@@ -48,6 +48,15 @@ setup() {
   printf '{}' > "$TEST_TMPDIR/canon-auth.json"
   ln -s "$TEST_TMPDIR/canon-auth.json" "$TEST_TMPDIR/edge-auth.json"
   export WATCHDOG_EDGE_AUTH_PROFILES="$TEST_TMPDIR/edge-auth.json"
+  # On a >= 2026.8 runtime the tripwire reads the mirror's --check instead of the
+  # symlink. Stub it clean; the real script would touch the live edge SQLite cell.
+  cat > "$TEST_TMPDIR/bin/codex-edge-mirror-stub.sh" <<'MSTUB'
+#!/usr/bin/env bash
+exit "${STUB_MIRROR_CHECK_RC:-0}"
+MSTUB
+  chmod +x "$TEST_TMPDIR/bin/codex-edge-mirror-stub.sh"
+  export WATCHDOG_EDGE_MIRROR_CHECK="$TEST_TMPDIR/bin/codex-edge-mirror-stub.sh"
+  export WATCHDOG_EDGE_MIRROR_TIMER="codex-edge-mirror.timer"
   # Codex refresh-lock convergence check → a converged fixture (edge dir is a
   # symlink to main's) so it reads clean instead of the real /root lock dirs.
   export CODEX_LOCK_ROOT="$TEST_TMPDIR/lockroot"
@@ -65,6 +74,9 @@ case "$1" in
   is-active)
     f="$STUB_SYSCTL_DIR/$2.status"
     [ -f "$f" ] && cat "$f" || echo active ;;
+  is-enabled)
+    # The edge auth tripwire asserts the mirror timer on a >= 2026.8 runtime.
+    echo "${STUB_UNIT_ENABLED:-enabled}" ;;
   restart)
     [ "${STUB_RESTART_RECOVERS:-1}" = "1" ] && echo active > "$STUB_SYSCTL_DIR/$2.status" ;;
   reset-failed|show|stop|start) : ;;
@@ -74,6 +86,13 @@ STUB
 
   cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
 #!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  # openclaw_runtime_version() reads field 2 of line 1. The edge auth-store
+  # tripwire branches on this, and an unparseable answer is a PAGE by design --
+  # so the stub must speak it or every suite here reds out on a synthetic alert.
+  echo "openclaw ${STUB_OPENCLAW_VERSION:-2026.8.2}"
+  exit 0
+fi
 prof=""
 while [ $# -gt 0 ]; do
   case "$1" in --profile) prof="$2"; shift 2 ;; *) shift ;; esac

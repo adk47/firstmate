@@ -353,10 +353,15 @@ check_gateway_liveness edge openclaw-gateway-edge "${GATEWAY_CONFIG_VALID[edge]:
 # "All image models failed" summary — see scripts/lib/codex-health.sh.
 # shellcheck source=lib/codex-health.sh
 source "$_WATCHDOG_DIR/lib/codex-health.sh"
+# shellcheck source=lib/version-compare.sh
+source "$_WATCHDOG_DIR/lib/version-compare.sh"
 
 # Overridable so the bats suite can point at a throwaway fixture instead of
 # reading the live edge agent's auth store on the node-8 CI host.
 EDGE_AUTH_PROFILES="${WATCHDOG_EDGE_AUTH_PROFILES:-/root/.openclaw-edge/agents/support/agent/auth-profiles.json}"
+# Same seam for the 2.0-era surfaces the edge auth tripwire reads instead.
+EDGE_MIRROR_CHECK="${WATCHDOG_EDGE_MIRROR_CHECK:-$_WATCHDOG_DIR/lib/codex-edge-mirror.sh}"
+EDGE_MIRROR_TIMER="${WATCHDOG_EDGE_MIRROR_TIMER:-codex-edge-mirror.timer}"
 CODEX_COOLDOWN_MIN=60  # token rotation is ~10-day; hourly re-alert is plenty
 
 # _codex_cooldown_ok <stampfile> <minutes> — true if last alert older than N min.
@@ -420,17 +425,68 @@ if [ "${CODEX_VISIONFAIL:-0}" -gt 0 ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR
   date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-vision-cooldown"
 fi
 
-# Symlink-integrity tripwire: edge auth durability rests on
-# auth-profiles.json being a symlink to main's canonical codex token. A deploy
-# clobbering it (regular file), a dangling link, or a missing store all silently
-# re-introduce #356 — alert before it bites. (We do NOT alert on token expiry:
-# the codex access token is ~9h-lived + refresh-on-use, so its `expires` carries
-# no human-re-auth signal — a real auth death is caught by the
-# `authentication token has been invalidated` tripwire above. See codex-health.sh.)
-CODEX_SYMLINK_STATUS=$(codex_edge_auth_symlink_status "$EDGE_AUTH_PROFILES")
-if [ "$CODEX_SYMLINK_STATUS" != "ok" ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-symlink-cooldown" "$CODEX_COOLDOWN_MIN"; then
-  log "EDGE CODEX AUTH SYMLINK status=${CODEX_SYMLINK_STATUS}"
-  slack_notify ":warning: *Edge Codex auth store* (Caroline/support) symlink status: \`${CODEX_SYMLINK_STATUS}\` (expected \`ok\`). not-symlink=a deploy clobbered it; dangling=main source moved; missing=never provisioned. \`systemctl restart openclaw-gateway-edge\` re-runs ensure-codex-auth (ExecStartPre) to re-point it at main's canonical codex token."
+# Edge auth-store integrity tripwire. The STORE's shape changed at openclaw
+# 2026.8, so the tripwire has to change with it — there is no version-agnostic
+# assertion here, because the healthy state on one side is the alarm state on
+# the other.
+#
+#   < 2026.8  edge auth durability rests on auth-profiles.json being a SYMLINK
+#             to main's canonical codex token. A deploy clobbering it (regular
+#             file), a dangling link, or a missing store all silently
+#             re-introduce #356 — alert before it bites.
+#   >= 2026.8 there is no symlink and no per-agent JSON at all: each profile
+#             reads its own `authProfiles.store` cell in
+#             <stateDir>/state/openclaw.sqlite, and edge's is populated by
+#             codex-edge-mirror.sh (ExecStartPre + a daily timer). The 7.1 probe
+#             reads `missing` here BY DESIGN, and its remedy — restart edge to
+#             re-run ensure-codex-auth — does nothing on 2.0. Left ungated it
+#             paged hourly, for a healthy fleet, with an un-actionable fix. So
+#             on 2.0 assert the surfaces that actually carry edge's credential:
+#             the mirror's own read-only --check, and the timer that keeps it
+#             converged.
+#
+# (We do NOT alert on token expiry in either era: the codex access token is
+# ~9h-lived + refresh-on-use, so its `expires` carries no human-re-auth signal —
+# a real auth death is caught by the `authentication token has been invalidated`
+# tripwire above. See codex-health.sh.)
+#
+# An unreadable/unparseable runtime version is its OWN alert, never a skip: a
+# tripwire that stays silent because it could not tell which era it is in is
+# indistinguishable from a healthy one, and this guard exists precisely because
+# the wrong-era check reported the wrong thing for six days.
+_edge_auth_runtime_ver="$(openclaw_runtime_version)"
+CODEX_EDGE_AUTH_STATUS=""
+CODEX_EDGE_AUTH_DETAIL=""
+if [ -z "$_edge_auth_runtime_ver" ]; then
+  CODEX_EDGE_AUTH_STATUS="unevaluated"
+  CODEX_EDGE_AUTH_DETAIL="\`openclaw --version\` is missing or not version-shaped, so the era of edge's auth store cannot be determined. Neither the 7.1 symlink probe nor the 2.0 cell probe can be trusted until that is resolved — run \`openclaw --version\` on node-8."
+elif version_at_least "2026.8" "$_edge_auth_runtime_ver"; then
+  # 2.0 era: the cell + the mirror timer are the real invariants.
+  _mirror_rc=0
+  "$EDGE_MIRROR_CHECK" --check >/dev/null 2>&1 || _mirror_rc=$?
+  _mirror_timer="$(systemctl is-enabled "$EDGE_MIRROR_TIMER" 2>/dev/null || echo unknown)"
+  if [ "$_mirror_rc" -eq 1 ]; then
+    CODEX_EDGE_AUTH_STATUS="cell-drift"
+    CODEX_EDGE_AUTH_DETAIL="\`codex-edge-mirror.sh --check\` reports DRIFT on edge's \`authProfiles.store\` cell (missing row/profile, stale access or expires, accountId ≠ token claim, refresh slot not the sentinel, or a leaked refresh token). Caroline falls back to paid OpenRouter with \`Explicit auth order for openai has no usable profiles\` while this is true. Run that command on node-8 for the per-profile reason, then \`codex-edge-mirror.sh --dry-run\` before converging."
+  elif [ "$_mirror_rc" -ne 0 ]; then
+    CODEX_EDGE_AUTH_STATUS="unevaluated"
+    CODEX_EDGE_AUTH_DETAIL="\`codex-edge-mirror.sh --check\` could not evaluate edge's auth cell (exit ${_mirror_rc}: runtime unknown, store/table missing, or node absent). Edge's credential state is UNKNOWN, not healthy."
+  elif [ "$_mirror_timer" != "enabled" ]; then
+    CODEX_EDGE_AUTH_STATUS="mirror-timer-${_mirror_timer}"
+    CODEX_EDGE_AUTH_DETAIL="edge's auth cell is clean right now, but \`${EDGE_MIRROR_TIMER}\` is \`${_mirror_timer}\` (expected \`enabled\`). Main's access token rotates, so without the daily mirror edge's copy goes stale on its own — this is the outage that has not happened yet. \`systemctl enable --now ${EDGE_MIRROR_TIMER}\`."
+  fi
+else
+  # 7.1 era: the symlink fabric is the real invariant.
+  _symlink_status=$(codex_edge_auth_symlink_status "$EDGE_AUTH_PROFILES")
+  if [ "$_symlink_status" != "ok" ]; then
+    CODEX_EDGE_AUTH_STATUS="symlink-${_symlink_status}"
+    CODEX_EDGE_AUTH_DETAIL="symlink status \`${_symlink_status}\` (expected \`ok\`). not-symlink=a deploy clobbered it; dangling=main source moved; missing=never provisioned. \`systemctl restart openclaw-gateway-edge\` re-runs ensure-codex-auth (ExecStartPre) to re-point it at main's canonical codex token."
+  fi
+fi
+
+if [ -n "$CODEX_EDGE_AUTH_STATUS" ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-symlink-cooldown" "$CODEX_COOLDOWN_MIN"; then
+  log "EDGE CODEX AUTH STORE status=${CODEX_EDGE_AUTH_STATUS} runtime=${_edge_auth_runtime_ver:-unknown}"
+  slack_notify ":warning: *Edge Codex auth store* (Caroline/support) status: \`${CODEX_EDGE_AUTH_STATUS}\` on runtime \`${_edge_auth_runtime_ver:-unknown}\`. ${CODEX_EDGE_AUTH_DETAIL}"
   date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-codex-symlink-cooldown"
 fi
 
