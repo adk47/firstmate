@@ -97,7 +97,7 @@ test_a_recovered_agent_with_the_old_error_in_scrollback_is_not_stalled() {
   pane=$(printf '%s\n%s\n%s' "$E503_ACCOUNTS" "$(ordinary_lines 12)" "$IDLE_FOOTER")
   fm_gateway_text_is_transient "$pane" \
     && fail "an error that scrolled above the last turn's output was still classified as a live stall"
-  fm_gateway_note_stall "$st" task-r pane || fail "could not open a stall record"
+  fm_gateway_note_stall "$st" task-r || fail "could not open a stall record"
   fm_gateway_record_attempt "$st" task-r || fail "could not charge an attempt"
   fm_gateway_stalled_now "$st" task-r "$pane" \
     && fail "a recovered crew with the old error in scrollback was kept in the ladder"

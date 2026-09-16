@@ -154,7 +154,7 @@ fm_gateway_text_is_transient() {  # <pane-text>
 # --- durable stall record ----------------------------------------------------
 #
 # One record per stalled agent, at <state>/<scope>.gateway-stall:
-#   v1 first=<epoch> attempts=<n> last=<epoch> notified=<0|1> kind=<detector>
+#   v1 first=<epoch> attempts=<n> last=<epoch> notified=<0|1>
 # <scope> is the task id for a crewmate or scout, and the reserved id below for
 # the primary session, which has no task record of its own. Removing the file is
 # always safe: it only costs the current stall its accumulated budget.
@@ -215,13 +215,13 @@ fm_gateway_notified() {  # <state-dir> <scope>; 0 when the spent budget was alre
   [ "$(_fm_gateway_field "$(fm_gateway_record_path "$1" "$2")" notified 0)" = 1 ]
 }
 
-_fm_gateway_write() {  # <state-dir> <scope> <first> <attempts> <last> <notified> <kind>
+_fm_gateway_write() {  # <state-dir> <scope> <first> <attempts> <last> <notified>
   local state=$1 scope=$2 rec tmp
   rec=$(fm_gateway_record_path "$state" "$scope")
   [ -d "$state" ] || mkdir -p "$state" 2>/dev/null || return 1
   tmp="$rec.tmp.$$"
-  printf 'v1 first=%s attempts=%s last=%s notified=%s kind=%s\n' \
-    "$3" "$4" "$5" "$6" "${7:-pane}" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  printf 'v1 first=%s attempts=%s last=%s notified=%s\n' \
+    "$3" "$4" "$5" "$6" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$rec" 2>/dev/null || { rm -f "$tmp"; return 1; }
   return 0
 }
@@ -230,34 +230,32 @@ _fm_gateway_write() {  # <state-dir> <scope> <first> <attempts> <last> <notified
 # record that is already open: every detector calls this on every sighting, and
 # advancing the ladder's anchors here would restart the backoff on each poll and
 # the horizon would never be reached.
-fm_gateway_note_stall() {  # <state-dir> <scope> [detector]
-  local state=$1 scope=$2 kind=${3:-pane} now
+fm_gateway_note_stall() {  # <state-dir> <scope>
+  local state=$1 scope=$2 now
   fm_gateway_stall_open "$state" "$scope" && return 0
   now=$(date +%s)
-  _fm_gateway_write "$state" "$scope" "$now" 0 "$now" 0 "$kind"
+  _fm_gateway_write "$state" "$scope" "$now" 0 "$now" 0
 }
 
 # Charge one re-ring attempt against the budget. Fails when the record cannot be
 # updated, so a caller that cannot persist the charge does not deliver an
 # uncounted re-ring.
 fm_gateway_record_attempt() {  # <state-dir> <scope>
-  local state=$1 scope=$2 first attempts notified kind
+  local state=$1 scope=$2 first attempts notified
   first=$(fm_gateway_first_seen "$state" "$scope") || first=$(date +%s)
   attempts=$(( $(fm_gateway_attempts "$state" "$scope") + 1 ))
   notified=0
   fm_gateway_notified "$state" "$scope" && notified=1
-  kind=$(_fm_gateway_field "$(fm_gateway_record_path "$state" "$scope")" kind pane)
-  _fm_gateway_write "$state" "$scope" "$first" "$attempts" "$(date +%s)" "$notified" "$kind"
+  _fm_gateway_write "$state" "$scope" "$first" "$attempts" "$(date +%s)" "$notified"
 }
 
 # Mark the spent budget as reported, so the declared wait is announced once
 # rather than on every later poll of the same stall.
 fm_gateway_mark_notified() {  # <state-dir> <scope>
-  local state=$1 scope=$2 first attempts kind
+  local state=$1 scope=$2 first attempts
   first=$(fm_gateway_first_seen "$state" "$scope") || first=$(date +%s)
   attempts=$(fm_gateway_attempts "$state" "$scope")
-  kind=$(_fm_gateway_field "$(fm_gateway_record_path "$state" "$scope")" kind pane)
-  _fm_gateway_write "$state" "$scope" "$first" "$attempts" "$(date +%s)" 1 "$kind"
+  _fm_gateway_write "$state" "$scope" "$first" "$attempts" "$(date +%s)" 1
 }
 
 fm_gateway_clear() {  # <state-dir> <scope>
@@ -350,7 +348,7 @@ fm_keepalive_notice_clear() {  # <state-dir> [kind]
 fm_gateway_stalled_now() {  # <state-dir> <scope> <pane-text>
   local state=$1 scope=$2 pane=${3-}
   if fm_gateway_text_is_transient "$pane"; then
-    fm_gateway_note_stall "$state" "$scope" pane || return 1
+    fm_gateway_note_stall "$state" "$scope" || return 1
     return 0
   fi
   _fm_gateway_close_declared_wait "$state" "$scope"
