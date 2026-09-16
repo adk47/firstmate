@@ -1418,6 +1418,18 @@ chmod 644 /etc/cron.d/openclaw-watchdog
 # ─── Codex OAuth keepalive at 15-min cadence ──────────────────
 # PROACTIVE complement to the watchdog: openclaw-watchdog.sh pages REACTIVELY
 # (journal 401 signature, after the fleet is already on the mini fallback);
+# BOTH profiles: edge is the one that CANNOT self-heal. Its auth cell carries
+# SYNC-MANAGED-NO-REFRESH-TOKEN in the refresh slot by design, so it depends
+# entirely on codex-edge-mirror.timer copying main's rotated access token. If
+# that mirror stalls, edge silently rides to expiry and Caroline drops to paid
+# OpenRouter — which is exactly what happened 2026-09-11..16, when the mirror
+# was merged but undeployed and edge sat on tokens expiring 09-20 while main
+# had already rotated to 09-26. The keepalive's per-profile loop only READS an
+# expiry and pages; all three actuators (usage-cap, revocation, proactive
+# rotate) run ONCE outside it, so adding a profile cannot double-rotate.
+# Verified live: `CODEX_KEEPALIVE_PROFILES="main edge"` reports
+# "edge: codex token healthy (13903m remaining)" alongside main's identical
+# figure — the mirrored value, which is precisely the signal we want watched.
 # codex-keepalive.sh reads the token's own expiry from the canonical auth store
 # (auth-profiles.json — NOT the CLI; 7.x `models status --json` has no expiry
 # data) and pages BEFORE the cliff (it is the safety net for the twice-weekly
@@ -1429,7 +1441,7 @@ chmod 644 /etc/cron.d/openclaw-watchdog
 cat > /etc/cron.d/codex-keepalive << CODEXKEEPALIVE
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-*/15 * * * * root $HYDRA_ROOT/scripts/codex-keepalive.sh >> /var/log/codex-keepalive.log 2>&1
+*/15 * * * * root CODEX_KEEPALIVE_PROFILES="main edge" $HYDRA_ROOT/scripts/codex-keepalive.sh >> /var/log/codex-keepalive.log 2>&1
 CODEXKEEPALIVE
 chmod 644 /etc/cron.d/codex-keepalive
 
@@ -2534,3 +2546,148 @@ qart=qa-approval-retry.timer
 systemctl enable "$qart" >/dev/null 2>&1 || log "WARN: could not enable $qart"
 systemctl start "$qart" >/dev/null 2>&1 || log "WARN: could not start $qart"
 log "  $qart: $(systemctl is-active "$qart" 2>/dev/null || echo unknown)"
+
+# ─── OnFailure paging for every timer-driven oneshot ──────────────────────────
+# hydra-unit-failed@.service (written above) is the generic pager for a failing
+# oneshot: without it a failed timer run is only a red line in
+# `systemctl --failed` that nobody reads. Until now exactly ONE unit referenced
+# it (codex-edge-mirror.service), which is why five units failed unnoticed for
+# 6-9 days: hydra-release-watch since 2026-09-07 (every 5 min),
+# hydra-session-thread-retention@{main,edge} and cs-selfserve-backlog-collect
+# since the 2.0 cutover, and clickup-sla-digest daily.
+#
+# A TABLE, not a glob over /etc/systemd/system: that directory also holds units
+# this script never wrote (system units, other installers), and silently
+# attaching our pager to those is not ours to do. Adding a unit here is one row,
+# the same shape as scripts/lib/release-repos.sh.
+#
+# SAFE TO WIRE ONLY BECAUSE notify-unit-failed.sh NOW HAS A PER-UNIT COOLDOWN
+# (24h default). Wiring hydra-release-watch without it would page ~288x/day,
+# the alert-storm failure mode this repo has already lived through once.
+# Do not widen this table without checking that cooldown is still in place.
+#
+# hydra-unit-failed@.service is deliberately absent: pointing the pager's
+# OnFailure= at itself is an infinite loop.
+AUX_ONFAILURE_UNITS=(
+  caroline-behavior-digest.service
+  clickup-sla-digest.service
+  clickup-todo-dedupe.service
+  close-duplicate-conversations.service
+  close-merged-tickets.service
+  close-resolved-conversations.service
+  codex-canonical-refresh.service
+  codex-token-refresh.service
+  cs-needs-human-digest-delta.service
+  cs-needs-human-digest.service
+  cs-selfserve-backlog-collect.service
+  cs-selfserve-backlog.service
+  cs-sla-report.service
+  cto-nightly-driver.service
+  hydra-company-finder-cache-refresh.service
+  hydra-daily-audit.service
+  hydra-peer-labels.service
+  hydra-release-watch.service
+  hydra-release.service
+  hydra-session-thread-retention@.service
+  hydra-weekly-cleanup.service
+  intercom-intake-watchdog.service
+  overdue-verification-notifier.service
+  qa-approval-retry.service
+  qa-review-reconcile.service
+  resolution-matcher.service
+  resolve-notify.service
+  support-changelog-sync.service
+)
+
+# wire_unit_failure_paging — idempotent: inserts OnFailure= into the [Unit]
+# section of each table entry that does not already carry one. Runs LAST so it
+# sees the final bytes of every unit this script wrote.
+#
+# `%n` is the full unit name, so for the ONE template in the table it expands
+# to e.g. hydra-session-thread-retention@main.service and the pager receives
+# that exact name as %i -- which is what it feeds to journalctl/systemctl.
+# `systemd-analyze verify` accepts the template form (rc=0).
+wire_unit_failure_paging() {
+  local dir="${AUX_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+  local unit path wired=0 skipped=0 absent=0 present_ours=0 broken=0
+  for unit in "${AUX_ONFAILURE_UNITS[@]}"; do
+    path="$dir/$unit"
+    # A unit gated behind a runtime check may legitimately not be installed.
+    if [ ! -f "$path" ]; then absent=$((absent + 1)); continue; fi
+    if grep -q '^OnFailure=' "$path"; then
+      skipped=$((skipped + 1))
+      # Does it carry OUR pager? Then systemd must be holding a definition that
+      # includes it — and on a retry after a failed reload, it is not.
+      grep -q '^OnFailure=hydra-unit-failed@' "$path" && present_ours=$((present_ours + 1))
+      continue
+    fi
+    if ! grep -q '^\[Unit\]' "$path"; then
+      log "WARN: $unit has no [Unit] section — not wiring OnFailure paging"
+      broken=$((broken + 1))
+      continue
+    fi
+    # Insert directly after the FIRST [Unit] header: order inside a section
+    # does not matter to systemd, and this needs no knowledge of the other
+    # keys. awk rather than `sed -i '0,/re/s//../'` because that address form
+    # is GNU-only, and rewrite-then-rename so a failure mid-write cannot leave
+    # a truncated unit file behind.
+    if awk 'BEGIN { done = 0 }
+            { print }
+            /^\[Unit\]$/ && !done { print "OnFailure=hydra-unit-failed@%n.service"; done = 1 }' \
+         "$path" > "$path.hydra-tmp" && [ -s "$path.hydra-tmp" ] \
+         && mv -f "$path.hydra-tmp" "$path"; then
+      wired=$((wired + 1))
+    else
+      rm -f "$path.hydra-tmp"
+      log "WARN: could not wire OnFailure paging into $unit"
+      broken=$((broken + 1))
+    fi
+  done
+  log "  OnFailure paging: wired $wired, already present $skipped, not installed $absent"
+  # daemon-reload is what makes the rewritten files LIVE, so its failure cannot
+  # be discarded. QA finding on this PR: with an unconditional `return 0` the
+  # files gain OnFailure= while systemd keeps the OLD loaded definitions, so
+  # every unit this change exists to cover carries a pager on disk and none in
+  # reality — the precise silent failure the pager was added to remove.
+  #
+  # Propagating is enough to be seen: this function is the installer's LAST
+  # command and the script has no `set -e`, so its status becomes the script's
+  # exit status, and deploy.sh:3034 already turns that into `fail`. A deploy
+  # that could not load the new units should stop rather than report success.
+  # Reload whenever any managed unit CARRIES the directive — not only when this
+  # run wrote it. QA finding on this PR: gating on `wired > 0` makes the fix
+  # self-defeating on retry. A failed first reload leaves the FILES mutated and
+  # systemd stale; on the next deploy every affected file already has
+  # OnFailure=, so wired = 0, the reload is skipped, and the installer returns
+  # SUCCESS — permanently. One transient failure would leave every timer-driven
+  # unit pagerless forever while each later deploy confirmed success, which is
+  # worse than the discarded exit status this replaced: it looks self-healing
+  # and never is.
+  #
+  # daemon-reload is idempotent and this installer already calls it 31 other
+  # times, so reloading on every run that manages a pager costs nothing. Do not
+  # reintroduce a "skip when unchanged" optimisation here, and do not put one in
+  # the shared helper that will route all 32 sites — it propagates this latch.
+  local reload_rc=0
+  if [ "$((wired + present_ours))" -gt 0 ]; then
+    systemctl daemon-reload || reload_rc=$?
+    if [ "$reload_rc" -ne 0 ]; then
+      log "FATAL: $wired unit(s) newly wired and $present_ours already carrying OnFailure paging, but 'systemctl daemon-reload' exited $reload_rc — systemd is STILL RUNNING THE OLD DEFINITIONS, so those units have no pager despite the files on disk saying they do. The next run will retry the reload."
+      return "$reload_rc"
+    fi
+  fi
+  # A per-unit failure must FAIL the run, after the units that did succeed have
+  # been written and reloaded. QA finding on this PR: logging WARN and returning
+  # 0 means one read-only path or I/O error leaves that unit permanently without
+  # the pager while every later deploy reports success — the silent-gap shape
+  # this whole change exists to remove, reintroduced one level up. Counted are a
+  # failed rewrite and a unit with no [Unit] section; a unit that is simply not
+  # installed is legitimate and is NOT counted.
+  if [ "$broken" -gt 0 ]; then
+    log "FATAL: $broken managed unit(s) could not be given OnFailure paging (see the WARNs above) — those units will fail silently; the units that did succeed are wired and loaded"
+    return 1
+  fi
+  return 0
+}
+
+wire_unit_failure_paging
