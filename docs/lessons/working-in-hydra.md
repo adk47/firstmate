@@ -269,6 +269,26 @@ none. Also note `CronSessionLifecycleClaimError` is
 either. (Beware mixing censuses across a restart: the 75.4h/52.3h `lastRunAtMs` values that made
 this look like a long-standing wedge were pre-restart readings of job ids that no longer existed.)
 
+**Python mutation testing: clear `__pycache__` between runs, or a restored file still
+executes the MUTATED bytecode.** A test module that loads its subject with
+`importlib.util.spec_from_file_location` + `exec_module` can be served stale bytecode left
+by an earlier `python3 -m py_compile`, so `cp orig back && rerun` re-runs the mutation.
+(Real incident, PR #947: a six-mutation matrix produced two false GREENs and one false RED
+-- the restored file was byte-identical to the original by `diff`, yet a test kept failing
+on a constant the source no longer contained. `find . -name __pycache__ -exec rm -rf {} +`
+before every run fixed it and reversed two of the six verdicts.) Mutation results are only
+evidence if the interpreter actually re-read the file: clear the cache, and `grep` that the
+mutation landed before trusting either colour.
+
+**Two guards that both exclude the same fixture are each UNTESTED.** If a decoy is rejected
+by a type check *and* a name check, mutating either one away leaves the suite green -- the
+tests prove only that the pair rejects it, never which one does the work. (Real incident,
+PR #947: `context.compiled` decoys were excluded by both `type not in (tool.call,
+tool.result)` and `data.name != create_ticket`; removing either guard was invisible, and
+dropping the name check would have counted all 2,866 weekly tool.calls as support tickets
+instead of the 359 real ones.) Write one fixture per guard that defeats every OTHER guard,
+so each guard has a case that fails when it alone is removed.
+
 **jq `any(generator; cond)` rebinds `.` inside a pipe in `cond`.** `any(["bass"][]; .
 != "" and ("pau romero" | contains(.)))` returns true because `contains(.)` sees the
 post-pipe value. Bind the iterator first: `any($items[] | . as $x |

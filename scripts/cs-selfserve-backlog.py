@@ -127,7 +127,10 @@ import glob
 import json
 import os
 import shutil
+import re
 import socket
+import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -137,6 +140,15 @@ import urllib.request
 SLACK_API = "https://slack.com/api/chat.postMessage"
 DEFAULT_TRAJECTORY_GLOB = (
     "/root/.openclaw-edge/agents/support/sessions/*.trajectory.jsonl")
+# openclaw >= 2026.8: the trajectory lives in the agent's own store instead.
+DEFAULT_TRAJECTORY_DBS = (
+    "/root/.openclaw-edge/agents/support/agent/openclaw-agent.sqlite",)
+# The runtime floor at which the trajectory moved out of the sessions dir.
+SQLITE_TRAJECTORY_MIN_RUNTIME = (2026, 8)
+# How far back the zero-day LIVENESS count looks. The collector runs daily, so
+# 48h tolerates one missed run without widening into "some row exists
+# somewhere". Env: CS_BACKLOG_LIVENESS_WINDOW_H.
+DEFAULT_LIVENESS_WINDOW_H = 48
 DEFAULT_STATE_PATH = "/var/lib/cs-selfserve-backlog/monthly.json"
 DEFAULT_AUDIT_PATH = "/var/log/muso-ops/tier2-audit.jsonl"
 DEFAULT_CHANNEL = "C0ANM0PN9L5"  # #cs_chats
@@ -260,13 +272,53 @@ def sessionkey_conv(session_key):
     return None
 
 
+def ingest_record(rec, partial):
+    """Fold ONE decoded trajectory event into `partial`. Returns True iff it
+    was a counted create_ticket tool.call (the caller's zero-day tally).
+
+    This is the single implementation of the event contract, shared by the
+    JSONL reader and the SQLite reader below. openclaw 2.0 stores the very
+    same event objects in a table instead of a file, so the only thing that
+    legitimately differs between the two sources is how bytes become a dict --
+    and two copies of this classification would drift exactly where a wrong
+    count is invisible."""
+    if not isinstance(rec, dict):
+        return False
+    typ = rec.get("type")
+    if typ not in ("tool.call", "tool.result"):
+        return False  # excludes the context.compiled tool-catalog decoy
+    data = rec.get("data") or {}
+    if data.get("name") != CREATE_TICKET_TOOL:
+        return False
+    tool_call_id = data.get("toolCallId")
+    if not tool_call_id:
+        return False
+    entry = partial.setdefault(tool_call_id, {"call": None, "result": None})
+    if typ == "tool.call":
+        entry["call"] = {
+            "ts": rec.get("ts"),
+            "sessionKey": rec.get("sessionKey"),
+            "actionType": (data.get("arguments") or {}).get("actionType"),
+        }
+        return True
+    entry["result"] = {
+        "ts": rec.get("ts"),
+        "sessionKey": rec.get("sessionKey"),
+        "payload": _parse_result_payload(data.get("contentItems")),
+    }
+    return False
+
+
 def sweep_files(paths):
     """Read every trajectory file in `paths` (missing/unreadable files are
     skipped -- the glob can race with the reaper). Returns
     (partial, calls_seen): `partial` is toolCallId -> {"call": {...}|None,
     "result": {...}|None}; `calls_seen` is the raw count of matching
     tool.call events found THIS sweep (used for the zero-day fail-loud
-    check)."""
+    check).
+
+    openclaw <= 2026.7 only. 2.0 writes no trajectory JSONL at all (see
+    sweep_sqlite)."""
     partial = {}
     calls_seen = 0
     for path in paths:
@@ -282,33 +334,89 @@ def sweep_files(paths):
                     rec = json.loads(line)
                 except ValueError:
                     continue  # malformed/torn line -- skip, never abort
-                if not isinstance(rec, dict):
-                    continue
-                typ = rec.get("type")
-                if typ not in ("tool.call", "tool.result"):
-                    continue  # excludes the context.compiled tool-catalog decoy
-                data = rec.get("data") or {}
-                if data.get("name") != CREATE_TICKET_TOOL:
-                    continue
-                tool_call_id = data.get("toolCallId")
-                if not tool_call_id:
-                    continue
-                entry = partial.setdefault(tool_call_id, {"call": None, "result": None})
-                if typ == "tool.call":
+                if ingest_record(rec, partial):
                     calls_seen += 1
-                    entry["call"] = {
-                        "ts": rec.get("ts"),
-                        "sessionKey": rec.get("sessionKey"),
-                        "actionType": (data.get("arguments") or {}).get("actionType"),
-                    }
-                else:
-                    entry["result"] = {
-                        "ts": rec.get("ts"),
-                        "sessionKey": rec.get("sessionKey"),
-                        "payload": _parse_result_payload(data.get("contentItems")),
-                    }
         finally:
             f.close()
+    return partial, calls_seen
+
+
+def sweep_sqlite(db_paths, liveness_since_ms=None):
+    """openclaw >= 2026.8 source. Same return contract as sweep_files.
+
+    2.0 moved the trajectory out of the sessions directory and into each
+    agent's own store, table `trajectory_runtime_events`
+    (session_id, seq, run_id, event_json, created_at). The event objects are
+    UNCHANGED -- traceSchema "openclaw-trajectory", same type/data/ts/
+    sessionKey fields -- which is why ingest_record is shared verbatim.
+
+    What is NOT unchanged is that the old glob now matches nothing, silently:
+    on node-8 the newest *.trajectory-path.json pointer is dated 2026-09-09,
+    the day before the 2.0 cutover, and the *.trajectory.jsonl files those
+    pointers name do not exist. So this collector failed rc=4 every day from
+    the cutover onward ("0 create_ticket tool.call events found ... matched 0
+    trajectory file(s)") -- correctly fail-loud, but recording nothing.
+
+    Read-only (`mode=ro`) against a LIVE store, and each database is skipped
+    on any error: a missing file, a store mid-write, or a schema without the
+    table must not abort the sweep -- the zero-day check in do_collect is what
+    turns "we read nothing" into a loud failure, and it must stay the single
+    place that decides that.
+
+    The substring pre-filter is deliberately applied in SQL (`instr`) rather
+    than by decoding all ~13k rows: it is speed-only and NOT a correctness
+    filter, exactly as in sweep_files. Every session's context.compiled event
+    lists create_ticket in its tool catalog, so instr alone over-counts by
+    ~10x (3,654 matching rows vs 359 real tool.calls on 2026-09-16) -- the
+    type check inside ingest_record is what makes the count real.
+
+    `liveness_since_ms` splits the two jobs this sweep does, which the JSONL
+    era conflated because the on-disk reaper bounded the window for free (~5
+    days of files). The table is PERSISTENT, so without a bound every row ever
+    retained keeps `calls_seen` above zero:
+
+      * `partial` is always the FULL scan -- the rollup merge is toolCallId-
+        keyed and idempotent, and re-merging old ids is how a missed day
+        backfills. Narrowing this would lose history.
+      * `calls_seen` is a LIVENESS count and must answer "is Caroline emitting
+        create_ticket NOW", so it counts only rows inside the window. Without
+        it, the day Caroline goes down (or the event schema changes again)
+        yesterday's rows still make the count positive and do_collect returns
+        success -- the exact false-green the zero-day gate exists to prevent.
+
+    A row whose created_at is missing or non-numeric is NOT counted toward
+    liveness: an unattributable timestamp must not be what holds the gate open.
+    None disables the bound (used by the parity test, where both readers see
+    the same records and must agree)."""
+    partial = {}
+    calls_seen = 0
+    for db_path in db_paths:
+        try:
+            con = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            rows = con.execute(
+                "select event_json, created_at from trajectory_runtime_events "
+                "where instr(event_json, ?) > 0 order by session_id, seq",
+                (CREATE_TICKET_TOOL,))
+            for (event_json, created_at) in rows:
+                try:
+                    rec = json.loads(event_json)
+                except (ValueError, TypeError):
+                    continue  # malformed row -- skip, never abort
+                if not ingest_record(rec, partial):
+                    continue
+                if liveness_since_ms is None:
+                    calls_seen += 1
+                elif (isinstance(created_at, (int, float))
+                      and not isinstance(created_at, bool)
+                      and created_at >= liveness_since_ms):
+                    calls_seen += 1
+        except sqlite3.Error:
+            continue  # unreadable/locked/no such table -- skip this store
+        finally:
+            con.close()
     return partial, calls_seen
 
 
@@ -680,18 +788,104 @@ def post_slack_digest(blocks, text, channel, config_path, account):
 
 
 # --------------------------------------------------------------------------
-# Collect: sweep the glob + merge into a rollup at `state_path`.
+# Source selection: trajectory JSONL (<= 2026.7) vs agent store (>= 2026.8).
 # --------------------------------------------------------------------------
-def do_collect(glob_pattern, state_path, today_iso):
+def openclaw_runtime_version():
+    """(major, minor) of the live runtime, or None when it cannot be read.
+
+    None is a THIRD state, never a synonym for either branch -- resolve_source
+    refuses to guess on it. Guessing wrong is silent in both directions: the
+    JSONL branch reads zero files on 2.0 (the bug this fixes), and the SQLite
+    branch reads no such table on 7.x. Both end at the same rc=4, but with a
+    message blaming the data instead of the detection."""
+    try:
+        out = subprocess.run(["openclaw", "--version"], capture_output=True,
+                             text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    m = re.search(r"(\d{4})\.(\d+)", out.stdout or "")
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)))
+
+
+def resolve_source(env=None):
+    """Return (source, rc). rc != 0 means refuse to sweep.
+
+    CS_BACKLOG_SOURCE forces a branch ("jsonl"/"sqlite") and skips detection;
+    that is the test seam and the break-glass. CS_BACKLOG_TRAJECTORY_GLOB and
+    CS_BACKLOG_TRAJECTORY_DBS (colon-separated) override the paths."""
+    env = os.environ if env is None else env
+    glob_pattern = env.get("CS_BACKLOG_TRAJECTORY_GLOB", DEFAULT_TRAJECTORY_GLOB)
+    dbs_raw = env.get("CS_BACKLOG_TRAJECTORY_DBS")
+    db_paths = ([d for d in dbs_raw.split(":") if d] if dbs_raw
+                else list(DEFAULT_TRAJECTORY_DBS))
+
+    forced = (env.get("CS_BACKLOG_SOURCE") or "auto").strip().lower()
+    if forced == "jsonl":
+        return glob_pattern, 0
+    if forced == "sqlite":
+        return ("sqlite", db_paths), 0
+    if forced != "auto":
+        print(f"ERROR: CS_BACKLOG_SOURCE={forced!r} is not one of "
+              "auto/jsonl/sqlite -- refusing to guess a data source",
+              file=sys.stderr)
+        return None, 4
+
+    ver = openclaw_runtime_version()
+    if ver is None:
+        print("ERROR: could not determine the openclaw runtime version "
+              "(\"openclaw --version\" returned nothing parseable) -- refusing "
+              "to guess whether the trajectory lives in JSONL (<= 2026.7) or "
+              "the agent store (>= 2026.8). Set CS_BACKLOG_SOURCE=jsonl|sqlite "
+              "to override.", file=sys.stderr)
+        return None, 4
+    if ver >= SQLITE_TRAJECTORY_MIN_RUNTIME:
+        return ("sqlite", db_paths), 0
+    return glob_pattern, 0
+
+
+# --------------------------------------------------------------------------
+# Collect: sweep the chosen source + merge into a rollup at `state_path`.
+# --------------------------------------------------------------------------
+def do_collect(source, state_path, today_iso):
     """Returns (state, exit_code). exit_code != 0 -> caller must not write
-    anything and must propagate it (see FAIL-LOUD in the module docstring)."""
-    paths = sorted(glob.glob(glob_pattern))
-    partial, calls_seen = sweep_files(paths)
+    anything and must propagate it (see FAIL-LOUD in the module docstring).
+
+    `source` is either a glob pattern string (openclaw <= 2026.7 trajectory
+    JSONL) or a ("sqlite", [db_path, ...]) tuple (>= 2026.8 agent stores).
+    A bare string keeps the pre-2.0 call signature, which is what the JSONL
+    event-shape tests exercise."""
+    if isinstance(source, tuple) and source and source[0] == "sqlite":
+        db_paths = list(source[1])
+        try:
+            window_h = float(os.environ.get("CS_BACKLOG_LIVENESS_WINDOW_H",
+                                            DEFAULT_LIVENESS_WINDOW_H))
+        except ValueError:
+            window_h = DEFAULT_LIVENESS_WINDOW_H
+        since_ms = int(time.time() * 1000) - int(window_h * 3600 * 1000)
+        partial, calls_seen = sweep_sqlite(db_paths, liveness_since_ms=since_ms)
+        source_desc = "%d agent store(s) [%s], liveness window %gh" % (
+            len(db_paths), ", ".join(db_paths) or "none", window_h)
+    else:
+        paths = sorted(glob.glob(source))
+        partial, calls_seen = sweep_files(paths)
+        source_desc = "%d trajectory file(s) via %r" % (len(paths), source)
     if calls_seen == 0:
-        print(f"ERROR: 0 create_ticket tool.call events found (matched {len(paths)} "
-              f"trajectory file(s) via {glob_pattern!r}) this sweep -- live baseline "
-              "is ~70-205/day; a zero day means Caroline is down or the event schema "
-              "changed, never treat this as \"quiet\"", file=sys.stderr)
+        # The zero-day check stays the SINGLE place that turns "we read
+        # nothing" into a failure: both readers skip unreadable sources on
+        # purpose, so this is the only gate that can tell an empty day from a
+        # broken source. Naming the source that was actually swept is the part
+        # that was missing -- from 2026-09-10 this fired every day saying
+        # "matched 0 trajectory file(s)", which was true and still took six
+        # days to read as "2.0 stopped writing that file".
+        print(f"ERROR: 0 create_ticket tool.call events found (swept "
+              f"{source_desc}) this sweep -- measured live baseline is "
+              "~33-99/day on 2.0 (~70-205/day pre-2.0); a zero day means "
+              "Caroline is down or the event schema changed, never treat this "
+              "as \"quiet\"", file=sys.stderr)
         return None, 4
     try:
         state = load_state(state_path)
@@ -785,7 +979,10 @@ def _self_test():
 
 def _sweep_lines(lines):
     """Test seam: sweep_files() reads real files; this exercises the same
-    inner parsing loop over in-memory lines for the self-test."""
+    event contract over in-memory lines for the self-test. It shares
+    ingest_record with both real readers -- it used to inline a third copy of
+    the classification, which is a test that can agree with itself while
+    disagreeing with production."""
     partial = {}
     calls_seen = 0
     for line in lines:
@@ -795,25 +992,8 @@ def _sweep_lines(lines):
             rec = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(rec, dict):
-            continue
-        typ = rec.get("type")
-        if typ not in ("tool.call", "tool.result"):
-            continue
-        data = rec.get("data") or {}
-        if data.get("name") != CREATE_TICKET_TOOL:
-            continue
-        tool_call_id = data.get("toolCallId")
-        if not tool_call_id:
-            continue
-        entry = partial.setdefault(tool_call_id, {"call": None, "result": None})
-        if typ == "tool.call":
+        if ingest_record(rec, partial):
             calls_seen += 1
-            entry["call"] = {"ts": rec.get("ts"), "sessionKey": rec.get("sessionKey"),
-                              "actionType": (data.get("arguments") or {}).get("actionType")}
-        else:
-            entry["result"] = {"ts": rec.get("ts"), "sessionKey": rec.get("sessionKey"),
-                                "payload": _parse_result_payload(data.get("contentItems"))}
     return partial, calls_seen
 
 
@@ -859,13 +1039,15 @@ def main():
               "(set CS_BACKLOG_SKIP_HOST_GUARD=1 to override)", file=sys.stderr)
         return 0
 
-    glob_pattern = os.environ.get("CS_BACKLOG_TRAJECTORY_GLOB", DEFAULT_TRAJECTORY_GLOB)
+    source, source_rc = resolve_source()
+    if source_rc != 0:
+        return source_rc
     now_epoch = int(os.environ.get("CS_BACKLOG_NOW") or time.time())
     today_iso = datetime.datetime.fromtimestamp(now_epoch, tz=datetime.timezone.utc).strftime("%Y-%m-%d")
 
     if args.collect:
         state_path = os.environ.get("CS_BACKLOG_STATE", DEFAULT_STATE_PATH)
-        state, rc = do_collect(glob_pattern, state_path, today_iso)
+        state, rc = do_collect(source, state_path, today_iso)
         if rc != 0:
             return rc
         if not save_state(state, state_path):
@@ -875,7 +1057,7 @@ def main():
 
     if args.post:
         state_path = os.environ.get("CS_BACKLOG_STATE", DEFAULT_STATE_PATH)
-        state, rc = do_collect(glob_pattern, state_path, today_iso)
+        state, rc = do_collect(source, state_path, today_iso)
         if rc != 0:
             return rc
         report_month = previous_utc_month(now_epoch)
@@ -907,7 +1089,7 @@ def main():
     # default: dry-run -- collect into a temp/--state-override copy, print,
     # write nothing to the real state, post nothing.
     if args.state:
-        state, rc = do_collect(glob_pattern, args.state, today_iso)
+        state, rc = do_collect(source, args.state, today_iso)
         if rc != 0:
             return rc
         save_state(state, args.state)
@@ -920,7 +1102,7 @@ def main():
                     shutil.copyfile(real_state_path, tmp_state_path)
                 except OSError:
                     pass
-            state, rc = do_collect(glob_pattern, tmp_state_path, today_iso)
+            state, rc = do_collect(source, tmp_state_path, today_iso)
             if rc != 0:
                 return rc
 
