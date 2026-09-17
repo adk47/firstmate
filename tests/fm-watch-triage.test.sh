@@ -1989,8 +1989,13 @@ make_gateway_busy_case() {  # <name> <task>
 #   polls:<n>  the window has been counted busy <n> consecutive times
 #   cleared    the stall record has been dropped
 #   cycles:<n> <n> completed poll cycles, for a phase with nothing to wait on
-# The threshold is deliberately NOT overridden: these tests must fail when the
-# shipped default sits inside the harness's own retry window.
+# The watcher runs at FM_POLL=1 so a test finishes in seconds, and the wall-clock
+# bound is scaled to match: 40 seconds at a 1-second cadence derives the same 40
+# polls the shipped 600-second bound derives at the shipped 15-second cadence, so
+# these tests reproduce the PRODUCTION GEOMETRY - a 16-poll harness retry inside
+# a 40-poll window - rather than a made-up one. The shipped constant itself, and
+# the fact that the derived window stays 600 seconds at any cadence, are pinned
+# directly on fm_gateway_busy_clear_polls in tests/fm-gateway-keepalive.test.sh.
 run_gateway_busy_watcher() {  # <dir> <task> <state> <busy|idle> <until>
   local dir=$1 task=$2 state=$3 pane_state=$4 until=$5 gen pid key n i=0
   key=$(printf '%s' "test:fm-$task" | tr ':/.' '___')
@@ -2000,7 +2005,8 @@ run_gateway_busy_watcher() {  # <dir> <task> <state> <busy|idle> <until>
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-$task" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
     FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_GATEWAY_RETRY_BACKOFF=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_GATEWAY_RETRY_BACKOFF=0 FM_GATEWAY_BUSY_CLEAR_SECS=40 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH" >> "$dir/watch.out" &
   pid=$!
   case "$until" in

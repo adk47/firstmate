@@ -165,6 +165,38 @@ test_ladder_is_bounded_by_wall_clock_independently() {
   pass "the ladder stops at its wall-clock horizon independently of the attempt count"
 }
 
+# The busy-duration exit has to outlast the harness's OWN internal retry of a
+# 503 - about 240 seconds per docs/verification/gateway-keepalive.md, during
+# which UserPromptSubmit has already marked the pane busy. The exit is applied
+# by counting busy polls, so a bound expressed in polls silently shrinks when a
+# home polls faster than the 15-second default: at a 5-second interval the old
+# 40-poll value covered only 200 seconds, back under that retry, and the record
+# was dropped mid-ladder so a genuine outage could never be declared. The bound
+# is therefore wall clock, converted to each caller's cadence.
+test_busy_clear_window_is_wall_clock_at_every_poll_cadence() {
+  local interval polls window retry=240
+  for interval in 15 5 1; do
+    polls=$(fm_gateway_busy_clear_polls "$interval")
+    window=$(( polls * interval ))
+    [ "$window" -ge 600 ] \
+      || fail "a ${interval}s poll interval derived only ${window}s of busy ($polls polls), shrinking the window below the bound"
+    [ "$window" -gt "$retry" ] \
+      || fail "a ${interval}s poll interval derived ${window}s of busy, inside the harness's own ~${retry}s internal retry; the record would be dropped mid-ladder and no outage could ever be declared"
+  done
+
+  # Rounded UP to whole polls, and never to zero: an interval longer than the
+  # whole window must still take one busy poll to end a record, not none.
+  [ "$(fm_gateway_busy_clear_polls 7)" = 86 ] \
+    || fail "the derived poll count was not rounded up to cover the whole window"
+  [ "$(fm_gateway_busy_clear_polls 3600)" = 1 ] \
+    || fail "an interval longer than the window derived fewer than one poll, which would end a record on sight"
+
+  # The bound itself is the tunable; the derivation follows it at any cadence.
+  [ "$( (FM_GATEWAY_BUSY_CLEAR_SECS=60; fm_gateway_busy_clear_polls 5) )" = 12 ] \
+    || fail "the derivation ignored a configured busy-clear window"
+  pass "the busy-clear window stays wall clock at every poll cadence, past the harness's own retry"
+}
+
 test_re_noting_a_stall_cannot_push_the_next_attempt_out_of_reach() {
   # The bug this pins: if every sighting advanced the backoff anchor, a stall
   # polled more often than its backoff would be absorbed forever and never
@@ -282,6 +314,7 @@ test_repository_text_naming_the_errors_is_not_a_stall
 test_a_gateway_that_is_simply_down_is_not_retried
 test_ladder_is_bounded_by_attempts
 test_ladder_is_bounded_by_wall_clock_independently
+test_busy_clear_window_is_wall_clock_at_every_poll_cadence
 test_re_noting_a_stall_cannot_push_the_next_attempt_out_of_reach
 test_first_attempt_waits_out_its_backoff
 test_backoff_ladder_repeats_its_last_step
