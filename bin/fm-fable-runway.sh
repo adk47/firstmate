@@ -10,8 +10,8 @@
 #   fable-runway: overall=<S> fable_state=<S> pool_state=<S> fable_remaining=<n>%
 #     fable_burn=<n>x fable_exhaustion=<iso|unknown>(<n>h)
 #     pool_routable=<r>/<c> pool_exhausted=<n> pool_capable=<names|none>
-#     pool_tracked=<names|none> pool_exhaustion=<n>h fable_reason=<token>
-#     pool_reason=<token>
+#     pool_tracked=<names|none> pool_unprojected=<names|none>
+#     pool_exhaustion=<n>h fable_reason=<token> pool_reason=<token>
 #
 # Two independent runways are reported, because the supervisor reads its own
 # credential while the fleet draws from the account pool, and they do not fail
@@ -54,14 +54,22 @@
 # average burn since the window opened is extrapolated to 100 percent, with the
 # elapsed portion floored at six hours so a burst in a freshly opened week is
 # not read as imminent exhaustion. The pool projection reported is the best
-# remaining one - the longest such exhaustion among Fable-capable accounts -
-# because the pool keeps serving while any capable account still has room, and
-# the time rule counts how many capable accounts are projected to outlast the
-# 2h and 6h thresholds rather than taking the soonest. That is the same pace
+# remaining one - the longest such exhaustion among Fable-capable accounts with
+# a projection - because the pool keeps serving while any capable account still
+# has room, and the time rule counts how many of them are projected to outlast
+# the 2h and 6h thresholds rather than taking the soonest. That is the same pace
 # model quota-axi reports as burnMultiple, and it deliberately under-weights a
 # recent ramp, so the pool's routable counts stay the primary signal and the
 # projection is reported as a refinement. An account whose windows are not
 # readable is excluded from the count rather than assumed healthy.
+#
+# A capable account whose week cannot be placed - a resets_at a full week or
+# more out, or one carrying a non-UTC offset - has no projection, and it may
+# have any amount of runway left. It is named in pool_unprojected and it
+# suppresses the time rule rather than letting the accounts that happen to be
+# projectable decide RED on their own; pool_reason then reads
+# exhaustion_unprojectable. The routable counts still decide, so the pool is
+# never judged only by the part of its capable set that could be measured.
 #
 # Read-only: this never writes fleet state, never mutates the pool, and never
 # prints a credential or an account email. It reads quota-axi and the local
@@ -263,12 +271,24 @@ def named($list): [$list[] | account_name(.)] | join(",");
 ($accts | map(select(fable_limit(.) != null))) as $trackedAccts |
 ($trackedAccts | length) as $tracked |
 ($accts | map(select(capable(.)))) as $cap |
-($cap | map(hours_to(fable_limit(.))) | map(select(. != null))) as $hrs |
+($cap | map({acct: ., hrs: hours_to(fable_limit(.))})) as $capHrs |
+($capHrs | map(select(.hrs != null)) | map(.hrs)) as $hrs |
+($capHrs | map(select(.hrs == null)) | map(.acct)) as $unproj |
 (if ($hrs | length) == 0 then null else ($hrs | max) end) as $phrs |
 ($hrs | map(select(. >= 2)) | length) as $past2 |
 ($hrs | map(select(. >= 6)) | length) as $past6 |
+# A capable account whose week cannot be placed may have any amount of runway
+# left, so it must not let the accounts that happen to be projectable decide the
+# time rule alone. It suppresses that rule instead, and is named on the line.
+(if ($hrs | length) == 0 then "unprojectable"
+ elif ($unproj | length) > 0 then
+   (if $past2 == 0 or $past6 == 0 then "unprojectable" else "none" end)
+ elif $past2 == 0 then "red"
+ elif $past6 == 0 then "yellow"
+ else "none" end) as $time |
 named($cap) as $names |
 named($trackedAccts) as $trackedNames |
+named($unproj) as $unprojNames |
 (.health.pool.routable // null) as $routable |
 (.health.pool.configured // null) as $configured |
 (.health.pool.usage_exhausted // null) as $exhausted |
@@ -287,12 +307,14 @@ named($trackedAccts) as $trackedNames |
     end)
  elif ($cap | length) == 0 then
    {state: "RED", reason: "no_fable_capable_account"}
- elif (($hrs | length) > 0 and $past2 == 0) then
+ elif $time == "red" then
    {state: "RED", reason: "exhaustion_under_2h"}
  elif $routable <= 3 then
    {state: "YELLOW", reason: "routable_at_or_below_3"}
- elif (($hrs | length) > 0 and $past6 == 0) then
+ elif $time == "yellow" then
    {state: "YELLOW", reason: "exhaustion_under_6h"}
+ elif $time == "unprojectable" then
+   {state: "GREEN", reason: "exhaustion_unprojectable"}
  else
    {state: "GREEN", reason: "has_fable_capacity"}
  end) as $verdict |
@@ -302,6 +324,7 @@ named($trackedAccts) as $trackedNames |
   (if ($exhausted | type) == "number" then ($exhausted | tostring) else "-" end),
   (if $names == "" then "none" else $names end),
   (if $trackedNames == "" then "none" else $trackedNames end),
+  (if $unprojNames == "" then "none" else $unprojNames end),
   (if $phrs == null then "-" else ($phrs | tostring) end),
   $verdict.reason
 ] | @tsv
@@ -339,22 +362,22 @@ pool_read() {
     accounts=$(pool_fetch "$POOL_URL/api/accounts") || accounts=''
   fi
   if [ -z "$health" ] || [ -z "$accounts" ]; then
-    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\t-\tpool_unavailable\n'
+    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\t-\tpool_unavailable\n'
     return 0
   fi
   if ! printf '%s' "$health" | jq -e 'type == "object"' >/dev/null 2>&1 \
     || ! printf '%s' "$accounts" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\t-\tpool_response_not_recognized\n'
+    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\t-\tpool_response_not_recognized\n'
     return 0
   fi
   input=$(jq -cn --argjson health "$health" --argjson accounts "$accounts" \
     '{health: $health, accounts: $accounts}') || input=''
   if [ -z "$input" ]; then
-    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\t-\tpool_response_not_recognized\n'
+    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\t-\tpool_response_not_recognized\n'
     return 0
   fi
   printf '%s' "$input" | jq -r --argjson now "$NOW" "$POOL_JQ" 2>/dev/null \
-    || printf 'UNKNOWN\t-\t-\t-\tnone\tnone\t-\tpool_response_not_readable\n'
+    || printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\t-\tpool_response_not_readable\n'
 }
 
 # --- main -------------------------------------------------------------------
@@ -406,10 +429,11 @@ if [ -z "$POOL_URL" ]; then
   POOL_EXHAUSTED=-
   POOL_CAPABLE=none
   POOL_TRACKED=none
+  POOL_UNPROJ=none
   POOL_HRS=-
   POOL_REASON=pool_not_configured
 else
-  IFS=$'\t' read -r POOL_STATE POOL_ROUTABLE POOL_CONFIGURED POOL_EXHAUSTED POOL_CAPABLE POOL_TRACKED POOL_HRS POOL_REASON <<EOF
+  IFS=$'\t' read -r POOL_STATE POOL_ROUTABLE POOL_CONFIGURED POOL_EXHAUSTED POOL_CAPABLE POOL_TRACKED POOL_UNPROJ POOL_HRS POOL_REASON <<EOF
 $(pool_read)
 EOF
 fi
@@ -433,11 +457,11 @@ EXH_PHRASE=${FABLE_EXH:--}
 [ "$POOL_CONFIGURED" = "-" ] && POOL_CONFIGURED=unknown
 [ "$POOL_EXHAUSTED" = "-" ] && POOL_EXHAUSTED=unknown
 
-printf 'fable-runway: overall=%s fable_state=%s pool_state=%s fable_remaining=%s%% fable_burn=%sx fable_exhaustion=%s(%s) pool_routable=%s/%s pool_exhausted=%s pool_capable=%s pool_tracked=%s pool_exhaustion=%s fable_reason=%s pool_reason=%s\n' \
+printf 'fable-runway: overall=%s fable_state=%s pool_state=%s fable_remaining=%s%% fable_burn=%sx fable_exhaustion=%s(%s) pool_routable=%s/%s pool_exhausted=%s pool_capable=%s pool_tracked=%s pool_unprojected=%s pool_exhaustion=%s fable_reason=%s pool_reason=%s\n' \
   "$OVERALL" "$FABLE_STATE" "$POOL_STATE" "$FABLE_REM" "$FABLE_BURN" \
   "$EXH_PHRASE" "$(fmt_hours "${FABLE_HRS:-}")" \
   "$POOL_ROUTABLE" "$POOL_CONFIGURED" "$POOL_EXHAUSTED" "$POOL_CAPABLE" \
-  "${POOL_TRACKED:-none}" \
+  "${POOL_TRACKED:-none}" "${POOL_UNPROJ:-none}" \
   "$(fmt_hours "${POOL_HRS:-}")" \
   "${FABLE_REASON:-unknown}" "${POOL_REASON:-unknown}"
 

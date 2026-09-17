@@ -104,6 +104,26 @@ add_account() {
     }]' "$file" > "$tmp" && mv "$tmp" "$file"
 }
 
+# add_account_resetting_at <accounts-file> <name> <fable-pct> <resets-at>
+# The resets_at is written verbatim, so a fixture can carry a timestamp the
+# monitor cannot place in a seven-day week.
+add_account_resetting_at() {
+  local file=$1 name=$2 pct=$3 resets=$4 tmp="$1.tmp"
+  jq -c --arg name "$name" --argjson pct "$pct" --arg resets "$resets" '
+    . + [{
+      name: $name,
+      tokenStatus: "valid",
+      paused: false,
+      usageData: {limits: [
+        {kind: "session", percent: 5},
+        {kind: "weekly_all", percent: $pct},
+        {kind: "weekly_scoped", percent: $pct,
+         resets_at: $resets,
+         scope: {model: {display_name: "Fable"}}}
+      ]}
+    }]' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
 # add_plain_account <accounts-file> <name> <session-pct> <weekly-all-pct>
 # An account whose windows carry no Fable-scoped limit at all, which is what a
 # gateway build that does not break its weekly window out per model reports.
@@ -355,6 +375,52 @@ expect_field "$out" pool_reason exhaustion_under_2h "all-hot pool reason"
 expect_rc "$out" 2 "all-hot pool exit"
 pass "a pool whose every capable account is inside two hours is RED"
 
+# A capable account whose week cannot be placed may have any amount of runway
+# left, so it must not let the one account that happens to be projectable decide
+# RED on its own. A clock a minute ahead, or a gateway that does not cut the week
+# at exactly seven days, puts resets_at past now+168h on a freshly reset account.
+make_pool "$health" "$accounts" 8 11 0
+add_account "$accounts" fresh-skewed 5 2 2 169
+add_account "$accounts" hot 5 99 99 24
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_unprojected fresh-skewed "skewed-week unprojected"
+expect_field "$out" pool_capable fresh-skewed,hot "skewed-week capable"
+expect_field "$out" pool_reason exhaustion_unprojectable "skewed-week reason"
+expect_field "$out" pool_state GREEN "skewed-week pool state"
+expect_rc "$out" 0 "skewed-week exit"
+
+# A resets_at carrying a non-UTC offset cannot be placed either, and that must
+# cost the account its projection rather than the whole pool verdict.
+make_pool "$health" "$accounts" 8 11 0
+add_account_resetting_at "$accounts" offset-account 2 "2026-10-01T12:00:00+01:00"
+add_account "$accounts" hot 5 99 99 24
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_unprojected offset-account "offset unprojected"
+expect_field "$out" pool_reason exhaustion_unprojectable "offset reason"
+expect_field "$out" pool_state GREEN "offset pool state"
+expect_rc "$out" 0 "offset exit"
+
+# With every capable account unprojectable there is no projection at all, and
+# the pool is still judged by its routable count rather than by a guess.
+make_pool "$health" "$accounts" 8 11 0
+add_account "$accounts" skewed-one 5 2 2 169
+add_account "$accounts" skewed-two 5 40 40 200
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_unprojected skewed-one,skewed-two "all-unprojectable unprojected"
+expect_field "$out" pool_exhaustion unknown "all-unprojectable projection"
+expect_field "$out" pool_reason exhaustion_unprojectable "all-unprojectable reason"
+expect_field "$out" pool_state GREEN "all-unprojectable pool state"
+expect_rc "$out" 0 "all-unprojectable exit"
+
+# The suppression is of the time rule only: the routable thresholds still apply.
+make_pool "$health" "$accounts" 3 11 6
+add_account "$accounts" skewed-one 5 2 2 169
+add_account "$accounts" hot 5 99 99 24
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state YELLOW "unprojectable thin pool state"
+expect_field "$out" pool_reason routable_at_or_below_3 "unprojectable thin pool reason"
+pass "an unprojectable capable account suppresses the time rule, not the verdict"
+
 # The pool's ordered routing steady state: one account burns out its week while
 # the rest sit untouched at zero. A zero-burn window is readable and maximally
 # healthy, so it must keep the pool out of RED. An untouched account's window is
@@ -500,18 +566,19 @@ silent=$(run_check "$((NOW + 900))")
 [ -z "$silent" ] || fail "check must stay silent on an unchanged yellow poll (got: $silent)"
 pass "a state change wakes and an unchanged yellow poll stays silent"
 
-# The RED repeat is throttled, then re-fires after the realert window.
+# The RED repeat is throttled, then re-fires an hour on. The clock moves, not a
+# knob: there is no way to ask for a sustained RED to stay quiet.
 make_quota "$cquota" 5 0.5 none through_reset
 red=$(run_check "$((NOW + 1200))")
 expect_field "$red" overall RED "check red transition"
 quiet=$(run_check "$((NOW + 1500))")
 [ -z "$quiet" ] || fail "a persistent RED must not repeat within the throttle (got: $quiet)"
-FM_FABLE_RUNWAY_REALERT_SECS=60
-export FM_FABLE_RUNWAY_REALERT_SECS
-repeat=$(run_check "$((NOW + 2000))")
-unset FM_FABLE_RUNWAY_REALERT_SECS
+still_quiet=$(run_check "$((NOW + 4700))")
+[ -z "$still_quiet" ] \
+  || fail "a persistent RED must not repeat a second short of the hour (got: $still_quiet)"
+repeat=$(run_check "$((NOW + 4800))")
 expect_field "$repeat" overall RED "check red repeat"
-pass "a persistent RED repeats only after the realert window"
+pass "a persistent RED repeats only once the fixed re-alert hour has passed"
 
 # Fail-back: an account the pool tracked but could not use is usable again, and
 # the check names it.

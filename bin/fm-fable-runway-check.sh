@@ -14,9 +14,10 @@
 #   - either runway state changed since the last printed poll (including the
 #     first poll, which is a change from unknown);
 #   - the overall state is RED and the last RED report is older than
-#     FM_FABLE_RUNWAY_REALERT_SECS (default 3600, 0 disables the repeat). RED is
-#     urgent, so it re-surfaces, but the repeat is throttled so a persistent RED
-#     cannot storm the wake queue every poll;
+#     REALERT_SECS (3600). RED is urgent, so it re-surfaces, but the repeat is
+#     throttled so a persistent RED cannot storm the wake queue every poll. That
+#     interval is a fixed constant rather than a knob, because the only thing an
+#     override could do is stop a sustained RED from ever being mentioned again;
 # Only a state transition is printable. The pool's membership churns on its own
 # - an account crosses 100 percent on some window, a new account is added - and
 # none of that is news while both runway states hold, so a change to the capable
@@ -76,6 +77,7 @@ CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 RECORD="$STATE/.fable-runway"
 RECORD_SCHEMA=fm-fable-runway-check-v2
+REALERT_SECS=3600
 MONITOR="$SCRIPT_DIR/fm-fable-runway.sh"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 
@@ -92,14 +94,6 @@ now_epoch() {
   case "${FM_FABLE_RUNWAY_NOW:-}" in
     ''|*[!0-9]*) date +%s ;;
     *) printf '%s\n' "$FM_FABLE_RUNWAY_NOW" ;;
-  esac
-}
-
-realert_secs() {
-  local n=${FM_FABLE_RUNWAY_REALERT_SECS:-3600}
-  case "$n" in
-    ''|*[!0-9]*) printf '3600\n' ;;
-    *) printf '%s\n' "$n" ;;
   esac
 }
 
@@ -153,7 +147,7 @@ action_check() {
   local line='' overall fable pool capable tracked
   line=$("$MONITOR" 2>/dev/null) || true
   if [ -z "$line" ]; then
-    line="fable-runway: overall=RED fable_state=RED pool_state=UNKNOWN fable_remaining=unknown% fable_burn=unknownx fable_exhaustion=unknown(unknown) pool_routable=unknown/unknown pool_exhausted=unknown pool_capable=none pool_tracked=none pool_exhaustion=unknown fable_reason=monitor_produced_no_line pool_reason=monitor_unavailable"
+    line="fable-runway: overall=RED fable_state=RED pool_state=UNKNOWN fable_remaining=unknown% fable_burn=unknownx fable_exhaustion=unknown(unknown) pool_routable=unknown/unknown pool_exhausted=unknown pool_capable=none pool_tracked=none pool_unprojected=none pool_exhaustion=unknown fable_reason=monitor_produced_no_line pool_reason=monitor_unavailable"
   fi
   overall=$(field overall "$line")
   fable=$(field fable_state "$line")
@@ -198,15 +192,14 @@ action_check() {
     label="capacity back account=$(printf '%s' "$recovered" | tr ' ' ',')"
   fi
 
-  local print=0 last_red_n='' realert=''
-  realert=$(realert_secs)
+  local print=0 last_red_n=''
   case "$last_red" in ''|*[!0-9]*) last_red_n='' ;; *) last_red_n=$last_red ;; esac
   if [ "$changed" -eq 1 ]; then
     print=1
   elif [ "$overall" = RED ]; then
     if [ -z "$last_red_n" ]; then
       print=1
-    elif [ "$realert" -gt 0 ] && [ "$((now - last_red_n))" -ge "$realert" ]; then
+    elif [ "$((now - last_red_n))" -ge "$REALERT_SECS" ]; then
       print=1
     fi
   fi

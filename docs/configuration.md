@@ -558,17 +558,19 @@ Per-account pool exhaustion is projected from the account's Fable-scoped weekly 
 A window reporting no burn at all is readable and maximally healthy, so it projects the whole seven-day week and stays in the counts the verdict is taken from; only a truly unreadable window drops out of them.
 That is settled before the window is placed in its week, because with no burn there is no rate left to measure and where the week started does not matter.
 It matters because the pool's ordered routing normally leaves most accounts untouched for the week while one account burns, and an untouched account is exactly the one whose `resets_at` sits a full week out or further.
-A window that has been burned against but whose `resets_at` says it has not opened yet is unprojectable and reported as `unknown`.
-`pool_exhaustion` is the best remaining account's runway - the longest projection among Fable-capable accounts - because the pool keeps serving while any capable account still has room, and the pool's time rule counts how many capable accounts are projected to outlast each threshold: `RED` when no capable account is projected past two hours and at least one projection is known, `YELLOW` when none is projected past six hours.
-One account near the end of its week therefore does not red-line a pool of healthy ones, while a pool whose every capable account is inside two hours is `RED`.
+A window that has been burned against but whose week cannot be placed is unprojectable: a `resets_at` a full week or more out, or one carrying a non-UTC offset, leaves no way to say how much of the week has elapsed.
+`pool_exhaustion` is the best remaining account's runway - the longest projection among Fable-capable accounts that have one - because the pool keeps serving while any capable account still has room, and the pool's time rule counts how many of them are projected to outlast each threshold: `RED` when none is projected past two hours, `YELLOW` when none is projected past six hours.
+An unprojectable capable account may have any amount of runway left, so it is named in `pool_unprojected` and it suppresses the time rule rather than letting the accounts that happen to be projectable decide on their own; `pool_reason` then reads `exhaustion_unprojectable`, and the routable counts still decide the verdict.
+One account near the end of its week therefore does not red-line a pool of healthy ones, while a pool whose every capable account is projectable and inside two hours is `RED`.
 That is the same pace model `quota-axi` reports as `burnMultiple`, and the pool's routable counts stay the primary signal.
 The monitor never writes fleet state and never prints a credential or an account email.
 
 Arm the check once per home with `bin/fm-fable-runway-check.sh arm`.
 That writes `state/fable-runway.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal `FM_CHECK_INTERVAL` cadence and turns its one line into a `check:` wake; no separate schedule is involved.
 `bin/fm-fable-runway-check.sh disarm` removes the shim, its trust binding, and the record; retire an armed check that way rather than by hand.
-The check prints one line, and only one, when either runway state changes since the last printed poll, or when a persistent `RED` has not been reported for `FM_FABLE_RUNWAY_REALERT_SECS` (default 3600, `0` disables the repeat).
-Only those transitions are printable: the pool's membership churns on its own as accounts cross and reset their windows, and a change to `pool_capable` or `pool_tracked` alone, with every state unchanged, prints nothing.
+The check prints one line, and only one, when either runway state changes since the last printed poll, or when a persistent `RED` has not been reported for an hour.
+That re-alert interval is a fixed constant, not a knob: the only thing an override could do is stop a sustained `RED` from ever being mentioned again, on the monitor whose reason for existing is that going quiet is the worst failure.
+Only those transitions are printable: the pool's membership churns on its own as accounts cross and reset their windows, and a change to `pool_capable`, `pool_tracked` or `pool_unprojected` alone, with every state unchanged, prints nothing.
 The wake always carries both `fable_state=` and `pool_state=`, so which runway went `RED` is never ambiguous.
 A poll that prints while the pool has just regained capacity also carries a recovery label, `capacity back account=<name>`; there is one spelling of it, because the same line already carries `pool_state=`.
 A regain means an account that was Fable-tracked but not Fable-capable as of the last printed poll is capable now; an account merely added to the pool is new, not recovered, and never earns the label.
