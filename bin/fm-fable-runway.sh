@@ -70,11 +70,13 @@
 # Every external call is clamped, because the watcher kills a check that runs
 # past FM_CHECK_TIMEOUT and a killed check prints nothing and records nothing -
 # for a failover monitor, going silently dark is the worst failure. No single
-# call may exceed FM_FABLE_RUNWAY_CALL_CAP (default 5) seconds, nor a quarter of
-# what is left of FM_CHECK_TIMEOUT once that cap is reserved as margin, so the
-# four calls this makes still fit even when an operator raises a timeout. On a
-# default home that clamp is 5 seconds, which is also what each quota-axi call
-# is bounded by unless FM_FABLE_RUNWAY_QUOTA_TIMEOUT asks for less.
+# call may exceed CALL_CAP seconds, nor a quarter of what is left of
+# FM_CHECK_TIMEOUT once that cap is reserved as margin, so the four calls this
+# makes still fit even when an operator raises a timeout. The cap is a fixed
+# constant rather than a knob: an override could only weaken the bound it exists
+# to enforce. On a default home the clamp is 5 seconds, which is also what each
+# quota-axi call is bounded by unless FM_FABLE_RUNWAY_QUOTA_TIMEOUT asks for
+# less.
 #
 # Test seams (all optional; production reads the live sources):
 #   FM_FABLE_RUNWAY_NOW                    epoch seconds to use as "now"
@@ -84,7 +86,6 @@
 #   FM_FABLE_RUNWAY_POOL_HEALTH_JSON       file holding a pool /health snapshot
 #   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON     file holding a pool /api/accounts snapshot
 #   FM_FABLE_RUNWAY_POOL_TIMEOUT           seconds bounding each pool fetch (default 4, clamped)
-#   FM_FABLE_RUNWAY_CALL_CAP               hard per-call ceiling in seconds (default 5)
 set -u
 export LC_ALL=C
 
@@ -371,10 +372,7 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
 case "$CHECK_TIMEOUT" in
   ''|*[!0-9]*|0) CHECK_TIMEOUT=30 ;;
 esac
-CALL_CAP=${FM_FABLE_RUNWAY_CALL_CAP:-5}
-case "$CALL_CAP" in
-  ''|*[!0-9]*|0) CALL_CAP=5 ;;
-esac
+CALL_CAP=5
 CALL_MAX=$(( (CHECK_TIMEOUT - CALL_CAP) / 4 ))
 [ "$CALL_MAX" -le "$CALL_CAP" ] || CALL_MAX=$CALL_CAP
 [ "$CALL_MAX" -ge 1 ] || CALL_MAX=1
