@@ -27,10 +27,15 @@ That bounded window is the same footer window the watcher's busy match reads, an
 Inside that window the match is anchored to the pane's **live output line**: the last *logical* line of rendered output, which is the line the agent's last turn ended on.
 The composer and everything the harness draws below it are skipped first — they are not output, and the raw last non-blank row of an idle pane is the shortcut footer, so anchoring there would blind the detector.
 Logical, not a screen row: a crew window is 80 columns and the rendered error is ~190 characters, so a pane always splits it across rows and the row carrying the shape is never the last of them.
-The screen rows are joined back into the line the harness wrote — walking up from the last output row across its wrap continuations, stopping at the row that begins the line, which is the row carrying a gutter glyph, a prompt glyph, or the `API Error:` shape itself.
+The screen rows are joined back into the line the harness wrote, and the join is **structural**: a row continues the row above it if and only if that row above fills the pane to its margin, because filling the margin is the only reason a screen breaks a line.
+A row shorter than the margin ended its line, so the walk stops there.
+The pane's width is read off the capture — the length of its longest row, but only when two or more rows end at exactly that column, since a margin is what makes two rows the same length while a single long row is just a long line.
+A bordered composer satisfies that on its own, its border and rails spanning the pane; a capture showing no margin at all has nothing that can be a continuation.
+Nothing in the test reads how the harness renders a gutter, a bullet or an indent, deliberately: a glyph test merges two separate rendered lines whenever the second carries no gutter, which turns a crew that merely mentioned a 503 in its closing paragraph into a crew being re-rung for one.
 The shape is also not matched when that line quotes it inside backticks or quotation marks, judged on the reconstructed line so a quote that opened on an earlier row still counts.
 Both rules exist because an agent that merely printed this repository's own sources must not be re-rung either: the docs, the tests and the classifier itself carry the literal rendered string, so a crewmate that read them ends its turn with the shape on screen.
-A citation always carries something around it, either more output below it or a quote beside it; the harness's own turn-ending error carries neither.
+A citation is disqualified by one of two things: another rendered line below it, which makes it not the last line, or a quote around it on its own line.
+The harness's own turn-ending error has neither.
 Re-ringing a healthy crew is not a harmless nudge — it spends the whole budget and stamps a false `paused [key=gateway-503]` on that crew's status log, which then routes a genuinely wedged pane onto the long declared-wait cadence instead of the wedge timer.
 
 A deny list runs first, over the whole capture, and beats the transient match.

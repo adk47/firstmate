@@ -52,13 +52,30 @@ ordinary_lines() {  # <count>
 # reproduced here; the fixtures below assert it really did split, because the
 # regression this pins shipped precisely because every fixture wrote the ~190
 # character error as one unwrapped line no pane could ever show.
+# The em dash stands in as one byte while the string is cut, so a row is <cols>
+# COLUMNS wide whatever locale this suite runs under - `${s:0:$w}` cuts bytes
+# under LC_ALL=C, and a row cut to 80 bytes is not the 80-column row a pane holds.
 pane_rows() {  # <text> <cols>
-  local s=$1 w=$2
+  local s=$1 w=$2 chunk
+  s=${s//—/$'\001'}
   while [ "${#s}" -gt "$w" ]; do
-    printf '%s\n' "${s:0:$w}"
+    chunk=${s:0:$w}
+    printf '%s\n' "${chunk//$'\001'/—}"
     s=${s:$w}
   done
-  printf '%s\n' "$s"
+  printf '%s\n' "${s//$'\001'/—}"
+}
+
+# The idle Claude screen at <cols> columns: the bordered empty composer and the
+# shortcut footer, with the border spanning the pane the way a harness draws it.
+# The border is what carries the pane's margin into the capture, so a fixture
+# whose composer is not the fixture's own width is not a pane any crew has.
+idle_screen() {  # <cols>
+  local cols=$1 i=0 rule='' pad=''
+  while [ "$i" -lt $(( cols - 2 )) ]; do rule="${rule}─"; i=$(( i + 1 )); done
+  i=0
+  while [ "$i" -lt $(( cols - 4 )) ]; do pad="${pad} "; i=$(( i + 1 )); done
+  printf '╭%s╮\n│ >%s│\n╰%s╯\n  ? for shortcuts\n' "$rule" "$pad" "$rule"
 }
 
 row_count() {  # <rows>
@@ -167,30 +184,65 @@ test_only_the_live_output_line_decides_a_stall() {
   pass "only the live output line decides a stall: an error named mid-turn is not one, an error ending the turn is"
 }
 
-test_a_wrapped_rendered_error_is_still_a_stall() {
-  # The error the captain is waiting on is 191 characters. No pane shows that on
-  # one row: a crew window is opened detached at tmux's 80-column default and
-  # captured as physical rows, so the shape arrives on the FIRST row of a wrap
-  # and the pane's last row is a fragment carrying none of it. A classifier that
-  # reads a screen row instead of the line the harness wrote is inert at every
-  # width a crew runs at - no record, no continue, nothing retried.
+# A crew's closing message that NAMES the error mid-sentence, long enough to wrap
+# at every width below, and the second paragraph it signs off with. Both are
+# ordinary output from an agent that finished: nothing here is stalled. The
+# sign-off carries the harness's continuation INDENT and no gutter glyph, which
+# is how a harness draws every paragraph of a message after its first - and is
+# what a glyph-based join cannot tell from a wrap, so it merged the two into one
+# line and re-rang a crew that was done.
+HEALTHY_MENTION='⏺ The watcher never re-rang cmux-v4 this morning: its pane had ended on API Error: 503 All accounts are temporarily unavailable, the detector was reading a single screen row, and the ladder therefore never opened a stall record for that lane at all, which is why an hour went missing before anyone noticed the lane had stopped moving.'
+HEALTHY_CLOSE='  Eighteen cases pass and the lint is clean.'
+
+# The same mention, but quoted, and left behind by further work: the shape the
+# repository's own docs and tests put on a crewmate's screen.
+QUOTED_MENTION='⏺ The verification record quotes the pooled gateway failure as "API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary — try again in a moment." and classes it transient, which is the row I went back to check before moving on to the next one.'
+
+test_the_wrap_is_undone_before_the_anchor_is_applied() {
+  # A pane is a SCREEN. The error the captain is waiting on is 191 characters, so
+  # no pane shows it on one row: the shape lands on the first row of a wrap and
+  # the pane's last row is a fragment carrying none of it. Undoing that wrap is
+  # what the anchor needs, and the wrap is undone STRUCTURALLY - a row continues
+  # the row above it only when that row above filled the pane to its margin -
+  # because the alternatives have each failed in their own direction: an
+  # unanchored match caught prose, a screen-row anchor went blind on the wrapped
+  # error, and a gutter-glyph join swallowed separate rendered lines.
   local cols rows pane st
-  for cols in 160 100 80; do
+  for cols in 80 100 160; do
+    # 1. The error at the end of the output: the stall this exists for.
     rows=$(pane_rows "$E503_ACCOUNTS" "$cols")
     [ "$(row_count "$rows")" -gt 1 ] \
-      || fail "the ${cols}-column fixture did not wrap, so it cannot pin this regression"
-    pane=$(printf '%s%s' "$rows" "$IDLE_FOOTER")
+      || fail "the ${cols}-column error fixture did not wrap, so it cannot pin this regression"
+    pane=$(printf '%s\n%s\n' "$rows" "$(idle_screen "$cols")")
     fm_gateway_text_is_transient "$pane" \
       || fail "the rendered error wrapped at $cols columns, as a real pane holds it, was not classified as a stall"
+
+    # 2. A healthy crew that MENTIONED the error and then signed off. Its sign-off
+    # is a separate rendered line, so the mention is not the live line - and the
+    # rows of the mention carry no gutter glyph, which is exactly what a glyph
+    # join merged into one line and re-rang a finished crew for.
+    rows=$(pane_rows "$HEALTHY_MENTION" "$cols")
+    [ "$(row_count "$rows")" -gt 1 ] \
+      || fail "the ${cols}-column mention fixture did not wrap, so it cannot pin this regression"
+    pane=$(printf '%s\n%s\n%s\n' "$rows" "$HEALTHY_CLOSE" "$(idle_screen "$cols")")
+    fm_gateway_text_is_transient "$pane" \
+      && fail "a crew that mentioned the error and then signed off was classified as stalled at $cols columns"
+
+    # 3. The same mention quoted, with ordinary output after it.
+    pane=$(printf '%s\n%s\n%s\n' "$(pane_rows "$QUOTED_MENTION" "$cols")" \
+      "$(ordinary_lines 2)" "$(idle_screen "$cols")")
+    fm_gateway_text_is_transient "$pane" \
+      && fail "a quoted mention left behind by later output was classified as stalled at $cols columns"
   done
 
-  # And the ladder actually engages on it: the durable record opens, which is
-  # what buys the crew its continue instruction.
+  # And the ladder actually engages on the real one: the durable record opens,
+  # which is what buys the crew its continue instruction.
   st=$(new_state wrapped-stall)
-  fm_gateway_stalled_now "$st" task-w "$(printf '%s%s' "$(pane_rows "$E503_ACCOUNTS" 80)" "$IDLE_FOOTER")" \
+  fm_gateway_stalled_now "$st" task-w \
+    "$(printf '%s\n%s\n' "$(pane_rows "$E503_ACCOUNTS" 80)" "$(idle_screen 80)")" \
     || fail "a pane holding the wrapped error did not enter the re-ring ladder"
   fm_gateway_stall_open "$st" task-w || fail "no stall record was opened for the wrapped error"
-  pass "the rendered error still opens the ladder when the pane wraps it, at 160, 100 and 80 columns"
+  pass "the wrap is undone before the anchor: the wrapped error stalls, a mention of it does not, at 80, 100 and 160 columns"
 }
 
 test_a_citation_split_across_a_wrap_is_still_quoted() {
@@ -206,7 +258,7 @@ test_a_citation_split_across_a_wrap_is_still_quoted() {
     || fail "the citation fixture did not wrap, so it cannot pin this regression"
   printf '%s\n' "$rows" | sed -n 2p | grep -q 'API Error: 503' \
     || fail "the citation fixture no longer splits with the shape on a continuation row"
-  pane=$(printf '%s%s' "$rows" "$IDLE_FOOTER")
+  pane=$(printf '%s\n%s\n' "$rows" "$(idle_screen 80)")
   fm_gateway_text_is_transient "$pane" \
     && fail "a citation whose quote opened on an earlier screen row was classified as a stall"
   pass "a citation split across a wrap is still read as quoted, not as the harness's own error"
@@ -401,7 +453,7 @@ test_deny_list_matches_anywhere_while_the_transient_match_is_bounded
 test_a_recovered_agent_with_the_old_error_in_scrollback_is_not_stalled
 test_repository_text_naming_the_errors_is_not_a_stall
 test_only_the_live_output_line_decides_a_stall
-test_a_wrapped_rendered_error_is_still_a_stall
+test_the_wrap_is_undone_before_the_anchor_is_applied
 test_a_citation_split_across_a_wrap_is_still_quoted
 test_a_gateway_that_is_simply_down_is_not_retried
 test_ladder_is_bounded_by_attempts

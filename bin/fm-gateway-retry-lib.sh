@@ -40,18 +40,28 @@
 # wrote before the anchor is applied, which is also what lets a quote that
 # opened on an earlier row still count as quoting the shape.
 #
+# THE WRAP TEST IS STRUCTURAL: a row continues the row above it if and only if
+# that row above fills the pane to its margin, because that is the only reason a
+# screen breaks a line. The width comes off the capture (see
+# _fm_gateway_pane_width). Nothing here reads how the harness renders a gutter,
+# a bullet or an indent, and that is deliberate - a glyph test merges two
+# separate rendered lines whenever the second carries no gutter, which turns a
+# crew that MENTIONED a 503 in its closing paragraph into a crew being re-rung
+# for one.
+#
 # WHY THE POSITION IS THE ANCHOR. Matching the shape ANYWHERE in the window
 # judges an agent by text it merely printed: this repository's own docs, tests
 # and sources carry the literal string, so a crewmate that read them ends its
 # turn with the shape on screen, and an unanchored match would send that healthy
 # crew a continue nobody asked for, spend the whole budget, and stamp a false
 # declared wait on its status log - which then hides a genuinely wedged crew
-# behind the long declared-wait cadence. A citation always carries something
-# ahead of it, either more output below it or a quote around it; the harness's
-# own error carries neither. The composer and everything the harness draws below
-# it are not output and are skipped before that last line is taken: the raw last
-# non-blank row of an idle pane is the shortcut footer, and anchoring to that
-# would blind the detector completely.
+# behind the long declared-wait cadence. A citation is disqualified by one of two
+# things: another rendered line below it, which makes it not the last line, or a
+# quote around it on its own line. The harness's own error has neither. The
+# composer and everything the harness draws below it are not output and are
+# skipped before that last line is taken: the raw last non-blank row of an idle
+# pane is the shortcut footer, and anchoring to that would blind the detector
+# completely.
 #
 # A DENY list runs first, over the WHOLE supplied text, and wins outright. It
 # exists because the non-retryable failures are the expensive mistakes:
@@ -236,27 +246,27 @@ _fm_gateway_chrome_row() {  # <row>
   return 1
 }
 
-# The gutter marks a harness draws at the START of a rendered output line.
-# Whatever begins with one of these, with a prompt glyph, or with the rendered
-# error shape itself is a new line; anything else continues the row above it.
-FM_GATEWAY_LINE_START_GLYPHS='⏺ ⎿ ✻ ⧉ ☒ ☐'
+# One row per line of <text>, each row's length in COLUMNS: bytes less the UTF-8
+# continuation bytes among them, so a row carrying the harness's em dash measures
+# the columns it occupies on screen rather than its bytes. `${#row}` cannot do
+# this job - it counts bytes under the LC_ALL=C of a daemon or launchd context,
+# and a width compared in bytes never matches a width in columns.
+_fm_gateway_row_columns() {  # <text>
+  printf '%s\n' "$1" | LC_ALL=C awk '{ print length($0) - gsub(/[\200-\277]/, "&") }'
+}
 
-# 0 when <row> BEGINS a rendered line rather than continuing the one above it.
-# A pane holds SCREEN ROWS, not lines: the rendered 503 is ~190 characters and a
-# crew pane is 80 columns, so the error arrives split across rows, and the row
-# carrying the shape is never the last of them. The glyphs above are what tells
-# a fresh line from the tail of a wrapped one.
-_fm_gateway_line_start_row() {  # <row>
-  local row=$1 glyph
-  fm_composer_normalize_trim_var row
-  case "$row" in
-    [aA][pP][iI]' '[eE][rR][rR][oO][rR]:*) return 0 ;;
-  esac
-  fm_composer_leading_prompt_glyph_var glyph "$row" && return 0
-  for glyph in $FM_GATEWAY_LINE_START_GLYPHS; do
-    case "$row" in "$glyph"*) return 0 ;; esac
-  done
-  return 1
+# The pane's WIDTH IN COLUMNS, read off the capture itself: the length of its
+# longest row, but only when two or more rows end at exactly that column. A
+# margin is what makes two rows the same length; a single longest row is just a
+# long line, and taking its length for the width would make the row beneath it a
+# continuation of something that never wrapped. A bordered composer needs no
+# case of its own for the same reason: its border and side rails span the pane,
+# so they ARE that shared maximum. 0 when the capture shows no margin, and then
+# nothing in it can be a continuation.
+_fm_gateway_pane_width() {  # <capture>
+  _fm_gateway_row_columns "$1" | LC_ALL=C awk '
+    { if ($1 > max) { max = $1; hits = 1 } else if ($1 == max) hits++ }
+    END { print (max > 0 && hits >= 2) ? max : 0 }'
 }
 
 # The window's LIVE OUTPUT LINE: the last LOGICAL line of rendered output, which
@@ -265,19 +275,30 @@ _fm_gateway_line_start_row() {  # <row>
 #   - the composer and everything the harness draws under it are skipped, so an
 #     idle pane's shortcut footer can never stand in for the agent's own last
 #     line, and chrome is never joined into an output line;
-#   - the screen rows above it are joined back into the line the harness wrote,
-#     walking up from the last output row across its wrap continuations and
-#     stopping at the row that begins the line.
+#   - the wrap is undone, walking up from the last output row while the row above
+#     it fills the pane to the margin. A row that fills the margin is the only
+#     row a screen can continue; a shorter row ended its line, so the walk stops
+#     there. That test is a property of the capture, needing no knowledge of how
+#     the harness renders gutters, bullets or indentation - the reason a glyph
+#     test cannot do this job is that it merges separate rendered lines that
+#     happen to carry no gutter, which is a healthy crew re-rung for a 503 it
+#     merely mentioned.
 # A window with no chrome at all - a capture of nothing but output - ends at its
 # own last row. 1 when the window holds no output row at all.
-_fm_gateway_live_output_line() {  # <tail-window>
-  local row i end line
-  local -a rows=()
+_fm_gateway_live_output_line() {  # <tail-window> <pane-width-columns>
+  local row i end line width=${2:-0}
+  local -a rows=() row_cols=()
   while IFS= read -r row; do
     rows+=("$row")
   done <<EOF
 $1
 EOF
+  while IFS= read -r row; do
+    row_cols+=("$row")
+  done <<EOF
+$(_fm_gateway_row_columns "$1")
+EOF
+  case "$width" in ''|*[!0-9]*) width=0 ;; esac
   end=$(( ${#rows[@]} - 1 ))
   [ "$end" -ge 0 ] || return 1
   i=$end
@@ -294,8 +315,8 @@ EOF
   fi
   line=${rows[$end]}
   i=$end
-  while [ "$i" -gt 0 ] \
-    && ! _fm_gateway_line_start_row "${rows[$i]}" \
+  while [ "$width" -gt 0 ] && [ "$i" -gt 0 ] \
+    && [ "${row_cols[$(( i - 1 ))]:-0}" -eq "$width" ] \
     && ! _fm_gateway_chrome_row "${rows[$(( i - 1 ))]}"; do
     i=$(( i - 1 ))
     line="${rows[$i]}$line"
@@ -334,7 +355,8 @@ fm_gateway_text_is_transient() {  # <pane-text>
   [ -n "$text" ] || return 1
   fm_gateway_text_is_permanent "$text" && return 1
   live=$(_fm_gateway_live_output_line \
-    "$(printf '%s\n' "$text" | grep -v '^[[:space:]]*$' | tail -n "$(fm_gateway_tail_lines)")") \
+    "$(printf '%s\n' "$text" | grep -v '^[[:space:]]*$' | tail -n "$(fm_gateway_tail_lines)")" \
+    "$(_fm_gateway_pane_width "$text")") \
     || return 1
   _fm_gateway_row_renders_error "$(printf '%s' "$live" | tr '[:upper:]' '[:lower:]')"
 }
