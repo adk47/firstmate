@@ -140,17 +140,40 @@ fm_gateway_busy_clear_secs() {
   printf '%s' "$n"
 }
 
+# <seconds> as whole MILLISECONDS, for an interval written either way - the
+# caller's cadence is a public tunable and this fleet's own watchers are driven
+# at fractional seconds. A fraction finer than a millisecond truncates DOWN,
+# which can only make the derived interval shorter and the derived poll count
+# larger. 1 when the value is not a number at all.
+_fm_gateway_interval_millis() {  # <seconds>
+  local v=${1-} whole frac
+  whole=${v%%.*}
+  case "$v" in *.*) frac=${v#*.} ;; *) frac='' ;; esac
+  [ -n "$whole" ] || whole=0
+  case "$whole" in *[!0-9]*) return 1 ;; esac
+  case "$frac" in *[!0-9]*) return 1 ;; esac
+  frac="${frac}000"
+  frac=${frac%"${frac#???}"}
+  printf '%s' "$(( whole * 1000 + 10#$frac ))"
+}
+
 # Consecutive busy polls that end a stall record, at <poll-interval> seconds per
-# poll: the wall-clock bound above rounded UP to whole polls, never below one, so
-# a very long interval cannot derive zero and a short one cannot shrink the
-# window. An interval that is not a positive whole number of seconds is treated
-# as one second, which only ever derives MORE polls - the safe direction, since
-# ending a record too early is the failure this bound exists to prevent.
+# poll: the wall-clock bound above divided by the caller's real cadence, rounded
+# UP to whole polls and never below one, so a very long interval cannot derive
+# zero and a short one cannot shrink the window. The division is exact for a
+# fractional cadence as well as a whole-second one, because rounding a cadence
+# of 0.2s up to 1s would derive a fifth of the polls and a fifth of the window -
+# ending a record early is the failure this bound exists to prevent, and it is
+# the SHORT cadences that reach it. A cadence that is not a number, or one that
+# is zero because the caller does not sleep at all, has no wall clock to divide:
+# those derive the bound's own seconds as polls, the longest window this
+# function can honestly name.
 fm_gateway_busy_clear_polls() {  # <poll-interval-secs>
-  local interval=${1-} secs n
-  case "$interval" in ''|*[!0-9]*|0) interval=1 ;; esac
+  local interval=${1-} secs ms n
+  ms=$(_fm_gateway_interval_millis "$interval") || ms=1000
+  [ "$ms" -ge 1 ] || ms=1000
   secs=$(fm_gateway_busy_clear_secs)
-  n=$(( ( secs + interval - 1 ) / interval ))
+  n=$(( ( secs * 1000 + ms - 1 ) / ms ))
   [ "$n" -ge 1 ] || n=1
   printf '%s' "$n"
 }
@@ -252,9 +275,8 @@ fm_gateway_turn_ended_on_api_error() {  # <state-dir> <scope>
 #
 # One record per stalled agent, at <state>/<scope>.gateway-stall:
 #   v1 first=<epoch> attempts=<n> last=<epoch> notified=<0|1>
-# <scope> is the task id for a crewmate or scout, and the reserved id below for
-# the primary session, which has no task record of its own. Removing the file is
-# always safe: it only costs the current stall its accumulated budget.
+# <scope> is the task id for a crewmate or scout. Removing the file is always
+# safe: it only costs the current stall its accumulated budget.
 #
 # `first` anchors the wall-clock horizon and never moves while the stall is
 # open. `last` anchors the BACKOFF and moves only when an attempt is charged, so
@@ -433,14 +455,20 @@ fm_gateway_paused_status_line() {  # <state-dir> <scope>
 }
 
 # The close for the line above, so a declared wait ends the way every other
-# keyed phase ends rather than outliving the condition it declared.
+# keyed phase ends rather than outliving the condition it declared. It names
+# only what dropping the record establishes, which is that the agent is working
+# again: the two transitions that drop one are a turn end that was not an API
+# error and a busy stretch long enough to be real work, and NEITHER of them
+# re-reads the pane, so the old error can still be on screen when this is
+# written.
 fm_gateway_resolved_status_line() {  # <state-dir> <scope>
-  printf 'resolved [key=gateway-503]: the pane stopped showing the transient gateway error after %ss; the agent is working again' \
+  printf 'resolved [key=gateway-503]: the agent is working again after %ss' \
     "$(fm_gateway_stall_age "$1" "$2")"
 }
 
-# Close the declared wait at the one transition that proves it is over: a
-# record that declared it being dropped because its pane recovered. Only a
+# Close the declared wait at the transition that proves it is over: the record
+# that declared it being dropped, which happens only once the agent is working
+# again. Only a
 # record marked notified ever opened a phase, and only a scope with a status
 # log has one to close, so a scope without one is left alone.
 _fm_gateway_close_declared_wait() {  # <state-dir> <scope>

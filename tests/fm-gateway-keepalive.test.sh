@@ -194,15 +194,30 @@ test_ladder_is_bounded_by_wall_clock_independently() {
 # was dropped mid-ladder so a genuine outage could never be declared. The bound
 # is therefore wall clock, converted to each caller's cadence.
 test_busy_clear_window_is_wall_clock_at_every_poll_cadence() {
-  local interval polls window retry=240
-  for interval in 15 5 1; do
+  # Each cadence is paired with its own length in milliseconds, so the window a
+  # count really covers can be asserted in integer arithmetic. The sub-second
+  # ones are not hypothetical: FM_POLL has no floor and this repository's own
+  # suites drive the real watcher at 0.2 and 0.02 seconds, where rounding the
+  # cadence up to a whole second derives a fifth or a fiftieth of the window.
+  local pair interval ms polls window retry=240
+  for pair in 15:15000 5:5000 1:1000 1.5:1500 0.5:500 0.2:200 0.02:20; do
+    interval=${pair%%:*}
+    ms=${pair#*:}
     polls=$(fm_gateway_busy_clear_polls "$interval")
-    window=$(( polls * interval ))
+    window=$(( polls * ms / 1000 ))
     [ "$window" -ge 600 ] \
       || fail "a ${interval}s poll interval derived only ${window}s of busy ($polls polls), shrinking the window below the bound"
     [ "$window" -gt "$retry" ] \
       || fail "a ${interval}s poll interval derived ${window}s of busy, inside the harness's own ~${retry}s internal retry; the record would be dropped mid-ladder and no outage could ever be declared"
   done
+
+  # A cadence that is not a number, and one that is zero because the caller does
+  # not sleep at all, have no wall clock to divide: both fall back to the longest
+  # window this function can name rather than a short one.
+  [ "$(fm_gateway_busy_clear_polls abc)" = 600 ] \
+    || fail "an unreadable poll interval did not fall back to the bound's own seconds"
+  [ "$(fm_gateway_busy_clear_polls 0)" = 600 ] \
+    || fail "a zero poll interval did not fall back to the bound's own seconds"
 
   # Rounded UP to whole polls, and never to zero: an interval longer than the
   # whole window must still take one busy poll to end a record, not none.
