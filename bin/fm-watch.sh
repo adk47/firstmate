@@ -469,6 +469,19 @@ gateway_stall_check() {  # <window> <task> <kind> <tail40>
   return 0
 }
 
+# The ladder's exit for the pane state gateway_stall_check never sees. A busy
+# pane is a successful turn in progress, so any stall record still open for this
+# task is over; bin/fm-gateway-retry-lib.sh's fm_gateway_note_progress owns what
+# ending one means. Admission is the same as gateway_stall_check above so one
+# window cannot be in the ladder for one check and out of it for the other.
+gateway_progress_check() {  # <task> <kind>
+  local task=$1 kind=$2
+  [ -n "$task" ] || return 0
+  [ "$kind" != secondmate ] || return 0
+  [ -f "$STATE/$task.meta" ] || return 0
+  fm_gateway_note_progress "$STATE" "$task"
+}
+
 # 0 (benign/absorb) if EVERY task in a no-verb "signal:" wake has positive work
 # evidence; 1 otherwise. Each task may satisfy the authoritative working proof,
 # or an eligible bare turn-end may use the opt-in pane-churn proof below.
@@ -1979,7 +1992,9 @@ EOF
     # rendered failure, not "nothing changed" - and it hands the window straight
     # back once either bound is spent, which is when the stale bookkeeping below
     # is the right owner again.
-    if [ "$busy_now" -ne 0 ] && gateway_stall_check "$w" "$task" "$kind" "$tail40"; then
+    if [ "$busy_now" -eq 0 ]; then
+      gateway_progress_check "$task" "$kind"
+    elif gateway_stall_check "$w" "$task" "$kind" "$tail40"; then
       continue
     fi
     if [ "$h" = "$prev" ]; then

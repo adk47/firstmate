@@ -281,6 +281,49 @@ test_a_recovered_agent_closes_its_declared_gateway_wait() {
   pass "a recovered agent's declared gateway wait is closed, leaving no open gateway-503 phase"
 }
 
+test_a_busy_turn_clears_a_stall_record_whatever_its_length() {
+  local st status open
+  st=$(new_state busy-progress)
+  status="$st/task-b.status"
+  printf 'working: started\n' > "$status"
+
+  # A stall opens, is re-rung once, and spends its budget, so the wait is
+  # declared as the external wait it is.
+  fm_gateway_stalled_now "$st" task-b "$E503_ACCOUNTS" || fail "a stalled pane must open the record"
+  fm_gateway_record_attempt "$st" task-b || fail "could not charge an attempt"
+  fm_gateway_mark_notified "$st" task-b || fail "could not mark the wait declared"
+  printf '%s\n' "$(fm_gateway_paused_status_line "$st" task-b)" >> "$status"
+  open=$(open_activity_keys "$status")
+  case "$open" in
+    *gateway-503*) : ;;
+    *) fail "the declared wait did not open a keyed phase to begin with, got: $open" ;;
+  esac
+
+  # The crew recovers and runs one long continuous turn. Its pane reads busy for
+  # the whole of it, so the idle clear path is never reached and the record would
+  # otherwise outlive the stall it records.
+  fm_gateway_note_progress "$st" task-b
+  fm_gateway_stall_open "$st" task-b && fail "a busy turn left the stall record open"
+  open=$(open_activity_keys "$status")
+  case "$open" in
+    *gateway-503*) fail "a recovered crew is still declared as waiting on the gateway: $open" ;;
+  esac
+
+  # So a genuinely new transient error begins a fresh ladder, instead of being
+  # judged against the stale anchor and declared spent with no retry at all.
+  fm_gateway_stalled_now "$st" task-b "$E503_ACCOUNTS" \
+    || fail "a new transient error did not open a fresh stall"
+  [ "$(fm_gateway_attempts "$st" task-b)" = 0 ] \
+    || fail "the new stall inherited the spent ladder's attempts"
+  fm_gateway_budget_spent "$st" task-b \
+    && fail "a genuinely new stall was declared spent on sight"
+
+  # A no-op for a scope with no record, so every poll may call it unconditionally.
+  fm_gateway_note_progress "$st" task-none \
+    || fail "progress for a scope with no record must be a silent no-op"
+  pass "a stall record does not outlive a successful turn, whatever its length"
+}
+
 test_a_notice_never_buries_an_unresolved_notice_of_another_kind() {
   local st
   st=$(new_state notice-kinds)
@@ -1012,6 +1055,7 @@ test_backoff_ladder_repeats_its_last_step
 test_pane_is_the_single_detector
 test_spent_budget_declares_an_external_wait_not_a_wedge
 test_a_recovered_agent_closes_its_declared_gateway_wait
+test_a_busy_turn_clears_a_stall_record_whatever_its_length
 test_a_notice_never_buries_an_unresolved_notice_of_another_kind
 test_primary_agent_re_rings_a_stalled_primary
 test_primary_agent_never_types_into_a_busy_primary
