@@ -2497,6 +2497,12 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
 # <mode> `exit` requires the watcher to surface and exit; `absorb` requires it to
 # survive whole poll cycles - enough to see the new hash, count it stable, and
 # reach the stale path. Returns 1 when the watcher does the other thing.
+# An exit round on a pane the case just rewrote needs those same three cycles
+# before it can surface (the new hash, its first stable count, the surfacing
+# count), so it is given three of the per-cycle budgets absorb rounds get rather
+# than the fixed 10s a seeded single-poll exit needs: on a loaded machine one
+# cycle alone runs several seconds, and a shorter budget reaps a watcher that
+# was about to surface and reports it as having absorbed.
 parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absorb>
   local state=$1 fakebin=$2 out=$3 capture=$4 window=$5 mode=$6 pid cycles=0
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
@@ -2508,7 +2514,7 @@ parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absor
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
   if [ "$mode" = exit ]; then
-    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+    wait_for_exit "$pid" 900 || { reap "$pid"; return 1; }
     return 0
   fi
   while [ "$cycles" -lt 4 ]; do
