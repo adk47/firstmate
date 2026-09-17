@@ -354,3 +354,26 @@ assert_absent() {
 assert_present() {
   [ -e "$1" ] || fail "$2"
 }
+
+# --- Node TypeScript host ---------------------------------------------------
+#
+# Several suites load a .ts artifact - the spawn-written state/<id>.pi-ext.ts,
+# the .pi/extensions/lib/*.ts adapters - in a plain `node --input-type=module`
+# host. Pi strips the types itself in production; the test host relies on
+# Node's built-in type stripping, which is on by default from Node 22.18 and
+# 23.6 but exists only behind --experimental-strip-types on earlier 22.x, where
+# a bare import of a .ts module dies with ERR_UNKNOWN_FILE_EXTENSION. Arm the
+# flag through NODE_OPTIONS once, at source time, only when node reports no
+# built-in stripping and accepts the flag; the experimental warning is silenced
+# so suites that assert an empty stderr stay exact. A node that already strips
+# is left untouched, and a node without the flag is left to fail as before.
+fm_test_node_typescript_setup() {
+  local feature opts
+  command -v node >/dev/null 2>&1 || return 0
+  feature=$(node -p 'process.features.typescript || ""' 2>/dev/null) || return 0
+  [ -z "$feature" ] || return 0
+  opts='--experimental-strip-types --disable-warning=ExperimentalWarning'
+  NODE_OPTIONS="$opts" node -e '' >/dev/null 2>&1 || return 0
+  export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }$opts"
+}
+fm_test_node_typescript_setup
