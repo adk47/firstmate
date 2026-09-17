@@ -993,6 +993,16 @@ RSYNC_EXCLUDES=(
   # does not require a mirror here. Keep it that way: a depth-1 rename would
   # silently start requiring one.
   --exclude='workspaces/support/reference/recent-changes.md'
+  # Caroline's platform.muso.ai API feed, GENERATED on the server by
+  # scripts/sync-platform-llms.sh from the PUBLIC
+  # https://platform.muso.ai/llms-full.txt. Same shape and same reasoning as
+  # recent-changes.md directly above: it must live inside reference/ to be
+  # RAG-indexed at all, so rsync --delete would wipe it every deploy and the
+  # Step 4a pre-flight would red every PR. It exists because hand-copied
+  # pricing is what went stale in api-access.md for ten weeks; the numbers are
+  # fetched, never written here. Server-owned, never tracked in the repo.
+  # Depth-2 shape, so the KEEP_GLOBS drift guard needs no mirror (see NOTE above).
+  --exclude='workspaces/support/reference/platform-api.md'
   # Agent-created backups directory — never in repo, never overwritten.
   --exclude='workspaces/*/backups/'
   # Per-PR QA review state (external-pr-review runs write

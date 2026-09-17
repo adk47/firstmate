@@ -1,5 +1,10 @@
 # Platform Features
 
+> "Platform" here means **the Muso app** and what a subscription includes. If the
+> customer is asking about **platform.muso.ai**, the self-service developer
+> platform for API access to the whole catalog, that is a different product --
+> see `platform.md`.
+
 ## Analytics
 
 Turn your credits into daily stats. Available on Pro and Business plans.

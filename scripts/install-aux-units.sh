@@ -203,6 +203,16 @@
 #     `--promote` publishes it, so review blocks publication rather
 #     than trailing it.
 #
+#   sync-platform-llms.timer / .service
+#     Daily refresh of Caroline's platform.muso.ai API + pricing feed
+#     into the same RAG-indexed reference/ directory, fetched from the
+#     PUBLIC https://platform.muso.ai/llms-full.txt. No staging gate,
+#     unlike the feed above: that one publishes model output over
+#     author-controlled PR titles, this one copies first-party pricing
+#     copy Muso already serves publicly. Fail-closed on a bad fetch, and
+#     it re-runs the CI blocklist because the file it writes is
+#     rsync-excluded and so invisible to pr-validate.yml.
+#
 #   hydra-release.timer / .service   [INSTALLED, DISABLED]
 #     The SUPERSEDED daily cut, kept installed so reverting to a daily
 #     cadence is one `systemctl enable --now` away. Do not run it
@@ -334,6 +344,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/caroline-behavior-digest.py missing"
 [[ -f "$HYDRA_ROOT/scripts/support-changelog-sync.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/support-changelog-sync.sh missing"
+[[ -f "$HYDRA_ROOT/scripts/sync-platform-llms.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/sync-platform-llms.sh missing"
 [[ -f "$HYDRA_ROOT/scripts/cs-needs-human-digest.py" ]] \
   || fail "$HYDRA_ROOT/scripts/cs-needs-human-digest.py missing"
 [[ -f "$HYDRA_ROOT/scripts/cs-sla-report.py" ]] \
@@ -1139,6 +1151,85 @@ scs=support-changelog-sync.timer
 systemctl enable "$scs" >/dev/null 2>&1 || log "WARN: could not enable $scs"
 systemctl start "$scs" >/dev/null 2>&1 || log "WARN: could not start $scs"
 log "  $scs: $(systemctl is-active "$scs" 2>/dev/null || echo unknown)"
+
+# ─── Caroline platform.muso.ai API feed (daily 05:45 UTC) ─────────────────
+# Renders workspaces/support/reference/platform-api.md from the PUBLIC
+# https://platform.muso.ai/llms-full.txt -- the page the platform team already
+# publishes for machine readers, whose figures come from the pricing module
+# rather than being typed by hand.
+#
+# Unlike the shipped-work feed above there is NO staging and NO promote gate,
+# and that difference is deliberate. That feed passes author-controlled PR
+# titles through a language model, so its output has never been read by anyone.
+# This one copies first-party pricing copy that Muso already serves to the open
+# internet -- a human reviewed it when they shipped the page, and gating it again
+# would only guarantee Caroline's copy is older than the customer's.
+#
+# The run is still fail-closed: a failed, empty, truncated or unrecognisable
+# fetch leaves the previous file byte-for-byte intact. It also re-runs the CI
+# blocklist (shared from lib/cs-reference-blocklist.sh) because this file is
+# rsync-excluded and never committed, so pr-validate.yml structurally cannot see
+# it. A content change posts a Slack notice -- unreviewed publication is the
+# accepted trade-off here, so it must at least be visible.
+#   /opt/hydra/scripts/sync-platform-llms.sh --dry-run   # render, write nothing
+#   /opt/hydra/scripts/sync-platform-llms.sh --check     # is the live file current?
+# The file it writes is rsync-excluded in deploy.sh; without that exclude every
+# deploy would delete it AND red the Step 4a pre-flight.
+cat > /etc/systemd/system/sync-platform-llms.service << PLATLLMSSVC
+[Unit]
+Description=Refresh Caroline's platform.muso.ai API + pricing feed
+After=network-online.target
+# No OnFailure= here on purpose: this unit is a row in AUX_ONFAILURE_UNITS
+# below, and wire_unit_failure_paging inserts the directive. The script pages
+# #cs_chats itself on every refusal it can SEE; the table covers the failures it
+# cannot -- ExecStart missing after a bad deploy, killed by TimeoutStartSec --
+# which would otherwise freeze her Platform pricing silently.
+
+[Service]
+Type=oneshot
+# One curl plus local validation; seconds in practice. Set explicitly anyway --
+# node-8 SIGTERMs any Type=oneshot that outruns the 90s default, and a silent
+# kill here would freeze Caroline's pricing without failing anything.
+TimeoutStartSec=180
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$HYDRA_ROOT/scripts/sync-platform-llms.sh
+PLATLLMSSVC
+
+cat > /etc/systemd/system/sync-platform-llms.timer << PLATLLMSTMR
+[Unit]
+Description=Daily — refresh Caroline's platform.muso.ai feed at 05:45 UTC
+
+[Timer]
+# 15 min after the shipped-work feed's 05:30 UTC tick, so the two daily writers
+# into reference/ do not land on top of each other, and early enough that both
+# are settled before the working day starts.
+OnCalendar=*-*-* 05:45:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+Unit=sync-platform-llms.service
+
+[Install]
+WantedBy=timers.target
+PLATLLMSTMR
+
+systemctl daemon-reload
+spl=sync-platform-llms.timer
+systemctl enable "$spl" >/dev/null 2>&1 || log "WARN: could not enable $spl"
+systemctl start "$spl" >/dev/null 2>&1 || log "WARN: could not start $spl"
+log "  $spl: $(systemctl is-active "$spl" 2>/dev/null || echo unknown)"
+
+# Seed the feed immediately on first install. Without this the file does not
+# exist until the first timer tick, and Caroline's SOUL catalog would advertise
+# a reference file that retrieval cannot find. Best-effort: a fetch failure here
+# must not fail the whole aux-unit install.
+if [[ ! -f /opt/hydra/workspaces/support/reference/platform-api.md ]]; then
+  "$HYDRA_ROOT/scripts/sync-platform-llms.sh" >/dev/null 2>&1 \
+    && log "  platform-api.md: seeded" \
+    || log "  WARN: platform-api.md seed failed; timer will retry at 05:45 UTC"
+fi
 
 # ─── Daily ClickUp SLA digest (08:00 America/New_York) ────────
 # Posts overdue / due-today / due-tomorrow open support tickets to
@@ -2605,6 +2696,7 @@ AUX_ONFAILURE_UNITS=(
   resolution-matcher.service
   resolve-notify.service
   support-changelog-sync.service
+  sync-platform-llms.service
 )
 
 # wire_unit_failure_paging — idempotent: inserts OnFailure= into the [Unit]

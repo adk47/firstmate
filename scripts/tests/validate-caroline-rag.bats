@@ -14,7 +14,14 @@ SCRIPT="$HYDRA_REPO/scripts/validate-caroline-rag.sh"
 
 # A single search line carrying every basename this suite asserts on, so any
 # assert_retrieval's `grep -qF "$want"` finds its file.
-ALL_HITS="founding-member.md credits-and-profiles.md subscriptions-and-billing.md common-issues.md active-incidents.md b2b-ads-pipeline.md"
+# platform.md is COMMITTED, so a grounded index always returns it and its
+# assertion in validate-caroline-rag.sh is HARD -- it belongs in this fixture.
+# platform-api.md is deliberately NOT here: it is generated on the server by
+# sync-platform-llms.sh and rsync-excluded, so it is legitimately absent on a
+# fresh box. Leaving it out keeps this fixture honest AND proves its assertion
+# really is soft -- if someone promotes that one to a hard assert, this test
+# goes red instead of passing on a stub that lies about what is on disk.
+ALL_HITS="founding-member.md credits-and-profiles.md subscriptions-and-billing.md common-issues.md active-incidents.md b2b-ads-pipeline.md platform.md"
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR

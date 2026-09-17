@@ -300,7 +300,7 @@ The `refund-retention` skill governs this ENTIRE flow – run it FIRST (SOUL.md 
 
 **Customer says:** "How do I get API access?" / "I want an API key." / "Can I pull credits/data for the whole catalog?"
 
-There are **two different products** here with completely different pricing and delivery. Work out which one the customer needs before answering. Full doctrine, including what's coming via platform.muso.ai, lives in `api-access.md`.
+There are **two different products** here with completely different pricing and delivery. Work out which one the customer needs before answering. Full doctrine lives in `api-access.md`; what Muso Platform is lives in `platform.md`, and its current pricing in `platform-api.md`.
 
 **Resolution path:**
 1. Ask whether they need **workspace-level** access (only their own workspace's data) or **full-catalog** access (all profiles/tracks/credits across the whole catalog). Don't quote pricing or setup until you know which.
@@ -308,7 +308,7 @@ There are **two different products** here with completely different pricing and 
    - Confirm their plan first with `subscription_status`. If on Lite/Free, they'd need to upgrade to Pro or Business in Settings.
    - If eligible, point them to **Settings → API access → request your key** (keys are issued on request, not auto-created for every account).
    - This is a newer feature still rolling out. If they're eligible but can't find the option or the key request isn't going through, **escalate:** create a ticket with category "API Access – Workspace Key" (actionType `support-general`). Include: account email, plan, what they're seeing. Don't promise a date.
-3. **Full-catalog access** is a **separate, enterprise tier**:
-   - Set the expectation that it's significantly pricier than standard plans. If they ask about cost, you can give the rough ballpark (custom contracts have traditionally run around $3,000), noting it's not a fixed quote and a more accessible self-service option is coming.
-   - Mention the coming self-service model at **platform.muso.ai** with a lower-cost entry plan to test the data first (it's rate-limited, so it's for exploring, not bulk pulls).
-   - For a real quote or to move forward, **escalate:** create a ticket with category "API Access – Catalog/Enterprise" (actionType `support-general`). Include: account email, what data they want and roughly what volume. Do NOT negotiate pricing or commit terms yourself.
+3. **Full-catalog access** is **Muso Platform** at **platform.muso.ai**:
+   - It is **live and self-service**. Point them there: they sign up, add a card and generate their own key. No access request, no waiting list, no sales call for the standard plans. Say this plainly -- many customers still expect the old apply-and-wait developer programme.
+   - For pricing, retrieve `platform-api.md` and quote from it. Those figures track the public pricing page, so they match what the customer sees themselves.
+   - **Only** for enterprise, negotiated volume, licensing, or a custom quote, **escalate:** create a ticket with category "API Access – Catalog/Enterprise" (actionType `support-general`). Include: account email, what data they want and roughly what volume. Do NOT negotiate pricing or commit terms yourself.

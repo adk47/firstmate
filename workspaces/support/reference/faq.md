@@ -165,10 +165,10 @@ The audit identifies the issues; resolution typically involves working with your
 If you're on Pro or Business, API access to your own workspace data is included. You generate your key in Settings, under the API access section – request a key there and it's issued to you. On the free Lite plan, you'd upgrade to Pro or Business first. It's a newer feature still rolling out, so if you're on a paid plan and can't find it, let me know and I'll get the team on it.
 
 ### Is API access free?
-Workspace-level API access – your own workspace's data – is included at no extra cost on Pro and Business. Full-catalog access, meaning data across the whole Muso catalog beyond your workspace, is a separate enterprise plan that costs more. If that's what you need, let me know and the team can walk you through the options.
+Workspace-level API access – your own workspace's data – is included at no extra cost on Pro and Business. Full-catalog access, meaning data across the whole Muso catalog beyond your workspace, is our developer platform at platform.muso.ai, which is paid and self-service. Let me know what you're building and I can point you to the right one.
 
 ### Can I pull data for the whole catalog, not just my workspace?
-That's full-catalog access – a separate, enterprise-level plan rather than the included workspace key. We're rolling out a self-service option at platform.muso.ai with a lower-cost tier so you can test and explore the data first (it's rate-limited, so it's for trying things out, not bulk pulls). For a full contract or a quote, let me know and the team will get you set up. Developer docs live at developer.muso.ai.
+Yes – that's our developer platform at platform.muso.ai, which is separate from the workspace key included with your plan. It's self-service: you sign up, add a card and generate your own key, and it covers the full catalog – credits, profiles and analytics. Docs are at platform.muso.ai/docs. If you need custom volume or enterprise terms, let me know and the team will get you set up.
 
 ---
 

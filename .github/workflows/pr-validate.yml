@@ -420,14 +420,22 @@ jobs:
           # inside legitimate English words do not false-positive. Prior version
           # used substring matching and tripped on "weeks" (contains "EKS"),
           # "block" (contains "BLoC"), "archive" (contains "Hive").
-          BLOCKLIST_TERMS="PostgreSQL|MongoDB|Mongo|Vault|Kubernetes|kubectl|k3s|k8s|Docker|Airflow|Spark|Trino|MinIO|Hive|OVH|OVHcloud|Hetzner|EKS|Aurora|Jenkins|SQS|Flutter|BLoC|Dart|HYDRA|NemoClaw|OpenClaw|CLIProxyAPI|Landlock|seccomp|vRack|WireGuard|node-[1-8]|ovh-node|Cilium|Longhorn|etcd|Prometheus|Grafana|Loki|seccomp"
-          # \b anchors require GNU grep, which is what runs in ubuntu-latest.
-          BLOCKLIST="\\b(${BLOCKLIST_TERMS})\\b"
+          #
+          # SOURCED, not duplicated. scripts/sync-platform-llms.sh enforces the
+          # same list on the cron path, over a generated file that is
+          # rsync-excluded and therefore invisible to this step. Two inline
+          # copies would drift, and the drift would be silent on exactly the
+          # path with no human review.
+          # The SCAN is shared too, not just the pattern: the helper reports a
+          # grep error (exit >= 2, e.g. a malformed term) as a hit, where a bare
+          # `grep || true` here would swallow it and print "CLEAN:" for every
+          # file.
+          . scripts/lib/cs-reference-blocklist.sh
 
           if [ -d "workspaces/support/reference" ]; then
             for f in workspaces/support/reference/*.md; do
               [ -f "$f" ] || continue
-              MATCHES=$(grep -iEn "$BLOCKLIST" "$f" || true)
+              MATCHES=$(cs_reference_blocklist_hits "$f" || true)
               if [ -n "$MATCHES" ]; then
                 echo "::error::LEAKED INTERNAL TERMS in $f:"
                 echo "$MATCHES"
