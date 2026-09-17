@@ -362,7 +362,7 @@ printf '%s\n' "$SUMMARY"
 # Outcome table — `queue_depth > 0` is the "there was work" predicate:
 #   sampled=0 + queue_depth>0   silent_noop   exit 6  (the incident's shape)
 #   attempted>0 + landed=0      all_failed    exit 6
-#   real run, line missing      unaccounted   exit 6
+#   line absent / malformed     unaccounted   exit 6
 #   sampled=0 + queue_depth=0   no_work       exit 0  (nothing to do)
 #   sampled>0 + attempted=0     no_eligible   exit 0  (nothing decidable)
 #   otherwise                   ok            exit 0
@@ -383,20 +383,44 @@ CV_REFUSED=$(cv_acct refused)
 CV_TRANSPORT_FAILED=$(cv_acct transport_failed)
 
 cv_numeric() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
+
+# Every field the classification below depends on must be PRESENT and NUMERIC.
+# A present-but-malformed contract line is not accounting: treating it as one
+# recreates exactly the silent success this guard exists to prevent (QA on
+# PR #961: `sampled=null` — what the renderer prints when .counts.total is
+# absent after an upstream schema change — used to fall through the numeric
+# tests to no_eligible and exit 0). Missing keys are named so the run log says
+# which upstream field vanished.
+CV_ACCT_INVALID=""
+cv_required_numeric() {
+  local -a bad=()
+  local k v
+  for k in queue_depth sampled attempted landed refused transport_failed; do
+    v=$(cv_acct "$k")
+    cv_numeric "$v" || bad+=("$k=${v:-<absent>}")
+  done
+  if (( ${#bad[@]} > 0 )); then
+    CV_ACCT_INVALID=$(printf '%s,' "${bad[@]}")
+    CV_ACCT_INVALID=${CV_ACCT_INVALID%,}
+    return 1
+  fi
+  return 0
+}
+
 CV_OUTCOME=ok
 CV_RC=0
 if [[ "$DRY_RUN_STR" == "false" ]]; then
   if [[ -z "$CV_ACCT_LINE" ]]; then
     CV_OUTCOME=unaccounted; CV_RC=6
-  elif cv_numeric "$CV_SAMPLED" && cv_numeric "$CV_QUEUE_DEPTH" \
-       && (( CV_SAMPLED == 0 )) && (( CV_QUEUE_DEPTH > 0 )); then
+  elif ! cv_required_numeric; then
+    CV_OUTCOME=unaccounted; CV_RC=6
+  elif (( CV_SAMPLED == 0 )) && (( CV_QUEUE_DEPTH > 0 )); then
     CV_OUTCOME=silent_noop; CV_RC=6
-  elif cv_numeric "$CV_ATTEMPTED" && cv_numeric "$CV_LANDED" \
-       && (( CV_ATTEMPTED > 0 )) && (( CV_LANDED == 0 )); then
+  elif (( CV_ATTEMPTED > 0 )) && (( CV_LANDED == 0 )); then
     CV_OUTCOME=all_failed; CV_RC=6
-  elif cv_numeric "$CV_SAMPLED" && (( CV_SAMPLED == 0 )); then
+  elif (( CV_SAMPLED == 0 )); then
     CV_OUTCOME=no_work
-  elif cv_numeric "$CV_ATTEMPTED" && (( CV_ATTEMPTED == 0 )); then
+  elif (( CV_ATTEMPTED == 0 )); then
     CV_OUTCOME=no_eligible
   fi
 else
@@ -422,7 +446,7 @@ if (( CV_RC != 0 )); then
       echo "ERROR: credit-verification batch attempted ${CV_ATTEMPTED} credit write(s) and landed 0 (refused=${CV_REFUSED:-?}, transport_failed=${CV_TRANSPORT_FAILED:-?}) — the admin API rejected or never confirmed every write. Reconcile current credit state before retrying." >&2
       ;;
     unaccounted)
-      echo "ERROR: no CV_BATCH_SUMMARY line in the pipeline output — the run cannot be credited with any work, so it cannot report success. The summary step (render-dry-run-summary.sh) may have failed, or Lobster's details.output shape changed. Raw tail: ${SUMMARY:0:300}" >&2
+      echo "ERROR: the pipeline output carries no usable CV_BATCH_SUMMARY accounting (${CV_ACCT_INVALID:+invalid fields: ${CV_ACCT_INVALID}; }raw tail: ${SUMMARY:0:300}) — the run cannot be credited with any work, so it cannot report success. The summary step (render-dry-run-summary.sh) may have failed, or Lobster's details.output shape changed." >&2
       ;;
   esac
   exit "$CV_RC"

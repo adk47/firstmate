@@ -95,6 +95,13 @@ real_dispatch() { # <args...>
 
 last_body() { tail -1 "$TEST_TMPDIR/curl.body" 2>/dev/null; }
 
+# Encode an arbitrary summary text as the response's last step stdout. Hand-
+# written JSON with an embedded newline is invalid JSON and the dispatcher
+# would fail at the invoke (exit 5) instead of at the guard — use --rawfile.
+make_raw_response() { # <response-file> <summary-text-file>
+  jq -nc --rawfile s "$2" '{ok:true, result:{details:{output:[$s]}}}' > "$1"
+}
+
 @test "every dispatch names an explicit agent owner in the invoke body" {
   # 2026-09-11 outage: openclaw 2026.8.x refuses an unowned session key once
   # multiple agents are configured (AGENT_SELECTION_REQUIRED: 'Multiple
@@ -145,11 +152,38 @@ last_body() { tail -1 "$TEST_TMPDIR/curl.body" 2>/dev/null; }
 
 @test "a real run with no readable accounting fails closed (exit 6)" {
   # A 200 whose output shape we cannot read must never be credited with work.
-  printf '{"ok":true,"result":{"details":{"output":["summary with no machine line"]}}}\n' > "$TEST_TMPDIR/resp.json"
+  printf 'summary with no machine line\n' > "$TEST_TMPDIR/summary.txt"
+  make_raw_response "$TEST_TMPDIR/resp.json" "$TEST_TMPDIR/summary.txt"
   export CV_TEST_RESPONSE_FILE="$TEST_TMPDIR/resp.json"
   real_dispatch 500 "" real queue ""
   [ "$status" -eq 6 ]
-  [[ "$stderr" == *"no CV_BATCH_SUMMARY line"* ]]
+  [[ "$stderr" == *"no usable CV_BATCH_SUMMARY accounting"* ]]
+  [[ "$output" == *"outcome=unaccounted"* ]]
+}
+
+@test "a present-but-MALFORMED contract line fails closed (exit 6)" {
+  # QA on PR #961: `sampled=null` is what the renderer prints when
+  # .counts.total disappears after an upstream schema change. With
+  # attempted=0 it used to fall through the numeric tests to no_eligible and
+  # exit 0 — the silent success this guard exists to prevent.
+  printf 'Queue depth (live): 2700 | Sampled: null of 500\nCV_BATCH_SUMMARY queue_depth=2700 fetch_size=500 sampled=null would_approve=0 would_uvn=0 attempted=0 landed=0 refused=0 transport_failed=0 dry_run=false run_id=x\n' > "$TEST_TMPDIR/summary.txt"
+  make_raw_response "$TEST_TMPDIR/resp.json" "$TEST_TMPDIR/summary.txt"
+  export CV_TEST_RESPONSE_FILE="$TEST_TMPDIR/resp.json"
+  real_dispatch 500 "" real queue ""
+  [ "$status" -eq 6 ]
+  [[ "$stderr" == *"invalid fields: sampled=null"* ]]
+  [[ "$output" == *"outcome=unaccounted"* ]]
+}
+
+@test "a contract line MISSING required keys fails closed (exit 6)" {
+  # Same class, one step further: a truncated contract line (schema change that
+  # drops attempted/landed) must not read as "nothing decidable".
+  printf 'CV_BATCH_SUMMARY queue_depth=2700 fetch_size=500 sampled=0\n' > "$TEST_TMPDIR/summary.txt"
+  make_raw_response "$TEST_TMPDIR/resp.json" "$TEST_TMPDIR/summary.txt"
+  export CV_TEST_RESPONSE_FILE="$TEST_TMPDIR/resp.json"
+  real_dispatch 500 "" real queue ""
+  [ "$status" -eq 6 ]
+  [[ "$stderr" == *"attempted=<absent>"* ]]
   [[ "$output" == *"outcome=unaccounted"* ]]
 }
 
