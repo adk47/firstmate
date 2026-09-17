@@ -579,10 +579,9 @@ A poll whose `pool_state` is `UNKNOWN` holds the name sets too, even though it p
 The check never switches anything; the failover and the lane-side offload are firstmate actions.
 `state/.fable-runway` records the last printed states, the last `RED` report time, and the tracked and capable name sets as of that same printed poll, so an unchanged poll stays silent and a regain is distinguishable from an addition.
 
-The monitor reads `FM_FABLE_RUNWAY_QUOTA_TIMEOUT` (defaults to the per-call cap, so 5 on a default home) as the bound on each `quota-axi` call and `FM_FABLE_RUNWAY_POOL_TIMEOUT` (default 4) as the bound on each pool fetch.
-Both are clamped, because a check the watcher kills prints nothing and records nothing, so the monitor would go silently dark and repeat that silence every poll.
-No single call may exceed a fixed 5-second cap, nor a quarter of what is left of `FM_CHECK_TIMEOUT` once that cap is reserved as margin, so the four calls the monitor makes still fit inside the watcher's per-check budget when an operator raises either timeout.
-That cap is not tunable: an override could only weaken the bound it exists to enforce.
+Each `quota-axi` call is bounded at 5 seconds and each pool fetch at 4, because a check the watcher kills prints nothing and records nothing, so the monitor would go silently dark and repeat that silence every poll.
+No single call may exceed a fixed 5-second cap, nor a quarter of what is left of `FM_CHECK_TIMEOUT` once that cap is reserved as margin, so the four calls the monitor makes still fit inside the watcher's per-check budget however `FM_CHECK_TIMEOUT` is set.
+None of those bounds is tunable: an override could only weaken the bound it exists to enforce.
 `quota-axi` needs its one-time Keychain approval (run `quota-axi --allow-keychain-prompt` once by hand); the monitor itself reads strictly, with `--no-credential-refresh`, and never prompts.
 
 ## Relay (.env)

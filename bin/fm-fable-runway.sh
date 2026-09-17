@@ -80,11 +80,10 @@
 # for a failover monitor, going silently dark is the worst failure. No single
 # call may exceed CALL_CAP seconds, nor a quarter of what is left of
 # FM_CHECK_TIMEOUT once that cap is reserved as margin, so the four calls this
-# makes still fit even when an operator raises a timeout. The cap is a fixed
-# constant rather than a knob: an override could only weaken the bound it exists
-# to enforce. On a default home the clamp is 5 seconds, which is also what each
-# quota-axi call is bounded by unless FM_FABLE_RUNWAY_QUOTA_TIMEOUT asks for
-# less.
+# makes still fit even when an operator raises FM_CHECK_TIMEOUT. Both the cap
+# and the per-call bounds are fixed constants rather than knobs: an override
+# could only weaken the bound it exists to enforce. On a default home that is 5
+# seconds for each quota-axi call and 4 for each pool fetch.
 #
 # Test seams (all optional; production reads the live sources):
 #   FM_FABLE_RUNWAY_NOW                    epoch seconds to use as "now"
@@ -93,7 +92,6 @@
 #   FM_FABLE_RUNWAY_POOL_URL               pool base URL (default http://127.0.0.1:8080)
 #   FM_FABLE_RUNWAY_POOL_HEALTH_JSON       file holding a pool /health snapshot
 #   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON     file holding a pool /api/accounts snapshot
-#   FM_FABLE_RUNWAY_POOL_TIMEOUT           seconds bounding each pool fetch (default 4, clamped)
 set -u
 export LC_ALL=C
 
@@ -282,7 +280,7 @@ def named($list): [$list[] | account_name(.)] | join(",");
 # time rule alone. It suppresses that rule instead, and is named on the line.
 (if ($hrs | length) == 0 then "unprojectable"
  elif ($unproj | length) > 0 then
-   (if $past2 == 0 or $past6 == 0 then "unprojectable" else "none" end)
+   (if $past6 == 0 then "unprojectable" else "none" end)
  elif $past2 == 0 then "red"
  elif $past6 == 0 then "yellow"
  else "none" end) as $time |
@@ -408,10 +406,7 @@ case "$QUOTA_TIMEOUT" in
   ''|*[!0-9]*|0) QUOTA_TIMEOUT=$CALL_CAP ;;
 esac
 [ "$QUOTA_TIMEOUT" -le "$CALL_MAX" ] || QUOTA_TIMEOUT=$CALL_MAX
-POOL_TIMEOUT=${FM_FABLE_RUNWAY_POOL_TIMEOUT:-4}
-case "$POOL_TIMEOUT" in
-  ''|*[!0-9]*|0) POOL_TIMEOUT=4 ;;
-esac
+POOL_TIMEOUT=4
 [ "$POOL_TIMEOUT" -le "$CALL_MAX" ] || POOL_TIMEOUT=$CALL_MAX
 NOW=$(now_epoch)
 case "$NOW" in
