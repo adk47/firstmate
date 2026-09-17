@@ -346,6 +346,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/support-changelog-sync.sh missing"
 [[ -f "$HYDRA_ROOT/scripts/sync-platform-llms.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/sync-platform-llms.sh missing"
+[[ -f "$HYDRA_ROOT/scripts/sync-app-pricing.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/sync-app-pricing.sh missing"
 [[ -f "$HYDRA_ROOT/scripts/cs-needs-human-digest.py" ]] \
   || fail "$HYDRA_ROOT/scripts/cs-needs-human-digest.py missing"
 [[ -f "$HYDRA_ROOT/scripts/cs-sla-report.py" ]] \
@@ -1229,6 +1231,69 @@ if [[ ! -f /opt/hydra/workspaces/support/reference/platform-api.md ]]; then
   "$HYDRA_ROOT/scripts/sync-platform-llms.sh" >/dev/null 2>&1 \
     && log "  platform-api.md: seeded" \
     || log "  WARN: platform-api.md seed failed; timer will retry at 05:45 UTC"
+fi
+
+# ─── Caroline Muso-app plan pricing feed (daily 05:50 UTC) ────────────────
+# Renders workspaces/support/reference/app-pricing.md from the PUBLIC anonymous
+# https://api.muso.ai/api/w/v3/subscription/public-plans, which core-backend serves
+# straight from WEB_SUBSCRIPTION_PLANS_INFO -- the one module that owns these numbers.
+#
+# It replaces a hand-written table whose failure was not staleness but CADENCE
+# CONFLATION: it showed the ANNUAL roster bracket divided by 12 under a heading that
+# read monthly, so a customer on monthly billing was quoted ~25% under what they
+# would pay. The renderer emits monthly and annual as separate labelled tables and
+# has no code path that can blend them.
+#
+# Fail-closed and paging, like the platform feed: a bad fetch, malformed JSON, a
+# non-ok envelope, a coupon-discounted payload, a missing cadence or a missing seats
+# bracket all leave the previous file byte-for-byte intact and page #cs_chats.
+#   /opt/hydra/scripts/sync-app-pricing.sh --dry-run   # render, write nothing
+#   /opt/hydra/scripts/sync-app-pricing.sh --check     # is the live file current?
+# The file it writes is rsync-excluded in deploy.sh. OnFailure comes from the
+# AUX_ONFAILURE_UNITS table, not a hardcoded directive.
+cat > /etc/systemd/system/sync-app-pricing.service << APPPRICESVC
+[Unit]
+Description=Refresh Caroline's Muso-app plan pricing feed
+After=network-online.target
+
+[Service]
+Type=oneshot
+# One curl plus jq; seconds in practice. Set explicitly anyway -- node-8 SIGTERMs any
+# Type=oneshot that outruns the 90s default, and a silent kill here freezes her plan
+# prices without failing anything.
+TimeoutStartSec=180
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$HYDRA_ROOT/scripts/sync-app-pricing.sh
+APPPRICESVC
+
+cat > /etc/systemd/system/sync-app-pricing.timer << APPPRICETMR
+[Unit]
+Description=Daily — refresh Caroline's Muso-app plan pricing at 05:50 UTC
+
+[Timer]
+# Just after the platform feed, still well before the working day in Europe/Rome.
+OnCalendar=*-*-* 05:50:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+Unit=sync-app-pricing.service
+
+[Install]
+WantedBy=timers.target
+APPPRICETMR
+
+systemctl daemon-reload
+sap=sync-app-pricing.timer
+systemctl enable "$sap" >/dev/null 2>&1 || log "WARN: could not enable $sap"
+systemctl start "$sap" >/dev/null 2>&1 || log "WARN: could not start $sap"
+log "  $sap: $(systemctl is-active "$sap" 2>/dev/null || echo unknown)"
+
+if [[ ! -f /opt/hydra/workspaces/support/reference/app-pricing.md ]]; then
+  "$HYDRA_ROOT/scripts/sync-app-pricing.sh" >/dev/null 2>&1 \
+    && log "  app-pricing.md: seeded" \
+    || log "  WARN: app-pricing.md seed failed; timer will retry at 05:50 UTC"
 fi
 
 # ─── Daily ClickUp SLA digest (08:00 America/New_York) ────────
@@ -2696,6 +2761,7 @@ AUX_ONFAILURE_UNITS=(
   resolution-matcher.service
   resolve-notify.service
   support-changelog-sync.service
+  sync-app-pricing.service
   sync-platform-llms.service
 )
 

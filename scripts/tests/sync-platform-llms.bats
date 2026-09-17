@@ -190,6 +190,28 @@ STUB
   [ "$status" -ne 0 ]
 }
 
+@test "--check is not blind to the header above the separator" {
+  # --check used to compare only below the '---' separator, so the GENERATED-FILE
+  # warning and the pointer to platform.md could be stripped on the server and it
+  # still answered "current". Same defect found on the sibling app-pricing feed.
+  run_sync
+  [ "$status" -eq 0 ]
+  run_sync --check
+  [ "$status" -eq 0 ]
+  grep -v "GENERATED FILE" "$OUT" >"$OUT.t" && mv "$OUT.t" "$OUT"
+  run_sync --check
+  [ "$status" -ne 0 ] || {
+    echo "--check accepted a file with the header warning removed" >&2; return 1; }
+}
+
+@test "--check still tolerates only the render timestamp changing" {
+  run_sync
+  [ "$status" -eq 0 ]
+  sed -i.bak 's/^Rendered: .*/Rendered: 1999-01-01 00:00 UTC/' "$OUT"
+  run_sync --check
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+}
+
 @test "--check exits nonzero when the file is missing entirely" {
   run_sync --check
   [ "$status" -ne 0 ]

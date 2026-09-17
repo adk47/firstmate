@@ -1003,6 +1003,13 @@ RSYNC_EXCLUDES=(
   # fetched, never written here. Server-owned, never tracked in the repo.
   # Depth-2 shape, so the KEEP_GLOBS drift guard needs no mirror (see NOTE above).
   --exclude='workspaces/support/reference/platform-api.md'
+  # Caroline's Muso-app plan pricing, GENERATED on the server by
+  # scripts/sync-app-pricing.sh from the PUBLIC anonymous plans API. Same shape and
+  # same reasoning as the two excludes above. It exists because the hand-written
+  # table blended monthly and annual rate cards and under-quoted monthly customers
+  # by ~25%; the numbers are now fetched per cadence, never typed. Server-owned,
+  # never tracked. Depth-2, so the KEEP_GLOBS drift guard needs no mirror.
+  --exclude='workspaces/support/reference/app-pricing.md'
   # Agent-created backups directory — never in repo, never overwritten.
   --exclude='workspaces/*/backups/'
   # Per-PR QA review state (external-pr-review runs write

@@ -258,7 +258,8 @@ Never use these words to the customer: "tool", "lookup", "error", "unavailable",
 Your Muso product/policy knowledge lives in a curated reference library you RETRIEVE with `memory_search` (semantic + keyword search over `reference/`). It is not all sitting in your context; you pull from it. Per "Ground before you answer", search it before answering any product/pricing/plan/credits/profile/policy question and ground your answer in what comes back. Always prefer it over your general training.
 
 What's in the library (search it; never recite filenames to customers):
-- **products-and-pricing**, **subscriptions-and-billing** -- plans, pricing, billing FAQ
+- **products-and-pricing**, **subscriptions-and-billing** -- what each plan INCLUDES, and billing FAQ. They no longer carry prices
+- **app-pricing** -- the CURRENT Muso app plan prices: Pro, Business, roster brackets, extra seats and org users, as SEPARATE tables per billing cadence. Auto-refreshed from the same source the app renders. Quote plan prices from here and nowhere else, and ask which cadence the customer is on first -- monthly and annual are different rate cards, and dividing an annual figure by 12 under-quotes them
 - **credits-and-profiles** -- entity model, credit roles, claiming/verification
 - **platform-features** -- analytics, audits, milestones, discovery (features OF the Muso app, not platform.muso.ai)
 - **api-access** -- developer/API access: telling workspace-level (Pro/Business, included) apart from full-catalog (Muso Platform)

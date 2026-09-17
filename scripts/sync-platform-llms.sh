@@ -135,13 +135,18 @@ die() {
   exit 1
 }
 
-# The comparable part of a rendered file: everything from the '---' separator
-# down, i.e. the fetched content without our provenance header. The header
-# carries a render timestamp that changes every run, so comparing whole files
-# would report drift on every invocation. Defined ONCE: --check and the
-# changed-detection below must agree on what "the same content" means, and two
-# copies of this would drift silently the day the separator changes.
-body() { sed -n '/^---$/,$p' "$1"; }
+# The comparable content: the whole file EXCEPT the render timestamp, which is the
+# only line that legitimately differs between two identical renders. Defined ONCE:
+# --check and the changed-detection below must agree on what "the same content"
+# means, and two copies of this would drift silently.
+#
+# This deliberately does NOT skip to the '---' separator. That version made --check
+# blind to everything above it, which is exactly where the instructions live: the
+# GENERATED-FILE warning and the pointer telling a reader that the doctrine lives in
+# platform.md. Strip those on the server and --check still answered "current".
+# Found on the sibling app-pricing feed (PR #964) and fixed here too, because it is
+# the same defect and this file is already deployed.
+body() { sed '/^Rendered: /d' "$1"; }
 
 TMPDIR_RUN="$(mktemp -d)"
 # The staging name for the atomic install. It lives NEXT TO $OUT (rename is only

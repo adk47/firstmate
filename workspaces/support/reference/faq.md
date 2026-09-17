@@ -176,8 +176,10 @@ Yes – that's our developer platform at platform.muso.ai, which is separate fro
 
 ### What's the difference between Lite, Pro, and Business?
 - **Lite** (Free): Credit management, profile page, company page, notifications
-- **Pro** ($10-12.50/mo): Everything in Lite + Analytics, Catalog Audits, Discography Playlists, Milestones
-- **Business** ($24-30/mo+): Everything in Pro + Company Analytics, List Analytics, Multi-User Workspace, Discovery Tools
+- **Pro**: Everything in Lite + Analytics, Catalog Audits, Discography Playlists, Milestones
+- **Business**: Everything in Pro + Company Analytics, List Analytics, Multi-User Workspace, Discovery Tools
+
+(For prices, retrieve `app-pricing.md` and quote the table matching the customer's billing cadence.)
 
 ### Can I try Pro for free? / Is there a free trial?
 There's no free trial – Muso doesn't offer one. The way to use Muso at no cost is

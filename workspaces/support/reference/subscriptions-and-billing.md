@@ -9,16 +9,16 @@
 - Notifications
 - No credit card required
 
-### Pro ($10-12.50/month)
+### Pro
 - Everything in Lite
 - Profile Analytics (data across 7 platforms: Spotify, YouTube, YouTube Music, Shazam, TikTok, SoundCloud, Instagram)
 - Catalog Audits (MLC gap detection, ISRC-to-ISWC matching)
 - Discography Playlists (AI-curated Spotify playlist)
 - Milestones & Charts
 - 1 Pro Seat included
-- Additional seats: $7.50/month each
+- Additional Pro seats available (price in `app-pricing.md`)
 
-### Business ($24-30/month starting)
+### Business
 - Everything in Pro
 - Company Analytics (aggregate stats for studios, labels, publishers)
 - List Analytics (track custom lists of profiles)
@@ -31,15 +31,14 @@
 
 ## Business Pricing by Roster Size
 
-| Profiles | Monthly (Annual) |
-|----------|------------------|
-| 1-5 | $24 |
-| 6-10 | $40 |
-| 11-50 | $104 |
-| 51-100 | $176 |
-| 101-250 | $384 |
-| 251-500 | $640 |
-| 501+ | $16/profile |
+**Retrieve `app-pricing.md` and quote from it.** It carries the roster brackets and
+the extra-org-user bands as separate tables per billing cadence, refreshed
+automatically from the same source the app renders.
+
+**Ask which cadence the customer is on before quoting.** Monthly and annual are
+different rate cards. Never divide an annual price by 12 to get a monthly one --
+the monthly plan is more expensive, and a table here once did exactly that and
+under-quoted monthly customers by about 25%.
 
 ---
 
@@ -53,7 +52,7 @@
 | **User Limit** | Maximum team members who can access a workspace |
 
 ### Seat Counts by Plan
-- **Pro**: 1 seat (expandable at $7.50/month per additional seat)
+- **Pro**: 1 seat, expandable with additional seats (price per cadence in `app-pricing.md`)
 - **Business**: 5 seats included (expandable with higher roster tiers)
 
 ---
@@ -83,7 +82,7 @@ You keep all your credits and profile data (these are free features). You lose a
 Refund requests are handled by our support team. Please create a support ticket and our team will review your request.
 
 ### How do I add more seats?
-In your account settings under your subscription, you can add additional Pro seats at $7.50/month each.
+In your account settings under your subscription, you can add additional Pro seats. Quote the seat price from `app-pricing.md`, matching their billing cadence -- the annual seat rate is not the monthly one times twelve.
 
 ### What payment methods do you accept?
 We accept major credit cards through our payment processor.
@@ -166,5 +165,5 @@ needs team review before any outcome is promised.
 1. Log in at app.muso.ai
 2. Go to Settings > Subscription
 3. Find the option to add Pro seats
-4. Each additional seat costs $7.50/month
+4. Each additional seat is charged at the rate in `app-pricing.md` for their cadence
 5. New seats are available immediately after adding
