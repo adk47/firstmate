@@ -66,6 +66,8 @@ teardown() { teardown_tmp_env; }
 
 pipeline_deployed() { [[ -r "${CV_PIPELINE_PATH:-/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/pipelines/verify-credit-batch-mvp.lobster}" ]]; }
 
+CRON_ENTRY="$SCRIPTS_DIR/credit-verification-batch-cron.sh"
+
 curl_calls() { grep -c '^CURL ' "$TEST_TMPDIR/curl.calls" 2>/dev/null || echo 0; }
 
 # --- helpers for the invoke-contract + zero-work regression tests -----------
@@ -100,6 +102,40 @@ last_body() { tail -1 "$TEST_TMPDIR/curl.body" 2>/dev/null; }
 # would fail at the invoke (exit 5) instead of at the guard — use --rawfile.
 make_raw_response() { # <response-file> <summary-text-file>
   jq -nc --rawfile s "$2" '{ok:true, result:{details:{output:[$s]}}}' > "$1"
+}
+
+@test "the cron ENTRYPOINT runs the dispatcher in real+queue mode with no thread ts" {
+  # This is what cron-jobs.json executes (the runtime rejects empty argv
+  # elements, so the cron cannot pass "" for the dispatcher's thread_ts
+  # positional — see credit-verification-batch-cron.sh). The entrypoint must
+  # therefore land on the real-apply / queue-selector defaults, and the
+  # zero-work guard must still be reachable through it.
+  [ -f "$CRON_ENTRY" ]
+  [ -x "$CRON_ENTRY" ]
+  bash -n "$CRON_ENTRY"
+  make_response "$TEST_TMPDIR/resp.json" 2700 500 500 480
+  export CV_TEST_RESPONSE_FILE="$TEST_TMPDIR/resp.json"
+  CV_DISPATCH_GUARD_DISABLE=1 \
+  CV_CREDIT_WRITE_LOCK_PATH="$TEST_TMPDIR/credit-status-writes.lock" \
+  CV_CREDIT_WRITE_LOCK_WAIT_SECS=1 \
+    run --separate-stderr "$CRON_ENTRY"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"outcome=ok"* ]]
+  run jq -e '.args.argsJson | fromjson
+             | .batch_size == 500 and .dry_run == "false"
+               and .selector_kind == "queue" and .thread_ts == ""' <<< "$(last_body)"
+  [ "$status" -eq 0 ]
+}
+
+@test "the cron ENTRYPOINT still fails the run when the queue has work and nothing was sampled" {
+  make_response "$TEST_TMPDIR/resp.json" 2700 0 0 0
+  export CV_TEST_RESPONSE_FILE="$TEST_TMPDIR/resp.json"
+  CV_DISPATCH_GUARD_DISABLE=1 \
+  CV_CREDIT_WRITE_LOCK_PATH="$TEST_TMPDIR/credit-status-writes.lock" \
+  CV_CREDIT_WRITE_LOCK_WAIT_SECS=1 \
+    run --separate-stderr "$CRON_ENTRY"
+  [ "$status" -eq 6 ]
+  [[ "$output" == *"outcome=silent_noop"* ]]
 }
 
 @test "every dispatch names an explicit agent owner in the invoke body" {
