@@ -29,7 +29,7 @@ Source columns for the exact runtime.
 | `resolution-matcher` | daily 12:00 UTC | `--apply` | backtests shipped data-fixes against open convos per cited entity, notifies in a fixed message, closes, rolls up "your fixes closed N conversations" to Aaron | `scripts/resolution-matcher.py`, :473-501 |
 | `close-merged-tickets` | daily 07:00 UTC | `--apply` | closes profile-merge ClickUp tickets whose merge already landed (matches merge route in action_log, avoiding the async-merge verification trap) | `scripts/dedup/sweeps/close-merged-tickets.sh`, :625-658 |
 | `overdue-verification-notifier` | daily 09:00 UTC | `--apply` | proactively tells a customer when their Tier-1 verification ticket is past SLA | `scripts/overdue-verification-notifier.py`, :367-394 |
-| `credit-verification-batch-4h` | every 4h | isolated agent turn | autonomous drain of the unverified-credits queue (~500/run), self-posts to #credit-verification | `cron-jobs.json` credit-verification block |
+| `credit-verification-batch-4h` | every 4h | deterministic command | autonomous drain of the unverified-credits queue (~500/run), self-posts to #credit-verification; runs `dispatch-cv-batch.sh` directly so a run that processes ZERO credits with work queued exits non-zero (was an isolated agent turn until 2026-09-17, whose status was the model finishing — that masked a six-day zero-work outage) | `cron-jobs.json` credit-verification block |
 
 Notify/review layer already live: `support-email-triage-hourly` (classify support@ to #cs_chats),
 `caroline-daily-review` + `caroline-weekly-rollup` (grade voice/leak/tools/sentiment + KB-gap
