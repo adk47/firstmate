@@ -65,6 +65,16 @@ APPLY_UVN_REFUSED=$(echo "$INPUT"     | jq -r '.apply.uvn.refused     // 0')
 APPLY_UVN_TRANSPORT_FAILED=$(echo "$INPUT" | jq -r '.apply.uvn.transport_failed // 0')
 APPLY_TRANSPORT_FAILED=$(( APPLY_APPROVE_TRANSPORT_FAILED + APPLY_UVN_TRANSPORT_FAILED ))
 
+# Totals for the machine contract below, plus `attempted`. Missing fields
+# default to 0 (a fixture or an older apply payload that carries only
+# landed/refused must not render "null").
+APPLY_LANDED_TOTAL=$(( APPLY_APPROVE_LANDED + APPLY_UVN_LANDED ))
+APPLY_REFUSED_TOTAL=$(( APPLY_APPROVE_REFUSED + APPLY_UVN_REFUSED ))
+APPLY_ATTEMPTED=$(echo "$INPUT" | jq -r '.apply.attempted // .apply.eligible // empty')
+if [[ -z "$APPLY_ATTEMPTED" || "$APPLY_ATTEMPTED" == "null" ]]; then
+  APPLY_ATTEMPTED=$(( APPLY_LANDED_TOTAL + APPLY_REFUSED_TOTAL ))
+fi
+
 # Selector-level note from the fetch step (e.g. fetch-by-credit.sh's
 # "status_is_approved_not_unverified"). Extracted once here, rendered by
 # BOTH the compact no-op branch and the full-block branch below — without
@@ -246,6 +256,22 @@ fi # end no-op-compaction else (full-block path)
 
 # Always echo the summary text to stdout so Lobster's step output captures it.
 printf '%s\n' "$TEXT"
+
+# --- machine-readable run contract -----------------------------------------
+# ONE stable key=value line on the same stdout Lobster returns. The Slack
+# block above is the human view; this is the CONTROL view, and it exists
+# because a run can succeed at the transport layer and still do nothing:
+# on 2026-09-11..09-17 every 4-hourly fire of credit-verification-batch-4h
+# failed before the pipeline ran, but the first failure mode after the invoke
+# is repaired is the SILENT one — the batch samples 0 of a non-empty queue,
+# posts "no-op", and the scheduler has no way to tell that from a quiet day.
+# dispatch-cv-batch.sh parses this line and turns the zero-work shapes into a
+# non-zero exit, which is what the cron's own status reflects.
+# Locked by scripts/tests/render-dry-run-summary.bats; keep the keys stable.
+printf 'CV_BATCH_SUMMARY queue_depth=%s fetch_size=%s sampled=%s would_approve=%s would_uvn=%s attempted=%s landed=%s refused=%s transport_failed=%s dry_run=%s run_id=%s\n' \
+  "$QUEUE_DEPTH" "$FETCH_SIZE" "$TOTAL" "$WOULD_APPROVE" "$WOULD_UVN" \
+  "$APPLY_ATTEMPTED" "$APPLY_LANDED_TOTAL" "$APPLY_REFUSED_TOTAL" \
+  "$APPLY_TRANSPORT_FAILED" "$DRY_APPLY" "$OPS_RUN_ID"
 
 # Post to Slack. Two modes:
 #   - THREAD_TS set                              → thread reply (@-mention path)
