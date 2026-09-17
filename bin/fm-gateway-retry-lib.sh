@@ -54,19 +54,19 @@
 # ladder and a stale horizon anchor into the next, unrelated stall and have that
 # one declared an outage on first sight. Busy alone cannot be the second exit
 # either: the ladder's own continue makes the pane busy from the moment it is
-# submitted until the turn ends, so a retry that dies on another 503 reads busy
-# for its whole short duration, and clearing there would wipe the attempt count
-# mid-ladder and no genuine outage could ever be declared. The part that cannot
-# be the ladder's own retry is DURATION - a busy stretch longer than
-# FM_GATEWAY_BUSY_CLEAR_POLLS of the caller's poll periods is a turn that
-# actually ran, which is the recovery the pane exit would have seen.
+# submitted until the turn ends, and a turn that dies on another 503 is busy for
+# the harness's WHOLE internal retry, not just for real work. Clearing on busy
+# would wipe the attempt count mid-ladder and no genuine outage could ever be
+# declared. The part that cannot be the ladder's own retry is DURATION - a busy
+# stretch reaching FM_GATEWAY_BUSY_CLEAR_POLLS of the caller's poll periods is
+# a turn that actually ran, which is the recovery the pane exit would have seen.
 #
 # Tunables (env):
 #   FM_GATEWAY_RETRY_MAX        default 8; re-ring attempts before the budget is spent
 #   FM_GATEWAY_RETRY_HORIZON    default 2700; seconds from first stall before the budget is spent
 #   FM_GATEWAY_RETRY_BACKOFF    default "30 60 120 300"; per-attempt wait, last value repeats
 #   FM_GATEWAY_TAIL_LINES       default 10; non-blank pane lines above the footer the transient match reads
-#   FM_GATEWAY_BUSY_CLEAR_POLLS default 2; consecutive busy polls a record survives before it is dropped
+#   FM_GATEWAY_BUSY_CLEAR_POLLS default 40; consecutive busy polls that drop a record
 #
 # No side effects on source. Dependency-light: pure shell plus date.
 
@@ -74,7 +74,18 @@ FM_GATEWAY_RETRY_MAX_DEFAULT=8
 FM_GATEWAY_RETRY_HORIZON_DEFAULT=2700
 FM_GATEWAY_RETRY_BACKOFF_DEFAULT='30 60 120 300'
 FM_GATEWAY_TAIL_LINES_DEFAULT=10
-FM_GATEWAY_BUSY_CLEAR_POLLS_DEFAULT=2
+# WHY 40, and not a number that merely "looks long enough". The busy signal is
+# written for the harness's entire internal retry, not only for real work:
+# docs/verification/gateway-keepalive.md records, verified on Claude Code 2.1.266,
+# that a 503 is retried internally for about four minutes before the turn ends,
+# firing UserPromptSubmit then StopFailure and never Stop, and bin/fm-spawn.sh
+# wires UserPromptSubmit to the busy writer. At the default FM_POLL=15 that is
+# roughly 16 consecutive busy polls produced by the ladder's OWN retry. A
+# threshold at or below that clears the record partway through every retry, the
+# budget is never spent, and a genuine outage can never be declared - the exact
+# failure a value of 2 shipped. 40 poll periods is about ten minutes, comfortably
+# past the verified window, so the ladder's own retry can never reach it.
+FM_GATEWAY_BUSY_CLEAR_POLLS_DEFAULT=40
 
 # The exact instruction a stalled agent is re-rung with. It deliberately names
 # the cause and asks for continuation rather than restatement, so the agent picks
@@ -94,10 +105,11 @@ fm_gateway_retry_horizon() {
   printf '%s' "$h"
 }
 
-# Consecutive busy polls a stall record survives. Longer than this is a turn
+# Consecutive busy polls that end a stall record. A stretch this long is a turn
 # that ran, not the ladder's own retry dying on the next error, so the record is
-# dropped. Owned here with the other bounds; the watcher reads it rather than
-# carrying a second copy of the number.
+# dropped. Owned here with the other bounds, with the calibration behind the
+# default at FM_GATEWAY_BUSY_CLEAR_POLLS_DEFAULT above; the watcher reads it
+# rather than carrying a second copy of the number.
 fm_gateway_busy_clear_polls() {
   local n=${FM_GATEWAY_BUSY_CLEAR_POLLS:-$FM_GATEWAY_BUSY_CLEAR_POLLS_DEFAULT}
   case "$n" in ''|*[!0-9]*|0) n=$FM_GATEWAY_BUSY_CLEAR_POLLS_DEFAULT ;; esac
