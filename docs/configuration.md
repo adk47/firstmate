@@ -532,6 +532,40 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the 
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Fable runway monitor
+
+The Fable runway monitor watches the two independent runways this home's supervisor depends on and turns a change into a `check:` wake, so the supervisor can move to Grok or offload lanes before Fable capacity runs out.
+[`bin/fm-fable-runway.sh`](../bin/fm-fable-runway.sh) is the read-only monitor, and [`bin/fm-fable-runway-check.sh`](../bin/fm-fable-runway-check.sh) is the registered watcher check.
+The procedures themselves live in [`docs/runbooks/supervisor-failover-grok.md`](runbooks/supervisor-failover-grok.md).
+
+Two runways are reported, because they do not fail together.
+`fable_state` is the supervisor's own credential, from `quota-axi`'s `model:fable` window: its remaining percent, its `pace.burnMultiple`, and the runway's `projectedExhaustedAt`.
+`pool_state` is the `better-ccflare` account pool at `FM_FABLE_RUNWAY_POOL_URL` (default `http://127.0.0.1:8080`), read from `GET /health` and `GET /api/accounts`; its routable count is the primary signal and its per-account Fable windows refine it.
+Both use the same documented thresholds, worst wins:
+
+- `RED` - projected exhaustion under 2h, or remaining under 10 percent.
+- `YELLOW` - projected exhaustion under 6h, or remaining under 25 percent.
+- `GREEN` - neither.
+
+The pool adds the pool's own capacity counts: `RED` at 1 or fewer routable accounts, `YELLOW` at 3 or fewer.
+The overall state is the worst of the two, and the monitor exits non-zero only on `RED`.
+A runway that cannot be measured is `RED` with a reason, never `GREEN`, because an unreadable runway is exactly what a failover monitor must not hide.
+The optional pool is the one exception: a home without `better-ccflare` is a normal firstmate home, so an unreachable or unconfigured pool is `UNKNOWN` and leaves the overall state to the supervisor's own runway.
+Per-account pool exhaustion is projected from the account's Fable-scoped weekly window by assuming a seven-day week ending at `resets_at` and extrapolating the average burn to 100 percent, and the pool reports the soonest such exhaustion among Fable-capable accounts; that is the same pace model `quota-axi` reports as `burnMultiple`, and the pool's routable counts stay the primary signal.
+The monitor never writes fleet state and never prints a credential or an account email.
+
+Arm the check once per home with `bin/fm-fable-runway-check.sh arm`.
+That writes `state/fable-runway.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal `FM_CHECK_INTERVAL` cadence and turns its one line into a `check:` wake; no separate schedule is involved.
+`bin/fm-fable-runway-check.sh disarm` removes the shim, its trust binding, and the record; retire an armed check that way rather than by hand.
+The check prints one line, and only one, when either runway state changes since the last printed poll, when the pool gains a Fable-capable account, or when a persistent `RED` has not been reported for `FM_FABLE_RUNWAY_REALERT_SECS` (default 3600, `0` disables the repeat).
+The wake always carries both `fable_state=` and `pool_state=`, so which runway went `RED` is never ambiguous.
+A recovery line reads `GREEN again account=<name>` when the pool is `GREEN` and `capacity back account=<name>` otherwise, naming the account that regained Fable capacity.
+The check never switches anything; the failover and the lane-side offload are firstmate actions.
+`state/.fable-runway` records the last printed states and the last `RED` report time, so an unchanged poll stays silent.
+
+The monitor reads `FM_FABLE_RUNWAY_QUOTA_TIMEOUT` (default 8) as the bound on each `quota-axi` call and `FM_FABLE_RUNWAY_POOL_TIMEOUT` (default 4) as the bound on each pool fetch, so the whole check stays inside `FM_CHECK_TIMEOUT`.
+`quota-axi` needs its one-time Keychain approval (run `quota-axi --allow-keychain-prompt` once by hand); the monitor itself reads strictly, with `--no-credential-refresh`, and never prompts.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
