@@ -143,16 +143,22 @@ JOBS_EXPLICIT=0
 JOBS_MAX=8
 MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
-# Bound applied automatically on the automatic --changed path, derived from
-# measured healthy runtimes with margin rather than picked: the slowest measured
-# behavior test is the 341s Herdr presentation E2E, and the slowest script in a
-# runner-file changed selection is tests/fm-calm-pi-extension.test.sh at 77s
-# once its Chrome reap terminates. 900s leaves roughly 2.6x headroom over the
-# slowest real script, so this can only ever fire on a script that is genuinely
-# stuck. It is a guard, not a speed control: a HUNG script becomes a bounded
+# Bound applied automatically on the automatic --changed path. It is a guard
+# against a HUNG script, not a speed control: a hung script becomes a bounded
 # failure instead of an unbounded suite, which is the shape that silently
 # outruns a caller's invocation budget.
-CHANGED_DEFAULT_TIMEOUT_SECS=900
+#
+# Sized from runtimes measured UNDER THIS RUNNER'S OWN CONCURRENCY, which is
+# what a script actually experiences here - not from a script timed alone. The
+# slowest script that passes is tests/fm-x-mode.test.sh at 762s, behind it
+# tests/fm-cursor-primary.test.sh at 550s and tests/fm-muse-harness.test.sh at
+# 494s. The previous 900s left almost no margin over that 762s, so it fired on
+# scripts that were merely slow rather than stuck: session-start, bootstrap,
+# fleet-sync, backlog-atomicity and teardown all hit it here while passing when
+# run alone. 1800s keeps roughly 2.4x headroom over the slowest real script and
+# still bounds a genuine hang at half an hour. Raise it only against fresh
+# measurements from this runner, never against a script timed on its own.
+CHANGED_DEFAULT_TIMEOUT_SECS=1800
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
