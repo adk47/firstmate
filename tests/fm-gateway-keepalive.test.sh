@@ -107,20 +107,44 @@ test_a_recovered_agent_with_the_old_error_in_scrollback_is_not_stalled() {
 
 test_repository_text_naming_the_errors_is_not_a_stall() {
   # A crewmate that greps or cats this repository's own sources prints the
-  # gateway's sentences and the word overloaded at its prompt. None of that is
-  # the harness's rendered "API Error: <5xx>" shape.
+  # gateway's sentences, the word overloaded, AND the rendered
+  # "API Error: <5xx>" shape itself - docs/verification/gateway-keepalive.md's
+  # census table and this file's own fixtures carry it verbatim - and then says
+  # so in its own words. Every one of those is a citation: quoted, and the
+  # harness never quotes its own error.
   local pane
   pane=$(printf '%s\n%s' "$(cat <<'TXT'
 bin/fm-gateway-retry-lib.sh:34:# word such as "overloaded".
-docs/gateway-keepalive.md:12: the gateway's own out-of-capacity sentences
-tests/fm-gateway-keepalive.test.sh:22: All accounts are temporarily unavailable
-tests/fm-gateway-keepalive.test.sh:23: Service temporarily unavailable
+docs/verification/gateway-keepalive.md:39:| 2427 | `API Error: 503 Service temporarily unavailable. …` | transient |
+tests/fm-gateway-keepalive.test.sh:22:E503_ACCOUNTS='API Error: 503 All accounts are temporarily unavailable. …'
 Overloaded
+⏺ Those are all citations — the harness renders "API Error: 503 All accounts are temporarily unavailable." itself, unquoted, on the line it ends the turn with.
 TXT
 )" "$IDLE_FOOTER")
   fm_gateway_text_is_transient "$pane" \
-    && fail "repository text mentioning overloaded and the gateway sentences was classified as a stall"
-  pass "repository text naming the errors without the rendered API Error shape is not a stall"
+    && fail "a crewmate quoting this repository's own rendered error text was classified as a stall"
+  pass "repository text quoting the rendered API Error shape is a citation, not a stall"
+}
+
+test_only_the_live_output_line_decides_a_stall() {
+  # (1) A turn that named the error and then carried on ends on its OWN output.
+  # The error is history there, not the live line, and re-ringing that crew
+  # would send it a continue nobody asked for and spend the whole budget.
+  local pane
+  pane=$(printf '%s\n%s\n%s' \
+    "⏺ the census row in docs/verification/gateway-keepalive.md reads $E503_SERVICE" \
+    "$(ordinary_lines 3)" "$IDLE_FOOTER")
+  fm_gateway_text_is_transient "$pane" \
+    && fail "an agent that named the error mid-turn and then carried on was classified as stalled"
+
+  # (2) The same window ENDING on the harness's own rendered error, above the
+  # idle composer and footer, is exactly the stall this keep-alive exists for.
+  # The composer and footer are not output lines; anchoring to the raw last
+  # non-blank line would find the footer and blind the detector completely.
+  pane=$(printf '%s\n%s\n%s' "$(ordinary_lines 3)" "$E503_ACCOUNTS" "$IDLE_FOOTER")
+  fm_gateway_text_is_transient "$pane" \
+    || fail "a pane whose last output line is the rendered error was not classified as a stall"
+  pass "only the live output line decides a stall: an error named mid-turn is not one, an error ending the turn is"
 }
 
 test_a_gateway_that_is_simply_down_is_not_retried() {
@@ -311,6 +335,7 @@ test_deny_list_beats_a_transient_code_inside_a_permanent_failure
 test_deny_list_matches_anywhere_while_the_transient_match_is_bounded
 test_a_recovered_agent_with_the_old_error_in_scrollback_is_not_stalled
 test_repository_text_naming_the_errors_is_not_a_stall
+test_only_the_live_output_line_decides_a_stall
 test_a_gateway_that_is_simply_down_is_not_retried
 test_ladder_is_bounded_by_attempts
 test_ladder_is_bounded_by_wall_clock_independently
