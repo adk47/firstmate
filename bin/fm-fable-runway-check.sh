@@ -26,8 +26,15 @@
 # also carries the fail-back label, which names the account and reads `GREEN
 # again account=<names>` when the pool is GREEN, or `capacity back
 # account=<names>` otherwise. A regain means an account that was Fable-tracked
-# but not Fable-capable last poll is capable now; an account that is merely new
-# to the pool never earns that label, because nothing came back.
+# but not Fable-capable as of the last printed poll is capable now; an account
+# that is merely new to the pool never earns that label, because nothing came
+# back.
+#
+# The membership the label is measured against is therefore the last one
+# reported, not the last one observed. A window that resets while the gateway's
+# routable count still lags is a normal sequence, and it lands on a silent poll;
+# holding the name sets until a line prints is what keeps that regain from being
+# consumed without ever being attributed to an account.
 #
 # The wake therefore always carries both runway states, so firstmate can tell
 # whether the Fable credential, the account pool, or both went RED.
@@ -36,8 +43,9 @@
 # Fable are firstmate actions; see docs/runbooks/supervisor-failover-grok.md.
 #
 # The record state/.fable-runway holds the last printed states, the last RED
-# report time, and the pool's last Fable-tracked and Fable-capable name sets, so
-# a silent poll stays silent and a regain is distinguishable from an addition.
+# report time, and the Fable-tracked and Fable-capable name sets as of that same
+# printed poll, so a silent poll stays silent and a regain is distinguishable
+# from an addition.
 # `arm` writes a byte-static shim
 # that the watcher validates with bin/fm-check-register.sh before it ever
 # dispatches it; `disarm` removes the shim, its trust binding, and the record.
@@ -115,9 +123,9 @@ record_write() {
 }
 
 # regained <current-capable> <previous-tracked> <previous-capable>: names that
-# the pool tracked but could not use last poll and can use now, space-separated.
-# An account the pool did not track last poll is new, not recovered, so it is
-# never named here.
+# the pool tracked but could not use as of the last printed poll and can use
+# now, space-separated. An account the pool did not track then is new, not
+# recovered, so it is never named here.
 regained() {
   local cur=$1 prev_tracked=$2 prev_capable=$3 name out='' IFS=','
   [ "$cur" = none ] && return 0
@@ -216,6 +224,10 @@ action_check() {
     red_at=$now
   elif [ "$overall" != RED ]; then
     red_at=0
+  fi
+  if [ "$print" -eq 0 ] && [ "$last_present" -eq 1 ]; then
+    capable=$last_capable
+    tracked=$last_tracked
   fi
   record_write "$overall" "$fable" "$pool" "$capable" "$tracked" "$red_at"
   return 0

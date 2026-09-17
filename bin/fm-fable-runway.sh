@@ -44,6 +44,11 @@
 # accounts expose no Fable-scoped window at all is still judged by them: the
 # missing window suppresses the projection fields, never the verdict.
 #
+# Fable-capable means usable, with readable windows, none of them spent, and a
+# Fable-scoped window among them. An account with no Fable window may well be
+# routable, but nothing about it says the fleet can draw Fable from it, so it is
+# neither named in pool_capable nor counted against the no-capable-account RED.
+#
 # Per-account pool exhaustion is projected from each account's Fable-scoped
 # weekly window: assuming the week runs seven days up to its resets_at, the
 # average burn since the window opened is extrapolated to 100 percent, with the
@@ -232,7 +237,8 @@ def windows_known($a):
   (limits($a) | length) > 0
   and all(limits($a)[]; ((.percent | type) == "number"));
 def capable($a):
-  usable($a) and windows_known($a) and all(limits($a)[]; (.percent < 100));
+  usable($a) and windows_known($a) and (fable_limit($a) != null)
+  and all(limits($a)[]; (.percent < 100));
 def hours_to($lim):
   if $lim == null or (($lim.resets_at | type) != "string") then null
   else ($lim.resets_at | to_epoch) as $r |

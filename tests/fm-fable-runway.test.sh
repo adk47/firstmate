@@ -293,6 +293,7 @@ out=$(run_monitor "$quota" "$health" "$accounts")
 expect_field "$out" pool_state GREEN "no-window pool state"
 expect_field "$out" pool_reason routable_only_without_fable_window "no-window pool reason"
 expect_field "$out" pool_tracked none "no-window pool tracked"
+expect_field "$out" pool_capable none "no-window pool capable"
 expect_field "$out" pool_exhaustion unknown "no-window pool projection"
 expect_rc "$out" 0 "no-window pool exit"
 make_pool "$health" "$accounts" 2 11 9
@@ -301,6 +302,32 @@ out=$(run_monitor "$quota" "$health" "$accounts")
 expect_field "$out" pool_state YELLOW "no-window thin pool state"
 expect_field "$out" pool_reason routable_at_or_below_3 "no-window thin pool reason"
 pass "a pool with no Fable-scoped window is still judged by its routable count"
+
+# A pool can mix both account shapes, and a window-less account is not Fable
+# capacity: it must neither be named as capable nor make the pool look healthy
+# while the only readable Fable window is burning down.
+make_pool "$health" "$accounts" 11 11 0
+add_account "$accounts" scoped-hot 5 99 99 1
+add_plain_account "$accounts" plain-1 2 2
+add_plain_account "$accounts" plain-2 3 3
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_capable scoped-hot "mixed-shape pool capable"
+expect_field "$out" pool_tracked scoped-hot "mixed-shape pool tracked"
+expect_field "$out" pool_state RED "mixed-shape pool state"
+expect_field "$out" pool_reason exhaustion_under_2h "mixed-shape pool reason"
+expect_rc "$out" 2 "mixed-shape pool exit"
+
+# The mirror case: the only Fable window in the pool is spent, so the pool has
+# no Fable capacity however routable its window-less accounts are.
+make_pool "$health" "$accounts" 11 11 1
+add_account "$accounts" scoped-spent 5 100 100 100
+add_plain_account "$accounts" plain-1 2 2
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state RED "spent-window pool state"
+expect_field "$out" pool_reason no_fable_capable_account "spent-window pool reason"
+expect_field "$out" pool_capable none "spent-window pool capable"
+expect_rc "$out" 2 "spent-window pool exit"
+pass "an account with no Fable window is routable but never Fable-capable"
 
 # The pool verdict is not the worst account: one nearly spent account among
 # healthy ones leaves the pool GREEN, and the projection reported is the best
@@ -497,6 +524,32 @@ expect_field "$back" pool_state YELLOW "capacity-back pool state"
 printf '%s\n' "$back" | grep -q 'capacity back account=thin-account' \
   || fail "a regain that leaves the pool thin must read 'capacity back' (got: $back)"
 pass "a regain on a still-thin pool is labelled 'capacity back'"
+
+# The gateway's routable count lags a per-account window reset by a poll, so the
+# regain itself lands on a silent poll. The next wake that prints must still
+# name the account, because that name is what the runbook's fail-back step
+# confirms.
+lagslab="$TMP_ROOT/lag"
+mkdir -p "$lagslab/state"
+make_quota "$lagslab/quota.json" 60 0.5 none through_reset
+make_pool "$lagslab/health.json" "$lagslab/accounts.json" 1 11 9
+add_account "$lagslab/accounts.json" lagging-account 5 100 100 100
+lag_first=$(run_check_in "$lagslab" "$NOW")
+expect_field "$lag_first" pool_state RED "lagged regain first poll"
+# The window resets while the gateway still reports one routable account.
+make_pool "$lagslab/health.json" "$lagslab/accounts.json" 1 11 9
+add_account "$lagslab/accounts.json" lagging-account 5 0 0 100
+lag_silent=$(run_check_in "$lagslab" "$((NOW + 300))")
+[ -z "$lag_silent" ] \
+  || fail "a regain with the pool still RED for the same reason must stay silent (got: $lag_silent)"
+# The routable count catches up and the pool goes GREEN.
+make_pool "$lagslab/health.json" "$lagslab/accounts.json" 6 11 0
+add_account "$lagslab/accounts.json" lagging-account 5 0 0 100
+lag_wake=$(run_check_in "$lagslab" "$((NOW + 600))")
+expect_field "$lag_wake" pool_state GREEN "lagged regain wake pool state"
+printf '%s\n' "$lag_wake" | grep -q 'GREEN again account=lagging-account' \
+  || fail "a regain consumed by a silent poll must still be named (got: $lag_wake)"
+pass "a regain that lands on a silent poll is named by the next wake that prints"
 
 # An account the captain adds is new, not recovered, even when its arrival is
 # what lifts the pool out of YELLOW.

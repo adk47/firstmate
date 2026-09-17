@@ -551,7 +551,9 @@ The pool adds the pool's own capacity counts: `RED` at 1 or fewer routable accou
 The overall state is the worst of the two, and the monitor exits non-zero only on `RED`.
 A runway that cannot be measured is `RED` with a reason, never `GREEN`, because an unreadable runway is exactly what a failover monitor must not hide.
 The optional pool is the one exception: a home without `better-ccflare` is a normal firstmate home, so an unreachable or unconfigured pool is `UNKNOWN` and leaves the overall state to the supervisor's own runway.
-The routable count decides the pool verdict first and decides it alone when no account exposes a Fable-scoped window, reported as `routable_only_without_fable_window`; the missing window suppresses `pool_exhaustion` and `pool_tracked`, never the verdict.
+The routable count decides the pool verdict first and decides it alone when no account exposes a Fable-scoped window, reported as `routable_only_without_fable_window`; the missing window suppresses `pool_exhaustion`, `pool_capable` and `pool_tracked`, never the verdict.
+Fable-capable means usable, with readable windows, none of them spent, and a Fable-scoped window among them.
+An account with no Fable window may well be routable, but nothing about it says the fleet can draw Fable from it, so it is neither named in `pool_capable` nor counted against the `no_fable_capable_account` `RED`.
 Per-account pool exhaustion is projected from the account's Fable-scoped weekly window by assuming a seven-day week ending at `resets_at` and extrapolating the average burn to 100 percent, with the elapsed portion of the window floored at six hours so a burst in a freshly opened week does not read as imminent exhaustion.
 A window that `resets_at` says has not opened yet is unprojectable and reported as `unknown`.
 A window reporting no burn at all is readable and maximally healthy, so it projects the whole seven-day week and stays in the counts the verdict is taken from; only a truly unreadable window drops out of them.
@@ -568,9 +570,10 @@ The check prints one line, and only one, when either runway state changes since 
 Only those transitions are printable: the pool's membership churns on its own as accounts cross and reset their windows, and a change to `pool_capable` or `pool_tracked` alone, with every state unchanged, prints nothing.
 The wake always carries both `fable_state=` and `pool_state=`, so which runway went `RED` is never ambiguous.
 A poll that prints while the pool has just regained capacity also carries a recovery label, which reads `GREEN again account=<name>` when the pool is `GREEN` and `capacity back account=<name>` otherwise.
-A regain means an account that was Fable-tracked but not Fable-capable last poll is capable now; an account merely added to the pool is new, not recovered, and never earns the label.
+A regain means an account that was Fable-tracked but not Fable-capable as of the last printed poll is capable now; an account merely added to the pool is new, not recovered, and never earns the label.
+The membership is measured against the last poll that printed, not the last poll that ran, so a window that resets while the gateway's `routable` count still lags lands on a silent poll and is still named by the next wake that prints.
 The check never switches anything; the failover and the lane-side offload are firstmate actions.
-`state/.fable-runway` records the last printed states, the last `RED` report time, and the pool's last tracked and capable name sets, so an unchanged poll stays silent and a regain is distinguishable from an addition.
+`state/.fable-runway` records the last printed states, the last `RED` report time, and the tracked and capable name sets as of that same printed poll, so an unchanged poll stays silent and a regain is distinguishable from an addition.
 
 The monitor reads `FM_FABLE_RUNWAY_QUOTA_TIMEOUT` (defaults to the call cap below, so 5 on a default home) as the bound on each `quota-axi` call and `FM_FABLE_RUNWAY_POOL_TIMEOUT` (default 4) as the bound on each pool fetch.
 Both are clamped, because a check the watcher kills prints nothing and records nothing, so the monitor would go silently dark and repeat that silence every poll.
