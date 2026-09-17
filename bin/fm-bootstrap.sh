@@ -166,12 +166,6 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
-# shellcheck source=bin/fm-session-lock-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-session-lock-lib.sh"
-# shellcheck source=bin/fm-primary-scope-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
-# shellcheck source=bin/fm-gateway-retry-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-gateway-retry-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh disable=SC1091
