@@ -326,7 +326,7 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*), and live homes hold those markers on
+# .wedge-escalations-, .paused-*, .writing-*, .gw-busy-), and live homes hold those markers on
 # disk under the current format, so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
@@ -399,6 +399,42 @@ inbox_steer_check() {  # <window> <task>
       wake "$reason"
       ;;
   esac
+}
+
+# The ladder's other exit, and the only one an idle poll cannot serve. A stall
+# record is dropped when its pane recovers, but gateway_stall_check below runs
+# only on an idle poll, so a crew that took the continue, resumed, and then ran
+# one long turn is never observed idle while it recovers - it would carry its
+# half-spent ladder and its stale horizon anchor into the NEXT, unrelated stall
+# and have that one declared a spent-budget outage on first sight.
+#
+# Busy alone cannot be the signal: the continue this ladder sends makes the pane
+# busy from submission until the turn ends, so a retry that dies on another 503
+# reads busy for its whole short duration, and clearing there would wipe the
+# attempt count mid-ladder and no genuine outage could ever be declared. Only
+# DURATION separates the two, and the threshold lives with the ladder's other
+# bounds in bin/fm-gateway-retry-lib.sh rather than being re-stated here.
+#
+# Counting polls rather than seconds is deliberate: the counter is exactly the
+# consecutive-busy observations this loop made, so it cannot be fooled by a
+# watcher that was restarted or by a poll cycle that ran long.
+gateway_busy_progress_check() {  # <window> <task> <key> <busy-now>
+  local w=$1 task=$2 key=$3 busy=$4 bf n
+  bf="$STATE/.gw-busy-$key"
+  if [ -z "$task" ] || [ "$busy" -ne 0 ] || ! fm_gateway_stall_open "$STATE" "$task"; then
+    [ ! -e "$bf" ] || rm -f "$bf" 2>/dev/null || true
+    return 0
+  fi
+  n=$(cat "$bf" 2>/dev/null || true)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  n=$(( n + 1 ))
+  if [ "$n" -le "$(fm_gateway_busy_clear_polls)" ]; then
+    printf '%s' "$n" > "$bf" 2>/dev/null || true
+    return 0
+  fi
+  rm -f "$bf" 2>/dev/null || true
+  fm_gateway_clear_recovered "$STATE" "$task" || return 0
+  triage_log "gateway keep-alive record dropped, the crew worked $n consecutive polls: $w"
 }
 
 # Keep a crew alive across a transient inference-gateway stall, one cheap check
@@ -1979,6 +2015,7 @@ EOF
     # rendered failure, not "nothing changed" - and it hands the window straight
     # back once either bound is spent, which is when the stale bookkeeping below
     # is the right owner again.
+    gateway_busy_progress_check "$w" "$task" "$key" "$busy_now"
     if [ "$busy_now" -ne 0 ] && gateway_stall_check "$w" "$task" "$kind" "$tail40"; then
       continue
     fi

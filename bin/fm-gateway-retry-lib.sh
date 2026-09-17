@@ -48,11 +48,25 @@
 # "the gateway is briefly out of accounts" becomes "the gateway is down", which
 # is the one thing the captain wants surfaced.
 #
+# A RECORD MUST NOT OUTLIVE THE STALL IT RECORDS. The pane exit above only fires
+# on a poll that finds the agent idle, and an agent that recovered and then ran a
+# long turn is never observed idle while it does so - it would carry a half-spent
+# ladder and a stale horizon anchor into the next, unrelated stall and have that
+# one declared an outage on first sight. Busy alone cannot be the second exit
+# either: the ladder's own continue makes the pane busy from the moment it is
+# submitted until the turn ends, so a retry that dies on another 503 reads busy
+# for its whole short duration, and clearing there would wipe the attempt count
+# mid-ladder and no genuine outage could ever be declared. The part that cannot
+# be the ladder's own retry is DURATION - a busy stretch longer than
+# FM_GATEWAY_BUSY_CLEAR_POLLS of the caller's poll periods is a turn that
+# actually ran, which is the recovery the pane exit would have seen.
+#
 # Tunables (env):
 #   FM_GATEWAY_RETRY_MAX        default 8; re-ring attempts before the budget is spent
 #   FM_GATEWAY_RETRY_HORIZON    default 2700; seconds from first stall before the budget is spent
 #   FM_GATEWAY_RETRY_BACKOFF    default "30 60 120 300"; per-attempt wait, last value repeats
 #   FM_GATEWAY_TAIL_LINES       default 10; non-blank pane lines above the footer the transient match reads
+#   FM_GATEWAY_BUSY_CLEAR_POLLS default 2; consecutive busy polls a record survives before it is dropped
 #
 # No side effects on source. Dependency-light: pure shell plus date.
 
@@ -60,6 +74,7 @@ FM_GATEWAY_RETRY_MAX_DEFAULT=8
 FM_GATEWAY_RETRY_HORIZON_DEFAULT=2700
 FM_GATEWAY_RETRY_BACKOFF_DEFAULT='30 60 120 300'
 FM_GATEWAY_TAIL_LINES_DEFAULT=10
+FM_GATEWAY_BUSY_CLEAR_POLLS_DEFAULT=2
 
 # The exact instruction a stalled agent is re-rung with. It deliberately names
 # the cause and asks for continuation rather than restatement, so the agent picks
@@ -77,6 +92,16 @@ fm_gateway_retry_horizon() {
   local h=${FM_GATEWAY_RETRY_HORIZON:-$FM_GATEWAY_RETRY_HORIZON_DEFAULT}
   case "$h" in ''|*[!0-9]*) h=$FM_GATEWAY_RETRY_HORIZON_DEFAULT ;; esac
   printf '%s' "$h"
+}
+
+# Consecutive busy polls a stall record survives. Longer than this is a turn
+# that ran, not the ladder's own retry dying on the next error, so the record is
+# dropped. Owned here with the other bounds; the watcher reads it rather than
+# carrying a second copy of the number.
+fm_gateway_busy_clear_polls() {
+  local n=${FM_GATEWAY_BUSY_CLEAR_POLLS:-$FM_GATEWAY_BUSY_CLEAR_POLLS_DEFAULT}
+  case "$n" in ''|*[!0-9]*|0) n=$FM_GATEWAY_BUSY_CLEAR_POLLS_DEFAULT ;; esac
+  printf '%s' "$n"
 }
 
 fm_gateway_tail_lines() {
@@ -257,6 +282,18 @@ fm_gateway_clear() {  # <state-dir> <scope>
   rm -f "$(fm_gateway_record_path "$1" "$2")" 2>/dev/null || true
 }
 
+# THE exit from the ladder: an agent that has demonstrably resumed drops its
+# record, closing any declared wait that record opened. Both exits go through
+# here so a record can never be dropped while the wait it declared is left
+# standing on the agent's status log. 1 when there was no record to drop, so a
+# caller can report only a real transition.
+fm_gateway_clear_recovered() {  # <state-dir> <scope>
+  fm_gateway_stall_open "$1" "$2" || return 1
+  _fm_gateway_close_declared_wait "$1" "$2"
+  fm_gateway_clear "$1" "$2"
+  return 0
+}
+
 fm_gateway_stall_open() {  # <state-dir> <scope>
   fm_gateway_first_seen "$1" "$2" >/dev/null 2>&1
 }
@@ -284,8 +321,7 @@ fm_gateway_stalled_now() {  # <state-dir> <scope> <pane-text>
     fm_gateway_note_stall "$state" "$scope" || return 1
     return 0
   fi
-  _fm_gateway_close_declared_wait "$state" "$scope"
-  fm_gateway_clear "$state" "$scope"
+  fm_gateway_clear_recovered "$state" "$scope" || true
   return 1
 }
 

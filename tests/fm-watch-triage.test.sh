@@ -1950,6 +1950,112 @@ test_gateway_stall_is_re_rung_instead_of_wedge_escalated() {
   pass "a gateway-stalled crew is re-rung with a bounded continue instruction and declares an external wait when the budget is spent"
 }
 
+# --- a stall record must not outlive the stall it records --------------------
+# gateway_stall_check only runs on an IDLE poll, so the pane-recovered exit
+# never fires for a crew that took the continue and then worked. Without a
+# second exit that crew carries a half-spent ladder and a stale horizon anchor
+# into its NEXT, unrelated stall, and has that one declared a spent-budget
+# outage on first sight - zero retries for a transient error the gateway was
+# serving fine around. Busy alone cannot be that exit either: the continue this
+# ladder sends makes the pane busy from submission until the turn ends, so a
+# retry that dies on the next 503 reads busy for its whole short duration, and
+# ending the record there would wipe the attempt count mid-ladder and no genuine
+# outage could ever be declared. Only duration separates the two, so both
+# directions are pinned below off one shared mid-ladder fixture: a record with
+# one attempt already charged and a horizon anchor older than the default 2700s
+# horizon, so what happens to that record during the busy stretch decides
+# whether the next transient error is re-rung or declared an outage.
+
+# Prints the case dir. <task> names both the task and its window suffix.
+make_gateway_busy_case() {  # <name> <task>
+  local dir state task=$2 window anchor
+  dir=$(make_case "$1"); state="$dir/state"
+  window="test:fm-$task"
+  printf 'Working...' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/$task.meta"
+  printf 'working: implementing the fix\n' > "$state/$task.status"
+  printf '%s' "$(seen_sig "$state/$task.status")" > "$state/.seen-${task}_status"
+  touch "$state/$task.turn-ended"
+  prime_turnend_seen "$state/$task.turn-ended"
+  anchor=$(( $(date +%s) - 3000 ))
+  printf 'v1 first=%s attempts=1 last=%s notified=0\n' "$anchor" "$anchor" > "$state/$task.gateway-stall"
+  printf '%s' "$dir"
+}
+
+# Drive <cycles> polls of a real watcher over the case's pane, with the task's
+# semantic busy state set to <busy|idle>. Extra env assignments follow.
+run_gateway_busy_watcher() {  # <dir> <task> <state> <busy|idle> <cycles> [env...]
+  local dir=$1 task=$2 pane_state=$4 cycles=$5 state=$3 gen pid i=0
+  shift 5
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" "$pane_state" --gen "$gen" \
+    --source pi-ext --event agent-turn
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-$task" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_GATEWAY_RETRY_BACKOFF=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    env "$@" "$WATCH" >> "$dir/watch.out" &
+  pid=$!
+  while [ "$i" -lt "$cycles" ]; do
+    wait_poll_cycle "$state" "$pid" >/dev/null 2>&1 || break
+    i=$(( i + 1 ))
+  done
+  reap "$pid"
+  # Reaping a live watcher leaves the stopped-watcher marker behind, and the
+  # NEXT round would spend its whole first poll resurfacing that check instead
+  # of running the triage the caller is asserting on.
+  ack_stopped_cycle "$state" 2>/dev/null || true
+}
+
+test_gateway_record_survives_a_short_busy_blip() {
+  local dir state task=gwblip anchor
+  dir=$(make_gateway_busy_case gateway-busy-blip "$task"); state="$dir/state"
+  anchor=$(cut -d' ' -f2 "$state/$task.gateway-stall")
+
+  # The ladder's own retry: the pane goes busy for a couple of polls, well
+  # inside the threshold, because the continue was submitted and the turn is
+  # about to die on the next gateway error.
+  run_gateway_busy_watcher "$dir" "$task" "$state" busy 2 FM_GATEWAY_BUSY_CLEAR_POLLS=20
+  [ -f "$state/$task.gateway-stall" ] \
+    || fail "a short busy blip ended the stall record; the ladder's own retry would wipe its own attempt count and no outage could ever be declared"
+  [ "$(cut -d' ' -f2 "$state/$task.gateway-stall")" = "$anchor" ] \
+    || fail "a short busy blip moved the horizon anchor, restarting the budget mid-ladder"
+
+  # The retry dies on another 503. The budget the blip preserved is spent, so
+  # this is declared as the external wait it is rather than re-rung forever.
+  printf 'API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary — try again in a moment.' > "$dir/pane.txt"
+  run_gateway_busy_watcher "$dir" "$task" "$state" idle 1 FM_GATEWAY_BUSY_CLEAR_POLLS=20
+  grep -q 'paused \[key=gateway-503\]' "$state/$task.status" \
+    || fail "the budget preserved across the blip did not reach a declared outage"
+  [ ! -d "$state/$task.inbox" ] || [ -z "$(find "$state/$task.inbox" -name '*.msg' 2>/dev/null)" ] \
+    || fail "a spent budget must stop re-ringing, not send another continue instruction"
+  pass "a busy blip inside the ladder keeps the stall record, and the budget still reaches a declared outage"
+}
+
+test_gateway_record_is_dropped_after_a_long_busy_stretch() {
+  local dir state task=gwworked msgs fresh
+  dir=$(make_gateway_busy_case gateway-busy-worked "$task"); state="$dir/state"
+
+  # The crew took the continue and actually worked: a busy stretch past the
+  # threshold, which the ladder's own retry cannot produce.
+  run_gateway_busy_watcher "$dir" "$task" "$state" busy 4 FM_GATEWAY_BUSY_CLEAR_POLLS=1
+  [ ! -f "$state/$task.gateway-stall" ] \
+    || fail "a busy stretch past the threshold left the stall record open; it will poison the crew's next, unrelated stall"
+
+  # A genuinely NEW transient error, 50 minutes after the old one. It must start
+  # a fresh ladder and be re-rung, not inherit the old record's spent horizon.
+  printf 'API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary — try again in a moment.' > "$dir/pane.txt"
+  run_gateway_busy_watcher "$dir" "$task" "$state" idle 1 FM_GATEWAY_BUSY_CLEAR_POLLS=1
+  grep -q 'paused \[key=gateway-503\]' "$state/$task.status" \
+    && fail "a new transient error was declared a spent-budget outage on first sight"
+  msgs=$(find "$state/$task.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$msgs" = 1 ] || fail "a new transient error was not re-rung; found $msgs continue instructions"
+  fresh=$(cut -d' ' -f2 "$state/$task.gateway-stall")
+  [ "$(( $(date +%s) - ${fresh#first=} ))" -lt 120 ] \
+    || fail "the new stall reused the old record's horizon anchor instead of starting fresh"
+  pass "a busy stretch past the threshold drops the stall record, so a later transient error starts a fresh ladder"
+}
+
 # A secondmate is admitted to the pane-stale path only to serve its declared
 # wait's bounded re-surface, and the gateway ladder must not piggyback on that
 # admission: a secondmate home runs its own watcher for its own crews, and
@@ -4426,6 +4532,8 @@ test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_gateway_stall_is_re_rung_instead_of_wedge_escalated
+test_gateway_record_survives_a_short_busy_blip
+test_gateway_record_is_dropped_after_a_long_busy_stretch
 test_gateway_stalled_secondmate_is_not_re_rung
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
