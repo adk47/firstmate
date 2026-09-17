@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Behavior tests for the transient inference-gateway keep-alive:
-# the rendered-pane classifier (the bounded tail window and the deny list that
-# beats it) and the twice-bounded retry ladder.
+# Behavior tests for the transient inference-gateway keep-alive: the event gate
+# (the agent's own recorded turn end, plus the bounded tail window and the deny
+# list that beats it) and the twice-bounded retry ladder.
 #
-# The classifier's inputs are quoted from the real transcripts this fleet
+# The turn-end records are written by the contract's only writer,
+# bin/fm-busy-event.sh, exactly as the harness's own hooks write them, so these
+# fixtures cannot drift from what production records.
+# The classifier's text inputs are quoted from the real transcripts this fleet
 # produced, so a wording change that would blind it in production fails here.
 set -u
 
@@ -45,41 +48,16 @@ ordinary_lines() {  # <count>
   done
 }
 
-# <text> as a pane holds it at <cols> columns: screen ROWS, hard-wrapped at the
-# margin exactly as tmux wraps a line too long for the pane and as
-# `tmux capture-pane -p` then hands it back - one row per wrap, no separator, no
-# word breaking. tmux is not a dependency of this suite, so the split is
-# reproduced here; the fixtures below assert it really did split, because the
-# regression this pins shipped precisely because every fixture wrote the ~190
-# character error as one unwrapped line no pane could ever show.
-# The em dash stands in as one byte while the string is cut, so a row is <cols>
-# COLUMNS wide whatever locale this suite runs under - `${s:0:$w}` cuts bytes
-# under LC_ALL=C, and a row cut to 80 bytes is not the 80-column row a pane holds.
-pane_rows() {  # <text> <cols>
-  local s=$1 w=$2 chunk
-  s=${s//—/$'\001'}
-  while [ "${#s}" -gt "$w" ]; do
-    chunk=${s:0:$w}
-    printf '%s\n' "${chunk//$'\001'/—}"
-    s=${s:$w}
-  done
-  printf '%s\n' "${s//$'\001'/—}"
-}
-
-# The idle Claude screen at <cols> columns: the bordered empty composer and the
-# shortcut footer, with the border spanning the pane the way a harness draws it.
-# The border is what carries the pane's margin into the capture, so a fixture
-# whose composer is not the fixture's own width is not a pane any crew has.
-idle_screen() {  # <cols>
-  local cols=$1 i=0 rule='' pad=''
-  while [ "$i" -lt $(( cols - 2 )) ]; do rule="${rule}─"; i=$(( i + 1 )); done
-  i=0
-  while [ "$i" -lt $(( cols - 4 )) ]; do pad="${pad} "; i=$(( i + 1 )); done
-  printf '╭%s╮\n│ >%s│\n╰%s╯\n  ? for shortcuts\n' "$rule" "$pad" "$rule"
-}
-
-row_count() {  # <rows>
-  printf '%s\n' "$1" | grep -c ''
+# Record one turn end on <task> through the contract's ONLY writer, arming a
+# fresh incarnation first: bin/fm-spawn.sh wires Claude's Stop hook to
+# `--event stop` and its StopFailure hook to `--event stop-failure`, both of
+# them this same command, so a fixture written here is the record production
+# has.
+record_turn_end() {  # <state-dir> <task> <event> [source]
+  local st=$1 task=$2 event=$3 source=${4:-claude-hook} gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$st" "$task") || return 1
+  "$ROOT/bin/fm-busy-event.sh" apply "$st" "$task" idle --gen "$gen" \
+    --source "$source" --event "$event" >/dev/null
 }
 
 new_state() {  # <name>
@@ -133,6 +111,9 @@ test_a_recovered_agent_with_the_old_error_in_scrollback_is_not_stalled() {
   pane=$(printf '%s\n%s\n%s' "$E503_ACCOUNTS" "$(ordinary_lines 12)" "$IDLE_FOOTER")
   fm_gateway_text_is_transient "$pane" \
     && fail "an error that scrolled above the last turn's output was still classified as a live stall"
+  # The recorded turn end is left as an API error on purpose: the tail window,
+  # not the gate, is what has to keep this crew out of the ladder.
+  record_turn_end "$st" task-r stop-failure || fail "could not record an API-error turn end"
   fm_gateway_note_stall "$st" task-r || fail "could not open a stall record"
   fm_gateway_record_attempt "$st" task-r || fail "could not charge an attempt"
   fm_gateway_stalled_now "$st" task-r "$pane" \
@@ -144,124 +125,22 @@ test_a_recovered_agent_with_the_old_error_in_scrollback_is_not_stalled() {
 
 test_repository_text_naming_the_errors_is_not_a_stall() {
   # A crewmate that greps or cats this repository's own sources prints the
-  # gateway's sentences, the word overloaded, AND the rendered
-  # "API Error: <5xx>" shape itself - docs/verification/gateway-keepalive.md's
-  # census table and this file's own fixtures carry it verbatim - and then says
-  # so in its own words. Every one of those is a citation: quoted, and the
-  # harness never quotes its own error.
+  # gateway's sentences and the word overloaded at its prompt. None of that is
+  # the harness's rendered "API Error: <5xx>" shape. The stronger case - a
+  # crewmate printing that shape itself - is not this match's job and is pinned
+  # on the gate, in test_the_recorded_turn_end_gates_the_ladder below.
   local pane
   pane=$(printf '%s\n%s' "$(cat <<'TXT'
 bin/fm-gateway-retry-lib.sh:34:# word such as "overloaded".
-docs/verification/gateway-keepalive.md:39:| 2427 | `API Error: 503 Service temporarily unavailable. …` | transient |
-tests/fm-gateway-keepalive.test.sh:22:E503_ACCOUNTS='API Error: 503 All accounts are temporarily unavailable. …'
+docs/gateway-keepalive.md:12: the gateway's own out-of-capacity sentences
+tests/fm-gateway-keepalive.test.sh:22: All accounts are temporarily unavailable
+tests/fm-gateway-keepalive.test.sh:23: Service temporarily unavailable
 Overloaded
-⏺ Those are all citations — the harness renders "API Error: 503 All accounts are temporarily unavailable." itself, unquoted, on the line it ends the turn with.
 TXT
 )" "$IDLE_FOOTER")
   fm_gateway_text_is_transient "$pane" \
-    && fail "a crewmate quoting this repository's own rendered error text was classified as a stall"
-  pass "repository text quoting the rendered API Error shape is a citation, not a stall"
-}
-
-test_only_the_live_output_line_decides_a_stall() {
-  # (1) A turn that named the error and then carried on ends on its OWN output.
-  # The error is history there, not the live line, and re-ringing that crew
-  # would send it a continue nobody asked for and spend the whole budget.
-  local pane
-  pane=$(printf '%s\n%s\n%s' \
-    "⏺ the census row in docs/verification/gateway-keepalive.md reads $E503_SERVICE" \
-    "$(ordinary_lines 3)" "$IDLE_FOOTER")
-  fm_gateway_text_is_transient "$pane" \
-    && fail "an agent that named the error mid-turn and then carried on was classified as stalled"
-
-  # (2) The same window ENDING on the harness's own rendered error, above the
-  # idle composer and footer, is exactly the stall this keep-alive exists for.
-  # The composer and footer are not output lines; anchoring to the raw last
-  # non-blank line would find the footer and blind the detector completely.
-  pane=$(printf '%s\n%s\n%s' "$(ordinary_lines 3)" "$E503_ACCOUNTS" "$IDLE_FOOTER")
-  fm_gateway_text_is_transient "$pane" \
-    || fail "a pane whose last output line is the rendered error was not classified as a stall"
-  pass "only the live output line decides a stall: an error named mid-turn is not one, an error ending the turn is"
-}
-
-# A crew's closing message that NAMES the error mid-sentence, long enough to wrap
-# at every width below, and the second paragraph it signs off with. Both are
-# ordinary output from an agent that finished: nothing here is stalled. The
-# sign-off carries the harness's continuation INDENT and no gutter glyph, which
-# is how a harness draws every paragraph of a message after its first - and is
-# what a glyph-based join cannot tell from a wrap, so it merged the two into one
-# line and re-rang a crew that was done.
-HEALTHY_MENTION='⏺ The watcher never re-rang cmux-v4 this morning: its pane had ended on API Error: 503 All accounts are temporarily unavailable, the detector was reading a single screen row, and the ladder therefore never opened a stall record for that lane at all, which is why an hour went missing before anyone noticed the lane had stopped moving.'
-HEALTHY_CLOSE='  Eighteen cases pass and the lint is clean.'
-
-# The same mention, but quoted, and left behind by further work: the shape the
-# repository's own docs and tests put on a crewmate's screen.
-QUOTED_MENTION='⏺ The verification record quotes the pooled gateway failure as "API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary — try again in a moment." and classes it transient, which is the row I went back to check before moving on to the next one.'
-
-test_the_wrap_is_undone_before_the_anchor_is_applied() {
-  # A pane is a SCREEN. The error the captain is waiting on is 191 characters, so
-  # no pane shows it on one row: the shape lands on the first row of a wrap and
-  # the pane's last row is a fragment carrying none of it. Undoing that wrap is
-  # what the anchor needs, and the wrap is undone STRUCTURALLY - a row continues
-  # the row above it only when that row above filled the pane to its margin -
-  # because the alternatives have each failed in their own direction: an
-  # unanchored match caught prose, a screen-row anchor went blind on the wrapped
-  # error, and a gutter-glyph join swallowed separate rendered lines.
-  local cols rows pane st
-  for cols in 80 100 160; do
-    # 1. The error at the end of the output: the stall this exists for.
-    rows=$(pane_rows "$E503_ACCOUNTS" "$cols")
-    [ "$(row_count "$rows")" -gt 1 ] \
-      || fail "the ${cols}-column error fixture did not wrap, so it cannot pin this regression"
-    pane=$(printf '%s\n%s\n' "$rows" "$(idle_screen "$cols")")
-    fm_gateway_text_is_transient "$pane" \
-      || fail "the rendered error wrapped at $cols columns, as a real pane holds it, was not classified as a stall"
-
-    # 2. A healthy crew that MENTIONED the error and then signed off. Its sign-off
-    # is a separate rendered line, so the mention is not the live line - and the
-    # rows of the mention carry no gutter glyph, which is exactly what a glyph
-    # join merged into one line and re-rang a finished crew for.
-    rows=$(pane_rows "$HEALTHY_MENTION" "$cols")
-    [ "$(row_count "$rows")" -gt 1 ] \
-      || fail "the ${cols}-column mention fixture did not wrap, so it cannot pin this regression"
-    pane=$(printf '%s\n%s\n%s\n' "$rows" "$HEALTHY_CLOSE" "$(idle_screen "$cols")")
-    fm_gateway_text_is_transient "$pane" \
-      && fail "a crew that mentioned the error and then signed off was classified as stalled at $cols columns"
-
-    # 3. The same mention quoted, with ordinary output after it.
-    pane=$(printf '%s\n%s\n%s\n' "$(pane_rows "$QUOTED_MENTION" "$cols")" \
-      "$(ordinary_lines 2)" "$(idle_screen "$cols")")
-    fm_gateway_text_is_transient "$pane" \
-      && fail "a quoted mention left behind by later output was classified as stalled at $cols columns"
-  done
-
-  # And the ladder actually engages on the real one: the durable record opens,
-  # which is what buys the crew its continue instruction.
-  st=$(new_state wrapped-stall)
-  fm_gateway_stalled_now "$st" task-w \
-    "$(printf '%s\n%s\n' "$(pane_rows "$E503_ACCOUNTS" 80)" "$(idle_screen 80)")" \
-    || fail "a pane holding the wrapped error did not enter the re-ring ladder"
-  fm_gateway_stall_open "$st" task-w || fail "no stall record was opened for the wrapped error"
-  pass "the wrap is undone before the anchor: the wrapped error stalls, a mention of it does not, at 80, 100 and 160 columns"
-}
-
-test_a_citation_split_across_a_wrap_is_still_quoted() {
-  # The quote and the shape land on DIFFERENT rows: at 80 columns this citation's
-  # opening `"` ends one row and `API Error: 503` sits inside the next. Judging
-  # that next row alone would find the shape with nothing ahead of it and re-ring
-  # a crew that was only reading the docs, so the quote test has to run on the
-  # reconstructed line, not on the row.
-  local citation rows pane
-  citation="⏺ The verification record's census table quotes the pooled gateway failure as \"the rendered $E503_ACCOUNTS\" and classes it transient."
-  rows=$(pane_rows "$citation" 80)
-  [ "$(row_count "$rows")" -gt 1 ] \
-    || fail "the citation fixture did not wrap, so it cannot pin this regression"
-  printf '%s\n' "$rows" | sed -n 2p | grep -q 'API Error: 503' \
-    || fail "the citation fixture no longer splits with the shape on a continuation row"
-  pane=$(printf '%s\n%s\n' "$rows" "$(idle_screen 80)")
-  fm_gateway_text_is_transient "$pane" \
-    && fail "a citation whose quote opened on an earlier screen row was classified as a stall"
-  pass "a citation split across a wrap is still read as quoted, not as the harness's own error"
+    && fail "repository text mentioning overloaded and the gateway sentences was classified as a stall"
+  pass "repository text naming the errors without the rendered API Error shape is not a stall"
 }
 
 test_a_gateway_that_is_simply_down_is_not_retried() {
@@ -344,6 +223,7 @@ test_re_noting_a_stall_cannot_push_the_next_attempt_out_of_reach() {
   # re-rung, and the horizon would never be reached either.
   local st first_open
   st=$(new_state anchor-stability)
+  record_turn_end "$st" task-c stop-failure || fail "could not record an API-error turn end"
   FM_GATEWAY_RETRY_BACKOFF=1
   export FM_GATEWAY_RETRY_BACKOFF
   fm_gateway_stalled_now "$st" task-c "$E503_ACCOUNTS" || fail "a stalled pane must open the record"
@@ -380,22 +260,116 @@ test_backoff_ladder_repeats_its_last_step() {
   pass "the backoff ladder repeats its last step past its own length"
 }
 
-test_pane_is_the_single_detector() {
-  # A record only ever exists because a pane showed the error, and a pane that
-  # no longer shows it ends the stall whatever the record says: there is no
-  # second detector whose word can hold the ladder open against the pane.
-  local st
-  st=$(new_state pane-authority)
-  fm_gateway_stalled_now "$st" task-e 'ordinary pane output' \
-    && fail "an ordinary pane must not enter the ladder"
-  fm_gateway_stall_open "$st" task-e && fail "an ordinary pane must open no record"
-  fm_gateway_stalled_now "$st" task-e "$E503_ACCOUNTS" || fail "a stalled pane must enter the ladder"
-  fm_gateway_stall_open "$st" task-e || fail "a stalled pane must open the record"
-  fm_gateway_stalled_now "$st" task-e 'ordinary pane output' \
-    && fail "a pane that moved on before any attempt must still leave the ladder"
-  fm_gateway_stall_open "$st" task-e \
+test_the_recorded_turn_end_gates_the_ladder() {
+  # The agent's OWN record of how its last turn ended is the first condition,
+  # and the pane text is the second. Case 2 is why: its screen is
+  # indistinguishable from case 1 by text alone - this repository's docs and
+  # tests put that exact string on a crewmate's screen - and no amount of
+  # reading ROWS tells a finished crew from a stalled one. The recorded event
+  # does.
+  local st stalled quoting
+  st=$(new_state event-gate)
+  stalled=$(printf '%s\n%s' "$E503_ACCOUNTS" "$IDLE_FOOTER")
+  quoting=$(printf '%s\n%s' "⏺ The census row quotes it as \"$E503_ACCOUNTS\"" "$IDLE_FOOTER")
+
+  # 1. An API-error turn end, and the pane naming a transient one: the stall
+  # this keep-alive exists for.
+  record_turn_end "$st" task-sf stop-failure || fail "could not record an API-error turn end"
+  fm_gateway_stalled_now "$st" task-sf "$stalled" \
+    || fail "a recorded API-error turn end showing the transient error did not enter the ladder"
+  fm_gateway_stall_open "$st" task-sf || fail "entering the ladder must open the durable record"
+
+  # 2. A NORMAL turn end quoting the same error in its report: never the ladder's
+  # business, whatever is on the screen.
+  record_turn_end "$st" task-stop stop || fail "could not record a normal turn end"
+  fm_gateway_stalled_now "$st" task-stop "$quoting" \
+    && fail "a crew that finished its turn normally was pulled into the ladder by text on its screen"
+  fm_gateway_stall_open "$st" task-stop && fail "a normal turn end must open no record"
+
+  # 3. An API-error turn end with no transient error on the pane: the event says
+  # THAT an API error ended the turn, never WHICH one, so the text still has to
+  # agree.
+  record_turn_end "$st" task-quiet stop-failure || fail "could not record an API-error turn end"
+  fm_gateway_stalled_now "$st" task-quiet "$(printf '%s\n%s' "$(ordinary_lines 3)" "$IDLE_FOOTER")" \
+    && fail "an API-error turn end with no transient error on the pane entered the ladder"
+  fm_gateway_stall_open "$st" task-quiet && fail "a pane with no transient error must open no record"
+
+  # And the exit is the same signal as the entry: the crew takes the continue,
+  # its next turn ends normally, and the record is dropped on the next idle poll
+  # without waiting for the old error to scroll off the screen.
+  fm_gateway_record_attempt "$st" task-sf || fail "could not charge an attempt"
+  record_turn_end "$st" task-sf stop || fail "could not record the recovering turn end"
+  fm_gateway_stalled_now "$st" task-sf "$stalled" \
+    && fail "a crew whose turn ended normally is still read as stalled while its old error is on screen"
+  fm_gateway_stall_open "$st" task-sf \
     && fail "leaving the ladder must drop the record so a later stall starts fresh"
-  pass "the rendered pane is the single detector: it alone opens, keeps, and ends a stall"
+  pass "the recorded turn end gates the ladder: an API-error end with the error enters it, a normal end never does, and a normal end ends it"
+}
+
+# The rendered error as a PANE actually holds it. The screen is ~80 columns and
+# the error is 191 characters, so it always arrives split across rows: word
+# wrapped, the way an Ink TUI breaks its own text, and hard wrapped mid-word, the
+# way a terminal breaks a line that overruns the margin. Both are quoted from the
+# shapes this classifier was measured against.
+WRAPPED_503_WORD=$(printf '%s\n%s\n%s' \
+'⏺ API Error: 503 All accounts are temporarily unavailable. This is a' \
+' server-side issue, usually temporary — try again in a moment. If it persists,' \
+' check your inference gateway (127.0.0.1:8080).')
+WRAPPED_503_HARD=$(printf '%s\n%s\n%s' \
+'API Error: 503 All accounts are temporarily unavailable. This is a server-side i' \
+'ssue, usually temporary — try again in a moment. If it persists, check your infe' \
+'rence gateway (127.0.0.1:8080).')
+
+test_a_wrapped_rendered_error_still_enters_the_ladder() {
+  # The regression that four position-based classifiers each produced in their
+  # own way: the row carrying the shape is never the last row of a wrap, so a
+  # classifier that anchors anywhere on the SCREEN misses the very error the
+  # captain is waiting on and nothing is ever re-rung. The text condition is
+  # bounded to the tail window and otherwise unanchored, so every wrap shape
+  # reads the same.
+  local st pane shape
+  st=$(new_state wrapped-stall)
+  for shape in word-wrapped hard-wrapped; do
+    case "$shape" in
+      word-wrapped) pane=$WRAPPED_503_WORD ;;
+      *) pane=$WRAPPED_503_HARD ;;
+    esac
+    rm -f "$st/task-w.gateway-stall"
+    record_turn_end "$st" task-w stop-failure || fail "could not record an API-error turn end"
+    fm_gateway_stalled_now "$st" task-w "$(printf '%s\n%s' "$pane" "$IDLE_FOOTER")" \
+      || fail "a pane holding the rendered error as a screen wraps it ($shape) did not enter the ladder"
+    fm_gateway_stall_open "$st" task-w \
+      || fail "no stall record was opened for the wrapped error ($shape)"
+  done
+  pass "the rendered error still opens the ladder when the pane wraps it, word wrapped and hard wrapped"
+}
+
+test_an_unreadable_turn_end_keeps_a_task_out_of_the_ladder() {
+  # The documented limit of this keep-alive. `stop-failure` is written in
+  # exactly one place, the claude arm of bin/fm-spawn.sh's busy wiring, so a
+  # task with no record, with an event no claude hook writes, or with a record
+  # whose incarnation can no longer be read is deliberately NOT re-rung on the
+  # strength of pane text alone - it is left to ordinary triage.
+  local st pane
+  st=$(new_state unreadable-event)
+  pane=$(printf '%s\n%s' "$E503_ACCOUNTS" "$IDLE_FOOTER")
+
+  fm_gateway_stalled_now "$st" task-none "$pane" \
+    && fail "a task with no turn-lifecycle record at all entered the ladder"
+  fm_gateway_stall_open "$st" task-none && fail "a task with no record must open no record"
+
+  record_turn_end "$st" task-other after-agent gemini-hook \
+    || fail "could not record another adapter's turn end"
+  fm_gateway_stalled_now "$st" task-other "$pane" \
+    && fail "a turn end no claude hook writes entered the ladder"
+  fm_gateway_stall_open "$st" task-other && fail "an unknown turn-end event must open no record"
+
+  record_turn_end "$st" task-orphan stop-failure || fail "could not record an API-error turn end"
+  rm -f "$st/task-orphan.busy-gen"
+  fm_gateway_stalled_now "$st" task-orphan "$pane" \
+    && fail "a record whose incarnation cannot be read entered the ladder"
+  fm_gateway_stall_open "$st" task-orphan && fail "an unreadable record must open no record"
+  pass "no record, an event no claude hook writes, and an unreadable record all stay out of the ladder"
 }
 
 test_spent_budget_declares_an_external_wait_not_a_wedge() {
@@ -422,6 +396,7 @@ test_a_recovered_agent_closes_its_declared_gateway_wait() {
   st=$(new_state resolved-line)
   status="$st/task-r.status"
   printf 'working: implementing the fix\n' > "$status"
+  record_turn_end "$st" task-r stop-failure || fail "could not record an API-error turn end"
   fm_gateway_note_stall "$st" task-r || fail "could not open a stall record"
   fm_gateway_record_attempt "$st" task-r || fail "could not charge an attempt"
   printf '%s\n' "$(fm_gateway_paused_status_line "$st" task-r)" >> "$status"
@@ -432,11 +407,12 @@ test_a_recovered_agent_closes_its_declared_gateway_wait() {
     *) fail "the declared wait did not open a keyed phase to begin with, got: $open" ;;
   esac
 
-  # The gateway recovers: the pane no longer shows the error, so the record is
+  # The gateway recovers: the crew's next turn ends normally, so the record is
   # dropped - and the phase that record declared must go with it, or a finished
   # crew is reported as still waiting on the gateway for the life of the log.
+  record_turn_end "$st" task-r stop || fail "could not record the recovering turn end"
   fm_gateway_stalled_now "$st" task-r "$(ordinary_lines 3)" \
-    && fail "a recovered pane still reads as stalled"
+    && fail "a recovered crew still reads as stalled"
   printf 'done: shipped\n' >> "$status"
   open=$(open_activity_keys "$status")
   case "$open" in
@@ -452,9 +428,9 @@ test_deny_list_beats_a_transient_code_inside_a_permanent_failure
 test_deny_list_matches_anywhere_while_the_transient_match_is_bounded
 test_a_recovered_agent_with_the_old_error_in_scrollback_is_not_stalled
 test_repository_text_naming_the_errors_is_not_a_stall
-test_only_the_live_output_line_decides_a_stall
-test_the_wrap_is_undone_before_the_anchor_is_applied
-test_a_citation_split_across_a_wrap_is_still_quoted
+test_the_recorded_turn_end_gates_the_ladder
+test_a_wrapped_rendered_error_still_enters_the_ladder
+test_an_unreadable_turn_end_keeps_a_task_out_of_the_ladder
 test_a_gateway_that_is_simply_down_is_not_retried
 test_ladder_is_bounded_by_attempts
 test_ladder_is_bounded_by_wall_clock_independently
@@ -462,6 +438,5 @@ test_busy_clear_window_is_wall_clock_at_every_poll_cadence
 test_re_noting_a_stall_cannot_push_the_next_attempt_out_of_reach
 test_first_attempt_waits_out_its_backoff
 test_backoff_ladder_repeats_its_last_step
-test_pane_is_the_single_detector
 test_spent_budget_declares_an_external_wait_not_a_wedge
 test_a_recovered_agent_closes_its_declared_gateway_wait

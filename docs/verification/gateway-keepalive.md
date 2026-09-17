@@ -49,8 +49,8 @@ async function F7e(e,n,r=pf){                              // executeStopFailure
 `StopFailure` is also a member of the event set the binary treats as non-blockable, alongside `Notification`, `SessionStart`, `SessionEnd`, and `PostToolUseFailure`.
 
 A `StopFailure` hook therefore has no continuation channel at all, whatever it exits with.
-This is the reason the keep-alive is built as detect-then-re-ring from outside the session rather than as a blocking hook: the rendered pane is the single detector, and the watcher delivers the continue instruction.
-An earlier revision also registered a `StopFailure` hook purely to open the stall record a few seconds before the next pane poll; it was removed because both re-ringing actors classify the pane anyway, the first attempt waits out a backoff regardless, and a record opened by anything other than the pane could hold the ladder open against a pane that had already recovered.
+This is the reason the keep-alive is built as detect-then-re-ring from outside the session rather than as a blocking hook: the hook cannot resume the turn, but the busy-state hook it shares the event with RECORDS that turn end as `event=stop-failure`, and the watcher reads that record, confirms which error ended the turn from the pane, and delivers the continue instruction.
+An earlier revision also registered a second `StopFailure` hook purely to open the stall record a few seconds before the next poll; it was removed because the watcher reads the recorded event anyway and the first attempt waits out a backoff regardless.
 
 ## The typed error enum
 
@@ -70,7 +70,7 @@ unknown, max_output_tokens
 
 Taken 2026-09-09 across 201 transcripts in this fleet's `~/.claude/projects`, counting assistant entries carrying `isApiErrorMessage: true`.
 These are the strings the pane classifier is written against; the counts are what makes the deny list load-bearing rather than theoretical.
-Only the rendered `API Error: <5xx>` shape is a positive match, and only within the bounded tail window above the prompt; the gateway's own sentences and the bare word `Overloaded` are not matched on their own, so a crewmate printing this repository's sources cannot classify as stalled.
+Only the rendered `API Error: <5xx>` shape is a positive match, and only within the bounded tail window above the prompt; the gateway's own sentences and the bare word `Overloaded` are not matched on their own. This text match is the second of the classifier's two conditions, never the whole test: the first is the recorded `event=stop-failure` turn end above, which is what keeps a crewmate printing this repository's sources out of the ladder.
 
 | Count | Text (truncated) | Class |
 |---|---|---|

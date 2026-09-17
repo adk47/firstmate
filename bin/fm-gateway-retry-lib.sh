@@ -18,50 +18,35 @@
 # (executeStopFailureHooks awaits the hook runner and discards its result), so a
 # StopFailure hook cannot block the stop or force a continuation the way the
 # turn-end guard does on Stop. Verified live on 2.1.266; see
-# docs/verification/gateway-keepalive.md. Detection is therefore done from the
-# RENDERED PANE by an actor outside the session, which is also the only signal
-# that keeps saying "still stalled" for as long as the stall lasts.
+# docs/verification/gateway-keepalive.md. The recovery is therefore driven by an
+# actor outside the session, which is also the only actor that keeps asking
+# "still stalled?" for as long as the stall lasts.
 #
-# CLASSIFICATION reads the pane's LIVE OUTPUT LINE. A turn-ending API error is
-# the last thing the harness draws above its composer, so the transient match is
-# bounded twice: to the last FM_GATEWAY_TAIL_LINES non-blank lines of whatever
-# the caller captured - the same bounded footer window bin/fm-watch.sh's busy
-# match uses - and, inside that window, to the single LOGICAL line the agent's
-# last turn actually ended on. Only the harness's rendered "API Error: <5xx>"
-# shape matches there, never a bare word such as "overloaded", and never the
-# shape quoted inside backticks or quotation marks.
+# CLASSIFICATION IS AN EVENT GATE, and it takes TWO conditions, both required:
+#   1. the task's turn-lifecycle record says its last turn ended on an API
+#      error - `event=stop-failure`, which Claude Code's StopFailure hook writes
+#      through bin/fm-busy-event.sh into the record bin/fm-busy-lib.sh owns;
+#   2. the pane tail shows one of the transient gateway errors.
+# A turn that ended normally records `event=stop` and NEVER enters the ladder,
+# whatever is on its screen.
 #
-# LOGICAL, not a screen row. A pane is a screen: the rendered 503 runs ~190
-# characters and a crew window is 80 columns wide (bin/backends/tmux.sh opens a
-# detached session at the tmux default and captures physical rows), so the error
-# always arrives split across rows and the row carrying the shape is never the
-# last of them. Anchoring to a screen row therefore matched nothing at any width
-# a crew actually runs at. The rows are joined back into the line the harness
-# wrote before the anchor is applied, which is also what lets a quote that
-# opened on an earlier row still count as quoting the shape.
+# WHY THE EVENT AND NOT THE SCREEN. The pane alone cannot answer the question
+# this classifier is asking, because the question is about a TURN and a screen
+# holds no turns: it holds rows. This repository's own docs, tests and sources
+# carry the rendered error text verbatim, so an agent that merely read them ends
+# its turn with the shape on screen, and every attempt to tell that agent from a
+# stalled one by POSITION failed in its own direction - an unanchored match
+# caught prose, a physical-row anchor went blind on the wrapped error, a
+# gutter-glyph join merged separate rendered lines, and a pane-width join missed
+# the error whenever the harness word-wrapped, whenever the composer border sat
+# one column off the wrap column, or whenever the capture still held wider rows
+# from before a resize. The turn end is not inferred from any of that: the crew
+# records it itself. A crew that cited the error finished normally and recorded
+# `stop`; a crew killed by a 503 recorded `stop-failure`.
 #
-# THE WRAP TEST IS STRUCTURAL: a row continues the row above it if and only if
-# that row above fills the pane to its margin, because that is the only reason a
-# screen breaks a line. The width comes off the capture (see
-# _fm_gateway_pane_width). Nothing here reads how the harness renders a gutter,
-# a bullet or an indent, and that is deliberate - a glyph test merges two
-# separate rendered lines whenever the second carries no gutter, which turns a
-# crew that MENTIONED a 503 in its closing paragraph into a crew being re-rung
-# for one.
-#
-# WHY THE POSITION IS THE ANCHOR. Matching the shape ANYWHERE in the window
-# judges an agent by text it merely printed: this repository's own docs, tests
-# and sources carry the literal string, so a crewmate that read them ends its
-# turn with the shape on screen, and an unanchored match would send that healthy
-# crew a continue nobody asked for, spend the whole budget, and stamp a false
-# declared wait on its status log - which then hides a genuinely wedged crew
-# behind the long declared-wait cadence. A citation is disqualified by one of two
-# things: another rendered line below it, which makes it not the last line, or a
-# quote around it on its own line. The harness's own error has neither. The
-# composer and everything the harness draws below it are not output and are
-# skipped before that last line is taken: the raw last non-blank row of an idle
-# pane is the shortcut footer, and anchoring to that would blind the detector
-# completely.
+# The pane condition stays because it names WHICH failure ended the turn, which
+# the event does not: `stop-failure` covers every API-error turn end, and the
+# deny list below exists precisely because some of those must never be retried.
 #
 # A DENY list runs first, over the WHOLE supplied text, and wins outright. It
 # exists because the non-retryable failures are the expensive mistakes:
@@ -79,8 +64,8 @@
 # "the gateway is briefly out of accounts" becomes "the gateway is down", which
 # is the one thing the captain wants surfaced.
 #
-# A RECORD MUST NOT OUTLIVE THE STALL IT RECORDS. The pane exit above only fires
-# on a poll that finds the agent idle, and an agent that recovered and then ran a
+# A RECORD MUST NOT OUTLIVE THE STALL IT RECORDS. The gate above only answers on
+# a poll that finds the agent idle, and an agent that recovered and then ran a
 # long turn is never observed idle while it does so - it would carry a half-spent
 # ladder and a stale horizon anchor into the next, unrelated stall and have that
 # one declared an outage on first sight. Busy alone cannot be the second exit
@@ -90,7 +75,7 @@
 # would wipe the attempt count mid-ladder and no genuine outage could ever be
 # declared. The part that cannot be the ladder's own retry is DURATION - a busy
 # stretch lasting FM_GATEWAY_BUSY_CLEAR_SECS of wall clock is a turn that
-# actually ran, which is the recovery the pane exit would have seen. The bound is
+# actually ran, which is the recovery the gate would have seen. The bound is
 # held in SECONDS and converted to the caller's own poll cadence, because a
 # cadence-denominated bound silently shrinks below the retry when the caller
 # polls faster.
@@ -103,11 +88,10 @@
 #   FM_GATEWAY_BUSY_CLEAR_SECS  default 600; seconds of continuous busy that drop a record
 #
 # No side effects on source. Dependency-light: pure shell plus date, and the one
-# fleet-wide composer owner, which already holds every shape a harness draws
-# below its output and is what tells this classifier where that output ends.
+# owner of the turn-lifecycle record this classifier reads.
 
-# shellcheck source=bin/fm-composer-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-busy-lib.sh"
 
 FM_GATEWAY_RETRY_MAX_DEFAULT=8
 FM_GATEWAY_RETRY_HORIZON_DEFAULT=2700
@@ -225,140 +209,43 @@ fm_gateway_text_is_permanent() {  # <text>
   return 1
 }
 
-# The rendered API-error codes worth re-ringing for. Held once, so the match
-# below reads them rather than respelling them.
-FM_GATEWAY_TRANSIENT_CODES='500 502 503 504 529'
-
-# 0 when <row> is harness CHROME rather than rendered output: a composer border
-# or side rail, a bare agent-prompt row, a transcript rule. Every shape is asked
-# of bin/fm-composer-lib.sh, the one fleet-wide owner of composer shape
-# knowledge, because a second copy of it here is exactly how the adapters' own
-# copies drifted. A shell prompt glyph is deliberately not chrome - that is the
-# owner's dead-shell rule - and a blank row is, so padding around the footer
-# cannot end the scan early. The footer needs no patterns of its own: it renders
-# BELOW the composer, and the scan below stops at the first chrome row it meets
-# coming up from the bottom.
-_fm_gateway_chrome_row() {  # <row>
-  local row=$1 glyph
-  case "$row" in *[![:space:]]*) : ;; *) return 0 ;; esac
-  fm_composer_row_has_edge "$row" && return 0
-  fm_composer_leading_agent_glyph_var glyph "$row" && return 0
-  return 1
-}
-
-# One row per line of <text>, each row's length in COLUMNS: bytes less the UTF-8
-# continuation bytes among them, so a row carrying the harness's em dash measures
-# the columns it occupies on screen rather than its bytes. `${#row}` cannot do
-# this job - it counts bytes under the LC_ALL=C of a daemon or launchd context,
-# and a width compared in bytes never matches a width in columns.
-_fm_gateway_row_columns() {  # <text>
-  printf '%s\n' "$1" | LC_ALL=C awk '{ print length($0) - gsub(/[\200-\277]/, "&") }'
-}
-
-# The pane's WIDTH IN COLUMNS, read off the capture itself: the length of its
-# longest row, but only when two or more rows end at exactly that column. A
-# margin is what makes two rows the same length; a single longest row is just a
-# long line, and taking its length for the width would make the row beneath it a
-# continuation of something that never wrapped. A bordered composer needs no
-# case of its own for the same reason: its border and side rails span the pane,
-# so they ARE that shared maximum. 0 when the capture shows no margin, and then
-# nothing in it can be a continuation.
-_fm_gateway_pane_width() {  # <capture>
-  _fm_gateway_row_columns "$1" | LC_ALL=C awk '
-    { if ($1 > max) { max = $1; hits = 1 } else if ($1 == max) hits++ }
-    END { print (max > 0 && hits >= 2) ? max : 0 }'
-}
-
-# The window's LIVE OUTPUT LINE: the last LOGICAL line of rendered output, which
-# is the line the agent's last turn ended on. Two things are undone first, in
-# this order, because the pane is a screen and not a transcript:
-#   - the composer and everything the harness draws under it are skipped, so an
-#     idle pane's shortcut footer can never stand in for the agent's own last
-#     line, and chrome is never joined into an output line;
-#   - the wrap is undone, walking up from the last output row while the row above
-#     it fills the pane to the margin. A row that fills the margin is the only
-#     row a screen can continue; a shorter row ended its line, so the walk stops
-#     there. That test is a property of the capture, needing no knowledge of how
-#     the harness renders gutters, bullets or indentation - the reason a glyph
-#     test cannot do this job is that it merges separate rendered lines that
-#     happen to carry no gutter, which is a healthy crew re-rung for a 503 it
-#     merely mentioned.
-# A window with no chrome at all - a capture of nothing but output - ends at its
-# own last row. 1 when the window holds no output row at all.
-_fm_gateway_live_output_line() {  # <tail-window> <pane-width-columns>
-  local row i end line width=${2:-0}
-  local -a rows=() row_cols=()
-  while IFS= read -r row; do
-    rows+=("$row")
-  done <<EOF
-$1
-EOF
-  while IFS= read -r row; do
-    row_cols+=("$row")
-  done <<EOF
-$(_fm_gateway_row_columns "$1")
-EOF
-  case "$width" in ''|*[!0-9]*) width=0 ;; esac
-  end=$(( ${#rows[@]} - 1 ))
-  [ "$end" -ge 0 ] || return 1
-  i=$end
-  while [ "$i" -ge 0 ] && ! _fm_gateway_chrome_row "${rows[$i]}"; do
-    i=$(( i - 1 ))
-  done
-  if [ "$i" -ge 0 ]; then
-    i=$(( i - 1 ))
-    while [ "$i" -ge 0 ] && _fm_gateway_chrome_row "${rows[$i]}"; do
-      i=$(( i - 1 ))
-    done
-    [ "$i" -ge 0 ] || return 1
-    end=$i
-  fi
-  line=${rows[$end]}
-  i=$end
-  while [ "$width" -gt 0 ] && [ "$i" -gt 0 ] \
-    && [ "${row_cols[$(( i - 1 ))]:-0}" -eq "$width" ] \
-    && ! _fm_gateway_chrome_row "${rows[$(( i - 1 ))]}"; do
-    i=$(( i - 1 ))
-    line="${rows[$i]}$line"
-  done
-  printf '%s' "$line"
-}
-
-# 0 when <lowercased-line> is the harness RENDERING one of the transient errors
-# rather than text that cites one. A citation wraps the shape in backticks or
-# quotation marks - this repository's docs, tests and sources all do, and so
-# does an agent quoting them back - while the harness never quotes its own
-# error, so a quote ahead of the shape on that line disqualifies it. The line is
-# the reconstructed logical one, so a quote that opened on an earlier screen row
-# is still seen ahead of the shape.
-_fm_gateway_row_renders_error() {  # <lowercased-line>
-  local row=$1 code before
-  for code in $FM_GATEWAY_TRANSIENT_CODES; do
-    case "$row" in
-      *"api error: $code"*) before=${row%%"api error: $code"*} ;;
-      *) continue ;;
-    esac
-    case "$before" in
-      *'`'*|*'"'*|*"'"*|*'“'*|*'”'*) continue ;;
-    esac
-    return 0
-  done
-  return 1
-}
-
 # 0 when the rendered pane tail shows a transient gateway failure worth
 # re-ringing for. The deny list is consulted over the whole text; the transient
-# match reads only the live output line of the last FM_GATEWAY_TAIL_LINES
-# non-blank lines, which is where a turn-ending API error renders.
+# match reads only the last FM_GATEWAY_TAIL_LINES non-blank lines, which is where
+# a turn-ending API error renders, immediately above the prompt and footer.
+# This match alone is NOT the stall decision - fm_gateway_stalled_now gates it
+# behind the turn-end event, which is what tells a stalled crew from one that
+# merely printed these sentences.
 fm_gateway_text_is_transient() {  # <pane-text>
-  local text=${1-} live
+  local text=${1-} t
   [ -n "$text" ] || return 1
   fm_gateway_text_is_permanent "$text" && return 1
-  live=$(_fm_gateway_live_output_line \
-    "$(printf '%s\n' "$text" | grep -v '^[[:space:]]*$' | tail -n "$(fm_gateway_tail_lines)")" \
-    "$(_fm_gateway_pane_width "$text")") \
-    || return 1
-  _fm_gateway_row_renders_error "$(printf '%s' "$live" | tr '[:upper:]' '[:lower:]')"
+  t=$(printf '%s\n' "$text" | grep -v '^[[:space:]]*$' | tail -n "$(fm_gateway_tail_lines)" \
+    | tr '[:upper:]' '[:lower:]')
+  case "$t" in
+    *'api error: 500'*|*'api error: 502'*|*'api error: 503'*|*'api error: 504'*|*'api error: 529'*) return 0 ;;
+  esac
+  return 1
+}
+
+# 0 when the task's OWN turn-lifecycle record says its last turn ended on an API
+# error. Claude Code closes such a turn through StopFailure and never Stop;
+# bin/fm-spawn.sh wires that hook to `--event stop-failure` and bin/fm-busy-lib.sh
+# persists the event in the record it owns, so the distinction this classifier
+# needs is already recorded by the crew itself.
+#
+# SCOPE, deliberately: `stop-failure` is written in exactly one place, the
+# `claude*` arm of bin/fm-spawn.sh's busy wiring. No other harness emits it, so
+# this ladder covers CLAUDE-harness agents only. A task whose record carries no
+# event, an event this does not name, or no readable record at all is NOT in the
+# ladder - the checks below are that refusal, written out rather than left to
+# fall through, because an agent whose turn end cannot be read must not be re-rung
+# on the strength of pane text alone.
+fm_gateway_turn_ended_on_api_error() {  # <state-dir> <scope>
+  local rec event
+  rec=$(fm_busy_record_read "$1" "$2") || return 1
+  event=$(printf '%s' "$rec" | cut -d' ' -f3)
+  [ "$event" = stop-failure ]
 }
 
 # --- durable stall record ----------------------------------------------------
@@ -495,16 +382,19 @@ fm_gateway_stall_age() {  # <state-dir> <scope>
   printf '0'
 }
 
-# THE entry and exit decision for the re-ring ladder, shared by the watcher and
-# the primary keep-alive agent so an agent cannot be in the ladder for one and
-# out of it for the other. <pane-text> is the rendered tail the caller already
-# read. The pane is the only detector: a tail showing the transient error opens
-# or keeps the record, and a tail that no longer shows it is a recovered agent,
-# whose record is dropped rather than re-ringing an agent that is already
-# working again.
+# THE entry and exit decision for the re-ring ladder. <pane-text> is the rendered
+# tail the caller already read. BOTH conditions are required: the agent's own
+# record must say its last turn ended on an API error, and the tail must show
+# which error that was. Failing either is a recovered - or never stalled - agent,
+# whose record is dropped rather than re-ringing an agent that is working again
+# or was never stopped by the gateway at all. The exit is therefore the same
+# transition as the entry, read from the same event: a turn that ends normally
+# records `stop`, which drops the record on the next idle poll without waiting
+# for the old error to scroll off the screen.
 fm_gateway_stalled_now() {  # <state-dir> <scope> <pane-text>
   local state=$1 scope=$2 pane=${3-}
-  if fm_gateway_text_is_transient "$pane"; then
+  if fm_gateway_turn_ended_on_api_error "$state" "$scope" \
+    && fm_gateway_text_is_transient "$pane"; then
     fm_gateway_note_stall "$state" "$scope" || return 1
     return 0
   fi

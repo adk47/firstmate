@@ -240,7 +240,7 @@ test_claude_hooks_semantic_lifecycle() {
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
   done
   jq -e '.hooks.StopFailure | length == 1' "$settings" >/dev/null \
-    || fail "StopFailure must carry the busy writer alone; the pane is the only gateway-stall detector"
+    || fail "StopFailure must carry the busy writer alone; its recorded event is what gates the gateway ladder"
 
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
