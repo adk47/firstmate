@@ -378,6 +378,50 @@ setup_lib() {
   [ -z "$output" ]
 }
 
+# ── qar_qa_review_rollup_state (2026-09-17 read-amplification cut) ─────────
+# The PR list carries each context's LATEST state for the head commit, which
+# is the same fact as the per-PR `commits/<sha>/status` read. These pin the
+# parse, including the two ways it must NOT answer: a missing context reads
+# `absent` (fall through to the reads) and a jq failure is rc 1 (fall through,
+# never "no verdict").
+
+@test "lib: qar_qa_review_rollup_state — reads the qa-review context state" {
+  setup_lib
+  run qar_qa_review_rollup_state '[{"context":"qa-review","state":"success"}]'
+  [ "$status" -eq 0 ]
+  [ "$output" = "success" ]
+  run qar_qa_review_rollup_state '[{"context":"build","state":"success"},{"context":"qa-review","state":"FAILURE"}]'
+  [ "$status" -eq 0 ]
+  [ "$output" = "failure" ]
+  run qar_qa_review_rollup_state '[{"context":"qa-review","state":"error"}]'
+  [ "$output" = "error" ]
+  run qar_qa_review_rollup_state '[{"context":"qa-review","state":"pending"}]'
+  [ "$output" = "pending" ]
+}
+
+@test "lib: qar_qa_review_rollup_state — check-run shape and missing context" {
+  setup_lib
+  # A CheckRun context (name+conclusion) rather than a StatusContext.
+  run qar_qa_review_rollup_state '[{"name":"qa-review","conclusion":"success"}]'
+  [ "$status" -eq 0 ]
+  [ "$output" = "success" ]
+  run qar_qa_review_rollup_state '[{"context":"other","state":"success"}]'
+  [ "$output" = "absent" ]
+  run qar_qa_review_rollup_state '[]'
+  [ "$output" = "absent" ]
+  # Not an array at all (a shape change) reads absent, i.e. fall through to
+  # the per-PR reads — the fail-safe direction.
+  run qar_qa_review_rollup_state '{"nodes":[]}'
+  [ "$output" = "absent" ]
+}
+
+@test "lib: qar_qa_review_rollup_state — jq failure is rc 1, never 'absent'" {
+  setup_lib
+  run qar_qa_review_rollup_state 'not json at all'
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
 # ─────────────────────────────────────────────────────────────────────────
 # Section 2: full entrypoint, PATH-shadowed
 # ─────────────────────────────────────────────────────────────────────────
@@ -1787,4 +1831,50 @@ JSON
   [[ "$output" == *"ACTIVE INCIDENT"* ]]
   [[ "$output" == *"Pull Requests=major_outage"* ]]
   [[ "$output" != *"component detail unavailable"* ]]
+}
+
+@test "e2e 47: a terminal rollup status on the head supplies the verdict with ZERO per-PR reads" {
+  # The read-amplification cut. `statusCheckRollup` arrives with the PR list
+  # (GraphQL budget); before this, every tick re-read commit+timeline+reviews+
+  # status for EVERY open PR on EVERY repo to re-derive a verdict it had
+  # already recorded, on the REST core budget the whole lane shares — the
+  # 352 CANDIDATE/STAGE READ FAILURE events/day measured 2026-09-17.
+  # Nothing else is seeded here on purpose: if the short-circuit did not fire,
+  # the commit read would fall through to the stub's default and this PR would
+  # be read at least once.
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="sharollup000000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 47 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  jq --arg s "$sha" '[.[] | .statusCheckRollup = [{"context":"qa-review","state":"success","description":"GO"}] | .headRefOid = $s]' \
+    "$FIX/prlist/Muso-AI-core-backend.json" > "$FIX/prlist/tmp.json"
+  mv "$FIX/prlist/tmp.json" "$FIX/prlist/Muso-AI-core-backend.json"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ ! -s "$DISPATCH_CALLS" ]
+  # No per-PR REST read was issued for this head at all.
+  run grep -c "repos/Muso-AI/core-backend/commits/$sha" "$GH_LOG"
+  [ "$output" = "0" ]
+  [[ "$(cat "$GH_LOG")" != *"/pulls/47/reviews"* ]]
+  [[ "$(cat "$GH_LOG")" != *"/issues/47/timeline"* ]]
+}
+
+@test "e2e 48: a PR with no qa-review context in its rollup still takes the read path" {
+  # The other half of the contract: the cut must not swallow the PRs the
+  # reconciler exists to recover. Same shape as e2e 1, but with a rollup that
+  # carries only an unrelated context.
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="sharollupmiss00000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 48 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  jq '[.[] | .statusCheckRollup = [{"context":"pr-validate","state":"success"}] | .headRefOid = "'"$sha"'"]' \
+    "$FIX/prlist/Muso-AI-core-backend.json" > "$FIX/prlist/tmp.json"
+  mv "$FIX/prlist/tmp.json" "$FIX/prlist/Muso-AI-core-backend.json"
+  mk_commit "Muso-AI/core-backend" "$sha" "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  run grep -c "repos/Muso-AI/core-backend/commits/$sha" "$GH_LOG"
+  [ "$output" -ge 1 ]
 }
