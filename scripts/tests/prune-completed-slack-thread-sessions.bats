@@ -66,6 +66,20 @@ if [[ " $* " == *" gateway call sessions.delete "* ]]; then
     echo 'gateway unavailable' >&2
     exit 1
   fi
+  # A TRANSIENT transport timeout, copied from the real 2026-09-17 incident
+  # payload. Distinct from 'broken' (an unclassifiable failure) on purpose:
+  # only this shape is tolerated, and the two must not converge.
+  # A transport error that is NOT a timeout. Structurally close to the
+  # tolerated shape on purpose: it shares `gateway_transport_error` and only
+  # differs in `kind`, which is exactly the case an alternation let through.
+  if [[ "$(jq -r '.expectedSessionId' <<<"$params")" == "gwprotocol" ]]; then
+    printf '%s\n' '{"ok":false,"error":{"type":"gateway_transport_error","kind":"protocol","message":"malformed response"}}' >&2
+    exit 1
+  fi
+  if [[ "$(jq -r '.expectedSessionId' <<<"$params")" == "gwtimeout" ]]; then
+    printf '%s\n' '{"ok":false,"error":{"type":"gateway_transport_error","kind":"timeout","message":"gateway timeout after 30000ms","timeoutMs":30000}}' >&2
+    exit 1
+  fi
   printf '%s\n' '{"ok":true,"deleted":true}'
   exit 0
 fi
@@ -387,4 +401,82 @@ Config (/root/.openclaw-main/openclaw.json): Removed retired agents.entries.*.de
   [ "$status" -eq 1 ]
   [ "$(jq -r '.error' <<<"$output")" = "SESSION_LIST_FAILED" ]
   [[ "$(jq -r '.stderr' <<<"$output")" == *"gateway unreachable"* ]]
+}
+
+
+# ── transient gateway failure must not page (2026-09-17 incident) ──────────
+# The gateway saturated during a deploy; one sessions.delete hit
+# `gateway timeout after 30000ms` AFTER 5 successful deletions, and this unit
+# exited 1 and paged with nothing for a human to do -- while the same
+# saturation was already paging through the deploy rollback. The failed
+# session stays ELIGIBLE, so the next 6h run retries it and nothing is lost.
+
+@test "a transient gateway timeout AFTER progress does not page" {
+  export OPENCLAW_STUB_SESSIONS='{"sessions":[
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000101","agentId":"scout","sessionId":"old-done","updatedAt":1990000000000,"status":"done"},
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000102","agentId":"scout","sessionId":"gwtimeout","updatedAt":1990000000001,"status":"done"}
+  ]}'
+
+  run bash "$SUT" --profile main --apply
+
+  [ "$status" -eq 0 ]                                   # no page
+  [ "$(jq -r '.deleted' <<<"$output")" -eq 1 ]          # progress was real
+  [ "$(jq -r '.failed'  <<<"$output")" -eq 1 ]          # and still RECORDED
+  echo "$output" | grep -q 'TRANSIENT gateway failure'
+  echo "$output" | grep -q 'next run retries'
+}
+
+@test "a transient timeout with ZERO progress still pages" {
+  # No progress means the sweep accomplished nothing; that is a real problem
+  # even though the error itself is transient-shaped.
+  export OPENCLAW_STUB_SESSIONS='{"sessions":[
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000103","agentId":"scout","sessionId":"gwtimeout","updatedAt":1990000000000,"status":"done"}
+  ]}'
+
+  run bash "$SUT" --profile main --apply
+
+  [ "$status" -eq 1 ]
+  [ "$(jq -r '.deleted' <<<"$output")" -eq 0 ]
+  [ "$(jq -r '.failed'  <<<"$output")" -eq 1 ]
+}
+
+@test "an UNCLASSIFIABLE failure after progress still pages — fail closed" {
+  # The scope guard. The tolerance covers exactly one recognised shape; any
+  # other failure must keep paging even when deletions succeeded first,
+  # because "could not classify" must never become "assumed fine".
+  export OPENCLAW_STUB_SESSIONS='{"sessions":[
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000104","agentId":"scout","sessionId":"old-done","updatedAt":1990000000000,"status":"done"},
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000105","agentId":"scout","sessionId":"broken","updatedAt":1990000000001,"status":"done"}
+  ]}'
+
+  run bash "$SUT" --profile main --apply
+
+  [ "$status" -eq 1 ]
+  [ "$(jq -r '.deleted' <<<"$output")" -eq 1 ]
+  echo "$output" | grep -qv 'TRANSIENT gateway failure'
+}
+
+@test "a clean run still exits 0 and reports no failures" {
+  # Guards the ordinary path against the new branching.
+  run bash "$SUT" --profile main --apply
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.failed' <<<"$output")" -eq 0 ]
+}
+
+@test "a NON-timeout gateway_transport_error after progress still pages" {
+  # QA finding on #979: the first cut matched `gateway_transport_error` OR the
+  # timeout message, so a `kind:"protocol"` failure — a malformed response,
+  # not self-healing — suppressed the page after one successful deletion.
+  # Only an actual timeout is tolerated.
+  export OPENCLAW_STUB_SESSIONS='{"sessions":[
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000106","agentId":"scout","sessionId":"old-done","updatedAt":1990000000000,"status":"done"},
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000107","agentId":"scout","sessionId":"gwprotocol","updatedAt":1990000000001,"status":"done"}
+  ]}'
+
+  run bash "$SUT" --profile main --apply
+
+  [ "$status" -eq 1 ]                                   # must still page
+  [ "$(jq -r '.deleted' <<<"$output")" -eq 1 ]           # despite progress
+  [ "$(jq -r '.failed'  <<<"$output")" -eq 1 ]
+  echo "$output" | grep -qv 'TRANSIENT gateway failure'
 }
