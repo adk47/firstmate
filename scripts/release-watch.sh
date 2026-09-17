@@ -31,6 +31,9 @@ set -euo pipefail
 #   HYDRA_RELEASE_STATE_DIR  state root (default /var/lib/hydra-release)
 #   RELEASE_STATUS_GRACE_SECONDS  how long a dispatch may carry no rollout
 #                            record before it is retired (default 7200)
+#   RELEASE_FINDING_REPAGE_SECONDS  how long a STANDING finding stays quiet
+#                            between pages; it is still logged every tick
+#                            (default 86400)
 #   RELEASE_HL_MODEL         model for the highlights call
 #                            (default: openai/gpt-5.6-luna)
 #   RELEASE_HL_KEY_FILE      OpenRouter key JSON
@@ -50,6 +53,7 @@ CHECKOUT_ROOT="$STATE_ROOT/repos"
 ANNOUNCED_DIR="$STATE_ROOT/announced"
 HIGHLIGHTS_DIR="$STATE_ROOT/highlights"
 LOCK_FILE="$STATE_ROOT/release-watch.lock"
+FINDINGS_DIR="$STATE_ROOT/findings"
 
 
 # Honour DRY_RUN from the environment as well as --dry-run. release.sh has
@@ -134,6 +138,52 @@ state_get() {
   awk -F= -v k="$2" '$1==k {sub(/^[^=]*=/,""); print; exit}' "$f"
 }
 
+# standing_finding_should_page <key> <fingerprint>
+# Returns 0 when this finding should fail the unit (and therefore page),
+# 1 when it should be logged and left quiet.
+#
+# Two of this detector's refusals are STANDING findings: an unresolved
+# rollout past the grace window, and a dispatch window that never reached
+# the checkpoint. Both are correct, both are load-bearing, and both persist
+# until a human re-seeds the baseline -- which means the 5-minute timer
+# re-discovers the same unresolved thing forever. Failing every tick pages
+# ~288 times a day for ONE finding, and that is how a real signal becomes
+# noise nobody reads (measured: wcn's 06460cdf sat `pending` for 13 days and
+# paged on every tick; the same shape burned us once already as the
+# paths-triggered audit storm, 17 pages in a day for one standing finding).
+#
+# The cure is NOT silence. The WARN block is still written on every tick, so
+# the record stays complete and greppable. Only the PAGE is deduped, and it
+# re-fires when the finding is new, when its fingerprint changes (a
+# different sha or rollout state is a different finding), or once per
+# FINDING_REPAGE_SECONDS so a forgotten one resurfaces on its own.
+standing_finding_should_page() {
+  local key="$1" fp="$2" f="$FINDINGS_DIR/$1" prev_fp="" prev_at="" now elapsed
+  now="$(date -u +%s)"
+  if [[ -r "$f" ]]; then
+    prev_fp="$(awk -F= '$1=="fingerprint" {sub(/^[^=]*=/,""); print; exit}' "$f")"
+    prev_at="$(awk -F= '$1=="paged_at" {print $2; exit}' "$f")"
+  fi
+  # A corrupt or absent stamp must PAGE, never suppress: the failure mode we
+  # can afford is one extra page, not a swallowed finding.
+  [[ "$prev_at" =~ ^[0-9]+$ ]] || prev_at=0
+  elapsed=$(( now - prev_at ))
+  # The lower bound matters: if the clock jumps backwards, a negative
+  # elapsed would otherwise read as "inside the window" and silence the
+  # finding until the clock caught up.
+  if [[ "$fp" == "$prev_fp" && "$prev_at" -gt 0 \
+        && "$elapsed" -ge 0 && "$elapsed" -lt "$FINDING_REPAGE_SECONDS" ]]; then
+    log "$key: standing finding unchanged, last paged ${elapsed}s ago — logged above, not re-paged (re-pages after ${FINDING_REPAGE_SECONDS}s or on any change)."
+    return 1
+  fi
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    mkdir -p "$FINDINGS_DIR"
+    printf 'fingerprint=%s\npaged_at=%s\n' "$fp" "$now" > "$f.tmp.$$" \
+      && mv -f "$f.tmp.$$" "$f"
+  fi
+  return 0
+}
+
 # state_put <key> field=value ...
 # Merges the given fields onto the existing state and rewrites it atomically.
 # NAMED rather than positional on purpose: the positional form reached six
@@ -206,6 +256,18 @@ if ! [[ "$STATUS_GRACE_SECONDS" =~ ^[0-9]+$ ]]; then
   die "RELEASE_STATUS_GRACE_SECONDS must be a non-negative integer number of seconds, got '$STATUS_GRACE_SECONDS'."
 fi
 
+# How long a STANDING finding stays quiet between pages. See
+# standing_finding_should_page: the timer runs every 5 minutes and these
+# findings persist until a human re-seeds, so failing the unit on every tick
+# turns one real signal into ~288 pages a day.
+FINDING_REPAGE_SECONDS="${RELEASE_FINDING_REPAGE_SECONDS:-86400}"
+# Validated for the same reason as the grace window above: a non-numeric
+# value coerces toward zero, which here would re-page on every tick and
+# quietly undo the dedupe this knob exists to provide.
+if ! [[ "$FINDING_REPAGE_SECONDS" =~ ^[0-9]+$ ]]; then
+  die "RELEASE_FINDING_REPAGE_SECONDS must be a non-negative integer number of seconds, got '$FINDING_REPAGE_SECONDS'."
+fi
+
 # How many dispatch runs the detector looks back over. gh returns the NEWEST
 # runs, so this window is a tail: one page covers the ordinary case, a real
 # backlog escalates to RUN_WINDOW_MAX once, and past that the tick fails loud
@@ -275,7 +337,13 @@ daily_gate_open() {
 # next_release_by_status <key>
 # Prints "<sha>\t<run_at>" for the OLDEST commit that has not been announced
 # and that H-DevOps has recorded as a successful prod rollout.
-# rc 0 = found, 1 = nothing new, 2 = could not measure.
+# rc 0 = found, 1 = nothing new, 2 = could not measure,
+# rc 3 = a STANDING finding that needs a human re-seed. 3 is split out from 2
+# because it behaves differently: a "could not measure" is transient and
+# self-resolving, so it must fail on every tick, whereas a standing finding
+# persists until someone acts and is deduped by
+# standing_finding_should_page. On rc 3 stdout carries the finding's
+# fingerprint instead of a release tuple.
 #
 # The identity comes from a commit status attached to the app-repo commit
 # itself (`H-DevOps / deploy` = "Rollout to muso-prod (success)"), which is
@@ -385,7 +453,8 @@ next_release_by_status() {
       warn "    Releases older than this window would be skipped silently, so this tick refuses to announce anything."
       warn "    Either the watcher has been down for a very long time, or the checkpoint run has aged out of GitHub's retention."
       warn "    Resolve by re-seeding the baseline: $0 --repo=$key --bootstrap=<sha-or-ref>"
-      return 2
+      printf 'window-exhausted\t%s\t%s\n' "${last_run_id:-none}" "$limit"
+      return 3
     fi
     log "$key: dispatch window of $limit did not reach the checkpoint — widening to $RUN_WINDOW_MAX."
     limit="$RUN_WINDOW_MAX"
@@ -444,7 +513,19 @@ next_release_by_status() {
           warn "    Whether it reached production is INDETERMINATE, so this will not guess:"
           warn "    skipping could drop a real release, announcing past it could strand one."
           warn "    Inspect the H-DevOps run for $repo, then re-seed with --bootstrap=<sha currently live>."
-          return 2
+          # The sha, the DISPATCH RUN and the state are all part of the
+          # identity. The state matters because a rollout moving
+          # pending -> absent is a different finding. The run id matters
+          # because the same sha can be REDEPLOYED: run 1001 for sha A goes
+          # indeterminate and pages, later succeeds and is announced, then
+          # run 1002 redeploys A and goes indeterminate again inside the
+          # window. Keyed on sha+state alone that is byte-identical to the
+          # incident already stamped, so a genuinely new deployment incident
+          # would inherit the old silence and the unit would exit 0. Nothing
+          # clears the stamp on recovery, so the run id is what separates
+          # them. (QA finding on #971 — I had dismissed this case.)
+          printf 'unresolved-rollout\t%s\t%s\t%s\n' "$sha" "$run_id" "${st:-none}"
+          return 3
         fi
         log "$key: ${sha:0:8} rollout unresolved (state='${st:-none}', ${u_age}s) — waiting."
         return 1 ;;
@@ -669,6 +750,11 @@ process_repo() {
            # The rollout record is per-sha, so the sha IS the marker.
            marker="$sha" ;;
         1) log "$key: no confirmed prod release found."; return 0 ;;
+        3) # A standing finding: already fully logged by the detector. Fail
+           # the unit only when it is new, changed, or due to re-page.
+           standing_finding_should_page "$key" "$(printf '%s' "$paired" | head -1)" \
+             || return 0
+           return 1 ;;
         *) return 1 ;;
       esac
       ;;
@@ -942,10 +1028,36 @@ if [[ -n "$BOOTSTRAP_REF" ]]; then
   # dispatch may already have succeeded while its rollout is still in flight;
   # stamping its timestamp would make the pairing skip past that release and
   # leave the watcher wedged until another manual re-seed.
-  braw="$(gh run list --repo "$(release_repo_field "$bkey" repo)" \
-            --workflow "$(release_repo_field "$bkey" sender)" \
-            --branch "$(release_repo_field "$bkey" branch)" \
-            --limit 100 --json databaseId,headSha,conclusion,createdAt,status 2>/dev/null || echo '[]')"
+  # A FAILED read is not evidence of an absent dispatch. This used to be
+  # `|| echo '[]'`, which turned any gh hiccup into an empty run list and
+  # then reported it as "no successful prod dispatch found for <sha>" --
+  # telling the operator to go pick a different sha when the sha was fine.
+  # It cost a real investigation: core-backend's d0e4be09 was refused that
+  # way and written off as un-bootstrappable, while run 35151474417 had
+  # succeeded for it all along. "Could not measure" is a THIRD state, not a
+  # synonym for "no".
+  # stderr goes to a FILE, never merged into the captured stdout: gh writes
+  # routine notices to stderr, and folding those into $braw would corrupt a
+  # perfectly good listing and trip the shape guard below.
+  brun_err="$(mktemp)"
+  if ! braw="$(gh run list --repo "$(release_repo_field "$bkey" repo)" \
+                 --workflow "$(release_repo_field "$bkey" sender)" \
+                 --branch "$(release_repo_field "$bkey" branch)" \
+                 --limit 100 --json databaseId,headSha,conclusion,createdAt,status 2>"$brun_err")"; then
+    bdetail="$(tr -d '\0' < "$brun_err" | head -c 300)"
+    rm -f "$brun_err"
+    die "$bkey: could not read the dispatch runs (gh failed): ${bdetail}. This says NOTHING about whether ${bsha:0:8} deployed -- retry rather than choosing another sha."
+  fi
+  rm -f "$brun_err"
+  # Guard the shape too: a zero-exit response that is not a JSON array would
+  # otherwise reach jq, fail open to empty, and land on the same misleading
+  # "no successful dispatch" verdict.
+  if ! printf '%s' "$braw" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    die "$bkey: the dispatch-run listing was not a JSON array. Refusing to read a baseline out of an unparseable response."
+  fi
+  if [[ "$(printf '%s' "$braw" | jq -r 'length')" -eq 0 ]]; then
+    die "$bkey: the dispatch-run listing came back EMPTY for the production branch, which cannot be right for a repo that deploys. Treating this as unmeasured, not as proof that ${bsha:0:8} never shipped."
+  fi
   brun_at="$(printf '%s' "$braw" | jq -r --arg sha "$bsha" '
     [ .[] | select(.status=="completed" and .conclusion=="success" and .headSha==$sha) ]
     | max_by(.databaseId) | .createdAt // empty')"
@@ -953,7 +1065,9 @@ if [[ -n "$BOOTSTRAP_REF" ]]; then
     [ .[] | select(.status=="completed" and .conclusion=="success" and .headSha==$sha) ]
     | max_by(.databaseId) | .databaseId // empty')"
   if [[ -z "$brun_at" ]]; then
-    die "$bkey: no successful prod dispatch found for ${bsha:0:8}. Bootstrap to a sha that actually deployed, so the baseline matches a real rollout."
+    # Now a genuine answer: the listing was read, it was well-formed, and it
+    # was non-empty -- this sha really has no successful dispatch in it.
+    die "$bkey: no successful prod dispatch found for ${bsha:0:8} among $(printf '%s' "$braw" | jq -r 'length') runs read. Bootstrap to a sha that actually deployed, so the baseline matches a real rollout."
   fi
   bmarker="$bsha"
 
