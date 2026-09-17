@@ -18,7 +18,8 @@
 # The check cases pin the wake contract: one line on a state change, silence on
 # an unchanged poll and on pool membership churn alone, a throttled RED repeat,
 # and the fail-back line that names the account which regained Fable capacity -
-# only for an account that really came back, never for one merely added.
+# only for an account that really came back, never for one merely added, and not
+# lost to a silent poll, an unreadable pool, or a record from another schema.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -454,7 +455,7 @@ clamp_elapsed=$(( $(date +%s) - clamp_started ))
 [ "$clamp_elapsed" -lt 20 ] \
   || fail "a hung quota-axi must be cut to the per-call cap (took ${clamp_elapsed}s)"
 expect_field "$clamped" fable_state RED "clamped fable state"
-expect_field "$clamped" fable_reason quota_axi_below_compatibility_floor "clamped fable reason"
+expect_field "$clamped" fable_reason quota_axi_version_unreadable_or_below_floor "clamped fable reason"
 pass "a hung quota-axi is cut to the per-call cap, well inside FM_CHECK_TIMEOUT"
 
 # --- check: wake contract ----------------------------------------------------
@@ -484,7 +485,7 @@ first=$(run_check "$NOW")
 [ -n "$first" ] || fail "check first poll must print the observed state"
 expect_field "$first" overall GREEN "check first poll overall"
 case "$first" in
-  *'GREEN again'*|*'capacity back'*) fail "a first poll must not claim a recovery: $first" ;;
+  *'capacity back'*) fail "a first poll must not claim a recovery: $first" ;;
 esac
 
 second=$(run_check "$((NOW + 300))")
@@ -521,12 +522,13 @@ run_check "$((NOW + 3000))" >/dev/null
 make_pool "$chealth" "$caccounts" 6 11 0
 add_account "$caccounts" revived-account 5 40 10 200
 recovery=$(run_check "$((NOW + 3300))")
-printf '%s\n' "$recovery" | grep -q 'GREEN again account=revived-account' \
+printf '%s\n' "$recovery" | grep -q 'capacity back account=revived-account' \
   || fail "fail-back must name the recovered account (got: $recovery)"
 expect_field "$recovery" pool_state GREEN "fail-back pool state"
 pass "the fail-back line names the account that regained Fable capacity"
 
-# The same regain on a pool that is still thin reads `capacity back`.
+# A regain that leaves the pool thin carries the same label; `pool_state=` on
+# the same line is what says how far the pool recovered.
 backlab="$TMP_ROOT/back"
 mkdir -p "$backlab/state"
 make_quota "$backlab/quota.json" 60 0.5 none through_reset
@@ -538,8 +540,57 @@ add_account "$backlab/accounts.json" thin-account 5 40 10 200
 back=$(run_check_in "$backlab" "$((NOW + 300))")
 expect_field "$back" pool_state YELLOW "capacity-back pool state"
 printf '%s\n' "$back" | grep -q 'capacity back account=thin-account' \
-  || fail "a regain that leaves the pool thin must read 'capacity back' (got: $back)"
-pass "a regain on a still-thin pool is labelled 'capacity back'"
+  || fail "a regain that leaves the pool thin must name the account (got: $back)"
+pass "a regain on a still-thin pool carries the same label and a YELLOW pool_state"
+
+# A gateway restart between polls makes the pool unreadable, and an unreadable
+# pool observed no membership at all. The window that resets during the outage
+# must still be named by the wake that follows it.
+gaplab="$TMP_ROOT/gap"
+mkdir -p "$gaplab/state"
+make_quota "$gaplab/quota.json" 60 0.5 none through_reset
+make_pool "$gaplab/health.json" "$gaplab/accounts.json" 6 11 5
+add_account "$gaplab/accounts.json" outage-account 5 100 100 100
+gap_first=$(run_check_in "$gaplab" "$NOW")
+expect_field "$gap_first" pool_state RED "outage first poll state"
+expect_field "$gap_first" pool_reason no_fable_capable_account "outage first poll reason"
+expect_field "$gap_first" pool_tracked outage-account "outage first poll tracked"
+# The gateway restarts, so both fetches fail and the pool reads UNKNOWN.
+rm -f "$gaplab/health.json" "$gaplab/accounts.json"
+gap_outage=$(run_check_in "$gaplab" "$((NOW + 300))")
+expect_field "$gap_outage" pool_state UNKNOWN "outage poll state"
+expect_field "$gap_outage" pool_reason pool_unavailable "outage poll reason"
+# The gateway is back and the account's window reset during the restart.
+make_pool "$gaplab/health.json" "$gaplab/accounts.json" 6 11 0
+add_account "$gaplab/accounts.json" outage-account 5 0 0 100
+gap_wake=$(run_check_in "$gaplab" "$((NOW + 600))")
+expect_field "$gap_wake" pool_state GREEN "outage recovery pool state"
+printf '%s\n' "$gap_wake" | grep -q 'capacity back account=outage-account' \
+  || fail "a regain across an unreadable pool must still be named (got: $gap_wake)"
+pass "an unreadable pool does not consume a pending regain"
+
+# A record stamped with another schema is no record at all, so the next poll is
+# a first poll: it prints, and it claims no recovery it cannot have observed.
+schemalab="$TMP_ROOT/schema"
+mkdir -p "$schemalab/state"
+make_quota "$schemalab/quota.json" 60 0.5 none through_reset
+make_pool "$schemalab/health.json" "$schemalab/accounts.json" 6 11 0
+add_account "$schemalab/accounts.json" schema-account 5 40 20 100
+run_check_in "$schemalab" "$NOW" >/dev/null
+silent_repeat=$(run_check_in "$schemalab" "$((NOW + 300))")
+[ -z "$silent_repeat" ] \
+  || fail "the unchanged poll before the schema swap must be silent (got: $silent_repeat)"
+# The foreign record claims exactly the states this poll observes, so reading it
+# would silence the poll; ignoring it makes the poll a first poll, which prints.
+printf 'schema=fm-fable-runway-check-v0\noverall=GREEN\nfable_state=GREEN\npool_state=GREEN\ncapable=schema-account\nred_at=0\n' \
+  > "$schemalab/state/.fable-runway"
+foreign=$(run_check_in "$schemalab" "$((NOW + 600))")
+[ -n "$foreign" ] || fail "a record from another schema must be ignored, so the poll prints"
+expect_field "$foreign" pool_state GREEN "foreign-schema poll state"
+case "$foreign" in
+  *'capacity back'*) fail "a poll with no usable record must not claim a recovery: $foreign" ;;
+esac
+pass "a record stamped with another schema is treated as no record at all"
 
 # The gateway's routable count lags a per-account window reset by a poll, so the
 # regain itself lands on a silent poll. The next wake that prints must still
@@ -563,7 +614,7 @@ make_pool "$lagslab/health.json" "$lagslab/accounts.json" 6 11 0
 add_account "$lagslab/accounts.json" lagging-account 5 0 0 100
 lag_wake=$(run_check_in "$lagslab" "$((NOW + 600))")
 expect_field "$lag_wake" pool_state GREEN "lagged regain wake pool state"
-printf '%s\n' "$lag_wake" | grep -q 'GREEN again account=lagging-account' \
+printf '%s\n' "$lag_wake" | grep -q 'capacity back account=lagging-account' \
   || fail "a regain consumed by a silent poll must still be named (got: $lag_wake)"
 pass "a regain that lands on a silent poll is named by the next wake that prints"
 
@@ -581,7 +632,7 @@ add_account "$addlab/accounts.json" newcomer 5 40 20 100
 added=$(run_check_in "$addlab" "$((NOW + 300))")
 expect_field "$added" pool_state GREEN "added account pool state"
 case "$added" in
-  *'GREEN again'*|*'capacity back'*) fail "a newly added account is not a recovery: $added" ;;
+  *'capacity back'*) fail "a newly added account is not a recovery: $added" ;;
 esac
 pass "an account added to the pool is never labelled a recovery"
 

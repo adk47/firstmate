@@ -196,7 +196,7 @@ fable_read() {
       return 0
     fi
     if ! fm_quota_axi_compatible "$timeout" >/dev/null 2>&1; then
-      printf 'RED\t-\t-\t-\t-\tquota_axi_below_compatibility_floor\n'
+      printf 'RED\t-\t-\t-\t-\tquota_axi_version_unreadable_or_below_floor\n'
       return 0
     fi
     json=$(fm_run_timed "$timeout" quota-axi --provider claude --json --no-credential-refresh \

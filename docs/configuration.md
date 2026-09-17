@@ -570,9 +570,10 @@ That writes `state/fable-runway.check.sh` and binds its bytes with `bin/fm-check
 The check prints one line, and only one, when either runway state changes since the last printed poll, or when a persistent `RED` has not been reported for `FM_FABLE_RUNWAY_REALERT_SECS` (default 3600, `0` disables the repeat).
 Only those transitions are printable: the pool's membership churns on its own as accounts cross and reset their windows, and a change to `pool_capable` or `pool_tracked` alone, with every state unchanged, prints nothing.
 The wake always carries both `fable_state=` and `pool_state=`, so which runway went `RED` is never ambiguous.
-A poll that prints while the pool has just regained capacity also carries a recovery label, which reads `GREEN again account=<name>` when the pool is `GREEN` and `capacity back account=<name>` otherwise.
+A poll that prints while the pool has just regained capacity also carries a recovery label, `capacity back account=<name>`; there is one spelling of it, because the same line already carries `pool_state=`.
 A regain means an account that was Fable-tracked but not Fable-capable as of the last printed poll is capable now; an account merely added to the pool is new, not recovered, and never earns the label.
 The membership is measured against the last poll that printed, not the last poll that ran, so a window that resets while the gateway's `routable` count still lags lands on a silent poll and is still named by the next wake that prints.
+A poll whose `pool_state` is `UNKNOWN` holds the name sets too, even though it prints: an unreadable pool observed no membership at all, so a gateway restart between polls does not consume a pending regain either.
 The check never switches anything; the failover and the lane-side offload are firstmate actions.
 `state/.fable-runway` records the last printed states, the last `RED` report time, and the tracked and capable name sets as of that same printed poll, so an unchanged poll stays silent and a regain is distinguishable from an addition.
 

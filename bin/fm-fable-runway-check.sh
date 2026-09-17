@@ -23,9 +23,9 @@
 # or tracked name set alone never wakes firstmate.
 #
 # A poll that prints while the pool has just regained a Fable-capable account
-# also carries the fail-back label, which names the account and reads `GREEN
-# again account=<names>` when the pool is GREEN, or `capacity back
-# account=<names>` otherwise. A regain means an account that was Fable-tracked
+# also carries the fail-back label, `capacity back account=<names>`, which names
+# the account. There is one spelling of it, because the same line already
+# carries pool_state= verbatim. A regain means an account that was Fable-tracked
 # but not Fable-capable as of the last printed poll is capable now; an account
 # that is merely new to the pool never earns that label, because nothing came
 # back.
@@ -34,7 +34,10 @@
 # reported, not the last one observed. A window that resets while the gateway's
 # routable count still lags is a normal sequence, and it lands on a silent poll;
 # holding the name sets until a line prints is what keeps that regain from being
-# consumed without ever being attributed to an account.
+# consumed without ever being attributed to an account. A poll whose pool is
+# UNKNOWN holds them too, even though it prints: an unreadable pool observed no
+# membership at all, and reading its `none` as an empty pool would consume a
+# pending regain the same way.
 #
 # The wake therefore always carries both runway states, so firstmate can tell
 # whether the Fable credential, the account pool, or both went RED.
@@ -45,7 +48,9 @@
 # The record state/.fable-runway holds the last printed states, the last RED
 # report time, and the Fable-tracked and Fable-capable name sets as of that same
 # printed poll, so a silent poll stays silent and a regain is distinguishable
-# from an addition.
+# from an addition. It is stamped with its schema, and a record carrying any
+# other stamp is treated as no record at all rather than read under the wrong
+# field layout.
 # `arm` writes a byte-static shim
 # that the watcher validates with bin/fm-check-register.sh before it ever
 # dispatches it; `disarm` removes the shim, its trust binding, and the record.
@@ -162,7 +167,7 @@ action_check() {
   [ -n "$tracked" ] || tracked=none
 
   local last_present=0 last_overall='' last_fable='' last_pool='' last_capable='' last_tracked='' last_red=''
-  if record_get schema >/dev/null 2>&1; then
+  if [ "$(record_get schema 2>/dev/null)" = "$RECORD_SCHEMA" ]; then
     last_present=1
     last_overall=$(record_get overall)
     last_fable=$(record_get fable_state)
@@ -190,11 +195,7 @@ action_check() {
   # A first poll has no prior sets, so nothing can have come back; a recovery
   # label belongs only to a real regain.
   if [ "$last_present" -eq 1 ] && [ -n "$recovered" ]; then
-    if [ "$pool" = GREEN ]; then
-      label="GREEN again account=$(printf '%s' "$recovered" | tr ' ' ',')"
-    else
-      label="capacity back account=$(printf '%s' "$recovered" | tr ' ' ',')"
-    fi
+    label="capacity back account=$(printf '%s' "$recovered" | tr ' ' ',')"
   fi
 
   local print=0 last_red_n='' realert=''
@@ -225,7 +226,7 @@ action_check() {
   elif [ "$overall" != RED ]; then
     red_at=0
   fi
-  if [ "$print" -eq 0 ] && [ "$last_present" -eq 1 ]; then
+  if [ "$last_present" -eq 1 ] && { [ "$print" -eq 0 ] || [ "$pool" = UNKNOWN ]; }; then
     capable=$last_capable
     tracked=$last_tracked
   fi

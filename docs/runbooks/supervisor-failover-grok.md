@@ -120,12 +120,12 @@ The session id is the one the previous `/exit` printed, and it is also visible i
 The fail-back signal is the check's recovery line:
 
 ```
-fable-runway: GREEN again account=<name> ...
+fable-runway: capacity back account=<name> ... pool_state=<S> ...
 ```
 
 It fires when an account the pool tracked but could not use is usable again, which is normally a per-account Fable window reset.
 An account newly added to the pool is not a recovery and is never named here.
-When the pool is still YELLOW but an account came back, the same event reads `capacity back account=<name>` instead.
+The label reads the same however far the pool recovered; read `pool_state=` on the same line to see whether the pool is back to `GREEN` or still thin at `YELLOW`.
 
 Procedure:
 
