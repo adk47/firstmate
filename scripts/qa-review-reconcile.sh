@@ -463,6 +463,9 @@ else
 fi
 
 dispatched_this_tick=0
+# PRs whose head commit already carried a terminal qa-review status in the PR
+# list, so no per-PR REST read was needed (the read-amplification cut).
+terminal_skipped=0
 paged_this_tick=0
 page_cap_deferred=0
 pre_epoch_ignored_total=0
@@ -489,6 +492,9 @@ for repo in "${REPOS[@]}"; do
   repo_reads_attempted=0
   repo_reads_failed=0
   repo_failed_classes=""
+  # PRs skipped because the list already showed a terminal qa-review status on
+  # their head commit (the read-amplification cut; see the loop body).
+  repo_terminal_skipped=0
   # Per-STAGE attempted/failed counts for this repo, this tick — see
   # lib/qa-reconcile.sh's "Per-repo, per-STAGE read-failure tracking" block.
   # Pre-initialize every stage key: under `set -u`, referencing an
@@ -499,7 +505,7 @@ for repo in "${REPOS[@]}"; do
   declare -A stage_failed=( [commit]=0 [timeline]=0 [reviews]=0 [status]=0 [author_uid]=0 )
 
   if ! prs_json="$("$GH" pr list --repo "$repo" --state open \
-        --json number,headRefOid,baseRefName,isDraft,author,updatedAt,createdAt,url \
+        --json number,headRefOid,baseRefName,isDraft,author,updatedAt,createdAt,url,statusCheckRollup \
         --limit "$PRLIST_LIMIT" 2>/dev/null)" || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$prs_json"; then
     log "READ-FAILURE: could not list open PRs for $repo — counted, not treated as 'no verdict'."
     failed_repo_count=$((failed_repo_count + 1))
@@ -573,6 +579,29 @@ for repo in "${REPOS[@]}"; do
       continue
     fi
     [ -n "$author_uid" ] || continue
+
+    # ── Terminal-status short-circuit: do not re-read a settled PR ───────
+    # The PR list already carries each context's LATEST state for the head
+    # commit (`statusCheckRollup`), so a PR whose head holds a terminal
+    # qa-review status is classified `verdict` by qar_classify_verdict's very
+    # first case — the same answer the four per-PR REST reads below would
+    # produce, at zero REST cost. Without this, every tick re-read the commit,
+    # timeline, reviews and combined status of EVERY open PR on EVERY repo to
+    # re-derive a verdict it had already recorded: that is the per-tick read
+    # amplification measured on 2026-09-17 (352 CANDIDATE/STAGE READ FAILURE
+    # events in a day, all on the REST core budget the rest of the lane shares,
+    # while the GraphQL budget sat unused at 5,000/5,000).
+    # Fail-safe direction: anything other than a terminal state — including a
+    # jq failure (empty) or `absent` — falls through to the existing reads, so
+    # a rollup shape change can only cost reads, never a missed recovery.
+    rollup_state="$(qar_qa_review_rollup_state "$(jq -c '.statusCheckRollup // []' <<<"$pr_json" 2>/dev/null)")" || rollup_state=""
+    case "$rollup_state" in
+      success|failure|error)
+        terminal_skipped=$((terminal_skipped + 1))
+        repo_terminal_skipped=$((repo_terminal_skipped + 1))
+        continue
+        ;;
+    esac
 
     # ── head-push trigger time ───────────────────────────────────────────
     repo_reads_attempted=$((repo_reads_attempted + 1))
@@ -807,6 +836,13 @@ for repo in "${REPOS[@]}"; do
     dispatched_this_tick=$((dispatched_this_tick + 1))
   done < <(jq -c '.[]' <<<"$prs_json")
 
+  # PRs whose head already showed a terminal qa-review status this tick —
+  # they consumed zero per-PR reads (see the loop's short-circuit). Reported
+  # per repo so a reader can compare read volume against the PR count.
+  if [ "$repo_terminal_skipped" -gt 0 ]; then
+    log "TERMINAL SKIP: $repo — $repo_terminal_skipped PR(s) already carried a terminal qa-review status on their head commit; no per-PR read issued for them this tick."
+  fi
+
   # ── Candidate-level (per-PR) read-failure watchdog ─────────────────────
   # A durable failure that leaves `gh pr list` working but every per-PR read
   # failing (a revoked token scope, a permissions change, a sustained
@@ -942,4 +978,4 @@ else
   fi
 fi
 
-log "tick complete: repos=$total_repo_count failed_repo_listings=$failed_repo_count dispatched=$dispatched_this_tick pre_epoch_ignored=$pre_epoch_ignored_total"
+log "tick complete: repos=$total_repo_count failed_repo_listings=$failed_repo_count dispatched=$dispatched_this_tick pre_epoch_ignored=$pre_epoch_ignored_total terminal_skipped=$terminal_skipped"

@@ -112,6 +112,30 @@ qar_qa_review_status_state() {
   printf '%s' "$out"
 }
 
+# qar_qa_review_rollup_state <pr-list-rollup-json>
+# Input: the `statusCheckRollup` ARRAY that `gh pr list --json
+# statusCheckRollup` already returns per PR. That array is the same fact as
+# `gh api repos/<repo>/commits/<sha>/status` for our one context — GitHub's
+# rollup keeps the LATEST state per context for the PR's head commit — but it
+# arrives on the PR list's GraphQL budget instead of spending the shared REST
+# core budget every other gh call in this lane draws on.
+# Echoes success|failure|error|pending|absent, lowercased.
+# rc 1 (echoes nothing) when jq itself failed: the caller MUST treat that as
+# "no answer" and fall back to the per-PR reads, never as "absent" — the same
+# discipline qar_qa_review_status_state documents for its own parse.
+qar_qa_review_rollup_state() {
+  local rollup_json="$1" out
+  out="$(jq -r '
+    (if type == "array" then . else [] end)
+    | map(select((.context // .name // "") == "qa-review"))
+    | first
+    | (if . == null then "absent"
+       else ((.state // .conclusion // "absent") | ascii_downcase) end)
+  ' <<<"$rollup_json" 2>/dev/null)" || return 1
+  [ -n "$out" ] || out="absent"
+  printf '%s' "$out"
+}
+
 # qar_classify_verdict <has-bot-review 0|1> <status-state> <repo-is-merge-gated 0|1>
 # Echoes one of: verdict | pending-suppress | candidate.
 #   verdict           — a terminal state exists (bot review on head, OR
