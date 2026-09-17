@@ -67,12 +67,14 @@
 # for a failover monitor, going silently dark is the worst failure. No single
 # call may exceed FM_FABLE_RUNWAY_CALL_CAP (default 5) seconds, nor a quarter of
 # what is left of FM_CHECK_TIMEOUT once that cap is reserved as margin, so the
-# four calls this makes still fit even when an operator raises a timeout.
+# four calls this makes still fit even when an operator raises a timeout. On a
+# default home that clamp is 5 seconds, which is also what each quota-axi call
+# is bounded by unless FM_FABLE_RUNWAY_QUOTA_TIMEOUT asks for less.
 #
 # Test seams (all optional; production reads the live sources):
 #   FM_FABLE_RUNWAY_NOW                    epoch seconds to use as "now"
 #   FM_FABLE_RUNWAY_QUOTA_JSON             file holding a quota-axi JSON snapshot
-#   FM_FABLE_RUNWAY_QUOTA_TIMEOUT          seconds bounding each quota-axi call (default 8, clamped)
+#   FM_FABLE_RUNWAY_QUOTA_TIMEOUT          seconds bounding each quota-axi call (defaults to the call cap, clamped)
 #   FM_FABLE_RUNWAY_POOL_URL               pool base URL (default http://127.0.0.1:8080)
 #   FM_FABLE_RUNWAY_POOL_HEALTH_JSON       file holding a pool /health snapshot
 #   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON     file holding a pool /api/accounts snapshot
@@ -213,7 +215,9 @@ fable_read() {
 # the average burn over that portion extrapolates the same way quota-axi's
 # burnMultiple does. A window with no readable resets_at or percent contributes
 # no projection rather than a guessed one, and a window that has not opened yet
-# is unprojectable rather than floored.
+# is unprojectable rather than floored. A window reporting no burn at all is
+# readable and maximally healthy, so it projects the whole seven-day week rather
+# than dropping out of the counts the verdict is taken from.
 IFS= read -r -d '' POOL_JQ <<'JQ' || true
 def norm: sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z");
 def to_epoch: try (norm | fromdateiso8601) catch null;
@@ -237,12 +241,14 @@ def hours_to($lim):
     else ($r - 604800) as $start |
       (($now - $start) / 3600) as $raw |
       if $raw <= 0 then null
-      elif $pct <= 0 then null
+      elif $pct <= 0 then (604800 / 3600)
       else (if $raw < 6 then 6 else $raw end) as $elapsed |
         ((100 - $pct) * $elapsed / $pct) end
     end
   end;
-def named($list): [$list[] | (.name | gsub("[ ,\t]"; "_"))] | join(",");
+def account_name($a):
+  if ($a.name | type) == "string" then ($a.name | gsub("[ ,\t]"; "_")) else "unnamed" end;
+def named($list): [$list[] | account_name(.)] | join(",");
 .accounts as $accts |
 ($accts | map(select(fable_limit(.) != null))) as $trackedAccts |
 ($trackedAccts | length) as $tracked |
@@ -367,9 +373,9 @@ CALL_MAX=$(( (CHECK_TIMEOUT - CALL_CAP) / 4 ))
 [ "$CALL_MAX" -le "$CALL_CAP" ] || CALL_MAX=$CALL_CAP
 [ "$CALL_MAX" -ge 1 ] || CALL_MAX=1
 
-QUOTA_TIMEOUT=${FM_FABLE_RUNWAY_QUOTA_TIMEOUT:-8}
+QUOTA_TIMEOUT=${FM_FABLE_RUNWAY_QUOTA_TIMEOUT:-$CALL_CAP}
 case "$QUOTA_TIMEOUT" in
-  ''|*[!0-9]*|0) QUOTA_TIMEOUT=8 ;;
+  ''|*[!0-9]*|0) QUOTA_TIMEOUT=$CALL_CAP ;;
 esac
 [ "$QUOTA_TIMEOUT" -le "$CALL_MAX" ] || QUOTA_TIMEOUT=$CALL_MAX
 POOL_TIMEOUT=${FM_FABLE_RUNWAY_POOL_TIMEOUT:-4}

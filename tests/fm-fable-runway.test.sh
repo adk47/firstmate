@@ -327,6 +327,35 @@ expect_field "$out" pool_reason exhaustion_under_2h "all-hot pool reason"
 expect_rc "$out" 2 "all-hot pool exit"
 pass "a pool whose every capable account is inside two hours is RED"
 
+# The pool's ordered routing steady state: one account burns out its week while
+# the rest sit untouched at zero. A zero-burn window is readable and maximally
+# healthy, so it must keep the pool out of RED.
+make_pool "$health" "$accounts" 11 11 0
+for acct_name in 1 2 3 4 5 6 7 8 9 10; do
+  add_account "$accounts" "idle-$acct_name" 0 0 0 100
+done
+add_account "$accounts" active 5 99 99 1
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state GREEN "ordered-routing pool state"
+expect_field "$out" pool_reason has_fable_capacity "ordered-routing pool reason"
+expect_field "$out" pool_exhaustion 168.0h "ordered-routing pool projection"
+expect_rc "$out" 0 "ordered-routing pool exit"
+pass "untouched zero-burn accounts keep a burning pool out of RED"
+
+# One malformed account record costs one name, never the whole pool verdict: a
+# pool with no routable account stays RED rather than aborting into UNKNOWN.
+make_pool "$health" "$accounts" 0 2 2
+add_account "$accounts" acct-a 5 40 20 100
+jq -c '.[1] = (.[0] | del(.name))' "$accounts" > "$accounts.tmp" && mv "$accounts.tmp" "$accounts"
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state RED "nameless account pool state"
+expect_field "$out" pool_reason routable_at_or_below_1 "nameless account pool reason"
+expect_field "$out" overall RED "nameless account overall"
+expect_rc "$out" 2 "nameless account exit"
+printf '%s\n' "$out" | grep -q 'pool_capable=acct-a,unnamed' \
+  || fail "a nameless account must cost one name, not the verdict (got: $out)"
+pass "an account record with no readable name does not abort the pool verdict"
+
 # A burst one hour into a freshly opened week is not imminent exhaustion: the
 # elapsed portion of the window is floored at six hours before extrapolating.
 make_pool "$health" "$accounts" 6 11 0
