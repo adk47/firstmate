@@ -408,12 +408,7 @@
         "kind": "command",
         "argv": [
           "bash",
-          "/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/lobster-mvp/dispatch-cv-batch.sh",
-          "500",
-          "",
-          "real",
-          "queue",
-          ""
+          "/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/credit-verification-batch-cron.sh"
         ],
         "cwd": "/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification",
         "timeoutSeconds": 1800
