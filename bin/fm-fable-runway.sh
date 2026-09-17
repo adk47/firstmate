@@ -220,10 +220,13 @@ fable_read() {
 # seven-day week ending at resets_at gives the elapsed portion of the window, and
 # the average burn over that portion extrapolates the same way quota-axi's
 # burnMultiple does. A window with no readable resets_at or percent contributes
-# no projection rather than a guessed one, and a window that has not opened yet
-# is unprojectable rather than floored. A window reporting no burn at all is
-# readable and maximally healthy, so it projects the whole seven-day week rather
-# than dropping out of the counts the verdict is taken from.
+# no projection rather than a guessed one, and a window that has opened but
+# cannot be placed in its week is unprojectable rather than floored. A window
+# reporting no burn at all is readable and maximally healthy, so it projects the
+# whole seven-day week rather than dropping out of the counts the verdict is
+# taken from - there is no burn rate left to measure, so where the week started
+# does not matter. An untouched account is the pool's steady state, so that case
+# is settled before the window is placed at all.
 IFS= read -r -d '' POOL_JQ <<'JQ' || true
 def norm: sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z");
 def to_epoch: try (norm | fromdateiso8601) catch null;
@@ -247,8 +250,8 @@ def hours_to($lim):
     if $r == null or ($pct | type) != "number" then null
     else ($r - 604800) as $start |
       (($now - $start) / 3600) as $raw |
-      if $raw <= 0 then null
-      elif $pct <= 0 then (604800 / 3600)
+      if $pct <= 0 then (604800 / 3600)
+      elif $raw <= 0 then null
       else (if $raw < 6 then 6 else $raw end) as $elapsed |
         ((100 - $pct) * $elapsed / $pct) end
     end

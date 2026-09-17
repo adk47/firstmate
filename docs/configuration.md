@@ -555,9 +555,10 @@ The routable count decides the pool verdict first and decides it alone when no a
 Fable-capable means usable, with readable windows, none of them spent, and a Fable-scoped window among them.
 An account with no Fable window may well be routable, but nothing about it says the fleet can draw Fable from it, so it is neither named in `pool_capable` nor counted against the `no_fable_capable_account` `RED`.
 Per-account pool exhaustion is projected from the account's Fable-scoped weekly window by assuming a seven-day week ending at `resets_at` and extrapolating the average burn to 100 percent, with the elapsed portion of the window floored at six hours so a burst in a freshly opened week does not read as imminent exhaustion.
-A window that `resets_at` says has not opened yet is unprojectable and reported as `unknown`.
 A window reporting no burn at all is readable and maximally healthy, so it projects the whole seven-day week and stays in the counts the verdict is taken from; only a truly unreadable window drops out of them.
-That matters because the pool's ordered routing normally leaves most accounts untouched for the week while one account burns.
+That is settled before the window is placed in its week, because with no burn there is no rate left to measure and where the week started does not matter.
+It matters because the pool's ordered routing normally leaves most accounts untouched for the week while one account burns, and an untouched account is exactly the one whose `resets_at` sits a full week out or further.
+A window that has been burned against but whose `resets_at` says it has not opened yet is unprojectable and reported as `unknown`.
 `pool_exhaustion` is the best remaining account's runway - the longest projection among Fable-capable accounts - because the pool keeps serving while any capable account still has room, and the pool's time rule counts how many capable accounts are projected to outlast each threshold: `RED` when no capable account is projected past two hours and at least one projection is known, `YELLOW` when none is projected past six hours.
 One account near the end of its week therefore does not red-line a pool of healthy ones, while a pool whose every capable account is inside two hours is `RED`.
 That is the same pace model `quota-axi` reports as `burnMultiple`, and the pool's routable counts stay the primary signal.

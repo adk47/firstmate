@@ -356,17 +356,33 @@ pass "a pool whose every capable account is inside two hours is RED"
 
 # The pool's ordered routing steady state: one account burns out its week while
 # the rest sit untouched at zero. A zero-burn window is readable and maximally
-# healthy, so it must keep the pool out of RED.
+# healthy, so it must keep the pool out of RED. An untouched account's window is
+# also the one whose resets_at sits a full week out or further, which is exactly
+# where the seven-day back-extrapolation cannot place it - that must not cost it
+# its place in the counts.
 make_pool "$health" "$accounts" 11 11 0
-for acct_name in 1 2 3 4 5 6 7 8 9 10; do
+for acct_name in 1 2 3 4 5; do
   add_account "$accounts" "idle-$acct_name" 0 0 0 100
 done
+add_account "$accounts" untouched-at-reset 0 0 0 168
+add_account "$accounts" untouched-fresh-week 0 0 0 200
 add_account "$accounts" active 5 99 99 1
 out=$(run_monitor "$quota" "$health" "$accounts")
 expect_field "$out" pool_state GREEN "ordered-routing pool state"
 expect_field "$out" pool_reason has_fable_capacity "ordered-routing pool reason"
 expect_field "$out" pool_exhaustion 168.0h "ordered-routing pool projection"
 expect_rc "$out" 0 "ordered-routing pool exit"
+
+# The same pool with only the untouched-window accounts, so nothing else can
+# carry the counts past the thresholds.
+make_pool "$health" "$accounts" 11 11 0
+add_account "$accounts" untouched-at-reset 0 0 0 168
+add_account "$accounts" active 5 99 99 1
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state GREEN "week-out untouched pool state"
+expect_field "$out" pool_reason has_fable_capacity "week-out untouched pool reason"
+expect_field "$out" pool_exhaustion 168.0h "week-out untouched pool projection"
+expect_rc "$out" 0 "week-out untouched pool exit"
 pass "untouched zero-burn accounts keep a burning pool out of RED"
 
 # One malformed account record costs one name, never the whole pool verdict: a
