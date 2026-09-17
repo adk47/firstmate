@@ -409,11 +409,13 @@ inbox_steer_check() {  # <window> <task>
 # and have that one declared a spent-budget outage on first sight.
 #
 # Busy alone cannot be the signal: the continue this ladder sends makes the pane
-# busy from submission until the turn ends, so a retry that dies on another 503
-# reads busy for its whole short duration, and clearing there would wipe the
-# attempt count mid-ladder and no genuine outage could ever be declared. Only
-# DURATION separates the two, and the threshold lives with the ladder's other
-# bounds in bin/fm-gateway-retry-lib.sh rather than being re-stated here.
+# busy from submission until the turn ends, and a turn that dies on another 503
+# is busy for the harness's whole internal retry - about four minutes on the
+# version this fleet runs - so clearing on busy would wipe the attempt count
+# mid-ladder and no genuine outage could ever be declared. Only DURATION
+# separates the two, and the threshold lives with the ladder's other bounds in
+# bin/fm-gateway-retry-lib.sh, calibrated there against that verified retry,
+# rather than being re-stated here.
 #
 # Counting polls rather than seconds is deliberate: the counter is exactly the
 # consecutive-busy observations this loop made, so it cannot be fooled by a
@@ -428,7 +430,7 @@ gateway_busy_progress_check() {  # <window> <task> <key> <busy-now>
   n=$(cat "$bf" 2>/dev/null || true)
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
   n=$(( n + 1 ))
-  if [ "$n" -le "$(fm_gateway_busy_clear_polls)" ]; then
+  if [ "$n" -lt "$(fm_gateway_busy_clear_polls)" ]; then
     printf '%s' "$n" > "$bf" 2>/dev/null || true
     return 0
   fi
