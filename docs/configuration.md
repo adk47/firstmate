@@ -551,19 +551,28 @@ The pool adds the pool's own capacity counts: `RED` at 1 or fewer routable accou
 The overall state is the worst of the two, and the monitor exits non-zero only on `RED`.
 A runway that cannot be measured is `RED` with a reason, never `GREEN`, because an unreadable runway is exactly what a failover monitor must not hide.
 The optional pool is the one exception: a home without `better-ccflare` is a normal firstmate home, so an unreachable or unconfigured pool is `UNKNOWN` and leaves the overall state to the supervisor's own runway.
-Per-account pool exhaustion is projected from the account's Fable-scoped weekly window by assuming a seven-day week ending at `resets_at` and extrapolating the average burn to 100 percent, and the pool reports the soonest such exhaustion among Fable-capable accounts; that is the same pace model `quota-axi` reports as `burnMultiple`, and the pool's routable counts stay the primary signal.
+The routable count decides the pool verdict first and decides it alone when no account exposes a Fable-scoped window, reported as `routable_only_without_fable_window`; the missing window suppresses `pool_exhaustion` and `pool_tracked`, never the verdict.
+Per-account pool exhaustion is projected from the account's Fable-scoped weekly window by assuming a seven-day week ending at `resets_at` and extrapolating the average burn to 100 percent, with the elapsed portion of the window floored at six hours so a burst in a freshly opened week does not read as imminent exhaustion.
+A window that `resets_at` says has not opened yet is unprojectable and reported as `unknown`.
+`pool_exhaustion` is the best remaining account's runway - the longest projection among Fable-capable accounts - because the pool keeps serving while any capable account still has room, and the pool's time rule counts how many capable accounts are projected to outlast each threshold: `RED` when no capable account is projected past two hours and at least one projection is known, `YELLOW` when none is projected past six hours.
+One account near the end of its week therefore does not red-line a pool of healthy ones, while a pool whose every capable account is inside two hours is `RED`.
+That is the same pace model `quota-axi` reports as `burnMultiple`, and the pool's routable counts stay the primary signal.
 The monitor never writes fleet state and never prints a credential or an account email.
 
 Arm the check once per home with `bin/fm-fable-runway-check.sh arm`.
 That writes `state/fable-runway.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal `FM_CHECK_INTERVAL` cadence and turns its one line into a `check:` wake; no separate schedule is involved.
 `bin/fm-fable-runway-check.sh disarm` removes the shim, its trust binding, and the record; retire an armed check that way rather than by hand.
-The check prints one line, and only one, when either runway state changes since the last printed poll, when the pool gains a Fable-capable account, or when a persistent `RED` has not been reported for `FM_FABLE_RUNWAY_REALERT_SECS` (default 3600, `0` disables the repeat).
+The check prints one line, and only one, when either runway state changes since the last printed poll, or when a persistent `RED` has not been reported for `FM_FABLE_RUNWAY_REALERT_SECS` (default 3600, `0` disables the repeat).
+Only those transitions are printable: the pool's membership churns on its own as accounts cross and reset their windows, and a change to `pool_capable` or `pool_tracked` alone, with every state unchanged, prints nothing.
 The wake always carries both `fable_state=` and `pool_state=`, so which runway went `RED` is never ambiguous.
-A recovery line reads `GREEN again account=<name>` when the pool is `GREEN` and `capacity back account=<name>` otherwise, naming the account that regained Fable capacity.
+A poll that prints while the pool has just regained capacity also carries a recovery label, which reads `GREEN again account=<name>` when the pool is `GREEN` and `capacity back account=<name>` otherwise.
+A regain means an account that was Fable-tracked but not Fable-capable last poll is capable now; an account merely added to the pool is new, not recovered, and never earns the label.
 The check never switches anything; the failover and the lane-side offload are firstmate actions.
-`state/.fable-runway` records the last printed states and the last `RED` report time, so an unchanged poll stays silent.
+`state/.fable-runway` records the last printed states, the last `RED` report time, and the pool's last tracked and capable name sets, so an unchanged poll stays silent and a regain is distinguishable from an addition.
 
-The monitor reads `FM_FABLE_RUNWAY_QUOTA_TIMEOUT` (default 8) as the bound on each `quota-axi` call and `FM_FABLE_RUNWAY_POOL_TIMEOUT` (default 4) as the bound on each pool fetch, so the whole check stays inside `FM_CHECK_TIMEOUT`.
+The monitor reads `FM_FABLE_RUNWAY_QUOTA_TIMEOUT` (default 8) as the bound on each `quota-axi` call and `FM_FABLE_RUNWAY_POOL_TIMEOUT` (default 4) as the bound on each pool fetch.
+Both are clamped, because a check the watcher kills prints nothing and records nothing, so the monitor would go silently dark and repeat that silence every poll.
+No single call may exceed `FM_FABLE_RUNWAY_CALL_CAP` (default 5) seconds, nor a quarter of what is left of `FM_CHECK_TIMEOUT` once that cap is reserved as margin, so the four calls the monitor makes still fit inside the watcher's per-check budget when an operator raises either timeout.
 `quota-axi` needs its one-time Keychain approval (run `quota-axi --allow-keychain-prompt` once by hand); the monitor itself reads strictly, with `--no-credential-refresh`, and never prompts.
 
 ## Relay (.env)

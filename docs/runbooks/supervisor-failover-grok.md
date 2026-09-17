@@ -123,7 +123,8 @@ The fail-back signal is the check's recovery line:
 fable-runway: GREEN again account=<name> ...
 ```
 
-It fires when the pool gains a Fable-capable account, which is normally a per-account Fable window reset.
+It fires when an account the pool tracked but could not use is usable again, which is normally a per-account Fable window reset.
+An account newly added to the pool is not a recovery and is never named here.
 When the pool is still YELLOW but an account came back, the same event reads `capacity back account=<name>` instead.
 
 Procedure:

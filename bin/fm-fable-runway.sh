@@ -10,7 +10,8 @@
 #   fable-runway: overall=<S> fable_state=<S> pool_state=<S> fable_remaining=<n>%
 #     fable_burn=<n>x fable_exhaustion=<iso|unknown>(<n>h)
 #     pool_routable=<r>/<c> pool_exhausted=<n> pool_capable=<names|none>
-#     pool_exhaustion=<n>h fable_reason=<token> pool_reason=<token>
+#     pool_tracked=<names|none> pool_exhaustion=<n>h fable_reason=<token>
+#     pool_reason=<token>
 #
 # Two independent runways are reported, because the supervisor reads its own
 # credential while the fleet draws from the account pool, and they do not fail
@@ -39,29 +40,44 @@
 # unconfigured pool is UNKNOWN and leaves the overall state to the supervisor's
 # own runway.
 #
+# The pool's routable counts decide the verdict on their own, so a pool whose
+# accounts expose no Fable-scoped window at all is still judged by them: the
+# missing window suppresses the projection fields, never the verdict.
+#
 # Per-account pool exhaustion is projected from each account's Fable-scoped
 # weekly window: assuming the week runs seven days up to its resets_at, the
-# average burn since the window opened is extrapolated to 100 percent. The pool
-# projection reported is the soonest such exhaustion among Fable-capable
-# accounts, which is the next point at which the pool loses capacity. That is
-# the same pace model quota-axi reports as burnMultiple, and it deliberately
-# under-weights a recent ramp, so the pool's routable counts stay the primary
-# signal and the projection is reported as a refinement. An account whose
-# windows are not readable is excluded from the count rather than assumed
-# healthy.
+# average burn since the window opened is extrapolated to 100 percent, with the
+# elapsed portion floored at six hours so a burst in a freshly opened week is
+# not read as imminent exhaustion. The pool projection reported is the best
+# remaining one - the longest such exhaustion among Fable-capable accounts -
+# because the pool keeps serving while any capable account still has room, and
+# the time rule counts how many capable accounts are projected to outlast the
+# 2h and 6h thresholds rather than taking the soonest. That is the same pace
+# model quota-axi reports as burnMultiple, and it deliberately under-weights a
+# recent ramp, so the pool's routable counts stay the primary signal and the
+# projection is reported as a refinement. An account whose windows are not
+# readable is excluded from the count rather than assumed healthy.
 #
 # Read-only: this never writes fleet state, never mutates the pool, and never
 # prints a credential or an account email. It reads quota-axi and the local
 # pool's HTTP API only.
 #
+# Every external call is clamped, because the watcher kills a check that runs
+# past FM_CHECK_TIMEOUT and a killed check prints nothing and records nothing -
+# for a failover monitor, going silently dark is the worst failure. No single
+# call may exceed FM_FABLE_RUNWAY_CALL_CAP (default 5) seconds, nor a quarter of
+# what is left of FM_CHECK_TIMEOUT once that cap is reserved as margin, so the
+# four calls this makes still fit even when an operator raises a timeout.
+#
 # Test seams (all optional; production reads the live sources):
 #   FM_FABLE_RUNWAY_NOW                    epoch seconds to use as "now"
 #   FM_FABLE_RUNWAY_QUOTA_JSON             file holding a quota-axi JSON snapshot
-#   FM_FABLE_RUNWAY_QUOTA_TIMEOUT          seconds bounding each quota-axi call (default 8)
+#   FM_FABLE_RUNWAY_QUOTA_TIMEOUT          seconds bounding each quota-axi call (default 8, clamped)
 #   FM_FABLE_RUNWAY_POOL_URL               pool base URL (default http://127.0.0.1:8080)
 #   FM_FABLE_RUNWAY_POOL_HEALTH_JSON       file holding a pool /health snapshot
 #   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON     file holding a pool /api/accounts snapshot
-#   FM_FABLE_RUNWAY_POOL_TIMEOUT           seconds bounding each pool fetch (default 4)
+#   FM_FABLE_RUNWAY_POOL_TIMEOUT           seconds bounding each pool fetch (default 4, clamped)
+#   FM_FABLE_RUNWAY_CALL_CAP               hard per-call ceiling in seconds (default 5)
 set -u
 export LC_ALL=C
 
@@ -166,10 +182,7 @@ fable_read() {
       return 0
     fi
   else
-    local timeout=${FM_FABLE_RUNWAY_QUOTA_TIMEOUT:-8}
-    case "$timeout" in
-      ''|*[!0-9]*|0) timeout=8 ;;
-    esac
+    local timeout=$QUOTA_TIMEOUT
     if ! command -v quota-axi >/dev/null 2>&1; then
       printf 'RED\t-\t-\t-\t-\tquota_axi_not_installed\n'
       return 0
@@ -199,7 +212,8 @@ fable_read() {
 # seven-day week ending at resets_at gives the elapsed portion of the window, and
 # the average burn over that portion extrapolates the same way quota-axi's
 # burnMultiple does. A window with no readable resets_at or percent contributes
-# no projection rather than a guessed one.
+# no projection rather than a guessed one, and a window that has not opened yet
+# is unprojectable rather than floored.
 IFS= read -r -d '' POOL_JQ <<'JQ' || true
 def norm: sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z");
 def to_epoch: try (norm | fromdateiso8601) catch null;
@@ -221,34 +235,47 @@ def hours_to($lim):
     ($lim.percent // null) as $pct |
     if $r == null or ($pct | type) != "number" then null
     else ($r - 604800) as $start |
-      (($now - $start) / 3600) as $elapsed |
-      if $elapsed <= 0 then null
+      (($now - $start) / 3600) as $raw |
+      if $raw <= 0 then null
       elif $pct <= 0 then null
-      else ((100 - $pct) * $elapsed / $pct) end
+      else (if $raw < 6 then 6 else $raw end) as $elapsed |
+        ((100 - $pct) * $elapsed / $pct) end
     end
   end;
+def named($list): [$list[] | (.name | gsub("[ ,\t]"; "_"))] | join(",");
 .accounts as $accts |
+($accts | map(select(fable_limit(.) != null))) as $trackedAccts |
+($trackedAccts | length) as $tracked |
 ($accts | map(select(capable(.)))) as $cap |
 ($cap | map(hours_to(fable_limit(.))) | map(select(. != null))) as $hrs |
-(if ($hrs | length) == 0 then null else ($hrs | min) end) as $phrs |
-($accts | map(select(fable_limit(.) != null)) | length) as $tracked |
-([$cap[] | (.name | gsub("[ ,\t]"; "_"))] | join(",")) as $names |
+(if ($hrs | length) == 0 then null else ($hrs | max) end) as $phrs |
+($hrs | map(select(. >= 2)) | length) as $past2 |
+($hrs | map(select(. >= 6)) | length) as $past6 |
+named($cap) as $names |
+named($trackedAccts) as $trackedNames |
 (.health.pool.routable // null) as $routable |
 (.health.pool.configured // null) as $configured |
 (.health.pool.usage_exhausted // null) as $exhausted |
+# The routable count is the primary signal, so it decides first and decides
+# alone when no account exposes a Fable-scoped window. The per-account windows
+# only refine a verdict the counts already reached.
 (if ($routable | type) != "number" then
    {state: "UNKNOWN", reason: "health_did_not_report_routable"}
- elif $tracked == 0 then
-   {state: "UNKNOWN", reason: "no_fable_scoped_window"}
- elif ($cap | length) == 0 then
-   {state: "RED", reason: "no_fable_capable_account"}
  elif $routable <= 1 then
    {state: "RED", reason: "routable_at_or_below_1"}
- elif ($phrs != null and $phrs < 2) then
+ elif $tracked == 0 then
+   (if $routable <= 3 then
+      {state: "YELLOW", reason: "routable_at_or_below_3"}
+    else
+      {state: "GREEN", reason: "routable_only_without_fable_window"}
+    end)
+ elif ($cap | length) == 0 then
+   {state: "RED", reason: "no_fable_capable_account"}
+ elif (($hrs | length) > 0 and $past2 == 0) then
    {state: "RED", reason: "exhaustion_under_2h"}
  elif $routable <= 3 then
    {state: "YELLOW", reason: "routable_at_or_below_3"}
- elif ($phrs != null and $phrs < 6) then
+ elif (($hrs | length) > 0 and $past6 == 0) then
    {state: "YELLOW", reason: "exhaustion_under_6h"}
  else
    {state: "GREEN", reason: "has_fable_capacity"}
@@ -258,6 +285,7 @@ def hours_to($lim):
   (if ($configured | type) == "number" then ($configured | tostring) else "-" end),
   (if ($exhausted | type) == "number" then ($exhausted | tostring) else "-" end),
   (if $names == "" then "none" else $names end),
+  (if $trackedNames == "" then "none" else $trackedNames end),
   (if $phrs == null then "-" else ($phrs | tostring) end),
   $verdict.reason
 ] | @tsv
@@ -295,22 +323,22 @@ pool_read() {
     accounts=$(pool_fetch "$POOL_URL/api/accounts") || accounts=''
   fi
   if [ -z "$health" ] || [ -z "$accounts" ]; then
-    printf 'UNKNOWN\t-\t-\t-\tnone\t-\tpool_unavailable\n'
+    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\t-\tpool_unavailable\n'
     return 0
   fi
   if ! printf '%s' "$health" | jq -e 'type == "object"' >/dev/null 2>&1 \
     || ! printf '%s' "$accounts" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    printf 'UNKNOWN\t-\t-\t-\tnone\t-\tpool_response_not_recognized\n'
+    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\t-\tpool_response_not_recognized\n'
     return 0
   fi
   input=$(jq -cn --argjson health "$health" --argjson accounts "$accounts" \
     '{health: $health, accounts: $accounts}') || input=''
   if [ -z "$input" ]; then
-    printf 'UNKNOWN\t-\t-\t-\tnone\t-\tpool_response_not_recognized\n'
+    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\t-\tpool_response_not_recognized\n'
     return 0
   fi
   printf '%s' "$input" | jq -r --argjson now "$NOW" "$POOL_JQ" 2>/dev/null \
-    || printf 'UNKNOWN\t-\t-\t-\tnone\t-\tpool_response_not_readable\n'
+    || printf 'UNKNOWN\t-\t-\t-\tnone\tnone\t-\tpool_response_not_readable\n'
 }
 
 # --- main -------------------------------------------------------------------
@@ -322,10 +350,33 @@ case "${1-}" in
 esac
 
 POOL_URL=${FM_FABLE_RUNWAY_POOL_URL-http://127.0.0.1:8080}
+
+# The watcher runs this check as a direct child, so FM_CHECK_TIMEOUT is read
+# here too and an operator who raised it is seen on both sides. One cap's worth
+# of that bound is reserved as margin, and what remains is split four ways, one
+# share per external call this makes.
+CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
+case "$CHECK_TIMEOUT" in
+  ''|*[!0-9]*|0) CHECK_TIMEOUT=30 ;;
+esac
+CALL_CAP=${FM_FABLE_RUNWAY_CALL_CAP:-5}
+case "$CALL_CAP" in
+  ''|*[!0-9]*|0) CALL_CAP=5 ;;
+esac
+CALL_MAX=$(( (CHECK_TIMEOUT - CALL_CAP) / 4 ))
+[ "$CALL_MAX" -le "$CALL_CAP" ] || CALL_MAX=$CALL_CAP
+[ "$CALL_MAX" -ge 1 ] || CALL_MAX=1
+
+QUOTA_TIMEOUT=${FM_FABLE_RUNWAY_QUOTA_TIMEOUT:-8}
+case "$QUOTA_TIMEOUT" in
+  ''|*[!0-9]*|0) QUOTA_TIMEOUT=8 ;;
+esac
+[ "$QUOTA_TIMEOUT" -le "$CALL_MAX" ] || QUOTA_TIMEOUT=$CALL_MAX
 POOL_TIMEOUT=${FM_FABLE_RUNWAY_POOL_TIMEOUT:-4}
 case "$POOL_TIMEOUT" in
   ''|*[!0-9]*|0) POOL_TIMEOUT=4 ;;
 esac
+[ "$POOL_TIMEOUT" -le "$CALL_MAX" ] || POOL_TIMEOUT=$CALL_MAX
 NOW=$(now_epoch)
 case "$NOW" in
   ''|*[!0-9]*) NOW=$(date +%s) ;;
@@ -341,10 +392,11 @@ if [ -z "$POOL_URL" ]; then
   POOL_CONFIGURED=-
   POOL_EXHAUSTED=-
   POOL_CAPABLE=none
+  POOL_TRACKED=none
   POOL_HRS=-
   POOL_REASON=pool_not_configured
 else
-  IFS=$'\t' read -r POOL_STATE POOL_ROUTABLE POOL_CONFIGURED POOL_EXHAUSTED POOL_CAPABLE POOL_HRS POOL_REASON <<EOF
+  IFS=$'\t' read -r POOL_STATE POOL_ROUTABLE POOL_CONFIGURED POOL_EXHAUSTED POOL_CAPABLE POOL_TRACKED POOL_HRS POOL_REASON <<EOF
 $(pool_read)
 EOF
 fi
@@ -368,10 +420,11 @@ EXH_PHRASE=${FABLE_EXH:--}
 [ "$POOL_CONFIGURED" = "-" ] && POOL_CONFIGURED=unknown
 [ "$POOL_EXHAUSTED" = "-" ] && POOL_EXHAUSTED=unknown
 
-printf 'fable-runway: overall=%s fable_state=%s pool_state=%s fable_remaining=%s%% fable_burn=%sx fable_exhaustion=%s(%s) pool_routable=%s/%s pool_exhausted=%s pool_capable=%s pool_exhaustion=%s fable_reason=%s pool_reason=%s\n' \
+printf 'fable-runway: overall=%s fable_state=%s pool_state=%s fable_remaining=%s%% fable_burn=%sx fable_exhaustion=%s(%s) pool_routable=%s/%s pool_exhausted=%s pool_capable=%s pool_tracked=%s pool_exhaustion=%s fable_reason=%s pool_reason=%s\n' \
   "$OVERALL" "$FABLE_STATE" "$POOL_STATE" "$FABLE_REM" "$FABLE_BURN" \
   "$EXH_PHRASE" "$(fmt_hours "${FABLE_HRS:-}")" \
   "$POOL_ROUTABLE" "$POOL_CONFIGURED" "$POOL_EXHAUSTED" "$POOL_CAPABLE" \
+  "${POOL_TRACKED:-none}" \
   "$(fmt_hours "${POOL_HRS:-}")" \
   "${FABLE_REASON:-unknown}" "${POOL_REASON:-unknown}"
 

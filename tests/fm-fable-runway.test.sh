@@ -9,9 +9,16 @@
 # with a reason rather than GREEN. Fixtures are files, so no case reads quota-axi
 # or reaches a live better-ccflare gateway.
 #
+# The pool's two ways of reading a verdict wrong are pinned too: a pool with no
+# Fable-scoped window anywhere must still be judged by its routable count rather
+# than falling through to UNKNOWN, and one nearly spent account among healthy
+# ones must not red-line the pool. So is the per-call clamp that keeps a hung
+# quota-axi from running the whole check past the watcher's own bound.
+#
 # The check cases pin the wake contract: one line on a state change, silence on
-# an unchanged poll, a throttled RED repeat, and the fail-back line that names
-# the account which regained Fable capacity.
+# an unchanged poll and on pool membership churn alone, a throttled RED repeat,
+# and the fail-back line that names the account which regained Fable capacity -
+# only for an account that really came back, never for one merely added.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -92,6 +99,23 @@ add_account() {
         {kind: "weekly_scoped", percent: $pct,
          resets_at: $resets,
          scope: {model: {display_name: "Fable"}}}
+      ]}
+    }]' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+# add_plain_account <accounts-file> <name> <session-pct> <weekly-all-pct>
+# An account whose windows carry no Fable-scoped limit at all, which is what a
+# gateway build that does not break its weekly window out per model reports.
+add_plain_account() {
+  local file=$1 name=$2 session=$3 weekly=$4 tmp="$1.tmp"
+  jq -c --arg name "$name" --argjson session "$session" --argjson weekly "$weekly" '
+    . + [{
+      name: $name,
+      tokenStatus: "valid",
+      paused: false,
+      usageData: {limits: [
+        {kind: "session", percent: $session},
+        {kind: "weekly_all", percent: $weekly}
       ]}
     }]' "$file" > "$tmp" && mv "$tmp" "$file"
 }
@@ -251,6 +275,75 @@ expect_field "$out" pool_reason exhaustion_under_2h "pool projected reason"
 expect_rc "$out" 2 "pool projected exit"
 pass "a fast-burning pool account projects a RED pool"
 
+# The routable count decides on its own, so an empty pool is RED rather than
+# falling through to UNKNOWN when no account exposes a Fable-scoped window.
+make_pool "$health" "$accounts" 0 11 11
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state RED "empty pool state"
+expect_field "$out" pool_reason routable_at_or_below_1 "empty pool reason"
+expect_field "$out" overall RED "empty pool overall"
+expect_rc "$out" 2 "empty pool exit"
+pass "a pool with zero routable accounts is RED, not UNKNOWN"
+
+# Accounts with no Fable-scoped window suppress the projection, not the verdict.
+make_pool "$health" "$accounts" 6 11 0
+add_plain_account "$accounts" plain-a 5 40
+add_plain_account "$accounts" plain-b 5 40
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state GREEN "no-window pool state"
+expect_field "$out" pool_reason routable_only_without_fable_window "no-window pool reason"
+expect_field "$out" pool_tracked none "no-window pool tracked"
+expect_field "$out" pool_exhaustion unknown "no-window pool projection"
+expect_rc "$out" 0 "no-window pool exit"
+make_pool "$health" "$accounts" 2 11 9
+add_plain_account "$accounts" plain-a 5 40
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state YELLOW "no-window thin pool state"
+expect_field "$out" pool_reason routable_at_or_below_3 "no-window thin pool reason"
+pass "a pool with no Fable-scoped window is still judged by its routable count"
+
+# The pool verdict is not the worst account: one nearly spent account among
+# healthy ones leaves the pool GREEN, and the projection reported is the best
+# remaining account's runway.
+make_pool "$health" "$accounts" 6 11 0
+for acct_name in one two three four five; do
+  add_account "$accounts" "acct-$acct_name" 5 40 20 100
+done
+add_account "$accounts" acct-hot 5 99 99 24
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state GREEN "mixed pool state"
+expect_field "$out" pool_reason has_fable_capacity "mixed pool reason"
+expect_field "$out" pool_exhaustion 272.0h "mixed pool projection"
+expect_rc "$out" 0 "mixed pool exit"
+pass "one nearly spent account does not red-line a pool of healthy ones"
+
+# A pool where every capable account is inside two hours is RED.
+make_pool "$health" "$accounts" 6 11 0
+add_account "$accounts" burny-a 5 90 90 162
+add_account "$accounts" burny-b 5 92 92 162
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state RED "all-hot pool state"
+expect_field "$out" pool_reason exhaustion_under_2h "all-hot pool reason"
+expect_rc "$out" 2 "all-hot pool exit"
+pass "a pool whose every capable account is inside two hours is RED"
+
+# A burst one hour into a freshly opened week is not imminent exhaustion: the
+# elapsed portion of the window is floored at six hours before extrapolating.
+make_pool "$health" "$accounts" 6 11 0
+add_account "$accounts" fresh-week 5 40 40 167
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state GREEN "fresh window state"
+expect_field "$out" pool_exhaustion 9.0h "fresh window projection"
+expect_rc "$out" 0 "fresh window exit"
+
+# A window whose resets_at says it has not opened yet stays unprojectable.
+make_pool "$health" "$accounts" 6 11 0
+add_account "$accounts" not-started 5 40 40 200
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state GREEN "unstarted window state"
+expect_field "$out" pool_exhaustion unknown "unstarted window projection"
+pass "a freshly opened week is floored, and one that has not opened is unprojectable"
+
 # An unreachable pool is UNKNOWN, and the supervisor's own runway still decides.
 make_quota "$quota" 60 0.5 none through_reset
 out=$(FM_FABLE_RUNWAY_NOW="$NOW" \
@@ -262,6 +355,36 @@ expect_field "$out" pool_state UNKNOWN "pool unavailable"
 expect_field "$out" overall GREEN "overall with unavailable pool"
 pass "an unreachable optional pool is UNKNOWN, not RED"
 
+# --- monitor: the per-call clamp --------------------------------------------
+
+# A check the watcher kills prints nothing and records nothing, so it would go
+# silently dark and repeat that silence every poll. A hung quota-axi therefore
+# has to be cut to the per-call cap even when the operator raised the timeout
+# well past the watcher's own bound.
+clamplab="$TMP_ROOT/clamp"
+mkdir -p "$clamplab/bin"
+cat > "$clamplab/bin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+sleep 120
+SH
+chmod 0755 "$clamplab/bin/quota-axi"
+make_pool "$health" "$accounts" 6 11 0
+add_account "$accounts" acct-a 5 40 20 100
+clamp_started=$(date +%s)
+clamped=$(PATH="$clamplab/bin:$PATH" \
+  FM_CHECK_TIMEOUT=30 \
+  FM_FABLE_RUNWAY_QUOTA_TIMEOUT=60 \
+  FM_FABLE_RUNWAY_NOW="$NOW" \
+  FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$health" \
+  FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$accounts" \
+  "$MONITOR" 2>/dev/null)
+clamp_elapsed=$(( $(date +%s) - clamp_started ))
+[ "$clamp_elapsed" -lt 20 ] \
+  || fail "a hung quota-axi must be cut to the per-call cap (took ${clamp_elapsed}s)"
+expect_field "$clamped" fable_state RED "clamped fable state"
+expect_field "$clamped" fable_reason quota_axi_below_compatibility_floor "clamped fable reason"
+pass "a hung quota-axi is cut to the per-call cap, well inside FM_CHECK_TIMEOUT"
+
 # --- check: wake contract ----------------------------------------------------
 
 checklab="$TMP_ROOT/check"
@@ -270,14 +393,17 @@ cquota="$checklab/quota.json"
 chealth="$checklab/health.json"
 caccounts="$checklab/accounts.json"
 
-run_check() {
-  FM_STATE_OVERRIDE="$checklab/state" \
-    FM_FABLE_RUNWAY_NOW="$1" \
-    FM_FABLE_RUNWAY_QUOTA_JSON="$cquota" \
-    FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$chealth" \
-    FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$caccounts" \
+# run_check_in <lab-dir> <now>: a poll against that lab's own state and fixtures.
+run_check_in() {
+  FM_STATE_OVERRIDE="$1/state" \
+    FM_FABLE_RUNWAY_NOW="$2" \
+    FM_FABLE_RUNWAY_QUOTA_JSON="$1/quota.json" \
+    FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$1/health.json" \
+    FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$1/accounts.json" \
     "$CHECK" check 2>/dev/null
 }
+
+run_check() { run_check_in "$checklab" "$1"; }
 
 make_pool "$chealth" "$caccounts" 6 11 0
 add_account "$caccounts" acct-a 5 40 20 100
@@ -314,10 +440,11 @@ unset FM_FABLE_RUNWAY_REALERT_SECS
 expect_field "$repeat" overall RED "check red repeat"
 pass "a persistent RED repeats only after the realert window"
 
-# Fail-back: the pool regains a Fable-capable account and the check names it.
+# Fail-back: an account the pool tracked but could not use is usable again, and
+# the check names it.
 make_quota "$cquota" 60 0.5 none through_reset
 make_pool "$chealth" "$caccounts" 1 11 9
-add_account "$caccounts" spent 5 100 100 200
+add_account "$caccounts" revived-account 5 100 100 200
 run_check "$((NOW + 3000))" >/dev/null
 make_pool "$chealth" "$caccounts" 6 11 0
 add_account "$caccounts" revived-account 5 40 10 200
@@ -326,6 +453,79 @@ printf '%s\n' "$recovery" | grep -q 'GREEN again account=revived-account' \
   || fail "fail-back must name the recovered account (got: $recovery)"
 expect_field "$recovery" pool_state GREEN "fail-back pool state"
 pass "the fail-back line names the account that regained Fable capacity"
+
+# The same regain on a pool that is still thin reads `capacity back`.
+backlab="$TMP_ROOT/back"
+mkdir -p "$backlab/state"
+make_quota "$backlab/quota.json" 60 0.5 none through_reset
+make_pool "$backlab/health.json" "$backlab/accounts.json" 1 11 9
+add_account "$backlab/accounts.json" thin-account 5 100 100 200
+run_check_in "$backlab" "$NOW" >/dev/null
+make_pool "$backlab/health.json" "$backlab/accounts.json" 3 11 7
+add_account "$backlab/accounts.json" thin-account 5 40 10 200
+back=$(run_check_in "$backlab" "$((NOW + 300))")
+expect_field "$back" pool_state YELLOW "capacity-back pool state"
+printf '%s\n' "$back" | grep -q 'capacity back account=thin-account' \
+  || fail "a regain that leaves the pool thin must read 'capacity back' (got: $back)"
+pass "a regain on a still-thin pool is labelled 'capacity back'"
+
+# An account the captain adds is new, not recovered, even when its arrival is
+# what lifts the pool out of YELLOW.
+addlab="$TMP_ROOT/added"
+mkdir -p "$addlab/state"
+make_quota "$addlab/quota.json" 60 0.5 none through_reset
+make_pool "$addlab/health.json" "$addlab/accounts.json" 3 11 0
+add_account "$addlab/accounts.json" incumbent 5 40 20 100
+run_check_in "$addlab" "$NOW" >/dev/null
+make_pool "$addlab/health.json" "$addlab/accounts.json" 6 11 0
+add_account "$addlab/accounts.json" incumbent 5 40 20 100
+add_account "$addlab/accounts.json" newcomer 5 40 20 100
+added=$(run_check_in "$addlab" "$((NOW + 300))")
+expect_field "$added" pool_state GREEN "added account pool state"
+case "$added" in
+  *'GREEN again'*|*'capacity back'*) fail "a newly added account is not a recovery: $added" ;;
+esac
+pass "an account added to the pool is never labelled a recovery"
+
+# Pool membership churns on its own, and none of it is news while both runway
+# states hold: an account leaving the capable set on a GREEN pool stays silent.
+churnlab="$TMP_ROOT/churn"
+mkdir -p "$churnlab/state"
+make_quota "$churnlab/quota.json" 60 0.5 none through_reset
+make_pool "$churnlab/health.json" "$churnlab/accounts.json" 6 11 0
+add_account "$churnlab/accounts.json" keeps 5 40 20 100
+add_account "$churnlab/accounts.json" leaves 5 40 20 100
+churn_first=$(run_check_in "$churnlab" "$NOW")
+expect_field "$churn_first" pool_state GREEN "churn first poll"
+make_pool "$churnlab/health.json" "$churnlab/accounts.json" 6 11 1
+add_account "$churnlab/accounts.json" keeps 5 40 20 100
+add_account "$churnlab/accounts.json" leaves 5 100 100 100
+churn_quiet=$(run_check_in "$churnlab" "$((NOW + 300))")
+[ -z "$churn_quiet" ] \
+  || fail "losing a capable account on a GREEN pool must not wake (got: $churn_quiet)"
+pass "pool membership churn with both runway states unchanged stays silent"
+
+# The check always runs its sibling monitor: the watcher validates the shim's
+# bytes before dispatch, so no environment variable may redirect it elsewhere.
+seamlab="$TMP_ROOT/seam"
+mkdir -p "$seamlab/state"
+cat > "$seamlab/impostor.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'fable-runway: overall=RED fable_state=RED pool_state=RED fable_remaining=0%% fable_burn=9x fable_exhaustion=unknown(unknown) pool_routable=0/0 pool_exhausted=0 pool_capable=none pool_tracked=none pool_exhaustion=unknown fable_reason=impostor pool_reason=impostor\n'
+SH
+chmod 0755 "$seamlab/impostor.sh"
+seam=$(FM_STATE_OVERRIDE="$seamlab/state" \
+  FM_FABLE_RUNWAY_MONITOR="$seamlab/impostor.sh" \
+  FM_FABLE_RUNWAY_NOW="$NOW" \
+  FM_FABLE_RUNWAY_QUOTA_JSON="$cquota" \
+  FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$chealth" \
+  FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$caccounts" \
+  "$CHECK" check 2>/dev/null)
+[ -n "$seam" ] || fail "the check's first poll must print the monitor's line"
+case "$seam" in
+  *impostor*) fail "the check must not take its monitor from the environment: $seam" ;;
+esac
+pass "the check runs its sibling monitor, not one named by the environment"
 
 # --- check: arm and disarm ---------------------------------------------------
 

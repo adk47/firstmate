@@ -17,9 +17,17 @@
 #     FM_FABLE_RUNWAY_REALERT_SECS (default 3600, 0 disables the repeat). RED is
 #     urgent, so it re-surfaces, but the repeat is throttled so a persistent RED
 #     cannot storm the wake queue every poll;
-#   - the pool gained a Fable-capable account, which is the fail-back signal.
-#     The line then names the account and reads `GREEN again account=<names>`
-#     when the pool is GREEN, or `capacity back account=<names>` otherwise.
+# Only a state transition is printable. The pool's membership churns on its own
+# - an account crosses 100 percent on some window, a new account is added - and
+# none of that is news while both runway states hold, so a change to the capable
+# or tracked name set alone never wakes firstmate.
+#
+# A poll that prints while the pool has just regained a Fable-capable account
+# also carries the fail-back label, which names the account and reads `GREEN
+# again account=<names>` when the pool is GREEN, or `capacity back
+# account=<names>` otherwise. A regain means an account that was Fable-tracked
+# but not Fable-capable last poll is capable now; an account that is merely new
+# to the pool never earns that label, because nothing came back.
 #
 # The wake therefore always carries both runway states, so firstmate can tell
 # whether the Fable credential, the account pool, or both went RED.
@@ -27,14 +35,15 @@
 # The check never switches anything. The failover to Grok and the fail-back to
 # Fable are firstmate actions; see docs/runbooks/supervisor-failover-grok.md.
 #
-# The record state/.fable-runway holds the last printed states and the last RED
-# report time so a silent poll stays silent. `arm` writes a byte-static shim
+# The record state/.fable-runway holds the last printed states, the last RED
+# report time, and the pool's last Fable-tracked and Fable-capable name sets, so
+# a silent poll stays silent and a regain is distinguishable from an addition.
+# `arm` writes a byte-static shim
 # that the watcher validates with bin/fm-check-register.sh before it ever
 # dispatches it; `disarm` removes the shim, its trust binding, and the record.
 # Retire an armed check with `disarm`, never a hand-composed rm.
 #
-# Test seams: FM_STATE_OVERRIDE selects the state directory,
-# FM_FABLE_RUNWAY_MONITOR selects an alternate monitor executable, and
+# Test seams: FM_STATE_OVERRIDE selects the state directory and
 # FM_FABLE_RUNWAY_NOW freezes the clock. The monitor's own seams pass through.
 set -u
 export LC_ALL=C
@@ -53,8 +62,8 @@ CHECK_ID='fable-runway'
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 RECORD="$STATE/.fable-runway"
-RECORD_SCHEMA=fm-fable-runway-check-v1
-MONITOR=${FM_FABLE_RUNWAY_MONITOR:-$SCRIPT_DIR/fm-fable-runway.sh}
+RECORD_SCHEMA=fm-fable-runway-check-v2
+MONITOR="$SCRIPT_DIR/fm-fable-runway.sh"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 
 usage() {
@@ -93,11 +102,11 @@ record_get() {
 }
 
 record_write() {
-  local overall=$1 fable=$2 pool=$3 capable=$4 red_at=$5 tmp
+  local overall=$1 fable=$2 pool=$3 capable=$4 tracked=$5 red_at=$6 tmp
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
   tmp=$(umask 077; mktemp "$STATE/.fm-fable-runway.XXXXXX" 2>/dev/null) || return 0
-  if ! printf 'schema=%s\noverall=%s\nfable_state=%s\npool_state=%s\ncapable=%s\nred_at=%s\n' \
-    "$RECORD_SCHEMA" "$overall" "$fable" "$pool" "$capable" "$red_at" > "$tmp"; then
+  if ! printf 'schema=%s\noverall=%s\nfable_state=%s\npool_state=%s\ncapable=%s\ntracked=%s\nred_at=%s\n' \
+    "$RECORD_SCHEMA" "$overall" "$fable" "$pool" "$capable" "$tracked" "$red_at" > "$tmp"; then
     rm -f -- "$tmp"
     return 0
   fi
@@ -105,15 +114,21 @@ record_write() {
   mv -f -- "$tmp" "$RECORD" 2>/dev/null || rm -f -- "$tmp"
 }
 
-# new_capable <current> <previous>: names in the current comma list that are not
-# in the previous one, space-separated. `none` and an empty previous list are
-# handled by the caller's case.
-new_capable() {
-  local cur=$1 prev=$2 name out='' IFS=','
+# regained <current-capable> <previous-tracked> <previous-capable>: names that
+# the pool tracked but could not use last poll and can use now, space-separated.
+# An account the pool did not track last poll is new, not recovered, so it is
+# never named here.
+regained() {
+  local cur=$1 prev_tracked=$2 prev_capable=$3 name out='' IFS=','
   [ "$cur" = none ] && return 0
+  [ "$prev_tracked" = none ] && return 0
   for name in $cur; do
     [ -n "$name" ] || continue
-    case ",$prev," in
+    case ",$prev_tracked," in
+      *",$name,"*) ;;
+      *) continue ;;
+    esac
+    case ",$prev_capable," in
       *",$name,"*) ;;
       *) out="$out $name" ;;
     esac
@@ -122,43 +137,50 @@ new_capable() {
 }
 
 action_check() {
-  local line='' overall fable pool capable
+  local line='' overall fable pool capable tracked
   line=$("$MONITOR" 2>/dev/null) || true
   if [ -z "$line" ]; then
-    line="fable-runway: overall=RED fable_state=RED pool_state=UNKNOWN fable_remaining=unknown% fable_burn=unknownx fable_exhaustion=unknown(unknown) pool_routable=unknown/unknown pool_exhausted=unknown pool_capable=none pool_exhaustion=unknown fable_reason=monitor_produced_no_line pool_reason=monitor_unavailable"
+    line="fable-runway: overall=RED fable_state=RED pool_state=UNKNOWN fable_remaining=unknown% fable_burn=unknownx fable_exhaustion=unknown(unknown) pool_routable=unknown/unknown pool_exhausted=unknown pool_capable=none pool_tracked=none pool_exhaustion=unknown fable_reason=monitor_produced_no_line pool_reason=monitor_unavailable"
   fi
   overall=$(field overall "$line")
   fable=$(field fable_state "$line")
   pool=$(field pool_state "$line")
   capable=$(field pool_capable "$line")
+  tracked=$(field pool_tracked "$line")
   case "$overall" in GREEN|YELLOW|RED) ;; *) overall=RED ;; esac
   case "$fable" in GREEN|YELLOW|RED|UNKNOWN) ;; *) fable=RED ;; esac
   case "$pool" in GREEN|YELLOW|RED|UNKNOWN) ;; *) pool=UNKNOWN ;; esac
   [ -n "$capable" ] || capable=none
+  [ -n "$tracked" ] || tracked=none
 
-  local last_present=0 last_overall='' last_fable='' last_pool='' last_capable='' last_red=''
+  local last_present=0 last_overall='' last_fable='' last_pool='' last_capable='' last_tracked='' last_red=''
   if record_get schema >/dev/null 2>&1; then
     last_present=1
     last_overall=$(record_get overall)
     last_fable=$(record_get fable_state)
     last_pool=$(record_get pool_state)
     last_capable=$(record_get capable)
+    last_tracked=$(record_get tracked)
     last_red=$(record_get red_at)
   fi
 
   local now changed=0 recovered='' label=''
   now=$(now_epoch)
+  # Membership alone is not a transition: only the two runway states and the
+  # overall verdict can make a poll printable.
   if [ "$last_present" -eq 0 ] \
     || [ "$overall" != "$last_overall" ] \
     || [ "$fable" != "$last_fable" ] \
-    || [ "$pool" != "$last_pool" ] \
-    || [ "$capable" != "$last_capable" ]; then
+    || [ "$pool" != "$last_pool" ]; then
     changed=1
   fi
-  [ "$last_present" -eq 1 ] || last_capable=''
-  recovered=$(new_capable "$capable" "$last_capable")
-  # A first poll has no prior capable set, so every account looks new; it never
-  # earns a recovery label, which belongs only to a real regain.
+  if [ "$last_present" -eq 1 ]; then
+    [ -n "$last_capable" ] || last_capable=none
+    [ -n "$last_tracked" ] || last_tracked=none
+    recovered=$(regained "$capable" "$last_tracked" "$last_capable")
+  fi
+  # A first poll has no prior sets, so nothing can have come back; a recovery
+  # label belongs only to a real regain.
   if [ "$last_present" -eq 1 ] && [ -n "$recovered" ]; then
     if [ "$pool" = GREEN ]; then
       label="GREEN again account=$(printf '%s' "$recovered" | tr ' ' ',')"
@@ -195,7 +217,7 @@ action_check() {
   elif [ "$overall" != RED ]; then
     red_at=0
   fi
-  record_write "$overall" "$fable" "$pool" "$capable" "$red_at"
+  record_write "$overall" "$fable" "$pool" "$capable" "$tracked" "$red_at"
   return 0
 }
 
