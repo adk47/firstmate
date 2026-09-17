@@ -414,12 +414,14 @@ inbox_steer_check() {  # <window> <task>
 # version this fleet runs - so clearing on busy would wipe the attempt count
 # mid-ladder and no genuine outage could ever be declared. Only DURATION
 # separates the two, and the threshold lives with the ladder's other bounds in
-# bin/fm-gateway-retry-lib.sh, calibrated there against that verified retry,
-# rather than being re-stated here.
+# bin/fm-gateway-retry-lib.sh as a wall-clock window, calibrated there against
+# that verified retry, rather than being re-stated here.
 #
-# Counting polls rather than seconds is deliberate: the counter is exactly the
-# consecutive-busy observations this loop made, so it cannot be fooled by a
-# watcher that was restarted or by a poll cycle that ran long.
+# The bound is wall clock, and this loop converts it to its own cadence: the
+# counter holds consecutive-busy OBSERVATIONS, so the library is asked how many
+# of them POLL seconds apart make up that window. Counting observations keeps
+# the tally immune to a cycle that ran long, while deriving the count from POLL
+# keeps the window from shrinking when this watcher polls faster than default.
 gateway_busy_progress_check() {  # <window> <task> <key> <busy-now>
   local w=$1 task=$2 key=$3 busy=$4 bf n
   bf="$STATE/.gw-busy-$key"
@@ -430,7 +432,7 @@ gateway_busy_progress_check() {  # <window> <task> <key> <busy-now>
   n=$(cat "$bf" 2>/dev/null || true)
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
   n=$(( n + 1 ))
-  if [ "$n" -lt "$(fm_gateway_busy_clear_polls)" ]; then
+  if [ "$n" -lt "$(fm_gateway_busy_clear_polls "$POLL")" ]; then
     printf '%s' "$n" > "$bf" 2>/dev/null || true
     return 0
   fi

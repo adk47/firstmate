@@ -32,9 +32,9 @@ A gateway that is simply unreachable is deliberately outside the transient class
 
 1. **Detect.** The actor that reads the idle agent's pane classifies its tail and opens a durable stall record on the first sighting.
    A pane that no longer shows the error is a recovered agent, and its record is dropped so a later stall starts fresh.
-   That reading only happens on a poll that finds the agent idle, so a record is also dropped once its pane has read busy for `FM_GATEWAY_BUSY_CLEAR_POLLS` consecutive polls: an agent that took the continue and then worked for that long has recovered, and must not carry a half-spent ladder and a stale horizon anchor into the next, unrelated stall.
+   That reading only happens on a poll that finds the agent idle, so a record is also dropped once its pane has read busy continuously for `FM_GATEWAY_BUSY_CLEAR_SECS`: an agent that took the continue and then worked for that long has recovered, and must not carry a half-spent ladder and a stale horizon anchor into the next, unrelated stall.
    Busy alone is not the signal - the continue this ladder sends makes the pane busy until the turn ends, and a turn that dies on the next error is busy for the harness's whole internal retry, about four minutes on the version verified in [`verification/gateway-keepalive.md`](verification/gateway-keepalive.md), so ending the record there would wipe the attempt count mid-ladder and no genuine outage could ever be declared.
-   The threshold is therefore set well past that verified retry, so the ladder's own retry can never reach it.
+   The threshold is therefore set well past that verified retry, so the ladder's own retry can never reach it, and it is held in seconds and converted to whatever cadence the watcher actually polls at - a poll-denominated bound would shrink back under the retry on a home that polls faster.
 2. **Re-ring.** The same actor sends the agent one continue instruction.
    For a crewmate or scout that is the watcher (`gateway_stall_check` in `bin/fm-watch.sh`), which delivers through the steering inbox as a fire-and-forget record: durable and rung with the constant doorbell, but excluded from the inbox's own re-ring ladder, because during a real outage the crew cannot acknowledge anything and an ordinary steer left unhandled would be escalated into stuck-crewmate recovery, the wedge treatment this keep-alive exists to avoid.
    For the primary session it is the keep-alive agent below.
@@ -60,7 +60,7 @@ A secondmate's own home runs its own watcher for its crews, and that is where th
 ## Tuning
 
 `bin/fm-gateway-retry-lib.sh`'s header owns the full list.
-The ones worth knowing: `FM_GATEWAY_RETRY_MAX` (default 8 attempts), `FM_GATEWAY_RETRY_HORIZON` (default 2700 seconds), `FM_GATEWAY_RETRY_BACKOFF` (default `30 60 120 300`, last step repeating), `FM_GATEWAY_TAIL_LINES` (default 10 non-blank lines above the footer), and `FM_GATEWAY_BUSY_CLEAR_POLLS` (default 40 consecutive busy polls end a record, about ten minutes at the default poll interval).
+The ones worth knowing: `FM_GATEWAY_RETRY_MAX` (default 8 attempts), `FM_GATEWAY_RETRY_HORIZON` (default 2700 seconds), `FM_GATEWAY_RETRY_BACKOFF` (default `30 60 120 300`, last step repeating), `FM_GATEWAY_TAIL_LINES` (default 10 non-blank lines above the footer), and `FM_GATEWAY_BUSY_CLEAR_SECS` (default 600 seconds of continuous busy end a record, at any poll interval).
 
 ## Regression coverage
 
