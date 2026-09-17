@@ -50,7 +50,7 @@ One instance per firstmate home owns the port, the pid file, the request log, an
   `~/.config/llm-route/README.md` owns that clock: off-peak routes to OpenRouter, DeepSeek's peak routes to Fireworks.
 - **The key comes from the picker.** The provider key is read by running the very `api_key_cmd` the picker names, so no secret location is hardcoded here and a captain who moves a key file changes one place.
   No secret is printed, logged, or committed; the request log and every error redact the key.
-- **The model ids are advertised, not negotiated.** `GET /v1/models` advertises `deepseek-v4.1-flash` and `deepseek-v4.1-flash[1m]`.
+- **The model ids are advertised, not negotiated.** `GET /v1/models` advertises `deepseek-v4.1-flash` and `deepseek-v4.1-flash[1m]`, and those two exact spellings are the only ones served - anything else, lookalike suffixes included, is a 404.
   A request for either is forwarded upstream under the provider's own model id, which is the only field the gateway rewrites; `cache_control` markers, tool definitions, thinking blocks, and the request body otherwise pass through untouched.
 - **Streaming is relayed frame by frame**, and usage is accumulated across `message_start` and `message_delta` because the providers split it.
 - **The port is gated by a local token.** Everything except `/healthz` requires the bearer token in `$STATE/fm-deepseek-gateway.token` (mode 0600, created on first use).
@@ -95,9 +95,10 @@ That is why the rollout below is "record, relaunch, then switch" for each lane r
 `--gateway` takes no value: the gateway is loopback-only, so its port comes from the lifecycle script's own default (`FM_DEEPSEEK_GATEWAY_PORT`, default 8799) and `--gateway=<anything>` is refused rather than probing one endpoint while recording another.
 
 The in-place switch captures whatever the lane's composer holds, refuses unless the composer verifies empty, sends `/model <spec>` through that lane's own backend submit core, verifies the switch on the rendered screen, records before and after in `state/<id>.meta`, and then kicks the lane back to work.
-Verification reads only the lines BEYOND the pre-submit capture's line count, minus the `/model <spec>` line the script itself submitted - Claude Code echoes that command into its transcript before it decides anything - and it treats Claude Code's own model-rejection renderings, which quote the model id, as an explicit unconfirmed verdict.
-A switch that does not confirm is not recorded and does not kick the lane.
-Because the rule is positional rather than textual, a retry after a slow redraw still verifies even when the confirmation line repeats one already on screen.
+Verification reads only the lines `diff` reports as ADDED between the pre-submit capture and the post-submit one, minus the `/model <spec>` line the script itself submitted - Claude Code echoes that command into its transcript before it decides anything - and it treats Claude Code's own model-rejection renderings, which quote the model id, as an explicit unconfirmed verdict.
+A Claude Code pane is bottom-anchored, so new output is inserted above the composer and a full pane scrolls its top away; diff aligns the two captures, which is what keeps content carried over from before the submit - including this script's own earlier kick text, which names the model - out of the evidence.
+A capture with no added line at all confirms nothing: a switch that does not confirm is not recorded and does not kick the lane.
+Because the rule aligns rather than compares by index, a retry after a slow redraw still verifies even when the confirmation line repeats one already on screen.
 
 It also prints the cron expressions the home records for that lane - `cron=<expr>` lines in its metadata and one expression per line in `data/<id>/crons` - verbatim and against the time it read them, and says so explicitly when the home records none.
 No fire time is computed: a model switch can skip the next scheduled tick, and watching the real fire is the only thing that proves the schedule survived.

@@ -202,21 +202,23 @@ send_key() {  # <key>
 
 # Claude Code renders the `/model <spec>` this script just typed straight back
 # into its transcript, so the post-submit screen always contains the model name
-# whether or not the client accepted it. Candidates are therefore the lines the
-# post-submit capture changed, compared BY POSITION: line n counts when it
-# differs from line n of the pre-submit capture, or lies past its end. The
-# composer sits at the bottom of a Claude Code screen and the transcript grows
-# above it, so new output is not simply appended - but it does shift what every
-# later index holds, which is why a retry whose confirmation reads identically
-# to a line already on the baseline screen still counts. The echo of this
-# script's own command is then dropped, so its input can never be its proof.
+# whether or not the client accepted it. Candidates are therefore the lines
+# `diff` reports as ADDED between the pre-submit capture and the post-submit
+# one, minus that echo.
+#
+# A Claude Code pane is bottom-anchored: the composer stays at the bottom, new
+# output is inserted above it, and a full pane scrolls its top away. So neither
+# "appended at the end" nor "differs at this index" describes a new line - a
+# pane that scrolled by k lines makes every index differ and would turn the
+# whole transcript, including this script's own stale kick text, into evidence.
+# An alignment is what distinguishes them, and diff is exactly that: content
+# carried over from the baseline is common however far it moved, only genuinely
+# new lines are added, and a capture that yields no added line at all confirms
+# nothing and fails closed.
 confirmation_lines() {  # <screen>; prints the lines a confirmation may come from
   local screen=$1
-  printf '%s\n' "$screen" \
-    | FM_LANE_SWITCH_BASELINE="$BASELINE_SCREEN" awk '
-        BEGIN { n = split(ENVIRON["FM_LANE_SWITCH_BASELINE"], base, "\n") }
-        NR > n || $0 != base[NR] { print }
-      ' \
+  diff -- <(printf '%s\n' "$BASELINE_SCREEN") <(printf '%s\n' "$screen") \
+    | sed -n 's/^> //p' \
     | grep -vF -- "/model $MODEL_SPEC" || true
 }
 
@@ -287,13 +289,28 @@ record_meta() {  # <before> <after> <gateway>
   fm_lock_release "$lock"
 }
 
+# Staged and moved into place, never written onto the destination: a half-way
+# failure here would otherwise leave an empty file, and an empty file is read
+# as "already repointed" by the next run and sourced as a no-op relaunch by an
+# operator - the two things the record-first design exists to prevent.
 write_gateway_env() {  # <port>; prints the env file path
-  local port=$1 file
+  local port=$1 file tmp
   file="$STATE/$LANE_ID.gateway.env"
-  (umask 077; "$GATEWAY_SH" env --port "$port" > "$file") \
-    || fail "could not write $file"
-  chmod 0600 "$file" 2>/dev/null || true
+  tmp=$(umask 077; mktemp "$STATE/.fm-lane-model-switch-env.XXXXXX") \
+    || fail "cannot stage the gateway exports for $LANE_ID"
+  if ! (umask 077; "$GATEWAY_SH" env --port "$port" > "$tmp") || [ ! -s "$tmp" ]; then
+    rm -f -- "$tmp"
+    fail "could not write $file"
+  fi
+  chmod 0600 "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$file" || { rm -f -- "$tmp"; fail "could not write $file"; }
   printf '%s' "$file"
+}
+
+# An env file exists AND is non-empty: a truncated one records no endpoint, so
+# the lane is still on whatever it launched with.
+lane_is_repointed() {  # <task-id>
+  [ -s "$STATE/$1.gateway.env" ]
 }
 
 # --- ticks ------------------------------------------------------------------
@@ -379,20 +396,26 @@ main() {
     fi
     # The recorded env file is the only durable evidence that this lane's
     # endpoint may already be the gateway. Read it BEFORE writing one.
-    [ ! -f "$STATE/$id.gateway.env" ] || already_pointed=1
+    ! lane_is_repointed "$id" || already_pointed=1
   fi
   [ "$spec" != gateway ] || refuse "the literal 'gateway' spec needs --gateway so the advertised model id can be resolved"
 
   # The repoint is the durable half of --gateway and it takes effect at the
   # lane's next launch, so it is recorded first and unconditionally. A lane
   # whose running session is still on another endpoint cannot accept the
-  # gateway's model in place, so no /model is attempted for it at all.
-  if [ -n "$gateway" ] && [ "$dry" = 0 ]; then
-    gateway_env=$(write_gateway_env "$port")
-    printf 'gateway: recorded %s for %s in %s\n' "$gateway" "$id" "$gateway_env"
-    printf 'gateway: this takes effect at the lane%ss next launch; a running Claude Code session keeps its current endpoint\n' "'"
+  # gateway's model in place, so no /model is attempted for it at all. A dry
+  # run takes the same branch and reports the same plan, writing nothing.
+  if [ -n "$gateway" ]; then
+    if [ "$dry" = 1 ]; then
+      gateway_env="$STATE/$id.gateway.env"
+      printf 'dry-run: would record the gateway binding %s for %s in %s\n' "$gateway" "$id" "$gateway_env"
+    else
+      gateway_env=$(write_gateway_env "$port")
+      printf 'gateway: recorded %s for %s in %s\n' "$gateway" "$id" "$gateway_env"
+    fi
+    printf 'gateway: the repoint takes effect at the lane%ss next launch; a running Claude Code session keeps its current endpoint\n' "'"
     if [ "$already_pointed" = 0 ]; then
-      printf 'gateway: %s had no recorded repoint, so its running session is not on this gateway and no /model was sent\n' "$id"
+      printf 'gateway: %s has no recorded repoint, so its running session is not on this gateway and no /model is sent to it\n' "$id"
       printf 'gateway: relaunch that lane with the recorded endpoint, then select the model in it:\n'
       printf 'gateway:   set -a; . %s; set +a\n' "$gateway_env"
       printf 'gateway:   /model %s\n' "$spec"
@@ -432,7 +455,6 @@ main() {
 
   if [ "$dry" = 1 ]; then
     printf 'dry-run: %s on %s would switch %s -> %s\n' "$id" "$LANE_BACKEND" "$before" "$spec"
-    [ -z "$gateway" ] || printf 'dry-run: would also record the gateway binding %s\n' "$gateway"
     report_ticks "$registry"
     return 0
   fi
@@ -454,7 +476,7 @@ main() {
   after=$spec
   printf 'switched: %s %s -> %s (verified on screen)\n' "$id" "$before" "$after"
 
-  if [ -z "$gateway" ] && [ -f "$STATE/$id.gateway.env" ]; then
+  if [ -z "$gateway" ] && lane_is_repointed "$id"; then
     # A model switch is not an endpoint switch: the lane's recorded repoint is
     # left exactly as it was, and an operator is told so rather than guessing.
     printf 'gateway: left %s untouched; this switch changed the model, not the endpoint\n' "$STATE/$id.gateway.env"

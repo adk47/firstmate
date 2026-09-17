@@ -157,6 +157,15 @@ ensure_token() {
   printf '%s' "$token"
 }
 
+# The process output can carry the same provider diagnostics the request log
+# does, so it is created 0600 like the log and the token beside it. launchd
+# opens StandardOutPath itself when it spawns the agent, so the file has to
+# exist with that mode BEFORE the agent is bootstrapped or launchd creates it
+# at its own umask instead.
+ensure_out_file() {
+  [ -e "$OUT_FILE" ] || (umask 077; : > "$OUT_FILE") || fail "cannot create $OUT_FILE"
+}
+
 health_body() {  # <port>
   require_curl
   curl -sS --max-time 5 "$(base_url "$1")/healthz" 2>/dev/null || true
@@ -245,6 +254,7 @@ cmd_start() {
   ensure_state_dir
   if [ "$foreground" = 1 ]; then
     # launchd runs this shape: no pidfile, no nohup, the supervisor owns life.
+    ensure_out_file
     exec python3 "$GATEWAY_PY" --port "$port" --pick "$pick" --kind "$DEFAULT_KIND" --state "$STATE" --log "$LOG_FILE"
   fi
   pid=$(running_pid)
@@ -256,9 +266,7 @@ cmd_start() {
     refuse "something already answers $(base_url "$port")/healthz but is not this gateway; stop it before starting"
   fi
   ensure_token >/dev/null
-  # The process output can carry the same provider diagnostics the request log
-  # does, so it is created 0600 like the log and the token beside it.
-  [ -e "$OUT_FILE" ] || (umask 077; : > "$OUT_FILE") || fail "cannot create $OUT_FILE"
+  ensure_out_file
   nohup python3 "$GATEWAY_PY" --port "$port" --pick "$pick" --kind "$DEFAULT_KIND" \
     --state "$STATE" --log "$LOG_FILE" >> "$OUT_FILE" 2>&1 &
   pid=$!
@@ -518,6 +526,7 @@ cmd_install_launchd() {
     refuse "a path contains a character that cannot be rendered safely into a launch agent plist"
   fi
   launch_agent_paths
+  ensure_out_file
   (umask 077; mkdir -p "$LAUNCH_AGENT_DIR") || fail "cannot create $LAUNCH_AGENT_DIR"
   actual=$(render_launchagent "$port" "$pick")
   if [ -f "$LAUNCH_AGENT_PLIST" ] && [ ! -L "$LAUNCH_AGENT_PLIST" ] \

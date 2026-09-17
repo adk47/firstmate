@@ -239,20 +239,77 @@ test_retry_after_a_slow_redraw_is_recorded() {
   write_lane_meta lane-p 'opus'
   # The lane applied an earlier attempt after that attempt had already given
   # up, so the target model is ALREADY on the pre-submit screen. The retry's
-  # own confirmation is byte-identical to it; verification is by position, so
-  # the fresh line still counts and the retry records the switch.
+  # own confirmation is byte-identical to it, and a bottom-anchored pane
+  # renders it above the composer rather than after it; the fresh line must
+  # still count, so the retry records the switch.
   screen_json "$SCREENS/1.json" 'previous output' 'Opus 5 · 1M context' '❯'
   screen_json "$SCREENS/2.json" 'previous output' 'Opus 5 · 1M context' '❯'
   screen_json "$SCREENS/3.json" 'previous output' 'Opus 5 · 1M context' '❯'
-  screen_json "$SCREENS/4.json" 'previous output' 'Opus 5 · 1M context' '❯' \
+  screen_json "$SCREENS/4.json" 'previous output' 'Opus 5 · 1M context' \
     '> /model opus[1m]' 'Opus 5 · 1M context' '❯'
-  screen_json "$SCREENS/5.json" 'previous output' 'Opus 5 · 1M context' '❯' \
+  screen_json "$SCREENS/5.json" 'previous output' 'Opus 5 · 1M context' \
     '> /model opus[1m]' 'Opus 5 · 1M context' '❯'
   run_switch lane-p 'opus[1m]'
   expect_code 0 "$RC" "a retry whose confirmation repeats an existing line must still be recorded: $OUT"
   assert_contains "$OUT" "switched: lane-p opus -> opus[1m]" "the retry must report the switch"
   assert_grep 'model=opus[1m]' "$STATE/lane-p.meta" "the retry must record the model the lane is actually on"
   pass "fm-lane-model-switch: a retry confirmed by a repeated line is still recorded"
+}
+
+# scrolled_screen_lines: a full 200-line pane whose transcript already carries
+# this script's OWN earlier kick text, which names the target model. That line
+# is the stale evidence a scroll-blind rule would accept.
+scrolled_screen_lines() {
+  local i
+  for i in $(seq 1 4); do printf 'transcript line %03d\n' "$i"; done
+  printf 'MODEL SWITCH: this lane is now on deepseek-v4.1-flash. Resume your standing goal.\n'
+  for i in $(seq 6 199); do printf 'transcript line %03d\n' "$i"; done
+  printf '❯\n'
+}
+
+# scroll_case: queue a full pane, then the same pane scrolled up by three lines
+# with <extra> rendered above the composer. The stale model mention survives
+# the scroll inside the carried-over transcript either way.
+scroll_case() {  # <name> <lane> [extra-line]
+  local name=$1 lane=$2 extra=${3:-} line
+  case_dir "$name"
+  write_lane_meta "$lane" 'opus'
+  BASE_LINES=()
+  while IFS= read -r line; do BASE_LINES+=("$line"); done < <(scrolled_screen_lines)
+  [ "${#BASE_LINES[@]}" = 200 ] || fail "the scrolled fixture must be a full 200-line pane"
+  local carried=("${BASE_LINES[@]:3:196}")
+  local after=("${carried[@]}" '> /model deepseek-v4.1-flash')
+  [ -z "$extra" ] || after+=("$extra")
+  after+=('❯')
+  screen_json "$SCREENS/1.json" "${BASE_LINES[@]}"
+  screen_json "$SCREENS/2.json" "${BASE_LINES[@]}"
+  screen_json "$SCREENS/3.json" "${BASE_LINES[@]}"
+  screen_json "$SCREENS/4.json" "${after[@]}"
+  screen_json "$SCREENS/5.json" "${after[@]}"
+}
+
+test_scrolled_pane_does_not_confirm_from_stale_transcript() {
+  # The pane scrolled and the client rendered no confirmation of its own: the
+  # only occurrence of the model name is the stale kick line carried over from
+  # before the submit, so nothing may be recorded and the lane must not be
+  # kicked.
+  scroll_case scrolled-stale lane-s
+  run_switch lane-s 'deepseek-v4.1-flash'
+  expect_code 1 "$RC" "a stale transcript mention must not confirm a switch"
+  assert_contains "$OUT" "does not confirm it" "the failure must name the verification gate"
+  assert_no_grep 'MODEL SWITCH: this lane is now on deepseek-v4.1-flash. Resume your standing goal. ' "$LOG" \
+    "the lane must not be kicked on stale evidence"
+  assert_no_grep 'model_switch_to=' "$STATE/lane-s.meta" "a switch confirmed only by stale text must not be recorded"
+  assert_grep 'model=opus' "$STATE/lane-s.meta" "the recorded model must still be the one before the attempt"
+
+  # The same scrolled pane, but the client really did render the switch below
+  # the carried-over transcript: that one must verify.
+  scroll_case scrolled-confirmed lane-t 'model set to deepseek-v4.1-flash (routed)'
+  run_switch lane-t 'deepseek-v4.1-flash'
+  expect_code 0 "$RC" "a genuine confirmation on a scrolled pane must verify: $OUT"
+  assert_contains "$OUT" "switched: lane-t opus -> deepseek-v4.1-flash" "the switch must be reported"
+  assert_grep 'model_switch_to=deepseek-v4.1-flash' "$STATE/lane-t.meta" "the switch must be recorded"
+  pass "fm-lane-model-switch: a scrolled pane confirms only on genuinely new output"
 }
 
 test_client_model_rejection_is_not_a_confirmation() {
@@ -341,7 +398,7 @@ test_repoint_is_recorded_for_a_lane_that_must_relaunch() {
   # the gateway's model id, so the repoint must be recorded for the next launch
   # and nothing may be typed into the lane.
   repoint_pool_lane lane-r
-  assert_contains "$OUT" "no /model was sent" "the report must say why nothing was typed"
+  assert_contains "$OUT" "no /model is sent to it" "the report must say why nothing was typed"
   assert_contains "$OUT" "set -a; . $STATE/lane-r.gateway.env" "the report must print the exact relaunch step"
   assert_contains "$OUT" "/model deepseek-v4.1-flash" "the report must name the model to select after the relaunch"
   assert_no_grep 'terminal send' "$LOG" "a lane that must relaunch must not be typed into"
@@ -362,6 +419,53 @@ test_repoint_is_recorded_for_a_lane_that_must_relaunch() {
   assert_grep '/model deepseek-v4.1-flash' "$LOG" "the /model command must reach an already-repointed lane"
   assert_grep 'model_switch_to=deepseek-v4.1-flash' "$STATE/lane-r.meta" "the in-place switch must be recorded"
   pass "fm-lane-model-switch: --gateway records the repoint first and only switches an already-repointed lane"
+}
+
+test_dry_run_gateway_describes_the_run_it_would_make() {
+  case_dir gateway-dry-run
+  write_lane_meta lane-u 'opus'
+  start_test_gateway
+  # A dry run over a pool lane must predict the record-only path the real run
+  # takes, not a switch the real run would never make - and must write nothing.
+  run_switch lane-u gateway --gateway --dry-run
+  expect_code 0 "$RC" "a dry run over a pool lane must succeed: $OUT"
+  assert_contains "$OUT" "would record the gateway binding" "the dry run must say it would record the repoint"
+  assert_contains "$OUT" "no /model is sent to it" "the dry run must predict the record-only path"
+  assert_contains "$OUT" "set -a; . $STATE/lane-u.gateway.env" "the dry run must print the same relaunch step"
+  assert_absent "$STATE/lane-u.gateway.env" "a dry run must not write the repoint"
+  assert_no_grep 'terminal send' "$LOG" "a dry run must not send anything to the lane"
+  assert_no_grep 'model_switch_to=' "$STATE/lane-u.meta" "a dry run must not record anything"
+
+  # Once a repoint is on record the real run would switch in place, so the dry
+  # run must describe that instead.
+  repoint_pool_lane lane-u
+  reset_screens
+  screen_json "$SCREENS/1.json" 'previous output' '❯'
+  screen_json "$SCREENS/2.json" 'previous output' '❯'
+  run_switch lane-u gateway --gateway --dry-run
+  expect_code 0 "$RC" "a dry run over a repointed lane must succeed: $OUT"
+  assert_contains "$OUT" "would switch opus -> deepseek-v4.1-flash" "the dry run must predict the in-place switch"
+  assert_no_grep 'terminal send' "$LOG" "a dry run must still send nothing"
+  pass "fm-lane-model-switch: a --gateway dry run predicts the branch the real run takes"
+}
+
+test_truncated_repoint_is_not_read_as_already_pointed() {
+  case_dir gateway-truncated-env
+  write_lane_meta lane-v 'opus'
+  start_test_gateway
+  # A repoint that failed half way leaves nothing usable. An empty file must
+  # not be mistaken for durable evidence that the lane is on the gateway, or
+  # the next run types the gateway's model into a lane still on the pool.
+  : > "$STATE/lane-v.gateway.env"
+  screen_json "$SCREENS/1.json" 'previous output' '❯'
+  run_switch lane-v gateway --gateway
+  expect_code 0 "$RC" "a lane with a truncated repoint must be re-recorded, not switched: $OUT"
+  assert_contains "$OUT" "no /model is sent to it" "an empty env file must not count as a recorded repoint"
+  assert_no_grep 'terminal send' "$LOG" "a lane with a truncated repoint must not be typed into"
+  [ -s "$STATE/lane-v.gateway.env" ] || fail "the run must replace the truncated repoint with real exports"
+  assert_grep "ANTHROPIC_BASE_URL=http://127.0.0.1:$SWITCH_GATEWAY_PORT" "$STATE/lane-v.gateway.env" \
+    "the rewritten exports must point at the gateway"
+  pass "fm-lane-model-switch: a truncated repoint file is not read as an already-pointed lane"
 }
 
 test_plain_switch_leaves_the_gateway_repoint_untouched() {
@@ -482,7 +586,10 @@ test_unhealthy_gateway_is_refused_before_the_lane
 test_gateway_value_form_is_refused
 test_clean_switch_verifies_records_and_kicks
 test_retry_after_a_slow_redraw_is_recorded
+test_scrolled_pane_does_not_confirm_from_stale_transcript
 test_repoint_is_recorded_for_a_lane_that_must_relaunch
+test_dry_run_gateway_describes_the_run_it_would_make
+test_truncated_repoint_is_not_read_as_already_pointed
 test_plain_switch_leaves_the_gateway_repoint_untouched
 test_unconfirmed_switch_does_not_kick
 test_echoed_command_alone_does_not_confirm

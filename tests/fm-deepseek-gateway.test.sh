@@ -255,6 +255,40 @@ test_request_rows_stay_behind_the_token() {
   pass "fm-deepseek-gateway: request rows are readable only behind the local token"
 }
 
+test_a_refused_request_leaves_the_connection_usable() {
+  gateway_case keep-alive
+  start_gateway
+  # HTTP/1.1 keep-alive: a 401 that never reads the POST body would leave that
+  # body in the socket to be parsed as the next request line. A lane holding a
+  # stale token must see a plain repeated auth failure, not alternating 401s
+  # and malformed responses.
+  cat > "$CASE/keepalive.py" <<'PY'
+import http.client, json, sys
+
+port, token = int(sys.argv[1]), sys.argv[2]
+body = json.dumps({"model": "deepseek-v4.1-flash", "max_tokens": 16,
+                   "messages": [{"role": "user", "content": "hi"}]})
+conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+statuses = []
+for headers in ({"content-type": "application/json"},
+                {"content-type": "application/json", "x-api-key": "wrong-token"},
+                {"content-type": "application/json", "x-api-key": token}):
+    conn.request("POST", "/v1/messages", body=body, headers=headers)
+    response = conn.getresponse()
+    payload = response.read().decode("utf-8", "replace")
+    statuses.append(response.status)
+print(" ".join(str(s) for s in statuses))
+print("last=%s" % ("reply" if "fake upstream reply" in payload else payload[:120]))
+PY
+  local out
+  out=$(python3 "$CASE/keepalive.py" "$GATEWAY_PORT" "$TOKEN" 2>&1) \
+    || fail "three POSTs on one connection must all complete: $out"
+  assert_contains "$out" "401 401 200" "a refused POST must not desynchronise the connection it arrived on"
+  assert_contains "$out" "last=reply" "the authorized request on that same connection must be served normally"
+  stop_gateway
+  pass "fm-deepseek-gateway: a refused request leaves its keep-alive connection usable"
+}
+
 test_models_advertise_the_discoverable_id() {
   gateway_case models
   start_gateway
@@ -299,6 +333,16 @@ test_messages_are_proxied_and_logged_without_the_key() {
     -H 'content-type: application/json' -d '{"model":"gpt-9","messages":[]}' \
     "http://127.0.0.1:$GATEWAY_PORT/v1/messages")
   expect_code 404 "$code" "a model this gateway does not serve must 404"
+  # Only the two advertised spellings are served; a lookalike id is not ours to
+  # forward upstream, whatever it claims about its context window.
+  local requested
+  for requested in 'deepseek-v4.1-flash[200k]' 'deepseek-v4.1-flash[' 'deepseek-v4.1-flash[1m][1m]'; do
+    code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST -H "x-api-key: $TOKEN" \
+      -H 'content-type: application/json' \
+      -d "$(printf '{"model":"%s","messages":[]}' "$(printf '%s' "$requested" | sed 's/\\/\\\\/g')")" \
+      "http://127.0.0.1:$GATEWAY_PORT/v1/messages")
+    expect_code 404 "$code" "an id this gateway never advertised must 404: $requested"
+  done
   code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST -H "x-api-key: $TOKEN" \
     "http://127.0.0.1:$GATEWAY_PORT/v1/not-an-endpoint")
   expect_code 404 "$code" "an unknown endpoint must 404"
@@ -472,6 +516,31 @@ PY
   pass "fm-deepseek-gateway: the launch agent recipe renders with no secret in it"
 }
 
+test_foreground_start_owns_the_output_file_mode() {
+  gateway_case foreground-out
+  # launchd opens StandardOutPath itself when it spawns the agent, so the file
+  # has to already exist at 0600; the agent's own command line is this
+  # foreground start, and install-launchd pre-creates it through the same
+  # helper before bootstrapping.
+  FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" bash "$GATEWAY" \
+    start --foreground --port "$GATEWAY_PORT" --pick "$PICK" > "$CASE/foreground.log" 2>&1 &
+  local pid=$!
+  local deadline=$(( $(date +%s) + 15 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    curl -sS --max-time 2 -o /dev/null "http://127.0.0.1:$GATEWAY_PORT/healthz" 2>/dev/null && break
+    sleep 0.2
+  done
+  curl -sS --max-time 5 -o /dev/null "http://127.0.0.1:$GATEWAY_PORT/healthz" \
+    || { kill "$pid" 2>/dev/null; fail "the foreground gateway must answer: $(cat "$CASE/foreground.log")"; }
+  assert_present "$STATE/fm-deepseek-gateway.out" "a foreground start must pre-create the process output file"
+  local mode
+  mode=$(stat -c '%a' "$STATE/fm-deepseek-gateway.out" 2>/dev/null || stat -f '%Lp' "$STATE/fm-deepseek-gateway.out")
+  [ "$mode" = "600" ] || fail "the process output file must be mode 0600 before launchd opens it, got $mode"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "fm-deepseek-gateway: the foreground start launchd runs pre-creates its output file at 0600"
+}
+
 test_env_prints_the_lane_exports() {
   gateway_case env
   gw env --port "$GATEWAY_PORT"
@@ -485,6 +554,7 @@ test_env_prints_the_lane_exports() {
 
 test_health_reports_route_and_never_the_key
 test_request_rows_stay_behind_the_token
+test_a_refused_request_leaves_the_connection_usable
 test_models_advertise_the_discoverable_id
 test_messages_are_proxied_and_logged_without_the_key
 test_streaming_is_relayed_and_accounted
@@ -493,4 +563,5 @@ test_unreadable_key_fails_closed
 test_shared_pool_port_is_refused
 test_status_and_stop_track_the_lifecycle
 test_launch_agent_recipe_is_renderable_and_secret_free
+test_foreground_start_owns_the_output_file_mode
 test_env_prints_the_lane_exports

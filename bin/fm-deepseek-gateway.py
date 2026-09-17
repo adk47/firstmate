@@ -91,18 +91,16 @@ def utc_now() -> str:
 
 
 def canonical_model_id(requested: str) -> str:
-    """Normalize a requested model id to an advertised one, or return ''.
+    """Return the routed model id for an exactly advertised id, or ''.
 
-    Claude Code may send the bare id or the `[1m]`-suffixed form, and a lane
-    may send either. Anything else is not ours to serve.
+    Claude Code may send the bare id or the `[1m]`-suffixed form, and both are
+    advertised on GET /v1/models. Only those two exact spellings are served:
+    an id this gateway never advertised is not ours to forward upstream.
     """
     name = (requested or "").strip()
-    if not name:
-        return ""
-    base = name.split("[", 1)[0].strip()
     for advertised, _display in ADVERTISED_MODELS:
-        if base == advertised:
-            return base
+        if name == advertised:
+            return CANONICAL_MODEL
     return ""
 
 
@@ -390,6 +388,29 @@ class Handler(BaseHTTPRequestHandler):
     def _send_error_json(self, status: int, error_type: str, message: str) -> None:
         self._send_json(status, {"type": "error", "error": {"type": error_type, "message": message}})
 
+    def _discard_body(self) -> None:
+        """Drain the request body before an error that never reads it.
+
+        This is HTTP/1.1 with keep-alive, so an unread body would be parsed as
+        the next request line and answered with a bogus 400 - a lane holding a
+        stale token would see alternating 401s and malformed responses instead
+        of the plain auth failure it actually has.
+        """
+        try:
+            size = int(self.headers.get("content-length") or 0)
+        except ValueError:
+            self.close_connection = True
+            return
+        if size < 0 or size > 64 * 1024 * 1024:
+            self.close_connection = True
+            return
+        while size > 0:
+            chunk = self.rfile.read(min(size, 65536))
+            if not chunk:
+                self.close_connection = True
+                return
+            size -= len(chunk)
+
     def _read_body(self) -> bytes:
         length = self.headers.get("content-length")
         if not length:
@@ -467,12 +488,14 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/") or "/"
         if not self._authorized():
+            self._discard_body()
             self._send_error_json(401, "authentication_error", "missing or invalid gateway token")
             return
         if path == "/v1/messages/count_tokens":
             self._count_tokens()
             return
         if path != "/v1/messages":
+            self._discard_body()
             self._send_error_json(404, "not_found_error", "no such endpoint: %s" % path)
             return
         self._messages()
