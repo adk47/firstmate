@@ -26,10 +26,19 @@
 # the last thing the harness draws above its composer, so the transient match is
 # bounded twice: to the last FM_GATEWAY_TAIL_LINES non-blank lines of whatever
 # the caller captured - the same bounded footer window bin/fm-watch.sh's busy
-# match uses - and, inside that window, to the single row the agent's last turn
-# actually ended on. Only the harness's rendered "API Error: <5xx>" shape
-# matches there, never a bare word such as "overloaded", and never the shape
-# quoted inside backticks or quotation marks.
+# match uses - and, inside that window, to the single LOGICAL line the agent's
+# last turn actually ended on. Only the harness's rendered "API Error: <5xx>"
+# shape matches there, never a bare word such as "overloaded", and never the
+# shape quoted inside backticks or quotation marks.
+#
+# LOGICAL, not a screen row. A pane is a screen: the rendered 503 runs ~190
+# characters and a crew window is 80 columns wide (bin/backends/tmux.sh opens a
+# detached session at the tmux default and captures physical rows), so the error
+# always arrives split across rows and the row carrying the shape is never the
+# last of them. Anchoring to a screen row therefore matched nothing at any width
+# a crew actually runs at. The rows are joined back into the line the harness
+# wrote before the anchor is applied, which is also what lets a quote that
+# opened on an earlier row still count as quoting the shape.
 #
 # WHY THE POSITION IS THE ANCHOR. Matching the shape ANYWHERE in the window
 # judges an agent by text it merely printed: this repository's own docs, tests
@@ -40,7 +49,7 @@
 # behind the long declared-wait cadence. A citation always carries something
 # ahead of it, either more output below it or a quote around it; the harness's
 # own error carries neither. The composer and everything the harness draws below
-# it are not output and are skipped before that last row is taken: the raw last
+# it are not output and are skipped before that last line is taken: the raw last
 # non-blank row of an idle pane is the shortcut footer, and anchoring to that
 # would blind the detector completely.
 #
@@ -227,48 +236,81 @@ _fm_gateway_chrome_row() {  # <row>
   return 1
 }
 
-# The window's LIVE OUTPUT LINE: the last row that is rendered output, which is
-# the row the agent's last turn ended on. The composer and everything the
-# harness draws under it are skipped first, so an idle pane's shortcut footer
-# can never stand in for the agent's own last line. A window with no chrome at
-# all - a capture of nothing but output - ends at its own last row. 1 when the
-# window holds no output row at all.
+# The gutter marks a harness draws at the START of a rendered output line.
+# Whatever begins with one of these, with a prompt glyph, or with the rendered
+# error shape itself is a new line; anything else continues the row above it.
+FM_GATEWAY_LINE_START_GLYPHS='⏺ ⎿ ✻ ⧉ ☒ ☐'
+
+# 0 when <row> BEGINS a rendered line rather than continuing the one above it.
+# A pane holds SCREEN ROWS, not lines: the rendered 503 is ~190 characters and a
+# crew pane is 80 columns, so the error arrives split across rows, and the row
+# carrying the shape is never the last of them. The glyphs above are what tells
+# a fresh line from the tail of a wrapped one.
+_fm_gateway_line_start_row() {  # <row>
+  local row=$1 glyph
+  fm_composer_normalize_trim_var row
+  case "$row" in
+    [aA][pP][iI]' '[eE][rR][rR][oO][rR]:*) return 0 ;;
+  esac
+  fm_composer_leading_prompt_glyph_var glyph "$row" && return 0
+  for glyph in $FM_GATEWAY_LINE_START_GLYPHS; do
+    case "$row" in "$glyph"*) return 0 ;; esac
+  done
+  return 1
+}
+
+# The window's LIVE OUTPUT LINE: the last LOGICAL line of rendered output, which
+# is the line the agent's last turn ended on. Two things are undone first, in
+# this order, because the pane is a screen and not a transcript:
+#   - the composer and everything the harness draws under it are skipped, so an
+#     idle pane's shortcut footer can never stand in for the agent's own last
+#     line, and chrome is never joined into an output line;
+#   - the screen rows above it are joined back into the line the harness wrote,
+#     walking up from the last output row across its wrap continuations and
+#     stopping at the row that begins the line.
+# A window with no chrome at all - a capture of nothing but output - ends at its
+# own last row. 1 when the window holds no output row at all.
 _fm_gateway_live_output_line() {  # <tail-window>
-  local row i last chrome=-1
+  local row i end line
   local -a rows=()
   while IFS= read -r row; do
     rows+=("$row")
   done <<EOF
 $1
 EOF
-  last=$(( ${#rows[@]} - 1 ))
-  [ "$last" -ge 0 ] || return 1
-  i=$last
-  while [ "$i" -ge 0 ]; do
-    if _fm_gateway_chrome_row "${rows[$i]}"; then
-      chrome=$i
-      break
-    fi
+  end=$(( ${#rows[@]} - 1 ))
+  [ "$end" -ge 0 ] || return 1
+  i=$end
+  while [ "$i" -ge 0 ] && ! _fm_gateway_chrome_row "${rows[$i]}"; do
     i=$(( i - 1 ))
   done
-  if [ "$chrome" -lt 0 ]; then
-    printf '%s' "${rows[$last]}"
-    return 0
+  if [ "$i" -ge 0 ]; then
+    i=$(( i - 1 ))
+    while [ "$i" -ge 0 ] && _fm_gateway_chrome_row "${rows[$i]}"; do
+      i=$(( i - 1 ))
+    done
+    [ "$i" -ge 0 ] || return 1
+    end=$i
   fi
-  i=$(( chrome - 1 ))
-  while [ "$i" -ge 0 ] && _fm_gateway_chrome_row "${rows[$i]}"; do
+  line=${rows[$end]}
+  i=$end
+  while [ "$i" -gt 0 ] \
+    && ! _fm_gateway_line_start_row "${rows[$i]}" \
+    && ! _fm_gateway_chrome_row "${rows[$(( i - 1 ))]}"; do
     i=$(( i - 1 ))
+    line="${rows[$i]}$line"
   done
-  [ "$i" -ge 0 ] || return 1
-  printf '%s' "${rows[$i]}"
+  printf '%s' "$line"
 }
 
-# 0 when <lowercased-row> is the harness RENDERING one of the transient errors
+# 0 when <lowercased-line> is the harness RENDERING one of the transient errors
 # rather than text that cites one. A citation wraps the shape in backticks or
 # quotation marks - this repository's docs, tests and sources all do, and so
 # does an agent quoting them back - while the harness never quotes its own
-# error, so a quote ahead of the shape on that row disqualifies it.
-_fm_gateway_row_renders_error() {  # <lowercased-row>
+# error, so a quote ahead of the shape on that line disqualifies it. The line is
+# the reconstructed logical one, so a quote that opened on an earlier screen row
+# is still seen ahead of the shape.
+_fm_gateway_row_renders_error() {  # <lowercased-line>
   local row=$1 code before
   for code in $FM_GATEWAY_TRANSIENT_CODES; do
     case "$row" in

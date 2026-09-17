@@ -24,9 +24,11 @@ The transient match reads only the few non-blank lines immediately above the har
 That bounded window is the same footer window the watcher's busy match reads, and for the same reason: an agent that recovered and went idle again with the old error still in its scrollback must not be re-rung.
 `FM_GATEWAY_TAIL_LINES` sizes the window.
 
-Inside that window the match is anchored to the pane's **live output line**: the last row that is rendered output, which is the row the agent's last turn ended on.
+Inside that window the match is anchored to the pane's **live output line**: the last *logical* line of rendered output, which is the line the agent's last turn ended on.
 The composer and everything the harness draws below it are skipped first — they are not output, and the raw last non-blank row of an idle pane is the shortcut footer, so anchoring there would blind the detector.
-The shape is also not matched when that row quotes it inside backticks or quotation marks.
+Logical, not a screen row: a crew window is 80 columns and the rendered error is ~190 characters, so a pane always splits it across rows and the row carrying the shape is never the last of them.
+The screen rows are joined back into the line the harness wrote — walking up from the last output row across its wrap continuations, stopping at the row that begins the line, which is the row carrying a gutter glyph, a prompt glyph, or the `API Error:` shape itself.
+The shape is also not matched when that line quotes it inside backticks or quotation marks, judged on the reconstructed line so a quote that opened on an earlier row still counts.
 Both rules exist because an agent that merely printed this repository's own sources must not be re-rung either: the docs, the tests and the classifier itself carry the literal rendered string, so a crewmate that read them ends its turn with the shape on screen.
 A citation always carries something around it, either more output below it or a quote beside it; the harness's own turn-ending error carries neither.
 Re-ringing a healthy crew is not a harmless nudge — it spends the whole budget and stamps a false `paused [key=gateway-503]` on that crew's status log, which then routes a genuinely wedged pane onto the long declared-wait cadence instead of the wedge timer.
