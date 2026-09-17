@@ -338,15 +338,13 @@ fm_keepalive_notice_clear() {  # <state-dir> [kind]
   rm -f "$(fm_keepalive_notice_path "$state")" 2>/dev/null || true
 }
 
-# The entry and exit decision for the re-ring ladder on a pane the caller has
-# read as idle, shared by the watcher and the primary keep-alive agent so an
-# agent cannot be in the ladder for one and out of it for the other.
-# <pane-text> is the rendered tail the caller already read. The pane is the only
-# detector: a tail showing the transient error opens or keeps the record, and a
-# tail that no longer shows it is a recovered agent, whose record is dropped
-# rather than re-ringing an agent that is already working again. A busy pane
-# never reaches here; fm_gateway_note_progress below is the ladder's exit for
-# that case.
+# THE entry and exit decision for the re-ring ladder, shared by the watcher and
+# the primary keep-alive agent so an agent cannot be in the ladder for one and
+# out of it for the other. <pane-text> is the rendered tail the caller already
+# read. The pane is the only detector: a tail showing the transient error opens
+# or keeps the record, and a tail that no longer shows it is a recovered agent,
+# whose record is dropped rather than re-ringing an agent that is already
+# working again.
 fm_gateway_stalled_now() {  # <state-dir> <scope> <pane-text>
   local state=$1 scope=$2 pane=${3-}
   if fm_gateway_text_is_transient "$pane"; then
@@ -356,22 +354,6 @@ fm_gateway_stalled_now() {  # <state-dir> <scope> <pane-text>
   _fm_gateway_close_declared_wait "$state" "$scope"
   fm_gateway_clear "$state" "$scope"
   return 1
-}
-
-# The ladder's exit for a pane that is busy rather than idle. A stall record
-# must not outlive the stall it records: fm_gateway_stalled_now above is reached
-# only on an idle poll, so a crew that recovered and then ran one long
-# continuous turn would keep an open record whose first= anchor is arbitrarily
-# old, and the next genuinely new transient error would be judged spent on
-# sight and never re-rung at all. A busy pane is proof of a successful turn
-# whatever its length, so it ends the record here on the same terms a recovered
-# idle pane does. A no-op when there is no open record, so every poll may call
-# it unconditionally.
-fm_gateway_note_progress() {  # <state-dir> <scope>
-  local state=$1 scope=$2
-  fm_gateway_stall_open "$state" "$scope" || return 0
-  _fm_gateway_close_declared_wait "$state" "$scope"
-  fm_gateway_clear "$state" "$scope"
 }
 
 # 0 when this stall has used up either bound and must stop being re-rung.
