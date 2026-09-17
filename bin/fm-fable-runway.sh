@@ -49,11 +49,21 @@
 # routable, but nothing about it says the fleet can draw Fable from it, so it is
 # neither named in pool_capable nor counted against the no-capable-account RED.
 #
-# Per-account pool exhaustion is projected from each account's Fable-scoped
-# weekly window: assuming the week runs seven days up to its resets_at, the
-# average burn since the window opened is extrapolated to 100 percent, with the
-# elapsed portion floored at six hours so a burst in a freshly opened week is
-# not read as imminent exhaustion. The pool projection reported is the best
+# Per-account pool exhaustion is projected from each account's weekly windows:
+# assuming a week runs seven days up to its resets_at, the average burn since
+# the window opened is extrapolated to 100 percent, with the elapsed portion
+# floored at six hours so a burst in a freshly opened week is not read as
+# imminent exhaustion.
+#
+# An account's runway is the sooner of its Fable-scoped week and its all-models
+# weekly_all week, because whichever wall it reaches first is the one that stops
+# it serving Fable. Reading the Fable window alone would report a full week of
+# runway for an account sitting one percent under its all-models wall, and the
+# pool would go from GREEN straight to no_fable_capable_account with no warning
+# in between. The five-hour session window is not projected: it refills through
+# the day, so it is a pause rather than a wall.
+#
+# The pool projection reported is the best
 # remaining one - the longest such exhaustion among Fable-capable accounts with
 # a projection - because the pool keeps serving while any capable account still
 # has room, and the time rule counts how many of them are projected to outlast
@@ -63,9 +73,9 @@
 # projection is reported as a refinement. An account whose windows are not
 # readable is excluded from the count rather than assumed healthy.
 #
-# A capable account whose week cannot be placed - a resets_at a full week or
-# more out, or one carrying a non-UTC offset - has no projection, and it may
-# have any amount of runway left. It is named in pool_unprojected and it
+# A capable account whose weeks cannot be placed - a resets_at a full week or
+# more out, or one carrying a non-UTC offset, on both windows - has no
+# projection, and it may have any amount of runway left. It is named in pool_unprojected and it
 # suppresses the time rule rather than letting the accounts that happen to be
 # projectable decide RED on their own; pool_reason then reads
 # exhaustion_unprojectable. The routable counts still decide, so the pool is
@@ -242,6 +252,8 @@ def fable_limit($a):
   | map(select(.kind == "weekly_scoped"
                and (((.scope.model.display_name // "") | ascii_downcase) == "fable")))
   | first;
+def weekly_all_limit($a):
+  limits($a) | map(select(.kind == "weekly_all")) | first;
 def usable($a): (($a.paused // false) | not) and (($a.tokenStatus // "") == "valid");
 def windows_known($a):
   (limits($a) | length) > 0
@@ -262,14 +274,19 @@ def hours_to($lim):
         ((100 - $pct) * $elapsed / $pct) end
     end
   end;
+def account_hours($a):
+  [hours_to(fable_limit($a)), hours_to(weekly_all_limit($a))]
+  | map(select(. != null))
+  | if length == 0 then null else min end;
 def account_name($a):
-  if ($a.name | type) == "string" then ($a.name | gsub("[ ,\t]"; "_")) else "unnamed" end;
+  if ($a.name | type) == "string" and $a.name != ""
+  then ($a.name | gsub("[ ,\t]"; "_")) else "unnamed" end;
 def named($list): [$list[] | account_name(.)] | join(",");
 .accounts as $accts |
 ($accts | map(select(fable_limit(.) != null))) as $trackedAccts |
 ($trackedAccts | length) as $tracked |
 ($accts | map(select(capable(.)))) as $cap |
-($cap | map({acct: ., hrs: hours_to(fable_limit(.))})) as $capHrs |
+($cap | map({acct: ., hrs: account_hours(.)})) as $capHrs |
 ($capHrs | map(select(.hrs != null)) | map(.hrs)) as $hrs |
 ($capHrs | map(select(.hrs == null)) | map(.acct)) as $unproj |
 (if ($hrs | length) == 0 then null else ($hrs | max) end) as $phrs |
@@ -386,7 +403,7 @@ case "${1-}" in
   *) usage ;;
 esac
 
-POOL_URL=${FM_FABLE_RUNWAY_POOL_URL-http://127.0.0.1:8080}
+POOL_URL=${FM_FABLE_RUNWAY_POOL_URL:-http://127.0.0.1:8080}
 
 # The watcher runs this check as a direct child, so FM_CHECK_TIMEOUT is read
 # here too and an operator who raised it is seen on both sides. One cap's worth
@@ -417,21 +434,9 @@ IFS=$'\t' read -r FABLE_STATE FABLE_REM FABLE_BURN FABLE_EXH FABLE_HRS FABLE_REA
 $(fable_read)
 EOF
 
-if [ -z "$POOL_URL" ]; then
-  POOL_STATE=UNKNOWN
-  POOL_ROUTABLE=-
-  POOL_CONFIGURED=-
-  POOL_EXHAUSTED=-
-  POOL_CAPABLE=none
-  POOL_TRACKED=none
-  POOL_UNPROJ=none
-  POOL_HRS=-
-  POOL_REASON=pool_not_configured
-else
-  IFS=$'\t' read -r POOL_STATE POOL_ROUTABLE POOL_CONFIGURED POOL_EXHAUSTED POOL_CAPABLE POOL_TRACKED POOL_UNPROJ POOL_HRS POOL_REASON <<EOF
+IFS=$'\t' read -r POOL_STATE POOL_ROUTABLE POOL_CONFIGURED POOL_EXHAUSTED POOL_CAPABLE POOL_TRACKED POOL_UNPROJ POOL_HRS POOL_REASON <<EOF
 $(pool_read)
 EOF
-fi
 
 state_valid "$FABLE_STATE" || FABLE_STATE=RED
 state_valid "$POOL_STATE" || POOL_STATE=UNKNOWN

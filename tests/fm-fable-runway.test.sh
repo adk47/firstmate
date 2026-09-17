@@ -104,6 +104,29 @@ add_account() {
     }]' "$file" > "$tmp" && mv "$tmp" "$file"
 }
 
+# add_account_with_wall <accounts-file> <name> <session-pct> <weekly-all-pct>
+#   <fable-pct> <resets-in-hours>
+# Both weekly windows carry a resets_at, so the all-models wall is projectable
+# the same way the Fable-scoped one is.
+add_account_with_wall() {
+  local file=$1 name=$2 session=$3 weekly=$4 pct=$5 hours=$6 resets tmp="$1.tmp"
+  resets=$(iso_in_hours "$hours")
+  jq -c --arg name "$name" --argjson session "$session" --argjson weekly "$weekly" \
+    --argjson pct "$pct" --arg resets "$resets" '
+    . + [{
+      name: $name,
+      tokenStatus: "valid",
+      paused: false,
+      usageData: {limits: [
+        {kind: "session", percent: $session},
+        {kind: "weekly_all", percent: $weekly, resets_at: $resets},
+        {kind: "weekly_scoped", percent: $pct,
+         resets_at: $resets,
+         scope: {model: {display_name: "Fable"}}}
+      ]}
+    }]' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
 # add_account_resetting_at <accounts-file> <name> <fable-pct> <resets-at>
 # The resets_at is written verbatim, so a fixture can carry a timestamp the
 # monitor cannot place in a seven-day week.
@@ -420,6 +443,68 @@ out=$(run_monitor "$quota" "$health" "$accounts")
 expect_field "$out" pool_state YELLOW "unprojectable thin pool state"
 expect_field "$out" pool_reason routable_at_or_below_3 "unprojectable thin pool reason"
 pass "an unprojectable capable account suppresses the time rule, not the verdict"
+
+# The all-models weekly wall binds before the Fable-scoped one here: every
+# account has burned 99 percent of weekly_all with its Fable week barely
+# touched. Reading the Fable window alone would report a full week of runway
+# right up to the moment the pool walls.
+make_pool "$health" "$accounts" 8 8 0
+for acct_name in 0 1 2 3 4; do
+  add_account_with_wall "$accounts" "acct-$acct_name" 5 99 5 100
+done
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state RED "weekly-all wall pool state"
+expect_field "$out" pool_reason exhaustion_under_2h "weekly-all wall pool reason"
+expect_rc "$out" 2 "weekly-all wall exit"
+
+# The sooner wall wins in the other direction too: a spent Fable week is not
+# rescued by an untouched all-models week.
+make_pool "$health" "$accounts" 8 8 0
+add_account_with_wall "$accounts" fable-bound 5 5 99 24
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state RED "fable wall pool state"
+expect_field "$out" pool_reason exhaustion_under_2h "fable wall pool reason"
+
+# One placeable weekly window is enough: an account is unprojectable only when
+# neither week can be placed.
+make_pool "$health" "$accounts" 8 8 0
+jq -c --arg r "$(iso_in_hours 100)" '[{
+  name: "half-placeable", tokenStatus: "valid", paused: false,
+  usageData: {limits: [
+    {kind: "session", percent: 5},
+    {kind: "weekly_all", percent: 50, resets_at: "2026-10-01T12:00:00+01:00"},
+    {kind: "weekly_scoped", percent: 50, resets_at: $r,
+     scope: {model: {display_name: "Fable"}}}
+  ]}
+}]' <<<'null' > "$accounts"
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_unprojected none "half-placeable unprojected"
+expect_field "$out" pool_state GREEN "half-placeable pool state"
+expect_field "$out" pool_reason has_fable_capacity "half-placeable pool reason"
+pass "an account's runway is the sooner of its two weekly walls"
+
+# An account whose name is an empty string is still a named member of the pool,
+# so the fail-back label stays available to it.
+make_pool "$health" "$accounts" 8 8 0
+add_account "$accounts" "" 5 40 20 100
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_capable unnamed "empty-name pool capable"
+expect_field "$out" pool_tracked unnamed "empty-name pool tracked"
+expect_field "$out" pool_state GREEN "empty-name pool state"
+pass "an account with an empty name is reported as unnamed, not as no account"
+
+# An empty pool URL is not a way to switch the pool read off; it takes the
+# default, and only an unreadable pool yields UNKNOWN.
+make_pool "$health" "$accounts" 6 11 0
+add_account "$accounts" acct-a 5 40 20 100
+out=$(FM_FABLE_RUNWAY_POOL_URL='' FM_FABLE_RUNWAY_NOW="$NOW" \
+  FM_FABLE_RUNWAY_QUOTA_JSON="$quota" \
+  FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$health" \
+  FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$accounts" \
+  "$MONITOR" 2>/dev/null)
+expect_field "$out" pool_state GREEN "empty pool url state"
+expect_field "$out" pool_reason has_fable_capacity "empty pool url reason"
+pass "an empty pool URL falls back to the default rather than disabling the read"
 
 # The pool's ordered routing steady state: one account burns out its week while
 # the rest sit untouched at zero. A zero-burn window is readable and maximally
