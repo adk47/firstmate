@@ -21,8 +21,15 @@ The rendered pane is the single detector, for every actor.
 It is the one signal that keeps saying "still stalled" for as long as the stall lasts, and it is the only signal a reader outside the session has.
 
 The transient match reads only the few non-blank lines immediately above the harness's prompt and footer, which is where a turn-ending API error renders, and it matches only the harness's rendered `API Error: <5xx>` shape.
-That bounded window is the same footer window the watcher's busy match reads, and for the same reason: an agent that recovered and went idle again with the old error still in its scrollback must not be re-rung, and an agent that merely printed this repository's own sources at its prompt must not be either.
+That bounded window is the same footer window the watcher's busy match reads, and for the same reason: an agent that recovered and went idle again with the old error still in its scrollback must not be re-rung.
 `FM_GATEWAY_TAIL_LINES` sizes the window.
+
+Inside that window the match is anchored to the pane's **live output line**: the last row that is rendered output, which is the row the agent's last turn ended on.
+The composer and everything the harness draws below it are skipped first — they are not output, and the raw last non-blank row of an idle pane is the shortcut footer, so anchoring there would blind the detector.
+The shape is also not matched when that row quotes it inside backticks or quotation marks.
+Both rules exist because an agent that merely printed this repository's own sources must not be re-rung either: the docs, the tests and the classifier itself carry the literal rendered string, so a crewmate that read them ends its turn with the shape on screen.
+A citation always carries something around it, either more output below it or a quote beside it; the harness's own turn-ending error carries neither.
+Re-ringing a healthy crew is not a harmless nudge — it spends the whole budget and stamps a false `paused [key=gateway-503]` on that crew's status log, which then routes a genuinely wedged pane onto the long declared-wait cadence instead of the wedge timer.
 
 A deny list runs first, over the whole capture, and beats the transient match.
 It exists because the non-retryable failures are the expensive mistakes: a prompt that is too long, an expired credential, or a spent usage limit cannot be improved by asking the agent to carry on, and one real failure this fleet produces (`Prompt is too long · automatic compaction failed: API Error: 503 ...`) carries a 503 inside a failure that is not the gateway's.

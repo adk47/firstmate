@@ -22,15 +22,27 @@
 # RENDERED PANE by an actor outside the session, which is also the only signal
 # that keeps saying "still stalled" for as long as the stall lasts.
 #
-# CLASSIFICATION reads the pane's tail. A turn-ending API error renders in the
-# few lines immediately above the harness's prompt and footer, so the transient
-# match is bounded to the last FM_GATEWAY_TAIL_LINES non-blank lines of whatever
+# CLASSIFICATION reads the pane's LIVE OUTPUT LINE. A turn-ending API error is
+# the last thing the harness draws above its composer, so the transient match is
+# bounded twice: to the last FM_GATEWAY_TAIL_LINES non-blank lines of whatever
 # the caller captured - the same bounded footer window bin/fm-watch.sh's busy
-# match uses, and for the same reason: an agent that recovered and went idle
-# again with the old error still in its scrollback must not be re-rung, and an
-# agent that merely printed this repository's own sources must not be either.
-# Only the harness's rendered "API Error: <5xx>" shape matches, never a bare
-# word such as "overloaded".
+# match uses - and, inside that window, to the single row the agent's last turn
+# actually ended on. Only the harness's rendered "API Error: <5xx>" shape
+# matches there, never a bare word such as "overloaded", and never the shape
+# quoted inside backticks or quotation marks.
+#
+# WHY THE POSITION IS THE ANCHOR. Matching the shape ANYWHERE in the window
+# judges an agent by text it merely printed: this repository's own docs, tests
+# and sources carry the literal string, so a crewmate that read them ends its
+# turn with the shape on screen, and an unanchored match would send that healthy
+# crew a continue nobody asked for, spend the whole budget, and stamp a false
+# declared wait on its status log - which then hides a genuinely wedged crew
+# behind the long declared-wait cadence. A citation always carries something
+# ahead of it, either more output below it or a quote around it; the harness's
+# own error carries neither. The composer and everything the harness draws below
+# it are not output and are skipped before that last row is taken: the raw last
+# non-blank row of an idle pane is the shortcut footer, and anchoring to that
+# would blind the detector completely.
 #
 # A DENY list runs first, over the WHOLE supplied text, and wins outright. It
 # exists because the non-retryable failures are the expensive mistakes:
@@ -71,7 +83,12 @@
 #   FM_GATEWAY_TAIL_LINES       default 10; non-blank pane lines above the footer the transient match reads
 #   FM_GATEWAY_BUSY_CLEAR_SECS  default 600; seconds of continuous busy that drop a record
 #
-# No side effects on source. Dependency-light: pure shell plus date.
+# No side effects on source. Dependency-light: pure shell plus date, and the one
+# fleet-wide composer owner, which already holds every shape a harness draws
+# below its output and is what tells this classifier where that output ends.
+
+# shellcheck source=bin/fm-composer-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 FM_GATEWAY_RETRY_MAX_DEFAULT=8
 FM_GATEWAY_RETRY_HORIZON_DEFAULT=2700
@@ -189,20 +206,95 @@ fm_gateway_text_is_permanent() {  # <text>
   return 1
 }
 
+# The rendered API-error codes worth re-ringing for. Held once, so the match
+# below reads them rather than respelling them.
+FM_GATEWAY_TRANSIENT_CODES='500 502 503 504 529'
+
+# 0 when <row> is harness CHROME rather than rendered output: a composer border
+# or side rail, a bare agent-prompt row, a transcript rule. Every shape is asked
+# of bin/fm-composer-lib.sh, the one fleet-wide owner of composer shape
+# knowledge, because a second copy of it here is exactly how the adapters' own
+# copies drifted. A shell prompt glyph is deliberately not chrome - that is the
+# owner's dead-shell rule - and a blank row is, so padding around the footer
+# cannot end the scan early. The footer needs no patterns of its own: it renders
+# BELOW the composer, and the scan below stops at the first chrome row it meets
+# coming up from the bottom.
+_fm_gateway_chrome_row() {  # <row>
+  local row=$1 glyph
+  case "$row" in *[![:space:]]*) : ;; *) return 0 ;; esac
+  fm_composer_row_has_edge "$row" && return 0
+  fm_composer_leading_agent_glyph_var glyph "$row" && return 0
+  return 1
+}
+
+# The window's LIVE OUTPUT LINE: the last row that is rendered output, which is
+# the row the agent's last turn ended on. The composer and everything the
+# harness draws under it are skipped first, so an idle pane's shortcut footer
+# can never stand in for the agent's own last line. A window with no chrome at
+# all - a capture of nothing but output - ends at its own last row. 1 when the
+# window holds no output row at all.
+_fm_gateway_live_output_line() {  # <tail-window>
+  local row i last chrome=-1
+  local -a rows=()
+  while IFS= read -r row; do
+    rows+=("$row")
+  done <<EOF
+$1
+EOF
+  last=$(( ${#rows[@]} - 1 ))
+  [ "$last" -ge 0 ] || return 1
+  i=$last
+  while [ "$i" -ge 0 ]; do
+    if _fm_gateway_chrome_row "${rows[$i]}"; then
+      chrome=$i
+      break
+    fi
+    i=$(( i - 1 ))
+  done
+  if [ "$chrome" -lt 0 ]; then
+    printf '%s' "${rows[$last]}"
+    return 0
+  fi
+  i=$(( chrome - 1 ))
+  while [ "$i" -ge 0 ] && _fm_gateway_chrome_row "${rows[$i]}"; do
+    i=$(( i - 1 ))
+  done
+  [ "$i" -ge 0 ] || return 1
+  printf '%s' "${rows[$i]}"
+}
+
+# 0 when <lowercased-row> is the harness RENDERING one of the transient errors
+# rather than text that cites one. A citation wraps the shape in backticks or
+# quotation marks - this repository's docs, tests and sources all do, and so
+# does an agent quoting them back - while the harness never quotes its own
+# error, so a quote ahead of the shape on that row disqualifies it.
+_fm_gateway_row_renders_error() {  # <lowercased-row>
+  local row=$1 code before
+  for code in $FM_GATEWAY_TRANSIENT_CODES; do
+    case "$row" in
+      *"api error: $code"*) before=${row%%"api error: $code"*} ;;
+      *) continue ;;
+    esac
+    case "$before" in
+      *'`'*|*'"'*|*"'"*|*'“'*|*'”'*) continue ;;
+    esac
+    return 0
+  done
+  return 1
+}
+
 # 0 when the rendered pane tail shows a transient gateway failure worth
 # re-ringing for. The deny list is consulted over the whole text; the transient
-# match reads only the last FM_GATEWAY_TAIL_LINES non-blank lines, which is where
-# a turn-ending API error renders, immediately above the prompt and footer.
+# match reads only the live output line of the last FM_GATEWAY_TAIL_LINES
+# non-blank lines, which is where a turn-ending API error renders.
 fm_gateway_text_is_transient() {  # <pane-text>
-  local text=${1-} t
+  local text=${1-} live
   [ -n "$text" ] || return 1
   fm_gateway_text_is_permanent "$text" && return 1
-  t=$(printf '%s\n' "$text" | grep -v '^[[:space:]]*$' | tail -n "$(fm_gateway_tail_lines)" \
-    | tr '[:upper:]' '[:lower:]')
-  case "$t" in
-    *'api error: 500'*|*'api error: 502'*|*'api error: 503'*|*'api error: 504'*|*'api error: 529'*) return 0 ;;
-  esac
-  return 1
+  live=$(_fm_gateway_live_output_line \
+    "$(printf '%s\n' "$text" | grep -v '^[[:space:]]*$' | tail -n "$(fm_gateway_tail_lines)")") \
+    || return 1
+  _fm_gateway_row_renders_error "$(printf '%s' "$live" | tr '[:upper:]' '[:lower:]')"
 }
 
 # --- durable stall record ----------------------------------------------------
