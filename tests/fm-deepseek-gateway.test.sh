@@ -8,10 +8,13 @@
 #     whole reason a second gateway exists rather than a direct base URL;
 #   - the upstream provider, model, and base URL are re-resolved PER REQUEST
 #     from the route picker, so a lane that crosses DeepSeek's peak window is
-#     re-routed without a restart;
+#     re-routed without a restart, and each route is called on its OWN path -
+#     the fake upstream serves the two providers' real path shapes and refuses
+#     anything else, so the peak route is proven, not assumed;
 #   - the provider key never reaches the request log or any error;
 #   - an unauthenticated caller is refused, so an open loopback port cannot
-#     spend the captain's provider cash;
+#     spend the captain's provider cash, and the per-request rows are readable
+#     only behind that token;
 #   - a route whose key cannot be read fails closed with a clear status rather
 #     than sending an unauthenticated upstream call;
 #   - the shared account-pool port is refused outright;
@@ -35,6 +38,13 @@ write_upstream() {  # <path>
 import json, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# The real providers hang their Anthropic surface off different path prefixes
+# (OpenRouter /api/v1/messages, Fireworks /inference/v1/messages), so this fake
+# records the exact path and Host it was called on and refuses anything else.
+# A gateway that built the URL wrong for one route fails here instead of
+# silently proving only the route the fixture happened to start on.
+SERVED = ("/api/v1/messages", "/inference/v1/messages")
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -43,10 +53,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         with open(log_path, "a") as handle:
-            handle.write("POST %s\n" % self.path)
+            handle.write("POST %s host=%s\n" % (self.path, self.headers.get("host", "")))
         size = int(self.headers.get("content-length", 0))
         body = json.loads(self.rfile.read(size) or b"{}")
-        if self.path.rstrip("/").endswith("/messages") and body.get("stream"):
+        if self.path not in SERVED:
+            data = json.dumps({"type": "error", "error": {
+                "type": "not_found_error",
+                "message": "no such upstream path: %s" % self.path,
+            }}).encode()
+            self.send_response(404)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if body.get("stream"):
             self.send_response(200)
             self.send_header("content-type", "text/event-stream")
             self.send_header("transfer-encoding", "chunked")
@@ -143,7 +164,8 @@ gateway_case() {  # <name> -> sets CASE HOME_DIR STATE GATEWAY_PORT PICK TOKEN
   GATEWAY_PORT=$(free_port)
   start_upstream "$CASE"
   PICK="$CASE/pick.py"
-  write_pick "$PICK" "http://127.0.0.1:$UPSTREAM_PORT" "printf $FAKE_KEY"
+  # The off-peak route's shape: OpenRouter serves /api/v1/messages.
+  write_pick "$PICK" "http://127.0.0.1:$UPSTREAM_PORT/api/v1" "printf $FAKE_KEY"
 }
 
 gw() {  # <args...>; sets OUT RC
@@ -199,6 +221,28 @@ test_health_reports_route_and_never_the_key() {
   pass "fm-deepseek-gateway: health reports the live route and never the provider key"
 }
 
+test_request_rows_stay_behind_the_token() {
+  gateway_case request-rows
+  start_gateway
+  api POST /v1/messages '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}' > /dev/null
+  local body
+  body=$(curl -sS --max-time 10 "http://127.0.0.1:$GATEWAY_PORT/healthz")
+  # A recorded row carries the provider's own error body, which routinely
+  # quotes the part of the lane's request it objected to; /healthz is served
+  # to anyone on the loopback port, so no row may appear in it.
+  assert_not_contains "$body" 'last_request' "the unauthenticated health payload must carry no request row"
+  assert_not_contains "$body" 'upstream_status' "the unauthenticated health payload must carry no request detail"
+  assert_contains "$body" '"requests_served": 1' "the unauthenticated payload must still carry the counters"
+  body=$(api GET /stats)
+  assert_contains "$body" '"last_request"' "the token-gated stats must still carry the last request row"
+  assert_contains "$body" '"upstream_status": 200' "the token-gated stats must carry the row's detail"
+  local code
+  code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$GATEWAY_PORT/stats")
+  expect_code 401 "$code" "stats must refuse an unauthenticated caller"
+  stop_gateway
+  pass "fm-deepseek-gateway: request rows are readable only behind the local token"
+}
+
 test_models_advertise_the_discoverable_id() {
   gateway_case models
   start_gateway
@@ -227,7 +271,8 @@ test_messages_are_proxied_and_logged_without_the_key() {
   local body
   body=$(api POST /v1/messages '{"model":"deepseek-v4.1-flash[1m]","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}')
   assert_contains "$body" 'fake upstream reply' "the upstream reply must reach the caller"
-  assert_grep 'POST /messages' "$UPSTREAM_LOG" "the request must really have reached the upstream"
+  assert_grep "POST /api/v1/messages host=127.0.0.1:$UPSTREAM_PORT" "$UPSTREAM_LOG" \
+    "the OpenRouter-shaped route must be called on its own /api/v1/messages path and host"
   assert_contains "$body" '"model": "deepseek/deepseek-v4.1-flash"' "the upstream must receive the provider's own model id"
   body=$(cat "$STATE/fm-deepseek-gateway.log")
   assert_contains "$body" '"provider": "openrouter-named"' "the request log must record the provider"
@@ -274,12 +319,18 @@ test_route_is_resolved_per_request() {
   start_gateway
   # Rewrite the route picker between two calls: the second call must take the
   # new provider without a restart, which is what keeps a long lane on the
-  # right side of DeepSeek's UTC peak.
-  api POST /v1/messages '{"model":"deepseek-v4.1-flash","messages":[]}' > /dev/null
-  write_pick "$PICK" "http://127.0.0.1:$UPSTREAM_PORT" "printf $FAKE_KEY"
-  python3 - "$PICK" "$UPSTREAM_PORT" <<'PY'
+  # right side of DeepSeek's UTC peak. The two routes carry the two providers'
+  # real path shapes, so this also proves the peak route's URL - the one every
+  # opted-in lane takes for seven hours each weekday - and not just the
+  # off-peak one the fixture starts on.
+  local body
+  body=$(api POST /v1/messages '{"model":"deepseek-v4.1-flash","messages":[]}')
+  assert_contains "$body" 'fake upstream reply' "the off-peak route must reach a served upstream path"
+  # The peak route: Fireworks serves /inference/v1/messages.
+  write_pick "$PICK" "http://127.0.0.1:$UPSTREAM_PORT/inference/v1" "printf $FAKE_KEY"
+  python3 - "$PICK" <<'PY'
 import sys
-path, port = sys.argv[1], sys.argv[2]
+path = sys.argv[1]
 with open(path) as handle:
     text = handle.read()
 text = text.replace('"provider": "openrouter-named"', '"provider": "fireworks-us"')
@@ -289,19 +340,26 @@ text = text.replace('"list_in": 0.15', '"list_in": 0.22').replace('"list_out": 0
 with open(path, "w") as handle:
     handle.write(text)
 PY
-  api POST /v1/messages '{"model":"deepseek-v4.1-flash","messages":[]}' > /dev/null
+  body=$(api POST /v1/messages '{"model":"deepseek-v4.1-flash","messages":[]}')
+  assert_contains "$body" 'fake upstream reply' "the peak route must reach a served upstream path too"
+  assert_contains "$body" '"model": "accounts/fireworks/models/deepseek-v4p1-flash"' \
+    "the peak route must forward the provider's own model id"
   local logged
   logged=$(cat "$STATE/fm-deepseek-gateway.log")
   assert_contains "$logged" '"provider": "openrouter-named"' "the first call must use the first route"
   assert_contains "$logged" '"provider": "fireworks-us"' "the second call must use the route as it stands now, not at startup"
   assert_contains "$logged" '"slot": "peak"' "the re-resolved slot must be recorded"
+  assert_grep "POST /api/v1/messages host=127.0.0.1:$UPSTREAM_PORT" "$UPSTREAM_LOG" \
+    "the off-peak route must be called on the OpenRouter path"
+  assert_grep "POST /inference/v1/messages host=127.0.0.1:$UPSTREAM_PORT" "$UPSTREAM_LOG" \
+    "the peak route must be called on the Fireworks path, not the off-peak one"
   stop_gateway
-  pass "fm-deepseek-gateway: the upstream route is re-resolved on every request"
+  pass "fm-deepseek-gateway: the upstream route is re-resolved per request and each provider's own URL is used"
 }
 
 test_unreadable_key_fails_closed() {
   gateway_case unreadable-key
-  write_pick "$PICK" "http://127.0.0.1:$UPSTREAM_PORT" "exit 3"
+  write_pick "$PICK" "http://127.0.0.1:$UPSTREAM_PORT/api/v1" "exit 3"
   gw start --port "$GATEWAY_PORT" --pick "$PICK"
   # A gateway that cannot read the key still binds and reports degraded: it
   # must never call upstream unauthenticated.
@@ -350,18 +408,49 @@ test_status_and_stop_track_the_lifecycle() {
   pass "fm-deepseek-gateway: status and stop track the real process lifecycle"
 }
 
+# The plist is a machine-consumed declarative artifact, so it is parsed into
+# its real semantic model (plutil is launchd's own reader; plistlib is the same
+# parse where plutil is not installed) and the VALUES are asserted. A raw
+# substring check passes on <key>RunAtLoad</key><false/>, which is the opposite
+# of the behaviour it claims to pin.
+plist_json() {  # reads plist XML on stdin, prints JSON
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -convert json -o - -
+  else
+    python3 -c 'import json,plistlib,sys; json.dump(plistlib.loads(sys.stdin.buffer.read()), sys.stdout)'
+  fi
+}
+
 test_launch_agent_recipe_is_renderable_and_secret_free() {
   gateway_case launch-agent
   gw plist --port "$GATEWAY_PORT" --pick "$PICK"
   expect_code 0 "$RC" "the launch agent definition must render"
-  assert_contains "$OUT" "<string>com.firstmate.deepseek-gateway</string>" "the label must be the one the verbs manage"
-  assert_contains "$OUT" "<string>start</string>" "the agent must start the gateway"
-  assert_contains "$OUT" "<string>--foreground</string>" "the agent must run it in the foreground so launchd owns it"
-  assert_contains "$OUT" "<string>$GATEWAY_PORT</string>" "the agent must carry the configured port"
-  assert_contains "$OUT" "<string>$PICK</string>" "the agent must carry the configured route picker"
-  assert_contains "$OUT" "<key>RunAtLoad</key>" "the agent must survive a reboot"
-  assert_contains "$OUT" "<key>KeepAlive</key>" "the agent must be restarted when it dies"
-  assert_contains "$OUT" "<string>$STATE/fm-deepseek-gateway.out</string>" "the agent must log where the operator expects"
+  printf '%s\n' "$OUT" | plist_json > "$CASE/agent.json" \
+    || fail "the rendered plist must parse as a plist"
+  cat > "$CASE/check-agent.py" <<'PY'
+import json, sys
+agent_path, script, port, pick, out_path = sys.argv[1:6]
+with open(agent_path) as handle:
+    agent = json.load(handle)
+problems = []
+if agent.get("Label") != "com.firstmate.deepseek-gateway":
+    problems.append("Label is %r" % agent.get("Label"))
+wanted = [script, "start", "--foreground", "--port", port, "--pick", pick]
+if agent.get("ProgramArguments") != wanted:
+    problems.append("ProgramArguments is %r, wanted %r" % (agent.get("ProgramArguments"), wanted))
+if agent.get("RunAtLoad") is not True:
+    problems.append("RunAtLoad is %r, so the agent would not survive a reboot" % (agent.get("RunAtLoad"),))
+if agent.get("KeepAlive") is not True:
+    problems.append("KeepAlive is %r, so a dead gateway would stay dead" % (agent.get("KeepAlive"),))
+if agent.get("StandardOutPath") != out_path:
+    problems.append("StandardOutPath is %r, wanted %r" % (agent.get("StandardOutPath"), out_path))
+if problems:
+    print("; ".join(problems), file=sys.stderr)
+    sys.exit(1)
+PY
+  python3 "$CASE/check-agent.py" "$CASE/agent.json" "$ROOT/bin/fm-deepseek-gateway.sh" \
+    "$GATEWAY_PORT" "$PICK" "$STATE/fm-deepseek-gateway.out" \
+    || fail "the launch agent does not mean what it must mean"
   assert_not_contains "$OUT" "ANTHROPIC_AUTH_TOKEN" "the launch agent must never carry the token"
   assert_not_contains "$OUT" "$FAKE_KEY" "the launch agent must never carry a provider key"
   # A path that cannot be rendered into XML safely must be refused rather than
@@ -383,6 +472,7 @@ test_env_prints_the_lane_exports() {
 }
 
 test_health_reports_route_and_never_the_key
+test_request_rows_stay_behind_the_token
 test_models_advertise_the_discoverable_id
 test_messages_are_proxied_and_logged_without_the_key
 test_streaming_is_relayed_and_accounted

@@ -31,9 +31,13 @@
 # serves DeepSeek V4.1 Flash under the model id Claude Code discovers. Claude
 # Code reads its endpoint from the environment at startup, so the repoint
 # takes effect on that lane's NEXT launch; a lane already pointed at the
-# gateway needs no relaunch. The binding is recorded in state/<id>.meta
-# (gateway_url, gateway_model, gateway_env) and the exact exports are written
-# to state/<id>.gateway.env (mode 0600) for whoever launches that lane next.
+# gateway needs no relaunch. The one record of that repoint is
+# state/<id>.gateway.env (mode 0600), the exact exports whoever launches that
+# lane next sources; state/<id>.meta carries only the `model_switch_gateway=`
+# audit line. That gateway is loopback-only, so its port is the gateway
+# script's own default (FM_DEEPSEEK_GATEWAY_PORT, default 8799) and there is
+# nothing to point at a different host. A plain switch with no --gateway never
+# touches state/<id>.gateway.env: it changes the model, not the endpoint.
 # The live session's `/model` step still runs and still has to verify, so a
 # lane whose current endpoint cannot serve the gateway model fails loudly
 # instead of silently reporting success.
@@ -52,8 +56,8 @@
 #                  gateway advertises.
 #
 # Options:
-#   --gateway[=<url>]   also repoint the lane at the second gateway
-#                       (default http://127.0.0.1:8799)
+#   --gateway           also repoint the lane at the second gateway on
+#                       http://127.0.0.1:$FM_DEEPSEEK_GATEWAY_PORT (8799)
 #   --verify <regex>    screen regex that confirms the switch landed
 #                       (default: the model spec, or `Opus` for opus specs)
 #   --kick <text>       resume text sent after a verified switch
@@ -98,6 +102,7 @@ SLASH_SETTLE="${FM_LANE_SWITCH_SETTLE:-1.2}"
 # Pause after an interrupt or a /model submit so the lane has redrawn before the
 # next read. Tests shorten it; a real lane needs the redraw.
 SWITCH_PAUSE="${FM_LANE_SWITCH_PAUSE:-2}"
+BASELINE_SCREEN=''
 
 usage() {
   awk '
@@ -127,17 +132,7 @@ validate_id() {  # <task-id>
 
 # --- gateway ----------------------------------------------------------------
 
-gateway_port_of() {  # <url>
-  local url=$1 rest
-  rest=${url#*://}
-  rest=${rest%%/*}
-  case "$rest" in
-    *:*) printf '%s' "${rest##*:}" ;;
-    *) printf '%s' "$DEFAULT_GATEWAY_PORT" ;;
-  esac
-}
-
-gateway_model() {  # <port>
+gateway_model() {
   "$GATEWAY_SH" model 2>/dev/null || fail "could not read the gateway's advertised model id"
 }
 
@@ -200,8 +195,24 @@ send_key() {  # <key>
 
 # --- verification -----------------------------------------------------------
 
+# Claude Code renders the `/model <spec>` this script just typed straight back
+# into its transcript, so the post-submit screen always contains the model name
+# whether or not the client accepted it. A confirmation is therefore only
+# believed on a line that BOTH is new since the pre-submit capture and is not
+# that echo - the script's own input can never satisfy its own proof.
+confirmation_lines() {  # <screen>; prints the lines a confirmation may come from
+  local screen=$1 lines
+  lines=$screen
+  if [ -n "$BASELINE_SCREEN" ]; then
+    lines=$(printf '%s\n' "$lines" | grep -vxF -- "$BASELINE_SCREEN" || true)
+  fi
+  printf '%s\n' "$lines" | grep -vF -- "/model $MODEL_SPEC" || true
+}
+
 screen_confirms() {  # <screen>; 0 when the switch is confirmed on screen
-  local screen=$1 base marker
+  local screen candidates base marker
+  candidates=$(confirmation_lines "$1")
+  screen=$candidates
   if [ -n "$VERIFY_REGEX" ]; then
     printf '%s\n' "$screen" | grep -qiE -- "$VERIFY_REGEX"
     return
@@ -226,8 +237,8 @@ screen_confirms() {  # <screen>; 0 when the switch is confirmed on screen
 
 # --- meta recording ---------------------------------------------------------
 
-record_meta() {  # <before> <after> <gateway> <gateway-env>
-  local before=$1 after=$2 gateway=$3 gateway_env=$4
+record_meta() {  # <before> <after> <gateway>
+  local before=$1 after=$2 gateway=$3
   local lock tmp line
   lock=$(fm_meta_lock_path "$LANE_META") || fail "cannot resolve the metadata lock for $LANE_ID"
   fm_lock_acquire_wait "$lock"
@@ -236,7 +247,7 @@ record_meta() {  # <before> <after> <gateway> <gateway-env>
   if ! {
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
-        model=*|model_switch_*|gateway_url=*|gateway_model=*|gateway_env=*) ;;
+        model=*|model_switch_*) ;;
         *) printf '%s\n' "$line" >> "$tmp" ;;
       esac
     done < "$LANE_META"
@@ -246,9 +257,6 @@ record_meta() {  # <before> <after> <gateway> <gateway-env>
       printf 'model_switch_from=%s\n' "$before"
       printf 'model_switch_to=%s\n' "$after"
       printf 'model_switch_gateway=%s\n' "${gateway:--}"
-      [ -z "$gateway" ] || printf 'gateway_url=%s\n' "$gateway"
-      [ -z "$gateway" ] || printf 'gateway_model=%s\n' "$after"
-      [ -z "$gateway_env" ] || printf 'gateway_env=%s\n' "$gateway_env"
     } >> "$tmp"
     chmod 0600 "$tmp"
     mv -f -- "$tmp" "$LANE_META"
@@ -395,7 +403,7 @@ main() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --gateway) gateway=$DEFAULT_GATEWAY_URL ;;
-      --gateway=*) gateway=${1#--gateway=} ;;
+      --gateway=*) refuse "--gateway takes no value; the second gateway is loopback-only on $DEFAULT_GATEWAY_URL - set FM_DEEPSEEK_GATEWAY_PORT to change its port" ;;
       --verify) shift; verify=${1:-} ;;
       --verify=*) verify=${1#--verify=} ;;
       --kick) shift; kick=${1:-} ;;
@@ -426,10 +434,10 @@ main() {
   before=$(lane_model_now "$LANE_META")
 
   if [ -n "$gateway" ]; then
-    port=$(gateway_port_of "$gateway")
+    port=$DEFAULT_GATEWAY_PORT
     require_gateway_healthy "$port"
     if [ "$spec" = gateway ]; then
-      MODEL_SPEC=$(gateway_model "$port")
+      MODEL_SPEC=$(gateway_model)
       spec=$MODEL_SPEC
     fi
   fi
@@ -442,6 +450,7 @@ main() {
   if [ -z "$screen" ]; then
     refuse "the screen of $id came back empty on $LANE_BACKEND; nothing was sent"
   fi
+  BASELINE_SCREEN=$screen
 
   # 3. the composer must verify empty before anything is typed.
   verdict=$(composer_verdict)
@@ -491,8 +500,12 @@ main() {
     gateway_env=$(write_gateway_env "$port")
     printf 'gateway: recorded %s for %s in %s\n' "$gateway" "$id" "$gateway_env"
     printf 'gateway: this takes effect at the lane''s next launch; a running Claude Code session keeps its current endpoint\n'
+  elif [ -f "$STATE/$id.gateway.env" ]; then
+    # A model switch is not an endpoint switch: the lane's recorded repoint is
+    # left exactly as it was, and an operator is told so rather than guessing.
+    printf 'gateway: left %s untouched; this switch changed the model, not the endpoint\n' "$STATE/$id.gateway.env"
   fi
-  record_meta "$before" "$after" "$gateway" "$gateway_env"
+  record_meta "$before" "$after" "$gateway"
 
   # 6. kick it back to work.
   if [ "$no_kick" = 0 ]; then

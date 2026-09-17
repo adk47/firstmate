@@ -287,7 +287,10 @@ class Gateway:
         with self.cfg.lock:
             requests = self.cfg.requests
             errors = self.cfg.errors
-            last = self.cfg.last
+        # No request row here: /healthz is unauthenticated, and a recorded row
+        # carries the provider's own error body, which routinely quotes the part
+        # of the lane's request it objected to. The rows live behind the token
+        # on /stats.
         body = {
             "schema": SCHEMA,
             "status": "ok" if key_present else "degraded",
@@ -302,7 +305,6 @@ class Gateway:
             "key_present": key_present,
             "requests_served": requests,
             "errors": errors,
-            "last_request": last,
         }
         if error:
             body["route_error"] = error
@@ -419,6 +421,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/stats":
             health = self.gateway.health()
             with self.gateway.cfg.lock:
+                health["last_request"] = self.gateway.cfg.last
                 health["recent"] = list(self.gateway.cfg.recent)
             self._send_json(200, health)
             return

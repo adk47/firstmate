@@ -90,13 +90,18 @@ write_lane_meta() {  # <id> [model]
     "terminal=term-$id"
 }
 
-run_switch() {  # <args...>; sets OUT RC
+run_switch() {  # <args...>; sets OUT RC. SWITCH_GATEWAY_PORT picks the gateway port.
   local rc=0
   OUT=$(PATH="$FB:$PATH" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_ORCA_LOG="$LOG" FM_ORCA_SCREENS="$SCREENS" FM_LANE_SWITCH_PAUSE=0.2 \
     FM_LANE_SWITCH_SETTLE=0.1 FM_LANE_SWITCH_SLEEP=0.1 \
+    FM_DEEPSEEK_GATEWAY_PORT="${SWITCH_GATEWAY_PORT:-8799}" \
     bash "$SWITCH" "$@" 2>&1) || rc=$?
   RC=$rc
+}
+
+free_port() {
+  python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
 }
 
 # --- refusal paths ----------------------------------------------------------
@@ -180,11 +185,28 @@ test_unhealthy_gateway_is_refused_before_the_lane() {
   screen_json "$SCREENS/1.json" '❯'
   # --gateway with no gateway listening on that port: refuse before touching
   # the lane, so a failed repoint never costs a switch.
-  run_switch lane-e 'gateway' --gateway=http://127.0.0.1:1
+  SWITCH_GATEWAY_PORT=$(free_port)
+  run_switch lane-e 'gateway' --gateway
   expect_code 1 "$RC" "an unhealthy gateway must stop the switch"
   assert_contains "$OUT" "not healthy" "the failure must name the gateway health gate"
   [ ! -s "$LOG" ] || fail "an unhealthy gateway must be detected before any backend call"
+  unset SWITCH_GATEWAY_PORT
   pass "fm-lane-model-switch: --gateway refuses an unhealthy gateway before touching the lane"
+}
+
+test_gateway_value_form_is_refused() {
+  case_dir gateway-value
+  write_lane_meta lane-n
+  screen_json "$SCREENS/1.json" '❯'
+  # The second gateway is loopback-only, so there is no host to point at. A
+  # value form used to be accepted and silently probed 127.0.0.1 anyway, which
+  # recorded one endpoint while binding another; it is now an explicit refusal.
+  run_switch lane-n 'gateway' --gateway=http://host.example:8799
+  expect_code 2 "$RC" "a --gateway value must be refused"
+  assert_contains "$OUT" "takes no value" "the refusal must say only the bare flag is supported"
+  assert_contains "$OUT" "FM_DEEPSEEK_GATEWAY_PORT" "the refusal must name how a port is chosen instead"
+  [ ! -s "$LOG" ] || fail "a refused flag must not reach the lane"
+  pass "fm-lane-model-switch: --gateway=<value> is refused rather than half-honoured"
 }
 
 # --- the switch itself ------------------------------------------------------
@@ -213,6 +235,89 @@ test_clean_switch_verifies_records_and_kicks() {
   pass "fm-lane-model-switch: a clean lane switches, verifies, records, and reports its next tick"
 }
 
+# --- the gateway repoint ----------------------------------------------------
+
+GATEWAY_SH="$ROOT/bin/fm-deepseek-gateway.sh"
+GATEWAY_HOMES=()
+
+stop_test_gateways() {
+  local home
+  for home in "${GATEWAY_HOMES[@]:-}"; do
+    [ -n "$home" ] || continue
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash "$GATEWAY_SH" stop --force >/dev/null 2>&1 || true
+  done
+}
+trap 'stop_test_gateways; fm_test_cleanup' EXIT
+trap 'stop_test_gateways; fm_test_cleanup; exit 130' INT
+trap 'stop_test_gateways; fm_test_cleanup; exit 143' TERM
+
+# A real second gateway on a scratch port: --gateway probes its health and asks
+# it for both the advertised model id and the exports, so a fixture that only
+# pretended to be one would not exercise the repoint at all.
+start_test_gateway() {  # sets SWITCH_GATEWAY_PORT
+  cat > "$CASE/pick.py" <<'PY'
+import json, sys
+json.dump({
+    "kind": "deepseek",
+    "slot": "offpeak",
+    "provider": "openrouter-named",
+    "model": "deepseek/deepseek-v4.1-flash",
+    "base_url": "http://127.0.0.1:1/api/v1",
+    "api_key_cmd": "printf sk-fixture-key",
+    "list_in": 0.15,
+    "list_out": 0.60,
+}, sys.stdout)
+PY
+  SWITCH_GATEWAY_PORT=$(free_port)
+  GATEWAY_HOMES+=("$HOME_DIR")
+  FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" bash "$GATEWAY_SH" \
+    start --port "$SWITCH_GATEWAY_PORT" --pick "$CASE/pick.py" > "$CASE/gateway.log" 2>&1 \
+    || fail "the gateway fixture must start: $(cat "$CASE/gateway.log")"
+}
+
+reset_screens() {
+  rm -f "$SCREENS/.count" "$SCREENS"/*.json
+}
+
+test_plain_switch_leaves_the_gateway_repoint_untouched() {
+  case_dir gateway-then-plain
+  write_lane_meta lane-m 'opus'
+  start_test_gateway
+  screen_json "$SCREENS/1.json" 'previous output' '❯'
+  screen_json "$SCREENS/2.json" 'previous output' '❯'
+  screen_json "$SCREENS/3.json" 'previous output' '❯'
+  screen_json "$SCREENS/4.json" 'previous output' 'model set to deepseek-v4.1-flash (routed)' '❯'
+  screen_json "$SCREENS/5.json" 'previous output' 'model set to deepseek-v4.1-flash (routed)' '❯'
+  run_switch lane-m gateway --gateway
+  expect_code 0 "$RC" "the gateway repoint must switch the lane: $OUT"
+  assert_contains "$OUT" "switched: lane-m opus -> deepseek-v4.1-flash" "the advertised model id must be resolved from the gateway"
+  assert_present "$STATE/lane-m.gateway.env" "the repoint must be written for the lane's next launch"
+  assert_grep "ANTHROPIC_BASE_URL=http://127.0.0.1:$SWITCH_GATEWAY_PORT" "$STATE/lane-m.gateway.env" \
+    "the exports must point at the gateway that was probed"
+  local mode
+  mode=$(stat -c '%a' "$STATE/lane-m.gateway.env" 2>/dev/null || stat -f '%Lp' "$STATE/lane-m.gateway.env")
+  [ "$mode" = "600" ] || fail "the lane's gateway exports carry a token and must be mode 0600, got $mode"
+  cp "$STATE/lane-m.gateway.env" "$CASE/gateway.env.before"
+
+  # A later model switch with no --gateway is exactly the documented "model
+  # switch only, same gateway" step. It must not disturb the repoint.
+  reset_screens
+  screen_json "$SCREENS/1.json" 'previous output' '❯'
+  screen_json "$SCREENS/2.json" 'previous output' '❯'
+  screen_json "$SCREENS/3.json" 'previous output' '❯'
+  screen_json "$SCREENS/4.json" 'previous output' 'Opus 5 · 1M context' '❯'
+  screen_json "$SCREENS/5.json" 'previous output' 'Opus 5 · 1M context' '❯'
+  run_switch lane-m 'opus[1m]'
+  expect_code 0 "$RC" "the plain switch must succeed: $OUT"
+  cmp -s "$CASE/gateway.env.before" "$STATE/lane-m.gateway.env" \
+    || fail "a plain model switch must leave the lane's gateway exports byte-identical"
+  assert_contains "$OUT" "left $STATE/lane-m.gateway.env untouched" \
+    "the report must say the endpoint record was left alone"
+  assert_grep 'model_switch_to=opus[1m]' "$STATE/lane-m.meta" "the plain switch must still be recorded"
+  assert_grep 'model_switch_gateway=-' "$STATE/lane-m.meta" "the plain switch must record that it bound no gateway"
+  pass "fm-lane-model-switch: a plain model switch leaves a prior gateway repoint byte-identical"
+}
+
 test_unconfirmed_switch_does_not_kick() {
   case_dir unconfirmed
   write_lane_meta lane-g 'opus'
@@ -228,6 +333,26 @@ test_unconfirmed_switch_does_not_kick() {
   assert_no_grep 'MODEL SWITCH:' "$LOG" "the lane must not be kicked when the switch is unconfirmed"
   assert_no_grep 'model_switch_to=' "$STATE/lane-g.meta" "an unconfirmed switch must not be recorded"
   pass "fm-lane-model-switch: an unconfirmed switch fails without kicking the lane"
+}
+
+test_echoed_command_alone_does_not_confirm() {
+  case_dir echoed-command
+  write_lane_meta lane-l 'opus'
+  screen_json "$SCREENS/1.json" 'previous output' '❯'
+  screen_json "$SCREENS/2.json" 'previous output' '❯'
+  screen_json "$SCREENS/3.json" 'previous output' '❯'
+  # Claude Code renders the submitted command back into its transcript before
+  # it decides anything, so this screen is what a REJECTED switch looks like:
+  # the model name is on it only because this script typed it. The script's own
+  # input must never satisfy the script's own proof.
+  screen_json "$SCREENS/4.json" 'previous output' '> /model opus[1m]' '❯'
+  run_switch lane-l 'opus[1m]'
+  expect_code 1 "$RC" "an echo-only screen must not count as a confirmed switch"
+  assert_contains "$OUT" "does not confirm it" "the failure must name the verification gate"
+  assert_no_grep 'MODEL SWITCH:' "$LOG" "a lane must not be kicked on an echo-only confirmation"
+  assert_no_grep 'model_switch_to=' "$STATE/lane-l.meta" "an echo-only confirmation must not be recorded"
+  assert_grep 'model=opus' "$STATE/lane-l.meta" "the recorded model must still be the one before the attempt"
+  pass "fm-lane-model-switch: the echoed /model command alone does not confirm a switch"
 }
 
 test_dry_run_sends_nothing() {
@@ -298,8 +423,11 @@ test_non_claude_lane_is_refused
 test_remote_lane_is_refused
 test_gate_agent_is_refused_before_any_backend_call
 test_unhealthy_gateway_is_refused_before_the_lane
+test_gateway_value_form_is_refused
 test_clean_switch_verifies_records_and_kicks
+test_plain_switch_leaves_the_gateway_repoint_untouched
 test_unconfirmed_switch_does_not_kick
+test_echoed_command_alone_does_not_confirm
 test_dry_run_sends_nothing
 test_unparsable_tick_source_is_reported_not_fatal
 test_no_tick_source_says_so

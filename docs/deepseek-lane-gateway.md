@@ -55,6 +55,7 @@ One instance per firstmate home owns the port, the pid file, the request log, an
 - **Streaming is relayed frame by frame**, and usage is accumulated across `message_start` and `message_delta` because the providers split it.
 - **The port is gated by a local token.** Everything except `/healthz` requires the bearer token in `$STATE/fm-deepseek-gateway.token` (mode 0600, created on first use).
   It gates this port, not the providers: it is what stops any other local process from spending the captain's provider cash through an open loopback port.
+  `/healthz` carries liveness, the resolved route, and counters only; the per-request rows live behind the token on `/stats`, because a failed row quotes the provider's own error body and those routinely echo the part of the lane's request they objected to.
 - **There is no automatic cross-provider failover.** An upstream 429 or 5xx is returned as it arrived, because routing is the picker's decision and silently switching providers would hide both the failure and the cost.
 - **`/v1/messages/count_tokens` is a local estimate** of about four characters per token, deliberately not a provider call.
 
@@ -84,8 +85,13 @@ bin/fm-lane-model-switch.sh <task-id> 'opus[1m]'            # model switch only,
 The switch captures whatever the lane's composer holds, refuses unless the composer verifies empty, sends `/model <spec>` through that lane's own backend submit core, verifies the switch on the rendered screen, records before and after in `state/<id>.meta`, and then kicks the lane back to work.
 It also prints the lane's next expected tick, because a model switch can skip the next scheduled tick: the source is `cron=<expr>` lines in that lane's metadata or one expression per line in `data/<id>/crons`, and the script says so explicitly when the home records none.
 
-Claude Code reads its endpoint from the environment at startup, so `--gateway` records the repoint in `state/<id>.meta` (`gateway_url`, `gateway_model`, `gateway_env`) and writes the exact exports to `state/<id>.gateway.env` for whoever launches that lane next.
+Claude Code reads its endpoint from the environment at startup, so `--gateway` writes the exact exports to `state/<id>.gateway.env` (mode 0600) for whoever launches that lane next.
+That file is the one record of the repoint; `state/<id>.meta` carries only the `model_switch_gateway=` audit line, and the second command above - a model switch with no `--gateway` - leaves `state/<id>.gateway.env` byte-identical and says so in its report.
+`--gateway` takes no value: the gateway is loopback-only, so its port comes from the lifecycle script's own default (`FM_DEEPSEEK_GATEWAY_PORT`, default 8799) and `--gateway=<anything>` is refused rather than probing one endpoint while recording another.
 A lane already pointed at the gateway needs no relaunch; a running session keeps its current endpoint until it is relaunched.
+
+The on-screen verification ignores the `/model <spec>` line the script itself just submitted: Claude Code echoes that command into its transcript before it decides anything, so a confirmation only counts on a line that is new since the pre-submit capture and is not that echo.
+A rejected switch is therefore reported unconfirmed, is not recorded, and does not kick the lane.
 
 ## Proof sequence
 
@@ -124,6 +130,24 @@ Measured on 2026-09-17, Claude Code 2.1.274, off-peak so routed to OpenRouter:
 | 3. discovery | `{"outcome": "models", "user_agent": "claude-code/2.1.274"}` |
 | 3. prompt cache | first request of a session `input_tokens 17297, cache_read 0`; the next `input_tokens 361, cache_read_input_tokens 17536` |
 | 3. cost | that cached call cost $0.0003 against $0.0026 for the uncached one |
+
+### The peak route, against the real Fireworks endpoint
+
+The table above was measured off peak, so it only proves OpenRouter.
+The peak route carries every opted-in lane for seven hours each weekday, so it was run separately on 2026-09-17 with the picker pinned to its own `peak` route and the real Fireworks key - the same clock the picker uses on its own selects that route Mon-Fri 01:00-04:00 and 06:00-10:00 UTC.
+
+| Step | Result |
+| --- | --- |
+| 1. tool call | `hello world` |
+| 2. multi-turn | `c.txt` contained `alpha` then `beta` |
+| routing | all 9 requests `upstream_status 200`, `provider fireworks-us`, `slot peak`, `upstream_model accounts/fireworks/models/deepseek-v4p1-flash` |
+| prompt cache | cache reads of 17676, 17698, 17840, 18170 and 18594 tokens against an approximately 18k-token prompt |
+| cost | $0.011 for the whole run |
+
+One recorded response from that run: id `msg_de04d842fed054f511fc125d`, model `accounts/fireworks/models/deepseek-v4p1-flash`, HTTP 200, usage `input_tokens 36` and `output_tokens 16`, cost $0.000018.
+
+Claude Code's request body - `cache_control` markers on the tool block included - reaches Fireworks unchanged and is accepted, which is what the off-peak run could not show.
+`tests/fm-deepseek-gateway.test.sh` pins the other half in CI: its fake upstream serves each provider's own path shape and refuses anything else, so the peak route's URL is proven by test rather than by the route the fixture happened to start on.
 
 Prompt caching is the whole game: a lane with a stable prefix pays about a tenth of the input rate for it, and a lane that rewrites its own system prompt every turn loses that discount.
 The gateway only passes the markers through; it is Claude Code's own `cache_control` blocks that make the providers serve a prefix from cache.
@@ -169,6 +193,6 @@ A lane that depends on Claude Code crons or `/loop` wakeups is switched in place
 
 ## Verification entry points
 
-- `tests/fm-deepseek-gateway.test.sh` - discovery, per-request routing, key redaction, the unauthenticated refusal, the fail-closed missing-key path, the port refusals, streaming, the launch agent recipe, and the lifecycle verbs.
-- `tests/fm-lane-model-switch.test.sh` - the composer refusal paths on fixture screens, the verified switch and its metadata record, the unconfirmed-switch path that must not kick a lane, and the tick report.
+- `tests/fm-deepseek-gateway.test.sh` - discovery, per-request routing against each provider's own path shape, key redaction, the unauthenticated refusal, request rows staying behind the token, the fail-closed missing-key path, the port refusals, streaming, the launch agent recipe parsed as a plist, and the lifecycle verbs.
+- `tests/fm-lane-model-switch.test.sh` - the composer refusal paths on fixture screens, the verified switch and its metadata record, the echo-only screen that must not count as a confirmation, the unconfirmed-switch path that must not kick a lane, a real gateway repoint that a later plain switch leaves byte-identical, and the tick report.
 - `bin/fm-lint.sh` covers both scripts' ShellCheck surface, and the scripts' own headers own their exact flags and contracts.
