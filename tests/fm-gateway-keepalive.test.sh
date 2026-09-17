@@ -45,6 +45,26 @@ ordinary_lines() {  # <count>
   done
 }
 
+# <text> as a pane holds it at <cols> columns: screen ROWS, hard-wrapped at the
+# margin exactly as tmux wraps a line too long for the pane and as
+# `tmux capture-pane -p` then hands it back - one row per wrap, no separator, no
+# word breaking. tmux is not a dependency of this suite, so the split is
+# reproduced here; the fixtures below assert it really did split, because the
+# regression this pins shipped precisely because every fixture wrote the ~190
+# character error as one unwrapped line no pane could ever show.
+pane_rows() {  # <text> <cols>
+  local s=$1 w=$2
+  while [ "${#s}" -gt "$w" ]; do
+    printf '%s\n' "${s:0:$w}"
+    s=${s:$w}
+  done
+  printf '%s\n' "$s"
+}
+
+row_count() {  # <rows>
+  printf '%s\n' "$1" | grep -c ''
+}
+
 new_state() {  # <name>
   local d="$TMP_ROOT/$1/state"
   rm -rf "${TMP_ROOT:?}/${1:?}"
@@ -145,6 +165,51 @@ test_only_the_live_output_line_decides_a_stall() {
   fm_gateway_text_is_transient "$pane" \
     || fail "a pane whose last output line is the rendered error was not classified as a stall"
   pass "only the live output line decides a stall: an error named mid-turn is not one, an error ending the turn is"
+}
+
+test_a_wrapped_rendered_error_is_still_a_stall() {
+  # The error the captain is waiting on is 191 characters. No pane shows that on
+  # one row: a crew window is opened detached at tmux's 80-column default and
+  # captured as physical rows, so the shape arrives on the FIRST row of a wrap
+  # and the pane's last row is a fragment carrying none of it. A classifier that
+  # reads a screen row instead of the line the harness wrote is inert at every
+  # width a crew runs at - no record, no continue, nothing retried.
+  local cols rows pane st
+  for cols in 160 100 80; do
+    rows=$(pane_rows "$E503_ACCOUNTS" "$cols")
+    [ "$(row_count "$rows")" -gt 1 ] \
+      || fail "the ${cols}-column fixture did not wrap, so it cannot pin this regression"
+    pane=$(printf '%s%s' "$rows" "$IDLE_FOOTER")
+    fm_gateway_text_is_transient "$pane" \
+      || fail "the rendered error wrapped at $cols columns, as a real pane holds it, was not classified as a stall"
+  done
+
+  # And the ladder actually engages on it: the durable record opens, which is
+  # what buys the crew its continue instruction.
+  st=$(new_state wrapped-stall)
+  fm_gateway_stalled_now "$st" task-w "$(printf '%s%s' "$(pane_rows "$E503_ACCOUNTS" 80)" "$IDLE_FOOTER")" \
+    || fail "a pane holding the wrapped error did not enter the re-ring ladder"
+  fm_gateway_stall_open "$st" task-w || fail "no stall record was opened for the wrapped error"
+  pass "the rendered error still opens the ladder when the pane wraps it, at 160, 100 and 80 columns"
+}
+
+test_a_citation_split_across_a_wrap_is_still_quoted() {
+  # The quote and the shape land on DIFFERENT rows: at 80 columns this citation's
+  # opening `"` ends one row and `API Error: 503` sits inside the next. Judging
+  # that next row alone would find the shape with nothing ahead of it and re-ring
+  # a crew that was only reading the docs, so the quote test has to run on the
+  # reconstructed line, not on the row.
+  local citation rows pane
+  citation="⏺ The verification record's census table quotes the pooled gateway failure as \"the rendered $E503_ACCOUNTS\" and classes it transient."
+  rows=$(pane_rows "$citation" 80)
+  [ "$(row_count "$rows")" -gt 1 ] \
+    || fail "the citation fixture did not wrap, so it cannot pin this regression"
+  printf '%s\n' "$rows" | sed -n 2p | grep -q 'API Error: 503' \
+    || fail "the citation fixture no longer splits with the shape on a continuation row"
+  pane=$(printf '%s%s' "$rows" "$IDLE_FOOTER")
+  fm_gateway_text_is_transient "$pane" \
+    && fail "a citation whose quote opened on an earlier screen row was classified as a stall"
+  pass "a citation split across a wrap is still read as quoted, not as the harness's own error"
 }
 
 test_a_gateway_that_is_simply_down_is_not_retried() {
@@ -336,6 +401,8 @@ test_deny_list_matches_anywhere_while_the_transient_match_is_bounded
 test_a_recovered_agent_with_the_old_error_in_scrollback_is_not_stalled
 test_repository_text_naming_the_errors_is_not_a_stall
 test_only_the_live_output_line_decides_a_stall
+test_a_wrapped_rendered_error_is_still_a_stall
+test_a_citation_split_across_a_wrap_is_still_quoted
 test_a_gateway_that_is_simply_down_is_not_retried
 test_ladder_is_bounded_by_attempts
 test_ladder_is_bounded_by_wall_clock_independently
