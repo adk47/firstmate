@@ -12,8 +12,10 @@ shape the fleet already uses for the Claude account pool: a gateway that
 advertises the model on GET /v1/models, which Claude Code itself fetches and
 caches, after which `/model <advertised-id>` is accepted and sent.
 
-WHAT THIS SERVES:
-  GET  /healthz                unauthenticated liveness and route summary
+WHAT THIS SERVES (and nothing else - every other path is a 404):
+  GET  /healthz                the one unauthenticated surface: liveness,
+                               the resolved route, and counters. No request
+                               rows: those carry provider error bodies.
   GET  /stats                  authenticated request counters and recent rows
   GET  /v1/models[?limit=N]    the advertised model list Claude Code discovers
   GET  /v1/models/<id>         one advertised model, or 404
@@ -193,31 +195,26 @@ def redact(text: str, secret: str) -> str:
 
 
 def usage_from(payload: dict) -> dict:
-    """Anthropic-shaped usage, tolerating the providers' spelling variants."""
+    """Usage in the Anthropic Messages names, the only surface this gateway calls.
+
+    Both routes are Anthropic Messages endpoints, so these are the names that
+    actually arrive. No OpenAI spelling is accepted: `prompt_tokens` INCLUDES
+    the cached prefix while `input_tokens` excludes it, so reading one as the
+    other would silently over-report both the token row and estimate_cost.
+    """
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
         return {}
     out = {}
-    for src, dst in (
-        ("input_tokens", "input_tokens"),
-        ("output_tokens", "output_tokens"),
-        ("cache_read_input_tokens", "cache_read_input_tokens"),
-        ("cache_creation_input_tokens", "cache_creation_input_tokens"),
-        ("prompt_tokens", "input_tokens"),
-        ("completion_tokens", "output_tokens"),
+    for name in (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
     ):
-        value = usage.get(src)
-        if isinstance(value, (int, float)) and dst not in out:
-            out[dst] = value
-    if "cache_read_input_tokens" not in out:
-        details = usage.get("prompt_tokens_details")
-        if isinstance(details, dict):
-            cached = details.get("cached_tokens")
-            if isinstance(cached, (int, float)):
-                out["cache_read_input_tokens"] = cached
-        cached = usage.get("cached_tokens")
-        if "cache_read_input_tokens" not in out and isinstance(cached, (int, float)):
-            out["cache_read_input_tokens"] = cached
+        value = usage.get(name)
+        if isinstance(value, (int, float)):
+            out[name] = value
     return out
 
 
@@ -260,7 +257,11 @@ class Gateway:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             if os.path.exists(path) and os.path.getsize(path) > self.cfg.log_max_bytes:
                 os.replace(path, path + ".1")
-            with open(path, "a") as handle:
+                os.chmod(path + ".1", 0o600)
+            # 0600, not the umask: these rows are the ones /healthz refuses to
+            # show, because a failed one carries the provider's own error body.
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "a") as handle:
                 handle.write(line)
         except OSError:
             pass  # A gateway that cannot log still serves; it must not fail a request.
@@ -405,15 +406,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/") or "/"
-        if path in ("/healthz", "/health"):
+        if path == "/healthz":
             self._send_json(200, self.gateway.health())
-            return
-        if path == "/":
-            self._send_json(200, {
-                "schema": SCHEMA,
-                "model": CANONICAL_MODEL,
-                "endpoints": ["/healthz", "/stats", "/v1/models", "/v1/messages", "/v1/messages/count_tokens"],
-            })
             return
         if not self._authorized():
             self._send_error_json(401, "authentication_error", "missing or invalid gateway token")

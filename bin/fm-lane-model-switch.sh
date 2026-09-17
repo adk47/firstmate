@@ -30,23 +30,29 @@
 # Anthropic-compatible gateway (bin/fm-deepseek-gateway.sh), which is what
 # serves DeepSeek V4.1 Flash under the model id Claude Code discovers. Claude
 # Code reads its endpoint from the environment at startup, so the repoint
-# takes effect on that lane's NEXT launch; a lane already pointed at the
-# gateway needs no relaunch. The one record of that repoint is
-# state/<id>.gateway.env (mode 0600), the exact exports whoever launches that
-# lane next sources; state/<id>.meta carries only the `model_switch_gateway=`
-# audit line. That gateway is loopback-only, so its port is the gateway
-# script's own default (FM_DEEPSEEK_GATEWAY_PORT, default 8799) and there is
-# nothing to point at a different host. A plain switch with no --gateway never
-# touches state/<id>.gateway.env: it changes the model, not the endpoint.
-# The live session's `/model` step still runs and still has to verify, so a
-# lane whose current endpoint cannot serve the gateway model fails loudly
-# instead of silently reporting success.
+# takes effect on that lane's NEXT launch. The repoint is therefore written
+# FIRST, once the gateway proves healthy, and never depends on the running
+# session: state/<id>.gateway.env (mode 0600) holds the exact exports whoever
+# launches that lane next sources, and state/<id>.meta carries only the
+# `model_switch_gateway=` audit line.
 #
-# TICKS: a model switch can skip the next scheduled tick, so after a verified
-# switch this prints the lane's next expected tick when the home records one -
-# either `cron=<expr>` lines in state/<id>.meta or one expression per line in
-# data/<id>/crons - and says so explicitly when it records none. Verify the
-# tick actually fires; that is the one thing the switch itself cannot prove.
+# The in-place `/model` is attempted only for a lane that ALREADY has a
+# recorded state/<id>.gateway.env, because that file is the only durable
+# evidence its session may already be on the gateway. A lane without one - any
+# lane still on the shared account pool - gets its repoint recorded, is told
+# the exact relaunch step, and is left untyped-into: a session pointed at
+# another endpoint cannot accept this gateway's model id, so there is nothing
+# to send it. A plain switch with no --gateway never touches
+# state/<id>.gateway.env: it changes the model, not the endpoint. That gateway
+# is loopback-only, so its port is the gateway script's own default
+# (FM_DEEPSEEK_GATEWAY_PORT, default 8799).
+#
+# TICKS: a model switch can skip the next scheduled tick, so this prints the
+# cron expressions the home records for the lane - `cron=<expr>` lines in
+# state/<id>.meta and one expression per line in data/<id>/crons - verbatim,
+# against the time it read them, and says so explicitly when it records none.
+# No fire time is computed: verify the tick actually fires, which is the one
+# thing the switch itself cannot prove.
 #
 # Usage:
 #   fm-lane-model-switch.sh <task-id> <model-spec> [options]
@@ -62,12 +68,11 @@
 #                       (default: the model spec, or `Opus` for opus specs)
 #   --kick <text>       resume text sent after a verified switch
 #   --no-kick           do not send resume text
-#   --tick-file <path>  tick registry to read (default data/<id>/crons)
-#   --now <ISO8601Z>    reference time for next-tick output (testing)
 #   --dry-run           perform every check and print the plan, send nothing
 #   --json              print one machine-readable summary line as well
 #
-# Exit codes: 0 switched and verified (or a clean --dry-run); 1 the switch
+# Exit codes: 0 switched and verified, a repoint recorded for a lane that must
+# be relaunched to take it, or a clean --dry-run; 1 the switch
 # could not be completed or verified, or the gateway is not healthy; 2 a
 # refusal that sent nothing - a non-Claude lane, a remote lane, an unreadable
 # screen, or a composer that would not verify empty.
@@ -197,22 +202,36 @@ send_key() {  # <key>
 
 # Claude Code renders the `/model <spec>` this script just typed straight back
 # into its transcript, so the post-submit screen always contains the model name
-# whether or not the client accepted it. A confirmation is therefore only
-# believed on a line that BOTH is new since the pre-submit capture and is not
-# that echo - the script's own input can never satisfy its own proof.
+# whether or not the client accepted it. Candidates are therefore the lines the
+# post-submit capture changed, compared BY POSITION: line n counts when it
+# differs from line n of the pre-submit capture, or lies past its end. The
+# composer sits at the bottom of a Claude Code screen and the transcript grows
+# above it, so new output is not simply appended - but it does shift what every
+# later index holds, which is why a retry whose confirmation reads identically
+# to a line already on the baseline screen still counts. The echo of this
+# script's own command is then dropped, so its input can never be its proof.
 confirmation_lines() {  # <screen>; prints the lines a confirmation may come from
-  local screen=$1 lines
-  lines=$screen
-  if [ -n "$BASELINE_SCREEN" ]; then
-    lines=$(printf '%s\n' "$lines" | grep -vxF -- "$BASELINE_SCREEN" || true)
-  fi
-  printf '%s\n' "$lines" | grep -vF -- "/model $MODEL_SPEC" || true
+  local screen=$1
+  printf '%s\n' "$screen" \
+    | FM_LANE_SWITCH_BASELINE="$BASELINE_SCREEN" awk '
+        BEGIN { n = split(ENVIRON["FM_LANE_SWITCH_BASELINE"], base, "\n") }
+        NR > n || $0 != base[NR] { print }
+      ' \
+    | grep -vF -- "/model $MODEL_SPEC" || true
 }
 
+# Claude Code's own refusal of a model id QUOTES that id, so it satisfies any
+# check that merely looks for the model name. These renderings are therefore a
+# positive unconfirmed verdict, not a missing one.
+REJECTION_RE="There'?s an issue with the selected model|is(n'?t| not) described by this version|may not exist or you may not have access"
+
 screen_confirms() {  # <screen>; 0 when the switch is confirmed on screen
-  local screen candidates base marker
-  candidates=$(confirmation_lines "$1")
-  screen=$candidates
+  local screen base marker
+  screen=$(confirmation_lines "$1")
+  if printf '%s\n' "$screen" | grep -qiE -- "$REJECTION_RE"; then
+    printf 'fm-lane-model-switch: the lane rendered a model rejection for %s; treat the switch as unconfirmed\n' "$MODEL_SPEC" >&2
+    return 1
+  fi
   if [ -n "$VERIFY_REGEX" ]; then
     printf '%s\n' "$screen" | grep -qiE -- "$VERIFY_REGEX"
     return
@@ -287,103 +306,25 @@ tick_lines() {  # prints one cron expression per line, if the home records any
   fi
 }
 
-next_tick() {  # <cron-expression> <now-iso>; prints "<ISO>|<minutes>" or a reason
-  python3 - "$1" "$2" <<'PY'
-import datetime, sys
-
-def field_set(spec, lo, hi):
-    out = set()
-    for part in spec.split(','):
-        if not part:
-            raise ValueError('empty field')
-        step = 1
-        if '/' in part:
-            part, _, step_text = part.partition('/')
-            step = int(step_text)
-            if step <= 0:
-                raise ValueError('bad step')
-        if part == '*':
-            first, last = lo, hi
-        elif '-' in part:
-            first_text, _, last_text = part.partition('-')
-            first, last = int(first_text), int(last_text)
-        else:
-            first = last = int(part)
-        if first > last or first < lo or last > hi:
-            raise ValueError('out of range')
-        for value in range(first, last + 1, step):
-            out.add(value)
-    return out
-
-expr = sys.argv[1].split()
-if len(expr) != 5:
-    print('unparsable cron expression (expected 5 fields): %s' % sys.argv[1])
-    sys.exit(0)
-try:
-    minutes = field_set(expr[0], 0, 59)
-    hours = field_set(expr[1], 0, 23)
-    days = field_set(expr[2], 1, 31)
-    months = field_set(expr[3], 1, 12)
-    weekdays = set(v % 7 for v in field_set(expr[4], 0, 7))
-except ValueError as exc:
-    print('unparsable cron expression (%s): %s' % (exc, sys.argv[1]))
-    sys.exit(0)
-day_restricted = expr[2] != '*'
-weekday_restricted = expr[4] != '*'
-
-now = datetime.datetime.strptime(sys.argv[2], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
-cursor = (now + datetime.timedelta(minutes=1)).replace(second=0, microsecond=0)
-limit = cursor + datetime.timedelta(days=366)
-while cursor < limit:
-    day_ok = cursor.day in days and cursor.month in months
-    weekday_ok = (cursor.weekday() + 1) % 7 in weekdays
-    if day_restricted and weekday_restricted:
-        # Standard cron: with both day fields restricted, either one matching
-        # is enough; otherwise the two are combined.
-        day_ok = day_ok or weekday_ok
-    else:
-        day_ok = day_ok and weekday_ok
-    if not day_ok:
-        cursor = (cursor + datetime.timedelta(days=1)).replace(hour=0, minute=0)
-        continue
-    if cursor.hour not in hours:
-        cursor = (cursor + datetime.timedelta(hours=1)).replace(minute=0)
-        continue
-    if cursor.minute not in minutes:
-        cursor = cursor + datetime.timedelta(minutes=1)
-        continue
-    print('%s|%d' % (cursor.strftime('%Y-%m-%dT%H:%M:%SZ'), int((cursor - now).total_seconds() // 60)))
-    sys.exit(0)
-print('no fire time within a year')
-PY
-}
-
-report_next_tick() {  # <registry>
-  local registry=$1 lines line when minutes count=0
-  local now=${FM_LANE_SWITCH_NOW:-$(utc_stamp)}
+# The expressions are printed verbatim against the time they were read, and
+# nothing is computed from them: the operator watches the real fire, which is
+# the only thing that proves the schedule survived the switch.
+report_ticks() {  # <registry>
+  local registry=$1 lines line
+  TICK_LINES=''
   lines=$(tick_lines "$LANE_META" "$registry")
   if [ -z "$lines" ]; then
-    printf 'next-tick: no tick source recorded for %s; add cron=<expr> lines to %s or a %s file, then verify the lane actually fires (a model switch can skip the next tick)\n' \
+    printf 'ticks: no tick source recorded for %s; add cron=<expr> lines to %s or a %s file, then verify the lane actually fires (a model switch can skip the next tick)\n' \
       "$LANE_ID" "$LANE_META" "$registry"
-    NEXT_TICK=''
     return 0
   fi
+  printf 'ticks: as of %s, %s records these cron expressions - watch the next one actually fire\n' \
+    "$(utc_stamp)" "$LANE_ID"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    when=$(next_tick "$line" "$now")
-    count=$((count + 1))
-    case "$when" in
-      *'|'*)
-        minutes=${when##*|}
-        when=${when%%|*}
-        if [ "$count" = 1 ]; then NEXT_TICK=$when; fi
-        printf 'next-tick: %s -> %s (in %s min) - verify it fires\n' "$line" "$when" "$minutes"
-        ;;
-      *)
-        if [ "$count" = 1 ]; then NEXT_TICK=''; fi
-        printf 'next-tick: %s -> %s\n' "$line" "$when"
-        ;;
-    esac
+    printf 'ticks:   %s\n' "$line"
+    TICK_LINES="$TICK_LINES$line
+"
   done <<EOF
 $lines
 EOF
@@ -394,7 +335,7 @@ EOF
 main() {
   local id='' spec='' gateway='' verify='' kick='' no_kick=0 registry='' dry=0 json=0
   local port='' gateway_env='' before='' after='' screen='' verdict='' saved='' kick_text=''
-  local switched=0 kicked=0
+  local switched=0 kicked=0 already_pointed=0
 
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   id=$1
@@ -409,10 +350,6 @@ main() {
       --kick) shift; kick=${1:-} ;;
       --kick=*) kick=${1#--kick=} ;;
       --no-kick) no_kick=1 ;;
-      --tick-file) shift; registry=${1:-} ;;
-      --tick-file=*) registry=${1#--tick-file=} ;;
-      --now) shift; FM_LANE_SWITCH_NOW=${1:-} ;;
-      --now=*) FM_LANE_SWITCH_NOW=${1#--now=} ;;
       --dry-run) dry=1 ;;
       --json) json=1 ;;
       -h|--help|help) usage; return 0 ;;
@@ -440,8 +377,29 @@ main() {
       MODEL_SPEC=$(gateway_model)
       spec=$MODEL_SPEC
     fi
+    # The recorded env file is the only durable evidence that this lane's
+    # endpoint may already be the gateway. Read it BEFORE writing one.
+    [ ! -f "$STATE/$id.gateway.env" ] || already_pointed=1
   fi
   [ "$spec" != gateway ] || refuse "the literal 'gateway' spec needs --gateway so the advertised model id can be resolved"
+
+  # The repoint is the durable half of --gateway and it takes effect at the
+  # lane's next launch, so it is recorded first and unconditionally. A lane
+  # whose running session is still on another endpoint cannot accept the
+  # gateway's model in place, so no /model is attempted for it at all.
+  if [ -n "$gateway" ] && [ "$dry" = 0 ]; then
+    gateway_env=$(write_gateway_env "$port")
+    printf 'gateway: recorded %s for %s in %s\n' "$gateway" "$id" "$gateway_env"
+    printf 'gateway: this takes effect at the lane%ss next launch; a running Claude Code session keeps its current endpoint\n' "'"
+    if [ "$already_pointed" = 0 ]; then
+      printf 'gateway: %s had no recorded repoint, so its running session is not on this gateway and no /model was sent\n' "$id"
+      printf 'gateway: relaunch that lane with the recorded endpoint, then select the model in it:\n'
+      printf 'gateway:   set -a; . %s; set +a\n' "$gateway_env"
+      printf 'gateway:   /model %s\n' "$spec"
+      report_ticks "$registry"
+      return 0
+    fi
+  fi
 
   # 1. capture, so nothing typed is ever lost.
   if ! screen=$(fm_backend_capture "$LANE_BACKEND" "$LANE_TARGET" 200 "$LANE_LABEL" 2>/dev/null); then
@@ -475,7 +433,7 @@ main() {
   if [ "$dry" = 1 ]; then
     printf 'dry-run: %s on %s would switch %s -> %s\n' "$id" "$LANE_BACKEND" "$before" "$spec"
     [ -z "$gateway" ] || printf 'dry-run: would also record the gateway binding %s\n' "$gateway"
-    report_next_tick "$registry"
+    report_ticks "$registry"
     return 0
   fi
 
@@ -496,11 +454,7 @@ main() {
   after=$spec
   printf 'switched: %s %s -> %s (verified on screen)\n' "$id" "$before" "$after"
 
-  if [ -n "$gateway" ]; then
-    gateway_env=$(write_gateway_env "$port")
-    printf 'gateway: recorded %s for %s in %s\n' "$gateway" "$id" "$gateway_env"
-    printf 'gateway: this takes effect at the lane''s next launch; a running Claude Code session keeps its current endpoint\n'
-  elif [ -f "$STATE/$id.gateway.env" ]; then
+  if [ -z "$gateway" ] && [ -f "$STATE/$id.gateway.env" ]; then
     # A model switch is not an endpoint switch: the lane's recorded repoint is
     # left exactly as it was, and an operator is told so rather than guessing.
     printf 'gateway: left %s untouched; this switch changed the model, not the endpoint\n' "$STATE/$id.gateway.env"
@@ -522,16 +476,16 @@ main() {
     printf 'kicked: resume text sent to %s\n' "$id"
   fi
 
-  report_next_tick "$registry"
+  report_ticks "$registry"
 
   if [ "$json" = 1 ]; then
-    python3 - "$id" "$LANE_BACKEND" "$before" "$after" "$gateway" "$switched" "$kicked" "${NEXT_TICK:-}" <<'PY'
+    python3 - "$id" "$LANE_BACKEND" "$before" "$after" "$gateway" "$switched" "$kicked" "${TICK_LINES:-}" <<'PY'
 import json, sys
-task, backend, before, after, gateway, switched, kicked, next_tick = sys.argv[1:9]
+task, backend, before, after, gateway, switched, kicked, crons = sys.argv[1:9]
 print(json.dumps({
     "task": task, "backend": backend, "before": before, "after": after,
     "gateway": gateway or None, "switched": switched == "1", "kicked": kicked == "1",
-    "next_tick": next_tick or None,
+    "crons": [line for line in crons.splitlines() if line],
 }, sort_keys=True))
 PY
   fi

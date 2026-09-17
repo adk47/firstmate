@@ -239,6 +239,18 @@ test_request_rows_stay_behind_the_token() {
   local code
   code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$GATEWAY_PORT/stats")
   expect_code 401 "$code" "stats must refuse an unauthenticated caller"
+  # /healthz is the only unauthenticated surface; nothing else answers to one.
+  code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$GATEWAY_PORT/")
+  expect_code 401 "$code" "the root path must not answer an unauthenticated caller"
+  code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$GATEWAY_PORT/health")
+  expect_code 401 "$code" "there must be no second unauthenticated spelling of healthz"
+  # The same rows are written to the request log, so it carries the same mode
+  # as the token beside it rather than whatever the umask happened to be.
+  local mode
+  mode=$(stat -c '%a' "$STATE/fm-deepseek-gateway.log" 2>/dev/null || stat -f '%Lp' "$STATE/fm-deepseek-gateway.log")
+  [ "$mode" = "600" ] || fail "the request log must be mode 0600, got $mode"
+  mode=$(stat -c '%a' "$STATE/fm-deepseek-gateway.out" 2>/dev/null || stat -f '%Lp' "$STATE/fm-deepseek-gateway.out")
+  [ "$mode" = "600" ] || fail "the gateway process output must be mode 0600, got $mode"
   stop_gateway
   pass "fm-deepseek-gateway: request rows are readable only behind the local token"
 }

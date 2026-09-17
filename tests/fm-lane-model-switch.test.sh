@@ -221,18 +221,57 @@ test_clean_switch_verifies_records_and_kicks() {
   screen_json "$SCREENS/4.json" 'previous output' 'Opus 5 · 1M context' '❯'
   screen_json "$SCREENS/5.json" 'previous output' 'Opus 5 · 1M context' '❯'
   printf '7,37 * * * *\n' > "$DATA/lane-f/crons"
-  run_switch lane-f 'opus[1m]' --now 2026-09-17T19:05:00Z
+  run_switch lane-f 'opus[1m]'
   expect_code 0 "$RC" "a clean lane must switch"
   assert_contains "$OUT" "switched: lane-f opus -> opus[1m]" "the switch must be reported with before and after"
   assert_contains "$OUT" "kicked:" "the lane must be kicked back to work"
-  assert_contains "$OUT" "next-tick: 7,37 * * * *" "the next expected tick must be printed"
-  assert_contains "$OUT" "2026-09-17T19:07:00Z" "the next tick must be computed from the cron expression"
+  assert_contains "$OUT" "ticks:   7,37 * * * *" "the lane's recorded cron expression must be printed verbatim"
   assert_grep '--text' "$LOG" "the model spec must reach the lane"
   assert_grep '/model opus[1m]' "$LOG" "the /model command must be typed verbatim"
   assert_grep 'model_switch_to=opus[1m]' "$STATE/lane-f.meta" "the switch must be recorded in metadata"
   assert_grep 'model_switch_from=opus' "$STATE/lane-f.meta" "the previous model must be recorded"
   assert_grep 'model=opus[1m]' "$STATE/lane-f.meta" "the metadata model must follow the switch"
-  pass "fm-lane-model-switch: a clean lane switches, verifies, records, and reports its next tick"
+  pass "fm-lane-model-switch: a clean lane switches, verifies, records, and reports its recorded ticks"
+}
+
+test_retry_after_a_slow_redraw_is_recorded() {
+  case_dir retry-after-redraw
+  write_lane_meta lane-p 'opus'
+  # The lane applied an earlier attempt after that attempt had already given
+  # up, so the target model is ALREADY on the pre-submit screen. The retry's
+  # own confirmation is byte-identical to it; verification is by position, so
+  # the fresh line still counts and the retry records the switch.
+  screen_json "$SCREENS/1.json" 'previous output' 'Opus 5 · 1M context' '❯'
+  screen_json "$SCREENS/2.json" 'previous output' 'Opus 5 · 1M context' '❯'
+  screen_json "$SCREENS/3.json" 'previous output' 'Opus 5 · 1M context' '❯'
+  screen_json "$SCREENS/4.json" 'previous output' 'Opus 5 · 1M context' '❯' \
+    '> /model opus[1m]' 'Opus 5 · 1M context' '❯'
+  screen_json "$SCREENS/5.json" 'previous output' 'Opus 5 · 1M context' '❯' \
+    '> /model opus[1m]' 'Opus 5 · 1M context' '❯'
+  run_switch lane-p 'opus[1m]'
+  expect_code 0 "$RC" "a retry whose confirmation repeats an existing line must still be recorded: $OUT"
+  assert_contains "$OUT" "switched: lane-p opus -> opus[1m]" "the retry must report the switch"
+  assert_grep 'model=opus[1m]' "$STATE/lane-p.meta" "the retry must record the model the lane is actually on"
+  pass "fm-lane-model-switch: a retry confirmed by a repeated line is still recorded"
+}
+
+test_client_model_rejection_is_not_a_confirmation() {
+  case_dir model-rejection
+  write_lane_meta lane-q 'opus'
+  screen_json "$SCREENS/1.json" 'previous output' '❯'
+  screen_json "$SCREENS/2.json" 'previous output' '❯'
+  screen_json "$SCREENS/3.json" 'previous output' '❯'
+  # Claude Code's own refusal QUOTES the model id, so it satisfies any check
+  # that merely looks for the name. This is the client saying no.
+  screen_json "$SCREENS/4.json" 'previous output' '> /model deepseek-v4.1-flash' \
+    "There's an issue with the selected model (deepseek-v4.1-flash). It may not exist or you may not have access to it." '❯'
+  run_switch lane-q 'deepseek-v4.1-flash'
+  expect_code 1 "$RC" "a rendered model rejection must not count as a switch"
+  assert_contains "$OUT" "does not confirm it" "the failure must name the verification gate"
+  assert_no_grep 'MODEL SWITCH:' "$LOG" "a rejected lane must not be kicked"
+  assert_no_grep 'model_switch_to=' "$STATE/lane-q.meta" "a rejected switch must not be recorded"
+  assert_grep 'model=opus' "$STATE/lane-q.meta" "the recorded model must still be the one before the attempt"
+  pass "fm-lane-model-switch: the client's own model rejection is not read as a confirmation"
 }
 
 # --- the gateway repoint ----------------------------------------------------
@@ -279,24 +318,57 @@ reset_screens() {
   rm -f "$SCREENS/.count" "$SCREENS"/*.json
 }
 
-test_plain_switch_leaves_the_gateway_repoint_untouched() {
-  case_dir gateway-then-plain
-  write_lane_meta lane-m 'opus'
+# repoint_pool_lane: the first --gateway run against a lane that has never been
+# repointed. Asserts the record-first contract and leaves the env in place for
+# the caller.
+repoint_pool_lane() {  # <lane-id>
+  local id=$1
+  run_switch "$id" gateway --gateway
+  expect_code 0 "$RC" "recording a repoint must succeed without an in-place switch: $OUT"
+  assert_present "$STATE/$id.gateway.env" "the repoint must be written for the lane's next launch"
+  assert_grep "ANTHROPIC_BASE_URL=http://127.0.0.1:$SWITCH_GATEWAY_PORT" "$STATE/$id.gateway.env" \
+    "the exports must point at the gateway that was probed"
+  local mode
+  mode=$(stat -c '%a' "$STATE/$id.gateway.env" 2>/dev/null || stat -f '%Lp' "$STATE/$id.gateway.env")
+  [ "$mode" = "600" ] || fail "the lane's gateway exports carry a token and must be mode 0600, got $mode"
+}
+
+test_repoint_is_recorded_for_a_lane_that_must_relaunch() {
+  case_dir gateway-repoint
+  write_lane_meta lane-r 'opus'
   start_test_gateway
+  # A lane still on the shared account pool: its running session cannot accept
+  # the gateway's model id, so the repoint must be recorded for the next launch
+  # and nothing may be typed into the lane.
+  repoint_pool_lane lane-r
+  assert_contains "$OUT" "no /model was sent" "the report must say why nothing was typed"
+  assert_contains "$OUT" "set -a; . $STATE/lane-r.gateway.env" "the report must print the exact relaunch step"
+  assert_contains "$OUT" "/model deepseek-v4.1-flash" "the report must name the model to select after the relaunch"
+  assert_no_grep 'terminal send' "$LOG" "a lane that must relaunch must not be typed into"
+  assert_no_grep 'model_switch_to=' "$STATE/lane-r.meta" "no model switch happened, so none may be recorded"
+  assert_grep 'model=opus' "$STATE/lane-r.meta" "the recorded model must still be the lane's running one"
+
+  # Now that a repoint is on record, the same command does attempt the in-place
+  # switch: the env file is the evidence the session may already be on it.
+  reset_screens
   screen_json "$SCREENS/1.json" 'previous output' '❯'
   screen_json "$SCREENS/2.json" 'previous output' '❯'
   screen_json "$SCREENS/3.json" 'previous output' '❯'
   screen_json "$SCREENS/4.json" 'previous output' 'model set to deepseek-v4.1-flash (routed)' '❯'
   screen_json "$SCREENS/5.json" 'previous output' 'model set to deepseek-v4.1-flash (routed)' '❯'
-  run_switch lane-m gateway --gateway
-  expect_code 0 "$RC" "the gateway repoint must switch the lane: $OUT"
-  assert_contains "$OUT" "switched: lane-m opus -> deepseek-v4.1-flash" "the advertised model id must be resolved from the gateway"
-  assert_present "$STATE/lane-m.gateway.env" "the repoint must be written for the lane's next launch"
-  assert_grep "ANTHROPIC_BASE_URL=http://127.0.0.1:$SWITCH_GATEWAY_PORT" "$STATE/lane-m.gateway.env" \
-    "the exports must point at the gateway that was probed"
-  local mode
-  mode=$(stat -c '%a' "$STATE/lane-m.gateway.env" 2>/dev/null || stat -f '%Lp' "$STATE/lane-m.gateway.env")
-  [ "$mode" = "600" ] || fail "the lane's gateway exports carry a token and must be mode 0600, got $mode"
+  run_switch lane-r gateway --gateway
+  expect_code 0 "$RC" "an already-repointed lane must take the in-place switch: $OUT"
+  assert_contains "$OUT" "switched: lane-r opus -> deepseek-v4.1-flash" "the advertised model id must be resolved from the gateway"
+  assert_grep '/model deepseek-v4.1-flash' "$LOG" "the /model command must reach an already-repointed lane"
+  assert_grep 'model_switch_to=deepseek-v4.1-flash' "$STATE/lane-r.meta" "the in-place switch must be recorded"
+  pass "fm-lane-model-switch: --gateway records the repoint first and only switches an already-repointed lane"
+}
+
+test_plain_switch_leaves_the_gateway_repoint_untouched() {
+  case_dir gateway-then-plain
+  write_lane_meta lane-m 'opus'
+  start_test_gateway
+  repoint_pool_lane lane-m
   cp "$STATE/lane-m.gateway.env" "$CASE/gateway.env.before"
 
   # A later model switch with no --gateway is exactly the documented "model
@@ -370,22 +442,6 @@ test_dry_run_sends_nothing() {
 
 # --- ticks ------------------------------------------------------------------
 
-test_unparsable_tick_source_is_reported_not_fatal() {
-  case_dir bad-cron
-  write_lane_meta lane-i 'opus'
-  screen_json "$SCREENS/1.json" '❯'
-  screen_json "$SCREENS/2.json" '❯'
-  screen_json "$SCREENS/3.json" '❯'
-  screen_json "$SCREENS/4.json" 'Opus 5 · 1M' '❯'
-  screen_json "$SCREENS/5.json" 'Opus 5 · 1M' '❯'
-  mkdir -p "$DATA/lane-i"
-  printf 'not a cron expression\n' > "$DATA/lane-i/crons"
-  run_switch lane-i 'opus[1m]'
-  expect_code 0 "$RC" "an unparsable tick source must not fail the switch"
-  assert_contains "$OUT" "unparsable cron expression" "the tick report must say what it could not read"
-  pass "fm-lane-model-switch: an unparsable tick source is reported without failing the switch"
-}
-
 test_no_tick_source_says_so() {
   case_dir no-ticks
   write_lane_meta lane-j 'opus'
@@ -410,11 +466,11 @@ test_meta_cron_line_is_a_tick_source() {
   screen_json "$SCREENS/3.json" '❯'
   screen_json "$SCREENS/4.json" 'Opus 5 · 1M' '❯'
   screen_json "$SCREENS/5.json" 'Opus 5 · 1M' '❯'
-  run_switch lane-k 'opus[1m]' --now 2026-09-17T19:05:00Z
+  run_switch lane-k 'opus[1m]'
   expect_code 0 "$RC" "a metadata cron line must be honoured"
-  assert_contains "$OUT" "next-tick: 13 14 * * *" "the metadata tick source must be reported"
-  assert_contains "$OUT" "2026-09-18T14:13:00Z" "the next fire time must be the next day's 14:13"
-  pass "fm-lane-model-switch: a cron= metadata line is used as a tick source"
+  assert_contains "$OUT" "ticks:   13 14 * * *" "the metadata tick source must be reported verbatim"
+  assert_contains "$OUT" "watch the next one actually fire" "the operator must be told to watch the real fire"
+  pass "fm-lane-model-switch: a cron= metadata line is reported as a tick source"
 }
 
 test_dirty_composer_is_refused
@@ -425,10 +481,12 @@ test_gate_agent_is_refused_before_any_backend_call
 test_unhealthy_gateway_is_refused_before_the_lane
 test_gateway_value_form_is_refused
 test_clean_switch_verifies_records_and_kicks
+test_retry_after_a_slow_redraw_is_recorded
+test_repoint_is_recorded_for_a_lane_that_must_relaunch
 test_plain_switch_leaves_the_gateway_repoint_untouched
 test_unconfirmed_switch_does_not_kick
 test_echoed_command_alone_does_not_confirm
+test_client_model_rejection_is_not_a_confirmation
 test_dry_run_sends_nothing
-test_unparsable_tick_source_is_reported_not_fatal
 test_no_tick_source_says_so
 test_meta_cron_line_is_a_tick_source

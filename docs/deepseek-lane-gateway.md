@@ -55,7 +55,9 @@ One instance per firstmate home owns the port, the pid file, the request log, an
 - **Streaming is relayed frame by frame**, and usage is accumulated across `message_start` and `message_delta` because the providers split it.
 - **The port is gated by a local token.** Everything except `/healthz` requires the bearer token in `$STATE/fm-deepseek-gateway.token` (mode 0600, created on first use).
   It gates this port, not the providers: it is what stops any other local process from spending the captain's provider cash through an open loopback port.
-  `/healthz` carries liveness, the resolved route, and counters only; the per-request rows live behind the token on `/stats`, because a failed row quotes the provider's own error body and those routinely echo the part of the lane's request they objected to.
+  `/healthz` is the only unauthenticated surface and carries liveness, the resolved route, and counters only; every other path answers 401 without the token.
+  The per-request rows live behind the token on `/stats`, because a failed row quotes the provider's own error body and those routinely echo the part of the lane's request they objected to.
+  The request log holds those same rows, so it and the gateway's process output are created mode 0600 like the token beside them.
 - **There is no automatic cross-provider failover.** An upstream 429 or 5xx is returned as it arrived, because routing is the picker's decision and silently switching providers would hide both the failure and the cost.
 - **`/v1/messages/count_tokens` is a local estimate** of about four characters per token, deliberately not a provider call.
 
@@ -78,20 +80,27 @@ The agent restarts the gateway across a reboot; `launchd-status` reports whether
 Point one lane at the gateway and switch its model:
 
 ```sh
-bin/fm-lane-model-switch.sh <task-id> gateway --gateway     # records the repoint, then switches
+bin/fm-lane-model-switch.sh <task-id> gateway --gateway     # records the repoint; relaunch the lane to take it
+bin/fm-lane-model-switch.sh <task-id> gateway --gateway     # run again once it is relaunched: switches in place
 bin/fm-lane-model-switch.sh <task-id> 'opus[1m]'            # model switch only, same gateway
 ```
 
-The switch captures whatever the lane's composer holds, refuses unless the composer verifies empty, sends `/model <spec>` through that lane's own backend submit core, verifies the switch on the rendered screen, records before and after in `state/<id>.meta`, and then kicks the lane back to work.
-It also prints the lane's next expected tick, because a model switch can skip the next scheduled tick: the source is `cron=<expr>` lines in that lane's metadata or one expression per line in `data/<id>/crons`, and the script says so explicitly when the home records none.
+Claude Code reads its endpoint from the environment at startup, so a running session cannot be repointed in place, and a session still on the shared account pool cannot accept this gateway's model id at all.
+`--gateway` therefore records the repoint FIRST, as soon as the gateway proves healthy, and never depends on the running session: it writes the exact exports to `state/<id>.gateway.env` (mode 0600) for whoever launches that lane next.
+It then attempts the in-place `/model` only for a lane that ALREADY had a recorded `state/<id>.gateway.env`, because that file is the only durable evidence its session may already be on the gateway.
+For a lane without one - the first command above, and every lane still on the pool - nothing is typed into the lane: the repoint is recorded, the exact relaunch step is printed, and the command exits 0.
+That is why the rollout below is "record, relaunch, then switch" for each lane rather than one command.
 
-Claude Code reads its endpoint from the environment at startup, so `--gateway` writes the exact exports to `state/<id>.gateway.env` (mode 0600) for whoever launches that lane next.
-That file is the one record of the repoint; `state/<id>.meta` carries only the `model_switch_gateway=` audit line, and the second command above - a model switch with no `--gateway` - leaves `state/<id>.gateway.env` byte-identical and says so in its report.
+`state/<id>.gateway.env` is the one record of the repoint; `state/<id>.meta` carries only the `model_switch_gateway=` audit line, and a model switch with no `--gateway` leaves `state/<id>.gateway.env` byte-identical and says so in its report.
 `--gateway` takes no value: the gateway is loopback-only, so its port comes from the lifecycle script's own default (`FM_DEEPSEEK_GATEWAY_PORT`, default 8799) and `--gateway=<anything>` is refused rather than probing one endpoint while recording another.
-A lane already pointed at the gateway needs no relaunch; a running session keeps its current endpoint until it is relaunched.
 
-The on-screen verification ignores the `/model <spec>` line the script itself just submitted: Claude Code echoes that command into its transcript before it decides anything, so a confirmation only counts on a line that is new since the pre-submit capture and is not that echo.
-A rejected switch is therefore reported unconfirmed, is not recorded, and does not kick the lane.
+The in-place switch captures whatever the lane's composer holds, refuses unless the composer verifies empty, sends `/model <spec>` through that lane's own backend submit core, verifies the switch on the rendered screen, records before and after in `state/<id>.meta`, and then kicks the lane back to work.
+Verification reads only the lines BEYOND the pre-submit capture's line count, minus the `/model <spec>` line the script itself submitted - Claude Code echoes that command into its transcript before it decides anything - and it treats Claude Code's own model-rejection renderings, which quote the model id, as an explicit unconfirmed verdict.
+A switch that does not confirm is not recorded and does not kick the lane.
+Because the rule is positional rather than textual, a retry after a slow redraw still verifies even when the confirmation line repeats one already on screen.
+
+It also prints the cron expressions the home records for that lane - `cron=<expr>` lines in its metadata and one expression per line in `data/<id>/crons` - verbatim and against the time it read them, and says so explicitly when the home records none.
+No fire time is computed: a model switch can skip the next scheduled tick, and watching the real fire is the only thing that proves the schedule survived.
 
 ## Proof sequence
 
@@ -179,8 +188,12 @@ It is written as lane classes rather than lane names, because a home's roster is
 4. Then the judgement-heavy build and analysis lanes, cheapest reasoning first and the most product-sensitive last.
 5. The Cloudflare edge-analysis lane stays on Opus 1M: it is the worst fit for a cheap model and the best fit for the bigger window.
 
-Switch one lane at a time, then watch one tick actually fire before the next lane, because the tick is the one thing a switch cannot prove.
-A lane that depends on Claude Code crons or `/loop` wakeups is switched in place for exactly that reason: relaunching it on another runtime would silently drop its schedule.
+Each lane is three steps, not one: record its repoint, relaunch it with the recorded endpoint, then run the same `--gateway` command again to switch it in place.
+Do one lane at a time, and watch one tick actually fire before starting the next, because the tick is the one thing a switch cannot prove.
+
+The relaunch is the real cost of the first step, and it is unavoidable: Claude Code fixes its endpoint at startup, so a lane on the shared pool cannot reach this gateway without one.
+A lane whose `/loop` wakeups and `CronCreate` ticks live in its session memory loses them across that relaunch and has to have them re-armed afterwards, which is why the order above starts with the lanes whose schedules are cheapest to rebuild.
+Once a lane is on the gateway, every later model change is in place and costs no relaunch at all.
 
 ## Limits
 
@@ -189,10 +202,12 @@ A lane that depends on Claude Code crons or `/loop` wakeups is switched in place
 - `count_tokens` is an estimate, and `cost_usd` in the log is a list-price estimate for operator accounting; the provider's own billing is authoritative.
 - Fireworks has a history of rate limiting in this fleet, so treat it as capacity-variable; the gateway reports its errors instead of hiding them.
 - The launch agent is macOS-only; on other hosts run `start` under your own supervisor.
-- A repointed lane takes its new endpoint at its next launch; a running Claude Code session cannot be repointed in place.
+- A repointed lane takes its new endpoint at its next launch; a running Claude Code session cannot be repointed in place, so the first `--gateway` run on a pool lane records the repoint and types nothing into the lane.
+- That first relaunch drops any `/loop` or `CronCreate` schedule held in the lane's session memory; re-arm those after it comes back. Only the first move costs this - later model changes on an already-repointed lane are in place.
+- The switch prints the lane's recorded cron expressions and the time it read them; it computes no fire time, so the operator watches the real tick.
 
 ## Verification entry points
 
 - `tests/fm-deepseek-gateway.test.sh` - discovery, per-request routing against each provider's own path shape, key redaction, the unauthenticated refusal, request rows staying behind the token, the fail-closed missing-key path, the port refusals, streaming, the launch agent recipe parsed as a plist, and the lifecycle verbs.
-- `tests/fm-lane-model-switch.test.sh` - the composer refusal paths on fixture screens, the verified switch and its metadata record, the echo-only screen that must not count as a confirmation, the unconfirmed-switch path that must not kick a lane, a real gateway repoint that a later plain switch leaves byte-identical, and the tick report.
+- `tests/fm-lane-model-switch.test.sh` - the composer refusal paths on fixture screens, the verified switch and its metadata record, the echo-only screen and the client's own model rejection that must not count as confirmations, the retry whose confirmation repeats an existing line and must still be recorded, the unconfirmed-switch path that must not kick a lane, a real gateway repoint recorded without typing into a pool lane and then taken in place once recorded, and the tick report.
 - `bin/fm-lint.sh` covers both scripts' ShellCheck surface, and the scripts' own headers own their exact flags and contracts.

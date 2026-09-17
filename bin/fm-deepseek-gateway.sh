@@ -256,6 +256,9 @@ cmd_start() {
     refuse "something already answers $(base_url "$port")/healthz but is not this gateway; stop it before starting"
   fi
   ensure_token >/dev/null
+  # The process output can carry the same provider diagnostics the request log
+  # does, so it is created 0600 like the log and the token beside it.
+  [ -e "$OUT_FILE" ] || (umask 077; : > "$OUT_FILE") || fail "cannot create $OUT_FILE"
   nohup python3 "$GATEWAY_PY" --port "$port" --pick "$pick" --kind "$DEFAULT_KIND" \
     --state "$STATE" --log "$LOG_FILE" >> "$OUT_FILE" 2>&1 &
   pid=$!
