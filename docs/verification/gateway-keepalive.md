@@ -49,7 +49,7 @@ async function F7e(e,n,r=pf){                              // executeStopFailure
 `StopFailure` is also a member of the event set the binary treats as non-blockable, alongside `Notification`, `SessionStart`, `SessionEnd`, and `PostToolUseFailure`.
 
 A `StopFailure` hook therefore has no continuation channel at all, whatever it exits with.
-This is the reason the keep-alive is built as detect-then-re-ring from outside the session rather than as a blocking hook: the rendered pane is the single detector, and the watcher or the launchd keep-alive agent delivers the continue instruction.
+This is the reason the keep-alive is built as detect-then-re-ring from outside the session rather than as a blocking hook: the rendered pane is the single detector, and the watcher delivers the continue instruction.
 An earlier revision also registered a `StopFailure` hook purely to open the stall record a few seconds before the next pane poll; it was removed because both re-ringing actors classify the pane anyway, the first attempt waits out a backoff regardless, and a record opened by anything other than the pane could hold the ladder open against a pane that had already recovered.
 
 ## The typed error enum
@@ -92,11 +92,3 @@ The 48-occurrence row is the reason the deny list is checked before the transien
 
 The rendered text uses an em dash (`—`), not a hyphen.
 `tests/fm-gateway-keepalive.test.sh` quotes these strings verbatim, so a classifier rewritten against a hyphen fails there instead of silently never matching in production.
-
-## Not yet verified live
-
-The primary keep-alive agent's launchd job has been exercised as a script (`bin/fm-keepalive-agent.sh --dry-run`) and through the session-start install sweep against a fake launchd, not yet across a real launchd-scheduled stall.
-Its endpoint discovery covers tmux and herdr through the shared supervisor-pane discovery owner (`bin/fm-supervisor-target-lib.sh`), plus cmux's own `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID` pair, composed into the `<workspace>:<surface>` target `bin/backends/cmux.sh` parses.
-The cmux path is proved only by unit test over the real `record` interface, not against a live cmux install; treat it as unproved in production until a cmux primary has actually installed the job.
-An orca primary exports no terminal identifier a child process can read - orca ids come from the orca CLI at spawn time - so orca requires the installer's explicit `--backend`/`--target`, as does any other runtime that proves nothing.
-The agent stays inert and says so rather than guessing.

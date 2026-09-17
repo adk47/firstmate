@@ -429,8 +429,8 @@ inbox_steer_check() {  # <window> <task>
 #
 # A secondmate is never read for a stall. The loop below admits a mate only to
 # serve its declared wait's bounded re-surface, and a secondmate home runs its
-# own session-start keep-alive for its own primary; this check must not
-# piggyback on that admission (docs/gateway-keepalive.md).
+# own watcher for its own crews; this check must not piggyback on that
+# admission (docs/gateway-keepalive.md).
 gateway_stall_check() {  # <window> <task> <kind> <tail40>
   local w=$1 task=$2 kind=$3 tail40=$4 rec paused_line
   [ -n "$task" ] || return 1
