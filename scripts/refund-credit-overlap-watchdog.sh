@@ -171,7 +171,7 @@ findings=()
 checked=0
 unverifiable=0
 
-while IFS=$'\t' read -r refund_id charge_id refund_created refund_status; do
+while IFS=$'\t' read -r refund_id charge_id refund_created refund_status refund_amount; do
   [ -n "$refund_id" ] || continue
   grep -qxF "$refund_id" "$STATE_FILE" && continue   # already reported
   checked=$((checked + 1))
@@ -186,6 +186,11 @@ while IFS=$'\t' read -r refund_id charge_id refund_created refund_status; do
   if ! [[ "$refund_created" =~ ^[0-9]+$ ]] || [ "$refund_created" -le 0 ]; then
     unverifiable=$((unverifiable + 1))
     log "WARN: refund $refund_id has missing/invalid created '${refund_created:-<absent>}' — not marking seen, will retry"
+    continue
+  fi
+  if ! [[ "$refund_amount" =~ ^[0-9]+$ ]] || [ "$refund_amount" -le 0 ]; then
+    unverifiable=$((unverifiable + 1))
+    log "WARN: refund $refund_id has missing/invalid amount '${refund_amount:-<absent>}' — not marking seen, will retry"
     continue
   fi
 
@@ -217,7 +222,34 @@ while IFS=$'\t' read -r refund_id charge_id refund_created refund_status; do
     continue
   fi
 
-  if ! credit="$(customer_live_proration_credit "$cust")"; then
+  # A free-text balance adjustment has no immutable refund foreign key. Treat it
+  # as linked only when this is the UNIQUE non-terminal refund of that amount in
+  # the entire matching window. Global uniqueness is intentionally conservative:
+  # two customers with same-sized refunds may cause a review, but one adjustment
+  # can never suppress two refunds. At the lookback edge we cannot prove the
+  # candidate set is complete, so suppression is disabled there too.
+  reversal_candidates="$(printf '%s' "$refunds_json" | jq -r \
+    --argjson amount "$refund_amount" \
+    --argjson created "$refund_created" \
+    --argjson window "$CREDIT_REFUND_REVERSAL_WINDOW_SECONDS" \
+    --argjson tolerance "$CREDIT_REFUND_REVERSAL_TOLERANCE_CENTS" '
+      [ .data[]
+        | select((.status // "") != "failed" and (.status // "") != "canceled")
+        | select((.amount | type) == "number" and (.created | type) == "number")
+        | (.amount - $amount) as $amount_delta
+        | (.created - $created) as $time_delta
+        | select((if $amount_delta < 0 then -$amount_delta else $amount_delta end) <= $tolerance)
+        | select((if $time_delta < 0 then -$time_delta else $time_delta end) <= $window)
+      ] | length
+    ')" || reversal_candidates=0
+  allow_reversal=0
+  if [[ "$reversal_candidates" =~ ^[0-9]+$ ]] \
+      && [ "$reversal_candidates" -eq 1 ] \
+      && [ $(( refund_created - since_epoch )) -ge "$CREDIT_REFUND_REVERSAL_WINDOW_SECONDS" ]; then
+    allow_reversal=1
+  fi
+
+  if ! credit="$(customer_refund_credit_overlap "$cust" "$refund_amount" "$refund_created" "$allow_reversal")"; then
     # Do NOT record this refund as seen: an unverifiable read must be retried,
     # not silently converted into a clean bill of health.
     unverifiable=$((unverifiable + 1))
@@ -226,9 +258,8 @@ while IFS=$'\t' read -r refund_id charge_id refund_created refund_status; do
   fi
 
   if [ -n "$credit" ]; then
-    amount="$(printf '%s' "$refunds_json" | jq -r --arg r "$refund_id" '.data[] | select(.id == $r) | .amount')"
-    findings+=("$refund_id|$cust|$amount|$credit")
-    log "FINDING: $refund_id (customer $cust, refunded ${amount}c) still holds live credit: $credit"
+    findings+=("$refund_id|$cust|$refund_amount|$credit")
+    log "FINDING: $refund_id (customer $cust, refunded ${refund_amount}c) still has live overlap: $credit"
   fi
   # A finding is watermarked only after its alert is DELIVERED (below) —
   # watermarking at scan time means one transient Slack failure permanently
@@ -250,7 +281,7 @@ while IFS=$'\t' read -r refund_id charge_id refund_created refund_status; do
   # `read` shift `created` into `charge_id` and leave `refund_created` empty. That
   # silently mis-parses every refund with no charge — the settlement-horizon
   # comparison then sees an empty string and the row can never settle.
-done < <(printf '%s' "$refunds_json" | jq -r '.data[] | [.id, (if (.charge // "") == "" then "-" else .charge end), (if ((.created | type) == "number" and .created > 0) then .created else "-" end), (if (.status // "") == "" then "-" else .status end)] | @tsv')
+done < <(printf '%s' "$refunds_json" | jq -r '.data | sort_by(.created // 0)[] | [.id, (if (.charge // "") == "" then "-" else .charge end), (if ((.created | type) == "number" and .created > 0) then .created else "-" end), (if (.status // "") == "" then "-" else .status end), (if ((.amount | type) == "number" and .amount > 0) then .amount else "-" end)] | @tsv')
 
 log "checked=$checked findings=${#findings[@]} unverifiable=$unverifiable"
 
@@ -277,10 +308,10 @@ fi
 lines=""
 for f in "${findings[@]}"; do
   IFS='|' read -r rid cus amt cred <<<"$f"
-  lines+="\n• \`$rid\` — customer \`$cus\`, refunded \$$(awk -v c="$amt" 'BEGIN{printf "%.2f", c/100}'), still holds credit: $cred"
+  lines+="\n• \`$rid\` — customer \`$cus\`, refunded \$$(awk -v c="$amt" 'BEGIN{printf "%.2f", c/100}'), live overlap: $cred"
 done
 
-msg=":rotating_light: *Duplicate concession detected* — cash refund AND a live customer-balance credit for the same customer.${lines}\n\nOne unused period should produce ONE concession. Zero the credit, or confirm it was deliberate. Runbook: \`scripts/remediate-refund-credit-overlap.sh --help\` (dry-run by default)."
+msg=":rotating_light: *Duplicate concession detected* — a cash refund still overlaps live customer-balance credit.${lines}\n\nOne unused period should produce ONE concession. Verify the overlap, then zero only confirmed duplicated credit. Runbook: \`scripts/remediate-refund-credit-overlap.sh --help\` (dry-run by default)."
 
 if [ "$DRY_RUN" = "1" ]; then
   log "DRY RUN — would have paged (nothing watermarked):"
