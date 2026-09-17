@@ -183,13 +183,49 @@ fi
 # Pull open tickets with a due date before the end of tomorrow. The
 # due_date_lt filter is server-side — without it the shared support list
 # (2000+ open tasks) blows straight through the pagination cap.
+#
+# …and `include_closed=false` is NOT sufficient, which is why this digest failed
+# every day until 2026-09-17. It drops only statuses of TYPE "closed"; this list
+# also defines `done`-type statuses (`resolved`, `impossible`), and ClickUp
+# returns those. Measured on list 901000600160: over 5 sampled pages, 321 of 500
+# returned tasks (64%) were done/closed-type and discarded by the jq filter
+# below — 229 of them `resolved`. The fetch burned its whole page budget on
+# tickets it was about to throw away, hit PAGINATION_CAP, and exit 6'd.
+#
+#   without a status filter : >25 pages, >2600 tasks, never exhausted
+#   with    a status filter :   6 pages,   598 tasks
+#
+# So filter by the list's OWN open statuses, server-side. This scales with OPEN
+# ticket count (bounded by team capacity) rather than with all history, which a
+# bigger cap would not: raising it to 80 works today and breaks again later.
+#
+# Read the status names from the list itself rather than hardcoding them — a
+# renamed or added status would otherwise silently drop its tickets from the
+# digest, which is worse than the cap. If that read fails we proceed UNFILTERED,
+# i.e. exactly today's behaviour plus its existing cap warning, rather than
+# inventing a new failure mode.
+open_status_query=""
+if statuses_resp=$(clickup_curl "/list/$list_id"); then
+  # NUL/newline-safe: status names contain spaces ("to do", "in progress"), so
+  # they are read one per LINE. A `for s in $(…)` word-splits them into garbage
+  # and the filter then matches nothing it was meant to.
+  while IFS= read -r _st; do
+    [ -n "$_st" ] || continue
+    open_status_query="${open_status_query}&statuses%5B%5D=$(printf %s "$_st" | jq -sRr @uri)"
+  done < <(printf '%s' "$statuses_resp" | jq -r '.statuses[]? | select(.type != "done" and .type != "closed") | .status')
+fi
+if [ -z "$open_status_query" ]; then
+  echo "clickup-sla-digest: could not read open statuses for list $list_id — fetching unfiltered (the PAGINATION_CAP warning below still applies)." >&2
+else
+  echo "clickup-sla-digest: filtering server-side to $(printf '%s' "$open_status_query" | grep -o 'statuses' | wc -l | tr -d ' ') open status(es)." >&2
+fi
 # include_closed=false drops "closed"-type statuses server-side; the jq
 # filter also drops "done"-type ones (resolved/impossible etc.), which
 # ClickUp still returns.
 : > "$tmp/due.jsonl"
 page=0
 while :; do
-  resp=$(clickup_curl "/list/$list_id/task?archived=false&include_closed=false&page=$page&order_by=due_date&due_date_lt=$start_after_ms") || exit 5
+  resp=$(clickup_curl "/list/$list_id/task?archived=false&include_closed=false&page=$page&order_by=due_date&due_date_lt=${start_after_ms}${open_status_query}") || exit 5
   # A 200 with no `tasks` array (e.g. a ClickUp `{"err":...}` envelope) must NOT
   # be read as "nothing due" — that would silently skip a day of overdue tickets.
   # Fail loud instead; only a genuine empty array ends the scan.
