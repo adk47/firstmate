@@ -104,13 +104,19 @@ SH
 # slack_notify_payload_file_status returns the decoded delivery result. A fake
 # where the critical path could fail was how the delivery-failure regression
 # went false-green against production code that cannot fail.
-slack_notify() { echo "SLACK_NOTIFY: \$1" >> "$BATS_TEST_TMPDIR/slack.log"; return 0; }
-slack_notify_critical() { echo "SLACK_CRITICAL: \$1" >> "$BATS_TEST_TMPDIR/slack.log"; return 0; }
+# The stub also records the ROUTE (channel + bot), not just the text: these
+# alerts name a customer and a dollar amount, so WHERE they land is part of the
+# behaviour under test, and a text-only fake cannot fail when the route is wrong.
+slack_notify() { echo "SLACK_NOTIFY[bot=\${SLACK_NOTIFY_BOT:-} chan=\${SLACK_CHANNEL:-}]: \$1" >> "$BATS_TEST_TMPDIR/slack.log"; return 0; }
+slack_notify_critical() { echo "SLACK_CRITICAL[bot=\${SLACK_NOTIFY_BOT:-} chan=\${SLACK_CHANNEL:-}]: <@\${SLACK_UID_NICK:-}> <@\${SLACK_UID_AARON:-}> \$1" >> "$BATS_TEST_TMPDIR/slack.log"; return 0; }
 slack_notify_payload_file_status() {
   if [ "\${STUB_SLACK_FAILS:-0}" -gt 0 ]; then return 1; fi
-  echo "SLACK_CRITICAL: \$(jq -r .text "\$1" 2>/dev/null)" >> "$BATS_TEST_TMPDIR/slack.log"
+  echo "SLACK_CRITICAL[bot=\${SLACK_NOTIFY_BOT:-} chan=\$(jq -r .channel "\$1" 2>/dev/null)]: \$(jq -r .text "\$1" 2>/dev/null)" >> "$BATS_TEST_TMPDIR/slack.log"
   return 0
 }
+# The real lib defines these; the script relies on them for the <@UID> mentions.
+SLACK_UID_NICK="U0AL36NADEY"
+SLACK_UID_AARON="U7RP6HKUZ"
 SH
 
   export STRIPE_BIN="$BIN/stripe"
@@ -431,4 +437,45 @@ slack_log() { cat "$BATS_TEST_TMPDIR/slack.log" 2>/dev/null || true; }
   [[ "$(slack_log)" == *"INCOMPLETE"* ]]
   # Nothing from a partial dataset may be watermarked.
   [ ! -s "$REFUND_OVERLAP_STATE_DIR/seen-refunds" ]
+}
+
+# ── alert routing: #hydra-finance as the finance bot, tagging Nick and Aaron ──
+# These alerts carry a customer id and a dollar figure and are actioned by Nick
+# and Aaron, not by whoever is on devops rota, so the route is part of the
+# contract rather than a cosmetic default.
+
+@test "a finding pages #hydra-finance as the finance bot, tagging Nick and Aaron" {
+  export STUB_CREDIT_BALANCE=-11772
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$(slack_log)" == *"chan=C0C2LT1HKDJ"* ]]
+  [[ "$(slack_log)" == *"bot=finance"* ]]
+  [[ "$(slack_log)" == *"<@U0AL36NADEY>"* ]]
+  [[ "$(slack_log)" == *"<@U7RP6HKUZ>"* ]]
+}
+
+@test "a caller may still override the channel and bot" {
+  # Route is a default, not a hardcode: an operator rehearsing against a scratch
+  # channel must not have to edit the script.
+  export STUB_CREDIT_BALANCE=-11772
+  export SLACK_CHANNEL=C0SCRATCH
+  export SLACK_NOTIFY_BOT=devops
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$(slack_log)" == *"chan=C0SCRATCH"* ]]
+  [[ "$(slack_log)" == *"bot=devops"* ]]
+  [[ "$(slack_log)" != *"chan=C0C2LT1HKDJ"* ]]
+}
+
+@test "a BLIND read failure also reaches finance and tags both approvers" {
+  # The degradation alerts matter MORE than a finding, not less: a blind
+  # watchdog means new duplicates are accruing with nobody watching. Previously
+  # these went out untagged, so they landed in a channel with no owner.
+  export STUB_REFUNDS_BROKEN=1
+  run "$SCRIPT"
+  [ "$status" -eq 2 ]
+  [[ "$(slack_log)" == *"BLIND"* ]]
+  [[ "$(slack_log)" == *"bot=finance"* ]]
+  [[ "$(slack_log)" == *"<@U0AL36NADEY>"* ]]
+  [[ "$(slack_log)" == *"<@U7RP6HKUZ>"* ]]
 }
