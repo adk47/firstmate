@@ -402,8 +402,9 @@ inbox_steer_check() {  # <window> <task>
 }
 
 # The ladder's other exit, and the only one an idle poll cannot serve. A stall
-# record is dropped when its pane recovers, but gateway_stall_check below runs
-# only on an idle poll, so a crew that took the continue, resumed, and then ran
+# record is dropped once the crew records a normal turn end, but
+# gateway_stall_check below runs only on an idle poll, so a crew that took the
+# continue, resumed, and then ran
 # one long turn is never observed idle while it recovers - it would carry its
 # half-spent ladder and its stale horizon anchor into the NEXT, unrelated stall
 # and have that one declared a spent-budget outage on first sight.
@@ -452,8 +453,10 @@ gateway_busy_progress_check() {  # <window> <task> <key> <busy-now>
 # possible wedge - a crew that needs one sentence to carry on gets treated as a
 # crew that needs a human. Claude Code reports that turn end through StopFailure,
 # which it executes outside its REPL loop, so the crew's own hook cannot resume
-# it (docs/verification/gateway-keepalive.md). Something outside the session has
-# to say "carry on", and the steering inbox is already exactly that channel.
+# it - but the busy-state hook on the same event RECORDS it, which is the signal
+# the ladder gates on (docs/verification/gateway-keepalive.md). Something outside
+# the session has to say "carry on", and the steering inbox is already exactly
+# that channel.
 # Putting the ladder here also means every crew already running gets the
 # behaviour without being relaunched.
 #
@@ -467,7 +470,7 @@ gateway_busy_progress_check() {  # <window> <task> <key> <busy-now>
 # absorb. A crew that comes back on its own simply finds the message moot.
 # Nothing here interrupts, signals, or restarts the worker.
 #
-# A secondmate is never read for a stall. The loop below admits a mate only to
+# A secondmate is never classified for a stall. The loop below admits a mate only to
 # serve its declared wait's bounded re-surface, and a secondmate home runs its
 # own watcher for its own crews; this check must not piggyback on that
 # admission (docs/gateway-keepalive.md).

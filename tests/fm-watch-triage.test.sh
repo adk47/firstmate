@@ -1894,8 +1894,11 @@ test_gateway_stall_is_re_rung_instead_of_wedge_escalated() {
   # The exact text Claude Code renders when the pooled gateway has no routable
   # account, em dash and all.
   printf 'API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary — try again in a moment.' > "$capture_file"
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/stalled.meta"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/stalled.meta"
   printf 'working: implementing the fix\n' > "$state/stalled.status"
+  # And the turn end the crew itself recorded: Claude's StopFailure hook, the
+  # first of the ladder's two conditions.
+  record_api_error_turn_end "$state" stalled
   sig=$(seen_sig "$state/stalled.status"); printf '%s' "$sig" > "$state/.seen-stalled_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "$(cat "$capture_file")")
@@ -1969,12 +1972,22 @@ test_gateway_stall_is_re_rung_instead_of_wedge_escalated() {
 # decides whether the next transient error is re-rung or declared an outage.
 
 # Prints the case dir. <task> names both the task and its window suffix.
+# The turn end Claude's StopFailure hook records through the busy contract's only
+# writer - the first of the gateway ladder's two conditions, without which no
+# pane text can put a crew in the ladder.
+record_api_error_turn_end() {  # <state-dir> <task>
+  local state=$1 task=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" idle --gen "$gen" \
+    --source claude-hook --event stop-failure
+}
+
 make_gateway_busy_case() {  # <name> <task>
   local dir state task=$2 window anchor
   dir=$(make_case "$1"); state="$dir/state"
   window="test:fm-$task"
   printf 'Working...' > "$dir/pane.txt"
-  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/$task.meta"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/$task.meta"
   printf 'working: implementing the fix\n' > "$state/$task.status"
   printf '%s' "$(seen_sig "$state/$task.status")" > "$state/.seen-${task}_status"
   touch "$state/$task.turn-ended"
@@ -1997,11 +2010,18 @@ make_gateway_busy_case() {  # <name> <task>
 # the fact that the derived window stays 600 seconds at any cadence, are pinned
 # directly on fm_gateway_busy_clear_polls in tests/fm-gateway-keepalive.test.sh.
 run_gateway_busy_watcher() {  # <dir> <task> <state> <busy|idle> <until>
-  local dir=$1 task=$2 state=$3 pane_state=$4 until=$5 gen pid key n i=0
+  local dir=$1 task=$2 state=$3 pane_state=$4 until=$5 gen event pid key n i=0
   key=$(printf '%s' "test:fm-$task" | tr ':/.' '___')
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")
+  # The real Claude lifecycle: UserPromptSubmit opens the turn, StopFailure ends
+  # it on an API error. The idle event is what the gateway ladder's gate reads,
+  # so an idle phase here must carry the event a 503 turn end actually records.
+  case "$pane_state" in
+    busy) event=user-prompt-submit ;;
+    *) event=stop-failure ;;
+  esac
   "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" "$pane_state" --gen "$gen" \
-    --source pi-ext --event agent-turn
+    --source claude-hook --event "$event"
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-$task" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
     FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -2103,17 +2123,19 @@ test_gateway_record_is_dropped_after_a_long_busy_stretch() {
 # A secondmate is admitted to the pane-stale path only to serve its declared
 # wait's bounded re-surface, and the gateway ladder must not piggyback on that
 # admission: a secondmate home runs its own watcher for its own crews, and
-# docs/gateway-keepalive.md promises a mate's pane is never read for
-# a stall. A paused mate whose pane shows the transient error is therefore still
-# re-surfaced as a paused mate, and never sent a continue instruction.
+# docs/gateway-keepalive.md promises a mate is never classified for a stall. A
+# paused mate that recorded an API-error turn end AND shows the transient error -
+# both of the ladder's conditions - is therefore still re-surfaced as a paused
+# mate, and never sent a continue instruction.
 test_gateway_stalled_secondmate_is_not_re_rung() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case gateway-stall-secondmate); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/mate-503.status"
   window="test:fm-mate-503"
   printf 'API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary — try again in a moment.' > "$capture_file"
-  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/mate-503.meta"
+  printf 'window=%s\nkind=secondmate\nharness=claude\n' "$window" > "$state/mate-503.meta"
   printf 'paused: awaiting the upstream release\n' > "$statusf"
+  record_api_error_turn_end "$state" mate-503
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi

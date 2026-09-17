@@ -12,30 +12,35 @@ This is the authoritative contract for how firstmate keeps agents working across
 
 Claude Code reports an API-error turn end through `StopFailure`, not `Stop`, and it executes `StopFailure` hooks outside its REPL loop and discards their result.
 A `StopFailure` hook therefore has no way to block the stop or force a continuation, unlike the `Stop` hooks [`turnend-guard.md`](turnend-guard.md) describes.
-The keep-alive is built on that fact rather than around it: the stall is detected from the rendered pane by an actor outside the session, and that actor delivers the nudge.
+The keep-alive is built on that fact rather than around it: the hook cannot resume the turn, but it can RECORD it, so an actor outside the session reads that record, confirms which error ended the turn, and delivers the nudge.
 [`verification/gateway-keepalive.md`](verification/gateway-keepalive.md) records the live evidence.
 
 ## What counts as a transient gateway stall
 
-The rendered pane is the single detector, for every actor.
-It is the one signal that keeps saying "still stalled" for as long as the stall lasts, and it is the only signal a reader outside the session has.
+The signal is the agent's own **turn-lifecycle record**, not its screen.
+Two conditions are required, and a stall is declared only when both hold:
 
-The transient match reads only the few non-blank lines immediately above the harness's prompt and footer, which is where a turn-ending API error renders, and it matches only the harness's rendered `API Error: <5xx>` shape.
-That bounded window is the same footer window the watcher's busy match reads, and for the same reason: an agent that recovered and went idle again with the old error still in its scrollback must not be re-rung.
-`FM_GATEWAY_TAIL_LINES` sizes the window.
+1. The task's busy record says its last turn ended on an API error — `event=stop-failure`.
+   Claude Code closes such a turn through `StopFailure` and never `Stop`; `bin/fm-spawn.sh` wires that hook to `fm-busy-event.sh … --event stop-failure`, and `bin/fm-busy-lib.sh` owns the record it writes.
+2. The pane tail shows one of the transient gateway errors.
+   The match reads the last `FM_GATEWAY_TAIL_LINES` non-blank lines — the same bounded footer window the watcher's busy match reads — and matches only the harness's rendered `API Error: <5xx>` shape, never a bare word such as `overloaded`.
 
-Inside that window the match is anchored to the pane's **live output line**: the last *logical* line of rendered output, which is the line the agent's last turn ended on.
-The composer and everything the harness draws below it are skipped first — they are not output, and the raw last non-blank row of an idle pane is the shortcut footer, so anchoring there would blind the detector.
-Logical, not a screen row: a crew window is 80 columns and the rendered error is ~190 characters, so a pane always splits it across rows and the row carrying the shape is never the last of them.
-The screen rows are joined back into the line the harness wrote, and the join is **structural**: a row continues the row above it if and only if that row above fills the pane to its margin, because filling the margin is the only reason a screen breaks a line.
-A row shorter than the margin ended its line, so the walk stops there.
-The pane's width is read off the capture — the length of its longest row, but only when two or more rows end at exactly that column, since a margin is what makes two rows the same length while a single long row is just a long line.
-A bordered composer satisfies that on its own, its border and rails spanning the pane; a capture showing no margin at all has nothing that can be a continuation.
-Nothing in the test reads how the harness renders a gutter, a bullet or an indent, deliberately: a glyph test merges two separate rendered lines whenever the second carries no gutter, which turns a crew that merely mentioned a 503 in its closing paragraph into a crew being re-rung for one.
-The shape is also not matched when that line quotes it inside backticks or quotation marks, judged on the reconstructed line so a quote that opened on an earlier row still counts.
-Both rules exist because an agent that merely printed this repository's own sources must not be re-rung either: the docs, the tests and the classifier itself carry the literal rendered string, so a crewmate that read them ends its turn with the shape on screen.
-A citation is disqualified by one of two things: another rendered line below it, which makes it not the last line, or a quote around it on its own line.
-The harness's own turn-ending error has neither.
+A turn that ended normally records `event=stop` and never enters the ladder, whatever is on its screen.
+That is also the exit: a crew that takes the continue and finishes its turn records `stop`, so its record is dropped on the next idle poll without waiting for the old error to scroll off.
+
+The second condition is not the detector on its own, and it is not asked to be.
+The question this classifier asks is about a TURN, and a screen holds no turns — it holds rows.
+This repository's own docs, tests and classifier carry the rendered error text verbatim, so an agent that merely read them ends its turn with the shape on screen, and four successive attempts to tell that agent from a stalled one by POSITION each failed in their own direction: an unanchored match caught prose, a physical-row anchor went blind on the wrapped error, a gutter-glyph join merged separate rendered lines, and a pane-width join missed the error whenever the harness word-wrapped, whenever the composer border sat one column off the wrap column, or whenever the capture still held wider rows from before a resize.
+The turn end is not inferred from the screen at all: the crew records it itself.
+The pane condition remains because the event says only THAT an API error ended the turn, never WHICH one — and some of those must never be retried (see the deny list below).
+
+### Scope: the claude harness only
+
+`event=stop-failure` is written in exactly one place, the `claude*` arm of `bin/fm-spawn.sh`'s busy wiring.
+No other harness emits it, so this keep-alive covers claude-harness crewmates and scouts only.
+A task whose record carries no event, an event the classifier does not name, or no readable record at all is deliberately **not** in the ladder: it is left to ordinary triage rather than re-rung on the strength of pane text alone.
+That is the intended limit — the captain asked for claude workers, and the text patterns are Claude Code's own rendered shape — and it is a written-out refusal in `fm_gateway_turn_ended_on_api_error`, not a silent fall-through.
+
 Re-ringing a healthy crew is not a harmless nudge — it spends the whole budget and stamps a false `paused [key=gateway-503]` on that crew's status log, which then routes a genuinely wedged pane onto the long declared-wait cadence instead of the wedge timer.
 
 A deny list runs first, over the whole capture, and beats the transient match.
@@ -44,8 +49,8 @@ A gateway that is simply unreachable is deliberately outside the transient class
 
 ## How an agent is kept alive
 
-1. **Detect.** The actor that reads the idle agent's pane classifies its tail and opens a durable stall record on the first sighting.
-   A pane that no longer shows the error is a recovered agent, and its record is dropped so a later stall starts fresh.
+1. **Detect.** On a poll that finds the agent idle, the watcher reads its turn-lifecycle record and the pane it already captured, and opens a durable stall record the first time both conditions hold.
+   An agent whose last turn ended normally is a recovered agent, and its record is dropped so a later stall starts fresh.
    That reading only happens on a poll that finds the agent idle, so a record is also dropped once its pane has read busy continuously for `FM_GATEWAY_BUSY_CLEAR_SECS`: an agent that took the continue and then worked for that long has recovered, and must not carry a half-spent ladder and a stale horizon anchor into the next, unrelated stall.
    Busy alone is not the signal - the continue this ladder sends makes the pane busy until the turn ends, and a turn that dies on the next error is busy for the harness's whole internal retry, about four minutes on the version verified in [`verification/gateway-keepalive.md`](verification/gateway-keepalive.md), so ending the record there would wipe the attempt count mid-ladder and no genuine outage could ever be declared.
    The threshold is therefore set well past that verified retry, so the ladder's own retry can never reach it, and it is held in seconds and converted to whatever cadence the watcher actually polls at - a poll-denominated bound would shrink back under the retry on a home that polls faster.
@@ -56,19 +61,19 @@ A gateway that is simply unreachable is deliberately outside the transient class
    Either bound alone is insufficient, because one stops a fast loop and the other stops a slow one spread across a real outage.
    The gateway ladder owns every re-ring and both bounds; nothing else re-rings the record.
 4. **Declare.** When either bound is spent, the stall stops being re-rung and is declared once as an external wait (`paused [key=gateway-503]: ...`), so the pane takes the long declared-wait cadence instead of a wedge escalation.
-   That declaration is closed (`resolved [key=gateway-503]: ...`) at the transition that proves it is over - the pane recovering, which drops the record that declared it - so a crew that carries on is not left reported as still waiting on the gateway.
+   That declaration is closed (`resolved [key=gateway-503]: ...`) at the transition that proves it is over - the agent's next turn ending normally, which drops the record that declared it - so a crew that carries on is not left reported as still waiting on the gateway.
 
 A successful re-ring is silent.
 An agent that carries on is not news, and the whole point is that the captain stops being the retry mechanism.
 
 ## Watcher backstop
 
-The watcher's check runs on every idle recorded window and costs one classification of a pane it already captured.
-It is deliberately not gated on the wedge timer's "nothing changed for two polls" rule: the evidence here is a specific rendered failure, not an absence of change, so an agent is re-rung promptly rather than after the stale bookkeeping has accumulated.
+The watcher's check runs on every idle recorded window and costs one read of the task's busy record plus one classification of a pane it already captured.
+It is deliberately not gated on the wedge timer's "nothing changed for two polls" rule: the evidence here is a recorded API-error turn end, not an absence of change, so an agent is re-rung promptly rather than after the stale bookkeeping has accumulated.
 Because it lives in the watcher, every agent already running gets the behaviour without being relaunched.
 
 Secondmate endpoints are outside it.
-An idle secondmate pane is healthy by design and is admitted to the stale path only to serve a declared wait, so it is never read for a stall; `gateway_stall_check` refuses a secondmate outright rather than piggybacking on that admission.
+An idle secondmate pane is healthy by design and is admitted to the stale path only to serve a declared wait, so it is never classified for a stall; `gateway_stall_check` refuses a secondmate outright rather than piggybacking on that admission.
 A secondmate's own home runs its own watcher for its crews, and that is where they are kept alive.
 
 ## Tuning
@@ -78,7 +83,7 @@ The ones worth knowing: `FM_GATEWAY_RETRY_MAX` (default 8 attempts), `FM_GATEWAY
 
 ## Regression coverage
 
-`tests/fm-gateway-keepalive.test.sh` covers the classifier against the exact rendered strings this fleet's transcripts contain, bare and above the idle composer and footer; the deny list beating a transient code inside a permanent failure and matching anywhere while the transient match stays bounded; a recovered agent whose scrollback still holds the old error and repository text naming the errors both staying out of the ladder; each bound independently; the anchor stability that keeps a frequently polled stall from being absorbed forever; and the pane as the single detector.
+`tests/fm-gateway-keepalive.test.sh` covers the event gate against records written by its real writer - a recorded API-error turn end plus the matching text entering the ladder, a normal turn end quoting the same text staying out of it, a recorded API-error turn end with no matching text staying out, and an absent, unreadable or unknown-event record staying out, which pins the claude-harness-only scope; the text classifier against the exact rendered strings this fleet's transcripts contain, bare and above the idle composer and footer; the deny list beating a transient code inside a permanent failure and matching anywhere while the transient match stays bounded; a recovered agent whose scrollback still holds the old error and repository text naming the errors both staying out of the ladder; each bound independently; and the anchor stability that keeps a frequently polled stall from being absorbed forever.
 `tests/fm-watch-triage.test.sh` drives a real watcher over a stalled pane and asserts the continue instruction lands in the steering inbox as a fire-and-forget record without a wake, that a spent budget declares the external wait and stops re-ringing, that the harness's own internal 503 retry keeps the record and still reaches a declared outage while a busy stretch reaching the threshold drops it so a later transient error starts a fresh ladder, and that a paused secondmate whose pane shows the error is re-surfaced as a paused mate and never re-rung.
 `tests/fm-busy-adapter-wiring.test.sh` pins that the spawn-written Claude settings register the busy writer alone on `StopFailure`.
 `tests/fm-teardown.test.sh` pins that a retired task leaves no stall record behind to poison the next task reusing its id.
