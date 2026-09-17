@@ -1408,6 +1408,23 @@ EOF
   s1=0; wait "$p1" || s1=$?
   s2=0; wait "$p2" || s2=$?
 
+  # Diagnostic BEFORE the assertions, because this case has failed in CI twice
+  # and both times the log carried only `not ok` with no values — unactionable.
+  # bats surfaces a test's output only when it fails, so this costs nothing on a
+  # green run and names the actual outcome on a red one.
+  #
+  # It is here rather than as a fix because the flake is NOT REPRODUCIBLE
+  # locally: 32 runs on node-8 (5 idle, 10 with every core saturated, and 12
+  # across 4 concurrent bats processes to mimic the 4 self-hosted runners) all
+  # passed. Guessing at a cause would be worse than instrumenting it, so the
+  # next occurrence has to arrive carrying its own evidence.
+  posts="$(grep -c "issue comment" "$GH_STUB_LOG" || true)"
+  echo "concurrency outcome: s1=$s1 s2=$s2 posts=$posts (expect s in {0,3}, at least one 0, posts in 1..2)" >&2
+  if [ -s "$GH_STUB_LOG" ]; then
+    echo "--- gh stub log ---" >&2
+    sed 's/^/  /' "$GH_STUB_LOG" >&2
+  fi
+
   # 0 = posted, 3 = duplicate. 2 would mean a usage/environment refusal — which is what a
   # lock timeout used to look like, so this is the assertion that says the lock is gone.
   [ "$s1" -eq 0 ] || [ "$s1" -eq 3 ]
@@ -1416,7 +1433,6 @@ EOF
   # AT LEAST once: they cannot BOTH decline. Losing the request is the failure that matters.
   [ "$s1" -eq 0 ] || [ "$s2" -eq 0 ]
 
-  posts="$(grep -c "issue comment" "$GH_STUB_LOG" || true)"
   [ "$posts" -ge 1 ]
   [ "$posts" -le 2 ]
 
