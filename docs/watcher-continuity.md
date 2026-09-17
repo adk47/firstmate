@@ -22,7 +22,7 @@ The Claude turn-end guard owns that notice commit contract, the monotonic failur
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
 
 Continuity above assumes a session that can still take a turn.
-A primary whose own turn ended on an inference-gateway failure is idle with nothing inside it able to resume, so its recovery has a separate out-of-session owner, [`gateway-keepalive.md`](gateway-keepalive.md).
+A primary whose own turn ended on an inference-gateway failure is idle with nothing inside it able to resume, and nothing recovers it automatically; [`gateway-keepalive.md`](gateway-keepalive.md) owns that keep-alive for the crewmates and scouts the watcher reads.
 
 ## Actionable wake ordering
 

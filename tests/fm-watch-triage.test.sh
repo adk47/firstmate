@@ -1952,8 +1952,8 @@ test_gateway_stall_is_re_rung_instead_of_wedge_escalated() {
 
 # A secondmate is admitted to the pane-stale path only to serve its declared
 # wait's bounded re-surface, and the gateway ladder must not piggyback on that
-# admission: a secondmate home runs its own session-start keep-alive for its own
-# primary, and docs/gateway-keepalive.md promises a mate's pane is never read for
+# admission: a secondmate home runs its own watcher for its own crews, and
+# docs/gateway-keepalive.md promises a mate's pane is never read for
 # a stall. A paused mate whose pane shows the transient error is therefore still
 # re-surfaced as a paused mate, and never sent a continue instruction.
 test_gateway_stalled_secondmate_is_not_re_rung() {

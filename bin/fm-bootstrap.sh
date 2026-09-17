@@ -20,7 +20,6 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
-#                 "KEEPALIVE: <why this primary has no working keep-alive>; <remediation>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
@@ -95,31 +94,20 @@
 #          reads or writes another home; the fleet snapshot's classifier and
 #          bin/fm-secondmate-reconcile.sh's nudge stay as backstops. Replayed
 #          transitions and restored In-flight rows print BOOTSTRAP_INFO facts.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (backlog_record_reconcile, secondmate_sync,
 #          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
-#          primary_keepalive_setup, fleet_sync) while still
+#          fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
 #          secondmate homes, pending handoff outboxes,
-#          X-mode artifacts, project clones, the primary keep-alive job, or
+#          X-mode artifacts, project clones, or
 #          repair instructions.
-#          Unset/0 (the default) runs all seven sweeps - this flag is purely
+#          Unset/0 (the default) runs all six sweeps - this flag is purely
 #          additive.
-#          primary_keepalive_setup (main home only, macOS only) records the
-#          lock-owning primary session's own terminal endpoint and installs the
-#          launchd keep-alive job whenever launchd is not running it, printing
-#          one "BOOTSTRAP_INFO: primary keep-alive installed ..." or "...
-#          refreshed ..." fact and nothing when the job is loaded and pointed
-#          at this pane. config/keepalive-off opts the home out entirely.
-#          Secondmate homes stay opt-in through bin/fm-keepalive-install.sh.
-#          A failed install never fails session start; it records
-#          state/.keepalive-uninstalled (bin/fm-gateway-retry-lib.sh owns that
-#          record) and reports it as an actionable KEEPALIVE line here, as does
-#          a primary-side gateway outage the keep-alive agent recorded.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
 #          alone and run the network half off the digest's blocking path:
@@ -131,8 +119,7 @@
 #                 secondmate_handoff_resume, and fleet_sync.
 #            only - ONLY those network steps and nothing else. No tool detection,
 #                 no version floors, no tangle check, no backlog
-#                 reconciliation, no x_mode_setup, no primary_keepalive_setup:
-#                 those already ran on the
+#                 reconciliation, and no x_mode_setup: those already ran on the
 #                 local pass.
 #          FM_BOOTSTRAP_DETECT_ONLY composes with it unchanged, so `only` plus
 #          detect-only is the read-only `gh auth status` probe on its own.
@@ -1348,51 +1335,6 @@ startup_memory_budget_setup() {
   fi
 }
 
-# The out-of-session keep-alive for this home's PRIMARY session
-# (docs/gateway-keepalive.md). A primary stalled on a transient gateway error
-# has nobody inside the session to notice, so the main home's session start
-# makes sure the launchd job exists and knows the current primary pane. Scoped
-# by three predicates that each mean something on their own: the main home
-# (a secondmate home opts in by hand), a genuine primary checkout rather than a
-# linked task worktree, and the session that actually holds this home's fleet
-# lock - so a scratch session opened at the repo root, or a lock-refused
-# session, can never record its own pane as the primary. Quiet when the job is
-# already installed and pointed at this pane; one BOOTSTRAP_INFO fact when it
-# installed or re-pointed it; one actionable KEEPALIVE line when the primary has
-# no working keep-alive, which never fails session start but must not be silent:
-# a primary that cannot recover itself is the captain's ask going unmet.
-primary_keepalive_setup() {
-  local installer out errf reason rc
-  [ "$(uname 2>/dev/null)" = Darwin ] || return 0
-  if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
-    return 0
-  fi
-  [ ! -e "$CONFIG/keepalive-off" ] || return 0
-  fm_primary_scope_matches "$FM_HOME" "$STATE" || return 0
-  fm_session_lock_owned_by_self "$STATE" || return 0
-  installer="$FM_HOME/bin/fm-keepalive-install.sh"
-  [ -x "$installer" ] || return 0
-  errf=$(mktemp "${TMPDIR:-/tmp}/fm-keepalive-ensure.XXXXXX" 2>/dev/null) || errf=''
-  rc=0
-  out=$("$installer" ensure --home "$FM_HOME" 2>"${errf:-/dev/null}") || rc=$?
-  if [ "$rc" -eq 0 ]; then
-    fm_keepalive_notice_clear "$STATE" install
-    [ -z "$out" ] || echo "BOOTSTRAP_INFO: primary keep-alive $out"
-  elif [ "$rc" -ne 3 ]; then
-    # 3 is the installer saying it could not observe the job at all, which is
-    # evidence for nothing; every other failure is a keep-alive this home lacks.
-    reason=$(sed -n '1p' "${errf:-/dev/null}" 2>/dev/null)
-    reason=${reason#error: }
-    fm_keepalive_notice_write "$STATE" install \
-      "this home's primary has no working keep-alive - ${reason:-the installer refused without a reason}; run bin/fm-keepalive-install.sh install from this home's primary pane, passing --backend and --target when this terminal's identifiers cannot be read" \
-      || true
-  fi
-  [ -z "$errf" ] || rm -f "$errf"
-  if reason=$(fm_keepalive_notice_read "$STATE"); then
-    echo "KEEPALIVE: $reason"
-  fi
-}
-
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -1645,9 +1587,6 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
-  # primary_keepalive_setup writes this home's own state record and launchd
-  # job only, and never leaves the machine either.
-  local_phase && primary_keepalive_setup
   if [ -n "$fleet_sync_pid" ]; then
     wait "$fleet_sync_pid" || true
     cat "$fleet_sync_out"
