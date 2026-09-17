@@ -71,8 +71,13 @@ _snap_edge_empty() { printf '%s\n' '{"ts":1,"lanes":[]}' > "$SNAP/edge.json"; }
 
 # $1 min-ticks (default 3), $2 cooldown (default 21600)
 run_wd() {
+  mkdir -p "$TEST_TMPDIR/latj-inert"
+  : > "$TEST_TMPDIR/latj-inert/openclaw-gateway-main.txt"
+  : > "$TEST_TMPDIR/latj-inert/openclaw-gateway-edge.txt"
   run env \
     STUCK_LANE_SKIP_HOST_GUARD=1 \
+    STUCK_LANE_LATENCY_JOURNAL_DIR="$TEST_TMPDIR/latj-inert" \
+    STUCK_LANE_LATENCY_STATE_FILE="$TEST_TMPDIR/lat-state-inert.json" \
     STUCK_LANE_JOURNAL_FILE="$TEST_TMPDIR/edge-journal.txt" \
     STUCK_LANE_STATE_FILE="$TEST_TMPDIR/edge-state.json" \
     STUCK_LANE_LIVE_SNAPSHOT_DIR="$SNAP" \
@@ -260,6 +265,8 @@ STUB
 
   run env \
     STUCK_LANE_SKIP_HOST_GUARD=1 \
+    STUCK_LANE_LATENCY_JOURNAL_DIR="$TEST_TMPDIR/latj-inert" \
+    STUCK_LANE_LATENCY_STATE_FILE="$TEST_TMPDIR/lat-state-inert.json" \
     STUCK_LANE_JOURNAL_FILE="$TEST_TMPDIR/edge-journal.txt" \
     STUCK_LANE_STATE_FILE="$TEST_TMPDIR/edge-state.json" \
     STUCK_LANE_LIVE_STATE_FILE="$LIVE_STATE" \
@@ -288,6 +295,8 @@ STUB
   chmod +x "$TEST_TMPDIR/bin/openclaw"
   run env \
     STUCK_LANE_SKIP_HOST_GUARD=1 \
+    STUCK_LANE_LATENCY_JOURNAL_DIR="$TEST_TMPDIR/latj-inert" \
+    STUCK_LANE_LATENCY_STATE_FILE="$TEST_TMPDIR/lat-state-inert.json" \
     STUCK_LANE_JOURNAL_FILE="$TEST_TMPDIR/edge-journal.txt" \
     STUCK_LANE_STATE_FILE="$TEST_TMPDIR/edge-state.json" \
     STUCK_LANE_LIVE_STATE_FILE="$LIVE_STATE" \
@@ -331,6 +340,8 @@ STUB
   _snap main "$(_lane 3 0 1)"; _snap_edge_empty
   run env \
     STUCK_LANE_SKIP_HOST_GUARD=1 \
+    STUCK_LANE_LATENCY_JOURNAL_DIR="$TEST_TMPDIR/latj-inert" \
+    STUCK_LANE_LATENCY_STATE_FILE="$TEST_TMPDIR/lat-state-inert.json" \
     STUCK_LANE_JOURNAL_FILE="$TEST_TMPDIR/edge-journal.txt" \
     STUCK_LANE_LIVE_SNAPSHOT_DIR="$SNAP" \
     STUCK_LANE_LIVE_PROFILES="main" \
@@ -362,6 +373,8 @@ STUB
   _snap main "$(_lane 3 0 1)"; _snap_edge_empty
   run env \
     STUCK_LANE_SKIP_HOST_GUARD=1 \
+    STUCK_LANE_LATENCY_JOURNAL_DIR="$TEST_TMPDIR/latj-inert" \
+    STUCK_LANE_LATENCY_STATE_FILE="$TEST_TMPDIR/lat-state-inert.json" \
     STUCK_LANE_JOURNAL_FILE="$TEST_TMPDIR/edge-journal.txt" \
     STUCK_LANE_LIVE_SNAPSHOT_DIR="$SNAP" \
     STUCK_LANE_LIVE_PROFILES="main" \
