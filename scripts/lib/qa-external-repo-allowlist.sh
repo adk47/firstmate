@@ -71,6 +71,82 @@ REPOS=(
   Muso-AI/ios-app
   Muso-AI/android-app
   Muso-AI/muso-data-steward
+  # 2026-09-17: ten active repos onboarded in one pass — each got its own
+  # .github/workflows/qa-autoreview-trigger.yml in the same rollout, so a PR there
+  # now fires external-qa-review instead of being silently unreviewed. Only the
+  # first three had a trigger before (platform-data-processing-v4, tests-web-e2e,
+  # muso-skills) — they were already listed here and are deliberately NOT repeated.
+  # Authors without a Slack-UID mapping in scripts/lib/qa-author-slack-uid.sh
+  # still fail-closed to "skip" (omamchich, ihor-shchuruk as of this date), so
+  # those PRs are onboarded-but-unreviewed until their UIDs land.
+  Muso-AI/chat-bakeoff
+  Muso-AI/customer-api-mcp
+  Muso-AI/devops
+  Muso-AI/hydra-audit
+  Muso-AI/mobile
+  Muso-AI/mobile-agents
+  Muso-AI/muso-docs
+  Muso-AI/platform-web
+  Muso-AI/render-service
+  Muso-AI/website-next
+  # 2026-09-17 (same rollout): the plaque worker found Muso-AI/digital-plaque
+  # missing from this fail-closed list while its own qa-autoreview-trigger was
+  # being added in Muso-AI/digital-plaque#151 — a trigger whose dispatches this
+  # list would otherwise refuse. muso-data-steward needs no line here: it is
+  # already listed above.
+  Muso-AI/digital-plaque
+  # 2026-09-17 (captain: 'just add qa to all repos'): the remaining 44
+  # non-archived, non-empty repos that lacked the trigger — the long tail
+  # beyond the active set above. Each got its own qa-autoreview-trigger.yml
+  # in the same widening pass. Listed here so their dispatches are accepted
+  # rather than refused one step into hydra. Note: 17 of these have GitHub
+  # Actions disabled repo-wide and will not run until it is enabled, and all
+  # but ai-chat-service/website/web-encore are org-PAT-only (see the org
+  # DEVOPS_DISPATCH_PAT 401).
+  Muso-AI/muso-embeds
+  Muso-AI/help-web
+  Muso-AI/tuwunel
+  Muso-AI/matrix-dart-sdk
+  Muso-AI/omni-gateway
+  Muso-AI/muso-sdk
+  Muso-AI/ai-chat-service
+  Muso-AI/website
+  Muso-AI/web-encore
+  Muso-AI/core-ai
+  Muso-AI/customer-api-docs
+  Muso-AI/nocodb-scripts
+  Muso-AI/onboarding-nick
+  Muso-AI/onboarding-ihor
+  Muso-AI/jenkins-shared-library
+  Muso-AI/midika
+  Muso-AI/openclaw-muso
+  Muso-AI/openclaw-gmail
+  Muso-AI/openclaw
+  Muso-AI/clio-workspace
+  Muso-AI/Muso-Ads
+  Muso-AI/platform-import-controller
+  Muso-AI/platform-data-registry
+  Muso-AI/platform-crawling-worker
+  Muso-AI/flutter_packages
+  Muso-AI/clio-skills
+  Muso-AI/terraform-module-aws-fluent-bit
+  Muso-AI/terraform-module-keda
+  Muso-AI/Voice
+  Muso-AI/Clio-KB
+  Muso-AI/ByteDance-Proposal
+  Muso-AI/muso-mobile-translations
+  Muso-AI/web-exploration
+  Muso-AI/terraform-module-cluster-autoscaler
+  Muso-AI/experiment-puppeteer
+  Muso-AI/auth-demo
+  Muso-AI/capture-tests
+  Muso-AI/distrokids-demo
+  Muso-AI/lambda-api-gw-auth-handler
+  Muso-AI/terraform-module-aws-cloudwatch-agent
+  Muso-AI/terraform-module-aws-lb-controller
+  Muso-AI/docker-ci-tools
+  Muso-AI/terraform-module-metrics-server
+  Muso-AI/quality-checks
   # Add more as repos come into scope, e.g.:
   #   Muso-AI/<repo>
 )
