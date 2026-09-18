@@ -45,8 +45,9 @@
 # FM_TOOL_UPDATE_INTERVAL (default 900, 0 disables the gate, otherwise 60..86400)
 # and stays silent in between. Each probe is bounded by
 # FM_TOOL_UPDATE_PROBE_SECS (default 5, valid 1..30) and a whole sweep by
-# FM_TOOL_UPDATE_BUDGET_SECS (default 27, the largest sweep the default watcher
-# bound fits, valid 1..120). Every probe is also bounded by what the sweep has
+# FM_TOOL_UPDATE_BUDGET_SECS (default 24, a few seconds inside the largest sweep
+# the default watcher bound fits, so a loaded host still ends the sweep before
+# the watcher kills it silently; valid 1..120). Every probe is also bounded by what the sweep has
 # left over and above a floor reserved for each tool still to be checked, so one
 # slow tool cannot spend the whole sweep and leave the tools after it unasked
 # while every one of them keeps a floor to answer in.
@@ -77,15 +78,20 @@
 # tool that stops being pending is absorbed silently, so its next pending update
 # is news again. The notice set holds one identity per check failure, overrun, or
 # unusable registry, built from a fixed code instead of the sentence around it,
-# and is latched: each notice reports once for this record and never again, so a
-# reworded clause, a reordered report, which tool an overrun happens to name,
-# and a condition that clears and returns cannot wake firstmate a second time.
-# A probe that ran out of its bound collapses into the single could-not-determine
-# identity rather than becoming that tool's own check failure, because which tool
-# a bound lands on is a function of the load the sweep ran under and not of the
-# tool, and a host under load must not be able to keep inventing new findings. The
-# record always carries the current finding set, so the durable state stays
-# accurate even when a latched notice does not report.
+# so a reworded clause or a reordered report is never news. A check failure and
+# an unusable registry follow their condition exactly as the pending set does:
+# reported once while present, absorbed when cleared, and news again when they
+# return, because a real failure that comes back must resurface. Only the two
+# notices that depend on the load the sweep ran under, could-not-determine and
+# budget-cut, are latched: each reports once for this record and never again, so
+# which tool an overrun happens to name and a bound that clears and returns with
+# the load cannot wake firstmate a second time. A probe that ran out of its bound
+# collapses into the single could-not-determine identity rather than becoming
+# that tool's own check failure, because which tool a bound lands on is a
+# function of the load and not of the tool, and a host under load must not be
+# able to keep inventing new findings. The record always carries the current
+# finding set, so the durable state stays accurate even when a latched notice
+# does not report.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
@@ -158,7 +164,7 @@ if [ "$PROBE_SECS" -gt 30 ]; then
   exit 2
 fi
 
-BUDGET_SECS=${FM_TOOL_UPDATE_BUDGET_SECS:-27}
+BUDGET_SECS=${FM_TOOL_UPDATE_BUDGET_SECS:-24}
 case "$BUDGET_SECS" in
   ''|*[!0-9]*|0)
     printf 'fm-tool-update-check: FM_TOOL_UPDATE_BUDGET_SECS must be a whole number from 1 to 120\n' >&2
@@ -294,6 +300,17 @@ emit_pending() {  # <name> <target> <text>
 emit_notice() {  # <identity> <text>
   NOTICE_IDS=$(id_add "$NOTICE_IDS" "$1")
   emit "$2"
+}
+
+# The notices whose presence is a function of the load the sweep ran under
+# rather than of any watched tool. These are latched in the record so a bound
+# that clears and returns with the load cannot report twice; every other notice
+# follows its condition.
+notice_latched() {  # <identity>
+  case "$1" in
+    could-not-determine|budget-cut) return 0 ;;
+  esac
+  return 1
 }
 
 # One could-not-determine clause per tool per sweep: a tool that runs out of its
@@ -816,8 +833,9 @@ record_read() {
 
 # <reported> is the whole finding set the sweep found, uncut, and is what an
 # operator reads to see the current state. <pending> is the pending identity set
-# as it stands now, and <notices> is the latched notice identity set, which only
-# grows, so a notice reports once for this record.
+# as it stands now, and <notices> is the notice identity set as it stands now
+# plus every latched notice this record has ever held, so a latched notice
+# reports once for this record while any other notice follows its condition.
 record_write() {
   local reported=$1 pending=$2 notices=$3 tmp
   tmp=$(mktemp "$RECORD.XXXXXX" 2>/dev/null) || return 1
@@ -904,17 +922,22 @@ action_check() {
   fi
 
   pending=$PENDING_IDS
-  # A notice is latched: once this record has seen one it never reports again,
-  # so the recorded notice set only grows and the current sweep is folded into
-  # it rather than replacing it.
-  notices=$RECORD_NOTICES
-  if [ -n "$NOTICE_IDS" ]; then
-    IFS=';' read -r -a new_notices <<< "$NOTICE_IDS"
-    for notice_id in "${new_notices[@]}"; do
-      [ -n "$notice_id" ] || continue
-      notices=$(id_add "$notices" "$notice_id")
-    done
-  fi
+  # The recorded notice set is this sweep's notices plus the latched notices the
+  # record already held: a latched notice is kept once seen so it never reports
+  # again, while every other notice is carried only while its condition holds,
+  # so a check failure that clears is absorbed and one that returns is news.
+  notices=
+  IFS=';' read -r -a new_notices <<< "$RECORD_NOTICES"
+  for notice_id in "${new_notices[@]}"; do
+    [ -n "$notice_id" ] || continue
+    notice_latched "$notice_id" || continue
+    notices=$(id_add "$notices" "$notice_id")
+  done
+  IFS=';' read -r -a new_notices <<< "$NOTICE_IDS"
+  for notice_id in "${new_notices[@]}"; do
+    [ -n "$notice_id" ] || continue
+    notices=$(id_add "$notices" "$notice_id")
+  done
 
   # The cut line is what gets printed, but what makes this sweep news is an
   # identity the record does not already hold, so a finding that lands past the

@@ -526,11 +526,12 @@ The check prints nothing when everything is current, and `state/.tool-updates` r
 An available update is identified by the tool and the version or revision it would reach, and every other finding by a fixed code for its own condition, so a report is emitted only when a sweep found an identity the record does not already hold.
 A reworded or reordered finding, and which tool an overrun happens to name, therefore never report again, while a new tool joining the pending set and a newer target version each report exactly once.
 A tool that stops having an available update is absorbed silently, so its next available update is news again.
-A check failure, an overrun, or an unusable registry reports once and is then latched for that record, so a clause that is reworded, clears, or returns does not report again; the record still carries the current finding set so the durable state stays accurate, and `disarm` resets the latch.
+A check failure or an unusable registry follows its condition the same way: reported once while present, absorbed silently when it clears, and reported again when it returns, so a real failure that comes back always resurfaces.
+Only the two findings that depend on the load the sweep ran under, a check that could not be determined and a sweep budget cut, are latched for that record: each reports once and then never again, so which tool an overrun happens to name and a bound that clears and returns with the load cannot wake firstmate twice; the record still carries the current finding set so the durable state stays accurate, and `disarm` resets the latch.
 Adding, removing, or changing a watched tool is an edit to this file and needs no code change or re-arming.
 This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
 
-`FM_TOOL_UPDATE_INTERVAL` (default 900 seconds, `0` to probe on every run) sets how often probes actually run, `FM_TOOL_UPDATE_PROBE_SECS` (default 5) bounds one probe, and `FM_TOOL_UPDATE_BUDGET_SECS` (default 27, the largest sweep the default watcher bound fits) bounds a whole sweep.
+`FM_TOOL_UPDATE_INTERVAL` (default 900 seconds, `0` to probe on every run) sets how often probes actually run, `FM_TOOL_UPDATE_PROBE_SECS` (default 5) bounds one probe, and `FM_TOOL_UPDATE_BUDGET_SECS` (default 24, a few seconds inside the largest sweep the default watcher bound fits, so a loaded host still ends the sweep before the watcher kills it silently) bounds a whole sweep.
 Every probe is additionally bounded by what the sweep budget has left over and above a floor reserved for each tool still to be checked, so one slow tool cannot spend the whole sweep and leave the tools after it unasked, and the sweep still ends inside the watcher's own per check bound.
 A probe that cannot answer inside its bound is reported as that one tool's check that could not be determined, never as a check failure and never as the whole sweep failing, because which tool a bound lands on depends on the load the sweep ran under and not on the tool.
 A sweep that runs out of budget says which tool it did not reach rather than reporting the rest as current.
@@ -888,7 +889,7 @@ FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledge
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 probes on every run, other values must be 60..86400
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
-FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
+FM_TOOL_UPDATE_BUDGET_SECS=24   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims

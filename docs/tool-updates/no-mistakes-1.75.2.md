@@ -125,27 +125,36 @@ PR_BODY="$(...)" PR_HEAD_SHA=c764010ee83a48d8fe1d69ccc38bc0faa3dd961a PR_NUMBER=
 ## Upgrade
 
 Firstmate applies this, never a crewmate and never a pipeline worker, and only at a moment when no run is mid-gate.
+This fleet has no quiet windows, so that moment is made, not waited for: firstmate holds new gate launches for a bounded window, lets the runs already in flight drain, and applies the update inside that window or releases the hold and tries again later.
 
 The guard is built into the updater rather than reimplemented: when any pipeline run is pending or running, `update` refuses to restart the daemon and prints each active run's ID, status, branch, and short head SHA, and `-y`/`--yes` does not bypass that refusal.
 `no-mistakes daemon stop` and `no-mistakes daemon restart` apply the same guard.
-So the detection step is the upgrade command itself, run without `--force`:
+So the detection step is the upgrade command itself, run without `--force`, inside the hold:
 
 ```sh
-# 1. Confirm from the fleet's own view that no crewmate is mid-validation.
-#    No task may be in a validation state, and no PR may be waiting on a gate.
+# 1. Start the hold. Firstmate stops sending the validate step to any crewmate
+#    and stops dispatching new work that would reach a gate; a crewmate that has
+#    finished its implementation commit is told to hold `no-mistakes axi run`
+#    until released. Runs already active keep going and are driven to their
+#    next gate or outcome by their own workers as usual.
+#    Note the hold start time; the window is 45 minutes from here.
 
 # 2. Attempt the upgrade without --force and without a bare --yes.
-#    If any run is pending or running this refuses and lists them; wait and retry.
+#    If any run is pending or running this refuses and lists them. A listed run
+#    parked at a gate waiting on a decision does not drain by itself: resolve
+#    that decision now under ask-user-authority, so the worker can finish it.
+#    Retry this step every few minutes while the window is open.
 no-mistakes update
 
-# 3. Only when step 2 reports no active runs, apply it non-interactively.
+# 3. As soon as step 2 reports no active runs, apply it non-interactively.
 no-mistakes update -y
 
-# 4. Confirm the new version and a healthy gate.
+# 4. Confirm the new version and a healthy gate, then release the hold.
 no-mistakes --version
 no-mistakes doctor
 ```
 
+When the 45-minute window closes with runs still active, release the hold without applying anything, note which runs were still listed, and schedule the next attempt for the next daily check rather than extending the window: a hold that runs on stalls the fleet, and a run that cannot drain in 45 minutes is itself something to look at.
 Never pass `--force`: it accepts that the listed in-flight runs may fail.
 After the upgrade, the first pipeline run in each repo is the real test of the trusted `.no-mistakes.yaml` parse, because the run resolves that file when it starts.
 

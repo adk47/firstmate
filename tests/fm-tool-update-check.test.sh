@@ -847,6 +847,33 @@ test_a_changed_or_returning_completeness_clause_is_silent_while_the_pending_set_
   pass "a changed or returning completeness clause is silent while the pending set holds"
 }
 
+test_a_returning_check_failure_is_reported_again() {
+  local home dir out
+  # The latch above is only for the notices that depend on the load the sweep
+  # ran under. A real check failure follows its condition like the pending set:
+  # once while present, silent when it clears, and news again when it returns,
+  # because a tool that drops off PATH a second time is a second incident and
+  # supervision must not lose it.
+  home=$(make_home returning-failure)
+  dir="$TMP_ROOT/returning-failure/bin"
+  make_copy "$dir" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "herdr check failed: $TOOL is not on PATH" "the check failure was not reported at all, so this case proves nothing"
+  run_check "$home" "$PATH" "$out"
+  [ ! -s "$out" ] || fail "the same check failure was reported twice: $(cat "$out")"
+
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  [ ! -s "$out" ] || fail "a cleared check failure produced a report: $(cat "$out")"
+  assert_not_contains "$(cat "$home/state/.tool-updates")" "not on PATH" "the record still holds the cleared check failure, so it never cleared"
+
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "herdr check failed: $TOOL is not on PATH" "a returning check failure was latched away instead of reported again"
+  pass "a returning check failure is reported again"
+}
+
 test_an_overlong_report_says_it_was_cut() {
   local home out report i tools=
   # Many watched tools can outgrow one line. The report must say it was cut
@@ -948,7 +975,7 @@ test_an_oversized_budget_is_cut_to_fit_and_reported() {
   assert_contains "$report" "sweep budget 60s cut to 27s to stay inside the watcher check timeout of 30s" "a budget that cannot fit the watcher bound was not cut and reported"
   assert_contains "$report" "herdr update not in effect" "the detector went quiet instead of sweeping with the cut budget"
 
-  # The default budget of 20s fits the default bound, so it is used as written.
+  # The default budget of 24s fits the default bound, so it is used as written.
   # The record is cleared first because the no-nag gate would otherwise suppress
   # this run, whose bare skew line differs from the cut run's line above.
   rm -f "$home/state/.tool-updates"
@@ -1203,6 +1230,7 @@ test_a_tool_joining_the_pending_set_wakes_once
 test_an_overrun_is_reported_once
 test_a_slow_tool_does_not_leave_later_tools_unasked
 test_a_changed_or_returning_completeness_clause_is_silent_while_the_pending_set_holds
+test_a_returning_check_failure_is_reported_again
 test_an_overlong_report_says_it_was_cut
 test_a_finding_past_the_cut_is_still_reported
 test_probes_are_skipped_between_intervals
