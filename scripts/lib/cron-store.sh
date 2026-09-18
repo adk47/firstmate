@@ -228,10 +228,22 @@ cron_store_diff_is_empty() {
 }
 
 # Tunables, named like the GATEWAY_*/RI_* knobs elsewhere in scripts/.
-# 5 attempts x 2s covers the ~5s a gateway takes from exec to "http server
-# listening" (measured 2026-08-18 on node-8: 12:43:45 restart -> 12:43:50
-# listening) without stretching a genuinely dead gateway's deploy by much.
-CRON_STORE_READ_TRIES="${CRON_STORE_READ_TRIES:-5}"
+# 5 attempts x 2s originally covered the ~5s a gateway takes from exec to
+# "http server listening" (measured 2026-08-18 on node-8: 12:43:45 restart ->
+# 12:43:50 listening). That budget is NOT enough for the second post-restart
+# gap: on openclaw 2026.8.2 the main gateway freezes its event loop roughly
+# 55s after "listening" and stays frozen ~4-5 minutes (journal: "host timing
+# gap detected: process was frozen ~218913ms" 2026-09-17 17:41Z, ~265559ms
+# 2026-09-18 13:41Z). A frozen gateway is LISTENING, so the CLI's WebSocket
+# handshake hangs ~50s per attempt instead of being refused; 5 attempts end
+# inside the freeze (2026-09-18 13:30:43 -> 13:34:57) and the read fails,
+# rolling back a deploy whose diff never touched cron -- and the rollback's
+# own smoke test then fails the same way (run 35350308199). 10 attempts
+# (~9 min worst case) outlast the measured freeze with margin; a genuinely
+# dead gateway still fails within that budget. The freeze itself is a
+# separate defect (tracked outside this file), not something this read can
+# fix -- it can only stop misreporting it as an unverifiable cron store.
+CRON_STORE_READ_TRIES="${CRON_STORE_READ_TRIES:-10}"
 CRON_STORE_READ_POLL_SECS="${CRON_STORE_READ_POLL_SECS:-2}"
 
 # _cron_store_gateway_read <profile>

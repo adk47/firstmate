@@ -342,6 +342,27 @@ stub_openclaw_flaky() {
   [ "$output" = "4" ]
 }
 
+@test "the default read budget outlasts a post-restart event-loop freeze (9 hung attempts, then success)" {
+  # 2026-09-18, run 35350308199: on openclaw 2026.8.2 the main gateway freezes
+  # its event loop ~55s after "http server listening" for ~4-5 minutes. It is
+  # LISTENING, so each CLI attempt hangs on the WebSocket handshake (~50s)
+  # instead of being refused; the old default of 5 attempts ended inside the
+  # freeze, the read failed, the deploy rolled back, and the rollback's own
+  # smoke test failed the same way. The default must survive at least nine
+  # such failures. Reverting the default to 5 makes this test red.
+  unset CRON_STORE_READ_TRIES
+  # shellcheck source=../lib/cron-store.sh
+  source "$LIB"
+  [ "$CRON_STORE_READ_TRIES" -ge 10 ]
+  stub_openclaw_flaky 9 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}' \
+    'Could not start the CLI. Reason: Opening handshake has timed out'
+  run cron_store_gateway_jobset main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"name":"a"'* ]] || [[ "$output" == *'"name": "a"'* ]]
+  run cat "$TEST_TMPDIR/attempts"
+  [ "$output" = "10" ]
+}
+
 @test "a successful first read does not retry" {
   stub_openclaw_flaky 0 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}'
   run cron_store_gateway_durable_count main
