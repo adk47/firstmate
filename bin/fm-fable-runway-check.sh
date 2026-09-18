@@ -52,10 +52,13 @@
 # from an addition. It is stamped with its schema, and a record carrying any
 # other stamp is treated as no record at all rather than read under the wrong
 # field layout.
-# `arm` writes a byte-static shim
-# that the watcher validates with bin/fm-check-register.sh before it ever
-# dispatches it; `disarm` removes the shim, its trust binding, and the record.
-# Retire an armed check with `disarm`, never a hand-composed rm.
+#
+# `arm` writes a byte-static shim that the watcher validates with
+# bin/fm-check-register.sh before it ever dispatches it; `disarm` removes the
+# shim, its trust binding, and the record. Both go through the shared lifecycle
+# in bin/fm-check-lib.sh, so the rule that a home never holds a shim without a
+# matching trust binding has one implementation. Retire an armed check with
+# `disarm`, never a hand-composed rm.
 #
 # Test seams: FM_STATE_OVERRIDE selects the state directory and
 # FM_FABLE_RUNWAY_NOW freezes the clock. The monitor's own seams pass through.
@@ -73,8 +76,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-check-lib.sh"
 
 CHECK_ID='fable-runway'
-CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
-CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 RECORD="$STATE/.fable-runway"
 RECORD_SCHEMA=fm-fable-runway-check-v2
 REALERT_SECS=3600
@@ -240,119 +241,20 @@ shim_content() {
     "exec $(printf '%q' "$SCRIPT_DIR/fm-fable-runway-check.sh") check"
 }
 
-SHIM_WRITE_TMP=
-ARM_BACKUP=
-
-shim_write() {
-  local want=$1 device tmp
-  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
-  device=$(fm_pr_file_device "$STATE") || return 1
-  [ -n "$device" ] || return 1
-  fm_pr_regular_destination_on_device_or_absent "$CHECK_SHIM" "$device" || return 1
-  if [ -e "$CHECK_SHIM" ] && [ "$(fm_pr_file_mode "$CHECK_SHIM")" = 700 ] \
-    && [ "$(cat "$CHECK_SHIM" 2>/dev/null)" = "$want" ]; then
-    return 0
-  fi
-  tmp=$(umask 077; mktemp "$STATE/.fm-fable-runway-check.XXXXXX" 2>/dev/null) || return 1
-  SHIM_WRITE_TMP=$tmp
-  if ! printf '%s\n' "$want" > "$tmp" \
-    || ! chmod 0700 "$tmp" \
-    || ! fm_pr_private_file_valid "$tmp" 700 "$device"; then
-    rm -f -- "$tmp"
-    SHIM_WRITE_TMP=
-    return 1
-  fi
-  if ! fm_pr_regular_destination_on_device_or_absent "$CHECK_SHIM" "$device" \
-    || ! mv -f -- "$tmp" "$CHECK_SHIM"; then
-    rm -f -- "$tmp"
-    SHIM_WRITE_TMP=
-    return 1
-  fi
-  SHIM_WRITE_TMP=
-  fm_pr_private_file_valid "$CHECK_SHIM" 700 "$device"
-}
-
-shim_backup() {
-  local device tmp
-  device=$(fm_pr_file_device "$STATE") || return 1
-  [ -n "$device" ] || return 1
-  tmp=$(umask 077; mktemp "$STATE/.fm-fable-runway-check.XXXXXX" 2>/dev/null) || return 1
-  if ! cat "$CHECK_SHIM" > "$tmp" 2>/dev/null \
-    || ! chmod 0700 "$tmp" \
-    || ! fm_pr_private_file_valid "$tmp" 700 "$device"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  printf '%s\n' "$tmp"
-}
-
-# An unregistered shim is not inert: the watcher rejects it on every cycle and
-# wakes firstmate about unauthenticated state checks. So after a failed or
-# interrupted arm the home never holds a shim without a matching trust binding.
-arm_rollback() {
-  [ -z "$SHIM_WRITE_TMP" ] || rm -f -- "$SHIM_WRITE_TMP"
-  SHIM_WRITE_TMP=
-  if [ -n "$ARM_BACKUP" ]; then
-    mv -f -- "$ARM_BACKUP" "$CHECK_SHIM" 2>/dev/null || rm -f -- "$ARM_BACKUP"
-    ARM_BACKUP=
-    if fm_custom_check_registered "$STATE" "$CHECK_ID"; then
-      return 0
-    fi
-  fi
-  rm -f -- "$CHECK_SHIM"
-}
-
-# shellcheck disable=SC2329  # Registered by action_arm's signal trap.
-arm_interrupted() {
-  arm_rollback
-  printf 'fm-fable-runway-check: arming was interrupted, so state/%s.check.sh is not armed\n' "$CHECK_ID" >&2
-  exit 1
-}
-
 action_arm() {
   local want home
   mkdir -p "$STATE" || return 1
-  case "$FM_HOME" in
-    /*) home=$FM_HOME ;;
-    *)
-      home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || {
-        printf 'fm-fable-runway-check: cannot resolve FM_HOME %s\n' "$FM_HOME" >&2
-        return 1
-      }
-      ;;
-  esac
+  home=$(fm_custom_check_resolve_home "$FM_HOME") || {
+    printf 'fm-fable-runway-check: cannot resolve FM_HOME %s\n' "$FM_HOME" >&2
+    return 1
+  }
   want=$(shim_content "$home")
-  ARM_BACKUP=
-  if [ -f "$CHECK_SHIM" ] && [ ! -L "$CHECK_SHIM" ]; then
-    ARM_BACKUP=$(shim_backup) || {
-      printf 'fm-fable-runway-check: could not save the existing %s\n' "$CHECK_SHIM" >&2
-      return 1
-    }
-  fi
-  trap arm_interrupted HUP INT TERM
-  if ! shim_write "$want"; then
-    trap - HUP INT TERM
-    arm_rollback
-    printf 'fm-fable-runway-check: could not write %s\n' "$CHECK_SHIM" >&2
-    return 1
-  fi
-  if ! FM_HOME="$home" FM_STATE_OVERRIDE="$STATE" "$REGISTER_BIN" "$CHECK_ID" >/dev/null; then
-    trap - HUP INT TERM
-    arm_rollback
-    printf 'fm-fable-runway-check: could not register %s\n' "$CHECK_SHIM" >&2
-    return 1
-  fi
-  trap - HUP INT TERM
-  [ -z "$ARM_BACKUP" ] || rm -f -- "$ARM_BACKUP"
-  ARM_BACKUP=
-  printf 'armed: state/%s.check.sh\n' "$CHECK_ID"
-  return 0
+  fm_custom_check_arm "$STATE" "$CHECK_ID" .fm-fable-runway-check \
+    fm-fable-runway-check "$REGISTER_BIN" "$home" "$want"
 }
 
 action_disarm() {
-  rm -f -- "$CHECK_SHIM" "$CHECK_TRUST" "$RECORD"
-  printf 'disarmed: state/%s.check.sh\n' "$CHECK_ID"
-  return 0
+  fm_custom_check_disarm "$STATE" "$CHECK_ID" "$RECORD"
 }
 
 case "${1:-check}" in

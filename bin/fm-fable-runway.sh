@@ -282,7 +282,7 @@ def account_name($a):
   if ($a.name | type) == "string" and $a.name != ""
   then ($a.name | gsub("[ ,\t]"; "_")) else "unnamed" end;
 def named($list): [$list[] | account_name(.)] | join(",");
-.accounts as $accts |
+. as $accts |
 ($accts | map(select(fable_limit(.) != null))) as $trackedAccts |
 ($trackedAccts | length) as $tracked |
 ($accts | map(select(capable(.)))) as $cap |
@@ -304,9 +304,9 @@ def named($list): [$list[] | account_name(.)] | join(",");
 named($cap) as $names |
 named($trackedAccts) as $trackedNames |
 named($unproj) as $unprojNames |
-(.health.pool.routable // null) as $routable |
-(.health.pool.configured // null) as $configured |
-(.health.pool.usage_exhausted // null) as $exhausted |
+($health.pool.routable // null) as $routable |
+($health.pool.configured // null) as $configured |
+($health.pool.usage_exhausted // null) as $exhausted |
 # The routable count is the primary signal, so it decides first and decides
 # alone when no account exposes a Fable-scoped window. The per-account windows
 # only refine a verdict the counts already reached.
@@ -359,7 +359,7 @@ pool_fetch() {
 # never reaches a live gateway and an unreadable fixture is reported rather than
 # silently replaced by a live fetch.
 pool_read() {
-  local health='' accounts='' input='' fixture=0
+  local health='' accounts='' fixture=0
   if [ -n "${FM_FABLE_RUNWAY_POOL_HEALTH_JSON:-}" ]; then
     fixture=1
     if [ -f "$FM_FABLE_RUNWAY_POOL_HEALTH_JSON" ] && [ ! -L "$FM_FABLE_RUNWAY_POOL_HEALTH_JSON" ]; then
@@ -385,13 +385,8 @@ pool_read() {
     printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\t-\tpool_response_not_recognized\n'
     return 0
   fi
-  input=$(jq -cn --argjson health "$health" --argjson accounts "$accounts" \
-    '{health: $health, accounts: $accounts}') || input=''
-  if [ -z "$input" ]; then
-    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\t-\tpool_response_not_recognized\n'
-    return 0
-  fi
-  printf '%s' "$input" | jq -r --argjson now "$NOW" "$POOL_JQ" 2>/dev/null \
+  printf '%s' "$accounts" \
+    | jq -r --argjson now "$NOW" --argjson health "$health" "$POOL_JQ" 2>/dev/null \
     || printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\t-\tpool_response_not_readable\n'
 }
 
