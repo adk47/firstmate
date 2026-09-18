@@ -292,9 +292,8 @@ test_leading_timestamp_folds_like_state_first() {
   pass "a leading ISO-8601 timestamp folds exactly like the state-first shape"
 }
 
-# Every accepted leading shape: both key positions, the HH:MMZ clock form, the
-# optional seconds and fractional seconds, and the optional dash or em-dash
-# separator after the token.
+# Every accepted leading shape: both key positions, the HH:MMZ clock form, and
+# the optional seconds and fractional seconds.
 test_leading_timestamp_shapes_are_position_tolerant() {
   local dir expected
   dir=$(case_dir leading-ts-shapes)
@@ -305,16 +304,12 @@ test_leading_timestamp_shapes_are_position_tolerant() {
   printf '2026-09-11T02:09:30Z needs-decision: [key=cadence] pick the cadence\n' > "$dir/seconds.status"
   printf '2026-09-11T02:09:30.123456Z needs-decision: [key=cadence] pick the cadence\n' > "$dir/fractional.status"
   printf '02:09Z needs-decision: [key=cadence] pick the cadence\n' > "$dir/clock.status"
-  printf '2026-09-11T02:09Z - needs-decision: [key=cadence] pick the cadence\n' > "$dir/dash.status"
-  printf '2026-09-11T02:09Z — needs-decision: [key=cadence] pick the cadence\n' > "$dir/emdash.status"
 
   assert_fold "$dir/before.status" "$expected" "timestamp-first, key before colon"
   assert_fold "$dir/after.status" "$expected" "timestamp-first, key at note head"
   assert_fold "$dir/seconds.status" "$expected" "ISO-8601 with seconds"
   assert_fold "$dir/fractional.status" "$expected" "ISO-8601 with fractional seconds"
   assert_fold "$dir/clock.status" "$expected" "HH:MMZ clock timestamp"
-  assert_fold "$dir/dash.status" "$expected" "dash separator"
-  assert_fold "$dir/emdash.status" "$expected" "em-dash separator"
   pass "a leading timestamp is honored in either key position, in every accepted shape"
 }
 
@@ -377,6 +372,53 @@ test_non_timestamp_digit_head_is_unchanged() {
   pass "a digit-leading head that is not a complete timestamp is returned unchanged"
 }
 
+# A timestamp glued to a following word is not a separated timestamp: the token
+# must be the line's whole first word, or the line is left alone.
+test_glued_timestamp_head_is_not_a_separated_timestamp() {
+  local ish partial
+  ish='2026-09-11T02:09Z-ish note'
+  [ "$(status_line_verb "$ish")" = '2026-09-11T02' ] \
+    || fail "a glued '-ish' head was stripped: '$(status_line_verb "$ish")'"
+  [ "$(status_line_note "$ish")" = '09Z-ish note' ] \
+    || fail "a glued '-ish' head changed the note: '$(status_line_note "$ish")'"
+
+  partial='2026-09-11T02:09-decision: [key=glued] pick one'
+  [ "$(status_line_verb "$partial")" = '2026-09-11T02' ] \
+    || fail "an incomplete timestamp glued to the verb was stripped: '$(status_line_verb "$partial")'"
+  pass "a timestamp glued to a following word leaves the line unchanged"
+}
+
+# The persisted cursor carries a folded open set, so every one written under the
+# previous reading holds decisions computed while timestamp-first lines were
+# invisible. Without a fold-version bump those homes would keep serving the old
+# answer forever - exactly the population this fix targets - and the incremental
+# fold would disagree with the whole-file one about what is open.
+test_a_cursor_written_before_this_change_is_rebuilt() {
+  local dir status cursor incr full
+  dir=$(case_dir leading-ts-stale-cursor)
+  status="$dir/task-stale.status"
+  printf '2026-09-11T02:09Z needs-decision: [key=seam] pick the bound\n' > "$status"
+
+  # A cursor claiming the whole file is already folded, with an empty open set -
+  # byte for byte what the previous reading would have persisted here.
+  cursor="$dir/.task-stale.open-decisions-cursor"
+  {
+    printf 'version=5\n'
+    printf 'offset=%s\n' "$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')"
+    printf 'ident=%s\n' "$(_fm_open_decisions_file_ident "$status")"
+  } > "$cursor"
+
+  incr=$(status_open_decisions_incremental "$status")
+  full=$(status_open_decisions "$status")
+  [ "$incr" = "$full" ] \
+    || fail "a cursor from the previous reading survived the fix: incremental='$incr' whole-file='$full'"
+  case "$incr" in
+    *seam*) : ;;
+    *) fail "the stale cursor hid the timestamp-first decision instead of being rebuilt: '$incr'" ;;
+  esac
+  pass "a cursor persisted under the previous reading is discarded and refolded"
+}
+
 test_stated_key_is_honored_in_both_positions
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
@@ -395,6 +437,8 @@ test_leading_timestamp_shapes_are_position_tolerant
 test_leading_timestamp_cross_position_resolution
 test_timestamp_in_note_body_is_untouched
 test_non_timestamp_digit_head_is_unchanged
+test_glued_timestamp_head_is_not_a_separated_timestamp
+test_a_cursor_written_before_this_change_is_rebuilt
 
 # status_key_closing_verb reports HOW the status side currently reads one key,
 # which is what lets a consumer tell a settled key from a key handed to a

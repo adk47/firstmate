@@ -278,52 +278,37 @@ _fm_classify_is_corr_token() {  # <word>
 # own colons, so the parsers below would otherwise split on the timestamp's colon
 # instead of the state/note one, and a keyed decision written that way would
 # never be seen as open - no wake fires and --resolve-key refuses it. Strip
-# exactly one such token, plus an optional dash or em-dash separator, before the
-# state/colon split, so a timestamp-first line parses exactly like the documented
-# state-first shape. Only the line head is touched: a timestamp inside the note
-# body stays note text.
+# exactly one such token before the state/colon split, so a timestamp-first line
+# parses exactly like the documented state-first shape. Only the line head is
+# touched: a timestamp inside the note body stays note text.
 #
-# The candidate guard is a cheap pre-filter so the strip - a subshell - runs only
-# for a line that could possibly begin with a timestamp; every ordinary
-# state-first line pays nothing.
-_fm_status_may_start_with_timestamp() {  # <status-line>
-  case "$1" in
-    [0-9]*) return 0 ;;
-    *) return 1 ;;
+# The token must be the line's entire first whitespace-delimited word, so it ends
+# the line or is followed by whitespace. A head that is not a complete timestamp,
+# or a timestamp glued to anything else ("2026-09-11T02:09Zebra",
+# "2026-09-11T02:09Z-ish"), leaves the line byte-for-byte unchanged.
+#
+# The result is returned in FM_STATUS_LINE_HEAD rather than on stdout - the
+# fm_cap_line_var/FM_LINE_CAP_LINE shape - because every parsing layer below
+# strips independently, and a command substitution per layer per line would
+# multiply the per-line fold cost this file budgets so carefully. The digit guard
+# keeps an ordinary state-first line off the regex entirely.
+_fm_status_strip_leading_timestamp() {  # <status-line> -> FM_STATUS_LINE_HEAD
+  local line=$1 word
+  FM_STATUS_LINE_HEAD=$line
+  case "$line" in
+    [0-9]*) ;;
+    *) return 0 ;;
   esac
-}
-
-# Print <status-line> with one leading timestamp token removed. A line whose head
-# is not a complete timestamp, or whose timestamp is glued to a following word
-# ("2026-09-11T02:09Zebra"), is returned byte-for-byte.
-_fm_status_strip_leading_timestamp() {  # <status-line> -> line without one leading timestamp
-  local line=$1 rest
-  if [[ $line =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?(\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?|[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z) ]]; then
-    rest=${line:${#BASH_REMATCH[0]}}
-  else
-    printf '%s' "$line"
-    return 0
-  fi
-  # The token must end the line or be followed by a separator, never glued to a
-  # following word.
-  case "$rest" in
-    ''|[[:space:]]*|-*|—*) ;;
-    *) printf '%s' "$line"; return 0 ;;
-  esac
-  rest=${rest#"${rest%%[![:space:]]*}"}
-  case "$rest" in
-    -*) rest=${rest#-} ;;
-    —*) rest=${rest#—} ;;
-  esac
-  rest=${rest#"${rest%%[![:space:]]*}"}
-  printf '%s' "$rest"
+  word=${line%%[[:space:]]*}
+  [[ $word =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?(\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?|[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z)$ ]] || return 0
+  line=${line#"$word"}
+  FM_STATUS_LINE_HEAD=${line#"${line%%[![:space:]]*}"}
 }
 
 status_line_verb() {  # <status-line> -> leading verb word
   local v=$1 out='' word
-  if _fm_status_may_start_with_timestamp "$v"; then
-    v=$(_fm_status_strip_leading_timestamp "$v")
-  fi
+  _fm_status_strip_leading_timestamp "$v"
+  v=$FM_STATUS_LINE_HEAD
   v=${v%%:*}
   v=${v%%\[*}
   v=${v#"${v%%[![:space:]]*}"}
@@ -354,9 +339,8 @@ status_line_verb() {  # <status-line> -> leading verb word
 # the line's first colon (or anywhere on a line that has no colon at all).
 _fm_key_before_colon() {  # <status-line>
   local line=$1
-  if _fm_status_may_start_with_timestamp "$line"; then
-    line=$(_fm_status_strip_leading_timestamp "$line")
-  fi
+  _fm_status_strip_leading_timestamp "$line"
+  line=$FM_STATUS_LINE_HEAD
   case "${line%%:*}" in
     *\[key=*\]*) return 0 ;;
     *) return 1 ;;
@@ -369,9 +353,8 @@ _fm_key_before_colon() {  # <status-line>
 # position.
 _fm_key_at_note_head() {  # <status-line> -> raw slug
   local line=$1 rest
-  if _fm_status_may_start_with_timestamp "$line"; then
-    line=$(_fm_status_strip_leading_timestamp "$line")
-  fi
+  _fm_status_strip_leading_timestamp "$line"
+  line=$FM_STATUS_LINE_HEAD
   case "$line" in
     *:*) rest=${line#*:} ;;
     *) return 1 ;;
@@ -391,9 +374,8 @@ _fm_decision_slug_ok() {  # <slug>
 }
 status_line_note() {  # <status-line> -> text after the first colon, trimmed
   local line=$1 n k
-  if _fm_status_may_start_with_timestamp "$line"; then
-    line=$(_fm_status_strip_leading_timestamp "$line")
-  fi
+  _fm_status_strip_leading_timestamp "$line"
+  line=$FM_STATUS_LINE_HEAD
   case "$line" in
     *:*) n=${line#*:}; n=${n#"${n%%[![:space:]]*}"} ;;
     *) printf '%s' "$line"; return 0 ;;
@@ -410,9 +392,8 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   local line=$1 k
-  if _fm_status_may_start_with_timestamp "$line"; then
-    line=$(_fm_status_strip_leading_timestamp "$line")
-  fi
+  _fm_status_strip_leading_timestamp "$line"
+  line=$FM_STATUS_LINE_HEAD
   if _fm_key_before_colon "$line"; then
     k=${line%%:*}
     k=${k#*\[key=}
@@ -705,7 +686,12 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=5
+# 6: the parsers now strip one leading timestamp token before the state/colon
+# split, so a timestamp-first line that folded as ordinary status becomes an open
+# or a close. A cursor persisted under the older reading has already consumed
+# such lines as ordinary status and would keep their decisions invisible
+# forever, so it must be discarded and rebuilt from byte 0.
+FM_OPEN_DECISIONS_FOLD_VERSION=6
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
