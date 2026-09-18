@@ -207,11 +207,17 @@ make_auth_account() {
 # judged by better-ccflare alone and never reads this machine's real inventory.
 NO_AUTH="$TMP_ROOT/no-auth-dir"
 
+# Likewise for the Claude settings the routing proxy is read from, so no case is
+# judged by whatever ANTHROPIC_BASE_URL this machine happens to have configured.
+NO_SETTINGS="$TMP_ROOT/no-settings.json"
+
 # run_monitor <quota> <health> <accounts> [auth-dir]: line followed by rc=<n>
 run_monitor() {
   local quota=$1 health=$2 accounts=$3 out rc
   out=$(FM_FABLE_RUNWAY_NOW="$NOW" \
     FM_FABLE_RUNWAY_AUTH_DIR="${4:-$NO_AUTH}" \
+    ANTHROPIC_BASE_URL="${5:-}" \
+    FM_FABLE_RUNWAY_SETTINGS_JSON="$NO_SETTINGS" \
     FM_FABLE_RUNWAY_QUOTA_JSON="$quota" \
     FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$health" \
     FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$accounts" \
@@ -380,8 +386,8 @@ add_plain_account "$accounts" plain-b 5 40
 out=$(run_monitor "$quota" "$health" "$accounts")
 expect_field "$out" pool_state GREEN "no-window pool state"
 expect_field "$out" pool_reason routable_only_without_fable_window "no-window pool reason"
-expect_field "$out" pool_tracked none "no-window pool tracked"
-expect_field "$out" pool_capable none "no-window pool capable"
+expect_field "$out" pool_tracked unobserved "no-window pool tracked"
+expect_field "$out" pool_capable unobserved "no-window pool capable"
 expect_field "$out" pool_exhaustion unknown "no-window pool projection"
 expect_rc "$out" 0 "no-window pool exit"
 make_pool "$health" "$accounts" 2 11 9
@@ -581,6 +587,8 @@ out=$(run_monitor "$quota" "$health" "$accounts")
 expect_field "$out" pool_needs_auth none "healthy pool needs-auth"
 out=$(FM_FABLE_RUNWAY_NOW="$NOW" \
   FM_FABLE_RUNWAY_AUTH_DIR="$NO_AUTH" \
+  ANTHROPIC_BASE_URL="" \
+  FM_FABLE_RUNWAY_SETTINGS_JSON="$NO_SETTINGS" \
   FM_FABLE_RUNWAY_QUOTA_JSON="$quota" \
   FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$lab/absent-health.json" \
   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$lab/absent-accounts.json" \
@@ -660,6 +668,62 @@ expect_field "$out" pool_needs_auth both-dead "cross-proxy live-elsewhere needs-
 expect_field "$out" pool_routable 0/1 "cross-proxy live-elsewhere routable"
 pass "needs-auth means no proxy holds a live grant, in either direction"
 
+# A grant on the proxy the fleet does not route through is real but unreachable,
+# so it is not capacity. Here the five accounts CLIProxyAPI can still serve have
+# spent their Fable weeks and the three fresh ones are dead in the inventory:
+# the fleet can draw Fable from nothing, and the pool must not read GREEN by
+# naming accounts its own base URL cannot reach.
+rm -rf "$authdir"
+make_pool "$health" "$accounts" 5 8 0
+for acct_name in a b c d e; do
+  add_account "$accounts" "inv-$acct_name" 5 100 100 100
+  make_auth_account "$authdir" "inv-$acct_name" 8 false
+done
+for acct_name in x y z; do
+  add_account "$accounts" "cc-$acct_name" 5 40 20 100
+  make_auth_account "$authdir" "cc-$acct_name" -1 false
+done
+out=$(run_monitor "$quota" "$health" "$accounts" "$authdir" http://127.0.0.1:8317)
+expect_field "$out" pool_routable 5/8 "unreachable-grant routable"
+expect_field "$out" pool_capable none "unreachable-grant capable"
+expect_field "$out" pool_state RED "unreachable-grant pool state"
+expect_field "$out" pool_reason no_fable_capable_account "unreachable-grant pool reason"
+expect_rc "$out" 2 "unreachable-grant exit"
+
+# Point the fleet at better-ccflare instead and the same fixture flips: those
+# three accounts are now the ones it can reach, and they are capacity.
+out=$(run_monitor "$quota" "$health" "$accounts" "$authdir" http://127.0.0.1:8080)
+expect_field "$out" pool_routable 5/8 "ccflare-routed routable"
+expect_field "$out" pool_capable cc-x,cc-y,cc-z "ccflare-routed capable"
+expect_field "$out" pool_state GREEN "ccflare-routed pool state"
+pass "only a grant on the proxy the fleet routes through counts as capacity"
+
+# One torn auth file is one account, not the whole inventory. A proxy caught
+# mid-rewrite would otherwise drop every account at once and hand the verdict
+# back to the source this monitor exists because it goes stale.
+rm -rf "$authdir"
+make_pool "$health" "$accounts" 0 5 0
+for acct_name in a b c d; do
+  add_account_needing_auth "$accounts" "acct-$acct_name" 20 100 tokenStatus '"expired"'
+  make_auth_account "$authdir" "acct-$acct_name" 8 false
+done
+add_account_needing_auth "$accounts" acct-torn 20 100 tokenStatus '"expired"'
+printf '{"expired":"2026-' > "$authdir/claude-acct-torn.json"
+out=$(run_monitor "$quota" "$health" "$accounts" "$authdir")
+expect_field "$out" pool_routable 4/4 "torn-file routable"
+expect_field "$out" pool_needs_auth acct-torn "torn-file needs-auth"
+expect_field "$out" pool_state GREEN "torn-file pool state"
+expect_rc "$out" 0 "torn-file exit"
+
+# Only when nothing parses at all is there no inventory to be the authority.
+rm -rf "$authdir"
+mkdir -p "$authdir"
+printf '{"expired":"2026-' > "$authdir/claude-torn-one.json"
+out=$(run_monitor "$quota" "$health" "$accounts" "$authdir")
+expect_field "$out" pool_routable 0/5 "all-torn routable"
+expect_field "$out" pool_state RED "all-torn pool state"
+pass "one unparsable auth file costs that account, not the whole inventory"
+
 # An unreadable better-ccflare costs the projection, not the verdict, while the
 # inventory still answers. That is the whole point of it being supplementary.
 rm -rf "$authdir"
@@ -704,6 +768,8 @@ make_pool "$health" "$accounts" 6 11 0
 add_account "$accounts" acct-a 5 40 20 100
 out=$(FM_FABLE_RUNWAY_POOL_URL='' FM_FABLE_RUNWAY_NOW="$NOW" \
   FM_FABLE_RUNWAY_AUTH_DIR="$NO_AUTH" \
+  ANTHROPIC_BASE_URL="" \
+  FM_FABLE_RUNWAY_SETTINGS_JSON="$NO_SETTINGS" \
   FM_FABLE_RUNWAY_QUOTA_JSON="$quota" \
   FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$health" \
   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$accounts" \
@@ -778,6 +844,8 @@ pass "a freshly opened week is floored, and one that has not opened is unproject
 make_quota "$quota" 60 0.5 none through_reset
 out=$(FM_FABLE_RUNWAY_NOW="$NOW" \
   FM_FABLE_RUNWAY_AUTH_DIR="$NO_AUTH" \
+  ANTHROPIC_BASE_URL="" \
+  FM_FABLE_RUNWAY_SETTINGS_JSON="$NO_SETTINGS" \
   FM_FABLE_RUNWAY_QUOTA_JSON="$quota" \
   FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$lab/absent-health.json" \
   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$lab/absent-accounts.json" \
@@ -805,6 +873,8 @@ clamp_started=$(date +%s)
 clamped=$(PATH="$clamplab/bin:$PATH" \
   FM_CHECK_TIMEOUT=30 \
   FM_FABLE_RUNWAY_AUTH_DIR="$NO_AUTH" \
+  ANTHROPIC_BASE_URL="" \
+  FM_FABLE_RUNWAY_SETTINGS_JSON="$NO_SETTINGS" \
   FM_FABLE_RUNWAY_NOW="$NOW" \
   FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$health" \
   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$accounts" \
@@ -843,6 +913,8 @@ done
 run_check_in() {
   PATH="$FAKEBIN:$PATH" \
     FM_FABLE_RUNWAY_AUTH_DIR="${3:-$NO_AUTH}" \
+    ANTHROPIC_BASE_URL="" \
+    FM_FABLE_RUNWAY_SETTINGS_JSON="$NO_SETTINGS" \
     FM_HOME="$1" \
     FM_FABLE_FAKE_LOG="$1" \
     FM_STATE_OVERRIDE="$1/state" \
@@ -1177,6 +1249,72 @@ run_check_in "$bliplab" "$((NOW + 1800))" >/dev/null
 [ "$(notes_in "$bliplab")" = 1 ] || fail "a continuing outage must not re-open the episode"
 pass "a sustained unreachable pool opens one episode that never claims the pool is empty"
 
+# The live home's shape: better-ccflare answers but exposes no Fable window on
+# any account, so the pool is GREEN on its routable count alone and the
+# membership fields are suppressed, not empty. A RED supervisor runway on top of
+# that must not ring the Grok seat claiming there is no Fable-capable account
+# left - there are eleven, and the monitor never looked at their windows.
+winlab="$TMP_ROOT/windowless"
+mkdir -p "$winlab/state" "$winlab/config"
+printf 'FM_FABLE_RUNWAY_GROK_TERMINAL=grok-seat\n' > "$winlab/config/fable-runway.env"
+printf 'not a quota document\n' > "$winlab/quota.json"
+make_pool "$winlab/health.json" "$winlab/accounts.json" 11 11 0
+for acct_name in 1 2 3 4 5 6 7 8 9 10 11; do
+  add_plain_account "$winlab/accounts.json" "plain-$acct_name" 5 40
+done
+win=$(run_check_in "$winlab" "$NOW")
+expect_field "$win" overall RED "windowless poll overall"
+expect_field "$win" pool_state GREEN "windowless poll pool state"
+expect_field "$win" pool_capable unobserved "windowless poll capable"
+expect_field "$win" pool_tracked unobserved "windowless poll tracked"
+[ "$(notes_in "$winlab")" = 0 ] \
+  || fail "a suppressed capable set must never open a failover episode"
+[ ! -e "$winlab/orca.log" ] \
+  || fail "a pool with eleven routable accounts must not ring the Grok seat"
+pass "a suppressed capable set is not an observed empty pool"
+
+# A poll that observed no membership must not consume a pending regain. A
+# better-ccflare restart while the inventory still answers is exactly that poll,
+# and it is the state the drill deliberately creates.
+holdlab="$TMP_ROOT/hold"
+mkdir -p "$holdlab/state"
+holdauth="$holdlab/auth"
+make_auth_account "$holdauth" held-account 8 false
+for acct_name in 1 2 3 4 5; do
+  make_auth_account "$holdauth" "grant-$acct_name" 8 false
+done
+make_quota "$holdlab/quota.json" 60 0.5 none through_reset
+make_pool "$holdlab/health.json" "$holdlab/accounts.json" 6 6 0
+add_account "$holdlab/accounts.json" held-account 5 100 100 200
+hold_first=$(run_check_in "$holdlab" "$NOW" "$holdauth")
+expect_field "$hold_first" pool_tracked held-account "hold first poll tracked"
+expect_field "$hold_first" pool_capable none "hold first poll capable"
+expect_field "$hold_first" pool_state RED "hold first poll pool state"
+# better-ccflare restarts; the inventory still answers, so the pool is counted
+# but no membership is observed.
+mv "$holdlab/health.json" "$holdlab/health.away"
+hold_gap=$(run_check_in "$holdlab" "$((NOW + 300))" "$holdauth")
+expect_field "$hold_gap" pool_capable unobserved "hold gap capable"
+expect_field "$hold_gap" pool_tracked unobserved "hold gap tracked"
+expect_field "$hold_gap" pool_state GREEN "hold gap pool state"
+# The gateway is back and the account's Fable week reset during the restart, but
+# the pool state did not move, so that regain lands on a silent poll.
+mv "$holdlab/health.away" "$holdlab/health.json"
+make_pool "$holdlab/health.json" "$holdlab/accounts.json" 6 6 0
+add_account "$holdlab/accounts.json" held-account 5 40 10 200
+hold_silent=$(run_check_in "$holdlab" "$((NOW + 600))" "$holdauth")
+[ -z "$hold_silent" ] || fail "an unchanged GREEN poll must stay silent (got: $hold_silent)"
+# Three grants lapse, so the pool thins to YELLOW and prints. That wake must
+# still name the account that came back two polls ago.
+for acct_name in 1 2 3; do
+  make_auth_account "$holdauth" "grant-$acct_name" -1 false
+done
+hold_wake=$(run_check_in "$holdlab" "$((NOW + 900))" "$holdauth")
+expect_field "$hold_wake" pool_state YELLOW "hold wake pool state"
+printf '%s\n' "$hold_wake" | grep -q 'capacity back account=held-account' \
+  || fail "a regain across an unobserved-membership poll must still be named (got: $hold_wake)"
+pass "a poll that observed no membership does not consume a pending regain"
+
 # The check always runs its sibling monitor: the watcher validates the shim's
 # bytes before dispatch, so no environment variable may redirect it elsewhere.
 seamlab="$TMP_ROOT/seam"
@@ -1188,6 +1326,8 @@ SH
 chmod 0755 "$seamlab/impostor.sh"
 seam=$(PATH="$FAKEBIN:$PATH" \
   FM_FABLE_RUNWAY_AUTH_DIR="$NO_AUTH" \
+  ANTHROPIC_BASE_URL="" \
+  FM_FABLE_RUNWAY_SETTINGS_JSON="$NO_SETTINGS" \
   FM_HOME="$seamlab" \
   FM_FABLE_FAKE_LOG="$seamlab" \
   FM_STATE_OVERRIDE="$seamlab/state" \

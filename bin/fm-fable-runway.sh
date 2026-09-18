@@ -9,8 +9,10 @@
 #
 #   fable-runway: overall=<S> fable_state=<S> pool_state=<S> fable_remaining=<n>%
 #     fable_burn=<n>x fable_exhaustion=<iso|unknown>(<n>h)
-#     pool_routable=<r>/<c> pool_exhausted=<n> pool_capable=<names|none>
-#     pool_tracked=<names|none> pool_unprojected=<names|none>
+#     pool_routable=<r>/<c> pool_exhausted=<n>
+#     pool_capable=<names|none|unobserved>
+#     pool_tracked=<names|none|unobserved>
+#     pool_unprojected=<names|none|unobserved>
 #     pool_needs_auth=<names|none> pool_exhaustion=<n>h
 #     fable_reason=<token> pool_reason=<token>
 #
@@ -62,8 +64,22 @@
 # accounts expose no Fable-scoped window at all is still judged by them: the
 # missing window suppresses the projection fields, never the verdict.
 #
+# Suppressed is not empty, and the three membership fields say which they are.
+# With no account exposing a Fable window there is nothing to have observed, so
+# pool_capable, pool_tracked and pool_unprojected read `unobserved` rather than
+# `none` - and so does an unreadable pool. That distinction is load-bearing
+# rather than cosmetic: `none` is what opens a failover episode, and an
+# unreadable better-ccflare beside a readable inventory produces exactly this
+# shape on a pool whose every grant is live.
+#
 # Fable-capable means usable, with readable windows, none of them spent, and a
-# Fable-scoped window among them. An account with no Fable window may well be
+# Fable-scoped window among them. Usable means a live grant on the proxy the
+# fleet actually routes through - the ANTHROPIC_BASE_URL the environment or the
+# local Claude settings name - because a grant on the other proxy is real but
+# unreachable. When that URL is the better-ccflare pool, or there is no
+# inventory at all, better-ccflare's own records decide; otherwise the inventory
+# does, and an account whose inventory grant died is spent as far as the fleet
+# is concerned however healthy better-ccflare still believes it to be. An account with no Fable window may well be
 # routable, but nothing about it says the fleet can draw Fable from it, so it is
 # neither named in pool_capable nor counted against the no-capable-account RED.
 #
@@ -127,7 +143,10 @@
 # HTTP API, and the auth inventory. Only two fields of each auth file are ever
 # read - `disabled` and `expired` - and the account is labelled from its own
 # file name, so neither the tokens nor the email address in that file is
-# carried into the line or into any child process.
+# carried into the line or into any child process. Each file is parsed on its
+# own, so one torn file - a proxy caught mid-rewrite, a hand-edit - costs that
+# one account rather than the whole inventory, and the inventory counts as
+# unreadable only when no file parses at all.
 #
 # Every external call is clamped, because the watcher kills a check that runs
 # past FM_CHECK_TIMEOUT and a killed check prints nothing and records nothing -
@@ -149,6 +168,10 @@
 #                                          claude-<label>.json (default
 #                                          ~/.cli-proxy-api); a path that does
 #                                          not exist means no inventory
+#   FM_FABLE_RUNWAY_SETTINGS_JSON          Claude settings file read for
+#                                          .env.ANTHROPIC_BASE_URL when the
+#                                          environment does not set it
+#                                          (default ~/.claude/settings.json)
 set -u
 export LC_ALL=C
 
@@ -295,6 +318,7 @@ IFS= read -r -d '' POOL_JQ <<'JQ' || true
 . as $accts |
 ($auth // []) as $inv |
 ($auth != null) as $haveInv |
+($haveInv and ($routes_ccflare | not)) as $useInv |
 def norm: sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z");
 def to_epoch: try (norm | fromdateiso8601) catch null;
 def limits($a): ($a.usageData.limits // []);
@@ -321,9 +345,15 @@ def cc_live($a):
 def inv_live($n): any($inv[]; .label == $n and .live);
 def cc_grant_name($n): any($accts[]; account_name(.) == $n and cc_grant(.));
 def needs_auth_name($n): (inv_live($n) | not) and (cc_grant_name($n) | not);
+# Usable means a live grant on the proxy the fleet actually routes through. A
+# grant on the other proxy is real but unreachable, so it is not capacity: with
+# ANTHROPIC_BASE_URL pointing at CLIProxyAPI, an account whose inventory grant
+# died is spent as far as the fleet is concerned however healthy better-ccflare
+# still believes it to be. The other proxy's grant still counts for
+# needs_auth_name, because a login one proxy can still perform is not one the
+# captain has to.
 def usable($a):
-  account_name($a) as $n
-  | inv_live($n) or (cc_live($a) and (needs_auth_name($n) | not));
+  if $useInv then inv_live(account_name($a)) else cc_live($a) end;
 def windows_known($a):
   (limits($a) | length) > 0
   and all(limits($a)[]; ((.percent | type) == "number"));
@@ -388,9 +418,9 @@ named($unproj) as $unprojNames |
 # The auth inventory is the authority on capacity whenever it can be read: it
 # is the proxy the fleet's base URL points at, and better-ccflare's own counts
 # go stale the moment the other proxy refreshes a shared login.
-(if $haveInv then ($inv | map(select(.live)) | length)
+(if $useInv then ($inv | map(select(.live)) | length)
  else ($health.pool.routable // null) end) as $routable |
-(if $haveInv then ($inv | length)
+(if $useInv then ($inv | length)
  else ($health.pool.configured // null) end) as $configured |
 ($health.pool.usage_exhausted // null) as $exhausted |
 # The routable count is the primary signal, so it decides first and decides
@@ -419,13 +449,20 @@ named($unproj) as $unprojNames |
  else
    {state: "GREEN", reason: "has_fable_capacity"}
  end) as $verdict |
+# No account exposing a Fable-scoped window is not an observation that the pool
+# has no capacity - it is the absence of one, and it is also what an unread
+# better-ccflare looks like beside a readable inventory. Reporting `none` there
+# would be a claim the pool is empty, which is what opens a failover episode, so
+# the three membership fields say `unobserved` instead and nothing downstream
+# can read them as a count of zero.
+($tracked == 0) as $suppressed |
 [ $verdict.state,
   (if ($routable | type) == "number" then ($routable | tostring) else "-" end),
   (if ($configured | type) == "number" then ($configured | tostring) else "-" end),
   (if ($exhausted | type) == "number" then ($exhausted | tostring) else "-" end),
-  (if $names == "" then "none" else $names end),
-  (if $trackedNames == "" then "none" else $trackedNames end),
-  (if $unprojNames == "" then "none" else $unprojNames end),
+  (if $suppressed then "unobserved" elif $names == "" then "none" else $names end),
+  (if $suppressed then "unobserved" elif $trackedNames == "" then "none" else $trackedNames end),
+  (if $suppressed then "unobserved" elif $unprojNames == "" then "none" else $unprojNames end),
   (if $authNames == "" then "none" else $authNames end),
   (if $phrs == null then "-" else ($phrs | tostring) end),
   $verdict.reason
@@ -457,28 +494,44 @@ def iso_epoch:
           end
       end
   end;
-[ inputs as $a
-  | (((input_filename // "") | sub("^.*/"; "") | sub("^claude-"; "") | sub("\\.json$"; ""))
-     | gsub("[ ,\t]"; "_")) as $label
-  | ($a.expired | iso_epoch) as $exp
-  | { label: $label,
-      live: ((($a.disabled // false) != true) and $exp != null and ($exp > $now)) } ]
+(.expired | iso_epoch) as $exp
+| { label: ($label | gsub("[ ,\t]"; "_")),
+    live: (((.disabled // false) != true) and $exp != null and ($exp > $now)) }
 JQ
+
+# The proxy the fleet actually routes through, from ANTHROPIC_BASE_URL - the
+# environment first, then the local Claude settings. A grant on the other proxy
+# is real but unreachable, so this is what decides whose grants are capacity.
+# With nothing configured the inventory stays the authority.
+fleet_base_url() {
+  local settings=${FM_FABLE_RUNWAY_SETTINGS_JSON:-$HOME/.claude/settings.json}
+  if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+    printf '%s' "$ANTHROPIC_BASE_URL"
+    return 0
+  fi
+  [ -f "$settings" ] && [ ! -L "$settings" ] || return 0
+  jq -r '.env.ANTHROPIC_BASE_URL // empty' "$settings" 2>/dev/null
+}
 
 # Print the inventory as a compact array, or fail when there is none to read. A
 # directory that is absent is a home that does not run CLIProxyAPI, which is a
 # normal home, not an error.
 auth_read() {
-  local dir=${FM_FABLE_RUNWAY_AUTH_DIR:-$HOME/.cli-proxy-api} out='' f
-  local -a files=()
+  local dir=${FM_FABLE_RUNWAY_AUTH_DIR:-$HOME/.cli-proxy-api} f label entry
+  local -a entries=()
   [ -n "$dir" ] && [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   for f in "$dir"/claude-*.json; do
-    [ -f "$f" ] && [ ! -L "$f" ] && files+=("$f")
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    label=${f##*/}
+    label=${label#claude-}
+    label=${label%.json}
+    entry=$(jq -c --argjson now "$NOW" --arg label "$label" "$AUTH_JQ" "$f" 2>/dev/null) \
+      || continue
+    [ -n "$entry" ] || continue
+    entries+=("$entry")
   done
-  [ "${#files[@]}" -gt 0 ] || return 1
-  out=$(jq -cn --argjson now "$NOW" "$AUTH_JQ" "${files[@]}" 2>/dev/null) || return 1
-  [ -n "$out" ] || return 1
-  printf '%s' "$out"
+  [ "${#entries[@]}" -gt 0 ] || return 1
+  printf '[%s]' "$(IFS=,; printf '%s' "${entries[*]}")"
 }
 
 pool_fetch() {
@@ -520,14 +573,14 @@ pool_read() {
   if [ -z "$health" ] || [ -z "$accounts" ]; then
     ccflare=0
     if [ -z "$auth" ]; then
-      printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\tnone\t-\tpool_unavailable\n'
+      printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tnone\t-\tpool_unavailable\n'
       return 0
     fi
   elif ! printf '%s' "$health" | jq -e 'type == "object"' >/dev/null 2>&1 \
     || ! printf '%s' "$accounts" | jq -e 'type == "array"' >/dev/null 2>&1; then
     ccflare=0
     if [ -z "$auth" ]; then
-      printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\tnone\t-\tpool_response_not_recognized\n'
+      printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tnone\t-\tpool_response_not_recognized\n'
       return 0
     fi
   fi
@@ -538,8 +591,8 @@ pool_read() {
   [ -n "$auth" ] || auth=null
   printf '%s' "$accounts" \
     | jq -r --argjson now "$NOW" --argjson health "$health" --argjson auth "$auth" \
-      "$POOL_JQ" 2>/dev/null \
-    || printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\tnone\t-\tpool_response_not_readable\n'
+      --argjson routes_ccflare "$ROUTES_CCFLARE" "$POOL_JQ" 2>/dev/null \
+    || printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tnone\t-\tpool_response_not_readable\n'
 }
 
 # --- main -------------------------------------------------------------------
@@ -551,6 +604,9 @@ case "${1-}" in
 esac
 
 POOL_URL=${FM_FABLE_RUNWAY_POOL_URL:-http://127.0.0.1:8080}
+BASE_URL=$(fleet_base_url)
+ROUTES_CCFLARE=false
+[ "${BASE_URL%/}" != "${POOL_URL%/}" ] || ROUTES_CCFLARE=true
 
 # The watcher runs this check as a direct child, so FM_CHECK_TIMEOUT is read
 # here too and an operator who raised it is seen on both sides. One cap's worth

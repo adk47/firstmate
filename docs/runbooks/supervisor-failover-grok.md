@@ -34,7 +34,7 @@ That account is already out of `pool_capable` and out of the projection, so the 
 Re-authenticate it and the next poll's `capacity back account=` line confirms it returned; nothing else in this runbook is needed for it.
 
 **A runway that has actually run out.**
-On one of two conditions - an overall RED on a pool that *was read* and holds no Fable-capable account, or a pool that has been *unreadable* for 2 consecutive polls spanning at least 10 minutes while `fable_state` is RED - [`bin/fm-fable-runway-alert.sh`](../../bin/fm-fable-runway-alert.sh) fires once per episode, in plain bash, without waiting for a firstmate turn:
+On one of two conditions - the pool's own verdict RED over a capable set that *was observed* and is empty, or a pool that has been *unreadable* for 2 consecutive polls spanning at least 10 minutes while `fable_state` is RED - [`bin/fm-fable-runway-alert.sh`](../../bin/fm-fable-runway-alert.sh) fires once per episode, in plain bash, without waiting for a firstmate turn:
 
 - it writes `state/fable-runway-handoff-<epoch>.md` with the monitor line, the UTC time, both reason tokens, and a pointer back to this runbook;
 - it rings the Grok supervisor terminal - `orca terminal send --terminal <handle> --text <doorbell> --enter` - carrying that note's path, with the handle read from `config/fable-runway.env` as `FM_FABLE_RUNWAY_GROK_TERMINAL`;
@@ -230,7 +230,7 @@ Preconditions: no lane mid `no-mistakes` run, no incident open, `bin/fm-fable-ru
 | 5 | Force one real wake and confirm Grok drains, handles, and re-arms | wake to handled and re-armed |
 | 6 | Reverse with Part 2 and confirm the Stop auto-arm reclaims supervision, the wake queue is empty, and no `RECORD DIVERGENCE` prints | Grok exit to confirmed Claude supervision |
 | 7 | Confirm the zero-token action fired: one `state/fable-runway-handoff-*.md` note for the episode, the doorbell at the Grok terminal, the notification - and that a second RED poll did not repeat any of them | note to doorbell |
-| 7a | Stop `better-ccflare` alone and confirm the pool is still counted from the auth inventory rather than reading `UNKNOWN`, then restart it | inventory-only read confirmed |
+| 7a | Stop `better-ccflare` alone and confirm the pool is still counted from the auth inventory rather than reading `UNKNOWN`, that `pool_capable` reads `unobserved` rather than `none`, and that no handoff episode opens; then restart it | inventory-only read confirmed |
 | 8 | Record the elapsed times and every failure encountered here | total drill time |
 
 Failures worth recording separately: a lock that did not transfer, an arm that never reported a live cycle, a wake that was not drained, a lane tick that did not fire, and any duplicated wake.

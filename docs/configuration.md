@@ -548,6 +548,7 @@ On a home where `CLIProxyAPI` refreshed them, `better-ccflare` reports every acc
 So the inventory decides the counts whenever it can be read, and `better-ccflare` is supplementary rather than authoritative; with no inventory present - a home that does not run `CLIProxyAPI` - `better-ccflare` decides alone.
 An account holds a live grant in the inventory when its file is not `disabled` and its `expired` timestamp is still in the future.
 Only those two fields are ever read, and the account is labelled from its own file name, so neither the tokens nor the email address in that file reaches the reported line or any child process.
+Each file is parsed on its own, so one torn file - a proxy caught mid-rewrite, a hand-edit - costs that one account rather than the whole inventory, and the inventory counts as unreadable only when no file parses at all.
 Both use the same documented thresholds, worst wins:
 
 - `RED` - projected exhaustion under 2h, or remaining under 10 percent.
@@ -560,7 +561,11 @@ A runway that cannot be measured is `RED` with a reason, never `GREEN`, because 
 The optional pool is the one exception: a home running neither proxy is a normal firstmate home, so a pool that cannot be read is `UNKNOWN` and leaves the overall state to the supervisor's own runway.
 It takes both sources failing to get there - an unreadable `better-ccflare` while the inventory still answers is a pool that can be counted but not projected, reported as `routable_only_without_fable_window`, not a pool that cannot be read.
 The routable count decides the pool verdict first and decides it alone when no account exposes a Fable-scoped window, reported as `routable_only_without_fable_window`; the missing window suppresses `pool_exhaustion`, `pool_capable` and `pool_tracked`, never the verdict.
+Suppressed is not empty, and the three membership fields say which they are: with no account exposing a Fable window - which is also what an unreadable `better-ccflare` beside a readable inventory looks like - `pool_capable`, `pool_tracked` and `pool_unprojected` read `unobserved` rather than `none`, and so does an unreadable pool.
+That distinction is load-bearing: `none` is an observed empty pool and is what opens a failover episode, while `unobserved` is the absence of an observation and opens nothing.
 Fable-capable means usable, with readable windows, none of them spent, and a Fable-scoped window among them.
+Usable means a live grant on the proxy the fleet actually routes through - the `ANTHROPIC_BASE_URL` the environment sets, or failing that the one in `FM_FABLE_RUNWAY_SETTINGS_JSON` (default `~/.claude/settings.json`) - because a grant on the other proxy is real but unreachable.
+When that URL is the `better-ccflare` pool, or there is no inventory at all, `better-ccflare`'s own records decide; otherwise the inventory does, and an account whose inventory grant died is spent as far as the fleet is concerned however healthy `better-ccflare` still believes it to be.
 An account with no Fable window may well be routable, but nothing about it says the fleet can draw Fable from it, so it is neither named in `pool_capable` nor counted against the `no_fable_capable_account` `RED`.
 Needing a login is a cross-proxy fact: an account is named in `pool_needs_auth` when *no* proxy holds a live grant for it - neither a current, enabled entry in the auth inventory nor a `better-ccflare` record without an authentication complaint (`requiresReauth`, a `tokenStatus` outside the usable ones such as `expired` or `invalid`, or a `pauseReason` naming authentication).
 An account one proxy can still serve is not a login the captain has to go and perform, so it is not named.
@@ -599,7 +604,8 @@ A regain means an account that was Fable-tracked but not Fable-capable as of the
 The membership is measured against the last poll that printed, not the last poll that ran, so a window that resets while the gateway's `routable` count still lags lands on a silent poll and is still named by the next wake that prints.
 A poll whose `pool_state` is `UNKNOWN` holds the name sets too, even though it prints: an unreadable pool observed no membership at all, so a gateway restart between polls does not consume a pending regain either.
 The check never switches anything; the failover and the lane-side offload are firstmate actions.
-`state/.fable-runway` records the last printed states, the last `RED` report time, and the tracked, capable and needs-authentication name sets as of that same printed poll, so an unchanged poll stays silent and a regain is distinguishable from an addition.
+`state/.fable-runway` records the last printed states, the last `RED` report time, the tracked, capable and needs-authentication name sets as of the last poll that both printed and observed them, and how long the pool has been unreadable, so an unchanged poll stays silent and a regain is distinguishable from an addition.
+Holding the membership sets across every poll that observed none - an unreadable pool, or one whose accounts expose no Fable window - is what keeps a `better-ccflare` restart from consuming a pending regain, so the `capacity back account=` line still names the account on the next wake that printed.
 
 ### The zero-token failover action
 
@@ -608,8 +614,8 @@ On those the check hands the episode to [`bin/fm-fable-runway-alert.sh`](../bin/
 
 Two conditions open an episode, and they are different claims that must never be worded as each other:
 
-- overall `RED` on a pool that **was read** and holds no Fable-capable account. That is an observation, and the episode says "No Fable-capable account left".
-- the pool **unreadable** for 2 consecutive polls spanning at least 10 minutes while `fable_state` is `RED`. A pool nobody could read is not an empty pool - `pool_capable=none` is what an unread pool prints too - so a gateway blip opens nothing, but a pool that stays unreadable while Fable is out leaves no way to switch at all. That episode says "Pool unreachable for `<minutes>` minutes, supervisor runway unmeasurable" and never that the pool is empty. Both bounds are fixed constants, not knobs: an override could only delay the one wake that cannot afford to be late.
+- the pool's own verdict is `RED` over a capable set that **was observed** and is empty. That is an observation, and the episode says "No Fable-capable account left". A `none` that is really a suppressed field never qualifies, which is why the monitor prints `unobserved` for it.
+- the pool **unreadable** for 2 consecutive polls spanning at least 10 minutes while `fable_state` is `RED`. A pool nobody could read is not an empty pool, so a gateway blip opens nothing, but a pool that stays unreadable while Fable is out leaves no way to switch at all. That episode says "Pool unreachable for `<minutes>` minutes, supervisor runway unmeasurable" and never that the pool is empty. Both bounds are fixed constants, not knobs: an override could only delay the one wake that cannot afford to be late.
 
 An episode runs once, guarded by `state/.fable-runway-handoff`, and does three things:
 
