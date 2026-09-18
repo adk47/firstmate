@@ -18,6 +18,8 @@
 #   - a route whose key cannot be read fails closed with a clear status rather
 #     than sending an unauthenticated upstream call;
 #   - the shared account-pool port is refused outright;
+#   - a start that never took the port is reported as a failure, not a success;
+#   - an upstream that dies mid-relay is recorded as a request row;
 #   - streaming is relayed frame by frame and its usage is accounted.
 set -u
 
@@ -66,6 +68,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("content-length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+            return
+        if body.get("metadata", {}).get("fm_test") == "truncate":
+            # Promise more than we send, then hang up: the gateway is already
+            # past its own error paths and fails inside the relay.
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", "4096")
+            self.end_headers()
+            self.wfile.write(b'{"partial":')
+            self.wfile.flush()
+            self.close_connection = True
             return
         if body.get("stream"):
             self.send_response(200)
@@ -289,6 +302,56 @@ PY
   pass "fm-deepseek-gateway: a refused request leaves its keep-alive connection usable"
 }
 
+test_mid_relay_upstream_failure_is_recorded() {
+  gateway_case mid-relay-failure
+  start_gateway
+  # The upstream dies after the gateway has committed to relaying it. There is
+  # no error response left to send, so the request log row IS the report - the
+  # documented promise that this gateway reports its errors instead of hiding
+  # them, which matters most for the provider the docs call capacity-variable.
+  curl -sS --max-time 20 -o /dev/null -X POST -H "x-api-key: $TOKEN" \
+    -H 'content-type: application/json' \
+    -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],"metadata":{"fm_test":"truncate"}}' \
+    "http://127.0.0.1:$GATEWAY_PORT/v1/messages" 2>/dev/null || true
+  local logged
+  logged=$(cat "$STATE/fm-deepseek-gateway.log")
+  assert_contains "$logged" '"outcome": "relay-failed"' "a mid-relay upstream failure must be recorded as a request row"
+  assert_contains "$logged" '"provider": "openrouter-named"' "the recorded failure must name the route it was on"
+  assert_contains "$logged" '"error"' "the recorded failure must carry the reason"
+  assert_not_contains "$logged" "$FAKE_KEY" "the recorded failure must never contain the provider key"
+  local body
+  body=$(api GET /stats)
+  assert_contains "$body" '"errors": 1' "the failure must move the error counter the operator reads"
+  stop_gateway
+  pass "fm-deepseek-gateway: an upstream that dies mid-relay is recorded, not swallowed"
+}
+
+test_start_refuses_a_port_held_by_another_instance() {
+  gateway_case foreign-listener
+  # The holder is DEGRADED, not healthy: its route cannot resolve a key, which
+  # is the supported state the fail-closed test pins. That is precisely when a
+  # "does this port answer healthily" guard looks away, so it is the state a
+  # second start has to be refused in.
+  write_pick "$PICK" "http://127.0.0.1:$UPSTREAM_PORT/api/v1" "exit 3"
+  gw start --port "$GATEWAY_PORT" --pick "$PICK"
+  expect_code 0 "$RC" "a degraded gateway must still start and hold its port"
+  local body
+  body=$(curl -sS --max-time 10 "http://127.0.0.1:$GATEWAY_PORT/healthz")
+  assert_contains "$body" '"status": "degraded"' "the holder must be degraded, or this case proves nothing"
+
+  # A second home starting on that port never binds. It must not report a start
+  # it never made, and must leave no pid file naming a process that died.
+  local other="$CASE/other" rc=0 out
+  mkdir -p "$other/state"
+  out=$(FM_HOME="$other" FM_STATE_OVERRIDE="$other/state" bash "$GATEWAY" \
+    start --port "$GATEWAY_PORT" --pick "$PICK" 2>&1) || rc=$?
+  [ "$rc" != 0 ] || fail "a start that never took the port must not exit 0: $out"
+  assert_not_contains "$out" "started: pid" "a start that never bound must not report a pid as started"
+  assert_absent "$other/state/fm-deepseek-gateway.pid" "a start that never took the port must record no pid"
+  stop_gateway
+  pass "fm-deepseek-gateway: a start onto a port another instance holds is refused, not reported as started"
+}
+
 test_models_advertise_the_discoverable_id() {
   gateway_case models
   start_gateway
@@ -464,64 +527,11 @@ test_status_and_stop_track_the_lifecycle() {
   pass "fm-deepseek-gateway: status and stop track the real process lifecycle"
 }
 
-# The plist is a machine-consumed declarative artifact, so it is parsed into
-# its real semantic model (plutil is launchd's own reader; plistlib is the same
-# parse where plutil is not installed) and the VALUES are asserted. A raw
-# substring check passes on <key>RunAtLoad</key><false/>, which is the opposite
-# of the behaviour it claims to pin.
-plist_json() {  # reads plist XML on stdin, prints JSON
-  if command -v plutil >/dev/null 2>&1; then
-    plutil -convert json -o - -
-  else
-    python3 -c 'import json,plistlib,sys; json.dump(plistlib.loads(sys.stdin.buffer.read()), sys.stdout)'
-  fi
-}
-
-test_launch_agent_recipe_is_renderable_and_secret_free() {
-  gateway_case launch-agent
-  gw plist --port "$GATEWAY_PORT" --pick "$PICK"
-  expect_code 0 "$RC" "the launch agent definition must render"
-  printf '%s\n' "$OUT" | plist_json > "$CASE/agent.json" \
-    || fail "the rendered plist must parse as a plist"
-  cat > "$CASE/check-agent.py" <<'PY'
-import json, sys
-agent_path, script, port, pick, out_path = sys.argv[1:6]
-with open(agent_path) as handle:
-    agent = json.load(handle)
-problems = []
-if agent.get("Label") != "com.firstmate.deepseek-gateway":
-    problems.append("Label is %r" % agent.get("Label"))
-wanted = [script, "start", "--foreground", "--port", port, "--pick", pick]
-if agent.get("ProgramArguments") != wanted:
-    problems.append("ProgramArguments is %r, wanted %r" % (agent.get("ProgramArguments"), wanted))
-if agent.get("RunAtLoad") is not True:
-    problems.append("RunAtLoad is %r, so the agent would not survive a reboot" % (agent.get("RunAtLoad"),))
-if agent.get("KeepAlive") is not True:
-    problems.append("KeepAlive is %r, so a dead gateway would stay dead" % (agent.get("KeepAlive"),))
-if agent.get("StandardOutPath") != out_path:
-    problems.append("StandardOutPath is %r, wanted %r" % (agent.get("StandardOutPath"), out_path))
-if problems:
-    print("; ".join(problems), file=sys.stderr)
-    sys.exit(1)
-PY
-  python3 "$CASE/check-agent.py" "$CASE/agent.json" "$ROOT/bin/fm-deepseek-gateway.sh" \
-    "$GATEWAY_PORT" "$PICK" "$STATE/fm-deepseek-gateway.out" \
-    || fail "the launch agent does not mean what it must mean"
-  assert_not_contains "$OUT" "ANTHROPIC_AUTH_TOKEN" "the launch agent must never carry the token"
-  assert_not_contains "$OUT" "$FAKE_KEY" "the launch agent must never carry a provider key"
-  # A path that cannot be rendered into XML safely must be refused rather than
-  # escaped into a plist launchd would read differently.
-  gw plist --port "$GATEWAY_PORT" --pick "$CASE/pick&trap.py"
-  expect_code 2 "$RC" "an XML-unsafe path must be refused"
-  pass "fm-deepseek-gateway: the launch agent recipe renders with no secret in it"
-}
-
 test_foreground_start_owns_the_output_file_mode() {
   gateway_case foreground-out
-  # launchd opens StandardOutPath itself when it spawns the agent, so the file
-  # has to already exist at 0600; the agent's own command line is this
-  # foreground start, and install-launchd pre-creates it through the same
-  # helper before bootstrapping.
+  # A supervisor that opens this path itself - launchd's StandardOutPath, the
+  # doc's recipe - opens it before the script runs, so the file has to already
+  # exist at 0600. The supervised command line IS this foreground start.
   FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" bash "$GATEWAY" \
     start --foreground --port "$GATEWAY_PORT" --pick "$PICK" > "$CASE/foreground.log" 2>&1 &
   local pid=$!
@@ -535,10 +545,10 @@ test_foreground_start_owns_the_output_file_mode() {
   assert_present "$STATE/fm-deepseek-gateway.out" "a foreground start must pre-create the process output file"
   local mode
   mode=$(stat -c '%a' "$STATE/fm-deepseek-gateway.out" 2>/dev/null || stat -f '%Lp' "$STATE/fm-deepseek-gateway.out")
-  [ "$mode" = "600" ] || fail "the process output file must be mode 0600 before launchd opens it, got $mode"
+  [ "$mode" = "600" ] || fail "the process output file must be mode 0600 before a supervisor opens it, got $mode"
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  pass "fm-deepseek-gateway: the foreground start launchd runs pre-creates its output file at 0600"
+  pass "fm-deepseek-gateway: the supervised foreground start pre-creates its output file at 0600"
 }
 
 test_env_prints_the_lane_exports() {
@@ -555,6 +565,8 @@ test_env_prints_the_lane_exports() {
 test_health_reports_route_and_never_the_key
 test_request_rows_stay_behind_the_token
 test_a_refused_request_leaves_the_connection_usable
+test_mid_relay_upstream_failure_is_recorded
+test_start_refuses_a_port_held_by_another_instance
 test_models_advertise_the_discoverable_id
 test_messages_are_proxied_and_logged_without_the_key
 test_streaming_is_relayed_and_accounted
@@ -562,6 +574,5 @@ test_route_is_resolved_per_request
 test_unreadable_key_fails_closed
 test_shared_pool_port_is_refused
 test_status_and_stop_track_the_lifecycle
-test_launch_agent_recipe_is_renderable_and_secret_free
 test_foreground_start_owns_the_output_file_mode
 test_env_prints_the_lane_exports

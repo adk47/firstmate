@@ -37,10 +37,11 @@
 #   fm-deepseek-gateway.sh model
 #   fm-deepseek-gateway.sh env [--port N]
 #   fm-deepseek-gateway.sh logs [--lines N]
-#   fm-deepseek-gateway.sh install-launchd [--port N] [--pick PATH]
-#   fm-deepseek-gateway.sh uninstall-launchd
-#   fm-deepseek-gateway.sh launchd-status
-#   fm-deepseek-gateway.sh plist [--port N] [--pick PATH]
+#
+# SUPERVISION IS THE HOME'S, NOT THIS SCRIPT'S: `start` runs the gateway under
+# whatever supervisor the home already uses. docs/deepseek-lane-gateway.md
+# carries a launchctl recipe for a macOS home that wants the gateway back after
+# a reboot; it points at `start --foreground` and carries no secret.
 #
 # Defaults: port 8799 (the port the offload investigation proved), host
 # 127.0.0.1, route picker ~/.config/llm-route/pick.py, route kind deepseek.
@@ -51,8 +52,7 @@
 #   fm-deepseek-gateway.token  the local bearer token, mode 0600
 #
 # Exit codes: 0 success; 1 the requested state could not be reached; 2 a usage
-# or safety refusal (a bad port, the shared pool port, a missing tool, a
-# non-macOS host for the launchd verbs).
+# or safety refusal (a bad port, the shared pool port, a missing tool).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,7 +65,6 @@ DEFAULT_PORT="${FM_DEEPSEEK_GATEWAY_PORT:-8799}"
 SHARED_POOL_PORT=8080
 DEFAULT_PICK="${FM_DEEPSEEK_GATEWAY_PICK:-$HOME/.config/llm-route/pick.py}"
 DEFAULT_KIND="${FM_DEEPSEEK_GATEWAY_KIND:-deepseek}"
-LAUNCH_AGENT_LABEL="${FM_DEEPSEEK_GATEWAY_LABEL:-com.firstmate.deepseek-gateway}"
 START_TIMEOUT="${FM_DEEPSEEK_GATEWAY_START_TIMEOUT:-20}"
 
 PID_FILE="$STATE/fm-deepseek-gateway.pid"
@@ -158,10 +157,10 @@ ensure_token() {
 }
 
 # The process output can carry the same provider diagnostics the request log
-# does, so it is created 0600 like the log and the token beside it. launchd
-# opens StandardOutPath itself when it spawns the agent, so the file has to
-# exist with that mode BEFORE the agent is bootstrapped or launchd creates it
-# at its own umask instead.
+# does, so it is created 0600 like the log and the token beside it. A
+# supervisor that opens this path itself - launchd's StandardOutPath does -
+# opens it before the script runs, so the file has to already exist with that
+# mode or the supervisor creates it at its own umask instead.
 ensure_out_file() {
   [ -e "$OUT_FILE" ] || (umask 077; : > "$OUT_FILE") || fail "cannot create $OUT_FILE"
 }
@@ -196,6 +195,22 @@ health_answers() {  # <port>
   printf '%s' "$body" | python3 -c 'import json, sys; json.load(sys.stdin)' 2>/dev/null
 }
 
+# health_pid: the pid the instance answering this port reports as its own.
+# `start` compares it with the process it just launched, because "the port
+# answers" and "the port answers US" are different facts.
+health_pid() {  # <port>
+  health_body "$1" | python3 -c '
+import json, sys
+try:
+    body = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+pid = body.get("pid")
+if isinstance(pid, int):
+    print(pid)
+'
+}
+
 health_summary() {  # reads the health payload on stdin
   python3 -c '
 import json, sys
@@ -221,8 +236,8 @@ wait_for_answer() {  # <port> <seconds>
   return 1
 }
 
-# report_start: the one start-time report, shared by the plain and launchd
-# paths, so a degraded route is always visible without being fatal.
+# report_start: the one start-time report, so a degraded route is always
+# visible without being fatal.
 report_start() {  # <port> <lead>
   local port=$1 lead=$2 body
   body=$(health_body "$port")
@@ -238,7 +253,7 @@ report_start() {  # <port> <lead>
 # --- verbs -------------------------------------------------------------------
 
 cmd_start() {
-  local port=$DEFAULT_PORT pick=$DEFAULT_PICK foreground=0 pid
+  local port=$DEFAULT_PORT pick=$DEFAULT_PICK foreground=0 pid answering=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --port) shift; port=${1:-} ;;
@@ -262,8 +277,8 @@ cmd_start() {
     printf 'already running: pid %s url %s\n' "$pid" "$(base_url "$port")"
     return 0
   fi
-  if health_ok "$port"; then
-    refuse "something already answers $(base_url "$port")/healthz but is not this gateway; stop it before starting"
+  if health_answers "$port"; then
+    refuse "something already answers $(base_url "$port")/healthz but this home has no pid recorded for it; stop it before starting"
   fi
   ensure_token >/dev/null
   ensure_out_file
@@ -272,9 +287,18 @@ cmd_start() {
   pid=$!
   printf '%s\n' "$pid" > "$PID_FILE"
   if wait_for_answer "$port" "$START_TIMEOUT"; then
-    printf 'started: pid %s\n' "$pid"
-    report_start "$port" "ready:"
-    return 0
+    answering=$(health_pid "$port")
+    if pid_is_gateway "$pid" && [ "$answering" = "$pid" ]; then
+      printf 'started: pid %s\n' "$pid"
+      report_start "$port" "ready:"
+      return 0
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+    rm -f -- "$PID_FILE"
+    printf 'fm-deepseek-gateway: %s answers, but as pid %s - not the process this start launched (pid %s). It never took the port; last output:\n' \
+      "$(base_url "$port")" "${answering:-unknown}" "$pid" >&2
+    tail -n 20 "$OUT_FILE" >&2 2>/dev/null || true
+    return 1
   fi
   kill -TERM "$pid" 2>/dev/null || true
   rm -f -- "$PID_FILE"
@@ -294,9 +318,6 @@ cmd_stop() {
   done
   pid=$(running_pid)
   if [ -z "$pid" ]; then
-    if launchagent_loaded; then
-      refuse "the launch agent $LAUNCH_AGENT_LABEL owns this gateway; run uninstall-launchd instead of stopping a process launchd would restart"
-    fi
     rm -f -- "$PID_FILE"
     printf 'stopped: no gateway process recorded\n'
     return 0
@@ -415,199 +436,6 @@ cmd_logs() {
   tail -n "$lines" "$LOG_FILE"
 }
 
-# --- launchd -----------------------------------------------------------------
-#
-# The agent is rendered from a fixed template and compared byte for byte on
-# inspection, so a hand-edited or half-written plist is refused rather than
-# trusted. It carries no secret: the token stays in the state directory.
-
-launch_agent_paths() {
-  LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
-  LAUNCH_AGENT_PLIST="$LAUNCH_AGENT_DIR/$LAUNCH_AGENT_LABEL.plist"
-}
-
-plist_safe_path() {
-  case "$1" in *'&'*|*'<'*|*'>'*|*'"'*|*"'"*) return 1 ;; esac
-}
-
-render_launchagent() {  # <port> <pick>
-  local port=$1 pick=$2
-  cat <<XML
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>$LAUNCH_AGENT_LABEL</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>$SCRIPT_DIR/fm-deepseek-gateway.sh</string>
-		<string>start</string>
-		<string>--foreground</string>
-		<string>--port</string>
-		<string>$port</string>
-		<string>--pick</string>
-		<string>$pick</string>
-	</array>
-	<key>EnvironmentVariables</key>
-	<dict>
-		<key>FM_HOME</key>
-		<string>$FM_HOME</string>
-		<key>FM_STATE_OVERRIDE</key>
-		<string>$STATE</string>
-	</dict>
-	<key>LimitLoadToSessionType</key>
-	<string>Aqua</string>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<true/>
-	<key>StandardOutPath</key>
-	<string>$OUT_FILE</string>
-	<key>StandardErrorPath</key>
-	<string>$OUT_FILE</string>
-</dict>
-</plist>
-XML
-}
-
-launchagent_contract_matches() {  # <port> <pick>
-  local actual expected
-  launch_agent_paths
-  [ -f "$LAUNCH_AGENT_PLIST" ] && [ ! -L "$LAUNCH_AGENT_PLIST" ] || return 1
-  actual=$(tr -d ' \t\r\n' < "$LAUNCH_AGENT_PLIST" 2>/dev/null) || return 1
-  expected=$(render_launchagent "$1" "$2" | tr -d ' \t\r\n') || return 1
-  [ "$actual" = "$expected" ]
-}
-
-gui_available() {
-  local uid_num
-  command -v launchctl >/dev/null 2>&1 || return 1
-  uid_num=$(id -u)
-  launchctl print "gui/$uid_num" >/dev/null 2>&1
-}
-
-launchagent_loaded() {
-  local uid_num loaded
-  command -v launchctl >/dev/null 2>&1 || return 1
-  uid_num=$(id -u)
-  loaded=$(launchctl print "gui/$uid_num/$LAUNCH_AGENT_LABEL" 2>/dev/null) || return 1
-  case "$loaded" in
-    *"$LAUNCH_AGENT_LABEL"*) return 0 ;;
-  esac
-  return 1
-}
-
-require_darwin() {
-  [ "$(uname -s)" = Darwin ] || refuse "launchd supervision is macOS-only; on this host run start under your own supervisor"
-}
-
-cmd_install_launchd() {
-  local port=$DEFAULT_PORT pick=$DEFAULT_PICK uid_num pid actual expected
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --port) shift; port=${1:-} ;;
-      --pick) shift; pick=${1:-} ;;
-      *) usage >&2; exit 2 ;;
-    esac
-    shift
-  done
-  validate_port "$port"
-  require_python
-  require_darwin
-  ensure_state_dir
-  gui_available || refuse "no launchd gui session for uid $(id -u); a launch agent cannot be loaded from this context"
-  pid=$(running_pid)
-  if [ -n "$pid" ] && ! launchagent_loaded; then
-    refuse "a gateway is already running outside launchd (pid $pid); run 'stop' first so the agent owns the port"
-  fi
-  if ! { plist_safe_path "$SCRIPT_DIR/fm-deepseek-gateway.sh" && plist_safe_path "$pick" \
-    && plist_safe_path "$FM_HOME" && plist_safe_path "$STATE" && plist_safe_path "$OUT_FILE"; }; then
-    refuse "a path contains a character that cannot be rendered safely into a launch agent plist"
-  fi
-  launch_agent_paths
-  ensure_out_file
-  (umask 077; mkdir -p "$LAUNCH_AGENT_DIR") || fail "cannot create $LAUNCH_AGENT_DIR"
-  actual=$(render_launchagent "$port" "$pick")
-  if [ -f "$LAUNCH_AGENT_PLIST" ] && [ ! -L "$LAUNCH_AGENT_PLIST" ] \
-    && [ "$(tr -d ' \t\r\n' < "$LAUNCH_AGENT_PLIST")" = "$(printf '%s' "$actual" | tr -d ' \t\r\n')" ]; then
-    printf 'launch agent already current: %s\n' "$LAUNCH_AGENT_PLIST"
-  else
-    printf '%s\n' "$actual" > "$LAUNCH_AGENT_PLIST" || fail "cannot write $LAUNCH_AGENT_PLIST"
-    printf 'wrote launch agent: %s\n' "$LAUNCH_AGENT_PLIST"
-  fi
-  launchagent_contract_matches "$port" "$pick" \
-    || fail "the launch agent on disk does not match the rendered contract; refusing to load it"
-  uid_num=$(id -u)
-  launchctl bootout "gui/$uid_num/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$uid_num" "$LAUNCH_AGENT_PLIST" \
-    || fail "launchctl could not load $LAUNCH_AGENT_PLIST"
-  if wait_for_answer "$port" "$START_TIMEOUT"; then
-    report_start "$port" "launchd: loaded $LAUNCH_AGENT_LABEL, answering on"
-    return 0
-  fi
-  printf 'fm-deepseek-gateway: launch agent loaded but the gateway is not healthy; last output:\n' >&2
-  tail -n 20 "$OUT_FILE" >&2 2>/dev/null || true
-  return 1
-}
-
-cmd_uninstall_launchd() {
-  local uid_num
-  require_darwin
-  launch_agent_paths
-  uid_num=$(id -u)
-  if command -v launchctl >/dev/null 2>&1; then
-    launchctl bootout "gui/$uid_num/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
-  fi
-  if [ -f "$LAUNCH_AGENT_PLIST" ]; then
-    rm -f -- "$LAUNCH_AGENT_PLIST" || fail "cannot remove $LAUNCH_AGENT_PLIST"
-    printf 'removed launch agent: %s\n' "$LAUNCH_AGENT_PLIST"
-  else
-    printf 'no launch agent installed at %s\n' "$LAUNCH_AGENT_PLIST"
-  fi
-}
-
-# cmd_plist renders the launch agent without installing it, so an operator can
-# read exactly what would be loaded and a test can pin the recipe's content
-# without side-effecting the machine. The plist carries no secret: the local
-# token stays in the state directory.
-cmd_plist() {
-  local port=$DEFAULT_PORT pick=$DEFAULT_PICK
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --port) shift; port=${1:-} ;;
-      --pick) shift; pick=${1:-} ;;
-      *) usage >&2; exit 2 ;;
-    esac
-    shift
-  done
-  validate_port "$port"
-  if ! { plist_safe_path "$SCRIPT_DIR/fm-deepseek-gateway.sh" && plist_safe_path "$pick" \
-    && plist_safe_path "$FM_HOME" && plist_safe_path "$STATE" && plist_safe_path "$OUT_FILE"; }; then
-    refuse "a path contains a character that cannot be rendered safely into a launch agent plist"
-  fi
-  render_launchagent "$port" "$pick"
-}
-
-cmd_launchd_status() {
-  local uid_num
-  require_darwin
-  launch_agent_paths
-  uid_num=$(id -u)
-  if ! command -v launchctl >/dev/null 2>&1; then
-    printf 'launchd: launchctl is not available\n'
-    return 1
-  fi
-  if launchagent_loaded; then
-    printf 'launchd: loaded %s\n' "$LAUNCH_AGENT_LABEL"
-    launchctl print "gui/$uid_num/$LAUNCH_AGENT_LABEL" 2>/dev/null \
-      | sed -n -e 's/^[[:space:]]*state = /state: /p' -e 's/^[[:space:]]*pid = /pid: /p' | head -4
-    return 0
-  fi
-  printf 'launchd: not loaded %s\n' "$LAUNCH_AGENT_LABEL"
-  return 1
-}
-
 main() {
   local verb=${1:-}
   [ -n "$verb" ] || { usage >&2; exit 2; }
@@ -620,10 +448,6 @@ main() {
     model) cmd_model "$@" ;;
     env) cmd_env "$@" ;;
     logs) cmd_logs "$@" ;;
-    install-launchd) cmd_install_launchd "$@" ;;
-    uninstall-launchd) cmd_uninstall_launchd "$@" ;;
-    launchd-status) cmd_launchd_status "$@" ;;
-    plist) cmd_plist "$@" ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 2 ;;
   esac

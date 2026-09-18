@@ -123,8 +123,14 @@ test_dirty_composer_is_refused() {
   assert_grep '--interrupt' "$LOG" "the composer is cleared before the re-verification"
   # The saved capture is the operator's copy of what was typed.
   assert_present "$DATA/lane-model-switch/pending-composer" "the pending composer directory must exist"
-  grep -rl 'rm -rf /important' "$DATA/lane-model-switch/pending-composer" >/dev/null \
+  local saved mode
+  saved=$(grep -rl 'rm -rf /important' "$DATA/lane-model-switch/pending-composer") \
     || fail "the saved capture must contain the text the composer held"
+  # That capture holds whatever the composer was holding - here a destructive
+  # command, and equally a pasted credential - so it carries the same mode as
+  # every other artifact this tool writes.
+  mode=$(stat -c '%a' "$saved" 2>/dev/null || stat -f '%Lp' "$saved")
+  [ "$mode" = "600" ] || fail "the saved composer capture must be mode 0600, got $mode"
   assert_no_grep 'model_switch_to=' "$STATE/lane-a.meta" "a refused switch must not be recorded as done"
   pass "fm-lane-model-switch: a composer that will not verify empty is refused and nothing is typed"
 }
@@ -421,6 +427,68 @@ test_repoint_is_recorded_for_a_lane_that_must_relaunch() {
   pass "fm-lane-model-switch: --gateway records the repoint first and only switches an already-repointed lane"
 }
 
+test_tick_owning_lane_is_refused_a_gateway_repoint() {
+  case_dir gateway-tick-owner
+  write_lane_meta lane-w 'opus'
+  write_lane_meta lane-x 'opus'
+  start_test_gateway
+  # The home's loop registry: lane-w's terminal owns two /loop wakeups, and its
+  # terminal is recorded under the pre-reboot name. lane-x is in the same
+  # registry with no expected wakeups at all.
+  mkdir -p "$DATA/cmux-takeover"
+  cat > "$DATA/cmux-takeover/expected-loops.json" <<'JSON'
+[
+  {"term": "term-other", "term_prior_reboot": "term-lane-w", "expected": ["30m drift sweep", "6h digest"]},
+  {"term": "term-lane-x", "expected": []}
+]
+JSON
+  screen_json "$SCREENS/1.json" 'previous output' '❯'
+  run_switch lane-w gateway --gateway
+  expect_code 2 "$RC" "a lane that owns /loop wakeups must be refused a repoint"
+  assert_contains "$OUT" "lane-w owns 2 /loop wakeup" "the refusal must name the lane and what it owns"
+  assert_contains "$OUT" "stays on the shared account pool" "the refusal must say where the lane stays"
+  assert_absent "$STATE/lane-w.gateway.env" "a refused lane must have no repoint recorded"
+  assert_no_grep 'terminal send' "$LOG" "a refused lane must not be typed into"
+
+  # Same registry, an entry with no expected wakeups and no recorded crons:
+  # this lane is in scope and takes the repoint.
+  run_switch lane-x gateway --gateway
+  expect_code 0 "$RC" "a lane the registry records no wakeups for must be allowed: $OUT"
+  assert_present "$STATE/lane-x.gateway.env" "an in-scope lane must have its repoint recorded"
+  pass "fm-lane-model-switch: a lane that owns /loop wakeups is refused a gateway repoint"
+}
+
+test_cron_owning_lane_is_refused_a_gateway_repoint() {
+  case_dir gateway-cron-owner
+  write_lane_meta lane-y 'opus'
+  # No gateway is started: the refusal lands before the health probe, which is
+  # itself the point - a tick-owning lane is out of scope whether or not the
+  # gateway is up. The port below has nothing behind it.
+  SWITCH_GATEWAY_PORT=$(free_port)
+  # No loop registry at all; this lane owns ticks under this script's own
+  # convention, which is the same unrotatable state.
+  mkdir -p "$DATA/lane-y"
+  printf '7,37 * * * *\n' > "$DATA/lane-y/crons"
+  screen_json "$SCREENS/1.json" 'previous output' '❯'
+  run_switch lane-y gateway --gateway
+  expect_code 2 "$RC" "a lane that owns recorded crons must be refused a repoint"
+  assert_contains "$OUT" "lane-y owns recorded cron ticks" "the refusal must name the lane and the tick source"
+  assert_absent "$STATE/lane-y.gateway.env" "a refused lane must have no repoint recorded"
+  assert_no_grep 'terminal send' "$LOG" "a refused lane must not be typed into"
+  # The same lane still takes a plain model switch: only the repoint is scoped.
+  reset_screens
+  screen_json "$SCREENS/1.json" 'previous output' '❯'
+  screen_json "$SCREENS/2.json" 'previous output' '❯'
+  screen_json "$SCREENS/3.json" 'previous output' '❯'
+  screen_json "$SCREENS/4.json" 'previous output' 'Opus 5 · 1M context' '❯'
+  screen_json "$SCREENS/5.json" 'previous output' 'Opus 5 · 1M context' '❯'
+  run_switch lane-y 'opus[1m]'
+  expect_code 0 "$RC" "a tick-owning lane must still take an in-place model switch: $OUT"
+  assert_grep 'model_switch_to=opus[1m]' "$STATE/lane-y.meta" "the in-place switch must still be recorded"
+  unset SWITCH_GATEWAY_PORT
+  pass "fm-lane-model-switch: a lane with recorded crons is refused a repoint but still switches in place"
+}
+
 test_dry_run_gateway_describes_the_run_it_would_make() {
   case_dir gateway-dry-run
   write_lane_meta lane-u 'opus'
@@ -588,6 +656,8 @@ test_clean_switch_verifies_records_and_kicks
 test_retry_after_a_slow_redraw_is_recorded
 test_scrolled_pane_does_not_confirm_from_stale_transcript
 test_repoint_is_recorded_for_a_lane_that_must_relaunch
+test_tick_owning_lane_is_refused_a_gateway_repoint
+test_cron_owning_lane_is_refused_a_gateway_repoint
 test_dry_run_gateway_describes_the_run_it_would_make
 test_truncated_repoint_is_not_read_as_already_pointed
 test_plain_switch_leaves_the_gateway_repoint_untouched

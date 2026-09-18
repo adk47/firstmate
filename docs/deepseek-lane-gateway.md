@@ -68,14 +68,24 @@ bin/fm-deepseek-gateway.sh start                 # port 8799, the captain's rout
 bin/fm-deepseek-gateway.sh health                # exit 0 only when the route and key resolve
 bin/fm-deepseek-gateway.sh env                   # the exports a lane needs, token included
 bin/fm-deepseek-gateway.sh logs --lines 20       # one JSON line per request
-bin/fm-deepseek-gateway.sh install-launchd       # macOS launch agent, RunAtLoad + KeepAlive
-bin/fm-deepseek-gateway.sh plist                 # render that agent without installing it
-bin/fm-deepseek-gateway.sh uninstall-launchd
+bin/fm-deepseek-gateway.sh stop
 ```
 
-`install-launchd` writes `~/Library/LaunchAgents/com.firstmate.deepseek-gateway.plist` from a fixed template, refuses to load a plist that does not match it byte for byte, and carries no secret.
-`plist` renders that same definition without installing it, so the recipe can be read and reviewed first.
-The agent restarts the gateway across a reboot; `launchd-status` reports whether it is loaded, and while it owns the gateway `stop` refuses and points at `uninstall-launchd` so a manual stop cannot fight the agent's restart.
+Supervision belongs to the home, not to this script: run `start` under whatever supervisor the home already uses.
+A macOS home that wants the gateway back after a reboot can hand `start --foreground` to launchd - the recipe carries no secret, because the local token stays in the state directory:
+
+```sh
+PLIST=~/Library/LaunchAgents/com.firstmate.deepseek-gateway.plist
+/usr/libexec/PlistBuddy -c 'Add :Label string com.firstmate.deepseek-gateway' \
+  -c "Add :ProgramArguments array" \
+  -c "Add :ProgramArguments: string $PWD/bin/fm-deepseek-gateway.sh" \
+  -c 'Add :ProgramArguments: string start' -c 'Add :ProgramArguments: string --foreground' \
+  -c 'Add :RunAtLoad bool true' -c 'Add :KeepAlive bool true' \
+  -c "Add :StandardOutPath string $HOME/.firstmate/state/fm-deepseek-gateway.out" "$PLIST"
+launchctl bootout "gui/$(id -u)/com.firstmate.deepseek-gateway" 2>/dev/null
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
+bin/fm-deepseek-gateway.sh health                # exit 0 once the agent's gateway is serving
+```
 
 Point one lane at the gateway and switch its model:
 
@@ -85,8 +95,24 @@ bin/fm-lane-model-switch.sh <task-id> gateway --gateway     # run again once it 
 bin/fm-lane-model-switch.sh <task-id> 'opus[1m]'            # model switch only, same gateway
 ```
 
+**`--gateway` only applies to lanes that own no ticks.** A repoint reaches a running session only through a relaunch, and a relaunch drops the `/loop` wakeups and `CronCreate` ticks that live in that session's memory - the very thing the in-place switch exists to protect.
+So a lane that owns any is refused outright, by name, and stays on the shared account pool until it is intentionally rotated; nothing is written and nothing is typed into it.
+Ownership is read from two sources: the home's loop registry (`data/cmux-takeover/expected-loops.json`, or `FM_LANE_SWITCH_LOOP_REGISTRY`), matching the lane's `terminal=` against an entry's `term`, `term_old` or `term_prior_reboot` with a non-empty `expected` list; and this script's own tick convention, `cron=` lines in `state/<id>.meta` or one expression per line in `data/<id>/crons`.
+A plain model switch with no `--gateway` is unaffected: a tick-owning lane still changes model in place, which is what that path is for.
+
+List the lanes this home would currently refuse before planning a rollout:
+
+```sh
+for m in state/*.meta; do id=${m##*/}; id=${id%.meta}
+  bin/fm-lane-model-switch.sh "$id" gateway --gateway --dry-run 2>&1 \
+    | grep -q 'stays on the shared account pool' && echo "refused: $id"
+done
+```
+
+The refusal is checked before the gateway is probed, so this listing works whether or not the gateway is running, and it prints nothing for a lane that is in scope.
+
 Claude Code reads its endpoint from the environment at startup, so a running session cannot be repointed in place, and a session still on the shared account pool cannot accept this gateway's model id at all.
-`--gateway` therefore records the repoint FIRST, as soon as the gateway proves healthy, and never depends on the running session: it writes the exact exports to `state/<id>.gateway.env` (mode 0600) for whoever launches that lane next.
+For an in-scope lane, `--gateway` records the repoint FIRST, as soon as the gateway proves healthy, and never depends on the running session: it writes the exact exports to `state/<id>.gateway.env` (mode 0600) for whoever launches that lane next.
 It then attempts the in-place `/model` only for a lane that ALREADY had a recorded `state/<id>.gateway.env`, because that file is the only durable evidence its session may already be on the gateway.
 For a lane without one - the first command above, and every lane still on the pool - nothing is typed into the lane: the repoint is recorded, the exact relaunch step is printed, and the command exits 0.
 That is why the rollout below is "record, relaunch, then switch" for each lane rather than one command.
@@ -183,17 +209,13 @@ Pinning a cheap host in the picker's off-peak route, or sending off-peak to Fire
 The earlier investigation's order, unchanged, and this change performs none of it: no lane is switched here.
 It is written as lane classes rather than lane names, because a home's roster is private and the classes are what decide the risk.
 
-1. The heaviest cron-driven polling lane first: several schedules and almost no judgement, which makes it the highest-value and lowest-risk offload.
-2. The drift-fix lane second.
-3. Then the remaining cron-driven, low-judgement lanes, proving a full day of correct ticks before moving on.
-4. Then the judgement-heavy build and analysis lanes, cheapest reasoning first and the most product-sensitive last.
-5. The Cloudflare edge-analysis lane stays on Opus 1M: it is the worst fit for a cheap model and the best fit for the bigger window.
+The rollout is scoped by tick ownership, not by lane name, because the relaunch a repoint needs is exactly what a tick-owning lane cannot survive.
 
-Each lane is three steps, not one: record its repoint, relaunch it with the recorded endpoint, then run the same `--gateway` command again to switch it in place.
-Do one lane at a time, and watch one tick actually fire before starting the next, because the tick is the one thing a switch cannot prove.
+1. **Tick-owning lanes are out of scope and the tool refuses them.** Run the listing command in Setup to see which ones this home currently refuses. They stay on the shared account pool until someone decides to rotate them deliberately - a decision that costs one relaunch plus re-arming every `/loop` and `CronCreate` by hand, and is not part of this rollout.
+2. **Lanes that own no ticks are the rollout.** Each is three steps: record its repoint, relaunch it with the recorded endpoint, then run the same `--gateway` command again to switch it in place.
+3. Do one lane at a time. Cheapest-judgement lanes first, the most product-sensitive last, and the edge-analysis work that wants the bigger window stays on Opus 1M because it is the worst fit for a cheap model.
+4. After each lane, confirm it is actually serving through the gateway - `bin/fm-deepseek-gateway.sh logs --lines 5` shows its requests with the provider and slot they took - before starting the next.
 
-The relaunch is the real cost of the first step, and it is unavoidable: Claude Code fixes its endpoint at startup, so a lane on the shared pool cannot reach this gateway without one.
-A lane whose `/loop` wakeups and `CronCreate` ticks live in its session memory loses them across that relaunch and has to have them re-armed afterwards, which is why the order above starts with the lanes whose schedules are cheapest to rebuild.
 Once a lane is on the gateway, every later model change is in place and costs no relaunch at all.
 
 ## Limits
@@ -202,13 +224,14 @@ Once a lane is on the gateway, every later model change is in place and costs no
 - The gateway is loopback-only and one instance per home; `start` refuses port 8080 and privileged ports.
 - `count_tokens` is an estimate, and `cost_usd` in the log is a list-price estimate for operator accounting; the provider's own billing is authoritative.
 - Fireworks has a history of rate limiting in this fleet, so treat it as capacity-variable; the gateway reports its errors instead of hiding them.
-- The launch agent is macOS-only; on other hosts run `start` under your own supervisor.
-- A repointed lane takes its new endpoint at its next launch; a running Claude Code session cannot be repointed in place, so the first `--gateway` run on a pool lane records the repoint and types nothing into the lane.
-- That first relaunch drops any `/loop` or `CronCreate` schedule held in the lane's session memory; re-arm those after it comes back. Only the first move costs this - later model changes on an already-repointed lane are in place.
+- This script does not supervise the gateway; `start` runs it and the home's own supervisor keeps it alive across a reboot.
+- A repointed lane takes its new endpoint at its next launch; a running Claude Code session cannot be repointed in place, so the first `--gateway` run on an in-scope lane records the repoint and types nothing into the lane.
+- A lane that owns `/loop` wakeups or recorded crons is refused a repoint outright, because the relaunch it would need is what drops those schedules. Moving such a lane is a deliberate decision made outside this tool.
+- Tick ownership is read from what the home records. A lane whose schedule is armed but recorded nowhere reads as tick-free, so keep the loop registry and `cron=` lines current before a rollout.
 - The switch prints the lane's recorded cron expressions and the time it read them; it computes no fire time, so the operator watches the real tick.
 
 ## Verification entry points
 
-- `tests/fm-deepseek-gateway.test.sh` - discovery, per-request routing against each provider's own path shape, key redaction, the unauthenticated refusal, request rows staying behind the token, the fail-closed missing-key path, the port refusals, streaming, the launch agent recipe parsed as a plist, and the lifecycle verbs.
-- `tests/fm-lane-model-switch.test.sh` - the composer refusal paths on fixture screens, the verified switch and its metadata record, the echo-only screen and the client's own model rejection that must not count as confirmations, the retry whose confirmation repeats an existing line and must still be recorded, the unconfirmed-switch path that must not kick a lane, a real gateway repoint recorded without typing into a pool lane and then taken in place once recorded, and the tick report.
+- `tests/fm-deepseek-gateway.test.sh` - discovery, per-request routing against each provider's own path shape, key redaction, the unauthenticated refusal, request rows staying behind the token, the fail-closed missing-key path, the port refusals, a start onto a port another instance holds, an upstream that dies mid-relay being recorded, streaming, the 0600 process output, and the lifecycle verbs.
+- `tests/fm-lane-model-switch.test.sh` - the composer refusal paths on fixture screens, the verified switch and its metadata record, the echo-only screen and the client's own model rejection that must not count as confirmations, the retry whose confirmation repeats an existing line and must still be recorded, the unconfirmed-switch path that must not kick a lane, a real gateway repoint recorded without typing into a pool lane and then taken in place once recorded, the tick-owning lanes that are refused a repoint outright, and the tick report.
 - `bin/fm-lint.sh` covers both scripts' ShellCheck surface, and the scripts' own headers own their exact flags and contracts.

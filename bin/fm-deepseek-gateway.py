@@ -567,6 +567,18 @@ class Handler(BaseHTTPRequestHandler):
             self.gateway.note(record)
             self.gateway.log(record)
             return
+        except Exception as exc:
+            # An upstream that stalls past the timeout or drops mid-response
+            # fails HERE, after the headers are already out, so there is no
+            # error response left to send. The row is what the operator reads
+            # instead: without it the only trace is a traceback in the .out
+            # file and the counters never move.
+            record["outcome"] = "relay-failed"
+            record["error"] = redact("%s: %s" % (type(exc).__name__, exc), key)
+            record["duration_ms"] = int((time.time() - started) * 1000)
+            self.gateway.note(record)
+            self.gateway.log(record)
+            raise
         finally:
             reader.close()
 

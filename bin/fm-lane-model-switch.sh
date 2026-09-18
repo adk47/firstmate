@@ -22,9 +22,10 @@
 # against a lane mid-turn would cancel live work for no reason.
 #
 # WHY IN PLACE: `/loop`, `CronCreate`, and the fleet's other scheduled
-# surfaces live in Claude Code's own session memory. Relaunching a lane on a
-# different runtime silently loses its schedule, so a lane that owns ticks is
-# switched inside its running session instead.
+# surfaces live in Claude Code's own session memory. Relaunching a lane
+# silently loses its schedule, so a lane that owns ticks is switched inside its
+# running session instead - and, because --gateway can only take effect at a
+# relaunch, a lane that owns ticks is REFUSED a gateway repoint outright.
 #
 # --gateway: records a durable repoint of the lane at the second local
 # Anthropic-compatible gateway (bin/fm-deepseek-gateway.sh), which is what
@@ -36,13 +37,23 @@
 # launches that lane next sources, and state/<id>.meta carries only the
 # `model_switch_gateway=` audit line.
 #
-# The in-place `/model` is attempted only for a lane that ALREADY has a
-# recorded state/<id>.gateway.env, because that file is the only durable
-# evidence its session may already be on the gateway. A lane without one - any
-# lane still on the shared account pool - gets its repoint recorded, is told
-# the exact relaunch step, and is left untyped-into: a session pointed at
-# another endpoint cannot accept this gateway's model id, so there is nothing
-# to send it. A plain switch with no --gateway never touches
+# WHICH LANES --gateway APPLIES TO: only lanes that own no ticks. A repoint
+# reaches a running session only through a relaunch, and a relaunch drops the
+# /loop wakeups and CronCreate ticks that live in that session's memory, so
+# --gateway REFUSES a lane that owns any - by the home's loop registry
+# ($LOOP_REGISTRY, matching the lane's terminal= against a registry entry's
+# term/term_old/term_prior_reboot with a non-empty expected list) or by this
+# script's own tick convention (cron= lines in state/<id>.meta, or
+# data/<id>/crons). Such a lane stays on the shared account pool until it is
+# intentionally rotated; nothing is written and nothing is typed into it.
+#
+# For a lane that IS in scope, the in-place `/model` is attempted only when it
+# ALREADY has a recorded state/<id>.gateway.env, because that file is the only
+# durable evidence its session may already be on the gateway. A lane without
+# one gets its repoint recorded, is told the exact relaunch step, and is left
+# untyped-into: a session pointed at another endpoint cannot accept this
+# gateway's model id, so there is nothing to send it. A plain switch with no
+# --gateway never touches
 # state/<id>.gateway.env: it changes the model, not the endpoint. That gateway
 # is loopback-only, so its port is the gateway script's own default
 # (FM_DEEPSEEK_GATEWAY_PORT, default 8799).
@@ -69,13 +80,13 @@
 #   --kick <text>       resume text sent after a verified switch
 #   --no-kick           do not send resume text
 #   --dry-run           perform every check and print the plan, send nothing
-#   --json              print one machine-readable summary line as well
 #
 # Exit codes: 0 switched and verified, a repoint recorded for a lane that must
 # be relaunched to take it, or a clean --dry-run; 1 the switch
 # could not be completed or verified, or the gateway is not healthy; 2 a
-# refusal that sent nothing - a non-Claude lane, a remote lane, an unreadable
-# screen, or a composer that would not verify empty.
+# refusal that sent nothing - a non-Claude lane, a remote lane, a tick-owning
+# lane asked to take a gateway repoint, an unreadable screen, or a composer
+# that would not verify empty.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -101,6 +112,13 @@ GATEWAY_SH="$SCRIPT_DIR/fm-deepseek-gateway.sh"
 DEFAULT_GATEWAY_PORT="${FM_DEEPSEEK_GATEWAY_PORT:-8799}"
 DEFAULT_GATEWAY_URL="http://127.0.0.1:$DEFAULT_GATEWAY_PORT"
 SAVE_ROOT="$DATA/lane-model-switch"
+# The home's loop registry. Entries carry the terminal a lane runs in (`term`,
+# and `term_old`/`term_prior_reboot` for a lane that has been moved or has
+# survived a reboot) and the `expected` list of /loop wakeups it owns. A
+# non-empty `expected` for this lane's terminal is what makes the lane
+# unrotatable here. Read-only, and a missing or unreadable registry is simply
+# no evidence.
+LOOP_REGISTRY="${FM_LANE_SWITCH_LOOP_REGISTRY:-$DATA/cmux-takeover/expected-loops.json}"
 SEND_RETRIES="${FM_LANE_SWITCH_RETRIES:-3}"
 SEND_SLEEP="${FM_LANE_SWITCH_SLEEP:-0.4}"
 SLASH_SETTLE="${FM_LANE_SWITCH_SETTLE:-1.2}"
@@ -181,7 +199,7 @@ save_capture() {  # <kind> <text>
   dir="$SAVE_ROOT/$kind"
   (umask 077; mkdir -p "$dir") || fail "cannot create $dir"
   file="$dir/$LANE_ID-$(utc_stamp).txt"
-  printf '%s\n' "$text" > "$file" || fail "cannot write $file"
+  (umask 077; printf '%s\n' "$text" > "$file") || fail "cannot write $file"
   printf '%s' "$file"
 }
 
@@ -200,6 +218,16 @@ send_key() {  # <key>
 
 # --- verification -----------------------------------------------------------
 
+# WHY DIFF AND NOT AN ANCHOR: the reviewed remedy was to anchor on the
+# pre-submit capture's last non-empty line and take only what follows it. That
+# line is the composer glyph - a Claude Code pane is bottom-anchored - and it
+# reappears at the bottom of every post-submit capture, so "strictly after the
+# anchor" is empty on every real capture and would fail every genuine switch.
+# The diff alignment below is what was accepted in its place: added lines are
+# the candidates, and a carried-over transcript line - including this script's
+# own earlier kick text, which names the model - stays in the common
+# subsequence and can never be mistaken for evidence.
+#
 # Claude Code renders the `/model <spec>` this script just typed straight back
 # into its transcript, so the post-submit screen always contains the model name
 # whether or not the client accepted it. Candidates are therefore the lines
@@ -328,7 +356,6 @@ tick_lines() {  # prints one cron expression per line, if the home records any
 # the only thing that proves the schedule survived the switch.
 report_ticks() {  # <registry>
   local registry=$1 lines line
-  TICK_LINES=''
   lines=$(tick_lines "$LANE_META" "$registry")
   if [ -z "$lines" ]; then
     printf 'ticks: no tick source recorded for %s; add cron=<expr> lines to %s or a %s file, then verify the lane actually fires (a model switch can skip the next tick)\n' \
@@ -340,19 +367,69 @@ report_ticks() {  # <registry>
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     printf 'ticks:   %s\n' "$line"
-    TICK_LINES="$TICK_LINES$line
-"
   done <<EOF
 $lines
 EOF
 }
 
+# --- tick ownership ---------------------------------------------------------
+#
+# The gateway repoint only takes effect at a relaunch, and a relaunch drops the
+# /loop wakeups and CronCreate ticks that live in Claude Code's session memory.
+# A lane that owns ticks therefore cannot be moved to the gateway by this
+# script at all - it stays on the shared pool until it is intentionally
+# rotated - so --gateway refuses it rather than recording a repoint whose only
+# way to take effect is the thing that breaks the lane.
+
+lane_loop_count() {  # <terminal>; prints how many /loop wakeups the home records
+  [ -n "${1:-}" ] || return 0
+  [ -f "$LOOP_REGISTRY" ] && [ ! -L "$LOOP_REGISTRY" ] || return 0
+  python3 - "$LOOP_REGISTRY" "$1" <<'PY'
+import json, sys
+
+path, terminal = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as handle:
+        doc = json.load(handle)
+except (OSError, ValueError):
+    sys.exit(0)
+if isinstance(doc, list):
+    entries = doc
+elif isinstance(doc, dict):
+    entries = list(doc.values())
+else:
+    entries = []
+for entry in entries:
+    if not isinstance(entry, dict):
+        continue
+    terms = [entry.get(key) for key in ("term", "term_old", "term_prior_reboot")]
+    if terminal not in [t for t in terms if isinstance(t, str) and t]:
+        continue
+    expected = entry.get("expected")
+    if isinstance(expected, list) and expected:
+        print(len(expected))
+        sys.exit(0)
+PY
+}
+
+refuse_if_lane_owns_ticks() {  # <task-id> <tick-registry>
+  local id=$1 registry=$2 terminal loops
+  terminal=$(fm_meta_get "$LANE_META" terminal)
+  loops=$(lane_loop_count "$terminal")
+  if [ -n "$loops" ]; then
+    refuse "$id owns $loops /loop wakeup(s) recorded in $LOOP_REGISTRY for terminal ${terminal:-<none>}; the gateway repoint only takes effect at a relaunch and a relaunch drops them, so $id stays on the shared account pool until it is intentionally rotated"
+  fi
+  if [ -n "$(tick_lines "$LANE_META" "$registry")" ]; then
+    refuse "$id owns recorded cron ticks (cron= lines in $LANE_META or $registry); the gateway repoint only takes effect at a relaunch and a relaunch drops them, so $id stays on the shared account pool until it is intentionally rotated"
+  fi
+}
+
 # --- the switch -------------------------------------------------------------
 
 main() {
-  local id='' spec='' gateway='' verify='' kick='' no_kick=0 registry='' dry=0 json=0
+  local id='' spec='' gateway='' verify='' kick='' no_kick=0 registry='' dry=0
   local port='' gateway_env='' before='' after='' screen='' verdict='' saved='' kick_text=''
-  local switched=0 kicked=0 already_pointed=0
+  local already_pointed=0
 
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   id=$1
@@ -368,7 +445,6 @@ main() {
       --kick=*) kick=${1#--kick=} ;;
       --no-kick) no_kick=1 ;;
       --dry-run) dry=1 ;;
-      --json) json=1 ;;
       -h|--help|help) usage; return 0 ;;
       *) usage >&2; exit 2 ;;
     esac
@@ -388,6 +464,7 @@ main() {
   before=$(lane_model_now "$LANE_META")
 
   if [ -n "$gateway" ]; then
+    refuse_if_lane_owns_ticks "$id" "$registry"
     port=$DEFAULT_GATEWAY_PORT
     require_gateway_healthy "$port"
     if [ "$spec" = gateway ]; then
@@ -472,7 +549,6 @@ main() {
     saved=$(save_capture unconfirmed "$screen")
     fail "/model $spec was submitted to $id but the screen does not confirm it; no resume text was sent. Read the saved screen: $saved"
   fi
-  switched=1
   after=$spec
   printf 'switched: %s %s -> %s (verified on screen)\n' "$id" "$before" "$after"
 
@@ -494,23 +570,10 @@ main() {
     if [ "$verdict" != empty ]; then
       fail "the model switch is recorded and verified, but the resume text was not confirmed as submitted (verdict=$verdict); check the lane and re-send it"
     fi
-    kicked=1
     printf 'kicked: resume text sent to %s\n' "$id"
   fi
 
   report_ticks "$registry"
-
-  if [ "$json" = 1 ]; then
-    python3 - "$id" "$LANE_BACKEND" "$before" "$after" "$gateway" "$switched" "$kicked" "${TICK_LINES:-}" <<'PY'
-import json, sys
-task, backend, before, after, gateway, switched, kicked, crons = sys.argv[1:9]
-print(json.dumps({
-    "task": task, "backend": backend, "before": before, "after": after,
-    "gateway": gateway or None, "switched": switched == "1", "kicked": kicked == "1",
-    "crons": [line for line in crons.splitlines() if line],
-}, sort_keys=True))
-PY
-  fi
 }
 
 main "$@"
