@@ -788,7 +788,9 @@ test_a_slow_tool_does_not_leave_later_tools_unasked() {
   # and the slow tool itself is reported as a check that could not be determined
   # rather than as a check failure or as the whole sweep failing. Counting probes
   # is what proves the later tools were asked, because silence alone would also be
-  # what a skipped tool produces.
+  # what a skipped tool produces. The sweep gets the default budget, which is
+  # real headroom for three tools: the guarantee under proof is that the slow
+  # tool cannot spend it, not that a loaded host lets a one-second probe start.
   home=$(make_home slow-first)
   dir="$TMP_ROOT/slow-first/bin"
   b_log="$TMP_ROOT/slow-first/b.log"
@@ -801,7 +803,7 @@ test_a_slow_tool_does_not_leave_later_tools_unasked() {
   write_config "$home" "{\"tools\":[{\"name\":\"slow\",\"command\":\"$TOOL\"},{\"name\":\"b\",\"command\":\"${TOOL}-b\"},{\"name\":\"c\",\"command\":\"${TOOL}-c\"}]}"
   out="$home/out.txt"
 
-  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=6
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=24
   report=$(cat "$out")
   assert_contains "$report" "slow check could not be determined" "a tool that ran out of its bound was not reported as a check that could not be determined"
   assert_not_contains "$report" "slow check failed" "a tool that ran out of its bound was reported as a check failure"

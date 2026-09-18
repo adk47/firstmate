@@ -332,15 +332,17 @@ budget_allows() {
 # The bound for one probe: the probe bound, cut down to whatever the sweep has
 # left once a floor is reserved for every tool still to be checked, so no probe
 # can run past the end of the sweep and no later tool is left with no time to
-# answer in. TOOLS_LEFT already excludes the tool being probed, and each reserved
-# floor covers the kill grace as well as the minimum bound, because a probe the
-# runner has to kill ends a second after its own bound. Never below
-# PROBE_MIN_SECS, because fm_run_timed treats a non-positive bound as no bound.
+# answer in. TOOLS_LEFT already excludes the tool being probed. A probe the
+# runner has to kill ends a kill grace after its own bound, so that grace is
+# taken off the bound handed out here, and each reserved floor covers it as well
+# as the minimum bound; a killed probe then cannot eat the floor reserved for
+# the tools still to be checked. Never below PROBE_MIN_SECS, because
+# fm_run_timed treats a non-positive bound as no bound.
 probe_bound() {
   local left reserve
   left=$((DEADLINE - $(real_epoch)))
   reserve=$((TOOLS_LEFT * (PROBE_MIN_SECS + KILL_GRACE_SECS)))
-  left=$((left - reserve))
+  left=$((left - reserve - KILL_GRACE_SECS))
   if [ "$left" -lt "$PROBE_MIN_SECS" ]; then
     printf '%s\n' "$PROBE_MIN_SECS"
   elif [ "$left" -lt "$PROBE_SECS" ]; then
