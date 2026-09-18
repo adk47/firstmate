@@ -896,7 +896,10 @@ fi
 # new request, and `--follow-up` could believe a thread exists that never did. Same defect
 # the notifier's escalation check had, and fixed the same way: the marker the wrapper itself
 # stamps, matched as a whole line.
-if [ -n "$EXISTING" ] && printf '%s' "$EXISTING" | grep -qE "^<!-- agent-bridge request_id=$REQUEST_ID type=[a-z_]+ from=[a-z]+ -->$"; then
+# Do not use grep -q here. With pipefail enabled, grep exits as soon as it finds
+# a marker and printf can receive SIGPIPE on a large mailbox, making the
+# successful match look false. Drain the input and discard matched output.
+if [ -n "$EXISTING" ] && printf '%s' "$EXISTING" | grep -E "^<!-- agent-bridge request_id=$REQUEST_ID type=[a-z_]+ from=[a-z]+ -->$" >/dev/null; then
   if [ "$FORCE" -eq 0 ]; then
     echo "DUPLICATE: request_id '$REQUEST_ID' is already on $REPO#$ISSUE." >&2
     echo "If you have NEW information — or the request has had no reply and you are chasing" >&2

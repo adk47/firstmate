@@ -438,6 +438,26 @@ mut() { jq "$@" "$REQ" > "$REQ.tmp" && mv "$REQ.tmp" "$REQ"; }
   ! grep -q "issue comment" "$GH_STUB_LOG"
 }
 
+@test "a duplicate near the top of a mailbox larger than the pipe buffer is still refused" {
+  # Regression: the check was `printf '%s' "$EXISTING" | grep -qE <marker>`. Under
+  # `set -o pipefail`, grep -q exits on the first match, and when the mailbox is larger
+  # than the pipe buffer printf is still writing, takes SIGPIPE (141), and the pipeline
+  # reports FAILURE for a real match -- so the wrapper posted a duplicate instead of
+  # refusing it. The one-line mailboxes above cannot reproduce that: the marker must be
+  # followed by more data than a pipe can hold (64 KiB on Linux), so that grep closing
+  # early is observable. 1 MiB of filler is comfortably past it on every platform.
+  {
+    echo "<!-- agent-bridge request_id=cs-2026-08-26-analytics-zero-plays type=systemic_check from=operations -->"
+    head -c 1048576 /dev/zero | tr '\0' 'x'
+    echo
+  } > "$GH_STUB_COMMENTS"
+  run "$SCRIPT" --file "$REQ"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"DUPLICATE"* ]]
+  ! grep -q "issue comment" "$GH_STUB_LOG"
+  [ ! -d "$AGENT_BRIDGE_TEST_DIR/posts" ]
+}
+
 @test "--follow-up posts onto the same request_id, marked as a follow-up" {
   echo "<!-- agent-bridge request_id=cs-2026-08-26-analytics-zero-plays type=systemic_check from=operations -->" > "$GH_STUB_COMMENTS"
   run "$SCRIPT" --file "$REQ" --follow-up
