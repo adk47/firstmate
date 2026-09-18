@@ -944,6 +944,10 @@ cat <<'EOF'
 The digest above is complete for this session start. The READ-ONCE CONTRACT
 section near the top of it governs what may still be read from disk.
 EOF
+if [ -f "$SCRIPT_DIR/fm-house-wiki-stanza.txt" ]; then
+  printf '\n'
+  cat "$SCRIPT_DIR/fm-house-wiki-stanza.txt"
+fi
 
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
   COMPLETION_RECORDED=0
