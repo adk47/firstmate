@@ -452,13 +452,6 @@ $set
 EOF
   _FM_DECISION_DROP=$out
 }
-# Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
-# set, applying the same needs-decision/blocked-opens, resolved/captain-held-closes
-# rule status_open_decisions documents above. Pure text transform, no file I/O.
-# This is the ONE place the per-line open/resolved rule is written; both the
-# whole-file fold (status_open_decisions) and the incremental cursor-backed fold
-# (status_open_decisions_incremental) below call this instead of re-deriving the
-# rule, so the two consumption strategies can never drift apart on semantics.
 # Reserved decision-key namespaces, and the rule that makes them mean something.
 #
 # A key like `pending-reply-<id>` names a decision that one library raises and is
@@ -504,21 +497,17 @@ _fm_is_pending_reply_escalation() {  # <key> <note>
 }
 
 # The no-fork fold engine: the ONE place the per-line open/resolved rule is
-# written. It updates the globals _FM_FOLD_OPEN, _FM_FOLD_OP, and _FM_FOLD_KEY/
-# _FM_FOLD_VERB/_FM_FOLD_NOTE in place instead of printing, so a fold loop pays no
-# command substitution per line. _FM_FOLD_OPEN deliberately carries NO trailing
-# newline, matching what the old printing form produced through a `$(...)`.
+# written. It updates the globals _FM_FOLD_OPEN, _FM_FOLD_OP, and _FM_FOLD_KEY in
+# place instead of printing, so a fold loop pays no command substitution per line.
+# _FM_FOLD_OPEN deliberately carries NO trailing newline, matching what the old
+# printing form produced through a `$(...)`.
 _FM_FOLD_OPEN=
 _FM_FOLD_OP=none
 _FM_FOLD_KEY=
-_FM_FOLD_VERB=
-_FM_FOLD_NOTE=
 _fm_fold_line_state() {  # <open-set> <status-line> <resolve-verb> <held-verb>
   local open=$1 line=$2 resolve=$3 held=$4 verb key note
   _FM_FOLD_OP=none
   _FM_FOLD_KEY=
-  _FM_FOLD_VERB=
-  _FM_FOLD_NOTE=
   # Blank-line guard. A `case` glob answers "does this line hold any non-space
   # character" in one pattern match; the equivalent ${line//[[:space:]]/} costs
   # tens of milliseconds per line under bash 3.2's global bracket-class
@@ -536,8 +525,6 @@ _fm_fold_line_state() {  # <open-set> <status-line> <resolve-verb> <held-verb>
   note=$_FM_STATUS_NOTE
   _fm_decision_key_transition_allowed "$key" "$note" || { _FM_FOLD_OPEN=$open; return 0; }
   _FM_FOLD_KEY=$key
-  _FM_FOLD_VERB=$verb
-  _FM_FOLD_NOTE=$note
   case "$verb" in
     needs-decision|blocked)
       if _fm_open_set_has "$open" "$key"; then
@@ -1743,9 +1730,11 @@ window_to_task() {
 # Every other captain-relevant event is terminal and always actionable.
 #
 # Last-opening bookkeeping for one span. Pass one folds the span and records, per
-# key, the line number of its last accepted opening transition; pass two
-# classifies the span and emits in source order, using those line numbers to
-# report each live opening exactly once.
+# key, the line number of its last accepted opening transition, dropping a key's
+# origin the moment the span closes it; pass two classifies the span and emits in
+# source order, using those line numbers to report each live opening exactly once.
+# Pruning on close keeps the origin set bounded by the keys currently open rather
+# than by every key ever opened, so recording an opening is never quadratic.
 _FM_SPAN_ORIGINS=
 _fm_span_origin_record() {  # <key> <line-number>
   local key=$1 number=$2 line out='' sep=''
@@ -1764,6 +1753,19 @@ EOF
   fi
 }
 
+_fm_span_origin_forget() {  # <key>
+  local key=$1 line out='' sep=''
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in "$key"$'\t'*) continue ;; esac
+    out="${out}${sep}${line}"
+    sep=$'\n'
+  done <<EOF
+$_FM_SPAN_ORIGINS
+EOF
+  _FM_SPAN_ORIGINS=$out
+}
+
 _fm_span_origin_line_for() {  # <key> -> last opening line number, or empty
   local line
   while IFS= read -r line; do
@@ -1776,23 +1778,6 @@ EOF
   return 0
 }
 
-# Keep only origins for keys still open at the span's end. A key opened and then
-# resolved inside the same span has no live opening, so it must not surface - the
-# same conclusion status_open_decisions reaches for the whole log.
-_fm_span_origin_keep_open_keys() {  # <final-open-set>
-  local line key out='' sep=''
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    key=${line%%$'\t'*}
-    _fm_open_set_has "$1" "$key" || continue
-    out="${out}${sep}${line}"
-    sep=$'\n'
-  done <<EOF
-$_FM_SPAN_ORIGINS
-EOF
-  _FM_SPAN_ORIGINS=$out
-}
-
 _fm_span_fold_last_open() {  # <chunk-file> <resolve> <held>
   local line open='' number=0
   _FM_SPAN_ORIGINS=
@@ -1800,10 +1785,11 @@ _fm_span_fold_last_open() {  # <chunk-file> <resolve> <held>
     number=$((number + 1))
     _fm_fold_line_state "$open" "$line" "$2" "$3"
     open=$_FM_FOLD_OPEN
-    [ "$_FM_FOLD_OP" = open ] || continue
-    _fm_span_origin_record "$_FM_FOLD_KEY" "$number"
+    case "$_FM_FOLD_OP" in
+      open)  _fm_span_origin_record "$_FM_FOLD_KEY" "$number" ;;
+      close) _fm_span_origin_forget "$_FM_FOLD_KEY" ;;
+    esac
   done < "$1"
-  _fm_span_origin_keep_open_keys "$open"
 }
 
 status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
