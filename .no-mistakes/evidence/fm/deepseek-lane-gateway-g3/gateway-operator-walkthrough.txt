@@ -1,0 +1,207 @@
+================================================================================
+ DeepSeek V4.1 Flash lane gateway - operator walkthrough
+ (real bin/ scripts; fixture route picker + fake provider upstream on loopback)
+================================================================================
+
+# 1. An operator starts the SECOND gateway. Port 8080 (the shared account pool) is refused by construction.
+
+$ bin/fm-deepseek-gateway.sh start --port 8080
+fm-deepseek-gateway: port 8080 is the shared Claude account-pool gateway; this gateway must not use it
+exit=2
+
+$ bin/fm-deepseek-gateway.sh start --port 55711 --pick ~/.config/llm-route/pick.py
+started: pid 71309
+ready: http://127.0.0.1:55711 model deepseek-v4.1-flash
+health: status=ok route_ok=True provider=openrouter slot=offpeak upstream_model=deepseek/deepseek-v4.1-flash key_present=True requests=0 errors=0
+exit=0
+
+# 2. The reason a gateway exists at all: Claude Code fetches the model list at session start.
+
+#    This is the exact request Claude Code 2.1.274 makes, verbatim user agent.
+
+$ curl -H 'x-api-key: <token>' -A 'claude-code/2.1.274' http://127.0.0.1:55711/v1/models
+{
+    "data": [
+        {
+            "type": "model",
+            "id": "deepseek-v4.1-flash",
+            "display_name": "DeepSeek V4.1 Flash (routed)",
+            "created_at": "2026-09-18T06:14:30Z",
+            "object": "model",
+            "owned_by": "fm-deepseek-gateway"
+        },
+        {
+            "type": "model",
+            "id": "deepseek-v4.1-flash[1m]",
+            "display_name": "DeepSeek V4.1 Flash (1M context)",
+            "created_at": "2026-09-18T06:14:30Z",
+            "object": "model",
+            "owned_by": "fm-deepseek-gateway"
+        }
+    ],
+    "has_more": false,
+    "first_id": "deepseek-v4.1-flash",
+    "last_id": "deepseek-v4.1-flash[1m]"
+}
+
+# 3. An unauthenticated caller on the same loopback port cannot spend provider cash.
+
+$ curl -o /dev/null -w '%{http_code}' http://127.0.0.1:55711/v1/models          # no token
+401
+
+$ curl -o /dev/null -w '%{http_code}' http://127.0.0.1:55711/status             # no token
+401
+
+# 4. Liveness is the one open path, and it runs no subprocess (no picker, no provider key command).
+
+$ curl http://127.0.0.1:55711/healthz                                            # no token
+{
+    "schema": "fm-deepseek-gateway.v1",
+    "alive": true,
+    "pid": 71309,
+    "started_at": "2026-09-18T06:14:30Z",
+    "uptime_s": 6.887,
+    "model": "deepseek-v4.1-flash",
+    "models": [
+        "deepseek-v4.1-flash",
+        "deepseek-v4.1-flash[1m]"
+    ],
+    "requests_served": 0,
+    "errors": 0
+}
+
+# 5. The resolved route lives behind the token: provider, slot, upstream model, key presence.
+
+$ curl -H 'x-api-key: <token>' http://127.0.0.1:55711/status
+{
+    "schema": "fm-deepseek-gateway.v1",
+    "alive": true,
+    "pid": 71309,
+    "started_at": "2026-09-18T06:14:30Z",
+    "uptime_s": 7.384,
+    "model": "deepseek-v4.1-flash",
+    "models": [
+        "deepseek-v4.1-flash",
+        "deepseek-v4.1-flash[1m]"
+    ],
+    "requests_served": 0,
+    "errors": 0,
+    "status": "ok",
+    "provider": "openrouter",
+    "slot": "offpeak",
+    "upstream_model": "deepseek/deepseek-v4.1-flash",
+    "base_url": "http://127.0.0.1:55709/api/v1",
+    "key_present": true,
+    "route_ok": true
+}
+
+# 6. A real agentic turn: an advertised model id, a tool definition, and a cache_control marker.
+
+$ curl -H 'x-api-key: <token>' -d @turn.json http://127.0.0.1:55711/v1/messages
+{
+    "id": "msg_upstream",
+    "type": "message",
+    "role": "assistant",
+    "model": "deepseek/deepseek-v4.1-flash",
+    "content": [
+        {
+            "type": "tool_use",
+            "id": "tu_1",
+            "name": "Bash",
+            "input": {
+                "command": "cat sample.txt"
+            }
+        }
+    ],
+    "stop_reason": "tool_use",
+    "usage": {
+        "input_tokens": 200,
+        "output_tokens": 20,
+        "cache_read_input_tokens": 800
+    }
+}
+
+#    What the provider actually received - the model id is the ONLY field rewritten;
+
+#    tools and cache_control markers passed through, and the key went upstream (never to the log).
+
+$ cat upstream-requests.log   # recorded by the fake provider
+{
+    "path": "/api/v1/messages",
+    "authorization": "Bearer <provider-key-redacted>",
+    "model": "deepseek/deepseek-v4.1-flash",
+    "tools": [
+        "Bash"
+    ],
+    "cache_control_markers": 1,
+    "stream": false
+}
+
+# 7. Streaming is relayed frame by frame (what an interactive lane sees).
+
+$ curl -N -H 'x-api-key: <token>' -d '{..."stream":true}' http://127.0.0.1:55711/v1/messages
+event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":40,"cache_read_input_tokens":1600,"output_tokens":0}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello from DeepSeek"}}
+
+event: message_delta
+data: {"type":"message_delta","usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+
+# 8. A model id this gateway never advertised is not forwarded upstream.
+
+$ curl -H 'x-api-key: <token>' -d '{"model":"deepseek-v4.1-flash-turbo",...}' http://127.0.0.1:55711/v1/messages
+HTTP 404
+{
+    "type": "error",
+    "error": {
+        "type": "not_found_error",
+        "message": "deepseek-v4.1-flash-turbo is not served by this gateway; it advertises deepseek-v4.1-flash, deepseek-v4.1-flash[1m]"
+    }
+}
+
+# 9. The operator verbs: health (exit 0 only when the route and key resolve), logs, env.
+
+$ bin/fm-deepseek-gateway.sh health --port 55711
+health: status=ok route_ok=True provider=openrouter slot=offpeak upstream_model=deepseek/deepseek-v4.1-flash key_present=True requests=3 errors=1
+exit=0
+
+$ bin/fm-deepseek-gateway.sh logs --lines 4
+{"at": "2026-09-18T06:14:36Z", "models": ["deepseek-v4.1-flash", "deepseek-v4.1-flash[1m]"], "outcome": "models", "query": "", "schema": "fm-deepseek-gateway.v1", "user_agent": "claude-code/2.1.274"}
+{"at": "2026-09-18T06:14:38Z", "cost_usd": 5.4e-05, "duration_ms": 509, "model": "deepseek-v4.1-flash", "outcome": "ok", "provider": "openrouter", "schema": "fm-deepseek-gateway.v1", "slot": "offpeak", "stream": false, "upstream_model": "deepseek/deepseek-v4.1-flash", "upstream_status": 200, "usage": {"cache_read_input_tokens": 800, "input_tokens": 200, "output_tokens": 20}}
+{"at": "2026-09-18T06:14:39Z", "cost_usd": 3.5e-05, "duration_ms": 571, "model": "deepseek-v4.1-flash", "outcome": "ok", "provider": "openrouter", "schema": "fm-deepseek-gateway.v1", "slot": "offpeak", "stream": true, "upstream_model": "deepseek/deepseek-v4.1-flash", "upstream_status": 200, "usage": {"cache_read_input_tokens": 1600, "input_tokens": 40, "output_tokens": 9}}
+{"at": "2026-09-18T06:14:40Z", "outcome": "unknown-model", "requested_model": "deepseek-v4.1-flash-turbo", "schema": "fm-deepseek-gateway.v1"}
+
+$ bin/fm-deepseek-gateway.sh env --port 55711
+# Source or export these in the lane's Claude Code environment. The base URL and
+# token are what point the lane at this gateway; the model id is what
+# `/model` accepts once Claude Code has discovered it.
+export ANTHROPIC_BASE_URL=http://127.0.0.1:55711
+export ANTHROPIC_AUTH_TOKEN=<local-token-redacted>
+# Claude Code caches a gateway's model list per base URL where it keeps one.
+# After changing the advertised models, clear any cached copy so a lane cannot
+# keep discovering the old list:
+#   rm -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cache/gateway-models.json"
+# Then select the model in the lane, adding the 1M marker for the full window:
+#   /model deepseek-v4.1-flash
+#   /model deepseek-v4.1-flash[1m]
+
+#    No secret anywhere in the request log or the process output:
+
+$ grep -c 'sk-fake-provider-key-do-not-log' state/fm-deepseek-gateway.log state/fm-deepseek-gateway.out
+/tmp/fm-deepseek-evidence/work/home/state/fm-deepseek-gateway.log:0
+/tmp/fm-deepseek-evidence/work/home/state/fm-deepseek-gateway.out:0
+
+$ bin/fm-deepseek-gateway.sh stop
+stopped: pid 71309
+exit=0
+
+$ curl -o /dev/null -w '%{http_code}' http://127.0.0.1:55711/healthz   # after stop
+curl: (7) Failed to connect to 127.0.0.1 port 55711 after 0 ms: Couldn't connect to server
+000
+(connection refused - the port is released)

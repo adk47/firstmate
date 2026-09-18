@@ -1,0 +1,128 @@
+================================================================================
+ Rolling one lane onto the DeepSeek gateway - operator walkthrough
+ (real bin/fm-lane-model-switch.sh; a fake Orca CLI records every keystroke)
+
+ Run with FM_GATE_REFUSE_BYPASS=1, the documented test-harness escape hatch in
+ bin/fm-gate-refuse-lib.sh: this transcript was produced from a no-mistakes gate
+ worktree, which the script otherwise refuses to let drive a fleet. Every lane
+ below is a scratch fixture under a temp home; no roster lane is touched.
+================================================================================
+
+# THE ROSTER. lane-cron-owner runs Claude Code on Opus 1M and owns /loop wakeups
+
+# plus a CronCreate tick; lane-clean owns neither.
+
+$ cat data/cmux-takeover/expected-loops.json
+[{"term": "term-lane-cron-owner", "expected": ["30m drift sweep", "6h fleet digest"]},
+ {"term": "term-lane-clean", "expected": []}]
+
+# 1. The captain plans the rollout first: which lanes would this home refuse?
+
+$ for m in state/*.meta; do fm-lane-model-switch.sh <id> gateway --gateway --dry-run; done
+  in scope: lane-clean
+  refused: lane-cron-owner
+
+# 2. The refusal in full - it names the lane, what it owns, and where it stays.
+
+$ bin/fm-lane-model-switch.sh lane-cron-owner gateway --gateway
+fm-lane-model-switch: lane-cron-owner owns 2 /loop wakeup(s) recorded in /tmp/fm-deepseek-evidence/lanework/home/data/cmux-takeover/expected-loops.json for endpoint term-lane-cron-owner; a first gateway repoint only takes effect at a relaunch and a relaunch drops them, so lane-cron-owner stays on the shared account pool until it is intentionally rotated
+exit=2
+
+$ ls state/lane-cron-owner.gateway.env        # nothing was recorded
+ls: /tmp/fm-deepseek-evidence/lanework/home/state/lane-cron-owner.gateway.env: No such file or directory
+
+$ grep model= state/lane-cron-owner.meta      # the lane is still on Opus
+model=opus[1m]
+
+$ grep 'terminal send' orca.log               # nothing was typed into the lane
+(no `orca terminal send` at all - nothing was typed into any lane)
+
+# 3. An in-scope lane. The repoint is RECORDED for its next launch and the lane is left alone:
+
+#    a running Claude Code session reads its endpoint at startup and cannot be repointed in place.
+
+$ bin/fm-lane-model-switch.sh lane-clean gateway --gateway
+gateway: recorded http://127.0.0.1:56163 for lane-clean in /tmp/fm-deepseek-evidence/lanework/home/state/lane-clean.gateway.env
+gateway: the repoint takes effect at the lane's next launch; a running Claude Code session keeps its current endpoint
+gateway: lane-clean has no recorded repoint, so its running session is not on this gateway and no /model is sent to it
+gateway: relaunch that lane with the recorded endpoint, then select the model in it:
+gateway:   set -a; . /tmp/fm-deepseek-evidence/lanework/home/state/lane-clean.gateway.env; set +a
+gateway:   /model deepseek-v4.1-flash
+ticks: no tick source recorded for lane-clean; add cron=<expr> lines to /tmp/fm-deepseek-evidence/lanework/home/state/lane-clean.meta or a /tmp/fm-deepseek-evidence/lanework/home/data/lane-clean/crons file, then verify the lane actually fires (a model switch can skip the next tick)
+exit=0
+
+$ cat state/lane-clean.gateway.env            # what the next launch will read
+# Source or export these in the lane's Claude Code environment. The base URL and
+# token are what point the lane at this gateway; the model id is what
+# `/model` accepts once Claude Code has discovered it.
+export ANTHROPIC_BASE_URL=http://127.0.0.1:56163
+export ANTHROPIC_AUTH_TOKEN=<local-token-redacted>
+# Claude Code caches a gateway's model list per base URL where it keeps one.
+# After changing the advertised models, clear any cached copy so a lane cannot
+# keep discovering the old list:
+#   rm -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cache/gateway-models.json"
+# Then select the model in the lane, adding the 1M marker for the full window:
+#   /model deepseek-v4.1-flash
+#   /model deepseek-v4.1-flash[1m]
+
+$ stat -f '%Lp' state/lane-clean.gateway.env  # it carries a token, so 0600
+600
+
+$ grep 'terminal send' orca.log               # still nothing typed into any lane
+(no `orca terminal send` at all - nothing was typed into any lane)
+
+# 4. The operator relaunches that lane with the recorded exports. NOW the same command
+
+#    switches it in place, because the recorded repoint is the evidence its session is on the gateway.
+
+$ bin/fm-lane-model-switch.sh lane-clean gateway --gateway
+gateway: recorded http://127.0.0.1:56163 for lane-clean in /tmp/fm-deepseek-evidence/lanework/home/state/lane-clean.gateway.env
+gateway: the repoint takes effect at the lane's next launch; a running Claude Code session keeps its current endpoint
+switched: lane-clean opus[1m] -> deepseek-v4.1-flash (verified on screen)
+kicked: resume text sent to lane-clean
+ticks: no tick source recorded for lane-clean; add cron=<expr> lines to /tmp/fm-deepseek-evidence/lanework/home/state/lane-clean.meta or a /tmp/fm-deepseek-evidence/lanework/home/data/lane-clean/crons file, then verify the lane actually fires (a model switch can skip the next tick)
+exit=0
+
+$ grep 'terminal send' orca.log               # exactly what reached the lane
+  orca terminal send --terminal term-lane-clean --text /model deepseek-v4.1-flash --json
+  orca terminal send --terminal term-lane-clean --text  --enter --json
+  orca terminal send --terminal term-lane-clean --text MODEL SWITCH: this lane is now on deepseek-v4.1-flash. Resume your standing goal without waiting for a human, and re-check that your scheduled ticks are still armed - a model switch can skip the next one. Report it if anything looks wrong after the switch. --json
+  orca terminal send --terminal term-lane-clean --text  --enter --json
+
+$ cat state/lane-clean.meta                   # the switch is recorded
+model=deepseek-v4.1-flash
+model_switch_at=2026-09-18T06:22:03Z
+model_switch_from=opus[1m]
+model_switch_to=deepseek-v4.1-flash
+model_switch_gateway=http://127.0.0.1:56163
+
+# 5. Safety: a lane whose composer holds unsubmitted text is never typed into.
+
+#    A dry run over it reports BOTH branches and writes nothing (exit 0).
+
+$ bin/fm-lane-model-switch.sh lane-busy 'deepseek-v4.1-flash' --dry-run
+dry-run: composer verdict is unknown; the real run would save the pending text, interrupt, re-verify, then switch opus[1m] -> deepseek-v4.1-flash if it verifies empty and refuse if it does not (a dry run saves nothing)
+ticks: no tick source recorded for lane-busy; add cron=<expr> lines to /tmp/fm-deepseek-evidence/lanework/home/state/lane-busy.meta or a /tmp/fm-deepseek-evidence/lanework/home/data/lane-busy/crons file, then verify the lane actually fires (a model switch can skip the next tick)
+exit=0
+
+$ grep 'terminal send' orca.log               # a dry run types nothing, sends no Ctrl-C
+(no `orca terminal send` at all - nothing was typed into any lane)
+
+#    And the real run over that same busy composer, when it will not clear:
+
+$ bin/fm-lane-model-switch.sh lane-busy 'deepseek-v4.1-flash'
+pending composer saved: /tmp/fm-deepseek-evidence/lanework/home/data/lane-model-switch/pending-composer/lane-busy-2026-09-18T06:22:38Z.txt
+fm-lane-model-switch: the composer of lane-busy still does not verify empty (verdict=unknown); /model was NOT sent - whatever was typed is saved at /tmp/fm-deepseek-evidence/lanework/home/data/lane-model-switch/pending-composer/lane-busy-2026-09-18T06:22:38Z.txt
+exit=2
+
+$ grep 'terminal send' orca.log      # only the Ctrl-C interrupt; no /model, no resume text
+orca terminal send --terminal term-lane-busy --interrupt --json
+
+$ cat data/lane-model-switch/pending-composer/<lane>-<ts>.txt   # the text is saved, not lost
+<home>/data/lane-model-switch/pending-composer/lane-busy-2026-09-18T06:22:38Z.txt
+earlier output
+❯ deploy to prod --now
+
+# 6. Nothing in this change switches a roster lane: every lane above is a scratch fixture,
+
+#    and the real roster is touched only when an operator runs the command for one lane.
