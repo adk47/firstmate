@@ -45,7 +45,12 @@
 # FM_TOOL_UPDATE_INTERVAL (default 900, 0 disables the gate, otherwise 60..86400)
 # and stays silent in between. Each probe is bounded by
 # FM_TOOL_UPDATE_PROBE_SECS (default 5, valid 1..30) and a whole sweep by
-# FM_TOOL_UPDATE_BUDGET_SECS (default 20, valid 1..120).
+# FM_TOOL_UPDATE_BUDGET_SECS (default 20, valid 1..120). Every probe is also
+# bounded by what the sweep has left over and above a floor reserved for each
+# tool still to be checked, so one slow tool cannot spend the whole sweep and
+# leave the tools after it unasked while every one of them keeps a floor to
+# answer in. A tool that cannot answer inside its bound is reported as that one
+# tool's own check failure.
 #
 # The sweep has to finish inside the watcher's own per check bound, because a run
 # the watcher kills prints nothing and writes no record, so it would repeat that
@@ -57,11 +62,25 @@
 # refused outright.
 #
 # The report record state/.tool-updates is written only when a sweep runs to its
-# end, and it carries the whole finding set the last report was made from,
-# uncut, so the same pending update is reported once rather than on every poll
-# while a new finding that lands past the one-line cut is still news. A sweep
-# killed part way through leaves no record and is retried, instead of
-# suppressing its finding.
+# end, and it carries the whole finding set the sweep found, uncut, so a new
+# finding that lands past the one-line cut is still news. A sweep killed part way
+# through leaves no record and is retried, instead of suppressing its finding.
+#
+# What makes a sweep news is the SET of conditions it found, never the report
+# prose. Two identity sets are recorded. The pending set holds one identity per
+# tool with an available update, `<name>@<target>`, and follows the condition: a
+# tool that stops being pending is absorbed silently, so its next pending update
+# is news again. The notice set holds one identity per check failure, overrun, or
+# unusable registry, built from a fixed code instead of the sentence around it,
+# and is latched: each notice reports once for this record and never again, so a
+# reworded clause, a reordered report, which tool an overrun happens to name,
+# and a condition that clears and returns cannot wake firstmate a second time.
+# A probe that ran out of its bound collapses into the single overrun identity
+# rather than becoming that tool's own check failure, because which tool a bound
+# lands on is a function of the load the sweep ran under and not of the tool, and
+# a host under load must not be able to keep inventing new findings. The record
+# always carries the current finding set, so the durable state stays accurate
+# even when a latched notice does not report.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
@@ -77,7 +96,7 @@ CHECK_ID=tool-updates
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
-RECORD_SCHEMA=fm-tool-updates-v1
+RECORD_SCHEMA=fm-tool-updates-v2
 # Wider than the digest default because one finding names two absolute paths and
 # their two versions, and several tools can report in the same sweep.
 MAX_LINE=1000
@@ -191,7 +210,10 @@ record_epoch_now() {
 real_epoch() { date +%s; }
 
 FINDINGS=
+PENDING_IDS=
+NOTICE_IDS=
 DEADLINE=0
+TOOLS_LEFT=0
 INCOMPLETE_REPORTED=0
 
 # Each finding is flattened to a single line here, because the whole report must
@@ -206,29 +228,95 @@ emit() {
   fi
 }
 
-budget_exhausted() {
+# One identity as it is stored and compared: a single token with no separator
+# and no surrounding space, so the identity an entry compares as is never a
+# function of the sentence printed beside it. Written with parameter expansion
+# rather than subprocesses because every sweep identity goes through it.
+identity_token() {
+  local text=$1
+  text=${text//;/ }
+  text=${text//$'\t'/ }
+  text=${text//$'\r'/ }
+  text=${text//$'\n'/ }
+  while [[ $text == *'  '* ]]; do
+    text=${text//  / }
+  done
+  while [[ $text == ' '* ]]; do
+    text=${text# }
+  done
+  while [[ $text == *' ' ]]; do
+    text=${text% }
+  done
+  printf '%s' "$text"
+}
+
+# Add one identity to the `;` joined set unless it is already there. The set is
+# kept sorted as it is built, so it is already in the one form both sides of a
+# comparison use and needs no separate canonical pass.
+id_add() {  # <set> <identity>
+  local set=$1 id item out='' inserted=0
+  local -a items
+  id=$(identity_token "$2")
+  [ -n "$id" ] || { printf '%s' "$set"; return 0; }
+  IFS=';' read -r -a items <<< "$set"
+  for item in "${items[@]}"; do
+    [ -n "$item" ] || continue
+    if [ "$item" = "$id" ]; then
+      printf '%s' "$set"
+      return 0
+    fi
+    if [ "$inserted" -eq 0 ] && [[ $id < $item ]]; then
+      out="${out:+$out;}$id"
+      inserted=1
+    fi
+    out="${out:+$out;}$item"
+  done
+  [ "$inserted" -eq 1 ] || out="${out:+$out;}$id"
+  printf '%s' "$out"
+}
+
+# A finding that the pending set carries: a tool with an available update,
+# named with the version or revision that update would reach.
+emit_pending() {  # <name> <target> <text>
+  PENDING_IDS=$(id_add "$PENDING_IDS" "$1@$2")
+  emit "$3"
+}
+
+# Every other finding: a check failure, an overrun, or an unusable registry. Its
+# identity is the condition's own kind, so which tool a shared overrun happened
+# to stop before is not a new condition.
+emit_notice() {  # <identity> <text>
+  NOTICE_IDS=$(id_add "$NOTICE_IDS" "$1")
+  emit "$2"
+}
+
+sweep_exhausted() {
   [ "$(real_epoch)" -ge "$DEADLINE" ]
 }
 
-# True while the sweep budget still has room for another probe. When it does not,
+# True while the sweep budget still has room for another tool. When it does not,
 # it records once which tool the sweep did not finish, so a sweep that cannot
 # finish says so rather than being killed by the watcher with nothing printed.
 budget_allows() {
   local name=$1
-  budget_exhausted || return 0
+  sweep_exhausted || return 0
   if [ "$INCOMPLETE_REPORTED" -eq 0 ]; then
     INCOMPLETE_REPORTED=1
-    emit "check incomplete: the time budget ran out before $name"
+    emit_notice incomplete "check incomplete: the time budget ran out before $name"
   fi
   return 1
 }
 
-# The bound for one probe: the probe bound, cut down to whatever the sweep
-# budget has left, so no probe can run past the end of the sweep. Never below
+# The bound for one probe: the probe bound, cut down to whatever the sweep has
+# left once a floor is reserved for every tool still to be checked, so no probe
+# can run past the end of the sweep and no later tool is left with no time to
+# answer in. TOOLS_LEFT already excludes the tool being probed. Never below
 # PROBE_MIN_SECS, because fm_run_timed treats a non-positive bound as no bound.
 probe_bound() {
-  local left
+  local left reserve
   left=$((DEADLINE - $(real_epoch)))
+  reserve=$((TOOLS_LEFT * PROBE_MIN_SECS))
+  left=$((left - reserve))
   if [ "$left" -lt "$PROBE_MIN_SECS" ]; then
     printf '%s\n' "$PROBE_MIN_SECS"
   elif [ "$left" -lt "$PROBE_SECS" ]; then
@@ -241,6 +329,15 @@ probe_bound() {
 # First dotted number in the text, so "herdr 0.8.2" and "v1.46.0" both work.
 parse_version() {
   printf '%s' "$1" | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1
+}
+
+# The version an announcement would reach: the last dotted number on the line the
+# pattern matched, because a tool that names both its current and its target
+# version writes them in that order and a pattern often captures only the opening
+# words. A matched line with no version leaves this empty, and that tool is then
+# identified by its name alone.
+announce_target() {
+  printf '%s' "$1" | grep -oE '[0-9]+(\.[0-9]+)+' | tail -n 1
 }
 
 # version_newer <a> <b>: true when version a is numerically newer than b.
@@ -405,34 +502,43 @@ command_findings() {
   local name=$1 command_name=$2 args_joined=$3 announce=$4 announce_args=$5
   local hit out version matched announce_out status
   local resolved_path='' resolved_version='' resolved_out=''
-  local best_path='' best_version='' unreadable='' hits=''
+  local best_path='' best_version='' unreadable='' overrun='' hits=''
 
   # This tool's announcement source is dead if its pattern cannot be used, which
   # is reported here, for this tool alone, so the rest of the sweep still runs.
   if [ -n "$announce" ] && ! announce_pattern_usable "$announce"; then
-    emit "$name check failed: announce_pattern is not a usable extended regular expression"
+    emit_notice "check-failed:$name:announce-pattern" "$name check failed: announce_pattern is not a usable extended regular expression"
     announce=
   fi
 
   hits=$(path_hits "$command_name")
   if [ -z "$hits" ]; then
-    emit "$name check failed: $command_name is not on PATH"
+    emit_notice "check-failed:$name:not-on-path" "$name check failed: $command_name is not on PATH"
     return 0
   fi
 
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
-    if budget_exhausted; then
-      emit "$name check failed: the time budget ran out before every copy answered"
+    if sweep_exhausted; then
+      overrun=1
       break
     fi
     # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
     out=$(probe_output "$hit" $args_joined)
+    status=$?
     version=$(parse_version "$out")
     if [ -z "$resolved_path" ]; then
       resolved_path=$hit
       resolved_version=$version
       resolved_out=$out
+    fi
+    if [ "$status" -eq 124 ]; then
+      # A copy killed by its own bound did not answer, which is a property of
+      # the sweep's budget and the load it ran under, never of the tool. It is
+      # reported as the one overrun condition instead of as this tool's own
+      # check failure, so a loaded host cannot keep inventing new findings.
+      overrun=1
+      continue
     fi
     if [ -z "$version" ]; then
       [ -n "$unreadable" ] || unreadable=$hit
@@ -446,6 +552,12 @@ command_findings() {
 $hits
 EOF
 
+  # The one overrun condition, whether a copy was killed by its bound or the
+  # sweep was already out of budget before a copy was asked.
+  if [ -n "$overrun" ]; then
+    emit_notice incomplete "$name check failed: the time budget ran out before every copy answered"
+  fi
+
   if [ -n "$announce" ] && [ -n "$resolved_path" ]; then
     # A tool does not have to announce its update on the command that reports its
     # version: no-mistakes prints its version for --version but announces a new
@@ -453,10 +565,10 @@ EOF
     # and it is asked of the copy PATH actually resolves.
     announce_out=$resolved_out
     if [ "$announce_args" != "$args_joined" ]; then
-      if budget_exhausted; then
+      if sweep_exhausted; then
         # The version probe's output cannot carry the announcement, so searching
         # it would present a source that was never asked as a clean result.
-        emit "$name check failed: the time budget ran out before the update announcement was checked"
+        emit_notice incomplete "$name check failed: the time budget ran out before the update announcement was checked"
         announce_out=
       else
         # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
@@ -465,7 +577,9 @@ EOF
         if [ "$status" -eq 124 ]; then
           # A source that was asked and never answered is not a source that had
           # nothing to say. The one that answers with nothing stays silent below.
-          emit "$name check failed: $resolved_path did not answer when asked for its update announcement"
+          # A source that ran out of its bound is the same overrun condition as a
+          # killed copy, not a property of the tool.
+          emit_notice incomplete "$name check failed: $resolved_path did not answer when asked for its update announcement"
           announce_out=
         fi
       fi
@@ -473,30 +587,38 @@ EOF
     if [ -n "$announce_out" ]; then
       # Not a pipeline, so grep's own status is still readable here: a pattern
       # grep cannot use is a check failure, never read as nothing to announce.
+      # The line the pattern matched carries the announcement's own target
+      # version even when the pattern captures only its opening words, so the
+      # version is read from that line while the report keeps the exact matched
+      # clause.
+      matched_line=$(grep -E -- "$announce" <<< "$announce_out" 2>/dev/null | head -n 1)
       matched=$(grep -oE -- "$announce" <<< "$announce_out" 2>/dev/null)
       status=$?
       if [ "$status" -gt 1 ]; then
-        emit "$name check failed: announce_pattern is not a usable extended regular expression"
+        emit_notice "check-failed:$name:announce-pattern" "$name check failed: announce_pattern is not a usable extended regular expression"
       elif [ -n "$matched" ]; then
-        emit "$name update available: $(printf '%s\n' "$matched" | head -n 1)"
+        emit_pending "$name" "$(announce_target "$matched_line")" \
+          "$name update available: $(printf '%s\n' "$matched" | head -n 1)"
       fi
     fi
   fi
 
   if [ -z "$resolved_version" ]; then
-    # No copy was probed at all when the path is empty, and the budget report
-    # already covers that, so do not blame a copy that was never asked.
-    [ -z "$resolved_path" ] || emit "$name check failed: $resolved_path did not report a version"
+    # No copy was probed at all when the path is empty, and the overrun report
+    # already covers a killed copy, so do not blame a copy that was never asked.
+    [ -z "$unreadable" ] || emit_notice "check-failed:$name:no-version:$unreadable" \
+      "$name check failed: $unreadable did not report a version"
     return 0
   fi
 
   if [ -n "$best_version" ] && [ "$best_path" != "$resolved_path" ] \
     && version_newer "$best_version" "$resolved_version"; then
-    emit "$name update not in effect: PATH resolves $resolved_version at $resolved_path but $best_version is installed at $best_path"
+    emit_pending "$name" "$best_version" \
+      "$name update not in effect: PATH resolves $resolved_version at $resolved_path but $best_version is installed at $best_path"
   fi
 
   if [ -n "$unreadable" ]; then
-    emit "$name check failed: $unreadable did not report a version"
+    emit_notice "check-failed:$name:no-version:$unreadable" "$name check failed: $unreadable did not report a version"
   fi
   return 0
 }
@@ -515,7 +637,7 @@ GIT_PROBE_NOT_ISSUED=3
 git_probe() {
   local repo=$1
   shift
-  budget_exhausted && return "$GIT_PROBE_NOT_ISSUED"
+  sweep_exhausted && return "$GIT_PROBE_NOT_ISSUED"
   fm_run_timed "$(probe_bound)" git -C "$repo" "$@"
 }
 
@@ -525,11 +647,11 @@ git_probe_answered() {
   local status=$1 name=$2 subject=$3 question=$4
   case "$status" in
     "$GIT_PROBE_NOT_ISSUED")
-      emit "$name check failed: the time budget ran out before $subject was asked $question"
+      emit_notice incomplete "$name check failed: the time budget ran out before $subject was asked $question"
       return 1
       ;;
     124)
-      emit "$name check failed: $subject did not answer $question"
+      emit_notice incomplete "$name check failed: $subject did not answer $question"
       return 1
       ;;
   esac
@@ -545,11 +667,11 @@ git_findings() {
   local status remote_sha local_sha local_label count short symref
 
   if ! command -v git >/dev/null 2>&1; then
-    emit "$name check failed: git is not installed"
+    emit_notice "check-failed:$name:git-missing" "$name check failed: git is not installed"
     return 0
   fi
   if [ ! -d "$repo" ]; then
-    emit "$name check failed: $repo is not a directory"
+    emit_notice "check-failed:$name:not-a-dir:$repo" "$name check failed: $repo is not a directory"
     return 0
   fi
   budget_allows "$name" || return 0
@@ -557,7 +679,7 @@ git_findings() {
   status=$?
   git_probe_answered "$status" "$name" "$repo" "whether it is a git repository" || return 0
   if [ "$status" -ne 0 ]; then
-    emit "$name check failed: $repo is not a git repository"
+    emit_notice "check-failed:$name:not-a-repo:$repo" "$name check failed: $repo is not a git repository"
     return 0
   fi
 
@@ -576,7 +698,7 @@ git_findings() {
       | awk '$1 == "ref:" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
   fi
   if [ -z "$branch" ]; then
-    emit "$name check failed: cannot resolve the default branch of $remote in $repo"
+    emit_notice "check-failed:$name:no-default-branch:$repo" "$name check failed: cannot resolve the default branch of $remote in $repo"
     return 0
   fi
 
@@ -587,12 +709,12 @@ git_findings() {
     # The probe itself failed, so nothing at all is known about the branch. An
     # offline host and a deleted branch are different problems, and reporting a
     # missing branch here would name a cause that was never established.
-    emit "$name check failed: $remote could not be reached or read from $repo"
+    emit_notice "check-failed:$name:remote-unreadable:$repo" "$name check failed: $remote could not be reached or read from $repo"
     return 0
   fi
   remote_sha=$(printf '%s\n' "$remote_sha" | awk 'NR == 1 { print $1 }')
   if [ -z "$remote_sha" ]; then
-    emit "$name check failed: $remote has no branch $branch"
+    emit_notice "check-failed:$name:no-branch:$remote:$branch" "$name check failed: $remote has no branch $branch"
     return 0
   fi
 
@@ -607,7 +729,7 @@ git_findings() {
     local_sha=$(git_probe "$repo" rev-parse --verify --quiet HEAD 2>/dev/null)
     git_probe_answered "$?" "$name" "$repo" "where HEAD points" || return 0
     if [ -z "$local_sha" ]; then
-      emit "$name check failed: $repo has no commit to compare"
+      emit_notice "check-failed:$name:no-commit:$repo" "$name check failed: $repo has no commit to compare"
       return 0
     fi
     local_label='local HEAD'
@@ -633,24 +755,26 @@ git_findings() {
       ''|*[!0-9]*|0) count= ;;
     esac
     if [ -n "$count" ]; then
-      emit "$name update available: $local_label is $(commit_phrase "$count") behind $remote/$branch"
+      emit_pending "$name" "$short" "$name update available: $local_label is $(commit_phrase "$count") behind $remote/$branch"
       return 0
     fi
   fi
 
-  emit "$name update available: $remote/$branch is at $short which this copy does not have"
+  emit_pending "$name" "$short" "$name update available: $remote/$branch is at $short which this copy does not have"
   return 0
 }
 
 # --- report record ----------------------------------------------------------
 
 RECORD_EPOCH=0
-RECORD_REPORTED=
+RECORD_PENDING=
+RECORD_NOTICES=
 
 record_read() {
   local line first=1
   RECORD_EPOCH=0
-  RECORD_REPORTED=
+  RECORD_PENDING=
+  RECORD_NOTICES=
   [ -f "$RECORD" ] || return 0
   while IFS= read -r line; do
     if [ "$first" = 1 ]; then
@@ -666,30 +790,56 @@ record_read() {
           *) RECORD_EPOCH=$line ;;
         esac
         ;;
-      reported=*) RECORD_REPORTED=${line#reported=} ;;
+      pending=*) RECORD_PENDING=${line#pending=} ;;
+      notices=*) RECORD_NOTICES=${line#notices=} ;;
     esac
   done < "$RECORD"
   return 0
 }
 
+# <reported> is the whole finding set the sweep found, uncut, and is what an
+# operator reads to see the current state. <pending> is the pending identity set
+# as it stands now, and <notices> is the latched notice identity set, which only
+# grows, so a notice reports once for this record.
 record_write() {
-  local reported=$1 tmp
+  local reported=$1 pending=$2 notices=$3 tmp
   tmp=$(mktemp "$RECORD.XXXXXX" 2>/dev/null) || return 1
   chmod 0600 "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
   {
     printf '%s\n' "$RECORD_SCHEMA"
     printf 'epoch=%s\n' "$(record_epoch_now)"
+    printf 'pending=%s\n' "$pending"
+    printf 'notices=%s\n' "$notices"
     printf 'reported=%s\n' "$reported"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$RECORD" || { rm -f -- "$tmp"; return 1; }
   return 0
 }
 
+# True when the new set holds an identity the recorded set does not. Only an
+# added identity is news, and a pending identity that clears is absorbed
+# silently, so a returning pending update is news again.
+id_added() {  # <new ids> <recorded ids>
+  local new=$1 old=$2 item
+  local -a items
+  [ -n "$new" ] || return 1
+  IFS=';' read -r -a items <<< "$new"
+  for item in "${items[@]}"; do
+    [ -n "$item" ] || continue
+    case ";$old;" in
+      *";$item;"*) continue ;;
+    esac
+    return 0
+  done
+  return 1
+}
+
 # --- actions ----------------------------------------------------------------
 
 action_check() {
   local name command_name args_joined announce announce_args repo remote branch
-  local line now
+  local line now pending notices records notice_id
+  local -a new_notices
 
   [ -f "$CONFIG" ] || return 0
 
@@ -701,20 +851,30 @@ action_check() {
   fi
 
   DEADLINE=$(($(real_epoch) + BUDGET_SECS))
+  TOOLS_LEFT=0
 
   if [ -n "$BUDGET_CUT_FROM" ]; then
-    emit "sweep budget ${BUDGET_CUT_FROM}s cut to ${BUDGET_SECS}s to stay inside the watcher check timeout of ${CHECK_TIMEOUT}s"
+    emit_notice budget-cut "sweep budget ${BUDGET_CUT_FROM}s cut to ${BUDGET_SECS}s to stay inside the watcher check timeout of ${CHECK_TIMEOUT}s"
   fi
 
   if ! config_validate; then
-    emit "watched tool registry: $CONFIG_PROBLEM"
+    emit_notice registry "watched tool registry: $CONFIG_PROBLEM"
   else
+    # One read of the registry for the whole sweep, so every probe can leave a
+    # floor for each tool still to be checked instead of letting one slow tool
+    # spend the sweep.
+    records=$(config_records)
+    TOOLS_LEFT=0
+    while IFS= read -r _; do
+      [ -n "$_" ] && TOOLS_LEFT=$((TOOLS_LEFT + 1))
+    done <<< "$records"
     while IFS=$FIELD_SEP read -r name command_name args_joined announce announce_args repo remote branch; do
       [ -n "$name" ] || continue
       budget_allows "$name" || break
+      [ "$TOOLS_LEFT" -gt 0 ] && TOOLS_LEFT=$((TOOLS_LEFT - 1))
       [ -z "$command_name" ] || command_findings "$name" "$command_name" "$args_joined" "$announce" "$announce_args"
       [ -z "$repo" ] || git_findings "$name" "$repo" "$remote" "$branch"
-    done < <(config_records)
+    done <<< "$records"
   fi
 
   line=
@@ -726,16 +886,30 @@ action_check() {
     line=$FM_LINE_CAP_LINE
   fi
 
-  # The cut line is what gets printed, but the whole finding set is what decides
-  # whether this is news, because a finding that lands past the cut leaves the
-  # printed line unchanged and would otherwise be suppressed for good.
+  pending=$PENDING_IDS
+  # A notice is latched: once this record has seen one it never reports again,
+  # so the recorded notice set only grows and the current sweep is folded into
+  # it rather than replacing it.
+  notices=$RECORD_NOTICES
+  if [ -n "$NOTICE_IDS" ]; then
+    IFS=';' read -r -a new_notices <<< "$NOTICE_IDS"
+    for notice_id in "${new_notices[@]}"; do
+      [ -n "$notice_id" ] || continue
+      notices=$(id_add "$notices" "$notice_id")
+    done
+  fi
+
+  # The cut line is what gets printed, but what makes this sweep news is an
+  # identity the record does not already hold, so a finding that lands past the
+  # cut is still news and a reworded clause never is.
   #
   # Report before recording, so a record that cannot be written costs a repeated
   # report rather than a lost one.
-  if [ -n "$line" ] && [ "$FINDINGS" != "$RECORD_REPORTED" ]; then
+  if [ -n "$line" ] \
+    && { id_added "$pending" "$RECORD_PENDING" || id_added "$NOTICE_IDS" "$RECORD_NOTICES"; }; then
     printf '%s\n' "$line"
   fi
-  record_write "$FINDINGS" || true
+  record_write "$FINDINGS" "$pending" "$notices" || true
   return 0
 }
 

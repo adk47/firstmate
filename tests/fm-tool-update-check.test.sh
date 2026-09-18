@@ -81,6 +81,24 @@ SH
   chmod 0755 "$dir/$command_name"
 }
 
+# make_announcing_copy <dir> <command> <version-output> <announce-file>: a copy
+# that answers --version with a fixed version and any other command with the
+# current contents of <announce-file>, so a case can reword a tool's own update
+# announcement between sweeps without changing anything else about it.
+make_announcing_copy() {
+  local dir=$1 command_name=$2 text=$3 announce_file=$4
+  mkdir -p "$dir"
+  cat > "$dir/$command_name" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then
+  printf '%s\n' '$text'
+  exit 0
+fi
+cat '$announce_file'
+SH
+  chmod 0755 "$dir/$command_name"
+}
+
 write_config() {
   local home=$1
   shift
@@ -684,6 +702,118 @@ test_findings_are_reported_once_until_they_change() {
   pass "the same pending update is reported once, and a change is reported again"
 }
 
+test_a_reworded_finding_with_the_same_pending_set_is_silent() {
+  local home dir announce out report
+  # The dedupe input is the set of tools with a pending update and the version
+  # each would reach, never the prose around it. A tool that rewords its own
+  # announcement without changing what it is announcing is not news.
+  home=$(make_home reword)
+  dir="$TMP_ROOT/reword/bin"
+  announce="$TMP_ROOT/reword/announce.txt"
+  make_announcing_copy "$dir" "$TOOL" 'fixture 1.0.0' "$announce"
+  write_config "$home" "{\"tools\":[{\"name\":\"$TOOL\",\"command\":\"$TOOL\",\"announce_args\":[\"--help\"],\"announce_pattern\":\"a new version of $TOOL is available.*\"}]}"
+  out="$home/out.txt"
+
+  printf 'a new version of %s is available: v1.0.0 -> v2.0.0\n' "$TOOL" > "$announce"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "$TOOL update available: a new version of $TOOL is available: v1.0.0 -> v2.0.0" "the announcement was not reported at all, so this case proves nothing"
+
+  printf 'a new version of %s is available: v1.0.0 -> v2.0.0 (released today)\n' "$TOOL" > "$announce"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  [ ! -s "$out" ] || fail "a reworded finding with the same pending set woke firstmate again: $(cat "$out")"
+  # Not vacuous: the finding the record holds really did change, so the two
+  # sweeps differed in prose and only in prose.
+  assert_contains "$(cat "$home/state/.tool-updates")" "released today" "the record did not carry the reworded finding, so the two sweeps never differed"
+  pass "a reworded finding with the same pending set is silent"
+}
+
+test_a_tool_joining_the_pending_set_wakes_once() {
+  local home dir first second out
+  # The other side of the case above: a tool that newly has an update is news,
+  # and is news once rather than on every poll after it.
+  home=$(make_home join)
+  dir="$TMP_ROOT/join/bin"
+  first="$TMP_ROOT/join/first.txt"
+  second="$TMP_ROOT/join/second.txt"
+  make_announcing_copy "$dir" "$TOOL" 'fixture 1.0.0' "$first"
+  make_announcing_copy "$dir" "${TOOL}-second" 'fixture 1.0.0' "$second"
+  write_config "$home" "{\"tools\":[{\"name\":\"$TOOL\",\"command\":\"$TOOL\",\"announce_args\":[\"--help\"],\"announce_pattern\":\"a new version of $TOOL is available.*\"},{\"name\":\"second\",\"command\":\"${TOOL}-second\",\"announce_args\":[\"--help\"],\"announce_pattern\":\"a new version of second is available.*\"}]}"
+  out="$home/out.txt"
+
+  printf 'a new version of %s is available: v1.0.0 -> v2.0.0\n' "$TOOL" > "$first"
+  : > "$second"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  assert_contains "$(cat "$out")" "$TOOL update available" "the first pending tool was not reported"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  [ ! -s "$out" ] || fail "the same pending set was reported twice: $(cat "$out")"
+
+  printf 'a new version of second is available: v1.0.0 -> v3.0.0\n' > "$second"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  assert_contains "$(cat "$out")" "second update available" "a tool joining the pending set did not wake firstmate"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  [ ! -s "$out" ] || fail "a tool that joined the pending set was reported again on the next poll: $(cat "$out")"
+  pass "a tool joining the pending set wakes once"
+}
+
+test_an_overrun_is_reported_once() {
+  local home dir out i tool
+  # An overrun is a state, not a message: the sweep that overran says so once and
+  # the record then holds it, so the next poll of the same condition is silent.
+  # The assertion deliberately does not name the tool the sweep stopped before,
+  # because which tool that is depends on the load the sweep ran under.
+  home=$(make_home overrun)
+  dir="$TMP_ROOT/overrun/bin"
+  for i in 1 2 3; do
+    make_slow_copy "$dir" "$TOOL-$i" 30
+  done
+  out="$home/out.txt"
+  write_config "$home" "{\"tools\":[{\"name\":\"slow-1\",\"command\":\"$TOOL-1\"},{\"name\":\"slow-2\",\"command\":\"$TOOL-2\"},{\"name\":\"slow-3\",\"command\":\"$TOOL-3\"}]}"
+
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
+  assert_contains "$(cat "$out")" "check incomplete: the time budget ran out" "the overrun was not reported at all, so this case proves nothing"
+  assert_contains "$(cat "$home/state/.tool-updates")" "check incomplete: the time budget ran out" "the record did not carry the overrun it reported"
+
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
+  [ ! -s "$out" ] || fail "the same overrun was reported again on the next poll: $(cat "$out")"
+  pass "an overrun is reported once as a state, not on every poll"
+}
+
+test_a_changed_or_returning_completeness_clause_is_silent_while_the_pending_set_holds() {
+  local home dir announce out
+  # A sweep that had to cut its own budget says so in prose that changes with the
+  # setting, and a sweep that overran names whichever tool it stopped before.
+  # Neither is a new pending update, so while the pending set is unchanged a
+  # reworded, cleared, or returning completeness clause must not wake firstmate
+  # again: the notice is a latched state that reports once for this record.
+  home=$(make_home completeness)
+  dir="$TMP_ROOT/completeness/bin"
+  announce="$TMP_ROOT/completeness/announce.txt"
+  make_announcing_copy "$dir" "$TOOL" 'fixture 1.0.0' "$announce"
+  printf 'a new version of %s is available: v1.0.0 -> v2.0.0\n' "$TOOL" > "$announce"
+  write_config "$home" "{\"tools\":[{\"name\":\"$TOOL\",\"command\":\"$TOOL\",\"announce_args\":[\"--help\"],\"announce_pattern\":\"a new version of $TOOL is available.*\"}]}"
+  out="$home/out.txt"
+
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=60
+  assert_contains "$(cat "$out")" "sweep budget 60s cut to 27s" "the cut budget was not reported at all, so this case proves nothing"
+  assert_contains "$(cat "$out")" "$TOOL update available" "the pending update was not reported"
+
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=50
+  [ ! -s "$out" ] || fail "a reworded completeness clause with the same pending set woke firstmate again: $(cat "$out")"
+  # Not vacuous: the clause really was reworded, and only the prose changed.
+  assert_contains "$(cat "$home/state/.tool-updates")" "sweep budget 50s cut to 27s" "the record did not carry the reworded clause, so the two sweeps never differed"
+
+  # The clause clears entirely, then returns. Both are silent, and the record
+  # still tracks the condition the whole time.
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=20
+  [ ! -s "$out" ] || fail "a cleared completeness clause woke firstmate: $(cat "$out")"
+  assert_not_contains "$(cat "$home/state/.tool-updates")" "sweep budget" "the record still holds the cleared clause, so it never cleared"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=60
+  [ ! -s "$out" ] || fail "a returning completeness clause woke firstmate again: $(cat "$out")"
+  assert_contains "$(cat "$home/state/.tool-updates")" "sweep budget 60s cut to 27s" "the record does not show the clause returned, so this case proves nothing"
+  pass "a changed or returning completeness clause is silent while the pending set holds"
+}
+
 test_an_overlong_report_says_it_was_cut() {
   local home out report i tools=
   # Many watched tools can outgrow one line. The report must say it was cut
@@ -744,7 +874,7 @@ test_probes_are_skipped_between_intervals() {
   FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$now" \
     "$CHECK" >"$out" 2>&1 || status=$?
   expect_code 0 "$status" "first cadence run exit"
-  assert_grep 'fm-tool-updates-v1' "$home/state/.tool-updates" "the first run did not record its sweep"
+  assert_grep 'fm-tool-updates-v2' "$home/state/.tool-updates" "the first run did not record its sweep"
 
   # A finding appears, but the interval has not elapsed, so no probe runs.
   make_copy "$dir" "$TOOL" 'no version here'
@@ -996,9 +1126,13 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
   out="$home/out.txt"
   err="$home/err.txt"
   status=0
+  # The window is the assertion that a wake arrives at all, not that it arrives
+  # within ten seconds: a heavily loaded host can delay the watcher's own poll
+  # loop past ten seconds, which would fail this case for the load rather than
+  # for the contract. A quiet run still returns the moment the wake lands.
   env FM_HOME="$home" PATH="$(fixture_path "$stale:$fresh")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=0 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 \
-    "$CHECKPOINT" --seconds 10 >"$out" 2>"$err" || status=$?
+    "$CHECKPOINT" --seconds 30 >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "watcher checkpoint exit"
   assert_contains "$(cat "$out")" "check:" "the armed check did not reach the watcher as a check wake"
   assert_contains "$(cat "$out")" "tool updates: herdr update not in effect" "the wake did not carry the PATH skew report"
@@ -1031,6 +1165,10 @@ test_a_stalled_repository_probe_is_not_reported_as_not_a_repository
 test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
+test_a_reworded_finding_with_the_same_pending_set_is_silent
+test_a_tool_joining_the_pending_set_wakes_once
+test_an_overrun_is_reported_once
+test_a_changed_or_returning_completeness_clause_is_silent_while_the_pending_set_holds
 test_an_overlong_report_says_it_was_cut
 test_a_finding_past_the_cut_is_still_reported
 test_probes_are_skipped_between_intervals

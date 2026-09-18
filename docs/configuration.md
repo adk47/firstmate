@@ -521,12 +521,17 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 That writes `state/tool-updates.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal cadence and turns its one line into a `check:` wake; no separate schedule is involved.
 The armed check runs whenever that home has a watcher running, and arming alone does not make watcher supervision required, so a home with no in-flight work and no other reason to watch does not start a watcher just for this check.
 `bin/fm-tool-update-check.sh disarm` removes the shim, its trust binding, and the report record.
-The check prints nothing when everything is current, and `state/.tool-updates` records the findings the last report was made from so the same pending update is reported once instead of on every poll.
-A changed or returning condition is reported again.
+The check prints nothing when everything is current, and `state/.tool-updates` records the whole finding set the sweep found plus the two identity sets that decide whether a later sweep is news.
+An available update is identified by the tool and the version or revision it would reach, and every other finding by a fixed code for its own condition, so a report is emitted only when a sweep found an identity the record does not already hold.
+A reworded or reordered finding, and which tool an overrun happens to name, therefore never report again, while a new tool joining the pending set and a newer target version each report exactly once.
+A tool that stops having an available update is absorbed silently, so its next available update is news again.
+A check failure, an overrun, or an unusable registry reports once and is then latched for that record, so a clause that is reworded, clears, or returns does not report again; the record still carries the current finding set so the durable state stays accurate, and `disarm` resets the latch.
 Adding, removing, or changing a watched tool is an edit to this file and needs no code change or re-arming.
 This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
 
 `FM_TOOL_UPDATE_INTERVAL` (default 900 seconds, `0` to probe on every run) sets how often probes actually run, `FM_TOOL_UPDATE_PROBE_SECS` (default 5) bounds one probe, and `FM_TOOL_UPDATE_BUDGET_SECS` (default 20) bounds a whole sweep.
+Every probe is additionally bounded by what the sweep budget has left over and above a floor reserved for each tool still to be checked, and a tool that cannot answer inside its bound is reported as that one tool's own check failure.
+One slow tool therefore cannot spend the whole sweep and leave the tools after it unasked, and the sweep still ends inside the watcher's own per check bound.
 A sweep that runs out of budget says which tool it did not reach rather than reporting the rest as current.
 The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
