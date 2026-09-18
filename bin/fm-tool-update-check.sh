@@ -45,12 +45,17 @@
 # FM_TOOL_UPDATE_INTERVAL (default 900, 0 disables the gate, otherwise 60..86400)
 # and stays silent in between. Each probe is bounded by
 # FM_TOOL_UPDATE_PROBE_SECS (default 5, valid 1..30) and a whole sweep by
-# FM_TOOL_UPDATE_BUDGET_SECS (default 20, valid 1..120). Every probe is also
-# bounded by what the sweep has left over and above a floor reserved for each
-# tool still to be checked, so one slow tool cannot spend the whole sweep and
-# leave the tools after it unasked while every one of them keeps a floor to
-# answer in. A tool that cannot answer inside its bound is reported as that one
-# tool's own check failure.
+# FM_TOOL_UPDATE_BUDGET_SECS (default 27, the largest sweep the default watcher
+# bound fits, valid 1..120). Every probe is also bounded by what the sweep has
+# left over and above a floor reserved for each tool still to be checked, so one
+# slow tool cannot spend the whole sweep and leave the tools after it unasked
+# while every one of them keeps a floor to answer in.
+#
+# A probe that cannot answer inside its bound is reported as that one tool's own
+# check that could not be determined, never as a check failure and never as the
+# whole sweep failing: what a bound lands on is a function of the load the sweep
+# ran under, not of the tool, so a slow or loaded host must not read as a broken
+# watched tool.
 #
 # The sweep has to finish inside the watcher's own per check bound, because a run
 # the watcher kills prints nothing and writes no record, so it would repeat that
@@ -75,12 +80,12 @@
 # and is latched: each notice reports once for this record and never again, so a
 # reworded clause, a reordered report, which tool an overrun happens to name,
 # and a condition that clears and returns cannot wake firstmate a second time.
-# A probe that ran out of its bound collapses into the single overrun identity
-# rather than becoming that tool's own check failure, because which tool a bound
-# lands on is a function of the load the sweep ran under and not of the tool, and
-# a host under load must not be able to keep inventing new findings. The record
-# always carries the current finding set, so the durable state stays accurate
-# even when a latched notice does not report.
+# A probe that ran out of its bound collapses into the single could-not-determine
+# identity rather than becoming that tool's own check failure, because which tool
+# a bound lands on is a function of the load the sweep ran under and not of the
+# tool, and a host under load must not be able to keep inventing new findings. The
+# record always carries the current finding set, so the durable state stays
+# accurate even when a latched notice does not report.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
@@ -153,7 +158,7 @@ if [ "$PROBE_SECS" -gt 30 ]; then
   exit 2
 fi
 
-BUDGET_SECS=${FM_TOOL_UPDATE_BUDGET_SECS:-20}
+BUDGET_SECS=${FM_TOOL_UPDATE_BUDGET_SECS:-27}
 case "$BUDGET_SECS" in
   ''|*[!0-9]*|0)
     printf 'fm-tool-update-check: FM_TOOL_UPDATE_BUDGET_SECS must be a whole number from 1 to 120\n' >&2
@@ -214,7 +219,8 @@ PENDING_IDS=
 NOTICE_IDS=
 DEADLINE=0
 TOOLS_LEFT=0
-INCOMPLETE_REPORTED=0
+UNDETERMINED_REPORTED=0
+OVERRUN_TOOL=
 
 # Each finding is flattened to a single line here, because the whole report must
 # stay one line for the wake record.
@@ -290,6 +296,15 @@ emit_notice() {  # <identity> <text>
   emit "$2"
 }
 
+# One could-not-determine clause per tool per sweep: a tool that runs out of its
+# bound twice has one condition, not two, and the identity is the same either
+# way, so only the prose would be duplicated.
+emit_undetermined() {  # <name> <text>
+  [ "$OVERRUN_TOOL" = "$1" ] && return 0
+  OVERRUN_TOOL=$1
+  emit_notice could-not-determine "$2"
+}
+
 sweep_exhausted() {
   [ "$(real_epoch)" -ge "$DEADLINE" ]
 }
@@ -300,9 +315,9 @@ sweep_exhausted() {
 budget_allows() {
   local name=$1
   sweep_exhausted || return 0
-  if [ "$INCOMPLETE_REPORTED" -eq 0 ]; then
-    INCOMPLETE_REPORTED=1
-    emit_notice incomplete "check incomplete: the time budget ran out before $name"
+  if [ "$UNDETERMINED_REPORTED" -eq 0 ]; then
+    UNDETERMINED_REPORTED=1
+    emit_undetermined "$name" "$name check could not be determined: the time budget ran out before it was asked"
   fi
   return 1
 }
@@ -310,12 +325,14 @@ budget_allows() {
 # The bound for one probe: the probe bound, cut down to whatever the sweep has
 # left once a floor is reserved for every tool still to be checked, so no probe
 # can run past the end of the sweep and no later tool is left with no time to
-# answer in. TOOLS_LEFT already excludes the tool being probed. Never below
+# answer in. TOOLS_LEFT already excludes the tool being probed, and each reserved
+# floor covers the kill grace as well as the minimum bound, because a probe the
+# runner has to kill ends a second after its own bound. Never below
 # PROBE_MIN_SECS, because fm_run_timed treats a non-positive bound as no bound.
 probe_bound() {
   local left reserve
   left=$((DEADLINE - $(real_epoch)))
-  reserve=$((TOOLS_LEFT * PROBE_MIN_SECS))
+  reserve=$((TOOLS_LEFT * (PROBE_MIN_SECS + KILL_GRACE_SECS)))
   left=$((left - reserve))
   if [ "$left" -lt "$PROBE_MIN_SECS" ]; then
     printf '%s\n' "$PROBE_MIN_SECS"
@@ -555,7 +572,7 @@ EOF
   # The one overrun condition, whether a copy was killed by its bound or the
   # sweep was already out of budget before a copy was asked.
   if [ -n "$overrun" ]; then
-    emit_notice incomplete "$name check failed: the time budget ran out before every copy answered"
+    emit_undetermined "$name" "$name check could not be determined: the time budget ran out before every copy answered"
   fi
 
   if [ -n "$announce" ] && [ -n "$resolved_path" ]; then
@@ -568,7 +585,7 @@ EOF
       if sweep_exhausted; then
         # The version probe's output cannot carry the announcement, so searching
         # it would present a source that was never asked as a clean result.
-        emit_notice incomplete "$name check failed: the time budget ran out before the update announcement was checked"
+        emit_undetermined "$name" "$name check could not be determined: the time budget ran out before the update announcement was checked"
         announce_out=
       else
         # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
@@ -579,7 +596,7 @@ EOF
           # nothing to say. The one that answers with nothing stays silent below.
           # A source that ran out of its bound is the same overrun condition as a
           # killed copy, not a property of the tool.
-          emit_notice incomplete "$name check failed: $resolved_path did not answer when asked for its update announcement"
+          emit_notice could-not-determine "$name check could not be determined: $resolved_path did not answer when asked for its update announcement"
           announce_out=
         fi
       fi
@@ -647,11 +664,11 @@ git_probe_answered() {
   local status=$1 name=$2 subject=$3 question=$4
   case "$status" in
     "$GIT_PROBE_NOT_ISSUED")
-      emit_notice incomplete "$name check failed: the time budget ran out before $subject was asked $question"
+      emit_notice could-not-determine "$name check could not be determined: the time budget ran out before $subject was asked $question"
       return 1
       ;;
     124)
-      emit_notice incomplete "$name check failed: $subject did not answer $question"
+      emit_notice could-not-determine "$name check could not be determined: $subject did not answer $question"
       return 1
       ;;
   esac

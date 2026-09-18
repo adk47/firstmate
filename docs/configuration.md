@@ -475,10 +475,11 @@ Skipped items, such as a destination checkout that does not yet gitignore the it
 ## Watched tool updates (config/watched-tools.json)
 
 `config/watched-tools.json` is an optional local, gitignored list of the tools this home depends on.
-When it is present and the check is armed, [`bin/fm-tool-update-check.sh`](../bin/fm-tool-update-check.sh) reports two conditions, and keeps them deliberately distinct:
+When it is present and the check is armed, [`bin/fm-tool-update-check.sh`](../bin/fm-tool-update-check.sh) reports three conditions, and keeps them deliberately distinct:
 
 - `<tool> update available` means a newer version exists at the tool's update source.
 - `<tool> update not in effect` means a newer copy is already installed on this host, but `PATH` still resolves an older one.
+- `<tool> check could not be determined` means a probe could not answer inside its bound, so whether that tool is current was not established.
 
 The second condition is the reason the check exists.
 An update can install correctly and stay inert because an earlier `PATH` entry still holds an older copy, and a check that only asks whether a newer version is published reports that host as up to date.
@@ -529,9 +530,9 @@ A check failure, an overrun, or an unusable registry reports once and is then la
 Adding, removing, or changing a watched tool is an edit to this file and needs no code change or re-arming.
 This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
 
-`FM_TOOL_UPDATE_INTERVAL` (default 900 seconds, `0` to probe on every run) sets how often probes actually run, `FM_TOOL_UPDATE_PROBE_SECS` (default 5) bounds one probe, and `FM_TOOL_UPDATE_BUDGET_SECS` (default 20) bounds a whole sweep.
-Every probe is additionally bounded by what the sweep budget has left over and above a floor reserved for each tool still to be checked, and a tool that cannot answer inside its bound is reported as that one tool's own check failure.
-One slow tool therefore cannot spend the whole sweep and leave the tools after it unasked, and the sweep still ends inside the watcher's own per check bound.
+`FM_TOOL_UPDATE_INTERVAL` (default 900 seconds, `0` to probe on every run) sets how often probes actually run, `FM_TOOL_UPDATE_PROBE_SECS` (default 5) bounds one probe, and `FM_TOOL_UPDATE_BUDGET_SECS` (default 27, the largest sweep the default watcher bound fits) bounds a whole sweep.
+Every probe is additionally bounded by what the sweep budget has left over and above a floor reserved for each tool still to be checked, so one slow tool cannot spend the whole sweep and leave the tools after it unasked, and the sweep still ends inside the watcher's own per check bound.
+A probe that cannot answer inside its bound is reported as that one tool's check that could not be determined, never as a check failure and never as the whole sweep failing, because which tool a bound lands on depends on the load the sweep ran under and not on the tool.
 A sweep that runs out of budget says which tool it did not reach rather than reporting the rest as current.
 The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.

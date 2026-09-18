@@ -338,7 +338,9 @@ test_an_unchecked_announcement_source_is_not_read_as_current() {
   # When the budget is gone the separate announcement command cannot run, and the
   # version probe's output never carries the announcement. Searching that output
   # anyway would present a source that was never asked as a clean result, which is
-  # the same silently dead source announce_args was added to close.
+  # the same silently dead source announce_args was added to close. The sweep says
+  # the check could not be determined and never claims an update from a source it
+  # did not ask.
   home=$(make_home announce-budget)
   dir="$TMP_ROOT/announce-budget/bin"
   mkdir -p "$dir"
@@ -364,7 +366,8 @@ SH
   # still exhausts the budget before the announcement check.
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=2
   report=$(cat "$out")
-  assert_contains "$report" "no-mistakes check failed: the time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
+  assert_contains "$report" "no-mistakes check could not be determined: the time budget ran out" "an announcement source that was never asked was not reported"
+  assert_not_contains "$report" "update available" "an announcement source the budget could not reach was read as current"
   pass "an announcement source the budget could not reach is reported, not read as current"
 }
 
@@ -389,7 +392,7 @@ SH
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
   report=$(cat "$out")
-  assert_contains "$report" "no-mistakes check failed: $dir/no-mistakes-fixture did not answer when asked for its update announcement" "an announcement probe that never answered was read as a clean sweep"
+  assert_contains "$report" "no-mistakes check could not be determined: $dir/no-mistakes-fixture did not answer when asked for its update announcement" "an announcement probe that never answered was read as a clean sweep"
   pass "an announcement probe that does not answer is reported, not read as current"
 }
 
@@ -543,8 +546,8 @@ test_git_probes_stop_when_the_sweep_budget_is_gone() {
   # The git probes are the several-in-a-row case, two of them over the network,
   # so they are the ones that can push a sweep past the watcher's own timeout and
   # leave it killed with nothing printed at all. Here the tool's command probe
-  # spends the whole budget, so its git probes must not start: the sweep says
-  # which tool it did not finish instead of quietly running on.
+  # spends the whole budget, so its git probes must not start: the sweep names the
+  # tool and says the check could not be determined instead of quietly running on.
   home=$(make_home git-budget)
   work=$(git_fixture git-budget-repo)
   git -C "$work" reset -q --hard HEAD~2
@@ -554,7 +557,7 @@ test_git_probes_stop_when_the_sweep_budget_is_gone() {
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$slow")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
   report=$(cat "$out")
-  assert_contains "$report" "check incomplete: the time budget ran out before firstmate" "a sweep with no budget left did not say which tool it did not finish"
+  assert_contains "$report" "firstmate check could not be determined" "a sweep with no budget left did not name the tool it could not finish"
   assert_not_contains "$report" "commits behind" "the git probes ran after the sweep budget was already gone"
   pass "git probes stop and name their tool once the sweep budget is gone"
 }
@@ -596,7 +599,7 @@ SH
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=3
   report=$(cat "$out")
   assert_not_contains "$report" "update available" "a probe that never answered was reported as an available update"
-  assert_contains "$report" "firstmate check failed: $work did not answer whether it already has" "the stalled object query was not the reported failure"
+  assert_contains "$report" "firstmate check could not be determined: $work did not answer whether it already has" "the stalled object query was not the reported failure"
   [ "$(git -C "$work" rev-parse HEAD)" = "$head_before" ] || fail "the check moved the watched repository's HEAD"
   pass "a git probe that does not answer is reported as a failure, never as an update"
 }
@@ -628,7 +631,7 @@ SH
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
   report=$(cat "$out")
-  assert_contains "$report" "firstmate check failed: $work did not answer whether it is a git repository" "a repository probe that never answered was not reported as such"
+  assert_contains "$report" "firstmate check could not be determined: $work did not answer whether it is a git repository" "a repository probe that never answered was not reported as such"
   assert_not_contains "$report" "is not a git repository" "a repository probe that never answered was reported as not a repository"
   pass "a stalled repository probe is reported as no answer, not as not a repository"
 }
@@ -771,12 +774,42 @@ test_an_overrun_is_reported_once() {
   write_config "$home" "{\"tools\":[{\"name\":\"slow-1\",\"command\":\"$TOOL-1\"},{\"name\":\"slow-2\",\"command\":\"$TOOL-2\"},{\"name\":\"slow-3\",\"command\":\"$TOOL-3\"}]}"
 
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
-  assert_contains "$(cat "$out")" "check incomplete: the time budget ran out" "the overrun was not reported at all, so this case proves nothing"
-  assert_contains "$(cat "$home/state/.tool-updates")" "check incomplete: the time budget ran out" "the record did not carry the overrun it reported"
+  assert_contains "$(cat "$out")" "check could not be determined: the time budget ran out" "the overrun was not reported at all, so this case proves nothing"
+  assert_contains "$(cat "$home/state/.tool-updates")" "check could not be determined: the time budget ran out" "the record did not carry the overrun it reported"
 
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
   [ ! -s "$out" ] || fail "the same overrun was reported again on the next poll: $(cat "$out")"
   pass "an overrun is reported once as a state, not on every poll"
+}
+
+test_a_slow_tool_does_not_leave_later_tools_unasked() {
+  local home dir b_log c_log out report b_probes c_probes
+  # A slow first tool must not spend the sweep: the later tools are still asked,
+  # and the slow tool itself is reported as a check that could not be determined
+  # rather than as a check failure or as the whole sweep failing. Counting probes
+  # is what proves the later tools were asked, because silence alone would also be
+  # what a skipped tool produces.
+  home=$(make_home slow-first)
+  dir="$TMP_ROOT/slow-first/bin"
+  b_log="$TMP_ROOT/slow-first/b.log"
+  c_log="$TMP_ROOT/slow-first/c.log"
+  make_slow_copy "$dir" "$TOOL" 30
+  make_counting_copy "$dir" "${TOOL}-b" 'fixture 1.0.0' "$b_log"
+  make_counting_copy "$dir" "${TOOL}-c" 'fixture 1.0.0' "$c_log"
+  : > "$b_log"
+  : > "$c_log"
+  write_config "$home" "{\"tools\":[{\"name\":\"slow\",\"command\":\"$TOOL\"},{\"name\":\"b\",\"command\":\"${TOOL}-b\"},{\"name\":\"c\",\"command\":\"${TOOL}-c\"}]}"
+  out="$home/out.txt"
+
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=6
+  report=$(cat "$out")
+  assert_contains "$report" "slow check could not be determined" "a tool that ran out of its bound was not reported as a check that could not be determined"
+  assert_not_contains "$report" "slow check failed" "a tool that ran out of its bound was reported as a check failure"
+  b_probes=$(wc -l < "$b_log" | tr -d ' ')
+  c_probes=$(wc -l < "$c_log" | tr -d ' ')
+  [ "$b_probes" = 1 ] || fail "a slow first tool left the next tool unasked (it was probed $b_probes times)"
+  [ "$c_probes" = 1 ] || fail "a slow first tool left the last tool unasked (it was probed $c_probes times)"
+  pass "a slow tool is a check that could not be determined and leaves later tools asked"
 }
 
 test_a_changed_or_returning_completeness_clause_is_silent_while_the_pending_set_holds() {
@@ -1168,6 +1201,7 @@ test_findings_are_reported_once_until_they_change
 test_a_reworded_finding_with_the_same_pending_set_is_silent
 test_a_tool_joining_the_pending_set_wakes_once
 test_an_overrun_is_reported_once
+test_a_slow_tool_does_not_leave_later_tools_unasked
 test_a_changed_or_returning_completeness_clause_is_silent_while_the_pending_set_holds
 test_an_overlong_report_says_it_was_cut
 test_a_finding_past_the_cut_is_still_reported
