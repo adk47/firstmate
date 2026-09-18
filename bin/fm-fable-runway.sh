@@ -63,23 +63,24 @@
 # in between. The five-hour session window is not projected: it refills through
 # the day, so it is a pause rather than a wall.
 #
-# The pool projection reported is the best
-# remaining one - the longest such exhaustion among Fable-capable accounts with
-# a projection - because the pool keeps serving while any capable account still
-# has room, and the time rule counts how many of them are projected to outlast
-# the 2h and 6h thresholds rather than taking the soonest. That is the same pace
-# model quota-axi reports as burnMultiple, and it deliberately under-weights a
-# recent ramp, so the pool's routable counts stay the primary signal and the
-# projection is reported as a refinement. An account whose windows are not
-# readable is excluded from the count rather than assumed healthy.
+# The pool projection reported is the best remaining one - the longest such
+# exhaustion among Fable-capable accounts with a projection - because the pool
+# keeps serving while any capable account still has room, and the time rule
+# counts how many of them are projected to outlast the 2h and 6h thresholds
+# rather than taking the soonest. That is the same pace model quota-axi reports
+# as burnMultiple, and it deliberately under-weights a recent ramp, so the
+# pool's routable counts stay the primary signal and the projection is reported
+# as a refinement. An account whose windows are not readable is excluded from
+# the count rather than assumed healthy.
 #
 # A capable account whose weeks cannot be placed - a resets_at a full week or
 # more out, or one carrying a non-UTC offset, on both windows - has no
-# projection, and it may have any amount of runway left. It is named in pool_unprojected and it
-# suppresses the time rule rather than letting the accounts that happen to be
-# projectable decide RED on their own; pool_reason then reads
-# exhaustion_unprojectable. The routable counts still decide, so the pool is
-# never judged only by the part of its capable set that could be measured.
+# projection, and it may have any amount of runway left. It is named in
+# pool_unprojected and it suppresses the time rule rather than letting the
+# accounts that happen to be projectable decide RED on their own; pool_reason
+# then reads exhaustion_unprojectable. The routable counts still decide, so the
+# pool is never judged only by the part of its capable set that could be
+# measured.
 #
 # Read-only: this never writes fleet state, never mutates the pool, and never
 # prints a credential or an account email. It reads quota-axi and the local
@@ -98,7 +99,6 @@
 # Test seams (all optional; production reads the live sources):
 #   FM_FABLE_RUNWAY_NOW                    epoch seconds to use as "now"
 #   FM_FABLE_RUNWAY_QUOTA_JSON             file holding a quota-axi JSON snapshot
-#   FM_FABLE_RUNWAY_QUOTA_TIMEOUT          seconds bounding each quota-axi call (defaults to the call cap, clamped)
 #   FM_FABLE_RUNWAY_POOL_URL               pool base URL (default http://127.0.0.1:8080)
 #   FM_FABLE_RUNWAY_POOL_HEALTH_JSON       file holding a pool /health snapshot
 #   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON     file holding a pool /api/accounts snapshot
@@ -418,10 +418,7 @@ CALL_MAX=$(( (CHECK_TIMEOUT - CALL_CAP) / 4 ))
 [ "$CALL_MAX" -le "$CALL_CAP" ] || CALL_MAX=$CALL_CAP
 [ "$CALL_MAX" -ge 1 ] || CALL_MAX=1
 
-QUOTA_TIMEOUT=${FM_FABLE_RUNWAY_QUOTA_TIMEOUT:-$CALL_CAP}
-case "$QUOTA_TIMEOUT" in
-  ''|*[!0-9]*|0) QUOTA_TIMEOUT=$CALL_CAP ;;
-esac
+QUOTA_TIMEOUT=$CALL_CAP
 [ "$QUOTA_TIMEOUT" -le "$CALL_MAX" ] || QUOTA_TIMEOUT=$CALL_MAX
 POOL_TIMEOUT=4
 [ "$POOL_TIMEOUT" -le "$CALL_MAX" ] || POOL_TIMEOUT=$CALL_MAX

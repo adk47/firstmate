@@ -597,7 +597,6 @@ add_account "$accounts" acct-a 5 40 20 100
 clamp_started=$(date +%s)
 clamped=$(PATH="$clamplab/bin:$PATH" \
   FM_CHECK_TIMEOUT=30 \
-  FM_FABLE_RUNWAY_QUOTA_TIMEOUT=60 \
   FM_FABLE_RUNWAY_NOW="$NOW" \
   FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$health" \
   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$accounts" \
