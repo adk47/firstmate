@@ -226,7 +226,6 @@ NOTICE_IDS=
 DEADLINE=0
 TOOLS_LEFT=0
 UNDETERMINED_REPORTED=0
-OVERRUN_TOOL=
 
 # Each finding is flattened to a single line here, because the whole report must
 # stay one line for the wake record.
@@ -313,15 +312,6 @@ notice_latched() {  # <identity>
   return 1
 }
 
-# One could-not-determine clause per tool per sweep: a tool that runs out of its
-# bound twice has one condition, not two, and the identity is the same either
-# way, so only the prose would be duplicated.
-emit_undetermined() {  # <name> <text>
-  [ "$OVERRUN_TOOL" = "$1" ] && return 0
-  OVERRUN_TOOL=$1
-  emit_notice could-not-determine "$2"
-}
-
 sweep_exhausted() {
   [ "$(real_epoch)" -ge "$DEADLINE" ]
 }
@@ -334,7 +324,7 @@ budget_allows() {
   sweep_exhausted || return 0
   if [ "$UNDETERMINED_REPORTED" -eq 0 ]; then
     UNDETERMINED_REPORTED=1
-    emit_undetermined "$name" "$name check could not be determined: the time budget ran out before it was asked"
+    emit_notice could-not-determine "$name check could not be determined: the time budget ran out before it was asked"
   fi
   return 1
 }
@@ -589,7 +579,7 @@ EOF
   # The one overrun condition, whether a copy was killed by its bound or the
   # sweep was already out of budget before a copy was asked.
   if [ -n "$overrun" ]; then
-    emit_undetermined "$name" "$name check could not be determined: the time budget ran out before every copy answered"
+    emit_notice could-not-determine "$name check could not be determined: the time budget ran out before every copy answered"
   fi
 
   if [ -n "$announce" ] && [ -n "$resolved_path" ]; then
@@ -602,7 +592,7 @@ EOF
       if sweep_exhausted; then
         # The version probe's output cannot carry the announcement, so searching
         # it would present a source that was never asked as a clean result.
-        emit_undetermined "$name" "$name check could not be determined: the time budget ran out before the update announcement was checked"
+        emit_notice could-not-determine "$name check could not be determined: the time budget ran out before the update announcement was checked"
         announce_out=
       else
         # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
