@@ -313,6 +313,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/deepseek-lane-gateway.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/documentation-audiences.md",
       "audience": "maintainer-architecture"
     },
