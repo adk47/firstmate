@@ -273,6 +273,38 @@ _fm_classify_is_corr_token() {  # <word>
   return 1
 }
 
+# A status line may be written with a leading ISO-8601 ("2026-09-11T02:09Z")
+# or clock ("02:09Z") timestamp ahead of the state word. That token carries its
+# own colons, so the parsers below would otherwise split on the timestamp's colon
+# instead of the state/note one, and a keyed decision written that way would
+# never be seen as open - no wake fires and --resolve-key refuses it. Strip
+# exactly one such token before the state/colon split, so a timestamp-first line
+# parses exactly like the documented state-first shape. Only the line head is
+# touched: a timestamp inside the note body stays note text.
+#
+# The token must be the line's entire first whitespace-delimited word, so it ends
+# the line or is followed by whitespace. A head that is not a complete timestamp,
+# or a timestamp glued to anything else ("2026-09-11T02:09Zebra",
+# "2026-09-11T02:09Z-ish"), leaves the line byte-for-byte unchanged.
+#
+# The result is returned in FM_STATUS_LINE_HEAD rather than on stdout - the
+# fm_cap_line_var/FM_LINE_CAP_LINE shape - because every parsing layer below
+# strips independently, and a command substitution per layer per line would
+# multiply the per-line fold cost this file budgets so carefully. The digit guard
+# keeps an ordinary state-first line off the regex entirely.
+_fm_status_strip_leading_timestamp() {  # <status-line> -> FM_STATUS_LINE_HEAD
+  local line=$1 word
+  FM_STATUS_LINE_HEAD=$line
+  case "$line" in
+    [0-9]*) ;;
+    *) return 0 ;;
+  esac
+  word=${line%%[[:space:]]*}
+  [[ $word =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?(\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?|[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z)$ ]] || return 0
+  line=${line#"$word"}
+  FM_STATUS_LINE_HEAD=${line#"${line%%[![:space:]]*}"}
+}
+
 # The no-fork core behind status_line_verb: it assigns the leading verb to
 # _FM_STATUS_VERB instead of printing it, so a per-line fold loop can parse a
 # status line with zero command substitutions. The public status_line_verb below
@@ -280,7 +312,10 @@ _fm_classify_is_corr_token() {  # <word>
 # has exactly one owner.
 _FM_STATUS_VERB=
 status_line_verb_core() {  # <status-line> -> _FM_STATUS_VERB
-  local v=${1%%:*} out='' word
+  local v=$1 out='' word
+  _fm_status_strip_leading_timestamp "$v"
+  v=$FM_STATUS_LINE_HEAD
+  v=${v%%:*}
   v=${v%%\[*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
@@ -314,7 +349,10 @@ status_line_verb() {  # <status-line> -> leading verb word
 # 0 when a complete "[key=...]" token sits in the documented position before
 # the line's first colon (or anywhere on a line that has no colon at all).
 _fm_key_before_colon() {  # <status-line>
-  case "${1%%:*}" in
+  local line=$1
+  _fm_status_strip_leading_timestamp "$line"
+  line=$FM_STATUS_LINE_HEAD
+  case "${line%%:*}" in
     *\[key=*\]*) return 0 ;;
     *) return 1 ;;
   esac
@@ -328,10 +366,12 @@ _fm_key_before_colon() {  # <status-line>
 # _FM_DECISION_KEY_HEAD instead of printing it.
 _FM_DECISION_KEY_HEAD=
 _fm_key_at_note_head_core() {  # <status-line> -> _FM_DECISION_KEY_HEAD
-  local rest
+  local line=$1 rest
   _FM_DECISION_KEY_HEAD=
-  case "$1" in
-    *:*) rest=${1#*:} ;;
+  _fm_status_strip_leading_timestamp "$line"
+  line=$FM_STATUS_LINE_HEAD
+  case "$line" in
+    *:*) rest=${line#*:} ;;
     *) return 1 ;;
   esac
   rest=${rest#"${rest%%[![:space:]]*}"}
@@ -347,19 +387,21 @@ _fm_decision_slug_ok() {  # <slug>
     *) return 0 ;;
   esac
 }
-# No-fork core for the note text; the public status_line_note prints the same
-# value, so the note rule keeps exactly one owner.
+# No-fork core for the note text; the public status_line_note below prints the
+# same value, so the note rule keeps exactly one owner.
 _FM_STATUS_NOTE=
 status_line_note_core() {  # <status-line> -> _FM_STATUS_NOTE
-  local n k
-  case "$1" in
-    *:*) n=${1#*:}; n=${n#"${n%%[![:space:]]*}"} ;;
-    *) _FM_STATUS_NOTE=$1; return 0 ;;
+  local line=$1 n k
+  _fm_status_strip_leading_timestamp "$line"
+  line=$FM_STATUS_LINE_HEAD
+  case "$line" in
+    *:*) n=${line#*:}; n=${n#"${n%%[![:space:]]*}"} ;;
+    *) _FM_STATUS_NOTE=$line; return 0 ;;
   esac
   # A note-head token that states this line's key (no before-colon token, valid
   # slug) is key metadata, not note text: strip it so both stated-key positions
   # yield the same note.
-  if ! _fm_key_before_colon "$1" && _fm_key_at_note_head_core "$1" \
+  if ! _fm_key_before_colon "$line" && _fm_key_at_note_head_core "$line" \
     && _fm_decision_slug_ok "$_FM_DECISION_KEY_HEAD"; then
     k=$_FM_DECISION_KEY_HEAD
     n=${n#"[key=$k]"}
@@ -378,14 +420,16 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   printf '%s' "$_FM_DECISION_KEY"
 }
 _fm_decision_key_core() {  # <status-line> -> _FM_DECISION_KEY
-  local k
+  local line=$1 k
   _FM_DECISION_KEY=
-  if _fm_key_before_colon "$1"; then
-    k=${1%%:*}
+  _fm_status_strip_leading_timestamp "$line"
+  line=$FM_STATUS_LINE_HEAD
+  if _fm_key_before_colon "$line"; then
+    k=${line%%:*}
     k=${k#*\[key=}
     k=${k%%\]*}
   else
-    _fm_key_at_note_head_core "$1" || { _FM_DECISION_KEY=default; return 0; }
+    _fm_key_at_note_head_core "$line" || { _FM_DECISION_KEY=default; return 0; }
     k=$_FM_DECISION_KEY_HEAD
   fi
   _fm_decision_slug_ok "$k" || return 1
@@ -708,7 +752,12 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=5
+# 6: the parsers now strip one leading timestamp token before the state/colon
+# split, so a timestamp-first line that folded as ordinary status becomes an open
+# or a close. A cursor persisted under the older reading has already consumed
+# such lines as ordinary status and would keep their decisions invisible
+# forever, so it must be discarded and rebuilt from byte 0.
+FM_OPEN_DECISIONS_FOLD_VERSION=6
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity

@@ -262,6 +262,163 @@ test_incremental_agrees_with_full_fold_across_appends() {
   pass "the incremental fold matches the full fold across appends in both key positions"
 }
 
+# --- leading-timestamp tolerance -------------------------------------------
+#
+# Lanes routinely write a status line with a leading ISO-8601 or clock timestamp
+# ("2026-09-11T02:09Z needs-decision: [key=x] ..."). That token carries its own
+# colons, which used to be mistaken for the state/note separator, so the keyed
+# decision the line opened was invisible to the fold: no wake fired, and fm-send
+# --resolve-key refused. A timestamp-first line must now fold byte-for-byte
+# identically to its state-first twin, in either key position, for both the
+# opening and closing verbs.
+test_leading_timestamp_folds_like_state_first() {
+  local dir ts expected first
+  dir=$(case_dir leading-ts)
+  ts='2026-09-11T02:09Z '
+  expected=$(printf 'seam-max-bound\tneeds-decision\tpick the bound\n')
+
+  printf '%sneeds-decision: [key=seam-max-bound] pick the bound\n' "$ts" > "$dir/ts.status"
+  printf 'needs-decision: [key=seam-max-bound] pick the bound\n' > "$dir/plain.status"
+  assert_fold "$dir/ts.status" "$expected" "timestamp-first open"
+  assert_fold "$dir/plain.status" "$expected" "state-first twin"
+
+  first=$(status_open_decisions "$dir/ts.status")
+  [ "$first" = "$(status_open_decisions "$dir/plain.status")" ] \
+    || fail "timestamp-first fold differs from its state-first twin: '$first'"
+
+  # The closing verb resolves through the same leading timestamp.
+  printf '%sresolved: [key=seam-max-bound] answered: use 4\n' "$ts" >> "$dir/ts.status"
+  assert_fold "$dir/ts.status" "" "timestamp-first resolution closes the open"
+  pass "a leading ISO-8601 timestamp folds exactly like the state-first shape"
+}
+
+# Every accepted leading shape: both key positions, the HH:MMZ clock form, and
+# the optional seconds and fractional seconds.
+test_leading_timestamp_shapes_are_position_tolerant() {
+  local dir expected
+  dir=$(case_dir leading-ts-shapes)
+  expected=$(printf 'cadence\tneeds-decision\tpick the cadence\n')
+
+  printf '2026-09-11T02:09Z needs-decision [key=cadence]: pick the cadence\n' > "$dir/before.status"
+  printf '2026-09-11T02:09Z needs-decision: [key=cadence] pick the cadence\n' > "$dir/after.status"
+  printf '2026-09-11T02:09:30Z needs-decision: [key=cadence] pick the cadence\n' > "$dir/seconds.status"
+  printf '2026-09-11T02:09:30.123456Z needs-decision: [key=cadence] pick the cadence\n' > "$dir/fractional.status"
+  printf '02:09Z needs-decision: [key=cadence] pick the cadence\n' > "$dir/clock.status"
+
+  assert_fold "$dir/before.status" "$expected" "timestamp-first, key before colon"
+  assert_fold "$dir/after.status" "$expected" "timestamp-first, key at note head"
+  assert_fold "$dir/seconds.status" "$expected" "ISO-8601 with seconds"
+  assert_fold "$dir/fractional.status" "$expected" "ISO-8601 with fractional seconds"
+  assert_fold "$dir/clock.status" "$expected" "HH:MMZ clock timestamp"
+  pass "a leading timestamp is honored in either key position, in every accepted shape"
+}
+
+# A timestamp-first opening must be closable by a state-first resolution and vice
+# versa, and blocked must be as tolerant as needs-decision.
+test_leading_timestamp_cross_position_resolution() {
+  local dir
+  dir=$(case_dir leading-ts-cross-close)
+  printf '2026-09-11T02:09Z needs-decision: [key=route] north or south\n' > "$dir/a.status"
+  printf 'resolved [key=route]: answered: north\n' >> "$dir/a.status"
+  assert_fold "$dir/a.status" "" "state-first resolution closes a timestamp-first open"
+
+  printf 'needs-decision [key=route]: north or south\n' > "$dir/b.status"
+  printf '2026-09-11T02:10Z resolved: [key=route] answered: south\n' >> "$dir/b.status"
+  assert_fold "$dir/b.status" "" "timestamp-first resolution closes a state-first open"
+
+  printf '2026-09-11T02:09Z blocked: [key=creds] waiting on the deploy token\n' > "$dir/c.status"
+  assert_fold "$dir/c.status" "$(printf 'creds\tblocked\twaiting on the deploy token\n')" \
+    "timestamp-first blocked opens its stated key"
+  pass "a leading timestamp is tolerated on both the opening and closing verbs"
+}
+
+# Only the line HEAD is a timestamp position. A timestamp inside the note body,
+# after the key, is note text and must survive byte-for-byte.
+test_timestamp_in_note_body_is_untouched() {
+  local dir line
+  dir=$(case_dir note-body-ts)
+  line='needs-decision: [key=body-ts] see 2026-09-11T02:09Z in the logs'
+  printf '%s\n' "$line" > "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'body-ts\tneeds-decision\tsee 2026-09-11T02:09Z in the logs\n')" \
+    "a timestamp in the note body is not stripped"
+
+  [ "$(status_line_verb "$line")" = needs-decision ] \
+    || fail "the timestamp-first verb was not recovered: '$(status_line_verb "$line")'"
+  [ "$(_fm_decision_key "$line")" = body-ts ] \
+    || fail "the timestamp-first note-head key was not recovered: '$(_fm_decision_key "$line")'"
+  [ "$(status_line_note "$line")" = 'see 2026-09-11T02:09Z in the logs' ] \
+    || fail "the note body was altered: '$(status_line_note "$line")'"
+
+  # A state-first line whose note merely mentions a timestamp is untouched too.
+  [ "$(status_line_note 'working: routine 2026-09-11T02:09Z heartbeat')" = 'routine 2026-09-11T02:09Z heartbeat' ] \
+    || fail "a note-body timestamp was altered on a state-first line"
+  pass "only the line head is stripped; a timestamp inside the note stays note text"
+}
+
+# A digit-leading head that is not a complete timestamp is left alone, so the fix
+# never rewrites an ordinary line.
+test_non_timestamp_digit_head_is_unchanged() {
+  local glued dated
+  glued='2026-09-11T02:09Zebra: glued to a word, not a timestamp'
+  [ "$(status_line_verb "$glued")" = '2026-09-11T02' ] \
+    || fail "a timestamp-like head glued to a word was stripped: '$(status_line_verb "$glued")'"
+  [ "$(status_line_note "$glued")" = '09Zebra: glued to a word, not a timestamp' ] \
+    || fail "a glued timestamp-like head changed the note"
+
+  dated='2026-09-11: release notes'
+  [ "$(status_line_verb "$dated")" = '2026-09-11' ] \
+    || fail "a bare date was treated as a timestamp: '$(status_line_verb "$dated")'"
+  pass "a digit-leading head that is not a complete timestamp is returned unchanged"
+}
+
+# A timestamp glued to a following word is not a separated timestamp: the token
+# must be the line's whole first word, or the line is left alone.
+test_glued_timestamp_head_is_not_a_separated_timestamp() {
+  local ish partial
+  ish='2026-09-11T02:09Z-ish note'
+  [ "$(status_line_verb "$ish")" = '2026-09-11T02' ] \
+    || fail "a glued '-ish' head was stripped: '$(status_line_verb "$ish")'"
+  [ "$(status_line_note "$ish")" = '09Z-ish note' ] \
+    || fail "a glued '-ish' head changed the note: '$(status_line_note "$ish")'"
+
+  partial='2026-09-11T02:09-decision: [key=glued] pick one'
+  [ "$(status_line_verb "$partial")" = '2026-09-11T02' ] \
+    || fail "an incomplete timestamp glued to the verb was stripped: '$(status_line_verb "$partial")'"
+  pass "a timestamp glued to a following word leaves the line unchanged"
+}
+
+# The persisted cursor carries a folded open set, so every one written under the
+# previous reading holds decisions computed while timestamp-first lines were
+# invisible. Without a fold-version bump those homes would keep serving the old
+# answer forever - exactly the population this fix targets - and the incremental
+# fold would disagree with the whole-file one about what is open.
+test_a_cursor_written_before_this_change_is_rebuilt() {
+  local dir status cursor incr full
+  dir=$(case_dir leading-ts-stale-cursor)
+  status="$dir/task-stale.status"
+  printf '2026-09-11T02:09Z needs-decision: [key=seam] pick the bound\n' > "$status"
+
+  # A cursor claiming the whole file is already folded, with an empty open set -
+  # byte for byte what the previous reading would have persisted here.
+  cursor="$dir/.task-stale.open-decisions-cursor"
+  {
+    printf 'version=5\n'
+    printf 'offset=%s\n' "$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')"
+    printf 'ident=%s\n' "$(_fm_open_decisions_file_ident "$status")"
+  } > "$cursor"
+
+  incr=$(status_open_decisions_incremental "$status")
+  full=$(status_open_decisions "$status")
+  [ "$incr" = "$full" ] \
+    || fail "a cursor from the previous reading survived the fix: incremental='$incr' whole-file='$full'"
+  case "$incr" in
+    *seam*) : ;;
+    *) fail "the stale cursor hid the timestamp-first decision instead of being rebuilt: '$incr'" ;;
+  esac
+  pass "a cursor persisted under the previous reading is discarded and refolded"
+}
+
 test_stated_key_is_honored_in_both_positions
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
@@ -275,6 +432,13 @@ test_corr_only_tag_opens_as_default_like_a_bare_line
 test_key_only_before_colon_still_opens_no_regression
 test_blocked_and_resolved_are_tag_order_independent
 test_incremental_agrees_with_full_fold_across_appends
+test_leading_timestamp_folds_like_state_first
+test_leading_timestamp_shapes_are_position_tolerant
+test_leading_timestamp_cross_position_resolution
+test_timestamp_in_note_body_is_untouched
+test_non_timestamp_digit_head_is_unchanged
+test_glued_timestamp_head_is_not_a_separated_timestamp
+test_a_cursor_written_before_this_change_is_rebuilt
 
 # status_key_closing_verb reports HOW the status side currently reads one key,
 # which is what lets a consumer tell a settled key from a key handed to a
