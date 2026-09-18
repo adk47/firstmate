@@ -24,8 +24,8 @@
 # WHY IN PLACE: `/loop`, `CronCreate`, and the fleet's other scheduled
 # surfaces live in Claude Code's own session memory. Relaunching a lane
 # silently loses its schedule, so a lane that owns ticks is switched inside its
-# running session instead - and, because --gateway can only take effect at a
-# relaunch, a lane that owns ticks is REFUSED a gateway repoint outright.
+# running session instead - and a FIRST gateway repoint, which can only take
+# effect at a relaunch, is refused for such a lane outright.
 #
 # --gateway: records a durable repoint of the lane at the second local
 # Anthropic-compatible gateway (bin/fm-deepseek-gateway.sh), which is what
@@ -37,25 +37,28 @@
 # launches that lane next sources, and state/<id>.meta carries only the
 # `model_switch_gateway=` audit line.
 #
-# WHICH LANES --gateway APPLIES TO: only lanes that own no ticks. A repoint
-# reaches a running session only through a relaunch, and a relaunch drops the
-# /loop wakeups and CronCreate ticks that live in that session's memory, so
-# --gateway REFUSES a lane that owns any - by the home's loop registry
-# ($LOOP_REGISTRY, matching the lane's terminal= against a registry entry's
-# term/term_old/term_prior_reboot with a non-empty expected list) or by this
-# script's own tick convention (cron= lines in state/<id>.meta, or
-# data/<id>/crons). Such a lane stays on the shared account pool until it is
-# intentionally rotated; nothing is written and nothing is typed into it.
+# WHICH LANES --gateway APPLIES TO: state/<id>.gateway.env decides, because it
+# is the only durable evidence a lane's session may already be on the gateway.
 #
-# For a lane that IS in scope, the in-place `/model` is attempted only when it
-# ALREADY has a recorded state/<id>.gateway.env, because that file is the only
-# durable evidence its session may already be on the gateway. A lane without
-# one gets its repoint recorded, is told the exact relaunch step, and is left
-# untyped-into: a session pointed at another endpoint cannot accept this
-# gateway's model id, so there is nothing to send it. A plain switch with no
-# --gateway never touches
-# state/<id>.gateway.env: it changes the model, not the endpoint. That gateway
-# is loopback-only, so its port is the gateway script's own default
+#   - A lane that ALREADY has one takes its `/model` in place. No relaunch is
+#     involved, so no schedule can be lost and tick ownership is irrelevant:
+#     such a lane is never refused.
+#   - A lane that has none needs a relaunch to reach the gateway at all, and a
+#     relaunch drops the /loop wakeups and CronCreate ticks held in its
+#     session's memory. So a FIRST repoint is REFUSED when the lane owns any -
+#     by the home's loop registry ($LOOP_REGISTRY, matching the lane's
+#     terminal= against a registry entry's term/term_old/term_prior_reboot with
+#     a non-empty expected list) or by this script's own tick convention (cron=
+#     lines in state/<id>.meta, or data/<id>/crons). Such a lane stays on the
+#     shared account pool until it is intentionally rotated; nothing is written
+#     and nothing is typed into it.
+#   - A tick-free lane with none gets its repoint recorded, is told the exact
+#     relaunch step, and is left untyped-into: a session pointed at another
+#     endpoint cannot accept this gateway's model id.
+#
+# A plain switch with no --gateway never touches state/<id>.gateway.env: it
+# changes the model, not the endpoint, and is offered to every lane. That
+# gateway is loopback-only, so its port is the gateway script's own default
 # (FM_DEEPSEEK_GATEWAY_PORT, default 8799).
 #
 # TICKS: a model switch can skip the next scheduled tick, so this prints the
@@ -75,18 +78,14 @@
 # Options:
 #   --gateway           also repoint the lane at the second gateway on
 #                       http://127.0.0.1:$FM_DEEPSEEK_GATEWAY_PORT (8799)
-#   --verify <regex>    screen regex that confirms the switch landed
-#                       (default: the model spec, or `Opus` for opus specs)
-#   --kick <text>       resume text sent after a verified switch
-#   --no-kick           do not send resume text
 #   --dry-run           perform every check and print the plan, send nothing
 #
 # Exit codes: 0 switched and verified, a repoint recorded for a lane that must
 # be relaunched to take it, or a clean --dry-run; 1 the switch
 # could not be completed or verified, or the gateway is not healthy; 2 a
 # refusal that sent nothing - a non-Claude lane, a remote lane, a tick-owning
-# lane asked to take a gateway repoint, an unreadable screen, or a composer
-# that would not verify empty.
+# lane asked to take a FIRST gateway repoint, an unreadable screen, or a
+# composer that would not verify empty.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -262,10 +261,6 @@ screen_confirms() {  # <screen>; 0 when the switch is confirmed on screen
     printf 'fm-lane-model-switch: the lane rendered a model rejection for %s; treat the switch as unconfirmed\n' "$MODEL_SPEC" >&2
     return 1
   fi
-  if [ -n "$VERIFY_REGEX" ]; then
-    printf '%s\n' "$screen" | grep -qiE -- "$VERIFY_REGEX"
-    return
-  fi
   base=${MODEL_SPEC%%\[*}
   if printf '%s\n' "$screen" | grep -qiF -- "$base"; then
     # A spec carrying the 1M marker is only half-confirmed by the model name:
@@ -374,12 +369,13 @@ EOF
 
 # --- tick ownership ---------------------------------------------------------
 #
-# The gateway repoint only takes effect at a relaunch, and a relaunch drops the
-# /loop wakeups and CronCreate ticks that live in Claude Code's session memory.
-# A lane that owns ticks therefore cannot be moved to the gateway by this
-# script at all - it stays on the shared pool until it is intentionally
-# rotated - so --gateway refuses it rather than recording a repoint whose only
-# way to take effect is the thing that breaks the lane.
+# A FIRST gateway repoint only takes effect at a relaunch, and a relaunch drops
+# the /loop wakeups and CronCreate ticks that live in Claude Code's session
+# memory. A lane that owns ticks therefore cannot be moved onto the gateway by
+# this script - it stays on the shared pool until it is intentionally rotated -
+# so --gateway refuses it rather than recording a repoint whose only way to
+# take effect is the thing that breaks the lane. A lane ALREADY on the gateway
+# is a different case entirely and is never refused: its /model goes in place.
 
 lane_loop_count() {  # <terminal>; prints how many /loop wakeups the home records
   [ -n "${1:-}" ] || return 0
@@ -417,17 +413,17 @@ refuse_if_lane_owns_ticks() {  # <task-id> <tick-registry>
   terminal=$(fm_meta_get "$LANE_META" terminal)
   loops=$(lane_loop_count "$terminal")
   if [ -n "$loops" ]; then
-    refuse "$id owns $loops /loop wakeup(s) recorded in $LOOP_REGISTRY for terminal ${terminal:-<none>}; the gateway repoint only takes effect at a relaunch and a relaunch drops them, so $id stays on the shared account pool until it is intentionally rotated"
+    refuse "$id owns $loops /loop wakeup(s) recorded in $LOOP_REGISTRY for terminal ${terminal:-<none>}; a first gateway repoint only takes effect at a relaunch and a relaunch drops them, so $id stays on the shared account pool until it is intentionally rotated"
   fi
   if [ -n "$(tick_lines "$LANE_META" "$registry")" ]; then
-    refuse "$id owns recorded cron ticks (cron= lines in $LANE_META or $registry); the gateway repoint only takes effect at a relaunch and a relaunch drops them, so $id stays on the shared account pool until it is intentionally rotated"
+    refuse "$id owns recorded cron ticks (cron= lines in $LANE_META or $registry); a first gateway repoint only takes effect at a relaunch and a relaunch drops them, so $id stays on the shared account pool until it is intentionally rotated"
   fi
 }
 
 # --- the switch -------------------------------------------------------------
 
 main() {
-  local id='' spec='' gateway='' verify='' kick='' no_kick=0 registry='' dry=0
+  local id='' spec='' gateway='' registry='' dry=0
   local port='' gateway_env='' before='' after='' screen='' verdict='' saved='' kick_text=''
   local already_pointed=0
 
@@ -439,11 +435,6 @@ main() {
     case "$1" in
       --gateway) gateway=$DEFAULT_GATEWAY_URL ;;
       --gateway=*) refuse "--gateway takes no value; the second gateway is loopback-only on $DEFAULT_GATEWAY_URL - set FM_DEEPSEEK_GATEWAY_PORT to change its port" ;;
-      --verify) shift; verify=${1:-} ;;
-      --verify=*) verify=${1#--verify=} ;;
-      --kick) shift; kick=${1:-} ;;
-      --kick=*) kick=${1#--kick=} ;;
-      --no-kick) no_kick=1 ;;
       --dry-run) dry=1 ;;
       -h|--help|help) usage; return 0 ;;
       *) usage >&2; exit 2 ;;
@@ -457,23 +448,25 @@ main() {
   validate_id "$id"
   LANE_ID=$id
   MODEL_SPEC=$spec
-  VERIFY_REGEX=$verify
   [ -n "$registry" ] || registry="$DATA/$id/crons"
 
   resolve_lane "$id"
   before=$(lane_model_now "$LANE_META")
 
   if [ -n "$gateway" ]; then
-    refuse_if_lane_owns_ticks "$id" "$registry"
+    # The recorded env file is the only durable evidence that this lane's
+    # endpoint may already be the gateway. Read it BEFORE writing one, because
+    # it also decides whether the tick refusal applies at all: a lane already
+    # on the gateway takes its /model in place, with no relaunch, so there is
+    # no schedule for this switch to cost it.
+    ! lane_is_repointed "$id" || already_pointed=1
+    [ "$already_pointed" = 1 ] || refuse_if_lane_owns_ticks "$id" "$registry"
     port=$DEFAULT_GATEWAY_PORT
     require_gateway_healthy "$port"
     if [ "$spec" = gateway ]; then
       MODEL_SPEC=$(gateway_model)
       spec=$MODEL_SPEC
     fi
-    # The recorded env file is the only durable evidence that this lane's
-    # endpoint may already be the gateway. Read it BEFORE writing one.
-    ! lane_is_repointed "$id" || already_pointed=1
   fi
   [ "$spec" != gateway ] || refuse "the literal 'gateway' spec needs --gateway so the advertised model id can be resolved"
 
@@ -560,18 +553,12 @@ main() {
   record_meta "$before" "$after" "$gateway"
 
   # 6. kick it back to work.
-  if [ "$no_kick" = 0 ]; then
-    if [ -n "$kick" ]; then
-      kick_text=$kick
-    else
-      kick_text="MODEL SWITCH: this lane is now on $after. Resume your standing goal without waiting for a human, and re-check that your scheduled ticks are still armed - a model switch can skip the next one. Report it if anything looks wrong after the switch."
-    fi
-    verdict=$(send_typed "$kick_text" 0.3)
-    if [ "$verdict" != empty ]; then
-      fail "the model switch is recorded and verified, but the resume text was not confirmed as submitted (verdict=$verdict); check the lane and re-send it"
-    fi
-    printf 'kicked: resume text sent to %s\n' "$id"
+  kick_text="MODEL SWITCH: this lane is now on $after. Resume your standing goal without waiting for a human, and re-check that your scheduled ticks are still armed - a model switch can skip the next one. Report it if anything looks wrong after the switch."
+  verdict=$(send_typed "$kick_text" 0.3)
+  if [ "$verdict" != empty ]; then
+    fail "the model switch is recorded and verified, but the resume text was not confirmed as submitted (verdict=$verdict); check the lane and re-send it"
   fi
+  printf 'kicked: resume text sent to %s\n' "$id"
 
   report_ticks "$registry"
 }

@@ -46,7 +46,7 @@
 # Defaults: port 8799 (the port the offload investigation proved), host
 # 127.0.0.1, route picker ~/.config/llm-route/pick.py, route kind deepseek.
 # Runtime records live in this home's state directory:
-#   fm-deepseek-gateway.pid    pid of a started (non-launchd) instance
+#   fm-deepseek-gateway.pid    pid of an instance this script started
 #   fm-deepseek-gateway.out    stdout/stderr of the server process
 #   fm-deepseek-gateway.log    one JSON line per request (rotated at 5 MB)
 #   fm-deepseek-gateway.token  the local bearer token, mode 0600
@@ -170,6 +170,18 @@ health_body() {  # <port>
   curl -sS --max-time 5 "$(base_url "$1")/healthz" 2>/dev/null || true
 }
 
+# health_body_authed: the same one surface, read WITH the local token, which is
+# the only way its payload carries the route picker's own message. `status`
+# uses it; `health` deliberately does not, so the unauthenticated view an
+# operator sees is the one any other local process would get.
+health_body_authed() {  # <port>
+  local token
+  require_curl
+  token=$(ensure_token 2>/dev/null || true)
+  [ -n "$token" ] || { health_body "$1"; return 0; }
+  curl -sS --max-time 5 -H "x-api-key: $token" "$(base_url "$1")/healthz" 2>/dev/null || true
+}
+
 health_ok() {  # <port>
   local body
   body=$(health_body "$1")
@@ -195,9 +207,10 @@ health_answers() {  # <port>
   printf '%s' "$body" | python3 -c 'import json, sys; json.load(sys.stdin)' 2>/dev/null
 }
 
-# health_pid: the pid the instance answering this port reports as its own.
-# `start` compares it with the process it just launched, because "the port
-# answers" and "the port answers US" are different facts.
+# health_pid: the pid the instance answering this port reports as its own, or
+# nothing when the probe could not be read. `start` compares it with the
+# process it just launched, because "the port answers" and "the port answers
+# US" are different facts - but an unreadable probe is no evidence either way.
 health_pid() {  # <port>
   health_body "$1" | python3 -c '
 import json, sys
@@ -219,12 +232,40 @@ try:
 except ValueError:
     print("unreadable health payload")
     sys.exit(0)
-print("status=%s provider=%s slot=%s upstream_model=%s key_present=%s requests=%s errors=%s"
-      % (body.get("status"), body.get("provider"), body.get("slot"), body.get("upstream_model"),
-         body.get("key_present"), body.get("requests_served"), body.get("errors")))
+print("status=%s route_ok=%s provider=%s slot=%s upstream_model=%s key_present=%s requests=%s errors=%s"
+      % (body.get("status"), body.get("route_ok"), body.get("provider"), body.get("slot"),
+         body.get("upstream_model"), body.get("key_present"),
+         body.get("requests_served"), body.get("errors")))
+# Only an authenticated read carries this; the unauthenticated view stops at
+# the boolean above.
 if body.get("route_error"):
     print("route_error=%s" % body["route_error"])
 '
+}
+
+# probe_answering_pid: read the answering pid, retrying while it disagrees with
+# the pid we launched, and print it ONLY when a different live pid is proven.
+# An unreadable or empty read prints nothing, which the caller reads as "no
+# evidence" rather than as proof of a foreign listener - a start must never
+# SIGTERM the gateway it just launched on the strength of one flaky probe.
+probe_answering_pid() {  # <port> <our-pid>
+  local port=$1 ours=$2 answering='' attempt=0
+  while [ "$attempt" -lt 5 ]; do
+    answering=$(health_pid "$port")
+    if [ -n "$answering" ] && [ "$answering" = "$ours" ]; then
+      return 0
+    fi
+    if [ -n "$answering" ] && ! pid_is_gateway "$ours"; then
+      printf '%s' "$answering"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.3
+  done
+  if [ -n "$answering" ] && [ "$answering" != "$ours" ] && kill -0 "$answering" 2>/dev/null; then
+    printf '%s' "$answering"
+  fi
+  return 0
 }
 
 wait_for_answer() {  # <port> <seconds>
@@ -240,7 +281,7 @@ wait_for_answer() {  # <port> <seconds>
 # visible without being fatal.
 report_start() {  # <port> <lead>
   local port=$1 lead=$2 body
-  body=$(health_body "$port")
+  body=$(health_body_authed "$port")
   printf '%s %s model %s\n' "$lead" "$(base_url "$port")" "$(cmd_model)"
   if [ -n "$body" ]; then
     printf 'health: '
@@ -287,16 +328,20 @@ cmd_start() {
   pid=$!
   printf '%s\n' "$pid" > "$PID_FILE"
   if wait_for_answer "$port" "$START_TIMEOUT"; then
-    answering=$(health_pid "$port")
-    if pid_is_gateway "$pid" && [ "$answering" = "$pid" ]; then
+    # Every /healthz hit makes the server run the route picker and the key
+    # command, so one probe can time out on a loaded machine even though the
+    # gateway is fine. Retry, and treat an unreadable probe as no evidence:
+    # only a DIFFERENT live pid proves someone else holds the port.
+    answering=$(probe_answering_pid "$port" "$pid")
+    if [ -z "$answering" ] || [ "$answering" = "$pid" ]; then
       printf 'started: pid %s\n' "$pid"
       report_start "$port" "ready:"
       return 0
     fi
     kill -TERM "$pid" 2>/dev/null || true
     rm -f -- "$PID_FILE"
-    printf 'fm-deepseek-gateway: %s answers, but as pid %s - not the process this start launched (pid %s). It never took the port; last output:\n' \
-      "$(base_url "$port")" "${answering:-unknown}" "$pid" >&2
+    printf 'fm-deepseek-gateway: %s is held by pid %s, not the process this start launched (pid %s), which never took the port; last output:\n' \
+      "$(base_url "$port")" "$answering" "$pid" >&2
     tail -n 20 "$OUT_FILE" >&2 2>/dev/null || true
     return 1
   fi
@@ -358,7 +403,7 @@ cmd_status() {
     printf 'process: not running\n'
   fi
   printf 'port: %s\n' "$port"
-  body=$(health_body "$port")
+  body=$(health_body_authed "$port")
   if [ -n "$body" ]; then
     printf 'health: '
     printf '%s' "$body" | health_summary

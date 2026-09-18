@@ -55,9 +55,10 @@ One instance per firstmate home owns the port, the pid file, the request log, an
 - **Streaming is relayed frame by frame**, and usage is accumulated across `message_start` and `message_delta` because the providers split it.
 - **The port is gated by a local token.** Everything except `/healthz` requires the bearer token in `$STATE/fm-deepseek-gateway.token` (mode 0600, created on first use).
   It gates this port, not the providers: it is what stops any other local process from spending the captain's provider cash through an open loopback port.
-  `/healthz` is the only unauthenticated surface and carries liveness, the resolved route, and counters only; every other path answers 401 without the token.
-  The per-request rows live behind the token on `/stats`, because a failed row quotes the provider's own error body and those routinely echo the part of the lane's request they objected to.
-  The request log holds those same rows, so it and the gateway's process output are created mode 0600 like the token beside them.
+  `/healthz` is the only path served without the token, and every other path answers 401 without it.
+  Unauthenticated it carries liveness, the resolved route, the counters, and a `route_ok` boolean - no request rows and no route-picker text, because a failed row quotes the provider's own error body and the picker's message is an unowned script's stderr.
+  Read WITH the token, that same path also carries the picker's own message, which is what `status` prints and `health` does not.
+  The per-request rows live in `$STATE/fm-deepseek-gateway.log`, which `logs` reads; it and the gateway's process output are created mode 0600 like the token beside them.
 - **There is no automatic cross-provider failover.** An upstream 429 or 5xx is returned as it arrived, because routing is the picker's decision and silently switching providers would hide both the failure and the cost.
 - **`/v1/messages/count_tokens` is a local estimate** of about four characters per token, deliberately not a provider call.
 
@@ -95,8 +96,9 @@ bin/fm-lane-model-switch.sh <task-id> gateway --gateway     # run again once it 
 bin/fm-lane-model-switch.sh <task-id> 'opus[1m]'            # model switch only, same gateway
 ```
 
-**`--gateway` only applies to lanes that own no ticks.** A repoint reaches a running session only through a relaunch, and a relaunch drops the `/loop` wakeups and `CronCreate` ticks that live in that session's memory - the very thing the in-place switch exists to protect.
-So a lane that owns any is refused outright, by name, and stays on the shared account pool until it is intentionally rotated; nothing is written and nothing is typed into it.
+**A FIRST `--gateway` repoint only applies to lanes that own no ticks.** Moving a lane onto the gateway takes a relaunch, and a relaunch drops the `/loop` wakeups and `CronCreate` ticks that live in that session's memory - the very thing the in-place switch exists to protect.
+So a lane that owns any is refused its first repoint, by name, and stays on the shared account pool until it is intentionally rotated; nothing is written and nothing is typed into it.
+A lane that is ALREADY on the gateway is never refused, however many wakeups it has since armed: its `/model` is sent in place, no relaunch is involved, and no schedule can be lost.
 Ownership is read from two sources: the home's loop registry (`data/cmux-takeover/expected-loops.json`, or `FM_LANE_SWITCH_LOOP_REGISTRY`), matching the lane's `terminal=` against an entry's `term`, `term_old` or `term_prior_reboot` with a non-empty `expected` list; and this script's own tick convention, `cron=` lines in `state/<id>.meta` or one expression per line in `data/<id>/crons`.
 A plain model switch with no `--gateway` is unaffected: a tick-owning lane still changes model in place, which is what that path is for.
 
@@ -211,7 +213,7 @@ It is written as lane classes rather than lane names, because a home's roster is
 
 The rollout is scoped by tick ownership, not by lane name, because the relaunch a repoint needs is exactly what a tick-owning lane cannot survive.
 
-1. **Tick-owning lanes are out of scope and the tool refuses them.** Run the listing command in Setup to see which ones this home currently refuses. They stay on the shared account pool until someone decides to rotate them deliberately - a decision that costs one relaunch plus re-arming every `/loop` and `CronCreate` by hand, and is not part of this rollout.
+1. **Tick-owning lanes are out of scope for a first repoint and the tool refuses them.** Run the listing command in Setup to see which ones this home currently refuses. They stay on the shared account pool until someone decides to rotate them deliberately - a decision that costs one relaunch plus re-arming every `/loop` and `CronCreate` by hand, and is not part of this rollout.
 2. **Lanes that own no ticks are the rollout.** Each is three steps: record its repoint, relaunch it with the recorded endpoint, then run the same `--gateway` command again to switch it in place.
 3. Do one lane at a time. Cheapest-judgement lanes first, the most product-sensitive last, and the edge-analysis work that wants the bigger window stays on Opus 1M because it is the worst fit for a cheap model.
 4. After each lane, confirm it is actually serving through the gateway - `bin/fm-deepseek-gateway.sh logs --lines 5` shows its requests with the provider and slot they took - before starting the next.
@@ -232,6 +234,6 @@ Once a lane is on the gateway, every later model change is in place and costs no
 
 ## Verification entry points
 
-- `tests/fm-deepseek-gateway.test.sh` - discovery, per-request routing against each provider's own path shape, key redaction, the unauthenticated refusal, request rows staying behind the token, the fail-closed missing-key path, the port refusals, a start onto a port another instance holds, an upstream that dies mid-relay being recorded, streaming, the 0600 process output, and the lifecycle verbs.
-- `tests/fm-lane-model-switch.test.sh` - the composer refusal paths on fixture screens, the verified switch and its metadata record, the echo-only screen and the client's own model rejection that must not count as confirmations, the retry whose confirmation repeats an existing line and must still be recorded, the unconfirmed-switch path that must not kick a lane, a real gateway repoint recorded without typing into a pool lane and then taken in place once recorded, the tick-owning lanes that are refused a repoint outright, and the tick report.
+- `tests/fm-deepseek-gateway.test.sh` - discovery, per-request routing against each provider's own path shape, key redaction, the unauthenticated refusal, request rows living only in the log that `logs` reads, the fail-closed missing-key path, the port refusals, a start onto a port another instance holds, an upstream that dies mid-relay being recorded, streaming, the 0600 process output, and the lifecycle verbs.
+- `tests/fm-lane-model-switch.test.sh` - the composer refusal paths on fixture screens, the verified switch and its metadata record, the echo-only screen and the client's own model rejection that must not count as confirmations, the retry whose confirmation repeats an existing line and must still be recorded, the unconfirmed-switch path that must not kick a lane, a real gateway repoint recorded without typing into a pool lane and then taken in place once recorded, the tick-owning lanes that are refused a first repoint while an already-repointed lane still switches in place, and the tick report.
 - `bin/fm-lint.sh` covers both scripts' ShellCheck surface, and the scripts' own headers own their exact flags and contracts.

@@ -243,15 +243,19 @@ test_request_rows_stay_behind_the_token() {
   # A recorded row carries the provider's own error body, which routinely
   # quotes the part of the lane's request it objected to; /healthz is served
   # to anyone on the loopback port, so no row may appear in it.
-  assert_not_contains "$body" 'last_request' "the unauthenticated health payload must carry no request row"
   assert_not_contains "$body" 'upstream_status' "the unauthenticated health payload must carry no request detail"
+  assert_not_contains "$body" 'last_request' "the unauthenticated health payload must carry no request row"
   assert_contains "$body" '"requests_served": 1' "the unauthenticated payload must still carry the counters"
-  body=$(api GET /stats)
-  assert_contains "$body" '"last_request"' "the token-gated stats must still carry the last request row"
-  assert_contains "$body" '"upstream_status": 200' "the token-gated stats must carry the row's detail"
+  # The rows live in the durable request log, which is what `logs` reads.
+  local logged
+  logged=$(cat "$STATE/fm-deepseek-gateway.log")
+  assert_contains "$logged" '"upstream_status": 200' "the request log must carry the row and its detail"
+  gw logs --lines 20
+  expect_code 0 "$RC" "the logs verb must read the rows back"
+  assert_contains "$OUT" '"upstream_status": 200' "the logs verb must surface the recorded row"
   local code
   code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$GATEWAY_PORT/stats")
-  expect_code 401 "$code" "stats must refuse an unauthenticated caller"
+  expect_code 401 "$code" "there must be no statistics surface beside healthz"
   # /healthz is the only unauthenticated surface; nothing else answers to one.
   code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$GATEWAY_PORT/")
   expect_code 401 "$code" "the root path must not answer an unauthenticated caller"
@@ -320,7 +324,7 @@ test_mid_relay_upstream_failure_is_recorded() {
   assert_contains "$logged" '"error"' "the recorded failure must carry the reason"
   assert_not_contains "$logged" "$FAKE_KEY" "the recorded failure must never contain the provider key"
   local body
-  body=$(api GET /stats)
+  body=$(curl -sS --max-time 10 "http://127.0.0.1:$GATEWAY_PORT/healthz")
   assert_contains "$body" '"errors": 1' "the failure must move the error counter the operator reads"
   stop_gateway
   pass "fm-deepseek-gateway: an upstream that dies mid-relay is recorded, not swallowed"

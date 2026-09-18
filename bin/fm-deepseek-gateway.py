@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """fm-deepseek-gateway.py - the second local Anthropic-compatible gateway.
 
-Owned by bin/fm-deepseek-gateway.sh, which starts, stops, probes, and
-launchd-supervises it; read that script's header for the operator surface and
-docs/deepseek-lane-gateway.md for the mechanism and the proof sequence.
+Owned by bin/fm-deepseek-gateway.sh, which starts, stops, and probes it; the
+home's own supervisor keeps it alive across a reboot, and
+docs/deepseek-lane-gateway.md carries a launchctl recipe for a macOS home that
+wants one. Read that script's header for the operator surface and the doc for
+the mechanism and the proof sequence.
 
 WHY A GATEWAY AT ALL: Claude Code 2.x gates every model id through its compiled
 catalog before any request leaves the machine, so pointing ANTHROPIC_BASE_URL
@@ -13,10 +15,12 @@ advertises the model on GET /v1/models, which Claude Code itself fetches and
 caches, after which `/model <advertised-id>` is accepted and sent.
 
 WHAT THIS SERVES (and nothing else - every other path is a 404):
-  GET  /healthz                the one unauthenticated surface: liveness,
-                               the resolved route, and counters. No request
-                               rows: those carry provider error bodies.
-  GET  /stats                  authenticated request counters and recent rows
+  GET  /healthz                liveness, the resolved route, and counters.
+                               Unauthenticated it carries a route_ok boolean
+                               only; WITH the token it also carries the route
+                               picker's own message. No request rows on either:
+                               $STATE/fm-deepseek-gateway.log is the one place
+                               those live, and `logs` is what reads them.
   GET  /v1/models[?limit=N]    the advertised model list Claude Code discovers
   GET  /v1/models/<id>         one advertised model, or 404
   POST /v1/messages            the proxied Anthropic Messages call
@@ -120,8 +124,6 @@ class Config:
         self.lock = threading.Lock()
         self.requests = 0
         self.errors = 0
-        self.recent: list = []
-        self.last = None
 
     def ensure_token(self) -> str:
         path = self.token_file
@@ -265,16 +267,19 @@ class Gateway:
             pass  # A gateway that cannot log still serves; it must not fail a request.
 
     def note(self, record: dict) -> None:
+        """Count one request and write its durable row.
+
+        Counting and recording are one act on purpose: the request log is the
+        only reader of rows, so a path that counts a failure without writing it
+        would leave a moved counter an operator cannot explain.
+        """
         with self.cfg.lock:
             self.cfg.requests += 1
             if record.get("outcome") != "ok":
                 self.cfg.errors += 1
-            self.cfg.last = record
-            self.cfg.recent.append(record)
-            if len(self.cfg.recent) > 20:
-                del self.cfg.recent[:-20]
+        self.log(record)
 
-    def health(self) -> dict:
+    def health(self, include_error: bool = False) -> dict:
         route = {}
         key_present = False
         error = None
@@ -286,10 +291,11 @@ class Gateway:
         with self.cfg.lock:
             requests = self.cfg.requests
             errors = self.cfg.errors
-        # No request row here: /healthz is unauthenticated, and a recorded row
-        # carries the provider's own error body, which routinely quotes the part
-        # of the lane's request it objected to. The rows live behind the token
-        # on /stats.
+        # No request row here, and no picker text unless the caller proved the
+        # token: a recorded row carries the provider's own error body and the
+        # picker's message is an unowned third-party script's stderr, neither of
+        # which belongs on a surface any local process can read. The rows live
+        # in the request log; `route_ok` is what an unauthenticated caller gets.
         body = {
             "schema": SCHEMA,
             "status": "ok" if key_present else "degraded",
@@ -304,9 +310,10 @@ class Gateway:
             "key_present": key_present,
             "requests_served": requests,
             "errors": errors,
+            "route_ok": error is None,
         }
-        if error:
-            body["route_error"] = error
+        if error and include_error:
+            body["route_error"] = redact(error, "")
         return body
 
     # --- upstream --------------------------------------------------------
@@ -428,17 +435,11 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/") or "/"
         if path == "/healthz":
-            self._send_json(200, self.gateway.health())
+            # One path, one surface: the token only widens what it carries.
+            self._send_json(200, self.gateway.health(include_error=self._authorized()))
             return
         if not self._authorized():
             self._send_error_json(401, "authentication_error", "missing or invalid gateway token")
-            return
-        if path == "/stats":
-            health = self.gateway.health()
-            with self.gateway.cfg.lock:
-                health["last_request"] = self.gateway.cfg.last
-                health["recent"] = list(self.gateway.cfg.recent)
-            self._send_json(200, health)
             return
         if path == "/v1/models":
             query = urllib.parse.parse_qs(parsed.query)
@@ -565,7 +566,6 @@ class Handler(BaseHTTPRequestHandler):
             record["outcome"] = "client-disconnected"
             record["duration_ms"] = int((time.time() - started) * 1000)
             self.gateway.note(record)
-            self.gateway.log(record)
             return
         except Exception as exc:
             # An upstream that stalls past the timeout or drops mid-response
@@ -577,7 +577,6 @@ class Handler(BaseHTTPRequestHandler):
             record["error"] = redact("%s: %s" % (type(exc).__name__, exc), key)
             record["duration_ms"] = int((time.time() - started) * 1000)
             self.gateway.note(record)
-            self.gateway.log(record)
             raise
         finally:
             reader.close()
@@ -598,7 +597,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
         self.gateway.note(record)
-        self.gateway.log(record)
 
     def _relay_stream(self, reader, route: dict, record: dict) -> None:
         """Relay Server-Sent Events frame by frame, never buffering the run."""
@@ -641,7 +639,6 @@ class Handler(BaseHTTPRequestHandler):
         record["cost_usd"] = estimate_cost(route, usage)
         record["outcome"] = "ok"
         self.gateway.note(record)
-        self.gateway.log(record)
 
 
 def parse_args(argv) -> argparse.Namespace:

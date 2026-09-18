@@ -303,8 +303,7 @@ test_scrolled_pane_does_not_confirm_from_stale_transcript() {
   run_switch lane-s 'deepseek-v4.1-flash'
   expect_code 1 "$RC" "a stale transcript mention must not confirm a switch"
   assert_contains "$OUT" "does not confirm it" "the failure must name the verification gate"
-  assert_no_grep 'MODEL SWITCH: this lane is now on deepseek-v4.1-flash. Resume your standing goal. ' "$LOG" \
-    "the lane must not be kicked on stale evidence"
+  assert_no_grep 'MODEL SWITCH:' "$LOG" "the lane must not be kicked on stale evidence"
   assert_no_grep 'model_switch_to=' "$STATE/lane-s.meta" "a switch confirmed only by stale text must not be recorded"
   assert_grep 'model=opus' "$STATE/lane-s.meta" "the recorded model must still be the one before the attempt"
 
@@ -315,6 +314,9 @@ test_scrolled_pane_does_not_confirm_from_stale_transcript() {
   expect_code 0 "$RC" "a genuine confirmation on a scrolled pane must verify: $OUT"
   assert_contains "$OUT" "switched: lane-t opus -> deepseek-v4.1-flash" "the switch must be reported"
   assert_grep 'model_switch_to=deepseek-v4.1-flash' "$STATE/lane-t.meta" "the switch must be recorded"
+  # The other half of the assertion above: the real kick text DOES reach a lane
+  # whose switch confirmed, so the stale-evidence case can actually fail.
+  assert_grep 'MODEL SWITCH:' "$LOG" "a confirmed switch must kick the lane back to work"
   pass "fm-lane-model-switch: a scrolled pane confirms only on genuinely new output"
 }
 
@@ -455,7 +457,28 @@ JSON
   run_switch lane-x gateway --gateway
   expect_code 0 "$RC" "a lane the registry records no wakeups for must be allowed: $OUT"
   assert_present "$STATE/lane-x.gateway.env" "an in-scope lane must have its repoint recorded"
-  pass "fm-lane-model-switch: a lane that owns /loop wakeups is refused a gateway repoint"
+
+  # lane-x is now ON the gateway, and its agent has since armed two /loop
+  # wakeups - the ordinary behaviour of these lanes. A later model change for
+  # it is sent in place, with no relaunch, so there is no schedule for the
+  # switch to cost and the tick refusal must not fire.
+  cat > "$DATA/cmux-takeover/expected-loops.json" <<'JSON'
+[
+  {"term": "term-other", "term_prior_reboot": "term-lane-w", "expected": ["30m drift sweep", "6h digest"]},
+  {"term": "term-lane-x", "expected": ["15m watch", "daily report"]}
+]
+JSON
+  reset_screens
+  screen_json "$SCREENS/1.json" 'previous output' '❯'
+  screen_json "$SCREENS/2.json" 'previous output' '❯'
+  screen_json "$SCREENS/3.json" 'previous output' '❯'
+  screen_json "$SCREENS/4.json" 'previous output' 'model set to deepseek-v4.1-flash (routed)' '❯'
+  screen_json "$SCREENS/5.json" 'previous output' 'model set to deepseek-v4.1-flash (routed)' '❯'
+  run_switch lane-x gateway --gateway
+  expect_code 0 "$RC" "a lane already on the gateway must switch in place however many loops it owns: $OUT"
+  assert_contains "$OUT" "switched: lane-x" "the already-repointed lane must take the in-place switch"
+  assert_grep 'model_switch_to=deepseek-v4.1-flash' "$STATE/lane-x.meta" "the in-place switch must be recorded"
+  pass "fm-lane-model-switch: a first repoint is refused for a tick owner, an already-repointed lane is not"
 }
 
 test_cron_owning_lane_is_refused_a_gateway_repoint() {
