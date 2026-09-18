@@ -15,6 +15,10 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SWITCH="$ROOT/bin/fm-lane-model-switch.sh"
+
+# The fake Orca CLI below records its argv joined by US (0x1f), so this is the
+# substring a real `orca terminal send` leaves in the log.
+LANE_SEND=$'terminal\x1fsend'
 TMP_ROOT=$(fm_test_tmproot fm-lane-model-switch-tests)
 
 # A fake Orca CLI: `terminal read` serves the next queued screen file, and
@@ -156,7 +160,7 @@ test_unreadable_screen_sends_nothing() {
   run_switch lane-b 'opus[1m]'
   expect_code 2 "$RC" "an unreadable screen must be refused"
   assert_contains "$OUT" "unreadable" "the refusal must say the screen could not be read"
-  assert_no_grep 'terminal send' "$LOG" "an unreadable screen must not send anything to the lane"
+  assert_no_grep "$LANE_SEND" "$LOG" "an unreadable screen must not send anything to the lane"
   pass "fm-lane-model-switch: an unreadable screen refuses before any backend call"
 }
 
@@ -245,6 +249,10 @@ test_clean_switch_verifies_records_and_kicks() {
   assert_contains "$OUT" "switched: lane-f opus -> opus[1m]" "the switch must be reported with before and after"
   assert_contains "$OUT" "kicked:" "the lane must be kicked back to work"
   assert_contains "$OUT" "ticks:   7,37 * * * *" "the lane's recorded cron expression must be printed verbatim"
+  # Positive control for the "nothing was typed into the lane" assertions
+  # elsewhere in this suite: on the one path that really does type into a lane,
+  # the same pattern those assertions forbid must be present.
+  assert_grep "$LANE_SEND" "$LOG" "a lane that switches must be typed into"
   assert_grep '--text' "$LOG" "the model spec must reach the lane"
   assert_grep '/model opus[1m]' "$LOG" "the /model command must be typed verbatim"
   assert_grep 'model_switch_to=opus[1m]' "$STATE/lane-f.meta" "the switch must be recorded in metadata"
@@ -422,7 +430,7 @@ test_repoint_is_recorded_for_a_lane_that_must_relaunch() {
   assert_contains "$OUT" "no /model is sent to it" "the report must say why nothing was typed"
   assert_contains "$OUT" "set -a; . $STATE/lane-r.gateway.env" "the report must print the exact relaunch step"
   assert_contains "$OUT" "/model deepseek-v4.1-flash" "the report must name the model to select after the relaunch"
-  assert_no_grep 'terminal send' "$LOG" "a lane that must relaunch must not be typed into"
+  assert_no_grep "$LANE_SEND" "$LOG" "a lane that must relaunch must not be typed into"
   assert_no_grep 'model_switch_to=' "$STATE/lane-r.meta" "no model switch happened, so none may be recorded"
   assert_grep 'model=opus' "$STATE/lane-r.meta" "the recorded model must still be the lane's running one"
 
@@ -463,7 +471,7 @@ JSON
   assert_contains "$OUT" "lane-w owns 2 /loop wakeup" "the refusal must name the lane and what it owns"
   assert_contains "$OUT" "stays on the shared account pool" "the refusal must say where the lane stays"
   assert_absent "$STATE/lane-w.gateway.env" "a refused lane must have no repoint recorded"
-  assert_no_grep 'terminal send' "$LOG" "a refused lane must not be typed into"
+  assert_no_grep "$LANE_SEND" "$LOG" "a refused lane must not be typed into"
 
   # Same registry, an entry with no expected wakeups and no recorded crons:
   # this lane is in scope and takes the repoint.
@@ -517,7 +525,7 @@ JSON
   assert_contains "$OUT" "lane-z owns 2 /loop wakeup" "the refusal must name the lane and what it owns"
   assert_contains "$OUT" "fm-lane-z" "the refusal must name the endpoint it matched on"
   assert_absent "$STATE/lane-z.gateway.env" "a refused lane must have no repoint recorded"
-  assert_no_grep 'terminal send' "$LOG" "a refused lane must not be typed into"
+  assert_no_grep "$LANE_SEND" "$LOG" "a refused lane must not be typed into"
 
   run_switch lane-ab gateway --gateway
   expect_code 2 "$RC" "an entry naming the lane by firstmate_task must refuse it too"
@@ -547,7 +555,7 @@ test_cron_owning_lane_is_refused_a_gateway_repoint() {
   expect_code 2 "$RC" "a lane that owns recorded crons must be refused a repoint"
   assert_contains "$OUT" "lane-y owns recorded cron ticks" "the refusal must name the lane and the tick source"
   assert_absent "$STATE/lane-y.gateway.env" "a refused lane must have no repoint recorded"
-  assert_no_grep 'terminal send' "$LOG" "a refused lane must not be typed into"
+  assert_no_grep "$LANE_SEND" "$LOG" "a refused lane must not be typed into"
   # The same lane still takes a plain model switch: only the repoint is scoped.
   reset_screens
   screen_json "$SCREENS/1.json" 'previous output' '❯'
@@ -574,7 +582,7 @@ test_dry_run_gateway_describes_the_run_it_would_make() {
   assert_contains "$OUT" "no /model is sent to it" "the dry run must predict the record-only path"
   assert_contains "$OUT" "set -a; . $STATE/lane-u.gateway.env" "the dry run must print the same relaunch step"
   assert_absent "$STATE/lane-u.gateway.env" "a dry run must not write the repoint"
-  assert_no_grep 'terminal send' "$LOG" "a dry run must not send anything to the lane"
+  assert_no_grep "$LANE_SEND" "$LOG" "a dry run must not send anything to the lane"
   assert_no_grep 'model_switch_to=' "$STATE/lane-u.meta" "a dry run must not record anything"
 
   # Once a repoint is on record the real run would switch in place, so the dry
@@ -586,7 +594,7 @@ test_dry_run_gateway_describes_the_run_it_would_make() {
   run_switch lane-u gateway --gateway --dry-run
   expect_code 0 "$RC" "a dry run over a repointed lane must succeed: $OUT"
   assert_contains "$OUT" "would switch opus -> deepseek-v4.1-flash" "the dry run must predict the in-place switch"
-  assert_no_grep 'terminal send' "$LOG" "a dry run must still send nothing"
+  assert_no_grep "$LANE_SEND" "$LOG" "a dry run must still send nothing"
   pass "fm-lane-model-switch: a --gateway dry run predicts the branch the real run takes"
 }
 
@@ -602,7 +610,7 @@ test_truncated_repoint_is_not_read_as_already_pointed() {
   run_switch lane-v gateway --gateway
   expect_code 0 "$RC" "a lane with a truncated repoint must be re-recorded, not switched: $OUT"
   assert_contains "$OUT" "no /model is sent to it" "an empty env file must not count as a recorded repoint"
-  assert_no_grep 'terminal send' "$LOG" "a lane with a truncated repoint must not be typed into"
+  assert_no_grep "$LANE_SEND" "$LOG" "a lane with a truncated repoint must not be typed into"
   [ -s "$STATE/lane-v.gateway.env" ] || fail "the run must replace the truncated repoint with real exports"
   assert_grep "ANTHROPIC_BASE_URL=http://127.0.0.1:$SWITCH_GATEWAY_PORT" "$STATE/lane-v.gateway.env" \
     "the rewritten exports must point at the gateway"
@@ -680,7 +688,7 @@ test_dry_run_sends_nothing() {
   run_switch lane-h 'opus[1m]' --dry-run
   expect_code 0 "$RC" "a dry run over a clean lane must succeed"
   assert_contains "$OUT" "dry-run:" "the dry run must say what it would do"
-  assert_no_grep 'terminal send' "$LOG" "a dry run must not send anything to the lane"
+  assert_no_grep "$LANE_SEND" "$LOG" "a dry run must not send anything to the lane"
   assert_no_grep 'model_switch_to=' "$STATE/lane-h.meta" "a dry run must not record anything"
   pass "fm-lane-model-switch: a dry run performs the checks and sends nothing"
 }

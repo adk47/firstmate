@@ -254,8 +254,9 @@ test_request_rows_stay_behind_the_token() {
   expect_code 0 "$RC" "the logs verb must read the rows back"
   assert_contains "$OUT" '"upstream_status": 200' "the logs verb must surface the recorded row"
   local code
-  code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$GATEWAY_PORT/stats")
-  expect_code 401 "$code" "there must be no statistics surface beside healthz"
+  code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "x-api-key: $TOKEN" \
+    "http://127.0.0.1:$GATEWAY_PORT/stats")
+  expect_code 404 "$code" "there must be no statistics surface beside healthz"
   # /healthz is the only unauthenticated surface; nothing else answers to one.
   code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$GATEWAY_PORT/")
   expect_code 401 "$code" "the root path must not answer an unauthenticated caller"
@@ -360,7 +361,7 @@ test_models_advertise_the_discoverable_id() {
   gateway_case models
   start_gateway
   local body
-  body=$(api GET '/v1/models?limit=1000')
+  body=$(api GET /v1/models)
   assert_contains "$body" '"id": "deepseek-v4.1-flash"' "the gateway must advertise the model Claude Code discovers"
   assert_contains "$body" '"id": "deepseek-v4.1-flash[1m]"' "the 1M row must be advertised too"
   assert_contains "$body" '"has_more": false' "the model list must be a complete page"

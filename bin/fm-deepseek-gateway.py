@@ -21,7 +21,7 @@ WHAT THIS SERVES (and nothing else - every other path is a 404):
                                picker's own message. No request rows on either:
                                $STATE/fm-deepseek-gateway.log is the one place
                                those live, and `logs` is what reads them.
-  GET  /v1/models[?limit=N]    the advertised model list Claude Code discovers
+  GET  /v1/models             the advertised model list Claude Code discovers
   POST /v1/messages            the proxied Anthropic Messages call
   POST /v1/messages/count_tokens  a local token estimate
 
@@ -441,11 +441,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_error_json(401, "authentication_error", "missing or invalid gateway token")
             return
         if path == "/v1/models":
-            query = urllib.parse.parse_qs(parsed.query)
-            try:
-                limit = int(query.get("limit", ["1000"])[0])
-            except ValueError:
-                limit = 1000
             models = [
                 {
                     "type": "model",
@@ -456,7 +451,7 @@ class Handler(BaseHTTPRequestHandler):
                     "owned_by": "fm-deepseek-gateway",
                 }
                 for model, display in ADVERTISED_MODELS
-            ][: max(limit, 0)]
+            ]
             # Discovery is logged on purpose: it is the one event that proves a
             # client actually read this gateway's model list, and without a
             # record of it an operator cannot tell a discovered model from a
@@ -464,14 +459,14 @@ class Handler(BaseHTTPRequestHandler):
             self.gateway.log({
                 "outcome": "models",
                 "models": [model for model, _display in ADVERTISED_MODELS],
-                "limit": limit,
+                "query": parsed.query[:120],
                 "user_agent": (self.headers.get("user-agent") or "")[:120],
             })
             self._send_json(200, {
                 "data": models,
                 "has_more": False,
-                "first_id": models[0]["id"] if models else None,
-                "last_id": models[-1]["id"] if models else None,
+                "first_id": models[0]["id"],
+                "last_id": models[-1]["id"],
             })
             return
         self._send_error_json(404, "not_found_error", "no such endpoint: %s" % path)

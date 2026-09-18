@@ -27,7 +27,7 @@ Claude Code fetches the gateway's own model list at session start, which is the 
 This gateway logs that fetch on purpose, so an operator can prove it happened:
 
 ```json
-{"at": "2026-09-17T20:12:10Z", "outcome": "models", "limit": 1000,
+{"at": "2026-09-17T20:12:10Z", "outcome": "models", "query": "limit=1000",
  "models": ["deepseek-v4.1-flash", "deepseek-v4.1-flash[1m]"], "user_agent": "claude-code/2.1.274"}
 ```
 
@@ -99,7 +99,7 @@ bin/fm-lane-model-switch.sh <task-id> 'opus[1m]'            # model switch only,
 **A FIRST `--gateway` repoint only applies to lanes that own no ticks.** Moving a lane onto the gateway takes a relaunch, and a relaunch drops the `/loop` wakeups and `CronCreate` ticks that live in that session's memory - the very thing the in-place switch exists to protect.
 So a lane that owns any is refused its first repoint, by name, and stays on the shared account pool until it is intentionally rotated; nothing is written and nothing is typed into it.
 A lane that is ALREADY on the gateway is never refused, however many wakeups it has since armed: its `/model` is sent in place, no relaunch is involved, and no schedule can be lost.
-Ownership is read from two sources: the home's loop registry (`data/cmux-takeover/expected-loops.json`, or `FM_LANE_SWITCH_LOOP_REGISTRY`), matching the lane's `terminal=` against an entry's `term`, `term_old` or `term_prior_reboot` with a non-empty `expected` list; and this script's own tick convention, `cron=` lines in `state/<id>.meta` or one expression per line in `data/<id>/crons`.
+Ownership is read from two sources: the home's loop registry (`data/cmux-takeover/expected-loops.json`, or `FM_LANE_SWITCH_LOOP_REGISTRY`), matching the lane's backend-resolved endpoint - `terminal=` for an Orca lane, `window=` for every other backend - against an entry's `term`, `term_old` or `term_prior_reboot`, or the lane id against an entry's `firstmate_task`, with a non-empty `expected` list; and this script's own tick convention, `cron=` lines in `state/<id>.meta` or one expression per line in `data/<id>/crons`.
 A plain model switch with no `--gateway` is unaffected: a tick-owning lane still changes model in place, which is what that path is for.
 
 List the lanes this home would currently refuse before planning a rollout:
