@@ -15,12 +15,18 @@ advertises the model on GET /v1/models, which Claude Code itself fetches and
 caches, after which `/model <advertised-id>` is accepted and sent.
 
 WHAT THIS SERVES (and nothing else - every other path is a 404):
-  GET  /healthz                liveness, the resolved route, and counters.
-                               Unauthenticated it carries a route_ok boolean
-                               only; WITH the token it also carries the route
-                               picker's own message. No request rows on either:
-                               $STATE/fm-deepseek-gateway.log is the one place
-                               those live, and `logs` is what reads them.
+  GET  /healthz                liveness only: pid, uptime, the advertised
+                               model ids, and the in-memory counters. It runs
+                               no subprocess, so an unauthenticated caller can
+                               never make this gateway execute the route picker
+                               or the provider's key command.
+  GET  /status                 the resolved route, key_present, a route_ok
+                               boolean, and the picker's own message, behind
+                               the token. The resolution is cached for
+                               --route-ttl seconds so a polled status does not
+                               fork the picker per request. No request rows
+                               here either: $STATE/fm-deepseek-gateway.log is
+                               the one place those live, and `logs` reads them.
   GET  /v1/models             the advertised model list Claude Code discovers
   POST /v1/messages            the proxied Anthropic Messages call
   POST /v1/messages/count_tokens  a local token estimate
@@ -72,6 +78,7 @@ DEFAULT_PICK = "~/.config/llm-route/pick.py"
 SHARED_POOL_PORT = 8080
 ANTHROPIC_VERSION_DEFAULT = "2023-06-01"
 MAX_ERROR_CHARS = 400
+ROUTE_TTL_DEFAULT = 10.0
 LOG_MAX_BYTES_DEFAULT = 5 * 1024 * 1024
 
 # The exact model ids this gateway advertises. Claude Code discovers these from
@@ -118,8 +125,11 @@ class Config:
         self.log_file = os.path.expanduser(args.log) if args.log else os.path.join(self.state, "fm-deepseek-gateway.log")
         self.upstream_timeout = float(args.upstream_timeout)
         self.log_max_bytes = int(args.log_max_bytes)
+        self.route_ttl = float(args.route_ttl)
+        self.route_cache = None
         self.token = ""
         self.started_at = utc_now()
+        self.started_monotonic = time.monotonic()
         self.lock = threading.Lock()
         self.requests = 0
         self.errors = 0
@@ -278,7 +288,44 @@ class Gateway:
                 self.cfg.errors += 1
         self.log(record)
 
-    def health(self, include_error: bool = False) -> dict:
+    def liveness(self) -> dict:
+        """The unauthenticated body: what this process is, and how it has done.
+
+        Every field here is already in memory. Resolving the route means
+        running the captain's picker and the provider key command, so neither
+        happens on a surface any local process can reach: that pair lives
+        behind the token on /status, which is also the only place a request
+        row's detail or the picker's own message could ever appear.
+        """
+        with self.cfg.lock:
+            requests = self.cfg.requests
+            errors = self.cfg.errors
+        return {
+            "schema": SCHEMA,
+            "alive": True,
+            "pid": os.getpid(),
+            "started_at": self.cfg.started_at,
+            "uptime_s": round(time.monotonic() - self.cfg.started_monotonic, 3),
+            "model": CANONICAL_MODEL,
+            "models": [model for model, _display in ADVERTISED_MODELS],
+            "requests_served": requests,
+            "errors": errors,
+        }
+
+    def resolve_route(self) -> tuple:
+        """Resolve the route and the key's presence, cached for route_ttl.
+
+        A status poll is a loop: `start` alone probes several times. Without
+        this cache each poll would fork the picker and the provider's own key
+        command. Request routing never reads it - `forward` resolves per
+        request, because crossing DeepSeek's peak window must re-route a
+        long-running lane immediately.
+        """
+        now = time.monotonic()
+        with self.cfg.lock:
+            cached = self.cfg.route_cache
+            if cached is not None and now - cached[0] < self.cfg.route_ttl:
+                return cached[1], cached[2], cached[3]
         route = {}
         key_present = False
         error = None
@@ -288,30 +335,22 @@ class Gateway:
         except RouteError as exc:
             error = str(exc)
         with self.cfg.lock:
-            requests = self.cfg.requests
-            errors = self.cfg.errors
-        # No request row here, and no picker text unless the caller proved the
-        # token: a recorded row carries the provider's own error body and the
-        # picker's message is an unowned third-party script's stderr, neither of
-        # which belongs on a surface any local process can read. The rows live
-        # in the request log; `route_ok` is what an unauthenticated caller gets.
-        body = {
-            "schema": SCHEMA,
+            self.cfg.route_cache = (time.monotonic(), route, key_present, error)
+        return route, key_present, error
+
+    def status(self) -> dict:
+        route, key_present, error = self.resolve_route()
+        body = dict(self.liveness())
+        body.update({
             "status": "ok" if key_present else "degraded",
-            "pid": os.getpid(),
-            "started_at": self.cfg.started_at,
-            "model": CANONICAL_MODEL,
-            "models": [model for model, _display in ADVERTISED_MODELS],
             "provider": route.get("provider", ""),
             "slot": route.get("slot", ""),
             "upstream_model": route.get("model", ""),
             "base_url": route.get("base_url", ""),
             "key_present": key_present,
-            "requests_served": requests,
-            "errors": errors,
             "route_ok": error is None,
-        }
-        if error and include_error:
+        })
+        if error:
             body["route_error"] = redact(error, "")
         return body
 
@@ -434,11 +473,14 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/") or "/"
         if path == "/healthz":
-            # One path, one surface: the token only widens what it carries.
-            self._send_json(200, self.gateway.health(include_error=self._authorized()))
+            # Liveness only, and no subprocess: see Gateway.liveness.
+            self._send_json(200, self.gateway.liveness())
             return
         if not self._authorized():
             self._send_error_json(401, "authentication_error", "missing or invalid gateway token")
+            return
+        if path == "/status":
+            self._send_json(200, self.gateway.status())
             return
         if path == "/v1/models":
             models = [
@@ -641,6 +683,10 @@ def parse_args(argv) -> argparse.Namespace:
     parser.add_argument("--token-file", default="")
     parser.add_argument("--log", default="")
     parser.add_argument("--upstream-timeout", default="900")
+    parser.add_argument(
+        "--route-ttl", default=str(ROUTE_TTL_DEFAULT),
+        help="seconds a resolved route is reused on /status (0 resolves every time)",
+    )
     parser.add_argument("--log-max-bytes", default=str(LOG_MAX_BYTES_DEFAULT))
     parser.add_argument(
         "--print-model", action="store_true",

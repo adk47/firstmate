@@ -81,10 +81,14 @@
 # Options:
 #   --gateway           also repoint the lane at the second gateway on
 #                       http://127.0.0.1:$FM_DEEPSEEK_GATEWAY_PORT (8799)
-#   --dry-run           perform every check and print the plan, send nothing
+#   --dry-run           perform every check and print the plan, send nothing.
+#                       It sends no Ctrl-C either, so it cannot know how a
+#                       dirty composer would re-verify: it names both branches
+#                       rather than reporting a refusal the real run would not
+#                       make.
 #
 # Exit codes: 0 switched and verified, a repoint recorded for a lane that must
-# be relaunched to take it, or a clean --dry-run; 1 the switch
+# be relaunched to take it, or a --dry-run that completed its checks; 1 the switch
 # could not be completed or verified, or the gateway is not healthy; 2 a
 # refusal that sent nothing - a non-Claude lane, a remote lane, a tick-owning
 # lane asked to take a FIRST gateway repoint, an unreadable screen, or a
@@ -517,19 +521,24 @@ main() {
   verdict=$(composer_verdict)
   if [ "$verdict" != empty ]; then
     if [ "$dry" = 1 ]; then
-      # A dry run inspects and reports; it writes no capture and sends nothing.
-      printf 'dry-run: composer verdict is %s; would save it, interrupt, re-verify, then refuse if still not empty\n' "$verdict"
-    else
-      saved=$(save_capture pending-composer "$screen")
-      printf 'pending composer saved: %s\n' "$saved"
-      # 2. clear it, then re-verify. Ctrl-C only ever fires when the composer is
-      # not already proven empty, so an idle lane mid-turn is never cancelled.
-      send_key C-c || true
-      sleep "$SWITCH_PAUSE"
-      verdict=$(composer_verdict)
+      # A dry run inspects and reports; it writes no capture, sends no Ctrl-C,
+      # and therefore cannot know which way the re-verification would go. It
+      # must not report the refusal of a lane the real run would clear and
+      # switch, so it names both branches and leaves the verdict undetermined.
+      printf 'dry-run: composer verdict is %s; the real run would save the pending text, interrupt, re-verify, then switch %s -> %s if it verifies empty and refuse if it does not (a dry run saves nothing)\n' \
+        "$verdict" "$before" "$spec"
+      report_ticks "$registry"
+      return 0
     fi
+    saved=$(save_capture pending-composer "$screen")
+    printf 'pending composer saved: %s\n' "$saved"
+    # 2. clear it, then re-verify. Ctrl-C only ever fires when the composer is
+    # not already proven empty, so an idle lane mid-turn is never cancelled.
+    send_key C-c || true
+    sleep "$SWITCH_PAUSE"
+    verdict=$(composer_verdict)
     if [ "$verdict" != empty ]; then
-      refuse "the composer of $id still does not verify empty (verdict=$verdict); /model was NOT sent - whatever was typed is saved at ${saved:-<nothing saved, dry run>}"
+      refuse "the composer of $id still does not verify empty (verdict=$verdict); /model was NOT sent - whatever was typed is saved at $saved"
     fi
   fi
 

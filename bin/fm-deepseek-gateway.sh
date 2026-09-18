@@ -170,26 +170,26 @@ health_body() {  # <port>
   curl -sS --max-time 5 "$(base_url "$1")/healthz" 2>/dev/null || true
 }
 
-# health_body_authed: the same one surface, read WITH the local token, which is
-# the only way its payload carries the route picker's own message. `status`
-# uses it; `health` deliberately does not, so the unauthenticated view an
-# operator sees is the one any other local process would get.
-health_body_authed() {  # <port>
+# status_body: the route surface, which lives behind the token because reading
+# it makes the gateway run the route picker and the provider's own key command.
+# /healthz answers liveness to anyone; only this path knows whether the route
+# and the key actually resolve, so every "can it serve" question reads it.
+status_body() {  # <port>
   local token
   require_curl
   token=$(ensure_token 2>/dev/null || true)
-  [ -n "$token" ] || { health_body "$1"; return 0; }
+  [ -n "$token" ] || return 0
   # Through a config file on stdin, never as an argument: argv is world-readable
   # through ps, and this token is the whole reason the token FILE is 0600.
   printf 'header = "x-api-key: %s"\n' "$token" \
-    | curl -sS --max-time 5 -K - "$(base_url "$1")/healthz" 2>/dev/null || true
+    | curl -sS --max-time 5 -K - "$(base_url "$1")/status" 2>/dev/null || true
 }
 
-health_ok() {  # <port>
-  local body
-  body=$(health_body "$1")
-  [ -n "$body" ] || return 1
-  printf '%s' "$body" | python3 -c '
+# route_is_ok: reads a status payload on stdin. The exit-code contract of
+# `health` is this one judgement, so a caller that already holds the payload
+# does not fetch it twice.
+route_is_ok() {
+  python3 -c '
 import json, sys
 try:
     body = json.load(sys.stdin)
@@ -197,6 +197,13 @@ except ValueError:
     sys.exit(1)
 sys.exit(0 if body.get("status") == "ok" else 1)
 '
+}
+
+health_ok() {  # <port>
+  local body
+  body=$(status_body "$1")
+  [ -n "$body" ] || return 1
+  printf '%s' "$body" | route_is_ok
 }
 
 # health_answers: 0 when the port answers /healthz with a parseable payload.
@@ -227,7 +234,7 @@ if isinstance(pid, int):
 '
 }
 
-health_summary() {  # reads the health payload on stdin
+health_summary() {  # reads the status payload on stdin
   python3 -c '
 import json, sys
 try:
@@ -239,8 +246,6 @@ print("status=%s route_ok=%s provider=%s slot=%s upstream_model=%s key_present=%
       % (body.get("status"), body.get("route_ok"), body.get("provider"), body.get("slot"),
          body.get("upstream_model"), body.get("key_present"),
          body.get("requests_served"), body.get("errors")))
-# Only an authenticated read carries this; the unauthenticated view stops at
-# the boolean above.
 if body.get("route_error"):
     print("route_error=%s" % body["route_error"])
 '
@@ -284,13 +289,16 @@ wait_for_answer() {  # <port> <seconds>
 # visible without being fatal.
 report_start() {  # <port> <lead>
   local port=$1 lead=$2 body
-  body=$(health_body_authed "$port")
+  body=$(status_body "$port")
   printf '%s %s model %s\n' "$lead" "$(base_url "$port")" "$(cmd_model)"
   if [ -n "$body" ]; then
     printf 'health: '
     printf '%s' "$body" | health_summary
+    if printf '%s' "$body" | route_is_ok; then
+      return 0
+    fi
   fi
-  health_ok "$port" || printf 'warning: the gateway is up but its route is not ready; run health for the reason\n' >&2
+  printf 'warning: the gateway is up but its route is not ready; run health for the reason\n' >&2
   return 0
 }
 
@@ -331,10 +339,9 @@ cmd_start() {
   pid=$!
   printf '%s\n' "$pid" > "$PID_FILE"
   if wait_for_answer "$port" "$START_TIMEOUT"; then
-    # Every /healthz hit makes the server run the route picker and the key
-    # command, so one probe can time out on a loaded machine even though the
-    # gateway is fine. Retry, and treat an unreadable probe as no evidence:
-    # only a DIFFERENT live pid proves someone else holds the port.
+    # A probe can still time out on a loaded machine even though the gateway is
+    # fine. Retry, and treat an unreadable probe as no evidence: only a
+    # DIFFERENT live pid proves someone else holds the port.
     # Liveness of what we launched is the authoritative half; the answering pid
     # only adds "and nobody else holds it". An inconclusive probe is no proof of
     # a foreign listener, and equally no proof that our own process survived.
@@ -413,7 +420,7 @@ cmd_status() {
     printf 'process: not running\n'
   fi
   printf 'port: %s\n' "$port"
-  body=$(health_body_authed "$port")
+  body=$(status_body "$port")
   if [ -n "$body" ]; then
     printf 'health: '
     printf '%s' "$body" | health_summary
@@ -433,15 +440,15 @@ cmd_health() {
     shift
   done
   validate_port "$port"
-  body=$(health_body "$port")
-  [ -n "$body" ] || fail "gateway is not answering $(base_url "$port")/healthz"
+  body=$(status_body "$port")
+  [ -n "$body" ] || fail "gateway is not answering $(base_url "$port")/status"
   if [ "$json" = 1 ]; then
     printf '%s\n' "$body"
   else
     printf 'health: '
     printf '%s' "$body" | health_summary
   fi
-  health_ok "$port" || return 1
+  printf '%s' "$body" | route_is_ok || return 1
   return 0
 }
 

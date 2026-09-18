@@ -143,9 +143,11 @@ start_upstream() {  # <case-dir> -> sets UPSTREAM_PORT
   UPSTREAM_LOG="$dir/upstream-requests.log"
 }
 
-write_pick() {  # <path> <base-url> <api-key-cmd>
+write_pick() {  # <path> <base-url> <api-key-cmd>; records one line per run in <path>.calls
   cat > "$1" <<PY
 import json, sys
+with open("$1.calls", "a") as handle:
+    handle.write("run\n")
 json.dump({
     "kind": "deepseek",
     "slot": "offpeak",
@@ -221,17 +223,45 @@ test_health_reports_route_and_never_the_key() {
   gateway_case health
   start_gateway
   local body
-  body=$(curl -sS --max-time 10 "http://127.0.0.1:$GATEWAY_PORT/healthz")
-  assert_contains "$body" '"status": "ok"' "health must report ok when the route and key resolve"
-  assert_contains "$body" '"provider": "openrouter-named"' "health must report the routed provider"
-  assert_contains "$body" '"slot": "offpeak"' "health must report the route slot"
-  assert_contains "$body" '"key_present": true' "health must confirm the key resolved"
-  assert_not_contains "$body" "$FAKE_KEY" "health must never echo the provider key"
+  body=$(api GET /status)
+  assert_contains "$body" '"status": "ok"' "status must report ok when the route and key resolve"
+  assert_contains "$body" '"provider": "openrouter-named"' "status must report the routed provider"
+  assert_contains "$body" '"slot": "offpeak"' "status must report the route slot"
+  assert_contains "$body" '"key_present": true' "status must confirm the key resolved"
+  assert_not_contains "$body" "$FAKE_KEY" "status must never echo the provider key"
+  # Resolving the route runs the picker AND the provider's own key command, so
+  # the unauthenticated surface must not carry it: /healthz answers liveness
+  # from memory alone.
+  local live
+  live=$(curl -sS --max-time 10 "http://127.0.0.1:$GATEWAY_PORT/healthz")
+  assert_contains "$live" '"alive": true' "the unauthenticated surface must still report liveness"
+  assert_contains "$live" '"deepseek-v4.1-flash"' "liveness must carry the advertised model ids"
+  assert_not_contains "$live" 'provider' "liveness must not carry the resolved route"
+  assert_not_contains "$live" 'key_present' "liveness must not report on the provider key"
+  # And it must not RUN the picker either: a hundred unauthenticated probes
+  # must fork it exactly as many times as one - never.
+  local before after
+  before=$(wc -l < "$PICK.calls" 2>/dev/null || echo 0)
+  local i
+  for i in 1 2 3 4 5; do
+    curl -sS --max-time 10 -o /dev/null "http://127.0.0.1:$GATEWAY_PORT/healthz"
+  done
+  after=$(wc -l < "$PICK.calls" 2>/dev/null || echo 0)
+  [ "$before" = "$after" ] \
+    || fail "an unauthenticated probe must never run the route picker, ran $((after - before)) time(s)"
+  # A polled status resolves at most once inside its TTL, so `status` in a loop
+  # does not fork the picker and the key command per request.
+  for i in 1 2 3 4 5; do
+    api GET /status > /dev/null
+  done
+  after=$(wc -l < "$PICK.calls" 2>/dev/null || echo 0)
+  [ "$((after - before))" -le 1 ] \
+    || fail "five status reads inside the TTL must resolve the route at most once, ran $((after - before)) time(s)"
   gw health --port "$GATEWAY_PORT"
   expect_code 0 "$RC" "the health verb must exit 0 for a healthy gateway"
   assert_contains "$OUT" "status=ok" "the health verb must summarise the route"
   stop_gateway
-  pass "fm-deepseek-gateway: health reports the live route and never the provider key"
+  pass "fm-deepseek-gateway: the route lives behind the token and an open probe never runs the picker"
 }
 
 test_request_rows_stay_behind_the_token() {
@@ -262,6 +292,8 @@ test_request_rows_stay_behind_the_token() {
   expect_code 401 "$code" "the root path must not answer an unauthenticated caller"
   code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$GATEWAY_PORT/health")
   expect_code 401 "$code" "there must be no second unauthenticated spelling of healthz"
+  code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$GATEWAY_PORT/status")
+  expect_code 401 "$code" "the route surface must be refused to an unauthenticated caller"
   # The same rows are written to the request log, so it carries the same mode
   # as the token beside it rather than whatever the umask happened to be.
   local mode
@@ -341,7 +373,8 @@ test_start_refuses_a_port_held_by_another_instance() {
   gw start --port "$GATEWAY_PORT" --pick "$PICK"
   expect_code 0 "$RC" "a degraded gateway must still start and hold its port"
   local body
-  body=$(curl -sS --max-time 10 "http://127.0.0.1:$GATEWAY_PORT/healthz")
+  body=$(curl -sS --max-time 10 -H "x-api-key: $(gateway_token "$STATE")" \
+    "http://127.0.0.1:$GATEWAY_PORT/status")
   assert_contains "$body" '"status": "degraded"' "the holder must be degraded, or this case proves nothing"
 
   # A second home starting on that port never binds. It must not report a start
@@ -489,7 +522,12 @@ test_unreadable_key_fails_closed() {
   # must never call upstream unauthenticated.
   expect_code 0 "$RC" "the gateway must still start so its state is visible"
   local body
+  # The process is alive whatever the route does, so liveness stays ok; the
+  # degraded route is the authenticated surface's news to carry.
   body=$(curl -sS --max-time 10 "http://127.0.0.1:$GATEWAY_PORT/healthz")
+  assert_contains "$body" '"alive": true' "a gateway with an unreadable key must still report itself alive"
+  body=$(curl -sS --max-time 10 -H "x-api-key: $(gateway_token "$STATE")" \
+    "http://127.0.0.1:$GATEWAY_PORT/status")
   assert_contains "$body" '"status": "degraded"' "a missing key must report degraded"
   assert_contains "$body" '"key_present": false' "a missing key must be reported as absent"
   local code

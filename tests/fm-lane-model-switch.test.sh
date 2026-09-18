@@ -693,6 +693,32 @@ test_dry_run_sends_nothing() {
   pass "fm-lane-model-switch: a dry run performs the checks and sends nothing"
 }
 
+test_dry_run_over_a_dirty_composer_does_not_refuse() {
+  case_dir dry-run-dirty-composer
+  write_lane_meta lane-w 'opus'
+  # The ordinary state of a working lane: text after the prompt glyph, which
+  # never verifies empty from a capture that carries no styling. The REAL run
+  # would save it, interrupt, re-verify and then switch - a dry run sends no
+  # Ctrl-C, so it cannot know which way that lands and must not report the
+  # refusal of a lane the real run would have switched.
+  screen_json "$SCREENS/1.json" 'some earlier output' '❯ half-typed command'
+  screen_json "$SCREENS/2.json" 'some earlier output' '❯ half-typed command'
+  screen_json "$SCREENS/3.json" 'some earlier output' '❯ half-typed command'
+  run_switch lane-w 'opus[1m]' --dry-run
+  expect_code 0 "$RC" "a dry run must not refuse a composer the real run would clear: $OUT"
+  assert_contains "$OUT" "the real run would save the pending text, interrupt, re-verify" \
+    "the dry run must describe the clearing the real run would do"
+  assert_contains "$OUT" "switch opus -> opus[1m] if it verifies empty and refuse if it does not" \
+    "the dry run must name both branches rather than picking one"
+  assert_not_contains "$OUT" "still does not verify empty" \
+    "a dry run must not claim a re-verification it never performed"
+  assert_no_grep "$LANE_SEND" "$LOG" "a dry run must not send anything to the lane"
+  assert_no_grep '--interrupt' "$LOG" "a dry run must not interrupt the lane to find out"
+  assert_absent "$DATA/lane-model-switch/pending-composer" "a dry run must save no capture"
+  assert_no_grep 'model_switch_to=' "$STATE/lane-w.meta" "a dry run must not record anything"
+  pass "fm-lane-model-switch: a dry run over a dirty composer names both branches instead of refusing"
+}
+
 # --- ticks ------------------------------------------------------------------
 
 test_no_tick_source_says_so() {
@@ -747,5 +773,6 @@ test_unconfirmed_switch_does_not_kick
 test_echoed_command_alone_does_not_confirm
 test_client_model_rejection_is_not_a_confirmation
 test_dry_run_sends_nothing
+test_dry_run_over_a_dirty_composer_does_not_refuse
 test_no_tick_source_says_so
 test_meta_cron_line_is_a_tick_source

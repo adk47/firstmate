@@ -56,8 +56,9 @@ One instance per firstmate home owns the port, the pid file, the request log, an
 - **The port is gated by a local token.** Everything except `/healthz` requires the bearer token in `$STATE/fm-deepseek-gateway.token` (mode 0600, created on first use).
   It gates this port, not the providers: it is what stops any other local process from spending the captain's provider cash through an open loopback port.
   `/healthz` is the only path served without the token, and every other path answers 401 without it.
-  Unauthenticated it carries liveness, the resolved route, the counters, and a `route_ok` boolean - no request rows and no route-picker text, because a failed row quotes the provider's own error body and the picker's message is an unowned script's stderr.
-  Read WITH the token, that same path also carries the picker's own message, which is what `status` prints and `health` does not.
+  It carries liveness only - pid, uptime, the advertised model ids, and the counters - and runs no subprocess, so an unauthenticated caller can never make the gateway execute the route picker or the provider's key command.
+  The route itself lives on `GET /status`, behind the token: the resolved provider, slot, upstream model, base URL, `key_present`, a `route_ok` boolean, and the picker's own message, which is an unowned script's stderr and so is never served unauthenticated. That resolution is cached for `--route-ttl` seconds (default 10), so polling `status` does not fork the picker per request; request routing is unaffected and still resolves per request.
+  `status` and `health` both read that path, and `health` exits 0 only when the route and the key actually resolve.
   The per-request rows live in `$STATE/fm-deepseek-gateway.log`, which `logs` reads; it and the gateway's process output are created mode 0600 like the token beside them.
 - **There is no automatic cross-provider failover.** An upstream 429 or 5xx is returned as it arrived, because routing is the picker's decision and silently switching providers would hide both the failure and the cost.
 - **`/v1/messages/count_tokens` is a local estimate** of about four characters per token, deliberately not a provider call.
