@@ -273,8 +273,58 @@ _fm_classify_is_corr_token() {  # <word>
   return 1
 }
 
+# A status line may be written with a leading ISO-8601 ("2026-09-11T02:09Z")
+# or clock ("02:09Z") timestamp ahead of the state word. That token carries its
+# own colons, so the parsers below would otherwise split on the timestamp's colon
+# instead of the state/note one, and a keyed decision written that way would
+# never be seen as open - no wake fires and --resolve-key refuses it. Strip
+# exactly one such token, plus an optional dash or em-dash separator, before the
+# state/colon split, so a timestamp-first line parses exactly like the documented
+# state-first shape. Only the line head is touched: a timestamp inside the note
+# body stays note text.
+#
+# The candidate guard is a cheap pre-filter so the strip - a subshell - runs only
+# for a line that could possibly begin with a timestamp; every ordinary
+# state-first line pays nothing.
+_fm_status_may_start_with_timestamp() {  # <status-line>
+  case "$1" in
+    [0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Print <status-line> with one leading timestamp token removed. A line whose head
+# is not a complete timestamp, or whose timestamp is glued to a following word
+# ("2026-09-11T02:09Zebra"), is returned byte-for-byte.
+_fm_status_strip_leading_timestamp() {  # <status-line> -> line without one leading timestamp
+  local line=$1 rest
+  if [[ $line =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?(\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?|[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z) ]]; then
+    rest=${line:${#BASH_REMATCH[0]}}
+  else
+    printf '%s' "$line"
+    return 0
+  fi
+  # The token must end the line or be followed by a separator, never glued to a
+  # following word.
+  case "$rest" in
+    ''|[[:space:]]*|-*|—*) ;;
+    *) printf '%s' "$line"; return 0 ;;
+  esac
+  rest=${rest#"${rest%%[![:space:]]*}"}
+  case "$rest" in
+    -*) rest=${rest#-} ;;
+    —*) rest=${rest#—} ;;
+  esac
+  rest=${rest#"${rest%%[![:space:]]*}"}
+  printf '%s' "$rest"
+}
+
 status_line_verb() {  # <status-line> -> leading verb word
-  local v=${1%%:*} out='' word
+  local v=$1 out='' word
+  if _fm_status_may_start_with_timestamp "$v"; then
+    v=$(_fm_status_strip_leading_timestamp "$v")
+  fi
+  v=${v%%:*}
   v=${v%%\[*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
@@ -303,7 +353,11 @@ status_line_verb() {  # <status-line> -> leading verb word
 # 0 when a complete "[key=...]" token sits in the documented position before
 # the line's first colon (or anywhere on a line that has no colon at all).
 _fm_key_before_colon() {  # <status-line>
-  case "${1%%:*}" in
+  local line=$1
+  if _fm_status_may_start_with_timestamp "$line"; then
+    line=$(_fm_status_strip_leading_timestamp "$line")
+  fi
+  case "${line%%:*}" in
     *\[key=*\]*) return 0 ;;
     *) return 1 ;;
   esac
@@ -314,9 +368,12 @@ _fm_key_before_colon() {  # <status-line>
 # the caller's check via _fm_decision_slug_ok, exactly as for the before-colon
 # position.
 _fm_key_at_note_head() {  # <status-line> -> raw slug
-  local rest
-  case "$1" in
-    *:*) rest=${1#*:} ;;
+  local line=$1 rest
+  if _fm_status_may_start_with_timestamp "$line"; then
+    line=$(_fm_status_strip_leading_timestamp "$line")
+  fi
+  case "$line" in
+    *:*) rest=${line#*:} ;;
     *) return 1 ;;
   esac
   rest=${rest#"${rest%%[![:space:]]*}"}
@@ -333,15 +390,18 @@ _fm_decision_slug_ok() {  # <slug>
   esac
 }
 status_line_note() {  # <status-line> -> text after the first colon, trimmed
-  local n k
-  case "$1" in
-    *:*) n=${1#*:}; n=${n#"${n%%[![:space:]]*}"} ;;
-    *) printf '%s' "$1"; return 0 ;;
+  local line=$1 n k
+  if _fm_status_may_start_with_timestamp "$line"; then
+    line=$(_fm_status_strip_leading_timestamp "$line")
+  fi
+  case "$line" in
+    *:*) n=${line#*:}; n=${n#"${n%%[![:space:]]*}"} ;;
+    *) printf '%s' "$line"; return 0 ;;
   esac
   # A note-head token that states this line's key (no before-colon token, valid
   # slug) is key metadata, not note text: strip it so both stated-key positions
   # yield the same note.
-  if ! _fm_key_before_colon "$1" && k=$(_fm_key_at_note_head "$1") \
+  if ! _fm_key_before_colon "$line" && k=$(_fm_key_at_note_head "$line") \
     && _fm_decision_slug_ok "$k"; then
     n=${n#"[key=$k]"}
     n=${n#"${n%%[![:space:]]*}"}
@@ -349,13 +409,16 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   printf '%s' "$n"
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local k
-  if _fm_key_before_colon "$1"; then
-    k=${1%%:*}
+  local line=$1 k
+  if _fm_status_may_start_with_timestamp "$line"; then
+    line=$(_fm_status_strip_leading_timestamp "$line")
+  fi
+  if _fm_key_before_colon "$line"; then
+    k=${line%%:*}
     k=${k#*\[key=}
     k=${k%%\]*}
   else
-    k=$(_fm_key_at_note_head "$1") || { printf 'default'; return 0; }
+    k=$(_fm_key_at_note_head "$line") || { printf 'default'; return 0; }
   fi
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"
