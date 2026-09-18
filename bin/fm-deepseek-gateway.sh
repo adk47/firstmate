@@ -179,7 +179,10 @@ health_body_authed() {  # <port>
   require_curl
   token=$(ensure_token 2>/dev/null || true)
   [ -n "$token" ] || { health_body "$1"; return 0; }
-  curl -sS --max-time 5 -H "x-api-key: $token" "$(base_url "$1")/healthz" 2>/dev/null || true
+  # Through a config file on stdin, never as an argument: argv is world-readable
+  # through ps, and this token is the whole reason the token FILE is 0600.
+  printf 'header = "x-api-key: %s"\n' "$token" \
+    | curl -sS --max-time 5 -K - "$(base_url "$1")/healthz" 2>/dev/null || true
 }
 
 health_ok() {  # <port>
@@ -332,16 +335,23 @@ cmd_start() {
     # command, so one probe can time out on a loaded machine even though the
     # gateway is fine. Retry, and treat an unreadable probe as no evidence:
     # only a DIFFERENT live pid proves someone else holds the port.
+    # Liveness of what we launched is the authoritative half; the answering pid
+    # only adds "and nobody else holds it". An inconclusive probe is no proof of
+    # a foreign listener, and equally no proof that our own process survived.
     answering=$(probe_answering_pid "$port" "$pid")
-    if [ -z "$answering" ] || [ "$answering" = "$pid" ]; then
+    if pid_is_gateway "$pid" && { [ -z "$answering" ] || [ "$answering" = "$pid" ]; }; then
       printf 'started: pid %s\n' "$pid"
       report_start "$port" "ready:"
       return 0
     fi
     kill -TERM "$pid" 2>/dev/null || true
     rm -f -- "$PID_FILE"
-    printf 'fm-deepseek-gateway: %s is held by pid %s, not the process this start launched (pid %s), which never took the port; last output:\n' \
-      "$(base_url "$port")" "$answering" "$pid" >&2
+    if [ -n "$answering" ] && [ "$answering" != "$pid" ]; then
+      printf 'fm-deepseek-gateway: %s is held by pid %s, not the process this start launched (pid %s), which never took the port; last output:\n' \
+        "$(base_url "$port")" "$answering" "$pid" >&2
+    else
+      printf 'fm-deepseek-gateway: the process this start launched (pid %s) is not running; last output:\n' "$pid" >&2
+    fi
     tail -n 20 "$OUT_FILE" >&2 2>/dev/null || true
     return 1
   fi

@@ -47,11 +47,14 @@
 #     relaunch drops the /loop wakeups and CronCreate ticks held in its
 #     session's memory. So a FIRST repoint is REFUSED when the lane owns any -
 #     by the home's loop registry ($LOOP_REGISTRY, matching the lane's
-#     terminal= against a registry entry's term/term_old/term_prior_reboot with
-#     a non-empty expected list) or by this script's own tick convention (cron=
-#     lines in state/<id>.meta, or data/<id>/crons). Such a lane stays on the
-#     shared account pool until it is intentionally rotated; nothing is written
-#     and nothing is typed into it.
+#     BACKEND-RESOLVED endpoint against a registry entry's
+#     term/term_old/term_prior_reboot, or the lane id against an entry's
+#     firstmate_task, with a non-empty expected list) or by this script's own
+#     tick convention (cron= lines in state/<id>.meta, or data/<id>/crons;
+#     every backend carries an endpoint, so no lane escapes this gate by the
+#     shape of its metadata). Such a lane stays on the shared account pool
+#     until it is intentionally rotated; nothing is written and nothing is
+#     typed into it.
 #   - A tick-free lane with none gets its repoint recorded, is told the exact
 #     relaunch step, and is left untyped-into: a session pointed at another
 #     endpoint cannot accept this gateway's model id.
@@ -111,12 +114,12 @@ GATEWAY_SH="$SCRIPT_DIR/fm-deepseek-gateway.sh"
 DEFAULT_GATEWAY_PORT="${FM_DEEPSEEK_GATEWAY_PORT:-8799}"
 DEFAULT_GATEWAY_URL="http://127.0.0.1:$DEFAULT_GATEWAY_PORT"
 SAVE_ROOT="$DATA/lane-model-switch"
-# The home's loop registry. Entries carry the terminal a lane runs in (`term`,
-# and `term_old`/`term_prior_reboot` for a lane that has been moved or has
-# survived a reboot) and the `expected` list of /loop wakeups it owns. A
-# non-empty `expected` for this lane's terminal is what makes the lane
-# unrotatable here. Read-only, and a missing or unreadable registry is simply
-# no evidence.
+# The home's loop registry. An entry names the lane by the endpoint it runs in
+# (`term`, and `term_old`/`term_prior_reboot` for a lane that has been moved or
+# has survived a reboot) or by `firstmate_task`, and carries the `expected`
+# list of /loop wakeups it owns. A non-empty `expected` for this lane is what
+# makes it unrotatable here. Read-only, and a missing or unreadable registry is
+# simply no evidence.
 LOOP_REGISTRY="${FM_LANE_SWITCH_LOOP_REGISTRY:-$DATA/cmux-takeover/expected-loops.json}"
 SEND_RETRIES="${FM_LANE_SWITCH_RETRIES:-3}"
 SEND_SLEEP="${FM_LANE_SWITCH_SLEEP:-0.4}"
@@ -377,13 +380,17 @@ EOF
 # take effect is the thing that breaks the lane. A lane ALREADY on the gateway
 # is a different case entirely and is never refused: its /model goes in place.
 
-lane_loop_count() {  # <terminal>; prints how many /loop wakeups the home records
-  [ -n "${1:-}" ] || return 0
+# The lane is joined to the registry by its BACKEND-RESOLVED endpoint, not by
+# the Orca-only terminal= field: cmux, herdr, tmux and zellij lanes carry
+# window= instead, and reading terminal= directly made this gate silently
+# unfireable for every one of them. An entry that names the lane through
+# firstmate_task matches on the lane id, which is backend-independent.
+lane_loop_count() {  # <task-id> <endpoint>; prints how many /loop wakeups the home records
   [ -f "$LOOP_REGISTRY" ] && [ ! -L "$LOOP_REGISTRY" ] || return 0
-  python3 - "$LOOP_REGISTRY" "$1" <<'PY'
+  python3 - "$LOOP_REGISTRY" "$1" "${2:-}" <<'PY'
 import json, sys
 
-path, terminal = sys.argv[1], sys.argv[2]
+path, task, endpoint = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     with open(path) as handle:
         doc = json.load(handle)
@@ -399,7 +406,11 @@ for entry in entries:
     if not isinstance(entry, dict):
         continue
     terms = [entry.get(key) for key in ("term", "term_old", "term_prior_reboot")]
-    if terminal not in [t for t in terms if isinstance(t, str) and t]:
+    matched = bool(endpoint) and endpoint in [t for t in terms if isinstance(t, str) and t]
+    if not matched:
+        owner = entry.get("firstmate_task")
+        matched = isinstance(owner, str) and bool(owner) and owner == task
+    if not matched:
         continue
     expected = entry.get("expected")
     if isinstance(expected, list) and expected:
@@ -409,11 +420,10 @@ PY
 }
 
 refuse_if_lane_owns_ticks() {  # <task-id> <tick-registry>
-  local id=$1 registry=$2 terminal loops
-  terminal=$(fm_meta_get "$LANE_META" terminal)
-  loops=$(lane_loop_count "$terminal")
+  local id=$1 registry=$2 loops
+  loops=$(lane_loop_count "$id" "$LANE_TARGET")
   if [ -n "$loops" ]; then
-    refuse "$id owns $loops /loop wakeup(s) recorded in $LOOP_REGISTRY for terminal ${terminal:-<none>}; a first gateway repoint only takes effect at a relaunch and a relaunch drops them, so $id stays on the shared account pool until it is intentionally rotated"
+    refuse "$id owns $loops /loop wakeup(s) recorded in $LOOP_REGISTRY for endpoint ${LANE_TARGET:-<none>}; a first gateway repoint only takes effect at a relaunch and a relaunch drops them, so $id stays on the shared account pool until it is intentionally rotated"
   fi
   if [ -n "$(tick_lines "$LANE_META" "$registry")" ]; then
     refuse "$id owns recorded cron ticks (cron= lines in $LANE_META or $registry); a first gateway repoint only takes effect at a relaunch and a relaunch drops them, so $id stays on the shared account pool until it is intentionally rotated"
@@ -448,7 +458,7 @@ main() {
   validate_id "$id"
   LANE_ID=$id
   MODEL_SPEC=$spec
-  [ -n "$registry" ] || registry="$DATA/$id/crons"
+  registry="$DATA/$id/crons"
 
   resolve_lane "$id"
   before=$(lane_model_now "$LANE_META")

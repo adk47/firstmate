@@ -22,7 +22,6 @@ WHAT THIS SERVES (and nothing else - every other path is a 404):
                                $STATE/fm-deepseek-gateway.log is the one place
                                those live, and `logs` is what reads them.
   GET  /v1/models[?limit=N]    the advertised model list Claude Code discovers
-  GET  /v1/models/<id>         one advertised model, or 404
   POST /v1/messages            the proxied Anthropic Messages call
   POST /v1/messages/count_tokens  a local token estimate
 
@@ -474,14 +473,6 @@ class Handler(BaseHTTPRequestHandler):
                 "first_id": models[0]["id"] if models else None,
                 "last_id": models[-1]["id"] if models else None,
             })
-            return
-        if path.startswith("/v1/models/"):
-            wanted = urllib.parse.unquote(path[len("/v1/models/"):])
-            for model, display in ADVERTISED_MODELS:
-                if wanted == model:
-                    self._send_json(200, {"type": "model", "id": model, "display_name": display})
-                    return
-            self._send_error_json(404, "not_found_error", "no such model: %s" % wanted)
             return
         self._send_error_json(404, "not_found_error", "no such endpoint: %s" % path)
 

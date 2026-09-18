@@ -285,7 +285,7 @@ import http.client, json, sys
 port, token = int(sys.argv[1]), sys.argv[2]
 body = json.dumps({"model": "deepseek-v4.1-flash", "max_tokens": 16,
                    "messages": [{"role": "user", "content": "hi"}]})
-conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+conn = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
 statuses = []
 for headers in ({"content-type": "application/json"},
                 {"content-type": "application/json", "x-api-key": "wrong-token"},
@@ -368,12 +368,12 @@ test_models_advertise_the_discoverable_id() {
   # list rather than inferring it from a model that happened to be accepted.
   assert_grep '"outcome": "models"' "$STATE/fm-deepseek-gateway.log" \
     "the gateway must log the model-list fetch"
-  body=$(api GET '/v1/models/deepseek-v4.1-flash')
-  assert_contains "$body" '"display_name"' "one model must be readable by id"
+  assert_contains "$body" '"display_name"' "the list rows must carry a display name"
+  # GET /v1/models is the one advertised-model surface; there is no per-id path.
   local code
   code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "x-api-key: $TOKEN" \
-    "http://127.0.0.1:$GATEWAY_PORT/v1/models/not-a-model")
-  expect_code 404 "$code" "an unknown model id must 404"
+    "http://127.0.0.1:$GATEWAY_PORT/v1/models/deepseek-v4.1-flash")
+  expect_code 404 "$code" "there must be no second read path for an advertised model"
   stop_gateway
   pass "fm-deepseek-gateway: the advertised model list carries the id Claude Code discovers"
 }

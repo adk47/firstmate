@@ -90,6 +90,19 @@ write_lane_meta() {  # <id> [model]
     "terminal=term-$id"
 }
 
+# A NON-Orca lane: window= and no terminal=, which is what cmux, herdr, tmux
+# and zellij lanes actually record. The tick guard must reach these too.
+write_tmux_lane_meta() {  # <id> [model]
+  local id=$1 model=${2:-opus[1m]}
+  fm_write_meta "$STATE/$id.meta" \
+    "window=fm-$id" \
+    "endpoint_task_id=$id" \
+    "harness=claude" \
+    "kind=ship" \
+    "model=$model" \
+    "backend=tmux"
+}
+
 run_switch() {  # <args...>; sets OUT RC. SWITCH_GATEWAY_PORT picks the gateway port.
   local rc=0
   OUT=$(PATH="$FB:$PATH" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
@@ -481,6 +494,43 @@ JSON
   pass "fm-lane-model-switch: a first repoint is refused for a tick owner, an already-repointed lane is not"
 }
 
+test_non_orca_lane_that_owns_loops_is_refused() {
+  case_dir gateway-tmux-tick-owner
+  write_tmux_lane_meta lane-z 'opus'
+  write_tmux_lane_meta lane-ab 'opus'
+  write_tmux_lane_meta lane-ac 'opus'
+  start_test_gateway
+  # A tmux lane carries no terminal= at all, so a guard that read that field
+  # could never fire for it - the lane would be repointed and relaunched, and
+  # the wakeups the intent calls unrecoverable would be gone. lane-z is named
+  # by its endpoint, lane-ab by the backend-independent firstmate_task key.
+  mkdir -p "$DATA/cmux-takeover"
+  cat > "$DATA/cmux-takeover/expected-loops.json" <<'JSON'
+[
+  {"term": "fm-lane-z", "expected": ["10m sweep", "hourly digest"]},
+  {"firstmate_task": "lane-ab", "expected": ["nightly report"]},
+  {"term": "fm-lane-ac", "expected": []}
+]
+JSON
+  run_switch lane-z gateway --gateway
+  expect_code 2 "$RC" "a non-Orca lane that owns /loop wakeups must be refused a first repoint"
+  assert_contains "$OUT" "lane-z owns 2 /loop wakeup" "the refusal must name the lane and what it owns"
+  assert_contains "$OUT" "fm-lane-z" "the refusal must name the endpoint it matched on"
+  assert_absent "$STATE/lane-z.gateway.env" "a refused lane must have no repoint recorded"
+  assert_no_grep 'terminal send' "$LOG" "a refused lane must not be typed into"
+
+  run_switch lane-ab gateway --gateway
+  expect_code 2 "$RC" "an entry naming the lane by firstmate_task must refuse it too"
+  assert_contains "$OUT" "lane-ab owns 1 /loop wakeup" "the firstmate_task join must be honoured"
+  assert_absent "$STATE/lane-ab.gateway.env" "a refused lane must have no repoint recorded"
+
+  # Same registry, an entry with no expected wakeups: in scope, takes the repoint.
+  run_switch lane-ac gateway --gateway
+  expect_code 0 "$RC" "a non-Orca lane the registry records no wakeups for must be allowed: $OUT"
+  assert_present "$STATE/lane-ac.gateway.env" "an in-scope lane must have its repoint recorded"
+  pass "fm-lane-model-switch: the tick guard reaches a non-Orca lane by its resolved endpoint"
+}
+
 test_cron_owning_lane_is_refused_a_gateway_repoint() {
   case_dir gateway-cron-owner
   write_lane_meta lane-y 'opus'
@@ -680,6 +730,7 @@ test_retry_after_a_slow_redraw_is_recorded
 test_scrolled_pane_does_not_confirm_from_stale_transcript
 test_repoint_is_recorded_for_a_lane_that_must_relaunch
 test_tick_owning_lane_is_refused_a_gateway_repoint
+test_non_orca_lane_that_owns_loops_is_refused
 test_cron_owning_lane_is_refused_a_gateway_repoint
 test_dry_run_gateway_describes_the_run_it_would_make
 test_truncated_repoint_is_not_read_as_already_pointed
