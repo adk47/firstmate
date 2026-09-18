@@ -1232,12 +1232,15 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
   err="$home/err.txt"
   status=0
   # The window is the assertion that a wake arrives at all, not that it arrives
-  # within ten seconds: a heavily loaded host can delay the watcher's own poll
-  # loop past ten seconds, which would fail this case for the load rather than
-  # for the contract. A quiet run still returns the moment the wake lands.
+  # within any particular time: a heavily loaded host can delay the watcher's
+  # own poll loop, and the check it runs is itself bounded at FM_CHECK_TIMEOUT
+  # (30s), so a 30s window failed this case for the load rather than for the
+  # contract. 90s leaves room for the watcher to start, run a fully bounded
+  # check, and emit the wake; a quiet run still returns the moment the wake
+  # lands, so the larger window costs nothing on success.
   env FM_HOME="$home" PATH="$(fixture_path "$stale:$fresh")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=0 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 \
-    "$CHECKPOINT" --seconds 30 >"$out" 2>"$err" || status=$?
+    "$CHECKPOINT" --seconds 90 >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "watcher checkpoint exit"
   assert_contains "$(cat "$out")" "check:" "the armed check did not reach the watcher as a check wake"
   assert_contains "$(cat "$out")" "tool updates: herdr update not in effect" "the wake did not carry the PATH skew report"
