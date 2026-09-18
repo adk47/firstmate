@@ -25,6 +25,31 @@ The check never switches anything.
 It reports, and the supervisor acts.
 The lane-side switch in Part 4 is also a firstmate action: run it deliberately, one lane at a time.
 
+Two things do happen without you, because both are faster than a model turn and neither changes who supervises.
+
+**An account that needs a login again.**
+The wake names it in `pool_needs_auth=`, and a macOS notification names it too.
+That account is already out of `pool_capable` and out of the projection, so the pool is running on the rest.
+Re-authenticate it in `better-ccflare` and the next poll's `capacity back account=` line confirms it returned; nothing else in this runbook is needed for it.
+
+**An overall RED with no Fable-capable account left.**
+On that condition, and only that one, [`bin/fm-fable-runway-alert.sh`](../../bin/fm-fable-runway-alert.sh) fires once per episode, in plain bash, without waiting for a firstmate turn:
+
+- it writes `state/fable-runway-handoff-<epoch>.md` with the monitor line, the UTC time, both reason tokens, and a pointer back to this runbook;
+- it rings the Grok supervisor terminal - `orca terminal send --terminal <handle> --text <doorbell> --enter` - carrying that note's path, with the handle read from `config/fable-runway.env` as `FM_FABLE_RUNWAY_GROK_TERMINAL`;
+- it posts a macOS notification naming the runway and the note.
+
+Set the handle once per home, in gitignored local configuration, before the day it is needed:
+
+```
+mkdir -p config
+printf 'FM_FABLE_RUNWAY_GROK_TERMINAL=<orca-terminal-handle>\n' > config/fable-runway.env
+```
+
+With no handle configured the doorbell is skipped and the note and the notification still happen, so the handoff is never silent.
+The doorbell is a doorbell: it tells whoever is at that terminal to start Part 1 below, and reading the note is the first step.
+Nothing about it takes the seat - Part 1 is still executed deliberately.
+
 ## 2. Before the day it is needed
 
 Do not rehearse under RED.
@@ -192,7 +217,7 @@ Bringing lanes back is a deliberate decision, not an automatic consequence of po
 Run this once on a quiet evening with the captain informed, while Fable still has headroom, and record the measured timings next to each step.
 A drill that has never been run is not a failover.
 
-Preconditions: no lane mid `no-mistakes` run, no incident open, `bin/fm-fable-runway.sh` not RED, Grok above roughly 30 percent of its window.
+Preconditions: no lane mid `no-mistakes` run, no incident open, `bin/fm-fable-runway.sh` not RED, Grok above roughly 30 percent of its window, and `config/fable-runway.env` naming the Grok terminal handle.
 
 | # | Step | Measured timing to record |
 | --- | --- | --- |
@@ -202,13 +227,14 @@ Preconditions: no lane mid `no-mistakes` run, no incident open, `bin/fm-fable-ru
 | 4 | Hand over: finish the Claude turn, `/exit`, verify the lock, start firstmate in Grok, confirm the digest and the drained queue | Claude exit to confirmed lock transfer |
 | 5 | Force one real wake and confirm Grok drains, handles, and re-arms | wake to handled and re-armed |
 | 6 | Reverse with Part 2 and confirm the Stop auto-arm reclaims supervision, the wake queue is empty, and no `RECORD DIVERGENCE` prints | Grok exit to confirmed Claude supervision |
-| 7 | Record the elapsed times and every failure encountered here | total drill time |
+| 7 | Confirm the zero-token action fired: one `state/fable-runway-handoff-*.md` note for the episode, the doorbell at the Grok terminal, the notification - and that a second RED poll did not repeat any of them | note to doorbell |
+| 8 | Record the elapsed times and every failure encountered here | total drill time |
 
 Failures worth recording separately: a lock that did not transfer, an arm that never reported a live cycle, a wake that was not drained, a lane tick that did not fire, and any duplicated wake.
 
 ## Safety rules
 
-- The check and the monitor are read-only. The supervisor switch and the lane switch are always firstmate actions.
+- The monitor is read-only, and the check reports. The one thing that writes and calls out is the failover action above: a note, a doorbell and a notification, once per RED episode. The supervisor switch and the lane switch are still always firstmate actions.
 - Never switch a lane mid `no-mistakes` run, and never interrupt a running validation to change models.
 - Never relaunch a lane on Pi to change models; that destroys its cron and `/loop` ticks.
 - Keep exactly one gateway in the Claude-serving role; a second gateway pointed at the same accounts double-burns the same windows.

@@ -147,6 +147,29 @@ add_account_resetting_at() {
     }]' "$file" > "$tmp" && mv "$tmp" "$file"
 }
 
+# add_account_needing_auth <accounts-file> <name> <fable-pct> <resets-in-hours>
+#   <auth-field> <auth-value>
+# An otherwise healthy account carrying one of the gateway's login-required
+# signals, so the same fixture covers requiresReauth, tokenStatus and pauseReason.
+add_account_needing_auth() {
+  local file=$1 name=$2 pct=$3 hours=$4 key=$5 value=$6 resets tmp="$1.tmp"
+  resets=$(iso_in_hours "$hours")
+  jq -c --arg name "$name" --argjson pct "$pct" --arg resets "$resets" \
+    --arg key "$key" --argjson value "$value" '
+    . + [({
+      name: $name,
+      tokenStatus: "valid",
+      paused: false,
+      usageData: {limits: [
+        {kind: "session", percent: 5},
+        {kind: "weekly_all", percent: $pct},
+        {kind: "weekly_scoped", percent: $pct,
+         resets_at: $resets,
+         scope: {model: {display_name: "Fable"}}}
+      ]}
+    } | .[$key] = $value)]' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
 # add_plain_account <accounts-file> <name> <session-pct> <weekly-all-pct>
 # An account whose windows carry no Fable-scoped limit at all, which is what a
 # gateway build that does not break its weekly window out per model reports.
@@ -351,7 +374,7 @@ pass "a pool with no Fable-scoped window is still judged by its routable count"
 # capacity: it must neither be named as capable nor make the pool look healthy
 # while the only readable Fable window is burning down.
 make_pool "$health" "$accounts" 11 11 0
-add_account "$accounts" scoped-hot 5 99 99 1
+add_account "$accounts" scoped-hot 5 99 99 24
 add_plain_account "$accounts" plain-1 2 2
 add_plain_account "$accounts" plain-2 3 3
 out=$(run_monitor "$quota" "$health" "$accounts")
@@ -384,7 +407,7 @@ add_account "$accounts" acct-hot 5 99 99 24
 out=$(run_monitor "$quota" "$health" "$accounts")
 expect_field "$out" pool_state GREEN "mixed pool state"
 expect_field "$out" pool_reason has_fable_capacity "mixed pool reason"
-expect_field "$out" pool_exhaustion 272.0h "mixed pool projection"
+expect_field "$out" pool_exhaustion 100.0h "mixed pool projection"
 expect_rc "$out" 0 "mixed pool exit"
 pass "one nearly spent account does not red-line a pool of healthy ones"
 
@@ -483,6 +506,78 @@ expect_field "$out" pool_state GREEN "half-placeable pool state"
 expect_field "$out" pool_reason has_fable_capacity "half-placeable pool reason"
 pass "an account's runway is the sooner of its two weekly walls"
 
+# A week that refills before its burn can spend it never walls. Eight capable
+# accounts each sitting at 99 percent on both weekly windows, every one of them
+# resetting in an hour, is a pool with eight fresh weeks about to start - not a
+# pool two hours from having nothing to serve. Aligned weeks are the normal
+# shape of a pool provisioned in one sitting, so the last hours before a shared
+# reset must not be a RED that wakes the supervisor for a Grok handoff.
+make_pool "$health" "$accounts" 8 8 0
+for acct_name in a b c d e f g h; do
+  add_account_with_wall "$accounts" "acct-$acct_name" 5 99 99 1
+done
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state GREEN "reset-ceiling pool state"
+expect_field "$out" pool_reason has_fable_capacity "reset-ceiling pool reason"
+expect_field "$out" pool_exhaustion 1.0h "reset-ceiling pool projection"
+expect_field "$out" overall GREEN "reset-ceiling overall"
+expect_rc "$out" 0 "reset-ceiling exit"
+
+# The ceiling is on the projection, not on the verdict: the same 99 percent with
+# a week still to run really is about to wall, and stays RED.
+make_pool "$health" "$accounts" 8 8 0
+for acct_name in a b c d e f g h; do
+  add_account_with_wall "$accounts" "acct-$acct_name" 5 99 99 100
+done
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_state RED "unreached-ceiling pool state"
+expect_field "$out" pool_reason exhaustion_under_2h "unreached-ceiling pool reason"
+expect_rc "$out" 2 "unreached-ceiling exit"
+pass "a weekly window that resets before it can be spent does not red-line the pool"
+
+# An account the gateway says has to log in again is its own signal: named on
+# the line, excluded from capacity, and never part of the projection. All three
+# spellings of it the gateway can use land in the same place.
+for auth_case in 'requiresReauth true' 'tokenStatus "expired"' 'pauseReason "reauth_required"'; do
+  auth_key=${auth_case%% *}
+  auth_val=${auth_case#* }
+  make_pool "$health" "$accounts" 6 11 0
+  add_account "$accounts" healthy 5 40 20 100
+  add_account_needing_auth "$accounts" locked-out 20 100 "$auth_key" "$auth_val"
+  out=$(run_monitor "$quota" "$health" "$accounts")
+  expect_field "$out" pool_needs_auth locked-out "$auth_key needs-auth names"
+  expect_field "$out" pool_capable healthy "$auth_key needs-auth capable"
+  expect_field "$out" pool_tracked healthy,locked-out "$auth_key needs-auth tracked"
+  expect_field "$out" pool_exhaustion 100.0h "$auth_key needs-auth projection"
+  expect_field "$out" pool_state GREEN "$auth_key needs-auth pool state"
+done
+
+# A healthy pool names no account there, and a pool that cannot be read names
+# none either rather than inventing one.
+make_pool "$health" "$accounts" 6 11 0
+add_account "$accounts" healthy 5 40 20 100
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_needs_auth none "healthy pool needs-auth"
+out=$(FM_FABLE_RUNWAY_NOW="$NOW" \
+  FM_FABLE_RUNWAY_QUOTA_JSON="$quota" \
+  FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$lab/absent-health.json" \
+  FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$lab/absent-accounts.json" \
+  "$MONITOR" 2>/dev/null)
+expect_field "$out" pool_needs_auth none "unreadable pool needs-auth"
+expect_field "$out" pool_state UNKNOWN "unreadable pool state with needs-auth column"
+
+# Every account locked out is no Fable capacity at all, whatever the gateway
+# still counts as routable.
+make_pool "$health" "$accounts" 6 11 0
+add_account_needing_auth "$accounts" locked-a 20 100 requiresReauth true
+add_account_needing_auth "$accounts" locked-b 20 100 requiresReauth true
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_needs_auth locked-a,locked-b "all-locked needs-auth names"
+expect_field "$out" pool_state RED "all-locked pool state"
+expect_field "$out" pool_reason no_fable_capable_account "all-locked pool reason"
+expect_rc "$out" 2 "all-locked exit"
+pass "an account that needs a login is named, excluded from capacity, and not projected"
+
 # An account whose name is an empty string is still a named member of the pool,
 # so the fail-back label stays available to it.
 make_pool "$health" "$accounts" 8 8 0
@@ -522,7 +617,7 @@ add_account "$accounts" active 5 99 99 1
 out=$(run_monitor "$quota" "$health" "$accounts")
 expect_field "$out" pool_state GREEN "ordered-routing pool state"
 expect_field "$out" pool_reason has_fable_capacity "ordered-routing pool reason"
-expect_field "$out" pool_exhaustion 168.0h "ordered-routing pool projection"
+expect_field "$out" pool_exhaustion 200.0h "ordered-routing pool projection"
 expect_rc "$out" 0 "ordered-routing pool exit"
 
 # The same pool with only the untouched-window accounts, so nothing else can
@@ -616,14 +711,38 @@ cquota="$checklab/quota.json"
 chealth="$checklab/health.json"
 caccounts="$checklab/accounts.json"
 
+# The check's helper is the one part of this that leaves the process, so every
+# poll below runs with orca and osascript shadowed on PATH. No case can ring a
+# real terminal or post a real desktop banner, and the fakes double as the
+# record of what the helper actually issued.
+FAKEBIN="$TMP_ROOT/fakebin"
+mkdir -p "$FAKEBIN"
+for fake in orca osascript; do
+  cat > "$FAKEBIN/$fake" <<SH
+#!/usr/bin/env bash
+[ -n "\${FM_FABLE_FAKE_LOG:-}" ] || exit 0
+printf '%s\\n' "\$*" >> "\$FM_FABLE_FAKE_LOG/$fake.log"
+SH
+  chmod 0755 "$FAKEBIN/$fake"
+done
+
 # run_check_in <lab-dir> <now>: a poll against that lab's own state and fixtures.
 run_check_in() {
-  FM_STATE_OVERRIDE="$1/state" \
+  PATH="$FAKEBIN:$PATH" \
+    FM_HOME="$1" \
+    FM_FABLE_FAKE_LOG="$1" \
+    FM_STATE_OVERRIDE="$1/state" \
     FM_FABLE_RUNWAY_NOW="$2" \
     FM_FABLE_RUNWAY_QUOTA_JSON="$1/quota.json" \
     FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$1/health.json" \
     FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$1/accounts.json" \
     "$CHECK" check 2>/dev/null
+}
+
+# notes_in <lab-dir>: how many durable handoff notes that lab's state holds.
+notes_in() {
+  set -- "$1"/state/fable-runway-handoff-*.md
+  [ -e "$1" ] && printf '%s\n' "$#" || printf '0\n'
 }
 
 run_check() { run_check_in "$checklab" "$1"; }
@@ -805,6 +924,96 @@ churn_quiet=$(run_check_in "$churnlab" "$((NOW + 300))")
   || fail "losing a capable account on a GREEN pool must not wake (got: $churn_quiet)"
 pass "pool membership churn with both runway states unchanged stays silent"
 
+# An account that starts wanting a login again wakes firstmate on its own, even
+# though neither runway state moved: the pool keeps a capable member, so without
+# that rule this is indistinguishable from ordinary membership churn. The same
+# transition is notified to the captain, because re-authenticating is the one
+# remedy a model turn cannot perform.
+authlab="$TMP_ROOT/auth"
+mkdir -p "$authlab/state"
+make_quota "$authlab/quota.json" 60 0.5 none through_reset
+make_pool "$authlab/health.json" "$authlab/accounts.json" 6 11 0
+add_account "$authlab/accounts.json" steady 5 40 20 100
+add_account "$authlab/accounts.json" wobbler 5 40 20 100
+auth_first=$(run_check_in "$authlab" "$NOW")
+expect_field "$auth_first" pool_needs_auth none "needs-auth first poll"
+[ ! -s "$authlab/osascript.log" ] \
+  || fail "a healthy first poll must not notify ($(cat "$authlab/osascript.log"))"
+make_pool "$authlab/health.json" "$authlab/accounts.json" 6 11 0
+add_account "$authlab/accounts.json" steady 5 40 20 100
+add_account_needing_auth "$authlab/accounts.json" wobbler 20 100 requiresReauth true
+auth_wake=$(run_check_in "$authlab" "$((NOW + 300))")
+[ -n "$auth_wake" ] || fail "an account entering needs-auth must wake firstmate"
+expect_field "$auth_wake" pool_needs_auth wobbler "needs-auth wake names"
+expect_field "$auth_wake" pool_state GREEN "needs-auth wake pool state"
+grep -q 'wobbler' "$authlab/osascript.log" 2>/dev/null \
+  || fail "the needs-auth transition must notify, naming the account"
+auth_quiet=$(run_check_in "$authlab" "$((NOW + 600))")
+[ -z "$auth_quiet" ] \
+  || fail "an account that already needs a login must not wake again (got: $auth_quiet)"
+[ "$(wc -l < "$authlab/osascript.log")" -eq 1 ] \
+  || fail "the notification must not repeat every poll"
+pass "an account newly needing a login wakes once and notifies the captain"
+
+# The zero-token failover action: overall RED with nothing left to serve Fable
+# from has to move the seat without waiting for a model turn, so the check hands
+# the episode to its plain-bash helper.
+hlab="$TMP_ROOT/handoff"
+mkdir -p "$hlab/state" "$hlab/config"
+printf 'FM_FABLE_RUNWAY_GROK_TERMINAL=grok-seat\n' > "$hlab/config/fable-runway.env"
+make_quota "$hlab/quota.json" 60 0.5 none through_reset
+make_pool "$hlab/health.json" "$hlab/accounts.json" 5 11 6
+add_account "$hlab/accounts.json" spent 5 100 100 200
+hand=$(run_check_in "$hlab" "$NOW")
+expect_field "$hand" overall RED "handoff poll overall"
+expect_field "$hand" pool_capable none "handoff poll capable"
+[ "$(notes_in "$hlab")" = 1 ] || fail "a RED episode must write one durable handoff note"
+note=$(printf '%s\n' "$hlab"/state/fable-runway-handoff-*.md)
+grep -q 'docs/runbooks/supervisor-failover-grok.md' "$note" \
+  || fail "the handoff note must point at the runbook"
+grep -q 'no_fable_capable_account' "$note" \
+  || fail "the handoff note must carry the reason token"
+grep -q 'fable-runway: overall=RED' "$note" \
+  || fail "the handoff note must carry the monitor line"
+grep -q 'terminal send --terminal grok-seat' "$hlab/orca.log" 2>/dev/null \
+  || fail "the doorbell must go to the configured terminal ($(cat "$hlab/orca.log" 2>/dev/null))"
+grep -q -- "--enter" "$hlab/orca.log" || fail "the doorbell must be submitted"
+grep -qF "$note" "$hlab/orca.log" || fail "the doorbell must carry the note path"
+grep -qF "$note" "$hlab/osascript.log" 2>/dev/null \
+  || fail "the notification must name the note path"
+
+# The same RED an hour on re-alerts, and the episode still fires only once.
+run_check_in "$hlab" "$((NOW + 4800))" >/dev/null
+[ "$(notes_in "$hlab")" = 1 ] || fail "a sustained RED episode must not write a second note"
+[ "$(wc -l < "$hlab/orca.log")" -eq 1 ] || fail "the doorbell must ring once per episode"
+
+# Capacity comes back, so the episode closes; the next RED is a new one.
+make_pool "$hlab/health.json" "$hlab/accounts.json" 6 11 0
+add_account "$hlab/accounts.json" spent 5 40 20 200
+run_check_in "$hlab" "$((NOW + 5100))" >/dev/null
+[ ! -e "$hlab/state/.fable-runway-handoff" ] \
+  || fail "recovering must close the failover episode"
+make_pool "$hlab/health.json" "$hlab/accounts.json" 5 11 6
+add_account "$hlab/accounts.json" spent 5 100 100 200
+run_check_in "$hlab" "$((NOW + 5400))" >/dev/null
+[ "$(notes_in "$hlab")" = 2 ] || fail "a RED after a recovery must open a new episode"
+pass "a RED with no Fable capacity left notes, rings and notifies once per episode"
+
+# A home with no terminal handle configured skips only the doorbell: the note
+# and the notification are what the captain reads, and neither may depend on
+# orca being installed or configured.
+nolab="$TMP_ROOT/nohandle"
+mkdir -p "$nolab/state"
+make_quota "$nolab/quota.json" 60 0.5 none through_reset
+make_pool "$nolab/health.json" "$nolab/accounts.json" 5 11 6
+add_account "$nolab/accounts.json" spent 5 100 100 200
+nohandle=$(run_check_in "$nolab" "$NOW")
+expect_field "$nohandle" overall RED "unconfigured handle overall"
+[ "$(notes_in "$nolab")" = 1 ] || fail "an unconfigured handle must not cost the note"
+[ ! -e "$nolab/orca.log" ] || fail "an unconfigured handle must not ring anything"
+[ -s "$nolab/osascript.log" ] || fail "an unconfigured handle must not cost the notification"
+pass "an unconfigured Grok terminal skips the doorbell and nothing else"
+
 # The check always runs its sibling monitor: the watcher validates the shim's
 # bytes before dispatch, so no environment variable may redirect it elsewhere.
 seamlab="$TMP_ROOT/seam"
@@ -814,7 +1023,10 @@ cat > "$seamlab/impostor.sh" <<'SH'
 printf 'fable-runway: overall=RED fable_state=RED pool_state=RED fable_remaining=0%% fable_burn=9x fable_exhaustion=unknown(unknown) pool_routable=0/0 pool_exhausted=0 pool_capable=none pool_tracked=none pool_exhaustion=unknown fable_reason=impostor pool_reason=impostor\n'
 SH
 chmod 0755 "$seamlab/impostor.sh"
-seam=$(FM_STATE_OVERRIDE="$seamlab/state" \
+seam=$(PATH="$FAKEBIN:$PATH" \
+  FM_HOME="$seamlab" \
+  FM_FABLE_FAKE_LOG="$seamlab" \
+  FM_STATE_OVERRIDE="$seamlab/state" \
   FM_FABLE_RUNWAY_MONITOR="$seamlab/impostor.sh" \
   FM_FABLE_RUNWAY_NOW="$NOW" \
   FM_FABLE_RUNWAY_QUOTA_JSON="$cquota" \
@@ -838,6 +1050,10 @@ bash -n "$armlab/state/fable-runway.check.sh" || fail "the shim must be valid ba
 disarm_out=$(FM_HOME="$armlab/home" FM_STATE_OVERRIDE="$armlab/state" "$CHECK" disarm 2>&1)
 [ ! -e "$armlab/state/fable-runway.check.sh" ] || fail "disarm must remove the shim ($disarm_out)"
 [ ! -e "$armlab/state/fable-runway.check-trust" ] || fail "disarm must remove the trust binding"
+: > "$armlab/state/.fable-runway-handoff"
+FM_HOME="$armlab/home" FM_STATE_OVERRIDE="$armlab/state" "$CHECK" disarm >/dev/null 2>&1
+[ ! -e "$armlab/state/.fable-runway-handoff" ] \
+  || fail "disarm must also retire the failover episode marker"
 pass "arm writes and binds the shim; disarm removes it"
 
 printf 'fm-fable-runway tests passed\n'

@@ -554,7 +554,13 @@ The optional pool is the one exception: a home without `better-ccflare` is a nor
 The routable count decides the pool verdict first and decides it alone when no account exposes a Fable-scoped window, reported as `routable_only_without_fable_window`; the missing window suppresses `pool_exhaustion`, `pool_capable` and `pool_tracked`, never the verdict.
 Fable-capable means usable, with readable windows, none of them spent, and a Fable-scoped window among them.
 An account with no Fable window may well be routable, but nothing about it says the fleet can draw Fable from it, so it is neither named in `pool_capable` nor counted against the `no_fable_capable_account` `RED`.
+An account the gateway reports as needing a login again - `requiresReauth`, a `tokenStatus` outside the usable ones such as `expired` or `invalid`, or a `pauseReason` naming authentication - is named in `pool_needs_auth` and is not usable, so it is neither Fable-capable nor part of the projection.
+It is a different failure from a spent window and it has a different remedy, so it is reported on its own rather than folded into the counts.
 Per-account pool exhaustion is projected from the account's weekly windows by assuming a seven-day week ending at `resets_at` and extrapolating the average burn to 100 percent, with the elapsed portion of the window floored at six hours so a burst in a freshly opened week does not read as imminent exhaustion.
+That window's own `resets_at` is the ceiling on the projection.
+A week projected to run out at or after the moment it resets does not run out at all - it is refilled first - so its runway is the time left to that reset and it counts past both thresholds the way a zero-burn window does.
+Without the ceiling an account at 99 percent projects exhaustion in about 1.7h however close its reset is, so a pool whose weeks are aligned - the normal shape of one provisioned in a single sitting - would go `RED` in the last hours before every one of them refills.
+The reported `pool_exhaustion` is bounded the same way, so it never claims more runway than the week it was measured over has left.
 An account's runway is the sooner of its Fable-scoped week and its all-models `weekly_all` week, because whichever wall it reaches first is the one that stops it serving Fable.
 Reading the Fable window alone would report a full week of runway for an account sitting one percent under its all-models wall, and the pool would go from `GREEN` straight to `no_fable_capable_account` with no warning in between.
 The five-hour session window is not projected: it refills through the day, so it is a pause rather than a wall.
@@ -574,14 +580,35 @@ That writes `state/fable-runway.check.sh` and binds its bytes with `bin/fm-check
 `bin/fm-fable-runway-check.sh disarm` removes the shim, its trust binding, and the record; retire an armed check that way rather than by hand.
 The check prints one line, and only one, when either runway state changes since the last printed poll, or when a persistent `RED` has not been reported for an hour.
 That re-alert interval is a fixed constant, not a knob: the only thing an override could do is stop a sustained `RED` from ever being mentioned again, on the monitor whose reason for existing is that going quiet is the worst failure.
-Only those transitions are printable: the pool's membership churns on its own as accounts cross and reset their windows, and a change to `pool_capable`, `pool_tracked` or `pool_unprojected` alone, with every state unchanged, prints nothing.
+One more transition is printable: an account that entered `pool_needs_auth` since the last printed poll wakes firstmate even though no runway state moved, and the same transition posts a macOS notification naming the account.
+Re-authenticating is the remedy no model turn can perform and it takes a minute, so it is worth the captain's attention long before any threshold is near; an account that already needed a login does not ask again on the next poll.
+Otherwise only those transitions are printable: the pool's membership churns on its own as accounts cross and reset their windows, and a change to `pool_capable`, `pool_tracked` or `pool_unprojected` alone, with every state unchanged, prints nothing.
 The wake always carries both `fable_state=` and `pool_state=`, so which runway went `RED` is never ambiguous.
 A poll that prints while the pool has just regained capacity also carries a recovery label, `capacity back account=<name>`; there is one spelling of it, because the same line already carries `pool_state=`.
 A regain means an account that was Fable-tracked but not Fable-capable as of the last printed poll is capable now; an account merely added to the pool is new, not recovered, and never earns the label.
 The membership is measured against the last poll that printed, not the last poll that ran, so a window that resets while the gateway's `routable` count still lags lands on a silent poll and is still named by the next wake that prints.
 A poll whose `pool_state` is `UNKNOWN` holds the name sets too, even though it prints: an unreadable pool observed no membership at all, so a gateway restart between polls does not consume a pending regain either.
 The check never switches anything; the failover and the lane-side offload are firstmate actions.
-`state/.fable-runway` records the last printed states, the last `RED` report time, and the tracked and capable name sets as of that same printed poll, so an unchanged poll stays silent and a regain is distinguishable from an addition.
+`state/.fable-runway` records the last printed states, the last `RED` report time, and the tracked, capable and needs-authentication name sets as of that same printed poll, so an unchanged poll stays silent and a regain is distinguishable from an addition.
+
+### The zero-token failover action
+
+There is one case where waiting for a firstmate model turn costs the most: an overall `RED` with no Fable-capable account left.
+The seat has to move to Grok, and the runway that would have paid for the turn that noticed is the one that just ran out.
+So on that condition the check hands the episode to [`bin/fm-fable-runway-alert.sh`](../bin/fm-fable-runway-alert.sh), which is plain bash and asks no model anything.
+It runs once per `RED` episode, guarded by `state/.fable-runway-handoff`, and does three things:
+
+1. writes a durable handoff note `state/fable-runway-handoff-<epoch>.md` carrying the monitor line, the UTC time, both reason tokens, and a pointer to the runbook;
+2. rings the Grok supervisor terminal through `orca terminal send --terminal <handle> --text <doorbell> --enter`, with the note's path in the doorbell;
+3. posts a macOS notification naming the runway and the note.
+
+The terminal handle is never hard-coded.
+It is read from `config/fable-runway.env` (gitignored, per-home) as `FM_FABLE_RUNWAY_GROK_TERMINAL`, and the file is parsed rather than sourced, so per-home configuration cannot run anything.
+With no handle configured the doorbell alone is skipped; the note and the notification still happen.
+Every step is best-effort and bounded at 5 seconds: a missing `orca`, a missing `osascript`, an unconfigured handle, or a hung either of them costs its own step and never the poll.
+The marker is removed on the first poll whose condition no longer holds, so a sustained `RED` rings once and a `RED` that returns after a recovery rings again.
+`bin/fm-fable-runway-check.sh disarm` removes the marker along with the shim, its trust binding, and the record; the notes are the captain's record and are left in place.
+The monitor itself remains read-only - only this action writes state or calls out.
 
 Each `quota-axi` call is bounded at 5 seconds and each pool fetch at 4, because a check the watcher kills prints nothing and records nothing, so the monitor would go silently dark and repeat that silence every poll.
 No single call may exceed a fixed 5-second cap, nor a quarter of what is left of `FM_CHECK_TIMEOUT` once that cap is reserved as margin, so the four calls the monitor makes still fit inside the watcher's per-check budget however `FM_CHECK_TIMEOUT` is set.

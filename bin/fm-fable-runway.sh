@@ -11,7 +11,8 @@
 #     fable_burn=<n>x fable_exhaustion=<iso|unknown>(<n>h)
 #     pool_routable=<r>/<c> pool_exhausted=<n> pool_capable=<names|none>
 #     pool_tracked=<names|none> pool_unprojected=<names|none>
-#     pool_exhaustion=<n>h fable_reason=<token> pool_reason=<token>
+#     pool_needs_auth=<names|none> pool_exhaustion=<n>h
+#     fable_reason=<token> pool_reason=<token>
 #
 # Two independent runways are reported, because the supervisor reads its own
 # credential while the fleet draws from the account pool, and they do not fail
@@ -49,11 +50,29 @@
 # routable, but nothing about it says the fleet can draw Fable from it, so it is
 # neither named in pool_capable nor counted against the no-capable-account RED.
 #
+# An account the gateway reports as needing a login again - requiresReauth, a
+# tokenStatus outside the usable ones, or a pauseReason naming authentication -
+# is named in pool_needs_auth and is not usable, so it is neither Fable-capable
+# nor part of the projection. It is a different failure from a spent window and
+# it has a different remedy, so it is reported on its own rather than folded
+# into the counts; the check turns an account newly entering that state into a
+# wake and a desktop notification, because re-authenticating is something the
+# captain can do long before the runway matters.
+#
 # Per-account pool exhaustion is projected from each account's weekly windows:
 # assuming a week runs seven days up to its resets_at, the average burn since
 # the window opened is extrapolated to 100 percent, with the elapsed portion
 # floored at six hours so a burst in a freshly opened week is not read as
 # imminent exhaustion.
+#
+# A window's own resets_at is the ceiling on that projection. A week projected
+# to run out at or after the moment it resets does not run out at all: it is
+# refilled first, so its runway is the time left to that reset and it counts
+# past both thresholds the way a zero-burn window does. Without that ceiling an
+# account sitting at 99 percent projects exhaustion in 1.7h however close its
+# reset is, so a pool with aligned weeks goes RED in the last hours before every
+# one of them refills. The reported pool_exhaustion is bounded the same way, so
+# it never claims more runway than the week it was measured over has left.
 #
 # An account's runway is the sooner of its Fable-scoped week and its all-models
 # weekly_all week, because whichever wall it reaches first is the one that stops
@@ -254,30 +273,50 @@ def fable_limit($a):
   | first;
 def weekly_all_limit($a):
   limits($a) | map(select(.kind == "weekly_all")) | first;
-def usable($a): (($a.paused // false) | not) and (($a.tokenStatus // "") == "valid");
+def lower($v): (if ($v | type) == "string" then ($v | ascii_downcase) else "" end);
+def needs_auth($a):
+  (($a.requiresReauth // false) == true)
+  or (lower($a.tokenStatus) | (. != "" and . != "valid"))
+  or (lower($a.pauseReason) | test("auth|login|credential"));
+def usable($a):
+  (($a.paused // false) | not) and (lower($a.tokenStatus) == "valid")
+  and (needs_auth($a) | not);
 def windows_known($a):
   (limits($a) | length) > 0
   and all(limits($a)[]; ((.percent | type) == "number"));
 def capable($a):
   usable($a) and windows_known($a) and (fable_limit($a) != null)
   and all(limits($a)[]; (.percent < 100));
-def hours_to($lim):
+# A window's runway as {h, wall}: h is the hours it has left, and wall says
+# whether that runway ends in exhaustion or in the window's own reset. A week
+# that refills before its burn can spend it is not a wall at any distance.
+def window_runway($lim):
   if $lim == null or (($lim.resets_at | type) != "string") then null
   else ($lim.resets_at | to_epoch) as $r |
     ($lim.percent // null) as $pct |
     if $r == null or ($pct | type) != "number" then null
-    else ($r - 604800) as $start |
+    else (($r - $now) / 3600) as $ttr |
+      ($r - 604800) as $start |
       (($now - $start) / 3600) as $raw |
-      if $pct <= 0 then (604800 / 3600)
+      if $pct <= 0 then {h: $ttr, wall: false}
       elif $raw <= 0 then null
       else (if $raw < 6 then 6 else $raw end) as $elapsed |
-        ((100 - $pct) * $elapsed / $pct) end
+        ((100 - $pct) * $elapsed / $pct) as $proj |
+        if $proj >= $ttr then {h: $ttr, wall: false}
+        else {h: $proj, wall: true} end
+      end
     end
   end;
-def account_hours($a):
-  [hours_to(fable_limit($a)), hours_to(weekly_all_limit($a))]
-  | map(select(. != null))
-  | if length == 0 then null else min end;
+# The account's runway is the sooner wall among its weeks; with no wall at all
+# it is the sooner reset, which is a refill rather than a limit.
+def account_runway($a):
+  ([window_runway(fable_limit($a)), window_runway(weekly_all_limit($a))]
+   | map(select(. != null))) as $w |
+  if ($w | length) == 0 then null
+  else ($w | map(select(.wall))) as $walls |
+    if ($walls | length) > 0 then {h: ($walls | map(.h) | min), wall: true}
+    else {h: ($w | map(.h) | min), wall: false} end
+  end;
 def account_name($a):
   if ($a.name | type) == "string" and $a.name != ""
   then ($a.name | gsub("[ ,\t]"; "_")) else "unnamed" end;
@@ -286,12 +325,13 @@ def named($list): [$list[] | account_name(.)] | join(",");
 ($accts | map(select(fable_limit(.) != null))) as $trackedAccts |
 ($trackedAccts | length) as $tracked |
 ($accts | map(select(capable(.)))) as $cap |
-($cap | map({acct: ., hrs: account_hours(.)})) as $capHrs |
-($capHrs | map(select(.hrs != null)) | map(.hrs)) as $hrs |
-($capHrs | map(select(.hrs == null)) | map(.acct)) as $unproj |
-(if ($hrs | length) == 0 then null else ($hrs | max) end) as $phrs |
-($hrs | map(select(. >= 2)) | length) as $past2 |
-($hrs | map(select(. >= 6)) | length) as $past6 |
+($accts | map(select(needs_auth(.)))) as $authAccts |
+($cap | map({acct: ., rw: account_runway(.)})) as $capRw |
+($capRw | map(select(.rw != null)) | map(.rw)) as $hrs |
+($capRw | map(select(.rw == null)) | map(.acct)) as $unproj |
+(if ($hrs | length) == 0 then null else ($hrs | map(.h) | max) end) as $phrs |
+($hrs | map(select((.wall | not) or .h >= 2)) | length) as $past2 |
+($hrs | map(select((.wall | not) or .h >= 6)) | length) as $past6 |
 # A capable account whose week cannot be placed may have any amount of runway
 # left, so it must not let the accounts that happen to be projectable decide the
 # time rule alone. It suppresses that rule instead, and is named on the line.
@@ -304,6 +344,7 @@ def named($list): [$list[] | account_name(.)] | join(",");
 named($cap) as $names |
 named($trackedAccts) as $trackedNames |
 named($unproj) as $unprojNames |
+named($authAccts) as $authNames |
 ($health.pool.routable // null) as $routable |
 ($health.pool.configured // null) as $configured |
 ($health.pool.usage_exhausted // null) as $exhausted |
@@ -340,6 +381,7 @@ named($unproj) as $unprojNames |
   (if $names == "" then "none" else $names end),
   (if $trackedNames == "" then "none" else $trackedNames end),
   (if $unprojNames == "" then "none" else $unprojNames end),
+  (if $authNames == "" then "none" else $authNames end),
   (if $phrs == null then "-" else ($phrs | tostring) end),
   $verdict.reason
 ] | @tsv
@@ -377,17 +419,17 @@ pool_read() {
     accounts=$(pool_fetch "$POOL_URL/api/accounts") || accounts=''
   fi
   if [ -z "$health" ] || [ -z "$accounts" ]; then
-    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\t-\tpool_unavailable\n'
+    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\tnone\t-\tpool_unavailable\n'
     return 0
   fi
   if ! printf '%s' "$health" | jq -e 'type == "object"' >/dev/null 2>&1 \
     || ! printf '%s' "$accounts" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\t-\tpool_response_not_recognized\n'
+    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\tnone\t-\tpool_response_not_recognized\n'
     return 0
   fi
   printf '%s' "$accounts" \
     | jq -r --argjson now "$NOW" --argjson health "$health" "$POOL_JQ" 2>/dev/null \
-    || printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\t-\tpool_response_not_readable\n'
+    || printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\tnone\t-\tpool_response_not_readable\n'
 }
 
 # --- main -------------------------------------------------------------------
@@ -426,7 +468,7 @@ IFS=$'\t' read -r FABLE_STATE FABLE_REM FABLE_BURN FABLE_EXH FABLE_HRS FABLE_REA
 $(fable_read)
 EOF
 
-IFS=$'\t' read -r POOL_STATE POOL_ROUTABLE POOL_CONFIGURED POOL_EXHAUSTED POOL_CAPABLE POOL_TRACKED POOL_UNPROJ POOL_HRS POOL_REASON <<EOF
+IFS=$'\t' read -r POOL_STATE POOL_ROUTABLE POOL_CONFIGURED POOL_EXHAUSTED POOL_CAPABLE POOL_TRACKED POOL_UNPROJ POOL_AUTH POOL_HRS POOL_REASON <<EOF
 $(pool_read)
 EOF
 
@@ -449,11 +491,11 @@ EXH_PHRASE=${FABLE_EXH:--}
 [ "$POOL_CONFIGURED" = "-" ] && POOL_CONFIGURED=unknown
 [ "$POOL_EXHAUSTED" = "-" ] && POOL_EXHAUSTED=unknown
 
-printf 'fable-runway: overall=%s fable_state=%s pool_state=%s fable_remaining=%s%% fable_burn=%sx fable_exhaustion=%s(%s) pool_routable=%s/%s pool_exhausted=%s pool_capable=%s pool_tracked=%s pool_unprojected=%s pool_exhaustion=%s fable_reason=%s pool_reason=%s\n' \
+printf 'fable-runway: overall=%s fable_state=%s pool_state=%s fable_remaining=%s%% fable_burn=%sx fable_exhaustion=%s(%s) pool_routable=%s/%s pool_exhausted=%s pool_capable=%s pool_tracked=%s pool_unprojected=%s pool_needs_auth=%s pool_exhaustion=%s fable_reason=%s pool_reason=%s\n' \
   "$OVERALL" "$FABLE_STATE" "$POOL_STATE" "$FABLE_REM" "$FABLE_BURN" \
   "$EXH_PHRASE" "$(fmt_hours "${FABLE_HRS:-}")" \
   "$POOL_ROUTABLE" "$POOL_CONFIGURED" "$POOL_EXHAUSTED" "$POOL_CAPABLE" \
-  "${POOL_TRACKED:-none}" "${POOL_UNPROJ:-none}" \
+  "${POOL_TRACKED:-none}" "${POOL_UNPROJ:-none}" "${POOL_AUTH:-none}" \
   "$(fmt_hours "${POOL_HRS:-}")" \
   "${FABLE_REASON:-unknown}" "${POOL_REASON:-unknown}"
 
