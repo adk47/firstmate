@@ -64,10 +64,8 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and defers self-governance recognition and insertion to
 # fm-ensure-agents-md.sh's contract.
-# Ship and scout briefs include a house-wiki stanza: knowledge is at
-# ~/.llm-wiki, grep wiki/index.md then read, Pi uses wiki_recall, lessons go
-# through wiki_retro, and a fact is never reported absent without grepping first.
-# This script owns that text; do not duplicate it into AGENTS.md.
+# Ship and scout briefs include the house-wiki stanza from
+# bin/fm-house-wiki-stanza.txt (single owner of that text).
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -344,15 +342,12 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
-IFS= read -r -d '' WIKI_SECTION <<'EOF' || true
-# House wiki
-House knowledge lives at `~/.llm-wiki`.
-Grep `wiki/index.md` then Read the matching page; Pi uses `wiki_recall`.
-File a lesson with `wiki_retro` when the work produced one.
-Never claim a fact is absent from memory without grepping `~/.llm-wiki` first.
-Never edit `raw/` or `meta/`; never call `/wiki-run` or `wiki_watch`.
-Do not add MCP for this vault.
-EOF
+WIKI_STANZA_FILE="$SCRIPT_DIR/fm-house-wiki-stanza.txt"
+if [ ! -f "$WIKI_STANZA_FILE" ]; then
+  echo "fm-brief.sh: missing house-wiki stanza $WIKI_STANZA_FILE" >&2
+  exit 1
+fi
+WIKI_SECTION=$(cat "$WIKI_STANZA_FILE")
 WIKI_SECTION=${WIKI_SECTION%$'\n'}
 
 IFS= read -r -d '' TASK_SECTION <<'EOF' || true

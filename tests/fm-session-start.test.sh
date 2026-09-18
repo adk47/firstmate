@@ -2384,6 +2384,8 @@ EOF
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: claude" "supervision block missing"
   assert_contains "$out" "- X mode: active" "supervision block did not mention X cadence"
   assert_contains "$out" "Follow the supervision operating instructions block above" "next step did not point back to the emitted supervision block"
+  assert_contains "$out" "# House wiki" "next step missing the house-wiki stanza"
+  assert_contains "$out" "Never claim a fact is absent from memory without grepping" "next step missing the house-wiki absence guard"
 
   pass "session start emits X-mode cadence guidance in the harness supervision block"
 }
