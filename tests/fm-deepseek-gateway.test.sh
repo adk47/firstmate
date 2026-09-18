@@ -242,8 +242,7 @@ test_health_reports_route_and_never_the_key() {
   # must fork it exactly as many times as one - never.
   local before after
   before=$(wc -l < "$PICK.calls" 2>/dev/null || echo 0)
-  local i
-  for i in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5; do
     curl -sS --max-time 10 -o /dev/null "http://127.0.0.1:$GATEWAY_PORT/healthz"
   done
   after=$(wc -l < "$PICK.calls" 2>/dev/null || echo 0)
@@ -251,7 +250,7 @@ test_health_reports_route_and_never_the_key() {
     || fail "an unauthenticated probe must never run the route picker, ran $((after - before)) time(s)"
   # A polled status resolves at most once inside its TTL, so `status` in a loop
   # does not fork the picker and the key command per request.
-  for i in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5; do
     api GET /status > /dev/null
   done
   after=$(wc -l < "$PICK.calls" 2>/dev/null || echo 0)
