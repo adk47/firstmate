@@ -540,7 +540,14 @@ The procedures themselves live in [`docs/runbooks/supervisor-failover-grok.md`](
 
 Two runways are reported, because they do not fail together.
 `fable_state` is the supervisor's own credential, from `quota-axi`'s `model:fable` window: its remaining percent, its `pace.burnMultiple`, and the runway's `projectedExhaustedAt`.
-`pool_state` is the `better-ccflare` account pool at `FM_FABLE_RUNWAY_POOL_URL` (default `http://127.0.0.1:8080`), read from `GET /health` and `GET /api/accounts`; its routable count is the primary signal and its per-account Fable windows refine it.
+`pool_state` is the account pool the fleet actually draws from, and two proxies serve the same Claude logins, so both are read.
+`CLIProxyAPI`'s local auth inventory - `FM_FABLE_RUNWAY_AUTH_DIR`, default `~/.cli-proxy-api`, one `claude-<label>.json` per login - is the authority for how many accounts hold a live grant, because it is the proxy `ANTHROPIC_BASE_URL` points at.
+`better-ccflare` at `FM_FABLE_RUNWAY_POOL_URL` (default `http://127.0.0.1:8080`, read from `GET /health` and `GET /api/accounts`) supplies the per-account Fable windows that refine it.
+Reading `better-ccflare` alone is not a subtle mistake: the two proxies share the same OAuth logins, so whichever refreshes a token last leaves the other holding a dead `refresh_token`.
+On a home where `CLIProxyAPI` refreshed them, `better-ccflare` reports every account `tokenStatus=expired` and `routable=0` while the fleet is being served normally.
+So the inventory decides the counts whenever it can be read, and `better-ccflare` is supplementary rather than authoritative; with no inventory present - a home that does not run `CLIProxyAPI` - `better-ccflare` decides alone.
+An account holds a live grant in the inventory when its file is not `disabled` and its `expired` timestamp is still in the future.
+Only those two fields are ever read, and the account is labelled from its own file name, so neither the tokens nor the email address in that file reaches the reported line or any child process.
 Both use the same documented thresholds, worst wins:
 
 - `RED` - projected exhaustion under 2h, or remaining under 10 percent.
@@ -550,11 +557,14 @@ Both use the same documented thresholds, worst wins:
 The pool adds the pool's own capacity counts: `RED` at 1 or fewer routable accounts, `YELLOW` at 3 or fewer.
 The overall state is the worst of the two, and the monitor exits non-zero only on `RED`.
 A runway that cannot be measured is `RED` with a reason, never `GREEN`, because an unreadable runway is exactly what a failover monitor must not hide.
-The optional pool is the one exception: a home without `better-ccflare` is a normal firstmate home, so a pool that cannot be read is `UNKNOWN` and leaves the overall state to the supervisor's own runway.
+The optional pool is the one exception: a home running neither proxy is a normal firstmate home, so a pool that cannot be read is `UNKNOWN` and leaves the overall state to the supervisor's own runway.
+It takes both sources failing to get there - an unreadable `better-ccflare` while the inventory still answers is a pool that can be counted but not projected, reported as `routable_only_without_fable_window`, not a pool that cannot be read.
 The routable count decides the pool verdict first and decides it alone when no account exposes a Fable-scoped window, reported as `routable_only_without_fable_window`; the missing window suppresses `pool_exhaustion`, `pool_capable` and `pool_tracked`, never the verdict.
 Fable-capable means usable, with readable windows, none of them spent, and a Fable-scoped window among them.
 An account with no Fable window may well be routable, but nothing about it says the fleet can draw Fable from it, so it is neither named in `pool_capable` nor counted against the `no_fable_capable_account` `RED`.
-An account the gateway reports as needing a login again - `requiresReauth`, a `tokenStatus` outside the usable ones such as `expired` or `invalid`, or a `pauseReason` naming authentication - is named in `pool_needs_auth` and is not usable, so it is neither Fable-capable nor part of the projection.
+Needing a login is a cross-proxy fact: an account is named in `pool_needs_auth` when *no* proxy holds a live grant for it - neither a current, enabled entry in the auth inventory nor a `better-ccflare` record without an authentication complaint (`requiresReauth`, a `tokenStatus` outside the usable ones such as `expired` or `invalid`, or a `pauseReason` naming authentication).
+An account one proxy can still serve is not a login the captain has to go and perform, so it is not named.
+A named account is not usable, so it is neither Fable-capable nor part of the projection.
 It is a different failure from a spent window and it has a different remedy, so it is reported on its own rather than folded into the counts.
 Per-account pool exhaustion is projected from the account's weekly windows by assuming a seven-day week ending at `resets_at` and extrapolating the average burn to 100 percent, with the elapsed portion of the window floored at six hours so a burst in a freshly opened week does not read as imminent exhaustion.
 That window's own `resets_at` is the ceiling on the projection.
@@ -564,7 +574,7 @@ The reported `pool_exhaustion` is bounded the same way, so it never claims more 
 An account's runway is the sooner of its Fable-scoped week and its all-models `weekly_all` week, because whichever wall it reaches first is the one that stops it serving Fable.
 Reading the Fable window alone would report a full week of runway for an account sitting one percent under its all-models wall, and the pool would go from `GREEN` straight to `no_fable_capable_account` with no warning in between.
 The five-hour session window is not projected: it refills through the day, so it is a pause rather than a wall.
-A window reporting no burn at all is readable and maximally healthy, so it projects the whole seven-day week and stays in the counts the verdict is taken from; only a truly unreadable window drops out of them.
+A window reporting no burn at all is readable and maximally healthy, so its runway is simply the time left to its own reset - the same ceiling every other window gets - and it stays in the counts the verdict is taken from; only a truly unreadable window drops out of them.
 That is settled before the window is placed in its week, because with no burn there is no rate left to measure and where the week started does not matter.
 It matters because the pool's ordered routing normally leaves most accounts untouched for the week while one account burns, and an untouched account is exactly the one whose `resets_at` sits a full week out or further.
 A window that has been burned against but whose week cannot be placed is unprojectable: a `resets_at` a full week or more out, or one carrying a non-UTC offset, leaves no way to say how much of the week has elapsed.
@@ -593,12 +603,17 @@ The check never switches anything; the failover and the lane-side offload are fi
 
 ### The zero-token failover action
 
-There is one case where waiting for a firstmate model turn costs the most: an overall `RED` with no Fable-capable account left.
-The seat has to move to Grok, and the runway that would have paid for the turn that noticed is the one that just ran out.
-So on that condition the check hands the episode to [`bin/fm-fable-runway-alert.sh`](../bin/fm-fable-runway-alert.sh), which is plain bash and asks no model anything.
-It runs once per `RED` episode, guarded by `state/.fable-runway-handoff`, and does three things:
+There are cases where waiting for a firstmate model turn costs the most: the seat has to move to Grok, and the runway that would have paid for the turn that noticed is the one that just ran out.
+On those the check hands the episode to [`bin/fm-fable-runway-alert.sh`](../bin/fm-fable-runway-alert.sh), which is plain bash and asks no model anything.
 
-1. writes a durable handoff note `state/fable-runway-handoff-<epoch>.md` carrying the monitor line, the UTC time, both reason tokens, and a pointer to the runbook;
+Two conditions open an episode, and they are different claims that must never be worded as each other:
+
+- overall `RED` on a pool that **was read** and holds no Fable-capable account. That is an observation, and the episode says "No Fable-capable account left".
+- the pool **unreadable** for 2 consecutive polls spanning at least 10 minutes while `fable_state` is `RED`. A pool nobody could read is not an empty pool - `pool_capable=none` is what an unread pool prints too - so a gateway blip opens nothing, but a pool that stays unreadable while Fable is out leaves no way to switch at all. That episode says "Pool unreachable for `<minutes>` minutes, supervisor runway unmeasurable" and never that the pool is empty. Both bounds are fixed constants, not knobs: an override could only delay the one wake that cannot afford to be late.
+
+An episode runs once, guarded by `state/.fable-runway-handoff`, and does three things:
+
+1. writes a durable handoff note `state/fable-runway-handoff-<epoch>.md` carrying the condition, the monitor line, the UTC time, both reason tokens, and a pointer to the runbook;
 2. rings the Grok supervisor terminal through `orca terminal send --terminal <handle> --text <doorbell> --enter`, with the note's path in the doorbell;
 3. posts a macOS notification naming the runway and the note.
 

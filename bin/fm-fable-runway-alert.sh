@@ -2,7 +2,10 @@
 # fm-fable-runway-alert.sh - the Fable-runway check's outward-facing actions.
 #
 # Usage:
-#   fm-fable-runway-alert.sh handoff <monitor-line>     open a failover episode
+#   fm-fable-runway-alert.sh handoff <monitor-line>
+#       open a failover episode: the pool was read and holds no Fable capacity
+#   fm-fable-runway-alert.sh handoff-unreachable <monitor-line> <minutes>
+#       open a failover episode: the pool has been unreadable that long
 #   fm-fable-runway-alert.sh resolve                    close the open episode
 #   fm-fable-runway-alert.sh needs-auth <names> <line>  an account wants a login
 #   fm-fable-runway-alert.sh --help                     print this help
@@ -12,12 +15,19 @@
 # place to audit - and so the two notifications the monitor can raise share a
 # single notifier rather than carrying a copy each.
 #
-# `handoff` is the zero-token failover action. When the overall runway is RED
-# and no Fable-capable account remains, the supervisor seat has to move to Grok,
-# and waiting for a firstmate model turn to notice is exactly the wait that
-# cannot be afforded: the runway that would have paid for that turn is the one
-# that just ran out. So this is plain bash, it never asks a model anything, and
-# it does three things once per RED episode:
+# The two `handoff` verbs are the zero-token failover action. When the
+# supervisor seat has to move to Grok, waiting for a firstmate model turn to
+# notice is exactly the wait that cannot be afforded: the runway that would
+# have paid for that turn is the one that just ran out. So this is plain bash,
+# it never asks a model anything, and it does three things once per episode.
+#
+# The two verbs exist because they are different claims and the note and the
+# banner must not confuse them. `handoff` is an observation - the pool answered
+# and has no Fable-capable account left. `handoff-unreachable` is the absence
+# of one - nobody could read the pool for that many minutes while the
+# supervisor's own runway was RED - and it says exactly that. Neither may ever
+# be worded as the other: a gateway blip reported as an empty pool sends the
+# captain to look for accounts that were there the whole time. Each does:
 #
 #   1. writes a durable handoff note under state/, carrying the monitor line,
 #      the UTC time, the reason tokens, and a pointer to the runbook;
@@ -110,10 +120,11 @@ notify() {
 }
 
 write_note() {
-  local path=$1 line=$2 now=$3 stamp
+  local path=$1 line=$2 now=$3 summary=$4 stamp
   stamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || stamp=unknown
   {
     printf '# Fable runway handoff\n\n'
+    printf -- '- condition: %s\n' "$summary"
     printf -- '- utc: %s\n' "$stamp"
     printf -- '- epoch: %s\n' "$now"
     printf -- '- fable_reason: %s\n' "$(field fable_reason "$line")"
@@ -124,27 +135,26 @@ write_note() {
 }
 
 ring_doorbell() {
-  local note=$1 handle text
+  local note=$1 summary=$2 handle text
   handle=$(config_get FM_FABLE_RUNWAY_GROK_TERMINAL)
   [ -n "$handle" ] || return 0
   command -v orca >/dev/null 2>&1 || return 0
-  text="fable-runway RED: take the supervisor seat per $RUNBOOK - handoff note: $note"
+  text="fable-runway RED: $summary Take the supervisor seat per $RUNBOOK - handoff note: $note"
   fm_run_timed "$CALL_SECS" orca terminal send \
     --terminal "$handle" --text "$text" --enter >/dev/null 2>&1 || return 0
 }
 
-action_handoff() {
-  local line=$1 now note
+open_episode() {
+  local summary=$1 line=$2 now note
   [ -n "$line" ] || return 0
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
   [ -e "$MARKER" ] && return 0
   now=$(now_epoch)
   note="$STATE/fable-runway-handoff-$now.md"
-  write_note "$note" "$line" "$now" || return 0
+  write_note "$note" "$line" "$now" "$summary" || return 0
   : > "$MARKER" 2>/dev/null || true
-  ring_doorbell "$note"
-  notify 'firstmate: Fable runway RED' \
-    "No Fable-capable account left. Handoff note: $note" || true
+  ring_doorbell "$note" "$summary"
+  notify 'firstmate: Fable runway RED' "$summary Handoff note: $note" || true
   return 0
 }
 
@@ -157,12 +167,15 @@ action_needs_auth() {
   local names=$1 line=${2-}
   [ -n "$names" ] && [ "$names" != none ] || return 0
   notify 'firstmate: account needs a login' \
-    "better-ccflare account needs re-authentication: $names ($(field pool_state "$line"))" || true
+    "No proxy holds a live grant: $names ($(field pool_state "$line"))" || true
   return 0
 }
 
 case "${1-}" in
-  handoff) action_handoff "${2-}" ;;
+  handoff) open_episode 'No Fable-capable account left.' "${2-}" ;;
+  handoff-unreachable)
+    open_episode "Pool unreachable for ${3-0} minutes, supervisor runway unmeasurable." "${2-}"
+    ;;
   resolve) action_resolve ;;
   needs-auth) action_needs_auth "${2-}" "${3-}" ;;
   -h|--help|help) usage ;;

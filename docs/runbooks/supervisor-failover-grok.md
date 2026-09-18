@@ -14,7 +14,7 @@ This runbook owns the procedures themselves.
 Two independent things can run out, and they do not fail together:
 
 - The **supervisor's own credential** (`fable_state`), read from `quota-axi`'s `model:fable` window.
-- The **account pool** `better-ccflare` serves from (`pool_state`), read from the local gateway's `/health` and `/api/accounts`.
+- The **account pool** the fleet draws from (`pool_state`). Two proxies serve the same Claude logins: `CLIProxyAPI`, which `ANTHROPIC_BASE_URL` points at, is the authority for how many accounts hold a live grant (its auth files under `~/.cli-proxy-api`), and `better-ccflare` on 8080 supplies the per-account Fable windows. They disagree routinely - whichever refreshed a shared login last leaves the other holding a dead token - so `pool_routable` counts live grants in the inventory, and a `better-ccflare` that says `routable=0` while the inventory is full is a stale reading, not an outage.
 
 At GREEN nothing to do.
 At YELLOW, plan the move and make sure Grok has fuel.
@@ -29,11 +29,12 @@ Two things do happen without you, because both are faster than a model turn and 
 
 **An account that needs a login again.**
 The wake names it in `pool_needs_auth=`, and a macOS notification names it too.
+An account is named there only when *no* proxy holds a live grant for it, so a name here really is a login to go and perform - an account one proxy can still serve is never named.
 That account is already out of `pool_capable` and out of the projection, so the pool is running on the rest.
-Re-authenticate it in `better-ccflare` and the next poll's `capacity back account=` line confirms it returned; nothing else in this runbook is needed for it.
+Re-authenticate it and the next poll's `capacity back account=` line confirms it returned; nothing else in this runbook is needed for it.
 
-**An overall RED with no Fable-capable account left.**
-On that condition, and only that one, [`bin/fm-fable-runway-alert.sh`](../../bin/fm-fable-runway-alert.sh) fires once per episode, in plain bash, without waiting for a firstmate turn:
+**A runway that has actually run out.**
+On one of two conditions - an overall RED on a pool that *was read* and holds no Fable-capable account, or a pool that has been *unreadable* for 2 consecutive polls spanning at least 10 minutes while `fable_state` is RED - [`bin/fm-fable-runway-alert.sh`](../../bin/fm-fable-runway-alert.sh) fires once per episode, in plain bash, without waiting for a firstmate turn:
 
 - it writes `state/fable-runway-handoff-<epoch>.md` with the monitor line, the UTC time, both reason tokens, and a pointer back to this runbook;
 - it rings the Grok supervisor terminal - `orca terminal send --terminal <handle> --text <doorbell> --enter` - carrying that note's path, with the handle read from `config/fable-runway.env` as `FM_FABLE_RUNWAY_GROK_TERMINAL`;
@@ -47,6 +48,7 @@ printf 'FM_FABLE_RUNWAY_GROK_TERMINAL=<orca-terminal-handle>\n' > config/fable-r
 ```
 
 With no handle configured the doorbell is skipped and the note and the notification still happen, so the handoff is never silent.
+Read the note's `condition:` line first: "No Fable-capable account left" means the pool answered and is empty, so Part 1 below is the whole job; "Pool unreachable for `<minutes>` minutes" means nobody could read the pool, so check the gateway and the inventory before assuming the accounts are gone.
 The doorbell is a doorbell: it tells whoever is at that terminal to start Part 1 below, and reading the note is the first step.
 Nothing about it takes the seat - Part 1 is still executed deliberately.
 
@@ -228,6 +230,7 @@ Preconditions: no lane mid `no-mistakes` run, no incident open, `bin/fm-fable-ru
 | 5 | Force one real wake and confirm Grok drains, handles, and re-arms | wake to handled and re-armed |
 | 6 | Reverse with Part 2 and confirm the Stop auto-arm reclaims supervision, the wake queue is empty, and no `RECORD DIVERGENCE` prints | Grok exit to confirmed Claude supervision |
 | 7 | Confirm the zero-token action fired: one `state/fable-runway-handoff-*.md` note for the episode, the doorbell at the Grok terminal, the notification - and that a second RED poll did not repeat any of them | note to doorbell |
+| 7a | Stop `better-ccflare` alone and confirm the pool is still counted from the auth inventory rather than reading `UNKNOWN`, then restart it | inventory-only read confirmed |
 | 8 | Record the elapsed times and every failure encountered here | total drill time |
 
 Failures worth recording separately: a lock that did not transfer, an arm that never reported a live cycle, a wake that was not drained, a lane tick that did not fire, and any duplicated wake.

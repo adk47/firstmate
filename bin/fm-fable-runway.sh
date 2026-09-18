@@ -21,9 +21,24 @@
 #   fable_state  the supervisor's own credential, from quota-axi's
 #                `model:fable` window: percentRemaining, pace.burnMultiple, and
 #                the runway's projectedExhaustedAt.
-#   pool_state   the better-ccflare account pool at FM_FABLE_RUNWAY_POOL_URL
-#                (GET /health and GET /api/accounts). Its routable count is the
-#                primary signal, and its per-account Fable windows refine it.
+#   pool_state   the account pool the fleet actually draws from. Two proxies
+#                serve the same Claude logins and they do not agree, so both
+#                are read: CLIProxyAPI's local auth inventory
+#                (FM_FABLE_RUNWAY_AUTH_DIR, default ~/.cli-proxy-api) is the
+#                authority for how many accounts hold a live grant, because it
+#                is the proxy ANTHROPIC_BASE_URL points at; better-ccflare at
+#                FM_FABLE_RUNWAY_POOL_URL (GET /health and GET /api/accounts)
+#                supplies the per-account Fable windows that refine it.
+#
+# Reading better-ccflare alone would be wrong, and not in a subtle way: the two
+# proxies share the same OAuth logins, so whichever refreshes a token last
+# leaves the other holding a dead refresh_token. On a home where CLIProxyAPI
+# refreshed them, better-ccflare reports every account tokenStatus=expired and
+# routable=0 while the fleet is being served normally. So the auth inventory
+# decides the counts whenever it can be read, and better-ccflare is a
+# supplementary source rather than the authority. With no inventory present -
+# a home that does not run CLIProxyAPI - better-ccflare decides alone, exactly
+# as before.
 #
 # Both runways use the same documented thresholds:
 #
@@ -37,9 +52,11 @@
 # The overall state is the worst of the two. A runway that cannot be measured is
 # RED with a reason, never GREEN, because an unreadable runway is exactly the
 # case a failover monitor must not hide. The optional pool is the one exception:
-# a home without better-ccflare is a normal firstmate home, so an unreachable or
-# unconfigured pool is UNKNOWN and leaves the overall state to the supervisor's
-# own runway.
+# a home running neither proxy is a normal firstmate home, so a pool is UNKNOWN
+# and leaves the overall state to the supervisor's own runway. It takes both
+# sources failing to get there - an unreadable better-ccflare while the auth
+# inventory still answers is a pool that can be counted but not projected, not
+# a pool that cannot be read.
 #
 # The pool's routable counts decide the verdict on their own, so a pool whose
 # accounts expose no Fable-scoped window at all is still judged by them: the
@@ -50,14 +67,18 @@
 # routable, but nothing about it says the fleet can draw Fable from it, so it is
 # neither named in pool_capable nor counted against the no-capable-account RED.
 #
-# An account the gateway reports as needing a login again - requiresReauth, a
-# tokenStatus outside the usable ones, or a pauseReason naming authentication -
-# is named in pool_needs_auth and is not usable, so it is neither Fable-capable
-# nor part of the projection. It is a different failure from a spent window and
-# it has a different remedy, so it is reported on its own rather than folded
-# into the counts; the check turns an account newly entering that state into a
-# wake and a desktop notification, because re-authenticating is something the
-# captain can do long before the runway matters.
+# Needing a login is a cross-proxy fact: an account is named in pool_needs_auth
+# when NO proxy holds a live grant for it - neither a current, enabled entry in
+# the auth inventory nor a better-ccflare record without an authentication
+# complaint (requiresReauth, a tokenStatus outside the usable ones, or a
+# pauseReason naming authentication). An account one proxy can still serve is
+# not a login the captain has to go and perform. A named account is not usable,
+# so it is neither Fable-capable nor part of the projection. It is a different
+# failure from a spent window and it has a different remedy, so it is reported
+# on its own rather than folded into the counts; the check turns an account
+# newly entering that state into a wake and a desktop notification, because
+# re-authenticating is something the captain can do long before the runway
+# matters.
 #
 # Per-account pool exhaustion is projected from each account's weekly windows:
 # assuming a week runs seven days up to its resets_at, the average burn since
@@ -102,8 +123,11 @@
 # measured.
 #
 # Read-only: this never writes fleet state, never mutates the pool, and never
-# prints a credential or an account email. It reads quota-axi and the local
-# pool's HTTP API only.
+# prints a credential or an account email. It reads quota-axi, the local pool's
+# HTTP API, and the auth inventory. Only two fields of each auth file are ever
+# read - `disabled` and `expired` - and the account is labelled from its own
+# file name, so neither the tokens nor the email address in that file is
+# carried into the line or into any child process.
 #
 # Every external call is clamped, because the watcher kills a check that runs
 # past FM_CHECK_TIMEOUT and a killed check prints nothing and records nothing -
@@ -121,6 +145,10 @@
 #   FM_FABLE_RUNWAY_POOL_URL               pool base URL (default http://127.0.0.1:8080)
 #   FM_FABLE_RUNWAY_POOL_HEALTH_JSON       file holding a pool /health snapshot
 #   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON     file holding a pool /api/accounts snapshot
+#   FM_FABLE_RUNWAY_AUTH_DIR               CLIProxyAPI auth directory holding
+#                                          claude-<label>.json (default
+#                                          ~/.cli-proxy-api); a path that does
+#                                          not exist means no inventory
 set -u
 export LC_ALL=C
 
@@ -257,12 +285,16 @@ fable_read() {
 # burnMultiple does. A window with no readable resets_at or percent contributes
 # no projection rather than a guessed one, and a window that has opened but
 # cannot be placed in its week is unprojectable rather than floored. A window
-# reporting no burn at all is readable and maximally healthy, so it projects the
-# whole seven-day week rather than dropping out of the counts the verdict is
-# taken from - there is no burn rate left to measure, so where the week started
-# does not matter. An untouched account is the pool's steady state, so that case
-# is settled before the window is placed at all.
+# reporting no burn at all is readable and maximally healthy, so its runway is
+# simply the time left to its own reset - the same ceiling every other window
+# gets - rather than dropping out of the counts the verdict is taken from.
+# There is no burn rate left to measure, so where the week started does not
+# matter and that case is settled before the window is placed at all. An
+# untouched account is the pool's steady state.
 IFS= read -r -d '' POOL_JQ <<'JQ' || true
+. as $accts |
+($auth // []) as $inv |
+($auth != null) as $haveInv |
 def norm: sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z");
 def to_epoch: try (norm | fromdateiso8601) catch null;
 def limits($a): ($a.usageData.limits // []);
@@ -274,13 +306,24 @@ def fable_limit($a):
 def weekly_all_limit($a):
   limits($a) | map(select(.kind == "weekly_all")) | first;
 def lower($v): (if ($v | type) == "string" then ($v | ascii_downcase) else "" end);
-def needs_auth($a):
-  (($a.requiresReauth // false) == true)
-  or (lower($a.tokenStatus) | (. != "" and . != "valid"))
-  or (lower($a.pauseReason) | test("auth|login|credential"));
+def account_name($a):
+  if ($a.name | type) == "string" and $a.name != ""
+  then ($a.name | gsub("[ ,\t]"; "_")) else "unnamed" end;
+# A better-ccflare record holds a grant unless it complains about authentication.
+# Being paused is not such a complaint - a rate-limited account still has a
+# credential - so the grant test and the routable test are separate.
+def cc_grant($a):
+  (($a.requiresReauth // false) != true)
+  and (lower($a.tokenStatus) | (. == "" or . == "valid"))
+  and ((lower($a.pauseReason) | test("auth|login|credential")) | not);
+def cc_live($a):
+  (($a.paused // false) | not) and (lower($a.tokenStatus) == "valid") and cc_grant($a);
+def inv_live($n): any($inv[]; .label == $n and .live);
+def cc_grant_name($n): any($accts[]; account_name(.) == $n and cc_grant(.));
+def needs_auth_name($n): (inv_live($n) | not) and (cc_grant_name($n) | not);
 def usable($a):
-  (($a.paused // false) | not) and (lower($a.tokenStatus) == "valid")
-  and (needs_auth($a) | not);
+  account_name($a) as $n
+  | inv_live($n) or (cc_live($a) and (needs_auth_name($n) | not));
 def windows_known($a):
   (limits($a) | length) > 0
   and all(limits($a)[]; ((.percent | type) == "number"));
@@ -295,7 +338,7 @@ def window_runway($lim):
   else ($lim.resets_at | to_epoch) as $r |
     ($lim.percent // null) as $pct |
     if $r == null or ($pct | type) != "number" then null
-    else (($r - $now) / 3600) as $ttr |
+    else (if $r <= $now then 0 else (($r - $now) / 3600) end) as $ttr |
       ($r - 604800) as $start |
       (($now - $start) / 3600) as $raw |
       if $pct <= 0 then {h: $ttr, wall: false}
@@ -317,15 +360,12 @@ def account_runway($a):
     if ($walls | length) > 0 then {h: ($walls | map(.h) | min), wall: true}
     else {h: ($w | map(.h) | min), wall: false} end
   end;
-def account_name($a):
-  if ($a.name | type) == "string" and $a.name != ""
-  then ($a.name | gsub("[ ,\t]"; "_")) else "unnamed" end;
 def named($list): [$list[] | account_name(.)] | join(",");
-. as $accts |
 ($accts | map(select(fable_limit(.) != null))) as $trackedAccts |
 ($trackedAccts | length) as $tracked |
 ($accts | map(select(capable(.)))) as $cap |
-($accts | map(select(needs_auth(.)))) as $authAccts |
+((($inv | map(.label)) + ($accts | map(account_name(.)))) | unique) as $allNames |
+($allNames | map(select(needs_auth_name(.)))) as $authNamesList |
 ($cap | map({acct: ., rw: account_runway(.)})) as $capRw |
 ($capRw | map(select(.rw != null)) | map(.rw)) as $hrs |
 ($capRw | map(select(.rw == null)) | map(.acct)) as $unproj |
@@ -344,9 +384,14 @@ def named($list): [$list[] | account_name(.)] | join(",");
 named($cap) as $names |
 named($trackedAccts) as $trackedNames |
 named($unproj) as $unprojNames |
-named($authAccts) as $authNames |
-($health.pool.routable // null) as $routable |
-($health.pool.configured // null) as $configured |
+($authNamesList | join(",")) as $authNames |
+# The auth inventory is the authority on capacity whenever it can be read: it
+# is the proxy the fleet's base URL points at, and better-ccflare's own counts
+# go stale the moment the other proxy refreshes a shared login.
+(if $haveInv then ($inv | map(select(.live)) | length)
+ else ($health.pool.routable // null) end) as $routable |
+(if $haveInv then ($inv | length)
+ else ($health.pool.configured // null) end) as $configured |
 ($health.pool.usage_exhausted // null) as $exhausted |
 # The routable count is the primary signal, so it decides first and decides
 # alone when no account exposes a Fable-scoped window. The per-account windows
@@ -387,6 +432,55 @@ named($authAccts) as $authNames |
 ] | @tsv
 JQ
 
+# The auth inventory is the local record CLIProxyAPI keeps per login. Only
+# `disabled` and `expired` are read out of it, and the account is labelled from
+# its own file name - claude-<label>.json - which is also the name
+# better-ccflare reports, so the two sources join without either the tokens or
+# the email address in that file ever being read.
+#
+# `expired` carries a real UTC offset, so it is parsed as one. That is
+# deliberately not the resets_at rule: a gateway window stamp the monitor
+# cannot place in a seven-day week is unprojectable by decision, while an auth
+# stamp is an instant and an instant with an offset is still an instant.
+IFS= read -r -d '' AUTH_JQ <<'JQ' || true
+def iso_epoch:
+  if type != "string" then null
+  else (sub("\\.[0-9]+"; "")) as $s
+    | (try ($s | capture("^(?<body>[0-9T:-]+)(?<tz>Z|[+-][0-9]{2}:?[0-9]{2})$")) catch null) as $m
+    | if $m == null then null
+      else (try (($m.body + "Z") | fromdateiso8601) catch null) as $e
+        | if $e == null then null
+          elif $m.tz == "Z" then $e
+          else ($m.tz | gsub(":"; "")) as $t
+            | ((($t[1:3] | tonumber) * 3600) + (($t[3:5] | tonumber) * 60)) as $off
+            | (if ($t[0:1] == "-") then ($e + $off) else ($e - $off) end)
+          end
+      end
+  end;
+[ inputs as $a
+  | (((input_filename // "") | sub("^.*/"; "") | sub("^claude-"; "") | sub("\\.json$"; ""))
+     | gsub("[ ,\t]"; "_")) as $label
+  | ($a.expired | iso_epoch) as $exp
+  | { label: $label,
+      live: ((($a.disabled // false) != true) and $exp != null and ($exp > $now)) } ]
+JQ
+
+# Print the inventory as a compact array, or fail when there is none to read. A
+# directory that is absent is a home that does not run CLIProxyAPI, which is a
+# normal home, not an error.
+auth_read() {
+  local dir=${FM_FABLE_RUNWAY_AUTH_DIR:-$HOME/.cli-proxy-api} out='' f
+  local -a files=()
+  [ -n "$dir" ] && [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  for f in "$dir"/claude-*.json; do
+    [ -f "$f" ] && [ ! -L "$f" ] && files+=("$f")
+  done
+  [ "${#files[@]}" -gt 0 ] || return 1
+  out=$(jq -cn --argjson now "$NOW" "$AUTH_JQ" "${files[@]}" 2>/dev/null) || return 1
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
 pool_fetch() {
   local url=$1 out=''
   if ! command -v curl >/dev/null 2>&1; then
@@ -401,7 +495,7 @@ pool_fetch() {
 # never reaches a live gateway and an unreadable fixture is reported rather than
 # silently replaced by a live fetch.
 pool_read() {
-  local health='' accounts='' fixture=0
+  local health='' accounts='' fixture=0 auth='' ccflare=1
   if [ -n "${FM_FABLE_RUNWAY_POOL_HEALTH_JSON:-}" ]; then
     fixture=1
     if [ -f "$FM_FABLE_RUNWAY_POOL_HEALTH_JSON" ] && [ ! -L "$FM_FABLE_RUNWAY_POOL_HEALTH_JSON" ]; then
@@ -418,17 +512,33 @@ pool_read() {
     health=$(pool_fetch "$POOL_URL/health") || health=''
     accounts=$(pool_fetch "$POOL_URL/api/accounts") || accounts=''
   fi
+  auth=$(auth_read) || auth=''
+  # Only both sources failing is an unreadable pool. An unreadable
+  # better-ccflare still leaves the inventory's capacity counts, which is the
+  # verdict this monitor exists to give; the per-account windows are what is
+  # lost, and they only ever refined it.
   if [ -z "$health" ] || [ -z "$accounts" ]; then
-    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\tnone\t-\tpool_unavailable\n'
-    return 0
-  fi
-  if ! printf '%s' "$health" | jq -e 'type == "object"' >/dev/null 2>&1 \
+    ccflare=0
+    if [ -z "$auth" ]; then
+      printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\tnone\t-\tpool_unavailable\n'
+      return 0
+    fi
+  elif ! printf '%s' "$health" | jq -e 'type == "object"' >/dev/null 2>&1 \
     || ! printf '%s' "$accounts" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\tnone\t-\tpool_response_not_recognized\n'
-    return 0
+    ccflare=0
+    if [ -z "$auth" ]; then
+      printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\tnone\t-\tpool_response_not_recognized\n'
+      return 0
+    fi
   fi
+  if [ "$ccflare" -eq 0 ]; then
+    health=null
+    accounts='[]'
+  fi
+  [ -n "$auth" ] || auth=null
   printf '%s' "$accounts" \
-    | jq -r --argjson now "$NOW" --argjson health "$health" "$POOL_JQ" 2>/dev/null \
+    | jq -r --argjson now "$NOW" --argjson health "$health" --argjson auth "$auth" \
+      "$POOL_JQ" 2>/dev/null \
     || printf 'UNKNOWN\t-\t-\t-\tnone\tnone\tnone\tnone\t-\tpool_response_not_readable\n'
 }
 

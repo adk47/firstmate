@@ -187,10 +187,31 @@ add_plain_account() {
     }]' "$file" > "$tmp" && mv "$tmp" "$file"
 }
 
-# run_monitor <quota> <health> <accounts>: print the line followed by rc=<n>
+# make_auth_account <auth-dir> <label> <expires-in-hours> <disabled>
+# One CLIProxyAPI auth file. The secret-bearing fields are written too, so a
+# case can assert that none of them ever reaches the monitor's line.
+make_auth_account() {
+  local dir=$1 label=$2 hours=$3 disabled=$4
+  mkdir -p "$dir"
+  jq -n --arg e "$(iso_in_hours "$hours")" --argjson d "$disabled" '{
+    type: "claude",
+    email: "do-not-print@example.invalid",
+    access_token: "sk-do-not-print-access",
+    refresh_token: "sk-do-not-print-refresh",
+    expired: $e,
+    disabled: $d
+  }' > "$dir/claude-$label.json"
+}
+
+# A path that does not exist, so a case that says nothing about CLIProxyAPI is
+# judged by better-ccflare alone and never reads this machine's real inventory.
+NO_AUTH="$TMP_ROOT/no-auth-dir"
+
+# run_monitor <quota> <health> <accounts> [auth-dir]: line followed by rc=<n>
 run_monitor() {
   local quota=$1 health=$2 accounts=$3 out rc
   out=$(FM_FABLE_RUNWAY_NOW="$NOW" \
+    FM_FABLE_RUNWAY_AUTH_DIR="${4:-$NO_AUTH}" \
     FM_FABLE_RUNWAY_QUOTA_JSON="$quota" \
     FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$health" \
     FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$accounts" \
@@ -559,6 +580,7 @@ add_account "$accounts" healthy 5 40 20 100
 out=$(run_monitor "$quota" "$health" "$accounts")
 expect_field "$out" pool_needs_auth none "healthy pool needs-auth"
 out=$(FM_FABLE_RUNWAY_NOW="$NOW" \
+  FM_FABLE_RUNWAY_AUTH_DIR="$NO_AUTH" \
   FM_FABLE_RUNWAY_QUOTA_JSON="$quota" \
   FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$lab/absent-health.json" \
   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$lab/absent-accounts.json" \
@@ -578,6 +600,94 @@ expect_field "$out" pool_reason no_fable_capable_account "all-locked pool reason
 expect_rc "$out" 2 "all-locked exit"
 pass "an account that needs a login is named, excluded from capacity, and not projected"
 
+# The two proxies share the same logins, so whichever refreshed a token last
+# leaves the other holding a dead one. This is the shape that produced: every
+# better-ccflare account reads tokenStatus=expired and routable=0 while
+# CLIProxyAPI holds a live grant for all of them and the fleet is served
+# normally. The auth inventory is the authority, so this pool is healthy.
+authdir="$lab/inventory"
+rm -rf "$authdir"
+make_pool "$health" "$accounts" 0 5 0
+for acct_name in one two three four five; do
+  add_account_needing_auth "$accounts" "acct-$acct_name" 20 100 tokenStatus '"expired"'
+  make_auth_account "$authdir" "acct-$acct_name" 8 false
+done
+out=$(run_monitor "$quota" "$health" "$accounts" "$authdir")
+expect_field "$out" pool_routable 5/5 "cross-proxy routable"
+expect_field "$out" pool_needs_auth none "cross-proxy needs-auth"
+expect_field "$out" pool_capable acct-one,acct-two,acct-three,acct-four,acct-five \
+  "cross-proxy capable"
+expect_field "$out" pool_state GREEN "cross-proxy pool state"
+expect_field "$out" pool_reason has_fable_capacity "cross-proxy pool reason"
+expect_rc "$out" 0 "cross-proxy exit"
+
+# The inventory holds only two fields of each file, and the account is labelled
+# from the file name, so nothing secret in that file can reach the line.
+case "$out" in
+  *do-not-print*) fail "the monitor must never print an auth file's secrets: $out" ;;
+esac
+pass "a live CLIProxyAPI grant outranks a stale better-ccflare token status"
+
+# An expired or disabled grant is not capacity. With the other proxy also
+# refusing the account, no proxy holds a live grant and the account is named.
+rm -rf "$authdir"
+make_pool "$health" "$accounts" 0 3 0
+add_account_needing_auth "$accounts" live-one 20 100 tokenStatus '"expired"'
+add_account_needing_auth "$accounts" gone-expired 20 100 tokenStatus '"expired"'
+add_account_needing_auth "$accounts" gone-disabled 20 100 tokenStatus '"expired"'
+make_auth_account "$authdir" live-one 8 false
+make_auth_account "$authdir" gone-expired -1 false
+make_auth_account "$authdir" gone-disabled 8 true
+out=$(run_monitor "$quota" "$health" "$accounts" "$authdir")
+expect_field "$out" pool_routable 1/3 "expired-grant routable"
+expect_field "$out" pool_needs_auth gone-disabled,gone-expired "expired-grant needs-auth"
+expect_field "$out" pool_capable live-one "expired-grant capable"
+expect_field "$out" pool_state RED "expired-grant pool state"
+expect_field "$out" pool_reason routable_at_or_below_1 "expired-grant pool reason"
+expect_rc "$out" 2 "expired-grant exit"
+
+# The rule is cross-proxy in both directions: an account the inventory has
+# nothing live for is still not a login to perform while better-ccflare holds a
+# working one. It is not routable capacity, because the fleet's base URL points
+# at the other proxy, but it is not the captain's problem either.
+rm -rf "$authdir"
+make_pool "$health" "$accounts" 4 4 0
+add_account "$accounts" cc-only 5 40 20 100
+add_account_needing_auth "$accounts" both-dead 20 100 tokenStatus '"expired"'
+make_auth_account "$authdir" both-dead -1 false
+out=$(run_monitor "$quota" "$health" "$accounts" "$authdir")
+expect_field "$out" pool_needs_auth both-dead "cross-proxy live-elsewhere needs-auth"
+expect_field "$out" pool_routable 0/1 "cross-proxy live-elsewhere routable"
+pass "needs-auth means no proxy holds a live grant, in either direction"
+
+# An unreadable better-ccflare costs the projection, not the verdict, while the
+# inventory still answers. That is the whole point of it being supplementary.
+rm -rf "$authdir"
+for acct_name in 1 2 3 4 5; do
+  make_auth_account "$authdir" "inv-$acct_name" 8 false
+done
+out=$(run_monitor "$quota" "$lab/absent-health.json" "$lab/absent-accounts.json" "$authdir")
+expect_field "$out" pool_state GREEN "inventory-only pool state"
+expect_field "$out" pool_routable 5/5 "inventory-only routable"
+expect_field "$out" pool_reason routable_only_without_fable_window "inventory-only reason"
+expect_field "$out" pool_exhaustion unknown "inventory-only projection"
+expect_rc "$out" 0 "inventory-only exit"
+
+# With neither source readable the pool is UNKNOWN, exactly as before.
+out=$(run_monitor "$quota" "$lab/absent-health.json" "$lab/absent-accounts.json" "$NO_AUTH")
+expect_field "$out" pool_state UNKNOWN "no-source pool state"
+expect_field "$out" pool_reason pool_unavailable "no-source pool reason"
+pass "an unreadable better-ccflare is not an unreadable pool while the inventory answers"
+
+# A resets_at the clock has already passed is a window whose reset is due, not
+# one with negative runway left.
+make_pool "$health" "$accounts" 8 8 0
+add_account_with_wall "$accounts" stale 5 99 99 -1
+out=$(run_monitor "$quota" "$health" "$accounts")
+expect_field "$out" pool_exhaustion 0.0h "stale-reset projection"
+expect_field "$out" pool_state GREEN "stale-reset pool state"
+pass "a window whose reset is already due reports no negative runway"
+
 # An account whose name is an empty string is still a named member of the pool,
 # so the fail-back label stays available to it.
 make_pool "$health" "$accounts" 8 8 0
@@ -593,6 +703,7 @@ pass "an account with an empty name is reported as unnamed, not as no account"
 make_pool "$health" "$accounts" 6 11 0
 add_account "$accounts" acct-a 5 40 20 100
 out=$(FM_FABLE_RUNWAY_POOL_URL='' FM_FABLE_RUNWAY_NOW="$NOW" \
+  FM_FABLE_RUNWAY_AUTH_DIR="$NO_AUTH" \
   FM_FABLE_RUNWAY_QUOTA_JSON="$quota" \
   FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$health" \
   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$accounts" \
@@ -666,6 +777,7 @@ pass "a freshly opened week is floored, and one that has not opened is unproject
 # An unreachable pool is UNKNOWN, and the supervisor's own runway still decides.
 make_quota "$quota" 60 0.5 none through_reset
 out=$(FM_FABLE_RUNWAY_NOW="$NOW" \
+  FM_FABLE_RUNWAY_AUTH_DIR="$NO_AUTH" \
   FM_FABLE_RUNWAY_QUOTA_JSON="$quota" \
   FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$lab/absent-health.json" \
   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$lab/absent-accounts.json" \
@@ -692,6 +804,7 @@ add_account "$accounts" acct-a 5 40 20 100
 clamp_started=$(date +%s)
 clamped=$(PATH="$clamplab/bin:$PATH" \
   FM_CHECK_TIMEOUT=30 \
+  FM_FABLE_RUNWAY_AUTH_DIR="$NO_AUTH" \
   FM_FABLE_RUNWAY_NOW="$NOW" \
   FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$health" \
   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$accounts" \
@@ -729,6 +842,7 @@ done
 # run_check_in <lab-dir> <now>: a poll against that lab's own state and fixtures.
 run_check_in() {
   PATH="$FAKEBIN:$PATH" \
+    FM_FABLE_RUNWAY_AUTH_DIR="${3:-$NO_AUTH}" \
     FM_HOME="$1" \
     FM_FABLE_FAKE_LOG="$1" \
     FM_STATE_OVERRIDE="$1/state" \
@@ -1014,6 +1128,55 @@ expect_field "$nohandle" overall RED "unconfigured handle overall"
 [ -s "$nolab/osascript.log" ] || fail "an unconfigured handle must not cost the notification"
 pass "an unconfigured Grok terminal skips the doorbell and nothing else"
 
+# A gateway blip is not an empty pool. `pool_capable=none` is what an unread
+# pool prints too, so a check that cannot tell them apart rings the Grok seat
+# every time the gateway restarts - on a home whose pool was healthy throughout.
+bliplab="$TMP_ROOT/blip"
+mkdir -p "$bliplab/state" "$bliplab/config"
+printf 'FM_FABLE_RUNWAY_GROK_TERMINAL=grok-seat\n' > "$bliplab/config/fable-runway.env"
+printf 'not a quota document\n' > "$bliplab/quota.json"
+make_pool "$bliplab/health.json" "$bliplab/accounts.json" 6 11 0
+add_account "$bliplab/accounts.json" healthy 5 40 20 100
+blip_first=$(run_check_in "$bliplab" "$NOW")
+expect_field "$blip_first" overall RED "blip first poll overall"
+expect_field "$blip_first" fable_state RED "blip first poll fable"
+expect_field "$blip_first" pool_state GREEN "blip first poll pool"
+[ "$(notes_in "$bliplab")" = 0 ] \
+  || fail "a RED supervisor runway on a healthy pool must not open an episode"
+mv "$bliplab/health.json" "$bliplab/health.away"
+run_check_in "$bliplab" "$((NOW + 300))" >/dev/null
+mv "$bliplab/health.away" "$bliplab/health.json"
+run_check_in "$bliplab" "$((NOW + 600))" >/dev/null
+[ "$(notes_in "$bliplab")" = 0 ] \
+  || fail "a single unreadable poll must not open a handoff episode"
+[ ! -e "$bliplab/orca.log" ] || fail "a gateway blip must not ring the Grok seat"
+pass "one unreadable pool poll is could-not-determine, not an empty pool"
+
+# A pool that stays unreachable while the supervisor's own runway is RED leaves
+# no way to switch at all, so it does open an episode - saying that, and never
+# that the pool is empty.
+mv "$bliplab/health.json" "$bliplab/health.away"
+run_check_in "$bliplab" "$((NOW + 900))" >/dev/null
+[ "$(notes_in "$bliplab")" = 0 ] \
+  || fail "the first poll of an outage must not open an episode on its own"
+run_check_in "$bliplab" "$((NOW + 1500))" >/dev/null
+[ "$(notes_in "$bliplab")" = 1 ] \
+  || fail "a sustained unreadable pool with a RED runway must open one episode"
+outage_note=$(printf '%s\n' "$bliplab"/state/fable-runway-handoff-*.md)
+grep -q 'Pool unreachable for 10 minutes' "$outage_note" \
+  || fail "the outage note must say how long the pool has been unreachable ($(cat "$outage_note"))"
+grep -q 'supervisor runway unmeasurable' "$outage_note" \
+  || fail "the outage note must say the runway is unmeasurable"
+grep -q 'No Fable-capable account left' "$outage_note" \
+  && fail "an unreadable pool must never be reported as an empty pool"
+grep -q 'Pool unreachable for 10 minutes' "$bliplab/orca.log" \
+  || fail "the outage doorbell must carry the unreachable wording"
+grep -q 'Pool unreachable' "$bliplab/osascript.log" \
+  || fail "the outage banner must carry the unreachable wording"
+run_check_in "$bliplab" "$((NOW + 1800))" >/dev/null
+[ "$(notes_in "$bliplab")" = 1 ] || fail "a continuing outage must not re-open the episode"
+pass "a sustained unreachable pool opens one episode that never claims the pool is empty"
+
 # The check always runs its sibling monitor: the watcher validates the shim's
 # bytes before dispatch, so no environment variable may redirect it elsewhere.
 seamlab="$TMP_ROOT/seam"
@@ -1024,6 +1187,7 @@ printf 'fable-runway: overall=RED fable_state=RED pool_state=RED fable_remaining
 SH
 chmod 0755 "$seamlab/impostor.sh"
 seam=$(PATH="$FAKEBIN:$PATH" \
+  FM_FABLE_RUNWAY_AUTH_DIR="$NO_AUTH" \
   FM_HOME="$seamlab" \
   FM_FABLE_FAKE_LOG="$seamlab" \
   FM_STATE_OVERRIDE="$seamlab/state" \

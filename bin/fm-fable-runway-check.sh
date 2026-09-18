@@ -54,20 +54,35 @@
 # Fable are firstmate actions; see docs/runbooks/supervisor-failover-grok.md.
 #
 # There is one exception, and it is the case where waiting for a model turn
-# costs the most: an overall RED with no Fable-capable account left. The seat
-# has to move, and the runway that would have paid for the turn that noticed is
-# the one that ran out. So the check hands that episode to
-# bin/fm-fable-runway-alert.sh, which is plain bash - a durable handoff note, a
-# doorbell to the Grok terminal, a desktop notification, once per episode. It
-# still prints its line; the helper is what happens without waiting for it.
+# costs the most: the seat has to move and the runway that would have paid for
+# the turn that noticed is the one that ran out. So the check hands that
+# episode to bin/fm-fable-runway-alert.sh, which is plain bash - a durable
+# handoff note, a doorbell to the Grok terminal, a desktop notification, once
+# per episode. It still prints its line; the helper is what happens without
+# waiting for it.
+#
+# Two conditions open an episode, and they are different claims:
+#
+#   - overall RED on a pool that WAS read and holds no Fable-capable account.
+#     That is an observation, and the episode says so.
+#   - the pool unreadable for POOL_DOWN_POLLS (2) consecutive polls spanning at
+#     least POOL_DOWN_SECS (600) while the supervisor's own runway is RED. A
+#     pool nobody could read is not an empty pool and must never be reported as
+#     one - `pool_capable=none` is what an unread pool prints too - but a pool
+#     that stays unreadable while Fable is out leaves no way to switch at all,
+#     which is the thing this monitor exists to catch. So this episode waits
+#     for the outage to prove itself and then says "pool unreachable", never
+#     that the pool is empty. Both bounds are fixed constants: an override
+#     could only delay the one wake that cannot afford to be late.
 #
 # The record state/.fable-runway holds the last printed states, the last RED
-# report time, and the Fable-tracked, Fable-capable and needs-authentication
-# name sets as of that same printed poll, so a silent poll stays silent, a
-# regain is distinguishable from an addition, and an account that already wanted
-# a login does not ask again every poll. It is stamped with its schema, and a
-# record carrying any other stamp is treated as no record at all rather than
-# read under the wrong field layout.
+# report time, the Fable-tracked, Fable-capable and needs-authentication name
+# sets as of that same printed poll, and how long the pool has been unreadable,
+# so a silent poll stays silent, a regain is distinguishable from an addition,
+# an account that already wanted a login does not ask again every poll, and a
+# gateway blip is distinguishable from an outage. It is stamped with its
+# schema, and a record carrying any other stamp is treated as no record at all
+# rather than read under the wrong field layout.
 #
 # `arm` writes a byte-static shim that the watcher validates with
 # bin/fm-check-register.sh before it ever dispatches it; `disarm` removes the
@@ -93,8 +108,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 CHECK_ID='fable-runway'
 RECORD="$STATE/.fable-runway"
-RECORD_SCHEMA=fm-fable-runway-check-v3
+RECORD_SCHEMA=fm-fable-runway-check-v4
 REALERT_SECS=3600
+POOL_DOWN_POLLS=2
+POOL_DOWN_SECS=600
 MONITOR="$SCRIPT_DIR/fm-fable-runway.sh"
 ALERT="$SCRIPT_DIR/fm-fable-runway-alert.sh"
 HANDOFF_MARKER="$STATE/.fable-runway-handoff"
@@ -128,11 +145,13 @@ record_get() {
 }
 
 record_write() {
-  local overall=$1 fable=$2 pool=$3 capable=$4 tracked=$5 needs_auth=$6 red_at=$7 tmp
+  local overall=$1 fable=$2 pool=$3 capable=$4 tracked=$5 needs_auth=$6 red_at=$7
+  local down_since=$8 down_polls=$9 tmp
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
   tmp=$(umask 077; mktemp "$STATE/.fm-fable-runway.XXXXXX" 2>/dev/null) || return 0
-  if ! printf 'schema=%s\noverall=%s\nfable_state=%s\npool_state=%s\ncapable=%s\ntracked=%s\nneeds_auth=%s\nred_at=%s\n' \
-    "$RECORD_SCHEMA" "$overall" "$fable" "$pool" "$capable" "$tracked" "$needs_auth" "$red_at" > "$tmp"; then
+  if ! printf 'schema=%s\noverall=%s\nfable_state=%s\npool_state=%s\ncapable=%s\ntracked=%s\nneeds_auth=%s\nred_at=%s\ndown_since=%s\ndown_polls=%s\n' \
+    "$RECORD_SCHEMA" "$overall" "$fable" "$pool" "$capable" "$tracked" "$needs_auth" "$red_at" \
+    "$down_since" "$down_polls" > "$tmp"; then
     rm -f -- "$tmp"
     return 0
   fi
@@ -188,7 +207,7 @@ action_check() {
   local line='' overall fable pool capable tracked needs_auth
   line=$("$MONITOR" 2>/dev/null) || true
   if [ -z "$line" ]; then
-    line="fable-runway: overall=RED fable_state=RED pool_state=UNKNOWN fable_remaining=unknown% fable_burn=unknownx fable_exhaustion=unknown(unknown) pool_routable=unknown/unknown pool_exhausted=unknown pool_capable=none pool_tracked=none pool_unprojected=none pool_needs_auth=none pool_exhaustion=unknown fable_reason=monitor_produced_no_line pool_reason=monitor_unavailable"
+    line="fable-runway: overall=RED fable_state=RED pool_state=UNKNOWN fable_remaining=unknown% fable_burn=unknownx fable_exhaustion=unknown(unknown) pool_routable=unknown/unknown pool_exhausted=unknown pool_capable=unknown pool_tracked=unknown pool_unprojected=unknown pool_needs_auth=none pool_exhaustion=unknown fable_reason=monitor_produced_no_line pool_reason=monitor_unavailable"
   fi
   overall=$(field overall "$line")
   fable=$(field fable_state "$line")
@@ -202,8 +221,10 @@ action_check() {
   [ -n "$capable" ] || capable=none
   [ -n "$tracked" ] || tracked=none
   [ -n "$needs_auth" ] || needs_auth=none
+  local observed_capable=$capable
 
   local last_present=0 last_overall='' last_fable='' last_pool='' last_capable='' last_tracked='' last_auth='' last_red=''
+  local last_down_since='' last_down_polls=''
   if [ "$(record_get schema 2>/dev/null)" = "$RECORD_SCHEMA" ]; then
     last_present=1
     last_overall=$(record_get overall)
@@ -213,10 +234,22 @@ action_check() {
     last_tracked=$(record_get tracked)
     last_auth=$(record_get needs_auth)
     last_red=$(record_get red_at)
+    last_down_since=$(record_get down_since)
+    last_down_polls=$(record_get down_polls)
   fi
+  case "$last_down_since" in ''|*[!0-9]*) last_down_since=0 ;; esac
+  case "$last_down_polls" in ''|*[!0-9]*) last_down_polls=0 ;; esac
 
-  local now changed=0 recovered='' label='' wants_auth=''
+  local now changed=0 recovered='' label='' wants_auth='' down_since=0 down_polls=0
   now=$(now_epoch)
+  # How long the pool has been unreadable, in consecutive polls and in wall
+  # time. Both are needed: a single blip is not an outage, and two polls a
+  # second apart are not either.
+  if [ "$pool" = UNKNOWN ]; then
+    down_polls=$((last_down_polls + 1))
+    down_since=$last_down_since
+    [ "$down_since" -gt 0 ] || down_since=$now
+  fi
   # Membership alone is not a transition: only the two runway states and the
   # overall verdict can make a poll printable.
   if [ "$last_present" -eq 0 ] \
@@ -275,12 +308,24 @@ action_check() {
     tracked=$last_tracked
     needs_auth=$last_auth
   fi
-  record_write "$overall" "$fable" "$pool" "$capable" "$tracked" "$needs_auth" "$red_at"
+  record_write "$overall" "$fable" "$pool" "$capable" "$tracked" "$needs_auth" "$red_at" \
+    "$down_since" "$down_polls"
   # The seat cannot wait for a model turn to notice that there is nothing left
   # to serve Fable from, so the episode is handed to the plain-bash helper here
-  # and closed again the first poll the condition lifts.
-  if [ "$overall" = RED ] && [ "$(field pool_capable "$line")" = none ]; then
+  # and closed again the first poll neither condition holds.
+  #
+  # Two conditions open one, and they are different claims. An observed empty
+  # pool is "no Fable-capable account left"; a pool nobody could read is not
+  # that and must never say so - a gateway blip would otherwise ring the Grok
+  # seat on a home whose pool was fine the whole time. So an unreadable pool
+  # opens an episode only once it has stayed unreadable, and it says exactly
+  # that instead.
+  if [ "$overall" = RED ] && [ "$pool" != UNKNOWN ] && [ "$observed_capable" = none ]; then
     alert handoff "$line"
+  elif [ "$pool" = UNKNOWN ] && [ "$fable" = RED ] \
+    && [ "$down_polls" -ge "$POOL_DOWN_POLLS" ] \
+    && [ "$((now - down_since))" -ge "$POOL_DOWN_SECS" ]; then
+    alert handoff-unreachable "$line" "$(( (now - down_since) / 60 ))"
   else
     alert resolve
   fi
