@@ -255,6 +255,18 @@ done
 
 NOW_EPOCH="${QA_RECONCILE_NOW_EPOCH:-$(date -u +%s)}"
 
+# Portable epoch -> UTC date (GNU date first, then BSD/macOS date). Mirrors
+# lib/cto-push-audit-guard.sh's epoch_to_date — not yet extracted to a
+# sourceable lib (only the second occurrence; see CLAUDE.md's "wait for the
+# third" DRY rule).
+epoch_to_date() {
+  date -u -d "@$1" +%Y-%m-%d 2>/dev/null || date -u -r "$1" +%Y-%m-%d 2>/dev/null
+}
+# The rollup enrichment call (see the split below) is scoped to the same
+# storm-guard age ceiling as qar_trigger_in_scope, since only in-scope PRs
+# ever reach the terminal-status short-circuit that consumes it.
+ROLLUP_SEARCH_DATE="$(epoch_to_date "$((NOW_EPOCH - AGE_CEILING_S))")"
+
 page() {
   # Best-effort, but never in dry-run: dry-run must page nothing.
   [ "$DRY_RUN" -eq 1 ] && { log "[dry-run] WOULD PAGE: $1"; return 0; }
@@ -472,6 +484,11 @@ pre_epoch_ignored_total=0
 declare -A pre_epoch_ignored_by_repo=()
 failed_repo_count=0
 total_repo_count=${#REPOS[@]}
+# Repos whose rollup-enrichment call (best-effort) failed or was malformed
+# this tick — NOT a READ-FAILURE (the authoritative listing still succeeded),
+# never touches the repo failure counter, never pages. Just disables the
+# terminal-status short-circuit for that repo this tick.
+rollup_degraded_count=0
 # Every key seen this tick that must survive pruning even though its repo's
 # listing may have failed later in the loop for a DIFFERENT repo; and every
 # (repo,pr,head_sha) confirmed still-open, for the prune pass below.
@@ -504,8 +521,11 @@ for repo in "${REPOS[@]}"; do
   declare -A stage_attempted=( [commit]=0 [timeline]=0 [reviews]=0 [status]=0 [author_uid]=0 )
   declare -A stage_failed=( [commit]=0 [timeline]=0 [reviews]=0 [status]=0 [author_uid]=0 )
 
+  # LISTING (authoritative): drives everything below — trigger scope, the
+  # truncation guard, and the prune keep-set. Its failure is a real
+  # READ-FAILURE. See "why statusCheckRollup is NOT requested here" below.
   if ! prs_json="$("$GH" pr list --repo "$repo" --state open \
-        --json number,headRefOid,baseRefName,isDraft,author,updatedAt,createdAt,url,statusCheckRollup \
+        --json number,headRefOid,baseRefName,isDraft,author,updatedAt,createdAt,url \
         --limit "$PRLIST_LIMIT" 2>/dev/null)" || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$prs_json"; then
     log "READ-FAILURE: could not list open PRs for $repo — counted, not treated as 'no verdict'."
     failed_repo_count=$((failed_repo_count + 1))
@@ -524,6 +544,38 @@ for repo in "${REPOS[@]}"; do
   repo_listed_ok["$repo"]=1
   state_json="$(qar_state_set_repo_failure_count "$state_json" "$repo" 0)"
   repo_file_key="${repo//\//-}"
+
+  # ── Rollup enrichment (best-effort, 2026-09-18) ────────────────────────
+  # `gh pr list --json ...,statusCheckRollup` for ALL open PRs 504s
+  # deterministically on Muso-AI/H-DevOps (133 open PRs, 30-50 check
+  # contexts each — measured live). The listing above no longer requests
+  # statusCheckRollup at all, so it stays cheap and reliable; the rollup is
+  # fetched separately, scoped to the same AGE_CEILING_S storm-guard window
+  # the terminal short-circuit's consumers (in-scope PRs only) ever reach —
+  # `--search "updated:>=<date>"` measured 49 rows / 1860 contexts on
+  # H-DevOps over 14d, vs a 504 for all 133. A failure or malformed result
+  # here is NOT a READ-FAILURE (the authoritative listing already
+  # succeeded): it just disables the short-circuit for this repo this tick,
+  # so every in-scope PR falls through to the existing per-PR reads —
+  # exactly the fail-safe direction the short-circuit's own comment above
+  # already documents for a rollup shape change.
+  rollup_call_ok=1
+  if ! rollup_json="$("$GH" pr list --repo "$repo" --state open \
+        --search "updated:>=$ROLLUP_SEARCH_DATE" \
+        --json number,statusCheckRollup \
+        --limit "$PRLIST_LIMIT" 2>/dev/null)" || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$rollup_json"; then
+    rollup_call_ok=0
+  fi
+  if [ "$rollup_call_ok" -eq 1 ] && merged_prs_json="$(jq -c --argjson rollups "$rollup_json" '
+        ( [ $rollups[] | { (.number|tostring): (.statusCheckRollup // []) } ] | add // {} ) as $by_number
+        | map(.statusCheckRollup = ($by_number[(.number|tostring)] // []))
+      ' <<<"$prs_json" 2>/dev/null)"; then
+    prs_json="$merged_prs_json"
+  else
+    rollup_degraded_count=$((rollup_degraded_count + 1))
+    log "ROLLUP-DEGRADED: statusCheckRollup unavailable for $repo this tick — terminal-status short-circuit disabled, every in-scope PR falls through to the per-PR reads (costs reads, never a missed recovery)."
+    prs_json="$(jq -c 'map(.statusCheckRollup = [])' <<<"$prs_json" 2>/dev/null || printf '%s' "$prs_json")"
+  fi
 
   # ── Truncation guard ──────────────────────────────────────────────────
   # A repo with more open PRs than PRLIST_LIMIT would otherwise silently
@@ -594,6 +646,20 @@ for repo in "${REPOS[@]}"; do
     # Fail-safe direction: anything other than a terminal state — including a
     # jq failure (empty) or `absent` — falls through to the existing reads, so
     # a rollup shape change can only cost reads, never a missed recovery.
+    #
+    # 2026-09-18: `statusCheckRollup` is no longer part of the LISTING call
+    # above (it now arrives via a separate best-effort enrichment call,
+    # merged into `.statusCheckRollup` by PR number before this loop) —
+    # `gh pr list --json ...,statusCheckRollup` for ALL open PRs 504s
+    # deterministically on Muso-AI/H-DevOps at 133 open PRs / 30-50 check
+    # contexts each. The enrichment call is scoped to AGE_CEILING_S (see
+    # ROLLUP_SEARCH_DATE) rather than "all open", because only an in-scope
+    # PR (this loop already `continue`s past out-of-scope ones below) ever
+    # reaches this short-circuit — scoping the rollup read to the same
+    # window costs nothing a wider read would have bought. An enrichment
+    # failure degrades to `.statusCheckRollup == []` for every row in that
+    # repo this tick (see ROLLUP-DEGRADED below), which lands in this same
+    # fail-safe fall-through, never a missed recovery.
     rollup_state="$(qar_qa_review_rollup_state "$(jq -c '.statusCheckRollup // []' <<<"$pr_json" 2>/dev/null)")" || rollup_state=""
     case "$rollup_state" in
       success|failure|error)
@@ -978,4 +1044,4 @@ else
   fi
 fi
 
-log "tick complete: repos=$total_repo_count failed_repo_listings=$failed_repo_count dispatched=$dispatched_this_tick pre_epoch_ignored=$pre_epoch_ignored_total terminal_skipped=$terminal_skipped"
+log "tick complete: repos=$total_repo_count failed_repo_listings=$failed_repo_count dispatched=$dispatched_this_tick pre_epoch_ignored=$pre_epoch_ignored_total terminal_skipped=$terminal_skipped rollup_degraded=$rollup_degraded_count"

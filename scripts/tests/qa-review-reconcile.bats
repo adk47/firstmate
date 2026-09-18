@@ -437,6 +437,7 @@ setup() {
   export SLACK_CALLS="$TEST_TMPDIR/slack_calls"; : > "$SLACK_CALLS"
   export STATUS_CALLS="$TEST_TMPDIR/status_calls"; : > "$STATUS_CALLS"
   export GH_LOG="$TEST_TMPDIR/gh_log"; : > "$GH_LOG"
+  export ROLLUP_SEARCH_CALLS="$TEST_TMPDIR/rollup_search_calls"; : > "$ROLLUP_SEARCH_CALLS"
 
   # --- gh stub -------------------------------------------------------------
   cat > "$STUBBIN/gh" <<'STUB'
@@ -446,11 +447,34 @@ key() { printf '%s' "$1" | tr '/' '-'; }
 
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   repo=""
+  json_arg=""
+  search_arg=""
   prev=""
   for a in "$@"; do
     [ "$prev" = "--repo" ] && repo="$a"
+    [ "$prev" = "--json" ] && json_arg="$a"
+    [ "$prev" = "--search" ] && search_arg="$a"
     prev="$a"
   done
+  case "$json_arg" in
+    *statusCheckRollup*)
+      # ── Rollup enrichment call (best-effort, scoped by --search) ──────
+      [ -n "${ROLLUP_SEARCH_CALLS:-}" ] && printf '%s\t%s\n' "$repo" "$search_arg" >> "$ROLLUP_SEARCH_CALLS"
+      [ -n "${STUB_ROLLUP_FAIL:-}" ] && exit 1
+      [ -n "${STUB_ROLLUP_MALFORMED:-}" ] && { echo '{}'; exit 0; }
+      # Default: derive {number, statusCheckRollup} from the same listing
+      # fixture the LISTING call below reads, so a test that seeds a rollup
+      # by mutating $FIX/prlist/<repo>.json (the pre-existing terminal-skip
+      # convention) keeps working unchanged.
+      f="$FIX/prlist/$(key "$repo").json"
+      if [ -f "$f" ]; then
+        jq -c '[.[] | {number: .number, statusCheckRollup: (.statusCheckRollup // [])}]' "$f"
+      else
+        echo '[]'
+      fi
+      exit 0
+      ;;
+  esac
   if [ -n "${STUB_PRLIST_FAIL_REPOS:-}" ] && printf '%s\n' "$STUB_PRLIST_FAIL_REPOS" | grep -qxF "$repo"; then
     exit 1
   fi
@@ -633,7 +657,7 @@ JSON
   export QA_RECONCILE_CRON_STALE_S=1800
   export QA_RECONCILE_AGE_CEILING_S=1209600
   export QA_RECONCILE_TICK_FAIL_THRESHOLD=3
-  unset STUB_SLACK_FAIL_ONCE STUB_SLACK_FAIL_ALWAYS STUB_REVIEWS_FAIL STUB_STATUS_FAIL STUB_STATUS_MALFORMED STUB_TIMELINE_FAIL STUB_COMMIT_FAIL STUB_CRON_JSON STUB_CRON_FAIL STUB_ALLOWLIST_REPOS STUB_DEFAULT_COMMIT_DATE STUB_AUTHOR_FAIL_RC STUB_PRLIST_FAIL_REPOS STUB_GH_STATUS_FAIL STUB_GH_STATUS_BODY
+  unset STUB_SLACK_FAIL_ONCE STUB_SLACK_FAIL_ALWAYS STUB_REVIEWS_FAIL STUB_STATUS_FAIL STUB_STATUS_MALFORMED STUB_TIMELINE_FAIL STUB_COMMIT_FAIL STUB_CRON_JSON STUB_CRON_FAIL STUB_ALLOWLIST_REPOS STUB_DEFAULT_COMMIT_DATE STUB_AUTHOR_FAIL_RC STUB_PRLIST_FAIL_REPOS STUB_GH_STATUS_FAIL STUB_GH_STATUS_BODY STUB_ROLLUP_FAIL STUB_ROLLUP_MALFORMED
   # Long enough that every pre-existing test keeps its single-page semantics
   # (each seeds a fresh state dir, so nothing is ever suppressed by inheritance);
   # the dedupe tests below set their own value.
@@ -1877,4 +1901,124 @@ JSON
   [ "$status" -eq 0 ]
   run grep -c "repos/Muso-AI/core-backend/commits/$sha" "$GH_LOG"
   [ "$output" -ge 1 ]
+}
+
+@test "e2e 49: rollup call fails -- listing still succeeds, ROLLUP-DEGRADED logged, per-PR reads proceed" {
+  # The 2026-09-18 split's core contract: an H-DevOps-shaped rollup 504 must
+  # never be confused with a LISTING failure. Listing itself is untouched
+  # (fixture served normally), only the separate rollup call is broken.
+  # Scoped to the single-repo case (allowlist = Muso-AI/hydra, which
+  # qar_expected_repos always includes and dedupes) so the tick's
+  # rollup_degraded count is exact, since STUB_ROLLUP_FAIL is a global
+  # knob (fails every repo's rollup call, mirroring STUB_STATUS_FAIL /
+  # STUB_REVIEWS_FAIL's existing global-toggle convention).
+  export STUB_ALLOWLIST_REPOS="Muso-AI/hydra"
+  seed_epoch_state "Muso-AI/hydra"
+  sha="sharollupfail000000000000000000000001"
+  mk_pr_list "Muso-AI/hydra" 49 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/hydra" "$sha" "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  export STUB_ROLLUP_FAIL=1
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"READ-FAILURE: could not list open PRs"* ]]
+  [[ "$output" == *"ROLLUP-DEGRADED: statusCheckRollup unavailable for Muso-AI/hydra this tick"* ]]
+  [[ "$output" == *"tick complete:"*"rollup_degraded=1"* ]]
+  # Listing succeeded -> the repo-listing failure counter stays 0 (unset).
+  run jq -r '.__meta__.repo_failures["Muso-AI/hydra"] // 0' "$QA_RECONCILE_STATE_FILE"
+  [ "$output" = "0" ]
+  # The short-circuit is disabled this tick -> the per-PR commit read fired.
+  run grep -c "repos/Muso-AI/hydra/commits/$sha" "$GH_LOG"
+  [ "$output" -ge 1 ]
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 1 ]
+}
+
+@test "e2e 50: rollup call returns malformed JSON ({}) -- same degrade-not-fail handling as a hard failure" {
+  export STUB_ALLOWLIST_REPOS="Muso-AI/hydra"
+  seed_epoch_state "Muso-AI/hydra"
+  sha="sharollupmalform0000000000000000000001"
+  mk_pr_list "Muso-AI/hydra" 50 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/hydra" "$sha" "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  export STUB_ROLLUP_MALFORMED=1
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"READ-FAILURE: could not list open PRs"* ]]
+  [[ "$output" == *"ROLLUP-DEGRADED: statusCheckRollup unavailable for Muso-AI/hydra this tick"* ]]
+  [[ "$output" == *"tick complete:"*"rollup_degraded=1"* ]]
+  run jq -r '.__meta__.repo_failures["Muso-AI/hydra"] // 0' "$QA_RECONCILE_STATE_FILE"
+  [ "$output" = "0" ]
+  run grep -c "repos/Muso-AI/hydra/commits/$sha" "$GH_LOG"
+  [ "$output" -ge 1 ]
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 1 ]
+}
+
+@test "e2e 51: rollup enrichment merges by PR number -- a terminal status on one PR skips only that PR" {
+  # Two PRs in the same repo, distinct numbers: only #51's head carries a
+  # terminal qa-review context in the rollup fixture; #52 carries none. If
+  # the merge-by-number wiring were broken (e.g. rollups applied
+  # positionally, or to every row), either PR could wrongly gain or lose the
+  # short-circuit.
+  seed_epoch_state "Muso-AI/core-backend"
+  sha_a="sharollupmergea00000000000000000000001"
+  sha_b="sharollupmergeb00000000000000000000001"
+  f="$FIX/prlist/Muso-AI-core-backend.json"
+  cat > "$f" <<JSON
+[
+  {"number": 51, "headRefOid": "$sha_a", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/Muso-AI/core-backend/pull/51", "statusCheckRollup": [{"context":"qa-review","state":"success"}]},
+  {"number": 52, "headRefOid": "$sha_b", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/Muso-AI/core-backend/pull/52"}
+]
+JSON
+  # The default rollup stub derives {number, statusCheckRollup} straight from
+  # this same fixture file, so only #51 carries a terminal rollup; #52's
+  # array default (missing key) is [].
+  mk_commit "Muso-AI/core-backend" "$sha_b" "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  # #51 terminal-skipped: no per-PR read for sha_a.
+  run grep -c "repos/Muso-AI/core-backend/commits/$sha_a" "$GH_LOG"
+  [ "$output" = "0" ]
+  # #52 has no rollup match: falls through to the read path.
+  run grep -c "repos/Muso-AI/core-backend/commits/$sha_b" "$GH_LOG"
+  [ "$output" -ge 1 ]
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 1 ]
+  grep -q "^52 $sha_b Muso-AI/core-backend U0AL36NADEY\$" "$DISPATCH_CALLS"
+}
+
+@test "e2e 52: the rollup enrichment call is scoped to --search updated:>=<AGE_CEILING_S date>" {
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="sharolluspsearch000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 53 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/core-backend" "$sha" "2026-01-01T00:00:00Z"
+  base_epoch=$(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s)
+  QA_RECONCILE_NOW_EPOCH=$((base_epoch + 3600))
+  export QA_RECONCILE_NOW_EPOCH
+  export QA_RECONCILE_AGE_CEILING_S=864000  # fixed 10d ceiling for a fixed expected date
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  expected_date="$(date -u -d "@$((QA_RECONCILE_NOW_EPOCH - 864000))" +%Y-%m-%d 2>/dev/null || date -u -r "$((QA_RECONCILE_NOW_EPOCH - 864000))" +%Y-%m-%d)"
+  run grep -F "Muso-AI/core-backend" "$ROLLUP_SEARCH_CALLS"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"updated:>=$expected_date"* ]]
+}
+
+@test "e2e 53: listing (non-rollup) call fails -- READ-FAILURE / repo-failure behaviour unchanged (see e2e 29 for the consecutive-tick page)" {
+  # Confirms the split did not touch the authoritative-listing failure path:
+  # this is the same shape e2e 29 already exercises across ticks (this test
+  # pins the single-tick log line + counter).
+  seed_epoch_state "Muso-AI/core-backend"
+  mk_pr_list "Muso-AI/core-backend" 54 "shalisting0000000000000000000000000001" main false nsollazzo "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  export STUB_PRLIST_FAIL_REPOS="Muso-AI/core-backend"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"READ-FAILURE: could not list open PRs for Muso-AI/core-backend"* ]]
+  run jq -r '.__meta__.repo_failures["Muso-AI/core-backend"] // 0' "$QA_RECONCILE_STATE_FILE"
+  [ "$output" = "1" ]
+  [ ! -s "$DISPATCH_CALLS" ]
 }
