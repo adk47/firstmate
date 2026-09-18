@@ -1225,6 +1225,14 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
+# Keep the liveness beacon fresh across a long poll's stages. The loop's
+# top-of-cycle touch owns the ordinary cadence, but a fleet-wide fold over many
+# large status logs can sit between two loop iterations for longer than the
+# guard's grace (FM_GUARD_GRACE, default 300s), which reads as a dead watcher.
+# Touching here, after each file or stage, keeps the beacon advancing exactly as
+# the work advances, so a legitimately long fold can never starve supervision.
+watch_beat() { touch "$STATE/.last-watcher-beat"; }
+
 # 0 when any signaled status file carries a captain-relevant event in the bytes
 # appended since this watcher last classified it. The start offset is the
 # classified-position field in that file's .seen-* marker, and fm-classify-lib.sh's
@@ -1255,6 +1263,7 @@ signal_files_actionable() {  # <status-file> ...
     status_span_first_actionable_record "$f" \
       "$(fm_wake_signal_seen_size "$STATE" "$f")" record needs_decision
     rc=$?
+    watch_beat
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
       # Could not classify this log. Surface it rather than absorbing it, and
@@ -1314,6 +1323,7 @@ heartbeat_scan_finds_actionable() {
     task=$(basename "$f"); task="${task%.status}"
     record=$(status_span_first_actionable_record "$f" "$(hb_surfaced_offset "$task")")
     rc=$?
+    watch_beat
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
       sig=$(status_observed_signature "$f")
@@ -1433,6 +1443,12 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
+# Beat as early as possible. The arm layer confirms a fresh watcher only when
+# its beacon is touched inside FM_ARM_CONFIRM_TIMEOUT, and a cold first poll can
+# spend a long time folding status logs before the loop's own top-of-cycle
+# touch. This touch, before any recovery bookkeeping or fold, is what keeps a
+# legitimate cold start from being killed as an unconfirmed watcher.
+touch "$STATE/.last-watcher-beat"
 WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
@@ -1731,6 +1747,7 @@ while :; do
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  watch_beat
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
@@ -1856,6 +1873,7 @@ EOF
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
+    watch_beat
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
