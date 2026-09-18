@@ -271,7 +271,7 @@ id_add() {  # <set> <identity>
   id=$(identity_token "$2")
   [ -n "$id" ] || { printf '%s' "$set"; return 0; }
   IFS=';' read -r -a items <<< "$set"
-  for item in "${items[@]}"; do
+  for item in ${items[@]+"${items[@]}"}; do
     [ -n "$item" ] || continue
     if [ "$item" = "$id" ]; then
       printf '%s' "$set"
@@ -859,7 +859,7 @@ id_added() {  # <new ids> <recorded ids>
   local -a items
   [ -n "$new" ] || return 1
   IFS=';' read -r -a items <<< "$new"
-  for item in "${items[@]}"; do
+  for item in ${items[@]+"${items[@]}"}; do
     [ -n "$item" ] || continue
     case ";$old;" in
       *";$item;"*) continue ;;
@@ -928,13 +928,13 @@ action_check() {
   # so a check failure that clears is absorbed and one that returns is news.
   notices=
   IFS=';' read -r -a new_notices <<< "$RECORD_NOTICES"
-  for notice_id in "${new_notices[@]}"; do
+  for notice_id in ${new_notices[@]+"${new_notices[@]}"}; do
     [ -n "$notice_id" ] || continue
     notice_latched "$notice_id" || continue
     notices=$(id_add "$notices" "$notice_id")
   done
   IFS=';' read -r -a new_notices <<< "$NOTICE_IDS"
-  for notice_id in "${new_notices[@]}"; do
+  for notice_id in ${new_notices[@]+"${new_notices[@]}"}; do
     [ -n "$notice_id" ] || continue
     notices=$(id_add "$notices" "$notice_id")
   done

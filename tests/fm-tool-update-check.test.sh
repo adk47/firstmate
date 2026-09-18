@@ -874,6 +874,49 @@ test_a_returning_check_failure_is_reported_again() {
   pass "a returning check failure is reported again"
 }
 
+test_empty_identity_sets_survive_the_system_bash() {
+  local home stale fresh out path status
+  # A watcher on a host with no newer bash on PATH runs this check under the
+  # stock /bin/bash 3.2, where expanding an empty array under set -u is an
+  # unbound-variable abort. Every first sweep starts from empty identity sets
+  # and every clean sweep folds an empty notice set into the record, so an
+  # abort there leaves the check permanently silent, which is the one outcome
+  # the check exists to avoid. On a host whose /bin/bash is newer this still
+  # drives the empty sets through the interpreter the watcher would use.
+  home=$(make_home system-bash)
+  stale="$TMP_ROOT/system-bash/old/bin"
+  fresh="$TMP_ROOT/system-bash/new/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$stale:$fresh")
+
+  status=0
+  env FM_CHECK_TIMEOUT=30 FM_HOME="$home" PATH="$path" FM_TOOL_UPDATE_INTERVAL=0 \
+    /bin/bash "$CHECK" >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "first sweep under /bin/bash exit: $(cat "$out")"
+  assert_contains "$(cat "$out")" "herdr update not in effect" "the first sweep from empty identity sets did not report under /bin/bash"
+  assert_grep 'pending=herdr@0.8.2' "$home/state/.tool-updates" "the first sweep under /bin/bash did not record its pending set"
+
+  status=0
+  env FM_CHECK_TIMEOUT=30 FM_HOME="$home" PATH="$path" FM_TOOL_UPDATE_INTERVAL=0 \
+    /bin/bash "$CHECK" >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "repeat sweep under /bin/bash exit: $(cat "$out")"
+  [ ! -s "$out" ] || fail "the same pending set was reported again under /bin/bash: $(cat "$out")"
+
+  # A clean sweep folds an empty notice set and an empty pending set into a
+  # record that already holds a pending identity.
+  make_copy "$stale" "$TOOL" 'herdr 0.8.2'
+  status=0
+  env FM_CHECK_TIMEOUT=30 FM_HOME="$home" PATH="$path" FM_TOOL_UPDATE_INTERVAL=0 \
+    /bin/bash "$CHECK" >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "clean sweep under /bin/bash exit: $(cat "$out")"
+  [ ! -s "$out" ] || fail "a clean sweep produced a report under /bin/bash: $(cat "$out")"
+  assert_not_contains "$(cat "$home/state/.tool-updates")" "pending=herdr" "the clean sweep under /bin/bash did not clear the pending set"
+  pass "empty identity sets survive the system bash"
+}
+
 test_an_overlong_report_says_it_was_cut() {
   local home out report i tools=
   # Many watched tools can outgrow one line. The report must say it was cut
@@ -1231,6 +1274,7 @@ test_an_overrun_is_reported_once
 test_a_slow_tool_does_not_leave_later_tools_unasked
 test_a_changed_or_returning_completeness_clause_is_silent_while_the_pending_set_holds
 test_a_returning_check_failure_is_reported_again
+test_empty_identity_sets_survive_the_system_bash
 test_an_overlong_report_says_it_was_cut
 test_a_finding_past_the_cut_is_still_reported
 test_probes_are_skipped_between_intervals
