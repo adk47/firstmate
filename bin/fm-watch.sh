@@ -1225,13 +1225,24 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
-# Keep the liveness beacon fresh across a long poll's stages. The loop's
-# top-of-cycle touch owns the ordinary cadence, but a fleet-wide fold over many
-# large status logs can sit between two loop iterations for longer than the
-# guard's grace (FM_GUARD_GRACE, default 300s), which reads as a dead watcher.
-# Touching here, after each file or stage, keeps the beacon advancing exactly as
-# the work advances, so a legitimately long fold can never starve supervision.
-watch_beat() { touch "$STATE/.last-watcher-beat"; }
+# Refresh the liveness beacon between a long poll's stages, but ONLY once it has
+# actually aged. The loop's top-of-cycle touch is unconditional and is the one
+# beacon change per poll cycle; a between-stage touch exists so a fleet-wide fold
+# over many large status logs cannot leave the beacon stale past the guard's
+# grace (FM_GUARD_GRACE, default 300s). Touching on EVERY stage would make a
+# beacon change no longer mean "a new poll cycle", which fm-watch-triage.test.sh's
+# wait_poll_cycle relies on, so this refreshes only once the beacon has aged past
+# half the grace. A fast poll therefore touches nothing extra; a genuinely slow
+# one keeps the beacon advancing exactly as the work advances.
+WATCH_BEAT_REFRESH_SECS=$(( WATCHER_STALE_GRACE / 2 ))
+[ "$WATCH_BEAT_REFRESH_SECS" -gt 0 ] || WATCH_BEAT_REFRESH_SECS=1
+watch_beat() {
+  local age
+  age=$(fm_path_age "$STATE/.last-watcher-beat")
+  case "$age" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$age" -ge "$WATCH_BEAT_REFRESH_SECS" ] && touch "$STATE/.last-watcher-beat"
+  return 0
+}
 
 # 0 when any signaled status file carries a captain-relevant event in the bytes
 # appended since this watcher last classified it. The start offset is the

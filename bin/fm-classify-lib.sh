@@ -232,7 +232,7 @@ status_is_paused_or_captain_held() {  # <status-line>
 #   resolved       corr=<16 hex> [key=texte-du-mur]: <how it was decided>
 # and a recovery turn can leave two such tokens on one line. All of those must
 # read as the bare verb, in BOTH directions: a verb parse that keeps the token
-# glued on matches no arm of _fm_decision_fold_line, so the opener never opens
+# glued on matches no arm of _fm_fold_line_state, so the opener never opens
 # and the closer never closes, and a captain decision goes silently missing.
 # Recognition starts only AFTER the retained leading verb: a token-first line
 # keeps that token, so its following word cannot impersonate a transition and
@@ -324,13 +324,9 @@ _fm_key_before_colon() {  # <status-line>
 # the line has no colon or no complete token there; slug charset validity is
 # the caller's check via _fm_decision_slug_ok, exactly as for the before-colon
 # position.
-# No-fork core for the note-head key token. The public _fm_key_at_note_head
-# below prints the same value, so this stays the single parser.
+# No-fork core for the note-head key token; it assigns the slug to
+# _FM_DECISION_KEY_HEAD instead of printing it.
 _FM_DECISION_KEY_HEAD=
-_fm_key_at_note_head() {  # <status-line> -> raw slug
-  _fm_key_at_note_head_core "$1" || return 1
-  printf '%s' "$_FM_DECISION_KEY_HEAD"
-}
 _fm_key_at_note_head_core() {  # <status-line> -> _FM_DECISION_KEY_HEAD
   local rest
   _FM_DECISION_KEY_HEAD=
@@ -398,11 +394,6 @@ _fm_decision_key_core() {  # <status-line> -> _FM_DECISION_KEY
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _FM_DECISION_DROP=
-_fm_decision_drop() {  # <open-set> <key>
-  _fm_decision_drop_core "$1" "$2"
-  [ -n "$_FM_DECISION_DROP" ] && printf '%s\n' "$_FM_DECISION_DROP"
-  return 0
-}
 _fm_decision_drop_core() {  # <open-set> <key> -> _FM_DECISION_DROP (no trailing newline)
   local set=$1 key=$2 line out='' sep=''
   while IFS= read -r line; do
@@ -468,13 +459,11 @@ _fm_is_pending_reply_escalation() {  # <key> <note>
   esac
 }
 
-# The no-fork fold engine behind the public _fm_decision_fold_line below: the
-# same rule, but it updates the globals _FM_FOLD_OPEN and _FM_FOLD_OP in place
-# instead of printing, so a fold loop pays no command substitution per line.
-# _FM_FOLD_OPEN deliberately carries NO trailing newline, which is exactly what
-# a `$(...)` caller of _fm_decision_fold_line already observes. Keeping the
-# per-line rule here and printing it from the wrapper preserves the one-owner
-# rule while making whole-log folds bounded by line count rather than by forks.
+# The no-fork fold engine: the ONE place the per-line open/resolved rule is
+# written. It updates the globals _FM_FOLD_OPEN, _FM_FOLD_OP, and _FM_FOLD_KEY/
+# _FM_FOLD_VERB/_FM_FOLD_NOTE in place instead of printing, so a fold loop pays no
+# command substitution per line. _FM_FOLD_OPEN deliberately carries NO trailing
+# newline, matching what the old printing form produced through a `$(...)`.
 _FM_FOLD_OPEN=
 _FM_FOLD_OP=none
 _FM_FOLD_KEY=
@@ -528,11 +517,6 @@ _fm_fold_line_state() {  # <open-set> <status-line> <resolve-verb> <held-verb>
   esac
   _FM_FOLD_OPEN=$open
   return 0
-}
-
-_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
-  _fm_fold_line_state "$1" "$2" "$3" "$4"
-  printf '%s' "$_FM_FOLD_OPEN"
 }
 
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
@@ -594,7 +578,7 @@ EOF
 # contradiction between the two records - see fm-captain-hold.sh's `diverged`.
 #
 # Semantics are not re-derived here: every line goes through the same
-# _fm_decision_fold_line rule the two folds use, and the reported verb is read
+# _fm_fold_line_state rule the two folds use, and the reported verb is read
 # off the transitions that rule produces. Only lines whose parsed key equals the
 # requested one can move that key, so a caller-supplied key other than "default"
 # lets the scan pre-filter the stream to lines carrying its token and stay cheap
@@ -664,7 +648,7 @@ EOF
 # below are the bounded-cost siblings used for that per-drain path: each call
 # reads only the bytes appended to a status file since its own last call (a
 # persisted per-file byte cursor) and folds just those new lines into a
-# persisted running open-set, via the exact same _fm_decision_fold_line rule
+# persisted running open-set, via the exact same _fm_fold_line_state rule
 # status_open_decisions uses - so the two strategies can never disagree on what
 # is open. Cost is bounded by NEW appends since the last drain, not by the
 # status file's total lifetime size.
@@ -677,7 +661,7 @@ EOF
 #
 # The cursor format is `version`, `offset`, `ident`, then the folded open set.
 # FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
-# _fm_decision_fold_line semantics change, so persisted state from an older
+# _fm_fold_line_state semantics change, so persisted state from an older
 # interpretation is discarded and rebuilt from byte 0.
 #
 # Cursor invalidation is deliberately minimal, matching how status files are
@@ -778,6 +762,12 @@ _fm_status_span_scratch() {  # <status-file>
 
 _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   local f=$1 start=$2 length=$3
+  # Test-only observability seam (off by default, no production behavior
+  # change): records the byte length of every span read, so a test can assert
+  # that a warm span classification reads only the appended span rather than
+  # re-reading the whole log.
+  [ -n "${FM_STATUS_SPAN_READ_PROBE:-}" ] \
+    && printf '%s\t%s\n' "$f" "$length" >> "$FM_STATUS_SPAN_READ_PROBE"
   if [ -n "${FM_STATUS_SPAN_READER:-}" ]; then
     "$FM_STATUS_SPAN_READER" "$f" "$start" "$length"
     return
@@ -796,42 +786,10 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   ' "$f" "$start" "$length"
 }
 
-# Cold-read byte cap. A cursorless status log is the ONE case where a pass has no
-# durable position to start from (a brand-new task, or a cursor invalidated by a
-# fold-version bump or a replaced file). So that a pathological multi-hundred-MB
-# log can never stall a supervision cycle, such a pass starts no earlier than
-# this many trailing bytes and drops a partial leading line. Every pass with a
-# durable cursor reads only appended bytes and never consults this bound. The
-# default is far above the largest single status log any real home has produced
-# (under 5 MiB in the 2026-09 21-lane incident), so it is a defense-in-depth
-# guard rather than a routine truncation.
-FM_STATUS_COLD_READ_CAP_BYTES=${FM_STATUS_COLD_READ_CAP_BYTES:-8388608}
-
-_fm_status_cold_start() {  # <size> -> coldest permissible start offset
-  local size=$1 cap=$FM_STATUS_COLD_READ_CAP_BYTES
-  case "$cap" in ''|*[!0-9]*|0) printf '0'; return 0 ;; esac
-  case "$size" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
-  if [ "$size" -le "$cap" ]; then printf '0'; else printf '%s' "$((size - cap))"; fi
-}
-
-# 0 when <offset> begins at a line boundary of <status-file> (offset 0 always
-# does). A capped cold start can land mid-line, and its partial first line must
-# not be parsed as a transition, so callers drop it when this reports 1.
-_fm_status_offset_at_line_start() {  # <status-file> <offset>
-  local f=$1 offset=$2 prev
-  [ "$offset" -gt 0 ] || return 0
-  # The trailing 'x' is deliberate: a command substitution strips trailing
-  # newlines, so the byte before <offset> is compared with a sentinel appended
-  # after it rather than against a bare '$\n' that would always be stripped to
-  # the empty string.
-  prev=$(_fm_status_read_span "$f" "$((offset - 1))" 1 2>/dev/null; printf 'x')
-  [ "$prev" = $'\nx' ]
-}
-
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
-  local target_cursor skip_first=0
+  local target_cursor
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
@@ -897,13 +855,14 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   fi
 
   if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
-    # No usable cursor: this is the one pass that may have to start near byte 0.
-    # The cold cap bounds it, and a start that lands mid-line drops its partial
-    # first line rather than parsing half a transition.
-    offset=$(_fm_status_cold_start "$size")
-    if [ "$offset" -gt 0 ] && ! _fm_status_offset_at_line_start "$f" "$offset"; then
-      skip_first=1
-    fi
+    # No usable cursor (a brand-new task, or one invalidated by a fold-version
+    # bump, an identity change, or a replaced file). This fold must start at byte
+    # 0 so NO decision is ever dropped; the no-fork engine makes that full read
+    # cheap, and _fm_status_read_span reads it in bounded 64 KiB syscalls. The
+    # watcher, whose poll drives the span classifier, touches its liveness beacon
+    # between status files and between poll stages, so a cold fold cannot starve
+    # supervision.
+    offset=0
     open=''
     trusted_open=''
     cursor_dirty=1
@@ -928,7 +887,6 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
     while IFS= read -r line || [ -n "$line" ]; do
-      if [ "$skip_first" -eq 1 ]; then skip_first=0; continue; fi
       _fm_fold_line_state "$open" "$line" "$resolve" "$held"
       open=$_FM_FOLD_OPEN
     done < "$chunk_file"
@@ -1521,7 +1479,6 @@ status_open_decisions_cursor_offset() {  # <status-file>
 # print nothing.
 status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
   local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line rc=0
-  local skip_first=0
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   chunk_file="$cf.unread.$$"
@@ -1537,20 +1494,10 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
   else
     size=$actual_size
   fi
-  if [ "$offset" -eq 0 ]; then
-    # No persisted presentation position for this log: the cold cap bounds the
-    # read, and a start that lands mid-line drops its partial first line so half
-    # a status line is never parsed as a fresh surface line.
-    offset=$(_fm_status_cold_start "$size")
-    if [ "$offset" -gt 0 ] && ! _fm_status_offset_at_line_start "$f" "$offset"; then
-      skip_first=1
-    fi
-  fi
   [ "$offset" -lt "$size" ] || return 0
   _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
     || { rm -f "$chunk_file"; return 1; }
   while IFS= read -r line || [ -n "$line" ]; do
-    if [ "$skip_first" -eq 1 ]; then skip_first=0; continue; fi
     case "$line" in
       *[![:space:]]*) printf '%s\n' "$line" || { rc=1; break; } ;;
     esac
@@ -1562,9 +1509,9 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
 # 0 when a status line is an informational `note:` or a reserved-key
 # pending-reply resolution. Those lines never fold into OPEN DECISIONS, so the
 # drain's unread-status surface is their only guaranteed presentation.
-# The no-fork parser body lives here and the printing wrapper below is unused
-# externally; the scan loops call this directly so a cold unread read costs no
-# command substitution per line.
+# _core holds the rule without a command substitution per line, so the unread
+# scan stays cheap on a cold read; the public status_line_is_unread_surface
+# below is the thin wrapper other callers use.
 status_line_is_unread_surface_core() {  # <status-line>
   local line=$1 verb key note resolve held prefix
   [ -n "$line" ] || return 1
@@ -1653,7 +1600,7 @@ _fm_status_open_activities_stream() {
   pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
   _FM_FOLD_OPEN=
   while IFS= read -r line || [ -n "$line" ]; do
-    # Blank-line guard; see _fm_decision_fold_line for why this is a glob.
+    # Blank-line guard; see _fm_fold_line_state for why this is a glob.
     case "$line" in
       *[![:space:]]*) ;;
       *) continue ;;
@@ -1812,7 +1759,7 @@ _fm_span_fold_last_open() {  # <chunk-file> <resolve> <held>
 
 status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
   local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file result
-  local line verb key resolve held rc=1 failed=0 line_number=0 live_line events='' _fm_span_needs_decision=0
+  local line verb key resolve held rc=1 line_number=0 live_line events='' _fm_span_needs_decision=0
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
@@ -1837,19 +1784,9 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
     || { rm -f "$chunk_file"; return 2; }
   cur_ident=$(_fm_open_decisions_file_ident "$f") || { rm -f "$chunk_file"; return 2; }
   [ "$cur_ident" = "$ident" ] || { rm -f "$chunk_file"; return 2; }
-  # A start that lands mid-line drops its partial first line, so half a
-  # transition can never be folded or reported. Committed cursors always sit on a
-  # line boundary, so this is a safety net rather than the ordinary path.
-  if [ "$start" -gt 0 ] && ! _fm_status_offset_at_line_start "$f" "$start"; then
-    if tail -n +2 "$chunk_file" > "${chunk_file}.trim" 2>/dev/null; then
-      mv -f "${chunk_file}.trim" "$chunk_file" || failed=1
-    else
-      failed=1
-    fi
-  fi
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-  [ "$failed" -eq 0 ] && _fm_span_fold_last_open "$chunk_file" "$resolve" "$held"
+  _fm_span_fold_last_open "$chunk_file" "$resolve" "$held"
   while IFS= read -r line || [ -n "$line" ]; do
     line_number=$((line_number + 1))
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
@@ -1899,7 +1836,6 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
     esac
   done < "$chunk_file"
   rm -f "$chunk_file"
-  [ "$failed" -eq 0 ] || return 2
   if [ "$rc" -eq 0 ]; then result="${size}"$'\t'"${ident}"$'\t'"${events}"; else result="${size}"$'\t'"${ident}"; fi
   if [ -n "$output_var" ]; then
     printf -v "$output_var" '%s' "$result"

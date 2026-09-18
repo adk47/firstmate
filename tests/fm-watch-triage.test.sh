@@ -69,13 +69,16 @@ wait_live() {
 # machine a short fixed budget can reap a round before the cycle it asserts on
 # ever ran - and then every "no wake, no marker" assertion passes vacuously
 # while every "marker written" assertion fails spuriously.
-# The liveness beacon is touched at the TOP of every poll, so this drops any
-# beacon left by an earlier round, waits for THIS watcher to write a fresh one
-# (some poll's top), then waits for that one to advance (the next poll's top) -
-# and the whole cycle in between is what the caller's assertions describe.
+# The liveness beacon is touched at the TOP of every poll, and fm-watch.sh also
+# touches it once before the loop (so the arm layer confirms a cold start inside
+# its window). This drops any beacon left by an earlier round, waits for THIS
+# watcher to write a fresh one, then waits for TWO further advances: whichever
+# touch comes first, two advances guarantee at least one full poll's work has
+# completed, so the caller's assertions describe a finished cycle rather than a
+# half-run one.
 # 0 if the watcher is still alive after a completed cycle, 1 if it exited.
 wait_poll_cycle() {  # <state> <pid> [limit-ticks]
-  local state=$1 pid=$2 limit=${3:-300} beat first now i=0
+  local state=$1 pid=$2 limit=${3:-300} beat first now changes=0 i=0
   beat="$state/.last-watcher-beat"
   rm -f "$beat"
   first=""
@@ -90,7 +93,9 @@ wait_poll_cycle() {  # <state> <pid> [limit-ticks]
     kill -0 "$pid" 2>/dev/null || return 1
     now=$(file_mtime "$beat")
     if [ -n "$now" ] && [ "$now" != "$first" ]; then
-      return 0
+      changes=$((changes + 1))
+      first=$now
+      [ "$changes" -ge 2 ] && return 0
     fi
     sleep 0.1
     i=$((i + 1))
