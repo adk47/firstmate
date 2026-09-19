@@ -131,11 +131,13 @@ status_is_terminal_verb() {
 # (working, resolved, captain-held) and paused never match from free-text prose;
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
-status_is_captain_relevant() {
-  local line=$1 verb
+# The no-fork predicate core: it takes the already-parsed verb (or parses one)
+# and returns the verdict without a command substitution, so the span classifier's
+# per-line pass can classify a long cold log without a subshell per line.
+status_is_captain_relevant_verb() {  # <status-line> [<verb>]
+  local line=$1 verb=${2-}
   [ -n "$line" ] || return 1
-  status_is_paused "$line" && return 1
-  verb=$(status_line_verb "$line")
+  [ -n "$verb" ] || { status_line_verb_core "$line"; verb=$_FM_STATUS_VERB; }
   case "$verb" in
     working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
@@ -145,8 +147,28 @@ status_is_captain_relevant() {
     case "$verb" in
       done|needs-decision|blocked|failed) return 0 ;;
     esac
+    # The default vocabulary is a fixed set of literal substrings, so a
+    # case-insensitive `case` answers it with builtins only. A per-line grep
+    # fork here is what made a cold classification of a multi-thousand-line log
+    # take minutes; shopt -q is a builtin, so the prior nocasematch state is
+    # restored without a subshell.
+    local _fm_nocase_was_on=0
+    shopt -q nocasematch && _fm_nocase_was_on=1
+    shopt -s nocasematch
+    case "$line" in
+      *done:*|*needs-decision:*|*blocked:*|*failed:*|*"PR ready"*|*"checks green"*|*"ready in branch"*|*merged*)
+        [ "$_fm_nocase_was_on" = 1 ] || shopt -u nocasematch
+        return 0
+        ;;
+    esac
+    [ "$_fm_nocase_was_on" = 1 ] || shopt -u nocasematch
+    return 1
   fi
-  printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+  printf '%s' "$line" | grep -qiE "$FM_CAPTAIN_RE"
+}
+
+status_is_captain_relevant() {
+  status_is_captain_relevant_verb "$1"
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
@@ -1544,11 +1566,9 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
 
 # 0 when a status line is an informational `note:` or a reserved-key
 # pending-reply resolution. Those lines never fold into OPEN DECISIONS, so the
-# drain's unread-status surface is their only guaranteed presentation.
-# _core holds the rule without a command substitution per line, so the unread
-# scan stays cheap on a cold read; the public status_line_is_unread_surface
-# below is the thin wrapper other callers use.
-status_line_is_unread_surface_core() {  # <status-line>
+# drain's unread-status surface is their only guaranteed presentation. The body
+# is fork-free so the unread scan stays cheap on a cold read.
+status_line_is_unread_surface() {  # <status-line>
   local line=$1 verb key note resolve held prefix
   [ -n "$line" ] || return 1
   status_line_verb_core "$line"
@@ -1575,10 +1595,6 @@ status_line_is_unread_surface_core() {  # <status-line>
   return 1
 }
 
-status_line_is_unread_surface() {  # <status-line>
-  status_line_is_unread_surface_core "$1"
-}
-
 # Fleet-wide unread informational lines: one "<task>\t<status-line>" row per
 # still-unread `note:` or pending-reply resolution, in glob (task id) order.
 # Prints nothing when none are unread. Directory scan rejects status symlinks
@@ -1592,7 +1608,7 @@ scan_unread_surface_lines() {  # <state>
     [ -n "$lines" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
-      status_line_is_unread_surface_core "$line" || continue
+      status_line_is_unread_surface "$line" || continue
       printf '%s\t%s\n' "$task" "$line"
     done <<EOF
 $lines
@@ -1610,7 +1626,7 @@ scan_unread_surface_snapshot() {  # <state> <task-and-endpoint-snapshot>
     [ -n "$lines" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
-      status_line_is_unread_surface_core "$line" || continue
+      status_line_is_unread_surface "$line" || continue
       printf '%s\t%s\n' "$task" "$line"
     done <<EOF
 $lines
@@ -1630,11 +1646,10 @@ EOF
 # It is never authoritative current crew state, and consumers must not let an open
 # phase outrank a structured home snapshot or fm-crew-state result.
 _fm_status_open_activities_stream() {
-  local line verb key note resolve held pause
+  local line verb key note resolve held pause open=''
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
-  _FM_FOLD_OPEN=
   while IFS= read -r line || [ -n "$line" ]; do
     # Blank-line guard; see _fm_fold_line_state for why this is a glob.
     case "$line" in
@@ -1649,25 +1664,25 @@ _fm_status_open_activities_stream() {
       working|"$pause")
         status_line_note_core "$line"
         note=$_FM_STATUS_NOTE
-        if _fm_open_set_has "$_FM_FOLD_OPEN" "$key"; then
-          _fm_decision_drop_core "$_FM_FOLD_OPEN" "$key"
-          _FM_FOLD_OPEN=$_FM_DECISION_DROP
+        if _fm_open_set_has "$open" "$key"; then
+          _fm_decision_drop_core "$open" "$key"
+          open=$_FM_DECISION_DROP
         fi
-        if [ -n "$_FM_FOLD_OPEN" ]; then
-          _FM_FOLD_OPEN="${_FM_FOLD_OPEN}"$'\n'"${key}"$'\t'"${verb}"$'\t'"${note}"
+        if [ -n "$open" ]; then
+          open="${open}"$'\n'"${key}"$'\t'"${verb}"$'\t'"${note}"
         else
-          _FM_FOLD_OPEN="${key}"$'\t'"${verb}"$'\t'"${note}"
+          open="${key}"$'\t'"${verb}"$'\t'"${note}"
         fi
         ;;
       done|failed|needs-decision|blocked|"$resolve"|"$held")
-        if _fm_open_set_has "$_FM_FOLD_OPEN" "$key"; then
-          _fm_decision_drop_core "$_FM_FOLD_OPEN" "$key"
-          _FM_FOLD_OPEN=$_FM_DECISION_DROP
+        if _fm_open_set_has "$open" "$key"; then
+          _fm_decision_drop_core "$open" "$key"
+          open=$_FM_DECISION_DROP
         fi
         ;;
     esac
   done
-  printf '%s' "$_FM_FOLD_OPEN"
+  printf '%s' "$open"
 }
 
 status_open_activities() {  # <status-file-or-dash>
@@ -1737,17 +1752,10 @@ window_to_task() {
 # than by every key ever opened, so recording an opening is never quadratic.
 _FM_SPAN_ORIGINS=
 _fm_span_origin_record() {  # <key> <line-number>
-  local key=$1 number=$2 line out='' sep=''
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    case "$line" in "$key"$'\t'*) continue ;; esac
-    out="${out}${sep}${line}"
-    sep=$'\n'
-  done <<EOF
-$_FM_SPAN_ORIGINS
-EOF
-  if [ -n "$out" ]; then
-    _FM_SPAN_ORIGINS="${out}"$'\n'"${key}"$'\t'"${number}"
+  local key=$1 number=$2
+  _fm_span_origin_forget "$key"
+  if [ -n "$_FM_SPAN_ORIGINS" ]; then
+    _FM_SPAN_ORIGINS="${_FM_SPAN_ORIGINS}"$'\n'"${key}"$'\t'"${number}"
   else
     _FM_SPAN_ORIGINS="${key}"$'\t'"${number}"
   fi
@@ -1825,16 +1833,16 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
   while IFS= read -r line || [ -n "$line" ]; do
     line_number=$((line_number + 1))
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
-    if status_is_captain_held "$line"; then
+    status_line_verb_core "$line"
+    verb=$_FM_STATUS_VERB
+    if [ "$verb" = "$held" ]; then
       # A transfer closes the status-log decision and remains non-actionable to
       # stale classification. The side-band marker lets signal routing surface
       # the captain-owned hold without changing that established stale verdict.
       _fm_span_needs_decision=1
       continue
     fi
-    status_is_captain_relevant "$line" || continue
-    status_line_verb_core "$line"
-    verb=$_FM_STATUS_VERB
+    status_is_captain_relevant_verb "$line" "$verb" || continue
     case "$verb" in
       needs-decision|blocked)
         if ! _fm_decision_key_core "$line"; then
