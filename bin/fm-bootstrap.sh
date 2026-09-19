@@ -104,7 +104,8 @@
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
 #          secondmate homes, pending handoff outboxes,
-#          X-mode artifacts, project clones, or repair instructions.
+#          X-mode artifacts, project clones, or
+#          repair instructions.
 #          Unset/0 (the default) runs all six sweeps - this flag is purely
 #          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
@@ -118,7 +119,7 @@
 #                 secondmate_handoff_resume, and fleet_sync.
 #            only - ONLY those network steps and nothing else. No tool detection,
 #                 no version floors, no tangle check, no backlog
-#                 reconciliation, no x_mode_setup: those already ran on the
+#                 reconciliation, and no x_mode_setup: those already ran on the
 #                 local pass.
 #          FM_BOOTSTRAP_DETECT_ONLY composes with it unchanged, so `only` plus
 #          detect-only is the read-only `gh auth status` probe on its own.
