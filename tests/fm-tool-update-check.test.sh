@@ -356,15 +356,17 @@ SH
   chmod 0755 "$dir/no-mistakes-fixture"
   write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
   out="$home/out.txt"
-  # The deadline is whole-second granular (real_epoch is `date +%s`), so a
-  # budget of 1 leaves headroom anywhere in (0, 1] seconds: when the sweep
-  # starts near the end of a second the very first budget check already reads
-  # as exhausted and the sweep reports "before every copy answered" instead of
-  # reaching the announcement step this case is about. A budget of 2 guarantees
-  # more than a full second of headroom for the millisecond-scale work before
-  # the copy loop, while the version probe below (bounded, then sleeping 30)
-  # still exhausts the budget before the announcement check.
-  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=2
+  # The version probe has to spend the whole budget for the announcement step
+  # to find none left. A probe's bound is the budget less the kill grace, so
+  # with any larger budget a copy that dies promptly on TERM is killed a whole
+  # second before the deadline and the announcement is still asked, which is
+  # the ordinary sweep, not this case. With a budget of 1 the bound's floor is
+  # the budget itself, so the killed copy has always reached the deadline
+  # (whole-second granular, real_epoch is `date +%s`) however the sweep's start
+  # sat inside its second. A sweep that finds the budget gone before it asks the
+  # first copy reports that instead, and both are the check that could not be
+  # determined this case asserts.
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
   report=$(cat "$out")
   assert_contains "$report" "no-mistakes check could not be determined: the time budget ran out" "an announcement source that was never asked was not reported"
   assert_not_contains "$report" "update available" "an announcement source the budget could not reach was read as current"
