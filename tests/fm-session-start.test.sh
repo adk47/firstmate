@@ -501,6 +501,16 @@ SH
   chmod +x "$fakebin/herdr"
 }
 
+# The digest's production runtime bound (FM_SESSION_START_TIMEOUT, 120s) is a
+# wall-clock contract for a session-open hook, not part of what the content
+# cases below assert. Under a loaded host (parallel test runs, load averages in
+# the 30s) a healthy fixture start has been measured at 180s, spread evenly over
+# every stage, so inheriting the production bound turns host contention into a
+# truncated digest and a spurious content failure. The content helpers run under
+# a load-tolerant bound instead; the runtime-bound cases pin their own value,
+# which wins because the default only fills an unset variable.
+SESSION_START_CONTENT_BOUND=600
+
 # run_session_start <home> <root> <path>
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
@@ -513,10 +523,12 @@ run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
     env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+      FM_SESSION_START_TIMEOUT="${FM_SESSION_START_TIMEOUT:-$SESSION_START_CONTENT_BOUND}" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      FM_SESSION_START_TIMEOUT="${FM_SESSION_START_TIMEOUT:-$SESSION_START_CONTENT_BOUND}" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
@@ -527,6 +539,7 @@ run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
   shift 3
   env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
     FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    FM_SESSION_START_TIMEOUT="${FM_SESSION_START_TIMEOUT:-$SESSION_START_CONTENT_BOUND}" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"
 }
@@ -536,6 +549,7 @@ run_named_harness_session_start() {  # <harness> <home> <root> <path> [fm-sessio
   shift 4
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     FM_FAKE_HARNESS="$harness" FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    FM_SESSION_START_TIMEOUT="${FM_SESSION_START_TIMEOUT:-$SESSION_START_CONTENT_BOUND}" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"
 }
