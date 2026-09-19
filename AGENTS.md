@@ -187,7 +187,7 @@ When that section reports its checks still in progress it names exactly what is 
    A read-only session runs no network checks at all and says so.
 7. **Context digest and next step** - last of the bulk sections, the full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, each clearly delimited, followed by the closing reminder.
    A file that does not exist prints an explicit `ABSENT` marker, never confused with an empty-but-present file: absence is meaningful (`captain.md` absent means use the firstmate repo's built-in defaults, `projects.md` absent means rebuild it from the clones under `projects/`, etc.).
-   The closing reminder points back to the emitted supervision block and preserves only the lock, afk, Relay, and read-once reminders.
+   The closing reminder points back to the emitted supervision block and preserves only the lock, afk, Relay, and read-once reminders, then the digest ends with the house-wiki stanza (section 6 owns that contract).
 
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
 Do not dispatch until the required tools are present and GitHub authentication is good.
@@ -252,8 +252,15 @@ A secondmate is idle by default and acts only on work routed by the main firstma
 It reconciles its own work under way after restart, then waits silently; an empty queue never authorizes a survey, audit, or self-directed improvement sweep.
 Do not reconstruct or supervise a secondmate's child tree from the main home.
 
+Muso house knowledge is `~/.llm-wiki` and is the source of truth for Muso goals, infra, memories, and apps.
+Grep `wiki/index.md` then Read before acting on a Muso fact.
+Grep `raw/sources/` for identifiers (PR URLs, job ids, image tags); read `wiki/` for meaning.
+Never claim a fact is absent without grepping first.
+File a durable lesson with `wiki-retro` (Pi: `wiki_retro`); workers never write the vault and instead carry `lesson: ...` as a trailing clause on their `done:` or `failed:` status line only (never on `working:`, never a line of its own); before running `bin/fm-teardown.sh`, which removes `state/<id>.status`, firstmate scans that log for `lesson:` clauses and files each, a deterministic read rather than a wake-dependent one.
+
 Route durable knowledge to its most specific owner:
 
+- Muso facts that belong in the house wiki go through capture/ingest or `wiki-retro`, not only a task note.
 - Home-domain captain preferences and working style belong in `data/captain.md` after inspect-then-update.
 - Captain preferences shared across secondmate domains belong in the primary home's `data/captain-shared.md` under the `secondmate-provisioning` contract.
 - Fleet-local operational facts belong in curated, home-local `data/learnings.md`.
@@ -524,6 +531,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's own ask plus the context needed to read it, including the substance of any report, decision, or PR the ask refers to, and fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with Firstmate's build instructions.
 `bin/fm-dod-lib.sh` owns what a no-mistakes worker may pass as `--intent` and its rule that the string must be self-sufficient.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
+Generated worker briefs include the house-wiki stanza; `bin/fm-house-wiki-stanza.txt` owns the shared text and `bin/fm-brief.sh` owns the worker `lesson:` rule.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.

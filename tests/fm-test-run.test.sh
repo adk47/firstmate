@@ -392,8 +392,11 @@ PY
   timeout_script=tests/fm-calm-pi-extension.test.sh
   mkdir -p "$timeout_repo/bin" "$timeout_repo/tests"
   cp "$RUNNER" "$timeout_repo/bin/fm-test-run.sh"
+  # The stub records every bound it is handed, so the test can assert which
+  # script received which bound rather than only that some bound fired.
   cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
 fm_run_timed() {
+  printf '%s %s\n' "$1" "$*" >>"$FM_TEST_BOUNDS_LOG"
   [ "$1" -eq 900 ] || return 99
   return 124
 }
@@ -408,6 +411,8 @@ SH
   git -C "$timeout_repo" add .
   git -C "$timeout_repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
   printf '\n' >>"$timeout_repo/$timeout_script"
+  export FM_TEST_BOUNDS_LOG="$tmp/bounds.log"
+  : >"$FM_TEST_BOUNDS_LOG"
   set +e
   (cd "$timeout_repo" && bin/fm-test-run.sh --changed --base HEAD) \
     >"$tmp/timeout.out" 2>"$tmp/timeout.err"
@@ -417,6 +422,57 @@ SH
   grep -Eq '^FM_TEST_END .+ tests/fm-calm-pi-extension\.test\.sh exit=124 ' "$tmp/timeout.out" \
     || fail "single unproven changed script did not receive the automatic timeout: $(cat "$tmp/timeout.out")"
   [ ! -e "$timeout_repo/should-not-run" ] || fail "automatic timeout helper did not own the single changed script"
+
+  # tests/fm-session-start.test.sh is the one measured outlier: the automatic
+  # path bounds it at 3600s while every other script keeps the 900s guard, and
+  # an explicit --per-script-timeout-secs still applies to it like any other.
+  cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
+fm_run_timed() {
+  printf '%s %s\n' "$1" "$*" >>"$FM_TEST_BOUNDS_LOG"
+  return 124
+}
+SH
+  cat >"$timeout_repo/tests/fm-session-start.test.sh" <<'SH'
+#!/usr/bin/env bash
+touch should-not-run
+echo "not ok - automatic timeout helper was bypassed"
+SH
+  chmod +x "$timeout_repo/tests/fm-session-start.test.sh"
+  git -C "$timeout_repo" add .
+  git -C "$timeout_repo" -c user.name=test -c user.email=test@example.invalid commit -qm outlier
+  printf '\n' >>"$timeout_repo/$timeout_script"
+  printf '\n' >>"$timeout_repo/tests/fm-session-start.test.sh"
+  : >"$FM_TEST_BOUNDS_LOG"
+  set +e
+  (cd "$timeout_repo" && bin/fm-test-run.sh --changed --base HEAD) \
+    >"$tmp/outlier.out" 2>"$tmp/outlier.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "automatic timeout run with the outlier must fail, got $rc"
+  grep -Eq '^900 .* tests/fm-calm-pi-extension\.test\.sh' "$FM_TEST_BOUNDS_LOG" \
+    || fail "the automatic 900s guard did not cover the ordinary changed script: $(cat "$FM_TEST_BOUNDS_LOG")"
+  grep -Eq '^3600 .* tests/fm-session-start\.test\.sh' "$FM_TEST_BOUNDS_LOG" \
+    || fail "tests/fm-session-start.test.sh did not receive its 3600s automatic bound: $(cat "$FM_TEST_BOUNDS_LOG")"
+  grep -Eq '^FM_TEST_END .+ tests/fm-session-start\.test\.sh exit=124 ' "$tmp/outlier.out" \
+    || fail "the outlier bound did not terminate as exit 124: $(cat "$tmp/outlier.out")"
+  grep -q 'tests/fm-session-start.test.sh exceeded the per-script bound of 3600s' "$tmp/outlier.out" \
+    || fail "the outlier's termination line did not report its own bound: $(cat "$tmp/outlier.out")"
+  [ ! -e "$timeout_repo/should-not-run" ] || fail "automatic timeout helper did not own the outlier"
+
+  : >"$FM_TEST_BOUNDS_LOG"
+  set +e
+  (cd "$timeout_repo" && bin/fm-test-run.sh --changed --base HEAD --per-script-timeout-secs 7) \
+    >"$tmp/explicit.out" 2>"$tmp/explicit.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "explicit timeout run must fail through the stub, got $rc"
+  grep -Eq '^7 .* tests/fm-session-start\.test\.sh' "$FM_TEST_BOUNDS_LOG" \
+    || fail "an explicit --per-script-timeout-secs did not apply to the outlier: $(cat "$FM_TEST_BOUNDS_LOG")"
+  grep -Eq '^7 .* tests/fm-calm-pi-extension\.test\.sh' "$FM_TEST_BOUNDS_LOG" \
+    || fail "an explicit --per-script-timeout-secs did not apply to the ordinary script: $(cat "$FM_TEST_BOUNDS_LOG")"
+  ! grep -Eq '^(900|3600) ' "$FM_TEST_BOUNDS_LOG" \
+    || fail "an explicit --per-script-timeout-secs was overridden by the automatic table: $(cat "$FM_TEST_BOUNDS_LOG")"
+  unset FM_TEST_BOUNDS_LOG
 
   rm -rf "$tmp"
   pass "changed defaults to bounded automatic scheduling with serial override"

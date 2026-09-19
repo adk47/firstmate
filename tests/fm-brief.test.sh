@@ -216,6 +216,19 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "# House wiki" "$brief" "$id: brief missing the house-wiki stanza"
+    assert_grep "Never claim a fact is absent from memory without grepping" "$brief" \
+      "$id: brief missing the house-wiki absence guard"
+    assert_grep "Never write to \`~/.llm-wiki\` from this task" "$brief" \
+      "$id: brief lets the worker write the house wiki outside its worktree"
+    assert_grep "append \`lesson: {fact}\` to the end of your \`done:\` or \`failed:\` line only" "$brief" \
+      "$id: brief missing the status-line lesson route"
+    assert_grep "\`lesson:\` is not a status state, so never write it as its own line" "$brief" \
+      "$id: brief lets the worker write lesson: as a standalone status line"
+    assert_grep "never on a \`working:\` line" "$brief" \
+      "$id: brief lets a lesson ride a working: line the watcher absorbs"
+    assert_grep "Before running \`bin/fm-teardown.sh\`, which removes this task's status log, firstmate scans that log for \`lesson:\` clauses" "$brief" \
+      "$id: brief missing the teardown filing route"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
@@ -831,6 +844,19 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
   assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
   assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"
+  assert_grep "# House wiki" "$brief" "scout brief missing the house-wiki stanza"
+  assert_grep "Never claim a fact is absent from memory without grepping" "$brief" \
+    "scout brief missing the house-wiki absence guard"
+  assert_grep "Never write to \`~/.llm-wiki\` from this task" "$brief" \
+    "scout brief lets the worker write the house wiki outside its worktree"
+  assert_grep "append \`lesson: {fact}\` to the end of your \`done:\` or \`failed:\` line only" "$brief" \
+    "scout brief missing the status-line lesson route"
+  assert_grep "\`lesson:\` is not a status state, so never write it as its own line" "$brief" \
+    "scout brief lets the worker write lesson: as a standalone status line"
+  assert_grep "never on a \`working:\` line" "$brief" \
+    "scout brief lets a lesson ride a working: line the watcher absorbs"
+  assert_grep "Before running \`bin/fm-teardown.sh\`, which removes this task's status log, firstmate scans that log for \`lesson:\` clauses" "$brief" \
+    "scout brief missing the teardown filing route"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
@@ -844,6 +870,21 @@ test_scout_and_secondmate_scaffold() {
   assert_no_grep "{FIRSTMATE_SPEC}" "$brief" \
     "secondmate charter must not carry the Firstmate spec placeholder"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
+}
+
+# The house-wiki stanza is a worker contract (ship + scout). Secondmates load
+# AGENTS.md themselves and must not grow a second copy of that text.
+test_house_wiki_stanza_is_on_workers_not_secondmates() {
+  local home brief
+  home="$TMP_ROOT/wiki-stanza-home"
+  mkdir -p "$home/data"
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-wiki-sm --secondmate alpha >/dev/null 2>&1 \
+    || fail "secondmate scaffold for wiki-stanza check exited non-zero"
+  brief="$home/data/brief-wiki-sm/brief.md"
+  assert_no_grep "# House wiki" "$brief" \
+    "secondmate charter must not duplicate the worker house-wiki stanza"
+  pass "fm-brief.sh: house-wiki stanza is on ship/scout workers, not secondmate charters"
 }
 
 test_script_parses
@@ -868,3 +909,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_house_wiki_stanza_is_on_workers_not_secondmates
