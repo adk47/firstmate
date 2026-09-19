@@ -1225,6 +1225,25 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
+# Refresh the liveness beacon between a long poll's stages, but ONLY once it has
+# actually aged. The loop's top-of-cycle touch is unconditional and is the one
+# beacon change per poll cycle; a between-stage touch exists so a fleet-wide fold
+# over many large status logs cannot leave the beacon stale past the guard's
+# grace (FM_GUARD_GRACE, default 300s). Touching on EVERY stage would make a
+# beacon change no longer mean "a new poll cycle", which fm-watch-triage.test.sh's
+# wait_poll_cycle relies on, so this refreshes only once the beacon has aged past
+# half the grace. A fast poll therefore touches nothing extra; a genuinely slow
+# one keeps the beacon advancing exactly as the work advances.
+WATCH_BEAT_REFRESH_SECS=$(( WATCHER_STALE_GRACE / 2 ))
+[ "$WATCH_BEAT_REFRESH_SECS" -gt 0 ] || WATCH_BEAT_REFRESH_SECS=1
+watch_beat() {
+  local age
+  age=$(fm_path_age "$STATE/.last-watcher-beat")
+  case "$age" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$age" -ge "$WATCH_BEAT_REFRESH_SECS" ] && touch "$STATE/.last-watcher-beat"
+  return 0
+}
+
 # 0 when any signaled status file carries a captain-relevant event in the bytes
 # appended since this watcher last classified it. The start offset is the
 # classified-position field in that file's .seen-* marker, and fm-classify-lib.sh's
@@ -1255,6 +1274,7 @@ signal_files_actionable() {  # <status-file> ...
     status_span_first_actionable_record "$f" \
       "$(fm_wake_signal_seen_size "$STATE" "$f")" record needs_decision
     rc=$?
+    watch_beat
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
       # Could not classify this log. Surface it rather than absorbing it, and
@@ -1314,6 +1334,7 @@ heartbeat_scan_finds_actionable() {
     task=$(basename "$f"); task="${task%.status}"
     record=$(status_span_first_actionable_record "$f" "$(hb_surfaced_offset "$task")")
     rc=$?
+    watch_beat
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
       sig=$(status_observed_signature "$f")
@@ -1452,6 +1473,14 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
+# Beat before any fold, and only once the recovery-marker checks above have
+# passed. The arm layer confirms a fresh watcher only when its beacon is touched
+# inside FM_ARM_CONFIRM_TIMEOUT, and a cold first poll can spend a long time
+# folding status logs before the loop's own top-of-cycle touch; this touch is
+# what keeps a legitimate cold start from being killed as an unconfirmed
+# watcher. It sits after the two exit-1 recovery checks so a watcher that fails
+# them never leaves a fresh beacon vouching for a process that is already gone.
+touch "$STATE/.last-watcher-beat"
 # Side-band ledger publication, detached from the poll loop.
 #
 # The poll loop owns the liveness beacon below, and fm-guard.sh reads that
@@ -1731,6 +1760,7 @@ while :; do
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  watch_beat
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
@@ -1856,6 +1886,7 @@ EOF
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
+    watch_beat
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
