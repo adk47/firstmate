@@ -16,7 +16,7 @@
 # its one line into a `check:` wake. `disarm` removes the shim, its trust
 # binding, and the report record.
 #
-# Two conditions are reported, and they are deliberately distinct:
+# Two update conditions are reported, and they are deliberately distinct:
 #
 #   "<tool> update available"      a newer version exists at the update source.
 #   "<tool> update not in effect"  a newer copy is installed on this host, but
