@@ -100,6 +100,7 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
+The watcher keeps that beacon fresh while it is genuinely working: `bin/fm-watch.sh` touches it once before its first poll's fold (after the recovery-marker checks that can exit) and again between a poll's stages whenever the beacon has aged past half the grace, so folding a fleet of multi-megabyte status logs cannot make a live watcher read as stale, and a fast poll still changes the beacon exactly once.
 
 ## Regression coverage
 
