@@ -13,7 +13,8 @@
 #     pool_capable=<names|none|unobserved>
 #     pool_tracked=<names|none|unobserved>
 #     pool_unprojected=<names|none|unobserved>
-#     pool_needs_auth=<names|none|unobserved> pool_exhaustion=<n>h
+#     pool_needs_auth=<names|none|unobserved>
+#     pool_unreadable=<names|none|unobserved> pool_exhaustion=<n>h
 #     fable_reason=<token> pool_reason=<token>
 #
 # Two independent runways are reported, because the supervisor reads its own
@@ -154,7 +155,11 @@
 # carried into the line or into any child process. Each file is parsed on its
 # own, so one torn file - a proxy caught mid-rewrite, a hand-edit - costs that
 # one account rather than the whole inventory, and the inventory counts as
-# unreadable only when no file parses at all.
+# unreadable only when no file parses at all. A torn file is could-not-determine
+# for its account rather than a dead grant: it is named in pool_unreadable, left
+# out of both routable counts rather than counted against the pool, and never
+# named in pool_needs_auth, because a read that failed is not a login the
+# captain has to go and perform.
 #
 # Every external call is clamped, because the watcher kills a check that runs
 # past FM_CHECK_TIMEOUT and a killed check prints nothing and records nothing -
@@ -355,9 +360,13 @@ def cc_grant($a):
   and ((lower($a.pauseReason) | test("auth|login|credential")) | not);
 def cc_live($a):
   (($a.paused // false) | not) and (lower($a.tokenStatus) == "valid") and cc_grant($a);
-def inv_live($n): any($inv[]; .label == $n and .live);
+def inv_live($n): any($inv[]; .label == $n and .live == true);
+def inv_torn($n): any($inv[]; .label == $n and .live == null);
 def cc_grant_name($n): any($accts[]; account_name(.) == $n and cc_grant(.));
-def needs_auth_name($n): (inv_live($n) | not) and (cc_grant_name($n) | not);
+# A torn file is not a dead grant, so it never asks the captain for a login: it
+# is one account's read that failed, and the remedy is another poll.
+def needs_auth_name($n):
+  (inv_torn($n) | not) and (inv_live($n) | not) and (cc_grant_name($n) | not);
 # Usable means a live grant on the proxy the fleet actually routes through. A
 # grant on the other proxy is real but unreachable, so it is not capacity: with
 # ANTHROPIC_BASE_URL pointing at CLIProxyAPI, an account whose inventory grant
@@ -428,12 +437,15 @@ named($cap) as $names |
 named($trackedAccts) as $trackedNames |
 named($unproj) as $unprojNames |
 ($authNamesList | join(",")) as $authNames |
+(($inv | map(select(.live == null)) | map(.label)) | join(",")) as $tornNames |
 # The auth inventory is the authority on capacity whenever it can be read: it
 # is the proxy the fleet's base URL points at, and better-ccflare's own counts
 # go stale the moment the other proxy refreshes a shared login.
-(if $useInv then ($inv | map(select(.live)) | length)
+(if $useInv then ($inv | map(select(.live == true)) | length)
  else ($health.pool.routable // null) end) as $routable |
-(if $useInv then ($inv | length)
+# An account whose file could not be read is left out of both counts rather
+# than counted against the pool: unknown is not dead.
+(if $useInv then ($inv | map(select(.live != null)) | length)
  else ($health.pool.configured // null) end) as $configured |
 ($health.pool.usage_exhausted // null) as $exhausted |
 # The routable count is the primary signal, so it decides first and decides
@@ -477,6 +489,7 @@ named($unproj) as $unprojNames |
   (if $suppressed then "unobserved" elif $trackedNames == "" then "none" else $trackedNames end),
   (if $suppressed then "unobserved" elif $unprojNames == "" then "none" else $unprojNames end),
   (if ($haveCc | not) then "unobserved" elif $authNames == "" then "none" else $authNames end),
+  (if $tornNames == "" then "none" else $tornNames end),
   (if $phrs == null then "-" else ($phrs | tostring) end),
   $verdict.reason
 ] | @tsv
@@ -550,7 +563,7 @@ fleet_base_url() {
 # directory that is absent is a home that does not run CLIProxyAPI, which is a
 # normal home, not an error.
 auth_read() {
-  local dir=${FM_FABLE_RUNWAY_AUTH_DIR:-$HOME/.cli-proxy-api} f label entry
+  local dir=${FM_FABLE_RUNWAY_AUTH_DIR:-$HOME/.cli-proxy-api} f label entry parsed=0
   local -a entries=()
   [ -n "$dir" ] && [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   for f in "$dir"/claude-*.json; do
@@ -558,12 +571,15 @@ auth_read() {
     label=${f##*/}
     label=${label#claude-}
     label=${label%.json}
-    entry=$(jq -c --argjson now "$NOW" --arg label "$label" "$AUTH_JQ" "$f" 2>/dev/null) \
-      || continue
-    [ -n "$entry" ] || continue
+    entry=$(jq -c --argjson now "$NOW" --arg label "$label" "$AUTH_JQ" "$f" 2>/dev/null)
+    if [ $? -eq 0 ] && [ -n "$entry" ]; then
+      parsed=$((parsed + 1))
+    else
+      entry=$(jq -cn --arg label "$label" '{label: $label, live: null}') || continue
+    fi
     entries+=("$entry")
   done
-  [ "${#entries[@]}" -gt 0 ] || return 1
+  [ "$parsed" -gt 0 ] || return 1
   printf '[%s]' "$(IFS=,; printf '%s' "${entries[*]}")"
 }
 
@@ -608,14 +624,14 @@ pool_read() {
   if [ -z "$health" ] || [ -z "$accounts" ]; then
     ccflare=0
     if [ -z "$auth" ] || [ "$ROUTES_CCFLARE" = true ]; then
-      printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tunobserved\t-\tpool_unavailable\n'
+      printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tunobserved\tunobserved\t-\tpool_unavailable\n'
       return 0
     fi
   elif ! printf '%s' "$health" | jq -e 'type == "object"' >/dev/null 2>&1 \
     || ! printf '%s' "$accounts" | jq -e 'type == "array"' >/dev/null 2>&1; then
     ccflare=0
     if [ -z "$auth" ] || [ "$ROUTES_CCFLARE" = true ]; then
-      printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tunobserved\t-\tpool_response_not_recognized\n'
+      printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tunobserved\tunobserved\t-\tpool_response_not_recognized\n'
       return 0
     fi
   fi
@@ -627,7 +643,7 @@ pool_read() {
   printf '%s' "$accounts" \
     | jq -r --argjson now "$NOW" --argjson health "$health" --argjson auth "$auth" \
       --argjson routes_ccflare "$ROUTES_CCFLARE" "$POOL_JQ" 2>/dev/null \
-    || printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tunobserved\t-\tpool_response_not_readable\n'
+    || printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tunobserved\tunobserved\t-\tpool_response_not_readable\n'
 }
 
 # --- main -------------------------------------------------------------------
@@ -669,7 +685,7 @@ IFS=$'\t' read -r FABLE_STATE FABLE_REM FABLE_BURN FABLE_EXH FABLE_HRS FABLE_REA
 $(fable_read)
 EOF
 
-IFS=$'\t' read -r POOL_STATE POOL_ROUTABLE POOL_CONFIGURED POOL_EXHAUSTED POOL_CAPABLE POOL_TRACKED POOL_UNPROJ POOL_AUTH POOL_HRS POOL_REASON <<EOF
+IFS=$'\t' read -r POOL_STATE POOL_ROUTABLE POOL_CONFIGURED POOL_EXHAUSTED POOL_CAPABLE POOL_TRACKED POOL_UNPROJ POOL_AUTH POOL_TORN POOL_HRS POOL_REASON <<EOF
 $(pool_read)
 EOF
 
@@ -692,11 +708,11 @@ EXH_PHRASE=${FABLE_EXH:--}
 [ "$POOL_CONFIGURED" = "-" ] && POOL_CONFIGURED=unknown
 [ "$POOL_EXHAUSTED" = "-" ] && POOL_EXHAUSTED=unknown
 
-printf 'fable-runway: overall=%s fable_state=%s pool_state=%s fable_remaining=%s%% fable_burn=%sx fable_exhaustion=%s(%s) pool_routable=%s/%s pool_exhausted=%s pool_capable=%s pool_tracked=%s pool_unprojected=%s pool_needs_auth=%s pool_exhaustion=%s fable_reason=%s pool_reason=%s\n' \
+printf 'fable-runway: overall=%s fable_state=%s pool_state=%s fable_remaining=%s%% fable_burn=%sx fable_exhaustion=%s(%s) pool_routable=%s/%s pool_exhausted=%s pool_capable=%s pool_tracked=%s pool_unprojected=%s pool_needs_auth=%s pool_unreadable=%s pool_exhaustion=%s fable_reason=%s pool_reason=%s\n' \
   "$OVERALL" "$FABLE_STATE" "$POOL_STATE" "$FABLE_REM" "$FABLE_BURN" \
   "$EXH_PHRASE" "$(fmt_hours "${FABLE_HRS:-}")" \
   "$POOL_ROUTABLE" "$POOL_CONFIGURED" "$POOL_EXHAUSTED" "$POOL_CAPABLE" \
-  "${POOL_TRACKED:-none}" "${POOL_UNPROJ:-none}" "${POOL_AUTH:-none}" \
+  "${POOL_TRACKED:-none}" "${POOL_UNPROJ:-none}" "${POOL_AUTH:-none}" "${POOL_TORN:-none}" \
   "$(fmt_hours "${POOL_HRS:-}")" \
   "${FABLE_REASON:-unknown}" "${POOL_REASON:-unknown}"
 

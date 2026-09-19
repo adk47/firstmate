@@ -698,9 +698,14 @@ expect_field "$out" pool_capable cc-x,cc-y,cc-z "ccflare-routed capable"
 expect_field "$out" pool_state GREEN "ccflare-routed pool state"
 pass "only a grant on the proxy the fleet routes through counts as capacity"
 
-# One torn auth file is one account, not the whole inventory. A proxy caught
+# One torn auth file is one account, not the whole inventory: a proxy caught
 # mid-rewrite would otherwise drop every account at once and hand the verdict
-# back to the source this monitor exists because it goes stale.
+# back to the source this monitor exists because it goes stale. And a torn file
+# is could-not-determine for its one account, not a dead grant: it
+# must not be counted against the pool and must never ask the captain for a
+# login it cannot know is needed. Here the torn account's better-ccflare record
+# is expired too, which is the live home's normal shape, so the only thing
+# keeping it out of pool_needs_auth is that its own read failed.
 rm -rf "$authdir"
 make_pool "$health" "$accounts" 0 5 0
 for acct_name in a b c d; do
@@ -710,10 +715,19 @@ done
 add_account_needing_auth "$accounts" acct-torn 20 100 tokenStatus '"expired"'
 printf '{"expired":"2026-' > "$authdir/claude-acct-torn.json"
 out=$(run_monitor "$quota" "$health" "$accounts" "$authdir")
+expect_field "$out" pool_unreadable acct-torn "torn-file unreadable names"
+expect_field "$out" pool_needs_auth none "torn-file needs-auth"
 expect_field "$out" pool_routable 4/4 "torn-file routable"
-expect_field "$out" pool_needs_auth acct-torn "torn-file needs-auth"
 expect_field "$out" pool_state GREEN "torn-file pool state"
 expect_rc "$out" 0 "torn-file exit"
+
+# A grant the inventory really reports dead is still named, so the exclusion is
+# of the unreadable case only.
+make_auth_account "$authdir" acct-torn -1 false
+out=$(run_monitor "$quota" "$health" "$accounts" "$authdir")
+expect_field "$out" pool_unreadable none "dead-grant unreadable names"
+expect_field "$out" pool_needs_auth acct-torn "dead-grant needs-auth"
+expect_field "$out" pool_routable 4/5 "dead-grant routable"
 
 # Only when nothing parses at all is there no inventory to be the authority.
 rm -rf "$authdir"
@@ -1391,6 +1405,81 @@ expect_field "$flip_real" pool_needs_auth mirror "flip real needs-auth"
 grep -q 'mirror' "$fliplab/osascript.log" 2>/dev/null \
   || fail "a genuine cross-proxy login request must still notify"
 pass "a better-ccflare restart never asks for a login the other proxy covers"
+
+# An account that leaves the needs-auth set on a silent poll must not swallow
+# its own next re-entry: the record advances on every poll that observed the
+# set, not only on the ones that printed. Losing that would suppress the one
+# notification whose whole reason for existing is that only a human can act.
+relab="$TMP_ROOT/reenter"
+mkdir -p "$relab/state"
+reauth="$relab/auth"
+make_auth_account "$reauth" mirror 8 false
+make_auth_account "$reauth" steady 8 false
+for acct_name in 1 2 3 4 5; do
+  make_auth_account "$reauth" "grant-$acct_name" 8 false
+done
+make_quota "$relab/quota.json" 60 0.5 none through_reset
+make_pool "$relab/health.json" "$relab/accounts.json" 6 6 0
+add_account "$relab/accounts.json" steady 5 40 20 100
+add_account "$relab/accounts.json" mirror 5 40 20 100
+re_first=$(run_check_in "$relab" "$NOW" "$reauth")
+expect_field "$re_first" pool_needs_auth none "re-entry first poll needs-auth"
+expect_field "$re_first" pool_state GREEN "re-entry first poll pool state"
+[ ! -s "$relab/osascript.log" ] || fail "a healthy first poll must not ask for a login"
+# The account dies on both proxies: that prints and notifies.
+make_auth_account "$reauth" mirror -1 false
+make_pool "$relab/health.json" "$relab/accounts.json" 6 6 0
+add_account "$relab/accounts.json" steady 5 40 20 100
+add_account_needing_auth "$relab/accounts.json" mirror 20 100 tokenStatus '"expired"'
+re_enter=$(run_check_in "$relab" "$((NOW + 300))" "$reauth")
+expect_field "$re_enter" pool_needs_auth mirror "re-entry second poll needs-auth"
+[ "$(wc -l < "$relab/osascript.log")" -eq 1 ] || fail "the first entrance must notify once"
+# The captain logs it back in. No runway state moves, so the poll is silent -
+# but the record must still record that the account left the set.
+make_auth_account "$reauth" mirror 8 false
+make_pool "$relab/health.json" "$relab/accounts.json" 6 6 0
+add_account "$relab/accounts.json" steady 5 40 20 100
+add_account "$relab/accounts.json" mirror 5 40 20 100
+re_quiet=$(run_check_in "$relab" "$((NOW + 600))" "$reauth")
+[ -z "$re_quiet" ] || fail "a recovery that moves no runway state must stay silent (got: $re_quiet)"
+# It dies again. This is a fresh entrance and must print and notify again.
+make_auth_account "$reauth" mirror -1 false
+make_pool "$relab/health.json" "$relab/accounts.json" 6 6 0
+add_account "$relab/accounts.json" steady 5 40 20 100
+add_account_needing_auth "$relab/accounts.json" mirror 20 100 tokenStatus '"expired"'
+re_again=$(run_check_in "$relab" "$((NOW + 900))" "$reauth")
+[ -n "$re_again" ] || fail "an account re-entering needs-auth must wake firstmate again"
+expect_field "$re_again" pool_needs_auth mirror "re-entry fourth poll needs-auth"
+[ "$(wc -l < "$relab/osascript.log")" -eq 2 ] \
+  || fail "the re-entry must notify again ($(cat "$relab/osascript.log"))"
+pass "an account re-entering needs-auth after a silent leave is reported again"
+
+# An account that already needs a login when the check is armed has no prior
+# set to have entered from, and it is exactly when the captain has to hear.
+armedlab="$TMP_ROOT/armed-auth"
+mkdir -p "$armedlab/state"
+armedauth="$armedlab/auth"
+make_auth_account "$armedauth" locked-out -1 false
+for acct_name in 1 2 3 4 5; do
+  make_auth_account "$armedauth" "grant-$acct_name" 8 false
+done
+make_quota "$armedlab/quota.json" 60 0.5 none through_reset
+make_pool "$armedlab/health.json" "$armedlab/accounts.json" 6 6 0
+add_account "$armedlab/accounts.json" steady 5 40 20 100
+add_account_needing_auth "$armedlab/accounts.json" locked-out 20 100 tokenStatus '"expired"'
+make_auth_account "$armedauth" steady 8 false
+armed_first=$(run_check_in "$armedlab" "$NOW" "$armedauth")
+[ -n "$armed_first" ] || fail "the first poll must print"
+expect_field "$armed_first" pool_needs_auth locked-out "armed first poll needs-auth"
+grep -q 'locked-out' "$armedlab/osascript.log" 2>/dev/null \
+  || fail "an account already needing a login when armed must notify once"
+[ "$(wc -l < "$armedlab/osascript.log")" -eq 1 ] \
+  || fail "the first observation must notify exactly once"
+armed_again=$(run_check_in "$armedlab" "$((NOW + 300))" "$armedauth")
+[ -z "$armed_again" ] || fail "the unchanged next poll must stay silent (got: $armed_again)"
+[ "$(wc -l < "$armedlab/osascript.log")" -eq 1 ] \
+  || fail "an account that already asked must not ask again every poll"
+pass "an account needing a login when the check is armed is notified once"
 
 # A poll that observed no membership must not consume a pending regain. A
 # better-ccflare restart while the inventory still answers is exactly that poll,

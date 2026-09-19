@@ -18,11 +18,14 @@
 #     throttled so a persistent RED cannot storm the wake queue every poll. That
 #     interval is a fixed constant rather than a knob, because the only thing an
 #     override could do is stop a sustained RED from ever being mentioned again;
-#   - an account entered pool_needs_auth since the last printed poll, on a poll
-#     that observed that set at all. That one is not a runway state, and it is
-#     printable anyway because it is the failure the captain can simply fix:
-#     re-authenticating an account takes a minute and gives the pool a member
-#     back, long before any threshold is near. The same transition also posts a macOS notification naming the
+#   - an account entered pool_needs_auth since the last poll that observed that
+#     set, the first poll included - there is no prior set then, so every name
+#     it sees is an entrance, and an account that already needs a login when the
+#     check is armed is exactly when the captain has to hear about it. That one
+#     is not a runway state, and it is printable anyway because it is the
+#     failure the captain can simply fix: re-authenticating an account takes a
+#     minute and gives the pool a member back, long before any threshold is
+#     near. The same transition also posts a macOS notification naming the
 #     account, because a wake the supervisor reads on its next turn is not fast
 #     enough for something only a human can do.
 # Otherwise only a state transition is printable. The pool's membership churns
@@ -83,9 +86,11 @@
 #     could only delay the one wake that cannot afford to be late.
 #
 # The record state/.fable-runway holds the last printed states, the last RED
-# report time, the Fable-tracked, Fable-capable and needs-authentication name
-# sets as of the last poll that both printed and observed them, and how long the
-# pool has been unreadable, so a silent poll stays silent, a regain is
+# report time, the Fable-tracked and Fable-capable name sets as of the last poll
+# that both printed and observed them, the needs-authentication set as of the
+# last poll that observed it at all - a leave that lands on a silent poll must
+# not swallow the next re-entry, and an entrance always prints anyway - and how
+# long the pool has been unreadable, so a silent poll stays silent, a regain is
 # distinguishable from an addition, an account that already wanted a login does
 # not ask again every poll, and a gateway blip is distinguishable from an
 # outage. It is stamped with its schema, and a record carrying any other stamp
@@ -214,7 +219,7 @@ action_check() {
   local line='' overall fable pool capable tracked needs_auth
   line=$("$MONITOR" 2>/dev/null) || true
   if [ -z "$line" ]; then
-    line="fable-runway: overall=RED fable_state=RED pool_state=UNKNOWN fable_remaining=unknown% fable_burn=unknownx fable_exhaustion=unknown(unknown) pool_routable=unknown/unknown pool_exhausted=unknown pool_capable=unobserved pool_tracked=unobserved pool_unprojected=unobserved pool_needs_auth=unobserved pool_exhaustion=unknown fable_reason=monitor_produced_no_line pool_reason=monitor_unavailable"
+    line="fable-runway: overall=RED fable_state=RED pool_state=UNKNOWN fable_remaining=unknown% fable_burn=unknownx fable_exhaustion=unknown(unknown) pool_routable=unknown/unknown pool_exhausted=unknown pool_capable=unobserved pool_tracked=unobserved pool_unprojected=unobserved pool_needs_auth=unobserved pool_unreadable=unobserved pool_exhaustion=unknown fable_reason=monitor_produced_no_line pool_reason=monitor_unavailable"
   fi
   overall=$(field overall "$line")
   fable=$(field fable_state "$line")
@@ -240,7 +245,7 @@ action_check() {
     membership=0
   fi
 
-  local last_present=0 last_overall='' last_fable='' last_pool='' last_capable='' last_tracked='' last_auth='' last_red=''
+  local last_present=0 last_overall='' last_fable='' last_pool='' last_capable='' last_tracked='' last_auth=none last_red=''
   local last_down_since='' last_down_polls=''
   if [ "$(record_get schema 2>/dev/null)" = "$RECORD_SCHEMA" ]; then
     last_present=1
@@ -250,6 +255,7 @@ action_check() {
     last_capable=$(record_get capable)
     last_tracked=$(record_get tracked)
     last_auth=$(record_get needs_auth)
+    [ -n "$last_auth" ] || last_auth=none
     last_red=$(record_get red_at)
     last_down_since=$(record_get down_since)
     last_down_polls=$(record_get down_polls)
@@ -278,16 +284,18 @@ action_check() {
   if [ "$last_present" -eq 1 ]; then
     [ -n "$last_capable" ] || last_capable=none
     [ -n "$last_tracked" ] || last_tracked=none
-    [ -n "$last_auth" ] || last_auth=none
     if [ "$membership" -eq 1 ]; then
       recovered=$(regained "$capable" "$last_tracked" "$last_capable")
     fi
-    # A poll that did not observe the set has observed no transition into it
-    # either: better-ccflare unread cannot rule out that it still holds the
-    # grant, so a restart must never re-ask the captain for a login.
-    if [ "$needs_auth" != unobserved ]; then
-      wants_auth=$(entered "$needs_auth" "$last_auth")
-    fi
+  fi
+  # A poll that did not observe the set has observed no transition into it
+  # either: better-ccflare unread cannot rule out that it still holds the grant,
+  # so a restart must never re-ask the captain for a login. A first poll has no
+  # prior set, and every name in the one it observes is an entrance: an account
+  # that already needs a login when the check is armed is exactly when the
+  # captain has to hear about it.
+  if [ "$needs_auth" != unobserved ]; then
+    wants_auth=$(entered "$needs_auth" "$last_auth")
   fi
   [ -z "$wants_auth" ] || changed=1
   # A first poll has no prior sets, so nothing can have come back; a recovery
@@ -327,7 +335,7 @@ action_check() {
     capable=$last_capable
     tracked=$last_tracked
   fi
-  if [ "$last_present" -eq 1 ] && { [ "$print" -eq 0 ] || [ "$needs_auth" = unobserved ]; }; then
+  if [ "$last_present" -eq 1 ] && [ "$needs_auth" = unobserved ]; then
     needs_auth=$last_auth
   fi
   record_write "$overall" "$fable" "$pool" "$capable" "$tracked" "$needs_auth" "$red_at" \

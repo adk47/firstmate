@@ -565,6 +565,7 @@ The routable count decides the pool verdict first and decides it alone when no a
 Suppressed is not empty, and the three membership fields say which they are: with no account exposing a Fable window - which is also what an unreadable `better-ccflare` beside a readable inventory looks like - `pool_capable`, `pool_tracked` and `pool_unprojected` read `unobserved` rather than `none`, and so does an unreadable pool.
 That distinction is load-bearing: `none` is an observed empty pool and is what opens a failover episode, while `unobserved` is the absence of an observation and opens nothing on its own.
 `pool_needs_auth` carries the same three states for the same reason: `better-ccflare` is the only source that can vouch for an account the inventory says is dead, so with it unread the set reads `unobserved` rather than naming every inventory-dead account, and the check holds the previous set instead of asking the captain for a login a restart would take back.
+An account whose own inventory file could not be parsed is could-not-determine rather than a dead grant: it is named in `pool_unreadable`, left out of both `pool_routable` counts rather than counted against the pool, and never named in `pool_needs_auth`, because a read that failed is not a login the captain has to go and perform.
 Fable-capable means usable, with readable windows, none of them spent, and a Fable-scoped window among them.
 Usable means a live grant on the proxy the fleet actually routes through - the `ANTHROPIC_BASE_URL` the environment sets, or failing that the one in `FM_FABLE_RUNWAY_SETTINGS_JSON` (default `~/.claude/settings.json`) - because a grant on the other proxy is real but unreachable.
 When that URL is the `better-ccflare` pool, or there is no inventory at all, `better-ccflare`'s own records decide; otherwise the inventory does, and an account whose inventory grant died is spent as far as the fleet is concerned however healthy `better-ccflare` still believes it to be.
@@ -607,7 +608,9 @@ A regain means an account that was Fable-tracked but not Fable-capable as of the
 The membership is measured against the last poll that printed, not the last poll that ran, so a window that resets while the gateway's `routable` count still lags lands on a silent poll and is still named by the next wake that prints.
 A poll whose `pool_state` is `UNKNOWN` holds the name sets too, even though it prints: an unreadable pool observed no membership at all, so a gateway restart between polls does not consume a pending regain either.
 The check never switches anything; the failover and the lane-side offload are firstmate actions.
-`state/.fable-runway` records the last printed states, the last `RED` report time, the tracked, capable and needs-authentication name sets as of the last poll that both printed and observed them, and how long the pool has been unreadable, so an unchanged poll stays silent and a regain is distinguishable from an addition.
+`state/.fable-runway` records the last printed states, the last `RED` report time, the tracked and capable name sets as of the last poll that both printed and observed them, the needs-authentication set as of the last poll that observed it at all, and how long the pool has been unreadable, so an unchanged poll stays silent and a regain is distinguishable from an addition.
+The needs-authentication set advances on every poll that observed it, printed or not: an entrance always makes a poll printable, so only a *leave* can land on a silent one, and holding that leave would swallow the account's next re-entry - the one notification that exists because only a human can act on it.
+The first poll has no prior set, so every name it observes is an entrance and the captain is notified once.
 Holding the membership sets across every poll that observed none - an unreadable pool, or one whose accounts expose no Fable window - is what keeps a `better-ccflare` restart from consuming a pending regain, so the `capacity back account=` line still names the account on the next wake that printed.
 
 ### The zero-token failover action
@@ -615,7 +618,7 @@ Holding the membership sets across every poll that observed none - an unreadable
 There are cases where waiting for a firstmate model turn costs the most: the seat has to move to Grok, and the runway that would have paid for the turn that noticed is the one that just ran out.
 On those the check hands the episode to [`bin/fm-fable-runway-alert.sh`](../bin/fm-fable-runway-alert.sh), which is plain bash and asks no model anything.
 
-Two conditions open an episode, and they are different claims that must never be worded as each other:
+Three conditions open an episode, and they are different claims that must never be worded as each other:
 
 - the pool's own verdict is `RED` with `pool_routable` at zero. A count is an observation whether or not any account exposes a Fable window, and zero means no grant on the proxy the fleet routes through is live, so the episode says "No live grant on the fleet's proxy".
 - the pool's own verdict is `RED` over a capable set that **was observed** and is empty: the grants are there and every Fable week is spent. The episode says "No Fable-capable account left". A `none` that is really a suppressed field never qualifies on its own, which is why the monitor prints `unobserved` for it.
