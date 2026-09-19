@@ -164,7 +164,7 @@ status_is_captain_relevant_verb() {  # <status-line> [<verb>]
     [ "$_fm_nocase_was_on" = 1 ] || shopt -u nocasematch
     return 1
   fi
-  printf '%s' "$line" | grep -qiE "$FM_CAPTAIN_RE"
+  printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
 status_is_captain_relevant() {
@@ -1774,11 +1774,13 @@ EOF
   _FM_SPAN_ORIGINS=$out
 }
 
-_fm_span_origin_line_for() {  # <key> -> last opening line number, or empty
+_FM_SPAN_ORIGIN_LINE=
+_fm_span_origin_line_for() {  # <key> -> _FM_SPAN_ORIGIN_LINE: last opening line number, or empty
   local line
+  _FM_SPAN_ORIGIN_LINE=
   while IFS= read -r line; do
     case "$line" in
-      "$1"$'\t'*) printf '%s' "${line#*$'\t'}"; return 0 ;;
+      "$1"$'\t'*) _FM_SPAN_ORIGIN_LINE=${line#*$'\t'}; return 0 ;;
     esac
   done <<EOF
 $_FM_SPAN_ORIGINS
@@ -1861,7 +1863,8 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
           rc=0
           continue
         }
-        live_line=$(_fm_span_origin_line_for "$key")
+        _fm_span_origin_line_for "$key"
+        live_line=$_FM_SPAN_ORIGIN_LINE
         [ -n "$live_line" ] && [ "$line_number" = "$live_line" ] || continue
         [ -n "$events" ] && events="${events} ; "
         events="${events}${line}"

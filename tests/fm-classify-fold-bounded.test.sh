@@ -189,7 +189,7 @@ test_span_classifier_reads_only_the_appended_span() {
 # whole-file fold does: a key opened and then resolved inside one span is not
 # actionable, and a same-key reopening supersedes its earlier opening.
 test_span_origins_follow_open_reopen_and_resolve() {
-  local dir state status event
+  local dir state status event rc
 
   dir=$(make_case span-origins)
   state="$dir/state"
@@ -197,8 +197,10 @@ test_span_origins_follow_open_reopen_and_resolve() {
 
   # Opened then resolved in the same span: nothing is live, so nothing surfaces.
   printf 'needs-decision [key=a]: pick one\nresolved [key=a]: went with one\n' > "$status"
-  status_span_first_actionable_record "$status" 0 >/dev/null 2>&1 \
-    && fail "a decision opened and resolved in one span was still classified actionable"
+  rc=0
+  status_span_first_actionable_record "$status" 0 >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "a decision opened and resolved in one span did not fold to not-actionable (rc=$rc)"
 
   # Reopened with a new note: only the live (last) opening surfaces.
   printf 'needs-decision [key=c]: version one\nneeds-decision [key=c]: version two\n' > "$status"

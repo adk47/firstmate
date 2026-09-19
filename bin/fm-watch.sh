@@ -1454,12 +1454,6 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
-# Beat as early as possible. The arm layer confirms a fresh watcher only when
-# its beacon is touched inside FM_ARM_CONFIRM_TIMEOUT, and a cold first poll can
-# spend a long time folding status logs before the loop's own top-of-cycle
-# touch. This touch, before any recovery bookkeeping or fold, is what keeps a
-# legitimate cold start from being killed as an unconfirmed watcher.
-touch "$STATE/.last-watcher-beat"
 WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
@@ -1479,6 +1473,14 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
+# Beat before any fold, and only once the recovery-marker checks above have
+# passed. The arm layer confirms a fresh watcher only when its beacon is touched
+# inside FM_ARM_CONFIRM_TIMEOUT, and a cold first poll can spend a long time
+# folding status logs before the loop's own top-of-cycle touch; this touch is
+# what keeps a legitimate cold start from being killed as an unconfirmed
+# watcher. It sits after the two exit-1 recovery checks so a watcher that fails
+# them never leaves a fresh beacon vouching for a process that is already gone.
+touch "$STATE/.last-watcher-beat"
 # Side-band ledger publication, detached from the poll loop.
 #
 # The poll loop owns the liveness beacon below, and fm-guard.sh reads that
