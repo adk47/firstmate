@@ -541,7 +541,7 @@ The procedures themselves live in [`docs/runbooks/supervisor-failover-grok.md`](
 Two runways are reported, because they do not fail together.
 `fable_state` is the supervisor's own credential, from `quota-axi`'s `model:fable` window: its remaining percent, its `pace.burnMultiple`, and the runway's `projectedExhaustedAt`.
 `pool_state` is the account pool the fleet actually draws from, and two proxies serve the same Claude logins, so both are read.
-`CLIProxyAPI`'s local auth inventory - `FM_FABLE_RUNWAY_AUTH_DIR`, default `~/.cli-proxy-api`, one `claude-<label>.json` per login - is the authority for how many accounts hold a live grant, because it is the proxy `ANTHROPIC_BASE_URL` points at.
+`CLIProxyAPI`'s local auth inventory - `FM_FABLE_RUNWAY_AUTH_DIR`, default `~/.cli-proxy-api`, one `claude-<label>.json` per login - is the authority for how many accounts hold a live grant, because it is the proxy `ANTHROPIC_BASE_URL` points at: today `http://127.0.0.1:8317`.
 `better-ccflare` at `FM_FABLE_RUNWAY_POOL_URL` (default `http://127.0.0.1:8080`, read from `GET /health` and `GET /api/accounts`) supplies the per-account Fable windows that refine it.
 Reading `better-ccflare` alone is not a subtle mistake: the two proxies share the same OAuth logins, so whichever refreshes a token last leaves the other holding a dead `refresh_token`.
 On a home where `CLIProxyAPI` refreshed them, `better-ccflare` reports every account `tokenStatus=expired` and `routable=0` while the fleet is being served normally.
@@ -559,13 +559,16 @@ The pool adds the pool's own capacity counts: `RED` at 1 or fewer routable accou
 The overall state is the worst of the two, and the monitor exits non-zero only on `RED`.
 A runway that cannot be measured is `RED` with a reason, never `GREEN`, because an unreadable runway is exactly what a failover monitor must not hide.
 The optional pool is the one exception: a home running neither proxy is a normal firstmate home, so a pool that cannot be read is `UNKNOWN` and leaves the overall state to the supervisor's own runway.
-It takes both sources failing to get there - an unreadable `better-ccflare` while the inventory still answers is a pool that can be counted but not projected, reported as `routable_only_without_fable_window`, not a pool that cannot be read.
+It takes both sources failing to get there, while the inventory is the authority - an unreadable `better-ccflare` beside an inventory that still answers is a pool that can be counted but not projected, reported as `routable_only_without_fable_window`, not a pool that cannot be read.
+When `ANTHROPIC_BASE_URL` is the `better-ccflare` pool that no longer holds: it is then the fleet's own router that could not be read and the inventory is not its capacity, so the pool is `UNKNOWN` with `pool_unavailable`.
 The routable count decides the pool verdict first and decides it alone when no account exposes a Fable-scoped window, reported as `routable_only_without_fable_window`; the missing window suppresses `pool_exhaustion`, `pool_capable` and `pool_tracked`, never the verdict.
 Suppressed is not empty, and the three membership fields say which they are: with no account exposing a Fable window - which is also what an unreadable `better-ccflare` beside a readable inventory looks like - `pool_capable`, `pool_tracked` and `pool_unprojected` read `unobserved` rather than `none`, and so does an unreadable pool.
-That distinction is load-bearing: `none` is an observed empty pool and is what opens a failover episode, while `unobserved` is the absence of an observation and opens nothing.
+That distinction is load-bearing: `none` is an observed empty pool and is what opens a failover episode, while `unobserved` is the absence of an observation and opens nothing on its own.
+`pool_needs_auth` carries the same three states for the same reason: `better-ccflare` is the only source that can vouch for an account the inventory says is dead, so with it unread the set reads `unobserved` rather than naming every inventory-dead account, and the check holds the previous set instead of asking the captain for a login a restart would take back.
 Fable-capable means usable, with readable windows, none of them spent, and a Fable-scoped window among them.
 Usable means a live grant on the proxy the fleet actually routes through - the `ANTHROPIC_BASE_URL` the environment sets, or failing that the one in `FM_FABLE_RUNWAY_SETTINGS_JSON` (default `~/.claude/settings.json`) - because a grant on the other proxy is real but unreachable.
 When that URL is the `better-ccflare` pool, or there is no inventory at all, `better-ccflare`'s own records decide; otherwise the inventory does, and an account whose inventory grant died is spent as far as the fleet is concerned however healthy `better-ccflare` still believes it to be.
+The two URLs are compared by what they mean rather than how they are spelled: scheme and host are lowercased, `localhost` is the loopback address, and any path, query or trailing slash is dropped, so `http://localhost:8080/` and `http://127.0.0.1:8080` select the same proxy.
 An account with no Fable window may well be routable, but nothing about it says the fleet can draw Fable from it, so it is neither named in `pool_capable` nor counted against the `no_fable_capable_account` `RED`.
 Needing a login is a cross-proxy fact: an account is named in `pool_needs_auth` when *no* proxy holds a live grant for it - neither a current, enabled entry in the auth inventory nor a `better-ccflare` record without an authentication complaint (`requiresReauth`, a `tokenStatus` outside the usable ones such as `expired` or `invalid`, or a `pauseReason` naming authentication).
 An account one proxy can still serve is not a login the captain has to go and perform, so it is not named.
@@ -614,7 +617,8 @@ On those the check hands the episode to [`bin/fm-fable-runway-alert.sh`](../bin/
 
 Two conditions open an episode, and they are different claims that must never be worded as each other:
 
-- the pool's own verdict is `RED` over a capable set that **was observed** and is empty. That is an observation, and the episode says "No Fable-capable account left". A `none` that is really a suppressed field never qualifies, which is why the monitor prints `unobserved` for it.
+- the pool's own verdict is `RED` with `pool_routable` at zero. A count is an observation whether or not any account exposes a Fable window, and zero means no grant on the proxy the fleet routes through is live, so the episode says "No live grant on the fleet's proxy".
+- the pool's own verdict is `RED` over a capable set that **was observed** and is empty: the grants are there and every Fable week is spent. The episode says "No Fable-capable account left". A `none` that is really a suppressed field never qualifies on its own, which is why the monitor prints `unobserved` for it.
 - the pool **unreadable** for 2 consecutive polls spanning at least 10 minutes while `fable_state` is `RED`. A pool nobody could read is not an empty pool, so a gateway blip opens nothing, but a pool that stays unreadable while Fable is out leaves no way to switch at all. That episode says "Pool unreachable for `<minutes>` minutes, supervisor runway unmeasurable" and never that the pool is empty. Both bounds are fixed constants, not knobs: an override could only delay the one wake that cannot afford to be late.
 
 An episode runs once, guarded by `state/.fable-runway-handoff`, and does three things:

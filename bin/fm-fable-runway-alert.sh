@@ -2,6 +2,9 @@
 # fm-fable-runway-alert.sh - the Fable-runway check's outward-facing actions.
 #
 # Usage:
+#   fm-fable-runway-alert.sh handoff-no-grant <monitor-line>
+#       open a failover episode: the pool was read and no grant on the fleet's
+#       proxy is live
 #   fm-fable-runway-alert.sh handoff <monitor-line>
 #       open a failover episode: the pool was read and holds no Fable capacity
 #   fm-fable-runway-alert.sh handoff-unreachable <monitor-line> <minutes>
@@ -21,13 +24,14 @@
 # have paid for that turn is the one that just ran out. So this is plain bash,
 # it never asks a model anything, and it does three things once per episode.
 #
-# The two verbs exist because they are different claims and the note and the
-# banner must not confuse them. `handoff` is an observation - the pool answered
-# and has no Fable-capable account left. `handoff-unreachable` is the absence
-# of one - nobody could read the pool for that many minutes while the
-# supervisor's own runway was RED - and it says exactly that. Neither may ever
-# be worded as the other: a gateway blip reported as an empty pool sends the
-# captain to look for accounts that were there the whole time. Each does:
+# The verbs exist because they are different claims and the note and the banner
+# must not confuse them. `handoff-no-grant` and `handoff` are observations - the
+# pool answered, and either no grant on the fleet's proxy is live or the grants
+# are there with every Fable week spent. `handoff-unreachable` is the absence of
+# an observation - nobody could read the pool for that many minutes while the
+# supervisor's own runway was RED - and it says exactly that. None may ever be
+# worded as another: a gateway blip reported as an empty pool sends the captain
+# to look for accounts that were there the whole time. Each does:
 #
 #   1. writes a durable handoff note under state/, carrying the monitor line,
 #      the UTC time, the reason tokens, and a pointer to the runbook;
@@ -172,6 +176,7 @@ action_needs_auth() {
 }
 
 case "${1-}" in
+  handoff-no-grant) open_episode 'No live grant on the fleet'"'"'s proxy.' "${2-}" ;;
   handoff) open_episode 'No Fable-capable account left.' "${2-}" ;;
   handoff-unreachable)
     open_episode "Pool unreachable for ${3-0} minutes, supervisor runway unmeasurable." "${2-}"

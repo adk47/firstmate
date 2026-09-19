@@ -18,11 +18,11 @@
 #     throttled so a persistent RED cannot storm the wake queue every poll. That
 #     interval is a fixed constant rather than a knob, because the only thing an
 #     override could do is stop a sustained RED from ever being mentioned again;
-#   - an account entered pool_needs_auth since the last printed poll. That one
-#     is not a runway state at all, and it is printable anyway because it is the
-#     failure the captain can simply fix: re-authenticating an account takes a
-#     minute and gives the pool a member back, long before any threshold is
-#     near. The same transition also posts a macOS notification naming the
+#   - an account entered pool_needs_auth since the last printed poll, on a poll
+#     that observed that set at all. That one is not a runway state, and it is
+#     printable anyway because it is the failure the captain can simply fix:
+#     re-authenticating an account takes a minute and gives the pool a member
+#     back, long before any threshold is near. The same transition also posts a macOS notification naming the
 #     account, because a wake the supervisor reads on its next turn is not fast
 #     enough for something only a human can do.
 # Otherwise only a state transition is printable. The pool's membership churns
@@ -63,18 +63,21 @@
 # per episode. It still prints its line; the helper is what happens without
 # waiting for it.
 #
-# Two conditions open an episode, and they are different claims:
+# Three conditions open an episode, and they are different claims:
 #
+#   - the pool's own verdict is RED with a routable count of zero. A count is an
+#     observation whether or not any account exposes a Fable window, and zero
+#     means no grant on the proxy the fleet routes through is live, so the
+#     episode says that rather than anything about Fable weeks.
 #   - the pool's own verdict is RED over a capable set that was observed and is
-#     empty. That is an observation, and the episode says so. A `none` that is
-#     really a suppressed field - no account exposes a Fable window, so the
-#     monitor prints `unobserved` - never qualifies.
+#     empty: the grants are there and every Fable week is spent. A `none` that
+#     is really a suppressed field - no account exposes a Fable window, so the
+#     monitor prints `unobserved` - never qualifies on its own.
 #   - the pool unreadable for POOL_DOWN_POLLS (2) consecutive polls spanning at
 #     least POOL_DOWN_SECS (600) while the supervisor's own runway is RED. A
 #     pool nobody could read is not an empty pool and must never be reported as
 #     one, but a pool that stays unreadable while Fable is out leaves no way to
-#     switch at all,
-#     which is the thing this monitor exists to catch. So this episode waits
+#     switch at all, which is the thing this monitor exists to catch. So it waits
 #     for the outage to prove itself and then says "pool unreachable", never
 #     that the pool is empty. Both bounds are fixed constants: an override
 #     could only delay the one wake that cannot afford to be late.
@@ -85,9 +88,8 @@
 # pool has been unreadable, so a silent poll stays silent, a regain is
 # distinguishable from an addition, an account that already wanted a login does
 # not ask again every poll, and a gateway blip is distinguishable from an
-# outage. It is stamped with its
-# schema, and a record carrying any other stamp is treated as no record at all
-# rather than read under the wrong field layout.
+# outage. It is stamped with its schema, and a record carrying any other stamp
+# is treated as no record at all rather than read under the wrong field layout.
 #
 # `arm` writes a byte-static shim that the watcher validates with
 # bin/fm-check-register.sh before it ever dispatches it; `disarm` removes the
@@ -212,7 +214,7 @@ action_check() {
   local line='' overall fable pool capable tracked needs_auth
   line=$("$MONITOR" 2>/dev/null) || true
   if [ -z "$line" ]; then
-    line="fable-runway: overall=RED fable_state=RED pool_state=UNKNOWN fable_remaining=unknown% fable_burn=unknownx fable_exhaustion=unknown(unknown) pool_routable=unknown/unknown pool_exhausted=unknown pool_capable=unobserved pool_tracked=unobserved pool_unprojected=unobserved pool_needs_auth=none pool_exhaustion=unknown fable_reason=monitor_produced_no_line pool_reason=monitor_unavailable"
+    line="fable-runway: overall=RED fable_state=RED pool_state=UNKNOWN fable_remaining=unknown% fable_burn=unknownx fable_exhaustion=unknown(unknown) pool_routable=unknown/unknown pool_exhausted=unknown pool_capable=unobserved pool_tracked=unobserved pool_unprojected=unobserved pool_needs_auth=unobserved pool_exhaustion=unknown fable_reason=monitor_produced_no_line pool_reason=monitor_unavailable"
   fi
   overall=$(field overall "$line")
   fable=$(field fable_state "$line")
@@ -226,7 +228,9 @@ action_check() {
   [ -n "$capable" ] || capable=none
   [ -n "$tracked" ] || tracked=none
   [ -n "$needs_auth" ] || needs_auth=none
-  local observed_capable=$capable
+  local observed_capable=$capable observed_routable
+  observed_routable=$(field pool_routable "$line")
+  observed_routable=${observed_routable%%/*}
   # A poll that did not observe membership must not be read as one that saw an
   # empty pool. The monitor says `unobserved` when no account exposed a Fable
   # window - which is also what an unreadable better-ccflare beside a readable
@@ -278,9 +282,10 @@ action_check() {
     if [ "$membership" -eq 1 ]; then
       recovered=$(regained "$capable" "$last_tracked" "$last_capable")
     fi
-    # An unreadable pool named no account at all, so it has observed no
-    # transition into needing a login either.
-    if [ "$pool" != UNKNOWN ]; then
+    # A poll that did not observe the set has observed no transition into it
+    # either: better-ccflare unread cannot rule out that it still holds the
+    # grant, so a restart must never re-ask the captain for a login.
+    if [ "$needs_auth" != unobserved ]; then
       wants_auth=$(entered "$needs_auth" "$last_auth")
     fi
   fi
@@ -322,7 +327,7 @@ action_check() {
     capable=$last_capable
     tracked=$last_tracked
   fi
-  if [ "$last_present" -eq 1 ] && { [ "$print" -eq 0 ] || [ "$pool" = UNKNOWN ]; }; then
+  if [ "$last_present" -eq 1 ] && { [ "$print" -eq 0 ] || [ "$needs_auth" = unobserved ]; }; then
     needs_auth=$last_auth
   fi
   record_write "$overall" "$fable" "$pool" "$capable" "$tracked" "$needs_auth" "$red_at" \
@@ -331,14 +336,19 @@ action_check() {
   # to serve Fable from, so the episode is handed to the plain-bash helper here
   # and closed again the first poll neither condition holds.
   #
-  # Two conditions open one, and they are different claims. Only the pool's own
-  # RED verdict over an observed, empty capable set is "no Fable-capable account
-  # left"; a pool nobody could read, and one whose accounts expose no Fable
-  # window at all, observed nothing and must never say so - either would
-  # otherwise ring the Grok seat on a home whose pool was full the whole time.
-  # So an unreadable pool opens an episode only once it has stayed unreadable,
-  # and it says exactly that instead.
-  if [ "$pool" = RED ] && [ "$observed_capable" = none ]; then
+  # Three conditions open one, and they are different claims. A routable count
+  # of zero is an observation whether or not any account exposes a Fable window,
+  # and it is the shape a pool takes when no grant on the fleet's own proxy is
+  # live, so it is named for what it is. An observed, empty capable set is the
+  # narrower claim that the grants are there but every Fable week is spent. A
+  # pool nobody could read, and one whose accounts expose no Fable window while
+  # it still has routable accounts, observed nothing and must never say either -
+  # both would otherwise ring the Grok seat on a home whose pool was full the
+  # whole time. So an unreadable pool opens an episode only once it has stayed
+  # unreadable, and it says exactly that instead.
+  if [ "$pool" = RED ] && [ "$observed_routable" = 0 ]; then
+    alert handoff-no-grant "$line"
+  elif [ "$pool" = RED ] && [ "$observed_capable" = none ]; then
     alert handoff "$line"
   elif [ "$pool" = UNKNOWN ] && [ "$fable" = RED ] \
     && [ "$down_polls" -ge "$POOL_DOWN_POLLS" ] \

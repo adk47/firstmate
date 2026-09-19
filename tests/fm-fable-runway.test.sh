@@ -593,7 +593,7 @@ out=$(FM_FABLE_RUNWAY_NOW="$NOW" \
   FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$lab/absent-health.json" \
   FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$lab/absent-accounts.json" \
   "$MONITOR" 2>/dev/null)
-expect_field "$out" pool_needs_auth none "unreadable pool needs-auth"
+expect_field "$out" pool_needs_auth unobserved "unreadable pool needs-auth"
 expect_field "$out" pool_state UNKNOWN "unreadable pool state with needs-auth column"
 
 # Every account locked out is no Fable capacity at all, whatever the gateway
@@ -723,6 +723,54 @@ out=$(run_monitor "$quota" "$health" "$accounts" "$authdir")
 expect_field "$out" pool_routable 0/5 "all-torn routable"
 expect_field "$out" pool_state RED "all-torn pool state"
 pass "one unparsable auth file costs that account, not the whole inventory"
+
+# Equivalent spellings of the pool URL must select the same proxy: the
+# comparison is the one boundary that decides whose grants are real, and reading
+# localhost as a different host silently hands the authority to the inventory on
+# a home that routes through better-ccflare.
+rm -rf "$authdir"
+make_pool "$health" "$accounts" 6 6 0
+add_account "$accounts" only-cc 5 40 10 100
+make_auth_account "$authdir" only-cc -1 false
+for acct_name in 1 2 3 4 5; do
+  make_auth_account "$authdir" "spare-$acct_name" 8 false
+done
+for spelling in http://127.0.0.1:8080 http://localhost:8080 HTTP://127.0.0.1:8080/ \
+  http://127.0.0.1:8080/api/ http://localhost:8080/health; do
+  out=$(run_monitor "$quota" "$health" "$accounts" "$authdir" "$spelling")
+  expect_field "$out" pool_routable 6/6 "$spelling routable"
+  expect_field "$out" pool_capable only-cc "$spelling capable"
+  expect_field "$out" pool_state GREEN "$spelling pool state"
+done
+# A different port really is the other proxy, so the inventory decides there.
+out=$(run_monitor "$quota" "$health" "$accounts" "$authdir" http://127.0.0.1:8317)
+expect_field "$out" pool_routable 5/6 "other-port routable"
+expect_field "$out" pool_capable none "other-port capable"
+pass "equivalent spellings of the pool URL select the same routing proxy"
+
+# When the fleet routes through better-ccflare, better-ccflare going unreadable
+# is the fleet's own router going unreadable - the inventory is not its
+# capacity, so that is an unreadable pool and the reason token must say so
+# rather than blaming a health body that was never fetched.
+out=$(run_monitor "$quota" "$lab/absent-health.json" "$lab/absent-accounts.json" \
+  "$authdir" http://127.0.0.1:8080)
+expect_field "$out" pool_state UNKNOWN "ccflare-routed outage pool state"
+expect_field "$out" pool_reason pool_unavailable "ccflare-routed outage reason"
+
+# With the inventory as the authority the same outage is still a countable pool.
+out=$(run_monitor "$quota" "$lab/absent-health.json" "$lab/absent-accounts.json" \
+  "$authdir" http://127.0.0.1:8317)
+expect_field "$out" pool_state GREEN "inventory-routed outage pool state"
+expect_field "$out" pool_reason routable_only_without_fable_window \
+  "inventory-routed outage reason"
+
+# better-ccflare is the only source that can vouch for an account the inventory
+# says is dead, so with it unread the needs-auth set is unobserved rather than a
+# list of every inventory-dead account.
+expect_field "$out" pool_needs_auth unobserved "ccflare-unread needs-auth"
+out=$(run_monitor "$quota" "$health" "$accounts" "$authdir" http://127.0.0.1:8317)
+expect_field "$out" pool_needs_auth none "both-read needs-auth"
+pass "an unreadable better-ccflare is an outage only for the fleet that routes through it"
 
 # An unreadable better-ccflare costs the projection, not the verdict, while the
 # inventory still answers. That is the whole point of it being supplementary.
@@ -1272,6 +1320,77 @@ expect_field "$win" pool_tracked unobserved "windowless poll tracked"
 [ ! -e "$winlab/orca.log" ] \
   || fail "a pool with eleven routable accounts must not ring the Grok seat"
 pass "a suppressed capable set is not an observed empty pool"
+
+# The live home's other shape: better-ccflare answers, exposes no Fable window
+# on any account, and the fleet's own proxy holds no live grant at all. A
+# routable count of zero is an observation whether or not any window is exposed,
+# so this one must ring - and say what it saw, not something about Fable weeks.
+zerolab="$TMP_ROOT/zerogrant"
+mkdir -p "$zerolab/state" "$zerolab/config"
+printf 'FM_FABLE_RUNWAY_GROK_TERMINAL=grok-seat\n' > "$zerolab/config/fable-runway.env"
+printf 'not a quota document\n' > "$zerolab/quota.json"
+zeroauth="$zerolab/auth"
+make_pool "$zerolab/health.json" "$zerolab/accounts.json" 11 11 0
+for acct_name in 1 2 3 4 5; do
+  add_plain_account "$zerolab/accounts.json" "plain-$acct_name" 5 40
+  make_auth_account "$zeroauth" "plain-$acct_name" -1 false
+done
+zero=$(run_check_in "$zerolab" "$NOW" "$zeroauth")
+expect_field "$zero" overall RED "zero-grant poll overall"
+expect_field "$zero" pool_state RED "zero-grant poll pool state"
+expect_field "$zero" pool_routable 0/5 "zero-grant poll routable"
+expect_field "$zero" pool_capable unobserved "zero-grant poll capable"
+[ "$(notes_in "$zerolab")" = 1 ] \
+  || fail "an observed routable count of zero must open a failover episode"
+zero_note=$(printf '%s\n' "$zerolab"/state/fable-runway-handoff-*.md)
+grep -q "No live grant on the fleet's proxy" "$zero_note" \
+  || fail "the zero-grant note must say what it observed ($(cat "$zero_note"))"
+grep -q 'No Fable-capable account left' "$zero_note" \
+  && fail "a zero routable count must not be worded as a spent-window pool"
+grep -q "No live grant on the fleet's proxy" "$zerolab/orca.log" \
+  || fail "the zero-grant doorbell must carry its own wording"
+pass "an observed zero routable count opens an episode that says what it saw"
+
+# A better-ccflare restart must never re-ask the captain to log in an account
+# the other proxy still holds a live grant for, and must never take it back on
+# the next poll. That flap is what an unobserved needs-auth set prevents.
+fliplab="$TMP_ROOT/flip"
+mkdir -p "$fliplab/state"
+flipauth="$fliplab/auth"
+make_auth_account "$flipauth" mirror -1 false
+make_auth_account "$flipauth" steady 8 false
+for acct_name in 1 2 3 4 5; do
+  make_auth_account "$flipauth" "grant-$acct_name" 8 false
+done
+make_quota "$fliplab/quota.json" 60 0.5 none through_reset
+make_pool "$fliplab/health.json" "$fliplab/accounts.json" 6 6 0
+add_account "$fliplab/accounts.json" steady 5 40 20 100
+add_account "$fliplab/accounts.json" mirror 5 40 20 100
+flip_first=$(run_check_in "$fliplab" "$NOW" "$flipauth")
+expect_field "$flip_first" pool_needs_auth none "flip first poll needs-auth"
+expect_field "$flip_first" pool_state GREEN "flip first poll pool state"
+mv "$fliplab/health.json" "$fliplab/health.away"
+flip_gap=$(run_check_in "$fliplab" "$((NOW + 300))" "$flipauth")
+[ -z "$flip_gap" ] \
+  || fail "a restart that changes no runway state must not wake (got: $flip_gap)"
+[ ! -s "$fliplab/osascript.log" ] \
+  || fail "a better-ccflare restart must not ask for a login ($(cat "$fliplab/osascript.log"))"
+mv "$fliplab/health.away" "$fliplab/health.json"
+run_check_in "$fliplab" "$((NOW + 600))" "$flipauth" >/dev/null
+mv "$fliplab/health.json" "$fliplab/health.away"
+run_check_in "$fliplab" "$((NOW + 900))" "$flipauth" >/dev/null
+[ ! -s "$fliplab/osascript.log" ] \
+  || fail "repeated restarts must not flap a login request"
+# The account really losing its better-ccflare grant too is still reported.
+mv "$fliplab/health.away" "$fliplab/health.json"
+make_pool "$fliplab/health.json" "$fliplab/accounts.json" 6 6 0
+add_account "$fliplab/accounts.json" steady 5 40 20 100
+add_account_needing_auth "$fliplab/accounts.json" mirror 20 100 tokenStatus '"expired"'
+flip_real=$(run_check_in "$fliplab" "$((NOW + 1200))" "$flipauth")
+expect_field "$flip_real" pool_needs_auth mirror "flip real needs-auth"
+grep -q 'mirror' "$fliplab/osascript.log" 2>/dev/null \
+  || fail "a genuine cross-proxy login request must still notify"
+pass "a better-ccflare restart never asks for a login the other proxy covers"
 
 # A poll that observed no membership must not consume a pending regain. A
 # better-ccflare restart while the inventory still answers is exactly that poll,

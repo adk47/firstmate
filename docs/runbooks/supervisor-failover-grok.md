@@ -14,7 +14,7 @@ This runbook owns the procedures themselves.
 Two independent things can run out, and they do not fail together:
 
 - The **supervisor's own credential** (`fable_state`), read from `quota-axi`'s `model:fable` window.
-- The **account pool** the fleet draws from (`pool_state`). Two proxies serve the same Claude logins: `CLIProxyAPI`, which `ANTHROPIC_BASE_URL` points at, is the authority for how many accounts hold a live grant (its auth files under `~/.cli-proxy-api`), and `better-ccflare` on 8080 supplies the per-account Fable windows. They disagree routinely - whichever refreshed a shared login last leaves the other holding a dead token - so `pool_routable` counts live grants in the inventory, and a `better-ccflare` that says `routable=0` while the inventory is full is a stale reading, not an outage.
+- The **account pool** the fleet draws from (`pool_state`). Two proxies serve the same Claude logins: `CLIProxyAPI` on 8317, which `ANTHROPIC_BASE_URL` points at, is the authority for how many accounts hold a live grant (its auth files under `~/.cli-proxy-api`), and `better-ccflare` on 8080 supplies the per-account Fable windows. They disagree routinely - whichever refreshed a shared login last leaves the other holding a dead token - so `pool_routable` counts live grants in the inventory, and a `better-ccflare` that says `routable=0` while the inventory is full is a stale reading, not an outage.
 
 At GREEN nothing to do.
 At YELLOW, plan the move and make sure Grok has fuel.
@@ -140,7 +140,8 @@ claude --dangerously-skip-permissions --resume <session-id>
 The session id is the one the previous `/exit` printed, and it is also visible in the recorded lock holder's command line while Claude held the seat.
 4. Confirm the Claude Stop hook reclaims supervision: the next Stop fires `bin/fm-claude-stop-autoarm.sh`, which arms the watcher only while work is in flight and this session holds the lock.
 5. Confirm no wake was lost: `state/.wake-queue` is empty and no `RECORD DIVERGENCE` line prints at the next drain.
-6. Confirm the supervisor is on Fable and the pool: `~/.claude/settings.json` pins the model and `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`.
+6. Confirm the supervisor is on Fable and the pool: `~/.claude/settings.json` pins the model, and `ANTHROPIC_BASE_URL` names the proxy the fleet actually routes through - today `http://127.0.0.1:8317`, CLIProxyAPI.
+   Do not set it to `8080`: that is `better-ccflare`, the supplementary source, and the monitor follows this URL when it decides whose grants count, so pointing the fleet there makes the stale proxy the authority and turns the monitor RED on a full pool.
 
 ## Part 3 - Fail back to Fable when the pool recovers
 
@@ -156,7 +157,8 @@ The label reads the same however far the pool recovered; read `pool_state=` on t
 
 Procedure:
 
-1. Confirm the named account is genuinely Fable-capable and routable: `curl -s http://127.0.0.1:8080/health` reports a healthy `pool.routable`, and `bin/fm-fable-runway.sh` reports `pool_state=GREEN`.
+1. Confirm the named account is genuinely Fable-capable and routable: `bin/fm-fable-runway.sh` reports `pool_state=GREEN`, and `curl -s http://127.0.0.1:8080/health` shows `better-ccflare`'s own view of the windows.
+   `pool_routable` on the monitor's line counts live grants in the CLIProxyAPI inventory, not that `pool.routable`, so the two can disagree without either being wrong.
 2. If the supervisor is on Grok, hand the seat back with Part 2.
 3. If the supervisor never left Claude Code but its own credential was the RED runway, no handoff is needed; the pool account is now serving the primary again.
 4. Leave the lanes where they are.
