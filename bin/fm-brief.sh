@@ -353,7 +353,7 @@ fi
 WIKI_SECTION=$(cat "$WIKI_STANZA_FILE")
 WIKI_SECTION=${WIKI_SECTION%$'\n'}
 IFS= read -r -d '' WIKI_WORKER_RULE <<'EOF' || true
-Never write to `~/.llm-wiki` from this task. When you learn a durable Muso fact, append `lesson: {fact}` to the end of your `done:` or `failed:` line only (for example `done: {conclusion} lesson: {fact}`), never on a `working:` line; `lesson:` is not a status state, so never write it as its own line. At teardown firstmate scans this task's status log for `lesson:` clauses and files each with `wiki-retro`.
+Never write to `~/.llm-wiki` from this task. When you learn a durable Muso fact, append `lesson: {fact}` to the end of your `done:` or `failed:` line only (for example `done: {conclusion} lesson: {fact}`), never on a `working:` line; `lesson:` is not a status state, so never write it as its own line. Before running `bin/fm-teardown.sh`, which removes this task's status log, firstmate scans that log for `lesson:` clauses and files each with `wiki-retro`.
 EOF
 WIKI_SECTION="$WIKI_SECTION
 ${WIKI_WORKER_RULE%$'\n'}"

@@ -256,7 +256,7 @@ Muso house knowledge is `~/.llm-wiki` and is the source of truth for Muso goals,
 Grep `wiki/index.md` then Read before acting on a Muso fact.
 Grep `raw/sources/` for identifiers (PR URLs, job ids, image tags); read `wiki/` for meaning.
 Never claim a fact is absent without grepping first.
-File a durable lesson with `wiki-retro` (Pi: `wiki_retro`); workers never write the vault and instead carry `lesson: ...` as a trailing clause on their `done:` or `failed:` status line only (never on `working:`, never a line of its own); at teardown firstmate scans the task's status log for `lesson:` clauses and files each, a deterministic read rather than a wake-dependent one.
+File a durable lesson with `wiki-retro` (Pi: `wiki_retro`); workers never write the vault and instead carry `lesson: ...` as a trailing clause on their `done:` or `failed:` status line only (never on `working:`, never a line of its own); before running `bin/fm-teardown.sh`, which removes `state/<id>.status`, firstmate scans that log for `lesson:` clauses and files each, a deterministic read rather than a wake-dependent one.
 
 Route durable knowledge to its most specific owner:
 
