@@ -2386,6 +2386,8 @@ EOF
   assert_contains "$out" "Follow the supervision operating instructions block above" "next step did not point back to the emitted supervision block"
   assert_contains "$out" "# House wiki" "next step missing the house-wiki stanza"
   assert_contains "$out" "Never claim a fact is absent from memory without grepping" "next step missing the house-wiki absence guard"
+  assert_contains "$out" "file each \`lesson:\` a worker reports in its status line" "next step missing the firstmate-side wiki-retro filing rule"
+  assert_contains "$out" "Never edit \`raw/\` or \`meta/\`" "next step missing the vault raw/meta guard"
 
   pass "session start emits X-mode cadence guidance in the harness supervision block"
 }
