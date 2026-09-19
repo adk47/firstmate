@@ -226,6 +226,11 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 COMPLETION_FILE="$STATE/.session-start-complete"
 AGENTS_BASELINE_FILE="$STATE/.session-start-agents-baseline"
+WIKI_STANZA_FILE="$SCRIPT_DIR/fm-house-wiki-stanza.txt"
+if [ ! -f "$WIKI_STANZA_FILE" ]; then
+  echo "fm-session-start.sh: missing house-wiki stanza $WIKI_STANZA_FILE" >&2
+  exit 1
+fi
 
 REEMIT=0
 SESSION_SOURCE=
@@ -944,14 +949,12 @@ cat <<'EOF'
 The digest above is complete for this session start. The READ-ONCE CONTRACT
 section near the top of it governs what may still be read from disk.
 EOF
-if [ -f "$SCRIPT_DIR/fm-house-wiki-stanza.txt" ]; then
-  printf '\n'
-  cat "$SCRIPT_DIR/fm-house-wiki-stanza.txt"
-  cat <<'EOF'
-Workers never write the vault: file each `lesson:` a worker reports in its status line, and any durable lesson of your own, with `wiki-retro` (Pi: `wiki_retro`).
+printf '\n'
+cat "$WIKI_STANZA_FILE"
+cat <<'EOF'
+Workers never write the vault: `lesson:` is not a status state but a trailing clause on a worker's `working:` or `done:` line; file each `lesson:` clause a worker carries on a status line, and any durable lesson of your own, with `wiki-retro` (Pi: `wiki_retro`).
 Never edit `raw/` or `meta/`; never call `/wiki-run` or `wiki_watch`.
 EOF
-fi
 
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
   COMPLETION_RECORDED=0
