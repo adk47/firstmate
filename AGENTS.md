@@ -257,7 +257,6 @@ Grep `wiki/index.md` then Read before acting on a Muso fact.
 Grep `raw/sources/` for identifiers (PR URLs, job ids, image tags); read `wiki/` for meaning.
 Never claim a fact is absent without grepping first.
 File a durable lesson with `wiki-retro` (Pi: `wiki_retro`); workers never write the vault and instead carry `lesson: ...` as a trailing clause on a `working:` or `done:` status line (never a line of its own), which firstmate files the same way it acts on a report.
-Generated worker briefs carry the same read contract; `bin/fm-house-wiki-stanza.txt` owns that shared text and `bin/fm-brief.sh` appends the worker lesson rule.
 
 Route durable knowledge to its most specific owner:
 
