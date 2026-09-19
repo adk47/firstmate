@@ -952,7 +952,7 @@ EOF
 printf '\n'
 cat "$WIKI_STANZA_FILE"
 cat <<'EOF'
-Workers never write the vault: `lesson:` is not a status state but a trailing clause on a worker's `working:` or `done:` line; file each `lesson:` clause a worker carries on a status line, and any durable lesson of your own, with `wiki-retro` (Pi: `wiki_retro`).
+Workers never write the vault: `lesson:` is not a status state but a trailing clause permitted only on a worker's `done:` or `failed:` line. At each task teardown scan that task's status log for `lesson:` clauses (a deterministic read, never a wake-dependent one) and file each, plus any durable lesson of your own, with `wiki-retro` (Pi: `wiki_retro`).
 Never edit `raw/` or `meta/`; never call `/wiki-run` or `wiki_watch`.
 EOF
 
