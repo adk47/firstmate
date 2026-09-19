@@ -947,6 +947,10 @@ EOF
 if [ -f "$SCRIPT_DIR/fm-house-wiki-stanza.txt" ]; then
   printf '\n'
   cat "$SCRIPT_DIR/fm-house-wiki-stanza.txt"
+  cat <<'EOF'
+Workers never write the vault: file each `lesson:` a worker reports in its status line, and any durable lesson of your own, with `wiki-retro` (Pi: `wiki_retro`).
+Never edit `raw/` or `meta/`; never call `/wiki-run` or `wiki_watch`.
+EOF
 fi
 
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then

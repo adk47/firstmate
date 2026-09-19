@@ -65,7 +65,9 @@
 # over copied detail) and defers self-governance recognition and insertion to
 # fm-ensure-agents-md.sh's contract.
 # Ship and scout briefs include the house-wiki stanza from
-# bin/fm-house-wiki-stanza.txt (single owner of that text).
+# bin/fm-house-wiki-stanza.txt (single owner of the shared read contract) plus
+# the worker rule: never write the vault; report `lesson: ...` in the status
+# line for firstmate to file with wiki-retro.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -349,6 +351,11 @@ if [ ! -f "$WIKI_STANZA_FILE" ]; then
 fi
 WIKI_SECTION=$(cat "$WIKI_STANZA_FILE")
 WIKI_SECTION=${WIKI_SECTION%$'\n'}
+IFS= read -r -d '' WIKI_WORKER_RULE <<'EOF' || true
+Never write to `~/.llm-wiki` from this task. Record a durable Muso lesson in your status line as `lesson: {one line}` (for example `done: {conclusion} lesson: {fact}`); firstmate files it with `wiki-retro`.
+EOF
+WIKI_SECTION="$WIKI_SECTION
+${WIKI_WORKER_RULE%$'\n'}"
 
 IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 # Task

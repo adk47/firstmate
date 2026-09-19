@@ -262,8 +262,8 @@ Muso house knowledge is `~/.llm-wiki` and is the source of truth for Muso goals,
 Grep `wiki/index.md` then Read before acting on a Muso fact.
 Grep `raw/sources/` for identifiers (PR URLs, job ids, image tags); read `wiki/` for meaning.
 Never claim a fact is absent without grepping first.
-File a durable lesson with `wiki-retro` (Pi: `wiki_retro`).
-Generated worker briefs carry the same contract; `bin/fm-house-wiki-stanza.txt` owns the worker text.
+File a durable lesson with `wiki-retro` (Pi: `wiki_retro`); workers never write the vault and instead report `lesson: ...` in a status line, which firstmate files the same way it acts on a report.
+Generated worker briefs carry the same read contract; `bin/fm-house-wiki-stanza.txt` owns that shared text and `bin/fm-brief.sh` appends the worker lesson rule.
 
 Route durable knowledge to its most specific owner:
 
@@ -540,7 +540,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's own ask plus the context needed to read it, including the substance of any report, decision, or PR the ask refers to, and fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with Firstmate's build instructions.
 `bin/fm-dod-lib.sh` owns what a no-mistakes worker may pass as `--intent` and its rule that the string must be self-sufficient.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
-Generated worker briefs include the house-wiki stanza; `bin/fm-house-wiki-stanza.txt` owns the text.
+Generated worker briefs include the house-wiki stanza; `bin/fm-house-wiki-stanza.txt` owns the shared text and `bin/fm-brief.sh` owns the worker `lesson:` rule.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.

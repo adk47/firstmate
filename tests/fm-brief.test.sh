@@ -219,6 +219,9 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "# House wiki" "$brief" "$id: brief missing the house-wiki stanza"
     assert_grep "Never claim a fact is absent from memory without grepping" "$brief" \
       "$id: brief missing the house-wiki absence guard"
+    assert_grep "Never write to \`~/.llm-wiki\` from this task" "$brief" \
+      "$id: brief lets the worker write the house wiki outside its worktree"
+    assert_grep "lesson: {one line}" "$brief" "$id: brief missing the status-line lesson route"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
@@ -837,6 +840,9 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "# House wiki" "$brief" "scout brief missing the house-wiki stanza"
   assert_grep "Never claim a fact is absent from memory without grepping" "$brief" \
     "scout brief missing the house-wiki absence guard"
+  assert_grep "Never write to \`~/.llm-wiki\` from this task" "$brief" \
+    "scout brief lets the worker write the house wiki outside its worktree"
+  assert_grep "lesson: {one line}" "$brief" "scout brief missing the status-line lesson route"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
