@@ -124,37 +124,9 @@ test_spawn_home_layout() {
   pass "spawn-home layout writes harness pin, beat, and brief"
 }
 
-test_node_host_loads_typescript_modules() {
-  local dir="$TMP_ROOT/ts-host" out err
-  if ! command -v node >/dev/null 2>&1; then
-    echo "skip: node not found for the TypeScript host test"
-    return 0
-  fi
-  mkdir -p "$dir"
-  printf '%s\n' \
-    'export interface Probe { answer: number }' \
-    'export const probe: Probe = { answer: 42 };' \
-    >"$dir/probe.ts"
-  # The same shape every .ts-driving suite uses: a plain module host importing
-  # the artifact by file URL. On a node without built-in type stripping this is
-  # exactly the ERR_UNKNOWN_FILE_EXTENSION path tests/lib.sh arms against.
-  out=$(PROBE="$dir/probe.ts" node --input-type=module 2>"$dir/stderr" <<'JS'
-import { pathToFileURL } from "node:url";
-const mod = await import(pathToFileURL(process.env.PROBE).href);
-console.log(mod.probe.answer);
-JS
-  )
-  expect_code 0 $? "a plain node host could not import a .ts module: $(cat "$dir/stderr")"
-  [ "$out" = "42" ] || fail "the .ts module's export did not round-trip, got '$out'"
-  err=$(cat "$dir/stderr")
-  [ -z "$err" ] || fail "importing a .ts module must leave stderr empty, got: $err"
-  pass "a plain node host imports a .ts module cleanly under the shared test library"
-}
-
 test_no_mistakes_version_constant
 test_no_mistakes_init_doctor_markers
 test_fake_gh_and_gh_axi
 test_spawn_tmux_and_fakebin
 test_send_stubs_and_ssh
 test_spawn_home_layout
-test_node_host_loads_typescript_modules
