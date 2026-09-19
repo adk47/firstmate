@@ -1909,10 +1909,14 @@ test_gateway_stall_is_re_rung_instead_of_wedge_escalated() {
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: none · idle at prompt'
 
+  # The first attempt fires on sight; the second is an hour out. wait_poll_cycle
+  # returns at the TOP of the next poll, and that poll's ladder races the count
+  # below, so a zero backoff for every attempt would make "exactly one" depend
+  # on which of the two ran first.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_GATEWAY_RETRY_BACKOFF=0 FM_GATEWAY_RETRY_MAX=2 \
+    FM_GATEWAY_RETRY_BACKOFF='0 3600' FM_GATEWAY_RETRY_MAX=2 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
@@ -1940,7 +1944,7 @@ test_gateway_stall_is_re_rung_instead_of_wedge_escalated() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_GATEWAY_RETRY_BACKOFF=0 FM_GATEWAY_RETRY_MAX=2 \
+    FM_GATEWAY_RETRY_BACKOFF='0 3600' FM_GATEWAY_RETRY_MAX=2 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_poll_cycle "$state" "$pid" >/dev/null 2>&1 || true
@@ -2009,6 +2013,10 @@ make_gateway_busy_case() {  # <name> <task>
 # a 40-poll window - rather than a made-up one. The shipped constant itself, and
 # the fact that the derived window stays 600 seconds at any cadence, are pinned
 # directly on fm_gateway_busy_clear_polls in tests/fm-gateway-keepalive.test.sh.
+# The ladder's first attempt fires on sight and its second is an hour out: an
+# idle phase ends at the TOP of a poll whose ladder then races the caller's
+# message count, so a zero backoff for every attempt would leave that count
+# depending on which of the two ran first.
 run_gateway_busy_watcher() {  # <dir> <task> <state> <busy|idle> <until>
   local dir=$1 task=$2 state=$3 pane_state=$4 until=$5 gen event pid key n i=0
   key=$(printf '%s' "test:fm-$task" | tr ':/.' '___')
@@ -2025,7 +2033,7 @@ run_gateway_busy_watcher() {  # <dir> <task> <state> <busy|idle> <until>
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-$task" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
     FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_GATEWAY_RETRY_BACKOFF=0 FM_GATEWAY_BUSY_CLEAR_SECS=40 \
+    FM_GATEWAY_RETRY_BACKOFF='0 3600' FM_GATEWAY_BUSY_CLEAR_SECS=40 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH" >> "$dir/watch.out" &
   pid=$!
