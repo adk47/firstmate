@@ -70,7 +70,8 @@ unknown, max_output_tokens
 
 Taken 2026-09-09 across 201 transcripts in this fleet's `~/.claude/projects`, counting assistant entries carrying `isApiErrorMessage: true`.
 These are the strings the pane classifier is written against; the counts are what makes the deny list load-bearing rather than theoretical.
-Only the rendered `API Error: <5xx>` shape is a positive match, and only within the bounded tail window above the prompt; the gateway's own sentences and the bare word `Overloaded` are not matched on their own. This text match is the second of the classifier's two conditions, never the whole test: the first is the recorded `event=stop-failure` turn end above, which is what keeps a crewmate printing this repository's sources out of the ladder.
+Only the rendered `API Error: <5xx>` shape is a positive match, and only within the bounded tail window above the prompt; the gateway's own sentences and the bare word `Overloaded` are not matched on their own.
+This text match is the second of the classifier's two conditions, never the whole test: the first is the recorded `event=stop-failure` turn end above, which is what keeps a crewmate printing this repository's sources out of the ladder.
 
 | Count | Text (truncated) | Class |
 |---|---|---|

@@ -20,28 +20,28 @@ The keep-alive is built on that fact rather than around it: the hook cannot resu
 The signal is the agent's own **turn-lifecycle record**, not its screen.
 Two conditions are required, and a stall is declared only when both hold:
 
-1. The task's busy record says its last turn ended on an API error — `event=stop-failure`.
+1. The task's busy record says its last turn ended on an API error - `event=stop-failure`.
    Claude Code closes such a turn through `StopFailure` and never `Stop`; `bin/fm-spawn.sh` wires that hook to `fm-busy-event.sh … --event stop-failure`, and `bin/fm-busy-lib.sh` owns the record it writes.
 2. The pane tail shows one of the transient gateway errors.
-   The match reads the last ten non-blank lines — a bounded footer window like the one the watcher's busy match reads, sized for where a turn-ending error renders — and matches only the harness's rendered `API Error: <5xx>` shape, never a bare word such as `overloaded`.
+   The match reads the last ten non-blank lines - a bounded footer window like the one the watcher's busy match reads, sized for where a turn-ending error renders - and matches only the harness's rendered `API Error: <5xx>` shape, never a bare word such as `overloaded`.
 
 A turn that ended normally records `event=stop` and never enters the ladder, whatever is on its screen.
 That is also the exit: a crew that takes the continue and finishes its turn records `stop`, so its record is dropped on the next idle poll without waiting for the old error to scroll off.
 
 The second condition is not the detector on its own, and it is not asked to be.
-The question this classifier asks is about a TURN, and a screen holds no turns — it holds rows.
+The question this classifier asks is about a TURN, and a screen holds no turns - it holds rows.
 This repository's own docs, tests and classifier carry the rendered error text verbatim, so an agent that merely read them ends its turn with the shape on screen, and four successive attempts to tell that agent from a stalled one by POSITION each failed in their own direction: an unanchored match caught prose, a physical-row anchor went blind on the wrapped error, a gutter-glyph join merged separate rendered lines, and a pane-width join missed the error whenever the harness word-wrapped, whenever the composer border sat one column off the wrap column, or whenever the capture still held wider rows from before a resize.
 The turn end is not inferred from the screen at all: the crew records it itself.
-The pane condition remains because the event says only THAT an API error ended the turn, never WHICH one — and some of those must never be retried (see the deny list below).
+The pane condition remains because the event says only THAT an API error ended the turn, never WHICH one - and some of those must never be retried (see the deny list below).
 
 ### Scope: the claude harness only
 
 `event=stop-failure` is written in exactly one place, the `claude*` arm of `bin/fm-spawn.sh`'s busy wiring.
 No other harness emits it, so this keep-alive covers claude-harness crewmates and scouts only.
 A task whose record carries no event, an event the classifier does not name, or no readable record at all is deliberately **not** in the ladder: it is left to ordinary triage rather than re-rung on the strength of pane text alone.
-That is the intended limit — the captain asked for claude workers, and the text patterns are Claude Code's own rendered shape — and it is a written-out refusal in `fm_gateway_turn_ended_on_api_error`, not a silent fall-through.
+That is the intended limit - the captain asked for claude workers, and the text patterns are Claude Code's own rendered shape - and it is a written-out refusal in `fm_gateway_turn_ended_on_api_error`, not a silent fall-through.
 
-Re-ringing a healthy crew is not a harmless nudge — it spends the whole budget and stamps a false `paused [key=gateway-503]` on that crew's status log, which then routes a genuinely wedged pane onto the long declared-wait cadence instead of the wedge timer.
+Re-ringing a healthy crew is not a harmless nudge - it spends the whole budget and stamps a false `paused [key=gateway-503]` on that crew's status log, which then routes a genuinely wedged pane onto the long declared-wait cadence instead of the wedge timer.
 
 A deny list runs first, over the whole capture, and beats the transient match.
 It exists because the non-retryable failures are the expensive mistakes: a prompt that is too long, an expired credential, or a spent usage limit cannot be improved by asking the agent to carry on, and one real failure this fleet produces (`Prompt is too long · automatic compaction failed: API Error: 503 ...`) carries a 503 inside a failure that is not the gateway's.
