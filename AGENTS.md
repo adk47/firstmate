@@ -254,6 +254,7 @@ Do not reconstruct or supervise a secondmate's child tree from the main home.
 
 Muso house knowledge is `~/.llm-wiki` and is the source of truth for Muso goals, infra, memories, and apps.
 Grep `wiki/index.md` then Read before acting on a Muso fact.
+Grep `raw/sources/` for identifiers (PR URLs, job ids, image tags); read `wiki/` for meaning.
 Never claim a fact is absent without grepping first.
 File a durable lesson with `wiki-retro` (Pi: `wiki_retro`).
 Generated worker briefs carry the same contract; `bin/fm-house-wiki-stanza.txt` owns the worker text.
