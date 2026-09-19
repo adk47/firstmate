@@ -475,10 +475,11 @@ Skipped items, such as a destination checkout that does not yet gitignore the it
 ## Watched tool updates (config/watched-tools.json)
 
 `config/watched-tools.json` is an optional local, gitignored list of the tools this home depends on.
-When it is present and the check is armed, [`bin/fm-tool-update-check.sh`](../bin/fm-tool-update-check.sh) reports two conditions, and keeps them deliberately distinct:
+When it is present and the check is armed, [`bin/fm-tool-update-check.sh`](../bin/fm-tool-update-check.sh) reports three conditions, and keeps them deliberately distinct:
 
 - `<tool> update available` means a newer version exists at the tool's update source.
 - `<tool> update not in effect` means a newer copy is already installed on this host, but `PATH` still resolves an older one.
+- `<tool> check could not be determined` means a probe could not answer inside its bound, so whether that tool is current was not established.
 
 The second condition is the reason the check exists.
 An update can install correctly and stay inert because an earlier `PATH` entry still holds an older copy, and a check that only asks whether a newer version is published reports that host as up to date.
@@ -514,19 +515,25 @@ A tool does not always announce a new release on the command that prints its ver
 An `announce_pattern` that is not a usable extended regular expression stops `arm`, and during a sweep it is reported as that one tool's own check failure so one broken pattern never stops the other watched tools from being checked.
 A `git` entry reports how many commits the local clone is behind its remote branch, and stays silent when the clone is current or ahead.
 An omitted `branch` uses the remote's default branch, taken from the clone's own record of it and otherwise asked of the remote directly, so a `--single-branch` clone still resolves.
-Both probe kinds are read-only and bounded, and a probe that cannot answer is reported as a check failure rather than assumed current.
+Both probe kinds are read-only and bounded, and a probe that cannot answer inside its bound is reported as that tool's check that could not be determined rather than assumed current.
 See [`docs/examples/watched-tools.json`](examples/watched-tools.json) for a starting point to copy into local `config/watched-tools.json`.
 
 Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 That writes `state/tool-updates.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal cadence and turns its one line into a `check:` wake; no separate schedule is involved.
 The armed check runs whenever that home has a watcher running, and arming alone does not make watcher supervision required, so a home with no in-flight work and no other reason to watch does not start a watcher just for this check.
 `bin/fm-tool-update-check.sh disarm` removes the shim, its trust binding, and the report record.
-The check prints nothing when everything is current, and `state/.tool-updates` records the findings the last report was made from so the same pending update is reported once instead of on every poll.
-A changed or returning condition is reported again.
+The check prints nothing when everything is current, and `state/.tool-updates` records the whole finding set the sweep found plus the two identity sets that decide whether a later sweep is news.
+An available update is identified by the tool and the version or revision it would reach, and every other finding by a fixed code for its own condition, so a report is emitted only when a sweep found an identity the record does not already hold.
+A reworded or reordered finding, and which tool an overrun happens to name, therefore never report again, while a new tool joining the pending set and a newer target version each report exactly once.
+A tool that stops having an available update is absorbed silently, so its next available update is news again.
+A check failure or an unusable registry follows its condition the same way: reported once while present, absorbed silently when it clears, and reported again when it returns, so a real failure that comes back always resurfaces.
+Only the two findings that depend on the load the sweep ran under, a check that could not be determined and a sweep budget cut, are latched for that record: each reports once and then never again, so which tool an overrun happens to name and a bound that clears and returns with the load cannot wake firstmate twice; the record still carries the current finding set so the durable state stays accurate, and `disarm` resets the latch.
 Adding, removing, or changing a watched tool is an edit to this file and needs no code change or re-arming.
 This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
 
-`FM_TOOL_UPDATE_INTERVAL` (default 900 seconds, `0` to probe on every run) sets how often probes actually run, `FM_TOOL_UPDATE_PROBE_SECS` (default 5) bounds one probe, and `FM_TOOL_UPDATE_BUDGET_SECS` (default 20) bounds a whole sweep.
+`FM_TOOL_UPDATE_INTERVAL` (default 900 seconds, `0` to probe on every run) sets how often probes actually run, `FM_TOOL_UPDATE_PROBE_SECS` (default 5) bounds one probe, and `FM_TOOL_UPDATE_BUDGET_SECS` (default 24, a few seconds inside the largest sweep the default watcher bound fits, so a loaded host still ends the sweep before the watcher kills it silently) bounds a whole sweep.
+Every probe is additionally bounded by what the sweep budget has left over and above a floor reserved for each tool still to be checked, so one slow tool cannot spend the whole sweep and leave the tools after it unasked, and the sweep still ends inside the watcher's own per check bound.
+A probe that cannot answer inside its bound is reported as that one tool's check that could not be determined, never as a check failure and never as the whole sweep failing, because which tool a bound lands on depends on the load the sweep ran under and not on the tool.
 A sweep that runs out of budget says which tool it did not reach rather than reporting the rest as current.
 The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
@@ -882,7 +889,7 @@ FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledge
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 probes on every run, other values must be 60..86400
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
-FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
+FM_TOOL_UPDATE_BUDGET_SECS=24   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
