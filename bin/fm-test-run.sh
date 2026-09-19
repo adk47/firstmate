@@ -62,9 +62,13 @@
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
 #                   record it as exit 124 (0 disables, the default). The
-#                   --changed applies 1800s automatically: no real script
+#                   --changed applies 900s automatically: no real script
 #                   approaches it, so it only converts a HUNG
-#                   script into a bounded failure. --max-wall-ms is checked
+#                   script into a bounded failure. The one exception is
+#                   tests/fm-session-start.test.sh, which the automatic
+#                   path bounds at 3600s because a healthy run measures
+#                   ~26 minutes under host contention. An explicit N
+#                   applies to every script. --max-wall-ms is checked
 #                   after the run and so cannot catch a hang on its own.
 #                   External interruption cleanup is outside this runner's
 #                   guarantee; configured per-script bounds remain authoritative.
@@ -144,19 +148,28 @@ JOBS_MAX=8
 MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
 # Bound applied automatically on the automatic --changed path, derived from
-# measured runtimes with margin rather than picked: the slowest measured
+# measured healthy runtimes with margin rather than picked: the slowest measured
 # behavior test is the 341s Herdr presentation E2E, and the slowest script in a
 # runner-file changed selection is tests/fm-calm-pi-extension.test.sh at 77s
-# once its Chrome reap terminates. Those are healthy-host numbers; on a
-# developer host running several no-mistakes suites at once,
-# tests/fm-session-start.test.sh (102 session starts, each with its own 120s
-# budget) has completed healthily in ~26 minutes, and the earlier 900s bound
-# recorded that complete run as hung. 1800s covers that measured worst case, so
-# this can only ever fire on a script that is genuinely stuck. It is a guard,
-# not a speed control: a HUNG script becomes a bounded failure instead of an
-# unbounded suite, which is the shape that silently outruns a caller's
-# invocation budget.
-CHANGED_DEFAULT_TIMEOUT_SECS=1800
+# once its Chrome reap terminates. 900s leaves roughly 2.6x headroom over the
+# slowest real script, so this can only ever fire on a script that is genuinely
+# stuck. It is a guard, not a speed control: a HUNG script becomes a bounded
+# failure instead of an unbounded suite, which is the shape that silently
+# outruns a caller's invocation budget.
+CHANGED_DEFAULT_TIMEOUT_SECS=900
+# The one script the automatic bound must not cover at 900s:
+# tests/fm-session-start.test.sh runs 102 session starts, each with its own
+# 120s budget, and has completed healthily in ~26 minutes on a developer host
+# running several no-mistakes suites at once. Raising the shared default to
+# cover it would make every genuinely hung script wait that long, so it gets
+# its own bound here. Only the automatic --changed path consults this table;
+# an explicit --per-script-timeout-secs applies to every script.
+changed_default_timeout_for() {  # <script>
+  case "$(basename "$1")" in
+    fm-session-start.test.sh) printf '%s\n' 3600 ;;
+    *) printf '%s\n' "$CHANGED_DEFAULT_TIMEOUT_SECS" ;;
+  esac
+}
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -1918,9 +1931,11 @@ done
 # lane must stay strictly serial, --family is what the required Herdr lane runs,
 # and --all is a deliberate complete regression.
 AUTO_CONCURRENCY=0
+PER_SCRIPT_TIMEOUT_AUTOMATIC=0
 if { [ "$MODE" = changed ] || [ "$MODE" = scripts ]; } && [ "$JOBS_EXPLICIT" -eq 0 ]; then
   if [ "$MODE" = changed ] && [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
     PER_SCRIPT_TIMEOUT_SECS=$CHANGED_DEFAULT_TIMEOUT_SECS
+    PER_SCRIPT_TIMEOUT_AUTOMATIC=1
   fi
   auto_admissible=0
   for s in "${SCRIPTS[@]}"; do
@@ -2093,32 +2108,38 @@ record_script_result() {
 # positive, a script that outruns it is terminated and reported as exit 124: a
 # hung script must become a bounded failure rather than an unbounded suite,
 # because an unbounded suite is what silently outruns its caller's budget.
+# The automatic --changed bound is resolved per script so the one measured
+# outlier gets its own bound without loosening the guard for everything else.
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
-  local rc
+  local rc timeout_secs
   : "$id"
+  timeout_secs=$PER_SCRIPT_TIMEOUT_SECS
+  if [ "$PER_SCRIPT_TIMEOUT_AUTOMATIC" -eq 1 ]; then
+    timeout_secs=$(changed_default_timeout_for "$script")
+  fi
   set +e
   if [ "$stream" -eq 1 ]; then
-    if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+    if [ "$timeout_secs" -gt 0 ]; then
       # Expansion is intentionally deferred to the child bash passed to -c.
       # shellcheck disable=SC2016
-      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
+      fm_run_timed "$timeout_secs" bash -c \
         'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
       rc=$?
     else
       bash "$script" 2>&1 | tee "$out"
       rc=${PIPESTATUS[0]}
     fi
-  elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
+  elif [ "$timeout_secs" -gt 0 ]; then
+    fm_run_timed "$timeout_secs" bash "$script" >"$out" 2>&1
     rc=$?
   else
     bash "$script" >"$out" 2>&1
     rc=$?
   fi
-  if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
+  if [ "$timeout_secs" -gt 0 ] && [ "$rc" -eq 124 ]; then
     printf 'not ok - %s exceeded the per-script bound of %ss and was terminated\n' \
-      "$script" "$PER_SCRIPT_TIMEOUT_SECS" >>"$out"
+      "$script" "$timeout_secs" >>"$out"
     [ "$stream" -eq 1 ] && tail -1 "$out"
   fi
   return "$rc"
