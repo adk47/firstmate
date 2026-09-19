@@ -81,6 +81,24 @@ SH
   chmod 0755 "$dir/$command_name"
 }
 
+# make_announcing_copy <dir> <command> <version-output> <announce-file>: a copy
+# that answers --version with a fixed version and any other command with the
+# current contents of <announce-file>, so a case can reword a tool's own update
+# announcement between sweeps without changing anything else about it.
+make_announcing_copy() {
+  local dir=$1 command_name=$2 text=$3 announce_file=$4
+  mkdir -p "$dir"
+  cat > "$dir/$command_name" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then
+  printf '%s\n' '$text'
+  exit 0
+fi
+cat '$announce_file'
+SH
+  chmod 0755 "$dir/$command_name"
+}
+
 write_config() {
   local home=$1
   shift
@@ -320,7 +338,9 @@ test_an_unchecked_announcement_source_is_not_read_as_current() {
   # When the budget is gone the separate announcement command cannot run, and the
   # version probe's output never carries the announcement. Searching that output
   # anyway would present a source that was never asked as a clean result, which is
-  # the same silently dead source announce_args was added to close.
+  # the same silently dead source announce_args was added to close. The sweep says
+  # the check could not be determined and never claims an update from a source it
+  # did not ask.
   home=$(make_home announce-budget)
   dir="$TMP_ROOT/announce-budget/bin"
   mkdir -p "$dir"
@@ -336,17 +356,20 @@ SH
   chmod 0755 "$dir/no-mistakes-fixture"
   write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
   out="$home/out.txt"
-  # The deadline is whole-second granular (real_epoch is `date +%s`), so a
-  # budget of 1 leaves headroom anywhere in (0, 1] seconds: when the sweep
-  # starts near the end of a second the very first budget check already reads
-  # as exhausted and the sweep reports "before every copy answered" instead of
-  # reaching the announcement step this case is about. A budget of 2 guarantees
-  # more than a full second of headroom for the millisecond-scale work before
-  # the copy loop, while the version probe below (bounded, then sleeping 30)
-  # still exhausts the budget before the announcement check.
-  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=2
+  # The version probe has to spend the whole budget for the announcement step
+  # to find none left. A probe's bound is the budget less the kill grace, so
+  # with any larger budget a copy that dies promptly on TERM is killed a whole
+  # second before the deadline and the announcement is still asked, which is
+  # the ordinary sweep, not this case. With a budget of 1 the bound's floor is
+  # the budget itself, so the killed copy has always reached the deadline
+  # (whole-second granular, real_epoch is `date +%s`) however the sweep's start
+  # sat inside its second. A sweep that finds the budget gone before it asks the
+  # first copy reports that instead, and both are the check that could not be
+  # determined this case asserts.
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
   report=$(cat "$out")
-  assert_contains "$report" "no-mistakes check failed: the time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
+  assert_contains "$report" "no-mistakes check could not be determined: the time budget ran out" "an announcement source that was never asked was not reported"
+  assert_not_contains "$report" "update available" "an announcement source the budget could not reach was read as current"
   pass "an announcement source the budget could not reach is reported, not read as current"
 }
 
@@ -371,7 +394,7 @@ SH
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
   report=$(cat "$out")
-  assert_contains "$report" "no-mistakes check failed: $dir/no-mistakes-fixture did not answer when asked for its update announcement" "an announcement probe that never answered was read as a clean sweep"
+  assert_contains "$report" "no-mistakes check could not be determined: $dir/no-mistakes-fixture did not answer when asked for its update announcement" "an announcement probe that never answered was read as a clean sweep"
   pass "an announcement probe that does not answer is reported, not read as current"
 }
 
@@ -525,8 +548,8 @@ test_git_probes_stop_when_the_sweep_budget_is_gone() {
   # The git probes are the several-in-a-row case, two of them over the network,
   # so they are the ones that can push a sweep past the watcher's own timeout and
   # leave it killed with nothing printed at all. Here the tool's command probe
-  # spends the whole budget, so its git probes must not start: the sweep says
-  # which tool it did not finish instead of quietly running on.
+  # spends the whole budget, so its git probes must not start: the sweep names the
+  # tool and says the check could not be determined instead of quietly running on.
   home=$(make_home git-budget)
   work=$(git_fixture git-budget-repo)
   git -C "$work" reset -q --hard HEAD~2
@@ -536,7 +559,7 @@ test_git_probes_stop_when_the_sweep_budget_is_gone() {
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$slow")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
   report=$(cat "$out")
-  assert_contains "$report" "check incomplete: the time budget ran out before firstmate" "a sweep with no budget left did not say which tool it did not finish"
+  assert_contains "$report" "firstmate check could not be determined" "a sweep with no budget left did not name the tool it could not finish"
   assert_not_contains "$report" "commits behind" "the git probes ran after the sweep budget was already gone"
   pass "git probes stop and name their tool once the sweep budget is gone"
 }
@@ -578,7 +601,7 @@ SH
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=3
   report=$(cat "$out")
   assert_not_contains "$report" "update available" "a probe that never answered was reported as an available update"
-  assert_contains "$report" "firstmate check failed: $work did not answer whether it already has" "the stalled object query was not the reported failure"
+  assert_contains "$report" "firstmate check could not be determined: $work did not answer whether it already has" "the stalled object query was not the reported failure"
   [ "$(git -C "$work" rev-parse HEAD)" = "$head_before" ] || fail "the check moved the watched repository's HEAD"
   pass "a git probe that does not answer is reported as a failure, never as an update"
 }
@@ -610,7 +633,7 @@ SH
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
   report=$(cat "$out")
-  assert_contains "$report" "firstmate check failed: $work did not answer whether it is a git repository" "a repository probe that never answered was not reported as such"
+  assert_contains "$report" "firstmate check could not be determined: $work did not answer whether it is a git repository" "a repository probe that never answered was not reported as such"
   assert_not_contains "$report" "is not a git repository" "a repository probe that never answered was reported as not a repository"
   pass "a stalled repository probe is reported as no answer, not as not a repository"
 }
@@ -684,6 +707,220 @@ test_findings_are_reported_once_until_they_change() {
   pass "the same pending update is reported once, and a change is reported again"
 }
 
+test_a_reworded_finding_with_the_same_pending_set_is_silent() {
+  local home dir announce out report
+  # The dedupe input is the set of tools with a pending update and the version
+  # each would reach, never the prose around it. A tool that rewords its own
+  # announcement without changing what it is announcing is not news.
+  home=$(make_home reword)
+  dir="$TMP_ROOT/reword/bin"
+  announce="$TMP_ROOT/reword/announce.txt"
+  make_announcing_copy "$dir" "$TOOL" 'fixture 1.0.0' "$announce"
+  write_config "$home" "{\"tools\":[{\"name\":\"$TOOL\",\"command\":\"$TOOL\",\"announce_args\":[\"--help\"],\"announce_pattern\":\"a new version of $TOOL is available.*\"}]}"
+  out="$home/out.txt"
+
+  printf 'a new version of %s is available: v1.0.0 -> v2.0.0\n' "$TOOL" > "$announce"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "$TOOL update available: a new version of $TOOL is available: v1.0.0 -> v2.0.0" "the announcement was not reported at all, so this case proves nothing"
+
+  printf 'a new version of %s is available: v1.0.0 -> v2.0.0 (released today)\n' "$TOOL" > "$announce"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  [ ! -s "$out" ] || fail "a reworded finding with the same pending set woke firstmate again: $(cat "$out")"
+  # Not vacuous: the finding the record holds really did change, so the two
+  # sweeps differed in prose and only in prose.
+  assert_contains "$(cat "$home/state/.tool-updates")" "released today" "the record did not carry the reworded finding, so the two sweeps never differed"
+  pass "a reworded finding with the same pending set is silent"
+}
+
+test_a_tool_joining_the_pending_set_wakes_once() {
+  local home dir first second out
+  # The other side of the case above: a tool that newly has an update is news,
+  # and is news once rather than on every poll after it.
+  home=$(make_home join)
+  dir="$TMP_ROOT/join/bin"
+  first="$TMP_ROOT/join/first.txt"
+  second="$TMP_ROOT/join/second.txt"
+  make_announcing_copy "$dir" "$TOOL" 'fixture 1.0.0' "$first"
+  make_announcing_copy "$dir" "${TOOL}-second" 'fixture 1.0.0' "$second"
+  write_config "$home" "{\"tools\":[{\"name\":\"$TOOL\",\"command\":\"$TOOL\",\"announce_args\":[\"--help\"],\"announce_pattern\":\"a new version of $TOOL is available.*\"},{\"name\":\"second\",\"command\":\"${TOOL}-second\",\"announce_args\":[\"--help\"],\"announce_pattern\":\"a new version of second is available.*\"}]}"
+  out="$home/out.txt"
+
+  printf 'a new version of %s is available: v1.0.0 -> v2.0.0\n' "$TOOL" > "$first"
+  : > "$second"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  assert_contains "$(cat "$out")" "$TOOL update available" "the first pending tool was not reported"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  [ ! -s "$out" ] || fail "the same pending set was reported twice: $(cat "$out")"
+
+  printf 'a new version of second is available: v1.0.0 -> v3.0.0\n' > "$second"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  assert_contains "$(cat "$out")" "second update available" "a tool joining the pending set did not wake firstmate"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  [ ! -s "$out" ] || fail "a tool that joined the pending set was reported again on the next poll: $(cat "$out")"
+  pass "a tool joining the pending set wakes once"
+}
+
+test_an_overrun_is_reported_once() {
+  local home dir out i tool
+  # An overrun is a state, not a message: the sweep that overran says so once and
+  # the record then holds it, so the next poll of the same condition is silent.
+  # The assertion deliberately does not name the tool the sweep stopped before,
+  # because which tool that is depends on the load the sweep ran under.
+  home=$(make_home overrun)
+  dir="$TMP_ROOT/overrun/bin"
+  for i in 1 2 3; do
+    make_slow_copy "$dir" "$TOOL-$i" 30
+  done
+  out="$home/out.txt"
+  write_config "$home" "{\"tools\":[{\"name\":\"slow-1\",\"command\":\"$TOOL-1\"},{\"name\":\"slow-2\",\"command\":\"$TOOL-2\"},{\"name\":\"slow-3\",\"command\":\"$TOOL-3\"}]}"
+
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
+  assert_contains "$(cat "$out")" "check could not be determined: the time budget ran out" "the overrun was not reported at all, so this case proves nothing"
+  assert_contains "$(cat "$home/state/.tool-updates")" "check could not be determined: the time budget ran out" "the record did not carry the overrun it reported"
+
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
+  [ ! -s "$out" ] || fail "the same overrun was reported again on the next poll: $(cat "$out")"
+  pass "an overrun is reported once as a state, not on every poll"
+}
+
+test_a_slow_tool_does_not_leave_later_tools_unasked() {
+  local home dir b_log c_log out report b_probes c_probes
+  # A slow first tool must not spend the sweep: the later tools are still asked,
+  # and the slow tool itself is reported as a check that could not be determined
+  # rather than as a check failure or as the whole sweep failing. Counting probes
+  # is what proves the later tools were asked, because silence alone would also be
+  # what a skipped tool produces. The sweep gets the default budget, which is
+  # real headroom for three tools: the guarantee under proof is that the slow
+  # tool cannot spend it, not that a loaded host lets a one-second probe start.
+  home=$(make_home slow-first)
+  dir="$TMP_ROOT/slow-first/bin"
+  b_log="$TMP_ROOT/slow-first/b.log"
+  c_log="$TMP_ROOT/slow-first/c.log"
+  make_slow_copy "$dir" "$TOOL" 30
+  make_counting_copy "$dir" "${TOOL}-b" 'fixture 1.0.0' "$b_log"
+  make_counting_copy "$dir" "${TOOL}-c" 'fixture 1.0.0' "$c_log"
+  : > "$b_log"
+  : > "$c_log"
+  write_config "$home" "{\"tools\":[{\"name\":\"slow\",\"command\":\"$TOOL\"},{\"name\":\"b\",\"command\":\"${TOOL}-b\"},{\"name\":\"c\",\"command\":\"${TOOL}-c\"}]}"
+  out="$home/out.txt"
+
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=24
+  report=$(cat "$out")
+  assert_contains "$report" "slow check could not be determined" "a tool that ran out of its bound was not reported as a check that could not be determined"
+  assert_not_contains "$report" "slow check failed" "a tool that ran out of its bound was reported as a check failure"
+  b_probes=$(wc -l < "$b_log" | tr -d ' ')
+  c_probes=$(wc -l < "$c_log" | tr -d ' ')
+  [ "$b_probes" = 1 ] || fail "a slow first tool left the next tool unasked (it was probed $b_probes times)"
+  [ "$c_probes" = 1 ] || fail "a slow first tool left the last tool unasked (it was probed $c_probes times)"
+  pass "a slow tool is a check that could not be determined and leaves later tools asked"
+}
+
+test_a_changed_or_returning_completeness_clause_is_silent_while_the_pending_set_holds() {
+  local home dir announce out
+  # A sweep that had to cut its own budget says so in prose that changes with the
+  # setting, and a sweep that overran names whichever tool it stopped before.
+  # Neither is a new pending update, so while the pending set is unchanged a
+  # reworded, cleared, or returning completeness clause must not wake firstmate
+  # again: the notice is a latched state that reports once for this record.
+  home=$(make_home completeness)
+  dir="$TMP_ROOT/completeness/bin"
+  announce="$TMP_ROOT/completeness/announce.txt"
+  make_announcing_copy "$dir" "$TOOL" 'fixture 1.0.0' "$announce"
+  printf 'a new version of %s is available: v1.0.0 -> v2.0.0\n' "$TOOL" > "$announce"
+  write_config "$home" "{\"tools\":[{\"name\":\"$TOOL\",\"command\":\"$TOOL\",\"announce_args\":[\"--help\"],\"announce_pattern\":\"a new version of $TOOL is available.*\"}]}"
+  out="$home/out.txt"
+
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=60
+  assert_contains "$(cat "$out")" "sweep budget 60s cut to 27s" "the cut budget was not reported at all, so this case proves nothing"
+  assert_contains "$(cat "$out")" "$TOOL update available" "the pending update was not reported"
+
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=50
+  [ ! -s "$out" ] || fail "a reworded completeness clause with the same pending set woke firstmate again: $(cat "$out")"
+  # Not vacuous: the clause really was reworded, and only the prose changed.
+  assert_contains "$(cat "$home/state/.tool-updates")" "sweep budget 50s cut to 27s" "the record did not carry the reworded clause, so the two sweeps never differed"
+
+  # The clause clears entirely, then returns. Both are silent, and the record
+  # still tracks the condition the whole time.
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=20
+  [ ! -s "$out" ] || fail "a cleared completeness clause woke firstmate: $(cat "$out")"
+  assert_not_contains "$(cat "$home/state/.tool-updates")" "sweep budget" "the record still holds the cleared clause, so it never cleared"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=60
+  [ ! -s "$out" ] || fail "a returning completeness clause woke firstmate again: $(cat "$out")"
+  assert_contains "$(cat "$home/state/.tool-updates")" "sweep budget 60s cut to 27s" "the record does not show the clause returned, so this case proves nothing"
+  pass "a changed or returning completeness clause is silent while the pending set holds"
+}
+
+test_a_returning_check_failure_is_reported_again() {
+  local home dir out
+  # The latch above is only for the notices that depend on the load the sweep
+  # ran under. A real check failure follows its condition like the pending set:
+  # once while present, silent when it clears, and news again when it returns,
+  # because a tool that drops off PATH a second time is a second incident and
+  # supervision must not lose it.
+  home=$(make_home returning-failure)
+  dir="$TMP_ROOT/returning-failure/bin"
+  make_copy "$dir" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "herdr check failed: $TOOL is not on PATH" "the check failure was not reported at all, so this case proves nothing"
+  run_check "$home" "$PATH" "$out"
+  [ ! -s "$out" ] || fail "the same check failure was reported twice: $(cat "$out")"
+
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  [ ! -s "$out" ] || fail "a cleared check failure produced a report: $(cat "$out")"
+  assert_not_contains "$(cat "$home/state/.tool-updates")" "not on PATH" "the record still holds the cleared check failure, so it never cleared"
+
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "herdr check failed: $TOOL is not on PATH" "a returning check failure was latched away instead of reported again"
+  pass "a returning check failure is reported again"
+}
+
+test_empty_identity_sets_survive_the_system_bash() {
+  local home stale fresh out path status
+  # A watcher on a host with no newer bash on PATH runs this check under the
+  # stock /bin/bash 3.2, where expanding an empty array under set -u is an
+  # unbound-variable abort. Every first sweep starts from empty identity sets
+  # and every clean sweep folds an empty notice set into the record, so an
+  # abort there leaves the check permanently silent, which is the one outcome
+  # the check exists to avoid. On a host whose /bin/bash is newer this still
+  # drives the empty sets through the interpreter the watcher would use.
+  home=$(make_home system-bash)
+  stale="$TMP_ROOT/system-bash/old/bin"
+  fresh="$TMP_ROOT/system-bash/new/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$stale:$fresh")
+
+  status=0
+  env FM_CHECK_TIMEOUT=30 FM_HOME="$home" PATH="$path" FM_TOOL_UPDATE_INTERVAL=0 \
+    /bin/bash "$CHECK" >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "first sweep under /bin/bash exit: $(cat "$out")"
+  assert_contains "$(cat "$out")" "herdr update not in effect" "the first sweep from empty identity sets did not report under /bin/bash"
+  assert_grep 'pending=herdr@0.8.2' "$home/state/.tool-updates" "the first sweep under /bin/bash did not record its pending set"
+
+  status=0
+  env FM_CHECK_TIMEOUT=30 FM_HOME="$home" PATH="$path" FM_TOOL_UPDATE_INTERVAL=0 \
+    /bin/bash "$CHECK" >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "repeat sweep under /bin/bash exit: $(cat "$out")"
+  [ ! -s "$out" ] || fail "the same pending set was reported again under /bin/bash: $(cat "$out")"
+
+  # A clean sweep folds an empty notice set and an empty pending set into a
+  # record that already holds a pending identity.
+  make_copy "$stale" "$TOOL" 'herdr 0.8.2'
+  status=0
+  env FM_CHECK_TIMEOUT=30 FM_HOME="$home" PATH="$path" FM_TOOL_UPDATE_INTERVAL=0 \
+    /bin/bash "$CHECK" >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "clean sweep under /bin/bash exit: $(cat "$out")"
+  [ ! -s "$out" ] || fail "a clean sweep produced a report under /bin/bash: $(cat "$out")"
+  assert_not_contains "$(cat "$home/state/.tool-updates")" "pending=herdr" "the clean sweep under /bin/bash did not clear the pending set"
+  pass "empty identity sets survive the system bash"
+}
+
 test_an_overlong_report_says_it_was_cut() {
   local home out report i tools=
   # Many watched tools can outgrow one line. The report must say it was cut
@@ -744,7 +981,7 @@ test_probes_are_skipped_between_intervals() {
   FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$now" \
     "$CHECK" >"$out" 2>&1 || status=$?
   expect_code 0 "$status" "first cadence run exit"
-  assert_grep 'fm-tool-updates-v1' "$home/state/.tool-updates" "the first run did not record its sweep"
+  assert_grep 'fm-tool-updates-v2' "$home/state/.tool-updates" "the first run did not record its sweep"
 
   # A finding appears, but the interval has not elapsed, so no probe runs.
   make_copy "$dir" "$TOOL" 'no version here'
@@ -785,7 +1022,7 @@ test_an_oversized_budget_is_cut_to_fit_and_reported() {
   assert_contains "$report" "sweep budget 60s cut to 27s to stay inside the watcher check timeout of 30s" "a budget that cannot fit the watcher bound was not cut and reported"
   assert_contains "$report" "herdr update not in effect" "the detector went quiet instead of sweeping with the cut budget"
 
-  # The default budget of 20s fits the default bound, so it is used as written.
+  # The default budget of 24s fits the default bound, so it is used as written.
   # The record is cleared first because the no-nag gate would otherwise suppress
   # this run, whose bare skew line differs from the cut run's line above.
   rm -f "$home/state/.tool-updates"
@@ -996,9 +1233,16 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
   out="$home/out.txt"
   err="$home/err.txt"
   status=0
+  # The window is the assertion that a wake arrives at all, not that it arrives
+  # within any particular time: a heavily loaded host can delay the watcher's
+  # own poll loop, and the check it runs is itself bounded at FM_CHECK_TIMEOUT
+  # (30s), so a 30s window failed this case for the load rather than for the
+  # contract. 90s leaves room for the watcher to start, run a fully bounded
+  # check, and emit the wake; a quiet run still returns the moment the wake
+  # lands, so the larger window costs nothing on success.
   env FM_HOME="$home" PATH="$(fixture_path "$stale:$fresh")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=0 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 \
-    "$CHECKPOINT" --seconds 10 >"$out" 2>"$err" || status=$?
+    "$CHECKPOINT" --seconds 90 >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "watcher checkpoint exit"
   assert_contains "$(cat "$out")" "check:" "the armed check did not reach the watcher as a check wake"
   assert_contains "$(cat "$out")" "tool updates: herdr update not in effect" "the wake did not carry the PATH skew report"
@@ -1031,6 +1275,13 @@ test_a_stalled_repository_probe_is_not_reported_as_not_a_repository
 test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
+test_a_reworded_finding_with_the_same_pending_set_is_silent
+test_a_tool_joining_the_pending_set_wakes_once
+test_an_overrun_is_reported_once
+test_a_slow_tool_does_not_leave_later_tools_unasked
+test_a_changed_or_returning_completeness_clause_is_silent_while_the_pending_set_holds
+test_a_returning_check_failure_is_reported_again
+test_empty_identity_sets_survive_the_system_bash
 test_an_overlong_report_says_it_was_cut
 test_a_finding_past_the_cut_is_still_reported
 test_probes_are_skipped_between_intervals
