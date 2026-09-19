@@ -1934,7 +1934,7 @@ test_gateway_stall_is_re_rung_instead_of_wedge_escalated() {
 
   # Spend the budget, then prove the pane hands back to ordinary triage having
   # DECLARED the wait rather than staying silently absorbed forever.
-  printf 'v1 first=%s attempts=2 last=%s notified=0 kind=pane\n' \
+  printf 'v1 first=%s attempts=2 last=%s notified=0\n' \
     "$(( $(date +%s) - 60 ))" "$(( $(date +%s) - 60 ))" > "$state/stalled.gateway-stall"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -2157,6 +2157,82 @@ test_gateway_stalled_secondmate_is_not_re_rung() {
     || fail "the primary's watcher sent a secondmate a gateway continue instruction"
   unset FM_FAKE_CREW_STATE
   pass "a secondmate pane showing a transient gateway error is never re-rung by the primary's watcher"
+}
+
+# --- an ordinary steer already waiting when the stall began -------------------
+# The fire-and-forget exclusion protects only the records the gateway ladder
+# writes. A steer firstmate sent BEFORE the gateway failed sits unhandled in the
+# same inbox, past its grace, and the inbox's own ladder would ring it on every
+# idle poll of the outage and escalate it after FM_TASK_INBOX_RING_MAX rings as
+# an unread instruction on a suspect worker - stuck-crewmate recovery, minutes
+# into an outage the gateway ladder is still absorbing. Ordering matters as
+# much as the gate: on a live crew that first doorbell opens a new turn, which
+# moves the recorded turn end off the API error before the gateway ladder can
+# read it, so the stall is never seen at all. Both are pinned here on the
+# inbox ladder's own persisted bookkeeping (.ring-state, the record
+# bin/fm-task-inbox-lib.sh documents): it must stay absent for every poll of
+# the stall, including the one that opens the stall record, and appear for
+# that same steer once the record drops.
+test_ordinary_steer_is_held_quiet_while_the_gateway_stall_is_open() {
+  local dir state fakebin out capture_file window pid steer ring_state i=0
+  dir=$(make_case gateway-stall-ordinary-steer); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-steered"
+  printf 'API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary — try again in a moment.' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/steered.meta"
+  printf 'working: implementing the fix\n' > "$state/steered.status"
+  printf '%s' "$(seen_sig "$state/steered.status")" > "$state/.seen-steered_status"
+  # The steer landed before the outage and is well past the inbox grace: due
+  # for a ring on the ladder's own terms.
+  steer=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_task_inbox_write "$2" steered "also fix the flaky test"' _ \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$state") || fail "could not write the ordinary steer"
+  touch -t 202001010000 "$steer"
+  ring_state="$state/steered.inbox/.ring-state"
+  record_api_error_turn_end "$state" steered
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_GATEWAY_RETRY_BACKOFF=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited during the stall: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited during the stall: $(cat "$out")"; }
+  [ -f "$state/steered.gateway-stall" ] || { reap "$pid"; fail "the watcher did not open a stall record for the pane"; }
+  [ ! -e "$ring_state" ] \
+    || { reap "$pid"; fail "the inbox ladder charged a delivery attempt for an ordinary steer during a gateway stall: $(cat "$ring_state")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a gateway stall queued a wake for the ordinary steer: $(cat "$state/.wake-queue")"; }
+  [ -f "$steer" ] || { reap "$pid"; fail "the ordinary steer disappeared from the inbox"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" 2>/dev/null || true
+
+  # The crew's next turn ends normally: the stall record drops on the next idle
+  # poll, and the inbox ladder resumes for the very same steer, starting its
+  # own count from the beginning rather than from rings it never made.
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" steered idle \
+    --gen "$("$ROOT/bin/fm-busy-event.sh" arm "$state" steered)" --source claude-hook --event stop
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_GATEWAY_RETRY_BACKOFF=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  while [ "$i" -lt 100 ]; do
+    [ -f "$ring_state" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -f "$ring_state" ] || { reap "$pid"; fail "the inbox ladder did not resume for the ordinary steer once the stall record dropped: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -f "$state/steered.gateway-stall" ] || fail "a normal turn end left the stall record open"
+  [ "$(cut -f1,2 "$ring_state")" = "$(printf '%s\t1' "${steer##*/}")" ] \
+    || fail "the resumed ladder did not start at one attempt for the waiting steer: $(cat "$ring_state")"
+  ! grep -qF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null \
+    || fail "the ordinary steer was escalated as an unread instruction: $(cat "$state/.wake-queue")"
+  unset FM_FAKE_CREW_STATE
+  pass "an ordinary steer waiting through a gateway stall is neither rung nor counted until the stall record drops, then rings on its own ladder"
 }
 
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
@@ -4607,6 +4683,7 @@ test_gateway_stall_is_re_rung_instead_of_wedge_escalated
 test_gateway_record_survives_the_harness_internal_retry
 test_gateway_record_is_dropped_after_a_long_busy_stretch
 test_gateway_stalled_secondmate_is_not_re_rung
+test_ordinary_steer_is_held_quiet_while_the_gateway_stall_is_open
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

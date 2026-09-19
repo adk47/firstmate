@@ -176,7 +176,7 @@ test_ladder_is_bounded_by_wall_clock_independently() {
   st=$(new_state horizon-bound)
   now=$(date +%s)
   rec="$st/task-b.gateway-stall"
-  printf 'v1 first=%s attempts=1 last=%s notified=0 kind=pane\n' \
+  printf 'v1 first=%s attempts=1 last=%s notified=0\n' \
     "$(( now - 4000 ))" "$(( now - 4000 ))" > "$rec"
   FM_GATEWAY_RETRY_MAX=99 FM_GATEWAY_RETRY_HORIZON=2700
   export FM_GATEWAY_RETRY_MAX FM_GATEWAY_RETRY_HORIZON

@@ -84,7 +84,6 @@
 #   FM_GATEWAY_RETRY_MAX        default 8; re-ring attempts before the budget is spent
 #   FM_GATEWAY_RETRY_HORIZON    default 2700; seconds from first stall before the budget is spent
 #   FM_GATEWAY_RETRY_BACKOFF    default "30 60 120 300"; per-attempt wait, last value repeats
-#   FM_GATEWAY_TAIL_LINES       default 10; non-blank pane lines above the footer the transient match reads
 #   FM_GATEWAY_BUSY_CLEAR_SECS  default 600; seconds of continuous busy that drop a record
 #
 # No side effects on source. Dependency-light: pure shell plus date, and the one
@@ -96,7 +95,6 @@
 FM_GATEWAY_RETRY_MAX_DEFAULT=8
 FM_GATEWAY_RETRY_HORIZON_DEFAULT=2700
 FM_GATEWAY_RETRY_BACKOFF_DEFAULT='30 60 120 300'
-FM_GATEWAY_TAIL_LINES_DEFAULT=10
 # WHY 600 SECONDS, and why seconds rather than polls. The busy signal is written
 # for the harness's ENTIRE internal retry, not only for real work:
 # docs/verification/gateway-keepalive.md records, verified on Claude Code 2.1.266,
@@ -178,12 +176,6 @@ fm_gateway_busy_clear_polls() {  # <poll-interval-secs>
   printf '%s' "$n"
 }
 
-fm_gateway_tail_lines() {
-  local n=${FM_GATEWAY_TAIL_LINES:-$FM_GATEWAY_TAIL_LINES_DEFAULT}
-  case "$n" in ''|*[!0-9]*|0) n=$FM_GATEWAY_TAIL_LINES_DEFAULT ;; esac
-  printf '%s' "$n"
-}
-
 # Seconds to wait before delivery attempt <n> (1-based). The configured ladder's
 # last value repeats for every attempt past its length, so a longer budget does
 # not need a longer ladder.
@@ -234,8 +226,8 @@ fm_gateway_text_is_permanent() {  # <text>
 
 # 0 when the rendered pane tail shows a transient gateway failure worth
 # re-ringing for. The deny list is consulted over the whole text; the transient
-# match reads only the last FM_GATEWAY_TAIL_LINES non-blank lines, which is where
-# a turn-ending API error renders, immediately above the prompt and footer.
+# match reads only the last ten non-blank lines, which is where a turn-ending
+# API error renders, immediately above the prompt and footer.
 # This match alone is NOT the stall decision - fm_gateway_stalled_now gates it
 # behind the turn-end event, which is what tells a stalled crew from one that
 # merely printed these sentences.
@@ -243,7 +235,7 @@ fm_gateway_text_is_transient() {  # <pane-text>
   local text=${1-} t
   [ -n "$text" ] || return 1
   fm_gateway_text_is_permanent "$text" && return 1
-  t=$(printf '%s\n' "$text" | grep -v '^[[:space:]]*$' | tail -n "$(fm_gateway_tail_lines)" \
+  t=$(printf '%s\n' "$text" | grep -v '^[[:space:]]*$' | tail -n 10 \
     | tr '[:upper:]' '[:lower:]')
   case "$t" in
     *'api error: 500'*|*'api error: 502'*|*'api error: 503'*|*'api error: 504'*|*'api error: 529'*) return 0 ;;

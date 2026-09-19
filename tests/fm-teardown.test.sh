@@ -1806,7 +1806,7 @@ test_teardown_removes_the_gateway_stall_record() {
   case_dir=$(make_case gateway-stall-cleanup)
   write_meta "$case_dir" local-only ship
   rec="$case_dir/state/task-x1.gateway-stall"
-  printf 'v1 first=1 attempts=8 last=1 notified=1 kind=server_error\n' > "$rec"
+  printf 'v1 first=1 attempts=8 last=1 notified=1\n' > "$rec"
 
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "gateway-stall-cleanup: forced teardown failed: $(cat "$case_dir/stderr")"

@@ -351,8 +351,17 @@ window_key() {  # <window>
 # blocking. Runs for secondmates
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
-inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc
+#
+# A task inside the gateway keep-alive ladder is quiet here, neither rung nor
+# counted, for as long as its stall record is open. During an outage the crew
+# cannot acknowledge anything, so an ordinary steer that was already waiting
+# when the gateway failed would otherwise ride this ladder into the stale wake
+# above - a wedge verdict for a crew the gateway ladder is still absorbing. The
+# gateway ladder owns the verdict while its record stands; this ladder resumes
+# untouched, with its own bookkeeping intact, once that record drops.
+inbox_steer_check() {  # <window> <task> <busy-now>
+  local w=$1 task=$2 busy=$3 action verb rec count reason ring_rc
+  ! fm_gateway_stall_open "$STATE" "$task" || return 0
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -364,10 +373,7 @@ inbox_steer_check() {  # <window> <task>
       rec=${rec% *}
       ;;
   esac
-  tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
-  if window_is_busy "$w" "$tail40"; then
-    return 0
-  fi
+  [ "$busy" -ne 0 ] || return 0
   case "$verb" in
     ring)
       ring_rc=0
@@ -464,9 +470,12 @@ gateway_busy_progress_check() {  # <window> <task> <key> <busy-now>
 # doorbell, excluded from the inbox's own re-ring ladder. During a real outage
 # the crew cannot acknowledge anything, and an ordinary steer left unhandled
 # would be escalated by that ladder into stuck-crewmate recovery - the exact
-# wedge treatment this check exists to avoid. The gateway ladder owns every
-# re-ring and both bounds (bin/fm-gateway-retry-lib.sh owns entry, exit,
-# backoff, and the budget); this function owns only the delivery and the
+# wedge treatment this check exists to avoid. The same holds for an ordinary
+# steer that was already waiting when the gateway failed, which is why
+# inbox_steer_check stands down for the whole life of the stall record and
+# why this check classifies the poll BEFORE that one runs. The gateway ladder
+# owns every re-ring and both bounds (bin/fm-gateway-retry-lib.sh owns entry,
+# exit, backoff, and the budget); this function owns only the delivery and the
 # absorb. A crew that comes back on its own simply finds the message moot.
 # Nothing here interrupts, signals, or restarts the worker.
 #
@@ -475,7 +484,7 @@ gateway_busy_progress_check() {  # <window> <task> <key> <busy-now>
 # own watcher for its own crews; this check must not piggyback on that
 # admission (docs/gateway-keepalive.md).
 gateway_stall_check() {  # <window> <task> <kind> <tail40>
-  local w=$1 task=$2 kind=$3 tail40=$4 rec paused_line
+  local w=$1 task=$2 kind=$3 tail40=$4 rec paused_line ring_rc
   [ -n "$task" ] || return 1
   [ "$kind" != secondmate ] || return 1
   [ -f "$STATE/$task.meta" ] || return 1
@@ -507,8 +516,9 @@ gateway_stall_check() {  # <window> <task> <kind> <tail40>
     triage_log "gateway keep-alive could not enqueue a continue instruction: $w"
     return 0
   fi
-  fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || true
-  triage_log "gateway keep-alive continue sent (attempt $(fm_gateway_attempts "$STATE" "$task")): $w"
+  ring_rc=0
+  fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+  triage_log "gateway keep-alive continue delivery attempt $(fm_gateway_attempts "$STATE" "$task") result=$ring_rc: $w"
   return 0
 }
 
@@ -1980,14 +1990,37 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
-    # Steering-inbox loss detection runs before the secondmate stale
-    # exemption below, because a mate's steers land in an inbox too.
-    [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
+    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    # Busy match: a backend's native semantic state when available (herdr), else
+    # the last 6 non-blank lines only (the TUI footer area, where every verified
+    # harness renders its busy indicator) so busy-looking strings in displayed
+    # content cannot suppress stale detection. Read once per window per poll and
+    # reused below so a busy verdict is consistent within one cycle.
+    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # An idle pane whose last output is a transient gateway error is a crew that
+    # needs one sentence, not a supervisor. Checked BEFORE the steering-inbox
+    # ladder and the stale bookkeeping below so the keep-alive ladder owns the
+    # window while it is running: a pane being re-rung must not have an older
+    # ordinary steer rung at it - that doorbell opens a new turn, which moves
+    # the crew's recorded turn end off the API error before this check could
+    # read it, so the stall would never be seen - nor accumulate wedge
+    # escalations for the same quiet stretch. The check is deliberately not
+    # tied to the >=2 poll stability rule the wedge timer uses - the evidence
+    # here is a specific rendered failure, not "nothing changed" - and it hands
+    # the window straight back once either bound is spent, which is when the
+    # stale bookkeeping below is the right owner again.
+    gateway_busy_progress_check "$w" "$task" "$key" "$busy_now"
+    if [ "$busy_now" -ne 0 ] && gateway_stall_check "$w" "$task" "$kind" "$tail40"; then
+      continue
+    fi
+    # Steering-inbox loss detection runs before the secondmate stale
+    # exemption below, because a mate's steers land in an inbox too.
+    [ -z "$task" ] || inbox_steer_check "$w" "$task" "$busy_now"
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
     # the pane-stale path ONLY to serve a declared wait's bounded re-surface -
     # the same declarations pause_state_class reconciles below, which is why this
@@ -1998,7 +2031,6 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -2007,25 +2039,6 @@ EOF
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
     prev=$(cat "$hf" 2>/dev/null || true)
-    # Busy match: a backend's native semantic state when available (herdr), else
-    # the last 6 non-blank lines only (the TUI footer area, where every verified
-    # harness renders its busy indicator) so busy-looking strings in displayed
-    # content cannot suppress stale detection. Read once per window per poll and
-    # reused below so a busy verdict is consistent within one cycle.
-    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
-    # An idle pane whose last output is a transient gateway error is a crew that
-    # needs one sentence, not a supervisor. Checked BEFORE the stale bookkeeping
-    # below so the keep-alive ladder owns the window while it is running: a pane
-    # being re-rung must not also accumulate wedge escalations for the same
-    # quiet stretch. The check is deliberately not tied to the >=2 poll
-    # stability rule the wedge timer uses - the evidence here is a specific
-    # rendered failure, not "nothing changed" - and it hands the window straight
-    # back once either bound is spent, which is when the stale bookkeeping below
-    # is the right owner again.
-    gateway_busy_progress_check "$w" "$task" "$key" "$busy_now"
-    if [ "$busy_now" -ne 0 ] && gateway_stall_check "$w" "$task" "$kind" "$tail40"; then
-      continue
-    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
