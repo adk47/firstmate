@@ -129,15 +129,16 @@ test_repository_text_naming_the_errors_is_not_a_stall() {
   # the harness's rendered "API Error: <5xx>" shape. The stronger case - a
   # crewmate printing that shape itself - is not this match's job and is pinned
   # on the gate, in test_the_recorded_turn_end_gates_the_ladder below.
+  # Built as printf arguments, not a heredoc inside a nested substitution:
+  # stock macOS Bash 3.2 cannot parse that shape and fails the whole file.
   local pane
-  pane=$(printf '%s\n%s' "$(cat <<'TXT'
-bin/fm-gateway-retry-lib.sh:34:# word such as "overloaded".
-docs/gateway-keepalive.md:12: the gateway's own out-of-capacity sentences
-tests/fm-gateway-keepalive.test.sh:22: All accounts are temporarily unavailable
-tests/fm-gateway-keepalive.test.sh:23: Service temporarily unavailable
-Overloaded
-TXT
-)" "$IDLE_FOOTER")
+  pane=$(printf '%s\n' \
+    'bin/fm-gateway-retry-lib.sh:34:# word such as "overloaded".' \
+    "docs/gateway-keepalive.md:12: the gateway's own out-of-capacity sentences" \
+    'tests/fm-gateway-keepalive.test.sh:22: All accounts are temporarily unavailable' \
+    'tests/fm-gateway-keepalive.test.sh:23: Service temporarily unavailable' \
+    'Overloaded' \
+    "$IDLE_FOOTER")
   fm_gateway_text_is_transient "$pane" \
     && fail "repository text mentioning overloaded and the gateway sentences was classified as a stall"
   pass "repository text naming the errors without the rendered API Error shape is not a stall"
