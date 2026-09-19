@@ -227,7 +227,7 @@ test_ship_modes_generate_clean_briefs() {
       "$id: brief lets the worker write lesson: as a standalone status line"
     assert_grep "never on a \`working:\` line" "$brief" \
       "$id: brief lets a lesson ride a working: line the watcher absorbs"
-    assert_grep "At teardown firstmate scans this task's status log for \`lesson:\` clauses" "$brief" \
+    assert_grep "Before running \`bin/fm-teardown.sh\`, which removes this task's status log, firstmate scans that log for \`lesson:\` clauses" "$brief" \
       "$id: brief missing the teardown filing route"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
@@ -855,7 +855,7 @@ test_scout_and_secondmate_scaffold() {
     "scout brief lets the worker write lesson: as a standalone status line"
   assert_grep "never on a \`working:\` line" "$brief" \
     "scout brief lets a lesson ride a working: line the watcher absorbs"
-  assert_grep "At teardown firstmate scans this task's status log for \`lesson:\` clauses" "$brief" \
+  assert_grep "Before running \`bin/fm-teardown.sh\`, which removes this task's status log, firstmate scans that log for \`lesson:\` clauses" "$brief" \
     "scout brief missing the teardown filing route"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
