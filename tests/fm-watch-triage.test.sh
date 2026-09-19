@@ -2204,6 +2204,26 @@ test_ordinary_steer_is_held_quiet_while_the_gateway_stall_is_open() {
     || { reap "$pid"; fail "the inbox ladder charged a delivery attempt for an ordinary steer during a gateway stall: $(cat "$ring_state")"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a gateway stall queued a wake for the ordinary steer: $(cat "$state/.wake-queue")"; }
   [ -f "$steer" ] || { reap "$pid"; fail "the ordinary steer disappeared from the inbox"; }
+
+  # The budget spends: the gateway ladder declares the external wait and hands
+  # the window back to ordinary triage, but its record still stands, and that
+  # record alone - not the re-ring the ladder is no longer making - is what
+  # keeps the inbox ladder quiet.
+  printf 'v1 first=%s attempts=8 last=%s notified=0\n' \
+    "$(( $(date +%s) - 4000 ))" "$(( $(date +%s) - 4000 ))" > "$state/steered.gateway-stall"
+  while [ "$i" -lt 600 ]; do
+    grep -q 'paused \[key=gateway-503\]' "$state/steered.status" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  i=0
+  grep -q 'paused \[key=gateway-503\]' "$state/steered.status" \
+    || { reap "$pid"; fail "the spent budget was not declared as an external wait: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" >/dev/null 2>&1 || true
+  [ -f "$state/steered.gateway-stall" ] || { reap "$pid"; fail "the spent stall record was dropped while the gateway was still failing"; }
+  [ ! -e "$ring_state" ] \
+    || { reap "$pid"; fail "the inbox ladder charged a delivery attempt for an ordinary steer during a declared gateway wait: $(cat "$ring_state")"; }
   reap "$pid"
   ack_stopped_cycle "$state" 2>/dev/null || true
 
@@ -2218,7 +2238,7 @@ test_ordinary_steer_is_held_quiet_while_the_gateway_stall_is_open() {
     FM_GATEWAY_RETRY_BACKOFF=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  while [ "$i" -lt 100 ]; do
+  while [ "$i" -lt 600 ]; do
     [ -f "$ring_state" ] && break
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
@@ -2233,6 +2253,43 @@ test_ordinary_steer_is_held_quiet_while_the_gateway_stall_is_open() {
     || fail "the ordinary steer was escalated as an unread instruction: $(cat "$state/.wake-queue")"
   unset FM_FAKE_CREW_STATE
   pass "an ordinary steer waiting through a gateway stall is neither rung nor counted until the stall record drops, then rings on its own ladder"
+}
+
+# --- a window that cannot be captured still escalates its unread steer -------
+# The gateway checks read the pane, so the loop skips them when the capture
+# fails - and that skip must not take the steering-inbox ladder with it. A
+# crewmate whose tmux window has died with its meta still on disk and a steer
+# unhandled in its inbox is exactly the worker firstmate needs to hear about:
+# the ladder reads an uncapturable pane as idle, charges its attempts against
+# the failed doorbells, and surfaces the unread instruction, instead of the
+# dead window dropping out of supervision for as long as it exists.
+test_uncapturable_window_still_escalates_its_unread_steer() {
+  local dir state fakebin out window pid steer
+  dir=$(make_case dead-window-unread-steer); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-gone"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/gone.meta"
+  printf 'working: implementing the fix\n' > "$state/gone.status"
+  printf '%s' "$(seen_sig "$state/gone.status")" > "$state/.seen-gone_status"
+  steer=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_task_inbox_write "$2" gone "also fix the flaky test"' _ \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$state") || fail "could not write the ordinary steer"
+  touch -t 202001010000 "$steer"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle at prompt'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_TASK_INBOX_RING_MAX=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 1800 || fail "the watcher never surfaced the unread steer of a window it cannot capture: $(cat "$out")"
+  [ -f "$steer" ] || fail "the unhandled steer disappeared from the inbox"
+  grep -qF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null \
+    || fail "an uncapturable window's unread steer was not escalated: $(cat "$state/.wake-queue" 2>/dev/null; cat "$out")"
+  [ "$(cut -f1,2 "$state/gone.inbox/.ring-state")" = "$(printf '%s\t1' "${steer##*/}")" ] \
+    || fail "the failed doorbell was not charged against the ladder: $(cat "$state/gone.inbox/.ring-state" 2>/dev/null)"
+  unset FM_FAKE_CREW_STATE
+  pass "a window that cannot be captured still has its unread steer rung, counted and escalated"
 }
 
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
@@ -4684,6 +4741,7 @@ test_gateway_record_survives_the_harness_internal_retry
 test_gateway_record_is_dropped_after_a_long_busy_stretch
 test_gateway_stalled_secondmate_is_not_re_rung
 test_ordinary_steer_is_held_quiet_while_the_gateway_stall_is_open
+test_uncapturable_window_still_escalates_its_unread_steer
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

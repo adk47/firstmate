@@ -1995,7 +1995,15 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    # A pane that cannot be captured is read as idle by the steering-inbox
+    # ladder alone, so a dead window with an unhandled steer still rings and
+    # escalates rather than vanishing from supervision; the gateway checks are
+    # skipped, so a capture blip never clears an open stall record on the
+    # strength of an empty pane.
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      [ -z "$task" ] || inbox_steer_check "$w" "$task" 1
+      continue
+    fi
     # Busy match: a backend's native semantic state when available (herdr), else
     # the last 6 non-blank lines only (the TUI footer area, where every verified
     # harness renders its busy indicator) so busy-looking strings in displayed
