@@ -1995,13 +1995,20 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
-    # A pane that cannot be captured is read as idle by the steering-inbox
-    # ladder alone, so a dead window with an unhandled steer still rings and
-    # escalates rather than vanishing from supervision; the gateway checks are
-    # skipped, so a capture blip never clears an open stall record on the
+    # A pane that cannot be captured is still served by the steering-inbox
+    # ladder, on the live classification rather than the screen: a gone
+    # endpoint is dead, never busy, so a dead window with an unhandled steer
+    # rings and escalates instead of vanishing from supervision, while a live
+    # window whose capture merely blipped keeps its recorded turn state and a
+    # busy crew is waited on rather than charged an attempt. The gateway checks
+    # are skipped, so a capture blip never clears an open stall record on the
     # strength of an empty pane.
     if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
-      [ -z "$task" ] || inbox_steer_check "$w" "$task" 1
+      if [ -n "$task" ]; then
+        verdict=$(fm_busy_classify_live "$(window_backend "$w")" "$w" "$(window_harness "$w")" "$task" "$STATE" "$(window_label "$w")")
+        if [ "${verdict%% *}" = busy ]; then busy_now=0; else busy_now=1; fi
+        inbox_steer_check "$w" "$task" "$busy_now"
+      fi
       continue
     fi
     # Busy match: a backend's native semantic state when available (herdr), else

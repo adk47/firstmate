@@ -95,6 +95,7 @@ fi
 if [ "${1:-}" = "display-message" ]; then
   case "$*" in
     *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+    *pane_id*) [ "${FM_FAKE_TMUX_PANE_ALIVE:-0}" = 1 ] || exit 1; printf '%%0\n'; exit 0 ;;
   esac
 fi
 exit 1

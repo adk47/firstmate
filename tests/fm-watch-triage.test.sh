@@ -2255,25 +2255,44 @@ test_ordinary_steer_is_held_quiet_while_the_gateway_stall_is_open() {
   pass "an ordinary steer waiting through a gateway stall is neither rung nor counted until the stall record drops, then rings on its own ladder"
 }
 
-# --- a window that cannot be captured still escalates its unread steer -------
+# --- a window that cannot be captured is served on its live classification --
 # The gateway checks read the pane, so the loop skips them when the capture
-# fails - and that skip must not take the steering-inbox ladder with it. A
-# crewmate whose tmux window has died with its meta still on disk and a steer
-# unhandled in its inbox is exactly the worker firstmate needs to hear about:
-# the ladder reads an uncapturable pane as idle, charges its attempts against
-# the failed doorbells, and surfaces the unread instruction, instead of the
-# dead window dropping out of supervision for as long as it exists.
+# fails - and that skip must not take the steering-inbox ladder with it. With
+# no screen to read, the ladder's busy gate is the LIVE classification: a gone
+# endpoint is dead, never busy, whatever its record last said, while a live
+# endpoint keeps the turn state its own hooks recorded. The two cases below
+# are the two sides of that verdict, pinned on the ladder's persisted
+# bookkeeping (.ring-state) and the wake it does or does not queue.
+
+# Writes the fixture the two cases share: a claude crew whose hooks last
+# recorded a turn IN FLIGHT, with an ordinary steer aged past the inbox grace.
+# Prints the steer's record path.
+make_uncapturable_steer_case() {  # <dir> <task>
+  local dir=$1 task=$2 state="$1/state" steer
+  printf 'window=test:fm-%s\nkind=ship\nharness=claude\n' "$task" > "$state/$task.meta"
+  printf 'working: implementing the fix\n' > "$state/$task.status"
+  printf '%s' "$(seen_sig "$state/$task.status")" > "$state/.seen-${task}_status"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" busy \
+    --gen "$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")" --source claude-hook --event user-prompt-submit
+  steer=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_task_inbox_write "$2" "$3" "also fix the flaky test"' _ \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$state" "$task") || return 1
+  touch -t 202001010000 "$steer"
+  printf '%s' "$steer"
+}
+
+# A crewmate whose tmux window has died mid-turn - the harness was killed, so
+# the Stop hook never wrote idle and the record is stuck at busy - with its
+# meta still on disk and a steer unhandled in its inbox is exactly the worker
+# firstmate needs to hear about. The dead verdict beats the stale busy record:
+# the ladder charges its attempts against the failed doorbells and surfaces
+# the unread instruction, instead of the dead window dropping out of
+# supervision for as long as it exists.
 test_uncapturable_window_still_escalates_its_unread_steer() {
   local dir state fakebin out window pid steer
   dir=$(make_case dead-window-unread-steer); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"
   window="test:fm-gone"
-  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/gone.meta"
-  printf 'working: implementing the fix\n' > "$state/gone.status"
-  printf '%s' "$(seen_sig "$state/gone.status")" > "$state/.seen-gone_status"
-  steer=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_task_inbox_write "$2" gone "also fix the flaky test"' _ \
-    "$ROOT/bin/fm-task-inbox-lib.sh" "$state") || fail "could not write the ordinary steer"
-  touch -t 202001010000 "$steer"
+  steer=$(make_uncapturable_steer_case "$dir" gone) || fail "could not write the ordinary steer"
   export FM_FAKE_CREW_STATE='state: unknown · source: none · idle at prompt'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
@@ -2289,7 +2308,37 @@ test_uncapturable_window_still_escalates_its_unread_steer() {
   [ "$(cut -f1,2 "$state/gone.inbox/.ring-state")" = "$(printf '%s\t1' "${steer##*/}")" ] \
     || fail "the failed doorbell was not charged against the ladder: $(cat "$state/gone.inbox/.ring-state" 2>/dev/null)"
   unset FM_FAKE_CREW_STATE
-  pass "a window that cannot be captured still has its unread steer rung, counted and escalated"
+  pass "a dead window's unread steer is rung, counted and escalated, whatever its stale busy record says"
+}
+
+# The other side: the endpoint is alive and mid-turn, and one poll's capture
+# simply failed. The recorded turn state stands, so the ladder waits exactly
+# as it would for a busy pane it could see - no doorbell typed into a busy
+# composer, no attempt charged, no wake.
+test_uncapturable_busy_window_is_waited_on() {
+  local dir state fakebin out window pid steer
+  dir=$(make_case live-window-capture-blip); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-blip"
+  steer=$(make_uncapturable_steer_case "$dir" blip) || fail "could not write the ordinary steer"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_TASK_INBOX_RING_MAX=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited on a busy crew's capture blip: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited on a busy crew's capture blip: $(cat "$out")"; }
+  reap "$pid"
+  [ "$(cat "$dir/capture.count" 2>/dev/null || echo 0)" -ge 2 ] || fail "the watcher did not attempt to capture the pane"
+  [ ! -e "$state/blip.inbox/.ring-state" ] \
+    || fail "a busy crew was charged a delivery attempt because one capture failed: $(cat "$state/blip.inbox/.ring-state")"
+  [ ! -s "$state/.wake-queue" ] || fail "a busy crew's capture blip queued a wake: $(cat "$state/.wake-queue")"
+  [ -f "$steer" ] || fail "the unhandled steer disappeared from the inbox"
+  unset FM_FAKE_CREW_STATE
+  pass "a live busy crew whose capture failed is waited on: no doorbell, no attempt charged, no wake"
 }
 
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
@@ -4742,6 +4791,7 @@ test_gateway_record_is_dropped_after_a_long_busy_stretch
 test_gateway_stalled_secondmate_is_not_re_rung
 test_ordinary_steer_is_held_quiet_while_the_gateway_stall_is_open
 test_uncapturable_window_still_escalates_its_unread_steer
+test_uncapturable_busy_window_is_waited_on
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
