@@ -50,22 +50,25 @@ file_bytes() { LC_ALL=C wc -c < "$1" | tr -d '[:space:]'; }
 
 # Build a synthetic status log of roughly <target-bytes> bytes carrying <keys>
 # open-then-resolved keyed transitions plus routine filler. Every key ends
-# resolved, so a correct fold leaves an EMPTY open set after the cold run.
+# resolved, so a correct fold leaves an EMPTY open set after the cold run. The
+# fold's cost is per line, not per byte, so the filler uses long lines: the byte
+# volume the probes assert on costs a few hundred lines, not tens of thousands.
 build_synthetic_log() {  # <file> <keys> <target-bytes>
   local file=$1 keys=$2 target=$3
   awk -v keys="$keys" -v target="$target" '
     BEGIN {
-      for (i = 0; i < keys; i++) {
-        printf "needs-decision [key=k%05d]: synthetic decision %05d needs an answer\n", i, i
-        printf "resolved [key=k%05d]: synthetic decision %05d was answered\n", i, i
-      }
-      pad = "working: routine lane progress padding line for realistic status log width"
-      per = length(pad) + 1
       have = 0
-      for (i = 0; i < keys; i++) have += length(sprintf("needs-decision [key=k%05d]: synthetic decision %05d needs an answer", i, i)) + 1 \
-                                          + length(sprintf("resolved [key=k%05d]: synthetic decision %05d was answered", i, i)) + 1
+      for (i = 0; i < keys; i++) {
+        open = sprintf("needs-decision [key=k%05d]: synthetic decision %05d needs an answer", i, i)
+        done = sprintf("resolved [key=k%05d]: synthetic decision %05d was answered", i, i)
+        print open; print done
+        have += length(open) + 1 + length(done) + 1
+      }
+      unit = ""
+      for (i = 0; i < 100; i++) unit = unit "routine-lane-progress-padding-"
+      per = length("working: ") + length(unit) + 6 + 1
       n = int((target - have) / per) + 1
-      for (j = 0; j < n; j++) print pad
+      for (j = 0; j < n; j++) printf "working: %s%06d\n", unit, j
     }
   ' > "$file"
 }
