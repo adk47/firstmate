@@ -2386,7 +2386,8 @@ EOF
   assert_contains "$out" "Follow the supervision operating instructions block above" "next step did not point back to the emitted supervision block"
   assert_contains "$out" "# House wiki" "next step missing the house-wiki stanza"
   assert_contains "$out" "Never claim a fact is absent from memory without grepping" "next step missing the house-wiki absence guard"
-  assert_contains "$out" "file each \`lesson:\` clause a worker carries on a status line" "next step missing the firstmate-side wiki-retro filing rule"
+  assert_contains "$out" "permitted only on a worker's \`done:\` or \`failed:\` line" "next step missing the done/failed-only lesson host rule"
+  assert_contains "$out" "At each task teardown scan that task's status log for \`lesson:\` clauses" "next step missing the firstmate-side teardown filing rule"
   assert_contains "$out" "\`lesson:\` is not a status state" "next step missing the lesson-is-a-clause rule"
   assert_contains "$out" "Never edit \`raw/\` or \`meta/\`" "next step missing the vault raw/meta guard"
 

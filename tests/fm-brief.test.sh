@@ -221,10 +221,14 @@ test_ship_modes_generate_clean_briefs() {
       "$id: brief missing the house-wiki absence guard"
     assert_grep "Never write to \`~/.llm-wiki\` from this task" "$brief" \
       "$id: brief lets the worker write the house wiki outside its worktree"
-    assert_grep "append \`lesson: {fact}\` to the end of the \`working:\` or \`done:\` line" "$brief" \
+    assert_grep "append \`lesson: {fact}\` to the end of your \`done:\` or \`failed:\` line only" "$brief" \
       "$id: brief missing the status-line lesson route"
     assert_grep "\`lesson:\` is not a status state, so never write it as its own line" "$brief" \
       "$id: brief lets the worker write lesson: as a standalone status line"
+    assert_grep "never on a \`working:\` line" "$brief" \
+      "$id: brief lets a lesson ride a working: line the watcher absorbs"
+    assert_grep "At teardown firstmate scans this task's status log for \`lesson:\` clauses" "$brief" \
+      "$id: brief missing the teardown filing route"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
@@ -845,10 +849,14 @@ test_scout_and_secondmate_scaffold() {
     "scout brief missing the house-wiki absence guard"
   assert_grep "Never write to \`~/.llm-wiki\` from this task" "$brief" \
     "scout brief lets the worker write the house wiki outside its worktree"
-  assert_grep "append \`lesson: {fact}\` to the end of the \`working:\` or \`done:\` line" "$brief" \
+  assert_grep "append \`lesson: {fact}\` to the end of your \`done:\` or \`failed:\` line only" "$brief" \
     "scout brief missing the status-line lesson route"
   assert_grep "\`lesson:\` is not a status state, so never write it as its own line" "$brief" \
     "scout brief lets the worker write lesson: as a standalone status line"
+  assert_grep "never on a \`working:\` line" "$brief" \
+    "scout brief lets a lesson ride a working: line the watcher absorbs"
+  assert_grep "At teardown firstmate scans this task's status log for \`lesson:\` clauses" "$brief" \
+    "scout brief missing the teardown filing route"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \

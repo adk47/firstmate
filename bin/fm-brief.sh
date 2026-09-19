@@ -67,7 +67,8 @@
 # Ship and scout briefs include the house-wiki stanza from
 # bin/fm-house-wiki-stanza.txt (single owner of the shared read contract) plus
 # the worker rule: never write the vault; carry `lesson: ...` as a trailing
-# clause on a working:/done: status line for firstmate to file with wiki-retro.
+# clause on the done:/failed: status line only, which firstmate scans for at
+# teardown and files with wiki-retro.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -352,7 +353,7 @@ fi
 WIKI_SECTION=$(cat "$WIKI_STANZA_FILE")
 WIKI_SECTION=${WIKI_SECTION%$'\n'}
 IFS= read -r -d '' WIKI_WORKER_RULE <<'EOF' || true
-Never write to `~/.llm-wiki` from this task. When you learn a durable Muso fact, append `lesson: {fact}` to the end of the `working:` or `done:` line you were already going to write (for example `done: {conclusion} lesson: {fact}`); `lesson:` is not a status state, so never write it as its own line. Firstmate files it with `wiki-retro`.
+Never write to `~/.llm-wiki` from this task. When you learn a durable Muso fact, append `lesson: {fact}` to the end of your `done:` or `failed:` line only (for example `done: {conclusion} lesson: {fact}`), never on a `working:` line; `lesson:` is not a status state, so never write it as its own line. At teardown firstmate scans this task's status log for `lesson:` clauses and files each with `wiki-retro`.
 EOF
 WIKI_SECTION="$WIKI_SECTION
 ${WIKI_WORKER_RULE%$'\n'}"
