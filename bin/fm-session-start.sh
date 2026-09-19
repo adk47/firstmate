@@ -55,6 +55,10 @@
 #   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
+#                       It ends with the house-wiki stanza
+#                       (bin/fm-house-wiki-stanza.txt, the shared read
+#                       contract) plus firstmate's rule for filing worker
+#                       `lesson:` clauses before teardown.
 #
 # Those nine names are also the runtime-bound stage list below, so a truncated
 # startup can name exactly which of them never ran.
