@@ -14,7 +14,8 @@
 #     pool_tracked=<names|none|unobserved>
 #     pool_unprojected=<names|none|unobserved>
 #     pool_needs_auth=<names|none|unobserved>
-#     pool_unreadable=<names|none|unobserved> pool_exhaustion=<n>h
+#     pool_unreadable=<names|none|unobserved>
+#     pool_authority=<inventory|ccflare|unobserved> pool_exhaustion=<n>h
 #     fable_reason=<token> pool_reason=<token>
 #
 # Two independent runways are reported, because the supervisor reads its own
@@ -155,11 +156,18 @@
 # carried into the line or into any child process. Each file is parsed on its
 # own, so one torn file - a proxy caught mid-rewrite, a hand-edit - costs that
 # one account rather than the whole inventory, and the inventory counts as
-# unreadable only when the directory holds no claude-*.json at all. A torn file
+# absent only when the directory holds no claude-*.json at all. A torn file
 # is could-not-determine for its account rather than a dead grant: it is named
 # in pool_unreadable, left out of both routable counts rather than counted
 # against the pool, and never named in pool_needs_auth, because a read that
 # failed is not a login the captain has to go and perform.
+#
+# pool_authority names which source decided the counts, because that is what
+# says whether a torn auth file decided anything. With better-ccflare as the
+# authority the inventory is consulted for nothing the verdict rests on, so a
+# torn file there is reported and gates nothing; with the inventory as the
+# authority the same file is could-not-determine for every set its account can
+# belong to, and the check holds rather than acts.
 #
 # Torn means unknown everywhere, never an observation. A directory whose files
 # all failed to parse is an inventory that was observed and could not be read,
@@ -513,6 +521,7 @@ named($unproj) as $unprojNames |
   (if $suppressed then "unobserved" elif $unprojNames == "" then "none" else $unprojNames end),
   (if ($haveCc | not) then "unobserved" elif $authNames == "" then "none" else $authNames end),
   (if $tornNames == "" then "none" else $tornNames end),
+  (if $useInv then "inventory" else "ccflare" end),
   (if $phrs == null then "-" else ($phrs | tostring) end),
   $verdict.reason
 ] | @tsv
@@ -649,14 +658,14 @@ pool_read() {
   if [ -z "$health" ] || [ -z "$accounts" ]; then
     ccflare=0
     if [ -z "$auth" ] || [ "$ROUTES_CCFLARE" = true ]; then
-      printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tunobserved\tunobserved\t-\tpool_unavailable\n'
+      printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tunobserved\tunobserved\tunobserved\t-\tpool_unavailable\n'
       return 0
     fi
   elif ! printf '%s' "$health" | jq -e 'type == "object"' >/dev/null 2>&1 \
     || ! printf '%s' "$accounts" | jq -e 'type == "array"' >/dev/null 2>&1; then
     ccflare=0
     if [ -z "$auth" ] || [ "$ROUTES_CCFLARE" = true ]; then
-      printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tunobserved\tunobserved\t-\tpool_response_not_recognized\n'
+      printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tunobserved\tunobserved\tunobserved\t-\tpool_response_not_recognized\n'
       return 0
     fi
   fi
@@ -668,7 +677,7 @@ pool_read() {
   printf '%s' "$accounts" \
     | jq -r --argjson now "$NOW" --argjson health "$health" --argjson auth "$auth" \
       --argjson routes_ccflare "$ROUTES_CCFLARE" "$POOL_JQ" 2>/dev/null \
-    || printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tunobserved\tunobserved\t-\tpool_response_not_readable\n'
+    || printf 'UNKNOWN\t-\t-\t-\tunobserved\tunobserved\tunobserved\tunobserved\tunobserved\tunobserved\t-\tpool_response_not_readable\n'
 }
 
 # --- main -------------------------------------------------------------------
@@ -710,7 +719,7 @@ IFS=$'\t' read -r FABLE_STATE FABLE_REM FABLE_BURN FABLE_EXH FABLE_HRS FABLE_REA
 $(fable_read)
 EOF
 
-IFS=$'\t' read -r POOL_STATE POOL_ROUTABLE POOL_CONFIGURED POOL_EXHAUSTED POOL_CAPABLE POOL_TRACKED POOL_UNPROJ POOL_AUTH POOL_TORN POOL_HRS POOL_REASON <<EOF
+IFS=$'\t' read -r POOL_STATE POOL_ROUTABLE POOL_CONFIGURED POOL_EXHAUSTED POOL_CAPABLE POOL_TRACKED POOL_UNPROJ POOL_AUTH POOL_TORN POOL_AUTHORITY POOL_HRS POOL_REASON <<EOF
 $(pool_read)
 EOF
 
@@ -733,11 +742,11 @@ EXH_PHRASE=${FABLE_EXH:--}
 [ "$POOL_CONFIGURED" = "-" ] && POOL_CONFIGURED=unknown
 [ "$POOL_EXHAUSTED" = "-" ] && POOL_EXHAUSTED=unknown
 
-printf 'fable-runway: overall=%s fable_state=%s pool_state=%s fable_remaining=%s%% fable_burn=%sx fable_exhaustion=%s(%s) pool_routable=%s/%s pool_exhausted=%s pool_capable=%s pool_tracked=%s pool_unprojected=%s pool_needs_auth=%s pool_unreadable=%s pool_exhaustion=%s fable_reason=%s pool_reason=%s\n' \
+printf 'fable-runway: overall=%s fable_state=%s pool_state=%s fable_remaining=%s%% fable_burn=%sx fable_exhaustion=%s(%s) pool_routable=%s/%s pool_exhausted=%s pool_capable=%s pool_tracked=%s pool_unprojected=%s pool_needs_auth=%s pool_unreadable=%s pool_authority=%s pool_exhaustion=%s fable_reason=%s pool_reason=%s\n' \
   "$OVERALL" "$FABLE_STATE" "$POOL_STATE" "$FABLE_REM" "$FABLE_BURN" \
   "$EXH_PHRASE" "$(fmt_hours "${FABLE_HRS:-}")" \
   "$POOL_ROUTABLE" "$POOL_CONFIGURED" "$POOL_EXHAUSTED" "$POOL_CAPABLE" \
-  "${POOL_TRACKED:-none}" "${POOL_UNPROJ:-none}" "${POOL_AUTH:-none}" "${POOL_TORN:-none}" \
+  "${POOL_TRACKED:-none}" "${POOL_UNPROJ:-none}" "${POOL_AUTH:-none}" "${POOL_TORN:-none}" "${POOL_AUTHORITY:-unobserved}" \
   "$(fmt_hours "${POOL_HRS:-}")" \
   "${FABLE_REASON:-unknown}" "${POOL_REASON:-unknown}"
 

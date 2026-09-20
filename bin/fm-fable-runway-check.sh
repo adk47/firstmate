@@ -85,10 +85,14 @@
 #     that the pool is empty. Both bounds are fixed constants: an override
 #     could only delay the one wake that cannot afford to be late.
 #
-# Both observation verbs additionally require pool_unreadable to be `none`. A
-# torn auth file is could-not-determine for its account - out of the counts and
-# out of the capable set - so either claim would be about an account nobody
-# read. The RED and the wake still happen; only the doorbell waits one poll.
+# A torn auth file is could-not-determine for its account - out of the counts,
+# out of the capable set - so while the inventory is the authority the whole
+# poll is could-not-determine and changes nothing: no episode opens, none
+# closes, the recorded capable and tracked sets stand, the torn account keeps
+# the needs-auth membership it was last observed to have, and no entrance or
+# capacity-back label is emitted for it. The RED and the wake still happen. When
+# better-ccflare is the authority the inventory decided nothing, so a torn file
+# there is reported on the line and gates none of this.
 #
 # The record state/.fable-runway holds the last printed states, the last RED
 # report time, the Fable-tracked and Fable-capable name sets as of the last poll
@@ -198,6 +202,23 @@ regained() {
   printf '%s\n' "${out# }"
 }
 
+# carried <current> <previous> <unreadable>: the current set plus every previous
+# member this poll could not read. A torn account keeps the membership it was
+# last observed to have, so a tear neither drops it from the set nor re-reports
+# it as an entrance once the file is readable again.
+carried() {
+  local cur=$1 prev=$2 torn=$3 name out IFS=','
+  out=$cur
+  [ "$prev" = none ] && { printf '%s\n' "$cur"; return 0; }
+  for name in $prev; do
+    [ -n "$name" ] || continue
+    case ",$torn," in *",$name,"*) ;; *) continue ;; esac
+    case ",$cur," in *",$name,"*) continue ;; esac
+    if [ "$out" = none ]; then out=$name; else out="$out,$name"; fi
+  done
+  printf '%s\n' "$out"
+}
+
 # entered <current> <previous>: comma-list members of current that the previous
 # set did not hold, space-separated.
 entered() {
@@ -224,7 +245,7 @@ action_check() {
   local line='' overall fable pool capable tracked needs_auth
   line=$("$MONITOR" 2>/dev/null) || true
   if [ -z "$line" ]; then
-    line="fable-runway: overall=RED fable_state=RED pool_state=UNKNOWN fable_remaining=unknown% fable_burn=unknownx fable_exhaustion=unknown(unknown) pool_routable=unknown/unknown pool_exhausted=unknown pool_capable=unobserved pool_tracked=unobserved pool_unprojected=unobserved pool_needs_auth=unobserved pool_unreadable=unobserved pool_exhaustion=unknown fable_reason=monitor_produced_no_line pool_reason=monitor_unavailable"
+    line="fable-runway: overall=RED fable_state=RED pool_state=UNKNOWN fable_remaining=unknown% fable_burn=unknownx fable_exhaustion=unknown(unknown) pool_routable=unknown/unknown pool_exhausted=unknown pool_capable=unobserved pool_tracked=unobserved pool_unprojected=unobserved pool_needs_auth=unobserved pool_unreadable=unobserved pool_authority=unobserved pool_exhaustion=unknown fable_reason=monitor_produced_no_line pool_reason=monitor_unavailable"
   fi
   overall=$(field overall "$line")
   fable=$(field fable_state "$line")
@@ -238,21 +259,33 @@ action_check() {
   [ -n "$capable" ] || capable=none
   [ -n "$tracked" ] || tracked=none
   [ -n "$needs_auth" ] || needs_auth=none
-  local observed_capable=$capable observed_routable observed_torn
+  local observed_capable=$capable observed_routable observed_torn torn_gate=0
   observed_routable=$(field pool_routable "$line")
   observed_routable=${observed_routable%%/*}
   observed_torn=$(field pool_unreadable "$line")
   [ -n "$observed_torn" ] || observed_torn=none
+  # An auth file this poll could not read makes the poll could-not-determine for
+  # every set its account can belong to - but only while the inventory is what
+  # decided the counts. With better-ccflare the authority the inventory is
+  # consulted for nothing the verdict rests on, so a torn file there is a report
+  # and nothing more, and withholding the doorbell on it would strand a RED
+  # better-ccflare observed completely.
+  if [ "$(field pool_authority "$line")" = inventory ] \
+    && [ "$observed_torn" != none ] && [ "$observed_torn" != unobserved ]; then
+    torn_gate=1
+  fi
   # A poll that did not observe membership must not be read as one that saw an
   # empty pool. The monitor says `unobserved` when no account exposed a Fable
   # window - which is also what an unreadable better-ccflare beside a readable
   # inventory prints - and UNKNOWN when it could not read the pool at all.
   local membership=1
-  if [ "$pool" = UNKNOWN ] || [ "$capable" = unobserved ] || [ "$tracked" = unobserved ]; then
+  if [ "$pool" = UNKNOWN ] || [ "$capable" = unobserved ] || [ "$tracked" = unobserved ] \
+    || [ "$torn_gate" -eq 1 ]; then
     membership=0
   fi
 
-  local last_present=0 last_overall='' last_fable='' last_pool='' last_capable='' last_tracked='' last_auth=none last_red=''
+  local last_present=0 last_overall='' last_fable='' last_pool=''
+  local last_capable=none last_tracked=none last_auth=none last_red=''
   local last_down_since='' last_down_polls=''
   if [ "$(record_get schema 2>/dev/null)" = "$RECORD_SCHEMA" ]; then
     last_present=1
@@ -338,23 +371,20 @@ action_check() {
   elif [ "$overall" != RED ]; then
     red_at=0
   fi
-  if [ "$last_present" -eq 1 ] && { [ "$print" -eq 0 ] || [ "$membership" -eq 0 ]; }; then
+  if [ "$print" -eq 0 ] || [ "$membership" -eq 0 ]; then
     capable=$last_capable
     tracked=$last_tracked
   fi
-  if [ "$last_present" -eq 1 ] && [ "$needs_auth" = unobserved ]; then
+  if [ "$needs_auth" = unobserved ]; then
     needs_auth=$last_auth
+  elif [ "$torn_gate" -eq 1 ]; then
+    needs_auth=$(carried "$needs_auth" "$last_auth" "$observed_torn")
   fi
   record_write "$overall" "$fable" "$pool" "$capable" "$tracked" "$needs_auth" "$red_at" \
     "$down_since" "$down_polls"
   # The seat cannot wait for a model turn to notice that there is nothing left
   # to serve Fable from, so the episode is handed to the plain-bash helper here
   # and closed again the first poll neither condition holds.
-  #
-  # Neither observation verb may ring on a reading an unreadable auth file could
-  # have changed: a torn file leaves its account out of the counts and out of
-  # the capable set, so both claims would be about an account nobody read. The
-  # RED and the wake stand; only the doorbell waits for a clean poll.
   #
   # Three conditions open one, and they are different claims. A routable count
   # of zero is an observation whether or not any account exposes a Fable window,
@@ -366,9 +396,18 @@ action_check() {
   # both would otherwise ring the Grok seat on a home whose pool was full the
   # whole time. So an unreadable pool opens an episode only once it has stayed
   # unreadable, and it says exactly that instead.
-  if [ "$observed_torn" = none ] && [ "$pool" = RED ] && [ "$observed_routable" = 0 ]; then
+  #
+  # A poll an unreadable auth file could have changed decides nothing either
+  # way: it neither opens an episode nor closes one, because a tear is not a
+  # recovery and resolving on it would ring the seat again the moment the file
+  # is readable. Once the pool is GREEN or YELLOW the marker may still go - one
+  # more live account cannot empty a capable set or zero a routable count, and
+  # holding it across a file that never heals would block every later episode.
+  if [ "$torn_gate" -eq 1 ] && { [ "$pool" = RED ] || [ "$pool" = UNKNOWN ]; }; then
+    :
+  elif [ "$pool" = RED ] && [ "$observed_routable" = 0 ]; then
     alert handoff-no-grant "$line"
-  elif [ "$observed_torn" = none ] && [ "$pool" = RED ] && [ "$observed_capable" = none ]; then
+  elif [ "$pool" = RED ] && [ "$observed_capable" = none ]; then
     alert handoff "$line"
   elif [ "$pool" = UNKNOWN ] && [ "$fable" = RED ] \
     && [ "$down_polls" -ge "$POOL_DOWN_POLLS" ] \

@@ -1583,6 +1583,135 @@ grep -q 'No Fable-capable account left' "$onelab"/state/fable-runway-handoff-*.m
   || fail "the clean poll's episode must name what it observed"
 pass "an unreadable auth file never underwrites a handoff, and the next clean poll does"
 
+# A tear is not a recovery. An open episode must survive a poll that could not
+# read an account, or the next clean poll rings the Grok seat a second time for
+# a RED that never lifted.
+keeplab="$TMP_ROOT/torn-keep"
+mkdir -p "$keeplab/state" "$keeplab/config"
+printf 'FM_FABLE_RUNWAY_GROK_TERMINAL=grok-seat\n' > "$keeplab/config/fable-runway.env"
+make_quota "$keeplab/quota.json" 60 0.5 none through_reset
+keepauth="$keeplab/auth"
+make_pool "$keeplab/health.json" "$keeplab/accounts.json" 5 5 0
+for acct_name in a b c d e; do
+  add_account "$keeplab/accounts.json" "spent-$acct_name" 5 100 100 100
+  make_auth_account "$keepauth" "spent-$acct_name" 8 false
+done
+run_check_in "$keeplab" "$NOW" "$keepauth" >/dev/null
+[ "$(notes_in "$keeplab")" = 1 ] || fail "the clean RED poll must open the episode"
+[ "$(wc -l < "$keeplab/orca.log")" -eq 1 ] || fail "the clean RED poll must ring once"
+# One account's file is caught mid-rewrite. The pool is still RED and nothing
+# recovered, so the episode must stand.
+printf '{"expired":"2026-' > "$keepauth/claude-spent-a.json"
+run_check_in "$keeplab" "$((NOW + 300))" "$keepauth" >/dev/null
+[ -e "$keeplab/state/.fable-runway-handoff" ] \
+  || fail "a torn poll must not close an open episode"
+# The file is readable again and the pool is unchanged: still one note, one ring.
+make_auth_account "$keepauth" spent-a 8 false
+run_check_in "$keeplab" "$((NOW + 600))" "$keepauth" >/dev/null
+[ "$(notes_in "$keeplab")" = 1 ] || fail "a tear must not produce a second handoff note"
+[ "$(wc -l < "$keeplab/orca.log")" -eq 1 ] || fail "a tear must not ring the seat twice"
+# Capacity really returns, so the episode closes and a later RED opens a new one.
+make_pool "$keeplab/health.json" "$keeplab/accounts.json" 5 5 0
+add_account "$keeplab/accounts.json" spent-a 5 40 20 100
+run_check_in "$keeplab" "$((NOW + 900))" "$keepauth" >/dev/null
+[ ! -e "$keeplab/state/.fable-runway-handoff" ] \
+  || fail "a clean healthy poll must close the episode"
+pass "a torn poll neither opens nor closes an episode; a real recovery closes it"
+
+# When better-ccflare is the authority the inventory decided nothing, so a
+# corrupt auth file there must not withhold a doorbell for a RED better-ccflare
+# observed completely - that file never heals on its own.
+ccblab="$TMP_ROOT/ccflare-torn"
+mkdir -p "$ccblab/state" "$ccblab/config"
+printf 'FM_FABLE_RUNWAY_GROK_TERMINAL=grok-seat\n' > "$ccblab/config/fable-runway.env"
+make_quota "$ccblab/quota.json" 60 0.5 none through_reset
+ccbauth="$ccblab/auth"
+mkdir -p "$ccbauth"
+make_pool "$ccblab/health.json" "$ccblab/accounts.json" 0 3 0
+for acct_name in a b c; do
+  add_account_needing_auth "$ccblab/accounts.json" "acct-$acct_name" 20 100 tokenStatus '"expired"'
+  make_auth_account "$ccbauth" "acct-$acct_name" 8 false
+done
+printf 'not json' > "$ccbauth/claude-acct-c.json"
+ccb=$(PATH="$FAKEBIN:$PATH" \
+  FM_FABLE_RUNWAY_AUTH_DIR="$ccbauth" \
+  ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
+  FM_FABLE_RUNWAY_SETTINGS_JSON="$NO_SETTINGS" \
+  FM_HOME="$ccblab" \
+  FM_FABLE_FAKE_LOG="$ccblab" \
+  FM_STATE_OVERRIDE="$ccblab/state" \
+  FM_FABLE_RUNWAY_NOW="$NOW" \
+  FM_FABLE_RUNWAY_QUOTA_JSON="$ccblab/quota.json" \
+  FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$ccblab/health.json" \
+  FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$ccblab/accounts.json" \
+  "$CHECK" check 2>/dev/null)
+expect_field "$ccb" pool_authority ccflare "ccflare-authority token"
+expect_field "$ccb" pool_unreadable acct-c "ccflare-authority unreadable names"
+expect_field "$ccb" pool_state RED "ccflare-authority pool state"
+expect_field "$ccb" pool_routable 0/3 "ccflare-authority routable"
+[ "$(notes_in "$ccblab")" = 1 ] \
+  || fail "a RED better-ccflare observed completely must still open an episode"
+grep -q "No live grant on the fleet's proxy" "$ccblab/orca.log" 2>/dev/null \
+  || fail "the doorbell must fire when the inventory decided nothing"
+pass "a corrupt auth file gates nothing while better-ccflare is the authority"
+
+# A transient tear must not re-ask the captain for a login already asked for:
+# the torn account keeps the needs-auth membership it was last observed to have.
+carrylab="$TMP_ROOT/torn-carry"
+mkdir -p "$carrylab/state"
+carryauth="$carrylab/auth"
+make_auth_account "$carryauth" acct-x -1 false
+make_auth_account "$carryauth" steady 8 false
+for acct_name in 1 2 3 4 5; do
+  make_auth_account "$carryauth" "grant-$acct_name" 8 false
+done
+make_quota "$carrylab/quota.json" 60 0.5 none through_reset
+make_pool "$carrylab/health.json" "$carrylab/accounts.json" 6 6 0
+add_account "$carrylab/accounts.json" steady 5 40 20 100
+add_account_needing_auth "$carrylab/accounts.json" acct-x 20 100 tokenStatus '"expired"'
+carry_first=$(run_check_in "$carrylab" "$NOW" "$carryauth")
+expect_field "$carry_first" pool_needs_auth acct-x "carry first poll needs-auth"
+[ "$(wc -l < "$carrylab/osascript.log")" -eq 1 ] || fail "the entrance must notify once"
+# acct-x's file is caught mid-rewrite: the monitor cannot say whether it still
+# needs a login, so the recorded set must keep it.
+printf '{"expired":"2026-' > "$carryauth/claude-acct-x.json"
+carry_torn=$(run_check_in "$carrylab" "$((NOW + 300))" "$carryauth")
+[ -z "$carry_torn" ] || fail "a torn poll that moves no state must stay silent (got: $carry_torn)"
+[ "$(wc -l < "$carrylab/osascript.log")" -eq 1 ] || fail "a torn poll must not notify"
+# The file is readable again and the login is still outstanding. The account
+# never left the recorded set, so this is no entrance: no wake, no second ask.
+make_auth_account "$carryauth" acct-x -1 false
+carry_clean=$(run_check_in "$carrylab" "$((NOW + 600))" "$carryauth")
+[ -z "$carry_clean" ] \
+  || fail "an unchanged outstanding login must not wake again (got: $carry_clean)"
+[ "$(wc -l < "$carrylab/osascript.log")" -eq 1 ] \
+  || fail "a tear must not re-ask for a login already asked for ($(cat "$carrylab/osascript.log"))"
+pass "a torn account keeps its needs-auth membership across the tear"
+
+# A torn-then-read account never came back, so it must not earn the fail-back
+# label: the poll that could not read it observed no membership at all.
+fakebacklab="$TMP_ROOT/torn-failback"
+mkdir -p "$fakebacklab/state"
+fakebackauth="$fakebacklab/auth"
+make_quota "$fakebacklab/quota.json" 60 0.5 none through_reset
+make_pool "$fakebacklab/health.json" "$fakebacklab/accounts.json" 5 5 0
+for acct_name in a b c d; do
+  add_account "$fakebacklab/accounts.json" "spent-$acct_name" 5 100 100 100
+  make_auth_account "$fakebackauth" "spent-$acct_name" 8 false
+done
+add_account "$fakebacklab/accounts.json" fresh 5 40 20 100
+printf '{"expired":"2026-' > "$fakebackauth/claude-fresh.json"
+fake_first=$(run_check_in "$fakebacklab" "$NOW" "$fakebackauth")
+expect_field "$fake_first" pool_unreadable fresh "fail-back torn poll unreadable"
+expect_field "$fake_first" pool_state RED "fail-back torn poll pool state"
+make_auth_account "$fakebackauth" fresh 8 false
+fake_clean=$(run_check_in "$fakebacklab" "$((NOW + 300))" "$fakebackauth")
+expect_field "$fake_clean" pool_state GREEN "fail-back clean poll pool state"
+case "$fake_clean" in
+  *'capacity back'*) fail "an account that was only unread never came back: $fake_clean" ;;
+esac
+pass "an account first observed on a clean read never earns the fail-back label"
+
 # A poll that observed no membership must not consume a pending regain. A
 # better-ccflare restart while the inventory still answers is exactly that poll,
 # and it is the state the drill deliberately creates.
