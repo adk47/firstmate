@@ -52,7 +52,7 @@ run_runway() {
   FM_CHAIR_CCFLARE_HEALTH_JSON="$HEALTH" \
   FM_CHAIR_CCFLARE_ACCOUNTS_JSON="$ACCOUNTS" \
   FM_CHAIR_GROK_JSON="$GROK" \
-  bash "$SCRIPT" "$@"
+  bash "$SCRIPT"
 }
 
 base_fixtures() {

@@ -44,7 +44,7 @@ run_tick() {
   FM_CHAIR_SENTINEL_HOME="$HOME_DIR" \
   FM_TEST_FLIP_LOG="$FLIP_LOG" \
   FM_CHAIR_SENTINEL_NOW=1700000000 \
-  bash "$SCRIPT" "$@"
+  bash "$SCRIPT"
 }
 
 last_log() { tail -n 1 "$HOME_DIR/data/chair-sentinel/log.jsonl"; }

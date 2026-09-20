@@ -49,7 +49,7 @@ run_status() {
   FM_TEST_ORCA_JSON="${FM_TEST_ORCA_JSON:-}" \
   FM_TEST_ORCA_SCREEN="${FM_TEST_ORCA_SCREEN:-}" \
   FM_TEST_ORCA_READ_LOG="$READ_LOG" \
-  bash "$SCRIPT" "$@"
+  bash "$SCRIPT"
 }
 
 orca_json() {  # <agentIdentity> <title> [connected] [preview]
@@ -205,7 +205,7 @@ session_file() {  # <name> <cwd> <epoch> <provider...>: a Pi session jsonl with 
   done
   printf '%s\n' "$f"
 }
-run_status_sessions() { FM_CHAIR_STATUS_PI_SESSIONS_DIR="$SESSIONS" run_status "$@"; }
+run_status_sessions() { FM_CHAIR_STATUS_PI_SESSIONS_DIR="$SESSIONS" run_status; }
 START=$(proc_start "$$")
 
 FM_TEST_ORCA_JSON=$(orca_json pi "π - firstmate")
