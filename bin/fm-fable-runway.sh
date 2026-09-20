@@ -563,7 +563,7 @@ JQ
 # path, query or trailing slash is dropped.
 url_authority() {
   local u
-  u=$(printf '%s' "${1-}" | tr 'A-Z' 'a-z')
+  u=$(printf '%s' "${1-}" | tr '[:upper:]' '[:lower:]')
   u=${u#*://}
   u=${u%%/*}
   u=${u%%\?*}
@@ -607,8 +607,8 @@ auth_read() {
     label=${f##*/}
     label=${label#claude-}
     label=${label%.json}
-    entry=$(jq -c --argjson now "$NOW" --arg label "$label" "$AUTH_JQ" "$f" 2>/dev/null)
-    if [ $? -ne 0 ] || [ -z "$entry" ]; then
+    if ! entry=$(jq -c --argjson now "$NOW" --arg label "$label" "$AUTH_JQ" "$f" 2>/dev/null) \
+      || [ -z "$entry" ]; then
       entry=$(jq -cn --arg label "$label" '{label: $label, live: null}') || continue
     fi
     entries+=("$entry")
