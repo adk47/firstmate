@@ -30,7 +30,7 @@ SH
 cat > "$STATUS" <<'SH'
 #!/usr/bin/env bash
 printf 'chair-status: chair=%s terminal=%s pid=%s reason=x\n' \
-  "${FM_TEST_CHAIR:-grok}" "${FM_TEST_TERMINAL:-term_x}" 123
+  "${FM_TEST_CHAIR:-grok}" "${FM_TEST_TERMINAL:-term_x}" "${FM_TEST_PID:-none}"
 SH
 cat > "$ORCA" <<'SH'
 #!/usr/bin/env bash
@@ -169,13 +169,72 @@ assert_contains "$out" "verification failed" "failure reported"
 assert_present "$HOME_DIR/state/.chair-flip-at" "hysteresis stamp written once the flip acted"
 assert_grep "terminal send --terminal term_x --text /exit --enter --json" "$ORCA_LOG" "/exit is submitted with Enter"
 assert_grep "terminal create --worktree path:" "$ORCA_LOG" "successor terminal created"
-assert_grep "terminal send --terminal term_new --text Take the helm" "$ORCA_LOG" "first prompt sent to the successor"
 pass "acted-then-failed flip is bounded by the hysteresis window"
+
+# --- the first prompt rides the launch command, never a post-create send ----
+
+create_line=$(grep -F "terminal create" "$ORCA_LOG")
+assert_contains "$create_line" "pi --model token-pool/claude-fable-5-1 --thinking high 'Take the helm: run bin/fm-session-start.sh, then read $HOME_DIR/data/handoff-grok-to-pi-fable.md" \
+  "the prompt is the harness's positional argument in --command"
+assert_no_grep "terminal send --terminal term_new" "$ORCA_LOG" "nothing is typed into the successor's shell"
+pass "first prompt passed as a launch argument"
 
 out=$(FM_TEST_CHAIR=grok run_flip_live to-pi-fable); code=$?
 expect_code 1 "$code" "immediate retry refuses"
 assert_contains "$out" "hysteresis" "retry lands in the hysteresis window"
 [ ! -s "$ORCA_LOG" ] || fail "retry within the window touches no terminal"
 pass "no unbounded relaunch loop after a failed verification"
+
+# --- only the harness pid status identified is ever signalled ---------------
+
+assert_dies() {  # <pid> <msg>: the pid exits within 5s (zombies count as exited)
+  local i stat
+  for i in $(seq 1 50); do
+    stat=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')
+    case "$stat" in ''|Z*) wait "$1" 2>/dev/null; return 0 ;; esac
+    sleep 0.1
+  done
+  fail "$2"
+}
+
+sleep 300 & INCUMBENT=$!
+sleep 300 & BYSTANDER=$!
+trap 'kill "$INCUMBENT" "$BYSTANDER" 2>/dev/null; fm_test_cleanup' EXIT
+rm -f "$HOME_DIR/state/.chair-flip-at"
+printf '%s\n' "$BYSTANDER" > "$HOME_DIR/state/.lock"
+out=$(FM_TEST_CHAIR=grok FM_TEST_PID="$INCUMBENT" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-pi-fable); code=$?
+assert_contains "$out" "incumbent pid $INCUMBENT still alive" "the status pid is the one waited on and signalled"
+assert_dies "$INCUMBENT" "the incumbent harness pid was not ended"
+kill -0 "$BYSTANDER" 2>/dev/null || fail "the unrelated pid in state/.lock was signalled"
+pass "SIGTERM targets the status pid, never the raw lock pid"
+
+rm -f "$HOME_DIR/state/.chair-flip-at"
+printf '%s\n' "$BYSTANDER" > "$HOME_DIR/state/.lock"
+out=$(FM_TEST_CHAIR=none FM_TEST_TERMINAL=none FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-pi-fable); code=$?
+assert_not_contains "$out" "SIGTERM" "a stale lock with a recycled pid signals nothing"
+kill -0 "$BYSTANDER" 2>/dev/null || fail "the recycled lock pid was signalled"
+assert_grep "terminal create" "$ORCA_LOG" "the successor is still launched"
+pass "chair=none pid=none -> nothing signalled, successor launched"
+
+# --- a context-full Pi with a known terminal still gets /exit ---------------
+
+sleep 300 & FULL_PI=$!
+trap 'kill "$INCUMBENT" "$BYSTANDER" "$FULL_PI" 2>/dev/null; fm_test_cleanup' EXIT
+rm -f "$HOME_DIR/state/.chair-flip-at"
+out=$(FM_TEST_CHAIR=none FM_TEST_TERMINAL=term_full FM_TEST_PID="$FULL_PI" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-pi-fable); code=$?
+assert_grep "terminal send --terminal term_full --text /exit --enter --json" "$ORCA_LOG" "/exit reaches the context-full Pi's terminal"
+assert_dies "$FULL_PI" "the context-full Pi was not ended"
+pass "chair=none with a terminal -> graceful /exit first, then SIGTERM"
+
+# --- no terminal known: the log says so before the wait + SIGTERM ------------
+
+sleep 300 & BLIND=$!
+trap 'kill "$INCUMBENT" "$BYSTANDER" "$FULL_PI" "$BLIND" 2>/dev/null; fm_test_cleanup' EXIT
+rm -f "$HOME_DIR/state/.chair-flip-at"
+out=$(FM_TEST_CHAIR=claude FM_TEST_TERMINAL=none FM_TEST_PID="$BLIND" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-pi-fable); code=$?
+assert_contains "$out" "no terminal known for incumbent pid $BLIND" "log line names the missing terminal"
+assert_no_grep "text /exit" "$ORCA_LOG" "no /exit without a terminal"
+assert_dies "$BLIND" "the terminal-less incumbent was not ended"
+pass "no terminal -> logged, then wait + SIGTERM"
 
 printf 'fm-chair-flip tests passed\n'

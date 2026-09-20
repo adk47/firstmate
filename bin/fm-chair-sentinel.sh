@@ -12,21 +12,35 @@
 # bin/fm-chair-flip.sh, and appends one line to data/chair-sentinel/log.jsonl.
 # It calls no model anywhere.
 #
-#   Fable green + chair pi-fable               -> nothing
-#   Fable green + any other chair              -> flip to-pi-fable
-#   Fable red   + Grok above floor + chair grok -> nothing
-#   Fable red   + Grok above floor + any other  -> flip to-grok
-#   otherwise (both red or unmeasurable)       -> no flip; write state/.chair-alarm
-#                                                 and print the captain-facing line
-#                                                 naming the 8080 accounts a human
-#                                                 must log in
+#   Fable green   + chair pi-fable                 -> nothing
+#   Fable green   + any other chair                -> flip to-pi-fable
+#   Fable red     + Grok above floor + chair grok  -> nothing
+#   Fable red     + Grok above floor + any other   -> flip to-grok
+#   Fable unknown + Grok above floor + chair grok  -> nothing (no alarm)
+#   Fable unknown + Grok above floor + chair pi-fable
+#                                                  -> hold for up to
+#                                                     FM_CHAIR_UNKNOWN_HOLD_TICKS
+#                                                     (default 3) consecutive
+#                                                     unknown ticks, then treat
+#                                                     Fable as red: flip to-grok
+#   Fable unknown + Grok above floor + none|other  -> flip to-grok (a live chair
+#                                                     beats no chair)
+#   otherwise (no green tank)                      -> no flip; write
+#                                                     state/.chair-alarm and print
+#                                                     the captain-facing line naming
+#                                                     the 8080 accounts a human must
+#                                                     log in
 #
 # Fable is primary. A Grok chair is a fallback for a Fable blackout and is
 # replaced as soon as Fable is green again, after the handoff file is written;
 # the actuator's 30-minute hysteresis is what stops a flapping 8317 from
-# bouncing the chair. "Any other chair" includes `none` and a foreign harness
-# such as `claude`: the actuator ends it gracefully with `/exit` before any
-# SIGTERM, and it is never an alarm.
+# bouncing the chair. Fable `unknown` (probe timeout or 5xx) is never an alarm
+# on its own and never causes a flip toward Fable. "Any other chair" includes
+# `none` and a foreign harness such as `claude`: the actuator ends it
+# gracefully with `/exit` before any SIGTERM, and it is never an alarm.
+#
+# The consecutive-unknown count lives in state/.chair-fable-unknown-ticks and
+# resets on any tick where Fable is measured.
 #
 # FM_CHAIR_SENTINEL_DRY_RUN=1 passes the dry run through to the actuator.
 #
@@ -38,6 +52,7 @@
 #   FM_CHAIR_SENTINEL_LA_DIR       LaunchAgents directory (default ~/Library/LaunchAgents)
 #   FM_CHAIR_SENTINEL_LAUNCHCTL    launchctl (default: launchctl)
 #   FM_CHAIR_SENTINEL_NOW          epoch seconds to use as now
+#   FM_CHAIR_UNKNOWN_HOLD_TICKS    consecutive Fable-unknown ticks a Pi chair is held (default 3)
 set -u
 export LC_ALL=C
 
@@ -51,6 +66,8 @@ DATA_DIR=$ABS_HOME/data
 LOG_DIR=$DATA_DIR/chair-sentinel
 LOG_FILE=$LOG_DIR/log.jsonl
 ALARM_FILE=$STATE_DIR/.chair-alarm
+UNKNOWN_TICKS_FILE=$STATE_DIR/.chair-fable-unknown-ticks
+UNKNOWN_HOLD_TICKS=${FM_CHAIR_UNKNOWN_HOLD_TICKS:-3}
 LABEL=ai.muso.chair-sentinel
 LA_DIR=${FM_CHAIR_SENTINEL_LA_DIR:-${HOME:-}/Library/LaunchAgents}
 PLIST=$LA_DIR/$LABEL.plist
@@ -97,7 +114,7 @@ flip_to() {  # <to-pi-fable|to-grok>
 }
 
 run_tick() {
-  local sensor status fable grok chair terminal decision action alarm_names flip_out flip_code source
+  local sensor status fable grok chair terminal decision action alarm_names flip_out flip_code source unknown_ticks
   sensor=$(sensor_line)
   status=$(chair_line)
   fable=$(extract_field "$sensor" fable)
@@ -105,6 +122,17 @@ run_tick() {
   chair=$(extract_field "$status" chair)
   terminal=$(extract_field "$status" terminal)
   alarm_names=$(extract_field "$sensor" names)
+
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  unknown_ticks=0
+  if [ "$fable" = unknown ]; then
+    unknown_ticks=$(cat -- "$UNKNOWN_TICKS_FILE" 2>/dev/null) || unknown_ticks=0
+    case "$unknown_ticks" in ''|*[!0-9]*) unknown_ticks=0 ;; esac
+    unknown_ticks=$((unknown_ticks + 1))
+    printf '%s\n' "$unknown_ticks" > "$UNKNOWN_TICKS_FILE" 2>/dev/null || true
+  else
+    rm -f "$UNKNOWN_TICKS_FILE" 2>/dev/null || true
+  fi
 
   decision=none
   action=none
@@ -122,12 +150,23 @@ run_tick() {
       decision=grok_blackout_chair_wrong
       action=to-grok
     fi
+  elif [ "$fable" = unknown ] && [ "$grok" = green ]; then
+    if [ "$chair" = grok ]; then
+      decision=grok_chair_ok_fable_unmeasured
+    elif [ "$chair" = pi-fable ] && [ "$unknown_ticks" -lt "$UNKNOWN_HOLD_TICKS" ]; then
+      decision=fable_unmeasured_hold
+    elif [ "$chair" = pi-fable ]; then
+      decision=fable_unmeasured_expired
+      action=to-grok
+    else
+      decision=fable_unmeasured_no_chair
+      action=to-grok
+    fi
   else
     decision=no_tank
   fi
 
   if [ "$decision" = no_tank ]; then
-    mkdir -p "$STATE_DIR" 2>/dev/null || true
     printf 'no tank: fable=%s grok=%s chair=%s\n' "$fable" "$grok" "$chair" > "$ALARM_FILE" 2>/dev/null || true
     printf 'Captain, firstmate has no tank: Fable=%s, SuperGrok=%s. better-ccflare accounts needing a human login: %s\n' \
       "$fable" "$grok" "${alarm_names:-unknown}"
@@ -147,11 +186,11 @@ run_tick() {
   mkdir -p "$LOG_DIR" 2>/dev/null || true
   local now
   now=${FM_CHAIR_SENTINEL_NOW:-$(date +%s)}
-  printf '{"at":%s,"fable":"%s","grok":"%s","chair":"%s","terminal":"%s","decision":"%s","action":"%s","source":"%s","flip_exit":%s}\n' \
-    "$now" "$fable" "$grok" "$chair" "$terminal" "$decision" "$action" "$source" "$flip_code" >> "$LOG_FILE" 2>/dev/null || true
+  printf '{"at":%s,"fable":"%s","grok":"%s","chair":"%s","terminal":"%s","decision":"%s","action":"%s","source":"%s","flip_exit":%s,"fable_unknown_ticks":%s}\n' \
+    "$now" "$fable" "$grok" "$chair" "$terminal" "$decision" "$action" "$source" "$flip_code" "$unknown_ticks" >> "$LOG_FILE" 2>/dev/null || true
 
-  printf 'chair-sentinel: fable=%s grok=%s chair=%s decision=%s action=%s source=%s flip_exit=%s\n' \
-    "$fable" "$grok" "$chair" "$decision" "$action" "$source" "$flip_code"
+  printf 'chair-sentinel: fable=%s grok=%s chair=%s decision=%s action=%s source=%s flip_exit=%s fable_unknown_ticks=%s\n' \
+    "$fable" "$grok" "$chair" "$decision" "$action" "$source" "$flip_code" "$unknown_ticks"
 }
 
 write_plist() {

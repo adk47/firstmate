@@ -96,6 +96,66 @@ assert_contains "$out" "action=to-grok" "red + grok green + claude chair flips t
 assert_grep "to-grok" "$FLIP_LOG" "flip invoked to-grok"
 pass "Fable red + Grok above floor + claude chair -> flip to-grok"
 
+# --- Fable unknown: never an alarm on its own, never a flip toward Fable ----
+
+UNKNOWN_TICKS="$HOME_DIR/state/.chair-fable-unknown-ticks"
+rm -f "$UNKNOWN_TICKS"
+
+out=$(FM_TEST_FABLE=unknown FM_TEST_GROK=green FM_TEST_CHAIR=grok run_tick)
+assert_contains "$out" "decision=grok_chair_ok_fable_unmeasured" "grok chair on a green tank is fine while Fable is unmeasured"
+assert_contains "$out" "action=none" "no flip"
+assert_not_contains "$out" "no tank" "no alarm line"
+assert_absent "$HOME_DIR/state/.chair-alarm" "no alarm file"
+[ ! -s "$FLIP_LOG" ] || fail "no flip for a grok chair while Fable is unknown"
+pass "Fable unknown + Grok green + grok chair -> nothing, no alarm"
+
+out=$(FM_TEST_FABLE=unknown FM_TEST_GROK=green FM_TEST_CHAIR=none run_tick)
+assert_contains "$out" "action=to-grok" "no chair + green Grok seats Grok"
+assert_grep "to-grok" "$FLIP_LOG" "flip invoked to-grok"
+assert_absent "$HOME_DIR/state/.chair-alarm" "no alarm"
+pass "Fable unknown + Grok green + no chair -> flip to-grok"
+
+out=$(FM_TEST_FABLE=unknown FM_TEST_GROK=green FM_TEST_CHAIR=claude run_tick)
+assert_contains "$out" "action=to-grok" "foreign chair + green Grok seats Grok"
+pass "Fable unknown + Grok green + claude chair -> flip to-grok"
+
+rm -f "$UNKNOWN_TICKS"
+out=$(FM_TEST_FABLE=green FM_TEST_CHAIR=pi-fable run_tick)
+for n in 1 2; do
+  out=$(FM_TEST_FABLE=unknown FM_TEST_GROK=green FM_TEST_CHAIR=pi-fable run_tick)
+  assert_contains "$out" "decision=fable_unmeasured_hold" "pi chair is held on unknown tick $n"
+  assert_contains "$out" "action=none" "no flip on unknown tick $n"
+  assert_contains "$out" "fable_unknown_ticks=$n" "tick $n counted"
+  [ ! -s "$FLIP_LOG" ] || fail "no flip while holding (tick $n)"
+  assert_absent "$HOME_DIR/state/.chair-alarm" "no alarm while holding"
+done
+out=$(FM_TEST_FABLE=unknown FM_TEST_GROK=green FM_TEST_CHAIR=pi-fable run_tick)
+assert_contains "$out" "decision=fable_unmeasured_expired" "third consecutive unknown tick expires the hold"
+assert_contains "$out" "action=to-grok" "expired hold flips to Grok"
+assert_grep "to-grok" "$FLIP_LOG" "flip invoked to-grok"
+pass "Fable unknown + Grok green + pi chair -> held 2 ticks, flipped on the 3rd"
+
+out=$(FM_TEST_FABLE=green FM_TEST_CHAIR=pi-fable run_tick)
+assert_contains "$out" "fable_unknown_ticks=0" "a measured tick resets the count"
+assert_absent "$UNKNOWN_TICKS" "counter file cleared"
+out=$(FM_TEST_FABLE=unknown FM_TEST_GROK=green FM_TEST_CHAIR=pi-fable run_tick)
+assert_contains "$out" "decision=fable_unmeasured_hold" "the hold starts over after a measured tick"
+assert_contains "$out" "fable_unknown_ticks=1" "count restarted"
+pass "a measured Fable tick resets the unknown hold"
+
+rm -f "$UNKNOWN_TICKS"
+out=$(FM_TEST_FABLE=unknown FM_TEST_GROK=red FM_TEST_CHAIR=pi-fable run_tick)
+assert_contains "$out" "decision=no_tank" "unknown Fable with red Grok is no tank"
+assert_contains "$out" "Captain, firstmate has no tank" "captain line printed"
+assert_contains "$out" "acctA,acctB" "captain line names the 8080 accounts"
+assert_present "$HOME_DIR/state/.chair-alarm" "alarm file written"
+[ ! -s "$FLIP_LOG" ] || fail "no flip with no green tank"
+pass "Fable unknown + Grok red -> no_tank alarm naming accounts"
+
+out=$(FM_TEST_FABLE=unknown FM_TEST_GROK=unknown FM_TEST_CHAIR=grok run_tick)
+assert_contains "$out" "decision=no_tank" "both unmeasured is no tank"
+pass "Fable unknown + Grok unknown -> no_tank"
+
 # --- dry run is forwarded to the actuator -----------------------------------
 
 out=$(FM_TEST_FABLE=green FM_TEST_CHAIR=grok run_tick)
@@ -108,7 +168,7 @@ pass "FM_CHAIR_SENTINEL_DRY_RUN reaches the actuator"
 
 [ -f "$HOME_DIR/data/chair-sentinel/log.jsonl" ] || fail "log file written"
 lines=$(wc -l < "$HOME_DIR/data/chair-sentinel/log.jsonl")
-[ "$lines" -ge 10 ] || fail "one log line per tick (got $lines)"
+[ "$lines" -ge 21 ] || fail "one log line per tick (got $lines)"
 last_log | jq -e '.decision and .action' >/dev/null || fail "log line carries decision and action"
 pass "every tick appends one jsonl line"
 

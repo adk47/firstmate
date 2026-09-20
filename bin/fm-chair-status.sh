@@ -15,23 +15,28 @@
 # `terminal` is the Orca terminal that hosts that chair. Orca exposes no
 # pid/tty field, so the match is structural and deliberately conservative: an
 # Orca terminal in this home's worktree, connected, whose `agentIdentity` equals
-# the lock harness, and whose title contains `firstmate` - the title convention
-# `bin/fm-chair-flip.sh` writes when it launches a chair. Zero matches or more
-# than one both yield `none` rather than a guess, so the actuator fails closed
-# instead of typing into the wrong terminal.
+# the lock harness. A chair this repository launches (`pi-fable`, `grok`) must
+# also carry `firstmate` in its title - the convention `bin/fm-chair-flip.sh`
+# writes; a foreign chair (`claude`) was never titled by us, so its title is not
+# consulted. Zero matches or more than one both yield `none` rather than a
+# guess, so the actuator fails closed instead of typing into the wrong terminal.
 #
 # A Pi chair whose status-bar footer reads its context as fully consumed counts
-# as `none`: a chair with no context left cannot take the helm. Only the footer
-# token Pi renders, `<NN.N>%/<window>` (e.g. `99.2%/1.0M`), is consulted - the
-# last such token in the terminal preview - and 99.0 or more is full. Prose in
-# the pane that merely mentions "100% context" never counts.
+# as `none`: a chair with no context left cannot take the helm. The footer is
+# read from the rendered screen (`orca terminal read --screen`, the only surface
+# that carries it). Only the footer token Pi renders, `<NN.N>%/<window>` (e.g.
+# `99.2%/1.0M`), is consulted - the last such token on the screen - and 99.0 or
+# more is full. Prose that merely mentions "100% context" never counts, and a
+# screen with no token is not full.
 #
 # Read-only: never writes state, never sends input.
 #
 # Test seams:
 #   FM_CHAIR_STATUS_LOCK         lock file path (default <home>/state/.lock)
 #   FM_CHAIR_STATUS_PS_CMD       override the command-line reader (echoes the cmdline for a pid)
-#   FM_CHAIR_STATUS_ORCA_CMD     override the Orca terminal enumerator (echoes JSON)
+#   FM_CHAIR_STATUS_ORCA_CMD     override the Orca CLI; called as
+#                                `terminal list --json` and
+#                                `terminal read --terminal <h> --screen --json`
 set -u
 export LC_ALL=C
 
@@ -107,37 +112,35 @@ fi
 
 # --- Orca terminal ----------------------------------------------------------
 
-enumerate_orca_terminals() {
-  if [ -n "${FM_CHAIR_STATUS_ORCA_CMD:-}" ]; then
-    "$FM_CHAIR_STATUS_ORCA_CMD" 2>/dev/null
-  else
-    orca terminal list --json 2>/dev/null
-  fi
+orca_cli() {  # <args...>
+  "${FM_CHAIR_STATUS_ORCA_CMD:-orca}" "$@" 2>/dev/null
 }
 
-context_full() {  # <preview> -> 0 when the last Pi footer token reads >= 99.0%
+context_full() {  # <terminal> -> 0 when the last Pi footer token on screen reads >= 99.0%
   local pct
-  pct=$(printf '%s\n' "$1" | grep -oE '[0-9]+\.[0-9]+%/[0-9.]+[kM]' | tail -n 1 | cut -d% -f1)
+  pct=$(orca_cli terminal read --terminal "$1" --screen --json \
+    | jq -r '.result.terminal.tail[]? // empty' 2>/dev/null \
+    | grep -oE '[0-9]+\.[0-9]+%/[0-9.]+[kM]' | tail -n 1 | cut -d% -f1)
   [ -n "$pct" ] || return 1
   awk -v p="$pct" 'BEGIN { exit !(p + 0 >= 99.0) }'
 }
 
 TERMINAL=none
 if [ "$CHAIR" != none ]; then
-  TERMS_JSON=$(enumerate_orca_terminals) || TERMS_JSON=''
+  TERMS_JSON=$(orca_cli terminal list --json) || TERMS_JSON=''
   if [ -n "$TERMS_JSON" ] && printf '%s' "$TERMS_JSON" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    case "$CHAIR" in pi-fable|grok) OURS=true ;; *) OURS=false ;; esac
     MATCHES=$(printf '%s' "$TERMS_JSON" | jq -r \
-      --arg path "$HOME_DIR" --arg harness "$CHAIR" \
+      --arg path "$HOME_DIR" --arg harness "$CHAIR" --argjson ours "$OURS" \
       '[.result.terminals[]? | select(.worktreePath == $path) | select(.connected == true)
         | select((.agentIdentity // "") == (if $harness == "pi-fable" then "pi" else $harness end))
-        | select((.title // "") | ascii_downcase | contains("firstmate"))]
-       | .[] | [.handle, .preview] | @tsv' 2>/dev/null) || MATCHES=''
+        | select(($ours | not) or ((.title // "") | ascii_downcase | contains("firstmate")))]
+       | .[].handle' 2>/dev/null) || MATCHES=''
     COUNT=$(printf '%s\n' "$MATCHES" | grep -c . 2>/dev/null || true)
     case "$COUNT" in
       1)
-        TERMINAL=$(printf '%s\n' "$MATCHES" | cut -f1)
-        PREVIEW=$(printf '%s\n' "$MATCHES" | cut -f2-)
-        if [ "$CHAIR" = pi-fable ] && context_full "$PREVIEW"; then
+        TERMINAL=$MATCHES
+        if [ "$CHAIR" = pi-fable ] && context_full "$TERMINAL"; then
           CHAIR=none
           REASON=context_full
         fi

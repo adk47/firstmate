@@ -28,13 +28,21 @@
 #      20 lines of each, and pointers to data/MEMORY-INDEX.md, data/captain.md
 #      and data/learnings.md. This is what carries memory across the flip.
 #   5. Record the attempt timestamp, then end the current chair: send `/exit`
-#      to its Orca terminal, wait up to FM_CHAIR_EXIT_WAIT_SECS (default 60) for
-#      the lock pid to die, then SIGTERM that exact pid. Never pkill -f, never a
-#      second chair on top of a first. The stamp goes first so a flip that acted
-#      and then failed verification is still bounded by the hysteresis window.
+#      to its Orca terminal whenever one is known, wait up to
+#      FM_CHAIR_EXIT_WAIT_SECS (default 60) for the harness pid to die, then
+#      SIGTERM that exact pid. The pid is the one `fm-chair-status.sh` identified
+#      as a live harness (its `pid=` field), never the raw contents of
+#      state/.lock: a stale lock whose pid was recycled by an unrelated process
+#      is `pid=none` and nothing is signalled. When no terminal is known the
+#      graceful step is skipped and the log line says so. Never pkill -f, never
+#      a second chair on top of a first. The stamp goes first so a flip that
+#      acted and then failed verification is still bounded by the hysteresis
+#      window.
 #   6. Launch the successor in a NEW Orca terminal in this home, titled
-#      `π - firstmate` or `grok - firstmate`, then send the one-line first prompt
-#      naming the handoff file.
+#      `π - firstmate` or `grok - firstmate`, with the one-line first prompt
+#      naming the handoff file passed as the harness's positional argument (the
+#      same shape bin/fm-spawn.sh uses), so nothing is typed into a shell that
+#      may still be initialising.
 #   7. Verify within FM_CHAIR_VERIFY_SECS (default 120) that state/.lock is held
 #      by a live harness pid and state/.last-watcher-beat is under
 #      FM_CHAIR_BEAT_MAX_SECS (default 300). Print the exact failure and exit
@@ -53,7 +61,6 @@
 #   FM_CHAIR_FLIP_SENSOR_CMD   override the sensor (bin/fm-chair-runway.sh)
 #   FM_CHAIR_FLIP_STATUS_CMD   override the chair status (bin/fm-chair-status.sh)
 #   FM_CHAIR_FLIP_SLEEP_CMD    sleep (default: sleep)
-#   FM_CHAIR_FLIP_SKIP_VERIFY  1 = skip step 6 (tests)
 #   FM_CHAIR_HYSTERESIS_SECS   minimum seconds between flips
 #   FM_CHAIR_EXIT_WAIT_SECS    seconds to wait for the incumbent to release the lock
 #   FM_CHAIR_VERIFY_SECS       seconds to wait for the successor lock
@@ -70,7 +77,6 @@ DATA_DIR=$ABS_HOME/data
 ORCA=${FM_CHAIR_FLIP_ORCA_CMD:-orca}
 SLEEP_CMD=${FM_CHAIR_FLIP_SLEEP_CMD:-sleep}
 DRY_RUN=${FM_CHAIR_FLIP_DRY_RUN:-0}
-SKIP_VERIFY=${FM_CHAIR_FLIP_SKIP_VERIFY:-0}
 HYSTERESIS_SECS=${FM_CHAIR_HYSTERESIS_SECS:-1800}
 EXIT_WAIT_SECS=${FM_CHAIR_EXIT_WAIT_SECS:-60}
 VERIFY_SECS=${FM_CHAIR_VERIFY_SECS:-120}
@@ -137,6 +143,8 @@ SENSOR=$(sensor_line)
 STATUS=$(chair_line)
 CHAIR=$(extract_field "$STATUS" chair)
 TERMINAL=$(extract_field "$STATUS" terminal)
+INCUMBENT_PID=$(extract_field "$STATUS" pid)
+case "$INCUMBENT_PID" in ''|*[!0-9]*) INCUMBENT_PID=none ;; esac
 
 FABLE=$(extract_field "$SENSOR" fable)
 POOL8317=$(extract_field "$SENSOR" pool8317)
@@ -268,64 +276,65 @@ log "chair-flip: handoff written: $HANDOFF"
 
 # --- end the incumbent ------------------------------------------------------
 
-lock_pid() { cat -- "$STATE_DIR/.lock" 2>/dev/null || true; }
+harness_pid_alive() {  # <pid|none>
+  [ "$1" != none ] && kill -0 "$1" 2>/dev/null
+}
 
 if [ "$DRY_RUN" != 1 ]; then
   mkdir -p "$STATE_DIR" 2>/dev/null || true
   printf '%s\n' "$NOW" > "$FLIP_STAMP"
 fi
 
-if [ "$CHAIR" != none ] && [ -n "$TERMINAL" ] && [ "$TERMINAL" != none ]; then
+if [ -n "$TERMINAL" ] && [ "$TERMINAL" != none ]; then
   run "$ORCA" terminal send --terminal "$TERMINAL" --text '/exit' --enter --json >/dev/null 2>&1 || true
+elif harness_pid_alive "$INCUMBENT_PID"; then
+  log "chair-flip: no terminal known for incumbent pid $INCUMBENT_PID (status: $STATUS); no /exit, waiting ${EXIT_WAIT_SECS}s then SIGTERM"
 fi
 
 waited=0
-while [ "$DRY_RUN" != 1 ] && [ "$waited" -lt "$EXIT_WAIT_SECS" ]; do
-  PID_NOW=$(lock_pid)
-  if [ -z "$PID_NOW" ] || ! kill -0 "$PID_NOW" 2>/dev/null; then break; fi
+while [ "$DRY_RUN" != 1 ] && [ "$waited" -lt "$EXIT_WAIT_SECS" ] && harness_pid_alive "$INCUMBENT_PID"; do
   "$SLEEP_CMD" 2
   waited=$((waited + 2))
 done
 
-PID_NOW=$(lock_pid)
-if [ "$DRY_RUN" != 1 ] && [ -n "$PID_NOW" ] && kill -0 "$PID_NOW" 2>/dev/null; then
-  log "chair-flip: incumbent pid $PID_NOW still alive after ${EXIT_WAIT_SECS}s; SIGTERM"
-  run kill -TERM "$PID_NOW" >/dev/null 2>&1 || true
+if [ "$DRY_RUN" != 1 ] && harness_pid_alive "$INCUMBENT_PID"; then
+  log "chair-flip: incumbent pid $INCUMBENT_PID still alive after ${EXIT_WAIT_SECS}s; SIGTERM"
+  run kill -TERM "$INCUMBENT_PID" >/dev/null 2>&1 || true
   waited=0
-  while [ "$waited" -lt 20 ]; do
-    kill -0 "$PID_NOW" 2>/dev/null || break
+  while [ "$waited" -lt 20 ] && harness_pid_alive "$INCUMBENT_PID"; do
     "$SLEEP_CMD" 2
     waited=$((waited + 2))
   done
 fi
 
 if [ "$DRY_RUN" != 1 ]; then
-  PID_NOW=$(lock_pid)
-  if [ -n "$PID_NOW" ] && kill -0 "$PID_NOW" 2>/dev/null; then
-    log "chair-flip: refuse to launch a second chair; incumbent pid $PID_NOW is still alive"
+  PID_NOW=$(extract_field "$(chair_line)" pid)
+  case "$PID_NOW" in ''|*[!0-9]*) PID_NOW=none ;; esac
+  if harness_pid_alive "$PID_NOW"; then
+    log "chair-flip: refuse to launch a second chair; harness pid $PID_NOW still holds the lock"
     exit 1
   fi
 fi
 
 # --- launch the successor ---------------------------------------------------
 
-PROMPT=$(printf 'Take the helm: run bin/fm-session-start.sh, then read %s and continue supervising the fleet.' "$HANDOFF")
+sh_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
-NEW_TERMINAL=none
+PROMPT=$(printf 'Take the helm: run bin/fm-session-start.sh, then read %s and continue supervising the fleet.' "$HANDOFF")
+LAUNCH_CMD="$LAUNCH $(sh_quote "$PROMPT")"
+
 if [ "$DRY_RUN" = 1 ]; then
-  log "DRY-RUN: $ORCA terminal create --worktree path:$ABS_HOME --title '$TITLE' --command '$LAUNCH' --json"
-  NEW_TERMINAL=new-terminal-dry-run
+  log "DRY-RUN: $ORCA terminal create --worktree path:$ABS_HOME --title '$TITLE' --command $(sh_quote "$LAUNCH_CMD") --json"
 else
-  CREATE_JSON=$(run_capture "$ORCA" terminal create --worktree "path:$ABS_HOME" --title "$TITLE" --command "$LAUNCH" --json 2>/dev/null) || CREATE_JSON=''
+  CREATE_JSON=$(run_capture "$ORCA" terminal create --worktree "path:$ABS_HOME" --title "$TITLE" --command "$LAUNCH_CMD" --json 2>/dev/null) || CREATE_JSON=''
   NEW_TERMINAL=$(printf '%s' "$CREATE_JSON" | jq -r '.result.terminal.handle // .result.handle // empty' 2>/dev/null) || NEW_TERMINAL=''
   [ -n "$NEW_TERMINAL" ] || { log "chair-flip: terminal create did not return a handle"; exit 1; }
+  log "chair-flip: successor launched in terminal $NEW_TERMINAL"
 fi
-
-run "$ORCA" terminal send --terminal "$NEW_TERMINAL" --text "$PROMPT" --enter --json >/dev/null 2>&1 || true
 
 # --- verify -----------------------------------------------------------------
 
-if [ "$SKIP_VERIFY" = 1 ] || [ "$DRY_RUN" = 1 ]; then
+if [ "$DRY_RUN" = 1 ]; then
   log "chair-flip: flipped to $TO (verification skipped)"
 else
   ok=0
