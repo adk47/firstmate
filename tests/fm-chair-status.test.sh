@@ -85,13 +85,24 @@ out=$(FM_TEST_CMDLINE='grok --permission-mode bypassPermissions' run_status)
 assert_contains "$out" "chair=grok" "grok command line classifies as grok"
 assert_contains "$out" "terminal=term_x" "chair terminal matched by title"
 assert_contains "$out" "harness=grok" "harness named"
+assert_contains "$out" "source=none" "a grok chair has no Fable source"
 pass "live grok harness -> chair=grok with its terminal"
 
 FM_TEST_ORCA_JSON=$(orca_json pi "π - firstmate")
 out=$(FM_TEST_CMDLINE='pi --model token-pool/claude-fable-5-1' run_status)
 assert_contains "$out" "chair=pi-fable" "pi command line classifies as pi-fable"
 assert_contains "$out" "harness=pi" "the harness itself is pi"
-pass "live pi harness -> chair=pi-fable"
+assert_contains "$out" "source=8317" "a token-pool/ model is bound to the 8317 pool"
+pass "live pi harness -> chair=pi-fable on 8317"
+
+out=$(FM_TEST_CMDLINE='pi --model anthropic/claude-fable-5-1 --thinking high' run_status)
+assert_contains "$out" "chair=pi-fable" "pi on the anthropic provider is still pi-fable"
+assert_contains "$out" "source=8080" "an anthropic/ model is bound to the 8080 gateway"
+pass "live pi harness on anthropic/ -> source=8080"
+
+out=$(FM_TEST_CMDLINE='pi --model openrouter-named/deepseek/deepseek-v4.1-flash' run_status)
+assert_contains "$out" "source=none" "a pi on neither Fable provider has no bound source"
+pass "pi on another provider -> source=none"
 
 out=$(FM_TEST_CMDLINE='/Users/x/.npm-global/bin/pi-signed --model token-pool/claude-fable-5-1' run_status)
 assert_contains "$out" "chair=pi-fable" "pi-signed is a pi chair"
@@ -117,6 +128,18 @@ for h in codex opencode kimi; do
   assert_contains "$out" "terminal=term_x" "its terminal is matched without the firstmate title"
 done
 pass "every harness bin/fm-lock.sh honours is recognised (codex, opencode, kimi)"
+
+FM_TEST_ORCA_JSON=$(printf '{"result":{"terminals":[{"handle":"term_null","worktreePath":"%s","agentIdentity":null,"title":"grok","connected":true}]}}' "$HOME_DIR")
+out=$(FM_TEST_CMDLINE='cursor-agent --trust --yolo --workspace /Users/x/firstmate' run_status)
+assert_contains "$out" "chair=cursor" "a Cursor primary is a cursor chair, never an empty label"
+assert_contains "$out" "harness=cursor" "harness named cursor"
+assert_contains "$out" "pid=$$" "its pid is reported"
+assert_contains "$out" "terminal=none" "an identity-less tab is not claimed as the cursor chair's terminal"
+pass "live cursor-agent harness -> chair=cursor, no identity-less tab match"
+
+out=$(FM_TEST_CMDLINE='/Users/x/.local/share/cursor-agent/versions/2026.09.1/index.js --trust --yolo' run_status)
+assert_contains "$out" "chair=cursor" "the versioned Cursor install form is cursor"
+pass "versioned cursor-agent install -> chair=cursor"
 
 out=$(FM_TEST_CMDLINE='/bin/zsh -l' run_status)
 assert_contains "$out" "chair=none" "a bare shell is not a chair"

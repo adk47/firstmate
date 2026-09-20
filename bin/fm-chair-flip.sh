@@ -10,6 +10,8 @@
 #
 # Order of operations (fixed, and the handoff file always comes first):
 #
+#   0. Refuse when the chair status line is unreadable (no `chair=` field): a
+#      successor is never launched blind on top of whatever holds the lock.
 #   1. Refuse unless the target is reachable. `to-grok` requires SuperGrok above
 #      its safety floor; `to-pi-fable` requires a green Fable source in
 #      `fm-chair-runway.sh` and launches Pi against that source only: the 8317
@@ -17,7 +19,9 @@
 #      the 8080 better-ccflare gateway (the `anthropic` provider with
 #      ANTHROPIC_BASE_URL=http://127.0.0.1:8080). A target reading `unknown` is
 #      never flipped toward, and Pi is never pointed at a source that is not
-#      green.
+#      green. A chair already at the target is a no-op, except a Pi chair whose
+#      bound source (`source=` in the status line) is no longer green: it is
+#      re-seated on the green source, handoff first, under the same hysteresis.
 #   2. Refuse within the hysteresis window: at most one attempt per
 #      FM_CHAIR_HYSTERESIS_SECS (default 1800) is recorded in
 #      state/.chair-flip-at.
@@ -48,9 +52,11 @@
 #      same shape bin/fm-spawn.sh uses), so nothing is typed into a shell that
 #      may still be initialising.
 #   7. Verify within FM_CHAIR_VERIFY_SECS (default 120) that state/.lock is held
-#      by a live harness pid and state/.last-watcher-beat is under
-#      FM_CHAIR_BEAT_MAX_SECS (default 300). Print the exact failure and exit
-#      nonzero otherwise.
+#      by a live harness pid other than the incumbent's and that
+#      state/.last-watcher-beat was written after this flip began (the beat file
+#      is shared, so wall-clock freshness would be satisfied by the
+#      predecessor's last beat). Print the exact failure and exit nonzero
+#      otherwise.
 #
 # Output carries `source=<8317|8080|supergrok>` so the caller can log which
 # tank the successor was launched on.
@@ -84,7 +90,6 @@ DRY_RUN=${FM_CHAIR_FLIP_DRY_RUN:-0}
 HYSTERESIS_SECS=${FM_CHAIR_HYSTERESIS_SECS:-1800}
 EXIT_WAIT_SECS=${FM_CHAIR_EXIT_WAIT_SECS:-60}
 VERIFY_SECS=${FM_CHAIR_VERIFY_SECS:-120}
-BEAT_MAX_SECS=${FM_CHAIR_BEAT_MAX_SECS:-300}
 FLIP_STAMP=$STATE_DIR/.chair-flip-at
 
 # shellcheck source=bin/fm-control-lib.sh
@@ -153,7 +158,13 @@ TERMINAL=$(extract_field "$STATUS" terminal)
 INCUMBENT_PID=$(extract_field "$STATUS" pid)
 case "$INCUMBENT_PID" in ''|*[!0-9]*) INCUMBENT_PID=none ;; esac
 INCUMBENT_HARNESS=$(extract_field "$STATUS" harness)
+CHAIR_SOURCE=$(extract_field "$STATUS" source)
 EXIT_CMD=$(fm_control_exit_command "${INCUMBENT_HARNESS:-none}") || EXIT_CMD=''
+
+if [ -z "$CHAIR" ]; then
+  log "chair-flip: refuse: chair status unreadable ($STATUS); a second chair is never launched blind"
+  exit 1
+fi
 
 FABLE=$(extract_field "$SENSOR" fable)
 POOL8317=$(extract_field "$SENSOR" pool8317)
@@ -187,13 +198,19 @@ case "$TO" in
 esac
 
 # FROM is the chair we are leaving, not the target's name: a handoff file is
-# named for the direction actually taken, and a chair already at the target is a
-# no-op.
+# named for the direction actually taken. A chair already at the target is a
+# no-op, except a Pi chair whose bound Fable source is no longer green: that
+# chair is re-seated on the source that is.
 FROM=$CHAIR
 
 if [ "$CHAIR" = "$TARGET_CHAIR" ]; then
-  log "chair-flip: no-op (chair is already $TARGET_CHAIR)"
-  exit 0
+  case "$TARGET_CHAIR:$CHAIR_SOURCE" in
+    pi-fable:8317) [ "$POOL8317" = green ] && { log "chair-flip: no-op (chair is already pi-fable on 8317, green)"; exit 0; } ;;
+    pi-fable:8080) [ "$CCFLARE" = green ] && { log "chair-flip: no-op (chair is already pi-fable on 8080, green)"; exit 0; } ;;
+    pi-fable:*) ;;
+    *) log "chair-flip: no-op (chair is already $TARGET_CHAIR)"; exit 0 ;;
+  esac
+  log "chair-flip: re-seat: chair is pi-fable on source $CHAIR_SOURCE (pool8317=$POOL8317 ccflare=$CCFLARE)"
 fi
 
 # Reachability: never flip toward unknown or red.
@@ -352,18 +369,16 @@ else
   while [ "$waited" -lt "$VERIFY_SECS" ]; do
     V_STATUS=$(chair_line)
     V_CHAIR=$(extract_field "$V_STATUS" chair)
-    if [ "$V_CHAIR" = "$FROM" ] || [ "$V_CHAIR" = none ]; then
+    V_PID=$(extract_field "$V_STATUS" pid)
+    case "$V_PID" in ''|*[!0-9]*) V_PID=none ;; esac
+    if [ "$V_CHAIR" = none ] || [ "$V_PID" = none ] || [ "$V_PID" = "$INCUMBENT_PID" ]; then
       "$SLEEP_CMD" 5
       waited=$((waited + 5))
       continue
     fi
     BEAT=$STATE_DIR/.last-watcher-beat
-    if [ -f "$BEAT" ]; then
-      AGE=$(( $(date +%s) - $(stat -f %m "$BEAT" 2>/dev/null || stat -c %Y "$BEAT" 2>/dev/null || echo 0) ))
-    else
-      AGE=999999
-    fi
-    if [ "$AGE" -lt "$BEAT_MAX_SECS" ]; then
+    BEAT_AT=$(stat -f %m "$BEAT" 2>/dev/null || stat -c %Y "$BEAT" 2>/dev/null || echo 0)
+    if [ "$BEAT_AT" -gt "$NOW" ]; then
       ok=1
       break
     fi
@@ -371,7 +386,7 @@ else
     waited=$((waited + 5))
   done
   if [ "$ok" != 1 ]; then
-    log "chair-flip: verification failed after ${VERIFY_SECS}s: chair=$(extract_field "$(chair_line)" chair) beat_age=${AGE:-unknown}s (want chair!=none and beat<${BEAT_MAX_SECS}s)"
+    log "chair-flip: verification failed after ${VERIFY_SECS}s: status=$(chair_line) beat_at=${BEAT_AT:-none} flip_started=$NOW (want a live harness pid other than $INCUMBENT_PID and a watcher beat written after the flip began)"
     exit 1
   fi
 fi

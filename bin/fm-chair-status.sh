@@ -6,7 +6,7 @@
 #
 # Prints one line and exits 0 always (this is a sensor):
 #
-#   chair=<pi-fable|grok|claude|codex|opencode|kimi|cursor|none> harness=<pi|grok|claude|...|none> terminal=<handle|none> pid=<n|none> reason=<token>
+#   chair=<pi-fable|grok|claude|codex|opencode|kimi|cursor|none> harness=<pi|grok|claude|...|none> source=<8317|8080|none> terminal=<handle|none> pid=<n|none> reason=<token>
 #
 # `harness` is read from state/.lock: the verified harness holding the lock as
 # a live pid, decided by the fleet's single owner of that question,
@@ -18,6 +18,11 @@
 # is `pi-fable`, every other harness is its own name, and a Pi chair with no
 # context left is `none` (below) while `harness` and `pid` still name it so the
 # actuator can end it gracefully.
+#
+# `source` is the Fable source a Pi chair is bound to, read from its command
+# line: a `token-pool/` model is the 8317 pool, an `anthropic/` model is the
+# 8080 better-ccflare gateway (the two providers bin/fm-chair-flip.sh launches
+# with). Any other chair, or a Pi on neither provider, is `none`.
 #
 # `terminal` is the Orca terminal that hosts that chair. Orca exposes no
 # pid/tty field, so the match is structural and deliberately conservative: an
@@ -91,15 +96,24 @@ harness_name() {  # <comm> <args> -> the verified harness name, or return 1
     name=claude
   else
     name=$(fm_harness_path_name "$1") || name=$(fm_harness_path_name "${2%% *}") \
-      || name=$(printf '%s %s' "$(basename -- "$1")" "$2" | grep -oE 'codex|opencode|grok|kimi|pi-signed|pi' | head -1) \
-      || name=cursor
+      || name=$(printf '%s %s' "$(basename -- "$1")" "$2" | grep -oE 'codex|opencode|grok|kimi|pi-signed|pi' | head -1)
+    [ -n "$name" ] || name=cursor
   fi
   printf '%s\n' "$name"
+}
+
+chair_source() {  # <args> -> the Fable source a pi command line is bound to
+  case "$1" in
+    *token-pool/*) printf '8317\n' ;;
+    *anthropic/*) printf '8080\n' ;;
+    *) printf 'none\n' ;;
+  esac
 }
 
 PID=none
 HARNESS=none
 CHAIR=none
+SOURCE=none
 REASON=no_lock
 if [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ]; then
   LOCK_PID=$(cat -- "$LOCK_FILE" 2>/dev/null) || LOCK_PID=''
@@ -111,7 +125,7 @@ if [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ]; then
         if H=$(harness_name "$PROC_COMM" "$PROC_ARGS"); then
           PID=$LOCK_PID
           HARNESS=$H
-          case "$H" in pi|pi-signed) CHAIR=pi-fable ;; *) CHAIR=$H ;; esac
+          case "$H" in pi|pi-signed) CHAIR=pi-fable; SOURCE=$(chair_source "$PROC_ARGS") ;; *) CHAIR=$H ;; esac
           REASON=live_harness
         else
           REASON=holder_not_harness
@@ -169,6 +183,6 @@ if [ "$CHAIR" != none ]; then
   fi
 fi
 
-printf 'chair-status: chair=%s harness=%s terminal=%s pid=%s reason=%s\n' \
-  "$CHAIR" "$HARNESS" "$TERMINAL" "$PID" "$REASON"
+printf 'chair-status: chair=%s harness=%s source=%s terminal=%s pid=%s reason=%s\n' \
+  "$CHAIR" "$HARNESS" "$SOURCE" "$TERMINAL" "$PID" "$REASON"
 exit 0

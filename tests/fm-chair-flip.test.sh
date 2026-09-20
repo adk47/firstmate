@@ -29,10 +29,15 @@ printf 'chair-runway: fable=%s pool8317=%s probe=x ccflare=%s routable=0/11 need
 SH
 cat > "$STATUS" <<'SH'
 #!/usr/bin/env bash
-c=${FM_TEST_CHAIR:-grok}
+[ "${FM_TEST_STATUS_EMPTY:-0}" = 1 ] && exit 0
+c=${FM_TEST_CHAIR:-grok}; pid=${FM_TEST_PID:-none}
+# After the successor has been created, report it as the new lock holder.
+if [ -n "${FM_TEST_CHAIR_AFTER:-}" ] && grep -q "terminal create" "${FM_TEST_ORCA_LOG:-/dev/null}" 2>/dev/null; then
+  c=$FM_TEST_CHAIR_AFTER; pid=${FM_TEST_PID_AFTER:-none}
+fi
 case "$c" in pi-fable) h=pi ;; none) h=${FM_TEST_HARNESS:-none} ;; *) h=$c ;; esac
-printf 'chair-status: chair=%s harness=%s terminal=%s pid=%s reason=x\n' \
-  "$c" "$h" "${FM_TEST_TERMINAL:-term_x}" "${FM_TEST_PID:-none}"
+printf 'chair-status: chair=%s harness=%s source=%s terminal=%s pid=%s reason=x\n' \
+  "$c" "$h" "${FM_TEST_SOURCE:-none}" "${FM_TEST_TERMINAL:-term_x}" "$pid"
 SH
 cat > "$ORCA" <<'SH'
 #!/usr/bin/env bash
@@ -64,8 +69,14 @@ run_flip_live() {  # <to>: no dry run, Orca replaced by the recording stub
   FM_CHAIR_FLIP_SLEEP_CMD=true \
   FM_CHAIR_FLIP_ORCA_CMD="${FM_TEST_ORCA_CMD:-$ORCA}" \
   FM_TEST_ORCA_LOG="$ORCA_LOG" \
-  FM_CHAIR_VERIFY_SECS=0 \
+  FM_CHAIR_VERIFY_SECS="${FM_TEST_VERIFY_SECS:-0}" \
   bash "$SCRIPT" "$@"
+}
+
+touch_at() {  # <epoch> <file>: set the file's mtime to an exact epoch second
+  local ts
+  ts=$(date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null) || ts=$(date -d "@$1" +%Y%m%d%H%M.%S)
+  touch -t "$ts" "$2"
 }
 
 # --- dry run writes the handoff and prints commands -------------------------
@@ -143,10 +154,39 @@ expect_code 1 "$code" "fable green with no green pool refuses"
 assert_contains "$out" "no green Fable source" "refusal names the missing source"
 pass "refuses when no concrete Fable source is green"
 
-out=$(FM_TEST_FABLE=green FM_TEST_CHAIR=pi-fable run_flip to-pi-fable); code=$?
-expect_code 0 "$code" "already-there is a no-op"
+out=$(FM_TEST_POOL8317=green FM_TEST_CCFLARE=red FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=8317 run_flip to-pi-fable); code=$?
+expect_code 0 "$code" "already-there on a green source is a no-op"
 assert_contains "$out" "no-op" "no-op reported"
-pass "no-op when the chair is already at the target"
+assert_not_contains "$out" "terminal create" "nothing launched"
+pass "no-op when the chair is already pi-fable on its green source"
+
+out=$(FM_TEST_FABLE=red FM_TEST_GROK=green FM_TEST_CHAIR=grok run_flip to-grok); code=$?
+expect_code 0 "$code" "grok already seated is a no-op"
+assert_contains "$out" "no-op" "no-op reported"
+pass "no-op when the chair is already grok"
+
+# --- a pi chair on a red source is re-seated on the green one ---------------
+
+rm -f "$HOME_DIR/state/.chair-flip-at"
+out=$(FM_TEST_POOL8317=red FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=8317 run_flip to-pi-fable); code=$?
+expect_code 0 "$code" "8317-bound chair with 8317 red re-seats"
+assert_contains "$out" "re-seat" "re-seat reported"
+assert_contains "$out" "DRY-RUN: orca terminal send --terminal term_x --text /quit --enter --json" "the starved Pi is asked to /quit first"
+assert_contains "$out" "anthropic/claude-fable-5-1" "the successor is launched on 8080"
+assert_contains "$out" "source=8080" "source recorded"
+assert_present "$HOME_DIR/data/handoff-pi-fable-to-pi-fable.md" "handoff written first"
+pass "pi on 8317 (red) -> re-seated on 8080"
+
+out=$(FM_TEST_POOL8317=green FM_TEST_CCFLARE=red FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=8080 run_flip to-pi-fable); code=$?
+expect_code 0 "$code" "8080-bound chair with 8080 red re-seats"
+assert_contains "$out" "token-pool/claude-fable-5-1" "the successor is launched on 8317"
+assert_contains "$out" "source=8317" "source recorded"
+pass "pi on 8080 (red) -> re-seated on 8317"
+
+out=$(FM_TEST_POOL8317=red FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=none run_flip to-pi-fable); code=$?
+expect_code 0 "$code" "a pi with no known bound source re-seats onto the green source"
+assert_contains "$out" "source=8080" "green source chosen"
+pass "pi with unknown bound source -> re-seated"
 
 # --- hysteresis -------------------------------------------------------------
 
@@ -155,6 +195,44 @@ out=$(FM_TEST_FABLE=green FM_TEST_CHAIR=grok FM_CHAIR_HYSTERESIS_SECS=1800 run_f
 expect_code 1 "$code" "hysteresis refuses"
 assert_contains "$out" "hysteresis" "hysteresis refusal reported"
 pass "refuses within the hysteresis window"
+
+# --- an unreadable status line never launches a chair blind -----------------
+
+rm -f "$HOME_DIR/state/.chair-flip-at"
+out=$(FM_TEST_STATUS_EMPTY=1 run_flip_live to-pi-fable); code=$?
+expect_code 1 "$code" "empty status refuses"
+assert_contains "$out" "status unreadable" "refusal names the unreadable status"
+assert_absent "$HOME_DIR/state/.chair-flip-at" "no stamp"
+assert_absent "$HOME_DIR/data/handoff--to-pi-fable.md" "no handoff"
+[ ! -s "$ORCA_LOG" ] || fail "no terminal touched"
+pass "empty status line -> refuse before any side effect"
+
+# --- verification demands a beat written after the flip began ---------------
+
+BEAT="$HOME_DIR/state/.last-watcher-beat"
+rm -f "$HOME_DIR/state/.chair-flip-at"
+touch_at "$(( $(date +%s) - 5 ))" "$BEAT"
+out=$(FM_TEST_CHAIR=grok FM_TEST_CHAIR_AFTER=pi-fable FM_TEST_PID_AFTER=$$ FM_TEST_VERIFY_SECS=5 run_flip_live to-pi-fable); code=$?
+expect_code 1 "$code" "a predecessor's fresh beat does not verify the successor"
+assert_contains "$out" "verification failed" "failure reported"
+assert_contains "$out" "beat written after the flip began" "the beat criterion is named"
+pass "successor lock + predecessor beat -> verification fails"
+
+rm -f "$HOME_DIR/state/.chair-flip-at"
+touch_at "$(( $(date +%s) + 120 ))" "$BEAT"
+out=$(FM_TEST_CHAIR=grok FM_TEST_CHAIR_AFTER=pi-fable FM_TEST_PID_AFTER=$$ FM_TEST_VERIFY_SECS=5 run_flip_live to-pi-fable); code=$?
+expect_code 0 "$code" "a beat after the flip began verifies"
+assert_contains "$out" "flipped grok -> to-pi-fable source=8317" "flip reported"
+pass "successor lock + post-start beat -> verified"
+
+sleep 300 & STUCK=$!
+trap 'kill "$STUCK" 2>/dev/null; fm_test_cleanup' EXIT
+rm -f "$HOME_DIR/state/.chair-flip-at"
+out=$(FM_TEST_CHAIR=grok FM_TEST_PID="$STUCK" FM_TEST_CHAIR_AFTER=grok FM_TEST_PID_AFTER="$STUCK" FM_CHAIR_EXIT_WAIT_SECS=4 FM_TEST_VERIFY_SECS=5 run_flip_live to-pi-fable); code=$?
+expect_code 1 "$code" "the incumbent pid still on the lock does not verify, even with a fresh beat"
+assert_contains "$out" "verification failed" "failure reported"
+pass "predecessor pid still on the lock -> verification fails"
+rm -f "$BEAT"
 
 # --- never end the incumbent when Orca cannot launch the successor ----------
 
@@ -168,7 +246,7 @@ assert_absent "$HOME_DIR/data/handoff-grok-to-pi-fable.md" "refused before the h
 pass "orca missing -> refuse before any side effect"
 
 sleep 300 & DOWN_PI=$!
-trap 'kill "$DOWN_PI" 2>/dev/null; fm_test_cleanup' EXIT
+trap 'kill "$STUCK" "$DOWN_PI" 2>/dev/null; fm_test_cleanup' EXIT
 rm -f "$HOME_DIR/state/.chair-flip-at" "$HOME_DIR/data/handoff-pi-fable-to-grok.md"
 out=$(FM_TEST_ORCA_DOWN=1 FM_TEST_CHAIR=pi-fable FM_TEST_TERMINAL=none FM_TEST_PID="$DOWN_PI" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-grok); code=$?
 expect_code 1 "$code" "orca on PATH but not answering refuses"
@@ -218,7 +296,7 @@ assert_dies() {  # <pid> <msg>: the pid exits within 5s (zombies count as exited
 
 sleep 300 & INCUMBENT=$!
 sleep 300 & BYSTANDER=$!
-trap 'kill "$DOWN_PI" "$INCUMBENT" "$BYSTANDER" 2>/dev/null; fm_test_cleanup' EXIT
+trap 'kill "$STUCK" "$DOWN_PI" "$INCUMBENT" "$BYSTANDER" 2>/dev/null; fm_test_cleanup' EXIT
 rm -f "$HOME_DIR/state/.chair-flip-at"
 printf '%s\n' "$BYSTANDER" > "$HOME_DIR/state/.lock"
 out=$(FM_TEST_CHAIR=grok FM_TEST_PID="$INCUMBENT" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-pi-fable); code=$?
@@ -238,7 +316,7 @@ pass "chair=none pid=none -> nothing signalled, successor launched"
 # --- a context-full Pi with a known terminal still gets /exit ---------------
 
 sleep 300 & FULL_PI=$!
-trap 'kill "$DOWN_PI" "$INCUMBENT" "$BYSTANDER" "$FULL_PI" 2>/dev/null; fm_test_cleanup' EXIT
+trap 'kill "$STUCK" "$DOWN_PI" "$INCUMBENT" "$BYSTANDER" "$FULL_PI" 2>/dev/null; fm_test_cleanup' EXIT
 rm -f "$HOME_DIR/state/.chair-flip-at"
 out=$(FM_TEST_CHAIR=none FM_TEST_HARNESS=pi FM_TEST_TERMINAL=term_full FM_TEST_PID="$FULL_PI" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-pi-fable); code=$?
 assert_grep "terminal send --terminal term_full --text /quit --enter --json" "$ORCA_LOG" "/quit (Pi's exit command) reaches the context-full Pi's terminal"
@@ -249,7 +327,7 @@ pass "chair=none pi with a terminal -> graceful /quit first, then SIGTERM"
 # --- no terminal known: the log says so before the wait + SIGTERM ------------
 
 sleep 300 & BLIND=$!
-trap 'kill "$DOWN_PI" "$INCUMBENT" "$BYSTANDER" "$FULL_PI" "$BLIND" 2>/dev/null; fm_test_cleanup' EXIT
+trap 'kill "$STUCK" "$DOWN_PI" "$INCUMBENT" "$BYSTANDER" "$FULL_PI" "$BLIND" 2>/dev/null; fm_test_cleanup' EXIT
 rm -f "$HOME_DIR/state/.chair-flip-at"
 out=$(FM_TEST_CHAIR=claude FM_TEST_TERMINAL=none FM_TEST_PID="$BLIND" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-pi-fable); code=$?
 assert_contains "$out" "no terminal or exit command known for incumbent claude pid $BLIND" "log line names the missing terminal"

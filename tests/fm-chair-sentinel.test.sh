@@ -19,12 +19,12 @@ FLIP_LOG="$TMP_ROOT/flip.log"
 cat > "$SENSOR" <<'SH'
 #!/usr/bin/env bash
 printf 'chair-runway: fable=%s pool8317=%s ccflare=%s routable=0/11 needs_reauth=%s names=%s grok=%s grok_pct=%s reason=x\n' \
-  "${FM_TEST_FABLE:-green}" x x "${FM_TEST_REAUTH:-11}" "${FM_TEST_NAMES:-acctA,acctB}" "${FM_TEST_GROK:-red}" "${FM_TEST_GROK_PCT:-1}"
+  "${FM_TEST_FABLE:-green}" "${FM_TEST_POOL8317:-x}" "${FM_TEST_CCFLARE:-x}" "${FM_TEST_REAUTH:-11}" "${FM_TEST_NAMES:-acctA,acctB}" "${FM_TEST_GROK:-red}" "${FM_TEST_GROK_PCT:-1}"
 SH
 cat > "$STATUS" <<'SH'
 #!/usr/bin/env bash
-printf 'chair-status: chair=%s terminal=%s pid=%s reason=x\n' \
-  "${FM_TEST_CHAIR:-pi-fable}" term_test 123
+printf 'chair-status: chair=%s harness=x source=%s terminal=%s pid=%s reason=x\n' \
+  "${FM_TEST_CHAIR:-pi-fable}" "${FM_TEST_SOURCE:-none}" term_test 123
 SH
 cat > "$FLIP" <<'SH'
 #!/usr/bin/env bash
@@ -82,6 +82,34 @@ assert_contains "$out" "Captain, firstmate has no tank" "captain line printed"
 assert_contains "$out" "acctA,acctB" "captain line names accounts"
 assert_present "$HOME_DIR/state/.chair-alarm" "alarm file written"
 pass "both red -> no flip, alarm, captain line"
+
+# --- a pi chair on a red source is re-seated on the green one ---------------
+
+out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=red FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=8317 run_tick)
+assert_contains "$out" "decision=chair_source_red_reseat" "8317-bound chair with 8317 red and 8080 green is re-seated"
+assert_contains "$out" "action=to-pi-fable" "re-seat goes through to-pi-fable"
+assert_grep "to-pi-fable" "$FLIP_LOG" "flip invoked"
+assert_absent "$HOME_DIR/state/.chair-alarm" "not an alarm"
+pass "pi on 8317, 8317 red, 8080 green -> re-seat to-pi-fable"
+
+out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=red FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=8080 run_tick)
+assert_contains "$out" "decision=chair_source_red_reseat" "8080-bound chair with 8080 red and 8317 green is re-seated"
+assert_contains "$out" "action=to-pi-fable" "re-seat goes through to-pi-fable"
+pass "pi on 8080, 8080 red, 8317 green -> re-seat to-pi-fable"
+
+out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=red FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=8317 run_tick)
+assert_contains "$out" "decision=fable_green_chair_ok" "a chair on its own green source is fine"
+[ ! -s "$FLIP_LOG" ] || fail "no flip for a chair on a green source"
+pass "pi on 8317, 8317 green -> nothing"
+
+out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=unknown FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=8317 run_tick)
+assert_contains "$out" "decision=fable_green_chair_ok" "an unmeasured bound source is held, not re-seated"
+[ ! -s "$FLIP_LOG" ] || fail "no flip on an unknown bound source"
+pass "pi on 8317, 8317 unknown, 8080 green -> nothing"
+
+out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=red FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=none run_tick)
+assert_contains "$out" "decision=fable_green_chair_ok" "a chair with no known bound source is not re-seated"
+pass "pi with no bound source -> nothing"
 
 # --- a foreign chair (claude) is replaced like none, never alarmed on -------
 

@@ -15,7 +15,12 @@
 # bin/fm-chair-flip.sh, and appends one line to data/chair-sentinel/log.jsonl.
 # It calls no model anywhere.
 #
-#   Fable green   + chair pi-fable                 -> nothing
+#   Fable green   + chair pi-fable on a green source -> nothing
+#   Fable green   + chair pi-fable whose bound source (8317 or 8080, from the
+#                   status line's source=) is RED  -> re-seat: flip to-pi-fable
+#                                                     on the green source,
+#                                                     handoff first, under the
+#                                                     actuator's hysteresis
 #   Fable green   + any other chair                -> flip to-pi-fable
 #   Fable red     + Grok above floor + chair grok  -> nothing
 #   Fable red     + Grok above floor + any other   -> flip to-grok
@@ -119,11 +124,15 @@ flip_to() {  # <to-pi-fable|to-grok>
 
 run_tick() {
   local sensor status fable grok chair terminal decision action alarm_names flip_out flip_code source unknown_ticks
+  local pool8317 ccflare chair_source bound_state
   sensor=$(sensor_line)
   status=$(chair_line)
   fable=$(extract_field "$sensor" fable)
+  pool8317=$(extract_field "$sensor" pool8317)
+  ccflare=$(extract_field "$sensor" ccflare)
   grok=$(extract_field "$sensor" grok)
   chair=$(extract_field "$status" chair)
+  chair_source=$(extract_field "$status" source)
   terminal=$(extract_field "$status" terminal)
   alarm_names=$(extract_field "$sensor" names)
 
@@ -140,8 +149,16 @@ run_tick() {
 
   decision=none
   action=none
+  case "$chair_source" in
+    8317) bound_state=$pool8317 ;;
+    8080) bound_state=$ccflare ;;
+    *) bound_state=none ;;
+  esac
   if [ "$fable" = green ]; then
-    if [ "$chair" = pi-fable ]; then
+    if [ "$chair" = pi-fable ] && [ "$bound_state" = red ]; then
+      decision=chair_source_red_reseat
+      action=to-pi-fable
+    elif [ "$chair" = pi-fable ]; then
       decision=fable_green_chair_ok
     else
       decision=fable_green_chair_wrong
@@ -190,11 +207,11 @@ run_tick() {
   mkdir -p "$LOG_DIR" 2>/dev/null || true
   local now
   now=${FM_CHAIR_SENTINEL_NOW:-$(date +%s)}
-  printf '{"at":%s,"fable":"%s","grok":"%s","chair":"%s","terminal":"%s","decision":"%s","action":"%s","source":"%s","flip_exit":%s,"fable_unknown_ticks":%s}\n' \
-    "$now" "$fable" "$grok" "$chair" "$terminal" "$decision" "$action" "$source" "$flip_code" "$unknown_ticks" >> "$LOG_FILE" 2>/dev/null || true
+  printf '{"at":%s,"fable":"%s","grok":"%s","chair":"%s","chair_source":"%s","terminal":"%s","decision":"%s","action":"%s","source":"%s","flip_exit":%s,"fable_unknown_ticks":%s}\n' \
+    "$now" "$fable" "$grok" "$chair" "${chair_source:-none}" "$terminal" "$decision" "$action" "$source" "$flip_code" "$unknown_ticks" >> "$LOG_FILE" 2>/dev/null || true
 
-  printf 'chair-sentinel: fable=%s grok=%s chair=%s decision=%s action=%s source=%s flip_exit=%s fable_unknown_ticks=%s\n' \
-    "$fable" "$grok" "$chair" "$decision" "$action" "$source" "$flip_code" "$unknown_ticks"
+  printf 'chair-sentinel: fable=%s grok=%s chair=%s chair_source=%s decision=%s action=%s source=%s flip_exit=%s fable_unknown_ticks=%s\n' \
+    "$fable" "$grok" "$chair" "${chair_source:-none}" "$decision" "$action" "$source" "$flip_code" "$unknown_ticks"
 }
 
 write_plist() {
