@@ -1880,6 +1880,480 @@ test_stale_terminal_status_overridden_by_active_run() {
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
 }
 
+# --- transient gateway stall: re-rung with a continue instruction, not wedged ---
+# A crew whose last output is a gateway 503 is idle with unfinished work. Before
+# this, the wedge timer escalated it as a possible wedge and a human had to type
+# "carry on". The watcher now enqueues one bounded continue instruction through
+# the steering inbox as a fire-and-forget record and absorbs the poll, and only
+# a spent budget surfaces - as the crew's own declared external wait rather
+# than a wedge. The record MUST be fire-and-forget: during a real outage the
+# crew cannot acknowledge it, and an ordinary steer left unhandled would be
+# escalated by the inbox's own ladder into stuck-crewmate recovery, the exact
+# wedge treatment the gateway ladder exists to avoid.
+
+test_gateway_stall_is_re_rung_instead_of_wedge_escalated() {
+  local dir state fakebin out capture_file window key pane_hash sig pid msgs
+  dir=$(make_case gateway-stall-rering); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-stalled"
+  # The exact text Claude Code renders when the pooled gateway has no routable
+  # account, em dash and all.
+  printf 'API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary — try again in a moment.' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/stalled.meta"
+  printf 'working: implementing the fix\n' > "$state/stalled.status"
+  # And the turn end the crew itself recorded: Claude's StopFailure hook, the
+  # first of the ladder's two conditions.
+  record_api_error_turn_end "$state" stalled
+  sig=$(seen_sig "$state/stalled.status"); printf '%s' "$sig" > "$state/.seen-stalled_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$(cat "$capture_file")")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Not provably working, and the wedge timer is already past its threshold: the
+  # exact state that used to produce a wedge escalation.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle at prompt'
+
+  # The first attempt fires on sight; the second is an hour out. wait_poll_cycle
+  # returns at the TOP of the next poll, and that poll's ladder races the count
+  # below, so a zero backoff for every attempt would make "exactly one" depend
+  # on which of the two ran first.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_GATEWAY_RETRY_BACKOFF='0 3600' FM_GATEWAY_RETRY_MAX=2 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "the watcher exited for a gateway-stalled pane instead of re-ringing it: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a gateway keep-alive re-ring must not print a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a gateway keep-alive re-ring must not enqueue a wake"
+  [ -f "$state/stalled.gateway-stall" ] || fail "the watcher did not open a stall record for the pane"
+  msgs=$(find "$state/stalled.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$msgs" = 1 ] || fail "expected exactly one continue instruction in the steering inbox, found $msgs"
+  grep -qi 'continue exactly where you left off' "$state/stalled.inbox"/*.msg \
+    || fail "the enqueued instruction is not the keep-alive continue line"
+  bash -c '. "$1"; fm_task_inbox_is_fire_and_forget "$2"' _ \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$(find "$state/stalled.inbox" -name '*.msg' | head -1)" \
+    || fail "the continue instruction must be a fire-and-forget record, or the inbox ladder escalates the outage into stuck-crewmate recovery"
+  reap "$pid"
+  ack_stopped_cycle "$state" 2>/dev/null || true
+
+  # Spend the budget, then prove the pane hands back to ordinary triage having
+  # DECLARED the wait rather than staying silently absorbed forever.
+  printf 'v1 first=%s attempts=2 last=%s notified=0\n' \
+    "$(( $(date +%s) - 60 ))" "$(( $(date +%s) - 60 ))" > "$state/stalled.gateway-stall"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_GATEWAY_RETRY_BACKOFF='0 3600' FM_GATEWAY_RETRY_MAX=2 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" >/dev/null 2>&1 || true
+  reap "$pid"
+  grep -q 'paused \[key=gateway-503\]' "$state/stalled.status" \
+    || fail "a spent keep-alive budget must declare the external wait on the crew's status log"
+  msgs=$(find "$state/stalled.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$msgs" = 1 ] || fail "a spent budget must stop re-ringing; found $msgs instructions"
+  unset FM_FAKE_CREW_STATE
+  pass "a gateway-stalled crew is re-rung with a bounded continue instruction and declares an external wait when the budget is spent"
+}
+
+# --- a stall record must not outlive the stall it records --------------------
+# gateway_stall_check only runs on an IDLE poll, so the pane-recovered exit
+# never fires for a crew that took the continue and then worked. Without a
+# second exit that crew carries a half-spent ladder and a stale horizon anchor
+# into its NEXT, unrelated stall, and has that one declared a spent-budget
+# outage on first sight - zero retries for a transient error the gateway was
+# serving fine around. Busy alone cannot be that exit either: the continue this
+# ladder sends makes the pane busy from submission until the turn ends, and a
+# turn that dies on the next 503 is busy for the harness's WHOLE internal retry
+# - about four minutes, roughly 16 polls at the default interval, per
+# docs/verification/gateway-keepalive.md - so ending the record inside that
+# window would wipe the attempt count mid-ladder and no genuine outage could
+# ever be declared. Only duration separates the two, so both directions are
+# pinned below at the SHIPPED threshold off one shared mid-ladder fixture: a
+# record with one attempt already charged and a horizon anchor older than the
+# default 2700s horizon, so what happens to that record during the busy stretch
+# decides whether the next transient error is re-rung or declared an outage.
+
+# Prints the case dir. <task> names both the task and its window suffix.
+# The turn end Claude's StopFailure hook records through the busy contract's only
+# writer - the first of the gateway ladder's two conditions, without which no
+# pane text can put a crew in the ladder.
+record_api_error_turn_end() {  # <state-dir> <task>
+  local state=$1 task=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" idle --gen "$gen" \
+    --source claude-hook --event stop-failure
+}
+
+make_gateway_busy_case() {  # <name> <task>
+  local dir state task=$2 window anchor
+  dir=$(make_case "$1"); state="$dir/state"
+  window="test:fm-$task"
+  printf 'Working...' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/$task.meta"
+  printf 'working: implementing the fix\n' > "$state/$task.status"
+  printf '%s' "$(seen_sig "$state/$task.status")" > "$state/.seen-${task}_status"
+  touch "$state/$task.turn-ended"
+  prime_turnend_seen "$state/$task.turn-ended"
+  anchor=$(( $(date +%s) - 3000 ))
+  printf 'v1 first=%s attempts=1 last=%s notified=0\n' "$anchor" "$anchor" > "$state/$task.gateway-stall"
+  printf '%s' "$dir"
+}
+
+# Drive a real watcher over the case's pane with the task's semantic busy state
+# set to <busy|idle>, until <until> is met or the budget runs out:
+#   polls:<n>  the window has been counted busy <n> consecutive times
+#   cleared    the stall record has been dropped
+#   cycles:<n> <n> completed poll cycles, for a phase with nothing to wait on
+# The watcher runs at FM_POLL=1 so a test finishes in seconds, and the wall-clock
+# bound is scaled to match: 40 seconds at a 1-second cadence derives the same 40
+# polls the shipped 600-second bound derives at the shipped 15-second cadence, so
+# these tests reproduce the PRODUCTION GEOMETRY - a 16-poll harness retry inside
+# a 40-poll window - rather than a made-up one. The shipped constant itself, and
+# the fact that the derived window stays 600 seconds at any cadence, are pinned
+# directly on fm_gateway_busy_clear_polls in tests/fm-gateway-keepalive.test.sh.
+# The ladder's first attempt fires on sight and its second is an hour out: an
+# idle phase ends at the TOP of a poll whose ladder then races the caller's
+# message count, so a zero backoff for every attempt would leave that count
+# depending on which of the two ran first.
+run_gateway_busy_watcher() {  # <dir> <task> <state> <busy|idle> <until>
+  local dir=$1 task=$2 state=$3 pane_state=$4 until=$5 gen event pid key n i=0
+  key=$(printf '%s' "test:fm-$task" | tr ':/.' '___')
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")
+  # The real Claude lifecycle: UserPromptSubmit opens the turn, StopFailure ends
+  # it on an API error. The idle event is what the gateway ladder's gate reads,
+  # so an idle phase here must carry the event a 503 turn end actually records.
+  case "$pane_state" in
+    busy) event=user-prompt-submit ;;
+    *) event=stop-failure ;;
+  esac
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" "$pane_state" --gen "$gen" \
+    --source claude-hook --event "$event"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-$task" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_GATEWAY_RETRY_BACKOFF='0 3600' FM_GATEWAY_BUSY_CLEAR_SECS=40 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" >> "$dir/watch.out" &
+  pid=$!
+  case "$until" in
+    cycles:*)
+      while [ "$i" -lt "${until#cycles:}" ]; do
+        wait_poll_cycle "$state" "$pid" >/dev/null 2>&1 || break
+        i=$(( i + 1 ))
+      done
+      ;;
+    *)
+      while [ "$i" -lt 1800 ]; do
+        kill -0 "$pid" 2>/dev/null || break
+        case "$until" in
+          cleared) [ -f "$state/$task.gateway-stall" ] || break ;;
+          polls:*)
+            # A dropped record stops the counting, so waiting out the rest of
+            # the budget would only turn a failure into a slow failure.
+            [ -f "$state/$task.gateway-stall" ] || break
+            n=$(cat "$state/.gw-busy-$key" 2>/dev/null || true)
+            case "$n" in ''|*[!0-9]*) n=0 ;; esac
+            [ "$n" -lt "${until#polls:}" ] || break
+            ;;
+        esac
+        sleep 0.1
+        i=$(( i + 1 ))
+      done
+      ;;
+  esac
+  reap "$pid"
+  # Reaping a live watcher leaves the stopped-watcher marker behind, and the
+  # NEXT round would spend its whole first poll resurfacing that check instead
+  # of running the triage the caller is asserting on.
+  ack_stopped_cycle "$state" 2>/dev/null || true
+}
+
+# The shape of the ladder's OWN retry at the shipped threshold: Claude Code
+# retries a 503 internally for about four minutes before StopFailure ends the
+# turn, and UserPromptSubmit already marked the pane busy, so the watcher sees
+# roughly 16 consecutive busy polls that are not work at all. Clearing there
+# resets the ladder on every retry and the outage is never declared.
+test_gateway_record_survives_the_harness_internal_retry() {
+  local dir state task=gwblip anchor
+  dir=$(make_gateway_busy_case gateway-busy-blip "$task"); state="$dir/state"
+  anchor=$(cut -d' ' -f2 "$state/$task.gateway-stall")
+
+  run_gateway_busy_watcher "$dir" "$task" "$state" busy polls:16
+  [ -f "$state/$task.gateway-stall" ] \
+    || fail "the harness's own internal 503 retry ended the stall record; the ladder resets every retry and no outage can ever be declared"
+  [ "$(cut -d' ' -f2 "$state/$task.gateway-stall")" = "$anchor" ] \
+    || fail "the harness's own internal 503 retry moved the horizon anchor, restarting the budget mid-ladder"
+
+  # The retry dies on another 503. The budget the retry preserved is spent, so
+  # this is declared as the external wait it is rather than re-rung forever.
+  printf 'API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary — try again in a moment.' > "$dir/pane.txt"
+  run_gateway_busy_watcher "$dir" "$task" "$state" idle cycles:1
+  grep -q 'paused \[key=gateway-503\]' "$state/$task.status" \
+    || fail "the budget preserved across the harness's internal retry did not reach a declared outage"
+  [ ! -d "$state/$task.inbox" ] || [ -z "$(find "$state/$task.inbox" -name '*.msg' 2>/dev/null)" ] \
+    || fail "a spent budget must stop re-ringing, not send another continue instruction"
+  pass "the harness's own internal 503 retry keeps the stall record, and the budget still reaches a declared outage"
+}
+
+test_gateway_record_is_dropped_after_a_long_busy_stretch() {
+  local dir state task=gwworked msgs fresh
+  dir=$(make_gateway_busy_case gateway-busy-worked "$task"); state="$dir/state"
+
+  # One poll short of the threshold is still inside the ladder: the record has
+  # to survive right up to the boundary, or the boundary is not where the
+  # calibration against the verified retry window put it.
+  run_gateway_busy_watcher "$dir" "$task" "$state" busy polls:39
+  [ -f "$state/$task.gateway-stall" ] \
+    || fail "the stall record was dropped before the busy stretch reached the threshold"
+
+  # Past it, the crew took the continue and actually worked - a stretch the
+  # harness's internal retry cannot produce.
+  run_gateway_busy_watcher "$dir" "$task" "$state" busy cleared
+  [ ! -f "$state/$task.gateway-stall" ] \
+    || fail "a busy stretch past the threshold left the stall record open; it will poison the crew's next, unrelated stall"
+
+  # A genuinely NEW transient error, 50 minutes after the old one. It must start
+  # a fresh ladder and be re-rung, not inherit the old record's spent horizon.
+  printf 'API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary — try again in a moment.' > "$dir/pane.txt"
+  run_gateway_busy_watcher "$dir" "$task" "$state" idle cycles:1
+  grep -q 'paused \[key=gateway-503\]' "$state/$task.status" \
+    && fail "a new transient error was declared a spent-budget outage on first sight"
+  msgs=$(find "$state/$task.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$msgs" = 1 ] || fail "a new transient error was not re-rung; found $msgs continue instructions"
+  fresh=$(cut -d' ' -f2 "$state/$task.gateway-stall")
+  [ "$(( $(date +%s) - ${fresh#first=} ))" -lt 300 ] \
+    || fail "the new stall reused the old record's horizon anchor instead of starting fresh"
+  pass "a busy stretch past the threshold drops the stall record, so a later transient error starts a fresh ladder"
+}
+
+# A secondmate is admitted to the pane-stale path only to serve its declared
+# wait's bounded re-surface, and the gateway ladder must not piggyback on that
+# admission: a secondmate home runs its own watcher for its own crews, and
+# docs/gateway-keepalive.md promises a mate is never classified for a stall. A
+# paused mate that recorded an API-error turn end AND shows the transient error -
+# both of the ladder's conditions - is therefore still re-surfaced as a paused
+# mate, and never sent a continue instruction.
+test_gateway_stalled_secondmate_is_not_re_rung() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back
+  dir=$(make_case gateway-stall-secondmate); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/mate-503.status"
+  window="test:fm-mate-503"
+  printf 'API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary — try again in a moment.' > "$capture_file"
+  printf 'window=%s\nkind=secondmate\nharness=claude\n' "$window" > "$state/mate-503.meta"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  record_api_error_turn_end "$state" mate-503
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-mate-503_status"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  pane_hash=$(hash_text "$(cat "$capture_file")")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_GATEWAY_RETRY_BACKOFF=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not re-surface the paused secondmate whose pane shows a gateway error"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the paused secondmate lost its bounded re-surface to the gateway ladder"
+  [ ! -e "$state/mate-503.gateway-stall" ] || fail "the primary's watcher opened a gateway stall record for a SECONDMATE pane"
+  [ ! -d "$state/mate-503.inbox" ] || [ "$(find "$state/mate-503.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 0 ] \
+    || fail "the primary's watcher sent a secondmate a gateway continue instruction"
+  unset FM_FAKE_CREW_STATE
+  pass "a secondmate pane showing a transient gateway error is never re-rung by the primary's watcher"
+}
+
+# --- an ordinary steer already waiting when the stall began -------------------
+# The fire-and-forget exclusion protects only the records the gateway ladder
+# writes. A steer firstmate sent BEFORE the gateway failed sits unhandled in the
+# same inbox, past its grace, and the inbox's own ladder would ring it on every
+# idle poll of the outage and escalate it after FM_TASK_INBOX_RING_MAX rings as
+# an unread instruction on a suspect worker - stuck-crewmate recovery, minutes
+# into an outage the gateway ladder is still absorbing. Ordering matters as
+# much as the gate: on a live crew that first doorbell opens a new turn, which
+# moves the recorded turn end off the API error before the gateway ladder can
+# read it, so the stall is never seen at all. Both are pinned here on the
+# inbox ladder's own persisted bookkeeping (.ring-state, the record
+# bin/fm-task-inbox-lib.sh documents): it must stay absent for every poll of
+# the stall, including the one that opens the stall record, and appear for
+# that same steer once the record drops.
+test_ordinary_steer_is_held_quiet_while_the_gateway_stall_is_open() {
+  local dir state fakebin out capture_file window pid steer ring_state i=0
+  dir=$(make_case gateway-stall-ordinary-steer); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-steered"
+  printf 'API Error: 503 All accounts are temporarily unavailable. This is a server-side issue, usually temporary — try again in a moment.' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/steered.meta"
+  printf 'working: implementing the fix\n' > "$state/steered.status"
+  printf '%s' "$(seen_sig "$state/steered.status")" > "$state/.seen-steered_status"
+  # The steer landed before the outage and is well past the inbox grace: due
+  # for a ring on the ladder's own terms.
+  steer=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_task_inbox_write "$2" steered "also fix the flaky test"' _ \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$state") || fail "could not write the ordinary steer"
+  touch -t 202001010000 "$steer"
+  ring_state="$state/steered.inbox/.ring-state"
+  record_api_error_turn_end "$state" steered
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_GATEWAY_RETRY_BACKOFF=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited during the stall: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited during the stall: $(cat "$out")"; }
+  [ -f "$state/steered.gateway-stall" ] || { reap "$pid"; fail "the watcher did not open a stall record for the pane"; }
+  [ ! -e "$ring_state" ] \
+    || { reap "$pid"; fail "the inbox ladder charged a delivery attempt for an ordinary steer during a gateway stall: $(cat "$ring_state")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a gateway stall queued a wake for the ordinary steer: $(cat "$state/.wake-queue")"; }
+  [ -f "$steer" ] || { reap "$pid"; fail "the ordinary steer disappeared from the inbox"; }
+
+  # The budget spends: the gateway ladder declares the external wait and hands
+  # the window back to ordinary triage, but its record still stands, and that
+  # record alone - not the re-ring the ladder is no longer making - is what
+  # keeps the inbox ladder quiet.
+  printf 'v1 first=%s attempts=8 last=%s notified=0\n' \
+    "$(( $(date +%s) - 4000 ))" "$(( $(date +%s) - 4000 ))" > "$state/steered.gateway-stall"
+  while [ "$i" -lt 600 ]; do
+    grep -q 'paused \[key=gateway-503\]' "$state/steered.status" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  i=0
+  grep -q 'paused \[key=gateway-503\]' "$state/steered.status" \
+    || { reap "$pid"; fail "the spent budget was not declared as an external wait: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" >/dev/null 2>&1 || true
+  [ -f "$state/steered.gateway-stall" ] || { reap "$pid"; fail "the spent stall record was dropped while the gateway was still failing"; }
+  [ ! -e "$ring_state" ] \
+    || { reap "$pid"; fail "the inbox ladder charged a delivery attempt for an ordinary steer during a declared gateway wait: $(cat "$ring_state")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" 2>/dev/null || true
+
+  # The crew's next turn ends normally: the stall record drops on the next idle
+  # poll, and the inbox ladder resumes for the very same steer, starting its
+  # own count from the beginning rather than from rings it never made.
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" steered idle \
+    --gen "$("$ROOT/bin/fm-busy-event.sh" arm "$state" steered)" --source claude-hook --event stop
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_GATEWAY_RETRY_BACKOFF=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  while [ "$i" -lt 600 ]; do
+    [ -f "$ring_state" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -f "$ring_state" ] || { reap "$pid"; fail "the inbox ladder did not resume for the ordinary steer once the stall record dropped: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -f "$state/steered.gateway-stall" ] || fail "a normal turn end left the stall record open"
+  [ "$(cut -f1,2 "$ring_state")" = "$(printf '%s\t1' "${steer##*/}")" ] \
+    || fail "the resumed ladder did not start at one attempt for the waiting steer: $(cat "$ring_state")"
+  ! grep -qF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null \
+    || fail "the ordinary steer was escalated as an unread instruction: $(cat "$state/.wake-queue")"
+  unset FM_FAKE_CREW_STATE
+  pass "an ordinary steer waiting through a gateway stall is neither rung nor counted until the stall record drops, then rings on its own ladder"
+}
+
+# --- a window that cannot be captured is served on its live classification --
+# The gateway checks read the pane, so the loop skips them when the capture
+# fails - and that skip must not take the steering-inbox ladder with it. With
+# no screen to read, the ladder's busy gate is the LIVE classification: a gone
+# endpoint is dead, never busy, whatever its record last said, while a live
+# endpoint keeps the turn state its own hooks recorded. The two cases below
+# are the two sides of that verdict, pinned on the ladder's persisted
+# bookkeeping (.ring-state) and the wake it does or does not queue.
+
+# Writes the fixture the two cases share: a claude crew whose hooks last
+# recorded a turn IN FLIGHT, with an ordinary steer aged past the inbox grace.
+# Prints the steer's record path.
+make_uncapturable_steer_case() {  # <dir> <task>
+  local dir=$1 task=$2 state="$1/state" steer
+  printf 'window=test:fm-%s\nkind=ship\nharness=claude\n' "$task" > "$state/$task.meta"
+  printf 'working: implementing the fix\n' > "$state/$task.status"
+  printf '%s' "$(seen_sig "$state/$task.status")" > "$state/.seen-${task}_status"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" busy \
+    --gen "$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")" --source claude-hook --event user-prompt-submit
+  steer=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_task_inbox_write "$2" "$3" "also fix the flaky test"' _ \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$state" "$task") || return 1
+  touch -t 202001010000 "$steer"
+  printf '%s' "$steer"
+}
+
+# A crewmate whose tmux window has died mid-turn - the harness was killed, so
+# the Stop hook never wrote idle and the record is stuck at busy - with its
+# meta still on disk and a steer unhandled in its inbox is exactly the worker
+# firstmate needs to hear about. The dead verdict beats the stale busy record:
+# the ladder charges its attempts against the failed doorbells and surfaces
+# the unread instruction, instead of the dead window dropping out of
+# supervision for as long as it exists.
+test_uncapturable_window_still_escalates_its_unread_steer() {
+  local dir state fakebin out window pid steer
+  dir=$(make_case dead-window-unread-steer); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-gone"
+  steer=$(make_uncapturable_steer_case "$dir" gone) || fail "could not write the ordinary steer"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle at prompt'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_TASK_INBOX_RING_MAX=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 1800 || fail "the watcher never surfaced the unread steer of a window it cannot capture: $(cat "$out")"
+  [ -f "$steer" ] || fail "the unhandled steer disappeared from the inbox"
+  grep -qF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null \
+    || fail "an uncapturable window's unread steer was not escalated: $(cat "$state/.wake-queue" 2>/dev/null; cat "$out")"
+  [ "$(cut -f1,2 "$state/gone.inbox/.ring-state")" = "$(printf '%s\t1' "${steer##*/}")" ] \
+    || fail "the failed doorbell was not charged against the ladder: $(cat "$state/gone.inbox/.ring-state" 2>/dev/null)"
+  unset FM_FAKE_CREW_STATE
+  pass "a dead window's unread steer is rung, counted and escalated, whatever its stale busy record says"
+}
+
+# The other side: the endpoint is alive and mid-turn, and one poll's capture
+# simply failed. The recorded turn state stands, so the ladder waits exactly
+# as it would for a busy pane it could see - no doorbell typed into a busy
+# composer, no attempt charged, no wake.
+test_uncapturable_busy_window_is_waited_on() {
+  local dir state fakebin out window pid steer
+  dir=$(make_case live-window-capture-blip); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-blip"
+  steer=$(make_uncapturable_steer_case "$dir" blip) || fail "could not write the ordinary steer"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_TASK_INBOX_RING_MAX=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited on a busy crew's capture blip: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited on a busy crew's capture blip: $(cat "$out")"; }
+  reap "$pid"
+  [ "$(cat "$dir/capture.count" 2>/dev/null || echo 0)" -ge 2 ] || fail "the watcher did not attempt to capture the pane"
+  [ ! -e "$state/blip.inbox/.ring-state" ] \
+    || fail "a busy crew was charged a delivery attempt because one capture failed: $(cat "$state/blip.inbox/.ring-state")"
+  [ ! -s "$state/.wake-queue" ] || fail "a busy crew's capture blip queued a wake: $(cat "$state/.wake-queue")"
+  [ -f "$steer" ] || fail "the unhandled steer disappeared from the inbox"
+  unset FM_FAKE_CREW_STATE
+  pass "a live busy crew whose capture failed is waited on: no doorbell, no attempt charged, no wake"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -2240,6 +2714,12 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
 # <mode> `exit` requires the watcher to surface and exit; `absorb` requires it to
 # survive whole poll cycles - enough to see the new hash, count it stable, and
 # reach the stale path. Returns 1 when the watcher does the other thing.
+# An exit round on a pane the case just rewrote needs those same three cycles
+# before it can surface (the new hash, its first stable count, the surfacing
+# count), so it is given three of the per-cycle budgets absorb rounds get rather
+# than the fixed 10s a seeded single-poll exit needs: on a loaded machine one
+# cycle alone runs several seconds, and a shorter budget reaps a watcher that
+# was about to surface and reports it as having absorbed.
 parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absorb>
   local state=$1 fakebin=$2 out=$3 capture=$4 window=$5 mode=$6 pid cycles=0
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
@@ -2251,7 +2731,7 @@ parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absor
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
   if [ "$mode" = exit ]; then
-    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+    wait_for_exit "$pid" 900 || { reap "$pid"; return 1; }
     return 0
   fi
   while [ "$cycles" -lt 4 ]; do
@@ -4318,6 +4798,13 @@ test_unreadable_status_reports_once_per_file_state
 test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
+test_gateway_stall_is_re_rung_instead_of_wedge_escalated
+test_gateway_record_survives_the_harness_internal_retry
+test_gateway_record_is_dropped_after_a_long_busy_stretch
+test_gateway_stalled_secondmate_is_not_re_rung
+test_ordinary_steer_is_held_quiet_while_the_gateway_stall_is_open
+test_uncapturable_window_still_escalates_its_unread_steer
+test_uncapturable_busy_window_is_waited_on
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

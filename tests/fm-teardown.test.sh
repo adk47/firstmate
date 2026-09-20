@@ -1798,6 +1798,22 @@ SH
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
 
+# The gateway keep-alive's stall record is per-task runtime state, so a retired
+# task must not leave one behind: a stale record carrying a spent budget would
+# make the next task reusing that id start its ladder already exhausted.
+test_teardown_removes_the_gateway_stall_record() {
+  local case_dir rec
+  case_dir=$(make_case gateway-stall-cleanup)
+  write_meta "$case_dir" local-only ship
+  rec="$case_dir/state/task-x1.gateway-stall"
+  printf 'v1 first=1 attempts=8 last=1 notified=1\n' > "$rec"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "gateway-stall-cleanup: forced teardown failed: $(cat "$case_dir/stderr")"
+  [ ! -e "$rec" ] || fail "gateway-stall-cleanup: teardown left the task's gateway stall record behind"
+  pass "teardown removes the per-task gateway keep-alive stall record"
+}
+
 # Flat (non-projected) Herdr endpoint whose fake pane exists until a locked
 # close removes it. The socket path is case-local so the derived presentation
 # lock never collides with another test or a real fleet session.
@@ -3476,6 +3492,7 @@ test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
+test_teardown_removes_the_gateway_stall_record
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
