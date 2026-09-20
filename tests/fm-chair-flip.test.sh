@@ -39,6 +39,7 @@ cat > "$ORCA" <<'SH'
 # Records every invocation; `terminal create` answers with a handle.
 printf '%s\n' "$*" >> "$FM_TEST_ORCA_LOG"
 case "$1 $2" in
+  "terminal list") [ "${FM_TEST_ORCA_DOWN:-0}" = 1 ] && exit 1; printf '{"result":{"terminals":[]}}\n' ;;
   "terminal create") printf '{"result":{"terminal":{"handle":"term_new"}}}\n' ;;
   *) printf '{"result":{}}\n' ;;
 esac
@@ -166,6 +167,18 @@ assert_absent "$HOME_DIR/data/handoff-grok-to-pi-fable.md" "refused before the h
 [ ! -s "$ORCA_LOG" ] || fail "no terminal was touched"
 pass "orca missing -> refuse before any side effect"
 
+sleep 300 & DOWN_PI=$!
+trap 'kill "$DOWN_PI" 2>/dev/null; fm_test_cleanup' EXIT
+rm -f "$HOME_DIR/state/.chair-flip-at" "$HOME_DIR/data/handoff-pi-fable-to-grok.md"
+out=$(FM_TEST_ORCA_DOWN=1 FM_TEST_CHAIR=pi-fable FM_TEST_TERMINAL=none FM_TEST_PID="$DOWN_PI" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-grok); code=$?
+expect_code 1 "$code" "orca on PATH but not answering refuses"
+assert_contains "$out" "not answering" "refusal names the unreachable Orca"
+assert_absent "$HOME_DIR/state/.chair-flip-at" "nothing acted, so no hysteresis stamp"
+assert_absent "$HOME_DIR/data/handoff-pi-fable-to-grok.md" "refused before the handoff"
+kill -0 "$DOWN_PI" 2>/dev/null || fail "the incumbent was ended although no successor could be created"
+assert_no_grep "terminal create" "$ORCA_LOG" "no successor attempted"
+pass "orca unreachable -> incumbent kept, flip refused"
+
 # --- a flip that acted is stamped even when verification fails -------------
 
 rm -f "$HOME_DIR/state/.chair-flip-at" "$HOME_DIR/state/.lock"
@@ -205,7 +218,7 @@ assert_dies() {  # <pid> <msg>: the pid exits within 5s (zombies count as exited
 
 sleep 300 & INCUMBENT=$!
 sleep 300 & BYSTANDER=$!
-trap 'kill "$INCUMBENT" "$BYSTANDER" 2>/dev/null; fm_test_cleanup' EXIT
+trap 'kill "$DOWN_PI" "$INCUMBENT" "$BYSTANDER" 2>/dev/null; fm_test_cleanup' EXIT
 rm -f "$HOME_DIR/state/.chair-flip-at"
 printf '%s\n' "$BYSTANDER" > "$HOME_DIR/state/.lock"
 out=$(FM_TEST_CHAIR=grok FM_TEST_PID="$INCUMBENT" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-pi-fable); code=$?
@@ -225,7 +238,7 @@ pass "chair=none pid=none -> nothing signalled, successor launched"
 # --- a context-full Pi with a known terminal still gets /exit ---------------
 
 sleep 300 & FULL_PI=$!
-trap 'kill "$INCUMBENT" "$BYSTANDER" "$FULL_PI" 2>/dev/null; fm_test_cleanup' EXIT
+trap 'kill "$DOWN_PI" "$INCUMBENT" "$BYSTANDER" "$FULL_PI" 2>/dev/null; fm_test_cleanup' EXIT
 rm -f "$HOME_DIR/state/.chair-flip-at"
 out=$(FM_TEST_CHAIR=none FM_TEST_HARNESS=pi FM_TEST_TERMINAL=term_full FM_TEST_PID="$FULL_PI" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-pi-fable); code=$?
 assert_grep "terminal send --terminal term_full --text /quit --enter --json" "$ORCA_LOG" "/quit (Pi's exit command) reaches the context-full Pi's terminal"
@@ -236,7 +249,7 @@ pass "chair=none pi with a terminal -> graceful /quit first, then SIGTERM"
 # --- no terminal known: the log says so before the wait + SIGTERM ------------
 
 sleep 300 & BLIND=$!
-trap 'kill "$INCUMBENT" "$BYSTANDER" "$FULL_PI" "$BLIND" 2>/dev/null; fm_test_cleanup' EXIT
+trap 'kill "$DOWN_PI" "$INCUMBENT" "$BYSTANDER" "$FULL_PI" "$BLIND" 2>/dev/null; fm_test_cleanup' EXIT
 rm -f "$HOME_DIR/state/.chair-flip-at"
 out=$(FM_TEST_CHAIR=claude FM_TEST_TERMINAL=none FM_TEST_PID="$BLIND" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-pi-fable); code=$?
 assert_contains "$out" "no terminal or exit command known for incumbent claude pid $BLIND" "log line names the missing terminal"

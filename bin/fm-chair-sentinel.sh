@@ -3,7 +3,10 @@
 #
 # Usage:
 #   fm-chair-sentinel.sh            one decision tick (the LaunchAgent default)
-#   fm-chair-sentinel.sh arm        install and load the LaunchAgent
+#   fm-chair-sentinel.sh arm        install and load the LaunchAgent; retires the
+#                                   legacy model-driven ai.muso.lane-tick-chair-flipper
+#                                   LaunchAgent first (bootout + remove) so only one
+#                                   actuator ever ticks the chair
 #   fm-chair-sentinel.sh disarm     unload and remove the LaunchAgent
 #   fm-chair-sentinel.sh status     report the LaunchAgent and last tick
 #
@@ -68,8 +71,10 @@ ALARM_FILE=$STATE_DIR/.chair-alarm
 UNKNOWN_TICKS_FILE=$STATE_DIR/.chair-fable-unknown-ticks
 UNKNOWN_HOLD_TICKS=3
 LABEL=ai.muso.chair-sentinel
+LEGACY_LABEL=ai.muso.lane-tick-chair-flipper
 LA_DIR=${FM_CHAIR_SENTINEL_LA_DIR:-${HOME:-}/Library/LaunchAgents}
 PLIST=$LA_DIR/$LABEL.plist
+LEGACY_PLIST=$LA_DIR/$LEGACY_LABEL.plist
 LAUNCHCTL=${FM_CHAIR_SENTINEL_LAUNCHCTL:-launchctl}
 # launchd starts jobs with /usr/bin:/bin:/usr/sbin:/sbin only; orca, pi,
 # quota-axi and grok live in the user's tool dirs.
@@ -218,6 +223,11 @@ case "${1:-tick}" in
   tick|'') run_tick ;;
   arm)
     mkdir -p "$LOG_DIR" 2>/dev/null || true
+    if [ -f "$LEGACY_PLIST" ] || "$LAUNCHCTL" list 2>/dev/null | grep -q "$LEGACY_LABEL"; then
+      "$LAUNCHCTL" bootout "gui/$(id -u)/$LEGACY_LABEL" >/dev/null 2>&1 || true
+      rm -f "$LEGACY_PLIST" 2>/dev/null || true
+      echo "chair-sentinel: retired legacy tick $LEGACY_LABEL ($LEGACY_PLIST removed)"
+    fi
     write_plist || exit 1
     "$LAUNCHCTL" unload "$PLIST" >/dev/null 2>&1 || true
     "$LAUNCHCTL" load "$PLIST" || { echo "chair-sentinel: launchctl load failed" >&2; exit 1; }

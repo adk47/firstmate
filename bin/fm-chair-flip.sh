@@ -21,8 +21,10 @@
 #   2. Refuse within the hysteresis window: at most one attempt per
 #      FM_CHAIR_HYSTERESIS_SECS (default 1800) is recorded in
 #      state/.chair-flip-at.
-#   3. Refuse when the Orca CLI cannot be found: the incumbent is never ended
-#      when the successor could not be launched.
+#   3. Refuse when Orca cannot be reached (`orca terminal list --json` must
+#      answer, the same call whose failure `fm-chair-status.sh` reports as
+#      reason=orca_unavailable): the incumbent is never ended when the
+#      successor could not be launched.
 #   4. Write data/handoff-<from>-to-<to>.md: timestamp, the sensor line, the
 #      chosen source, the status-log path of every task in flight with the last
 #      20 lines of each, and pointers to data/MEMORY-INDEX.md, data/captain.md
@@ -221,9 +223,10 @@ if [ -f "$FLIP_STAMP" ]; then
   esac
 fi
 
-# Never end the incumbent when the successor could not be launched.
-if [ "$DRY_RUN" != 1 ] && ! command -v "$ORCA" >/dev/null 2>&1; then
-  log "chair-flip: refuse: Orca CLI '$ORCA' not found on PATH; the successor could not be launched"
+# Never end the incumbent when the successor could not be launched: Orca must
+# answer now, not merely be on PATH.
+if [ "$DRY_RUN" != 1 ] && ! "$ORCA" terminal list --json 2>/dev/null | jq -e 'type == "object"' >/dev/null 2>&1; then
+  log "chair-flip: refuse: Orca CLI '$ORCA' not found or not answering; the successor could not be launched (status: $STATUS)"
   exit 1
 fi
 

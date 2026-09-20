@@ -188,11 +188,52 @@ pass "no-action tick logs flip_exit null"
 
 # --- the armed LaunchAgent carries the tool PATH ----------------------------
 
+LAUNCHCTL_STUB="$TMP_ROOT/launchctl.sh"
+LAUNCHCTL_LOG="$TMP_ROOT/launchctl.log"
+cat > "$LAUNCHCTL_STUB" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_LAUNCHCTL_LOG"
+[ "$1" = list ] && printf '%s\n' "${FM_TEST_LAUNCHCTL_LOADED:-}"
+exit 0
+SH
+chmod +x "$LAUNCHCTL_STUB"
+LA_DIR="$TMP_ROOT/LaunchAgents"
+LEGACY_PLIST="$LA_DIR/ai.muso.lane-tick-chair-flipper.plist"
+mkdir -p "$LA_DIR"
+printf '<plist/>\n' > "$LEGACY_PLIST"
+: > "$LAUNCHCTL_LOG"
+out=$(FM_CHAIR_SENTINEL_HOME="$HOME_DIR" FM_CHAIR_SENTINEL_LA_DIR="$LA_DIR" FM_CHAIR_SENTINEL_LAUNCHCTL="$LAUNCHCTL_STUB" \
+  FM_TEST_LAUNCHCTL_LOG="$LAUNCHCTL_LOG" FM_TEST_LAUNCHCTL_LOADED="-	0	ai.muso.lane-tick-chair-flipper" bash "$SCRIPT" arm); code=$?
+expect_code 0 "$code" "arm succeeds"
+PLIST="$LA_DIR/ai.muso.chair-sentinel.plist"
+assert_present "$PLIST" "plist written"
+assert_absent "$LEGACY_PLIST" "the legacy lane-tick flipper plist is removed"
+assert_grep "bootout gui/$(id -u)/ai.muso.lane-tick-chair-flipper" "$LAUNCHCTL_LOG" "the legacy tick is booted out"
+[ "$(grep -n 'bootout' "$LAUNCHCTL_LOG" | cut -d: -f1 | head -1)" -lt "$(grep -n "load $PLIST" "$LAUNCHCTL_LOG" | cut -d: -f1 | head -1)" ] \
+  || fail "legacy tick must be retired before the sentinel is loaded"
+assert_contains "$out" "retired legacy tick ai.muso.lane-tick-chair-flipper" "arm reports the retirement"
+pass "arm retires the legacy lane-tick chair flipper before loading the sentinel"
+
+: > "$LAUNCHCTL_LOG"
+out=$(FM_CHAIR_SENTINEL_HOME="$HOME_DIR" FM_CHAIR_SENTINEL_LA_DIR="$LA_DIR" FM_CHAIR_SENTINEL_LAUNCHCTL="$LAUNCHCTL_STUB" \
+  FM_TEST_LAUNCHCTL_LOG="$LAUNCHCTL_LOG" bash "$SCRIPT" arm); code=$?
+expect_code 0 "$code" "re-arm succeeds"
+assert_not_contains "$out" "retired legacy" "nothing to retire the second time"
+assert_no_grep "bootout" "$LAUNCHCTL_LOG" "no bootout when the legacy tick is already gone"
+pass "re-arm is quiet once the legacy tick is gone"
+
+out=$(FM_CHAIR_SENTINEL_HOME="$HOME_DIR" FM_CHAIR_SENTINEL_LA_DIR="$LA_DIR" FM_CHAIR_SENTINEL_LAUNCHCTL="$LAUNCHCTL_STUB" \
+  FM_TEST_LAUNCHCTL_LOG="$LAUNCHCTL_LOG" bash "$SCRIPT" disarm); code=$?
+expect_code 0 "$code" "disarm succeeds"
+assert_absent "$PLIST" "sentinel plist removed"
+assert_absent "$LEGACY_PLIST" "disarm does not restore the legacy tick"
+pass "disarm leaves the legacy tick retired"
+
 if command -v python3 >/dev/null 2>&1; then
-  LA_DIR="$TMP_ROOT/LaunchAgents"
-  out=$(FM_CHAIR_SENTINEL_HOME="$HOME_DIR" FM_CHAIR_SENTINEL_LA_DIR="$LA_DIR" FM_CHAIR_SENTINEL_LAUNCHCTL=true bash "$SCRIPT" arm); code=$?
+  : > "$LAUNCHCTL_LOG"
+  out=$(FM_CHAIR_SENTINEL_HOME="$HOME_DIR" FM_CHAIR_SENTINEL_LA_DIR="$LA_DIR" FM_CHAIR_SENTINEL_LAUNCHCTL="$LAUNCHCTL_STUB" \
+    FM_TEST_LAUNCHCTL_LOG="$LAUNCHCTL_LOG" bash "$SCRIPT" arm); code=$?
   expect_code 0 "$code" "arm succeeds"
-  PLIST="$LA_DIR/ai.muso.chair-sentinel.plist"
   assert_present "$PLIST" "plist written"
   env_json=$(python3 -c 'import plistlib, json, sys; print(json.dumps(plistlib.load(open(sys.argv[1], "rb"))["EnvironmentVariables"]))' "$PLIST")
   la_path=$(printf '%s' "$env_json" | jq -r '.PATH // ""')
