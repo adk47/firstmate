@@ -85,6 +85,11 @@
 #     that the pool is empty. Both bounds are fixed constants: an override
 #     could only delay the one wake that cannot afford to be late.
 #
+# Both observation verbs additionally require pool_unreadable to be `none`. A
+# torn auth file is could-not-determine for its account - out of the counts and
+# out of the capable set - so either claim would be about an account nobody
+# read. The RED and the wake still happen; only the doorbell waits one poll.
+#
 # The record state/.fable-runway holds the last printed states, the last RED
 # report time, the Fable-tracked and Fable-capable name sets as of the last poll
 # that both printed and observed them, the needs-authentication set as of the
@@ -233,9 +238,11 @@ action_check() {
   [ -n "$capable" ] || capable=none
   [ -n "$tracked" ] || tracked=none
   [ -n "$needs_auth" ] || needs_auth=none
-  local observed_capable=$capable observed_routable
+  local observed_capable=$capable observed_routable observed_torn
   observed_routable=$(field pool_routable "$line")
   observed_routable=${observed_routable%%/*}
+  observed_torn=$(field pool_unreadable "$line")
+  [ -n "$observed_torn" ] || observed_torn=none
   # A poll that did not observe membership must not be read as one that saw an
   # empty pool. The monitor says `unobserved` when no account exposed a Fable
   # window - which is also what an unreadable better-ccflare beside a readable
@@ -344,6 +351,11 @@ action_check() {
   # to serve Fable from, so the episode is handed to the plain-bash helper here
   # and closed again the first poll neither condition holds.
   #
+  # Neither observation verb may ring on a reading an unreadable auth file could
+  # have changed: a torn file leaves its account out of the counts and out of
+  # the capable set, so both claims would be about an account nobody read. The
+  # RED and the wake stand; only the doorbell waits for a clean poll.
+  #
   # Three conditions open one, and they are different claims. A routable count
   # of zero is an observation whether or not any account exposes a Fable window,
   # and it is the shape a pool takes when no grant on the fleet's own proxy is
@@ -354,9 +366,9 @@ action_check() {
   # both would otherwise ring the Grok seat on a home whose pool was full the
   # whole time. So an unreadable pool opens an episode only once it has stayed
   # unreadable, and it says exactly that instead.
-  if [ "$pool" = RED ] && [ "$observed_routable" = 0 ]; then
+  if [ "$observed_torn" = none ] && [ "$pool" = RED ] && [ "$observed_routable" = 0 ]; then
     alert handoff-no-grant "$line"
-  elif [ "$pool" = RED ] && [ "$observed_capable" = none ]; then
+  elif [ "$observed_torn" = none ] && [ "$pool" = RED ] && [ "$observed_capable" = none ]; then
     alert handoff "$line"
   elif [ "$pool" = UNKNOWN ] && [ "$fable" = RED ] \
     && [ "$down_polls" -ge "$POOL_DOWN_POLLS" ] \

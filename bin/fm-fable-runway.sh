@@ -155,11 +155,19 @@
 # carried into the line or into any child process. Each file is parsed on its
 # own, so one torn file - a proxy caught mid-rewrite, a hand-edit - costs that
 # one account rather than the whole inventory, and the inventory counts as
-# unreadable only when no file parses at all. A torn file is could-not-determine
-# for its account rather than a dead grant: it is named in pool_unreadable, left
-# out of both routable counts rather than counted against the pool, and never
-# named in pool_needs_auth, because a read that failed is not a login the
-# captain has to go and perform.
+# unreadable only when the directory holds no claude-*.json at all. A torn file
+# is could-not-determine for its account rather than a dead grant: it is named
+# in pool_unreadable, left out of both routable counts rather than counted
+# against the pool, and never named in pool_needs_auth, because a read that
+# failed is not a login the captain has to go and perform.
+#
+# Torn means unknown everywhere, never an observation. A directory whose files
+# all failed to parse is an inventory that was observed and could not be read,
+# so it is UNKNOWN with inventory_unreadable rather than an absent inventory
+# handing the verdict back to better-ccflare; and when only some files are torn
+# and the counts still reach a RED, that RED stands but its reason reads
+# inventory_unreadable rather than claiming an observation a torn account could
+# have changed. The check refuses to ring the Grok seat on either reading.
 #
 # Every external call is clamped, because the watcher kills a check that runs
 # past FM_CHECK_TIMEOUT and a killed check prints nothing and records nothing -
@@ -438,21 +446,27 @@ named($trackedAccts) as $trackedNames |
 named($unproj) as $unprojNames |
 ($authNamesList | join(",")) as $authNames |
 (($inv | map(select(.live == null)) | map(.label)) | join(",")) as $tornNames |
+($inv | map(select(.live != null)) | length) as $invKnown |
+($useInv and $invKnown > 0) as $invCounts |
 # The auth inventory is the authority on capacity whenever it can be read: it
 # is the proxy the fleet's base URL points at, and better-ccflare's own counts
 # go stale the moment the other proxy refreshes a shared login.
-(if $useInv then ($inv | map(select(.live == true)) | length)
+(if $invCounts then ($inv | map(select(.live == true)) | length)
+ elif $useInv then null
  else ($health.pool.routable // null) end) as $routable |
 # An account whose file could not be read is left out of both counts rather
-# than counted against the pool: unknown is not dead.
-(if $useInv then ($inv | map(select(.live != null)) | length)
+# than counted against the pool: unknown is not dead. With no file readable at
+# all there is no count to give, so the inventory reports none rather than zero.
+(if $invCounts then $invKnown
+ elif $useInv then null
  else ($health.pool.configured // null) end) as $configured |
 ($health.pool.usage_exhausted // null) as $exhausted |
 # The routable count is the primary signal, so it decides first and decides
 # alone when no account exposes a Fable-scoped window. The per-account windows
 # only refine a verdict the counts already reached.
 (if ($routable | type) != "number" then
-   {state: "UNKNOWN", reason: "health_did_not_report_routable"}
+   (if $useInv then {state: "UNKNOWN", reason: "inventory_unreadable"}
+    else {state: "UNKNOWN", reason: "health_did_not_report_routable"} end)
  elif $routable <= 1 then
    {state: "RED", reason: "routable_at_or_below_1"}
  elif $tracked == 0 then
@@ -473,7 +487,16 @@ named($unproj) as $unprojNames |
    {state: "GREEN", reason: "exhaustion_unprojectable"}
  else
    {state: "GREEN", reason: "has_fable_capacity"}
- end) as $verdict |
+ end) as $observed |
+# A torn file is unknown, never an observation - so a RED the counts reached by
+# leaving a torn account out is not the observation its token would claim, and
+# the check must not ring the seat on it. The state stands, because an
+# unmeasurable pool is never GREEN; only the claim is withdrawn.
+(if $useInv and $tornNames != ""
+   and ($observed.reason == "routable_at_or_below_1"
+        or $observed.reason == "no_fable_capable_account")
+ then {state: $observed.state, reason: "inventory_unreadable"}
+ else $observed end) as $verdict |
 # No account exposing a Fable-scoped window is not an observation that the pool
 # has no capacity - it is the absence of one, and it is also what an unread
 # better-ccflare looks like beside a readable inventory. Reporting `none` there
@@ -560,10 +583,14 @@ fleet_base_url() {
 }
 
 # Print the inventory as a compact array, or fail when there is none to read. A
-# directory that is absent is a home that does not run CLIProxyAPI, which is a
-# normal home, not an error.
+# directory that is absent, or that holds no claude-*.json at all, is a home
+# that does not run CLIProxyAPI - a normal home, not an error. A directory that
+# holds files none of which parsed is a different thing: the inventory was
+# observed and could not be read, so every account comes back could-not-
+# determine rather than the whole inventory silently reading as absent and
+# handing the verdict to the source this monitor exists because it goes stale.
 auth_read() {
-  local dir=${FM_FABLE_RUNWAY_AUTH_DIR:-$HOME/.cli-proxy-api} f label entry parsed=0
+  local dir=${FM_FABLE_RUNWAY_AUTH_DIR:-$HOME/.cli-proxy-api} f label entry
   local -a entries=()
   [ -n "$dir" ] && [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   for f in "$dir"/claude-*.json; do
@@ -572,14 +599,12 @@ auth_read() {
     label=${label#claude-}
     label=${label%.json}
     entry=$(jq -c --argjson now "$NOW" --arg label "$label" "$AUTH_JQ" "$f" 2>/dev/null)
-    if [ $? -eq 0 ] && [ -n "$entry" ]; then
-      parsed=$((parsed + 1))
-    else
+    if [ $? -ne 0 ] || [ -z "$entry" ]; then
       entry=$(jq -cn --arg label "$label" '{label: $label, live: null}') || continue
     fi
     entries+=("$entry")
   done
-  [ "$parsed" -gt 0 ] || return 1
+  [ "${#entries[@]}" -gt 0 ] || return 1
   printf '[%s]' "$(IFS=,; printf '%s' "${entries[*]}")"
 }
 

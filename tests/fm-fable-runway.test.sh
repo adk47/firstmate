@@ -729,14 +729,54 @@ expect_field "$out" pool_unreadable none "dead-grant unreadable names"
 expect_field "$out" pool_needs_auth acct-torn "dead-grant needs-auth"
 expect_field "$out" pool_routable 4/5 "dead-grant routable"
 
-# Only when nothing parses at all is there no inventory to be the authority.
+# An inventory whose every file is torn was observed and could not be read - it
+# is not an absent inventory, and handing the verdict back to better-ccflare
+# there is the one thing that must not happen: on the live home's shape that
+# source reports every shared login expired, so the pool would read no-grant and
+# ring the Grok seat over a read that raced a rewrite.
+for torn_count in 1 3; do
+  rm -rf "$authdir"
+  mkdir -p "$authdir"
+  make_pool "$health" "$accounts" 0 "$torn_count" 0
+  for acct_name in $(seq 1 "$torn_count"); do
+    add_account_needing_auth "$accounts" "torn-$acct_name" 20 100 tokenStatus '"expired"'
+    printf '{"expired":"2026-' > "$authdir/claude-torn-$acct_name.json"
+  done
+  out=$(run_monitor "$quota" "$health" "$accounts" "$authdir")
+  expect_field "$out" pool_state UNKNOWN "$torn_count-file all-torn pool state"
+  expect_field "$out" pool_reason inventory_unreadable "$torn_count-file all-torn reason"
+  expect_field "$out" pool_needs_auth none "$torn_count-file all-torn needs-auth"
+  expect_field "$out" pool_routable unknown/unknown "$torn_count-file all-torn routable"
+  expect_rc "$out" 0 "$torn_count-file all-torn exit"
+done
+# Every torn name is on the line, so the read failure is visible.
+expect_field "$out" pool_unreadable torn-1,torn-2,torn-3 "all-torn unreadable names"
+
+# A directory with no claude-*.json at all is still a home that does not run
+# CLIProxyAPI, and better-ccflare decides there as it always has.
 rm -rf "$authdir"
 mkdir -p "$authdir"
-printf '{"expired":"2026-' > "$authdir/claude-torn-one.json"
+make_pool "$health" "$accounts" 6 6 0
+add_account "$accounts" only-cc 5 40 20 100
 out=$(run_monitor "$quota" "$health" "$accounts" "$authdir")
-expect_field "$out" pool_routable 0/5 "all-torn routable"
-expect_field "$out" pool_state RED "all-torn pool state"
-pass "one unparsable auth file costs that account, not the whole inventory"
+expect_field "$out" pool_routable 6/6 "empty-dir routable"
+expect_field "$out" pool_unreadable none "empty-dir unreadable names"
+expect_field "$out" pool_state GREEN "empty-dir pool state"
+
+# A RED the counts reached only by leaving a torn account out is not the
+# observation its token would claim, so the token says so. The state stands.
+rm -rf "$authdir"
+make_pool "$health" "$accounts" 5 5 0
+add_account "$accounts" spent-a 5 100 100 100
+add_account "$accounts" fresh 5 40 20 100
+make_auth_account "$authdir" spent-a 8 false
+printf '{"expired":"2026-' > "$authdir/claude-fresh.json"
+out=$(run_monitor "$quota" "$health" "$accounts" "$authdir")
+expect_field "$out" pool_capable none "torn-capability capable"
+expect_field "$out" pool_unreadable fresh "torn-capability unreadable names"
+expect_field "$out" pool_state RED "torn-capability pool state"
+expect_field "$out" pool_reason inventory_unreadable "torn-capability reason"
+pass "a torn auth file is unknown for the whole pool, never an observation"
 
 # Equivalent spellings of the pool URL must select the same proxy: the
 # comparison is the one boundary that decides whose grants are real, and reading
@@ -1480,6 +1520,68 @@ armed_again=$(run_check_in "$armedlab" "$((NOW + 300))" "$armedauth")
 [ "$(wc -l < "$armedlab/osascript.log")" -eq 1 ] \
   || fail "an account that already asked must not ask again every poll"
 pass "an account needing a login when the check is armed is notified once"
+
+# A read that raced a rewrite must not ring the Grok seat. On an inventory whose
+# every file is torn the pool cannot be counted at all, and on one where the
+# only unspent account is torn the capable set is empty only because nobody read
+# it - neither is an observation, so neither opens an episode or asks for a
+# login. The RED and the wake still happen.
+tornlab="$TMP_ROOT/torn"
+mkdir -p "$tornlab/state" "$tornlab/config"
+printf 'FM_FABLE_RUNWAY_GROK_TERMINAL=grok-seat\n' > "$tornlab/config/fable-runway.env"
+printf 'not a quota document\n' > "$tornlab/quota.json"
+tornauth="$tornlab/auth"
+mkdir -p "$tornauth"
+make_pool "$tornlab/health.json" "$tornlab/accounts.json" 0 3 0
+for acct_name in 1 2 3; do
+  add_account_needing_auth "$tornlab/accounts.json" "torn-$acct_name" 20 100 tokenStatus '"expired"'
+  printf '{"expired":"2026-' > "$tornauth/claude-torn-$acct_name.json"
+done
+torn_all=$(run_check_in "$tornlab" "$NOW" "$tornauth")
+expect_field "$torn_all" overall RED "all-torn poll overall"
+expect_field "$torn_all" pool_state UNKNOWN "all-torn poll pool state"
+expect_field "$torn_all" pool_needs_auth none "all-torn poll needs-auth"
+[ "$(notes_in "$tornlab")" = 0 ] \
+  || fail "an inventory nobody could read must not open a failover episode"
+[ ! -e "$tornlab/orca.log" ] || fail "a torn inventory must not ring the Grok seat"
+[ ! -s "$tornlab/osascript.log" ] \
+  || fail "a torn inventory must not ask for a login ($(cat "$tornlab/osascript.log"))"
+
+# One torn file beside a spent pool: the capable set is empty only because that
+# one account went unread, so the doorbell waits for a clean poll.
+onelab="$TMP_ROOT/torn-one"
+mkdir -p "$onelab/state" "$onelab/config"
+printf 'FM_FABLE_RUNWAY_GROK_TERMINAL=grok-seat\n' > "$onelab/config/fable-runway.env"
+make_quota "$onelab/quota.json" 60 0.5 none through_reset
+oneauth="$onelab/auth"
+make_pool "$onelab/health.json" "$onelab/accounts.json" 5 5 0
+for acct_name in a b c d; do
+  add_account "$onelab/accounts.json" "spent-$acct_name" 5 100 100 100
+  make_auth_account "$oneauth" "spent-$acct_name" 8 false
+done
+add_account "$onelab/accounts.json" fresh 5 40 20 100
+printf '{"expired":"2026-' > "$oneauth/claude-fresh.json"
+torn_one=$(run_check_in "$onelab" "$NOW" "$oneauth")
+expect_field "$torn_one" pool_state RED "torn-one poll pool state"
+expect_field "$torn_one" pool_capable none "torn-one poll capable"
+expect_field "$torn_one" pool_unreadable fresh "torn-one poll unreadable"
+[ -n "$torn_one" ] || fail "a RED pool must still wake firstmate"
+[ "$(notes_in "$onelab")" = 0 ] \
+  || fail "a capable set emptied by an unread account must not open an episode"
+[ ! -e "$onelab/orca.log" ] || fail "an unread account must not ring the Grok seat"
+
+# The next clean poll reads that account and decides for real. It stays silent -
+# the pool was already RED and the re-alert hour has not passed - but the
+# episode is not gated on printing, so the seat is rung now that the emptiness
+# is an observation.
+make_auth_account "$oneauth" fresh -1 false
+torn_clean=$(run_check_in "$onelab" "$((NOW + 300))" "$oneauth")
+[ -z "$torn_clean" ] || fail "an unchanged RED inside the throttle must stay silent (got: $torn_clean)"
+[ "$(notes_in "$onelab")" = 1 ] \
+  || fail "the clean poll that observes the empty pool must open the episode"
+grep -q 'No Fable-capable account left' "$onelab"/state/fable-runway-handoff-*.md \
+  || fail "the clean poll's episode must name what it observed"
+pass "an unreadable auth file never underwrites a handoff, and the next clean poll does"
 
 # A poll that observed no membership must not consume a pending regain. A
 # better-ccflare restart while the inventory still answers is exactly that poll,
