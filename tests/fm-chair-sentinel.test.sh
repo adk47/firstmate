@@ -122,7 +122,7 @@ for n in 1 2 3 4 5 6; do
   [ ! -s "$FLIP_LOG" ] || fail "an unknown source must never trigger a flip (tick $n)"
   assert_absent "$HOME_DIR/state/.chair-alarm" "no alarm"
 done
-assert_absent "$SOURCE_FILE" "an unknown source is never cached"
+assert_contains "$(cat "$SOURCE_FILE")" "pid=123 source=unknown " "an unknown source is cached for the pid too"
 pass "quiet chair, unknown source, fable green for 30 minutes -> no action"
 
 out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=red FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=unknown run_tick)
@@ -136,7 +136,7 @@ out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=red FM_TEST_CHA
 assert_present "$SOURCE_FILE" "a named source is cached"
 record=$(cat "$SOURCE_FILE")
 assert_contains "$record" "pid=123 " "cached under the lock pid"
-assert_contains "$record" "source=8317" "cached source"
+assert_contains "$record" "source=8317" "a cached unknown is replaced once the tank is named"
 assert_contains "$record" "launched_at=1700000000" "stamped with the tick time"
 pass "sentinel caches a named chair source keyed by pid"
 

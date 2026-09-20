@@ -55,10 +55,11 @@
 # The consecutive-unknown count lives in state/.chair-fable-unknown-ticks and
 # resets on any tick where Fable is measured.
 #
-# Once a tick has seen a chair with a named source (8317, 8080 or grok) it is
-# cached in state/.chair-source keyed by the lock pid (the same record the
-# actuator writes for a chair it launched), so later ticks read the record and
-# never re-derive the source while that pid holds the lock.
+# Once a tick has seen a chair, its source is cached in state/.chair-source
+# keyed by the lock pid (the same record the actuator writes for a chair it
+# launched): a named source (8317, 8080 or grok) is never re-derived while that
+# pid holds the lock; a cached `unknown` is re-derived by the status sensor
+# every tick and replaced as soon as a session names the tank.
 #
 # FM_CHAIR_SENTINEL_DRY_RUN=1 passes the dry run through to the actuator.
 #
@@ -135,7 +136,7 @@ flip_to() {  # <to-pi-fable|to-grok>
 
 run_tick() {
   local sensor status fable grok chair terminal decision action alarm_names flip_out flip_code source unknown_ticks
-  local pool8317 ccflare chair_source bound_state chair_pid
+  local pool8317 ccflare chair_source bound_state chair_pid cached cached_pid cached_source
   sensor=$(sensor_line)
   status=$(chair_line)
   fable=$(extract_field "$sensor" fable)
@@ -167,9 +168,12 @@ run_tick() {
     *) bound_state=none ;;
   esac
   case "$chair_pid:$chair_source" in
-    none:*|:*|*:unknown|*:none) ;;
+    none:*|:*|*:none|*:) ;;
     *)
-      if [ "$(sed -n 's/.*pid=\([^ ]*\).*/\1/p' "$SOURCE_FILE" 2>/dev/null | head -1)" != "$chair_pid" ]; then
+      cached=$(head -n 1 -- "$SOURCE_FILE" 2>/dev/null) || cached=''
+      cached_pid=$(printf '%s\n' "$cached" | sed -n 's/.*pid=\([^ ]*\).*/\1/p')
+      cached_source=$(printf '%s\n' "$cached" | sed -n 's/.*source=\([^ ]*\).*/\1/p')
+      if [ "$cached_pid" != "$chair_pid" ] || { [ "$cached_source" = unknown ] && [ "$chair_source" != unknown ]; }; then
         printf 'pid=%s source=%s launched_at=%s\n' "$chair_pid" "$chair_source" "${FM_CHAIR_SENTINEL_NOW:-$(date +%s)}" > "$SOURCE_FILE" 2>/dev/null || true
       fi
       ;;

@@ -228,12 +228,19 @@ assert_contains "$out" "source=8080" "a session from before this pid started is 
 pass "older session in the home -> ignored for a pid that started later"
 
 rm -f "$mine"
-out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
-assert_contains "$out" "source=8317" "with no session near the process start the newest session for this home is used"
 touch "$earlier"; sleep 1; touch "$other"
 out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
-assert_contains "$out" "source=8317" "newest by mtime"
-pass "no identity match -> newest session for this home"
+assert_contains "$out" "source=unknown" "with no session created as this pid started, no other session is taken for the chair"
+pass "no identity match (e.g. a resumed session) -> unknown, never another Pi's file"
+
+printf 'pid=%s source=unknown launched_at=1700000000\n' "$$" > "$SOURCE_FILE"
+out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
+assert_contains "$out" "source=unknown" "a recorded unknown with no match stays unknown"
+mine=$(session_file 2026-09-20T14-00-00-000Z_mine "$CWD_RESOLVED" $((START + 3)) anthropic)
+out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
+assert_contains "$out" "source=8080" "a recorded unknown is re-derived and named once the chair's session appears"
+rm -f "$SOURCE_FILE" "$mine"
+pass "recorded unknown is re-derived every read"
 
 rm -f "$other" "$earlier"
 elsewhere=$(session_file 2026-09-20T14-00-01-000Z_elsewhere /somewhere/else $((START + 2)) anthropic)
