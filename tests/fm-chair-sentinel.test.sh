@@ -24,7 +24,7 @@ SH
 cat > "$STATUS" <<'SH'
 #!/usr/bin/env bash
 printf 'chair-status: chair=%s harness=x source=%s terminal=%s pid=%s reason=x\n' \
-  "${FM_TEST_CHAIR:-pi-fable}" "${FM_TEST_SOURCE:-none}" term_test 123
+  "${FM_TEST_CHAIR:-pi-fable}" "${FM_TEST_SOURCE:-none}" term_test "${FM_TEST_PID:-123}"
 SH
 cat > "$FLIP" <<'SH'
 #!/usr/bin/env bash
@@ -111,27 +111,47 @@ out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=red FM_TEST_CCFLARE=green FM_TEST_CHA
 assert_contains "$out" "decision=fable_green_chair_ok" "a chair with no bound source (non-Pi record) is not re-seated"
 pass "pi with source=none -> nothing"
 
-SOURCE_TICKS="$HOME_DIR/state/.chair-source-unknown-ticks"
-rm -f "$SOURCE_TICKS"
-for n in 1 2; do
-  out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=unknown run_tick)
-  assert_contains "$out" "decision=chair_source_unknown_hold" "an unknown bound source is held on tick $n"
-  assert_contains "$out" "action=none" "no flip on hold tick $n"
-  [ ! -s "$FLIP_LOG" ] || fail "no flip while holding on an unknown source (tick $n)"
-done
-out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=unknown run_tick)
-assert_contains "$out" "decision=chair_source_unknown_reseat" "third consecutive unknown-source tick re-seats"
-assert_contains "$out" "action=to-pi-fable" "re-seat through to-pi-fable"
-assert_grep "to-pi-fable" "$FLIP_LOG" "flip invoked"
-pass "pi with unknown bound source -> held 2 ticks, re-seated on the 3rd"
+# --- an unknown bound source never re-seats a chair on its own --------------
 
-out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=8317 run_tick)
-assert_contains "$out" "decision=fable_green_chair_ok" "a named green source is fine"
-assert_absent "$SOURCE_TICKS" "the unknown-source count resets once the tank is named"
+SOURCE_FILE="$HOME_DIR/state/.chair-source"
+rm -f "$SOURCE_FILE"
+for n in 1 2 3 4 5 6; do
+  out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=unknown run_tick)
+  assert_contains "$out" "decision=fable_green_chair_ok" "a quiet chair with an unknown source is left alone (tick $n)"
+  assert_contains "$out" "action=none" "no action on tick $n"
+  [ ! -s "$FLIP_LOG" ] || fail "an unknown source must never trigger a flip (tick $n)"
+  assert_absent "$HOME_DIR/state/.chair-alarm" "no alarm"
+done
+assert_absent "$SOURCE_FILE" "an unknown source is never cached"
+pass "quiet chair, unknown source, fable green for 30 minutes -> no action"
+
+out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=red FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=unknown run_tick)
+assert_contains "$out" "decision=fable_green_chair_ok" "an unknown source cannot fire the source-red row"
+[ ! -s "$FLIP_LOG" ] || fail "no flip on unknown source even with a red pool"
+pass "unknown source + one pool red -> still nothing"
+
+# --- a named source is cached per lock pid so later ticks never re-derive ---
+
+out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=red FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=8317 run_tick)
+assert_present "$SOURCE_FILE" "a named source is cached"
+record=$(cat "$SOURCE_FILE")
+assert_contains "$record" "pid=123 " "cached under the lock pid"
+assert_contains "$record" "source=8317" "cached source"
+assert_contains "$record" "launched_at=1700000000" "stamped with the tick time"
+pass "sentinel caches a named chair source keyed by pid"
+
 out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=unknown run_tick)
-assert_contains "$out" "decision=chair_source_unknown_hold" "the hold starts over"
-pass "a named source resets the unknown-source hold"
-rm -f "$SOURCE_TICKS"
+assert_contains "$(cat "$SOURCE_FILE")" "source=8317" "an unknown reading never overwrites a cached source for the same pid"
+out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=8080 run_tick)
+assert_contains "$(cat "$SOURCE_FILE")" "source=8317" "the same pid is not re-derived once cached"
+pass "cached source is stable for the pid that holds the lock"
+
+out=$(FM_TEST_FABLE=red FM_TEST_GROK=green FM_TEST_CHAIR=grok FM_TEST_SOURCE=grok FM_TEST_PID=456 run_tick)
+record=$(cat "$SOURCE_FILE")
+assert_contains "$record" "pid=456 " "a new lock pid replaces the cached record"
+assert_contains "$record" "source=grok" "a grok chair's source is cached too"
+pass "new lock pid -> record replaced; grok chair source cached"
+rm -f "$SOURCE_FILE"
 
 # --- a foreign chair (claude) is replaced like none, never alarmed on -------
 

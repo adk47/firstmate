@@ -184,51 +184,65 @@ assert_contains "$out" "source=none" "a non-Pi chair with no record has no tank 
 pass "grok chair without a record -> source=none"
 rm -f "$SOURCE_FILE"
 
-# --- chair source: fallback to the newest recent Pi session file -------------
+# --- chair source: this Pi's own session file, by identity not recency -----
 
 SESSIONS="$TMP_ROOT/sessions"
 CWD_RESOLVED=$(cd "$HOME_DIR" && pwd -P)
 SESSION_DIR="$SESSIONS/--$(printf '%s' "${CWD_RESOLVED#/}" | tr '/' '-')--"
 mkdir -p "$SESSION_DIR"
-session_file() {  # <name> <cwd> <provider...>: a Pi session jsonl with one model_change per provider
-  local f="$SESSION_DIR/$1.jsonl" cwd=$2 prov; shift 2
-  printf '{"type":"session","version":3,"id":"%s","timestamp":"2026-09-20T14:04:50.961Z","cwd":"%s"}\n' "$1" "$cwd" > "$f"
+proc_start() {  # <pid> -> epoch the process started
+  local l; l=$(ps -o lstart= -p "$1" | sed 's/^ *//; s/ *$//')
+  date -j -f '%a %b %d %T %Y' "$l" +%s 2>/dev/null || date -d "$l" +%s
+}
+iso_at() {  # <epoch> -> Pi's session timestamp form
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u -d "@$1" +%Y-%m-%dT%H:%M:%S.000Z
+}
+session_file() {  # <name> <cwd> <epoch> <provider...>: a Pi session jsonl with one model_change per provider
+  local f="$SESSION_DIR/$1.jsonl" cwd=$2 at=$3 prov; shift 3
+  printf '{"type":"session","version":3,"id":"%s","timestamp":"%s","cwd":"%s"}\n' "$1" "$(iso_at "$at")" "$cwd" > "$f"
   for prov in "$@"; do
-    printf '{"type":"model_change","id":"x","parentId":null,"timestamp":"2026-09-20T14:04:51.503Z","provider":"%s","modelId":"claude-fable-5-1"}\n' "$prov" >> "$f"
+    printf '{"type":"model_change","id":"x","parentId":null,"timestamp":"%s","provider":"%s","modelId":"claude-fable-5-1"}\n' "$(iso_at "$at")" "$prov" >> "$f"
   done
   printf '%s\n' "$f"
 }
 run_status_sessions() { FM_CHAIR_STATUS_PI_SESSIONS_DIR="$SESSIONS" run_status "$@"; }
+START=$(proc_start "$$")
 
 FM_TEST_ORCA_JSON=$(orca_json pi "π - firstmate")
-older=$(session_file 2026-09-20T13-00-00-000Z_a "$CWD_RESOLVED" token-pool)
-newer=$(session_file 2026-09-20T14-00-00-000Z_b "$CWD_RESOLVED" token-pool anthropic)
-touch -t 202001010000 "$older"; sleep 1; touch "$newer"
+mine=$(session_file 2026-09-20T14-00-00-000Z_mine "$CWD_RESOLVED" $((START + 3)) token-pool anthropic)
+touch -t 202001010000 "$mine"
 out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
-assert_contains "$out" "source=8080" "the newest recent session's LAST model_change names the tank"
-pass "pi session fallback -> last model_change of the newest recent file"
+assert_contains "$out" "source=8080" "the session created as this pid started names the tank from its LAST model_change"
+pass "quiet chair (session untouched for years) -> still its own source"
 
-touch "$older"; sleep 1; touch "$newer"
+other=$(session_file 2026-09-20T15-00-00-000Z_other "$CWD_RESOLVED" $((START + 3600)) token-pool)
+touch "$other"
 out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
-assert_contains "$out" "source=8080" "newest by mtime wins when both are recent"
-touch "$newer"; sleep 1; touch "$older"
-out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
-assert_contains "$out" "source=8317" "a more recently written older session file wins"
-pass "pi session fallback -> newest by mtime"
+assert_contains "$out" "source=8080" "a second Pi opened later in the same home is never the chair, however recent"
+pass "second Pi opened in the home -> the chair keeps its own source"
 
-touch -t 202001010000 "$older" "$newer"
+earlier=$(session_file 2026-09-20T13-00-00-000Z_earlier "$CWD_RESOLVED" $((START - 3600)) token-pool)
+touch "$earlier"
 out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
-assert_contains "$out" "source=unknown" "session files older than 10 minutes are not evidence"
-pass "stale pi session files -> unknown"
+assert_contains "$out" "source=8080" "a session from before this pid started is not its own"
+pass "older session in the home -> ignored for a pid that started later"
 
-rm -f "$older" "$newer"
-other=$(session_file 2026-09-20T14-30-00-000Z_c /somewhere/else anthropic)
+rm -f "$mine"
 out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
-assert_contains "$out" "source=unknown" "a session whose cwd is not this home is ignored"
-pass "pi session for another cwd -> unknown"
-rm -f "$other"
+assert_contains "$out" "source=8317" "with no session near the process start the newest session for this home is used"
+touch "$earlier"; sleep 1; touch "$other"
+out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
+assert_contains "$out" "source=8317" "newest by mtime"
+pass "no identity match -> newest session for this home"
 
-recent=$(session_file 2026-09-20T14-40-00-000Z_d "$CWD_RESOLVED" anthropic)
+rm -f "$other" "$earlier"
+elsewhere=$(session_file 2026-09-20T14-00-01-000Z_elsewhere /somewhere/else $((START + 2)) anthropic)
+out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
+assert_contains "$out" "source=unknown" "a session whose cwd is not this home is ignored even at the right time"
+pass "session for another cwd -> unknown"
+rm -f "$elsewhere"
+
+mine=$(session_file 2026-09-20T14-00-00-000Z_mine "$CWD_RESOLVED" $((START + 3)) anthropic)
 printf 'pid=%s source=8317 launched_at=1700000000\n' "$$" > "$SOURCE_FILE"
 out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
 assert_contains "$out" "source=8317" "the flip's record outranks the session file"
@@ -237,7 +251,7 @@ FM_TEST_ORCA_JSON=$(orca_json claude "claude - firstmate")
 out=$(FM_TEST_CMDLINE='claude' run_status_sessions)
 assert_contains "$out" "source=none" "a Pi session file says nothing about a claude chair"
 pass "record outranks session; session only applies to a Pi chair"
-rm -f "$recent"
+rm -f "$mine"
 
 # --- terminal matching is conservative --------------------------------------
 

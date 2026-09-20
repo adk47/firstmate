@@ -28,13 +28,19 @@
 #   1. state/.chair-source, the record bin/fm-chair-flip.sh writes when a flip
 #      it launched verifies (`pid=<lock pid> source=<8317|8080|grok>
 #      launched_at=<epoch>`), used only while its pid is the lock holder.
-#   2. For a Pi chair firstmate did not launch: the newest Pi session file for
-#      this home (~/.pi/agent/sessions/<encoded cwd>/*.jsonl) whose first line
-#      names this home as cwd and whose mtime is within the last 10 minutes;
-#      its LAST model_change record's provider: token-pool -> 8317, anthropic
+#   2. For a Pi chair firstmate did not launch: THIS Pi's own session file under
+#      ~/.pi/agent/sessions/<encoded cwd>/, identified by creation time - Pi
+#      creates the session as the process starts, so the file whose first-line
+#      timestamp is closest to the lock pid's process start (within 120s) is
+#      its own; a session another Pi opened in this home is never the chair.
+#      Only if no session sits near the process start is the newest session
+#      whose first line names this home as cwd used instead. No file is ever
+#      rejected for being quiet: recency of writes is not evidence. The LAST
+#      model_change record's provider decides: token-pool -> 8317, anthropic
 #      -> 8080.
-#   3. Otherwise `unknown` for a Pi chair (the sentinel holds on it), `none`
-#      for any other chair.
+#   3. Otherwise `unknown` for a Pi chair, `none` for any other chair. An
+#      unknown source never causes a flip on its own; it only means the
+#      source-red re-seat row in the sentinel cannot fire.
 #
 # `terminal` is the Orca terminal that hosts that chair. Orca exposes no
 # pid/tty field, so the match is structural and deliberately conservative: an
@@ -122,11 +128,18 @@ harness_name() {  # <comm> <args> -> the verified harness name, or return 1
 ABS_HOME=$(cd -- "$HOME_DIR" 2>/dev/null && pwd -P) || ABS_HOME=$HOME_DIR
 SOURCE_FILE=$ABS_HOME/state/.chair-source
 PI_SESSIONS_DIR=${FM_CHAIR_STATUS_PI_SESSIONS_DIR:-${HOME:-}/.pi/agent/sessions}
-PI_SESSION_MAX_AGE_SECS=600
+PI_SESSION_START_SLACK_SECS=120
 
 file_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
 
-recorded_source() {  # <lock pid> -> the source bin/fm-chair-flip.sh recorded for this pid, or return 1
+process_start_epoch() {  # <pid> -> epoch seconds the process started, or return 1
+  local lstart
+  lstart=$(ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//')
+  [ -n "$lstart" ] || return 1
+  date -j -f '%a %b %d %T %Y' "$lstart" +%s 2>/dev/null || date -d "$lstart" +%s 2>/dev/null
+}
+
+recorded_source() {  # <lock pid> -> the source recorded in state/.chair-source for this pid, or return 1
   local line pid source
   line=$(head -n 1 -- "$SOURCE_FILE" 2>/dev/null) || return 1
   pid=$(printf '%s\n' "$line" | sed -n 's/.*pid=\([^ ]*\).*/\1/p')
@@ -135,25 +148,48 @@ recorded_source() {  # <lock pid> -> the source bin/fm-chair-flip.sh recorded fo
   printf '%s\n' "$source"
 }
 
-pi_session_source() {  # -> the provider of the newest recent Pi session for this home, or return 1
-  local dir f now provider
+session_provider_source() {  # <session file> -> 8317|8080 from its LAST model_change, or return 1
+  local provider
+  provider=$(jq -r 'select(.type == "model_change") | .provider // empty' -- "$1" 2>/dev/null | tail -n 1)
+  case "$provider" in
+    token-pool) printf '8317\n' ;;
+    anthropic) printf '8080\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+pi_session_source() {  # <lock pid> -> the source of THIS Pi's session, or return 1
+  # Pi appends each record with open/write/close and keeps no file handle, so
+  # the session is identified by creation time: Pi creates it as it starts, so
+  # the session whose first-line timestamp is closest to the lock pid's
+  # process start (within PI_SESSION_START_SLACK_SECS) is this process's. Only
+  # when no session sits near the start is the newest session for this home
+  # consulted instead. Neither path looks at how recently the file was written:
+  # a quiet chair is still the chair.
+  local dir f start ts best='' best_gap='' newest='' newest_m=0 m
   dir="$PI_SESSIONS_DIR/--$(printf '%s' "${ABS_HOME#/}" | tr '/:' '--')--"
-  now=$(date +%s)
   [ -d "$dir" ] || return 1
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    [ $((now - $(file_mtime "$f"))) -le "$PI_SESSION_MAX_AGE_SECS" ] || continue
-    head -n 1 -- "$f" | jq -e --arg cwd "$ABS_HOME" '.type == "session" and .cwd == $cwd' >/dev/null 2>&1 || continue
-    provider=$(jq -r 'select(.type == "model_change") | .provider // empty' -- "$f" 2>/dev/null | tail -n 1)
-    case "$provider" in
-      token-pool) printf '8317\n'; return 0 ;;
-      anthropic) printf '8080\n'; return 0 ;;
-      *) return 1 ;;
-    esac
-  done <<EOF_FILES
-$(ls -t -- "$dir"/*.jsonl 2>/dev/null)
-EOF_FILES
-  return 1
+  start=$(process_start_epoch "$1") || start=''
+  for f in "$dir"/*.jsonl; do
+    [ -f "$f" ] || continue
+    ts=$(head -n 1 -- "$f" | jq -r --arg cwd "$ABS_HOME" \
+      'select(.type == "session" and .cwd == $cwd) | .timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601' 2>/dev/null) || ts=''
+    [ -n "$ts" ] || continue
+    m=$(file_mtime "$f")
+    if [ "$m" -gt "$newest_m" ]; then newest=$f; newest_m=$m; fi
+    [ -n "$start" ] || continue
+    gap=$((ts - start)); [ "$gap" -lt 0 ] && gap=$((-gap))
+    if [ "$gap" -le "$PI_SESSION_START_SLACK_SECS" ] && { [ -z "$best_gap" ] || [ "$gap" -lt "$best_gap" ]; }; then
+      best=$f; best_gap=$gap
+    fi
+  done
+  if [ -n "$best" ]; then
+    session_provider_source "$best"
+  elif [ -n "$newest" ]; then
+    session_provider_source "$newest"
+  else
+    return 1
+  fi
 }
 
 PID=none
@@ -174,7 +210,7 @@ if [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ]; then
           case "$H" in pi|pi-signed) CHAIR=pi-fable ;; *) CHAIR=$H ;; esac
           if ! SOURCE=$(recorded_source "$LOCK_PID"); then
             if [ "$CHAIR" = pi-fable ]; then
-              SOURCE=$(pi_session_source) || SOURCE=unknown
+              SOURCE=$(pi_session_source "$LOCK_PID") || SOURCE=unknown
             else
               SOURCE=none
             fi
