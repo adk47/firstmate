@@ -27,8 +27,10 @@
 #      chosen source, the status-log path of every task in flight with the last
 #      20 lines of each, and pointers to data/MEMORY-INDEX.md, data/captain.md
 #      and data/learnings.md. This is what carries memory across the flip.
-#   5. Record the attempt timestamp, then end the current chair: send `/exit`
-#      to its Orca terminal whenever one is known, wait up to
+#   5. Record the attempt timestamp, then end the current chair: send its
+#      harness's own exit command (`/quit` for Pi, `/exit` for Grok and Claude;
+#      bin/fm-control-lib.sh fm_control_exit_command owns that fact) to its
+#      Orca terminal whenever one is known, wait up to
 #      FM_CHAIR_EXIT_WAIT_SECS (default 60) for the harness pid to die, then
 #      SIGTERM that exact pid. The pid is the one `fm-chair-status.sh` identified
 #      as a live harness (its `pid=` field), never the raw contents of
@@ -83,6 +85,9 @@ VERIFY_SECS=${FM_CHAIR_VERIFY_SECS:-120}
 BEAT_MAX_SECS=${FM_CHAIR_BEAT_MAX_SECS:-300}
 FLIP_STAMP=$STATE_DIR/.chair-flip-at
 
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
+
 usage() {
   awk '
     NR == 1 { next }
@@ -101,11 +106,11 @@ esac
 
 log() { printf '%s\n' "$*"; }
 
-run() {  # <command...>
+run() {  # <command...>: silent when live, printed when dry
   if [ "$DRY_RUN" = 1 ]; then
     log "DRY-RUN: $*"
   else
-    "$@"
+    "$@" >/dev/null 2>&1
   fi
 }
 
@@ -145,6 +150,8 @@ CHAIR=$(extract_field "$STATUS" chair)
 TERMINAL=$(extract_field "$STATUS" terminal)
 INCUMBENT_PID=$(extract_field "$STATUS" pid)
 case "$INCUMBENT_PID" in ''|*[!0-9]*) INCUMBENT_PID=none ;; esac
+INCUMBENT_HARNESS=$(extract_field "$STATUS" harness)
+EXIT_CMD=$(fm_control_exit_command "${INCUMBENT_HARNESS:-none}") || EXIT_CMD=''
 
 FABLE=$(extract_field "$SENSOR" fable)
 POOL8317=$(extract_field "$SENSOR" pool8317)
@@ -173,7 +180,7 @@ case "$TO" in
     TARGET_CHAIR=grok; TARGET_STATE=$GROK_STATE; TARGET_NAME=SuperGrok
     TITLE='grok - firstmate'
     SOURCE=supergrok
-    LAUNCH='grok --permission-mode bypassPermissions'
+    LAUNCH='grok --always-approve'
     ;;
 esac
 
@@ -285,10 +292,10 @@ if [ "$DRY_RUN" != 1 ]; then
   printf '%s\n' "$NOW" > "$FLIP_STAMP"
 fi
 
-if [ -n "$TERMINAL" ] && [ "$TERMINAL" != none ]; then
-  run "$ORCA" terminal send --terminal "$TERMINAL" --text '/exit' --enter --json >/dev/null 2>&1 || true
+if [ -n "$TERMINAL" ] && [ "$TERMINAL" != none ] && [ -n "$EXIT_CMD" ]; then
+  run "$ORCA" terminal send --terminal "$TERMINAL" --text "$EXIT_CMD" --enter --json || true
 elif harness_pid_alive "$INCUMBENT_PID"; then
-  log "chair-flip: no terminal known for incumbent pid $INCUMBENT_PID (status: $STATUS); no /exit, waiting ${EXIT_WAIT_SECS}s then SIGTERM"
+  log "chair-flip: no terminal or exit command known for incumbent $INCUMBENT_HARNESS pid $INCUMBENT_PID (status: $STATUS); no graceful exit, waiting ${EXIT_WAIT_SECS}s then SIGTERM"
 fi
 
 waited=0
@@ -299,7 +306,7 @@ done
 
 if [ "$DRY_RUN" != 1 ] && harness_pid_alive "$INCUMBENT_PID"; then
   log "chair-flip: incumbent pid $INCUMBENT_PID still alive after ${EXIT_WAIT_SECS}s; SIGTERM"
-  run kill -TERM "$INCUMBENT_PID" >/dev/null 2>&1 || true
+  run kill -TERM "$INCUMBENT_PID" || true
   waited=0
   while [ "$waited" -lt 20 ] && harness_pid_alive "$INCUMBENT_PID"; do
     "$SLEEP_CMD" 2

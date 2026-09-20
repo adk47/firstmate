@@ -6,20 +6,28 @@
 #
 # Prints one line and exits 0 always (this is a sensor):
 #
-#   chair=<grok|pi-fable|claude|none> terminal=<handle|none> pid=<n|none> reason=<token>
+#   chair=<pi-fable|grok|claude|codex|opencode|kimi|cursor|none> harness=<pi|grok|claude|...|none> terminal=<handle|none> pid=<n|none> reason=<token>
 #
-# `chair` is read from state/.lock: a live harness pid whose command line is
-# `grok ...` is `grok`, `pi ...` is `pi-fable`, `claude ...` is `claude`.
-# A missing lock, a dead pid, or a pid that is not a harness is `none`.
+# `harness` is read from state/.lock: the verified harness holding the lock as
+# a live pid, decided by the fleet's single owner of that question,
+# bin/fm-session-lock-lib.sh (fm_harness_process_matches), so every harness
+# bin/fm-lock.sh would honour is recognised here. A missing lock, a dead pid,
+# or a pid that is not a harness is `none`.
+#
+# `chair` is `harness` as the sentinel's decision value: `pi` (and `pi-signed`)
+# is `pi-fable`, every other harness is its own name, and a Pi chair with no
+# context left is `none` (below) while `harness` and `pid` still name it so the
+# actuator can end it gracefully.
 #
 # `terminal` is the Orca terminal that hosts that chair. Orca exposes no
 # pid/tty field, so the match is structural and deliberately conservative: an
 # Orca terminal in this home's worktree, connected, whose `agentIdentity` equals
 # the lock harness. A chair this repository launches (`pi-fable`, `grok`) must
 # also carry `firstmate` in its title - the convention `bin/fm-chair-flip.sh`
-# writes; a foreign chair (`claude`) was never titled by us, so its title is not
-# consulted. Zero matches or more than one both yield `none` rather than a
-# guess, so the actuator fails closed instead of typing into the wrong terminal.
+# writes; a foreign chair (`claude`, `codex`, ...) was never titled by us, so
+# its title is not consulted. Zero matches or more than one both yield `none`
+# rather than a guess, so the actuator fails closed instead of typing into the
+# wrong terminal.
 #
 # A Pi chair whose status-bar footer reads its context as fully consumed counts
 # as `none`: a chair with no context left cannot take the helm. The footer is
@@ -33,7 +41,9 @@
 #
 # Test seams:
 #   FM_CHAIR_STATUS_LOCK         lock file path (default <home>/state/.lock)
-#   FM_CHAIR_STATUS_PS_CMD       override the command-line reader (echoes the cmdline for a pid)
+#   FM_CHAIR_STATUS_PS_CMD       override the process reader (echoes the full
+#                                command line for a pid; its first word is taken
+#                                as the command name)
 #   FM_CHAIR_STATUS_ORCA_CMD     override the Orca CLI; called as
 #                                `terminal list --json` and
 #                                `terminal read --terminal <h> --screen --json`
@@ -45,6 +55,9 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 HOME_DIR=${FM_CHAIR_HOME_DIR:-$FM_HOME}
 LOCK_FILE=${FM_CHAIR_STATUS_LOCK:-$FM_HOME/state/.lock}
+
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 usage() {
   awk '
@@ -61,29 +74,31 @@ pid_alive() {
   [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
 }
 
-read_cmdline() {  # <pid>
+read_process() {  # <pid> -> sets PROC_COMM PROC_ARGS
   if [ -n "${FM_CHAIR_STATUS_PS_CMD:-}" ]; then
-    "$FM_CHAIR_STATUS_PS_CMD" "$1" 2>/dev/null
+    PROC_ARGS=$("$FM_CHAIR_STATUS_PS_CMD" "$1" 2>/dev/null) || PROC_ARGS=''
+    PROC_COMM=${PROC_ARGS%% *}
   else
-    ps -o command= -p "$1" 2>/dev/null
+    PROC_COMM=$(ps -o comm= -p "$1" 2>/dev/null) || PROC_COMM=''
+    PROC_ARGS=$(ps -o args= -p "$1" 2>/dev/null) || PROC_ARGS=''
   fi
 }
 
-classify_harness() {  # <cmdline>
-  # The harness is argv[0], not any substring of the arguments: a `pi` chair
-  # launched with `--model token-pool/claude-fable-5-1` must classify as
-  # pi-fable, and a bare shell is never a chair.
-  local first=${1%% *}
-  first=${first##*/}
-  case "$first" in
-    grok*) printf 'grok\n' ;;
-    claude*) printf 'claude\n' ;;
-    pi) printf 'pi-fable\n' ;;
-    *) printf 'none\n' ;;
-  esac
+harness_name() {  # <comm> <args> -> the verified harness name, or return 1
+  local name
+  fm_harness_process_matches "$1" "$2" || return 1
+  if [ "$FM_HARNESS_IS_CLAUDE" = 1 ]; then
+    name=claude
+  else
+    name=$(fm_harness_path_name "$1") || name=$(fm_harness_path_name "${2%% *}") \
+      || name=$(printf '%s %s' "$(basename -- "$1")" "$2" | grep -oE 'codex|opencode|grok|kimi|pi-signed|pi' | head -1) \
+      || name=cursor
+  fi
+  printf '%s\n' "$name"
 }
 
 PID=none
+HARNESS=none
 CHAIR=none
 REASON=no_lock
 if [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ]; then
@@ -92,14 +107,14 @@ if [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ]; then
     ''|*[!0-9]*) REASON=unreadable_lock ;;
     *)
       if pid_alive "$LOCK_PID"; then
-        CMD=$(read_cmdline "$LOCK_PID") || CMD=''
-        H=$(classify_harness "$CMD")
-        if [ "$H" = none ]; then
-          REASON=holder_not_harness
-        else
+        read_process "$LOCK_PID"
+        if H=$(harness_name "$PROC_COMM" "$PROC_ARGS"); then
           PID=$LOCK_PID
-          CHAIR=$H
+          HARNESS=$H
+          case "$H" in pi|pi-signed) CHAIR=pi-fable ;; *) CHAIR=$H ;; esac
           REASON=live_harness
+        else
+          REASON=holder_not_harness
         fi
       else
         REASON=stale_lock
@@ -154,6 +169,6 @@ if [ "$CHAIR" != none ]; then
   fi
 fi
 
-printf 'chair-status: chair=%s terminal=%s pid=%s reason=%s\n' \
-  "$CHAIR" "$TERMINAL" "$PID" "$REASON"
+printf 'chair-status: chair=%s harness=%s terminal=%s pid=%s reason=%s\n' \
+  "$CHAIR" "$HARNESS" "$TERMINAL" "$PID" "$REASON"
 exit 0

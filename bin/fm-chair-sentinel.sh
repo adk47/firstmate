@@ -18,11 +18,10 @@
 #   Fable red     + Grok above floor + any other   -> flip to-grok
 #   Fable unknown + Grok above floor + chair grok  -> nothing (no alarm)
 #   Fable unknown + Grok above floor + chair pi-fable
-#                                                  -> hold for up to
-#                                                     FM_CHAIR_UNKNOWN_HOLD_TICKS
-#                                                     (default 3) consecutive
-#                                                     unknown ticks, then treat
-#                                                     Fable as red: flip to-grok
+#                                                  -> hold for up to 3 consecutive
+#                                                     unknown ticks (15 min), then
+#                                                     treat Fable as red: flip
+#                                                     to-grok
 #   Fable unknown + Grok above floor + none|other  -> flip to-grok (a live chair
 #                                                     beats no chair)
 #   otherwise (no green tank)                      -> no flip; write
@@ -36,8 +35,9 @@
 # the actuator's 30-minute hysteresis is what stops a flapping 8317 from
 # bouncing the chair. Fable `unknown` (probe timeout or 5xx) is never an alarm
 # on its own and never causes a flip toward Fable. "Any other chair" includes
-# `none` and a foreign harness such as `claude`: the actuator ends it
-# gracefully with `/exit` before any SIGTERM, and it is never an alarm.
+# `none` and a foreign harness such as `claude` or `codex`: the actuator ends
+# it gracefully with its own exit command before any SIGTERM, and it is never
+# an alarm.
 #
 # The consecutive-unknown count lives in state/.chair-fable-unknown-ticks and
 # resets on any tick where Fable is measured.
@@ -52,7 +52,6 @@
 #   FM_CHAIR_SENTINEL_LA_DIR       LaunchAgents directory (default ~/Library/LaunchAgents)
 #   FM_CHAIR_SENTINEL_LAUNCHCTL    launchctl (default: launchctl)
 #   FM_CHAIR_SENTINEL_NOW          epoch seconds to use as now
-#   FM_CHAIR_UNKNOWN_HOLD_TICKS    consecutive Fable-unknown ticks a Pi chair is held (default 3)
 set -u
 export LC_ALL=C
 
@@ -67,7 +66,7 @@ LOG_DIR=$DATA_DIR/chair-sentinel
 LOG_FILE=$LOG_DIR/log.jsonl
 ALARM_FILE=$STATE_DIR/.chair-alarm
 UNKNOWN_TICKS_FILE=$STATE_DIR/.chair-fable-unknown-ticks
-UNKNOWN_HOLD_TICKS=${FM_CHAIR_UNKNOWN_HOLD_TICKS:-3}
+UNKNOWN_HOLD_TICKS=3
 LABEL=ai.muso.chair-sentinel
 LA_DIR=${FM_CHAIR_SENTINEL_LA_DIR:-${HOME:-}/Library/LaunchAgents}
 PLIST=$LA_DIR/$LABEL.plist

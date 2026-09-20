@@ -29,8 +29,10 @@ printf 'chair-runway: fable=%s pool8317=%s probe=x ccflare=%s routable=0/11 need
 SH
 cat > "$STATUS" <<'SH'
 #!/usr/bin/env bash
-printf 'chair-status: chair=%s terminal=%s pid=%s reason=x\n' \
-  "${FM_TEST_CHAIR:-grok}" "${FM_TEST_TERMINAL:-term_x}" "${FM_TEST_PID:-none}"
+c=${FM_TEST_CHAIR:-grok}
+case "$c" in pi-fable) h=pi ;; none) h=${FM_TEST_HARNESS:-none} ;; *) h=$c ;; esac
+printf 'chair-status: chair=%s harness=%s terminal=%s pid=%s reason=x\n' \
+  "$c" "$h" "${FM_TEST_TERMINAL:-term_x}" "${FM_TEST_PID:-none}"
 SH
 cat > "$ORCA" <<'SH'
 #!/usr/bin/env bash
@@ -72,6 +74,7 @@ printf 'done: something\n' > "$HOME_DIR/state/task-a.status"
 out=$(FM_TEST_FABLE=green FM_TEST_CHAIR=grok run_flip to-pi-fable)
 assert_contains "$out" "DRY-RUN" "dry run prints commands"
 assert_contains "$out" "terminal create" "dry run prints the launch"
+assert_contains "$out" "DRY-RUN: orca terminal send --terminal term_x --text /exit --enter --json" "dry run shows the graceful exit it would send"
 assert_contains "$out" "handoff written" "dry run reports the handoff"
 assert_present "$HOME_DIR/data/handoff-grok-to-pi-fable.md" "handoff file written"
 handoff=$(cat "$HOME_DIR/data/handoff-grok-to-pi-fable.md")
@@ -118,7 +121,10 @@ pass "both green -> 8317"
 out=$(FM_TEST_FABLE=red FM_TEST_GROK=green FM_TEST_CHAIR=pi-fable run_flip to-grok); code=$?
 expect_code 0 "$code" "to-grok flips"
 assert_contains "$out" "source=supergrok" "to-grok records the SuperGrok source"
-pass "to-grok -> source=supergrok"
+assert_contains "$out" "DRY-RUN: orca terminal send --terminal term_x --text /quit --enter --json" "a pi incumbent is asked to /quit, Pi's own exit command"
+assert_contains "$out" "--command 'grok --always-approve '" "grok is launched in the verified unattended form"
+assert_not_contains "$out" "permission-mode" "no unverified permission flag"
+pass "to-grok -> source=supergrok, pi asked to /quit, grok --always-approve"
 
 # --- refusals ---------------------------------------------------------------
 
@@ -221,10 +227,11 @@ pass "chair=none pid=none -> nothing signalled, successor launched"
 sleep 300 & FULL_PI=$!
 trap 'kill "$INCUMBENT" "$BYSTANDER" "$FULL_PI" 2>/dev/null; fm_test_cleanup' EXIT
 rm -f "$HOME_DIR/state/.chair-flip-at"
-out=$(FM_TEST_CHAIR=none FM_TEST_TERMINAL=term_full FM_TEST_PID="$FULL_PI" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-pi-fable); code=$?
-assert_grep "terminal send --terminal term_full --text /exit --enter --json" "$ORCA_LOG" "/exit reaches the context-full Pi's terminal"
+out=$(FM_TEST_CHAIR=none FM_TEST_HARNESS=pi FM_TEST_TERMINAL=term_full FM_TEST_PID="$FULL_PI" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-pi-fable); code=$?
+assert_grep "terminal send --terminal term_full --text /quit --enter --json" "$ORCA_LOG" "/quit (Pi's exit command) reaches the context-full Pi's terminal"
+assert_no_grep "text /exit" "$ORCA_LOG" "Pi is never sent /exit, which it would submit as a chat message"
 assert_dies "$FULL_PI" "the context-full Pi was not ended"
-pass "chair=none with a terminal -> graceful /exit first, then SIGTERM"
+pass "chair=none pi with a terminal -> graceful /quit first, then SIGTERM"
 
 # --- no terminal known: the log says so before the wait + SIGTERM ------------
 
@@ -232,8 +239,8 @@ sleep 300 & BLIND=$!
 trap 'kill "$INCUMBENT" "$BYSTANDER" "$FULL_PI" "$BLIND" 2>/dev/null; fm_test_cleanup' EXIT
 rm -f "$HOME_DIR/state/.chair-flip-at"
 out=$(FM_TEST_CHAIR=claude FM_TEST_TERMINAL=none FM_TEST_PID="$BLIND" FM_CHAIR_EXIT_WAIT_SECS=4 run_flip_live to-pi-fable); code=$?
-assert_contains "$out" "no terminal known for incumbent pid $BLIND" "log line names the missing terminal"
-assert_no_grep "text /exit" "$ORCA_LOG" "no /exit without a terminal"
+assert_contains "$out" "no terminal or exit command known for incumbent claude pid $BLIND" "log line names the missing terminal"
+assert_no_grep "terminal send" "$ORCA_LOG" "no exit command without a terminal"
 assert_dies "$BLIND" "the terminal-less incumbent was not ended"
 pass "no terminal -> logged, then wait + SIGTERM"
 

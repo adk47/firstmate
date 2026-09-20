@@ -84,20 +84,45 @@ FM_TEST_ORCA_JSON=$(orca_json grok "grok - firstmate")
 out=$(FM_TEST_CMDLINE='grok --permission-mode bypassPermissions' run_status)
 assert_contains "$out" "chair=grok" "grok command line classifies as grok"
 assert_contains "$out" "terminal=term_x" "chair terminal matched by title"
+assert_contains "$out" "harness=grok" "harness named"
 pass "live grok harness -> chair=grok with its terminal"
 
 FM_TEST_ORCA_JSON=$(orca_json pi "π - firstmate")
 out=$(FM_TEST_CMDLINE='pi --model token-pool/claude-fable-5-1' run_status)
 assert_contains "$out" "chair=pi-fable" "pi command line classifies as pi-fable"
+assert_contains "$out" "harness=pi" "the harness itself is pi"
 pass "live pi harness -> chair=pi-fable"
+
+out=$(FM_TEST_CMDLINE='/Users/x/.npm-global/bin/pi-signed --model token-pool/claude-fable-5-1' run_status)
+assert_contains "$out" "chair=pi-fable" "pi-signed is a pi chair"
+assert_contains "$out" "harness=pi-signed" "harness named"
+pass "live pi-signed harness -> chair=pi-fable"
 
 FM_TEST_ORCA_JSON=$(orca_json claude "claude - firstmate")
 out=$(FM_TEST_CMDLINE='claude --dangerously-skip-permissions' run_status)
 assert_contains "$out" "chair=claude" "claude command line classifies as claude"
+assert_contains "$out" "harness=claude" "harness named"
 pass "live claude harness -> chair=claude"
+
+out=$(FM_TEST_CMDLINE='/Users/x/.local/share/claude/versions/2.1.220 --dangerously-skip-permissions' run_status)
+assert_contains "$out" "chair=claude" "a version-named Claude binary is still claude (install path evidence)"
+pass "version-named claude binary -> chair=claude"
+
+for h in codex opencode kimi; do
+  FM_TEST_ORCA_JSON=$(orca_json "$h" "Some session")
+  out=$(FM_TEST_CMDLINE="$h --yolo" run_status)
+  assert_contains "$out" "chair=$h" "a verified $h harness is a chair, not holder_not_harness"
+  assert_contains "$out" "harness=$h" "harness named"
+  assert_contains "$out" "pid=$$" "its pid is reported so the actuator can end it"
+  assert_contains "$out" "terminal=term_x" "its terminal is matched without the firstmate title"
+done
+pass "every harness bin/fm-lock.sh honours is recognised (codex, opencode, kimi)"
 
 out=$(FM_TEST_CMDLINE='/bin/zsh -l' run_status)
 assert_contains "$out" "chair=none" "a bare shell is not a chair"
+assert_contains "$out" "harness=none" "no harness"
+assert_contains "$out" "pid=none" "no pid"
+assert_contains "$out" "reason=holder_not_harness" "reason"
 pass "non-harness holder -> none"
 
 # --- terminal matching is conservative --------------------------------------
@@ -153,9 +178,10 @@ FM_TEST_ORCA_SCREEN=$'> \n\nclaude-fable-5-1  ↑1.2M ↓40.1k  99.2%/1.0M'
 out=$(FM_TEST_CMDLINE='pi' run_status)
 assert_contains "$out" "chair=none" "a 99.2%-context pi chair is no chair"
 assert_contains "$out" "reason=context_full" "context-full reason"
-assert_contains "$out" "terminal=term_x" "its terminal is still reported so /exit can reach it"
+assert_contains "$out" "terminal=term_x" "its terminal is still reported so the exit command can reach it"
+assert_contains "$out" "harness=pi" "the harness is still named so the actuator sends Pi's exit command"
 assert_contains "$out" "pid=$$" "its pid is still reported"
-pass "screen footer 99.2%/1.0M -> none, terminal and pid kept"
+pass "screen footer 99.2%/1.0M -> none, harness, terminal and pid kept"
 
 FM_TEST_ORCA_SCREEN=$'claude-fable-5-1  ↑1.2M ↓40.1k  100.0%/1.0M'
 out=$(FM_TEST_CMDLINE='pi' run_status)

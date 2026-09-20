@@ -19,6 +19,8 @@ printf '%s\n' "${FM_TEST_PROBE_CODE:-200}"
 SH
 chmod +x "$PROBE"
 
+KEY_FILE="$TMP_ROOT/api_key"
+printf 'test-key\n' > "$KEY_FILE"
 HEALTH="$TMP_ROOT/health.json"
 ACCOUNTS="$TMP_ROOT/accounts.json"
 GROK="$TMP_ROOT/grok.json"
@@ -44,6 +46,7 @@ EOF
 }
 
 run_runway() {
+  FM_CHAIR_8317_KEY_FILE="$KEY_FILE" \
   FM_CHAIR_PROBE_CMD="$PROBE" \
   FM_CHAIR_CCFLARE_FIXTURE=1 \
   FM_CHAIR_CCFLARE_HEALTH_JSON="$HEALTH" \
@@ -111,5 +114,16 @@ write_grok 9
 out=$(FM_TEST_PROBE_CODE=200 run_runway)
 assert_contains "$out" "grok=red" "grok below floor is red"
 pass "grok floor applies at 10 percent"
+
+# --- no pool key -> 8317 unknown, never probed ------------------------------
+
+write_health 3 11
+write_grok 50
+out=$(FM_CHAIR_8317_KEY_FILE="$TMP_ROOT/no-such-key" FM_CHAIR_PROBE_CMD="$PROBE" FM_CHAIR_CCFLARE_FIXTURE=1 \
+  FM_CHAIR_CCFLARE_HEALTH_JSON="$HEALTH" FM_CHAIR_CCFLARE_ACCOUNTS_JSON="$ACCOUNTS" FM_CHAIR_GROK_JSON="$GROK" \
+  FM_TEST_PROBE_CODE=200 bash "$SCRIPT")
+assert_contains "$out" "pool8317=unknown" "a missing pool key leaves 8317 unknown"
+assert_contains "$out" "probe=no_key" "the reason names the missing key"
+pass "missing 8317 key -> unknown, not green"
 
 printf 'fm-chair-runway tests passed\n'
