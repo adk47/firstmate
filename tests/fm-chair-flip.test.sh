@@ -190,10 +190,40 @@ assert_contains "$out" "token-pool/claude-fable-5-1" "the successor is launched 
 assert_contains "$out" "source=8317" "source recorded"
 pass "pi on 8080 (red) -> re-seated on 8317"
 
+# --- an unknown or unmeasured bound source is a no-op without --force -------
+
+rm -f "$HOME_DIR/data/handoff-pi-fable-to-pi-fable.md"
+out=$(FM_TEST_POOL8317=red FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=unknown run_flip to-pi-fable); code=$?
+expect_code 0 "$code" "a pi with an unknown bound source is left alone"
+assert_contains "$out" "no-op" "no-op reported"
+assert_contains "$out" "--force" "the no-op says how to re-seat anyway"
+assert_not_contains "$out" "terminal create" "nothing launched"
+assert_not_contains "$out" "/quit" "the chair is not asked to exit"
+assert_absent "$HOME_DIR/data/handoff-pi-fable-to-pi-fable.md" "no handoff for a no-op"
+pass "direct to-pi-fable on an unknown-source chair -> no-op"
+
 out=$(FM_TEST_POOL8317=red FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=none run_flip to-pi-fable); code=$?
-expect_code 0 "$code" "a pi with no known bound source re-seats onto the green source"
-assert_contains "$out" "source=8080" "green source chosen"
-pass "pi with unknown bound source -> re-seated"
+expect_code 0 "$code" "a pi with no bound source is left alone"
+assert_contains "$out" "no-op" "no-op reported"
+pass "direct to-pi-fable on a source=none chair -> no-op"
+
+out=$(FM_TEST_POOL8317=unknown FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=8317 run_flip to-pi-fable); code=$?
+expect_code 0 "$code" "an unmeasured bound pool is not red"
+assert_contains "$out" "no-op" "no-op reported"
+assert_not_contains "$out" "terminal create" "nothing launched"
+pass "direct to-pi-fable with the bound pool unknown (not red) -> no-op"
+
+out=$(FM_TEST_POOL8317=red FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=unknown run_flip to-pi-fable --force); code=$?
+expect_code 0 "$code" "--force re-seats"
+assert_contains "$out" "re-seat (--force)" "forced re-seat reported"
+assert_contains "$out" "DRY-RUN: orca terminal send --terminal term_x --text /quit --enter --json" "the chair is asked to /quit"
+assert_contains "$out" "source=8080" "re-seated on the green source"
+assert_present "$HOME_DIR/data/handoff-pi-fable-to-pi-fable.md" "handoff written first"
+pass "direct to-pi-fable --force on an unknown-source chair -> re-seat"
+
+out=$(FM_TEST_FABLE=red FM_TEST_GROK=green FM_TEST_CHAIR=pi-fable run_flip to-grok --force); code=$?
+expect_code 2 "$code" "--force is only meaningful for to-pi-fable"
+pass "to-grok --force -> usage"
 
 # --- hysteresis -------------------------------------------------------------
 

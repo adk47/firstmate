@@ -4,9 +4,14 @@
 # script decides and acts, because a model with no tokens cannot perform prose.
 #
 # Usage:
-#   fm-chair-flip.sh to-pi-fable
+#   fm-chair-flip.sh to-pi-fable [--force]
 #   fm-chair-flip.sh to-grok
 #   fm-chair-flip.sh --help
+#
+# `--force` re-seats a chair that is already pi-fable even though its bound
+# source does not read red (source unknown/none, or its pool merely
+# unmeasured); without it such a call is a no-op that says why, the same rule
+# the sentinel applies. A forced re-seat still writes the handoff first.
 #
 # Order of operations (fixed, and the handoff file always comes first):
 #
@@ -20,8 +25,9 @@
 #      ANTHROPIC_BASE_URL=http://127.0.0.1:8080). A target reading `unknown` is
 #      never flipped toward, and Pi is never pointed at a source that is not
 #      green. A chair already at the target is a no-op, except a Pi chair whose
-#      bound source (`source=` in the status line) is no longer green: it is
-#      re-seated on the green source, handoff first, under the same hysteresis.
+#      bound source (`source=` in the status line) reads red: it is re-seated
+#      on the green source, handoff first, under the same hysteresis. Any other
+#      already-pi-fable chair is re-seated only with --force.
 #   2. Refuse within the hysteresis window: at most one attempt per
 #      FM_CHAIR_HYSTERESIS_SECS (default 1800) is recorded in
 #      state/.chair-flip-at.
@@ -111,11 +117,19 @@ usage() {
 }
 
 TO=${1:-}
+FORCE=0
 case "$TO" in
   to-pi-fable|to-grok) ;;
   -h|--help|help|'') usage ;;
   *) usage ;;
 esac
+shift
+for arg in "$@"; do
+  case "$arg" in
+    --force) [ "$TO" = to-pi-fable ] || usage; FORCE=1 ;;
+    *) usage ;;
+  esac
+done
 
 log() { printf '%s\n' "$*"; }
 
@@ -205,18 +219,27 @@ esac
 
 # FROM is the chair we are leaving, not the target's name: a handoff file is
 # named for the direction actually taken. A chair already at the target is a
-# no-op, except a Pi chair whose bound Fable source is no longer green: that
-# chair is re-seated on the source that is.
+# no-op, except a Pi chair whose bound Fable source reads RED: that chair is
+# re-seated on the source that is green. Any other already-pi-fable chair
+# (source unknown or none, or its pool merely unmeasured) is left alone unless
+# --force asks for the re-seat, the same rule the sentinel applies.
 FROM=$CHAIR
 
 if [ "$CHAIR" = "$TARGET_CHAIR" ]; then
   case "$TARGET_CHAIR:$CHAIR_SOURCE" in
-    pi-fable:8317) [ "$POOL8317" = green ] && { log "chair-flip: no-op (chair is already pi-fable on 8317, green)"; exit 0; } ;;
-    pi-fable:8080) [ "$CCFLARE" = green ] && { log "chair-flip: no-op (chair is already pi-fable on 8080, green)"; exit 0; } ;;
-    pi-fable:*) ;;
+    pi-fable:8317) BOUND_STATE=$POOL8317 ;;
+    pi-fable:8080) BOUND_STATE=$CCFLARE ;;
+    pi-fable:*) BOUND_STATE=$CHAIR_SOURCE ;;
     *) log "chair-flip: no-op (chair is already $TARGET_CHAIR)"; exit 0 ;;
   esac
-  log "chair-flip: re-seat: chair is pi-fable on source $CHAIR_SOURCE (pool8317=$POOL8317 ccflare=$CCFLARE)"
+  if [ "$BOUND_STATE" = red ]; then
+    log "chair-flip: re-seat: chair is pi-fable on source $CHAIR_SOURCE, which reads red (pool8317=$POOL8317 ccflare=$CCFLARE)"
+  elif [ "$FORCE" = 1 ]; then
+    log "chair-flip: re-seat (--force): chair is pi-fable on source $CHAIR_SOURCE, bound state $BOUND_STATE (pool8317=$POOL8317 ccflare=$CCFLARE)"
+  else
+    log "chair-flip: no-op (chair is already pi-fable on source $CHAIR_SOURCE, bound state $BOUND_STATE, not red; pass --force to re-seat anyway)"
+    exit 0
+  fi
 fi
 
 # Reachability: never flip toward unknown or red.
