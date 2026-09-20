@@ -141,6 +141,20 @@ out=$(FM_TEST_CMDLINE='/Users/x/.local/share/cursor-agent/versions/2026.09.1/ind
 assert_contains "$out" "chair=cursor" "the versioned Cursor install form is cursor"
 pass "versioned cursor-agent install -> chair=cursor"
 
+out=$(FM_TEST_CMDLINE='cursor-agent --trust --yolo --workspace /Users/x/Projects/api-service' run_status)
+assert_contains "$out" "chair=cursor" "a workspace path containing 'pi' does not turn Cursor into a Pi chair"
+assert_contains "$out" "harness=cursor" "harness stays cursor"
+pass "cursor-agent with an incidental 'pi' substring -> chair=cursor"
+
+out=$(FM_TEST_CMDLINE='cursor-agent --trust --yolo "fix the grok pipeline and the kimi codex import"' run_status)
+assert_contains "$out" "chair=cursor" "harness names in a positional prompt do not rename a Cursor chair"
+pass "cursor-agent with harness names in its prompt -> chair=cursor"
+
+FM_TEST_ORCA_JSON=$(orca_json grok "grok - firstmate")
+out=$(FM_TEST_CMDLINE='node /Users/x/.npm-global/lib/node_modules/@grok/cli/dist/index.js --always-approve' run_status)
+assert_contains "$out" "chair=grok" "an interpreter-launched harness is still named from its script path"
+pass "node-launched grok -> chair=grok"
+
 out=$(FM_TEST_CMDLINE='/bin/zsh -l' run_status)
 assert_contains "$out" "chair=none" "a bare shell is not a chair"
 assert_contains "$out" "harness=none" "no harness"

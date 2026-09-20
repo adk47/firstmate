@@ -11,8 +11,11 @@
 # `harness` is read from state/.lock: the verified harness holding the lock as
 # a live pid, decided by the fleet's single owner of that question,
 # bin/fm-session-lock-lib.sh (fm_harness_process_matches), so every harness
-# bin/fm-lock.sh would honour is recognised here. A missing lock, a dead pid,
-# or a pid that is not a harness is `none`.
+# bin/fm-lock.sh would honour is recognised here. Its name comes from the same
+# structural evidence the owner uses (exact path component, then Cursor's own
+# identity via bin/fm-cursor-lib.sh); only an interpreter-launched harness
+# (node/python running a harness script) is named from its argument text. A
+# missing lock, a dead pid, or a pid that is not a harness is `none`.
 #
 # `chair` is `harness` as the sentinel's decision value: `pi` (and `pi-signed`)
 # is `pi-fable`, every other harness is its own name, and a Pi chair with no
@@ -95,9 +98,13 @@ harness_name() {  # <comm> <args> -> the verified harness name, or return 1
   if [ "$FM_HARNESS_IS_CLAUDE" = 1 ]; then
     name=claude
   else
-    name=$(fm_harness_path_name "$1") || name=$(fm_harness_path_name "${2%% *}") \
-      || name=$(printf '%s %s' "$(basename -- "$1")" "$2" | grep -oE 'codex|opencode|grok|kimi|pi-signed|pi' | head -1)
-    [ -n "$name" ] || name=cursor
+    if name=$(fm_harness_path_name "$1") || name=$(fm_harness_path_name "${2%% *}"); then
+      :
+    elif fm_cursor_process_matches "$1" "$2" "${2%% *}"; then
+      name=cursor
+    else
+      name=$(printf '%s %s' "$(basename -- "$1")" "$2" | grep -oE 'codex|opencode|grok|kimi|pi-signed|pi' | head -1)
+    fi
   fi
   printf '%s\n' "$name"
 }

@@ -53,9 +53,11 @@
 #      may still be initialising.
 #   7. Verify within FM_CHAIR_VERIFY_SECS (default 120) that state/.lock is held
 #      by a live harness pid other than the incumbent's and that
-#      state/.last-watcher-beat was written after this flip began (the beat file
-#      is shared, so wall-clock freshness would be satisfied by the
-#      predecessor's last beat). Print the exact failure and exit nonzero
+#      state/.last-watcher-beat was written at or after the moment the
+#      successor's terminal was created, i.e. after the incumbent had already
+#      exited (the beat file is shared and the incumbent's watcher keeps
+#      touching it every poll until then, so any earlier reference would be
+#      satisfied by the predecessor). Print the exact failure and exit nonzero
 #      otherwise.
 #
 # Output carries `source=<8317|8080|supergrok>` so the caller can log which
@@ -353,6 +355,7 @@ LAUNCH_CMD="$LAUNCH $(sh_quote "$PROMPT")"
 if [ "$DRY_RUN" = 1 ]; then
   log "DRY-RUN: $ORCA terminal create --worktree path:$ABS_HOME --title '$TITLE' --command $(sh_quote "$LAUNCH_CMD") --json"
 else
+  LAUNCH_AT=$(date +%s)
   CREATE_JSON=$(run_capture "$ORCA" terminal create --worktree "path:$ABS_HOME" --title "$TITLE" --command "$LAUNCH_CMD" --json 2>/dev/null) || CREATE_JSON=''
   NEW_TERMINAL=$(printf '%s' "$CREATE_JSON" | jq -r '.result.terminal.handle // .result.handle // empty' 2>/dev/null) || NEW_TERMINAL=''
   [ -n "$NEW_TERMINAL" ] || { log "chair-flip: terminal create did not return a handle"; exit 1; }
@@ -378,7 +381,7 @@ else
     fi
     BEAT=$STATE_DIR/.last-watcher-beat
     BEAT_AT=$(stat -f %m "$BEAT" 2>/dev/null || stat -c %Y "$BEAT" 2>/dev/null || echo 0)
-    if [ "$BEAT_AT" -gt "$NOW" ]; then
+    if [ "$BEAT_AT" -ge "$LAUNCH_AT" ]; then
       ok=1
       break
     fi
@@ -386,7 +389,7 @@ else
     waited=$((waited + 5))
   done
   if [ "$ok" != 1 ]; then
-    log "chair-flip: verification failed after ${VERIFY_SECS}s: status=$(chair_line) beat_at=${BEAT_AT:-none} flip_started=$NOW (want a live harness pid other than $INCUMBENT_PID and a watcher beat written after the flip began)"
+    log "chair-flip: verification failed after ${VERIFY_SECS}s: status=$(chair_line) beat_at=${BEAT_AT:-none} launched_at=$LAUNCH_AT (want a live harness pid other than $INCUMBENT_PID and a watcher beat written after the successor was launched)"
     exit 1
   fi
 fi

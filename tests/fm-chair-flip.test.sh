@@ -31,6 +31,13 @@ cat > "$STATUS" <<'SH'
 #!/usr/bin/env bash
 [ "${FM_TEST_STATUS_EMPTY:-0}" = 1 ] && exit 0
 c=${FM_TEST_CHAIR:-grok}; pid=${FM_TEST_PID:-none}
+# The incumbent's watcher keeps beating until it exits: on the flip's second
+# status read (the second-chair guard, after the exit wait and before the
+# successor is created) write a beat that post-dates the flip's start.
+if [ -n "${FM_TEST_BEAT_ON_GUARD:-}" ]; then
+  n=$(cat "$FM_TEST_BEAT_ON_GUARD.calls" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s\n' "$n" > "$FM_TEST_BEAT_ON_GUARD.calls"
+  if [ "$n" = 2 ]; then sleep 1.1; touch "$FM_TEST_BEAT_ON_GUARD"; sleep 1.1; fi
+fi
 # After the successor has been created, report it as the new lock holder.
 if [ -n "${FM_TEST_CHAIR_AFTER:-}" ] && grep -q "terminal create" "${FM_TEST_ORCA_LOG:-/dev/null}" 2>/dev/null; then
   c=$FM_TEST_CHAIR_AFTER; pid=${FM_TEST_PID_AFTER:-none}
@@ -215,10 +222,18 @@ touch_at "$(( $(date +%s) - 5 ))" "$BEAT"
 out=$(FM_TEST_CHAIR=grok FM_TEST_CHAIR_AFTER=pi-fable FM_TEST_PID_AFTER=$$ FM_TEST_VERIFY_SECS=5 run_flip_live to-pi-fable); code=$?
 expect_code 1 "$code" "a predecessor's fresh beat does not verify the successor"
 assert_contains "$out" "verification failed" "failure reported"
-assert_contains "$out" "beat written after the flip began" "the beat criterion is named"
+assert_contains "$out" "beat written after the successor was launched" "the beat criterion is named"
 pass "successor lock + predecessor beat -> verification fails"
 
-rm -f "$HOME_DIR/state/.chair-flip-at"
+rm -f "$HOME_DIR/state/.chair-flip-at" "$BEAT.calls"
+touch_at "$(( $(date +%s) - 5 ))" "$BEAT"
+out=$(FM_TEST_CHAIR=claude FM_TEST_TERMINAL=none FM_TEST_BEAT_ON_GUARD="$BEAT" FM_TEST_CHAIR_AFTER=pi-fable FM_TEST_PID_AFTER=$$ FM_TEST_VERIFY_SECS=5 run_flip_live to-pi-fable); code=$?
+expect_code 1 "$code" "a predecessor beat written during the exit wait does not verify the successor"
+assert_contains "$out" "verification failed" "failure reported"
+assert_contains "$out" "launched_at=" "the reference is the successor launch"
+pass "beat written by the incumbent's watcher during the exit wait -> verification fails"
+
+rm -f "$HOME_DIR/state/.chair-flip-at" "$BEAT.calls"
 touch_at "$(( $(date +%s) + 120 ))" "$BEAT"
 out=$(FM_TEST_CHAIR=grok FM_TEST_CHAIR_AFTER=pi-fable FM_TEST_PID_AFTER=$$ FM_TEST_VERIFY_SECS=5 run_flip_live to-pi-fable); code=$?
 expect_code 0 "$code" "a beat after the flip began verifies"
