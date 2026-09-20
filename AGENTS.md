@@ -90,6 +90,8 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  handoff-<from>-to-<to>.md  memory carried across a firstmate chair flip (sensor line, chosen source, in-flight task tails, memory pointers); written by bin/fm-chair-flip.sh before the incumbent is ended and named in the successor's first prompt
+  chair-sentinel/    one JSONL decision line per chair-sentinel tick plus the LaunchAgent's stdout/stderr; bin/fm-chair-sentinel.sh owns the format
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               runtime records and signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
@@ -140,6 +142,7 @@ state/               runtime records and signals; gitignored
   .hash-* .count-* .stale-* .stale-since-* .churn-since-* .paused-* .wedge-escalations-* .writing-* .gw-busy-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes) and between a slow poll's stages; guard scripts read it
+  .chair-source .chair-flip-at .chair-alarm .chair-fable-unknown-ticks   firstmate chair sentinel records: the lock holder's bound token source, the flip hysteresis stamp, the no-tank alarm, and the consecutive Fable-unmeasured count; bin/fm-chair-flip.sh and bin/fm-chair-sentinel.sh own the formats; never touch
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```

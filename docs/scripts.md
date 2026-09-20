@@ -135,6 +135,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-deepseek-gateway.sh` | Lifecycle for the second local Anthropic-compatible gateway that serves DeepSeek V4.1 Flash to opt-in lanes |
 | `fm-lane-model-switch.sh` | Switch one live lane's model in place behind a composer-empty refusal, with an optional repoint at the DeepSeek gateway |
+| `fm-chair-sentinel.sh`   | Model-free LaunchAgent tick that keeps the firstmate chair on a green tank: Pi+Fable while a Fable source is green, SuperGrok during a Fable blackout; `arm`, `disarm`, `status` |
+| `fm-chair-runway.sh`     | Read-only sensor line for the chair's three tanks (8317 token pool live probe, 8080 better-ccflare, SuperGrok floor) |
+| `fm-chair-status.sh`     | Read-only line naming who holds the firstmate chair, its bound token source, and its Orca terminal |
+| `fm-chair-flip.sh`       | Deterministic actuator: write the handoff, end the incumbent chair gracefully, launch and verify the successor on the chosen tank |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared Relay config, relay, and reply-threading helpers                              |
 | `fm-x-poll.sh`           | One bounded Relay poll: stash newly offered mentions and emit their once-only wake   |
