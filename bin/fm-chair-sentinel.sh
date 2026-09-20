@@ -12,16 +12,21 @@
 # bin/fm-chair-flip.sh, and appends one line to data/chair-sentinel/log.jsonl.
 # It calls no model anywhere.
 #
-#   Fable green + chair pi-fable          -> nothing
-#   Fable green + chair grok|none         -> flip to-pi-fable
-#   Fable red   + Grok above floor + grok -> nothing
-#   Fable red   + Grok above floor + pi|none -> flip to-grok
-#   otherwise (both red or unmeasurable)  -> no flip; write state/.chair-alarm and
-#                                            print the captain-facing line naming
-#                                            the 8080 accounts a human must log in
+#   Fable green + chair pi-fable               -> nothing
+#   Fable green + any other chair              -> flip to-pi-fable
+#   Fable red   + Grok above floor + chair grok -> nothing
+#   Fable red   + Grok above floor + any other  -> flip to-grok
+#   otherwise (both red or unmeasurable)       -> no flip; write state/.chair-alarm
+#                                                 and print the captain-facing line
+#                                                 naming the 8080 accounts a human
+#                                                 must log in
 #
-# "Do not fight a healthy chair" is the first and third rows: a chair sitting on
-# a source that is still green is never moved.
+# Fable is primary. A Grok chair is a fallback for a Fable blackout and is
+# replaced as soon as Fable is green again, after the handoff file is written;
+# the actuator's 30-minute hysteresis is what stops a flapping 8317 from
+# bouncing the chair. "Any other chair" includes `none` and a foreign harness
+# such as `claude`: the actuator ends it gracefully with `/exit` before any
+# SIGTERM, and it is never an alarm.
 #
 # FM_CHAIR_SENTINEL_DRY_RUN=1 passes the dry run through to the actuator.
 #
@@ -50,6 +55,9 @@ LABEL=ai.muso.chair-sentinel
 LA_DIR=${FM_CHAIR_SENTINEL_LA_DIR:-${HOME:-}/Library/LaunchAgents}
 PLIST=$LA_DIR/$LABEL.plist
 LAUNCHCTL=${FM_CHAIR_SENTINEL_LAUNCHCTL:-launchctl}
+# launchd starts jobs with /usr/bin:/bin:/usr/sbin:/sbin only; orca, pi,
+# quota-axi and grok live in the user's tool dirs.
+LAUNCHD_PATH=${HOME:-}/.local/bin:${HOME:-}/.npm-global/bin:${HOME:-}/.grok/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 
 usage() {
   awk '
@@ -82,14 +90,14 @@ chair_line() {
 
 flip_to() {  # <to-pi-fable|to-grok>
   if [ -n "${FM_CHAIR_SENTINEL_FLIP_CMD:-}" ]; then
-    FM_CHAIR_FLIP_HOME="$ABS_HOME" "$FM_CHAIR_SENTINEL_FLIP_CMD" "$1"
+    FM_CHAIR_FLIP_HOME="$ABS_HOME" FM_CHAIR_FLIP_DRY_RUN="${FM_CHAIR_SENTINEL_DRY_RUN:-0}" "$FM_CHAIR_SENTINEL_FLIP_CMD" "$1"
   else
-    FM_CHAIR_FLIP_HOME="$ABS_HOME" "$SCRIPT_DIR/fm-chair-flip.sh" "$1"
+    FM_CHAIR_FLIP_HOME="$ABS_HOME" FM_CHAIR_FLIP_DRY_RUN="${FM_CHAIR_SENTINEL_DRY_RUN:-0}" "$SCRIPT_DIR/fm-chair-flip.sh" "$1"
   fi
 }
 
 run_tick() {
-  local sensor status fable grok chair terminal decision action alarm_names
+  local sensor status fable grok chair terminal decision action alarm_names flip_out flip_code source
   sensor=$(sensor_line)
   status=$(chair_line)
   fable=$(extract_field "$sensor" fable)
@@ -100,16 +108,20 @@ run_tick() {
 
   decision=none
   action=none
-  if [ "$fable" = green ] && [ "$chair" = pi-fable ]; then
-    decision=fable_green_chair_ok
-  elif [ "$fable" = green ] && { [ "$chair" = grok ] || [ "$chair" = none ]; }; then
-    decision=fable_green_chair_wrong
-    action=to-pi-fable
-  elif [ "$fable" = red ] && [ "$grok" = green ] && [ "$chair" = grok ]; then
-    decision=grok_red_chair_ok
-  elif [ "$fable" = red ] && [ "$grok" = green ] && { [ "$chair" = pi-fable ] || [ "$chair" = none ]; }; then
-    decision=grok_blackout_chair_wrong
-    action=to-grok
+  if [ "$fable" = green ]; then
+    if [ "$chair" = pi-fable ]; then
+      decision=fable_green_chair_ok
+    else
+      decision=fable_green_chair_wrong
+      action=to-pi-fable
+    fi
+  elif [ "$fable" = red ] && [ "$grok" = green ]; then
+    if [ "$chair" = grok ]; then
+      decision=grok_red_chair_ok
+    else
+      decision=grok_blackout_chair_wrong
+      action=to-grok
+    fi
   else
     decision=no_tank
   fi
@@ -123,18 +135,23 @@ run_tick() {
     rm -f "$ALARM_FILE" 2>/dev/null || true
   fi
 
+  flip_code=null
+  source=none
   if [ "$action" != none ]; then
-    flip_to "$action" || true
+    flip_out=$(flip_to "$action" 2>&1); flip_code=$?
+    [ -z "$flip_out" ] || printf '%s\n' "$flip_out"
+    source=$(extract_field "$flip_out" source)
+    source=${source:-none}
   fi
 
   mkdir -p "$LOG_DIR" 2>/dev/null || true
   local now
   now=${FM_CHAIR_SENTINEL_NOW:-$(date +%s)}
-  printf '{"at":%s,"fable":"%s","grok":"%s","chair":"%s","terminal":"%s","decision":"%s","action":"%s"}\n' \
-    "$now" "$fable" "$grok" "$chair" "$terminal" "$decision" "$action" >> "$LOG_FILE" 2>/dev/null || true
+  printf '{"at":%s,"fable":"%s","grok":"%s","chair":"%s","terminal":"%s","decision":"%s","action":"%s","source":"%s","flip_exit":%s}\n' \
+    "$now" "$fable" "$grok" "$chair" "$terminal" "$decision" "$action" "$source" "$flip_code" >> "$LOG_FILE" 2>/dev/null || true
 
-  printf 'chair-sentinel: fable=%s grok=%s chair=%s decision=%s action=%s\n' \
-    "$fable" "$grok" "$chair" "$decision" "$action"
+  printf 'chair-sentinel: fable=%s grok=%s chair=%s decision=%s action=%s source=%s flip_exit=%s\n' \
+    "$fable" "$grok" "$chair" "$decision" "$action" "$source" "$flip_code"
 }
 
 write_plist() {
@@ -149,6 +166,7 @@ write_plist() {
   </array>
   <key>EnvironmentVariables</key><dict>
     <key>FM_HOME</key><string>$ABS_HOME</string>
+    <key>PATH</key><string>$LAUNCHD_PATH</string>
   </dict>
   <key>StartInterval</key><integer>300</integer>
   <key>RunAtLoad</key><true/>

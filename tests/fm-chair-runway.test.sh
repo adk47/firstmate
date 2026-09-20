@@ -112,13 +112,4 @@ out=$(FM_TEST_PROBE_CODE=200 run_runway)
 assert_contains "$out" "grok=red" "grok below floor is red"
 pass "grok floor applies at 10 percent"
 
-# --- json -------------------------------------------------------------------
-
-write_grok 50
-out=$(FM_TEST_PROBE_CODE=200 run_runway --json)
-printf '%s' "$out" | jq -e '.fable == "green"' >/dev/null || fail "json fable green"
-printf '%s' "$out" | jq -e '.pool8317 == "green"' >/dev/null || fail "json pool8317"
-printf '%s' "$out" | jq -e '.grok == "green"' >/dev/null || fail "json grok"
-pass "json output carries every source"
-
 printf 'fm-chair-runway tests passed\n'

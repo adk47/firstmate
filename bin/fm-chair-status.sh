@@ -2,11 +2,11 @@
 # fm-chair-status.sh - who currently sits in the firstmate chair, and where.
 #
 # Usage:
-#   fm-chair-status.sh [--json]
+#   fm-chair-status.sh
 #
 # Prints one line and exits 0 always (this is a sensor):
 #
-#   chair=<grok|pi-fable|claude|none> terminal=<handle|none> pid=<n|none> tty=<t|none> reason=<token>
+#   chair=<grok|pi-fable|claude|none> terminal=<handle|none> pid=<n|none> reason=<token>
 #
 # `chair` is read from state/.lock: a live harness pid whose command line is
 # `grok ...` is `grok`, `pi ...` is `pi-fable`, `claude ...` is `claude`.
@@ -20,8 +20,11 @@
 # than one both yield `none` rather than a guess, so the actuator fails closed
 # instead of typing into the wrong terminal.
 #
-# A Pi chair whose footer reads its context as fully consumed counts as `none`:
-# a chair with no context left cannot take the helm.
+# A Pi chair whose status-bar footer reads its context as fully consumed counts
+# as `none`: a chair with no context left cannot take the helm. Only the footer
+# token Pi renders, `<NN.N>%/<window>` (e.g. `99.2%/1.0M`), is consulted - the
+# last such token in the terminal preview - and 99.0 or more is full. Prose in
+# the pane that merely mentions "100% context" never counts.
 #
 # Read-only: never writes state, never sends input.
 #
@@ -29,7 +32,6 @@
 #   FM_CHAIR_STATUS_LOCK         lock file path (default <home>/state/.lock)
 #   FM_CHAIR_STATUS_PS_CMD       override the command-line reader (echoes the cmdline for a pid)
 #   FM_CHAIR_STATUS_ORCA_CMD     override the Orca terminal enumerator (echoes JSON)
-#   FM_CHAIR_STATUS_TERMINAL     pin the terminal handle (skips enumeration)
 set -u
 export LC_ALL=C
 
@@ -48,14 +50,7 @@ usage() {
   exit 2
 }
 
-JSON=0
-for arg in "$@"; do
-  case "$arg" in
-    --json) JSON=1 ;;
-    -h|--help|help) usage ;;
-    *) usage ;;
-  esac
-done
+[ $# -eq 0 ] || usage
 
 pid_alive() {
   [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
@@ -85,7 +80,6 @@ classify_harness() {  # <cmdline>
 
 PID=none
 CHAIR=none
-TTY=none
 REASON=no_lock
 if [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ]; then
   LOCK_PID=$(cat -- "$LOCK_FILE" 2>/dev/null) || LOCK_PID=''
@@ -101,12 +95,6 @@ if [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ]; then
           PID=$LOCK_PID
           CHAIR=$H
           REASON=live_harness
-          if [ -n "${FM_CHAIR_STATUS_TTY_CMD:-}" ]; then
-            TTY=$("$FM_CHAIR_STATUS_TTY_CMD" "$LOCK_PID" 2>/dev/null) || TTY=none
-          else
-            TTY=$(ps -o tty= -p "$LOCK_PID" 2>/dev/null | tr -d ' ') || TTY=none
-          fi
-          [ -n "$TTY" ] || TTY=none
         fi
       else
         REASON=stale_lock
@@ -127,52 +115,42 @@ enumerate_orca_terminals() {
   fi
 }
 
+context_full() {  # <preview> -> 0 when the last Pi footer token reads >= 99.0%
+  local pct
+  pct=$(printf '%s\n' "$1" | grep -oE '[0-9]+\.[0-9]+%/[0-9.]+[kM]' | tail -n 1 | cut -d% -f1)
+  [ -n "$pct" ] || return 1
+  awk -v p="$pct" 'BEGIN { exit !(p + 0 >= 99.0) }'
+}
+
 TERMINAL=none
-FULL=0
 if [ "$CHAIR" != none ]; then
-  if [ -n "${FM_CHAIR_STATUS_TERMINAL:-}" ]; then
-    TERMINAL=$FM_CHAIR_STATUS_TERMINAL
+  TERMS_JSON=$(enumerate_orca_terminals) || TERMS_JSON=''
+  if [ -n "$TERMS_JSON" ] && printf '%s' "$TERMS_JSON" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    MATCHES=$(printf '%s' "$TERMS_JSON" | jq -r \
+      --arg path "$HOME_DIR" --arg harness "$CHAIR" \
+      '[.result.terminals[]? | select(.worktreePath == $path) | select(.connected == true)
+        | select((.agentIdentity // "") == (if $harness == "pi-fable" then "pi" else $harness end))
+        | select((.title // "") | ascii_downcase | contains("firstmate"))]
+       | .[] | [.handle, .preview] | @tsv' 2>/dev/null) || MATCHES=''
+    COUNT=$(printf '%s\n' "$MATCHES" | grep -c . 2>/dev/null || true)
+    case "$COUNT" in
+      1)
+        TERMINAL=$(printf '%s\n' "$MATCHES" | cut -f1)
+        PREVIEW=$(printf '%s\n' "$MATCHES" | cut -f2-)
+        if [ "$CHAIR" = pi-fable ] && context_full "$PREVIEW"; then
+          CHAIR=none
+          REASON=context_full
+        fi
+        ;;
+      0) TERMINAL=none; [ "$REASON" = live_harness ] && REASON=no_terminal_match ;;
+      *) TERMINAL=none; REASON=ambiguous_terminal ;;
+    esac
   else
-    TERMS_JSON=$(enumerate_orca_terminals) || TERMS_JSON=''
-    if [ -n "$TERMS_JSON" ] && printf '%s' "$TERMS_JSON" | jq -e 'type == "object"' >/dev/null 2>&1; then
-      MATCHES=$(printf '%s' "$TERMS_JSON" | jq -r \
-        --arg path "$HOME_DIR" --arg harness "$CHAIR" \
-        '[.result.terminals[]? | select(.worktreePath == $path) | select(.connected == true)
-          | select((.agentIdentity // "") == (if $harness == "pi-fable" then "pi" else $harness end))
-          | select((.title // "") | ascii_downcase | contains("firstmate"))]
-         | .[] | [.handle, .preview] | @tsv' 2>/dev/null) || MATCHES=''
-      COUNT=$(printf '%s\n' "$MATCHES" | grep -c . 2>/dev/null || true)
-      case "$COUNT" in
-        1)
-          TERMINAL=$(printf '%s\n' "$MATCHES" | cut -f1)
-          PREVIEW=$(printf '%s\n' "$MATCHES" | cut -f2-)
-          # A Pi footer that reads its context as fully consumed means no chair.
-          if [ "$CHAIR" = pi-fable ] && printf '%s' "$PREVIEW" \
-            | grep -Eq '100%[[:space:]]*context|context[^0-9]{0,6}100%'; then
-            FULL=1
-            REASON=context_full
-          fi
-          ;;
-        0) TERMINAL=none; [ "$REASON" = live_harness ] && REASON=no_terminal_match ;;
-        *) TERMINAL=none; REASON=ambiguous_terminal ;;
-      esac
-    else
-      TERMINAL=none
-      [ "$REASON" = live_harness ] && REASON=orca_unavailable
-    fi
+    TERMINAL=none
+    [ "$REASON" = live_harness ] && REASON=orca_unavailable
   fi
 fi
 
-if [ "$FULL" = 1 ]; then
-  CHAIR=none
-fi
-
-if [ "$JSON" = 1 ]; then
-  jq -cn --arg chair "$CHAIR" --arg terminal "$TERMINAL" --arg pid "$PID" \
-    --arg tty "$TTY" --arg reason "$REASON" \
-    '{chair:$chair,terminal:$terminal,pid:$pid,tty:$tty,reason:$reason}'
-else
-  printf 'chair-status: chair=%s terminal=%s pid=%s tty=%s reason=%s\n' \
-    "$CHAIR" "$TERMINAL" "$PID" "$TTY" "$REASON"
-fi
+printf 'chair-status: chair=%s terminal=%s pid=%s reason=%s\n' \
+  "$CHAIR" "$TERMINAL" "$PID" "$REASON"
 exit 0

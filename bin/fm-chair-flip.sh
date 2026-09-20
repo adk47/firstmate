@@ -11,27 +11,37 @@
 # Order of operations (fixed, and the handoff file always comes first):
 #
 #   1. Refuse unless the target is reachable. `to-grok` requires SuperGrok above
-#      its safety floor; `to-pi-fable` requires Fable green in `fm-chair-runway.sh`.
-#      A target reading `unknown` is never flipped toward.
-#   2. Refuse within the hysteresis window: at most one flip per
+#      its safety floor; `to-pi-fable` requires a green Fable source in
+#      `fm-chair-runway.sh` and launches Pi against that source only: the 8317
+#      token pool (`token-pool/claude-fable-5-1`) when it is green, otherwise
+#      the 8080 better-ccflare gateway (the `anthropic` provider with
+#      ANTHROPIC_BASE_URL=http://127.0.0.1:8080). A target reading `unknown` is
+#      never flipped toward, and Pi is never pointed at a source that is not
+#      green.
+#   2. Refuse within the hysteresis window: at most one attempt per
 #      FM_CHAIR_HYSTERESIS_SECS (default 1800) is recorded in
 #      state/.chair-flip-at.
-#   3. Write data/handoff-<from>-to-<to>.md: timestamp, the sensor line, the open
-#      wake count, the status-log path of every task in flight with the last 20
-#      lines of each, and pointers to data/MEMORY-INDEX.md, data/captain.md and
-#      data/learnings.md. This is what carries memory across the flip.
-#   4. End the current chair: send `/exit` to its Orca terminal, wait up to
-#      FM_CHAIR_EXIT_WAIT_SECS (default 60) for the lock pid to die, then
-#      SIGTERM that exact pid. Never pkill -f, never a second chair on top of a
-#      first.
-#   5. Launch the successor in a NEW Orca terminal in this home, titled
+#   3. Refuse when the Orca CLI cannot be found: the incumbent is never ended
+#      when the successor could not be launched.
+#   4. Write data/handoff-<from>-to-<to>.md: timestamp, the sensor line, the
+#      chosen source, the status-log path of every task in flight with the last
+#      20 lines of each, and pointers to data/MEMORY-INDEX.md, data/captain.md
+#      and data/learnings.md. This is what carries memory across the flip.
+#   5. Record the attempt timestamp, then end the current chair: send `/exit`
+#      to its Orca terminal, wait up to FM_CHAIR_EXIT_WAIT_SECS (default 60) for
+#      the lock pid to die, then SIGTERM that exact pid. Never pkill -f, never a
+#      second chair on top of a first. The stamp goes first so a flip that acted
+#      and then failed verification is still bounded by the hysteresis window.
+#   6. Launch the successor in a NEW Orca terminal in this home, titled
 #      `π - firstmate` or `grok - firstmate`, then send the one-line first prompt
 #      naming the handoff file.
-#   6. Verify within FM_CHAIR_VERIFY_SECS (default 120) that state/.lock is held
+#   7. Verify within FM_CHAIR_VERIFY_SECS (default 120) that state/.lock is held
 #      by a live harness pid and state/.last-watcher-beat is under
 #      FM_CHAIR_BEAT_MAX_SECS (default 300). Print the exact failure and exit
 #      nonzero otherwise.
-#   7. Record the flip timestamp so the hysteresis window applies.
+#
+# Output carries `source=<8317|8080|supergrok>` so the caller can log which
+# tank the successor was launched on.
 #
 # FM_CHAIR_FLIP_DRY_RUN=1 prints every command it would run and still writes the
 # handoff file, then touches nothing else.
@@ -40,6 +50,8 @@
 #   FM_CHAIR_FLIP_DRY_RUN      1 = print commands, act on nothing
 #   FM_CHAIR_FLIP_HOME         home directory (default $FM_HOME)
 #   FM_CHAIR_FLIP_ORCA_CMD     Orca CLI (default: orca)
+#   FM_CHAIR_FLIP_SENSOR_CMD   override the sensor (bin/fm-chair-runway.sh)
+#   FM_CHAIR_FLIP_STATUS_CMD   override the chair status (bin/fm-chair-status.sh)
 #   FM_CHAIR_FLIP_SLEEP_CMD    sleep (default: sleep)
 #   FM_CHAIR_FLIP_SKIP_VERIFY  1 = skip step 6 (tests)
 #   FM_CHAIR_HYSTERESIS_SECS   minimum seconds between flips
@@ -127,11 +139,34 @@ CHAIR=$(extract_field "$STATUS" chair)
 TERMINAL=$(extract_field "$STATUS" terminal)
 
 FABLE=$(extract_field "$SENSOR" fable)
+POOL8317=$(extract_field "$SENSOR" pool8317)
+CCFLARE=$(extract_field "$SENSOR" ccflare)
 GROK_STATE=$(extract_field "$SENSOR" grok)
 
+# The successor is launched on one concrete green source, never on the OR:
+# 8317 when it is green, else 8080 when it is green. Fable green with neither
+# pool green is a contradiction in the sensor line and is refused as unreadable.
 case "$TO" in
-  to-pi-fable) TARGET_CHAIR=pi-fable; TARGET_STATE=$FABLE; TARGET_NAME=Fable ;;
-  to-grok) TARGET_CHAIR=grok; TARGET_STATE=$GROK_STATE; TARGET_NAME=SuperGrok ;;
+  to-pi-fable)
+    TARGET_CHAIR=pi-fable; TARGET_STATE=$FABLE; TARGET_NAME=Fable
+    TITLE='π - firstmate'
+    if [ "$POOL8317" = green ]; then
+      SOURCE=8317
+      LAUNCH='pi --model token-pool/claude-fable-5-1 --thinking high'
+    elif [ "$CCFLARE" = green ]; then
+      SOURCE=8080
+      LAUNCH='ANTHROPIC_BASE_URL=http://127.0.0.1:8080 pi --model anthropic/claude-fable-5-1 --thinking high'
+    else
+      SOURCE=none
+      LAUNCH=''
+    fi
+    ;;
+  to-grok)
+    TARGET_CHAIR=grok; TARGET_STATE=$GROK_STATE; TARGET_NAME=SuperGrok
+    TITLE='grok - firstmate'
+    SOURCE=supergrok
+    LAUNCH='grok --permission-mode bypassPermissions'
+    ;;
 esac
 
 # FROM is the chair we are leaving, not the target's name: a handoff file is
@@ -151,6 +186,10 @@ case "$TARGET_STATE" in
   red) log "chair-flip: refuse to-flip toward $TARGET_NAME: source is red ($SENSOR)"; exit 1 ;;
   *) log "chair-flip: refuse to-flip toward $TARGET_NAME: source unreadable ($SENSOR)"; exit 1 ;;
 esac
+if [ "$SOURCE" = none ]; then
+  log "chair-flip: refuse to-flip toward $TARGET_NAME: no green Fable source to launch on ($SENSOR)"
+  exit 1
+fi
 
 # Hysteresis.
 NOW=$(date +%s)
@@ -167,6 +206,14 @@ if [ -f "$FLIP_STAMP" ]; then
   esac
 fi
 
+# Never end the incumbent when the successor could not be launched.
+if [ "$DRY_RUN" != 1 ] && ! command -v "$ORCA" >/dev/null 2>&1; then
+  log "chair-flip: refuse: Orca CLI '$ORCA' not found on PATH; the successor could not be launched"
+  exit 1
+fi
+
+log "chair-flip: target=$TARGET_CHAIR source=$SOURCE"
+
 # --- handoff file -----------------------------------------------------------
 
 write_handoff() {
@@ -177,6 +224,7 @@ write_handoff() {
     printf 'Written %s by bin/fm-chair-flip.sh.\n\n' "$(date -u +%FT%TZ)"
     printf '## Sensor\n\n%s\n\n' "$SENSOR"
     printf '## Chair now\n\n%s\n\n' "$STATUS"
+    printf '## Successor\n\nsource=%s\nlaunch=%s\n\n' "$SOURCE" "$LAUNCH"
     cat <<'MEMEOF'
 ## Memories (read these first)
 
@@ -222,8 +270,13 @@ log "chair-flip: handoff written: $HANDOFF"
 
 lock_pid() { cat -- "$STATE_DIR/.lock" 2>/dev/null || true; }
 
+if [ "$DRY_RUN" != 1 ]; then
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  printf '%s\n' "$NOW" > "$FLIP_STAMP"
+fi
+
 if [ "$CHAIR" != none ] && [ -n "$TERMINAL" ] && [ "$TERMINAL" != none ]; then
-  run "$ORCA" terminal send --terminal "$TERMINAL" --text '/exit' --json >/dev/null 2>&1 || true
+  run "$ORCA" terminal send --terminal "$TERMINAL" --text '/exit' --enter --json >/dev/null 2>&1 || true
 fi
 
 waited=0
@@ -255,17 +308,6 @@ if [ "$DRY_RUN" != 1 ]; then
 fi
 
 # --- launch the successor ---------------------------------------------------
-
-case "$TO" in
-  to-pi-fable)
-    TITLE='π - firstmate'
-    LAUNCH=$(printf 'pi --model token-pool/claude-fable-5-1 --thinking high')
-    ;;
-  to-grok)
-    TITLE='grok - firstmate'
-    LAUNCH=$(printf 'grok --permission-mode bypassPermissions')
-    ;;
-esac
 
 PROMPT=$(printf 'Take the helm: run bin/fm-session-start.sh, then read %s and continue supervising the fleet.' "$HANDOFF")
 
@@ -315,6 +357,5 @@ else
   fi
 fi
 
-[ "$DRY_RUN" = 1 ] || printf '%s\n' "$NOW" > "$FLIP_STAMP"
-log "chair-flip: flipped $FROM -> $TO"
+log "chair-flip: flipped $FROM -> $TO source=$SOURCE"
 exit 0

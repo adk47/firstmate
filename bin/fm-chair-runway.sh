@@ -4,10 +4,10 @@
 # SuperGrok.
 #
 # Usage:
-#   fm-chair-runway.sh [--json]
+#   fm-chair-runway.sh
 #
-# Prints exactly one machine-readable line (or one JSON object) and always
-# exits 0. This is a sensor: it measures and reports, it never flips anything.
+# Prints exactly one machine-readable line and always exits 0. This is a
+# sensor: it measures and reports, it never flips anything.
 #
 # Three sources, each reported as green|red|unknown with its measured figure:
 #
@@ -22,8 +22,8 @@
 #              GET /api/accounts. Report needs_reauth=<n> and the account names
 #              separately from capacity, because those are the accounts a human
 #              must log in and the captain wants them named. green when
-#              pool.routable > 0, red when it is 0 with no authless account left,
-#              unknown when the pool cannot be read at all.
+#              pool.routable > 0, red when it is 0, unknown when the pool
+#              cannot be read at all.
 #   grok       SuperGrok's remaining percent from quota-axi, green above the 10%
 #              safety floor, red at or below it.
 #
@@ -41,9 +41,13 @@
 #   FM_CHAIR_8317_PROBE_MODEL    model probed (default claude-fable-5-1)
 #   FM_CHAIR_8317_PROBE_TIMEOUT  probe timeout seconds (default 20)
 #   FM_CHAIR_CCFLARE_URL         better-ccflare base URL (default http://127.0.0.1:8080)
+#   FM_CHAIR_CCFLARE_FIXTURE     1 = do not contact better-ccflare; read the two files below
+#   FM_CHAIR_CCFLARE_HEALTH_JSON   file holding a GET /health body
+#   FM_CHAIR_CCFLARE_ACCOUNTS_JSON file holding a GET /api/accounts body
 #   FM_CHAIR_GROK_JSON           file holding a quota-axi --provider grok JSON snapshot
 #   FM_CHAIR_GROK_FLOOR_PCT      Grok safety floor percent (default 10)
-#   FM_CHAIR_PROBE_CMD           override the probe command (given the key on stdin)
+#   FM_CHAIR_PROBE_CMD           override the probe: called as <url> <model> <timeout>,
+#                                prints the HTTP status code (the key is never passed)
 set -u
 export LC_ALL=C
 
@@ -60,14 +64,7 @@ usage() {
   exit 2
 }
 
-JSON=0
-for arg in "$@"; do
-  case "$arg" in
-    --json) JSON=1 ;;
-    -h|--help|help) usage ;;
-    *) usage ;;
-  esac
-done
+[ $# -eq 0 ] || usage
 
 POOL8317_URL=${FM_CHAIR_8317_URL:-http://127.0.0.1:8317}
 POOL8317_KEY_FILE=${FM_CHAIR_8317_KEY_FILE:-${HOME:-}/.config/cliproxyapi/api_key}
@@ -203,16 +200,7 @@ else
   REASON=fable_unmeasured
 fi
 
-if [ "$JSON" = 1 ]; then
-  jq -cn \
-    --arg fable "$FABLE" --arg pool8317 "$P8317" --arg probe "$P8317_NOTE" \
-    --arg ccflare "$CCF" --arg routable "$CCF_ROUTABLE" --arg configured "$CCF_CONFIGURED" \
-    --arg needs_reauth "$CCF_REAUTH" --arg names "$CCF_NAMES" \
-    --arg grok "$GROK" --arg grok_pct "$GROK_PCT" --arg reason "$REASON" \
-    '{fable:$fable,pool8317:$pool8317,pool8317_probe:$probe,ccflare:$ccflare,ccflare_routable:$routable,ccflare_configured:$configured,ccflare_needs_reauth:$needs_reauth,ccflare_needs_reauth_names:$names,grok:$grok,grok_pct:$grok_pct,reason:$reason}'
-else
-  printf 'chair-runway: fable=%s pool8317=%s probe=%s ccflare=%s routable=%s/%s needs_reauth=%s names=%s grok=%s grok_pct=%s reason=%s\n' \
-    "$FABLE" "$P8317" "$P8317_NOTE" "$CCF" "$CCF_ROUTABLE" "$CCF_CONFIGURED" \
-    "$CCF_REAUTH" "$CCF_NAMES" "$GROK" "$GROK_PCT" "$REASON"
-fi
+printf 'chair-runway: fable=%s pool8317=%s probe=%s ccflare=%s routable=%s/%s needs_reauth=%s names=%s grok=%s grok_pct=%s reason=%s\n' \
+  "$FABLE" "$P8317" "$P8317_NOTE" "$CCF" "$CCF_ROUTABLE" "$CCF_CONFIGURED" \
+  "$CCF_REAUTH" "$CCF_NAMES" "$GROK" "$GROK_PCT" "$REASON"
 exit 0
