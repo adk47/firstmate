@@ -335,8 +335,8 @@ pass "no unbounded relaunch loop after a failed verification"
 # --- only the harness pid status identified is ever signalled ---------------
 
 assert_dies() {  # <pid> <msg>: the pid exits within 5s (zombies count as exited)
-  local i stat
-  for i in $(seq 1 50); do
+  local stat
+  for _ in $(seq 1 50); do
     stat=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')
     case "$stat" in ''|Z*) wait "$1" 2>/dev/null; return 0 ;; esac
     sleep 0.1

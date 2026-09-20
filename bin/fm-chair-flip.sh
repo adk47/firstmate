@@ -407,7 +407,13 @@ else
       continue
     fi
     BEAT=$STATE_DIR/.last-watcher-beat
-    BEAT_AT=$(stat -f %m "$BEAT" 2>/dev/null || stat -c %Y "$BEAT" 2>/dev/null || echo 0)
+    # GNU stat accepts -f too (filesystem status), so pick the syntax by OS
+    # instead of falling through on exit status.
+    if [ "$(uname 2>/dev/null)" = Darwin ]; then
+      BEAT_AT=$(stat -f %m "$BEAT" 2>/dev/null) || BEAT_AT=0
+    else
+      BEAT_AT=$(stat -c %Y "$BEAT" 2>/dev/null) || BEAT_AT=0
+    fi
     if [ "$BEAT_AT" -ge "$LAUNCH_AT" ]; then
       ok=1
       printf 'pid=%s source=%s launched_at=%s\n' "$V_PID" "$SOURCE" "$LAUNCH_AT" > "$STATE_DIR/.chair-source"
