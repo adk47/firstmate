@@ -1,0 +1,13 @@
+# Live read-only sensor readings on this machine (2026-09-20T20:49:49Z), no seams, nothing flipped
+
+$ FM_HOME=/Users/aaron/Projects/firstmate bin/fm-chair-runway.sh
+chair-runway: fable=green pool8317=green probe=HTTP:200 ccflare=red routable=0/11 needs_reauth=11 names=aaron-muso,nina-muso,Muso-Kirsten,aaron-hygea,kyran,Oleg_-_Muso,aaronkaufman-me,aarondkaufman-gmail,Jason_-_muso,steve_-muso,brian_-_muso grok=red grok_pct=1 reason=fable_available
+
+$ FM_HOME=/Users/aaron/Projects/firstmate bin/fm-chair-status.sh
+chair-status: chair=pi-fable harness=pi source=8317 terminal=term_dee5fd5b-266c-437e-a47a-36d2d2c0b58c pid=8824 reason=live_harness
+
+$ ps -o pid=,lstart=,comm=,args= -p $(cat /Users/aaron/Projects/firstmate/state/.lock)
+ 8824 Sun Sep 20 10:04:50 2026     pi pi 
+
+$ cat /Users/aaron/Projects/firstmate/state/.chair-source
+cat: /Users/aaron/Projects/firstmate/state/.chair-source: No such file or directory

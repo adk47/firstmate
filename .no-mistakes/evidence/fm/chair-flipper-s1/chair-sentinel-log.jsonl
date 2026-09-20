@@ -1,0 +1,6 @@
+{"at":1789937280,"fable":"green","grok":"red","chair":"grok","chair_source":"none","terminal":"term_grok","decision":"fable_green_chair_wrong","action":"to-pi-fable","source":"8317","flip_exit":0,"fable_unknown_ticks":0}
+{"at":1789937290,"fable":"green","grok":"red","chair":"pi-fable","chair_source":"8317","terminal":"term_pi","decision":"fable_green_chair_ok","action":"none","source":"none","flip_exit":null,"fable_unknown_ticks":0}
+{"at":1789937313,"fable":"green","grok":"red","chair":"pi-fable","chair_source":"8317","terminal":"term_pi","decision":"chair_source_red_reseat","action":"to-pi-fable","source":"8080","flip_exit":0,"fable_unknown_ticks":0}
+{"at":1789937328,"fable":"green","grok":"red","chair":"pi-fable","chair_source":"8080","terminal":"term_pi","decision":"chair_source_red_reseat","action":"to-pi-fable","source":"none","flip_exit":1,"fable_unknown_ticks":0}
+{"at":1789937339,"fable":"red","grok":"red","chair":"pi-fable","chair_source":"8080","terminal":"term_pi","decision":"no_tank","action":"none","source":"none","flip_exit":null,"fable_unknown_ticks":0}
+{"at":1789937377,"fable":"red","grok":"green","chair":"pi-fable","chair_source":"8080","terminal":"term_pi","decision":"grok_blackout_chair_wrong","action":"to-grok","source":"grok","flip_exit":0,"fable_unknown_ticks":0}

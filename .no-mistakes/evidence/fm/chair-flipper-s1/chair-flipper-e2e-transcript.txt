@@ -1,0 +1,109 @@
+
+=== Scenario 1: Grok is the chair and SuperGrok has run out of tokens (0%); the 8317 token pool answers Fable (HTTP 200) ===
+state/.lock -> pid 39894 (/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T//fm-chair-e2e.dkpqfY/fakebin/grok)
+
+$ bin/fm-chair-runway.sh
+chair-runway: fable=green pool8317=green probe=HTTP:200 ccflare=red routable=0/11 needs_reauth=2 names=acct-alpha,acct-beta grok=red grok_pct=0 reason=fable_available
+
+$ bin/fm-chair-status.sh
+chair-status: chair=grok harness=grok source=none terminal=term_grok pid=39894 reason=live_harness
+
+$ bin/fm-chair-sentinel.sh   (one tick, live actuator)
+chair-flip: target=pi-fable source=8317
+chair-flip: handoff written: /private/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T/fm-chair-e2e.dkpqfY/home/data/handoff-grok-to-pi-fable.md
+chair-flip: successor launched in terminal term_pi
+chair-flip: flipped grok -> to-pi-fable source=8317
+chair-sentinel: fable=green grok=red chair=grok chair_source=none decision=fable_green_chair_wrong action=to-pi-fable source=8317 flip_exit=0 fable_unknown_ticks=0
+exit=0
+
+--- Orca calls the actuator made, in order ---
+terminal list --json
+terminal list --json
+terminal list --json
+terminal list --json
+terminal send --terminal term_grok --text /exit --enter --json
+terminal create --worktree path:/private/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T/fm-chair-e2e.dkpqfY/home --title π - firstmate --command pi --model token-pool/claude-fable-5-1 --thinking high 'Take the helm: run bin/fm-session-start.sh, then read /private/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T/fm-chair-e2e.dkpqfY/home/data/handoff-grok-to-pi-fable.md and continue supervising the fleet.' --json
+terminal list --json
+terminal read --terminal term_pi --screen --json
+
+--- after the flip ---
+state/.lock -> pid 44705 (/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T//fm-chair-e2e.dkpqfY/fakebin/pi)
+grok pid 39894: ended
+state/.chair-source: pid=44705 source=8317 launched_at=1789937276
+handoff files: handoff-grok-to-pi-fable.md
+
+=== Scenario 2: next tick - the successor Pi holds the lock and its source is the green 8317 pool ===
+$ bin/fm-chair-status.sh
+chair-status: chair=pi-fable harness=pi source=8317 terminal=term_pi pid=44705 reason=live_harness
+$ bin/fm-chair-sentinel.sh
+chair-sentinel: fable=green grok=red chair=pi-fable chair_source=8317 decision=fable_green_chair_ok action=none source=none flip_exit=null fable_unknown_ticks=0
+no terminal created (chair left alone)
+
+=== Scenario 3: 8317 goes red (HTTP 401) while better-ccflare 8080 is green - the starved Pi is re-seated on 8080 ===
+$ bin/fm-chair-runway.sh
+chair-runway: fable=green pool8317=red probe=HTTP:401 ccflare=green routable=3/11 needs_reauth=2 names=acct-alpha,acct-beta grok=red grok_pct=0 reason=fable_available
+$ bin/fm-chair-sentinel.sh
+chair-flip: re-seat: chair is pi-fable on source 8317, which reads red (pool8317=red ccflare=green)
+chair-flip: target=pi-fable source=8080
+chair-flip: handoff written: /private/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T/fm-chair-e2e.dkpqfY/home/data/handoff-pi-fable-to-pi-fable.md
+chair-flip: successor launched in terminal term_pi
+chair-flip: flipped pi-fable -> to-pi-fable source=8080
+chair-sentinel: fable=green grok=red chair=pi-fable chair_source=8317 decision=chair_source_red_reseat action=to-pi-fable source=8080 flip_exit=0 fable_unknown_ticks=0
+exit=0
+
+--- Orca calls ---
+terminal list --json
+terminal read --terminal term_pi --screen --json
+terminal list --json
+terminal read --terminal term_pi --screen --json
+terminal list --json
+terminal send --terminal term_pi --text /quit --enter --json
+terminal create --worktree path:/private/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T/fm-chair-e2e.dkpqfY/home --title π - firstmate --command ANTHROPIC_BASE_URL=http://127.0.0.1:8080 pi --model anthropic/claude-fable-5-1 --thinking high 'Take the helm: run bin/fm-session-start.sh, then read /private/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T/fm-chair-e2e.dkpqfY/home/data/handoff-pi-fable-to-pi-fable.md and continue supervising the fleet.' --json
+terminal list --json
+terminal read --terminal term_pi --screen --json
+starved pi pid 44705: ended
+state/.lock -> pid 52782 (/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T//fm-chair-e2e.dkpqfY/fakebin/pi)
+state/.chair-source: pid=52782 source=8080 launched_at=1789937308
+
+=== Scenario 4: same conditions one second later - the actuator refuses inside the hysteresis window (no flapping) ===
+chair-flip: re-seat: chair is pi-fable on source 8080, which reads red (pool8317=green ccflare=red)
+chair-flip: refuse within hysteresis window (22s < 1800s)
+chair-sentinel: fable=green grok=red chair=pi-fable chair_source=8080 decision=chair_source_red_reseat action=to-pi-fable source=none flip_exit=1 fable_unknown_ticks=0
+exit=0
+no exit sent, no terminal created inside the hysteresis window
+
+=== Scenario 5: 8317 red, 8080 red, SuperGrok 0% - no tank: alarm, captain line names the accounts needing login, chair untouched ===
+Captain, firstmate has no tank: Fable=red, SuperGrok=red. better-ccflare accounts needing a human login: acct-alpha,acct-beta
+chair-sentinel: fable=red grok=red chair=pi-fable chair_source=8080 decision=no_tank action=none source=none flip_exit=null fable_unknown_ticks=0
+exit=0
+state/.chair-alarm: no tank: fable=red grok=red chair=pi-fable
+state/.lock -> pid 52782 (/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T//fm-chair-e2e.dkpqfY/fakebin/pi)
+
+=== Scenario 6: Fable blackout (both pools red) but SuperGrok back at 60% - the Pi chair is handed to Grok ===
+chair-flip: target=grok source=grok
+chair-flip: handoff written: /private/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T/fm-chair-e2e.dkpqfY/home/data/handoff-pi-fable-to-grok.md
+chair-flip: successor launched in terminal term_grok
+chair-flip: flipped pi-fable -> to-grok source=grok
+chair-sentinel: fable=red grok=green chair=pi-fable chair_source=8080 decision=grok_blackout_chair_wrong action=to-grok source=grok flip_exit=0 fable_unknown_ticks=0
+exit=0
+
+--- Orca calls ---
+terminal list --json
+terminal read --terminal term_pi --screen --json
+terminal list --json
+terminal read --terminal term_pi --screen --json
+terminal list --json
+terminal send --terminal term_pi --text /quit --enter --json
+terminal create --worktree path:/private/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T/fm-chair-e2e.dkpqfY/home --title grok - firstmate --command grok --always-approve 'Take the helm: run bin/fm-session-start.sh, then read /private/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T/fm-chair-e2e.dkpqfY/home/data/handoff-pi-fable-to-grok.md and continue supervising the fleet.' --json
+terminal list --json
+pi pid 52782: ended
+state/.lock -> pid 71190 (/var/folders/pd/58q959lj3bj6jnln94nq6plw0000gn/T//fm-chair-e2e.dkpqfY/fakebin/grok)
+state/.chair-source: pid=71190 source=grok launched_at=1789937372
+
+=== Sentinel decision log (data/chair-sentinel/log.jsonl) ===
+{"at":1789937280,"fable":"green","grok":"red","chair":"grok","chair_source":"none","terminal":"term_grok","decision":"fable_green_chair_wrong","action":"to-pi-fable","source":"8317","flip_exit":0,"fable_unknown_ticks":0}
+{"at":1789937290,"fable":"green","grok":"red","chair":"pi-fable","chair_source":"8317","terminal":"term_pi","decision":"fable_green_chair_ok","action":"none","source":"none","flip_exit":null,"fable_unknown_ticks":0}
+{"at":1789937313,"fable":"green","grok":"red","chair":"pi-fable","chair_source":"8317","terminal":"term_pi","decision":"chair_source_red_reseat","action":"to-pi-fable","source":"8080","flip_exit":0,"fable_unknown_ticks":0}
+{"at":1789937328,"fable":"green","grok":"red","chair":"pi-fable","chair_source":"8080","terminal":"term_pi","decision":"chair_source_red_reseat","action":"to-pi-fable","source":"none","flip_exit":1,"fable_unknown_ticks":0}
+{"at":1789937339,"fable":"red","grok":"red","chair":"pi-fable","chair_source":"8080","terminal":"term_pi","decision":"no_tank","action":"none","source":"none","flip_exit":null,"fable_unknown_ticks":0}
+{"at":1789937377,"fable":"red","grok":"green","chair":"pi-fable","chair_source":"8080","terminal":"term_pi","decision":"grok_blackout_chair_wrong","action":"to-grok","source":"grok","flip_exit":0,"fable_unknown_ticks":0}
