@@ -1688,6 +1688,53 @@ carry_clean=$(run_check_in "$carrylab" "$((NOW + 600))" "$carryauth")
   || fail "a tear must not re-ask for a login already asked for ($(cat "$carrylab/osascript.log"))"
 pass "a torn account keeps its needs-auth membership across the tear"
 
+# The same carry must hold when better-ccflare is the authority. The monitor
+# withholds a torn account's name under either source, so without the carry the
+# record drops it on the torn poll and the next clean poll asks the captain for
+# the same login a second time.
+ccarrylab="$TMP_ROOT/ccflare-carry"
+mkdir -p "$ccarrylab/state"
+ccarryauth="$ccarrylab/auth"
+make_auth_account "$ccarryauth" acct-x -1 false
+for acct_name in 1 2 3 4 5; do
+  make_auth_account "$ccarryauth" "grant-$acct_name" 8 false
+done
+make_quota "$ccarrylab/quota.json" 60 0.5 none through_reset
+ccarry_poll() {
+  PATH="$FAKEBIN:$PATH" \
+    FM_FABLE_RUNWAY_AUTH_DIR="$ccarryauth" \
+    ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
+    FM_FABLE_RUNWAY_SETTINGS_JSON="$NO_SETTINGS" \
+    FM_HOME="$ccarrylab" \
+    FM_FABLE_FAKE_LOG="$ccarrylab" \
+    FM_STATE_OVERRIDE="$ccarrylab/state" \
+    FM_FABLE_RUNWAY_NOW="$1" \
+    FM_FABLE_RUNWAY_QUOTA_JSON="$ccarrylab/quota.json" \
+    FM_FABLE_RUNWAY_POOL_HEALTH_JSON="$ccarrylab/health.json" \
+    FM_FABLE_RUNWAY_POOL_ACCOUNTS_JSON="$ccarrylab/accounts.json" \
+    "$CHECK" check 2>/dev/null
+}
+make_pool "$ccarrylab/health.json" "$ccarrylab/accounts.json" 6 6 0
+add_account "$ccarrylab/accounts.json" steady 5 40 20 100
+add_account_needing_auth "$ccarrylab/accounts.json" acct-x 20 100 tokenStatus '"expired"'
+ccarry_first=$(ccarry_poll "$NOW")
+expect_field "$ccarry_first" pool_authority ccflare "ccflare-carry authority"
+expect_field "$ccarry_first" pool_needs_auth acct-x "ccflare-carry first poll needs-auth"
+[ "$(wc -l < "$ccarrylab/osascript.log")" -eq 1 ] \
+  || fail "the entrance must notify once under better-ccflare authority"
+# acct-x's inventory file is caught mid-rewrite. better-ccflare still decides
+# the counts, but the monitor cannot say whether any proxy holds a grant.
+printf '{"expired":"2026-' > "$ccarryauth/claude-acct-x.json"
+ccarry_poll "$((NOW + 300))" >/dev/null
+[ "$(wc -l < "$ccarrylab/osascript.log")" -eq 1 ] \
+  || fail "a torn poll must not notify under better-ccflare authority"
+# The file is readable again and the same login is still outstanding.
+make_auth_account "$ccarryauth" acct-x -1 false
+ccarry_poll "$((NOW + 600))" >/dev/null
+[ "$(wc -l < "$ccarrylab/osascript.log")" -eq 1 ] \
+  || fail "a tear must not re-ask for a login under better-ccflare authority ($(cat "$ccarrylab/osascript.log"))"
+pass "the needs-auth carry holds under better-ccflare authority too"
+
 # A torn-then-read account never came back, so it must not earn the fail-back
 # label: the poll that could not read it observed no membership at all.
 fakebacklab="$TMP_ROOT/torn-failback"

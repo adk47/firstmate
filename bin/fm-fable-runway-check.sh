@@ -85,14 +85,27 @@
 #     that the pool is empty. Both bounds are fixed constants: an override
 #     could only delay the one wake that cannot afford to be late.
 #
-# A torn auth file is could-not-determine for its account - out of the counts,
-# out of the capable set - so while the inventory is the authority the whole
-# poll is could-not-determine and changes nothing: no episode opens, none
-# closes, the recorded capable and tracked sets stand, the torn account keeps
-# the needs-auth membership it was last observed to have, and no entrance or
-# capacity-back label is emitted for it. The RED and the wake still happen. When
-# better-ccflare is the authority the inventory decided nothing, so a torn file
-# there is reported on the line and gates none of this.
+# A torn auth file is could-not-determine for its account. Under either
+# authority the monitor withholds that account's name from pool_needs_auth, so
+# the check carries its last observed membership forward: the captain is never
+# asked twice for the same login because a read happened to race a rewrite.
+#
+# Everything else the tear gates depends on which source decided the counts.
+# While the inventory is the authority a torn account is also out of the counts
+# and out of the capable set, so the poll observes no membership: the recorded
+# capable and tracked sets stand and no entrance or capacity-back label is
+# emitted for it. No episode opens on such a poll, and while its pool reads RED
+# or UNKNOWN none closes either - a tear is not a recovery, and resolving on one
+# would ring the seat again the moment the file is readable. Once the pool reads
+# GREEN or YELLOW over the accounts that were readable, an open episode does
+# resolve: reading one more account can only raise the counts, so a pool healthy
+# without it cannot be RED once the file heals, and holding the marker across a
+# file that never heals would block every later episode. The RED and the wake
+# still happen throughout.
+#
+# When better-ccflare is the authority the inventory decided none of the counts,
+# so a torn file there is reported on the line and gates nothing beyond that
+# carry.
 #
 # The record state/.fable-runway holds the last printed states, the last RED
 # report time, the Fable-tracked and Fable-capable name sets as of the last poll
@@ -259,20 +272,27 @@ action_check() {
   [ -n "$capable" ] || capable=none
   [ -n "$tracked" ] || tracked=none
   [ -n "$needs_auth" ] || needs_auth=none
-  local observed_capable=$capable observed_routable observed_torn torn_gate=0
+  local observed_capable=$capable observed_routable observed_torn torn_names=0 torn_gate=0
   observed_routable=$(field pool_routable "$line")
   observed_routable=${observed_routable%%/*}
   observed_torn=$(field pool_unreadable "$line")
   [ -n "$observed_torn" ] || observed_torn=none
   # An auth file this poll could not read makes the poll could-not-determine for
-  # every set its account can belong to - but only while the inventory is what
-  # decided the counts. With better-ccflare the authority the inventory is
-  # consulted for nothing the verdict rests on, so a torn file there is a report
-  # and nothing more, and withholding the doorbell on it would strand a RED
-  # better-ccflare observed completely.
-  if [ "$(field pool_authority "$line")" = inventory ] \
-    && [ "$observed_torn" != none ] && [ "$observed_torn" != unobserved ]; then
-    torn_gate=1
+  # every set its account can belong to. The monitor drops that account from
+  # pool_needs_auth under either authority, so its recorded membership is
+  # carried forward under either one too - otherwise the captain is asked a
+  # second time for a login they were already asked for.
+  #
+  # What the counts and the episodes do with it depends on which source decided
+  # them. With better-ccflare the authority the inventory is consulted for
+  # nothing the verdict rests on, so a torn file there is a report and nothing
+  # more, and withholding the doorbell on it would strand a RED better-ccflare
+  # observed completely.
+  if [ "$observed_torn" != none ] && [ "$observed_torn" != unobserved ]; then
+    torn_names=1
+    if [ "$(field pool_authority "$line")" = inventory ]; then
+      torn_gate=1
+    fi
   fi
   # A poll that did not observe membership must not be read as one that saw an
   # empty pool. The monitor says `unobserved` when no account exposed a Fable
@@ -377,7 +397,7 @@ action_check() {
   fi
   if [ "$needs_auth" = unobserved ]; then
     needs_auth=$last_auth
-  elif [ "$torn_gate" -eq 1 ]; then
+  elif [ "$torn_names" -eq 1 ]; then
     needs_auth=$(carried "$needs_auth" "$last_auth" "$observed_torn")
   fi
   record_write "$overall" "$fable" "$pool" "$capable" "$tracked" "$needs_auth" "$red_at" \
