@@ -34,7 +34,7 @@ That account is already out of `pool_capable` and out of the projection, so the 
 Re-authenticate it and the next poll's `capacity back account=` line confirms it returned; nothing else in this runbook is needed for it.
 
 **A runway that has actually run out.**
-On one of two conditions - the pool's own verdict RED over a capable set that *was observed* and is empty, or a pool that has been *unreadable* for 2 consecutive polls spanning at least 10 minutes while `fable_state` is RED - [`bin/fm-fable-runway-alert.sh`](../../bin/fm-fable-runway-alert.sh) fires once per episode, in plain bash, without waiting for a firstmate turn:
+On one of the three episode conditions that [`docs/configuration.md`](../configuration.md) "The zero-token failover action" owns - no live grant on the fleet's proxy, no Fable-capable account left, or a pool unreadable long enough while `fable_state` is RED - [`bin/fm-fable-runway-alert.sh`](../../bin/fm-fable-runway-alert.sh) fires once per episode, in plain bash, without waiting for a firstmate turn:
 
 - it writes `state/fable-runway-handoff-<epoch>.md` with the monitor line, the UTC time, both reason tokens, and a pointer back to this runbook;
 - it rings the Grok supervisor terminal - `orca terminal send --terminal <handle> --text <doorbell> --enter` - carrying that note's path, with the handle read from `config/fable-runway.env` as `FM_FABLE_RUNWAY_GROK_TERMINAL`;
@@ -48,7 +48,7 @@ printf 'FM_FABLE_RUNWAY_GROK_TERMINAL=<orca-terminal-handle>\n' > config/fable-r
 ```
 
 With no handle configured the doorbell is skipped and the note and the notification still happen, so the handoff is never silent.
-Read the note's `condition:` line first: "No Fable-capable account left" means the pool answered and is empty, so Part 1 below is the whole job; "Pool unreachable for `<minutes>` minutes" means nobody could read the pool, so check the gateway and the inventory before assuming the accounts are gone.
+Read the note's `condition:` line first: "No live grant on the fleet's proxy" means the pool answered and no account holds a live grant on the proxy the fleet routes through, so Part 1 below takes the seat and the logins named in `pool_needs_auth=` are the way back; "No Fable-capable account left" means the grants are there and every Fable week is spent, so Part 1 is the whole job; "Pool unreachable for `<minutes>` minutes" means nobody could read the pool, so check the gateway and the inventory before assuming the accounts are gone.
 The doorbell is a doorbell: it tells whoever is at that terminal to start Part 1 below, and reading the note is the first step.
 Nothing about it takes the seat - Part 1 is still executed deliberately.
 
