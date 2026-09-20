@@ -21,6 +21,12 @@
 #                                                     on the green source,
 #                                                     handoff first, under the
 #                                                     actuator's hysteresis
+#   Fable green   + chair pi-fable whose bound source is UNKNOWN (no record
+#                   from a flip and no recent Pi session file names it)
+#                                                  -> hold for up to 3 consecutive
+#                                                     such ticks, then re-seat:
+#                                                     flip to-pi-fable on the
+#                                                     green source
 #   Fable green   + any other chair                -> flip to-pi-fable
 #   Fable red     + Grok above floor + chair grok  -> nothing
 #   Fable red     + Grok above floor + any other   -> flip to-grok
@@ -47,8 +53,10 @@
 # it gracefully with its own exit command before any SIGTERM, and it is never
 # an alarm.
 #
-# The consecutive-unknown count lives in state/.chair-fable-unknown-ticks and
-# resets on any tick where Fable is measured.
+# The consecutive-unknown counts live in state/.chair-fable-unknown-ticks
+# (Fable unmeasured) and state/.chair-source-unknown-ticks (a Pi chair whose
+# tank cannot be named); each resets on any tick where its condition no longer
+# holds.
 #
 # FM_CHAIR_SENTINEL_DRY_RUN=1 passes the dry run through to the actuator.
 #
@@ -74,6 +82,7 @@ LOG_DIR=$DATA_DIR/chair-sentinel
 LOG_FILE=$LOG_DIR/log.jsonl
 ALARM_FILE=$STATE_DIR/.chair-alarm
 UNKNOWN_TICKS_FILE=$STATE_DIR/.chair-fable-unknown-ticks
+SOURCE_UNKNOWN_TICKS_FILE=$STATE_DIR/.chair-source-unknown-ticks
 UNKNOWN_HOLD_TICKS=3
 LABEL=ai.muso.chair-sentinel
 LEGACY_LABEL=ai.muso.lane-tick-chair-flipper
@@ -124,7 +133,7 @@ flip_to() {  # <to-pi-fable|to-grok>
 
 run_tick() {
   local sensor status fable grok chair terminal decision action alarm_names flip_out flip_code source unknown_ticks
-  local pool8317 ccflare chair_source bound_state
+  local pool8317 ccflare chair_source bound_state source_unknown_ticks
   sensor=$(sensor_line)
   status=$(chair_line)
   fable=$(extract_field "$sensor" fable)
@@ -152,12 +161,27 @@ run_tick() {
   case "$chair_source" in
     8317) bound_state=$pool8317 ;;
     8080) bound_state=$ccflare ;;
+    unknown) bound_state=unnamed ;;
     *) bound_state=none ;;
   esac
+  source_unknown_ticks=0
+  if [ "$fable" = green ] && [ "$chair" = pi-fable ] && [ "$bound_state" = unnamed ]; then
+    source_unknown_ticks=$(cat -- "$SOURCE_UNKNOWN_TICKS_FILE" 2>/dev/null) || source_unknown_ticks=0
+    case "$source_unknown_ticks" in ''|*[!0-9]*) source_unknown_ticks=0 ;; esac
+    source_unknown_ticks=$((source_unknown_ticks + 1))
+    printf '%s\n' "$source_unknown_ticks" > "$SOURCE_UNKNOWN_TICKS_FILE" 2>/dev/null || true
+  else
+    rm -f "$SOURCE_UNKNOWN_TICKS_FILE" 2>/dev/null || true
+  fi
   if [ "$fable" = green ]; then
     if [ "$chair" = pi-fable ] && [ "$bound_state" = red ]; then
       decision=chair_source_red_reseat
       action=to-pi-fable
+    elif [ "$chair" = pi-fable ] && [ "$bound_state" = unnamed ] && [ "$source_unknown_ticks" -ge "$UNKNOWN_HOLD_TICKS" ]; then
+      decision=chair_source_unknown_reseat
+      action=to-pi-fable
+    elif [ "$chair" = pi-fable ] && [ "$bound_state" = unnamed ]; then
+      decision=chair_source_unknown_hold
     elif [ "$chair" = pi-fable ]; then
       decision=fable_green_chair_ok
     else

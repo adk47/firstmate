@@ -108,8 +108,30 @@ assert_contains "$out" "decision=fable_green_chair_ok" "an unmeasured bound sour
 pass "pi on 8317, 8317 unknown, 8080 green -> nothing"
 
 out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=red FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=none run_tick)
-assert_contains "$out" "decision=fable_green_chair_ok" "a chair with no known bound source is not re-seated"
-pass "pi with no bound source -> nothing"
+assert_contains "$out" "decision=fable_green_chair_ok" "a chair with no bound source (non-Pi record) is not re-seated"
+pass "pi with source=none -> nothing"
+
+SOURCE_TICKS="$HOME_DIR/state/.chair-source-unknown-ticks"
+rm -f "$SOURCE_TICKS"
+for n in 1 2; do
+  out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=unknown run_tick)
+  assert_contains "$out" "decision=chair_source_unknown_hold" "an unknown bound source is held on tick $n"
+  assert_contains "$out" "action=none" "no flip on hold tick $n"
+  [ ! -s "$FLIP_LOG" ] || fail "no flip while holding on an unknown source (tick $n)"
+done
+out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=unknown run_tick)
+assert_contains "$out" "decision=chair_source_unknown_reseat" "third consecutive unknown-source tick re-seats"
+assert_contains "$out" "action=to-pi-fable" "re-seat through to-pi-fable"
+assert_grep "to-pi-fable" "$FLIP_LOG" "flip invoked"
+pass "pi with unknown bound source -> held 2 ticks, re-seated on the 3rd"
+
+out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=8317 run_tick)
+assert_contains "$out" "decision=fable_green_chair_ok" "a named green source is fine"
+assert_absent "$SOURCE_TICKS" "the unknown-source count resets once the tank is named"
+out=$(FM_TEST_FABLE=green FM_TEST_POOL8317=green FM_TEST_CCFLARE=green FM_TEST_CHAIR=pi-fable FM_TEST_SOURCE=unknown run_tick)
+assert_contains "$out" "decision=chair_source_unknown_hold" "the hold starts over"
+pass "a named source resets the unknown-source hold"
+rm -f "$SOURCE_TICKS"
 
 # --- a foreign chair (claude) is replaced like none, never alarmed on -------
 

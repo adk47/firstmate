@@ -88,21 +88,13 @@ assert_contains "$out" "harness=grok" "harness named"
 assert_contains "$out" "source=none" "a grok chair has no Fable source"
 pass "live grok harness -> chair=grok with its terminal"
 
+# Pi rewrites its process title, so a live Pi reports just `pi` with no model.
 FM_TEST_ORCA_JSON=$(orca_json pi "π - firstmate")
-out=$(FM_TEST_CMDLINE='pi --model token-pool/claude-fable-5-1' run_status)
+out=$(FM_TEST_CMDLINE='pi' run_status)
 assert_contains "$out" "chair=pi-fable" "pi command line classifies as pi-fable"
 assert_contains "$out" "harness=pi" "the harness itself is pi"
-assert_contains "$out" "source=8317" "a token-pool/ model is bound to the 8317 pool"
-pass "live pi harness -> chair=pi-fable on 8317"
-
-out=$(FM_TEST_CMDLINE='pi --model anthropic/claude-fable-5-1 --thinking high' run_status)
-assert_contains "$out" "chair=pi-fable" "pi on the anthropic provider is still pi-fable"
-assert_contains "$out" "source=8080" "an anthropic/ model is bound to the 8080 gateway"
-pass "live pi harness on anthropic/ -> source=8080"
-
-out=$(FM_TEST_CMDLINE='pi --model openrouter-named/deepseek/deepseek-v4.1-flash' run_status)
-assert_contains "$out" "source=none" "a pi on neither Fable provider has no bound source"
-pass "pi on another provider -> source=none"
+assert_contains "$out" "source=unknown" "with no flip record and no session file the tank is unknown"
+pass "live pi harness, no evidence -> chair=pi-fable source=unknown"
 
 out=$(FM_TEST_CMDLINE='/Users/x/.npm-global/bin/pi-signed --model token-pool/claude-fable-5-1' run_status)
 assert_contains "$out" "chair=pi-fable" "pi-signed is a pi chair"
@@ -161,6 +153,91 @@ assert_contains "$out" "harness=none" "no harness"
 assert_contains "$out" "pid=none" "no pid"
 assert_contains "$out" "reason=holder_not_harness" "reason"
 pass "non-harness holder -> none"
+
+# --- chair source: the flip's record wins while its pid holds the lock ------
+
+SOURCE_FILE="$HOME_DIR/state/.chair-source"
+printf 'pid=%s source=8080 launched_at=1700000000\n' "$$" > "$SOURCE_FILE"
+FM_TEST_ORCA_JSON=$(orca_json pi "π - firstmate")
+out=$(FM_TEST_CMDLINE='pi' run_status)
+assert_contains "$out" "source=8080" "the recorded source is reported for the lock pid"
+pass "state/.chair-source with the lock pid -> its source"
+
+printf 'pid=%s source=8080 launched_at=1700000000\n' "$$" > "$SOURCE_FILE"
+FM_TEST_ORCA_JSON=$(orca_json grok "grok - firstmate")
+out=$(FM_TEST_CMDLINE='grok' run_status)
+assert_contains "$out" "source=8080" "the record applies to whichever harness holds the pid"
+printf 'pid=%s source=grok launched_at=1700000000\n' "$$" > "$SOURCE_FILE"
+out=$(FM_TEST_CMDLINE='grok' run_status)
+assert_contains "$out" "source=grok" "a grok record reads back as grok"
+pass "state/.chair-source names a grok chair's tank"
+
+printf 'pid=999999 source=8080 launched_at=1700000000\n' > "$SOURCE_FILE"
+FM_TEST_ORCA_JSON=$(orca_json pi "π - firstmate")
+out=$(FM_TEST_CMDLINE='pi' run_status)
+assert_contains "$out" "source=unknown" "a record for another pid is stale and ignored"
+pass "state/.chair-source for a different pid -> ignored"
+
+FM_TEST_ORCA_JSON=$(orca_json grok "grok - firstmate")
+out=$(FM_TEST_CMDLINE='grok' run_status)
+assert_contains "$out" "source=none" "a non-Pi chair with no record has no tank to name"
+pass "grok chair without a record -> source=none"
+rm -f "$SOURCE_FILE"
+
+# --- chair source: fallback to the newest recent Pi session file -------------
+
+SESSIONS="$TMP_ROOT/sessions"
+CWD_RESOLVED=$(cd "$HOME_DIR" && pwd -P)
+SESSION_DIR="$SESSIONS/--$(printf '%s' "${CWD_RESOLVED#/}" | tr '/' '-')--"
+mkdir -p "$SESSION_DIR"
+session_file() {  # <name> <cwd> <provider...>: a Pi session jsonl with one model_change per provider
+  local f="$SESSION_DIR/$1.jsonl" cwd=$2 prov; shift 2
+  printf '{"type":"session","version":3,"id":"%s","timestamp":"2026-09-20T14:04:50.961Z","cwd":"%s"}\n' "$1" "$cwd" > "$f"
+  for prov in "$@"; do
+    printf '{"type":"model_change","id":"x","parentId":null,"timestamp":"2026-09-20T14:04:51.503Z","provider":"%s","modelId":"claude-fable-5-1"}\n' "$prov" >> "$f"
+  done
+  printf '%s\n' "$f"
+}
+run_status_sessions() { FM_CHAIR_STATUS_PI_SESSIONS_DIR="$SESSIONS" run_status "$@"; }
+
+FM_TEST_ORCA_JSON=$(orca_json pi "π - firstmate")
+older=$(session_file 2026-09-20T13-00-00-000Z_a "$CWD_RESOLVED" token-pool)
+newer=$(session_file 2026-09-20T14-00-00-000Z_b "$CWD_RESOLVED" token-pool anthropic)
+touch -t 202001010000 "$older"; sleep 1; touch "$newer"
+out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
+assert_contains "$out" "source=8080" "the newest recent session's LAST model_change names the tank"
+pass "pi session fallback -> last model_change of the newest recent file"
+
+touch "$older"; sleep 1; touch "$newer"
+out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
+assert_contains "$out" "source=8080" "newest by mtime wins when both are recent"
+touch "$newer"; sleep 1; touch "$older"
+out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
+assert_contains "$out" "source=8317" "a more recently written older session file wins"
+pass "pi session fallback -> newest by mtime"
+
+touch -t 202001010000 "$older" "$newer"
+out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
+assert_contains "$out" "source=unknown" "session files older than 10 minutes are not evidence"
+pass "stale pi session files -> unknown"
+
+rm -f "$older" "$newer"
+other=$(session_file 2026-09-20T14-30-00-000Z_c /somewhere/else anthropic)
+out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
+assert_contains "$out" "source=unknown" "a session whose cwd is not this home is ignored"
+pass "pi session for another cwd -> unknown"
+rm -f "$other"
+
+recent=$(session_file 2026-09-20T14-40-00-000Z_d "$CWD_RESOLVED" anthropic)
+printf 'pid=%s source=8317 launched_at=1700000000\n' "$$" > "$SOURCE_FILE"
+out=$(FM_TEST_CMDLINE='pi' run_status_sessions)
+assert_contains "$out" "source=8317" "the flip's record outranks the session file"
+rm -f "$SOURCE_FILE"
+FM_TEST_ORCA_JSON=$(orca_json claude "claude - firstmate")
+out=$(FM_TEST_CMDLINE='claude' run_status_sessions)
+assert_contains "$out" "source=none" "a Pi session file says nothing about a claude chair"
+pass "record outranks session; session only applies to a Pi chair"
+rm -f "$recent"
 
 # --- terminal matching is conservative --------------------------------------
 

@@ -6,7 +6,7 @@
 #
 # Prints one line and exits 0 always (this is a sensor):
 #
-#   chair=<pi-fable|grok|claude|codex|opencode|kimi|cursor|none> harness=<pi|grok|claude|...|none> source=<8317|8080|none> terminal=<handle|none> pid=<n|none> reason=<token>
+#   chair=<pi-fable|grok|claude|codex|opencode|kimi|cursor|none> harness=<pi|grok|claude|...|none> source=<8317|8080|grok|unknown|none> terminal=<handle|none> pid=<n|none> reason=<token>
 #
 # `harness` is read from state/.lock: the verified harness holding the lock as
 # a live pid, decided by the fleet's single owner of that question,
@@ -22,10 +22,19 @@
 # context left is `none` (below) while `harness` and `pid` still name it so the
 # actuator can end it gracefully.
 #
-# `source` is the Fable source a Pi chair is bound to, read from its command
-# line: a `token-pool/` model is the 8317 pool, an `anthropic/` model is the
-# 8080 better-ccflare gateway (the two providers bin/fm-chair-flip.sh launches
-# with). Any other chair, or a Pi on neither provider, is `none`.
+# `source` is the tank the chair is bound to. Pi rewrites its process title on
+# start, so its command line carries no model and argv is never consulted.
+# Evidence, in order:
+#   1. state/.chair-source, the record bin/fm-chair-flip.sh writes when a flip
+#      it launched verifies (`pid=<lock pid> source=<8317|8080|grok>
+#      launched_at=<epoch>`), used only while its pid is the lock holder.
+#   2. For a Pi chair firstmate did not launch: the newest Pi session file for
+#      this home (~/.pi/agent/sessions/<encoded cwd>/*.jsonl) whose first line
+#      names this home as cwd and whose mtime is within the last 10 minutes;
+#      its LAST model_change record's provider: token-pool -> 8317, anthropic
+#      -> 8080.
+#   3. Otherwise `unknown` for a Pi chair (the sentinel holds on it), `none`
+#      for any other chair.
 #
 # `terminal` is the Orca terminal that hosts that chair. Orca exposes no
 # pid/tty field, so the match is structural and deliberately conservative: an
@@ -55,6 +64,7 @@
 #   FM_CHAIR_STATUS_ORCA_CMD     override the Orca CLI; called as
 #                                `terminal list --json` and
 #                                `terminal read --terminal <h> --screen --json`
+#   FM_CHAIR_STATUS_PI_SESSIONS_DIR  Pi sessions root (default ~/.pi/agent/sessions)
 set -u
 export LC_ALL=C
 
@@ -109,12 +119,41 @@ harness_name() {  # <comm> <args> -> the verified harness name, or return 1
   printf '%s\n' "$name"
 }
 
-chair_source() {  # <args> -> the Fable source a pi command line is bound to
-  case "$1" in
-    *token-pool/*) printf '8317\n' ;;
-    *anthropic/*) printf '8080\n' ;;
-    *) printf 'none\n' ;;
-  esac
+ABS_HOME=$(cd -- "$HOME_DIR" 2>/dev/null && pwd -P) || ABS_HOME=$HOME_DIR
+SOURCE_FILE=$ABS_HOME/state/.chair-source
+PI_SESSIONS_DIR=${FM_CHAIR_STATUS_PI_SESSIONS_DIR:-${HOME:-}/.pi/agent/sessions}
+PI_SESSION_MAX_AGE_SECS=600
+
+file_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+
+recorded_source() {  # <lock pid> -> the source bin/fm-chair-flip.sh recorded for this pid, or return 1
+  local line pid source
+  line=$(head -n 1 -- "$SOURCE_FILE" 2>/dev/null) || return 1
+  pid=$(printf '%s\n' "$line" | sed -n 's/.*pid=\([^ ]*\).*/\1/p')
+  source=$(printf '%s\n' "$line" | sed -n 's/.*source=\([^ ]*\).*/\1/p')
+  [ "$pid" = "$1" ] && [ -n "$source" ] || return 1
+  printf '%s\n' "$source"
+}
+
+pi_session_source() {  # -> the provider of the newest recent Pi session for this home, or return 1
+  local dir f now provider
+  dir="$PI_SESSIONS_DIR/--$(printf '%s' "${ABS_HOME#/}" | tr '/:' '--')--"
+  now=$(date +%s)
+  [ -d "$dir" ] || return 1
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ $((now - $(file_mtime "$f"))) -le "$PI_SESSION_MAX_AGE_SECS" ] || continue
+    head -n 1 -- "$f" | jq -e --arg cwd "$ABS_HOME" '.type == "session" and .cwd == $cwd' >/dev/null 2>&1 || continue
+    provider=$(jq -r 'select(.type == "model_change") | .provider // empty' -- "$f" 2>/dev/null | tail -n 1)
+    case "$provider" in
+      token-pool) printf '8317\n'; return 0 ;;
+      anthropic) printf '8080\n'; return 0 ;;
+      *) return 1 ;;
+    esac
+  done <<EOF_FILES
+$(ls -t -- "$dir"/*.jsonl 2>/dev/null)
+EOF_FILES
+  return 1
 }
 
 PID=none
@@ -132,7 +171,14 @@ if [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ]; then
         if H=$(harness_name "$PROC_COMM" "$PROC_ARGS"); then
           PID=$LOCK_PID
           HARNESS=$H
-          case "$H" in pi|pi-signed) CHAIR=pi-fable; SOURCE=$(chair_source "$PROC_ARGS") ;; *) CHAIR=$H ;; esac
+          case "$H" in pi|pi-signed) CHAIR=pi-fable ;; *) CHAIR=$H ;; esac
+          if ! SOURCE=$(recorded_source "$LOCK_PID"); then
+            if [ "$CHAIR" = pi-fable ]; then
+              SOURCE=$(pi_session_source) || SOURCE=unknown
+            else
+              SOURCE=none
+            fi
+          fi
           REASON=live_harness
         else
           REASON=holder_not_harness

@@ -139,11 +139,11 @@ pass "both green -> 8317"
 
 out=$(FM_TEST_FABLE=red FM_TEST_GROK=green FM_TEST_CHAIR=pi-fable run_flip to-grok); code=$?
 expect_code 0 "$code" "to-grok flips"
-assert_contains "$out" "source=supergrok" "to-grok records the SuperGrok source"
+assert_contains "$out" "source=grok" "to-grok records the grok source"
 assert_contains "$out" "DRY-RUN: orca terminal send --terminal term_x --text /quit --enter --json" "a pi incumbent is asked to /quit, Pi's own exit command"
 assert_contains "$out" "--command 'grok --always-approve '" "grok is launched in the verified unattended form"
 assert_not_contains "$out" "permission-mode" "no unverified permission flag"
-pass "to-grok -> source=supergrok, pi asked to /quit, grok --always-approve"
+pass "to-grok -> source=grok, pi asked to /quit, grok --always-approve"
 
 # --- refusals ---------------------------------------------------------------
 
@@ -217,12 +217,13 @@ pass "empty status line -> refuse before any side effect"
 # --- verification demands a beat written after the flip began ---------------
 
 BEAT="$HOME_DIR/state/.last-watcher-beat"
-rm -f "$HOME_DIR/state/.chair-flip-at"
+rm -f "$HOME_DIR/state/.chair-flip-at" "$HOME_DIR/state/.chair-source"
 touch_at "$(( $(date +%s) - 5 ))" "$BEAT"
 out=$(FM_TEST_CHAIR=grok FM_TEST_CHAIR_AFTER=pi-fable FM_TEST_PID_AFTER=$$ FM_TEST_VERIFY_SECS=5 run_flip_live to-pi-fable); code=$?
 expect_code 1 "$code" "a predecessor's fresh beat does not verify the successor"
 assert_contains "$out" "verification failed" "failure reported"
 assert_contains "$out" "beat written after the successor was launched" "the beat criterion is named"
+assert_absent "$HOME_DIR/state/.chair-source" "no record for a flip that did not verify"
 pass "successor lock + predecessor beat -> verification fails"
 
 rm -f "$HOME_DIR/state/.chair-flip-at" "$BEAT.calls"
@@ -238,7 +239,11 @@ touch_at "$(( $(date +%s) + 120 ))" "$BEAT"
 out=$(FM_TEST_CHAIR=grok FM_TEST_CHAIR_AFTER=pi-fable FM_TEST_PID_AFTER=$$ FM_TEST_VERIFY_SECS=5 run_flip_live to-pi-fable); code=$?
 expect_code 0 "$code" "a beat after the flip began verifies"
 assert_contains "$out" "flipped grok -> to-pi-fable source=8317" "flip reported"
-pass "successor lock + post-start beat -> verified"
+record=$(cat "$HOME_DIR/state/.chair-source")
+assert_contains "$record" "pid=$$ " "the record names the successor's lock pid"
+assert_contains "$record" "source=8317" "the record names the tank the successor was launched on"
+[ "$(printf '%s\n' "$record" | sed -n 's/.*launched_at=\([0-9]*\).*/\1/p')" -ge "$(( $(date +%s) - 60 ))" ] || fail "launched_at is the launch epoch ($record)"
+pass "verified flip records state/.chair-source for the new lock pid"
 
 sleep 300 & STUCK=$!
 trap 'kill "$STUCK" 2>/dev/null; fm_test_cleanup' EXIT

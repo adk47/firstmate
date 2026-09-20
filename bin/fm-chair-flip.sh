@@ -57,11 +57,15 @@
 #      successor's terminal was created, i.e. after the incumbent had already
 #      exited (the beat file is shared and the incumbent's watcher keeps
 #      touching it every poll until then, so any earlier reference would be
-#      satisfied by the predecessor). Print the exact failure and exit nonzero
+#      satisfied by the predecessor). On success record state/.chair-source
+#      for the new lock pid. Print the exact failure and exit nonzero
 #      otherwise.
 #
-# Output carries `source=<8317|8080|supergrok>` so the caller can log which
-# tank the successor was launched on.
+# Output carries `source=<8317|8080|grok>` so the caller can log which tank
+# the successor was launched on, and a verified flip records
+# state/.chair-source (`pid=<lock pid> source=<8317|8080|grok>
+# launched_at=<epoch>`) so `fm-chair-status.sh` can name the chair's tank
+# afterwards (Pi hides its command line, so nothing else carries it).
 #
 # FM_CHAIR_FLIP_DRY_RUN=1 prints every command it would run and still writes the
 # handoff file, then touches nothing else.
@@ -194,7 +198,7 @@ case "$TO" in
   to-grok)
     TARGET_CHAIR=grok; TARGET_STATE=$GROK_STATE; TARGET_NAME=SuperGrok
     TITLE='grok - firstmate'
-    SOURCE=supergrok
+    SOURCE=grok
     LAUNCH='grok --always-approve'
     ;;
 esac
@@ -383,6 +387,7 @@ else
     BEAT_AT=$(stat -f %m "$BEAT" 2>/dev/null || stat -c %Y "$BEAT" 2>/dev/null || echo 0)
     if [ "$BEAT_AT" -ge "$LAUNCH_AT" ]; then
       ok=1
+      printf 'pid=%s source=%s launched_at=%s\n' "$V_PID" "$SOURCE" "$LAUNCH_AT" > "$STATE_DIR/.chair-source"
       break
     fi
     "$SLEEP_CMD" 5
