@@ -1619,10 +1619,8 @@ await waitFor(
 if (rows().length !== 2) throw new Error(`unretired arm overlapped before fallback: ${rows().join(" | ")}`);
 if (!prompts[0]?.includes("original wake")) throw new Error(`missing original fallback: ${prompts.join(" | ")}`);
 writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
-for (let i = 0; i < 500; i += 1) {
-  if (rows().length >= 3 && (process.env.FM_LATE_KIND !== "actionable" || prompts.some((message) => message.includes("late wake")))) break;
-  await new Promise((resolve) => setTimeout(resolve, 10));
-}
+await waitFor(() => rows().length >= 3, "late close did not restore a successor");
+await new Promise((resolve) => setTimeout(resolve, 50));
 if (rows().length !== 3) throw new Error(`late close did not restore one successor: ${rows().join(" | ")}`);
 // The original follow-up was accepted but never consumed here, so a late
 // actionable close folds under it (one queued doorbell drains every row)
@@ -2469,10 +2467,13 @@ writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close\n");
 // The first doorbell is accepted but not yet consumed, so the second close
 // FOLDS under it: one queued follow-up drains every durable row, and a second
 // would only stack another "Follow-up:" on the captain's screen. The successor
-// chain must still advance for the folded close.
-await waitFor(() => arms() === 3, "successor after the second (folded) streaming-time close");
-await new Promise((resolve) => setTimeout(resolve, 50));
-if (prompts.length !== 1) throw new Error(`second streaming-time close was not folded: ${prompts.join(" | ")}`);
+// chain must still advance for the folded close; its handling confirmation
+// runs synchronously right before the fold, so that row marks the delivery.
+await waitFor(
+  () => readFileSync(process.env.FM_ARM_LOG, "utf8").includes("confirmed=chain-3\n"),
+  "second (folded) streaming-time close delivered through its successor",
+);
+if (arms() !== 3 || prompts.length !== 1) throw new Error(`second streaming-time close was not folded: ${prompts.join(" | ")}`);
 if (beforeAgentStarts !== 0) throw new Error(`streaming follow-ups raised before_agent_start ${beforeAgentStarts} times`);
 
 // Nothing is consumed before the captain replaces the session, so BOTH records
@@ -2504,6 +2505,252 @@ EOF
   expect_code 0 "$status" "Pi streaming-time wake delivery must keep the successor chain and replay only unconsumed wakes"
   [ -z "$out" ] || fail "Pi streaming-time delivery chain test printed output: $out"
   pass "Pi streaming-time wake delivery keeps the successor chain and replays only unconsumed wakes"
+}
+
+# A queued follow-up can leave Pi's queue without ever being consumed: Escape
+# or the dequeue key moves it into the editor and the run ends on agent_end
+# without draining it. A carrier dropped that way must not hold every later
+# close folded under it silent for the rest of the generation: once main's
+# turn ends and the grace passes, the extension releases it and redelivers one
+# fresh doorbell carrying every record. A carrier consumed inside the grace is
+# finished with everything folded under it and is never redelivered.
+test_pi_dropped_carrier_is_released_after_the_turn() {
+  local repo home plugin log trigger out status
+  repo="$TMP_ROOT/pi-dropped-carrier-root"
+  home="$TMP_ROOT/pi-dropped-carrier-home"
+  log="$TMP_ROOT/pi-dropped-carrier.log"
+  trigger="$TMP_ROOT/pi-dropped-carrier.trigger"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed=%s\n' "$2" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=dropped-%s\n' "$$" "$count"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_TRIGGER_FILE.$count" ]; do sleep 0.02; done
+printf 'signal: dropped carrier wake %s\n' "$count"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_TRIGGER_FILE="$trigger" FM_PI_WAKE_FOLD_GRACE_MS=300 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const prompts = [];
+let streaming = false;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+    if (streaming) return;
+    handlers.get("before_agent_start")?.({ prompt: message }, {});
+  },
+  events: { on() {}, emit() {} },
+};
+// The running run reaching a queued follow-up: Pi emits the user message.
+const consumeQueued = (message) =>
+  handlers.get("message_start")?.({ message: { role: "user", content: [{ type: "text", text: message }] } }, {});
+// Main's turn ending. Pi drains its follow-up queue before this event, so a
+// follow-up it never emitted a message_start for was dropped from the queue.
+const endTurn = () => handlers.get("agent_end")?.({ type: "agent_end", messages: [] }, {});
+const logRows = () => existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n") : [];
+const arms = () => logRows().filter((row) => row.startsWith("arm=")).length;
+// Handling confirmation for successor N runs synchronously right before the
+// wake is sent or folded, so its row is the earliest sign a close's delivery
+// has settled.
+const confirmations = (successor) => logRows().filter((row) => row === `confirmed=dropped-${successor}`).length;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await sleep(10);
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const wakes = (text) => prompts.filter((message) => message.includes(text)).length;
+const grace = Number(process.env.FM_PI_WAKE_FOLD_GRACE_MS);
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+await waitFor(() => arms() === 1, "first arm");
+streaming = true;
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.1`, "close\n");
+await waitFor(() => prompts.length === 1, "carrier delivered while main streams");
+await waitFor(() => arms() === 2, "successor after the carrier");
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close\n");
+await waitFor(() => confirmations(3) === 1, "second close delivered through its successor");
+if (arms() !== 3 || prompts.length !== 1) throw new Error(`second close was not folded: ${prompts.join(" | ")}`);
+
+// The turn ends and the run consumes the carrier inside the grace: the release
+// is a no-op, both records finish, and nothing is redelivered.
+endTurn();
+consumeQueued(prompts[0]);
+await sleep(grace * 2);
+if (prompts.length !== 1) throw new Error(`consumed carrier was redelivered: ${prompts.join(" | ")}`);
+// With both records finished there is nothing left to fold under: the next
+// close is a new carrier.
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.3`, "close\n");
+await waitFor(() => prompts.length === 2, "new carrier after the consumed one");
+if (wakes("dropped carrier wake 3") !== 1) throw new Error(`wrong new carrier: ${prompts.join(" | ")}`);
+await waitFor(() => arms() === 4, "successor after the new carrier");
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.4`, "close\n");
+await waitFor(() => confirmations(5) === 1, "fourth close delivered through its successor");
+if (arms() !== 5 || prompts.length !== 2) throw new Error(`fourth close was not folded: ${prompts.join(" | ")}`);
+
+// The turn ends and the carrier is never consumed (the captain dequeued it).
+// Nothing moves inside the grace; after it, exactly one fresh doorbell goes
+// out, carrying the first record with the other folded under it, and no bare
+// arm is launched for it.
+endTurn();
+await sleep(Math.floor(grace / 3));
+if (prompts.length !== 2) throw new Error(`dropped carrier was redelivered inside the grace: ${prompts.join(" | ")}`);
+await waitFor(() => prompts.length === 3, "fresh doorbell after the grace");
+if (wakes("dropped carrier wake 3") !== 2 || wakes("dropped carrier wake 4") !== 0) {
+  throw new Error(`redelivery carried the wrong record: ${prompts.join(" | ")}`);
+}
+// Both released records go back through delivery against the same live
+// successor: the first as the fresh doorbell, the second folded under it.
+await waitFor(() => confirmations(5) === 3, "both released records redelivered");
+await sleep(grace);
+if (prompts.length !== 3) throw new Error(`redelivery stacked more than one doorbell: ${prompts.join(" | ")}`);
+if (arms() !== 5) throw new Error(`redelivery launched a bare arm: ${readFileSync(process.env.FM_ARM_LOG, "utf8")}`);
+
+// Consuming the fresh doorbell finishes both records it carries: a replacement
+// right after has nothing to replay.
+consumeQueued(prompts[2]);
+await sleep(20);
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+if (existsSync(handoffPath)) throw new Error(`finished records rode the handoff: ${readFileSync(handoffPath, "utf8")}`);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must release a dropped carrier after the turn and redeliver its records once"
+  [ -z "$out" ] || fail "Pi dropped-carrier test printed output: $out"
+  pass "Pi releases a dropped carrier after the turn and redelivers its records once"
+}
+
+# A close whose message carries typed failure detail is never folded: the drain
+# presents queue rows, not the extension's repair text, so that text needs its
+# own follow-up. It still becomes the carrier for later plain closes.
+test_pi_failure_detail_close_is_never_folded() {
+  local repo home plugin log trigger reject out status
+  repo="$TMP_ROOT/pi-failed-not-folded-root"
+  home="$TMP_ROOT/pi-failed-not-folded-home"
+  log="$TMP_ROOT/pi-failed-not-folded.log"
+  trigger="$TMP_ROOT/pi-failed-not-folded.trigger"
+  reject="$TMP_ROOT/pi-failed-not-folded.reject"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  if [ -e "${FM_CONFIRM_REJECT_FILE:?}" ]; then
+    printf 'confirmation rejected on purpose\n' >&2
+    exit 3
+  fi
+  printf 'confirmed=%s\n' "$2" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=failed-%s\n' "$$" "$count"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_TRIGGER_FILE.$count" ]; do sleep 0.02; done
+printf 'signal: failure detail wake %s\n' "$count"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_TRIGGER_FILE="$trigger" FM_CONFIRM_REJECT_FILE="$reject" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const prompts = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  // Main streams throughout: every follow-up is queued, none consumed here.
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+  events: { on() {}, emit() {} },
+};
+const consumeQueued = (message) =>
+  handlers.get("message_start")?.({ message: { role: "user", content: [{ type: "text", text: message }] } }, {});
+const logRows = () => existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n") : [];
+const arms = () => logRows().filter((row) => row.startsWith("arm=")).length;
+// Handling confirmation for successor N runs synchronously right before the
+// wake is sent or folded, so its row is the earliest sign a close's delivery
+// has settled.
+const confirmations = (successor) => logRows().filter((row) => row === `confirmed=failed-${successor}`).length;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await sleep(10);
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+await waitFor(() => arms() === 1, "first arm");
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.1`, "close\n");
+await waitFor(() => prompts.length === 1, "carrier delivered while main streams");
+if (confirmations(2) !== 1) throw new Error(`carrier was sent before its successor confirmed: ${logRows().join(" | ")}`);
+
+// The second close's handling confirmation is rejected, so its wake carries
+// typed failure detail: it must reach main as its own follow-up even though
+// the first carrier is still unconsumed.
+writeFileSync(process.env.FM_CONFIRM_REJECT_FILE, "reject\n");
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close\n");
+await waitFor(() => prompts.length === 2, "failure-detail close sent its own follow-up");
+if (!prompts[1].includes("signal: failure detail wake 2") || !prompts[1].includes("watcher: FAILED - handling delivery confirmation was rejected")) {
+  throw new Error(`failure-detail follow-up lacks its record or detail: ${prompts[1]}`);
+}
+await waitFor(() => arms() === 3, "successor after the failure-detail close");
+
+// A later plain close folds under the newest unconsumed carrier.
+unlinkSync(process.env.FM_CONFIRM_REJECT_FILE);
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.3`, "close\n");
+await waitFor(() => confirmations(4) === 1, "third close delivered through its successor");
+if (arms() !== 4 || prompts.length !== 2) throw new Error(`plain close after a failure-detail carrier was not folded: ${prompts.join(" | ")}`);
+
+// Consuming both carriers finishes all three records.
+consumeQueued(prompts[1]);
+consumeQueued(prompts[0]);
+await sleep(20);
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+if (existsSync(handoffPath)) throw new Error(`finished records rode the handoff: ${readFileSync(handoffPath, "utf8")}`);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must never fold a close carrying typed failure detail"
+  [ -z "$out" ] || fail "Pi failure-detail fold test printed output: $out"
+  pass "Pi never folds a close carrying typed failure detail"
 }
 
 # A verified successor can die while the wake it was started for is still
@@ -4008,6 +4255,8 @@ test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_streaming_followup_is_replayed_after_replacement
 test_pi_streaming_time_delivery_keeps_the_successor_chain
+test_pi_dropped_carrier_is_released_after_the_turn
+test_pi_failure_detail_close_is_never_folded
 test_pi_successor_failure_during_delivery_is_retried_after_delivery
 test_pi_late_retiring_actionable_reaches_replacement
 test_pi_replacement_tokens_are_process_unique

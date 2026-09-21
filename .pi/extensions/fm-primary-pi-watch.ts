@@ -21,6 +21,14 @@
 // consumes at the user message_start carrying the exact wake text; either
 // event finishes the pending record, and a still-unconsumed record rides the
 // replacement handoff.
+// While a follow-up is accepted but unconsumed, a later actionable close folds
+// under it instead of queueing a second follow-up: a wake is only a doorbell
+// for one drain that presents every queued row. Pi drains every queued
+// follow-up before agent_end, so a follow-up still unconsumed once main's turn
+// has ended was dropped from the queue (Escape, dequeue) and will never be
+// consumed; after a short grace (FM_PI_WAKE_FOLD_GRACE_MS) the extension
+// releases it without finishing its records, and the pipeline redelivers them
+// as one fresh follow-up.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -105,6 +113,9 @@ type SessionGeneration = {
   // replacement began reads it to tell a main-queued wake (replayed) from a
   // branch-handled one (finished).
   unconsumedWakes: Map<string, UnconsumedWake>;
+  // Armed at agent_end over the follow-ups still unconsumed then; releases
+  // whichever are still unconsumed when it fires so they are redelivered.
+  wakeReleaseTimer: ReturnType<typeof setTimeout> | null;
   // A verified successor's failure close that arrived while the pipeline was
   // still delivering the wake it was started for; its bounded retry runs once
   // that delivery settles instead of being skipped by the single-flight guard.
@@ -153,6 +164,7 @@ const armReadyTimeoutMs = positiveInteger(
   process.platform === "win32" ? 35000 : 12000,
 );
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+const wakeFoldGraceMs = positiveInteger("FM_PI_WAKE_FOLD_GRACE_MS", 3000);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 
@@ -427,6 +439,7 @@ function createGeneration(): SessionGeneration {
     pendingActionables: [],
     cleanupFailure: "",
     unconsumedWakes: new Map(),
+    wakeReleaseTimer: null,
     deferredClose: null,
   };
 }
@@ -443,8 +456,10 @@ function stopGeneration(generation: SessionGeneration): ChildProcess | null {
   generation.stopping = true;
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
   if (generation.cleanupTimer) clearTimeout(generation.cleanupTimer);
+  if (generation.wakeReleaseTimer) clearTimeout(generation.wakeReleaseTimer);
   generation.retryTimer = null;
   generation.cleanupTimer = null;
+  generation.wakeReleaseTimer = null;
   const child = generation.child;
   if (child) child.kill("SIGTERM");
   generation.child = null;
@@ -579,6 +594,29 @@ export default function (pi: ExtensionAPI) {
       if (wake.pendings.some((item) => item.token === token)) return true;
     }
     return false;
+  }
+
+  // Main's turn ended. Pi drained its follow-up queue before agent_end, so a
+  // wake still unconsumed after the grace was dropped from that queue and
+  // would otherwise hold every close folded under it silent for the rest of
+  // the generation. Release it without finishing its records: the pipeline
+  // then redelivers the first one as a fresh doorbell and folds the rest.
+  function scheduleDroppedWakeRelease(owner: SessionGeneration): void {
+    if (owner.wakeReleaseTimer) clearTimeout(owner.wakeReleaseTimer);
+    owner.wakeReleaseTimer = null;
+    const tokens = [...owner.unconsumedWakes.keys()];
+    if (tokens.length === 0) return;
+    const timer = setTimeout(() => {
+      if (owner.wakeReleaseTimer === timer) owner.wakeReleaseTimer = null;
+      if (!generationIsLive(owner)) return;
+      let released = false;
+      for (const token of tokens) {
+        if (owner.unconsumedWakes.delete(token)) released = true;
+      }
+      if (released) void processPendingActionables(owner);
+    }, wakeFoldGraceMs);
+    timer.unref();
+    owner.wakeReleaseTimer = timer;
   }
 
   function confirmHandlingDelivery(recovery: { generation: string; watcherPid: string }): {
@@ -1125,6 +1163,9 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("message_start", (event) => {
     if (event.message.role !== "user") return;
     consumeWake(generation, userMessageText(event.message.content));
+  });
+  pi.on?.("agent_end", () => {
+    scheduleDroppedWakeRelease(generation);
   });
 
   pi.on?.("session_start", async () => {
