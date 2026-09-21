@@ -122,8 +122,11 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-unregister.sh` | Retire a custom watcher check and its trust binding by validated task id            |
-| `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
+| `fm-check-lib.sh`        | Validate custom-check registrations, prepare private execution snapshots, and arm or disarm a self-registered check's shim and trust binding |
 | `fm-tool-update-check.sh` | Report watched tooling with an update available, and updates installed but left inert by PATH order |
+| `fm-fable-runway.sh`     | Print one read-only GREEN/YELLOW/RED line for the supervisor's Fable credential and the account pool |
+| `fm-fable-runway-check.sh` | Registered slow-poll check that wakes firstmate on a Fable or pool runway change, a sustained RED, or an account needing a login |
+| `fm-fable-runway-alert.sh` | The runway check's outward actions: the once-per-episode handoff note, Grok doorbell, and notifications |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
