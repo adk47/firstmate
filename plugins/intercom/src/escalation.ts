@@ -125,6 +125,53 @@ const RISK_RULES: RiskRule[] = [
   },
 ];
 
+// Observability: one [intercom:judge] journal line per judge invocation (or
+// per turn where the judge was reachable but not invoked), so we can tell
+// "never trips" from "silently times out" from the edge journal alone. Never
+// carries message content — only the fixed key=value fields below.
+// The reason vocabulary the judge prompt asks for (judge.ts). Kept here as the
+// log-side allowlist so a free-text reason can never reach the journal.
+const JUDGE_REASONS: ReadonlySet<string> = new Set([
+  "frustration",
+  "repeated_question",
+  "stuck_in_loop",
+  "refund_intent",
+  "cancel_intent",
+  "public_shaming_intent",
+  "ambiguous",
+]);
+
+function logJudgeSkip(
+  log: AssessRiskDeps["log"],
+  conversationId: string | undefined,
+  reason: "min_turns" | "hard_cap" | "rule_escalated" | "disabled",
+): void {
+  log?.warn?.(`[intercom:judge] conv=${conversationId ?? "?"} outcome=skipped reason=${reason}`);
+}
+
+function logJudgeOutcome(
+  log: AssessRiskDeps["log"],
+  conversationId: string | undefined,
+  outcome: "verdict" | "null" | "error",
+  out: JudgeOutput | null | undefined,
+  ms: number,
+): void {
+  const shouldHandoff = out ? String(out.shouldHandoff) : "-";
+  const confidence = out ? out.confidence : "-";
+  const actionType = out ? out.suggestedActionType : "-";
+  // The judge validates `reasons` only as string[]; the model is asked for the
+  // fixed tokens in JUDGE_REASONS but nothing stops it echoing customer text.
+  // Log only known tokens; anything else collapses to a single `unknown`.
+  const known = out ? out.reasons.filter((r) => JUDGE_REASONS.has(r)) : [];
+  const unknownCount = out ? out.reasons.length - known.length : 0;
+  const reasonTokens = unknownCount > 0 ? [...known, "unknown"] : known;
+  const reasons = reasonTokens.length ? reasonTokens.join(",") : "-";
+  log?.warn?.(
+    `[intercom:judge] conv=${conversationId ?? "?"} outcome=${outcome} shouldHandoff=${shouldHandoff} ` +
+    `confidence=${confidence} actionType=${actionType} reasons=${reasons} ms=${Math.round(ms)}`,
+  );
+}
+
 function checkRules(message: string): { reason: string; actionType: RiskActionType; matched: string } | null {
   for (const rule of RISK_RULES) {
     for (const p of rule.patterns) {
@@ -233,6 +280,7 @@ export async function assessRisk(
 
   // Layer 0 — magic keyword. Always wins; bypasses dedupe gate (caller's responsibility).
   if (checkMagicKeyword(message)) {
+    logJudgeSkip(deps.log, state.conversationId, "rule_escalated");
     return {
       triggered: true,
       source: "user_request",
@@ -245,6 +293,7 @@ export async function assessRisk(
   // Layer 1a — content rules.
   const ruleHit = checkRules(message);
   if (ruleHit) {
+    logJudgeSkip(deps.log, state.conversationId, "rule_escalated");
     return {
       triggered: true,
       source: "rule",
@@ -261,6 +310,7 @@ export async function assessRisk(
   const cap = deps.turnCountHardCap ?? DEFAULT_TURN_HARD_CAP;
   const turns = state.userTurnCount ?? 0;
   if (turns >= cap && !state.escalationFiredAt) {
+    logJudgeSkip(deps.log, state.conversationId, "hard_cap");
     return {
       triggered: true,
       source: "rule",
@@ -277,12 +327,14 @@ export async function assessRisk(
   // turn-count cap above is the unconditional safety net.
   const minTurns = deps.judgeMinTurnCount ?? DEFAULT_JUDGE_MIN_TURNS;
   if (deps.judge && turns >= minTurns && !state.escalationFiredAt) {
+    const startedAt = Date.now();
     try {
       const out = await deps.judge({
         knownFacts: state.knownFacts ?? {},
         recentParts,
         currentMessage: message,
       });
+      logJudgeOutcome(deps.log, state.conversationId, out ? "verdict" : "null", out, Date.now() - startedAt);
       if (out && out.shouldHandoff && out.confidence !== "low") {
         return {
           triggered: true,
@@ -293,10 +345,17 @@ export async function assessRisk(
         };
       }
     } catch (err) {
+      logJudgeOutcome(deps.log, state.conversationId, "error", null, Date.now() - startedAt);
       deps.log?.warn?.(
         `[intercom:risk] judge call failed turns=${turns} errClass=${(err as Error)?.constructor?.name ?? "unknown"} message=${(err as Error)?.message ?? String(err)}`,
       );
     }
+  } else {
+    // Judge reachable (message not otherwise escalated) but not invoked.
+    // escalationFiredAt already true means a prior layer already escalated
+    // this conversation, so it's bucketed with the other pre-judge triggers.
+    const reason = !deps.judge ? "disabled" : state.escalationFiredAt ? "rule_escalated" : "min_turns";
+    logJudgeSkip(deps.log, state.conversationId, reason);
   }
 
   return { triggered: false };

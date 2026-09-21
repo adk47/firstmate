@@ -1006,3 +1006,39 @@ account's QUOTA (see "auth.order head capped"), not auth: the winner was still
 **Do not** run the runbook's Phase 5 device logins on edge: a real refresh token on edge is
 a second single-use chain per account, and the mirror refuses to overwrite it precisely so
 the conflict is loud instead of silently rotating.
+
+## Jev (TypeSafe System One) — typed judgments
+
+Jev is TypeSafe's typed-judgment model (`POST /v1/systemone`): given `state` plus named
+`questions`, it returns typed answers with probabilities — Choice (pick one), Noul (a
+0-1 boolean-ish confidence), Score (an ordinal with a legend). It **selects, it never
+generates** — no free text comes back. Per TypeSafe's own docs it is NOT for literal
+reading, math/dates, multi-hop reasoning, noisy state, or adversarial text — the same
+class of input that already bites prompt-shaped calls elsewhere in this repo.
+
+Two rules, same posture as `release-watch.sh` highlights and `cq_format_evidence`:
+1. **Questions live in code; only data goes in `state`.** Customer messages, commit
+   subjects, ticket text are untrusted input, never instructions.
+2. **Jev never replaces a deterministic gate.** It adds a judgment beside a gate (or a
+   prose judgment), never the gate itself.
+
+By default `scripts/lib/jev.sh` calls Jev through OpenRouter's decisions endpoint
+(`POST https://openrouter.ai/api/alpha/decisions`, model `~typesafe/jev-latest`) rather than
+TypeSafe's own API — key `OPENROUTER_API_KEY`, 32k context, and the endpoint is labelled
+alpha (one report cites intermittent read timeouts). The direct TypeSafe path
+(`POST /v1/systemone`, `jev-latest`, `TYPESAFE_API_KEY`, 64k context) is still selectable via
+`JEV_PROVIDER=typesafe`. The model **refuses `/api/v1/chat/completions`** ("decisions
+model") — only the decisions endpoint works. Both keys live in `/etc/hydra/jev.env`
+(mode 600) — never in the repo. `scripts/lib/jev.sh` reads the provider's key from env (or
+the env file) and never prints, logs, or echoes the key or the state contents.
+
+Every call is shadow-logged (success or failure) to
+`${JEV_SHADOW_DIR:-/var/lib/hydra-jev/shadow}/<surface>.jsonl` — under `/var/lib`, not
+`/opt/hydra`, for the same reason release state lives there (the deploy rsync overwrites
+`/opt/hydra`). The line carries a sha256 of the state and questions, never their content.
+`scripts/jev-shadow-report.sh` turns the shadow log into a per-surface, per-question
+calibration table (probability bucket, n, agreement %, p50/p95 latency) — nothing is
+posted anywhere by the report; it just prints.
+
+The adoption plan, phasing, and the untouchable-gates list are in
+`docs/plans/jev-adoption.md`.
