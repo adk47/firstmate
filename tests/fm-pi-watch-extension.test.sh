@@ -1624,10 +1624,12 @@ for (let i = 0; i < 500; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 if (rows().length !== 3) throw new Error(`late close did not restore one successor: ${rows().join(" | ")}`);
-if (process.env.FM_LATE_KIND === "actionable") {
-  if (prompts.length !== 2 || !prompts[1].includes("late wake")) throw new Error(`late actionable close was not delivered: ${prompts.join(" | ")}`);
-} else if (prompts.length !== 1) {
-  throw new Error(`late non-actionable close sent an extra wake: ${prompts.join(" | ")}`);
+// The original follow-up was accepted but never consumed here, so a late
+// actionable close folds under it (one queued doorbell drains every row)
+// instead of stacking a second "Follow-up:" on the captain's screen; the
+// non-actionable close never sends one at all. Either way exactly one prompt.
+if (prompts.length !== 1) {
+  throw new Error(`late ${process.env.FM_LATE_KIND} close changed the prompt count: ${prompts.join(" | ")}`);
 }
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 await new Promise((resolve) => setTimeout(resolve, 80));
@@ -2464,31 +2466,37 @@ await waitFor(() => prompts.length === 1, "first wake delivered while main strea
 if (wakes("signal: streaming chain wake 1") !== 1) throw new Error(`wrong first wake: ${prompts.join(" | ")}`);
 await waitFor(() => arms() === 2, "successor after the streaming-time delivery");
 writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close\n");
-await waitFor(() => prompts.length === 2, "second wake delivered while main still streams");
-if (wakes("signal: streaming chain wake 2") !== 1) throw new Error(`wrong second wake: ${prompts.join(" | ")}`);
-await waitFor(() => arms() === 3, "successor after the second streaming-time delivery");
+// The first doorbell is accepted but not yet consumed, so the second close
+// FOLDS under it: one queued follow-up drains every durable row, and a second
+// would only stack another "Follow-up:" on the captain's screen. The successor
+// chain must still advance for the folded close.
+await waitFor(() => arms() === 3, "successor after the second (folded) streaming-time close");
+await new Promise((resolve) => setTimeout(resolve, 50));
+if (prompts.length !== 1) throw new Error(`second streaming-time close was not folded: ${prompts.join(" | ")}`);
 if (beforeAgentStarts !== 0) throw new Error(`streaming follow-ups raised before_agent_start ${beforeAgentStarts} times`);
 
-// The run reaches the first queued follow-up; the second is still queued when
-// the captain replaces the session, so only the second rides the handoff.
-consumeQueued(prompts[0]);
+// Nothing is consumed before the captain replaces the session, so BOTH records
+// (the carrier and the folded one) ride the handoff, neither marked delivered.
 await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
 const handoff = JSON.parse(readFileSync(handoffPath, "utf8"));
-if (handoff.pending.length !== 1 || handoff.pending[0].delivered || !handoff.pending[0].message.includes("signal: streaming chain wake 2")) {
-  throw new Error(`replacement handoff did not carry exactly the unconsumed wake: ${JSON.stringify(handoff)}`);
+const carried = handoff.pending.map((item) => item.message).join(" | ");
+if (handoff.pending.length !== 2 || handoff.pending.some((item) => item.delivered) || !carried.includes("wake 1") || !carried.includes("wake 2")) {
+  throw new Error(`replacement handoff did not carry both unconsumed records: ${JSON.stringify(handoff)}`);
 }
 streaming = false;
 const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=streaming-chain`);
 replacementMod.default(pi);
 await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
-await waitFor(() => prompts.length === 3, "replacement replay of the unconsumed wake");
-if (wakes("signal: streaming chain wake 2") !== 2 || wakes("signal: streaming chain wake 1") !== 1) {
+// An idle replacement consumes each replayed follow-up as it is sent, so
+// nothing folds here and both records are replayed and finished in turn.
+await waitFor(() => prompts.length === 3, "replacement replay of both unconsumed records");
+if (wakes("signal: streaming chain wake 1") !== 2 || wakes("signal: streaming chain wake 2") !== 1) {
   throw new Error(`replacement replayed the wrong wakes: ${prompts.join(" | ")}`);
 }
-if (beforeAgentStarts !== 1) throw new Error(`idle replay raised before_agent_start ${beforeAgentStarts} times`);
-await waitFor(() => arms() === 4, "replacement arm");
-await waitFor(() => !existsSync(handoffPath), "consumed replay clears its handoff record");
+if (beforeAgentStarts !== 2) throw new Error(`idle replay raised before_agent_start ${beforeAgentStarts} times`);
+await waitFor(() => arms() >= 4, "replacement arm");
+await waitFor(() => !existsSync(handoffPath), "consumed replays clear the handoff record");
 process.exit(0);
 EOF
 )

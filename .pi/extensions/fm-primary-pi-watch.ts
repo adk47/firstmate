@@ -77,9 +77,15 @@ type WatchToolRenderContext = {
   isPartial: boolean;
 };
 
+// One accepted-but-unconsumed main follow-up, plus every later actionable
+// close folded under it while it still sat in Pi's queue. A wake is a doorbell
+// ("drain the durable queue"), never the payload, and one drain presents every
+// queued row - so a second doorbell behind an unconsumed one is pure noise that
+// stacks up as "Follow-up:" rows on the captain's screen. Folding keeps one
+// queued doorbell per generation; consumption finishes every folded record.
 type UnconsumedWake = {
   content: string;
-  pending: PendingActionableClose;
+  pendings: PendingActionableClose[];
 };
 
 type SessionGeneration = {
@@ -521,7 +527,20 @@ export default function (pi: ExtensionAPI) {
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
-    if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
+    if (pending) {
+      // Coalesce: a doorbell Pi has accepted but main has not consumed yet
+      // already guarantees a drain, and that drain presents this close's row
+      // too. Fold this record under it instead of queueing another follow-up.
+      // A message carrying a typed failure detail is never folded: the drain
+      // shows queue rows, not the extension's repair text, so that text must
+      // reach main as its own follow-up.
+      const carrier = /watcher: FAILED/.test(message) ? undefined : [...owner.unconsumedWakes.values()].pop();
+      if (carrier) {
+        carrier.pendings.push(pending);
+        return generationIsLive(owner);
+      }
+      owner.unconsumedWakes.set(pending.token, { content, pendings: [pending] });
+    }
     try {
       await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch (error) {
@@ -540,15 +559,26 @@ export default function (pi: ExtensionAPI) {
     for (const [token, wake] of owner.unconsumedWakes) {
       if (wake.content !== text) continue;
       owner.unconsumedWakes.delete(token);
-      wake.pending.delivered = true;
-      try {
-        finishPendingActionable(owner, wake.pending);
-      } catch (error) {
-        surfaceCleanupFailure(owner, error);
-        schedulePendingCleanup(owner);
+      for (const pending of wake.pendings) {
+        pending.delivered = true;
+        try {
+          finishPendingActionable(owner, pending);
+        } catch (error) {
+          surfaceCleanupFailure(owner, error);
+          schedulePendingCleanup(owner);
+        }
       }
       return;
     }
+  }
+
+  // True while Pi holds an accepted follow-up that will finish this record on
+  // consumption - as the carrier or folded under one.
+  function unconsumedHolds(owner: SessionGeneration, token: string): boolean {
+    for (const wake of owner.unconsumedWakes.values()) {
+      if (wake.pendings.some((item) => item.token === token)) return true;
+    }
+    return false;
   }
 
   function confirmHandlingDelivery(recovery: { generation: string; watcherPid: string }): {
@@ -736,7 +766,7 @@ export default function (pi: ExtensionAPI) {
         // A record Pi has accepted but not consumed is neither redelivered
         // nor finished here: consumption finishes it, replacement replays it.
         const pending = owner.pendingActionables.find(
-          (item) => !item.delivered && !owner.unconsumedWakes.has(item.token),
+          (item) => !item.delivered && !unconsumedHolds(owner, item.token),
         );
         if (!pending) break;
         const existingClaim = replacementCoordinator.deliveries.get(pending.token);
@@ -779,7 +809,7 @@ export default function (pi: ExtensionAPI) {
             releaseClaim();
             return;
           }
-          const awaitingConsumption = owner.unconsumedWakes.has(pending.token);
+          const awaitingConsumption = unconsumedHolds(owner, pending.token);
           if (awaitingConsumption && !generationIsLive(owner)) {
             // Pi accepted the follow-up, then the session was replaced before
             // this continuation ran: the shutdown persisted the still-pending
