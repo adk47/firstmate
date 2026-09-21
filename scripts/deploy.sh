@@ -2338,6 +2338,150 @@ done
 # know the deploy actually works — a half-failed deploy would leave a
 # stale baseline that masks real drift on the next run.
 
+# ─── Caddy delivery + the loopback-bind ordering gate ───────────────────────
+#
+# WHY THIS EXISTS. `gateway.bind: "loopback"` is only safe while Caddy is the
+# thing listening publicly and reverse-proxying to localhost. Those two facts
+# live in DIFFERENT places -- the bind in openclaw-*.json (which deploy.sh
+# syncs, just below) and the reverse proxy in /etc/caddy/Caddyfile (which
+# NOTHING deployed until this block). So "Caddy first, then the loopback bind"
+# was enforced only by whoever read a PR description, while the reverse order
+# shipped automatically on the next scheduled deploy and took the Control UI
+# dark.
+#
+# That asymmetry is how the 2026-09-21 exposure survived ~5 months: on
+# 2026-04-28 the live Caddyfile became a 2-line
+# `respond "MINIMAL_RESTART_OK" 200` stub, and because the gateway was ALSO
+# bound to 0.0.0.0, nothing broke visibly -- traffic bypassed basic_auth and
+# hit :18789 directly. Untracked infra config plus a permissive bind hid an
+# authentication bypass.
+#
+# Ordering inside the function is the point: it INSTALLS before it GATES, so a
+# single deploy carrying both the Caddyfile and the loopback bind satisfies the
+# order by construction. Both halves are no-ops until the repo carries the
+# Caddyfile AND a profile asks for loopback, so this lands safely ahead of the
+# bind change instead of racing it.
+#
+# Seams exist so the block is unit testable; a gate no test can falsify is how
+# the last one rotted. `caddy_reload` is a FUNCTION, not a command in a
+# variable: the pre-commit indirection gate refuses a command word it cannot
+# read statically, and it is right to -- `cmd=rsync; $cmd --delete` is exactly
+# what that gate exists to catch. Tests redefine this function instead.
+caddy_reload() { systemctl reload caddy; }
+
+caddy_deliver_and_gate_bind() {
+  local deploy_path="$1" live="$2"
+  local repo_file="$deploy_path/infra/node-8/Caddyfile"
+
+  # (a) DELIVER first.
+  if [ -f "$repo_file" ]; then
+    if ! command -v caddy >/dev/null 2>&1; then
+      fail "infra/node-8/Caddyfile is in the repo but caddy is not installed — refusing to sync a config whose public entry point is missing."
+    fi
+    if cmp -s "$repo_file" "$live"; then
+      log "  Caddy: $live already matches the repo."
+    else
+      # Validate the REPO file before it may replace a working live one.
+      if ! caddy validate --config "$repo_file" --adapter caddyfile >/dev/null 2>&1; then
+        fail "caddy validate rejected infra/node-8/Caddyfile — refusing to install it."
+      fi
+      local backup=""
+      if [ -f "$live" ]; then
+        backup="${live}.pre-deploy-$(date -u +%Y%m%dT%H%M%SZ)"
+        cp -a "$live" "$backup"
+      fi
+      install -m 644 "$repo_file" "$live" \
+        || fail "could not install infra/node-8/Caddyfile to $live"
+      # A failed reload must ROLL THE FILE BACK. Otherwise the candidate is
+      # already installed, so the NEXT scheduled run sees `cmp -s` succeed,
+      # skips the reload, and the bind gate then reads routing out of a file
+      # Caddy never loaded -- permitting the loopback sync while the old stub
+      # is still being served. The retry this block exists to make safe would
+      # become the outage. (QA finding on #994.)
+      if ! caddy_reload; then
+        # FAIL CLOSED, in every branch. The candidate is already installed, so
+        # the next run must not be able to reach the `cmp -s` equality
+        # shortcut and skip the reload -- that is how a failed reload became a
+        # false success. Two branches, both of which an earlier cut got wrong:
+        #   - no predecessor  -> the installed candidate must be REMOVED
+        #   - restore fails   -> removing $live is the only fail-closed state
+        # An ignored restore failure left the candidate in place, which the
+        # reviewer reproduced adversarially. (QA findings on #994.)
+        if [ -n "$backup" ] && install -m 644 "$backup" "$live"; then
+          caddy_reload || true   # best effort: return Caddy to known-good
+          fail "caddy reload failed after installing the new Caddyfile — restored the previous file so the next run retries the install instead of trusting byte equality."
+        fi
+        rm -f "$live"
+        fail "caddy reload failed after installing the new Caddyfile and there was no restorable predecessor — REMOVED $live so the next run cannot skip the reload on byte equality. Caddy is still serving its previously loaded config; install a known-good Caddyfile before the next deploy."
+      fi
+      log "  Caddy: installed repo Caddyfile and reloaded (previous kept as .pre-deploy-*)."
+    fi
+  else
+    log "  Caddy: no infra/node-8/Caddyfile in the repo — skipping (nothing to deliver)."
+  fi
+
+  # (b) GATE second: a loopback bind requires the REVIEWED Caddyfile to be the
+  # one Caddy is serving.
+  #
+  # This deliberately does NOT analyse the config's routing. Three review
+  # rounds produced six distinct ways a Caddyfile can adapt cleanly and still
+  # not serve "/" to the gateway: a proxy in another site block, in an
+  # unimported snippet, scoped to a narrow path, placed after a terminal
+  # `respond` handler, or pointed at a non-loopback host that merely ends in
+  # the right port. Each fix produced another evasion, which is evidence the
+  # CONTRACT was wrong rather than the implementation.
+  #
+  # So the contract is now the narrow, unevadable one: `bind: loopback` is
+  # permitted only when /etc/caddy/Caddyfile is byte-identical to the repo's
+  # infra/node-8/Caddyfile. Whether THAT file routes "/" correctly is a code
+  # review question about a tracked, human-reviewed artifact -- not something
+  # this script should infer at 04:00 from an arbitrary file on disk. It also
+  # closes a case none of the routing checks covered: shipping loopback while
+  # Caddy serves some hand-edited config nobody reviewed.
+  #
+  # Delivery ran above, so on a correct deploy the files already match. A
+  # mismatch here means either no Caddyfile in the repo, or a reload that did
+  # not take -- both of which must block the bind.
+  local prof cfg mode
+  local reloaded_for_gate=0
+  for prof in main edge; do
+    case "$prof" in
+      main) cfg="$deploy_path/openclaw-main.json" ;;
+      edge) cfg="$deploy_path/openclaw-edge.json" ;;
+    esac
+    [ -f "$cfg" ] || continue
+    # Unreadable config is NOT a pass: it is the one state where we cannot
+    # tell whether a loopback bind is about to ship.
+    mode=$(jq -er '.gateway.bind // "unset"' "$cfg" 2>/dev/null) \
+      || fail "could not read gateway.bind from $cfg — refusing to sync configs blind while the bind gate cannot be evaluated."
+    [ "$mode" = "loopback" ] || continue
+    if [ ! -f "$repo_file" ]; then
+      fail "$prof requests gateway.bind=loopback but the repo carries no infra/node-8/Caddyfile — there is no reviewed public entry point to bind behind."
+    fi
+    if ! cmp -s "$repo_file" "$live"; then
+      fail "$prof requests gateway.bind=loopback but $live is not byte-identical to the repo's infra/node-8/Caddyfile — Caddy is serving something that was not reviewed, or the reload did not take. Refusing to take the surface dark."
+    fi
+    # Byte equality on DISK does not prove the running process LOADED it. If
+    # someone hand-copies the repo bytes over $live while Caddy still serves
+    # the prior stub, the delivery step above skips the reload on `cmp -s`,
+    # this identity check then compares the same two on-disk files and passes,
+    # and loopback ships against a stale in-memory config -- the exact
+    # file-versus-process gap the identity contract was meant to escape.
+    # So force ONE reload before clearing any loopback gate, even when the
+    # files already match, and fail closed if it does not take. Idempotence
+    # for the ordinary case is preserved: this runs only when a profile
+    # actually requests loopback. (QA finding on #994.)
+    if [ "$reloaded_for_gate" -eq 0 ]; then
+      caddy_reload || fail "$prof requests gateway.bind=loopback and $live matches the repo, but 'caddy reload' failed — cannot prove Caddy is serving the reviewed config, so refusing to take the surface dark."
+      reloaded_for_gate=1
+      log "  Bind gate: reloaded Caddy so the reviewed file is proven loaded, not merely on disk."
+    fi
+    log "  Bind gate: $prof loopback is safe — Caddy is serving the reviewed repo Caddyfile."
+  done
+}
+
+caddy_deliver_and_gate_bind "$DEPLOY_PATH" "${CADDY_LIVE_FILE:-/etc/caddy/Caddyfile}"
+
 # Sync per-profile configs to profile state dirs.
 # Preserves `.mcp.servers` from the live file across deploys so
 # server-side `openclaw mcp set` registrations (e.g. NocoDB, which
