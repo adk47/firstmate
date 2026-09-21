@@ -27,13 +27,22 @@ Reconcile a subscription downgrade credit before refunding an accidental upgrade
 
 9. Report the proposed and completed states separately, naming every write that a read-back confirmed, including a partial write and its compensation. Say that no payment or subscription change has been made only when no write succeeded; finish only when the balance, every identified charge’s refund, and the subscription state all match the resolution.
 
+## Roster-seat proration branch
+
+When an accidental profile-seat swap increases a graduated subscription quantity, reconstruct the intended roster before moving money:
+
+1. Read the active roster seats, their update timestamps, the subscription quantity, and the charge invoice. Confirm the invoice is a quantity-change proration and identify the customer’s intended replacement from the seat transition evidence. Preserve the previously active seat and the newly activated replacement; pause only the extra seat whose later reactivation created the temporary quantity increase.
+2. Apply the roster correction through the gated team-seat update, read back the named active and paused profiles, then run the workspace subscription-sync endpoint. A successful seat update request is not proof that billing changed; finish this step only when the product seat limit and payment subscription quantity both equal the intended count.
+3. Re-read the customer balance and newest correction invoice after subscription sync. The sync can mint a new live proration credit, so use that post-sync value—not the pre-correction balance—for reconciliation. Neutralize the live concession before refunding the original proration charge, verify the live concession is zero, then issue and verify the refund with the authorized keep-subscription and prior-refund waivers when applicable.
+4. Tell the customer which profiles remain active, which profile was paused, that the subscription remains active, and the verified refund amount; add the same concrete resolution to the internal support note.
+
 ## Paid-month restoration branch
 
 When the customer paid for a monthly term, then converted that same subscription to annual, and the annual refund requires canceling the mutated subscription, restore only the retained monthly entitlement:
 
 1. Read the original monthly invoices and use their line-item period end as the access cutoff; do not estimate a month from the current date.
-2. Create a new subscription on the original monthly price and paid quantity, set `trial_end` and `cancel_at` to that exact cutoff, retain the workspace/user/plan metadata, and use an idempotency key. This represents already-paid access, creates no renewal, and must go through the guarded Stripe-write path with a pre-write audit entry.
-3. Read back the new subscription, its initial invoice, recent charges, and the product user record. Finish only when the monthly plan and quantity are present, the subscription is active-like through the cutoff, `cancel_at` equals the cutoff, the invoice amount due and paid are zero, no charge was created, and the product entitlement reflects the monthly plan. Record the verified result in the audit trail.
+2. Create a new subscription on the original monthly price and paid quantity, set `trial_end` to that exact cutoff, retain the workspace/user/plan metadata and applicable standing discount, and use an idempotency key. If the customer should receive only the retained paid access, also set `cancel_at` to the cutoff so no renewal occurs. If the customer explicitly wants the monthly plan restored as recurring, omit `cancel_at`; the trial bridges the already-paid term and monthly billing resumes at the cutoff. Run the write through the guarded Stripe path with a pre-write audit entry.
+3. Read back the new subscription, its initial invoice, recent charges, and the product user record. Finish only when the monthly plan and quantity are present, the subscription is active-like through the exact cutoff, the initial invoice amount due and paid are zero, no charge was created, and the product entitlement reflects the monthly plan. For access-only restoration, verify `cancel_at` equals the cutoff. For recurring restoration, verify `cancel_at_period_end=false`, preview the next invoice, and confirm its period begins at the cutoff and its total matches the monthly plan after retained discounts. Record the verified result in the audit trail.
 
 ## Verification checklist
 
