@@ -1624,7 +1624,7 @@ await new Promise((resolve) => setTimeout(resolve, 50));
 if (rows().length !== 3) throw new Error(`late close did not restore one successor: ${rows().join(" | ")}`);
 // The original follow-up was accepted but never consumed here, so a late
 // actionable close folds under it (one queued doorbell drains every row)
-// instead of stacking a second "Follow-up:" on the captain's screen; the
+// instead of stacking a second "Follow-up:" on the screen of the captain; the
 // non-actionable close never sends one at all. Either way exactly one prompt.
 if (prompts.length !== 1) {
   throw new Error(`late ${process.env.FM_LATE_KIND} close changed the prompt count: ${prompts.join(" | ")}`);
@@ -2466,7 +2466,7 @@ await waitFor(() => arms() === 2, "successor after the streaming-time delivery")
 writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close\n");
 // The first doorbell is accepted but not yet consumed, so the second close
 // FOLDS under it: one queued follow-up drains every durable row, and a second
-// would only stack another "Follow-up:" on the captain's screen. The successor
+// would only stack another "Follow-up:" on the screen of the captain. The successor
 // chain must still advance for the folded close; its handling confirmation
 // runs synchronously right before the fold, so that row marks the delivery.
 await waitFor(
@@ -2561,14 +2561,14 @@ const pi = {
 // The running run reaching a queued follow-up: Pi emits the user message.
 const consumeQueued = (message) =>
   handlers.get("message_start")?.({ message: { role: "user", content: [{ type: "text", text: message }] } }, {});
-// Main's run settling: no retry, compaction, or queued continuation will still
+// The run of main settling: no retry, compaction, or queued continuation will still
 // drain the follow-up queue, so a follow-up Pi never emitted a message_start
 // for was dropped from the queue.
 const settleRun = () => handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
 const logRows = () => existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n") : [];
 const arms = () => logRows().filter((row) => row.startsWith("arm=")).length;
 // Handling confirmation for successor N runs synchronously right before the
-// wake is sent or folded, so its row is the earliest sign a close's delivery
+// wake is sent or folded, so its row is the earliest sign the delivery of a close
 // has settled.
 const confirmations = (successor) => logRows().filter((row) => row === `confirmed=dropped-${successor}`).length;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -2799,7 +2799,7 @@ const consumeQueued = (message) =>
 const logRows = () => existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n") : [];
 const arms = () => logRows().filter((row) => row.startsWith("arm=")).length;
 // Handling confirmation for successor N runs synchronously right before the
-// wake is sent or folded, so its row is the earliest sign a close's delivery
+// wake is sent or folded, so its row is the earliest sign the delivery of a close
 // has settled.
 const confirmations = (successor) => logRows().filter((row) => row === `confirmed=failed-${successor}`).length;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -2820,7 +2820,7 @@ writeFileSync(`${process.env.FM_TRIGGER_FILE}.1`, "close\n");
 await waitFor(() => prompts.length === 1, "carrier delivered while main streams");
 if (confirmations(2) !== 1) throw new Error(`carrier was sent before its successor confirmed: ${logRows().join(" | ")}`);
 
-// The second close's handling confirmation is rejected, so its wake carries
+// The handling confirmation of the second close is rejected, so its wake carries
 // typed failure detail: it must reach main as its own follow-up even though
 // the first carrier is still unconsumed.
 writeFileSync(process.env.FM_CONFIRM_REJECT_FILE, "reject\n");
