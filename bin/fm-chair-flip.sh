@@ -314,7 +314,7 @@ MEMEOF
     printf '## Inbox\n\n'
     for line in "$STATE_DIR"/*.inbox/*.msg; do
       [ -f "$line" ] || continue
-      printf '- %s\n' "$line"
+      printf -- '- %s\n' "$line"
     done
   } > "$out"
   printf '%s\n' "$out"

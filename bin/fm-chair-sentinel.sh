@@ -136,6 +136,7 @@ flip_to() {  # <to-pi-fable|to-grok>
 
 run_tick() {
   local sensor status fable grok chair terminal decision action alarm_names flip_out flip_code source unknown_ticks
+  local fable_runway fable_pct fable_reset_h pre_alarm alarm_text
   local pool8317 ccflare chair_source bound_state chair_pid cached cached_pid cached_source
   sensor=$(sensor_line)
   status=$(chair_line)
@@ -148,6 +149,9 @@ run_tick() {
   chair_pid=$(extract_field "$status" pid)
   terminal=$(extract_field "$status" terminal)
   alarm_names=$(extract_field "$sensor" names)
+  fable_runway=$(extract_field "$sensor" fable_runway)
+  fable_pct=$(extract_field "$sensor" fable_pct)
+  fable_reset_h=$(extract_field "$sensor" fable_reset_h)
 
   mkdir -p "$STATE_DIR" 2>/dev/null || true
   unknown_ticks=0
@@ -211,10 +215,37 @@ run_tick() {
     decision=no_tank
   fi
 
+  # Pre-alarm: Fable is thin (low AND the refill is further away than the tank
+  # lasts) while Grok is already red, so there is no fallback tank and no relief
+  # coming. The no_tank state below only fires once Fable is already gone; this
+  # buys lead time instead. The Grok top-up is web-only - the CLI returns 402
+  # Payment Required and cannot buy credits - and buying does not always clear
+  # the weekly wall, so the text says to verify rather than assume it worked.
+  pre_alarm=''
+  case "${fable_runway:-unknown}" in
+    thin|dry)
+      if [ "$grok" = red ]; then
+        pre_alarm=$(printf 'Captain, firstmate is one tank from dark: Fable=%s (%s%% left, resets in %sh) and SuperGrok=%s, so there is no fallback. Top up Grok now, before Fable runs out. The Grok CLI cannot buy credits (it returns 402 Payment Required); it is web-only at grok.com -> Settings -> Usage, from $5. Note: buying extra usage does not always clear the weekly wall, so verify Grok actually serves afterwards.' \
+          "$fable_runway" "${fable_pct:--}" "${fable_reset_h:--}" "$grok")
+      fi
+      ;;
+  esac
+
+  alarm_text=''
   if [ "$decision" = no_tank ]; then
-    printf 'no tank: fable=%s grok=%s chair=%s\n' "$fable" "$grok" "$chair" > "$ALARM_FILE" 2>/dev/null || true
-    printf 'Captain, firstmate has no tank: Fable=%s, SuperGrok=%s. better-ccflare accounts needing a human login: %s\n' \
-      "$fable" "$grok" "${alarm_names:-unknown}"
+    alarm_text=$(printf 'Captain, firstmate has no tank: Fable=%s, SuperGrok=%s. better-ccflare accounts needing a human login: %s' \
+      "$fable" "$grok" "${alarm_names:-unknown}")
+  elif [ -n "$pre_alarm" ]; then
+    alarm_text="$pre_alarm"
+  fi
+
+  # This ticks every 300s; repeating an unchanged alarm is noise, so emit only
+  # when the text actually changes. The file stays a latch for the panel below.
+  if [ -n "$alarm_text" ]; then
+    if [ "$(cat -- "$ALARM_FILE" 2>/dev/null)" != "$alarm_text" ]; then
+      printf '%s\n' "$alarm_text" > "$ALARM_FILE" 2>/dev/null || true
+      printf '%s\n' "$alarm_text"
+    fi
   else
     rm -f "$ALARM_FILE" 2>/dev/null || true
   fi

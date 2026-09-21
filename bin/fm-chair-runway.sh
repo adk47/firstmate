@@ -26,6 +26,11 @@
 #              cannot be read at all.
 #   grok       SuperGrok's remaining percent from quota-axi, green above the 10%
 #              safety floor, red at or below it.
+#   fablepct   the bound Claude account's remaining Fable percent AND the hours
+#              until that window resets, from quota-axi --provider claude. A low
+#              percent is only a pre-alarm when the refill is far away: 8% with
+#              43h to reset means the tank empties first, 8% with 20 minutes to
+#              reset means it is about to refill. Reported as ok|thin|dry.
 #
 # fable is the OR of the two Fable sources: green if EITHER 8317 or 8080 is
 # green, red only when both are red, and unknown otherwise. Reading only the 8080
@@ -46,6 +51,9 @@
 #   FM_CHAIR_CCFLARE_ACCOUNTS_JSON file holding a GET /api/accounts body
 #   FM_CHAIR_GROK_JSON           file holding a quota-axi --provider grok JSON snapshot
 #   FM_CHAIR_GROK_FLOOR_PCT      Grok safety floor percent (default 10)
+#   FM_CHAIR_CLAUDE_JSON         file holding a quota-axi --provider claude JSON snapshot
+#   FM_CHAIR_CLAUDE_FLOOR_PCT    Fable "thin" threshold percent (default 15)
+#   FM_CHAIR_CLAUDE_DRY_HOURS    how distant a reset must be to count as thin (default 12)
 #   FM_CHAIR_PROBE_CMD           override the probe: called as <url> <model> <timeout>,
 #                                prints the HTTP status code (the key is never passed)
 set -u
@@ -72,6 +80,8 @@ POOL8317_MODEL=${FM_CHAIR_8317_PROBE_MODEL:-claude-fable-5-1}
 POOL8317_TIMEOUT=${FM_CHAIR_8317_PROBE_TIMEOUT:-20}
 CCFLARE_URL=${FM_CHAIR_CCFLARE_URL:-http://127.0.0.1:8080}
 GROK_FLOOR_PCT=${FM_CHAIR_GROK_FLOOR_PCT:-10}
+CLAUDE_FLOOR_PCT=${FM_CHAIR_CLAUDE_FLOOR_PCT:-15}
+CLAUDE_DRY_HOURS=${FM_CHAIR_CLAUDE_DRY_HOURS:-12}
 
 valid_state() {
   case "$1" in green|red|unknown) return 0 ;; *) return 1 ;; esac
@@ -169,6 +179,58 @@ read_grok() {
   esac
 }
 
+# --- Fable runway (the bound Claude account) --------------------------------
+
+read_fable_runway() {
+  # echoes: <ok|thin|dry|unknown> <pct> <hours_to_reset>
+  #
+  # `percentRemaining` alone cannot tell a tank that is about to refill from one
+  # that is about to run out - the reset deadline is what separates them. `thin`
+  # is therefore a PAIR: at or below the floor AND a reset further away than the
+  # dry-hours horizon, i.e. the tank empties before the refill arrives. `dry` is
+  # zero percent. An unreadable reset degrades to ok for a non-zero percent
+  # rather than claiming a distance that was never measured.
+  local json pct reset hrs
+  if [ -n "${FM_CHAIR_CLAUDE_JSON:-}" ]; then
+    json=$(cat -- "$FM_CHAIR_CLAUDE_JSON" 2>/dev/null) || json=''
+  else
+    json=$(quota-axi --provider claude --json --no-credential-refresh 2>/dev/null </dev/null) || json=''
+  fi
+  [ -n "$json" ] || { printf 'unknown\t-\t-\n'; return; }
+  printf '%s' "$json" | jq -e 'type == "object"' >/dev/null 2>&1 || { printf 'unknown\t-\t-\n'; return; }
+  pct=$(printf '%s' "$json" | jq -r '([.providers[]? | select(.provider=="claude")][0].windows // [] | map(select(.id=="model:fable")) | first).percentRemaining // empty' 2>/dev/null)
+  reset=$(printf '%s' "$json" | jq -r '([.providers[]? | select(.provider=="claude")][0].windows // [] | map(select(.id=="model:fable")) | first).resetsAt // empty' 2>/dev/null)
+  hrs=-
+  case "$reset" in
+    ''|null) : ;;
+    *)
+      hrs=$(python3 -c '
+import sys, datetime
+try:
+    t = datetime.datetime.fromisoformat(sys.argv[1])
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=datetime.timezone.utc)
+    print("%.1f" % ((t - datetime.datetime.now(datetime.timezone.utc)).total_seconds() / 3600.0))
+except Exception:
+    print("-")
+' "$reset" 2>/dev/null) || hrs=-
+      ;;
+  esac
+  case "$pct" in
+    ''|*[!0-9.]*) printf 'unknown\t-\t%s\n' "$hrs" ;;
+    *)
+      if awk -v p="$pct" 'BEGIN { exit !(p+0 <= 0) }'; then
+        printf 'dry\t%s\t%s\n' "$pct" "$hrs"
+      elif awk -v p="$pct" -v f="$CLAUDE_FLOOR_PCT" 'BEGIN { exit !(p+0 <= f) }' \
+        && awk -v h="$hrs" -v d="$CLAUDE_DRY_HOURS" 'BEGIN { exit !(h+0 > d) }'; then
+        printf 'thin\t%s\t%s\n' "$pct" "$hrs"
+      else
+        printf 'ok\t%s\t%s\n' "$pct" "$hrs"
+      fi
+      ;;
+  esac
+}
+
 # --- combine ----------------------------------------------------------------
 
 IFS=$'\t' read -r P8317 P8317_NOTE <<EOF
@@ -180,10 +242,14 @@ EOF
 IFS=$'\t' read -r GROK GROK_PCT <<EOF
 $(read_grok)
 EOF
+IFS=$'\t' read -r FABLE_RUNWAY FABLE_PCT FABLE_RESET_H <<EOF
+$(read_fable_runway)
+EOF
 
 valid_state "$P8317" || P8317=unknown
 valid_state "$CCF" || CCF=unknown
 valid_state "$GROK" || GROK=unknown
+case "$FABLE_RUNWAY" in ok|thin|dry|unknown) ;; *) FABLE_RUNWAY=unknown ;; esac
 
 FABLE=unknown
 if [ "$P8317" = green ] || [ "$CCF" = green ]; then
@@ -200,7 +266,8 @@ else
   REASON=fable_unmeasured
 fi
 
-printf 'chair-runway: fable=%s pool8317=%s probe=%s ccflare=%s routable=%s/%s needs_reauth=%s names=%s grok=%s grok_pct=%s reason=%s\n' \
+printf 'chair-runway: fable=%s pool8317=%s probe=%s ccflare=%s routable=%s/%s needs_reauth=%s names=%s grok=%s grok_pct=%s fable_runway=%s fable_pct=%s fable_reset_h=%s reason=%s\n' \
   "$FABLE" "$P8317" "$P8317_NOTE" "$CCF" "$CCF_ROUTABLE" "$CCF_CONFIGURED" \
-  "$CCF_REAUTH" "$CCF_NAMES" "$GROK" "$GROK_PCT" "$REASON"
+  "$CCF_REAUTH" "$CCF_NAMES" "$GROK" "$GROK_PCT" \
+  "$FABLE_RUNWAY" "$FABLE_PCT" "$FABLE_RESET_H" "$REASON"
 exit 0

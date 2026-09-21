@@ -24,6 +24,7 @@ printf 'test-key\n' > "$KEY_FILE"
 HEALTH="$TMP_ROOT/health.json"
 ACCOUNTS="$TMP_ROOT/accounts.json"
 GROK="$TMP_ROOT/grok.json"
+CLAUDE="$TMP_ROOT/claude.json"
 
 write_health() {  # <routable> <configured>
   printf '{"pool":{"routable":%s,"configured":%s}}\n' "$1" "$2" > "$HEALTH"
@@ -45,6 +46,17 @@ write_grok() {  # <percent>
 EOF
 }
 
+write_claude() {  # <fable-percent> <hours-to-reset>
+  local reset
+  reset=$(python3 -c "
+import datetime
+print((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=float('$2'))).isoformat())
+" 2>/dev/null) || reset=null
+  cat > "$CLAUDE" <<EOF
+{"providers":[{"provider":"claude","windows":[{"id":"five_hour","percentRemaining":100,"resetsAt":null},{"id":"seven_day","percentRemaining":0,"resetsAt":null},{"id":"model:fable","percentRemaining":$1,"resetsAt":"$reset"}]}]}
+EOF
+}
+
 run_runway() {
   FM_CHAIR_8317_KEY_FILE="$KEY_FILE" \
   FM_CHAIR_PROBE_CMD="$PROBE" \
@@ -52,6 +64,7 @@ run_runway() {
   FM_CHAIR_CCFLARE_HEALTH_JSON="$HEALTH" \
   FM_CHAIR_CCFLARE_ACCOUNTS_JSON="$ACCOUNTS" \
   FM_CHAIR_GROK_JSON="$GROK" \
+  FM_CHAIR_CLAUDE_JSON="$CLAUDE" \
   bash "$SCRIPT"
 }
 
@@ -59,6 +72,7 @@ base_fixtures() {
   write_health 0 11
   write_accounts 0
   write_grok 50
+  write_claude 40 50
 }
 
 # --- OR rule ----------------------------------------------------------------
@@ -121,9 +135,42 @@ write_health 3 11
 write_grok 50
 out=$(FM_CHAIR_8317_KEY_FILE="$TMP_ROOT/no-such-key" FM_CHAIR_PROBE_CMD="$PROBE" FM_CHAIR_CCFLARE_FIXTURE=1 \
   FM_CHAIR_CCFLARE_HEALTH_JSON="$HEALTH" FM_CHAIR_CCFLARE_ACCOUNTS_JSON="$ACCOUNTS" FM_CHAIR_GROK_JSON="$GROK" \
+  FM_CHAIR_CLAUDE_JSON="$CLAUDE" \
   FM_TEST_PROBE_CODE=200 bash "$SCRIPT")
 assert_contains "$out" "pool8317=unknown" "a missing pool key leaves 8317 unknown"
 assert_contains "$out" "probe=no_key" "the reason names the missing key"
 pass "missing 8317 key -> unknown, not green"
+
+# --- fable runway -----------------------------------------------------------
+# A low percent is NOT the signal on its own - the distance to the reset is what
+# separates "about to run out" from "about to refill".
+
+write_health 3 11
+write_grok 50
+write_claude 40 50
+out=$(FM_TEST_PROBE_CODE=200 run_runway)
+assert_contains "$out" "fable_runway=ok" "plenty left is ok"
+assert_contains "$out" "fable_pct=40" "fable percent reported"
+
+write_claude 8 43
+out=$(FM_TEST_PROBE_CODE=200 run_runway)
+assert_contains "$out" "fable_runway=thin" "low percent with a distant reset is thin"
+assert_contains "$out" "fable_reset_h=43" "hours to reset reported"
+
+write_claude 8 1
+out=$(FM_TEST_PROBE_CODE=200 run_runway)
+assert_contains "$out" "fable_runway=ok" "low percent with a near reset is not thin"
+
+write_claude 0 43
+out=$(FM_TEST_PROBE_CODE=200 run_runway)
+assert_contains "$out" "fable_runway=dry" "zero percent is dry"
+pass "fable runway: the percent alone is not the pre-alarm, the reset distance is"
+
+# A claude snapshot that cannot be read must degrade to unknown, never thin.
+write_claude 8 43
+printf 'not json\n' > "$CLAUDE"
+out=$(FM_TEST_PROBE_CODE=200 run_runway)
+assert_contains "$out" "fable_runway=unknown" "an unreadable claude snapshot is unknown"
+pass "unreadable fable snapshot is never a verdict"
 
 printf 'fm-chair-runway tests passed\n'
