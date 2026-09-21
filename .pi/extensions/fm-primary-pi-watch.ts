@@ -23,9 +23,11 @@
 // replacement handoff.
 // While a follow-up is accepted but unconsumed, a later actionable close folds
 // under it instead of queueing a second follow-up: a wake is only a doorbell
-// for one drain that presents every queued row. Pi drains every queued
-// follow-up before agent_end, so a follow-up still unconsumed once main's turn
-// has ended was dropped from the queue (Escape, dequeue) and will never be
+// for one drain that presents every queued row. Pi emits agent_settled only
+// once a run has fully settled - no automatic retry, compaction, or queued
+// continuation will still drain the follow-up queue (an error or abort emits
+// agent_end before any of those) - so a follow-up still unconsumed at
+// agent_settled was dropped from the queue (Escape, dequeue) and will never be
 // consumed; after a short grace (FM_PI_WAKE_FOLD_GRACE_MS) the extension
 // releases it without finishing its records, and the pipeline redelivers them
 // as one fresh follow-up.
@@ -113,7 +115,7 @@ type SessionGeneration = {
   // replacement began reads it to tell a main-queued wake (replayed) from a
   // branch-handled one (finished).
   unconsumedWakes: Map<string, UnconsumedWake>;
-  // Armed at agent_end over the follow-ups still unconsumed then; releases
+  // Armed at agent_settled over the follow-ups still unconsumed then; releases
   // whichever are still unconsumed when it fires so they are redelivered.
   wakeReleaseTimer: ReturnType<typeof setTimeout> | null;
   // A verified successor's failure close that arrived while the pipeline was
@@ -596,11 +598,13 @@ export default function (pi: ExtensionAPI) {
     return false;
   }
 
-  // Main's turn ended. Pi drained its follow-up queue before agent_end, so a
-  // wake still unconsumed after the grace was dropped from that queue and
-  // would otherwise hold every close folded under it silent for the rest of
-  // the generation. Release it without finishing its records: the pipeline
-  // then redelivers the first one as a fresh doorbell and folds the rest.
+  // Main's run settled: no retry, compaction, or queued continuation will
+  // still drain the follow-up queue (agent_end alone is emitted before those
+  // on an error or abort), so a wake still unconsumed after the grace was
+  // dropped from that queue and would otherwise hold every close folded under
+  // it silent for the rest of the generation. Release it without finishing
+  // its records: the pipeline then redelivers the first one as a fresh
+  // doorbell and folds the rest.
   function scheduleDroppedWakeRelease(owner: SessionGeneration): void {
     if (owner.wakeReleaseTimer) clearTimeout(owner.wakeReleaseTimer);
     owner.wakeReleaseTimer = null;
@@ -1164,7 +1168,7 @@ export default function (pi: ExtensionAPI) {
     if (event.message.role !== "user") return;
     consumeWake(generation, userMessageText(event.message.content));
   });
-  pi.on?.("agent_end", () => {
+  pi.on?.("agent_settled", () => {
     scheduleDroppedWakeRelease(generation);
   });
 

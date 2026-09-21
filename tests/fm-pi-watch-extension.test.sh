@@ -2508,10 +2508,10 @@ EOF
 }
 
 # A queued follow-up can leave Pi's queue without ever being consumed: Escape
-# or the dequeue key moves it into the editor and the run ends on agent_end
-# without draining it. A carrier dropped that way must not hold every later
-# close folded under it silent for the rest of the generation: once main's
-# turn ends and the grace passes, the extension releases it and redelivers one
+# or the dequeue key moves it into the editor and the run settles without
+# draining it. A carrier dropped that way must not hold every later close
+# folded under it silent for the rest of the generation: once main's run
+# settles and the grace passes, the extension releases it and redelivers one
 # fresh doorbell carrying every record. A carrier consumed inside the grace is
 # finished with everything folded under it and is never redelivered.
 test_pi_dropped_carrier_is_released_after_the_turn() {
@@ -2561,9 +2561,10 @@ const pi = {
 // The running run reaching a queued follow-up: Pi emits the user message.
 const consumeQueued = (message) =>
   handlers.get("message_start")?.({ message: { role: "user", content: [{ type: "text", text: message }] } }, {});
-// Main's turn ending. Pi drains its follow-up queue before this event, so a
-// follow-up it never emitted a message_start for was dropped from the queue.
-const endTurn = () => handlers.get("agent_end")?.({ type: "agent_end", messages: [] }, {});
+// Main's run settling: no retry, compaction, or queued continuation will still
+// drain the follow-up queue, so a follow-up Pi never emitted a message_start
+// for was dropped from the queue.
+const settleRun = () => handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
 const logRows = () => existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n") : [];
 const arms = () => logRows().filter((row) => row.startsWith("arm=")).length;
 // Handling confirmation for successor N runs synchronously right before the
@@ -2594,9 +2595,9 @@ writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close\n");
 await waitFor(() => confirmations(3) === 1, "second close delivered through its successor");
 if (arms() !== 3 || prompts.length !== 1) throw new Error(`second close was not folded: ${prompts.join(" | ")}`);
 
-// The turn ends and the run consumes the carrier inside the grace: the release
-// is a no-op, both records finish, and nothing is redelivered.
-endTurn();
+// The run settles and consumes the carrier inside the grace: the release is a
+// no-op, both records finish, and nothing is redelivered.
+settleRun();
 consumeQueued(prompts[0]);
 await sleep(grace * 2);
 if (prompts.length !== 1) throw new Error(`consumed carrier was redelivered: ${prompts.join(" | ")}`);
@@ -2610,11 +2611,11 @@ writeFileSync(`${process.env.FM_TRIGGER_FILE}.4`, "close\n");
 await waitFor(() => confirmations(5) === 1, "fourth close delivered through its successor");
 if (arms() !== 5 || prompts.length !== 2) throw new Error(`fourth close was not folded: ${prompts.join(" | ")}`);
 
-// The turn ends and the carrier is never consumed (the captain dequeued it).
+// The run settles and the carrier is never consumed (the captain dequeued it).
 // Nothing moves inside the grace; after it, exactly one fresh doorbell goes
 // out, carrying the first record with the other folded under it, and no bare
 // arm is launched for it.
-endTurn();
+settleRun();
 await sleep(Math.floor(grace / 3));
 if (prompts.length !== 2) throw new Error(`dropped carrier was redelivered inside the grace: ${prompts.join(" | ")}`);
 await waitFor(() => prompts.length === 3, "fresh doorbell after the grace");
@@ -2642,6 +2643,105 @@ EOF
   expect_code 0 "$status" "Pi must release a dropped carrier after the turn and redeliver its records once"
   [ -z "$out" ] || fail "Pi dropped-carrier test printed output: $out"
   pass "Pi releases a dropped carrier after the turn and redelivers its records once"
+}
+
+# A retryable provider error (overloaded, rate limit, 5xx) ends the agent loop
+# with agent_end BEFORE the follow-up queue is drained; Pi then backs off for
+# seconds, continues the run, and only drains the queue after that. A carrier
+# still queued across that gap is not dropped, so agent_end must not start the
+# release: the run has not settled. Only agent_settled does, and by then the
+# retry has consumed the carrier - no redelivery, one follow-up in total.
+test_pi_retry_gap_after_agent_end_does_not_release_the_carrier() {
+  local repo home plugin log trigger out status
+  repo="$TMP_ROOT/pi-retry-gap-root"
+  home="$TMP_ROOT/pi-retry-gap-home"
+  log="$TMP_ROOT/pi-retry-gap.log"
+  trigger="$TMP_ROOT/pi-retry-gap.trigger"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed=%s\n' "$2" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=retry-%s\n' "$$" "$count"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_TRIGGER_FILE.$count" ]; do sleep 0.02; done
+printf 'signal: retry gap wake %s\n' "$count"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_TRIGGER_FILE="$trigger" FM_PI_WAKE_FOLD_GRACE_MS=200 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const prompts = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  // Main streams throughout: every follow-up is queued, none consumed here.
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+  events: { on() {}, emit() {} },
+};
+const consumeQueued = (message) =>
+  handlers.get("message_start")?.({ message: { role: "user", content: [{ type: "text", text: message }] } }, {});
+const logRows = () => existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n") : [];
+const arms = () => logRows().filter((row) => row.startsWith("arm=")).length;
+const confirmations = (successor) => logRows().filter((row) => row === `confirmed=retry-${successor}`).length;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await sleep(10);
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const grace = Number(process.env.FM_PI_WAKE_FOLD_GRACE_MS);
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+await waitFor(() => arms() === 1, "first arm");
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.1`, "close\n");
+await waitFor(() => prompts.length === 1, "carrier delivered while main streams");
+await waitFor(() => arms() === 2, "successor after the carrier");
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close\n");
+await waitFor(() => confirmations(3) === 1, "second close delivered through its successor");
+if (arms() !== 3 || prompts.length !== 1) throw new Error(`second close was not folded: ${prompts.join(" | ")}`);
+
+// The provider errors: the loop ends with agent_end while the carrier is still
+// queued, then Pi backs off well past the grace before continuing the run.
+await handlers.get("agent_end")?.({ type: "agent_end", messages: [] }, {});
+await sleep(grace * 3);
+if (prompts.length !== 1) throw new Error(`carrier was redelivered during the retry back-off: ${prompts.join(" | ")}`);
+if (confirmations(3) !== 1) throw new Error(`records were re-processed during the retry back-off: ${logRows().join(" | ")}`);
+
+// The continued run drains the queue, then the run settles.
+consumeQueued(prompts[0]);
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+await sleep(grace * 2);
+if (prompts.length !== 1) throw new Error(`consumed carrier was redelivered after settling: ${prompts.join(" | ")}`);
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+if (existsSync(handoffPath)) throw new Error(`finished records rode the handoff: ${readFileSync(handoffPath, "utf8")}`);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must not release a carrier across a retry gap after agent_end"
+  [ -z "$out" ] || fail "Pi retry-gap test printed output: $out"
+  pass "Pi keeps a queued carrier across a retry gap after agent_end"
 }
 
 # A close whose message carries typed failure detail is never folded: the drain
@@ -4256,6 +4356,7 @@ test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_streaming_followup_is_replayed_after_replacement
 test_pi_streaming_time_delivery_keeps_the_successor_chain
 test_pi_dropped_carrier_is_released_after_the_turn
+test_pi_retry_gap_after_agent_end_does_not_release_the_carrier
 test_pi_failure_detail_close_is_never_folded
 test_pi_successor_failure_during_delivery_is_retried_after_delivery
 test_pi_late_retiring_actionable_reaches_replacement
