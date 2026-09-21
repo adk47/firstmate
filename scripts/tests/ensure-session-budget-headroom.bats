@@ -87,16 +87,39 @@ PY
 # session — so leaving lastRunAtMs absent would make those tests pass for the
 # wrong reason once the fired-gate exists.
 _set_enabled_crons() {
-  python3 - "$FAKE_CRON_JSON" "$1" "$2" "${3:-yes}" <<'PY'
+  python3 - "$FAKE_CRON_JSON" "$1" "$2" "${3:-yes}" "${4:-}" <<'PY'
 import json, sys, time
 path, agent, n, fired = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+# 5th arg: sessionTarget. Omitted => field ABSENT, which must default to
+# "isolated" (counted), so every pre-existing test keeps its meaning.
+target = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] else None
 now = int(time.time() * 1000)
 jobs = []
 for i in range(n):
     j = {"id": f"j{i}", "enabled": True, "agentId": agent}
     if fired == "yes":
         j["lastRunAtMs"] = now - 3600_000
+    if target:
+        j["sessionTarget"] = target
     jobs.append(j)
+json.dump({"jobs": jobs}, open(path, "w"))
+PY
+}
+
+# _set_mixed_target_crons <agent> -- one main-target cron and one ISOLATED
+# one, both enabled, both fired. The isolated job CAN own a base ":cron:"
+# key, so this agent must still page when it has none.
+_set_mixed_target_crons() {
+  python3 - "$FAKE_CRON_JSON" "$1" <<'PY'
+import json, sys, time
+path, agent = sys.argv[1], sys.argv[2]
+now = int(time.time() * 1000)
+jobs = [
+    {"id": "jmain", "enabled": True, "agentId": agent,
+     "sessionTarget": "main", "lastRunAtMs": now - 3600_000},
+    {"id": "jiso", "enabled": True, "agentId": agent,
+     "sessionTarget": "isolated", "lastRunAtMs": now - 3600_000},
+]
 json.dump({"jobs": jobs}, open(path, "w"))
 PY
 }
@@ -1078,4 +1101,45 @@ STUB
   [[ "$output" == *"UNEVALUATED"* ]]
   [[ "$output" == *"main/ghost"* ]]
   [[ "$output" == *"session store path absent or unreadable"* ]]
+}
+
+
+# -- main-target crons cannot own a base ":cron:" key (2026-09-21) ----------
+# A cron with sessionTarget "main" runs inside the agent's OWN main session, so
+# it never creates a base `:cron:<jobId>` key however healthily it fires. Only
+# ISOLATED model-turn crons do. Live on main 2026-09-21 ceo and cmo each had
+# exactly one enabled model-turn cron -- both `skill-collection-review-*`,
+# target=main, lastRunAtMs set, `cron list` status ok -- and this guard paged
+# them as a standing outage. ceo sat at 5 entries / 1.6M against maxEntries
+# 10000 and maxDiskBytes 8gb, so no cap could ever have been the fix. These
+# declaration-keyed jobs are created by openclaw 2.0 at boot and did not exist
+# on 7.1, which is why the original model was true when it was written.
+
+@test "an agent whose only enabled cron is main-target is CLEAN with zero cron keys" {
+  _mk_agent main ceo 1024 0
+  _set_enabled_crons ceo 1 yes main
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"ZERO"* ]]
+  [[ "$output" != *"CRITICAL"* ]]
+}
+
+@test "a main-target cron does not mask a genuinely wedged ISOLATED cron" {
+  # Scope guard: excluding main-target must not swallow the real signature when
+  # the same agent also owns an isolated cron that CAN hold a base key.
+  _mk_agent main ops 1024 0
+  _set_mixed_target_crons ops
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CRITICAL"* ]]
+  [[ "$output" == *"ops"* ]]
+}
+
+@test "an ABSENT sessionTarget still counts - the guard fails toward paging" {
+  # An unfamiliar cron shape must keep the wedge signature, not lose it.
+  _mk_agent main ops 1024 0
+  _set_enabled_crons ops 1
+  run "$SCRIPT" --check
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ZERO"* ]]
 }

@@ -480,6 +480,41 @@ _protected_key_count() {
 # the entry-cap line would claim more cron sessions are at risk than exist.
 # `.payload.kind?` (optional) so a non-object payload degrades to "kept" instead
 # of erroring the whole inventory into UNEVALUATED.
+#
+# `sessionTarget == "main"` crons are excluded for the SAME reason as command
+# kind, and this is the second time the "which crons can even have a `:cron:`
+# key" question has bitten: a main-target cron runs inside the agent's OWN main
+# session (`agent:<id>:main`) and therefore NEVER creates a base
+# `:cron:<jobId>` key, no matter how healthily it fires. Only ISOLATED
+# model-turn crons do.
+#
+# Measured on live main 2026-09-21, which is what sent this guard CRITICAL on
+# ceo and cmo:
+#
+#   ceo  skill-collection-review-ceo  target=main      kind=skillCollectionReview  lastRun set
+#   cmo  skill-collection-review-cmo  target=main      kind=skillCollectionReview  lastRun set
+#   cto  caroline-autonomy-improver   target=isolated  kind=agentTurn              -> 12 base keys
+#   qa   qa-autoreview-*              target=isolated  kind=agentTurn              -> 99 base keys
+#
+# ceo and cmo are the only agents whose ONLY enabled model-turn cron is
+# main-target, so they hold zero base `:cron:` keys PERMANENTLY while both
+# crons run fine (`cron list` showed status `ok`, last fired 1d and 10h before
+# the page; a genuinely wedged fire dies at setup with
+# CronSessionLifecycleClaimError instead). The old filter therefore paged them
+# as a standing outage forever, and raising either cap could never help: ceo
+# sits at 5 entries / 1.6M against maxEntries 10000 and maxDiskBytes 8gb.
+#
+# These `skillCollectionReview` crons are DECLARATION-KEYED jobs that openclaw
+# 2.0 creates at boot; they did not exist on 7.1, which is why the guard's
+# original model of "enabled model-turn cron => must hold a base `:cron:` key"
+# was true when written and silently stopped being true at the 8.2 cutover.
+#
+# The default is "isolated" (i.e. KEPT) when the field is absent, so an
+# unfamiliar cron shape still counts toward the wedge signature. This guard's
+# job is to catch a real outage; it must fail toward paging, never away from it.
+# This is NOT the rejected "gate on how long ago the cron ran" fix from PR #946
+# — that modelled per-run expiry as base-session loss. This excludes only crons
+# that are structurally incapable of owning a base session.
 _enabled_cron_counts() {
   local profile="$1" out
   out="$(openclaw --profile "$profile" cron list --all --json 2>/dev/null)" || return 1
@@ -497,7 +532,9 @@ _enabled_cron_counts() {
   # docs/lessons/working-in-hydra.md.
   printf '%s' "$out" | jq -r '
       (.jobs // [])
-      | map(select(.enabled == true and ((.payload.kind? // "") != "command"))
+      | map(select(.enabled == true
+                   and ((.payload.kind? // "") != "command")
+                   and ((.sessionTarget? // .session?.target? // "isolated") != "main"))
             | { agent: (.agentId // "default"),
                 ran: ([ .lastRunAtMs?, .state?.lastRunAtMs? ] | map(numbers) | .[0]) })
       | group_by(.agent)[]
