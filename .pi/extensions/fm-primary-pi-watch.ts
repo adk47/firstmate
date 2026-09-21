@@ -21,6 +21,16 @@
 // consumes at the user message_start carrying the exact wake text; either
 // event finishes the pending record, and a still-unconsumed record rides the
 // replacement handoff.
+// While a follow-up is accepted but unconsumed, a later actionable close folds
+// under it instead of queueing a second follow-up: a wake is only a doorbell
+// for one drain that presents every queued row. Pi emits agent_settled only
+// once a run has fully settled - no automatic retry, compaction, or queued
+// continuation will still drain the follow-up queue (an error or abort emits
+// agent_end before any of those) - so a follow-up still unconsumed at
+// agent_settled was dropped from the queue (Escape, dequeue) and will never be
+// consumed; after a short grace (FM_PI_WAKE_FOLD_GRACE_MS) the extension
+// releases it without finishing its records, and the pipeline redelivers them
+// as one fresh follow-up.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -77,9 +87,15 @@ type WatchToolRenderContext = {
   isPartial: boolean;
 };
 
+// One accepted-but-unconsumed main follow-up, plus every later actionable
+// close folded under it while it still sat in Pi's queue. A wake is a doorbell
+// ("drain the durable queue"), never the payload, and one drain presents every
+// queued row - so a second doorbell behind an unconsumed one is pure noise that
+// stacks up as "Follow-up:" rows on the captain's screen. Folding keeps one
+// queued doorbell per generation; consumption finishes every folded record.
 type UnconsumedWake = {
   content: string;
-  pending: PendingActionableClose;
+  pendings: PendingActionableClose[];
 };
 
 type SessionGeneration = {
@@ -99,6 +115,9 @@ type SessionGeneration = {
   // replacement began reads it to tell a main-queued wake (replayed) from a
   // branch-handled one (finished).
   unconsumedWakes: Map<string, UnconsumedWake>;
+  // Armed at agent_settled over the follow-ups still unconsumed then; releases
+  // whichever are still unconsumed when it fires so they are redelivered.
+  wakeReleaseTimer: ReturnType<typeof setTimeout> | null;
   // A verified successor's failure close that arrived while the pipeline was
   // still delivering the wake it was started for; its bounded retry runs once
   // that delivery settles instead of being skipped by the single-flight guard.
@@ -147,6 +166,7 @@ const armReadyTimeoutMs = positiveInteger(
   process.platform === "win32" ? 35000 : 12000,
 );
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+const wakeFoldGraceMs = positiveInteger("FM_PI_WAKE_FOLD_GRACE_MS", 3000);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 
@@ -421,6 +441,7 @@ function createGeneration(): SessionGeneration {
     pendingActionables: [],
     cleanupFailure: "",
     unconsumedWakes: new Map(),
+    wakeReleaseTimer: null,
     deferredClose: null,
   };
 }
@@ -437,8 +458,10 @@ function stopGeneration(generation: SessionGeneration): ChildProcess | null {
   generation.stopping = true;
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
   if (generation.cleanupTimer) clearTimeout(generation.cleanupTimer);
+  if (generation.wakeReleaseTimer) clearTimeout(generation.wakeReleaseTimer);
   generation.retryTimer = null;
   generation.cleanupTimer = null;
+  generation.wakeReleaseTimer = null;
   const child = generation.child;
   if (child) child.kill("SIGTERM");
   generation.child = null;
@@ -521,7 +544,20 @@ export default function (pi: ExtensionAPI) {
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
-    if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
+    if (pending) {
+      // Coalesce: a doorbell Pi has accepted but main has not consumed yet
+      // already guarantees a drain, and that drain presents this close's row
+      // too. Fold this record under it instead of queueing another follow-up.
+      // A message carrying a typed failure detail is never folded: the drain
+      // shows queue rows, not the extension's repair text, so that text must
+      // reach main as its own follow-up.
+      const carrier = /watcher: FAILED/.test(message) ? undefined : [...owner.unconsumedWakes.values()].pop();
+      if (carrier) {
+        carrier.pendings.push(pending);
+        return generationIsLive(owner);
+      }
+      owner.unconsumedWakes.set(pending.token, { content, pendings: [pending] });
+    }
     try {
       await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch (error) {
@@ -540,15 +576,51 @@ export default function (pi: ExtensionAPI) {
     for (const [token, wake] of owner.unconsumedWakes) {
       if (wake.content !== text) continue;
       owner.unconsumedWakes.delete(token);
-      wake.pending.delivered = true;
-      try {
-        finishPendingActionable(owner, wake.pending);
-      } catch (error) {
-        surfaceCleanupFailure(owner, error);
-        schedulePendingCleanup(owner);
+      for (const pending of wake.pendings) {
+        pending.delivered = true;
+        try {
+          finishPendingActionable(owner, pending);
+        } catch (error) {
+          surfaceCleanupFailure(owner, error);
+          schedulePendingCleanup(owner);
+        }
       }
       return;
     }
+  }
+
+  // True while Pi holds an accepted follow-up that will finish this record on
+  // consumption - as the carrier or folded under one.
+  function unconsumedHolds(owner: SessionGeneration, token: string): boolean {
+    for (const wake of owner.unconsumedWakes.values()) {
+      if (wake.pendings.some((item) => item.token === token)) return true;
+    }
+    return false;
+  }
+
+  // Main's run settled: no retry, compaction, or queued continuation will
+  // still drain the follow-up queue (agent_end alone is emitted before those
+  // on an error or abort), so a wake still unconsumed after the grace was
+  // dropped from that queue and would otherwise hold every close folded under
+  // it silent for the rest of the generation. Release it without finishing
+  // its records: the pipeline then redelivers the first one as a fresh
+  // doorbell and folds the rest.
+  function scheduleDroppedWakeRelease(owner: SessionGeneration): void {
+    if (owner.wakeReleaseTimer) clearTimeout(owner.wakeReleaseTimer);
+    owner.wakeReleaseTimer = null;
+    const tokens = [...owner.unconsumedWakes.keys()];
+    if (tokens.length === 0) return;
+    const timer = setTimeout(() => {
+      if (owner.wakeReleaseTimer === timer) owner.wakeReleaseTimer = null;
+      if (!generationIsLive(owner)) return;
+      let released = false;
+      for (const token of tokens) {
+        if (owner.unconsumedWakes.delete(token)) released = true;
+      }
+      if (released) void processPendingActionables(owner);
+    }, wakeFoldGraceMs);
+    timer.unref();
+    owner.wakeReleaseTimer = timer;
   }
 
   function confirmHandlingDelivery(recovery: { generation: string; watcherPid: string }): {
@@ -736,7 +808,7 @@ export default function (pi: ExtensionAPI) {
         // A record Pi has accepted but not consumed is neither redelivered
         // nor finished here: consumption finishes it, replacement replays it.
         const pending = owner.pendingActionables.find(
-          (item) => !item.delivered && !owner.unconsumedWakes.has(item.token),
+          (item) => !item.delivered && !unconsumedHolds(owner, item.token),
         );
         if (!pending) break;
         const existingClaim = replacementCoordinator.deliveries.get(pending.token);
@@ -779,7 +851,7 @@ export default function (pi: ExtensionAPI) {
             releaseClaim();
             return;
           }
-          const awaitingConsumption = owner.unconsumedWakes.has(pending.token);
+          const awaitingConsumption = unconsumedHolds(owner, pending.token);
           if (awaitingConsumption && !generationIsLive(owner)) {
             // Pi accepted the follow-up, then the session was replaced before
             // this continuation ran: the shutdown persisted the still-pending
@@ -1095,6 +1167,9 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("message_start", (event) => {
     if (event.message.role !== "user") return;
     consumeWake(generation, userMessageText(event.message.content));
+  });
+  pi.on?.("agent_settled", () => {
+    scheduleDroppedWakeRelease(generation);
   });
 
   pi.on?.("session_start", async () => {
