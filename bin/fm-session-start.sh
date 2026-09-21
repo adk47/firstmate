@@ -55,6 +55,10 @@
 #   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
+#                       It ends with the house-wiki stanza
+#                       (bin/fm-house-wiki-stanza.txt, the shared read
+#                       contract) plus firstmate's rule for filing worker
+#                       `lesson:` clauses before teardown.
 #
 # Those nine names are also the runtime-bound stage list below, so a truncated
 # startup can name exactly which of them never ran.
@@ -184,10 +188,12 @@
 # the digest never runs without the same hard bound and process-group cleanup.
 #
 # Usage: fm-session-start.sh [--reemit] [--source <source>]
-#   Prints the full ordered digest to stdout and always exits 0: this is a
+#   Prints the full ordered digest to stdout and exits 0: this is a
 #   reporting command, not a gate. A lock refusal is reported as a loud
 #   banner inline, never a silent failure or a non-zero exit that would make
-#   an agent skip the rest of the digest.
+#   an agent skip the rest of the digest. The one exception is a broken
+#   checkout: a missing bin/fm-house-wiki-stanza.txt refuses with exit 1
+#   before the lock is taken and before any digest is printed.
 #
 #   --reemit  This process ALREADY took the helm at its own startup and has
 #             only lost its context (a /clear or a compaction). Skip the
@@ -254,6 +260,12 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+WIKI_STANZA_FILE="$SCRIPT_DIR/fm-house-wiki-stanza.txt"
+if [ ! -f "$WIKI_STANZA_FILE" ]; then
+  echo "fm-session-start.sh: missing house-wiki stanza $WIKI_STANZA_FILE" >&2
+  exit 1
+fi
 
 # --- 0. runtime bound ---------------------------------------------------------
 # The ordered stage list is the contract behind the truncation banner: the child
@@ -943,6 +955,12 @@ fi
 cat <<'EOF'
 The digest above is complete for this session start. The READ-ONCE CONTRACT
 section near the top of it governs what may still be read from disk.
+EOF
+printf '\n'
+cat "$WIKI_STANZA_FILE"
+cat <<'EOF'
+Workers never write the vault: `lesson:` is not a status state but a trailing clause permitted only on a worker's `done:` or `failed:` line. Before running `bin/fm-teardown.sh` for a task, which removes `state/<id>.status`, scan that log for `lesson:` clauses (a deterministic read, never a wake-dependent one) and file each, plus any durable lesson of your own, with `wiki-retro` (Pi: `wiki_retro`).
+Never edit `raw/` or `meta/`; never call `/wiki-run` or `wiki_watch`.
 EOF
 
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then

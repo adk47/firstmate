@@ -273,6 +273,10 @@
       "audience": "public-product"
     },
     {
+      "path": "bin/fm-house-wiki-stanza.txt",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/agent-control.md",
       "audience": "maintainer-architecture"
     },
