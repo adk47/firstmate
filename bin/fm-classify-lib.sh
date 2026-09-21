@@ -106,11 +106,81 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
+# --- bounded status-log reads -------------------------------------------------
+#
+# A long-lived lane's status log is append-only and can reach many megabytes.
+# Every per-task read in the supervision path must therefore be bounded by the
+# bytes it actually needs, never by the log's total lifetime size, or one big
+# log stalls a drain, a snapshot, a watcher poll, or a session start. The
+# cursor-backed folds further down this file already bound their own reads to
+# appended bytes; last_status_line below bounds the latest-line read the same
+# way. Neither ever rotates or truncates a log, because the fold cursors are
+# byte offsets into it.
+FM_STATUS_TAIL_BYTES_DEFAULT=65536
+
 # Return the last non-blank line of a status file (empty if missing/blank).
+# Reads at most the final FM_STATUS_TAIL_BYTES bytes: the live line of an
+# append-only log is at its tail, so the bounded read is exact for real logs.
+# A pathological file whose tail window holds no non-blank line falls back to
+# the whole-file scan, so the verdict is never wrong - only slower on that edge.
 last_status_line() {
-  local f=$1
+  local f=$1 limit=${FM_STATUS_TAIL_BYTES:-$FM_STATUS_TAIL_BYTES_DEFAULT} line
   [ -e "$f" ] || return 0
+  case "$limit" in ''|*[!0-9]*|0) limit=$FM_STATUS_TAIL_BYTES_DEFAULT ;; esac
+  if line=$(_fm_status_tail_last_nonblank "$f" "$limit"); then
+    printf '%s\n' "$line"
+    return 0
+  fi
+  # The tail window held no non-blank line (a tail of more than <limit> blank
+  # bytes, or a final line longer than the window). The whole-file scan is the
+  # exact verdict for that edge and is never reached on a normal status log.
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
+}
+
+# Bounded tail reader behind last_status_line. Prints the last non-blank line
+# fully inside the final <limit> bytes and exits 0, or exits 1 when that window
+# holds no complete non-blank line. One process, one bounded read, no whole-file
+# scan. FM_STATUS_TAIL_READ_PROBE records the byte count actually read, the
+# test-only seam a bounded-cost test asserts on.
+_fm_status_tail_last_nonblank() {  # <file> <limit-bytes>
+  local f=$1 limit=$2
+  if [ -n "${FM_STATUS_TAIL_READER:-}" ]; then
+    "$FM_STATUS_TAIL_READER" "$f" "$limit"
+    return
+  fi
+  perl -e '
+    my ($path, $limit) = @ARGV;
+    open my $fh, "<", $path or exit 1;
+    binmode $fh;
+    my $size = -s $path;
+    my $start = ($size > $limit) ? $size - $limit : 0;
+    # A tail window that does not begin on a line boundary starts mid-line; that
+    # first partial line is dropped below, never mistaken for a complete one.
+    my $partial = 0;
+    if ($start > 0) {
+      seek($fh, $start - 1, 0) or exit 1;
+      my $prev = "";
+      read($fh, $prev, 1);
+      $partial = 1 if $prev ne "\n";
+    }
+    seek($fh, $start, 0) or exit 1;
+    my $data = do { local $/; <$fh> };
+    if ($partial) {
+      my $nl = index($data, "\n");
+      $data = ($nl >= 0) ? substr($data, $nl + 1) : "";
+    }
+    my $probe = $ENV{FM_STATUS_TAIL_READ_PROBE};
+    if (defined $probe && length $probe) {
+      if (open my $pf, ">>", $probe) { print $pf "$path\t", ($size - $start), "\n"; close $pf; }
+    }
+    my @lines = split /\n/, $data, -1;
+    for (my $i = $#lines; $i >= 0; $i--) {
+      next if $lines[$i] =~ /^[[:space:]]*$/;
+      print $lines[$i];
+      exit 0;
+    }
+    exit 1;
+  ' "$f" "$limit"
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
@@ -768,22 +838,34 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # forever, so it must be discarded and rebuilt from byte 0.
 FM_OPEN_DECISIONS_FOLD_VERSION=6
 
+# The host OS name, resolved once and EXPORTED so the many $(...) subshells that
+# call the stat helpers below inherit it instead of forking `uname` per call.
+# That per-call fork was a measured per-task cost on a large fleet; the value is
+# constant for the life of a process tree, so one resolution is enough.
+_FM_CLASSIFY_UNAME_S=${_FM_CLASSIFY_UNAME_S:-$(uname -s 2>/dev/null)}
+export _FM_CLASSIFY_UNAME_S
+
 # Portable device:inode identity for the rotation/recreation check below.
+# One `stat` call answers identity, birth epoch, and birth string together, so
+# the three forks the separate reads cost are paid once per call.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
-  local f=$1 epoch birth ident
+  local f=$1 line ident epoch birth
   if [ -n "${FM_STATUS_IDENTITY_READER:-}" ]; then
     "$FM_STATUS_IDENTITY_READER" "$f"
     return
   fi
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    ident=$(LC_ALL=C stat -f '%d:%i' "$f" 2>/dev/null) || return 1
-    epoch=$(LC_ALL=C stat -f '%B' "$f" 2>/dev/null) || epoch=0
-    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -f '%FB' "$f" 2>/dev/null) || birth=''; else birth=''; fi
+  if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
+    line=$(LC_ALL=C stat -f '%d:%i|%B|%FB' "$f" 2>/dev/null) \
+      || line=$(LC_ALL=C stat -f '%d:%i' "$f" 2>/dev/null) || return 1
   else
-    ident=$(LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null) || return 1
-    epoch=$(LC_ALL=C stat -c '%W' "$f" 2>/dev/null) || epoch=0
-    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -c '%w' "$f" 2>/dev/null) || birth=''; else birth=''; fi
+    line=$(LC_ALL=C stat -c '%d:%i|%W|%w' "$f" 2>/dev/null) \
+      || line=$(LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null) || return 1
   fi
+  ident=${line%%|*}
+  line=${line#*|}
+  epoch=${line%%|*}
+  birth=${line#*|}
+  case "$epoch" in ''|*[!0-9]*|0) birth='' ;; esac
   case "$ident$birth" in *$'\t'*|*$'\n'*|'') return 1 ;; esac
   if [ -n "$birth" ]; then printf 'strong:%s:%s' "$ident" "$birth"; else printf 'weak:%s' "$ident"; fi
 }
@@ -794,7 +876,7 @@ _fm_status_file_size() {  # <status-file>
     "$FM_STATUS_SIZE_READER" "$f"
     return
   fi
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
     LC_ALL=C stat -f '%z' "$f" 2>/dev/null
   else
     LC_ALL=C stat -c '%s' "$f" 2>/dev/null
@@ -803,7 +885,7 @@ _fm_status_file_size() {  # <status-file>
 
 _fm_status_file_mtime() {  # <status-file>
   local f=$1
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
     LC_ALL=C stat -f '%m' "$f" 2>/dev/null
   else
     LC_ALL=C stat -c '%Y' "$f" 2>/dev/null
@@ -952,7 +1034,14 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     offset=$size
     cursor_dirty=1
   fi
-  if [ "$cursor_dirty" -eq 1 ]; then
+  # A caller that must not mutate shared supervision state (the fleet snapshot,
+  # which folds each task's open set for its own read but never owns the drain's
+  # cursor) sets FM_OPEN_DECISIONS_READONLY=1: it still gets the identical folded
+  # open set from the persisted cursor plus the appended bytes, but leaves the
+  # cursor untouched. That keeps the cursor's ownership unambiguous - it is a
+  # presentation offset in status_presentation_cursor_offset's legacy fallback,
+  # so only the drain may advance it.
+  if [ "$cursor_dirty" -eq 1 ] && [ "${FM_OPEN_DECISIONS_READONLY:-0}" != 1 ]; then
     target_cursor="$cf.tmp.$$"
     {
       printf 'version=%s\n' "$FM_OPEN_DECISIONS_FOLD_VERSION"
@@ -1085,7 +1174,7 @@ status_presentation_cursor_offset() {  # <status-file>
     [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
     data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
     offset=
-    while IFS=$(printf '\t') read -r row_task ident legacy backstop extra; do
+    while IFS=$'\t' read -r row_task ident legacy backstop extra; do
       [ -n "$row_task" ] || continue
       [ -z "$extra" ] || return 1
       case "$legacy:$backstop" in *[!0-9:]*) return 1 ;; esac
@@ -1130,7 +1219,7 @@ status_outcome_backstop_cursor_offset() {  # <status-file>
   [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
   data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
   backstop=0
-  while IFS=$(printf '\t') read -r row_task ident presented row_backstop extra; do
+  while IFS=$'\t' read -r row_task ident presented row_backstop extra; do
     [ -n "$row_task" ] || continue
     [ -z "$extra" ] || return 1
     case "$presented:$row_backstop" in *[!0-9:]*) return 1 ;; esac
@@ -1208,7 +1297,7 @@ status_presentation_marker_parse() {
 }
 
 _status_observed_path_state() {
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
     LC_ALL=C stat -f '%HT:%p' "$1" 2>/dev/null
   else
     LC_ALL=C stat -c '%F:%f' "$1" 2>/dev/null
@@ -1310,7 +1399,7 @@ status_retire_presentation_task() {  # <state> <task-id>
     fi
     if [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] \
       && data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
-      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
+      while IFS=$'\t' read -r row_task ident offset backstop extra; do
         [ -n "$row_task" ] || continue
         if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
         case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
@@ -1333,7 +1422,7 @@ EOF
     elif ! : > "$tmp"; then
       rc=1
     else
-      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
+      while IFS=$'\t' read -r row_task ident offset backstop extra; do
         [ -n "$row_task" ] || continue
         if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
         case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
@@ -1359,7 +1448,7 @@ EOF
 
 status_acknowledge_presented_snapshot() {  # <state> <snapshot> [<fully-presented-task-ids>]
   local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident f offset lines line safe
-  while IFS=$(printf '\t') read -r task endpoint ident; do
+  while IFS=$'\t' read -r task endpoint ident; do
     [ -n "$task" ] || continue
     safe=false
     case "
@@ -1395,7 +1484,7 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
   local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp backstop acknowledged_task acknowledged_endpoint
   tmp="$state/.status-presentation-cursor.tmp.$$"
   : > "$tmp" || return 1
-  while IFS=$(printf '\t') read -r task endpoint ident; do
+  while IFS=$'\t' read -r task endpoint ident; do
     [ -n "$task" ] || continue
     case "$endpoint" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
     [ -n "$ident" ] || { rm -f "$tmp"; return 1; }
@@ -1408,7 +1497,7 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
     [ "$cur_ident" = "$ident" ] && [ "$endpoint" -le "$size" ] \
       || { rm -f "$tmp"; return 1; }
     backstop=$(status_outcome_backstop_cursor_offset "$f") || { rm -f "$tmp"; return 1; }
-    while IFS=$(printf '\t') read -r acknowledged_task acknowledged_endpoint; do
+    while IFS=$'\t' read -r acknowledged_task acknowledged_endpoint; do
       if [ "$acknowledged_task" = "$task" ]; then backstop=$acknowledged_endpoint; fi
     done <<EOF
 ${STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED:-}
@@ -1425,7 +1514,7 @@ EOF
 
 scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>
   local state=$1 snapshot=$2 task endpoint ident f open line
-  while IFS=$(printf '\t') read -r task endpoint ident; do
+  while IFS=$'\t' read -r task endpoint ident; do
     [ -n "$task" ] || continue
     f="$state/$task.status"
     open=$(status_open_decisions_incremental "$f" "$endpoint") || return 1
@@ -1619,7 +1708,7 @@ EOF
 
 scan_unread_surface_snapshot() {  # <state> <task-and-endpoint-snapshot>
   local state=$1 snapshot=$2 task endpoint ident f lines line
-  while IFS=$(printf '\t') read -r task endpoint ident; do
+  while IFS=$'\t' read -r task endpoint ident; do
     [ -n "$task" ] || continue
     f="$state/$task.status"
     lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1

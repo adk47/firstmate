@@ -7,7 +7,10 @@
 # mutate backlog state, or write reports. Its default ledger collector may
 # atomically refresh parent-side cached copies of remote home summaries under
 # state/secondmate-summary-cache; those observational cache writes are its only
-# fleet-state mutation.
+# fleet-state mutation. Its per-task open-decision fold reads the shared
+# state/.<id>.open-decisions-cursor but never advances it
+# (FM_OPEN_DECISIONS_READONLY), because that cursor is also a presentation
+# offset the wake drain owns.
 #
 # Top-level fields:
 #   schema: stable schema id.
@@ -288,7 +291,10 @@ meta_value() {  # <meta-file> <key>
 
 last_nonempty_line() {  # <file>
   [ -f "$1" ] || return 1
-  grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
+  # Bounded tail read (fm-classify-lib.sh's last_status_line): a multi-megabyte
+  # append-only status log keeps its live line at the tail, so this never
+  # re-scans the whole log per task.
+  last_status_line "$1"
 }
 
 # A local crew-state read is bounded so one slow child cannot extend this
@@ -577,7 +583,7 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
 
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
-  local status_log status_capture report_path report_capture
+  local status_log status_capture report_path report_capture opendecisions_file
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
@@ -586,11 +592,25 @@ prefetch_task_observations() {  # <meta> <id>
   status_capture="$SNAPSHOT_TASK_DIR/$id.status"
   report_path="$DATA/$id/report.md"
   report_capture="$SNAPSHOT_TASK_DIR/$id.report"
+  opendecisions_file="$SNAPSHOT_TASK_DIR/$id.opendecisions"
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
   if [ "$generation_current" = 1 ]; then
     snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
+    # Fold the durable open-decision set in this same concurrent worker, so the
+    # fleet's whole set of folds runs at FM_SNAPSHOT_LOCAL_READ_CONCURRENCY
+    # instead of serially in task_json_lines. The cursor-backed incremental fold
+    # reads only bytes appended since its last offset, so its cost is bounded by
+    # new appends rather than the log's lifetime size. It runs READ-ONLY against
+    # the LIVE status file: it takes the persisted open set from the cursor the
+    # wake drain owns without advancing it (that cursor doubles as the drain's
+    # legacy presentation offset, so only the drain may move it), and the
+    # generation check above already proved this task's generation is current.
+    if [ -f "$status_capture" ]; then
+      FM_OPEN_DECISIONS_READONLY=1 status_open_decisions_incremental "$status_log" \
+        > "$opendecisions_file" 2>/dev/null || : > "$opendecisions_file"
+    fi
   fi
 
   if [ -n "$remote_host" ]; then
@@ -623,7 +643,7 @@ prefetch_task_observations() {  # <meta> <id>
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
-    rm -f -- "$status_capture" "$report_capture"
+    rm -f -- "$status_capture" "$report_capture" "$opendecisions_file"
     jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
       > "$current_file" || current_rc=1
     endpoint_exists=null
@@ -743,8 +763,10 @@ task_json_lines() {
       printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
     )
 
-    # Durable keyed open-decision set: fold the WHOLE status stream
-    # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
+    # Durable keyed open-decision set, folded in prefetch_task_observations
+    # (concurrently, via fm-classify-lib.sh's cursor-backed incremental fold so
+    # its cost is bounded by new appends rather than the log's lifetime size) so
+    # a later unrelated event can
     # never mask a still-open captain decision. The set is derived purely from the
     # keyed fold - never from report bodies or decision-like prose - and then
     # reconciled against the crew LIFECYCLE, which only clears a stale decision the
@@ -760,7 +782,7 @@ task_json_lines() {
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
-    open_decisions_tsv=$(status_open_decisions "$status_log")
+    open_decisions_tsv=$(command cat "$SNAPSHOT_TASK_DIR/$id.opendecisions" 2>/dev/null || true)
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
