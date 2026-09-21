@@ -67,8 +67,9 @@
 # Ship and scout briefs include the house-wiki stanza from
 # bin/fm-house-wiki-stanza.txt (single owner of the shared read contract) plus
 # the worker rule: never write the vault; carry `lesson: ...` as a trailing
-# clause on the done:/failed: status line only, which firstmate scans for at
-# teardown and files with wiki-retro.
+# clause on the done:/failed: status line only, which firstmate scans for
+# before running bin/fm-teardown.sh and files with wiki-retro. A missing
+# stanza file is a broken checkout and refuses the scaffold with exit 1.
 # Refuses to overwrite an existing brief.
 set -eu
 
