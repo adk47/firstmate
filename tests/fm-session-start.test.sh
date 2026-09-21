@@ -506,9 +506,11 @@ SH
 # cases below assert. Under a loaded host (parallel test runs, load averages in
 # the 30s) a healthy fixture start has been measured at 180s, spread evenly over
 # every stage, so inheriting the production bound turns host contention into a
-# truncated digest and a spurious content failure. The content helpers run under
-# a load-tolerant bound instead; the runtime-bound cases pin their own value,
-# which wins because the default only fills an unset variable.
+# truncated digest and a spurious content failure. The content helpers below and
+# the direct "$SESSION_START" invocations (the nested full-startup run and the
+# three --reemit runs) run under a load-tolerant bound instead; the runtime-bound
+# cases pin their own value, which wins because the default only fills an unset
+# variable.
 SESSION_START_CONTENT_BOUND=600
 
 # run_session_start <home> <root> <path>
@@ -2081,6 +2083,7 @@ SH
 
   # shellcheck disable=SC2016 # $$ must expand in the launched shell, not here.
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_SESSION_START_TIMEOUT="${FM_SESSION_START_TIMEOUT:-$SESSION_START_CONTENT_BOUND}" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     bash -c 'export FM_FAKE_HARNESS_PID=$$; exec "$1" 8 "$2"' _ "$nest" "$SESSION_START")
 
@@ -2117,6 +2120,7 @@ EOF
   append_wake "$home/state" signal task-r "done: queued after the re-emit too" || fail "seed second wake failed"
   reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_SESSION_START_TIMEOUT="${FM_SESSION_START_TIMEOUT:-$SESSION_START_CONTENT_BOUND}" \
     "$SESSION_START" --reemit)
 
   assert_contains "$reemit" "SESSION START (CONTEXT RE-EMIT) - $home" "--reemit did not label itself"
@@ -2336,6 +2340,7 @@ EOF
 
   reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_SESSION_START_TIMEOUT="${FM_SESSION_START_TIMEOUT:-$SESSION_START_CONTENT_BOUND}" \
     "$SESSION_START" --reemit)
 
   # A re-emit skips the sweeps because it ALREADY ran them, not because it lacks
@@ -2351,6 +2356,7 @@ EOF
   printf '%s\n' "$holder_pid" > "$home/state/.lock"
   readonly_out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_SESSION_START_TIMEOUT="${FM_SESSION_START_TIMEOUT:-$SESSION_START_CONTENT_BOUND}" \
     "$SESSION_START" --reemit)
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
