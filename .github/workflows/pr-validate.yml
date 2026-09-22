@@ -614,6 +614,19 @@ jobs:
           scripts/check-skill-drift.sh
           echo "::endgroup::"
 
+      - name: Caroline inventory drift — the Jev question set matches the tools and skills
+        # plugins/intercom/src/caroline-{inventory,questions}.json are GENERATED from the
+        # registered support tools, Caroline's skills and the action router's intents. They are
+        # what the pre-turn classifier is told Caroline can do, so a tool or skill added without
+        # regenerating them means the router keeps routing against yesterday's capabilities and
+        # never names the new one. This fails the PR on drift; fix with
+        # scripts/gen-caroline-inventory.sh and commit the result.
+        run: |
+          echo "::group::Caroline inventory drift check"
+          chmod +x scripts/check-caroline-inventory.sh scripts/gen-caroline-inventory.sh
+          scripts/check-caroline-inventory.sh
+          echo "::endgroup::"
+
       - name: Em-dash lint — no em-dashes in Caroline's surface
         # The outbound sanitizer (sanitize-typography.ts) guarantees no em-dash
         # reaches a customer at runtime; this gate keeps the SOURCE clean so the

@@ -197,6 +197,18 @@ export interface IntercomSessionState {
   // overwritten every dispatch turn; never indexed into openclaw vector memory. See
   // kb-retrieval.ts.
   kbSnippets?: KbSnippet[];
+  // Jev pre-turn router result for THIS turn, gated behind account.jev.enabled. On
+  // a "route"/"decline" action, `block` is rendered as a [ROUTING] block by
+  // buildAgentRawBody, right before [CUSTOMER_MESSAGE]. `badFaithDeclinedAt` is a
+  // once-per-conversation gate: the first bad-faith turn declines, every later
+  // bad-faith turn silences. Overwritten every dispatch turn (badFaithDeclinedAt
+  // persists across overwrites once set). See jev-router.ts.
+  jev?: {
+    action: "route" | "decline" | "silence" | "escalate" | "none";
+    block: string | null;
+    answers?: Record<string, unknown>;
+    badFaithDeclinedAt?: string | null;
+  };
 }
 
 /** A single retrieved knowledge-base chunk (snippet text + provenance for logs). */
@@ -264,6 +276,36 @@ export interface IntercomAccountConfig {
     maxResults?: number;
     minScore?: number;
     agentId?: string;
+  };
+  // Jev pre-turn router (docs/designs/2026-09-22-jev-caroline-router.md). One
+  // typed-judgment call per turn classifies the customer message against
+  // Caroline's real tool/skill inventory; the plugin acts on three of the
+  // answers itself (silence, decline-then-silence, escalate) and injects the
+  // rest as a [ROUTING] block. Also replaces the OpenRouter judge in
+  // buildRiskOptions when enabled (same pre-turn answers, no second request).
+  // `apiKey` is a SecretRef resolved to a plaintext string by
+  // secret-contract-api.ts before the plugin ever reads it (mirrors
+  // `clickup.apiKey`). Missing apiKey with enabled:true fails config load,
+  // same as a missing token (see config.ts).
+  jev?: {
+    enabled: boolean;
+    apiKey: string;
+    model?: string;
+    timeoutMs?: number;
+    bands: {
+      bad_faith: number;
+      no_reply: number;
+      human_required: number;
+    };
+    // Per-branch kill switches — see DEFAULT_JEV_ACTIONS. When a switch is
+    // off, that branch's band hit resolves to `route` instead (silence/
+    // escalate log a `suppressed=<branch>` token on the [intercom:jev] line
+    // so jev-shadow-report.sh can still count what it would have done).
+    actions: {
+      decline: boolean;
+      silence: boolean;
+      escalate: boolean;
+    };
   };
   // Upper bound (ms) on how long we wait for a single agent dispatch to return
   // before treating the conversation lane as wedged. The dispatch await
@@ -488,6 +530,42 @@ export interface RiskAssessment {
 export const MAX_PROCESSED_EVENT_IDS = 1000;
 export const MAX_OUTBOUND_MESSAGE_IDS = 500;
 export const DEFAULT_FALLBACK_ACK = "We're looking into this and will get back to you shortly.";
+
+// Jev band defaults (docs/designs/2026-09-22-jev-caroline-router.md; raised
+// from an earlier 0.7/0.8/0.8 to 0.85/0.90/0.90 after the 197-turn real-
+// conversation backtest — a Spanish status-ping scored human_required 0.79,
+// so 0.8 would have escalated it). Applied per-key in config.ts so a
+// partially-specified `jev.bands` in openclaw-*.json still fails loud on an
+// out-of-range value but falls back band-by-band for anything omitted —
+// which is why the DEFAULT has to be safe on its own, not merely whatever
+// openclaw-edge.json happens to override it with today.
+//
+// `bad_faith` raised again 0.85 -> 0.92 (2026-09-22): a real customer opening
+// "I am the sole legal owner and proprietor of the registered entity …"
+// scores 0.90 (conversation 215475985153553; stable across two full backtest
+// runs), and declining that person is the exact harm this band exists to
+// prevent. 0.92 keeps every true positive the troll produced.
+export const DEFAULT_JEV_BANDS = {
+  bad_faith: 0.92,
+  no_reply: 0.9,
+  human_required: 0.9,
+} as const;
+
+// Per-branch kill switches (docs/designs/2026-09-22-jev-caroline-router.md;
+// added after a 202-turn backtest found no safe band for `no_reply` — real
+// waiting customers like "Hi you got some news ?" still scored 0.97 with the
+// closer guard — or `human_required` — the 6 customers who explicitly asked
+// for a person scored median 0.39, so the keyword/rule escalation layer is
+// the right detector there, not Jev). A band alone cannot express "never
+// fire": probabilities reach 1.0, so 0.99 is not "off". `bad_faith` stayed
+// on (97.5% agreement, zero false positives at its 0.92 band). Conservative defaults:
+// decline on, silence/escalate off until backtest data says otherwise for
+// those two branches specifically.
+export const DEFAULT_JEV_ACTIONS = {
+  decline: true,
+  silence: false,
+  escalate: false,
+} as const;
 
 // Default dispatch-await timeout (ms). See IntercomAccountConfig.dispatchTimeoutMs.
 // 90s: >> real p99 dispatch (~10-15s) so healthy slow replies never false-page,

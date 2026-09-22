@@ -1,0 +1,47 @@
+{
+  "resolution_path": {
+    "type": "choice",
+    "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation.",
+    "choices": {
+      "caroline_tool": "Caroline resolves it herself with one of her tools or skills.",
+      "ask_customer": "One missing fact or piece of evidence is needed before a tool can act.",
+      "human_required": "Identity/ownership cannot be verified, refund request, account deletion, or another item on the human_required list.",
+      "no_reply": "Bare closer after Caroline already acknowledged once, or a third or later identical message."
+    }
+  },
+  "intent": {
+    "type": "choice",
+    "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation.",
+    "choices": {
+      "credit_verification": "Customer asking about a submitted credit that has not been approved.",
+      "other": "Does not match any known intent."
+    }
+  },
+  "first_tool": {
+    "type": "choice",
+    "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation.",
+    "choices": {
+      "credit_verification_check": "Looks up the status of a submitted credit.",
+      "create_ticket": "Files a support ticket.",
+      "none": "No tool applies."
+    }
+  },
+  "skill": {
+    "type": "choice",
+    "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation.",
+    "choices": {
+      "customer-credit-verification": "Verifying a customer's submitted credit.",
+      "none": "No skill applies."
+    }
+  },
+  "off_topic_or_bad_faith": {
+    "type": "noul",
+    "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation.",
+    "criteria": "Unrelated to the customer's own Muso account or support need, or clearly not a good-faith request (jokes, essays, tests, insults, spam)."
+  },
+  "frustration": {
+    "type": "score",
+    "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation.",
+    "legend": ["Calm", "Concerned", "Frustrated", "Angry"]
+  }
+}

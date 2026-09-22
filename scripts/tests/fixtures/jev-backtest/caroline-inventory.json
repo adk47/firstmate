@@ -1,0 +1,7 @@
+{
+  "tools": [
+    {"kind": "read", "name": "credit_verification_check", "requires": "fixture", "resolves": "fixture"},
+    {"kind": "read", "name": "profile_lookup", "requires": "fixture", "resolves": "fixture"},
+    {"kind": "write", "name": "create_ticket", "requires": "fixture", "resolves": "fixture"}
+  ]
+}

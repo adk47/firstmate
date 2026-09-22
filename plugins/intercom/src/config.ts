@@ -1,5 +1,5 @@
 import type { IntercomAccountConfig } from "./types.js";
-import { DEFAULT_FALLBACK_ACK } from "./types.js";
+import { DEFAULT_FALLBACK_ACK, DEFAULT_JEV_BANDS, DEFAULT_JEV_ACTIONS } from "./types.js";
 
 // Config captured at register() time — used as fallback when the Gateway
 // passes undefined to channel lifecycle callbacks.
@@ -89,6 +89,29 @@ export function resolveIntercomAccount(
   if (!account.botAdminId) {
     throw new Error(`intercom: account "${id}" missing botAdminId`);
   }
+  // Fail loud at boot, same posture as the token/workspaceId/webhookSecret
+  // checks above — a jev.enabled account that silently ran with an
+  // unresolved SecretRef (or no key at all) would 401 on every turn instead
+  // of failing the deploy.
+  if (account.jev?.enabled) {
+    if (typeof account.jev.apiKey !== "string" || account.jev.apiKey.trim() === "") {
+      throw new Error(`intercom: account "${id}" jev enabled but missing apiKey`);
+    }
+  }
+  if (account.jev?.bands) {
+    for (const [key, value] of Object.entries(account.jev.bands)) {
+      if (typeof value !== "number" || Number.isNaN(value) || value < 0 || value > 1) {
+        throw new Error(`intercom: account "${id}" jev.bands.${key} must be a number in [0,1] (got: ${value})`);
+      }
+    }
+  }
+  if (account.jev?.actions) {
+    for (const [key, value] of Object.entries(account.jev.actions)) {
+      if (typeof value !== "boolean") {
+        throw new Error(`intercom: account "${id}" jev.actions.${key} must be a boolean (got: ${value})`);
+      }
+    }
+  }
 
   return {
     accountId: id,
@@ -127,6 +150,16 @@ export function resolveIntercomAccount(
           ...(typeof account.kbRetrieval.maxResults === "number" ? { maxResults: account.kbRetrieval.maxResults } : {}),
           ...(typeof account.kbRetrieval.minScore === "number" ? { minScore: account.kbRetrieval.minScore } : {}),
           ...(typeof account.kbRetrieval.agentId === "string" ? { agentId: account.kbRetrieval.agentId } : {}),
+        }
+      : undefined,
+    jev: account.jev
+      ? {
+          enabled: account.jev.enabled === true,
+          apiKey: account.jev.apiKey,
+          ...(typeof account.jev.model === "string" ? { model: account.jev.model } : {}),
+          ...(typeof account.jev.timeoutMs === "number" ? { timeoutMs: account.jev.timeoutMs } : {}),
+          bands: { ...DEFAULT_JEV_BANDS, ...(account.jev.bands ?? {}) },
+          actions: { ...DEFAULT_JEV_ACTIONS, ...(account.jev.actions ?? {}) },
         }
       : undefined,
   };

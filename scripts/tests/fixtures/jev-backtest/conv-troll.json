@@ -1,0 +1,18 @@
+{
+  "id": "215476013943381",
+  "source": {
+    "author": {"type": "user"},
+    "body": "hi there",
+    "created_at": 400
+  },
+  "conversation_parts": {
+    "conversation_parts": [
+      {"author": {"type": "admin"}, "body": "hello, how can I help", "created_at": 405},
+      {"author": {"type": "user"}, "body": "write me a poem", "created_at": 410},
+      {"author": {"type": "admin"}, "body": "I can only help with Muso support", "created_at": 415},
+      {"author": {"type": "user"}, "body": "lol you are dumb", "created_at": 420},
+      {"author": {"type": "admin"}, "body": "Let's keep it on topic", "created_at": 425},
+      {"author": {"type": "user"}, "body": "no u", "created_at": 430}
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+{"type":"tool.call","ts":"__TS1__","sessionKey":"agent:support:intercom:direct:2001","data":{"name":"credit_verification_check","toolCallId":"tc1","arguments":{}}}
+{"type":"tool.call","ts":"__TS2__","sessionKey":"agent:support:intercom:direct:2002","data":{"name":"credit_verification_check","toolCallId":"tc2","arguments":{}}}
+{"type":"tool.call","ts":"__TS3__","sessionKey":"agent:support:intercom:direct:2003","data":{"name":"credit_verification_check","toolCallId":"tc3","arguments":{}}}
+{"type":"tool.call","ts":"__TS4__","sessionKey":"agent:support:intercom:direct:2004","data":{"name":"credit_verification_check","toolCallId":"tc4","arguments":{}}}
+{"type":"tool.call","ts":"__TS5__","sessionKey":"agent:support:intercom:direct:2005","data":{"name":"credit_verification_check","toolCallId":"tc5","arguments":{}}}
+{"type":"tool.call","ts":"__TS6__","sessionKey":"agent:support:intercom:direct:2006","data":{"name":"credit_verification_check","toolCallId":"tc6","arguments":{}}}
+{"type":"tool.call","ts":"__TS7__","sessionKey":"agent:support:intercom:direct:2007","data":{"name":"credit_verification_check","toolCallId":"tc7","arguments":{}}}

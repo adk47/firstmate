@@ -333,6 +333,26 @@
             "turnCountHardCap": 14,
             "judgeMinTurnCount": 4
           },
+          "jev": {
+            "enabled": true,
+            "apiKey": {
+              "source": "env",
+              "provider": "hydra-env",
+              "id": "OPENROUTER_API_KEY"
+            },
+            "model": "typesafe/jev-1.13",
+            "timeoutMs": 1500,
+            "bands": {
+              "bad_faith": 0.92,
+              "no_reply": 0.9,
+              "human_required": 0.9
+            },
+            "actions": {
+              "decline": true,
+              "silence": false,
+              "escalate": false
+            }
+          },
           "clickup": {
             "apiKey": {
               "source": "env",
@@ -478,7 +498,8 @@
           "CLICKUP_API_KEY",
           "MUSO_ADMIN_EMAIL",
           "MUSO_ADMIN_PASSWORD",
-          "MUSOAI_INTERCOM_TOKEN"
+          "MUSOAI_INTERCOM_TOKEN",
+          "OPENROUTER_API_KEY"
         ]
       }
     }

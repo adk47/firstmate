@@ -1,0 +1,87 @@
+{
+  "first_tool": {
+    "criteria": {
+      "billing_status": "muso subscription billing-summary --email <verified-email> --env prod --json (read-only; muso-cli >=0.10.0 -> GET /admin/team/:id/billing-summary).",
+      "create_ticket": "ClickUp task creation in list 901000600160",
+      "credit_verification_check": "read-only lookup of a customer's user_verification_needed (UVN) credits.",
+      "credits_search": "GET /api/v3/admin/profile/{profileId}/credits?limit=<L>&offset=<O>",
+      "dedupe_check": "read-only verification for a customer profile-merge request.",
+      "founding_status": "muso founding status --email <verified-email> --env prod --json (GET /admin/team; the founder envelope lives on the list items).",
+      "none": "No tool call is the right first step for this message.",
+      "order_lookup": "GET /api/v3/admin/orders/{ref} via MusoAdminClient (GET-only, allowlisted).",
+      "profile_analytics_status": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution, GET /api/v3/admin/profile/{id} for direct UUID profile context, and GET /api/v3/admin/profile/{id}/analytics-status for the read-only analytics…",
+      "profile_claim_status": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution, GET /api/v3/admin/profile/{id} for claim/ownership context, GET /api/v3/admin/claiming?profilesIds=<id>&limit=21 for the profile's claim requests…",
+      "profile_credits_status": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution and the same-name duplicate-candidate scan, GET /api/v3/admin/profile/{id} for the resolved profile / each candidate / a stated target profile, GET…",
+      "profile_lookup": "GET /api/v3/admin/profile/search?keyword=<q>",
+      "profile_status": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution, GET /api/v3/admin/profile/{id} for direct UUID, GET /api/v3/admin/profile/{id}/credits?limit=20&offset=0 for credits.",
+      "retention_offer_check": "muso subscription retention-offer --email <verified-email> --env prod --json (read-only).",
+      "subscription_status": "muso teams list --email <verified-email> --env prod --json (GET /admin/team), which returns each workspace's subscription ({plan, status, period, usersLimit}) inline.",
+      "support_action_router": "a deterministic read-only registry inside support-tools."
+    },
+    "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation. Pick the first tool Caroline should call to resolve this request, or create_ticket if it must go straight to a handoff, or none if no tool call is warranted. Pick the tool that reads the specific object the customer is asking about (pending credits → credit_verification_check, a claim → profile_claim_status, an order → order_lookup, a charge → billing_status); profile_status only when the ask is about the profile itself.",
+    "type": "choice"
+  },
+  "frustration": {
+    "criteria": [
+      "Calm",
+      "Concerned",
+      "Frustrated",
+      "Angry"
+    ],
+    "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation. Rate the customer's emotional tone in their last message.",
+    "type": "score"
+  },
+  "intent": {
+    "criteria": {
+      "account_profile_change": "Gather proof and run safe prechecks; destructive account/profile changes stay human-gated.",
+      "analytics_data_complaint": "Ground the answer in profile, subscription, and analytics-status data; explain current state; file a follow-up only when evidence shows an account-specific issue.",
+      "billing_cancel_refund": "Read subscription state, run the retention save hierarchy (50% offer, then free plan), cancel at period end when the customer insists; refunds stay a handoff packet.",
+      "catalog_metadata_repair": "Use available profile/credit visibility and file a repair packet until catalog capture tools exist.",
+      "credit_verification": "Inspect pending UVN credits, ask for exact proof, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
+      "founding_member": "Read founder status and mint only the customer-requested paid buy-back checkout link.",
+      "login_email_verification": "Collect exact account-state facts and hand off until login/email tools are exposed.",
+      "order_fulfillment": "Answer order status and correct the verified customer's own shipping address when the order is still editable.",
+      "other": "None of the above intents match the customer's request.",
+      "profile_claim": "Approve the customer's own pending profile claim when the muso gate says it is safe.",
+      "profile_duplicates": "Self-serve only same-owner unclaimed duplicate consolidation; everything destructive or cross-owner goes to a packet.",
+      "remove_wrong_credits": "Remove mechanical wrong credits from a profile the customer owns, without touching production-side roles or wrong-merge cases."
+    },
+    "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation. Pick the single support intent that best matches the customer's request.",
+    "type": "choice"
+  },
+  "off_topic_or_bad_faith": {
+    "criteria": {
+      "false": "a genuine, on-topic support request about the customer's own Muso account.",
+      "true": "unrelated to the customer's own Muso account or support need, or clearly not a good-faith request (jokes, essays, tests, insults, spam)"
+    },
+    "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation. Is this message unrelated to the customer's own Muso account or support need, or clearly not a good-faith request?",
+    "type": "noul"
+  },
+  "resolution_path": {
+    "criteria": {
+      "ask_customer": "Caroline cannot start without one specific thing only the customer has: the exact tracks to remove, which of several profiles they mean, proof or a screenshot for a credit, an order number when the account has several. Not for locating their profile or account; the read tools do that from the verified email.",
+      "caroline_tool": "Caroline resolves it herself. Read tools cover the customer's own profile, credits, pending credit verification, profile claims, duplicate profiles, orders, subscription, billing and founding status; gated write tools verify credits, approve the customer's own claim, merge their own duplicates, remove their own wrong credits, fix an order address, apply the retention discount, cancel at period end, and file a structured ticket. Skills: action-request (Submit structured…); customer-credit-removal (Autonomously…); customer-credit-verification (When a customer…); customer-profile-claim (Use when a…); customer-profile-consolidate (Merge a customer's…); customer-profile-dedupe (When a customer…); customer-track-dedupe (When a customer…); milestone-badge-purchase (Buy a milestone…); order-fulfillment (Handle…); refund-retention (3-gate retention…)",
+      "human_required": "No tool path exists because the request is one of: identity or ownership cannot be verified; cross-owner conflict (someone else claimed or is claiming the customer's profile, credits or workspace); refund request; account deletion / GDPR erasure; profile deletion or unmerge; policy exception or waiver; role-based bulk credit change; chargeback, fraud or account takeover; duplicate or post-cancel charge; founding-member free reinstatement; on-behalf or cross-account request",
+      "no_reply": "bare closer after Caroline already acknowledged once; third or later identical message"
+    },
+    "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation. Decide how the customer's need is resolved: does Caroline already have a tool or skill that handles it, is one fact missing before a tool can act, does it require a human, or does it need no reply at all? The customer's identity is verified by Intercom, and Caroline's read tools find their profile, credits, claims, orders and subscription from that verified email without asking. Prefer caroline_tool whenever a tool can read or act on what the customer is asking about.",
+    "type": "choice"
+  },
+  "skill": {
+    "criteria": {
+      "action-request": "Submit structured action requests via ClickUp tasks for operations review",
+      "customer-credit-removal": "Autonomously remove credits a customer owns from their own profile, OR detect mis-described unmerge requests and escalate them with audit context",
+      "customer-credit-verification": "When a customer asks about credits they submitted that are stuck in \"user verification needed\", confirm ownership with the read-only credit_verification_check tool, ask the customer for proof, and route the outcome.",
+      "customer-profile-claim": "Use when a verified customer asks to claim/verify their profile and a pending claim exists on it.",
+      "customer-profile-consolidate": "Merge a customer's OWN duplicate profiles into the profile they own – the SAFE self-service merge case, gated by the muso capability gate. The gate corroborates identity server-side (same or near-same name, the customer's own verified/pending claim, empty dup, or shared tracks) and refuses…",
+      "customer-profile-dedupe": "When a customer asks to merge/dedupe their duplicate Muso profiles, verify ownership with the read-only dedupe_check tool and file a high-signal profile-merge ticket for Operations.",
+      "customer-track-dedupe": "When a customer asks to merge/dedupe duplicate TRACKS (not profiles), capture which track to keep and which duplicate(s) to fold in, then file ONE high-signal track-merge ticket for the Catalog/Operations team.",
+      "milestone-badge-purchase": "Buy a milestone badge or plaque; verify profile and streams, then route pre-order corrections or existing-order issues.",
+      "none": "No skill's activation condition matches this request.",
+      "order-fulfillment": "Handle plaque/poster order-fulfillment support – Prodigi vendor address-confirmation requests and customer order/shipping questions – by validating and reformatting the shipping address and filing a structured order-fulfillment request for the team to complete.",
+      "refund-retention": "3-gate retention flow (50% save, free-plan fallback) before cancelling or escalating a refund"
+    },
+    "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation. Pick the skill whose activation condition matches this request, or none.",
+    "type": "choice"
+  }
+}

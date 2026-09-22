@@ -30,6 +30,8 @@ import { isIntentionalNoReply, stripNoReplySentinel } from "./no-reply.js";
 import { detectPrioritySignal, stripPrioritySentinel, DATA_COMPLAINT_TAG } from "./priority-signal.js";
 import { stripModelFallbackNotice, findModelFallbackNotices, isOnlyModelFallbackNotice } from "./sanitize-model-fallback.js";
 import { createOpenRouterJudge } from "./judge.js";
+import { createJevTurnRunner, createJevBackedJudge, renderJevBlock } from "./jev-router.js";
+import { loadCarolineIntents, loadCarolineSkills } from "./caroline-inventory-loader.js";
 import { createClickupTicket } from "./clickup.js";
 import {
   downloadImageAttachments,
@@ -909,12 +911,33 @@ export function renderAttachmentStatusBlock(
  * mined account email / profile URL is only shown when enrichment didn't
  * already supply a verified equivalent (so the agent never sees two emails).
  */
+/**
+ * Render-time gate for the Jev [ROUTING] block, applied on top of
+ * renderJevBlock. renderJevBlock alone only inspects the PERSISTED decision
+ * (`jev.action`), so a conversation that stored a "route"/"decline" decision
+ * on an earlier turn keeps rendering that block on every later turn — even
+ * after the account's `jev.enabled` kill switch is flipped off for a
+ * rollback. A rollback must take effect immediately for conversations that
+ * already have a stored route, not just for new ones, so this checks the
+ * CURRENT config before ever consulting the persisted state. Exported so the
+ * rollback behavior is directly testable without exercising the full webhook
+ * handler.
+ */
+export function resolveJevBlockForDispatch(
+  jevEnabled: boolean | undefined,
+  jev: IntercomSessionState["jev"] | undefined,
+): string | null {
+  if (!jevEnabled) return null;
+  return renderJevBlock(jev);
+}
+
 export function buildAgentRawBody(
   message: string,
   facts: KnownFacts,
   enrichment?: EnrichmentState,
   kbSnippets?: KbSnippet[],
   unreadable?: UnreadableAttachment[],
+  jevBlock?: string | null,
 ): string {
   const sanitized = sanitizeCustomerMessage(message);
   const kbBlock = renderKnowledgeBaseBlock(kbSnippets ?? []);
@@ -932,12 +955,16 @@ export function buildAgentRawBody(
       : "";
   // KB grounding goes ABOVE the per-user context, both above the message itself.
   // The attachment status sits directly above [CUSTOMER_MESSAGE] so it reads as
-  // "…and here is what happened to what they attached".
-  if (!kbBlock && !contextBlock && !attachmentBlock) return sanitized;
+  // "…and here is what happened to what they attached". The Jev [ROUTING]
+  // block (docs/designs/2026-09-22-jev-caroline-router.md §B) goes last,
+  // immediately before [CUSTOMER_MESSAGE], so it reads as "…and here is how
+  // to handle what follows".
+  if (!kbBlock && !contextBlock && !attachmentBlock && !jevBlock) return sanitized;
   return [
     ...(kbBlock ? [kbBlock] : []),
     ...(contextBlock ? [contextBlock] : []),
     ...(attachmentBlock ? [attachmentBlock] : []),
+    ...(jevBlock ? [jevBlock] : []),
     "[CUSTOMER_MESSAGE]",
     sanitized,
   ].join("\n");
@@ -967,21 +994,44 @@ export function stripConversationContext(
 // Construct the per-webhook risk-assessment options. When the flag is on AND
 // an OpenRouter key is configured, the LLM-judge backstop is wired; otherwise
 // only Layer 0/1/1b (magic-keyword + content rules + turn-count cap) run.
+//
+// `jev`, when the account has jev.enabled, replaces that OpenRouter judge
+// with a Jev-backed one built from the SAME per-request memoized runner the
+// caller also hands to handleWebhookEvent's `runJev` option — so the pre-turn
+// Jev call is reused rather than fired twice (docs/designs/2026-09-22-jev-
+// caroline-router.md §B "no second request"). `turnCountOf` is a thunk
+// (rather than a plain number) because it's evaluated when the judge
+// actually fires, and `JudgeInput` carries no turnCount of its own for us
+// to read it from.
 export function buildRiskOptions(
   account: IntercomAccountConfig,
   log: { warn: (msg: string) => void } | undefined,
+  jev?: {
+    runner: (input: import("./jev-router.js").JevTurnInput) => Promise<import("./jev-router.js").JevTurnOutcome>;
+    turnCountOf: () => number;
+  },
 ): { riskAssessment: { enabled: boolean }; riskDeps?: import("./escalation.js").AssessRiskDeps } {
   if (!account.riskAssessment?.enabled) {
     return { riskAssessment: { enabled: false } };
   }
   const cfg = account.riskAssessment;
-  const judge = cfg.openrouterApiKey
-    ? createOpenRouterJudge({
-        openrouterApiKey: cfg.openrouterApiKey,
-        model: cfg.judgeModel ?? DEFAULT_JUDGE_MODEL,
-        log: log ? { warn: (m) => log.warn(m) } : undefined,
-      })
-    : undefined;
+  const jevLog = log ? { warn: (m: string) => log.warn(m) } : undefined;
+  const judge =
+    account.jev?.enabled && account.jev.actions.escalate && jev
+      ? createJevBackedJudge(
+          jev.runner,
+          account.jev.bands,
+          jev.turnCountOf,
+          loadCarolineIntents(jevLog),
+          account.jev.actions,
+        )
+      : cfg.openrouterApiKey
+        ? createOpenRouterJudge({
+            openrouterApiKey: cfg.openrouterApiKey,
+            model: cfg.judgeModel ?? DEFAULT_JUDGE_MODEL,
+            log: log ? { warn: (m) => log.warn(m) } : undefined,
+          })
+        : undefined;
   return {
     riskAssessment: { enabled: true },
     riskDeps: {
@@ -1241,7 +1291,14 @@ export const intercomPlugin = createChatChannelPlugin({
             senderAddress: `intercom:${result.authorId}`,
             recipientAddress: `intercom:${account.botAdminId}`,
             conversationLabel: `Intercom conversation ${result.conversationId}`,
-            rawBody: buildAgentRawBody(bodyForDispatch, state.knownFacts ?? {}, state.enrichment, state.kbSnippets, unreadable),
+            rawBody: buildAgentRawBody(
+              bodyForDispatch,
+              state.knownFacts ?? {},
+              state.enrichment,
+              state.kbSnippets,
+              unreadable,
+              resolveJevBlockForDispatch(account.jev?.enabled, state.jev),
+            ),
             messageId: latest.messageId,
             timestamp: latest.timestamp,
             extraContext: mediaExtraContext,
@@ -1626,7 +1683,24 @@ export const intercomPlugin = createChatChannelPlugin({
 
                   const state = getOrCreateSession(account.accountId, conversationId, account.workspaceId);
                   const client = createIntercomClient(account.token, log);
-                  const riskOptions = buildRiskOptions(account, log);
+                  const jevLog = log ? { warn: (m: string) => log.warn(m) } : undefined;
+                  // Fresh per webhook request — this is what makes the "no
+                  // second request" memoization correct (see jev-router.ts's
+                  // createJevTurnRunner doc comment). A runner created once
+                  // per account/process would wrongly share a cached answer
+                  // across different customer turns.
+                  const jevRunner =
+                    account.jev?.enabled
+                      ? createJevTurnRunner(
+                          { apiKey: account.jev.apiKey, model: account.jev.model, timeoutMs: account.jev.timeoutMs },
+                          jevLog,
+                        )
+                      : undefined;
+                  const riskOptions = buildRiskOptions(
+                    account,
+                    log,
+                    jevRunner ? { runner: jevRunner, turnCountOf: () => state.userTurnCount ?? 0 } : undefined,
+                  );
                   const { result } = await handleWebhookEvent(
                     payload,
                     state,
@@ -1639,6 +1713,26 @@ export const intercomPlugin = createChatChannelPlugin({
                       enrich: enrichFn,
                       kbRetrieval: account.kbRetrieval,
                       retrieveKb: kbRetrieveFn,
+                      ...(account.jev?.enabled
+                        ? {
+                            jev: {
+                              enabled: true,
+                              bands: account.jev.bands,
+                              actions: account.jev.actions,
+                              intents: loadCarolineIntents(jevLog),
+                              skills: loadCarolineSkills(jevLog),
+                            },
+                            runJev: jevRunner
+                              ? (input: import("./jev-router.js").JevTurnInput) =>
+                                  jevRunner({
+                                    ...input,
+                                    founding: state.enrichment?.snapshot?.founderSince,
+                                    plan: state.enrichment?.snapshot?.plan,
+                                    priorChats: state.enrichment?.priorChats,
+                                  })
+                              : undefined,
+                          }
+                        : {}),
                     },
                   );
 

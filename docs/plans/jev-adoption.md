@@ -88,58 +88,38 @@ Goal: one client, one log format, one report, vendor prerequisites settled.
 Done when: `jev.sh` round-trips one Noul against the live API from node-8, the shadow file
 appears under `/var/lib/hydra-jev/shadow/`, and the report script prints a table from it.
 
-## Phase 1 — Caroline, shadow (support, zero write risk, grader exists)
+## Phase 1 — Caroline pre-turn router (acting, not shadow)
 
-Goal: log Jev's answer for every Caroline turn next to what she actually did. No customer-visible
-change.
+Design contract: `docs/designs/2026-09-22-jev-caroline-router.md`. Direction from Nick,
+2026-09-22: no shadow mode; Jev must know what Caroline can do, classify the request and tell
+her which tools and skills to use; backtest on real conversations before it ships.
 
-**1a. Escalation judge shadow.** `plugins/intercom/src/judge.ts` today posts the last 10 message
-pairs + known facts to OpenRouter and returns `{shouldHandoff, reasons, suggestedActionType,
-confidence: low|medium|high}` with an 8 s timeout that fails open (`judge()` returns null ⇒ no
-escalation). Add a parallel Jev call from `escalation.ts` at the judge invocation point
-(after the rule layer, before the judge result is consumed) with:
-- Noul `needs_human` ("the customer needs a human now")
-- Choice `action_type` over the 24 values in `plugins/intercom/src/ticket-format.ts` TIER_MAP
-- Score `frustration` (calm / concerned / frustrated / angry)
-Log `actual = judge result` (or `null` on timeout). This is the swap candidate for Phase 3.
-
-**1b. Pre-turn bundle shadow.** In `plugins/intercom/src/handler.ts` after enrichment + KB
-retrieval (~line 156), one Jev request over `{message, known_facts, last_parts}` with:
-- Choice `router_intent` over the 11 keys of `SUPPORT_ACTION_ROUTES` in
-  `plugins/support-tools/src/tools/support-action-router.ts` (Caroline names this herself today)
-- Choice `refund_flow` {retention, billing_complaint, none} and Choice `reason_category`
-  {not-using-it, too-expensive, missing-feature, billing-issue, other} (the refund-retention
-  3-gate activation, a documented P1 miss)
-- Noul `bare_closer` (the `[[NO_REPLY]]` rule in `workspaces/support/SOUL.md` "Reading the room")
-- Noul `data_complaint` (the `[[PRIORITY]]` rule)
-- Noul `repeat_followup_past_sla` (the Sandy Vee rule)
-- Noul `off_topic_or_bad_faith` ("this is not a request about the customer's own Muso account
-  or a support need"). Reference case: Intercom conversation 215476013943381 (2026-09-20):
-  13 messages in 9 minutes went from "buy a subscription" to "sell me on Muso", two MLA
-  essays and "replace every vowel with h", Caroline answered every one and then filed a human
-  ticket. The judge never fired and the scope rule was applied once, then abandoned. Above
-  the band: one scripted decline, `[[NO_REPLY]]` on every further off-topic message, and no
-  ticket. That case alone would have saved 9 of 13 model turns and the human ticket.
-`actual` = the router intent Caroline passed to `support_action_router`, the actionType in any
-`create_ticket` call, whether `retention_offer_check` was called, whether `[[NO_REPLY]]` /
-`[[PRIORITY]]` were emitted. All of these are already in the trajectory log the
-`cs-selfserve-backlog.py` collector parses (`tool.call` / `tool.result` events).
-
-**1c. Post-turn honesty check shadow.** Before send, Noul `asserts_unreturned_fact` over
-`{reply, tool_results_this_turn}`: "does the reply state a price, discount, date, SLA, reference
-number or entitlement that does not appear in the tool results". Log only. This targets five of
-Caroline's ten documented incidents (invented discount, SLA re-quote, founding-member
-over-promise, unbacked follow-up claim, support-email disclosure).
-
-**Grader hookup.** `caroline-daily-review` (rubric in
-`workspaces/operations/skills/muso-caroline-weekly-review/references/grading-rubric.md`) gets one
-new precomputed input: the output of `jev-shadow-report.sh --surface caroline --window 30h`,
-read verbatim the way `voice-summary.txt` is. The LLM grader does not compute agreement; it only
-reports it.
-
-Done when: 7 days and ≥300 turns logged; the daily review posts the agreement table; Dimension B
-findings (gate skips, actionType mismatch) can be cross-read against Jev's answer for the same
-conversation.
+- One Jev call per turn over `{message, last_parts, turn_count, known_facts}` with six
+  questions generated from Caroline's inventory (`scripts/gen-caroline-inventory.sh` →
+  `plugins/intercom/src/caroline-inventory.json` + `caroline-questions.json`, CI-checked):
+  `resolution_path` {caroline_tool, ask_customer, human_required, no_reply}, `intent` (11 router
+  intents + other), `first_tool`, `skill`, `off_topic_or_bad_faith`, `frustration`.
+- The plugin acts on three answers itself: bad faith above band → one decline, then silence;
+  bare closer above band → silence; human_required above band → the existing escalation path
+  with the intent's action type. Everything else becomes a `[ROUTING]` block in her prompt
+  (path, intent, first tool, skill, each with its probability), which AGENTS.md tells her to
+  follow unless a tool result contradicts it.
+- The dead OpenRouter judge (never wired: no key in config, `reason=disabled` on every turn)
+  is replaced by the same call.
+- Every turn logs one `[intercom:jev]` line and one row in
+  `/var/lib/hydra-jev/shadow/caroline.jsonl`; `jev-shadow-report.sh --surface caroline` and
+  the daily review's Dimension B grade it continuously.
+- Bands are set by `scripts/jev-backtest-caroline.sh` on ~60 real conversations from the
+  last 14 days with journal and trajectory-log labels (tool actually called, ticket action
+  type, rule/user escalations, closers, the 2026-09-20 troll), choosing the smallest threshold
+  with zero false positives on the labelled set.
+- **Backtested on 202 real turns before shipping** (2026-09-22, report in the design doc): the
+  routing block and the bad-faith decline ship ON; `silence` and `escalate` ship OFF behind
+  per-branch flags because no threshold reached zero false positives on real customers waiting
+  for an answer, and because the customers who asked for a person outright scored a median of
+  0.39 (the keyword rule already catches them). Turning those two on needs a hand-labelled set
+  of opening messages: Phase 1b.
+- Not in this phase: the post-turn honesty Noul (moves to Phase 3).
 
 ## Phase 2 — Timers and read-only crons, shadow (support + devops, zero write risk)
 

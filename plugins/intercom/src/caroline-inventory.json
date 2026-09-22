@@ -1,0 +1,391 @@
+{
+  "generated_from": {
+    "intents": "plugins/support-tools/src/tools/support-action-router.ts",
+    "skills": "workspaces/support/skills/*/SKILL.md",
+    "tools": "plugins/support-tools/src/tools/*.ts + workspaces/support/TOOLS.md"
+  },
+  "human_required": [
+    "identity or ownership cannot be verified",
+    "cross-owner conflict (someone else claimed or is claiming the customer's profile, credits or workspace)",
+    "refund request",
+    "account deletion / GDPR erasure",
+    "profile deletion or unmerge",
+    "policy exception or waiver",
+    "role-based bulk credit change",
+    "chargeback, fraud or account takeover",
+    "duplicate or post-cancel charge",
+    "founding-member free reinstatement",
+    "on-behalf or cross-account request"
+  ],
+  "intents": [
+    {
+      "action_type_on_handoff": "profile-change",
+      "description": "Gather proof and run safe prechecks; destructive account/profile changes stay human-gated.",
+      "first_read_tool": "profile_lookup",
+      "handoff_when": "Email change, account merge, profile deletion/removal, identity proof mismatch, claimed duplicate, or any destructive request",
+      "intent": "account_profile_change",
+      "write_tools": [
+        "profiles_consolidate"
+      ]
+    },
+    {
+      "action_type_on_handoff": "analytics-followup",
+      "description": "Ground the answer in profile, subscription, and analytics-status data; explain current state; file a follow-up only when evidence shows an account-specific issue.",
+      "first_read_tool": "profile_status",
+      "handoff_when": "profile_status, subscription_status, or profile_analytics_status fails closed; profile_analytics_status reports missing, stale, or inconsistent analytics; Customer is stuck after one grounded explanation",
+      "intent": "analytics_data_complaint",
+      "write_tools": []
+    },
+    {
+      "action_type_on_handoff": null,
+      "description": "Read subscription state, run the retention save hierarchy (50% offer, then free plan), cancel at period end when the customer insists; refunds stay a handoff packet.",
+      "first_read_tool": "subscription_status",
+      "handoff_when": "Any refund request today; billing_status reports past_due, a prior refund, or fails with vip_manual / not_stripe / ambiguous_workspace / not_found; retention_offer_check/apply or cancel_subscription refuses or routes to human (past_due billing, VIP, non-Stripe, ambiguous workspace); Duplicate charge, B2B/manual invoice, chargeback/legal threat, or discount request",
+      "intent": "billing_cancel_refund",
+      "write_tools": [
+        "retention_offer_apply",
+        "cancel_subscription"
+      ]
+    },
+    {
+      "action_type_on_handoff": "catalog-metadata",
+      "description": "Use available profile/credit visibility and file a repair packet until catalog capture tools exist.",
+      "first_read_tool": "profile_status",
+      "handoff_when": "Track/artwork/metadata is missing after lookup; Ownership/dispute ambiguity; Customer supplied enough identifiers for repair",
+      "intent": "catalog_metadata_repair",
+      "write_tools": []
+    },
+    {
+      "action_type_on_handoff": "credit-verify",
+      "description": "Inspect pending UVN credits, ask for exact proof, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
+      "first_read_tool": "credit_verification_check",
+      "handoff_when": "owner_undetermined, impersonation, shared profile, disabled, no approver, non-corroborated proof, or wrapper refusal",
+      "intent": "credit_verification",
+      "write_tools": [
+        "credits_verify"
+      ]
+    },
+    {
+      "action_type_on_handoff": "founding-member",
+      "description": "Read founder status and mint only the customer-requested paid buy-back checkout link.",
+      "first_read_tool": "founding_status",
+      "handoff_when": "Customer asks for free/comp reinstatement, status is ambiguous, link mint disabled/refused, or workspace cannot be verified",
+      "intent": "founding_member",
+      "write_tools": [
+        "founding_buyback_link"
+      ]
+    },
+    {
+      "action_type_on_handoff": "login-recovery",
+      "description": "Collect exact account-state facts and hand off until login/email tools are exposed.",
+      "first_read_tool": "",
+      "handoff_when": "Customer cannot access account, verification email missing, bounce/suppression suspected, account email change needed",
+      "intent": "login_email_verification",
+      "write_tools": []
+    },
+    {
+      "action_type_on_handoff": "order-fulfillment",
+      "description": "Answer order status and correct the verified customer's own shipping address when the order is still editable.",
+      "first_read_tool": "order_lookup",
+      "handoff_when": "Order not found, owner mismatch, vendor-only request, shipped/non-editable order, or apply failure",
+      "intent": "order_fulfillment",
+      "write_tools": [
+        "order_address_update"
+      ]
+    },
+    {
+      "action_type_on_handoff": "profile-claim",
+      "description": "Approve the customer's own pending profile claim when the muso gate says it is safe.",
+      "first_read_tool": "profile_status",
+      "handoff_when": "disabled, owner mismatch, ambiguous profile, shared ownership, competing claim, suspicion flags, or any route_to_human result",
+      "intent": "profile_claim",
+      "write_tools": [
+        "profiles_claim_self"
+      ]
+    },
+    {
+      "action_type_on_handoff": "profile-merge",
+      "description": "Self-serve only same-owner unclaimed duplicate consolidation; everything destructive or cross-owner goes to a packet.",
+      "first_read_tool": "dedupe_check",
+      "handoff_when": "claimed duplicate, cross-owner signal, unmerge-shaped request, disabled, no approver, or ambiguity",
+      "intent": "profile_duplicates",
+      "write_tools": [
+        "profiles_consolidate"
+      ]
+    },
+    {
+      "action_type_on_handoff": "credit-correction",
+      "description": "Remove mechanical wrong credits from a profile the customer owns, without touching production-side roles or wrong-merge cases.",
+      "first_read_tool": "profile_status",
+      "handoff_when": "unmerge-shaped cluster, owner mismatch, unclaimed/multi-owner profile, production-side role refusal, or repeated ambiguity",
+      "intent": "remove_wrong_credits",
+      "write_tools": [
+        "remove_credits"
+      ]
+    }
+  ],
+  "no_reply": [
+    "bare closer after Caroline already acknowledged once",
+    "third or later identical message"
+  ],
+  "skills": [
+    {
+      "activates_when": "Submit structured action requests via ClickUp tasks for operations review",
+      "name": "action-request",
+      "outcome": "When a customer requests a write action (credit change, refund, profile update, dispute), the CS agent creates a structured ClickUp task tagged hydra-action-request in list 901000600160.",
+      "tools_used": []
+    },
+    {
+      "activates_when": "Autonomously remove credits a customer owns from their own profile, OR detect mis-described unmerge requests and escalate them with audit context",
+      "name": "customer-credit-removal",
+      "outcome": "Two related customer requests, handled together:",
+      "tools_used": [
+        "profile_status",
+        "credits_search",
+        "create_ticket",
+        "remove_credits"
+      ]
+    },
+    {
+      "activates_when": "When a customer asks about credits they submitted that are stuck in \"user verification needed\", confirm ownership with the read-only credit_verification_check tool, ask the customer for proof, and route the outcome.",
+      "name": "customer-credit-verification",
+      "outcome": "A customer is asking about credits they submitted that are stuck in user_verification_needed (UVN) – the backend flagged the claim as needing proof.",
+      "tools_used": [
+        "credit_verification_check",
+        "profile_lookup",
+        "profile_status",
+        "credits_search",
+        "credits_verify",
+        "create_ticket"
+      ]
+    },
+    {
+      "activates_when": "Use when a verified customer asks to claim/verify their profile and a pending claim exists on it.",
+      "name": "customer-profile-claim",
+      "outcome": "When a customer asks to claim/verify a profile that is theirs and a pending claim already exists on it, you can approve that claim yourself instead of handing off.",
+      "tools_used": [
+        "profiles_claim_self",
+        "profile_claim_status",
+        "profile_status",
+        "credit_verification_check",
+        "dedupe_check",
+        "create_ticket"
+      ]
+    },
+    {
+      "activates_when": "Merge a customer's OWN duplicate profiles into the profile they own – the SAFE self-service merge case, gated by the muso capability gate. The gate corroborates identity server-side (same or near-same name, the customer's own verified/pending claim, empty dup, or shared tracks) and refuses…",
+      "name": "customer-profile-consolidate",
+      "outcome": "When a customer has duplicate profiles – their real (claimed) profile plus duplicates that fragment their credits – you can fold the duplicates into the profile they own.",
+      "tools_used": [
+        "dedupe_check",
+        "profiles_consolidate",
+        "create_ticket"
+      ]
+    },
+    {
+      "activates_when": "When a customer asks to merge/dedupe their duplicate Muso profiles, verify ownership with the read-only dedupe_check tool and file a high-signal profile-merge ticket for Operations.",
+      "name": "customer-profile-dedupe",
+      "outcome": "A customer says they have duplicate Muso profiles and wants them merged into one.",
+      "tools_used": [
+        "dedupe_check",
+        "profile_status",
+        "profile_lookup",
+        "create_ticket"
+      ]
+    },
+    {
+      "activates_when": "When a customer asks to merge/dedupe duplicate TRACKS (not profiles), capture which track to keep and which duplicate(s) to fold in, then file ONE high-signal track-merge ticket for the Catalog/Operations team.",
+      "name": "customer-track-dedupe",
+      "outcome": "A customer says the same recording appears as two (or more) tracks and wants the duplicates folded into one master.",
+      "tools_used": [
+        "credits_search",
+        "profile_status",
+        "create_ticket"
+      ]
+    },
+    {
+      "activates_when": "Buy a milestone badge or plaque; verify profile and streams, then route pre-order corrections or existing-order issues.",
+      "name": "milestone-badge-purchase",
+      "outcome": "Buy a milestone badge or plaque; verify profile and streams, then route pre-order corrections or existing-order issues.",
+      "tools_used": []
+    },
+    {
+      "activates_when": "Handle plaque/poster order-fulfillment support – Prodigi vendor address-confirmation requests and customer order/shipping questions – by validating and reformatting the shipping address and filing a structured order-fulfillment request for the team to complete.",
+      "name": "order-fulfillment",
+      "outcome": "Muso sells physical acrylic plaques / posters; they're printed and shipped by a print-on-demand vendor, Prodigi.",
+      "tools_used": [
+        "order_lookup",
+        "order_address_update",
+        "create_ticket"
+      ]
+    },
+    {
+      "activates_when": "3-gate retention flow (50% save, free-plan fallback) before cancelling or escalating a refund",
+      "name": "refund-retention",
+      "outcome": "When a customer wants out – a refund request OR a cancellation request – Caroline runs this 3-gate retention flow BEFORE cancelling anything or creating a subscription-refund action-request ticket.",
+      "tools_used": [
+        "profile_lookup",
+        "credits_search",
+        "subscription_status",
+        "billing_status",
+        "profile_status",
+        "create_ticket",
+        "retention_offer_check",
+        "retention_offer_apply",
+        "cancel_subscription"
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "kind": "read",
+      "name": "billing_status",
+      "requires": "verified Intercom contact email only (deriveConvId -> getAuthorEmail); the tool has NO email/team parameter at all, and billing data is private, so an unverifiable anchor fails closed.",
+      "resolves": "muso subscription billing-summary --email <verified-email> --env prod --json (read-only; muso-cli >=0.10.0 -> GET /admin/team/:id/billing-summary)."
+    },
+    {
+      "kind": "write",
+      "name": "cancel_subscription",
+      "requires": "verified Intercom contact email only; requires the explicit confirm: true parameter, ONLY after the customer explicitly asked to cancel AND declined the retention saves.",
+      "resolves": "muso subscription cancel --email <verified-email> --requester <verified-email> --reason \"Customer request via support (Caroline)\" --yes --env prod --json (gated dangerous-tier WRITE, audited server-side)."
+    },
+    {
+      "kind": "write",
+      "name": "company_finder_finalize",
+      "requires": "undocumented",
+      "resolves": "undocumented"
+    },
+    {
+      "kind": "write",
+      "name": "company_finder_prep",
+      "requires": "undocumented",
+      "resolves": "undocumented"
+    },
+    {
+      "kind": "handoff",
+      "name": "create_ticket",
+      "requires": "ClickUp API key (handled by plugin, never visible to agent)",
+      "resolves": "ClickUp task creation in list 901000600160"
+    },
+    {
+      "kind": "read",
+      "name": "credit_verification_check",
+      "requires": "Muso admin JWT (MusoAdminClient, GET-only) + MUSOAI_INTERCOM_TOKEN (env).",
+      "resolves": "read-only lookup of a customer's user_verification_needed (UVN) credits."
+    },
+    {
+      "kind": "read",
+      "name": "credits_search",
+      "requires": "Muso admin JWT bearer (same client as profile_lookup; GET-only, allowlisted)",
+      "resolves": "GET /api/v3/admin/profile/{profileId}/credits?limit=<L>&offset=<O>"
+    },
+    {
+      "kind": "write",
+      "name": "credits_verify",
+      "requires": "same muso host auth + ctx-derived --actor-identity as #14; --intercom-conv-id is REQUIRED (it is the approval-ref).",
+      "resolves": "muso credits verify --actor-identity <verified-email> (APPROVAL-tier PUT: also --yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>) via…"
+    },
+    {
+      "kind": "read",
+      "name": "dedupe_check",
+      "requires": "Muso admin JWT (same MusoAdminClient, GET-only) + MUSOAI_INTERCOM_TOKEN (read from env).",
+      "resolves": "read-only verification for a customer profile-merge request."
+    },
+    {
+      "kind": "write",
+      "name": "founding_buyback_link",
+      "requires": "verified Intercom contact email only -- there is no target parameter, so the link can never be minted for another account.",
+      "resolves": "muso founding buyback-checkout --email <verified-email> --requester <verified-email> --env prod --json (POST /admin/founding/buyback/checkout)."
+    },
+    {
+      "kind": "read",
+      "name": "founding_status",
+      "requires": "verified Intercom contact email only (deriveConvId -> getAuthorEmail); the CLI exact-matches the workspace email server-side and refuses ambiguity.",
+      "resolves": "muso founding status --email <verified-email> --env prod --json (GET /admin/team; the founder envelope lives on the list items)."
+    },
+    {
+      "kind": "write",
+      "name": "order_address_update",
+      "requires": "the wrapper uses muso-admin-api.sh's JWT cache (same Muso admin auth as remove_credits).",
+      "resolves": "PUT /api/v3/admin/orders/{id} via the bash wrapper at workspaces/support/skills/order-fulfillment/scripts/update-order-address.sh (NOT MusoAdminClient – same wrapper-as-boundary model as remove_credits)."
+    },
+    {
+      "kind": "read",
+      "name": "order_lookup",
+      "requires": "Muso admin JWT bearer (same client as the profile tools; GET-only, allowlisted to the single-order read path).",
+      "resolves": "GET /api/v3/admin/orders/{ref} via MusoAdminClient (GET-only, allowlisted)."
+    },
+    {
+      "kind": "read",
+      "name": "profile_analytics_status",
+      "requires": "Muso admin JWT bearer (MusoAdminClient; GET-only, regex-allowlisted to the profile analytics-status read path).",
+      "resolves": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution, GET /api/v3/admin/profile/{id} for direct UUID profile context, and GET /api/v3/admin/profile/{id}/analytics-status for the read-only analytics…"
+    },
+    {
+      "kind": "read",
+      "name": "profile_claim_status",
+      "requires": "claim rows are PRIVATE (they carry the claiming team's email and the submitted proof links), so this tool anchors to the verified Intercom contact email (deriveConvId -> getAuthorEmail) and FAILS CLOSED -- no claim…",
+      "resolves": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution, GET /api/v3/admin/profile/{id} for claim/ownership context, GET /api/v3/admin/claiming?profilesIds=<id>&limit=21 for the profile's claim requests…"
+    },
+    {
+      "kind": "read",
+      "name": "profile_credits_status",
+      "requires": "the Intercom anchor (same deriveConvId -> getAuthorEmail as dedupe_check) is best-effort for the PUBLIC catalog facts -- an unverifiable anchor DEGRADES the ownership-derived fields to owner_undetermined instead of…",
+      "resolves": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution and the same-name duplicate-candidate scan, GET /api/v3/admin/profile/{id} for the resolved profile / each candidate / a stated target profile, GET…"
+    },
+    {
+      "kind": "read",
+      "name": "profile_lookup",
+      "requires": "Muso admin JWT bearer (handled by plugin via MusoAdminClient; GET-only and path-allowlisted)",
+      "resolves": "GET /api/v3/admin/profile/search?keyword=<q>"
+    },
+    {
+      "kind": "read",
+      "name": "profile_status",
+      "requires": "Muso admin JWT bearer (MusoAdminClient; GET-only, regex-allowlisted to the 3 profile endpoints).",
+      "resolves": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution, GET /api/v3/admin/profile/{id} for direct UUID, GET /api/v3/admin/profile/{id}/credits?limit=20&offset=0 for credits."
+    },
+    {
+      "kind": "write",
+      "name": "profiles_claim_self",
+      "requires": "muso uses the host login (MUSO_ADMIN_*, MUSO_STATE_DIR); the --actor-identity is the ctx-derived verified Intercom author email (deriveConvId+getAuthorEmail), NEVER a model arg.",
+      "resolves": "muso profiles claim-self --actor-identity <verified-email> via the bash wrapper at workspaces/support/skills/customer-profile-claim/scripts/claim-self.sh (the muso capability gate is the ownership/caps/audit boundary…"
+    },
+    {
+      "kind": "write",
+      "name": "profiles_consolidate",
+      "requires": "same muso host auth + ctx-derived --actor-identity as #14; --intercom-conv-id is REQUIRED (it is the approval-ref).",
+      "resolves": "muso profiles consolidate --actor-identity <verified-email> (APPROVAL-tier: --yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>) via…"
+    },
+    {
+      "kind": "write",
+      "name": "remove_credits",
+      "requires": "The wrapper uses muso-admin-api.sh's JWT cache (same Muso admin JWT as the other admin-API tools).",
+      "resolves": "DELETE /api/v3/admin/track/{trackId}/profile/{profileId}/credits via the bash wrapper at workspaces/support/skills/customer-credit-removal/scripts/remove-credits.sh."
+    },
+    {
+      "kind": "write",
+      "name": "retention_offer_apply",
+      "requires": "verified Intercom contact email only; requires the explicit confirm: true parameter, ONLY after the customer explicitly accepts the offer in this conversation.",
+      "resolves": "muso subscription apply-retention-offer --email <verified-email> --requester <verified-email> --env prod --json (gated WRITE)."
+    },
+    {
+      "kind": "read",
+      "name": "retention_offer_check",
+      "requires": "verified Intercom contact email only (deriveConvId -> getAuthorEmail); the CLI exact-matches the workspace email server-side and refuses ambiguity.",
+      "resolves": "muso subscription retention-offer --email <verified-email> --env prod --json (read-only)."
+    },
+    {
+      "kind": "read",
+      "name": "subscription_status",
+      "requires": "the lookup email is the verified Intercom contact (deriveConvId -> getAuthorEmail), NEVER an email the customer types.",
+      "resolves": "muso teams list --email <verified-email> --env prod --json (GET /admin/team), which returns each workspace's subscription ({plan, status, period, usersLimit}) inline."
+    },
+    {
+      "kind": "read",
+      "name": "support_action_router",
+      "requires": "intent plus optional state.",
+      "resolves": "a deterministic read-only registry inside support-tools."
+    }
+  ]
+}
