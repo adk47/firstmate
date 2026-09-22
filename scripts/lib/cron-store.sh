@@ -230,35 +230,47 @@ cron_store_diff_is_empty() {
 # Tunables, named like the GATEWAY_*/RI_* knobs elsewhere in scripts/.
 # 5 attempts x 2s originally covered the ~5s a gateway takes from exec to
 # "http server listening" (measured 2026-08-18 on node-8: 12:43:45 restart ->
-# 12:43:50 listening). That budget is NOT enough for the second post-restart
-# gap: on openclaw 2026.8.2 the main gateway freezes its event loop roughly
-# 55s after "listening" and stays frozen ~4-5 minutes (journal: "host timing
-# gap detected: process was frozen ~218913ms" 2026-09-17 17:41Z, ~265559ms
-# 2026-09-18 13:41Z). A frozen gateway is LISTENING, so the CLI's WebSocket
-# handshake hangs ~50s per attempt instead of being refused; 5 attempts end
-# inside the freeze (2026-09-18 13:30:43 -> 13:34:57) and the read fails,
-# rolling back a deploy whose diff never touched cron -- and the rollback's
-# own smoke test then fails the same way (run 35350308199). 10 attempts
-# (~9 min worst case) outlast the measured freeze with margin; a genuinely
-# dead gateway still fails within that budget. The freeze itself is a
+# 12:43:50 listening), and a later bump to 10 tries covered a measured
+# 4-5 minute post-restart freeze by attempt COUNT. That unit turned out to be
+# wrong: on openclaw 2026.8.2 the main gateway freezes its event loop roughly
+# 55s after "listening" and stays frozen for a MEASURED 218s, 265s, and 298s
+# across three separate incidents (journal: "host timing gap detected: process
+# was frozen ~218913ms" 2026-09-17 17:41Z, ~265559ms 2026-09-18 13:41Z,
+# ~298xxxms 2026-09-21 18:12Z, hydra issue #984). A frozen gateway is still
+# LISTENING, so the CLI's WebSocket handshake HANGS instead of being refused —
+# each attempt can eat minutes instead of the sub-second refusal the retry was
+# designed around, so ten hanging attempts can exhaust themselves entirely
+# inside a single freeze (2026-09-21 18:12-18:15Z) without ever outlasting it.
+# The bound has to be wall-clock, not attempt count. CRON_STORE_READ_DEADLINE_SECS
+# (55s to listening + 298s measured-worst freeze + margin = 420s) bounds total
+# elapsed time; CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS caps any single attempt so
+# a hang can't silently consume the whole deadline in one shot and starve the
+# retry of a second try. CRON_STORE_READ_TRIES is still accepted and validated
+# (other scripts/tests export it) but no longer bounds the loop -- a genuinely
+# dead gateway now fails on the deadline instead. The freeze itself is a
 # separate defect (tracked outside this file), not something this read can
 # fix -- it can only stop misreporting it as an unverifiable cron store.
 CRON_STORE_READ_TRIES="${CRON_STORE_READ_TRIES:-10}"
-CRON_STORE_READ_POLL_SECS="${CRON_STORE_READ_POLL_SECS:-2}"
+CRON_STORE_READ_POLL_SECS="${CRON_STORE_READ_POLL_SECS:-5}"
+CRON_STORE_READ_DEADLINE_SECS="${CRON_STORE_READ_DEADLINE_SECS:-420}"
+CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS="${CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS:-60}"
 
 # _cron_store_gateway_read <profile>
-# Echo the raw `cron list --all --json` output, retrying a bounded number of
-# times. RETRY EXISTS FOR ONE REASON: this runs seconds after a gateway
-# restart, and the CLI needs the gateway's HTTP server to be listening. On
-# 2026-08-18 a single attempt landed 1s before it came up, and the resulting
-# refused connection was reported as an unverifiable cron store — rolling back
-# a deploy whose diff never touched cron. A transient connect failure is not
-# evidence about the store's contents.
+# Echo the raw `cron list --all --json` output, retrying within a bounded
+# wall-clock deadline. RETRY EXISTS FOR ONE REASON: this runs seconds after a
+# gateway restart, and the CLI needs the gateway's HTTP server to be
+# listening. On 2026-08-18 a single attempt landed 1s before it came up, and
+# the resulting refused connection was reported as an unverifiable cron store
+# — rolling back a deploy whose diff never touched cron. A transient connect
+# failure is not evidence about the store's contents.
 #
 # Bounded on purpose: a permanently dead gateway must still FAIL, and fail
-# within a knowable budget, rather than hang the deploy.
+# within a knowable budget, rather than hang the deploy. Each attempt is
+# itself timed out, so a frozen-but-listening gateway (which hangs the
+# handshake instead of refusing it) can't burn the whole deadline on one
+# attempt.
 _cron_store_gateway_read() {
-  local profile="$1" bin raw err rc i
+  local profile="$1" bin raw err rc i start deadline now elapsed timeout_cmd remaining attempt_timeout
   bin="${OPENCLAW_BIN:-openclaw}"
 
   # VALIDATE BEFORE ANY ARITHMETIC. Bash recursively evaluates a variable's
@@ -268,7 +280,9 @@ _cron_store_gateway_read() {
   # typo like `banana` evaluates to 0, so the loop makes ZERO attempts, the
   # read returns failure without ever contacting the gateway, and a perfectly
   # healthy cron store becomes a FATAL + rollback. Refuse both up front rather
-  # than let a knob decide how much of the gate runs.
+  # than let a knob decide how much of the gate runs. All four knobs are
+  # checked the same way, including the two the loop no longer arithmetically
+  # depends on (TRIES is still interpolated into log text below).
   if [[ ! "$CRON_STORE_READ_TRIES" =~ ^[0-9]+$ ]] || [ "$CRON_STORE_READ_TRIES" -lt 1 ]; then
     printf '        cron-store: CRON_STORE_READ_TRIES must be a positive integer, got %s\n' \
       "$(printf '%q' "$CRON_STORE_READ_TRIES")" >&2
@@ -279,11 +293,68 @@ _cron_store_gateway_read() {
       "$(printf '%q' "$CRON_STORE_READ_POLL_SECS")" >&2
     return 1
   fi
+  if [[ ! "$CRON_STORE_READ_DEADLINE_SECS" =~ ^[0-9]+$ ]] || [ "$CRON_STORE_READ_DEADLINE_SECS" -lt 1 ]; then
+    printf '        cron-store: CRON_STORE_READ_DEADLINE_SECS must be a positive integer, got %s\n' \
+      "$(printf '%q' "$CRON_STORE_READ_DEADLINE_SECS")" >&2
+    return 1
+  fi
+  if [[ ! "$CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS" =~ ^[0-9]+$ ]] || [ "$CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS" -lt 1 ]; then
+    printf '        cron-store: CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS must be a positive integer, got %s\n' \
+      "$(printf '%q' "$CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS")" >&2
+    return 1
+  fi
+
+  # `timeout` is coreutils; on macOS it's usually absent (brew installs it as
+  # `gtimeout` to avoid clobbering nothing — there's no BSD `timeout`). The
+  # deploy/rollback/smoke-test path runs on node-8 (linux), so the wrapper is
+  # load-bearing there; local/macOS runs without it, with a one-line note,
+  # rather than fail a dependency the deploy never has.
+  timeout_cmd=""
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_cmd="timeout"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_cmd="gtimeout"
+  fi
 
   err="$(mktemp)"
-  for (( i = 1; i <= CRON_STORE_READ_TRIES; i++ )); do
+  if [ -z "$timeout_cmd" ]; then
+    printf 'no timeout/gtimeout on PATH -- running attempts without a per-attempt cap\n' >> "$err"
+  fi
+
+  start=$(date +%s)
+  deadline=$(( start + CRON_STORE_READ_DEADLINE_SECS ))
+  i=0
+  while :; do
+    # QA finding (D1): a fixed per-attempt timeout can outrun the deadline --
+    # an attempt starting with 2s left but handed the full (say) 60s timeout
+    # can run to t+60, breaking the "bounded by CRON_STORE_READ_DEADLINE_SECS"
+    # promise every caller relies on. Clamp to whatever time is actually left
+    # before spending it.
+    now=$(date +%s)
+    remaining=$(( deadline - now ))
+    [ "$remaining" -gt 0 ] || break
+    if [ "$remaining" -lt "$CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS" ]; then
+      attempt_timeout="$remaining"
+    else
+      attempt_timeout="$CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS"
+    fi
+    i=$(( i + 1 ))
     rc=0
-    raw=$("$bin" --profile "$profile" cron list --all --json 2>"$err") || rc=$?
+    if [ -n "$timeout_cmd" ]; then
+      # No --foreground: this runs non-interactively (a deploy/smoke-test
+      # script, never a terminal foreground job), and --foreground disables
+      # timeout's default new-process-group kill, sending the signal to the
+      # direct child ONLY. openclaw's CLI is itself a wrapper around further
+      # child processes, and a hung network call lives below that top-level
+      # process -- verified empirically: with --foreground a 30s-sleeping
+      # grandchild rode out the full sleep past a 3s attempt timeout;
+      # without it, the whole process group is killed on schedule. The
+      # default group-kill behavior is what actually bounds a hung attempt.
+      raw=$("$timeout_cmd" "$attempt_timeout" \
+              "$bin" --profile "$profile" cron list --all --json 2>"$err") || rc=$?
+    else
+      raw=$("$bin" --profile "$profile" cron list --all --json 2>"$err") || rc=$?
+    fi
     # An rc-0 read with EMPTY stdout is a failed attempt too, not a store with
     # no jobs: deploy run 35116340141 (2026-09-16 15:44Z) got exactly that
     # ~2 min after the Step 6 restart, the smoke test took it as a verdict and
@@ -295,11 +366,20 @@ _cron_store_gateway_read() {
       rm -f "$err"
       return 0
     fi
-    if [ "$rc" -eq 0 ]; then
-      printf 'cron list --all --json exited 0 with EMPTY output (attempt %s of %s)\n' "$i" "$CRON_STORE_READ_TRIES" >> "$err"
+    if [ "$rc" -eq 124 ]; then
+      printf 'attempt %s hung for %ss (timed out)\n' "$i" "$attempt_timeout" >> "$err"
+    elif [ "$rc" -eq 0 ]; then
+      printf 'cron list --all --json exited 0 with EMPTY output (attempt %s)\n' "$i" >> "$err"
     fi
-    [ "$i" -lt "$CRON_STORE_READ_TRIES" ] && sleep "$CRON_STORE_READ_POLL_SECS"
+    now=$(date +%s)
+    [ "$now" -lt "$deadline" ] || break
+    sleep "$CRON_STORE_READ_POLL_SECS"
+    now=$(date +%s)
+    [ "$now" -lt "$deadline" ] || break
   done
+  elapsed=$(( $(date +%s) - start ))
+  printf 'gave up after %s attempt(s) / %ss (deadline %ss, attempt timeout %ss)\n' \
+    "$i" "$elapsed" "$CRON_STORE_READ_DEADLINE_SECS" "$CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS" >> "$err"
   # Report WHY on stderr, so a refused connection is never mistaken for a
   # corrupt store. Same idiom cron_store_reimport uses below: the caller's
   # fatal line lands directly under this, and the deploy log carries both.

@@ -102,6 +102,27 @@ run_rollback() {
 
   run_rollback
 
+  [ "$status" -eq 0 ]
+  [ ! -f "$DEPLOY/.deploy-mutating" ]
+  [[ "$output" == *"Rollback complete."* ]]
+}
+
+@test "a smoke-test failure after rollback still exits non-zero AND the marker is already cleared (issue #984)" {
+  # Regression for 2026-09-21: the marker clear used to sit AFTER the smoke
+  # test, so a smoke-test failure (e.g. the post-restart event-loop freeze,
+  # issue #984) left the marker behind and blocked every later deploy for
+  # 16h even though the tree was already restored and the gateways already
+  # restarted. The clear must happen before the smoke test runs, so it has
+  # already happened by the time the smoke test fails.
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  : > "$DEPLOY/.deploy-mutating"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$SRC/scripts/smoke-test.sh"
+  chmod +x "$SRC/scripts/smoke-test.sh"
+
+  run_rollback
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Smoke test FAILED"* ]]
   [ ! -f "$DEPLOY/.deploy-mutating" ]
 }
 

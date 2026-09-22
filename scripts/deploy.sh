@@ -1428,6 +1428,54 @@ DEPLOY_CHANGED_FILES=""
 # shellcheck disable=SC2034  # consumed by sourced lib/edge-restart-gate.sh
 DEPLOY_DIFF_COMPUTED=0
 
+# decide_marker_takeover <owner-token> [repo]
+#
+# Belt-and-braces for the leftover-marker WARN below: a rollback that dies
+# before clear_mutation_marker (SIGKILL, ssh drop — incident 2026-09-21, GHA
+# run 35636138551) leaves .deploy-mutating owned by a GitHub Actions run that
+# is provably dead, and nothing takes that over automatically, so the fleet
+# stays stranded until a human logs into node-8. This decides whether THAT
+# is the situation: only an owner shaped like `gha-<run_id>-<attempt>` (a
+# GitHub Actions run — NEVER a `manual-...` owner, which may be a laptop
+# deploy genuinely mid-flight) whose run is reported `completed` by the
+# GitHub API is taken over. Any other outcome (owner not a gha token, gh
+# missing, an API error/timeout, or a live status such as in_progress/
+# queued) leaves today's behaviour untouched: the WARN below, and later the
+# rc-2 refusal at the claim site. An operator-set
+# HYDRA_TAKEOVER_MUTATION_MARKER is never overridden.
+#
+# On takeover, exports HYDRA_TAKEOVER_MUTATION_MARKER so the existing claim
+# (claim_mutation_marker, below) performs its compare-and-swap. Logs its
+# reasoning either way via `log` (must be defined by the caller).
+decide_marker_takeover() {
+  local owner="${1:-}" repo="${2:-}"
+  if [[ -n "${HYDRA_TAKEOVER_MUTATION_MARKER:-}" ]]; then
+    log "  HYDRA_TAKEOVER_MUTATION_MARKER is already set by the operator; leaving it as is."
+    return 0
+  fi
+  if [[ ! "$owner" =~ ^gha-([0-9]+)-[0-9]+$ ]]; then
+    log "  owner '$owner' is not a GitHub Actions run token (gha-<run_id>-<attempt>); no automatic takeover (it may be a manual deploy genuinely mid-flight)."
+    return 0
+  fi
+  local run_id="${BASH_REMATCH[1]}"
+  if ! command -v gh >/dev/null 2>&1; then
+    log "  owner run $run_id: gh is not on PATH, cannot check whether it finished; no automatic takeover."
+    return 0
+  fi
+  local run_status="" gh_rc=0
+  run_status="$(timeout 20 gh api "repos/${repo}/actions/runs/${run_id}" --jq .status 2>/dev/null)" || gh_rc=$?  # hydra-hook: reviewed-indirection reviewed-argv (gh by literal name under a literal timeout; the gate cannot see through the substitution)
+  if [[ "$gh_rc" -ne 0 || -z "$run_status" ]]; then
+    log "  owner run $run_id: could not read its status from GitHub (gh rc=$gh_rc); no automatic takeover."
+    return 0
+  fi
+  if [[ "$run_status" != "completed" ]]; then
+    log "  owner run $run_id is '$run_status' on GitHub (not completed); no automatic takeover."
+    return 0
+  fi
+  log "  owner run $run_id is completed on GitHub; taking the marker over (compare-and-swap on token $owner)"
+  export HYDRA_TAKEOVER_MUTATION_MARKER="$owner"
+}
+
 # A leftover .deploy-mutating marker means a PREVIOUS run wrote it (right
 # after its Step 4a passed) and never reached a clean end state (neither
 # the .deployed-sha baseline write nor rollback.sh cleared it). That is a
@@ -1447,8 +1495,11 @@ else
   fi
 fi
 if $marker_precheck; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
-  log "WARN: $DEPLOY_PATH/.deploy-mutating already exists (owner: $(cat "$DEPLOY_PATH/.deploy-mutating" 2>/dev/null || echo unreadable)); a previous deploy never completed or rolled back, or another deploy is mid-flight."
+  marker_owner="$(cat "$DEPLOY_PATH/.deploy-mutating" 2>/dev/null || echo unreadable)"
+  log "WARN: $DEPLOY_PATH/.deploy-mutating already exists (owner: $marker_owner); a previous deploy never completed or rolled back, or another deploy is mid-flight."
   log "WARN: a halt in this run will therefore trigger a rollback (the marker looks the same either way)."
+  decide_marker_takeover "$marker_owner" "${REPO:-${GITHUB_REPOSITORY:-Muso-AI/hydra}}"
+  unset marker_owner
 fi
 unset marker_precheck
 
@@ -3480,7 +3531,7 @@ if needs_target "main" && [ -f "$HYDRA_ROOT/cron-jobs.json" ]; then
     2)
       fail "cron convergence: could not count jobs in $HYDRA_ROOT/cron-jobs.json" ;;
     3)
-      fail "cron convergence: 'openclaw --profile main cron list --all --json' failed or returned unparseable JSON after ${CRON_STORE_READ_TRIES} attempt(s) — refusing to assume the cron store is correct (the CLI's own error is logged directly above)" ;;
+      fail "cron convergence: 'openclaw --profile main cron list --all --json' failed or returned unparseable JSON within ${CRON_STORE_READ_DEADLINE_SECS:-420}s (attempt timeout ${CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS:-60}s) — refusing to assume the cron store is correct (the CLI's own error is logged directly above)" ;;
     4)
       fail "cron convergence: the gateway's cron list came back PAGINATED (hasMore=true). The durable count cannot be derived from a truncated page and this openclaw build exposes no paging flag, so the store is unverifiable — refusing to assume it is correct." ;;
     5)

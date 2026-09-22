@@ -385,25 +385,23 @@ sleep 5
 log "  Gateways restarted."
 
 # -------------------------------------------------------------------
-# Step 3: Run smoke test
-# -------------------------------------------------------------------
-log "Step 3/4: Running smoke test..."
-if ! "$SCRIPT_DIR/smoke-test.sh" all; then
-  fail "Smoke test FAILED after rollback. System may be in a bad state."
-fi
-log "  Smoke test passed."
-
-# -------------------------------------------------------------------
-# Step 3b: Clear the mutation marker BEFORE announcing success
+# Step 2b: Clear the mutation marker (tree restored and gateways
+# restarted -- the mutation is over whatever the smoke test says)
 # -------------------------------------------------------------------
 # The tree is restored and the gateways are back, so the marker deploy.sh
 # wrote when it started mutating must go: a leftover marker is a foreign
 # owner to every later deploy, which then refuses to claim it and the daily
-# schedule stays blocked. That is why this runs BEFORE the success
-# notification and why a failure here is a FATAL, not a swallowed rc
-# (QA Important, PR #948 round 4). The helper retries once; the ssh path
-# streams the lib so the retry runs on node-8.
-log "Step 3b/4: Clearing the mutation marker..."
+# schedule stays blocked. This runs here -- right after the mutation itself
+# is over -- rather than after the smoke test below: on 2026-09-21 the
+# post-restart event-loop freeze (issue #984) hung the smoke test's
+# cron-store read for ~6 minutes, `fail` exited the script at the smoke-test
+# step, and because the clear used to sit AFTER that step the marker
+# survived and blocked every deploy for 16h even though the mutation itself
+# had already finished cleanly at Step 2. A failure to clear is still a
+# FATAL, not a swallowed rc (QA Important, PR #948 round 4) -- it just can no
+# longer be gated on smoke-test success. The helper retries once; the ssh
+# path streams the lib so the retry runs on node-8.
+log "Step 2b/4: Clearing the mutation marker (tree restored and gateways restarted -- the mutation is over whatever the smoke test says)..."
 marker_clear_rc=0
 if $HYDRA_LOCAL; then
   clear_mutation_marker "$DEPLOY_PATH/.deploy-mutating" || marker_clear_rc=$?
@@ -416,6 +414,15 @@ if [ "$marker_clear_rc" -ne 0 ]; then
   fail "rollback restored $PREVIOUS_SHA and restarted the gateways, but could not clear $DEPLOY_PATH/.deploy-mutating (rc=$marker_clear_rc). Every scheduled deploy will refuse to claim it: run  rm -f $DEPLOY_PATH/.deploy-mutating  on node-8, then re-check with scripts/lib/deploy-rollback-gate.sh."
 fi
 log "  Mutation marker cleared."
+
+# -------------------------------------------------------------------
+# Step 3: Run smoke test
+# -------------------------------------------------------------------
+log "Step 3/4: Running smoke test..."
+if ! "$SCRIPT_DIR/smoke-test.sh" all; then
+  fail "Smoke test FAILED after rollback. System may be in a bad state."
+fi
+log "  Smoke test passed."
 
 # -------------------------------------------------------------------
 # Step 4: Post rollback status
