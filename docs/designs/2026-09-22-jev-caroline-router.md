@@ -279,6 +279,41 @@ that conversation", a weak proxy for what the opening message asked for. Hand-ch
 eight known-shape messages were correct on all eight. Re-labelling (a human pass over ~60 opening
 messages) is the prerequisite for turning `silence` and `escalate` on, and is Phase 1b.
 
+## Phase 1b: hand-labelled result (2026-09-22)
+
+The cohort labels above are proxies ("which tool Caroline called first"), so
+they cannot set a safe band for `silence` or `escalate`. Phase 1b labels by
+hand, with context. Only turns Jev scores HIGH can become false positives at a
+strict band, so the labelled set is every turn in the 15:33 run with
+`no_reply >= 0.60` or `human_required >= 0.50`: **47 turns across 23
+conversations**, each read with Caroline's message before it and her reply
+after it. Labels: *no_reply is right* = the message needs no answer at all;
+*human_required is right* = Caroline has no tool path and a person must act.
+Raw set, redacted: node-8 `/var/lib/caroline-backtest-v3/label-set.json`.
+
+**`silence` stays OFF.** Of the 28 turns scoring `no_reply >= 0.60`, 15 were
+customers who needed an answer, up to 0.97 (a status ping; a profile link sent
+to be added to a merge). No band below 0.98 is clean, and 0.98 fires on
+nothing. Behind the closer guard it was worse than it looked: the guard
+treated any message of three words or fewer as a closer, so "urgent" after an
+escalation (0.89) and a bare profile link (0.64) both passed it. **Fixed in
+this PR**: the guard is an exact closer-phrase match only, pinned by tests
+built from those turns. With the fixed guard no labelled non-closer passes, but
+only a handful of real closers score high enough to fire, so the branch would
+save a few "Anytime!" replies a day and nothing of Jan's. Not worth turning on.
+One class stays open if it ever is: "ok" in reply to a yes/no question is
+consent, not a closer; the guard would need to read Caroline's previous turn.
+
+**`escalate` stays OFF, permanently for this surface.** The highest-scoring
+false positive is a policy question Caroline answered correctly ("could my
+account get deleted?", 0.93); status pings on cases already with a person
+score 0.58-0.76; a "thanks" after an escalation scores 0.75. The only turns
+above 0.93 are one fraud claim. More fundamentally, escalation cannot make Jan
+work less: it can only route to him sooner. Explicit "I want a person" asks are
+already caught by the keyword rule, and the fraud and legal claims Jev does
+score high are already escalated by the rule layer (cohort b). Jev's value on
+this surface is the routing block and `decline`, both ON.
+
 ## Rollout
 
 Merge → the next deploy (config change needs the gateway restart the deploy performs). The

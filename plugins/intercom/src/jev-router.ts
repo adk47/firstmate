@@ -245,7 +245,6 @@ const CLOSER_PHRASES = new Set([
   "thanks so much",
 ]);
 
-const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}]/gu;
 const SIGNATURE_LINE_RE = /^(--\s*$|sent from |regards,?$|best,?$|cheers,?$)/i;
 
 export function isCloserShaped(message: string): boolean {
@@ -266,18 +265,13 @@ export function isCloserShaped(message: string): boolean {
     .trim()
     .toLowerCase();
   if (stripped.length === 0) return false;
-  if (CLOSER_PHRASES.has(stripped)) return true;
-
-  // Word count for the "≤3 words" fallback is computed emoji-stripped, so a
-  // bare emoji (or emoji + short text) is judged on its real word count.
-  const words = stripped
-    .replace(EMOJI_RE, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean);
-  if (words.length > 8) return false;
-  return words.length <= 3;
+  // EXACT phrase match only. There used to be a fallback treating any message
+  // of three words or fewer as a closer; the Phase 1b hand-labelled set
+  // (docs/designs/2026-09-22-jev-caroline-router.md) showed what it admits: a
+  // customer writing "urgent" after an escalation scored no_reply 0.89, and a
+  // bare profile link (one "word") scored 0.64. Both needed a reply, both
+  // would have been silenced. Short is not the same as finished.
+  return CLOSER_PHRASES.has(stripped);
 }
 
 function choiceLabelAndProb(answer: JevAnswer | undefined): { label: string; p: number } {

@@ -104,6 +104,24 @@ describe("isCloserShaped", () => {
     expect(isCloserShaped("")).toBe(false);
     expect(isCloserShaped("   ")).toBe(false);
   });
+
+  // Phase 1b hand-labelled set (docs/designs/2026-09-22-jev-caroline-router.md).
+  // Each of these is SHORT and has no "?", and each was a real customer who
+  // needed a reply. A "three words or fewer is a closer" rule admitted all of
+  // them; the guard is now an exact phrase match.
+  it("is false for a short message that is not a closer phrase: 'urgent' after an escalation (no_reply 0.89)", () => {
+    expect(isCloserShaped("urgent")).toBe(false);
+  });
+
+  it("is false for a bare profile link sent to be merged (no_reply 0.64)", () => {
+    expect(isCloserShaped("https://muso.ai/profile/eec1e131-2115-4ea7-8390-7a7303983f5a")).toBe(false);
+  });
+
+  it("is false for other short non-closers: a greeting, a fragment, an answer to Caroline's question", () => {
+    expect(isCloserShaped("hi")).toBe(false);
+    expect(isCloserShaped("soundexchange")).toBe(false);
+    expect(isCloserShaped("I keep kameeh")).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
