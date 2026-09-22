@@ -989,9 +989,12 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     size=$actual_size
   fi
 
-  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
+  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
     # No usable cursor (a brand-new task, or one invalidated by a fold-version
-    # bump, an identity change, or a replaced file). This fold must start at byte
+    # bump, an identity change, or a replaced file), or a cursor that has already
+    # folded past the caller's captured end: its persisted open set may carry a
+    # transition appended after the capture, so a caller bounded at that capture
+    # must refold the captured prefix instead. This fold must start at byte
     # 0 so NO decision is ever dropped; the no-fork engine makes that full read
     # cheap, and _fm_status_read_span reads it in bounded 64 KiB syscalls. The
     # watcher, whose poll drives the span classifier, touches its liveness beacon

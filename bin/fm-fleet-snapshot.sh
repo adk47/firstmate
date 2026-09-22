@@ -584,7 +584,7 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
 
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
-  local status_log status_capture report_path report_capture opendecisions_file
+  local status_log status_capture report_path report_capture opendecisions_file captured_end
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
@@ -604,15 +604,26 @@ prefetch_task_observations() {  # <meta> <id>
     # instead of serially in task_json_lines. The cursor-backed incremental fold
     # reads only bytes appended since its last offset, so its cost is bounded by
     # new appends rather than the log's lifetime size. It runs READ-ONLY against
-    # the LIVE status file: it takes the persisted open set from the cursor the
-    # wake drain owns without advancing it (that cursor doubles as the drain's
-    # legacy presentation offset, so only the drain may move it), keeps its
-    # scratch chunk in this snapshot's own task dir rather than state/, and the
-    # generation check above already proved this task's generation is current.
+    # the LIVE status file, bounded at the captured copy's byte size: the capture
+    # is a byte-identical prefix of the append-only live log, so the fold covers
+    # exactly the observation crew_state_json below reads, and a decision the
+    # task appends after the capture cannot leak into this snapshot's hints. It
+    # takes the persisted open set from the cursor the wake drain owns without
+    # advancing it (that cursor doubles as the drain's legacy presentation
+    # offset, so only the drain may move it), keeps its scratch chunk in this
+    # snapshot's own task dir rather than state/, and the generation check above
+    # already proved this task's generation is current.
     if [ -f "$status_capture" ]; then
-      FM_OPEN_DECISIONS_READONLY=1 FM_OPEN_DECISIONS_SCRATCH_DIR="$SNAPSHOT_TASK_DIR" \
-        status_open_decisions_incremental "$status_log" \
-        > "$opendecisions_file" 2>/dev/null || : > "$opendecisions_file"
+      captured_end=$(_fm_status_file_size "$status_capture") || captured_end=''
+      captured_end=${captured_end//[[:space:]]/}
+      case "$captured_end" in
+        ''|*[!0-9]*) : > "$opendecisions_file" ;;
+        *)
+          FM_OPEN_DECISIONS_READONLY=1 FM_OPEN_DECISIONS_SCRATCH_DIR="$SNAPSHOT_TASK_DIR" \
+            status_open_decisions_incremental "$status_log" "$captured_end" \
+            > "$opendecisions_file" 2>/dev/null || : > "$opendecisions_file"
+          ;;
+      esac
     fi
   fi
 

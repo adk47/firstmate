@@ -355,8 +355,64 @@ SH
   pass "the snapshot's read-only fold keeps its scratch chunk out of the drain-owned state dir"
 }
 
+# The snapshot bounds its read-only fold at the byte size of the status copy it
+# captured, while the drain's cursor may already have folded the live log past
+# that point. A cursor ahead of the capture must never lend the snapshot a
+# transition the task appended after the capture, in either direction: a new
+# decision must not appear, and a post-capture close must not hide a decision
+# that was open in the captured observation.
+test_captured_end_fold_refolds_when_cursor_is_ahead_of_capture() {
+  local dir state status scratch cursor captured_end open cursor_before cursor_after
+
+  dir=$(make_case captured-end-refold)
+  state="$dir/state"
+  status="$state/lane.status"
+  scratch="$dir/scratch"
+  cursor="$state/.lane.open-decisions-cursor"
+  mkdir -p "$scratch"
+
+  # Direction 1: the capture saw no decision; one lands after it, and the drain
+  # folds the whole live log, moving its cursor past the captured end.
+  printf 'working: captured state\n' > "$status"
+  captured_end=$(file_bytes "$status")
+  printf 'needs-decision [key=late]: appended after capture\n' >> "$status"
+  status_open_decisions_incremental "$status" > /dev/null \
+    || fail "the drain fold did not complete"
+  [ -f "$cursor" ] || fail "the drain fold did not persist its cursor"
+  cursor_before=$(cat "$cursor")
+  open=$(FM_OPEN_DECISIONS_READONLY=1 FM_OPEN_DECISIONS_SCRATCH_DIR="$scratch" \
+    status_open_decisions_incremental "$status" "$captured_end")
+  [ -z "$open" ] \
+    || fail "a cursor ahead of the capture leaked a post-capture decision into the captured fold: $open"
+  cursor_after=$(cat "$cursor")
+  [ "$cursor_after" = "$cursor_before" ] \
+    || fail "the read-only captured fold moved the drain-owned cursor"
+
+  # Direction 2: the capture saw an open decision; the task resolves it after
+  # the capture and the drain folds that close. The captured observation still
+  # holds the decision open.
+  printf 'needs-decision [key=held]: pick the bounded path\n' > "$status"
+  rm -f "$cursor"
+  captured_end=$(file_bytes "$status")
+  printf 'resolved [key=held]: picked after capture\n' >> "$status"
+  open=$(status_open_decisions_incremental "$status") \
+    || fail "the drain fold did not complete"
+  [ -z "$open" ] || fail "the drain fold did not fold the post-capture close: $open"
+  open=$(FM_OPEN_DECISIONS_READONLY=1 FM_OPEN_DECISIONS_SCRATCH_DIR="$scratch" \
+    status_open_decisions_incremental "$status" "$captured_end")
+  case "$open" in
+    "held"$'\t'"needs-decision"$'\t'*) ;;
+    *) fail "a cursor ahead of the capture hid a decision that was open at capture: '$open'" ;;
+  esac
+  [ -z "$(find "$scratch" -mindepth 1)" ] \
+    || fail "the captured fold left its scratch chunk behind: $(find "$scratch" -mindepth 1)"
+
+  pass "a captured-end fold refolds the captured prefix when the drain cursor is ahead of the capture"
+}
+
 test_latest_status_line_is_bounded_and_exact
 test_crew_state_status_read_is_bounded
 test_read_only_fold_keeps_scratch_out_of_state_dir
+test_captured_end_fold_refolds_when_cursor_is_ahead_of_capture
 test_drain_open_decision_fold_reads_only_appended_bytes
 test_real_drain_presents_a_buried_decision_from_a_multi_megabyte_log
