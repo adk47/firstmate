@@ -12,10 +12,13 @@
 #   2. NOT UNDER SUPERVISION - the pieces the captain still has running that no
 #      firstmate task owns: migrated cmux surfaces whose expected loop has no
 #      live task, old cmux-app terminals still resumed on this host, and Orca
-#      terminals bound to no task. The migrated-surface rows join
+#      terminals bound to no task. Each row carries the same doing-now, model,
+#      and estimate columns as a supervised row: the expected loop's own
+#      description, the resumed session's opening request, or the Orca
+#      terminal's agent and last screen line; the estimate cell says the piece
+#      is unsupervised. The migrated-surface rows join
 #      data/cmux-takeover/expected-loops.json to live task metadata directly, so
-#      classifying them needs no Orca call; bin/fm-cmux-board.sh renders the same
-#      surfaces from the Orca side.
+#      classifying them needs no Orca call.
 #
 # WHY IT IS BOUNDED: a firstmate home carries multi-megabyte append-only status
 # logs. This script never reads a whole status file: it reads only the last
@@ -26,8 +29,10 @@
 #
 # WHY IT IS READ-ONLY: it prints and exits. It never steers a worker, merges,
 # dispatches, tears down, or writes under state/, data/, or projects/. Missing
-# files degrade to "-" in that cell; they never abort the report. The only
-# filesystem writes are to a private temp dir that is removed on exit.
+# files degrade to "-" in that cell; they never abort the report. The script
+# itself writes nothing; the one caveat is the bin/fm-peek.sh fallback for a
+# pane read (used only when the task is not on Orca or the Orca read fails),
+# which runs bin/fm-guard.sh and may refresh that guard's own marker file.
 #
 # ESTIMATE BASIS: a standing lane (its title names a lane/watch/loop, or its
 # newest line is a paused await-* wait) has no end and shows its next tick. A
@@ -42,6 +47,12 @@
 # Usage:
 #   fm-roster.sh            print the two tables and the totals line
 #   fm-roster.sh --help     print this usage
+#
+# HOME: FM_HOME when set. Otherwise the script's own checkout when it holds a
+# state/ directory, else the primary checkout behind the script's linked
+# worktree (git rev-parse --git-common-dir) when that one holds state/, so a
+# run from a task worktree reports the home that owns the fleet rather than an
+# empty roster.
 #
 # Environment (overrides exist for tests and non-default homes):
 #   FM_HOME, FM_STATE_OVERRIDE, FM_DATA_OVERRIDE  standard firstmate overrides
@@ -60,7 +71,17 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+if [ -z "${FM_HOME:-}" ]; then
+  FM_HOME="${FM_ROOT_OVERRIDE:-$FM_ROOT}"
+  if [ ! -d "$FM_HOME/state" ] && command -v git >/dev/null 2>&1; then
+    common_dir=$(git -C "$FM_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    case "$common_dir" in
+      */.git)
+        [ -d "${common_dir%/.git}/state" ] && FM_HOME=${common_dir%/.git}
+        ;;
+    esac
+  fi
+fi
 
 case "${1:-}" in
   -h | --help)
@@ -237,12 +258,11 @@ def backlog_index(path: str):
             titles[task_id] = title.strip()
             continue
         done_ids.add(task_id)
-        if "kind: ship" not in line:
+        if "kind: ship" not in line or len(durations) >= 20:
             continue
         duration = done_ship_duration(task_id)
         if duration is not None and duration > 0:
             durations.append(duration)
-    durations = durations[-20:]
     if len(durations) >= 3:
         ordered = sorted(durations)
         mid = len(ordered) // 2
@@ -262,22 +282,29 @@ def mtime(path: str):
         return None
 
 
+BRIEF_NAMES = ("launch-brief.md", "brief.md")
+
+
 def done_ship_duration(task_id: str):
     """Hours from a Done ship task's dispatch brief to its last artifact write.
 
     The Done record keeps only a date, so a precise duration comes from the
     task's retained data/<id>/ directory: the dispatch brief is written at
-    launch, and the directory's own mtime is the last write for that task.
+    launch, and the newest entry other than the briefs is the task's last
+    artifact. A directory holding only briefs has no measurable duration.
     """
     task_dir = os.path.join(DATA, task_id)
-    end = mtime(task_dir)
-    if end is None:
+    try:
+        names = os.listdir(task_dir)
+    except OSError:
         return None
-    starts = [mtime(os.path.join(task_dir, name)) for name in ("launch-brief.md", "brief.md")]
+    starts = [mtime(os.path.join(task_dir, name)) for name in BRIEF_NAMES]
     starts = [value for value in starts if value is not None]
-    if not starts:
+    ends = [mtime(os.path.join(task_dir, name)) for name in names if name not in BRIEF_NAMES]
+    ends = [value for value in ends if value is not None]
+    if not starts or not ends:
         return None
-    start = min(starts)
+    start, end = min(starts), max(ends)
     if end <= start:
         return None
     return (end - start) / 3600.0
@@ -358,8 +385,8 @@ def context_percent(meta: dict, task_id: str) -> str:
         )
     if not out and PEEK_CMD:
         out = run(shlex.split(PEEK_CMD) + [task_id, "4"], PANE_TIMEOUT + 5)
-    match = re.search(r"CH([0-9.]+)%", out)
-    return match.group(1) + "%" if match else "-"
+    matches = re.findall(r"([0-9]+\.[0-9]+)%/[0-9.]+[kM]", out)
+    return matches[-1] + "%" if matches else "-"
 
 
 def task_row(meta_path: str, titles: dict, done_ids: set, median, basis: str):
@@ -433,13 +460,21 @@ def estimate_for(task_id, kind, state, line, standing, meta, done_ids, median, b
 # --- unsupervised surfaces --------------------------------------------------
 
 
-def expected_loop_rows(meta_ids: set, meta_terms: set, relaunch_item: str):
+UNSUPERVISED = "unsupervised - no estimate"
+
+
+def slug_in_task_id(slug: str, task_id: str) -> bool:
+    return re.search(r"(?:^|-)" + re.escape(slug) + r"(?:-|$)", task_id) is not None
+
+
+def expected_loop_rows(meta_ids: set, meta_terms: set):
     """Migrated cmux surfaces with no live firstmate task.
 
     A surface is supervised when its recorded `firstmate_task` has a meta, when
     its old terminal is still the terminal a live meta records, or when its slug
-    is part of a live task id (a relaunched lane gets a new terminal, so the
-    recorded terminal alone would misreport it). Anything else is listed.
+    is a hyphen-delimited token run of a live task id (a relaunched lane gets a
+    new terminal, so the recorded terminal alone would misreport it). Anything
+    else is listed with the loop it is expected to be running.
     """
     exp_path = os.path.join(CMUX, "expected-loops.json")
     try:
@@ -458,31 +493,39 @@ def expected_loop_rows(meta_ids: set, meta_terms: set, relaunch_item: str):
             continue
         if surface.get("term") in meta_terms:
             continue
-        if slug and any(slug in task_id for task_id in meta_ids):
+        if slug and any(slug_in_task_id(slug, task_id) for task_id in meta_ids):
             continue
         heartbeat = None
         if slug:
             heartbeat = mtime(os.path.join(CMUX, "status", slug + ".json"))
+        expected = surface.get("expected") or []
+        whats = [
+            " ".join(str(item.get("what", "")).split())
+            for item in expected
+            if isinstance(item, dict) and item.get("what")
+        ]
         rows.append(
             {
                 "source": "migrated",
                 "name": surface.get("surface") or slug or "-",
-                "what": "no live firstmate task",
+                "doing": "; ".join(whats) or "-",
+                "model": "-",
                 "last": age_str(NOW - heartbeat) if heartbeat else "-",
-                "detail": relaunch_item or "-",
+                "estimate": UNSUPERVISED + "; relaunch item queued",
             }
         )
     rows.sort(key=lambda row: row["name"].lower())
     return rows
 
 
-def cmux_app_rows():
+def cmux_app_rows(meta_worktrees: set):
     """Old cmux-app terminals still resumed on this host.
 
     Matches a resumed Claude session (`--resume <uuid>`) or a resumed grok
     session (`grok -r <uuid>`), deduplicated by session id. The project
     directory comes from the live process's working directory, because the
-    resume command itself carries no cwd.
+    resume command itself carries no cwd; a process working in a live task's
+    recorded worktree is that task's own relaunched worker, not a stray.
     """
     if not PS_CMD:
         return []
@@ -507,8 +550,9 @@ def cmux_app_rows():
         seen.add((kind, sid))
         rows.append((kind, sid, pid))
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        resolved = list(pool.map(lambda args: cmux_app_row(*args), rows))
-    resolved.sort(key=lambda row: (row["what"], row["name"]))
+        resolved = list(pool.map(lambda args: cmux_app_row(*args, meta_worktrees), rows))
+    resolved = [row for row in resolved if row]
+    resolved.sort(key=lambda row: (row["model"], row["name"]))
     return resolved
 
 
@@ -518,6 +562,28 @@ def proc_cwd(pid: str) -> str:
         if line.startswith("n"):
             return line[1:].strip()
     return ""
+
+
+TAG_BLOCK = re.compile(r"^\s*<([A-Za-z][\w-]*)>.*?</\1>\s*", re.S)
+
+
+def plain_request(text: str) -> str:
+    """The human request in a session entry, or '' when it is only scaffolding.
+
+    Session logs open with harness blocks such as <local-command-caveat>,
+    <command-name>, <system-reminder>, and <user_info>; those are stripped from
+    the front, and an entry that is nothing but such blocks yields ''.
+    """
+    text = text or ""
+    while True:
+        stripped = TAG_BLOCK.sub("", text, count=1)
+        if stripped == text:
+            break
+        text = stripped
+    text = " ".join(text.split())
+    if not text or text.startswith("<"):
+        return ""
+    return text
 
 
 def first_claude_user_message(session_file: str) -> str:
@@ -531,6 +597,8 @@ def first_claude_user_message(session_file: str) -> str:
                 try:
                     entry = json.loads(raw)
                 except ValueError:
+                    continue
+                if entry.get("isMeta"):
                     continue
                 content = (entry.get("message") or {}).get("content")
                 if isinstance(content, str):
@@ -546,7 +614,7 @@ def first_claude_user_message(session_file: str) -> str:
                     text = " ".join(parts)
                 else:
                     continue
-                text = " ".join(text.split())
+                text = plain_request(text)
                 if text:
                     return text
     except OSError:
@@ -566,6 +634,8 @@ def first_grok_user_message(session_file: str) -> str:
                     entry = json.loads(raw)
                 except ValueError:
                     continue
+                if entry.get("synthetic_reason"):
+                    continue
                 content = entry.get("content")
                 parts = []
                 if isinstance(content, str):
@@ -578,9 +648,7 @@ def first_grok_user_message(session_file: str) -> str:
                     ]
                 text = " ".join(parts)
                 query = re.search(r"<user_query>(.*?)</user_query>", text, re.S)
-                if query:
-                    text = query.group(1)
-                text = " ".join(text.split())
+                text = plain_request(query.group(1) if query else text)
                 if text:
                     return text
     except OSError:
@@ -588,7 +656,7 @@ def first_grok_user_message(session_file: str) -> str:
     return ""
 
 
-def cmux_app_row(kind: str, sid: str, pid: str):
+def cmux_app_row(kind: str, sid: str, pid: str, meta_worktrees: set):
     session_file = ""
     for pattern in (
         os.path.join(CLAUDE_PROJECTS, "*", sid + ".jsonl") if CLAUDE_PROJECTS else "",
@@ -601,6 +669,8 @@ def cmux_app_row(kind: str, sid: str, pid: str):
             session_file = hits[0]
             break
     cwd = proc_cwd(pid)
+    if cwd and os.path.realpath(cwd) in meta_worktrees:
+        return None
     age = "-"
     if session_file:
         stamp = mtime(session_file)
@@ -613,16 +683,25 @@ def cmux_app_row(kind: str, sid: str, pid: str):
             else first_claude_user_message(session_file)
         )
     name = os.path.basename(cwd.rstrip("/")) or cwd or "-"
-    detail = sid
-    if title:
-        detail = sid + " - " + truncate(title, 70)
     return {
         "source": "cmux app",
         "name": name,
-        "what": "%s (resumed)" % kind,
+        "doing": title or "-",
+        "model": "claude via pool" if kind == "claude" else "grok",
         "last": age,
-        "detail": detail,
+        "estimate": UNSUPERVISED,
     }
+
+
+def preview_line(preview) -> str:
+    """The last screen line of an Orca terminal preview, without frame glyphs."""
+    if not isinstance(preview, str):
+        return ""
+    for line in reversed(preview.splitlines()):
+        text = " ".join(re.sub(r"[\u2500-\u257f\u2800-\u28ff]", " ", line).split())
+        if text:
+            return text
+    return ""
 
 
 def orca_unbound_rows(meta_terms: set):
@@ -650,13 +729,15 @@ def orca_unbound_rows(meta_terms: set):
         title = terminal.get("title") or ""
         if not title or re.match(r"^term_[0-9a-f-]+$", title):
             title = os.path.basename((terminal.get("worktreePath") or "").rstrip("/")) or handle or "-"
+        agent = terminal.get("agentIdentity") or ""
         rows.append(
             {
                 "source": "orca term",
                 "name": title,
-                "what": "orca terminal (unbound)",
+                "doing": ": ".join(part for part in (agent, preview_line(terminal.get("preview"))) if part) or "-",
+                "model": agent or "-",
                 "last": age,
-                "detail": terminal.get("worktreePath") or handle or "-",
+                "estimate": UNSUPERVISED,
             }
         )
     rows.sort(key=lambda row: row["name"].lower())
@@ -703,12 +784,12 @@ def render(supervised, unsupervised, skipped_note):
     if unsupervised:
         out.extend(
             table(
-                ["SOURCE", "NAME", "WHAT IT IS", "LAST", "DETAIL"],
+                ["SOURCE", "NAME", "DOING NOW", "MODEL", "LAST", "ESTIMATE"],
                 [
-                    [r["source"], r["name"], r["what"], r["last"], truncate(r["detail"], 70)]
+                    [r["source"], r["name"], r["doing"], r["model"], r["last"], r["estimate"]]
                     for r in unsupervised
                 ],
-                [10, 28, 24, 8, 70],
+                [10, 28, 70, 16, 6, 48],
             )
         )
     else:
@@ -750,26 +831,17 @@ def main():
         print("fm-roster: no state directory at %s" % (STATE or "-"), file=sys.stderr)
         return 1
     titles, done_ids, median, basis = backlog_index(BACKLOG)
-    relaunch = ""
-    for task_id in titles:
-        if "surfaces-rehome" in task_id:
-            relaunch = task_id
-            break
-    if not relaunch:
-        try:
-            with open(BACKLOG, encoding="utf-8", errors="replace") as handle:
-                match = re.search(r"\]\s+(\S*surfaces-rehome\S*)", handle.read())
-            relaunch = match.group(1) if match else ""
-        except OSError:
-            relaunch = ""
 
     meta_paths = sorted(glob.glob(os.path.join(STATE, "*.meta")))
     meta_ids = {os.path.basename(path)[: -len(".meta")] for path in meta_paths}
     meta_terms = set()
+    meta_worktrees = set()
     for path in meta_paths:
-        terminal = read_meta(path).get("terminal")
-        if terminal:
-            meta_terms.add(terminal)
+        meta = read_meta(path)
+        if meta.get("terminal"):
+            meta_terms.add(meta["terminal"])
+        if meta.get("worktree"):
+            meta_worktrees.add(os.path.realpath(meta["worktree"]))
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         supervised = list(
@@ -777,8 +849,8 @@ def main():
         )
     supervised.sort(key=lambda row: row["id"])
 
-    unsupervised = expected_loop_rows(meta_ids, meta_terms, relaunch)
-    unsupervised.extend(cmux_app_rows())
+    unsupervised = expected_loop_rows(meta_ids, meta_terms)
+    unsupervised.extend(cmux_app_rows(meta_worktrees))
     orca_rows, skipped = orca_unbound_rows(meta_terms)
     unsupervised.extend(orca_rows)
 
