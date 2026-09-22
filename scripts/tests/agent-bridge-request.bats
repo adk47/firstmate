@@ -1433,11 +1433,22 @@ EOF
   # bats surfaces a test's output only when it fails, so this costs nothing on a
   # green run and names the actual outcome on a red one.
   #
-  # It is here rather than as a fix because the flake is NOT REPRODUCIBLE
-  # locally: 32 runs on node-8 (5 idle, 10 with every core saturated, and 12
-  # across 4 concurrent bats processes to mimic the 4 self-hosted runners) all
-  # passed. Guessing at a cause would be worse than instrumenting it, so the
-  # next occurrence has to arrive carrying its own evidence.
+  # ROOT-CAUSED 2026-09-22, from exactly the evidence this instrumentation was
+  # added to capture. The next occurrence arrived carrying:
+  #   cp: cannot create regular file '.../posts/<id>.md': File exists
+  #   concurrency outcome: s1=0 s2=1 posts=1
+  # s2=1 is not one of the contract's outcomes. The archive step used `cp`,
+  # and GNU cp opens a destination it believes is new with O_CREAT|O_EXCL, so
+  # the losing racer got EEXIST and `set -e` propagated cp's exit 1.
+  #
+  # Why 32 earlier runs missed it: the window is between cp's stat and its
+  # open, and it only exists when the destination starts ABSENT. Measured on
+  # node-8 (GNU coreutils 9.4): 0/300 with two racers on a pre-existing file,
+  # 67/400 with a fresh destination and four. The fix is a shell redirect
+  # (O_CREAT|O_TRUNC, cannot fail on an existing file): 0/400.
+  #
+  # The diagnostic below stays. It cost nothing on green runs and is what made
+  # the cause readable in one shot when it finally fired.
   posts="$(grep -c "issue comment" "$GH_STUB_LOG" || true)"
   echo "concurrency outcome: s1=$s1 s2=$s2 posts=$posts (expect s in {0,3}, at least one 0, posts in 1..2)" >&2
   if [ -s "$GH_STUB_LOG" ]; then
@@ -1460,6 +1471,37 @@ EOF
   # duplicate harmless rather than merely rare.
   grep -q "cs-2026-08-26-analytics-zero-plays" \
     "$AGENT_BRIDGE_TEST_DIR/posts/cs-2026-08-26-analytics-zero-plays.md"
+}
+
+@test "the archive write cannot fail on a destination another caller just created" {
+  # The behavioural guard is the concurrency test above — it is what actually
+  # went red. But its red is PROBABILISTIC (the window sits between cp's stat
+  # and its open, and exists only while the destination is absent), so it
+  # cannot be relied on to catch a reintroduction: the same `cp` survived 32
+  # deliberate runs on node-8 before CI caught it.
+  #
+  # So this one is deterministic and deliberately shape-based: whatever writes
+  # the archive destination must be a command that cannot fail when the file
+  # already exists. `cp` and `cp -f` both can (measured 67/400 and 58/400 with
+  # four racers on GNU coreutils 9.4); a redirect and `mv` of a unique temp
+  # cannot (0/400 each).
+  local archive_cmd
+  archive_cmd="$(grep -vE '^[[:space:]]*#' "$SCRIPT" \
+    | grep -F 'TEST_DIR/posts/' \
+    | grep -vF 'mkdir' \
+    | head -1 \
+    | sed -E 's/^[[:space:]]+//' \
+    | awk '{ print $1 }')"
+
+  # Vacuity guard: an empty match would satisfy the assertion below trivially,
+  # which is how a shape-based test quietly stops testing anything.
+  [ -n "$archive_cmd" ]
+
+  if [ "$archive_cmd" = "cp" ]; then
+    echo "archive write uses cp, which exits 1 with EEXIST when a concurrent" >&2
+    echo "caller creates the destination first — see the concurrency test above." >&2
+    return 1
+  fi
 }
 
 @test "a second post on a live request_id is ACCEPTED, not blocked — no mutex survives" {
