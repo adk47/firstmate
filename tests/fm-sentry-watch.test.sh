@@ -486,6 +486,84 @@ JSON
   pass "projects lists every API project with its effective state"
 }
 
+test_legacy_import_baselines_only_the_projects_it_covered() {
+  local home out
+  home=$(make_home legacy-per-project)
+  cat > "$home/state/sentry-backend-watch-b1.last.json" <<'JSON'
+{"CORE-BACKEND-OLD":{"users":7,"title":"TypeError: old","culprit":"/api/v4/onboarding/name","count":12,"level":"fatal","ts":1000}}
+JSON
+  write_projects "$home" core-backend industry-api
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-OLD","title":"TypeError: old","culprit":"/api/v4/onboarding/name","userCount":7,"count":12,"level":"fatal","substatus":"ongoing","permalink":"https://x/old/"},
+ {"shortId":"CORE-BACKEND-NEW","title":"TypeError: new","culprit":"/api/v4/onboarding/name","userCount":1,"count":2,"level":"fatal","substatus":"new","permalink":"https://x/new/"}]
+JSON
+  write_issues "$home" industry-api <<'JSON'
+[{"shortId":"INDUSTRY-API-AAA","title":"TypeError: backlog","culprit":"/api/v1/auth/login","userCount":1,"count":2,"level":"fatal","substatus":"ongoing","permalink":"https://x/aaa/"}]
+JSON
+  printf '[]\n' > "$home/fix/rail.json"
+  mark_armed "$home" 1000
+  # The arming poll: the legacy-covered project classifies at once and only its
+  # unknown issue pages; the uncovered project records its estate silently.
+  out=$(poll "$home" 1000)
+  assert_contains "$out" "P1 CORE-BACKEND-NEW" "an unknown issue on a legacy-covered project did not page"
+  assert_not_contains "$out" "CORE-BACKEND-OLD" "an imported legacy issue re-paged"
+  assert_not_contains "$out" "INDUSTRY-API-AAA" "the arming poll announced the backlog of a project the legacy baseline never covered"
+  write_issues "$home" industry-api <<'JSON'
+[{"shortId":"INDUSTRY-API-AAA","title":"TypeError: backlog","culprit":"/api/v1/auth/login","userCount":1,"count":2,"level":"fatal","substatus":"ongoing","permalink":"https://x/aaa/"},
+ {"shortId":"INDUSTRY-API-BBB","title":"TypeError: fresh","culprit":"/api/v1/auth/login","userCount":1,"count":1,"level":"fatal","substatus":"new","permalink":"https://x/bbb/"}]
+JSON
+  out=$(poll "$home" 1300)
+  assert_contains "$out" "P1 INDUSTRY-API-BBB" "a new issue on the second read of a project did not page"
+  assert_not_contains "$out" "INDUSTRY-API-AAA" "an issue recorded on the project's first read re-paged"
+  pass "the baseline is per project: legacy-covered projects classify, uncovered ones record first"
+}
+
+test_fetch_order_rotates_so_no_project_starves() {
+  local home out i
+  home=$(make_home rotation)
+  write_projects "$home" alpha bravo charlie delta
+  for i in alpha bravo charlie delta; do
+    printf '{"sleep":1.2,"issues":[]}\n' > "$home/fix/issues-$i.json"
+  done
+  printf '[]\n' > "$home/fix/rail.json"
+  mark_armed "$home" 1000
+  # A 2s budget lets exactly one 1.2s project read per poll; rotation must
+  # hand each poll to the next project, and a project unread for three polls
+  # is reported on that transition, then recovered when its turn comes.
+  out=$(FM_SENTRY_WATCH_BUDGET_SECS=2 poll "$home" 1000)
+  python3 - "$home/state/sentry-watch.baseline.json" alpha <<'PY'
+import json, sys
+last_read = json.load(open(sys.argv[1]))["last_read"]
+assert sorted(last_read) == sys.argv[2:], "read set after poll: %s" % sorted(last_read)
+PY
+  [ -z "$out" ] || fail "one unread poll was already reported: $out"
+  out=$(FM_SENTRY_WATCH_BUDGET_SECS=2 poll "$home" 1300)
+  python3 - "$home/state/sentry-watch.baseline.json" alpha bravo <<'PY'
+import json, sys
+last_read = json.load(open(sys.argv[1]))["last_read"]
+assert sorted(last_read) == sys.argv[2:], "read set after poll: %s" % sorted(last_read)
+assert last_read["alpha"] == 1000 and last_read["bravo"] == 1300, last_read
+PY
+  [ -z "$out" ] || fail "two unread polls were already reported: $out"
+  out=$(FM_SENTRY_WATCH_BUDGET_SECS=2 poll "$home" 1600)
+  python3 - "$home/state/sentry-watch.baseline.json" alpha bravo charlie <<'PY'
+import json, sys
+last_read = json.load(open(sys.argv[1]))["last_read"]
+assert sorted(last_read) == sys.argv[2:], "read set after poll: %s" % sorted(last_read)
+PY
+  assert_contains "$out" "could-not-determine delta: unread for 3 consecutive polls" \
+    "a project unread for three polls was not reported"
+  assert_not_contains "$out" "could-not-determine charlie" "a project read this poll was reported unread"
+  out=$(FM_SENTRY_WATCH_BUDGET_SECS=2 poll "$home" 1900)
+  assert_contains "$out" "recovered delta" "the starved project's turn did not clear its condition"
+  python3 - "$home/state/sentry-watch.baseline.json" <<'PY'
+import json, sys
+last_read = json.load(open(sys.argv[1]))["last_read"]
+assert last_read["delta"] == 1900, last_read
+PY
+  pass "the fetch order rotates so every project is read within a bounded number of polls"
+}
+
 test_migrate_imports_the_retired_baselines() {
   local home out
   home=$(make_home migrate)
@@ -649,6 +727,8 @@ test_missing_beat_is_dark
 test_rail_only_detection
 test_rail_only_is_suppressed_when_the_watch_surfaced_it
 test_projects_lists_every_project_with_its_effective_state
+test_legacy_import_baselines_only_the_projects_it_covered
+test_fetch_order_rotates_so_no_project_starves
 test_migrate_imports_the_retired_baselines
 test_a_task_pr_poll_cannot_touch_the_watch
 test_an_overwritten_check_is_dark

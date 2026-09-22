@@ -747,6 +747,8 @@ The first successful rail read seeds its known set rather than reporting history
 
 The retired `state/sentry-backend-watch-b1.last.json` and `state/sentry-mobile-s1.last.json` seen-sets are imported into `state/sentry-watch.baseline.json` by `bin/fm-sentry-watch.sh migrate`, and automatically by the first poll when the shared baseline does not exist yet.
 Import the baselines before retiring the old checks, so the first shared poll does not re-announce the existing estate.
+The baseline is per project: a project whose issues an imported or recorded baseline already covers classifies at once, and only its unknown issues page; a project the watch has never read records its estate on its first read and wakes nobody, then classifies from its second read.
+An imported legacy file therefore never makes the arming poll announce the backlog of a project it did not cover.
 The shared baseline is deliberately kept across `disarm`, because the Sentry mobile scout reads it.
 
 ### Commands
@@ -759,7 +761,9 @@ The shared baseline is deliberately kept across `disarm`, because the Sentry mob
 
 Arming writes a check the existing watcher polls on its normal `FM_CHECK_INTERVAL` cadence, so no separate schedule is involved.
 The token is read from `~/.config/muso/sentry-vault.json` by the interpreter only, is never printed, and is never passed on a command line.
-The watch is read-only against Sentry and GitHub, makes no model calls, and bounds a whole poll by `FM_SENTRY_WATCH_BUDGET_SECS` (default 20) and each request by `FM_SENTRY_WATCH_HTTP_TIMEOUT` (default 5) so it ends inside `FM_CHECK_TIMEOUT` rather than being killed with nothing printed.
+The watch is read-only against Sentry and GitHub, makes no model calls, and bounds a whole poll by `FM_SENTRY_WATCH_BUDGET_SECS` (default 20) so it ends inside `FM_CHECK_TIMEOUT` rather than being killed with nothing printed.
+That budget is shared fairly: each project's read gets the budget divided by the project count, at least 2 seconds and never more than `FM_SENTRY_WATCH_HTTP_TIMEOUT` (default 5), and the read order rotates round-robin every poll starting after the last project read, so a slow host starves no fixed tail and every project is read within a bounded number of polls.
+A project left unread for three consecutive polls is reported as `could-not-determine` on that transition.
 
 ## Relay (.env)
 

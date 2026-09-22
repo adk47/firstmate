@@ -87,17 +87,26 @@
 # set instead of reporting history; a gh outage is reported once on the
 # ok->down transition as RAILCHECK-DARK.
 #
-# MIGRATION. `poll` imports the retired per-lane baselines automatically when the
-# shared baseline is absent, and `migrate` does the same explicitly. That is what
-# keeps the first poll after arming from re-announcing the existing estate.
+# MIGRATION AND PER-PROJECT BASELINE. `poll` imports the retired per-lane
+# baselines automatically when the shared baseline is absent, and `migrate` does
+# the same explicitly. The baseline is per project: a project already covered by
+# imported or recorded issues classifies at once and only its unknown issues
+# page, while a project the watch has never read records its estate on its first
+# read and wakes nobody, then classifies from its second read. One imported
+# legacy file therefore never makes the arming poll announce projects it did
+# not cover.
 #
 # READ-ONLY AND BOUNDED. The watch only reads Sentry and GitHub. It makes no
 # model calls, prints no token, and passes no token on any command line: the
 # token is read from the vault path by the interpreter only. A whole poll is
-# bounded by FM_SENTRY_WATCH_BUDGET_SECS (default 20) and each HTTP request by
-# FM_SENTRY_WATCH_HTTP_TIMEOUT (default 5), so a loaded or unreachable host ends
-# the poll inside the watcher's own FM_CHECK_TIMEOUT rather than being killed
-# with nothing printed.
+# bounded by FM_SENTRY_WATCH_BUDGET_SECS (default 20), shared fairly: each
+# project's read gets that budget divided by the project count (at least 2s,
+# never more than FM_SENTRY_WATCH_HTTP_TIMEOUT, default 5), and the read order
+# rotates round-robin each poll starting after the last project read, so a slow
+# host starves no fixed tail and every project is read within a bounded number
+# of polls. A project left unread for three consecutive polls is reported as
+# could-not-determine. The poll ends inside the watcher's own FM_CHECK_TIMEOUT
+# rather than being killed with nothing printed.
 #
 # Test seams: FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, FM_SENTRY_WATCH_NOW,
 # FM_SENTRY_WATCH_FIXTURES (stubbed Sentry responses), FM_SENTRY_WATCH_RAIL_FIXTURE,
@@ -476,10 +485,10 @@ class FetchError(Exception):
     pass
 
 
-def http_get(url, token):
+def http_get(url, token, timeout=None):
     request = urllib.request.Request(url, headers={"Authorization": "Bearer %s" % token})
     try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+        with urllib.request.urlopen(request, timeout=timeout or HTTP_TIMEOUT) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as exc:
         raise FetchError("HTTP %s" % exc.code)
@@ -502,11 +511,14 @@ def fetch_projects(org, host, token):
     return data
 
 
-def fetch_issues(org, host, token, slug):
+def fetch_issues(org, host, token, slug, timeout=None):
     if FIXTURES:
         data = read_json(Path(FIXTURES) / ("issues-%s.json" % slug))
         if data is None:
             raise FetchError("fixture issues-%s.json is missing or unreadable" % slug)
+        if isinstance(data, dict):
+            time.sleep(float(data.get("sleep") or 0))
+            data = data.get("issues", [])
         return data
     query = urllib.parse.urlencode({
         "query": "is:unresolved lastSeen:-2d !environment:development",
@@ -514,7 +526,7 @@ def fetch_issues(org, host, token, slug):
         "sort": "date",
     })
     url = "https://%s/api/0/projects/%s/%s/issues/?%s" % (host, org, slug, query)
-    data = http_get(url, token)
+    data = http_get(url, token, timeout)
     if not isinstance(data, list):
         raise FetchError("issues response was not a list")
     return data
@@ -872,6 +884,22 @@ def import_legacy(issues):
 
 
 REMIND_SECS = 3600
+UNREAD_POLLS = 3
+
+
+def project_seen(slug, issues, last_read):
+    """Whether the watch already holds a baseline for this project: it has read
+    the project before, or an imported legacy baseline carries its issues (a
+    Sentry short id is the project slug upper-cased plus a suffix)."""
+    if slug in last_read:
+        return True
+    prefix = slug.upper() + "-"
+    for sid, entry in issues.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("project") == slug or str(sid).upper().startswith(prefix):
+            return True
+    return False
 
 
 def condition_findings(prior, current, now):
@@ -1034,15 +1062,17 @@ def action_poll(config, org, host, token, problems):
             slug: _as_int(stamp) for slug, stamp in stored["last_read"].items()
             if _as_int(stamp) is not None
         }
+    cursor = stored.get("cursor") if present else None
+    unread = {}
+    if present and isinstance(stored.get("unread"), dict):
+        unread = {slug: _as_int(n) or 0 for slug, n in stored["unread"].items()}
     if not present:
         imported, files_read = import_legacy(issues)
         if files_read:
-            present = True
             write_json_atomic(RECORD, {
                 "schema": SCHEMA, "updated": now,
                 "legacy_imported": imported, "issues": issues,
             })
-    baseline = not present
     issues = prune_issues(issues, now, config["retention_secs"])
 
     enumerated = True
@@ -1062,6 +1092,10 @@ def action_poll(config, org, host, token, problems):
         if not slug or slug in deny:
             continue
         slugs.append(slug)
+    if cursor in slugs:
+        start = slugs.index(cursor) + 1
+        slugs = slugs[start:] + slugs[:start]
+    per_project = max(2.0, float(max(1, BUDGET_SECS)) / max(1, len(slugs)))
 
     signatures = {}
     for key in ("sensitive", "noise", "transport", "retired", "crash", "critical"):
@@ -1072,16 +1106,24 @@ def action_poll(config, org, host, token, problems):
     read_any = False
     for slug in slugs:
         settings = project_settings(config, slug)
-        if time.time() >= deadline:
-            conditions[slug] = "could-not-determine %s: time budget ran out" % slug
+        remaining = deadline - time.time()
+        if remaining < 1.0:
+            unread[slug] = unread.get(slug, 0) + 1
+            if unread[slug] >= UNREAD_POLLS:
+                conditions[slug] = "could-not-determine %s: unread for %s consecutive polls" % (
+                    slug, unread[slug])
             continue
         try:
-            rows = fetch_issues(org, host, token, slug)
+            rows = fetch_issues(org, host, token, slug, min(HTTP_TIMEOUT, per_project, remaining))
         except FetchError as exc:
+            unread[slug] = unread.get(slug, 0) + 1
             conditions[slug] = "could-not-determine %s: %s" % (slug, exc)
             continue
         window_start = last_read.get(slug, now - cadence)
+        project_baseline = not project_seen(slug, issues, last_read)
         last_read[slug] = now
+        unread[slug] = 0
+        cursor = slug
         read_any = True
         for issue in rows:
             if not isinstance(issue, dict):
@@ -1094,7 +1136,7 @@ def action_poll(config, org, host, token, problems):
             old = issues.get(sid)
             entry["rate"] = project_rate(entry, old, now)
             entry["surfaced"] = (old.get("surfaced") or 0) if isinstance(old, dict) else 0
-            if not baseline:
+            if not project_baseline:
                 finding = classify(entry, old, settings, signatures, config, window_start, now)
                 if finding:
                     # The surfaced marker is what distinguishes an issue this
@@ -1126,6 +1168,8 @@ def action_poll(config, org, host, token, problems):
         "issues": merged,
         "conditions": conditions,
         "last_read": last_read,
+        "unread": unread,
+        "cursor": cursor,
     })
     if read_any:
         try:
@@ -1173,13 +1217,6 @@ def action_poll(config, org, host, token, problems):
             previous["reported"] = sorted(reported)
         write_json_atomic(RAIL_STATE, previous)
 
-    if baseline:
-        # The first poll after arming records the estate and wakes nobody; a
-        # DARK finding and a could-not-determine finding still print, because an
-        # unarmed, stalled, or unreadable watch is exactly what the first poll
-        # must not hide.
-        findings = [f for f in findings
-                    if f.startswith("DARK") or f.startswith("could-not-determine")]
     findings.extend(rail_findings)
     for finding in findings:
         print("sentry-watch: " + finding)
