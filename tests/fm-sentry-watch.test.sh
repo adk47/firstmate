@@ -10,7 +10,7 @@
 # check-side and drain-side halves of the DARK wake.
 #
 # Every case drives the real script through its fixture seams and asserts on the
-# one line it prints, so no case touches the Sentry API, GitHub, or the network.
+# lines it prints, so no case touches the Sentry API, GitHub, or the network.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -154,12 +154,110 @@ test_transport_burst_still_pages() {
   # CORE-BACKEND-VD on 2026-09-22 was literally "socket hang up": a transport
   # signature must never be able to hide the request-reset cascade it describes.
   write_issues "$home" core-backend <<'JSON'
-[{"shortId":"CORE-BACKEND-VD","title":"Error: socket hang up","culprit":"/api/v4/feed/profile/2/activities","userCount":1,"count":30,"level":"error","substatus":"new","permalink":"https://x/9/"}]
+[{"shortId":"CORE-BACKEND-VD","title":"Error: socket hang up","culprit":"/api/v4/feed/profile/2/activities","userCount":1,"count":30,"level":"error","substatus":"new","firstSeen":"1970-01-01T00:20:00Z","permalink":"https://x/9/"}]
 JSON
   out=$(poll "$home" 1300)
   assert_contains "$out" "P0 CORE-BACKEND-VD" "a transport burst was silenced"
   assert_contains "$out" "rule=burst>=10" "the transport burst did not name the burst rule"
   pass "a transport signature never hides a burst"
+}
+
+test_new_issue_burst_needs_events_inside_the_poll_window() {
+  local home out
+  home=$(make_home lifetime-count)
+  prime_baseline "$home" 1000
+  # A chronic weekly job that fell out of the baseline returns with a lifetime
+  # count of 40 but first appeared long before this window: not a burst.
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-OLD","title":"TypeError: weekly job","culprit":"/api/v4/feed/rebuild","userCount":1,"count":40,"level":"error","substatus":"ongoing","firstSeen":"1969-12-01T00:00:00Z","permalink":"https://x/old/"}]
+JSON
+  out=$(poll "$home" 1300)
+  [ -z "$out" ] || fail "a lifetime count outside the poll window paged as a burst: $out"
+  pass "a new issue is a burst only on events inside the poll window"
+}
+
+test_seen_p0_pages_once_per_user_tier() {
+  local home out
+  home=$(make_home p0-tier)
+  prime_baseline "$home" 1000
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-Q0","title":"TypeError: chronic","culprit":"PUT /api/v4/user","userCount":30,"count":10,"level":"error","substatus":"ongoing","permalink":"https://x/q0/"}]
+JSON
+  out=$(poll "$home" 1300)
+  assert_contains "$out" "P0 CORE-BACKEND-Q0" "a new issue at the first user tier did not page"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-Q0","title":"TypeError: chronic","culprit":"PUT /api/v4/user","userCount":33,"count":12,"level":"error","substatus":"ongoing","permalink":"https://x/q0/"}]
+JSON
+  out=$(poll "$home" 1600)
+  [ -z "$out" ] || fail "a chronic P0 re-paged inside the same user tier: $out"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-Q0","title":"TypeError: chronic","culprit":"PUT /api/v4/user","userCount":52,"count":14,"level":"error","substatus":"ongoing","permalink":"https://x/q0/"}]
+JSON
+  out=$(poll "$home" 1900)
+  assert_contains "$out" "P0 CORE-BACKEND-Q0" "crossing the next user tier did not page"
+  assert_contains "$out" "rule=users>=50" "the new tier was not named"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-Q0","title":"TypeError: chronic","culprit":"PUT /api/v4/user","userCount":55,"count":15,"level":"error","substatus":"ongoing","permalink":"https://x/q0/"}]
+JSON
+  out=$(poll "$home" 2200)
+  [ -z "$out" ] || fail "a chronic P0 re-paged after its tier page: $out"
+  pass "a seen P0 pages once per user tier, never every poll"
+}
+
+test_critical_signature_pages_at_any_user_count() {
+  local home out
+  home=$(make_home critical)
+  write_projects "$home" core-backend apple-ios
+  printf '[]\n' > "$home/fix/issues-core-backend.json"
+  printf '[]\n' > "$home/fix/issues-apple-ios.json"
+  printf '[]\n' > "$home/fix/rail.json"
+  mark_armed "$home" 1000
+  poll "$home" 1000 >/dev/null
+  # APPLE-IOS-AC on 2026-09-19: a one-user fatal app hang with no sensitive
+  # token anywhere in its title or culprit. The retired mobile scout paged it.
+  write_issues "$home" apple-ios <<'JSON'
+[{"shortId":"APPLE-IOS-AC","title":"Fatal App Hang Fully Blocked","culprit":"MusoModalSheetTrackingModifier","userCount":1,"count":1,"level":"fatal","substatus":"new","permalink":"https://x/ac/"}]
+JSON
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-OOM","title":"OOMKilled","culprit":"/api/v4/x","userCount":0,"count":5,"level":"fatal","substatus":"ongoing","permalink":"https://x/oom/"}]
+JSON
+  out=$(poll "$home" 1300)
+  assert_contains "$out" "CRITICAL APPLE-IOS-AC" "a one-user fatal app hang did not page"
+  assert_contains "$out" "CRITICAL CORE-BACKEND-OOM" "a new OOMKilled issue did not page"
+  assert_contains "$out" "rule=critical-signature" "the critical rule was not named"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-OOM","title":"OOMKilled","culprit":"/api/v4/x","userCount":0,"count":6,"level":"fatal","substatus":"ongoing","permalink":"https://x/oom/"}]
+JSON
+  out=$(poll "$home" 1600)
+  assert_contains "$out" "CRITICAL CORE-BACKEND-OOM" "a seen OOMKilled issue with one new event did not page"
+  assert_contains "$out" "delta=1" "the critical re-page did not carry its delta"
+  pass "a critical signature pages at any user count and on any new event"
+}
+
+test_every_finding_pages_on_its_own_line() {
+  local home out i lines
+  home=$(make_home many)
+  prime_baseline "$home" 1000
+  python3 - "$home/fix/issues-core-backend.json" <<'PY'
+import json, sys
+rows = [{
+    "shortId": "CORE-BACKEND-M%02d" % i,
+    "title": "TypeError: null name %d " % i + "x" * 150,
+    "culprit": "/api/v4/onboarding/name/%d/" % i + "y" * 150,
+    "userCount": 1, "count": 2, "level": "fatal", "substatus": "new",
+    "permalink": "https://sentry.io/organizations/musoai/issues/%d/" % (1000 + i),
+} for i in range(12)]
+json.dump(rows, open(sys.argv[1], "w"))
+PY
+  out=$(poll "$home" 1300)
+  for i in 00 01 02 03 04 05 06 07 08 09 10 11; do
+    assert_contains "$out" "P1 CORE-BACKEND-M$i" "finding CORE-BACKEND-M$i was dropped"
+  done
+  lines=$(printf '%s\n' "$out" | grep -c 'sentry-watch: P1 ')
+  [ "$lines" -eq 12 ] || fail "expected 12 finding lines, got $lines"
+  out=$(poll "$home" 1600)
+  assert_not_contains "$out" "P1 CORE-BACKEND-M" "a finding that already paged paged again"
+  pass "every finding pages on its own line and none is dropped by a cap"
 }
 
 test_regression_pages_when_a_resolved_issue_refires() {
@@ -194,6 +292,9 @@ JSON
 test_page_any_delta_pages_on_a_single_event() {
   local home out
   home=$(make_home page-any)
+  write_config "$home" <<'JSON'
+{"page_any_delta":["CORE-BACKEND-11N"]}
+JSON
   prime_baseline "$home" 1000
   write_issues "$home" core-backend <<'JSON'
 [{"shortId":"CORE-BACKEND-11N","title":"TypeError: null","culprit":"/api/v4/user","userCount":1,"count":10,"level":"error","substatus":"ongoing","permalink":"https://x/11/"}]
@@ -213,14 +314,40 @@ test_api_error_is_could_not_determine_not_silence() {
   home=$(make_home api-error)
   write_projects "$home" core-backend android
   printf '[]\n' > "$home/fix/issues-core-backend.json"
+  printf '[]\n' > "$home/fix/issues-android.json"
   printf '[]\n' > "$home/fix/rail.json"
   mark_armed "$home" 1000
   poll "$home" 1000 >/dev/null
-  # The android fixture is deliberately absent: one unreadable project must be
-  # reported, and must not stop the readable one from being polled.
+  # The android fixture is removed: one unreadable project must be reported,
+  # and must not stop the readable one from being polled.
+  rm -f "$home/fix/issues-android.json"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-EEE","title":"TypeError: null name","culprit":"/api/v4/onboarding/name","userCount":1,"count":2,"level":"fatal","substatus":"new","permalink":"https://x/5/"}]
+JSON
   out=$(poll "$home" 1300)
   assert_contains "$out" "could-not-determine android" "an unreadable project was not reported"
-  pass "an unreadable project is could-not-determine, never silence"
+  assert_contains "$out" "P1 CORE-BACKEND-EEE" "an unreadable project stopped the readable one"
+  # Reported on the transition only: the same condition is silent on the next
+  # poll, reminded once an hour while it persists, and reported once it clears.
+  out=$(poll "$home" 1600)
+  assert_not_contains "$out" "could-not-determine android" "a persistent condition paged on every poll"
+  out=$(poll "$home" 5000)
+  assert_contains "$out" "could-not-determine android" "the hourly reminder did not fire"
+  assert_contains "$out" "persisting 3700s" "the reminder did not say how long the condition has held"
+  out=$(poll "$home" 5300)
+  assert_not_contains "$out" "could-not-determine android" "the reminder repeated before an hour passed"
+  printf '[]\n' > "$home/fix/issues-android.json"
+  out=$(poll "$home" 5600)
+  assert_contains "$out" "recovered android" "the condition clearing was not reported"
+  out=$(poll "$home" 5900)
+  [ -z "$out" ] || fail "a recovered condition kept printing: $out"
+  # A failed project enumeration is the same kind of condition.
+  rm -f "$home/fix/projects.json"
+  out=$(poll "$home" 6200)
+  assert_contains "$out" "could-not-determine projects" "a failed project enumeration was not reported"
+  out=$(poll "$home" 6500)
+  assert_not_contains "$out" "could-not-determine projects" "a persistent enumeration failure paged on every poll"
+  pass "an unreadable project is could-not-determine on its transitions, never silence and never every poll"
 }
 
 test_missing_beat_is_dark() {
@@ -282,7 +409,7 @@ JSON
     FM_SENTRY_WATCH_FIXTURES="$home/fix" "$SW" projects 2>/dev/null)
   assert_contains "$out" "core-backend	enabled" "an API project was not listed as enabled"
   assert_contains "$out" "flutter	disabled" "a denylisted project was not disabled"
-  assert_contains "$out" "android	enabled" "an allowlist-free project was not enabled"
+  assert_contains "$out" "android	enabled" "a second API project was not enabled"
   pass "projects lists every API project with its effective state"
 }
 
@@ -435,6 +562,10 @@ test_sensitive_route_pages_at_one_user
 test_nonsensitive_route_pages_at_three_users
 test_burst_pages_regardless_of_users
 test_transport_burst_still_pages
+test_new_issue_burst_needs_events_inside_the_poll_window
+test_seen_p0_pages_once_per_user_tier
+test_critical_signature_pages_at_any_user_count
+test_every_finding_pages_on_its_own_line
 test_regression_pages_when_a_resolved_issue_refires
 test_noise_stays_silent
 test_page_any_delta_pages_on_a_single_event

@@ -28,10 +28,19 @@
 #               must page on a single recurrence).
 #   REGRESSION  an issue whose substatus transitions into "regressed" (a resolved
 #               issue re-firing), or a brand-new issue already marked regressed.
-#   P0          users>=users_p0, or a burst: delta>=burst_min_events in one poll
-#               window on a path whose prior rate was below burst_baseline_per_hour.
-#               A burst is deliberately NOT gated on transport signatures: the
-#               2026-09-22 fleet-wide request reset arrived AS "socket hang up".
+#   CRITICAL    a critical signature (fatal app hangs, watchdog terminations,
+#               native aborts, OOM kills, memory exhaustion, connection-pool
+#               exhaustion) pages a NEW issue at any user count and a seen issue
+#               on any new event.
+#   P0          a user tier: a NEW issue at users>=users_p0, and a seen issue only
+#               when it crosses a new tier (users_p0, twice it, four times it), so
+#               a chronic issue pages once per tier rather than every poll. Or a
+#               burst: burst_min_events or more events inside the poll window on a
+#               path whose prior rate was below burst_baseline_per_hour; a NEW
+#               issue is a burst only when its firstSeen falls inside the window,
+#               never on its lifetime count. A burst is deliberately NOT gated on
+#               transport signatures: the 2026-09-22 fleet-wide request reset
+#               arrived AS "socket hang up".
 #   P1          level error/fatal on a live path, at users>=users_p1_sensitive when
 #               the path matches the sensitive routes (onboarding, signup, auth,
 #               login, billing, checkout, payment, claim, credits) and users>=users_p1
@@ -41,10 +50,18 @@
 # wake. Every threshold and every signature lives in config/sentry-watch.json
 # (local, gitignored); docs/configuration.md owns that schema.
 #
+# EVERY FINDING PAGES. Each finding prints on its own line, so a multi-issue
+# incident is never cut down to the first few, and an issue is recorded as
+# surfaced only because its line was printed.
+#
 # THREE STATES, NEVER SILENT ON ERROR. A poll either fires, stays silent, or
 # reports could-not-determine. A project whose issues cannot be read is reported
 # as could-not-determine, and one unreadable project never stops the others. A
 # poll that cannot enumerate projects at all reports could-not-determine too.
+# A could-not-determine condition (a project, the project list, or a config
+# problem) is reported when it appears, reminded hourly while it persists, and
+# reported once more as recovered when it clears, so a persistent condition is
+# never a wake on every poll.
 #
 # LIVENESS. Every poll writes state/.sentry-watch.beat. A poll emits a DARK wake
 # when the recorded beat is older than three times the cadence, when the check
@@ -165,6 +182,7 @@ run_engine() {  # <action>
   FM_SENTRY_WATCH_LEGACY="${FM_SENTRY_WATCH_LEGACY:-}" \
   FM_SENTRY_WATCH_REGISTERED="$registered" \
   python3 - <<'PY'
+import datetime
 import json
 import os
 import re
@@ -244,7 +262,13 @@ DEFAULT_SIGNATURES = {
         r"/api/m/v2|athena|Run_Calculate_Industry|Run_Industry_Orchestrator|"
         r"Run_Scheduled_Calculations|industry_calculations"
     ),
-    "live": r"/api/v4|/api/v5|/api/m/v3|/api/w/v2|/api/w/v3|/api/c/v|/api/internal|/api/wh/|/presale",
+    "critical": (
+        r"Fatal App Hang|WatchdogTermination|EXC_|SIGABRT|NoSuchMethodError|"
+        r"NullPointerException|OOMKilled|out of memory|ENOMEM|Cannot allocate memory|"
+        r"SIGKILL|too many clients|remaining connection slots|pool exhausted|"
+        r"SequelizeConnectionError|SequelizeConnectionAcquireTimeoutError|"
+        r"PROTOCOL_CONNECTION_LOST|Connection terminated unexpectedly"
+    ),
 }
 DEFAULT_RAIL = {
     "enabled": True,
@@ -266,9 +290,8 @@ PROJECT_DEFAULTS = {
 DEFAULTS = {
     "cadence_secs": 300,
     "retention_secs": 7 * 24 * 3600,
-    "allowlist": [],
     "denylist": [],
-    "page_any_delta": ["CORE-BACKEND-11N"],
+    "page_any_delta": [],
     "signatures": dict(DEFAULT_SIGNATURES),
     "projects": {},
     "rail": dict(DEFAULT_RAIL),
@@ -330,7 +353,6 @@ def load_config():
     config = {
         "cadence_secs": DEFAULTS["cadence_secs"],
         "retention_secs": DEFAULTS["retention_secs"],
-        "allowlist": list(DEFAULTS["allowlist"]),
         "denylist": list(DEFAULTS["denylist"]),
         "page_any_delta": list(DEFAULTS["page_any_delta"]),
         "signatures": dict(DEFAULT_SIGNATURES),
@@ -351,7 +373,7 @@ def load_config():
                 config[key] = int(raw[key])
             except (TypeError, ValueError):
                 problems.append("config %s must be a whole number" % key)
-    for key in ("allowlist", "denylist", "page_any_delta"):
+    for key in ("denylist", "page_any_delta"):
         if key in raw:
             value = raw[key]
             if isinstance(value, list) and all(isinstance(v, str) for v in value):
@@ -644,6 +666,7 @@ def issue_entry(issue, now):
         "permalink": issue.get("permalink") or "",
         "level": (issue.get("level") or "").lower(),
         "substatus": (issue.get("substatus") or "") or "",
+        "first_seen": parse_iso(issue.get("firstSeen")),
         "ts": now,
     }
 
@@ -655,7 +678,35 @@ def _as_int(value):
         return None
 
 
-def classify(entry, old, settings, signatures, config, now):
+def parse_iso(value):
+    """Sentry's firstSeen as epoch seconds, or None when it is unreadable."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = re.sub(r"\.\d+", "", value.strip())
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return int(parsed.timestamp())
+
+
+def user_tier(users, settings):
+    """The highest P0 user tier reached: users_p0, twice it, or four times it;
+    0 below the first."""
+    base = _as_int(settings.get("users_p0")) or 0
+    tier = 0
+    if base > 0:
+        for factor in (1, 2, 4):
+            if users >= base * factor:
+                tier = base * factor
+    return tier
+
+
+def classify(entry, old, settings, signatures, config, window_start):
     """Return a finding line, or None. `old` is the prior baseline entry."""
     blob = "%s %s" % (entry["title"], entry["culprit"])
     if signatures["retired"] and signatures["retired"].search(blob):
@@ -669,6 +720,7 @@ def classify(entry, old, settings, signatures, config, now):
             live = False
     level = entry["level"]
     transport = bool(signatures["transport"] and signatures["transport"].search(blob))
+    critical = bool(signatures["critical"] and signatures["critical"].search(blob))
     sensitive = bool(settings.get("sensitive"))
     if not sensitive and signatures["sensitive"] and signatures["sensitive"].search(blob):
         sensitive = True
@@ -718,9 +770,13 @@ def classify(entry, old, settings, signatures, config, now):
     if old is None:
         if entry["substatus"] == "regressed":
             return finding("REGRESSION", "regressed")
+        if critical:
+            return finding("CRITICAL", "critical-signature")
         if users >= settings["users_p0"]:
             return finding("P0", "users>=%s" % settings["users_p0"])
-        if count >= settings["burst_min_events"] and level in ("error", "fatal") and live:
+        first_seen = entry.get("first_seen")
+        if first_seen is not None and first_seen >= window_start \
+                and count >= settings["burst_min_events"] and level in ("error", "fatal") and live:
             return finding("P0", "burst>=%s" % settings["burst_min_events"])
         if level in ("error", "fatal") and live and not transport:
             if sensitive and users >= settings["users_p1_sensitive"]:
@@ -736,8 +792,11 @@ def classify(entry, old, settings, signatures, config, now):
             and level in ("error", "fatal") and live:
         return finding("P0", "burst>=%s prior<%.0f/h" % (
             settings["burst_min_events"], settings["burst_baseline_per_hour"]))
-    if users >= settings["users_p0"] and delta >= 3 and live:
-        return finding("P0", "users>=%s" % settings["users_p0"])
+    if critical and delta >= 1:
+        return finding("CRITICAL", "critical-signature")
+    tier = user_tier(users, settings)
+    if tier and tier > user_tier(_as_int(old.get("users")) or 0, settings) and live:
+        return finding("P0", "users>=%s" % tier)
     return None
 
 
@@ -794,6 +853,34 @@ def import_legacy(issues):
     return imported, files_read
 
 
+REMIND_SECS = 3600
+
+
+def condition_findings(prior, current, now):
+    """Report each could-not-determine condition when it appears, remind hourly
+    while it persists, and report it once more when it clears. Returns
+    (lines, conditions-to-record)."""
+    lines = []
+    kept = {}
+    for key, message in current.items():
+        record = prior.get(key) if isinstance(prior.get(key), dict) else None
+        if record is None:
+            lines.append("could-not-determine %s" % message)
+            kept[key] = {"since": now, "reported": now, "message": message}
+            continue
+        since = _as_int(record.get("since"))
+        reported = _as_int(record.get("reported"))
+        since = now if since is None else since
+        reported = now if reported is None else reported
+        if now - reported >= REMIND_SECS:
+            lines.append("could-not-determine %s (persisting %ss)" % (message, now - since))
+            reported = now
+        kept[key] = {"since": since, "reported": reported, "message": message}
+    for key in sorted(set(prior) - set(current)):
+        lines.append("recovered %s" % key)
+    return lines, kept
+
+
 def prune_issues(issues, now, retention):
     kept = {}
     for sid, entry in issues.items():
@@ -816,7 +903,6 @@ def action_projects(config, org, host, token, problems):
     except FetchError as exc:
         print("sentry-watch: could-not-determine projects: %s" % exc)
         return
-    allow = set(config["allowlist"])
     deny = set(config["denylist"])
     for project in sorted(projects, key=lambda p: p.get("slug") or ""):
         if not isinstance(project, dict):
@@ -824,10 +910,7 @@ def action_projects(config, org, host, token, problems):
         slug = project.get("slug") or ""
         if not slug:
             continue
-        if allow and slug not in allow:
-            state = "disabled"
-            reason = "not in allowlist"
-        elif slug in deny:
+        if slug in deny:
             state = "disabled"
             reason = "denylisted"
         else:
@@ -897,8 +980,9 @@ def action_poll(config, org, host, token, problems):
     deadline = time.time() + max(1, BUDGET_SECS)
     findings = []
     findings.extend(liveness_findings(now, cadence))
+    conditions = {}
     for problem in problems:
-        findings.append("could-not-determine config: %s" % problem)
+        conditions["config: %s" % problem] = "config: %s" % problem
 
     # Whether the record is a first poll is decided by the record's presence,
     # never by whether it happens to hold issues: an estate with nothing
@@ -907,6 +991,15 @@ def action_poll(config, org, host, token, problems):
     stored = read_json(RECORD)
     present = isinstance(stored, dict) and stored.get("schema") == SCHEMA
     issues = stored.get("issues") if present and isinstance(stored.get("issues"), dict) else {}
+    prior_conditions = (
+        stored.get("conditions")
+        if present and isinstance(stored.get("conditions"), dict) else {}
+    )
+    # The poll window runs from the previous poll, so a NEW issue counts as a
+    # burst only when it first appeared inside it.
+    window_start = now - cadence
+    if present and _as_int(stored.get("updated")) is not None:
+        window_start = _as_int(stored.get("updated"))
     if not present:
         imported, files_read = import_legacy(issues)
         if files_read:
@@ -918,16 +1011,14 @@ def action_poll(config, org, host, token, problems):
     baseline = not present
     issues = prune_issues(issues, now, config["retention_secs"])
 
+    enumerated = True
     try:
         projects = fetch_projects(org, host, token)
     except FetchError as exc:
-        if config["allowlist"]:
-            projects = [{"slug": slug} for slug in config["allowlist"]]
-        else:
-            findings.append("could-not-determine projects: %s" % exc)
-            projects = []
+        conditions["projects"] = "projects: %s" % exc
+        enumerated = False
+        projects = []
 
-    allow = set(config["allowlist"])
     deny = set(config["denylist"])
     slugs = []
     for project in projects:
@@ -936,24 +1027,23 @@ def action_poll(config, org, host, token, problems):
         slug = project.get("slug") or ""
         if not slug or slug in deny:
             continue
-        if allow and slug not in allow:
-            continue
         slugs.append(slug)
 
     signatures = {}
-    for key in ("sensitive", "noise", "transport", "retired", "live"):
+    for key in ("sensitive", "noise", "transport", "retired", "critical"):
         signatures[key] = compile_re(config["signatures"].get(key, ""), "signatures.%s" % key, [])
 
     updated = {}
+    issue_findings = []
     for slug in slugs:
         settings = project_settings(config, slug)
         if time.time() >= deadline:
-            findings.append("could-not-determine %s: time budget ran out" % slug)
+            conditions[slug] = "%s: time budget ran out" % slug
             continue
         try:
             rows = fetch_issues(org, host, token, slug)
         except FetchError as exc:
-            findings.append("could-not-determine %s: %s" % (slug, exc))
+            conditions[slug] = "%s: %s" % (slug, exc)
             continue
         for issue in rows:
             if not isinstance(issue, dict):
@@ -967,15 +1057,28 @@ def action_poll(config, org, host, token, problems):
             entry["rate"] = project_rate(entry, old, now)
             entry["surfaced"] = (old.get("surfaced") or 0) if isinstance(old, dict) else 0
             if not baseline:
-                finding = classify(entry, old, settings, signatures, config, now)
+                finding = classify(entry, old, settings, signatures, config, window_start)
                 if finding:
                     # The surfaced marker is what distinguishes an issue this
                     # watch has woken firstmate about from one it only recorded,
                     # so the rail cross-check never calls a surfaced fix a
-                    # silent disagreement.
+                    # silent disagreement. Every finding prints, so the marker
+                    # is never set on an issue whose line was dropped.
                     entry["surfaced"] = now
-                    findings.append(finding)
+                    issue_findings.append(finding)
             updated[sid] = entry
+
+    if not enumerated:
+        # A poll that could not list projects learned nothing about any single
+        # project's condition, so those carry over neither reported nor cleared.
+        for key, record in prior_conditions.items():
+            if key in conditions or key == "projects" or key.startswith("config: "):
+                continue
+            if isinstance(record, dict) and record.get("message"):
+                conditions[key] = record["message"]
+    condition_lines, conditions = condition_findings(prior_conditions, conditions, now)
+    findings.extend(condition_lines)
+    findings.extend(issue_findings)
 
     merged = dict(issues)
     merged.update(updated)
@@ -983,6 +1086,7 @@ def action_poll(config, org, host, token, problems):
         "schema": SCHEMA,
         "updated": now,
         "issues": merged,
+        "conditions": conditions,
     })
     try:
         BEAT.write_text("%s\n" % now)
@@ -1037,10 +1141,8 @@ def action_poll(config, org, host, token, problems):
         findings = [f for f in findings
                     if f.startswith("DARK") or f.startswith("could-not-determine")]
     findings.extend(rail_findings)
-    if not findings:
-        return
-    line = "sentry-watch: " + "; ".join(findings[:8])
-    print(line)
+    for finding in findings:
+        print("sentry-watch: " + finding)
 
 
 def main():
@@ -1062,14 +1164,20 @@ main()
 PY
 }
 
+# One line per finding: the cap bounds a single line and never drops a finding.
 action_poll() {
-  local out
+  local out line
   out=$(run_engine poll) || {
     printf 'sentry-watch: could-not-determine the poll engine failed\n'
     return 0
   }
   [ -n "$out" ] || return 0
-  fm_cap_line "$out" "$MAX_LINE"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    fm_cap_line "$line" "$MAX_LINE"
+  done <<EOF
+$out
+EOF
 }
 
 action_status() { run_engine status; }

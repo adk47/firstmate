@@ -676,15 +676,14 @@ See [`docs/examples/sentry-watch.json`](examples/sentry-watch.json) for a starti
   "org": "<optional organization slug, default from the vault>",
   "cadence_secs": 300,
   "retention_secs": 604800,
-  "allowlist": ["<optional project slugs; when non-empty only these are polled>"],
   "denylist": ["<project slugs never polled>"],
-  "page_any_delta": ["<Sentry short ids that must page on any new event>"],
+  "page_any_delta": ["<Sentry short ids that must page on any new event; empty by default>"],
   "signatures": {
     "sensitive": "<regex matching signup, auth, login, billing, checkout, payment, claim, credits routes>",
     "noise": "<regex matching client transport and bot-probe signatures that never wake>",
     "transport": "<regex matching transport signatures that cannot trigger P1>",
     "retired": "<regex matching dead data paths that are recorded and never wake>",
-    "live": "<regex matching live paths>"
+    "critical": "<regex matching fatal app hangs, watchdog terminations, native aborts, OOM kills, memory and connection-pool exhaustion>"
   },
   "projects": {
     "<project slug>": {
@@ -710,17 +709,20 @@ See [`docs/examples/sentry-watch.json`](examples/sentry-watch.json) for a starti
 
 The watch fires three states and never goes silent on error: it wakes, stays silent, or reports `could-not-determine`.
 A project whose issues cannot be read is reported as `could-not-determine` for that project, and one unreadable project never stops the others; a poll that cannot enumerate projects at all reports it too.
+Each `could-not-determine` condition - a project, the project list, or a config problem - is reported when it appears, reminded once an hour while it persists, and reported once more as `recovered` when it clears, so a persistent condition is never a wake on every poll.
+Every finding prints on its own line, so a multi-issue incident is never cut to the first few, and an issue is recorded as surfaced only because its line was printed.
 The rules themselves, in the order they are applied, are:
 
 - `PAGE-NOW` - an issue named in `page_any_delta` has any new event.
 - `REGRESSION` - an issue's Sentry `substatus` transitions into `regressed`, which is a resolved issue re-firing.
-- `P0` - `users >= users_p0`, or a burst: `burst_min_events` or more events in one poll window on a path whose prior rate was below `burst_baseline_per_hour`.
+- `CRITICAL` - a `critical` signature match pages a new issue at any user count and a seen issue on any new event.
+- `P0` - a user tier, or a burst. A new issue pages at `users >= users_p0`; a seen issue pages again only when it crosses a new tier (`users_p0`, twice it, four times it), so a chronic issue pages once per tier rather than every poll. A burst is `burst_min_events` or more events inside the poll window on a path whose prior rate was below `burst_baseline_per_hour`; a new issue counts as a burst only when its Sentry `firstSeen` falls inside the window, never on its lifetime count.
 - `P1` - a new `error` or `fatal` issue on a live path, at `users_p1_sensitive` when the path matches the sensitive routes and `users_p1` elsewhere.
 
 A `noise` match silences an issue entirely.
 A `transport` match cannot trigger `P1` or the users-based `P0`, but never hides a burst: the 2026-09-22 fleet-wide request reset arrived as `socket hang up`, and a transport signature that suppressed bursts is exactly how that P0 stayed hidden.
 A `retired` match is recorded and never wakes.
-The `live` signature is used only when a project sets `live_routes`; without it every non-retired path counts as live.
+A project's `live_routes`, when set, is the regex a new issue must match to count as a live path; without it every non-retired path counts as live.
 
 ### Liveness
 
