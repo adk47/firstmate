@@ -676,6 +676,7 @@ See [`docs/examples/sentry-watch.json`](examples/sentry-watch.json) for a starti
   "org": "<optional organization slug, default from the vault>",
   "cadence_secs": 300,
   "retention_secs": 604800,
+  "surfaced_window_secs": 3600,
   "denylist": ["<project slugs never polled>"],
   "page_any_delta": ["<Sentry short ids that must page on any new event; empty by default>"],
   "signatures": {
@@ -683,7 +684,8 @@ See [`docs/examples/sentry-watch.json`](examples/sentry-watch.json) for a starti
     "noise": "<regex matching client transport and bot-probe signatures that never wake>",
     "transport": "<regex matching transport signatures that cannot trigger P1>",
     "retired": "<regex matching dead data paths that are recorded and never wake>",
-    "critical": "<regex matching fatal app hangs, watchdog terminations, native aborts, OOM kills, memory and connection-pool exhaustion>"
+    "crash": "<regex matching fatal app hangs, watchdog terminations, native aborts, NoSuchMethodError, NullPointerException>",
+    "critical": "<regex matching OOM kills, memory exhaustion, SIGKILL, connection-pool exhaustion>"
   },
   "projects": {
     "<project slug>": {
@@ -695,6 +697,7 @@ See [`docs/examples/sentry-watch.json`](examples/sentry-watch.json) for a starti
       "users_p1": 3,
       "users_p0": 25,
       "burst_min_events": 10,
+      "burst_min_events_transport": 25,
       "burst_baseline_per_hour": 2
     }
   },
@@ -715,19 +718,20 @@ The rules themselves, in the order they are applied, are:
 
 - `PAGE-NOW` - an issue named in `page_any_delta` has any new event.
 - `REGRESSION` - an issue's Sentry `substatus` transitions into `regressed`, which is a resolved issue re-firing.
-- `CRITICAL` - a `critical` signature match pages a new issue at any user count and a seen issue on any new event.
-- `P0` - a user tier, or a burst. A new issue pages at `users >= users_p0`; a seen issue pages again only when it crosses a new tier (`users_p0`, twice it, four times it), so a chronic issue pages once per tier rather than every poll. A burst is `burst_min_events` or more events inside the poll window on a path whose prior rate was below `burst_baseline_per_hour`; a new issue counts as a burst only when its Sentry `firstSeen` falls inside the window, never on its lifetime count.
+- `CRASH` - a `crash` signature match pages a new issue once at any user count; after that the seen-issue rules below apply to it like any other issue.
+- `CRITICAL` - a `critical` signature match pages a new issue at any user count and a seen issue on any new event, throttled to once per `surfaced_window_secs`: it pages again only when that window has rolled since the issue last surfaced or a new user tier is crossed.
+- `P0` - a user tier, or a burst. A new issue pages at `users >= users_p0`; a seen issue pages again only when it crosses a new tier (`users_p0`, twice it, four times it), so a chronic issue pages once per tier rather than every poll. A burst is `burst_min_events` or more events inside the poll window on a path whose prior rate was below `burst_baseline_per_hour`; a new issue counts as a burst only when its Sentry `firstSeen` falls inside the window, never on its lifetime count. The window runs from the last poll that actually read the project, so a poll that skipped it never shortens the window.
 - `P1` - a new `error` or `fatal` issue on a live path, at `users_p1_sensitive` when the path matches the sensitive routes and `users_p1` elsewhere.
 
 A `noise` match silences an issue entirely.
-A `transport` match cannot trigger `P1` or the users-based `P0`, but never hides a burst: the 2026-09-22 fleet-wide request reset arrived as `socket hang up`, and a transport signature that suppressed bursts is exactly how that P0 stayed hidden.
+A `transport` match never triggers the users-based `P0` or `P1`; it can page only through the burst rule, at the raised floor `burst_min_events_transport`, because the 2026-09-22 fleet-wide request reset arrived as `socket hang up` and a transport signature that suppressed bursts is exactly how that P0 stayed hidden.
 A `retired` match is recorded and never wakes.
 A project's `live_routes`, when set, is the regex a new issue must match to count as a live path; without it every non-retired path counts as live.
 
 ### Liveness
 
-Every poll writes `state/.sentry-watch.beat`.
-A poll emits a `DARK` wake when the recorded beat is older than three times the cadence, when the check shim or its trust binding is missing, when the trust binding no longer covers the shim's bytes, or when no beat was ever recorded.
+A poll that actually read at least one project writes `state/.sentry-watch.beat`, and the baseline records a per-project `last_read` time written only when that project was fetched, so the beat and every burst window derive from real reads rather than from the poll having run.
+A poll emits a `DARK` wake when the recorded beat is older than three times the cadence (reported on the transition and reminded hourly, like a `could-not-determine` condition), when the check shim or its trust binding is missing, when the trust binding no longer covers the shim's bytes, or when no beat was ever recorded.
 That last condition matters because a task's own PR poll writes `state/<task>.check.sh`, so a check named after its task is overwritten when that task's PR is armed and deleted when the poll retires - the exact way the retired per-lane checks went dark twice on 2026-09-22.
 This watch lives at `state/sentry-watch.check.sh`, a path no task PR poll derives, `arm` refuses when a task record exists for its id, and an in-place overwrite is caught by the trust-binding check rather than read as healthy.
 `arm` also writes `state/.sentry-watch.armed`, which outlives a deleted check, so `bin/fm-wake-drain.sh` prints a `SENTRY WATCH DARK` line on the next supervision turn when the shim, trust, or beat is missing or stale even though the check itself can no longer run to notice.

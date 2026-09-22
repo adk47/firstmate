@@ -28,25 +28,30 @@
 #               must page on a single recurrence).
 #   REGRESSION  an issue whose substatus transitions into "regressed" (a resolved
 #               issue re-firing), or a brand-new issue already marked regressed.
-#   CRITICAL    a critical signature (fatal app hangs, watchdog terminations,
-#               native aborts, OOM kills, memory exhaustion, connection-pool
-#               exhaustion) pages a NEW issue at any user count and a seen issue
-#               on any new event.
+#   CRASH       a crash signature (fatal app hangs, watchdog terminations, native
+#               aborts, NoSuchMethodError, NullPointerException) pages a NEW issue
+#               once at any user count; after that the seen-issue rules apply.
+#   CRITICAL    an infrastructure signature (OOM kills, memory exhaustion, SIGKILL,
+#               connection-pool exhaustion) pages a NEW issue at any user count and
+#               a seen issue on any new event, throttled to once per surfaced
+#               window (surfaced_window_secs): it pages again only when that window
+#               has rolled or a new user tier is crossed.
 #   P0          a user tier: a NEW issue at users>=users_p0, and a seen issue only
 #               when it crosses a new tier (users_p0, twice it, four times it), so
 #               a chronic issue pages once per tier rather than every poll. Or a
 #               burst: burst_min_events or more events inside the poll window on a
 #               path whose prior rate was below burst_baseline_per_hour; a NEW
 #               issue is a burst only when its firstSeen falls inside the window,
-#               never on its lifetime count. A burst is deliberately NOT gated on
-#               transport signatures: the 2026-09-22 fleet-wide request reset
-#               arrived AS "socket hang up".
+#               never on its lifetime count. The window runs from the last poll
+#               that actually read the project.
 #   P1          level error/fatal on a live path, at users>=users_p1_sensitive when
 #               the path matches the sensitive routes (onboarding, signup, auth,
 #               login, billing, checkout, payment, claim, credits) and users>=users_p1
 #               elsewhere.
-# Noise signatures silence an issue entirely; transport signatures silence P1 and
-# the users-based P0 but never a burst. Retired data paths are recorded and never
+# Noise signatures silence an issue entirely. Transport signatures never trigger
+# the users-based P0 or P1; they page only through the burst rule, at the raised
+# floor burst_min_events_transport, because the 2026-09-22 fleet-wide request
+# reset arrived AS "socket hang up". Retired data paths are recorded and never
 # wake. Every threshold and every signature lives in config/sentry-watch.json
 # (local, gitignored); docs/configuration.md owns that schema.
 #
@@ -63,7 +68,10 @@
 # reported once more as recovered when it clears, so a persistent condition is
 # never a wake on every poll.
 #
-# LIVENESS. Every poll writes state/.sentry-watch.beat. A poll emits a DARK wake
+# LIVENESS. A poll that read at least one project writes state/.sentry-watch.beat,
+# and the baseline records a last_read time per project, written only when that
+# project was actually fetched, so the beat and every burst window derive from
+# real reads rather than from the poll having run. A poll emits a DARK wake
 # when the recorded beat is older than three times the cadence, when the check
 # shim or its trust binding is missing, when the trust binding no longer covers
 # the shim's bytes, or when no beat was ever recorded. A never-restored deletion
@@ -262,9 +270,12 @@ DEFAULT_SIGNATURES = {
         r"/api/m/v2|athena|Run_Calculate_Industry|Run_Industry_Orchestrator|"
         r"Run_Scheduled_Calculations|industry_calculations"
     ),
-    "critical": (
+    "crash": (
         r"Fatal App Hang|WatchdogTermination|EXC_|SIGABRT|NoSuchMethodError|"
-        r"NullPointerException|OOMKilled|out of memory|ENOMEM|Cannot allocate memory|"
+        r"NullPointerException"
+    ),
+    "critical": (
+        r"OOMKilled|out of memory|ENOMEM|Cannot allocate memory|"
         r"SIGKILL|too many clients|remaining connection slots|pool exhausted|"
         r"SequelizeConnectionError|SequelizeConnectionAcquireTimeoutError|"
         r"PROTOCOL_CONNECTION_LOST|Connection terminated unexpectedly"
@@ -285,11 +296,13 @@ PROJECT_DEFAULTS = {
     "users_p1": 3,
     "users_p0": 25,
     "burst_min_events": 10,
+    "burst_min_events_transport": 25,
     "burst_baseline_per_hour": 2,
 }
 DEFAULTS = {
     "cadence_secs": 300,
     "retention_secs": 7 * 24 * 3600,
+    "surfaced_window_secs": 3600,
     "denylist": [],
     "page_any_delta": [],
     "signatures": dict(DEFAULT_SIGNATURES),
@@ -353,6 +366,7 @@ def load_config():
     config = {
         "cadence_secs": DEFAULTS["cadence_secs"],
         "retention_secs": DEFAULTS["retention_secs"],
+        "surfaced_window_secs": DEFAULTS["surfaced_window_secs"],
         "denylist": list(DEFAULTS["denylist"]),
         "page_any_delta": list(DEFAULTS["page_any_delta"]),
         "signatures": dict(DEFAULT_SIGNATURES),
@@ -367,7 +381,7 @@ def load_config():
     if not isinstance(raw, dict):
         problems.append("config is not a JSON object: %s" % CONFIG)
         return config, problems
-    for key in ("cadence_secs", "retention_secs"):
+    for key in ("cadence_secs", "retention_secs", "surfaced_window_secs"):
         if key in raw:
             try:
                 config[key] = int(raw[key])
@@ -646,11 +660,8 @@ def liveness_findings(now, cadence):
     # trust binding no longer covers the shim's bytes.
     if shim_present and trust_present and env("FM_SENTRY_WATCH_REGISTERED", "") != "1":
         findings.append("DARK the trust binding does not cover the current check bytes")
-    beat = read_int(BEAT)
-    if beat is None:
+    if read_int(BEAT) is None:
         findings.append("DARK no beat recorded")
-    elif cadence > 0 and now - beat >= DARK_FACTOR * cadence:
-        findings.append("DARK beat %ss old (>= %ss)" % (now - beat, DARK_FACTOR * cadence))
     return findings
 
 
@@ -706,7 +717,7 @@ def user_tier(users, settings):
     return tier
 
 
-def classify(entry, old, settings, signatures, config, window_start):
+def classify(entry, old, settings, signatures, config, window_start, now):
     """Return a finding line, or None. `old` is the prior baseline entry."""
     blob = "%s %s" % (entry["title"], entry["culprit"])
     if signatures["retired"] and signatures["retired"].search(blob):
@@ -720,7 +731,9 @@ def classify(entry, old, settings, signatures, config, window_start):
             live = False
     level = entry["level"]
     transport = bool(signatures["transport"] and signatures["transport"].search(blob))
+    crash = bool(signatures["crash"] and signatures["crash"].search(blob))
     critical = bool(signatures["critical"] and signatures["critical"].search(blob))
+    burst_floor = settings["burst_min_events_transport"] if transport else settings["burst_min_events"]
     sensitive = bool(settings.get("sensitive"))
     if not sensitive and signatures["sensitive"] and signatures["sensitive"].search(blob):
         sensitive = True
@@ -770,14 +783,16 @@ def classify(entry, old, settings, signatures, config, window_start):
     if old is None:
         if entry["substatus"] == "regressed":
             return finding("REGRESSION", "regressed")
+        if crash:
+            return finding("CRASH", "crash-signature")
         if critical:
             return finding("CRITICAL", "critical-signature")
-        if users >= settings["users_p0"]:
+        if users >= settings["users_p0"] and not transport:
             return finding("P0", "users>=%s" % settings["users_p0"])
         first_seen = entry.get("first_seen")
         if first_seen is not None and first_seen >= window_start \
-                and count >= settings["burst_min_events"] and level in ("error", "fatal") and live:
-            return finding("P0", "burst>=%s" % settings["burst_min_events"])
+                and count >= burst_floor and level in ("error", "fatal") and live:
+            return finding("P0", "burst>=%s" % burst_floor)
         if level in ("error", "fatal") and live and not transport:
             if sensitive and users >= settings["users_p1_sensitive"]:
                 return finding("P1", "sensitive users>=%s" % settings["users_p1_sensitive"])
@@ -788,14 +803,17 @@ def classify(entry, old, settings, signatures, config, window_start):
     old_substatus = old.get("substatus") if isinstance(old, dict) else ""
     if entry["substatus"] == "regressed" and old_substatus != "regressed":
         return finding("REGRESSION", "regressed")
-    if delta >= settings["burst_min_events"] and prev_rate < settings["burst_baseline_per_hour"] \
+    if delta >= burst_floor and prev_rate < settings["burst_baseline_per_hour"] \
             and level in ("error", "fatal") and live:
         return finding("P0", "burst>=%s prior<%.0f/h" % (
-            settings["burst_min_events"], settings["burst_baseline_per_hour"]))
-    if critical and delta >= 1:
-        return finding("CRITICAL", "critical-signature")
+            burst_floor, settings["burst_baseline_per_hour"]))
     tier = user_tier(users, settings)
-    if tier and tier > user_tier(_as_int(old.get("users")) or 0, settings) and live:
+    new_tier = bool(tier) and tier > user_tier(_as_int(old.get("users")) or 0, settings)
+    if critical and delta >= 1:
+        surfaced = _as_int(old.get("surfaced")) or 0
+        if not surfaced or now - surfaced >= config["surfaced_window_secs"] or new_tier:
+            return finding("CRITICAL", "critical-signature")
+    if new_tier and live and not transport:
         return finding("P0", "users>=%s" % tier)
     return None
 
@@ -857,15 +875,15 @@ REMIND_SECS = 3600
 
 
 def condition_findings(prior, current, now):
-    """Report each could-not-determine condition when it appears, remind hourly
-    while it persists, and report it once more when it clears. Returns
-    (lines, conditions-to-record)."""
+    """Report each condition (a could-not-determine or a DARK beat) when it
+    appears, remind hourly while it persists, and report it once more when it
+    clears. Returns (lines, conditions-to-record)."""
     lines = []
     kept = {}
     for key, message in current.items():
         record = prior.get(key) if isinstance(prior.get(key), dict) else None
         if record is None:
-            lines.append("could-not-determine %s" % message)
+            lines.append(message)
             kept[key] = {"since": now, "reported": now, "message": message}
             continue
         since = _as_int(record.get("since"))
@@ -873,7 +891,7 @@ def condition_findings(prior, current, now):
         since = now if since is None else since
         reported = now if reported is None else reported
         if now - reported >= REMIND_SECS:
-            lines.append("could-not-determine %s (persisting %ss)" % (message, now - since))
+            lines.append("%s (persisting %ss)" % (message, now - since))
             reported = now
         kept[key] = {"since": since, "reported": reported, "message": message}
     for key in sorted(set(prior) - set(current)):
@@ -935,6 +953,14 @@ def action_status(config, problems):
     print("armed marker: %s" % ("present" if ARMED.is_file() else "absent"))
     issues = read_baseline()
     print("baseline: %s issues" % len(issues))
+    stored = read_json(RECORD)
+    last_read = stored.get("last_read") if isinstance(stored, dict) else None
+    reads = [v for v in (last_read or {}).values() if _as_int(v) is not None] \
+        if isinstance(last_read, dict) else []
+    if reads:
+        print("last read: %s projects, oldest %ss ago" % (len(reads), now - min(int(v) for v in reads)))
+    else:
+        print("last read: no project read yet")
     rail = read_json(RAIL_STATE)
     if isinstance(rail, dict):
         print("rail: %s known=%s reported=%s" % (
@@ -982,7 +1008,11 @@ def action_poll(config, org, host, token, problems):
     findings.extend(liveness_findings(now, cadence))
     conditions = {}
     for problem in problems:
-        conditions["config: %s" % problem] = "config: %s" % problem
+        conditions["config: %s" % problem] = "could-not-determine config: %s" % problem
+    beat = read_int(BEAT)
+    if beat is not None and cadence > 0 and now - beat >= DARK_FACTOR * cadence:
+        conditions["beat"] = "DARK beat %ss old (>= %ss): no project read since" % (
+            now - beat, DARK_FACTOR * cadence)
 
     # Whether the record is a first poll is decided by the record's presence,
     # never by whether it happens to hold issues: an estate with nothing
@@ -995,11 +1025,15 @@ def action_poll(config, org, host, token, problems):
         stored.get("conditions")
         if present and isinstance(stored.get("conditions"), dict) else {}
     )
-    # The poll window runs from the previous poll, so a NEW issue counts as a
-    # burst only when it first appeared inside it.
-    window_start = now - cadence
-    if present and _as_int(stored.get("updated")) is not None:
-        window_start = _as_int(stored.get("updated"))
+    # A project's poll window runs from the last poll that actually read it, so
+    # a NEW issue counts as a burst only when it first appeared inside that
+    # window, and a poll that skipped the project never shortens it.
+    last_read = {}
+    if present and isinstance(stored.get("last_read"), dict):
+        last_read = {
+            slug: _as_int(stamp) for slug, stamp in stored["last_read"].items()
+            if _as_int(stamp) is not None
+        }
     if not present:
         imported, files_read = import_legacy(issues)
         if files_read:
@@ -1015,7 +1049,7 @@ def action_poll(config, org, host, token, problems):
     try:
         projects = fetch_projects(org, host, token)
     except FetchError as exc:
-        conditions["projects"] = "projects: %s" % exc
+        conditions["projects"] = "could-not-determine projects: %s" % exc
         enumerated = False
         projects = []
 
@@ -1030,21 +1064,25 @@ def action_poll(config, org, host, token, problems):
         slugs.append(slug)
 
     signatures = {}
-    for key in ("sensitive", "noise", "transport", "retired", "critical"):
+    for key in ("sensitive", "noise", "transport", "retired", "crash", "critical"):
         signatures[key] = compile_re(config["signatures"].get(key, ""), "signatures.%s" % key, [])
 
     updated = {}
     issue_findings = []
+    read_any = False
     for slug in slugs:
         settings = project_settings(config, slug)
         if time.time() >= deadline:
-            conditions[slug] = "%s: time budget ran out" % slug
+            conditions[slug] = "could-not-determine %s: time budget ran out" % slug
             continue
         try:
             rows = fetch_issues(org, host, token, slug)
         except FetchError as exc:
-            conditions[slug] = "%s: %s" % (slug, exc)
+            conditions[slug] = "could-not-determine %s: %s" % (slug, exc)
             continue
+        window_start = last_read.get(slug, now - cadence)
+        last_read[slug] = now
+        read_any = True
         for issue in rows:
             if not isinstance(issue, dict):
                 continue
@@ -1057,7 +1095,7 @@ def action_poll(config, org, host, token, problems):
             entry["rate"] = project_rate(entry, old, now)
             entry["surfaced"] = (old.get("surfaced") or 0) if isinstance(old, dict) else 0
             if not baseline:
-                finding = classify(entry, old, settings, signatures, config, window_start)
+                finding = classify(entry, old, settings, signatures, config, window_start, now)
                 if finding:
                     # The surfaced marker is what distinguishes an issue this
                     # watch has woken firstmate about from one it only recorded,
@@ -1072,7 +1110,7 @@ def action_poll(config, org, host, token, problems):
         # A poll that could not list projects learned nothing about any single
         # project's condition, so those carry over neither reported nor cleared.
         for key, record in prior_conditions.items():
-            if key in conditions or key == "projects" or key.startswith("config: "):
+            if key in conditions or key in ("projects", "beat") or key.startswith("config: "):
                 continue
             if isinstance(record, dict) and record.get("message"):
                 conditions[key] = record["message"]
@@ -1087,12 +1125,14 @@ def action_poll(config, org, host, token, problems):
         "updated": now,
         "issues": merged,
         "conditions": conditions,
+        "last_read": last_read,
     })
-    try:
-        BEAT.write_text("%s\n" % now)
-        os.chmod(BEAT, 0o600)
-    except OSError:
-        pass
+    if read_any:
+        try:
+            BEAT.write_text("%s\n" % now)
+            os.chmod(BEAT, 0o600)
+        except OSError:
+            pass
 
     # Rail cross-check: report an id the rail fixed that this watch never saw.
     rail_config = config["rail"]

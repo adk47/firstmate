@@ -158,8 +158,57 @@ test_transport_burst_still_pages() {
 JSON
   out=$(poll "$home" 1300)
   assert_contains "$out" "P0 CORE-BACKEND-VD" "a transport burst was silenced"
-  assert_contains "$out" "rule=burst>=10" "the transport burst did not name the burst rule"
+  assert_contains "$out" "rule=burst>=25" "the transport burst did not name the raised burst floor"
   pass "a transport signature never hides a burst"
+}
+
+test_transport_pages_only_through_the_raised_burst_floor() {
+  local home out
+  home=$(make_home transport-users)
+  prime_baseline "$home" 1000
+  # A transport reset at thirty users is client churn until it bursts: neither
+  # the users-based P0 nor the P1 rule may fire on it.
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-RST","title":"Error: read ECONNRESET","culprit":"/api/v4/onboarding/name","userCount":30,"count":12,"level":"error","substatus":"new","firstSeen":"1970-01-01T00:20:00Z","permalink":"https://x/rst/"}]
+JSON
+  out=$(poll "$home" 1300)
+  [ -z "$out" ] || fail "a transport issue paged on users or below the raised burst floor: $out"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-RST","title":"Error: read ECONNRESET","culprit":"/api/v4/onboarding/name","userCount":52,"count":12,"level":"error","substatus":"new","firstSeen":"1970-01-01T00:20:00Z","permalink":"https://x/rst/"}]
+JSON
+  out=$(poll "$home" 1600)
+  [ -z "$out" ] || fail "a seen transport issue paged on crossing a user tier: $out"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-RST","title":"Error: read ECONNRESET","culprit":"/api/v4/onboarding/name","userCount":52,"count":44,"level":"error","substatus":"new","firstSeen":"1970-01-01T00:20:00Z","permalink":"https://x/rst/"}]
+JSON
+  out=$(poll "$home" 1900)
+  assert_contains "$out" "P0 CORE-BACKEND-RST" "a transport burst above the raised floor did not page"
+  assert_contains "$out" "rule=burst>=25" "the transport burst did not name the raised floor"
+  pass "a transport signature pages only through the burst rule at its raised floor"
+}
+
+test_burst_window_runs_from_the_last_real_read() {
+  local home out beat
+  home=$(make_home last-read)
+  prime_baseline "$home" 1000
+  # Poll B skips core-backend (unreadable) and must neither advance the beat
+  # nor shorten the project's window; poll C then sees a burst that began
+  # between A and B.
+  rm -f "$home/fix/issues-core-backend.json"
+  out=$(poll "$home" 1300)
+  assert_contains "$out" "could-not-determine core-backend" "the skipped project was not reported"
+  beat=$(cat "$home/state/.sentry-watch.beat")
+  [ "$beat" = 1000 ] || fail "a poll that read nothing advanced the beat to $beat"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-WIN","title":"TypeError: feed","culprit":"/api/v4/feed/profile/2/activities","userCount":2,"count":50,"level":"error","substatus":"new","firstSeen":"1970-01-01T00:18:40Z","permalink":"https://x/win/"}]
+JSON
+  out=$(poll "$home" 1600)
+  assert_contains "$out" "P0 CORE-BACKEND-WIN" "a burst that began after the last real read did not page"
+  assert_contains "$out" "rule=burst>=10" "the burst rule was not named"
+  assert_contains "$out" "recovered core-backend" "the project reading again was not reported"
+  beat=$(cat "$home/state/.sentry-watch.beat")
+  [ "$beat" = 1600 ] || fail "a poll that read a project did not advance the beat (got $beat)"
+  pass "the burst window and the beat derive from the last real read"
 }
 
 test_new_issue_burst_needs_events_inside_the_poll_window() {
@@ -222,16 +271,40 @@ JSON
 [{"shortId":"CORE-BACKEND-OOM","title":"OOMKilled","culprit":"/api/v4/x","userCount":0,"count":5,"level":"fatal","substatus":"ongoing","permalink":"https://x/oom/"}]
 JSON
   out=$(poll "$home" 1300)
-  assert_contains "$out" "CRITICAL APPLE-IOS-AC" "a one-user fatal app hang did not page"
+  assert_contains "$out" "CRASH APPLE-IOS-AC" "a one-user fatal app hang did not page"
+  assert_contains "$out" "rule=crash-signature" "the crash rule was not named"
   assert_contains "$out" "CRITICAL CORE-BACKEND-OOM" "a new OOMKilled issue did not page"
   assert_contains "$out" "rule=critical-signature" "the critical rule was not named"
+  # A seen crash follows the ordinary seen-issue rules, and a seen critical
+  # issue is throttled to once per surfaced window: neither pages on one more
+  # event five minutes later.
+  write_issues "$home" apple-ios <<'JSON'
+[{"shortId":"APPLE-IOS-AC","title":"Fatal App Hang Fully Blocked","culprit":"MusoModalSheetTrackingModifier","userCount":2,"count":3,"level":"fatal","substatus":"ongoing","permalink":"https://x/ac/"}]
+JSON
   write_issues "$home" core-backend <<'JSON'
 [{"shortId":"CORE-BACKEND-OOM","title":"OOMKilled","culprit":"/api/v4/x","userCount":0,"count":6,"level":"fatal","substatus":"ongoing","permalink":"https://x/oom/"}]
 JSON
   out=$(poll "$home" 1600)
-  assert_contains "$out" "CRITICAL CORE-BACKEND-OOM" "a seen OOMKilled issue with one new event did not page"
+  [ -z "$out" ] || fail "a seen crash or critical issue re-paged inside its surfaced window: $out"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-OOM","title":"OOMKilled","culprit":"/api/v4/x","userCount":30,"count":7,"level":"fatal","substatus":"ongoing","permalink":"https://x/oom/"}]
+JSON
+  out=$(poll "$home" 1900)
+  assert_contains "$out" "CRITICAL CORE-BACKEND-OOM" "a critical issue crossing a user tier did not page"
   assert_contains "$out" "delta=1" "the critical re-page did not carry its delta"
-  pass "a critical signature pages at any user count and on any new event"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-OOM","title":"OOMKilled","culprit":"/api/v4/x","userCount":31,"count":8,"level":"fatal","substatus":"ongoing","permalink":"https://x/oom/"}]
+JSON
+  out=$(poll "$home" 2200)
+  assert_not_contains "$out" "CRITICAL CORE-BACKEND-OOM" "a critical issue re-paged inside its surfaced window"
+  out=$(poll "$home" 5500)
+  assert_not_contains "$out" "CRITICAL CORE-BACKEND-OOM" "a critical issue with no new event paged when its window rolled"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-OOM","title":"OOMKilled","culprit":"/api/v4/x","userCount":31,"count":9,"level":"fatal","substatus":"ongoing","permalink":"https://x/oom/"}]
+JSON
+  out=$(poll "$home" 5800)
+  assert_contains "$out" "CRITICAL CORE-BACKEND-OOM" "a critical issue with a new event did not page after its window rolled"
+  pass "crash pages a new issue once; critical pages once per surfaced window or tier"
 }
 
 test_every_finding_pages_on_its_own_line() {
@@ -562,6 +635,8 @@ test_sensitive_route_pages_at_one_user
 test_nonsensitive_route_pages_at_three_users
 test_burst_pages_regardless_of_users
 test_transport_burst_still_pages
+test_transport_pages_only_through_the_raised_burst_floor
+test_burst_window_runs_from_the_last_real_read
 test_new_issue_burst_needs_events_inside_the_poll_window
 test_seen_p0_pages_once_per_user_tier
 test_critical_signature_pages_at_any_user_count

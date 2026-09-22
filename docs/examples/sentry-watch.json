@@ -1,6 +1,7 @@
 {
   "cadence_secs": 300,
   "retention_secs": 604800,
+  "surfaced_window_secs": 3600,
   "denylist": ["flutter"],
   "page_any_delta": ["CORE-BACKEND-11N"],
   "signatures": {
@@ -8,7 +9,8 @@
     "noise": "Network request failed|NetworkError|Failed to fetch|ECONNABORTED|TLS error|handshake|Invalid statusCode:\\s*404|NSURLErrorDomain|Internet connection appears to be offline|not connected to the internet|cannot enqueue|Load failed|net::ERR_|Navigation cancelled|UnhandledRejection: Non-Error promise rejection|Non-Error promise rejection|wp-admin|wp-login|wp-content|xmlrpc|admin-ajax|phpmyadmin|/\\.env|/\\.git/|/cgi-bin|eval-stdin|/vendor/phpunit|StoreKit|N\\+1 API Call|Can't assign requested address|Software caused connection abort|UNErrorDomain|Notifications are not allowed",
     "transport": "socket hang up|ECONNRESET|EPERM|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|timeout of \\d+ms exceeded|aborted|Client network socket disconnected|other side closed|socket closed|HandshakeException|Broken pipe",
     "retired": "/api/m/v2|athena|Run_Calculate_Industry|Run_Industry_Orchestrator|Run_Scheduled_Calculations|industry_calculations",
-    "critical": "Fatal App Hang|WatchdogTermination|EXC_|SIGABRT|NoSuchMethodError|NullPointerException|OOMKilled|out of memory|ENOMEM|Cannot allocate memory|SIGKILL|too many clients|remaining connection slots|pool exhausted|SequelizeConnectionError|SequelizeConnectionAcquireTimeoutError|PROTOCOL_CONNECTION_LOST|Connection terminated unexpectedly"
+    "crash": "Fatal App Hang|WatchdogTermination|EXC_|SIGABRT|NoSuchMethodError|NullPointerException",
+    "critical": "OOMKilled|out of memory|ENOMEM|Cannot allocate memory|SIGKILL|too many clients|remaining connection slots|pool exhausted|SequelizeConnectionError|SequelizeConnectionAcquireTimeoutError|PROTOCOL_CONNECTION_LOST|Connection terminated unexpectedly"
   },
   "projects": {
     "core-backend": {
