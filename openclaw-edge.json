@@ -483,6 +483,11 @@
     },
     "sessions": {
       "visibility": "all"
+    },
+    "web": {
+      "search": {
+        "enabled": false
+      }
     }
   },
   "secrets": {
