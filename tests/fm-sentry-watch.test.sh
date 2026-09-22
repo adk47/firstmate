@@ -138,13 +138,54 @@ test_burst_pages_regardless_of_users() {
 [{"shortId":"CORE-BACKEND-DDD","title":"OOMKilled","culprit":"/api/v4/x","userCount":0,"count":5,"level":"fatal","substatus":"ongoing","permalink":"https://x/4/"}]
 JSON
   poll "$home" 1300 >/dev/null
+  # The second read establishes the issue's rate; only then can a window rate
+  # be judged a burst.
+  poll "$home" 1600 >/dev/null
   write_issues "$home" core-backend <<'JSON'
 [{"shortId":"CORE-BACKEND-DDD","title":"OOMKilled","culprit":"/api/v4/x","userCount":1,"count":20,"level":"fatal","substatus":"ongoing","permalink":"https://x/4/"}]
 JSON
-  out=$(poll "$home" 1600)
+  out=$(poll "$home" 1900)
   assert_contains "$out" "P0 CORE-BACKEND-DDD" "a burst did not page as P0"
   assert_contains "$out" "rule=burst>=10" "the burst rule was not named"
   pass "a burst pages as P0 regardless of users"
+}
+
+test_burst_is_a_window_rate_not_a_gap_total() {
+  local home out
+  home=$(make_home gap-total)
+  # The arming-day shape: a chronic issue imported from the retired check at
+  # count=100, read again four hours later at count=115. Fifteen events over
+  # four hours is a trickle, not a burst, and an imported entry has no rate
+  # until this watch has read it twice.
+  cat > "$home/state/sentry-backend-watch-b1.last.json" <<'JSON'
+{"CORE-BACKEND-CHR":{"users":4,"title":"TypeError: chronic","culprit":"/api/v4/feed/x","count":100,"level":"error","rate":9.0,"ts":1000}}
+JSON
+  write_projects "$home" core-backend
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-CHR","title":"TypeError: chronic","culprit":"/api/v4/feed/x","userCount":4,"count":115,"level":"error","substatus":"ongoing","permalink":"https://x/chr/"}]
+JSON
+  printf '[]\n' > "$home/fix/rail.json"
+  mark_armed "$home" 15400
+  out=$(poll "$home" 15400)
+  [ -z "$out" ] || fail "a chronic trickle over a four-hour gap paged: $out"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-CHR","title":"TypeError: chronic","culprit":"/api/v4/feed/x","userCount":4,"count":116,"level":"error","substatus":"ongoing","permalink":"https://x/chr/"}]
+JSON
+  out=$(poll "$home" 15700)
+  [ -z "$out" ] || fail "one event in a window paged: $out"
+  # A quiet window brings the prior rate to zero; fifteen events in the next
+  # five-minute window are then a real burst and page.
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-CHR","title":"TypeError: chronic","culprit":"/api/v4/feed/x","userCount":4,"count":116,"level":"error","substatus":"ongoing","permalink":"https://x/chr/"}]
+JSON
+  poll "$home" 16000 >/dev/null
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-CHR","title":"TypeError: chronic","culprit":"/api/v4/feed/x","userCount":4,"count":131,"level":"error","substatus":"ongoing","permalink":"https://x/chr/"}]
+JSON
+  out=$(poll "$home" 16300)
+  assert_contains "$out" "P0 CORE-BACKEND-CHR" "fifteen events in one window after a quiet one did not page"
+  assert_contains "$out" "rule=burst>=10/window" "the burst rule was not named as a window rate"
+  pass "a burst is a window rate against the prior rate, never a gap total"
 }
 
 test_transport_burst_still_pages() {
@@ -443,6 +484,9 @@ test_missing_beat_is_dark() {
 test_rail_only_detection() {
   local home out
   home=$(make_home rail-only)
+  write_config "$home" <<'JSON'
+{"rail":{"every_polls":1}}
+JSON
   prime_baseline "$home" 1000
   write_rail "$home" <<'JSON'
 [{"url":"https://github.com/Muso-AI/core-backend/pull/9999","headRefName":"cto/sentry-core-backend-zzz-20260922-000000","body":"Fixes CORE-BACKEND-ZZZ"}]
@@ -455,9 +499,30 @@ JSON
   pass "a rail fix the watch never surfaced is reported once with its PR URL"
 }
 
+test_rail_runs_on_its_own_cadence() {
+  local home out i
+  home=$(make_home rail-cadence)
+  prime_baseline "$home" 1000
+  write_rail "$home" <<'JSON'
+[{"url":"https://github.com/Muso-AI/core-backend/pull/9999","headRefName":"cto/sentry-core-backend-zzz-20260922-000000","body":"Fixes CORE-BACKEND-ZZZ"}]
+JSON
+  # The arming poll seeded the rail; with the default cadence the next rail
+  # read is the sixth poll after it, not the next one.
+  for i in 1300 1600 1900 2200 2500; do
+    out=$(poll "$home" "$i")
+    assert_not_contains "$out" "RAIL-ONLY" "the rail was read on an off-cadence poll at $i"
+  done
+  out=$(poll "$home" 2800)
+  assert_contains "$out" "RAIL-ONLY CORE-BACKEND-ZZZ" "the rail was not read on its cadence poll"
+  pass "the rail cross-check runs every sixth poll"
+}
+
 test_rail_only_is_suppressed_when_the_watch_surfaced_it() {
   local home out
   home=$(make_home rail-surfaced)
+  write_config "$home" <<'JSON'
+{"rail":{"every_polls":1}}
+JSON
   prime_baseline "$home" 1000
   write_issues "$home" core-backend <<'JSON'
 [{"shortId":"CORE-BACKEND-ZZZ","title":"TypeError: null","culprit":"/api/v4/onboarding/name","userCount":1,"count":1,"level":"fatal","substatus":"new","permalink":"https://x/z/"}]
@@ -521,6 +586,9 @@ JSON
 test_fetch_order_rotates_so_no_project_starves() {
   local home out i
   home=$(make_home rotation)
+  write_config "$home" <<'JSON'
+{"rail":{"enabled":false}}
+JSON
   write_projects "$home" alpha bravo charlie delta
   for i in alpha bravo charlie delta; do
     printf '{"sleep":1.2,"issues":[]}\n' > "$home/fix/issues-$i.json"
@@ -567,6 +635,9 @@ PY
 test_budget_skip_never_closes_an_open_condition() {
   local home out
   home=$(make_home skip-keeps-condition)
+  write_config "$home" <<'JSON'
+{"rail":{"enabled":false}}
+JSON
   write_projects "$home" alpha bravo charlie
   printf '{"sleep":1.2,"issues":[]}\n' > "$home/fix/issues-bravo.json"
   printf '{"sleep":1.2,"issues":[]}\n' > "$home/fix/issues-charlie.json"
@@ -587,6 +658,28 @@ test_budget_skip_never_closes_an_open_condition() {
   out=$(FM_SENTRY_WATCH_BUDGET_SECS=2 poll "$home" 2200)
   assert_contains "$out" "recovered alpha" "a successful read did not close the condition"
   pass "a budget skip never closes an open condition; only a successful read does"
+}
+
+test_departed_project_is_removed_from_watch_not_recovered() {
+  local home out
+  home=$(make_home departed)
+  write_projects "$home" core-backend flutter
+  printf '[]\n' > "$home/fix/issues-core-backend.json"
+  printf '[]\n' > "$home/fix/rail.json"
+  mark_armed "$home" 1000
+  out=$(poll "$home" 1000)
+  assert_contains "$out" "could-not-determine flutter" "the unreadable project was not reported"
+  # The natural reason to denylist a project is that it is unreadable; the
+  # poll after the edit must say it left the watch, never that it recovered.
+  write_config "$home" <<'JSON'
+{"denylist":["flutter"]}
+JSON
+  out=$(poll "$home" 1300)
+  assert_contains "$out" "removed from watch flutter" "a denylisted project was not reported as removed"
+  assert_not_contains "$out" "recovered flutter" "a denylisted project was reported as recovered"
+  out=$(poll "$home" 1600)
+  [ -z "$out" ] || fail "a removed project kept printing: $out"
+  pass "a project that leaves the enumerated set is removed from watch, never recovered"
 }
 
 test_migrate_imports_the_retired_baselines() {
@@ -737,6 +830,7 @@ test_first_poll_records_the_estate_and_wakes_nobody
 test_sensitive_route_pages_at_one_user
 test_nonsensitive_route_pages_at_three_users
 test_burst_pages_regardless_of_users
+test_burst_is_a_window_rate_not_a_gap_total
 test_transport_burst_still_pages
 test_transport_pages_only_through_the_raised_burst_floor
 test_burst_window_runs_from_the_last_real_read
@@ -750,11 +844,13 @@ test_page_any_delta_pages_on_a_single_event
 test_api_error_is_could_not_determine_not_silence
 test_missing_beat_is_dark
 test_rail_only_detection
+test_rail_runs_on_its_own_cadence
 test_rail_only_is_suppressed_when_the_watch_surfaced_it
 test_projects_lists_every_project_with_its_effective_state
 test_legacy_import_baselines_only_the_projects_it_covered
 test_fetch_order_rotates_so_no_project_starves
 test_budget_skip_never_closes_an_open_condition
+test_departed_project_is_removed_from_watch_not_recovered
 test_migrate_imports_the_retired_baselines
 test_a_task_pr_poll_cannot_touch_the_watch
 test_an_overwritten_check_is_dark

@@ -25,6 +25,7 @@
   },
   "rail": {
     "enabled": true,
+    "every_polls": 6,
     "repos": ["Muso-AI/core-backend"],
     "branch_prefix": "cto/sentry",
     "id_prefixes": ["CORE-BACKEND"]

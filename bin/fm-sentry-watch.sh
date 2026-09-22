@@ -39,11 +39,15 @@
 #   P0          a user tier: a NEW issue at users>=users_p0, and a seen issue only
 #               when it crosses a new tier (users_p0, twice it, four times it), so
 #               a chronic issue pages once per tier rather than every poll. Or a
-#               burst: burst_min_events or more events inside the poll window on a
-#               path whose prior rate was below burst_baseline_per_hour; a NEW
-#               issue is a burst only when its firstSeen falls inside the window,
-#               never on its lifetime count. The window runs from the last poll
-#               that actually read the project.
+#               burst: the window rate (delta divided by the hours since the
+#               issue was last read) reaches burst_min_events per cadence on a
+#               path whose prior rate was below burst_baseline_per_hour, so a
+#               long gap never turns a chronic trickle into a burst. An issue
+#               with no recorded rate yet (its first read, or a legacy import)
+#               earns one from its first two reads before the rule applies. A
+#               NEW issue is a burst only when its firstSeen falls inside the
+#               window, never on its lifetime count. The window runs from the
+#               last poll that actually read the project.
 #   P1          level error/fatal on a live path, at users>=users_p1_sensitive when
 #               the path matches the sensitive routes (onboarding, signup, auth,
 #               login, billing, checkout, payment, claim, credits) and users>=users_p1
@@ -66,7 +70,9 @@
 # A could-not-determine condition (a project, the project list, or a config
 # problem) is reported when it appears, reminded hourly while it persists, and
 # reported once more as recovered when it clears, so a persistent condition is
-# never a wake on every poll.
+# never a wake on every poll. A project that leaves the enumerated set (removed
+# from the org or denylisted) is reported once as removed from watch, never as
+# recovered.
 #
 # LIVENESS. A poll that read at least one project writes state/.sentry-watch.beat,
 # and the baseline records a last_read time per project, written only when that
@@ -80,12 +86,14 @@
 # state/.sentry-watch.armed is present and the shim, trust, or beat is missing or
 # stale. That marker is written by `arm` and removed by `disarm`.
 #
-# RAIL CROSS-CHECK. Each poll lists the CTO Sentry rail's PRs (branches under the
-# configured prefix, plus any PR body naming a fixed Sentry id) and reports an id
-# the rail fixed that this watch never surfaced as RAIL-ONLY with the PR URL, so
-# the two systems never disagree silently. The first rail poll seeds its known
-# set instead of reporting history; a gh outage is reported once on the
-# ok->down transition as RAILCHECK-DARK.
+# RAIL CROSS-CHECK. Every rail.every_polls-th poll (default 6, about half an
+# hour) lists the CTO Sentry rail's PRs (branches under the configured prefix,
+# plus any PR body naming a fixed Sentry id) and reports an id the rail fixed
+# that this watch never surfaced as RAIL-ONLY with the PR URL, so the two systems
+# never disagree silently. The rail read has its own 5s budget, reserved out of
+# the poll budget before the project loop, so project reads can never starve
+# it. The first rail read seeds its known set instead of reporting history; a
+# gh outage is reported once on the ok->down transition as RAILCHECK-DARK.
 #
 # MIGRATION AND PER-PROJECT BASELINE. `poll` imports the retired per-lane
 # baselines automatically when the shared baseline is absent, and `migrate` does
@@ -109,9 +117,8 @@
 # rather than being killed with nothing printed.
 #
 # Test seams: FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, FM_SENTRY_WATCH_NOW,
-# FM_SENTRY_WATCH_FIXTURES (stubbed Sentry responses), FM_SENTRY_WATCH_RAIL_FIXTURE,
-# FM_SENTRY_WATCH_VAULT, FM_SENTRY_WATCH_GH, FM_SENTRY_WATCH_CADENCE, and
-# FM_SENTRY_WATCH_LEGACY.
+# FM_SENTRY_WATCH_FIXTURES (stubbed Sentry and rail responses), FM_SENTRY_WATCH_VAULT,
+# FM_SENTRY_WATCH_GH, FM_SENTRY_WATCH_CADENCE, and FM_SENTRY_WATCH_LEGACY.
 set -u
 export LC_ALL=C
 
@@ -190,7 +197,6 @@ run_engine() {  # <action>
   FM_SENTRY_WATCH_CADENCE="${FM_SENTRY_WATCH_CADENCE:-}" \
   FM_SENTRY_WATCH_NOW="${FM_SENTRY_WATCH_NOW:-}" \
   FM_SENTRY_WATCH_FIXTURES="${FM_SENTRY_WATCH_FIXTURES:-}" \
-  FM_SENTRY_WATCH_RAIL_FIXTURE="${FM_SENTRY_WATCH_RAIL_FIXTURE:-}" \
   FM_SENTRY_WATCH_GH="${FM_SENTRY_WATCH_GH:-gh}" \
   FM_SENTRY_WATCH_ORG="${FM_SENTRY_WATCH_ORG:-}" \
   FM_SENTRY_WATCH_HOST="${FM_SENTRY_WATCH_HOST:-}" \
@@ -246,7 +252,6 @@ ARMED = Path(env("FM_SENTRY_WATCH_ARMED"))
 SHIM = Path(env("FM_SENTRY_WATCH_SHIM"))
 TRUST = Path(env("FM_SENTRY_WATCH_TRUST"))
 FIXTURES = env("FM_SENTRY_WATCH_FIXTURES")
-RAIL_FIXTURE = env("FM_SENTRY_WATCH_RAIL_FIXTURE")
 GH = env("FM_SENTRY_WATCH_GH", "gh")
 BUDGET_SECS = env_int("FM_SENTRY_WATCH_BUDGET_SECS", 20)
 HTTP_TIMEOUT = env_float("FM_SENTRY_WATCH_HTTP_TIMEOUT", 5.0)
@@ -290,8 +295,10 @@ DEFAULT_SIGNATURES = {
         r"PROTOCOL_CONNECTION_LOST|Connection terminated unexpectedly"
     ),
 }
+RAIL_BUDGET_SECS = 5
 DEFAULT_RAIL = {
     "enabled": True,
+    "every_polls": 6,
     "repos": ["Muso-AI/core-backend"],
     "branch_prefix": "cto/sentry",
     "id_prefixes": ["CORE-BACKEND"],
@@ -463,7 +470,7 @@ def resolve_credentials(config, problems):
     org = env("FM_SENTRY_WATCH_ORG", "") or config.get("org") or ""
     host = env("FM_SENTRY_WATCH_HOST", "")
     token = ""
-    if not (FIXTURES or RAIL_FIXTURE):
+    if not FIXTURES:
         data = read_json(VAULT)
         if not isinstance(data, dict) or not isinstance(data.get("data"), dict):
             problems.append("Sentry vault is unreadable: %s" % VAULT)
@@ -550,17 +557,6 @@ def run_gh(args, timeout):
 
 def fetch_rail(rail_config, deadline):
     """Return (prs, error). prs is a list of {url, headRefName, body}."""
-    if RAIL_FIXTURE:
-        data = read_json(RAIL_FIXTURE)
-        if data is None:
-            return [], "rail fixture is missing or unreadable"
-        if isinstance(data, dict) and data.get("error"):
-            return [], str(data["error"])
-        if isinstance(data, dict):
-            data = data.get("prs", [])
-        if not isinstance(data, list):
-            return [], "rail fixture is not a list of pull requests"
-        return data, ""
     if FIXTURES:
         data = read_json(Path(FIXTURES) / "rail.json")
         if data is None:
@@ -729,7 +725,7 @@ def user_tier(users, settings):
     return tier
 
 
-def classify(entry, old, settings, signatures, config, window_start, now):
+def classify(entry, old, settings, signatures, config, window_start, now, cadence):
     """Return a finding line, or None. `old` is the prior baseline entry."""
     blob = "%s %s" % (entry["title"], entry["culprit"])
     if signatures["retired"] and signatures["retired"].search(blob):
@@ -767,12 +763,17 @@ def classify(entry, old, settings, signatures, config, window_start, now):
         prev = _as_int(old.get("count"))
         if prev is not None:
             delta = max(0, count - prev)
-    prev_rate = 0.0
-    if isinstance(old, dict):
+    prev_rate = None
+    if isinstance(old, dict) and old.get("rate") is not None:
         try:
-            prev_rate = float(old.get("rate") or 0.0)
+            prev_rate = float(old.get("rate"))
         except (TypeError, ValueError):
-            prev_rate = 0.0
+            prev_rate = None
+    window_hours = 0.0
+    if isinstance(old, dict) and _as_int(old.get("ts")) is not None:
+        window_hours = max(1, now - _as_int(old.get("ts"))) / 3600.0
+    window_rate = delta / window_hours if window_hours > 0 else 0.0
+    floor_rate = burst_floor * 3600.0 / max(1, cadence)
 
     def finding(kind, rule, extra=""):
         parts = [
@@ -815,9 +816,10 @@ def classify(entry, old, settings, signatures, config, window_start, now):
     old_substatus = old.get("substatus") if isinstance(old, dict) else ""
     if entry["substatus"] == "regressed" and old_substatus != "regressed":
         return finding("REGRESSION", "regressed")
-    if delta >= burst_floor and prev_rate < settings["burst_baseline_per_hour"] \
+    if prev_rate is not None and window_rate >= floor_rate \
+            and prev_rate < settings["burst_baseline_per_hour"] \
             and level in ("error", "fatal") and live:
-        return finding("P0", "burst>=%s prior<%.0f/h" % (
+        return finding("P0", "burst>=%s/window prior<%.0f/h" % (
             burst_floor, settings["burst_baseline_per_hour"]))
     tier = user_tier(users, settings)
     new_tier = bool(tier) and tier > user_tier(_as_int(old.get("users")) or 0, settings)
@@ -831,12 +833,13 @@ def classify(entry, old, settings, signatures, config, window_start, now):
 
 
 def project_rate(entry, old, now):
-    """The issue's event rate in events/hour as of this poll."""
+    """The issue's event rate in events/hour as of this poll, or None until a
+    prior read exists to measure it against."""
     if not isinstance(old, dict):
-        return 0.0
+        return None
     prev_count = _as_int(old.get("count"))
     if prev_count is None:
-        return 0.0
+        return None
     try:
         elapsed = max(1, now - int(old.get("ts") or now))
     except (TypeError, ValueError):
@@ -878,6 +881,8 @@ def import_legacy(issues):
         for sid, entry in data.items():
             if not isinstance(entry, dict) or sid in issues:
                 continue
+            entry = dict(entry)
+            entry.pop("rate", None)
             issues[sid] = entry
             imported += 1
     return imported, files_read
@@ -1031,7 +1036,16 @@ def action_migrate():
 def action_poll(config, org, host, token, problems):
     now = now_epoch()
     cadence = CADENCE or config["cadence_secs"]
-    deadline = time.time() + max(1, BUDGET_SECS)
+    rail_config = config["rail"]
+    rail_state = read_json(RAIL_STATE)
+    if not isinstance(rail_state, dict) or rail_state.get("schema") != RAIL_SCHEMA:
+        rail_state = {"schema": RAIL_SCHEMA, "ok": True, "seeded": False,
+                      "known": [], "reported": [], "polls": 0}
+    rail_every = max(1, _as_int(rail_config.get("every_polls")) or 1)
+    rail_due = bool(rail_config.get("enabled", True)) \
+        and (_as_int(rail_state.get("polls")) or 0) % rail_every == 0
+    project_budget = max(1, BUDGET_SECS - (RAIL_BUDGET_SECS if rail_due else 0))
+    deadline = time.time() + project_budget
     findings = []
     findings.extend(liveness_findings(now, cadence))
     conditions = {}
@@ -1095,7 +1109,7 @@ def action_poll(config, org, host, token, problems):
     if cursor in slugs:
         start = slugs.index(cursor) + 1
         slugs = slugs[start:] + slugs[:start]
-    per_project = max(2.0, float(max(1, BUDGET_SECS)) / max(1, len(slugs)))
+    per_project = max(2.0, float(project_budget) / max(1, len(slugs)))
 
     signatures = {}
     for key in ("sensitive", "noise", "transport", "retired", "crash", "critical"):
@@ -1140,7 +1154,7 @@ def action_poll(config, org, host, token, problems):
             entry["rate"] = project_rate(entry, old, now)
             entry["surfaced"] = (old.get("surfaced") or 0) if isinstance(old, dict) else 0
             if not project_baseline:
-                finding = classify(entry, old, settings, signatures, config, window_start, now)
+                finding = classify(entry, old, settings, signatures, config, window_start, now, cadence)
                 if finding:
                     # The surfaced marker is what distinguishes an issue this
                     # watch has woken firstmate about from one it only recorded,
@@ -1159,7 +1173,15 @@ def action_poll(config, org, host, token, problems):
                 continue
             if isinstance(record, dict) and record.get("message"):
                 conditions[key] = record["message"]
+    removed_lines = []
+    if enumerated:
+        for key in sorted(prior_conditions):
+            if key in slugs or key in ("projects", "beat") or key.startswith("config: "):
+                continue
+            prior_conditions.pop(key)
+            removed_lines.append("removed from watch %s" % key)
     condition_lines, conditions = condition_findings(prior_conditions, conditions, now)
+    findings.extend(removed_lines)
     findings.extend(condition_lines)
     findings.extend(issue_findings)
 
@@ -1182,14 +1204,14 @@ def action_poll(config, org, host, token, problems):
             pass
 
     # Rail cross-check: report an id the rail fixed that this watch never saw.
-    rail_config = config["rail"]
+    # It runs on its own cadence with its own reserved budget, so a poll whose
+    # project reads consumed theirs still reads the rail.
     rail_findings = []
+    previous = rail_state
     if rail_config.get("enabled", True):
-        previous = read_json(RAIL_STATE)
-        if not isinstance(previous, dict) or previous.get("schema") != RAIL_SCHEMA:
-            previous = {"schema": RAIL_SCHEMA, "ok": True, "seeded": False,
-                        "known": [], "reported": []}
-        prs, error = fetch_rail(rail_config, deadline)
+        previous["polls"] = (_as_int(previous.get("polls")) or 0) + 1
+    if rail_due:
+        prs, error = fetch_rail(rail_config, time.time() + RAIL_BUDGET_SECS)
         if error:
             if previous.get("ok", True):
                 rail_findings.append("RAILCHECK-DARK %s" % error)
@@ -1218,7 +1240,8 @@ def action_poll(config, org, host, token, problems):
                 known |= set(ids)
             previous["known"] = sorted(known)
             previous["reported"] = sorted(reported)
-        write_json_atomic(RAIL_STATE, previous)
+    if rail_config.get("enabled", True):
+        write_json_atomic(RAIL_STATE, rail_state)
 
     findings.extend(rail_findings)
     for finding in findings:
@@ -1331,12 +1354,12 @@ action_disarm() {
 }
 
 case "${1:-poll}" in
-  poll|check) action_poll ;;
+  poll) action_poll ;;
   status) action_status ;;
   projects) action_projects ;;
-  migrate|import) action_migrate ;;
+  migrate) action_migrate ;;
   arm) action_arm ;;
   disarm) action_disarm ;;
-  -h|--help|help) usage ;;
+  --help) usage ;;
   *) die_usage "unknown action: $1" ;;
 esac
