@@ -705,3 +705,13 @@ case "$outcome_rc" in
     printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac
+
+# Post-merge change watch. Additive only: it registers a by-effect watch for a
+# merged change that touches a deployable service, and a failure here never
+# changes the merge outcome reported above. A PR that touches no deployable
+# service registers nothing and says so on its own.
+change_watch_rc=0
+"$SCRIPT_DIR/fm-change-watch.sh" register "$ID" "$URL" >/dev/null 2>&1 || change_watch_rc=$?
+[ "$change_watch_rc" -eq 0 ] \
+  || printf 'notice: post-merge change watch was not registered for %s (rc=%s); the merge outcome above stands\n' \
+    "$URL" "$change_watch_rc" >&2
