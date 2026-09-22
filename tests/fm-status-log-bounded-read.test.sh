@@ -292,7 +292,71 @@ test_real_drain_presents_a_buried_decision_from_a_multi_megabyte_log() {
   pass "the real drain presents a buried decision from a multi-megabyte log with a bounded per-task fold"
 }
 
+# The fleet snapshot folds each task's open set read-only against the live
+# status log, and the watcher runs that snapshot under a timed bound that
+# kills the whole process group at the deadline. A fold killed mid-read must
+# not leave its scratch chunk in the drain-owned state dir, so the read-only
+# caller points the fold at a scratch dir it owns and cleans.
+test_read_only_fold_keeps_scratch_out_of_state_dir() {
+  local dir state status scratch reader cursor open pid waited leaked
+
+  dir=$(make_case readonly-fold-scratch)
+  state="$dir/state"
+  status="$state/lane.status"
+  scratch="$dir/scratch"
+  cursor="$state/.lane.open-decisions-cursor"
+  mkdir -p "$scratch"
+  printf 'needs-decision [key=buried]: pick the bounded path\n' > "$status"
+
+  # A completed read-only fold returns the open set and leaves the state dir
+  # holding nothing but the status log: no cursor, no scratch.
+  open=$(FM_OPEN_DECISIONS_READONLY=1 FM_OPEN_DECISIONS_SCRATCH_DIR="$scratch" \
+    status_open_decisions_incremental "$status")
+  case "$open" in
+    *"buried"*"needs-decision"*) ;;
+    *) fail "the read-only fold did not surface the open decision: $open" ;;
+  esac
+  [ ! -e "$cursor" ] || fail "the read-only fold wrote the drain-owned cursor"
+  leaked=$(find "$state" -mindepth 1 ! -name lane.status)
+  [ -z "$leaked" ] || fail "a completed read-only fold left files in the state dir: $leaked"
+  leaked=$(find "$scratch" -mindepth 1)
+  [ -z "$leaked" ] || fail "a completed read-only fold left its scratch chunk behind: $leaked"
+
+  # A span reader that never finishes stands in for a fold caught mid-read at
+  # the snapshot's deadline; the scratch chunk it is writing must already be
+  # in the caller-owned scratch dir, not beside the cursor.
+  reader="$dir/slow-reader.sh"
+  cat > "$reader" <<'SH'
+#!/usr/bin/env bash
+printf 'needs-decision [key=partial]: a fold caught mid-read\n'
+exec sleep 20
+SH
+  chmod +x "$reader"
+  FM_STATUS_SPAN_READER="$reader" FM_OPEN_DECISIONS_READONLY=1 \
+    FM_OPEN_DECISIONS_SCRATCH_DIR="$scratch" \
+    status_open_decisions_incremental "$status" > /dev/null 2>&1 &
+  pid=$!
+  waited=0
+  while [ -z "$(find "$scratch" -name '*.read.*' 2>/dev/null)" ] \
+    && [ -z "$(find "$state" -name '*.read.*' 2>/dev/null)" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  leaked=$(find "$state" -name '*.read.*')
+  pkill -P "$pid" 2>/dev/null || :
+  kill -KILL "$pid" 2>/dev/null || :
+  wait "$pid" 2>/dev/null || :
+  [ -z "$leaked" ] \
+    || fail "the read-only fold wrote its scratch chunk into the drain-owned state dir: $leaked"
+  [ -n "$(find "$scratch" -name '*.read.*')" ] \
+    || fail "the read-only fold never wrote its scratch chunk into the caller-owned scratch dir"
+  [ ! -e "$cursor" ] || fail "the killed read-only fold wrote the drain-owned cursor"
+
+  pass "the snapshot's read-only fold keeps its scratch chunk out of the drain-owned state dir"
+}
+
 test_latest_status_line_is_bounded_and_exact
 test_crew_state_status_read_is_bounded
+test_read_only_fold_keeps_scratch_out_of_state_dir
 test_drain_open_decision_fold_reads_only_appended_bytes
 test_real_drain_presents_a_buried_decision_from_a_multi_megabyte_log

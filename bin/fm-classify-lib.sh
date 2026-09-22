@@ -116,18 +116,17 @@ FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 # appended bytes; last_status_line below bounds the latest-line read the same
 # way. Neither ever rotates or truncates a log, because the fold cursors are
 # byte offsets into it.
-FM_STATUS_TAIL_BYTES_DEFAULT=65536
+FM_STATUS_TAIL_BYTES=65536
 
 # Return the last non-blank line of a status file (empty if missing/blank).
-# Reads at most the final FM_STATUS_TAIL_BYTES bytes: the live line of an
+# Reads at most the final FM_STATUS_TAIL_BYTES (64 KiB): the live line of an
 # append-only log is at its tail, so the bounded read is exact for real logs.
 # A pathological file whose tail window holds no non-blank line falls back to
 # the whole-file scan, so the verdict is never wrong - only slower on that edge.
 last_status_line() {
-  local f=$1 limit=${FM_STATUS_TAIL_BYTES:-$FM_STATUS_TAIL_BYTES_DEFAULT} line
+  local f=$1 line
   [ -e "$f" ] || return 0
-  case "$limit" in ''|*[!0-9]*|0) limit=$FM_STATUS_TAIL_BYTES_DEFAULT ;; esac
-  if line=$(_fm_status_tail_last_nonblank "$f" "$limit"); then
+  if line=$(_fm_status_tail_last_nonblank "$f" "$FM_STATUS_TAIL_BYTES"); then
     printf '%s\n' "$line"
     return 0
   fi
@@ -144,10 +143,6 @@ last_status_line() {
 # test-only seam a bounded-cost test asserts on.
 _fm_status_tail_last_nonblank() {  # <file> <limit-bytes>
   local f=$1 limit=$2
-  if [ -n "${FM_STATUS_TAIL_READER:-}" ]; then
-    "$FM_STATUS_TAIL_READER" "$f" "$limit"
-    return
-  fi
   perl -e '
     my ($path, $limit) = @ARGV;
     open my $fh, "<", $path or exit 1;
@@ -1009,7 +1004,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   fi
 
   if [ "$offset" -lt "$size" ]; then
-    chunk_file="$cf.read.$$"
+    chunk_file="${FM_OPEN_DECISIONS_SCRATCH_DIR:-${cf%/*}}/${cf##*/}.read.$$"
     _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
       || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
     chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
@@ -1040,7 +1035,10 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   # open set from the persisted cursor plus the appended bytes, but leaves the
   # cursor untouched. That keeps the cursor's ownership unambiguous - it is a
   # presentation offset in status_presentation_cursor_offset's legacy fallback,
-  # so only the drain may advance it.
+  # so only the drain may advance it. Such a caller also points
+  # FM_OPEN_DECISIONS_SCRATCH_DIR at a directory it owns, so the scratch chunk
+  # above never lands in the drain's state dir, where a caller killed at its
+  # deadline (the snapshot runs under a timed bound) would leave it behind.
   if [ "$cursor_dirty" -eq 1 ] && [ "${FM_OPEN_DECISIONS_READONLY:-0}" != 1 ]; then
     target_cursor="$cf.tmp.$$"
     {

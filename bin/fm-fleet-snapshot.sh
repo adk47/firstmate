@@ -10,7 +10,8 @@
 # fleet-state mutation. Its per-task open-decision fold reads the shared
 # state/.<id>.open-decisions-cursor but never advances it
 # (FM_OPEN_DECISIONS_READONLY), because that cursor is also a presentation
-# offset the wake drain owns.
+# offset the wake drain owns, and keeps that fold's scratch chunk in its own
+# temp dir (FM_OPEN_DECISIONS_SCRATCH_DIR) so nothing else lands in state/.
 #
 # Top-level fields:
 #   schema: stable schema id.
@@ -605,10 +606,12 @@ prefetch_task_observations() {  # <meta> <id>
     # new appends rather than the log's lifetime size. It runs READ-ONLY against
     # the LIVE status file: it takes the persisted open set from the cursor the
     # wake drain owns without advancing it (that cursor doubles as the drain's
-    # legacy presentation offset, so only the drain may move it), and the
+    # legacy presentation offset, so only the drain may move it), keeps its
+    # scratch chunk in this snapshot's own task dir rather than state/, and the
     # generation check above already proved this task's generation is current.
     if [ -f "$status_capture" ]; then
-      FM_OPEN_DECISIONS_READONLY=1 status_open_decisions_incremental "$status_log" \
+      FM_OPEN_DECISIONS_READONLY=1 FM_OPEN_DECISIONS_SCRATCH_DIR="$SNAPSHOT_TASK_DIR" \
+        status_open_decisions_incremental "$status_log" \
         > "$opendecisions_file" 2>/dev/null || : > "$opendecisions_file"
     fi
   fi

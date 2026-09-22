@@ -138,7 +138,7 @@ fi
 # --- status log ------------------------------------------------------------
 
 # Last non-empty status line; fm-classify-lib.sh owns leading-verb normalization
-# and the bounded tail read (only the final FM_STATUS_TAIL_BYTES are inspected,
+# and the bounded tail read (only the final 64 KiB are inspected,
 # so a multi-megabyte append-only log never forces a whole-file scan per task).
 log_last_line() {
   [ -f "$LOG" ] || return 1
