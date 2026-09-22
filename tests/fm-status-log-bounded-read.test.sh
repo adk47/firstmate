@@ -329,18 +329,22 @@ test_read_only_fold_keeps_scratch_out_of_state_dir() {
   cat > "$reader" <<'SH'
 #!/usr/bin/env bash
 printf 'needs-decision [key=partial]: a fold caught mid-read\n'
-exec sleep 20
+exec sleep 600
 SH
   chmod +x "$reader"
   FM_STATUS_SPAN_READER="$reader" FM_OPEN_DECISIONS_READONLY=1 \
     FM_OPEN_DECISIONS_SCRATCH_DIR="$scratch" \
     status_open_decisions_incremental "$status" > /dev/null 2>&1 &
   pid=$!
-  waited=0
+  # The chunk appears as soon as the fold opens its span read, but a loaded
+  # host can delay that background subshell by well over ten seconds; wait on a
+  # generous wall-clock deadline (the stub reader sleeps longer than this) so
+  # host load cannot expire the wait before the chunk exists.
+  waited=$SECONDS
   while [ -z "$(find "$scratch" -name '*.read.*' 2>/dev/null)" ] \
-    && [ -z "$(find "$state" -name '*.read.*' 2>/dev/null)" ] && [ "$waited" -lt 100 ]; do
-    sleep 0.1
-    waited=$((waited + 1))
+    && [ -z "$(find "$state" -name '*.read.*' 2>/dev/null)" ] \
+    && [ $((SECONDS - waited)) -lt 120 ]; do
+    sleep 0.2
   done
   leaked=$(find "$state" -name '*.read.*')
   pkill -P "$pid" 2>/dev/null || :
