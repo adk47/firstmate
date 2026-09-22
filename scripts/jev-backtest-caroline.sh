@@ -954,13 +954,21 @@ fi
 [ -n "${MUSOAI_INTERCOM_TOKEN:-}" ] || _bt_die 2 "MUSOAI_INTERCOM_TOKEN not set and not found in $CAROLINE_BACKTEST_INTERCOM_ENV_FILE"
 INTERCOM_API="${CAROLINE_BACKTEST_INTERCOM_API:-https://api.intercom.io}"
 
+# The bearer token goes to curl through a header FILE, never argv: a process's
+# argv is world-readable in /proc/<pid>/cmdline and `ps` for as long as curl
+# runs, and this script can issue hundreds of GETs. Same pattern as
+# scripts/lib/jev.sh. $work_dir is mktemp -d (mode 700) and is removed by the
+# EXIT trap, so the file never outlives the run.
+intercom_hdr="$work_dir/intercom-auth.hdr"
+( umask 077; printf 'Authorization: Bearer %s\n' "$MUSOAI_INTERCOM_TOKEN" > "$intercom_hdr" )
+
 # _bt_intercom_get <conv_id> <out_file>: GET one conversation, plaintext,
 # with a short 429/5xx backoff (max 3 attempts). Never mutates Intercom.
 _bt_intercom_get() {
   local conv_id="$1" out_file="$2" attempt=0 code
   while [ "$attempt" -lt 3 ]; do
     code=$(curl -sS -o "$out_file" -w '%{http_code}' \
-      -H "Authorization: Bearer $MUSOAI_INTERCOM_TOKEN" \
+      -H @"$intercom_hdr" \
       -H "Intercom-Version: 2.11" -H "Accept: application/json" \
       "$INTERCOM_API/conversations/${conv_id}?display_as=plaintext") || code="000"
     case "$code" in
@@ -994,7 +1002,7 @@ _bt_intercom_search_ids() {
       '{query:{field:"updated_at", operator:">", value:$since}, pagination:$pagination}')
     : > "$resp_file"
     code=$(curl -sS -X POST -o "$resp_file" -w '%{http_code}' \
-      -H "Authorization: Bearer $MUSOAI_INTERCOM_TOKEN" \
+      -H @"$intercom_hdr" \
       -H "Intercom-Version: 2.11" -H "Content-Type: application/json" \
       -H "Accept: application/json" -d "$body" "$INTERCOM_API/conversations/search") || code="000"
     case "$code" in

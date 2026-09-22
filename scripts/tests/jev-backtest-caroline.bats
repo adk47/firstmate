@@ -38,8 +38,14 @@ setup() {
 #!/bin/bash
 out="" url=""
 args=("$@")
+# Record every invocation's argv, and the contents of any `-H @file` header,
+# so tests can assert WHERE the Intercom token travels (never argv).
+printf '%s\n' "$*" >> "${BT_CURL_ARGV_LOG:-/dev/null}"
 for ((i = 0; i < ${#args[@]}; i++)); do
   if [ "${args[i]}" = "-o" ]; then out="${args[i+1]}"; fi
+  if [ "${args[i]}" = "-H" ] && [[ "${args[i+1]}" == @* ]]; then
+    cat "${args[i+1]#@}" >> "${BT_CURL_HDR_LOG:-/dev/null}" 2>/dev/null
+  fi
 done
 url="${args[${#args[@]}-1]}"
 if [[ "$url" == *"/conversations/search" ]]; then
@@ -456,4 +462,33 @@ _bt_epoch_to_iso() {
   [ -f "$TEST_TMPDIR/out/report.md" ]
   [ -f "$TEST_TMPDIR/out/rows.jsonl" ]
   grep -qF "rows: 9 (malformed skipped: 0)" "$TEST_TMPDIR/out/report.md"
+}
+
+@test "the Intercom token never reaches curl's argv, but still authenticates every call" {
+  # argv is world-readable (/proc/<pid>/cmdline, ps) for as long as curl
+  # runs. The token must travel in a header FILE instead -- and that file
+  # must actually carry it, or "not in argv" would pass for a run that simply
+  # stopped authenticating.
+  export BT_CURL_ARGV_LOG="$TEST_TMPDIR/curl-argv.log"
+  export BT_CURL_HDR_LOG="$TEST_TMPDIR/curl-hdr.log"
+  : > "$BT_CURL_ARGV_LOG"; : > "$BT_CURL_HDR_LOG"
+  run "$SCRIPT" --days 30 --limit 10 --out "$TEST_TMPDIR/out" --questions "$QUESTIONS_FILE"
+  [ "$status" -eq 0 ]
+
+  # Vacuity: curl was really called, or both assertions below pass trivially.
+  [ -s "$BT_CURL_ARGV_LOG" ]
+
+  # NOT `! grep ...`: bash exempts a `!`-negated command from errexit, so under
+  # bats it fails the test only as the LAST line. Here it is not, and the
+  # original form stayed green with the token sitting in argv (verified by
+  # mutation). An explicit `if` is a real failure wherever it appears.
+  if grep -qF "$MUSOAI_INTERCOM_TOKEN" "$BT_CURL_ARGV_LOG"; then
+    echo "the Intercom token appeared in curl's argv" >&2
+    return 1
+  fi
+
+  # Every invocation authenticated through the file.
+  calls=$(grep -c . "$BT_CURL_ARGV_LOG")
+  authed=$(grep -cF "Authorization: Bearer $MUSOAI_INTERCOM_TOKEN" "$BT_CURL_HDR_LOG")
+  [ "$authed" -eq "$calls" ]
 }
