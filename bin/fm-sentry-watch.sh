@@ -1109,7 +1109,10 @@ def action_poll(config, org, host, token, problems):
         remaining = deadline - time.time()
         if remaining < 1.0:
             unread[slug] = unread.get(slug, 0) + 1
-            if unread[slug] >= UNREAD_POLLS:
+            prior = prior_conditions.get(slug)
+            if isinstance(prior, dict) and prior.get("message"):
+                conditions[slug] = prior["message"]
+            elif unread[slug] >= UNREAD_POLLS:
                 conditions[slug] = "could-not-determine %s: unread for %s consecutive polls" % (
                     slug, unread[slug])
             continue

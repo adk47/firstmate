@@ -564,6 +564,31 @@ PY
   pass "the fetch order rotates so every project is read within a bounded number of polls"
 }
 
+test_budget_skip_never_closes_an_open_condition() {
+  local home out
+  home=$(make_home skip-keeps-condition)
+  write_projects "$home" alpha bravo charlie
+  printf '{"sleep":1.2,"issues":[]}\n' > "$home/fix/issues-bravo.json"
+  printf '{"sleep":1.2,"issues":[]}\n' > "$home/fix/issues-charlie.json"
+  printf '[]\n' > "$home/fix/rail.json"
+  mark_armed "$home" 1000
+  # alpha is unreadable, and the 2s budget reads one slow project per poll, so
+  # the rotation leaves alpha skipped on every other poll. A skipped project
+  # must keep its open condition: only a real successful read may close it.
+  out=$(FM_SENTRY_WATCH_BUDGET_SECS=2 poll "$home" 1000)
+  assert_contains "$out" "could-not-determine alpha" "the unreadable project was not reported"
+  out=$(FM_SENTRY_WATCH_BUDGET_SECS=2 poll "$home" 1300)
+  assert_not_contains "$out" "recovered alpha" "a budget skip closed the condition of a project it never read"
+  out=$(FM_SENTRY_WATCH_BUDGET_SECS=2 poll "$home" 1600)
+  assert_not_contains "$out" "could-not-determine alpha" "a still-open condition was reported as a new transition"
+  printf '[]\n' > "$home/fix/issues-alpha.json"
+  out=$(FM_SENTRY_WATCH_BUDGET_SECS=2 poll "$home" 1900)
+  assert_not_contains "$out" "recovered alpha" "a budget skip closed the condition before the project was read"
+  out=$(FM_SENTRY_WATCH_BUDGET_SECS=2 poll "$home" 2200)
+  assert_contains "$out" "recovered alpha" "a successful read did not close the condition"
+  pass "a budget skip never closes an open condition; only a successful read does"
+}
+
 test_migrate_imports_the_retired_baselines() {
   local home out
   home=$(make_home migrate)
@@ -729,6 +754,7 @@ test_rail_only_is_suppressed_when_the_watch_surfaced_it
 test_projects_lists_every_project_with_its_effective_state
 test_legacy_import_baselines_only_the_projects_it_covered
 test_fetch_order_rotates_so_no_project_starves
+test_budget_skip_never_closes_an_open_condition
 test_migrate_imports_the_retired_baselines
 test_a_task_pr_poll_cannot_touch_the_watch
 test_an_overwritten_check_is_dark
