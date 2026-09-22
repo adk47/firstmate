@@ -41,7 +41,9 @@ It has two tables and a totals line:
   reported, and its expected completion with the basis stated in the cell.
 - **Not under supervision** - the migrated surfaces with no live firstmate task,
   the old cmux-app terminals still resumed on this host, and the Orca terminals
-  bound to no task, each with the same doing-now, model, and estimate columns:
+  bound to no task (firstmate's own chair and a supervised task's companion
+  panes are never listed here), each with the same doing-now, model, and
+  estimate columns:
   the loop the surface is expected to run, the request that opened the resumed
   session, or the terminal's agent and last screen line, and an estimate cell
   that says the piece is unsupervised.

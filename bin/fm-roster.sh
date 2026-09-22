@@ -12,11 +12,15 @@
 #   2. NOT UNDER SUPERVISION - the pieces the captain still has running that no
 #      firstmate task owns: migrated cmux surfaces whose expected loop has no
 #      live task, old cmux-app terminals still resumed on this host, and Orca
-#      terminals bound to no task. Each row carries the same doing-now, model,
-#      and estimate columns as a supervised row: the expected loop's own
-#      description, the resumed session's opening request, or the Orca
-#      terminal's agent and last screen line; the estimate cell says the piece
-#      is unsupervised. The migrated-surface rows join
+#      terminals bound to no task. Firstmate's own chair (the process holding
+#      state/.lock, and any process or terminal working in the home checkout)
+#      and a supervised task's companion panes (any terminal or process working
+#      in a live task's recorded worktree) are not listed: they belong to the
+#      supervisor or to a supervised task. Each row carries the same
+#      doing-now, model, and estimate columns as a supervised row: the expected
+#      loop's own description, the resumed session's opening request, or the
+#      Orca terminal's agent and last screen line; the estimate cell says the
+#      piece is unsupervised. The migrated-surface rows join
 #      data/cmux-takeover/expected-loops.json to live task metadata directly, so
 #      classifying them needs no Orca call.
 #
@@ -126,6 +130,7 @@ from datetime import datetime, timezone
 
 STATE = os.environ.get("FM_STATE_OVERRIDE") or ""
 DATA = os.environ.get("FM_DATA_OVERRIDE") or ""
+HOME_DIR = os.path.realpath(os.environ.get("FM_HOME") or "")
 PEEK_CMD = os.environ.get("FM_ROSTER_PEEK_CMD") or ""
 ORCA_CMD = os.environ.get("FM_ROSTER_ORCA_CMD") or ""
 PS_CMD = os.environ.get("FM_ROSTER_PS_CMD") or ""
@@ -144,6 +149,25 @@ except ValueError:
 
 MAX_WORKERS = 8
 PANE_TIMEOUT = 15
+
+
+def lock_pid() -> str:
+    try:
+        with open(os.path.join(STATE, ".lock"), encoding="utf-8") as handle:
+            value = handle.read().strip()
+    except OSError:
+        return ""
+    return value if value.isdigit() else ""
+
+
+LOCK_PID = lock_pid()
+
+
+def owned_by_home_or_task(path: str, meta_worktrees: set) -> bool:
+    if not path:
+        return False
+    real = os.path.realpath(path)
+    return real == HOME_DIR or real in meta_worktrees
 
 
 # --- small helpers ----------------------------------------------------------
@@ -525,7 +549,9 @@ def cmux_app_rows(meta_worktrees: set):
     session (`grok -r <uuid>`), deduplicated by session id. The project
     directory comes from the live process's working directory, because the
     resume command itself carries no cwd; a process working in a live task's
-    recorded worktree is that task's own relaunched worker, not a stray.
+    recorded worktree is that task's own relaunched worker, not a stray, and
+    the process holding this home's session lock or working in the home
+    checkout is firstmate's own chair.
     """
     if not PS_CMD:
         return []
@@ -668,8 +694,10 @@ def cmux_app_row(kind: str, sid: str, pid: str, meta_worktrees: set):
         if hits:
             session_file = hits[0]
             break
+    if pid == LOCK_PID:
+        return None
     cwd = proc_cwd(pid)
-    if cwd and os.path.realpath(cwd) in meta_worktrees:
+    if owned_by_home_or_task(cwd, meta_worktrees):
         return None
     age = "-"
     if session_file:
@@ -704,7 +732,7 @@ def preview_line(preview) -> str:
     return ""
 
 
-def orca_unbound_rows(meta_terms: set):
+def orca_unbound_rows(meta_terms: set, meta_worktrees: set):
     if not ORCA_CMD:
         return [], ""
     out = run(shlex.split(ORCA_CMD) + ["terminal", "list", "--json"], 5)
@@ -720,7 +748,7 @@ def orca_unbound_rows(meta_terms: set):
         if not isinstance(terminal, dict):
             continue
         handle = terminal.get("handle", "")
-        if handle in meta_terms:
+        if handle in meta_terms or owned_by_home_or_task(terminal.get("worktreePath") or "", meta_worktrees):
             continue
         output_at = terminal.get("lastOutputAt")
         age = "-"
@@ -851,7 +879,7 @@ def main():
 
     unsupervised = expected_loop_rows(meta_ids, meta_terms)
     unsupervised.extend(cmux_app_rows(meta_worktrees))
-    orca_rows, skipped = orca_unbound_rows(meta_terms)
+    orca_rows, skipped = orca_unbound_rows(meta_terms, meta_worktrees)
     unsupervised.extend(orca_rows)
 
     print(render(supervised, unsupervised, skipped))

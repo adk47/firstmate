@@ -21,10 +21,14 @@ NOW=1790033000
 UUID_WORKER=11111111-1111-4111-8111-111111111111
 UUID_STRAY=22222222-2222-4222-8222-222222222222
 UUID_GROK=33333333-3333-4333-8333-333333333333
+UUID_CHAIR=44444444-4444-4444-8444-444444444444
+UUID_LOCK=55555555-5555-4555-8555-555555555555
 
-# Three live processes stand in for resumed cmux-app sessions: one working in
+# Five live processes stand in for resumed cmux-app sessions: one working in
 # a supervised task's recorded worktree (its own relaunched worker), one stray
-# Claude session, and one stray grok session.
+# Claude session, one stray grok session, one working in the home checkout
+# (a captain chat or firstmate's own chair), and one holding the home's
+# session lock from elsewhere (firstmate's chair itself).
 SLEEPERS=()
 cleanup_sleepers() { kill "${SLEEPERS[@]}" 2>/dev/null; fm_test_cleanup; }
 trap cleanup_sleepers EXIT
@@ -38,7 +42,8 @@ build_home() {
   mkdir -p "$home/state" "$home/data/cmux-takeover/status" \
     "$home/projects/alpha" "$home/projects/beta" "$home/claude-projects/proj" \
     "$home/grok-sessions/ws/$UUID_GROK" "$home/data/scout" \
-    "$home/wt/alpha-worker" "$home/wt/stray-claude" "$home/wt/stray-grok"
+    "$home/wt/alpha-worker" "$home/wt/stray-claude" "$home/wt/stray-grok" \
+    "$home/wt/lock-chair"
 
   fm_write_meta "$home/state/ship-working.meta" \
     "project=$home/projects/alpha" "worktree=$home/wt/alpha-worker" \
@@ -92,15 +97,18 @@ build_home() {
 
   # The Orca stub answers the pane read for term_live with a Pi footer whose
   # cache-hit token (CH99.9%) precedes the real context token (58.7%/1.0M),
-  # and the terminal list with that bound terminal plus one stray pane.
-  cat > "$home/fake-orca" <<'ORCA'
+  # and the terminal list with that bound terminal, one stray pane, the
+  # supervised task's companion shell pane (no agent, worktreePath = the
+  # task's recorded worktree), and firstmate's own chair (worktreePath = the
+  # home checkout).
+  cat > "$home/fake-orca" <<ORCA
 #!/usr/bin/env bash
-case "$1 $2" in
+case "\$1 \$2" in
   "terminal read")
-    printf '%s\n' '{"ok":true,"result":{"terminal":{"handle":"term_live","tail":["----","~/wt/alpha-worker (fm/parser)","up5.4M dn371k R124M CH99.9% $2.290 58.7%/1.0M   (fireworks-us) deepseek-v4p1-flash - high"]}}}'
+    printf '%s\n' '{"ok":true,"result":{"terminal":{"handle":"term_live","tail":["----","~/wt/alpha-worker (fm/parser)","up5.4M dn371k R124M CH99.9% \$2.290 58.7%/1.0M   (fireworks-us) deepseek-v4p1-flash - high"]}}}'
     ;;
   "terminal list")
-    printf '%s\n' '{"ok":true,"result":{"terminals":[{"handle":"term_live","title":"pi - parser","agentIdentity":"pi","preview":"Working","worktreePath":"/x/alpha-worker","lastOutputAt":1790032940000},{"handle":"term_00000000-0000-4000-8000-000000000002","title":"term_00000000-0000-4000-8000-000000000002","agentIdentity":"pi","preview":"vault deletions: 26\nTook 420.7s\n── ⠙ Working ────","worktreePath":"/x/stray-pane","lastOutputAt":1790032400000}]}}'
+    printf '%s\n' '{"ok":true,"result":{"terminals":[{"handle":"term_live","title":"pi - parser","agentIdentity":"pi","preview":"Working","worktreePath":"/x/alpha-worker","lastOutputAt":1790032940000},{"handle":"term_00000000-0000-4000-8000-000000000002","title":"term_00000000-0000-4000-8000-000000000002","agentIdentity":"pi","preview":"vault deletions: 26\nTook 420.7s\n── ⠙ Working ────","worktreePath":"/x/stray-pane","lastOutputAt":1790032400000},{"handle":"term_companion","title":"Terminal 1","agentIdentity":null,"preview":"\$ ","worktreePath":"$home/wt/alpha-worker","lastOutputAt":1790032900000},{"handle":"term_chair","title":"pi - firstmate","agentIdentity":"pi","preview":"Steering the fleet","worktreePath":"$home","lastOutputAt":1790032990000}]}}'
     ;;
   *) exit 1 ;;
 esac
@@ -116,6 +124,12 @@ ORCA
 {"type":"user","message":{"role":"user","content":[{"type":"text","text":"<system-reminder>\nThe user opened the file.\n</system-reminder>fix the flaky deploy"}]}}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"on it"}]}}
 JSONL
+  cat > "$home/claude-projects/proj/$UUID_CHAIR.jsonl" <<'JSONL'
+{"type":"user","message":{"role":"user","content":"steer the fleet from the chair"}}
+JSONL
+  cat > "$home/claude-projects/proj/$UUID_LOCK.jsonl" <<'JSONL'
+{"type":"user","message":{"role":"user","content":"hold the session lock"}}
+JSONL
   cat > "$home/grok-sessions/ws/$UUID_GROK/chat_history.jsonl" <<'JSONL'
 {"type": "user", "content": "<user_info>\nOS Version: macos\nShell: /bin/zsh\n</user_info>"}
 {"type": "user", "content": "<system-reminder>\nThe following skills are available.\n</system-reminder>", "synthetic_reason": "system_reminder"}
@@ -130,6 +144,7 @@ JSONL
 - [ ] ship-working - alpha: implement the parser (repo: alpha) (kind: ship) (since 2026-09-21)
 - [ ] lane - alpha lane takeover: keep the lane alive (repo: alpha) (kind: ship) (since 2026-09-01)
 - [ ] scout - mobile crash triage (repo: alpha) (kind: scout) (since 2026-09-21)
+- [ ] cmux-surfaces-rehome-as-firstmate-tasks-v5 - relaunch the migrated surfaces as firstmate tasks (repo: firstmate) (kind: ship) (since 2026-09-21)
 
 MD
 
@@ -219,13 +234,19 @@ HOME_DIR=$(build_home)
 start_sleeper "$HOME_DIR/wt/alpha-worker"
 start_sleeper "$HOME_DIR/wt/stray-claude"
 start_sleeper "$HOME_DIR/wt/stray-grok"
+start_sleeper "$HOME_DIR"
+start_sleeper "$HOME_DIR/wt/lock-chair"
 PID_WORKER=${SLEEPERS[0]} PID_STRAY=${SLEEPERS[1]} PID_GROK=${SLEEPERS[2]}
+PID_CHAIR=${SLEEPERS[3]} PID_LOCK=${SLEEPERS[4]}
+printf '%s\n' "$PID_LOCK" > "$HOME_DIR/state/.lock"
 cat > "$HOME_DIR/fake-ps" <<PS
 #!/usr/bin/env bash
 printf '%s\n' \\
   '$PID_WORKER /usr/local/bin/claude --dangerously-skip-permissions --resume $UUID_WORKER' \\
   '$PID_STRAY claude --resume $UUID_STRAY' \\
   '$PID_GROK grok -r $UUID_GROK' \\
+  '$PID_CHAIR claude --resume $UUID_CHAIR' \\
+  '$PID_LOCK claude --resume $UUID_LOCK' \\
   '1 /sbin/launchd'
 PS
 chmod +x "$HOME_DIR/fake-ps"
@@ -296,9 +317,20 @@ assert_not_contains "$out" "zzz-supervised-by-task" "a surface linked to a live 
 assert_not_contains "$out" "zzz-supervised-by-token" "a surface matched by task-id token was listed as unsupervised"
 assert_not_contains "$out" "cmux-surfaces-rehome" "an internal backlog id leaked into the roster"
 
-# Resumed cmux-app sessions: the supervised task's own worker is skipped, and
-# the strays show the captain's request rather than harness scaffolding.
+# The unsupervised count is exactly the three migrated surfaces, the two stray
+# cmux-app sessions, and the one stray Orca pane: a leaked worker, companion
+# pane, or chair row would raise it.
+assert_contains "$out" "NOT UNDER SUPERVISION (6)" "the unsupervised count is not the six stray pieces"
+assert_contains "$out" "6 not supervised." "the totals line does not count six unsupervised pieces"
+
+# Resumed cmux-app sessions: the supervised task's own worker and firstmate's
+# chair (the lock holder, and any session working in the home checkout) are
+# skipped, and the strays show the captain's request rather than harness
+# scaffolding.
 assert_not_contains "$out" "alpha-worker" "a supervised task's relaunched worker was listed as unsupervised"
+assert_not_contains "$out" "steer the fleet from the chair" "a session working in the home checkout was listed as unsupervised"
+assert_not_contains "$out" "lock-chair" "the session-lock holder was listed as unsupervised"
+assert_not_contains "$out" "hold the session lock" "the session-lock holder's request was listed as unsupervised"
 assert_contains "$out" "stray-claude" "the stray Claude session is missing"
 assert_contains "$out" "fix the flaky deploy" "the stray Claude session does not show its opening request"
 assert_contains "$out" "claude via pool" "the stray Claude session has no model cell"
@@ -313,6 +345,9 @@ assert_not_contains "$out" "<user_info>" "the grok user_info preamble leaked int
 assert_contains "$out" "stray-pane" "the unbound Orca terminal is missing"
 assert_contains "$out" "pi: Working" "the unbound Orca terminal does not show its agent and last line"
 assert_not_contains "$out" "pi - parser" "the terminal bound to a supervised task was listed as unbound"
+assert_not_contains "$out" "Terminal 1" "a supervised task's companion pane was listed as unbound"
+assert_not_contains "$out" "pi - firstmate" "firstmate's own chair terminal was listed as unbound"
+assert_not_contains "$out" "Steering the fleet" "firstmate's own chair terminal was listed as unbound"
 
 # Without FM_HOME, a run from a linked task worktree reports the primary
 # checkout that holds state/*.meta, not the worktree's own empty root.
