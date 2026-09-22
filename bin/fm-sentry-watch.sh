@@ -41,13 +41,17 @@
 #               a chronic issue pages once per tier rather than every poll. Or a
 #               burst: the window rate (delta divided by the hours since the
 #               issue was last read) reaches burst_min_events per cadence on a
-#               path whose prior rate was below burst_baseline_per_hour, so a
-#               long gap never turns a chronic trickle into a burst. An issue
-#               with no recorded rate yet (its first read, or a legacy import)
-#               earns one from its first two reads before the rule applies. A
-#               NEW issue is a burst only when its firstSeen falls inside the
-#               window, never on its lifetime count. The window runs from the
-#               last poll that actually read the project.
+#               path whose prior window rate was below burst_baseline_per_hour
+#               (the prior window was not itself at burst level), so a long gap
+#               never turns a chronic trickle into a burst and a sustained storm
+#               pages once. A NEW issue in an already-baselined project records
+#               its first-read rate from the poll window (its count over the
+#               window, bounded by its firstSeen), so a ramp pages on its second
+#               read; only a project's baseline read and a legacy import record
+#               no rate, and those earn one from their first two reads before
+#               the rule applies. A NEW issue is a burst only when its firstSeen
+#               falls inside the window, never on its lifetime count. The window
+#               runs from the last poll that actually read the project.
 #   P1          level error/fatal on a live path, at users>=users_p1_sensitive when
 #               the path matches the sensitive routes (onboarding, signup, auth,
 #               login, billing, checkout, payment, claim, credits) and users>=users_p1
@@ -70,8 +74,10 @@
 # A could-not-determine condition (a project, the project list, or a config
 # problem) is reported when it appears, reminded hourly while it persists, and
 # reported once more as recovered when it clears, so a persistent condition is
-# never a wake on every poll. A project that leaves the enumerated set (removed
-# from the org or denylisted) is reported once as removed from watch, never as
+# never a wake on every poll. The enumerated project set is recorded, and a
+# project present in the prior set and absent from the current one (removed
+# from the org, out of the token's scope, or denylisted) is reported once as
+# removed from watch, whether or not it had an open condition, never as
 # recovered.
 #
 # LIVENESS. A poll that read at least one project writes state/.sentry-watch.beat,
@@ -86,8 +92,8 @@
 # state/.sentry-watch.armed is present and the shim, trust, or beat is missing or
 # stale. That marker is written by `arm` and removed by `disarm`.
 #
-# RAIL CROSS-CHECK. Every rail.every_polls-th poll (default 6, about half an
-# hour) lists the CTO Sentry rail's PRs (branches under the configured prefix,
+# RAIL CROSS-CHECK. Every sixth poll (about half an hour at the default
+# cadence) lists the CTO Sentry rail's PRs (branches under the configured prefix,
 # plus any PR body naming a fixed Sentry id) and reports an id the rail fixed
 # that this watch never surfaced as RAIL-ONLY with the PR URL, so the two systems
 # never disagree silently. The rail read has its own 5s budget, reserved out of
@@ -296,9 +302,9 @@ DEFAULT_SIGNATURES = {
     ),
 }
 RAIL_BUDGET_SECS = 5
+RAIL_EVERY_POLLS = 6
 DEFAULT_RAIL = {
     "enabled": True,
-    "every_polls": 6,
     "repos": ["Muso-AI/core-backend"],
     "branch_prefix": "cto/sentry",
     "id_prefixes": ["CORE-BACKEND"],
@@ -313,7 +319,7 @@ PROJECT_DEFAULTS = {
     "users_p0": 25,
     "burst_min_events": 10,
     "burst_min_events_transport": 25,
-    "burst_baseline_per_hour": 2,
+    "burst_baseline_per_hour": 100,
 }
 DEFAULTS = {
     "cadence_secs": 300,
@@ -832,11 +838,19 @@ def classify(entry, old, settings, signatures, config, window_start, now, cadenc
     return None
 
 
-def project_rate(entry, old, now):
-    """The issue's event rate in events/hour as of this poll, or None until a
-    prior read exists to measure it against."""
+def project_rate(entry, old, now, window_start, project_baseline):
+    """The issue's event rate in events/hour as of this poll. A seen issue is
+    measured since its last read. An issue new to an already-baselined project
+    is measured over the poll window, bounded by its firstSeen. Only a project's
+    baseline read and a legacy import leave the rate unknown (None)."""
     if not isinstance(old, dict):
-        return None
+        if project_baseline:
+            return None
+        start = window_start
+        first_seen = entry.get("first_seen")
+        if first_seen is not None and first_seen > start:
+            start = first_seen
+        return (entry["count"] or 0) * 3600.0 / max(1, now - start)
     prev_count = _as_int(old.get("count"))
     if prev_count is None:
         return None
@@ -1041,9 +1055,8 @@ def action_poll(config, org, host, token, problems):
     if not isinstance(rail_state, dict) or rail_state.get("schema") != RAIL_SCHEMA:
         rail_state = {"schema": RAIL_SCHEMA, "ok": True, "seeded": False,
                       "known": [], "reported": [], "polls": 0}
-    rail_every = max(1, _as_int(rail_config.get("every_polls")) or 1)
     rail_due = bool(rail_config.get("enabled", True)) \
-        and (_as_int(rail_state.get("polls")) or 0) % rail_every == 0
+        and (_as_int(rail_state.get("polls")) or 0) % RAIL_EVERY_POLLS == 0
     project_budget = max(1, BUDGET_SECS - (RAIL_BUDGET_SECS if rail_due else 0))
     deadline = time.time() + project_budget
     findings = []
@@ -1070,6 +1083,10 @@ def action_poll(config, org, host, token, problems):
     # A project's poll window runs from the last poll that actually read it, so
     # a NEW issue counts as a burst only when it first appeared inside that
     # window, and a poll that skipped the project never shortens it.
+    prior_projects = (
+        [s for s in stored.get("projects") if isinstance(s, str)]
+        if present and isinstance(stored.get("projects"), list) else []
+    )
     last_read = {}
     if present and isinstance(stored.get("last_read"), dict):
         last_read = {
@@ -1151,7 +1168,7 @@ def action_poll(config, org, host, token, problems):
             entry = issue_entry(issue, now)
             entry["project"] = slug
             old = issues.get(sid)
-            entry["rate"] = project_rate(entry, old, now)
+            entry["rate"] = project_rate(entry, old, now, window_start, project_baseline)
             entry["surfaced"] = (old.get("surfaced") or 0) if isinstance(old, dict) else 0
             if not project_baseline:
                 finding = classify(entry, old, settings, signatures, config, window_start, now, cadence)
@@ -1174,12 +1191,13 @@ def action_poll(config, org, host, token, problems):
             if isinstance(record, dict) and record.get("message"):
                 conditions[key] = record["message"]
     removed_lines = []
+    projects_now = sorted(slugs) if enumerated else prior_projects
     if enumerated:
-        for key in sorted(prior_conditions):
-            if key in slugs or key in ("projects", "beat") or key.startswith("config: "):
-                continue
-            prior_conditions.pop(key)
-            removed_lines.append("removed from watch %s" % key)
+        for slug in sorted(set(prior_projects) - set(slugs)):
+            prior_conditions.pop(slug, None)
+            last_read.pop(slug, None)
+            unread.pop(slug, None)
+            removed_lines.append("removed from watch %s" % slug)
     condition_lines, conditions = condition_findings(prior_conditions, conditions, now)
     findings.extend(removed_lines)
     findings.extend(condition_lines)
@@ -1195,6 +1213,7 @@ def action_poll(config, org, host, token, problems):
         "last_read": last_read,
         "unread": unread,
         "cursor": cursor,
+        "projects": projects_now,
     })
     if read_any:
         try:

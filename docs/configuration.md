@@ -698,12 +698,11 @@ See [`docs/examples/sentry-watch.json`](examples/sentry-watch.json) for a starti
       "users_p0": 25,
       "burst_min_events": 10,
       "burst_min_events_transport": 25,
-      "burst_baseline_per_hour": 2
+      "burst_baseline_per_hour": 100
     }
   },
   "rail": {
     "enabled": true,
-    "every_polls": 6,
     "repos": ["Muso-AI/core-backend"],
     "branch_prefix": "cto/sentry",
     "id_prefixes": ["CORE-BACKEND"]
@@ -714,7 +713,7 @@ See [`docs/examples/sentry-watch.json`](examples/sentry-watch.json) for a starti
 The watch fires three states and never goes silent on error: it wakes, stays silent, or reports `could-not-determine`.
 A project whose issues cannot be read is reported as `could-not-determine` for that project, and one unreadable project never stops the others; a poll that cannot enumerate projects at all reports it too.
 Each `could-not-determine` condition - a project, the project list, or a config problem - is reported when it appears, reminded once an hour while it persists, and reported once more as `recovered` when it clears, so a persistent condition is never a wake on every poll.
-A project that leaves the enumerated set, because it was removed from the organization or denylisted, is reported once as `removed from watch <slug>` and never as `recovered`.
+The enumerated project set is recorded, and a project present in the prior set and absent from the current one, because it was removed from the organization, left the token's scope, or was denylisted, is reported once as `removed from watch <slug>` whether or not it had an open condition, and never as `recovered`.
 Every finding prints on its own line, so a multi-issue incident is never cut to the first few, and an issue is recorded as surfaced only because its line was printed.
 The rules themselves, in the order they are applied, are:
 
@@ -722,7 +721,7 @@ The rules themselves, in the order they are applied, are:
 - `REGRESSION` - an issue's Sentry `substatus` transitions into `regressed`, which is a resolved issue re-firing.
 - `CRASH` - a `crash` signature match pages a new issue once at any user count; after that the seen-issue rules below apply to it like any other issue.
 - `CRITICAL` - a `critical` signature match pages a new issue at any user count and a seen issue on any new event, throttled to once per `surfaced_window_secs`: it pages again only when that window has rolled since the issue last surfaced or a new user tier is crossed.
-- `P0` - a user tier, or a burst. A new issue pages at `users >= users_p0`; a seen issue pages again only when it crosses a new tier (`users_p0`, twice it, four times it), so a chronic issue pages once per tier rather than every poll. A burst is a window rate - the event delta divided by the hours since the issue was last read - that reaches `burst_min_events` per cadence on a path whose prior rate was below `burst_baseline_per_hour`, so a long read gap never turns a chronic trickle into a burst; an issue with no recorded rate yet (its first read, or a legacy import) earns one from its first two reads before the rule applies to it. A new issue counts as a burst only when its Sentry `firstSeen` falls inside the window, never on its lifetime count. The window runs from the last poll that actually read the project, so a poll that skipped it never shortens the window.
+- `P0` - a user tier, or a burst. A new issue pages at `users >= users_p0`; a seen issue pages again only when it crosses a new tier (`users_p0`, twice it, four times it), so a chronic issue pages once per tier rather than every poll. A burst is a window rate - the event delta divided by the hours since the issue was last read - that reaches `burst_min_events` per cadence on a path whose prior window rate was below `burst_baseline_per_hour` (the default, 100 events per hour, is just under the burst level itself, so the prior window must not already have been a burst), so a long read gap never turns a chronic trickle into a burst and a sustained storm pages once. A new issue in an already-baselined project records its first-read rate from the poll window (its count over the window, bounded by its `firstSeen`), so a ramp pages on its second read; only a project's baseline read and a legacy import record no rate, and those earn one from their first two reads before the rule applies. A new issue counts as a burst only when its Sentry `firstSeen` falls inside the window, never on its lifetime count. The window runs from the last poll that actually read the project, so a poll that skipped it never shortens the window.
 - `P1` - a new `error` or `fatal` issue on a live path, at `users_p1_sensitive` when the path matches the sensitive routes and `users_p1` elsewhere.
 
 A `noise` match silences an issue entirely.
@@ -742,7 +741,7 @@ That is the external half of the guarantee: the check covers a gap it survives, 
 
 ### Rail cross-check
 
-Every `rail.every_polls`-th poll (default 6, about half an hour at the default cadence) lists the CTO Sentry rail's pull requests - branches under `rail.branch_prefix`, plus any PR body naming a fixed Sentry id - and reports an id the rail fixed that this watch never surfaced as `RAIL-ONLY <id> <pr-url>`.
+Every sixth poll (about half an hour at the default cadence) lists the CTO Sentry rail's pull requests - branches under `rail.branch_prefix`, plus any PR body naming a fixed Sentry id - and reports an id the rail fixed that this watch never surfaced as `RAIL-ONLY <id> <pr-url>`.
 The rail read has its own 5-second budget, reserved out of the poll budget before the project loop on the polls it runs, so project reads can never starve it.
 The first successful rail read seeds its known set rather than reporting history, and a `gh` outage is reported once on the ok-to-down transition as `RAILCHECK-DARK`.
 

@@ -138,16 +138,40 @@ test_burst_pages_regardless_of_users() {
 [{"shortId":"CORE-BACKEND-DDD","title":"OOMKilled","culprit":"/api/v4/x","userCount":0,"count":5,"level":"fatal","substatus":"ongoing","permalink":"https://x/4/"}]
 JSON
   poll "$home" 1300 >/dev/null
-  # The second read establishes the issue's rate; only then can a window rate
-  # be judged a burst.
-  poll "$home" 1600 >/dev/null
+  # A ramp on the second read is exactly what the burst rule exists to catch.
   write_issues "$home" core-backend <<'JSON'
 [{"shortId":"CORE-BACKEND-DDD","title":"OOMKilled","culprit":"/api/v4/x","userCount":1,"count":20,"level":"fatal","substatus":"ongoing","permalink":"https://x/4/"}]
 JSON
-  out=$(poll "$home" 1900)
+  out=$(poll "$home" 1600)
   assert_contains "$out" "P0 CORE-BACKEND-DDD" "a burst did not page as P0"
   assert_contains "$out" "rule=burst>=10" "the burst rule was not named"
   pass "a burst pages as P0 regardless of users"
+}
+
+test_new_issue_ramp_pages_on_its_second_read() {
+  local home out
+  home=$(make_home ramp)
+  prime_baseline "$home" 1000
+  # The 11N shape on a non-sensitive route: few users, rising events. Five
+  # events at first read is below every first-read rule; thirty-five more in
+  # the next window must page, and the storm must not re-page every window.
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-RMP","title":"TypeError: ramp","culprit":"/api/v4/feed/profile/3/activities","userCount":1,"count":5,"level":"error","substatus":"new","firstSeen":"1970-01-01T00:18:00Z","permalink":"https://x/rmp/"}]
+JSON
+  out=$(poll "$home" 1300)
+  [ -z "$out" ] || fail "five events at first read paged: $out"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-RMP","title":"TypeError: ramp","culprit":"/api/v4/feed/profile/3/activities","userCount":2,"count":40,"level":"error","substatus":"ongoing","firstSeen":"1970-01-01T00:18:00Z","permalink":"https://x/rmp/"}]
+JSON
+  out=$(poll "$home" 1600)
+  assert_contains "$out" "P0 CORE-BACKEND-RMP" "a ramp on the second read did not page"
+  assert_contains "$out" "rule=burst>=10/window" "the burst rule was not named"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-RMP","title":"TypeError: ramp","culprit":"/api/v4/feed/profile/3/activities","userCount":2,"count":80,"level":"error","substatus":"ongoing","firstSeen":"1970-01-01T00:18:00Z","permalink":"https://x/rmp/"}]
+JSON
+  out=$(poll "$home" 1900)
+  assert_not_contains "$out" "P0 CORE-BACKEND-RMP" "a sustained storm re-paged on the next window"
+  pass "a new issue's ramp pages on its second read and a sustained storm pages once"
 }
 
 test_burst_is_a_window_rate_not_a_gap_total() {
@@ -173,8 +197,9 @@ JSON
 JSON
   out=$(poll "$home" 15700)
   [ -z "$out" ] || fail "one event in a window paged: $out"
-  # A quiet window brings the prior rate to zero; fifteen events in the next
-  # five-minute window are then a real burst and page.
+  # A quiet window records a rate of zero. Fifteen events that then arrive
+  # over a four-hour read gap (a DARK period, a starved rotation) are a raw
+  # delta of fifteen but a window rate under four per hour: not a burst.
   write_issues "$home" core-backend <<'JSON'
 [{"shortId":"CORE-BACKEND-CHR","title":"TypeError: chronic","culprit":"/api/v4/feed/x","userCount":4,"count":116,"level":"error","substatus":"ongoing","permalink":"https://x/chr/"}]
 JSON
@@ -182,7 +207,14 @@ JSON
   write_issues "$home" core-backend <<'JSON'
 [{"shortId":"CORE-BACKEND-CHR","title":"TypeError: chronic","culprit":"/api/v4/feed/x","userCount":4,"count":131,"level":"error","substatus":"ongoing","permalink":"https://x/chr/"}]
 JSON
-  out=$(poll "$home" 16300)
+  out=$(poll "$home" 30400)
+  assert_not_contains "$out" "P0 CORE-BACKEND-CHR" "fifteen events spread over a four-hour gap paged as a burst"
+  # The same fifteen inside one five-minute window after a quiet one page.
+  poll "$home" 30700 >/dev/null
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-CHR","title":"TypeError: chronic","culprit":"/api/v4/feed/x","userCount":4,"count":146,"level":"error","substatus":"ongoing","permalink":"https://x/chr/"}]
+JSON
+  out=$(poll "$home" 31000)
   assert_contains "$out" "P0 CORE-BACKEND-CHR" "fifteen events in one window after a quiet one did not page"
   assert_contains "$out" "rule=burst>=10/window" "the burst rule was not named as a window rate"
   pass "a burst is a window rate against the prior rate, never a gap total"
@@ -481,21 +513,30 @@ test_missing_beat_is_dark() {
   pass "a beat older than three cadences emits a DARK wake"
 }
 
+# The rail is read every sixth poll; the arming poll is the first read, so five
+# quiet polls bring the counter to the next one.
+advance_to_rail_poll() {  # <home> <first-now>  (five polls, 300s apart)
+  local home=$1 t=$2 i
+  for i in 0 1 2 3 4; do
+    poll "$home" $((t + 300 * i)) >/dev/null
+  done
+}
+
 test_rail_only_detection() {
-  local home out
+  local home out i
   home=$(make_home rail-only)
-  write_config "$home" <<'JSON'
-{"rail":{"every_polls":1}}
-JSON
   prime_baseline "$home" 1000
+  advance_to_rail_poll "$home" 1300
   write_rail "$home" <<'JSON'
 [{"url":"https://github.com/Muso-AI/core-backend/pull/9999","headRefName":"cto/sentry-core-backend-zzz-20260922-000000","body":"Fixes CORE-BACKEND-ZZZ"}]
 JSON
-  out=$(poll "$home" 1300)
+  out=$(poll "$home" 2800)
   assert_contains "$out" "RAIL-ONLY CORE-BACKEND-ZZZ" "a rail fix the watch never surfaced was not reported"
   assert_contains "$out" "https://github.com/Muso-AI/core-backend/pull/9999" "the rail-only wake lost the PR URL"
-  out=$(poll "$home" 1600)
-  assert_not_contains "$out" "RAIL-ONLY" "the same rail-only finding reported twice"
+  for i in 3100 3400 3700 4000 4300 4600; do
+    out=$(poll "$home" "$i")
+    assert_not_contains "$out" "RAIL-ONLY" "the same rail-only finding reported twice (poll at $i)"
+  done
   pass "a rail fix the watch never surfaced is reported once with its PR URL"
 }
 
@@ -520,17 +561,15 @@ JSON
 test_rail_only_is_suppressed_when_the_watch_surfaced_it() {
   local home out
   home=$(make_home rail-surfaced)
-  write_config "$home" <<'JSON'
-{"rail":{"every_polls":1}}
-JSON
   prime_baseline "$home" 1000
+  advance_to_rail_poll "$home" 1300
   write_issues "$home" core-backend <<'JSON'
 [{"shortId":"CORE-BACKEND-ZZZ","title":"TypeError: null","culprit":"/api/v4/onboarding/name","userCount":1,"count":1,"level":"fatal","substatus":"new","permalink":"https://x/z/"}]
 JSON
   write_rail "$home" <<'JSON'
 [{"url":"https://github.com/Muso-AI/core-backend/pull/9999","headRefName":"cto/sentry-core-backend-zzz-20260922-000000","body":"Fixes CORE-BACKEND-ZZZ"}]
 JSON
-  out=$(poll "$home" 1300)
+  out=$(poll "$home" 2800)
   assert_contains "$out" "P1 CORE-BACKEND-ZZZ" "the watch did not surface the issue itself"
   assert_not_contains "$out" "RAIL-ONLY" "an issue the watch surfaced was still called a rail-only disagreement"
   pass "the rail cross-check never calls a surfaced fix a silent disagreement"
@@ -682,6 +721,27 @@ JSON
   pass "a project that leaves the enumerated set is removed from watch, never recovered"
 }
 
+test_healthy_project_leaving_the_org_is_removed_from_watch() {
+  local home out
+  home=$(make_home departed-healthy)
+  write_projects "$home" core-backend feed-service
+  printf '[]\n' > "$home/fix/issues-core-backend.json"
+  printf '[]\n' > "$home/fix/issues-feed-service.json"
+  printf '[]\n' > "$home/fix/rail.json"
+  mark_armed "$home" 1000
+  out=$(poll "$home" 1000)
+  [ -z "$out" ] || fail "two healthy projects printed on the arming poll: $out"
+  # The token's scope narrows or the project is deleted: the next enumeration
+  # simply lacks the slug, and losing coverage of a live app must not be silent.
+  write_projects "$home" core-backend
+  out=$(poll "$home" 1300)
+  assert_contains "$out" "removed from watch feed-service" "a healthy project leaving the org was dropped silently"
+  assert_not_contains "$out" "recovered" "a departed project was reported as recovered"
+  out=$(poll "$home" 1600)
+  [ -z "$out" ] || fail "a removed project kept printing: $out"
+  pass "a healthy project that leaves the enumerated set is reported once as removed"
+}
+
 test_migrate_imports_the_retired_baselines() {
   local home out
   home=$(make_home migrate)
@@ -830,6 +890,7 @@ test_first_poll_records_the_estate_and_wakes_nobody
 test_sensitive_route_pages_at_one_user
 test_nonsensitive_route_pages_at_three_users
 test_burst_pages_regardless_of_users
+test_new_issue_ramp_pages_on_its_second_read
 test_burst_is_a_window_rate_not_a_gap_total
 test_transport_burst_still_pages
 test_transport_pages_only_through_the_raised_burst_floor
@@ -851,6 +912,7 @@ test_legacy_import_baselines_only_the_projects_it_covered
 test_fetch_order_rotates_so_no_project_starves
 test_budget_skip_never_closes_an_open_condition
 test_departed_project_is_removed_from_watch_not_recovered
+test_healthy_project_leaving_the_org_is_removed_from_watch
 test_migrate_imports_the_retired_baselines
 test_a_task_pr_poll_cannot_touch_the_watch
 test_an_overwritten_check_is_dark
