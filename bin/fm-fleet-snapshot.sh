@@ -62,9 +62,11 @@
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
-#     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
-#     against current_state; hints.pending_decision and hints.blocked_event are
-#     booleans derived from that set.
+#     fm-classify-lib.sh's cursor-backed incremental fold (the authoritative
+#     status_open_decisions semantics), folded read-only up to the end of the
+#     captured status copy so it and current_state share one observation, and
+#     reconciled against current_state; hints.pending_decision and
+#     hints.blocked_event are booleans derived from that set.
 #     endpoint.exists is the cheap local backend endpoint-presence read.
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
