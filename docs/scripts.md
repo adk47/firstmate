@@ -128,6 +128,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fable-runway.sh`     | Print one read-only GREEN/YELLOW/RED line for the supervisor's Fable credential and the account pool |
 | `fm-fable-runway-check.sh` | Registered slow-poll check that wakes firstmate on a Fable or pool runway change, a sustained RED, or an account needing a login |
 | `fm-fable-runway-alert.sh` | The runway check's outward actions: the once-per-episode handoff note, Grok doorbell, and notifications |
+| `fm-sentry-watch.sh`     | Registered check that watches every Sentry project the API lists, pages on P0/P1/regression, cross-checks the CTO rail, and emits a DARK wake when its own visibility is lost |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |

@@ -660,6 +660,101 @@ No single call may exceed a fixed 5-second cap, nor a quarter of what is left of
 None of those bounds is tunable: an override could only weaken the bound it exists to enforce.
 `quota-axi` needs its one-time Keychain approval (run `quota-axi --allow-keychain-prompt` once by hand); the monitor itself reads strictly, with `--no-credential-refresh`, and never prompts.
 
+## Sentry watch (config/sentry-watch.json)
+
+[`bin/fm-sentry-watch.sh`](../bin/fm-sentry-watch.sh) is the one firstmate-owned Sentry watch for the organization, and it replaces the per-lane scratch checks that used to live in `state/`.
+It polls **every project the Sentry API lists** for the organization rather than a hardcoded tuple, so a project added later is covered without a code change.
+Its header owns the exact rule order, the liveness mechanics, and the rail cross-check; this section owns the local configuration schema.
+
+`config/sentry-watch.json` is optional, local, and gitignored.
+It is never propagated to another home, and it is not required: with no file at all the watch runs on the built-in defaults below, so an unreadable or malformed file degrades to defaults and reports the problem instead of going silent.
+Every threshold and every signature lives in this file, so tuning the watch is a config edit rather than a code change.
+See [`docs/examples/sentry-watch.json`](examples/sentry-watch.json) for a starting point to copy.
+
+```json
+{
+  "org": "<optional organization slug, default from the vault>",
+  "cadence_secs": 300,
+  "retention_secs": 604800,
+  "allowlist": ["<optional project slugs; when non-empty only these are polled>"],
+  "denylist": ["<project slugs never polled>"],
+  "page_any_delta": ["<Sentry short ids that must page on any new event>"],
+  "signatures": {
+    "sensitive": "<regex matching signup, auth, login, billing, checkout, payment, claim, credits routes>",
+    "noise": "<regex matching client transport and bot-probe signatures that never wake>",
+    "transport": "<regex matching transport signatures that cannot trigger P1>",
+    "retired": "<regex matching dead data paths that are recorded and never wake>",
+    "live": "<regex matching live paths>"
+  },
+  "projects": {
+    "<project slug>": {
+      "live": true,
+      "live_routes": "<optional regex a NEW issue must match to count as a live path>",
+      "sensitive": false,
+      "sensitive_routes": "<optional extra regex for this project's sensitive routes>",
+      "users_p1_sensitive": 1,
+      "users_p1": 3,
+      "users_p0": 25,
+      "burst_min_events": 10,
+      "burst_baseline_per_hour": 2
+    }
+  },
+  "rail": {
+    "enabled": true,
+    "repos": ["Muso-AI/core-backend"],
+    "branch_prefix": "cto/sentry",
+    "id_prefixes": ["CORE-BACKEND"]
+  }
+}
+```
+
+The watch fires three states and never goes silent on error: it wakes, stays silent, or reports `could-not-determine`.
+A project whose issues cannot be read is reported as `could-not-determine` for that project, and one unreadable project never stops the others; a poll that cannot enumerate projects at all reports it too.
+The rules themselves, in the order they are applied, are:
+
+- `PAGE-NOW` - an issue named in `page_any_delta` has any new event.
+- `REGRESSION` - an issue's Sentry `substatus` transitions into `regressed`, which is a resolved issue re-firing.
+- `P0` - `users >= users_p0`, or a burst: `burst_min_events` or more events in one poll window on a path whose prior rate was below `burst_baseline_per_hour`.
+- `P1` - a new `error` or `fatal` issue on a live path, at `users_p1_sensitive` when the path matches the sensitive routes and `users_p1` elsewhere.
+
+A `noise` match silences an issue entirely.
+A `transport` match cannot trigger `P1` or the users-based `P0`, but never hides a burst: the 2026-09-22 fleet-wide request reset arrived as `socket hang up`, and a transport signature that suppressed bursts is exactly how that P0 stayed hidden.
+A `retired` match is recorded and never wakes.
+The `live` signature is used only when a project sets `live_routes`; without it every non-retired path counts as live.
+
+### Liveness
+
+Every poll writes `state/.sentry-watch.beat`.
+A poll emits a `DARK` wake when the recorded beat is older than three times the cadence, when the check shim or its trust binding is missing, when the trust binding no longer covers the shim's bytes, or when no beat was ever recorded.
+That last condition matters because a task's own PR poll writes `state/<task>.check.sh`, so a check named after its task is overwritten when that task's PR is armed and deleted when the poll retires - the exact way the retired per-lane checks went dark twice on 2026-09-22.
+This watch lives at `state/sentry-watch.check.sh`, a path no task PR poll derives, `arm` refuses when a task record exists for its id, and an in-place overwrite is caught by the trust-binding check rather than read as healthy.
+`arm` also writes `state/.sentry-watch.armed`, which outlives a deleted check, so `bin/fm-wake-drain.sh` prints a `SENTRY WATCH DARK` line on the next supervision turn when the shim, trust, or beat is missing or stale even though the check itself can no longer run to notice.
+That is the external half of the guarantee: the check covers a gap it survives, and the drain covers the deletion the check cannot see.
+`bin/fm-sentry-watch.sh status` prints the same verdict locally without any network call.
+
+### Rail cross-check
+
+Each poll lists the CTO Sentry rail's pull requests - branches under `rail.branch_prefix`, plus any PR body naming a fixed Sentry id - and reports an id the rail fixed that this watch never surfaced as `RAIL-ONLY <id> <pr-url>`.
+The first successful rail read seeds its known set rather than reporting history, and a `gh` outage is reported once on the ok-to-down transition as `RAILCHECK-DARK`.
+
+### Migration from the per-lane checks
+
+The retired `state/sentry-backend-watch-b1.last.json` and `state/sentry-mobile-s1.last.json` seen-sets are imported into `state/sentry-watch.baseline.json` by `bin/fm-sentry-watch.sh migrate`, and automatically by the first poll when the shared baseline does not exist yet.
+Import the baselines before retiring the old checks, so the first shared poll does not re-announce the existing estate.
+The shared baseline is deliberately kept across `disarm`, because the Sentry mobile scout reads it.
+
+### Commands
+
+- `bin/fm-sentry-watch.sh arm` writes `state/sentry-watch.check.sh`, binds its bytes with [`bin/fm-check-register.sh`](../bin/fm-check-register.sh), seeds the beat, and writes the armed marker.
+- `bin/fm-sentry-watch.sh disarm` removes the shim, its trust binding, the beat, the armed marker, and the rail record; the baseline stays.
+- `bin/fm-sentry-watch.sh projects` lists every project the API lists with its effective enabled or disabled state.
+- `bin/fm-sentry-watch.sh status` prints a read-only local status with no network call.
+- `bin/fm-sentry-watch.sh migrate` imports the retired per-lane baselines.
+
+Arming writes a check the existing watcher polls on its normal `FM_CHECK_INTERVAL` cadence, so no separate schedule is involved.
+The token is read from `~/.config/muso/sentry-vault.json` by the interpreter only, is never printed, and is never passed on a command line.
+The watch is read-only against Sentry and GitHub, makes no model calls, and bounds a whole poll by `FM_SENTRY_WATCH_BUDGET_SECS` (default 20) and each request by `FM_SENTRY_WATCH_HTTP_TIMEOUT` (default 5) so it ends inside `FM_CHECK_TIMEOUT` rather than being killed with nothing printed.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
