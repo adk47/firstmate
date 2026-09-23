@@ -1,0 +1,42 @@
+{
+  "owner": {
+    "type": "choice",
+    "instructions": "This is one thread from the support@muso.ai inbox. Judge who owns FIRST CONTACT with it, under the muso-support-email-triage doctrine: does Caroline's support-skill/KB tooling resolve it, does it structurally require a human to read the raw email first, or is it not a support request at all? Filing a ticket or running a gated self-service write is Caroline owning the thread, not a human handoff.",
+    "criteria": {
+      "caroline": "Any thread whose first contact is a Caroline support skill or KB answer, a gated self-service write (credit verification, credit removal, profile claim/consolidate/dedupe, track dedupe, order/address fix, founding buy-back), or filing the recommend-approve / needs-human / intake ticket her skill is designed to file -- including when she discovers something a human must act on downstream, because she still owned first contact. Default for any genuine customer request.",
+      "human": "ONLY a thread Caroline structurally cannot even start, where a human must read the raw email first: legal/rights/IP demands (DMCA, subpoena, cease-and-desist, licensing or chain-of-title disputes, official legal/visa documentation); security/account-compromise/fraud/law-enforcement; pure sales or commercial negotiation (enterprise/full-catalog-API deals, Business-tier quotes); vendor/B2B business development (partnership, data-licensing, press, recruiting, AP invoices); Google de-indexing; formal legal/privacy-rights deletion demands; or a disputed cross-account claim reversal (removing someone else's claim). Needing a write or a ticket is NOT a human trigger.",
+      "spam": "Not a support request at all, and no human action either: cold marketing/promotions, SEO/link-building pitches, unsolicited app/TestFlight invites, newsletters, or automated system noise (mailer-daemon/delivery-failure bounces, auto-replies, out-of-office, read receipts, list confirmations, automated request-received receipts, internal test mail, Intercom/tooling setup notices)."
+    }
+  },
+  "category": {
+    "type": "choice",
+    "instructions": "Same thread as the owner question. Pick the single category that best names what the sender wants, drawn from the same doctrine used to decide owner.",
+    "criteria": {
+      "credit-verification": "Caroline: a pending/stuck credit submission ('user verification needed') -- she verifies ownership and reviews proof.",
+      "credit-removal": "Caroline: the customer wants a mechanical wrong credit removed from a profile they own.",
+      "profile-claim-consolidate-dedupe": "Caroline: claiming a profile, merging the customer's own duplicate profiles, or deduping profiles.",
+      "track-dedupe": "Caroline: merging/deduping duplicate TRACKS (not profiles).",
+      "refund-cancellation": "Caroline: a refund or subscription-cancellation request, handled through the refund-retention 3-gate flow.",
+      "analytics-streams-issue": "Caroline: analytics/streams genuinely appear off; she files the analytics-followup data-integrity ticket herself.",
+      "profile-data-correction": "Caroline: a correction to the customer's own profile data.",
+      "order-plaque-fulfillment": "Caroline: an order, plaque, or Prodigi fulfillment question, including an address fix on an editable order.",
+      "founding-member-qa-buyback": "Caroline: founding-member Q&A or a paid buy-back checkout link.",
+      "account-email-change": "Caroline: the customer wants to change the email on their own Muso account.",
+      "account-profile-deletion": "Caroline: account or profile deletion/removal intake for the customer's own account/profile.",
+      "general-howto-faq": "Caroline: a general how-to or FAQ question answerable from the KB.",
+      "caroline-filed-needs-human": "Caroline: she owned first contact but the substance is something she cannot finish herself and files a needs-human ticket (e.g. a credit-theft contradiction she discovered, or a cross-owner merge).",
+      "legal-rights-ip": "Human: DMCA, subpoena, cease-and-desist, licensing or chain-of-title dispute, or official legal/visa documentation.",
+      "security-fraud-compromise": "Human: account compromise, fraud, law-enforcement request, or a security event on the support mailbox itself.",
+      "sales-commercial": "Human: pure sales or commercial negotiation -- enterprise/full-catalog-API deals, Business-tier quotes.",
+      "vendor-b2b": "Human: vendor/B2B business development -- partnership, data-licensing, press, recruiting, AP invoices.",
+      "google-deindexing": "Human: a Google de-indexing request.",
+      "legal-privacy-deletion-demand": "Human: a formal legal/privacy-rights deletion demand (as opposed to the customer's own account-deletion intake, which is Caroline's).",
+      "disputed-cross-account-claim": "Human: a disputed cross-account claim reversal -- removing SOMEONE ELSE'S claim.",
+      "cold-marketing-promo": "Spam: cold marketing or a promotion.",
+      "seo-link-building": "Spam: an SEO or link-building pitch.",
+      "unsolicited-app-invite": "Spam: an unsolicited app or TestFlight invite.",
+      "newsletter": "Spam: a newsletter.",
+      "system-noise": "Spam: automated system noise -- mailer-daemon/delivery-failure bounces, auto-replies, out-of-office, read receipts, list confirmations, automated request-received receipts, internal test mail, Intercom/tooling setup notices."
+    }
+  }
+}
