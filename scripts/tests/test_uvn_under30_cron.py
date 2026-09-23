@@ -1104,5 +1104,34 @@ class ClickUpBoundaryTests(unittest.TestCase):
         )
 
 
+
+class ClickUpDeleteConfirmation(unittest.TestCase):
+    """muso-cli refuses a DELETE without --yes ("DELETEs and destructive paths
+    need --yes"), so without it every ClickUp tag removal this cron makes
+    fails. Pulled from a node-8 hot fix (2026-09-23 04:51 UTC) that blocked
+    the next deploy at its drift check. Scoped to the clickup() wrapper: it
+    never reaches Muso's admin API, and it grants only the "dangerous" tier,
+    never the second-approver tier (--confirmed-by / --approval-ref)."""
+
+    def _argv_for(self, method, body=None):
+        with patch.object(cron, "run_json", return_value={"data": {}}) as run_json:
+            cron.clickup(method, "/task/t1/tag/x", body=body)
+        return run_json.call_args.args[0]
+
+    def test_delete_carries_yes(self):
+        argv = self._argv_for("DELETE")
+        self.assertIn("--yes", argv)
+        self.assertIn("--requester", argv)
+
+    def test_non_delete_writes_and_reads_do_not(self):
+        for method in ("GET", "PUT", "POST"):
+            with self.subTest(method=method):
+                self.assertNotIn("--yes", self._argv_for(method, body={"a": 1} if method != "GET" else None))
+
+    def test_yes_never_reaches_the_second_approver_tier(self):
+        argv = self._argv_for("DELETE")
+        self.assertNotIn("--confirmed-by", argv)
+        self.assertNotIn("--approval-ref", argv)
+
 if __name__ == "__main__":
     unittest.main()

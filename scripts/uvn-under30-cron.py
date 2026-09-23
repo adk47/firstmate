@@ -164,6 +164,8 @@ def clickup(method: str, path: str, body: dict[str, Any] | None = None, query: l
         argv.extend(["--query", value])
     if method != "GET":
         argv.extend(["--requester", SERVICE_REQUESTER])
+    if method == "DELETE":
+        argv.append("--yes")
     if body is not None:
         argv.extend(["--data", json.dumps(body, separators=(",", ":"), sort_keys=True)])
     argv.append("--json")
