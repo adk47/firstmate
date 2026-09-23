@@ -33,9 +33,7 @@
 #               once at any user count; after that the seen-issue rules apply.
 #   CRITICAL    an infrastructure signature (OOM kills, memory exhaustion, SIGKILL,
 #               connection-pool exhaustion) pages a NEW issue at any user count and
-#               a seen issue on any new event, throttled to once per surfaced
-#               window (surfaced_window_secs): it pages again only when that window
-#               has rolled or a new user tier is crossed.
+#               a seen issue on any new event, subject to the tier throttle below.
 #   P0          a user tier: a NEW issue at users>=users_p0, and a seen issue only
 #               when it crosses a new tier (users_p0, twice it, four times it), so
 #               a chronic issue pages once per tier rather than every poll. Or a
@@ -48,9 +46,13 @@
 #               one cadence so a long gap never turns a trickle into a burst).
 #               From an issue's third read the rule is a rate: the window rate
 #               reaches burst_min_events per cadence while the prior window's
-#               rate was at or below the project's baseline rate. Either burst
-#               follows the seen-issue throttle once it has surfaced: it pages
-#               again only after surfaced_window_secs or on a new user tier, so
+#               rate was at or below the project's baseline rate. Seen-issue
+#               bursts and CRITICAL pages follow the tier throttle: each page
+#               records surfaced and surfaced_tier, and inside surfaced_window_secs
+#               a repeat at the same or a lower tier (SEVERITY: P1 and CRASH
+#               below REGRESSION, CRITICAL and P0, below PAGE-NOW) is silent
+#               unless a new user tier is crossed, while an escalation to a
+#               higher tier always pages: a P1 followed by a P0 burst pages, and
 #               a storm that began on a NEW issue pages once, not on each of its
 #               first two reads. The baseline is an exponentially weighted moving
 #               average (BASELINE_ALPHA) of the project's mean per-issue event
@@ -736,8 +738,11 @@ def user_tier(users, settings):
     return tier
 
 
+SEVERITY = {"P1": 1, "CRASH": 1, "REGRESSION": 2, "CRITICAL": 2, "P0": 2, "PAGE-NOW": 3}
+
+
 def classify(entry, old, settings, signatures, config, window_start, now, cadence, baseline_rate):
-    """Return a finding line, or None. `old` is the prior baseline entry."""
+    """Return (kind, finding line), or None. `old` is the prior baseline entry."""
     blob = "%s %s" % (entry["title"], entry["culprit"])
     if signatures["retired"] and signatures["retired"].search(blob):
         return None
@@ -799,7 +804,7 @@ def classify(entry, old, settings, signatures, config, window_start, now, cadenc
         parts.append("culprit=%s" % culprit)
         parts.append("permalink=%s" % permalink)
         parts.append("rule=%s" % rule)
-        return " ".join(parts)
+        return kind, " ".join(parts)
 
     if page_now and (old is None or delta >= 1):
         return finding("PAGE-NOW", "page-any-delta")
@@ -830,13 +835,18 @@ def classify(entry, old, settings, signatures, config, window_start, now, cadenc
     tier = user_tier(users, settings)
     new_tier = bool(tier) and tier > user_tier(_as_int(old.get("users")) or 0, settings)
     surfaced = _as_int(old.get("surfaced")) or 0
-    throttled = bool(surfaced) and now - surfaced < config["surfaced_window_secs"] and not new_tier
-    if window_rate >= floor_rate and level in ("error", "fatal") and live and not throttled:
+    prior_tier = SEVERITY.get(old.get("surfaced_tier"), 0)
+    in_window = bool(surfaced) and now - surfaced < config["surfaced_window_secs"]
+
+    def throttled(kind):
+        return in_window and SEVERITY[kind] <= prior_tier and not new_tier
+
+    if window_rate >= floor_rate and level in ("error", "fatal") and live and not throttled("P0"):
         if prev_rate is None:
             return finding("P0", "burst>=%s/window" % burst_floor)
         if prev_rate <= baseline_rate:
             return finding("P0", "burst>=%s/window prior<=%.0f/h" % (burst_floor, baseline_rate))
-    if critical and delta >= 1 and not throttled:
+    if critical and delta >= 1 and not throttled("CRITICAL"):
         return finding("CRITICAL", "critical-signature")
     if new_tier and live and not transport:
         return finding("P0", "users>=%s" % tier)
@@ -1210,6 +1220,7 @@ def action_poll(config, org, host, token, problems):
             old = issues.get(sid)
             entry["rate"] = project_rate(entry, old, now)
             entry["surfaced"] = (old.get("surfaced") or 0) if isinstance(old, dict) else 0
+            entry["surfaced_tier"] = old.get("surfaced_tier") if isinstance(old, dict) else None
             if not project_baseline:
                 finding = classify(
                     entry, old, settings, signatures, config, window_start, now, cadence, baseline_rate)
@@ -1219,8 +1230,10 @@ def action_poll(config, org, host, token, problems):
                     # so the rail cross-check never calls a surfaced fix a
                     # silent disagreement. Every finding prints, so the marker
                     # is never set on an issue whose line was dropped.
+                    kind, line = finding
                     entry["surfaced"] = now
-                    issue_findings.append(finding)
+                    entry["surfaced_tier"] = kind
+                    issue_findings.append(line)
             updated[sid] = entry
         update_baseline(baselines, slug, read_sample_rate(rows, issues, now))
 

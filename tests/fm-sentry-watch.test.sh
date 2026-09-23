@@ -174,6 +174,32 @@ JSON
   pass "a new issue's ramp pages on its second read and a sustained storm pages once"
 }
 
+test_lower_tier_page_never_suppresses_a_burst_escalation() {
+  local home out
+  home=$(make_home escalation)
+  prime_baseline "$home" 1000
+  # The 11N shape: a one-user fatal on the onboarding path pages P1 at first
+  # read, then becomes a storm five minutes later. The P1 must not swallow the
+  # P0; a second P0-tier repeat inside the window is the same page.
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-ESC","title":"TypeError: null name","culprit":"/api/v4/onboarding/name","userCount":1,"count":3,"level":"fatal","substatus":"new","firstSeen":"1970-01-01T00:20:00Z","permalink":"https://x/esc/"}]
+JSON
+  out=$(poll "$home" 1300)
+  assert_contains "$out" "P1 CORE-BACKEND-ESC" "the one-user sensitive fatal did not page P1"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-ESC","title":"TypeError: null name","culprit":"/api/v4/onboarding/name","userCount":2,"count":18,"level":"fatal","substatus":"ongoing","firstSeen":"1970-01-01T00:20:00Z","permalink":"https://x/esc/"}]
+JSON
+  out=$(poll "$home" 1600)
+  assert_contains "$out" "P0 CORE-BACKEND-ESC" "a P1 page suppressed the storm's P0 escalation"
+  assert_contains "$out" "rule=burst>=10/window" "the burst rule was not named"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-ESC","title":"TypeError: null name","culprit":"/api/v4/onboarding/name","userCount":2,"count":33,"level":"fatal","substatus":"ongoing","firstSeen":"1970-01-01T00:20:00Z","permalink":"https://x/esc/"}]
+JSON
+  out=$(poll "$home" 1900)
+  assert_not_contains "$out" "CORE-BACKEND-ESC" "a same-tier repeat inside the surfaced window paged again"
+  pass "a lower-tier page never suppresses a higher-tier escalation"
+}
+
 test_new_issue_burst_pages_on_first_read_anywhere_in_the_window() {
   local home out
   home=$(make_home first-read-late)
@@ -974,6 +1000,7 @@ test_sensitive_route_pages_at_one_user
 test_nonsensitive_route_pages_at_three_users
 test_burst_pages_regardless_of_users
 test_new_issue_ramp_pages_on_its_second_read
+test_lower_tier_page_never_suppresses_a_burst_escalation
 test_new_issue_burst_pages_on_first_read_anywhere_in_the_window
 test_project_baseline_rate_is_learned_from_its_first_two_polls
 test_burst_is_a_window_rate_not_a_gap_total
