@@ -57,7 +57,7 @@ run_cw() {
 }
 
 # seed_pr <home> <manifest-path> <manifest-body-file> <files...> seeds the merged
-# PR's file list, merge epoch and ref, and the manifest content at that ref.
+# PR's file list, merge epoch, head ref, and the manifest content at that ref.
 seed_pr() {
   local home=$1 manifest=$2 body=$3
   shift 3
@@ -65,22 +65,21 @@ seed_pr() {
   local f
   for f in "$@"; do printf '%s\n' "$f" >> "$home/forge/files.txt"; done
   printf '%s\n' 1790000000 > "$home/forge/merge-epoch"
-  printf '%s\n' deadbeefcafe > "$home/forge/merge-ref"
+  printf '%s\n' deadbeefcafe > "$home/forge/head-ref"
   mkdir -p "$home/forge/content/$(dirname "$manifest")"
   cp "$body" "$home/forge/content/$manifest"
 }
 
-# seed_diff <home> <path> <new-line> writes a one-line change at <new-line>.
+# seed_diff <home> <path> <new-line...> writes one-line changes, one hunk each.
 seed_diff() {
-  local home=$1 path=$2 line=$3
-  cat > "$home/forge/diff.txt" <<DIFF
-diff --git a/$path b/$path
---- a/$path
-+++ b/$path
-@@ -$line,1 +$line,1 @@
--          value: old
-+          value: new
-DIFF
+  local home=$1 path=$2 line
+  shift 2
+  {
+    printf 'diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n' "$path" "$path" "$path" "$path"
+    for line in "$@"; do
+      printf '@@ -%s,1 +%s,1 @@\n-          value: old\n+          value: new\n' "$line" "$line"
+    done
+  } > "$home/forge/diff.txt"
 }
 
 # seed_series <home> <metric> <target> <window> <lines...>
@@ -208,15 +207,45 @@ esac
 [ "$(cat "$HOME_A4/state/change-watch/w4-3317/targets")" = "$(printf 'muso-prod\tcore-backend-api\nmuso-prod\tfeed-service')" ] \
   || fail "whole-manifest fallback targets are wrong"
 
-# A Deployment that declares no namespace takes the manifest's directory.
+# A PR changing several lines of one Deployment (the motivating merge's shape)
+# still targets exactly that Deployment.
 HOME_A5=$(new_world a5)
+seed_pr "$HOME_A5" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_A5" "$MANIFEST" $((FEED_LINE - 2)) "$FEED_LINE"
+out=$(run_cw "$HOME_A5" 1790000000 register w5 "$PR_URL") || fail "register failed"
+case "$out" in
+  *"registered w5-3317"*"(1 target(s))"*) ;;
+  *) fail "a two-hunk diff did not register one target: $out" ;;
+esac
+[ "$(cat "$HOME_A5/state/change-watch/w5-3317/targets")" = "$(printf 'muso-prod\tfeed-service')" ] \
+  || fail "two hunks in feed-service did not target it alone"
+pass "several hunks in one Deployment target that Deployment once"
+
+# A Deployment that declares no namespace is skipped with its reason, never guessed.
+HOME_A6=$(new_world a6)
 printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: argocd-server\nspec: {}\n' > "$TMP_ROOT/nons.yaml"
-seed_pr "$HOME_A5" k8s/prod/argocd/install.yaml "$TMP_ROOT/nons.yaml" k8s/prod/argocd/install.yaml
-seed_diff "$HOME_A5" k8s/prod/argocd/install.yaml 4
-run_cw "$HOME_A5" 1790000000 register w5 "$PR_URL" >/dev/null || fail "register failed"
-[ "$(cat "$HOME_A5/state/change-watch/w5-3317/targets")" = "$(printf 'argocd\targocd-server')" ] \
-  || fail "directory fallback namespace is wrong"
-pass "a Deployment without metadata.namespace falls back to the manifest directory"
+seed_pr "$HOME_A6" k8s/prod/argocd/install.yaml "$TMP_ROOT/nons.yaml" k8s/prod/argocd/install.yaml
+seed_diff "$HOME_A6" k8s/prod/argocd/install.yaml 4
+out=$(run_cw "$HOME_A6" 1790000000 register w6 "$PR_URL") || fail "register failed"
+case "$out" in
+  *"no deployable service touched"*"(no namespace: argocd-server in k8s/prod/argocd/install.yaml)"*) ;;
+  *) fail "a Deployment without metadata.namespace was not skipped with its reason: $out" ;;
+esac
+[ -e "$HOME_A6/state/change-watch/w6-3317" ] && fail "a Deployment without a namespace was watched under a guess"
+pass "a Deployment without metadata.namespace is skipped, never guessed"
+
+# A manifest that cannot be read is reported as unread, not as no service.
+HOME_A7=$(new_world a7)
+seed_pr "$HOME_A7" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_A7" "$MANIFEST" "$FEED_LINE"
+rm -f "$HOME_A7/forge/head-ref"
+out=$(run_cw "$HOME_A7" 1790000000 register w7 "$PR_URL") || fail "register failed"
+case "$out" in
+  *"could not read 1 manifest(s) for $PR_URL; nothing registered"*) ;;
+  *) fail "an unreadable manifest was not reported as unread: $out" ;;
+esac
+[ -e "$HOME_A7/state/change-watch/w7-3317" ] && fail "an unreadable manifest created a watch record"
+pass "an unreadable manifest is a stated measurement gap, not a PR without a service"
 
 # --- (b) a regressing 5xx series fires at +15m --------------------------------
 
@@ -416,7 +445,7 @@ pass "a drive killed outright is recorded as interrupted at its last heartbeat"
 HOME_E=$(new_world e)
 printf 'README.md\ndocs/notes.md\n' > "$HOME_E/forge/files.txt"
 printf '%s\n' 1790000000 > "$HOME_E/forge/merge-epoch"
-printf '%s\n' deadbeef > "$HOME_E/forge/merge-ref"
+printf '%s\n' deadbeef > "$HOME_E/forge/head-ref"
 out=$(run_cw "$HOME_E" 1790000000 register e1 "$PR_URL") || fail "docs-only register failed"
 case "$out" in
   *"no deployable service touched"*"nothing registered"*) pass "docs-only PR registers nothing" ;;
@@ -434,7 +463,7 @@ mkdir -p "$HOME_F/projects/H-DevOps/k8s/prod/core-services"
 cp "$TMP_ROOT/multi.yaml" "$HOME_F/projects/H-DevOps/k8s/prod/core-services/deployments.yaml"
 printf 'src/main.py\n' > "$HOME_F/forge/files.txt"
 printf '%s\n' 1790000000 > "$HOME_F/forge/merge-epoch"
-printf '%s\n' deadbeef > "$HOME_F/forge/merge-ref"
+printf '%s\n' deadbeef > "$HOME_F/forge/head-ref"
 out=$(env FM_HOME="$HOME_F" FM_STATE_OVERRIDE="$HOME_F/state" FM_CW_NOW=1790000000 \
   FM_CW_FORGE_DIR="$HOME_F/forge" FM_CW_CLUSTER_DIR="$HOME_F/cluster" \
   FM_CW_HDEVOPS_K8S_DIR="$HOME_F/projects/H-DevOps/k8s/prod" \
@@ -450,9 +479,9 @@ esac
   || fail "application-repo target is wrong (namespace must come from the manifest)"
 
 # --- live reads through a kubectl shim -----------------------------------------
-# The shim answers the exact kubectl calls a sample makes: pods with a 512Mi
-# limit, metrics-server rows with a CPU column before the memory column, and a
-# capped access log whose lines span two minutes.
+# The shim answers the exact kubectl calls a sample makes: two replicas with a
+# 512Mi limit, metrics-server rows with a CPU column before the memory column,
+# and a capped access log whose lines span two minutes.
 
 HOME_L=$(new_world l)
 mkdir -p "$HOME_L/bin"
@@ -463,11 +492,14 @@ case " $* " in
     cat <<'JSON'
 {"items":[{"metadata":{"name":"feed-service-abc"},
   "spec":{"containers":[{"name":"feed-service","resources":{"limits":{"memory":"512Mi"}}}]},
+  "status":{"containerStatuses":[{"name":"feed-service","restartCount":0,"lastState":{}}]}},
+ {"metadata":{"name":"feed-service-def"},
+  "spec":{"containers":[{"name":"feed-service","resources":{"limits":{"memory":"512Mi"}}}]},
   "status":{"containerStatuses":[{"name":"feed-service","restartCount":0,"lastState":{}}]}}]}
 JSON
     ;;
   *" top pods "*)
-    printf 'feed-service-abc   feed-service   500m   300Mi\n'
+    printf 'feed-service-abc   feed-service   500m   300Mi\nfeed-service-def   feed-service   250m   400Mi\n'
     ;;
   *" logs "*)
     awk 'BEGIN {
@@ -488,10 +520,10 @@ CW_CLUSTER_DIR='' PATH="$HOME_L/bin:$PATH" run_cw "$HOME_L" 1790000000 register 
 CW_CLUSTER_DIR='' PATH="$HOME_L/bin:$PATH" run_cw "$HOME_L" 1790000300 sample l1-3317 >/dev/null \
   || fail "live sample failed"
 SAMPLES_L="$HOME_L/state/change-watch/l1-3317/samples.log"
-[ "$(awk -F'\t' '$3 == "rss_ratio@muso-prod/feed-service" { print $4 }' "$SAMPLES_L")" = "0.5859" ] \
-  || fail "rss_ratio did not read 300Mi of 512Mi from the memory column: $(cat "$SAMPLES_L")"
+[ "$(awk -F'\t' '$3 == "rss_ratio@muso-prod/feed-service" { print $4 }' "$SAMPLES_L")" = "0.7812" ] \
+  || fail "rss_ratio did not take the worst replica's 400Mi of 512Mi from the memory column: $(cat "$SAMPLES_L")"
 [ "$(awk -F'\t' '$3 == "http_5xx_per_min@muso-prod/feed-service" { print $4 "/" $5 }' "$SAMPLES_L")" = "6.0000/6.0000" ] \
   || fail "a capped log was not rated over the span it covers in both windows: $(cat "$SAMPLES_L")"
 CW_CLUSTER_DIR='' PATH="$HOME_L/bin:$PATH" run_cw "$HOME_L" 1790000300 verdict l1-3317 | grep -q "clean so far" \
   || fail "an unchanged service regressed on live reads"
-pass "live reads take memory from the memory column and rate a capped log over its span"
+pass "live reads take the worst replica's memory column and rate a capped log over its span"

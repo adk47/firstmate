@@ -21,7 +21,8 @@ Load this on a `check: change-watch <task-id> <pr-url> <metric> regressed` wake,
 
 A merge is verified at merge time by content - the new env values or image tag are read on the live pods - which proves the change arrived and says nothing about the service afterwards.
 `bin/fm-change-watch.sh` watches the change by effect instead: it samples the affected Deployment's own signals against a pre-deploy baseline at +5m, +15m, +30m, then hourly to +12h.
-The affected Deployments are the documents the PR's diff hunks land in, under each document's own `metadata.namespace`; when a hunk cannot be placed the whole manifest is watched and the registration line says so.
+The affected Deployments are the documents the PR's diff hunks land in, under each document's own `metadata.namespace`; a Deployment declaring none is skipped with its reason, and when a hunk cannot be placed the whole manifest is watched and the registration line says so.
+A registration that could not read a manifest says `could not read N manifest(s)`: that is a measurement gap to re-register once the forge answers, not a PR without a service.
 `bin/fm-change-watch.sh`'s header is the one owner of the exact commands, metrics, bars, schedule, and test seams; read it before acting.
 
 The watch is armed automatically when a merged PR touches a deployable service, from both `bin/fm-pr-merge.sh` and the watcher's merged-poll landing path.

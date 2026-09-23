@@ -20,14 +20,17 @@
 #           record the pre-deploy baseline, and arm one bounded schedule of
 #           samples. For an H-DevOps pull request the targets are the
 #           Deployment documents that the PR's diff hunks land in, across the
-#           changed manifests under k8s/prod/; a target's namespace is the
-#           document's metadata.namespace, or the manifest's directory only
-#           when the document declares none. When a hunk cannot be placed in
-#           its manifest (no diff, or content that does not match it) every
-#           Deployment in that manifest is watched and the registration line
-#           says so. For an application repository the target is the Deployment
-#           carrying the repository's name in the local H-DevOps checkout. A PR
-#           that touches no deployable service registers nothing and says so.
+#           changed manifests under k8s/prod/, read at the PR's head commit so
+#           the diff's line numbers apply; a target's namespace is the
+#           document's own metadata.namespace, and a Deployment that declares
+#           none is skipped with a stated reason, never guessed. When a hunk
+#           cannot be placed in its manifest (no diff, or content that does not
+#           match it) every Deployment in that manifest is watched and the
+#           registration line says so. For an application repository the
+#           target is the Deployment carrying the repository's name in the
+#           local H-DevOps checkout. A PR that touches no deployable service
+#           registers nothing and says so; a PR whose manifests could not be
+#           read registers nothing and says that instead.
 #           Registering an existing watch whose drive stopped before the end of
 #           its schedule re-arms the remaining samples; any other existing watch
 #           is left alone. Registration is read-only against the cluster; it
@@ -103,7 +106,7 @@
 #   FM_CW_NOW              fixed current epoch (integer) instead of `date +%s`
 #   FM_CW_MERGE_EPOCH      fixed rollout/merge epoch instead of the PR's
 #   FM_CW_FORGE_DIR        directory replacing every forge read (files.txt,
-#                          merge-epoch, merge-ref, diff.txt, content/<path>)
+#                          merge-epoch, head-ref, diff.txt, content/<path>)
 #   FM_CW_HDEVOPS_K8S_DIR  k8s/prod tree of an H-DevOps checkout, used to resolve
 #                          an application repository to its Deployment
 #   FM_CW_FORGE_TIMEOUT    per-call bound on a forge read (default 12s)
@@ -307,15 +310,16 @@ cw_forge_content() {  # <owner> <repo> <path> <ref>
     | base64 -d 2>/dev/null || return 1
 }
 
-# LIVE QUERY (forge) - merge commit sha of the merged pull request.
-cw_forge_merge_ref() {  # <url>
+# LIVE QUERY (forge) - head commit sha of the merged pull request, the commit
+# the PR diff's new-file line numbers refer to.
+cw_forge_head_ref() {  # <url>
   if [ -n "${FM_CW_FORGE_DIR:-}" ]; then
-    [ -f "$FM_CW_FORGE_DIR/merge-ref" ] || return 1
-    cat "$FM_CW_FORGE_DIR/merge-ref"
+    [ -f "$FM_CW_FORGE_DIR/head-ref" ] || return 1
+    cat "$FM_CW_FORGE_DIR/head-ref"
     return 0
   fi
   command -v gh >/dev/null 2>&1 || return 1
-  cw_forge_run gh pr view "$1" --json mergeCommit -q .mergeCommit.oid || return 1
+  cw_forge_run gh pr view "$1" --json headRefOid -q .headRefOid || return 1
 }
 
 # --- deployment derivation ----------------------------------------------------
@@ -373,7 +377,7 @@ cw_diff_changed_lines() {
 
 # Resolve an application repository's name to "target<TAB>namespace<TAB>name"
 # from a local H-DevOps checkout's k8s/prod tree. Read-only; prints nothing when
-# unresolved. LIVE QUERY (checkout).
+# unresolved or when the Deployment declares no namespace. LIVE QUERY (checkout).
 cw_service_targets() {  # <service>
   local root=${FM_CW_HDEVOPS_K8S_DIR:-$FM_HOME/projects/H-DevOps/k8s/prod}
   local service=$1 dir manifest ns name
@@ -383,8 +387,8 @@ cw_service_targets() {  # <service>
     for manifest in "$dir"/*.yaml "$dir"/*.yml; do
       [ -f "$manifest" ] || continue
       while IFS=$'\t' read -r ns name; do
-        [ "$name" = "$service" ] || continue
-        printf 'target\t%s\t%s\n' "${ns:-$(basename "$dir")}" "$name"
+        [ "$name" = "$service" ] && [ -n "$ns" ] || continue
+        printf 'target\t%s\t%s\n' "$ns" "$name"
         return 0
       done < <(cw_manifest_deployments < "$manifest")
     done
@@ -393,13 +397,15 @@ cw_service_targets() {  # <service>
 }
 
 # Map one manifest's changed lines onto its Deployment documents. Prints
-# "target<TAB>namespace<TAB>name" per affected Deployment and one
+# "target<TAB>namespace<TAB>name" per affected Deployment, one
 # "note<TAB>whole manifest: <path>" when the lines could not be placed, in which
-# case every Deployment of the manifest is a target.
-cw_place_changed_lines() {  # <path> <dir-namespace> <docs> <lines>
-  awk -F'\t' -v path="$1" -v dir_ns="$2" -v lines="$4" '
-    BEGIN { n = split(lines, l, "\n"); whole = (lines == "") }
-    { start[NR] = $1; end[NR] = $2; kind[NR] = $3; ns[NR] = ($4 == "" ? dir_ns : $4); name[NR] = $5 }
+# case every Deployment of the manifest is a target, and one
+# "note<TAB>no namespace: <name> in <path>" per affected Deployment that
+# declares no metadata.namespace and is therefore skipped.
+cw_place_changed_lines() {  # <path> <docs> <lines>
+  CW_LINES="$3" awk -F'\t' -v path="$1" '
+    BEGIN { lines = ENVIRON["CW_LINES"]; n = split(lines, l, "\n"); whole = (lines == "") }
+    { start[NR] = $1; end[NR] = $2; kind[NR] = $3; ns[NR] = $4; name[NR] = $5 }
     END {
       if (!whole) {
         for (i = 1; i <= n; i++) {
@@ -415,11 +421,15 @@ cw_place_changed_lines() {  # <path> <dir-namespace> <docs> <lines>
         }
       }
       if (whole) for (d = 1; d <= NR; d++) if (kind[d] == "Deployment" && name[d] != "") pick[d] = 1
-      for (d = 1; d <= NR; d++) if (pick[d]) printf "target\t%s\t%s\n", ns[d], name[d]
+      for (d = 1; d <= NR; d++) {
+        if (!pick[d]) continue
+        if (ns[d] == "") printf "note\tno namespace: %s in %s\n", name[d], path
+        else printf "target\t%s\t%s\n", ns[d], name[d]
+      }
       if (whole) printf "note\twhole manifest: %s\n", path
     }
   ' <<DOCS
-$3
+$2
 DOCS
 }
 
@@ -428,7 +438,7 @@ DOCS
 # target when no deployable service is touched.
 cw_derive_targets() {  # <url> <provider> <owner> <repo> <number> <repo-name>
   local url=$1 provider=$2 owner=$3 repo=$4 number=$5 repo_name=$6
-  local files manifests ref changed path dir_ns docs lines placed any=0 reads=0
+  local files manifests ref changed path docs lines placed any=0 reads=0
   files=$(cw_forge_files "$url" "$provider" "$owner" "$repo" "$number") || return 1
   [ -n "$files" ] || return 1
   manifests=$(printf '%s\n' "$files" | grep -E '^k8s/prod/[^/]+/[^/]+\.ya?ml$' || true)
@@ -436,7 +446,7 @@ cw_derive_targets() {  # <url> <provider> <owner> <repo> <number> <repo-name>
     cw_service_targets "$repo_name"
     return
   fi
-  ref=$(cw_forge_merge_ref "$url" 2>/dev/null || true)
+  ref=$(cw_forge_head_ref "$url" 2>/dev/null || true)
   changed=$(cw_forge_diff "$url" "$provider" 2>/dev/null | cw_diff_changed_lines || true)
   while IFS= read -r path; do
     [ -n "$path" ] || continue
@@ -445,14 +455,13 @@ cw_derive_targets() {  # <url> <provider> <owner> <repo> <number> <repo-name>
       continue
     fi
     reads=$((reads + 1))
-    dir_ns=$(printf '%s' "$path" | cut -d/ -f3)
     docs=$(cw_forge_content "$owner" "$repo" "$path" "$ref" 2>/dev/null | cw_manifest_docs) || docs=''
     if [ -z "$docs" ]; then
       printf 'note\tmanifest unread: %s\n' "$path"
       continue
     fi
     lines=$(printf '%s\n' "$changed" | awk -F'\t' -v p="$path" '$1 == p { print $2 }')
-    placed=$(cw_place_changed_lines "$path" "$dir_ns" "$docs" "$lines")
+    placed=$(cw_place_changed_lines "$path" "$docs" "$lines")
     [ -n "$placed" ] || continue
     printf '%s\n' "$placed"
     case "$placed" in *target*) any=1 ;; esac
@@ -615,7 +624,7 @@ for pod in data.get("items", []):
   [ -n "$limits" ] || return 1
   usage=$(cw_kubectl -n "$ns" top pods -l "app=$deploy" --containers --no-headers 2>/dev/null) || return 1
   [ -n "$usage" ] || return 1
-  printf '%s\n' "$limits" | awk -F'\t' -v usage="$usage" '
+  printf '%s\n' "$limits" | CW_USAGE="$usage" awk -F'\t' '
     function bytes(u,    two, one) {
       two = substr(u, length(u) - 1, 2)
       one = substr(u, length(u), 1)
@@ -628,7 +637,7 @@ for pod in data.get("items", []):
       return u + 0
     }
     BEGIN {
-      n = split(usage, rows, "\n")
+      n = split(ENVIRON["CW_USAGE"], rows, "\n")
       for (i = 1; i <= n; i++) {
         m = split(rows[i], f, /[ \t]+/)
         if (m < 4) continue
@@ -1183,7 +1192,7 @@ cw_rearm() {  # <watch-id> <url>
 # --- commands -----------------------------------------------------------------
 
 cmd_register() {
-  local task=$1 url=$2 provider owner repo number repo_name id derived targets notes now t0
+  local task=$1 url=$2 provider owner repo number repo_name id derived targets notes unread now t0
   fm_pr_task_id_valid "$task" || die "invalid task id: $task"
   fm_pr_url_parse "$url" || die "invalid pr url: $url"
   provider=$FM_PR_PROVIDER
@@ -1205,15 +1214,18 @@ cmd_register() {
 
   derived=$(cw_derive_targets "$url" "$provider" "$owner" "$repo" "$number" "$repo_name" 2>/dev/null || true)
   targets=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "target" && $2 != "" && $3 != "" { print $2 "\t" $3 }' | sort -u)
+  notes=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "note" { print $2 }' | sort -u | paste -sd ';' - | sed 's/;/; /g')
   if [ -z "$targets" ]; then
+    unread=$(printf '%s\n' "$derived" | grep -c '^note	manifest unread: ' || true)
     if ! cw_forge_files "$url" "$provider" "$owner" "$repo" "$number" >/dev/null 2>&1; then
       printf 'change-watch: cannot read the merged file list for %s; nothing registered\n' "$url"
+    elif [ "$unread" -gt 0 ]; then
+      printf 'change-watch: could not read %s manifest(s) for %s; nothing registered\n' "$unread" "$url"
     else
-      printf 'change-watch: no deployable service touched by %s; nothing registered\n' "$url"
+      printf 'change-watch: no deployable service touched by %s%s; nothing registered\n' "$url" "${notes:+ ($notes)}"
     fi
     return 0
   fi
-  notes=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "note" { print $2 }' | sort -u | paste -sd ';' - | sed 's/;/; /g')
 
   now=$(cw_now)
   t0=$(cw_forge_merge_epoch "$url" "$provider" 2>/dev/null || true)
