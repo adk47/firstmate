@@ -235,6 +235,13 @@
 #     Clio's review of PR #340; pre-fix `0 1` would have masked real
 #     broken-release failures as success.
 #
+#   hydra-jev-shadow-prune.timer / .service
+#     Daily. Runs scripts/jev-shadow-prune.sh, which drops shadow rows
+#     older than JEV_SHADOW_RETENTION_DAYS (default 30) from every
+#     $JEV_SHADOW_DIR/*.jsonl -- the row's `state` field (added so a
+#     misclassification can be replayed against Jev directly) is customer
+#     text, so it should not accumulate unbounded on disk.
+#
 # Also cleans up the retired `hydra-mcp-reap.{timer,service}` if
 # present on the host. That unit reaped orphan `mcp-remote`
 # subprocesses but sent SIGTERM to the gateway's own process group
@@ -2236,6 +2243,58 @@ systemctl start "$ctmr" >/dev/null 2>&1 || log "WARN: could not start $ctmr"
 cstate=$(systemctl is-active "$ctmr" 2>/dev/null || echo unknown)
 log "  $ctmr: $cstate (fires Mon 04:30 UTC)"
 
+# ─── Jev shadow-row retention (daily 05:15 UTC) ──────────────────
+# Every Jev shadow row now carries the raw `state` object next to
+# state_sha256 (scripts/lib/jev.sh, plugins/intercom's jev-shadow-log.ts,
+# format-digest.sh) so a misclassification can be replayed against Jev
+# directly -- but that's customer text, so it must not accumulate on disk
+# unbounded. scripts/jev-shadow-prune.sh drops rows older than
+# JEV_SHADOW_RETENTION_DAYS (default 30) from every $JEV_SHADOW_DIR/*.jsonl,
+# atomically and under the same per-file flock the writers use. A single
+# global unit (not per-profile): the shadow dir is shared, not gateway-scoped.
+[[ -x "$HYDRA_ROOT/scripts/jev-shadow-prune.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/jev-shadow-prune.sh missing or not executable"
+
+cat > /etc/systemd/system/hydra-jev-shadow-prune.service << JEVPRUNESVC
+[Unit]
+Description=Prune Jev shadow rows older than the retention window
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/jev-shadow-prune.sh
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# A handful of small *.jsonl rewrites under flock; generous headroom over the
+# default 90s oneshot SIGTERM so a large/contended shadow dir never gets cut
+# off mid-run.
+TimeoutStartSec=10min
+StandardOutput=append:/var/log/hydra-jev-shadow-prune.log
+StandardError=append:/var/log/hydra-jev-shadow-prune.log
+JEVPRUNESVC
+
+cat > /etc/systemd/system/hydra-jev-shadow-prune.timer << JEVPRUNETMR
+[Unit]
+Description=Run the Jev shadow-row prune daily at 05:15 UTC
+
+[Timer]
+OnCalendar=*-*-* 05:15:00 UTC
+Persistent=true
+RandomizedDelaySec=10min
+Unit=hydra-jev-shadow-prune.service
+
+[Install]
+WantedBy=timers.target
+JEVPRUNETMR
+
+systemctl daemon-reload
+
+jptmr=hydra-jev-shadow-prune.timer
+systemctl enable "$jptmr" >/dev/null 2>&1 || fail "could not enable $jptmr"
+systemctl start "$jptmr" >/dev/null 2>&1 || fail "could not start $jptmr"
+jpstate="$(systemctl is-active "$jptmr" 2>/dev/null || true)"
+[[ "$jpstate" == "active" ]] || fail "$jptmr is not active (state: ${jpstate:-unknown})"
+log "  $jptmr: $jpstate (fires daily 05:15 UTC)"
+
 # ─── Twice-weekly codex OAuth token refresh (Sun+Wed 04:00 UTC) ──
 # The DURABLE fix for the recurring ~10-day codex token lapse. hydra keeps the
 # bundled `openai` plugin DISABLED to dodge #90925, but that plugin owns the
@@ -2502,7 +2561,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log {
     weekly
     rotate 4
     compress
@@ -2749,6 +2808,7 @@ AUX_ONFAILURE_UNITS=(
   cto-nightly-driver.service
   hydra-company-finder-cache-refresh.service
   hydra-daily-audit.service
+  hydra-jev-shadow-prune.service
   hydra-peer-labels.service
   hydra-release-watch.service
   hydra-release.service

@@ -41,16 +41,27 @@
 # Every call — success or failure, including rc 4/5 pre-request failures once
 # --surface/--item-id are parsed — appends one JSON line to the shadow log
 # at ${JEV_SHADOW_DIR:-/var/lib/hydra-jev/shadow}/<surface>.jsonl unless
-# --no-shadow is given. The shadow line never carries the API key, the state
-# contents, or the questions text — only a sha256 of each (it does record
-# which provider was used). Shadow-logging failures are best-effort: a WARN
-# on stderr, never a failed call (same posture as slack_notify — the log is
-# not allowed to make the primary action less reliable).
+# --no-shadow is given. The shadow line never carries the API key or the
+# questions text — only a sha256 of the questions. The state SHA is always
+# recorded, and (default on; JEV_SHADOW_STORE_STATE=0 to disable) the raw
+# state object is stored next to it too, so a misclassification can be
+# replayed against Jev directly. Shadow files carry customer text, so they
+# are created/kept at mode 0600 — a looser-permission file left from before
+# this behavior is tightened on the next write. Every append is taken under
+# an flock on the sibling "<file>.lock" (the same lock format-digest.sh and
+# jev-shadow-log.ts's flock-subprocess append use, and the one
+# jev-shadow-prune.sh's rewrite holds exclusively) so an append can never
+# land on a discarded pre-rewrite inode or interleave with another writer.
+# A lock that can't be taken within 5s skips the row (WARN on stderr) rather
+# than writing unlocked. Shadow-logging failures are best-effort: a WARN on
+# stderr, never a failed call (same posture as slack_notify — the log is not
+# allowed to make the primary action less reliable).
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
 : "${JEV_ENV_FILE:=/etc/hydra/jev.env}"
 : "${JEV_SHADOW_DIR:=/var/lib/hydra-jev/shadow}"
+: "${JEV_SHADOW_STORE_STATE:=1}"
 
 _jev_die() {
   # $1=rc $2=message
@@ -123,14 +134,16 @@ jev_main() {
   # — is recorded in the shadow log with answers=null. A caller that keeps
   # hitting the size cap, lost its key, or points at a stale path must show
   # up in the report as rc≠0 rows, not as silence. Hashes are null until the
-  # inputs have been read.
-  local state_sha="" questions_sha=""
+  # inputs have been read. state_json stays "null" until the state file has
+  # been read AND validated as JSON (below) — a pre-validation failure (bad
+  # flags, missing key, unreadable path) never has real state content to log.
+  local state_sha="" questions_sha="" state_json="null"
 
   _jev_fail() {
     # $1=rc $2=message — shadow-log the failure (unless --no-shadow), then die.
     if [ "$no_shadow" -eq 0 ]; then
       _jev_shadow_log "$surface" "$item_id" "$state_sha" "$questions_sha" \
-        "$model" "null" "null" "0" "$actual" "$1" "null" "$provider"
+        "$model" "null" "null" "0" "$actual" "$1" "null" "$provider" "$state_json"
     fi
     _jev_die "$1" "$2"
   }
@@ -164,7 +177,7 @@ jev_main() {
   if [ -e "$disabled_file" ]; then
     if [ "$no_shadow" -eq 0 ]; then
       _jev_shadow_log "$surface" "$item_id" "$state_sha" "$questions_sha" \
-        "$model" "null" "null" "0" "$actual" "6" "null" "$provider"
+        "$model" "null" "null" "0" "$actual" "6" "null" "$provider" "$state_json"
     fi
     _jev_die 6 "disabled via $disabled_file — no call made"
   fi
@@ -187,6 +200,10 @@ jev_main() {
 
   jq -e . "$state_file" >/dev/null 2>&1 || _jev_fail 5 "state file is not valid JSON: $state_file"
   jq -e . "$questions_file" >/dev/null 2>&1 || _jev_fail 5 "questions file is not valid JSON: $questions_file"
+
+  if [ "$JEV_SHADOW_STORE_STATE" != "0" ]; then
+    state_json="$(jq -c . "$state_file")"
+  fi
 
   local api_key="${!key_var:-}"
   if [ -z "$api_key" ] && [ -r "$JEV_ENV_FILE" ]; then
@@ -274,7 +291,7 @@ jev_main() {
 
   if [ "$no_shadow" -eq 0 ]; then
     _jev_shadow_log "$surface" "$item_id" "$state_sha" "$questions_sha" \
-      "$resp_model" "$answers" "$usage" "$latency_ms" "$actual" "$rc" "$http_code_json" "$provider"
+      "$resp_model" "$answers" "$usage" "$latency_ms" "$actual" "$rc" "$http_code_json" "$provider" "$state_json"
   fi
 
   if [ "$rc" -ne 0 ]; then
@@ -289,10 +306,11 @@ jev_main() {
 }
 
 # _jev_shadow_log surface item_id state_sha questions_sha model answers usage \
-#   latency_ms actual rc http provider
+#   latency_ms actual rc http provider state_json
 _jev_shadow_log() {
   local surface="$1" item_id="$2" state_sha="$3" questions_sha="$4" model="$5"
   local answers="$6" usage="$7" latency_ms="$8" actual="$9" rc="${10}" http="${11}" provider="${12}"
+  local state_json="${13:-null}"
 
   if ! mkdir -p "$JEV_SHADOW_DIR" 2>/dev/null; then
     echo "jev.sh: WARN could not create shadow dir $JEV_SHADOW_DIR" >&2
@@ -328,9 +346,11 @@ _jev_shadow_log() {
     --argjson rc "$rc" \
     --argjson http "$http" \
     --arg provider "$provider" \
+    --argjson state "$state_json" \
     '{ts:$ts, surface:$surface, item_id:$item_id,
       state_sha256:(if $state_sha256 == "" then null else $state_sha256 end),
       questions_sha256:(if $questions_sha256 == "" then null else $questions_sha256 end),
+      state:$state,
       model:$model, answers:$answers,
       usage:$usage, latency_ms:$latency_ms, actual:$actual, rc:$rc, http:$http,
       provider:$provider}' \
@@ -343,8 +363,32 @@ _jev_shadow_log() {
   fi
 
   local target="$JEV_SHADOW_DIR/${surface}.jsonl"
-  if ! cat "$line_file" >> "$target" 2>/dev/null; then
-    echo "jev.sh: WARN could not write shadow log to $target" >&2
+  local lock_file="${target}.lock"
+  # Every writer to $JEV_SHADOW_DIR/*.jsonl (this function, format-digest.sh's
+  # _jev_email_triage_classify_shadow, and jev-shadow-log.ts via the flock
+  # binary) and the prune rewrite (jev-shadow-prune.sh) share this exact
+  # "<file>.lock" lock file, so append vs. append and append vs. rewrite can
+  # never interleave or land on a discarded inode. Create-at-0600 and the
+  # 0600-tighten of a pre-existing looser file both happen INSIDE the lock —
+  # doing either outside it would let two writers race the existence check.
+  # Fail-soft on both axes: a lock timeout skips this row (WARN, never
+  # blocks the caller) rather than writing unlocked, and any other failure
+  # here is a WARN, never a failed call. scripts/tests/jev.bats exercises
+  # this by holding $lock_file itself with a real flock before invoking
+  # jev.sh -- no test hook needed, the lock is real.
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "jev.sh: WARN flock not found -- skipping shadow row for $target" >&2
+    rm -f "$line_file"
+    return 0
+  fi
+  if ! ( flock -w 5 9 || exit 1
+         if [ ! -e "$target" ]; then
+           ( umask 077; : > "$target" ) 2>/dev/null || true
+         fi
+         chmod 0600 "$target" 2>/dev/null || true
+         cat "$line_file" >> "$target"
+       ) 9>>"$lock_file" 2>/dev/null; then
+    echo "jev.sh: WARN could not lock $lock_file within 5s -- skipping shadow row for $target" >&2
   fi
   rm -f "$line_file"
   return 0

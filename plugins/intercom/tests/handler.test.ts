@@ -3,10 +3,59 @@ import { describe, it, expect, vi } from "vitest";
 // Mocked so the direct shadow-log tests below can inspect the exact JSONL row
 // jev-shadow-log.ts writes (surface/provider/item_id/state_sha256/
 // questions_sha256/actual/rc/http) without touching the real filesystem.
+// `stat`/`chmod` are mocked too (not just appendFile/mkdir): jev-shadow-log's
+// mode-0600 check calls the real fs otherwise, which is both a prod-path
+// touch (JEV_SHADOW_DIR is unset here, so it defaults to
+// /var/lib/hydra-jev/shadow) and genuine async disk I/O that raced ahead of
+// the fire-and-forget `void appendJevShadowRow(...)` call site in
+// handler.ts, so appendFileMock was still unresolved by the time the
+// assertions below ran (a real, reproducible regression — see PR history).
 const { appendFileMock } = vi.hoisted(() => ({ appendFileMock: vi.fn(async () => undefined) }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, appendFile: appendFileMock, mkdir: vi.fn(async () => undefined) };
+  const enoent = () => {
+    const err = new Error("ENOENT: no such file or directory") as NodeJS.ErrnoException;
+    err.code = "ENOENT";
+    throw err;
+  };
+  return {
+    ...actual,
+    appendFile: appendFileMock,
+    mkdir: vi.fn(async () => undefined),
+    stat: vi.fn(async () => enoent()),
+    chmod: vi.fn(async () => undefined),
+  };
+});
+// jev-shadow-log.ts's append now goes through the `flock` binary
+// (execFile), not fs.appendFile, directly -- mocked so this suite never
+// shells out to a REAL flock against the real (unset -> prod-default)
+// JEV_SHADOW_DIR, and so the row lands on the SAME appendFileMock spy the
+// assertions below already read, matching the row's [path, content]
+// fs.appendFile-shaped call signature. The fake stdin resolves the write
+// SYNCHRONOUSLY on `.end(line)` (no stream event-loop hop) so this stays
+// exactly as fast as the fs.appendFile mock it replaces -- a real
+// PassThrough's async 'data'/'end' events let earlier tests' fire-and-forget
+// shadow writes (many `it()`s above never await appendJevShadowRow) drain
+// mid-test instead of before it, inflating a later test's call count.
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    execFile: (
+      _file: string,
+      args: string[],
+      _options: unknown,
+      cb: (err: Error | null) => void,
+    ) => {
+      const filePath = args[args.length - 1];
+      const stdin = {
+        end: (line: string) => {
+          void appendFileMock(filePath, line).then(() => cb(null), (err: Error) => cb(err));
+        },
+      };
+      return { stdin };
+    },
+  };
 });
 
 import { handleWebhookEvent } from "../src/handler.js";
@@ -1223,7 +1272,12 @@ describe("handler — Jev pre-turn router", () => {
       makeUserPayload("where's my credit"), state, "bot", undefined,
       { jev: { enabled: true, bands: JEV_BANDS }, runJev },
     );
-    expect(appendFileMock).toHaveBeenCalledTimes(1);
+    // appendJevShadowRow is deliberately fire-and-forget (`void ...` at the
+    // handler.ts call site, never awaited), so its internal await chain —
+    // mkdir, a stat-based mode check, then appendFile — can still be
+    // in-flight when handleWebhookEvent resolves. waitFor (not a bare
+    // assertion) tolerates that without caring how many awaits it takes.
+    await vi.waitFor(() => expect(appendFileMock).toHaveBeenCalledTimes(1));
     const [, written] = appendFileMock.mock.calls[0];
     const row = JSON.parse((written as string).trim());
     expect(row.surface).toBe("caroline");
@@ -1235,6 +1289,34 @@ describe("handler — Jev pre-turn router", () => {
     // sha256 hex digest: 64 lowercase hex chars.
     expect(row.state_sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(row.questions_sha256).toMatch(/^[0-9a-f]{64}$/);
+    // The raw state is stored next to the hash by default, so the row is
+    // replayable against Jev without needing the original request.
+    expect(row.state).toEqual({ some: "state" });
+  });
+
+  it("omits the raw state (keeps only state_sha256) when jev.shadow.storeState is false", async () => {
+    appendFileMock.mockClear();
+    const state = makeState();
+    const runJev = vi.fn(async () =>
+      jevResult({
+        off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
+        resolution_path: { type: "choice", choice: "caroline_tool", probabilities: { caroline_tool: 0.85 } },
+      }),
+    );
+    await handleWebhookEvent(
+      makeUserPayload("where's my credit"), state, "bot", undefined,
+      { jev: { enabled: true, bands: JEV_BANDS, shadow: { storeState: false } }, runJev },
+    );
+    // appendJevShadowRow is deliberately fire-and-forget (`void ...` at the
+    // handler.ts call site, never awaited), so its internal await chain —
+    // mkdir, a stat-based mode check, then appendFile — can still be
+    // in-flight when handleWebhookEvent resolves. waitFor (not a bare
+    // assertion) tolerates that without caring how many awaits it takes.
+    await vi.waitFor(() => expect(appendFileMock).toHaveBeenCalledTimes(1));
+    const [, written] = appendFileMock.mock.calls[0];
+    const row = JSON.parse((written as string).trim());
+    expect(row.state).toBeNull();
+    expect(row.state_sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("appends a failure shadow row (answers null, rc 2, actual none) when runJev fails, and still dispatches unchanged", async () => {
@@ -1246,7 +1328,12 @@ describe("handler — Jev pre-turn router", () => {
       { jev: { enabled: true, bands: JEV_BANDS }, runJev },
     );
     expect(result.action).toBe("dispatch_to_agent");
-    expect(appendFileMock).toHaveBeenCalledTimes(1);
+    // appendJevShadowRow is deliberately fire-and-forget (`void ...` at the
+    // handler.ts call site, never awaited), so its internal await chain —
+    // mkdir, a stat-based mode check, then appendFile — can still be
+    // in-flight when handleWebhookEvent resolves. waitFor (not a bare
+    // assertion) tolerates that without caring how many awaits it takes.
+    await vi.waitFor(() => expect(appendFileMock).toHaveBeenCalledTimes(1));
     const [, written] = appendFileMock.mock.calls[0];
     const row = JSON.parse((written as string).trim());
     expect(row.surface).toBe("caroline");
@@ -1311,7 +1398,12 @@ describe("handler — Jev pre-turn router", () => {
     expect(result.action).toBe("dispatch_to_agent");
     expect(renderJevBlock(updatedState?.jev)).toBeNull();
 
-    expect(appendFileMock).toHaveBeenCalledTimes(1);
+    // appendJevShadowRow is deliberately fire-and-forget (`void ...` at the
+    // handler.ts call site, never awaited), so its internal await chain —
+    // mkdir, a stat-based mode check, then appendFile — can still be
+    // in-flight when handleWebhookEvent resolves. waitFor (not a bare
+    // assertion) tolerates that without caring how many awaits it takes.
+    await vi.waitFor(() => expect(appendFileMock).toHaveBeenCalledTimes(1));
     const [, written] = appendFileMock.mock.calls[0];
     const row = JSON.parse((written as string).trim());
     expect(row.answers).toBeNull();

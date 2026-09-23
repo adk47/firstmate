@@ -9,6 +9,11 @@ HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 JEV="$HYDRA_REPO/scripts/lib/jev.sh"
 FIXTURE_OK="$HYDRA_REPO/scripts/tests/fixtures/jev/answers-ok.json"
 
+# Portable octal file mode (GNU `stat -c` vs BSD/macOS `stat -f`).
+_jev_test_stat_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%A' "$1"
+}
+
 setup() {
   TEST_TMPDIR="$(mktemp -d)"
   export TEST_TMPDIR
@@ -110,6 +115,31 @@ teardown() {
   echo "$line" | jq -e '(.latency_ms | type) == "number"' >/dev/null
   echo "$line" | jq -e '.answers.is_refund_eligible.noul == 0.97' >/dev/null
 
+  # The raw state is stored next to the hash by default, so the row is
+  # replayable against Jev directly without the original request.
+  echo "$line" | jq -e '.state == {"foo":"bar"}' >/dev/null
+
+  # No secret anywhere in the shadow file — the API key never appears
+  # regardless of state storage.
+  if grep -q "test-key-do-not-print" "$shadow_file"; then
+    echo "shadow file leaks the API key" >&2
+    false
+  fi
+}
+
+@test "JEV_SHADOW_STORE_STATE=0: shadow row keeps the hash but omits raw state" {
+  export JEV_FAKE_MODE="ok"
+  export JEV_SHADOW_STORE_STATE=0
+  run "$JEV" --surface refund-gate --item-id conv-1b \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --actual "true" --timeout-ms 200
+  [ "$status" -eq 0 ]
+
+  shadow_file="$JEV_SHADOW_DIR/refund-gate.jsonl"
+  local line; line="$(tail -1 "$shadow_file")"
+  echo "$line" | jq -e '.state == null' >/dev/null
+  echo "$line" | jq -e '.state_sha256 != null' >/dev/null
+
   # No secret or state content anywhere in the shadow file.
   # `! cmd` on a non-final line is exempt from set -e and bats reads only the
   # last command, so each forbidden value gets an explicit fail branch.
@@ -119,6 +149,100 @@ teardown() {
       false
     fi
   done
+}
+
+@test "shadow file is created at mode 0600" {
+  export JEV_FAKE_MODE="ok"
+  run "$JEV" --surface refund-gate --item-id conv-mode1 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 0 ]
+  shadow_file="$JEV_SHADOW_DIR/refund-gate.jsonl"
+  [ -f "$shadow_file" ]
+  mode="$(_jev_test_stat_mode "$shadow_file")"
+  [ "$mode" = "600" ]
+}
+
+@test "an existing 0644 shadow file is tightened to 0600 on the next append" {
+  export JEV_FAKE_MODE="ok"
+  shadow_file="$JEV_SHADOW_DIR/refund-gate.jsonl"
+  : > "$shadow_file"
+  chmod 0644 "$shadow_file"
+  mode_before="$(_jev_test_stat_mode "$shadow_file")"
+  [ "$mode_before" = "644" ]
+
+  run "$JEV" --surface refund-gate --item-id conv-mode2 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 0 ]
+  mode_after="$(_jev_test_stat_mode "$shadow_file")"
+  [ "$mode_after" = "600" ]
+}
+
+@test "a lock holder is not clobbered: jev.sh appends after the lock frees, never before (QA finding)" {
+  # Every writer now shares the "<file>.lock" flock, so a first-writer race
+  # can no longer land two unlocked creates on the same path -- jev.sh's own
+  # append below only lands once this test's held lock is released.
+  export JEV_FAKE_MODE="ok"
+  shadow_file="$JEV_SHADOW_DIR/refund-gate.jsonl"
+  lock_file="${shadow_file}.lock"
+  mkdir -p "$JEV_SHADOW_DIR"
+  printf '{"item_id":"race-writer"}\n' > "$shadow_file"
+
+  (
+    exec 9>>"$lock_file"
+    flock -x 9
+    sleep 2
+  ) &
+  holder_pid=$!
+  # Give the holder a moment to actually acquire the lock before racing it.
+  sleep 0.3
+
+  run "$JEV" --surface refund-gate --item-id conv-race \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 0 ]
+
+  wait "$holder_pid" 2>/dev/null || true
+
+  [ "$(wc -l < "$shadow_file" | tr -d '[:space:]')" -eq 2 ]
+  grep -q '"race-writer"' "$shadow_file"
+  grep -q '"conv-race"' "$shadow_file"
+}
+
+@test "jev.sh waits on the shared lock, then times out and skips rather than writing unlocked (QA finding)" {
+  export JEV_FAKE_MODE="ok"
+  shadow_file="$JEV_SHADOW_DIR/refund-gate.jsonl"
+  lock_file="${shadow_file}.lock"
+  mkdir -p "$JEV_SHADOW_DIR"
+
+  # Hold the lock for longer than jev.sh's 5s wait, so the wait must time out.
+  (
+    exec 9>>"$lock_file"
+    flock -x 9
+    sleep 7
+  ) &
+  holder_pid=$!
+  sleep 0.3
+
+  start_ts="$(date +%s)"
+  run --separate-stderr "$JEV" --surface refund-gate --item-id conv-lockwait \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  end_ts="$(date +%s)"
+
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  # The primary call must never be made to wait or fail because shadow
+  # logging is stuck -- rc is unaffected, and the wait is bounded near the
+  # documented 5s (never unbounded, never near-instant).
+  [ "$status" -eq 0 ]
+  elapsed=$((end_ts - start_ts))
+  [ "$elapsed" -ge 4 ]
+  [ "$elapsed" -le 9 ]
+  [[ "$stderr" == *"could not lock"* ]]
+  [ ! -e "$shadow_file" ]
 }
 
 @test "timeout: rc 2, shadow line records rc 2 with null answers" {
@@ -163,7 +287,11 @@ teardown() {
   # as silence.
   local line; line="$(tail -1 "$JEV_SHADOW_DIR/refund-gate.jsonl")"
   echo "$line" | jq -e '.rc == 4 and .answers == null and .http == null and .item_id == "conv-5"' >/dev/null
-  if grep -q "foo" "$JEV_SHADOW_DIR/refund-gate.jsonl"; then false; fi
+  # The size cap only refuses to SEND the state to Jev; state was already
+  # read and validated as JSON before the cap is checked, so (like every
+  # other rc, default JEV_SHADOW_STORE_STATE=1) the shadow row still carries
+  # it for replay.
+  echo "$line" | jq -e '.state == {"foo":"bar"}' >/dev/null
 }
 
 @test "missing key: rc 5" {

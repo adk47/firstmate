@@ -155,6 +155,10 @@ export interface HandlerOptions {
     actions: JevActionsConfig;
     intents?: import("./caroline-inventory-loader.js").CarolineIntentMeta[];
     skills?: import("./caroline-inventory-loader.js").CarolineSkillMeta[];
+    // Shadow-row replay knob (see IntercomAccountConfig.jev.shadow). Absent
+    // means "store state" (the appendJevShadowRow call sites below default
+    // to true), matching DEFAULT_JEV_SHADOW.
+    shadow?: { storeState?: boolean };
   };
   runJev?: (input: JevTurnInput) => Promise<JevTurnOutcome>;
 }
@@ -474,6 +478,7 @@ export async function handleWebhookEvent(
             actual: "none",
             rc: turnResult.reason === "shape" ? 3 : 2,
             http: turnResult.httpStatus,
+            storeState: options.jev?.shadow?.storeState ?? true,
           }).catch(() => {});
         }
 
@@ -510,6 +515,7 @@ export async function handleWebhookEvent(
             actual: decision.action,
             rc: 0,
             http: turnResult.httpStatus,
+            storeState: options.jev?.shadow?.storeState ?? true,
           }).catch(() => {});
 
           if (decision.action === "decline") {

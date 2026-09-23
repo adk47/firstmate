@@ -306,6 +306,13 @@ export interface IntercomAccountConfig {
       silence: boolean;
       escalate: boolean;
     };
+    // Shadow-row replay knob (jev-shadow-log.ts). `storeState: false` keeps
+    // the row's `state_sha256` but omits the raw `state` object that would
+    // otherwise let a stored shadow row be replayed against Jev directly.
+    // Default true — see DEFAULT_JEV_SHADOW.
+    shadow?: {
+      storeState?: boolean;
+    };
   };
   // Upper bound (ms) on how long we wait for a single agent dispatch to return
   // before treating the conversation lane as wedged. The dispatch await
@@ -565,6 +572,12 @@ export const DEFAULT_JEV_ACTIONS = {
   decline: true,
   silence: false,
   escalate: false,
+} as const;
+
+// Default shadow-row replay knob — see IntercomAccountConfig.jev.shadow.
+// On by default: rows must be replayable unless an operator opts out.
+export const DEFAULT_JEV_SHADOW = {
+  storeState: true,
 } as const;
 
 // Default dispatch-await timeout (ms). See IntercomAccountConfig.dispatchTimeoutMs.

@@ -1719,6 +1719,7 @@ export const intercomPlugin = createChatChannelPlugin({
                               enabled: true,
                               bands: account.jev.bands,
                               actions: account.jev.actions,
+                              shadow: account.jev.shadow,
                               intents: loadCarolineIntents(jevLog),
                               skills: loadCarolineSkills(jevLog),
                             },

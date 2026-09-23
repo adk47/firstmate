@@ -243,6 +243,7 @@ _jev_email_triage_classify_shadow() {
   : "${JEV_EMAIL_TRIAGE_MAX_THREADS:=25}"
   : "${JEV_EMAIL_TRIAGE_TIMEOUT_MS:=1000}"
   : "${JEV_EMAIL_TRIAGE_BUDGET_S:=20}"
+  : "${JEV_SHADOW_STORE_STATE:=1}"
   case "$JEV_EMAIL_TRIAGE_MAX_THREADS" in ''|*[!0-9]*) JEV_EMAIL_TRIAGE_MAX_THREADS=25 ;; esac
   case "$JEV_EMAIL_TRIAGE_TIMEOUT_MS" in ''|*[!0-9]*) JEV_EMAIL_TRIAGE_TIMEOUT_MS=1000 ;; esac
   case "$JEV_EMAIL_TRIAGE_BUDGET_S" in ''|*[!0-9]*) JEV_EMAIL_TRIAGE_BUDGET_S=20 ;; esac
@@ -354,8 +355,12 @@ _jev_email_triage_classify_shadow() {
       --timeout-ms "$JEV_EMAIL_TRIAGE_TIMEOUT_MS" --no-shadow)
     if [ -n "$actual_json" ]; then jev_args+=(--actual "$actual_json"); fi
 
-    local state_sha stdout_file call_rc start_ms end_ms latency_ms
+    local state_sha state_json stdout_file call_rc start_ms end_ms latency_ms
     state_sha="$(_jev_email_triage_sha256 "$state_file")"
+    state_json="null"
+    if [ "$JEV_SHADOW_STORE_STATE" != "0" ]; then
+      state_json="$(jq -c . "$state_file" 2>/dev/null || echo null)"
+    fi
     stdout_file="$work_dir/answers.out"
     : > "$stdout_file"
 
@@ -407,9 +412,11 @@ _jev_email_triage_classify_shadow() {
       --argjson rc "$eff_rc" \
       --arg provider "$provider" \
       --arg reason "$reason" \
+      --argjson state "$state_json" \
       '{ts:$ts, surface:$surface, item_id:$item_id,
         state_sha256:(if $state_sha256 == "" then null else $state_sha256 end),
         questions_sha256:(if $questions_sha256 == "" then null else $questions_sha256 end),
+        state:$state,
         model:null, answers:$answers_arr[0], usage:null, latency_ms:$latency_ms,
         actual:$actual, rc:$rc, http:null, provider:$provider,
         reason:(if $reason == "" then null else $reason end)}' 2>/dev/null)
@@ -424,8 +431,17 @@ _jev_email_triage_classify_shadow() {
       # this shadow file (QA finding 2): each writer locks the SAME sibling
       # .lock file before appending its own already-fully-built line, so two
       # overlapping runs can interleave calls but never interleave bytes
-      # within a line.
-      if ! ( flock -w 5 9 || exit 1; printf '%s\n' "$row" >> "$shadow_file" ) 9>>"$lock_file" 2>/dev/null; then
+      # within a line. Create-at-0600/tighten happens INSIDE the lock too
+      # (QA finding): doing it outside would let two writers race the
+      # existence check, and the O_TRUNC create clobber whatever the other
+      # had already written.
+      if ! ( flock -w 5 9 || exit 1
+             if [ ! -e "$shadow_file" ]; then
+               ( umask 077; : > "$shadow_file" ) 2>/dev/null || true
+             fi
+             chmod 0600 "$shadow_file" 2>/dev/null || true
+             printf '%s\n' "$row" >> "$shadow_file"
+           ) 9>>"$lock_file" 2>/dev/null; then
         recorded=0
       fi
     else
@@ -434,7 +450,14 @@ _jev_email_triage_classify_shadow() {
       # opens with O_APPEND, and one printf of a single JSONL line (well
       # under PIPE_BUF) through an O_APPEND fd is already an atomic write --
       # concurrent writers still cannot interleave a partial line into each
-      # other's, they just are not lock-ordered or wait-bounded.
+      # other's, they just are not lock-ordered or wait-bounded. Same
+      # create-at-0600/tighten as above; no lock is available here to hold
+      # it under, so it's still best-effort ordered like everything else in
+      # this fallback.
+      if [ ! -e "$shadow_file" ]; then
+        ( umask 077; : > "$shadow_file" ) 2>/dev/null || true
+      fi
+      chmod 0600 "$shadow_file" 2>/dev/null || true
       if ! printf '%s\n' "$row" >> "$shadow_file" 2>/dev/null; then
         recorded=0
       fi

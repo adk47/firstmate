@@ -17,6 +17,11 @@ bats_require_minimum_version 1.5.0
 
 SCRIPT="${BATS_TEST_DIRNAME}/../format-digest.sh"
 
+# Portable octal file mode (GNU `stat -c` vs BSD/macOS `stat -f`).
+_fd_test_stat_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%A' "$1"
+}
+
 setup() {
   WORKDIR="$(mktemp -d)"
   export WORKDIR
@@ -42,7 +47,8 @@ teardown() {
   [ -n "${WORKDIR:-}" ] && rm -rf "$WORKDIR"
   [ -n "${JEV_SCRATCH:-}" ] && rm -rf "$JEV_SCRATCH"
   unset JEV_SH JEV_SHADOW_DIR JEV_EMAIL_TRIAGE_TIMEOUT_MS JEV_EMAIL_TRIAGE_BUDGET_S \
-    JEV_EMAIL_TRIAGE_MAX_THREADS JEV_EMAIL_TRIAGE_QUESTIONS_FILE JEV_CALL_LOG JEV_PROBE_LOG
+    JEV_EMAIL_TRIAGE_MAX_THREADS JEV_EMAIL_TRIAGE_QUESTIONS_FILE JEV_CALL_LOG JEV_PROBE_LOG \
+    JEV_SHADOW_STORE_STATE
 }
 
 emails() { printf '%s' "$1" > "$WORKDIR/emails.json"; }
@@ -612,6 +618,10 @@ STUB
   [ "$(printf '%s' "$row" | jq -r '.rc')" = "0" ]
   [ "$(printf '%s' "$row" | jq -r '.reason')" = "null" ]
   [ "$(printf '%s' "$row" | jq -r '.answers.owner.choice')" = "caroline" ]
+  # The raw state is stored next to state_sha256 by default, so the row is
+  # replayable against Jev directly.
+  [ "$(printf '%s' "$row" | jq -r '.state.subject')" = "a" ]
+  [ "$(printf '%s' "$row" | jq -r '.state_sha256')" != "null" ]
 
   run bash "$repo_root/scripts/jev-shadow-report.sh" --shadow-dir "$JEV_SHADOW_DIR" --surface email-triage
   [ "$status" -eq 0 ]
@@ -627,6 +637,22 @@ STUB
     echo "expected total=1 rc_nonzero=0, got: $output" >&2
     return 1
   fi
+}
+
+@test "JEV_SHADOW_STORE_STATE=0: shadow row keeps state_sha256 but omits raw state" {
+  export JEV_SHADOW_STORE_STATE=0
+  emails '[{"threadId":"t1","subject":"a","url":"u1"}]'
+  verdicts '[{"threadId":"t1","verdict":"caroline","description":"d","reason":"r"}]'
+  jev_stub ok
+
+  run --separate-stderr bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+
+  shadow_file="$JEV_SHADOW_DIR/email-triage.jsonl"
+  [ -f "$shadow_file" ]
+  row="$(cat "$shadow_file")"
+  [ "$(printf '%s' "$row" | jq -r '.state')" = "null" ]
+  [ "$(printf '%s' "$row" | jq -r '.state_sha256')" != "null" ]
 }
 
 @test "rc 0 with empty/garbage stdout counts as a failure, not a measured agreement (QA finding 1)" {
@@ -820,6 +846,43 @@ STUB
     echo "$bad_lines/$expected_calls large row(s) corrupted (interleaved writes) -- flock is load-bearing" >&2
     return 1
   fi
+}
+
+@test "shadow file is created at mode 0600 under a normal 022 umask, not 0644 (QA finding)" {
+  # The append is a bare `>>`, which creates a missing file under the
+  # AMBIENT umask. A dev/CI shell's default 022 umask would otherwise leave
+  # customer text world/group-readable on first write.
+  emails '[{"threadId":"t1","subject":"a","url":"u1"}]'
+  verdicts '[{"threadId":"t1","verdict":"caroline","description":"d","reason":"r"}]'
+  jev_stub ok
+
+  umask 022
+  run --separate-stderr bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+
+  shadow_file="$JEV_SHADOW_DIR/email-triage.jsonl"
+  [ -f "$shadow_file" ]
+  mode="$(_fd_test_stat_mode "$shadow_file")"
+  [ "$mode" = "600" ]
+}
+
+@test "an existing 0644 shadow file is tightened to 0600 on the next append (QA finding)" {
+  emails '[{"threadId":"t1","subject":"a","url":"u1"}]'
+  verdicts '[{"threadId":"t1","verdict":"caroline","description":"d","reason":"r"}]'
+  jev_stub ok
+
+  mkdir -p "$JEV_SHADOW_DIR"
+  shadow_file="$JEV_SHADOW_DIR/email-triage.jsonl"
+  : > "$shadow_file"
+  chmod 0644 "$shadow_file"
+  mode_before="$(_fd_test_stat_mode "$shadow_file")"
+  [ "$mode_before" = "644" ]
+
+  run --separate-stderr bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+
+  mode_after="$(_fd_test_stat_mode "$shadow_file")"
+  [ "$mode_after" = "600" ]
 }
 
 @test "an unwritable shadow dir logs via logger, leaves the digest byte-identical, exits 0, and still removes WORKDIR" {

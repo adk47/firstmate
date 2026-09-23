@@ -73,7 +73,19 @@ Goal: one client, one log format, one report, vendor prerequisites settled.
   configurable byte size and refuses above it (rc 4) rather than truncating silently.
 - **Shadow log line** (JSONL, one per call):
   `{ts, surface, item_id, state_sha256, model, questions_sha256, answers, usage, latency_ms,
-  actual: <what the existing code decided>, rc}`. `actual` is filled by the caller.
+  actual: <what the existing code decided>, rc}`. `actual` is filled by the caller. A `state`
+  field carries the exact JSON object sent to Jev (next to the existing `state_sha256` hash),
+  so a misclassification can be replayed against Jev directly instead of only hashed-compared.
+  It's customer text, so: on by default, gated off with `JEV_SHADOW_STORE_STATE=0` (bash
+  writers) / `shadow.storeState: false` (the Intercom plugin config); every shadow file is
+  created at mode 0600 and any pre-existing looser-permission file is tightened on next
+  append; and `scripts/jev-shadow-prune.sh` (daily timer) drops rows older than
+  `JEV_SHADOW_RETENTION_DAYS` (default 30 days) from every shadow file, atomically and under
+  the writers' own per-file lock. Every writer takes that same `<file>.lock` before appending:
+  `scripts/lib/jev.sh` and `format-digest.sh` through `flock`, and the in-process Caroline
+  writer (`plugins/intercom/src/jev-shadow-log.ts`) through the `flock` binary. The prune holds
+  the lock for its whole rewrite, so no row can land mid-rewrite. A writer that can't get the
+  lock within 5 s skips its row with a warning rather than writing unlocked.
 - **`scripts/jev-shadow-report.sh`**: per surface, per question, agreement between Jev's top
   answer and `actual`, bucketed by probability (0.5–0.6 … 0.9–1.0), plus item count and p50/p95
   latency. Prints a table; nothing is posted anywhere in Phase 0.

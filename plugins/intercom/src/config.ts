@@ -1,5 +1,5 @@
 import type { IntercomAccountConfig } from "./types.js";
-import { DEFAULT_FALLBACK_ACK, DEFAULT_JEV_BANDS, DEFAULT_JEV_ACTIONS } from "./types.js";
+import { DEFAULT_FALLBACK_ACK, DEFAULT_JEV_BANDS, DEFAULT_JEV_ACTIONS, DEFAULT_JEV_SHADOW } from "./types.js";
 
 // Config captured at register() time — used as fallback when the Gateway
 // passes undefined to channel lifecycle callbacks.
@@ -112,6 +112,13 @@ export function resolveIntercomAccount(
       }
     }
   }
+  if (account.jev?.shadow && account.jev.shadow.storeState !== undefined) {
+    if (typeof account.jev.shadow.storeState !== "boolean") {
+      throw new Error(
+        `intercom: account "${id}" jev.shadow.storeState must be a boolean (got: ${account.jev.shadow.storeState})`,
+      );
+    }
+  }
 
   return {
     accountId: id,
@@ -160,6 +167,7 @@ export function resolveIntercomAccount(
           ...(typeof account.jev.timeoutMs === "number" ? { timeoutMs: account.jev.timeoutMs } : {}),
           bands: { ...DEFAULT_JEV_BANDS, ...(account.jev.bands ?? {}) },
           actions: { ...DEFAULT_JEV_ACTIONS, ...(account.jev.actions ?? {}) },
+          shadow: { ...DEFAULT_JEV_SHADOW, ...(account.jev.shadow ?? {}) },
         }
       : undefined,
   };
