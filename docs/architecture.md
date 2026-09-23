@@ -323,7 +323,7 @@ A metric that cannot be read is `unmeasured` and is skipped rather than scored a
 The first regression appends one `check: change-watch <task-id> <pr-url> <metric> regressed` wake to the durable wake queue and steers the owning task through `bin/fm-send.sh` with the numbers; a clean +12h, one in which every target had a scored reading, appends one note to the task's status log and records one wiki observation.
 Registration is hooked into both merge paths - `bin/fm-pr-merge.sh` and the watcher's merged-poll landing path - and is additive only, so a failure to register never turns a successful merge into a reported failure.
 The watch makes no model calls, is read-only against the cluster, and writes only under the home's `state/change-watch/`.
-`bin/fm-change-watch.sh`'s header owns the exact commands, metrics, bars, schedule, and test seams; the `change-watch` agent skill owns how a regression, an interruption, and a completion wake are handled, and `tests/fm-change-watch.test.sh` pins the register, regression, OOMKilled, clean, unmeasured, interrupted, pool-scoping, and no-deployable-service cases.
+`bin/fm-change-watch.sh`'s header owns the exact commands, metrics, bars, schedule, and test seams; the `change-watch` agent skill owns how a regression, an interruption, and a completion wake are handled, and `tests/fm-change-watch.test.sh` pins the register, regression, OOMKilled, clean, unmeasured, interrupted, reused-pid, pool-scoping, pool-console, doctor, and no-deployable-service cases.
 
 ## Optional Relay
 

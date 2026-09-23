@@ -15,6 +15,7 @@
 #   fm-change-watch.sh sample <watch-id> [<offset-seconds>]
 #   fm-change-watch.sh verdict <watch-id>
 #   fm-change-watch.sh status [<watch-id>]
+#   fm-change-watch.sh doctor [<watch-id>]
 #
 # register  Derive the affected Kubernetes Deployment(s) from the merged PR,
 #           record the pre-deploy baseline, and arm one bounded schedule of
@@ -57,6 +58,13 @@
 #           target never read: a measurement gap, recorded as such, never as
 #           health.
 # status    Print one line per registered watch (all of them, or one).
+# doctor    Live self-test of the pooler console read. With no argument it runs
+#           SHOW POOLS at the documented pooler path (ubuntu@10.0.0.17, port
+#           6432) and proves rows come back; with a watch id it reads every
+#           target's own resolved pool and names a target whose pool is
+#           unresolved. A read that fails, times out, or returns no row for the
+#           database is a stated "doctor: FAIL" line and a non-zero exit, so an
+#           unmeasured pool metric is never silent.
 #
 # Metrics, bars, and windows:
 #   http_5xx_per_min     5xx responses per minute from the pods' own access
@@ -74,10 +82,16 @@
 #   pgbouncer_cl_waiting clients waiting on the Deployment's own pgbouncer pool:
 #                        the pod spec's DB_HOST/DB_PORT/DB_NAME (secret refs
 #                        resolved), the pooler endpoint behind that Service, then
-#                        SHOW POOLS filtered to that database. A pool that
-#                        cannot be resolved at registration is unmeasured for
-#                        the whole watch. Regressed when value > 0 on two
-#                        consecutive samples.
+#                        SHOW POOLS filtered to that database. The console is
+#                        read on the pooler host as `ssh -n ubuntu@<host>`
+#                        running `sudo -u postgres psql -h /var/run/postgresql
+#                        -p <port> -U pgbouncer pgbouncer -Ac 'SHOW POOLS'`, the
+#                        admin unix socket the house wiki records as the form
+#                        that answers without a password; the read is bounded
+#                        by the remaining sample budget. A pool that cannot be
+#                        resolved at registration is unmeasured for the whole
+#                        watch. Regressed when value > 0 on two consecutive
+#                        samples.
 #   rss_ratio            highest container working set as a fraction of its
 #                        memory limit; regressed when value > 0.85.
 # The baseline window is the 60 minutes before the change's rollout start, read
@@ -105,7 +119,6 @@
 #
 # Test seams (all optional, all inert in production):
 #   FM_CW_NOW              fixed current epoch (integer) instead of `date +%s`
-#   FM_CW_MERGE_EPOCH      fixed rollout/merge epoch instead of the PR's
 #   FM_CW_FORGE_DIR        directory replacing every forge read (files.txt,
 #                          merge-epoch, head-ref, diff.txt, content/<path>)
 #   FM_CW_HDEVOPS_K8S_DIR  k8s/prod tree of an H-DevOps checkout, used to resolve
@@ -122,7 +135,6 @@
 #   FM_CW_ARM_CMD          command replacing bin/fm-procevent-when.sh for arming
 #   FM_CW_SEND_CMD         command replacing bin/fm-send.sh for the lane steer
 #   FM_CW_SLEEP_CMD        command replacing `sleep` for the drive loop
-#   FM_CW_WIKI_CMD         command replacing `wiki-retro` for the clean note
 #   FM_CW_NO_WIKI          set to 1 to skip the wiki note with a printed notice
 set -u
 
@@ -152,10 +164,14 @@ FORGE_BUDGET_SECONDS=${FM_CW_FORGE_BUDGET:-60}
 # never run a sample, a merge, or a watcher cycle past its bound.
 SAMPLE_DEADLINE_SECONDS=${FM_CW_SAMPLE_DEADLINE:-25}
 MAX_MANIFEST_READS=20
+POOLER_SSH_USER=ubuntu
+POOLER_SOCKET_DIR=/var/run/postgresql
+POOLER_DEFAULT_HOST=10.0.0.17
+POOLER_DEFAULT_PORT=6432
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 notice() { printf 'notice: %s\n' "$1" >&2; }
-usage() { sed -n '2,122p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,138p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 cw_now() {
   if [ -n "${FM_CW_NOW:-}" ]; then
@@ -182,6 +198,13 @@ cw_forge_run() {
 
 cw_budget_start() { CW_BUDGET_START=$(cw_now); }
 cw_within_budget() { [ $(( $(cw_now) - CW_BUDGET_START )) -lt "$SAMPLE_DEADLINE_SECONDS" ]; }
+cw_budget_left() {
+  local used=0 left
+  [ -z "$CW_BUDGET_START" ] || used=$(( $(cw_now) - CW_BUDGET_START ))
+  left=$(( SAMPLE_DEADLINE_SECONDS - used ))
+  [ "$left" -gt 0 ] || return 1
+  printf '%s\n' "$left"
+}
 
 # Stable content hash of a string (shasum or sha256sum; empty when neither is
 # available, in which case the watch name falls back to a path-safe prefix).
@@ -209,6 +232,7 @@ cw_verdict_path() { printf '%s/verdict\n' "$(cw_watch_dir "$1")"; }
 cw_sampled_path() { printf '%s/sampled\n' "$(cw_watch_dir "$1")"; }
 cw_drive_pid_path() { printf '%s/drive.pid\n' "$(cw_watch_dir "$1")"; }
 cw_drive_alive_path() { printf '%s/drive.alive\n' "$(cw_watch_dir "$1")"; }
+cw_drive_identity_path() { printf '%s/drive.identity\n' "$(cw_watch_dir "$1")"; }
 cw_last_path() { printf '%s/last.%s\n' "$(cw_watch_dir "$1")" "$2"; }
 
 cw_meta_get() {  # <watch-id> <key>
@@ -709,16 +733,28 @@ sys.exit(1)
   printf '%s\t%s\n' "$endpoint" "$db"
 }
 
-# LIVE QUERY (cluster) - clients waiting on one database's pools (SHOW POOLS /
-# cl_waiting, summed over that database's users) on the pooler at ip:port. An
-# unreachable console or an absent database is unmeasured.
-cw_live_pgbouncer_cl_waiting() {  # <ip> <port> <database>
-  local ip=$1 port=$2 db=$3 out
+# LIVE QUERY (pooler host) - the pgbouncer admin console's SHOW POOLS on the
+# pooler at <host>, reached as ubuntu over ssh with stdin closed (so the read
+# can never drain a caller's input stream), through the admin unix socket, and
+# bounded by the remaining sample budget. Prints the console's unaligned rows;
+# exit 124 when the bound was hit.
+cw_pool_console() {  # <host> <port>
+  local host=$1 port=$2 left
   command -v ssh >/dev/null 2>&1 || return 1
   case "$port" in ''|*[!0-9]*) return 1 ;; esac
+  case "$host" in ''|*[!A-Za-z0-9.-]*) return 1 ;; esac
+  left=$(cw_budget_left) || return 124
+  fm_run_timed "$left" ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+    "$POOLER_SSH_USER@$host" \
+    "sudo -u postgres psql -h $POOLER_SOCKET_DIR -p $port -U pgbouncer pgbouncer -Ac 'SHOW POOLS'"
+}
+
+# Clients waiting on one database's pools (cl_waiting summed over that
+# database's users). An unreachable console or an absent database is unmeasured.
+cw_live_pgbouncer_cl_waiting() {  # <host> <port> <database>
+  local host=$1 port=$2 db=$3 out
   case "$db" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
-  out=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ip" \
-    "sudo -u postgres psql -h 127.0.0.1 -p $port -U pgbouncer pgbouncer -Ac 'SHOW POOLS'" 2>/dev/null) || return 1
+  out=$(cw_pool_console "$host" "$port" 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | awk -F'|' -v db="$db" '
     NR == 1 {
@@ -759,7 +795,6 @@ cw_metric_read() {  # <watch-id> <metric> <target> <window> [<baseline-epoch>]
   if [ -n "${FM_CW_CLUSTER_DIR:-}" ]; then
     sanitized=$(printf '%s' "$target" | tr '/' '_')
     file="$FM_CW_CLUSTER_DIR/$metric.$sanitized.$window"
-    [ -f "$file" ] || file="$FM_CW_CLUSTER_DIR/$metric.$window"
     [ -f "$file" ] || return 1
     value=$(cw_series_next "$file" "$metric.$sanitized.$window")
     case "$value" in
@@ -1014,7 +1049,7 @@ cw_wiki_note() {  # <watch-id> <task> <url>
     notice "change-watch: wiki note skipped by FM_CW_NO_WIKI for $url"
     return 0
   fi
-  cmd=${FM_CW_WIKI_CMD:-wiki-retro}
+  cmd=wiki-retro
   if ! command -v "$cmd" >/dev/null 2>&1; then
     notice "change-watch: wiki note skipped (no $cmd on PATH) for $url"
     return 0
@@ -1091,7 +1126,7 @@ cw_record_interrupted() {  # <watch-id> <epoch>
   [ "$offset" -le "$latest" ] || offset=$latest
   tick=$((offset / 60))
   printf 'interrupted at +%dm\n' "$tick" | cw_write "$(cw_verdict_path "$id")"
-  rm -f -- "$(cw_drive_pid_path "$id")" "$(cw_drive_alive_path "$id")"
+  rm -f -- "$(cw_drive_pid_path "$id")" "$(cw_drive_identity_path "$id")" "$(cw_drive_alive_path "$id")"
   cw_mark_once "$(cw_watch_dir "$id")/interrupted-reported" || return 0
   task=$(cw_meta_get "$id" task || true)
   url=$(cw_meta_get "$id" pr_url || true)
@@ -1100,17 +1135,25 @@ cw_record_interrupted() {  # <watch-id> <epoch>
     || notice "change-watch: could not queue the interruption wake for $url"
 }
 
-# A drive whose pid is gone without a verdict was killed outright; record the
-# interruption at its last heartbeat.
+# A drive whose process is gone without a verdict was killed outright; record
+# the interruption at its last heartbeat. The pid counts as the drive only when
+# the process behind it still carries the identity the drive recorded at start,
+# so a pid reused after a reboot never reads as a live watch.
 cw_reconcile_drive() {  # <watch-id>
-  local id=$1 pidfile pid at
+  local id=$1 pidfile pid recorded at
   pidfile=$(cw_drive_pid_path "$id")
   [ -f "$pidfile" ] || return 0
   cw_watch_done "$id" && return 0
   pid=$(cat "$pidfile" 2>/dev/null || true)
+  recorded=$(cat "$(cw_drive_identity_path "$id")" 2>/dev/null || true)
   case "$pid" in
     ''|*[!0-9]*) ;;
-    *) kill -0 "$pid" 2>/dev/null && return 0 ;;
+    *)
+      if [ -n "$recorded" ] && kill -0 "$pid" 2>/dev/null \
+        && [ "$(fm_pid_identity "$pid" 2>/dev/null || true)" = "$recorded" ]; then
+        return 0
+      fi
+      ;;
   esac
   at=$(cat "$(cw_drive_alive_path "$id")" 2>/dev/null || true)
   case "$at" in ''|*[!0-9]*) at=$(cw_now) ;; esac
@@ -1243,7 +1286,6 @@ cmd_register() {
   case "$t0" in
     ''|*[!0-9]*) t0=$now ;;
   esac
-  if [ -n "${FM_CW_MERGE_EPOCH:-}" ]; then t0=$FM_CW_MERGE_EPOCH; fi
   [ "$t0" -le "$now" ] || t0=$now
 
   mkdir -p "$(cw_watch_dir "$id")" || die "cannot create watch directory"
@@ -1311,6 +1353,7 @@ cmd_sample() {
 
 CW_DRIVE_ID=''
 CW_DRIVE_PIDFILE=''
+CW_DRIVE_IDENTITY_FILE=''
 CW_SLEEPER=''
 
 cw_drive_interrupted() {
@@ -1321,15 +1364,18 @@ cw_drive_interrupted() {
 }
 
 cmd_drive() {
-  local id=$1 sleep_cmd offset epoch now remaining
+  local id=$1 sleep_cmd offset epoch now remaining identity
   cw_watch_exists "$id" || die "unknown watch: $id"
   sleep_cmd=${FM_CW_SLEEP_CMD:-sleep}
   cw_meta_get "$id" t0 >/dev/null || die "watch $id has no rollout epoch"
+  identity=$(fm_pid_identity "$$") || die "cannot read the drive's own process identity"
 
   CW_DRIVE_ID=$id
   CW_DRIVE_PIDFILE=$(cw_drive_pid_path "$id")
+  CW_DRIVE_IDENTITY_FILE=$(cw_drive_identity_path "$id")
   printf '%s\n' "$$" > "$CW_DRIVE_PIDFILE" || die "cannot record the drive pid"
-  trap 'rm -f -- "$CW_DRIVE_PIDFILE"' EXIT
+  printf '%s\n' "$identity" > "$CW_DRIVE_IDENTITY_FILE" || die "cannot record the drive identity"
+  trap 'rm -f -- "$CW_DRIVE_PIDFILE" "$CW_DRIVE_IDENTITY_FILE"' EXIT
   trap cw_drive_interrupted TERM INT HUP
 
   while IFS=$'\t' read -r offset epoch; do
@@ -1388,6 +1434,57 @@ cmd_status() {
   [ "$count" -gt 0 ] || printf 'change-watch: no watches registered\n'
 }
 
+# One pool console read for the doctor: a stated ok or FAIL line, never silence.
+cw_doctor_pool() {  # <label> <host> <port> <database>
+  local label=$1 host=$2 port=$3 db=$4 where err out rc reason rows
+  where="${label:+$label }pool read $POOLER_SSH_USER@$host:$port"
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-cw-doctor.XXXXXX" 2>/dev/null) || err=/dev/null
+  cw_budget_start
+  out=$(cw_pool_console "$host" "$port" 2>"$err")
+  rc=$?
+  reason=$(tail -1 "$err" 2>/dev/null || true)
+  [ "$err" = /dev/null ] || rm -f -- "$err"
+  if [ "$rc" -eq 124 ]; then
+    printf 'doctor: FAIL %s: timed out after %ss\n' "$where" "$SAMPLE_DEADLINE_SECONDS"
+    return 1
+  fi
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+    printf 'doctor: FAIL %s: %s\n' "$where" "${reason:-exit $rc with no rows}"
+    return 1
+  fi
+  rows=$(printf '%s\n' "$out" | awk -F'|' -v db="$db" '
+    NR == 1 { for (i = 1; i <= NF; i++) if ($i == "database") d = i; next }
+    NF > 1 && (db == "" || (d && $d == db)) { n++ }
+    END { print n + 0 }
+  ')
+  if [ "$rows" -eq 0 ]; then
+    printf 'doctor: FAIL %s: no pool row%s\n' "$where" "${db:+ for database $db}"
+    return 1
+  fi
+  printf 'doctor: ok %s returned %s pool row(s)%s\n' "$where" "$rows" "${db:+ for database $db}"
+}
+
+cmd_doctor() {
+  local id=${1:-} ns deploy target spec failed=0
+  if [ -z "$id" ]; then
+    cw_doctor_pool '' "$POOLER_DEFAULT_HOST" "$POOLER_DEFAULT_PORT" '' || failed=1
+    return "$failed"
+  fi
+  cw_watch_exists "$id" || die "unknown watch: $id"
+  while IFS=$'\t' read -r ns deploy; do
+    [ -n "${ns:-}" ] || continue
+    target="$ns/$deploy"
+    if spec=$(cw_pool_spec "$id" "$target"); then
+      cw_doctor_pool "$target" "$(printf '%s' "$spec" | cut -f1)" \
+        "$(printf '%s' "$spec" | cut -f2)" "$(printf '%s' "$spec" | cut -f3)" || failed=1
+    else
+      printf 'doctor: FAIL %s pool unresolved; its pool metric is unmeasured for the whole watch\n' "$target"
+      failed=1
+    fi
+  done < "$(cw_targets_path "$id")"
+  return "$failed"
+}
+
 # --- entry --------------------------------------------------------------------
 
 case "${1:-}" in
@@ -1397,6 +1494,7 @@ case "${1:-}" in
   sample) if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then usage; fi; shift; cmd_sample "$@" ;;
   verdict) [ "$#" -eq 2 ] || usage; shift; cmd_verdict "$@" ;;
   status) [ "$#" -le 2 ] || usage; shift; cmd_status "$@" ;;
+  doctor) [ "$#" -le 2 ] || usage; shift; cmd_doctor "$@" ;;
   ""|-h|--help|help) usage ;;
   *) usage ;;
 esac

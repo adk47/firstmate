@@ -71,3 +71,4 @@ A clean +12h watch appends one `note: change-watch clean for <pr-url>` line to t
 A completed-unmeasured watch appends one `note: change-watch completed unmeasured for <pr-url> (never measured: ...)` line and records no wiki observation.
 Neither is captain-facing news, so never surface a completion to the captain on its own.
 The watch is read-only against the cluster; it writes only under the home's `state/change-watch/`, a metric it cannot read is `unmeasured` and skipped rather than scored as a pass, and a relative bar whose baseline was never read is recorded but not scored.
+A pool metric that stays unmeasured is never left silent: `bin/fm-change-watch.sh doctor <watch-id>` reads every target's own pool through the pooler console live and states each read as `doctor: ok` or `doctor: FAIL` with its reason (unresolved pool, refused login, timed-out console, no row for the database); with no watch id it proves the documented pooler path itself answers.

@@ -9,12 +9,14 @@
 # on the sample that sees it; a clean series runs the whole 12h schedule and
 # records the clean note; a schedule that never read a target completes
 # unmeasured instead of clean; an interrupted drive is never clean and can be
-# re-armed; the pool metric is scoped to the Deployment's own pool; and a
-# docs-only PR registers nothing at all.
+# re-armed; the pool metric is scoped to the Deployment's own pool; the pool
+# console is read as ubuntu through the admin unix socket with stdin closed and
+# a hard bound, and the doctor states every failed pool read; a reused pid never
+# reads as a live drive; and a docs-only PR registers nothing at all.
 #
 # Every cluster and forge read is stubbed through the script's own seams
 # (FM_CW_FORGE_DIR, FM_CW_CLUSTER_DIR, FM_CW_ARM_CMD, FM_CW_SEND_CMD) or a
-# kubectl PATH shim, so no case reaches a cluster, the network, or the wiki.
+# kubectl/ssh PATH shim, so no case reaches a cluster, the network, or the wiki.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -421,6 +423,7 @@ CW_SLEEP="$HOME_I/kill-sleep.sh" run_cw "$HOME_I" 1790000900 drive i1-3317 >/dev
 grep -qF "check: change-watch i1 $PR_URL interrupted at +15m" "$HOME_I/state/.wake-queue" \
   || fail "the interruption did not queue one check wake"
 [ ! -e "$HOME_I/state/change-watch/i1-3317/drive.pid" ] || fail "the stopped drive left its pid record"
+[ ! -e "$HOME_I/state/change-watch/i1-3317/drive.identity" ] || fail "the stopped drive left its identity record"
 pass "a drive stopped mid-schedule records interrupted and queues one wake"
 
 before=$(grep -c '' "$HOME_I/arm.log")
@@ -454,6 +457,35 @@ printf '%s\n' 1790001800 > "$HOME_K/state/change-watch/k1-3317/drive.alive"
 grep -qF "check: change-watch k1 $PR_URL interrupted at +30m" "$HOME_K/state/.wake-queue" \
   || fail "a dead drive did not queue the interruption wake"
 pass "a drive killed outright is recorded as interrupted at its last heartbeat"
+
+# A pid that is alive but belongs to another process (reused after a reboot) is
+# not the drive; only a pid still carrying the recorded identity is.
+HOME_R=$(new_world r)
+seed_pr "$HOME_R" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_R" "$MANIFEST" "$FEED_LINE"
+run_cw "$HOME_R" 1790000000 register r1 "$PR_URL" >/dev/null || fail "register failed"
+printf '%s\n' "$$" > "$HOME_R/state/change-watch/r1-3317/drive.pid"
+printf 'linux-starttime=1 cmdline-hex=00\n' > "$HOME_R/state/change-watch/r1-3317/drive.identity"
+printf '%s\n' 1790001800 > "$HOME_R/state/change-watch/r1-3317/drive.alive"
+[ "$(run_cw "$HOME_R" 1790040000 verdict r1-3317)" = "change-watch interrupted at +30m" ] \
+  || fail "a reused live pid was read as the drive: $(run_cw "$HOME_R" 1790040000 verdict r1-3317)"
+out=$(run_cw "$HOME_R" 1790040000 register r1 "$PR_URL") || fail "re-register failed"
+case "$out" in
+  *"re-armed r1-3317"*) ;;
+  *) fail "a watch behind a reused pid was not re-armed: $out" ;;
+esac
+pass "a reused pid never reads as a live drive and the watch can be re-armed"
+
+HOME_R2=$(new_world r2)
+seed_pr "$HOME_R2" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_R2" "$MANIFEST" "$FEED_LINE"
+run_cw "$HOME_R2" 1790000000 register r2 "$PR_URL" >/dev/null || fail "register failed"
+printf '%s\n' "$$" > "$HOME_R2/state/change-watch/r2-3317/drive.pid"
+printf '%s\n' "$FM_TEST_OWNER_IDENTITY" > "$HOME_R2/state/change-watch/r2-3317/drive.identity"
+printf '%s\n' 1790001800 > "$HOME_R2/state/change-watch/r2-3317/drive.alive"
+run_cw "$HOME_R2" 1790040000 verdict r2-3317 | grep -q "clean so far" \
+  || fail "a live drive with its recorded identity was reported interrupted"
+pass "a live pid with the recorded identity is the drive"
 
 # --- (e) a docs-only PR registers nothing --------------------------------------
 
@@ -542,3 +574,128 @@ SAMPLES_L="$HOME_L/state/change-watch/l1-3317/samples.log"
 CW_CLUSTER_DIR='' PATH="$HOME_L/bin:$PATH" run_cw "$HOME_L" 1790000300 verdict l1-3317 | grep -q "clean so far" \
   || fail "an unchanged service regressed on live reads"
 pass "live reads take the worst replica's memory column and rate a capped log over its span"
+
+# --- the pool console read and the doctor ---------------------------------------
+# The ssh shim behaves like ssh where it matters: without -n it reads its stdin
+# to the end (the real ssh forwards it to the remote session), it records its
+# argv, and it answers SHOW POOLS with the console's unaligned rows. The kubectl
+# shim resolves feed-service's DB env to the pooler and gives search-service,
+# which sorts after it, no DB env at all.
+
+POOL_MANIFEST='apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: feed-service
+  namespace: muso-prod
+spec:
+  template:
+    spec:
+      containers:
+        - name: feed-service
+          env:
+            - name: DB_HOST
+              value: 10.0.0.17
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: search-service
+  namespace: muso-prod
+spec:
+  template:
+    spec:
+      containers:
+        - name: search-service
+'
+printf '%s' "$POOL_MANIFEST" > "$TMP_ROOT/pool.yaml"
+
+pool_world() {  # <name> prints a home with the ssh and kubectl shims on its bin
+  local home
+  home=$(new_world "$1")
+  mkdir -p "$home/bin"
+  cat > "$home/bin/ssh" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_CW_SSH_LOG"
+case " $* " in *" -n "*) ;; *) cat >/dev/null ;; esac
+[ -z "${FM_CW_SSH_SLEEP:-}" ] || sleep "$FM_CW_SSH_SLEEP"
+if [ -n "${FM_CW_SSH_FAIL:-}" ]; then printf '%s\n' "$FM_CW_SSH_FAIL" >&2; exit 255; fi
+printf 'database|user|cl_active|cl_waiting|sv_active|sv_idle|maxwait|pool_mode\n'
+printf 'feed|muso-feed-pg|12|2|12|3|0|transaction\n'
+printf 'stats|muso-stats-pg|40|0|40|10|0|transaction\n'
+printf 'pgbouncer|pgbouncer|1|0|0|0|0|statement\n'
+printf '(3 rows)\n'
+SHIM
+  cat > "$home/bin/kubectl" <<'SHIM'
+#!/usr/bin/env bash
+case " $* " in
+  *" set env deployment/feed-service "*) printf 'DB_HOST=10.0.0.17\nDB_PORT=6432\nDB_NAME=feed\n' ;;
+  *" set env "*) printf 'ENV=production\n' ;;
+  *" get pods "*)
+    printf '{"items":[{"metadata":{"name":"p"},"spec":{"containers":[{"name":"c","resources":{"limits":{"memory":"512Mi"}}}]},"status":{"containerStatuses":[{"name":"c","restartCount":0,"lastState":{}}]}}]}\n'
+    ;;
+  *" top pods "*) printf 'p   c   500m   300Mi\n' ;;
+  *" logs "*) : ;;
+  *) exit 1 ;;
+esac
+SHIM
+  chmod +x "$home/bin/ssh" "$home/bin/kubectl"
+  seed_pr "$home" "$MANIFEST" "$TMP_ROOT/pool.yaml" "$MANIFEST"
+  printf '%s\n' "$home"
+}
+
+HOME_S=$(pool_world s)
+CW_CLUSTER_DIR='' PATH="$HOME_S/bin:$PATH" FM_CW_SSH_LOG="$HOME_S/ssh.log" \
+  run_cw "$HOME_S" 1790000000 register s1 "$PR_URL" >/dev/null || fail "live register failed"
+BASE_S="$HOME_S/state/change-watch/s1-3317/baseline"
+[ "$(grep -c '' "$BASE_S")" -eq 12 ] \
+  || fail "the pool read drained the metric key stream; baseline has $(grep -c '' "$BASE_S") of 12 keys"
+grep -q "^restarts@muso-prod/search-service	" "$BASE_S" \
+  || fail "the target sorted after the pool read was never read"
+[ "$(awk -F'\t' '$1 == "pgbouncer_cl_waiting@muso-prod/feed-service" { print $2 }' "$BASE_S")" = "2" ] \
+  || fail "the pool baseline is not the feed database's cl_waiting: $(cat "$BASE_S")"
+pass "the pool read leaves every later metric key to be read"
+
+[ "$(grep -c '' "$HOME_S/ssh.log")" -eq 1 ] || fail "expected one console read at registration: $(cat "$HOME_S/ssh.log")"
+case " $(cat "$HOME_S/ssh.log") " in
+  *" -n "*" ubuntu@10.0.0.17 sudo -u postgres psql -h /var/run/postgresql -p 6432 -U pgbouncer pgbouncer -Ac 'SHOW POOLS'"*) ;;
+  *) fail "the console is not read as ubuntu through the admin unix socket: $(cat "$HOME_S/ssh.log")" ;;
+esac
+pass "the console is read as ubuntu through the pgbouncer admin unix socket"
+
+out=$(CW_CLUSTER_DIR='' PATH="$HOME_S/bin:$PATH" FM_CW_SSH_LOG="$HOME_S/ssh.log" \
+  run_cw "$HOME_S" 1790000300 doctor s1-3317) && fail "doctor passed a watch with an unresolved pool"
+case "$out" in
+  *"doctor: ok muso-prod/feed-service pool read ubuntu@10.0.0.17:6432 returned 1 pool row(s) for database feed"*) ;;
+  *) fail "doctor did not prove the resolved pool read: $out" ;;
+esac
+case "$out" in
+  *"doctor: FAIL muso-prod/search-service pool unresolved"*) ;;
+  *) fail "doctor did not name the unresolved pool: $out" ;;
+esac
+pass "doctor proves each target's pool read and names an unresolved pool"
+
+out=$(PATH="$HOME_S/bin:$PATH" FM_CW_SSH_LOG="$HOME_S/ssh.log" run_cw "$HOME_S" 1790000300 doctor) \
+  || fail "doctor failed against a console that answers: $out"
+[ "$out" = "doctor: ok pool read ubuntu@10.0.0.17:6432 returned 3 pool row(s)" ] \
+  || fail "doctor's default read is not the documented pooler path: $out"
+out=$(PATH="$HOME_S/bin:$PATH" FM_CW_SSH_LOG="$HOME_S/ssh.log" FM_CW_SSH_FAIL='Permission denied (publickey).' \
+  run_cw "$HOME_S" 1790000300 doctor) && fail "doctor passed a failed console read"
+[ "$out" = "doctor: FAIL pool read ubuntu@10.0.0.17:6432: Permission denied (publickey)." ] \
+  || fail "doctor did not state the console failure: $out"
+pass "doctor reads the documented pooler by default and states a failed read"
+
+# A console that stops answering is cut at the sample budget: the pool metric is
+# unmeasured, the later keys are still read, and the doctor says it timed out.
+HOME_T=$(pool_world t)
+CW_CLUSTER_DIR='' PATH="$HOME_T/bin:$PATH" FM_CW_SSH_LOG="$HOME_T/ssh.log" \
+  FM_CW_SSH_SLEEP=30 FM_CW_SAMPLE_DEADLINE=2 \
+  run_cw "$HOME_T" 1790000000 register t1 "$PR_URL" >/dev/null || fail "live register failed"
+BASE_T="$HOME_T/state/change-watch/t1-3317/baseline"
+[ "$(awk -F'\t' '$1 == "pgbouncer_cl_waiting@muso-prod/feed-service" { print $2 }' "$BASE_T")" = "" ] \
+  || fail "a hung console read produced a pool reading: $(cat "$BASE_T")"
+[ "$(grep -c '' "$BASE_T")" -eq 12 ] || fail "a hung console read lost the later keys"
+out=$(PATH="$HOME_T/bin:$PATH" FM_CW_SSH_LOG="$HOME_T/ssh.log" FM_CW_SSH_SLEEP=30 FM_CW_SAMPLE_DEADLINE=2 \
+  run_cw "$HOME_T" 1790000300 doctor) && fail "doctor passed a hung console read"
+[ "$out" = "doctor: FAIL pool read ubuntu@10.0.0.17:6432: timed out after 2s" ] \
+  || fail "doctor did not state the timed-out read: $out"
+pass "a hung console read is bounded, unmeasured, and stated by the doctor"
