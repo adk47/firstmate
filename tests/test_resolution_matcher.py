@@ -191,6 +191,11 @@ class PureLogic(unittest.TestCase):
 # --------------------------------------------------------------------------
 class MainFlow(unittest.TestCase):
     def setUp(self):
+        # Snapshot the WHOLE environment and restore it exactly in tearDown.
+        # Popping keys this class set also deleted values it did not own --
+        # including CI's JEV_SHADOW_DIR fence, so every later test class wrote
+        # fixture rows into the PRODUCTION shadow log on node-8 (2026-09-23).
+        self._env_snapshot = dict(os.environ)
         self.d = tempfile.mkdtemp()
         self.feed = os.path.join(self.d, "feed.jsonl")
         self.state = os.path.join(self.d, "state.json")
@@ -209,7 +214,7 @@ class MainFlow(unittest.TestCase):
         self.calls = {"reply": [], "close": []}
         self._orig = {k: getattr(rm, k) for k in
                       ("get_conversation", "post_intercom_reply", "close_conversation",
-                       "query_action_log", "post_slack")}
+                       "query_action_log", "post_slack", "shadow_judge")}
         rm.get_conversation = lambda cid, tok: conv(cid=cid, email="a@b.com")
         rm.post_intercom_reply = lambda cid, aid, msg, tok: self.calls["reply"].append(cid)
         rm.close_conversation = lambda cid, aid, tok: self.calls["close"].append(cid)
@@ -217,14 +222,16 @@ class MainFlow(unittest.TestCase):
             {"route": "/api/v3/admin/profile/x/credits", "method": "PUT",
              "requester": "aaron@muso.ai", "at": "2026-06-29 10:00:00 UTC"}]
         rm.post_slack = lambda *a, **k: True
+        # Hermetic: MainFlow exercises the matcher's decision path, not the
+        # Jev shadow. Without this stub it ran the REAL jev.sh (JevShadowWiring
+        # below is where the shadow call is actually tested).
+        rm.shadow_judge = lambda *a, **k: None
 
     def tearDown(self):
         for k, v in self._orig.items():
             setattr(rm, k, v)
-        for k in ("RESOLUTION_SKIP_HOST_GUARD", "MUSOAI_INTERCOM_TOKEN",
-                  "RESOLUTION_FEED_PATH", "RESOLUTION_STATE_PATH", "RESOLUTION_SHADOW_LOG",
-                  "RESOLUTION_NOW", "RESOLUTION_MATCHER_MAX"):
-            os.environ.pop(k, None)
+        os.environ.clear()
+        os.environ.update(self._env_snapshot)
 
     def _write_feed(self, *lines):
         with open(self.feed, "w") as f:
@@ -372,6 +379,11 @@ _REAL_JEV = str(
 
 class JevShadowWiring(unittest.TestCase):
     def setUp(self):
+        # Snapshot the WHOLE environment and restore it exactly in tearDown.
+        # Popping keys this class set also deleted values it did not own --
+        # including CI's JEV_SHADOW_DIR fence, so every later test class wrote
+        # fixture rows into the PRODUCTION shadow log on node-8 (2026-09-23).
+        self._env_snapshot = dict(os.environ)
         self.d = tempfile.mkdtemp()
         self.feed = os.path.join(self.d, "feed.jsonl")
         self.state = os.path.join(self.d, "state.json")
@@ -404,11 +416,8 @@ class JevShadowWiring(unittest.TestCase):
     def tearDown(self):
         for k, v in self._orig.items():
             setattr(rm, k, v)
-        for k in ("RESOLUTION_SKIP_HOST_GUARD", "MUSOAI_INTERCOM_TOKEN",
-                  "RESOLUTION_FEED_PATH", "RESOLUTION_STATE_PATH", "RESOLUTION_SHADOW_LOG",
-                  "RESOLUTION_NOW", "RESOLUTION_MATCHER_MAX", "JEV_SHADOW_DIR",
-                  "JEV_SH", "JEV_SHADOW_FAKE_MODE", "JEV_DISABLED_FILE"):
-            os.environ.pop(k, None)
+        os.environ.clear()
+        os.environ.update(self._env_snapshot)
 
     def _write_feed(self, *lines):
         with open(self.feed, "w") as f:
@@ -504,6 +513,36 @@ class JevShadowWiring(unittest.TestCase):
                                 "requester": "aaron@muso.ai", "at": "2026-06-29 10:00:00 UTC",
                                 "matched_entity": UUID}})
 
+
+
+class EnvironmentIsRestoredExactly(unittest.TestCase):
+    """CI sets JEV_SHADOW_DIR (and JEV_ENV_FILE) for the whole job so no test
+    can write the PRODUCTION shadow log on node-8. A test class that pops keys
+    in tearDown deletes that fence for every class after it -- which is how
+    fixture rows reached production on 2026-09-23 after the fence merged."""
+
+    def _roundtrip(self, cls):
+        name = next(n for n in dir(cls) if n.startswith("test_"))
+        sentinel = "/tmp/ci-fence-sentinel-do-not-touch"
+        prior = os.environ.get("JEV_SHADOW_DIR")
+        os.environ["JEV_SHADOW_DIR"] = sentinel
+        try:
+            t = cls(name)
+            t.setUp()
+            t.tearDown()
+            self.assertEqual(os.environ.get("JEV_SHADOW_DIR"), sentinel,
+                             f"{cls.__name__}.tearDown did not restore a pre-existing JEV_SHADOW_DIR")
+        finally:
+            if prior is None:
+                os.environ.pop("JEV_SHADOW_DIR", None)
+            else:
+                os.environ["JEV_SHADOW_DIR"] = prior
+
+    def test_mainflow_restores_a_preexisting_jev_shadow_dir(self):
+        self._roundtrip(MainFlow)
+
+    def test_jevshadowwiring_restores_a_preexisting_jev_shadow_dir(self):
+        self._roundtrip(JevShadowWiring)
 
 if __name__ == "__main__":
     unittest.main()

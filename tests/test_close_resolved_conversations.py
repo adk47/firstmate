@@ -507,6 +507,11 @@ _REAL_JEV = str(
 
 class JevShadowWiring(unittest.TestCase):
     def setUp(self):
+        # Snapshot the WHOLE environment and restore it exactly in tearDown.
+        # Popping keys this class set also deleted values it did not own --
+        # including CI's JEV_SHADOW_DIR fence, so every later test class wrote
+        # fixture rows into the PRODUCTION shadow log on node-8 (2026-09-23).
+        self._env_snapshot = dict(os.environ)
         self.d = tempfile.mkdtemp()
         self.shadow_log = os.path.join(self.d, "close-shadow.jsonl")
         self.jev_shadow_dir = os.path.join(self.d, "jev-shadow")
@@ -543,10 +548,8 @@ class JevShadowWiring(unittest.TestCase):
     def tearDown(self):
         for k, v in self._orig.items():
             setattr(cr, k, v)
-        for k in ("MUSOAI_INTERCOM_TOKEN", "CLICKUP_API_KEY", "RESOLVE_NOTIFY_STATE",
-                  "CLOSE_SHADOW_LOG", "JEV_SHADOW_DIR", "CLOSE_RESOLVED_JEV_SAMPLE_SIZE",
-                  "JEV_SH", "JEV_SHADOW_FAKE_MODE", "JEV_DISABLED_FILE"):
-            os.environ.pop(k, None)
+        os.environ.clear()
+        os.environ.update(self._env_snapshot)
         shutil.rmtree(self.d, ignore_errors=True)
 
     def _run_scenario(self, jev_sh, disabled_file=None, argv=("--apply",)):
@@ -662,6 +665,33 @@ class JevShadowWiring(unittest.TestCase):
             seen.update(captured)
         self.assertGreater(len(seen), 1, seen)  # a head-slice would always yield {"P0"}
 
+
+
+class EnvironmentIsRestoredExactly(unittest.TestCase):
+    """CI sets JEV_SHADOW_DIR (and JEV_ENV_FILE) for the whole job so no test
+    can write the PRODUCTION shadow log on node-8. A test class that pops keys
+    in tearDown deletes that fence for every class after it -- which is how
+    fixture rows reached production on 2026-09-23 after the fence merged."""
+
+    def _roundtrip(self, cls):
+        name = next(n for n in dir(cls) if n.startswith("test_"))
+        sentinel = "/tmp/ci-fence-sentinel-do-not-touch"
+        prior = os.environ.get("JEV_SHADOW_DIR")
+        os.environ["JEV_SHADOW_DIR"] = sentinel
+        try:
+            t = cls(name)
+            t.setUp()
+            t.tearDown()
+            self.assertEqual(os.environ.get("JEV_SHADOW_DIR"), sentinel,
+                             f"{cls.__name__}.tearDown did not restore a pre-existing JEV_SHADOW_DIR")
+        finally:
+            if prior is None:
+                os.environ.pop("JEV_SHADOW_DIR", None)
+            else:
+                os.environ["JEV_SHADOW_DIR"] = prior
+
+    def test_jevshadowwiring_restores_a_preexisting_jev_shadow_dir(self):
+        self._roundtrip(JevShadowWiring)
 
 if __name__ == "__main__":
     unittest.main()
