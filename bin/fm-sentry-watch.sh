@@ -39,19 +39,21 @@
 #   P0          a user tier: a NEW issue at users>=users_p0, and a seen issue only
 #               when it crosses a new tier (users_p0, twice it, four times it), so
 #               a chronic issue pages once per tier rather than every poll. Or a
-#               burst: the window rate (delta divided by the hours since the
-#               issue was last read) reaches burst_min_events per cadence on a
-#               path whose prior window rate was below burst_baseline_per_hour
-#               (the prior window was not itself at burst level), so a long gap
-#               never turns a chronic trickle into a burst and a sustained storm
-#               pages once. A NEW issue in an already-baselined project records
-#               its first-read rate from the poll window (its count over the
-#               window, bounded by its firstSeen), so a ramp pages on its second
-#               read; only a project's baseline read and a legacy import record
-#               no rate, and those earn one from their first two reads before
-#               the rule applies. A NEW issue is a burst only when its firstSeen
-#               falls inside the window, never on its lifetime count. The window
-#               runs from the last poll that actually read the project.
+#               burst. Until an issue has two full reads by this watch the rule
+#               is absolute and window-scoped: burst_min_events or more events in
+#               this poll window (a NEW issue counts the events since its
+#               firstSeen when that falls inside the window, wherever in the
+#               window they landed, never its lifetime count; an issue with one
+#               prior read counts the events since that read, scaled to at least
+#               one cadence so a long gap never turns a trickle into a burst).
+#               From an issue's third read the rule is a rate: the window rate
+#               reaches burst_min_events per cadence while the prior window's
+#               rate was at or below the project's baseline rate, so a sustained
+#               storm pages once. That baseline is learned per project from its
+#               first two full polls (the mean per-issue event rate between
+#               them); burst_baseline_per_hour is only the fallback until it is
+#               learned. The window runs from the last poll that actually read
+#               the project.
 #   P1          level error/fatal on a live path, at users>=users_p1_sensitive when
 #               the path matches the sensitive routes (onboarding, signup, auth,
 #               login, billing, checkout, payment, claim, credits) and users>=users_p1
@@ -319,7 +321,7 @@ PROJECT_DEFAULTS = {
     "users_p0": 25,
     "burst_min_events": 10,
     "burst_min_events_transport": 25,
-    "burst_baseline_per_hour": 100,
+    "burst_baseline_per_hour": 2,
 }
 DEFAULTS = {
     "cadence_secs": 300,
@@ -731,7 +733,7 @@ def user_tier(users, settings):
     return tier
 
 
-def classify(entry, old, settings, signatures, config, window_start, now, cadence):
+def classify(entry, old, settings, signatures, config, window_start, now, cadence, baseline_rate):
     """Return a finding line, or None. `old` is the prior baseline entry."""
     blob = "%s %s" % (entry["title"], entry["culprit"])
     if signatures["retired"] and signatures["retired"].search(blob):
@@ -777,7 +779,7 @@ def classify(entry, old, settings, signatures, config, window_start, now, cadenc
             prev_rate = None
     window_hours = 0.0
     if isinstance(old, dict) and _as_int(old.get("ts")) is not None:
-        window_hours = max(1, now - _as_int(old.get("ts"))) / 3600.0
+        window_hours = max(cadence, 1, now - _as_int(old.get("ts"))) / 3600.0
     window_rate = delta / window_hours if window_hours > 0 else 0.0
     floor_rate = burst_floor * 3600.0 / max(1, cadence)
 
@@ -822,11 +824,11 @@ def classify(entry, old, settings, signatures, config, window_start, now, cadenc
     old_substatus = old.get("substatus") if isinstance(old, dict) else ""
     if entry["substatus"] == "regressed" and old_substatus != "regressed":
         return finding("REGRESSION", "regressed")
-    if prev_rate is not None and window_rate >= floor_rate \
-            and prev_rate < settings["burst_baseline_per_hour"] \
-            and level in ("error", "fatal") and live:
-        return finding("P0", "burst>=%s/window prior<%.0f/h" % (
-            burst_floor, settings["burst_baseline_per_hour"]))
+    if window_rate >= floor_rate and level in ("error", "fatal") and live:
+        if prev_rate is None:
+            return finding("P0", "burst>=%s/window" % burst_floor)
+        if prev_rate <= baseline_rate:
+            return finding("P0", "burst>=%s/window prior<=%.0f/h" % (burst_floor, baseline_rate))
     tier = user_tier(users, settings)
     new_tier = bool(tier) and tier > user_tier(_as_int(old.get("users")) or 0, settings)
     if critical and delta >= 1:
@@ -838,19 +840,11 @@ def classify(entry, old, settings, signatures, config, window_start, now, cadenc
     return None
 
 
-def project_rate(entry, old, now, window_start, project_baseline):
-    """The issue's event rate in events/hour as of this poll. A seen issue is
-    measured since its last read. An issue new to an already-baselined project
-    is measured over the poll window, bounded by its firstSeen. Only a project's
-    baseline read and a legacy import leave the rate unknown (None)."""
+def project_rate(entry, old, now):
+    """The issue's event rate in events/hour since its last read by this watch,
+    or None until it has one (its first read, or a legacy import)."""
     if not isinstance(old, dict):
-        if project_baseline:
-            return None
-        start = window_start
-        first_seen = entry.get("first_seen")
-        if first_seen is not None and first_seen > start:
-            start = first_seen
-        return (entry["count"] or 0) * 3600.0 / max(1, now - start)
+        return None
     prev_count = _as_int(old.get("count"))
     if prev_count is None:
         return None
@@ -863,6 +857,26 @@ def project_rate(entry, old, now, window_start, project_baseline):
 
 
 # --- baseline ---------------------------------------------------------------
+
+def learn_baseline_rate(rows, issues, now):
+    """The project's baseline rate: the mean per-issue event rate between its
+    first two full polls, in events/hour. A project with nothing in common
+    between the two reads is quiet, and its baseline is zero."""
+    rates = []
+    for issue in rows:
+        if not isinstance(issue, dict):
+            continue
+        old = issues.get(issue.get("shortId") or issue.get("id"))
+        if not isinstance(old, dict):
+            continue
+        prev_count = _as_int(old.get("count"))
+        prev_ts = _as_int(old.get("ts"))
+        if prev_count is None or prev_ts is None:
+            continue
+        delta = max(0, (_as_int(issue.get("count")) or 0) - prev_count)
+        rates.append(delta * 3600.0 / max(1, now - prev_ts))
+    return sum(rates) / len(rates) if rates else 0.0
+
 
 def read_baseline():
     data = read_json(RECORD)
@@ -1083,6 +1097,12 @@ def action_poll(config, org, host, token, problems):
     # A project's poll window runs from the last poll that actually read it, so
     # a NEW issue counts as a burst only when it first appeared inside that
     # window, and a poll that skipped the project never shortens it.
+    baselines = {}
+    if present and isinstance(stored.get("baselines"), dict):
+        baselines = {
+            slug: float(rate) for slug, rate in stored["baselines"].items()
+            if isinstance(rate, (int, float))
+        }
     prior_projects = (
         [s for s in stored.get("projects") if isinstance(s, str)]
         if present and isinstance(stored.get("projects"), list) else []
@@ -1155,6 +1175,11 @@ def action_poll(config, org, host, token, problems):
             continue
         window_start = last_read.get(slug, now - cadence)
         project_baseline = not project_seen(slug, issues, last_read)
+        if slug in last_read and slug not in baselines:
+            baselines[slug] = learn_baseline_rate(rows, issues, now)
+        baseline_rate = baselines.get(slug)
+        if baseline_rate is None:
+            baseline_rate = float(settings["burst_baseline_per_hour"])
         last_read[slug] = now
         unread[slug] = 0
         cursor = slug
@@ -1168,10 +1193,11 @@ def action_poll(config, org, host, token, problems):
             entry = issue_entry(issue, now)
             entry["project"] = slug
             old = issues.get(sid)
-            entry["rate"] = project_rate(entry, old, now, window_start, project_baseline)
+            entry["rate"] = project_rate(entry, old, now)
             entry["surfaced"] = (old.get("surfaced") or 0) if isinstance(old, dict) else 0
             if not project_baseline:
-                finding = classify(entry, old, settings, signatures, config, window_start, now, cadence)
+                finding = classify(
+                    entry, old, settings, signatures, config, window_start, now, cadence, baseline_rate)
                 if finding:
                     # The surfaced marker is what distinguishes an issue this
                     # watch has woken firstmate about from one it only recorded,
@@ -1214,6 +1240,7 @@ def action_poll(config, org, host, token, problems):
         "unread": unread,
         "cursor": cursor,
         "projects": projects_now,
+        "baselines": baselines,
     })
     if read_any:
         try:

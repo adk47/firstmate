@@ -174,6 +174,76 @@ JSON
   pass "a new issue's ramp pages on its second read and a sustained storm pages once"
 }
 
+test_new_issue_burst_pages_on_first_read_anywhere_in_the_window() {
+  local home out
+  home=$(make_home first-read-late)
+  prime_baseline "$home" 1000
+  # Twelve fatal events whose first landed twenty seconds before the read: the
+  # 11N shape must page on its first read wherever in the window it fell.
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-LATE","title":"TypeError: late","culprit":"/api/v4/feed/profile/4/activities","userCount":1,"count":12,"level":"fatal","substatus":"new","firstSeen":"1970-01-01T00:21:20Z","permalink":"https://x/late/"}]
+JSON
+  out=$(poll "$home" 1300)
+  assert_contains "$out" "P0 CORE-BACKEND-LATE" "a first-read burst late in the window did not page"
+  assert_contains "$out" "rule=burst>=10" "the burst rule was not named"
+
+  home=$(make_home first-read-early)
+  prime_baseline "$home" 1000
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-EARLY","title":"TypeError: early","culprit":"/api/v4/feed/profile/4/activities","userCount":1,"count":12,"level":"fatal","substatus":"new","firstSeen":"1970-01-01T00:16:40Z","permalink":"https://x/early/"}]
+JSON
+  out=$(poll "$home" 1300)
+  assert_contains "$out" "P0 CORE-BACKEND-EARLY" "a first-read burst at the start of the window did not page"
+  pass "a new-issue burst pages on its first read wherever in the window the events fell"
+}
+
+test_project_baseline_rate_is_learned_from_its_first_two_polls() {
+  local home out
+  home=$(make_home learned-baseline)
+  write_projects "$home" core-backend feed-service
+  # core-backend carries a chronic issue at 60/h between its first two polls,
+  # so its learned baseline is 30/h (the mean over its two issues); feed-service
+  # is quiet, so its baseline is zero. The same two-event prior window then
+  # lets a burst page on core-backend and blocks it on feed-service.
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-CHR","title":"TypeError: chronic","culprit":"/api/v4/feed/a","userCount":4,"count":100,"level":"error","substatus":"ongoing","permalink":"https://x/chr/"},
+ {"shortId":"CORE-BACKEND-X","title":"TypeError: x","culprit":"/api/v4/feed/b","userCount":1,"count":10,"level":"error","substatus":"ongoing","permalink":"https://x/x/"}]
+JSON
+  write_issues "$home" feed-service <<'JSON'
+[{"shortId":"FEED-SERVICE-Y","title":"TypeError: y","culprit":"/api/v4/feed/c","userCount":1,"count":10,"level":"error","substatus":"ongoing","permalink":"https://x/y/"}]
+JSON
+  printf '[]\n' > "$home/fix/rail.json"
+  mark_armed "$home" 1000
+  poll "$home" 1000 >/dev/null
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-CHR","title":"TypeError: chronic","culprit":"/api/v4/feed/a","userCount":4,"count":105,"level":"error","substatus":"ongoing","permalink":"https://x/chr/"},
+ {"shortId":"CORE-BACKEND-X","title":"TypeError: x","culprit":"/api/v4/feed/b","userCount":1,"count":10,"level":"error","substatus":"ongoing","permalink":"https://x/x/"}]
+JSON
+  out=$(poll "$home" 1300)
+  [ -z "$out" ] || fail "the learning poll paged: $out"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-CHR","title":"TypeError: chronic","culprit":"/api/v4/feed/a","userCount":4,"count":110,"level":"error","substatus":"ongoing","permalink":"https://x/chr/"},
+ {"shortId":"CORE-BACKEND-X","title":"TypeError: x","culprit":"/api/v4/feed/b","userCount":1,"count":12,"level":"error","substatus":"ongoing","permalink":"https://x/x/"}]
+JSON
+  write_issues "$home" feed-service <<'JSON'
+[{"shortId":"FEED-SERVICE-Y","title":"TypeError: y","culprit":"/api/v4/feed/c","userCount":1,"count":12,"level":"error","substatus":"ongoing","permalink":"https://x/y/"}]
+JSON
+  out=$(poll "$home" 1600)
+  [ -z "$out" ] || fail "two events in a window paged: $out"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-CHR","title":"TypeError: chronic","culprit":"/api/v4/feed/a","userCount":4,"count":115,"level":"error","substatus":"ongoing","permalink":"https://x/chr/"},
+ {"shortId":"CORE-BACKEND-X","title":"TypeError: x","culprit":"/api/v4/feed/b","userCount":1,"count":27,"level":"error","substatus":"ongoing","permalink":"https://x/x/"}]
+JSON
+  write_issues "$home" feed-service <<'JSON'
+[{"shortId":"FEED-SERVICE-Y","title":"TypeError: y","culprit":"/api/v4/feed/c","userCount":1,"count":27,"level":"error","substatus":"ongoing","permalink":"https://x/y/"}]
+JSON
+  out=$(poll "$home" 1900)
+  assert_contains "$out" "P0 CORE-BACKEND-X" "a burst under the project's learned baseline did not page"
+  assert_contains "$out" "prior<=30/h" "the learned baseline was not the one compared against"
+  assert_not_contains "$out" "FEED-SERVICE-Y" "a burst over a quiet project's learned baseline paged"
+  pass "the burst baseline is learned per project from its first two polls"
+}
+
 test_burst_is_a_window_rate_not_a_gap_total() {
   local home out
   home=$(make_home gap-total)
@@ -891,6 +961,8 @@ test_sensitive_route_pages_at_one_user
 test_nonsensitive_route_pages_at_three_users
 test_burst_pages_regardless_of_users
 test_new_issue_ramp_pages_on_its_second_read
+test_new_issue_burst_pages_on_first_read_anywhere_in_the_window
+test_project_baseline_rate_is_learned_from_its_first_two_polls
 test_burst_is_a_window_rate_not_a_gap_total
 test_transport_burst_still_pages
 test_transport_pages_only_through_the_raised_burst_floor
