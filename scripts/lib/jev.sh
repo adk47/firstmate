@@ -17,6 +17,10 @@
 # An explicitly set JEV_API_URL, JEV_MODEL, or --model still wins over the
 # provider default.
 #
+# Kill switch: JEV_DISABLED_FILE (default /etc/hydra/jev.disabled) — when
+# that path exists, every call exits 6 with no network request. See rc 6
+# below.
+#
 # Usage:
 #   jev.sh --surface <name> --item-id <id> --state-file <path.json> \
 #     --questions-file <path.json> [--actual <string or JSON object keyed by question id>] [--model jev-latest] \
@@ -29,6 +33,10 @@
 #   4  state file larger than --max-state-bytes (refused, never truncated)
 #   5  missing/invalid input (bad JSON, missing flag, missing API key,
 #      invalid JEV_PROVIDER, invalid --surface / --item-id)
+#   6  disabled via the kill switch: ${JEV_DISABLED_FILE:-/etc/hydra/jev.disabled}
+#      exists. Checked before any network call. Still shadow-logged (unless
+#      --no-shadow) with rc 6, so a disabled window shows up in the report as
+#      "disabled", not as indistinguishable silence.
 #
 # Every call — success or failure, including rc 4/5 pre-request failures once
 # --surface/--item-id are parsed — appends one JSON line to the shadow log
@@ -147,6 +155,19 @@ jev_main() {
   esac
   [ -n "$api_url" ] || api_url="$provider_url_default"
   [ -n "$model" ] || model="$provider_model_default"
+
+  # Kill switch: refuse immediately, before any network call, if the disabled
+  # marker file exists. Checked here (after surface/item-id/provider/model are
+  # known, so the shadow row carries a real model) but before any file I/O or
+  # network work below.
+  local disabled_file="${JEV_DISABLED_FILE:-/etc/hydra/jev.disabled}"
+  if [ -e "$disabled_file" ]; then
+    if [ "$no_shadow" -eq 0 ]; then
+      _jev_shadow_log "$surface" "$item_id" "$state_sha" "$questions_sha" \
+        "$model" "null" "null" "0" "$actual" "6" "null" "$provider"
+    fi
+    _jev_die 6 "disabled via $disabled_file — no call made"
+  fi
 
   # Numeric knobs must be decimal integers >= 1 before they reach arithmetic
   # or `-gt`: a typo like JEV_TIMEOUT_MS=abc would otherwise die with no

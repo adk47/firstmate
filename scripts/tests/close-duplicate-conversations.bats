@@ -27,6 +27,15 @@ setup() {
   export CLOSE_DUP_SHADOW_LOG="$STATE_DIR/close-duplicate-shadow.jsonl"
   export CLOSE_DUP_POINTER_STATE="$STATE_DIR/pointer-posted.json"
 
+  TEST_TMPDIR="$BATS_TEST_TMPDIR"
+  export TEST_TMPDIR
+  export FAKE_JEV="$SCRIPTS_DIR/tests/fixtures/jev/fake-jev-sh.sh"
+  export REAL_JEV="$SCRIPTS_DIR/lib/jev.sh"
+  # Throwaway shadow dir so dedupe-same-request wiring tests never touch a
+  # real /var/lib/hydra-jev/shadow.
+  export JEV_SHADOW_DIR="$BATS_TEST_TMPDIR/jev-shadow"
+  mkdir -p "$JEV_SHADOW_DIR"
+
   # Stub openclaw/muso ahead of the real PATH — repo doctrine (this script
   # is pure-Python urllib and shells out to neither today, but the stub is
   # cheap insurance against a future edit silently gaining a live call).
@@ -448,4 +457,176 @@ print("ok")
 PYEOF
   [ "$status" -eq 0 ]
   echo "$output" | grep -qx ok
+}
+
+_close_dup_shadow_scenario() {
+  # Drives one --apply run of a Tier A candidate (immediate close, no
+  # pointer step) and writes the observable result (rc + closed ids) to
+  # RESULT_FILE, deliberately separate from stdout/stderr — jev_shadow's own
+  # diagnostic lines land on stderr and legitimately DIFFER per failure mode.
+  # $1 = JEV_SH to use, $2 = JEV_DISABLED_FILE (optional).
+  RESULT_FILE="$TEST_TMPDIR/close-dup-shadow-result.json"
+  rm -f "$RESULT_FILE"
+  JEV_SH="$1" JEV_DISABLED_FILE="${2:-}" RESULT_FILE="$RESULT_FILE" \
+    python3 - > /dev/null 2>&1 <<'PYEOF'
+import os, json, sys
+from importlib import util
+spec = util.spec_from_file_location('m', os.environ['CLOSEDUP'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+older = {"id": "O", "email": "x@y.com", "lar": 200, "lcr": 100, "created_at": 1000, "is_inbound": True}
+kept = {"id": "K", "email": "x@y.com", "lar": 300, "lcr": 100, "created_at": 5000, "is_inbound": True}
+mod.fetch_open_convs = lambda token: [older, kept]
+mod.owned_ids = lambda paths: set()
+mod.reverify_still_valid = lambda *a, **k: True
+
+def fake_get_conversation(token, conv_id):
+    body = "<p>my profile is wrong</p>" if conv_id == "O" else "<p>please fix my profile</p>"
+    return {"id": conv_id, "state": "open", "lcr": 100, "lar": 200,
+            "confirm_email": "x@y.com", "source_body": body}
+mod.get_conversation = fake_get_conversation
+
+closed = []
+mod.close_conversation = lambda token, admin_id, conv_id: closed.append(conv_id) or {"state": "closed"}
+
+class FakeShadow:
+    def write(self, s): pass
+    def flush(self): pass
+    def close(self): pass
+
+mod.open_shadow_log = lambda: (FakeShadow(), "/fake/path")
+mod.post_slack_summary = lambda *a, **k: True
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+os.environ["INTERCOM_ADMIN_ID"] = "5763097"
+sys.argv = ["m", "--apply"]
+rc = mod.main()
+with open(os.environ["RESULT_FILE"], "w") as f:
+    json.dump({"rc": rc, "closed": closed}, f, sort_keys=True)
+PYEOF
+  cat "$RESULT_FILE"
+}
+
+@test "shadow wiring: dedupe-same-request jev call never changes which candidate closes (ok/rc2/hang/kill-switch all match)" {
+  export JEV_SHADOW_FAKE_MODE=ok
+  run _close_dup_shadow_scenario "$FAKE_JEV"
+  [ "$status" -eq 0 ]
+  BASELINE="$output"
+  [ -n "$BASELINE" ]
+  echo "$BASELINE" | grep -qF '"closed": ["O"]'  # sanity: this candidate did close
+
+  export JEV_SHADOW_FAKE_MODE=rc2
+  run _close_dup_shadow_scenario "$FAKE_JEV"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$BASELINE" ]
+
+  export JEV_SHADOW_FAKE_MODE=hang
+  run _close_dup_shadow_scenario "$FAKE_JEV"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$BASELINE" ]
+
+  # Kill switch: real jev.sh, JEV_DISABLED_FILE present -> jev.sh itself exits 6.
+  KS_FILE="$TEST_TMPDIR/jev.disabled"
+  : > "$KS_FILE"
+  run _close_dup_shadow_scenario "$REAL_JEV" "$KS_FILE"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$BASELINE" ]
+}
+
+@test "shadow wiring: actual reflects the real tier, and bodies come from each thread's own source_body" {
+  run python3 - <<'PYEOF'
+import os, sys
+from importlib import util
+spec = util.spec_from_file_location('m', os.environ['CLOSEDUP'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+older = {"id": "O", "email": "x@y.com", "lar": 200, "lcr": 100, "created_at": 1000, "is_inbound": True}
+kept = {"id": "K", "email": "x@y.com", "lar": 300, "lcr": 100, "created_at": 5000, "is_inbound": True}
+mod.fetch_open_convs = lambda token: [older, kept]
+mod.owned_ids = lambda paths: set()
+mod.reverify_still_valid = lambda *a, **k: True
+
+def fake_get_conversation(token, conv_id):
+    # Already plain text: this mock stands in for the real get_conversation,
+    # which does its own HTML stripping before source_body is ever set
+    # (see _strip_html), so the mock returns what that call would produce.
+    body = "my profile is wrong" if conv_id == "O" else "please fix my profile"
+    return {"id": conv_id, "state": "open", "lcr": 100, "lar": 200,
+            "confirm_email": "x@y.com", "source_body": body}
+mod.get_conversation = fake_get_conversation
+mod.close_conversation = lambda token, admin_id, conv_id: {"state": "closed"}
+
+class FakeShadow:
+    def write(self, s): pass
+    def flush(self): pass
+    def close(self): pass
+mod.open_shadow_log = lambda: (FakeShadow(), "/fake/path")
+mod.post_slack_summary = lambda *a, **k: True
+
+captured = []
+# state is now a zero-arg build_state callable (built lazily inside
+# shadow_judge's never-raise boundary), not a pre-built dict -- call it here
+# to get the actual state this candidate would have been judged on.
+mod.shadow_judge = lambda surface, item_id, state, questions, actual=None: (
+    captured.append((surface, item_id, state() if callable(state) else state, actual)) or None)
+
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+os.environ["INTERCOM_ADMIN_ID"] = "5763097"
+sys.argv = ["m", "--apply"]
+rc = mod.main()
+assert rc == 0, rc
+assert len(captured) == 1, captured
+surface, item_id, state, actual = captured[0]
+assert surface == "dedupe-same-request", surface
+assert item_id == "O", item_id
+assert actual == "A", actual
+assert state == {"thread_a_first_message": "my profile is wrong",
+                  "thread_b_first_message": "please fix my profile"}, state
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "build_state boundary: a get_conversation OSError while building shadow state never aborts the close" {
+  # Regression for the exact bug class flagged in review: the two re-fetches
+  # inside _dedupe_build_state used to run BEFORE shadow_judge was even
+  # called, so an OSError (RemoteDisconnected / socket timeout -- neither
+  # caught by get_conversation's own URLError/ValueError handling) would
+  # raise straight through main()'s loop and abort a legitimate close.
+  # Now that fetch lives inside shadow_judge's never-raise boundary, the
+  # same OSError must leave `closed`/rc identical to the non-raising case.
+  run python3 - <<'PYEOF'
+import os, sys
+from importlib import util
+spec = util.spec_from_file_location('m', os.environ['CLOSEDUP'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+older = {"id": "O", "email": "x@y.com", "lar": 200, "lcr": 100, "created_at": 1000, "is_inbound": True}
+kept = {"id": "K", "email": "x@y.com", "lar": 300, "lcr": 100, "created_at": 5000, "is_inbound": True}
+mod.fetch_open_convs = lambda token: [older, kept]
+mod.owned_ids = lambda paths: set()
+mod.reverify_still_valid = lambda *a, **k: True
+
+def raising_get_conversation(token, conv_id):
+    raise ConnectionResetError("simulated network failure fetching message body")
+mod.get_conversation = raising_get_conversation
+
+closed = []
+mod.close_conversation = lambda token, admin_id, conv_id: closed.append(conv_id) or {"state": "closed"}
+
+class FakeShadow:
+    def write(self, s): pass
+    def flush(self): pass
+    def close(self): pass
+mod.open_shadow_log = lambda: (FakeShadow(), "/fake/path")
+mod.post_slack_summary = lambda *a, **k: True
+
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+os.environ["INTERCOM_ADMIN_ID"] = "5763097"
+sys.argv = ["m", "--apply"]
+rc = mod.main()
+assert rc == 0, rc
+assert closed == ["O"], closed  # the close still happens despite the shadow-state GET raising
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
 }

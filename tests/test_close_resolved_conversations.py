@@ -20,7 +20,10 @@ under the same bare `python3 -m unittest` the py-tests CI job already uses.
 """
 import importlib.util
 import json
+import os
 import pathlib
+import shutil
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -482,6 +485,182 @@ class TestShouldNotify(unittest.TestCase):
 
     def test_no_post_when_nothing_closed(self):
         self.assertFalse(cr.should_notify(apply=True, notify_enabled=True, ok=0))
+
+
+
+
+# --------------------------------------------------------------------------
+# Phase 2a shadow wiring (docs/plans/jev-adoption.md #2a). The close-resolved
+# Jev call fires strictly AFTER is_eligible() above, on a RANDOM sample of the
+# FULL open-conversation scan (never just the eligible slice), and must never
+# change `eligible`, closes, stdout, or the exit code -- regardless of whether
+# jev.sh succeeds, fails, hangs, or is disabled.
+# --------------------------------------------------------------------------
+_FAKE_JEV = str(
+    pathlib.Path(__file__).resolve().parent.parent
+    / "scripts" / "tests" / "fixtures" / "jev" / "fake-jev-sh.sh"
+)
+_REAL_JEV = str(
+    pathlib.Path(__file__).resolve().parent.parent / "scripts" / "lib" / "jev.sh"
+)
+
+
+class JevShadowWiring(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.shadow_log = os.path.join(self.d, "close-shadow.jsonl")
+        self.jev_shadow_dir = os.path.join(self.d, "jev-shadow")
+        os.makedirs(self.jev_shadow_dir, exist_ok=True)
+        os.environ.update({
+            "MUSOAI_INTERCOM_TOKEN": "fake",
+            "CLICKUP_API_KEY": "fake",
+            # Points at a file that does not exist -> a clean first run for
+            # resolve-notify's state (load_held/seen_ticket_ids both return
+            # set()), never the real /var/lib default.
+            "RESOLVE_NOTIFY_STATE": os.path.join(self.d, "notified.json"),
+            "CLOSE_SHADOW_LOG": self.shadow_log,
+            "JEV_SHADOW_DIR": self.jev_shadow_dir,
+        })
+        self.calls = {"close": []}
+        self._orig = {k: getattr(cr, k) for k in
+                      ("build_ticket_index", "fetch_open_convs", "close_conversation",
+                       "get_conversation_for_shadow", "post_slack_summary", "shadow_judge")}
+        # One conversation the script's own logic makes ELIGIBLE (linked ticket
+        # customer-complete, we-spoke-last) and one it does NOT.
+        eligible_conv = make_conv(cid="E1", lar=200, lcr=100, email="a@b.com")
+        not_eligible_conv = make_conv(cid="N1", lar=100, lcr=200, email="c@d.com")
+        cr.build_ticket_index = lambda key, list_id: (
+            {}, {"E1": cs("2026-06-01")}, {})
+        cr.fetch_open_convs = lambda token: [eligible_conv, not_eligible_conv]
+        cr.close_conversation = lambda tok, aid, cid: self.calls["close"].append(cid) or {"state": "closed"}
+        cr.get_conversation_for_shadow = lambda conv_id, token: {
+            "conversation_parts": {"conversation_parts": [
+                {"author": {"type": "admin", "id": "1"}, "body": "<p>all set?</p>"},
+                {"author": {"type": "user"}, "body": "<p>yes, thanks!</p>"},
+            ]}}
+        cr.post_slack_summary = lambda *a, **k: True
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(cr, k, v)
+        for k in ("MUSOAI_INTERCOM_TOKEN", "CLICKUP_API_KEY", "RESOLVE_NOTIFY_STATE",
+                  "CLOSE_SHADOW_LOG", "JEV_SHADOW_DIR", "CLOSE_RESOLVED_JEV_SAMPLE_SIZE",
+                  "JEV_SH", "JEV_SHADOW_FAKE_MODE", "JEV_DISABLED_FILE"):
+            os.environ.pop(k, None)
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _run_scenario(self, jev_sh, disabled_file=None, argv=("--apply",)):
+        os.environ["JEV_SH"] = jev_sh
+        if disabled_file:
+            os.environ["JEV_DISABLED_FILE"] = disabled_file
+        else:
+            os.environ.pop("JEV_DISABLED_FILE", None)
+        with mock.patch.object(sys, "argv", ["close-resolved-conversations.py", *argv]):
+            rc = cr.main()
+        return {"rc": rc, "close": list(self.calls["close"])}
+
+    def test_shadow_call_never_changes_outcome_across_ok_rc2_hang_killswitch(self):
+        os.environ["JEV_SHADOW_FAKE_MODE"] = "ok"
+        baseline = self._run_scenario(_FAKE_JEV)
+        self.assertEqual(baseline["close"], ["E1"])  # sanity: only the eligible conv closed
+
+        for mode in ("rc2", "hang"):
+            self.calls["close"].clear()
+            os.environ["JEV_SHADOW_FAKE_MODE"] = mode
+            result = self._run_scenario(_FAKE_JEV)
+            self.assertEqual(result, baseline, f"mode={mode} changed observable behaviour")
+
+        # Kill switch: real jev.sh, JEV_DISABLED_FILE present -> jev.sh exits 6.
+        self.calls["close"].clear()
+        ks_file = os.path.join(self.d, "jev.disabled")
+        with open(ks_file, "w"):
+            pass
+        result = self._run_scenario(_REAL_JEV, disabled_file=ks_file)
+        self.assertEqual(result, baseline, "kill switch changed observable behaviour")
+
+    def test_shadow_actual_matches_the_real_eligible_not_eligible_split(self):
+        captured = []
+        cr.shadow_judge = lambda surface, item_id, state, questions, actual=None: (
+            captured.append((surface, item_id, actual)) or None)
+        result = self._run_scenario(_FAKE_JEV, argv=("--apply",))
+        self.assertEqual(result["rc"], 0)
+        self.assertEqual(
+            sorted(captured),
+            sorted([(cr.JEV_SURFACE_CLOSE_RESOLVED, "E1", "eligible"),
+                    (cr.JEV_SURFACE_CLOSE_RESOLVED, "N1", "not-eligible")]))
+
+    def test_dry_run_also_reaches_the_sample_unharmed(self):
+        # The sample is drawn from the full scan BEFORE the --apply/dry-run
+        # branch, so a dry-run must sample (and never close) exactly like an
+        # --apply run never changes the sample.
+        captured = []
+        cr.shadow_judge = lambda surface, item_id, state, questions, actual=None: (
+            captured.append(item_id) or None)
+        result = self._run_scenario(_FAKE_JEV, argv=())
+        self.assertEqual(result["rc"], 0)
+        self.assertEqual(result["close"], [])
+        self.assertEqual(sorted(captured), ["E1", "N1"])
+
+    def test_sample_never_exceeds_the_configured_knob_even_over_a_large_pool(self):
+        os.environ["CLOSE_RESOLVED_JEV_SAMPLE_SIZE"] = "3"
+        convs = [make_conv(cid=f"C{i}", lar=100, lcr=50, email=f"u{i}@x.com") for i in range(40)]
+        cr.fetch_open_convs = lambda token: convs
+        captured = []
+        cr.shadow_judge = lambda surface, item_id, state, questions, actual=None: (
+            captured.append(item_id) or None)
+        result = self._run_scenario(_FAKE_JEV, argv=("--apply",))
+        self.assertEqual(result["rc"], 0)
+        self.assertEqual(len(captured), 3)
+        self.assertEqual(len(set(captured)), 3)  # no duplicate items in one sample
+
+    def test_build_state_is_a_lazy_callable_and_a_raising_fetch_never_blocks_the_close(self):
+        # Regression for the same bug class as the other Phase-2a call sites:
+        # a raising get_conversation_for_shadow (this script's OWN eligibility
+        # decision never depends on conversation body text -- only the shadow
+        # state fetch does) must never abort the real close loop.
+        captured = []
+
+        def boom(conv_id, token):
+            raise RuntimeError("network boom")
+        cr.get_conversation_for_shadow = boom
+
+        def spy_shadow_judge(surface, item_id, state, questions, actual=None):
+            captured.append((surface, item_id, actual))
+            self.assertTrue(callable(state), state)  # NOT a pre-built dict
+            return None
+        cr.shadow_judge = spy_shadow_judge
+        result = self._run_scenario(_FAKE_JEV, argv=("--apply",))
+        self.assertEqual(result["rc"], 0)
+        self.assertEqual(result["close"], ["E1"])  # the real close still happens
+        self.assertEqual(len(captured), 2)
+
+    def test_a_nonfixed_seed_is_logged_to_stderr_with_the_sample_size(self):
+        import io
+        from contextlib import redirect_stderr
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            result = self._run_scenario(_FAKE_JEV, argv=("--apply",))
+        self.assertEqual(result["rc"], 0)
+        self.assertRegex(buf.getvalue(),
+                          r"jev shadow sample: seed=\d+ size=2 \(pool=2\)")
+
+    def test_samples_across_runs_vary_never_pinned_to_the_scan_head(self):
+        # convs is scanned in fetch_open_convs' own (arbitrary, API-page) order
+        # -- a caller that (bug) sliced convs[:k] instead of drawing a random
+        # sample would deterministically pick the SAME item (index 0) on every
+        # run. Over enough runs a genuinely random draw from a 10-item pool
+        # with k=1 must land on more than one distinct id.
+        os.environ["CLOSE_RESOLVED_JEV_SAMPLE_SIZE"] = "1"
+        pool = [make_conv(cid=f"P{i}", lar=100, lcr=50, email=f"p{i}@x.com") for i in range(10)]
+        cr.fetch_open_convs = lambda token: pool
+        seen = set()
+        for _ in range(30):
+            captured = []
+            cr.shadow_judge = lambda surface, item_id, state, questions, actual=None: (
+                captured.append(item_id) or None)
+            self._run_scenario(_FAKE_JEV, argv=())
+            seen.update(captured)
+        self.assertGreater(len(seen), 1, seen)  # a head-slice would always yield {"P0"}
 
 
 if __name__ == "__main__":

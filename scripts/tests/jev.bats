@@ -424,6 +424,41 @@ teardown() {
   [ -f "$JEV_SHADOW_DIR/refund-gate.v2_x.jsonl" ]
 }
 
+@test "kill switch: JEV_DISABLED_FILE present -> rc 6, curl never called, shadow row rc 6" {
+  export JEV_FAKE_MODE=ok
+  export JEV_DISABLED_FILE="$TEST_TMPDIR/jev.disabled"
+  : > "$JEV_DISABLED_FILE"
+  run "$JEV" --surface refund-gate --item-id ks1 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --actual "true" --timeout-ms 200
+  [ "$status" -eq 6 ]
+  [ ! -f "$CURL_MARKER" ]
+  local line; line="$(tail -1 "$JEV_SHADOW_DIR/refund-gate.jsonl")"
+  echo "$line" | jq -e '.rc == 6 and .answers == null and .item_id == "ks1" and .actual == "true"' >/dev/null
+}
+
+@test "kill switch: --no-shadow with JEV_DISABLED_FILE present -> rc 6, no shadow file" {
+  export JEV_FAKE_MODE=ok
+  export JEV_DISABLED_FILE="$TEST_TMPDIR/jev.disabled"
+  : > "$JEV_DISABLED_FILE"
+  run "$JEV" --surface refund-gate --item-id ks2 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --no-shadow --timeout-ms 200
+  [ "$status" -eq 6 ]
+  [ ! -f "$CURL_MARKER" ]
+  [ ! -f "$JEV_SHADOW_DIR/refund-gate.jsonl" ]
+}
+
+@test "kill switch: JEV_DISABLED_FILE absent -> normal ok flow unaffected" {
+  export JEV_FAKE_MODE=ok
+  export JEV_DISABLED_FILE="$TEST_TMPDIR/no-such-jev.disabled"
+  run "$JEV" --surface refund-gate --item-id ks3 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 0 ]
+  [ -f "$CURL_MARKER" ]
+}
+
 @test "--item-id with a newline: rc 5, no shadow row" {
   export JEV_FAKE_MODE=ok
   run "$JEV" --surface refund-gate --item-id "$(printf 'a\nb')" \

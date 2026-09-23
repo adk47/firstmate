@@ -19,6 +19,15 @@ setup() {
   export RESOLVE_NOTIFY_SUMMARY_MODE=never
   export RESOLVE_NOTIFY_LOG="$BATS_TEST_TMPDIR/send.log"
   export RESOLVE_NOTIFY_NOW=1781784000  # 2026-06-17 12:00 UTC
+
+  TEST_TMPDIR="$BATS_TEST_TMPDIR"
+  export TEST_TMPDIR
+  export FAKE_JEV="$SCRIPTS_DIR/tests/fixtures/jev/fake-jev-sh.sh"
+  export REAL_JEV="$SCRIPTS_DIR/lib/jev.sh"
+  # Point every run at a throwaway shadow dir so cs-closer wiring tests never
+  # touch a real /var/lib/hydra-jev/shadow.
+  export JEV_SHADOW_DIR="$BATS_TEST_TMPDIR/jev-shadow"
+  mkdir -p "$JEV_SHADOW_DIR"
 }
 
 @test "syntax-checks" {
@@ -571,6 +580,185 @@ tampered = json.load(open(path))
 tampered.pop(mod.STATE_VERSION_KEY)
 json.dump(tampered, open(path, "w"))
 assert mod.load_state(path) is None, "partial integrity metadata must fail closed"
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+# --------------------------------------------------------------------------
+# Phase 2a shadow wiring (docs/plans/jev-adoption.md #2a): the cs-closer Jev
+# call must never change observable behaviour. Each of the four scenarios
+# below (jev.sh success / non-zero exit / hang past timeout / kill switch)
+# must produce byte-identical sent-replies + written state to a baseline run
+# with JEV_SH pointed at a real jev.sh that is unreachable (fails safely).
+# --------------------------------------------------------------------------
+
+_resolve_notify_shadow_scenario() {
+  # Drives one apply run and writes the observable result (rc + sent replies +
+  # final state, i.e. everything a caller of this script can see) to
+  # RESULT_FILE, deliberately separate from stdout/stderr — jev_shadow's own
+  # diagnostic lines land on stderr and legitimately DIFFER per failure mode
+  # (that's the point of them), so comparing raw combined `run` output across
+  # scenarios would fail on those diagnostics, not on real behaviour. $1 =
+  # JEV_SH to use, $2 = JEV_DISABLED_FILE (optional).
+  RESULT_FILE="$TEST_TMPDIR/shadow-scenario-result.json"
+  rm -f "$RESULT_FILE"
+  JEV_SH="$1" JEV_DISABLED_FILE="${2:-}" RESULT_FILE="$RESULT_FILE" \
+    python3 - > /dev/null 2>&1 <<'PYEOF'
+import os, json, sys
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod.write_state(os.environ["RESOLVE_NOTIFY_STATE"], {mod.SEED_SENTINEL: 1781000000})
+task = {"id": "T9", "status": {"type": "done"},
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:profile-claim"},
+                 {"name": "customer-outcome:complete"}],
+        "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/C9"}],
+        "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---"}
+mod.fetch_all_tasks = lambda key, lid: [task]
+# state=closed -> the REAL decision is suppress ("not-open"): this deliberately
+# exercises a case where the shadow call's own answer differs from the real
+# decision (jev.sh "ok" fixture answers True), so a broken after-the-decision
+# ordering guard (the shadow answer leaking into `reason`) sends here instead
+# of correctly sending nothing.
+mod.get_conversation = lambda cid, tok: {
+    "source": {"author": {"type": "user", "email": "a@b.com"}},
+    "state": "closed",
+    "conversation_parts": {"conversation_parts": [
+        {"author": {"type": "admin", "id": "5763097"}, "body": "<p>did that answer it?</p>"},
+        {"author": {"type": "user"}, "body": "<p>yes thanks, all set</p>"},
+    ]},
+}
+calls = []
+mod.post_intercom_reply = lambda conv_id, admin_id, message, token: calls.append((conv_id, message)) or {"id": "m"}
+os.environ.update({"CLICKUP_API_KEY": "k", "MUSOAI_INTERCOM_TOKEN": "t"})
+sys.argv = ["n", "--apply"]
+rc = mod.main()
+state = json.load(open(os.environ["RESOLVE_NOTIFY_STATE"]))
+with open(os.environ["RESULT_FILE"], "w") as f:
+    json.dump({"rc": rc, "sent": calls, "state": state}, f, sort_keys=True)
+PYEOF
+  cat "$RESULT_FILE"
+}
+
+@test "shadow wiring: cs-closer jev call never changes sent replies or state (ok/rc2/hang/kill-switch all match)" {
+  export JEV_SHADOW_FAKE_MODE=ok
+  run _resolve_notify_shadow_scenario "$FAKE_JEV"
+  [ "$status" -eq 0 ]
+  BASELINE="$output"
+  [ -n "$BASELINE" ]
+
+  export JEV_SHADOW_FAKE_MODE=rc2
+  run _resolve_notify_shadow_scenario "$FAKE_JEV"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$BASELINE" ]
+
+  export JEV_SHADOW_FAKE_MODE=hang
+  run _resolve_notify_shadow_scenario "$FAKE_JEV"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$BASELINE" ]
+
+  # Kill switch: real jev.sh, JEV_DISABLED_FILE present -> jev.sh itself exits 6.
+  KS_FILE="$TEST_TMPDIR/jev.disabled"
+  : > "$KS_FILE"
+  run _resolve_notify_shadow_scenario "$REAL_JEV" "$KS_FILE"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$BASELINE" ]
+}
+
+@test "last_customer_message_state: extracts the last customer message and the preceding admin message" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+conv = {"conversation_parts": {"conversation_parts": [
+    {"author": {"type": "user"}, "body": "<p>hi, still broken</p>"},
+    {"author": {"type": "admin", "id": "1"}, "body": "<p>did that answer it?</p>"},
+    {"author": {"type": "user"}, "body": "<p>yes thanks, all set</p>"},
+]}}
+st = mod.last_customer_message_state(conv)
+assert st == {"customer_message": "yes thanks, all set",
+              "preceding_admin_message": "did that answer it?"}, st
+
+# No customer part at all -> None (nothing to judge).
+assert mod.last_customer_message_state({"conversation_parts": {"conversation_parts": []}}) is None
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "shadow wiring: actual reflects the real suppress decision (sent vs suppressed:<reason>)" {
+  run python3 - <<'PYEOF'
+import os, sys
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod.write_state(os.environ["RESOLVE_NOTIFY_STATE"], {mod.SEED_SENTINEL: 1781000000})
+task = {"id": "T9", "status": {"type": "done"},
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:profile-claim"},
+                 {"name": "customer-outcome:complete"}],
+        "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/C9"}],
+        "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---"}
+mod.fetch_all_tasks = lambda key, lid: [task]
+# not-open -> suppressed
+mod.get_conversation = lambda cid, tok: {
+    "source": {"author": {"type": "user", "email": "a@b.com"}},
+    "state": "closed",
+    "conversation_parts": {"conversation_parts": [{"author": {"type": "user"}, "body": "<p>ok</p>"}]},
+}
+captured = []
+mod.shadow_judge = lambda surface, item_id, state, questions, actual=None: captured.append((surface, item_id, actual)) or None
+os.environ.update({"CLICKUP_API_KEY": "k", "MUSOAI_INTERCOM_TOKEN": "t"})
+sys.argv = ["n", "--apply"]
+mod.main()
+assert captured == [("cs-closer", "C9", "suppressed:not-open")], captured
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "build_state boundary: a malformed conversation part raising inside last_customer_message_state never blocks the send" {
+  # Regression for the review-flagged bug class: last_customer_message_state
+  # used to be evaluated as a bare argument to shadow_judge (i.e. BEFORE its
+  # own try/except boundary is ever entered), so a malformed conversation
+  # part (e.g. a raw string instead of a dict) would raise AttributeError
+  # straight through the send loop and abort a legitimate reply. Now the
+  # call is wrapped in a lambda passed as `state`, so it runs lazily INSIDE
+  # shadow_judge's never-raise boundary -- the send must still happen.
+  run python3 - <<'PYEOF'
+import os, json, sys
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod.write_state(os.environ["RESOLVE_NOTIFY_STATE"], {mod.SEED_SENTINEL: 1781000000})
+task = {"id": "T9", "status": {"type": "done"},
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:profile-claim"},
+                 {"name": "customer-outcome:complete"}],
+        "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/C9"}],
+        "description": "---ACTION-REQUEST---\n{\"customer_email\": \"a@b.com\"}\n---END-ACTION-REQUEST---"}
+mod.fetch_all_tasks = lambda key, lid: [task]
+mod.get_conversation = lambda cid, tok: {
+    "source": {"author": {"type": "user", "email": "a@b.com"}},
+    "state": "open",
+    # conversation_suppressed (the REAL decision) only ever looks at
+    # parts[-1] -- a well-formed user part here -- so it suppresses nothing
+    # and never touches the malformed entry. last_customer_message_state,
+    # walking BACKWARD from the last customer part looking for a preceding
+    # admin part, hits the malformed string at index 0 and
+    # parts[i].get("author") raises AttributeError on a str.
+    "conversation_parts": {"conversation_parts": [
+        "not-a-dict",
+        {"author": {"type": "user"}, "body": "<p>yes thanks, all set</p>"},
+    ]},
+}
+calls = []
+mod.post_intercom_reply = lambda conv_id, admin_id, message, token: calls.append((conv_id, message)) or {"id": "m"}
+os.environ.update({"CLICKUP_API_KEY": "k", "MUSOAI_INTERCOM_TOKEN": "t"})
+sys.argv = ["n", "--apply"]
+rc = mod.main()
+assert rc == 0, rc
+assert len(calls) == 1, calls  # the send still happens despite the shadow-state build raising
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]; echo "$output" | grep -qx ok

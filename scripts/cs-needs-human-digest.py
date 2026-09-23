@@ -112,6 +112,27 @@ Env:
                                 script. If unset while aging items exist, no
                                 mention is rendered and a stderr warning is
                                 printed.
+  CS_DIGEST_JEV_SAMPLE_SIZE     optional, default 25 — Phase 2a shadow-only
+                                Jev sample size (docs/plans/jev-adoption.md
+                                #2a; see JEV_SURFACE_NEEDS_HUMAN_DIGEST
+                                below). Each run draws a FRESH random sample
+                                (never the ranked/rendered head — that order
+                                is oldest-waiting-first, so the head is a
+                                biased slice) of this size from the full
+                                needs_human bucket and fires one shadow Jev
+                                judgment per sampled conversation; this can
+                                never change what gets rendered or posted.
+                                `actual` for this surface is always
+                                "needs-human" (the bucket every sampled item
+                                is drawn from), which makes it a WEAK label —
+                                this surface exists to measure what fraction
+                                of Jan's needs-human backlog Jev independently
+                                reads as still genuinely needing a human, not
+                                to grade this script's own bucketing (which
+                                the sample is drawn FROM, not compared
+                                against). Those disagreements are meant to be
+                                hand-labelled later, not treated as ground
+                                truth from this script alone.
 
 Flags:
   --post        actually post the digest to Slack (default: dry-run —
@@ -136,6 +157,8 @@ Exit codes: 0 ok; 1 usage/env error or undelivered --post; 3 systematic
 import argparse
 import json
 import os
+import random
+import re
 import socket
 import sys
 import tempfile
@@ -143,6 +166,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.jev_shadow import shadow_judge  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
@@ -151,10 +178,39 @@ DEFAULT_SUMMARY_CHANNEL = "C0ANM0PN9L5"  # #cs_chats
 DEFAULT_TOP_N = 15
 DEFAULT_AGING_HOURS = 20
 DEFAULT_DIGEST_STATE = "/var/lib/cs-needs-human-digest/surfaced.json"
+DEFAULT_JEV_SAMPLE_SIZE = 25
 # Deeplink workspace id — same default + env override as
 # scripts/intercom-data-complaint-watchdog.py's deeplink() and
 # plugins/support-tools/src/tools/ticket-format.ts's intercomDeeplink().
 DEFAULT_WORKSPACE_ID = "dwjzhcge"
+
+# Phase 2a shadow-only Jev surface (docs/plans/jev-adoption.md #2a). Judges,
+# for a RANDOM sample of the needs_human bucket, whether the customer's own
+# last message genuinely still calls for a human reply — independent of and
+# strictly AFTER this script's own deterministic bucket_conversations()
+# decision, never influencing it. See CS_DIGEST_JEV_SAMPLE_SIZE above for why
+# `actual` is a weak label on this particular surface.
+JEV_SURFACE_NEEDS_HUMAN_DIGEST = "needs-human-digest"
+NEEDS_HUMAN_DIGEST_QUESTIONS = {
+    "needs_human_reply_now": {
+        "type": "noul",
+        "instructions": (
+            "State carries the customer's most recent message in this open "
+            "conversation as `customer_message`, and — when one exists — the "
+            "admin's message immediately BEFORE it as "
+            "`preceding_admin_message`. This script's own bucket already "
+            "established the customer spoke last by timestamp; decide "
+            "independently whether the customer's own message TEXT genuinely "
+            "still calls for a human reply, as opposed to text that reads as "
+            "already closed out (a bare thanks, a closing remark) that "
+            "merely landed after the admin's last reply."
+        ),
+        "criteria": {
+            "true": "The customer's message reads as still needing an admin reply.",
+            "false": "The customer's message reads as already closed out, despite being the last message chronologically.",
+        },
+    },
+}
 
 
 # --------------------------------------------------------------------------
@@ -180,6 +236,78 @@ def intercom_search(token, body):
         method="POST")
     return _retry_json(req)
 
+
+# Bounded, single-attempt (no retry/backoff), short timeout — unlike
+# _retry_json (used by this script's own correctness-critical GETs, which
+# legitimately need generous retries), this fetch feeds ONLY a best-effort
+# shadow Jev sample: a failure here just means that one sample is skipped
+# this run (see needs_human_shadow_state), so it must be bounded exactly as
+# tightly as the jev.sh call itself (jev_shadow.DEFAULT_TIMEOUT_S) rather
+# than able to add minutes of latency chasing a single dead sample.
+JEV_SHADOW_FETCH_TIMEOUT_S = 5
+
+
+def get_conversation_for_shadow(conv_id, token):
+    """GET /conversations/{id}?display_as=plaintext (read-only), single
+    attempt, JEV_SHADOW_FETCH_TIMEOUT_S bound.
+
+    Used ONLY to build state for the Phase 2a needs-human-digest shadow Jev
+    sample below — this script's own real buckets never depend on
+    conversation body text (fetch_open_convs only reads
+    last_admin_reply_at/last_contact_reply_at). Always called from inside
+    shadow_judge's build_state boundary (see needs_human_shadow_state), so a
+    failure here is caught there and never reaches the digest itself."""
+    req = urllib.request.Request(
+        f"{INTERCOM_API}/conversations/{conv_id}?display_as=plaintext",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
+                 "Intercom-Version": INTERCOM_VERSION},
+        method="GET")
+    with urllib.request.urlopen(req, timeout=JEV_SHADOW_FETCH_TIMEOUT_S) as resp:
+        return json.load(resp)
+
+
+def _text_of(part):
+    body = part.get("body") if part else None
+    return re.sub(r"<[^>]+>", " ", body).strip() if body else ""
+
+
+def needs_human_shadow_state(conv_id, token):
+    """(state | None) for the needs-human-digest Jev question: the sampled
+    conversation's most recent customer message plus the admin message
+    immediately before it, if any. Fetches the conversation (network — the
+    reason this is a build_state callable, not a plain dict). Returns None
+    when the fetched conversation has no customer part to judge."""
+    conv = get_conversation_for_shadow(conv_id, token)
+    parts = (conv.get("conversation_parts") or {}).get("conversation_parts") or []
+    last_customer_idx = None
+    for i in range(len(parts) - 1, -1, -1):
+        a = (parts[i].get("author") or {})
+        if a.get("type") == "user":
+            last_customer_idx = i
+            break
+    if last_customer_idx is None:
+        return None
+    preceding_admin = None
+    for i in range(last_customer_idx - 1, -1, -1):
+        a = (parts[i].get("author") or {})
+        if a.get("type") in ("admin", "team"):
+            preceding_admin = _text_of(parts[i])
+            break
+    return {
+        "customer_message": _text_of(parts[last_customer_idx]),
+        "preceding_admin_message": preceding_admin,
+    }
+
+
+def _jev_sample_size():
+    raw = os.environ.get("CS_DIGEST_JEV_SAMPLE_SIZE")
+    if not raw:
+        return DEFAULT_JEV_SAMPLE_SIZE
+    try:
+        n = int(raw)
+    except ValueError:
+        return DEFAULT_JEV_SAMPLE_SIZE
+    return n if n > 0 else DEFAULT_JEV_SAMPLE_SIZE
 
 
 # Contact-email lookup cache (module-level, process-lifetime). Many open
@@ -1155,6 +1283,24 @@ def main():
     print(f"needs-human: {len(buckets['needs_human'])}  "
           f"needs-customer-input: {len(buckets['needs_customer_input'])}  "
           f"dup-candidate: {len(buckets['dup_candidate'])}")
+
+    # Shadow-only (Phase 2a #2a): fires strictly AFTER bucket_conversations()
+    # above, on a RANDOM sample (never the ranked/rendered head — needs_human
+    # is sorted oldest-waiting-first, so the head is a biased slice) of the
+    # needs_human bucket, and can never change buckets, rendered rows, stdout,
+    # or the exit code. A fresh, non-fixed seed each run is logged to stderr
+    # so a run can be reproduced. See docs/plans/jev-adoption.md #2a and
+    # CS_DIGEST_JEV_SAMPLE_SIZE above for the `actual`-is-a-weak-label caveat.
+    jev_pool = buckets["needs_human"]
+    jev_k = min(_jev_sample_size(), len(jev_pool))
+    if jev_k > 0:
+        jev_seed = random.SystemRandom().randrange(2 ** 32)
+        print(f"jev shadow sample: seed={jev_seed} size={jev_k} "
+              f"(pool={len(jev_pool)})", file=sys.stderr)
+        for c in random.Random(jev_seed).sample(jev_pool, jev_k):
+            shadow_judge(JEV_SURFACE_NEEDS_HUMAN_DIGEST, c["id"],
+                         lambda cid=c["id"]: needs_human_shadow_state(cid, token),
+                         NEEDS_HUMAN_DIGEST_QUESTIONS, actual="needs-human")
 
     def _persist_next_state(rendered_items):
         """Returns True if the anti-repeat checkpoint is durable after this call

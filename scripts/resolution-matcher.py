@@ -114,10 +114,38 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.customer_outcome import outcome_tag, outcome_tags_of  # noqa: E402
 from lib.intercom_identity import resolve_admin_id  # noqa: E402
+from lib.jev_shadow import shadow_judge  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
 CLICKUP_API = os.environ.get("CLICKUP_API", "https://api.clickup.com/api/v2")
+
+# Phase 2a shadow-only Jev surface (docs/plans/jev-adoption.md #2a). Judges,
+# for each WOULD-ACT pair (a member the deterministic action_log backtest
+# already matched to a fix row), whether that row actually fixes the reported
+# issue. Fired strictly AFTER `detect_fix()` already found a match — it can
+# never turn a match into a non-match or vice versa. There is no per-member
+# customer-report text in the feed (only cluster-level title/symptom — see
+# load_feed()), so `customer_report` below is necessarily cluster-level.
+JEV_SURFACE_RESOLUTION_MATCH = "resolution-match"
+RESOLUTION_MATCH_QUESTIONS = {
+    "row_fixes_reported_issue": {
+        "type": "noul",
+        "instructions": (
+            "State carries `customer_report` (the systemic issue cluster's "
+            "title and symptom the customer reported) and `action_log_row` "
+            "(the admin data-fix action_log row the deterministic backtest "
+            "matched to this customer's cited entity, by route/method/"
+            "requester/timestamp). Decide whether that admin action plausibly "
+            "fixes the reported symptom, as opposed to being an unrelated edit "
+            "that merely happened to touch the same entity id."
+        ),
+        "criteria": {
+            "true": "The action_log row's route/method is the kind of fix that would address the reported symptom.",
+            "false": "The action_log row looks unrelated to the reported symptom even though it touched the same entity.",
+        },
+    },
+}
 
 CAROLINE_ADMIN_ID = "5763097"
 DEFAULT_LIST_ID = "901000600160"
@@ -885,6 +913,20 @@ def main(argv=None):
         if fix:
             m = dict(m, fix=fix)
             matched.append(m)
+            # Shadow-only (Phase 2a #2a): fires strictly AFTER detect_fix()
+            # already matched this member to a fix row above, and its answer
+            # changes nothing about `matched`, `to_act`, stdout, or the exit
+            # code. See docs/plans/jev-adoption.md #2a. State is built lazily
+            # inside shadow_judge's never-raise boundary (a build_state
+            # callable) rather than as a bare argument here, same as every
+            # other Phase 2a call site — see jev_shadow.shadow_judge's
+            # docstring for why a caller-built dict defeats the boundary.
+            shadow_judge(
+                JEV_SURFACE_RESOLUTION_MATCH, m["conv_id"],
+                lambda m=m, fix=fix: {
+                    "customer_report": {"title": m.get("title"), "symptom": m.get("symptom")},
+                    "action_log_row": fix},
+                RESOLUTION_MATCH_QUESTIONS, actual="matched")
         else:
             no_fix += 1
 
