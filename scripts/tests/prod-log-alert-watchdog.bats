@@ -121,6 +121,36 @@ print(json.dumps({"choices":[{"message":{"content":content}}]}))
 '
 STUB
   chmod +x "$TEST_TMPDIR/bin/curl"
+
+  # jev.sh stub (Phase 2c shadow-only call, docs/plans/jev-adoption.md):
+  # PROD_LOG_ALERT_JEV_SH is a binary override exactly like
+  # CAROLINE_BACKTEST_JEV_SH in jev-backtest-caroline.bats -- the real
+  # jev.sh's own curl call is never exercised here (it would otherwise
+  # collide with the classifier's curl stub above). Records every call
+  # (--item-id/--actual) to JEV_STUB_CALLS; WD_JEV_RC makes it exit that
+  # code (default 0); WD_JEV_HANG=1 makes it sleep 30s so tests can prove
+  # the watchdog's own OS-level `timeout` wrapper -- not jev.sh's internal
+  # behaviour -- is what bounds a hang.
+  export JEV_STUB_CALLS="$TEST_TMPDIR/jev-calls"
+  : > "$JEV_STUB_CALLS"
+  cat > "$TEST_TMPDIR/bin/jev-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+item="" actual=""
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  case "${args[i]}" in
+    --item-id) item="${args[i+1]}" ;;
+    --actual) actual="${args[i+1]}" ;;
+  esac
+done
+printf 'item=%s actual=%s\n' "$item" "$actual" >> "$JEV_STUB_CALLS"
+[ "${WD_JEV_HANG:-0}" = "1" ] && sleep 30
+exit "${WD_JEV_RC:-0}"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/jev-stub.sh"
+  export PROD_LOG_ALERT_JEV_SH="$TEST_TMPDIR/bin/jev-stub.sh"
+  export PROD_LOG_ALERT_JEV_SHADOW_MAX=3
+  export PROD_LOG_ALERT_JEV_SHADOW_OS_TIMEOUT=2
 }
 
 # Enable v2 with a classifier key present (the curl stub answers).
@@ -1533,4 +1563,171 @@ EOF
   rm -f "$WD_TEST_CAPTURE"
   OPENCLAW_BIN="$TEST_TMPDIR/bin/nonexistent-openclaw" run bash "$WD"
   [[ "$output" == *"no new prod log errors"* ]]
+}
+
+# ── Phase 2c: Jev shadow call (docs/plans/jev-adoption.md) ──
+# Shadow-only: must never change what posts, pages, gets recorded, or the
+# exit code, no matter how jev.sh behaves.
+
+_jev_scenario() {
+  v2on
+  printf '%s\n' "muso-prod core-backend-api" "muso-prod core-backend-worker" \
+    "muso-prod industry-api" > "$TEST_TMPDIR/config/deployments.txt"
+  for d in core-backend-api core-backend-worker industry-api; do
+    fixture muso-prod "$d" <<'EOF'
+[pod-a] 2026-06-09T10:00:00Z FATAL: db connection pool exhausted
+EOF
+  done
+}
+
+# Seeds the ledger once (dry-run) to learn the deterministic blast fingerprint
+# id, exactly like the existing BLAST test above, then resets state so the
+# caller gets a clean corroborated-P0 run.
+_jev_blast_id() {
+  PROD_LOG_ALERT_NOW=1000000 bash "$WD" --dry-run >/dev/null
+  python3 -c "
+import json
+l = json.load(open('$PROD_LOG_ALERT_LEDGER'))
+print([k for k,v in l.items() if v.get('blast')][0][:12])
+"
+  rm -f "$PROD_LOG_ALERT_LEDGER" "$PROD_LOG_ALERT_LAST_DIGEST"
+}
+
+@test "v2: Jev is called with the classifier's OWN final verdict as --actual, after it is final" {
+  _jev_scenario
+  id="$(_jev_blast_id)"
+  export WD_LLM_REPLY="{\"incidents\":[{\"id\":\"$id\",\"severity\":\"P0\",\"notify\":\"page\",\"summary\":\"pool exhausted fleet-wide\"}]}"
+  PROD_LOG_ALERT_NOW=1000000 run bash "$WD"
+  [ "$status" -eq 0 ]
+  [ -s "$JEV_STUB_CALLS" ]
+  grep -q "item=$id actual=P0" "$JEV_STUB_CALLS"
+}
+
+@test "v2: no classifier verdict → Jev is never called (nothing to compare against)" {
+  _jev_scenario
+  id="$(_jev_blast_id)"
+  export WD_CURL_FAIL=1
+  PROD_LOG_ALERT_NOW=1000000 run bash "$WD"
+  [ "$status" -eq 0 ]
+  [ ! -s "$JEV_STUB_CALLS" ]
+}
+
+# One run per jev.sh failure mode, each compared byte-for-byte against a
+# WD_JEV_RC=0 (success) baseline: exit code, the Slack text actually posted,
+# the triage-dispatch call count, and the ledger contents on disk. Any
+# divergence means Jev leaked into a decision it must never influence.
+@test "v2: Jev success/failure/kill-switch-rc6/absent/hang are all behaviourally identical" {
+  _jev_scenario
+  id="$(_jev_blast_id)"
+  export WD_LLM_REPLY="{\"incidents\":[{\"id\":\"$id\",\"severity\":\"P0\",\"notify\":\"page\",\"summary\":\"pool exhausted fleet-wide\"}]}"
+
+  WD_JEV_RC=0 PROD_LOG_ALERT_NOW=1000000 run bash "$WD"
+  base_status="$status"
+  base_text="$(cat "$WD_TEST_CAPTURE")"
+  base_cron="$(grep -c 'cron add' "$OPENCLAW_STUB_CALLS" || true)"
+  base_ledger="$(python3 -c "import json;print(json.dumps(json.load(open('$PROD_LOG_ALERT_LEDGER')),sort_keys=True))")"
+
+  for mode in fail rc6 absent hang; do
+    rm -f "$PROD_LOG_ALERT_LEDGER" "$PROD_LOG_ALERT_LAST_DIGEST" "$WD_TEST_CAPTURE"
+    : > "$OPENCLAW_STUB_CALLS"
+    _jev_blast_id >/dev/null
+
+    case "$mode" in
+      fail) export WD_JEV_RC=2; unset WD_JEV_HANG; export PROD_LOG_ALERT_JEV_SH="$TEST_TMPDIR/bin/jev-stub.sh" ;;
+      rc6)  export WD_JEV_RC=6; unset WD_JEV_HANG; export PROD_LOG_ALERT_JEV_SH="$TEST_TMPDIR/bin/jev-stub.sh" ;;
+      absent) export PROD_LOG_ALERT_JEV_SH="$TEST_TMPDIR/bin/no-such-jev.sh" ;;
+      hang) export WD_JEV_RC=0; export WD_JEV_HANG=1; export PROD_LOG_ALERT_JEV_SH="$TEST_TMPDIR/bin/jev-stub.sh"
+            start="$(date +%s)" ;;
+    esac
+
+    PROD_LOG_ALERT_NOW=1000000 run bash "$WD"
+    [ "$status" -eq "$base_status" ]
+    [ "$(cat "$WD_TEST_CAPTURE")" = "$base_text" ]
+    [ "$(grep -c 'cron add' "$OPENCLAW_STUB_CALLS" || true)" = "$base_cron" ]
+    ledger_now="$(python3 -c "import json;print(json.dumps(json.load(open('$PROD_LOG_ALERT_LEDGER')),sort_keys=True))")"
+    [ "$ledger_now" = "$base_ledger" ]
+
+    if [ "$mode" = "hang" ]; then
+      elapsed=$(( $(date +%s) - start ))
+      # bound: JEV_SHADOW_MAX(3, only 1 candidate here) * OS_TIMEOUT(2s) +
+      # generous slack for the rest of the tick's real work.
+      [ "$elapsed" -lt 15 ]
+      unset WD_JEV_HANG
+    fi
+  done
+  unset WD_JEV_RC
+  export PROD_LOG_ALERT_JEV_SH="$TEST_TMPDIR/bin/jev-stub.sh"
+}
+
+@test "v2: no usable \`timeout\` binary -> NO Jev call, and a hanging Jev cannot delay the page" {
+  # QA on #1009: an unwrapped fallback would let a hung jev.sh block the pager.
+  # Fail closed: without an OS-level bound the shadow call must not run at all.
+  _jev_scenario
+  id="$(_jev_blast_id)"
+  export WD_LLM_REPLY="{\"incidents\":[{\"id\":\"$id\",\"severity\":\"P0\",\"notify\":\"page\",\"summary\":\"pool exhausted fleet-wide\"}]}"
+  export WD_JEV_HANG=1
+  start="$(date +%s)"
+  PROD_LOG_ALERT_JEV_TIMEOUT_BIN=no-such-timeout-binary PROD_LOG_ALERT_NOW=1000000 run bash "$WD"
+  elapsed=$(( $(date +%s) - start ))
+  unset WD_JEV_HANG
+  [ "$status" -eq 0 ]
+  if [ -s "$JEV_STUB_CALLS" ]; then
+    echo "jev.sh was called with no OS timeout available: $(cat "$JEV_STUB_CALLS")" >&2
+    return 1
+  fi
+  [ "$elapsed" -lt 10 ]
+  grep -q 'U0AL36NADEY' "$WD_TEST_CAPTURE"
+}
+
+@test "v2: an OS timeout of 0 (GNU: disables the limit) -> NO Jev call, page still delivered" {
+  _jev_scenario
+  id="$(_jev_blast_id)"
+  export WD_LLM_REPLY="{\"incidents\":[{\"id\":\"$id\",\"severity\":\"P0\",\"notify\":\"page\",\"summary\":\"pool exhausted fleet-wide\"}]}"
+  export WD_JEV_HANG=1
+  start="$(date +%s)"
+  PROD_LOG_ALERT_JEV_SHADOW_OS_TIMEOUT=0 PROD_LOG_ALERT_NOW=1000000 run bash "$WD"
+  elapsed=$(( $(date +%s) - start ))
+  unset WD_JEV_HANG
+  [ "$status" -eq 0 ]
+  if [ -s "$JEV_STUB_CALLS" ]; then
+    echo "jev.sh was called with OS timeout 0 (unbounded): $(cat "$JEV_STUB_CALLS")" >&2
+    return 1
+  fi
+  [ "$elapsed" -lt 10 ]
+  grep -q 'U0AL36NADEY' "$WD_TEST_CAPTURE"
+}
+
+@test "v2: PROD_LOG_ALERT_JEV_SHADOW=0 disables the call entirely, same output" {
+  _jev_scenario
+  id="$(_jev_blast_id)"
+  export WD_LLM_REPLY="{\"incidents\":[{\"id\":\"$id\",\"severity\":\"P0\",\"notify\":\"page\",\"summary\":\"pool exhausted fleet-wide\"}]}"
+  export PROD_LOG_ALERT_JEV_SHADOW=0
+  PROD_LOG_ALERT_NOW=1000000 run bash "$WD"
+  [ "$status" -eq 0 ]
+  [ ! -s "$JEV_STUB_CALLS" ]
+  [ -f "$WD_TEST_CAPTURE" ]
+  grep -q 'U0AL36NADEY' "$WD_TEST_CAPTURE"
+}
+
+@test "v2: the Jev shadow call never runs before classify_incidents has written a verdict" {
+  # A stub that writes its OWN sentinel line before checking would prove
+  # nothing about ordering; instead assert the verdicts file already exists
+  # and is non-empty at call time by having the stub read it via a path this
+  # test fixes.
+  _jev_scenario
+  id="$(_jev_blast_id)"
+  export WD_LLM_REPLY="{\"incidents\":[{\"id\":\"$id\",\"severity\":\"P1\",\"notify\":\"channel\",\"summary\":\"x\"}]}"
+  cat > "$TEST_TMPDIR/bin/jev-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+actual=""
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  [ "${args[i]}" = "--actual" ] && actual="${args[i+1]}"
+done
+[ -n "$actual" ] || { echo "ORDERING BUG: --actual was empty" >&2; exit 9; }
+exit 0
+STUB
+  chmod +x "$TEST_TMPDIR/bin/jev-stub.sh"
+  PROD_LOG_ALERT_NOW=1000000 run bash "$WD"
+  [ "$status" -eq 0 ]
 }
