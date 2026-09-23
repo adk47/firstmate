@@ -1866,6 +1866,13 @@ while :; do
             exit 1
           fi
           retire_merged_pr_poll "$id"
+          # Post-merge change watch (additive): register a by-effect watch for a
+          # change that touches a deployable service. A failure here never
+          # affects the merge outcome already recorded above.
+          if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+            "$SCRIPT_DIR/fm-change-watch.sh" register "$id" "$url" >/dev/null 2>&1; then
+            triage_log "post-merge change watch was not registered for $id"
+          fi
           touch "$STATE/.last-check"
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"

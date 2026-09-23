@@ -311,6 +311,20 @@ Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committe
 Before the worktree is returned, teardown concludes the task's own no-mistakes run when it is parked at a gate, including a run whose head the task copy cannot resolve - the shared runs-ledger continuation proof is the only recognition for that case, so cleanup never orphans a parked run the pipeline advanced past the submitted head.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, pre-teardown run conclusion, and stale-lock recovery procedure.
 
+## Post-merge change watch
+
+A merge is normally verified at merge time BY CONTENT: the new values or image tag are read on the live pods, which proves the change arrived but says nothing about the service's behavior afterwards.
+A change that is bad by effect can therefore first surface hours later as a customer-facing incident, which is exactly what happened when a routing change exposed an application bug and three feed-service pods OOM-killed seven hours after a green merge.
+`bin/fm-change-watch.sh` closes that gap with one bounded watch per merged change: `register` derives the affected Kubernetes Deployment(s) from the merged PR's file list, records a pre-deploy baseline, and arms a schedule of samples at +5m, +15m, +30m, then hourly to +12h.
+An H-DevOps pull request derives its targets from the Deployment documents its diff hunks land in across the changed manifests under `k8s/prod/`, read at the PR's head commit, under each document's own `metadata.namespace` (a Deployment declaring none is skipped with its reason), and falls back to the whole manifest, saying so, only when a hunk cannot be placed; an application repository resolves its name to the Deployment that carries it in the local H-DevOps checkout; a PR that touches no deployable service registers nothing.
+The schedule is armed through `bin/fm-procevent-when.sh`, so the watcher's existing process-event runner drives one long-running child per watch and no new worker or fleet process is created.
+Each sample reads the Deployment's own signals - 5xx rate, pod restarts, OOMKilled events, p95 latency where the service exposes it, waits on the Deployment's own pgbouncer pool, and container working set - and compares each to its baseline with a stated bar.
+A metric that cannot be read is `unmeasured` and is skipped rather than scored as a pass, so an outage of the measurement itself never reads as health: a schedule that ends with a target never read completes `unmeasured`, not clean, and a drive stopped before the end of its schedule records `interrupted at +Nm`, queues one check wake, and is re-armed for its remaining samples by registering it again.
+The first regression appends one `check: change-watch <task-id> <pr-url> <metric> regressed` wake to the durable wake queue and steers the owning task through `bin/fm-send.sh` with the numbers; a clean +12h, one in which every target had a scored reading, appends one note to the task's status log and records one wiki observation.
+Registration is hooked into both merge paths - `bin/fm-pr-merge.sh` and the watcher's merged-poll landing path - and is additive only, so a failure to register never turns a successful merge into a reported failure.
+The watch makes no model calls, is read-only against the cluster, and writes only under the home's `state/change-watch/`.
+`bin/fm-change-watch.sh`'s header owns the exact commands, metrics, bars, schedule, and test seams; the `change-watch` agent skill owns how a regression, an interruption, and a completion wake are handled, and `tests/fm-change-watch.test.sh` pins the register, regression, OOMKilled, clean, unmeasured, interrupted, reused-pid, pool-scoping, pool-console, doctor, and no-deployable-service cases.
+
 ## Optional Relay
 
 Relay is opt-in presence for the shared `@myfirstmate` bot on both public surfaces it supports, X and Discord.
