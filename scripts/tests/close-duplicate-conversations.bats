@@ -26,6 +26,10 @@ setup() {
   export DEDUP_SHADOW_LOG="$STATE_DIR/dedup-shadow.jsonl"
   export CLOSE_DUP_SHADOW_LOG="$STATE_DIR/close-duplicate-shadow.jsonl"
   export CLOSE_DUP_POINTER_STATE="$STATE_DIR/pointer-posted.json"
+  # Isolate the dry-run review export from the real prod path (CI runs on
+  # node-8 as root, where DEFAULT_REVIEW_DIR=/var/lib/close-duplicate-conversations/
+  # is a real, writable directory).
+  export CLOSE_DUP_REVIEW_DIR="$STATE_DIR/review"
 
   TEST_TMPDIR="$BATS_TEST_TMPDIR"
   export TEST_TMPDIR
@@ -626,6 +630,206 @@ sys.argv = ["m", "--apply"]
 rc = mod.main()
 assert rc == 0, rc
 assert closed == ["O"], closed  # the close still happens despite the shadow-state GET raising
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "dry-run: shadow-judges every candidate exactly once, and stdout is unchanged" {
+  # Regression for the bug where shadow_judge was only wired into the
+  # --apply loop -- main() returns before that loop on every dry-run, and
+  # the prod timer runs dry-run only, so dedupe-same-request never wrote a
+  # shadow row in prod. The candidate list here has TWO groups (two
+  # distinct emails) so a double-judge or a missed candidate both show up.
+  # Pool size (2) is within the default CLOSE_DUP_JEV_SAMPLE_SIZE (25), so
+  # the random sample below covers the whole pool here -- the "pool larger
+  # than the sample" and "never pinned to the head" cases are covered by
+  # the two dedicated sampling tests further down.
+  run python3 - <<'PYEOF'
+import contextlib
+import io
+import os
+import re
+import sys
+from importlib import util
+spec = util.spec_from_file_location('m', os.environ['CLOSEDUP'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+older1 = {"id": "O1", "email": "a@x.com", "lar": 200, "lcr": 100, "created_at": 1000, "is_inbound": True}
+kept1 = {"id": "K1", "email": "a@x.com", "lar": 300, "lcr": 100, "created_at": 5000, "is_inbound": True}
+older2 = {"id": "O2", "email": "b@x.com", "lar": 200, "lcr": 100, "created_at": 1000, "is_inbound": True}
+kept2 = {"id": "K2", "email": "b@x.com", "lar": 300, "lcr": 100, "created_at": 5000, "is_inbound": True}
+mod.fetch_open_convs = lambda token: [older1, kept1, older2, kept2]
+mod.owned_ids = lambda paths: set()
+
+captured = []
+mod.shadow_judge = lambda surface, item_id, state, questions, actual=None: (
+    captured.append((surface, item_id, actual)) or None)
+
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+sys.argv = ["m"]
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc = mod.main()
+out = buf.getvalue()
+assert rc == 0, rc
+
+# Exactly one shadow_judge call per candidate -- no double-judge, none missed.
+assert sorted(captured) == sorted([
+    ("dedupe-same-request", "O1", "A"),
+    ("dedupe-same-request", "O2", "A"),
+]), captured
+
+# stdout is byte-identical to the pre-fix shape: the shadow stub above
+# writes nothing to stdout itself, so any drift here would mean the fix
+# leaked shadow output (or a debug print) into the machine-readable channel.
+expected_head = (
+    "open conversations scanned: 4\n"
+    "duplicate groups with a closable member: 2\n"
+    "candidate closes (individual): 2\n"
+)
+assert out.startswith(expected_head), out
+assert re.search(r"^review export: \S+ \(Tier A 2 / Tier B 0\)$", out, re.M), out
+assert "  would close conv=O1 -> kept=K1 tier=A\n" in out, out
+assert "  would close conv=O2 -> kept=K2 tier=A\n" in out, out
+assert out.endswith("DRY-RUN — no conversations closed. Re-run with --apply to close.\n"), out
+print("CAPTURED_OK")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "CAPTURED_OK"
+}
+
+@test "apply mode: still judges each candidate exactly once via the shared helper" {
+  # Companion to the dry-run test above -- guards the refactor into a
+  # shared _dedupe_shadow_judge() helper against double-judging a candidate
+  # (e.g. calling it once in the reverify branch and again elsewhere).
+  run python3 - <<'PYEOF'
+import os, sys
+from importlib import util
+spec = util.spec_from_file_location('m', os.environ['CLOSEDUP'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+older1 = {"id": "O1", "email": "a@x.com", "lar": 200, "lcr": 100, "created_at": 1000, "is_inbound": True}
+kept1 = {"id": "K1", "email": "a@x.com", "lar": 300, "lcr": 100, "created_at": 5000, "is_inbound": True}
+older2 = {"id": "O2", "email": "b@x.com", "lar": 200, "lcr": 100, "created_at": 1000, "is_inbound": True}
+kept2 = {"id": "K2", "email": "b@x.com", "lar": 300, "lcr": 100, "created_at": 5000, "is_inbound": True}
+mod.fetch_open_convs = lambda token: [older1, kept1, older2, kept2]
+mod.owned_ids = lambda paths: set()
+mod.reverify_still_valid = lambda *a, **k: True
+
+closed = []
+mod.close_conversation = lambda token, admin_id, conv_id: closed.append(conv_id) or {"state": "closed"}
+
+class FakeShadow:
+    def write(self, s): pass
+    def flush(self): pass
+    def close(self): pass
+mod.open_shadow_log = lambda: (FakeShadow(), "/fake/path")
+mod.post_slack_summary = lambda *a, **k: True
+
+captured = []
+mod.shadow_judge = lambda surface, item_id, state, questions, actual=None: (
+    captured.append(item_id) or None)
+
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+os.environ["INTERCOM_ADMIN_ID"] = "5763097"
+sys.argv = ["m", "--apply"]
+rc = mod.main()
+assert rc == 0, rc
+assert sorted(closed) == ["O1", "O2"], closed
+assert sorted(captured) == ["O1", "O2"], captured
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "dry-run: over a pool larger than the sample size, judges exactly the configured count, drawn from the pool, and logs the seed to stderr" {
+  # 40 distinct-email groups (40 candidates) -> a `candidates[:k]` head
+  # slice and a real random sample both satisfy "exactly k, no dupes, all
+  # from the pool" here; this test's job is the seed/size/pool stderr line
+  # (mirrors close-resolved-conversations.py's "jev shadow sample" format
+  # exactly) -- the head-vs-random distinction is covered by the next test.
+  run python3 - <<'PYEOF'
+import contextlib
+import io
+import os
+import re
+import sys
+from importlib import util
+spec = util.spec_from_file_location('m', os.environ['CLOSEDUP'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+convs = []
+all_ids = set()
+for i in range(40):
+    older = {"id": f"O{i}", "email": f"u{i}@x.com", "lar": 200, "lcr": 100,
+              "created_at": 1000, "is_inbound": True}
+    kept = {"id": f"K{i}", "email": f"u{i}@x.com", "lar": 300, "lcr": 100,
+             "created_at": 5000, "is_inbound": True}
+    convs += [older, kept]
+    all_ids.add(older["id"])
+mod.fetch_open_convs = lambda token: convs
+mod.owned_ids = lambda paths: set()
+
+captured = []
+mod.shadow_judge = lambda surface, item_id, state, questions, actual=None: (
+    captured.append(item_id) or None)
+
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+os.environ["CLOSE_DUP_JEV_SAMPLE_SIZE"] = "3"
+sys.argv = ["m"]
+buf = io.StringIO()
+with contextlib.redirect_stderr(buf):
+    rc = mod.main()
+err = buf.getvalue()
+assert rc == 0, rc
+assert len(captured) == 3, captured
+assert len(set(captured)) == 3, captured  # no duplicate items in one sample
+assert set(captured) <= all_ids, (captured, all_ids)
+assert re.search(r"jev shadow sample: seed=\d+ size=3 \(pool=40\)", err), err
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "dry-run: samples vary across runs and are never pinned to the pool head" {
+  # Mutation guard for the exact bug this fix addresses: `candidates[:k]`
+  # (a head slice) would deterministically pick the SAME candidate (index
+  # 0) every run. A genuinely random sample.Random(seed).sample() draw from
+  # a 10-item pool with k=1, over enough runs, must land on more than one
+  # distinct id. This must go RED if the sample call is replaced by a head
+  # slice.
+  run python3 - <<'PYEOF'
+import os, sys
+from importlib import util
+spec = util.spec_from_file_location('m', os.environ['CLOSEDUP'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+convs = []
+for i in range(10):
+    older = {"id": f"P{i}", "email": f"p{i}@x.com", "lar": 200, "lcr": 100,
+              "created_at": 1000, "is_inbound": True}
+    kept = {"id": f"Q{i}", "email": f"p{i}@x.com", "lar": 300, "lcr": 100,
+             "created_at": 5000, "is_inbound": True}
+    convs += [older, kept]
+mod.fetch_open_convs = lambda token: convs
+mod.owned_ids = lambda paths: set()
+mod.post_slack_summary = lambda *a, **k: True
+
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+os.environ["CLOSE_DUP_JEV_SAMPLE_SIZE"] = "1"
+sys.argv = ["m"]
+
+seen = set()
+for _ in range(30):
+    captured = []
+    mod.shadow_judge = lambda surface, item_id, state, questions, actual=None: (
+        captured.append(item_id) or None)
+    rc = mod.main()
+    assert rc == 0, rc
+    seen.update(captured)
+
+assert len(seen) > 1, seen  # a head-slice would always yield {"P0"}
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
