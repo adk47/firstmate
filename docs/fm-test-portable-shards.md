@@ -65,10 +65,10 @@ Each shard is still strictly serial in itself, and separate runners mean no two 
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
 The last full refresh of the hints retained the slowest measurements from the `fm-test-timing-portable-serial-*` artifacts of three green CI runs on 2026-09-01, [33558082172](https://github.com/kunchenguid/firstmate/actions/runs/33558082172), [33523597838](https://github.com/kunchenguid/firstmate/actions/runs/33523597838), and [33463326167](https://github.com/kunchenguid/firstmate/actions/runs/33463326167).
-Scripts added since then carry the slowest of several runs measured through `bin/fm-test-run.sh` on the branch that added them (`tests/fm-classify-fold-bounded.test.sh` at 35503 ms is the newest) until the next artifact refresh replaces those local figures.
-The 141 current hints total 3860571 ms of conservative balance weight.
+Scripts added since then carry the slowest of several runs measured through `bin/fm-test-run.sh` on the branch that added them (`tests/fm-classify-fold-bounded.test.sh` at 35503 ms is the newest measured that way; `tests/fm-sentry-watch.test.sh` carries 35300 ms from the same method) until the next artifact refresh replaces those local figures.
+The 142 current hints total 3895871 ms of conservative balance weight.
 Taking the slowest of several runs rather than a single run keeps the balance honest on a slow runner: individual scripts varied by up to 20% between those three runs.
-A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default; the current 148-script lane has seven such scripts, bringing its assignment weight to 4049571 ms.
+A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default; the current 156-script lane has fourteen such scripts, bringing its assignment weight to 4273871 ms.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
 Balance is still worth keeping current, because enough unmeasured scripts let one shard carry more than twice another shard's real work and reach the job cap while another runner sits idle.
 That is not hypothetical: by 2026-09-01 the lane had grown from 116 to 139 scripts and from ~42 to ~63 minutes, 17 scripts were still unmeasured, and several hints were low by 2-5x, so shard 3 of 4 ran 17-20 minutes against its 20-minute cap while shard 1 ran 11.5 minutes and run [33574154856](https://github.com/kunchenguid/firstmate/actions/runs/33574154856) timed out seconds after a passing test.

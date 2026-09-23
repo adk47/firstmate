@@ -648,6 +648,7 @@ tests/fm-send-remote-delivery.test.sh 27686
 tests/fm-send-resolve-key.test.sh 19619
 tests/fm-send-secondmate-marker-herdr-e2e.test.sh 51
 tests/fm-send-secondmate-marker.test.sh 6252
+tests/fm-sentry-watch.test.sh 35300
 tests/fm-session-lock-ancestry.test.sh 1414
 tests/fm-session-start.test.sh 156952
 tests/fm-sessionstart-hook-live-e2e.test.sh 20

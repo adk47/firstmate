@@ -349,6 +349,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/sentry-watch.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
     },

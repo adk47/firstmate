@@ -355,6 +355,23 @@ Because a terminal event's id is derived from its identity tuple rather than gen
 Reconciliation rides the existing relay poll and the session-start digest instead of a new watcher, daemon, or timer, and both are gated on the same `.env` activation contract so a home that never opted into the relay executes none of it.
 The [Relay configuration reference](configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, and the `fmx-respond` skill owns the procedure.
 
+## Sentry watch
+
+The firstmate-owned Sentry watch is [`bin/fm-sentry-watch.sh`](../bin/fm-sentry-watch.sh), registered through [`bin/fm-check-register.sh`](../bin/fm-check-register.sh) as the one custom check `state/sentry-watch.check.sh`.
+It exists because visibility into the live apps must not depend on a per-lane scratch check: on 2026-09-22 the only backend watch was silently deleted, polling stopped with no alarm, and a fatal onboarding issue never paged because that watch paged only at three users.
+So the watch discovers its coverage from the Sentry API instead of a hardcoded project tuple, and it owns its own liveness rather than trusting that something will notice it stopped.
+
+The mechanism has four boundaries.
+The rule engine reads unresolved issues per project and applies an ordered rule set whose thresholds and signatures live in local `config/sentry-watch.json`; the script header owns that order and [`configuration.md`](configuration.md#sentry-watch-configsentry-watchjson) owns the schema.
+Liveness is the second: each poll writes a beat, and a poll emits a `DARK` wake when the beat is stale or its own registration is missing, while [`bin/fm-wake-drain.sh`](../bin/fm-wake-drain.sh) prints an independent `SENTRY WATCH DARK` line from `state/.sentry-watch.armed` for the case a check that is not running cannot see - its own deletion.
+The rail cross-check is the third: the same poll reads the CTO Sentry rail's pull requests and reports an id the rail fixed that this watch never surfaced, so the two systems cannot disagree silently.
+Migration is the fourth: the retired per-lane seen-sets import into one shared `state/sentry-watch.baseline.json`, which the Sentry mobile scout also reads, so retiring those checks never re-announces the estate.
+
+Safety boundaries are deliberate and stable.
+The watch is read-only against Sentry and GitHub, makes no model calls, reads its token from the vault path in-process so it is never printed or passed on a command line, and bounds a whole poll and each request so a slow host still prints its line inside the watcher's own per-check budget.
+A project it cannot read is reported as `could-not-determine` rather than assumed quiet, and one unreadable project never stops the others.
+Tuning, disabling a project, or changing a threshold is a config edit, never a code change.
+
 ## Project memory belongs to projects
 
 Durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a real `@AGENTS.md` import pointer.

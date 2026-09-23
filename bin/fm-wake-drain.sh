@@ -2,8 +2,9 @@
 # Present durable watcher wake records, optionally acknowledge handled records,
 # annotate every unread line for validated signal status keys, surface unread
 # informational status lines, latest captain-facing statuses not covered by a
-# newer branch outcome, OPEN DECISIONS, and captain-call record divergence,
-# then assert liveness.
+# newer branch outcome, OPEN DECISIONS, captain-call record divergence, and a
+# SENTRY WATCH DARK line for an armed Sentry watch that lost its check, trust
+# binding, or beat, then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -514,6 +515,47 @@ EOF
   printf 'RECORD DIVERGENCE: reconcile each one - record the captain'"'"'s own words with bin/fm-captain-hold.sh answer <task> --decision-file <path>, or re-open the status decision when that resolution was not the captain'"'"'s word.\n' || return 1
 }
 
+# One bounded read-only liveness line for the firstmate-owned Sentry watch.
+# state/.sentry-watch.armed is written by bin/fm-sentry-watch.sh arm and removed
+# by its disarm, and it outlives a deleted check, so this is the external half of
+# that watch's own DARK wake: a missing check file, a missing trust binding, or a
+# beat older than three times the cadence means Sentry visibility was lost, and
+# the check itself cannot run to notice a deletion. This runs at the top of every
+# supervision turn, and stays silent whenever no watch is armed. It only prints;
+# it changes no state and never changes the drain's exit status.
+print_sentry_watch_liveness_section() {
+  local armed="$STATE/.sentry-watch.armed"
+  [ -f "$armed" ] && [ ! -L "$armed" ] || return 0
+  local schema cadence shim trust beat now age stamp reason=''
+  schema=$(awk -F= '$1 == "schema" { print $2; exit }' "$armed")
+  [ "$schema" = fm-sentry-watch-armed-v1 ] || return 0
+  cadence=$(awk -F= '$1 == "cadence" { print $2; exit }' "$armed")
+  case "$cadence" in ''|*[!0-9]*) cadence=300 ;; esac
+  shim=$(awk -F= '$1 == "shim" { sub(/^[^=]*=/, ""); print; exit }' "$armed")
+  trust=$(awk -F= '$1 == "trust" { sub(/^[^=]*=/, ""); print; exit }' "$armed")
+  beat=$(awk -F= '$1 == "beat" { sub(/^[^=]*=/, ""); print; exit }' "$armed")
+  if [ -z "$shim" ] || [ ! -f "$shim" ]; then
+    reason="the check file is missing ($shim)"
+  elif [ -z "$trust" ] || [ ! -f "$trust" ]; then
+    reason="the trust binding is missing ($trust)"
+  else
+    now=$(date +%s)
+    age=
+    if [ -n "$beat" ] && [ -f "$beat" ]; then
+      stamp=$(cat -- "$beat" 2>/dev/null)
+      case "$stamp" in ''|*[!0-9]*) stamp= ;; esac
+      [ -z "$stamp" ] || age=$((now - stamp))
+    fi
+    if [ -z "$age" ]; then
+      reason='no beat has been recorded'
+    elif [ "$cadence" -gt 0 ] && [ "$age" -ge $((3 * cadence)) ]; then
+      reason="the last poll was ${age}s ago (>= $((3 * cadence))s)"
+    fi
+  fi
+  [ -n "$reason" ] || return 0
+  printf 'SENTRY WATCH DARK: %s; re-arm it with bin/fm-sentry-watch.sh arm\n' "$reason" || return 1
+}
+
 print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
@@ -559,6 +601,9 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     fi
     return 1
   fi
+  # Independent of the status snapshot: a watch whose check file was deleted
+  # must surface even on a home whose status logs say nothing at all.
+  print_sentry_watch_liveness_section || true
   snapshot=$(status_presentation_snapshot "$STATE") || {
     printf 'STATUS PRESENTATION INCOMPLETE: status snapshot could not be read.\n'
     rc=1
