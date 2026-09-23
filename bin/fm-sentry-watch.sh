@@ -48,12 +48,16 @@
 #               one cadence so a long gap never turns a trickle into a burst).
 #               From an issue's third read the rule is a rate: the window rate
 #               reaches burst_min_events per cadence while the prior window's
-#               rate was at or below the project's baseline rate, so a sustained
-#               storm pages once. That baseline is learned per project from its
-#               first two full polls (the mean per-issue event rate between
-#               them); burst_baseline_per_hour is only the fallback until it is
-#               learned. The window runs from the last poll that actually read
-#               the project.
+#               rate was at or below the project's baseline rate. Either burst
+#               follows the seen-issue throttle once it has surfaced: it pages
+#               again only after surfaced_window_secs or on a new user tier, so
+#               a storm that began on a NEW issue pages once, not on each of its
+#               first two reads. The baseline is an exponentially weighted moving
+#               average (BASELINE_ALPHA) of the project's mean per-issue event
+#               rate, updated on every full read after that read is classified,
+#               cleared when the project leaves the watch, and read as
+#               BASELINE_COLD_START_PER_HOUR before its first sample. The window
+#               runs from the last poll that actually read the project.
 #   P1          level error/fatal on a live path, at users>=users_p1_sensitive when
 #               the path matches the sensitive routes (onboarding, signup, auth,
 #               login, billing, checkout, payment, claim, credits) and users>=users_p1
@@ -321,7 +325,6 @@ PROJECT_DEFAULTS = {
     "users_p0": 25,
     "burst_min_events": 10,
     "burst_min_events_transport": 25,
-    "burst_baseline_per_hour": 2,
 }
 DEFAULTS = {
     "cadence_secs": 300,
@@ -824,17 +827,17 @@ def classify(entry, old, settings, signatures, config, window_start, now, cadenc
     old_substatus = old.get("substatus") if isinstance(old, dict) else ""
     if entry["substatus"] == "regressed" and old_substatus != "regressed":
         return finding("REGRESSION", "regressed")
-    if window_rate >= floor_rate and level in ("error", "fatal") and live:
+    tier = user_tier(users, settings)
+    new_tier = bool(tier) and tier > user_tier(_as_int(old.get("users")) or 0, settings)
+    surfaced = _as_int(old.get("surfaced")) or 0
+    throttled = bool(surfaced) and now - surfaced < config["surfaced_window_secs"] and not new_tier
+    if window_rate >= floor_rate and level in ("error", "fatal") and live and not throttled:
         if prev_rate is None:
             return finding("P0", "burst>=%s/window" % burst_floor)
         if prev_rate <= baseline_rate:
             return finding("P0", "burst>=%s/window prior<=%.0f/h" % (burst_floor, baseline_rate))
-    tier = user_tier(users, settings)
-    new_tier = bool(tier) and tier > user_tier(_as_int(old.get("users")) or 0, settings)
-    if critical and delta >= 1:
-        surfaced = _as_int(old.get("surfaced")) or 0
-        if not surfaced or now - surfaced >= config["surfaced_window_secs"] or new_tier:
-            return finding("CRITICAL", "critical-signature")
+    if critical and delta >= 1 and not throttled:
+        return finding("CRITICAL", "critical-signature")
     if new_tier and live and not transport:
         return finding("P0", "users>=%s" % tier)
     return None
@@ -858,10 +861,19 @@ def project_rate(entry, old, now):
 
 # --- baseline ---------------------------------------------------------------
 
-def learn_baseline_rate(rows, issues, now):
-    """The project's baseline rate: the mean per-issue event rate between its
-    first two full polls, in events/hour. A project with nothing in common
-    between the two reads is quiet, and its baseline is zero."""
+# The per-project baseline is an exponentially weighted moving average of the
+# project's mean per-issue event rate (events/hour) between consecutive full
+# reads. BASELINE_ALPHA weights the newest read; before a project has its first
+# sample the baseline reads as BASELINE_COLD_START_PER_HOUR, a quiet estate, so
+# only an issue whose prior window was silent can burst until the estate has
+# been measured.
+BASELINE_ALPHA = 0.2
+BASELINE_COLD_START_PER_HOUR = 0.0
+
+
+def read_sample_rate(rows, issues, now):
+    """The mean per-issue event rate (events/hour) of this read against the
+    issues' previous read, or None when no issue has a previous read."""
     rates = []
     for issue in rows:
         if not isinstance(issue, dict):
@@ -875,7 +887,14 @@ def learn_baseline_rate(rows, issues, now):
             continue
         delta = max(0, (_as_int(issue.get("count")) or 0) - prev_count)
         rates.append(delta * 3600.0 / max(1, now - prev_ts))
-    return sum(rates) / len(rates) if rates else 0.0
+    return sum(rates) / len(rates) if rates else None
+
+
+def update_baseline(baselines, slug, sample):
+    if sample is None:
+        return
+    prior = baselines.get(slug)
+    baselines[slug] = sample if prior is None else BASELINE_ALPHA * sample + (1 - BASELINE_ALPHA) * prior
 
 
 def read_baseline():
@@ -1175,11 +1194,7 @@ def action_poll(config, org, host, token, problems):
             continue
         window_start = last_read.get(slug, now - cadence)
         project_baseline = not project_seen(slug, issues, last_read)
-        if slug in last_read and slug not in baselines:
-            baselines[slug] = learn_baseline_rate(rows, issues, now)
-        baseline_rate = baselines.get(slug)
-        if baseline_rate is None:
-            baseline_rate = float(settings["burst_baseline_per_hour"])
+        baseline_rate = baselines.get(slug, BASELINE_COLD_START_PER_HOUR)
         last_read[slug] = now
         unread[slug] = 0
         cursor = slug
@@ -1207,6 +1222,7 @@ def action_poll(config, org, host, token, problems):
                     entry["surfaced"] = now
                     issue_findings.append(finding)
             updated[sid] = entry
+        update_baseline(baselines, slug, read_sample_rate(rows, issues, now))
 
     if not enumerated:
         # A poll that could not list projects learned nothing about any single
@@ -1223,6 +1239,7 @@ def action_poll(config, org, host, token, problems):
             prior_conditions.pop(slug, None)
             last_read.pop(slug, None)
             unread.pop(slug, None)
+            baselines.pop(slug, None)
             removed_lines.append("removed from watch %s" % slug)
     condition_lines, conditions = condition_findings(prior_conditions, conditions, now)
     findings.extend(removed_lines)

@@ -135,12 +135,12 @@ test_burst_pages_regardless_of_users() {
   home=$(make_home burst)
   prime_baseline "$home" 1000
   write_issues "$home" core-backend <<'JSON'
-[{"shortId":"CORE-BACKEND-DDD","title":"OOMKilled","culprit":"/api/v4/x","userCount":0,"count":5,"level":"fatal","substatus":"ongoing","permalink":"https://x/4/"}]
+[{"shortId":"CORE-BACKEND-DDD","title":"TypeError: boom","culprit":"/api/v4/x","userCount":0,"count":5,"level":"fatal","substatus":"ongoing","permalink":"https://x/4/"}]
 JSON
   poll "$home" 1300 >/dev/null
   # A ramp on the second read is exactly what the burst rule exists to catch.
   write_issues "$home" core-backend <<'JSON'
-[{"shortId":"CORE-BACKEND-DDD","title":"OOMKilled","culprit":"/api/v4/x","userCount":1,"count":20,"level":"fatal","substatus":"ongoing","permalink":"https://x/4/"}]
+[{"shortId":"CORE-BACKEND-DDD","title":"TypeError: boom","culprit":"/api/v4/x","userCount":1,"count":20,"level":"fatal","substatus":"ongoing","permalink":"https://x/4/"}]
 JSON
   out=$(poll "$home" 1600)
   assert_contains "$out" "P0 CORE-BACKEND-DDD" "a burst did not page as P0"
@@ -186,6 +186,12 @@ JSON
   out=$(poll "$home" 1300)
   assert_contains "$out" "P0 CORE-BACKEND-LATE" "a first-read burst late in the window did not page"
   assert_contains "$out" "rule=burst>=10" "the burst rule was not named"
+  # The same storm on the second read is the same page, not a second one.
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-LATE","title":"TypeError: late","culprit":"/api/v4/feed/profile/4/activities","userCount":2,"count":24,"level":"fatal","substatus":"ongoing","firstSeen":"1970-01-01T00:21:20Z","permalink":"https://x/late/"}]
+JSON
+  out=$(poll "$home" 1600)
+  assert_not_contains "$out" "CORE-BACKEND-LATE" "a storm that paged on its first read paged again on its second"
 
   home=$(make_home first-read-early)
   prime_baseline "$home" 1000
@@ -201,10 +207,11 @@ test_project_baseline_rate_is_learned_from_its_first_two_polls() {
   local home out
   home=$(make_home learned-baseline)
   write_projects "$home" core-backend feed-service
-  # core-backend carries a chronic issue at 60/h between its first two polls,
-  # so its learned baseline is 30/h (the mean over its two issues); feed-service
-  # is quiet, so its baseline is zero. The same two-event prior window then
-  # lets a burst page on core-backend and blocks it on feed-service.
+  # core-backend carries a chronic issue at 60/h, so its baseline seeds at
+  # 30/h (the mean over its two issues) and moves to 32/h with the next read's
+  # sample; feed-service is quiet, so its baseline stays near zero. The same
+  # two-event prior window then lets a burst page on core-backend and blocks it
+  # on feed-service.
   write_issues "$home" core-backend <<'JSON'
 [{"shortId":"CORE-BACKEND-CHR","title":"TypeError: chronic","culprit":"/api/v4/feed/a","userCount":4,"count":100,"level":"error","substatus":"ongoing","permalink":"https://x/chr/"},
  {"shortId":"CORE-BACKEND-X","title":"TypeError: x","culprit":"/api/v4/feed/b","userCount":1,"count":10,"level":"error","substatus":"ongoing","permalink":"https://x/x/"}]
@@ -239,9 +246,9 @@ JSON
 JSON
   out=$(poll "$home" 1900)
   assert_contains "$out" "P0 CORE-BACKEND-X" "a burst under the project's learned baseline did not page"
-  assert_contains "$out" "prior<=30/h" "the learned baseline was not the one compared against"
+  assert_contains "$out" "prior<=32/h" "the moving baseline was not the one compared against"
   assert_not_contains "$out" "FEED-SERVICE-Y" "a burst over a quiet project's learned baseline paged"
-  pass "the burst baseline is learned per project from its first two polls"
+  pass "the burst baseline is a per-project moving average learned from its reads"
 }
 
 test_burst_is_a_window_rate_not_a_gap_total() {
@@ -807,6 +814,12 @@ test_healthy_project_leaving_the_org_is_removed_from_watch() {
   out=$(poll "$home" 1300)
   assert_contains "$out" "removed from watch feed-service" "a healthy project leaving the org was dropped silently"
   assert_not_contains "$out" "recovered" "a departed project was reported as recovered"
+  python3 - "$home/state/sentry-watch.baseline.json" <<'PY'
+import json, sys
+record = json.load(open(sys.argv[1]))
+for key in ("last_read", "unread", "baselines"):
+    assert "feed-service" not in record.get(key, {}), "%s still holds the removed project" % key
+PY
   out=$(poll "$home" 1600)
   [ -z "$out" ] || fail "a removed project kept printing: $out"
   pass "a healthy project that leaves the enumerated set is reported once as removed"
