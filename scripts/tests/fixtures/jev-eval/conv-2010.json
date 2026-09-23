@@ -1,0 +1,7 @@
+{
+  "id": "2010",
+  "source": {"author": {"type": "user", "id": "u3"}, "body": "quick question about billing", "created_at": 300, "attachments": []},
+  "conversation_parts": {"conversation_parts": [
+    {"part_type": "comment", "author": {"type": "admin", "id": "bot-admin-1"}, "body": "happy to help with that", "created_at": 310, "attachments": []}
+  ]}
+}

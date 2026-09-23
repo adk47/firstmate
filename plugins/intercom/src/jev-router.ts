@@ -223,7 +223,11 @@ function fmt(p: number): string {
 // "Acknowledge once, then go quiet", verbatim) or is three words or fewer.
 // This guard applies ONLY to the no_reply silence branch below — the
 // bad-faith decline-then-silence branch is unchanged.
-const CLOSER_PHRASES = new Set([
+// Exported (not just module-private) so jev-state-cli.ts's
+// --dump-closer-phrases mode can hand the eval harness (scripts/
+// jev-eval-build.sh) this exact list on request, instead of it hardcoding
+// its own independent copy that can silently drift from production.
+export const CLOSER_PHRASES = new Set([
   // Verbatim from workspaces/support/SOUL.md "Reading the room" (line ~62).
   "ok",
   "k",

@@ -1,0 +1,10 @@
+{
+  "id": "2001",
+  "source": {"author": {"type": "user", "id": "u1"}, "body": "my credits are stuck", "created_at": 100, "attachments": []},
+  "conversation_parts": {"conversation_parts": [
+    {"part_type": "comment", "author": {"type": "admin", "id": "bot-admin-1"}, "body": "can you send a screenshot?", "created_at": 110, "attachments": []},
+    {"part_type": "comment", "author": {"type": "user", "id": "u1"}, "body": "https://example.com/shot.png here you go", "created_at": 120, "attachments": []},
+    {"part_type": "comment", "author": {"type": "admin", "id": "bot-admin-1"}, "body": "thanks, fixed it", "created_at": 130, "attachments": []},
+    {"part_type": "comment", "author": {"type": "user", "id": "u1"}, "body": "thank you!", "created_at": 140, "attachments": []}
+  ]}
+}

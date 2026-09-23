@@ -1,0 +1,8 @@
+{
+  "generated_from": "test-fixture",
+  "human_required": ["chargeback", "legal"],
+  "intents": ["credits_missing", "refund_request", "other"],
+  "no_reply": ["closer"],
+  "skills": ["none"],
+  "tools": ["credits_lookup", "none"]
+}
