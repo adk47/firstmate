@@ -7,7 +7,7 @@
 #   fm-sentry-watch.sh projects   list every Sentry project the API lists, with its effective state
 #   fm-sentry-watch.sh migrate    import the retired per-lane Sentry baselines into the shared one
 #   fm-sentry-watch.sh arm        write state/sentry-watch.check.sh and bind its bytes
-#   fm-sentry-watch.sh disarm     remove the shim, its trust binding, the beat, and the rail record
+#   fm-sentry-watch.sh disarm     remove the shim, its trust binding, the beat, the armed marker, and the rail record
 #   fm-sentry-watch.sh --help     print this help
 #
 # This is the one firstmate-owned Sentry watch. It replaces the per-lane scratch
@@ -171,7 +171,7 @@ Usage:
   fm-sentry-watch.sh projects   list every Sentry project the API lists and its effective state
   fm-sentry-watch.sh migrate    import the retired per-lane baselines into the shared one
   fm-sentry-watch.sh arm        write and register state/sentry-watch.check.sh
-  fm-sentry-watch.sh disarm     remove the shim, trust binding, beat, and rail record
+  fm-sentry-watch.sh disarm     remove the shim, trust binding, beat, armed marker, and rail record
   fm-sentry-watch.sh --help     print this help
 
 Rules, thresholds, and signatures are read from config/sentry-watch.json (local,
