@@ -190,6 +190,20 @@ describe("callJev", () => {
       expect(result.ok).toBe(true);
     });
 
+    // A Score is CONTINUOUS (a probability-weighted position across levels).
+    // These are verbatim answers captured from the live API on 2026-09-23. A
+    // validator that required String(score) to be a level key rejected both,
+    // and with them 106 of 125 production turns that day.
+    it.each([
+      ["a mildly uncertain Calm (live: 0.04)", { type: "score", score: 0.04, legend: { "0": "Calm", "1": "Concerned", "2": "Frustrated", "3": "Angry" }, probabilities: { "0": 0.97, "1": 0.03, "2": 0, "3": 0 }, confidence: 0.96 }],
+      ["mostly Frustrated, some Angry (live: 2.12)", { type: "score", score: 2.12, legend: { "0": "Calm", "1": "Concerned", "2": "Frustrated", "3": "Angry" }, probabilities: { "0": 0, "1": 0, "2": 0.88, "3": 0.12 }, confidence: 0.88 }],
+    ])("accepts a fractional score within range: %s", async (_label, frustration) => {
+      const answers = validAnswers();
+      answers.frustration = frustration;
+      const { result } = await run(answers);
+      expect(result.ok).toBe(true);
+    });
+
     const shapeCases: Array<[string, (a: Record<string, unknown>) => void]> = [
       ["choice: confidence is a string", (a) => { (a.resolution_path as any).confidence = "0.8"; }],
       ["choice: probabilities is not an object", (a) => { (a.resolution_path as any).probabilities = "bad"; }],
@@ -205,6 +219,8 @@ describe("callJev", () => {
       ["score: legend is not an object", (a) => { (a.frustration as any).legend = "bad"; }],
       ["score: confidence is a string", (a) => { (a.frustration as any).confidence = "high"; }],
       ["score: score is outside the question's declared range", (a) => { (a.frustration as any).score = 99; }],
+      ["score: a fractional score above the highest level", (a) => { (a.frustration as any).score = 3.5; }],
+      ["score: a negative score", (a) => { (a.frustration as any).score = -0.5; }],
       ["score: a legend key is outside the question's declared range", (a) => { (a.frustration as any).legend = { "99": "nope" }; }],
       ["score: a probabilities key is outside the question's declared range", (a) => { (a.frustration as any).probabilities = { "99": 1.0 }; }],
       ["unknown type", (a) => { (a.resolution_path as any).type = "mystery"; }],
@@ -249,7 +265,10 @@ describe("callJev", () => {
     it("succeeds against the real generated caroline-questions.json fixture, so a future question-set change the validator can't satisfy fails this test", async () => {
       const realAnswers = {
         first_tool: { type: "choice", choice: "credit_verification_check" },
-        frustration: { type: "score", score: 0, legend: { "0": "Calm" } },
+        // Fractional on purpose: the earlier score:0 here was exactly the one
+        // value a key-membership check accepted, so this test could not see
+        // the bug that rejected most production answers.
+        frustration: { type: "score", score: 2.12, legend: { "0": "Calm", "2": "Frustrated" } },
         intent: { type: "choice", choice: "credit_verification" },
         off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
         resolution_path: { type: "choice", choice: "caroline_tool" },

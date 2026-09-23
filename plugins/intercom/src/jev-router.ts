@@ -491,7 +491,9 @@ function choiceField(answer: JevAnswer | undefined): string {
 
 function scoreField(answer: JevAnswer | undefined): string {
   if (!answer || answer.type !== "score") return "unknown:0.00";
-  const key = String(answer.score);
+  // score is continuous (see jev-client's validator); label it by the
+  // nearest level so the log reads "Frustrated:0.88", not "2.12:0.88".
+  const key = Number.isFinite(answer.score) ? String(Math.round(answer.score)) : String(answer.score);
   const label = answer.legend?.[key] ?? key;
   const p = answer.confidence ?? answer.probabilities?.[key] ?? 0;
   return `${label}:${fmt(p)}`;

@@ -723,6 +723,21 @@ describe("formatJevLogLine", () => {
     );
   });
 
+  it("labels a fractional score by its NEAREST level (live 2.12 -> Frustrated), not the raw number", () => {
+    const answers: JevAnswers = {
+      resolution_path: choice("caroline_tool", { caroline_tool: 0.85 }),
+      frustration: {
+        type: "score",
+        score: 2.12,
+        legend: { "0": "Calm", "1": "Concerned", "2": "Frustrated", "3": "Angry" },
+        probabilities: { "0": 0, "1": 0, "2": 0.88, "3": 0.12 },
+        confidence: 0.88,
+      },
+    };
+    const line = formatJevLogLine({ conversationId: "conv3", action: "route", answers, latencyMs: 1 });
+    expect(line).toContain("frustration=Frustrated:0.88");
+  });
+
   it("formats a none-action line when answers is null", () => {
     const line = formatJevLogLine({ conversationId: "conv2", action: "none", answers: null, latencyMs: 5 });
     expect(line).toBe(

@@ -137,7 +137,21 @@ function isValidJevAnswer(a: unknown, question: Record<string, unknown>): boolea
     case "score": {
       if (typeof a.score !== "number" || !Number.isFinite(a.score)) return false;
       const validKeys = scoreCriteriaKeys(question);
-      if (validKeys && !validKeys.has(String(a.score))) return false;
+      // A Score is a probability-weighted POSITION across the ordered levels
+      // (TypeSafe docs), so it is continuous: 0.04 for a mildly uncertain
+      // "Calm", 2.12 for "mostly Frustrated, some Angry". It is NOT a level
+      // key. Requiring String(score) to be a key rejected every answer that
+      // was not perfectly certain -- in production, 106 of 125 Caroline turns
+      // on 2026-09-23 (reason=shape), disproportionately the frustrated
+      // customers, which silently dropped their routing block. Validate the
+      // RANGE instead: within [0, highest level index].
+      if (validKeys) {
+        const levels = [...validKeys].map(Number).filter((n) => Number.isFinite(n));
+        if (levels.length > 0) {
+          const min = Math.min(...levels), max = Math.max(...levels);
+          if (a.score < min || a.score > max) return false;
+        }
+      }
       if (a.legend !== undefined) {
         if (!isPlainObject(a.legend)) return false;
         if (validKeys && !Object.keys(a.legend).every((k) => validKeys.has(k))) return false;
