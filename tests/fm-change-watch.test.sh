@@ -247,6 +247,21 @@ esac
 [ -e "$HOME_A7/state/change-watch/w7-3317" ] && fail "an unreadable manifest created a watch record"
 pass "an unreadable manifest is a stated measurement gap, not a PR without a service"
 
+# A manifest the PR deletes is a decommission, not a forge read failure.
+HOME_A8=$(new_world a8)
+printf '%s\n' "$MANIFEST" > "$HOME_A8/forge/files.txt"
+printf '%s\n' 1790000000 > "$HOME_A8/forge/merge-epoch"
+printf '%s\n' deadbeefcafe > "$HOME_A8/forge/head-ref"
+printf 'diff --git a/%s b/%s\ndeleted file mode 100644\n--- a/%s\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-apiVersion: apps/v1\n-kind: Deployment\n-metadata:\n' \
+  "$MANIFEST" "$MANIFEST" "$MANIFEST" > "$HOME_A8/forge/diff.txt"
+out=$(run_cw "$HOME_A8" 1790000000 register w8 "$PR_URL") || fail "register failed"
+case "$out" in
+  *"no deployable service touched by $PR_URL (manifest removed: $MANIFEST); nothing registered"*) ;;
+  *) fail "a deleted manifest was not reported as removed: $out" ;;
+esac
+[ -e "$HOME_A8/state/change-watch/w8-3317" ] && fail "a deleted manifest created a watch record"
+pass "a deleted manifest registers nothing and is named as removed, not unread"
+
 # --- (b) a regressing 5xx series fires at +15m --------------------------------
 
 HOME_B=$(new_world b)

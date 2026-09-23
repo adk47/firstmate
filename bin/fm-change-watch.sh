@@ -29,8 +29,9 @@
 #           registration line says so. For an application repository the
 #           target is the Deployment carrying the repository's name in the
 #           local H-DevOps checkout. A PR that touches no deployable service
-#           registers nothing and says so; a PR whose manifests could not be
-#           read registers nothing and says that instead.
+#           registers nothing and says so, as does one that only deletes a
+#           manifest; a PR whose manifests could not be read registers nothing
+#           and says that instead.
 #           Registering an existing watch whose drive stopped before the end of
 #           its schedule re-arms the remaining samples; any other existing watch
 #           is left alone. Registration is read-only against the cluster; it
@@ -355,11 +356,17 @@ cw_manifest_deployments() {
 }
 
 # Changed lines of a unified diff (stdin) as "path<TAB>new-file-line", one per
-# added line and one per removed line at the position it was removed from.
+# added line and one per removed line at the position it was removed from; a
+# file the diff deletes is one "path<TAB>removed" line instead.
 cw_diff_changed_lines() {
   awk '
-    /^diff --git / { path = ""; inhunk = 0; next }
-    /^\+\+\+ / { path = $2; sub(/^b\//, "", path); if (path == "/dev/null") path = ""; inhunk = 0; next }
+    /^diff --git / { path = ""; old = ""; inhunk = 0; next }
+    /^--- / && !inhunk { old = $2; sub(/^a\//, "", old); next }
+    /^\+\+\+ / {
+      path = $2; sub(/^b\//, "", path); inhunk = 0
+      if (path == "/dev/null") { path = ""; if (old != "" && old != "/dev/null") print old "\tremoved" }
+      next
+    }
     /^@@ / {
       match($0, /\+[0-9]+/)
       cur = substr($0, RSTART + 1, RLENGTH - 1) + 0
@@ -450,6 +457,10 @@ cw_derive_targets() {  # <url> <provider> <owner> <repo> <number> <repo-name>
   changed=$(cw_forge_diff "$url" "$provider" 2>/dev/null | cw_diff_changed_lines || true)
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    if printf '%s\n' "$changed" | grep -qxF "$path	removed"; then
+      printf 'note\tmanifest removed: %s\n' "$path"
+      continue
+    fi
     if [ -z "$ref" ] || [ "$reads" -ge "$MAX_MANIFEST_READS" ]; then
       printf 'note\tmanifest unread: %s\n' "$path"
       continue
