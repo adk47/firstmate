@@ -313,6 +313,22 @@ export interface IntercomAccountConfig {
     shadow?: {
       storeState?: boolean;
     };
+    // Shadow-rollout surface for caroline-questions.v2.json
+    // (docs gap noted in the implementer report: no design doc section yet).
+    // `questionsVersion` gates LIVE routing behaviour only (which questions
+    // ship in the real call, and therefore decide()'s branches / the
+    // [ROUTING] block). Default "v1" keeps prod byte-identical.
+    questionsVersion: "v1" | "v2";
+    // For each version listed here, an EXTRA Jev call fires in parallel,
+    // fire-and-forget, on its own timeout, writing only to the shadow log —
+    // it never affects the live call, the live decision, or turn latency.
+    // Default [] (no shadow calls).
+    shadowVersions: string[];
+    // v2-only. Absolute path to Caroline's SOUL.md, sent as
+    // agent_instructions on every v2 call (live or shadow). Defaults to
+    // DEFAULT_AGENT_INSTRUCTIONS_PATH (caroline-agent-instructions-loader.ts,
+    // /opt/hydra/workspaces/support/SOUL.md on edge) when omitted.
+    agentInstructionsPath?: string;
   };
   // Upper bound (ms) on how long we wait for a single agent dispatch to return
   // before treating the conversation lane as wedged. The dispatch await

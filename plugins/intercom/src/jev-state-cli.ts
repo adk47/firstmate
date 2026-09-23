@@ -52,7 +52,16 @@
  * count of CUSTOMER-authored parts at indices 0..turn_index inclusive, not
  * the raw part index.
  */
-import { buildJevState, CLOSER_PHRASES, type BuildJevStateInput } from "./jev-router.js";
+import { readFileSync } from "node:fs";
+import {
+  buildJevState,
+  buildJevStateV2,
+  CLOSER_PHRASES,
+  type BuildJevStateInput,
+  type BuildJevStateV2Input,
+  type JevV2Author,
+} from "./jev-router.js";
+import { loadCarolineToolCapabilities } from "./caroline-inventory-loader.js";
 
 export interface JevStateCliPart {
   author: string;
@@ -151,12 +160,114 @@ export function buildStateV1(thread: JevStateCliThread): Record<string, unknown>
   return buildJevState(input);
 }
 
+// v2 author mapping (jev-router.ts's buildJevStateV2 / handler.ts's v2 parts
+// builder): "user"|"lead"|"contact" -> customer (same Intercom customer
+// author types as v1), "bot" -> caroline (Caroline's own admin id), "admin"
+// -> human_agent (the whole point of v2: a human takeover reply is now
+// VISIBLE to Jev instead of dropped, per the spec's bug (c)). Anything else
+// is dropped, same as v1.
+function mapAuthorV2(author: string): JevV2Author | null {
+  if (CUSTOMER_AUTHOR_TYPES.has(author)) return "customer";
+  if (author === "bot") return "caroline";
+  if (author === "admin") return "human_agent";
+  return null;
+}
+
+function buildV2Parts(parts: JevStateCliPart[]): { author: JevV2Author; body: string; createdAt?: number | string }[] {
+  return parts
+    .map((p) => {
+      const role = mapAuthorV2(p.author);
+      if (!role) return null;
+      const body = stripHtml(p.body);
+      if (!body) return null;
+      return { author: role, body, ...(p.created_at !== undefined ? { createdAt: p.created_at } : {}) };
+    })
+    .filter((p): p is { author: JevV2Author; body: string; createdAt?: number | string } => p !== null);
+}
+
+interface V2BaseOptions {
+  tools?: BuildJevStateV2Input["tools"];
+  policy?: BuildJevStateV2Input["policy"];
+  agentInstructions?: string;
+}
+
+function buildStateV2Base(thread: JevStateCliThread, opts: V2BaseOptions): Record<string, unknown> {
+  assertThread(thread);
+  const { parts, turn_index: turnIndex, known_facts: knownFacts } = thread;
+
+  const current = parts[turnIndex];
+  if (!CUSTOMER_AUTHOR_TYPES.has(current.author)) {
+    throw new Error(
+      `thread.turn_index ${turnIndex} does not point at a customer-authored part (author=${current.author})`,
+    );
+  }
+
+  const recentParts = buildV2Parts(parts.slice(0, turnIndex));
+
+  const input: BuildJevStateV2Input = {
+    message: stripHtml(current.body),
+    recentParts,
+    turnCount: countCustomerTurnsThrough(parts, turnIndex),
+    founding: knownFacts?.founding,
+    plan: knownFacts?.plan,
+    priorChats: knownFacts?.prior_chats
+      ? {
+          count: knownFacts.prior_chats.count,
+          mostRecentTitle: knownFacts.prior_chats.most_recent_title,
+          mostRecentAt: knownFacts.prior_chats.most_recent_at,
+        }
+      : undefined,
+    tools: opts.tools,
+    policy: opts.policy,
+    agentInstructions: opts.agentInstructions,
+  };
+  return buildJevStateV2(input);
+}
+
+/** v2-min — v2 state shape, no tools/policy. */
+export function buildStateV2Min(thread: JevStateCliThread): Record<string, unknown> {
+  return buildStateV2Base(thread, {});
+}
+
+/** v2-policy — v2 state shape plus tools/policy from caroline-tool-capabilities.json. */
+export function buildStateV2Policy(thread: JevStateCliThread): Record<string, unknown> {
+  const capabilities = loadCarolineToolCapabilities();
+  return buildStateV2Base(thread, {
+    tools: capabilities?.tools,
+    policy: capabilities?.policy,
+  });
+}
+
+/**
+ * v2-soul — v2-policy plus the full text of workspaces/support/SOUL.md as
+ * `agent_instructions`, loaded from the path in env `JEV_SOUL_PATH`. Eval-only:
+ * never used by the live router (nothing in handler.ts/channel.ts reads
+ * JEV_SOUL_PATH). Throws if the env var is unset — a soul-less "v2-soul" run
+ * would silently measure v2-policy instead, which is worse than failing loud.
+ */
+export function buildStateV2Soul(thread: JevStateCliThread): Record<string, unknown> {
+  const soulPath = process.env.JEV_SOUL_PATH;
+  if (!soulPath) {
+    throw new Error("JEV_SOUL_PATH must be set to use --variant v2-soul");
+  }
+  const agentInstructions = readFileSync(soulPath, "utf8");
+  const capabilities = loadCarolineToolCapabilities();
+  return buildStateV2Base(thread, {
+    tools: capabilities?.tools,
+    policy: capabilities?.policy,
+    agentInstructions,
+  });
+}
+
 export type JevStateVariantBuilder = (thread: JevStateCliThread) => Record<string, unknown>;
 
 // Variant -> builder map. Add a "v2-*" entry here to plug in a future
 // builder; the CLI's --variant flag and buildState() below never change.
 export const VARIANTS: Record<string, JevStateVariantBuilder> = {
   v1: buildStateV1,
+  "v2-min": buildStateV2Min,
+  "v2-policy": buildStateV2Policy,
+  "v2-soul": buildStateV2Soul,
 };
 
 export function buildState(variant: string, thread: unknown): Record<string, unknown> {

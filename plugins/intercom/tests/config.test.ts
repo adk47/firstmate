@@ -305,3 +305,124 @@ describe("dispatch coalescing / timeout config passthrough", () => {
     expect(resolveIntercomAccount(bare).dispatchTimeoutMs).toBeUndefined();
   });
 });
+
+describe("jev.questionsVersion / jev.shadowVersions config (shadow-only rollout surface)", () => {
+  const base = {
+    enabled: true,
+    workspaceId: "w",
+    token: "t",
+    webhookSecret: "s",
+    botAdminId: "b",
+  };
+
+  it("defaults questionsVersion to v1 and shadowVersions to [] when jev is configured but neither key is set", () => {
+    const cfg = { channels: { intercom: { accounts: { default: { ...base, jev: { enabled: true, apiKey: "k" } } } } } };
+    const account = resolveIntercomAccount(cfg);
+    expect(account.jev?.questionsVersion).toBe("v1");
+    expect(account.jev?.shadowVersions).toEqual([]);
+  });
+
+  it("passes questionsVersion=v2 and shadowVersions through unchanged", () => {
+    const cfg = {
+      channels: {
+        intercom: {
+          accounts: {
+            default: { ...base, jev: { enabled: true, apiKey: "k", questionsVersion: "v2", shadowVersions: ["v1"] } },
+          },
+        },
+      },
+    };
+    const account = resolveIntercomAccount(cfg);
+    expect(account.jev?.questionsVersion).toBe("v2");
+    expect(account.jev?.shadowVersions).toEqual(["v1"]);
+  });
+
+  it("throws on an invalid questionsVersion", () => {
+    const cfg = {
+      channels: { intercom: { accounts: { default: { ...base, jev: { enabled: true, apiKey: "k", questionsVersion: "v3" } } } } },
+    };
+    expect(() => resolveIntercomAccount(cfg)).toThrow(/questionsVersion must be "v1" or "v2"/);
+  });
+
+  it("throws when shadowVersions is not an array of strings", () => {
+    const cfg = {
+      channels: { intercom: { accounts: { default: { ...base, jev: { enabled: true, apiKey: "k", shadowVersions: "v2" } } } } },
+    };
+    expect(() => resolveIntercomAccount(cfg)).toThrow(/shadowVersions must be an array of strings/);
+  });
+
+  it("throws when shadowVersions contains a non-string entry", () => {
+    const cfg = {
+      channels: { intercom: { accounts: { default: { ...base, jev: { enabled: true, apiKey: "k", shadowVersions: [1] } } } } },
+    };
+    expect(() => resolveIntercomAccount(cfg)).toThrow(/shadowVersions must be an array of strings/);
+  });
+
+  // QA NO-GO on #1022 (finding 1, comment 4088080438): shadowVersions: ["v02"]
+  // passed this validation, channel.ts then silently mapped it to the v1
+  // runner while handler.ts still wrote questions_version: "v02" on the
+  // shadow row — a corrupted cohort labelled as an experiment that was never
+  // actually run. Restrict entries to the implemented set (v1, v2).
+  it("throws when shadowVersions contains an unsupported version string (e.g. a typo)", () => {
+    const cfg = {
+      channels: {
+        intercom: { accounts: { default: { ...base, jev: { enabled: true, apiKey: "k", shadowVersions: ["v02"] } } } },
+      },
+    };
+    expect(() => resolveIntercomAccount(cfg)).toThrow(/shadowVersions\[0\] "v02" is not a supported version \(v1, v2\)/);
+  });
+
+  it("throws when shadowVersions contains a supported version alongside an unsupported one", () => {
+    const cfg = {
+      channels: {
+        intercom: {
+          accounts: { default: { ...base, jev: { enabled: true, apiKey: "k", shadowVersions: ["v2", "v3"] } } },
+        },
+      },
+    };
+    expect(() => resolveIntercomAccount(cfg)).toThrow(/shadowVersions\[1\] "v3" is not a supported version \(v1, v2\)/);
+  });
+
+  it("accepts shadowVersions containing only implemented versions", () => {
+    const cfg = {
+      channels: {
+        intercom: {
+          accounts: { default: { ...base, jev: { enabled: true, apiKey: "k", shadowVersions: ["v1", "v2"] } } },
+        },
+      },
+    };
+    expect(resolveIntercomAccount(cfg).jev?.shadowVersions).toEqual(["v1", "v2"]);
+  });
+
+  it("leaves agentInstructionsPath undefined when absent", () => {
+    const cfg = { channels: { intercom: { accounts: { default: { ...base, jev: { enabled: true, apiKey: "k" } } } } } };
+    expect(resolveIntercomAccount(cfg).jev?.agentInstructionsPath).toBeUndefined();
+  });
+
+  it("passes agentInstructionsPath through unchanged", () => {
+    const cfg = {
+      channels: {
+        intercom: {
+          accounts: {
+            default: { ...base, jev: { enabled: true, apiKey: "k", agentInstructionsPath: "/opt/hydra/workspaces/support/SOUL.md" } },
+          },
+        },
+      },
+    };
+    expect(resolveIntercomAccount(cfg).jev?.agentInstructionsPath).toBe("/opt/hydra/workspaces/support/SOUL.md");
+  });
+
+  it("throws when agentInstructionsPath is an empty/blank string", () => {
+    const cfg = {
+      channels: { intercom: { accounts: { default: { ...base, jev: { enabled: true, apiKey: "k", agentInstructionsPath: "  " } } } } },
+    };
+    expect(() => resolveIntercomAccount(cfg)).toThrow(/agentInstructionsPath must be a non-empty string/);
+  });
+
+  it("throws when agentInstructionsPath is not a string", () => {
+    const cfg = {
+      channels: { intercom: { accounts: { default: { ...base, jev: { enabled: true, apiKey: "k", agentInstructionsPath: 42 } } } } },
+    };
+    expect(() => resolveIntercomAccount(cfg)).toThrow(/agentInstructionsPath must be a non-empty string/);
+  });
+});

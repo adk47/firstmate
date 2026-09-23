@@ -61,6 +61,16 @@ export interface JevShadowRowInput {
   http: number | null;
   // Default true — see IntercomAccountConfig.jev.shadow.storeState.
   storeState?: boolean;
+  // Which caroline-questions*.json shape produced `answers` — "v1" for the
+  // live default and every pre-v2 row, "v2" (or a future variant key) for a
+  // shadow/live-v2 call. Optional so existing callers/tests that don't pass
+  // it keep compiling; appendJevShadowRow defaults it to "v1" in the row.
+  questionsVersion?: string;
+  // v2-only — "v2-soul" when SOUL.md was read for this call, "v2-policy-
+  // fallback" when it was unreadable and the call ran without
+  // agent_instructions. Undefined (and so absent/null in the row) on every
+  // v1 call — see JevTurnResult.stateVariant.
+  stateVariant?: string;
 }
 
 async function ensureShadowFileMode(filePath: string, log?: { warn: (msg: string) => void }): Promise<void> {
@@ -99,6 +109,8 @@ export async function appendJevShadowRow(
       rc: input.rc,
       http: input.http,
       provider: input.provider ?? "openrouter",
+      questions_version: input.questionsVersion ?? "v1",
+      state_variant: input.stateVariant ?? null,
     };
     const filePath = join(SHADOW_DIR, `${SURFACE}.jsonl`);
     const lockPath = `${filePath}.lock`;

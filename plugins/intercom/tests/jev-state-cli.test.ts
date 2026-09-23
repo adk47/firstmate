@@ -1,6 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { buildJevState } from "../src/jev-router.js";
-import { buildState, buildStateV1, VARIANTS, type JevStateCliThread } from "../src/jev-state-cli.js";
+import {
+  buildState,
+  buildStateV1,
+  buildStateV2Min,
+  buildStateV2Policy,
+  buildStateV2Soul,
+  VARIANTS,
+  type JevStateCliThread,
+} from "../src/jev-state-cli.js";
+import { __resetCarolineInventoryCacheForTests } from "../src/caroline-inventory-loader.js";
 
 // ---------------------------------------------------------------------------
 // v1 must be byte-identical to buildJevState for equivalent fixture threads —
@@ -169,5 +178,68 @@ describe("buildState variant dispatch", () => {
 
   it("throws when parts is missing", () => {
     expect(() => buildState("v1", { turn_index: 0 })).toThrow(/parts must be an array/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v2 CLI variants — v2-min, v2-policy, v2-soul, and VARIANTS registration
+// ---------------------------------------------------------------------------
+
+describe("jev-state-cli v2 variants", () => {
+  afterEach(() => {
+    __resetCarolineInventoryCacheForTests();
+    delete process.env.JEV_SOUL_PATH;
+  });
+
+  it("VARIANTS registers v2-min, v2-policy, v2-soul alongside v1", () => {
+    expect(Object.keys(VARIANTS).sort()).toEqual(["v1", "v2-min", "v2-policy", "v2-soul"].sort());
+  });
+
+  it("v2-min produces the v2 state shape with empty tools/policy and maps admin -> human_agent", () => {
+    const thread: JevStateCliThread = {
+      parts: [
+        { author: "user", body: "my credits are missing" },
+        { author: "bot", body: "can you share the profile link?" },
+        { author: "admin", body: "I've taken over, one sec" },
+        { author: "user", body: "ok here it is" },
+      ],
+      turn_index: 3,
+    };
+    const got = buildStateV2Min(thread);
+    expect(got.customer_last_message).toBe("ok here it is");
+    // most recent part before the current turn is the admin (human_agent) reply
+    expect(got.agent_last_message).toEqual({ author: "human_agent", text: "I've taken over, one sec" });
+    expect(got.tools).toEqual([]);
+    expect(got.policy).toEqual({ human_gated: [], kb_topics: [] });
+    const thread2 = (got.thread as { author: string; text: string }[]) ?? [];
+    expect(thread2.some((p) => p.author === "human_agent" && p.text === "I've taken over, one sec")).toBe(true);
+  });
+
+  it("buildState('v2-min', ...) is reachable via VARIANTS dispatch too", () => {
+    const thread: JevStateCliThread = { parts: [{ author: "user", body: "hi" }], turn_index: 0 };
+    expect(buildState("v2-min", thread)).toEqual(buildStateV2Min(thread));
+  });
+
+  it("v2-policy loads tools/policy from caroline-tool-capabilities.json", () => {
+    const thread: JevStateCliThread = { parts: [{ author: "user", body: "hi" }], turn_index: 0 };
+    const got = buildStateV2Policy(thread);
+    const tools = got.tools as unknown[];
+    const policy = got.policy as { human_gated: string[]; kb_topics: string[] };
+    expect(tools.length).toBeGreaterThan(0);
+    expect(policy.kb_topics.length).toBeGreaterThan(0);
+  });
+
+  it("v2-soul throws when JEV_SOUL_PATH is unset", () => {
+    delete process.env.JEV_SOUL_PATH;
+    const thread: JevStateCliThread = { parts: [{ author: "user", body: "hi" }], turn_index: 0 };
+    expect(() => buildStateV2Soul(thread)).toThrow(/JEV_SOUL_PATH/);
+  });
+
+  it("v2-soul loads agent_instructions from JEV_SOUL_PATH when set", () => {
+    process.env.JEV_SOUL_PATH = new URL("../../../workspaces/support/SOUL.md", import.meta.url).pathname;
+    const thread: JevStateCliThread = { parts: [{ author: "user", body: "hi" }], turn_index: 0 };
+    const got = buildStateV2Soul(thread);
+    expect(typeof got.agent_instructions).toBe("string");
+    expect((got.agent_instructions as string).length).toBeGreaterThan(0);
   });
 });

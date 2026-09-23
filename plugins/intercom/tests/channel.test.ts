@@ -14,6 +14,7 @@ import {
   orderBatch,
   mergeBatchMedia,
   classifyRuntimeNoticePayload,
+  resolveJevShadowQuestionsVersion,
 } from "../src/channel.js";
 import { decide, type JevActionsConfig, type JevAnswers, type JevBands } from "../src/jev-router.js";
 import { canAgentReply } from "../src/handoff.js";
@@ -908,5 +909,37 @@ describe("orderBatch", () => {
     const input = [qm("b", 2), qm("a", 1)];
     orderBatch(input);
     expect(input.map((m) => m.messageId)).toEqual(["b", "a"]);
+  });
+});
+
+describe("resolveJevShadowQuestionsVersion", () => {
+  // QA NO-GO on #1022 (finding 1, comment 4088080438): jevShadowRunners
+  // used to map ANY non-"v2" shadowVersions entry onto the v1 runner, so a
+  // typo like "v02" silently ran v1 while handler.ts still wrote
+  // questions_version: "v02" on the shadow row — a corrupted cohort. Dispatch
+  // must stay exhaustive: an unsupported version is never mapped to "v1".
+  it("resolves v1 and v2 to themselves", () => {
+    expect(resolveJevShadowQuestionsVersion("v1")).toBe("v1");
+    expect(resolveJevShadowQuestionsVersion("v2")).toBe("v2");
+  });
+
+  it("never maps an unknown version to v1 — returns null instead", () => {
+    expect(resolveJevShadowQuestionsVersion("v02")).toBeNull();
+    expect(resolveJevShadowQuestionsVersion("v3")).toBeNull();
+    expect(resolveJevShadowQuestionsVersion("")).toBeNull();
+  });
+
+  it("warns once with the offending version when given an unsupported entry", () => {
+    const warns: string[] = [];
+    const result = resolveJevShadowQuestionsVersion("v02", { warn: (m) => warns.push(m) });
+    expect(result).toBeNull();
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain("v02");
+  });
+
+  it("does not warn for a supported version", () => {
+    const warns: string[] = [];
+    resolveJevShadowQuestionsVersion("v2", { warn: (m) => warns.push(m) });
+    expect(warns).toHaveLength(0);
   });
 });

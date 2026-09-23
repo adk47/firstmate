@@ -21,6 +21,8 @@ import {
   type JevBands,
   type JevTurnInput,
   type JevTurnOutcome,
+  type JevV2Author,
+  type JevV2Part,
 } from "./jev-router.js";
 import { appendJevShadowRow } from "./jev-shadow-log.js";
 import { DEFAULT_JEV_MODEL } from "./jev-client.js";
@@ -107,6 +109,53 @@ function buildRecentPartsFromLiveConversation(
   return out;
 }
 
+// v2 twin of buildRecentPartsFromLiveConversation above — same source/dedup
+// logic, but OTHER admins (human takeover replies) map to "human_agent"
+// instead of being dropped (spec bug (c): v1 loses Jan/human replies from
+// state entirely). Built alongside, never instead of, the v1 recentParts —
+// v1's shape and behaviour are unchanged by this function's existence.
+function buildRecentPartsV2FromLiveConversation(
+  source: IntercomConversation["source"] | undefined,
+  parts: IntercomConversationPart[] | undefined,
+  botAdminId: string,
+  currentBody: string,
+): JevV2Part[] {
+  const out: JevV2Part[] = [];
+  const currentStripped = currentBody.replace(/<[^>]*>/g, "").trim();
+
+  if (source) {
+    const body = (source.body ?? "").replace(/<[^>]*>/g, "").trim();
+    if (body && body !== currentStripped) {
+      const authorType = source.author?.type;
+      const author: JevV2Author =
+        authorType === "user" || authorType === ("lead" as string) || authorType === ("contact" as string)
+          ? "customer"
+          : authorType === "admin" && source.author?.id === botAdminId
+            ? "caroline"
+            : "human_agent";
+      out.push({ author, body });
+    }
+  }
+
+  for (const part of parts ?? []) {
+    if (part.part_type !== "comment") continue;
+    const body = (part.body ?? "").replace(/<[^>]*>/g, "").trim();
+    if (!body) continue;
+    if (part.author?.type === "user") {
+      out.push({ author: "customer", body });
+    } else if (part.author?.type === "admin" && part.author.id === botAdminId) {
+      out.push({ author: "caroline", body });
+    } else if (part.author?.type === "admin") {
+      out.push({ author: "human_agent", body });
+    }
+  }
+  const last = out.at(-1);
+  if (last && last.author === "customer" && last.body === currentStripped) {
+    out.pop();
+  }
+  return out;
+}
+
 export type HandlerAction =
   // `unsupportedAttachments` rides here for the same reason `attachments` does:
   // the channel needs it to build the turn. Dropping it at this hop would put
@@ -124,6 +173,10 @@ export interface HandlerOptions {
   riskAssessment?: { enabled: boolean };
   riskDeps?: AssessRiskDeps;
   recentParts?: { author: "user" | "bot"; body: string }[];
+  // v2 twin of recentParts (tests only — production builds it from the live
+  // conversation, see buildRecentPartsV2FromLiveConversation). Only used
+  // when jev.questionsVersion is "v2" or "v2" is in jev.shadowVersions.
+  recentPartsV2?: JevV2Part[];
   // When present and non-empty, any customer message on a conversation whose
   // tags include one of these names (case-insensitive) is filtered before
   // the live-check and risk paths run. Used to disable Caroline on social
@@ -159,8 +212,23 @@ export interface HandlerOptions {
     // means "store state" (the appendJevShadowRow call sites below default
     // to true), matching DEFAULT_JEV_SHADOW.
     shadow?: { storeState?: boolean };
+    // Gates LIVE routing behaviour only (decide()'s branches + the
+    // [ROUTING] block). Default "v1" — omitting this leaves prod unchanged.
+    questionsVersion?: "v1" | "v2";
+    // Extra questions-schema versions to shadow-call IN PARALLEL with the
+    // live call, fire-and-forget, never affecting the live result or turn
+    // latency. Default [] (no shadow calls). A version equal to
+    // jev.questionsVersion is harmless but redundant (the live call already
+    // writes a rc=0 row for it).
+    shadowVersions?: string[];
   };
   runJev?: (input: JevTurnInput) => Promise<JevTurnOutcome>;
+  // Fires ONE shadow-only Jev call for `version` (e.g. "v2") — invoked once
+  // per entry in jev.shadowVersions, never awaited by the caller, its result
+  // only ever reaches the shadow log. Injected (like runJev) so handler.ts
+  // stays free of live-API/runner-construction details; channel.ts is
+  // expected to route this to a version-specific memoized runner instance.
+  runJevShadow?: (version: string, input: JevTurnInput) => Promise<JevTurnOutcome>;
 }
 
 export async function handleWebhookEvent(
@@ -346,6 +414,17 @@ export async function handleWebhookEvent(
         options?.recentParts ??
         buildRecentPartsFromLiveConversation(liveConversationSource, liveConversationParts, botAdminId, classified.body);
 
+      // Built once, lazily, only when v2 state is actually needed this turn
+      // (live questionsVersion "v2" or "v2" in shadowVersions) — never spent
+      // on a v1-only turn.
+      const jevQuestionsVersion = options?.jev?.questionsVersion ?? "v1";
+      const jevShadowVersions = options?.jev?.shadowVersions ?? [];
+      const needsV2Parts = jevQuestionsVersion === "v2" || jevShadowVersions.includes("v2");
+      const recentPartsV2 = needsV2Parts
+        ? (options?.recentPartsV2 ??
+          buildRecentPartsV2FromLiveConversation(liveConversationSource, liveConversationParts, botAdminId, classified.body))
+        : undefined;
+
       const flagOn = options?.riskAssessment?.enabled === true;
 
       if (flagOn) {
@@ -354,6 +433,11 @@ export async function handleWebhookEvent(
           recentParts,
           state ?? ({ userTurnCount: 0 } as IntercomSessionState),
           options?.riskDeps ?? {},
+          // QA NO-GO on #1022 (finding 2): the risk judge shares the SAME
+          // memoized runner as the later runJev call — recentPartsV2 must be
+          // computed and passed here too, or a v2 turn's first call (this
+          // one) permanently caches a state with an empty thread.
+          recentPartsV2,
         );
 
         const isMagic = assessment.source === "user_request";
@@ -443,11 +527,79 @@ export async function handleWebhookEvent(
       // A Jev failure (timeout, bad shape, disabled) leaves `state.jev`
       // untouched and falls through to the unchanged dispatch below.
       if (state && options?.jev?.enabled && options.runJev) {
+        // Shadow calls fire here, BEFORE the live call is awaited, so they
+        // run concurrently with it and never add to this turn's latency.
+        // Fire-and-forget: any hang/throw/garbage result is swallowed to a
+        // warn and never reaches the live decision or the customer.
+        if (options.runJevShadow) {
+          for (const version of jevShadowVersions) {
+            const shadowStartedAt = Date.now();
+            const shadowInput: JevTurnInput =
+              version === "v2"
+                ? { message: classified.body, turnCount: state.userTurnCount ?? 0, recentPartsV2 }
+                : { message: classified.body, turnCount: state.userTurnCount ?? 0, recentParts };
+            void options
+              .runJevShadow(version, shadowInput)
+              .then((outcome) => {
+                const shadowLatencyMs = Date.now() - shadowStartedAt;
+                if (outcome.ok) {
+                  // decide() here is used ONLY to compute what the shadow row's
+                  // `actual` would have been — its result is never applied to
+                  // state or the response, only logged.
+                  const shadowDecision = decideJev(
+                    outcome.answers,
+                    options.jev!.bands,
+                    classified.body,
+                    undefined,
+                    options.jev!.intents ?? [],
+                    options.jev!.skills ?? [],
+                    options.jev!.actions,
+                    version === "v2" ? "v2" : "v1",
+                  );
+                  return appendJevShadowRow({
+                    conversationId: classified.conversationId,
+                    state: outcome.state,
+                    questions: outcome.questions,
+                    model: outcome.model,
+                    provider: "openrouter",
+                    answers: outcome.answers,
+                    usage: outcome.usage,
+                    latencyMs: shadowLatencyMs,
+                    actual: shadowDecision.action,
+                    rc: 0,
+                    http: outcome.httpStatus,
+                    questionsVersion: version,
+                    stateVariant: outcome.stateVariant,
+                  });
+                }
+                return appendJevShadowRow({
+                  conversationId: classified.conversationId,
+                  state: {},
+                  questions: {},
+                  model: DEFAULT_JEV_MODEL,
+                  provider: "openrouter",
+                  answers: null,
+                  usage: null,
+                  latencyMs: shadowLatencyMs,
+                  actual: "none",
+                  rc: outcome.reason === "shape" ? 3 : 2,
+                  http: outcome.httpStatus,
+                  questionsVersion: version,
+                  stateVariant: outcome.stateVariant,
+                });
+              })
+              .catch((err) => {
+                console.warn(`[intercom:jev] shadow call version=${version} failed: ${err}`);
+              });
+          }
+        }
+
         const startedAt = Date.now();
         const turnResult = await options.runJev({
           message: classified.body,
           turnCount: state.userTurnCount ?? 0,
           recentParts,
+          recentPartsV2,
         });
         const latencyMs = Date.now() - startedAt;
 
@@ -479,6 +631,8 @@ export async function handleWebhookEvent(
             rc: turnResult.reason === "shape" ? 3 : 2,
             http: turnResult.httpStatus,
             storeState: options.jev?.shadow?.storeState ?? true,
+            questionsVersion: jevQuestionsVersion,
+            stateVariant: turnResult.stateVariant,
           }).catch(() => {});
         }
 
@@ -491,6 +645,7 @@ export async function handleWebhookEvent(
             options.jev.intents ?? [],
             options.jev.skills ?? [],
             options.jev.actions,
+            jevQuestionsVersion,
           );
           console.info(
             formatJevLogLine({
@@ -516,6 +671,8 @@ export async function handleWebhookEvent(
             rc: 0,
             http: turnResult.httpStatus,
             storeState: options.jev?.shadow?.storeState ?? true,
+            questionsVersion: jevQuestionsVersion,
+            stateVariant: turnResult.stateVariant,
           }).catch(() => {});
 
           if (decision.action === "decline") {

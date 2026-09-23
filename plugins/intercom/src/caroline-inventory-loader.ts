@@ -61,12 +61,37 @@ export interface CarolineSkillMeta {
   outcome?: string;
 }
 
+// v2-only. caroline-tool-capabilities.json: per-tool declared answer/cannot
+// capabilities plus the human_gated / kb_topics policy — see
+// caroline-tool-capabilities.json's own top-level comment for provenance.
+export interface CarolineToolCapability {
+  name: string;
+  answers: string[];
+  cannot_answer: string[];
+  needs: string;
+}
+
+export interface CarolineCapabilitiesPolicy {
+  human_gated: string[];
+  kb_topics: string[];
+}
+
+export interface CarolineCapabilities {
+  tools: CarolineToolCapability[];
+  policy: CarolineCapabilitiesPolicy;
+}
+
+let cachedQuestionsV2: CarolineQuestions | null | undefined;
+let warnedQuestionsV2 = false;
+
 let cachedQuestions: CarolineQuestions | null | undefined;
 let cachedIntents: CarolineIntentMeta[] | null | undefined;
 let cachedSkills: CarolineSkillMeta[] | null | undefined;
+let cachedCapabilities: CarolineCapabilities | null | undefined;
 let warnedQuestions = false;
 let warnedIntents = false;
 let warnedSkills = false;
+let warnedCapabilities = false;
 
 export function loadCarolineQuestions(log?: { warn: (msg: string) => void }): CarolineQuestions | null {
   if (cachedQuestions !== undefined) return cachedQuestions;
@@ -77,6 +102,17 @@ export function loadCarolineQuestions(log?: { warn: (msg: string) => void }): Ca
     log?.warn("[intercom:jev] caroline-questions.json not found — jev routing disabled for this process");
   }
   return cachedQuestions;
+}
+
+export function loadCarolineQuestionsV2(log?: { warn: (msg: string) => void }): CarolineQuestions | null {
+  if (cachedQuestionsV2 !== undefined) return cachedQuestionsV2;
+  const data = readJson("caroline-questions.v2.json");
+  cachedQuestionsV2 = (data as CarolineQuestions | null) ?? null;
+  if (cachedQuestionsV2 === null && !warnedQuestionsV2) {
+    warnedQuestionsV2 = true;
+    log?.warn("[intercom:jev] caroline-questions.v2.json not found — jev v2 routing disabled for this process");
+  }
+  return cachedQuestionsV2;
 }
 
 export function loadCarolineIntents(log?: { warn: (msg: string) => void }): CarolineIntentMeta[] {
@@ -101,12 +137,30 @@ export function loadCarolineSkills(log?: { warn: (msg: string) => void }): Carol
   return cachedSkills ?? [];
 }
 
+export function loadCarolineToolCapabilities(log?: { warn: (msg: string) => void }): CarolineCapabilities | null {
+  if (cachedCapabilities !== undefined) return cachedCapabilities;
+  const data = readJson("caroline-tool-capabilities.json") as
+    | { tools?: CarolineToolCapability[]; policy?: CarolineCapabilitiesPolicy }
+    | null;
+  cachedCapabilities =
+    data?.tools && data.policy ? { tools: data.tools, policy: data.policy } : null;
+  if (cachedCapabilities === null && !warnedCapabilities) {
+    warnedCapabilities = true;
+    log?.warn("[intercom:jev] caroline-tool-capabilities.json not found — v2 tools/policy unavailable");
+  }
+  return cachedCapabilities;
+}
+
 // Test-only: each test file wants a clean cache/warn-once state.
 export function __resetCarolineInventoryCacheForTests(): void {
   cachedQuestions = undefined;
+  cachedQuestionsV2 = undefined;
   cachedIntents = undefined;
   cachedSkills = undefined;
+  cachedCapabilities = undefined;
   warnedQuestions = false;
+  warnedQuestionsV2 = false;
   warnedIntents = false;
   warnedSkills = false;
+  warnedCapabilities = false;
 }

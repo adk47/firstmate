@@ -119,6 +119,37 @@ export function resolveIntercomAccount(
       );
     }
   }
+  if (account.jev?.questionsVersion !== undefined) {
+    if (account.jev.questionsVersion !== "v1" && account.jev.questionsVersion !== "v2") {
+      throw new Error(
+        `intercom: account "${id}" jev.questionsVersion must be "v1" or "v2" (got: ${account.jev.questionsVersion})`,
+      );
+    }
+  }
+  if (account.jev?.shadowVersions !== undefined) {
+    if (
+      !Array.isArray(account.jev.shadowVersions) ||
+      account.jev.shadowVersions.some((v) => typeof v !== "string")
+    ) {
+      throw new Error(`intercom: account "${id}" jev.shadowVersions must be an array of strings`);
+    }
+    // Restrict to the versions jev-router.ts actually implements (mirrors
+    // questionsVersion's "v1"|"v2" check above). QA NO-GO on #1022: an
+    // unrecognised entry (e.g. a typo like "v02") used to pass this check,
+    // then channel.ts silently ran the v1 runner for it while handler.ts
+    // still labelled the shadow row with the typo'd version string — a
+    // corrupted cohort masquerading as an experiment that was never run.
+    account.jev.shadowVersions.forEach((v, i) => {
+      if (v !== "v1" && v !== "v2") {
+        throw new Error(`intercom: account "${id}" jev.shadowVersions[${i}] "${v}" is not a supported version (v1, v2)`);
+      }
+    });
+  }
+  if (account.jev?.agentInstructionsPath !== undefined) {
+    if (typeof account.jev.agentInstructionsPath !== "string" || account.jev.agentInstructionsPath.trim() === "") {
+      throw new Error(`intercom: account "${id}" jev.agentInstructionsPath must be a non-empty string`);
+    }
+  }
 
   return {
     accountId: id,
@@ -168,6 +199,15 @@ export function resolveIntercomAccount(
           bands: { ...DEFAULT_JEV_BANDS, ...(account.jev.bands ?? {}) },
           actions: { ...DEFAULT_JEV_ACTIONS, ...(account.jev.actions ?? {}) },
           shadow: { ...DEFAULT_JEV_SHADOW, ...(account.jev.shadow ?? {}) },
+          // Shadow-only surface: questionsVersion gates LIVE routing
+          // behaviour (decline/silence/escalate + the [ROUTING] block);
+          // shadowVersions fires extra parallel Jev calls that only ever
+          // write to the shadow log. Defaults keep prod identical to today.
+          questionsVersion: account.jev.questionsVersion ?? "v1",
+          shadowVersions: account.jev.shadowVersions ?? [],
+          ...(typeof account.jev.agentInstructionsPath === "string"
+            ? { agentInstructionsPath: account.jev.agentInstructionsPath }
+            : {}),
         }
       : undefined,
   };

@@ -5,6 +5,11 @@ import type {
   RiskActionType,
 } from "./types.js";
 import { DEFAULT_JUDGE_MIN_TURNS, DEFAULT_TURN_HARD_CAP } from "./types.js";
+// Type-only, so this is safe against jev-router.ts's own type-only import of
+// JudgeInput/JudgeOutput from this file (erased at compile time — no runtime
+// cycle). QA NO-GO on #1022 (finding 2): the risk judge needs the v2 parts
+// too, not just v1's recentParts — see JudgeInput.recentPartsV2 below.
+import type { JevV2Part } from "./jev-router.js";
 
 // Layer 0: Magic-keyword consent — explicit "talk to a human" requests.
 const MAGIC_KEYWORD_PATTERNS: RegExp[] = [
@@ -261,6 +266,16 @@ export interface JudgeInput {
   knownFacts: import("./types.js").KnownFacts;
   recentParts: { author: "user" | "bot"; body: string }[];
   currentMessage: string;
+  // v2 twin of recentParts, mirroring JevTurnInput.recentPartsV2 (jev-router.ts).
+  // QA NO-GO on #1022 (finding 2): the Jev-backed judge (createJevBackedJudge)
+  // and the live runJev call share ONE memoized runner per webhook request
+  // (createJevTurnRunner's "no second request" cache) — whichever fires
+  // first permanently decides the cached state. Omitting this let a v2-
+  // configured runner's FIRST call (from the judge, via assessRisk) cache a
+  // state built from an empty thread and a null agent_last_message, which
+  // the later real runJev call then silently reused. Undefined on every v1
+  // turn, same posture as recentPartsV2 elsewhere.
+  recentPartsV2?: JevV2Part[];
 }
 
 export interface JudgeOutput {
@@ -275,6 +290,9 @@ export async function assessRisk(
   recentParts: JudgeInput["recentParts"],
   state: IntercomSessionState,
   deps: AssessRiskDeps,
+  // v2 twin of recentParts — optional, undefined on every v1 turn. See
+  // JudgeInput.recentPartsV2 for why this must reach deps.judge.
+  recentPartsV2?: JudgeInput["recentPartsV2"],
 ): Promise<RiskAssessment> {
   if (!message) return { triggered: false };
 
@@ -333,6 +351,7 @@ export async function assessRisk(
         knownFacts: state.knownFacts ?? {},
         recentParts,
         currentMessage: message,
+        recentPartsV2,
       });
       logJudgeOutcome(deps.log, state.conversationId, out ? "verdict" : "null", out, Date.now() - startedAt);
       if (out && out.shouldHandoff && out.confidence !== "low") {

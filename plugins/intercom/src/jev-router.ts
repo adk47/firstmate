@@ -14,8 +14,9 @@
  * call in handler.ts.
  */
 import { callJev, DEFAULT_JEV_MODEL, DEFAULT_JEV_TIMEOUT_MS } from "./jev-client.js";
-import { loadCarolineQuestions } from "./caroline-inventory-loader.js";
+import { loadCarolineQuestions, loadCarolineQuestionsV2, loadCarolineToolCapabilities } from "./caroline-inventory-loader.js";
 import type { CarolineIntentMeta, CarolineSkillMeta } from "./caroline-inventory-loader.js";
+import { loadAgentInstructions } from "./caroline-agent-instructions-loader.js";
 import type { IntercomSessionState, RiskAssessment, RiskActionType } from "./types.js";
 import { DEFAULT_JEV_ACTIONS } from "./types.js";
 import type { JudgeInput, JudgeOutput } from "./escalation.js";
@@ -106,6 +107,115 @@ export function buildJevState(input: BuildJevStateInput): Record<string, unknown
     last_parts: lastParts,
     turn_count: input.turnCount,
     ...(Object.keys(knownFacts).length > 0 ? { known_facts: knownFacts } : {}),
+  };
+}
+
+// --- buildJevStateV2 ---
+//
+// v2 state adds three things v1 lacks (docs/designs/2026-09-22 misses,
+// backfilled per the 2026-09-23 review of live Jev misses):
+//   (a) agent_last_message — the most recent non-customer part (Caroline OR
+//       a human agent), whoever it is, so the model can judge for itself
+//       whether it asked the customer for something and whether the
+//       customer's reply supplies it. Per TypeSafe's split (code supplies
+//       facts, the model judges meaning), this deliberately carries no
+//       code-side "did it ask a question" judgement — an earlier
+//       keyword-gated `open_request`/`isOpenRequestShaped` rule was English-
+//       only and missed the exact Spanish case that motivated it
+//       ("Envíame el enlace..."), and it nulled the field whenever a human
+//       agent (e.g. Jan) was last, discarding "thanks Jan, worked straight
+//       away" as evidence. Replaced 2026-09-23 per coordinator review.
+//   (b) a human_agent author, so a human takeover reply is visible to Jev
+//       instead of silently dropped (v1's buildJevState has no author for
+//       it at all — handler.ts's buildRecentPartsFromLiveConversation drops
+//       those parts before v1 ever sees them).
+//   (c) tools/policy carried on every call, so Jev can judge
+//       resolution_path/tool_can_answer against Caroline's REAL declared
+//       capabilities instead of inferring them from a CLI/HTTP string.
+
+export type JevV2Author = "customer" | "caroline" | "human_agent";
+
+export interface JevV2Part {
+  author: JevV2Author;
+  body: string;
+  createdAt?: number | string;
+}
+
+export interface JevV2ToolCapability {
+  name: string;
+  answers: string[];
+  cannot_answer: string[];
+  needs: string;
+}
+
+export interface JevV2Policy {
+  human_gated: string[];
+  kb_topics: string[];
+}
+
+export interface BuildJevStateV2Input {
+  message: string;
+  recentParts?: JevV2Part[];
+  turnCount: number;
+  founding?: number;
+  plan?: string;
+  priorChats?: { count: number; mostRecentTitle?: string; mostRecentAt?: string };
+  tools?: JevV2ToolCapability[];
+  policy?: JevV2Policy;
+  agentInstructions?: string;
+}
+
+const MAX_THREAD_PARTS = 12;
+const MAX_THREAD_PART_CHARS = 1500;
+
+export interface JevV2AgentLastMessage {
+  author: "caroline" | "human_agent";
+  text: string;
+}
+
+/**
+ * Walks backward from the end of `recentParts` (which, like v1, excludes the
+ * current customer message/burst) to find the most recent non-customer
+ * part — Caroline's or a human agent's, whoever wrote it last. This is the
+ * single "what did the agent side last say" fact; whether it asked the
+ * customer for something is left to the model (supplying_requested_info),
+ * not decided here. Returns null only when no agent has spoken yet in this
+ * thread.
+ */
+function findAgentLastMessage(parts: JevV2Part[]): JevV2AgentLastMessage | null {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const part = parts[i];
+    if (part.author === "caroline" || part.author === "human_agent") {
+      return { author: part.author, text: part.body };
+    }
+  }
+  return null;
+}
+
+export function buildJevStateV2(input: BuildJevStateV2Input): Record<string, unknown> {
+  const parts = input.recentParts ?? [];
+
+  const thread = parts.slice(-MAX_THREAD_PARTS).map((p) => ({
+    author: p.author,
+    text: p.body.length > MAX_THREAD_PART_CHARS ? p.body.slice(0, MAX_THREAD_PART_CHARS) : p.body,
+  }));
+
+  const agentLastMessage = findAgentLastMessage(parts);
+
+  const knownFacts: Record<string, unknown> = {};
+  if (input.founding !== undefined) knownFacts.founding = input.founding;
+  if (input.plan !== undefined) knownFacts.plan = input.plan;
+  if (input.priorChats !== undefined) knownFacts.prior_chats = input.priorChats;
+
+  return {
+    customer_last_message: input.message,
+    agent_last_message: agentLastMessage,
+    thread,
+    turn_count: input.turnCount,
+    ...(Object.keys(knownFacts).length > 0 ? { known_facts: knownFacts } : {}),
+    tools: input.tools ?? [],
+    policy: input.policy ?? { human_gated: [], kb_topics: [] },
+    ...(input.agentInstructions !== undefined ? { agent_instructions: input.agentInstructions } : {}),
   };
 }
 
@@ -352,6 +462,25 @@ function renderPathLine(answer: JevAnswer | undefined, actions: JevActionsConfig
   return `path: ${best.label} (${fmt(best.p)})`;
 }
 
+// v2-only: resolution_path gains `answer_from_knowledge` and `acknowledge` options
+// (`answer_from_knowledge` below)
+// (caroline-questions.v2.json) with no analogue in v1 and no kill switch —
+// it's a read from the KB, not an action decline()'s bands gate. When it's
+// the top (allowed) path, the [ROUTING] block gets an explicit instruction
+// telling Caroline to answer from memory_search rather than inventing a
+// tool call, since none of the existing lines (first_tool/skill) apply.
+// `acknowledge` (a first thanks, a goodbye, "are you a bot?") gets the same
+// treatment: none of the tool/skill lines apply, so say so explicitly.
+const V2_PATH_NOTES: Readonly<Record<string, string>> = {
+  answer_from_knowledge: "path note: answer from the knowledge base (memory_search), no tool call needed.",
+  acknowledge: "path note: a short courtesy reply is enough, no tool call or ticket needed.",
+};
+
+function v2PathNote(answer: JevAnswer | undefined): string | null {
+  if (answer?.type !== "choice") return null;
+  return Object.prototype.hasOwnProperty.call(V2_PATH_NOTES, answer.choice) ? V2_PATH_NOTES[answer.choice] : null;
+}
+
 // `actions` is deliberately REQUIRED (no default): a new call site that
 // cannot supply it must fail to compile rather than silently render an
 // unmasked block. decide()'s own `actions` parameter carries the restrictive
@@ -361,8 +490,10 @@ function renderRouteBlock(
   intents: CarolineIntentMeta[],
   skills: CarolineSkillMeta[],
   actions: JevActionsConfig,
+  questionsVersion: "v1" | "v2" = "v1",
 ): string {
   const pathLine = renderPathLine(answers.resolution_path, actions);
+  const answerFromKnowledgeLine = questionsVersion === "v2" ? v2PathNote(answers.resolution_path) : null;
   const intent = choiceLabelAndProb(answers.intent);
 
   const { intent: intentChoice, p: intentP } = intentChoiceAndProb(answers);
@@ -388,6 +519,7 @@ function renderRouteBlock(
   return [
     "[ROUTING]",
     ...(pathLine ? [pathLine] : []),
+    ...(answerFromKnowledgeLine ? [answerFromKnowledgeLine] : []),
     `intent: ${intent.label} (${fmt(intent.p)})`,
     toolLine,
     skillLine,
@@ -412,6 +544,9 @@ export function decide(
   intents: CarolineIntentMeta[] = [],
   skills: CarolineSkillMeta[] = [],
   actions: JevActionsConfig = DEFAULT_JEV_ACTIONS,
+  // v2-only. v1 callers never pass this, so v1's decisions are provably
+  // unchanged — every branch below that reads it defaults to v1 behaviour.
+  questionsVersion: "v1" | "v2" = "v1",
 ): JevDecision {
   // Gated on actions.decline as a whole — the once-per-conversation
   // decline-then-silence pair is "part of decline" (see DEFAULT_JEV_ACTIONS'
@@ -428,10 +563,23 @@ export function decide(
     }
   }
 
+  // v2 override: if Jev is confident the customer is supplying something
+  // agent_last_message asked for, that is by definition not a no-reply/
+  // closer message — never silence it, no matter what resolution_path/
+  // no_reply scored. v1 never reads supplying_requested_info
+  // (the question doesn't exist in caroline-questions.json), so this is a
+  // no-op for v1 callers.
+  const supplyingRequestedInfo = questionsVersion === "v2" ? noulValue(answers.supplying_requested_info) : 0;
+  const isSupplyingRequestedInfo = questionsVersion === "v2" && supplyingRequestedInfo >= 0.5;
+
   const noReplyP = choiceProb(answers.resolution_path, "no_reply");
-  if (noReplyP >= bands.no_reply && isCloserShaped(message)) {
+  if (!isSupplyingRequestedInfo && noReplyP >= bands.no_reply && isCloserShaped(message)) {
     if (!actions.silence) {
-      return { action: "route", block: renderRouteBlock(answers, intents, skills, actions), suppressed: "silence" };
+      return {
+        action: "route",
+        block: renderRouteBlock(answers, intents, skills, actions, questionsVersion),
+        suppressed: "silence",
+      };
     }
     return { action: "silence", block: null };
   }
@@ -441,7 +589,11 @@ export function decide(
   const humanRequiredP = choiceProb(resolutionPath, "human_required");
   if (isHumanRequiredChoice && humanRequiredP >= bands.human_required) {
     if (!actions.escalate) {
-      return { action: "route", block: renderRouteBlock(answers, intents, skills, actions), suppressed: "escalate" };
+      return {
+        action: "route",
+        block: renderRouteBlock(answers, intents, skills, actions, questionsVersion),
+        suppressed: "escalate",
+      };
     }
     const intentMeta = findIntentMeta(answers, intents);
     return {
@@ -457,7 +609,7 @@ export function decide(
     };
   }
 
-  return { action: "route", block: renderRouteBlock(answers, intents, skills, actions) };
+  return { action: "route", block: renderRouteBlock(answers, intents, skills, actions, questionsVersion) };
 }
 
 /**
@@ -533,6 +685,10 @@ export interface JevTurnInput {
   founding?: number;
   plan?: string;
   priorChats?: { count: number; mostRecentTitle?: string; mostRecentAt?: string };
+  // v2-only. Used instead of `recentParts` when the runner is configured
+  // with questionsVersion "v2" (see JevRunnerConfig) — carries the
+  // human_agent author v1's shape has no room for.
+  recentPartsV2?: JevV2Part[];
 }
 
 export interface JevTurnResult {
@@ -548,6 +704,11 @@ export interface JevTurnResult {
   httpStatus: number;
   state: Record<string, unknown>;
   questions: Record<string, unknown>;
+  // v2-only. "v2-soul" when SOUL.md was read successfully this call,
+  // "v2-policy-fallback" when it was unreadable and buildJevStateV2 ran
+  // without agent_instructions. Undefined on every v1 call — never sent,
+  // per spec, so a v1 row's state_variant stays absent rather than "v1".
+  stateVariant?: string;
 }
 
 // A failed turn — timeout/network/http/shape from callJev, or the questions
@@ -562,6 +723,10 @@ export interface JevTurnFailure {
   reason: string;
   httpStatus: number | null;
   latencyMs: number;
+  // See JevTurnResult.stateVariant — set even on a failed call, since the
+  // SOUL.md read (success or fallback) happens before callJev, independent
+  // of whether the HTTP call itself later fails.
+  stateVariant?: string;
 }
 
 export type JevTurnOutcome = JevTurnResult | JevTurnFailure;
@@ -571,6 +736,16 @@ export interface JevRunnerConfig {
   model?: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  // Default "v1". "v2" swaps in buildJevStateV2 + caroline-questions.v2.json
+  // (with tools/policy from caroline-tool-capabilities.json) instead of the
+  // v1 state/questions — everything else about the runner (memoization,
+  // timeout, shape) is unchanged.
+  questionsVersion?: "v1" | "v2";
+  // v2-only. Absolute path to Caroline's SOUL.md, read (mtime-cached) and
+  // sent as agent_instructions on every v2 call. Defaults to
+  // DEFAULT_AGENT_INSTRUCTIONS_PATH (caroline-agent-instructions-loader.js)
+  // when omitted. Never consulted on a v1 call.
+  agentInstructionsPath?: string;
 }
 
 /**
@@ -592,18 +767,40 @@ export function createJevTurnRunner(
   return (input: JevTurnInput) => {
     if (!cached) {
       cached = (async (): Promise<JevTurnOutcome> => {
-        const questions = loadCarolineQuestions(log);
+        const isV2 = cfg.questionsVersion === "v2";
+        const questions = isV2 ? loadCarolineQuestionsV2(log) : loadCarolineQuestions(log);
         if (!questions) {
           return { ok: false, reason: "questions_unavailable", httpStatus: null, latencyMs: 0 };
         }
-        const state = buildJevState({
-          message: input.message,
-          recentParts: input.recentParts,
-          turnCount: input.turnCount,
-          founding: input.founding,
-          plan: input.plan,
-          priorChats: input.priorChats,
-        });
+        // v2-only: never invoked on a v1 call, so v1 never pays the stat()
+        // cost and v1 state can never carry agent_instructions (buildJevState's
+        // input has no such field to begin with — see BuildJevStateInput).
+        let stateVariant: string | undefined;
+        const state = isV2
+          ? (() => {
+              const capabilities = loadCarolineToolCapabilities(log);
+              const agentInstructions = loadAgentInstructions(cfg.agentInstructionsPath, log);
+              stateVariant = agentInstructions !== null ? "v2-soul" : "v2-policy-fallback";
+              return buildJevStateV2({
+                message: input.message,
+                recentParts: input.recentPartsV2 ?? [],
+                turnCount: input.turnCount,
+                founding: input.founding,
+                plan: input.plan,
+                priorChats: input.priorChats,
+                tools: capabilities?.tools,
+                policy: capabilities?.policy,
+                ...(agentInstructions !== null ? { agentInstructions } : {}),
+              });
+            })()
+          : buildJevState({
+              message: input.message,
+              recentParts: input.recentParts,
+              turnCount: input.turnCount,
+              founding: input.founding,
+              plan: input.plan,
+              priorChats: input.priorChats,
+            });
         const result = await callJev({
           apiKey: cfg.apiKey,
           model: cfg.model ?? DEFAULT_JEV_MODEL,
@@ -614,7 +811,13 @@ export function createJevTurnRunner(
           log,
         });
         if (!result.ok) {
-          return { ok: false, reason: result.reason, httpStatus: result.httpStatus, latencyMs: result.latencyMs };
+          return {
+            ok: false,
+            reason: result.reason,
+            httpStatus: result.httpStatus,
+            latencyMs: result.latencyMs,
+            ...(stateVariant !== undefined ? { stateVariant } : {}),
+          };
         }
         return {
           ok: true,
@@ -625,6 +828,7 @@ export function createJevTurnRunner(
           httpStatus: result.httpStatus,
           state,
           questions,
+          ...(stateVariant !== undefined ? { stateVariant } : {}),
         };
       })();
     }
@@ -657,10 +861,17 @@ export function createJevBackedJudge(
 ): (input: JudgeInput) => Promise<JudgeOutput | null> {
   return async (input: JudgeInput): Promise<JudgeOutput | null> => {
     if (!actions.escalate) return null;
+    // QA NO-GO on #1022 (finding 2): this runner is the SAME memoized
+    // instance handler.ts later calls via runJev (buildRiskOptions's doc
+    // comment above). recentPartsV2 must ride along here too, or a v2-
+    // configured runner that fires from THIS call first permanently caches
+    // a state built from an empty thread (createJevTurnRunner's "no second
+    // request" memoization never re-derives state from a later call).
     const result = await runner({
       message: input.currentMessage,
       turnCount: turnCountOf(),
       recentParts: input.recentParts,
+      recentPartsV2: input.recentPartsV2,
     });
     if (!result.ok) return null;
     return toJudgeOutput(result.answers, bands, intents);

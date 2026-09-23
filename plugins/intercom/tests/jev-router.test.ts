@@ -1,19 +1,23 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   buildJevState,
+  buildJevStateV2,
   decide,
   renderJevBlock,
   toJudgeOutput,
   formatJevLogLine,
   createJevTurnRunner,
+  createJevBackedJudge,
   isCloserShaped,
   type JevAnswers,
   type JevActionsConfig,
   type JevBands,
+  type JevV2Part,
 } from "../src/jev-router.js";
 import * as inventoryLoader from "../src/caroline-inventory-loader.js";
 import type { CarolineIntentMeta, CarolineSkillMeta } from "../src/caroline-inventory-loader.js";
 import type { IntercomSessionState } from "../src/types.js";
+import * as agentInstructionsLoader from "../src/caroline-agent-instructions-loader.js";
 
 const BANDS: JevBands = { bad_faith: 0.85, no_reply: 0.9, human_required: 0.9 };
 const ALL_ON: JevActionsConfig = { decline: true, silence: true, escalate: true };
@@ -906,5 +910,407 @@ describe("createJevTurnRunner", () => {
     expect(result.httpStatus).toBe(200);
     expect(result.state).toEqual(expect.any(Object));
     expect(result.questions).toEqual(expect.any(Object));
+  });
+
+  // -------------------------------------------------------------------------
+  // agent_instructions (SOUL.md) — v2 only. Real caroline-questions.v2.json
+  // has many required keys; stubbing loadCarolineQuestionsV2 to a single
+  // noul question keeps these focused on state/stateVariant, not the full
+  // v2 answer shape (already covered above).
+  // -------------------------------------------------------------------------
+
+  const MIN_V2_QUESTIONS = { off_topic_or_bad_faith: { type: "noul" } };
+  function minV2Fetch(): typeof fetch {
+    return vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ answers: { off_topic_or_bad_faith: { type: "noul", noul: 0.05 } } }),
+    })) as unknown as typeof fetch;
+  }
+
+  it("v2: agent_instructions is present on state when SOUL.md reads successfully, and absent on v1", async () => {
+    const qSpy = vi.spyOn(inventoryLoader, "loadCarolineQuestionsV2").mockReturnValue(MIN_V2_QUESTIONS);
+    const loadSpy = vi.spyOn(agentInstructionsLoader, "loadAgentInstructions").mockReturnValue("Be warm. Be brief.");
+
+    const v2Runner = createJevTurnRunner({ apiKey: "k", fetchImpl: minV2Fetch(), questionsVersion: "v2" });
+    const v2Result = await v2Runner({ message: "hi", turnCount: 1, recentPartsV2: [] });
+    expect(v2Result.ok).toBe(true);
+    if (!v2Result.ok) throw new Error("expected ok");
+    expect(v2Result.state.agent_instructions).toBe("Be warm. Be brief.");
+    expect(v2Result.stateVariant).toBe("v2-soul");
+
+    const v1Fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        answers: {
+          first_tool: { type: "choice", choice: "credit_verification_check" },
+          frustration: { type: "score", score: 0, legend: { "0": "Calm" } },
+          intent: { type: "choice", choice: "credit_verification" },
+          off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
+          resolution_path: { type: "choice", choice: "caroline_tool" },
+          skill: { type: "choice", choice: "customer-credit-verification" },
+        },
+      }),
+    })) as unknown as typeof fetch;
+    const v1Runner = createJevTurnRunner({ apiKey: "k", fetchImpl: v1Fetch });
+    const v1Result = await v1Runner({ message: "hi", turnCount: 1 });
+    expect(v1Result.ok).toBe(true);
+    if (!v1Result.ok) throw new Error("expected ok");
+    expect(v1Result.state).not.toHaveProperty("agent_instructions");
+    expect(v1Result.stateVariant).toBeUndefined();
+    // The loader must never even be consulted on a v1 call.
+    expect(loadSpy).toHaveBeenCalledTimes(1);
+
+    qSpy.mockRestore();
+    loadSpy.mockRestore();
+  });
+
+  it("v2: an unreadable SOUL.md falls back to v2-policy state and marks stateVariant v2-policy-fallback", async () => {
+    const qSpy = vi.spyOn(inventoryLoader, "loadCarolineQuestionsV2").mockReturnValue(MIN_V2_QUESTIONS);
+    const loadSpy = vi.spyOn(agentInstructionsLoader, "loadAgentInstructions").mockReturnValue(null);
+
+    const runner = createJevTurnRunner({ apiKey: "k", fetchImpl: minV2Fetch(), questionsVersion: "v2" });
+    const result = await runner({ message: "hi", turnCount: 1, recentPartsV2: [] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.state).not.toHaveProperty("agent_instructions");
+    expect(result.stateVariant).toBe("v2-policy-fallback");
+
+    qSpy.mockRestore();
+    loadSpy.mockRestore();
+  });
+
+  it("v2: a failed callJev result still carries stateVariant (computed before the HTTP call)", async () => {
+    const qSpy = vi.spyOn(inventoryLoader, "loadCarolineQuestionsV2").mockReturnValue(MIN_V2_QUESTIONS);
+    const loadSpy = vi.spyOn(agentInstructionsLoader, "loadAgentInstructions").mockReturnValue(null);
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("network down");
+    }) as unknown as typeof fetch;
+
+    const runner = createJevTurnRunner({ apiKey: "k", fetchImpl, questionsVersion: "v2" });
+    const result = await runner({ message: "hi", turnCount: 1, recentPartsV2: [] });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected failure");
+    expect(result.stateVariant).toBe("v2-policy-fallback");
+
+    qSpy.mockRestore();
+    loadSpy.mockRestore();
+  });
+
+  it("passes cfg.agentInstructionsPath through to the loader unchanged", async () => {
+    const qSpy = vi.spyOn(inventoryLoader, "loadCarolineQuestionsV2").mockReturnValue(MIN_V2_QUESTIONS);
+    const loadSpy = vi.spyOn(agentInstructionsLoader, "loadAgentInstructions").mockReturnValue("soul content");
+
+    const runner = createJevTurnRunner({
+      apiKey: "k",
+      fetchImpl: minV2Fetch(),
+      questionsVersion: "v2",
+      agentInstructionsPath: "/custom/path/SOUL.md",
+    });
+    await runner({ message: "hi", turnCount: 1, recentPartsV2: [] });
+    expect(loadSpy.mock.calls[0]?.[0]).toBe("/custom/path/SOUL.md");
+
+    qSpy.mockRestore();
+    loadSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createJevBackedJudge + createJevTurnRunner — the v2 memoization defect
+// ---------------------------------------------------------------------------
+//
+// QA NO-GO on #1022 (finding 2): channel.ts hands the SAME memoized runner
+// (createJevTurnRunner) to both createJevBackedJudge (the risk-assessment
+// judge, invoked from assessRisk before dispatch) and handler.ts's own
+// runJev call. Whichever fires first computes and permanently caches the
+// v2 state (createJevTurnRunner's "no second request" memoization — see its
+// doc comment). Before the fix, createJevBackedJudge never forwarded
+// recentPartsV2 to the runner, so a v2-configured judge call that fired
+// first cached a state built from an EMPTY thread and a null
+// agent_last_message, and the later real runJev call — even with real v2
+// parts — silently reused that empty-thread cache for the rest of the turn.
+describe("createJevBackedJudge (v2 memoization)", () => {
+  const V2_QUESTIONS = { off_topic_or_bad_faith: { type: "noul" } };
+
+  function v2Fetch(): typeof fetch {
+    return vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ answers: { off_topic_or_bad_faith: { type: "noul", noul: 0.05 } } }),
+    })) as unknown as typeof fetch;
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("the runner never returns a result computed from different state inputs than the current call's: the risk judge's call must carry recentPartsV2 through to the shared runner, so a later call sees the SAME (real) thread, not an empty one", async () => {
+    vi.spyOn(inventoryLoader, "loadCarolineQuestionsV2").mockReturnValue(V2_QUESTIONS);
+    vi.spyOn(agentInstructionsLoader, "loadAgentInstructions").mockReturnValue(null);
+
+    const realThread: JevV2Part[] = [
+      { author: "customer", body: "where is my credit" },
+      { author: "caroline", body: "let me check that for you" },
+    ];
+
+    // One memoized runner per (simulated) webhook request — exactly how
+    // channel.ts constructs it (jevRunner), then hands the SAME instance to
+    // both buildRiskOptions (-> createJevBackedJudge) and handler.ts's runJev.
+    const runner = createJevTurnRunner({ apiKey: "k", fetchImpl: v2Fetch(), questionsVersion: "v2" });
+
+    const judge = createJevBackedJudge(runner, BANDS, () => 4, [], ALL_ON);
+    // 1) The risk judge fires FIRST (assessRisk runs before dispatch/runJev
+    //    in handler.ts) — with the fix, JudgeInput.recentPartsV2 rides along.
+    await judge({
+      knownFacts: {},
+      recentParts: [],
+      currentMessage: "it still is not fixed",
+      recentPartsV2: realThread,
+    });
+
+    // 2) handler.ts's own runJev call happens SECOND, with the real v2
+    //    parts too (this is what production always supplies) — but since
+    //    the runner is memoized, this call reuses the FIRST call's result.
+    const second = await runner({
+      message: "it still is not fixed",
+      turnCount: 4,
+      recentPartsV2: realThread,
+    });
+
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error("expected ok");
+    // The rule to test: the second call's state carries agent_last_message
+    // and the thread — proof the FIRST (judge) call was the one that built
+    // it, using the real v2 parts, not an empty thread.
+    expect(second.state.agent_last_message).toEqual({ author: "caroline", text: "let me check that for you" });
+    expect(second.state.thread).toEqual([
+      { author: "customer", text: "where is my credit" },
+      { author: "caroline", text: "let me check that for you" },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildJevStateV2
+//
+// agent_last_message replaces the earlier keyword-gated caroline_last_message
+// + open_request pair (2026-09-23 coordinator review): code supplies the
+// fact (who spoke last on the agent side, and what they said), the model
+// judges whether it was a request and whether the customer answered it. No
+// isOpenRequestShaped keyword rule exists any more, so there is no English-
+// only false negative to test around — the Spanish case that motivated the
+// change is now just a normal agent_last_message.text value.
+// ---------------------------------------------------------------------------
+
+function v2Part(author: JevV2Part["author"], body: string): JevV2Part {
+  return { author, body };
+}
+
+describe("buildJevStateV2", () => {
+  it("produces the v2 shape: customer_last_message, agent_last_message, thread, turn_count, tools, policy", () => {
+    const state = buildJevStateV2({
+      message: "here's the link: example.com/profile",
+      recentParts: [v2Part("customer", "my credits are missing"), v2Part("caroline", "can you share the profile link?")],
+      turnCount: 2,
+    });
+    expect(state.customer_last_message).toBe("here's the link: example.com/profile");
+    expect(state.agent_last_message).toEqual({ author: "caroline", text: "can you share the profile link?" });
+    expect(state.thread).toEqual([
+      { author: "customer", text: "my credits are missing" },
+      { author: "caroline", text: "can you share the profile link?" },
+    ]);
+    expect(state.turn_count).toBe(2);
+    expect(state.tools).toEqual([]);
+    expect(state.policy).toEqual({ human_gated: [], kb_topics: [] });
+  });
+
+  // The exact case that motivated dropping the keyword-gated open_request
+  // rule: a Spanish ask has none of the English request tokens, but it is
+  // still the correct agent_last_message — no detection rule needed.
+  it("agent_last_message is set for a Spanish ask + reply, with no English-keyword gate to miss it", () => {
+    const state = buildJevStateV2({
+      message: "aquí está: example.com/profile",
+      recentParts: [v2Part("customer", "faltan mis créditos"), v2Part("caroline", "Envíame el enlace de tu perfil, por favor.")],
+      turnCount: 2,
+    });
+    expect(state.agent_last_message).toEqual({ author: "caroline", text: "Envíame el enlace de tu perfil, por favor." });
+  });
+
+  it("agent_last_message is null when no agent has spoken yet (first customer turn)", () => {
+    const state = buildJevStateV2({ message: "hello", recentParts: [], turnCount: 1 });
+    expect(state.agent_last_message).toBeNull();
+  });
+
+  it("agent_last_message survives a burst of customer messages after the agent's message", () => {
+    const state = buildJevStateV2({
+      message: "ok here it is",
+      recentParts: [
+        v2Part("customer", "my order is missing"),
+        v2Part("caroline", "what's your order number?"),
+        v2Part("customer", "hold on"),
+        v2Part("customer", "let me find it"),
+      ],
+      turnCount: 3,
+    });
+    // Caroline's message is still the most recent AGENT part even though
+    // more customer parts followed it — that's what "agent's last message"
+    // means even across a burst.
+    expect(state.agent_last_message).toEqual({ author: "caroline", text: "what's your order number?" });
+  });
+
+  it("agent_last_message is the human_agent's message when a human takeover reply is the most recent agent-side thing said (fixes the 'thanks Jan' shape)", () => {
+    const state = buildJevStateV2({
+      message: "thanks Jan, worked straight away",
+      recentParts: [
+        v2Part("customer", "I need a refund"),
+        v2Part("caroline", "can you confirm the order number?"),
+        v2Part("human_agent", "I've taken over, processing your refund now."),
+      ],
+      turnCount: 1,
+    });
+    expect(state.agent_last_message).toEqual({
+      author: "human_agent",
+      text: "I've taken over, processing your refund now.",
+    });
+  });
+
+  it("truncates thread to the last 12 parts, 1500 chars each, oldest first, excluding the current message", () => {
+    const recentParts: JevV2Part[] = [];
+    for (let i = 0; i < 20; i++) {
+      recentParts.push(v2Part(i % 2 === 0 ? "customer" : "caroline", `part-${i}`));
+    }
+    const state = buildJevStateV2({ message: "current message", recentParts, turnCount: 10 });
+    const thread = state.thread as { author: string; text: string }[];
+    expect(thread).toHaveLength(12);
+    expect(thread[0].text).toBe("part-8"); // last 12 of 20 -> indices 8..19
+    expect(thread[11].text).toBe("part-19");
+    expect(thread.some((p) => p.text === "current message")).toBe(false);
+
+    const long = "y".repeat(2000);
+    const trimmed = buildJevStateV2({ message: "hi", recentParts: [v2Part("customer", long)], turnCount: 1 });
+    const trimmedThread = trimmed.thread as { author: string; text: string }[];
+    expect(trimmedThread[0].text).toHaveLength(1500);
+  });
+
+  it("carries tools/policy through unmodified when supplied", () => {
+    const tools = [{ name: "profile_lookup", answers: ["find my profile"], cannot_answer: [], needs: "a keyword" }];
+    const policy = { human_gated: ["refund request"], kb_topics: ["FAQ"] };
+    const state = buildJevStateV2({ message: "hi", recentParts: [], turnCount: 1, tools, policy });
+    expect(state.tools).toEqual(tools);
+    expect(state.policy).toEqual(policy);
+  });
+
+  it("includes agent_instructions only when supplied (eval-only field)", () => {
+    const withInstructions = buildJevStateV2({
+      message: "hi",
+      recentParts: [],
+      turnCount: 1,
+      agentInstructions: "You are Caroline...",
+    });
+    expect(withInstructions.agent_instructions).toBe("You are Caroline...");
+
+    const without = buildJevStateV2({ message: "hi", recentParts: [], turnCount: 1 });
+    expect("agent_instructions" in without).toBe(false);
+  });
+
+  it("includes known_facts only when provided, same as v1", () => {
+    const state = buildJevStateV2({ message: "hi", recentParts: [], turnCount: 1, plan: "pro" });
+    expect(state.known_facts).toEqual({ plan: "pro" });
+    const without = buildJevStateV2({ message: "hi", recentParts: [], turnCount: 1 });
+    expect("known_facts" in without).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// decide — v2-only override + answer_from_knowledge routing line
+// ---------------------------------------------------------------------------
+
+function noul(value: number): JevAnswers[string] {
+  return { type: "noul", noul: value };
+}
+
+describe("decide — v2 supplying_requested_info override", () => {
+  it("v1 callers (no questionsVersion arg) are UNCHANGED: still silences a no_reply-shaped closer", () => {
+    const answers: JevAnswers = {
+      resolution_path: choice("no_reply", { no_reply: 0.95, caroline_tool: 0.05 }),
+      off_topic_or_bad_faith: noul(0.05),
+    };
+    const decision = decide(answers, BANDS, "Thanks so much!", undefined, [], [], ALL_ON);
+    expect(decision.action).toBe("silence");
+  });
+
+  it("v2: never silences/no_replies when supplying_requested_info >= 0.5, even if resolution_path says no_reply", () => {
+    const answers: JevAnswers = {
+      resolution_path: choice("no_reply", { no_reply: 0.95, caroline_tool: 0.05 }),
+      off_topic_or_bad_faith: noul(0.05),
+      supplying_requested_info: noul(0.8),
+    };
+    // Message is deliberately closer-shaped ("Thanks so much!") so the
+    // no_reply/isCloserShaped condition would otherwise fire — this is what
+    // makes the override assertion meaningful (a non-closer-shaped message
+    // would never reach the silence branch regardless of the override).
+    const decision = decide(answers, BANDS, "Thanks so much!", undefined, [], [], ALL_ON, "v2");
+    expect(decision.action).not.toBe("silence");
+  });
+
+  it("v2: supplying_requested_info below 0.5 does not suppress the no_reply branch", () => {
+    const answers: JevAnswers = {
+      resolution_path: choice("no_reply", { no_reply: 0.95, caroline_tool: 0.05 }),
+      off_topic_or_bad_faith: noul(0.05),
+      supplying_requested_info: noul(0.2),
+    };
+    const decision = decide(answers, BANDS, "Thanks so much!", undefined, [], [], ALL_ON, "v2");
+    expect(decision.action).toBe("silence");
+  });
+
+  it("v1 answers with no supplying_requested_info key behave the same as before under questionsVersion v2 (treated as 0)", () => {
+    const answers: JevAnswers = {
+      resolution_path: choice("no_reply", { no_reply: 0.95, caroline_tool: 0.05 }),
+      off_topic_or_bad_faith: noul(0.05),
+    };
+    const decision = decide(answers, BANDS, "Thanks so much!", undefined, [], [], ALL_ON, "v2");
+    expect(decision.action).toBe("silence");
+  });
+});
+
+describe("decide — v2 answer_from_knowledge routing line", () => {
+  it("v2 route block includes a 'path note' pointing Caroline at memory_search when the top path is answer_from_knowledge", () => {
+    const answers: JevAnswers = {
+      resolution_path: choice("answer_from_knowledge", { answer_from_knowledge: 0.9, caroline_tool: 0.1 }),
+      intent: choice("other", { other: 0.9 }),
+      first_tool: choice("none", { none: 0.9 }),
+      skill: choice("none", { none: 0.9 }),
+      off_topic_or_bad_faith: noul(0.02),
+    };
+    const decision = decide(answers, BANDS, "what's the difference between plans?", undefined, [], [], ALL_ON, "v2");
+    expect(decision.action).toBe("route");
+    expect(decision.block).toContain("memory_search");
+  });
+
+  it("v2 route block tells Caroline a short courtesy reply is enough when the top path is acknowledge", () => {
+    const answers: JevAnswers = {
+      resolution_path: choice("acknowledge", { acknowledge: 0.9, no_reply: 0.1 }),
+      intent: choice("other", { other: 0.9 }),
+      first_tool: choice("none", { none: 0.9 }),
+      skill: choice("none", { none: 0.9 }),
+      off_topic_or_bad_faith: noul(0.02),
+    };
+    const decision = decide(answers, BANDS, "thank you so much!", undefined, [], [], ALL_ON, "v2");
+    expect(decision.action).toBe("route");
+    expect(decision.block).toContain("short courtesy reply");
+    expect(decision.block).not.toContain("memory_search");
+  });
+
+  it("v1 callers never get the answer_from_knowledge line even if the label somehow appears", () => {
+    const answers: JevAnswers = {
+      resolution_path: choice("answer_from_knowledge", { answer_from_knowledge: 0.9, caroline_tool: 0.1 }),
+      intent: choice("other", { other: 0.9 }),
+      first_tool: choice("none", { none: 0.9 }),
+      skill: choice("none", { none: 0.9 }),
+      off_topic_or_bad_faith: noul(0.02),
+    };
+    const decision = decide(answers, BANDS, "what's the difference between plans?", undefined, [], [], ALL_ON);
+    expect(decision.block).not.toContain("memory_search");
   });
 });

@@ -991,6 +991,25 @@ export function stripConversationContext(
   return reply.replace(CONTEXT_BLOCK_REGEX, "").replace(CONTEXT_OPEN_LINE_REGEX, "").trim();
 }
 
+// Which caroline-questions*.json shape a shadowVersions entry should build a
+// runner for — jev-router.ts implements exactly "v1" and "v2" today.
+// config.ts's resolveIntercomAccount already refuses an unrecognised entry
+// at config-load time (QA NO-GO on #1022, finding 1), but dispatch stays
+// exhaustive here too as defense-in-depth: an unsupported version must never
+// silently fall through to the v1 runner while the shadow row it produces
+// still carries the unsupported string as its own questions_version label
+// (a corrupted cohort that looks like an experiment that was never run).
+// Returns null (never "v1") for anything unrecognised, and warns once per
+// call so an operator sees it even if config validation was bypassed.
+export function resolveJevShadowQuestionsVersion(
+  version: string,
+  log?: { warn: (msg: string) => void },
+): "v1" | "v2" | null {
+  if (version === "v1" || version === "v2") return version;
+  log?.warn?.(`[intercom:jev] shadowVersions: unsupported version "${version}" skipped (supported: v1, v2)`);
+  return null;
+}
+
 // Construct the per-webhook risk-assessment options. When the flag is on AND
 // an OpenRouter key is configured, the LLM-judge backstop is wired; otherwise
 // only Layer 0/1/1b (magic-keyword + content rules + turn-count cap) run.
@@ -1689,13 +1708,58 @@ export const intercomPlugin = createChatChannelPlugin({
                   // createJevTurnRunner doc comment). A runner created once
                   // per account/process would wrongly share a cached answer
                   // across different customer turns.
+                  const jevQuestionsVersion = account.jev?.questionsVersion ?? "v1";
+                  const jevShadowVersions = account.jev?.shadowVersions ?? [];
                   const jevRunner =
                     account.jev?.enabled
                       ? createJevTurnRunner(
-                          { apiKey: account.jev.apiKey, model: account.jev.model, timeoutMs: account.jev.timeoutMs },
+                          {
+                            apiKey: account.jev.apiKey,
+                            model: account.jev.model,
+                            timeoutMs: account.jev.timeoutMs,
+                            questionsVersion: jevQuestionsVersion,
+                            agentInstructionsPath: account.jev.agentInstructionsPath,
+                          },
                           jevLog,
                         )
                       : undefined;
+                  // One fresh memoized runner PER shadow version, scoped to
+                  // this webhook request only — same "no second request"
+                  // rationale as jevRunner, just for that version's single
+                  // shadow call. Never shares jevRunner's memoized promise
+                  // even when a shadow version equals the live version.
+                  const jevShadowRunners: Record<
+                    string,
+                    (input: import("./jev-router.js").JevTurnInput) => Promise<import("./jev-router.js").JevTurnOutcome>
+                  > = account.jev?.enabled
+                    ? Object.fromEntries(
+                        jevShadowVersions.flatMap((version) => {
+                          const resolved = resolveJevShadowQuestionsVersion(version, jevLog);
+                          // Unsupported version: build NO runner for it. The
+                          // dispatcher below (runJevShadow) then hits its
+                          // existing "no runner for this version" branch and
+                          // returns shadow_runner_unavailable — it never
+                          // reuses another version's runner under this
+                          // version's label.
+                          if (!resolved) return [];
+                          return [
+                            [
+                              version,
+                              createJevTurnRunner(
+                                {
+                                  apiKey: account.jev!.apiKey,
+                                  model: account.jev!.model,
+                                  timeoutMs: account.jev!.timeoutMs,
+                                  questionsVersion: resolved,
+                                  agentInstructionsPath: account.jev!.agentInstructionsPath,
+                                },
+                                jevLog,
+                              ),
+                            ] as const,
+                          ];
+                        }),
+                      )
+                    : {};
                   const riskOptions = buildRiskOptions(
                     account,
                     log,
@@ -1722,6 +1786,8 @@ export const intercomPlugin = createChatChannelPlugin({
                               shadow: account.jev.shadow,
                               intents: loadCarolineIntents(jevLog),
                               skills: loadCarolineSkills(jevLog),
+                              questionsVersion: jevQuestionsVersion,
+                              shadowVersions: jevShadowVersions,
                             },
                             runJev: jevRunner
                               ? (input: import("./jev-router.js").JevTurnInput) =>
@@ -1732,6 +1798,26 @@ export const intercomPlugin = createChatChannelPlugin({
                                     priorChats: state.enrichment?.priorChats,
                                   })
                               : undefined,
+                            runJevShadow:
+                              jevShadowVersions.length > 0
+                                ? (version: string, input: import("./jev-router.js").JevTurnInput) => {
+                                    const runner = jevShadowRunners[version];
+                                    if (!runner) {
+                                      return Promise.resolve({
+                                        ok: false as const,
+                                        reason: "shadow_runner_unavailable",
+                                        httpStatus: null,
+                                        latencyMs: 0,
+                                      });
+                                    }
+                                    return runner({
+                                      ...input,
+                                      founding: state.enrichment?.snapshot?.founderSince,
+                                      plan: state.enrichment?.snapshot?.plan,
+                                      priorChats: state.enrichment?.priorChats,
+                                    });
+                                  }
+                                : undefined,
                           }
                         : {}),
                     },

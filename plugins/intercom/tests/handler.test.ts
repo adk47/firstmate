@@ -1526,4 +1526,199 @@ describe("handler — Jev pre-turn router", () => {
     expect(result.action).toBe("dispatch_to_agent");
     expect(updatedState?.jev?.action).toBe("route");
   });
+
+  // -------------------------------------------------------------------------
+  // Shadow dispatch (jev.shadowVersions) — fire-and-forget, isolated from the
+  // live call. "own timeout, errors swallowed to warn" per spec: none of
+  // hang/throw/garbage from the shadow call may affect the live turn.
+  // -------------------------------------------------------------------------
+
+  function flushMicrotasks(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  it("dual-call isolation: a shadow call that never resolves does not block or change the live turn", async () => {
+    const state = makeState();
+    const runJev = vi.fn(async () =>
+      jevResult({
+        off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
+        resolution_path: { type: "choice", choice: "caroline_tool", probabilities: { caroline_tool: 0.85 } },
+      }),
+    );
+    const runJevShadow = vi.fn(() => new Promise<JevTurnOutcome>(() => {})); // never settles
+
+    const { result, state: updatedState } = await handleWebhookEvent(
+      makeUserPayload("where's my credit"), state, "bot", undefined,
+      {
+        jev: { enabled: true, bands: JEV_BANDS, questionsVersion: "v1", shadowVersions: ["v2"] },
+        runJev,
+        runJevShadow,
+      },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+    expect(updatedState?.jev?.action).toBe("route");
+    expect(runJevShadow).toHaveBeenCalledTimes(1);
+    expect(runJevShadow.mock.calls[0][0]).toBe("v2");
+  });
+
+  it("dual-call isolation: a shadow call that throws/rejects is swallowed (warn only), live turn unaffected", async () => {
+    appendFileMock.mockClear();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const state = makeState();
+    const runJev = vi.fn(async () =>
+      jevResult({
+        off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
+        resolution_path: { type: "choice", choice: "caroline_tool", probabilities: { caroline_tool: 0.85 } },
+      }),
+    );
+    const runJevShadow = vi.fn(async () => {
+      throw new Error("boom");
+    });
+
+    const { result } = await handleWebhookEvent(
+      makeUserPayload("where's my credit"), state, "bot", undefined,
+      {
+        jev: { enabled: true, bands: JEV_BANDS, questionsVersion: "v1", shadowVersions: ["v2"] },
+        runJev,
+        runJevShadow,
+      },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+    await flushMicrotasks();
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("dual-call isolation: a shadow call resolving with a malformed/garbage outcome never throws out of handleWebhookEvent", async () => {
+    const state = makeState();
+    const runJev = vi.fn(async () =>
+      jevResult({
+        off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
+        resolution_path: { type: "choice", choice: "caroline_tool", probabilities: { caroline_tool: 0.85 } },
+      }),
+    );
+    const runJevShadow = vi.fn(async () => ({ ok: true, answers: "not an answers object" }) as unknown as JevTurnOutcome);
+
+    const { result } = await handleWebhookEvent(
+      makeUserPayload("where's my credit"), state, "bot", undefined,
+      {
+        jev: { enabled: true, bands: JEV_BANDS, questionsVersion: "v1", shadowVersions: ["v2"] },
+        runJev,
+        runJevShadow,
+      },
+    );
+    expect(result.action).toBe("dispatch_to_agent");
+    await flushMicrotasks();
+  });
+
+  it("shadow row carries questions_version for the shadow variant, separate from the live row's version", async () => {
+    appendFileMock.mockClear();
+    const state = makeState();
+    const runJev = vi.fn(async () =>
+      jevResult({
+        off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
+        resolution_path: { type: "choice", choice: "caroline_tool", probabilities: { caroline_tool: 0.85 } },
+      }),
+    );
+    const runJevShadow = vi.fn(async () =>
+      jevResult({
+        off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
+        resolution_path: { type: "choice", choice: "caroline_tool", probabilities: { caroline_tool: 0.7 } },
+      }),
+    );
+
+    await handleWebhookEvent(
+      makeUserPayload("where's my credit"), state, "bot", undefined,
+      {
+        jev: { enabled: true, bands: JEV_BANDS, questionsVersion: "v1", shadowVersions: ["v2"] },
+        runJev,
+        runJevShadow,
+      },
+    );
+    await flushMicrotasks();
+
+    expect(appendFileMock).toHaveBeenCalledTimes(2);
+    const rows = appendFileMock.mock.calls.map(([, written]) => JSON.parse((written as string).trim()));
+    const liveRow = rows.find((r) => r.actual === "route" && r.questions_version === "v1");
+    const shadowRow = rows.find((r) => r.questions_version === "v2");
+    expect(liveRow).toBeTruthy();
+    expect(shadowRow).toBeTruthy();
+  });
+
+  it("shadow row carries state_variant from the shadow outcome; the live v1 row carries none", async () => {
+    appendFileMock.mockClear();
+    const state = makeState();
+    const runJev = vi.fn(async () =>
+      jevResult({
+        off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
+        resolution_path: { type: "choice", choice: "caroline_tool", probabilities: { caroline_tool: 0.85 } },
+      }),
+    );
+    const runJevShadow = vi.fn(async () => ({
+      ...jevResult({
+        off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
+        resolution_path: { type: "choice", choice: "caroline_tool", probabilities: { caroline_tool: 0.7 } },
+      }),
+      stateVariant: "v2-policy-fallback",
+    }));
+
+    await handleWebhookEvent(
+      makeUserPayload("where's my credit"), state, "bot", undefined,
+      {
+        jev: { enabled: true, bands: JEV_BANDS, questionsVersion: "v1", shadowVersions: ["v2"] },
+        runJev,
+        runJevShadow,
+      },
+    );
+    await flushMicrotasks();
+
+    const rows = appendFileMock.mock.calls.map(([, written]) => JSON.parse((written as string).trim()));
+    const liveRow = rows.find((r) => r.questions_version === "v1");
+    const shadowRow = rows.find((r) => r.questions_version === "v2");
+    expect(liveRow.state_variant).toBeNull();
+    expect(shadowRow.state_variant).toBe("v2-policy-fallback");
+  });
+
+  // Isolation, per spec: a shadow call hanging or throwing must leave the
+  // live v1 decision, its timing, and its result completely untouched — not
+  // just "no exception escapes", but the SAME action/state.jev/log line as
+  // if runJevShadow had never been wired at all.
+  it("dual-call isolation: a hanging shadow call leaves the live v1 decision, its state.jev, and its dispatch result byte-identical", async () => {
+    const baselineState = makeState();
+    const isolatedState = makeState();
+    const runJev = vi.fn(async () =>
+      jevResult({
+        off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
+        resolution_path: { type: "choice", choice: "caroline_tool", probabilities: { caroline_tool: 0.85 } },
+        intent: { type: "choice", choice: "credit_verification", probabilities: { credit_verification: 0.91 } },
+      }),
+    );
+
+    const baseline = await handleWebhookEvent(
+      makeUserPayload("where's my credit"), baselineState, "bot", undefined,
+      { jev: { enabled: true, bands: JEV_BANDS, questionsVersion: "v1" }, runJev },
+    );
+
+    const runJevIsolated = vi.fn(async () =>
+      jevResult({
+        off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
+        resolution_path: { type: "choice", choice: "caroline_tool", probabilities: { caroline_tool: 0.85 } },
+        intent: { type: "choice", choice: "credit_verification", probabilities: { credit_verification: 0.91 } },
+      }),
+    );
+    const runJevShadow = vi.fn(() => new Promise<JevTurnOutcome>(() => {})); // never settles
+
+    const isolated = await handleWebhookEvent(
+      makeUserPayload("where's my credit"), isolatedState, "bot", undefined,
+      {
+        jev: { enabled: true, bands: JEV_BANDS, questionsVersion: "v1", shadowVersions: ["v2"] },
+        runJev: runJevIsolated,
+        runJevShadow,
+      },
+    );
+
+    expect(isolated.result).toEqual(baseline.result);
+    expect(isolated.state?.jev).toEqual(baseline.state?.jev);
+    expect(runJevShadow).toHaveBeenCalledTimes(1);
+  });
 });

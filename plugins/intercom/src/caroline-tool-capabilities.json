@@ -1,0 +1,316 @@
+{
+  "generated_from": "workspaces/support/TOOLS.md (hand-authored capability statements, verified per-tool against that doc; NOT mechanically generated). Drift-checked against plugins/intercom/src/caroline-inventory.json's .tools[].name by plugins/intercom/tests/caroline-tool-capabilities.test.ts.",
+  "tools": [
+    {
+      "name": "billing_status",
+      "answers": [
+        "was I charged / when was my last charge",
+        "was I already refunded",
+        "what's my billing status (active, past_due, canceled)",
+        "am I currently on a subscription"
+      ],
+      "cannot_answer": [
+        "issue a refund (read-only; refunds always hand off)",
+        "explain a charge from a non-standard/non-Stripe billing arrangement (returns charge_data_available:false)"
+      ],
+      "needs": "verified Intercom contact email only (no parameters)."
+    },
+    {
+      "name": "cancel_subscription",
+      "answers": [
+        "cancel my subscription"
+      ],
+      "cannot_answer": [
+        "issue a refund (no money moves; refunds stay a human path)",
+        "cancel before the customer has explicitly declined the retention offer"
+      ],
+      "needs": "verified Intercom contact email + explicit confirm:true, only after the customer declined retention saves."
+    },
+    {
+      "name": "company_finder_finalize",
+      "answers": [],
+      "cannot_answer": [
+        "anything customer-facing — this tool is not part of Caroline's support tool set (workspaces/support/TOOLS.md lists exactly 25 tools and this is not one of them)"
+      ],
+      "needs": "UNVERIFIED. Present in caroline-inventory.json's generated tool list (a sales/outreach tool from plugins/support-tools' company-finder-batch, used by scout/cmo, not support) but absent from TOOLS.md and from company_finder_finalize/company_finder_prep's own \"undocumented\" marker in caroline-inventory.json. Flagged as uncertain in the implementer report — do not trust this entry without re-verifying against the current tool registry."
+    },
+    {
+      "name": "company_finder_prep",
+      "answers": [],
+      "cannot_answer": [
+        "anything customer-facing — this tool is not part of Caroline's support tool set (workspaces/support/TOOLS.md lists exactly 25 tools and this is not one of them)"
+      ],
+      "needs": "UNVERIFIED. Same generator artifact as company_finder_finalize — see that entry's `needs` field."
+    },
+    {
+      "name": "create_ticket",
+      "answers": [
+        "file a request for something Caroline can't do herself (refund, deletion, dispute, policy exception)"
+      ],
+      "cannot_answer": [
+        "any customer question directly — it opens a ticket, it does not resolve anything itself",
+        "guarantee an outcome or a timeline beyond the SLA in its response"
+      ],
+      "needs": "actionType, customerEmail, summary, conversationSummary."
+    },
+    {
+      "name": "credit_verification_check",
+      "answers": [
+        "why are my submitted credits stuck / pending verification",
+        "do I have any credits waiting on proof"
+      ],
+      "cannot_answer": [
+        "approve or reject a pending credit (read-only; approval is credits_verify)",
+        "verify a credit on a profile the customer doesn't own"
+      ],
+      "needs": "verified Intercom contact email; ownership re-verified server-side against the profile."
+    },
+    {
+      "name": "credits_search",
+      "answers": [
+        "what credits are listed on this profile",
+        "is a specific track/release credited to this profile"
+      ],
+      "cannot_answer": [
+        "add, remove, or edit a credit (read-only)",
+        "return private data (email/phone/payment)"
+      ],
+      "needs": "profileId; optional keyword/creditRole filters."
+    },
+    {
+      "name": "credits_verify",
+      "answers": [
+        "approve my pending credit now that I've provided proof"
+      ],
+      "cannot_answer": [
+        "approve a credit without catalog corroboration (refuses to a human)",
+        "approve a credit for a profile the customer doesn't own"
+      ],
+      "needs": "verified actor identity + intercom conversation id (the approval-ref); server-side re-verifies ownership and corroboration."
+    },
+    {
+      "name": "dedupe_check",
+      "answers": [
+        "can my duplicate profiles be merged",
+        "is this duplicate merge safe to do myself"
+      ],
+      "cannot_answer": [
+        "actually merge the profiles (read-only; the write tool is profiles_consolidate)",
+        "verify a cross-owner or claimed-duplicate merge (fails closed)"
+      ],
+      "needs": "verified Intercom contact email; caps duplicates at 5 per call."
+    },
+    {
+      "name": "founding_buyback_link",
+      "answers": [
+        "how do I buy back into the founding member program"
+      ],
+      "cannot_answer": [
+        "reinstate founding status for free (that stays a human/ops path)",
+        "mint a link for another account"
+      ],
+      "needs": "verified Intercom contact email + explicit confirm:true."
+    },
+    {
+      "name": "founding_status",
+      "answers": [
+        "am I a founding member",
+        "did my founding status lapse",
+        "am I eligible for buy-back"
+      ],
+      "cannot_answer": [
+        "reinstate or change founding status (read-only)"
+      ],
+      "needs": "verified Intercom contact email only."
+    },
+    {
+      "name": "order_address_update",
+      "answers": [
+        "fix the shipping address on my plaque/poster order"
+      ],
+      "cannot_answer": [
+        "update an order that's already shipped or otherwise non-editable",
+        "apply an address the customer hasn't confirmed (dry-run required first)"
+      ],
+      "needs": "order_ref, customer_email (must match order owner), full recipient address; intercomConvId required to apply."
+    },
+    {
+      "name": "order_lookup",
+      "answers": [
+        "where is my order / what's its status",
+        "what shipping address is on file for my order"
+      ],
+      "cannot_answer": [
+        "change the order (read-only; the write tool is order_address_update)",
+        "return payment data"
+      ],
+      "needs": "order ref (UUID, order number, or Prodigi id)."
+    },
+    {
+      "name": "profile_analytics_status",
+      "answers": [
+        "why are my streams/analytics not updating",
+        "why does my profile show no data"
+      ],
+      "cannot_answer": [
+        "explain exact refresh cadence (never quote one)",
+        "trigger a refresh or reprocess (read-only)",
+        "give a confident answer when the cache is cold (measured:false means unmeasured, not zero)"
+      ],
+      "needs": "profile_id / profile_url / email / name to resolve the profile first."
+    },
+    {
+      "name": "profile_claim_status",
+      "answers": [
+        "where is my pending profile claim",
+        "why was my claim rejected",
+        "is someone else claiming my profile"
+      ],
+      "cannot_answer": [
+        "approve a claim (read-only; the write tool is profiles_claim_self)",
+        "show another person's claim details (fails closed to aggregate counters)"
+      ],
+      "needs": "verified Intercom contact email; profile resolved by search or id."
+    },
+    {
+      "name": "profile_credits_status",
+      "answers": [
+        "why is my credit missing from my profile",
+        "did my credit end up on the wrong profile",
+        "is there a duplicate profile that might have my credit"
+      ],
+      "cannot_answer": [
+        "move or fix the credit itself (diagnosis only)",
+        "confirm a duplicate profile is really the same artist (candidates only, not confirmed)"
+      ],
+      "needs": "profile identifier + the track/credit in question."
+    },
+    {
+      "name": "profile_lookup",
+      "answers": [
+        "find my profile / does this profile exist"
+      ],
+      "cannot_answer": [
+        "return private data (email/phone/address/payment — public fields only)",
+        "modify anything (read-only)"
+      ],
+      "needs": "a search keyword."
+    },
+    {
+      "name": "profile_status",
+      "answers": [
+        "what's the current state of my profile (verified, claimed, credit count)",
+        "what are my most recent credits"
+      ],
+      "cannot_answer": [
+        "return private contact data",
+        "change ownership or verification (read-only)"
+      ],
+      "needs": "profile_id, profile_url, email, or name."
+    },
+    {
+      "name": "profiles_claim_self",
+      "answers": [
+        "approve my own pending profile claim"
+      ],
+      "cannot_answer": [
+        "approve a claim that isn't the customer's own (routes to human)",
+        "claim on a disabled/ambiguous/shared profile"
+      ],
+      "needs": "verified actor identity; preview (dry-run) before apply."
+    },
+    {
+      "name": "profiles_consolidate",
+      "answers": [
+        "merge my duplicate profiles into the one I own"
+      ],
+      "cannot_answer": [
+        "merge a claimed duplicate or a cross-owner profile (routes to human)",
+        "merge without the customer's own attestation on a name-mismatched duplicate"
+      ],
+      "needs": "verified actor identity + intercom conversation id; preview before apply."
+    },
+    {
+      "name": "remove_credits",
+      "answers": [
+        "remove a wrong/mechanical credit from my own profile"
+      ],
+      "cannot_answer": [
+        "remove a credit from a profile the customer doesn't own",
+        "apply without a matching dry-run in the last 15 minutes"
+      ],
+      "needs": "profileId, requesterEmail (Intercom-verified), tracks[]; intercomConvId required to apply."
+    },
+    {
+      "name": "retention_offer_apply",
+      "answers": [
+        "apply the 50% retention discount I just accepted"
+      ],
+      "cannot_answer": [
+        "apply an offer the customer hasn't explicitly accepted in this conversation",
+        "choose or invent a discount figure (server-resolved only)"
+      ],
+      "needs": "verified Intercom contact email + explicit confirm:true."
+    },
+    {
+      "name": "retention_offer_check",
+      "answers": [
+        "am I eligible for a discount if I don't cancel"
+      ],
+      "cannot_answer": [
+        "apply the offer (read-only; the write tool is retention_offer_apply)"
+      ],
+      "needs": "verified Intercom contact email only."
+    },
+    {
+      "name": "subscription_status",
+      "answers": [
+        "what plan am I on",
+        "is my subscription active"
+      ],
+      "cannot_answer": [
+        "change the plan (read-only)",
+        "return other members' emails/names"
+      ],
+      "needs": "verified Intercom contact email only."
+    },
+    {
+      "name": "support_action_router",
+      "answers": [],
+      "cannot_answer": [
+        "answer a customer question directly — this is an internal routing lookup, not a customer-facing answer"
+      ],
+      "needs": "intent plus optional state."
+    }
+  ],
+  "policy": {
+    "human_gated": [
+      "identity or ownership cannot be verified",
+      "cross-owner conflict (someone else claimed or is claiming the customer's profile, credits or workspace)",
+      "refund request",
+      "account deletion / GDPR erasure",
+      "profile deletion or unmerge",
+      "policy exception or waiver",
+      "role-based bulk credit change",
+      "chargeback, fraud or account takeover",
+      "duplicate or post-cancel charge",
+      "founding-member free reinstatement",
+      "on-behalf or cross-account request"
+    ],
+    "kb_topics": [
+      "Active Incidents",
+      "Developer / API Access",
+      "Common Issues – Troubleshooting Guide",
+      "Credits and Profiles",
+      "Handing a data problem to the engineering lane",
+      "Frequently Asked Questions",
+      "Founding Member Program",
+      "GDPR / Data Erasure Requests",
+      "Orders & fulfillment (plaques / posters via Prodigi)",
+      "Platform Features",
+      "Muso Platform (platform.muso.ai) -- the developer platform",
+      "Muso.AI Products and Pricing",
+      "Subscriptions and Billing"
+    ]
+  }
+}
