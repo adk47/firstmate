@@ -16,76 +16,105 @@
 #   fm-change-watch.sh verdict <watch-id>
 #   fm-change-watch.sh status [<watch-id>]
 #
-# register  Derive the affected Kubernetes Deployment(s) from the merged PR's
-#           file list, record the pre-deploy baseline, and arm one bounded
-#           schedule of samples. For an H-DevOps pull request the targets come
-#           from the changed manifests under k8s/prod/<namespace>/ (the
-#           Deployment names in the diff). For an application repository the
-#           target is the service named in data/projects.md, or the repository
-#           itself, resolved to the Deployment that carries it in the local
-#           H-DevOps checkout. A PR that touches no deployable service registers
-#           nothing and says so. Registration is read-only against the cluster;
-#           it writes only under this home's state/ directory.
+# register  Derive the affected Kubernetes Deployment(s) from the merged PR,
+#           record the pre-deploy baseline, and arm one bounded schedule of
+#           samples. For an H-DevOps pull request the targets are the
+#           Deployment documents that the PR's diff hunks land in, across the
+#           changed manifests under k8s/prod/; a target's namespace is the
+#           document's metadata.namespace, or the manifest's directory only
+#           when the document declares none. When a hunk cannot be placed in
+#           its manifest (no diff, or content that does not match it) every
+#           Deployment in that manifest is watched and the registration line
+#           says so. For an application repository the target is the Deployment
+#           carrying the repository's name in the local H-DevOps checkout. A PR
+#           that touches no deployable service registers nothing and says so.
+#           Registering an existing watch whose drive stopped before the end of
+#           its schedule re-arms the remaining samples; any other existing watch
+#           is left alone. Registration is read-only against the cluster; it
+#           writes only under this home's state/ directory. Its forge reads
+#           share one budget (default 60s) and its baseline capture the sample
+#           budget below, so a merge or watcher cycle is never stalled by it.
 # due       Condition hook for the armed watch: exit 0 when a scheduled sample
 #           is due now, exit 1 otherwise. Pure and cheap; never runs a sample.
 # drive     Action hook for the armed watch: take every remaining scheduled
 #           sample in order, stopping at the first regression. This is the one
 #           long-running child; it is armed through bin/fm-procevent-when.sh and
-#           is never run in a conversational turn.
+#           is never run in a conversational turn. A drive stopped before the
+#           end of its schedule records "interrupted at +Nm" and queues one
+#           check wake; it never reads as clean.
 # sample    Read every metric for every target, compare each to its baseline
 #           with a stated bar, and append one sample record. Degrades to
 #           "unmeasured" per metric rather than failing the whole watch.
-# verdict   Print "change-watch clean" or
+# verdict   Print "change-watch clean", "change-watch completed unmeasured",
+#           "change-watch interrupted at +Nm", or
 #           "change-watch regressed at +Nm on <metric> (<value> vs baseline <value>)".
+#           Clean means every target had at least one scored reading across the
+#           schedule. Completed unmeasured means the schedule ended with some
+#           target never read: a measurement gap, recorded as such, never as
+#           health.
 # status    Print one line per registered watch (all of them, or one).
 #
 # Metrics, bars, and windows:
-#   http_5xx_per_min     5xx responses per minute over the window; regressed when
-#                        value > 3x baseline AND value > 1/min.
+#   http_5xx_per_min     5xx responses per minute from the pods' own access
+#                        logs. When the per-container line cap is hit the rate
+#                        is taken over the span the read lines actually cover,
+#                        so a busy service is never divided by a window it did
+#                        not fill. Regressed when value > 3x baseline AND
+#                        value > 1/min.
 #   restarts             total container restartCount across the Deployment's
 #                        pods; regressed when value > baseline + 1.
 #   oomkilled            OOMKilled container terminations at or after the
 #                        baseline epoch; regressed when value > 0.
 #   p95_ms               request p95 latency where the service exposes it;
 #                        regressed when value > 3x baseline AND > baseline+100ms.
-#   pgbouncer_cl_waiting client waits on the service's pgbouncer pool
-#                        (SHOW POOLS); regressed when value > 0 on two
+#   pgbouncer_cl_waiting clients waiting on the Deployment's own pgbouncer pool:
+#                        the pod spec's DB_HOST/DB_PORT/DB_NAME (secret refs
+#                        resolved), the pooler endpoint behind that Service, then
+#                        SHOW POOLS filtered to that database. A pool that
+#                        cannot be resolved at registration is unmeasured for
+#                        the whole watch. Regressed when value > 0 on two
 #                        consecutive samples.
-#   rss_ratio            highest container RSS as a fraction of its memory
-#                        limit; regressed when value > 0.85.
+#   rss_ratio            highest container working set as a fraction of its
+#                        memory limit; regressed when value > 0.85.
 # The baseline window is the 60 minutes before the change's rollout start, read
 # as a level for counters (restarts, oomkilled, rss_ratio) and as a rate for the
-# others. An unmeasured metric is skipped, never scored as a pass.
+# others. An unmeasured metric is skipped, never scored as a pass, and a metric
+# with a relative bar (http_5xx_per_min, restarts, p95_ms) whose baseline could
+# not be read is recorded but never scored.
 #
 # Schedule: +5m, +15m, +30m, then hourly to +12h. Samples stop at the first
-# regression. On a clean +12h the watch appends one note to the task's status log
-# and records one wiki observation.
+# regression. On a clean +12h the watch appends one note to the task's status
+# log and records one wiki observation; on a completed-unmeasured +12h it
+# appends one note naming the targets it never read and records nothing else.
 #
 # Reporting: the first regression appends one
 #   check: change-watch <task-id> <pr-url> <metric> regressed
 # wake to the durable wake queue and steers the owning task through
-# bin/fm-send.sh with the numbers. Both are best-effort and never fail a merge.
+# bin/fm-send.sh with the numbers; an interrupted drive appends one
+#   check: change-watch <task-id> <pr-url> interrupted at +Nm
+# wake. All are best-effort and never fail a merge.
 #
 # Read-only against the cluster. No model calls. No new fleet workers: the
 # watcher's existing process-event runner drives the registered watch. One
-# sample is bounded by a hard budget (default 25s); every metric not read inside
-# it is recorded unmeasured.
+# sample, and the baseline capture at registration, are each bounded by a hard
+# budget (default 25s); every metric not read inside it is recorded unmeasured.
 #
 # Test seams (all optional, all inert in production):
 #   FM_CW_NOW              fixed current epoch (integer) instead of `date +%s`
 #   FM_CW_MERGE_EPOCH      fixed rollout/merge epoch instead of the PR's
 #   FM_CW_FORGE_DIR        directory replacing every forge read (files.txt,
-#                          merge-epoch, merge-ref, content/<path>)
+#                          merge-epoch, merge-ref, diff.txt, content/<path>)
 #   FM_CW_HDEVOPS_K8S_DIR  k8s/prod tree of an H-DevOps checkout, used to resolve
-#                          an application service to its Deployment
-#   FM_CW_PROJECTS_FILE    projects registry read for an application service name
-#                          (default $FM_HOME/data/projects.md)
+#                          an application repository to its Deployment
 #   FM_CW_FORGE_TIMEOUT    per-call bound on a forge read (default 12s)
-#   FM_CW_SAMPLE_DEADLINE  hard budget for one sample in seconds (default 25)
+#   FM_CW_FORGE_BUDGET     total bound on forge reads in one register (default 60s)
+#   FM_CW_SAMPLE_DEADLINE  hard budget for one sample or baseline capture (default 25)
 #   FM_CW_CLUSTER_DIR      directory of metric series replacing cluster reads:
 #                          <metric>.<target>.<window>, one value per line, empty
 #                          line = unmeasured; the target is ns/deploy with "/"
-#                          replaced by "_", or "watch" for watch-level metrics
+#                          replaced by "_". pool.<target> holds one line
+#                          "ip<TAB>port<TAB>database" replacing the pool
+#                          resolution (absent = unresolvable).
 #   FM_CW_ARM_CMD          command replacing bin/fm-procevent-when.sh for arming
 #   FM_CW_SEND_CMD         command replacing bin/fm-send.sh for the lane steer
 #   FM_CW_SLEEP_CMD        command replacing `sleep` for the drive loop
@@ -107,19 +136,22 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 WATCH_ROOT="$STATE/change-watch"
 SCHEDULE_OFFSETS="300 900 1800 3600 7200 10800 14400 18000 21600 25200 28800 32400 36000 39600 43200"
+METRICS="http_5xx_per_min restarts oomkilled p95_ms rss_ratio pgbouncer_cl_waiting"
 BASELINE_WINDOW_SECONDS=3600
 SAMPLE_WINDOW_SECONDS=300
+LOG_TAIL_LINES=2000
 KUBECTL_TIMEOUT=4s
 FORGE_TIMEOUT=${FM_CW_FORGE_TIMEOUT:-12}
-# Hard budget for one sample: once it elapses, every remaining metric is
-# recorded unmeasured so a slow or unreachable read can never run a sample past
-# its bound.
+FORGE_BUDGET_SECONDS=${FM_CW_FORGE_BUDGET:-60}
+# Hard budget for one sample or one baseline capture: once it elapses, every
+# remaining metric is recorded unmeasured so a slow or unreachable read can
+# never run a sample, a merge, or a watcher cycle past its bound.
 SAMPLE_DEADLINE_SECONDS=${FM_CW_SAMPLE_DEADLINE:-25}
 MAX_MANIFEST_READS=20
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 notice() { printf 'notice: %s\n' "$1" >&2; }
-usage() { sed -n '2,93p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,122p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 cw_now() {
   if [ -n "${FM_CW_NOW:-}" ]; then
@@ -129,10 +161,23 @@ cw_now() {
   fi
 }
 
+CW_FORGE_START=$(cw_now)
+CW_BUDGET_START=''
+
 cw_kubectl() { kubectl --request-timeout="$KUBECTL_TIMEOUT" "$@"; }
 
-# Bound one forge read so a hung CLI can never stall the merge or watcher path.
-cw_forge_run() { fm_run_timed "$FORGE_TIMEOUT" "$@" 2>/dev/null; }
+# Bound one forge read per call and all forge reads of this process together, so
+# a hung CLI or a wide PR can never stall the merge or watcher path.
+cw_forge_run() {
+  local left
+  left=$(( FORGE_BUDGET_SECONDS - ($(cw_now) - CW_FORGE_START) ))
+  [ "$left" -gt 0 ] || return 124
+  [ "$left" -lt "$FORGE_TIMEOUT" ] || left=$FORGE_TIMEOUT
+  fm_run_timed "$left" "$@" 2>/dev/null
+}
+
+cw_budget_start() { CW_BUDGET_START=$(cw_now); }
+cw_within_budget() { [ $(( $(cw_now) - CW_BUDGET_START )) -lt "$SAMPLE_DEADLINE_SECONDS" ]; }
 
 # Stable content hash of a string (shasum or sha256sum; empty when neither is
 # available, in which case the watch name falls back to a path-safe prefix).
@@ -152,10 +197,14 @@ cw_watch_id() { printf '%s-%s\n' "$1" "$2"; }
 cw_watch_dir() { printf '%s/%s\n' "$WATCH_ROOT" "$1"; }
 cw_meta_path() { printf '%s/watch.meta\n' "$(cw_watch_dir "$1")"; }
 cw_targets_path() { printf '%s/targets\n' "$(cw_watch_dir "$1")"; }
+cw_pools_path() { printf '%s/pools\n' "$(cw_watch_dir "$1")"; }
 cw_baseline_path() { printf '%s/baseline\n' "$(cw_watch_dir "$1")"; }
 cw_schedule_path() { printf '%s/schedule\n' "$(cw_watch_dir "$1")"; }
 cw_samples_path() { printf '%s/samples.log\n' "$(cw_watch_dir "$1")"; }
 cw_verdict_path() { printf '%s/verdict\n' "$(cw_watch_dir "$1")"; }
+cw_sampled_path() { printf '%s/sampled\n' "$(cw_watch_dir "$1")"; }
+cw_drive_pid_path() { printf '%s/drive.pid\n' "$(cw_watch_dir "$1")"; }
+cw_drive_alive_path() { printf '%s/drive.alive\n' "$(cw_watch_dir "$1")"; }
 cw_last_path() { printf '%s/last.%s\n' "$(cw_watch_dir "$1")" "$2"; }
 
 cw_meta_get() {  # <watch-id> <key>
@@ -195,6 +244,22 @@ cw_forge_files() {  # <url> <provider> <owner> <repo> <number>
     github)
       command -v gh >/dev/null 2>&1 || return 1
       cw_forge_run gh pr view "$1" --json files -q '.files[].path' || return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# LIVE QUERY (forge) - the merged PR's unified diff.
+cw_forge_diff() {  # <url> <provider>
+  if [ -n "${FM_CW_FORGE_DIR:-}" ]; then
+    [ -f "$FM_CW_FORGE_DIR/diff.txt" ] || return 1
+    cat "$FM_CW_FORGE_DIR/diff.txt"
+    return 0
+  fi
+  case "$2" in
+    github)
+      command -v gh >/dev/null 2>&1 || return 1
+      cw_forge_run gh pr diff "$1" || return 1
       ;;
     *) return 1 ;;
   esac
@@ -255,32 +320,60 @@ cw_forge_merge_ref() {  # <url>
 
 # --- deployment derivation ----------------------------------------------------
 
-# Deployment names declared in a Kubernetes manifest stream (stdin).
-cw_manifest_deployments() {
+# Documents of a Kubernetes manifest stream (stdin), one per line as
+# "start<TAB>end<TAB>kind<TAB>namespace<TAB>name" with 1-based inclusive line
+# ranges. The name and namespace are the top-level metadata's own keys.
+cw_manifest_docs() {
   awk '
-    function flush() { if (is_dep && name != "") print name; is_dep = 0; name = "" }
-    /^---[[:space:]]*$/ { flush(); next }
-    /^kind:[[:space:]]*Deployment[[:space:]]*$/ { is_dep = 1; next }
-    is_dep && name == "" && /^[[:space:]]+name:[[:space:]]*/ {
-      name = $2; gsub(/["\047]/, "", name)
+    function flush(end) {
+      if (kind != "" && end >= start) printf "%d\t%d\t%s\t%s\t%s\n", start, end, kind, ns, name
+      start = NR + 1; kind = ""; ns = ""; name = ""; meta = 0; cind = 0
     }
-    END { flush() }
+    BEGIN { start = 1 }
+    /^---[[:space:]]*$/ { flush(NR - 1); next }
+    /^kind:[[:space:]]*/ { kind = $2; gsub(/["\047]/, "", kind); next }
+    /^[^[:space:]#]/ { meta = ($0 ~ /^metadata:/); cind = 0; next }
+    meta && /^[[:space:]]+[^[:space:]]/ {
+      match($0, /^[[:space:]]+/)
+      if (cind == 0) cind = RLENGTH
+      if (RLENGTH != cind) next
+      if ($1 == "name:" && name == "") { name = $2; gsub(/["\047]/, "", name) }
+      else if ($1 == "namespace:" && ns == "") { ns = $2; gsub(/["\047]/, "", ns) }
+    }
+    END { flush(NR) }
   '
 }
 
-# LIVE QUERY (checkout) - the service named in data/projects.md, or the repo
-# name itself when the repo is not registered there. Read-only.
-cw_service_name() {  # <repo-name>
-  local file=${FM_CW_PROJECTS_FILE:-$FM_HOME/data/projects.md}
-  local name
-  [ -f "$file" ] || { printf '%s\n' "$1"; return 0; }
-  name=$(awk -v repo="$1" '$1 == "-" && $2 == repo { print $2; exit }' "$file" 2>/dev/null || true)
-  printf '%s\n' "${name:-$1}"
+# Deployments declared in a manifest stream (stdin): "namespace<TAB>name", with
+# an empty namespace when the document declares none.
+cw_manifest_deployments() {
+  cw_manifest_docs | awk -F'\t' '$3 == "Deployment" && $5 != "" { print $4 "\t" $5 }'
 }
 
-# Resolve an application service name to "namespace<TAB>deployment" from a local
-# H-DevOps checkout's k8s/prod tree. Read-only; prints nothing when unresolved.
-# LIVE QUERY (checkout).
+# Changed lines of a unified diff (stdin) as "path<TAB>new-file-line", one per
+# added line and one per removed line at the position it was removed from.
+cw_diff_changed_lines() {
+  awk '
+    /^diff --git / { path = ""; inhunk = 0; next }
+    /^\+\+\+ / { path = $2; sub(/^b\//, "", path); if (path == "/dev/null") path = ""; inhunk = 0; next }
+    /^@@ / {
+      match($0, /\+[0-9]+/)
+      cur = substr($0, RSTART + 1, RLENGTH - 1) + 0
+      if (cur < 1) cur = 1
+      inhunk = 1
+      next
+    }
+    !inhunk || path == "" { next }
+    /^\\/ { next }
+    /^\+/ { print path "\t" cur; cur++; next }
+    /^-/ { print path "\t" cur; next }
+    { cur++ }
+  ' | sort -u
+}
+
+# Resolve an application repository's name to "target<TAB>namespace<TAB>name"
+# from a local H-DevOps checkout's k8s/prod tree. Read-only; prints nothing when
+# unresolved. LIVE QUERY (checkout).
 cw_service_targets() {  # <service>
   local root=${FM_CW_HDEVOPS_K8S_DIR:-$FM_HOME/projects/H-DevOps/k8s/prod}
   local service=$1 dir manifest ns name
@@ -289,10 +382,9 @@ cw_service_targets() {  # <service>
     [ -d "$dir" ] || continue
     for manifest in "$dir"/*.yaml "$dir"/*.yml; do
       [ -f "$manifest" ] || continue
-      while IFS= read -r name; do
+      while IFS=$'\t' read -r ns name; do
         [ "$name" = "$service" ] || continue
-        ns=$(basename "$dir")
-        printf '%s\t%s\n' "$ns" "$name"
+        printf 'target\t%s\t%s\n' "${ns:-$(basename "$dir")}" "$name"
         return 0
       done < <(cw_manifest_deployments < "$manifest")
     done
@@ -300,61 +392,125 @@ cw_service_targets() {  # <service>
   return 1
 }
 
-# Derive "namespace<TAB>deployment" targets from the merged PR's file list.
-# Prints one target per line; prints nothing when no deployable service is
-# touched.
+# Map one manifest's changed lines onto its Deployment documents. Prints
+# "target<TAB>namespace<TAB>name" per affected Deployment and one
+# "note<TAB>whole manifest: <path>" when the lines could not be placed, in which
+# case every Deployment of the manifest is a target.
+cw_place_changed_lines() {  # <path> <dir-namespace> <docs> <lines>
+  awk -F'\t' -v path="$1" -v dir_ns="$2" -v lines="$4" '
+    BEGIN { n = split(lines, l, "\n"); whole = (lines == "") }
+    { start[NR] = $1; end[NR] = $2; kind[NR] = $3; ns[NR] = ($4 == "" ? dir_ns : $4); name[NR] = $5 }
+    END {
+      if (!whole) {
+        for (i = 1; i <= n; i++) {
+          if (l[i] == "") continue
+          hit = 0
+          for (d = 1; d <= NR; d++) {
+            if (l[i] + 0 >= start[d] && l[i] + 0 <= end[d]) {
+              hit = 1
+              if (kind[d] == "Deployment" && name[d] != "") pick[d] = 1
+            }
+          }
+          if (!hit) whole = 1
+        }
+      }
+      if (whole) for (d = 1; d <= NR; d++) if (kind[d] == "Deployment" && name[d] != "") pick[d] = 1
+      for (d = 1; d <= NR; d++) if (pick[d]) printf "target\t%s\t%s\n", ns[d], name[d]
+      if (whole) printf "note\twhole manifest: %s\n", path
+    }
+  ' <<DOCS
+$3
+DOCS
+}
+
+# Derive the affected Deployments from the merged PR. Prints
+# "target<TAB>namespace<TAB>name" lines and "note<TAB>text" lines; prints no
+# target when no deployable service is touched.
 cw_derive_targets() {  # <url> <provider> <owner> <repo> <number> <repo-name>
   local url=$1 provider=$2 owner=$3 repo=$4 number=$5 repo_name=$6
-  local files ref path ns declared name any=0 reads=0
+  local files manifests ref changed path dir_ns docs lines placed any=0 reads=0
   files=$(cw_forge_files "$url" "$provider" "$owner" "$repo" "$number") || return 1
   [ -n "$files" ] || return 1
+  manifests=$(printf '%s\n' "$files" | grep -E '^k8s/prod/[^/]+/[^/]+\.ya?ml$' || true)
+  if [ -z "$manifests" ]; then
+    cw_service_targets "$repo_name"
+    return
+  fi
   ref=$(cw_forge_merge_ref "$url" 2>/dev/null || true)
-
-  # H-DevOps shape: manifests under k8s/prod/<namespace>/.
+  changed=$(cw_forge_diff "$url" "$provider" 2>/dev/null | cw_diff_changed_lines || true)
   while IFS= read -r path; do
-    case "$path" in
-      k8s/prod/*/*.yaml|k8s/prod/*/*.yml) ;;
-      *) continue ;;
-    esac
-    [ -n "$ref" ] || continue
-    [ "$reads" -lt "$MAX_MANIFEST_READS" ] || continue
-    ns=$(printf '%s' "$path" | cut -d/ -f3)
-    [ -n "$ns" ] || continue
+    [ -n "$path" ] || continue
+    if [ -z "$ref" ] || [ "$reads" -ge "$MAX_MANIFEST_READS" ]; then
+      printf 'note\tmanifest unread: %s\n' "$path"
+      continue
+    fi
     reads=$((reads + 1))
-    declared=$(cw_forge_content "$owner" "$repo" "$path" "$ref" 2>/dev/null | cw_manifest_deployments) || true
-    [ -n "$declared" ] || continue
-    while IFS= read -r name; do
-      [ -n "$name" ] || continue
-      printf '%s\t%s\n' "$ns" "$name"
-      any=1
-    done <<TARGETS
-$declared
-TARGETS
+    dir_ns=$(printf '%s' "$path" | cut -d/ -f3)
+    docs=$(cw_forge_content "$owner" "$repo" "$path" "$ref" 2>/dev/null | cw_manifest_docs) || docs=''
+    if [ -z "$docs" ]; then
+      printf 'note\tmanifest unread: %s\n' "$path"
+      continue
+    fi
+    lines=$(printf '%s\n' "$changed" | awk -F'\t' -v p="$path" '$1 == p { print $2 }')
+    placed=$(cw_place_changed_lines "$path" "$dir_ns" "$docs" "$lines")
+    [ -n "$placed" ] || continue
+    printf '%s\n' "$placed"
+    case "$placed" in *target*) any=1 ;; esac
   done <<PATHS
-$files
+$manifests
 PATHS
   [ "$any" -eq 1 ] && return 0
-
-  # Application-repo shape: the service named in data/projects.md, or the repo
-  # name itself, resolved to the Deployment that carries it in H-DevOps.
-  cw_service_targets "$(cw_service_name "$repo_name")"
+  cw_service_targets "$repo_name"
 }
 
 # --- live metric reads --------------------------------------------------------
 # Each live query below is self-contained and can be run by hand with the same
 # arguments, so an operator can reproduce any sample outside this script.
 
-# LIVE QUERY (cluster) - 5xx responses per minute for one Deployment's pods. The
-# shape is the one the p1/infra lanes use: the app's own access log over the
-# window, kept only when the HTTP/1.1 line count proves the probe executed.
+# LIVE QUERY (cluster) - 5xx responses per minute for one Deployment's pods, from
+# the app's own access log over the window, kept only when the HTTP/1.1 line
+# count proves the probe executed. Each container's read is capped at
+# LOG_TAIL_LINES lines; a container that hit the cap is rated over the span its
+# lines cover, one that did not over the whole window.
 cw_live_http_5xx_per_min() {  # <ns> <deploy> <window-seconds>
-  local ns=$1 deploy=$2 secs=$3 errors total
-  errors=$(cw_kubectl -n "$ns" logs --tail=2000 --since="${secs}s" --max-log-requests=10 \
-    -l "app=$deploy" 2>/dev/null | grep -cE '500 Internal|"\s5[0-9][0-9]\s' || true)
-  total=$(cw_kubectl -n "$ns" logs --tail=2000 --since="${secs}s" --max-log-requests=10 \
-    -l "app=$deploy" 2>/dev/null | grep -cE 'HTTP/1.1' || true)
-  [ "${total:-0}" -gt 0 ] || return 1
-  awk -v e="$errors" -v s="$secs" 'BEGIN { printf "%.4f\n", (e * 60) / s }'
+  local ns=$1 deploy=$2 secs=$3
+  cw_kubectl -n "$ns" logs --tail="$LOG_TAIL_LINES" --since="${secs}s" --max-log-requests=10 \
+    --prefix --timestamps -l "app=$deploy" 2>/dev/null | python3 -c '
+import datetime, re, sys
+window = float(sys.argv[1])
+cap = int(sys.argv[2])
+error_re = re.compile(r"500 Internal|\"\s5[0-9][0-9]\s")
+pods = {}
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    pod = ""
+    if line.startswith("["):
+        end = line.find("] ")
+        if end > 0:
+            pod = line[1:end]
+            line = line[end + 2:]
+    ts, _, rest = line.partition(" ")
+    try:
+        t = datetime.datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        continue
+    epoch = t.replace(tzinfo=datetime.timezone.utc).timestamp()
+    p = pods.setdefault(pod, {"first": epoch, "last": epoch, "lines": 0, "http": 0, "errors": 0})
+    p["first"] = min(p["first"], epoch)
+    p["last"] = max(p["last"], epoch)
+    p["lines"] += 1
+    if "HTTP/1.1" in rest:
+        p["http"] += 1
+    if error_re.search(rest):
+        p["errors"] += 1
+if sum(p["http"] for p in pods.values()) == 0:
+    sys.exit(1)
+rate = 0.0
+for p in pods.values():
+    span = window if p["lines"] < cap else max(p["last"] - p["first"], 1.0)
+    rate += p["errors"] * 60.0 / span
+print("%.4f" % rate)
+' "$secs" "$LOG_TAIL_LINES" 2>/dev/null || return 1
 }
 
 # LIVE QUERY (cluster) - total container restartCount across the Deployment.
@@ -429,9 +585,10 @@ except Exception:
   printf '%s\n' "$value"
 }
 
-# LIVE QUERY (cluster) - highest container RSS as a fraction of its memory limit
-# across the Deployment's pods. Reads the pod specs for limits and metrics-server
-# for the working set, then takes the worst ratio.
+# LIVE QUERY (cluster) - highest container working set as a fraction of its
+# memory limit across the Deployment's pods. Reads the pod specs for limits and
+# metrics-server (POD NAME CPU MEMORY) for the working set, then takes the worst
+# ratio.
 cw_live_rss_ratio() {  # <ns> <deploy> <window-seconds>
   local ns=$1 deploy=$2 limits usage
   limits=$(cw_kubectl -n "$ns" get pods -l "app=$deploy" -o json 2>/dev/null | python3 -c '
@@ -459,18 +616,23 @@ for pod in data.get("items", []):
   usage=$(cw_kubectl -n "$ns" top pods -l "app=$deploy" --containers --no-headers 2>/dev/null) || return 1
   [ -n "$usage" ] || return 1
   printf '%s\n' "$limits" | awk -F'\t' -v usage="$usage" '
+    function bytes(u,    two, one) {
+      two = substr(u, length(u) - 1, 2)
+      one = substr(u, length(u), 1)
+      if (two == "Ki") return substr(u, 1, length(u) - 2) * 1024
+      if (two == "Mi") return substr(u, 1, length(u) - 2) * 1048576
+      if (two == "Gi") return substr(u, 1, length(u) - 2) * 1073741824
+      if (one == "K") return substr(u, 1, length(u) - 1) * 1000
+      if (one == "M") return substr(u, 1, length(u) - 1) * 1000000
+      if (one == "G") return substr(u, 1, length(u) - 1) * 1000000000
+      return u + 0
+    }
     BEGIN {
       n = split(usage, rows, "\n")
       for (i = 1; i <= n; i++) {
         m = split(rows[i], f, /[ \t]+/)
-        if (m < 3) continue
-        u = f[3]
-        mult = 1
-        last = substr(u, length(u), 1)
-        if (last == "M" || last == "m") { mult = 1000000; u = substr(u, 1, length(u) - 1) }
-        else if (last == "G" || last == "g") { mult = 1000000000; u = substr(u, 1, length(u) - 1) }
-        else if (last == "K" || last == "k") { mult = 1000; u = substr(u, 1, length(u) - 1) }
-        used[f[1] SUBSEP f[2]] = (u + 0) * mult
+        if (m < 4) continue
+        used[f[1] SUBSEP f[2]] = bytes(f[4])
       }
       worst = 0
     }
@@ -485,22 +647,95 @@ for pod in data.get("items", []):
   '
 }
 
-# LIVE QUERY (cluster) - client waits on the service's pgbouncer pool (SHOW
-# POOLS / cl_waiting), read on the primary pooler host. An unreachable console
-# is unmeasured.
-cw_live_pgbouncer_cl_waiting() {  # <window-seconds>
-  local host=${FM_CW_PGBOUNCER_HOST:-10.0.0.17} out
+# LIVE QUERY (cluster) - the Deployment's own pgbouncer pool as
+# "ip<TAB>port<TAB>database": DB_HOST/DB_PORT/DB_NAME from the pod spec with
+# secret refs resolved, and the pooler endpoint behind that Service from its
+# EndpointSlice. Prints nothing when any step is unresolvable.
+cw_live_pool_spec() {  # <ns> <deploy>
+  local ns=$1 deploy=$2 env host port db svc rest sns endpoint
+  env=$(cw_kubectl -n "$ns" set env "deployment/$deploy" --list --resolve 2>/dev/null) || return 1
+  host=$(printf '%s\n' "$env" | awk -F= '$1 == "DB_HOST" { print $2; exit }')
+  port=$(printf '%s\n' "$env" | awk -F= '$1 == "DB_PORT" { print $2; exit }')
+  db=$(printf '%s\n' "$env" | awk -F= '$1 == "DB_NAME" { print $2; exit }')
+  [ -n "$host" ] && [ -n "$db" ] || return 1
+  case "$port" in ''|*[!0-9]*) port=5432 ;; esac
+  case "$db" in *[!A-Za-z0-9_-]*) return 1 ;; esac
+  case "$host" in
+    *[!0-9.]*)
+      svc=${host%%.*}
+      rest=${host#*.}
+      sns=${rest%%.*}
+      [ -n "$svc" ] && [ -n "$sns" ] && [ "$rest" != "$host" ] || return 1
+      endpoint=$(cw_kubectl -n "$sns" get endpointslices -l "kubernetes.io/service-name=$svc" -o json 2>/dev/null \
+        | python3 -c '
+import json, sys
+want = int(sys.argv[1])
+data = json.load(sys.stdin)
+for item in data.get("items", []):
+    ports = [int(p["port"]) for p in item.get("ports", []) or [] if p.get("port")]
+    if not ports:
+        continue
+    port = want if want in ports else ports[0]
+    for ep in item.get("endpoints", []) or []:
+        for addr in ep.get("addresses", []) or []:
+            print("%s\t%s" % (addr, port))
+            sys.exit(0)
+sys.exit(1)
+' "$port" 2>/dev/null) || return 1
+      ;;
+    *) endpoint=$(printf '%s\t%s' "$host" "$port") ;;
+  esac
+  [ -n "$endpoint" ] || return 1
+  printf '%s\t%s\n' "$endpoint" "$db"
+}
+
+# LIVE QUERY (cluster) - clients waiting on one database's pools (SHOW POOLS /
+# cl_waiting, summed over that database's users) on the pooler at ip:port. An
+# unreachable console or an absent database is unmeasured.
+cw_live_pgbouncer_cl_waiting() {  # <ip> <port> <database>
+  local ip=$1 port=$2 db=$3 out
   command -v ssh >/dev/null 2>&1 || return 1
-  out=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$host" \
-    "sudo -u postgres psql -h 127.0.0.1 -p 6432 -U pgbouncer pgbouncer -tAc 'SHOW POOLS'" 2>/dev/null) || return 1
+  case "$port" in ''|*[!0-9]*) return 1 ;; esac
+  case "$db" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  out=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ip" \
+    "sudo -u postgres psql -h 127.0.0.1 -p $port -U pgbouncer pgbouncer -Ac 'SHOW POOLS'" 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
-  printf '%s\n' "$out" | awk -F'|' '{ if ($3+0 > max) max = $3+0 } END { printf "%.0f\n", max }'
+  printf '%s\n' "$out" | awk -F'|' -v db="$db" '
+    NR == 1 {
+      for (i = 1; i <= NF; i++) { if ($i == "database") d = i; if ($i == "cl_waiting") w = i }
+      next
+    }
+    d && w && $d == db { sum += $w + 0; found = 1 }
+    END { if (!found) exit 1; printf "%.0f\n", sum }
+  '
+}
+
+# Resolve one target's pool through the test seam or the live query.
+cw_resolve_pool_spec() {  # <ns> <deploy>
+  local file
+  if [ -n "${FM_CW_CLUSTER_DIR:-}" ]; then
+    file="$FM_CW_CLUSTER_DIR/pool.$(printf '%s_%s' "$1" "$2")"
+    [ -f "$file" ] || return 1
+    head -1 "$file"
+    return 0
+  fi
+  cw_live_pool_spec "$1" "$2"
+}
+
+cw_pool_spec() {  # <watch-id> <target>
+  local file
+  file=$(cw_pools_path "$1")
+  [ -f "$file" ] || return 1
+  awk -F'\t' -v t="$2" '$1 == t && $2 != "" { print $2 "\t" $3 "\t" $4; found = 1; exit } END { exit(found ? 0 : 1) }' "$file"
 }
 
 # Dispatch one metric read through the test seam or its live function.
-cw_metric_read() {  # <metric> <target> <window> [<baseline-epoch>]
-  local metric=$1 target=$2 window=$3 since=${4:-0}
-  local file value sanitized secs ns='' deploy=''
+cw_metric_read() {  # <watch-id> <metric> <target> <window> [<baseline-epoch>]
+  local id=$1 metric=$2 target=$3 window=$4 since=${5:-0}
+  local file value sanitized secs ns='' deploy='' spec=''
+  if [ "$metric" = pgbouncer_cl_waiting ]; then
+    spec=$(cw_pool_spec "$id" "$target") || return 1
+  fi
   if [ -n "${FM_CW_CLUSTER_DIR:-}" ]; then
     sanitized=$(printf '%s' "$target" | tr '/' '_')
     file="$FM_CW_CLUSTER_DIR/$metric.$sanitized.$window"
@@ -513,7 +748,6 @@ cw_metric_read() {  # <metric> <target> <window> [<baseline-epoch>]
     esac
   fi
   case "$target" in
-    watch) ;;
     */*) ns=${target%%/*}; deploy=${target#*/} ;;
     *) return 1 ;;
   esac
@@ -524,7 +758,10 @@ cw_metric_read() {  # <metric> <target> <window> [<baseline-epoch>]
     oomkilled) cw_live_oomkilled "$ns" "$deploy" "$since" ;;
     p95_ms) cw_live_p95_ms "$ns" "$deploy" "$secs" ;;
     rss_ratio) cw_live_rss_ratio "$ns" "$deploy" "$secs" ;;
-    pgbouncer_cl_waiting) cw_live_pgbouncer_cl_waiting "$secs" ;;
+    pgbouncer_cl_waiting)
+      cw_live_pgbouncer_cl_waiting "$(printf '%s' "$spec" | cut -f1)" \
+        "$(printf '%s' "$spec" | cut -f2)" "$(printf '%s' "$spec" | cut -f3)"
+      ;;
     *) return 1 ;;
   esac
 }
@@ -548,24 +785,47 @@ cw_metric_keys() {  # <watch-id>
   while IFS=$'\t' read -r ns deploy; do
     [ -n "${ns:-}" ] || continue
     target="$ns/$deploy"
-    for metric in http_5xx_per_min restarts oomkilled p95_ms rss_ratio; do
+    for metric in $METRICS; do
       printf '%s@%s\n' "$metric" "$target"
     done
   done < "$(cw_targets_path "$1")"
-  printf 'pgbouncer_cl_waiting@watch\n'
 }
 
 cw_key_metric() { printf '%s\n' "${1%%@*}"; }
 cw_key_target() { printf '%s\n' "${1#*@}"; }
 
+cw_metric_relative() {
+  case "$1" in http_5xx_per_min|restarts|p95_ms) return 0 ;; *) return 1 ;; esac
+}
+
+# Resolve every target's pool inside the shared budget; an unresolved target has
+# no pools line and its pool metric stays unmeasured.
+cw_resolve_pools() {  # <watch-id>
+  local id=$1 ns deploy spec out=''
+  while IFS=$'\t' read -r ns deploy; do
+    [ -n "${ns:-}" ] || continue
+    cw_within_budget || break
+    spec=$(cw_resolve_pool_spec "$ns" "$deploy" 2>/dev/null) || continue
+    [ -n "$spec" ] || continue
+    out="$out$ns/$deploy	$spec
+"
+  done < "$(cw_targets_path "$id")"
+  printf '%s' "$out" | cw_write "$(cw_pools_path "$id")"
+}
+
 cw_capture_baseline() {  # <watch-id> <baseline-epoch>
   local id=$1 since=$2 key metric target value out
   out=''
+  cw_budget_start
+  cw_resolve_pools "$id"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     metric=$(cw_key_metric "$key")
     target=$(cw_key_target "$key")
-    value=$(cw_metric_read "$metric" "$target" baseline "$since" 2>/dev/null || true)
+    value=''
+    if cw_within_budget; then
+      value=$(cw_metric_read "$id" "$metric" "$target" baseline "$since" 2>/dev/null || true)
+    fi
     out="$out$key	$value
 "
   done < <(cw_metric_keys "$id")
@@ -608,29 +868,34 @@ cw_set_previous_value() {  # <watch-id> <key> <value>
 }
 
 # Take one sample. Prints "metric<TAB>target<TAB>value<TAB>baseline" for the
-# first bar crossed, or nothing when every measured metric is inside its bar.
-# Appends one record per metric to samples.log.
+# first bar crossed, or nothing when every scored metric is inside its bar.
+# Appends one record per metric to samples.log:
+#   epoch<TAB>offset<TAB>key<TAB>value<TAB>baseline<TAB>regressed<TAB>scored
+# where scored is 0 for an unmeasured value or a relative bar with no baseline.
 cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch>
   local id=$1 offset=$2 epoch=$3 baseline_epoch=$4
-  local key metric target value baseline previous regressed first start
+  local key metric target value baseline previous regressed scored first
   first=''
-  start=$(cw_now)
+  cw_budget_start
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     metric=$(cw_key_metric "$key")
     target=$(cw_key_target "$key")
     value=''
-    if [ $(( $(cw_now) - start )) -lt "$SAMPLE_DEADLINE_SECONDS" ]; then
-      value=$(cw_metric_read "$metric" "$target" sample "$baseline_epoch" 2>/dev/null || true)
+    if cw_within_budget; then
+      value=$(cw_metric_read "$id" "$metric" "$target" sample "$baseline_epoch" 2>/dev/null || true)
     fi
     baseline=$(cw_baseline_value "$id" "$key" 2>/dev/null || true)
     previous=$(cw_previous_value "$id" "$key" 2>/dev/null || true)
+    scored=1
+    [ -n "$value" ] || scored=0
+    if [ "$scored" -eq 1 ] && cw_metric_relative "$metric" && [ -z "$baseline" ]; then scored=0; fi
     regressed=0
-    if cw_metric_regressed "$metric" "$value" "$baseline" "$previous"; then
+    if [ "$scored" -eq 1 ] && cw_metric_regressed "$metric" "$value" "$baseline" "$previous"; then
       regressed=1
       [ -n "$first" ] || first="$metric	$target	$value	$baseline"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$epoch" "$offset" "$key" "$value" "$baseline" "$regressed" \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$epoch" "$offset" "$key" "$value" "$baseline" "$regressed" "$scored" \
       >> "$(cw_samples_path "$id")"
     [ -z "$value" ] || cw_set_previous_value "$id" "$key" "$value"
   done < <(cw_metric_keys "$id")
@@ -650,12 +915,16 @@ cw_verdict_line() {  # <watch-id>
   printf 'change-watch clean so far (%s)\n' "$(cw_progress_label "$id")"
 }
 
+cw_schedule_latest() {  # <watch-id>
+  awk -F'\t' 'NR == 1 || $1 > max { max = $1 } END { if (max == "") max = 0; print max }' \
+    "$(cw_schedule_path "$1")" 2>/dev/null || echo 0
+}
+
 cw_progress_label() {  # <watch-id>
   local id=$1 t0 now latest offset
   t0=$(cw_meta_get "$id" t0 || true)
   now=$(cw_now)
-  latest=$(awk -F'\t' 'NR == 1 || $1 > max { max = $1 } END { if (max == "") max = 0; print max }' \
-    "$(cw_schedule_path "$id")" 2>/dev/null || echo 0)
+  latest=$(cw_schedule_latest "$id")
   [ -n "$t0" ] || { printf 'armed\n'; return 0; }
   offset=$(( now - t0 ))
   [ "$offset" -ge 0 ] || offset=0
@@ -735,20 +1004,97 @@ cw_wiki_note() {  # <watch-id> <task> <url>
     >/dev/null 2>&1 || notice "change-watch: wiki note failed for $url"
 }
 
+cw_task_note() {  # <task> <url> <line>
+  local task=$1 url=$2 line=$3
+  if [ -n "$task" ] && [ -d "$STATE" ] \
+    && { [ -f "$STATE/$task.meta" ] || [ -f "$STATE/$task.status" ]; }; then
+    printf '%s\n' "$line" >> "$STATE/$task.status" 2>/dev/null \
+      || notice "change-watch: could not append the completion note for $url"
+  else
+    notice "change-watch: completion note skipped for $url (task $task has no status record)"
+  fi
+}
+
 cw_record_clean() {  # <watch-id>
   local id=$1 task url
   task=$(cw_meta_get "$id" task || true)
   url=$(cw_meta_get "$id" pr_url || true)
   printf 'clean\n' | cw_write "$(cw_verdict_path "$id")"
   cw_mark_once "$(cw_watch_dir "$id")/noted" || return 0
-  if [ -n "$task" ] && [ -d "$STATE" ] \
-    && { [ -f "$STATE/$task.meta" ] || [ -f "$STATE/$task.status" ]; }; then
-    printf 'note: change-watch clean for %s\n' "$url" >> "$STATE/$task.status" 2>/dev/null \
-      || notice "change-watch: could not append the clean note for $url"
-  else
-    notice "change-watch: clean note skipped for $url (task $task has no status record)"
-  fi
+  cw_task_note "$task" "$url" "note: change-watch clean for $url"
   cw_wiki_note "$id" "$task" "$url"
+}
+
+cw_record_unmeasured() {  # <watch-id> <unread-targets>
+  local id=$1 unread=$2 task url list
+  task=$(cw_meta_get "$id" task || true)
+  url=$(cw_meta_get "$id" pr_url || true)
+  printf 'completed unmeasured\n' | cw_write "$(cw_verdict_path "$id")"
+  cw_mark_once "$(cw_watch_dir "$id")/noted" || return 0
+  list=$(printf '%s\n' "$unread" | paste -sd ',' - | sed 's/,/, /g')
+  cw_task_note "$task" "$url" "note: change-watch completed unmeasured for $url (never measured: $list)"
+  notice "change-watch: wiki note skipped for $url (completed unmeasured: $list)"
+}
+
+# Targets that never had one scored reading across the whole schedule.
+cw_unmeasured_targets() {  # <watch-id>
+  local id=$1 samples
+  samples=$(cw_samples_path "$id")
+  [ -f "$samples" ] || : > "$samples"
+  awk -F'\t' '
+    NR == FNR { if ($1 != "") want[$1 "/" $2] = 1; next }
+    $7 == 1 { t = $3; sub(/^[^@]*@/, "", t); delete want[t] }
+    END { for (t in want) print t }
+  ' "$(cw_targets_path "$id")" "$samples" | sort
+}
+
+# The schedule ended: clean only when every target was measured at least once.
+cw_record_completion() {  # <watch-id>
+  local id=$1 unread
+  unread=$(cw_unmeasured_targets "$id")
+  if [ -z "$unread" ]; then
+    cw_record_clean "$id"
+  else
+    cw_record_unmeasured "$id" "$unread"
+  fi
+}
+
+# A drive that stopped before the end of its schedule: the verdict names the
+# point it reached, and one check wake carries it. Never clean.
+cw_record_interrupted() {  # <watch-id> <epoch>
+  local id=$1 at=$2 t0 latest offset tick task url line
+  cw_watch_done "$id" && return 0
+  t0=$(cw_meta_get "$id" t0 || true)
+  latest=$(cw_schedule_latest "$id")
+  offset=$(( at - ${t0:-$at} ))
+  [ "$offset" -ge 0 ] || offset=0
+  [ "$offset" -le "$latest" ] || offset=$latest
+  tick=$((offset / 60))
+  printf 'interrupted at +%dm\n' "$tick" | cw_write "$(cw_verdict_path "$id")"
+  rm -f -- "$(cw_drive_pid_path "$id")" "$(cw_drive_alive_path "$id")"
+  cw_mark_once "$(cw_watch_dir "$id")/interrupted-reported" || return 0
+  task=$(cw_meta_get "$id" task || true)
+  url=$(cw_meta_get "$id" pr_url || true)
+  line="check: change-watch $task $url interrupted at +${tick}m"
+  fm_wake_append check "change-watch-$id-interrupted" "$line" 2>/dev/null \
+    || notice "change-watch: could not queue the interruption wake for $url"
+}
+
+# A drive whose pid is gone without a verdict was killed outright; record the
+# interruption at its last heartbeat.
+cw_reconcile_drive() {  # <watch-id>
+  local id=$1 pidfile pid at
+  pidfile=$(cw_drive_pid_path "$id")
+  [ -f "$pidfile" ] || return 0
+  cw_watch_done "$id" && return 0
+  pid=$(cat "$pidfile" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *) kill -0 "$pid" 2>/dev/null && return 0 ;;
+  esac
+  at=$(cat "$(cw_drive_alive_path "$id")" 2>/dev/null || true)
+  case "$at" in ''|*[!0-9]*) at=$(cw_now) ;; esac
+  cw_record_interrupted "$id" "$at"
 }
 
 # --- schedule -----------------------------------------------------------------
@@ -762,8 +1108,6 @@ cw_write_schedule() {  # <watch-id> <t0>
   printf '%s' "$out" | cw_write "$(cw_schedule_path "$id")"
 }
 
-cw_sampled_path() { printf '%s/sampled\n' "$(cw_watch_dir "$1")"; }
-
 cw_next_due_offset() {  # <watch-id> <now>
   local id=$1 now=$2 offset epoch
   while IFS=$'\t' read -r offset epoch; do
@@ -776,16 +1120,70 @@ cw_next_due_offset() {  # <watch-id> <now>
   return 1
 }
 
+cw_remaining_count() {  # <watch-id>
+  local id=$1 offset epoch n=0
+  while IFS=$'\t' read -r offset epoch; do
+    [ -n "$offset" ] || continue
+    grep -qx "$offset" "$(cw_sampled_path "$id")" 2>/dev/null && continue
+    n=$((n + 1))
+  done < "$(cw_schedule_path "$id")"
+  printf '%s\n' "$n"
+}
+
 cw_mark_sampled() {  # <watch-id> <offset>
   printf '%s\n' "$2" >> "$(cw_sampled_path "$1")" 2>/dev/null || true
 }
 
 cw_watch_done() { [ -f "$(cw_verdict_path "$1")" ]; }
 
+cw_arm() {  # <watch-id> <when-name> <url>
+  local id=$1 when_name=$2 url=$3 arm_cmd
+  arm_cmd=${FM_CW_ARM_CMD:-$SCRIPT_DIR/fm-procevent-when.sh}
+  if [ -x "$arm_cmd" ] || command -v "$arm_cmd" >/dev/null 2>&1; then
+    "$arm_cmd" arm "$when_name" \
+      --interval 60 --stable 1 --deadline 46800 \
+      --condition-timeout 60 --action-timeout 46800 \
+      --condition "$SCRIPT_DIR/fm-change-watch.sh" due "$id" \
+      --action "$SCRIPT_DIR/fm-change-watch.sh" drive "$id" \
+      >/dev/null 2>&1 \
+      || notice "change-watch: could not arm the scheduled watch for $url (the watch record is retained)"
+  else
+    notice "change-watch: arming command unavailable; watch record retained for $url"
+  fi
+}
+
+# Re-arm an interrupted watch for the samples it has not taken.
+cw_rearm() {  # <watch-id> <url>
+  local id=$1 url=$2 remaining old attempt when_name arm_cmd
+  remaining=$(cw_remaining_count "$id")
+  if [ "$remaining" -eq 0 ]; then
+    rm -f -- "$(cw_verdict_path "$id")"
+    cw_record_completion "$id"
+    printf 'change-watch: %s had no samples left; completed as %s\n' "$id" "$(cw_verdict_line "$id")"
+    return 0
+  fi
+  old=$(cw_meta_get "$id" when_name || true)
+  attempt=$(cw_meta_get "$id" arm_attempt || true)
+  case "$attempt" in ''|*[!0-9]*) attempt=1 ;; esac
+  attempt=$((attempt + 1))
+  rm -f -- "$(cw_verdict_path "$id")" "$(cw_watch_dir "$id")/interrupted-reported"
+  arm_cmd=${FM_CW_ARM_CMD:-$SCRIPT_DIR/fm-procevent-when.sh}
+  if [ -n "$old" ] && { [ -x "$arm_cmd" ] || command -v "$arm_cmd" >/dev/null 2>&1; }; then
+    "$arm_cmd" retire "$old" >/dev/null 2>&1 || true
+  fi
+  when_name="cw-$(cw_hash "$id/$attempt" | cut -c1-40)"
+  {
+    printf 'when_name=%s\n' "$when_name"
+    printf 'arm_attempt=%s\n' "$attempt"
+  } >> "$(cw_meta_path "$id")"
+  cw_arm "$id" "$when_name" "$url"
+  printf 'change-watch: re-armed %s for %s (%s sample(s) remaining)\n' "$id" "$url" "$remaining"
+}
+
 # --- commands -----------------------------------------------------------------
 
 cmd_register() {
-  local task=$1 url=$2 provider owner repo number repo_name id targets now t0
+  local task=$1 url=$2 provider owner repo number repo_name id derived targets notes now t0
   fm_pr_task_id_valid "$task" || die "invalid task id: $task"
   fm_pr_url_parse "$url" || die "invalid pr url: $url"
   provider=$FM_PR_PROVIDER
@@ -797,11 +1195,16 @@ cmd_register() {
 
   id=$(cw_watch_id "$task" "$number")
   if cw_watch_exists "$id"; then
+    cw_reconcile_drive "$id"
+    case "$(cat "$(cw_verdict_path "$id")" 2>/dev/null || true)" in
+      interrupted*) cw_rearm "$id" "$url"; return 0 ;;
+    esac
     printf 'change-watch: %s already registered for %s\n' "$id" "$url"
     return 0
   fi
 
-  targets=$(cw_derive_targets "$url" "$provider" "$owner" "$repo" "$number" "$repo_name" 2>/dev/null || true)
+  derived=$(cw_derive_targets "$url" "$provider" "$owner" "$repo" "$number" "$repo_name" 2>/dev/null || true)
+  targets=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "target" && $2 != "" && $3 != "" { print $2 "\t" $3 }' | sort -u)
   if [ -z "$targets" ]; then
     if ! cw_forge_files "$url" "$provider" "$owner" "$repo" "$number" >/dev/null 2>&1; then
       printf 'change-watch: cannot read the merged file list for %s; nothing registered\n' "$url"
@@ -810,7 +1213,7 @@ cmd_register() {
     fi
     return 0
   fi
-  targets=$(printf '%s\n' "$targets" | sort -u)
+  notes=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "note" { print $2 }' | sort -u | paste -sd ';' - | sed 's/;/; /g')
 
   now=$(cw_now)
   t0=$(cw_forge_merge_epoch "$url" "$provider" 2>/dev/null || true)
@@ -838,25 +1241,16 @@ cmd_register() {
   cw_write_schedule "$id" "$t0"
   cw_capture_baseline "$id" "$t0"
 
-  local when_name arm_cmd
+  local when_name
   when_name="cw-$(cw_hash "$id" | cut -c1-40)"
-  printf 'when_name=%s\n' "$when_name" >> "$(cw_meta_path "$id")"
+  {
+    printf 'when_name=%s\n' "$when_name"
+    printf 'arm_attempt=1\n'
+  } >> "$(cw_meta_path "$id")"
+  cw_arm "$id" "$when_name" "$url"
 
-  arm_cmd=${FM_CW_ARM_CMD:-$SCRIPT_DIR/fm-procevent-when.sh}
-  if [ -x "$arm_cmd" ] || command -v "$arm_cmd" >/dev/null 2>&1; then
-    "$arm_cmd" arm "$when_name" \
-      --interval 60 --stable 1 --deadline 46800 \
-      --condition-timeout 60 --action-timeout 46800 \
-      --condition "$SCRIPT_DIR/fm-change-watch.sh" due "$id" \
-      --action "$SCRIPT_DIR/fm-change-watch.sh" drive "$id" \
-      >/dev/null 2>&1 \
-      || notice "change-watch: could not arm the scheduled watch for $url (the watch record is retained)"
-  else
-    notice "change-watch: arming command unavailable; watch record retained for $url"
-  fi
-
-  printf 'change-watch: registered %s for %s (%s target(s))\n' \
-    "$id" "$url" "$(grep -c '' "$(cw_targets_path "$id")")"
+  printf 'change-watch: registered %s for %s (%s target(s)%s)\n' \
+    "$id" "$url" "$(grep -c '' "$(cw_targets_path "$id")")" "${notes:+; $notes}"
 }
 
 cmd_due() {
@@ -892,21 +1286,42 @@ cmd_sample() {
   cw_report_regression "$id"
 }
 
+CW_DRIVE_ID=''
+CW_DRIVE_PIDFILE=''
+CW_SLEEPER=''
+
+cw_drive_interrupted() {
+  trap '' TERM INT HUP
+  [ -z "$CW_SLEEPER" ] || kill "$CW_SLEEPER" 2>/dev/null || true
+  cw_record_interrupted "$CW_DRIVE_ID" "$(cw_now)"
+  exit 143
+}
+
 cmd_drive() {
   local id=$1 sleep_cmd offset epoch now remaining
   cw_watch_exists "$id" || die "unknown watch: $id"
   sleep_cmd=${FM_CW_SLEEP_CMD:-sleep}
   cw_meta_get "$id" t0 >/dev/null || die "watch $id has no rollout epoch"
 
+  CW_DRIVE_ID=$id
+  CW_DRIVE_PIDFILE=$(cw_drive_pid_path "$id")
+  printf '%s\n' "$$" > "$CW_DRIVE_PIDFILE" || die "cannot record the drive pid"
+  trap 'rm -f -- "$CW_DRIVE_PIDFILE"' EXIT
+  trap cw_drive_interrupted TERM INT HUP
+
   while IFS=$'\t' read -r offset epoch; do
     [ -n "$offset" ] || continue
     grep -qx "$offset" "$(cw_sampled_path "$id")" 2>/dev/null && continue
     while :; do
       now=$(cw_now)
+      printf '%s\n' "$now" > "$(cw_drive_alive_path "$id")" 2>/dev/null || true
       [ "$now" -ge "$epoch" ] && break
       remaining=$(( epoch - now ))
       [ "$remaining" -gt 60 ] && remaining=60
-      "$sleep_cmd" "$remaining" 2>/dev/null || true
+      "$sleep_cmd" "$remaining" 2>/dev/null &
+      CW_SLEEPER=$!
+      wait "$CW_SLEEPER" 2>/dev/null || true
+      CW_SLEEPER=''
     done
     cmd_sample "$id" "$offset" >/dev/null || true
     if cw_watch_done "$id"; then
@@ -915,19 +1330,17 @@ cmd_drive() {
     fi
   done < "$(cw_schedule_path "$id")"
 
-  cw_record_clean "$id"
+  cw_record_completion "$id"
   return 0
 }
 
 cmd_verdict() {
   local id=$1 line
   cw_watch_exists "$id" || die "unknown watch: $id"
+  cw_reconcile_drive "$id"
   if [ -f "$(cw_verdict_path "$id")" ]; then
     line=$(cat "$(cw_verdict_path "$id")")
-    case "$line" in
-      clean) printf 'change-watch clean\n' ;;
-      *) printf 'change-watch %s\n' "$line" ;;
-    esac
+    printf 'change-watch %s\n' "$line"
     return 0
   fi
   cw_verdict_line "$id"
@@ -938,12 +1351,14 @@ cmd_status() {
   [ -d "$WATCH_ROOT" ] || { printf 'change-watch: no watches registered\n'; return 0; }
   if [ -n "$id" ]; then
     cw_watch_exists "$id" || die "unknown watch: $id"
+    cw_reconcile_drive "$id"
     printf '%s\t%s\n' "$id" "$(cw_verdict_line "$id")"
     return 0
   fi
   for meta in "$WATCH_ROOT"/*/watch.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$(dirname "$meta")")
+    cw_reconcile_drive "$id"
     printf '%s\t%s\n' "$id" "$(cw_verdict_line "$id")"
     count=$((count + 1))
   done
