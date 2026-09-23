@@ -3394,6 +3394,70 @@ finish_gateway_restart() {
   verify_gateway_env_pin "$service"
 }
 
+# check_gateway_not_crashlooping <service> <baseline_nrestarts> — the
+# 2026-09-22 incident gate (deploy run 35773324797): edge crash-looped 43
+# times over ~17 min after a restart while Step 6/6b logged only a
+# non-fatal warning, and the smoke test didn't reach edge for ~12 more
+# minutes (main's #984 post-restart freeze stalled every earlier probe).
+# Deploy reported success the whole time.
+#
+# Called right after EVERY wait_for_agents_bound call site (the normal
+# warmup wait below, and the cron-store heal's own restart) so a gateway
+# that is merely SLOW to bind still just warns as before — this only fires
+# on a gateway that is actually crash-looping (systemd restarting it more
+# than it had immediately AFTER this deploy's own restart completed — see
+# each call site's comment for why the baseline is captured post-restart,
+# never pre-restart — or stuck failed / repeatedly auto-restarting). See
+# gateway_crash_looping in lib/gateway-restart.sh for why a frozen main
+# (#984) can never trip this: a freeze holds one PID, active, with an
+# unmoving NRestarts.
+#
+# baseline carries exactly THREE distinct meanings — never overload the
+# empty string to mean more than one of them (2026-09-23 QA finding on
+# #1010): an unreadable baseline after a restart that DID happen used to
+# collapse into the same "" a skipped restart passes, so a crash loop right
+# after a transient `systemctl show`/SSH hiccup was a silent no-op — exactly
+# the class this whole gate exists to close.
+#   ""                    this deploy did NOT restart the unit (the
+#                         gateway_restart_needed skip branch, or needs_target
+#                         false for this profile) — no-op, nothing to compare.
+#   a number              the normal path: gateway_crash_looping's numeric
+#                         NRestarts-since-baseline compare (falls back to the
+#                         is-failed/auto-restart sampling on its own if it
+#                         can't decide from the counter alone).
+#   UNREADABLE_BASELINE   this deploy DID restart the unit, but every
+#                         gateway_nrestarts_retry attempt right after still
+#                         failed to read a number. Falls back to
+#                         gateway_crash_looping_state_only (is-failed /
+#                         auto-restart sampling only — see that function's
+#                         header for why a raw "read NRestarts once more,
+#                         fail if > 0" heuristic is deliberately NOT used
+#                         here: it would false-fail every healthy
+#                         safe-restart deploy).
+check_gateway_not_crashlooping() {
+  local service="$1" baseline="$2"
+  case "$baseline" in
+    "") return 0 ;;
+    UNREADABLE_BASELINE)
+      log "  WARN: $service's NRestarts baseline was unreadable after this deploy's restart (systemctl/SSH hiccup?) — falling back to state-only crash-loop detection"
+      gateway_crash_looping_state_only "$service" || return 0
+      ;;
+    *)
+      gateway_crash_looping "$service" "$baseline" || return 0
+      ;;
+  esac
+  local current
+  current="$(gateway_nrestarts "$service")" || current="?"
+  # The journal tail goes to the deploy LOG (multi-line, unescaped, complete),
+  # never into the fail() message: fail() forwards its text to notify_slack,
+  # which interpolates it raw into a JSON body, so newlines or quotes from a
+  # journal would make that payload invalid. The message stays one bounded,
+  # quote-free line; the evidence is right above it in the log.
+  log "  $service journal tail (last 40 lines) follows:"
+  gateway_journal_tail "$service" 40 | sed 's/^/    | /' | while IFS= read -r line; do log "$line"; done
+  fail "$service is CRASH-LOOPING after this deploy's restart (NRestarts ${baseline} -> ${current}, or the unit is failed/auto-restarting); refusing to report success. Journal tail is in the deploy log above."
+}
+
 # gateway_restart_needed(): skip a gateway restart when a deploy provably changed
 # nothing that gateway loads (every restart costs ~12-30s of agent rebind, and on
 # edge it also pauses the memory_search index — so a needless restart is churn).
@@ -3408,6 +3472,7 @@ if gateway_restart_needed; then
   # the gateways then drain CONCURRENTLY, so worst-case wall time is one drain
   # budget, not one per gateway). Phase B verifies serially.
   main_old_pid="" main_req="" edge_old_pid="" edge_req=""
+  main_baseline_nrestarts="" edge_baseline_nrestarts=""
   if needs_target "main"; then
     main_old_pid=$(gateway_main_pid "openclaw-gateway-main") || main_old_pid=""
     if [ -z "$main_old_pid" ] || [ "$main_old_pid" = "0" ]; then
@@ -3424,8 +3489,32 @@ if gateway_restart_needed; then
       edge_req=0; request_safe_restart "openclaw-gateway-edge" "edge" || edge_req=$?
     fi
   fi
-  if needs_target "main"; then finish_gateway_restart "openclaw-gateway-main" "$main_old_pid" "$main_req"; fi
-  if needs_target "edge"; then finish_gateway_restart "openclaw-gateway-edge" "$edge_old_pid" "$edge_req"; fi
+  # *_baseline_nrestarts is captured AFTER finish_gateway_restart returns —
+  # i.e. once THIS deploy's own restart of the unit (whichever of the safe or
+  # hard path actually fired) has completed — never before it. Live-measured
+  # on node-8 (systemd 255): an explicit `systemctl restart` RESETS NRestarts
+  # to 0, so a baseline read before our restart is worthless against a unit
+  # that was ALREADY crash-looping when the deploy touched it (exactly the
+  # 2026-09-22 incident — see gateway_crash_looping's header in
+  # lib/gateway-restart.sh for the full measurement and the safe-path case).
+  # check_gateway_not_crashlooping (called after the warmup wait below) then
+  # only ever sees restarts that happened AFTER this deploy finished
+  # restarting the unit.
+  #
+  # gateway_nrestarts_retry retries a bounded few times before giving up —
+  # a single transient read failure right here must not disable the gate for
+  # the rest of this deploy. On total failure the baseline is set to the
+  # UNREADABLE_BASELINE sentinel, never "" — see check_gateway_not_crashlooping's
+  # header for why conflating that with "this deploy never restarted the
+  # unit" was the 2026-09-23 QA finding on #1010.
+  if needs_target "main"; then
+    finish_gateway_restart "openclaw-gateway-main" "$main_old_pid" "$main_req"
+    main_baseline_nrestarts=$(gateway_nrestarts_retry "openclaw-gateway-main") || main_baseline_nrestarts="UNREADABLE_BASELINE"
+  fi
+  if needs_target "edge"; then
+    finish_gateway_restart "openclaw-gateway-edge" "$edge_old_pid" "$edge_req"
+    edge_baseline_nrestarts=$(gateway_nrestarts_retry "openclaw-gateway-edge") || edge_baseline_nrestarts="UNREADABLE_BASELINE"
+  fi
 else
   for svc_profile in main edge; do
     if needs_target "$svc_profile"; then
@@ -3448,9 +3537,11 @@ fi
 log "  Waiting for agents to bind before smoke test..."
 if needs_target "main"; then
   wait_for_agents_bound "main" 30 || true
+  check_gateway_not_crashlooping "openclaw-gateway-main" "${main_baseline_nrestarts:-}"
 fi
 if needs_target "edge"; then
   wait_for_agents_bound "edge" 30 || true
+  check_gateway_not_crashlooping "openclaw-gateway-edge" "${edge_baseline_nrestarts:-}"
 fi
 
 # -------------------------------------------------------------------
@@ -3491,9 +3582,20 @@ if needs_target "main" && [ -f "$HYDRA_ROOT/cron-jobs.json" ]; then
   }
   cron_store_heal_start() {
     local profile="$1" svc="openclaw-gateway-${1}"
+    # Baseline captured immediately AFTER this restart completes, mirroring
+    # Step 6's Phase A/B above (see the comment there for why: a `systemctl
+    # restart` — this is always the hard path, since the unit was just
+    # explicitly stopped — resets NRestarts to 0, so reading it before the
+    # restart would be worthless against a unit that was already
+    # crash-looping when this heal restarted it). Retries a bounded few times
+    # on a read failure and falls back to the UNREADABLE_BASELINE sentinel
+    # rather than "" — see check_gateway_not_crashlooping's header.
+    local baseline
     hard_restart_gateway "$svc" || return 1
+    baseline=$(gateway_nrestarts_retry "$svc") || baseline="UNREADABLE_BASELINE"
     verify_gateway_env_pin "$svc"
     wait_for_agents_bound "$profile" 30 || true
+    check_gateway_not_crashlooping "$svc" "$baseline"
     CRON_HEAL_STOPPED=""
     return 0
   }
