@@ -132,7 +132,7 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 When ops shares an image in Slack:
 ```bash
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  upload "/admin/user/<user_id>/image" /tmp/user-image.jpg
+  upload PUT "/admin/user/<user_id>/image" /tmp/user-image.jpg
 ```
 
 ## Multi-Step Workflows

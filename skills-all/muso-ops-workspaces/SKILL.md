@@ -101,7 +101,7 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 ### Step 2: Add Logo
 ```bash
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  upload "/admin/team/<id>/image" /tmp/logo.jpg
+  upload PUT "/admin/team/<id>/image" /tmp/logo.jpg
 ```
 
 ### Step 3: Add Users

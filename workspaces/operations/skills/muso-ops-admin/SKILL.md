@@ -405,9 +405,9 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
   --requester U7RP6HKUZ call POST "/admin/claiming/12345/verify" '{}'
 
-# File upload
+# File upload (legacy syntax defaults to POST; pass PUT explicitly for image routes)
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  --requester U7RP6HKUZ upload "/admin/profile/abc123/image" /path/to/file.jpg
+  --requester U7RP6HKUZ upload PUT "/admin/profile/abc123/image" /path/to/file.jpg
 
 # Resolve Slack ID to email
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh resolve-email U7RP6HKUZ
