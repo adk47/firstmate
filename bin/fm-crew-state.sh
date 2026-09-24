@@ -137,10 +137,12 @@ fi
 
 # --- status log ------------------------------------------------------------
 
-# Last non-empty status line; fm-classify-lib.sh owns leading-verb normalization.
+# Last non-empty status line; fm-classify-lib.sh owns leading-verb normalization
+# and the bounded tail read (only the final 64 KiB are inspected,
+# so a multi-megabyte append-only log never forces a whole-file scan per task).
 log_last_line() {
   [ -f "$LOG" ] || return 1
-  grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
+  last_status_line "$LOG"
 }
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is
 # the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
