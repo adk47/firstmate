@@ -364,12 +364,14 @@ stub_openclaw_flaky() {
   # being refused; the old count bound (10 attempts) ended inside the freeze,
   # the read failed, the deploy rolled back, and the rollback's own smoke test
   # failed the same way. The default deadline must outlast 55s + the worst
-  # measured freeze (434s), so 489 s is the bare requirement; this floor holds the shipped 600 s (~110 s of headroom over the worst measurement), and a future cut below it must justify itself here.
+  # measured freeze (770s on 2026-09-24, which outlasted the old 600 s default and
+  # rolled a deploy back), so 825 s is the bare requirement; this floor holds the
+  # shipped 1200 s (~375 s of headroom), and a future cut below it must justify itself here.
   # Reverting the default below that makes the first assertion false.
   unset CRON_STORE_READ_TRIES CRON_STORE_READ_DEADLINE_SECS CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS
   # shellcheck source=../lib/cron-store.sh
   source "$LIB"
-  [ "$CRON_STORE_READ_DEADLINE_SECS" -ge 600 ]
+  [ "$CRON_STORE_READ_DEADLINE_SECS" -ge 1200 ]
   [ "$CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS" -ge 60 ]
   stub_openclaw_flaky 9 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}' \
     'Could not start the CLI. Reason: Opening handshake has timed out'

@@ -242,9 +242,11 @@ cron_store_diff_is_empty() {
 # designed around, so ten hanging attempts can exhaust themselves entirely
 # inside a single freeze (2026-09-21 18:12-18:15Z) without ever outlasting it.
 # The bound has to be wall-clock, not attempt count. CRON_STORE_READ_DEADLINE_SECS
-# (the freeze measured 218s / 265s / 298s on 2026-09-17/18 and 434s on 2026-09-22,
-# deploy run 35705040277 "host timing gap detected: process was frozen ~433776ms",
-# so the deadline is 600s; each attempt is clamped to the remaining budget, so a
+# (the freeze measured 218s / 265s / 298s on 2026-09-17/18, 434s on 2026-09-22
+# (deploy run 35705040277, "host timing gap detected: process was frozen ~433776ms")
+# and 770s on 2026-09-24 (deploy run 35967352505, "frozen ~770042ms"), which outlasted
+# the old 600s deadline and rolled the deploy back, so the deadline is 1200s; each
+# attempt is clamped to the remaining budget, so a
 # healthy gateway pays nothing for the headroom) bounds total
 # elapsed time; CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS caps any single attempt so
 # a hang can't silently consume the whole deadline in one shot and starve the
@@ -255,7 +257,7 @@ cron_store_diff_is_empty() {
 # fix -- it can only stop misreporting it as an unverifiable cron store.
 CRON_STORE_READ_TRIES="${CRON_STORE_READ_TRIES:-10}"
 CRON_STORE_READ_POLL_SECS="${CRON_STORE_READ_POLL_SECS:-5}"
-CRON_STORE_READ_DEADLINE_SECS="${CRON_STORE_READ_DEADLINE_SECS:-600}"
+CRON_STORE_READ_DEADLINE_SECS="${CRON_STORE_READ_DEADLINE_SECS:-1200}"
 CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS="${CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS:-60}"
 
 # _cron_store_gateway_read <profile>
