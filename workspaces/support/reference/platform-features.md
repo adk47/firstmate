@@ -57,6 +57,22 @@ AI-curated Spotify playlist of your work. Available on Pro and Business plans.
 
 Share your discography playlist on resumes, social media, and portfolios to showcase your body of work as a producer, songwriter, or engineer.
 
+### If your playlist is missing or stale
+
+If your Muso-generated Spotify discography playlist is missing, expired, or
+stale, first confirm the tracks appear in your Muso discography. Then send your
+Muso profile link, the generated playlist link if available, and one example
+track that is missing so support can check the playlist mapping.
+
+---
+
+## App Language
+
+On iPhone, open Settings > Apps > Muso > Preferred Language, choose your
+language, and reopen Muso. On older iOS versions, use Settings > Muso >
+Language. If a screen remains in another language, send a screenshot and your
+device version to support.
+
 ---
 
 ## Business Workspaces
