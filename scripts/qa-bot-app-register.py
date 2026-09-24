@@ -50,6 +50,13 @@ PERMISSIONS = {
     "checks": "read",          # statusCheckRollup mixes check-runs and statuses
 }
 
+# The repos QA reviews. hydra alone is NOT enough: the Sentry autofix merge
+# gate in sentry-issue-watchdog.sh checks the qa-review creator on the FIX
+# repo, so an App absent there leaves the GO host-posted and the PR
+# unmerged. Both operator-facing instruction surfaces below (the browser
+# success page and the terminal next-steps) must name this same list.
+APP_REPOS = ["Muso-AI/hydra", "Muso-AI/core-backend", "Muso-AI/web-credits-next"]
+
 result: dict = {}
 
 
@@ -146,12 +153,13 @@ document.getElementById('f').submit();
             return
 
         result["app"] = data
+        repos_html = ", ".join(f"<code>{r}</code>" for r in APP_REPOS)
         self._send(200, f"""<!doctype html><meta charset="utf-8">
 <body style="font:15px system-ui;max-width:40em;margin:4em auto">
 <h2>Created: {data.get('slug')}</h2>
 <p>App ID <b>{data.get('id')}</b>. The private key has been written locally.</p>
-<p>Next: install it on <code>Muso-AI/hydra</code> at
-<a href="{data.get('html_url')}/installations/new">{data.get('html_url')}/installations/new</a>,
+<p>Next: install it on {repos_html} (all three — hydra alone is NOT enough)
+at <a href="{data.get('html_url')}/installations/new">{data.get('html_url')}/installations/new</a>,
 then follow the instructions printed in your terminal.</p>
 <p>You can close this tab.</p></body>""")
 
@@ -230,8 +238,13 @@ def main() -> int:
     print(f"\nApp created: {app.get('slug')} (id {app['id']})")
     print(f"Key store written to {out} (0600)\n")
     print("Next steps:")
-    print(f"  1. Install on hydra:  {app.get('html_url')}/installations/new")
-    print("     Choose 'Only select repositories' -> Muso-AI/hydra")
+    print(f"  1. Install on the repos QA reviews:  {app.get('html_url')}/installations/new")
+    print(f"     Choose 'Only select repositories' -> {', '.join(APP_REPOS)}")
+    print("     (hydra alone is NOT enough: the Sentry autofix merge gate in")
+    print("      sentry-issue-watchdog.sh checks the qa-review creator on the")
+    print("      FIX repo, so an App absent there leaves the GO host-posted and")
+    print("      the PR unmerged. Add a repo here and to .identity.app_repos")
+    print("      together, or the pair is half-wired.)")
     print("  2. Install the key on node-8 and fill in the installation id:")
     print(f"     scp {out} root@40.160.32.80:/opt/hydra/secrets/qa-bot-app.json")
     print("     ssh root@40.160.32.80 'chmod 600 /opt/hydra/secrets/qa-bot-app.json'")

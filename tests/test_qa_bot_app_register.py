@@ -84,3 +84,43 @@ def test_register_script_does_not_double_close_the_descriptor():
     fdopen_at = text.index("os.fdopen(fd,")
     close_at = text.index("os.close(fd)")
     assert fchmod_at < close_at < fdopen_at, "os.close must precede fdopen taking ownership"
+
+
+def test_browser_success_page_and_terminal_agree_on_the_app_repos():
+    """Both operator-facing install surfaces must name the same three repos,
+    from one shared constant.
+
+    Regression: the browser success page (Handler._callback()) once told the
+    operator to install the App only on Muso-AI/hydra, while the terminal
+    next-steps already listed all three. An operator who only reads the
+    browser tab (the more prominent surface right after clicking "Create
+    GitHub App") would install on hydra alone, leaving core-backend and
+    web-credits-next with host-posted QA statuses and their Sentry autofix
+    PRs permanently unmerged -- the exact bug this script exists to fix.
+    """
+    src = os.path.join(os.path.dirname(__file__), "..", "scripts", "qa-bot-app-register.py")
+    with open(src, encoding="utf-8") as fh:
+        text = fh.read()
+
+    assert "APP_REPOS = " in text, "expected a single shared repo-list constant"
+    assert "Muso-AI/hydra" in text and "Muso-AI/core-backend" in text \
+        and "Muso-AI/web-credits-next" in text, "APP_REPOS must list all three fix repos"
+
+    callback_start = text.index("def _callback")
+    main_start = text.index("def main")
+    callback_src = text[callback_start:main_start]
+    main_src = text[main_start:]
+
+    assert "APP_REPOS" in callback_src, \
+        "the browser success page (Handler._callback) must derive its repo list from APP_REPOS"
+    assert "APP_REPOS" in main_src, \
+        "the terminal next-steps (main) must derive its repo list from APP_REPOS"
+
+    # No hardcoded repo name may reappear outside the single APP_REPOS
+    # definition -- that duplication is exactly what let the two surfaces
+    # drift apart before.
+    for repo in ("Muso-AI/hydra", "Muso-AI/core-backend", "Muso-AI/web-credits-next"):
+        assert repo not in callback_src, \
+            f"{repo} hardcoded in the browser success page instead of via APP_REPOS"
+        assert repo not in main_src, \
+            f"{repo} hardcoded in the terminal next-steps instead of via APP_REPOS"

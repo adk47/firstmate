@@ -1470,6 +1470,135 @@ section is only the wiring.
 Org: `musoai` (`https://musoai.sentry.io`, region `https://us.sentry.io`).
 Projects: `core-backend`, `credits-web-next`, `muso-auth`, `flutter`.
 
+### Why no Sentry autofix has ever auto-merged — and the two things that fix it
+
+Asked on 2026-09-22 ("make the CTO agent autofix `develop` on core-backend, not
+just web-credits-next"). The premise is wrong in a useful way: **core-backend is
+not behind web-credits-next.** Both repos run the same policy
+(`scripts/lib/sentry-merge-policy.sh:16` maps both to `develop qa-gated`), both
+are polled (`scripts/sentry-issue-watchdog.sh:125`), and the CTO agent opens
+core-backend fix PRs (#9692, #9701, #9753 + twin #9754). Nothing about the
+pipeline treats them differently. What is broken is the **last mile, in both
+repos equally**, and it is two independent blockers, not one.
+
+**Blocker 1 — the merge: one identity is playing author, reviewer and merger.**
+`qa_creator_ok()` (`scripts/sentry-issue-watchdog.sh:1162-1192`) requires the
+`qa-review` status creator to be in `policies/qa-approval-policy.json`
+`.identity.bot_logins` **and** `!= MERGER_LOGIN`. On node-8 `gh api user` is
+`adk47`; QA posts its GO as `adk47`; the PRs are *authored* as `adk47`. So the
+gate refuses, correctly, every 30 minutes:
+
+```
+qa-merge: …/core-backend/pull/9753 qa-review GO posted by 'adk47' — not QA's App identity, not merging.
+qa-merge: …/web-credits-next/pull/944 qa-review GO posted by 'adk47' — not QA's App identity, not merging.
+```
+
+This is the separation-of-duties rule from #907 working as designed — **do not
+"fix" it by relaxing `qa_creator_ok` to accept `creator == merger`**, which is
+exactly the self-approval loophole it exists to close. It also explains a second
+symptom: `qa-pr-approve.sh` Guard 3c refuses these PRs outright
+(`author_deny: ["adk47"]`, exit 12), and GitHub blocks self-approval anyway.
+The root unblock is `.identity.app_repos` being `[]` and
+`/opt/hydra/secrets/qa-bot-app.json` not existing — **the App was designed,
+scripted and tested, but never registered.** See the checklist below.
+
+Note the repos differ in what happens *after* the creator check passes:
+core-backend `develop` has no classic protection (404) and no rulesets, so the
+App alone unblocks it. web-credits-next `develop` requires 1 approving review
+(`required_approving_review_count: 1`), so #944 is `BLOCKED` /
+`REVIEW_REQUIRED` and needs QA's App approval to count as well. core-backend
+`master` twins (#9754) are production and stay human-merged — that is correct
+and must not change.
+
+**Blocker 2 — the dispatch: 6 core-backend diagnoses are stranded forever.**
+Separately from the merge gate, six core-backend issues sit at
+`awaiting-approval` and **can never be re-dispatched**, so their fixes are never
+even written. Two independent reasons, each sufficient:
+
+1. *No dispatch nonce.* The origin check (`:966-993`) re-dispatches an
+   `awaiting` row only if `dispatched.json` carries a nonce matching the row's
+   `contract`. Nonces landed with #907 on 2026-09-04; these rows were written
+   2026-08-25…09-01, **before the field existed**, so they read as
+   "human-initiated, awaiting a human" and nothing will ever pick them up.
+   Confirmed on node-8: all 6 have `contract: null`, and their `dispatched.json`
+   entries are the only 24 of 55 with no `nonces` key.
+2. *Not fresh.* Even with a nonce they would never re-enter the candidate list:
+   the filter (`:792-796`) keeps an issue only if `substatus` is
+   new/regressed/escalating **or** `firstSeen` is inside `NEW_WINDOW` (7d). All
+   six are `ongoing` and 22–551 days old. Eligibility is intersected with the
+   candidate list at `:1547-1551`, so they are dropped there regardless.
+
+The affected rows (core-backend): `11A`, `11C`, `11D`, `K9`, `R6`, `RZ`.
+web-credits-next has the same shape on `3S` and `41`. This is a **backlog
+drain**, not a pipeline bug — the design deliberately refuses to land a
+human-started diagnosis unattended, and equally deliberately does not chase
+year-old `ongoing` issues. Draining it is a decision for Nick and Aaron, not a
+silent code change. Two of these are worth a look on merit: `K9` (1550 events /
+268 users, first seen 2025-03-19) and `R6` (978 / 78).
+
+Today's two `needs-human` rows are **correctly classified** and are not part of
+this: `CORE-BACKEND-107` (PgBouncer slot exhaustion) and `CORE-BACKEND-VD`
+(OOM-killed feed-service workers) are both the feed-service incident. The fix is
+in feed-service's read-session lifecycle and memory growth, not in core-backend
+code, so "needs-human" is the right answer and no autofix should have been
+attempted.
+
+`skills-all/sentry-issue-triage/config/watchdog-exclude-patterns.txt` contains
+**no core-backend exclusions** — every pattern targets browser/client noise in
+credits-web-next. If anything the asymmetry runs the other way, which is why the
+core-backend ledger has zero `client-noise` rows against credits-web-next's 29.
+
+### Register the QA GitHub App (Aaron — org-admin, ~15 min, unblocks both repos)
+
+This is the whole fix for Blocker 1 and it needs **no code change**: once
+`qa-review` is posted by `muso-qa-bot[bot]`, the existing gate passes as
+designed. The alternative — giving the watchdog a second merger identity
+(a `muso-merge-bot` PAT) so `MERGER_LOGIN != adk47` — is **not** equivalent and
+should not be used as a shortcut: it would make the merger distinct while
+leaving *author and reviewer* the same account, so the GO would still be
+self-attested, and it adds a second long-lived admin-capable credential on
+node-8. The App fixes author/reviewer/merger in one move and holds
+`contents: read` (never write), so approve is structurally not merge.
+
+Aaron's steps, in order:
+
+1. On a machine with a browser (not node-8):
+   `python3 scripts/qa-bot-app-register.py --org Muso-AI`
+   One click on "Create GitHub App". Writes `qa-bot-app.json` locally, 0600.
+2. Install it — **on all three repos**, not just hydra as the script's own
+   "Next steps" text says: `Muso-AI/hydra`, `Muso-AI/core-backend`,
+   `Muso-AI/web-credits-next`.
+3. `scp qa-bot-app.json root@40.160.32.80:/opt/hydra/secrets/qa-bot-app.json`
+   then `chmod 600`, then
+   `bash /opt/hydra/scripts/qa-bot-app-verify.sh --fix-installation-id`.
+4. `bash /opt/hydra/scripts/qa-bot-app-verify.sh` — must be all PASS. `push:
+   false` is **correct**; never broaden the App to `contents: write` to make a
+   check go green.
+5. PR the policy change (`policies/` is Aaron-owned, and
+   `qa-approval-policy.json` is in `sensitive_paths_blocking`, so the bot
+   refuses to approve this PR by design — a human merges it):
+   set `.identity.app_repos` to
+   `["Muso-AI/core-backend", "Muso-AI/web-credits-next"]`. Deploy.
+   Leave `author_deny: ["adk47"]` alone; flipping it is a separate decision.
+6. On web-credits-next only: confirm QA's App approval satisfies
+   `required_approving_review_count: 1` on `develop`. If it does not, that repo
+   still needs a human approval and only core-backend goes fully unattended.
+7. Watch one tick: `/var/log/sentry-issue-watchdog.log` should stop printing
+   `not QA's App identity` for the next GO.
+
+Do **not** start by adding repos to `merge_gate_repos` — that makes `qa-review`
+a required check, and GitHub never times out a required check that was never
+reported, so a lost dispatch makes a PR permanently unmergeable. That list is a
+separate, later decision (see its `_field_notes`).
+
+**Meanwhile, #9753 and #9754 are waiting on a human.** #9753 (core-backend
+`develop`, CORE-BACKEND-Q0) has been `CLEAN` with a QA GO since
+2026-09-21T22:29Z and is safe to merge by hand — that is what happened to #9692
+and #9701, both merged by `nsollazzo`. #9754 is its `master` twin: production,
+`BLOCKED`, and human-merged by design — review it on its own merits. Merging
+9753 by hand is the only thing that moves today; nothing else drains until the
+App exists.
+
 ### The registration is runtime-only, therefore fragile — read this first
 
 **It has already been destroyed once.** Registered 2026-08-25 12:59, gone by
