@@ -277,6 +277,22 @@ else
     "$NODE8_USER@$NODE8_IP:$DEPLOY_PATH/"
 fi
 
+# Fix script permissions (rsync doesn't preserve +x from git; same fix as
+# deploy.sh Step 4d — its absence here is what let hydra-daily-audit.py land
+# non-executable and 203/EXEC the timer, 2026-09-22 08:00Z incident).
+# A failed chmod must fail the rollback: logging success over non-executable
+# scripts is the silent 203/EXEC this step exists to prevent.
+# find (not a glob) so a tree with no *.py is not itself a chmod error.
+if $HYDRA_LOCAL; then
+  find "$DEPLOY_PATH/scripts" -maxdepth 1 -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} + \
+    || fail "could not restore +x on $DEPLOY_PATH/scripts (rollback tree is non-executable)"
+else
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
+    "find '$DEPLOY_PATH/scripts' -maxdepth 1 -type f \\( -name '*.sh' -o -name '*.py' \\) -exec chmod +x {} +" \
+    || fail "could not restore +x on $NODE8_IP:$DEPLOY_PATH/scripts (rollback tree is non-executable)"
+fi
+log "  Script permissions fixed"
+
 # Sync to profile dirs.
 #
 # The local branch derives BOTH roots from variables. It used to hardcode

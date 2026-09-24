@@ -371,6 +371,48 @@ run_rollback() {
   [ "$n" -ge 20 ]
 }
 
+@test "restores the exec bit on a directly-exec'd script committed 100644 (2026-09-22 203/EXEC incident, QA #1001)" {
+  # scripts/hydra-daily-audit.py is a real ExecStart-by-path target (see
+  # scripts/tests/exec-bits-guard.bats); it is what actually landed 100644
+  # and 203/EXEC'd hydra-daily-audit.service in the 2026-09-22 08:00Z
+  # incident. The guard added in this branch proves the git INDEX carries
+  # 100755 for such targets, but says nothing about the rollback path: if a
+  # last-known-good tree still has this file at 100644 (e.g. it predates the
+  # +x fix, or a future commit drops the mode bit again), rsync does not
+  # preserve +x, and only the post-rsync `chmod +x .../scripts/*.py` block in
+  # rollback.sh (search "Script permissions fixed") stands between that tree
+  # and another 203/EXEC. This drives the REAL rollback.sh entrypoint end to
+  # end (HYDRA_LOCAL=true, same seam every other test in this file uses) and
+  # asserts the deployed file, not the git index, is executable.
+  printf '#!/usr/bin/env python3\nprint("audit")\n' > "$SRC/scripts/hydra-daily-audit.py"
+  chmod 644 "$SRC/scripts/hydra-daily-audit.py"
+  git -C "$SRC" add -A
+  git -C "$SRC" commit -qm "add hydra-daily-audit.py at 644 (pre-fix mode)"
+  LKG_WITH_644_SCRIPT_SHA="$(git -C "$SRC" rev-parse HEAD)"
+  printf '%s\n' "$LKG_WITH_644_SCRIPT_SHA" > "$DEPLOY/.deployed-sha"
+
+  run_rollback
+
+  [ "$status" -eq 0 ]
+  [ -f "$DEPLOY/scripts/hydra-daily-audit.py" ]
+  [ -x "$DEPLOY/scripts/hydra-daily-audit.py" ]
+}
+
+@test "fails the rollback when restoring +x fails, instead of logging success (QA #1001)" {
+  # The chmod used to end in `|| true` and the next line always logged
+  # "Script permissions fixed", so a failed repair (read-only mount, foreign
+  # ownership) shipped non-executable scripts and a green rollback.
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/chmod"
+  command chmod +x "$TMP/bin/chmod"
+
+  run_rollback
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not restore +x"* ]]
+  [[ "$output" != *"Script permissions fixed"* ]]
+}
+
 @test "leaves no leftover git worktree in the source checkout" {
   printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
   run_rollback
