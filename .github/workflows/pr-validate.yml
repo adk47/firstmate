@@ -1794,7 +1794,7 @@ jobs:
           # 370+ lines of bash and is the very tool catching bash bugs
           # — it must be in scope. Add it explicitly so the find -name
           # filter doesn't skip it.
-          sh_files=$(find scripts .githooks -type f -name '*.sh' 2>/dev/null)
+          sh_files=$(find scripts .githooks -type f \( -name '*.sh' -o -name '*.bash' \) 2>/dev/null)
           if [ -f .githooks/pre-commit ]; then
             sh_files=$(printf '%s\n.githooks/pre-commit\n' "$sh_files")
           fi

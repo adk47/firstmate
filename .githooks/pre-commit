@@ -1319,7 +1319,7 @@ if ! command -v shellcheck >/dev/null 2>&1; then
 else
   # Stage detection: any *.sh AND .githooks/pre-commit (which has no
   # extension but is the very tool we're hardening — must be linted).
-  staged_sh=$(git diff --cached --name-only --diff-filter=ACM | grep -E '(\.sh$|^\.githooks/pre-commit$)' || true)
+  staged_sh=$(git diff --cached --name-only --diff-filter=ACM | grep -E '(\.sh$|\.bash$|^\.githooks/pre-commit$)' || true)
   if [[ -z "$staged_sh" ]]; then
     ok "no staged *.sh files"
   else
