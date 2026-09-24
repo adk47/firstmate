@@ -1463,13 +1463,21 @@ fi
 # ─── Gateway pre-start self-heal drop-ins ─────────────────────
 # One drop-in per profile, hard-coded with the profile name (the
 # base units are not systemd templates so %i is unavailable). The
-# drop-in adds ExecStartPre=…/openclaw-pre-start-heal.sh <profile>
-# and StartLimitBurst/IntervalSec to break crash-loops cleanly.
+# drop-in adds ExecStartPre=…/openclaw-pre-start-heal.sh <profile>,
+# StartLimitBurst/IntervalSec to break crash-loops cleanly, and a
+# raised node heap cap (NODE_OPTIONS).
 # A re-run of migrate-to-multi-gateway.sh recreates the base unit
 # but does NOT touch the .service.d/ directory, so the drop-in
 # survives. We daemon-reload + reset-failed at the end so a
 # previously-tripped restart limit doesn't stick around after
 # the heal infrastructure is in place.
+HEAP_SNAPSHOT_DIR=/var/lib/hydra/heap-snapshots
+cat > /etc/tmpfiles.d/hydra-heap-snapshots.conf << HEAPTMPFILES
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+# Gateway near-OOM heap snapshots are several GB each; keep 3 days.
+d ${HEAP_SNAPSHOT_DIR} 0700 root root 3d
+HEAPTMPFILES
+systemd-tmpfiles --create /etc/tmpfiles.d/hydra-heap-snapshots.conf
 for profile in main edge; do
   drop_dir="/etc/systemd/system/openclaw-gateway-${profile}.service.d"
   mkdir -p "$drop_dir"
@@ -1488,10 +1496,19 @@ for profile in main edge; do
   if [ "$profile" = "edge" ]; then
     reindex_hook="ExecStartPost=-/usr/bin/systemctl start --no-block openclaw-edge-reindex.service"
   fi
+  # Heap cap: node's default (~4 GB) is below main's normal working set. Its
+  # heap swings 1-3.6 GB all day, and every spike past the cap is a V8
+  # "heap out of memory" SIGABRT plus a ~10 min post-restart freeze: 8 crashes
+  # 2026-09-17..23, two on 09-23 three hours apart. Not a steady leak (heap is
+  # back to ~2 GB within 30 min of a restart), so a higher ceiling is the fix.
+  # Near the ceiling node writes ONE heap snapshot per process, so the next
+  # near-OOM names what fills the heap (openclaw's own critical-pressure
+  # snapshot is hard-coded off in 2026.8.2). tmpfiles ages them out after 3d.
   cat > "$drop_dir/override.conf" << GATEWAYDROP
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
 # Reference template: scripts/aux-units/openclaw-gateway.override.conf
 [Service]
+Environment="NODE_OPTIONS=--max-old-space-size=8192 --heapsnapshot-near-heap-limit=1 --diagnostic-dir=${HEAP_SNAPSHOT_DIR}"
 ExecStartPre=$HYDRA_ROOT/scripts/openclaw-pre-start-heal.sh ${profile}
 ${reindex_hook}
 [Unit]
