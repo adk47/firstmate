@@ -20,7 +20,7 @@ import {
   intercomDeeplink,
 } from "./ticket-format.js";
 import { deriveConvId } from "./dedupe-check.js";
-import { markTicketFiled } from "../ticket-success-signal.js";
+import { markTicketFiled, markTicketId } from "../ticket-success-signal.js";
 import { validateProdigiAddress } from "../order-address.js";
 
 const Parameters = Type.Object({
@@ -396,7 +396,11 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
           // Signal the intercom false-handoff-claim guard that a ticket really landed
           // for this conversation, so an "I've flagged this for the team" reply is
           // allowed through instead of being rewritten to the honest fallback.
-          markTicketFiled(deriveConvId(sessionKey));
+          const followupConvId = deriveConvId(sessionKey);
+          markTicketFiled(followupConvId);
+          // MUS-1516: also record WHICH id, so the guard's reference-id check
+          // can tell a real quoted id from one this conversation never filed.
+          markTicketId(followupConvId, existingId);
           // Escalation follow-up (e.g. customer already past the promised
           // SLA): give it teeth — tag the ticket so the overdue sweep groups
           // it, and bump urgent reasons to ClickUp priority 1. Both
@@ -490,7 +494,11 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       sessionTickets.record(sessionId, params.actionType, params.customerEmail, result.data.id);
       // Signal the intercom false-handoff-claim guard that a ticket really landed for
       // this conversation (mirrors the follow-up-append path above).
-      markTicketFiled(deriveConvId(sessionKey));
+      markTicketFiled(convId);
+      // MUS-1516: also record WHICH id (reuses the `convId` already derived above
+      // for the Intercom deeplink), so the guard's reference-id check can tell a
+      // real quoted id from one this conversation never filed.
+      markTicketId(convId, result.data.id);
       return ticketResult({ submitted: true, ticket_id: result.data.id, sla, action_type: params.actionType, tier });
     },
   };

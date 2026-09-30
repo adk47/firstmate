@@ -112,6 +112,24 @@ describe("create_ticket dedupe", () => {
     expect(commentBody.comment_text).toContain("---ACTION-REQUEST-UPDATE---");
   });
 
+  // MUS-1516: the append (follow-up-comment) path is the OTHER call site that must
+  // record the filed id — a conversation whose second create_ticket call merely
+  // commented on the existing ticket still needs that id backed for the intercom
+  // reference-id guard (design call ① on MUS-1471 — "both must record the id").
+  it("records the existing ticket's id on the follow-up-comment (append) path too", async () => {
+    const IDS_KEY = "__musoSupportTicketIds";
+    delete (globalThis as unknown as Record<string, unknown>)[IDS_KEY];
+    const deps = makeDeps({ sessionKey: "agent:support:intercom:direct:conv_append1" });
+    const tool = createCreateTicketTool(deps);
+
+    await run(tool, CLAIM, "c1"); // creates task_1
+    const second = await run(tool, { ...CLAIM, summary: "customer added the track URL" }, "c2"); // appends
+    expect(second).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "task_1" });
+
+    const store = (globalThis as unknown as Record<string, unknown>)[IDS_KEY] as Map<string, { atMs: number; ids: string[] }> | undefined;
+    expect(store?.get("conv_append1")?.ids).toEqual(["task_1"]);
+  });
+
   it("still creates a new ticket for a different action type in the same session", async () => {
     const deps = makeDeps();
     const tool = createCreateTicketTool(deps);

@@ -351,6 +351,45 @@ describe("SanitizingIntercomClient", () => {
     delete g[SIGNAL_KEY];
   });
 
+  // MUS-1516: end-to-end wiring of the new filed-id store through outbound.ts into
+  // sanitizeHandoffClaim's `filedTicketIds` option. The unit tests in
+  // sanitize-handoff-claim.test.ts cover the guard logic itself; these confirm
+  // outbound.ts actually reads plugins/intercom/src/ticket-success-signal.ts's new
+  // getFiledTicketIds and passes it through.
+  it("redacts a reference number this conversation never filed (no ids store at all)", async () => {
+    const IDS_KEY = "__musoSupportTicketIds";
+    delete (globalThis as unknown as Record<string, unknown>)[IDS_KEY];
+    const inner = new MockIntercomClient();
+    const logged: string[] = [];
+    const client = new SanitizingIntercomClient(inner, { error: (msg) => logged.push(msg) });
+    await client.replyToConversation({
+      conversationId: "conv_ref1",
+      adminId: "admin_1",
+      body: "Your reference number is 869f7v9v2.",
+    });
+    expect(inner.calls.replyToConversation[0].body).toBe("I'll make sure this gets to the team.");
+    expect(logged.some((m) => m.includes("[intercom:false-handoff-claim]") && m.includes("conv=conv_ref1"))).toBe(true);
+  });
+
+  it("passes through a reference number that WAS filed in this conversation", async () => {
+    const IDS_KEY = "__musoSupportTicketIds";
+    const g = globalThis as unknown as Record<string, unknown>;
+    const store = new Map<string, { atMs: number; ids: string[] }>();
+    store.set("conv_ref2", { atMs: Date.now(), ids: ["869f7v9v2"] });
+    g[IDS_KEY] = store;
+    const inner = new MockIntercomClient();
+    const logged: string[] = [];
+    const client = new SanitizingIntercomClient(inner, { error: (msg) => logged.push(msg) });
+    await client.replyToConversation({
+      conversationId: "conv_ref2",
+      adminId: "admin_1",
+      body: "Your reference number is 869f7v9v2.",
+    });
+    expect(inner.calls.replyToConversation[0].body).toBe("Your reference number is 869f7v9v2.");
+    expect(logged.some((m) => m.includes("[intercom:false-handoff-claim]"))).toBe(false);
+    delete g[IDS_KEY];
+  });
+
   it("does not log when logger has no error method", async () => {
     const inner = new MockIntercomClient();
     const client = new SanitizingIntercomClient(inner, {});
