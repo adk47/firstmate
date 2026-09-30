@@ -732,9 +732,10 @@ describe("jev [ROUTING] block in the dispatched raw body — kill-switched paths
     expect(rawBody).toContain("path: caroline_tool (0.45)");
   });
 
-  it("falsifiable: with silence ON the same turn's raw body DOES carry no_reply", () => {
+  it("MUS-1598: with silence ON the same turn's raw body still does NOT carry no_reply — masking is unconditional", () => {
     const rawBody = rawBodyFor(FP_ANSWERS, FP_MESSAGE, ALL_ON);
-    expect(rawBody).toContain("path: no_reply (0.97)");
+    expect(rawBody).not.toContain("no_reply");
+    expect(rawBody).not.toContain("path:");
   });
 });
 

@@ -538,25 +538,45 @@ describe("renderRouteBlock — a disabled path is never named", () => {
     expect(decide(justUnder, BANDS, FP_MESSAGE, undefined, [], [], SILENCE_OFF).block).not.toContain("path:");
   });
 
-  it("falsifiable the other way: with silence ON the block DOES name no_reply", () => {
-    // Band 0.9 is crossed but the message is not closer-shaped, so this is
-    // still the fall-through — the only difference from the first test is the
-    // switch. If the mask were a no-op this assertion and the first would both
-    // pass; together they can only both pass when the mask actually reads
-    // `actions`.
-    const decision = decide(FP_ANSWERS, BANDS, FP_MESSAGE, undefined, [], [], ALL_ON);
-    expect(decision.action).toBe("route");
-    expect(decision.block).toContain("path: no_reply (0.97)");
-  });
+  // MUS-1598: the `actions[branch] === true` escape hatch above is gone —
+  // masking is now UNCONDITIONAL. The two tests this replaces asserted the
+  // old, leaky behaviour (a kill-switched label stays named once its action
+  // flag is on); that behaviour was QA finding 3 re-opening itself one band
+  // lower (see MUS-1551's 27.6%-of-turns measurement) and must not exist.
 
-  it("falsifiable the other way: with escalate ON an under-band human_required is still named", () => {
+  it("case 1 (red on origin/main): escalate ON does not un-mask an under-band human_required path", () => {
     const answers: JevAnswers = {
       off_topic_or_bad_faith: { type: "noul", noul: 0.02 },
-      resolution_path: choice("human_required", { human_required: 0.5, caroline_tool: 0.4 }),
+      resolution_path: choice("human_required", { human_required: 0.6, caroline_tool: 0.4 }),
     };
     const decision = decide(answers, BANDS, "I need a person", undefined, [], [], ALL_ON);
     expect(decision.action).toBe("route");
-    expect(decision.block).toContain("path: human_required (0.50)");
+    expect(decision.block).not.toContain("path: human_required");
+  });
+
+  it("case 2: at p=0.95 there is no block to leak into — decide() escalates directly instead", () => {
+    // Documents why the high-confidence case was never the problem: decide()
+    // takes the gated action itself (block: null) long before any fallback
+    // rendering could happen.
+    const answers: JevAnswers = {
+      off_topic_or_bad_faith: { type: "noul", noul: 0.02 },
+      resolution_path: choice("human_required", { human_required: 0.95, caroline_tool: 0.05 }),
+    };
+    const decision = decide(answers, BANDS, "I need a person", undefined, [], [], ALL_ON);
+    expect(decision.action).toBe("escalate");
+    expect(decision.block).toBeNull();
+  });
+
+  it("case 3 (red on origin/main, the silence twin): silence ON does not un-mask a non-closer-shaped no_reply path", () => {
+    // Same defect on the other action, so it can't be left latent for
+    // whoever flips silence next. FP_MESSAGE ("Hi you got some news ?") is
+    // not closer-shaped, so decide() takes the plain fall-through, not the
+    // suppressed-silence branch — the assertion is about the block contents,
+    // not about isCloserShaped already forcing route.
+    const decision = decide(FP_ANSWERS, BANDS, FP_MESSAGE, undefined, [], [], ALL_ON);
+    expect(decision.action).toBe("route");
+    expect(decision.suppressed).toBeUndefined();
+    expect(decision.block).not.toContain("path: no_reply");
   });
 
   it("omits the path: line entirely when probabilities are absent — never invents one", () => {
