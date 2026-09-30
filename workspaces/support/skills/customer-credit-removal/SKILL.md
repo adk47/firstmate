@@ -161,7 +161,7 @@ Then wait for the customer to specify. Do NOT bulk-remove based on "tracks where
 
 1. Tell the customer:
 
-   > "Looking at this, it seems like the issue might be that another artist's tracks got mixed into your profile, not just a few mis-attributed credits. Removing them one by one wouldn't fix the underlying merge. I've flagged this for our team to investigate – they'll look at the merge history and either unmerge or do a deeper fix. You'll hear back within 5 business days."
+   > "Looking at this, it seems like the issue might be that another artist's tracks got mixed into your profile, not just a few mis-attributed credits. Removing them one by one wouldn't fix the underlying merge. I've flagged this for our team to review – they'll look at the merge history and either unmerge or do a deeper fix. You'll hear back within 5 business days."
 
 2. File via `action-request` with:
    - `action_type: unmerge-request` (tier-2 type – see `action-request/SKILL.md`)

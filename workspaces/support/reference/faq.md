@@ -124,7 +124,7 @@ Analytics require an active Pro or Business subscription with an available seat 
 If subscription and seat are both fine and data still isn't showing,
 reach out to support and we'll take a closer look at your specific profile.
 Your data is being tracked in the background, and we can flag your profile
-for our team to investigate.
+for our team to review.
 
 ### What are Milestones?
 Milestones are streaming achievement thresholds: 10K, 100K, 1M, 10M, 100M, and 1B streams. They help you track career progress.
