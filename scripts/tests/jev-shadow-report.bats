@@ -273,3 +273,154 @@ J
   [ "$status" -eq 0 ]
   [[ "$output" == *"failures by reason: shape=1 timeout=2 unknown=1"* ]]
 }
+
+# ─── --outcomes: join real ground truth instead of the router's own action ───
+# These fixtures are built inline (never under scripts/tests/fixtures/jev/,
+# per MUS-1542's diff-scope constraint) using the sidecar shape from the
+# MUS-1481 shared contract: {surface, item_id, row_ts:[...], truth:{qid:val}}.
+
+@test "outcomes: matching truth agrees 100%, mismatching truth is 0%" {
+  local d; d="$(mktemp -d)"
+  # e1 first_tool choice=profile_status prob=0.90 -> bucket 0.9-1.0;
+  #    outcome truth.first_tool="profile_status" -> match, 100.0%
+  # e2 first_tool choice=profile_status prob=0.85 -> bucket 0.8-0.9;
+  #    outcome truth.first_tool="other_tool" -> mismatch, 0.0%
+  # both rows join a truth record -> outcomes_rows=2 outcomes_matched=2
+  cat > "$d/outc1.jsonl" <<'J'
+{"ts":"T1","surface":"outc1","item_id":"i1","answers":{"first_tool":{"type":"choice","choice":"profile_status","probabilities":{"profile_status":0.90,"other":0.10}}},"actual":"route","rc":0,"latency_ms":100}
+{"ts":"T2","surface":"outc1","item_id":"i2","answers":{"first_tool":{"type":"choice","choice":"profile_status","probabilities":{"profile_status":0.85,"other":0.15}}},"actual":"route","rc":0,"latency_ms":100}
+J
+  cat > "$d/outcomes.jsonl" <<'J'
+{"v":1,"surface":"outc1","item_id":"i1","row_ts":["T1"],"truth":{"first_tool":"profile_status"}}
+{"v":1,"surface":"outc1","item_id":"i2","row_ts":["T2"],"truth":{"first_tool":"other_tool"}}
+J
+  run "$REPORT" --shadow-dir "$d" --surface outc1 --outcomes "$d/outcomes.jsonl"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"question: first_tool"* ]]
+  [[ "$output" =~ 0\.8-0\.9[[:space:]]+1[[:space:]]+0\.0% ]]
+  [[ "$output" =~ 0\.9-1\.0[[:space:]]+1[[:space:]]+100\.0% ]]
+  [[ "$output" == *"labelled=2 unlabelled=0"* ]]
+  [[ "$output" == *"total=2"* ]]
+  [[ "$output" == *"outcomes_rows=2 outcomes_matched=2"* ]]
+  rm -rf "$d"
+}
+
+@test "outcomes: two shadow rows sharing one turn both pick up the same truth (v1/v2 pair)" {
+  local d; d="$(mktemp -d)"
+  # one outcome record's row_ts lists both Ta (v1) and Tb (v2) -- the common
+  # production case of a live call and its shadow twin firing on one turn.
+  # both choices agree with truth -> both 100.0%, but 1 outcome record joins
+  # 2 shadow rows -> outcomes_rows=1 outcomes_matched=2 (not 2 and 2).
+  cat > "$d/outc2.jsonl" <<'J'
+{"ts":"Ta","surface":"outc2","item_id":"iX","answers":{"first_tool":{"type":"choice","choice":"ticket_open","probabilities":{"ticket_open":0.95,"other":0.05}}},"actual":"route","rc":0,"latency_ms":100}
+{"ts":"Tb","surface":"outc2","item_id":"iX","answers":{"first_tool":{"type":"choice","choice":"ticket_open","probabilities":{"ticket_open":0.72,"other":0.28}}},"actual":"decline","rc":0,"latency_ms":100}
+J
+  cat > "$d/outcomes.jsonl" <<'J'
+{"v":1,"surface":"outc2","item_id":"iX","row_ts":["Ta","Tb"],"truth":{"first_tool":"ticket_open"}}
+J
+  run "$REPORT" --shadow-dir "$d" --surface outc2 --outcomes "$d/outcomes.jsonl"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ 0\.7-0\.8[[:space:]]+1[[:space:]]+100\.0% ]]
+  [[ "$output" =~ 0\.9-1\.0[[:space:]]+1[[:space:]]+100\.0% ]]
+  [[ "$output" == *"labelled=2 unlabelled=0"* ]]
+  [[ "$output" == *"total=2"* ]]
+  [[ "$output" == *"outcomes_rows=1 outcomes_matched=2"* ]]
+  rm -rf "$d"
+}
+
+@test "outcomes: a row with no matching outcome record is unlabelled, excluded from agreement" {
+  local d; d="$(mktemp -d)"
+  # outcomes.jsonl has no record for (outc3, iY, Tc) at all -> no join ->
+  # judged=[] -> agreement "n/a", labelled=0 unlabelled=1, outcomes_matched=0
+  cat > "$d/outc3.jsonl" <<'J'
+{"ts":"Tc","surface":"outc3","item_id":"iY","answers":{"q":{"type":"choice","choice":"a","probabilities":{"a":0.65,"b":0.35}}},"actual":"a","rc":0,"latency_ms":100}
+J
+  : > "$d/outcomes.jsonl"
+  run "$REPORT" --shadow-dir "$d" --surface outc3 --outcomes "$d/outcomes.jsonl"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ 0\.6-0\.7[[:space:]]+1[[:space:]]+n/a ]]
+  [[ "$output" == *"labelled=0 unlabelled=1"* ]]
+  [[ "$output" == *"total=1"* ]]
+  [[ "$output" == *"outcomes_rows=0 outcomes_matched=0"* ]]
+  rm -rf "$d"
+}
+
+@test "outcomes: an outcome record whose truth omits the question is unlabelled" {
+  local d; d="$(mktemp -d)"
+  # the record joins (matched=1) but truth has no "q1" key -> actual_q=None,
+  # same unlabelled outcome as no-record-at-all, but outcomes_matched=1 this
+  # time since a truth record WAS found for (surface, item_id, ts).
+  cat > "$d/outc4.jsonl" <<'J'
+{"ts":"Td","surface":"outc4","item_id":"iZ","answers":{"q1":{"type":"choice","choice":"a","probabilities":{"a":0.65,"b":0.35}}},"actual":"a","rc":0,"latency_ms":100}
+J
+  cat > "$d/outcomes.jsonl" <<'J'
+{"v":1,"surface":"outc4","item_id":"iZ","row_ts":["Td"],"truth":{"other_question":"x"}}
+J
+  run "$REPORT" --shadow-dir "$d" --surface outc4 --outcomes "$d/outcomes.jsonl"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ 0\.6-0\.7[[:space:]]+1[[:space:]]+n/a ]]
+  [[ "$output" == *"labelled=0 unlabelled=1"* ]]
+  [[ "$output" == *"outcomes_rows=1 outcomes_matched=1"* ]]
+  rm -rf "$d"
+}
+
+@test "outcomes: actual is ignored completely -- agreement computed only against outcomes truth" {
+  local d; d="$(mktemp -d)"
+  # This is the regression test for the bug MUS-1542 fixes: row["actual"] is
+  # the router's own action ("route") and shares no vocabulary with the
+  # question's answers. If the report ever fell back to it, "profile_status"
+  # (the choice) vs "route" (actual) would mismatch -> 0.0%. With the fix,
+  # comparison is choice "profile_status" vs truth.first_tool "profile_status"
+  # -> match, 100.0%, and "route" never appears in the output.
+  cat > "$d/outc5.jsonl" <<'J'
+{"ts":"Te","surface":"outc5","item_id":"iW","answers":{"first_tool":{"type":"choice","choice":"profile_status","probabilities":{"profile_status":0.88,"route":0.12}}},"actual":"route","rc":0,"latency_ms":100}
+J
+  cat > "$d/outcomes.jsonl" <<'J'
+{"v":1,"surface":"outc5","item_id":"iW","row_ts":["Te"],"truth":{"first_tool":"profile_status"}}
+J
+  run "$REPORT" --shadow-dir "$d" --surface outc5 --outcomes "$d/outcomes.jsonl"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ 0\.8-0\.9[[:space:]]+1[[:space:]]+100\.0% ]]
+  [[ "$output" == *"labelled=1 unlabelled=0"* ]]
+  [[ "$output" != *"route"* ]]
+  rm -rf "$d"
+}
+
+@test "outcomes: a malformed outcomes line is counted, report still exits 0" {
+  local d; d="$(mktemp -d)"
+  cat > "$d/outc6.jsonl" <<'J'
+{"ts":"Tf","surface":"outc6","item_id":"iV","answers":{"q":{"type":"noul","noul":0.9}},"actual":"true","rc":0,"latency_ms":50}
+J
+  # line 1: not JSON at all
+  # line 2: valid JSON, valid outcome_row_ok fields except "truth" is missing
+  #         entirely -- fails outcome_row_ok, counted malformed
+  # line 3: well-formed, matches the shadow row -> truth.q="true" agrees with
+  #         noul=0.9 -> "true" (100.0%, bucket 0.9-1.0)
+  cat > "$d/outcomes.jsonl" <<'J'
+this is not json
+{"v":1,"surface":"outc6","item_id":"iV","row_ts":["x"]}
+{"v":1,"surface":"outc6","item_id":"iV","row_ts":["Tf"],"truth":{"q":"true"}}
+J
+  run "$REPORT" --shadow-dir "$d" --surface outc6 --outcomes "$d/outcomes.jsonl"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Traceback"* ]]
+  [[ "$output" =~ 0\.9-1\.0[[:space:]]+1[[:space:]]+100\.0% ]]
+  [[ "$output" == *"total=1"* ]]
+  [[ "$output" == *"malformed_rows=2"* ]]
+  [[ "$output" == *"outcomes_rows=1 outcomes_matched=1"* ]]
+  rm -rf "$d"
+}
+
+@test "no --outcomes: output is unchanged, no labelled/unlabelled or outcomes_* fields" {
+  # Re-runs the primary two-surface fixture without --outcomes and checks the
+  # same pre-existing numbers from the first test in this file still hold,
+  # plus that none of the new --outcomes-only output appears.
+  run "$REPORT" --shadow-dir "$FIXTURE_DIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"0.9-1.0   2   100.0%"* ]]
+  [[ "$output" == *"total=4 rc_nonzero=1 p50_ms=120 p95_ms=1600"* ]]
+  [[ "$output" != *"labelled="* ]]
+  [[ "$output" != *"unlabelled="* ]]
+  [[ "$output" != *"outcomes_rows="* ]]
+  [[ "$output" != *"outcomes_matched="* ]]
+}
