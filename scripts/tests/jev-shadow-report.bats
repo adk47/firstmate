@@ -424,3 +424,61 @@ J
   [[ "$output" != *"outcomes_rows="* ]]
   [[ "$output" != *"outcomes_matched="* ]]
 }
+
+# ─── sidecar inside the shadow dir must not be read as a shadow log ───
+# jev-outcomes-collect.py writes caroline.outcomes.jsonl INTO the shadow dir,
+# and the all-surface glob is *.jsonl, so without an explicit exclusion the
+# truth file is ingested a second time as shadow rows. It carries `surface`,
+# so row_ok accepts it: no crash, just an inflated total.
+
+_outcomes_in_shadow_dir_fixture() {
+  d="$(mktemp -d)"
+  cat > "$d/caroline.jsonl" <<'J'
+{"ts":"T1","surface":"outc1","item_id":"i1","answers":{"first_tool":{"type":"choice","choice":"profile_status","probabilities":{"profile_status":0.90,"other":0.10}}},"actual":"route","rc":0,"latency_ms":100}
+{"ts":"T2","surface":"outc1","item_id":"i2","answers":{"first_tool":{"type":"choice","choice":"profile_status","probabilities":{"profile_status":0.85,"other":0.15}}},"actual":"route","rc":0,"latency_ms":100}
+J
+  cat > "$d/caroline.outcomes.jsonl" <<'J'
+{"v":1,"surface":"outc1","item_id":"i1","row_ts":["T1"],"truth":{"first_tool":"profile_status"}}
+{"v":1,"surface":"outc1","item_id":"i2","row_ts":["T2"],"truth":{"first_tool":"other_tool"}}
+J
+}
+
+@test "outcomes inside shadow dir, no --surface: total counts shadow rows only" {
+  local d; _outcomes_in_shadow_dir_fixture
+  run "$REPORT" --shadow-dir "$d" --outcomes "$d/caroline.outcomes.jsonl"
+  [ "$status" -eq 0 ]
+  # 2 shadow rows; the 2 sidecar records must not be added (would be total=4).
+  [[ "$output" == *"total=2 "* ]]
+  [[ "$output" == *"outcomes_rows=2 outcomes_matched=2"* ]]
+  [[ "$output" == *"labelled=2 unlabelled=0"* ]]
+  rm -rf "$d"
+}
+
+@test "outcomes inside shadow dir given as a relative path is still excluded" {
+  local d; _outcomes_in_shadow_dir_fixture
+  cd "$d"
+  run "$REPORT" --shadow-dir "$d" --outcomes "./caroline.outcomes.jsonl"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"total=2 "* ]]
+  [[ "$output" == *"outcomes_matched=2"* ]]
+  rm -rf "$d"
+}
+
+@test "outcomes inside shadow dir via a symlinked shadow dir is still excluded" {
+  local d; _outcomes_in_shadow_dir_fixture
+  ln -s "$d" "$d.link"
+  run "$REPORT" --shadow-dir "$d.link" --outcomes "$d/caroline.outcomes.jsonl"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"total=2 "* ]]
+  rm -rf "$d" "$d.link"
+}
+
+@test "outcomes outside shadow dir, no --surface: unchanged" {
+  local d o; _outcomes_in_shadow_dir_fixture
+  o="$(mktemp -d)"; mv "$d/caroline.outcomes.jsonl" "$o/"
+  run "$REPORT" --shadow-dir "$d" --outcomes "$o/caroline.outcomes.jsonl"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"total=2 "* ]]
+  [[ "$output" == *"outcomes_rows=2 outcomes_matched=2"* ]]
+  rm -rf "$d" "$o"
+}
