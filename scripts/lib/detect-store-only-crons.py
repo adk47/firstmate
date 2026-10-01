@@ -14,6 +14,18 @@ This helper reads the REAL store (a loadCronStore dump) and reports any DURABLE
 so the deploy can halt BEFORE the destructive import. The operator then commits the cron to
 cron-jobs.json (as we did in #702) or sets HYDRA_ALLOW_ORPHAN_CRON=1 to drop it.
 
+MUS-1804: if what halted the deploy is an agent's WATCH-CRON (a cron polling
+for some condition, e.g. "has this customer's credit been restored yet"),
+do NOT commit it and do NOT set HYDRA_ALLOW_ORPHAN_CRON=1 — either keeps a
+recurring job in a place that blocks every future deploy too (MUS-1139: six
+days, two monitors, one manual host intervention). Fix the AGENT instead: a
+watch-cron must be a self-re-arming ONE-SHOT, never a recurring schedule. Each
+turn, if the awaited condition isn't met yet, arm the next one-shot ~10 min
+out with `openclaw cron add --at "+600s" ...` (which defaults
+`deleteAfterRun:true`) and exit; at most one pending one-shot exists at a time,
+and it already matches the exact predicate `is_ephemeral()` below uses, so it
+never reaches this guard at all.
+
 Usage:
   detect-store-only-crons.py <repo-cron-jobs.json> <store-dump.json>
 
@@ -184,7 +196,12 @@ def main(argv):
         f"store but absent from cron-jobs.json: {listing}. These were created directly on "
         f"the gateway (e.g. `openclaw cron add`) and the deploy's saveCronStore import would "
         f"DELETE them. Commit them to cron-jobs.json (see the ChartMogul restore, PR #702), "
-        f"or set HYDRA_ALLOW_ORPHAN_CRON=1 to intentionally drop them.",
+        f"or set HYDRA_ALLOW_ORPHAN_CRON=1 to intentionally drop them.\n"
+        f"  If this is an agent WATCH-CRON (polling for some condition): don't commit it and "
+        f"don't set HYDRA_ALLOW_ORPHAN_CRON=1 — both leave a recurring job that blocks every "
+        f"future deploy too (MUS-1139). Fix the agent instead: re-arm it each turn as a "
+        f"self-deleting one-shot (deleteAfterRun:true + schedule.kind:\"at\", e.g. "
+        f"`openclaw cron add --at \"+600s\" ...`) so it never reaches this guard (MUS-1804).",
         file=sys.stderr,
     )
     return 3
