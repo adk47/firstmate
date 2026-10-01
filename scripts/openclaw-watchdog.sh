@@ -31,6 +31,16 @@ COOLDOWN_FILE="$WATCHDOG_STATE_DIR/openclaw-watchdog-cooldown"
 COOLDOWN_MIN=30  # Don't restart more than once per 30 min
 GATEWAY_SERVICE="openclaw-gateway-main"  # PR 43: multi-gateway split
 
+# MUS-1298: a 100% failure ratio over 1 sample is not a signal. The 29 Sep
+# 15:18 incident restarted the whole fleet off ONE failed run (a
+# skill-workshop-review context-window overflow — an application error a
+# restart cannot fix). STUCK now requires both a bad ratio (SUCCESS_COUNT -eq
+# 0) AND a real sample (MSG_COUNT >= MIN_RUNS_FOR_STUCK).
+MIN_RUNS_FOR_STUCK="${MIN_RUNS_FOR_STUCK:-3}"
+# Liveness probe target for the STUCK gate below. Overridable so the bats
+# suite can stub `curl` without needing a live gateway on node-8.
+GATEWAY_LIVENESS_PROBE_URL="${GATEWAY_LIVENESS_PROBE_URL:-http://127.0.0.1:18789/}"
+
 # Source the shared Slack helper. Both this watchdog and the new
 # openclaw-pre-start-heal.sh need to post to the same #clio_devops
 # channel via the gated muso CLI (devops bot, token pulled from
@@ -66,6 +76,28 @@ readonly RESTART_LOG_REGEX='Started openclaw-gateway-main\.service'
 readonly RESTART_LOG_FIXTURE='Apr 07 20:51:14 ovh-node-8 systemd[1]: Started openclaw-gateway-main.service - OpenClaw Gateway HYDRA (main profile).'
 
 log() { echo "$LOGPREFIX $1"; }
+
+# MUS-1298 round 2 (QA NO-GO on hydra#1030): validate MIN_RUNS_FOR_STUCK before
+# it reaches the numeric comparisons at the STUCK gate below. A malformed
+# override (e.g. "three") makes `[ "$MSG_COUNT" -ge "$MIN_RUNS_FOR_STUCK" ]`
+# emit "integer expression expected" and evaluate false — the STUCK block is
+# silently skipped, so a dead gateway with 3+ failed runs is neither probed
+# nor restarted. A non-positive override (e.g. "0", "-1") doesn't error, but
+# neuters the sample-size floor and resurrects the exact single-run-restart
+# bug this card fixed. A guard that can't parse its own threshold must still
+# guard: reject anything that isn't a positive integer and fall back to 3
+# loudly instead of skipping or weakening the check.
+# MUS-1298 round 3 (GitHub QA bot NO-GO on hydra#1030 @ 1eccff79): bound the
+# WIDTH too, not just the sign. An unbounded `[0-9]*` still accepts an
+# all-digit value wide enough to exceed bash's 64-bit integer range (e.g. a
+# 31-digit string), which hits the exact same "integer expression expected"
+# failure mode as the non-numeric case. Cap at 1-999 (3 digits) — far above
+# any threshold this watchdog would ever need, and small enough to never
+# overflow a shell arithmetic comparison.
+if ! [[ "$MIN_RUNS_FOR_STUCK" =~ ^[1-9][0-9]{0,2}$ ]]; then
+  log "MIN_RUNS_FOR_STUCK='$MIN_RUNS_FOR_STUCK' is not a positive integer — falling back to 3"
+  MIN_RUNS_FOR_STUCK=3
+fi
 
 # slack_notify is provided by lib/slack-notify.sh sourced above.
 # It silently no-ops if the devops bot token can't be read (e.g., the
@@ -395,6 +427,31 @@ _codex_cooldown_ok() {
   # skipped while the tick sails on. A corrupt byte must never mute codex.
   last=$(_sane_epoch "$last" "$now")
   [ "$(( (now - last) / 60 ))" -ge "$mins" ]
+}
+
+# MUS-1298: gate the STUCK restart on a real liveness probe. 3 attempts, 10s
+# apart. Any HTTP response (1xx-5xx) means the gateway is answering — the run
+# failures are application-level and a restart won't fix them. Restart only
+# when all 3 probes come back dead.
+#
+# Never write `$(curl … || echo 000)` — on a timeout curl already prints 000
+# to stdout AND exits non-zero, so the `||` fallback appends a second one:
+# `000000` passes a `!= 000` test and a dead gateway reads as healthy forever
+# (muso-gateway-health §6). `|| true` here only neutralises curl's own exit
+# status (required under `set -e`, else a refused/timed-out connection kills
+# the whole watchdog tick instead of just failing this probe) — it prints
+# nothing, so curl's own "000" write-out is never duplicated.
+_gateway_probe_alive() {
+  local attempt code
+  for attempt in 1 2 3; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$GATEWAY_LIVENESS_PROBE_URL" || true)
+    code=${code:-000}
+    if [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]; then
+      return 0
+    fi
+    [ "$attempt" -lt 3 ] && sleep 10
+  done
+  return 1
 }
 
 EDGE_LOGS=$(journalctl -u openclaw-gateway-edge --since "${CHECK_WINDOW_MIN} min ago" --no-pager 2>/dev/null || true)
@@ -791,8 +848,17 @@ if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -gt 0 ] && [ "$OVERLOAD_COUNT" -
   exit 0
 fi
 
+# Sample-size guard: a 100% failure ratio over fewer than MIN_RUNS_FOR_STUCK
+# runs is not a signal (the 29 Sep 15:18 incident restarted the whole fleet
+# off ONE failed run). Keep SUCCESS_COUNT -eq 0 as the ratio term and
+# MIN_RUNS_FOR_STUCK as the sample-size term — both are needed.
+if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -gt 0 ] && [ "$MSG_COUNT" -lt "$MIN_RUNS_FOR_STUCK" ]; then
+  log "INSUFFICIENT SAMPLE: ${MSG_COUNT} runs (< ${MIN_RUNS_FOR_STUCK}), 0 successes — not restarting"
+  exit 0
+fi
+
 # If there are agent runs but zero successes AND it's not just API overload, the system is stuck
-if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -gt 0 ]; then
+if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -ge "$MIN_RUNS_FOR_STUCK" ]; then
   log "STUCK: ${MSG_COUNT} agent runs but 0 successes — checking cooldown"
 
   # Cooldown check — don't restart too frequently
@@ -810,6 +876,14 @@ if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -gt 0 ]; then
       log "SKIP: Last restart was ${ELAPSED}min ago (cooldown: ${COOLDOWN_MIN}min)"
       exit 0
     fi
+  fi
+
+  # Liveness gate: a real 100%-failure sample can still be application-level
+  # (e.g. every run hitting the same context-window overflow) rather than a
+  # frozen gateway. If the gateway answers at all, restarting won't help.
+  if _gateway_probe_alive; then
+    log "NOT STUCK: gateway answering on :18789 — ${MSG_COUNT} failed runs are application-level"
+    exit 0
   fi
 
   # Capture the error pattern for the notification
