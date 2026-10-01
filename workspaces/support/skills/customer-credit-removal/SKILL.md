@@ -125,7 +125,7 @@ If the ownership signal looks ambiguous, call `remove_credits` with `apply: fals
 |------|---------------------------|
 | Profile is unclaimed | "I can't make changes to an unclaimed profile from here – I've flagged this for our team to review." Then file `action-request` tier 2. Pick the action_type based on Step 3's heuristic: if the unmerge-detection fires, use `action_type: unmerge-request` (so Aaron gets the merge audit upfront); otherwise `action_type: credit-correction`. The two action_types lead to different ops playbooks, so picking the right one saves a triage round-trip. |
 | Profile has multiple claimed workspaces | "This profile has multiple owners on it, so I'd like to have our team sort it out. I've flagged it for review." Then file `action-request` tier 2 (same routing rule as above – `unmerge-request` if detection fires, else `credit-correction`). |
-| Email mismatch | "I'm not seeing this profile under your account. Could you double-check the URL?" Don't escalate by default; ask the customer to confirm. If they insist it's theirs, file tier 2 for ops to investigate. |
+| Email mismatch | "I'm not seeing this profile under your account. Could you double-check the URL?" Don't escalate by default; ask the customer to confirm. If they insist it's theirs, file tier 2 for ops to review. |
 
 ### Step 3 – Unmerge-mistake detection (capability B pre-step)
 
