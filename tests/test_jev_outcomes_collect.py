@@ -445,6 +445,7 @@ def test_since_hours_cutoff_between_a_turns_rows_drops_it_through_collect(invent
 
 # ── --intercom leg (MUS-1543): resolution_path + needs_reply ground truth ──
 # Every fixture stubs the HTTP layer; nothing here touches the network.
+import http.client
 import io
 import re
 import urllib.error
@@ -705,7 +706,8 @@ def test_fetcher_retries_429_honouring_retry_after_then_succeeds():
 
 
 @pytest.mark.parametrize("exc", [_http_error(500), _http_error(404),
-                                 urllib.error.URLError("boom"), TimeoutError("slow")])
+                                 urllib.error.URLError("boom"), TimeoutError("slow"),
+                                 http.client.IncompleteRead(b"x"), http.client.BadStatusLine("x")])
 def test_fetcher_returns_none_on_failure_never_raises(exc):
     def opener(req, timeout):
         raise exc
@@ -770,3 +772,66 @@ def test_cli_intercom_without_a_token_fails_loud_and_preserves_the_sidecar(inven
                  "--intercom", "--intercom-token-file", str(envf)])
     assert rc == 3
     assert out.read_text() == "GOOD\n"
+
+
+def test_malformed_payload_or_raising_fetch_marks_only_that_conversation_unseen(inventory, tmp_path, capsys):
+    rows = [shadow_row("C1", T0), shadow_row("C2", T0), shadow_row("C3", T0)]
+    shadow = tmp_path / "caroline.jsonl"
+    write_shadow(shadow, rows)
+    db = tmp_path / "traj.sqlite"
+    write_trajectory_db(db, [non_tool_event("model.completed", T0, "C1")])
+    good = conv([part(30, "admin", HUMAN)])
+
+    def fetch(cid):
+        if cid == "C1":
+            return {"statistics": [1]}
+        if cid == "C2":
+            raise http.client.IncompleteRead(b"x")
+        return good
+
+    recs, summary = m.collect(str(shadow), inventory, [str(db)], intercom_fetch=fetch)
+    assert [r["evidence"]["intercom_seen"] for r in recs] == [False, False, True]
+    assert recs[2]["truth"]["resolution_path"] == "human_required"
+    assert summary["intercom_failed"] == 2
+    assert "SECRET" not in capsys.readouterr().err
+
+
+def test_caroline_note_part_is_not_a_reply(inventory, tmp_path):
+    c = conv([part(20, "admin", CAROLINE, part_type="note")])
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
+    assert "needs_reply" not in recs[0]["truth"]
+    assert recs[0]["evidence"]["caroline_replied"] is False
+
+
+def test_human_assignee_with_assignment_outside_window_is_not_human_required(inventory, tmp_path):
+    rows = [shadow_row("C1", T0), shadow_row("C1", "2026-09-23T10:10:00Z")]
+    c = conv([], assignee=HUMAN, first_assignment=T0_EPOCH + 700)  # turn 2 only
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c}, shadow_rows=rows)
+    assert "resolution_path" not in recs[0]["truth"]
+    assert recs[1]["truth"]["resolution_path"] == "human_required"
+
+
+def test_capped_conversations_are_not_counted_as_failures(inventory, tmp_path):
+    rows = [shadow_row("C1", T0), shadow_row("C2", T0)]
+    _, summary, _ = run_intercom(tmp_path, inventory, {"C1": conv([]), "C2": conv([])},
+                                 shadow_rows=rows, max_convs=1)
+    assert summary["intercom_failed"] == 0 and summary["intercom_capped"] == 1
+
+
+def test_all_gets_failing_warns_loudly_on_stderr(inventory, tmp_path, capsys):
+    run_intercom(tmp_path, inventory, {"C1": None})
+    assert "every intercom GET failed" in capsys.readouterr().err
+
+
+def test_cli_max_convs_is_wired_through_main(inventory, tmp_path, monkeypatch):
+    shadow = tmp_path / "caroline.jsonl"
+    write_shadow(shadow, [shadow_row("C1", T0), shadow_row("C2", T0)])
+    envf = tmp_path / "edge.env"
+    envf.write_text("MUSOAI_INTERCOM_TOKEN=tok\n")
+    calls = []
+    monkeypatch.setattr(m, "make_intercom_fetcher",
+                        lambda token, **kw: (lambda cid: calls.append(cid) or conv([])))
+    rc = m.main(["--shadow-file", str(shadow), "--out", str(tmp_path / "o.jsonl"),
+                 "--inventory", inventory, "--trajectory-db", str(tmp_path / "n.sqlite"),
+                 "--intercom", "--intercom-token-file", str(envf), "--intercom-max-convs", "1"])
+    assert rc == 0 and calls == ["C1"]

@@ -47,6 +47,7 @@
 # ──────────────────────────────────────────────────────────────
 import argparse
 import datetime
+import http.client
 import json
 import os
 import sqlite3
@@ -359,7 +360,7 @@ def make_intercom_fetcher(token, opener=urllib.request.urlopen, sleep=time.sleep
                 print("jev-outcomes-collect.py: intercom GET %s -> non-JSON body" % conv_id,
                       file=sys.stderr)
                 return None
-            except (urllib.error.URLError, OSError):
+            except (urllib.error.URLError, http.client.HTTPException, OSError):
                 if attempt + 1 < INTERCOM_MAX_ATTEMPTS:
                     sleep(2 ** attempt)
                     continue
@@ -468,6 +469,7 @@ def collect(shadow_path, inventory_path, trajectory_db_paths, since_hours=None,
     collected_at = format_ts(datetime.datetime.now(datetime.timezone.utc))
 
     caroline_id = caroline_id or caroline_admin_id_from_env()
+    capped = set()  # conversations skipped by --intercom-max-convs, not failures
     intercom = {}  # item_id -> summarized payload, or None for a failed/skipped GET
     records = []
     labeled = 0
@@ -480,9 +482,17 @@ def collect(shadow_path, inventory_path, trajectory_db_paths, since_hours=None,
             if cid not in intercom:
                 if intercom_max_convs is not None and len(intercom) >= intercom_max_convs:
                     intercom[cid] = None
+                    capped.add(cid)
                 else:
-                    payload = intercom_fetch(cid)
-                    intercom[cid] = summarize_intercom(payload, caroline_id) if payload else None
+                    # One bad conversation (transport fault OR malformed payload)
+                    # must never abort the run.
+                    try:
+                        payload = intercom_fetch(cid)
+                        intercom[cid] = summarize_intercom(payload, caroline_id) if payload else None
+                    except Exception as exc:
+                        print("jev-outcomes-collect.py: intercom %s skipped (%s)"
+                              % (cid, type(exc).__name__), file=sys.stderr)
+                        intercom[cid] = None
             if intercom[cid] is None:
                 evidence["intercom_seen"] = False
             else:
@@ -510,7 +520,13 @@ def collect(shadow_path, inventory_path, trajectory_db_paths, since_hours=None,
             rp = r["truth"].get("resolution_path")
             if rp:
                 hist[rp] = hist.get(rp, 0) + 1
-        summary["intercom_failed"] = sum(1 for v in intercom.values() if v is None)
+        attempted = len(intercom) - len(capped)
+        failed = sum(1 for c, v in intercom.items() if v is None and c not in capped)
+        summary["intercom_failed"] = failed
+        summary["intercom_capped"] = len(capped)
+        if attempted and failed == attempted:
+            print("jev-outcomes-collect.py: WARNING every intercom GET failed (%d/%d); "
+                  "token revoked or API down?" % (failed, attempted), file=sys.stderr)
         summary["resolution_path_labeled"] = sum(hist.values())
         summary["resolution_path_hist"] = hist
     return records, summary
