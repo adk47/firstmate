@@ -232,6 +232,56 @@ describe("support-tools creditVerificationEnabled flag wiring", () => {
   });
 });
 
+// QA finding (MUS-1528 round 1): no test invoked profileAnalyticsStatusFactory,
+// so a one-token edit (ctx.sessionKey -> ctx.sessionId, or severing
+// intercomToken) survived the whole suite — every customer including paying
+// Pro subscribers would get silently denied. This mirrors registerAndGetCvTool
+// above, which already proves this convention for a sibling tool.
+describe("support-tools profile_analytics_status factory wiring", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("anchors the entitlement gate on ctx.sessionKey, never ctx.sessionId", async () => {
+    // The entitlement gate's FIRST observable action, if and only if it was
+    // handed a valid Intercom session key, is an Intercom conversation fetch.
+    // A distinct, non-matching ctx.sessionId proves nothing reaches the gate
+    // if the wiring regresses to that field instead: deriveConvId(sessionId)
+    // returns null and denies before any fetch happens.
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    let factory: ((ctx: any) => any) | undefined;
+    const api = {
+      pluginConfig: {
+        musoApiBase: "https://api.muso.ai",
+        adminEmail: "admin@muso.ai", adminPassword: "pw", clickupApiKey: "k", clickupListId: "list",
+        clickupProfileIdFieldId: "pf", clickupUserEmailFieldId: "ef",
+        intercomToken: "tok",
+      },
+      registerTool: (f: any, opts: { name: string }) => {
+        if (opts.name === "profile_analytics_status") factory = f;
+      },
+    };
+    (pluginEntry as any).register(api);
+    expect(factory).toBeDefined();
+
+    const tool = factory!({
+      sessionKey: "agent:support:intercom:direct:CONV42",
+      sessionId: "11111111-2222-3333-4444-555555555555",
+    });
+    await tool.execute("call-1", { profile_id: "90b6866c-7026-458e-a1af-48b1c1ac1c37" });
+
+    const conversationCalls = fetchMock.mock.calls.filter(([url]: [string]) => String(url).includes("/conversations/"));
+    expect(conversationCalls).toHaveLength(1);
+    expect(String(conversationCalls[0][0])).toContain("/conversations/CONV42");
+  });
+});
+
 describe("support-tools manifest contracts.tools drift check", () => {
   it("contracts.tools in openclaw.plugin.json matches the tools registered in src/index.ts", () => {
     const __dirname_local = dirname(fileURLToPath(import.meta.url));
