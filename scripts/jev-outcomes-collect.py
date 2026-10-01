@@ -427,13 +427,14 @@ def label_intercom(turn, truth, ic):
     caroline_in_win = any(p["caroline_comment"] for p in in_win)
     last_close = ic["last_close_at"]
     closed_after_start = last_close is not None and last_close >= start
+    closed_in_win = last_close is not None and start <= last_close < end
 
     add = {}
     if human_in_win:
         add["resolution_path"] = "human_required"
     elif truth.get("first_tool") not in (None, "none"):
         add["resolution_path"] = "caroline_tool"
-    elif not caroline_in_win and closed_after_start and ic["reopens"] == 0:
+    elif not caroline_in_win and closed_in_win and ic["reopens"] == 0:
         add["resolution_path"] = "no_reply"
 
     if caroline_in_win:

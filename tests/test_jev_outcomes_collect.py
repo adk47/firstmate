@@ -835,3 +835,14 @@ def test_cli_max_convs_is_wired_through_main(inventory, tmp_path, monkeypatch):
                  "--inventory", inventory, "--trajectory-db", str(tmp_path / "n.sqlite"),
                  "--intercom", "--intercom-token-file", str(envf), "--intercom-max-convs", "1"])
     assert rc == 0 and calls == ["C1"]
+
+
+def test_close_in_a_later_turn_does_not_make_an_earlier_turn_no_reply(inventory, tmp_path):
+    # Bot R1: a close at 11:00 belongs to the 10:10 turn's window, not the
+    # 10:00 turn's. Only the turn whose own window holds the close is no_reply.
+    c = conv([], state="closed", last_close=T0_EPOCH + 3600)
+    rows = [shadow_row("C1", T0), shadow_row("C1", "2026-09-23T10:10:00Z")]
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c}, shadow_rows=rows)
+    first, second = sorted(recs, key=lambda r: r["turn_start"])
+    assert "resolution_path" not in first["truth"]
+    assert second["truth"]["resolution_path"] == "no_reply"
