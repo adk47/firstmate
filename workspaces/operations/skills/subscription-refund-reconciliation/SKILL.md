@@ -25,7 +25,7 @@ Reconcile a subscription downgrade credit before refunding an accidental upgrade
 
 8. When summarizing an existing support resolution, treat conversation notes and customer replies as claims, not proof. Re-read every identified charge, each charge’s concrete refund record, the customer balance, and the subscription; reconcile them with the refund/audit log, then report only the confirmed amount and disposition per charge.
 
-9. Separate proposed from read-back-confirmed writes; finish only when balance, refunds, and subscription match the resolution. For engineering, give the observed symptom and timeline of plan selections, charge, reversal invoices, and balance transactions. Keep remediation separate; do not infer a root cause or prescribe product changes from billing artifacts.
+9. Separate proposed from read-back-confirmed writes; finish only when balance, refunds, and subscription match the resolution. For engineering, give the observed symptom and timeline of plan selections, charge, reversal invoices, and balance transactions. Keep remediation separate; do not infer a root cause or prescribe product changes from billing artifacts. Customer-facing bar: `references/customer-communication.md`.
 
 ## Roster-seat proration branch
 
