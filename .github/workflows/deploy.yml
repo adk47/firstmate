@@ -33,10 +33,10 @@ env:
 jobs:
   deploy:
     runs-on: [self-hosted, hydra]
-    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        timeout-minutes: 10
         with:
           # Full history: Step 4a's baseline-aware skill-drift check resolves
           # `git show <.deployed-sha>:<path>`, and that baseline can lag main by
@@ -48,6 +48,7 @@ jobs:
           fetch-depth: 0
 
       - name: Check deploy notification path
+        timeout-minutes: 5
         run: |
           # Deploy notifications go through `muso slack send --bot devops`
           # (scripts/lib/slack-notify.sh) — the same path the watchdogs use,
@@ -86,6 +87,7 @@ jobs:
         id: stale_check
         env:
           HYDRA_ALLOW_STALE_DEPLOY: ${{ vars.HYDRA_ALLOW_STALE_DEPLOY }}
+        timeout-minutes: 10
         run: |
           git fetch origin main --quiet
           TIP=$(git rev-parse origin/main)
@@ -101,6 +103,7 @@ jobs:
         # A dispatch run still lets a human scope it via the `target` input.
         id: detect
         if: steps.stale_check.outputs.proceed == 'true'
+        timeout-minutes: 5
         run: |
           TARGET="${{ github.event.inputs.target || 'all' }}"
           echo "target=$TARGET" >> $GITHUB_OUTPUT
@@ -117,6 +120,7 @@ jobs:
           # back a mutation THIS run started (never one a concurrent manual
           # deploy owns).
           HYDRA_DEPLOY_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+        timeout-minutes: 40
         run: |
           echo "::group::Running deploy script"
           TARGET="${{ steps.detect.outputs.target }}"
@@ -130,6 +134,7 @@ jobs:
 
       - name: Post to Slack — success
         if: success() && steps.stale_check.outputs.proceed == 'true'
+        timeout-minutes: 5
         run: |
           COMMIT_SHA="${{ github.sha }}"
           COMMIT_MSG=$(git log -1 --pretty=format:'%s')
@@ -151,6 +156,7 @@ jobs:
 
       - name: Rollback on failure
         if: failure() && steps.stale_check.outputs.proceed == 'true'
+        timeout-minutes: 25
         run: |
           # deploy.sh Step 0 (drift check) and Step 4a (pre-flight) are
           # READ-ONLY and halt with exit 1 BEFORE any rsync when the server
