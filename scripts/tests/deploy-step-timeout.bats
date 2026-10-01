@@ -115,7 +115,7 @@ EOF
 
   run run_step
   [ "$status" -eq 0 ]
-  ! grep -qx "rollback.sh invoked" "$LOG"
+  if grep -qx "rollback.sh invoked" "$LOG"; then false; fi
   grep -qx "deploy-notify.sh critical" "$LOG"
 }
 
@@ -129,6 +129,6 @@ EOF
 
   run run_step
   [ "$status" -eq 0 ]
-  ! grep -qx "rollback.sh invoked" "$LOG"
+  if grep -qx "rollback.sh invoked" "$LOG"; then false; fi
   grep -qx "deploy-notify.sh critical" "$LOG"
 }
