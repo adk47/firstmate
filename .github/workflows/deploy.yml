@@ -33,6 +33,7 @@ env:
 jobs:
   deploy:
     runs-on: [self-hosted, hydra]
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v5
