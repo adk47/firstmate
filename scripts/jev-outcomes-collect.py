@@ -402,12 +402,9 @@ def summarize_intercom(conv, caroline_id):
                                  and str(a_id) == str(caroline_id)
                                  and p.get("part_type") == "comment"),
         })
-    assignee = conv.get("admin_assignee_id")
     rating = conv.get("conversation_rating")
     return {
         "parts": parts,
-        "human_assignee": assignee is not None and str(assignee) != str(caroline_id),
-        "first_assignment_at": _epoch(stats.get("first_assignment_at")),
         "last_close_at": _epoch(stats.get("last_close_at")),
         "reopens": stats.get("count_reopens") if isinstance(stats.get("count_reopens"), int) else 0,
         "csat": rating.get("rating") if isinstance(rating, dict) else None,
@@ -421,9 +418,10 @@ def label_intercom(turn, truth, ic):
     start = turn["turn_start_dt"].timestamp()
     end = turn["turn_end_dt"].timestamp()
     in_win = [p for p in ic["parts"] if start <= p["at"] < end]
-    human_in_win = any(p["human"] for p in in_win) or (
-        ic["human_assignee"] and ic["first_assignment_at"] is not None
-        and start <= ic["first_assignment_at"] < end)
+    # Human takeover = a human-authored part in the window. Assignment alone is
+    # not used: first_assignment_at is the first assignment to anyone, so it
+    # cannot date the current human assignee (bot review, PR #1059).
+    human_in_win = any(p["human"] for p in in_win)
     caroline_in_win = any(p["caroline_comment"] for p in in_win)
     last_close = ic["last_close_at"]
     closed_after_start = last_close is not None and last_close >= start

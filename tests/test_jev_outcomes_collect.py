@@ -501,10 +501,23 @@ def test_human_admin_part_in_window_is_human_required_and_beats_a_tool_call(inve
     assert recs[0]["evidence"]["human_admin_replied"] is True
 
 
-def test_human_assignee_with_assignment_in_window_is_human_required(inventory, tmp_path):
+def test_human_assignee_alone_is_not_human_required(inventory, tmp_path):
+    # Bot review on PR #1059: first_assignment_at is the first assignment to
+    # ANYONE while admin_assignee_id is the CURRENT one, so pairing them can
+    # label a turn human_required when Caroline was assigned first and a human
+    # only took over later. Assignment alone must stay unlabelled.
     c = conv([], assignee=HUMAN, first_assignment=T0_EPOCH + 20)
     recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
-    assert recs[0]["truth"]["resolution_path"] == "human_required"
+    assert "resolution_path" not in recs[0]["truth"]
+
+
+def test_reassignment_to_human_after_caroline_does_not_taint_earlier_turn(inventory, tmp_path):
+    rows = [shadow_row("C1", T0), shadow_row("C1", "2026-09-23T10:10:00Z")]
+    # Caroline assigned in turn 1 (first_assignment), human holds it by turn 2,
+    # but no human authored a part anywhere.
+    c = conv([], assignee=HUMAN, first_assignment=T0_EPOCH + 5)
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c}, shadow_rows=rows)
+    assert all("resolution_path" not in r["truth"] for r in recs)
 
 
 def test_caroline_assignee_is_not_a_human_takeover(inventory, tmp_path):
@@ -801,14 +814,6 @@ def test_caroline_note_part_is_not_a_reply(inventory, tmp_path):
     recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
     assert "needs_reply" not in recs[0]["truth"]
     assert recs[0]["evidence"]["caroline_replied"] is False
-
-
-def test_human_assignee_with_assignment_outside_window_is_not_human_required(inventory, tmp_path):
-    rows = [shadow_row("C1", T0), shadow_row("C1", "2026-09-23T10:10:00Z")]
-    c = conv([], assignee=HUMAN, first_assignment=T0_EPOCH + 700)  # turn 2 only
-    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c}, shadow_rows=rows)
-    assert "resolution_path" not in recs[0]["truth"]
-    assert recs[1]["truth"]["resolution_path"] == "human_required"
 
 
 def test_capped_conversations_are_not_counted_as_failures(inventory, tmp_path):
