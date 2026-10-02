@@ -1316,6 +1316,12 @@ RSYNC_EXCLUDES=(
   # otherwise delete the state of a live escalation -- and the pre-flight
   # dry-run fails on it, which twice blocked THIS PR on an unrelated lane.
   --exclude='workspaces/*/.bridge-*.json'
+  # Same state again, with an 'agent-' infix: workspaces/operations/
+  # .agent-bridge-215476152669042.json (838 B, opened 2026-10-01 17:38:14Z) is a
+  # live in-flight request on node-8. The dotted '.bridge-*' sibling above misses
+  # it (no 'agent-' infix) and 'bridge-*' misses the leading dot, so a deploy would
+  # delete it mid-escalation. Mirrored KEEP glob in qa-clean-merge-scratch.sh.
+  --exclude='workspaces/*/.agent-bridge-*.json'
   # Same state, un-dotted: the AGENT names its request payload at runtime and
   # wrote workspaces/operations/bridge-request-<conversationId>.json (2026-09-15,
   # blocked #943). Top-level workspace files never auto-classify, so the shape

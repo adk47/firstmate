@@ -107,6 +107,20 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ -e "$TARGET/SOUL.md" ]
 }
 
+@test "agent bridge request ('.agent-bridge-<id>.json') is kept, not deleted" {
+  # Live in-flight escalation found on node-8 (2026-10-01, opened 17:38:14Z):
+  # workspaces/operations/.agent-bridge-215476152669042.json. It matched none of
+  # '.bridge-*.json' (no 'agent-' infix), 'bridge-request-*' or 'bridge-*' (leading
+  # dot), so a deploy would have deleted it mid-escalation. Must be KEPT.
+  echo x > "$TARGET/SOUL.md"
+  echo x > "$TARGET/.agent-bridge-215476152669042.json"
+
+  run "$SCRIPT" "$TARGET"
+  [ "$status" -eq 0 ]
+  [ -e "$TARGET/.agent-bridge-215476152669042.json" ]
+  [ -e "$TARGET/SOUL.md" ]
+}
+
 @test "drift guard: KEEP globs cover every workspaces/*/ FILE exclude in deploy.sh" {
   # Extract deploy.sh's workspaces/*/<fileglob> excludes (single path component,
   # no trailing slash = a file, not a dir). Every one must be a KEEP glob, else a

@@ -192,6 +192,7 @@ required_excludes=(
   "workspaces/*/*.sql"
   "workspaces/*/*.sh"
   "workspaces/*/.bridge-*.json"
+  "workspaces/*/.agent-bridge-*.json"
   "workspaces/*/bridge-request-*.json"
   "workspaces/*/bridge-*.json"
   "workspaces/*/skills/*/references/daily-batches/"

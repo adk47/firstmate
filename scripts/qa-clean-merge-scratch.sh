@@ -53,6 +53,7 @@ KEEP_GLOBS=(
   'openclaw-workspace-state.json'
   '*tmp*'                              # any 'tmp'-marked scratch: .tmp-*, tmp_*, *.tmp
   '.bridge-*.json'                     # agent-bridge in-flight request state (#877)
+  '.agent-bridge-*.json'               # same, 'agent-' infix variant (2026-10-01, live .agent-bridge-215476152669042.json)
   'bridge-request-*.json'              # same, un-dotted agent-named variant (2026-09-15, #943)
   'bridge-*.json'                      # agent names bridge payloads by case too (2026-09-16, #950)
   'final-*.json'                       # scout company-finder run scratch (2026-07-21, #719)
