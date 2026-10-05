@@ -12,7 +12,8 @@
 #       always kept) -> start main -> wait for STABLE health (200 for STABLE_SECS).
 # FAIL-OPEN: if the prune fails, main is started anyway. Never retried, never restarts twice. A failed
 #       BACKUP aborts before anything is stopped (main is untouched). A failed STOP skips the prune.
-#       Exit non-zero (so OnFailure= pages) if stop/start failed or health never stabilised.
+#       Exit non-zero (so OnFailure= pages) if the prune, stop or start failed or health never stabilised
+#       (main is still started first: paging never costs availability).
 # Rollback of data: $BACKUP_ROOT/<ts>/ (stop main, copy the .sqlite files back, start).
 # Usage: main-prune-restart.sh [reason]
 #   HYDRA_MAIN_MIN_UPTIME_H=N  skip when main has been up < N hours (the nightly timer sets 4).
@@ -96,7 +97,12 @@ s=$(date +%s)
   > "$LOG_DIR/hydra-main-prune-$TS.json" 2> "$LOG_DIR/hydra-main-prune-$TS.err" || prune_rc=$?
 rm -rf "$TC"
 log "cleanup rc=$prune_rc secs=$(( $(date +%s)-s )) rows_after=$(rows)"
-[ "$prune_rc" = skipped ] || [ "$prune_rc" -eq 0 ] || log "WARN prune failed (rc=$prune_rc, see $LOG_DIR/hydra-main-prune-$TS.err) - starting main anyway"
+if [ "$prune_rc" != skipped ] && [ "$prune_rc" -ne 0 ]; then
+  # Fail-open (main still starts below) but fail the unit once main is up, so OnFailure= pages: a prune that
+  # fails every night lets rows climb back to the ~7k restart freeze with nothing else to say so.
+  log "WARN prune failed (rc=$prune_rc, see $LOG_DIR/hydra-main-prune-$TS.err) - starting main anyway"
+  FAILED=1
+fi
 start_rc=0; systemctl start "$SVC" || start_rc=$?
 log "start issued rc=$start_rc (active=$(systemctl is-active "$SVC"))"
 [ "$start_rc" -eq 0 ] || { log "ERROR systemctl start failed (rc=$start_rc) - not retrying"; FAILED=1; }

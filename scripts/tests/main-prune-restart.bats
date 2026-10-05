@@ -188,10 +188,13 @@ _count() { grep -c "$1" "$CALLS" || true; }
   grep -q '^maintenance stop' "$CALLS"
 }
 
-@test "a failing PRUNE alone still exits 0: main is up, the WARN is the signal" {
+@test "a failing PRUNE still starts main once, but fails the unit so OnFailure pages" {
   echo 7 > "$TEST_TMPDIR/openclaw.rc"
   _run
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
+  [ "$(_count 'systemctl start openclaw-gateway-main')" -eq 1 ]
+  [ "$(_count '^openclaw ')" -eq 1 ]
+  [[ "$output" == *"RESULT OK"* ]]
 }
 
 @test "stop that exits NON-ZERO (timeout) while the unit already reads inactive still never prunes" {
