@@ -900,11 +900,17 @@ fi
 kill -KILL "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
 wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
 LOCK_HOLDER_PID=
-PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" \
-  FM_HOME_SUMMARY_IF_IDLE=1 "$WRITER" --best-effort \
-  || fail "stale-lock recovery changed the best-effort caller result"
+# A watcher-spawned refresh that tried the lock before the holder died may still
+# own the single-flight spawn guard, so a watcher-path retry can no-op until it
+# exits; keep retrying the way the next watcher interval would.
 i=0
 while [ ! -e "$RESTART_HOME/state/home-summary.json" ] && [ "$i" -lt 200 ]; do
+  if [ $((i % 10)) -eq 0 ]; then
+    PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" \
+      FM_HOME_SUMMARY_IF_IDLE=1 "$WRITER" --best-effort \
+      || fail "stale-lock recovery changed the best-effort caller result"
+  fi
+  [ -e "$RESTART_HOME/state/home-summary.json" ] && break
   sleep 0.05
   i=$((i + 1))
 done
@@ -1149,47 +1155,63 @@ jq -e '
 pass "fleet-sized slow current-state reads still publish a valid ledger inside the deadline"
 
 SPAWN_HOME=$(slow_home_fixture spawn-home 20)
-SPAWN_GUARD="$SPAWN_HOME/state/.home-summary-refresh.spawn.d"
+SPAWN_GUARD="$SPAWN_HOME/state/.home-summary-refresh.spawn"
 PATH="$SLOWBIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SPAWN_HOME" \
   FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
   FM_SLOW_NM_SLEEP=5 FM_HOME_SUMMARY_TIMEOUT=60 FM_HOME_SUMMARY_PREFETCH_HEADROOM=55 \
-  "$WRITER" --best-effort \
+  FM_HOME_SUMMARY_IF_IDLE=1 "$WRITER" --best-effort \
   > "$TMP_ROOT/spawn-first.out" 2> "$TMP_ROOT/spawn-first.err" &
 SLOW_WRITER_PID=$!
 i=0
-while [ ! -d "$SPAWN_GUARD" ] && [ "$i" -lt 100 ]; do
+while [ ! -L "$SPAWN_GUARD" ] && [ "$i" -lt 100 ]; do
   kill -0 "$SLOW_WRITER_PID" 2>/dev/null || break
   sleep 0.05
   i=$((i + 1))
 done
-[ -d "$SPAWN_GUARD" ] || fail "the first refresh did not hold its spawn guard"
-first_guard_pid=$(cat "$SPAWN_GUARD/pid" 2>/dev/null || true)
+[ -L "$SPAWN_GUARD" ] || fail "the first refresh did not hold its spawn guard"
+first_guard_pid=$(readlink "$SPAWN_GUARD" 2>/dev/null || true)
+[ "$first_guard_pid" = "$SLOW_WRITER_PID" ] \
+  || fail "the spawn guard did not name its owner pid: $first_guard_pid"
 started=$(date +%s)
 PATH="$SLOWBIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SPAWN_HOME" \
   FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
   FM_SLOW_NM_SLEEP=5 FM_HOME_SUMMARY_TIMEOUT=60 FM_HOME_SUMMARY_PREFETCH_HEADROOM=55 \
-  "$WRITER" --best-effort \
+  FM_HOME_SUMMARY_IF_IDLE=1 "$WRITER" --best-effort \
   || fail "a second spawn while one ran changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
 [ "$elapsed" -lt 5 ] \
   || fail "a second refresh spawn waited ${elapsed}s behind a live refresh"
-[ "$(cat "$SPAWN_GUARD/pid" 2>/dev/null || true)" = "$first_guard_pid" ] \
+[ "$(readlink "$SPAWN_GUARD" 2>/dev/null || true)" = "$first_guard_pid" ] \
   || fail "the second spawn reclaimed a live refresh guard"
-wait "$SLOW_WRITER_PID" >/dev/null 2>&1 || true
-SLOW_WRITER_PID=
-[ -f "$SPAWN_HOME/state/home-summary.json" ] \
-  || fail "the first refresh did not publish after the second spawn no-oped"
-# Stale recovery: a guard whose recorded pid is dead must not wedge publication.
-mkdir -p "$SPAWN_GUARD"
-dead_guard_pid=999999
-while kill -0 "$dead_guard_pid" 2>/dev/null; do dead_guard_pid=$((dead_guard_pid + 1)); done
-printf '%s\n' "$dead_guard_pid" > "$SPAWN_GUARD/pid"
+# A status-change caller (spawn, teardown, session start) is not single-flighted:
+# it waits on the publication lock and publishes after the in-flight refresh.
+i=0
+while [ ! -s "$SPAWN_HOME/state/.home-summary-refresh.lock/pid" ] && [ "$i" -lt 200 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -s "$SPAWN_HOME/state/.home-summary-refresh.lock/pid" ] \
+  || fail "the in-flight watcher refresh never held the publication lock"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SPAWN_HOME" \
   FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
-  FM_HOME_SUMMARY_TIMEOUT=60 "$WRITER" --best-effort \
-  || fail "a stale refresh guard changed the best-effort caller result"
+  FM_HOME_SUMMARY_TIMEOUT=120 FM_HOME_SUMMARY_PREFETCH_HEADROOM=115 "$WRITER" --best-effort \
+  || fail "a status-change refresh during a live refresh changed the best-effort caller result"
+wait "$SLOW_WRITER_PID" >/dev/null 2>&1 || true
+SLOW_WRITER_PID=
 jq -e --arg now "$NOW_THREE" '.generated == $now' \
   "$SPAWN_HOME/state/home-summary.json" >/dev/null \
+  || fail "a status-change refresh was dropped behind the in-flight watcher refresh"
+# Stale recovery: a guard whose recorded pid is dead must not wedge publication.
+dead_guard_pid=999999
+while kill -0 "$dead_guard_pid" 2>/dev/null; do dead_guard_pid=$((dead_guard_pid + 1)); done
+ln -sn "$dead_guard_pid" "$SPAWN_GUARD"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SPAWN_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  FM_HOME_SUMMARY_TIMEOUT=120 FM_HOME_SUMMARY_PREFETCH_HEADROOM=115 \
+  FM_HOME_SUMMARY_IF_IDLE=1 "$WRITER" --best-effort \
+  || fail "a stale refresh guard changed the best-effort caller result"
+jq -e --arg now "$NOW_ONE" '.generated == $now' \
+  "$SPAWN_HOME/state/home-summary.json" >/dev/null \
   || fail "a dead-pid refresh guard wedged publication"
-[ ! -d "$SPAWN_GUARD" ] || fail "the refresh spawn guard survived its run"
+[ ! -L "$SPAWN_GUARD" ] || fail "the refresh spawn guard survived its run"
 pass "refresh spawning is single flight across watcher generations and recovers a stale guard"

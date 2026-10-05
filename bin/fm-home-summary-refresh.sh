@@ -96,48 +96,60 @@ if [ "$HOME_SUMMARY_MODE" != parent ]; then
   . "$SCRIPT_DIR/fm-wake-lib.sh"
 fi
 
-# Single-flight guard for refresh spawning, independent of the worker's
-# publication lock. A watcher generation churns on every wake and each one asks
-# for a refresh while the ledger is stale, so without this a burst of parent +
-# timeout + worker processes forks on every poll even though only one publication
-# can ever run. A directory is the atomic claim; the pid inside lets a dead owner
-# be reclaimed, and the age bound reclaims a wedged owner that outlived the
-# caller's own deadline. Best-effort callers only: a diagnostic or test run
-# without --best-effort still computes a real refresh.
+# Single-flight guard for the watcher's refresh spawning, independent of the
+# worker's publication lock. A watcher generation churns on every wake and each
+# one asks for a refresh while the ledger is stale, so without this a burst of
+# parent + timeout + worker processes forks on every poll even though only one
+# publication can ever run. The claim is a symlink whose target is the owner
+# pid, created atomically so no observer ever sees an owner-less claim. A dead
+# or wedged owner (older than the caller's own deadline) is reclaimed under a
+# short-lived reclaim mutex so two reclaimers cannot both win. Spawn, teardown,
+# and session-start refreshes skip the guard and keep waiting on the
+# publication lock, so a status change always gets a later publication.
 HOME_SUMMARY_SPAWN_GUARD=
-home_summary_spawn_guard_release() {  # <guard-dir>
-  local guard=$1 pid
+# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
+home_summary_spawn_guard_release() {  # <guard>
+  local guard=$1
   [ -n "$guard" ] || return 0
-  pid=$(cat "$guard/pid" 2>/dev/null || true)
-  [ "$pid" = "$$" ] || return 0
-  rm -f -- "$guard/pid" 2>/dev/null || true
-  rmdir -- "$guard" 2>/dev/null || true
+  [ "$(readlink "$guard" 2>/dev/null || true)" = "$$" ] || return 0
+  rm -f -- "$guard" 2>/dev/null || true
 }
 
-home_summary_spawn_guard_acquire() {  # <guard-dir>
-  local guard=$1 pid mtime now age
+home_summary_path_age() {  # <path>
+  local mtime now
+  mtime=$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || true)
+  now=$(date +%s 2>/dev/null || true)
+  case "$mtime:$now" in
+    *[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  printf '%s\n' "$((now - mtime))"
+}
+
+home_summary_spawn_guard_live() {  # <guard>
+  local pid age
+  pid=$(readlink "$1" 2>/dev/null) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  age=$(home_summary_path_age "$1") || return 0
+  [ "$age" -lt "$((HOME_SUMMARY_TIMEOUT + 30))" ]
+}
+
+home_summary_spawn_guard_acquire() {  # <guard>
+  local guard=$1 reclaim="$1.reclaim" age rc=1
   [ -d "$STATE" ] || return 0
-  if mkdir -- "$guard" 2>/dev/null; then
-    printf '%s\n' "$$" > "$guard/pid" 2>/dev/null || true
-    return 0
+  ln -sn "$$" "$guard" 2>/dev/null && return 0
+  home_summary_spawn_guard_live "$guard" && return 1
+  if ! mkdir -- "$reclaim" 2>/dev/null; then
+    age=$(home_summary_path_age "$reclaim") && [ "$age" -ge 10 ] \
+      && rmdir -- "$reclaim" 2>/dev/null
+    return 1
   fi
-  pid=$(cat "$guard/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    mtime=$(stat -f %m "$guard/pid" 2>/dev/null || stat -c %Y "$guard/pid" 2>/dev/null || true)
-    now=$(date +%s 2>/dev/null || true)
-    case "$mtime:$now" in
-      *[!0-9:]*) ;;
-      *)
-        age=$((now - mtime))
-        [ "$age" -lt "$((HOME_SUMMARY_TIMEOUT + 30))" ] && return 1
-        ;;
-    esac
+  if ! home_summary_spawn_guard_live "$guard"; then
+    rm -f -- "$guard" 2>/dev/null || true
+    ln -sn "$$" "$guard" 2>/dev/null && rc=0
   fi
-  rm -f -- "$guard/pid" 2>/dev/null || true
-  rmdir -- "$guard" 2>/dev/null || true
-  mkdir -- "$guard" 2>/dev/null || return 1
-  printf '%s\n' "$$" > "$guard/pid" 2>/dev/null || true
-  return 0
+  rmdir -- "$reclaim" 2>/dev/null || true
+  return "$rc"
 }
 
 # shellcheck disable=SC2329 # Invoked by the signal and EXIT traps below.
@@ -274,15 +286,14 @@ fi
 
 if [ "$HOME_SUMMARY_MODE" = parent ]; then
   attempt_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || attempt_stamp=
-  # Best-effort callers are the watcher, session start, spawn, and teardown; one
-  # live refresh at a time is enough for a side-band ledger, so a second spawn
-  # exits without forking its worker. Non-best-effort diagnostic/test runs skip
-  # the guard and always compute a real refresh.
-  if [ "$BEST_EFFORT" -eq 1 ]; then
-    if ! home_summary_spawn_guard_acquire "$STATE/.home-summary-refresh.spawn.d"; then
+  # The watcher's if-idle refresh is single-flight: one live refresh at a time
+  # is enough for its periodic side-band publication, so a second spawn exits
+  # without forking its worker.
+  if [ "$BEST_EFFORT" -eq 1 ] && [ "$HOME_SUMMARY_IF_IDLE" -eq 1 ]; then
+    if ! home_summary_spawn_guard_acquire "$STATE/.home-summary-refresh.spawn"; then
       exit 0
     fi
-    HOME_SUMMARY_SPAWN_GUARD="$STATE/.home-summary-refresh.spawn.d"
+    HOME_SUMMARY_SPAWN_GUARD="$STATE/.home-summary-refresh.spawn"
     trap 'home_summary_spawn_guard_release "$HOME_SUMMARY_SPAWN_GUARD"' EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT

@@ -759,12 +759,15 @@ prefetch_task_current_states() {
   # One bounded `no-mistakes runs` listing per repository, shared by every task in
   # that repo: the cross-branch attribution fallback is repo-scoped, so a listing
   # computed under another repo would mis-attribute, while a per-repo cache cuts
-  # one ledger read per fallback task. Best-effort and inside the same deadline;
-  # a task whose repo is not cached simply falls back to its own read.
+  # one ledger read per fallback task. Best-effort: the listings run concurrently,
+  # each bounded by the remaining deadline, and only a successful non-empty
+  # listing is published, so a task whose repo is not cached falls back to its
+  # own read.
   if [ "$SNAPSHOT_TASK_META_COUNT" -gt 0 ] && command -v no-mistakes >/dev/null 2>&1 \
     && mkdir -p "$SNAPSHOT_TASK_DIR/runs-cache" 2>/dev/null; then
     SNAPSHOT_RUNS_LIST_DIR="$SNAPSHOT_TASK_DIR/runs-cache"
-    local repo_wt repo_key repo_kind line seen_wts=''
+    local repo_wt repo_key repo_kind line seen_wts='' seen_keys='' list_bound list_tmp
+    local -a list_pids=()
     for meta in "${SNAPSHOT_TASK_METAS[@]}"; do
       repo_kind=''; repo_wt=''
       while IFS= read -r line; do
@@ -779,11 +782,24 @@ prefetch_task_current_states() {
       seen_wts="${seen_wts}${seen_wts:+$'\n'}${repo_wt}"
       repo_key=$(fm_nm_repo_cache_key "$repo_wt" 2>/dev/null) || continue
       [ -n "$repo_key" ] || continue
-      [ -f "$SNAPSHOT_RUNS_LIST_DIR/$repo_key" ] && continue
-      [ "$SECONDS" -ge "$deadline" ] && break
-      ( cd "$repo_wt" && fm_run_timed "$FM_SNAPSHOT_CREW_STATE_TIMEOUT" \
-          no-mistakes runs --limit 200 ) > "$SNAPSHOT_RUNS_LIST_DIR/$repo_key" 2>/dev/null || true
+      case $'\n'"$seen_keys"$'\n' in *$'\n'"$repo_key"$'\n'*) continue ;; esac
+      seen_keys="${seen_keys}${seen_keys:+$'\n'}${repo_key}"
+      list_bound=$((deadline - SECONDS))
+      [ "$list_bound" -gt 0 ] || break
+      [ "$list_bound" -le "$FM_SNAPSHOT_CREW_STATE_TIMEOUT" ] || list_bound=$FM_SNAPSHOT_CREW_STATE_TIMEOUT
+      list_tmp="$SNAPSHOT_RUNS_LIST_DIR/.$repo_key.tmp"
+      (
+        if ( cd "$repo_wt" && fm_run_timed "$list_bound" \
+            no-mistakes runs --limit "${FM_CREW_STATE_RUNS_LIMIT:-200}" ) > "$list_tmp" 2>/dev/null \
+          && [ -s "$list_tmp" ]; then
+          mv -f -- "$list_tmp" "$SNAPSHOT_RUNS_LIST_DIR/$repo_key" 2>/dev/null || rm -f -- "$list_tmp"
+        else
+          rm -f -- "$list_tmp"
+        fi
+      ) &
+      list_pids[${#list_pids[@]}]=$!
     done
+    [ "${#list_pids[@]}" -eq 0 ] || wait "${list_pids[@]}" 2>/dev/null || true
   fi
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
