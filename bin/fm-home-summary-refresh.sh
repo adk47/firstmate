@@ -14,9 +14,10 @@
 # ledger. After a failed, interrupted, or killed refresh, the ledger path holds
 # either the prior complete document or the new complete document, never torn output.
 # A home-local refresh lock serializes concurrent triggers so an older in-flight
-# summary cannot overwrite one computed after a later status change, and a
-# best-effort spawn guard keeps at most one refresh in flight across watcher
-# generations (a dead or over-age guard is reclaimed). The shared timeout owner
+# summary cannot overwrite one computed after a later status change. Only the
+# watcher's if-idle refresh is also single-flight across watcher generations
+# (see the spawn guard below); status-change callers still wait on the lock.
+# The shared timeout owner
 # bounds the complete refresh with FM_HOME_SUMMARY_TIMEOUT (default 60 seconds),
 # handing the producer FM_HOME_SUMMARY_TIMEOUT minus FM_HOME_SUMMARY_PREFETCH_HEADROOM
 # as its local observation budget so composition finishes before the deadline.
