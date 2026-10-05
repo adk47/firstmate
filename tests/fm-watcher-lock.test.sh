@@ -449,8 +449,8 @@ test_watch_restart_rejects_reused_pid() {
   pass "watch restart preserves recovery without signaling a reused pid"
 }
 
-start_detached_peer() {  # <ready-file> <pid-file> <node-script>
-  ( node -e "$3" "$1" & printf '%s\n' "$!" > "$2" )
+start_detached_peer() {  # <ready-file> <pid-file> <node-script> [node-arg]
+  ( node -e "$3" "$1" "${4:-}" & printf '%s\n' "$!" > "$2" )
   local i=0
   while [ "$i" -lt 50 ] && [ ! -s "$1" ]; do
     sleep 0.1
@@ -560,8 +560,11 @@ test_restart_waits_out_deferred_term_then_starts_successor() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
+  # Like a real watcher's EXIT trap, the incumbent releases its lock as it exits,
+  # so the successor takes a released lock instead of resurfacing a crash.
   start_detached_peer "$dir/peer.ready" "$dir/peer.pid" \
-    'const fs = require("node:fs"); process.on("SIGTERM", () => setTimeout(() => process.exit(1), 6000)); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 60000)' \
+    'const fs = require("node:fs"); process.on("SIGTERM", () => setTimeout(() => { fs.rmSync(process.argv[2], { recursive: true, force: true }); process.exit(1); }, 6000)); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 60000)' \
+    "$state/.watch.lock" \
     || fail "deferred-TERM incumbent did not become ready"
   peer=$(cat "$dir/peer.pid")
   record_peer_lock "$dir" "$peer" || { kill -KILL "$peer" 2>/dev/null; fail "could not identify incumbent pid"; }
