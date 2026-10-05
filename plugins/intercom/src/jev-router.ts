@@ -723,6 +723,12 @@ export interface JevTurnFailure {
   reason: string;
   httpStatus: number | null;
   latencyMs: number;
+  // The payload the failed call carried, so the failure shadow row hashes the
+  // REAL state/questions instead of sha256("{}"). Absent only on
+  // "questions_unavailable", which fails before either exists.
+  state?: unknown;
+  questions?: unknown;
+  model?: string;
   // See JevTurnResult.stateVariant — set even on a failed call, since the
   // SOUL.md read (success or fallback) happens before callJev, independent
   // of whether the HTTP call itself later fails.
@@ -816,6 +822,9 @@ export function createJevTurnRunner(
             reason: result.reason,
             httpStatus: result.httpStatus,
             latencyMs: result.latencyMs,
+            state,
+            questions,
+            model: cfg.model ?? DEFAULT_JEV_MODEL,
             ...(stateVariant !== undefined ? { stateVariant } : {}),
           };
         }

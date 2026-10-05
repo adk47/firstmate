@@ -865,6 +865,18 @@ describe("createJevTurnRunner", () => {
     expect(first).toEqual(second);
   });
 
+  it("an HTTP failure outcome carries the real state, questions and model (MUS-3191)", async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: false, status: 502, json: async () => ({}) })) as unknown as typeof fetch;
+    const runner = createJevTurnRunner({ apiKey: "k", model: "jev-x", fetchImpl });
+    const result = await runner({ message: "hi", turnCount: 1 });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("http_502");
+    expect(result.state).toBeDefined();
+    expect(result.questions).toBeDefined();
+    expect(result.model).toBe("jev-x");
+  });
+
   it("returns a questions_unavailable failure outcome without calling fetch when the questions file is unavailable", async () => {
     // caroline-questions.json is checked in by a concurrent workstream and
     // may or may not exist depending on when that PR lands; stub the loader
