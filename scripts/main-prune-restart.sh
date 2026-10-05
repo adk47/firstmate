@@ -11,7 +11,8 @@
 #       pruneAfter=$PRUNE on a TEMP config (live openclaw.json is not edited; agent :main sessions are
 #       always kept) -> start main -> wait for STABLE health (200 for STABLE_SECS).
 # FAIL-OPEN: if the prune fails, main is started anyway. Never retried, never restarts twice. A failed
-#       BACKUP aborts before anything is stopped (main is untouched).
+#       BACKUP aborts before anything is stopped (main is untouched). A failed STOP skips the prune.
+#       Exit non-zero (so OnFailure= pages) if stop/start failed or health never stabilised.
 # Rollback of data: $BACKUP_ROOT/<ts>/ (stop main, copy the .sqlite files back, start).
 # Usage: main-prune-restart.sh [reason]
 #   HYDRA_MAIN_MIN_UPTIME_H=N  skip when main has been up < N hours (the nightly timer sets 4).
@@ -79,15 +80,26 @@ p, v = sys.argv[1], sys.argv[2]; j = json.load(open(p)); j["session"]["maintenan
 PY
 
 # 3. stop -> prune offline -> start. The prune's exit status is LOGGED, never acted on: fail-open.
-s=$(date +%s); systemctl stop "$SVC"; log "stopped in $(( $(date +%s)-s ))s"
-s=$(date +%s); prune_rc=0
-env -i HOME=/root PATH="$PRUNE_PATH" OPENCLAW_STATE_DIR="$SD" OPENCLAW_CONFIG_PATH="$TC/openclaw.json" \
+# A stop that failed (or left main active) must NOT be pruned: cleanup would race the live gateway's
+# writes on the same SQLite files. Skip the prune, leave main running, and fail the unit so it pages.
+FAILED=0; prune_rc=0
+s=$(date +%s); stop_rc=0; systemctl stop "$SVC" || stop_rc=$?
+if [ "$stop_rc" -ne 0 ] || systemctl is-active --quiet "$SVC"; then
+  log "ERROR stop failed (rc=$stop_rc, active=$(systemctl is-active "$SVC")) - NOT pruning a live store; main left as is"
+  FAILED=1; prune_rc=skipped
+else
+  log "stopped in $(( $(date +%s)-s ))s"
+fi
+s=$(date +%s)
+[ "$prune_rc" = skipped ] || env -i HOME=/root PATH="$PRUNE_PATH" OPENCLAW_STATE_DIR="$SD" OPENCLAW_CONFIG_PATH="$TC/openclaw.json" \
   timeout 1200 openclaw sessions cleanup --all-agents --enforce --json \
   > "$LOG_DIR/hydra-main-prune-$TS.json" 2> "$LOG_DIR/hydra-main-prune-$TS.err" || prune_rc=$?
 rm -rf "$TC"
 log "cleanup rc=$prune_rc secs=$(( $(date +%s)-s )) rows_after=$(rows)"
 [ "$prune_rc" -eq 0 ] || log "WARN prune failed (rc=$prune_rc, see $LOG_DIR/hydra-main-prune-$TS.err) - starting main anyway"
-systemctl start "$SVC"; log "start issued (active=$(systemctl is-active "$SVC"))"
+start_rc=0; systemctl start "$SVC" || start_rc=$?
+log "start issued rc=$start_rc (active=$(systemctl is-active "$SVC"))"
+[ "$start_rc" -eq 0 ] || { log "ERROR systemctl start failed (rc=$start_rc) - not retrying"; FAILED=1; }
 
 # 4. wait for STABLE health (200 continuously for STABLE_SECS), max MAX_WAIT_SECS. Never restarts again.
 T0=$(date +%s); streak=""; stable=""; c=""
@@ -98,5 +110,8 @@ while [ $(( $(date +%s)-T0 )) -lt "$MAX_WAIT_SECS" ]; do
   sleep "$POLL_SECS"
 done
 if [ -n "$stable" ]; then log "RESULT OK stable 200 from ${stable}s after start; rss=$(rss_mb)MB"
-else log "RESULT NOT STABLE after $((MAX_WAIT_SECS/60)) min (last=$c) - leaving it running, no further restart"; fi
+else log "RESULT NOT STABLE after $((MAX_WAIT_SECS/60)) min (last=$c) - leaving it running, no further restart"; FAILED=1; fi
 "$MAINT_SH" stop >/dev/null 2>&1 || true
+# Exit non-zero when main did not come back (or never stopped) so the oneshot fails and OnFailure= pages.
+# A prune failure alone stays exit 0: main is up and healthy, the WARN above is the signal.
+exit "$FAILED"
