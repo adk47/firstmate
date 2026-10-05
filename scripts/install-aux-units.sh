@@ -11,10 +11,8 @@
 #     agent-to-agent messaging. Also runs on boot.
 #
 #   hydra-main-prune-restart.timer / .service
-#     Nightly 02:30 UTC. scripts/main-prune-restart.sh prunes main's sessions
-#     idle >24h offline (backed up, fail-open) and restarts main so a cold start
-#     never re-reads ~7k session_nodes rows (MUS-1295). Retires the hand-placed
-#     /usr/local/sbin/hydra-main-{prune-restart,nightly-reset}.sh bridge.
+#     Nightly 02:30 UTC: scripts/main-prune-restart.sh prunes main's sessions idle >24h offline (backed up,
+#     fail-open) and restarts main (MUS-1295). Retires the hand-placed /usr/local/sbin bridge.
 #
 #   hydra-session-thread-retention@{main,edge}.timer / .service
 #     Every 6h, removes terminal Slack channel thread sessions older
@@ -2410,22 +2408,15 @@ trstate="$(systemctl is-active "$trtmr" 2>/dev/null || true)"
 log "  $trtmr: $trstate (fires hourly)"
 
 # ─── Main gateway session prune + restart (nightly 02:30 UTC) ────
-# MUS-1295: main's cold start re-reads every session_nodes row per session
-# lookup, so a restart froze /health for 22-60 min while retention left ~7k
-# rows. scripts/main-prune-restart.sh prunes sessions idle >24h OFFLINE
-# (backup first, fail-open: a failed prune still starts main) and restarts main
-# only if it has been up >= 4h. This replaces the hand-placed bridge:
-# /usr/local/sbin/hydra-main-{prune-restart,nightly-reset}.sh run by the
-# TRANSIENT timer hydra-main-nightly-reset.timer. Both fire at 02:30 UTC, so the
-# bridge is retired BEFORE the managed timer is armed -- two prune+restarts back
-# to back is exactly the double restart this unit must never do.
+# MUS-1295: see scripts/main-prune-restart.sh. Replaces the hand-placed bridge (/usr/local/sbin/
+# hydra-main-{prune-restart,nightly-reset}.sh via the TRANSIENT hydra-main-nightly-reset.timer). Both fire at
+# 02:30 UTC, so the bridge is retired BEFORE the managed timer is armed: no double prune+restart.
 [[ -x "$HYDRA_ROOT/scripts/main-prune-restart.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/main-prune-restart.sh missing or not executable"
 
-# Never kill a legacy prune/restart that is mid-flight: it has already stopped main and has no exit trap, so
-# stopping its service leaves main down or cold-starting from a half-pruned store. Stop only the TIMER (no new
-# run), then wait for any running legacy service/script to finish; if it does not, fail the install loudly
-# (nothing has been removed or armed yet) so the next deploy retries.
+# Never kill a legacy prune/restart mid-flight (it has stopped main and has no exit trap): stop only the TIMER,
+# wait for any running legacy service/script, and if it never finishes fail the install with nothing removed
+# or armed, so the next deploy retries.
 AUX_BRIDGE_WAIT_SECS="${AUX_BRIDGE_WAIT_SECS:-900}"
 legacy_bridge_running() {
   [[ "$(systemctl is-active hydra-main-nightly-reset.service 2>/dev/null || true)" =~ ^(active|activating|deactivating)$ ]] \
@@ -2441,7 +2432,6 @@ retire_main_prune_bridge() {
     (( waited == 0 )) && log "  legacy main prune/restart bridge is running; waiting for it to finish (max ${AUX_BRIDGE_WAIT_SECS}s)"
     sleep 5; waited=$((waited + 5))
   done
-  # Transient units vanish when they finish; clear any failed leftovers by name.
   systemctl reset-failed hydra-main-nightly-reset.timer hydra-main-nightly-reset.service >/dev/null 2>&1 || true
   for f in /usr/local/sbin/hydra-main-prune-restart.sh /usr/local/sbin/hydra-main-nightly-reset.sh; do
     if [[ -e "$f" ]]; then rm -f "$f"; log "  retired hand-placed bridge: $f"; fi
@@ -2460,11 +2450,10 @@ ExecStart=$HYDRA_ROOT/scripts/main-prune-restart.sh nightly
 Environment=HOME=/root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HYDRA_MAIN_PRUNE_AFTER=24h
-# Skip when main restarted recently (a manual restart already left it fresh).
+# Skip when main restarted recently (already fresh).
 Environment=HYDRA_MAIN_MIN_UPTIME_H=4
 Environment=MAINT_SH=$HYDRA_ROOT/scripts/hydra-maintenance.sh
-# Backup + stop + prune (<=20 min) + start + stable-health wait (<=45 min).
-# systemd killing this mid-run would leave main stopped, so keep real headroom.
+# Backup + stop + prune (<=20 min) + start + health wait (<=45 min); a kill mid-run would leave main stopped.
 TimeoutStartSec=90min
 # No Restart=: a failed run must never re-run itself (never loops).
 StandardOutput=append:/var/log/hydra-main-prune-restart.log
@@ -2477,7 +2466,7 @@ Description=Prune main-gateway sessions and restart main nightly at 02:30 UTC
 
 [Timer]
 OnCalendar=*-*-* 02:30:00 UTC
-# No Persistent=: a missed night must not become a restart at boot/catch-up.
+# No Persistent=: a missed night must not become a boot-time restart.
 Unit=hydra-main-prune-restart.service
 
 [Install]

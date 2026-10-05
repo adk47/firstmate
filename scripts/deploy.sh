@@ -57,6 +57,8 @@ source "$SCRIPT_DIR/lib/codex-version.sh"
 source "$SCRIPT_DIR/lib/deploy-lock.sh"
 # shellcheck source=lib/deploy-mutation-marker.sh
 source "$SCRIPT_DIR/lib/deploy-mutation-marker.sh"
+# shellcheck source=lib/main-prune-lock.sh
+source "$SCRIPT_DIR/lib/main-prune-lock.sh"
 
 # Effective systemd EnvironmentFile validation for the muso CLI credentials
 # used by the main gateway (unit-tested in scripts/tests/muso-env-preflight.bats).
@@ -2332,6 +2334,21 @@ DEPLOY_RUN_TOKEN="${HYDRA_DEPLOY_RUN_ID:-manual-$(hostname 2>/dev/null || echo h
 # marker held by another live owner is a refusal, never an overwrite; a
 # dead owner is cleared by hand or compare-and-swapped away with
 # HYDRA_TAKEOVER_MUTATION_MARKER=<that owner's token>.
+# Serialise with scripts/main-prune-restart.sh BEFORE the first node-8 mutation (MUS-3742): a restart in the
+# middle of its offline cleanup would race it on the SQLite stores. Held until this process exits
+# (lib/main-prune-lock.sh). Failing here, before the marker claim, touched nothing: no rollback fires.
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+  lock_rc=0
+  log "Taking the main prune/restart lock (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock || lock_rc=$?
+  case "$lock_rc" in
+    0) ;;
+    1) fail "a main prune/restart still holds $MAIN_PRUNE_LOCK_FILE after ${MAIN_PRUNE_LOCK_WAIT_SECS}s; refusing to deploy underneath it (nothing was changed). Re-run once it finishes." ;;
+    *) fail "cannot open $MAIN_PRUNE_LOCK_FILE (rc=$lock_rc); refusing to deploy without the main prune/restart lock (nothing was changed)" ;;
+  esac
+else
+  log "WARN: ssh-mode deploy (HYDRA_LOCAL=false): the main prune/restart lock is NOT taken, a lock on this host would not exclude the prune on node-8"
+fi
 log "Claiming the mutation marker ($DEPLOY_PATH/.deploy-mutating, owner $DEPLOY_RUN_TOKEN)"
 marker_rc=0
 if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)

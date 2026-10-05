@@ -37,6 +37,9 @@ setup() {
   cp "$REPO_ROOT/scripts/lib/sync-profile-config.sh" "$SRC/scripts/lib/sync-profile-config.sh"
   # rollback.sh sources the mutation-marker lib (PR #948); the synthetic repo needs it too.
   cp "$REPO_ROOT/scripts/lib/deploy-mutation-marker.sh" "$SRC/scripts/lib/deploy-mutation-marker.sh"
+  # rollback.sh takes the main-prune lock (MUS-3742); the /run/lock default may not exist on a test host.
+  cp "$REPO_ROOT/scripts/lib/main-prune-lock.sh" "$SRC/scripts/lib/main-prune-lock.sh"
+  export MAIN_PRUNE_LOCK_FILE="$TMP/main-prune.lock"
   [ -f "$REPO_ROOT/scripts/lib/announce-legit-write.sh" ] \
     && cp "$REPO_ROOT/scripts/lib/announce-legit-write.sh" "$SRC/scripts/lib/announce-legit-write.sh"
   chmod +x "$SRC/scripts/rollback.sh"
@@ -79,6 +82,9 @@ setup() {
   export PROFILE_STATE_ROOT="$STATE"
   export SLACK_WEBHOOK=""
 }
+
+# One process holds the lock (exec): kill $! releases it and leaves no orphan holding bats' fds.
+_hold_lock() { bash -c 'exec 8>"$1"; flock -n 8 && exec sleep "$2"' _ "$1" "$2" >/dev/null 2>&1 3>&- & }
 
 run_rollback() {
   run env HYDRA_LOCAL=true DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" \
@@ -566,4 +572,38 @@ assert_both_gateways_started() {
   grep -qxF "systemctl restart openclaw-gateway-main" "$SYSTEMCTL_LOG"
   grep -qxF "systemctl restart openclaw-gateway-edge" "$SYSTEMCTL_LOG"
   if grep -q "systemctl start" "$SYSTEMCTL_LOG"; then echo "NEGATED ASSERTION FAILED: backstop fired after Step 2" >&2; false; fi
+}
+
+# MUS-3742: rollback.sh restarts with raw systemctl, so it takes the shared prune lock once, before any mutation.
+@test "rollback REFUSES while a main prune holds the lock: nothing is synced or restarted" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  _hold_lock "$MAIN_PRUNE_LOCK_FILE" 30; holder=$!
+  sleep 1
+  run env HYDRA_LOCAL=true DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \
+    MAIN_PRUNE_LOCK_WAIT_SECS=1 bash "$SRC/scripts/rollback.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"still holds"* ]]
+  # server left as-is: the restore never ran
+  [ ! -f "$DEPLOY/skills-all/marker.md" ]
+}
+
+@test "rollback WAITS for an in-flight prune and then proceeds" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  _hold_lock "$MAIN_PRUNE_LOCK_FILE" 3; holder=$!
+  sleep 1
+  run env HYDRA_LOCAL=true DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \
+    MAIN_PRUNE_LOCK_WAIT_SECS=30 bash "$SRC/scripts/rollback.sh"
+  wait "$holder" || true
+  [ "$status" -eq 0 ]
+  [ "$(cat "$DEPLOY/skills-all/marker.md")" = "GOOD" ]
+}
+
+@test "rollback refuses (loudly, nothing touched) when the lock file cannot be opened" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  run env HYDRA_LOCAL=true DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \
+    MAIN_PRUNE_LOCK_FILE=/dev/null/nope.lock bash "$SRC/scripts/rollback.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot open"* ]]
+  [ ! -f "$DEPLOY/skills-all/marker.md" ]
 }

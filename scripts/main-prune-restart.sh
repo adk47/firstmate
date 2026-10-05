@@ -1,24 +1,20 @@
 #!/usr/bin/env bash
-# scripts/main-prune-restart.sh -- offline session prune + restart of openclaw-gateway-main.
-# Installed/scheduled by install-aux-units.sh (hydra-main-prune-restart.{service,timer}, 02:30 UTC).
-# Replaces the hand-placed /usr/local/sbin/hydra-main-{prune-restart,nightly-reset}.sh bridge (MUS-1295).
-#
-# Why: main's cold start re-parses every session_nodes row on each session lookup
-# (listSqliteSessionEntriesFromDatabase, MUS-2652), so the cost scales with row count. At 14d retention
-# main carried ~7k rows and a restart froze /health for 22-60 min. Lab on a copy of live state (5 Oct):
-# unpruned never stable in 15+ min; pruned of sessions idle >24h (7045 -> 2737 rows) stable from 6.3 min.
+# scripts/main-prune-restart.sh -- offline session prune + restart of openclaw-gateway-main (MUS-1295).
+# Scheduled by install-aux-units.sh (hydra-main-prune-restart.{service,timer}, 02:30 UTC); replaces the
+# hand-placed /usr/local/sbin/hydra-main-{prune-restart,nightly-reset}.sh bridge.
+# Why: main's cold start re-parses every session_nodes row per session lookup (MUS-2652), so cost scales with
+# row count. At 14d retention (~7k rows) a restart froze /health 22-60 min; pruned to 24h (2737 rows) it was
+# stable from 6.3 min (lab, 5 Oct).
 # What: maintenance flag -> online backup -> stop main -> `openclaw sessions cleanup --enforce` offline with
-#       pruneAfter=$PRUNE on a TEMP config (live openclaw.json is not edited; agent :main sessions are
-#       always kept) -> start main -> wait for STABLE health (200 for STABLE_SECS).
-# FAIL-OPEN: if the prune fails, main is started anyway. Never retried, never restarts twice. A failed
-#       BACKUP aborts before anything is stopped (main is untouched). A failed STOP skips the prune.
-#       Exit non-zero (so OnFailure= pages) if the prune, stop or start failed or health never stabilised
-#       (main is still started first: paging never costs availability).
-# Rollback of data: $BACKUP_ROOT/<ts>/ (stop main, copy the .sqlite files back, start).
-# Only one run at a time (flock on $LOCK_FILE); a second invocation skips.
-# Usage: main-prune-restart.sh [reason]
-#   HYDRA_MAIN_MIN_UPTIME_H=N  skip when main has been up < N hours (the nightly timer sets 4).
-# The remaining env knobs exist so the bats suite can run the real script against stubs.
+# pruneAfter=$PRUNE on a TEMP config (live openclaw.json untouched) -> start main -> wait for STABLE health.
+# FAIL-OPEN: a failed prune still starts main, once, never retried. A failed backup aborts before anything is
+# stopped; a failed stop skips the prune. Exit non-zero (so OnFailure= pages) if the prune, stop or start
+# failed or health never stabilised; main is started first, so paging never costs availability.
+# Data rollback: $BACKUP_ROOT/<ts>/ (stop main, copy the .sqlite files back, start).
+# One run at a time: flock on $LOCK_FILE, the SAME lock deploy.sh/rollback.sh take (lib/main-prune-lock.sh).
+# Held from before the pgrep check through `systemctl start`, then released; a second run skips.
+# Usage: main-prune-restart.sh [reason]; HYDRA_MAIN_MIN_UPTIME_H=N skips when main is younger (timer sets 4).
+# The other env knobs exist so the bats suite can run the real script against stubs.
 set -uo pipefail
 
 PRUNE="${HYDRA_MAIN_PRUNE_AFTER:-24h}"
@@ -54,10 +50,8 @@ main_uptime_h() {
   echo $(( (now - start) / 3600000000 ))
 }
 
-# Serialise the nightly unit and any manual run BEFORE the active check: two runs would both see main active,
-# both stop it, and both run cleanup against the same SQLite stores while racing to start main. The lock dies
-# with the process (fd 9), so a killed run can never wedge the next one. Unable to take the lock = abort with
-# main untouched (and page); a held lock = another run is already doing this, skip.
+# One run at a time, BEFORE the active check (two runs would both stop main and both clean the same stores).
+# The lock dies with the process (fd 9). Cannot open it = abort, main untouched, pages; held = skip.
 exec 9>"$LOCK_FILE" || { log "ERROR cannot open lock $LOCK_FILE - aborting before any change"; exit 1; }
 flock -n 9 || { log "another main-prune-restart run holds $LOCK_FILE - skip"; exit 0; }
 if pgrep -f "scripts/(deploy|rollback).sh" >/dev/null; then log "deploy/rollback running - skip"; exit 0; fi
@@ -88,9 +82,8 @@ import json, sys
 p, v = sys.argv[1], sys.argv[2]; j = json.load(open(p)); j["session"]["maintenance"]["pruneAfter"] = v; json.dump(j, open(p, "w"))
 PY
 
-# 3. stop -> prune offline -> start. The prune's exit status is LOGGED and fails the unit afterwards, but never stops the start: fail-open.
-# A stop that failed (or left main active) must NOT be pruned: cleanup would race the live gateway's
-# writes on the same SQLite files. Skip the prune, leave main running, and fail the unit so it pages.
+# 3. stop -> prune offline -> start. A prune failure is logged and fails the unit afterwards but never stops
+# the start (fail-open). A stop that failed (or left main active) must NOT be pruned: skip it, fail the unit.
 FAILED=0; prune_rc=0
 s=$(date +%s); stop_rc=0; systemctl stop "$SVC" || stop_rc=$?
 if [ "$stop_rc" -ne 0 ] || systemctl is-active --quiet "$SVC"; then
@@ -106,13 +99,15 @@ s=$(date +%s)
 rm -rf "$TC"
 log "cleanup rc=$prune_rc secs=$(( $(date +%s)-s )) rows_after=$(rows)"
 if [ "$prune_rc" != skipped ] && [ "$prune_rc" -ne 0 ]; then
-  # Fail-open (main still starts below) but fail the unit once main is up, so OnFailure= pages: a prune that
-  # fails every night lets rows climb back to the ~7k restart freeze with nothing else to say so.
+  # Fail-open (main still starts below), but fail the unit so OnFailure= pages: a prune failing every night
+  # lets rows climb back to the ~7k restart freeze unnoticed.
   log "WARN prune failed (rc=$prune_rc, see $LOG_DIR/hydra-main-prune-$TS.err) - starting main anyway"
   FAILED=1
 fi
 start_rc=0; systemctl start "$SVC" || start_rc=$?
 log "start issued rc=$start_rc (active=$(systemctl is-active "$SVC"))"
+# The cleanup-vs-live-gateway race ends at start: release so a deploy is not held through the health wait.
+exec 9>&-
 [ "$start_rc" -eq 0 ] || { log "ERROR systemctl start failed (rc=$start_rc) - not retrying"; FAILED=1; }
 
 # 4. wait for STABLE health (200 continuously for STABLE_SECS), max MAX_WAIT_SECS. Never restarts again.
@@ -126,6 +121,5 @@ done
 if [ -n "$stable" ]; then log "RESULT OK stable 200 from ${stable}s after start; rss=$(rss_mb)MB"
 else log "RESULT NOT STABLE after $((MAX_WAIT_SECS/60)) min (last=$c) - leaving it running, no further restart"; FAILED=1; fi
 "$MAINT_SH" stop >/dev/null 2>&1 || true
-# Exit non-zero when the prune, stop or start failed or health never stabilised, so the oneshot fails and
-# OnFailure= pages; main has already been started first, so paging never costs availability.
+# Non-zero when the prune, stop or start failed or health never stabilised: the oneshot fails, OnFailure= pages.
 exit "$FAILED"

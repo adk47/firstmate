@@ -1,10 +1,8 @@
 #!/usr/bin/env bats
 # scripts/install-aux-units.sh -> hydra-main-prune-restart.{service,timer} (MUS-1295)
 #
-# Runs the REAL "Main gateway session prune" block of the installer, redirected
-# at a temp dir with a stubbed systemctl, and pins: the units it writes, that the
-# hand-placed bridge (two /usr/local/sbin scripts + the transient timer) is
-# retired BEFORE the managed timer is armed, and the pager/logrotate wiring.
+# Runs the REAL "Main gateway session prune" block of the installer against a temp dir and a stubbed systemctl:
+# the units it writes, the bridge retired BEFORE the timer is armed, the pager/logrotate wiring.
 bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
@@ -108,11 +106,10 @@ _install() { run bash "$TEST_TMPDIR/block.sh"; }
 }
 
 @test "a legacy prune/restart still RUNNING is never stopped: the installer waits, then retires it" {
-  touch "$LEGACY_RUNNING_MARK"          # the stubbed sleep clears it, i.e. the legacy run finishes
+  touch "$LEGACY_RUNNING_MARK"   # the stubbed sleep clears it: the legacy run finishes
   _install
   [ "$status" -eq 0 ]
   grep -q '^sleep' "$CALLS"
-  # argv match, not a literal: a combined `stop <timer> <service>` call must also be caught
   [ "$(grep -cE 'systemctl stop .*hydra-main-nightly-reset\.service' "$CALLS")" -eq 0 ]
   [ ! -e "$SBIN/hydra-main-nightly-reset.sh" ]
 }
@@ -123,7 +120,6 @@ _install() { run bash "$TEST_TMPDIR/block.sh"; }
   _install
   [ "$status" -ne 0 ]
   [[ "$output" == *"refusing to kill it mid-flight"* ]]
-  # argv match, not a literal: a combined `stop <timer> <service>` call must also be caught
   [ "$(grep -cE 'systemctl stop .*hydra-main-nightly-reset\.service' "$CALLS")" -eq 0 ]
   [ "$(grep -c 'enable hydra-main-prune-restart.timer' "$CALLS")" -eq 0 ]
   [ -e "$SBIN/hydra-main-nightly-reset.sh" ]

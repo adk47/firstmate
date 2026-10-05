@@ -1,13 +1,7 @@
 #!/usr/bin/env bats
-# scripts/main-prune-restart.sh -- the offline session prune + restart of
-# openclaw-gateway-main (MUS-1295: a cold start re-reads every session_nodes
-# row per session lookup, so main froze 22-60 min after each restart while the
-# 14d retention left ~7k rows).
-#
-# Runs the REAL script against stubbed systemctl/openclaw/curl/pgrep and a temp
-# state dir with real sqlite files. The contract under test is FAIL-OPEN: a prune
-# that cannot run degrades to a plain start, never to a dead gateway, and never
-# loops.
+# scripts/main-prune-restart.sh (MUS-1295): runs the REAL script against stubbed systemctl/openclaw/curl/pgrep
+# and a temp state dir with real sqlite files. Contract: FAIL-OPEN (a prune that cannot run degrades to a plain
+# start, never a dead gateway, never a loop) and one run at a time with deploy/rollback.
 bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
@@ -72,6 +66,9 @@ STUB
 }
 teardown() { rm -rf "$TEST_TMPDIR"; }
 
+# One process holds the lock (exec): kill $! releases it and leaves no orphan holding bats' fds.
+_hold_lock() { bash -c 'exec 8>"$1"; flock -n 8 && exec sleep "$2"' _ "$1" "$2" >/dev/null 2>&1 3>&- & }
+
 _run() { run bash "$SCRIPT" "${1:-test}"; }
 _count() { grep -c "$1" "$CALLS" || true; }
 
@@ -84,9 +81,7 @@ _count() { grep -c "$1" "$CALLS" || true; }
   [ "$(grep -n 'systemctl stop' "$CALLS" | cut -d: -f1)" -lt "$(grep -n '^openclaw' "$CALLS" | cut -d: -f1)" ]
   [ "$(grep -n '^openclaw' "$CALLS" | cut -d: -f1)" -lt "$(grep -n 'systemctl start openclaw-gateway-main' "$CALLS" | cut -d: -f1)" ]
   grep -q 'openclaw sessions cleanup --all-agents --enforce --json cfg_prune=24h' "$CALLS"
-  # the live config is never edited: only the temp copy carries 24h
   grep -q '"pruneAfter": *"14d"' "$SD/openclaw.json"
-  # online backup of every agent DB + the state DB
   b="$(ls -d "$BACKUP_ROOT"/*/ | head -1)"
   [ -s "${b}agents/qa/agent/openclaw-agent.sqlite" ]
   [ -s "${b}state/openclaw.sqlite" ]
@@ -142,15 +137,12 @@ _count() { grep -c "$1" "$CALLS" || true; }
   [ "$(ls -1d "$BACKUP_ROOT"/*/ | wc -l | tr -d ' ')" -eq 2 ]
 }
 
-@test "nightly mode: a main younger than the uptime floor is skipped" {
+@test "nightly mode: a main younger than the uptime floor is skipped, an older one is pruned" {
   export HYDRA_MAIN_MIN_UPTIME_H=4 HYDRA_MAIN_UPTIME_H=1
   _run nightly
   [[ "$output" == *"already fresh"* ]]
   [ "$(_count 'systemctl stop')" -eq 0 ]
-}
-
-@test "nightly mode: a main older than the floor is pruned" {
-  export HYDRA_MAIN_MIN_UPTIME_H=4 HYDRA_MAIN_UPTIME_H=9
+  export HYDRA_MAIN_UPTIME_H=9
   _run nightly
   [ "$(_count 'systemctl start openclaw-gateway-main')" -eq 1 ]
 }
@@ -165,7 +157,6 @@ _count() { grep -c "$1" "$CALLS" || true; }
 }
 
 @test "a stop that returns 0 but leaves main ACTIVE never prunes either" {
-  # stub: stop "succeeds" without deactivating
   sed -i.bak 's|^  stop) .*|  stop)      exit 0 ;;|' "$STUBBIN/systemctl"
   _run
   [ "$status" -ne 0 ]
@@ -216,8 +207,7 @@ _count() { grep -c "$1" "$CALLS" || true; }
 }
 
 @test "a second invocation while one holds the lock skips: no stop, no prune, no backup" {
-  # the first run is mid-backup/prune; hold the same lock it would hold
-  flock -n "$LOCK_FILE" sleep 30 & holder=$!
+  _hold_lock "$LOCK_FILE" 30; holder=$!
   sleep 1
   _run manual
   kill "$holder" 2>/dev/null || true
@@ -228,17 +218,67 @@ _count() { grep -c "$1" "$CALLS" || true; }
   [ ! -d "$BACKUP_ROOT" ]
 }
 
-@test "the lock is released when a run ends: the next run proceeds" {
-  _run first
-  [ "$status" -eq 0 ]
-  _run second
-  [ "$status" -eq 0 ]
-  [ "$(_count '^openclaw ')" -eq 2 ]
-}
-
 @test "an unopenable lock aborts before any change, and pages" {
   export LOCK_FILE="/dev/null/nope.lock"
   _run
   [ "$status" -ne 0 ]
   [ "$(_count 'systemctl stop')" -eq 0 ]
+}
+
+# ---- deploy/rollback <-> prune exclusion (MUS-3742): a deploy that begins AFTER the pgrep check must block
+# until cleanup is over (the prune holds the lock through `systemctl start`).
+LIB="$HYDRA_REPO/scripts/lib/main-prune-lock.sh"
+
+_slow_cleanup_openclaw() {   # cleanup that signals it started, then runs until released (paths baked in: env -i)
+  cat > "$STUBBIN/openclaw" <<STUB
+#!/usr/bin/env bash
+echo "openclaw \$*" >> "$CALLS"
+touch "$TEST_TMPDIR/cleanup-started"
+while [ ! -e "$TEST_TMPDIR/release" ]; do sleep 0.1; done
+STUB
+  chmod +x "$STUBBIN/openclaw"
+}
+_wait_for() { local i; for i in $(seq 1 100); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
+_deploy_acquire() {   # what deploy.sh / rollback.sh do, via the real lib
+  MAIN_PRUNE_LOCK_FILE="$LOCK_FILE" MAIN_PRUNE_LOCK_WAIT_SECS="$1" bash -c "source '$LIB'; acquire_main_prune_lock"
+}
+
+@test "a deploy that starts AFTER the pgrep check blocks until cleanup is over and main is started" {
+  _slow_cleanup_openclaw
+  bash "$SCRIPT" nightly > "$TEST_TMPDIR/prune.out" 2>&1 & prune=$!
+  _wait_for "$TEST_TMPDIR/cleanup-started"
+  # mid-cleanup: a bounded deploy wait must TIME OUT (rc 1), not slip through
+  run _deploy_acquire 1
+  [ "$status" -eq 1 ]
+  ( _deploy_acquire 30 && echo "DEPLOY-ACQUIRED" >> "$CALLS" ) & deploy=$!
+  sleep 1
+  [ "$(_count DEPLOY-ACQUIRED)" -eq 0 ]
+  [ "$(_count 'systemctl start openclaw-gateway-main')" -eq 0 ]
+  touch "$TEST_TMPDIR/release"
+  wait "$prune"; wait "$deploy"
+  [ "$(_count DEPLOY-ACQUIRED)" -eq 1 ]
+  # the order is the point: the prune started main BEFORE the deploy got the lock
+  [ "$(grep -n 'systemctl start openclaw-gateway-main' "$CALLS" | head -1 | cut -d: -f1)" -lt "$(grep -n DEPLOY-ACQUIRED "$CALLS" | cut -d: -f1)" ]
+}
+
+@test "the prune releases the lock after start, so a deploy is not held for the stable-health wait" {
+  export STUB_HTTP=000 MAX_WAIT_SECS=6          # health never stabilises: the wait loop runs ~6s
+  bash "$SCRIPT" nightly > "$TEST_TMPDIR/prune.out" 2>&1 & prune=$!
+  for i in $(seq 1 100); do [ "$(_count 'systemctl start openclaw-gateway-main')" -ge 1 ] && break; sleep 0.1; done
+  run _deploy_acquire 2                          # still inside the prune's health wait
+  [ "$status" -eq 0 ]
+  wait "$prune" || true
+}
+
+@test "the lock path is one literal shared by the lib, the prune, deploy.sh and rollback.sh" {
+  [ "$(grep -c '/run/lock/hydra-main-prune-restart.lock' "$LIB")" -eq 1 ]
+  [ "$(grep -c '/run/lock/hydra-main-prune-restart.lock' "$SCRIPT")" -ge 1 ]
+  grep -q 'source "$SCRIPT_DIR/lib/main-prune-lock.sh"' "$HYDRA_REPO/scripts/deploy.sh"
+  grep -q 'source "$SCRIPT_DIR/lib/main-prune-lock.sh"' "$HYDRA_REPO/scripts/rollback.sh"
+}
+
+@test "no deploy/rollback path backgrounds a child that could inherit the lock fd" {
+  [ "$(grep -cE '(^|[[:space:];|])(nohup|setsid|disown|coproc)([[:space:]]|$)' \
+      "$HYDRA_REPO/scripts/deploy.sh" "$HYDRA_REPO/scripts/rollback.sh" \
+      "$HYDRA_REPO/scripts/lib/gateway-restart.sh" "$HYDRA_REPO/scripts/lib/deploy-mutation-marker.sh" | awk -F: '{s+=$2} END{print s+0}')" -eq 0 ]
 }

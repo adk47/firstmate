@@ -8,6 +8,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/deploy-mutation-marker.sh
 source "$SCRIPT_DIR/lib/deploy-mutation-marker.sh"
+# shellcheck source=lib/main-prune-lock.sh
+source "$SCRIPT_DIR/lib/main-prune-lock.sh"
 HYDRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/ovh_muso}"
@@ -146,6 +148,21 @@ notify_slack ":warning: HYDRA rollback initiated. Reverting $CURRENT_SHA -> $PRE
 # checkout with two files reverted. Using a separate worktree also means we
 # never mutate $HYDRA_ROOT (the runner's checkout), so a partial rollback
 # can't leave the source tree in a franken-state.
+# Serialise with scripts/main-prune-restart.sh before any mutation (MUS-3742): Step 2 restarts the gateways
+# with raw systemctl, which would race an offline prune. Same lock as deploy.sh (lib/main-prune-lock.sh).
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+  lock_rc=0
+  log "Taking the main prune/restart lock (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock || lock_rc=$?
+  case "$lock_rc" in
+    0) ;;
+    1) fail "a main prune/restart still holds $MAIN_PRUNE_LOCK_FILE after ${MAIN_PRUNE_LOCK_WAIT_SECS}s; refusing to roll back underneath it. Server left as-is; re-run once it finishes." ;;
+    *) fail "cannot open $MAIN_PRUNE_LOCK_FILE (rc=$lock_rc); refusing to roll back without the main prune/restart lock. Server left as-is." ;;
+  esac
+else
+  log "WARN: ssh-mode rollback (HYDRA_LOCAL=false): the main prune/restart lock is NOT taken"
+fi
+
 log "Step 1/4: Materializing last-known-good tree ($PREVIOUS_SHA)..."
 ROLLBACK_TREE="$(mktemp -d -t hydra-rollback-XXXXXX)"
 cleanup_rollback_tree() {
