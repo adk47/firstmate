@@ -568,6 +568,7 @@ export async function handleWebhookEvent(
                     actual: shadowDecision.action,
                     rc: 0,
                     http: outcome.httpStatus,
+                    storeState: options.jev?.shadow?.storeState ?? true,
                     questionsVersion: version,
                     stateVariant: outcome.stateVariant,
                   });
@@ -585,6 +586,7 @@ export async function handleWebhookEvent(
                   rc: outcome.reason === "shape" ? 3 : 2,
                   reason: outcome.reason,
                   http: outcome.httpStatus,
+                  storeState: options.jev?.shadow?.storeState ?? true,
                   questionsVersion: version,
                   stateVariant: outcome.stateVariant,
                 });
