@@ -3,9 +3,10 @@
 #
 # These are focused units for two liveness properties of scan_signals that a
 # fleet-sized poll depends on:
-#   - a beat refresh per scanned file, so a long scan over many multi-megabyte
-#     status logs cannot let the watcher's liveness beacon age past the guard's
-#     grace while the scan is in progress.
+#   - a beat refresh paced by elapsed time across scanned files, so a long scan
+#     over many multi-megabyte status logs cannot let the watcher's liveness
+#     beacon age past the guard's grace, while a fast scan does not fork a
+#     beacon check for every file.
 #   - a single signature computation per file: scan_signals already computes the
 #     reported signature to detect a change, so it hands that value to
 #     fm_wake_signal_seen_current instead of forking a second
@@ -48,29 +49,35 @@ test_signal_seen_current_reuses_a_supplied_signature() {
   pass "signal scan: a supplied reported signature is reused, not recomputed"
 }
 
-test_scan_signals_refreshes_beacon_once_per_file() {
-  local dir state sigcalls beatcalls out
-  dir=$(make_case scan-signals)
+scan_signal_counts() {  # <dir> <seconds-each-beacon-check-takes>
+  local dir=$1 step=$2 state
   state="$dir/state"
-  sigcalls="$dir/sigcalls"
-  beatcalls="$dir/beatcalls"
   printf 'working: a\n' > "$state/one.status"
   printf 'working: b\n' > "$state/two.status"
   : > "$state/three.turn-ended"
-  : > "$sigcalls"
-  : > "$beatcalls"
-  out=$(SIGCALLFILE="$sigcalls" BEATCALLFILE="$beatcalls" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+  : > "$dir/sigcalls"
+  : > "$dir/beatcalls"
+  SIGCALLFILE="$dir/sigcalls" BEATCALLFILE="$dir/beatcalls" STEP="$step" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_wake_signal_sig() { printf "x\n" >> "$SIGCALLFILE"; printf "sig:%s" "${1##*/}"; }
-    watch_beat() { printf "x\n" >> "$BEATCALLFILE"; }
+    watch_beat() { printf "x\n" >> "$BEATCALLFILE"; SECONDS=$((SECONDS + STEP)); }
+    SECONDS=100
     scan_signals >/dev/null
     printf "sigcalls=%s beatcalls=%s\n" \
       "$(LC_ALL=C wc -l < "$SIGCALLFILE" | tr -d "[:space:]")" \
       "$(LC_ALL=C wc -l < "$BEATCALLFILE" | tr -d "[:space:]")"
-  ' _ "$WATCH" "$state")
+  ' _ "$WATCH"
+}
+
+test_scan_signals_paces_beacon_refresh_by_elapsed_time() {
+  local out
+  out=$(scan_signal_counts "$(make_case scan-signals-fast)" 0)
+  grep -qx 'sigcalls=3 beatcalls=1' <<<"$out" \
+    || fail "a fast scan should compute one signature per file and check the beacon once: $out"
+  out=$(scan_signal_counts "$(make_case scan-signals-slow)" 2)
   grep -qx 'sigcalls=3 beatcalls=3' <<<"$out" \
-    || fail "expected one signature and one beacon refresh per scanned file: $out"
-  pass "signal scan: one signature computation and one beacon refresh per file"
+    || fail "a slow scan should check the beacon as each second passes: $out"
+  pass "signal scan: one signature per file and a time-paced beacon refresh"
 }
 
 test_absorbed_heartbeat_advances_surfaced_offset() {
@@ -95,5 +102,5 @@ test_absorbed_heartbeat_advances_surfaced_offset() {
 }
 
 test_signal_seen_current_reuses_a_supplied_signature
-test_scan_signals_refreshes_beacon_once_per_file
+test_scan_signals_paces_beacon_refresh_by_elapsed_time
 test_absorbed_heartbeat_advances_surfaced_offset

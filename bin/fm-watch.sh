@@ -1207,10 +1207,10 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # markers retain their size-and-mtime signature.
 # Pure read apart from the shared watch_beat beacon refresh and the reused
 # signature: the signature is computed once per file here and handed to
-# fm_wake_signal_seen_current, and watch_beat runs once per file so a fleet-sized
-# scan over many status logs keeps the liveness beacon advancing instead of
-# letting it age past the guard's grace. Print one "<seen-file>\t<sig>\t<file>"
-# line per changed file.
+# fm_wake_signal_seen_current, and watch_beat_paced runs per file so a
+# fleet-sized scan over many status logs keeps the liveness beacon advancing
+# instead of letting it age past the guard's grace. Print one
+# "<seen-file>\t<sig>\t<file>" line per changed file.
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
 scan_signals() {
@@ -1222,7 +1222,7 @@ scan_signals() {
     sig=$(fm_wake_signal_sig "$f") || continue
     [ -n "$sig" ] || continue
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
-    watch_beat
+    watch_beat_paced
     case "$f" in
       *.status) fm_wake_signal_seen_current "$STATE" "$f" "$sig" && continue ;;
       *) [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue ;;
@@ -1380,6 +1380,16 @@ watch_beat() {
   case "$age" in ''|*[!0-9]*) return 0 ;; esac
   [ "$age" -ge "$WATCH_BEAT_REFRESH_SECS" ] && touch "$STATE/.last-watcher-beat"
   return 0
+}
+
+# watch_beat for a per-item loop: consult the beacon at most once per elapsed
+# second of bash's own SECONDS clock, so a scan over many files does not fork an
+# mtime read for every file while the beacon is nowhere near due.
+WATCH_BEAT_CHECKED_AT=
+watch_beat_paced() {
+  [ -n "$WATCH_BEAT_CHECKED_AT" ] && [ "$SECONDS" -le "$WATCH_BEAT_CHECKED_AT" ] && return 0
+  WATCH_BEAT_CHECKED_AT=$SECONDS
+  watch_beat
 }
 
 # 0 when any signaled status file carries a captain-relevant event in the bytes

@@ -449,59 +449,59 @@ test_watch_restart_rejects_reused_pid() {
   pass "watch restart preserves recovery without signaling a reused pid"
 }
 
-test_watch_restart_attaches_to_healthy_peer() {
-  local dir state fakebin out peer_ready peer identity armpid status i
-  dir=$(make_case restart-healthy-peer)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  out="$dir/restart.out"
-  peer_ready="$dir/peer.ready"
-  node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" &
-  peer=$!
-  i=0
-  while [ "$i" -lt 50 ] && [ ! -s "$peer_ready" ]; do
+start_detached_peer() {  # <ready-file> <pid-file> <node-script>
+  ( node -e "$3" "$1" & printf '%s\n' "$!" > "$2" )
+  local i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$1" ]; do
     sleep 0.1
     i=$((i + 1))
   done
-  if [ ! -s "$peer_ready" ]; then
-    kill -KILL "$peer" 2>/dev/null || true
-    wait "$peer" 2>/dev/null || true
-    fail "TERM-resistant peer did not become ready"
-  fi
-  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
+  [ -s "$1" ] && [ -s "$2" ]
+}
+
+record_peer_lock() {  # <dir> <peer-pid>
+  local dir=$1 peer=$2 state identity
+  state="$dir/state"
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || return 1
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$out" &
-  armpid=$!
-  i=0
-  while [ "$i" -lt 80 ]; do
-    grep -qF "watcher: attached pid=$peer" "$out" 2>/dev/null && break
-    sleep 0.1
-    i=$((i + 1))
-  done
-  grep -qF "watcher: attached pid=$peer" "$out" || fail "restart did not attach to the verified healthy peer: $(cat "$out")"
-  is_live_non_zombie "$armpid" || fail "restart arm exited instead of following the healthy peer"
-  is_live_non_zombie "$peer" || fail "restart killed a TERM-resistant peer unexpectedly"
-  kill -KILL "$peer" 2>/dev/null || true
-  wait "$peer" 2>/dev/null || true
-  wait_for_exit "$armpid" 80
-  status=$?
-  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "restart arm did not fail after its attached peer ended without a successor (status $status)"
-  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$out" || fail "restart arm did not surface the attached cycle end"
-  pass "watch restart attaches to a verified healthy peer and later surfaces a successor gap"
 }
 
-# A lock left holding a pid that is no longer alive is genuinely unheld: it is
-# the normal residue between a predecessor watcher being killed and the successor
-# claiming the lock. Under the Pi extension supervision model that residue must
-# not read as a lapse while the beacon is fresh and the extension provably owns
-# continuity, or every hand-off emits a false "no live watcher holds this home
-# lock" banner. A lock holding a live pid remains held here.
-test_dead_pid_watch_lock_is_unheld_for_extension_verdict() {
+# A restart never adopts the watcher it just signalled. A peer that never honors
+# the TERM keeps the singleton, so the arm fails loudly at its stop bound rather
+# than reporting readiness against a process that is meant to be exiting.
+test_watch_restart_never_adopts_signalled_peer() {
+  local dir fakebin out peer armpid status
+  dir=$(make_case restart-healthy-peer)
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  start_detached_peer "$dir/peer.ready" "$dir/peer.pid" \
+    'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 60000)' \
+    || fail "TERM-resistant peer did not become ready"
+  peer=$(cat "$dir/peer.pid")
+  record_peer_lock "$dir" "$peer" || { kill -KILL "$peer" 2>/dev/null; fail "could not identify peer pid"; }
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 FM_ARM_RESTART_STOP_TIMEOUT=2 "$WATCH_ARM" --restart > "$out" 2>&1 &
+  armpid=$!
+  wait_for_exit "$armpid" 80
+  status=$?
+  is_live_non_zombie "$peer" || fail "restart killed a TERM-resistant peer unexpectedly"
+  kill -KILL "$peer" 2>/dev/null || true
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "restart did not fail loudly while its signalled peer survived (status $status): $(cat "$out")"
+  grep -qF "watcher: attached pid=$peer" "$out" && fail "restart adopted the watcher it signalled: $(cat "$out")"
+  grep -qF "watcher: FAILED - signalled watcher pid=$peer did not exit" "$out" \
+    || fail "restart did not name the surviving signalled watcher: $(cat "$out")"
+  pass "watch restart never adopts the watcher it signalled"
+}
+
+# A lock still recording a dead pid while the beacon is fresh is the shape of a
+# watcher that died with nothing restarting it. Even when the Pi extension owns
+# continuity, it stays held, so the verdict reports the gap instead of masking it.
+test_dead_pid_watch_lock_stays_no_watcher() {
   local dir state watch_path out
   dir=$(make_case dead-pid-unheld)
   state="$dir/state"
@@ -520,9 +520,9 @@ test_dead_pid_watch_lock_is_unheld_for_extension_verdict() {
     fm_watcher_supervision_verdict "$2" "$3" 300 "$4"
     printf "unheld=%s ok=%s reason=%s\n" "$unheld" "$FM_WATCHER_VERDICT_OK" "$FM_WATCHER_VERDICT_REASON"
   ' _ "$LIB" "$state" "$watch_path" "$dir")
-  grep -qx 'unheld=0 ok=true reason=stale-beacon' <<<"$out" \
-    || fail "a dead-pid lock did not read as unheld for the extension verdict: $out"
-  pass "watch lock: a dead recorded pid is unheld and does not trip the extension verdict"
+  grep -qx 'unheld=1 ok=false reason=no-watcher' <<<"$out" \
+    || fail "a dead-pid lock with a fresh beacon masked a supervision gap: $out"
+  pass "watch lock: a dead recorded pid with a fresh beacon still reads as no-watcher"
 }
 
 test_live_pid_watch_lock_stays_no_watcher() {
@@ -550,71 +550,49 @@ test_live_pid_watch_lock_stays_no_watcher() {
   pass "watch lock: a live unmatched pid still reads as no-watcher"
 }
 
-# The production failure this guards: a TERM-resistant incumbent survives the
-# bounded stop-wait (bash defers its TERM trap across a foreground sleep), and a
-# fresh watcher spawned anyway loses the singleton race, so the arm never reports
-# "started"/"attached" inside the harness successor verifier's readiness budget.
-# With the arm's production-sized confirmation window, attaching to the surviving
-# healthy incumbent must finish well inside that budget instead of spending the
-# stop-wait plus a full confirmation timeout.
-test_restart_attaches_to_surviving_incumbent_within_readiness_budget() {
-  local dir state fakebin out peer_ready peer identity armpid started elapsed i attached
-  dir=$(make_case restart-surviving-incumbent)
+# The production failure this guards: bash defers a watcher's TERM trap across
+# its SIGNAL_GRACE sleep, so the signalled incumbent outlives a short stop-wait.
+# The restart must wait it out, never adopt it, and finish with its own live
+# successor holding the lock, all inside the extension's readiness budget.
+test_restart_waits_out_deferred_term_then_starts_successor() {
+  local dir state fakebin out peer armpid started elapsed i child lock_pid peer_alive child_alive
+  dir=$(make_case restart-deferred-term)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
-  peer_ready="$dir/peer.ready"
-  # Auto-exit well inside a test timeout, and ignore TERM, so a failing case can
-  # never leave a 300s process for the runner to wait on.
-  node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 60000)' "$peer_ready" &
-  peer=$!
-  i=0
-  while [ "$i" -lt 50 ] && [ ! -s "$peer_ready" ]; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if [ ! -s "$peer_ready" ]; then
-    kill -KILL "$peer" 2>/dev/null || true
-    wait "$peer" 2>/dev/null || true
-    fail "TERM-resistant incumbent did not become ready"
-  fi
-  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify incumbent pid"
-  mkdir "$state/.watch.lock"
-  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
-  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
-  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
-  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
-  touch "$state/.last-watcher-beat"
+  start_detached_peer "$dir/peer.ready" "$dir/peer.pid" \
+    'const fs = require("node:fs"); process.on("SIGTERM", () => setTimeout(() => process.exit(1), 6000)); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 60000)' \
+    || fail "deferred-TERM incumbent did not become ready"
+  peer=$(cat "$dir/peer.pid")
+  record_peer_lock "$dir" "$peer" || { kill -KILL "$peer" 2>/dev/null; fail "could not identify incumbent pid"; }
   started=$(date +%s)
-  # A production-sized confirmation window: the old stop-wait-then-spawn path
-  # would spend the 5s stop-wait plus this whole budget before attaching, while
-  # attaching to the surviving healthy incumbent finishes in a few seconds.
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=30 "$WATCH_ARM" --restart > "$out" 2>&1 &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" --restart > "$out" 2>&1 &
   armpid=$!
   i=0
-  while [ "$i" -lt 400 ]; do
-    grep -qF "watcher: attached pid=$peer" "$out" 2>/dev/null && break
+  while [ "$i" -lt 300 ]; do
+    grep -qE '^watcher: (started|attached|FAILED)' "$out" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
   elapsed=$(( $(date +%s) - started ))
-  attached=0
-  grep -qF "watcher: attached pid=$peer" "$out" && attached=1
-  # Tear down both processes before any assertion can exit early and leave the
-  # runner waiting on a live child.
+  child=$(sed -n 's/^watcher: started pid=\([0-9]*\).*/\1/p' "$out" | head -1)
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  peer_alive=0
+  is_live_non_zombie "$peer" && peer_alive=1
+  child_alive=0
+  [ -n "$child" ] && is_live_non_zombie "$child" && child_alive=1
   kill -KILL "$peer" 2>/dev/null || true
   kill -TERM "$armpid" 2>/dev/null || true
-  wait "$peer" 2>/dev/null || true
   wait "$armpid" 2>/dev/null || true
-  [ "$attached" -eq 1 ] \
-    || fail "restart did not attach to the surviving incumbent: $(cat "$out")"
-  # The old path spawned a fresh child that lost the singleton and printed this
-  # from its captured output; attaching directly never starts the child.
-  grep -qF 'watcher: already running' "$out" \
-    && fail "restart spawned a doomed child instead of attaching: $(cat "$out")"
-  [ "$elapsed" -le 20 ] \
-    || fail "restart spent ${elapsed}s before attaching, inside the confirmation budget of a spawned child"
-  pass "watch restart attaches to a surviving incumbent inside the readiness budget"
+  grep -qF "watcher: attached pid=$peer" "$out" && fail "restart adopted the watcher it signalled: $(cat "$out")"
+  [ -n "$child" ] || fail "restart did not start a successor after the signalled watcher exited: $(cat "$out")"
+  [ "$child" != "$peer" ] || fail "restart reported the signalled watcher as its successor"
+  [ "$peer_alive" -eq 0 ] || fail "restart started a successor before the signalled watcher exited"
+  [ "$child_alive" -eq 1 ] && [ "$lock_pid" = "$child" ] \
+    || fail "restart left no live watcher holding the lock (child=$child lock=$lock_pid)"
+  [ "$elapsed" -ge 5 ] || fail "restart did not wait for the signalled watcher's deferred exit (${elapsed}s)"
+  [ "$elapsed" -le 25 ] || fail "restart spent ${elapsed}s before readiness"
+  pass "watch restart waits out a deferred TERM, never adopts it, and starts a live successor"
 }
 
 test_watcher_self_evicts_on_lock_takeover() {
@@ -1241,10 +1219,10 @@ test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
-test_watch_restart_attaches_to_healthy_peer
-test_dead_pid_watch_lock_is_unheld_for_extension_verdict
+test_watch_restart_never_adopts_signalled_peer
+test_dead_pid_watch_lock_stays_no_watcher
 test_live_pid_watch_lock_stays_no_watcher
-test_restart_attaches_to_surviving_incumbent_within_readiness_budget
+test_restart_waits_out_deferred_term_then_starts_successor
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher

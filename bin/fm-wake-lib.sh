@@ -105,27 +105,19 @@ fm_path_age() {
 }
 
 # fm_watcher_lock_unheld <state>
-# True when the watcher lock or its symlinked owner directory is absent, when the
-# existing lock records no pid at all, or when the recorded pid is a well-formed
-# pid that is no longer alive. A dead recorded pid is genuinely unheld: it is the
-# normal residue of a predecessor that has exited or been killed but whose lock
-# symlink has not yet been replaced by the successor. The Pi extension tears its
-# watcher down on every actionable wake and respawns it, so that residue is
-# exactly the hand-off window fm_watcher_supervision_verdict must not read as a
-# supervision lapse. A non-empty, still-alive pid, and a malformed pid that names
-# no real process at all, remain held here (a corrupt lock is a health problem,
-# never a silent exemption); syntax, ownership metadata, and identity are health
-# concerns.
+# True when the watcher lock or its symlinked owner directory is absent, or when
+# the existing lock records no pid at all. Any non-empty pid remains held here,
+# including a pid that is no longer alive: a dead holder with a still-fresh beacon
+# is exactly the shape of a watcher that died with nothing restarting it, so it
+# must never read as a benign hand-off. Its syntax, liveness, ownership metadata,
+# and identity are health concerns.
 fm_watcher_lock_unheld() {
   local state=$1 lockdir pid
   lockdir="$state/.watch.lock"
   [ ! -e "$lockdir" ] && return 0
   [ ! -e "$lockdir/pid" ] && return 0
   pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
-  [ -z "$pid" ] && return 0
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  fm_pid_alive "$pid" && return 1
-  return 0
+  [ -z "$pid" ]
 }
 
 FM_WATCHER_MATCHED_IDENTITY=
