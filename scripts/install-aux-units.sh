@@ -10,6 +10,12 @@
 #     sessions.resolve({ label: "@Role" }) keeps working for
 #     agent-to-agent messaging. Also runs on boot.
 #
+#   hydra-main-prune-restart.timer / .service
+#     Nightly 02:30 UTC. scripts/main-prune-restart.sh prunes main's sessions
+#     idle >24h offline (backed up, fail-open) and restarts main so a cold start
+#     never re-reads ~7k session_nodes rows (MUS-1295). Retires the hand-placed
+#     /usr/local/sbin/hydra-main-{prune-restart,nightly-reset}.sh bridge.
+#
 #   hydra-session-thread-retention@{main,edge}.timer / .service
 #     Every 6h, removes terminal Slack channel thread sessions older
 #     than 14d through each gateway's native sessions.delete lifecycle API.
@@ -2403,6 +2409,77 @@ trstate="$(systemctl is-active "$trtmr" 2>/dev/null || true)"
 [[ "$trstate" == "active" ]] || fail "$trtmr is not active (state: ${trstate:-unknown})"
 log "  $trtmr: $trstate (fires hourly)"
 
+# ─── Main gateway session prune + restart (nightly 02:30 UTC) ────
+# MUS-1295: main's cold start re-reads every session_nodes row per session
+# lookup, so a restart froze /health for 22-60 min while retention left ~7k
+# rows. scripts/main-prune-restart.sh prunes sessions idle >24h OFFLINE
+# (backup first, fail-open: a failed prune still starts main) and restarts main
+# only if it has been up >= 4h. This replaces the hand-placed bridge:
+# /usr/local/sbin/hydra-main-{prune-restart,nightly-reset}.sh run by the
+# TRANSIENT timer hydra-main-nightly-reset.timer. Both fire at 02:30 UTC, so the
+# bridge is retired BEFORE the managed timer is armed -- two prune+restarts back
+# to back is exactly the double restart this unit must never do.
+[[ -x "$HYDRA_ROOT/scripts/main-prune-restart.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/main-prune-restart.sh missing or not executable"
+
+retire_main_prune_bridge() {
+  local unit f
+  # Transient units are not in unit-files and have no /etc file, so the stale-unit
+  # loop above cannot see them: stop them by name, tolerating "not loaded".
+  for unit in hydra-main-nightly-reset.timer hydra-main-nightly-reset.service; do
+    systemctl stop "$unit" >/dev/null 2>&1 || true
+    systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+  done
+  for f in /usr/local/sbin/hydra-main-prune-restart.sh /usr/local/sbin/hydra-main-nightly-reset.sh; do
+    if [[ -e "$f" ]]; then rm -f "$f"; log "  retired hand-placed bridge: $f"; fi
+  done
+  rm -f /usr/local/sbin/hydra-main-nightly-reset.sh.bak-*
+}
+retire_main_prune_bridge
+
+cat > /etc/systemd/system/hydra-main-prune-restart.service << MAINPRUNESVC
+[Unit]
+Description=Prune main-gateway sessions idle >24h offline, then restart openclaw-gateway-main
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/main-prune-restart.sh nightly
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HYDRA_MAIN_PRUNE_AFTER=24h
+# Skip when main restarted recently (a manual restart already left it fresh).
+Environment=HYDRA_MAIN_MIN_UPTIME_H=4
+Environment=MAINT_SH=$HYDRA_ROOT/scripts/hydra-maintenance.sh
+# Backup + stop + prune (<=20 min) + start + stable-health wait (<=45 min).
+# systemd killing this mid-run would leave main stopped, so keep real headroom.
+TimeoutStartSec=90min
+# No Restart=: a failed run must never re-run itself (never loops).
+StandardOutput=append:/var/log/hydra-main-prune-restart.log
+StandardError=append:/var/log/hydra-main-prune-restart.log
+MAINPRUNESVC
+
+cat > /etc/systemd/system/hydra-main-prune-restart.timer << MAINPRUNETMR
+[Unit]
+Description=Prune main-gateway sessions and restart main nightly at 02:30 UTC
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+# No Persistent=: a missed night must not become a restart at boot/catch-up.
+Unit=hydra-main-prune-restart.service
+
+[Install]
+WantedBy=timers.target
+MAINPRUNETMR
+
+systemctl daemon-reload
+
+mpt=hydra-main-prune-restart.timer
+systemctl enable "$mpt" >/dev/null 2>&1 || fail "could not enable $mpt"
+systemctl start "$mpt" >/dev/null 2>&1 || fail "could not start $mpt"
+mpstate="$(systemctl is-active "$mpt" 2>/dev/null || true)"
+[[ "$mpstate" == "active" ]] || fail "$mpt is not active (state: ${mpstate:-unknown})"
+log "  $mpt: $mpstate (fires nightly 02:30 UTC)"
+
 # ─── Twice-weekly codex OAuth token refresh (Sun+Wed 04:00 UTC) ──
 # The DURABLE fix for the recurring ~10-day codex token lapse. hydra keeps the
 # bundled `openai` plugin DISABLED to dodge #90925, but that plugin owns the
@@ -2669,7 +2746,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/hydra-tmp-reaper.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/hydra-tmp-reaper.log /var/log/hydra-main-prune-restart.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log {
     weekly
     rotate 4
     compress
@@ -2917,6 +2994,7 @@ AUX_ONFAILURE_UNITS=(
   hydra-company-finder-cache-refresh.service
   hydra-daily-audit.service
   hydra-jev-shadow-prune.service
+  hydra-main-prune-restart.service
   hydra-peer-labels.service
   hydra-release-watch.service
   hydra-release.service
