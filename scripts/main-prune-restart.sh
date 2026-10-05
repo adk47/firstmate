@@ -96,7 +96,7 @@ s=$(date +%s)
   > "$LOG_DIR/hydra-main-prune-$TS.json" 2> "$LOG_DIR/hydra-main-prune-$TS.err" || prune_rc=$?
 rm -rf "$TC"
 log "cleanup rc=$prune_rc secs=$(( $(date +%s)-s )) rows_after=$(rows)"
-[ "$prune_rc" -eq 0 ] || log "WARN prune failed (rc=$prune_rc, see $LOG_DIR/hydra-main-prune-$TS.err) - starting main anyway"
+[ "$prune_rc" = skipped ] || [ "$prune_rc" -eq 0 ] || log "WARN prune failed (rc=$prune_rc, see $LOG_DIR/hydra-main-prune-$TS.err) - starting main anyway"
 start_rc=0; systemctl start "$SVC" || start_rc=$?
 log "start issued rc=$start_rc (active=$(systemctl is-active "$SVC"))"
 [ "$start_rc" -eq 0 ] || { log "ERROR systemctl start failed (rc=$start_rc) - not retrying"; FAILED=1; }

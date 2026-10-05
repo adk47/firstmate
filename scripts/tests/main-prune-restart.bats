@@ -41,7 +41,7 @@ echo "systemctl $*" >> "$CALLS"
 case "$1" in
   is-active) if [ "$STUB_ACTIVE" = active ] && [ ! -e "$TEST_TMPDIR/stopped" ]; then echo active; exit 0; else echo inactive; exit 3; fi ;;
   show)      echo 0; exit 0 ;;
-  stop)      [ "${STUB_STOP_RC:-0}" -eq 0 ] && touch "$TEST_TMPDIR/stopped"; exit "${STUB_STOP_RC:-0}" ;;
+  stop)      if [ "${STUB_STOP_RC:-0}" -eq 0 ] || [ -n "${STUB_STOP_DEACTIVATES:-}" ]; then touch "$TEST_TMPDIR/stopped"; fi; exit "${STUB_STOP_RC:-0}" ;;
   start)     [ "${STUB_START_RC:-0}" -eq 0 ] && rm -f "$TEST_TMPDIR/stopped"; exit "${STUB_START_RC:-0}" ;;
 esac
 exit 0
@@ -165,7 +165,7 @@ _count() { grep -c "$1" "$CALLS" || true; }
 
 @test "a stop that returns 0 but leaves main ACTIVE never prunes either" {
   # stub: stop "succeeds" without deactivating
-  sed -i.bak 's|\[ "\${STUB_STOP_RC:-0}" -eq 0 \] \&\& touch "\$TEST_TMPDIR/stopped"; ||' "$STUBBIN/systemctl"
+  sed -i.bak 's|^  stop) .*|  stop)      exit 0 ;;|' "$STUBBIN/systemctl"
   _run
   [ "$status" -ne 0 ]
   [ "$(_count '^openclaw ')" -eq 0 ]
@@ -192,4 +192,21 @@ _count() { grep -c "$1" "$CALLS" || true; }
   echo 7 > "$TEST_TMPDIR/openclaw.rc"
   _run
   [ "$status" -eq 0 ]
+}
+
+@test "stop that exits NON-ZERO (timeout) while the unit already reads inactive still never prunes" {
+  # systemctl stop timing out can leave the unit 'deactivating' (is-active != active) with rc=1 while the
+  # gateway is still flushing SQLite. The rc arm alone must refuse the prune (is-active cannot catch this).
+  export STUB_STOP_RC=1 STUB_STOP_DEACTIVATES=1
+  _run
+  [ "$status" -ne 0 ]
+  [ "$(_count '^openclaw ')" -eq 0 ]
+  [[ "$output" == *"NOT pruning a live store"* ]]
+}
+
+@test "the skipped-prune path logs no bogus 'prune failed' WARN or shell error" {
+  export STUB_STOP_RC=1
+  _run
+  [[ "$output" != *"WARN prune failed"* ]]
+  [[ "$output" != *"integer expected"* ]]
 }
