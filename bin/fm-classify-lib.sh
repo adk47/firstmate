@@ -921,6 +921,18 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   ' "$f" "$start" "$length"
 }
 
+# Bounded span read: like _fm_status_read_span, but prints only the bytes
+# through the last newline inside the requested window, so a caller that bounds
+# a fold (the watcher's heartbeat backstop) never hands the fold a partial
+# trailing line and can advance its marker to the exact byte it inspected.
+# Exits non-zero when the window holds no newline, which leaves the caller's
+# recorded position unmoved rather than parked mid-line. Honors the same
+# FM_STATUS_SPAN_READER/PROBE seam as _fm_status_read_span.
+_fm_status_read_complete_span() {  # <status-file> <start-offset> <byte-length>
+  _fm_status_read_span "$1" "$2" "$3" 2>/dev/null \
+    | perl -e 'local $/; my $d = <>; my $i = rindex(defined($d) ? $d : "", "\n"); exit 1 if $i < 0; print substr($d, 0, $i + 1)'
+}
+
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
@@ -1892,9 +1904,9 @@ _fm_span_fold_last_open() {  # <chunk-file> <resolve> <held>
   done < "$1"
 }
 
-status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
-  local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file result
-  local line verb key resolve held rc=1 line_number=0 live_line events='' _fm_span_needs_decision=0
+status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var] [max-end-offset]
+  local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} max_end=${5-} size ident cur_ident scratch chunk_file result
+  local line verb key resolve held rc=1 line_number=0 live_line events='' _fm_span_needs_decision=0 end endpoint folded
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
@@ -1913,10 +1925,32 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
     fi
     return 1
   fi
+  # An optional max-end-offset bounds the folded window (belt-and-braces for the
+  # heartbeat backstop). The read stops at the last newline inside the bound so
+  # the recorded endpoint is a byte the next fold resumes from cleanly; an empty
+  # or absent bound keeps the original whole-append read exactly as before.
+  end=$size
+  case "$max_end" in
+    ''|*[!0-9]*) ;;
+    *) [ "$max_end" -gt "$start" ] && [ "$max_end" -lt "$size" ] && end=$max_end ;;
+  esac
   scratch=$(_fm_status_span_scratch "$f") || return 2
   chunk_file="${scratch}.span"
-  _fm_status_read_span "$f" "$start" "$((size - start))" > "$chunk_file" 2>/dev/null \
-    || { rm -f "$chunk_file"; return 2; }
+  if [ "$end" -lt "$size" ]; then
+    if _fm_status_read_complete_span "$f" "$start" "$((end - start))" > "$chunk_file" 2>/dev/null; then
+      folded=$(_fm_status_file_size "$chunk_file") || { rm -f "$chunk_file"; return 2; }
+      folded=${folded//[[:space:]]/}
+      case "$folded" in ''|*[!0-9]*) rm -f "$chunk_file"; return 2 ;; esac
+    else
+      folded=0
+      : > "$chunk_file" || { rm -f "$chunk_file"; return 2; }
+    fi
+    endpoint=$((start + folded))
+  else
+    _fm_status_read_span "$f" "$start" "$((size - start))" > "$chunk_file" 2>/dev/null \
+      || { rm -f "$chunk_file"; return 2; }
+    endpoint=$size
+  fi
   cur_ident=$(_fm_open_decisions_file_ident "$f") || { rm -f "$chunk_file"; return 2; }
   [ "$cur_ident" = "$ident" ] || { rm -f "$chunk_file"; return 2; }
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
@@ -1972,7 +2006,7 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
     esac
   done < "$chunk_file"
   rm -f "$chunk_file"
-  if [ "$rc" -eq 0 ]; then result="${size}"$'\t'"${ident}"$'\t'"${events}"; else result="${size}"$'\t'"${ident}"; fi
+  if [ "$rc" -eq 0 ]; then result="${endpoint}"$'\t'"${ident}"$'\t'"${events}"; else result="${endpoint}"$'\t'"${ident}"; fi
   if [ -n "$output_var" ]; then
     printf -v "$output_var" '%s' "$result"
     [ -z "$needs_var" ] || printf -v "$needs_var" '%s' "$_fm_span_needs_decision"

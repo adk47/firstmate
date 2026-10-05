@@ -142,8 +142,14 @@ esac
 # Cross-home bounds are explicit so one broken or unexpectedly large home cannot
 # hang or explode the parent snapshot.
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
-FM_SNAPSHOT_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-10}
-FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=${FM_SNAPSHOT_LOCAL_READ_CONCURRENCY:-8}
+FM_SNAPSHOT_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-4}
+FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=${FM_SNAPSHOT_LOCAL_READ_CONCURRENCY:-16}
+# Overall wall-clock budget for the local per-task observation pass. Each task's
+# read is additionally bounded by min(FM_SNAPSHOT_CREW_STATE_TIMEOUT, remaining
+# budget), and a task the budget cannot reach is reported unknown rather than
+# extending the pass past its deadline. bin/fm-home-summary-refresh.sh lowers
+# this to leave room for composition inside FM_HOME_SUMMARY_TIMEOUT.
+FM_SNAPSHOT_PREFETCH_TIMEOUT=${FM_SNAPSHOT_PREFETCH_TIMEOUT:-45}
 FM_SNAPSHOT_BUDGET=${FM_SNAPSHOT_BUDGET:-5}
 FM_SNAPSHOT_CACHE_DIR=${FM_SNAPSHOT_CACHE_DIR:-$STATE/secondmate-summary-cache}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
@@ -177,6 +183,7 @@ case "$FM_SNAPSHOT_SECONDMATES" in
 esac
 validate_positive_bound FM_SNAPSHOT_CREW_STATE_TIMEOUT "$FM_SNAPSHOT_CREW_STATE_TIMEOUT"
 validate_positive_bound FM_SNAPSHOT_LOCAL_READ_CONCURRENCY "$FM_SNAPSHOT_LOCAL_READ_CONCURRENCY"
+validate_positive_bound FM_SNAPSHOT_PREFETCH_TIMEOUT "$FM_SNAPSHOT_PREFETCH_TIMEOUT"
 validate_positive_bound FM_SNAPSHOT_BUDGET "$FM_SNAPSHOT_BUDGET"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_CHILDREN "$FM_SNAPSHOT_SECONDMATE_CHILDREN"
@@ -213,6 +220,9 @@ esac
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
+# shellcheck source=bin/fm-nm-run-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"  # fm_nm_repo_cache_key: shared per-repo run-listing key
 
 usage() {
   cat <<'EOF'
@@ -246,8 +256,11 @@ home with neither a valid current ledger nor a valid current cached copy is
 reported unreadable with the reason; collection never computes a summary in
 that home.
 Each local per-task current-state read is bounded by FM_SNAPSHOT_CREW_STATE_TIMEOUT
-(default 10 seconds); a read that hits the bound reports state unknown. Local task
-observations run concurrently, up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY (default 8).
+(default 4 seconds); a read that hits the bound reports state unknown. Local task
+observations run concurrently, up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY (default 16),
+and the whole local observation pass is bounded by FM_SNAPSHOT_PREFETCH_TIMEOUT
+(default 45 seconds): a task the deadline cannot reach is reported unknown rather
+than extending the pass.
 Remote secondmate endpoint liveness is not probed by this command.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
@@ -302,22 +315,34 @@ last_nonempty_line() {  # <file>
 
 # A local crew-state read is bounded so one slow child cannot extend this
 # snapshot without limit. Remote secondmate endpoint liveness is never read here.
-# A local read that hits the bound folds to state unknown.
-crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
-  local id=$1 captured_meta=${2:-} captured_status=${3:-} raw rest state source detail sep
-  raw=$(
-    fm_run_timed "$FM_SNAPSHOT_CREW_STATE_TIMEOUT" \
-      env FM_ROOT_OVERRIDE="$FM_ROOT" \
-      FM_HOME="$FM_HOME" \
-      FM_STATE_OVERRIDE="$STATE" \
-      FM_CREW_STATE_META_OVERRIDE="$captured_meta" \
-      FM_CREW_STATE_STATUS_OVERRIDE="$captured_status" \
-      FM_DATA_OVERRIDE="$DATA" \
-      FM_PROJECTS_OVERRIDE="$PROJECTS" \
-      FM_CONFIG_OVERRIDE="$CONFIG" \
-      "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
-  )
-  raw=$(printf '%s\n' "$raw" | head -1)
+# A local read that hits the bound folds to state unknown. The bound is the
+# smaller of FM_SNAPSHOT_CREW_STATE_TIMEOUT and the caller's remaining prefetch
+# budget, so the pass as a whole cannot outrun its deadline.
+crew_state_json() {  # <id> [<captured-meta>] [<captured-status>] [<seconds-bound>]
+  local id=$1 captured_meta=${2:-} captured_status=${3:-} bound=${4:-$FM_SNAPSHOT_CREW_STATE_TIMEOUT} raw rest state source detail sep raw_file hard_bound
+  case "$bound" in ''|*[!0-9]*|0) bound=$FM_SNAPSHOT_CREW_STATE_TIMEOUT ;; esac
+  # fm-crew-state.sh shells no-mistakes under its own bounded timeout. Give that
+  # inner bound the whole outer budget and wrap the script with a slightly larger
+  # hard bound: the inner timeout then reaps its own process group first, so a
+  # hanging vendor CLI never outlives the outer kill as an orphan. Capture to a
+  # file rather than through command substitution so a stranded grandchild can
+  # never hold this read past the bound on a substitution pipe.
+  hard_bound=$((bound + 5))
+  raw_file="$SNAPSHOT_TASK_DIR/$id.current.raw"
+  fm_run_timed "$hard_bound" \
+    env FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_HOME="$FM_HOME" \
+    FM_STATE_OVERRIDE="$STATE" \
+    FM_CREW_STATE_META_OVERRIDE="$captured_meta" \
+    FM_CREW_STATE_STATUS_OVERRIDE="$captured_status" \
+    FM_CREW_STATE_NM_TIMEOUT="$bound" \
+    FM_CREW_STATE_RUNS_LIST_DIR="${SNAPSHOT_RUNS_LIST_DIR:-}" \
+    FM_DATA_OVERRIDE="$DATA" \
+    FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-crew-state.sh" "$id" > "$raw_file" 2>/dev/null || true
+  raw=$(head -1 "$raw_file" 2>/dev/null || true)
+  rm -f -- "$raw_file" 2>/dev/null || true
   sep=' · '
   state=unknown
   source=none
@@ -531,12 +556,14 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 SNAPSHOT_TASK_DIR=
+SNAPSHOT_RUNS_LIST_DIR=
 SNAPSHOT_TASK_METAS=()
 SNAPSHOT_TASK_META_COUNT=0
 
 snapshot_task_cleanup() {
   [ -z "$SNAPSHOT_TASK_DIR" ] || rm -rf -- "$SNAPSHOT_TASK_DIR"
   SNAPSHOT_TASK_DIR=
+  SNAPSHOT_RUNS_LIST_DIR=
   SNAPSHOT_TASK_METAS=()
   SNAPSHOT_TASK_META_COUNT=0
 }
@@ -584,8 +611,20 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
   fi
 }
 
-prefetch_task_observations() {  # <meta> <id>
-  local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
+# Report one task unknown because the shared prefetch budget could not reach it.
+# Writes the same observation files an ordinary read would, so composition stays
+# total and the snapshot remains a valid document rather than failing.
+prefetch_degrade_unknown() {  # <id> <reason>
+  local id=$1 reason=$2
+  jq -n --arg detail "$reason" '{state:"unknown",source:"none",detail:$detail,raw:""}' \
+    > "$SNAPSHOT_TASK_DIR/$id.json" || return 1
+  printf 'endpoint_exists=null\nagent_alive=unknown\n' > "$SNAPSHOT_TASK_DIR/$id.endpoint" || return 1
+  : > "$SNAPSHOT_TASK_DIR/$id.opendecisions" 2>/dev/null || true
+  return 0
+}
+
+prefetch_task_observations() {  # <meta> <id> <prefetch-deadline-epoch>
+  local meta=$1 id=$2 deadline=${3:-} remote_host current_file endpoint_file current_pid='' current_rc=0 remaining crew_bound
   local status_log status_capture report_path report_capture opendecisions_file captured_end
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
   remote_host=$(meta_value "$meta" remote_host)
@@ -596,6 +635,13 @@ prefetch_task_observations() {  # <meta> <id>
   report_path="$DATA/$id/report.md"
   report_capture="$SNAPSHOT_TASK_DIR/$id.report"
   opendecisions_file="$SNAPSHOT_TASK_DIR/$id.opendecisions"
+
+  # The shared pass deadline can already be past by the time this worker runs
+  # (the previous batch used the remaining budget). Degrade rather than read.
+  if [ -n "$deadline" ] && [ "$SECONDS" -ge "$deadline" ]; then
+    prefetch_degrade_unknown "$id" "snapshot prefetch deadline reached before this task was read" || return 1
+    return 0
+  fi
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
   if [ "$generation_current" = 1 ]; then
@@ -634,7 +680,13 @@ prefetch_task_observations() {  # <meta> <id>
       > "$current_file" || current_rc=1
     agent_alive=unknown
   elif [ "$generation_current" = 1 ]; then
-    crew_state_json "$id" "$meta" "$status_capture" > "$current_file" &
+    crew_bound=$FM_SNAPSHOT_CREW_STATE_TIMEOUT
+    if [ -n "$deadline" ]; then
+      remaining=$((deadline - SECONDS))
+      [ "$remaining" -gt 0 ] || remaining=1
+      [ "$remaining" -lt "$crew_bound" ] && crew_bound=$remaining
+    fi
+    crew_state_json "$id" "$meta" "$status_capture" "$crew_bound" > "$current_file" &
     current_pid=$!
     kind=$(meta_value "$meta" kind)
     backend=$(fm_backend_of_meta "$meta")
@@ -674,7 +726,7 @@ prefetch_task_observations() {  # <meta> <id>
 # window rather than five in series, while every command bound remains owned by
 # fm-timeout-lib.sh.
 prefetch_task_current_states() {
-  local meta captured_meta id active=0 index=0 rc=0
+  local meta captured_meta id active=0 index=0 rc=0 deadline
   local -a pids=()
   snapshot_task_cleanup
   SNAPSHOT_TASK_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-tasks.XXXXXX") || return 1
@@ -701,10 +753,47 @@ prefetch_task_current_states() {
     SNAPSHOT_TASK_METAS[SNAPSHOT_TASK_META_COUNT]=$captured_meta
     SNAPSHOT_TASK_META_COUNT=$((SNAPSHOT_TASK_META_COUNT + 1))
   done
+  # The local observation pass shares one wall-clock deadline. It starts after
+  # the manifest copy so composition still owns the rest of the caller's budget.
+  deadline=$((SECONDS + FM_SNAPSHOT_PREFETCH_TIMEOUT))
+  # One bounded `no-mistakes runs` listing per repository, shared by every task in
+  # that repo: the cross-branch attribution fallback is repo-scoped, so a listing
+  # computed under another repo would mis-attribute, while a per-repo cache cuts
+  # one ledger read per fallback task. Best-effort and inside the same deadline;
+  # a task whose repo is not cached simply falls back to its own read.
+  if [ "$SNAPSHOT_TASK_META_COUNT" -gt 0 ] && command -v no-mistakes >/dev/null 2>&1 \
+    && mkdir -p "$SNAPSHOT_TASK_DIR/runs-cache" 2>/dev/null; then
+    SNAPSHOT_RUNS_LIST_DIR="$SNAPSHOT_TASK_DIR/runs-cache"
+    local repo_wt repo_key repo_kind line seen_wts=''
+    for meta in "${SNAPSHOT_TASK_METAS[@]}"; do
+      repo_kind=''; repo_wt=''
+      while IFS= read -r line; do
+        case "$line" in
+          kind=*) repo_kind=${line#kind=} ;;
+          worktree=*) repo_wt=${line#worktree=} ;;
+        esac
+      done < "$meta"
+      [ "$repo_kind" = ship ] || continue
+      [ -n "$repo_wt" ] || continue
+      case $'\n'"$seen_wts"$'\n' in *$'\n'"$repo_wt"$'\n'*) continue ;; esac
+      seen_wts="${seen_wts}${seen_wts:+$'\n'}${repo_wt}"
+      repo_key=$(fm_nm_repo_cache_key "$repo_wt" 2>/dev/null) || continue
+      [ -n "$repo_key" ] || continue
+      [ -f "$SNAPSHOT_RUNS_LIST_DIR/$repo_key" ] && continue
+      [ "$SECONDS" -ge "$deadline" ] && break
+      ( cd "$repo_wt" && fm_run_timed "$FM_SNAPSHOT_CREW_STATE_TIMEOUT" \
+          no-mistakes runs --limit 200 ) > "$SNAPSHOT_RUNS_LIST_DIR/$repo_key" 2>/dev/null || true
+    done
+  fi
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
     id=$(basename "$meta" .meta)
-    prefetch_task_observations "$meta" "$id" &
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      prefetch_degrade_unknown "$id" "snapshot prefetch deadline reached; task not read" || rc=1
+      index=$((index + 1))
+      continue
+    fi
+    prefetch_task_observations "$meta" "$id" "$deadline" &
     pids[active]=$!
     active=$((active + 1))
     index=$((index + 1))

@@ -744,6 +744,49 @@ EOF
   pass "cross-branch run is attributed via the real runs list"
 }
 
+# A fleet snapshot builds one `no-mistakes runs` listing per repository and
+# points every task in that repo at it. The key must group a linked worktree
+# with its primary checkout, since `no-mistakes runs` is repo-scoped.
+test_repo_cache_key_groups_worktrees() {
+  local d key_primary key_linked
+  d=$(new_case repo-cache-key)
+  make_repo_on_branch "$d/primary" fm/feat-key
+  git -C "$d/primary" worktree add -q "$d/linked" -b fm/feat-key2
+  key_primary=$(bash -c '. "$1"; fm_nm_repo_cache_key "$2"' _ "$ROOT/bin/fm-nm-run-lib.sh" "$d/primary") \
+    || fail "primary checkout produced no cache key"
+  key_linked=$(bash -c '. "$1"; fm_nm_repo_cache_key "$2"' _ "$ROOT/bin/fm-nm-run-lib.sh" "$d/linked") \
+    || fail "linked worktree produced no cache key"
+  [ -n "$key_primary" ] && [ "$key_primary" = "$key_linked" ] \
+    || fail "linked worktree key differs from its primary: '$key_primary' vs '$key_linked'"
+  pass "repo cache key groups a linked worktree with its primary checkout"
+}
+
+# The shared per-repo listing must be consumed instead of a fresh, empty
+# per-task read, and a key with no cached file must fall back safely.
+test_runs_list_cache_reuses_a_shared_listing() {
+  reset_fakes
+  local d short key cache out
+  d=$(new_case runs-cache)
+  make_repo_on_branch "$d/wt" fm/feat-cache
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cache.meta" "window=fm:fm-feat-cache" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  # A fresh per-task read finds nothing; only the shared listing names the run.
+  FM_FAKE_RUNS_LIST=""
+  cache="$d/runs-cache"; mkdir -p "$cache"
+  key=$(bash -c '. "$1"; fm_nm_repo_cache_key "$2"' _ "$ROOT/bin/fm-nm-run-lib.sh" "$d/wt")
+  [ -n "$key" ] || fail "empty cache key"
+  printf '  running    fm/feat-cache %s  2026-07-02 22:05\n' "$short" > "$cache/$key"
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_RUNS_LIST_DIR="$cache" "$CREW_STATE" feat-cache)
+  assert_contains "$out" "state: working" "shared per-repo listing attributed the run"
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_RUNS_LIST_DIR="$d/empty-cache" "$CREW_STATE" feat-cache)
+  assert_contains "$out" "state: unknown" "a missing cache entry falls back to the per-task read"
+  pass "runs-list cache reuses a shared per-repo listing"
+}
+
 # The runs list is newest-first; a branch with an OLDER completed run must not
 # shadow its own newer active one - the first (topmost) matching row wins.
 test_cross_branch_attribution_picks_most_recent_row() {
@@ -1891,6 +1934,8 @@ test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
+test_repo_cache_key_groups_worktrees
+test_runs_list_cache_reuses_a_shared_listing
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored

@@ -66,6 +66,29 @@ fm_nm_resolve_commit() {  # <worktree> <sha-ish>
   git -C "$1" rev-parse --verify --quiet "${2}^{commit}" 2>/dev/null || true
 }
 
+# Filesystem-safe key for the repository a worktree belongs to, so one
+# repo-scoped `no-mistakes runs` listing can be shared by every task in that
+# repo during a fleet snapshot. Reads the worktree's own .git pointer without
+# forking git; a linked worktree's .git file names the shared common directory
+# before its /worktrees/<name> component. Prints nothing and returns non-zero
+# when the worktree has no git identity. A wrong or colliding key is harmless:
+# the caller only consumes a listing whose file exists, and a mismatch simply
+# falls back to the ordinary per-task read.
+fm_nm_repo_cache_key() {  # <worktree>
+  local wt=$1 common
+  if [ -f "$wt/.git" ]; then
+    common=$(<"$wt/.git") || return 1
+    common=${common#gitdir: }
+    common=${common%%/worktrees/*}
+  elif [ -d "$wt/.git" ]; then
+    common="$wt/.git"
+  else
+    return 1
+  fi
+  [ -n "$common" ] || return 1
+  printf '%s' "$common" | cksum | cut -d' ' -f1
+}
+
 # 0 if run head $2 matches worktree $1's code identity, per the same rule
 # everywhere this attribution is needed:
 #   - missing/empty head: cannot bind; reject
