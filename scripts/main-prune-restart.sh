@@ -15,6 +15,7 @@
 #       Exit non-zero (so OnFailure= pages) if the prune, stop or start failed or health never stabilised
 #       (main is still started first: paging never costs availability).
 # Rollback of data: $BACKUP_ROOT/<ts>/ (stop main, copy the .sqlite files back, start).
+# Only one run at a time (flock on $LOCK_FILE); a second invocation skips.
 # Usage: main-prune-restart.sh [reason]
 #   HYDRA_MAIN_MIN_UPTIME_H=N  skip when main has been up < N hours (the nightly timer sets 4).
 # The remaining env knobs exist so the bats suite can run the real script against stubs.
@@ -32,6 +33,7 @@ MAX_WAIT_SECS="${MAX_WAIT_SECS:-2700}"
 POLL_SECS="${POLL_SECS:-5}"
 MIN_UPTIME_H="${HYDRA_MAIN_MIN_UPTIME_H:-0}"
 PRUNE_PATH="${HYDRA_PRUNE_PATH:-/usr/bin:/bin}"
+LOCK_FILE="${LOCK_FILE:-/run/lock/hydra-main-prune-restart.lock}"
 REASON="${1:-manual}"
 TS=$(date -u +%Y%m%dT%H%M%SZ); BK="$BACKUP_ROOT/$TS"
 
@@ -52,6 +54,12 @@ main_uptime_h() {
   echo $(( (now - start) / 3600000000 ))
 }
 
+# Serialise the nightly unit and any manual run BEFORE the active check: two runs would both see main active,
+# both stop it, and both run cleanup against the same SQLite stores while racing to start main. The lock dies
+# with the process (fd 9), so a killed run can never wedge the next one. Unable to take the lock = abort with
+# main untouched (and page); a held lock = another run is already doing this, skip.
+exec 9>"$LOCK_FILE" || { log "ERROR cannot open lock $LOCK_FILE - aborting before any change"; exit 1; }
+flock -n 9 || { log "another main-prune-restart run holds $LOCK_FILE - skip"; exit 0; }
 if pgrep -f "scripts/(deploy|rollback).sh" >/dev/null; then log "deploy/rollback running - skip"; exit 0; fi
 systemctl is-active --quiet "$SVC" || { log "main not active - skip (systemd/watchdog own that)"; exit 0; }
 if [ "$MIN_UPTIME_H" -gt 0 ]; then

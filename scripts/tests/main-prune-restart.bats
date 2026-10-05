@@ -32,6 +32,7 @@ c.executemany('insert into session_nodes values (?)',[(i,) for i in range(5)]); 
   export MAINT_SH="$STUBBIN/hydra-maintenance.sh"
   export STABLE_SECS=0 MAX_WAIT_SECS=5 POLL_SECS=0
   export STUB_ACTIVE=active STUB_PGREP_RC=1 STUB_HTTP=200
+  export LOCK_FILE="$TEST_TMPDIR/prune.lock"
   export STUB_START_RC=0 HYDRA_PRUNE_PATH="$STUBBIN:$PATH"
 
   # Stateful: a successful stop makes the service inactive until a start.
@@ -212,4 +213,32 @@ _count() { grep -c "$1" "$CALLS" || true; }
   _run
   [[ "$output" != *"WARN prune failed"* ]]
   [[ "$output" != *"integer expected"* ]]
+}
+
+@test "a second invocation while one holds the lock skips: no stop, no prune, no backup" {
+  # the first run is mid-backup/prune; hold the same lock it would hold
+  flock -n "$LOCK_FILE" sleep 30 & holder=$!
+  sleep 1
+  _run manual
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"holds"*"skip"* ]]
+  [ "$(_count 'systemctl stop')" -eq 0 ]
+  [ "$(_count '^openclaw ')" -eq 0 ]
+  [ ! -d "$BACKUP_ROOT" ]
+}
+
+@test "the lock is released when a run ends: the next run proceeds" {
+  _run first
+  [ "$status" -eq 0 ]
+  _run second
+  [ "$status" -eq 0 ]
+  [ "$(_count '^openclaw ')" -eq 2 ]
+}
+
+@test "an unopenable lock aborts before any change, and pages" {
+  export LOCK_FILE="/dev/null/nope.lock"
+  _run
+  [ "$status" -ne 0 ]
+  [ "$(_count 'systemctl stop')" -eq 0 ]
 }

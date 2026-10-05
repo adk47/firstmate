@@ -2422,14 +2422,27 @@ log "  $trtmr: $trstate (fires hourly)"
 [[ -x "$HYDRA_ROOT/scripts/main-prune-restart.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/main-prune-restart.sh missing or not executable"
 
+# Never kill a legacy prune/restart that is mid-flight: it has already stopped main and has no exit trap, so
+# stopping its service leaves main down or cold-starting from a half-pruned store. Stop only the TIMER (no new
+# run), then wait for any running legacy service/script to finish; if it does not, fail the install loudly
+# (nothing has been removed or armed yet) so the next deploy retries.
+AUX_BRIDGE_WAIT_SECS="${AUX_BRIDGE_WAIT_SECS:-900}"
+legacy_bridge_running() {
+  [[ "$(systemctl is-active hydra-main-nightly-reset.service 2>/dev/null || true)" =~ ^(active|activating|deactivating)$ ]] \
+    || pgrep -f '/usr/local/sbin/hydra-main-(prune-restart|nightly-reset)\.sh' >/dev/null 2>&1
+}
 retire_main_prune_bridge() {
-  local unit f
-  # Transient units are not in unit-files and have no /etc file, so the stale-unit
-  # loop above cannot see them: stop them by name, tolerating "not loaded".
-  for unit in hydra-main-nightly-reset.timer hydra-main-nightly-reset.service; do
-    systemctl stop "$unit" >/dev/null 2>&1 || true
-    systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+  local f waited=0
+  systemctl stop hydra-main-nightly-reset.timer >/dev/null 2>&1 || true
+  while legacy_bridge_running; do
+    if (( waited >= AUX_BRIDGE_WAIT_SECS )); then
+      fail "legacy main prune/restart bridge still running after ${AUX_BRIDGE_WAIT_SECS}s; refusing to kill it mid-flight (main may be stopped). Re-run install-aux-units.sh once it finishes."
+    fi
+    (( waited == 0 )) && log "  legacy main prune/restart bridge is running; waiting for it to finish (max ${AUX_BRIDGE_WAIT_SECS}s)"
+    sleep 5; waited=$((waited + 5))
   done
+  # Transient units vanish when they finish; clear any failed leftovers by name.
+  systemctl reset-failed hydra-main-nightly-reset.timer hydra-main-nightly-reset.service >/dev/null 2>&1 || true
   for f in /usr/local/sbin/hydra-main-prune-restart.sh /usr/local/sbin/hydra-main-nightly-reset.sh; do
     if [[ -e "$f" ]]; then rm -f "$f"; log "  retired hand-placed bridge: $f"; fi
   done

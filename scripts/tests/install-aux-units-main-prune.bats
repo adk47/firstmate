@@ -14,10 +14,22 @@ setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
   UNITS="$TEST_TMPDIR/units"; SBIN="$TEST_TMPDIR/sbin"; mkdir -p "$UNITS" "$SBIN"
   export CALLS="$TEST_TMPDIR/calls.log"; : > "$CALLS"
+  export LEGACY_RUNNING_MARK="$TEST_TMPDIR/legacy-running"
   cat > "$TEST_TMPDIR/stub.sh" <<'STUB'
 log() { echo "$*"; }
 fail() { echo "FATAL: $*"; exit 1; }
-systemctl() { echo "systemctl $*" >> "$CALLS"; case "$1" in is-active) echo active;; esac; return 0; }
+sleep() { echo "sleep $*" >> "$CALLS"; rm -f "$LEGACY_RUNNING_MARK"; }
+pgrep() { return 1; }
+systemctl() {
+  echo "systemctl $*" >> "$CALLS"
+  case "$1" in
+    is-active)
+      if [ "$2" = hydra-main-nightly-reset.service ]; then
+        [ -e "$LEGACY_RUNNING_MARK" ] && echo active || echo inactive
+      else echo active; fi ;;
+  esac
+  return 0
+}
 STUB
   {
     cat "$TEST_TMPDIR/stub.sh"
@@ -83,7 +95,7 @@ _install() { run bash "$TEST_TMPDIR/block.sh"; }
 }
 
 @test "the timer not coming active fails the install" {
-  sed -i.bak 's/is-active) echo active;;/is-active) echo failed;;/' "$TEST_TMPDIR/block.sh"
+  sed -i.bak 's/else echo active; fi ;;/else echo failed; fi ;;/' "$TEST_TMPDIR/block.sh"
   _install
   [ "$status" -ne 0 ]
   [[ "$output" == *"FATAL"* ]]
@@ -93,4 +105,35 @@ _install() { run bash "$TEST_TMPDIR/block.sh"; }
   # the installer's real tables, not a copy
   awk '/^AUX_ONFAILURE_UNITS=\(/,/^\)/' "$INSTALLER" | grep -qx '  hydra-main-prune-restart.service'
   grep -q '/var/log/hydra-main-prune-restart.log' "$INSTALLER"
+}
+
+@test "a legacy prune/restart still RUNNING is never stopped: the installer waits, then retires it" {
+  touch "$LEGACY_RUNNING_MARK"          # the stubbed sleep clears it, i.e. the legacy run finishes
+  _install
+  [ "$status" -eq 0 ]
+  grep -q '^sleep' "$CALLS"
+  # argv match, not a literal: a combined `stop <timer> <service>` call must also be caught
+  [ "$(grep -cE 'systemctl stop .*hydra-main-nightly-reset\.service' "$CALLS")" -eq 0 ]
+  [ ! -e "$SBIN/hydra-main-nightly-reset.sh" ]
+}
+
+@test "a legacy run that never finishes fails the install with nothing removed or armed" {
+  touch "$LEGACY_RUNNING_MARK"
+  export AUX_BRIDGE_WAIT_SECS=0
+  _install
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refusing to kill it mid-flight"* ]]
+  # argv match, not a literal: a combined `stop <timer> <service>` call must also be caught
+  [ "$(grep -cE 'systemctl stop .*hydra-main-nightly-reset\.service' "$CALLS")" -eq 0 ]
+  [ "$(grep -c 'enable hydra-main-prune-restart.timer' "$CALLS")" -eq 0 ]
+  [ -e "$SBIN/hydra-main-nightly-reset.sh" ]
+  [ -e "$SBIN/hydra-main-prune-restart.sh" ]
+}
+
+@test "a legacy script running by hand (no unit) also blocks the retirement" {
+  sed -i.bak 's/^pgrep() .*/pgrep() { return 0; }/' "$TEST_TMPDIR/block.sh"
+  export AUX_BRIDGE_WAIT_SECS=0
+  _install
+  [ "$status" -ne 0 ]
+  [ -e "$SBIN/hydra-main-prune-restart.sh" ]
 }
