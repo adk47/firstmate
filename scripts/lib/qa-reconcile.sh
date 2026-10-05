@@ -427,6 +427,42 @@ qar_state_put() {
     '.[$k] = {"attempts": $a, "last_attempt_epoch": $l, "paged": $p}' <<<"$state" 2>/dev/null
 }
 
+# qar_state_put_unreachable <state-json> <key> <attempts> <last_attempt_epoch> <paged 0|1>
+# Echo a NEW state with that entry written back for a dispatch that NEVER
+# REACHED the gateway (dispatcher rc 75): attempts/paged are the caller's
+# UNCHANGED values, last_attempt_epoch is advanced (the cooldown bound stays),
+# and the entry's unreachable_attempts counter is incremented. qar_state_put
+# replaces the entry wholesale, so a later rc-0 dispatch drops the counter.
+qar_state_put_unreachable() {
+  local state="$1" key="$2" attempts="$3" last="$4" paged="$5"
+  jq -c --arg k "$key" --argjson a "$attempts" --argjson l "$last" \
+    --argjson p "$([ "$paged" = "1" ] && echo true || echo false)" \
+    '.[$k] = {"attempts": $a, "last_attempt_epoch": $l, "paged": $p,
+              "unreachable_attempts": ((.[$k].unreachable_attempts // 0) + 1)}' <<<"$state" 2>/dev/null
+}
+
+# qar_state_meta_unreachable_ticks <state-json> — echo
+# __meta__.consecutive_unreachable_ticks, default 0.
+qar_state_meta_unreachable_ticks() {
+  jq -r '(.__meta__.consecutive_unreachable_ticks // 0)' <<<"$1" 2>/dev/null || echo 0
+}
+
+# qar_state_set_meta_unreachable_ticks <state-json> <n> — echo new state with it set.
+qar_state_set_meta_unreachable_ticks() {
+  jq -c --argjson n "$2" '.__meta__.consecutive_unreachable_ticks = $n' <<<"$1" 2>/dev/null
+}
+
+# qar_state_meta_unreachable_last_alert <state-json> — epoch of the last
+# gateway-unreachable page, 0 if never.
+qar_state_meta_unreachable_last_alert() {
+  jq -r '(.__meta__.unreachable_last_alert // 0)' <<<"$1" 2>/dev/null || echo 0
+}
+
+# qar_state_set_meta_unreachable_last_alert <state-json> <epoch>
+qar_state_set_meta_unreachable_last_alert() {
+  jq -c --argjson e "$2" '.__meta__.unreachable_last_alert = $e' <<<"$1" 2>/dev/null
+}
+
 # qar_state_keep_only <state-json> <keys-newline-list>
 # Echo a NEW state object retaining ONLY the given keys (plus __meta__, which
 # is never subject to per-PR pruning). This is the prune primitive: a key not

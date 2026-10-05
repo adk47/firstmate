@@ -612,7 +612,8 @@ STUB
   cat > "$DISPATCH_STUB" <<'STUB'
 #!/usr/bin/env bash
 printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" >> "$DISPATCH_CALLS"
-exit 0
+# DISPATCH_RC lets a test simulate a failing dispatcher (75 = never reached the gateway).
+exit "${DISPATCH_RC:-0}"
 STUB
   chmod +x "$DISPATCH_STUB"
 
@@ -2021,4 +2022,75 @@ JSON
   run jq -r '.__meta__.repo_failures["Muso-AI/core-backend"] // 0' "$QA_RECONCILE_STATE_FILE"
   [ "$output" = "1" ]
   [ ! -s "$DISPATCH_CALLS" ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Dispatch exit 75 (never reached the gateway) must not burn an attempt
+# ─────────────────────────────────────────────────────────────────────────
+
+unreach_epoch() {
+  echo "$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 7200 ))"
+}
+
+# unreach_setup <pr> <sha> — one candidate PR, epoch-seeded, no prior attempts.
+unreach_setup() {
+  seed_epoch_state "Muso-AI/core-backend"
+  mk_pr_list "Muso-AI/core-backend" "$1" "$2" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/core-backend" "$2" "2026-01-01T00:00:00Z"
+  export QA_RECONCILE_NOW_EPOCH="$(unreach_epoch)"
+}
+
+@test "e2e 75a: dispatch rc 75 -> attempts unchanged, cooldown stamp advanced, unreachable_attempts counted; a later tick re-dispatches instead of paging EXHAUSTED" {
+  sha="shaunr0000000000000000000000000000000001"
+  key="Muso-AI/core-backend#60@$sha"
+  unreach_setup 60 "$sha"
+  now="$QA_RECONCILE_NOW_EPOCH"
+  DISPATCH_RC=75 run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+  [ "$(jq -r --arg k "$key" '.[$k].last_attempt_epoch' "$QA_RECONCILE_STATE_FILE")" = "$now" ]
+  [ "$(jq -r --arg k "$key" '.[$k].unreachable_attempts' "$QA_RECONCILE_STATE_FILE")" = "1" ]
+  # Inside the cooldown: no hammering.
+  DISPATCH_RC=75 run "$SCRIPT" --once
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 1 ]
+  # Three more past-cooldown unreachable ticks: still never exhausted, never an EXHAUSTED page.
+  for i in 1 2 3; do
+    now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+    DISPATCH_RC=75 run "$SCRIPT" --once
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"EXHAUSTED"* ]]
+  done
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 4 ]
+  [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+}
+
+@test "e2e 75b: dispatch rc 1 STILL counts as an attempt (a systematically broken dispatcher must hit the cap)" {
+  sha="shaunr0000000000000000000000000000000002"
+  key="Muso-AI/core-backend#61@$sha"
+  unreach_setup 61 "$sha"
+  DISPATCH_RC=1 run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "1" ]
+  [ "$(jq -r --arg k "$key" '.[$k].unreachable_attempts // 0' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+}
+
+@test "e2e 75c: three consecutive all-unreachable ticks page exactly ONCE, a fourth pages nothing, an rc-0 dispatch resets the counter" {
+  sha="shaunr0000000000000000000000000000000003"
+  unreach_setup 62 "$sha"
+  now="$QA_RECONCILE_NOW_EPOCH"
+  for i in 1 2; do
+    DISPATCH_RC=75 run "$SCRIPT" --once
+    [ ! -s "$SLACK_CALLS" ]
+    now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+  done
+  DISPATCH_RC=75 run "$SCRIPT" --once
+  [ "$(jq -r '.__meta__.consecutive_unreachable_ticks' "$QA_RECONCILE_STATE_FILE")" = "3" ]
+  [ "$(wc -l < "$SLACK_CALLS" | tr -d ' ')" -eq 1 ]
+  [[ "$output" == *"GATEWAY UNREACHABLE"* ]]
+  now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+  DISPATCH_RC=75 run "$SCRIPT" --once
+  [ "$(wc -l < "$SLACK_CALLS" | tr -d ' ')" -eq 1 ]
+  now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+  DISPATCH_RC=0 run "$SCRIPT" --once
+  [ "$(jq -r '.__meta__.consecutive_unreachable_ticks // 0' "$QA_RECONCILE_STATE_FILE")" = "0" ]
 }

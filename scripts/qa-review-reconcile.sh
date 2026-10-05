@@ -106,6 +106,8 @@ set -euo pipefail
 #   Grace:    no action until >=30 min since the PR's trigger_time (head
 #             push, or ready_for_review if later).
 #   Cooldown: >=30 min between attempts for the same (repo, pr, head_sha).
+#   Unreachable: a dispatch that never reached the gateway (rc 75) is NOT an
+#             attempt; see QA_RECONCILE_MAX_ATTEMPTS.
 #   Cap:      max 2 attempts per key; on the 2nd exhausted attempt, page
 #             once and (merge-gated repos only) drive the qa-review status
 #             red via qa-review-status.sh.
@@ -167,7 +169,12 @@ set -euo pipefail
 #   QA_RECONCILE_PROFILE             openclaw --profile (default: main)
 #   QA_RECONCILE_GRACE_S             grace window seconds (default 1800)
 #   QA_RECONCILE_COOLDOWN_S          cooldown seconds (default 1800)
-#   QA_RECONCILE_MAX_ATTEMPTS        attempts cap per key (default 2)
+#   QA_RECONCILE_MAX_ATTEMPTS        attempts cap per key (default 2). Bounds
+#                                     dispatches that REACHED the gateway; a
+#                                     dispatcher exit 75 (gateway unreachable)
+#                                     is not an attempt — cooldown, the global
+#                                     cap and a page after TICK_FAIL_THRESHOLD
+#                                     all-unreachable ticks bound those
 #   QA_RECONCILE_GLOBAL_CAP          re-dispatches per tick (default 3)
 #   QA_RECONCILE_PAGE_CAP             exhaustion pages + red-status calls per
 #                                     tick (default 3) — bounds the actuator
@@ -475,6 +482,9 @@ else
 fi
 
 dispatched_this_tick=0
+# Dispatches this tick that exited 75 (never reached the gateway) / exited 0.
+unreachable_this_tick=0
+reached_this_tick=0
 # PRs whose head commit already carried a terminal qa-review status in the PR
 # list, so no per-PR REST read was needed (the read-amplification cut).
 terminal_skipped=0
@@ -897,8 +907,21 @@ for repo in "${REPOS[@]}"; do
     log "DISPATCH: $key (attempt $((attempts + 1))/$MAX_ATTEMPTS)"
     dispatch_rc=0
     "$DISPATCH_SCRIPT" "$pr" "$head_sha" "$repo" "$author_uid" || dispatch_rc=$?
-    [ "$dispatch_rc" -eq 0 ] || log "WARN: $DISPATCH_SCRIPT exited $dispatch_rc for $key (counted as an attempt regardless — a systematically broken dispatcher must still hit the attempts cap, not retry forever)."
-    state_json="$(qar_state_put "$state_json" "$key" "$((attempts + 1))" "$NOW_EPOCH" 0)"
+    # Invariant: `attempts` bounds dispatches that REACHED the gateway. rc 75
+    # (EX_TEMPFAIL) means the dispatcher never got to it, so it is not an
+    # attempt; cooldown (last_attempt_epoch still advances) + GLOBAL_CAP + the
+    # consecutive-unreachable-ticks page bound those. Every other non-zero rc
+    # stays counted — a systematically broken dispatcher must still hit the
+    # attempts cap, not retry forever.
+    if [ "$dispatch_rc" -eq 75 ]; then
+      log "WARN: $DISPATCH_SCRIPT exited 75 for $key (gateway unreachable — NOT counted as an attempt; cooldown still applies)."
+      state_json="$(qar_state_put_unreachable "$state_json" "$key" "$attempts" "$NOW_EPOCH" "$paged")"
+      unreachable_this_tick=$((unreachable_this_tick + 1))
+    else
+      [ "$dispatch_rc" -eq 0 ] || log "WARN: $DISPATCH_SCRIPT exited $dispatch_rc for $key (counted as an attempt regardless — a systematically broken dispatcher must still hit the attempts cap, not retry forever)."
+      state_json="$(qar_state_put "$state_json" "$key" "$((attempts + 1))" "$NOW_EPOCH" 0)"
+      [ "$dispatch_rc" -ne 0 ] || reached_this_tick=$((reached_this_tick + 1))
+    fi
     dispatched_this_tick=$((dispatched_this_tick + 1))
   done < <(jq -c '.[]' <<<"$prs_json")
 
@@ -980,6 +1003,32 @@ if [ "$pre_epoch_ignored_total" -gt 0 ]; then
     by_repo="${by_repo}${by_repo:+, }${r}=${pre_epoch_ignored_by_repo[$r]}"
   done
   log "pre-epoch ignored: $pre_epoch_ignored_total PRs across ${#pre_epoch_ignored_by_repo[@]} repos ($by_repo)"
+fi
+
+# ── Gateway-unreachable watchdog ───────────────────────────────────────────
+# rc-75 dispatches are not attempts, so this replaces the bound the attempts
+# cap used to give: a tick with >=1 unreachable and 0 successful dispatches
+# advances the counter; any rc-0 dispatch resets it; a tick with neither leaves
+# it alone. At TICK_FAIL_THRESHOLD, page once per READ_FAIL_ALERT_INTERVAL.
+if [ "$DRY_RUN" -eq 0 ]; then
+  if [ "$reached_this_tick" -gt 0 ]; then
+    state_json="$(qar_state_set_meta_unreachable_ticks "$state_json" 0)"
+  elif [ "$unreachable_this_tick" -gt 0 ]; then
+    unreach_n=$(( $(qar_state_meta_unreachable_ticks "$state_json") + 1 ))
+    state_json="$(qar_state_set_meta_unreachable_ticks "$state_json" "$unreach_n")"
+    log "GATEWAY UNREACHABLE: $unreachable_this_tick dispatch(es) never reached the gateway this tick; consecutive count now $unreach_n."
+    if [ "$unreach_n" -ge "$TICK_FAIL_THRESHOLD" ]; then
+      unreach_last="$(qar_state_meta_unreachable_last_alert "$state_json")"
+      if qar_read_fail_should_page "$unreach_last" "$NOW_EPOCH" "$READ_FAIL_ALERT_INTERVAL"; then
+        waiting_heads="$(jq '[to_entries[] | select(.key != "__meta__" and .key != "__repo_epochs__" and .key != "__ready_cache__") | select((.value.unreachable_attempts // 0) > 0)] | length' <<<"$state_json")"
+        if page_confirmed "qa-review-reconcile: the openclaw gateway has been unreachable for $unreach_n consecutive ticks; $waiting_heads PR head(s) are waiting for a review that could not be dispatched (not counted as attempts)."; then
+          state_json="$(qar_state_set_meta_unreachable_last_alert "$state_json" "$NOW_EPOCH")"
+        else
+          log "WARN: gateway-unreachable page was NOT confirmed delivered — suppression stamp NOT advanced; the next tick retries."
+        fi
+      fi
+    fi
+  fi
 fi
 
 # ── Whole-tick read-failure watchdog ───────────────────────────────────────
