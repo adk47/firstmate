@@ -105,16 +105,27 @@ fm_path_age() {
 }
 
 # fm_watcher_lock_unheld <state>
-# True when the watcher lock or its symlinked owner directory is absent, or when
-# the existing lock records no pid at all. Any non-empty pid remains held here;
-# its syntax, liveness, ownership metadata, and identity are health concerns.
+# True when the watcher lock or its symlinked owner directory is absent, when the
+# existing lock records no pid at all, or when the recorded pid is a well-formed
+# pid that is no longer alive. A dead recorded pid is genuinely unheld: it is the
+# normal residue of a predecessor that has exited or been killed but whose lock
+# symlink has not yet been replaced by the successor. The Pi extension tears its
+# watcher down on every actionable wake and respawns it, so that residue is
+# exactly the hand-off window fm_watcher_supervision_verdict must not read as a
+# supervision lapse. A non-empty, still-alive pid, and a malformed pid that names
+# no real process at all, remain held here (a corrupt lock is a health problem,
+# never a silent exemption); syntax, ownership metadata, and identity are health
+# concerns.
 fm_watcher_lock_unheld() {
   local state=$1 lockdir pid
   lockdir="$state/.watch.lock"
   [ ! -e "$lockdir" ] && return 0
   [ ! -e "$lockdir/pid" ] && return 0
   pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
-  [ -z "$pid" ]
+  [ -z "$pid" ] && return 0
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_pid_alive "$pid" && return 1
+  return 0
 }
 
 FM_WATCHER_MATCHED_IDENTITY=
@@ -1711,9 +1722,14 @@ fm_wake_signal_seen_size() {  # <state> <file>
 # that fact.
 # A missing marker or unreadable signature is not a match, so uncertainty reads
 # as an unreported state.
-fm_wake_signal_seen_current() {  # <state> <file>
-  local sig marker
-  sig=$(fm_wake_signal_sig "$2") || return 1
+# <reported-signature> lets a caller that already computed the signature for this
+# exact file (scan_signals does) reuse it instead of forking a second
+# status_observed_signature for every file on every poll. It is the caller's
+# responsibility that the value is this file's current signature; an empty or
+# absent value recomputes it as before.
+fm_wake_signal_seen_current() {  # <state> <file> [<reported-signature>]
+  local sig=${3-} marker
+  [ -n "$sig" ] || sig=$(fm_wake_signal_sig "$2") || return 1
   [ -n "$sig" ] || return 1
   marker=$(fm_wake_signal_seen_path "$1" "$2")
   case "$2" in

@@ -491,6 +491,37 @@ ok - unacknowledged recovery is announced at most once per generation and the su
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
 
+Poll liveness at fleet scale was corrected and verified on 2026-10-05 against a live Pi home with 74 task metadata records (72 orca, 1 herdr) whose watcher cycles reached 120-260s and produced 60 retired successor arms and 46 cycles with no successor.
+Three corrections share this evidence: `scan_signals` refreshes the liveness beacon once per scanned file and reuses its already-computed reported signature; a well-formed but dead recorded pid counts as an unheld lock for the extension-model guard verdict; and `bin/fm-watch-arm.sh --restart` attaches to a surviving healthy incumbent instead of spawning a child that loses the singleton.
+The beacon, signature, and heartbeat backstop corrections are covered directly:
+
+```sh
+bin/fm-test-run.sh tests/fm-watch-scan-signals.test.sh tests/fm-guard-stale-banner.test.sh
+```
+
+Observed output:
+
+```text
+ok - signal scan: a supplied reported signature is reused, not recomputed
+ok - signal scan: one signature computation and one beacon refresh per file
+ok - heartbeat backstop: an absorbed scan advances the surfaced offset
+ok - fm-guard stale banner: extension-owned empty lock is genuinely unheld
+ok - fm-guard stale banner: extension-owned dead-pid lock is genuinely unheld
+ok - fm-guard stale banner: held unhealthy extension locks stay loud
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0
+```
+
+The arm restart-attach and dead-pid verdict cases live in the watcher lock suite; the environment-sensitive `test_lock_single_winner_under_concurrency` case at the head of that suite is host-load sensitive (it reproduces on the base commit at the same load), so the new cases were also run as a targeted subset:
+
+```text
+ok - watch lock: a dead recorded pid is unheld and does not trip the extension verdict
+ok - watch lock: a live unmatched pid still reads as no-watcher
+ok - watch restart attaches to a verified healthy peer and later surfaces a successor gap
+ok - watch restart attaches to a surviving incumbent inside the readiness budget
+```
+
+The restart regression is proven against the pre-change arm: on the base `bin/fm-watch-arm.sh` the same test fails with `not ok - restart spawned a doomed child instead of attaching: watcher: already running pid <pid>`.
+
 Deterministic entry points:
 
 ```sh
@@ -498,6 +529,7 @@ tests/fm-pi-watch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-watcher-lock.test.sh
 tests/fm-watch-arm.test.sh
+tests/fm-watch-scan-signals.test.sh
 tests/fm-watch-recovery-loop.test.sh
 tests/fm-wake-queue.test.sh
 tests/fm-subagent-pretool-check.test.sh

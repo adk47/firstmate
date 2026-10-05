@@ -442,6 +442,21 @@ if [ "$mode" = arm ] && healthy_watcher; then
   exit $?
 fi
 
+# A successor must never spawn a doomed child. bash defers a TERM trap until the
+# current foreground child returns, so an incumbent sitting in a SIGNAL_GRACE
+# sleep (or a slow check) survives the bounded stop-wait above and still
+# legitimately owns the singleton. Spawning a fresh watcher here would only lose
+# the singleton race, leave the arm without a "watcher: started" line, and make
+# the harness's successor verifier time out. Attach to the live+fresh incumbent
+# and report that honestly instead; it ends the cycle on its own wake as usual.
+if [ "$mode" = restart ] && healthy_watcher; then
+  cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+  cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
+  report_attached
+  attach_and_wait "$HEALTHY_PID"
+  exit $?
+fi
+
 # Start a watcher as a tracked child and confirm it before settling in. The child
 # stays our child for its whole life: we wait on it, so killing this arm (the
 # harness-tracked task) tears the watcher down too, and the watcher's eventual

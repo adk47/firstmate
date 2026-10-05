@@ -474,11 +474,41 @@ test_extension_handoff_with_empty_lock_is_healthy() {
   pass "fm-guard stale banner: extension-owned empty lock is genuinely unheld"
 }
 
-# Extension ownership tolerates only a released lock. Every non-empty recorded
-# pid means the lock is held, so any strict watcher-health failure stays loud.
+# A lock whose recorded pid is well-formed but no longer alive is the residue a
+# killed predecessor leaves before its successor claims the lock. The extension
+# owns continuity and the beacon is fresh, so the hand-off must stay silent and
+# must not open a down-episode.
+test_extension_handoff_with_dead_pid_lock_is_healthy() {
+  local dir home out session_pid holder_pid
+  dir=$(make_guard_case extension-dead-pid-lock)
+  home=$(case_home "$dir")
+  sleep 60 &
+  session_pid=$!
+  record_pi_extension_session "$dir" "$session_pid" \
+    || fail "could not record the Pi extension session"
+  sleep 60 &
+  holder_pid=$!
+  record_live_watcher "$dir" "$holder_pid" || fail "could not record the watcher lock"
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  touch "$home/state/.last-watcher-beat"
+  out=$(run_guard_case_extension "$dir")
+  kill "$session_pid" 2>/dev/null || true
+  wait "$session_pid" 2>/dev/null || true
+  [ -z "$out" ] \
+    || fail "an extension-owned hand-off with a dead-pid lock must stay silent, got: $out"
+  assert_absent "$home/state/.guard-watcher-stale-banner" \
+    "a dead-pid lock during a healthy hand-off must not open a down-episode"
+  pass "fm-guard stale banner: extension-owned dead-pid lock is genuinely unheld"
+}
+
+# Extension ownership tolerates a released lock, including a lock whose recorded
+# pid is well-formed but no longer alive (the residue a killed predecessor leaves
+# before its successor claims the lock). Every other non-empty recorded pid means
+# the lock is held, so any strict watcher-health failure stays loud.
 test_extension_held_unhealthy_locks_stay_alarm() {
   local dir home out session_pid holder_pid case_name
-  for case_name in dead-pid malformed-pid wrong-home wrong-path identity-mismatch; do
+  for case_name in malformed-pid wrong-home wrong-path identity-mismatch; do
     dir=$(make_guard_case "extension-held-$case_name")
     home=$(case_home "$dir")
     sleep 60 &
@@ -497,11 +527,6 @@ test_extension_held_unhealthy_locks_stay_alarm() {
         record_live_watcher "$dir" "$holder_pid" \
           || fail "could not record the watcher lock for $case_name"
         case "$case_name" in
-          dead-pid)
-            kill "$holder_pid" 2>/dev/null || true
-            wait "$holder_pid" 2>/dev/null || true
-            holder_pid=
-            ;;
           wrong-home)
             printf '%s\n' "$home/other" > "$home/state/.watch.lock/fm-home"
             ;;
@@ -730,6 +755,7 @@ test_repeated_same_episode_prints_reminder_only
 test_pi_harness_routes_itself_to_the_extension_model
 test_extension_handoff_with_live_session_is_healthy
 test_extension_handoff_with_empty_lock_is_healthy
+test_extension_handoff_with_dead_pid_lock_is_healthy
 test_extension_held_unhealthy_locks_stay_alarm
 test_extension_without_ownership_evidence_stays_alarm
 test_extension_ownership_needs_every_signal

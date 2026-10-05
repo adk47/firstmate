@@ -1205,7 +1205,12 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # -nt comparison.
 # Status signatures include observable file and readability state, while turn-end
 # markers retain their size-and-mtime signature.
-# Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
+# Pure read apart from the shared watch_beat beacon refresh and the reused
+# signature: the signature is computed once per file here and handed to
+# fm_wake_signal_seen_current, and watch_beat runs once per file so a fleet-sized
+# scan over many status logs keeps the liveness beacon advancing instead of
+# letting it age past the guard's grace. Print one "<seen-file>\t<sig>\t<file>"
+# line per changed file.
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
 scan_signals() {
@@ -1217,8 +1222,9 @@ scan_signals() {
     sig=$(fm_wake_signal_sig "$f") || continue
     [ -n "$sig" ] || continue
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
+    watch_beat
     case "$f" in
-      *.status) fm_wake_signal_seen_current "$STATE" "$f" && continue ;;
+      *.status) fm_wake_signal_seen_current "$STATE" "$f" "$sig" && continue ;;
       *) [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue ;;
     esac
     printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
