@@ -80,7 +80,7 @@ import json, sys
 p, v = sys.argv[1], sys.argv[2]; j = json.load(open(p)); j["session"]["maintenance"]["pruneAfter"] = v; json.dump(j, open(p, "w"))
 PY
 
-# 3. stop -> prune offline -> start. The prune's exit status is LOGGED, never acted on: fail-open.
+# 3. stop -> prune offline -> start. The prune's exit status is LOGGED and fails the unit afterwards, but never stops the start: fail-open.
 # A stop that failed (or left main active) must NOT be pruned: cleanup would race the live gateway's
 # writes on the same SQLite files. Skip the prune, leave main running, and fail the unit so it pages.
 FAILED=0; prune_rc=0
@@ -118,6 +118,6 @@ done
 if [ -n "$stable" ]; then log "RESULT OK stable 200 from ${stable}s after start; rss=$(rss_mb)MB"
 else log "RESULT NOT STABLE after $((MAX_WAIT_SECS/60)) min (last=$c) - leaving it running, no further restart"; FAILED=1; fi
 "$MAINT_SH" stop >/dev/null 2>&1 || true
-# Exit non-zero when main did not come back (or never stopped) so the oneshot fails and OnFailure= pages.
-# A prune failure alone stays exit 0: main is up and healthy, the WARN above is the signal.
+# Exit non-zero when the prune, stop or start failed or health never stabilised, so the oneshot fails and
+# OnFailure= pages; main has already been started first, so paging never costs availability.
 exit "$FAILED"
