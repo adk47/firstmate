@@ -946,6 +946,16 @@ RSYNC_EXCLUDES=(
   # tracked file contains 'pr-review'). Mirrored KEEP glob in
   # scripts/qa-clean-merge-scratch.sh (lockstep rule).
   --exclude='workspaces/*/.*pr-review-*.json'
+  # Ops agent run-manifest ('TRIBUTARIES_EXECUTION_MANIFEST_2026-10-02.md',
+  # observed on node-8 workspaces/operations 2026-10-02, flagged by the Step 4a
+  # pre-flight) — dated per-run working state, never in the repo. Mirrored KEEP
+  # glob in scripts/qa-clean-merge-scratch.sh (lockstep rule).
+  --exclude='workspaces/*/*_MANIFEST_*.md'
+  # Ops agent run artifact, dot-prefixed ('.ops-2026-10-02-profile-916514bf-
+  # seven-track-metadata-followup-0232.json', observed on node-8 workspaces/
+  # operations 2026-10-02) — per-run scratch, never in the repo. Mirrored KEEP
+  # glob in scripts/qa-clean-merge-scratch.sh (lockstep rule).
+  --exclude='workspaces/*/.ops-*.json'
   # QA credit-verification todo inventory — dated per-run working state the QA
   # agent writes on node-8 (e.g. credit-verification-todo-inventory-2026-07-21.json),
   # never in the repo. Server-owned scratch; mirrored KEEP glob in

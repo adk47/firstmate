@@ -64,6 +64,8 @@ KEEP_GLOBS=(
                                         # widened 2026-08-19 for the external cross-repo
                                         # review shape '.qa-pr-review-<repo>-<pr>-<sha>.json'
   'credit-verification-todo-inventory-*.json'  # QA credit-verification run scratch
+  '*_MANIFEST_*.md'                    # ops agent run manifest (2026-10-02, Step 4a pre-flight)
+  '.ops-*.json'                        # ops agent run artifact, dot-prefixed (2026-10-02, Step 4a pre-flight)
   'package-lock.json'                  # npm install artifact, any workspace (2026-09-08, #915)
   'TOOLS.md.bak-*' '*.md.bak-*'
   'write-activity.log'

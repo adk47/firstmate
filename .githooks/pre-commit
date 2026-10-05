@@ -169,6 +169,8 @@ required_excludes=(
   "workspaces/*/write-activity.log"
   "workspaces/*/*.csv"
   "workspaces/*/.*pr-review-*.json"
+  "workspaces/*/*_MANIFEST_*.md"
+  "workspaces/*/.ops-*.json"
   "secrets/"
   "audit/"
   "audit-local-backup/"
