@@ -158,12 +158,13 @@ const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(exte
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
-// 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
-// bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
-// SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
+// The budget stays above arm's --restart stop-wait for the watcher it signalled
+// (35s in bin/fm-watch-arm.sh) plus its confirm default (30s on MSYS, 10s
+// elsewhere): a successor that is waiting out its predecessor's deferred TERM,
+// or a slow but successful Git Bash cold start, must not be SIGTERMed mid-way.
 const armReadyTimeoutMs = positiveInteger(
   "FM_PI_ARM_READY_TIMEOUT_MS",
-  process.platform === "win32" ? 35000 : 12000,
+  process.platform === "win32" ? 70000 : 50000,
 );
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const wakeFoldGraceMs = positiveInteger("FM_PI_WAKE_FOLD_GRACE_MS", 3000);

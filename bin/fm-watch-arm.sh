@@ -52,8 +52,9 @@
 # log and is never written here.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
-# state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
-# wins the singleton while the duplicate child stands down. It
+# state/.watch.lock), wait boundedly for that pid to exit, and own a fresh cycle,
+# or attach if a different verified live peer wins the singleton. It never
+# attaches to the watcher it just signalled. It
 # resolves and signals exactly that pid, so it can never touch another home's
 # watcher. NEVER `pkill -f
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
@@ -77,6 +78,9 @@ case "${OSTYPE:-}" in
   *) ARM_CONFIRM_DEFAULT=10 ;;
 esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
+# How long --restart waits for the watcher it signalled to exit. It covers the
+# watcher's SIGNAL_GRACE sleep (30s), across which bash defers its TERM trap.
+RESTART_STOP_TIMEOUT=${FM_ARM_RESTART_STOP_TIMEOUT:-35}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
@@ -407,19 +411,30 @@ if [ "$mode" = handling-delivered ]; then
   exit $?
 fi
 
+signalled_pid=
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
     if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
       kill -TERM "$lock_pid" 2>/dev/null || true
+      signalled_pid=$lock_pid
       # Wait for it to actually exit before relaunching, so the fresh watcher
       # either takes a released lock or reclaims a now-dead-pid stale lock instead
-      # of seeing the dying one as a live holder and no-opping.
-      i=0
-      while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
-        sleep 0.1
-        i=$((i + 1))
+      # of seeing the dying one as a live holder and no-opping. bash defers the
+      # watcher's TERM trap until its foreground child (a SIGNAL_GRACE sleep or a
+      # slow check) returns, so the bound covers that, and a different healthy
+      # watcher that claims the lock meanwhile ends the wait early.
+      deadline=$(( $(date +%s) + RESTART_STOP_TIMEOUT ))
+      while fm_pid_alive "$signalled_pid"; do
+        if healthy_watcher && [ "$HEALTHY_PID" != "$signalled_pid" ]; then
+          break
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+          echo "watcher: FAILED - signalled watcher pid=$signalled_pid did not exit within ${RESTART_STOP_TIMEOUT}s"
+          exit 1
+        fi
+        sleep 0.2
       done
     else
       if ! clear_stale_recorded_watcher_lock; then
@@ -435,6 +450,17 @@ fi
 # then, not as an immediate empty wake. (--restart skips this: it just stopped
 # this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
+  cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+  cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
+  report_attached
+  attach_and_wait "$HEALTHY_PID"
+  exit $?
+fi
+
+# A different live+fresh watcher that won the singleton while this restart
+# stopped its predecessor is adopted rather than raced. The watcher this restart
+# signalled is never adopted: it is about to exit on that TERM.
+if [ "$mode" = restart ] && healthy_watcher && [ "$HEALTHY_PID" != "$signalled_pid" ]; then
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
   cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
   report_attached

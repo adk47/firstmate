@@ -106,8 +106,11 @@ fm_path_age() {
 
 # fm_watcher_lock_unheld <state>
 # True when the watcher lock or its symlinked owner directory is absent, or when
-# the existing lock records no pid at all. Any non-empty pid remains held here;
-# its syntax, liveness, ownership metadata, and identity are health concerns.
+# the existing lock records no pid at all. Any non-empty pid remains held here,
+# including a pid that is no longer alive: a dead holder with a still-fresh beacon
+# is exactly the shape of a watcher that died with nothing restarting it, so it
+# must never read as a benign hand-off. Its syntax, liveness, ownership metadata,
+# and identity are health concerns.
 fm_watcher_lock_unheld() {
   local state=$1 lockdir pid
   lockdir="$state/.watch.lock"
@@ -1711,9 +1714,14 @@ fm_wake_signal_seen_size() {  # <state> <file>
 # that fact.
 # A missing marker or unreadable signature is not a match, so uncertainty reads
 # as an unreported state.
-fm_wake_signal_seen_current() {  # <state> <file>
-  local sig marker
-  sig=$(fm_wake_signal_sig "$2") || return 1
+# <reported-signature> lets a caller that already computed the signature for this
+# exact file (scan_signals does) reuse it instead of forking a second
+# status_observed_signature for every file on every poll. It is the caller's
+# responsibility that the value is this file's current signature; an empty or
+# absent value recomputes it as before.
+fm_wake_signal_seen_current() {  # <state> <file> [<reported-signature>]
+  local sig=${3-} marker
+  [ -n "$sig" ] || sig=$(fm_wake_signal_sig "$2") || return 1
   [ -n "$sig" ] || return 1
   marker=$(fm_wake_signal_seen_path "$1" "$2")
   case "$2" in

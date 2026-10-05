@@ -491,6 +491,31 @@ ok - unacknowledged recovery is announced at most once per generation and the su
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
 
+Poll liveness at fleet scale was corrected and verified on 2026-10-05 against a live Pi home with 74 task metadata records (72 orca, 1 herdr) whose watcher cycles reached 120-260s and produced 60 retired successor arms and 46 cycles with no successor.
+Three corrections share this evidence: `scan_signals` refreshes the liveness beacon across scanned files, paced by elapsed seconds, and reuses its already-computed reported signature; `bin/fm-watch-arm.sh --restart` never adopts the watcher it just signalled, waiting boundedly (`FM_ARM_RESTART_STOP_TIMEOUT`, default 35s) for that pid's deferred TERM exit before starting its own successor, and adopting only a different live watcher with a fresh beat; and the Pi and OpenCode ready-wait budgets rise above that stop-wait plus the confirm window.
+A lock still recording a dead pid stays held for the extension-model guard verdict, so a fresh beacon can never mask a watcher that died with nothing restarting it.
+
+```sh
+bin/fm-test-run.sh tests/fm-watch-scan-signals.test.sh tests/fm-guard-stale-banner.test.sh
+```
+
+Observed output:
+
+```text
+ok - signal scan: a supplied reported signature is reused, not recomputed
+ok - signal scan: one signature per file and a time-paced beacon refresh
+ok - heartbeat backstop: an absorbed scan advances the surfaced offset
+```
+
+The arm restart and dead-pid verdict cases live in the watcher lock suite, run as a targeted subset:
+
+```text
+ok - watch restart never adopts the watcher it signalled
+ok - watch lock: a dead recorded pid with a fresh beacon still reads as no-watcher
+ok - watch lock: a live unmatched pid still reads as no-watcher
+ok - watch restart waits out a deferred TERM, never adopts it, and starts a live successor
+```
+
 Deterministic entry points:
 
 ```sh
@@ -498,6 +523,7 @@ tests/fm-pi-watch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-watcher-lock.test.sh
 tests/fm-watch-arm.test.sh
+tests/fm-watch-scan-signals.test.sh
 tests/fm-watch-recovery-loop.test.sh
 tests/fm-wake-queue.test.sh
 tests/fm-subagent-pretool-check.test.sh
