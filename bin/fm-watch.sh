@@ -183,6 +183,16 @@ HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
 esac
+# Per-file cap on the bytes the heartbeat backstop folds in one scan. The
+# backstop is fail-safe, not the primary path: the per-wake signal scan already
+# classifies each task's appended span, so a heartbeat that meets a huge stale
+# span (a replaced status log resets its .hb-surfaced offset) folds a bounded
+# complete-line prefix and resumes from there next heartbeat instead of stalling
+# one poll on a whole multi-megabyte log. 0 disables the cap.
+STATUS_HEARTBEAT_SPAN_BYTES=${FM_STATUS_HEARTBEAT_SPAN_BYTES:-2097152}
+case "$STATUS_HEARTBEAT_SPAN_BYTES" in
+  ''|*[!0-9]*) STATUS_HEARTBEAT_SPAN_BYTES=2097152 ;;
+esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -1475,12 +1485,13 @@ EOF
 # is absorbed; it surfaces only an event the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task record rest endpoint ident rc found=1 sig marker
+  local f task record rest endpoint ident rc found=1 sig marker off
   FM_HEARTBEAT_SURFACE_ENDPOINTS=''
   for f in "$STATE"/*.status; do
     [ -e "$f" ] || [ -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
-    record=$(status_span_first_actionable_record "$f" "$(hb_surfaced_offset "$task")")
+    off=$(hb_surfaced_offset "$task")
+    record=$(status_span_first_actionable_record "$f" "$off" '' '' "$((off + STATUS_HEARTBEAT_SPAN_BYTES))")
     rc=$?
     watch_beat
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue

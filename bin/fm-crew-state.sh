@@ -387,6 +387,18 @@ nm_ci_checks_state() {
 # rejected here, letting the older failed row answer as current), so both
 # attribution routes share one rule.
 nm_runs_list() {
+  local key
+  # A fleet snapshot precomputes one repo-scoped listing per repository and
+  # points every task in that repo at it, so the cross-branch fallback does not
+  # repeat the same ledger read per task. Absent or non-matching cache, or a
+  # worktree with no git identity, falls back to this task's own read.
+  if [ -n "${FM_CREW_STATE_RUNS_LIST_DIR:-}" ] && [ -d "$FM_CREW_STATE_RUNS_LIST_DIR" ] \
+    && key=$(fm_nm_repo_cache_key "$WT" 2>/dev/null) && [ -n "$key" ] \
+    && [ -f "$FM_CREW_STATE_RUNS_LIST_DIR/$key" ] && [ -r "$FM_CREW_STATE_RUNS_LIST_DIR/$key" ] \
+    && [ ! -L "$FM_CREW_STATE_RUNS_LIST_DIR/$key" ]; then
+    command cat "$FM_CREW_STATE_RUNS_LIST_DIR/$key"
+    return 0
+  fi
   nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT"
 }
 

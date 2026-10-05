@@ -900,11 +900,17 @@ fi
 kill -KILL "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
 wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
 LOCK_HOLDER_PID=
-PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" \
-  FM_HOME_SUMMARY_IF_IDLE=1 "$WRITER" --best-effort \
-  || fail "stale-lock recovery changed the best-effort caller result"
+# A watcher-spawned refresh that tried the lock before the holder died may still
+# own the single-flight spawn guard, so a watcher-path retry can no-op until it
+# exits; keep retrying the way the next watcher interval would.
 i=0
 while [ ! -e "$RESTART_HOME/state/home-summary.json" ] && [ "$i" -lt 200 ]; do
+  if [ $((i % 10)) -eq 0 ]; then
+    PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" \
+      FM_HOME_SUMMARY_IF_IDLE=1 "$WRITER" --best-effort \
+      || fail "stale-lock recovery changed the best-effort caller result"
+  fi
+  [ -e "$RESTART_HOME/state/home-summary.json" ] && break
   sleep 0.05
   i=$((i + 1))
 done
@@ -1076,3 +1082,136 @@ case "$report_out" in
     ;;
 esac
 pass "repeated publication failure is reported at session start until it clears"
+
+# --- fleet-sized deadline and spawn single flight ---------------------------
+#
+# The live incident: at ~80 tasks a home whose per-task current-state read was
+# slow could not finish inside FM_HOME_SUMMARY_TIMEOUT, so every attempt timed
+# out, the ledger never republished, and every watcher generation forked another
+# frozen producer tree. These two regressions pin the two fixes: the observation
+# pass degrades unfinished tasks to unknown inside the deadline, and a refresh
+# spawn while one is running is a no-op.
+
+slow_home_fixture() {  # <name> <tasks>
+  local name=$1 n=$2 home i
+  home="$TMP_ROOT/$name"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects/task"
+  printf '# Seeded Firstmate home\n' > "$home/AGENTS.md"
+  printf '%s\n' "$name" > "$home/.fm-secondmate-home"
+  fm_git_init_commit "$home/projects/task"
+  git -C "$home/projects/task" checkout -q -b "fm/$name-task"
+  {
+    printf '%s\n' '## In flight'
+    i=1
+    while [ "$i" -le "$n" ]; do
+      printf '%s\n' "- [ ] $name-$i - Slow read (repo: firstmate) (kind: ship) (since 2026-08-28)"
+      i=$((i + 1))
+    done
+    printf '%s\n' '' '## Queued' '' '## Done'
+  } > "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le "$n" ]; do
+    fm_write_meta "$home/state/$name-$i.meta" \
+      "window=fmtest:fm-$name-$i" \
+      "worktree=$home/projects/task" \
+      "project=firstmate" \
+      "harness=claude" \
+      "kind=ship" \
+      "mode=no-mistakes" \
+      "spawn_gen=fm.$name$i"
+    printf 'working: slow read\n' > "$home/state/$name-$i.status"
+    i=$((i + 1))
+  done
+  printf '%s\n' "$home"
+}
+
+SLOWBIN="$TMP_ROOT/slowbin"
+mkdir -p "$SLOWBIN"
+cat > "$SLOWBIN/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+sleep "${FM_SLOW_NM_SLEEP:-6}"
+SH
+chmod +x "$SLOWBIN/no-mistakes"
+
+DEADLINE_HOME=$(slow_home_fixture deadline-home 20)
+started=$(date +%s)
+PATH="$SLOWBIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$DEADLINE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  FM_SLOW_NM_SLEEP=5 FM_HOME_SUMMARY_TIMEOUT=60 FM_HOME_SUMMARY_PREFETCH_HEADROOM=55 \
+  "$WRITER" --best-effort \
+  || fail "a fleet-sized slow read changed the best-effort caller result"
+elapsed=$(( $(date +%s) - started ))
+[ "$elapsed" -lt 60 ] \
+  || fail "a fleet-sized slow read exceeded the refresh deadline: ${elapsed}s"
+[ -f "$DEADLINE_HOME/state/home-summary.json" ] \
+  || fail "no ledger was published inside the deadline: $(cat "$DEADLINE_HOME/state/.home-summary-refresh.log" 2>/dev/null)"
+jq -e '
+  .schema == "fm-secondmate-home-summary.v1"
+  and .counts.endpoints == 20
+  and .state == "unknown"
+  and .invalidity.kind == "child_current_unavailable"
+' "$DEADLINE_HOME/state/home-summary.json" >/dev/null \
+  || fail "the deadline ledger did not degrade unfinished tasks to unknown: $(jq -c '{state,invalidity,counts}' "$DEADLINE_HOME/state/home-summary.json")"
+pass "fleet-sized slow current-state reads still publish a valid ledger inside the deadline"
+
+SPAWN_HOME=$(slow_home_fixture spawn-home 20)
+SPAWN_GUARD="$SPAWN_HOME/state/.home-summary-refresh.spawn"
+PATH="$SLOWBIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SPAWN_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  FM_SLOW_NM_SLEEP=5 FM_HOME_SUMMARY_TIMEOUT=60 FM_HOME_SUMMARY_PREFETCH_HEADROOM=55 \
+  FM_HOME_SUMMARY_IF_IDLE=1 "$WRITER" --best-effort \
+  > "$TMP_ROOT/spawn-first.out" 2> "$TMP_ROOT/spawn-first.err" &
+SLOW_WRITER_PID=$!
+i=0
+while [ ! -L "$SPAWN_GUARD" ] && [ "$i" -lt 100 ]; do
+  kill -0 "$SLOW_WRITER_PID" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -L "$SPAWN_GUARD" ] || fail "the first refresh did not hold its spawn guard"
+first_guard_pid=$(readlink "$SPAWN_GUARD" 2>/dev/null || true)
+[ "$first_guard_pid" = "$SLOW_WRITER_PID" ] \
+  || fail "the spawn guard did not name its owner pid: $first_guard_pid"
+started=$(date +%s)
+PATH="$SLOWBIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SPAWN_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
+  FM_SLOW_NM_SLEEP=5 FM_HOME_SUMMARY_TIMEOUT=60 FM_HOME_SUMMARY_PREFETCH_HEADROOM=55 \
+  FM_HOME_SUMMARY_IF_IDLE=1 "$WRITER" --best-effort \
+  || fail "a second spawn while one ran changed the best-effort caller result"
+elapsed=$(( $(date +%s) - started ))
+[ "$elapsed" -lt 5 ] \
+  || fail "a second refresh spawn waited ${elapsed}s behind a live refresh"
+[ "$(readlink "$SPAWN_GUARD" 2>/dev/null || true)" = "$first_guard_pid" ] \
+  || fail "the second spawn reclaimed a live refresh guard"
+# A status-change caller (spawn, teardown, session start) is not single-flighted:
+# it waits on the publication lock and publishes after the in-flight refresh.
+i=0
+while [ ! -s "$SPAWN_HOME/state/.home-summary-refresh.lock/pid" ] && [ "$i" -lt 200 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -s "$SPAWN_HOME/state/.home-summary-refresh.lock/pid" ] \
+  || fail "the in-flight watcher refresh never held the publication lock"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SPAWN_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
+  FM_HOME_SUMMARY_TIMEOUT=120 FM_HOME_SUMMARY_PREFETCH_HEADROOM=115 "$WRITER" --best-effort \
+  || fail "a status-change refresh during a live refresh changed the best-effort caller result"
+wait "$SLOW_WRITER_PID" >/dev/null 2>&1 || true
+SLOW_WRITER_PID=
+jq -e --arg now "$NOW_THREE" '.generated == $now' \
+  "$SPAWN_HOME/state/home-summary.json" >/dev/null \
+  || fail "a status-change refresh was dropped behind the in-flight watcher refresh"
+# Stale recovery: a guard whose recorded pid is dead must not wedge publication.
+dead_guard_pid=999999
+while kill -0 "$dead_guard_pid" 2>/dev/null; do dead_guard_pid=$((dead_guard_pid + 1)); done
+ln -sn "$dead_guard_pid" "$SPAWN_GUARD"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SPAWN_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  FM_HOME_SUMMARY_TIMEOUT=120 FM_HOME_SUMMARY_PREFETCH_HEADROOM=115 \
+  FM_HOME_SUMMARY_IF_IDLE=1 "$WRITER" --best-effort \
+  || fail "a stale refresh guard changed the best-effort caller result"
+jq -e --arg now "$NOW_ONE" '.generated == $now' \
+  "$SPAWN_HOME/state/home-summary.json" >/dev/null \
+  || fail "a dead-pid refresh guard wedged publication"
+[ ! -L "$SPAWN_GUARD" ] || fail "the refresh spawn guard survived its run"
+pass "refresh spawning is single flight across watcher generations and recovers a stale guard"

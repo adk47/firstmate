@@ -101,6 +101,45 @@ test_absorbed_heartbeat_advances_surfaced_offset() {
   pass "heartbeat backstop: an absorbed scan advances the surfaced offset"
 }
 
+# A stale offset over a large log must not let one heartbeat fold the whole
+# thing. Each pass is capped at a complete-line prefix and advances the offset
+# to the exact byte it inspected, so repeated heartbeats converge on the end
+# without ever stalling a poll on a multi-megabyte fold.
+test_heartbeat_scan_bounds_each_fold() {
+  local dir state status size out
+  dir=$(make_case heartbeat-cap)
+  state="$dir/state"
+  status="$state/heartbeat-cap.status"
+  awk 'BEGIN { for (i = 0; i < 4000; i++) printf "working: routine %d padding padding padding padding padding\n", i }' > "$status"
+  size=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
+  out=$(FM_STATUS_HEARTBEAT_SPAN_BYTES=4096 FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    size=$2
+    prev=0
+    maxstep=0
+    passes=0
+    while [ "$passes" -lt 200 ]; do
+      heartbeat_scan_finds_actionable >/dev/null
+      mark_all_captain_relevant_surfaced
+      off=$(hb_surfaced_offset heartbeat-cap)
+      step=$((off - prev))
+      [ "$step" -gt "$maxstep" ] && maxstep=$step
+      prev=$off
+      passes=$((passes + 1))
+      [ "$off" -ge "$size" ] && break
+    done
+    printf "off=%s size=%s maxstep=%s passes=%s\n" "$off" "$size" "$maxstep" "$passes"
+  ' _ "$WATCH" "$size")
+  grep -qE "^off=${size} size=${size} maxstep=[0-9]+ passes=[0-9]+$" <<<"$out" \
+    || fail "bounded heartbeat passes did not converge to the log end: $out"
+  maxstep=$(sed -n 's/.*maxstep=\([0-9]*\).*/\1/p' <<<"$out")
+  passes=$(sed -n 's/.*passes=\([0-9]*\).*/\1/p' <<<"$out")
+  [ "$maxstep" -le 4096 ] || fail "a heartbeat fold exceeded its cap: $out"
+  [ "$passes" -ge 2 ] || fail "a log larger than the cap should need more than one bounded heartbeat: $out"
+  pass "heartbeat backstop: each fold is bounded and still converges"
+}
+
 test_signal_seen_current_reuses_a_supplied_signature
 test_scan_signals_paces_beacon_refresh_by_elapsed_time
 test_absorbed_heartbeat_advances_surfaced_offset
+test_heartbeat_scan_bounds_each_fold

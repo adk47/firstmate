@@ -14,10 +14,14 @@
 # ledger. After a failed, interrupted, or killed refresh, the ledger path holds
 # either the prior complete document or the new complete document, never torn output.
 # A home-local refresh lock serializes concurrent triggers so an older in-flight
-# summary cannot overwrite one computed after a later status change. The shared
-# timeout owner bounds the complete refresh with FM_HOME_SUMMARY_TIMEOUT
-# (default 60 seconds). No reader can observe temporary output through the
-# ledger path.
+# summary cannot overwrite one computed after a later status change. Only the
+# watcher's if-idle refresh is also single-flight across watcher generations
+# (see the spawn guard below); status-change callers still wait on the lock.
+# The shared timeout owner
+# bounds the complete refresh with FM_HOME_SUMMARY_TIMEOUT (default 60 seconds),
+# handing the producer FM_HOME_SUMMARY_TIMEOUT minus FM_HOME_SUMMARY_PREFETCH_HEADROOM
+# as its local observation budget so composition finishes before the deadline.
+# No reader can observe temporary output through the ledger path.
 #
 # With --best-effort, a failure is appended to the bounded home-local
 # state/.home-summary-refresh.log when available, with stderr as the bounded
@@ -39,6 +43,7 @@ ERROR_LOG="$STATE/.home-summary-refresh.log"
 REFRESH_LOCK="$STATE/.home-summary-refresh.lock"
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
 HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
+HOME_SUMMARY_PREFETCH_HEADROOM=${FM_HOME_SUMMARY_PREFETCH_HEADROOM:-15}
 HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
 BEST_EFFORT=0
 HOME_SUMMARY_MODE=parent
@@ -73,6 +78,14 @@ esac
 case "$HOME_SUMMARY_TIMEOUT" in
   ''|*[!0-9]*|0) HOME_SUMMARY_TIMEOUT=60 ;;
 esac
+case "$HOME_SUMMARY_PREFETCH_HEADROOM" in
+  ''|*[!0-9]*) HOME_SUMMARY_PREFETCH_HEADROOM=15 ;;
+esac
+# The producer's local per-task observation pass must leave room for the rest of
+# composition inside the caller's deadline. Hand it a smaller bound rather than
+# letting a fleet-sized read consume the whole budget and time out unpublished.
+HOME_SUMMARY_PREFETCH_TIMEOUT=$((HOME_SUMMARY_TIMEOUT - HOME_SUMMARY_PREFETCH_HEADROOM))
+[ "$HOME_SUMMARY_PREFETCH_TIMEOUT" -ge 1 ] || HOME_SUMMARY_PREFETCH_TIMEOUT=1
 case "$HOME_SUMMARY_IF_IDLE" in
   0|1) ;;
   *) HOME_SUMMARY_IF_IDLE=0 ;;
@@ -83,6 +96,62 @@ if [ "$HOME_SUMMARY_MODE" != parent ]; then
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
 fi
+
+# Single-flight guard for the watcher's refresh spawning, independent of the
+# worker's publication lock. A watcher generation churns on every wake and each
+# one asks for a refresh while the ledger is stale, so without this a burst of
+# parent + timeout + worker processes forks on every poll even though only one
+# publication can ever run. The claim is a symlink whose target is the owner
+# pid, created atomically so no observer ever sees an owner-less claim. A dead
+# or wedged owner (older than the caller's own deadline) is reclaimed under a
+# short-lived reclaim mutex so two reclaimers cannot both win. Spawn, teardown,
+# and session-start refreshes skip the guard and keep waiting on the
+# publication lock, so a status change always gets a later publication.
+HOME_SUMMARY_SPAWN_GUARD=
+# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
+home_summary_spawn_guard_release() {  # <guard>
+  local guard=$1
+  [ -n "$guard" ] || return 0
+  [ "$(readlink "$guard" 2>/dev/null || true)" = "$$" ] || return 0
+  rm -f -- "$guard" 2>/dev/null || true
+}
+
+home_summary_path_age() {  # <path>
+  local mtime now
+  mtime=$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || true)
+  now=$(date +%s 2>/dev/null || true)
+  case "$mtime:$now" in
+    *[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  printf '%s\n' "$((now - mtime))"
+}
+
+home_summary_spawn_guard_live() {  # <guard>
+  local pid age
+  pid=$(readlink "$1" 2>/dev/null) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  age=$(home_summary_path_age "$1") || return 0
+  [ "$age" -lt "$((HOME_SUMMARY_TIMEOUT + 30))" ]
+}
+
+home_summary_spawn_guard_acquire() {  # <guard>
+  local guard=$1 reclaim="$1.reclaim" age rc=1
+  [ -d "$STATE" ] || return 0
+  ln -sn "$$" "$guard" 2>/dev/null && return 0
+  home_summary_spawn_guard_live "$guard" && return 1
+  if ! mkdir -- "$reclaim" 2>/dev/null; then
+    age=$(home_summary_path_age "$reclaim") && [ "$age" -ge 10 ] \
+      && rmdir -- "$reclaim" 2>/dev/null
+    return 1
+  fi
+  if ! home_summary_spawn_guard_live "$guard"; then
+    rm -f -- "$guard" 2>/dev/null || true
+    ln -sn "$$" "$guard" 2>/dev/null && rc=0
+  fi
+  rmdir -- "$reclaim" 2>/dev/null || true
+  return "$rc"
+}
 
 # shellcheck disable=SC2329 # Invoked by the signal and EXIT traps below.
 home_summary_cleanup() {
@@ -131,6 +200,7 @@ home_summary_refresh_once() {
     FM_DATA_OVERRIDE="$DATA" \
     FM_CONFIG_OVERRIDE="$CONFIG" \
     FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    FM_SNAPSHOT_PREFETCH_TIMEOUT="$HOME_SUMMARY_PREFETCH_TIMEOUT" \
     "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary \
       > "$HOME_SUMMARY_TMP" 2> "$HOME_SUMMARY_ERR_TMP"; then
     producer_rc=0
@@ -217,9 +287,23 @@ fi
 
 if [ "$HOME_SUMMARY_MODE" = parent ]; then
   attempt_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || attempt_stamp=
+  # The watcher's if-idle refresh is single-flight: one live refresh at a time
+  # is enough for its periodic side-band publication, so a second spawn exits
+  # without forking its worker.
+  if [ "$BEST_EFFORT" -eq 1 ] && [ "$HOME_SUMMARY_IF_IDLE" -eq 1 ]; then
+    if ! home_summary_spawn_guard_acquire "$STATE/.home-summary-refresh.spawn"; then
+      exit 0
+    fi
+    HOME_SUMMARY_SPAWN_GUARD="$STATE/.home-summary-refresh.spawn"
+    trap 'home_summary_spawn_guard_release "$HOME_SUMMARY_SPAWN_GUARD"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+  fi
   if fm_run_timed "$HOME_SUMMARY_TIMEOUT" env \
     FM_HOME_SUMMARY_WORKER_BEST_EFFORT="$BEST_EFFORT" \
     FM_HOME_SUMMARY_IF_IDLE="$HOME_SUMMARY_IF_IDLE" \
+    FM_HOME_SUMMARY_TIMEOUT="$HOME_SUMMARY_TIMEOUT" \
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_worker; then
     exit 0
   else
