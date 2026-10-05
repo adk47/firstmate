@@ -41,3 +41,4 @@ Playbooks live in `/opt/hydra/workspaces/operations/skills/customer-data-resolut
 ## Verification
 
 A completed resolution includes either live proof that the requested state landed or an explicit open status with a concrete owner, ticket ID, SLA, customer-reply ID, and failed read-back count. A successful API response or created ticket alone is never proof that customer-visible data changed.
+<!-- Reviewed baseline: deploy overwrites node-8 autonomous rewrites of this file (MUS-3099, MUS-3105). -->
