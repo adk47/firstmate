@@ -48,7 +48,9 @@ STUB
 echo "openclaw \$* cfg_prune=\$(python3 -c "import json,os;print(json.load(open(os.environ['OPENCLAW_CONFIG_PATH']))['session']['maintenance']['pruneAfter'])")" >> "$CALLS"
 exit "\$(cat "$TEST_TMPDIR/openclaw.rc")"
 STUB
-  printf '#!/usr/bin/env bash\nshift; exec "$@"\n' > "$STUBBIN/timeout"   # macOS has no timeout(1)
+  # macOS has no timeout(1): GNU timeout if installed, else a shim that just drops its options and duration
+  REAL_TIMEOUT="$(command -v gtimeout || command -v timeout || true)"; export REAL_TIMEOUT
+  printf '#!/usr/bin/env bash\nwhile [[ "$1" == --* ]]; do shift; done; shift; exec "$@"\n' > "$STUBBIN/timeout"
   cat > "$STUBBIN/curl" <<'STUB'
 #!/usr/bin/env bash
 echo "$STUB_HTTP"
@@ -184,8 +186,7 @@ _count() { grep -c "$1" "$CALLS" || true; }
 }
 
 @test "stop that exits NON-ZERO (timeout) while the unit already reads inactive still never prunes" {
-  # systemctl stop timing out can leave the unit 'deactivating' (is-active != active) with rc=1 while the
-  # gateway is still flushing SQLite. The rc arm alone must refuse the prune (is-active cannot catch this).
+  # a stop timeout leaves the unit 'deactivating' with rc=1: only the rc arm can refuse the prune here
   export STUB_STOP_RC=1 STUB_STOP_DEACTIVATES=1
   _run
   [ "$status" -ne 0 ]
@@ -219,8 +220,7 @@ _count() { grep -c "$1" "$CALLS" || true; }
   [ "$(_count 'systemctl stop')" -eq 0 ]
 }
 
-# ---- deploy/rollback <-> prune exclusion (MUS-3742): a deploy that begins AFTER the pgrep check must block
-# until cleanup is over (the prune holds the lock through `systemctl start`).
+# ---- MUS-3742: a deploy that begins AFTER the pgrep check must block until cleanup is over
 LIB="$HYDRA_REPO/scripts/lib/main-prune-lock.sh"
 
 _slow_cleanup_openclaw() {   # cleanup that signals it started, then runs until released or killed (paths baked in: env -i)
@@ -241,7 +241,6 @@ _deploy_acquire() {   # what deploy.sh / rollback.sh do, via the real lib
   _slow_cleanup_openclaw
   bash "$SCRIPT" nightly > "$TEST_TMPDIR/prune.out" 2>&1 3>&- & prune=$!
   _wait_for "$TEST_TMPDIR/cleanup-started"
-  # mid-cleanup: a bounded deploy wait must TIME OUT (rc 1), not slip through
   run _deploy_acquire 1
   [ "$status" -eq 1 ]
   ( _deploy_acquire 30 && echo "DEPLOY-ACQUIRED" >> "$CALLS" ) 3>&- & deploy=$!
@@ -251,7 +250,6 @@ _deploy_acquire() {   # what deploy.sh / rollback.sh do, via the real lib
   touch "$TEST_TMPDIR/release"
   wait "$prune"; wait "$deploy"
   [ "$(_count DEPLOY-ACQUIRED)" -eq 1 ]
-  # the order is the point: the prune started main BEFORE the deploy got the lock
   [ "$(grep -n 'systemctl start openclaw-gateway-main' "$CALLS" | head -1 | cut -d: -f1)" -lt "$(grep -n DEPLOY-ACQUIRED "$CALLS" | cut -d: -f1)" ]
 }
 
@@ -286,4 +284,20 @@ _deploy_acquire() {   # what deploy.sh / rollback.sh do, via the real lib
   [ "$status" -ne 0 ]
   [ "$(_count 'systemctl start openclaw-gateway-main')" -eq 1 ]
   [ "$(_count '^maintenance stop')" -eq 1 ]
+}
+
+@test "a cleanup that IGNORES SIGTERM is KILLed after the grace, so main is not left stopped" {
+  [ -n "$REAL_TIMEOUT" ] || skip "needs GNU timeout (brew install coreutils)"
+  printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$REAL_TIMEOUT" > "$STUBBIN/timeout"
+  cat > "$STUBBIN/openclaw" <<STUB
+#!/usr/bin/env bash
+trap '' TERM
+for _ in \$(seq 1 300); do sleep 0.1; done
+STUB
+  export CLEANUP_TIMEOUT_S=1 CLEANUP_KILL_AFTER_S=1
+  SECONDS=0; _run
+  [ "$SECONDS" -lt 15 ]
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cleanup rc=137"* ]]
+  [ "$(_count 'systemctl start openclaw-gateway-main')" -eq 1 ]
 }

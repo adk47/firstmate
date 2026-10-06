@@ -30,6 +30,8 @@ POLL_SECS="${POLL_SECS:-5}"
 MIN_UPTIME_H="${HYDRA_MAIN_MIN_UPTIME_H:-0}"
 PRUNE_PATH="${HYDRA_PRUNE_PATH:-/usr/bin:/bin}"
 LOCK_FILE="${LOCK_FILE:-/run/lock/hydra-main-prune-restart.lock}"
+# TERM at 1200s, KILL 30s later: a cleanup that ignores TERM must not hold main stopped until systemd's 90 min.
+CLEANUP_TIMEOUT_S="${CLEANUP_TIMEOUT_S:-1200}"; CLEANUP_KILL_AFTER_S="${CLEANUP_KILL_AFTER_S:-30}"
 REASON="${1:-manual}"
 TS=$(date -u +%Y%m%dT%H%M%SZ); BK="$BACKUP_ROOT/$TS"
 
@@ -50,8 +52,7 @@ main_uptime_h() {
   echo $(( (now - start) / 3600000000 ))
 }
 
-# One run at a time, BEFORE the active check (two runs would both stop main and both clean the same stores).
-# The lock dies with the process (fd 9). Cannot open it = abort, main untouched, pages; held = skip.
+# One run at a time, BEFORE the active check. Lock dies with the process (fd 9). Cannot open = abort (pages); held = skip.
 exec 9>"$LOCK_FILE" || { log "ERROR cannot open lock $LOCK_FILE - aborting before any change"; exit 1; }
 flock -n 9 || { log "another main-prune-restart run holds $LOCK_FILE - skip"; exit 0; }
 if pgrep -f "scripts/(deploy|rollback).sh" >/dev/null; then log "deploy/rollback running - skip"; exit 0; fi
@@ -102,13 +103,12 @@ else
 fi
 s=$(date +%s)
 [ "$prune_rc" = skipped ] || env -i HOME=/root PATH="$PRUNE_PATH" OPENCLAW_STATE_DIR="$SD" OPENCLAW_CONFIG_PATH="$TC/openclaw.json" \
-  timeout 1200 openclaw sessions cleanup --all-agents --enforce --json \
+  timeout --kill-after="$CLEANUP_KILL_AFTER_S" "$CLEANUP_TIMEOUT_S" openclaw sessions cleanup --all-agents --enforce --json \
   > "$LOG_DIR/hydra-main-prune-$TS.json" 2> "$LOG_DIR/hydra-main-prune-$TS.err" || prune_rc=$?
 rm -rf "$TC"
 log "cleanup rc=$prune_rc secs=$(( $(date +%s)-s )) rows_after=$(rows)"
 if [ "$prune_rc" != skipped ] && [ "$prune_rc" -ne 0 ]; then
-  # Fail-open (main still starts below), but fail the unit so OnFailure= pages: a prune failing every night
-  # lets rows climb back to the ~7k restart freeze unnoticed.
+  # Fail-open (main still starts below), but fail the unit so OnFailure= pages (else rows climb back unnoticed).
   log "WARN prune failed (rc=$prune_rc, see $LOG_DIR/hydra-main-prune-$TS.err) - starting main anyway"
   FAILED=1
 fi
