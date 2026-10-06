@@ -671,11 +671,25 @@ for repo in "${REPOS[@]}"; do
     # repo this tick (see ROLLUP-DEGRADED below), which lands in this same
     # fail-safe fall-through, never a missed recovery.
     rollup_state="$(qar_qa_review_rollup_state "$(jq -c '.statusCheckRollup // []' <<<"$pr_json" 2>/dev/null)")" || rollup_state=""
+    # The rollup carries no status DESCRIPTION, so a red it reports may be our
+    # own "no review happened" write (qar_status_is_infra), which is not a
+    # verdict. Only `success` is settled from the rollup alone; failure/error
+    # costs one REST status read to read the description, and falls through to
+    # the full reads if that read fails or the red is infrastructure.
     case "$rollup_state" in
-      success|failure|error)
+      success)
         terminal_skipped=$((terminal_skipped + 1))
         repo_terminal_skipped=$((repo_terminal_skipped + 1))
         continue
+        ;;
+      failure|error)
+        if rollup_status_json="$("$GH" api "repos/$repo/commits/$head_sha/status?per_page=100" 2>/dev/null)" \
+           && rollup_desc="$(qar_qa_review_status_field "$rollup_status_json" description)" \
+           && ! qar_status_is_infra "$rollup_desc"; then
+          terminal_skipped=$((terminal_skipped + 1))
+          repo_terminal_skipped=$((repo_terminal_skipped + 1))
+          continue
+        fi
         ;;
     esac
 
@@ -813,7 +827,19 @@ for repo in "${REPOS[@]}"; do
     fi
     gated=0; [ "$gate_rc" -eq 0 ] && gated=1
 
-    verdict="$(qar_classify_verdict "$has_bot_review" "$status_state" "$gated")"
+    status_desc="$(qar_qa_review_status_field "$status_json" description)" || status_desc=""
+    # pending age from the status's own updated_at; unparseable/absent = treat as
+    # stale (a bounded extra dispatch beats suppressing forever).
+    pending_age_s=""
+    if [ "$status_state" = "pending" ]; then
+      status_updated="$(qar_qa_review_status_field "$status_json" updated_at)" || status_updated=""
+      if status_updated_epoch="$(iso_to_epoch "$status_updated" 2>/dev/null)" && [ -n "$status_updated_epoch" ]; then
+        pending_age_s=$((NOW_EPOCH - status_updated_epoch))
+      else
+        pending_age_s=$((CRON_STALE_S + 1))
+      fi
+    fi
+    verdict="$(qar_classify_verdict "$has_bot_review" "$status_state" "$gated" "$status_desc" "$pending_age_s" "$CRON_STALE_S")"
     [ "$verdict" = "candidate" ] || continue
 
     key="${repo}#${pr}@${head_sha}"

@@ -119,6 +119,66 @@ setup_lib() {
   [ "$output" = "pending-suppress" ]
 }
 
+@test "lib: qar_classify_verdict — FRESH pending (within the budget) still suppresses" {
+  setup_lib
+  run qar_classify_verdict 0 "pending" 0 "QA review queued for abc1234" 60 1800
+  [ "$output" = "pending-suppress" ]
+  run qar_classify_verdict 0 "pending" 0 "" 1800 1800
+  [ "$output" = "pending-suppress" ]
+}
+
+@test "lib: qar_classify_verdict — a pending OLDER than the budget is not in-flight evidence -> candidate" {
+  setup_lib
+  run qar_classify_verdict 0 "pending" 0 "QA review queued for abc1234" 1801 1800
+  [ "$output" = "candidate" ]
+}
+
+@test "lib: qar_classify_verdict — a NEGATIVE pending age (future updated_at, clock skew) is stale -> candidate" {
+  setup_lib
+  run qar_classify_verdict 0 "pending" 0 "" -5 1800
+  [ "$output" = "candidate" ]
+  run qar_classify_verdict 0 "pending" 0 "" 0 1800
+  [ "$output" = "pending-suppress" ]
+}
+
+@test "lib: qar_classify_verdict — the workflow's own dispatch-failure literal is NOT a verdict" {
+  setup_lib
+  # Read the literal OUT of the workflow so renaming it on either side turns this red.
+  lit="$(grep -F 'say_status failure "QA review could not be dispatched' "$HYDRA_REPO/.github/workflows/qa-autoreview.yml" | sed -E 's/.*say_status failure "([^"]*)".*/\1/')"
+  [ -n "$lit" ]
+  run qar_classify_verdict 0 "failure" 0 "$lit"
+  [ "$output" = "candidate" ]
+  run qar_classify_verdict 0 "error" 0 "$lit"
+  [ "$output" = "candidate" ]
+}
+
+@test "lib: qar_classify_verdict — the reconciler's own exhaustion write is NOT a verdict (literal read from the script)" {
+  setup_lib
+  lit="$(grep -F 'failure "QA review lost' "$HYDRA_REPO/scripts/qa-review-reconcile.sh" | sed -E 's/.*failure "([^"]*)".*/\1/' | sed 's/\$attempts/2/')"
+  [ -n "$lit" ]
+  run qar_classify_verdict 0 "failure" 1 "$lit"
+  [ "$output" = "candidate" ]
+}
+
+@test "lib: qar_classify_verdict — a real NO-GO failure stays a verdict" {
+  setup_lib
+  run qar_classify_verdict 0 "failure" 0 "NO-GO — 1 blocking finding"
+  [ "$output" = "verdict" ]
+  run qar_classify_verdict 0 "success" 0 "QA review could not be dispatched"
+  [ "$output" = "verdict" ]
+}
+
+@test "lib: qar_qa_review_status_field — description/updated_at; malformed input is rc1" {
+  setup_lib
+  j='{"statuses":[{"context":"qa-review","state":"pending","description":"d","updated_at":"2026-01-01T00:00:00Z"}]}'
+  run qar_qa_review_status_field "$j" description
+  [ "$output" = "d" ]
+  run qar_qa_review_status_field "$j" updated_at
+  [ "$output" = "2026-01-01T00:00:00Z" ]
+  run qar_qa_review_status_field 'not json' description
+  [ "$status" -eq 1 ]
+}
+
 @test "lib: qar_classify_verdict — pending on a MERGE-GATED repo is a candidate (stale pending must not silence forever)" {
   setup_lib
   run qar_classify_verdict 0 "pending" 1
@@ -742,6 +802,61 @@ JSON
   export QA_RECONCILE_NOW_EPOCH
   run "$SCRIPT" --once
   [ "$status" -eq 0 ]
+  [ ! -s "$DISPATCH_CALLS" ]
+}
+
+# MUS-3631: only a completed review ends the retry loop.
+_mus3631_run() {  # <pr> <sha> <status-json> [rollup-state]
+  seed_epoch_state "Muso-AI/core-backend"
+  mk_pr_list "Muso-AI/core-backend" "$1" "$2" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/core-backend" "$2" "2026-01-01T00:00:00Z"
+  printf '%s' "$3" > "$FIX/status/Muso-AI-core-backend-$2.json"
+  if [ -n "${4:-}" ]; then
+    jq --arg st "$4" '[.[] | .statusCheckRollup = [{"context":"qa-review","state":$st}]]' \
+      "$FIX/prlist/Muso-AI-core-backend.json" > "$FIX/prlist/tmp.json"
+    mv "$FIX/prlist/tmp.json" "$FIX/prlist/Muso-AI-core-backend.json"
+  fi
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+}
+
+@test "e2e MUS-3631: a head carrying only a STALE pending is dispatched" {
+  _mus3631_run 60 "shastale000000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"pending","description":"QA review queued for shastal","updated_at":"2026-01-01T00:00:00Z"}]}' PENDING
+  [ -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a pending stamped in the FUTURE (clock skew) is dispatched, not suppressed" {
+  _mus3631_run 64 "shafuture00000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"pending","description":"QA review queued for shafutu","updated_at":"2026-01-01T05:00:00Z"}]}' PENDING
+  [ -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a pending with an unparseable updated_at is dispatched, not suppressed" {
+  _mus3631_run 65 "shabadts00000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"pending","description":"QA review queued for shabads","updated_at":"garbage"}]}' PENDING
+  [ -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a head carrying a FRESH pending is not dispatched" {
+  _mus3631_run 61 "shafresh000000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"pending","description":"QA review queued for shafres","updated_at":"2026-01-01T00:59:00Z"}]}' PENDING
+  [ ! -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a head carrying the dispatch-failure red is re-dispatched, even via the rollup short-circuit" {
+  lit="$(grep -F 'say_status failure "QA review could not be dispatched' "$HYDRA_REPO/.github/workflows/qa-autoreview.yml" | sed -E 's/.*say_status failure "([^"]*)".*/\1/')"
+  [ -n "$lit" ]
+  _mus3631_run 62 "shainfra000000000000000000000000000000001" \
+    "$(jq -n --arg d "$lit" '{statuses:[{context:"qa-review",state:"failure",description:$d,updated_at:"2026-01-01T00:00:00Z"}]}')" FAILURE
+  [ -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a real NO-GO failure is NOT re-dispatched (rollup short-circuit)" {
+  _mus3631_run 63 "shanogo0000000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"failure","description":"NO-GO — 1 blocking finding","updated_at":"2026-01-01T00:00:00Z"}]}' FAILURE
   [ ! -s "$DISPATCH_CALLS" ]
 }
 
