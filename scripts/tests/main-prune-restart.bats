@@ -223,12 +223,12 @@ _count() { grep -c "$1" "$CALLS" || true; }
 # until cleanup is over (the prune holds the lock through `systemctl start`).
 LIB="$HYDRA_REPO/scripts/lib/main-prune-lock.sh"
 
-_slow_cleanup_openclaw() {   # cleanup that signals it started, then runs until released (paths baked in: env -i)
+_slow_cleanup_openclaw() {   # cleanup that signals it started, then runs until released or killed (paths baked in: env -i)
   cat > "$STUBBIN/openclaw" <<STUB
 #!/usr/bin/env bash
 echo "openclaw \$*" >> "$CALLS"
-touch "$TEST_TMPDIR/cleanup-started"
-while [ ! -e "$TEST_TMPDIR/release" ]; do sleep 0.1; done
+echo \$\$ > "$TEST_TMPDIR/cleanup.pid"; touch "$TEST_TMPDIR/cleanup-started"
+for _ in \$(seq 1 300); do [ -e "$TEST_TMPDIR/release" ] && break; sleep 0.1; done
 STUB
   chmod +x "$STUBBIN/openclaw"
 }
@@ -239,12 +239,12 @@ _deploy_acquire() {   # what deploy.sh / rollback.sh do, via the real lib
 
 @test "a deploy that starts AFTER the pgrep check blocks until cleanup is over and main is started" {
   _slow_cleanup_openclaw
-  bash "$SCRIPT" nightly > "$TEST_TMPDIR/prune.out" 2>&1 & prune=$!
+  bash "$SCRIPT" nightly > "$TEST_TMPDIR/prune.out" 2>&1 3>&- & prune=$!
   _wait_for "$TEST_TMPDIR/cleanup-started"
   # mid-cleanup: a bounded deploy wait must TIME OUT (rc 1), not slip through
   run _deploy_acquire 1
   [ "$status" -eq 1 ]
-  ( _deploy_acquire 30 && echo "DEPLOY-ACQUIRED" >> "$CALLS" ) & deploy=$!
+  ( _deploy_acquire 30 && echo "DEPLOY-ACQUIRED" >> "$CALLS" ) 3>&- & deploy=$!
   sleep 1
   [ "$(_count DEPLOY-ACQUIRED)" -eq 0 ]
   [ "$(_count 'systemctl start openclaw-gateway-main')" -eq 0 ]
@@ -257,7 +257,7 @@ _deploy_acquire() {   # what deploy.sh / rollback.sh do, via the real lib
 
 @test "the prune releases the lock after start, so a deploy is not held for the stable-health wait" {
   export STUB_HTTP=000 MAX_WAIT_SECS=6          # health never stabilises: the wait loop runs ~6s
-  bash "$SCRIPT" nightly > "$TEST_TMPDIR/prune.out" 2>&1 & prune=$!
+  bash "$SCRIPT" nightly > "$TEST_TMPDIR/prune.out" 2>&1 3>&- & prune=$!
   for i in $(seq 1 100); do [ "$(_count 'systemctl start openclaw-gateway-main')" -ge 1 ] && break; sleep 0.1; done
   run _deploy_acquire 2                          # still inside the prune's health wait
   [ "$status" -eq 0 ]
@@ -279,10 +279,9 @@ _deploy_acquire() {   # what deploy.sh / rollback.sh do, via the real lib
 
 @test "a SIGTERM mid-cleanup starts main exactly once, clears maintenance, and exits non-zero" {
   _slow_cleanup_openclaw
-  bash "$SCRIPT" nightly > "$TEST_TMPDIR/prune.out" 2>&1 & prune=$!
+  bash "$SCRIPT" nightly > "$TEST_TMPDIR/prune.out" 2>&1 3>&- & prune=$!
   _wait_for "$TEST_TMPDIR/cleanup-started"
-  kill -TERM "$prune"
-  touch "$TEST_TMPDIR/release"   # under systemd the cleanup child dies of the SIGTERM too
+  kill -TERM "$prune" "$(cat "$TEST_TMPDIR/cleanup.pid")"   # systemd's control-group kill takes the cleanup child too
   wait "$prune" && status=0 || status=$?
   [ "$status" -ne 0 ]
   [ "$(_count 'systemctl start openclaw-gateway-main')" -eq 1 ]
