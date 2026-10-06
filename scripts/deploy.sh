@@ -1541,6 +1541,54 @@ unset marker_precheck
 #   HYDRA_FORCE=1            skip both this check AND Step 4a pre-flight
 #   HYDRA_SKIP_DRIFT_CHECK=1 skip only Step 0; Step 4a pre-flight still runs
 #                            (use when SSH baseline read is genuinely broken)
+# Step 0 diagnostics (MUS-4098): name the skill-workshop proposal behind a
+# drifted SKILL.md. The workshop leaves the body it applied on disk at
+#   <proposals>/<skill>-<date>-<hash>/generations/<uuid>/PROPOSAL.md
+# so a proposal whose body equals the live file (proposal-only frontmatter
+# keys status/version/date stripped from BOTH sides) is the writer. Causal,
+# never temporal: no mtime, SSH-login or auth.log proximity is used (that
+# heuristic named the wrong writer on MUS-4069).
+#
+# Reads only, and fail-soft: stdout is `<path>\t<proposal>\t<date>` per
+# attributed file and nothing else; every error yields no output. It is
+# called only from the reporting block and never feeds the drift verdict.
+# stdin: drifted paths, one per line.
+drift_proposal_attribution() {
+  local script
+  script=$(cat <<'ATTRIB'
+  norm() {
+    awk 'NR==1 && $0=="---" {fm=1; print; next}
+         fm && $0=="---" {fm=0; print; next}
+         fm && /^(status|version|date):/ {next}
+         {print}' "$1"
+  }
+  while IFS= read -r p; do
+    [ "$(basename "$p")" = SKILL.md ] || continue
+    skill=$(basename "$(dirname "$p")")
+    live="$1/$p"
+    [ -r "$live" ] || continue
+    live_body=$(norm "$live") || continue
+    matches=""
+    for prop in $2/"$skill"-*/generations/*/PROPOSAL.md; do
+      [ -r "$prop" ] || continue
+      [ "$(norm "$prop")" = "$live_body" ] || continue
+      d=$(sed -n 's/^date: *//p' "$prop" | head -1)
+      matches="$matches$prop	$d"$'\n'
+    done
+    [ -n "$matches" ] || continue
+    printf '%s\t%s\n' "$p" "$(printf '%s' "$matches" | sort -t'	' -k2,2r | head -1)"
+  done
+ATTRIB
+)
+  local roots="${HYDRA_PROPOSALS_GLOB:-/root/.openclaw-*/skill-workshop/proposals}"
+  if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+    bash -c "$script" _ "$DEPLOY_PATH" "$roots" 2>/dev/null || true  # hydra-hook: reviewed-indirection (read-only; literal heredoc above)
+  else
+    ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" \
+      "bash -c $(printf '%q' "$script") _ $(printf '%q' "$DEPLOY_PATH") $(printf '%q' "$roots")" 2>/dev/null || true
+  fi
+}
+
 log "Step 0/8: Drift check (server vs last-deployed SHA)..."
 drift_check_against_baseline() {
   if [[ "${HYDRA_FORCE:-0}" == "1" ]]; then
@@ -1707,6 +1755,16 @@ drift_check_against_baseline() {
     return 0
   fi
 
+  # Reporting only: annotate each drifted file with the workshop proposal
+  # that wrote it. Falls back to the plain listing on any failure; nothing
+  # above this point or the verdict below depends on it.
+  local attribution drift_listing
+  attribution=$(echo "$drift" | drift_proposal_attribution 2>/dev/null || true)
+  drift_listing=$(echo "$drift" | ATTR="$attribution" awk '
+    BEGIN { n = split(ENVIRON["ATTR"], L, "\n"); for (i = 1; i <= n; i++) { split(L[i], f, "\t"); if (f[1] != "") A[f[1]] = f[2] " (date: " f[3] ")" } }
+    { print "  " $0; if ($0 in A) print "    ↳ skill-workshop proposal: " A[$0] }
+  ') || drift_listing=$(echo "$drift" | sed 's/^/  /')
+
   cat <<DRIFT_BRIEFING
 ================================================================================
 ✗ DEPLOY BLOCKED — server has edits this repo doesn't account for
@@ -1723,7 +1781,7 @@ WHAT THIS MEANS:
   Pushing now would silently overwrite their work. There is no backup.
 
 DRIFTED FILES (server has edits not in any local commit):
-$(echo "$drift" | sed 's/^/  /')
+$drift_listing
 
 WHAT TO DO (the only safe path, mirrors \`git pull --rebase\`):
   1. Pull the server-side edits into your local repo:
