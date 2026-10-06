@@ -1018,77 +1018,33 @@ jobs:
           REPO_ROOT="$(pwd)" SERVER_ROOT=/opt/hydra scripts/pr-skill-drift-gate.sh
 
       - name: Cron job orphan check
-        # Compares cron-jobs.json in the PR against the server's live
-        # cron state. If the server has jobs not in the repo, the deploy
-        # Step 5a will block with "refusing to drop live state". Catching
-        # this at PR time means the author can either add the missing job
-        # to cron-jobs.json or confirm it should be dropped.
+        # Shift-left of deploy.sh's store-only cron guard. Dumps the LIVE
+        # SQLite cron store (scripts/lib/dump-cron-store.sh, the same read the
+        # deploy does) and runs scripts/lib/detect-store-only-crons.py against
+        # this PR's cron-jobs.json, so a PR that would make deploy Step 5a halt
+        # ("refusing to drop live state") goes red here instead.
+        # MUS-3346: this step used to read /root/.openclaw-main/cron/jobs.json,
+        # which the 7.x runtime never writes, and `exit 0`'d when it was
+        # absent — green on every PR. It now FAILS CLOSED when the store or SDK
+        # is missing; there is no skip branch.
         run: |
           set -euo pipefail
-          SERVER_CRON="/root/.openclaw-main/cron/jobs.json"
-          REPO_CRON="cron-jobs.json"
-
-          if [ ! -f "$SERVER_CRON" ]; then
-            echo "No server cron state found — skipping orphan check"
-            exit 0
-          fi
-          if [ ! -f "$REPO_CRON" ]; then
-            echo "No cron-jobs.json in repo — skipping"
-            exit 0
-          fi
-
-          # Extract job IDs from both. Skip ephemeral one-shot crons: any job
-          # with deleteAfterRun + a one-time `at` schedule is created at runtime
-          # by an agent and is never committed to cron-jobs.json by design (e.g.
-          # the QA bot's qa-autoreview-pr-<N> review jobs from PR #391, or the
-          # CMO agent's b2b-*-send-report reminders). They self-delete after
-          # firing, so they are not protected orphan state. Matching by PROPERTY
-          # rather than the qa-autoreview-pr- name prefix exempts EVERY agent's
-          # one-shots — otherwise this gate blocks any PR opened while such a job
-          # is pending on the server.
-          server_ids=$(python3 -c "
-          import json, sys
-          with open('$SERVER_CRON') as f:
-              data = json.load(f)
-          for job in data.get('jobs', []):
-              if job.get('deleteAfterRun') is True and job.get('schedule', {}).get('kind') == 'at':
-                  continue
-              print(job['id'])
-          " | sort)
-
-          repo_ids=$(python3 -c "
-          import json, sys
-          with open('$REPO_CRON') as f:
-              data = json.load(f)
-          for job in data.get('jobs', []):
-              print(job['id'])
-          " | sort)
-
-          # Find orphans (on server but not in repo)
-          orphans=$(comm -23 <(echo "$server_ids") <(echo "$repo_ids"))
-
-          if [ -n "$orphans" ]; then
-            echo "::error::Cron jobs exist on server but NOT in cron-jobs.json — deploy Step 5a will block"
-            echo
-            echo "Orphaned job IDs:"
-            for id in $orphans; do
-              name=$(python3 -c "
-          import json
-          with open('$SERVER_CRON') as f:
-              data = json.load(f)
-          for job in data.get('jobs', []):
-              if job['id'] == '$id':
-                  print(f\"{job.get('name', '?')} (agent: {job.get('agentId', '?')})\")
-                  break
-          ")
-              echo "  $id — $name"
-            done
-            echo
-            echo "Fix: pull the job into cron-jobs.json, or confirm it should be dropped"
-            echo "  (set HYDRA_ALLOW_ORPHAN_CRON=1 at deploy time to force-drop)"
+          if [ ! -f cron-jobs.json ]; then
+            echo "::error::cron-jobs.json missing from the repo — cannot check for orphaned crons"
             exit 1
           fi
-          echo "✓ All server cron jobs accounted for in cron-jobs.json"
+          STORE_DUMP=$(mktemp)
+          trap 'rm -f "$STORE_DUMP"' EXIT
+          if ! OPENCLAW_STATE_DIR=/root/.openclaw-main scripts/lib/dump-cron-store.sh "$STORE_DUMP"; then
+            echo "::error::could not read the live cron store on this runner — the orphan check cannot run (fail-closed)"
+            exit 1
+          fi
+          if ! python3 scripts/lib/detect-store-only-crons.py cron-jobs.json "$STORE_DUMP"; then
+            echo "::error::live cron store holds recurring cron(s) not in cron-jobs.json — deploy Step 5a will block"
+            echo "Fix: commit the job to cron-jobs.json, or convert a watch-cron to a self-re-arming one-shot (see detect-store-only-crons.py)"
+            exit 1
+          fi
+          echo "✓ No durable store-only crons — every live recurring cron is in cron-jobs.json"
 
       - name: Plugin env-var preflight (shift-left of deploy.sh Step 4d)
         # Mirrors scripts/deploy.sh Step 4d / install_plugin's call to

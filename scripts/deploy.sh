@@ -2973,40 +2973,16 @@ for j in live.get('jobs', []):
 # human label that may change (e.g. b2b-reply-scanner-15m -> -1h cadence
 # rename).
 live_states = {j['id']: j.get('state', {}) for j in live.get('jobs', [])}
-# Ephemeral one-shot jobs (deleteAfterRun + a one-time `at` schedule) are
-# created at runtime by agents and self-delete after firing — never a
-# committable/protected orphan. Used by the orphan filter below.
-live_ephemeral = {j['id'] for j in live.get('jobs', [])
-                  if j.get('deleteAfterRun') is True and j.get('schedule', {}).get('kind') == 'at'}
-repo_ids = {j['id'] for j in repo.get('jobs', [])}
 preserved = 0
 for j in repo.get('jobs', []):
     if j['id'] in live_states:
         j['state'] = live_states[j['id']]
         preserved += 1
 
-# Orphaned ids = jobs that exist in live but no longer exist in repo.
-# Their runtime state will be permanently dropped on the next write.
-# That's a real data-loss event (lastRunMs/nextRunMs gone forever) and
-# should fail the deploy unless explicitly allowed via env var. The
-# common cases that legitimately produce orphans are: deliberate job
-# removal (set HYDRA_ALLOW_ORPHAN_CRON=1) or a refactor that changed
-# UUIDs (write a migration instead of bypassing the guard).
-orphaned = set(live_states) - repo_ids
-# Ephemeral one-shot crons (deleteAfterRun + a one-time `at` schedule) are
-# created at runtime by agents and never committed to the repo: the QA
-# auto-review bot's qa-autoreview-pr-<N> review jobs (PR #391), the CMO
-# agent's b2b-*-send-report reminders, etc. They are disposable and
-# self-delete after firing — not protected orphan state. Drop them from the
-# live file on sync without blocking the deploy (otherwise any deploy that
-# races a pending one-shot would halt). Matched by PROPERTY, not name, so
-# every agent's one-shots are covered — not just the QA bot's.
-orphaned = {i for i in orphaned if i not in live_ephemeral}
-if orphaned:
-    if os.environ.get('HYDRA_ALLOW_ORPHAN_CRON') == '1':
-        print(f'  HYDRA_ALLOW_ORPHAN_CRON=1: dropping live state for {len(orphaned)} job ids no longer in repo: {sorted(orphaned)}', file=sys.stderr)
-    else:
-        sys.exit(f"refusing to drop live state for {len(orphaned)} orphaned job id(s): {sorted(orphaned)}. Set HYDRA_ALLOW_ORPHAN_CRON=1 if this is intentional (e.g. you removed jobs from cron-jobs.json on purpose).")
+# NOTE: no orphan guard here (MUS-3346). This block reads cron/jobs.json, which
+# the 7.x runtime never writes, so a guard here was redundant with the
+# store-only cron guard below (detect-store-only-crons.py against a live
+# loadCronStore dump) and blind to live-created crons.
 
 # Heal-from-empty: live file existed but had 0 jobs. This is the exact
 # state the 2026-04-07 outage left the system in. Repo file will
@@ -3094,9 +3070,9 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
 
   # --- Store-only cron guard: fail-loud BEFORE the destructive import ---
   # saveCronStore below is delete-by-store_key + re-insert, so any cron in the
-  # live SQLite store but absent from cron-jobs.json is WIPED. The jobs.json
-  # orphan guard above cannot catch these: it reads the stale cron/jobs.json,
-  # which the 7.x runtime never writes to, so a cron created directly on the
+  # live SQLite store but absent from cron-jobs.json is WIPED. A
+  # jobs.json-based orphan guard (removed, MUS-3346) could not catch these: it
+  # read the stale cron/jobs.json, which the 7.x runtime never writes to, so a cron created directly on the
   # gateway (`openclaw cron add`) is invisible to it and silently lost
   # (incident 2026-07-16: Aaron's ChartMogul MRR/SaaS crons, PR #702). Read the
   # REAL store via loadCronStore and halt if it holds a durable (recurring,
@@ -3105,16 +3081,8 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
   # operator commits it or sets HYDRA_ALLOW_ORPHAN_CRON=1 to drop it.
   STORE_DUMP=$(mktemp) || fail "store-only cron guard: mktemp failed"
   DUMP_RC=0
-  DUMP_ERR=$(OPENCLAW_STATE_DIR=/root/.openclaw-main CRON_SDK="$CRON_SDK" STORE_DUMP="$STORE_DUMP" \
-    node --input-type=module -e '
-      import { writeFileSync } from "node:fs";
-      try {
-        const m = await import(process.env.CRON_SDK);
-        const cur = await m.loadCronStore(m.resolveCronStorePath());
-        writeFileSync(process.env.STORE_DUMP, JSON.stringify(cur));
-        process.exit(0);
-      } catch (e) { console.error(e); process.exit(1); }
-    ' 2>&1) || DUMP_RC=$?
+  DUMP_ERR=$(OPENCLAW_STATE_DIR=/root/.openclaw-main CRON_SDK="$CRON_SDK" \
+    bash "$HYDRA_ROOT/scripts/lib/dump-cron-store.sh" "$STORE_DUMP" 2>&1) || DUMP_RC=$?
   if (( DUMP_RC != 0 )); then
     rm -f "$STORE_DUMP"
     log "  ✗ store-only cron guard: loadCronStore read failed (rc=$DUMP_RC):"
