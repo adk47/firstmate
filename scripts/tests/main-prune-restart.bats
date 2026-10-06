@@ -115,17 +115,11 @@ _count() { grep -c "$1" "$CALLS" || true; }
   [ "$(_count 'systemctl restart')" -eq 0 ]
 }
 
-@test "skips while a deploy/rollback runs" {
+@test "skips (touching nothing) while a deploy/rollback runs, and when main is not active" {
   export STUB_PGREP_RC=0
   _run
-  [ "$status" -eq 0 ]
-  [ "$(_count 'systemctl stop')" -eq 0 ]
-}
-
-@test "skips when main is not active (systemd/watchdog own that)" {
-  export STUB_ACTIVE=inactive
-  _run
-  [ "$status" -eq 0 ]
+  export STUB_PGREP_RC=1 STUB_ACTIVE=inactive
+  _run; [ "$status" -eq 0 ]
   [ "$(_count 'systemctl stop')" -eq 0 ]
 }
 
@@ -281,4 +275,16 @@ _deploy_acquire() {   # what deploy.sh / rollback.sh do, via the real lib
   [ "$(grep -cE '(^|[[:space:];|])(nohup|setsid|disown|coproc)([[:space:]]|$)' \
       "$HYDRA_REPO/scripts/deploy.sh" "$HYDRA_REPO/scripts/rollback.sh" \
       "$HYDRA_REPO/scripts/lib/gateway-restart.sh" "$HYDRA_REPO/scripts/lib/deploy-mutation-marker.sh" | awk -F: '{s+=$2} END{print s+0}')" -eq 0 ]
+}
+
+@test "a SIGTERM mid-cleanup starts main exactly once, clears maintenance, and exits non-zero" {
+  _slow_cleanup_openclaw
+  bash "$SCRIPT" nightly > "$TEST_TMPDIR/prune.out" 2>&1 & prune=$!
+  _wait_for "$TEST_TMPDIR/cleanup-started"
+  kill -TERM "$prune"
+  touch "$TEST_TMPDIR/release"   # under systemd the cleanup child dies of the SIGTERM too
+  wait "$prune" && status=0 || status=$?
+  [ "$status" -ne 0 ]
+  [ "$(_count 'systemctl start openclaw-gateway-main')" -eq 1 ]
+  [ "$(_count '^maintenance stop')" -eq 1 ]
 }

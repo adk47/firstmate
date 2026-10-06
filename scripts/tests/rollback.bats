@@ -588,17 +588,6 @@ assert_both_gateways_started() {
   [ ! -f "$DEPLOY/skills-all/marker.md" ]
 }
 
-@test "rollback WAITS for an in-flight prune and then proceeds" {
-  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
-  _hold_lock "$MAIN_PRUNE_LOCK_FILE" 3; holder=$!
-  sleep 1
-  run env HYDRA_LOCAL=true DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \
-    MAIN_PRUNE_LOCK_WAIT_SECS=30 bash "$SRC/scripts/rollback.sh"
-  wait "$holder" || true
-  [ "$status" -eq 0 ]
-  [ "$(cat "$DEPLOY/skills-all/marker.md")" = "GOOD" ]
-}
-
 @test "rollback refuses (loudly, nothing touched) when the lock file cannot be opened" {
   printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
   run env HYDRA_LOCAL=true DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \

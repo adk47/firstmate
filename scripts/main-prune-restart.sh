@@ -84,13 +84,21 @@ PY
 
 # 3. stop -> prune offline -> start. A prune failure is logged and fails the unit afterwards but never stops
 # the start (fail-open). A stop that failed (or left main active) must NOT be pruned: skip it, fail the unit.
-FAILED=0; prune_rc=0
+FAILED=0; prune_rc=0; RECOVER=0
+# Armed from a successful stop until the normal start: a SIGTERM mid-cleanup must not leave main stopped unpaged.
+recover_main() {
+  [ "$RECOVER" -eq 1 ] || return 0
+  RECOVER=0; log "interrupted after stopping main - starting it"; rm -rf "$TC"
+  systemctl start "$SVC" || log "ERROR recovery start failed"
+  "$MAINT_SH" stop >/dev/null 2>&1 || true
+}
 s=$(date +%s); stop_rc=0; systemctl stop "$SVC" || stop_rc=$?
 if [ "$stop_rc" -ne 0 ] || systemctl is-active --quiet "$SVC"; then
   log "ERROR stop failed (rc=$stop_rc, active=$(systemctl is-active "$SVC")) - NOT pruning a live store; main left as is"
   FAILED=1; prune_rc=skipped
 else
   log "stopped in $(( $(date +%s)-s ))s"
+  RECOVER=1; trap recover_main EXIT   # bash runs the EXIT trap on SIGTERM/INT/HUP too
 fi
 s=$(date +%s)
 [ "$prune_rc" = skipped ] || env -i HOME=/root PATH="$PRUNE_PATH" OPENCLAW_STATE_DIR="$SD" OPENCLAW_CONFIG_PATH="$TC/openclaw.json" \
@@ -104,7 +112,7 @@ if [ "$prune_rc" != skipped ] && [ "$prune_rc" -ne 0 ]; then
   log "WARN prune failed (rc=$prune_rc, see $LOG_DIR/hydra-main-prune-$TS.err) - starting main anyway"
   FAILED=1
 fi
-start_rc=0; systemctl start "$SVC" || start_rc=$?
+start_rc=0; systemctl start "$SVC" || start_rc=$?; RECOVER=0
 log "start issued rc=$start_rc (active=$(systemctl is-active "$SVC"))"
 # The cleanup-vs-live-gateway race ends at start: release so a deploy is not held through the health wait.
 exec 9>&-

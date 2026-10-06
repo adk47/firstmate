@@ -6,11 +6,10 @@
 # flock ONE file. The prune takes it non-blocking (skips while a deploy/rollback holds it); deploy/rollback take
 # it blocking, ONCE, before their first mutation and hold it until they exit (not per restart: rollback.sh uses
 # raw systemctl and deploy.sh restarts at several sites).
-# Wait bound 1500s = the prune's hold (backup + stop + cleanup `timeout 1200` + start) plus margin. Its
-# stable-health wait (<=45 min) is outside the lock, so a deploy never blocks ~67 min.
-# fd hygiene: the lock is fd 213 of the deploy/rollback process. Nothing in deploy.sh, rollback.sh,
-# lib/gateway-restart.sh or lib/deploy-mutation-marker.sh backgrounds a long-lived child (pinned by
-# deploy-main-prune-lock.bats), so no child can keep the lock after exit; a new spawn there must close `213>&-`.
+# Wait bound 1500s = the prune's hold (backup + stop + cleanup `timeout 1200` + start) + margin; its health wait
+# (<=45 min) is outside the lock. fd hygiene: the lock is fd 213 of the deploy/rollback process; nothing in
+# deploy.sh, rollback.sh, lib/gateway-restart.sh or lib/deploy-mutation-marker.sh backgrounds a long-lived child
+# (pinned by main-prune-restart.bats), so none can keep it after exit; a new spawn there must close `213>&-`.
 # Only meaningful on node-8 (HYDRA_LOCAL=true); in ssh mode callers log that the lock was not taken.
 
 MAIN_PRUNE_LOCK_FILE="${MAIN_PRUNE_LOCK_FILE:-/run/lock/hydra-main-prune-restart.lock}"

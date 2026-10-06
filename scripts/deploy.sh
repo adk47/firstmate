@@ -2334,9 +2334,8 @@ DEPLOY_RUN_TOKEN="${HYDRA_DEPLOY_RUN_ID:-manual-$(hostname 2>/dev/null || echo h
 # marker held by another live owner is a refusal, never an overwrite; a
 # dead owner is cleared by hand or compare-and-swapped away with
 # HYDRA_TAKEOVER_MUTATION_MARKER=<that owner's token>.
-# Serialise with scripts/main-prune-restart.sh BEFORE the first node-8 mutation (MUS-3742): a restart in the
-# middle of its offline cleanup would race it on the SQLite stores. Held until this process exits
-# (lib/main-prune-lock.sh). Failing here, before the marker claim, touched nothing: no rollback fires.
+# Serialise with scripts/main-prune-restart.sh BEFORE the first node-8 mutation (MUS-3742): a restart during its
+# offline cleanup would race it. Held until exit (lib/main-prune-lock.sh); failing here touched nothing.
 if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
   lock_rc=0
   log "Taking the main prune/restart lock (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
