@@ -405,6 +405,13 @@
   "browser": {
     "enabled": false
   },
+  "skills": {
+    "workshop": {
+      "autonomous": {
+        "mode": "propose"
+      }
+    }
+  },
   "plugins": {
     "allow": [
       "codex",
