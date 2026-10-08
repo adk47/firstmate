@@ -75,8 +75,8 @@ run_path() {
     for wrapper in "${WRAPPERS[@]}"; do
         for kind in call upload; do
             run_path "$wrapper" "$kind"
-            ! grep -qi '^Approved-By' "$CURL_ARGS"
-            ! grep -qi '^Request-Ref' "$CURL_ARGS"
+            if grep -qi '^Approved-By' "$CURL_ARGS"; then false; fi
+            if grep -qi '^Request-Ref' "$CURL_ARGS"; then false; fi
         done
     done
 }
@@ -100,9 +100,9 @@ run_path() {
     for wrapper in "${WRAPPERS[@]}"; do
         run_path "$wrapper" call --confirmed-by X
         grep -qxF 'Approved-By: X' "$CURL_ARGS"
-        ! grep -qi '^Request-Ref' "$CURL_ARGS"
+        if grep -qi '^Request-Ref' "$CURL_ARGS"; then false; fi
         run_path "$wrapper" call --approval-msg-id T
         grep -qxF 'Request-Ref: T' "$CURL_ARGS"
-        ! grep -qi '^Approved-By' "$CURL_ARGS"
+        if grep -qi '^Approved-By' "$CURL_ARGS"; then false; fi
     done
 }
