@@ -168,6 +168,36 @@ setup_lib() {
   [ "$output" = "verdict" ]
 }
 
+# Incident anchor (the producer string is off-repo, on node-8/openclaw, so it cannot be
+# read out of a writer like the two tests above): Muso-AI/hydra#1092, head b730c1c9b, carried
+# qa-review=failure "CANNOT REVIEW: GitHub review publication failed after 3 attempts"
+# (written 2026-10-06T19:46:43Z) and sat parked ~46h as a "verdict". The review happened; only the
+# GitHub write failed, so a re-dispatch is correct and terminates.
+@test "lib: qar_classify_verdict — a publication-failure CANNOT REVIEW (hydra#1092 b730c1c9b) is NOT a verdict" {
+  setup_lib
+  lit="CANNOT REVIEW: GitHub review publication failed after 3 attempts"
+  for st in failure error; do
+    for gated in 0 1; do
+      run qar_classify_verdict 0 "$st" "$gated" "$lit"
+      [ "$output" = "candidate" ]
+    done
+  done
+}
+
+# Narrowness (CTO ruling, MUS-5260): the bot never saw the diff, so retrying loops forever;
+# qa-approval-retry.sh says a human must review it. Only "publication failed" is infra.
+@test "lib: qar_classify_verdict — the other CANNOT REVIEW family (diff cap / unfetchable bundle) stays a verdict" {
+  setup_lib
+  for d in "CANNOT REVIEW: the diff exceeded the GitHub 20,000-line cap" "CANNOT REVIEW: diff bundle unfetchable"; do
+    for st in failure error; do
+      run qar_classify_verdict 0 "$st" 0 "$d"
+      [ "$output" = "verdict" ]
+    done
+  done
+  run qar_classify_verdict 0 "success" 0 "CANNOT REVIEW: GitHub review publication failed after 3 attempts"
+  [ "$output" = "verdict" ]
+}
+
 @test "lib: qar_qa_review_status_field — description/updated_at; malformed input is rc1" {
   setup_lib
   j='{"statuses":[{"context":"qa-review","state":"pending","description":"d","updated_at":"2026-01-01T00:00:00Z"}]}'

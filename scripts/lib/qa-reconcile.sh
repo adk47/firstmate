@@ -129,11 +129,15 @@ qar_qa_review_status_field() {
 # not a review outcome. ONE place; the writers are
 #   .github/workflows/qa-autoreview.yml   say_status failure "QA review could not be dispatched — ..."
 #   scripts/qa-review-reconcile.sh        "QA review lost — reconciler exhausted N attempts"
-# Matched as a PREFIX of the description. The bats suite greps the workflow's
-# literal at test time, so renaming either side turns the suite red.
+# The third marker's writer is off-repo (node-8/openclaw): the review happened, only the GitHub
+# write failed. It is deliberately NOT bare "CANNOT REVIEW" — the diff-cap / unfetchable-bundle
+# family is a human-review case (qa-approval-retry.sh) and must stay a verdict.
+# Matched as a PREFIX of the description. The bats suite greps the first two writers'
+# literals at test time, so renaming either side turns the suite red.
 QAR_INFRA_STATUS_MARKERS=(
   "QA review could not be dispatched"
   "QA review lost — reconciler exhausted"
+  "CANNOT REVIEW: GitHub review publication failed"
 )
 
 # qar_status_is_infra <description> — rc 0 iff the description starts with a marker.
