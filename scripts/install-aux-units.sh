@@ -2458,6 +2458,55 @@ trstate="$(systemctl is-active "$trtmr" 2>/dev/null || true)"
 [[ "$trstate" == "active" ]] || fail "$trtmr is not active (state: ${trstate:-unknown})"
 log "  $trtmr: $trstate (fires hourly)"
 
+# ─── codex-home retention (daily 05:45 UTC) ──────────────────────
+# The codex binary writes sessions/**/rollout-*.jsonl and logs_*.sqlite under
+# every agent's codex-home and has no retention knob (72 GiB across 35 agents
+# on 8 Oct, MUS-5584). scripts/codex-home-prune.sh deletes rollout files and
+# log rows older than CODEX_SESSION_TTL_DAYS (default 14); VACUUM only below
+# 80% disk. One global unit: the glob spans every profile.
+[[ -x "$HYDRA_ROOT/scripts/codex-home-prune.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/codex-home-prune.sh missing or not executable"
+
+cat > /etc/systemd/system/hydra-codex-home-prune.service << CHPRUNESVC
+[Unit]
+Description=Prune codex-home session files and log rows older than the retention window
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/codex-home-prune.sh --apply
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Nice=10
+IOSchedulingClass=idle
+# ~60k file deletes plus 35 sqlite DELETE/checkpoint passes on the first run.
+TimeoutStartSec=30min
+StandardOutput=append:/var/log/hydra-codex-home-prune.log
+StandardError=append:/var/log/hydra-codex-home-prune.log
+CHPRUNESVC
+
+cat > /etc/systemd/system/hydra-codex-home-prune.timer << CHPRUNETMR
+[Unit]
+Description=Run the codex-home prune daily at 05:45 UTC
+
+[Timer]
+OnCalendar=*-*-* 05:45:00 UTC
+Persistent=true
+RandomizedDelaySec=10min
+Unit=hydra-codex-home-prune.service
+
+[Install]
+WantedBy=timers.target
+CHPRUNETMR
+
+systemctl daemon-reload
+
+chptmr=hydra-codex-home-prune.timer
+systemctl enable "$chptmr" >/dev/null 2>&1 || fail "could not enable $chptmr"
+systemctl start "$chptmr" >/dev/null 2>&1 || fail "could not start $chptmr"
+chpstate="$(systemctl is-active "$chptmr" 2>/dev/null || true)"
+[[ "$chpstate" == "active" ]] || fail "$chptmr is not active (state: ${chpstate:-unknown})"
+log "  $chptmr: $chpstate (fires daily 05:45 UTC)"
+
 # ─── Twice-weekly codex OAuth token refresh (Sun+Wed 04:00 UTC) ──
 # The DURABLE fix for the recurring ~10-day codex token lapse. hydra keeps the
 # bundled `openai` plugin DISABLED to dodge #90925, but that plugin owns the
