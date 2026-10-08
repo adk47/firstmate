@@ -23,7 +23,7 @@ DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"
 # Pinned openclaw runtime version. Updated together with this file so the
 # version change appears in git history alongside any deploy-script tweaks
 # the upgrade requires. Bump in lockstep with docs/guides/REPO-MANAGEMENT.md.
-OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.8.2}"
+OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.8.35}"
 
 # Minimum Node.js for the pinned runtime (openclaw 2026.7.1 raised the floor
 # to >=22.22.3 — its bin refuses to start below it, so a deploy on an old Node
