@@ -8,6 +8,13 @@ set -u
 ROOT="${MKTEMP_GUARD_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 rc=0
 
+fn_body() {
+  awk -v fn="$2" '
+    !inb && $0 ~ "^[[:space:]]*(function[[:space:]]+)?" fn "[[:space:]]*\\(\\)" { inb = 1 }
+    inb { print; if ($0 ~ /^[[:space:]]*\}/ || (/\}[[:space:]]*$/ && /\{/)) inb = 0 }
+  ' "$1"
+}
+
 while IFS= read -r f; do
   prev=""
   n=0
@@ -27,8 +34,8 @@ while IFS= read -r f; do
           if grep -E '^[^#]*(^|[^A-Za-z_])trap[[:space:]]' "$f" | grep -Eq "\\\$\{?$var([^A-Za-z0-9_]|\$)"; then ok=1; fi
           if [ "$ok" -eq 0 ]; then
             while IFS= read -r fn; do
-              if grep -Eq "^[[:space:]]*(function[[:space:]]+)?${fn}[[:space:]]*\(\)" "$f" \
-                && grep -E '(^|[^A-Za-z_])rm[[:space:]]' "$f" | grep -Eq "\\\$\{?$var([^A-Za-z0-9_]|\$)"; then ok=1; break; fi
+              # the rm must sit inside the handler's own body (def line to first closing brace)
+              if fn_body "$f" "$fn" | grep -E '(^|[^A-Za-z_])rm[[:space:]]' | grep -Eq "\\\$\{?$var([^A-Za-z0-9_]|\$)"; then ok=1; break; fi
             done < <(grep -E '^[^#]*(^|[^A-Za-z_])trap[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]' "$f" \
                        | sed -E 's/.*trap[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]].*/\1/')
           fi

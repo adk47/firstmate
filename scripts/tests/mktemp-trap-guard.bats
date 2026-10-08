@@ -63,3 +63,16 @@ run_guard() { MKTEMP_GUARD_ROOT="$TEST_TMPDIR" run "$GUARD"; }
   run_guard
   [ "$status" -eq 0 ]
 }
+
+@test "trapped handler that does not remove the variable fails even with an inline rm" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ncleanup() { :; }\ntrap cleanup EXIT\nrm -rf "$work"\n' > "$TEST_TMPDIR/scripts/emptyhandler.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"emptyhandler.sh:2"* ]]
+}
+
+@test "multi-line trapped handler that removes the variable passes" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ncleanup() {\n  rm -rf "$work"\n}\ntrap cleanup EXIT\n' > "$TEST_TMPDIR/scripts/ml.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}
