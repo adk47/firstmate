@@ -1784,10 +1784,11 @@ DRIFTED FILES (server has edits not in any local commit):
 $drift_listing
 
 WHAT TO DO (the only safe path, mirrors \`git pull --rebase\`):
-  1. Pull the server-side edits into your local repo:
-       scripts/sync-from-server.sh skills --apply       # if drift is in skills-all/
-       scripts/sync-from-server.sh workspaces --apply   # if drift is in workspaces/
-       scripts/sync-from-server.sh audit --apply        # if drift is in audit/
+  1. Pull the server-side edits into your local repo, ONE PATH AT A TIME:
+       scripts/sync-from-server.sh skills     --apply --only <path>
+       scripts/sync-from-server.sh workspaces --apply --only <path>
+       scripts/sync-from-server.sh audit      --apply --only <path>
+     # NEVER bulk-pull: workspaces/ is 125 GB / 6.2M files on node-8 (8 Oct), no excludes.
        # or pull a single file directly (uses same defaults as deploy.sh):
        scp -i "\$SSH_KEY" "\$NODE8_USER@\$NODE8_IP:$DEPLOY_PATH/<path>" ./<path>
   2. Review what came down:
@@ -2126,9 +2127,10 @@ $sus_overflow
 THE ONLY SAFE FIX (do this, in order):
   1. For each path above, decide:
      (a) Is it real data? → Pull it into the repo:
-           scripts/sync-from-server.sh workspaces --apply   # for workspaces/*
-           scripts/sync-from-server.sh skills --apply       # for skills-all/*
-           scripts/sync-from-server.sh audit --apply        # for audit/*
+           scripts/sync-from-server.sh workspaces --apply --only <path>   # for workspaces/*
+           scripts/sync-from-server.sh skills --apply --only <path>       # for skills-all/*
+           scripts/sync-from-server.sh audit --apply --only <path>        # for audit/*
+           # NEVER bulk-pull: workspaces/ is 125 GB / 6.2M files on node-8 (8 Oct).
          Then commit.
      (b) Is it runtime state we want server-owned? → Add an --exclude
          line to RSYNC_EXCLUDES at the top of scripts/deploy.sh (it's
