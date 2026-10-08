@@ -7,10 +7,11 @@
 #   - scripts/deploy.sh preflight_drift_check() (Step 4a)
 #   - .github/workflows/pr-validate.yml deploy-preflight job (shift-left gate)
 #
-# Both callers want the same rule: if a deletion would remove a file under
-# `workspaces/<ws>/<subdir>/` AND git has no tracked content at that subdir,
-# treat it as agent-authored runtime state and exclude it. Otherwise treat
-# the deletion as real drift (tracked file removed, or non-workspaces path).
+# Both callers want the same rule: if a deletion would remove a path under
+# `workspaces/<ws>/` that git has NEVER tracked, it is server-owned runtime
+# state; exclude the shallowest never-tracked ancestor (one exclude per
+# server-only tree root). Deleting a path git HAS tracked, or anything outside
+# `workspaces/`, is real drift.
 #
 # USAGE
 #   . scripts/lib/classify-deletions.sh
@@ -18,7 +19,9 @@
 #   # Then grep AUTO: / REMAIN: from /tmp/classified.
 #
 # OUTPUT (on stdout, newline-delimited)
-#   AUTO:   workspaces/<ws>/<subdir>/     — each pattern is emitted once,
+#   AUTO:   workspaces/<ws>/.../<root>[/]  — shallowest never-tracked ancestor,
+#                                           rsync-glob-escaped ([ ] * ? \)
+#                                           (dir => trailing /); emitted once,
 #                                           caller appends to rsync excludes
 #   REMAIN: *deleting   <path>            — unchanged rsync itemize line,
 #                                           caller feeds back to the briefing
@@ -33,17 +36,16 @@
 #       auto-exclude every deletion.
 #
 # INVARIANTS
-# - `ever_tracked` is derived from `git ls-files` at HEAD, so classification
-#   is deterministic across environments (laptop dev, CI shallow clone, node-
-#   8). A once-tracked-then-deleted subdir is NOT in ever_tracked, so its
-#   current deletion trips the briefing — that is real drift.
-# - The awk filter emits both subdirs and top-level tracked files (a tracked
-#   workspaces/<ws>/SOUL.md has 3 path components and the NF>=3 filter
-#   includes it). On lookup, deletion of a tracked SOUL.md matches ever_
-#   tracked exactly and is correctly NOT auto-excluded.
-# - The regex requires a trailing `/` after the subdir component, so a
-#   never-tracked TOP-LEVEL workspace file (e.g. `workspaces/<ws>/runtime.log`)
-#   does NOT match and falls through to REMAIN — that is real drift.
+# - `ever_tracked` is HEAD's tracked files UNION every path HEAD's history
+#   ever touched (needs full history; CI uses fetch-depth 0), so classification
+#   is deterministic across environments. A tracked-then-deleted path stays in
+#   the set: its deletion from git while the file still sits on the server is
+#   real drift and trips the briefing.
+# - `ever_tracked` holds every tracked path AND each of its ancestor prefixes,
+#   so the walk-up can test any depth. A tracked workspaces/<ws>/SOUL.md has
+#   all its prefixes in the set, so its deletion is never auto-excluded.
+# - A never-tracked TOP-LEVEL workspace file (e.g. `workspaces/<ws>/runtime.log`)
+#   IS auto-excluded as the file itself, no trailing slash (node-8 is truth).
 
 set -euo pipefail
 
@@ -74,15 +76,28 @@ classify_workspace_deletions() {
         return 0
     fi
 
-    # Compute the ever-tracked set at HEAD. tr -d '\r' normalizes filenames
+    # Compute the ever-tracked set. tr -d '\r' normalizes filenames
     # on Windows-origin clones where core.autocrlf may introduce CR on list
     # output — without this, exact-key matches fail and legitimately-tracked
     # paths get mis-classified as never-tracked.
     local ever_tracked_file
     ever_tracked_file=$(mktemp) || return 4
-    git -C "$hydra_root" ls-files -- 'workspaces/*' \
+    # Union HEAD's tracked files with every path HEAD's history ever touched:
+    # a tracked file deleted by the change under test is gone from ls-files
+    # but is exactly the real-drift signal, so it must stay "tracked" (REMAIN).
+    # A failed read of either source must fail closed: a partial set would turn
+    # a tracked-then-deleted path into AUTO.
+    local tracked_now history_paths
+    tracked_now=$(git -C "$hydra_root" ls-files -- 'workspaces/*') \
+        || { rm -f "$ever_tracked_file"; echo "classify_workspace_deletions: git ls-files failed; cannot classify" >&2; return 4; }
+    history_paths=
+    if git -C "$hydra_root" rev-parse -q --verify HEAD >/dev/null 2>&1; then
+        history_paths=$(git -C "$hydra_root" -c core.quotepath=off log --pretty=format: --name-only -- 'workspaces/*') \
+            || { rm -f "$ever_tracked_file"; echo "classify_workspace_deletions: git log failed; cannot classify" >&2; return 4; }
+    fi
+    printf '%s\n%s\n' "$tracked_now" "$history_paths" \
         | tr -d '\r' \
-        | awk -F/ '$1 == "workspaces" && NF >= 3 { print $1"/"$2"/"$3 }' \
+        | awk -F/ '$1 == "workspaces" { p = $1; for (i = 2; i <= NF; i++) { p = p "/" $i; print p } }' \
         | sort -u > "$ever_tracked_file"
 
     # Sanity check: if the caller's repo has workspaces/ on disk with
@@ -118,15 +133,26 @@ classify_workspace_deletions() {
             path = line
             sub(/^\*deleting[[:space:]]*/, "", path)
 
-            # Requires a slash after the subdir component. A top-level
-            # workspace file like workspaces/ops/runtime.log has only three
-            # path parts and remains suspicious.
+            # Walk down from depth 3 (workspaces/<ws>/<x>) to the SHALLOWEST
+            # ancestor git has never tracked; that is the server-only tree
+            # root. One exclude per root: the file itself (no slash) or the
+            # dir (trailing slash). A tracked path has every prefix in `ever`
+            # and falls through to REMAIN.
             n = split(path, parts, "/")
-            if (n >= 4 && parts[1] == "workspaces" && parts[2] != "" && parts[3] != "") {
-                key = parts[1] "/" parts[2] "/" parts[3]
-                if (!(key in ever)) {
-                    print key "/" >> auto_file
-                    next
+            if (parts[n] == "") n--
+            if (n >= 3 && parts[1] == "workspaces" && parts[2] != "" && parts[3] != "") {
+                key = parts[1] "/" parts[2]
+                for (i = 3; i <= n; i++) {
+                    key = key "/" parts[i]
+                    if (!(key in ever)) {
+                        # The caller passes this as an rsync --exclude pattern,
+                        # where [ ] * ? are wildcards and \ escapes; escape them
+                        # so the exclude matches the literal name.
+                        pat = key
+                        gsub(/[][\\*?]/, "\\\\&", pat)
+                        print pat ((i < n || path ~ /\/$/) ? "/" : "") >> auto_file
+                        next
+                    }
                 }
             }
 

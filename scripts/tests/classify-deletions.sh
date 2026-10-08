@@ -6,7 +6,7 @@
 # pipes synthetic rsync `*deleting` lines through the classifier, and asserts
 # the expected AUTO: / REMAIN: partition. Run manually:
 #
-#   bash scripts/tests/classify-deletions.sh
+#   LC_ALL=C bash scripts/tests/classify-deletions.sh
 #
 # Exits 0 on all-pass, 1 on any failure (prints which case failed). Used
 # to validate PR #130's auto-exclude logic pre-merge and to catch future
@@ -14,6 +14,10 @@
 # is refactored.
 
 set -euo pipefail
+
+# run() sorts the classifier output; pin the collation so the suite does not
+# depend on the runner's locale (en_US sorts runtime.log before SOUL.md).
+export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../lib/classify-deletions.sh
@@ -71,10 +75,19 @@ assert "tracked SOUL.md deletion stays suspicious" \
     "REMAIN: *deleting   workspaces/ops/SOUL.md" \
     "$(run '*deleting   workspaces/ops/SOUL.md')"
 
-# 3. Untracked file inside a tracked subdir (skills/foo) → REMAIN
-assert "untracked file in tracked subdir stays suspicious" \
-    "REMAIN: *deleting   workspaces/ops/skills/foo/extra.md" \
+# 3. Untracked file inside a tracked subdir (skills/foo) → AUTO, the file
+#    itself (git has never tracked it; node-8 is truth)
+assert "untracked file in tracked subdir auto-excludes the file" \
+    "AUTO: workspaces/ops/skills/foo/extra.md" \
     "$(run '*deleting   workspaces/ops/skills/foo/extra.md')"
+
+# 3b. Class B (6+7 Oct halts): never-tracked dir nested under a TRACKED
+#     subdir → one AUTO for the dir root, trailing slash, not one per file
+assert "never-tracked dir under tracked subdir auto-excludes once" \
+    "AUTO: workspaces/ops/skills/newskill/" \
+    "$(run '*deleting   workspaces/ops/skills/newskill/SKILL.md
+*deleting   workspaces/ops/skills/newskill/refs/a.md
+*deleting   workspaces/ops/skills/newskill/')"
 
 # 4. Deep path under a never-tracked subdir (workspaces/ops/clients/sub/x.md)
 #    → AUTO with `clients/` pattern (NOT deeper — we exclude at the subdir level)
@@ -82,23 +95,48 @@ assert "deep path under never-tracked subdir auto-excludes at subdir level" \
     "AUTO: workspaces/ops/clients/" \
     "$(run '*deleting   workspaces/ops/clients/inner/nested/file.md')"
 
-# 5. Never-tracked TOP-LEVEL workspace FILE (not a subdir) → REMAIN
-#    This catches the regex `(/|$)` bug that would have auto-excluded files.
-assert "never-tracked top-level workspace file stays suspicious" \
-    "REMAIN: *deleting   workspaces/ops/runtime.log" \
+# 5. Class A (8 Oct halt): never-tracked depth-1 workspace FILE under a
+#    workspace with tracked seeds → AUTO, the file itself, no trailing slash
+assert "never-tracked top-level workspace file auto-excludes" \
+    "AUTO: workspaces/ops/runtime.log" \
     "$(run '*deleting   workspaces/ops/runtime.log')"
+
+# 5b. Glob metachars in a never-tracked name are backslash-escaped so the
+#     rsync --exclude matches the literal name; unescaped, `[draft]` is a
+#     character class and the delete goes through (file form and dir form).
+assert "glob metachars in never-tracked file name are escaped" \
+    'AUTO: workspaces/ceo/\[draft\] plan.md' \
+    "$(run '*deleting   workspaces/ceo/[draft] plan.md')"
+assert "glob metachars in never-tracked dir name are escaped" \
+    'AUTO: workspaces/ceo/\[wip\]\*/' \
+    "$(run '*deleting   workspaces/ceo/[wip]*/notes.md')"
+if command -v rsync >/dev/null 2>&1; then
+    src=$(mktemp -d); dst=$(mktemp -d)
+    mkdir -p "$src/workspaces/ceo" "$dst/workspaces/ceo/[wip]*"
+    echo x > "$dst/workspaces/ceo/[draft] plan.md"
+    echo x > "$dst/workspaces/ceo/[wip]*/notes.md"
+    echo x > "$dst/workspaces/ceo/plain.md"
+    excl=()
+    while IFS= read -r l; do excl+=("--exclude=${l#AUTO: }"); done < <(
+        run '*deleting   workspaces/ceo/[draft] plan.md
+*deleting   workspaces/ceo/[wip]*/notes.md' | grep '^AUTO: ')
+    assert "real rsync --delete spares the metachar-named paths, deletes the rest" \
+        "*deleting workspaces/ceo/plain.md" \
+        "$(rsync -rn --delete --itemize-changes "${excl[@]}" "$src/" "$dst/" | grep 'deleting' | grep -v '/$' | tr -s ' ' || true)"
+    rm -rf "$src" "$dst"
+fi
 
 # 6. Skills-all deletion → REMAIN (not under workspaces/, out of scope)
 assert "skills-all deletion stays suspicious" \
     "REMAIN: *deleting   skills-all/foo/SKILL.md" \
     "$(run '*deleting   skills-all/foo/SKILL.md')"
 
-# 7. Mixed batch: auto + tracked + file
+# 7. Mixed batch: auto + tracked (single REMAIN keeps the sort locale-proof)
 assert "mixed batch partitions correctly" \
     "AUTO: workspaces/cmo/clients/
 AUTO: workspaces/ops/phantom/
-REMAIN: *deleting   workspaces/ops/SOUL.md
-REMAIN: *deleting   workspaces/ops/runtime.log" \
+AUTO: workspaces/ops/runtime.log
+REMAIN: *deleting   workspaces/ops/SOUL.md" \
     "$(run '*deleting   workspaces/ops/phantom/report.pdf
 *deleting   workspaces/cmo/clients/jamstik.md
 *deleting   workspaces/ops/SOUL.md
@@ -132,6 +170,46 @@ rc=0
 classify_workspace_deletions "*deleting   workspaces/ops/foo/x.md" "$fakeroot" 2>/dev/null || rc=$?
 assert "empty ever_tracked but workspaces populated returns rc 5" "5" "$rc"
 rm -rf "$fakeroot"
+
+# 12. Once-tracked-then-deleted file (a PR removing a seed): git no longer lists
+#     it at HEAD, but history does, so the deletion stays real drift (REMAIN),
+#     not a server-only path to auto-exclude.
+histroot=$(mktemp -d)
+git -C "$histroot" init -q
+git -C "$histroot" config user.email test@test
+git -C "$histroot" config user.name  test
+mkdir -p "$histroot/workspaces/ops"
+echo soul > "$histroot/workspaces/ops/SOUL.md"
+echo old  > "$histroot/workspaces/ops/obsolete.md"
+mkdir -p "$histroot/workspaces/ops/legacy"
+echo old  > "$histroot/workspaces/ops/legacy/a.md"
+git -C "$histroot" add -A
+git -C "$histroot" commit -qm "seed"
+git -C "$histroot" rm -q -r workspaces/ops/obsolete.md workspaces/ops/legacy
+git -C "$histroot" commit -qm "drop obsolete"
+assert "tracked-then-deleted file stays suspicious" \
+    "REMAIN: *deleting   workspaces/ops/obsolete.md" \
+    "$(classify_workspace_deletions '*deleting   workspaces/ops/obsolete.md' "$histroot" | sort)"
+assert "tracked-then-deleted dir stays suspicious" \
+    "REMAIN: *deleting   workspaces/ops/legacy/a.md" \
+    "$(classify_workspace_deletions '*deleting   workspaces/ops/legacy/a.md' "$histroot" | sort)"
+rm -rf "$histroot"
+
+# 13. A failed history read must fail closed (rc 4), not yield a partial
+#     ever_tracked set that turns a tracked-then-deleted path into AUTO.
+realgit=$(command -v git)
+shimdir=$(mktemp -d)
+cat > "$shimdir/git" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == log ]] && exit 128; done
+exec "$realgit" "\$@"
+SHIM
+chmod +x "$shimdir/git"
+rc=0
+out=$(PATH="$shimdir:$PATH" classify_workspace_deletions '*deleting   workspaces/ops/phantom/x.md' "$TMPROOT" 2>/dev/null) || rc=$?
+assert "git log failure returns rc 4 (fail closed)" "4" "$rc"
+assert "git log failure emits no AUTO/REMAIN" "" "$out"
+rm -rf "$shimdir"
 
 # ---- summary ----
 if (( fail_count > 0 )); then

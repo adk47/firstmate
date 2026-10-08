@@ -15,10 +15,10 @@ set -euo pipefail
 #   Only depth-1 REGULAR FILES under TARGET that are BOTH
 #     (a) NOT tracked at the merged repo HEAD, AND
 #     (b) NOT matched by the depth-1-file subset of deploy.sh's RSYNC_EXCLUDES.
-#   That is EXACTLY the set the deploy pre-flight would flag (scripts/lib/
-#   classify-deletions.sh auto-excludes never-tracked *subdirs*, but a never-
-#   tracked top-level FILE falls through to the drift briefing — so files are the
-#   only class we touch). Untracked-but-legit runtime files like IDENTITY.md and
+#   That is the set the deploy pre-flight USED to flag (scripts/lib/
+#   classify-deletions.sh now auto-excludes any never-tracked path, files
+#   included, so the pre-flight no longer halts on these; this cleanup stays as
+#   a conservative backstop and still touches only depth-1 files). Untracked-but-legit runtime files like IDENTITY.md and
 #   HEARTBEAT.md are protected by (b); tracked seeds (AGENTS/SOUL/USER/...) by (a);
 #   subdirs (api-logs/, skills/, memory/, ...) are never touched at all.
 #
