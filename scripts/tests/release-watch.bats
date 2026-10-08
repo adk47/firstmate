@@ -172,6 +172,17 @@ case "$1" in
     filter=""; prev=""
     for a in "$@"; do [ "$prev" = "--jq" ] && filter="$a"; prev="$a"; done
     sha="$(printf '%s' "$2" | sed -n 's#.*/commits/\([0-9a-f]*\)/status#\1#p')"
+    # repos/<o>/<r>/compare/<base>...<head> -> {"status": ...}. Driven by
+    # $STUB_COMPARE_STATUS; unset behaves like a failing call, so a test that
+    # does not opt in can never be "covered" by accident. The argv is already
+    # recorded above, so a test can assert which two shas were compared.
+    case "$2" in
+      */compare/*)
+        [ -n "$STUB_COMPARE_STATUS" ] || { echo "gh: compare not stubbed" >&2; exit 1; }
+        body="{\"status\":\"$STUB_COMPARE_STATUS\"}"
+        if [ -n "$filter" ]; then printf '%s' "$body" | jq -r "$filter"; else printf '%s\n' "$body"; fi
+        exit 0 ;;
+    esac
     if [ -n "$sha" ]; then
       if printf '%s' "$STUB_ROLLED_OUT" | tr ' ' '\n' | grep -qx "$sha"; then
         body='{"state":"success","total_count":1,"statuses":[{"state":"success","context":"H-DevOps / deploy","description":"Rollout to muso-prod (success)"}]}'
@@ -1496,7 +1507,8 @@ JSON
   # The dedupe must not become permanent amnesia.
   _pending_fixture
   _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 90000 ))"
-  run "$SCRIPT" --repo=auth --no-highlights
+  # The default is now "never on elapsed time alone"; the window is opt-in.
+  RELEASE_FINDING_REPAGE_SECONDS=86400 run "$SCRIPT" --repo=auth --no-highlights
   [ "$status" -ne 0 ]
   [[ "$output" == *"INDETERMINATE"* ]]
 }
@@ -1676,4 +1688,158 @@ JSON
   run "$SCRIPT" --repo=auth --no-highlights
   [ "$status" -eq 0 ]
   [[ "$output" == *"not re-paged"* ]]
+}
+
+# ─── Covered-by-later-success (MUS-5149) ───────────────────────────────
+# A statusless sha that is an ancestor of (or identical to) a LATER success is
+# covered: that release ships its commits. Anything we cannot prove stays
+# INDETERMINATE and pages (fail closed).
+
+# _covered_fixture <second-run-sha> — run 1001 = MID (statusless), run 1002 = $1 (success)
+_covered_fixture() {
+  cat > "$STUB_RUNS_JSON" <<JSON
+[ { "databaseId": 1001, "headSha": "$MID_SHA", "conclusion": "success", "createdAt": "2026-08-20T10:00:00Z", "status": "completed" },
+  { "databaseId": 1002, "headSha": "$1", "conclusion": "success", "createdAt": "2026-08-20T11:00:00Z", "status": "completed" } ]
+JSON
+  _rolled_out "$1"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-20T09:00:00Z" "v2026.8.26" 1000
+}
+
+@test "a statusless sha that is an ANCESTOR of a later success is skipped and the later one announced" {
+  _covered_fixture "$SHIPPED_SHA"
+  STUB_COMPARE_STATUS=ahead run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"INDETERMINATE"* ]]
+  [[ "$output" == *"${MID_SHA:0:8}"* && "$output" == *"${SHIPPED_SHA:0:8}"* ]]
+  [[ "$output" == *"rolled into"* ]]
+  # Pin the argv: the compare must be base=skipped sha, head=later success.
+  grep -q "compare/$MID_SHA...$SHIPPED_SHA" "$STUB_GH_ARGV"
+  tag="$(git -C "$ORIGIN" tag -l "$(_today_tag_glob)" | sort | tail -1)"
+  [ "$(git -C "$ORIGIN" rev-list -n1 "$tag")" = "$SHIPPED_SHA" ]
+  grep -q "last_marker=$SHIPPED_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/auth"
+  [ ! -f "$HYDRA_RELEASE_STATE_DIR/findings/auth" ]
+}
+
+@test "a sha REDEPLOYED by a later success run is never INDETERMINATE" {
+  # Status is per-SHA, so run 1001 and run 1002 on one sha read the same
+  # record and 1001 resolves on its own. The `identical` arm of the compare
+  # is therefore only reachable on a race between the two reads; it is kept
+  # because ahead alone would page on that race, but it cannot be driven
+  # through this stub.
+  _covered_fixture "$MID_SHA"
+  STUB_COMPARE_STATUS=identical run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"INDETERMINATE"* ]]
+  grep -q "last_marker=$MID_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/auth"
+  grep -q 'last_run_id=1001' "$HYDRA_RELEASE_STATE_DIR/announced/auth"
+}
+
+@test "a statusless sha with NO later success still fails loud" {
+  _pending_fixture
+  export STUB_ROLLOUT_PENDING=""
+  STUB_COMPARE_STATUS=ahead run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]
+  # No later success to look ahead to, so no compare is even attempted.
+  if grep -q "compare/" "$STUB_GH_ARGV"; then false; fi
+}
+
+@test "a later FAILED rollout does not cover a statusless sha" {
+  _covered_fixture "$SHIPPED_SHA"
+  export STUB_ROLLED_OUT=""; _rollout_failed "$SHIPPED_SHA"
+  STUB_COMPARE_STATUS=ahead run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]
+}
+
+@test "a DIVERGED statusless sha is not covered by a later success" {
+  _covered_fixture "$SHIPPED_SHA"
+  STUB_COMPARE_STATUS=diverged run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]
+  grep -q "compare/$MID_SHA...$SHIPPED_SHA" "$STUB_GH_ARGV"
+  [ -z "$(git -C "$ORIGIN" tag -l "$(_today_tag_glob)")" ]
+}
+
+@test "a BEHIND compare is not covered either" {
+  _covered_fixture "$SHIPPED_SHA"
+  STUB_COMPARE_STATUS=behind run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]
+}
+
+@test "a FAILING compare call fails closed" {
+  _covered_fixture "$SHIPPED_SHA"
+  run "$SCRIPT" --repo=auth --no-highlights      # STUB_COMPARE_STATUS unset -> gh exits 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]
+  grep -q "compare/$MID_SHA...$SHIPPED_SHA" "$STUB_GH_ARGV"
+  [ -z "$(git -C "$ORIGIN" tag -l "$(_today_tag_glob)")" ]
+}
+
+# ─── One page per new finding (MUS-5149) ───────────────────────────────
+
+@test "by default an unchanged finding never re-pages on elapsed time alone" {
+  _pending_fixture
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 90000 ))"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]      # still logged every tick
+  [[ "$output" == *"not re-paged"* ]]
+}
+
+@test "a clean tick clears the stamp so the same finding pages again afterwards" {
+  _pending_fixture
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 60 ))"
+  # Recovery: the rollout lands and the tick is clean.
+  _rolled_out "$MID_SHA"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [ ! -f "$HYDRA_RELEASE_STATE_DIR/findings/auth" ]
+  # The identical fingerprint recurs (same sha, run, state): it is a new page.
+  _pending_fixture
+  _seed_state "$BASE_SHA" "2026-08-20T09:00:00Z" "v2026.8.26" 1000
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"not re-paged"* ]]
+}
+
+@test "a TRANSIENT failure does not clear the stamp" {
+  _pending_fixture
+  export STUB_GH_FAIL=1
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 60 ))"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [ -f "$HYDRA_RELEASE_STATE_DIR/findings/auth" ]
+}
+
+@test "--dry-run does not delete a findings stamp" {
+  _pending_fixture
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 60 ))"
+  _rolled_out "$MID_SHA"
+  run "$SCRIPT" --repo=auth --no-highlights --dry-run
+  [ -f "$HYDRA_RELEASE_STATE_DIR/findings/auth" ]
+}
+
+# rc 1 ("no confirmed prod release found") is the arm that heals a stamp left
+# naming a sha that is no longer a candidate -- node-8's real state after a
+# re-seed. The rc 0 arm is covered above.
+@test "a no-release tick (rc 1) clears a STALE stamp, and the finding pages again if it recurs" {
+  cat > "$STUB_RUNS_JSON" <<JSON
+[ { "databaseId": 1000, "headSha": "$BASE_SHA", "conclusion": "success", "createdAt": "2026-08-20T09:00:00Z", "status": "completed" } ]
+JSON
+  export STUB_ROLLED_OUT="$BASE_SHA"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-20T09:00:00Z" "v2026.8.26" 1000
+  _seed_finding "unresolved-rollout	$SHIPPED_SHA	999	pending" "$(( $(date -u +%s) - 60 ))"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no confirmed prod release found"* ]]
+  [ ! -f "$HYDRA_RELEASE_STATE_DIR/findings/auth" ]
+  # The identical fingerprint recurs: a new page, not a suppressed one.
+  _pending_fixture
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"not re-paged"* ]]
 }
