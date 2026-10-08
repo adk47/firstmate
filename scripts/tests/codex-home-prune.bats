@@ -136,8 +136,24 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 @test "never prints row contents (the logs hold a live token)" {
   _chp_db "$CH/logs_2.sqlite"
   run "$PRUNE" --apply
+  [[ "$output" != *"SECRET-TOKEN"* ]]
   run "$PRUNE"
   [[ "$output" != *"SECRET-TOKEN"* ]]
+}
+
+@test "a non-lock checkpoint failure is a failure, not a benign locked skip" {
+  _chp_db "$CH/logs_2.sqlite"
+  real="$(command -v sqlite3)"
+  cat > "$TEST_TMPDIR/bin/sqlite3" <<SQ
+#!/bin/sh
+case "\$*" in *wal_checkpoint*) echo "Error: disk I/O error"; exit 1 ;; esac
+exec "$real" "\$@"
+SQ
+  chmod +x "$TEST_TMPDIR/bin/sqlite3"
+  run "$PRUNE" --apply
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"checkpoint failed"* ]]
+  [[ "$output" != *"locked by codex"* ]]
 }
 
 @test "a DB locked by codex is a logged skip with exit 0, rows untouched" {

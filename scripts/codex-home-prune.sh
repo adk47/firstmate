@@ -132,8 +132,10 @@ for home in "${homes[@]}"; do
     fi
 
     # busy=1 in the first column means codex held the DB and nothing was truncated.
-    out="$(sq "$db" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1)" || out="1|-1|-1"
-    if [ "${out%%|*}" != "0" ]; then
+    st=0; out="$(sq "$db" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1)" || st=$?
+    if [ "$st" -ne 0 ] && ! printf '%s' "$out" | is_locked; then
+      log "WARN $label/$name checkpoint failed -- continuing"; rc=1
+    elif [ "$st" -ne 0 ] || [ "${out%%|*}" != "0" ]; then
       log "WARN $label/$name checkpoint refused (locked by codex) -- skipped, will retry next run"
     fi
 
