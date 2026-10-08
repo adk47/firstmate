@@ -246,6 +246,9 @@
 #     patterns (review clones, qa-pr-*, pr-review-*.json, tmp.XXXXXX) after a
 #     3h/24h idle TTL, only when lsof shows no open handles. Everything else
 #     is left to the tmpfiles 24h catch-all. jest_0 is never touched.
+#   hydra-codex-home-prune.timer / .service
+#     Daily 05:45 UTC. scripts/codex-home-prune.sh --apply: ages out codex
+#     rollout jsonl and logs_*.sqlite rows past CODEX_SESSION_TTL_DAYS (14).
 #
 #   hydra-jev-shadow-prune.timer / .service
 #     Daily. Runs scripts/jev-shadow-prune.sh, which drops shadow rows
@@ -3019,6 +3022,7 @@ AUX_ONFAILURE_UNITS=(
   cs-sla-report.service
   cto-nightly-driver.service
   hydra-company-finder-cache-refresh.service
+  hydra-codex-home-prune.service
   hydra-daily-audit.service
   hydra-jev-shadow-prune.service
   hydra-peer-labels.service

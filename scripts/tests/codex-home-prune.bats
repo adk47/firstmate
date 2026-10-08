@@ -27,7 +27,7 @@ _chp_db() { # <db> : 3 old + 2 new rows, big bodies so VACUUM visibly shrinks th
   local i
   for i in 1 2 3; do
     sqlite3 "$db" "INSERT INTO logs(ts,ts_nanos,level,target,feedback_log_body,estimated_bytes)
-      VALUES($old,0,'INFO','t',hex(zeroblob(100000)),200000);"
+      VALUES($old,0,'INFO','t','SECRET-TOKEN-old'||hex(zeroblob(100000)),200000);"
   done
   for i in 1 2; do
     sqlite3 "$db" "INSERT INTO logs(ts,ts_nanos,level,target,feedback_log_body,estimated_bytes)
@@ -170,4 +170,40 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 @test "no codex-home dirs matched is a clean no-op" {
   CODEX_HOME_GLOB="$TEST_TMPDIR/nothing/*/codex-home" run "$PRUNE" --apply
   [ "$status" -eq 0 ]
+}
+
+@test "idle DB with no -wal/-shm sidecars is still pruned (Linux clean close)" {
+  _chp_db "$CH/logs_2.sqlite"
+  rm -f "$CH/logs_2.sqlite-wal" "$CH/logs_2.sqlite-shm"
+  run "$PRUNE" --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"unreadable"* ]]
+  [ "$(sqlite3 "$CH/logs_2.sqlite" 'select count(*) from logs')" -eq 2 ]
+}
+
+@test "dry-run on an idle DB with no sidecars still counts the would-free rows" {
+  _chp_db "$CH/logs_2.sqlite"
+  rm -f "$CH/logs_2.sqlite-wal" "$CH/logs_2.sqlite-shm"
+  run "$PRUNE" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"unreadable"* ]]
+  [[ "$output" == *"log_rows=3"* ]]
+}
+
+@test "one failed rm does not starve the next agent" {
+  [ "$(id -u)" -ne 0 ] || skip "root ignores directory permissions"
+  CH2="$TEST_TMPDIR/.openclaw-main/agents/zz/agent/codex-home"
+  _chp_rollout "$CH/sessions/ro/rollout-1.jsonl" 20
+  _chp_rollout "$CH2/sessions/rollout-2.jsonl" 20
+  chmod 555 "$CH/sessions/ro"
+  run "$PRUNE" --apply
+  chmod 755 "$CH/sessions/ro"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"rm failed"* ]]
+  [[ "$output" == *"done."* ]]
+  [ ! -e "$CH2/sessions/rollout-2.jsonl" ]
+}
+
+@test "the installer pages on failure of the prune unit" {
+  grep -qx '  hydra-codex-home-prune.service' "$HYDRA_REPO/scripts/install-aux-units.sh"
 }

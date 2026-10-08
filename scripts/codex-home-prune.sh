@@ -94,8 +94,10 @@ for home in "${homes[@]}"; do
   s_files=0; s_bytes=0
   while IFS= read -r -d '' f; do
     sz="$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')" || sz=0
+    if [ "$apply" -eq 1 ]; then
+      rm -f -- "$f" || { log "WARN $label rm failed for a rollout file -- skipped"; rc=1; continue; }
+    fi
     s_bytes=$(( s_bytes + ${sz:-0} )); s_files=$(( s_files + 1 ))
-    if [ "$apply" -eq 1 ]; then rm -f -- "$f"; fi
   done < <(find "$home/sessions" -type f -name 'rollout-*.jsonl' -mmin +"$ttl_min" -print0 2>/dev/null)
 
   # ── logs_*.sqlite: rows past the TTL ──
@@ -104,7 +106,14 @@ for home in "${homes[@]}"; do
     [ -f "$db" ] || continue
     name="$(basename "$db")"
 
-    if ! out="$(sq -readonly "$db" "SELECT COUNT(*), COALESCE(SUM(estimated_bytes),0) FROM logs WHERE ts < $cutoff_ts;" 2>&1)"; then
+    # Apply opens read-write: a WAL DB with no -wal/-shm sidecars (idle codex)
+    # cannot be opened -readonly. Dry-run falls back to an immutable open.
+    count_sql="SELECT COUNT(*), COALESCE(SUM(estimated_bytes),0) FROM logs WHERE ts < $cutoff_ts;"
+    st=0
+    if [ "$apply" -eq 1 ]; then out="$(sq "$db" "$count_sql" 2>&1)" || st=$?
+    else out="$(sq -readonly "$db" "$count_sql" 2>&1)" || out="$(sq "file:$db?immutable=1" "$count_sql" 2>&1)" || st=$?
+    fi
+    if [ "$st" -ne 0 ]; then
       if printf '%s' "$out" | is_locked; then log "WARN $label/$name locked -- skipped, will retry next run"
       else log "WARN $label/$name unreadable -- skipped"; rc=1; fi
       continue
