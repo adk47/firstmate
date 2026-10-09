@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/check-mktemp-traps.sh — every `mktemp -d` in scripts/** must either
 # be named in a cleanup `trap` (directly, or via a handler function that rm's
-# it) or carry a `# mktemp-ok: <why>` comment on the same or previous line.
+# it) or carry a `# mktemp-ok: <why>` comment on the same line or a comment-only previous line.
 # Test fixtures (scripts/tests/**, *.bats) are out of scope.
 # Exit 0 clean, 1 offenders listed. MKTEMP_GUARD_ROOT overrides the repo root.
 set -u
@@ -46,7 +46,7 @@ while IFS= read -r f; do
     cur="$line"
     code="${cur%%#*}"
     if [[ "$code" =~ mktemp[[:space:]]+(-d|--directory|-[a-z]*d)([[:space:]]|\)|\"|$) ]]; then
-      if [[ "$cur" == *"mktemp-ok:"* || "$prev" == *"mktemp-ok:"* ]]; then
+      if [[ "$cur" == *"mktemp-ok:"* || ( "$prev" =~ ^[[:space:]]*# && "$prev" == *"mktemp-ok:"* ) ]]; then
         :
       else
         var=""

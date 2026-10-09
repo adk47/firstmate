@@ -177,3 +177,25 @@ SH
   run_guard
   [ "$status" -eq 0 ]
 }
+
+@test "a same-line mktemp-ok does not waive the next allocation" {
+  cat > "$TEST_TMPDIR/scripts/adjacent.sh" <<'SH'
+#!/bin/bash
+a=$(mktemp -d)   # mktemp-ok: persists by design
+b=$(mktemp -d)
+SH
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"adjacent.sh:3"* ]]
+  [[ "$output" != *"adjacent.sh:2"* ]]
+}
+
+@test "a comment-only mktemp-ok on the previous line still waives" {
+  cat > "$TEST_TMPDIR/scripts/prevline.sh" <<'SH'
+#!/bin/bash
+# mktemp-ok: persists by design
+a=$(mktemp -d)
+SH
+  run_guard
+  [ "$status" -eq 0 ]
+}
