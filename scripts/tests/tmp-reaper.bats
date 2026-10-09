@@ -149,8 +149,10 @@ setup() {
 @test "a mktemp failure fails closed: the path survives and the run exits non-zero" {
   mk core-backend-7-review-MKTMP1 10
   mkdir -p "$BATS_TEST_TMPDIR/bin"
-  printf '#!/bin/sh\necho "mktemp: No space left on device" >&2\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/mktemp"
-  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/lsof"
+  # Fail only the reaper's own bare `mktemp`; the lib's templated calls pass, so the lib's guard can't mask a regression here.
+  printf '#!/bin/sh\n[ "$#" -eq 0 ] || exec /usr/bin/mktemp "$@"\necho "mktemp: No space left on device" >&2\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/mktemp"
+  # lsof: reaper's `-t` probe says "no match" (rc 1); the lib's whole-system scan succeeds, so only the reaper's own mktemp guard can keep the path.
+  printf '#!/bin/sh\n[ "$1" = "-t" ] && exit 1\nexit 0\n' > "$BATS_TEST_TMPDIR/bin/lsof"
   chmod +x "$BATS_TEST_TMPDIR/bin/mktemp" "$BATS_TEST_TMPDIR/bin/lsof"
   PATH="$BATS_TEST_TMPDIR/bin:$PATH" run "$REAPER"
   [ "$status" -ne 0 ]
