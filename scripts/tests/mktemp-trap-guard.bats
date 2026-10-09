@@ -307,3 +307,28 @@ SH
   run_guard
   [ "$status" -eq 0 ]
 }
+
+@test "an unmatched brace inside a heredoc body does not merge function scopes" {
+  cat > "$TEST_TMPDIR/scripts/heredocfn.sh" <<'SH'
+#!/bin/bash
+a() {
+  cat <<EOT
+{
+EOT
+  work="$(mktemp -d)"
+}
+b() {
+  work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+}
+SH
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"heredocfn.sh:6"* ]]
+}
+
+@test "a quoted-delimiter and tab-stripped heredoc with a brace is skipped too" {
+  printf '#!/bin/bash\na() {\n\tcat <<-'"'"'EOT'"'"'\n\t{\n\tEOT\n  work="$(mktemp -d)"\n}\nb() {\n  work="$(mktemp -d)"; trap '"'"'rm -rf "$work"'"'"' EXIT\n}\n' > "$TEST_TMPDIR/scripts/heredoc2.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"heredoc2.sh:6"* ]]
+}

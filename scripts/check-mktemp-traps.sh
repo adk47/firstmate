@@ -42,6 +42,13 @@ region() {
   awk -v n="$1" '
     {
       l[NR] = $0
+      # heredoc body is data: its braces never move scope depth
+      if (hd != "") {
+        t = $0; if (hdash) sub(/^\t+/, "", t)
+        if (t == hd) hd = ""
+        id[NR] = blk
+        next
+      }
       if (d == 0) {
         if ($0 ~ /^[[:space:]]*(function[[:space:]]+[A-Za-z_][A-Za-z0-9_:.-]*([[:space:]]|\(|$)|[A-Za-z_][A-Za-z0-9_:.-]*[[:space:]]*\(\))/) blk = NR
         else if ($0 !~ /^[[:space:]]*\{/) blk = 0   # Allman: a lone "{" keeps the function open
@@ -58,6 +65,12 @@ region() {
         if (c == "{") d++; else if (c == "}") d--
       }
       if (d < 0) d = 0
+      if (match($0, /<<-?[[:space:]]*["\047\\]?[A-Za-z_][A-Za-z0-9_]*/) && substr($0, RSTART - 1, 1) != "<") {
+        s = substr($0, RSTART, RLENGTH)
+        hdash = (s ~ /^<<-/)
+        sub(/^<<-?[[:space:]]*["\047\\]?/, "", s)
+        hd = s
+      }
     }
     END { for (i = 1; i <= NR; i++) if (id[i] == id[n]) print l[i] }
   '
