@@ -282,6 +282,36 @@ class TestRenderTextDigest(unittest.TestCase):
         self.assertNotIn("alice@example.com", text)
         self.assertIn("a***@***", text)
 
+    def test_full_digest_states_observable_reply_order_without_waiting_claims(self):
+        now = 1_000_000
+        replied = conv(cid="REPLIED", lar=0, lcr=now - 3600)
+        tied = conv(cid="TIED", lar=now - (2 * 3600), lcr=now - (2 * 3600))
+        opened = conv(cid="OPENED", lar=0, lcr=0,
+                      created_at=now - (2 * 3600), is_inbound=True)
+        outbound = conv(cid="OUTBOUND", lar=0, lcr=0,
+                        created_at=now - (3 * 3600), is_inbound=False)
+        buckets = d.bucket_conversations([replied, tied, opened, outbound], set())
+
+        text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20)
+
+        self.assertIn("CS open-conversation review daily digest", text)
+        self.assertIn("customer-side activity is latest: 3", text)
+        self.assertIn(
+            "team-side activity is latest, or team initiated with no recorded "
+            "customer reply: 1", text)
+        self.assertIn(
+            "customer is last recorded replier; last customer reply 1h ago", text)
+        self.assertIn(
+            "customer and team share the latest recorded reply time; "
+            "last customer reply 2h ago", text)
+        self.assertIn(
+            "customer-initiated; opened 2h ago; no recorded reply", text)
+        self.assertIn(
+            "Open status and reply order do not prove that a customer went unanswered.",
+            text)
+        self.assertNotIn("waiting", text.lower())
+        self.assertNotIn("aging", text.lower())
+
 
 class TestBuildDigestBlocks(unittest.TestCase):
     def test_header_is_plain_text_never_pings(self):
@@ -314,7 +344,41 @@ class TestBuildDigestBlocks(unittest.TestCase):
         c = conv(cid="OLD", lar=0, lcr=0, created_at=now - (72 * 3600))  # 72h old
         buckets = d.bucket_conversations([c], set())
         blocks = d.build_digest_blocks(buckets, now_epoch=now)
-        self.assertIn("past 48h", str(blocks))
+        self.assertIn("customer-side activity older than 48h", str(blocks))
+
+    def test_full_blocks_use_neutral_title_counts_rows_and_caveat(self):
+        now = 1_000_000
+        c = conv(cid="C1", lar=0, lcr=now - (25 * 3600))
+        buckets = d.bucket_conversations([c], set())
+
+        blocks = d.build_digest_blocks(buckets, now_epoch=now, aging_hours=20)
+        rendered = str(blocks)
+
+        self.assertEqual(
+            blocks[0]["text"]["text"], "CS open-conversation review daily digest")
+        self.assertIn("customer-side activity is latest", rendered)
+        self.assertIn("older than 20h since customer-side activity", rendered)
+        self.assertIn("do not prove that a customer went unanswered", rendered)
+        self.assertNotIn("waiting", rendered.lower())
+        self.assertNotIn("aging", rendered.lower())
+
+    def test_full_blocks_keep_every_section_within_slack_limit(self):
+        now = 10_000_000
+        items = [
+            conv(cid=str(100_000_000_000_000 + i), lar=0,
+                 lcr=now - ((25 + i) * 3600))
+            for i in range(15)
+        ]
+        buckets = d.bucket_conversations(items, set())
+
+        blocks = d.build_digest_blocks(
+            buckets, now_epoch=now, top_n=15, aging_hours=20)
+
+        sections = [b for b in blocks if b["type"] == "section"]
+        self.assertTrue(all(len(b["text"]["text"]) <= 3000 for b in sections))
+        rendered_rows = sum(
+            b["text"]["text"].count("conversation/") for b in sections)
+        self.assertEqual(rendered_rows, 15)
 
 
 class TestPostSlackDigestBestEffort(unittest.TestCase):
@@ -907,14 +971,16 @@ class TestAgingRenderingAndMention(unittest.TestCase):
         c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
         buckets = d.bucket_conversations([c], set())
         text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20)
-        self.assertIn("aging", text)
+        self.assertIn("older than 20h since customer-side activity", text)
+        self.assertNotIn("aging", text.lower())
 
     def test_aging_line_appears_in_blocks(self):
         now = 1_000_000
         c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
         buckets = d.bucket_conversations([c], set())
         blocks = d.build_digest_blocks(buckets, now_epoch=now, aging_hours=20)
-        self.assertIn("aging", str(blocks))
+        self.assertIn("older than 20h since customer-side activity", str(blocks))
+        self.assertNotIn("aging", str(blocks).lower())
 
     def test_no_aging_line_when_under_threshold(self):
         now = 1_000_000
@@ -983,12 +1049,40 @@ class TestMentionComputedOnceAndNoHeaderDuplication(unittest.TestCase):
         blocks = d.build_delta_digest_blocks([c], [], now_epoch=now, top_n=15)
         title_occurrences = sum(
             1 for b in blocks
-            if b["type"] == "header" and b["text"]["text"] == "CS needs-human delta digest"
+            if b["type"] == "header"
+            and b["text"]["text"] == "CS open-conversation review delta"
         )
         self.assertEqual(title_occurrences, 1)
         section_texts = [b["text"]["text"] for b in blocks if b["type"] == "section"]
         self.assertFalse(
-            any("CS needs-human delta digest" in t for t in section_texts))
+            any("CS open-conversation review delta" in t for t in section_texts))
+
+    def test_delta_digest_uses_neutral_counts_rows_and_caveat(self):
+        now = 1_000_000
+        replied = conv(cid="REPLIED", lar=0, lcr=now - 3600)
+        tied = conv(cid="TIED", lar=now - (2 * 3600), lcr=now - (2 * 3600))
+        opened = conv(cid="OPENED", lar=0, lcr=0,
+                      created_at=now - (25 * 3600), is_inbound=True)
+
+        text = d.render_delta_digest(
+            [replied, tied, opened], [opened], now_epoch=now, top_n=15)
+
+        self.assertIn("CS open-conversation review delta", text)
+        self.assertIn("new to this digest: 3", text)
+        self.assertIn(
+            "older than 20h since customer-side activity: 1", text)
+        self.assertIn(
+            "customer is last recorded replier; last customer reply 1h ago", text)
+        self.assertIn(
+            "customer and team share the latest recorded reply time; "
+            "last customer reply 2h ago", text)
+        self.assertIn(
+            "customer-initiated; opened 25h ago; no recorded reply", text)
+        self.assertIn(
+            "Open status and reply order do not prove that a customer went unanswered.",
+            text)
+        self.assertNotIn("waiting", text.lower())
+        self.assertNotIn("aging", text.lower())
 
 
 class TestMainDeltaFlow(unittest.TestCase):
@@ -1105,7 +1199,7 @@ class TestMainDeltaFlow(unittest.TestCase):
              redirect_stdout(out), redirect_stderr(err):
             rc = d.main()
         self.assertEqual(rc, 0)
-        self.assertIn("CS needs-human daily digest", out.getvalue())
+        self.assertIn("CS open-conversation review daily digest", out.getvalue())
         self.assertIn("corrupt", err.getvalue())
 
     def test_corrupt_state_full_post_renders_and_posts_but_skips_persistence(self):
@@ -1279,11 +1373,18 @@ class TestDeltaDigestLargeBacklogCap(unittest.TestCase):
         self.assertIn("13:30 full digest", text)
 
     def test_build_delta_digest_blocks_section_text_under_slack_cap(self):
-        now = 1_000_000
-        items = [conv(cid=f"N{i}", lar=0, lcr=now - i) for i in range(100)]
-        blocks = d.build_delta_digest_blocks(items, [], now_epoch=now, top_n=15)
-        section = [b for b in blocks if b["type"] == "section"][-1]
-        self.assertLess(len(section["text"]["text"]), 3000)
+        now = 10_000_000
+        items = [
+            conv(cid=str(100_000_000_000_000 + i), lar=0,
+                 lcr=now - ((25 + i) * 3600))
+            for i in range(100)
+        ]
+        blocks = d.build_delta_digest_blocks(items, items, now_epoch=now, top_n=15)
+        sections = [b for b in blocks if b["type"] == "section"]
+        self.assertTrue(all(len(b["text"]["text"]) <= 3000 for b in sections))
+        rendered_rows = sum(
+            b["text"]["text"].count("conversation/") for b in sections)
+        self.assertEqual(rendered_rows, 15)
 
     def test_state_records_only_the_rendered_subset_not_all_100(self):
         # Consistency with the rank-beyond-top_n fix: --delta state must only
