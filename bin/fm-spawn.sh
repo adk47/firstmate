@@ -1806,51 +1806,80 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # A relaunch must PROVE the previous agent is gone before it launches another
   # one into the same endpoint, and only tmux and herdr have a recovery-grade
   # classifier that can (bin/fm-control-lib.sh owns that capability table).
-  fm_control_backend_state_verified "$BACKEND" || {
-    echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
-    exit 1
-  }
-  # Two states are agent-free, and both license a relaunch:
-  #   dead    - the endpoint exists and confidently holds no agent. The
-  #             endpoint is ADOPTED, so the task keeps its exact address.
-  #   missing - the endpoint itself is gone. There is no endpoint AND therefore
-  #             no agent, so a relaunch cannot adopt it: it CREATES a fresh
-  #             endpoint in the recorded worktree and the published record
-  #             rebinds to it.
-  # `missing` is NOT one state, and that is what the duplicate-agent argument
-  # turns on. fm_backend_agent_state's per-backend `missing` conflates "the
-  # endpoint was DESTROYED" with "the endpoint is UNREACHABLE from here right
-  # now", and an unreachable endpoint can still hold the live agent this
-  # relaunch would duplicate. So absence is PROVEN before it may rebind, never
-  # inferred from a failed read - and only HERDR can prove it:
-  #   herdr - the recorded session's server is started, and the recorded pane is
-  #           RE-READ through that session's own socket. `dead` means the pane
-  #           survived the restart and is adopted after all; `alive` means the
-  #           agent came back and refuses; only a second `missing` proves the
-  #           pane itself did not survive.
-  #   tmux  - REFUSES, always. A task record carries no socket identity for its
-  #           endpoint, and a server-wide inventory describes only the server
-  #           this process addresses, so no read available here can tell "gone"
-  #           from "on a server I cannot see". A tmux `missing` therefore stays
-  #           as deadlocked as it was before this change - deliberately, and
-  #           with the reason stated rather than guessed past.
-  # Every transient or self-contradicting read stays `unreadable`/`ambiguous`
-  # and refuses as it always did (bin/fm-backend.sh's fm_backend_agent_state
-  # owns that vocabulary). The proof itself lives in one place for the whole
-  # control plane - fm_control_endpoint_absence_verdict - so `exit` and
-  # `relaunch` cannot reach two different answers about one endpoint.
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  if [ "$RELAUNCH_STATE" = missing ]; then
-    RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET")
-    case "${RELAUNCH_ABSENCE%%$'\t'*}" in
-      gone) RELAUNCH_STATE=missing ;;
-      dead) RELAUNCH_STATE=dead ;;
-      alive) RELAUNCH_STATE=alive ;;
+  if [ "$BACKEND" = orca ]; then
+    # Orca has no recovery-grade classifier for a LIVE terminal, so a terminal
+    # Orca still lists can never be proven agent-free and is refused. A terminal
+    # that a successful, well-formed `orca terminal list` no longer lists (after
+    # a host reboot or an Orca restart) provably hosts no agent, so it is
+    # `missing`, and the rebind below creates a fresh terminal in the task's own
+    # recorded Orca worktree after re-verifying that worktree's path. An
+    # unreadable inventory is never read as absence.
+    ORCA_LISTED_RC=0
+    fm_backend_orca_terminal_listed "$RELAUNCH_TARGET" || ORCA_LISTED_RC=$?
+    case "$ORCA_LISTED_RC" in
+      0)
+        echo "error: task $ID's Orca terminal $RELAUNCH_TARGET still exists; Orca cannot prove its agent exited, so a relaunch applies only to a terminal Orca no longer lists" >&2
+        exit 1
+        ;;
+      1) ;;
       *)
-        echo "error: task $ID's recorded endpoint $RELAUNCH_TARGET reads 'missing', but ${RELAUNCH_ABSENCE#*$'\t'}. An endpoint that cannot be proven absent may still hold a live agent on this task's worktree; refusing rather than launching a second agent into it" >&2
+        echo "error: could not read Orca's terminal inventory to prove task $ID's terminal $RELAUNCH_TARGET is gone; refusing rather than risking two agents on one worktree" >&2
         exit 1
         ;;
     esac
+    ORCA_WORKTREE_ID=$(fm_meta_get "$RELAUNCH_META" orca_worktree_id)
+    [ -n "$ORCA_WORKTREE_ID" ] || {
+      echo "error: task $ID has no recorded orca_worktree_id; refusing to relaunch" >&2
+      exit 1
+    }
+    RELAUNCH_STATE=missing
+  else
+    fm_control_backend_state_verified "$BACKEND" || {
+      echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
+      exit 1
+    }
+    # Two states are agent-free, and both license a relaunch:
+    #   dead    - the endpoint exists and confidently holds no agent. The
+    #             endpoint is ADOPTED, so the task keeps its exact address.
+    #   missing - the endpoint itself is gone. There is no endpoint AND therefore
+    #             no agent, so a relaunch cannot adopt it: it CREATES a fresh
+    #             endpoint in the recorded worktree and the published record
+    #             rebinds to it.
+    # `missing` is NOT one state, and that is what the duplicate-agent argument
+    # turns on. fm_backend_agent_state's per-backend `missing` conflates "the
+    # endpoint was DESTROYED" with "the endpoint is UNREACHABLE from here right
+    # now", and an unreachable endpoint can still hold the live agent this
+    # relaunch would duplicate. So absence is PROVEN before it may rebind, never
+    # inferred from a failed read - and only HERDR can prove it:
+    #   herdr - the recorded session's server is started, and the recorded pane is
+    #           RE-READ through that session's own socket. `dead` means the pane
+    #           survived the restart and is adopted after all; `alive` means the
+    #           agent came back and refuses; only a second `missing` proves the
+    #           pane itself did not survive.
+    #   tmux  - REFUSES, always. A task record carries no socket identity for its
+    #           endpoint, and a server-wide inventory describes only the server
+    #           this process addresses, so no read available here can tell "gone"
+    #           from "on a server I cannot see". A tmux `missing` therefore stays
+    #           as deadlocked as it was before this change - deliberately, and
+    #           with the reason stated rather than guessed past.
+    # Every transient or self-contradicting read stays `unreadable`/`ambiguous`
+    # and refuses as it always did (bin/fm-backend.sh's fm_backend_agent_state
+    # owns that vocabulary). The proof itself lives in one place for the whole
+    # control plane - fm_control_endpoint_absence_verdict - so `exit` and
+    # `relaunch` cannot reach two different answers about one endpoint.
+    RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+    if [ "$RELAUNCH_STATE" = missing ]; then
+      RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET")
+      case "${RELAUNCH_ABSENCE%%$'\t'*}" in
+        gone) RELAUNCH_STATE=missing ;;
+        dead) RELAUNCH_STATE=dead ;;
+        alive) RELAUNCH_STATE=alive ;;
+        *)
+          echo "error: task $ID's recorded endpoint $RELAUNCH_TARGET reads 'missing', but ${RELAUNCH_ABSENCE#*$'\t'}. An endpoint that cannot be proven absent may still hold a live agent on this task's worktree; refusing rather than launching a second agent into it" >&2
+          exit 1
+          ;;
+      esac
+    fi
   fi
   case "$RELAUNCH_STATE" in
     dead) ;;
@@ -3692,6 +3721,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
     SES=${T%%:*}
+  elif [ "$BACKEND" = orca ]; then
+    # The recorded Orca terminal is proven gone (gate above). Re-verify that the
+    # recorded Orca worktree still resolves to this task's worktree before
+    # creating ONE fresh terminal in it; the record below rebinds terminal= to
+    # it and keeps orca_worktree_id, worktree, brief, and status log unchanged.
+    orca_wt_path=$(fm_backend_orca_worktree_path "$ORCA_WORKTREE_ID") || exit 1
+    [ "$(real_path_or_raw "$orca_wt_path")" = "$(real_path_or_raw "$WT")" ] || {
+      echo "error: Orca worktree $ORCA_WORKTREE_ID resolves to '$orca_wt_path', not task $ID's recorded worktree '$WT'; refusing to relaunch" >&2
+      exit 1
+    }
+    ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+    T=$ORCA_TERMINAL
+    SES=${T%%:*}
+    WT_TARGET=$T
   else
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
@@ -3699,8 +3742,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # ids) from these values, which is the whole rebind - the task id, brief,
     # worktree, armed poll and status log are untouched.
     #
-    # Herdr is the ONLY backend that reaches here: the gate above rebinds only
-    # on a PROVEN-gone endpoint, and absence is provable only on herdr, whose
+    # Herdr is the only backend that reaches here (Orca rebinds above): the gate
+    # rebinds only on a PROVEN-gone endpoint, and absence is provable only on herdr, whose
     # every read is scoped to the session the record names
     # (fm_control_endpoint_absence_verdict owns that argument). tmux and every
     # secondmate were already refused, so there is no dispatch left to make.
