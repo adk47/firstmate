@@ -18,8 +18,24 @@ files=$(printf '%s\n' "$files" | sort)
 # a trap only counts if it fires on a normal exit; ERR/INT-only traps leak on success
 LIFECYCLE_SIG='(^|[^A-Za-z_])(EXIT|RETURN)([^A-Za-z_]|$)'
 
-# comment-stripped source ($#, ${#x} survive: '#' only counts after whitespace/;/start)
-strip() { sed -E 's/(^|[[:space:];])#.*/\1/' "$1"; }
+# split each line into code and comment, quote-aware ('#' inside '...' or "..." is data; it starts
+# a comment only at line start or after whitespace/;). Prints one line per input line for the chosen part.
+split_comment() {
+  awk -v part="$2" '
+    {
+      line = $0; code = ""; q = ""; esc = 0; cmt = ""
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (esc) { esc = 0; code = code c; continue }
+        if (c == "\\" && q != "\047") { esc = 1; code = code c; continue }
+        if (q != "") { if (c == q) q = ""; code = code c; continue }
+        if (c == "\"" || c == "\047") { q = c; code = code c; continue }
+        if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[[:space:];]/)) { cmt = substr(line, i); break }
+        code = code c
+      }
+      print (part == "code" ? code : cmt)
+    }' "$1"
+}
 
 # lines of the top-level function (name() {, function name {, or Allman) or top-level code enclosing line $1, from stdin
 region() {
@@ -45,16 +61,39 @@ fn_body() {
   '
 }
 
+# does a trap in $1 (a scope) arm cleanup on EXIT/RETURN, with an action that rm's $2 (directly or via a handler fn)?
+# The action and the trailing signal list are parsed apart: "EXIT" inside the action string arms nothing.
+RE_Q1="trap[[:space:]]+(--[[:space:]]+)?'([^']*)'[[:space:]]+([^;&|]*)"
+RE_Q2='trap[[:space:]]+(--[[:space:]]+)?"(([^"\\]|\\.)*)"[[:space:]]+([^;&|]*)'
+RE_W="trap[[:space:]]+(--[[:space:]]+)?([^[:space:]'\"]+)[[:space:]]+([^;&|]*)"
+RM_VAR_PRE='(^|[^A-Za-z_])rm[[:space:]]'
+trap_cleans() {
+  local scope="$1" var="$2" tl action sigs fn
+  while IFS= read -r tl; do
+    action=""; sigs=""
+    if   [[ "$tl" =~ $RE_Q1 ]]; then action="${BASH_REMATCH[2]}"; sigs="${BASH_REMATCH[3]}"
+    elif [[ "$tl" =~ $RE_Q2 ]]; then action="${BASH_REMATCH[2]}"; sigs="${BASH_REMATCH[4]}"
+    elif [[ "$tl" =~ $RE_W  ]]; then action="${BASH_REMATCH[2]}"; sigs="${BASH_REMATCH[3]}"
+    else continue; fi
+    printf '%s\n' "$sigs" | grep -Eq "$LIFECYCLE_SIG" || continue
+    if printf '%s\n' "$action" | grep -E "$RM_VAR_PRE" | grep -Eq "\\\$\{?$var([^A-Za-z0-9_]|\$)"; then return 0; fi
+    # handlers: every function the action calls; the rm must sit in that function's own body
+    for fn in $(printf '%s\n' "$action" | grep -Eo '(^|[;&[:space:]])[A-Za-z_][A-Za-z0-9_]*' | tr -d ';& \t'); do
+      if printf '%s\n' "$src" | fn_body "$fn" | grep -E "$RM_VAR_PRE" | grep -Eq "\\\$\{?$var([^A-Za-z0-9_]|\$)"; then return 0; fi
+    done
+  done < <(printf '%s\n' "$scope" | grep -E '(^|[^A-Za-z_])trap[[:space:]]')
+  return 1
+}
+
 while IFS= read -r f; do
-  src=$(strip "$f")
-  prev=""
+  src=$(split_comment "$f" code)
+  prev_code=""; prev_cmt=""
   n=0
-  while IFS= read -r line || [ -n "$line" ]; do
+  while IFS= read -r code <&3 && IFS= read -r cmt <&4; do
     n=$((n + 1))
-    cur="$line"
-    code="${cur%%#*}"
     if [[ "$code" =~ mktemp[[:space:]]+(-d|--directory|-[a-z]*d)([[:space:]]|\)|\"|$) ]]; then
-      if [[ "$cur" == *"mktemp-ok:"* || ( "$prev" =~ ^[[:space:]]*# && "$prev" == *"mktemp-ok:"* ) ]]; then
+      # waiver lives in a real comment: this line's, or a comment-only previous line's
+      if [[ "$cmt" == *"mktemp-ok:"* || ( "$prev_code" =~ ^[[:space:]]*$ && "$prev_cmt" == *"mktemp-ok:"* ) ]]; then
         :
       else
         var=""
@@ -63,24 +102,17 @@ while IFS= read -r f; do
         if [ -n "$var" ]; then
           # cleanup evidence must sit in the allocation's own function, not elsewhere in the file
           scope=$(printf '%s\n' "$src" | region "$n")
-          # a trap line that rm's the var, or `trap <fn> ...` where <fn> rm's it
-          if printf '%s\n' "$scope" | grep -E '(^|[^A-Za-z_])trap[[:space:]]' | grep -E "$LIFECYCLE_SIG" | grep -E '(^|[^A-Za-z_])rm[[:space:]]' | grep -Eq "\\\$\{?$var([^A-Za-z0-9_]|\$)"; then ok=1; fi
-          if [ "$ok" -eq 0 ]; then
-            while IFS= read -r fn; do
-              # the rm must sit inside the handler's own body (def line to first closing brace)
-              if printf '%s\n' "$src" | fn_body "$fn" | grep -E '(^|[^A-Za-z_])rm[[:space:]]' | grep -Eq "\\\$\{?$var([^A-Za-z0-9_]|\$)"; then ok=1; break; fi
-            done < <(printf '%s\n' "$scope" | grep -E '(^|[^A-Za-z_])trap[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]' | grep -E "$LIFECYCLE_SIG" \
-                       | sed -E 's/.*trap[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]].*/\1/')
-          fi
+          if trap_cleans "$scope" "$var"; then ok=1; fi
         fi
         if [ "$ok" -eq 0 ]; then
+          # mktemp-ok: message text, not an allocation
           echo "${f#"$ROOT"/}:$n: mktemp -d with no cleanup trap naming it (add one, or '# mktemp-ok: <why>')"
           rc=1
         fi
       fi
     fi
-    prev="$cur"
-  done < "$f"
+    prev_code="$code"; prev_cmt="$cmt"
+  done 3< <(split_comment "$f" code) 4< <(split_comment "$f" comment)
 done <<< "$files"
 
 exit "$rc"

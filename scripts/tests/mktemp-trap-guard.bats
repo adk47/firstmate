@@ -220,3 +220,43 @@ SH
   [ "$status" -eq 2 ]
   [[ "$output" == *"cannot enumerate"* ]]
 }
+
+@test "a quoted '#' earlier on the line does not hide the allocation" {
+  cat > "$TEST_TMPDIR/scripts/hashq.sh" <<'SH'
+#!/bin/bash
+printf "#"; work="$(mktemp -d)"
+SH
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"hashq.sh:2"* ]]
+}
+
+@test "mktemp-ok inside a quoted string is not a waiver" {
+  cat > "$TEST_TMPDIR/scripts/waiverq.sh" <<'SH'
+#!/bin/bash
+printf "mktemp-ok: diagnostic"; work="$(mktemp -d)"
+SH
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"waiverq.sh:2"* ]]
+}
+
+@test "EXIT appearing only in the trap action does not count (ERR-only trap leaks)" {
+  cat > "$TEST_TMPDIR/scripts/erraction.sh" <<'SH'
+#!/bin/bash
+work="$(mktemp -d)"; trap 'echo EXIT; rm -rf "$work"' ERR
+SH
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"erraction.sh:2"* ]]
+}
+
+@test "a quoted trap action with a real EXIT signal list still passes" {
+  cat > "$TEST_TMPDIR/scripts/okq.sh" <<'SH'
+#!/bin/bash
+work="$(mktemp -d)"; trap "rm -rf \"$work\"" ERR EXIT
+d2="$(mktemp -d)"; trap -- 'rm -rf "$d2"' INT EXIT
+SH
+  run_guard
+  [ "$status" -eq 0 ]
+}
