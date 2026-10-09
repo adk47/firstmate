@@ -152,7 +152,7 @@
 #     email; Aaron, who owns ads, never saw it).
 #
 #   /etc/tmpfiles.d/tmp.conf
-#     /tmp age policy keyed on mtime only (`D /tmp 1777 root root mM:14d`),
+#     /tmp age policy keyed on mtime only (`D /tmp 1777 root root mM:24h`),
 #     installed verbatim from scripts/aux-units/tmp.conf. Codifies the
 #     2026-08-26 node-8 hand-edit that ended the disk-pressure alerts: the
 #     stock newest-of(atime,mtime,ctime) age test was permanently defeated by
@@ -234,6 +234,12 @@
 #     other failures, e.g. dirty tree, auth, push failed). Caught in
 #     Clio's review of PR #340; pre-fix `0 1` would have masked real
 #     broken-release failures as success.
+#
+#   hydra-tmp-reaper.timer / .service
+#     Hourly. Runs scripts/tmp-reaper.sh: deletes the known /tmp scratch
+#     patterns (review clones, qa-pr-*, pr-review-*.json, tmp.XXXXXX) after a
+#     3h/24h idle TTL, only when lsof shows no open handles. Everything else
+#     is left to the tmpfiles 24h catch-all. jest_0 is never touched.
 #
 #   hydra-jev-shadow-prune.timer / .service
 #     Daily. Runs scripts/jev-shadow-prune.sh, which drops shadow rows
@@ -2312,6 +2318,52 @@ jpstate="$(systemctl is-active "$jptmr" 2>/dev/null || true)"
 [[ "$jpstate" == "active" ]] || fail "$jptmr is not active (state: ${jpstate:-unknown})"
 log "  $jptmr: $jpstate (fires daily 05:15 UTC)"
 
+# ─── /tmp scratch reaper (hourly) ────────────────────────────────
+# systemd-tmpfiles has no open-handle check and its floor is 24h; on 2026-10-08
+# only 32 of 6,055 /tmp entries were >1d old while / went 85% -> 93% in 26h.
+# scripts/tmp-reaper.sh reaps the known scratch patterns within hours, skipping
+# anything with an open handle. Allow-list and TTLs live in the script.
+[[ -x "$HYDRA_ROOT/scripts/tmp-reaper.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/tmp-reaper.sh missing or not executable"
+
+cat > /etc/systemd/system/hydra-tmp-reaper.service << TMPREAPERSVC
+[Unit]
+Description=Reap idle /tmp scratch (review clones, qa-pr-*, tmp.XXXXXX) with no open handles
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/tmp-reaper.sh
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# lsof +D over multi-GB clones is slow; headroom over the 90s oneshot default.
+TimeoutStartSec=30min
+StandardOutput=append:/var/log/hydra-tmp-reaper.log
+StandardError=append:/var/log/hydra-tmp-reaper.log
+TMPREAPERSVC
+
+cat > /etc/systemd/system/hydra-tmp-reaper.timer << TMPREAPERTMR
+[Unit]
+Description=Run the /tmp scratch reaper hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5min
+Unit=hydra-tmp-reaper.service
+
+[Install]
+WantedBy=timers.target
+TMPREAPERTMR
+
+systemctl daemon-reload
+
+trtmr=hydra-tmp-reaper.timer
+systemctl enable "$trtmr" >/dev/null 2>&1 || fail "could not enable $trtmr"
+systemctl start "$trtmr" >/dev/null 2>&1 || fail "could not start $trtmr"
+trstate="$(systemctl is-active "$trtmr" 2>/dev/null || true)"
+[[ "$trstate" == "active" ]] || fail "$trtmr is not active (state: ${trstate:-unknown})"
+log "  $trtmr: $trstate (fires hourly)"
+
 # ─── Twice-weekly codex OAuth token refresh (Sun+Wed 04:00 UTC) ──
 # The DURABLE fix for the recurring ~10-day codex token lapse. hydra keeps the
 # bundled `openai` plugin DISABLED to dodge #90925, but that plugin owns the
@@ -2578,7 +2630,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/hydra-tmp-reaper.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log {
     weekly
     rotate 4
     compress
@@ -2829,6 +2881,7 @@ AUX_ONFAILURE_UNITS=(
   hydra-peer-labels.service
   hydra-release-watch.service
   hydra-release.service
+  hydra-tmp-reaper.service
   hydra-session-thread-retention@.service
   hydra-weekly-cleanup.service
   intercom-intake-watchdog.service
