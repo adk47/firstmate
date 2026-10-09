@@ -170,14 +170,18 @@ write_window() { jq -n --argjson e "$1" '{reason:"deploy gateway warm-up",expire
   d="$HYDRA_REPO/scripts/deploy.sh"
   # Extract the REAL arm statement (default assignment + run_on_node8 call + its
   # `|| log` continuation) and run it, so deleting or breaking it goes red.
-  lines=$(sed -n '/^HYDRA_DEPLOY_WINDOW_SECS=/,/^  || log /p' "$d")
+  lines=$(sed -n '/^  HYDRA_DEPLOY_WINDOW_SECS=/,/^    || log /p' "$d")
   [[ "$lines" == *deploy_window_arm* ]]
-  # ordered after the Step 6 log line and before the restart helper is sourced
-  step6=$(grep -n '^log "Step 6/8' "$d" | head -1 | cut -d: -f1)
-  arm=$(grep -n '^run_on_node8 ".*deploy_window_arm' "$d" | head -1 | cut -d: -f1)
-  restart=$(grep -n '^source "\$SCRIPT_DIR/lib/gateway-restart.sh"' "$d" | head -1 | cut -d: -f1)
-  [ -n "$step6" ]; [ -n "$arm" ]; [ -n "$restart" ]
-  [ "$step6" -lt "$arm" ]; [ "$arm" -lt "$restart" ]
+  # armed INSIDE the `if gateway_restart_needed` branch (a no-restart deploy must
+  # not open a window), before Phase A requests the restart
+  gate=$(grep -n '^if gateway_restart_needed; then' "$d" | head -1 | cut -d: -f1)
+  arm=$(grep -n '^  run_on_node8 ".*deploy_window_arm' "$d" | head -1 | cut -d: -f1)
+  phase=$(grep -n '^  # Phase A: request the safe restarts' "$d" | head -1 | cut -d: -f1)
+  close=$(awk -v g="$gate" 'NR>g && /^(fi|else)/ {print NR; exit}' "$d")
+  [ -n "$gate" ]; [ -n "$arm" ]; [ -n "$phase" ]; [ -n "$close" ]
+  [ "$gate" -lt "$arm" ]; [ "$arm" -lt "$phase" ]; [ "$arm" -lt "$close" ]
+  # and exactly one arm call, so a second unconditional one cannot hide
+  [ "$(grep -c 'deploy_window_arm' "$d")" -eq 1 ]
   rm -f "$HYDRA_DEPLOY_WINDOW_FLAG"
   before=$(date -u +%s)
   HYDRA_LOCAL=true DEPLOY_PATH="$HYDRA_REPO" HYDRA_DEPLOY_WINDOW_FLAG="$HYDRA_DEPLOY_WINDOW_FLAG" \
