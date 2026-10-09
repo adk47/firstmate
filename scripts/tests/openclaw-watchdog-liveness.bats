@@ -70,8 +70,13 @@ MSTUB
 printf '%s\n' "$*" >> "$SYSCTL_CALLS"
 case "$1" in
   is-active)
+    # Real `systemctl is-active` prints the state AND exits 3 for every state
+    # except `active` (empty/unreadable status file → prints nothing, exits 3).
     f="$STUB_SYSCTL_DIR/$2.status"
-    [ -f "$f" ] && cat "$f" || echo active ;;
+    st=active; [ -f "$f" ] && st=$(cat "$f")
+    [ -n "$st" ] && echo "$st"
+    [ "$st" = "active" ] && exit 0
+    exit 3 ;;
   is-enabled)
     # The edge auth tripwire asserts the mirror timer on a >= 2026.8 runtime.
     echo "${STUB_UNIT_ENABLED:-enabled}" ;;
@@ -168,6 +173,62 @@ mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
   [ "$status" -eq 0 ]
   [[ "$output" == *"config INVALID — not restarting"* ]]
   ! grep -q "restart openclaw-gateway-main" "$SYSCTL_CALLS"
+}
+
+# MUS-5173: `is-active` exits non-zero for every non-active state, so the old
+# `$(… || echo unknown)` appended "unknown" ("activating\nunknown") and no case
+# arm ever matched — a planned restart paged as GATEWAY DOWN. Stubs exit 3 like
+# the real thing; a stub that exits 0 cannot reproduce this at all.
+wd_restart_calls() { grep -cE '^(restart|reset-failed) openclaw-gateway-main$' "$SYSCTL_CALLS" || true; }
+
+@test "transient gateway state is skipped, not restarted or paged (activating|reloading|deactivating, is-active exits 3)" {
+  printf 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test\n' > "$MUSO_SLACK_ENV_FILE"
+  export MUSO_TEXTS="$TEST_TMPDIR/muso-texts"; : > "$MUSO_TEXTS"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$MUSO_TEXTS"\n' > "$TEST_TMPDIR/bin/muso"
+  chmod +x "$TEST_TMPDIR/bin/muso"
+  for st in activating reloading deactivating; do
+    : > "$SYSCTL_CALLS"
+    set_status openclaw-gateway-main "$st"
+    set_status openclaw-gateway-edge active
+    run "$WD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"openclaw-gateway-main transient state=${st}"* ]]
+    [[ "$output" != *"GATEWAY DOWN"* ]]
+    [ "$(wd_restart_calls)" -eq 0 ]
+    # Only gateway-liveness pages count (unrelated host checks may page on a dev box):
+    ! grep -qE 'gateway DOWN|gateway\* was|reset-failed' "$MUSO_TEXTS"
+  done
+}
+
+@test "genuinely failed gateway (is-active prints failed, exits 3) still gets reset-failed + restart" {
+  set_status openclaw-gateway-main failed
+  set_status openclaw-gateway-edge active
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GATEWAY DOWN: openclaw-gateway-main status=failed"* ]]
+  [[ "$output" != *"transient state"* ]]
+  grep -qx "reset-failed openclaw-gateway-main" "$SYSCTL_CALLS"
+  grep -qx "restart openclaw-gateway-main" "$SYSCTL_CALLS"
+}
+
+@test "is-active printing NOTHING resolves to status=unknown and still reaches the DOWN path" {
+  set_status openclaw-gateway-main ""
+  set_status openclaw-gateway-edge active
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GATEWAY DOWN: openclaw-gateway-main status=unknown"* ]]
+  grep -qx "restart openclaw-gateway-main" "$SYSCTL_CALLS"
+}
+
+@test "restart poll breaks on the first failed sample instead of burning all six" {
+  set_status openclaw-gateway-main failed
+  set_status openclaw-gateway-edge active
+  export STUB_RESTART_RECOVERS=0
+  run "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"restart FAILED — status now failed"* ]]
+  # 1 liveness read + exactly 1 poll read for main (old code: 1 + 6).
+  [ "$(grep -cx 'is-active openclaw-gateway-main' "$SYSCTL_CALLS")" -eq 2 ]
 }
 
 @test "down gateway whose restart does NOT recover → pages 'restart FAILED' (critical branch)" {

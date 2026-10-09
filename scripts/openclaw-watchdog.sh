@@ -322,7 +322,12 @@ fi
 # (pre-start-heal) re-tightens secret perms + codex auth before it comes back.
 check_gateway_liveness() {
   local profile="$1" svc="$2" config_valid="$3" status now
-  status=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
+  # is-active prints the state AND exits non-zero for every state but `active`,
+  # so fall back only on EMPTY output — `|| echo` would append "unknown" to a
+  # real state and no case arm below would ever match. `|| true` keeps the
+  # non-zero exit from tripping `set -e`.
+  status=$(systemctl is-active "$svc" 2>/dev/null || true)
+  [ -n "$status" ] || status="unknown"
   case "$status" in
     active) return 0 ;;
     activating|reloading|deactivating)
@@ -350,7 +355,8 @@ check_gateway_liveness() {
   now="unknown"; prev=""
   for _ in 1 2 3 4 5 6; do
     sleep 2
-    now=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
+    now=$(systemctl is-active "$svc" 2>/dev/null || true)
+    [ -n "$now" ] || now="unknown"
     [ "$now" = "failed" ] && break
     [ "$now" = "active" ] && [ "$prev" = "active" ] && break
     prev="$now"
