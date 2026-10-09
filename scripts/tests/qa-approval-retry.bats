@@ -244,7 +244,12 @@ case "${1:-}" in
         # Explicit paging (?per_page=N&page=M), default 30 / page 1 like the API.
         _pp="$(printf '%s' "$2" | sed -n 's/.*per_page=\([0-9]*\).*/\1/p')"; _pp="${_pp:-30}"
         _pg="$(printf '%s' "$2" | sed -n 's/.*[?&]page=\([0-9]*\).*/\1/p')"; _pg="${_pg:-1}"
-        printf '%s' "${STUB_REVIEWS_JSON:-[]}" | jq -c --argjson pp "$_pp" --argjson pg "$_pg" '.[(($pg-1)*$pp):($pg*$pp)]'
+        # STUB_REVIEWS_FILE: file-backed, for bodies too big for an env var.
+        if [ -n "${STUB_REVIEWS_FILE:-}" ]; then
+          jq -c --argjson pp "$_pp" --argjson pg "$_pg" '.[(($pg-1)*$pp):($pg*$pp)]' "$STUB_REVIEWS_FILE"
+        else
+          printf '%s' "${STUB_REVIEWS_JSON:-[]}" | jq -c --argjson pp "$_pp" --argjson pg "$_pg" '.[(($pg-1)*$pp):($pg*$pp)]'
+        fi
         ;;
       *)
         # The pre-write head re-confirmation (repos/<r>/pulls/<n>).
@@ -1944,6 +1949,22 @@ stale_reviews() { # $1 = count of stale NO-GOs ahead of one live-head GO
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   [ "$(grep -c 'per_page=100&page=' "$REVIEWS_CALLS")" -eq 3 ]
+  run grep -c "Muso-AI/web-credits-next 636 U03LP8YHLPK" "$APPROVE_CALLS"
+  [ "$output" = "1" ]
+}
+
+@test "pagination: a page above the Linux 128 KiB argv limit does not abort the tick" {
+  # Reviews must never travel through argv: one argv string is capped at 128 KiB
+  # (MAX_ARG_STRLEN) on node-8, and under set -e the exec failure kills the tick
+  # with no log line. 100 reviews x 12 KB = 1.2 MB on page 1.
+  jq -c -n '[range(100) | {user:{login:"adk47"}, state:"COMMENTED", commit_id:"OLDSHA",
+      submitted_at:"2026-08-17T09:00:00Z", body:("**Verdict: NO-GO** " + ("x" * 12000))}]
+    + [{user:{login:"adk47"}, state:"COMMENTED", commit_id:"abc123",
+      submitted_at:"2026-08-17T10:51:41Z", body:"**Verdict: GO** — 0 Critical."}]' > "$TEST_TMPDIR/big-reviews.json"
+  export STUB_REVIEWS_FILE="$TEST_TMPDIR/big-reviews.json"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "${lines[*]}" == *"tick done"* ]]
   run grep -c "Muso-AI/web-credits-next 636 U03LP8YHLPK" "$APPROVE_CALLS"
   [ "$output" = "1" ]
 }

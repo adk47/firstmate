@@ -840,7 +840,9 @@ for repo in "${REPOS[@]}"; do
         log "READ-FAILURE: the reviews body for $repo#$pr was not a JSON array — counted, never treated as 'no verdict'."
         reviews="__ERR__"; break
       fi
-      reviews="$(jq -cn --argjson a "$reviews" --argjson b "$pg" '$a + $b')"
+      # Combined on stdin, never argv: a page can exceed the 128 KiB per-argument
+      # cap on Linux, and under set -e the exec failure would kill the whole tick.
+      reviews="$(printf '%s\n%s' "$reviews" "$pg" | jq -cs 'add')"
       [ "$(printf '%s' "$pg" | jq 'length')" -lt 100 ] && break
       page=$((page + 1))
       if [ "$page" -gt "$MAX_REVIEW_PAGES" ]; then
