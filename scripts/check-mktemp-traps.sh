@@ -8,6 +8,13 @@ set -u
 ROOT="${MKTEMP_GUARD_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 [ -d "$ROOT/scripts" ] || { echo "check-mktemp-traps: no scripts directory under $ROOT" >&2; exit 2; }
 rc=0
+# enumerate up front: a find that errors (unreadable tree) must not pass as "nothing to check"
+files=$(find "$ROOT/scripts" -type f \( -name '*.sh' -o -name '*.py' -o -name '*.mjs' \) \
+          -not -path '*/tests/*' 2>"${TMPDIR:-/tmp}/check-mktemp-traps.$$.err") || find_failed=1
+if [ -s "${TMPDIR:-/tmp}/check-mktemp-traps.$$.err" ]; then find_failed=1; fi
+rm -f "${TMPDIR:-/tmp}/check-mktemp-traps.$$.err"
+if [ "${find_failed:-0}" -eq 1 ]; then echo "check-mktemp-traps: cannot enumerate $ROOT/scripts (unreadable path)" >&2; exit 2; fi
+files=$(printf '%s\n' "$files" | sort)
 # a trap only counts if it fires on a normal exit; ERR/INT-only traps leak on success
 LIFECYCLE_SIG='(^|[^A-Za-z_])(EXIT|RETURN)([^A-Za-z_]|$)'
 
@@ -74,7 +81,6 @@ while IFS= read -r f; do
     fi
     prev="$cur"
   done < "$f"
-done < <(find "$ROOT/scripts" -type f \( -name '*.sh' -o -name '*.py' -o -name '*.mjs' \) \
-           -not -path '*/tests/*' | sort)
+done <<< "$files"
 
 exit "$rc"

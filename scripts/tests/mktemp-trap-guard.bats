@@ -206,3 +206,17 @@ SH
   [ "$status" -ne 0 ]
   [[ "$output" == *"no scripts directory"* ]]
 }
+
+@test "an unreadable scripts tree fails closed instead of scanning nothing" {
+  [ "$(id -u)" -ne 0 ] || skip "root ignores directory modes"
+  mkdir "$TEST_TMPDIR/scripts/sealed"
+  cat > "$TEST_TMPDIR/scripts/sealed/leaky.sh" <<'SH'
+#!/bin/bash
+d=$(mktemp -d)
+SH
+  chmod 000 "$TEST_TMPDIR/scripts/sealed"
+  run_guard
+  chmod 755 "$TEST_TMPDIR/scripts/sealed"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"cannot enumerate"* ]]
+}
