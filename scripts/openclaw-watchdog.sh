@@ -547,18 +547,6 @@ _codex_cooldown_ok() {
   [ "$(( (now - last) / 60 ))" -ge "$mins" ]
 }
 
-# MUS-1298: gate the STUCK restart on a real liveness probe. 3 attempts, 10s
-# apart. Any HTTP response (1xx-5xx) means the gateway is answering — the run
-# failures are application-level and a restart won't fix them. Restart only
-# when all 3 probes come back dead.
-#
-# Never write `$(curl … || echo 000)` — on a timeout curl already prints 000
-# to stdout AND exits non-zero, so the `||` fallback appends a second one:
-# `000000` passes a `!= 000` test and a dead gateway reads as healthy forever
-# (muso-gateway-health §6). `|| true` here only neutralises curl's own exit
-# status (required under `set -e`, else a refused/timed-out connection kills
-# the whole watchdog tick instead of just failing this probe) — it prints
-# nothing, so curl's own "000" write-out is never duplicated.
 # MUS-1320 uptime floor. Returns 0 (and logs) when the unit started less than
 # GATEWAY_UPTIME_FLOOR_MIN ago. One clock covers every restarter: the unit's
 # own ActiveEnterTimestampMonotonic vs boot uptime. An unreadable start time
@@ -584,6 +572,18 @@ _within_uptime_floor() {
   return 1
 }
 
+# MUS-1298: gate the STUCK restart on a real liveness probe. 3 attempts, 10s
+# apart. Any HTTP response (1xx-5xx) means the gateway is answering — the run
+# failures are application-level and a restart won't fix them. Restart only
+# when all 3 probes come back dead.
+#
+# Never write `$(curl … || echo 000)` — on a timeout curl already prints 000
+# to stdout AND exits non-zero, so the `||` fallback appends a second one:
+# `000000` passes a `!= 000` test and a dead gateway reads as healthy forever
+# (muso-gateway-health §6). `|| true` here only neutralises curl's own exit
+# status (required under `set -e`, else a refused/timed-out connection kills
+# the whole watchdog tick instead of just failing this probe) — it prints
+# nothing, so curl's own "000" write-out is never duplicated.
 _gateway_probe_alive() {
   local attempt code
   for attempt in 1 2 3; do

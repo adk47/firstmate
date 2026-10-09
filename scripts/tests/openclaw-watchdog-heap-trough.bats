@@ -113,6 +113,8 @@ case "$1" in
       if [ "$n" -le 1 ]; then echo "$STUB_MAINPID_BEFORE"; else echo "$STUB_MAINPID_AFTER"; fi
     elif [ "$3" = "InvocationID" ]; then
       echo "${STUB_INVOCATION_ID-inv-current-000}"
+    elif [ "$3" = "ActiveEnterTimestampMonotonic" ]; then
+      echo "${STUB_ACTIVE_ENTER_MONO:-}"
     fi ;;
   restart)
     svc="$(_svc_arg "$@")"
@@ -334,6 +336,27 @@ no_bare_restart() { ! grep -q "^restart openclaw-gateway-main$" "$SYSCTL_CALLS";
   [[ "$output" == *"drain-restarting openclaw-gateway-main"* ]]
   drain_requested
   [[ "$output" == *"drain-restarted openclaw-gateway-main proactively"* ]]
+}
+
+@test "floor: unit started 5min ago suppresses the heap-trough restart (MUS-1320)" {
+  export PROC_UPTIME_FILE="$TEST_TMPDIR/up"; echo "100000.0 0" > "$PROC_UPTIME_FILE"
+  export STUB_ACTIVE_ENTER_MONO=$(( (100000-300) * 1000000 ))
+  _stub_heap_samples 4.05 5.80 4.60 4.90 5.10 4.30
+  _run_wd
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"UPTIME FLOOR"*"HEAP TROUGH"* ]]
+  [[ "$output" != *"drain-restarting"* ]]
+  no_drain_requested
+}
+
+@test "floor: unit started 31min ago does not block the heap-trough restart (MUS-1320)" {
+  export PROC_UPTIME_FILE="$TEST_TMPDIR/up"; echo "100000.0 0" > "$PROC_UPTIME_FILE"
+  export STUB_ACTIVE_ENTER_MONO=$(( (100000-1860) * 1000000 ))
+  _stub_heap_samples 4.05 5.80 4.60 4.90 5.10 4.30
+  _run_wd
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"UPTIME FLOOR: openclaw"* ]]
+  drain_requested
 }
 
 @test "tonight's real numbers (peak 5.85, trough 3.08) do NOT restart — the false-positive case" {
