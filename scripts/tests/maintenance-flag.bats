@@ -166,14 +166,30 @@ write_window() { jq -n --argjson e "$1" '{reason:"deploy gateway warm-up",expire
   [ ! -e "$HYDRA_DEPLOY_WINDOW_FLAG" ]
 }
 
-@test "deploy.sh arms the window before the Step 6 restart, and never touches the maintenance flag" {
+@test "deploy.sh's Step 6 arm lines, executed, open the window with a future numeric expiry" {
   d="$HYDRA_REPO/scripts/deploy.sh"
-  arm=$(grep -n 'deploy_window_arm' "$d" | head -1 | cut -d: -f1)
+  # Extract the REAL arm statement (default assignment + run_on_node8 call + its
+  # `|| log` continuation) and run it, so deleting or breaking it goes red.
+  lines=$(sed -n '/^HYDRA_DEPLOY_WINDOW_SECS=/,/^  || log /p' "$d")
+  [[ "$lines" == *deploy_window_arm* ]]
+  # ordered after the Step 6 log line and before the restart helper is sourced
+  step6=$(grep -n '^log "Step 6/8' "$d" | head -1 | cut -d: -f1)
+  arm=$(grep -n '^run_on_node8 ".*deploy_window_arm' "$d" | head -1 | cut -d: -f1)
   restart=$(grep -n '^source "\$SCRIPT_DIR/lib/gateway-restart.sh"' "$d" | head -1 | cut -d: -f1)
-  [ -n "$arm" ] && [ -n "$restart" ] && [ "$arm" -lt "$restart" ]
-  grep -q 'HYDRA_DEPLOY_WINDOW_SECS:-900' "$d"
-  run grep -nE 'hydra-maintenance|HYDRA_MAINTENANCE_FLAG|maintenance-flag.sh.*(arm|write)' "$d"
-  # the only maintenance-flag reference is sourcing the lib for deploy_window_arm
+  [ -n "$step6" ]; [ -n "$arm" ]; [ -n "$restart" ]
+  [ "$step6" -lt "$arm" ]; [ "$arm" -lt "$restart" ]
+  rm -f "$HYDRA_DEPLOY_WINDOW_FLAG"
+  before=$(date -u +%s)
+  HYDRA_LOCAL=true DEPLOY_PATH="$HYDRA_REPO" HYDRA_DEPLOY_WINDOW_FLAG="$HYDRA_DEPLOY_WINDOW_FLAG" \
+    HYDRA_MAINTENANCE_FLAG="$HYDRA_MAINTENANCE_FLAG" \
+    bash -c 'log() { echo "$*"; }; run_on_node8() { bash -c "$1"; }; '"$lines"
+  exp=$(jq -r .expires_epoch "$HYDRA_DEPLOY_WINDOW_FLAG")
+  [[ "$exp" =~ ^[0-9]+$ ]]
+  [ "$exp" -ge $(( before + 900 )) ]
+  [ "$exp" -le $(( $(date -u +%s) + 900 )) ]
+  # decision 1: deploy.sh never writes the maintenance flag
+  [ ! -e "$HYDRA_MAINTENANCE_FLAG" ]
+  run grep -nE 'hydra-maintenance|HYDRA_MAINTENANCE_FLAG' "$d"
   [[ "$output" != *"/run/hydra-maintenance"* ]]
   [[ "$output" != *"HYDRA_MAINTENANCE_FLAG"* ]]
 }
