@@ -97,3 +97,28 @@ run_guard() { MKTEMP_GUARD_ROOT="$TEST_TMPDIR" run "$GUARD"; }
   [ "$status" -eq 1 ]
   [[ "$output" == *"errfn.sh:2"* ]]
 }
+
+@test "ERR trap whose trailing comment mentions EXIT fails" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ntrap '"'"'rm -rf "$work"'"'"' ERR # EXIT\n' > "$TEST_TMPDIR/scripts/cmt.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cmt.sh:2"* ]]
+}
+
+@test "trap in a different function does not cover a second allocation" {
+  cat > "$TEST_TMPDIR/scripts/twofn.sh" <<'SH'
+#!/bin/bash
+a() {
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+}
+b() {
+  work="$(mktemp -d)"
+  echo hi
+}
+SH
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"twofn.sh:7"* ]]
+  [[ "$output" != *"twofn.sh:3"* ]]
+}
