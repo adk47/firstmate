@@ -24,7 +24,9 @@
 # Env: AD_SCREENING_MUSO_READ / AD_SCREENING_DESCRIBE / AD_SCREENING_JEV / AD_SCREENING_PUT
 #      (command overrides, tests), AD_SCREENING_MODEL (default ~typesafe/jev-latest),
 #      AD_SCREENING_POLICY_VERSION (default v1),
-#      AD_SCREENING_MAX_PACKET_BYTES (default 20000; jev.sh refuses at 200000).
+#      AD_SCREENING_MAX_PACKET_BYTES (default 20000; jev.sh refuses at 200000),
+#      AD_SCREENING_JEV_TIMEOUT_MS (default 5000), AD_SCREENING_DISABLED_FILE
+#      (default /etc/hydra/ad-screening.disabled: --run exits 0 before any Jev call).
 # ──────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -37,9 +39,12 @@ questions="$here/ad-screening-questions.json"
 model="${AD_SCREENING_MODEL:-~typesafe/jev-latest}"
 policy_version="${AD_SCREENING_POLICY_VERSION:-v1}"
 max_bytes="${AD_SCREENING_MAX_PACKET_BYTES:-20000}"
+jev_timeout_ms="${AD_SCREENING_JEV_TIMEOUT_MS:-5000}"
+disabled_file="${AD_SCREENING_DISABLED_FILE:-/etc/hydra/ad-screening.disabled}"
 FIELD_CAP=1000
 
 log() { echo "ad-screening: $*" >&2; }
+first_line() { head -n1 "$1" 2>/dev/null | cut -c1-200; }
 
 case "${1:-}" in
   --dry-run) mode=dry ;;
@@ -48,6 +53,11 @@ case "${1:-}" in
 esac
 # shellcheck source=/dev/null
 source "$here/lib/ad-screening-reason.sh"
+# The PUT wrapper honours this switch too, but only after Jev has been paid for: check it first.
+if [ "$mode" = run ] && [ -e "$disabled_file" ]; then
+  log "disabled ($disabled_file): no Jev call, nothing screened"
+  exit 0
+fi
 workdir="$(mktemp -d)" || exit 1
 trap 'rm -rf "$workdir"' EXIT
 
@@ -153,10 +163,10 @@ screen() {
   jq -n --arg p "$packet" '{ad_application: $p}' >"$workdir/state.json" || return 1
   # shellcheck disable=SC2086
   answers="$($jev --surface ad-screening --item-id "$id" --state-file "$workdir/state.json" \
-    --questions-file "$questions" 2>/dev/null)"
+    --questions-file "$questions" --timeout-ms "$jev_timeout_ms" 2>"$workdir/err")"
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    log "skipping ad $id: unscreened, jev rc=$rc"
+    log "skipping ad $id: unscreened, jev rc=$rc: $(first_line "$workdir/err")"
     return 1
   fi
   v="$(jq -ec "$VALIDATE" <<<"$answers" 2>/dev/null)" \
@@ -174,7 +184,7 @@ screen() {
     '{recommendation: $rec, confidence: $conf, brandFit: $fit, riskFlags: ($flags | split(",") | map(select(. != ""))),
       reason: $reason, model: $model, policyVersion: $pv}' >"$payload" || return 1
   # shellcheck disable=SC2086
-  $put put "$id" "$payload" >/dev/null 2>&1 || { log "ad $id: write failed (rc=$?), suggestion not stored"; return 1; }
+  $put put "$id" "$payload" >"$workdir/err" 2>&1 || { log "ad $id: write failed (rc=$?), suggestion not stored: $(first_line "$workdir/err")"; return 1; }
   log "ad $id: screened ($eff)"
 }
 

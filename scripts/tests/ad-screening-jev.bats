@@ -13,6 +13,7 @@ setup() {
   export STUB_DIR="$T"
   export AD_SCREENING_MUSO_READ="$T/muso-read" AD_SCREENING_DESCRIBE="$T/describe"
   export AD_SCREENING_JEV="$T/jev" AD_SCREENING_PUT="$T/put"
+  export AD_SCREENING_DISABLED_FILE="$T/ad-screening.disabled"
   export STUB_FIXTURE="$T/fixture.json" STUB_ANSWERS="$T/answers.json"
   cat >"$AD_SCREENING_MUSO_READ" <<'S'
 #!/usr/bin/env bash
@@ -30,6 +31,7 @@ id=""; state=""
 while [ $# -gt 0 ]; do case "$1" in --item-id) id="$2";; --state-file) state="$2";; esac; shift; done
 cp "$state" "$STUB_DIR/state.$id.json"
 rcvar="STUB_JEV_RC_$id"; rc="${!rcvar:-${STUB_JEV_RC:-0}}"
+[ -n "${STUB_JEV_ERR:-}" ] && echo "$STUB_JEV_ERR" >&2
 [ "$rc" -eq 0 ] && cat "$STUB_ANSWERS"
 exit "$rc"
 S
@@ -37,6 +39,7 @@ S
 #!/usr/bin/env bash
 echo "$*" >>"$STUB_DIR/put.args"
 cp "$3" "$STUB_DIR/put.$2.json"
+[ -n "${STUB_PUT_ERR:-}" ] && echo "$STUB_PUT_ERR" >&2
 exit "${STUB_PUT_RC:-0}"
 S
   chmod +x "$AD_SCREENING_MUSO_READ" "$AD_SCREENING_DESCRIBE" "$AD_SCREENING_JEV" "$AD_SCREENING_PUT"
@@ -47,6 +50,7 @@ ad() {
     destinationUrl:"https://acme.example", primaryMediaUrl:"https://cdn.example/a.png",
     updatedAt:"2026-10-05T09:00:00Z", screenedAt:null, adAccount:{name:"Acme"}, campaign:{}}'
 }
+fixture_add() { jq -s '{items: (.[0].items + .[1:])}' "$STUB_FIXTURE" - >"$T/f" && mv "$T/f" "$STUB_FIXTURE"; }
 fixture() { jq -s '{items: .}' >"$STUB_FIXTURE"; }
 
 # answers <rec> <p_rec> <fit> <comma-list of present flags>
@@ -180,6 +184,37 @@ puts() { if [ -f "$T/put.args" ]; then wc -l <"$T/put.args" | tr -d ' '; else ec
   ad 101 | fixture; answers approve 0.9 strong ""
   run "$SCRIPT" --run
   [ "$(jq -c 'keys' "$T/put.101.json")" = '["brandFit","confidence","model","policyVersion","reason","recommendation","riskFlags"]' ]
+}
+
+@test "PUT kill switch present: no jev call and no PUT, whole run skipped" {
+  ad 101 | fixture; ad 102 | fixture_add; answers reject 0.9 weak adult
+  touch "$AD_SCREENING_DISABLED_FILE"
+  run --separate-stderr "$SCRIPT" --run
+  [ "$status" -eq 0 ]
+  [ ! -f "$T/jev.args" ]
+  [ "$(puts)" -eq 0 ]
+  [[ "$stderr" == *"disabled"* ]]
+}
+
+@test "jev gets an explicit timeout (default 5000 ms, AD_SCREENING_JEV_TIMEOUT_MS overrides)" {
+  ad 101 | fixture; answers approve 0.9 strong ""
+  run "$SCRIPT" --run
+  [[ "$(cat "$T/jev.args")" == *"--timeout-ms 5000"* ]]
+  rm "$T/jev.args"
+  AD_SCREENING_JEV_TIMEOUT_MS=9000 run "$SCRIPT" --run
+  [[ "$(cat "$T/jev.args")" == *"--timeout-ms 9000"* ]]
+}
+
+@test "a failed PUT logs the first line of the wrapper's stderr" {
+  ad 101 | fixture; answers approve 0.9 strong ""
+  STUB_PUT_RC=4 STUB_PUT_ERR="HTTP 400: reason too long" run --separate-stderr "$SCRIPT" --run
+  [[ "$stderr" == *"write failed (rc=4)"*"HTTP 400: reason too long"* ]]
+}
+
+@test "a failing jev logs the first line of its stderr" {
+  ad 101 | fixture; answers approve 0.9 strong ""
+  STUB_JEV_RC=2 STUB_JEV_ERR="curl: timed out" run --separate-stderr "$SCRIPT" --run
+  [[ "$stderr" == *"jev rc=2"*"curl: timed out"* ]]
 }
 
 # ── how jev is called ─────────────────────────────────────────────────
