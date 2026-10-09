@@ -75,6 +75,17 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   echo "$output" | grep -qi 'only'
 }
 
+@test "--only with the workspaces target accepts a workspaces/*/skills/ path (MUS-1792 round 2: the command the drift briefings now print)" {
+  # QA's NO-GO reproduced the operator failure end-to-end: deploy.sh's and
+  # pr-skill-drift-gate.sh's remediation printers must pick the 'workspaces'
+  # target for a workspaces/ path, or this exact command exits 1 with "not
+  # under the 'skills' target". This proves the FIXED command (workspaces
+  # target) actually succeeds, closing the loop QA opened.
+  run "$SCRIPT" workspaces --apply --only workspaces/operations/skills/foo/SKILL.md
+  [ "$status" -eq 0 ]
+  grep -qF '/./workspaces/operations/skills/foo/SKILL.md' "$RSYNC_CALLS"
+}
+
 @test "--only path outside the target subdir is rejected" {
   run "$SCRIPT" skills --only workspaces/cmo/SOUL.md
   [ "$status" -ne 0 ]

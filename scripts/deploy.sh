@@ -2135,32 +2135,31 @@ preflight_drift_check() {
   if [[ -n "$skills_drift" ]]; then
     cat <<DRIFT_BRIEFING
 ================================================================================
-✗ DEPLOY BLOCKED — skills-all/ drift between node-8 and the repo
+✗ DEPLOY BLOCKED — skill drift between node-8 and the repo (skills-all/ or workspaces/)
 ================================================================================
 
 WHAT THIS MEANS:
-  These skill files differ between /opt/hydra/skills-all/ on node-8 and this
-  commit in a way the repo does NOT account for. Lines tagged SERVER-AHEAD were
-  edited directly on node-8 (often by an operator or an agent) and are not in the
-  repo; lines tagged CONFLICT were edited on BOTH sides. Your own intended
-  skill edits (REPO-AHEAD) are allowed through and are NOT listed here. If you
-  push past this check, rsync --delete OVERWRITES the server bytes with this
-  commit's bytes and there is NO backup — losing server-side work agents rely on.
+  These skill files differ between node-8 (under /opt/hydra/skills-all/ or
+  /opt/hydra/workspaces/<workspace>/skills/) and this commit in a way the repo
+  does NOT account for. Lines tagged SERVER-AHEAD were edited directly on
+  node-8 (often by an operator or an agent) and are not in the repo; lines
+  tagged CONFLICT were edited on BOTH sides. Your own intended skill edits
+  (REPO-AHEAD) are allowed through and are NOT listed here. If you push past
+  this check, rsync --delete OVERWRITES the server bytes with this commit's
+  bytes and there is NO backup — losing server-side work agents rely on.
   (Lines shown as raw rsync flags mean no baseline was available, so this fell
   back to a blunt "any difference" check — treat every line as SERVER-AHEAD.)
 
 DRIFTED FILES:
 $(echo "$skills_drift" | sed 's/^/  /')
 
-THE SAFE FIX — capture per file. Do NOT bulk-pull: a full
-scripts/sync-from-server.sh skills --apply would clobber your OTHER skill edits
-in this branch.
+THE SAFE FIX — capture per file. Do NOT bulk-pull: a full sync-from-server.sh
+pull would clobber your OTHER skill edits in this branch.
   SERVER-AHEAD — pull just that file and commit it:
-       scripts/sync-from-server.sh skills --apply --only <path>
-       git add <path> && git commit -m "chore: capture skill edit from node-8"
+$(format_skill_capture_commands "$skills_drift")
   CONFLICT — 3-way merge by hand (both sides changed); the baseline is the
   commit in /opt/hydra/.deployed-sha:
-       git show "\$(cat /opt/hydra/.deployed-sha)":<path>   # baseline version
+$(format_skill_conflict_commands "$skills_drift")
        # reconcile that, the node-8 copy, and your branch; commit the result
   Then re-run deploy — pre-flight should report clean.
 
@@ -2173,7 +2172,7 @@ WHEN BYPASSING IS ACTUALLY OK (HYDRA_FORCE=1):
 ================================================================================
 DRIFT_BRIEFING
     if [[ "${HYDRA_FORCE:-0}" != "1" ]]; then
-      fail "skills-all drift — refusing to deploy (override: HYDRA_FORCE=1)"
+      fail "skill drift — refusing to deploy (override: HYDRA_FORCE=1)"
     fi
     log "  HYDRA_FORCE=1 set — proceeding despite drift (will overwrite server)"
   fi
