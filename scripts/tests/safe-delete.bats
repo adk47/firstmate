@@ -119,7 +119,8 @@ STUB
   ln -s "$SANDBOX/target" "$SANDBOX/root/link"
   run safe_delete_path "$SANDBOX/root/link"
   [ "$status" -eq 0 ]
-  [ ! -e "$SANDBOX/root/link" ] && [ ! -L "$SANDBOX/root/link" ]
+  [ ! -L "$SANDBOX/root/link" ]
+  [ ! -e "$SANDBOX/root/link" ]
   [ -f "$SANDBOX/target/sub/blob" ]
 }
 

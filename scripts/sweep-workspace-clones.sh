@@ -1062,7 +1062,7 @@ for ws_tmp in "$WS_ROOT"/*/tmp "$WS_ROOT"/*/.tmp; do
   ws_tmp_real="$(realpath -- "$ws_tmp" 2>/dev/null)" || continue
   case "$ws_tmp_real" in "$WS_ROOT"/*) ;; *) continue ;; esac
   # ...and from here ONLY the resolved path is used. /proc/self/mounts records
-  # REAL paths, so is_mountpoint/safe_delete_mount_hazard comparisons against the alias
+  # REAL paths, so safe_delete_is_mountpoint/safe_delete_mount_hazard comparisons against the alias
   # would miss a mount at or under the aliased tree — and rm
   # --one-file-system cannot protect a candidate that already lives inside
   # that mounted filesystem. Sweeping the alias name was the hole.
