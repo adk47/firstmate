@@ -211,13 +211,13 @@ case "${1:-}" in
         fi
         printf '%s' "${STUB_TIMELINE_JSON:-[]}"
         exit 0 ;;
-      */reviews)
+      */reviews|*/reviews\?*)
         echo "$2" >> "$REVIEWS_CALLS"
         # STUB_REVIEWS_FAIL_PR fails the reviews read for ONE pr number, so a
         # per-candidate failure stays a counter instead of tripping the
         # all-candidates blackout.
         if [ -n "${STUB_REVIEWS_FAIL_PR:-}" ]; then
-          case "${2:-}" in */pulls/"$STUB_REVIEWS_FAIL_PR"/reviews) exit 1 ;; esac
+          case "${2:-}" in */pulls/"$STUB_REVIEWS_FAIL_PR"/reviews*) exit 1 ;; esac
         fi
         # A truncated / non-array body returned with exit 0 and non-empty — the
         # shape that slips past an rc-and-emptiness check.
@@ -241,7 +241,10 @@ case "${1:-}" in
         for _a in "$@"; do
           [ "$_a" = "--paginate" ] && { printf '%s' "${STUB_REVIEWS_JSON:-[]}"; exit 0; }
         done
-        printf '%s' "${STUB_REVIEWS_JSON:-[]}" | jq -c '.[0:30]'
+        # Explicit paging (?per_page=N&page=M), default 30 / page 1 like the API.
+        _pp="$(printf '%s' "$2" | sed -n 's/.*per_page=\([0-9]*\).*/\1/p')"; _pp="${_pp:-30}"
+        _pg="$(printf '%s' "$2" | sed -n 's/.*[?&]page=\([0-9]*\).*/\1/p')"; _pg="${_pg:-1}"
+        printf '%s' "${STUB_REVIEWS_JSON:-[]}" | jq -c --argjson pp "$_pp" --argjson pg "$_pg" '.[(($pg-1)*$pp):($pg*$pp)]'
         ;;
       *)
         # The pre-write head re-confirmation (repos/<r>/pulls/<n>).
@@ -1924,4 +1927,47 @@ go_review() { export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMM
   [ "$status" -eq 0 ]
   [ -s "$REVIEWS_CALLS" ]
   [[ "${lines[*]}" != *"RATE FLOOR"* ]]
+}
+
+# ── Reviews pagination is bounded and counted per page (hydra#1119 review) ──
+
+stale_reviews() { # $1 = count of stale NO-GOs ahead of one live-head GO
+  jq -c -n --argjson n "$1" '
+    [range($n) | {user:{login:"adk47"}, state:"COMMENTED", commit_id:"OLDSHA",
+                  submitted_at:"2026-08-17T09:00:00Z", body:"**Verdict: NO-GO** — 1 Important."}]
+    + [{user:{login:"adk47"}, state:"COMMENTED", commit_id:"abc123",
+        submitted_at:"2026-08-17T10:51:41Z", body:"**Verdict: GO** — 0 Critical."}]'
+}
+
+@test "pagination: a 251-review history is read page by page (3 reads) and the live-head GO is found" {
+  export STUB_REVIEWS_JSON="$(stale_reviews 250)"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'per_page=100&page=' "$REVIEWS_CALLS")" -eq 3 ]
+  run grep -c "Muso-AI/web-credits-next 636 U03LP8YHLPK" "$APPROVE_CALLS"
+  [ "$output" = "1" ]
+}
+
+@test "pagination: every page is charged to the call budget, not one call per candidate" {
+  # Two candidates of 3 pages each. At one-call-per-read the budget of 3 would
+  # let both through (2 spent); charged per page, the first uses all 3. No live
+  # head verdict, so nothing else (approve path) spends and only pages count.
+  export QA_APPROVAL_RETRY_MAX_CALLS=3
+  export STUB_REVIEWS_JSON="$(stale_reviews 250 | jq -c 'del(.[-1])')"
+  export STUB_PRS_JSON="$(jq -nc '[range(1;3)|{number:.,headRefOid:"abc123",author:{login:"azure-kirin"},isDraft:false}]')"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'per_page=100&page=' "$REVIEWS_CALLS")" -eq 3 ]
+  [[ "${lines[*]}" == *"CALL BUDGET"* ]]
+}
+
+@test "pagination: a history past the page cap stops at 10 reads and is a read failure, never 'no verdict'" {
+  export STUB_REVIEWS_JSON="$(stale_reviews 1500)"
+  run "$SCRIPT"
+  # the lone candidate is unreadable -> the existing total-blackout exit
+  [ "$status" -eq 3 ]
+  [ "$(grep -c 'per_page=100&page=' "$REVIEWS_CALLS")" -eq 10 ]
+  [ ! -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" == *"READ-FAILURE"* ]]
+  [[ "${lines[*]}" == *"page cap"* ]]
 }

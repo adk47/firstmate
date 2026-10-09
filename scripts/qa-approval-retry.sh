@@ -118,6 +118,8 @@ PRLIST_LIMIT="${QA_APPROVAL_RETRY_PRLIST_LIMIT:-300}"
 BLACKOUT_PAGE_COOLDOWN="${QA_APPROVAL_RETRY_BLACKOUT_COOLDOWN:-3600}"
 RATE_FLOOR="${QA_APPROVAL_RETRY_RATE_FLOOR:-1000}"
 MAX_CALLS="${QA_APPROVAL_RETRY_MAX_CALLS:-600}"
+# Hard cap on pages (100 reviews each) read for ONE PR; bounds a single candidate.
+MAX_REVIEW_PAGES=10
 
 # Overridable so the suite can stub it: slack_notify_critical sends a REAL page
 # through `muso slack dm`, and an unstubbed test run has fired real alerts here
@@ -706,9 +708,9 @@ qar_rate_core() { # <repo>
 }
 
 # REST calls issued by THIS script, counted at the call site (a count kept
-# inside a $(...) helper would be lost with its subshell). A `--paginate` read
-# counts as ONE call however many pages it fetches, and the post-approval
-# readbacks are not counted, so this is a FLOOR on real spend, not exact
+# inside a $(...) helper would be lost with its subshell). The reviews read is
+# charged per page; the other `--paginate` reads count as ONE call however many
+# pages they fetch, and the post-approval readbacks are not counted, so this is a FLOOR on real spend, not exact
 # accounting. It is checked once per candidate, so a PR in flight may overshoot
 # by its handful of calls. Sized (600) to bite on a pathological repo, not on
 # normal volume.
@@ -821,25 +823,35 @@ for repo in "${REPOS[@]}"; do
     fi
     considered=$((considered + 1))
 
-    # Reviews: --paginate is load-bearing. GitHub returns reviews OLDEST-first
-    # and pages at 30 — on a PR with a long review history the current head's
-    # verdict is on page 2, and an unpaginated read sees only stale ones.
-    qar_spend 1
-    reviews="$("$QA_GH" --repo "$repo" api "repos/$repo/pulls/$pr/reviews" --paginate 2>/dev/null || echo "__ERR__")"
+    # Reviews: paging is load-bearing. GitHub returns reviews OLDEST-first, so on
+    # a long history the current head's verdict is on a late page and a one-page
+    # read sees only stale ones. Paged by hand rather than with --paginate so
+    # every HTTP request is charged to rest_calls and the spend is bounded:
+    # --paginate is one call to the counter however many pages it fetches
+    # (hydra#1119 review). Past MAX_REVIEW_PAGES the history is unreadable, which
+    # is a read failure, never "no verdict".
+    reviews="[]"; page=1
+    while :; do
+      qar_spend 1
+      pg="$("$QA_GH" --repo "$repo" api "repos/$repo/pulls/$pr/reviews?per_page=100&page=$page" 2>/dev/null)" || { reviews="__ERR__"; break; }
+      # The same shape-check the PR list gets: a truncated or non-array body
+      # arrives with exit 0, so only this catches it (and must count as a failure).
+      if ! printf '%s' "$pg" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        log "READ-FAILURE: the reviews body for $repo#$pr was not a JSON array — counted, never treated as 'no verdict'."
+        reviews="__ERR__"; break
+      fi
+      reviews="$(jq -cn --argjson a "$reviews" --argjson b "$pg" '$a + $b')"
+      [ "$(printf '%s' "$pg" | jq 'length')" -lt 100 ] && break
+      page=$((page + 1))
+      if [ "$page" -gt "$MAX_REVIEW_PAGES" ]; then
+        log "READ-FAILURE: $repo#$pr has more than $((MAX_REVIEW_PAGES * 100)) reviews (page cap $MAX_REVIEW_PAGES) — not read, skipped."
+        reviews="__ERR__"; break
+      fi
+    done
     if [ "$reviews" = "__ERR__" ] || [ -z "$reviews" ]; then
       log "READ-FAILURE: could not read reviews for $repo#$pr — skipped."
       read_fail=$((read_fail + 1)); reviews_fail=$((reviews_fail + 1)); continue
     fi
-    # The SAME shape-check the PR list gets, for the same reason and in the same
-    # place: a truncated or non-array body arrives with exit 0 and non-empty, so
-    # the checks above pass, the classification jq below fails, and only
-    # read_fail moves — which would leave the all-candidates blackout unable to
-    # fire no matter how total the outage. Non-array is a read failure here.
-    if ! printf '%s' "$reviews" | jq -e 'type == "array"' >/dev/null 2>&1; then
-      log "READ-FAILURE: the reviews body for $repo#$pr was not a JSON array — counted, never treated as 'no verdict'."
-      read_fail=$((read_fail + 1)); reviews_fail=$((reviews_fail + 1)); continue
-    fi
-
     # Already approved by the bot on THIS head? Then there is nothing to repair.
     # Scoped to the live head sha: dismiss_stale_reviews drops an approval when a
     # new commit lands, so an approval on an older sha is not a current approval.
@@ -1099,7 +1111,7 @@ if [ "$floor_hit" -eq 1 ]; then
 fi
 
 if [ "$budget_hit" -eq 1 ]; then
-  log "CALL BUDGET: $rest_calls REST call(s) reached the per-tick budget of $MAX_CALLS — standing down at $budget_at; $(( ${#REPOS[@]} - repo_idx )) repo(s) after it not swept. Counts calls, not pages, so real spend is higher. Expected steady state, not a failure."
+  log "CALL BUDGET: $rest_calls REST call(s) reached the per-tick budget of $MAX_CALLS — standing down at $budget_at; $(( ${#REPOS[@]} - repo_idx )) repo(s) after it not swept. Counts calls (reviews per page, other reads once), so real spend can be higher. Expected steady state, not a failure."
 fi
 
 log "tick done — considered=$considered approved=$approved declined=$declined declined_permanent=$declined_permanent self_authored=$self_authored skipped=$skipped read_failures=$read_fail alerts_unpublished=$alerts_unpublished raced=$raced repo_read_failures=$repo_fail/${#REPOS[@]} reviews_read_failures=$reviews_fail/$considered truncated_repos=$truncated safety_read_failures=$safety_fail/$safety_considered unsafe_unflagged=$unsafe_unflagged"
