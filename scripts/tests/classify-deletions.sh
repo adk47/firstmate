@@ -59,7 +59,7 @@ assert() {
 
 run() {
     # Usage: run "<deletions-blob>"; emits sorted stdout of the classifier.
-    classify_workspace_deletions "$1" "$TMPROOT" | sort
+    classify_workspace_deletions "$1" "$TMPROOT" | LC_ALL=C sort  # C collation for consistent test fixture ordering
 }
 
 # ---- cases ----

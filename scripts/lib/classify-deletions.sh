@@ -168,7 +168,7 @@ classify_workspace_deletions() {
 
     cat "$remain_file"
     if [[ -s "$auto_file" ]]; then
-        sort -u "$auto_file" | sed 's/^/AUTO: /'
+        LC_ALL=C sort -u "$auto_file" | sed 's/^/AUTO: /'  # C collation for stable byte-order output
     fi
     rm -f "$ever_tracked_file" "$auto_file" "$remain_file"
 }
