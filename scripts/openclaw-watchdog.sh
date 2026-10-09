@@ -27,9 +27,73 @@ CHECK_WINDOW_MIN=15
 # node-8 host) writes throwaway stamps instead of clobbering the production
 # watchdog's real /tmp cooldown clocks.
 WATCHDOG_STATE_DIR="${WATCHDOG_STATE_DIR:-/tmp}"
-COOLDOWN_FILE="$WATCHDOG_STATE_DIR/openclaw-watchdog-cooldown"
+# The RESTART cooldown stamp (shared by the STUCK and heap-trough restarts) is
+# written as root, so it lives in a root-owned 0700 dir, NOT the /tmp default
+# above: a predictable path under world-writable /tmp lets any local user
+# pre-create it as a symlink and make root truncate an arbitrary file. Same
+# class and same gate as DR_STATE_DIR/_dr_state_ok. One definition, both
+# writers follow it. Never falls back to /tmp.
+HEAP_STATE_DIR="${HEAP_STATE_DIR:-/var/lib/hydra-watchdog}"
+_heap_state_ok() {
+  mkdir -p "$HEAP_STATE_DIR" 2>/dev/null || true
+  [ ! -L "$HEAP_STATE_DIR" ] && [ -d "$HEAP_STATE_DIR" ] && [ -O "$HEAP_STATE_DIR" ] \
+    && chmod 700 "$HEAP_STATE_DIR" 2>/dev/null
+}
+COOLDOWN_FILE="$HEAP_STATE_DIR/openclaw-watchdog-cooldown"
+# Safe stamp: gate the dir, write a mktemp file inside it, then rename over the
+# target (rename replaces a planted symlink instead of following it). An unsafe
+# dir skips the stamp and logs it; callers never lose the restart for it.
+_stamp_cooldown() {
+  local t
+  _heap_state_ok || { log "cooldown dir $HEAP_STATE_DIR unsafe (symlink/not ours) — NOT stamping cooldown"; return 0; }
+  t=$(mktemp "$HEAP_STATE_DIR/cooldown.XXXXXX" 2>/dev/null) || { log "cooldown mktemp failed — NOT stamping cooldown"; return 0; }
+  date +%s > "$t" && mv -f "$t" "$COOLDOWN_FILE" || rm -f "$t"
+}
 COOLDOWN_MIN=30  # Don't restart more than once per 30 min
 GATEWAY_SERVICE="openclaw-gateway-main"  # PR 43: multi-gateway split
+
+# MUS-1009 A2 / MUS-1588: proactive drain-restart on the 60-min heap TROUGH
+# (see the block near the crash-loop check below for the full rationale).
+# Env-overridable so the bats suite runs with no live gateway.
+HEAP_TROUGH_RESTART_BYTES="${HEAP_TROUGH_RESTART_BYTES:-4294967296}"  # 4.0 GiB (50% of the 8192 MiB cap)
+HEAP_TROUGH_WINDOW_MIN="${HEAP_TROUGH_WINDOW_MIN:-60}"
+HEAP_TROUGH_MIN_SAMPLES="${HEAP_TROUGH_MIN_SAMPLES:-6}"
+HEAP_TROUGH_MAX_GAP_MIN="${HEAP_TROUGH_MAX_GAP_MIN:-10}"  # largest hole tolerated in the window
+# A non-numeric override must not silently disable the fail-closed sample
+# floor: `[ N -lt "$HEAP_TROUGH_MIN_SAMPLES" ]` returns exit 2 (not 1) on a
+# bad value, and an `if` condition is exempt from `set -e`, so the check would
+# fall through the `elif`/`else` as though the floor had been cleared instead
+# of aborting or erroring. Same digits-only guard idiom as _sane_epoch below.
+#
+# Digits-only is NOT sufficient on its own (GitHub Muso QA Bot, hydra#1046):
+# bash's `[ -lt ]` represents both operands as (at most) a signed 64-bit
+# integer, so an all-digit value past ~19 digits — e.g.
+# HEAP_TROUGH_RESTART_BYTES=999999999999999999999999 — still passes the
+# `case` guard below but makes `[` itself exit 2 ("integer expected") at the
+# comparison. Same consequence as the non-numeric case: the `if`/`elif` does
+# not trap it under `set -e`, so execution falls through to the NEXT branch —
+# which for the leading sample-count check can still reach RESTART with far
+# fewer than HEAP_TROUGH_MIN_SAMPLES real samples, and for the trough-vs-
+# threshold `elif` is the RESTART branch outright. Bound the LENGTH (15
+# digits — ~910 TiB, far past any real byte count or sample count, and
+# comfortably inside bash's 19-digit signed-integer range with margin) in
+# addition to digits-only, on BOTH knobs: fixing only the one named in a
+# given finding leaves its sibling fail-open in the same way.
+case "$HEAP_TROUGH_MIN_SAMPLES" in ''|*[!0-9]*) HEAP_TROUGH_MIN_SAMPLES=6 ;; esac
+[ "${#HEAP_TROUGH_MIN_SAMPLES}" -le 15 ] || HEAP_TROUGH_MIN_SAMPLES=6
+# The same mechanism applies here, in the worse direction: a non-numeric or
+# overlong threshold makes the trough comparison itself error out and fall
+# through to the RESTART branch — a config typo drain-restarts a perfectly
+# healthy gateway every cooldown window, exit 0, with the log/Slack asserting
+# a threshold crossing that never happened (MUS-1667 review finding 1; the
+# length half is hydra#1046's bot finding).
+case "$HEAP_TROUGH_RESTART_BYTES" in ''|*[!0-9]*) HEAP_TROUGH_RESTART_BYTES=4294967296 ;; esac
+[ "${#HEAP_TROUGH_RESTART_BYTES}" -le 15 ] || HEAP_TROUGH_RESTART_BYTES=4294967296
+# Same hazard for the other two numeric knobs consumed by shell/awk arithmetic.
+case "$HEAP_TROUGH_MAX_GAP_MIN" in ''|*[!0-9]*) HEAP_TROUGH_MAX_GAP_MIN=10 ;; esac
+[ "${#HEAP_TROUGH_MAX_GAP_MIN}" -le 6 ] || HEAP_TROUGH_MAX_GAP_MIN=10
+case "$HEAP_TROUGH_WINDOW_MIN" in ''|*[!0-9]*) HEAP_TROUGH_WINDOW_MIN=60 ;; esac
+[ "${#HEAP_TROUGH_WINDOW_MIN}" -le 6 ] || HEAP_TROUGH_WINDOW_MIN=60
 
 # MUS-1298: a 100% failure ratio over 1 sample is not a signal. The 29 Sep
 # 15:18 incident restarted the whole fleet off ONE failed run (a
@@ -51,6 +115,26 @@ GATEWAY_LIVENESS_PROBE_URL="${GATEWAY_LIVENESS_PROBE_URL:-http://127.0.0.1:18789
 _WATCHDOG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/slack-notify.sh
 source "$_WATCHDOG_DIR/lib/slack-notify.sh"
+
+# drain_restart_gateway (MUS-1009 A2): the heap-trough trigger below must
+# restart through the same drain-aware path as deploy.sh/codex-token-refresh.sh
+# rather than a bare `systemctl restart` — a proactive restart ahead of an OOM
+# still has in-flight turns worth draining.
+# shellcheck source=lib/gateway-restart.sh
+source "$_WATCHDOG_DIR/lib/gateway-restart.sh"
+# Every OTHER drain_restart_gateway caller (codex-token-refresh.sh,
+# codex-canonical-refresh.sh, codex-edge-mirror.sh, codex-reauth.sh,
+# codex-account-rotate.sh) wires this per the lib's own caller contract
+# (lib/gateway-restart.sh: "Callers that can page ... should notify on
+# fallback so a permanently-broken safe path can't degrade silently").
+# Without it, a broken safe-restart path degrades to a hard SIGTERM kill —
+# cutting exactly the in-flight turns the drain exists to protect — while
+# drain_restart_gateway still returns 0 and this trigger takes its SUCCESS
+# branch, paging #clio_devops that the drain worked (MUS-1667 review
+# finding 2). declare -F guards a sandbox that sources this lib standalone
+# without slack-notify.sh, though this script always sources both.
+_heap_trough_fallback_notify() { declare -F slack_notify >/dev/null && slack_notify "[heap-trough] $1" || true; }
+export GATEWAY_FALLBACK_NOTIFY_FN="${GATEWAY_FALLBACK_NOTIFY_FN:-_heap_trough_fallback_notify}"
 
 # Stand down during a planned maintenance window (scripts/hydra-maintenance.sh).
 # The gateways are stopped ON PURPOSE for a window; without this the 2-min
@@ -150,6 +234,21 @@ if [[ "${1:-}" == "--self-test" ]]; then
   fi
 fi
 
+# Serialize ticks (bot Important on hydra#1046). The cron fires every 2 min with
+# no other lock, but a heap-trough drain can run ~390s, so ticks overlap: two
+# ticks that both read "no cooldown" each fire their own drain_restart_gateway
+# (then competing hard SIGTERMs after the deadline), and the heap-sample file
+# append/trim races the same way. A non-blocking flock makes the whole tick the
+# critical section; the loser logs and exits 0. If the lock can't be opened or
+# flock is absent we proceed unserialized (the old behaviour) and say so, rather
+# than silently disabling the watchdog. fd 9 is closed for the DR healer child.
+WATCHDOG_LOCK_FILE="${WATCHDOG_LOCK_FILE:-/run/lock/openclaw-watchdog.lock}"
+if command -v flock >/dev/null 2>&1 && { exec 9>"$WATCHDOG_LOCK_FILE"; } 2>/dev/null; then
+  flock -n 9 || { log "previous tick still running - skip"; exit 0; }
+else
+  log "watchdog lock $WATCHDOG_LOCK_FILE unavailable - running unserialized"
+fi
+
 # Implicit self-test on every cron run. If this fails in production,
 # abort BEFORE we can silently misbehave — loud failure beats quiet
 # safety-net rot. Best-effort Slack alert (slack_notify is defined
@@ -189,7 +288,7 @@ _dr_escalate() {
   [ -x "$DR_HEALER" ] || return 0
   _dr_state_ok || { log "DR state dir $DR_STATE_DIR unsafe (symlink/not ours) — NOT escalating"; return 0; }
   log "DR ESCALATION: signature '$1' — invoking dr-ai-healer.sh (background)"
-  nohup "$DR_HEALER" --trigger "$1" >> "$DR_STATE_DIR/dr-ai-healer.log" 2>&1 &
+  nohup "$DR_HEALER" --trigger "$1" >> "$DR_STATE_DIR/dr-ai-healer.log" 2>&1 9>&- &
 }
 _dr_strike() {
   _dr_state_ok || { log "DR state dir $DR_STATE_DIR unsafe (symlink/not ours) — NOT tracking strikes"; return 0; }
@@ -821,6 +920,159 @@ if [ "${RESTART_COUNT:-0}" -gt 10 ]; then
   exit 0
 fi
 
+# ── Heap TROUGH proactive drain-restart (MUS-1009 A2 / MUS-1588) ─────────────
+# 6 main-gateway heap-limit crashes in 8 days. Live heap is a sawtooth (one
+# process went 5.66 -> 3.96 -> 3.08 -> 5.85 -> 4.23 GiB inside 40 minutes), so
+# neither a single sample nor the latest reading is a usable trigger — a
+# `heap >= 6.0` test would have drain-restarted the fleet 1-4x/hour. The
+# MINIMUM of heapUsedBytes over a trailing HEAP_TROUGH_WINDOW_MIN (default 60)
+# is the only monotonic signal: on the incident night it read 0.46 GiB at
+# 05:00 UTC, 4.03 at 17:00 and 5.86 at 18:00, with the OOM at 18:59:17 — the
+# trough alone tracked the climb toward the 8192 MiB cap.
+#
+# Source: the gateway's UNCONDITIONAL `diagnostic.memory.sample` stream
+# (heapUsedBytes every 30s, read via `openclaw gateway stability`). NOT the
+# journal's `[diagnostics/memory] memory pressure:` lines: those are emitted
+# only while the process is above an adaptive pressure threshold and are
+# rate-limited per key, so a window of them holds only the HIGH samples — a GC
+# dip below the threshold leaves no line and the "trough" reads falsely high
+# (QA bot, hydra#1046). Parse heapUsedBytes (exact integer), never heap=.
+#
+# A read that returns nothing, or fewer than HEAP_TROUGH_MIN_SAMPLES
+# samples, must NEVER default to firing — same fail-safe posture as the
+# maintenance-flag check at the top of this script. This is an ADDITIONAL
+# restart reason, not a bypass: the maintenance flag and the crash-loop block
+# above already would have exited before this point if either applied, and
+# this trigger shares the STUCK path's cooldown stamp below — one restart
+# reason firing must suppress the other for COOLDOWN_MIN, since both restart
+# the same unit.
+#
+# MUST be scoped to the CURRENTLY RUNNING process: samples persisted for a
+# process a crash already killed must never be read as the new one's trough.
+# Live-measured on node-8 (2026-09-30 18:59:53 UTC restart, the MUS-1009
+# incident restart itself): the dying process's final hour was all above the
+# threshold, and a read spanning the restart would drain-restart a 60-second-
+# old gateway — restarting the very recovery pass this trigger exists to
+# protect (the ~10min post-restart freeze noted in scripts/install-aux-units.sh).
+# The sample file is therefore keyed to the unit's InvocationID (a fresh UUID
+# systemd assigns on every (re)start); a different ID discards the file, so a
+# restart is a hard boundary. An unreadable ID fails closed.
+#
+# The ring buffer behind the RPC only retains ~10 minutes (measured: 19-21
+# samples at 30s cadence), so the 60-minute window is ACCUMULATED here, one
+# tick at a time, in HEAP_TROUGH_SAMPLES_FILE ("# <InvocationID>" header, then
+# "<ts_ms> <heapUsedBytes>" rows). That accumulation is only a trough if there
+# are no holes in it — a missed tick, an unreachable RPC or a watchdog that was
+# only just deployed all leave a stretch where a dip could have gone unseen.
+# So coverage is part of the gate: no gap larger than HEAP_TROUGH_MAX_GAP_MIN
+# anywhere from the window start to now, otherwise NO RESTART.
+#
+# The sample file lives in its OWN root-owned 0700 dir, NOT under the
+# /tmp-default WATCHDOG_STATE_DIR: this runs as root and the path is
+# predictable, so any local user could pre-create it (or its temp file) as a
+# symlink and make root truncate an arbitrary file. Same class and same gate
+# as DR_STATE_DIR/_dr_state_ok above; an unsafe dir skips the trigger (NO
+# RESTART) and never falls back to /tmp.
+HEAP_TROUGH_SAMPLES_FILE="$HEAP_STATE_DIR/openclaw-watchdog-heap-samples"
+HEAP_TROUGH_INVOCATION_ID=$(systemctl show -p InvocationID --value "$GATEWAY_SERVICE" 2>/dev/null || true)
+HEAP_TROUGH_STATS=""
+HEAP_TROUGH_STATE_UNSAFE=0
+if [ -n "$HEAP_TROUGH_INVOCATION_ID" ] && ! _heap_state_ok; then
+  HEAP_TROUGH_STATE_UNSAFE=1
+  log "HEAP TROUGH: heap state dir $HEAP_STATE_DIR unsafe (symlink/not ours) — skipping this tick, NOT restarting"
+elif [ -n "$HEAP_TROUGH_INVOCATION_ID" ]; then
+  HT_NOW_MS=$(( $(date +%s) * 1000 ))
+  if [ "$(head -n 1 "$HEAP_TROUGH_SAMPLES_FILE" 2>/dev/null || true)" != "# $HEAP_TROUGH_INVOCATION_ID" ]; then
+    printf '# %s\n' "$HEAP_TROUGH_INVOCATION_ID" > "$HEAP_TROUGH_SAMPLES_FILE"
+  fi
+  # `last` comes only from rows inside [window start, now]: a future-dated row
+  # (gateway clock skew, host clock stepped back) must never become `last`, or
+  # every later sample fails ts>last and the window silently stops filling.
+  HT_START_MS=$(( HT_NOW_MS - HEAP_TROUGH_WINDOW_MIN * 60000 ))
+  HT_LAST_MS=$(awk -v s="$HT_START_MS" -v n="$HT_NOW_MS" 'NR>1 && $1 ~ /^[0-9]+$/ && $1>=s && $1<=n {l=$1} END{print l+0}' "$HEAP_TROUGH_SAMPLES_FILE")
+  # Append samples newer than what is stored. Parse stops at "summary": that
+  # block repeats heapUsedBytes under `latest`, which is not a window sample.
+  # Rows with a non-numeric or >15-digit value are dropped here, so nothing
+  # overlong ever reaches a shell `[ -lt ]` (exit 2 inside an `elif` falls
+  # through to the restart branch). `|| true`: an unreachable RPC is a gap,
+  # which the coverage gate below turns into NO RESTART.
+  openclaw --profile main gateway stability --type diagnostic.memory.sample \
+    --limit 200 --timeout 10000 --json 2>/dev/null \
+    | awk '/"summary"/{exit} /"ts":/{t=$2; gsub(/[^0-9]/,"",t)} /"heapUsedBytes":/{h=$2; gsub(/[^0-9]/,"",h); if(t!="" && h!="" && length(h)<=15 && length(t)<=15){print t, h}; t=""}' \
+    | awk -v last="$HT_LAST_MS" '$1>last' >> "$HEAP_TROUGH_SAMPLES_FILE" || true
+  # Trim to the window [start, now] (both ends), then: min, count,
+  # covered(0/1), largest gap (min). The temp file is mktemp'd inside the safe
+  # dir so its name is not predictable either. The stats pass re-applies the
+  # same bounds, so a failed trim cannot let an out-of-window row count.
+  HT_TMP=$(mktemp "$HEAP_STATE_DIR/heap-samples.XXXXXX" 2>/dev/null) || HT_TMP=""
+  if [ -n "$HT_TMP" ]; then
+    { printf '# %s\n' "$HEAP_TROUGH_INVOCATION_ID"
+      awk -v s="$HT_START_MS" -v n="$HT_NOW_MS" 'NR>1 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && length($2)<=15 && $1>=s && $1<=n' "$HEAP_TROUGH_SAMPLES_FILE"; } > "$HT_TMP" \
+      && mv "$HT_TMP" "$HEAP_TROUGH_SAMPLES_FILE" || rm -f "$HT_TMP"
+  fi
+  HEAP_TROUGH_STATS=$(awk -v s="$HT_START_MS" -v n="$HT_NOW_MS" -v g="$HEAP_TROUGH_MAX_GAP_MIN" '
+    NR==1{prev=s; next}
+    !($1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $1>=s && $1<=n) { next }
+    { if (c==0 || $2<min) min=$2; c++; if ($1-prev>maxgap) maxgap=$1-prev; prev=$1 }
+    END{ if (n-prev>maxgap) maxgap=n-prev
+         print (c>0?min:0), c+0, (c>0 && maxgap<=g*60000 ? 1 : 0), int(maxgap/60000) }' "$HEAP_TROUGH_SAMPLES_FILE" || true)
+else
+  # Can't verify which process is even running -> can't verify the trough is
+  # about that process. Same fail-safe posture as zero samples.
+  log "HEAP TROUGH: could not read ${GATEWAY_SERVICE}'s InvocationID — skipping this tick, NOT restarting"
+fi
+HEAP_TROUGH_MIN_BYTES=$(printf '%s' "$HEAP_TROUGH_STATS" | cut -d' ' -f1)
+HEAP_TROUGH_SAMPLE_COUNT=$(printf '%s' "$HEAP_TROUGH_STATS" | cut -d' ' -f2)
+HEAP_TROUGH_COVERED=$(printf '%s' "$HEAP_TROUGH_STATS" | cut -d' ' -f3)
+HEAP_TROUGH_MAX_GAP_SEEN=$(printf '%s' "$HEAP_TROUGH_STATS" | cut -d' ' -f4)
+
+if [ -z "$HEAP_TROUGH_INVOCATION_ID" ] || [ "$HEAP_TROUGH_STATE_UNSAFE" -eq 1 ]; then
+  :
+elif [ "${HEAP_TROUGH_SAMPLE_COUNT:-0}" -lt "$HEAP_TROUGH_MIN_SAMPLES" ]; then
+  log "HEAP TROUGH: ${HEAP_TROUGH_SAMPLE_COUNT:-0} heapUsedBytes sample(s) in last ${HEAP_TROUGH_WINDOW_MIN}min (< ${HEAP_TROUGH_MIN_SAMPLES} required) — not evaluating, NOT restarting"
+elif [ "${HEAP_TROUGH_COVERED:-0}" != "1" ]; then
+  log "HEAP TROUGH: ${HEAP_TROUGH_SAMPLE_COUNT} samples do not cover the last ${HEAP_TROUGH_WINDOW_MIN}min (largest gap ${HEAP_TROUGH_MAX_GAP_SEEN:-?}min > ${HEAP_TROUGH_MAX_GAP_MIN}min allowed) — a dip could be hidden, NOT restarting"
+elif [ "$HEAP_TROUGH_MIN_BYTES" -lt "$HEAP_TROUGH_RESTART_BYTES" ]; then
+  log "HEAP TROUGH: min heapUsedBytes=${HEAP_TROUGH_MIN_BYTES} over ${HEAP_TROUGH_SAMPLE_COUNT} samples in last ${HEAP_TROUGH_WINDOW_MIN}min (< ${HEAP_TROUGH_RESTART_BYTES} threshold) — healthy, no action"
+else
+  log "HEAP TROUGH: min heapUsedBytes=${HEAP_TROUGH_MIN_BYTES} over ${HEAP_TROUGH_SAMPLE_COUNT} samples in last ${HEAP_TROUGH_WINDOW_MIN}min >= ${HEAP_TROUGH_RESTART_BYTES} threshold"
+
+  HEAP_TROUGH_COOLDOWN_OK=1
+  if [ -f "$COOLDOWN_FILE" ]; then
+    HT_LAST_RESTART=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo "0")
+    HT_NOW=$(date +%s)
+    # Same corrupt/future-stamp hardening as the STUCK cooldown below.
+    HT_LAST_RESTART=$(_sane_epoch "$HT_LAST_RESTART" "$HT_NOW")
+    HT_ELAPSED=$(( (HT_NOW - HT_LAST_RESTART) / 60 ))
+    if [ "$HT_ELAPSED" -lt "$COOLDOWN_MIN" ]; then
+      log "HEAP TROUGH: SKIP restart — last restart ${HT_ELAPSED}min ago (cooldown: ${COOLDOWN_MIN}min)"
+      HEAP_TROUGH_COOLDOWN_OK=0
+    fi
+  fi
+
+  if [ "$HEAP_TROUGH_COOLDOWN_OK" -eq 1 ]; then
+    log "HEAP TROUGH: drain-restarting ${GATEWAY_SERVICE} before V8 aborts"
+    # Stamp the cooldown BEFORE the (up to GATEWAY_DRAIN_DEADLINE_SECS, default
+    # 390s) drain call, not after. The watchdog cron fires every 2min with no
+    # flock, so a stamp written only on return leaves every overlapping tick
+    # during the drain free to read "no cooldown" and fire its OWN
+    # drain_restart_gateway — each one racing its own 390s await and, on
+    # timeout, its own hard `systemctl restart` SIGTERM, exactly the in-flight
+    # turns the drain path exists to protect. The STUCK path below can safely
+    # stamp AFTER because its bare `systemctl restart` returns in seconds, not
+    # minutes — that precedent does not transfer to this multi-minute call.
+    _stamp_cooldown
+    if drain_restart_gateway "$GATEWAY_SERVICE" main; then
+      log "HEAP TROUGH: drain-restarted ${GATEWAY_SERVICE} proactively (MUS-1009 A2)"
+      slack_notify ":recycle: *main gateway heap trough* — min heapUsedBytes=${HEAP_TROUGH_MIN_BYTES} over ${HEAP_TROUGH_SAMPLE_COUNT} samples in the last ${HEAP_TROUGH_WINDOW_MIN}min stayed at/above the ${HEAP_TROUGH_RESTART_BYTES}-byte trough threshold — drain-restarted ${GATEWAY_SERVICE} proactively (MUS-1009 A2) before it hit the 8192 MiB cap."
+    else
+      log "HEAP TROUGH: drain-restart of ${GATEWAY_SERVICE} FAILED (safe path and hard fallback both failed)"
+      slack_notify_critical ":rotating_light: *main gateway heap trough restart FAILED* — min heapUsedBytes=${HEAP_TROUGH_MIN_BYTES} over ${HEAP_TROUGH_SAMPLE_COUNT} samples crossed the ${HEAP_TROUGH_RESTART_BYTES}-byte threshold and BOTH the drain-restart and its hard-restart fallback failed. Manual: \`ssh node-8; systemctl reset-failed ${GATEWAY_SERVICE}; systemctl restart ${GATEWAY_SERVICE}\`."
+      _dr_escalate heap_trough_restart_failed
+    fi
+  fi
+fi
+
 # Grab recent logs once
 RECENT_LOGS=$(journalctl -u "$GATEWAY_SERVICE" --since "${CHECK_WINDOW_MIN} min ago" --no-pager 2>/dev/null || true)
 
@@ -904,7 +1156,7 @@ if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -ge "$MIN_RUNS_FOR_STUCK" ]; the
   systemctl restart "$GATEWAY_SERVICE"
 
   # Record restart time
-  date +%s > "$COOLDOWN_FILE"
+  _stamp_cooldown
 
   # Wait for startup
   sleep 5

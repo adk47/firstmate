@@ -35,12 +35,14 @@ setup() {
   # Secret-perm guard sees a clean 0600 fixture (no drift alarm).
   printf 'x' > "$TEST_TMPDIR/secrets/llm-provider-keys.json"
   chmod 600 "$TEST_TMPDIR/secrets/llm-provider-keys.json"
+  export WATCHDOG_LOCK_FILE="$TEST_TMPDIR/watchdog.lock"
   export HYDRA_SECRETS_DIR="$TEST_TMPDIR/secrets"
 
   # Hermeticity: the watchdog's codex checks + cooldown stamps must NOT read or
   # write the live node-8 fleet state (CI runs this suite ON the gateway host).
   # Redirect every external state path at a throwaway fixture.
   export WATCHDOG_STATE_DIR="$TEST_TMPDIR/state"; mkdir -p "$WATCHDOG_STATE_DIR"
+  export HEAP_STATE_DIR="$TEST_TMPDIR/heapstate"; mkdir -p "$HEAP_STATE_DIR"
   # Edge codex auth-store symlink → a valid (symlink-to-existing-file) fixture so
   # the symlink-integrity check reads "ok" instead of the real edge store.
   printf '{}' > "$TEST_TMPDIR/canon-auth.json"
@@ -528,7 +530,7 @@ STUB
 @test "an octal-looking restart cooldown stamp does not kill the watchdog" {
   set_status openclaw-gateway-main active
   set_status openclaw-gateway-edge active
-  printf '08' > "$WATCHDOG_STATE_DIR/openclaw-watchdog-cooldown"
+  printf '08' > "$HEAP_STATE_DIR/openclaw-watchdog-cooldown"
   _stub_stuck_agent_runs
   run "$WD"
   [ "$status" -eq 0 ]
@@ -542,7 +544,7 @@ STUB
 @test "a far-future restart cooldown stamp does not suppress the restart forever" {
   set_status openclaw-gateway-main active
   set_status openclaw-gateway-edge active
-  printf '9999999999' > "$WATCHDOG_STATE_DIR/openclaw-watchdog-cooldown"
+  printf '9999999999' > "$HEAP_STATE_DIR/openclaw-watchdog-cooldown"
   _stub_stuck_agent_runs
   run "$WD"
   [ "$status" -eq 0 ]
@@ -552,7 +554,7 @@ STUB
 @test "a corrupt restart cooldown stamp does not kill the watchdog mid-tick" {
   set_status openclaw-gateway-main active
   set_status openclaw-gateway-edge active
-  printf '1abc' > "$WATCHDOG_STATE_DIR/openclaw-watchdog-cooldown"
+  printf '1abc' > "$HEAP_STATE_DIR/openclaw-watchdog-cooldown"
   # Agent runs with zero successes → the STUCK branch, which reads the stamp.
   cat > "$TEST_TMPDIR/bin/journalctl" <<'STUB'
 #!/usr/bin/env bash
