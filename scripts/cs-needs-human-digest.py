@@ -99,8 +99,8 @@ Env:
                                 new+aging list — see build_next_state).
                                 Missing = empty (first run); corrupt = FAIL
                                 LOUD for --delta (see CorruptDigestState) —
-                                never silently reset, which would re-ping Jan
-                                with hundreds of items. A corrupt file's
+                                never silently reset, which would re-surface
+                                hundreds of records. A corrupt file's
                                 blast radius is scoped to --delta only: the
                                 pre-existing 13:30 FULL digest (--post or
                                 dry-run) degrades instead — it warns to
@@ -118,15 +118,11 @@ Env:
                                 "backlog:" line. Applied once in main(), so
                                 both digests, the --delta state and the Jev
                                 shadow pool see actionable items only.
-  CS_DIGEST_AGING_MENTION_UID   optional — Slack user id (e.g. U038BM16T7W)
-                                rendered as <@UID> in the header line, ONLY
-                                when at least one aging item is present in
-                                this run's digest. A literal @name pings
-                                nobody (repo doctrine), so this must be a
-                                real Slack UID, never hardcoded in the
-                                script. If unset while aging items exist, no
-                                mention is rendered and a stderr warning is
-                                printed.
+  CS_DIGEST_AGING_MENTION_UID   legacy setting, intentionally ignored. Age
+                                alone cannot establish an unresolved request,
+                                so this reconciliation digest never @mentions
+                                someone from a timestamp threshold. Verified
+                                actionable alerts require a separate signal.
   CS_DIGEST_JEV_SAMPLE_SIZE     optional, default 25 — Phase 2a shadow-only
                                 Jev sample size (docs/plans/jev-adoption.md
                                 #2a; see JEV_SURFACE_NEEDS_HUMAN_DIGEST
@@ -706,9 +702,8 @@ def mask_email(email):
 
 
 def is_aging(c, now_epoch, aging_hours):
-    """Whether a needs-human item's waiting time exceeds the aging
-    escalation threshold. Uses waiting_since (never bare lcr — see its
-    docstring)."""
+    """Whether an open record's customer-side timestamp exceeds the age
+    threshold. Uses waiting_since (never bare lcr — see its docstring)."""
     return (now_epoch - waiting_since(c)) / 3600 > aging_hours
 
 
@@ -734,7 +729,7 @@ def actionable_dups(dup_candidate, now_epoch, window_days=DEFAULT_ACTIONABLE_DAY
 # --------------------------------------------------------------------------
 # --delta state: {conv_id: {"first_surfaced": epoch, "aged_flagged": bool}}.
 # Missing file = empty (first run). Corrupt file = FAIL LOUD — never a
-# silent reset, which would re-ping Jan with hundreds of items. Updated ONLY
+# silent reset, which would re-surface hundreds of records. Updated ONLY
 # on a successful --post (dry-run never mutates it) — see main().
 # --------------------------------------------------------------------------
 class CorruptDigestState(Exception):
@@ -807,17 +802,16 @@ def compute_delta_and_next_state(state, needs_human, now_epoch, aging_hours):
 
     new_items:   needs-human items with no prior entry in `state` — never
                  surfaced before.
-    aging_items: needs-human items that are currently aging (waiting >
-                 aging_hours) and were NOT already aged_flagged in `state` —
-                 aging is a ONE-TIME-PER-CROSSING ping, never a re-ping every
-                 run for the same item while it stays aged. A brand-new item
+    aging_items: needs-human items whose customer-side timestamp exceeds
+                 aging_hours and were NOT already aged_flagged in `state` —
+                 a ONE-TIME-PER-CROSSING digest entry, not an @mention. A new item
                  that is already aging on first surface lands in BOTH lists.
     next_state:  `state` with every needs_human item's entry
                  created/refreshed (first_surfaced kept on re-surface;
                  aged_flagged set to the item's CURRENT aging status — NOT
-                 sticky-True-forever. This lets a genuinely-reset wait (e.g.
+                 sticky-True-forever. This lets a reset timestamp (e.g.
                  waiting_since moves forward because the customer replied
-                 again) drop the flag, so a later re-crossing pings again
+                 again) drop the flag, so a later re-crossing surfaces again
                  instead of staying silently suppressed forever).
 
     NOTE: this function is a pure per-item evaluator over whatever
@@ -891,14 +885,14 @@ def build_next_state(state, needs_human, rendered_items, now_epoch, aging_hours)
     3. Refresh the aging status of EXISTING entries every run, even when the row
        was not rendered — otherwise a stale aged_flagged:true survives a
        reset-below-threshold and permanently suppresses the next re-crossing
-       escalation (compute_delta_and_next_state's reset is defeated because THIS
+       age entry (compute_delta_and_next_state's reset is defeated because THIS
        is what actually persists). The refresh direction is deliberately
        asymmetric to stay safe:
          - no longer aging  -> aged_flagged:false (a reset only ENABLES a future
-           ping, never suppresses one — safe to apply unrendered).
-         - aging AND rendered -> aged_flagged:true (the escalation was delivered).
-         - aging but NOT rendered -> KEEP the existing flag (we have not pinged
-           yet; flipping it true sight-unseen would suppress the escalation when
+           entry, never suppresses one — safe to apply unrendered).
+         - aging AND rendered -> aged_flagged:true (the entry was delivered).
+         - aging but NOT rendered -> KEEP the existing flag (not yet shown;
+           flipping it true sight-unseen would suppress the entry when
            the row is finally shown — the rule-2 concern, in the other direction).
        first_surfaced is always preserved.
 
@@ -918,7 +912,7 @@ def build_next_state(state, needs_human, rendered_items, now_epoch, aging_hours)
         if not aging_now:
             aged_flagged = False                      # reset (safe unrendered)
         elif cid in rendered_ids:
-            aged_flagged = True                       # aging + shown -> pinged
+            aged_flagged = True                       # aging + shown -> recorded
         else:
             aged_flagged = bool(entry.get("aged_flagged"))  # aging + unseen -> keep
         next_state[cid] = {
@@ -998,7 +992,7 @@ def _delta_body_lines(new_items, aging_items, now_epoch, top_n,
                       aging_hours=DEFAULT_AGING_HOURS, backlog_count=0,
                       window_days=DEFAULT_ACTIONABLE_DAYS):
     """Counts + capped rows + overflow pointer — the digest BODY, with no
-    title/mention line (callers own that, exactly once each, so the title
+    title line (callers own that, exactly once each, so the title
     never appears twice — see render_delta_digest / build_delta_digest_blocks).
 
     Rows are capped at top_n (the same DIGEST_TOP_N convention the full
@@ -1030,17 +1024,12 @@ def _delta_body_lines(new_items, aging_items, now_epoch, top_n,
 
 
 def render_delta_digest(new_items, aging_items, now_epoch, top_n=DEFAULT_TOP_N,
-                         mention_uid=None, mention=None,
-                         aging_hours=DEFAULT_AGING_HOURS, backlog_count=0,
-                         window_days=DEFAULT_ACTIONABLE_DAYS):
+                        aging_hours=DEFAULT_AGING_HOURS, backlog_count=0,
+                        window_days=DEFAULT_ACTIONABLE_DAYS):
     """Plain-text rendering of a --delta run's surfaced items (new + newly
-    aging, deduped, capped at top_n — see _delta_body_lines). Mention
-    rendered per the same rule as render_text_digest (see its docstring);
-    pass a precomputed `mention` to skip recomputing it (and re-warning on a
-    missing UID) when the caller already has one — see main()."""
-    if mention is None:
-        mention = _mention_prefix(mention_uid, aging_items)
-    lines = [mention + DELTA_TITLE]
+    aging, deduped, capped at top_n — see _delta_body_lines), without
+    age-based @mentions."""
+    lines = [DELTA_TITLE]
     lines.extend(_delta_body_lines(
         new_items, aging_items, now_epoch, top_n, aging_hours,
         backlog_count, window_days))
@@ -1048,39 +1037,18 @@ def render_delta_digest(new_items, aging_items, now_epoch, top_n=DEFAULT_TOP_N,
 
 
 def build_delta_digest_blocks(new_items, aging_items, now_epoch, top_n=DEFAULT_TOP_N,
-                               mention_uid=None, mention=None,
-                               aging_hours=DEFAULT_AGING_HOURS, backlog_count=0,
-                               window_days=DEFAULT_ACTIONABLE_DAYS):
+                              aging_hours=DEFAULT_AGING_HOURS, backlog_count=0,
+                              window_days=DEFAULT_ACTIONABLE_DAYS):
     """Block Kit rendering. Builds the body directly via _delta_body_lines
-    rather than calling render_delta_digest (which would recompute the
-    mention and re-render the title a second time — the title lives ONLY in
-    the header block here, never duplicated into the section text)."""
-    if mention is None:
-        mention = _mention_prefix(mention_uid, aging_items)
+    rather than calling render_delta_digest (the title lives ONLY in the
+    header block here, never duplicated into the section text)."""
     blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": DELTA_TITLE}},
     ]
-    if mention:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": mention.strip()}})
     blocks.extend(_slack_section_blocks(_delta_body_lines(
         new_items, aging_items, now_epoch, top_n, aging_hours,
         backlog_count, window_days)))
     return blocks
-
-
-def _mention_prefix(mention_uid, aging_items):
-    """<@UID> prefix, ONLY when aging_items is nonempty AND mention_uid is
-    set — a literal @name pings nobody (repo doctrine), so this must be a
-    real Slack UID passed in via CS_DIGEST_AGING_MENTION_UID, never
-    hardcoded here. Prints a stderr warning when aging items exist but no
-    UID is configured."""
-    if not aging_items:
-        return ""
-    if mention_uid:
-        return f"<@{mention_uid}> "
-    print("WARN: aging item(s) present but CS_DIGEST_AGING_MENTION_UID is "
-          "unset — no mention rendered", file=sys.stderr)
-    return ""
 
 
 def age_str(epoch_seconds, now_epoch):
@@ -1107,23 +1075,16 @@ ACTIVITY_48H_HOURS = 48  # elapsed timestamp only, not an SLA or request status
 
 
 def build_digest_blocks(buckets, now_epoch, top_n=DEFAULT_TOP_N,
-                         aging_hours=DEFAULT_AGING_HOURS, mention_uid=None, mention=None,
-                         window_days=DEFAULT_ACTIONABLE_DAYS):
-    """`mention`, if given, is used as-is instead of recomputing it from
-    mention_uid — pass a precomputed value (see main()) to avoid calling
-    _mention_prefix (and its stderr WARN on a missing UID) a second time in
-    the same posted run, once here and once in render_text_digest."""
+                        aging_hours=DEFAULT_AGING_HOURS,
+                        window_days=DEFAULT_ACTIONABLE_DAYS):
+    """Render Intercom-open records without unverified age-based alerts."""
     nh, nci, dup = buckets["needs_human"], buckets["needs_customer_input"], buckets["dup_candidate"]
     aging_items = [c for c in nh if is_aging(c, now_epoch, aging_hours)]
-    if mention is None:
-        mention = _mention_prefix(mention_uid, aging_items)
     blocks = [
         # plain_text header (no mrkdwn/mention parsing -> never pings anyone,
         # matching the repo convention: reference_slack_blockkit_header_mention_no_ping).
         {"type": "header", "text": {"type": "plain_text", "text": DAILY_TITLE}},
     ]
-    if mention:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": mention}})
     blocks.append({"type": "section", "text": {"type": "mrkdwn",
                    "text": f"_{REPLY_ORDER_CAVEAT}_"}})
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
@@ -1162,16 +1123,13 @@ def build_digest_blocks(buckets, now_epoch, top_n=DEFAULT_TOP_N,
 
 
 def render_text_digest(buckets, now_epoch, top_n=DEFAULT_TOP_N,
-                        aging_hours=DEFAULT_AGING_HOURS, mention_uid=None, mention=None,
-                        window_days=DEFAULT_ACTIONABLE_DAYS):
-    """Plain-text rendering for --post's fallback `text` field and dry-run
-    stdout. `mention`, if given, is used as-is — see build_digest_blocks."""
+                       aging_hours=DEFAULT_AGING_HOURS,
+                       window_days=DEFAULT_ACTIONABLE_DAYS):
+    """Plain-text rendering for --post's fallback `text` field and dry-run."""
     nh, nci, dup = buckets["needs_human"], buckets["needs_customer_input"], buckets["dup_candidate"]
     aging_items = [c for c in nh if is_aging(c, now_epoch, aging_hours)]
-    if mention is None:
-        mention = _mention_prefix(mention_uid, aging_items)
     lines = [
-        mention + DAILY_TITLE,
+        DAILY_TITLE,
         REPLY_ORDER_CAVEAT,
         f"customer-side activity is latest: {len(nh)}  "
         f"older than {_threshold_label(aging_hours)} since customer-side activity: "
@@ -1388,11 +1346,10 @@ def main():
     aging_hours = int(os.environ.get("CS_DIGEST_AGING_HOURS", str(DEFAULT_AGING_HOURS)))
     actionable_days = int(os.environ.get("CS_DIGEST_ACTIONABLE_DAYS",
                                          str(DEFAULT_ACTIONABLE_DAYS)))
-    mention_uid = os.environ.get("CS_DIGEST_AGING_MENTION_UID") or None
     state_path = os.environ.get("CS_DIGEST_STATE", DEFAULT_DIGEST_STATE)
 
     # A corrupt --delta state file must fail LOUD for --delta itself (never
-    # silently reset — that would re-ping Jan with hundreds of items, every
+    # silently reset — that would re-surface hundreds of items, every
     # needs-human item looking "new" again). It must NOT, however, block the
     # pre-existing 13:30 FULL digest (or its dry-runs): the full digest's own
     # job (Jan's daily ranked view) doesn't depend on this file being valid.
@@ -1467,7 +1424,7 @@ def main():
         state was corrupt), False if an atomic persist was ATTEMPTED and FAILED
         (disk/permission). On False the caller fails the run loud so the
         cron-health watchdog surfaces it — a green timer hiding stale anti-repeat
-        state would silently re-page Jan on the next delta run."""
+        state would re-surface old records on the next delta run."""
         # Skip persistence entirely when the loaded state was corrupt (full
         # mode's degrade path) — never overwrite a known-bad file with a
         # reconstruction built from an empty state.
@@ -1511,10 +1468,9 @@ def main():
                     return 5
             return 0
 
-        mention = _mention_prefix(mention_uid, aging_items)
         text = render_delta_digest(
             new_items, aging_items, now_epoch, top_n,
-            mention=mention, aging_hours=aging_hours,
+            aging_hours=aging_hours,
             backlog_count=buckets["backlog_count"], window_days=actionable_days)
         print(text)
         if not args.post:
@@ -1522,7 +1478,7 @@ def main():
             return 0
         blocks = build_delta_digest_blocks(
             new_items, aging_items, now_epoch, top_n,
-            mention=mention, aging_hours=aging_hours,
+            aging_hours=aging_hours,
             backlog_count=buckets["backlog_count"], window_days=actionable_days)
         posted = post_slack_digest(blocks, text, channel, cfg, account)
         print(f"slack post: {'posted' if posted else 'skipped/failed'} -> {channel}")
@@ -1535,10 +1491,7 @@ def main():
                 return 5   # posted, but the anti-repeat checkpoint failed to persist
         return 0 if posted else 1
 
-    aging_items_full = [c for c in buckets["needs_human"]
-                         if is_aging(c, now_epoch, aging_hours)]
-    mention = _mention_prefix(mention_uid, aging_items_full)
-    text = render_text_digest(buckets, now_epoch, top_n, aging_hours, mention=mention,
+    text = render_text_digest(buckets, now_epoch, top_n, aging_hours,
                               window_days=actionable_days)
     print(text)
 
@@ -1546,7 +1499,7 @@ def main():
         print("DRY-RUN — nothing posted. Re-run with --post to post to Slack.")
         return 0
 
-    blocks = build_digest_blocks(buckets, now_epoch, top_n, aging_hours, mention=mention,
+    blocks = build_digest_blocks(buckets, now_epoch, top_n, aging_hours,
                                  window_days=actionable_days)
     posted = post_slack_digest(blocks, text, channel, cfg, account)
     print(f"slack post: {'posted' if posted else 'skipped/failed'} -> {channel}")
