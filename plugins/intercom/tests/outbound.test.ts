@@ -365,7 +365,7 @@ describe("SanitizingIntercomClient", () => {
     await client.replyToConversation({
       conversationId: "conv_ref1",
       adminId: "admin_1",
-      body: "Your reference number is 869f7v9v2.",
+      body: "Your reference number is a1b2c3d4e.",
     });
     expect(inner.calls.replyToConversation[0].body).toBe("I'll make sure this gets to the team.");
     expect(logged.some((m) => m.includes("[intercom:false-handoff-claim]") && m.includes("conv=conv_ref1"))).toBe(true);
@@ -375,7 +375,7 @@ describe("SanitizingIntercomClient", () => {
     const IDS_KEY = "__musoSupportTicketIds";
     const g = globalThis as unknown as Record<string, unknown>;
     const store = new Map<string, { atMs: number; ids: string[] }>();
-    store.set("conv_ref2", { atMs: Date.now(), ids: ["869f7v9v2"] });
+    store.set("conv_ref2", { atMs: Date.now(), ids: ["a1b2c3d4e"] });
     g[IDS_KEY] = store;
     const inner = new MockIntercomClient();
     const logged: string[] = [];
@@ -383,10 +383,30 @@ describe("SanitizingIntercomClient", () => {
     await client.replyToConversation({
       conversationId: "conv_ref2",
       adminId: "admin_1",
-      body: "Your reference number is 869f7v9v2.",
+      body: "Your reference number is a1b2c3d4e.",
     });
-    expect(inner.calls.replyToConversation[0].body).toBe("Your reference number is 869f7v9v2.");
+    expect(inner.calls.replyToConversation[0].body).toBe("Your reference number is a1b2c3d4e.");
     expect(logged.some((m) => m.includes("[intercom:false-handoff-claim]"))).toBe(false);
+    delete g[IDS_KEY];
+  });
+
+  // Nick, 13 Oct: no internal id ever reaches a customer, even one this conversation
+  // filed. The handoff guard lets filed ids through, so the internal-reference pass
+  // must run first and rewrite them (sanitize-internal-reference.ts).
+  it("rewrites a ClickUp-shaped id even when this conversation filed it", async () => {
+    const IDS_KEY = "__musoSupportTicketIds";
+    const g = globalThis as unknown as Record<string, unknown>;
+    const store = new Map<string, { atMs: number; ids: string[] }>();
+    store.set("conv_ref3", { atMs: Date.now(), ids: ["869fep919"] });
+    g[IDS_KEY] = store;
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner, { error: () => {} });
+    await client.replyToConversation({
+      conversationId: "conv_ref3",
+      adminId: "admin_1",
+      body: "Your reference number is 869fep919.",
+    });
+    expect(inner.calls.replyToConversation[0].body).not.toContain("869fep919");
     delete g[IDS_KEY];
   });
 

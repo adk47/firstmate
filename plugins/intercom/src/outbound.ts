@@ -4,6 +4,7 @@ import { sanitizeOutboundBody } from "./sanitize-email.js";
 import { sanitizeToolLeak } from "./sanitize-tool-leak.js";
 import { sanitizeTypography } from "./sanitize-typography.js";
 import { sanitizeHandoffClaim } from "./sanitize-handoff-claim.js";
+import { sanitizeInternalReference } from "./sanitize-internal-reference.js";
 import { wasTicketFiledRecently, getFiledTicketIds } from "./ticket-success-signal.js";
 
 // --- Outbound reply retry (design §7 Rate Limiting) ---
@@ -606,6 +607,19 @@ export class SanitizingIntercomClient implements IntercomClient {
         try { console.error(msg); } catch { /* noop */ }
       }
     }
+    // Internal-reference pass: a bare ClickUp task id must never reach a customer
+    // (sanitize-tool-leak bans the words, not the id). Rewrites to a neutral phrase.
+    const refPass = sanitizeInternalReference(typoPass.body);
+    if (refPass.redactions.length > 0) {
+      const unique = Array.from(new Set(refPass.redactions));
+      const msg = `[intercom:internal-reference] conv=${params.conversationId} count=${unique.length} rewritten=${JSON.stringify(unique)}`;
+      // Logging must never block delivery (same contract as the passes above).
+      try {
+        this.log?.error?.(msg);
+      } catch {
+        try { console.error(msg); } catch { /* noop */ }
+      }
+    }
     // False-handoff-claim pass (honesty enforcement). A completed-action claim like
     // "I've flagged this for our team" is only honest if create_ticket actually
     // succeeded for this conversation; the cross-plugin signal (set by support-tools on
@@ -616,7 +630,7 @@ export class SanitizingIntercomClient implements IntercomClient {
     // MUS-1516: which ids this conversation actually filed, so the guard can
     // tell a real quoted reference number from one it never filed.
     const filedTicketIds = getFiledTicketIds(params.conversationId);
-    const handoffPass = sanitizeHandoffClaim(typoPass.body, { ticketConfirmed, filedTicketIds });
+    const handoffPass = sanitizeHandoffClaim(refPass.body, { ticketConfirmed, filedTicketIds });
     if (handoffPass.redactions.length > 0) {
       const unique = Array.from(new Set(handoffPass.redactions));
       const msg = `[intercom:false-handoff-claim] conv=${params.conversationId} count=${unique.length} rewritten=${JSON.stringify(unique)}`;
@@ -662,7 +676,8 @@ export class SanitizingIntercomClient implements IntercomClient {
       const emailPass = sanitizeOutboundBody(params.body);
       const toolPass = sanitizeToolLeak(emailPass.body);
       const typoPass = sanitizeTypography(toolPass.body);
-      return this.inner.closeConversation({ ...params, body: typoPass.body });
+      const refPass = sanitizeInternalReference(typoPass.body);
+      return this.inner.closeConversation({ ...params, body: refPass.body });
     }
     return this.inner.closeConversation(params);
   }
