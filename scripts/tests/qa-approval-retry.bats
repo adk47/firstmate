@@ -1893,3 +1893,12 @@ go_review() { export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMM
   [ "$status" -eq 0 ]
   [[ "${lines[*]}" == *"QA_APPROVAL_RETRY_MAX_CALLS='abc'"* ]]
 }
+
+@test "floor: remaining == floor (1000) proceeds — the floor is 'below', not 'at or below'" {
+  go_review
+  export STUB_RATE_REMAINING=1000
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$REVIEWS_CALLS" ]
+  [[ "${lines[*]}" != *"RATE FLOOR"* ]]
+}
