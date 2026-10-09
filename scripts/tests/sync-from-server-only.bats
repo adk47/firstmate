@@ -7,6 +7,8 @@ bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 SCRIPT="$HYDRA_REPO/scripts/sync-from-server.sh"
+# Real git-tracked paths: --only refuses untracked ones. A skill rename is a one-line fix here.
+readonly TRACKED_A=skills-all/babysit/SKILL.md TRACKED_B=skills-all/agent-bridge-request/SKILL.md
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"
@@ -19,7 +21,7 @@ setup() {
   cat > "$TEST_TMPDIR/bin/rsync" <<STUB
 #!/bin/bash
 printf '%s\n' "\$*" >> "$RSYNC_CALLS"
-echo ">f.st...... skills-all/foo/SKILL.md"
+echo ">f.st...... skills-all/babysit/SKILL.md"
 exit 0
 STUB
   cat > "$TEST_TMPDIR/bin/ssh" <<'STUB'
@@ -36,36 +38,37 @@ STUB
 
 teardown() { rm -rf "$TEST_TMPDIR"; }
 
-@test "bulk pull (no --only) still rsyncs the whole skills-all/ dir" {
+@test "bulk pull (no --only) transfers a tracked-only --files-from list, not the whole dir" {
   run "$SCRIPT" skills
   [ "$status" -eq 0 ]
-  # Bulk source is the subdir with a trailing slash, not a /./ -R anchor.
-  grep -qF 'skills-all/ ' "$RSYNC_CALLS"
+  # Bulk source is the deploy root + a tracked file list (tracked-only rule,
+  # see sync-from-server-tracked-only.bats), not a /./ -R anchor.
+  grep -qF -- '--files-from=' "$RSYNC_CALLS"
   ! grep -qF '/./skills-all/' "$RSYNC_CALLS"
 }
 
 @test "--only pulls just the named file (dry-run default), with -R anchor" {
-  run "$SCRIPT" skills --only skills-all/foo/SKILL.md
+  run "$SCRIPT" skills --only $TRACKED_A
   [ "$status" -eq 0 ]
   # -R relative anchor on the single file, not a bulk dir pull.
-  grep -qF '/./skills-all/foo/SKILL.md' "$RSYNC_CALLS"
+  grep -qF "/./$TRACKED_A" "$RSYNC_CALLS"
   # Dry-run by default → rsync invoked with -n.
   grep -qE '(^| )-n( |$)|-az[A-Za-z]*n' "$RSYNC_CALLS"
 }
 
 @test "--only --apply drops the dry-run flag" {
-  run "$SCRIPT" skills --apply --only skills-all/foo/SKILL.md
+  run "$SCRIPT" skills --apply --only $TRACKED_A
   [ "$status" -eq 0 ]
-  grep -qF '/./skills-all/foo/SKILL.md' "$RSYNC_CALLS"
+  grep -qF "/./$TRACKED_A" "$RSYNC_CALLS"
   # No standalone -n in apply mode.
   ! grep -qE '(^| )-n( |$)' "$RSYNC_CALLS"
 }
 
 @test "--only is repeatable (two files → two rsync calls)" {
-  run "$SCRIPT" skills --only skills-all/foo/SKILL.md --only skills-all/bar/SKILL.md
+  run "$SCRIPT" skills --only $TRACKED_A --only $TRACKED_B
   [ "$status" -eq 0 ]
-  grep -qF '/./skills-all/foo/SKILL.md' "$RSYNC_CALLS"
-  grep -qF '/./skills-all/bar/SKILL.md' "$RSYNC_CALLS"
+  grep -qF "/./$TRACKED_A" "$RSYNC_CALLS"
+  grep -qF "/./$TRACKED_B" "$RSYNC_CALLS"
   [ "$(grep -c . "$RSYNC_CALLS")" -eq 2 ]
 }
 

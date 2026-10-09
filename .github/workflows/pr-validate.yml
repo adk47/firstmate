@@ -1003,7 +1003,8 @@ jobs:
             echo
             echo "Each deletion means one of three things:"
             echo "  (a) Real data created on the server that the repo doesn't know about"
-            echo "      → Pull it in: scripts/sync-from-server.sh <path> --apply, then commit"
+            echo "      → Pull it in: tracked file: scripts/sync-from-server.sh <target> --apply --only <path>;"
+            echo "        a path the repo never tracked is NOT pulled by that script: scp it, review it (no secrets), git add <path>. Then commit"
             echo "  (b) Runtime state the server should own"
             echo "      → Either commit a seed file under the path (auto-exclude will then kick in)"
             echo "        OR add an --exclude line to RSYNC_EXCLUDES in scripts/deploy.sh"

@@ -271,7 +271,7 @@ application login.
 
 ### Troubleshooting
 
-- **Deploy fails at Step 0 (drift check)** — the server has files the repo doesn't. See briefing in deploy log for the list. Use `scripts/sync-from-server.sh` to pull server-side edits into the repo first, commit, then retry the deploy.
+- **Deploy fails at Step 0 (drift check)** — the server has files the repo doesn't. See briefing in deploy log for the list. For an edited tracked file use `scripts/sync-from-server.sh <target> --apply --only <path>`; it pulls tracked files only, so a file the repo never tracked must be `scp`ed, reviewed (no secrets) and `git add`ed by path. Commit, then retry the deploy.
 - **Deploy fails at Step 4a (pre-flight)** — rsync `--delete` would remove server files not in the repo. See briefing in the deploy log for the list and recovery steps.
   - If the flagged file is a stray scratch directly under `workspaces/qa/` (e.g. the historical `workspaces/qa/seven_days_ago` from a QA auto-review), it is now swept automatically on the next merge of a QA-reviewed PR by `.github/workflows/qa-pr-merged.yml` (→ `scripts/qa-clean-merge-scratch.sh`, which deletes only depth-1 files that are neither tracked nor matched by `RSYNC_EXCLUDES`). To unblock the current deploy immediately, still `rm` the file on node-8 and rerun — the sweep races the deploy and only guarantees the *next* one is clean.
 - **Deploy fails at Step 4d (plugin install)** — npm install failed for a specific plugin. The error message names the plugin and its stderr. Fix the `package.json` or dependencies and retry. Set `HYDRA_CONTINUE_ON_PLUGIN_FAIL=1` to see all plugin failures at once.

@@ -159,7 +159,7 @@ The next deploy's pre-flight drift check accepts the divergence (rsync still
 overwrites server bytes with the PR's HEAD bytes — the announce only
 suppresses the halt, never the sync). Without an announcement, Step 4a
 halts with the existing `DEPLOY BLOCKED — skills-all/ content drift`
-runbook (`scripts/sync-from-server.sh skills --apply` → commit → re-deploy
+runbook (`scripts/sync-from-server.sh skills --apply --only <path>` for a tracked file; a never-tracked file is NOT pulled by it, so `scp` + review + `git add` → commit → re-deploy
 or `HYDRA_FORCE=1` after verification).
 
 Ack window is 1h by default (`HYDRA_HOTPATCH_ACK_WINDOW`); stale

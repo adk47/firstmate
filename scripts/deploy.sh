@@ -1873,13 +1873,21 @@ DRIFTED FILES (server has edits not in any local commit):
 $drift_listing
 
 WHAT TO DO (the only safe path, mirrors \`git pull --rebase\`):
-  1. Pull the server-side edits into your local repo, ONE PATH AT A TIME:
-       scripts/sync-from-server.sh skills     --apply --only <path>
-       scripts/sync-from-server.sh workspaces --apply --only <path>
-       scripts/sync-from-server.sh audit      --apply --only <path>
-     # NEVER bulk-pull: workspaces/ is 125 GB / 6.2M files on node-8 (8 Oct), no excludes.
-       # or pull a single file directly (uses same defaults as deploy.sh):
-       scp -i "\$SSH_KEY" "\$NODE8_USER@\$NODE8_IP:$DEPLOY_PATH/<path>" ./<path>
+  1. Pull the server-side edits into your local repo, ONE PATH AT A TIME.
+     sync-from-server.sh pulls ONLY files git already tracks, so:
+       - an edited TRACKED file (skills-all/ or workspaces/):
+           scripts/sync-from-server.sh skills     --apply --only <path>
+           scripts/sync-from-server.sh workspaces --apply --only <path>
+       - a NEW file that exists only on the server is untracked, and
+         sync-from-server.sh will NOT pull it (even if it says "matches").
+         Capture it by hand, review it (no secrets/tokens), then add it
+         explicitly by path:
+           scp -i "\$SSH_KEY" "\$NODE8_USER@\$NODE8_IP:$DEPLOY_PATH/<path>" ./<path>
+           git add <path>
+       - audit/ is gitignored (nothing to commit); its target pulls the
+         whole subtree, which is large:
+           scripts/sync-from-server.sh audit --apply
+     # NEVER bulk-pull workspaces/: it is 125 GB / 6.2M files on node-8 (8 Oct).
   2. Review what came down:
        git status
        git diff -- <path>
@@ -2214,11 +2222,15 @@ $sus_overflow
 
 THE ONLY SAFE FIX (do this, in order):
   1. For each path above, decide:
-     (a) Is it real data? → Pull it into the repo:
-           scripts/sync-from-server.sh workspaces --apply --only <path>   # for workspaces/*
-           scripts/sync-from-server.sh skills --apply --only <path>       # for skills-all/*
-           scripts/sync-from-server.sh audit --apply --only <path>        # for audit/*
-           # NEVER bulk-pull: workspaces/ is 125 GB / 6.2M files on node-8 (8 Oct).
+     (a) Is it real data? → Pull it into the repo. sync-from-server.sh
+         pulls only TRACKED files, so a path the repo has never seen is
+         NOT pulled by it. Capture it by hand and review it first (no
+         secrets/tokens):
+           scp -i "\$SSH_KEY" "\$NODE8_USER@\$NODE8_IP:$DEPLOY_PATH/<path>" ./<path>
+           git add <path>
+         (an already-tracked file: sync-from-server.sh skills --apply --only <path>
+          or workspaces --apply --only <path>; audit/* is gitignored: audit --apply.
+          NEVER bulk-pull workspaces/: 125 GB / 6.2M files on node-8, 8 Oct.)
          Then commit.
      (b) Is it runtime state we want server-owned? → Add an --exclude
          line to RSYNC_EXCLUDES at the top of scripts/deploy.sh (it's
