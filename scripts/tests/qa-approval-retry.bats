@@ -1983,7 +1983,10 @@ stale_reviews() { # $1 = count of stale NO-GOs ahead of one live-head GO
 }
 
 @test "pagination: a history past the page cap stops at 10 reads and is a read failure, never 'no verdict'" {
-  export STUB_REVIEWS_JSON="$(stale_reviews 1500)"
+  # file-backed: 1500 reviews (~225 KB) in one env var exceeds Linux's 128 KiB
+  # per-string limit and breaks bats' own teardown `rm` in CI.
+  stale_reviews 1500 > "$TEST_TMPDIR/cap-reviews.json"
+  export STUB_REVIEWS_FILE="$TEST_TMPDIR/cap-reviews.json"
   run "$SCRIPT"
   # the lone candidate is unreadable -> the existing total-blackout exit
   [ "$status" -eq 3 ]
