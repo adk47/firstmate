@@ -51,6 +51,7 @@ INTAKE_MARKER = "Source: hydra-intake"
 ESCALATED_LABEL = "intake-escalated"
 CLOSED = ("done", "cancelled")
 HTTP_TIMEOUT = 20
+MAX_PAGES = 20  # search pages per query; 1000 cards is far past any real intake queue
 
 # ---- fingerprint (port of plugins/tracker/src/fingerprint.ts) ---------------
 # Order matters: most specific first. A URL contains digits and a UUID contains
@@ -145,11 +146,18 @@ class Client:
         return self._company
 
     def search_issues(self, q, status=None, limit=50):
-        params = {"q": q, "scope": "issues", "limit": str(limit)}
-        if status:
-            params["status"] = status
-        res = self.call("GET", f"/api/companies/{self.company}/search?{urllib.parse.urlencode(params)}")
-        return [r for r in res.get("results", []) if r.get("type") == "issue"]
+        """Every issue hit for `q`, paged: a short page is the last one (MAX_PAGES bounds a runaway)."""
+        hits = []
+        for page in range(MAX_PAGES):
+            params = {"q": q, "scope": "issues", "limit": str(limit), "offset": str(page * limit)}
+            if status:
+                params["status"] = status
+            res = self.call("GET", f"/api/companies/{self.company}/search?{urllib.parse.urlencode(params)}")
+            raw = res.get("results", [])
+            hits += [r for r in raw if r.get("type") == "issue"]
+            if len(raw) < limit:
+                break
+        return hits
 
     def issue(self, issue_id):
         return self.call("GET", f"/api/issues/{issue_id}")

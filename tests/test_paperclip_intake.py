@@ -132,10 +132,12 @@ class FakePaperclip:
             return self.search_hook(qs)
         q = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
         term = q.get("q", "").replace("%3A", ":").replace("+", " ")
-        return [{"id": i["id"], "type": "issue", "title": i["title"]}
+        hits = [{"id": i["id"], "type": "issue", "title": i["title"]}
                 for i in self.issues.values()
                 if term and term.lower() in (i.get("description", "") + i["title"]).lower()
                 and (not q.get("status") or i["status"] == q["status"])]
+        offset = int(q.get("offset", 0))  # like the real API: a page of `limit`, from `offset`
+        return hits[offset:offset + int(q.get("limit", 20))]
 
     def close(self):
         self.server.shutdown()
@@ -412,6 +414,29 @@ class WaitingTests(Base):
         list(self.api.issues.values())[1]["assigneeAgentId"] = "someone"
         rc, out, _ = self.run_cli("waiting")
         self.assertEqual([c["title"] for c in json.loads(out)["waiting"]], ["deploy failed"])
+
+
+class PaginationTests(Base):
+    def test_a_waiting_card_beyond_the_first_page_is_still_found(self):
+        # 60 already-triaged cards fill the first pages; the one waiting card is the 61st hit.
+        for n in range(60):
+            self.file(f"triaged problem {chr(97 + n // 26)}{chr(97 + n % 26)}")
+        for card in self.api.issues.values():
+            card["assigneeAgentId"] = "someone"
+        self.file("brand new problem")
+        rc, out, _ = self.run_cli("waiting")
+        self.assertEqual([c["title"] for c in json.loads(out)["waiting"]], ["brand new problem"])
+
+    def test_escalate_reaches_an_untriaged_card_beyond_the_first_page(self):
+        for n in range(60):
+            self.file(f"triaged problem {chr(97 + n // 26)}{chr(97 + n % 26)}")
+        for card in self.api.issues.values():
+            card["assigneeAgentId"] = "someone"
+        self.file("brand new problem")
+        last = list(self.api.issues.values())[-1]
+        last["createdAt"] = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat()
+        self.run_cli("escalate", "--to-agent", "pilot-agent-id")
+        self.assertEqual(last["assigneeAgentId"], "pilot-agent-id")
 
 
 class EscalateTests(Base):
