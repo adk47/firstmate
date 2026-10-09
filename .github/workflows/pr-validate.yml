@@ -1146,7 +1146,7 @@ jobs:
           # the depth so those cases actually RUN on every runner, new or old.
           fetch-depth: 0
 
-      - name: Ensure bats + jq installed
+      - name: Ensure bats + jq + sqlite3 installed
         run: |
           set -e
           if ! command -v bats >/dev/null 2>&1; then
@@ -1155,8 +1155,15 @@ jobs:
           if ! command -v jq >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y jq
           fi
+          # rollback.bats and deploy-plugin-pin-stops-gateway.bats build state-DB
+          # fixtures (pragma user_version) with the sqlite3 CLI; without it they die
+          # rc=127 before exercising the runtime-restore guard (MUS-5079).
+          if ! command -v sqlite3 >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y sqlite3
+          fi
           bats --version
           jq --version
+          sqlite3 --version
 
       - name: Run all bats suites under scripts/ + ops-admin gate tests
         # Discovers every *.bats file under scripts/ so a future

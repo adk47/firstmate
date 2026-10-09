@@ -297,6 +297,48 @@ plugin_install_version_flags() {
   fi
 }
 
+# stop_gateway_for_plugin_pin <profile> — openclaw fences state-schema mutation
+# against a live gateway (dist/state-database-coordinator withStateSchemaFence:
+# "refused shared state schema mutation ... because another Gateway owns that
+# state directory. Stop that Gateway or perform the update through its managed
+# restart path"). The fence exists in 2026.8.2 AND 2026.8.35 alike; what decides
+# whether it fires is the fast path in ensureSchema: it skips the fence only when
+# the DB's stamped schema_meta.app_version equals the running binary's version.
+# So the trigger is "install_openclaw swapped the runtime in THIS deploy" (the
+# binary now differs from the version the DBs are stamped with), not a version
+# threshold. Deploy HYDRA run 37791745129 (8 Oct): Step 4c.5 made the binary
+# 8.35 over DBs stamped 8.2, then Step 4d.5 `plugins install` hit the fence and
+# the deploy auto-rolled back. The record install_openclaw writes is that signal
+# (Step 4c.5 runs before Step 4d.5), and it is version-free, so it cannot rot.
+# The unit stays stopped until Step 6, which must therefore restart it:
+# HYDRA_FORCE_RESTART=1 overrides the gateway-inert restart-skip gate. A
+# failure between here and Step 6 ends in rollback.sh, which restarts both.
+# Direct systemctl, not run_on_node8 (defined later, Step 5a): this function
+# already drives the host's own openclaw/npm directly.
+# Profiles recorded here were stopped ON PURPOSE: Step 6 then expects no MainPID
+# (see missing_pid_restart_req) instead of paging that the drain path is broken.
+GATEWAYS_STOPPED_BY_DEPLOY=""
+gateway_stopped_by_deploy() { [[ " $GATEWAYS_STOPPED_BY_DEPLOY " == *" $1 "* ]]; }
+
+# missing_pid_restart_req <profile> — Step 6 found no pre-request MainPID.
+# Returns finish_gateway_restart's req code: 4 = we stopped the unit ourselves
+# (hard restart, no page), 3 = PID genuinely unreadable (hard restart + page).
+missing_pid_restart_req() {
+  if gateway_stopped_by_deploy "$1"; then return 4; fi
+  return 3
+}
+
+stop_gateway_for_plugin_pin() {
+  local profile="$1"
+  if [[ -f "$DEPLOY_PATH/.pre-deploy-openclaw-version" ]]; then
+    log "    Stopping openclaw-gateway-${profile} for the plugin install (runtime was swapped this deploy; the state DB migration is fenced against a live gateway)"
+    systemctl stop "openclaw-gateway-${profile}" || return 1
+    gateway_stopped_by_deploy "$profile" || GATEWAYS_STOPPED_BY_DEPLOY="$GATEWAYS_STOPPED_BY_DEPLOY $profile"
+    export HYDRA_FORCE_RESTART=1
+  fi
+  return 0
+}
+
 install_external_plugin() {
   # Pins ONE externalized @openclaw/* plugin per-profile under
   # ~/.openclaw-<profile>/npm/. Args: <pkg> <version> (e.g.
@@ -331,6 +373,10 @@ install_external_plugin() {
       continue
     fi
     log "    Installing ${pkg}@$version on $profile (was: ${installed:-not installed})"
+    stop_gateway_for_plugin_pin "$profile" || {
+      log "    ✗ could not stop openclaw-gateway-${profile}; not installing ${pkg} against a live gateway"
+      return 1
+    }
     local install_out install_rc=0
     local -a extra_flags=()
     read -r -a extra_flags <<< "$(plugin_install_version_flags "$version")"
@@ -350,6 +396,25 @@ install_external_plugin() {
     fi
   done
   return 0
+}
+
+# state_user_versions <root> — "main=15 edge=15": each profile's state DB
+# PRAGMA user_version, "absent" if the DB file does not exist, "unreadable" if
+# it exists but cannot be read. rollback.sh Step 1c computes the same string
+# (inline, the restored tree may predate this function) and compares.
+state_user_versions() {
+  local p f v out=""
+  for p in main edge; do
+    f="$1/.openclaw-$p/state/openclaw.sqlite"
+    if [[ ! -f "$f" ]]; then
+      v=absent
+    else
+      v=$(sqlite3 -readonly "$f" 'pragma user_version;' 2>/dev/null) || v=""
+      [[ "$v" =~ ^[0-9]+$ ]] || v=unreadable
+    fi
+    out="${out:+$out }$p=$v"
+  done
+  printf '%s' "$out"
 }
 
 install_openclaw() {
@@ -377,6 +442,16 @@ install_openclaw() {
     return 0
   else
     log "    Upgrading openclaw $installed → $OPENCLAW_VERSION"
+    # Record what rollback.sh must restore: the swap below outlives a failed
+    # deploy (8 Oct run 37791745129 left runtime 8.35 under 8.2 plugins).
+    # Cleared once Step 6 has restarted the gateways.
+    # Line 1: the runtime to restore. Line 2: each state DB's user_version at
+    # swap time; rollback.sh restores the binary only while they are unchanged
+    # (a newer-schema DB makes the old binary refuse to boot).
+    local state_uv
+    state_uv=$(state_user_versions "${OPENCLAW_PROFILE_ROOT:-/root}")
+    printf '%s\n%s\n' "$installed" "$state_uv" > "$DEPLOY_PATH/.pre-deploy-openclaw-version" \
+      || { log "    ✗ cannot record the pre-swap runtime in $DEPLOY_PATH/.pre-deploy-openclaw-version"; return 1; }
   fi
 
   local npm_out
@@ -846,6 +921,9 @@ RSYNC_EXCLUDES=(
   # In-progress marker (server-owned, written/removed by deploy.sh and
   # rollback.sh); must survive rsync --delete like .deployed-sha above.
   --exclude='.deploy-mutating'
+  # Pre-swap openclaw runtime version (written by install_openclaw, cleared by
+  # Step 6, consumed by rollback.sh Step 1c); same survive-rsync rule.
+  --exclude='.pre-deploy-openclaw-version'
   # Decommissioned CLIProxyAPI sidecar (PR #224). Files no longer in the
   # repo but may still exist on /opt/hydra/ until ops cleanup. Excluded
   # so rsync --delete doesn't trip the deploy pre-flight gate; safe to
@@ -3425,6 +3503,8 @@ finish_gateway_restart() {
       ;;
     2)
       log "  HYDRA_HARD_RESTART=1 — skipping drain for $service" ;;
+    4)
+      log "  $service was stopped by this deploy for the plugin install — starting it (no PID to drain, by design)" ;;
     3)
       log "  WARN: no verified pre-request MainPID for $service — a drain result would be unverifiable; hard restart"
       notify_slack ":warning: HYDRA deploy: could not capture a pre-request MainPID for $service — hard restart without drain (in-flight turns may be cut)."
@@ -3520,7 +3600,7 @@ if gateway_restart_needed; then
   if needs_target "main"; then
     main_old_pid=$(gateway_main_pid "openclaw-gateway-main") || main_old_pid=""
     if [ -z "$main_old_pid" ] || [ "$main_old_pid" = "0" ]; then
-      main_req=3   # no verified baseline PID -> drain unverifiable, fail closed
+      main_req=0; missing_pid_restart_req "main" || main_req=$?   # 4 = stopped by this deploy, 3 = unverifiable, fail closed
     else
       main_req=0; request_safe_restart "openclaw-gateway-main" "main" || main_req=$?
     fi
@@ -3528,7 +3608,7 @@ if gateway_restart_needed; then
   if needs_target "edge"; then
     edge_old_pid=$(gateway_main_pid "openclaw-gateway-edge") || edge_old_pid=""
     if [ -z "$edge_old_pid" ] || [ "$edge_old_pid" = "0" ]; then
-      edge_req=3   # no verified baseline PID -> drain unverifiable, fail closed
+      edge_req=0; missing_pid_restart_req "edge" || edge_req=$?   # 4 = stopped by this deploy, 3 = unverifiable, fail closed
     else
       edge_req=0; request_safe_restart "openclaw-gateway-edge" "edge" || edge_req=$?
     fi
@@ -3566,6 +3646,12 @@ else
     fi
   done
 fi
+
+# Step 6 is done: the gateways run on the new runtime. Clear the record
+# install_openclaw wrote (rollback.sh Step 1c consumes it). A failure INSIDE
+# Step 6 keeps it on purpose: Step 1c then restores the binary only if every
+# state DB's user_version is unchanged, which is the real safety measure.
+rm -f "$DEPLOY_PATH/.pre-deploy-openclaw-version"
 
 # -------------------------------------------------------------------
 # WARMUP: wait for agents to bind before smoke test
