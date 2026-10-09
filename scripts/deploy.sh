@@ -2458,6 +2458,16 @@ fi
 # discover it. Re-evaluate for docs/runbooks/UPGRADE-2026.8.1.md Phase 3.
 if version_at_least "2026.8" "$OPENCLAW_VERSION"; then
   log "  openclaw ${OPENCLAW_VERSION} >= 2026.8 — inactive-session-delete/mention-gate dist patches are retired-pending-reevaluation on 2.0, skipping (docs/runbooks/UPGRADE-2026.8.1.md)"
+  # gpt-6-sol/gpt-6-luna subscription route (MUS-5128). 2026.8.x routes these ids
+  # to the Platform (api-key) transport only, so the oauth-only fleet fell back to
+  # paid OpenRouter on every turn. 2026.9.x ships the same ids natively: the gate
+  # retires the backport there. Anchor-checked; fails the deploy on drift.
+  if version_at_least "2026.9" "$OPENCLAW_VERSION"; then
+    log "  openclaw ${OPENCLAW_VERSION} >= 2026.9 — gpt-6 subscription route is native, backport skipped"
+  elif ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
+    bash "$HYDRA_ROOT/scripts/patch-openclaw-gpt6-subscription-route.sh"; then
+    fail "OpenClaw gpt-6 subscription route backport failed"
+  fi
 else
   if ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
     bash "$HYDRA_ROOT/scripts/patch-openclaw-inactive-session-delete.sh"; then
