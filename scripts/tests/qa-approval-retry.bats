@@ -1862,7 +1862,7 @@ go_review() { export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMM
 
 @test "floor: depleting mid-tick leaves the second repo unswept, one stand-down line" {
   go_review
-  export STUB_REPOS="Muso-AI/a Muso-AI/b" STUB_RATE_SEQ="5000 999"
+  export STUB_REPOS="Muso-AI/a Muso-AI/b" STUB_RATE_SEQ="5000 5000 999"
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   grep -q 'Muso-AI/a/' "$REVIEWS_CALLS"
@@ -1886,6 +1886,28 @@ go_review() { export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMM
   [[ "$line" == *"budget of 2"* ]]
   [[ "$line" == *"2 REST call(s)"* ]]
   [[ "$line" == *"Muso-AI/web-credits-next#3"* ]]
+}
+
+@test "floor: quota that empties mid-repo stops before the next candidate, one line, exit 0" {
+  export STUB_PRS_JSON="$(jq -nc '[range(1;6)|{number:.,headRefOid:"abc123",author:{login:"azure-kirin"},isDraft:false}]')"
+  # probes: repo(1) + candidate 1 + candidate 2 healthy, candidate 3 below floor
+  export STUB_RATE_SEQ="5000 5000 5000 999"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$REVIEWS_CALLS" | tr -d ' ')" -eq 2 ]
+  n="$(printf '%s\n' "${lines[@]}" | grep -c 'RATE FLOOR')"
+  [ "$n" -eq 1 ]
+  line="$(printf '%s\n' "${lines[@]}" | grep 'RATE FLOOR')"
+  [[ "$line" == *"remaining=999"* ]]
+  [[ "$line" == *"Muso-AI/web-credits-next#3"* ]]
+}
+
+@test "floor: a dead rate_limit probe mid-repo fails open — candidates still read" {
+  export STUB_PRS_JSON="$(jq -nc '[range(1;4)|{number:.,headRefOid:"abc123",author:{login:"azure-kirin"},isDraft:false}]')"
+  export STUB_RATE_RC=1
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$REVIEWS_CALLS" | tr -d ' ')" -eq 3 ]
 }
 
 @test "budget: a non-numeric QA_APPROVAL_RETRY_MAX_CALLS warns and falls back to 600" {

@@ -745,7 +745,7 @@ me_norm="$(norm_login "$me")"
 log "tick start — ${#REPOS[@]} repo(s) in scope${DRY_RUN:+, dry_run=$DRY_RUN}"
 considered=0; approved=0; declined=0; skipped=0; read_fail=0; alerts_unpublished=0; raced=0; repo_fail=0; reviews_fail=0; truncated=0; safety_considered=0; safety_fail=0; unsafe_unflagged=0; self_authored=0; declined_permanent=0
 
-budget_hit=0; rate_warned=0; repo_idx=0; budget_at=""
+budget_hit=0; floor_hit=0; floor_at=""; floor_rem=""; rate_warned=0; repo_idx=0; budget_at=""
 for repo in "${REPOS[@]}"; do
   # Floor probe, before every repo (this also covers tick start: repo 1). Free
   # call, see qar_rate_core. Below the floor the whole tick stops — `continue`
@@ -810,6 +810,14 @@ for repo in "${REPOS[@]}"; do
     # Per-tick REST budget, checked per candidate before it spends anything.
     if [ "$rest_calls" -ge "$MAX_CALLS" ]; then
       budget_hit=1; budget_at="$repo#$pr"; break
+    fi
+    # The budget above counts calls, not pages, so it can sit under its ceiling
+    # while the shared bucket empties (hydra#1119 review). The ceiling that
+    # holds is the REAL remaining quota, re-read before every candidate: free
+    # call, same fail-open as the per-repo probe (an unreadable answer proceeds).
+    rate="$(qar_rate_core "$repo")"
+    if [ "$rate" != "ERR" ] && [ "${rate%% *}" -lt "$RATE_FLOOR" ]; then
+      floor_hit=1; floor_at="$repo#$pr"; floor_rem="${rate%% *}"; break
     fi
     considered=$((considered + 1))
 
@@ -1083,8 +1091,12 @@ for repo in "${REPOS[@]}"; do
   if [ "$repo_self" -gt 0 ]; then
     log "SKIP: $repo — $repo_self PR(s) authored by the acting QA identity ($me); self-approval is permanently blocked by GitHub, so they cost 0 reads"
   fi
-  if [ "$budget_hit" -eq 1 ]; then break; fi
+  if [ "$budget_hit" -eq 1 ] || [ "$floor_hit" -eq 1 ]; then break; fi
 done
+
+if [ "$floor_hit" -eq 1 ]; then
+  log "RATE FLOOR: core remaining=$floor_rem is below floor=$RATE_FLOOR at $floor_at — standing down mid-repo; $(( ${#REPOS[@]} - repo_idx )) repo(s) after it not swept. Expected steady state, not a failure."
+fi
 
 if [ "$budget_hit" -eq 1 ]; then
   log "CALL BUDGET: $rest_calls REST call(s) reached the per-tick budget of $MAX_CALLS — standing down at $budget_at; $(( ${#REPOS[@]} - repo_idx )) repo(s) after it not swept. Counts calls, not pages, so real spend is higher. Expected steady state, not a failure."
