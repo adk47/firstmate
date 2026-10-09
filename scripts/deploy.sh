@@ -13,7 +13,7 @@ set -euo pipefail
 # IS node-8 or a similar Linux host with /root/.openclaw/ access.
 # In practice: SSH into node-8 first, then run deploy.sh from there.
 #     ssh -i ~/.ssh/nick_ovh root@40.160.32.80
-#     cd /opt/hydra && ./scripts/deploy.sh [--target main|edge|all]
+#     cd /opt/hydra && ./scripts/deploy.sh [--target main|edge|all] [--report-only]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HYDRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -198,13 +198,17 @@ export LC_ALL=C
 
 # Parse --target flag
 TARGET="all"
+# --report-only (env twin HYDRA_REPORT_ONLY=1): run Step 0 + Step 4a, then exit
+# before anything mutates. See the exit after preflight_drift_check below.
+REPORT_ONLY="${HYDRA_REPORT_ONLY:-0}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target)
       [[ -z "${2:-}" ]] && { echo "Error: --target requires a value (main|edge|all)"; exit 1; }
       TARGET="$2"; shift 2 ;;
+    --report-only) REPORT_ONLY=1; shift ;;
     main|edge|all) TARGET="$1"; shift ;;
-    *) echo "Usage: deploy.sh [--target main|edge|all]"; exit 1 ;;
+    *) echo "Usage: deploy.sh [--target main|edge|all] [--report-only]"; exit 1 ;;
   esac
 done
 
@@ -218,7 +222,14 @@ for t in "${TARGET_PARTS[@]}"; do
 done
 
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"; }
-fail() { log "FATAL: $*"; notify_slack ":x: HYDRA deploy FAILED ($TARGET): $*"; exit 1; }
+# A --report-only run is a read-only probe, not a deploy: a blocking rail exits
+# non-zero but must not raise a "deploy FAILED" alarm in #hydra-heartbeat.
+fail() { log "FATAL: $*"; [[ "$REPORT_ONLY" == "1" ]] || notify_slack ":x: HYDRA deploy FAILED ($TARGET): $*"; exit 1; }
+# --report-only reports the rails; HYDRA_FORCE / HYDRA_SKIP_DRIFT_CHECK bypass
+# them, so a bypassed run would exit 0 "clean" without having checked anything.
+if [[ "$REPORT_ONLY" == "1" ]] && { [[ "${HYDRA_FORCE:-0}" == "1" ]] || [[ "${HYDRA_SKIP_DRIFT_CHECK:-0}" == "1" ]]; }; then
+  fail "--report-only refuses to run with HYDRA_FORCE=1 or HYDRA_SKIP_DRIFT_CHECK=1: those bypass the rails it exists to report. Unset them."
+fi
 needs_target() { [[ "$TARGET" == "all" || ",$TARGET," == *",$1,"* ]]; }
 
 notify_slack() {
@@ -881,7 +892,7 @@ trap 'release_deploy_lock "$LOCK_DIR"' EXIT
 # instead of swallowing the error with `|| true`. The whole point of
 # setting hooks up here is "guarantee they're active"; silently
 # failing would break that guarantee while pretending it succeeded.
-if [[ -x "$SCRIPT_DIR/setup-hooks.sh" ]] && [[ -d "$HYDRA_ROOT/.git" ]]; then
+if [[ "$REPORT_ONLY" != "1" ]] && [[ -x "$SCRIPT_DIR/setup-hooks.sh" ]] && [[ -d "$HYDRA_ROOT/.git" ]]; then
   if ! hook_setup_out=$("$SCRIPT_DIR/setup-hooks.sh" 2>&1); then  # hydra-hook: reviewed-indirection (repo script by path)
     log "  WARNING: setup-hooks.sh failed — pre-commit guard may not be active."
     log "  Run manually to investigate: scripts/setup-hooks.sh"
@@ -2243,6 +2254,18 @@ DEL_BRIEFING
 }
 preflight_drift_check
 
+# -------------------------------------------------------------------
+# --report-only: both read-only rails (Step 0 drift, Step 4a pre-flight) passed
+# — a blocking rail has already exited non-zero through fail() with its normal
+# briefing. Stop HERE, before the muso CLI pin (Step 4a.5), the mutation-marker
+# claim and every non-dry-run rsync, so nothing on the server is touched and
+# .deployed-sha is never written. Reuses the functions and RSYNC_EXCLUDES above;
+# it deliberately has no rail logic of its own.
+# -------------------------------------------------------------------
+if [[ "$REPORT_ONLY" == "1" ]]; then
+  log "--report-only: Step 0 and Step 4a are clean. Exiting before any mutation (no marker, no sync, no .deployed-sha)."
+  exit 0
+fi
 
 # -------------------------------------------------------------------
 # Step 4a.5: pin the muso CLI — BEFORE anything is synced.
