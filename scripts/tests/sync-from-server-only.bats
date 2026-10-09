@@ -84,9 +84,9 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   # target for a workspaces/ path, or this exact command exits 1 with "not
   # under the 'skills' target". This proves the FIXED command (workspaces
   # target) actually succeeds, closing the loop QA opened.
-  run "$SCRIPT" workspaces --apply --only workspaces/operations/skills/foo/SKILL.md
+  run "$SCRIPT" workspaces --apply --only workspaces/cmo/skills/accuracy-protocol/SKILL.md
   [ "$status" -eq 0 ]
-  grep -qF '/./workspaces/operations/skills/foo/SKILL.md' "$RSYNC_CALLS"
+  grep -qF '/./workspaces/cmo/skills/accuracy-protocol/SKILL.md' "$RSYNC_CALLS"
 }
 
 @test "--only path outside the target subdir is rejected" {
