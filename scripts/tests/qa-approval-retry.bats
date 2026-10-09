@@ -1866,7 +1866,8 @@ go_review() { export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMM
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   grep -q 'Muso-AI/a/' "$REVIEWS_CALLS"
-  ! grep -q 'Muso-AI/b/' "$REVIEWS_CALLS"
+  # `! cmd` is exempt from set -e, so a failure here would be silently ignored.
+  if grep -q 'Muso-AI/b/' "$REVIEWS_CALLS"; then false; fi
   n="$(printf '%s\n' "${lines[@]}" | grep -c 'RATE FLOOR')"
   [ "$n" -eq 1 ]
   [[ "${lines[*]}" == *"1 of 2 repo(s) not swept"* ]]
