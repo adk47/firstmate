@@ -1548,11 +1548,18 @@ Environment=\"OPENCLAW_DIAGNOSTICS_TIMELINE_PATH=${DIAG_DIR}/main-timeline.jsonl
   # back to ~2 GB within 30 min of a restart), so a higher ceiling is the fix.
   # Snapshots were disabled (cost: ~2.5 min GC pause + 6-6.8 GB per crash).
   # tmpfiles ages out any lingering snapshots from prior crashes after 3d.
+  # main runs at 12 GiB (it OOMed at 8 GiB on 2026-10-07/08); edge keeps 8 GiB.
+  # The 12 GiB used to come from a hand-placed zz-heap-bridge.conf on node-8;
+  # the cap is raised HERE before that file is removed below, never after.
+  heap_mb=8192
+  if [ "$profile" = "main" ]; then
+    heap_mb=12288
+  fi
   cat > "$drop_dir/override.conf" << GATEWAYDROP
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
 # Reference template: scripts/aux-units/openclaw-gateway.override.conf
 [Service]
-Environment="NODE_OPTIONS=--max-old-space-size=8192 --diagnostic-dir=${HEAP_SNAPSHOT_DIR}"
+Environment="NODE_OPTIONS=--max-old-space-size=${heap_mb} --diagnostic-dir=${HEAP_SNAPSHOT_DIR}"
 ${trace_env}
 ExecStartPre=$HYDRA_ROOT/scripts/openclaw-pre-start-heal.sh ${profile}
 ${reindex_hook}
@@ -1560,6 +1567,14 @@ ${reindex_hook}
 StartLimitBurst=5
 StartLimitIntervalSec=120
 GATEWAYDROP
+  # Retire the hand-placed bridge (sorts after override.conf, so it would win
+  # and re-add the snapshot flag). Exact filename, main's dir only. The caller's
+  # daemon-reload below picks the removal up. No `systemctl revert`: that would
+  # also delete this managed override.conf.
+  if [ "$profile" = "main" ] && [ -e "$drop_dir/zz-heap-bridge.conf" ]; then
+    rm -f "$drop_dir/zz-heap-bridge.conf"
+    log "  removed stale hand-placed $drop_dir/zz-heap-bridge.conf (cap now managed: ${heap_mb} MB)"
+  fi
   log "  installed drop-in for openclaw-gateway-${profile}.service"
 done
 
