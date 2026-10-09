@@ -364,21 +364,20 @@ class TestRenderTextDigest(unittest.TestCase):
 
         text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20)
 
-        self.assertIn("CS open-conversation review daily digest", text)
+        self.assertIn("CS Intercom open-state reconciliation — daily", text)
         self.assertIn("customer-side activity is latest: 3", text)
         self.assertIn(
             "team-side activity is latest, or team initiated with no recorded "
             "customer reply: 1", text)
         self.assertIn(
-            "customer is last recorded replier; last customer reply 1h ago", text)
+            "last recorded reply: customer, 1h ago", text)
         self.assertIn(
-            "customer and team share the latest recorded reply time; "
-            "last customer reply 2h ago", text)
+            "customer and team reply timestamps tied, 2h ago", text)
         self.assertIn(
-            "customer-initiated; opened 2h ago; no recorded reply", text)
+            "customer-initiated; opened 2h ago; no reply timestamp recorded", text)
         self.assertIn(
-            "Open status and reply order do not prove that a customer went unanswered.",
-            text)
+            "Handover records may already be resolved in practice", text)
+        self.assertIn("Verify each record before follow-up or closure", text)
         self.assertNotIn("waiting", text.lower())
         self.assertNotIn("aging", text.lower())
 
@@ -414,7 +413,7 @@ class TestBuildDigestBlocks(unittest.TestCase):
         c = conv(cid="OLD", lar=0, lcr=0, created_at=now - (72 * 3600))  # 72h old
         buckets = d.bucket_conversations([c], set())
         blocks = d.build_digest_blocks(buckets, now_epoch=now)
-        self.assertIn("customer-side activity older than 48h", str(blocks))
+        self.assertIn("customer-side timestamp older than 48h", str(blocks))
 
     def test_full_blocks_use_neutral_title_counts_rows_and_caveat(self):
         now = 1_000_000
@@ -425,10 +424,14 @@ class TestBuildDigestBlocks(unittest.TestCase):
         rendered = str(blocks)
 
         self.assertEqual(
-            blocks[0]["text"]["text"], "CS open-conversation review daily digest")
+            blocks[0]["text"]["text"], "CS Intercom open-state reconciliation — daily")
+        self.assertIn("not confirmed unresolved requests", blocks[1]["text"]["text"])
         self.assertIn("customer-side activity is latest", rendered)
-        self.assertIn("older than 20h since customer-side activity", rendered)
-        self.assertIn("do not prove that a customer went unanswered", rendered)
+        self.assertIn("customer-side timestamp older than 20h", rendered)
+        self.assertIn("Handover records may already be resolved in practice", rendered)
+        self.assertIn("Verify each record before follow-up or closure", rendered)
+        self.assertNotIn(":rotating_light:", rendered)
+        self.assertNotIn("⚠️", rendered)
         self.assertNotIn("waiting", rendered.lower())
         self.assertNotIn("aging", rendered.lower())
 
@@ -1041,7 +1044,7 @@ class TestAgingRenderingAndMention(unittest.TestCase):
         c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
         buckets = d.bucket_conversations([c], set())
         text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20)
-        self.assertIn("older than 20h since customer-side activity", text)
+        self.assertIn("customer-side timestamp older than 20h", text)
         self.assertNotIn("aging", text.lower())
 
     def test_aging_line_appears_in_blocks(self):
@@ -1049,7 +1052,7 @@ class TestAgingRenderingAndMention(unittest.TestCase):
         c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
         buckets = d.bucket_conversations([c], set())
         blocks = d.build_digest_blocks(buckets, now_epoch=now, aging_hours=20)
-        self.assertIn("older than 20h since customer-side activity", str(blocks))
+        self.assertIn("customer-side timestamp older than 20h", str(blocks))
         self.assertNotIn("aging", str(blocks).lower())
 
     def test_no_aging_line_when_under_threshold(self):
@@ -1120,12 +1123,13 @@ class TestMentionComputedOnceAndNoHeaderDuplication(unittest.TestCase):
         title_occurrences = sum(
             1 for b in blocks
             if b["type"] == "header"
-            and b["text"]["text"] == "CS open-conversation review delta"
+            and b["text"]["text"] == "CS Intercom open-state reconciliation — delta"
         )
         self.assertEqual(title_occurrences, 1)
         section_texts = [b["text"]["text"] for b in blocks if b["type"] == "section"]
         self.assertFalse(
-            any("CS open-conversation review delta" in t for t in section_texts))
+            any("CS Intercom open-state reconciliation — delta" in t for t in section_texts))
+        self.assertIn("not confirmed unresolved requests", section_texts[0])
 
     def test_delta_digest_uses_neutral_counts_rows_and_caveat(self):
         now = 1_000_000
@@ -1137,20 +1141,21 @@ class TestMentionComputedOnceAndNoHeaderDuplication(unittest.TestCase):
         text = d.render_delta_digest(
             [replied, tied, opened], [opened], now_epoch=now, top_n=15)
 
-        self.assertIn("CS open-conversation review delta", text)
-        self.assertIn("new to this digest: 3", text)
+        self.assertIn("CS Intercom open-state reconciliation — delta", text)
+        self.assertIn("first shown in this digest: 3", text)
         self.assertIn(
-            "older than 20h since customer-side activity: 1", text)
+            "customer-side timestamp older than 20h: 1", text)
         self.assertIn(
-            "customer is last recorded replier; last customer reply 1h ago", text)
+            "last recorded reply: customer, 1h ago", text)
         self.assertIn(
-            "customer and team share the latest recorded reply time; "
-            "last customer reply 2h ago", text)
+            "customer and team reply timestamps tied, 2h ago", text)
         self.assertIn(
-            "customer-initiated; opened 25h ago; no recorded reply", text)
+            "customer-initiated; opened 25h ago; no reply timestamp recorded", text)
         self.assertIn(
-            "Open status and reply order do not prove that a customer went unanswered.",
-            text)
+            "Handover records may already be resolved in practice", text)
+        self.assertIn("Verify each record before follow-up or closure", text)
+        self.assertNotIn("⚠️", text)
+        self.assertNotIn(":rotating_light:", text)
         self.assertNotIn("waiting", text.lower())
         self.assertNotIn("aging", text.lower())
 
@@ -1272,7 +1277,7 @@ class TestMainDeltaFlow(unittest.TestCase):
              redirect_stdout(out), redirect_stderr(err):
             rc = d.main()
         self.assertEqual(rc, 0)
-        self.assertIn("CS open-conversation review daily digest", out.getvalue())
+        self.assertIn("CS Intercom open-state reconciliation — daily", out.getvalue())
         self.assertIn("corrupt", err.getvalue())
 
     def test_corrupt_state_full_post_renders_and_posts_but_skips_persistence(self):

@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Daily READ-ONLY "needs-human" ranked digest of open Intercom conversations.
+"""Daily READ-ONLY reconciliation view of open Intercom conversations.
 
 Phase 0.3 of docs/plans/autonomous-cs-machine.md. Every live sweeper
 (close-resolved-conversations, resolve-notify, resolution-matcher,
 overdue-verification-notifier, close-merged-tickets) only acts on
 conversations it can already tie to a resolved ticket or a shipped fix. The
 residue — open conversations nothing has touched — piles up with no single
-ranked view for Jan, who otherwise has to pull ClickUp by hand. This script
-lists OPEN Intercom conversations, EXCLUDES anything a sibling sweeper's
-state already owns (the de-confliction invariant — double-surfacing wastes
-Jan's time), buckets what's left, ranks the actionable residue by age, and
+ranked view for Jan, who otherwise has to pull ClickUp by hand. During the
+CS handover, some of these records were resolved in practice but left open
+in Intercom. Open state and reply timestamps cannot establish resolution.
+This script lists OPEN Intercom conversations, EXCLUDES anything a sibling
+sweeper's state already owns (the de-confliction invariant — double-surfacing
+wastes Jan's time), buckets what's left for record-level reconciliation, and
 posts ONE Block Kit digest to #cs_chats.
 
 THIS SCRIPT IS READ-ONLY ON INTERCOM. It never closes, snoozes, tags,
@@ -23,13 +25,16 @@ requires a follow-up GET /contacts/{id} (also read-only), cached at module
 level by contact id to avoid an N+1 GET per conversation.
 
 Buckets (deterministic, no LLM judgment):
-  - needs-human:          customer spoke last (last_contact_reply_at >
-                           last_admin_reply_at, or never replied to) — we
-                           owe them a reply. Ranked newest-waiting-first.
-                           Only threads with customer-side activity within
+  - needs-human:          historical internal bucket name for records where
+                           customer spoke last (last_contact_reply_at >
+                           last_admin_reply_at, or never replied to). It
+                           does NOT establish an outstanding request.
+                           Ranked newest-customer-activity-first. Only
+                           records with customer-side activity within
                            CS_DIGEST_ACTIONABLE_DAYS are listed; older ones
                            are counted in one rolled-up "backlog:" line.
-  - needs-customer-input: we (admin) spoke last — waiting on the customer.
+  - needs-customer-input: team spoke last; this does not establish that the
+                           customer still needs to respond.
   - dup-candidate:        the same contact email has >=2 open conversations
                            (checked independent of the two buckets above).
 
@@ -103,16 +108,16 @@ Env:
                                 persisting to the known-bad file (never
                                 overwrites corruption with a
                                 reconstructed-from-empty state).
-  CS_DIGEST_AGING_HOURS         optional, default 20 — a needs-human item
-                                waiting longer than this gets a distinct
-                                "⚠️ aging" line in both full and delta digests.
-  CS_DIGEST_ACTIONABLE_DAYS     optional, default 30 — needs-human items whose
-                                waiting_since is older than this many days are
-                                backlog, not actionable: never listed, only
-                                counted in one rolled-up "backlog:" line.
-                                Applied once in main(), so both digests, the
-                                --delta state and the Jev shadow pool see
-                                actionable items only.
+  CS_DIGEST_AGING_HOURS         optional, default 20 — an internal bucket item
+                                with an older customer-side timestamp gets a
+                                distinct factual age label in both digests.
+  CS_DIGEST_ACTIONABLE_DAYS     optional, default 30 — internal bucket items
+                                whose customer-side timestamp is older than
+                                this many days are backlog, not actionable:
+                                never listed, only counted in one rolled-up
+                                "backlog:" line. Applied once in main(), so
+                                both digests, the --delta state and the Jev
+                                shadow pool see actionable items only.
   CS_DIGEST_AGING_MENTION_UID   optional — Slack user id (e.g. U038BM16T7W)
                                 rendered as <@UID> in the header line, ONLY
                                 when at least one aging item is present in
@@ -936,21 +941,23 @@ def _threshold_label(hours):
 
 
 def _customer_activity_fact(c, now_epoch):
-    """Slack-visible facts only; never infer that a customer was unanswered."""
+    """Slack-visible timestamps only; never infer unresolved customer work."""
     if c["lcr"] > c["lar"]:
-        return ("customer is last recorded replier; last customer reply "
-                f"{age_str(c['lcr'], now_epoch)} ago")
+        return f"last recorded reply: customer, {age_str(c['lcr'], now_epoch)} ago"
     if c["lcr"]:
-        return ("customer and team share the latest recorded reply time; "
-                f"last customer reply {age_str(c['lcr'], now_epoch)} ago")
+        return ("customer and team reply timestamps tied, "
+                f"{age_str(c['lcr'], now_epoch)} ago")
     return ("customer-initiated; opened "
-            f"{age_str(waiting_since(c), now_epoch)} ago; no recorded reply")
+            f"{age_str(waiting_since(c), now_epoch)} ago; no reply timestamp recorded")
 
 
-DAILY_TITLE = "CS open-conversation review daily digest"
-DELTA_TITLE = "CS open-conversation review delta"
+DAILY_TITLE = "CS Intercom open-state reconciliation — daily"
+DELTA_TITLE = "CS Intercom open-state reconciliation — delta"
 REPLY_ORDER_CAVEAT = (
-    "Open status and reply order do not prove that a customer went unanswered."
+    "These are Intercom-open records, not confirmed unresolved requests. "
+    "Handover records may already be resolved in practice. Reply timestamps "
+    "do not establish whether a customer needs help. Verify each record "
+    "before follow-up or closure."
 )
 SLACK_SECTION_CHAR_LIMIT = 3000
 
@@ -1004,12 +1011,13 @@ def _delta_body_lines(new_items, aging_items, now_epoch, top_n,
     rendered, overflow = _cap_delta_items(new_items, aging_items, top_n)
     threshold = _threshold_label(aging_hours)
     lines = [
-        f"new to this digest: {len(new_items)}  "
-        f"older than {threshold} since customer-side activity: {len(aging_items)}"
+        REPLY_ORDER_CAVEAT,
+        f"first shown in this digest: {len(new_items)}  "
+        f"customer-side timestamp older than {threshold}: {len(aging_items)}"
     ]
     for c in rendered:
         threshold_suffix = (
-            f"  ⚠️ older than {threshold} since customer-side activity"
+            f"  customer-side timestamp older than {threshold}"
             if c in aging_items else "")
         lines.append(f"  {intercom_link(c['id'])}  {mask_email(c['email'])}  "
                      f"{_customer_activity_fact(c, now_epoch)}{threshold_suffix}")
@@ -1018,7 +1026,6 @@ def _delta_body_lines(new_items, aging_items, now_epoch, top_n,
     backlog = _backlog_line(backlog_count, window_days)
     if backlog:
         lines.append(backlog)
-    lines.append(REPLY_ORDER_CAVEAT)
     return lines
 
 
@@ -1096,7 +1103,7 @@ def _slack_escape(s):
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-SLA_HOURS_FLAG = 48  # surfaced as "past a reasonable SLA", never a promise
+ACTIVITY_48H_HOURS = 48  # elapsed timestamp only, not an SLA or request status
 
 
 def build_digest_blocks(buckets, now_epoch, top_n=DEFAULT_TOP_N,
@@ -1117,6 +1124,8 @@ def build_digest_blocks(buckets, now_epoch, top_n=DEFAULT_TOP_N,
     ]
     if mention:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": mention}})
+    blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                   "text": f"_{REPLY_ORDER_CAVEAT}_"}})
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
         f"*customer-side activity is latest:* {len(nh)}  ·  "
         f"*older than {_threshold_label(aging_hours)} since customer-side activity:* "
@@ -1127,22 +1136,20 @@ def build_digest_blocks(buckets, now_epoch, top_n=DEFAULT_TOP_N,
     backlog = _backlog_line(buckets.get("backlog_count", 0), window_days)
     if backlog:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": backlog}})
-    blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                   "text": f"_{REPLY_ORDER_CAVEAT}_"}})
     if not nh:
         blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                       "text": (":white_check_mark: no open conversations currently "
-                                "have customer-side activity as the latest recorded event.")}})
+                       "text": ("No matching Intercom-open records have customer-side "
+                                "activity as the latest recorded event.")}})
         return blocks
 
     lines = []
     threshold = _threshold_label(aging_hours)
     for c in nh[:top_n]:
         since = waiting_since(c)
-        flag = (" :rotating_light: customer-side activity older than 48h"
-                if now_epoch - since > SLA_HOURS_FLAG * 3600 else "")
+        flag = (" customer-side timestamp older than 48h"
+                if now_epoch - since > ACTIVITY_48H_HOURS * 3600 else "")
         threshold_flag = (
-            f"  ⚠️ older than {threshold} since customer-side activity"
+            f"  customer-side timestamp older than {threshold}"
             if c in aging_items else "")
         lines.append(
             f"• <{intercom_link(c['id'])}|conversation {c['id']}> — "
@@ -1165,6 +1172,7 @@ def render_text_digest(buckets, now_epoch, top_n=DEFAULT_TOP_N,
         mention = _mention_prefix(mention_uid, aging_items)
     lines = [
         mention + DAILY_TITLE,
+        REPLY_ORDER_CAVEAT,
         f"customer-side activity is latest: {len(nh)}  "
         f"older than {_threshold_label(aging_hours)} since customer-side activity: "
         f"{len(aging_items)}  "
@@ -1175,11 +1183,10 @@ def render_text_digest(buckets, now_epoch, top_n=DEFAULT_TOP_N,
     backlog = _backlog_line(buckets.get("backlog_count", 0), window_days)
     if backlog:
         lines.append(backlog)
-    lines.append(REPLY_ORDER_CAVEAT)
     threshold = _threshold_label(aging_hours)
     for c in nh[:top_n]:
         threshold_suffix = (
-            f"  ⚠️ older than {threshold} since customer-side activity"
+            f"  customer-side timestamp older than {threshold}"
             if c in aging_items else "")
         lines.append(f"  {intercom_link(c['id'])}  {mask_email(c['email'])}  "
                      f"{_customer_activity_fact(c, now_epoch)}{threshold_suffix}")
