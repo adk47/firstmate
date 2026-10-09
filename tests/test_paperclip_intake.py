@@ -135,6 +135,7 @@ class FakePaperclip:
 
     def close(self):
         self.server.shutdown()
+        self.server.server_close()
 
 
 class Base(unittest.TestCase):
@@ -145,7 +146,12 @@ class Base(unittest.TestCase):
         self.keyfile.write_text(KEY + "\n")
         self.keyfile.chmod(0o600)
         self.env = {"PAPERCLIP_INTAKE_URL": self.api.url,
-                    "PAPERCLIP_INTAKE_KEY_FILE": str(self.keyfile)}
+                    "PAPERCLIP_INTAKE_KEY_FILE": str(self.keyfile),
+                    "PAPERCLIP_INTAKE_STATE": str(pathlib.Path(self.tmp.name) / "wake-state")}
+        self.wakes = []
+        real = pi.wake_job
+        pi.wake_job = self.wakes.append
+        self.addCleanup(setattr, pi, "wake_job", real)
         self.addCleanup(self.api.close)
         self.addCleanup(self.tmp.cleanup)
 
@@ -254,7 +260,7 @@ class FileTests(Base):
         self.assertEqual(len(fps), 2)
 
     def test_card_carries_agent_name_fp_token_and_intake_marker(self):
-        self.file("deploy failed", agent="operations")
+        self.file("deploy failed", component="operations", agent="operations")
         card = next(iter(self.api.issues.values()))
         self.assertIn("Filed by: operations", card["description"])
         self.assertIn(f"fp:{pi.fingerprint('deploy failed', 'operations')}", card["description"])
@@ -336,35 +342,37 @@ class FileTests(Base):
 
 class PrecheckTests(Base):
     def test_empty_queue_prints_nothing_and_wakes_nobody(self):
-        woke = []
-        rc, out, _ = self.run_cli("precheck", "--wake-job", "job-1",
-                                  env={**self.env, "_WAKE": "1"})
+        rc, out, _ = self.run_cli("precheck", "--wake-job", "job-1")
         self.assertEqual(rc, 0)
         self.assertEqual(out, "")
-        self.assertEqual(pi.WAKES, [])
+        self.assertEqual(self.wakes, [])
 
     def test_waiting_card_wakes_the_triage_job_once(self):
         self.file("deploy failed")
         self.file("cron failed")
-        pi.WAKES.clear()
         rc, out, _ = self.run_cli("precheck", "--wake-job", "job-1")
         self.assertEqual(rc, 0)
-        self.assertEqual(pi.WAKES, ["job-1"])
+        self.assertEqual(self.wakes, ["job-1"])
         self.assertEqual(json.loads(out)["waiting"], 2)
 
     def test_triaged_cards_do_not_wake(self):
         self.file("deploy failed")
         next(iter(self.api.issues.values()))["status"] = "in_progress"
-        pi.WAKES.clear()
         self.run_cli("precheck", "--wake-job", "job-1")
-        self.assertEqual(pi.WAKES, [])
+        self.assertEqual(self.wakes, [])
+
+    def test_does_not_rewake_inside_the_window_while_clio_is_working(self):
+        self.file("deploy failed")
+        self.run_cli("precheck", "--wake-job", "job-1")
+        rc, out, _ = self.run_cli("precheck", "--wake-job", "job-1")
+        self.assertEqual(self.wakes, ["job-1"])
+        self.assertFalse(json.loads(out)["woke"])
 
     def test_search_failure_exits_nonzero_and_does_not_wake(self):
-        pi.WAKES.clear()
         env = {**self.env, "PAPERCLIP_INTAKE_URL": "http://127.0.0.1:1"}
         rc, _, err = self.run_cli("precheck", "--wake-job", "job-1", env=env)
         self.assertNotEqual(rc, 0)
-        self.assertEqual(pi.WAKES, [])
+        self.assertEqual(self.wakes, [])
 
     def test_precheck_makes_no_agent_turn(self):
         # Zero-token: the script is stdlib HTTP only and its only wake is the
