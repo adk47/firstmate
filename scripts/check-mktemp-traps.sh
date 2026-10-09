@@ -47,7 +47,16 @@ region() {
         else if ($0 !~ /^[[:space:]]*\{/) blk = 0   # Allman: a lone "{" keeps the function open
       }
       id[NR] = blk
-      t = $0; d += gsub(/\{/, "", t); d -= gsub(/\}/, "", t)
+      # count only braces outside quotes and not backslash-escaped: a quoted "{" is data, not scope
+      q = ""; esc = 0
+      for (i = 1; i <= length($0); i++) {
+        c = substr($0, i, 1)
+        if (esc) { esc = 0; continue }
+        if (c == "\\" && q != "\047") { esc = 1; continue }
+        if (q != "") { if (c == q) q = ""; continue }
+        if (c == "\"" || c == "\047") { q = c; continue }
+        if (c == "{") d++; else if (c == "}") d--
+      }
       if (d < 0) d = 0
     }
     END { for (i = 1; i <= NR; i++) if (id[i] == id[n]) print l[i] }
@@ -66,7 +75,12 @@ fn_body() {
 RE_Q1="trap[[:space:]]+(--[[:space:]]+)?'([^']*)'[[:space:]]+([^;&|]*)"
 RE_Q2='trap[[:space:]]+(--[[:space:]]+)?"(([^"\\]|\\.)*)"[[:space:]]+([^;&|]*)'
 RE_W="trap[[:space:]]+(--[[:space:]]+)?([^[:space:]'\"]+)[[:space:]]+([^;&|]*)"
-RM_VAR_PRE='(^|[^A-Za-z_])rm[[:space:]]'
+# an rm command (at a command start) that itself targets $1: split on ; & | first so an rm of
+# something else plus a mention of $1 in another command is not cleanup evidence
+rm_targets() {
+  tr ';&|' '\n' | grep -E '(^|[{(]|(^|[[:space:]])(then|do|else))[[:space:]]*(command[[:space:]]+)?rm[[:space:]]' \
+    | grep -Eq "\\\$\{?$1([^A-Za-z0-9_]|\$)"
+}
 trap_cleans() {
   local scope="$1" var="$2" tl action sigs fn
   while IFS= read -r tl; do
@@ -76,10 +90,10 @@ trap_cleans() {
     elif [[ "$tl" =~ $RE_W  ]]; then action="${BASH_REMATCH[2]}"; sigs="${BASH_REMATCH[3]}"
     else continue; fi
     printf '%s\n' "$sigs" | grep -Eq "$LIFECYCLE_SIG" || continue
-    if printf '%s\n' "$action" | grep -E "$RM_VAR_PRE" | grep -Eq "\\\$\{?$var([^A-Za-z0-9_]|\$)"; then return 0; fi
+    if printf '%s\n' "$action" | rm_targets "$var"; then return 0; fi
     # handlers: every function the action calls; the rm must sit in that function's own body
     for fn in $(printf '%s\n' "$action" | grep -Eo '(^|[;&[:space:]])[A-Za-z_][A-Za-z0-9_]*' | tr -d ';& \t'); do
-      if printf '%s\n' "$src" | fn_body "$fn" | grep -E "$RM_VAR_PRE" | grep -Eq "\\\$\{?$var([^A-Za-z0-9_]|\$)"; then return 0; fi
+      if printf '%s\n' "$src" | fn_body "$fn" | rm_targets "$var"; then return 0; fi
     done
   done < <(printf '%s\n' "$scope" | grep -E '(^|[^A-Za-z_])trap[[:space:]]')
   return 1

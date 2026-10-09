@@ -260,3 +260,50 @@ SH
   run_guard
   [ "$status" -eq 0 ]
 }
+
+@test "a quoted brace in one function does not merge it with the next function's trap" {
+  cat > "$TEST_TMPDIR/scripts/bracefn.sh" <<'SH'
+#!/bin/bash
+a() { printf "{"; d="$(mktemp -d)"; }
+b() { d="x"; trap 'rm -rf "$d"' EXIT; }
+SH
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"bracefn.sh:2"* ]]
+}
+
+@test "rm and the variable in different commands of a trap action do not count" {
+  cat > "$TEST_TMPDIR/scripts/splitact.sh" <<'SH'
+#!/bin/bash
+work="$(mktemp -d)"; trap 'rm -rf /tmp/other; echo "$work" >/dev/null' EXIT
+SH
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"splitact.sh:2"* ]]
+}
+
+@test "rm and the variable in different commands of a handler function do not count" {
+  cat > "$TEST_TMPDIR/scripts/splitfn.sh" <<'SH'
+#!/bin/bash
+work="$(mktemp -d)"
+bye() { rm -rf /tmp/other; echo "$work" >/dev/null; }
+trap bye EXIT
+SH
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"splitfn.sh:2"* ]]
+}
+
+@test "a multi-command trap action whose rm targets the variable still passes" {
+  cat > "$TEST_TMPDIR/scripts/multi.sh" <<'SH'
+#!/bin/bash
+work="$(mktemp -d)"; trap 'echo bye; rm -rf "$work" && true' EXIT
+d2="$(mktemp -d)"
+bye() {
+  if [ -d "$d2" ]; then rm -rf "$d2"; fi
+}
+trap bye EXIT
+SH
+  run_guard
+  [ "$status" -eq 0 ]
+}
