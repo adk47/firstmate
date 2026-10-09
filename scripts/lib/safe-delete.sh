@@ -122,13 +122,19 @@ safe_delete_has_open_handle() {  # <path>
 
 # Put it back, NEVER clobbering a name another writer has retaken. GNU mv -n
 # exits 0 when it declines, so the move is proven rather than assumed.
-# Nonzero = left quarantined (the optional hook lets the caller account it).
+# Nonzero = left quarantined: reported on stderr and in SD_ERROR; the optional
+# hook lets the caller account it too.
 safe_delete_restore() {  # <quarantined> <original> <qdir>
-  if mv -n -- "$1" "$2" 2>/dev/null && [ ! -e "$1" ] && [ ! -L "$1" ]; then
+  # mv -n onto a retaken DIRECTORY name would nest the object inside it and
+  # exit 0, so a taken name is refused up front; mv -n still covers the race.
+  if [ ! -e "$2" ] && [ ! -L "$2" ] && mv -n -- "$1" "$2" 2>/dev/null && [ ! -e "$1" ] && [ ! -L "$1" ]; then
     rmdir "$3" 2>/dev/null || true
     if declare -F safe_delete_on_restored >/dev/null; then safe_delete_on_restored "$2"; fi
     return 0
   fi
+  # Never silent: the object now sits under a random name nobody was told about.
+  SD_ERROR="${SD_ERROR:+$SD_ERROR; }restore blocked, object left quarantined at $1"
+  echo "safe-delete: $SD_ERROR" >&2
   if declare -F safe_delete_on_restore_blocked >/dev/null; then
     safe_delete_on_restore_blocked "$1"
   fi

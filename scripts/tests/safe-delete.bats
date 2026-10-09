@@ -162,3 +162,35 @@ STUB
   [ "$status" -ne 0 ]
   [ "$(leftovers)" -eq 0 ]
 }
+
+@test "restore blocked (name retaken) via the default handle check: stderr + SD_ERROR name the quarantined object, retaken file survives" {
+  mkdir_with_data "$SANDBOX/root/victim"
+  # 1st lsof call = pre-check (idle). 2nd = post-quarantine scan: reports a
+  # holder AND a writer retakes the name, so the restore must be refused.
+  cat > "$SANDBOX/bin/lsof" <<STUB
+#!/bin/sh
+n=\$(cat "$SANDBOX/lsof.n" 2>/dev/null || echo 0)
+echo \$((n + 1)) > "$SANDBOX/lsof.n"
+if [ "\$n" -ge 1 ]; then
+  mkdir "$SANDBOX/root/victim"
+  echo retaken > "$SANDBOX/root/victim/new"
+  for q in "$SANDBOX"/root/.safe-delete-quarantine.*/victim; do echo "n\$q"; done
+fi
+exit 0
+STUB
+  chmod +x "$SANDBOX/bin/lsof"
+  run --separate-stderr safe_delete_path "$SANDBOX/root/victim"
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"left quarantined at $SANDBOX/root/.safe-delete-quarantine."* ]]
+  [ "$(cat "$SANDBOX/root/victim/new")" = "retaken" ]
+  [ -f "$(echo "$SANDBOX"/root/.safe-delete-quarantine.*/victim/sub/blob)" ]
+}
+
+# A primitive moved into the lib must never be called bare by the sweep: after
+# a merge with a branch that adds a caller, the bare name is command-not-found
+# (127), which `if ! reaudit` swallows — a fail-open guard with no git conflict.
+# Keep this list next to the lib's primitives: a future move updates both.
+@test "sweep calls no bare primitive that moved into the lib" {
+  run grep -nE '(^|[^_[:alnum:]])(mount_hazard|is_mountpoint|path_id|id_stable)[[:space:]]*"?\$?' "$HYDRA_REPO/scripts/sweep-workspace-clones.sh"
+  [ "$status" -ne 0 ]
+}
