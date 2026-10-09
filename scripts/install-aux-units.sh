@@ -1480,8 +1480,9 @@ fi
 HEAP_SNAPSHOT_DIR=/var/lib/hydra/heap-snapshots
 cat > /etc/tmpfiles.d/hydra-heap-snapshots.conf << HEAPTMPFILES
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-# Gateway near-OOM heap snapshots are several GB each; keep 3 days.
-d ${HEAP_SNAPSHOT_DIR} 0700 root root 3d
+# Gateway near-OOM heap snapshots are several GB each; keep 3 days by mtime
+# (not atime/ctime, so reading a snapshot during incident investigation does not reset the timer).
+d ${HEAP_SNAPSHOT_DIR} 0700 root root m:3d
 HEAPTMPFILES
 systemd-tmpfiles --create /etc/tmpfiles.d/hydra-heap-snapshots.conf
 for profile in main edge; do
@@ -1507,14 +1508,13 @@ for profile in main edge; do
   # "heap out of memory" SIGABRT plus a ~10 min post-restart freeze: 8 crashes
   # 2026-09-17..23, two on 09-23 three hours apart. Not a steady leak (heap is
   # back to ~2 GB within 30 min of a restart), so a higher ceiling is the fix.
-  # Near the ceiling node writes ONE heap snapshot per process, so the next
-  # near-OOM names what fills the heap (openclaw's own critical-pressure
-  # snapshot is hard-coded off in 2026.8.2). tmpfiles ages them out after 3d.
+  # Snapshots were disabled (cost: ~2.5 min GC pause + 6-6.8 GB per crash).
+  # tmpfiles ages out any lingering snapshots from prior crashes after 3d.
   cat > "$drop_dir/override.conf" << GATEWAYDROP
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
 # Reference template: scripts/aux-units/openclaw-gateway.override.conf
 [Service]
-Environment="NODE_OPTIONS=--max-old-space-size=8192 --heapsnapshot-near-heap-limit=1 --diagnostic-dir=${HEAP_SNAPSHOT_DIR}"
+Environment="NODE_OPTIONS=--max-old-space-size=8192 --diagnostic-dir=${HEAP_SNAPSHOT_DIR}"
 ExecStartPre=$HYDRA_ROOT/scripts/openclaw-pre-start-heal.sh ${profile}
 ${reindex_hook}
 [Unit]
