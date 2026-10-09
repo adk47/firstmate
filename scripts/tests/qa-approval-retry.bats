@@ -25,6 +25,7 @@ JSON
   export COMMENT_CALLS="$TEST_TMPDIR/comment-calls"; : > "$COMMENT_CALLS"
   export STATUS_CALLS="$TEST_TMPDIR/status-calls";   : > "$STATUS_CALLS"
   export DM_CALLS="$TEST_TMPDIR/dm-calls";           : > "$DM_CALLS"
+  export REVIEWS_CALLS="$TEST_TMPDIR/reviews-calls"; : > "$REVIEWS_CALLS"
   # Never let a test write the real /var/lib/hydra audit dir.
   export QA_APPROVAL_RETRY_LOG_DIR="$TEST_TMPDIR/api-logs/github"
 
@@ -139,6 +140,10 @@ case "${1:-}" in
        printf '%s' "${STUB_PRS_JSON:-[]}" ;;
   api)
     case "${2:-}" in
+      user)
+        # The acting identity. STUB_ME_RC=1 models an App token 403ing here.
+        [ "${STUB_ME_RC:-0}" = "0" ] || exit 1
+        printf '%s\n' "${STUB_ME:-adk47}"; exit 0 ;;
       */issues/*/comments)
         # GET = the idempotency read (what is already on the PR);
         # POST = the alert comment itself. Record the exact JSON body that would
@@ -189,6 +194,7 @@ case "${1:-}" in
         printf '%s' "${STUB_TIMELINE_JSON:-[]}"
         exit 0 ;;
       */reviews)
+        echo "$2" >> "$REVIEWS_CALLS"
         # STUB_REVIEWS_FAIL_PR fails the reviews read for ONE pr number, so a
         # per-candidate failure stays a counter instead of tripping the
         # all-candidates blackout.
@@ -1693,4 +1699,86 @@ SH
   run wc -l < "$APPROVE_CALLS"
   [ "$status" -eq 0 ]
   [ "${output// /}" = "0" ]
+}
+
+
+# ── MUS-6087: self-authored PRs cost zero reads ──────────────────────────
+# Self-approval is permanently blocked by GitHub (qa-pr-approve.sh exit 4), so
+# re-asking every tick only burns the shared REST bucket. Assert on the stub
+# call logs, never on the exit code.
+
+@test "an acting-identity-authored PR costs 0 reviews reads and 0 approve calls" {
+  export STUB_PRS_JSON='[{"number":636,"headRefOid":"abc123","author":{"login":"adk47"},"isDraft":false}]'
+  export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMMENTED","commit_id":"abc123","submitted_at":"2026-08-17T10:51:41Z","body":"**Verdict: GO**"}]'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -s "$REVIEWS_CALLS" ]
+  [ ! -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" == *"1 PR(s) authored by the acting QA identity (adk47)"* ]]
+}
+
+@test "all three login spellings collapse to the acting identity" {
+  for who in adk47 app/adk47 'adk47[bot]' ADK47; do
+    : > "$REVIEWS_CALLS"; : > "$APPROVE_CALLS"
+    export STUB_PRS_JSON="[{\"number\":636,\"headRefOid\":\"abc123\",\"author\":{\"login\":\"$who\"},\"isDraft\":false}]"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ ! -s "$REVIEWS_CALLS" ] || { echo "spelling $who reached the reviews read"; false; }
+    [ ! -s "$APPROVE_CALLS" ]
+  done
+}
+
+@test "a PR by someone else still reaches the approve wrapper" {
+  export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMMENTED","commit_id":"abc123","submitted_at":"2026-08-17T10:51:41Z","body":"**Verdict: GO**"}]'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$REVIEWS_CALLS" ]
+  [ -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" == *"self_authored=0"* ]]
+}
+
+@test "gh api user failing falls back to bot_logins[0] and the skip still works" {
+  export STUB_ME_RC=1
+  # policy bot_logins[0] is muso-qa-bot
+  export STUB_PRS_JSON='[{"number":636,"headRefOid":"abc123","author":{"login":"app/muso-qa-bot"},"isDraft":false}]'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -s "$REVIEWS_CALLS" ]
+  [ ! -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" == *"(muso-qa-bot)"* ]]
+}
+
+@test "self-authored skip logs once per repo, not once per PR" {
+  export STUB_PRS_JSON='[{"number":1,"headRefOid":"a","author":{"login":"adk47"},"isDraft":false},{"number":2,"headRefOid":"b","author":{"login":"adk47"},"isDraft":false},{"number":3,"headRefOid":"c","author":{"login":"adk47"},"isDraft":false}]'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  n="$(printf '%s\n' "${lines[@]}" | grep -c 'authored by the acting QA identity')"
+  [ "$n" -eq 1 ]
+  [[ "${lines[*]}" == *"3 PR(s) authored"* ]]
+  [[ "${lines[*]}" == *"self_authored=3"* ]]
+}
+
+@test "a permanent wrapper decline (exit 4) logs DECLINED-PERMANENT; exit 8 stays transient" {
+  export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMMENTED","commit_id":"abc123","submitted_at":"2026-08-17T10:51:41Z","body":"**Verdict: GO**"}]'
+  export STUB_APPROVE_RC=4
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "${lines[*]}" == *"DECLINED-PERMANENT (exit 4)"* ]]
+  [[ "${lines[*]}" == *"declined_permanent=1"* ]]
+  [[ "${lines[*]}" == *"declined=0"* ]]
+  export STUB_APPROVE_RC=8
+  run "$SCRIPT"
+  [[ "${lines[*]}" == *"DECLINED (exit 8)"* ]]
+  [[ "${lines[*]}" != *"DECLINED-PERMANENT"* ]]
+  [[ "${lines[*]}" == *"declined_permanent=0"* ]]
+  [[ "${lines[*]}" == *"declined=1"* ]]
+}
+
+@test "every permanent exit code is classified permanent" {
+  export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMMENTED","commit_id":"abc123","submitted_at":"2026-08-17T10:51:41Z","body":"**Verdict: GO**"}]'
+  for rc in 3 4 5 11 12; do
+    export STUB_APPROVE_RC=$rc
+    run "$SCRIPT"
+    [[ "${lines[*]}" == *"DECLINED-PERMANENT (exit $rc)"* ]] || { echo "exit $rc not permanent"; false; }
+  done
 }

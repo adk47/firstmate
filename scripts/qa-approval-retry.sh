@@ -671,8 +671,19 @@ while IFS= read -r _r; do
 done < <(QA_EXTERNAL_REPO_ALLOWLIST_ENUMERATE=1 "$QA_REPO_ALLOWLIST")
 [ "${#REPOS[@]}" -gt 0 ] || die 2 "external repo allowlist enumerated empty — refusing."
 
+# Acting identity, resolved once per tick. Self-approval is permanently refused
+# by GitHub (qa-pr-approve.sh exit 4), so a PR authored by this identity is
+# skipped before any read is spent on it. Mirrors qa-pr-approve.sh:262-263,
+# including the `|| true`: an App token 403s on `gh api user`, so fall back to
+# the policy's first bot login.
+# mirrors qa-pr-approve.sh:273 — do not diverge
+norm_login() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's,^app/,,' -e 's,\[bot\]$,,'; }
+me="$("$QA_GH" --repo "${REPOS[0]}" api user --jq .login 2>/dev/null || true)"
+[ -n "$me" ] || me="$(printf '%s' "$bot_logins_json" | jq -r '.[0] // "muso-qa-bot"' 2>/dev/null || echo "muso-qa-bot")"
+me_norm="$(norm_login "$me")"
+
 log "tick start — ${#REPOS[@]} repo(s) in scope${DRY_RUN:+, dry_run=$DRY_RUN}"
-considered=0; approved=0; declined=0; skipped=0; read_fail=0; alerts_unpublished=0; raced=0; repo_fail=0; reviews_fail=0; truncated=0; safety_considered=0; safety_fail=0; unsafe_unflagged=0
+considered=0; approved=0; declined=0; skipped=0; read_fail=0; alerts_unpublished=0; raced=0; repo_fail=0; reviews_fail=0; truncated=0; safety_considered=0; safety_fail=0; unsafe_unflagged=0; self_authored=0; declined_permanent=0
 
 for repo in "${REPOS[@]}"; do
   prs_json="$("$QA_GH" --repo "$repo" pr list --repo "$repo" --state open \
@@ -709,9 +720,15 @@ for repo in "${REPOS[@]}"; do
       "qa-approval-retry: TRUNCATED PR LIST — $repo returned exactly $PRLIST_LIMIT open PRs (the --limit cap), so the overflow is invisible to this sweep. Any withheld approval on those PRs is NOT being repaired. Raise QA_APPROVAL_RETRY_PRLIST_LIMIT."
   fi
 
+  repo_self=0
   while IFS=$'\t' read -r pr head_sha author is_draft; do
     [ -n "${pr:-}" ] || continue
     [ "$is_draft" = "true" ] && continue
+    # Before the reviews read: this PR can never be approved by us, and every
+    # call below it (reviews, timeline, threads, head re-read) is wasted quota.
+    if [ "$(norm_login "$author")" = "$me_norm" ]; then
+      self_authored=$((self_authored + 1)); repo_self=$((repo_self + 1)); continue
+    fi
     considered=$((considered + 1))
 
     # Reviews: --paginate is load-bearing. GitHub returns reviews OLDEST-first
@@ -957,8 +974,18 @@ for repo in "${REPOS[@]}"; do
       # exit 8 while CI is still running is the EXPECTED steady state between
       # the review landing and CI going green — that is the whole race this
       # script exists to ride out. It is logged, not paged.
-      log "DECLINED (exit $rc): $repo#$pr — $(printf '%s' "$out" | tail -1)"
-      declined=$((declined + 1))
+      # Exits 3/4/5/11/12 (repo not muso, self-approval, requester not
+      # authorized, sensitive path, policy malformed) never clear on retry.
+      # Everything else — 8 above all — is transient. No state file: see
+      # WHY STATELESS above.
+      case "$rc" in
+        3|4|5|11|12)
+          log "DECLINED-PERMANENT (exit $rc): $repo#$pr — $(printf '%s' "$out" | tail -1)"
+          declined_permanent=$((declined_permanent + 1)) ;;
+        *)
+          log "DECLINED (exit $rc): $repo#$pr — $(printf '%s' "$out" | tail -1)"
+          declined=$((declined + 1)) ;;
+      esac
     fi
 
     # Relay the wrapper's alerts on BOTH branches. GO is exactly when they
@@ -966,9 +993,12 @@ for repo in "${REPOS[@]}"; do
     qar_publish_alerts "$repo" "$pr" "$head_sha" "$uid" "$rc" "$out" \
       || alerts_unpublished=$((alerts_unpublished + 1))
   done < <(printf '%s' "$prs_json" | jq -r '.[] | [.number, .headRefOid, .author.login, .isDraft] | @tsv')
+  if [ "$repo_self" -gt 0 ]; then
+    log "SKIP: $repo — $repo_self PR(s) authored by the acting QA identity ($me); self-approval is permanently blocked by GitHub, so they cost 0 reads"
+  fi
 done
 
-log "tick done — considered=$considered approved=$approved declined=$declined skipped=$skipped read_failures=$read_fail alerts_unpublished=$alerts_unpublished raced=$raced repo_read_failures=$repo_fail/${#REPOS[@]} reviews_read_failures=$reviews_fail/$considered truncated_repos=$truncated safety_read_failures=$safety_fail/$safety_considered unsafe_unflagged=$unsafe_unflagged"
+log "tick done — considered=$considered approved=$approved declined=$declined declined_permanent=$declined_permanent self_authored=$self_authored skipped=$skipped read_failures=$read_fail alerts_unpublished=$alerts_unpublished raced=$raced repo_read_failures=$repo_fail/${#REPOS[@]} reviews_read_failures=$reviews_fail/$considered truncated_repos=$truncated safety_read_failures=$safety_fail/$safety_considered unsafe_unflagged=$unsafe_unflagged"
 
 # ── Total blackout ───────────────────────────────────────────────────────
 # Per-repo read failures are counted above, but counters in a log nobody reads
