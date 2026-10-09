@@ -125,12 +125,19 @@ safe_delete_has_open_handle() {  # <path>
 # Nonzero = left quarantined: reported on stderr and in SD_ERROR; the optional
 # hook lets the caller account it too.
 safe_delete_restore() {  # <quarantined> <original> <qdir>
-  # mv -n onto a retaken DIRECTORY name would nest the object inside it and
-  # exit 0, so a taken name is refused up front; mv -n still covers the race.
+  local want
+  want="$(safe_delete_id_stable "$(safe_delete_path_id "$1")")"
+  # mv -n onto a retaken DIRECTORY name nests the object inside it and exits 0,
+  # so a taken name is refused up front. A writer can still win the race between
+  # that check and the mv, so the landed object's identity is verified and a
+  # nested one is moved back out rather than reported as restored.
   if [ ! -e "$2" ] && [ ! -L "$2" ] && mv -n -- "$1" "$2" 2>/dev/null && [ ! -e "$1" ] && [ ! -L "$1" ]; then
-    rmdir "$3" 2>/dev/null || true
-    if declare -F safe_delete_on_restored >/dev/null; then safe_delete_on_restored "$2"; fi
-    return 0
+    if [ "$(safe_delete_id_stable "$(safe_delete_path_id "$2")")" = "$want" ]; then
+      rmdir "$3" 2>/dev/null || true
+      if declare -F safe_delete_on_restored >/dev/null; then safe_delete_on_restored "$2"; fi
+      return 0
+    fi
+    mv -n -- "$2/$(basename -- "$1")" "$1" 2>/dev/null || true
   fi
   # Never silent: the object now sits under a random name nobody was told about.
   SD_ERROR="${SD_ERROR:+$SD_ERROR; }restore blocked, object left quarantined at $1"
@@ -179,6 +186,13 @@ safe_delete_quarantine() {  # <path> <id-at-classification>
   # scan settles it: if nobody holds the tree open now, nobody will.
   if "$handle_check" "$q"; then
     SD_ERROR="live process holds the tree open (cwd or open fd)"
+    safe_delete_restore "$q" "$p" "$qdir" || true
+    return 1
+  fi
+  # A bind mount shares st_dev, so --one-file-system would cross it: re-read
+  # the mount table now that the name is private and nothing can add one.
+  if safe_delete_mount_hazard "$q"; then
+    SD_ERROR="mount appeared under the path after quarantine"
     safe_delete_restore "$q" "$p" "$qdir" || true
     return 1
   fi

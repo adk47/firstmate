@@ -186,6 +186,37 @@ STUB
   [ -f "$(echo "$SANDBOX"/root/.safe-delete-quarantine.*/victim/sub/blob)" ]
 }
 
+@test "a mount appearing AFTER quarantine (bind mounts share st_dev) => refuse and restore, nothing deleted" {
+  mkdir_with_data "$SANDBOX/root/victim"
+  # The post-quarantine handle scan reports idle, but a mount shows up under the
+  # now-private name first: --one-file-system would walk straight across it.
+  appear_mount() { printf 'tmpfs %s/sub tmpfs rw 0 0\n' "$1" > "$SANDBOX/mounts"; return 1; }
+  SAFE_DELETE_HANDLE_CHECK=appear_mount run safe_delete_path "$SANDBOX/root/victim"
+  [ "$status" -ne 0 ]
+  [ -f "$SANDBOX/root/victim/sub/blob" ]
+  [ "$(leftovers)" -eq 0 ]
+}
+
+@test "restore never reports success when the name is retaken as a directory mid-restore" {
+  mkdir_with_data "$SANDBOX/root/victim"
+  # Race between the restore's name pre-check and its mv: a writer creates the
+  # directory, so a plain mv -n would nest the object inside it and exit 0.
+  real_mv="$(command -v mv)"
+  cat > "$SANDBOX/bin/mv" <<STUB
+#!/bin/sh
+for last; do :; done
+[ "\$last" = "$SANDBOX/root/victim" ] && mkdir "$SANDBOX/root/victim"
+exec "$real_mv" "\$@"
+STUB
+  chmod +x "$SANDBOX/bin/mv"
+  held() { return 0; }
+  SAFE_DELETE_HANDLE_CHECK=held run --separate-stderr safe_delete_path "$SANDBOX/root/victim"
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"left quarantined at $SANDBOX/root/.safe-delete-quarantine."* ]]
+  [ -f "$(echo "$SANDBOX"/root/.safe-delete-quarantine.*/victim/sub/blob)" ]
+  [ ! -e "$SANDBOX/root/victim/victim" ]
+}
+
 # A primitive moved into the lib must never be called bare by the sweep: after
 # a merge with a branch that adds a caller, the bare name is command-not-found
 # (127), which `if ! reaudit` swallows — a fail-open guard with no git conflict.
