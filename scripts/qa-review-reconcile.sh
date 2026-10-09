@@ -508,8 +508,68 @@ declare -A repo_listed_ok=()
 # below (an overflow PR that is merely invisible this tick must not have its
 # attempt counters wiped as if it were closed/merged).
 declare -A repo_truncated=()
+# ── per-PR gh reads: capture stderr, classify rate-limit ────────────────
+# gh_read <outvar> <gh args...> — runs "$GH" with stdout captured into
+# <outvar> and stderr sent to a FILE, never merged into stdout (gh writes
+# routine notices to stderr; folding them in would corrupt a good JSON body —
+# same pattern as release-watch.sh's gh_run_list_retry). Returns gh's rc.
+# On failure sets GH_ERR_DETAIL (first 300 bytes of stderr, one line) and
+# GH_ERR_RATE_LIMITED (1 when stderr carries a 403/429 AND rate-limit text; a
+# bare 403 is also how a scope problem reads, so the text decides).
+GH_ERR_DETAIL=""
+GH_ERR_RATE_LIMITED=0
+# Assigned via printf -v in gh_read; declared so shellcheck sees the assignment.
+commit_json="" timeline_json="" reviews_json="" status_json=""
+gh_read() {
+  local __outvar="$1" __body
+  shift
+  : > "$gh_err_file"
+  GH_ERR_DETAIL=""
+  GH_ERR_RATE_LIMITED=0
+  if __body="$("$GH" "$@" 2>"$gh_err_file")"; then
+    printf -v "$__outvar" '%s' "$__body"
+    return 0
+  fi
+  # `head` MUST read straight from the file and run before `tr`: with
+  # pipefail, `tr < file | head -c 300` SIGPIPEs `tr` on a large stderr and the
+  # 141 trips `set -e`, killing the tick (see release-watch.sh).
+  GH_ERR_DETAIL="$(head -c 300 "$gh_err_file" | tr -d '\0' | tr '\n' ' ')"
+  if grep -qE '\b(403|429)\b' "$gh_err_file" && grep -qiE 'rate limit' "$gh_err_file"; then
+    GH_ERR_RATE_LIMITED=1
+  fi
+  return 1
+}
+
+rate_limit_failed_reads=0
+rate_limit_probe=""
+# report_gh_read_failure <message> — call after a failed gh_read. A rate-limit
+# cause is tallied (and probed once) for the single tick-level TOKEN EXHAUSTED
+# line; any other cause logs the per-PR READ-FAILURE line with gh's own text.
+report_gh_read_failure() {
+  local msg="$1" core remaining limit reset reset_iso
+  if [ "$GH_ERR_RATE_LIMITED" -eq 1 ]; then
+    rate_limit_failed_reads=$((rate_limit_failed_reads + 1))
+    if [ -z "$rate_limit_probe" ]; then
+      # `gh api rate_limit` is not counted against the bucket.
+      rate_limit_probe="unknown"
+      if core="$("$GH" api rate_limit 2>/dev/null | jq -re '.resources.core | "\(.remaining) \(.limit) \(.reset)"' 2>/dev/null)"; then
+        read -r remaining limit reset <<<"$core"
+        if [[ "$remaining" =~ ^[0-9]+$ && "$limit" =~ ^[0-9]+$ && "$reset" =~ ^[0-9]+$ ]]; then
+          reset_iso="$(date -u -d "@$reset" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$reset" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || reset_iso="unknown"
+          rate_limit_probe="core remaining $remaining/$limit, reset at $reset_iso"
+        fi
+      fi
+    fi
+    return 0
+  fi
+  log "$msg${GH_ERR_DETAIL:+ gh: $GH_ERR_DETAIL}"
+}
+
 open_pr_keys_file="$(mktemp)"
-trap 'rm -f "$open_pr_keys_file" "$open_pr_keys_file".*' EXIT
+# One reused stderr capture file for every per-PR gh read this tick (see
+# gh_read below); the single trap covers every exit path.
+gh_err_file="$(mktemp)"
+trap 'rm -f "$open_pr_keys_file" "$open_pr_keys_file".* "$gh_err_file"' EXIT
 
 for repo in "${REPOS[@]}"; do
   # Per-repo candidate-level (per-PR) read-failure tracking for this tick —
@@ -696,8 +756,8 @@ for repo in "${REPOS[@]}"; do
     # ── head-push trigger time ───────────────────────────────────────────
     repo_reads_attempted=$((repo_reads_attempted + 1))
     stage_attempted[commit]=$((stage_attempted[commit] + 1))
-    if ! commit_json="$("$GH" api "repos/$repo/commits/$head_sha" 2>/dev/null)"; then
-      log "READ-FAILURE: could not fetch commit $repo@${head_sha:0:7} — counted, not treated as 'no verdict'."
+    if ! gh_read commit_json api "repos/$repo/commits/$head_sha"; then
+      report_gh_read_failure "READ-FAILURE: could not fetch commit $repo@${head_sha:0:7} — counted, not treated as 'no verdict'."
       repo_reads_failed=$((repo_reads_failed + 1))
       repo_failed_classes="${repo_failed_classes:+$repo_failed_classes,}commit"
       stage_failed[commit]=$((stage_failed[commit] + 1))
@@ -758,7 +818,7 @@ for repo in "${REPOS[@]}"; do
         # array-typed responses), so downstream jq is unaffected.
         repo_reads_attempted=$((repo_reads_attempted + 1))
         stage_attempted[timeline]=$((stage_attempted[timeline] + 1))
-        if timeline_json="$("$GH" api --paginate "repos/$repo/issues/$pr/timeline?per_page=100" 2>/dev/null)"; then
+        if gh_read timeline_json api --paginate "repos/$repo/issues/$pr/timeline?per_page=100"; then
           ready_iso="$(jq -r '[.[] | select(.event == "ready_for_review")] | last | .created_at // empty' <<<"$timeline_json")"
           if [ -n "$ready_iso" ] && ready_epoch="$(iso_to_epoch "$ready_iso")"; then
             state_json="$(qar_ready_cache_put "$state_json" "$repo" "$pr" "$updated_at" "$ready_epoch")"
@@ -766,7 +826,7 @@ for repo in "${REPOS[@]}"; do
             ready_epoch=""
           fi
         else
-          log "READ-FAILURE: could not fetch timeline for $repo#$pr — treating as no ready_for_review signal this tick (safe direction: exclusion, never inclusion, under a read failure here)."
+          report_gh_read_failure "READ-FAILURE: could not fetch timeline for $repo#$pr — treating as no ready_for_review signal this tick (safe direction: exclusion, never inclusion, under a read failure here)."
           repo_reads_failed=$((repo_reads_failed + 1))
           repo_failed_classes="${repo_failed_classes:+$repo_failed_classes,}timeline"
           stage_failed[timeline]=$((stage_failed[timeline] + 1))
@@ -792,8 +852,8 @@ for repo in "${REPOS[@]}"; do
     # behavior for array-typed responses), so downstream jq is unaffected.
     repo_reads_attempted=$((repo_reads_attempted + 1))
     stage_attempted[reviews]=$((stage_attempted[reviews] + 1))
-    if ! reviews_json="$("$GH" api --paginate "repos/$repo/pulls/$pr/reviews?per_page=100" 2>/dev/null)"; then
-      log "READ-FAILURE: could not fetch reviews for $repo#$pr — counted, not treated as 'no verdict'."
+    if ! gh_read reviews_json api --paginate "repos/$repo/pulls/$pr/reviews?per_page=100"; then
+      report_gh_read_failure "READ-FAILURE: could not fetch reviews for $repo#$pr — counted, not treated as 'no verdict'."
       repo_reads_failed=$((repo_reads_failed + 1))
       repo_failed_classes="${repo_failed_classes:+$repo_failed_classes,}reviews"
       stage_failed[reviews]=$((stage_failed[reviews] + 1))
@@ -804,8 +864,8 @@ for repo in "${REPOS[@]}"; do
 
     repo_reads_attempted=$((repo_reads_attempted + 1))
     stage_attempted[status]=$((stage_attempted[status] + 1))
-    if ! status_json="$("$GH" api "repos/$repo/commits/$head_sha/status?per_page=100" 2>/dev/null)"; then
-      log "READ-FAILURE: could not fetch combined status for $repo@${head_sha:0:7} — counted, not treated as 'no verdict'."
+    if ! gh_read status_json api "repos/$repo/commits/$head_sha/status?per_page=100"; then
+      report_gh_read_failure "READ-FAILURE: could not fetch combined status for $repo@${head_sha:0:7} — counted, not treated as 'no verdict'."
       repo_reads_failed=$((repo_reads_failed + 1))
       repo_failed_classes="${repo_failed_classes:+$repo_failed_classes,}status"
       stage_failed[status]=$((stage_failed[status] + 1))
@@ -1018,6 +1078,11 @@ for repo in "${REPOS[@]}"; do
     fi
   done
 done
+
+# One tick-level line for the whole rate-limit cause (never one per PR/repo).
+if [ "$rate_limit_failed_reads" -gt 0 ]; then
+  log "TOKEN EXHAUSTED — ${rate_limit_probe:-core remaining unknown}; $rate_limit_failed_reads per-PR read(s) failed on this cause. This is the shared adk47 bucket, not a permissions problem."
+fi
 
 if [ "$page_cap_deferred" -gt 0 ]; then
   log "PAGE CAP: paged $paged_this_tick exhausted key(s) this tick (cap $PAGE_CAP), and $page_cap_deferred more...deferred to a later tick."
