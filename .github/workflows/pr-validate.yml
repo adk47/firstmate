@@ -599,6 +599,17 @@ jobs:
 
           echo "::endgroup::"
 
+      - name: No new literal /tmp scratch paths (MUS-5643)
+        # Agent Bash calls are separate shells, so `trap ... EXIT` never cleaned
+        # /tmp (536 pr-review-*.json, 1171 review clones). Scope is the ADDED
+        # lines of skills-all/**, workspaces/*/AGENTS.md and scripts/** vs base
+        # (scripts/check-no-tmp-scratch.sh SCOPE); legacy sites do not trip it.
+        run: |
+          echo "::group::No new /tmp scratch paths"
+          git fetch origin "${{ github.event.pull_request.base.ref }}" --depth=200 --quiet
+          scripts/check-no-tmp-scratch.sh --base "origin/${{ github.event.pull_request.base.ref }}"
+          echo "::endgroup::"
+
       - name: Skill drift check — skills-all/ vs workspaces/*/skills/
         # Per memory `feedback_skill_dual_tree.md` and incident 2026-04-29
         # postmortem: skill fixes have repeatedly landed in skills-all/ but

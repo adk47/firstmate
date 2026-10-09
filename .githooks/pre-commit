@@ -1562,6 +1562,17 @@ BRIEFING
   fi
 fi
 
+# MUS-5643: no new literal /tmp/ scratch paths (trap-EXIT cannot clean agent shells)
+echo "▸ no new /tmp scratch paths"
+if [[ ! -f scripts/check-no-tmp-scratch.sh ]]; then
+  ok "no /tmp scratch guard in this tree (synthetic fixture repo)"
+elif tmp_out=$(bash scripts/check-no-tmp-scratch.sh --staged 2>&1); then
+  ok "no new /tmp/ scratch paths"
+else
+  fail "new literal /tmp/ scratch path (use \${PAPERCLIP_RUN_SCRATCH_DIR:-\${TMPDIR:-/tmp}}/..., or '# tmp-ok: <reason>')"
+  printf '%s\n' "$tmp_out"
+fi
+
 echo
 if (( fail_count > 0 )); then
   red "✗ pre-commit failed ($fail_count check(s) failed)"

@@ -563,7 +563,7 @@ the dispatch message, `"authorization":"auto-review-dispatch"`.
 
 **Post one review** via the reviews API:
 
-**Use a per-run payload file, never a fixed `/tmp` path.** Reviews run
+**Use a per-run payload file under the run's scratch root, never a `/tmp` path.** Reviews run
 concurrently across repos, so a shared name (the old `/tmp/pr-review.json`) is a
 real race: another review overwrites the file between your heredoc and the POST,
 and you submit ITS payload — a 422 commit mismatch, no review, no status, and a
@@ -571,15 +571,29 @@ gated PR stuck. Observed live on hydra#790, where a core-backend payload replace
 the file mid-run.
 
 ```bash
-payload=$(mktemp "/tmp/pr-review-${REPO}-${PR}-XXXXXX.json")
-trap 'rm -f "$payload"' EXIT
+scratch="${PAPERCLIP_RUN_SCRATCH_DIR:-/opt/hydra/workspaces/qa/tmp}"; mkdir -p "$scratch"
+payload=$(mktemp "$scratch/pr-review-${REPO}-${PR}-XXXXXX.json")
 cat > "$payload" <<JSONEOF
 {"commit_id":"<pr.headRefOid>","event":"COMMENT","body":"🤖 **Muso QA Bot** (automated review)",
  "comments":[{"path":"src/auth.js","line":45,"side":"RIGHT","body":"🔴 **Critical:** ..."}]}
 JSONEOF
 bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" api \
   "repos/$OWNER/$REPO/pulls/$PR/reviews" --method POST --input "$payload"
+rc=$?; rm -f "$payload"; [ $rc -eq 0 ] || echo "review POST failed rc=$rc" >&2
+(exit $rc)  # keep the POST status as the block result
 ```
+
+**Why no `trap 'rm -f "$payload"' EXIT` (MUS-5643):** this skill used to carry
+that trap and `/tmp` held 536 leftover `pr-review-*.json` files (1G), plus 1,171
+`*-review-*` clones (27G). Each agent Bash call is its own shell, so the trap
+fires at the end of the call that created the file, before the next call uses
+it, or the agent drops the line. You cannot turn a multi-call session into one
+process lifetime. Fix the **location**, not the cleanup: scratch goes under
+`$PAPERCLIP_RUN_SCRATCH_DIR` when a Paperclip run sets it (the runtime deletes it),
+otherwise under the qa workspace's `tmp/` (`/opt/hydra/workspaces/qa/tmp`, TTL-swept,
+`docs/lessons/working-in-hydra.md`). The block creates, POSTs and `rm`s in one call, so
+nothing outlives it. Clone into the same root, never `/tmp`.
+`scripts/check-no-tmp-scratch.sh` fails a PR that adds a hard-coded tmp path here.
 
 **NEVER inline PR/diff text via `-f body='...'`** — always heredoc +
 `--input <file>` (backticks/`$(...)` re-parse through your shell; PR #287
@@ -837,8 +851,10 @@ cannot work. Both channels below come after the wrapper returns:
    explicit — and there must be exactly ONE post attempt path, or the happy path
    posts the comment twice.
    ```bash
-   alerts_json=/tmp/qa-alerts.json
-   cat > /tmp/qa-alerts.md <<'EOF'
+   scratch="${PAPERCLIP_RUN_SCRATCH_DIR:-/opt/hydra/workspaces/qa/tmp}"; mkdir -p "$scratch"
+   alerts_json=$(mktemp "$scratch/qa-alerts-${REPO}-${PR}-XXXXXX.json")
+   alerts_md=$(mktemp "$scratch/qa-alerts-${REPO}-${PR}-XXXXXX.md")
+   cat > "$alerts_md" <<'EOF'
    ## ⚠️ Auto-approved with alerts
    <every ⚠️ ALERT line, verbatim>
    EOF
@@ -847,7 +863,7 @@ cannot work. Both channels below come after the wrapper returns:
    # markdown posts invalid JSON, and any -f/-F alongside --input lands in the
    # query string instead of the payload. `jq -Rs` slurps stdin into one
    # JSON-escaped string, so backticks, quotes and $VAR survive verbatim.
-   jq -Rs '{body: .}' < /tmp/qa-alerts.md > "$alerts_json"
+   jq -Rs '{body: .}' < "$alerts_md" > "$alerts_json"
 
    post_alerts() {
      bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" api \
@@ -879,6 +895,8 @@ cannot work. Both channels below come after the wrapper returns:
      sleep 3
      post_alerts || go_red "auto-approved with ALERTS that could not be published — NOT safe to merge"
    fi
+   rc=$?; rm -f "$alerts_json" "$alerts_md"
+   (exit $rc)  # keep go_red's status as the block result
    ```
    A green PR whose alert never published is worse than a red one, because it
    looks reviewed.
