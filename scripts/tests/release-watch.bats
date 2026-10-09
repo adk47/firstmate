@@ -33,6 +33,9 @@ setup() {
   export MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-test-token"
   export MUSO_SLACK_ENV_FILE="$TEST_TMPDIR/main.env"; : > "$MUSO_SLACK_ENV_FILE"
 
+  # Retries on a failed `gh run list` must not sleep for real in tests.
+  export RELEASE_GH_RETRY_DELAYS="0 0"
+
   export STUB_GH_ARGV="$TEST_TMPDIR/gh-argv";           : > "$STUB_GH_ARGV"
   export STUB_CURL_ARGV="$TEST_TMPDIR/curl-argv"; : > "$STUB_CURL_ARGV"
   export STUB_OPENCLAW_CALLS="$TEST_TMPDIR/openclaw-calls"; : > "$STUB_OPENCLAW_CALLS"
