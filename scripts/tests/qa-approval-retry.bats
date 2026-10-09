@@ -26,6 +26,7 @@ JSON
   export STATUS_CALLS="$TEST_TMPDIR/status-calls";   : > "$STATUS_CALLS"
   export DM_CALLS="$TEST_TMPDIR/dm-calls";           : > "$DM_CALLS"
   export REVIEWS_CALLS="$TEST_TMPDIR/reviews-calls"; : > "$REVIEWS_CALLS"
+  export RATE_CALLS="$TEST_TMPDIR/rate-calls";       : > "$RATE_CALLS"
   # Never let a test write the real /var/lib/hydra audit dir.
   export QA_APPROVAL_RETRY_LOG_DIR="$TEST_TMPDIR/api-logs/github"
 
@@ -144,6 +145,23 @@ case "${1:-}" in
         # The acting identity. STUB_ME_RC=1 models an App token 403ing here.
         [ "${STUB_ME_RC:-0}" = "0" ] || exit 1
         printf '%s\n' "${STUB_ME:-adk47}"; exit 0 ;;
+      rate_limit)
+        # Free quota probe. STUB_RATE_SEQ is a space-separated list of
+        # `remaining` values consumed one per call (the last repeats), so a
+        # mid-tick depletion is expressible; else STUB_RATE_REMAINING.
+        echo x >> "$RATE_CALLS"
+        [ "${STUB_RATE_RC:-0}" = "0" ] || exit 1
+        [ -z "${STUB_RATE_GARBAGE:-}" ] || { printf '%s' "$STUB_RATE_GARBAGE"; exit 0; }
+        _n="$(wc -l < "$RATE_CALLS" | tr -d ' ')"
+        _rem="${STUB_RATE_REMAINING:-5000}"
+        if [ -n "${STUB_RATE_SEQ:-}" ]; then
+          read -ra _seq <<< "$STUB_RATE_SEQ"
+          _i=$(( _n - 1 )); [ "$_i" -lt "${#_seq[@]}" ] || _i=$(( ${#_seq[@]} - 1 ))
+          _rem="${_seq[$_i]}"
+        fi
+        _out="$(printf '{"remaining":%s,"reset":1791537180,"limit":5000,"used":0}' "$_rem")"
+        printf '%s' "$_out" | jq -c '.resources.core // .' 2>/dev/null >/dev/null
+        printf '{"resources":{"core":%s}}' "$_out" | jq -c '.resources.core'; exit 0 ;;
       */issues/*/comments)
         # GET = the idempotency read (what is already on the PR);
         # POST = the alert comment itself. Record the exact JSON body that would
@@ -1781,4 +1799,97 @@ SH
     run "$SCRIPT"
     [[ "${lines[*]}" == *"DECLINED-PERMANENT (exit $rc)"* ]] || { echo "exit $rc not permanent"; false; }
   done
+}
+
+# ── MUS-6088: rate-limit floor + per-tick call budget ────────────────────
+# Assert on the stub call logs and on the log lines, never on intent. The
+# quota guard stands down with exit 0: a non-zero would page for a working guard.
+
+go_review() { export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMMENTED","commit_id":"abc123","submitted_at":"2026-08-17T10:51:41Z","body":"**Verdict: GO**"}]'; }
+
+@test "floor: remaining 999 stops the tick — 0 reads, 0 approves, exit 0, one line with floor and reset" {
+  go_review
+  export STUB_RATE_REMAINING=999
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -s "$REVIEWS_CALLS" ]
+  [ ! -s "$APPROVE_CALLS" ]
+  n="$(printf '%s\n' "${lines[@]}" | grep -c 'RATE FLOOR')"
+  [ "$n" -eq 1 ]
+  line="$(printf '%s\n' "${lines[@]}" | grep 'RATE FLOOR')"
+  [[ "$line" == *"remaining=999"* ]]
+  [[ "$line" == *"floor=1000"* ]]
+  [[ "$line" == *"2026-10-"* ]]
+  [[ "$line" == *"1 of 1 repo(s) not swept"* ]]
+  [ ! -s "$PAGE_CALLS" ]
+}
+
+@test "floor: remaining 1001 proceeds (boundary pinned on the other side)" {
+  go_review
+  export STUB_RATE_REMAINING=1001
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$REVIEWS_CALLS" ]
+  [ -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" != *"RATE FLOOR"* ]]
+}
+
+@test "floor: an unreadable rate_limit FAILS OPEN with one WARN" {
+  go_review
+  export STUB_RATE_RC=1
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" == *"WARN: could not read rate_limit"* ]]
+  # garbage body, exit 0
+  : > "$APPROVE_CALLS"; rm -f "$TEST_TMPDIR/approved-sha"; unset STUB_RATE_RC
+  export STUB_RATE_GARBAGE='not json'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" == *"WARN: could not read rate_limit"* ]]
+}
+
+@test "floor: a non-numeric QA_APPROVAL_RETRY_RATE_FLOOR warns, falls back to 1000, guard still works" {
+  go_review
+  export QA_APPROVAL_RETRY_RATE_FLOOR=abc STUB_RATE_REMAINING=999
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "${lines[*]}" == *"QA_APPROVAL_RETRY_RATE_FLOOR='abc'"* ]]
+  [[ "${lines[*]}" == *"floor=1000"* ]]
+  [ ! -s "$REVIEWS_CALLS" ]
+}
+
+@test "floor: depleting mid-tick leaves the second repo unswept, one stand-down line" {
+  go_review
+  export STUB_REPOS="Muso-AI/a Muso-AI/b" STUB_RATE_SEQ="5000 999"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q 'Muso-AI/a/' "$REVIEWS_CALLS"
+  ! grep -q 'Muso-AI/b/' "$REVIEWS_CALLS"
+  n="$(printf '%s\n' "${lines[@]}" | grep -c 'RATE FLOOR')"
+  [ "$n" -eq 1 ]
+  [[ "${lines[*]}" == *"1 of 2 repo(s) not swept"* ]]
+}
+
+@test "budget: MAX_CALLS=2 with 5 candidates stops early, exit 0, one line naming budget and count" {
+  export QA_APPROVAL_RETRY_MAX_CALLS=2
+  export STUB_PRS_JSON='[1,2,3,4,5]'
+  export STUB_PRS_JSON="$(jq -nc '[range(1;6)|{number:.,headRefOid:"abc123",author:{login:"azure-kirin"},isDraft:false}]')"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$REVIEWS_CALLS" | tr -d ' ')" -eq 2 ]
+  n="$(printf '%s\n' "${lines[@]}" | grep -c 'CALL BUDGET')"
+  [ "$n" -eq 1 ]
+  line="$(printf '%s\n' "${lines[@]}" | grep 'CALL BUDGET')"
+  [[ "$line" == *"budget of 2"* ]]
+  [[ "$line" == *"2 REST call(s)"* ]]
+  [[ "$line" == *"Muso-AI/web-credits-next#3"* ]]
+}
+
+@test "budget: a non-numeric QA_APPROVAL_RETRY_MAX_CALLS warns and falls back to 600" {
+  export QA_APPROVAL_RETRY_MAX_CALLS=abc
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "${lines[*]}" == *"QA_APPROVAL_RETRY_MAX_CALLS='abc'"* ]]
 }
