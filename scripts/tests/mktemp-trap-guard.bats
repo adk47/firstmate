@@ -83,3 +83,17 @@ run_guard() { MKTEMP_GUARD_ROOT="$TEST_TMPDIR" run "$GUARD"; }
   [ "$status" -eq 1 ]
   [[ "$output" == *"echotrap.sh:2"* ]]
 }
+
+@test "direct trap on ERR only (never fires on success) fails" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ntrap '"'"'rm -rf "$work"'"'"' ERR\n' > "$TEST_TMPDIR/scripts/errtrap.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"errtrap.sh:2"* ]]
+}
+
+@test "handler trapped on ERR only fails" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ncleanup() { rm -rf "$work"; }\ntrap cleanup ERR\n' > "$TEST_TMPDIR/scripts/errfn.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"errfn.sh:2"* ]]
+}
