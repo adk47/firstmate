@@ -30,8 +30,8 @@ while IFS= read -r f; do
         [[ "$code" =~ ([A-Za-z_][A-Za-z0-9_]*)=[\"\']?\$\([[:space:]]*mktemp ]] && var="${BASH_REMATCH[1]}"
         ok=0
         if [ -n "$var" ]; then
-          # a trap line naming the var, or `trap <fn> ...` where <fn> rm's it
-          if grep -E '^[^#]*(^|[^A-Za-z_])trap[[:space:]]' "$f" | grep -Eq "\\\$\{?$var([^A-Za-z0-9_]|\$)"; then ok=1; fi
+          # a trap line that rm's the var, or `trap <fn> ...` where <fn> rm's it
+          if grep -E '^[^#]*(^|[^A-Za-z_])trap[[:space:]]' "$f" | grep -E '(^|[^A-Za-z_])rm[[:space:]]' | grep -Eq "\\\$\{?$var([^A-Za-z0-9_]|\$)"; then ok=1; fi
           if [ "$ok" -eq 0 ]; then
             while IFS= read -r fn; do
               # the rm must sit inside the handler's own body (def line to first closing brace)

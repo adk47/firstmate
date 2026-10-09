@@ -76,3 +76,10 @@ run_guard() { MKTEMP_GUARD_ROOT="$TEST_TMPDIR" run "$GUARD"; }
   run_guard
   [ "$status" -eq 0 ]
 }
+
+@test "direct trap that only mentions the variable without rm fails" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ntrap '"'"'echo "$work" >/dev/null'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/echotrap.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"echotrap.sh:2"* ]]
+}
