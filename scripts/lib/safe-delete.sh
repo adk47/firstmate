@@ -19,7 +19,8 @@
 #   SAFE_DELETE_QUARANTINE_PREFIX  default .safe-delete-quarantine.
 #   SAFE_DELETE_HANDLE_CHECK       function used for the post-quarantine handle
 #                                  scan; default safe_delete_has_open_handle
-#   safe_delete_on_restore_blocked  optional hook <quarantined-path>, called
+#   safe_delete_on_restored        optional hook <original-path>, after a restore
+#   safe_delete_on_restore_blocked optional hook <quarantined-path>, called
 #                                  when a restore is refused (name retaken)
 # Out-vars: SD_QPATH SD_QDIR (quarantine), SD_ERROR (last refusal reason).
 
@@ -125,6 +126,7 @@ safe_delete_has_open_handle() {  # <path>
 safe_delete_restore() {  # <quarantined> <original> <qdir>
   if mv -n -- "$1" "$2" 2>/dev/null && [ ! -e "$1" ] && [ ! -L "$1" ]; then
     rmdir "$3" 2>/dev/null || true
+    if declare -F safe_delete_on_restored >/dev/null; then safe_delete_on_restored "$2"; fi
     return 0
   fi
   if declare -F safe_delete_on_restore_blocked >/dev/null; then
