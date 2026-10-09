@@ -10,6 +10,7 @@ setup() {
   HYDRA_REPO="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
   TEST_TMPDIR="$(mktemp -d)"
   export HYDRA_MAINTENANCE_FLAG="$TEST_TMPDIR/flag.json"
+  export HYDRA_DEPLOY_WINDOW_FLAG="$TEST_TMPDIR/window.json"
   # shellcheck source=/dev/null
   source "$HYDRA_REPO/scripts/lib/maintenance-flag.sh"
 }
@@ -97,4 +98,92 @@ write_flag() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"INACTIVE"* ]]
   [[ "$output" == *"REACHED_END"* ]]
+}
+
+# ── deploy_window_active (MUS-5175): separate flag, same fail-safe ──────────
+
+write_window() { jq -n --argjson e "$1" '{reason:"deploy gateway warm-up",expires_epoch:$e}' > "$HYDRA_DEPLOY_WINDOW_FLAG"; }
+
+@test "deploy window: unexpired => active, reason readable" {
+  write_window "$(( $(date -u +%s) + 600 ))"
+  run deploy_window_active
+  [ "$status" -eq 0 ]
+  run deploy_window_reason
+  [ "$output" = "deploy gateway warm-up" ]
+}
+
+@test "deploy window: absent => NOT active" {
+  run deploy_window_active
+  [ "$status" -eq 1 ]
+}
+
+@test "deploy window: expired => NOT active (the TTL is the window)" {
+  write_window "$(( $(date -u +%s) - 1 ))"
+  run deploy_window_active
+  [ "$status" -eq 1 ]
+}
+
+@test "deploy window: malformed JSON => NOT active" {
+  printf 'not json {{{' > "$HYDRA_DEPLOY_WINDOW_FLAG"
+  run deploy_window_active
+  [ "$status" -eq 1 ]
+}
+
+@test "deploy window: non-numeric expires_epoch => NOT active" {
+  jq -n '{reason:"x",expires_epoch:"soon"}' > "$HYDRA_DEPLOY_WINDOW_FLAG"
+  run deploy_window_active
+  [ "$status" -eq 1 ]
+}
+
+@test "an open deploy window does not change maintenance_active's verdict" {
+  write_window "$(( $(date -u +%s) + 600 ))"
+  run maintenance_active
+  [ "$status" -eq 1 ]
+  write_flag "$(( $(date -u +%s) + 600 ))"
+  rm -f "$HYDRA_DEPLOY_WINDOW_FLAG"
+  run deploy_window_active
+  [ "$status" -eq 1 ]
+}
+
+@test "deploy_window_arm writes only the window flag, with a future numeric expiry" {
+  run deploy_window_arm 900 "deploy gateway warm-up"
+  [ "$status" -eq 0 ]
+  [ ! -e "$HYDRA_MAINTENANCE_FLAG" ]
+  exp=$(jq -r .expires_epoch "$HYDRA_DEPLOY_WINDOW_FLAG")
+  [[ "$exp" =~ ^[0-9]+$ ]]
+  [ "$exp" -gt "$(date -u +%s)" ]
+  run deploy_window_active
+  [ "$status" -eq 0 ]
+  run maintenance_active
+  [ "$status" -eq 1 ]
+}
+
+@test "deploy_window_arm refuses a non-numeric or zero ttl and writes nothing" {
+  run deploy_window_arm abc x
+  [ "$status" -eq 1 ]
+  run deploy_window_arm 0 x
+  [ "$status" -eq 1 ]
+  [ ! -e "$HYDRA_DEPLOY_WINDOW_FLAG" ]
+}
+
+@test "deploy.sh arms the window before the Step 6 restart, and never touches the maintenance flag" {
+  d="$HYDRA_REPO/scripts/deploy.sh"
+  arm=$(grep -n 'deploy_window_arm' "$d" | head -1 | cut -d: -f1)
+  restart=$(grep -n '^source "\$SCRIPT_DIR/lib/gateway-restart.sh"' "$d" | head -1 | cut -d: -f1)
+  [ -n "$arm" ] && [ -n "$restart" ] && [ "$arm" -lt "$restart" ]
+  grep -q 'HYDRA_DEPLOY_WINDOW_SECS:-900' "$d"
+  run grep -nE 'hydra-maintenance|HYDRA_MAINTENANCE_FLAG|maintenance-flag.sh.*(arm|write)' "$d"
+  # the only maintenance-flag reference is sourcing the lib for deploy_window_arm
+  [[ "$output" != *"/run/hydra-maintenance"* ]]
+  [[ "$output" != *"HYDRA_MAINTENANCE_FLAG"* ]]
+}
+
+@test "the window's DEFAULT path is its own file, never the maintenance flag's" {
+  # Pins the load-bearing decision: the untracked gateway guard ignores the
+  # maintenance flag's TTL, so arming that path would muzzle it. Env unset on
+  # purpose; the other tests override the path and cannot see a collapse.
+  run env -u HYDRA_DEPLOY_WINDOW_FLAG -u HYDRA_MAINTENANCE_FLAG bash -c \
+    'source "'"$HYDRA_REPO"'/scripts/lib/maintenance-flag.sh"; echo "$HYDRA_DEPLOY_WINDOW_FLAG $HYDRA_MAINTENANCE_FLAG"'
+  [ "$status" -eq 0 ]
+  [ "$output" = "/run/hydra-deploy-window /run/hydra-maintenance" ]
 }

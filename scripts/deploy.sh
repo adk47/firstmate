@@ -3506,6 +3506,16 @@ fi
 # restart, the pre-drain behavior); HYDRA_FORCE_RESTART=1 overrides the
 # restart-skip gate below (they compose).
 log "Step 6/8: Restarting OpenClaw Gateway ($TARGET)..."
+
+# Open the deploy/gateway warm-up stand-down window (MUS-5175) for the paging
+# timers that hit the gateway WS. A SEPARATE flag from the maintenance one
+# (the untracked gateway guard ignores that one's TTL). The TTL is the window:
+# no disarm is needed or wanted. Observed 2026-10-08: restart 12:46, peer-labels
+# still unhealthy at 12:51:47, recovered 12:55 (~9 min), so default 900s.
+# Non-fatal: no window just means the old behaviour.
+HYDRA_DEPLOY_WINDOW_SECS="${HYDRA_DEPLOY_WINDOW_SECS:-900}"
+run_on_node8 "source '$DEPLOY_PATH/scripts/lib/maintenance-flag.sh' && deploy_window_arm '$HYDRA_DEPLOY_WINDOW_SECS' 'deploy gateway warm-up'" \
+  || log "  WARN: could not arm the deploy warm-up window — gateway timers may page during warm-up"
 # shellcheck source=lib/gateway-restart.sh
 source "$SCRIPT_DIR/lib/gateway-restart.sh"
 export GATEWAY_EXEC_FN=run_on_node8   # every probe honors $HYDRA_LOCAL (ssh mode too)
