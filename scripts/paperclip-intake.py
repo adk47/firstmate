@@ -8,7 +8,8 @@ Subcommands:
   file       --agent NAME --title T --body B [--component C]   file or bump a card
   precheck   --wake-job ID                                     ZERO-TOKEN sweep: wake Clio's triage job only if an
                                                                untriaged intake card is waiting
-  escalate   --to-agent ID [--after-minutes 30]                reassign untouched intake cards to the pilot agent
+  escalate   --to-agent ID|NAME [--after-minutes 30]                reassign untouched intake cards to the pilot agent
+  waiting                                                      list untriaged intake cards (for the triage agent)
   escalations                                                  count cards the fallback has escalated (pilot report)
 
 Dedupe key (ported from hydra#1002 plugins/tracker/src/fingerprint.ts, spec 4):
@@ -156,6 +157,13 @@ class Client:
     def comment(self, issue_id, body):
         self.call("POST", f"/api/issues/{issue_id}/comments", {"body": body})
 
+    def agent_id(self, ref):
+        """Accept an agent id, name or urlKey (the pilot agent's id is only known on the node-8 instance)."""
+        for a in self.call("GET", f"/api/companies/{self.company}/agents"):
+            if ref in (a.get("id"), a.get("name"), a.get("urlKey")):
+                return a["id"]
+        raise ApiError(f"no agent matching {ref!r}")
+
     def label_id(self, name):
         for lab in self.call("GET", f"/api/companies/{self.company}/labels"):
             if lab["name"] == name:
@@ -244,18 +252,24 @@ def _age_minutes(card):
 
 def cmd_escalate(client, args):
     n = 0
-    label = None
+    label = target = None
     for card in waiting_cards(client):
         if _age_minutes(card) < args.after_minutes:
             continue
         label = label or client.label_id(ESCALATED_LABEL)
+        target = target or client.agent_id(args.to_agent)
         client.call("PATCH", f"/api/issues/{card['id']}",
-                    {"assigneeAgentId": args.to_agent,
+                    {"assigneeAgentId": target,
                      "labelIds": sorted(set(card.get("labelIds") or []) | {label})})
         client.comment(card["id"], f"Untouched for {args.after_minutes} minutes: escalated to the pilot "
                                    f"agent (label {ESCALATED_LABEL}).")
         n += 1
     return {"escalated": n}
+
+
+def cmd_waiting(client, args):
+    return {"waiting": [{"id": c["id"], "identifier": c.get("identifier"), "title": c.get("title")}
+                        for c in waiting_cards(client)]}
 
 
 def cmd_escalations(client, args):
@@ -280,6 +294,7 @@ def main(argv=None, env=None):
     e = sub.add_parser("escalate")
     e.add_argument("--to-agent", required=True)
     e.add_argument("--after-minutes", type=int, default=30)
+    sub.add_parser("waiting")
     sub.add_parser("escalations")
     try:
         args = p.parse_args(argv)
@@ -293,6 +308,8 @@ def main(argv=None, env=None):
             result = cmd_precheck(client, args, env)
         elif args.cmd == "escalate":
             result = cmd_escalate(client, args)
+        elif args.cmd == "waiting":
+            result = cmd_waiting(client, args)
         else:
             result = cmd_escalations(client, args)
     except SystemExit as exc:

@@ -85,6 +85,8 @@ class FakePaperclip:
                     return self._send(200, {"id": "agent-1", "companyId": COMPANY})
                 if path == f"/api/companies/{COMPANY}/search":
                     return self._send(200, {"results": outer._search(qs)})
+                if path == f"/api/companies/{COMPANY}/agents":
+                    return self._send(200, [{"id": "pilot-agent-id", "name": "oc-scout", "urlKey": "oc-scout"}])
                 if path == f"/api/companies/{COMPANY}/labels":
                     if method == "POST":
                         lab = {"id": f"lab-{len(outer.labels)+1}", "name": req["body"]["name"]}
@@ -382,6 +384,15 @@ class PrecheckTests(Base):
         self.assertNotRegex(src, r"openclaw[^\n]*\bagent\b")
 
 
+class WaitingTests(Base):
+    def test_lists_only_untriaged_intake_cards(self):
+        self.file("deploy failed")
+        self.file("cron failed")
+        list(self.api.issues.values())[1]["assigneeAgentId"] = "someone"
+        rc, out, _ = self.run_cli("waiting")
+        self.assertEqual([c["title"] for c in json.loads(out)["waiting"]], ["deploy failed"])
+
+
 class EscalateTests(Base):
     def old(self, minutes):
         return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
@@ -396,6 +407,21 @@ class EscalateTests(Base):
         self.assertEqual(len(card["labelIds"]), 1)
         self.assertEqual(next(iter(self.api.labels.values()))["name"], "intake-escalated")
         self.assertEqual(json.loads(out)["escalated"], 1)
+
+    def test_pilot_agent_is_resolved_by_name(self):
+        self.file("deploy failed")
+        card = next(iter(self.api.issues.values()))
+        card["updatedAt"] = self.old(45)
+        self.run_cli("escalate", "--to-agent", "oc-scout")
+        self.assertEqual(card["assigneeAgentId"], "pilot-agent-id")
+
+    def test_unknown_pilot_agent_fails_loud_and_assigns_nobody(self):
+        self.file("deploy failed")
+        card = next(iter(self.api.issues.values()))
+        card["updatedAt"] = self.old(45)
+        rc, _, err = self.run_cli("escalate", "--to-agent", "ghost")
+        self.assertEqual(rc, 1)
+        self.assertIsNone(card["assigneeAgentId"])
 
     def test_fresh_card_is_left_alone(self):
         self.file("deploy failed")
