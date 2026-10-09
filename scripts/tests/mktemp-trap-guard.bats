@@ -122,3 +122,58 @@ SH
   [[ "$output" == *"twofn.sh:7"* ]]
   [[ "$output" != *"twofn.sh:3"* ]]
 }
+
+@test "function-keyword form (no parens) scopes per function" {
+  cat > "$TEST_TMPDIR/scripts/kw.sh" <<'SH'
+#!/bin/bash
+function a {
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+}
+function b {
+  work="$(mktemp -d)"
+  echo hi
+}
+SH
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"kw.sh:7"* ]]
+  [[ "$output" != *"kw.sh:3"* ]]
+}
+
+@test "Allman-style braces scope per function" {
+  cat > "$TEST_TMPDIR/scripts/allman.sh" <<'SH'
+#!/bin/bash
+a()
+{
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+}
+b()
+{
+  work="$(mktemp -d)"
+  echo hi
+}
+SH
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"allman.sh:9"* ]]
+  [[ "$output" != *"allman.sh:4"* ]]
+}
+
+@test "function-keyword and Allman functions that trap their own dir pass" {
+  cat > "$TEST_TMPDIR/scripts/okforms.sh" <<'SH'
+#!/bin/bash
+function a {
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+}
+b()
+{
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+}
+SH
+  run_guard
+  [ "$status" -eq 0 ]
+}

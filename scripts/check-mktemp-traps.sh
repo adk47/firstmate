@@ -13,12 +13,15 @@ LIFECYCLE_SIG='(^|[^A-Za-z_])(EXIT|RETURN)([^A-Za-z_]|$)'
 # comment-stripped source ($#, ${#x} survive: '#' only counts after whitespace/;/start)
 strip() { sed -E 's/(^|[[:space:];])#.*/\1/' "$1"; }
 
-# lines of the top-level function (or top-level code) enclosing line $1, from stdin
+# lines of the top-level function (name() {, function name {, or Allman) or top-level code enclosing line $1, from stdin
 region() {
   awk -v n="$1" '
     {
       l[NR] = $0
-      if (d == 0) blk = ($0 ~ /^[[:space:]]*(function[[:space:]]+)?[A-Za-z_][A-Za-z0-9_:.-]*[[:space:]]*\(\)/) ? NR : 0
+      if (d == 0) {
+        if ($0 ~ /^[[:space:]]*(function[[:space:]]+[A-Za-z_][A-Za-z0-9_:.-]*([[:space:]]|\(|$)|[A-Za-z_][A-Za-z0-9_:.-]*[[:space:]]*\(\))/) blk = NR
+        else if ($0 !~ /^[[:space:]]*\{/) blk = 0   # Allman: a lone "{" keeps the function open
+      }
       id[NR] = blk
       t = $0; d += gsub(/\{/, "", t); d -= gsub(/\}/, "", t)
       if (d < 0) d = 0
@@ -29,7 +32,7 @@ region() {
 
 fn_body() {
   awk -v fn="$1" '
-    !inb && $0 ~ "^[[:space:]]*(function[[:space:]]+)?" fn "[[:space:]]*\\(\\)" { inb = 1 }
+    !inb && ($0 ~ "^[[:space:]]*function[[:space:]]+" fn "([[:space:]]|\\(|$)" || $0 ~ "^[[:space:]]*" fn "[[:space:]]*\\(\\)") { inb = 1 }
     inb { print; if ($0 ~ /^[[:space:]]*\}/ || (/\}[[:space:]]*$/ && /\{/)) inb = 0 }
   '
 }
