@@ -84,6 +84,12 @@ class FakePaperclip:
                 if path == "/api/agents/me":
                     return self._send(200, {"id": "agent-1", "companyId": COMPANY})
                 if path == f"/api/companies/{COMPANY}/search":
+                    # the live API's caps (checked 9 Oct): limit 1..50, offset 0..200
+                    sq = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
+                    if not 1 <= int(sq.get("limit", 20)) <= 50:
+                        return self._send(400, {"error": "limit must be between 1 and 50"})
+                    if not 0 <= int(sq.get("offset", 0)) <= 200:
+                        return self._send(400, {"error": "offset must be between 0 and 200"})
                     return self._send(200, {"results": outer._search(qs)})
                 if path == f"/api/companies/{COMPANY}/agents":
                     return self._send(200, [{"id": "pilot-agent-id", "name": "oc-scout", "urlKey": "oc-scout"}])
@@ -437,6 +443,14 @@ class PaginationTests(Base):
         last["createdAt"] = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat()
         self.run_cli("escalate", "--to-agent", "pilot-agent-id")
         self.assertEqual(last["assigneeAgentId"], "pilot-agent-id")
+
+
+class SearchCapTests(Base):
+    def test_a_query_with_more_hits_than_the_api_pages_returns_the_first_250_and_does_not_raise(self):
+        for n in range(260):
+            self.api.issues[f"iss-{n}"] = {"id": f"iss-{n}", "title": f"hydra-intake {n}", "status": "todo"}
+        client = pi.Client(self.env)
+        self.assertEqual(len(client.search_issues("hydra-intake")), 250)
 
 
 class EscalateTests(Base):

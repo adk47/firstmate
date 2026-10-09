@@ -51,7 +51,7 @@ INTAKE_MARKER = "Source: hydra-intake"
 ESCALATED_LABEL = "intake-escalated"
 CLOSED = ("done", "cancelled")
 HTTP_TIMEOUT = 20
-MAX_PAGES = 20  # search pages per query; 1000 cards is far past any real intake queue
+MAX_PAGES = 5  # the search API refuses offset > 200 (limit 50), so 250 hits is its ceiling per query
 
 # ---- fingerprint (port of plugins/tracker/src/fingerprint.ts) ---------------
 # Order matters: most specific first. A URL contains digits and a UUID contains
@@ -146,7 +146,7 @@ class Client:
         return self._company
 
     def search_issues(self, q, status=None, limit=50):
-        """Every issue hit for `q`, paged: a short page is the last one (MAX_PAGES bounds a runaway)."""
+        """Every issue hit for `q`, paged: a short page is the last one (the API caps a query at MAX_PAGES pages)."""
         hits = []
         for page in range(MAX_PAGES):
             params = {"q": q, "scope": "issues", "limit": str(limit), "offset": str(page * limit)}
@@ -282,7 +282,7 @@ def cmd_waiting(client, args):
 
 def cmd_escalations(client, args):
     label = client.label_id(ESCALATED_LABEL)
-    n = sum(1 for hit in client.search_issues("hydra-intake", limit=100)
+    n = sum(1 for hit in client.search_issues("hydra-intake")
             if label in (client.issue(hit["id"]).get("labelIds") or []))
     return {"escalated": n}
 
