@@ -40,7 +40,9 @@ set -u
 DIR="${FM_TEST_ORCA_DIR:?}"
 case "$1 $2" in
   "status --json")
-    printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
+    state=ready
+    [ -f "$DIR/orca-runtime-starting" ] && state=starting
+    printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"%s"}}}\n' "$state"
     exit 0
     ;;
   "repo show")
@@ -73,11 +75,20 @@ case "$1 $2" in
   "terminal list")
     printf 'list\n' >> "$DIR/orca-calls"
     [ -f "$DIR/orca-list-fails" ] && exit 1
-    printf '{"ok":true,"result":{"terminals":[%s]}}\n' "$(cat "$DIR/orca-listed" 2>/dev/null)"
+    listed=$(cat "$DIR/orca-listed" 2>/dev/null)
+    count=$(printf '%s' "$listed" | grep -o '"handle"' | wc -l | tr -d ' ')
+    truncated=false
+    [ -f "$DIR/orca-list-truncated" ] && truncated=true
+    printf '{"ok":true,"result":{"terminals":[%s],"hostScope":{"hostIds":["local"],"omittedHostIds":[]},"totalCount":%s,"truncated":%s}}\n' "$listed" "$count" "$truncated"
     exit 0
     ;;
   "worktree show")
     printf '{"ok":true,"result":{"worktree":{"path":"%s"}}}\n' "$(cat "$DIR/orca-worktree-path")"
+    exit 0
+    ;;
+  "terminal close")
+    printf 'close %s\n' "$*" >> "$DIR/orca-calls"
+    printf '{"ok":true}\n'
     exit 0
     ;;
   "terminal send")
@@ -200,6 +211,47 @@ test_orca_relaunch_refuses_when_the_inventory_cannot_be_read() {
   pass "orca relaunch never reads an unreadable terminal inventory as a gone terminal"
 }
 
+test_orca_relaunch_refuses_before_the_runtime_is_ready() {
+  local id=orca-relaunch-a6 case_dir out status
+  case_dir=$(make_orca_relaunch_case starting "$id")
+  : > "$case_dir/orca-listed"
+  : > "$case_dir/orca-runtime-starting"
+  out=$(run_orca_relaunch "$case_dir" "$id"); status=$?
+  expect_code 1 "$status" "a relaunch must refuse while the Orca runtime is not ready"$'\n'"$out"
+  assert_contains "$out" "could not read Orca's terminal inventory" "the refusal should name the unreadable inventory"
+  assert_not_contains "$(cat "$case_dir/orca-calls" 2>/dev/null)" "create" "an inventory from a runtime that is not ready must never be read as absence"
+  pass "orca relaunch never reads an empty inventory from a runtime that is not ready as a gone terminal"
+}
+
+test_orca_relaunch_refuses_a_truncated_inventory() {
+  local id=orca-relaunch-a7 case_dir out status
+  case_dir=$(make_orca_relaunch_case truncated "$id")
+  printf '{"handle":"term-other"}' > "$case_dir/orca-listed"
+  : > "$case_dir/orca-list-truncated"
+  out=$(run_orca_relaunch "$case_dir" "$id"); status=$?
+  expect_code 1 "$status" "a truncated Orca inventory must refuse"$'\n'"$out"
+  assert_contains "$out" "could not read Orca's terminal inventory" "the refusal should name the unreadable inventory"
+  assert_not_contains "$(cat "$case_dir/orca-calls" 2>/dev/null)" "create" "a truncated inventory must never be read as absence"
+  pass "orca relaunch never reads a truncated terminal inventory as a gone terminal"
+}
+
+test_orca_relaunch_closes_its_fresh_terminal_when_it_refuses_after_creating_it() {
+  local id=orca-relaunch-a8 case_dir out status plain
+  case_dir=$(make_orca_relaunch_case abort "$id")
+  : > "$case_dir/orca-listed"
+  plain="$case_dir/plain-dir"
+  mkdir -p "$plain"
+  sed -i.bak "s|^worktree=.*|worktree=$plain|" "$case_dir/home/state/$id.meta"
+  printf '%s\n' "$plain" > "$case_dir/orca-worktree-path"
+  out=$(run_orca_relaunch "$case_dir" "$id"); status=$?
+  expect_code 1 "$status" "a relaunch into a non-isolated worktree must refuse"$'\n'"$out"
+  assert_contains "$(cat "$case_dir/orca-calls" 2>/dev/null)" "create " "the refusal under test must come after the fresh terminal is created"$'\n'"$out"
+  assert_contains "$(cat "$case_dir/orca-calls" 2>/dev/null)" "close terminal close --terminal term-new" "a refused relaunch must close the terminal it created"$'\n'"$out"
+  [ "$(grep '^terminal=' "$case_dir/home/state/$id.meta" | tail -1 | cut -d= -f2-)" = term-old ] \
+    || fail "a refused relaunch must leave the recorded terminal unchanged"
+  pass "orca relaunch closes the fresh terminal it created when it refuses before rebinding the record"
+}
+
 test_orca_relaunch_refuses_a_worktree_that_resolves_elsewhere() {
   local id=orca-relaunch-a4 case_dir out status
   case_dir=$(make_orca_relaunch_case moved "$id")
@@ -235,6 +287,9 @@ test_orca_relaunch_rebinds_a_gone_terminal_in_the_recorded_worktree() {
 test_orca_fresh_spawn_enters_the_worktree_it_created
 test_orca_relaunch_refuses_a_terminal_orca_still_lists
 test_orca_relaunch_refuses_when_the_inventory_cannot_be_read
+test_orca_relaunch_refuses_before_the_runtime_is_ready
+test_orca_relaunch_refuses_a_truncated_inventory
+test_orca_relaunch_closes_its_fresh_terminal_when_it_refuses_after_creating_it
 test_orca_relaunch_refuses_a_worktree_that_resolves_elsewhere
 test_orca_relaunch_rebinds_a_gone_terminal_in_the_recorded_worktree
 

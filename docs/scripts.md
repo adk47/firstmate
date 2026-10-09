@@ -137,6 +137,9 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-check-unregister.sh` | Retire a custom watcher check and its trust binding by validated task id            |
 | `fm-check-lib.sh`        | Validate custom-check registrations, prepare private execution snapshots, and arm or disarm a self-registered check's shim and trust binding |
 | `fm-tool-update-check.sh` | Report watched tooling with an update available, and updates installed but left inert by PATH order |
+| `fm-fable-runway.sh`     | Print one read-only GREEN/YELLOW/RED line for the supervisor's Fable credential and the account pool |
+| `fm-fable-runway-check.sh` | Registered slow-poll check that wakes firstmate on a Fable or pool runway change, a sustained RED, or an account needing a login |
+| `fm-fable-runway-alert.sh` | The runway check's outward actions: the once-per-episode handoff note, Grok doorbell, and notifications |
 | `fm-sentry-watch.sh`     | Registered check that watches every Sentry project the API lists, pages on P0/P1/regression, cross-checks the CTO rail, and emits a DARK wake when its own visibility is lost |
 | `fm-startup-growth-check.sh` | Daily metadata-only growth check for startup memory and tracked startup/instruction surfaces |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
@@ -153,6 +156,12 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode, write the ship instructions carrying that mode's definition of done, and supersede the task's brief so a later relaunch cannot revive stale scout delivery text |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness, resolve crew or secondmate harness, model, and effort, and validate the native-only `ultra` effort |
+| `fm-deepseek-gateway.sh` | Lifecycle for the second local Anthropic-compatible gateway that serves DeepSeek V4.1 Flash to opt-in lanes |
+| `fm-lane-model-switch.sh` | Switch one live lane's model in place behind a composer-empty refusal, with an optional repoint at the DeepSeek gateway |
+| `fm-chair-sentinel.sh`   | Model-free LaunchAgent tick that keeps the firstmate chair on a green tank: Pi+Fable while a Fable source is green, SuperGrok during a Fable blackout; `arm`, `disarm`, `status` |
+| `fm-chair-runway.sh`     | Read-only sensor line for the chair's three tanks (8317 token pool live probe, 8080 better-ccflare, SuperGrok floor) |
+| `fm-chair-status.sh`     | Read-only line naming who holds the firstmate chair, its bound token source, and its Orca terminal |
+| `fm-chair-flip.sh`       | Deterministic actuator: write the handoff, end the incumbent chair gracefully, launch and verify the successor on the chosen tank |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared Relay config, relay, and reply-threading helpers                              |
 | `fm-x-poll.sh`           | One bounded Relay poll: stash newly offered mentions, emit their once-only wake, and raise queued public-followup rejection wakes at least once |

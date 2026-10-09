@@ -116,7 +116,8 @@ An unreachable endpoint can still hold the live agent a rebind would duplicate, 
   A different but running server would answer "not anywhere" about a window it was never able to see, so a server-wide read cannot tell a destroyed window from one on a server this process cannot address.
   There is no read available that closes that gap, so tmux always refuses - for a renamed session, a moved window, a foreign socket, and a dead server alike.
 - **Orca proves only absence, and only at the launch owner.** Orca has no recovery-grade classifier for a live terminal, so `bin/fm-control.sh` still refuses an Orca task, and `bin/fm-spawn.sh --relaunch` refuses every terminal Orca still lists.
-  It rebinds only when a successful, well-formed `orca terminal list` no longer lists the recorded terminal and the recorded `orca_worktree_id` still resolves to the task's worktree; an unreadable inventory refuses.
+  It rebinds only when `orca status` reports a ready runtime, a successful, well-formed, untruncated `orca terminal list` covering every host no longer lists the recorded terminal, and the recorded `orca_worktree_id` still resolves to the task's worktree; any other inventory refuses.
+  A refusal after the fresh terminal is created closes that terminal, so a retry never leaves a stray one behind.
 
 Every transient or self-contradicting read stays `unreadable` or `ambiguous` and still refuses, so a momentary backend failure can never be mistaken for absence.
 

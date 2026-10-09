@@ -1249,6 +1249,7 @@ spawn_remote_secondmate() {
 
 BACKEND=
 ORCA_ABORT_CLEANUP=0
+ORCA_ABORT_KILL_TERMINAL=
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 HERDR_PROJECTION_ABORT_CLEANUP=0
@@ -1353,6 +1354,10 @@ spawn_abort_cleanup() {
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
+  if [ -n "$ORCA_ABORT_KILL_TERMINAL" ]; then
+    fm_backend_kill orca "$ORCA_ABORT_KILL_TERMINAL" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
+    ORCA_ABORT_KILL_TERMINAL=
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -3732,6 +3737,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       exit 1
     }
     ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+    ORCA_ABORT_KILL_TERMINAL=$ORCA_TERMINAL
     T=$ORCA_TERMINAL
     SES=${T%%:*}
     WT_TARGET=$T
@@ -5268,7 +5274,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
-[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0 && ORCA_ABORT_KILL_TERMINAL=
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

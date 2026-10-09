@@ -167,19 +167,24 @@ fm_backend_orca_terminal_create() {  # <worktree-id> <title>
 
 # fm_backend_orca_terminal_listed: whether Orca's live terminal inventory still
 # lists <terminal-id>. Returns 0 when it is listed, 1 only when a successful,
-# well-formed `orca terminal list` omits it, and 2 when the inventory could not
-# be read or parsed, so an unreadable inventory is never mistaken for absence.
+# well-formed, complete `orca terminal list` from a ready runtime omits it, and
+# 2 when the runtime is not ready or the inventory could not be read, was
+# truncated, omitted a host, or could not be parsed, so a partial inventory is
+# never mistaken for absence.
 fm_backend_orca_terminal_listed() {  # <terminal-id>
   local terminal=${1:-} out
   [ -n "$terminal" ] || return 2
-  fm_backend_orca_tool_check >/dev/null 2>&1 || return 2
+  fm_backend_orca_runtime_check >/dev/null 2>&1 || return 2
   out=$(orca terminal list --json --limit 100000 2>/dev/null) || return 2
   printf '%s' "$out" | node -e '
 const fs = require("fs");
 let data;
 try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (err) { process.exit(2); }
 if (!data || data.ok !== true || !data.result || !Array.isArray(data.result.terminals)) process.exit(2);
-process.exit(data.result.terminals.some((t) => t && t.handle === process.argv[1]) ? 0 : 1);
+const r = data.result;
+if (r.truncated !== false || r.totalCount !== r.terminals.length) process.exit(2);
+if (r.hostScope && Array.isArray(r.hostScope.omittedHostIds) && r.hostScope.omittedHostIds.length) process.exit(2);
+process.exit(r.terminals.some((t) => t && t.handle === process.argv[1]) ? 0 : 1);
 ' "$terminal"
 }
 
