@@ -387,7 +387,7 @@ reaudit_qa_review() {  # <quarantined-path> <cutoff-ref-file>
   fi
   # A bind mount can land between the last pre-quarantine guard and now; rm
   # --one-file-system would follow a same-device one out of the clone.
-  if mount_hazard "$q"; then
+  if safe_delete_mount_hazard "$q"; then
     REAUDIT_REASON="mount appeared before removal"; return 1
   fi
   return 0
@@ -784,14 +784,14 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp|q
     if tree_fresh_since "$d" "$QA_REF"; then
       active=$((active + 1)); return 0
     fi
-    if mount_hazard "$d"; then
+    if safe_delete_mount_hazard "$d"; then
       held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
     fi
     kb="$(entry_kb "$d")"
     if ! qa_review_shape_ok "$d" || tree_fresh_since "$d" "$QA_REF"; then
       active=$((active + 1)); return 0
     fi
-    if mount_hazard "$d"; then
+    if safe_delete_mount_hazard "$d"; then
       held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate (appeared during size scan)"; return 0
     fi
     if remove_entry "$d" "$kb" "qa-review" tree "$cand_id" reaudit_qa_review "$QA_REF"; then
