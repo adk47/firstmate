@@ -97,6 +97,7 @@ class FakePaperclip:
                     n = len(outer.issues) + 1
                     iss = {"id": f"iss-{n}", "identifier": f"PIL-{n}", "status": "todo",
                            "assigneeAgentId": None, "labelIds": [],
+                           "createdAt": datetime.now(timezone.utc).isoformat(),
                            "updatedAt": datetime.now(timezone.utc).isoformat(),
                            **req["body"]}
                     outer.issues[iss["id"]] = iss
@@ -108,6 +109,7 @@ class FakePaperclip:
                         return self._send(201, {"id": "c-1"})
                     if method == "PATCH":
                         iss.update(req["body"])
+                        iss["updatedAt"] = datetime.now(timezone.utc).isoformat()
                         return self._send(200, iss)
                     return self._send(200, iss)
                 self._send(404, {"error": "not found"})
@@ -342,6 +344,25 @@ class FileTests(Base):
         self.assertEqual(self.api.issues, {})
 
 
+class ClosedTwinTests(Base):
+    def _recur_after(self, status):
+        self.file("deploy failed")
+        next(iter(self.api.issues.values()))["status"] = status
+        rc, out, _ = self.file("deploy failed")
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out)["action"], "created")
+        self.assertEqual(len(self.api.issues), 2)
+        new = self.api.issues["iss-2"]
+        self.assertIn("Occurrences: 1", new["description"])
+        self.assertIn("Occurrences: 1", self.api.issues["iss-1"]["description"])
+
+    def test_recurrence_after_done_is_a_new_card(self):
+        self._recur_after("done")
+
+    def test_recurrence_after_cancelled_is_a_new_card(self):
+        self._recur_after("cancelled")
+
+
 class PrecheckTests(Base):
     def test_empty_queue_prints_nothing_and_wakes_nobody(self):
         rc, out, _ = self.run_cli("precheck", "--wake-job", "job-1")
@@ -400,7 +421,7 @@ class EscalateTests(Base):
     def test_untouched_card_over_30_minutes_goes_to_the_pilot_agent_with_a_label(self):
         self.file("deploy failed")
         card = next(iter(self.api.issues.values()))
-        card["updatedAt"] = self.old(45)
+        card["createdAt"] = self.old(45)
         rc, out, _ = self.run_cli("escalate", "--to-agent", "pilot-agent-id")
         self.assertEqual(rc, 0)
         self.assertEqual(card["assigneeAgentId"], "pilot-agent-id")
@@ -411,14 +432,14 @@ class EscalateTests(Base):
     def test_pilot_agent_is_resolved_by_name(self):
         self.file("deploy failed")
         card = next(iter(self.api.issues.values()))
-        card["updatedAt"] = self.old(45)
+        card["createdAt"] = self.old(45)
         self.run_cli("escalate", "--to-agent", "oc-scout")
         self.assertEqual(card["assigneeAgentId"], "pilot-agent-id")
 
     def test_unknown_pilot_agent_fails_loud_and_assigns_nobody(self):
         self.file("deploy failed")
         card = next(iter(self.api.issues.values()))
-        card["updatedAt"] = self.old(45)
+        card["createdAt"] = self.old(45)
         rc, _, err = self.run_cli("escalate", "--to-agent", "ghost")
         self.assertEqual(rc, 1)
         self.assertIsNone(card["assigneeAgentId"])
@@ -426,22 +447,33 @@ class EscalateTests(Base):
     def test_fresh_card_is_left_alone(self):
         self.file("deploy failed")
         card = next(iter(self.api.issues.values()))
-        card["updatedAt"] = self.old(10)
+        card["createdAt"] = self.old(10)
         self.run_cli("escalate", "--to-agent", "pilot-agent-id")
         self.assertIsNone(card["assigneeAgentId"])
 
     def test_already_escalated_card_is_not_escalated_twice(self):
         self.file("deploy failed")
         card = next(iter(self.api.issues.values()))
-        card["updatedAt"] = self.old(45)
+        card["createdAt"] = self.old(45)
         self.run_cli("escalate", "--to-agent", "pilot-agent-id")
-        card["updatedAt"] = self.old(45)
+        card["createdAt"] = self.old(45)
         rc, out, _ = self.run_cli("escalate", "--to-agent", "pilot-agent-id")
         self.assertEqual(json.loads(out)["escalated"], 0)
 
+    def test_refiling_does_not_reset_the_escalation_clock(self):
+        # Clio down: a cron agent re-files every 10 min; each bump moves updatedAt.
+        self.file("deploy failed")
+        card = next(iter(self.api.issues.values()))
+        card["createdAt"] = self.old(45)
+        self.file("deploy failed")
+        self.assertEqual(len(self.api.issues), 1)
+        rc, out, _ = self.run_cli("escalate", "--to-agent", "pilot-agent-id")
+        self.assertEqual(json.loads(out)["escalated"], 1)
+        self.assertEqual(card["assigneeAgentId"], "pilot-agent-id")
+
     def test_report_counts_escalations(self):
         self.file("deploy failed")
-        next(iter(self.api.issues.values()))["updatedAt"] = self.old(45)
+        next(iter(self.api.issues.values()))["createdAt"] = self.old(45)
         self.run_cli("escalate", "--to-agent", "pilot-agent-id")
         rc, out, _ = self.run_cli("escalations")
         self.assertEqual(json.loads(out)["escalated"], 1)

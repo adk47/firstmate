@@ -8,7 +8,7 @@ Subcommands:
   file       --agent NAME --title T --body B [--component C]   file or bump a card
   precheck   --wake-job ID                                     ZERO-TOKEN sweep: wake Clio's triage job only if an
                                                                untriaged intake card is waiting
-  escalate   --to-agent ID|NAME [--after-minutes 30]                reassign untouched intake cards to the pilot agent
+  escalate   --to-agent ID|NAME [--after-minutes 30]                reassign intake cards untriaged for 30 min (aged from createdAt) to the pilot agent
   waiting                                                      list untriaged intake cards (for the triage agent)
   escalations                                                  count cards the fallback has escalated (pilot report)
 
@@ -242,7 +242,7 @@ def cmd_precheck(client, args, env):
 
 
 def _age_minutes(card):
-    raw = card.get("updatedAt") or ""
+    raw = card.get("createdAt") or ""
     try:
         ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
@@ -261,7 +261,7 @@ def cmd_escalate(client, args):
         client.call("PATCH", f"/api/issues/{card['id']}",
                     {"assigneeAgentId": target,
                      "labelIds": sorted(set(card.get("labelIds") or []) | {label})})
-        client.comment(card["id"], f"Untouched for {args.after_minutes} minutes: escalated to the pilot "
+        client.comment(card["id"], f"Waiting {args.after_minutes} minutes untriaged: escalated to the pilot "
                                    f"agent (label {ESCALATED_LABEL}).")
         n += 1
     return {"escalated": n}

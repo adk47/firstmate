@@ -45,5 +45,5 @@ Quote the identifier in your reply. Do not file the same problem twice by hand.
 ## How cards are handled (not your job)
 
 Clio's triage wakes only when an untriaged intake card is waiting (zero-token
-pre-check every 15 minutes). A card untouched for 30 minutes is reassigned to the
+pre-check every 15 minutes). A card still untriaged 30 minutes after it was filed is reassigned to the
 pilot agent with the `intake-escalated` label.
