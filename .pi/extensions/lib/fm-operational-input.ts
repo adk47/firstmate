@@ -21,6 +21,15 @@ export type FirstmateCurrentOperationalKind =
 
 type OperationalInputCommand = "encode" | "classify" | "kind";
 
+export function firstmateShellInvocation(
+  script: string,
+  args: readonly string[],
+): { command: string; args: string[] } {
+  return process.platform === "win32"
+    ? { command: "bash", args: [script, ...args] }
+    : { command: script, args: [...args] };
+}
+
 // The one owner of how each command is invoked and how its exit status and
 // stdout become an answer, shared by the synchronous and awaited callers
 // below so the two can never drift.
@@ -45,12 +54,20 @@ function runOperationalInputCommand(
   content: string,
   kind?: FirstmateCurrentOperationalKind,
 ): string | undefined {
-  const result = spawnSync(operationalInputScript, operationalInputArgs(command, kind), {
-    encoding: "utf8",
-    input: content,
-    maxBuffer: 1024 * 1024,
-  });
-  return operationalInputAnswer(command, result.status, result.stdout);
+  const invocation = firstmateShellInvocation(
+    operationalInputScript,
+    operationalInputArgs(command, kind),
+  );
+  try {
+    const result = spawnSync(invocation.command, invocation.args, {
+      encoding: "utf8",
+      input: content,
+      maxBuffer: 1024 * 1024,
+    });
+    return operationalInputAnswer(command, result.status, result.stdout ?? "");
+  } catch {
+    return undefined;
+  }
 }
 
 function encodeFailure(kind: FirstmateCurrentOperationalKind): Error {
@@ -85,7 +102,11 @@ export async function encodeFirstmateOperationalInputWith(
   kind: FirstmateCurrentOperationalKind,
   content: string,
 ): Promise<string> {
-  const result = await run(operationalInputScript, operationalInputArgs("encode", kind), { input: content });
+  const invocation = firstmateShellInvocation(
+    operationalInputScript,
+    operationalInputArgs("encode", kind),
+  );
+  const result = await run(invocation.command, invocation.args, { input: content });
   const encoded = operationalInputAnswer("encode", result.status, result.stdout);
   if (encoded === undefined) throw encodeFailure(kind);
   return encoded;
@@ -99,4 +120,20 @@ export function classifyFirstmateCurrentOperationalText(
   content: string,
 ): string | undefined {
   return runOperationalInputCommand("kind", content);
+}
+
+// The only legacy operational shape Calm presentation hides on top of the current
+// typed kinds. The broader `classify` legacy set stays out: its bare forms are text a
+// captain can type, so hiding them would hide real input.
+const LEGACY_CALM_OPERATIONAL_PREFIX = "\u2063Supervisor escalate (";
+
+// Single owner of "may Calm presentation hide this exact input?", shared by the
+// transcript-row and queued-row adapters so the two can never disagree about a message.
+// Text without the U+2063 marker answers here without spawning the classifier.
+export function isFirstmateOperationalPresentationText(text: string): boolean {
+  if (!text.includes("\u2063")) return false;
+  return (
+    classifyFirstmateCurrentOperationalText(text) !== undefined ||
+    text.startsWith(LEGACY_CALM_OPERATIONAL_PREFIX)
+  );
 }
