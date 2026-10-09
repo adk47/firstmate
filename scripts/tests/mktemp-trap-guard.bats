@@ -199,3 +199,10 @@ SH
   run_guard
   [ "$status" -eq 0 ]
 }
+
+@test "a missing scripts directory fails closed instead of passing" {
+  rm -rf "$TEST_TMPDIR/scripts"
+  run_guard
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no scripts directory"* ]]
+}

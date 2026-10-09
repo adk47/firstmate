@@ -6,6 +6,7 @@
 # Exit 0 clean, 1 offenders listed. MKTEMP_GUARD_ROOT overrides the repo root.
 set -u
 ROOT="${MKTEMP_GUARD_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+[ -d "$ROOT/scripts" ] || { echo "check-mktemp-traps: no scripts directory under $ROOT" >&2; exit 2; }
 rc=0
 # a trap only counts if it fires on a normal exit; ERR/INT-only traps leak on success
 LIFECYCLE_SIG='(^|[^A-Za-z_])(EXIT|RETURN)([^A-Za-z_]|$)'
