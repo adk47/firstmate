@@ -104,6 +104,15 @@ MIN_RUNS_FOR_STUCK="${MIN_RUNS_FOR_STUCK:-3}"
 # Liveness probe target for the STUCK gate below. Overridable so the bats
 # suite can stub `curl` without needing a live gateway on node-8.
 GATEWAY_LIVENESS_PROBE_URL="${GATEWAY_LIVENESS_PROBE_URL:-http://127.0.0.1:18789/}"
+# MUS-1320: never restart main within this many minutes of its last start, by
+# ANY restarter (crash-restart, deploy, manual, guard). openclaw re-runs a
+# ~20min migration at every start during which the gateway answers nothing, so
+# a restart inside that window aborts it and guarantees it runs again. The
+# cooldown stamp only knows restarts THIS script made. No probe exception: a
+# probe cannot tell "wedged" from "mid-migration".
+GATEWAY_UPTIME_FLOOR_MIN="${GATEWAY_UPTIME_FLOOR_MIN:-30}"
+# Boot uptime source (seconds). Overridable for the bats suite.
+PROC_UPTIME_FILE="${PROC_UPTIME_FILE:-/proc/uptime}"
 
 # Source the shared Slack helper. Both this watchdog and the new
 # openclaw-pre-start-heal.sh need to post to the same #clio_devops
@@ -181,6 +190,10 @@ log() { echo "$LOGPREFIX $1"; }
 if ! [[ "$MIN_RUNS_FOR_STUCK" =~ ^[1-9][0-9]{0,2}$ ]]; then
   log "MIN_RUNS_FOR_STUCK='$MIN_RUNS_FOR_STUCK' is not a positive integer — falling back to 3"
   MIN_RUNS_FOR_STUCK=3
+fi
+if ! [[ "$GATEWAY_UPTIME_FLOOR_MIN" =~ ^[1-9][0-9]{0,2}$ ]]; then
+  log "GATEWAY_UPTIME_FLOOR_MIN='$GATEWAY_UPTIME_FLOOR_MIN' is not a positive integer — falling back to 30"
+  GATEWAY_UPTIME_FLOOR_MIN=30
 fi
 
 # slack_notify is provided by lib/slack-notify.sh sourced above.
@@ -546,6 +559,31 @@ _codex_cooldown_ok() {
 # status (required under `set -e`, else a refused/timed-out connection kills
 # the whole watchdog tick instead of just failing this probe) — it prints
 # nothing, so curl's own "000" write-out is never duplicated.
+# MUS-1320 uptime floor. Returns 0 (and logs) when the unit started less than
+# GATEWAY_UPTIME_FLOOR_MIN ago. One clock covers every restarter: the unit's
+# own ActiveEnterTimestampMonotonic vs boot uptime. An unreadable start time
+# (unit inactive/never started reads 0, or systemctl fails) does NOT suppress:
+# a down unit must stay restartable.
+_within_uptime_floor() {
+  local ctx="$1" mono up age_min
+  mono=$(systemctl show -p ActiveEnterTimestampMonotonic --value "$GATEWAY_SERVICE" 2>/dev/null || true)
+  up=$(cut -d' ' -f1 "$PROC_UPTIME_FILE" 2>/dev/null || true)
+  up="${up%%.*}"
+  case "$mono" in ''|*[!0-9]*) mono="" ;; esac
+  case "$up" in ''|*[!0-9]*) up="" ;; esac
+  if [ -z "$mono" ] || [ -z "$up" ] || [ "${#mono}" -gt 15 ] || [ "$((10#$mono))" -eq 0 ] \
+     || [ "$((10#$mono / 1000000))" -gt "$((10#$up))" ]; then
+    log "UPTIME FLOOR: start time unreadable for ${GATEWAY_SERVICE} (${ctx}) — floor not applied"
+    return 1
+  fi
+  age_min=$(( (10#$up - 10#$mono / 1000000) / 60 ))
+  if [ "$age_min" -lt "$GATEWAY_UPTIME_FLOOR_MIN" ]; then
+    log "UPTIME FLOOR: ${GATEWAY_SERVICE} started ${age_min}min ago (< ${GATEWAY_UPTIME_FLOOR_MIN}min) — not restarting (${ctx}); a fresh start may be mid-migration"
+    return 0
+  fi
+  return 1
+}
+
 _gateway_probe_alive() {
   local attempt code
   for attempt in 1 2 3; do
@@ -1050,6 +1088,10 @@ else
     fi
   fi
 
+  if [ "$HEAP_TROUGH_COOLDOWN_OK" -eq 1 ] && _within_uptime_floor "HEAP TROUGH"; then
+    HEAP_TROUGH_COOLDOWN_OK=0
+  fi
+
   if [ "$HEAP_TROUGH_COOLDOWN_OK" -eq 1 ]; then
     log "HEAP TROUGH: drain-restarting ${GATEWAY_SERVICE} before V8 aborts"
     # Stamp the cooldown BEFORE the (up to GATEWAY_DRAIN_DEADLINE_SECS, default
@@ -1134,6 +1176,11 @@ if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -ge "$MIN_RUNS_FOR_STUCK" ]; the
       log "SKIP: Last restart was ${ELAPSED}min ago (cooldown: ${COOLDOWN_MIN}min)"
       exit 0
     fi
+  fi
+
+  # Uptime floor (MUS-1320): before the probe, which is dead mid-migration too.
+  if _within_uptime_floor "STUCK"; then
+    exit 0
   fi
 
   # Liveness gate: a real 100%-failure sample can still be application-level
