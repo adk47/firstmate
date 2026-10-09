@@ -16,6 +16,8 @@ mk() {
 setup() {
   export TMP_REAPER_ROOT="$BATS_TEST_TMPDIR/tmp"
   mkdir -p "$TMP_REAPER_ROOT"
+  : > "$BATS_TEST_TMPDIR/mounts"
+  export SAFE_DELETE_MOUNTS_FILE="$BATS_TEST_TMPDIR/mounts"
 }
 
 @test "review clone idle 4h is deleted, 2h is kept" {
@@ -153,4 +155,12 @@ setup() {
   PATH="$BATS_TEST_TMPDIR/bin:$PATH" run "$REAPER"
   [ "$status" -ne 0 ]
   [ -d "$TMP_REAPER_ROOT/core-backend-7-review-MKTMP1" ]
+}
+
+@test "a mountpoint under an expired candidate keeps it (deletion goes through the safe-delete lib)" {
+  mk core-backend-8-review-MOUNT1 10
+  printf 'tmpfs %s/core-backend-8-review-MOUNT1/repo tmpfs rw 0 0\n' "$TMP_REAPER_ROOT" > "$SAFE_DELETE_MOUNTS_FILE"
+  run "$REAPER"
+  [ "$status" -ne 0 ]
+  [ -f "$TMP_REAPER_ROOT/core-backend-8-review-MOUNT1/repo/f" ]
 }
