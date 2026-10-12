@@ -19,11 +19,14 @@ files=$(printf '%s\n' "$files" | sort)
 LIFECYCLE_SIG='(^|[^A-Za-z_])(EXIT|RETURN)([^A-Za-z_]|$)'
 
 # split each line into code and comment, quote-aware ('#' inside '...' or "..." is data; it starts
-# a comment only at line start or after whitespace/;). Prints one line per input line for the chosen part.
+# a comment only at line start or after whitespace/;). A backslash-continued command is joined onto its
+# first line (continuation lines print empty) so `mktemp \<newline> -d` is matched like `mktemp -d`.
+# Prints one line per input line for the chosen part.
 split_comment() {
   awk -v part="$2" '
     {
-      line = $0; code = ""; q = ""; esc = 0; cmt = ""
+      line = $0; code = ""; esc = 0; cmt = ""
+      if (start == 0) q = ""   # a quote opened before a continuation stays open on the next line
       for (i = 1; i <= length(line); i++) {
         c = substr(line, i, 1)
         if (esc) { esc = 0; code = code c; continue }
@@ -33,7 +36,15 @@ split_comment() {
         if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[[:space:];]/)) { cmt = substr(line, i); break }
         code = code c
       }
-      print (part == "code" ? code : cmt)
+      ocode[NR] = ""; ocmt[NR] = ""
+      if (start == 0) start = NR
+      if (esc) { sub(/\\$/, " ", code); ocode[start] = ocode[start] code; next }
+      ocode[start] = ocode[start] code
+      ocmt[start] = ocmt[start] cmt
+      start = 0
+    }
+    END {
+      for (i = 1; i <= NR; i++) print (part == "code" ? ocode[i] : ocmt[i])
     }' "$1"
 }
 

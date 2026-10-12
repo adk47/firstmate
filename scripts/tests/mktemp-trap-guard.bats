@@ -332,3 +332,22 @@ SH
   [ "$status" -eq 1 ]
   [[ "$output" == *"heredoc2.sh:6"* ]]
 }
+
+@test "a backslash-continued mktemp -d with no trap is flagged at its first line" {
+  printf '#!/bin/bash\nwork="$(mktemp \\\n  -d)"\necho "$work"\n' > "$TEST_TMPDIR/scripts/cont.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cont.sh:2"* ]]
+}
+
+@test "a continued mktemp -d whose variable is trapped on EXIT still passes" {
+  printf '#!/bin/bash\nwork="$(mktemp \\\n  -d)"\ntrap '"'"'rm -rf "$work"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/contok.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "a continued mktemp -d with a mktemp-ok waiver on the continuation line passes" {
+  printf '#!/bin/bash\nwork="$(mktemp \\\n  -d)" # mktemp-ok: short-lived\n' > "$TEST_TMPDIR/scripts/contw.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}
