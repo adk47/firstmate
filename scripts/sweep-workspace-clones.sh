@@ -253,10 +253,12 @@ entry_kb() {
 # GNU rm has --one-file-system (prod / CI); BSD rm (dev laptops) does not.
 # The has_mount_under skip is the primary rail either way — this is backstop.
 RM_ONEFS=()
-# mktemp-ok: the probe removes the dir it creates
-if rm --one-file-system -rf "$(mktemp -d "${TMPDIR:-/tmp}/sweep-workspace-clones.XXXXXX")" 2>/dev/null; then
+# mktemp-ok: removed unconditionally below, even when BSD rm rejects the flag
+probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/sweep-workspace-clones.XXXXXX")"
+if rm --one-file-system -rf "$probe_dir" 2>/dev/null; then
   RM_ONEFS=(--one-file-system)
 fi
+rm -rf "$probe_dir"
 
 is_kept() {
   local name="$1" k
