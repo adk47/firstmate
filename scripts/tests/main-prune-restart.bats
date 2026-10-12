@@ -109,6 +109,28 @@ _count() { grep -c "$1" "$CALLS" || true; }
   grep -q '^maintenance stop' "$CALLS"
 }
 
+@test "an unwritable temp dir aborts BEFORE main is stopped, clears maintenance and pages" {
+  TMPDIR="$TEST_TMPDIR/no-such-dir" _run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"temp config"* ]]
+  [ "$(_count 'systemctl stop')" -eq 0 ]
+  [ "$(_count 'systemctl start')" -eq 0 ]
+  [ "$(_count '^openclaw ')" -eq 0 ]
+  grep -q '^maintenance stop' "$CALLS"
+}
+
+@test "an unparseable live config aborts BEFORE main is stopped, clears maintenance and pages" {
+  echo 'not json' > "$SD/openclaw.json"
+  TMPDIR="$TEST_TMPDIR" _run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"temp config"* ]]
+  [ "$(_count 'systemctl stop')" -eq 0 ]
+  [ "$(_count 'systemctl start')" -eq 0 ]
+  [ "$(_count '^openclaw ')" -eq 0 ]
+  grep -q '^maintenance stop' "$CALLS"
+  [ -z "$(ls -A "$TEST_TMPDIR" | grep '^\.main-prune-cfg' || true)" ]
+}
+
 @test "never loops when health never stabilises: no second restart, main left running" {
   export STUB_HTTP=000
   _run

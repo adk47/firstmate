@@ -77,8 +77,11 @@ log "backup ok $BK ($(du -sh "$BK" | cut -f1))"
 ls -1dt "$BACKUP_ROOT"/*/ 2>/dev/null | tail -n +3 | xargs -r rm -rf
 
 # 2. temp config = live config with only pruneAfter changed (live openclaw.json is NOT edited)
-TC=$(mktemp -d "${TMPDIR:-/root}/.main-prune-cfg.XXXX"); cp "$SD/openclaw.json" "$TC/openclaw.json"
-python3 - "$TC/openclaw.json" "$PRUNE" <<'PY'
+# Any prep failure aborts BEFORE main is stopped: a stopped main with no usable temp config restarts unpruned.
+abort_prep() { log "temp config prep FAILED - aborting before main is stopped"; [ -z "${TC:-}" ] || rm -rf "$TC"; "$MAINT_SH" stop >/dev/null 2>&1; exit 1; }
+TC=$(mktemp -d "${TMPDIR:-/root}/.main-prune-cfg.XXXX") || abort_prep
+cp "$SD/openclaw.json" "$TC/openclaw.json" || abort_prep
+python3 - "$TC/openclaw.json" "$PRUNE" <<'PY' || abort_prep
 import json, sys
 p, v = sys.argv[1], sys.argv[2]; j = json.load(open(p)); j["session"]["maintenance"]["pruneAfter"] = v; json.dump(j, open(p, "w"))
 PY
