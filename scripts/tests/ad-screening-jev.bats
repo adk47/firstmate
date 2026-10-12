@@ -243,6 +243,31 @@ puts() { if [ -f "$T/put.args" ]; then wc -l <"$T/put.args" | tr -d ' '; else ec
   [ "$(puts)" -eq 0 ]
 }
 
+# ── the stored model is the model Jev was asked to use ───────────────
+
+stored_and_sent() { echo "sent: $(grep -o -- '--model [^ ]*' "$T/jev.args") stored: $(jq -r .model "$T/put.101.json")"; }
+
+@test "AD_SCREENING_MODEL override is both sent to jev and stored" {
+  ad 101 | fixture; answers approve 0.9 strong ""
+  AD_SCREENING_MODEL=custom run "$SCRIPT" --run
+  [ "$(stored_and_sent)" = "sent: --model custom stored: custom" ]
+}
+
+@test "JEV_MODEL is honoured: sent to jev and stored" {
+  ad 101 | fixture; answers approve 0.9 strong ""
+  JEV_MODEL=from-env run "$SCRIPT" --run
+  [ "$(stored_and_sent)" = "sent: --model from-env stored: from-env" ]
+}
+
+@test "default model follows JEV_PROVIDER, sent and stored alike" {
+  ad 101 | fixture; answers approve 0.9 strong ""
+  run "$SCRIPT" --run
+  [ "$(stored_and_sent)" = "sent: --model ~typesafe/jev-latest stored: ~typesafe/jev-latest" ]
+  rm "$T/jev.args"
+  JEV_PROVIDER=typesafe run "$SCRIPT" --run
+  [ "$(stored_and_sent)" = "sent: --model jev-latest stored: jev-latest" ]
+}
+
 # ── the real PUT wrapper must accept our payload ──────────────────────
 
 @test "muso-ad-screening.sh allowlist accepts every key the payload carries" {
