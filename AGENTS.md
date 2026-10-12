@@ -537,6 +537,18 @@ bug for a month, and is why the `muso-streams-lookup` skill (#592) + CMO anti-co
   refresh-lock use the profile-blind resolver under `--profile`). Re-verify on every openclaw
   bump. The repo already used this lever for cron (`deploy.sh` cron-store import).
 
+## node-8 `/dev/*`: never a destructive target
+
+- **NEVER make a `/dev/*` path the target of `rm`, `mv`, `cp`, `install`, `sed -i`
+  or `rsync` on node-8.** On 2026-10-09 a `rm -rf /dev/null 2>/dev/null` in an
+  ad-hoc SSH one-liner replaced the device with a regular root-owned file; the
+  next root redirect recreated it as a plain file and PR Validation went red for
+  hours looking like 5 random bats failures. Appending `2>/dev/null` to a
+  destructive command does not make it safe — it performs the damage and
+  suppresses the one line that would have reported it.
+  `scripts/assert-host-devnull.sh` now fails every PR Validation job loudly when
+  this recurs, and the watchdog pages (it never repairs; restore needs Nick).
+
 ## Credit approvals: nothing approves without a recorded captain decision
 
 Any automation that can APPROVE a Muso credit request is listed in

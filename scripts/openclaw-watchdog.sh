@@ -534,6 +534,20 @@ _codex_cooldown_ok() {
   [ "$(( (now - last) / 60 ))" -ge "$mins" ]
 }
 
+# ── /dev/null char-device guard (MUS-6775) ──────────────────────────────────
+# On 2026-10-09 /dev/null became a regular root-owned file (a `rm -rf /dev/null`
+# over SSH); non-root `> /dev/null` then failed and PR Validation went red for
+# hours as unrelated bats failures. PAGES ONLY: recreating a device node is a
+# node-8 write that needs Nick (MUS-6760), and the file's content is the only
+# record of what wrote to it. DEVNULL_PATH is a test seam.
+DEVNULL_PATH="${DEVNULL_PATH:-/dev/null}"
+if ! [ -c "$DEVNULL_PATH" ] && _codex_cooldown_ok "$WATCHDOG_STATE_DIR/openclaw-watchdog-devnull-cooldown" "$CODEX_COOLDOWN_MIN"; then
+  DEVNULL_LS=$(ls -ld "$DEVNULL_PATH" 2>&1 || true)
+  log "DEVNULL NOT A CHAR DEVICE: ${DEVNULL_LS}"
+  slack_notify_critical ":rotating_light: *node-8 ${DEVNULL_PATH} is not a char device* — every non-root \`> /dev/null\` fails and CI shows unrelated bats failures. The watchdog does NOT repair it (the file content is evidence). Restore is MUS-6760 and needs Nick.\n\`\`\`${DEVNULL_LS}\`\`\`"
+  date +%s > "$WATCHDOG_STATE_DIR/openclaw-watchdog-devnull-cooldown"
+fi
+
 # MUS-1298: gate the STUCK restart on a real liveness probe. 3 attempts, 10s
 # apart. Any HTTP response (1xx-5xx) means the gateway is answering — the run
 # failures are application-level and a restart won't fix them. Restart only

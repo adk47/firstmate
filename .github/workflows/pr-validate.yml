@@ -20,6 +20,8 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
 
       - name: Rebase staleness check — flag overlapping changes on main
         # Why this gate exists: GitHub's "merge" button doesn't refuse to
@@ -897,6 +899,8 @@ jobs:
           # baseline blob (git show <.deployed-sha>:<path>); that baseline
           # can lag this PR by many commits.
           fetch-depth: 0
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
 
       - name: skills-all config include pairs (same guard the deploy runs)
         # THE SHIFT-LEFT THIS JOB ALREADY CLAIMED TO BE. The deploy carries a guard that
@@ -1185,6 +1189,8 @@ jobs:
           # becomes a green tick" outcome that file's header exists to prevent. Pin
           # the depth so those cases actually RUN on every runner, new or old.
           fetch-depth: 0
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
 
       - name: Ensure bats + jq + sqlite3 installed
         run: |
@@ -1335,6 +1341,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
       - name: py_compile every .py file in operational paths
         run: |
           set -euo pipefail
@@ -1377,6 +1385,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
       - name: Run watchdog behavioral tests
         run: |
           set -euo pipefail
@@ -1646,6 +1656,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
       - name: Ensure pnpm available
         # The hydra runner doesn't have pnpm pre-installed (the gateway
         # uses `openclaw plugins install` which handles deps internally,
@@ -1821,6 +1833,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
 
       - name: Ensure shellcheck installed
         run: |
