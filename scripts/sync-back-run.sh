@@ -41,8 +41,15 @@ g() { git -C "$ROOT" "$@"; }
 g fetch -q "$REMOTE"
 
 # An open sync PR's branch is the one we amend. Yesterday's name, not today's.
-open_branch="$(gh pr list --state open --base "$BASE" --json headRefName \
-  | jq -r '[.[].headRefName | select(startswith("sync/node-8-"))][0] // empty')"
+# --limit: gh's default page is 30 and hydra has more open PRs than that, so an
+# old sync PR would fall off page 1 and a second one would be opened.
+open_branches="$(gh pr list --state open --base "$BASE" --limit 200 --json headRefName \
+  | jq -r '.[].headRefName | select(startswith("sync/node-8-"))')"
+if [[ "$(printf '%s' "$open_branches" | grep -c .)" -gt 1 ]]; then
+  echo "[sync-back-run] more than one open sync PR, refusing to pick one: $(echo $open_branches)" >&2
+  exit 1
+fi
+open_branch="$open_branches"
 branch="${open_branch:-sync/node-8-$DATE}"
 
 # Detached at the base: the branch is created only once there is something to
@@ -55,6 +62,9 @@ if [[ -z "$(g status --porcelain --untracked-files=no)" ]]; then
   exit 0
 fi
 
+# The lease is computed AFTER the fetch above, so it always equals the remote tip
+# and does NOT guard against a human push. The branch is bot-owned (the PR body
+# says so); the workflow's concurrency group is what prevents the lost-capture race.
 lease=()
 if g rev-parse -q --verify "refs/remotes/$REMOTE/$branch" >/dev/null; then
   lease=(--force-with-lease="$branch:$(g rev-parse "refs/remotes/$REMOTE/$branch")")
@@ -73,6 +83,6 @@ if [[ -n "$open_branch" ]]; then
   exit 0
 fi
 
-body="$(printf 'Automated node-8 -> git sync-back (scripts/sync-back-run.sh). Git-tracked paths only; never auto-merged.\n\nChanged files:\n\n```\n%s\n```\n' "$files")"
+body="$(printf 'Automated node-8 -> git sync-back (scripts/sync-back-run.sh). Git-tracked paths only; never auto-merged.\n\nThis branch is rewritten from node-8 on every run - do not push to it; comment on the PR instead.\n\nChanged files:\n\n```\n%s\n```\n' "$files")"
 gh pr create --base "$BASE" --head "$branch" \
   --title "chore(sync): pull node-8 drift into git ($DATE)" --body "$body"

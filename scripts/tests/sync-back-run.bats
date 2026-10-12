@@ -57,9 +57,14 @@ STUB
 printf '%s\n' "$*" >> "$GH_CALLS"
 case "$1 $2" in
   "pr list")
-    printf '[{"headRefName":"feat/unrelated"}'
-    [[ -s "$T/open_pr" ]] && printf ',{"headRefName":"%s"}' "$(cat "$T/open_pr")"
-    printf ']\n'; exit 0 ;;
+    # NOISE unrelated PRs (default 1) sit above the sync PR, as on a busy repo; honour --limit
+    # (gh's default page is 30) so a missing --limit makes the sync PR invisible.
+    lim=30; prev=""
+    for a in "$@"; do [[ "$prev" == "--limit" ]] && lim="$a"; prev="$a"; done
+    { for ((i=0; i<$(cat "$T/noise" 2>/dev/null || echo 1); i++)); do echo "feat/unrelated-$i"; done
+      [[ -s "$T/open_pr" ]] && cat "$T/open_pr"; } \
+      | jq -R '{headRefName: .}' | jq -s --argjson l "$lim" '.[:$l]'
+    exit 0 ;;
   "pr create") echo "https://github.com/Muso-AI/hydra/pull/9999"; exit 0 ;;
 esac
 exit 0
@@ -118,6 +123,7 @@ create_calls() { grep -c '^pr create' "$GH_CALLS" || true; }
   grep -qE '^pr create .*--base main' "$GH_CALLS"
   grep -qE '^pr create .*--head sync/node-8-2026-10-13' "$GH_CALLS"
   grep -qE '^pr create .*--title chore\(sync\): ' "$GH_CALLS"
+  grep -q 'do not push to it; comment on the PR instead' "$GH_CALLS"
 }
 
 @test "AC3 second run while yesterday's PR is open replaces that branch and opens no second PR" {
@@ -214,4 +220,28 @@ create_calls() { grep -c '^pr create' "$GH_CALLS" || true; }
   refute grep -qE -- '(^| )-e ' "$RSYNC_CALLS"
   find "$SERVER" -type f -exec cksum {} + | sort > "$T/server.after"
   diff "$T/server.before" "$T/server.after"
+}
+
+@test "AC11 sync PR buried under 40 newer open PRs is still found: amend, no second PR" {
+  plant "$SERVER" workspaces/ceo/TOOLS.md "day one"
+  "$RUN" --date 2026-10-13 >/dev/null
+  echo "sync/node-8-2026-10-13" > "$T/open_pr"; echo 40 > "$T/noise"
+  : > "$GH_CALLS"
+  plant "$SERVER" workspaces/ceo/TOOLS.md "day two"
+  run "$RUN" --date 2026-10-14
+  [ "$status" -eq 0 ]
+  [ "$(create_calls)" = 0 ]
+  grep -q -- '--limit' <(grep '^pr list' "$GH_CALLS")
+  [ "$(origin_branches | grep -c '^sync/')" = 1 ]
+  [ "$(git -C "$ORIGIN" show sync/node-8-2026-10-13:workspaces/ceo/TOOLS.md)" = "day two" ]
+}
+
+@test "AC12 two open sync PRs: fails loud naming both, pushes and creates nothing" {
+  plant "$SERVER" workspaces/ceo/TOOLS.md "edited"
+  printf 'sync/node-8-2026-10-11\nsync/node-8-2026-10-12\n' > "$T/open_pr"
+  run "$RUN" --date 2026-10-13
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"sync/node-8-2026-10-11"* && "$output" == *"sync/node-8-2026-10-12"* ]]
+  [ "$(origin_branches)" = "main" ]
+  [ "$(create_calls)" = 0 ]
 }
