@@ -2572,6 +2572,33 @@ for _profile in main edge; do
   done
 done
 
+# Step 4d.6: SOUL/memory/skills/cron-mode delivery patch (MUS-6632).
+# codex 0.156.1 overwrites the turn-level collaboration_mode payload on gpt-6 slugs, so
+# delivery moves to the thread-level developerInstructions. Placement is load-bearing: it
+# patches the @openclaw/codex plugin tree (the code a gateway runs), which the Step 4d.5
+# install above rewrites with --force on any codex version change. Run it before 4d.5 and
+# a codex bump wipes it while the deploy stays green. One glob per targeted profile; the
+# script FAILS on a glob with no match and re-reads each tree after patching. Core dist is
+# not a target: it is dead code on this runtime. The gate shape is the OPPOSITE of the
+# gpt-6 route backport in Step 4c.5, on purpose: 2026.9.x does NOT fix this
+# (@openclaw/codex@2026.9.9 still uses the turn-level channel); only >= 2026.10 ships it.
+# Do not "tidy" it to match. The patch lands before the Step 6 restart; a running gateway
+# keeps the old code in memory until then.
+if version_at_least "2026.8" "$OPENCLAW_VERSION"; then
+  if version_at_least "2026.10" "$OPENCLAW_VERSION"; then
+    log "Step 4d.6: openclaw ${OPENCLAW_VERSION} >= 2026.10 — soul delivery is native, patch skipped"
+  else
+    _soul_globs=()
+    for _profile in main edge; do
+      needs_target "$_profile" || continue
+      _soul_globs+=("/root/.openclaw-${_profile}/npm/projects/openclaw-codex-*/node_modules/@openclaw/codex/dist/.setup")
+    done
+    if [[ "${#_soul_globs[@]}" -gt 0 ]] && ! bash "$HYDRA_ROOT/scripts/patch-openclaw-soul-delivery.sh" "${_soul_globs[@]}"; then
+      fail "OpenClaw soul-delivery patch failed"
+    fi
+  fi
+fi
+
 # -------------------------------------------------------------------
 # muso CLI pin: MOVED to Step 4a.5 (before the Step 4b rsync).
 # -------------------------------------------------------------------
