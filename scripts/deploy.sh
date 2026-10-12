@@ -2477,6 +2477,20 @@ if version_at_least "2026.8" "$OPENCLAW_VERSION"; then
     bash "$HYDRA_ROOT/scripts/patch-openclaw-gpt6-subscription-route.sh"; then
     fail "OpenClaw gpt-6 subscription route backport failed"
   fi
+  # a2a announce flow escapes the prepared-model-runtime generation scope
+  # (MUS-6707/MUS-6726). Reinstalling the dist drops it, so re-apply on every
+  # install. Anchor-checked; fails the deploy on drift (upstream may ship it
+  # natively — then retire this call, do not loosen the anchors).
+  # Upstream #168410 (2026.10.2) rewrites prepared-model-runtime-lease.ts, the
+  # file our anchors live in: expect the anchors to drift on that upgrade and
+  # the deploy to halt here. That halt is intended. Do NOT add a
+  # version_at_least "2026.10" skip. Retire this call only after PROVING the
+  # detached session:a2a-send continuation is fixed natively, not by inference
+  # from the changelog (CTO ruling, MUS-6726).
+  if ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
+    bash "$HYDRA_ROOT/scripts/patch-openclaw-a2a-generation-scope.sh"; then
+    fail "OpenClaw a2a generation-scope backport failed"
+  fi
 else
   if ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
     bash "$HYDRA_ROOT/scripts/patch-openclaw-inactive-session-delete.sh"; then
