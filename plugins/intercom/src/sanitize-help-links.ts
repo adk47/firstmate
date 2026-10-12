@@ -18,8 +18,8 @@ export interface HelpLinkSanitizeResult {
   redactions: string[];
 }
 
-// Any URL (scheme optional) on help.muso.ai whose path has an /articles/ segment.
-const ARTICLE_URL = /(?:https?:\/\/)?help\.muso\.ai\/[^\s<>()[\]"']*articles\/[^\s<>()[\]"']*/i;
+// Any URL (scheme optional; port and trailing-dot host forms count) on help.muso.ai whose path has an /articles/ segment.
+const ARTICLE_URL = /(?:https?:\/\/)?help\.muso\.ai\.?(?::\d*)?\/[^\s<>()[\]"']*articles\/[^\s<>()[\]"']*/i;
 const TEMPLATE_LINE = new RegExp(`^${HELP_CITATION_LEAD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} (\\S+)$`);
 
 const ARTICLE_URL_G = new RegExp(ARTICLE_URL.source, "gi");

@@ -983,6 +983,10 @@ describe("SanitizingIntercomClient help-centre link gate", () => {
     expect(out).toBe("Answer.");
     expect(errors.join()).toContain("[intercom:help-link]");
   });
+  it("strips an invented link written with an explicit :443 port", async () => {
+    const out = await send("Answer.\nMore detail here: https://help.muso.ai:443/en/articles/9999999-invented", () => manifest);
+    expect(out).toBe("Answer.");
+  });
   it("fails closed when the manifest is unavailable, customer sees no trace", async () => {
     const errors: string[] = [];
     const out = await send(`Answer.\nMore detail here: ${GOOD}`, () => null, errors);

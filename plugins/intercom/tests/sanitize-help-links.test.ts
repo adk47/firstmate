@@ -33,6 +33,17 @@ describe("sanitizeHelpLinks", () => {
     expect(out.redactions.length).toBe(1);
   });
 
+  it.each([
+    ["explicit https port", "https://help.muso.ai:443/en/articles/9999999-invented"],
+    ["empty port", "https://help.muso.ai:/en/articles/9999999-invented"],
+    ["trailing-dot host", "https://help.muso.ai./en/articles/9999999-invented"],
+    ["valid article with explicit port", "https://help.muso.ai:443/en/articles/1111111-how-do-i-claim-my-profile"],
+  ])("strips %s variant together with its lead-in line", (_n, url) => {
+    const out = sanitizeHelpLinks(`Here is the answer.\n\n${HELP_CITATION_LEAD} ${url}`, MANIFEST);
+    expect(out.body).toBe("Here is the answer.");
+    expect(out.redactions.length).toBe(1);
+  });
+
   it("strips a URL embedded mid-prose (not on a template line)", () => {
     const out = sanitizeHelpLinks(`Answer one.\nSee ${GOOD} for steps.\nAnswer two.`, MANIFEST);
     expect(out.body).toBe("Answer one.\nAnswer two.");
