@@ -245,6 +245,47 @@ describe("create_ticket dedupe", () => {
     expect(vi.mocked(get).mock.calls).toHaveLength(0);
   });
 
+  describe("rights_holder cross-conversation dedupe", () => {
+    const openLookup = () => vi.fn(async () => ({
+      ok: true,
+      data: { tasks: [
+        { id: "open_rh", status: { status: "to do" }, date_created: String(Date.now() - 1000), custom_fields: [{ id: "ef", value: "u@example.com" }] },
+      ] } as any,
+    }));
+    const taskPosts = (deps: ReturnType<typeof makeDeps>) =>
+      vi.mocked(deps.http.post).mock.calls.filter(([u]) => TASK_URL_RE.test(u as string));
+    const commentPosts = (deps: ReturnType<typeof makeDeps>) =>
+      vi.mocked(deps.http.post).mock.calls.filter(([u]) => COMMENT_URL_RE.test(u as string));
+
+    it("opens its own record instead of appending to another matter's open ticket", async () => {
+      const deps = makeDeps({ http: makeHttp({ get: openLookup() }) });
+      const tool = createCreateTicketTool(deps);
+      const result = await run(tool, { ...CLAIM, details: { escalation_reason: "rights_holder" } });
+      expect(result.submitted).toBe(true);
+      expect(result.updated_existing).toBeUndefined();
+      expect(taskPosts(deps)).toHaveLength(1);
+      expect(commentPosts(deps)).toHaveLength(0);
+    });
+
+    it("still appends the same shape without rights_holder", async () => {
+      const deps = makeDeps({ http: makeHttp({ get: openLookup() }) });
+      const tool = createCreateTicketTool(deps);
+      const result = await run(tool, { ...CLAIM, details: { escalation_reason: "sla_breach_customer_followup" } });
+      expect(result).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "open_rh" });
+      expect(taskPosts(deps)).toHaveLength(0);
+    });
+
+    it("keeps the in-session repeat append for rights_holder", async () => {
+      const deps = makeDeps();
+      const tool = createCreateTicketTool(deps);
+      const details = { escalation_reason: "rights_holder" };
+      await run(tool, { ...CLAIM, details }, "c1");
+      const second = await run(tool, { ...CLAIM, details }, "c2");
+      expect(second).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "task_1" });
+      expect(taskPosts(deps)).toHaveLength(1);
+    });
+  });
+
   it("meters the lookup GET in its own bucket (10/60min)", async () => {
     // A retry-looping session must not hammer ClickUp search unbounded —
     // after the lookup budget is gone, calls proceed straight to the create
