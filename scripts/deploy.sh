@@ -1109,6 +1109,15 @@ RSYNC_EXCLUDES=(
   # by ~25%; the numbers are now fetched per cadence, never typed. Server-owned,
   # never tracked. Depth-2, so the KEEP_GLOBS drift guard needs no mirror.
   --exclude='workspaces/support/reference/app-pricing.md'
+  # Caroline's help-centre corpus + citation manifest, GENERATED on the server by
+  # scripts/sync-help-centre.sh from the PUBLIC https://help.muso.ai/llms.txt
+  # (one flat hc-<id>.md per article, plus hc-manifest.json). Same shape and same
+  # reasoning as the three excludes above: it must live inside reference/ to be
+  # RAG-indexed, so rsync --delete would wipe it every deploy and the Step 4a
+  # pre-flight would red every PR. Server-owned, never tracked. Depth-2, so the
+  # KEEP_GLOBS drift guard needs no mirror.
+  --exclude='workspaces/support/reference/hc-*.md'
+  --exclude='workspaces/support/reference/hc-manifest.json'
   # Agent-created backups directory — never in repo, never overwritten.
   --exclude='workspaces/*/backups/'
   # Per-PR QA review state (external-pr-review runs write
