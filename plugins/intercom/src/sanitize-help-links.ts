@@ -22,19 +22,15 @@ export interface HelpLinkSanitizeResult {
 const ARTICLE_URL = /(?:https?:\/\/)?help\.muso\.ai\.?(?::\d*)?\/[^\s<>()[\]"']*articles\/[^\s<>()[\]"']*/i;
 const TEMPLATE_LINE = new RegExp(`^${HELP_CITATION_LEAD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} (\\S+)$`);
 
-// Any help.muso.ai-looking token, whatever its path; kept only if it decodes to an article URL.
-const HELP_TOKEN_G = /(?:https?:\/\/)?help(?:\.|%2e)muso(?:\.|%2e)ai[^\s<>()[\]"']*/gi;
+// Any help.muso.ai-looking token, whatever its path; every host char may be percent-encoded. Kept only if it decodes to an article URL.
+const hostChar = (c: string) => `(?:${c === "." ? "\\." : c}|%${c.charCodeAt(0).toString(16).padStart(2, "0")})`;
+const HELP_TOKEN_G = new RegExp(`(?:https?:\\/\\/)?${[..."help.muso.ai"].map(hostChar).join("")}[^\\s<>()[\\]"']*`, "gi");
 
-/** Percent-decode (repeatedly, so double encoding resolves too); undecodable input is returned as-is. */
+/** Percent-decode every well-formed %XX (repeatedly, so double encoding resolves too); a malformed % is left alone, never aborts the decode. */
 function decodeAll(s: string): string {
   let cur = s;
   for (let i = 0; i < 4; i++) {
-    let next: string;
-    try {
-      next = decodeURIComponent(cur);
-    } catch {
-      return cur;
-    }
+    const next = cur.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
     if (next === cur) break;
     cur = next;
   }

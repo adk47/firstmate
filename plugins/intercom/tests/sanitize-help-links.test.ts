@@ -49,6 +49,23 @@ describe("sanitizeHelpLinks", () => {
     expect(out.redactions.length).toBe(1);
   });
 
+  it("a stray % elsewhere in the reply does not switch the decode off", () => {
+    const out = sanitizeHelpLinks(`Accuracy is 100%.\n${HELP_CITATION_LEAD} https://help.muso.ai/en/%61rticles/9999999-invented`, MANIFEST);
+    expect(out.body).toBe("Accuracy is 100%.");
+    expect(out.redactions.length).toBe(1);
+  });
+
+  it("a malformed escape inside the URL still strips it", () => {
+    const out = sanitizeHelpLinks(`Answer.\n${HELP_CITATION_LEAD} https://help.muso.ai/en/%61rticles/9999999-%E0`, MANIFEST);
+    expect(out.body).toBe("Answer.");
+  });
+
+  it("fallback strips a URL whose host letter is percent-encoded, keeping the prose", () => {
+    const out = sanitizeHelpLinks("See https://%68elp.muso.ai/en/articles/9999999-invented for details", MANIFEST);
+    expect(out.body).toBe("See for details");
+    expect(out.body).not.toMatch(/muso\.ai/i);
+  });
+
   it("strips a URL embedded mid-prose (not on a template line)", () => {
     const out = sanitizeHelpLinks(`Answer one.\nSee ${GOOD} for steps.\nAnswer two.`, MANIFEST);
     expect(out.body).toBe("Answer one.\nAnswer two.");
