@@ -19,9 +19,16 @@ setup() {
 
   # Stub the identity shim, logging every call so a test can assert what was
   # posted. STUB_POST_FAIL=1 models GitHub rejecting the write.
+  # A GET is the status lookup behind the CANNOT REVIEW no-clobber guard:
+  # it answers with STUB_STATUSES_JSON, or fails when STUB_LOOKUP_FAIL=1.
   cat > "$TEST_TMPDIR/qa-gh.sh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$QA_GH_LOG"
+case "$*" in
+  *"--method POST"*) ;;
+  *) [ -n "${STUB_LOOKUP_FAIL:-}" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }
+     printf '%s' "${STUB_STATUSES_JSON:-[]}"; exit 0 ;;
+esac
 [ -n "${STUB_POST_FAIL:-}" ] && { echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; }
 exit 0
 STUB
@@ -203,4 +210,51 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO"
   [ "$status" -eq 3 ]
   ! grep -q -- '--method POST' "$QA_GH_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# CANNOT REVIEW no-clobber (MUS-7698). A sha is immutable, so a GO already
+# recorded on it still describes this exact code. A CANNOT REVIEW describes
+# nothing about the code: a quota blip must not turn a GO'd sha red.
+# ---------------------------------------------------------------------------
+
+GO_ROW='{"context":"qa-review","state":"success","description":"GO — 0 blocking findings","created_at":"2026-10-12T18:26:51Z"}'
+CANNOT_ROW='{"context":"qa-review","state":"failure","description":"CANNOT REVIEW: GitHub GraphQL API rate limit blocked the review bundle","created_at":"2026-10-12T18:48:17Z"}'
+
+@test "CANNOT REVIEW does not overwrite a standing same-sha GO; the retained GO is named" {
+  STUB_STATUSES_JSON="[$CANNOT_ROW,$GO_ROW]" \
+    run "$SCRIPT" Muso-AI/hydra "$SHA" failure "CANNOT REVIEW: GitHub API rate limit blocked the review bundle"
+  [ "$status" -eq 0 ]
+  ! grep -q -- '--method POST' "$QA_GH_LOG"
+  echo "$output" | grep -q '2026-10-12T18:26:51Z'
+}
+
+@test "CANNOT REVIEW with no prior same-sha GO still posts failure (fail closed, as before)" {
+  STUB_STATUSES_JSON="[$CANNOT_ROW]" \
+    run "$SCRIPT" Muso-AI/hydra "$SHA" failure "CANNOT REVIEW: diff exceeds GitHub's 20,000-line cap"
+  [ "$status" -eq 0 ]
+  grep -q -- '--method POST' "$QA_GH_LOG"
+  grep -q 'state=failure' "$QA_GH_LOG"
+}
+
+@test "a NO-GO over a same-sha GO still posts: the guard is prefix-scoped, a finding must clobber" {
+  STUB_STATUSES_JSON="[$GO_ROW]" \
+    run "$SCRIPT" Muso-AI/hydra "$SHA" failure "NO-GO — 1 Important finding in the diff"
+  [ "$status" -eq 0 ]
+  grep -q -- '--method POST' "$QA_GH_LOG"
+  grep -q 'state=failure' "$QA_GH_LOG"
+}
+
+@test "if the status lookup fails, a CANNOT REVIEW posts as before (cannot prove a GO, so do not suppress)" {
+  STUB_LOOKUP_FAIL=1 \
+    run "$SCRIPT" Muso-AI/hydra "$SHA" failure "CANNOT REVIEW: GitHub API rate limit blocked the review bundle"
+  [ "$status" -eq 0 ]
+  grep -q -- '--method POST' "$QA_GH_LOG"
+}
+
+@test "a pending re-arm over a same-sha GO still posts (a re-fire makes the old verdict stale)" {
+  STUB_STATUSES_JSON="[$GO_ROW]" run "$SCRIPT" Muso-AI/hydra "$SHA" pending "QA review queued"
+  [ "$status" -eq 0 ]
+  grep -q -- '--method POST' "$QA_GH_LOG"
+  grep -q 'state=pending' "$QA_GH_LOG"
 }
