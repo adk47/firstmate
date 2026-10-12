@@ -36,7 +36,9 @@ ARE the authorization. Message carries the author's Slack UID.
   review)`. Open with `qa-pr-thread-dm.sh`, keep `ts`. Skip Step 5; log
   then post yourself.
 - Approve (Step 7) only if `checks` are green **EXCEPT for the policy's
-  `advisory_checks`** — every check passed, none `fail` and none `pending`,
+  `advisory_checks`** — every check is `SUCCESS`, `NEUTRAL` or `SKIPPED`
+  (the same tri-state `scripts/qa-pr-approve.sh:595` enforces; a `skipped`
+  check is NOT a withhold reason), and none is failing or pending,
   other than those the policy names advisory (the deploy pre-flight and
   friends, which fail on live server drift rather than on the diff).
   **Changed 2026-08-03:** this used to say "be strict — any non-green check
