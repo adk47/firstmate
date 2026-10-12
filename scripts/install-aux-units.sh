@@ -157,6 +157,15 @@
 #     sales lead was closed-as-answered and forwarded to Nick by
 #     email; Aaron, who owns ads, never saw it).
 #
+#   /etc/systemd/system/intercom-rights-holder-watchdog.{service,timer}
+#     Runs scripts/intercom-rights-holder-watchdog.py every 10 min (oneshot).
+#     Pages #cs_priority (operations bot) when an inbound Intercom
+#     conversation is from a rights-holder or marked urgent and has gone
+#     unhandled (Sony/natori correction misfiled onto another customer's
+#     ticket, MUS-6566). A systemd unit, not cron.d: the Intercom token comes
+#     from EnvironmentFile (a 644 cron.d line would expose it) and the
+#     service is in AUX_ONFAILURE_UNITS so a failing run pages.
+#
 #   /etc/tmpfiles.d/tmp.conf
 #     /tmp age policy keyed on mtime only (`D /tmp 1777 root root mM:24h`),
 #     installed verbatim from scripts/aux-units/tmp.conf. Codifies the
@@ -341,6 +350,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/lib/ensure-mercury-token.sh" ]] \
@@ -523,6 +534,42 @@ INTAKEWDTMR
 
 systemctl daemon-reload
 wd=intercom-intake-watchdog.timer
+systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
+systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
+log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
+# ─── Intercom rights-holder / urgent inbound watchdog (MUS-6566) ───────────
+# Live tick = no flag (--dry-run is the only mode switch). Token:
+# MUSOAI_INTERCOM_TOKEN from the env files; the Slack token is resolved inside
+# the script. No secret is written into the unit. See
+# scripts/intercom-rights-holder-watchdog.py.
+cat > /etc/systemd/system/intercom-rights-holder-watchdog.service << RIGHTSHOLDERWDSVC
+[Unit]
+Description=Intercom rights-holder / urgent inbound watchdog (alerts #cs_priority)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py
+RIGHTSHOLDERWDSVC
+
+cat > /etc/systemd/system/intercom-rights-holder-watchdog.timer << RIGHTSHOLDERWDTMR
+[Unit]
+Description=Run the Intercom rights-holder / urgent watchdog every 10 min
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=10min
+Unit=intercom-rights-holder-watchdog.service
+
+[Install]
+WantedBy=timers.target
+RIGHTSHOLDERWDTMR
+
+systemctl daemon-reload
+wd=intercom-rights-holder-watchdog.timer
 systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
@@ -2979,6 +3026,7 @@ AUX_ONFAILURE_UNITS=(
   hydra-session-thread-retention@.service
   hydra-weekly-cleanup.service
   intercom-intake-watchdog.service
+  intercom-rights-holder-watchdog.service
   overdue-verification-notifier.service
   qa-approval-retry.service
   qa-review-reconcile.service
