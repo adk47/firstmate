@@ -787,6 +787,16 @@ jobs:
           bash scripts/check-data-sourcing-doctrine.sh
           echo "::endgroup::"
 
+      - name: Analytics entitlement doctrine check — Caroline states no figures unless analytics.entitled is true
+        # Caroline disclosed a customer's lifetime stream figures to a non-subscriber
+        # on 2026-09-30. The rule lives in support/SOUL.md (entitlement is decided by
+        # profile_analytics_status, which returns analytics.entitled); prose != enforcement,
+        # so this gate fails if its load-bearing anchors are silently removed.
+        run: |
+          echo "::group::Analytics entitlement doctrine check"
+          bash scripts/check-analytics-entitlement-doctrine.sh
+          echo "::endgroup::"
+
       - name: Admin-API doc contract check — analytics-sources payload must document {"link"}
         # Incident 2026-07-15: @Ops sent 16x {"url": ...} to
         # POST /admin/track/<id>/analytics-sources and got 16x HTTP 400, because
