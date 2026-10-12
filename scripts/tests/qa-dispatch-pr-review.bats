@@ -51,6 +51,16 @@ case "$sub" in
 esac
 STUB
   chmod +x "$STUBBIN/openclaw"
+  # `gh run list` stub for the in-flight dedup. Records argv; prints STUB_GH_JSON
+  # (default: no runs); STUB_GH_FAIL makes the lookup fail (fail-open test).
+  cat > "$STUBBIN/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "$STUB_GH_ARGV"
+if [ -n "${STUB_GH_FAIL:-}" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
+if [ -f "${STUB_GH_JSON:-}" ]; then cat "$STUB_GH_JSON"; else echo '[]'; fi
+STUB
+  chmod +x "$STUBBIN/gh"
+  export STUB_GH_ARGV="$TEST_TMPDIR/gh_argv"; : > "$STUB_GH_ARGV"
   export PATH="$STUBBIN:$PATH"
   export OPENCLAW="openclaw"   # resolve via the stubbed PATH
 }
@@ -355,4 +365,101 @@ JSON
     QA_REVIEW_REQUESTER_UID="$NICK" run --separate-stderr "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 1 ]
   [[ "$stderr" == *"invalid --at value"* ]]
+}
+
+# --- in-flight dedup (MUS-7955): refuse a duplicate / superseded dispatch -------
+# Fixture: one queued dispatch run, named as external-pr-review.yml's run-name.
+gh_runs() {  # gh_runs <databaseId> <pr> <sha> [status]
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '[{"databaseId":%s,"name":"qa Muso-AI/hydra#%s @ %s (external-qa-review)","status":"%s","createdAt":"%s"}]\n' \
+    "$1" "$2" "$3" "${4:-queued}" "$now" > "$TEST_TMPDIR/gh.json"
+  export STUB_GH_JSON="$TEST_TMPDIR/gh.json"
+}
+
+@test "dedup: lookup asks gh run list for hydra runs with the exact fields (argv, not branches)" {
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(sed -n 1p "$STUB_GH_ARGV")" = "run" ]
+  [ "$(sed -n 2p "$STUB_GH_ARGV")" = "list" ]
+  grep -qx -- '-R' "$STUB_GH_ARGV"
+  grep -qx 'Muso-AI/hydra' "$STUB_GH_ARGV"
+  grep -qx -- '--json' "$STUB_GH_ARGV"
+  grep -qx 'databaseId,name,status,createdAt' "$STUB_GH_ARGV"
+}
+
+@test "dedup: exact (repo,pr,sha) already queued -> refused, exit 0, greppable line, no cron add" {
+  gh_runs 100 123 "${GOOD_SHA}0000000000000000000000000000"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: in_progress duplicate is refused too" {
+  gh_runs 100 123 "${GOOD_SHA}0000000000000000000000000000" in_progress
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: a COMPLETED run for the same sha does not block a re-send (drop-resender protocol)" {
+  gh_runs 100 123 "${GOOD_SHA}0000000000000000000000000000" completed
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: our OWN run (GITHUB_RUN_ID) is never a duplicate of itself" {
+  gh_runs 100 123 "${GOOD_SHA}0000000000000000000000000000" in_progress
+  GITHUB_RUN_ID=100 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: two queued twins -> only the YOUNGER one refuses (the older proceeds)" {
+  gh_runs 100 123 "${GOOD_SHA}0000000000000000000000000000"
+  GITHUB_RUN_ID=200 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+  gh_runs 300 123 "${GOOD_SHA}0000000000000000000000000000"
+  GITHUB_RUN_ID=200 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: a NEWER sha already queued for the same PR -> this older sha is refused as superseded" {
+  gh_runs 300 123 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  GITHUB_RUN_ID=200 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DEDUP-REFUSED superseded"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: an OLDER sha queued for the same PR does not block the newer one" {
+  gh_runs 100 123 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  GITHUB_RUN_ID=200 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: different PR or different repo never matches" {
+  gh_runs 100 999 "${GOOD_SHA}0000000000000000000000000000"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: fresh (repo,pr,sha) with no runs dispatches" {
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: lookup FAILS -> fail OPEN, dispatches anyway, says so" {
+  STUB_GH_FAIL=1 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+  [[ "$output" == *"DEDUP-SKIPPED"* ]]
+}
+
+@test "dedup: lookup returns garbage -> fail OPEN, dispatches anyway" {
+  echo "not json" > "$TEST_TMPDIR/gh.json"; export STUB_GH_JSON="$TEST_TMPDIR/gh.json"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
 }
