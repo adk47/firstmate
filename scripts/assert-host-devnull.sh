@@ -21,6 +21,6 @@ if [ -c "$NULL_PATH" ]; then
 fi
 
 echo "::error::node-8 $NULL_PATH is not a char device — host problem, not this PR"
-ls -ld "$NULL_PATH" 2>/dev/null || echo "$NULL_PATH: absent"
+ls -ld "$NULL_PATH" 2>&1 || echo "$NULL_PATH: absent"
 echo "Restore is tracked in MUS-6760 and needs Nick. This check never repairs it."
 exit 1

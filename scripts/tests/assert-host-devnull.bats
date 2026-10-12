@@ -16,6 +16,9 @@ SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/assert-hos
   [[ "$output" == *"::error::"* ]]
   [[ "$output" == *"is not a char device"* ]]
   printf '%s\n' "$output" | grep -q '^::error::node-8 '
+  # an existing file must never be reported as absent (ls -ld line is the forensics)
+  [[ "$output" != *"absent"* ]]
+  [[ "$output" == *"$BATS_TEST_TMPDIR/null"* ]]
 }
 
 @test "real char device (/dev/zero): exits 0" {
