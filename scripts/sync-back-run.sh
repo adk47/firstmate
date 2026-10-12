@@ -43,8 +43,9 @@ g fetch -q "$REMOTE"
 # An open sync PR's branch is the one we amend. Yesterday's name, not today's.
 # --limit: gh's default page is 30 and hydra has more open PRs than that, so an
 # old sync PR would fall off page 1 and a second one would be opened.
-open_branches="$(gh pr list --state open --base "$BASE" --limit 200 --json headRefName \
-  | jq -r '.[].headRefName | select(startswith("sync/node-8-"))')"
+# Same-repo heads only: a fork PR with a sync/node-8-* name is not ours to amend.
+open_branches="$(gh pr list --state open --base "$BASE" --limit 200 --json headRefName,isCrossRepository \
+  | jq -r '.[] | select(.isCrossRepository | not) | .headRefName | select(startswith("sync/node-8-"))')"
 if [[ "$(printf '%s' "$open_branches" | grep -c .)" -gt 1 ]]; then
   echo "[sync-back-run] more than one open sync PR, refusing to pick one: $(echo $open_branches)" >&2
   exit 1

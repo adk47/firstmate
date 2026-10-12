@@ -63,7 +63,9 @@ case "$1 $2" in
     for a in "$@"; do [[ "$prev" == "--limit" ]] && lim="$a"; prev="$a"; done
     { for ((i=0; i<$(cat "$T/noise" 2>/dev/null || echo 1); i++)); do echo "feat/unrelated-$i"; done
       [[ -s "$T/open_pr" ]] && cat "$T/open_pr"; } \
-      | jq -R '{headRefName: .}' | jq -s --argjson l "$lim" '.[:$l]'
+      | jq -R '{headRefName: ., isCrossRepository: false}' \
+      | { cat; [[ -s "$T/fork_pr" ]] && jq -R '{headRefName: ., isCrossRepository: true}' "$T/fork_pr"; } \
+      | jq -s --argjson l "$lim" '.[:$l]'
     exit 0 ;;
   "pr create") echo "https://github.com/Muso-AI/hydra/pull/9999"; exit 0 ;;
 esac
@@ -244,4 +246,13 @@ create_calls() { grep -c '^pr create' "$GH_CALLS" || true; }
   [[ "$output" == *"more than one open sync PR"* && "$output" == *"sync/node-8-2026-10-11"* && "$output" == *"sync/node-8-2026-10-12"* ]]
   [ "$(origin_branches)" = "main" ]
   [ "$(create_calls)" = 0 ]
+}
+
+@test "AC13 a fork PR named sync/node-8-* is not the sync PR: runner still opens its own" {
+  plant "$SERVER" workspaces/ceo/TOOLS.md "edited"
+  echo "sync/node-8-2026-10-12" > "$T/fork_pr"
+  run "$RUN" --date 2026-10-13
+  [ "$status" -eq 0 ]
+  [ "$(create_calls)" = 1 ]
+  [ "$(origin_branches | grep -c '^sync/node-8-2026-10-13$')" = 1 ]
 }
