@@ -106,3 +106,18 @@ run_path() {
         if grep -qi '^Approved-By' "$CURL_ARGS"; then false; fi
     done
 }
+
+# An audit header that carries no approver is worse than none: it reads as
+# "approved by <blank>". Empty and whitespace-only values behave as absent.
+@test "empty or whitespace-only approval flags => treated as absent, never forwarded" {
+    local wrapper kind v
+    for wrapper in "${WRAPPERS[@]}"; do
+        for kind in call upload; do
+            for v in "" " " "   " $'\t' $' \t '; do
+                run_path "$wrapper" "$kind" --confirmed-by "$v" --approval-msg-id "$v"
+                if grep -qi '^Approved-By' "$CURL_ARGS"; then false; fi
+                if grep -qi '^Request-Ref' "$CURL_ARGS"; then false; fi
+            done
+        done
+    done
+}
