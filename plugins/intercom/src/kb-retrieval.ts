@@ -95,8 +95,10 @@ export async function retrieveKbSnippets(
 export const HELP_CENTRE_MAX_SNIPPETS = 2;
 /** Over-fetch factor so 60 help-centre files cannot crowd every curated hit out of the raw top-K. */
 const KB_OVERFETCH = 4;
-/** Second-pass multiplier when the first window held no curated hit. */
+/** Window growth per extra pass when the previous window held no curated hit. */
 const KB_WIDEN = 5;
+/** Safety bound on extra passes (5 -> 20, 100, 500, 2500 hits); the shared time box also applies. */
+const KB_MAX_WIDEN_PASSES = 4;
 
 /** Map a raw memory-search hit to a KbSnippet; citationUrl comes from the manifest, never from snippet text. */
 export function toKbSnippet(
@@ -120,10 +122,13 @@ export function withHelpCentreCap(inner: KbSearcher): KbSearcher {
       const all = await inner(query, { ...opts, maxResults: asked });
       return { all, truncated: all.length >= asked };
     };
-    let { all, truncated } = await fetchWindow(KB_OVERFETCH);
-    // A full window with no curated hit may be hiding one below many help-centre chunks: widen once.
-    if (truncated && !all.some((s) => !isHelpCentrePath(s.path))) {
-      ({ all } = await fetchWindow(KB_OVERFETCH * KB_WIDEN));
+    let factor = KB_OVERFETCH;
+    let { all, truncated } = await fetchWindow(factor);
+    // A full window with no curated hit may be hiding one below many help-centre chunks:
+    // keep widening until one appears or the corpus is exhausted (a short window).
+    for (let pass = 0; pass < KB_MAX_WIDEN_PASSES && truncated && !all.some((s) => !isHelpCentrePath(s.path)); pass++) {
+      factor *= KB_WIDEN;
+      ({ all, truncated } = await fetchWindow(factor));
     }
     const curated = all.filter((s) => !isHelpCentrePath(s.path)).slice(0, opts.maxResults);
     const help = all

@@ -55,6 +55,22 @@ describe("withHelpCentreCap", () => {
     expect(asked.length).toBe(2);
   });
 
+  it("keeps widening until the corpus is exhausted, so a curated hit ranked beyond the second window still surfaces", async () => {
+    const ranked: KbSnippet[] = [...Array.from({ length: 600 }, (_, i) => hc(i + 1)), cur("refund-policy")];
+    const inner: KbSearcher = async (_q, o) => ranked.slice(0, o.maxResults);
+    const out = await withHelpCentreCap(inner)("q", { maxResults: 5, minScore: 0 });
+    expect(out.some((s) => s.path === "reference/refund-policy.md")).toBe(true);
+  });
+
+  it("stops widening once a window comes back short (corpus exhausted, no curated hit)", async () => {
+    const ranked: KbSnippet[] = Array.from({ length: 150 }, (_, i) => hc(i + 1));
+    let calls = 0;
+    const inner: KbSearcher = async (_q, o) => { calls++; return ranked.slice(0, o.maxResults); };
+    const out = await withHelpCentreCap(inner)("q", { maxResults: 5, minScore: 0 });
+    expect(out.length).toBe(2);
+    expect(calls).toBe(3);
+  });
+
   it("does not widen when the first window already returned fewer hits than asked", async () => {
     let calls = 0;
     const inner: KbSearcher = async () => { calls++; return [hc(1), hc(2)]; };
