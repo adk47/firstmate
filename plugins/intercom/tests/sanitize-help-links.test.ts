@@ -38,6 +38,24 @@ describe("sanitizeHelpLinks", () => {
     expect(out.body).toBe("Answer one.\nAnswer two.");
   });
 
+  it("never empties the reply: a single-line prose reply keeps its text, loses only the URL", () => {
+    const out = sanitizeHelpLinks(`You can change it under Settings > Plan, see ${GOOD} for steps.`, MANIFEST);
+    expect(out.body).toBe("You can change it under Settings > Plan, see for steps.");
+    expect(out.body).not.toMatch(/help\.muso\.ai/i);
+    expect(out.redactions.length).toBe(1);
+  });
+
+  it("never empties the reply: a single-line html anchor is removed, prose kept", () => {
+    const out = sanitizeHelpLinks(`<p>Open Settings, then Plan. More detail here: <a href="${GOOD}">${GOOD}</a></p>`, MANIFEST);
+    expect(out.body).not.toMatch(/help\.muso\.ai|href/i);
+    expect(out.body).toBe("<p>Open Settings, then Plan.</p>");
+  });
+
+  it("a reply that was only a citation line stays empty (nothing else to keep)", () => {
+    const out = sanitizeHelpLinks(`${HELP_CITATION_LEAD} https://help.muso.ai/en/articles/9999999-x`, MANIFEST);
+    expect(out.body).toBe("");
+  });
+
   it("strips a markdown-linked article URL", () => {
     const out = sanitizeHelpLinks(`Answer.\n[read this](${GOOD})`, MANIFEST);
     expect(out.body).toBe("Answer.");

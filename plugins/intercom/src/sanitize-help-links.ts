@@ -22,6 +22,25 @@ export interface HelpLinkSanitizeResult {
 const ARTICLE_URL = /(?:https?:\/\/)?help\.muso\.ai\/[^\s<>()[\]"']*articles\/[^\s<>()[\]"']*/i;
 const TEMPLATE_LINE = new RegExp(`^${HELP_CITATION_LEAD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} (\\S+)$`);
 
+const ARTICLE_URL_G = new RegExp(ARTICLE_URL.source, "gi");
+const LEAD_RE = new RegExp(`${HELP_CITATION_LEAD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*(?=(?:<\\/\\w+>\\s*)*$)`, "i");
+
+/** Remove anchors / markdown links / bare tokens carrying an article URL, and a trailing lead-in; keep other prose. */
+function stripUrlTokensOnly(body: string): string {
+  const stripped = body
+    .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, (m) => (ARTICLE_URL.test(m) ? "" : m))
+    .replace(/\[[^\]]*\]\([^)]*\)/g, (m) => (ARTICLE_URL.test(m) ? "" : m))
+    .replace(ARTICLE_URL_G, "");
+  return stripped
+    .split("\n")
+    .map((l) => l.replace(LEAD_RE, "").replace(/[ \t]{2,}/g, " ").replace(/\s+$/, ""))
+    .join("\n")
+    .replace(/\s+(<\/\w+>)/g, "$1")
+    .replace(/<p>\s*<\/p>/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function sanitizeHelpLinks(body: string, manifest: HelpManifest | null): HelpLinkSanitizeResult {
   if (typeof body !== "string" || !ARTICLE_URL.test(body)) return { body, redactions: [] };
 
@@ -45,5 +64,8 @@ export function sanitizeHelpLinks(body: string, manifest: HelpManifest | null): 
     }
   }
   const cleaned = out.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "");
-  return { body: cleaned, redactions };
+  if (cleaned.trim().length > 0 || !stripUrlTokensOnly(body).trim()) return { body: cleaned, redactions };
+  // Dropping whole lines emptied a reply that had prose around the URL (a model that
+  // ignored the template). Never post an empty body: keep the prose, lose only the URL.
+  return { body: stripUrlTokensOnly(body), redactions };
 }
