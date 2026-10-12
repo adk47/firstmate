@@ -629,3 +629,26 @@ stub_ssh_local() {
   [ ! -f "$DEPLOY/skills-all/marker.md" ]
   assert_no_systemctl_start
 }
+
+# The ssh holding the node-8 prune lock dies mid-rollback (link drop): the watcher aborts rollback, and the EXIT
+# backstop must not then start main unlocked (the prune may now hold the store). Non-lock ssh calls are slowed so
+# rollback is still running when the holder dies.
+@test "ssh-mode rollback aborts when the node-8 lock holder dies mid-run and starts no gateway" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_systemctl_log
+  cat > "$TMP/bin/ssh" <<'STUB'
+#!/usr/bin/env bash
+cmd="${@: -1}"
+case "$cmd" in
+  *flock*) bash -c "$cmd" & p=$!; ( sleep 1; kill -9 "$p" 2>/dev/null ) >/dev/null 2>&1 & wait "$p" ;;
+  *) sleep 5; bash -c "$cmd" ;;
+esac
+STUB
+  chmod +x "$TMP/bin/ssh"
+  run env HYDRA_LOCAL=false DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \
+    MAIN_PRUNE_LOCK_WATCH_SECS=0.2 bash "$SRC/scripts/rollback.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"holding the main prune lock"*"died"* ]]
+  [[ "$output" == *"main prune lock lost"* ]]
+  assert_no_systemctl_start
+}

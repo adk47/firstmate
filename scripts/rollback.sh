@@ -104,6 +104,8 @@ read_deployed_sha() {
 GATEWAYS_RESTARTED=0
 ensure_gateways_up() {
   [ "$GATEWAYS_RESTARTED" = 1 ] && return 0
+  # The remote prune lock was lost (ssh holder died): starting main unlocked could race the offline prune.
+  main_prune_lock_lost && { log "rollback aborted: main prune lock lost; leaving main alone (the prune restarts it)"; return 0; }
   log "rollback exiting before Step 2: starting any stopped gateway so the fleet is not left down"
   local start_cmd='for svc in openclaw-gateway-main openclaw-gateway-edge; do
   if systemctl is-active "$svc" &>/dev/null || systemctl is-enabled "$svc" &>/dev/null; then

@@ -118,3 +118,20 @@ FAKE_SSH_OK='bash -c "${!#}"'
   run flock -n "$MAIN_PRUNE_LOCK_FILE" true
   [ "$status" -eq 0 ]
 }
+
+# Bot finding (12 Oct): the remote lock lives only as long as the ssh holding it. If that dies after acquisition (link
+# drop) the prune can take the lock while the deploy keeps mutating, so the caller must be aborted, not left running.
+@test "ssh-mode deploy: the ssh holder dying AFTER the lock was taken aborts the deploy (fail closed)" {
+  _ssh_block "$FAKE_SSH_OK" 'kill -9 "$MAIN_PRUNE_LOCK_REMOTE_PID"; sleep 10; echo SURVIVED-LOCK-LOSS'
+  MAIN_PRUNE_LOCK_WATCH_SECS=0.2 run bash "$TEST_TMPDIR/ssh-block.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"holding the main prune lock"*"died"* ]]
+  [[ "$output" != *"SURVIVED-LOCK-LOSS"* ]]
+}
+
+@test "ssh-mode deploy: a healthy holder is not mistaken for a lost lock" {
+  _ssh_block "$FAKE_SSH_OK" 'sleep 1.5; main_prune_lock_lost && echo LOST || echo STILL-HELD'
+  MAIN_PRUNE_LOCK_WATCH_SECS=0.2 run bash "$TEST_TMPDIR/ssh-block.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STILL-HELD"* ]]
+}

@@ -28,7 +28,7 @@ acquire_main_prune_lock() {
 # Args: the ssh command and its options up to and including user@host. rc 0 held; 1 timed out or the ssh failed
 # (a prune may still run; the remote flock itself exits 1 on timeout); 2 local setup failed.
 acquire_main_prune_lock_remote() {
-  local tmp wait_secs="$MAIN_PRUNE_LOCK_WAIT_SECS" i=0
+  local tmp wait_secs="$MAIN_PRUNE_LOCK_WAIT_SECS" i=0 parent=$$
   tmp="$(mktemp -d 2>/dev/null)" || return 2
   mkfifo "$tmp/in" || { rm -rf "$tmp"; return 2; }
   "$@" "exec 9>'$MAIN_PRUNE_LOCK_FILE' && flock -w $wait_secs 9 && echo LOCKED && exec cat >/dev/null" \
@@ -43,5 +43,23 @@ acquire_main_prune_lock_remote() {
     i=$((i + 1)); [ "$i" -gt $((wait_secs * 5 + 300)) ] && { kill "$MAIN_PRUNE_LOCK_REMOTE_PID" 2>/dev/null; exec 214>&-; rm -rf "$tmp"; return 1; }
     sleep 0.2
   done
-  rm -rf "$tmp"
+  # The lock is only as live as that ssh. Once it dies (link drop, node-8 reboot) the prune may take the lock while we
+  # keep mutating, so a watcher couples the two: ssh gone -> flag file + SIGTERM to this process (fail closed). It exits
+  # when this process does. fd 214 is closed in it so it never keeps the remote lock alive past our exit.
+  MAIN_PRUNE_LOCK_LOST_FILE="$tmp/lost"
+  rm -f "$tmp/in" "$tmp/out" "$tmp/err"
+  (
+    exec 214>&- </dev/null >/dev/null
+    while kill -0 "$MAIN_PRUNE_LOCK_REMOTE_PID" 2>/dev/null; do
+      kill -0 "$parent" 2>/dev/null || { rm -rf "$tmp"; exit 0; }
+      sleep "${MAIN_PRUNE_LOCK_WATCH_SECS:-1}"
+    done
+    kill -0 "$parent" 2>/dev/null || { rm -rf "$tmp"; exit 0; }
+    : >"$tmp/lost"
+    echo "FATAL: the ssh holding the main prune lock on node-8 died; aborting so we do not mutate without the lock" >&2
+    kill -TERM "$parent" 2>/dev/null
+  ) &
 }
+
+# True once the remote lock watcher has fired (callers' EXIT backstops must not start main unlocked after that).
+main_prune_lock_lost() { [ -n "${MAIN_PRUNE_LOCK_LOST_FILE:-}" ] && [ -e "$MAIN_PRUNE_LOCK_LOST_FILE" ]; }
