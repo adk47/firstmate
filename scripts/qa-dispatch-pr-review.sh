@@ -102,8 +102,10 @@ if runs_json="$("$GH" run list -R Muso-AI/hydra --limit 200 --json databaseId,na
         else "ok" end' 2>/dev/null)"; then
   case "$verdict" in
     duplicate|superseded)
-      echo "qa-dispatch-pr-review: DEDUP-REFUSED ${verdict} ${REPO}#${pr} @ ${sha} -- an equivalent review is already queued/in_progress; no cron minted (no-op, exit 0)." >&2
-      exit 0 ;;
+      echo "qa-dispatch-pr-review: DEDUP-REFUSED ${verdict} ${REPO}#${pr} @ ${sha} -- an equivalent review is already queued/in_progress; no cron minted (no-op)." >&2
+      # Exit 0 for the workflows; the reconciler sets QA_DEDUP_REFUSED_RC=76 so a
+      # refusal is not charged to it as an attempt (it would exhaust and page "lost").
+      exit "${QA_DEDUP_REFUSED_RC:-0}" ;;
   esac
 else
   echo "qa-dispatch-pr-review: DEDUP-SKIPPED ${REPO}#${pr} @ ${sha} -- in-flight lookup failed; dispatching anyway (fail open)." >&2

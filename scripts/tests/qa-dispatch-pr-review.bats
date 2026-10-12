@@ -369,10 +369,11 @@ JSON
 
 # --- in-flight dedup (MUS-7955): refuse a duplicate / superseded dispatch -------
 # Fixture: one queued dispatch run, named as external-pr-review.yml's run-name.
-gh_runs() {  # gh_runs <databaseId> <pr> <sha> [status]
-  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf '[{"databaseId":%s,"name":"qa Muso-AI/hydra#%s @ %s (external-qa-review)","status":"%s","createdAt":"%s"}]\n' \
-    "$1" "$2" "$3" "${4:-queued}" "$now" > "$TEST_TMPDIR/gh.json"
+gh_runs() {  # gh_runs <databaseId> <pr> <sha> [status] [repo] [age-seconds]
+  local t; t=$(( $(date -u +%s) - ${6:-0} ))
+  t="$(date -u -d "@$t" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$t" +%Y-%m-%dT%H:%M:%SZ)"
+  printf '[{"databaseId":%s,"name":"qa %s#%s @ %s (external-qa-review)","status":"%s","createdAt":"%s"}]\n' \
+    "$1" "${5:-Muso-AI/hydra}" "$2" "$3" "${4:-queued}" "$t" > "$TEST_TMPDIR/gh.json"
   export STUB_GH_JSON="$TEST_TMPDIR/gh.json"
 }
 
@@ -443,6 +444,32 @@ gh_runs() {  # gh_runs <databaseId> <pr> <sha> [status]
   gh_runs 100 999 "${GOOD_SHA}0000000000000000000000000000"
   QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: same PR number and sha under ANOTHER repo never matches (PR numbers collide across repos)" {
+  gh_runs 100 123 "$GOOD_SHA" queued Muso-AI/other
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: a run older than the 4h window is not in flight -> dispatches (a wedged queued run cannot block a re-send forever)" {
+  gh_runs 100 123 "$GOOD_SHA" queued Muso-AI/hydra 18000
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: a run inside the 4h window still refuses (window test is not vacuous)" {
+  gh_runs 100 123 "$GOOD_SHA" queued Muso-AI/hydra 3600
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: QA_DEDUP_REFUSED_RC=76 (the reconciler) makes a refusal exit 76, still no cron add" {
+  gh_runs 100 123 "$GOOD_SHA"
+  QA_DEDUP_REFUSED_RC=76 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 76 ]
+  [ ! -s "$STUB_CALLS" ]
 }
 
 @test "dedup: fresh (repo,pr,sha) with no runs dispatches" {
