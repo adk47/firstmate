@@ -1485,6 +1485,29 @@ cat > /etc/tmpfiles.d/hydra-heap-snapshots.conf << HEAPTMPFILES
 d ${HEAP_SNAPSHOT_DIR} 0700 root root m:3d
 HEAPTMPFILES
 systemd-tmpfiles --create /etc/tmpfiles.d/hydra-heap-snapshots.conf
+DIAG_DIR=/var/lib/hydra/diag
+cat > /etc/tmpfiles.d/hydra-gateway-diag.conf << DIAGTMPFILES
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+# MUS-2652 temporary: main gateway diagnostics-timeline JSONL; keep 3 days.
+d ${DIAG_DIR} 0700 root root 3d
+DIAGTMPFILES
+systemd-tmpfiles --create /etc/tmpfiles.d/hydra-gateway-diag.conf
+# tmpfiles ages by mtime, and openclaw appends to this ONE fixed file, so every
+# append refreshes mtime and the 3d age never fires while main is active. Rotate
+# it for real. copytruncate: the writer holds the fd open, no reopen signal.
+cat > /etc/logrotate.d/hydra-gateway-diag << 'DIAGLOGROTATE'
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+/var/lib/hydra/diag/main-timeline.jsonl {
+    daily
+    maxsize 200M
+    rotate 3
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+DIAGLOGROTATE
+chmod 644 /etc/logrotate.d/hydra-gateway-diag
 for profile in main edge; do
   drop_dir="/etc/systemd/system/openclaw-gateway-${profile}.service.d"
   mkdir -p "$drop_dir"
@@ -1503,6 +1526,21 @@ for profile in main edge; do
   if [ "$profile" = "edge" ]; then
     reindex_hook="ExecStartPost=-/usr/bin/systemctl start --no-block openclaw-edge-reindex.service"
   fi
+  # MAIN ONLY, TEMPORARY (MUS-2652 / MUS-1295): openclaw's own startup trace +
+  # diagnostics timeline, to name the 20-28 min post-start freeze (main thread
+  # at 100% CPU). Journal gets per-span "startup trace:" lines; the JSONL at
+  # ${DIAG_DIR} carries the span active at each event-loop stall. =timeline, NOT
+  # =1: =1 is the wildcard and enables all nine flags incl. brave.http and
+  # telegram.http (provider HTTP traffic in the journal). Edge never gets these.
+  # Remove: delete trace_env + the tmpfiles conf above, re-run this installer.
+  trace_env=""
+  if [ "$profile" = "main" ]; then
+    trace_env="Environment=\"OPENCLAW_GATEWAY_STARTUP_TRACE=1\"
+Environment=\"OPENCLAW_GATEWAY_RESTART_TRACE=1\"
+Environment=\"OPENCLAW_DIAGNOSTICS=timeline\"
+Environment=\"OPENCLAW_DIAGNOSTICS_EVENT_LOOP=1\"
+Environment=\"OPENCLAW_DIAGNOSTICS_TIMELINE_PATH=${DIAG_DIR}/main-timeline.jsonl\""
+  fi
   # Heap cap: node's default (~4 GB) is below main's normal working set. Its
   # heap swings 1-3.6 GB all day, and every spike past the cap is a V8
   # "heap out of memory" SIGABRT plus a ~10 min post-restart freeze: 8 crashes
@@ -1515,6 +1553,7 @@ for profile in main edge; do
 # Reference template: scripts/aux-units/openclaw-gateway.override.conf
 [Service]
 Environment="NODE_OPTIONS=--max-old-space-size=8192 --diagnostic-dir=${HEAP_SNAPSHOT_DIR}"
+${trace_env}
 ExecStartPre=$HYDRA_ROOT/scripts/openclaw-pre-start-heal.sh ${profile}
 ${reindex_hook}
 [Unit]
