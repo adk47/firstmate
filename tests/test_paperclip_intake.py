@@ -99,6 +99,15 @@ class FakePaperclip:
                         outer.labels[lab["id"]] = lab
                         return self._send(201, lab)
                     return self._send(200, list(outer.labels.values()))
+                if path == f"/api/companies/{COMPANY}/issues" and method == "GET":
+                    # live: filters status/q, plain limit/offset, no 250 ceiling (checked 12 Oct)
+                    lq = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
+                    term = lq.get("q", "").replace("%3A", ":").replace("+", " ").lower()
+                    rows = [i for i in outer.issues.values()
+                            if (not lq.get("status") or i.get("status") == lq["status"])
+                            and term in (i.get("description", "") + i.get("title", "")).lower()]
+                    off, lim = int(lq.get("offset", 0)), int(lq.get("limit", 500))
+                    return self._send(200, rows[off:off + lim])
                 if path == f"/api/companies/{COMPANY}/issues" and method == "POST":
                     n = len(outer.issues) + 1
                     iss = {"id": f"iss-{n}", "identifier": f"PIL-{n}", "status": "todo",
@@ -443,6 +452,18 @@ class PaginationTests(Base):
         last["createdAt"] = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat()
         self.run_cli("escalate", "--to-agent", "pilot-agent-id")
         self.assertEqual(last["assigneeAgentId"], "pilot-agent-id")
+
+
+class BeyondSearchCeilingTests(Base):
+    def test_a_waiting_card_behind_more_than_250_triaged_cards_is_still_found(self):
+        # search_issues stops at 250 hits; the waiting queue must not be bounded by it.
+        for n in range(260):
+            self.api.issues[f"old-{n}"] = {"id": f"old-{n}", "title": f"old {n}", "status": "todo",
+                                           "assigneeAgentId": "someone",
+                                           "description": f"{pi.INTAKE_MARKER}\nfp:{n:016x}"}
+        self.file("brand new problem")
+        rc, out, _ = self.run_cli("waiting")
+        self.assertEqual([c["title"] for c in json.loads(out)["waiting"]], ["brand new problem"])
 
 
 class SearchCapTests(Base):

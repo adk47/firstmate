@@ -159,6 +159,18 @@ class Client:
                 break
         return hits
 
+    def list_issues(self, status, q, limit=100):
+        """Every issue with `status` matching `q`, paged until a short page. The list endpoint has no
+        250-hit ceiling (the search one does), so the waiting queue is never cut off."""
+        rows, offset = [], 0
+        while True:
+            params = urllib.parse.urlencode({"status": status, "q": q, "limit": str(limit), "offset": str(offset)})
+            page = self.call("GET", f"/api/companies/{self.company}/issues?{params}")
+            rows += page
+            if len(page) < limit:
+                return rows
+            offset += limit
+
     def issue(self, issue_id):
         return self.call("GET", f"/api/issues/{issue_id}")
 
@@ -188,8 +200,10 @@ def has_token(description, fp):
 def waiting_cards(client):
     """Untriaged intake cards: marker present, status todo, nobody assigned."""
     out = []
-    for hit in client.search_issues("hydra-intake", status="todo"):
-        card = client.issue(hit["id"])
+    for row in client.list_issues("todo", "hydra-intake"):
+        if row.get("assigneeAgentId"):
+            continue
+        card = client.issue(row["id"])
         if (INTAKE_MARKER in (card.get("description") or "") and card.get("status") == "todo"
                 and not card.get("assigneeAgentId")):
             out.append(card)
