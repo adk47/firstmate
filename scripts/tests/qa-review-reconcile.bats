@@ -512,6 +512,23 @@ setup_lib() {
   [ -z "$output" ]
 }
 
+@test "lib: qar_has_bot_review — a diff-cap / unfetchable-bundle CANNOT REVIEW stays a verdict (terminal, human case)" {
+  setup_lib
+  local_bots='["muso-qa-bot"]'
+  sha="abc123"
+  for b in "Verdict: CANNOT REVIEW — the diff exceeded the GitHub 20,000-line cap" "Verdict: CANNOT REVIEW — diff bundle unfetchable"; do
+    reviews=$(jq -nc --arg sha "$sha" --arg b "$b" '[{commit_id:$sha,user:{login:"muso-qa-bot"},body:$b}]')
+    run qar_has_bot_review "$reviews" "$sha" "$local_bots"
+    [ "$status" -eq 0 ]
+  done
+  # ...while the retryable infra bodies still are not a verdict.
+  for b in "Verdict: CANNOT REVIEW — GitHub API rate limit blocked it" "Verdict: CANNOT REVIEW: GitHub review publication failed after 3 attempts"; do
+    reviews=$(jq -nc --arg sha "$sha" --arg b "$b" '[{commit_id:$sha,user:{login:"muso-qa-bot"},body:$b}]')
+    run qar_has_bot_review "$reviews" "$sha" "$local_bots"
+    [ "$status" -ne 0 ]
+  done
+}
+
 @test "lib: qar_has_bot_review — a CANNOT REVIEW comment is not a verdict" {
   setup_lib
   local_bots='["muso-qa-bot","muso-qa-bot[bot]","adk47"]'
@@ -2316,6 +2333,22 @@ JSON
   [ "$status" -eq 0 ]
   [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 1 ]
   grep -q "49 $sha Muso-AI/core-backend U0AL36NADEY" "$DISPATCH_CALLS"
+}
+
+@test "e2e 78: a diff-cap CANNOT REVIEW bot review with NO qa-review status stays terminal (no dispatch)" {
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="shadiffcap00000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 51 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/core-backend" "$sha" "2026-01-01T00:00:00Z"
+  cat > "$FIX/reviews/Muso-AI-core-backend-51.json" <<JSON
+[{"commit_id": "$sha", "user": {"login": "muso-qa-bot"},
+  "body": "🤖 **Muso QA Bot** (automated review)\n\n⛔ **Verdict: CANNOT REVIEW** — the diff exceeded the GitHub 20,000-line cap and cannot be fetched."}]
+JSON
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ ! -s "$DISPATCH_CALLS" ]
 }
 
 @test "e2e 77: a real GO bot review on the head still settles (no dispatch)" {

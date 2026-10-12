@@ -102,7 +102,11 @@ qar_bot_logins() {
 # while its head status read `pending` with no qa-review context at all. A
 # no-verdict is not a verdict.
 #
-# Narrow on purpose: only this exact marker is excluded, so GO and NO-GO
+# Narrow on purpose: only a CANNOT REVIEW naming a retryable cause (API rate
+# limit, review publication failure) is excluded. The diff-cap / unfetchable-
+# bundle family is a human-review case (qa-approval-retry.sh): re-dispatching it
+# would burn the attempts cap on a review that can never load the diff, so it
+# stays a verdict. GO and NO-GO
 # comments still settle a PR and the bounded attempts cap (MAX_ATTEMPTS, then a
 # page) still governs how often an unrecoverable PR is retried. A review with
 # no body counts as a review (conservative: a bodiless bot review is evidence
@@ -113,7 +117,7 @@ qar_has_bot_review() {
     any(.[]?;
       (.commit_id == $sha)
       and (.user.login as $l | $bots | index($l)) != null
-      and (((.body // "") | test("Verdict: CANNOT REVIEW")) | not)
+      and (((.body // "") | test("Verdict: CANNOT REVIEW") and test("rate limit|publication failed"; "i")) | not)
     )
   ' <<<"$reviews_json" >/dev/null 2>&1
 }
