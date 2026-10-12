@@ -490,3 +490,25 @@ gh_runs() {  # gh_runs <databaseId> <pr> <sha> [status] [repo] [age-seconds]
   QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
 }
+
+# --- hydra's own path: qa-autoreview.yml calls this same script (MUS-7955 bot round) ---
+AUTOREVIEW="$HYDRA_REPO/.github/workflows/qa-autoreview.yml"
+
+@test "dedup: qa-autoreview.yml's run-name, rendered, is a name the guard matches -> second hydra dispatch refused" {
+  rn="$(grep -m1 '^run-name:' "$AUTOREVIEW")"
+  [ -n "$rn" ]
+  name="$(printf '%s' "${rn#run-name: }" | tr -d '"' \
+    | sed -e 's/\${{ github.repository }}/Muso-AI\/hydra/' \
+          -e 's/\${{ github.event.workflow_run.pull_requests\[0\].number }}/123/' \
+          -e "s/\${{ github.event.workflow_run.head_sha }}/${GOOD_SHA}0000000000000000000000000000/")"
+  [[ "$name" != *'${{'* ]]
+  printf '[{"databaseId":100,"name":"%s","status":"queued","createdAt":"%s"}]\n' "$name" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TEST_TMPDIR/gh.json"
+  export STUB_GH_JSON="$TEST_TMPDIR/gh.json"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: qa-autoreview.yml grants actions: read at workflow level (gh run list 403s without it -> silent DEDUP-SKIPPED)" {
+  awk '/^permissions:/{p=1;next} /^[^ #]/{p=0} p' "$AUTOREVIEW" | grep -qE '^  actions: read$'
+}
