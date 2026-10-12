@@ -137,7 +137,20 @@ safe_delete_restore() {  # <quarantined> <original> <qdir>
       if declare -F safe_delete_on_restored >/dev/null; then safe_delete_on_restored "$2"; fi
       return 0
     fi
-    mv -n -- "$2/$(basename -- "$1")" "$1" 2>/dev/null || true
+    # A mismatch alone is not a nest (a live writer can touch the tree's mtime):
+    # only undo when the child at the nested path really is the object.
+    local nested; nested="$2/$(basename -- "$1")"
+    if [ -e "$nested" ] && [ "$(safe_delete_id_stable "$(safe_delete_path_id "$nested")")" = "$want" ]; then
+      if ! mv -n -- "$nested" "$1" 2>/dev/null; then
+        SD_ERROR="${SD_ERROR:+$SD_ERROR; }restore blocked, object nested at $nested"
+        echo "safe-delete: $SD_ERROR" >&2
+        return 1
+      fi
+    else
+      rmdir "$3" 2>/dev/null || true
+      if declare -F safe_delete_on_restored >/dev/null; then safe_delete_on_restored "$2"; fi
+      return 0
+    fi
   fi
   # Never silent: the object now sits under a random name nobody was told about.
   SD_ERROR="${SD_ERROR:+$SD_ERROR; }restore blocked, object left quarantined at $1"

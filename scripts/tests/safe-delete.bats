@@ -217,6 +217,27 @@ STUB
   [ ! -e "$SANDBOX/root/victim/victim" ]
 }
 
+@test "restore keeps a same-named child when a writer only touches the tree root" {
+  mkdir -p "$SANDBOX/root/victim/victim"; echo x > "$SANDBOX/root/victim/victim/f"
+  # A live holder adds an entry between the identity snapshot and the mv: the
+  # tree's mtime changes though nothing is nested, so it must not be "undone".
+  real_mv="$(command -v mv)"
+  cat > "$SANDBOX/bin/mv" <<STUB
+#!/bin/sh
+for a; do prev="\$last"; last="\$a"; done
+[ "\$last" = "$SANDBOX/root/victim" ] && touch "\$prev/newfile"
+exec "$real_mv" "\$@"
+STUB
+  chmod +x "$SANDBOX/bin/mv"
+  held() { return 0; }
+  SD_QDIR_TEST="$SANDBOX/root/.q"; mkdir "$SD_QDIR_TEST"
+  "$real_mv" "$SANDBOX/root/victim" "$SD_QDIR_TEST/victim"
+  run safe_delete_restore "$SD_QDIR_TEST/victim" "$SANDBOX/root/victim" "$SD_QDIR_TEST"
+  [ "$status" -eq 0 ]
+  [ -f "$SANDBOX/root/victim/victim/f" ]
+  [ -f "$SANDBOX/root/victim/newfile" ]
+}
+
 # A primitive moved into the lib must never be called bare by the sweep: after
 # a merge with a branch that adds a caller, the bare name is command-not-found
 # (127), which `if ! reaudit` swallows — a fail-open guard with no git conflict.
