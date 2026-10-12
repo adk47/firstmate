@@ -378,6 +378,23 @@ gh_run_list_retry() {
     if out="$(gh run list --repo "$repo" --workflow "$workflow" --branch "$branch" \
                 --limit "$limit" --json databaseId,headSha,conclusion,createdAt,status 2>"$err")"; then
       rm -f "$err"
+      # A zero-exit response is not necessarily a usable one: gh can print a
+      # GitHub error body (rate limit, bad credentials) or a truncated page
+      # and still exit 0. Refuse it here, once, so every caller treats it as
+      # "could not measure" (the detectors map non-zero to rc 2 / rc 1)
+      # instead of reaching a bare `jq:` crash or reading it as "nothing
+      # shipped". Not retried: a malformed body is not a transient gh failure.
+      if ! printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        warn "$key: gh run list for $repo returned a response that was not a JSON array: $(printf '%s' "$out" | tr -d '\0' | head -c 300)"
+        return 1
+      fi
+      # An empty listing is shaped correctly but no more believable: $key is
+      # configured because it deploys, so a truly empty prod-branch listing
+      # is never a fact about production -- it is an unmeasured tick.
+      if [[ "$(printf '%s' "$out" | jq -r 'length')" -eq 0 ]]; then
+        warn "$key: gh run list for $repo came back EMPTY for the production branch, which cannot be right for a repo that deploys. Treating this as unmeasured, not as proof nothing shipped."
+        return 1
+      fi
       printf '%s' "$out"
       return 0
     fi
