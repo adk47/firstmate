@@ -351,3 +351,16 @@ SH
   run_guard
   [ "$status" -eq 0 ]
 }
+
+@test "top-level allocation with only a RETURN trap fails (RETURN never fires on script exit)" {
+  printf '#!/bin/bash\nwork=$(mktemp -d)\ntrap '"'"'rm -rf "$work"'"'"' RETURN\n' > "$TEST_TMPDIR/scripts/topret.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"topret.sh:2"* ]]
+}
+
+@test "top-level allocation with an EXIT trap passes" {
+  printf '#!/bin/bash\nwork=$(mktemp -d)\ntrap '"'"'rm -rf "$work"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/topexit.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}

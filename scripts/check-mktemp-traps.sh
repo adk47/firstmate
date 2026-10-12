@@ -15,8 +15,11 @@ if [ -s "${TMPDIR:-/tmp}/check-mktemp-traps.$$.err" ]; then find_failed=1; fi
 rm -f "${TMPDIR:-/tmp}/check-mktemp-traps.$$.err"
 if [ "${find_failed:-0}" -eq 1 ]; then echo "check-mktemp-traps: cannot enumerate $ROOT/scripts (unreadable path)" >&2; exit 2; fi
 files=$(printf '%s\n' "$files" | sort)
-# a trap only counts if it fires on a normal exit; ERR/INT-only traps leak on success
-LIFECYCLE_SIG='(^|[^A-Za-z_])(EXIT|RETURN)([^A-Za-z_]|$)'
+# a trap only counts if it fires on a normal exit; ERR/INT-only traps leak on success.
+# RETURN fires when a function returns, never on script exit, so it counts only inside a function.
+SIG_TOP='(^|[^A-Za-z_])EXIT([^A-Za-z_]|$)'
+SIG_FN='(^|[^A-Za-z_])(EXIT|RETURN)([^A-Za-z_]|$)'
+FN_HEADER='^[[:space:]]*(function[[:space:]]+[A-Za-z_][A-Za-z0-9_:.-]*([[:space:]]|\(|$)|[A-Za-z_][A-Za-z0-9_:.-]*[[:space:]]*\(\))'
 
 # split each line into code and comment, quote-aware ('#' inside '...' or "..." is data; it starts
 # a comment only at line start or after whitespace/;). A backslash-continued command is joined onto its
@@ -94,7 +97,7 @@ fn_body() {
   '
 }
 
-# does a trap in $1 (a scope) arm cleanup on EXIT/RETURN, with an action that rm's $2 (directly or via a handler fn)?
+# does a trap in $1 (a scope) arm cleanup on EXIT (or RETURN inside a function), with an action that rm's $2 (directly or via a handler fn)?
 # The action and the trailing signal list are parsed apart: "EXIT" inside the action string arms nothing.
 RE_Q1="trap[[:space:]]+(--[[:space:]]+)?'([^']*)'[[:space:]]+([^;&|]*)"
 RE_Q2='trap[[:space:]]+(--[[:space:]]+)?"(([^"\\]|\\.)*)"[[:space:]]+([^;&|]*)'
@@ -106,14 +109,16 @@ rm_targets() {
     | grep -Eq "\\\$\{?$1([^A-Za-z0-9_]|\$)"
 }
 trap_cleans() {
-  local scope="$1" var="$2" tl action sigs fn
+  local scope="$1" var="$2" tl action sigs fn sigre="$SIG_TOP"
+  # a function scope starts with its header line; top-level scope never does
+  if [[ "$(printf '%s\n' "$scope" | head -n1)" =~ $FN_HEADER ]]; then sigre="$SIG_FN"; fi
   while IFS= read -r tl; do
     action=""; sigs=""
     if   [[ "$tl" =~ $RE_Q1 ]]; then action="${BASH_REMATCH[2]}"; sigs="${BASH_REMATCH[3]}"
     elif [[ "$tl" =~ $RE_Q2 ]]; then action="${BASH_REMATCH[2]}"; sigs="${BASH_REMATCH[4]}"
     elif [[ "$tl" =~ $RE_W  ]]; then action="${BASH_REMATCH[2]}"; sigs="${BASH_REMATCH[3]}"
     else continue; fi
-    printf '%s\n' "$sigs" | grep -Eq "$LIFECYCLE_SIG" || continue
+    printf '%s\n' "$sigs" | grep -Eq "$sigre" || continue
     if printf '%s\n' "$action" | rm_targets "$var"; then return 0; fi
     # handlers: every function the action calls; the rm must sit in that function's own body
     for fn in $(printf '%s\n' "$action" | grep -Eo '(^|[;&[:space:]])[A-Za-z_][A-Za-z0-9_]*' | tr -d ';& \t'); do
