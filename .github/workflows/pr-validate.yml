@@ -1462,6 +1462,13 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_godmode_weekly_report
+      - name: Run fallback-local-error-report tests
+        # scripts/fallback-local-error-report.py counts model fallbacks that a LOCAL
+        # runtime error caused (MUS-6727). These lock the structural classifier (no
+        # error-string list), the explicit unclassified bucket, and local-only alerting.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_fallback_local_error_report
       - name: Run cs-needs-human-digest tests
         # scripts/cs-needs-human-digest.py runs UNATTENDED daily and is
         # READ-ONLY on Intercom — its only effect is one Block Kit post to

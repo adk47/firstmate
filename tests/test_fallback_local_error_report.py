@@ -99,7 +99,7 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(got, ["local", "local", "provider", "provider", "none"])
 
     def test_malformed_and_unrelated_lines_are_counted_not_crashed(self):
-        p = r.parse_lines(["not json", json.dumps({"1": "hello"}), decision("2026-10-12T10:00:00.000Z")])
+        p = r.parse_lines(["model_fallback_decision {truncated", json.dumps({"1": "hello"}), decision("2026-10-12T10:00:00.000Z")])
         self.assertEqual(len(p.decisions), 1)
         self.assertEqual(p.malformed, 1)
 
