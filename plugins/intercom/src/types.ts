@@ -220,6 +220,8 @@ export interface KbSnippet {
   snippet: string;
   path?: string;
   score?: number;
+  /** Help-centre article URL resolved from the manifest by path; absent for curated hits. */
+  citationUrl?: string;
 }
 
 // --- Config ---

@@ -3,6 +3,8 @@ import { MAX_OUTBOUND_MESSAGE_IDS } from "./types.js";
 import { sanitizeOutboundBody } from "./sanitize-email.js";
 import { sanitizeToolLeak } from "./sanitize-tool-leak.js";
 import { sanitizeTypography } from "./sanitize-typography.js";
+import { sanitizeHelpLinks } from "./sanitize-help-links.js";
+import { loadHelpManifest, type HelpManifest } from "./help-manifest.js";
 import { sanitizeHandoffClaim } from "./sanitize-handoff-claim.js";
 import { sanitizeInternalReference } from "./sanitize-internal-reference.js";
 import { wasTicketFiledRecently, getFiledTicketIds } from "./ticket-success-signal.js";
@@ -561,7 +563,27 @@ export class SanitizingIntercomClient implements IntercomClient {
   constructor(
     private readonly inner: IntercomClient,
     private readonly log?: SanitizerLogger,
+    private readonly helpManifestLoader: () => HelpManifest | null = loadHelpManifest,
   ) {}
+
+  /**
+   * Help-centre link gate. The manifest is read only when a reply actually
+   * contains an article URL. A null manifest fails closed (links stripped) and
+   * is logged to the internal log only; the customer sees a normal answer.
+   */
+  private helpLinkPass(body: string, conversationId: string): string {
+    const probe = sanitizeHelpLinks(body, null);
+    if (probe.redactions.length === 0) return body;
+    const manifest = this.helpManifestLoader();
+    const pass = sanitizeHelpLinks(body, manifest);
+    const msg = `[intercom:help-link] conv=${conversationId} stripped=${pass.redactions.length}${manifest ? "" : " manifest=unavailable"} urls=${JSON.stringify(pass.redactions)}`;
+    try {
+      this.log?.error?.(msg);
+    } catch {
+      try { console.error(msg); } catch { /* noop */ }
+    }
+    return pass.body;
+  }
 
   async replyToConversation(params: {
     conversationId: string;
@@ -597,7 +619,7 @@ export class SanitizingIntercomClient implements IntercomClient {
         try { console.error(msg); } catch { /* noop */ }
       }
     }
-    const typoPass = sanitizeTypography(toolPass.body);
+    const typoPass = sanitizeTypography(this.helpLinkPass(toolPass.body, params.conversationId));
     if (typoPass.redactions.length > 0) {
       const msg = `[intercom:typography] conv=${params.conversationId} count=${typoPass.redactions.length}`;
       // Logging must never block delivery (same contract as the passes above).
@@ -677,7 +699,7 @@ export class SanitizingIntercomClient implements IntercomClient {
     if (params.body) {
       const emailPass = sanitizeOutboundBody(params.body);
       const toolPass = sanitizeToolLeak(emailPass.body);
-      const typoPass = sanitizeTypography(toolPass.body);
+      const typoPass = sanitizeTypography(this.helpLinkPass(toolPass.body, params.conversationId));
       const refPass = sanitizeInternalReference(typoPass.body);
       return this.inner.closeConversation({ ...params, body: refPass.body });
     }
