@@ -1063,6 +1063,39 @@
       "state": {
         "consecutiveErrors": 0
       }
+    },
+    {
+      "id": "9dd605f5-1ded-4245-9ee7-f051c481755b",
+      "agentId": "scout",
+      "name": "hydra-health-watch-twice-daily",
+      "description": "Read-only twice-daily Hydra health check on node-8: gateway units and ports, deploy drift, last Deploy HYDRA run. Posts to Slack so it works when the Mac is down. Does not cover Sentry (MUS-7155, MUS-7136).",
+      "enabled": true,
+      "createdAtMs": 1791800852194,
+      "updatedAtMs": 1791800852194,
+      "schedule": {
+        "kind": "cron",
+        "expr": "5 9,21 * * *",
+        "tz": "Europe/Rome"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Hydra health watch for node-8. Read-only, twice daily. It covers the gateway units, the gateway ports, deploy drift and the last deploy only. It does NOT check Sentry or any Muso app errors, so HEALTHY here is not a prod-wide all-clear.\n\nREAD-ONLY RULE: run only the read commands below. Do not restart any service. Do not run deploy.sh, rollback.sh, or any kubectl command that writes. Do not create or change any file on the host. Never use a path under /dev as the target of any command; /dev/null may only be used as a redirect sink.\n\nRun these checks in order with the shell (exec) tool:\n\n1. Gateway units. Run `systemctl is-active openclaw-gateway-main openclaw-gateway-edge` and `systemctl show -p NRestarts -p ActiveEnterTimestamp openclaw-gateway-main openclaw-gateway-edge`. A unit that is not `active` is a failure. Report the NRestarts value and the ActiveEnterTimestamp for each unit. Do not judge a restart yet: check 4 decides it. Deploy HYDRA restarts both gateways on purpose every day at about 04:00 UTC, so a restart on its own is not a failure.\n\n2. Gateway ports. For each of 18789 and 18810, run `curl -s --max-time 10 -w '%{http_code}' http://127.0.0.1:<port>/ | tail -c 3`. The last three characters are the HTTP code. Any code that is not 2xx is a failure. `000` means no connection, which is also a failure.\n\n3. Deploy drift. Run `cat /opt/hydra/.deployed-sha` and `gh api repos/Muso-AI/hydra/git/ref/heads/main --jq .object.sha`. Report both shas. If they differ, report that main has moved since the last deploy. This is information, not a failure.\n\n4. Last deploy. Run `gh run list -R Muso-AI/hydra --workflow 'Deploy HYDRA' --limit 1 --json conclusion,status,createdAt,updatedAt,url`. A conclusion of `failure` or `cancelled` is a failure. A status of `in_progress` or `queued` is information. Now judge the restarts from check 1. Convert every timestamp to UTC before you compare. If the run's status is `completed`, a gateway whose ActiveEnterTimestamp is before the run's `updatedAt` was restarted by that deploy: information only. A gateway whose ActiveEnterTimestamp is after the run's `updatedAt` restarted after the last deploy finished: a failure. If the run's status is `in_progress` or `queued`, every restart is information.\n\nPost ONE message in this form:\n- All four checks were read and none failed: start with `HEALTHY`, then one line of evidence per check.\n- Any check failed: start with `FAILURES`, then one line per failure with its evidence.\n- Any check could not be read (command error, empty output, unreachable): add `PARTIAL - <check name> not read` for each one. A run with an unread check is never `HEALTHY`, even if every other check passed.\n\nState facts only. Give no advice. Do not restart or fix anything.",
+        "timeoutSeconds": 300,
+        "thinking": "low",
+        "model": "openai/gpt-6-sol",
+        "fallbacks": [
+          "openrouter/openai/gpt-6-luna",
+          "openrouter/anthropic/claude-haiku-5.5"
+        ]
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0ADV2W76G4",
+        "bestEffort": true
+      }
     }
   ]
 }
