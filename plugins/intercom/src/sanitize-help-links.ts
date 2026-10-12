@@ -23,7 +23,9 @@ const ARTICLE_URL = /(?:https?:\/\/)?help\.muso\.ai\.?(?::\d*)?\/[^\s<>()[\]"']*
 const TEMPLATE_LINE = new RegExp(`^${HELP_CITATION_LEAD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} (\\S+)$`);
 
 // Any help.muso.ai-looking token, whatever its path; every host char may be percent-encoded. Kept only if it decodes to an article URL.
-const hostChar = (c: string) => `(?:${c === "." ? "\\." : c}|%${c.charCodeAt(0).toString(16).padStart(2, "0")})`;
+const hex = (c: string) => c.charCodeAt(0).toString(16).padStart(2, "0");
+const hostChar = (c: string) =>
+  c === "." ? "(?:\\.|%2e)" : `(?:${c}|%${hex(c.toLowerCase())}|%${hex(c.toUpperCase())})`;
 const HELP_TOKEN_G = new RegExp(`(?:https?:\\/\\/)?${[..."help.muso.ai"].map(hostChar).join("")}[^\\s<>()[\\]"']*`, "gi");
 
 /** Percent-decode every well-formed %XX (repeatedly, so double encoding resolves too); a malformed % is left alone, never aborts the decode. */

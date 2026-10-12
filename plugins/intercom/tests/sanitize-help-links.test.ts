@@ -66,6 +66,13 @@ describe("sanitizeHelpLinks", () => {
     expect(out.body).not.toMatch(/muso\.ai/i);
   });
 
+  it("strips a URL whose host letter is percent-encoded in uppercase code, keeping the prose", () => {
+    for (const host of ["%48elp.muso.ai", "help.%4Duso.ai", "help.muso.%41i"]) {
+      const out = sanitizeHelpLinks(`See https://${host}/en/articles/9999999-invented for details`, MANIFEST);
+      expect(out.body).toBe("See for details");
+    }
+  });
+
   it("strips a URL embedded mid-prose (not on a template line)", () => {
     const out = sanitizeHelpLinks(`Answer one.\nSee ${GOOD} for steps.\nAnswer two.`, MANIFEST);
     expect(out.body).toBe("Answer one.\nAnswer two.");
