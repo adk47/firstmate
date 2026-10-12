@@ -75,9 +75,10 @@ qar_bot_logins() {
 
 # qar_has_bot_review <reviews-json> <head-sha> <bot-logins-json>
 # reviews-json: `gh api repos/<repo>/pulls/<pr>/reviews` array (objects with
-# .commit_id, .user.login). rc 0 iff some review's .commit_id equals head-sha
-# AND its author is LITERALLY (exact string equality, via array `index()`) a
-# member of bot-logins.
+# .commit_id, .user.login, .body). rc 0 iff some review's .commit_id equals
+# head-sha AND its author is LITERALLY (exact string equality, via array
+# `index()`) a member of bot-logins AND that review is not a "could not
+# review" notice.
 #
 # LITERAL EQUALITY ONLY — never test()/match()/contains(). The policy carries
 # "muso-qa-bot[bot]"; in jq's regex engine `[bot]` is a character class, so
@@ -86,10 +87,34 @@ qar_bot_logins() {
 # misclassified as lost because the login test silently matched wrong strings
 # some other way). `--argjson bots` + `index($l)` is exact-string membership,
 # immune to this class of bug by construction.
+#
+# WHY A "CANNOT REVIEW" BODY IS EXCLUDED (2026-09-17): the reviewer posts its
+# verdict as a review COMMENT and then as the terminal `qa-review` STATUS.
+# When the review bundle cannot be loaded (GitHub API rate limit, the dominant
+# failure mode — 3 in the 24h to 2026-09-17T14:50Z) it posts
+# "Verdict: CANNOT REVIEW" as the comment and the status POST itself can fail
+# on the same exhausted budget. That comment is then the only bot review on
+# the head, so this helper said "verdict", `qar_classify_verdict` returned
+# `verdict` on any repo NOT in merge_gate_repos, and the reconciler — the one
+# component whose job is to recover exactly this — never re-dispatched it.
+# Measured: hydra#975 carried CANNOT REVIEW at 16:05:09Z and the reconciler's
+# 16:33Z tick dispatched a different PR and never mentioned 975 (grep -c 975 = 0)
+# while its head status read `pending` with no qa-review context at all. A
+# no-verdict is not a verdict.
+#
+# Narrow on purpose: only this exact marker is excluded, so GO and NO-GO
+# comments still settle a PR and the bounded attempts cap (MAX_ATTEMPTS, then a
+# page) still governs how often an unrecoverable PR is retried. A review with
+# no body counts as a review (conservative: a bodiless bot review is evidence
+# of something that ran, and this change must not re-dispatch settled PRs).
 qar_has_bot_review() {
   local reviews_json="$1" head_sha="$2" logins_json="$3"
   jq -e --arg sha "$head_sha" --argjson bots "$logins_json" '
-    any(.[]?; (.commit_id == $sha) and (.user.login as $l | $bots | index($l)) != null)
+    any(.[]?;
+      (.commit_id == $sha)
+      and (.user.login as $l | $bots | index($l)) != null
+      and (((.body // "") | test("Verdict: CANNOT REVIEW")) | not)
+    )
   ' <<<"$reviews_json" >/dev/null 2>&1
 }
 
