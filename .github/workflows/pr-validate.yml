@@ -4,6 +4,14 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel a run superseded by a newer push to the same PR ref. Without this
+# every push stacks another full run on the 4 self-hosted runners (measured
+# 5 of 31 runs superseded, ~16% of pool minutes). A cancel only fires when a
+# newer run starts on this ref, so the current head always has a live run.
+concurrency:
+  group: pr-validate-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: [self-hosted, hydra]
