@@ -38,6 +38,11 @@ describe("sanitizeHelpLinks", () => {
     ["empty port", "https://help.muso.ai:/en/articles/9999999-invented"],
     ["trailing-dot host", "https://help.muso.ai./en/articles/9999999-invented"],
     ["valid article with explicit port", "https://help.muso.ai:443/en/articles/1111111-how-do-i-claim-my-profile"],
+    ["percent-encoded path segment", "https://help.muso.ai/en/%61rticles/9999999-invented"],
+    ["percent-encoded host dot", "https://help%2Emuso.ai/en/articles/9999999-invented"],
+    ["double-encoded path segment", "https://help.muso.ai/en/%2561rticles/9999999-invented"],
+    ["percent-encoded slash", "https://help.muso.ai/en%2Farticles%2F9999999-invented"],
+    ["valid article, percent-encoded", "https://help.muso.ai/en/%61rticles/1111111-how-do-i-claim-my-profile"],
   ])("strips %s variant together with its lead-in line", (_n, url) => {
     const out = sanitizeHelpLinks(`Here is the answer.\n\n${HELP_CITATION_LEAD} ${url}`, MANIFEST);
     expect(out.body).toBe("Here is the answer.");

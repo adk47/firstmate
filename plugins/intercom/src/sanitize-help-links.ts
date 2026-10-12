@@ -22,15 +22,37 @@ export interface HelpLinkSanitizeResult {
 const ARTICLE_URL = /(?:https?:\/\/)?help\.muso\.ai\.?(?::\d*)?\/[^\s<>()[\]"']*articles\/[^\s<>()[\]"']*/i;
 const TEMPLATE_LINE = new RegExp(`^${HELP_CITATION_LEAD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} (\\S+)$`);
 
-const ARTICLE_URL_G = new RegExp(ARTICLE_URL.source, "gi");
+// Any help.muso.ai-looking token, whatever its path; kept only if it decodes to an article URL.
+const HELP_TOKEN_G = /(?:https?:\/\/)?help(?:\.|%2e)muso(?:\.|%2e)ai[^\s<>()[\]"']*/gi;
+
+/** Percent-decode (repeatedly, so double encoding resolves too); undecodable input is returned as-is. */
+function decodeAll(s: string): string {
+  let cur = s;
+  for (let i = 0; i < 4; i++) {
+    let next: string;
+    try {
+      next = decodeURIComponent(cur);
+    } catch {
+      return cur;
+    }
+    if (next === cur) break;
+    cur = next;
+  }
+  return cur;
+}
+
+/** True when the text, once percent-decoding is undone, carries an article URL. */
+function hasArticleUrl(s: string): boolean {
+  return ARTICLE_URL.test(s) || ARTICLE_URL.test(decodeAll(s));
+}
 const LEAD_RE = new RegExp(`${HELP_CITATION_LEAD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*(?=(?:<\\/\\w+>\\s*)*$)`, "i");
 
 /** Remove anchors / markdown links / bare tokens carrying an article URL, and a trailing lead-in; keep other prose. */
 function stripUrlTokensOnly(body: string): string {
   const stripped = body
-    .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, (m) => (ARTICLE_URL.test(m) ? "" : m))
-    .replace(/\[[^\]]*\]\([^)]*\)/g, (m) => (ARTICLE_URL.test(m) ? "" : m))
-    .replace(ARTICLE_URL_G, "");
+    .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, (m) => (hasArticleUrl(m) ? "" : m))
+    .replace(/\[[^\]]*\]\([^)]*\)/g, (m) => (hasArticleUrl(m) ? "" : m))
+    .replace(HELP_TOKEN_G, (m) => (hasArticleUrl(m) ? "" : m));
   return stripped
     .split("\n")
     .map((l) => l.replace(LEAD_RE, "").replace(/[ \t]{2,}/g, " ").replace(/\s+$/, ""))
@@ -42,13 +64,13 @@ function stripUrlTokensOnly(body: string): string {
 }
 
 export function sanitizeHelpLinks(body: string, manifest: HelpManifest | null): HelpLinkSanitizeResult {
-  if (typeof body !== "string" || !ARTICLE_URL.test(body)) return { body, redactions: [] };
+  if (typeof body !== "string" || !hasArticleUrl(body)) return { body, redactions: [] };
 
   const redactions: string[] = [];
   let kept = false;
   const out: string[] = [];
   for (const line of body.split("\n")) {
-    const hit = ARTICLE_URL.exec(line);
+    const hit = ARTICLE_URL.exec(line) ?? ARTICLE_URL.exec(decodeAll(line));
     if (!hit) {
       out.push(line);
       continue;
