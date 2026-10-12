@@ -574,9 +574,17 @@ assert_both_gateways_started() {
   if grep -q "systemctl start" "$SYSTEMCTL_LOG"; then echo "NEGATED ASSERTION FAILED: backstop fired after Step 2" >&2; false; fi
 }
 
+# Asserts on the recorded argv, not on which branch ran: any `systemctl start|restart` here is a start without the lock.
+assert_no_systemctl_start() {
+  if grep -qE "^systemctl (start|restart)" "$SYSTEMCTL_LOG"; then
+    echo "started a gateway without the main prune lock:" >&2; cat "$SYSTEMCTL_LOG" >&2; false
+  fi
+}
+
 # MUS-3742: rollback.sh restarts with raw systemctl, so it takes the shared prune lock once, before any mutation.
 @test "rollback REFUSES while a main prune holds the lock: nothing is synced or restarted" {
   printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_systemctl_log
   _hold_lock "$MAIN_PRUNE_LOCK_FILE" 30; holder=$!
   sleep 1
   run env HYDRA_LOCAL=true DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \
@@ -586,13 +594,17 @@ assert_both_gateways_started() {
   [[ "$output" == *"still holds"* ]]
   # server left as-is: the restore never ran
   [ ! -f "$DEPLOY/skills-all/marker.md" ]
+  # the availability backstop must NOT start main without the lock: the prune has main stopped for offline cleanup
+  assert_no_systemctl_start
 }
 
 @test "rollback refuses (loudly, nothing touched) when the lock file cannot be opened" {
   printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_systemctl_log
   run env HYDRA_LOCAL=true DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \
     MAIN_PRUNE_LOCK_FILE=/dev/null/nope.lock bash "$SRC/scripts/rollback.sh"
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot open"* ]]
   [ ! -f "$DEPLOY/skills-all/marker.md" ]
+  assert_no_systemctl_start
 }

@@ -154,6 +154,9 @@ if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a c
   lock_rc=0
   log "Taking the main prune/restart lock (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
   acquire_main_prune_lock || lock_rc=$?
+  # Refused: a prune may have main stopped for offline cleanup. Starting it here, unlocked, is the race the lock exists
+  # to stop, so disarm the EXIT backstop (ensure_gateways_up). Nothing of ours is stopped yet; the server stays as-is.
+  [ "$lock_rc" = 0 ] || GATEWAYS_RESTARTED=1
   case "$lock_rc" in
     0) ;;
     1) fail "a main prune/restart still holds $MAIN_PRUNE_LOCK_FILE after ${MAIN_PRUNE_LOCK_WAIT_SECS}s; refusing to roll back underneath it. Server left as-is; re-run once it finishes." ;;
