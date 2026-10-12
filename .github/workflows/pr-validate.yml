@@ -672,6 +672,16 @@ jobs:
           bash scripts/check-refund-doctrine.sh
           echo "::endgroup::"
 
+      - name: "Ops-skill safety-clause doctrine check (#1047 silent-deletion regression class)"
+        # PR #1047 silently deleted 7 safety clauses from the customer-data-resolution
+        # and subscription-refund-reconciliation @Ops skills and every CI gate stayed
+        # green. MUS-1796 (#1050) restored the prose; this gate anchors it so the next
+        # silent deletion fails CI instead of shipping unnoticed.
+        run: |
+          echo "::group::Ops-skill safety-clause doctrine check"
+          bash scripts/check-ops-skill-doctrine.sh
+          echo "::endgroup::"
+
       - name: Collaborator derived-table doctrine check — no hand-written SQL on a rebuilt table
         # Incident 2026-07-29: asked to remove ~24 named collaborators from a profile,
         # @Ops proposed a 32-row direct production DELETE against
