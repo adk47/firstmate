@@ -241,7 +241,7 @@ create_calls() { grep -c '^pr create' "$GH_CALLS" || true; }
   printf 'sync/node-8-2026-10-11\nsync/node-8-2026-10-12\n' > "$T/open_pr"
   run "$RUN" --date 2026-10-13
   [ "$status" -ne 0 ]
-  [[ "$output" == *"sync/node-8-2026-10-11"* && "$output" == *"sync/node-8-2026-10-12"* ]]
+  [[ "$output" == *"more than one open sync PR"* && "$output" == *"sync/node-8-2026-10-11"* && "$output" == *"sync/node-8-2026-10-12"* ]]
   [ "$(origin_branches)" = "main" ]
   [ "$(create_calls)" = 0 ]
 }
