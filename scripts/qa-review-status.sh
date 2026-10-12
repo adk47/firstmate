@@ -113,11 +113,14 @@ fi
 # already recorded on it still describes this exact code, and overwriting it would
 # turn a quota blip into an unmergeable sha. Only the CANNOT REVIEW prefix is
 # guarded: a NO-GO is a finding and always overwrites. If the lookup fails, post as
-# before: we cannot prove a GO exists, so we must not suppress.
+# before: we cannot prove a GO exists, so we must not suppress. The GO must also be
+# the CURRENT verdict: a `pending` re-arm after it makes it stale, so the newest
+# non-CANNOT row has to be that GO itself, not merely some GO in the history.
 if [ "$state" = failure ] && [[ "$description" == "CANNOT REVIEW: "* ]]; then
   go_at="$("$QA_GH" --repo "$repo" api "repos/$repo/statuses/$sha?per_page=100" 2>/dev/null \
-    | jq -r '[ .[]? | select(.context == "qa-review" and .state == "success"
-        and ((.description // "") | startswith("CANNOT REVIEW: ") | not)) ] | first | select(. != null) | .created_at' 2>/dev/null)" || go_at=""
+    | jq -r '[ .[]? | select(.context == "qa-review"
+        and ((.description // "") | startswith("CANNOT REVIEW: ") | not)) ] | first
+        | select(. != null and .state == "success") | .created_at' 2>/dev/null)" || go_at=""
   if [ -n "$go_at" ]; then
     echo "qa-review-status: $repo@${sha:0:7} $CONTEXT=failure NOT posted — a GO recorded at $go_at stands on this sha; a tool failure does not overwrite it."
     exit 0

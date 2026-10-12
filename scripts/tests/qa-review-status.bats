@@ -258,3 +258,14 @@ CANNOT_ROW='{"context":"qa-review","state":"failure","description":"CANNOT REVIE
   grep -q -- '--method POST' "$QA_GH_LOG"
   grep -q 'state=pending' "$QA_GH_LOG"
 }
+
+@test "CANNOT REVIEW after a pending re-arm of a same-sha GO still posts (the GO is no longer the current verdict)" {
+  # The re-arm supersedes the GO even though the GO row is still in history. The
+  # newest non-CANNOT row is the pending one, so the standing GO is not current.
+  PENDING_ROW='{"context":"qa-review","state":"pending","description":"QA review queued for 0123456","created_at":"2026-10-12T19:00:00Z"}'
+  STUB_STATUSES_JSON="[$PENDING_ROW,$GO_ROW]" \
+    run "$SCRIPT" Muso-AI/hydra "$SHA" failure "CANNOT REVIEW: GitHub API rate limit blocked the review bundle"
+  [ "$status" -eq 0 ]
+  grep -q -- '--method POST' "$QA_GH_LOG"
+  grep -q 'state=failure' "$QA_GH_LOG"
+}
