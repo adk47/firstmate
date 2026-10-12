@@ -1431,6 +1431,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_data_complaint_watchdog
+      - name: Run rights-holder watchdog tests
+        # scripts/intercom-rights-holder-watchdog.py PAGES #cs_priority (Nick, Jan)
+        # on label/publisher/PRO/legal senders. These lock the domain boundary
+        # (notsonymusic.com must not match), subject-only 'urgent', the inbound-only
+        # author filter, and the post -> tag -> ledger ordering. Targeted by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_intercom_rights_holder_watchdog
       - name: Run resolution-matcher tests
         # scripts/resolution-matcher.py runs UNATTENDED daily (--apply) and both
         # MESSAGES customers and CLOSES their conversations/tickets on the strength
