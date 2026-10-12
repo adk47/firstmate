@@ -246,3 +246,26 @@ STUB
   run grep -nE '(^|[^_[:alnum:]])(mount_hazard|is_mountpoint|path_id|id_stable)[[:space:]]*"?\$?' "$HYDRA_REPO/scripts/sweep-workspace-clones.sh"
   [ "$status" -ne 0 ]
 }
+
+@test "restore never reports success for a nested tree a writer also modified (identity is inode, not mtime)" {
+  mkdir_with_data "$SANDBOX/root/victim"
+  # Writer recreates the name and the mv nests the object; the object is then
+  # modified before the restore can verify it. Inode proves the nest, so it is undone, not reported restored.
+  real_mv="$(command -v mv)"
+  cat > "$SANDBOX/bin/mv" <<STUB
+#!/bin/sh
+for a; do prev="\$last"; last="\$a"; done
+if [ "\$last" = "$SANDBOX/root/victim" ]; then
+  mkdir "\$last"; "$real_mv" "\$@"; touch "\$last/victim/newfile"; exit 0
+fi
+exec "$real_mv" "\$@"
+STUB
+  chmod +x "$SANDBOX/bin/mv"
+  SD_Q="$SANDBOX/root/.q"; mkdir "$SD_Q"
+  "$real_mv" "$SANDBOX/root/victim" "$SD_Q/victim"
+  run --separate-stderr safe_delete_restore "$SD_Q/victim" "$SANDBOX/root/victim" "$SD_Q"
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"left quarantined at $SD_Q/victim"* ]]
+  [ -f "$SD_Q/victim/sub/blob" ]
+  [ ! -e "$SANDBOX/root/victim/victim" ]
+}

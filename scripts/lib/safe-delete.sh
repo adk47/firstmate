@@ -100,6 +100,14 @@ safe_delete_id_stable() {  # <path_id>
   printf '%s|%s|%s|%s' "$dev" "$ino" "$mtime" "$size"
 }
 
+# Rename-invariant identity: device|inode only.
+safe_delete_inode() {  # <path>
+  local dev ino rest
+  IFS='|' read -r dev ino rest <<< "$(safe_delete_path_id "$1")"
+  [ -n "$ino" ] && printf '%s|%s' "$dev" "$ino"
+  return 0
+}
+
 # 0 if any process holds a handle on <path> or anything under it, or has its
 # cwd there. An lsof error or a missing lsof is "held": we cannot prove
 # absence of a writer. One whole-system lsof pass filtered by prefix, rather
@@ -125,31 +133,27 @@ safe_delete_has_open_handle() {  # <path>
 # Nonzero = left quarantined: reported on stderr and in SD_ERROR; the optional
 # hook lets the caller account it too.
 safe_delete_restore() {  # <quarantined> <original> <qdir>
-  local want
-  want="$(safe_delete_id_stable "$(safe_delete_path_id "$1")")"
+  local want_id nested
+  want_id="$(safe_delete_inode "$1")"
   # mv -n onto a retaken DIRECTORY name nests the object inside it and exits 0,
   # so a taken name is refused up front. A writer can still win the race between
-  # that check and the mv, so the landed object's identity is verified and a
-  # nested one is moved back out rather than reported as restored.
+  # that check and the mv, so what landed is proven by device+inode (rename keeps
+  # them; mtime/size can change under a live writer) and a nested object is
+  # moved back out. Anything unproven is blocked, never reported as restored.
   if [ ! -e "$2" ] && [ ! -L "$2" ] && mv -n -- "$1" "$2" 2>/dev/null && [ ! -e "$1" ] && [ ! -L "$1" ]; then
-    if [ "$(safe_delete_id_stable "$(safe_delete_path_id "$2")")" = "$want" ]; then
+    if [ -n "$want_id" ] && [ "$(safe_delete_inode "$2")" = "$want_id" ]; then
       rmdir "$3" 2>/dev/null || true
       if declare -F safe_delete_on_restored >/dev/null; then safe_delete_on_restored "$2"; fi
       return 0
     fi
-    # A mismatch alone is not a nest (a live writer can touch the tree's mtime):
-    # only undo when the child at the nested path really is the object.
-    local nested; nested="$2/$(basename -- "$1")"
-    if [ -e "$nested" ] && [ "$(safe_delete_id_stable "$(safe_delete_path_id "$nested")")" = "$want" ]; then
-      if ! mv -n -- "$nested" "$1" 2>/dev/null; then
-        SD_ERROR="${SD_ERROR:+$SD_ERROR; }restore blocked, object nested at $nested"
-        echo "safe-delete: $SD_ERROR" >&2
-        return 1
-      fi
+    nested="$2/$(basename -- "$1")"
+    if [ -n "$want_id" ] && [ "$(safe_delete_inode "$nested")" = "$want_id" ] \
+       && mv -n -- "$nested" "$1" 2>/dev/null; then
+      :  # undone: falls through to "left quarantined"
     else
-      rmdir "$3" 2>/dev/null || true
-      if declare -F safe_delete_on_restored >/dev/null; then safe_delete_on_restored "$2"; fi
-      return 0
+      SD_ERROR="${SD_ERROR:+$SD_ERROR; }restore blocked, object not proven at $2 (may be nested at $nested)"
+      echo "safe-delete: $SD_ERROR" >&2
+      return 1
     fi
   fi
   # Never silent: the object now sits under a random name nobody was told about.
