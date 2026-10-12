@@ -263,23 +263,23 @@ Read `create_ticket`'s JSON response and choose the template:
 
 ### Submitted (`submitted: true`)
 
-Use `ticket_id` as the reference and `sla` verbatim from the response:
+Use `sla` verbatim from the response. **Never put `ticket_id` in a reply** – it is an internal id (see SOUL.md, Response Rules).
 
-**Tier 1:** "I've flagged your request for our team. You'll hear back within `<sla>`. Your reference is `<ticket_id>`."
+**Tier 1:** "I've flagged your request for our team. You'll hear back within `<sla>`. If you need to add anything, just reply here."
 
-**Tier 2:** "I've escalated your request to our operations team. This type of request requires manual review – you'll hear back within `<sla>`. Your reference is `<ticket_id>`."
+**Tier 2:** "I've escalated your request to our operations team. This type of request requires manual review – you'll hear back within `<sla>`. If you need to add anything, just reply here."
 
-**Tier 3:** "I've passed your request to our senior team for review. You can expect a response within `<sla>`. Your reference is `<ticket_id>`."
+**Tier 3:** "I've passed your request to our senior team for review. You can expect a response within `<sla>`. If you need to add anything, just reply here."
 
 ### Updated existing request (`submitted: true, updated_existing: true`)
 
-"I've added that to your existing request – same reference `<ticket_id>`, the team will see the update."
+"I've added that to your existing request – the team will see the update."
 
 Do NOT re-quote the `sla` on an `updated_existing` response – the clock started when the ticket was first filed, and repeating the timeframe on every follow-up reads as a fresh promise.
 
 ### Overdue follow-up (`updated_existing: true` and the original SLA has passed)
 
-"You're right that this has taken longer than it should – that's on us. I've raised the priority on your existing request (`<ticket_id>`) so it's flagged for the team's overdue review. I won't quote you another timeframe I can't guarantee, but it is marked at the highest priority I can set."
+"You're right that this has taken longer than it should – that's on us. I've raised the priority on your existing request so it's flagged for the team's overdue review. I won't quote you another timeframe I can't guarantee, but it is marked at the highest priority I can set."
 
 ### Not submitted – rate limited (`submitted: false, reason: "rate_limited"`)
 "Looks like a request is already on the way to our team for you. You'll hear back soon."
