@@ -95,6 +95,8 @@ export async function retrieveKbSnippets(
 export const HELP_CENTRE_MAX_SNIPPETS = 2;
 /** Over-fetch factor so 60 help-centre files cannot crowd every curated hit out of the raw top-K. */
 const KB_OVERFETCH = 4;
+/** Second-pass multiplier when the first window held no curated hit. */
+const KB_WIDEN = 5;
 
 /** Map a raw memory-search hit to a KbSnippet; citationUrl comes from the manifest, never from snippet text. */
 export function toKbSnippet(
@@ -113,7 +115,16 @@ export function toKbSnippet(
  */
 export function withHelpCentreCap(inner: KbSearcher): KbSearcher {
   return async (query, opts) => {
-    const all = await inner(query, { ...opts, maxResults: opts.maxResults * KB_OVERFETCH });
+    const fetchWindow = async (factor: number) => {
+      const asked = opts.maxResults * factor;
+      const all = await inner(query, { ...opts, maxResults: asked });
+      return { all, truncated: all.length >= asked };
+    };
+    let { all, truncated } = await fetchWindow(KB_OVERFETCH);
+    // A full window with no curated hit may be hiding one below many help-centre chunks: widen once.
+    if (truncated && !all.some((s) => !isHelpCentrePath(s.path))) {
+      ({ all } = await fetchWindow(KB_OVERFETCH * KB_WIDEN));
+    }
     const curated = all.filter((s) => !isHelpCentrePath(s.path)).slice(0, opts.maxResults);
     const help = all
       .filter((s) => isHelpCentrePath(s.path))

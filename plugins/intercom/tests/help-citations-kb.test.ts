@@ -45,6 +45,23 @@ describe("withHelpCentreCap", () => {
     expect(seen).toBeGreaterThan(5);
   });
 
+  it("widens the search when the first window is all help-centre, so a curated hit ranked 21st still surfaces", async () => {
+    const ranked: KbSnippet[] = [...Array.from({ length: 20 }, (_, i) => hc(i + 1)), cur("refund-policy")];
+    const asked: number[] = [];
+    const inner: KbSearcher = async (_q, o) => { asked.push(o.maxResults); return ranked.slice(0, o.maxResults); };
+    const out = await withHelpCentreCap(inner)("q", { maxResults: 5, minScore: 0 });
+    expect(out.some((s) => s.path === "reference/refund-policy.md")).toBe(true);
+    expect(out.filter((s) => s.path!.includes("hc-")).length).toBe(2);
+    expect(asked.length).toBe(2);
+  });
+
+  it("does not widen when the first window already returned fewer hits than asked", async () => {
+    let calls = 0;
+    const inner: KbSearcher = async () => { calls++; return [hc(1), hc(2)]; };
+    await withHelpCentreCap(inner)("q", { maxResults: 5, minScore: 0 });
+    expect(calls).toBe(1);
+  });
+
   it("curated hits take priority and never exceed maxResults", async () => {
     const inner: KbSearcher = async () => [hc(1), cur("a"), cur("b"), cur("c"), cur("d"), cur("e"), cur("f")];
     const out = await withHelpCentreCap(inner)("q", { maxResults: 5, minScore: 0 });
