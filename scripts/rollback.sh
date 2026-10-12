@@ -163,7 +163,12 @@ if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a c
     *) fail "cannot open $MAIN_PRUNE_LOCK_FILE (rc=$lock_rc); refusing to roll back without the main prune/restart lock. Server left as-is." ;;
   esac
 else
-  log "WARN: ssh-mode rollback (HYDRA_LOCAL=false): the main prune/restart lock is NOT taken"
+  # ssh mode: hold the lock ON node-8 for the life of this process (lib/main-prune-lock.sh); refused = fail closed.
+  lock_rc=0
+  log "Taking the main prune/restart lock ON node-8 (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock_remote ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" || lock_rc=$?
+  # Same as the local branch: a refused lock must not let the EXIT backstop start main during an offline prune.
+  [ "$lock_rc" = 0 ] || { GATEWAYS_RESTARTED=1; fail "could not take $MAIN_PRUNE_LOCK_FILE on node-8 (rc=$lock_rc: a main prune/restart still holds it, or node-8 is unreachable); refusing to roll back underneath it. Server left as-is; re-run once it finishes."; }
 fi
 
 log "Step 1/4: Materializing last-known-good tree ($PREVIOUS_SHA)..."

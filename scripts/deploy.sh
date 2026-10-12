@@ -2346,7 +2346,12 @@ if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a c
     *) fail "cannot open $MAIN_PRUNE_LOCK_FILE (rc=$lock_rc); refusing to deploy without the main prune/restart lock (nothing was changed)" ;;
   esac
 else
-  log "WARN: ssh-mode deploy (HYDRA_LOCAL=false): the main prune/restart lock is NOT taken, a lock on this host would not exclude the prune on node-8"
+  # ssh mode: the lock must live on node-8 (a local flock would not exclude the prune there), held by a background ssh
+  # for the life of this process; refused = fail closed, same as the local branch.
+  lock_rc=0
+  log "Taking the main prune/restart lock ON node-8 (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock_remote ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" || lock_rc=$?
+  [ "$lock_rc" = 0 ] || fail "could not take $MAIN_PRUNE_LOCK_FILE on node-8 (rc=$lock_rc: a main prune/restart still holds it, or node-8 is unreachable); refusing to deploy underneath it (nothing was changed). Re-run once it finishes."
 fi
 log "Claiming the mutation marker ($DEPLOY_PATH/.deploy-mutating, owner $DEPLOY_RUN_TOKEN)"
 marker_rc=0

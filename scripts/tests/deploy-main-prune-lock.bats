@@ -62,9 +62,59 @@ line_of() {
   [[ "$output" != *"REACHED-MARKER-CLAIM"* ]]
 }
 
-@test "ssh-mode deploy does not pretend: no lock taken, it says so and continues" {
-  HYDRA_LOCAL=false run bash "$TEST_TMPDIR/block.sh"
+# ssh mode: the lock must be held ON node-8 (MUS-3742 bot finding, 12 Oct). _ssh_block builds deploy.sh's REAL lock
+# block with HYDRA_LOCAL=false and a fake `ssh` (given as $1, a function body) so the real remote flock + FIFO hold run.
+_ssh_block() {
+  {
+    echo 'log() { echo "$*"; }'
+    echo 'fail() { echo "FATAL: $*"; exit 1; }'
+    echo "source '$LIB'"
+    echo 'SSH_KEY=k; SSH_OPTS=(-o X=y); NODE8_USER=u; NODE8_IP=h; HYDRA_LOCAL=false'
+    echo "ssh() { $1; }"
+    awk '/^# Serialise with scripts\/main-prune-restart.sh BEFORE the first node-8 mutation/ { on = 1 }
+         /^log "Claiming the mutation marker/ { on = 0 }
+         on' "$DEPLOY"
+    echo "$2"
+    echo 'echo REACHED-MARKER-CLAIM'
+  } > "$TEST_TMPDIR/ssh-block.sh"
+}
+# The fake ssh runs the remote command (its last argument) in a local bash.
+FAKE_SSH_OK='bash -c "${!#}"'
+
+@test "ssh-mode deploy takes the lock ON the far side and still holds it while the deploy runs" {
+  _ssh_block "$FAKE_SSH_OK" 'exec 8>"$MAIN_PRUNE_LOCK_FILE"; if flock -n 8; then echo PRUNE-COULD-LOCK; else echo PRUNE-EXCLUDED; fi'
+  run bash "$TEST_TMPDIR/ssh-block.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"NOT taken"* ]]
+  [[ "$output" == *"ON node-8"* ]]
+  [[ "$output" == *"PRUNE-EXCLUDED"* ]]
+  [[ "$output" != *"PRUNE-COULD-LOCK"* ]]
   [[ "$output" == *"REACHED-MARKER-CLAIM"* ]]
+}
+
+@test "ssh-mode deploy: a prune holding the lock on node-8 FAILS the deploy before the marker claim" {
+  _hold_lock "$MAIN_PRUNE_LOCK_FILE" 30; holder=$!
+  sleep 1
+  _ssh_block "$FAKE_SSH_OK" ''
+  MAIN_PRUNE_LOCK_WAIT_SECS=1 run bash "$TEST_TMPDIR/ssh-block.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FATAL"*"could not take"* ]]
+  [[ "$output" != *"REACHED-MARKER-CLAIM"* ]]
+}
+
+@test "ssh-mode deploy: an unreachable node-8 FAILS closed, not open" {
+  _ssh_block 'echo "ssh: connection refused" >&2; return 255' ''
+  run bash "$TEST_TMPDIR/ssh-block.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FATAL"*"could not take"* ]]
+  [[ "$output" != *"REACHED-MARKER-CLAIM"* ]]
+}
+
+@test "ssh-mode lock is released once the deploy process exits (the far-side lock cannot leak)" {
+  _ssh_block "$FAKE_SSH_OK" ''
+  run bash "$TEST_TMPDIR/ssh-block.sh"
+  [ "$status" -eq 0 ]
+  sleep 1
+  run flock -n "$MAIN_PRUNE_LOCK_FILE" true
+  [ "$status" -eq 0 ]
 }

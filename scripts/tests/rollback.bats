@@ -608,3 +608,24 @@ assert_no_systemctl_start() {
   [ ! -f "$DEPLOY/skills-all/marker.md" ]
   assert_no_systemctl_start
 }
+
+# ssh mode (laptop rollback): the lock is held ON node-8 by a background ssh; a refusal must not start main either.
+# The fake ssh runs the remote command (its last argument) locally, so the real remote flock runs on the test lock file.
+stub_ssh_local() {
+  printf '#!/usr/bin/env bash\nbash -c "${@: -1}"\n' > "$TMP/bin/ssh"
+  chmod +x "$TMP/bin/ssh"
+}
+
+@test "ssh-mode rollback REFUSES while a main prune holds the lock on node-8: nothing synced, no gateway started" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_systemctl_log; stub_ssh_local
+  _hold_lock "$MAIN_PRUNE_LOCK_FILE" 30; holder=$!
+  sleep 1
+  run env HYDRA_LOCAL=false DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \
+    MAIN_PRUNE_LOCK_WAIT_SECS=1 bash "$SRC/scripts/rollback.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not take"* ]]
+  [ ! -f "$DEPLOY/skills-all/marker.md" ]
+  assert_no_systemctl_start
+}
