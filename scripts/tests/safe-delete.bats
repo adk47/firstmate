@@ -124,6 +124,25 @@ STUB
   [ -f "$SANDBOX/target/sub/blob" ]
 }
 
+@test "symlink replaced by a regular file after classification => refused, replacement survives" {
+  mkdir_with_data "$SANDBOX/target"
+  ln -s "$SANDBOX/target" "$SANDBOX/root/link"
+  # mktemp runs after the identity snapshot and before the quarantine rename.
+  real_mktemp="$(command -v mktemp)"
+  cat > "$SANDBOX/bin/mktemp" <<STUB
+#!/bin/sh
+rm -f "$SANDBOX/root/link"
+echo precious > "$SANDBOX/root/link"
+exec "$real_mktemp" "\$@"
+STUB
+  chmod +x "$SANDBOX/bin/mktemp"
+  run safe_delete_path "$SANDBOX/root/link"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$SANDBOX/root/link")" = "precious" ]
+  [ -f "$SANDBOX/target/sub/blob" ]
+  [ "$(leftovers)" -eq 0 ]
+}
+
 @test "mountpoint under candidate => refuse" {
   mkdir_with_data "$SANDBOX/root/victim"
   mkdir -p "$SANDBOX/root/victim/mnt"

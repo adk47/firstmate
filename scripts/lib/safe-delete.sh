@@ -237,7 +237,7 @@ safe_delete_rm_quarantined() {  # <quarantined> <qdir> <is-tree>
 # Full guarded removal of <path>. Echoes freed KB on success. On refusal
 # nothing is deleted, the reason goes to stderr (and SD_ERROR), return 1.
 safe_delete_path() {  # <path>
-  local p="$1" id now_id kb is_tree=0
+  local p="$1" id now_id kb is_tree=0 is_link=0
   SD_ERROR=""
   while [ -n "$p" ] && [ "$p" != "${p%/}" ]; do p="${p%/}"; done
   if [ -z "$p" ]; then
@@ -247,14 +247,15 @@ safe_delete_path() {  # <path>
   fi
   if [ -n "$SD_ERROR" ]; then echo "safe-delete: refused '$1': $SD_ERROR" >&2; return 1; fi
 
-  # A symlink is unlinked, never followed.
-  if [ -L "$p" ]; then
-    if rm -f -- "$p"; then echo 0; return 0; fi
-    SD_ERROR="could not unlink symlink"
-    echo "safe-delete: refused '$p': $SD_ERROR" >&2; return 1
-  fi
-
-  if safe_delete_mount_hazard "$p"; then
+  # A symlink is unlinked, never followed, but it takes the same quarantine
+  # and identity path as a tree: a bare rm could unlink a fresh file that
+  # replaced the link after it was classified.
+  [ -L "$p" ] && is_link=1
+  if [ "$is_link" -eq 1 ]; then
+    id="$(safe_delete_path_id "$p")"
+    [ -n "$id" ] || SD_ERROR="could not stat the path"
+    kb=0
+  elif safe_delete_mount_hazard "$p"; then
     SD_ERROR="mountpoint at or under the path (or mount table unreadable)"
   elif safe_delete_has_open_handle "$p"; then
     SD_ERROR="open handle (or the handle probe failed)"
@@ -262,7 +263,7 @@ safe_delete_path() {  # <path>
     id="$(safe_delete_path_id "$p")"
     [ -n "$id" ] || SD_ERROR="could not stat the path"
   fi
-  if [ -z "$SD_ERROR" ]; then
+  if [ -z "$SD_ERROR" ] && [ "$is_link" -eq 0 ]; then
     if [ -d "$p" ]; then is_tree=1; fi
     kb="$(du -skx -- "$p" 2>/dev/null | awk '{print $1}' || true)"
     kb="${kb:-0}"
@@ -275,6 +276,11 @@ safe_delete_path() {  # <path>
   fi
   if [ -z "$SD_ERROR" ]; then
     safe_delete_quarantine "$p" "$id" || true
+  fi
+  # Classified as a link: the quarantined object must still be one.
+  if [ -z "$SD_ERROR" ] && [ "$is_link" -eq 1 ] && [ ! -L "$SD_QPATH" ]; then
+    SD_ERROR="object is no longer the symlink that was classified"
+    safe_delete_restore "$SD_QPATH" "$p" "$SD_QDIR" || true
   fi
   if [ -z "$SD_ERROR" ]; then
     safe_delete_rm_quarantined "$SD_QPATH" "$SD_QDIR" "$is_tree" || true
