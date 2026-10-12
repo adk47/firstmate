@@ -310,10 +310,18 @@ diff is not the problem. Fail-closed in the direction of "blocking but honest".
 **When to use it — any INFRASTRUCTURAL reason review is impossible**, not just
 the diff cap: a failed/degraded bundle (every case under "Check the bundle's
 integrity flags FIRST"), a 403/404 that hides the PR, an unreadable file list,
-a thread list that cannot be completed. If you could read the change and chose
-to block it, that is NO-GO. If you could not read the change, that is CANNOT
-REVIEW. **Never mix them in one verdict**, and never dress a tool failure up as
-a finding to make the verdict look normal.
+a thread list that cannot be completed, and a GitHub API rate limit (quota
+exhausted) that blocks the bundle or the CI lookup. The rate-limit case uses the
+fixed wording `CANNOT REVIEW: GitHub API rate limit blocked the review bundle`.
+If you could read the change and chose to block it, that is NO-GO. If you could
+not read the change, that is CANNOT REVIEW. **Never mix them in one verdict**,
+and never dress a tool failure up as a finding to make the verdict look normal.
+
+**On a quota failure, do not self-retry.** Publish the verdict and stop: re-asking
+spends the bucket that just emptied. Do not read a prior GO on the same sha and
+adopt it as your verdict either. Whether a CANNOT REVIEW overwrites a standing GO
+is the status writer's call (`scripts/qa-review-status.sh` keeps the GO), not
+yours.
 
 **How to publish it** — same three writes as any other review, with the token
 carried through all three so no reader has to infer it:
