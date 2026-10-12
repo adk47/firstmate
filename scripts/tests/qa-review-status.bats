@@ -225,7 +225,9 @@ CANNOT_ROW='{"context":"qa-review","state":"failure","description":"CANNOT REVIE
   STUB_STATUSES_JSON="[$CANNOT_ROW,$GO_ROW]" \
     run "$SCRIPT" Muso-AI/hydra "$SHA" failure "CANNOT REVIEW: GitHub API rate limit blocked the review bundle"
   [ "$status" -eq 0 ]
-  ! grep -q -- '--method POST' "$QA_GH_LOG"
+  # Not `! grep`: Bats ignores a negated command that is not the last one, so a
+  # POST would pass here while the retained-GO echo below still matched.
+  if grep -q -- '--method POST' "$QA_GH_LOG"; then false; fi
   echo "$output" | grep -q '2026-10-12T18:26:51Z'
 }
 
