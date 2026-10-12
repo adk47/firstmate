@@ -1451,6 +1451,17 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_resolution_matcher
+      - name: Run god-mode weekly report tests
+        # scripts/godmode-weekly-report.py is what makes workspaces/cto/USER.md's
+        # "god-mode actions are logged and reported to Aaron weekly" true (Fable
+        # item 10, 2026-10-11). These lock what the report must not get wrong:
+        # Nick's actions itemized first, automation on a requester's behalf (QA
+        # reviews of their PRs) excluded but counted, pre/result phases counted
+        # once, emails/secrets masked, and an unreadable log tree reported as
+        # "could not be counted", never as zero. Same bare stdlib unittest.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_godmode_weekly_report
       - name: Run cs-needs-human-digest tests
         # scripts/cs-needs-human-digest.py runs UNATTENDED daily and is
         # READ-ONLY on Intercom — its only effect is one Block Kit post to
