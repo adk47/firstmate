@@ -26,7 +26,7 @@ must never be the reason for one.
 Env (all optional):
   PAPERCLIP_INTAKE_URL       default http://127.0.0.1:3100
   PAPERCLIP_INTAKE_KEY_FILE  default /etc/paperclip/secrets/hydra-intake
-  PAPERCLIP_INTAKE_STATE     default /var/tmp/hydra-paperclip-intake-wake
+  PAPERCLIP_INTAKE_STATE     default /var/tmp/hydra-paperclip-intake-wake  # tmp-ok: fixed wake-state file
 
 Exit codes: 0 ok · 1 API/IO failure · 2 usage or refused input
 """
@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 
 DEFAULT_URL = "http://127.0.0.1:3100"
 DEFAULT_KEY_FILE = "/etc/paperclip/secrets/hydra-intake"
-DEFAULT_STATE = "/var/tmp/hydra-paperclip-intake-wake"
+DEFAULT_STATE = "/var/tmp/hydra-paperclip-intake-wake"  # tmp-ok: fixed wake-state file, not scratch
 INTAKE_MARKER = "Source: hydra-intake"
 ESCALATED_LABEL = "intake-escalated"
 CLOSED = ("done", "cancelled")
@@ -225,8 +225,11 @@ def cmd_file(client, args):
         m = re.search(r"Occurrences: (\d+)", desc)
         n = (int(m.group(1)) if m else 1) + 1
         desc = re.sub(r"Occurrences: \d+", f"Occurrences: {n}", desc) if m else f"{desc}\nOccurrences: {n}"
-        client.call("PATCH", f"/api/issues/{card['id']}", {"description": desc})
+        # Comment first: if it fails nothing has been counted, so a retry counts once.
+        # If the PATCH fails after it, the retry posts the same "Occurrence n" again
+        # but the counter still lands on n.
         client.comment(card["id"], f"Occurrence {n}, filed by {args.agent}.\n\n{args.body}")
+        client.call("PATCH", f"/api/issues/{card['id']}", {"description": desc})
         return {"action": "bumped", "id": card["id"], "identifier": card.get("identifier"),
                 "occurrences": n, "fp": fp}
     description = (f"{INTAKE_MARKER}\nFiled by: {args.agent}\nComponent: {component}\n"
@@ -246,20 +249,32 @@ def wake_job(job_id):
                    check=True, timeout=60, capture_output=True)
 
 
+def _woken_ids(state):
+    try:
+        with open(state, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return float(data["ts"]), set(data["ids"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0.0, set()
+
+
 def cmd_precheck(client, args, env):
     waiting = waiting_cards(client)
-    if not waiting:
-        return None
     state = env.get("PAPERCLIP_INTAKE_STATE", DEFAULT_STATE)
-    try:
-        last = os.path.getmtime(state)
-    except OSError:
-        last = 0
-    if time.time() - last < args.rewake_minutes * 60:
+    if not waiting:
+        # Queue drained: forget the last wake so the next card is never held back by it.
+        try:
+            os.remove(state)
+        except OSError:
+            pass
+        return None
+    ids = {c["id"] for c in waiting}
+    last, seen = _woken_ids(state)
+    if ids <= seen and time.time() - last < args.rewake_minutes * 60:
         return {"waiting": len(waiting), "woke": False, "reason": "recently woken"}
     wake_job(args.wake_job)
     with open(state, "w", encoding="utf-8") as fh:
-        fh.write(str(int(time.time())))
+        json.dump({"ts": time.time(), "ids": sorted(ids)}, fh)
     return {"waiting": len(waiting), "woke": True}
 
 

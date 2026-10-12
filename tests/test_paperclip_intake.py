@@ -55,6 +55,7 @@ class FakePaperclip:
         self.labels = {}
         self.requests = []
         self.search_hook = None  # optional: override the search result list
+        self.fail_once = []  # (method, path suffix) pairs that 500 on their next request
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -81,6 +82,10 @@ class FakePaperclip:
                      "body": self._body() if method in ("POST", "PATCH") else None}
                 )
                 req = outer.requests[-1]
+                for rule in outer.fail_once:
+                    if rule[0] == method and path.endswith(rule[1]):
+                        outer.fail_once.remove(rule)
+                        return self._send(500, {"error": "boom"})
                 if path == "/api/agents/me":
                     return self._send(200, {"id": "agent-1", "companyId": COMPANY})
                 if path == f"/api/companies/{COMPANY}/search":
@@ -273,6 +278,26 @@ class FileTests(Base):
         comments = [r for r in self.api.requests if r["path"].endswith("/comments")]
         self.assertEqual(len(comments), 1)
 
+    def _occurrences(self):
+        return int(re.search(r"Occurrences: (\d+)", next(iter(self.api.issues.values()))["description"]).group(1))
+
+    def test_failed_comment_leaves_the_counter_alone_so_a_retry_counts_once(self):
+        self.file("deploy failed")
+        self.api.fail_once.append(("POST", "/comments"))
+        rc, _, _ = self.file("deploy failed")
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self._occurrences(), 1)  # nothing counted for the lost occurrence
+        self.assertEqual(self.file("deploy failed")[0], 0)
+        self.assertEqual(self._occurrences(), 2)
+
+    def test_failed_counter_bump_after_the_comment_still_retries_to_the_right_count(self):
+        self.file("deploy failed")
+        self.api.fail_once.append(("PATCH", "-1"))
+        rc, _, _ = self.file("deploy failed")
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.file("deploy failed")[0], 0)
+        self.assertEqual(self._occurrences(), 2)
+
     def test_different_problem_is_a_second_card(self):
         self.file("deploy failed")
         self.file("cron failed")
@@ -407,6 +432,22 @@ class PrecheckTests(Base):
         rc, out, _ = self.run_cli("precheck", "--wake-job", "job-1")
         self.assertEqual(self.wakes, ["job-1"])
         self.assertFalse(json.loads(out)["woke"])
+
+    def test_a_card_filed_after_the_queue_drained_wakes_inside_the_window(self):
+        self.file("deploy failed")
+        self.run_cli("precheck", "--wake-job", "job-1")
+        next(iter(self.api.issues.values()))["status"] = "in_progress"  # Clio triaged it
+        self.run_cli("precheck", "--wake-job", "job-1")  # empty queue
+        self.file("cron failed")
+        self.run_cli("precheck", "--wake-job", "job-1")
+        self.assertEqual(self.wakes, ["job-1", "job-1"])
+
+    def test_a_new_card_beside_one_already_woken_for_wakes_again(self):
+        self.file("deploy failed")
+        self.run_cli("precheck", "--wake-job", "job-1")
+        self.file("cron failed")
+        self.run_cli("precheck", "--wake-job", "job-1")
+        self.assertEqual(self.wakes, ["job-1", "job-1"])
 
     def test_search_failure_exits_nonzero_and_does_not_wake(self):
         env = {**self.env, "PAPERCLIP_INTAKE_URL": "http://127.0.0.1:1"}
