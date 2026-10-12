@@ -7,7 +7,7 @@ reached us as a Slack "Model Fallback" notice Nick had to ask about (MUS-6707 as
 report is the standing counter. It does NOT silence or reword that notice (CTO ruling 4.2:
 count it, don't silence it).
 
-READ-ONLY. Reads openclaw's JSON log (/tmp/openclaw/openclaw-<profile>-<YYYY-MM-DD>.log, one
+READ-ONLY. Reads openclaw's JSON log (<log-dir>/openclaw-<profile>-<YYYY-MM-DD>.log, one
 file per profile per day). Every fallback is one `model-fallback/decision` line carrying
 `event: model_fallback_decision`.
 
@@ -31,7 +31,7 @@ Alert: only when the LOCAL bucket's `candidate_failed` count for a day reaches -
 The provider bucket never alerts; that is the existing notice's job.
 
 Usage: fallback-local-error-report.py [--profile main] [--date YYYY-MM-DD ...]
-       [--log-dir /tmp/openclaw] [--log FILE ...] [--threshold N] [--top N] [--post]
+       [--log-dir DIR] [--log FILE ...] [--threshold N] [--top N] [--post]
 Exit: 0 report printed, no alert; 10 local bucket over threshold; 1 no log readable.
 `--post` sends the alert (alert days only) through scripts/lib/slack-notify.sh; without it the
 composed message is only printed (dry).
@@ -234,7 +234,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--profile", default="main")
     ap.add_argument("--date", action="append", help="YYYY-MM-DD (repeatable); default today (UTC)")
-    ap.add_argument("--log-dir", default="/tmp/openclaw")
+    ap.add_argument("--log-dir", default="/tmp/openclaw")  # tmp-ok: openclaw writes its logs to this fixed dir on node-8
     ap.add_argument("--log", action="append", help="explicit log file (repeatable); overrides profile/date")
     ap.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD)
     ap.add_argument("--top", type=int, default=5)
