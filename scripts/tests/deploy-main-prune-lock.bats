@@ -155,8 +155,24 @@ sleep 10; echo SURVIVED-LOCK-LOSS"
   [[ "$output" == *"holding the main prune lock"*"died"* ]]
   [[ "$output" != *"SURVIVED-LOCK-LOSS"* ]]
   [ -s "$HB_PIDFILE" ]
-  ! kill -0 "$(cat "$HB_PIDFILE")" 2>/dev/null
+  if kill -0 "$(cat "$HB_PIDFILE")" 2>/dev/null; then false; fi
   n=$(wc -l <"$HB"); sleep 1
   [ "$(wc -l <"$HB")" -eq "$n" ]
   [ "$(cat "$ORD")" = flag-first ]
+}
+
+# QA finding (13 Oct): killing the child before the parent leaves a window in which an errexit-suppressed step (`|| true`)
+# starts the NEXT foreground child, which nothing stops. The parent is frozen first, so the second child never ticks.
+@test "ssh-mode deploy: lock loss does not let an errexit-suppressed step start a successor child" {
+  HB="$TEST_TMPDIR/hb"; HB2="$TEST_TMPDIR/hb2"; HB_PIDFILE="$TEST_TMPDIR/child.pid"
+  _ssh_block "$FAKE_SSH_OK" "( until [ -s $HB_PIDFILE ]; do sleep 0.1; done; sleep 0.3; kill -9 \"\$MAIN_PRUNE_LOCK_REMOTE_PID\" ) >/dev/null 2>&1 &
+bash -c 'echo \$\$ >$HB_PIDFILE; for i in \$(seq 300); do echo tick >>$HB; sleep 0.2; done' >/dev/null 2>&1 || true
+bash -c 'for i in \$(seq 300); do echo tick >>$HB2; sleep 0.2; done' >/dev/null 2>&1 || true
+echo SURVIVED-LOCK-LOSS"
+  MAIN_PRUNE_LOCK_WATCH_SECS=0.2 run bash "$TEST_TMPDIR/ssh-block.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"SURVIVED-LOCK-LOSS"* ]]
+  sleep 1
+  [ ! -s "$HB2" ]
+  pkill -f "$HB2" 2>/dev/null || true
 }

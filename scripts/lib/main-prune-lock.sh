@@ -62,6 +62,9 @@ acquire_main_prune_lock_remote() {
     # and keeps mutating node-8 while the prune takes the freed lock. Stop the parent's descendant tree first (pids walked
     # with pgrep -P only, never a process group: deploy/rollback share the caller's pgid), TERM then KILL stragglers, and
     # only then TERM the parent. The flag above stays first: killing the child makes the parent's EXIT path run at once.
+    # The parent is frozen (STOP) while its children die: under an errexit-suppressed step (`cmd || handler`, `if`) it
+    # would otherwise start the NEXT foreground child in the gap before our TERM lands, and nothing would stop that one.
+    kill -STOP "$parent" 2>/dev/null
     kids=$(_main_prune_lock_descendants "$parent" "$self")
     # shellcheck disable=SC2086  # pids, word-split on purpose
     if [ -n "$kids" ]; then
@@ -76,6 +79,7 @@ acquire_main_prune_lock_remote() {
       kill -KILL $kids 2>/dev/null
     fi
     kill -TERM "$parent" 2>/dev/null
+    kill -CONT "$parent" 2>/dev/null  # the pending TERM is delivered on resume
   ) &
 }
 

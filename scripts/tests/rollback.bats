@@ -672,7 +672,7 @@ STUB
   [ $((SECONDS - start)) -lt 15 ]
   # the in-flight foreground child is dead the moment rollback returns and stays silent
   [ -s "$HB_PIDFILE" ]
-  ! kill -0 "$(cat "$HB_PIDFILE")" 2>/dev/null
+  if kill -0 "$(cat "$HB_PIDFILE")" 2>/dev/null; then false; fi
   n=$(wc -l <"$HB"); sleep 1
   [ "$(wc -l <"$HB")" -eq "$n" ]
   # the lost flag was written before the child was signalled
