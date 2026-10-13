@@ -40,6 +40,7 @@ setup() {
 
   export STUB_SYSCTL_DIR="$TEST_TMPDIR/sysctl"
   export STUB_OPENCLAW_DIR="$TEST_TMPDIR/oc"
+  export WATCHDOG_LOCK_FILE="$TEST_TMPDIR/watchdog.lock"
   export WATCHDOG_STATE_DIR="$TEST_TMPDIR/state"; mkdir -p "$WATCHDOG_STATE_DIR"
 
   # Pages are captured, never delivered. A FAKE token is required, not optional:

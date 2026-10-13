@@ -22,8 +22,8 @@
 # committing them. The next deploy still overwrites the server
 # bytes with the repo's HEAD bytes. The announce only suppresses
 # the halt; it does not change what rsync does. If you want the
-# server edits to be preserved, run scripts/sync-from-server.sh
-# and commit them first.
+# server edits to be preserved, run scripts/sync-from-server.sh --only <path>
+# (tracked files only; scp a never-tracked file) and commit them first.
 #
 # Caller contract:
 #   - Pass ANNOUNCE_SHA in the env (the sha256 of the bytes

@@ -1305,3 +1305,148 @@ STUB
   run "$SWEEP" --frobnicate
   [ "$status" -eq 2 ]
 }
+
+# ── QA review-clone lane (MUS-5583) ──────────────────────────
+# Shape on node-8: workspaces/qa/tmp/<repo>-<pr>-review-<6 alnum>/repo/.git.
+# The NAME PATTERN is the whole safety argument for skipping the dirty /
+# unpushed holds, so these tests attack the pattern.
+
+# mkqa <dir> : QA review clone at <dir>/repo, dirty AND unpushed, aged <days>.
+mkqa() {
+  local d="$1" days="$2"
+  mkdir -p "$d"
+  mkclone "$d/repo"
+  echo wip >> "$d/repo/f.txt"
+  ( cd "$d/repo" && git commit -qam unpushed && echo dirty >> f.txt && git stash -q 2>/dev/null; echo dirty >> f.txt )
+  # age EVERYTHING incl. .git: the QA lane's freshness rail covers .git too
+  local stamp; stamp="$(past_stamp "$days")"
+  find "$d" -print0 | xargs -0 touch -h -t "$stamp" --
+}
+
+@test "qa lane: review clone past 2d is deleted even though dirty+unpushed+stashed" {
+  mkdir -p "$TEST_TMPDIR/ws/qa/tmp"
+  mkqa "$TEST_TMPDIR/ws/qa/tmp/core-backend-10179-review-JjcqCp" 3
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ ! -d "$TEST_TMPDIR/ws/qa/tmp/core-backend-10179-review-JjcqCp" ]
+}
+
+@test "qa lane: a mount that appears during the size scan holds the review clone" {
+  mkdir -p "$TEST_TMPDIR/ws/qa/tmp"
+  local d="$TEST_TMPDIR/ws/qa/tmp/core-backend-10179-review-JjcqCp"
+  mkqa "$d" 3
+  printf 'dev %s ext4 rw 0 0\n' "$d/repo/ext" > "$TEST_TMPDIR/mounts-late"
+  # du shim: the mount lands while the size scan runs (after the first guard)
+  local real_du; real_du="$(command -v du)"
+  printf '#!/bin/sh\ncp "%s" "%s"\nexec "%s" "$@"\n' "$TEST_TMPDIR/mounts-late" "$TEST_TMPDIR/mounts-live" "$real_du" > "$TEST_TMPDIR/bin/du"
+  chmod +x "$TEST_TMPDIR/bin/du"
+  : > "$TEST_TMPDIR/mounts-live"
+  SWEEP_MOUNTS_FILE="$TEST_TMPDIR/mounts-live" run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$d" ]
+  [[ "$output" == *"mount"* ]]
+}
+
+@test "qa lane: a mount that appears after quarantine holds the review clone" {
+  mkdir -p "$TEST_TMPDIR/ws/qa/tmp"
+  local d="$TEST_TMPDIR/ws/qa/tmp/core-backend-10179-review-JjcqCp"
+  mkqa "$d" 3
+  : > "$TEST_TMPDIR/mounts-live"
+  # find shim: the re-audit's extra-repo probe is the first find on the quarantined path
+  local real_find; real_find="$(command -v find)"
+  cat > "$TEST_TMPDIR/bin/find" <<SH
+#!/bin/sh
+case "\$*" in *"-not -path"*) printf 'dev %s/repo/ext ext4 rw 0 0\n' "\$1" > "$TEST_TMPDIR/mounts-live";; esac
+exec "$real_find" "\$@"
+SH
+  chmod +x "$TEST_TMPDIR/bin/find"
+  SWEEP_MOUNTS_FILE="$TEST_TMPDIR/mounts-live" run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$d" ]
+  [[ "$output" == *"mount appeared"* ]]
+}
+
+@test "qa lane: dry-run reports it and deletes nothing" {
+  mkdir -p "$TEST_TMPDIR/ws/qa/tmp"
+  mkqa "$TEST_TMPDIR/ws/qa/tmp/core-backend-10179-review-JjcqCp" 3
+  run "$SWEEP"
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/ws/qa/tmp/core-backend-10179-review-JjcqCp" ]
+  [[ "$output" == *"would delete"*"core-backend-10179-review-JjcqCp"* ]]
+}
+
+@test "qa lane: review clone inside the 2d TTL is kept" {
+  mkdir -p "$TEST_TMPDIR/ws/qa/tmp"
+  mkqa "$TEST_TMPDIR/ws/qa/tmp/core-backend-10179-review-JjcqCp" 1
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/ws/qa/tmp/core-backend-10179-review-JjcqCp" ]
+}
+
+@test "qa lane: QA_REVIEW_TTL_DAYS knob is honoured and validated" {
+  mkdir -p "$TEST_TMPDIR/ws/qa/tmp"
+  mkqa "$TEST_TMPDIR/ws/qa/tmp/core-backend-10179-review-JjcqCp" 3
+  QA_REVIEW_TTL_DAYS=5 run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/ws/qa/tmp/core-backend-10179-review-JjcqCp" ]
+  QA_REVIEW_TTL_DAYS=abc run "$SWEEP" --apply
+  [ "$status" -eq 2 ]
+}
+
+@test "qa lane: fresh write inside repo/ keeps an otherwise old review clone" {
+  mkdir -p "$TEST_TMPDIR/ws/qa/tmp"
+  mkqa "$TEST_TMPDIR/ws/qa/tmp/core-backend-10179-review-JjcqCp" 3
+  touch "$TEST_TMPDIR/ws/qa/tmp/core-backend-10179-review-JjcqCp/repo/f.txt"
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/ws/qa/tmp/core-backend-10179-review-JjcqCp" ]
+}
+
+@test "qa lane: names outside the allowlist pattern are never deleted by the new lane" {
+  mkdir -p "$TEST_TMPDIR/ws/qa/tmp"
+  local n
+  for n in some-agent-work core-backend-review core-backend-10179-review-TOOLONG9 \
+           core-backend-10179-review-SHORT core-backend-x-review-JjcqCp \
+           core-backend-10179-review-JjcqCp.bak 'core backend-10179-review-JjcqCp'; do
+    mkqa "$TEST_TMPDIR/ws/qa/tmp/$n" 30
+  done
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  for n in some-agent-work core-backend-review core-backend-10179-review-TOOLONG9 \
+           core-backend-10179-review-SHORT core-backend-x-review-JjcqCp \
+           core-backend-10179-review-JjcqCp.bak 'core backend-10179-review-JjcqCp'; do
+    [ -d "$TEST_TMPDIR/ws/qa/tmp/$n" ]
+  done
+}
+
+@test "qa lane: right name but repo at depth 1 or depth 3 or a second repo falls through (held)" {
+  mkdir -p "$TEST_TMPDIR/ws/qa/tmp"
+  local q="$TEST_TMPDIR/ws/qa/tmp"
+  # depth 1: the dir itself is the clone (.git directly inside) — NOT repo/.git
+  mkclone "$q/core-backend-1-review-AAAAAA"; echo d >> "$q/core-backend-1-review-AAAAAA/f.txt"
+  # depth 3
+  mkdir -p "$q/core-backend-2-review-BBBBBB/x/y"; mkclone "$q/core-backend-2-review-BBBBBB/x/y/repo"
+  echo d >> "$q/core-backend-2-review-BBBBBB/x/y/repo/f.txt"
+  # repo/ plus a second nested repo
+  mkqa "$q/core-backend-3-review-CCCCCC" 30
+  mkclone "$q/core-backend-3-review-CCCCCC/other"
+  # repo/ is not a repo dir but a gitfile (linked worktree)
+  mkdir -p "$q/core-backend-4-review-DDDDDD/repo"; echo "gitdir: /nowhere" > "$q/core-backend-4-review-DDDDDD/repo/.git"
+  find "$q" -print0 | xargs -0 touch -h -t "$(past_stamp 30)" -- 2>/dev/null || true
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$q/core-backend-1-review-AAAAAA" ]
+  [ -d "$q/core-backend-2-review-BBBBBB" ]
+  [ -d "$q/core-backend-3-review-CCCCCC" ]
+  [ -d "$q/core-backend-4-review-DDDDDD" ]
+}
+
+@test "qa lane: same shape under another agent's tmp or under repos/ is untouched" {
+  mkqa "$TEST_TMPDIR/ws/cto/tmp/core-backend-10179-review-JjcqCp" 30
+  mkdir -p "$TEST_TMPDIR/repos"
+  mkqa "$TEST_TMPDIR/repos/core-backend-10179-review-JjcqCp" 30
+  run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/ws/cto/tmp/core-backend-10179-review-JjcqCp" ]
+  [ -d "$TEST_TMPDIR/repos/core-backend-10179-review-JjcqCp" ]
+}

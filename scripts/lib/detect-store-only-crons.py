@@ -3,9 +3,9 @@
 
 Every main deploy reconciles the SQLite cron store to cron-jobs.json via
 openclaw's saveCronStore ("delete-by-store_key + re-insert"), so ANY cron
-present in the live store but absent from cron-jobs.json is wiped. The existing
-orphan guard in deploy.sh cannot catch these: it inspects the stale
-cron/jobs.json file, which the 7.x runtime never writes to, so a cron created
+present in the live store but absent from cron-jobs.json is wiped. A
+jobs.json-based orphan guard (removed from deploy.sh, MUS-3346) could not catch
+these: it inspected the stale cron/jobs.json file, which the 7.x runtime never writes to, so a cron created
 directly on the gateway (`openclaw cron add`) is invisible to it and silently
 lost (incident 2026-07-16: Aaron's ChartMogul MRR/SaaS crons, PR #702).
 

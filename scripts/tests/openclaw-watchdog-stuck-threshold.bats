@@ -34,9 +34,11 @@ setup() {
 
   printf 'x' > "$TEST_TMPDIR/secrets/llm-provider-keys.json"
   chmod 600 "$TEST_TMPDIR/secrets/llm-provider-keys.json"
+  export WATCHDOG_LOCK_FILE="$TEST_TMPDIR/watchdog.lock"
   export HYDRA_SECRETS_DIR="$TEST_TMPDIR/secrets"
 
   export WATCHDOG_STATE_DIR="$TEST_TMPDIR/state"; mkdir -p "$WATCHDOG_STATE_DIR"
+  export HEAP_STATE_DIR="$TEST_TMPDIR/heapstate"; mkdir -p "$HEAP_STATE_DIR"
   printf '{}' > "$TEST_TMPDIR/canon-auth.json"
   ln -s "$TEST_TMPDIR/canon-auth.json" "$TEST_TMPDIR/edge-auth.json"
   export WATCHDOG_EDGE_AUTH_PROFILES="$TEST_TMPDIR/edge-auth.json"

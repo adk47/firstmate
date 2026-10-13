@@ -60,15 +60,15 @@ _dropin() { echo "$TEST_TMPDIR/openclaw-gateway-$1.service.d/override.conf"; }
   done
 }
 
-@test "near the cap node snapshots the heap into the dir tmpfiles ages out" {
+@test "heap cap in place, snapshots aged by mtime, heapsnapshot flag disabled" {
   # A snapshot with no directory lands in the unit's cwd (/) and is never
   # cleaned; one in a dir with no tmpfiles age fills the disk a few GB per crash.
   local p dir want
   want="$(sed -n 's/^HEAP_SNAPSHOT_DIR=//p' "$INSTALLER")"
   [[ "$want" == /* ]]
-  grep -Eq '^d [$][{]HEAP_SNAPSHOT_DIR[}] 0700 root root [0-9]+d$' "$INSTALLER"
+  grep -Eq '^d [$][{]HEAP_SNAPSHOT_DIR[}] 0700 root root m:[0-9]+d$' "$INSTALLER"
   for p in main edge; do
-    grep -q -- '--heapsnapshot-near-heap-limit=1' "$(_dropin "$p")"
+    if grep -q -- '--heapsnapshot-near-heap-limit' "$(_dropin "$p")"; then false; fi
     dir="$(sed -n 's/^Environment="NODE_OPTIONS=.*--diagnostic-dir=\([^" ]*\).*/\1/p' "$(_dropin "$p")")"
     [ "$dir" = "$want" ]
   done

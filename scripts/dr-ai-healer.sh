@@ -441,7 +441,8 @@ post_heal_ok() {
     sleep 2
     both_now="yes"
     for svc in openclaw-gateway-main openclaw-gateway-edge; do
-      now=$(systemctl is-active "$svc" 2>/dev/null || echo unknown)
+      now=$(systemctl is-active "$svc" 2>/dev/null || true)
+      [ -n "$now" ] || now="unknown"
       [ "$now" = "failed" ] && return 1
       [ "$now" = "active" ] || both_now="no"
     done

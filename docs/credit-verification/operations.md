@@ -37,6 +37,16 @@ Authorized senders for the on-demand batch: Aaron (`U7RP6HKUZ`), Jan (`U038BM16T
 
 Task `credit-verification-batch-4h`: schedule `0 */4 * * *` UTC, six runs/day at 0/4/8/12/16/20.
 
+> **DISABLED since 2026-10-11, and every dispatch is forced DRY.** The pipeline's
+> approve rule (`approve_owning_track == 100 AND total_risk_percent < 80`) was
+> inverted: in the IDP validator an approve rule fires when its risk is below 30,
+> so `100` means the owning-track shortcut did NOT fire, and the rule approved
+> validator-DECLINED rows. The cron is `enabled: false` in `cron-jobs.json`.
+> `dispatch-cv-batch.sh` runs dry unless `policies/credit-approval-automation.json`
+> sets `credit-verification-batch.approved: true` with `approved_by` +
+> `approval_ref`. That flip is a captain decision. CI guard:
+> `scripts/check-credit-approval-automation.sh`.
+
 ```bash
 ssh -i ~/.ssh/nick_ovh root@40.160.32.80 "openclaw --profile main cron list | grep credit-verification"
 ```

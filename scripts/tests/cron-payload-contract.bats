@@ -123,12 +123,16 @@ workspaces/finance/scripts/stripe-saas-weekly-report.py'
   # Pins the 2026-09-17 fix. The batch must not go back to an agent turn: a
   # run's status has to come from the batch's own outcome, not from the model
   # finishing (that is how six days of zero-work runs read `ok`).
+  # enabled is pinned FALSE since 2026-10-11: the batch's approve rule was
+  # inverted and the cron was contained; re-enabling needs the captain's
+  # approval in policies/credit-approval-automation.json
+  # (scripts/check-credit-approval-automation.sh enforces it).
   run jq -r '
     .jobs[] | select(.name == "credit-verification-batch-4h")
     | "\(.payload.kind) \(.enabled) \(.payload.argv[1] // "")"
   ' "$CRON_JSON"
   [ "$status" -eq 0 ]
-  [ "$output" = "command true /opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/credit-verification-batch-cron.sh" ]
+  [ "$output" = "command false /opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/credit-verification-batch-cron.sh" ]
 
   # ...and that entrypoint must exist, be runnable, and reach the dispatcher.
   local entry="$HYDRA_REPO/workspaces/operations/skills/muso-ops-credit-verification/scripts/credit-verification-batch-cron.sh"
