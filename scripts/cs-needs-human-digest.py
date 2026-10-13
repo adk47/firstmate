@@ -25,7 +25,10 @@ level by contact id to avoid an N+1 GET per conversation.
 Buckets (deterministic, no LLM judgment):
   - needs-human:          customer spoke last (last_contact_reply_at >
                            last_admin_reply_at, or never replied to) — we
-                           owe them a reply. Ranked oldest-waiting-first.
+                           owe them a reply. Ranked newest-waiting-first.
+                           Only threads with customer-side activity within
+                           CS_DIGEST_ACTIONABLE_DAYS are listed; older ones
+                           are counted in one rolled-up "backlog:" line.
   - needs-customer-input: we (admin) spoke last — waiting on the customer.
   - dup-candidate:        the same contact email has >=2 open conversations
                            (checked independent of the two buckets above).
@@ -103,6 +106,13 @@ Env:
   CS_DIGEST_AGING_HOURS         optional, default 20 — a needs-human item
                                 waiting longer than this gets a distinct
                                 "⚠️ aging" line in both full and delta digests.
+  CS_DIGEST_ACTIONABLE_DAYS     optional, default 30 — needs-human items whose
+                                waiting_since is older than this many days are
+                                backlog, not actionable: never listed, only
+                                counted in one rolled-up "backlog:" line.
+                                Applied once in main(), so both digests, the
+                                --delta state and the Jev shadow pool see
+                                actionable items only.
   CS_DIGEST_AGING_MENTION_UID   optional — Slack user id (e.g. U038BM16T7W)
                                 rendered as <@UID> in the header line, ONLY
                                 when at least one aging item is present in
@@ -117,7 +127,7 @@ Env:
                                 #2a; see JEV_SURFACE_NEEDS_HUMAN_DIGEST
                                 below). Each run draws a FRESH random sample
                                 (never the ranked/rendered head — that order
-                                is oldest-waiting-first, so the head is a
+                                is newest-waiting-first, so the head is a
                                 biased slice) of this size from the full
                                 needs_human bucket and fires one shadow Jev
                                 judgment per sampled conversation; this can
@@ -177,6 +187,7 @@ SLACK_API = "https://slack.com/api/chat.postMessage"
 DEFAULT_SUMMARY_CHANNEL = "C0ANM0PN9L5"  # #cs_chats
 DEFAULT_TOP_N = 15
 DEFAULT_AGING_HOURS = 20
+DEFAULT_ACTIONABLE_DAYS = 30
 DEFAULT_DIGEST_STATE = "/var/lib/cs-needs-human-digest/surfaced.json"
 DEFAULT_JEV_SAMPLE_SIZE = 25
 # Deeplink workspace id — same default + env override as
@@ -615,7 +626,7 @@ def waiting_since(c):
     Intercom's statistics do not count as a "reply") — the conversation's
     created_at. NEVER bare last_contact_reply_at (0) for that case: treating
     a brand-new conversation as "waiting since the Unix epoch" corrupts the
-    oldest-waiting-first ranking (ties every such row together in API order)
+    newest-waiting-first ranking (ties every such row together in API order)
     and the elapsed-time/48h-SLA-flag signal (always flags it, regardless of
     real age)."""
     return c["lcr"] or c.get("created_at") or 0
@@ -665,11 +676,15 @@ def bucket_conversations(convs, owned_ids):
         if c["email"] and email_counts[c["email"]] >= 2:
             dup_candidate.append(c)
 
-    # Oldest-waiting-first: rank by waiting_since (see its docstring) — the
-    # customer's last reply time, or created_at for a never-replied
-    # conversation — oldest first. NEVER bare lcr, which is 0 (the Unix
-    # epoch) for a never-replied conversation regardless of its real age.
-    needs_human.sort(key=waiting_since)
+    # Newest-customer-activity-first: rank by waiting_since (see its
+    # docstring) — the customer's last reply time, or created_at for a
+    # never-replied conversation — newest first. NEVER bare lcr, which is 0
+    # (the Unix epoch) for a never-replied conversation regardless of its real
+    # age. Oldest-first put the 194-day tail permanently in the rendered
+    # [:top_n] slice while the live threads never surfaced; the 20h/48h SLA
+    # signal lives in is_aging, SLA_HOURS_FLAG and the --delta crossing ping,
+    # not in the sort order.
+    needs_human.sort(key=waiting_since, reverse=True)
     return {
         "needs_human": needs_human,
         "needs_customer_input": needs_customer_input,
@@ -690,6 +705,25 @@ def is_aging(c, now_epoch, aging_hours):
     escalation threshold. Uses waiting_since (never bare lcr — see its
     docstring)."""
     return (now_epoch - waiting_since(c)) / 3600 > aging_hours
+
+
+def split_actionable(convs, now_epoch, window_days=DEFAULT_ACTIONABLE_DAYS):
+    """Split convs into (actionable, backlog) by waiting_since age. Inclusive
+    at the boundary; input order is preserved in both lists."""
+    cutoff = window_days * 86400
+    actionable, backlog = [], []
+    for c in convs:
+        (actionable if now_epoch - waiting_since(c) <= cutoff else backlog).append(c)
+    return actionable, backlog
+
+
+def actionable_dups(dup_candidate, now_epoch, window_days=DEFAULT_ACTIONABLE_DAYS):
+    """Keep every member of an email group with at least one member inside the
+    window: a duplicate pair is worth merging when the contact is live even if
+    one thread is old. Falsy emails are never dup members. Input order kept."""
+    live = {c["email"] for c in split_actionable(dup_candidate, now_epoch, window_days)[0]
+            if c["email"]}
+    return [c for c in dup_candidate if c["email"] and c["email"] in live]
 
 
 # --------------------------------------------------------------------------
@@ -862,6 +896,12 @@ def build_next_state(state, needs_human, rendered_items, now_epoch, aging_hours)
            yet; flipping it true sight-unseen would suppress the escalation when
            the row is finally shown — the rule-2 concern, in the other direction).
        first_surfaced is always preserved.
+
+    Window consequence (MUS-8853): `needs_human` here is the ACTIONABLE list, so
+    entries for threads that age out of the window are pruned by rule 1 — that
+    is intended. waiting_since only moves forward when the customer replies, so
+    a backlog thread re-entering the window has genuinely new customer activity
+    and must surface as new.
     """
     aging_by_id = {c["id"]: is_aging(c, now_epoch, aging_hours) for c in needs_human}
     rendered_ids = {c["id"] for c in rendered_items}
@@ -937,8 +977,19 @@ def _slack_section_blocks(lines):
     ]
 
 
+def _backlog_line(backlog_count, window_days):
+    """The ONE rolled-up line for threads outside the actionable window, or
+    None when there are none. Carries the real count, never a capped one."""
+    if not backlog_count:
+        return None
+    return (f"backlog: {backlog_count} open conversations with no customer-side "
+            f"activity in the last {window_days}d — being drained separately "
+            f"(not listed here)")
+
+
 def _delta_body_lines(new_items, aging_items, now_epoch, top_n,
-                      aging_hours=DEFAULT_AGING_HOURS):
+                      aging_hours=DEFAULT_AGING_HOURS, backlog_count=0,
+                      window_days=DEFAULT_ACTIONABLE_DAYS):
     """Counts + capped rows + overflow pointer — the digest BODY, with no
     title/mention line (callers own that, exactly once each, so the title
     never appears twice — see render_delta_digest / build_delta_digest_blocks).
@@ -964,13 +1015,17 @@ def _delta_body_lines(new_items, aging_items, now_epoch, top_n,
                      f"{_customer_activity_fact(c, now_epoch)}{threshold_suffix}")
     if overflow > 0:
         lines.append(f"  …and {overflow} more (see 13:30 full digest)")
+    backlog = _backlog_line(backlog_count, window_days)
+    if backlog:
+        lines.append(backlog)
     lines.append(REPLY_ORDER_CAVEAT)
     return lines
 
 
 def render_delta_digest(new_items, aging_items, now_epoch, top_n=DEFAULT_TOP_N,
                          mention_uid=None, mention=None,
-                         aging_hours=DEFAULT_AGING_HOURS):
+                         aging_hours=DEFAULT_AGING_HOURS, backlog_count=0,
+                         window_days=DEFAULT_ACTIONABLE_DAYS):
     """Plain-text rendering of a --delta run's surfaced items (new + newly
     aging, deduped, capped at top_n — see _delta_body_lines). Mention
     rendered per the same rule as render_text_digest (see its docstring);
@@ -980,13 +1035,15 @@ def render_delta_digest(new_items, aging_items, now_epoch, top_n=DEFAULT_TOP_N,
         mention = _mention_prefix(mention_uid, aging_items)
     lines = [mention + DELTA_TITLE]
     lines.extend(_delta_body_lines(
-        new_items, aging_items, now_epoch, top_n, aging_hours))
+        new_items, aging_items, now_epoch, top_n, aging_hours,
+        backlog_count, window_days))
     return "\n".join(lines)
 
 
 def build_delta_digest_blocks(new_items, aging_items, now_epoch, top_n=DEFAULT_TOP_N,
                                mention_uid=None, mention=None,
-                               aging_hours=DEFAULT_AGING_HOURS):
+                               aging_hours=DEFAULT_AGING_HOURS, backlog_count=0,
+                               window_days=DEFAULT_ACTIONABLE_DAYS):
     """Block Kit rendering. Builds the body directly via _delta_body_lines
     rather than calling render_delta_digest (which would recompute the
     mention and re-render the title a second time — the title lives ONLY in
@@ -999,7 +1056,8 @@ def build_delta_digest_blocks(new_items, aging_items, now_epoch, top_n=DEFAULT_T
     if mention:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": mention.strip()}})
     blocks.extend(_slack_section_blocks(_delta_body_lines(
-        new_items, aging_items, now_epoch, top_n, aging_hours)))
+        new_items, aging_items, now_epoch, top_n, aging_hours,
+        backlog_count, window_days)))
     return blocks
 
 
@@ -1042,7 +1100,8 @@ SLA_HOURS_FLAG = 48  # surfaced as "past a reasonable SLA", never a promise
 
 
 def build_digest_blocks(buckets, now_epoch, top_n=DEFAULT_TOP_N,
-                         aging_hours=DEFAULT_AGING_HOURS, mention_uid=None, mention=None):
+                         aging_hours=DEFAULT_AGING_HOURS, mention_uid=None, mention=None,
+                         window_days=DEFAULT_ACTIONABLE_DAYS):
     """`mention`, if given, is used as-is instead of recomputing it from
     mention_uid — pass a precomputed value (see main()) to avoid calling
     _mention_prefix (and its stderr WARN on a missing UID) a second time in
@@ -1060,9 +1119,14 @@ def build_digest_blocks(buckets, now_epoch, top_n=DEFAULT_TOP_N,
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": mention}})
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
         f"*customer-side activity is latest:* {len(nh)}  ·  "
+        f"*older than {_threshold_label(aging_hours)} since customer-side activity:* "
+        f"{len(aging_items)}  ·  "
         f"*team-side activity is latest, or team initiated with no recorded customer "
         f"reply:* {len(nci)}  ·  "
         f"*possible duplicate open conversations:* {len(dup)}")}})
+    backlog = _backlog_line(buckets.get("backlog_count", 0), window_days)
+    if backlog:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": backlog}})
     blocks.append({"type": "section", "text": {"type": "mrkdwn",
                    "text": f"_{REPLY_ORDER_CAVEAT}_"}})
     if not nh:
@@ -1091,7 +1155,8 @@ def build_digest_blocks(buckets, now_epoch, top_n=DEFAULT_TOP_N,
 
 
 def render_text_digest(buckets, now_epoch, top_n=DEFAULT_TOP_N,
-                        aging_hours=DEFAULT_AGING_HOURS, mention_uid=None, mention=None):
+                        aging_hours=DEFAULT_AGING_HOURS, mention_uid=None, mention=None,
+                        window_days=DEFAULT_ACTIONABLE_DAYS):
     """Plain-text rendering for --post's fallback `text` field and dry-run
     stdout. `mention`, if given, is used as-is — see build_digest_blocks."""
     nh, nci, dup = buckets["needs_human"], buckets["needs_customer_input"], buckets["dup_candidate"]
@@ -1101,11 +1166,16 @@ def render_text_digest(buckets, now_epoch, top_n=DEFAULT_TOP_N,
     lines = [
         mention + DAILY_TITLE,
         f"customer-side activity is latest: {len(nh)}  "
+        f"older than {_threshold_label(aging_hours)} since customer-side activity: "
+        f"{len(aging_items)}  "
         f"team-side activity is latest, or team initiated with no recorded customer "
         f"reply: {len(nci)}  "
         f"possible duplicate open conversations: {len(dup)}",
-        REPLY_ORDER_CAVEAT,
     ]
+    backlog = _backlog_line(buckets.get("backlog_count", 0), window_days)
+    if backlog:
+        lines.append(backlog)
+    lines.append(REPLY_ORDER_CAVEAT)
     threshold = _threshold_label(aging_hours)
     for c in nh[:top_n]:
         threshold_suffix = (
@@ -1173,7 +1243,7 @@ def _self_test():
     # never replied (lar==0) -> needs-human.
     c3 = conv("C3", "e@f.com", 0, 50)
     buckets = bucket_conversations([c1, c2, c3], set())
-    assert [c["id"] for c in buckets["needs_human"]] == ["C3", "C1"], buckets["needs_human"]
+    assert [c["id"] for c in buckets["needs_human"]] == ["C1", "C3"], buckets["needs_human"]
     assert [c["id"] for c in buckets["needs_customer_input"]] == ["C2"], buckets["needs_customer_input"]
     assert buckets["dup_candidate"] == [], buckets["dup_candidate"]
 
@@ -1202,11 +1272,11 @@ def _self_test():
 
     # KEY regression (waiting-timestamp finding): two never-replied
     # conversations (lcr==0) must rank by created_at, NOT tie at the Unix
-    # epoch. n1 is older (created earlier) than n2, so n1 must sort first.
+    # epoch. n1 is older (created earlier) than n2, so n2 must sort first (newest-first).
     n1 = conv("N1", "n1@x.com", 0, 0, created_at=now - (72 * 3600))  # 72h old
     n2 = conv("N2", "n2@x.com", 0, 0, created_at=now - (10 * 3600))  # 10h old
     buckets5 = bucket_conversations([n1, n2], set())
-    assert [c["id"] for c in buckets5["needs_human"]] == ["N1", "N2"], buckets5["needs_human"]
+    assert [c["id"] for c in buckets5["needs_human"]] == ["N2", "N1"], buckets5["needs_human"]
     assert waiting_since(n1) != 0 and waiting_since(n2) != 0, (n1, n2)
 
     # KEY regression (inbound-vs-outbound 0/0 finding): the lar==0/lcr==0 tie
@@ -1309,6 +1379,8 @@ def main():
     now_epoch = int(os.environ.get("DIGEST_NOW") or time.time())
     top_n = int(os.environ.get("DIGEST_TOP_N", str(DEFAULT_TOP_N)))
     aging_hours = int(os.environ.get("CS_DIGEST_AGING_HOURS", str(DEFAULT_AGING_HOURS)))
+    actionable_days = int(os.environ.get("CS_DIGEST_ACTIONABLE_DAYS",
+                                         str(DEFAULT_ACTIONABLE_DAYS)))
     mention_uid = os.environ.get("CS_DIGEST_AGING_MENTION_UID") or None
     state_path = os.environ.get("CS_DIGEST_STATE", DEFAULT_DIGEST_STATE)
 
@@ -1345,20 +1417,32 @@ def main():
         return 3
     ids = owned_ids(default_state_paths())
     buckets = bucket_conversations(convs, ids)
+    # Window the needs-human list (and the dup list) ONCE, here: every
+    # downstream consumer — both renderers, --delta, build_next_state, the Jev
+    # pool — then sees the actionable threads only, by construction.
+    actionable, backlog = split_actionable(buckets["needs_human"], now_epoch,
+                                           actionable_days)
+    buckets["needs_human"] = actionable
+    buckets["backlog_count"] = len(backlog)
+    buckets["dup_candidate"] = actionable_dups(buckets["dup_candidate"], now_epoch,
+                                               actionable_days)
 
     print(f"open conversations scanned: {len(convs)}")
-    print(f"already owned by a sibling sweeper: {len(convs) - len(buckets['needs_human']) - len(buckets['needs_customer_input'])}")
+    print(f"already owned by a sibling sweeper: {len(convs) - len(buckets['needs_human']) - len(backlog) - len(buckets['needs_customer_input'])}")
     print(f"needs-human: {len(buckets['needs_human'])}  "
           f"needs-customer-input: {len(buckets['needs_customer_input'])}  "
-          f"dup-candidate: {len(buckets['dup_candidate'])}")
+          f"dup-candidate: {len(buckets['dup_candidate'])}  "
+          f"backlog (> {actionable_days}d): {buckets['backlog_count']}")
 
     # Shadow-only (Phase 2a #2a): fires strictly AFTER bucket_conversations()
     # above, on a RANDOM sample (never the ranked/rendered head — needs_human
-    # is sorted oldest-waiting-first, so the head is a biased slice) of the
+    # is sorted newest-waiting-first, so the head is a biased slice) of the
     # needs_human bucket, and can never change buckets, rendered rows, stdout,
     # or the exit code. A fresh, non-fixed seed each run is logged to stderr
     # so a run can be reproduced. See docs/plans/jev-adoption.md #2a and
     # CS_DIGEST_JEV_SAMPLE_SIZE above for the `actual`-is-a-weak-label caveat.
+    # Deliberately the ACTIONABLE bucket (post-window): shadow-judging the live
+    # population, not the 194d backlog. Still shadow-only.
     jev_pool = buckets["needs_human"]
     jev_k = min(_jev_sample_size(), len(jev_pool))
     if jev_k > 0:
@@ -1423,14 +1507,16 @@ def main():
         mention = _mention_prefix(mention_uid, aging_items)
         text = render_delta_digest(
             new_items, aging_items, now_epoch, top_n,
-            mention=mention, aging_hours=aging_hours)
+            mention=mention, aging_hours=aging_hours,
+            backlog_count=buckets["backlog_count"], window_days=actionable_days)
         print(text)
         if not args.post:
             print("DRY-RUN — nothing posted. Re-run with --post to post to Slack.")
             return 0
         blocks = build_delta_digest_blocks(
             new_items, aging_items, now_epoch, top_n,
-            mention=mention, aging_hours=aging_hours)
+            mention=mention, aging_hours=aging_hours,
+            backlog_count=buckets["backlog_count"], window_days=actionable_days)
         posted = post_slack_digest(blocks, text, channel, cfg, account)
         print(f"slack post: {'posted' if posted else 'skipped/failed'} -> {channel}")
         if posted:
@@ -1445,14 +1531,16 @@ def main():
     aging_items_full = [c for c in buckets["needs_human"]
                          if is_aging(c, now_epoch, aging_hours)]
     mention = _mention_prefix(mention_uid, aging_items_full)
-    text = render_text_digest(buckets, now_epoch, top_n, aging_hours, mention=mention)
+    text = render_text_digest(buckets, now_epoch, top_n, aging_hours, mention=mention,
+                              window_days=actionable_days)
     print(text)
 
     if not args.post:
         print("DRY-RUN — nothing posted. Re-run with --post to post to Slack.")
         return 0
 
-    blocks = build_digest_blocks(buckets, now_epoch, top_n, aging_hours, mention=mention)
+    blocks = build_digest_blocks(buckets, now_epoch, top_n, aging_hours, mention=mention,
+                                 window_days=actionable_days)
     posted = post_slack_digest(blocks, text, channel, cfg, account)
     print(f"slack post: {'posted' if posted else 'skipped/failed'} -> {channel}")
     persisted_ok = True

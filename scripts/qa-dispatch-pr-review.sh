@@ -142,12 +142,12 @@ Follow the skill Auto mode section exactly. In short:
   of starting a new top-level DM (it owns the wording and prints the thread-root ts):
     bash /opt/hydra/scripts/qa-pr-thread-dm.sh ${REPO} ${pr} ${REQUESTER_UID}
 - Skip the Step 5 human gate; post the batched review (Step 6, COMMENT) to GitHub
-  yourself after the audit-log line. Check CI with "gh pr checks ${pr} --repo ${REPO}".
+  yourself after the audit-log line.
 - Before any GO, carry prior findings forward (skill "Carry forward prior findings"):
   resolve confirmed-fixed threads, treat any unresolved Critical/Important as a blocker.
-- Approve (Step 7, scripts/qa-pr-approve.sh, requester ${REQUESTER_UID}) ONLY IF every
-  CI check passed, the verdict is GO (no Critical, no Important), and the wrapper
-  allowlist passes. Otherwise post the review and DO NOT approve. Never merge.
+- Approve through scripts/qa-pr-approve.sh (Step 7, requester ${REQUESTER_UID}) whenever
+  the verdict is GO (no Critical, no Important). The wrapper decides CI greenness: advisory
+  checks alert, they do not withhold. Do not gate on CI yourself. Never merge.
 - LAST, DM the author the result as a threaded reply under that opening ts (one line:
   approved + safe to merge, or not-approved + the reason and finding counts).
 EOF

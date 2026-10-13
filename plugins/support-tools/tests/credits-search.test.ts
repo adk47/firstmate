@@ -67,6 +67,23 @@ describe("filterCreditsResults", () => {
     const filtered = filterCreditsResults(raw);
     expect(filtered.totalCount).toBe(2);
   });
+
+  it("normalizes total/limit/offset pagination from the admin endpoint", () => {
+    const raw = {
+      total: 17,
+      limit: 1,
+      offset: 0,
+      items: [
+        { credits: ["Producer"], title: "Track A", releaseDate: "2024-01-01", artists: [{ name: "X" }] },
+      ],
+    };
+
+    const filtered = filterCreditsResults(raw);
+
+    expect(filtered.totalCount).toBe(17);
+    expect(filtered.hasMore).toBe(true);
+    expect(filterCreditsResults({ ...raw, offset: 16 }).hasMore).toBe(false);
+  });
 });
 
 describe("createCreditsSearchTool", () => {

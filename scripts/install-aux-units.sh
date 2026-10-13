@@ -10,6 +10,10 @@
 #     sessions.resolve({ label: "@Role" }) keeps working for
 #     agent-to-agent messaging. Also runs on boot.
 #
+#   hydra-main-prune-restart.timer / .service
+#     Nightly 02:30 UTC: scripts/main-prune-restart.sh prunes main's sessions idle >24h offline (backed up,
+#     fail-open) and restarts main (MUS-1295). Retires the hand-placed /usr/local/sbin bridge.
+#
 #   hydra-session-thread-retention@{main,edge}.timer / .service
 #     Every 6h, removes terminal Slack channel thread sessions older
 #     than 14d through each gateway's native sessions.delete lifecycle API.
@@ -2508,6 +2512,81 @@ trstate="$(systemctl is-active "$trtmr" 2>/dev/null || true)"
 [[ "$trstate" == "active" ]] || fail "$trtmr is not active (state: ${trstate:-unknown})"
 log "  $trtmr: $trstate (fires hourly)"
 
+# ─── Main gateway session prune + restart (nightly 02:30 UTC) ────
+# MUS-1295: see scripts/main-prune-restart.sh. Replaces the hand-placed bridge (/usr/local/sbin/
+# hydra-main-{prune-restart,nightly-reset}.sh via the TRANSIENT hydra-main-nightly-reset.timer). Both fire at
+# 02:30 UTC, so the bridge is retired BEFORE the managed timer is armed: no double prune+restart.
+[[ -x "$HYDRA_ROOT/scripts/main-prune-restart.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/main-prune-restart.sh missing or not executable"
+
+# Never kill a legacy prune/restart mid-flight (it has stopped main and has no exit trap): stop only the TIMER,
+# wait for any running legacy service/script, and if it never finishes fail the install with nothing removed
+# or armed, so the next deploy retries.
+AUX_BRIDGE_WAIT_SECS="${AUX_BRIDGE_WAIT_SECS:-900}"
+legacy_bridge_running() {
+  [[ "$(systemctl is-active hydra-main-nightly-reset.service 2>/dev/null || true)" =~ ^(active|activating|deactivating)$ ]] \
+    || pgrep -f '/usr/local/sbin/hydra-main-(prune-restart|nightly-reset)\.sh' >/dev/null 2>&1
+}
+retire_main_prune_bridge() {
+  local f waited=0
+  systemctl stop hydra-main-nightly-reset.timer >/dev/null 2>&1 || true
+  while legacy_bridge_running; do
+    if (( waited >= AUX_BRIDGE_WAIT_SECS )); then
+      fail "legacy main prune/restart bridge still running after ${AUX_BRIDGE_WAIT_SECS}s; refusing to kill it mid-flight (main may be stopped). Re-run install-aux-units.sh once it finishes."
+    fi
+    (( waited == 0 )) && log "  legacy main prune/restart bridge is running; waiting for it to finish (max ${AUX_BRIDGE_WAIT_SECS}s)"
+    sleep 5; waited=$((waited + 5))
+  done
+  systemctl reset-failed hydra-main-nightly-reset.timer hydra-main-nightly-reset.service >/dev/null 2>&1 || true
+  for f in /usr/local/sbin/hydra-main-prune-restart.sh /usr/local/sbin/hydra-main-nightly-reset.sh; do
+    if [[ -e "$f" ]]; then rm -f "$f"; log "  retired hand-placed bridge: $f"; fi
+  done
+  rm -f /usr/local/sbin/hydra-main-nightly-reset.sh.bak-*
+}
+retire_main_prune_bridge
+
+cat > /etc/systemd/system/hydra-main-prune-restart.service << MAINPRUNESVC
+[Unit]
+Description=Prune main-gateway sessions idle >24h offline, then restart openclaw-gateway-main
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/main-prune-restart.sh nightly
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HYDRA_MAIN_PRUNE_AFTER=24h
+# Skip when main restarted recently (already fresh).
+Environment=HYDRA_MAIN_MIN_UPTIME_H=4
+Environment=MAINT_SH=$HYDRA_ROOT/scripts/hydra-maintenance.sh
+# Backup + stop + prune (<=20 min) + start + health wait (<=45 min); a kill mid-run would leave main stopped.
+TimeoutStartSec=90min
+# No Restart=: a failed run must never re-run itself (never loops).
+StandardOutput=append:/var/log/hydra-main-prune-restart.log
+StandardError=append:/var/log/hydra-main-prune-restart.log
+MAINPRUNESVC
+
+cat > /etc/systemd/system/hydra-main-prune-restart.timer << MAINPRUNETMR
+[Unit]
+Description=Prune main-gateway sessions and restart main nightly at 02:30 UTC
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+# No Persistent=: a missed night must not become a boot-time restart.
+Unit=hydra-main-prune-restart.service
+
+[Install]
+WantedBy=timers.target
+MAINPRUNETMR
+
+systemctl daemon-reload
+
+mpt=hydra-main-prune-restart.timer
+systemctl enable "$mpt" >/dev/null 2>&1 || fail "could not enable $mpt"
+systemctl start "$mpt" >/dev/null 2>&1 || fail "could not start $mpt"
+mpstate="$(systemctl is-active "$mpt" 2>/dev/null || true)"
+[[ "$mpstate" == "active" ]] || fail "$mpt is not active (state: ${mpstate:-unknown})"
+log "  $mpt: $mpstate (fires nightly 02:30 UTC)"
+
 # ─── codex-home retention (daily 05:45 UTC) ──────────────────────
 # The codex binary writes sessions/**/rollout-*.jsonl and logs_*.sqlite under
 # every agent's codex-home and has no retention knob (72 GiB across 35 agents
@@ -2823,7 +2902,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/hydra-tmp-reaper.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log /var/log/agent-soul-delivery-guard.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/hydra-tmp-reaper.log /var/log/hydra-main-prune-restart.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log /var/log/agent-soul-delivery-guard.log {
     weekly
     rotate 4
     compress
@@ -3072,6 +3151,7 @@ AUX_ONFAILURE_UNITS=(
   hydra-codex-home-prune.service
   hydra-daily-audit.service
   hydra-jev-shadow-prune.service
+  hydra-main-prune-restart.service
   hydra-peer-labels.service
   hydra-release-watch.service
   hydra-release.service
