@@ -31,6 +31,14 @@ Secret `hydra/hydra-event-router-query` (ExternalSecret of Vault
 https://github.com/Muso-AI/H-DevOps/pull/4025). Neither present = exit 3 and agents fall
 back to the vendor and say so.
 
+Rotating `query_hydra` is not end-to-end automatic: the router reads
+`QUERY_API_CREDENTIALS` via `envFrom` (no Reloader), so it keeps the old pair until its
+pods restart. Order: new value in Vault → force-sync both ExternalSecrets
+(`messaging/event-router-vault`, `hydra/hydra-event-router-query`) → `kubectl -n messaging
+rollout restart sts/event-router`. In between, hydra gets 401 → exit 3 → vendor fallback
+(degraded, never wrong). The exact commands are in the ExternalSecret's comment
+(H-DevOps `k8s/prod/security/external-secrets-hydra.yaml`).
+
 Why port-forward: the admin port is fenced to `muso-prod` / `monitoring` / `messaging`
 (H-DevOps `k8s/prod/messaging/80-event-router.yaml`), and hydra runs as systemd on node-8,
 not in a pod. node-8's kubectl is how `scripts/trino-query.sh` reaches Trino too.
