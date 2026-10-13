@@ -124,9 +124,14 @@ export function withHelpCentreCap(inner: KbSearcher): KbSearcher {
     };
     let factor = KB_OVERFETCH;
     let { all, truncated } = await fetchWindow(factor);
-    // A full window with no curated hit may be hiding one below many help-centre chunks:
-    // keep widening until one appears or the corpus is exhausted (a short window).
-    for (let pass = 0; pass < KB_MAX_WIDEN_PASSES && truncated && !all.some((s) => !isHelpCentrePath(s.path)); pass++) {
+    // Help-centre keeps at most HELP_CENTRE_MAX_SNIPPETS slots, so once this many
+    // curated hits are in hand more widening cannot change the output. The floor of 1
+    // preserves the old behaviour when maxResults <= HELP_CENTRE_MAX_SNIPPETS.
+    const curatedQuota = Math.max(1, opts.maxResults - HELP_CENTRE_MAX_SNIPPETS);
+    const curatedCount = () => all.filter((s) => !isHelpCentrePath(s.path)).length;
+    // A full window short of the curated quota may be hiding curated hits below many
+    // help-centre chunks: keep widening until the quota is met or the corpus is exhausted.
+    for (let pass = 0; pass < KB_MAX_WIDEN_PASSES && truncated && curatedCount() < curatedQuota; pass++) {
       factor *= KB_WIDEN;
       ({ all, truncated } = await fetchWindow(factor));
     }

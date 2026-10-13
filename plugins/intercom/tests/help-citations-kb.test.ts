@@ -78,6 +78,49 @@ describe("withHelpCentreCap", () => {
     expect(calls).toBe(1);
   });
 
+  it("keeps widening past the first curated hit until the curated quota is filled (5/5, not 3/5)", async () => {
+    // ranks 1-19 help-centre, rank 20 curated, ranks 21-23 curated, help-centre padding after.
+    const ranked: KbSnippet[] = [
+      ...Array.from({ length: 19 }, (_, i) => hc(i + 1)),
+      cur("curated-A"),
+      cur("curated-21"),
+      cur("curated-22"),
+      cur("curated-23"),
+      ...Array.from({ length: 300 }, (_, i) => hc(i + 100)),
+    ];
+    const inner: KbSearcher = async (_q, o) => ranked.slice(0, o.maxResults);
+    const out = await withHelpCentreCap(inner)("q", { maxResults: 5, minScore: 0 });
+    expect(out.length).toBe(5);
+    expect(out.filter((s) => !s.path!.includes("hc-")).map((s) => s.path)).toEqual([
+      "reference/curated-A.md",
+      "reference/curated-21.md",
+      "reference/curated-22.md",
+      "reference/curated-23.md",
+    ]);
+    expect(out.filter((s) => s.path!.includes("hc-")).length).toBe(1);
+  });
+
+  it("still widens for one curated hit when maxResults <= the help-centre cap (quota floor of 1)", async () => {
+    // maxResults 2 -> first window asks 8; the only curated hit is rank 9.
+    const ranked: KbSnippet[] = [
+      ...Array.from({ length: 8 }, (_, i) => hc(i + 1)),
+      cur("deep-curated"),
+      ...Array.from({ length: 50 }, (_, i) => hc(i + 100)),
+    ];
+    const inner: KbSearcher = async (_q, o) => ranked.slice(0, o.maxResults);
+    const out = await withHelpCentreCap(inner)("q", { maxResults: 2, minScore: 0 });
+    expect(out.filter((s) => !s.path!.includes("hc-")).map((s) => s.path)).toEqual(["reference/deep-curated.md"]);
+    expect(out.length).toBe(2);
+  });
+
+  it("does not over-widen: a first window already holding the curated quota is searched once", async () => {
+    const ranked: KbSnippet[] = [cur("a"), cur("b"), cur("c"), ...Array.from({ length: 100 }, (_, i) => hc(i + 1))];
+    let calls = 0;
+    const inner: KbSearcher = async (_q, o) => { calls++; return ranked.slice(0, o.maxResults); };
+    await withHelpCentreCap(inner)("q", { maxResults: 5, minScore: 0 });
+    expect(calls).toBe(1);
+  });
+
   it("curated hits take priority and never exceed maxResults", async () => {
     const inner: KbSearcher = async () => [hc(1), cur("a"), cur("b"), cur("c"), cur("d"), cur("e"), cur("f")];
     const out = await withHelpCentreCap(inner)("q", { maxResults: 5, minScore: 0 });
