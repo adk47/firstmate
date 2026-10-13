@@ -130,7 +130,7 @@ PYEOF
   echo "$output" | grep -qx ok
 }
 
-@test "needs-human is ranked oldest-waiting-first" {
+@test "needs-human is ranked newest-waiting-first" {
   run python3 - <<'PYEOF'
 import os
 from importlib import util
@@ -140,7 +140,7 @@ recent = {"id": "R", "email": "r@x.com", "lar": 0, "lcr": 900, "url": ""}
 oldest = {"id": "O", "email": "o@x.com", "lar": 0, "lcr": 100, "url": ""}
 middle = {"id": "M", "email": "m@x.com", "lar": 0, "lcr": 500, "url": ""}
 buckets = mod.bucket_conversations([recent, oldest, middle], set())
-assert [c["id"] for c in buckets["needs_human"]] == ["O", "M", "R"], buckets["needs_human"]
+assert [c["id"] for c in buckets["needs_human"]] == ["R", "M", "O"], buckets["needs_human"]
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]
@@ -151,7 +151,7 @@ PYEOF
   # KEY regression (waiting-timestamp finding): last_contact_reply_at == 0
   # for a never-replied (unanswered first message) conversation must NOT be
   # treated as "waiting since the epoch" — two such conversations created at
-  # DIFFERENT times must rank in created_at order, never tied in API order.
+  # DIFFERENT times must rank in created_at order (newest first), never tied in API order.
   run python3 - <<'PYEOF'
 import os
 from importlib import util
@@ -160,7 +160,8 @@ mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 older = {"id": "OLD", "email": "o@x.com", "lar": 0, "lcr": 0, "created_at": 1000, "url": ""}
 newer = {"id": "NEW", "email": "n@x.com", "lar": 0, "lcr": 0, "created_at": 2000, "url": ""}
 buckets = mod.bucket_conversations([newer, older], set())  # API order: NEW, OLD
-assert [c["id"] for c in buckets["needs_human"]] == ["OLD", "NEW"], buckets["needs_human"]
+assert [c["id"] for c in buckets["needs_human"]] == ["NEW", "OLD"], buckets["needs_human"]
+assert mod.waiting_since(older) != 0 and mod.waiting_since(newer) != 0
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]
@@ -1019,7 +1020,7 @@ PYEOF
 
 @test "shadow wiring: samples across runs vary -- never pinned to the ranked head" {
   # needs_human is ranked oldest-waiting-first (see "needs-human is ranked
-  # oldest-waiting-first" above), so a caller that (bug) sliced jev_pool[:k]
+  # newest-waiting-first" above), so a caller that (bug) sliced jev_pool[:k]
   # instead of drawing a random sample would deterministically pick the SAME
   # item (the oldest) on every run. Over enough runs a genuinely random draw
   # from a 10-item pool with k=1 must land on more than one distinct id.
@@ -1098,4 +1099,43 @@ assert len(posted) == 1, posted  # the digest still posts despite the shadow fet
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "split_actionable: boundary inclusive, never-replied rides created_at" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('d', os.environ['DIGEST'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+now = 1_000_000_000
+mk = lambda i, lcr, ca=0: {"id": i, "email": i + "@x.com", "lar": 0, "lcr": lcr, "created_at": ca, "url": ""}
+edge = mk("EDGE", now - 30 * 86400)
+out = mk("OUT", now - 30 * 86400 - 1)
+fresh = mk("NEW", 0, now - 60)
+act, back = mod.split_actionable([out, edge, fresh], now)
+assert [c["id"] for c in act] == ["EDGE", "NEW"], act
+assert [c["id"] for c in back] == ["OUT"], back
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
+}
+
+@test "actionable_dups: live contact keeps whole group, all-ancient group dropped" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('d', os.environ['DIGEST'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+now = 1_000_000_000
+mk = lambda i, em, age: {"id": i, "email": em, "lar": 0, "lcr": now - age, "created_at": 0, "url": ""}
+convs = [mk("OLD", "a@x.com", 194 * 86400), mk("NEW", "a@x.com", 3600),
+         mk("X1", "b@x.com", 100 * 86400), mk("X2", "b@x.com", 194 * 86400),
+         mk("NOEM", "", 60)]
+got = [c["id"] for c in mod.actionable_dups(convs, now)]
+assert got == ["OLD", "NEW"], got
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
 }

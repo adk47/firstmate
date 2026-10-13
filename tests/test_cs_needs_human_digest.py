@@ -56,12 +56,23 @@ class TestBucketConversations(unittest.TestCase):
         self.assertEqual(buckets["needs_human"], [])
         self.assertEqual([x["id"] for x in buckets["needs_customer_input"]], ["c1"])
 
-    def test_needs_human_ranked_oldest_waiting_first(self):
+    def test_needs_human_ranked_newest_waiting_first(self):
         recent = conv(cid="R", lar=0, lcr=900)
         oldest = conv(cid="O", lar=0, lcr=100)
         middle = conv(cid="M", lar=0, lcr=500)
         buckets = d.bucket_conversations([recent, oldest, middle], set())
-        self.assertEqual([c["id"] for c in buckets["needs_human"]], ["O", "M", "R"])
+        self.assertEqual([c["id"] for c in buckets["needs_human"]], ["R", "M", "O"])
+
+    def test_ancient_item_ranks_last_and_stays_out_of_top_n(self):
+        # MUS-8853: oldest-first pinned the 194-day tail in the rendered
+        # [:top_n] slice while live threads never surfaced.
+        now = 1_000_000_000
+        live = [conv(cid=f"L{i}", lar=0, lcr=now - i * 3600) for i in range(1, 21)]
+        ancient = conv(cid="ANCIENT", lar=0, lcr=now - 194 * 86400)
+        buckets = d.bucket_conversations([ancient] + live, set())
+        ids = [c["id"] for c in buckets["needs_human"]]
+        self.assertEqual(ids[-1], "ANCIENT")
+        self.assertNotIn("ANCIENT", ids[:d.DEFAULT_TOP_N])
 
     def test_same_email_two_open_convs_is_dup_candidate(self):
         d1 = conv(cid="D1", email="dup@x.com")
@@ -99,7 +110,9 @@ class TestBucketConversations(unittest.TestCase):
         older = conv(cid="OLD", lar=0, lcr=0, created_at=1000)
         newer = conv(cid="NEW", lar=0, lcr=0, created_at=2000)
         buckets = d.bucket_conversations([newer, older], set())  # API order: NEW, OLD
-        self.assertEqual([c["id"] for c in buckets["needs_human"]], ["OLD", "NEW"])
+        self.assertEqual([c["id"] for c in buckets["needs_human"]], ["NEW", "OLD"])
+        self.assertNotEqual(d.waiting_since(older), 0)
+        self.assertNotEqual(d.waiting_since(newer), 0)
 
     def test_outbound_zero_zero_is_needs_customer_input_not_needs_human(self):
         # KEY regression (inbound-vs-outbound finding): lar==0 and lcr==0 is
@@ -142,6 +155,63 @@ class TestBucketConversations(unittest.TestCase):
         buckets = d.bucket_conversations([c], set())
         self.assertEqual([x["id"] for x in buckets["needs_human"]], ["CONTACT1"])
         self.assertEqual(buckets["needs_customer_input"], [])
+
+
+class TestSplitActionable(unittest.TestCase):
+    NOW = 1_000_000_000
+    DAY = 86400
+
+    def test_inside_outside_and_exact_boundary(self):
+        inside = conv(cid="IN", lar=0, lcr=self.NOW - 29 * self.DAY)
+        edge = conv(cid="EDGE", lar=0, lcr=self.NOW - 30 * self.DAY)
+        outside = conv(cid="OUT", lar=0, lcr=self.NOW - 30 * self.DAY - 1)
+        act, back = d.split_actionable([outside, inside, edge], self.NOW)
+        self.assertEqual([c["id"] for c in act], ["IN", "EDGE"])
+        self.assertEqual([c["id"] for c in back], ["OUT"])
+
+    def test_never_replied_rides_created_at_not_epoch(self):
+        fresh = conv(cid="NEW", lar=0, lcr=0, created_at=self.NOW - 3600)
+        act, back = d.split_actionable([fresh], self.NOW)
+        self.assertEqual([c["id"] for c in act], ["NEW"])
+        self.assertEqual(back, [])
+
+    def test_empty_input(self):
+        self.assertEqual(d.split_actionable([], self.NOW), ([], []))
+
+    def test_window_days_honoured(self):
+        c = conv(cid="C", lar=0, lcr=self.NOW - 10 * self.DAY)
+        self.assertEqual(d.split_actionable([c], self.NOW, window_days=7), ([], [c]))
+        self.assertEqual(d.split_actionable([c], self.NOW, window_days=10), ([c], []))
+
+
+class TestActionableDups(unittest.TestCase):
+    NOW = 1_000_000_000
+    DAY = 86400
+
+    def _ids(self, convs, **kw):
+        return [c["id"] for c in d.actionable_dups(convs, self.NOW, **kw)]
+
+    def test_group_with_one_recent_member_keeps_both(self):
+        new = conv(cid="NEW", email="a@x.com", lar=0, lcr=self.NOW - 3600)
+        old = conv(cid="OLD", email="a@x.com", lar=0, lcr=self.NOW - 194 * self.DAY)
+        self.assertEqual(self._ids([old, new]), ["OLD", "NEW"])
+
+    def test_group_entirely_ancient_is_dropped(self):
+        a = conv(cid="A", email="a@x.com", lar=0, lcr=self.NOW - 100 * self.DAY)
+        b = conv(cid="B", email="a@x.com", lar=0, lcr=self.NOW - 194 * self.DAY)
+        self.assertEqual(self._ids([a, b]), [])
+
+    def test_falsy_email_is_never_a_member(self):
+        fresh = conv(cid="F", email="", lar=0, lcr=self.NOW - 3600)
+        self.assertEqual(self._ids([fresh]), [])
+
+    def test_single_member_group_unaffected(self):
+        one = conv(cid="ONE", email="a@x.com", lar=0, lcr=self.NOW - 3600)
+        self.assertEqual(self._ids([one]), ["ONE"])
+
+    def test_window_days_honoured(self):
+        c = conv(cid="C", email="a@x.com", lar=0, lcr=self.NOW - 10 * self.DAY)
+        self.assertEqual(self._ids([c], window_days=7), [])
 
 
 class TestOwnedIds(unittest.TestCase):
@@ -1322,11 +1392,11 @@ class TestMainDeltaFlow(unittest.TestCase):
              redirect_stdout(io.StringIO()):
             rc = d.main()
         self.assertEqual(rc, 0)
-        # needs_human is ranked oldest-waiting-first — the 5 NEWEST (highest
-        # lcr, i.e. C15..C19) rank beyond top_n=15 and must be absent.
-        for i in range(15, 20):
+        # needs_human is ranked newest-waiting-first — the 5 OLDEST (lowest
+        # lcr, i.e. C0..C4) rank beyond top_n=15 and must be absent.
+        for i in range(0, 5):
             self.assertNotIn(f"C{i}", captured["next_state"])
-        for i in range(0, 15):
+        for i in range(5, 20):
             self.assertIn(f"C{i}", captured["next_state"])
 
     def test_full_post_failure_does_not_persist_state_and_exits_1(self):

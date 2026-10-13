@@ -103,6 +103,10 @@ Env:
   CS_DIGEST_AGING_HOURS         optional, default 20 — a needs-human item
                                 waiting longer than this gets a distinct
                                 "⚠️ aging" line in both full and delta digests.
+  CS_DIGEST_ACTIONABLE_DAYS     optional, default 30 — needs-human items whose
+                                waiting_since is older than this many days are
+                                backlog, not actionable (wired in main() by
+                                card B).
   CS_DIGEST_AGING_MENTION_UID   optional — Slack user id (e.g. U038BM16T7W)
                                 rendered as <@UID> in the header line, ONLY
                                 when at least one aging item is present in
@@ -177,6 +181,7 @@ SLACK_API = "https://slack.com/api/chat.postMessage"
 DEFAULT_SUMMARY_CHANNEL = "C0ANM0PN9L5"  # #cs_chats
 DEFAULT_TOP_N = 15
 DEFAULT_AGING_HOURS = 20
+DEFAULT_ACTIONABLE_DAYS = 30
 DEFAULT_DIGEST_STATE = "/var/lib/cs-needs-human-digest/surfaced.json"
 DEFAULT_JEV_SAMPLE_SIZE = 25
 # Deeplink workspace id — same default + env override as
@@ -665,11 +670,15 @@ def bucket_conversations(convs, owned_ids):
         if c["email"] and email_counts[c["email"]] >= 2:
             dup_candidate.append(c)
 
-    # Oldest-waiting-first: rank by waiting_since (see its docstring) — the
-    # customer's last reply time, or created_at for a never-replied
-    # conversation — oldest first. NEVER bare lcr, which is 0 (the Unix
-    # epoch) for a never-replied conversation regardless of its real age.
-    needs_human.sort(key=waiting_since)
+    # Newest-customer-activity-first: rank by waiting_since (see its
+    # docstring) — the customer's last reply time, or created_at for a
+    # never-replied conversation — newest first. NEVER bare lcr, which is 0
+    # (the Unix epoch) for a never-replied conversation regardless of its real
+    # age. Oldest-first put the 194-day tail permanently in the rendered
+    # [:top_n] slice while the live threads never surfaced; the 20h/48h SLA
+    # signal lives in is_aging, SLA_HOURS_FLAG and the --delta crossing ping,
+    # not in the sort order.
+    needs_human.sort(key=waiting_since, reverse=True)
     return {
         "needs_human": needs_human,
         "needs_customer_input": needs_customer_input,
@@ -690,6 +699,25 @@ def is_aging(c, now_epoch, aging_hours):
     escalation threshold. Uses waiting_since (never bare lcr — see its
     docstring)."""
     return (now_epoch - waiting_since(c)) / 3600 > aging_hours
+
+
+def split_actionable(convs, now_epoch, window_days=DEFAULT_ACTIONABLE_DAYS):
+    """Split convs into (actionable, backlog) by waiting_since age. Inclusive
+    at the boundary; input order is preserved in both lists."""
+    cutoff = window_days * 86400
+    actionable, backlog = [], []
+    for c in convs:
+        (actionable if now_epoch - waiting_since(c) <= cutoff else backlog).append(c)
+    return actionable, backlog
+
+
+def actionable_dups(dup_candidate, now_epoch, window_days=DEFAULT_ACTIONABLE_DAYS):
+    """Keep every member of an email group with at least one member inside the
+    window: a duplicate pair is worth merging when the contact is live even if
+    one thread is old. Falsy emails are never dup members. Input order kept."""
+    live = {c["email"] for c in split_actionable(dup_candidate, now_epoch, window_days)[0]
+            if c["email"]}
+    return [c for c in dup_candidate if c["email"] and c["email"] in live]
 
 
 # --------------------------------------------------------------------------
@@ -1173,7 +1201,7 @@ def _self_test():
     # never replied (lar==0) -> needs-human.
     c3 = conv("C3", "e@f.com", 0, 50)
     buckets = bucket_conversations([c1, c2, c3], set())
-    assert [c["id"] for c in buckets["needs_human"]] == ["C3", "C1"], buckets["needs_human"]
+    assert [c["id"] for c in buckets["needs_human"]] == ["C1", "C3"], buckets["needs_human"]
     assert [c["id"] for c in buckets["needs_customer_input"]] == ["C2"], buckets["needs_customer_input"]
     assert buckets["dup_candidate"] == [], buckets["dup_candidate"]
 
@@ -1202,11 +1230,11 @@ def _self_test():
 
     # KEY regression (waiting-timestamp finding): two never-replied
     # conversations (lcr==0) must rank by created_at, NOT tie at the Unix
-    # epoch. n1 is older (created earlier) than n2, so n1 must sort first.
+    # epoch. n1 is older (created earlier) than n2, so n2 must sort first (newest-first).
     n1 = conv("N1", "n1@x.com", 0, 0, created_at=now - (72 * 3600))  # 72h old
     n2 = conv("N2", "n2@x.com", 0, 0, created_at=now - (10 * 3600))  # 10h old
     buckets5 = bucket_conversations([n1, n2], set())
-    assert [c["id"] for c in buckets5["needs_human"]] == ["N1", "N2"], buckets5["needs_human"]
+    assert [c["id"] for c in buckets5["needs_human"]] == ["N2", "N1"], buckets5["needs_human"]
     assert waiting_since(n1) != 0 and waiting_since(n2) != 0, (n1, n2)
 
     # KEY regression (inbound-vs-outbound 0/0 finding): the lar==0/lcr==0 tie
