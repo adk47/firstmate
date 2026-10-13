@@ -406,10 +406,16 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       // Cross-conversation fallback. Skipped for profile-merge AND track-merge:
       // the merged-ticket sweep auto-closes those keyed on the ORIGINAL
       // description's ids, so appending a DIFFERENT merge request (a distinct
-      // track/profile set) cross-conversation could be closed unexecuted. The
+      // track/profile set) cross-conversation could be closed unexecuted. Also
+      // skipped for rights_holder: the lookup keys on (actionType, email) only,
+      // never on content, so a label/publisher/PRO/law firm mailing about a
+      // SECOND matter would be appended to the first matter's open record and
+      // lost when the sweep closes it on the first. Rights-holder mail always
+      // opens its own record (in-session follow-ups above still append). The
       // lookup GET is metered in its own bucket so a retry-looping session can't
       // hammer ClickUp search.
       if (!existingId && params.actionType !== "profile-merge" && params.actionType !== "track-merge"
+          && params.details?.escalation_reason !== "rights_holder"
           && isUsableDedupeEmail(customerEmail)
           && rateLimiter.check(sessionId, "create_ticket_lookup", 60, 10).allowed) {
         existingId = await lookupOpenTicket(params.actionType, customerEmail);
