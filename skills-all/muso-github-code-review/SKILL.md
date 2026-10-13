@@ -35,19 +35,23 @@ ARE the authorization. Message carries the author's Slack UID.
   substitute one for another), lead body `🤖 Muso QA Bot (automated
   review)`. Open with `qa-pr-thread-dm.sh`, keep `ts`. Skip Step 5; log
   then post yourself.
-- Approve (Step 7) only if `checks` are green **EXCEPT for the policy's
-  `advisory_checks`** — every check is `SUCCESS`, `NEUTRAL` or `SKIPPED`
-  (the same tri-state `scripts/qa-pr-approve.sh:595` enforces; a `skipped`
-  check is NOT a withhold reason), and none is failing or pending,
-  other than those the policy names advisory (the deploy pre-flight and
-  friends, which fail on live server drift rather than on the diff).
+- Approve (Step 7) through the wrapper only. **Never gate approval on `checks`
+  yourself.** `scripts/qa-pr-approve.sh` decides CI greenness, fail-closed (Guard 6):
+  it excludes the policy's `advisory_checks` (the deploy pre-flight and friends,
+  which fail on live server drift rather than on the diff), accepts `SUCCESS`,
+  `NEUTRAL` and `SKIPPED`, and holds on any other failing or pending check. A prose
+  restatement of that rule can only diverge from the wrapper, so do not write one.
   **Changed 2026-08-03:** this used to say "be strict — any non-green check
   means do not approve", which held hydra#780 at a clean GO for days because
   a live rsync dry-run was red against pre-existing server drift that had
   nothing to do with the diff. Advisory checks now alert instead of blocking;
-  every OTHER red check still holds the approval. (Ignore only your own
-  `qa-review` row — the wrapper excludes it too, to avoid a circular
-  dependency.) Plus: GO incl. carried-forward; `rebaseIntegrity` clear —
+  every OTHER red check still holds the approval, enforced by the wrapper. (Ignore
+  only your own `qa-review` row — the wrapper excludes it too, to avoid a circular
+  dependency.) **Changed 2026-10-13 (MUS-7727, CTO ruling 12 Oct):** the removed
+  rule came back as "requires every CI check to pass" and withheld approval on
+  hydra#1119 and hydra#1107, two clean GOs with a red `Deploy pre-flight` advisory
+  check. A red advisory check is relayed as an `⚠️ ALERT` line, never a withhold.
+  Plus: GO incl. carried-forward; `rebaseIntegrity` clear —
   **`WARN` holds only while its thread is still UNRESOLVED**; once it is
   resolved — by a human, or **by you** once you have verified the deletions
   were intended (Step 3) — the warning is acknowledged and no longer blocks,
@@ -786,6 +790,10 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> \
   (Guard 7 only blocks 🔴/🟡-tagged ones). It is the wrapper refusing to approve a
   PR its caller's verdict no longer describes, so it is a CORRECT outcome, never a
   fault to work around: a fresh review must supply the verdict.
+- A red `checks` entry is never a reason to skip the wrapper. When the verdict is GO
+  and the requester is authorized, **always invoke it**, then report its exit code and
+  message. Whether CI blocks is the wrapper's decision, not yours; a red advisory check
+  arrives as an `⚠️ ALERT` line.
 - If the verdict is **not** GO, do NOT approve: post the findings and stop.
 
 Then report the wrapper's post-check (`reviewDecision` / `mergeStateStatus`). If
