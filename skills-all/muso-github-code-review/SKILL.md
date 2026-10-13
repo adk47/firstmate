@@ -50,7 +50,7 @@ ARE the authorization. Message carries the author's Slack UID.
   dependency.) **Changed 2026-10-13 (MUS-7727, CTO ruling 12 Oct):** the removed
   rule came back as "requires every CI check to pass" and withheld approval on
   hydra#1119 and hydra#1107, two clean GOs with a red `Deploy pre-flight` advisory
-  check. A red advisory check is relayed as an `⚠️ ALERT` line, never a withhold.
+  check. A red advisory check is normally relayed as an `⚠️ ALERT` line, never a withhold.
   Plus: GO incl. carried-forward; `rebaseIntegrity` clear —
   **`WARN` holds only while its thread is still UNRESOLVED**; once it is
   resolved — by a human, or **by you** once you have verified the deletions
@@ -793,7 +793,8 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> \
 - A red `checks` entry is never a reason to skip the wrapper. When the verdict is GO
   and the requester is authorized, **always invoke it**, then report its exit code and
   message. Whether CI blocks is the wrapper's decision, not yours; a red advisory check
-  arrives as an `⚠️ ALERT` line.
+  normally arrives as an `⚠️ ALERT` line (the wrapper withholds it only when the PR edits
+  `.github/workflows/`).
 - If the verdict is **not** GO, do NOT approve: post the findings and stop.
 
 Then report the wrapper's post-check (`reviewDecision` / `mergeStateStatus`). If
