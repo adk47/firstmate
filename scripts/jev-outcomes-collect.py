@@ -424,7 +424,8 @@ def label_intercom(turn, truth, ic):
     human_in_win = any(p["human"] for p in in_win)
     caroline_in_win = any(p["caroline_comment"] for p in in_win)
     last_close = ic["last_close_at"]
-    closed_after_start = last_close is not None and last_close >= start
+    # A reopened conversation is live again, so a close does not settle it.
+    closed_after_start = last_close is not None and last_close >= start and ic["reopens"] == 0
     closed_in_win = last_close is not None and start <= last_close < end
 
     add = {}

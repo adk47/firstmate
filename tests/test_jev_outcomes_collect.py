@@ -578,6 +578,21 @@ def test_open_conversation_reopened_after_an_earlier_close_still_omits_needs_rep
     assert "needs_reply" not in recs[0]["truth"]
 
 
+def test_last_turn_closed_after_start_but_reopened_omits_needs_reply(inventory, tmp_path):
+    # A close after turn_start followed by a reopen means the conversation is
+    # live again: we cannot tell "chose not to reply" from "not replied yet"
+    # (bot review, PR #1059).
+    c = conv([], state="open", last_close=T0_EPOCH + 60, reopens=1)
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
+    assert "needs_reply" not in recs[0]["truth"]
+
+
+def test_last_turn_closed_after_start_not_reopened_is_needs_reply_false(inventory, tmp_path):
+    c = conv([], state="closed", last_close=T0_EPOCH + 60, reopens=0)
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
+    assert recs[0]["truth"]["needs_reply"] == "false"
+
+
 def test_non_last_turn_without_caroline_part_is_needs_reply_false(inventory, tmp_path):
     rows = [shadow_row("C1", T0), shadow_row("C1", "2026-09-23T10:10:00Z")]
     recs, _, _ = run_intercom(tmp_path, inventory, {"C1": conv([])}, shadow_rows=rows)
