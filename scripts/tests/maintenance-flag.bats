@@ -217,8 +217,8 @@ armed_ttl_with_drain() {
     bash -c 'log() { echo "$*"; }; run_on_node8() { bash -c "$1"; }; '"$lines"
   exp=$(jq -r .expires_epoch "$HYDRA_DEPLOY_WINDOW_FLAG")
   [[ "$exp" =~ ^[0-9]+$ ]]
-  [ "$exp" -ge $(( before + 900 )) ]
-  [ "$exp" -le $(( $(date -u +%s) + 900 )) ]
+  [ "$exp" -ge $(( before + 390 + 900 )) ]
+  [ "$exp" -le $(( $(date -u +%s) + 390 + 900 )) ]
   # decision 1: deploy.sh never writes the maintenance flag
   [ ! -e "$HYDRA_MAINTENANCE_FLAG" ]
   run grep -nE 'hydra-maintenance|HYDRA_MAINTENANCE_FLAG' "$d"
