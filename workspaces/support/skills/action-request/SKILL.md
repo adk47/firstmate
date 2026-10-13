@@ -263,7 +263,7 @@ Read `create_ticket`'s JSON response and choose the template:
 
 ### Submitted (`submitted: true`)
 
-Use `sla` verbatim from the response. **Never put `ticket_id` in a reply** – it is an internal id (see SOUL.md, Response Rules).
+Use `sla` verbatim from the response. **Never put `ticket_id` in a reply** – it is an internal id (see SOUL.md, Zero Internal Knowledge).
 
 **Tier 1:** "I've flagged your request for our team. You'll hear back within `<sla>`. If you need to add anything, just reply here."
 
