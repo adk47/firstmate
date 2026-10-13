@@ -104,7 +104,7 @@ Scan for and redact patterns that could be PII leakage:
 
 Truncate responses to 2,000 tokens (approximately 8,000 characters). CS responses should be concise -- if hitting this limit, the response is too verbose.
 
-If truncated, append: "... For more details, please visit help.muso.ai or create a support ticket."
+If truncated, append: "... There is more detail at help.muso.ai. If you want me to pass this to the team, just say so."
 
 ## Alert Levels
 

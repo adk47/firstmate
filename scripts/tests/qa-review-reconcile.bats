@@ -683,6 +683,7 @@ STUB
   cat > "$DISPATCH_STUB" <<'STUB'
 #!/usr/bin/env bash
 printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" >> "$DISPATCH_CALLS"
+printf '%s\n' "${QA_DEDUP_REFUSED_RC:-unset}" >> "$DISPATCH_CALLS.refused_rc"
 # DISPATCH_RC lets a test simulate a failing dispatcher (75 = never reached the gateway).
 exit "${DISPATCH_RC:-0}"
 STUB
@@ -2188,6 +2189,24 @@ unreach_setup() {
   done
   [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 4 ]
   [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+}
+
+@test "e2e 76a: dispatcher dedup-refusal (rc 76) is NOT an attempt: N past-cooldown ticks never exhaust or page; the reconciler asks for rc 76" {
+  sha="shaunr0000000000000000000000000000000004"
+  key="Muso-AI/core-backend#63@$sha"
+  unreach_setup 63 "$sha"
+  now="$QA_RECONCILE_NOW_EPOCH"
+  for i in 1 2 3 4 5; do
+    DISPATCH_RC=76 run "$SCRIPT" --once
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"EXHAUSTED"* ]]
+    now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+  done
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 5 ]
+  [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+  [ "$(jq -r --arg k "$key" '.[$k].unreachable_attempts // 0' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+  [ ! -s "$SLACK_CALLS" ]
+  [ "$(sort -u "$DISPATCH_CALLS.refused_rc")" = "76" ]
 }
 
 @test "e2e 75b: dispatch rc 1 STILL counts as an attempt (a systematically broken dispatcher must hit the cap)" {

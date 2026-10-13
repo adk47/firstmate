@@ -139,4 +139,106 @@ describe("sanitizeToolLeak", () => {
     const lowerRed = out.redactions.map((r) => r.toLowerCase());
     expect(lowerRed).toContain("create_ticket");
   });
+
+  it("allows the instructed truncation suffix from SKILL.md to pass unsanitized", async () => {
+    const skillPath = new URL("../../../workspaces/support/skills/output-sanitizer/SKILL.md", import.meta.url);
+    const skillText = await import("fs").then((fs) => fs.promises.readFile(skillPath, "utf-8"));
+
+    // Extract the suffix from the "If truncated, append: "..." line
+    const match = skillText.match(/If truncated, append: "([^"]+)"/);
+    if (!match || !match[1]) {
+      throw new Error("Could not find 'If truncated, append: \"...\"' line in SKILL.md");
+    }
+    const suffix = match[1];
+
+    // The instructed suffix must survive sanitization without redaction
+    const out = sanitizeToolLeak(suffix);
+    expect(out.redactions).toEqual([]);
+    expect(out.body).toBe(suffix);
+  });
+
+  it("the instructed truncation suffix contains no customer-banned word", async () => {
+    const skillPath = new URL("../../../workspaces/support/skills/output-sanitizer/SKILL.md", import.meta.url);
+    const skillText = await import("fs").then((fs) => fs.promises.readFile(skillPath, "utf-8"));
+    const match = skillText.match(/If truncated, append: "([^"]+)"/);
+    if (!match || !match[1]) {
+      throw new Error("Could not find 'If truncated, append: \"...\"' line in SKILL.md");
+    }
+    for (const word of ["tool", "lookup", "error", "unavailable", "system", "api", "ticket", "clickup", "openclaw", "hydra"]) {
+      expect(match[1].toLowerCase()).not.toMatch(new RegExp(`\\b${word}\\b`));
+    }
+  });
+
+  // MUS-5248: a customer is never told where our work is tracked.
+  it("redacts a GitHub issue URL", () => {
+    const out = sanitizeToolLeak(
+      "See https://github.com/Muso-AI/platform-data-processing/issues/2405 for status.",
+    );
+    expect(out.body).not.toContain("github.com");
+    expect(out.body).not.toContain("2405");
+    expect(out.redactions.length).toBeGreaterThan(0);
+  });
+
+  it("redacts a GitLab URL", () => {
+    const out = sanitizeToolLeak("Details: https://gitlab.com/muso/tracker/-/issues/2405 here.");
+    expect(out.body).not.toContain("gitlab.com");
+    expect(out.body).not.toContain("2405");
+    expect(out.redactions.length).toBeGreaterThan(0);
+  });
+
+  it("redacts a scheme-less GitHub path (no https://)", () => {
+    for (const input of [
+      "See github.com/Muso-AI/platform-data-processing/issues/2405",
+      "See github.com/Muso-AI/core-backend/issues/1234",
+      "See www.gitlab.com/muso/tracker/-/issues/77",
+    ]) {
+      const out = sanitizeToolLeak(input);
+      expect(out.body).not.toMatch(/github\.com|gitlab\.com/);
+      expect(out.body).not.toMatch(/\d{2,}/);
+      expect(out.redactions.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("redacts 'issue <n>' with no hash (only the issue pattern covers this)", () => {
+    const out = sanitizeToolLeak("Your verification is open on issue 2405.");
+    expect(out.body).not.toContain("2405");
+  });
+
+  it("leaves a small number after 'issue' alone (no tracker has 1-2 digit ids worth hiding)", () => {
+    const input = "I raised issue 3 in your catalog and these issues 2 weeks ago.";
+    const out = sanitizeToolLeak(input);
+    expect(out.body).toBe(input);
+    expect(out.redactions).toEqual([]);
+  });
+
+  it("redacts 'issue #<n>'", () => {
+    const out = sanitizeToolLeak("Your verification is open on issue #2405.");
+    expect(out.body).not.toContain("2405");
+  });
+
+  it("redacts a bare '#<digits>' with no 'issue' word and no URL", () => {
+    const out = sanitizeToolLeak("Tracked on #2405.");
+    expect(out.body).not.toContain("2405");
+  });
+
+  it("redacts the internal repo name", () => {
+    const out = sanitizeToolLeak("We filed it under platform-data-processing.");
+    expect(out.body).not.toContain("platform-data-processing");
+  });
+
+  it("leaves an order reference written without a hash untouched", () => {
+    // order_lookup / order_address_update are live customer flows
+    // (workspaces/support/TOOLS.md:115,129,274): a hash-free order number must survive.
+    const input = "Your order 104820 shipped to the address on file.";
+    const out = sanitizeToolLeak(input);
+    expect(out.body).toBe(input);
+    expect(out.redactions).toEqual([]);
+  });
+
+  it("leaves 'issues' with no digit after it untouched", () => {
+    const input = "I can see three issues with your credits.";
+    const out = sanitizeToolLeak(input);
+    expect(out.body).toBe(input);
+    expect(out.redactions).toEqual([]);
+  });
 });

@@ -9,12 +9,16 @@ setup() {
   export SESSION_THREAD_NOW_MS=2000000000000
   export SESSION_THREAD_RETENTION_DAYS=14
   export SESSION_THREAD_MAX_DELETES=100
+  export OPENCLAW_STUB_ARGV="$BATS_TEST_TMPDIR/argv.log"
+  export HYDRA_MAINTENANCE_FLAG="$BATS_TEST_TMPDIR/no-maintenance-flag"
+  export HYDRA_DEPLOY_WINDOW_FLAG="$BATS_TEST_TMPDIR/no-window-flag"
 
   export FAKE_OPENCLAW_VERSION="${FAKE_OPENCLAW_VERSION:-2026.7.1}"
 
   cat > "$OPENCLAW_STUB" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >> "${OPENCLAW_STUB_ARGV:-/dev/null}"
 
 if [[ " $* " == *" --version "* || "${*: -1}" == "--version" ]]; then
   echo "openclaw ${FAKE_OPENCLAW_VERSION:-2026.7.1}"
@@ -479,4 +483,27 @@ Config (/root/.openclaw-main/openclaw.json): Removed retired agents.entries.*.de
   [ "$(jq -r '.deleted' <<<"$output")" -eq 1 ]           # despite progress
   [ "$(jq -r '.failed'  <<<"$output")" -eq 1 ]
   echo "$output" | grep -qv 'TRANSIENT gateway failure'
+}
+
+@test "inside a deploy window it stands down: exit 0, logged, no gateway call" {
+  jq -n --argjson e "$(( $(date -u +%s) + 600 ))" '{reason:"deploy gateway warm-up",expires_epoch:$e}' > "$HYDRA_DEPLOY_WINDOW_FLAG"
+  run bash "$SUT" --profile main --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"deploy window: deploy gateway warm-up - skipping"* ]]
+  [ ! -s "$OPENCLAW_STUB_ARGV" ]
+}
+
+@test "inside a maintenance window it stands down: exit 0, logged, no gateway call" {
+  jq -n --argjson e "$(( $(date -u +%s) + 600 ))" '{reason:"openclaw bump",expires_epoch:$e}' > "$HYDRA_MAINTENANCE_FLAG"
+  run bash "$SUT" --profile main --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"maintenance: openclaw bump - skipping"* ]]
+  [ ! -s "$OPENCLAW_STUB_ARGV" ]
+}
+
+@test "an EXPIRED deploy window changes nothing: the gateway is called as today" {
+  jq -n --argjson e "$(( $(date -u +%s) - 60 ))" '{reason:"old",expires_epoch:$e}' > "$HYDRA_DEPLOY_WINDOW_FLAG"
+  run bash "$SUT" --profile main --apply
+  [ "$status" -eq 0 ]
+  grep -q 'gateway call sessions.delete' "$OPENCLAW_STUB_ARGV"
 }

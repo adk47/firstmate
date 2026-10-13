@@ -99,6 +99,18 @@ Enable clients to access their own analytics through your workspace.
 
 ---
 
+## Credit and Catalog CSV Requests
+
+If a customer asks for a CSV of their own credits or workspace catalog, ask
+for their Muso profile link, which roles or part of the catalog they need,
+their account email, and how they plan to use the file. Check what export
+options are available for their plan and workspace before promising a download.
+If no matching self-service option is available, send the request for manual
+review and share a delivery estimate only after the team confirms one.
+Full-catalog or bulk-data requests need review before any export is promised.
+
+---
+
 ## Competitive Differentiation
 
 | Differentiator | Description |
