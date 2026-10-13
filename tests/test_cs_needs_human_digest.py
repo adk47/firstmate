@@ -1521,10 +1521,6 @@ class TestBuildNextStateAgingRefresh(unittest.TestCase):
         self.assertEqual([c["id"] for c in aging_items], ["C1"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestActionableWindowWiring(unittest.TestCase):
     """MUS-8853b: the 30d window reaches both renderers, --delta and the
     persisted state through main() — a 194d-old thread is not listed, and is
@@ -1633,3 +1629,25 @@ class TestActionableWindowWiring(unittest.TestCase):
     def test_dry_run_delta_with_backlog_writes_nothing(self):
         _, _, _, saved = self._run([self.OLD, self.NEW], ["--delta"])
         self.assertIsNone(saved)
+
+    def test_dup_count_ignores_pair_that_is_entirely_backlog(self):
+        # Wiring of actionable_dups in main(): two 194d threads of one contact
+        # must not surface as a duplicate pair in either rendering.
+        o1 = conv(cid="O1", email="old@example.com", lar=0, lcr=self.NOW - 194 * self.DAY)
+        o2 = conv(cid="O2", email="old@example.com", lar=0, lcr=self.NOW - 195 * self.DAY)
+        _, out, blocks, _ = self._run([o1, o2, self.NEW], ["--post"])
+        self.assertIn("possible duplicate open conversations: 0", out)
+        self.assertIn("possible duplicate open conversations: 0",
+                      self._block_text(blocks).replace("*", ""))
+
+    def test_dup_count_keeps_pair_when_one_member_is_live(self):
+        live = conv(cid="L", email="mix@example.com", lar=0, lcr=self.NOW - 3600)
+        old = conv(cid="O", email="mix@example.com", lar=0, lcr=self.NOW - 194 * self.DAY)
+        _, out, blocks, _ = self._run([live, old], ["--post"])
+        self.assertIn("possible duplicate open conversations: 2", out)
+        self.assertIn("possible duplicate open conversations: 2",
+                      self._block_text(blocks).replace("*", ""))
+
+
+if __name__ == "__main__":
+    unittest.main()
