@@ -32,6 +32,9 @@ PRUNE_PATH="${HYDRA_PRUNE_PATH:-/usr/bin:/bin}"
 LOCK_FILE="${LOCK_FILE:-/run/lock/hydra-main-prune-restart.lock}"
 # TERM at 1200s, KILL 30s later: a cleanup that ignores TERM must not hold main stopped until systemd's 90 min.
 CLEANUP_TIMEOUT_S="${CLEANUP_TIMEOUT_S:-1200}"; CLEANUP_KILL_AFTER_S="${CLEANUP_KILL_AFTER_S:-30}"
+DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"   # same default as scripts/deploy.sh:21; the ssh-mode rsync target and the mutation marker live here
+MARKER_MAX_AGE_MIN="${HYDRA_DEPLOY_MARKER_MAX_AGE_MIN:-120}"
+REASON_MUT=""
 REASON="${1:-manual}"
 TS=$(date -u +%Y%m%dT%H%M%SZ); BK="$BACKUP_ROOT/$TS"
 
@@ -52,10 +55,38 @@ main_uptime_h() {
   echo $(( (now - start) / 3600000000 ))
 }
 
+# Someone other than us is mutating node-8 (MUS-8545 round 9 / MUS-8735 residual).
+# The pgrep below only sees a LOCAL deploy; an ssh-mode deploy driven from a laptop leaves no deploy.sh process
+# here, and TERMing that local ssh does not stop the command already running on node-8, so its remote tail can
+# outlive the ssh that held our prune lock. Three signals: (1) and (2) are live and have no upper time bound;
+# (3) covers the whole claim->clear window but its mtime is never refreshed (claim writes it once), so it goes
+# blind past MARKER_MAX_AGE_MIN on purpose (a stranded marker must not disable the nightly prune forever; the
+# timer fires once a night, so a stranded one costs at most one night). Past the bound only (1) and (2) remain.
+# A deploy with a non-default DEPLOY_PATH would need this unit's environment updated too.
+# No pipelines: `set -o pipefail` is on, so `pgrep ... | grep -q` would silently never fire.
+deploy_mutating_node8() {
+  local jobs rs marker
+  jobs=$(systemctl list-jobs --no-legend 2>/dev/null || true)
+  case "$jobs" in *openclaw-gateway-*)
+    REASON_MUT="a systemd job is already operating a gateway: $(printf '%s' "$jobs" | tr '\n' ';')"; return 0 ;;
+  esac
+  rs=$(pgrep -af 'rsync --server' 2>/dev/null || true)
+  case "$rs" in *"$DEPLOY_PATH/"*)
+    REASON_MUT="a live rsync --server is writing $DEPLOY_PATH/ ($rs)"; return 0 ;;
+  esac
+  marker=$(find "$DEPLOY_PATH/.deploy-mutating" -mmin "-$MARKER_MAX_AGE_MIN" 2>/dev/null || true)
+  if [ -n "$marker" ]; then
+    REASON_MUT="$DEPLOY_PATH/.deploy-mutating is younger than ${MARKER_MAX_AGE_MIN}m (owner: $(head -n 1 "$DEPLOY_PATH/.deploy-mutating" 2>/dev/null | tr -d '[:space:]' || echo unreadable))"
+    return 0
+  fi
+  return 1
+}
+
 # One run at a time, BEFORE the active check. Lock dies with the process (fd 9). Cannot open = abort (pages); held = skip.
 exec 9>"$LOCK_FILE" || { log "ERROR cannot open lock $LOCK_FILE - aborting before any change"; exit 1; }
 flock -n 9 || { log "another main-prune-restart run holds $LOCK_FILE - skip"; exit 0; }
 if pgrep -f "scripts/(deploy|rollback).sh" >/dev/null; then log "deploy/rollback running - skip"; exit 0; fi
+if deploy_mutating_node8; then log "WARN SKIP deploy-mutation-in-flight: $REASON_MUT - skip (nothing was changed)"; exit 0; fi
 systemctl is-active --quiet "$SVC" || { log "main not active - skip (systemd/watchdog own that)"; exit 0; }
 if [ "$MIN_UPTIME_H" -gt 0 ]; then
   up_h="${HYDRA_MAIN_UPTIME_H:-$(main_uptime_h)}"
@@ -96,6 +127,12 @@ recover_main() {
   systemctl start "$SVC" || log "ERROR recovery start failed"
   "$MAINT_SH" stop >/dev/null 2>&1 || true
 }
+# Re-check: the online backup above is the longest pre-stop segment. The backup dir stays (the 2 newest are kept).
+if deploy_mutating_node8; then
+  log "WARN SKIP deploy-mutation-in-flight before stop: $REASON_MUT - main NOT stopped"
+  rm -rf "$TC"; "$MAINT_SH" stop >/dev/null 2>&1 || true
+  exit 0
+fi
 s=$(date +%s); stop_rc=0; systemctl stop "$SVC" || stop_rc=$?
 if [ "$stop_rc" -ne 0 ] || systemctl is-active --quiet "$SVC"; then
   log "ERROR stop failed (rc=$stop_rc, active=$(systemctl is-active "$SVC")) - NOT pruning a live store; main left as is"

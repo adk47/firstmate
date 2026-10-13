@@ -28,6 +28,8 @@ c.executemany('insert into session_nodes values (?)',[(i,) for i in range(5)]); 
   export STUB_ACTIVE=active STUB_PGREP_RC=1 STUB_HTTP=200
   export LOCK_FILE="$TEST_TMPDIR/prune.lock"
   export STUB_START_RC=0 HYDRA_PRUNE_PATH="$STUBBIN:$PATH"
+  export DEPLOY_PATH="$TEST_TMPDIR/deploy"; mkdir -p "$DEPLOY_PATH"
+  export STUB_JOBS="" STUB_PGREP_OUT=""
 
   # Stateful: a successful stop makes the service inactive until a start.
   cat > "$STUBBIN/systemctl" <<'STUB'
@@ -36,6 +38,7 @@ echo "systemctl $*" >> "$CALLS"
 case "$1" in
   is-active) if [ "$STUB_ACTIVE" = active ] && [ ! -e "$TEST_TMPDIR/stopped" ]; then echo active; exit 0; else echo inactive; exit 3; fi ;;
   show)      echo 0; exit 0 ;;
+  list-jobs) printf '%s' "${STUB_JOBS:-}"; exit 0 ;;
   stop)      if [ "${STUB_STOP_RC:-0}" -eq 0 ] || [ -n "${STUB_STOP_DEACTIVATES:-}" ]; then touch "$TEST_TMPDIR/stopped"; fi; exit "${STUB_STOP_RC:-0}" ;;
   start)     [ "${STUB_START_RC:-0}" -eq 0 ] && rm -f "$TEST_TMPDIR/stopped"; exit "${STUB_START_RC:-0}" ;;
 esac
@@ -57,6 +60,8 @@ echo "$STUB_HTTP"
 STUB
   cat > "$STUBBIN/pgrep" <<'STUB'
 #!/usr/bin/env bash
+# STUB_PGREP_OUT answers only the rsync --server probe; the deploy/rollback probe keeps STUB_PGREP_RC
+case "$*" in *"rsync --server"*) [ -z "${STUB_PGREP_OUT:-}" ] || { printf '%s\n' "$STUB_PGREP_OUT"; exit 0; }; exit 1 ;; esac
 exit "$STUB_PGREP_RC"
 STUB
   cat > "$MAINT_SH" <<'STUB'
@@ -322,4 +327,69 @@ STUB
   [ "$status" -ne 0 ]
   [[ "$output" == *"cleanup rc=137"* ]]
   [ "$(_count 'systemctl start openclaw-gateway-main')" -eq 1 ]
+}
+
+# --- round 9 (MUS-8545): remote-side deploy-mutation guard. Three signals, each paired with a must-not-skip case.
+_assert_skipped_untouched() {
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SKIP deploy-mutation-in-flight"* ]]
+  [ "$(_count 'systemctl stop')" -eq 0 ]
+  [ "$(_count '^maintenance start')" -eq 0 ]
+}
+
+@test "mutation guard: a systemd job already operating a gateway skips the prune" {
+  STUB_JOBS="59227591 openclaw-gateway-main.service start running" _run
+  _assert_skipped_untouched
+}
+
+@test "mutation guard: an unrelated systemd job does not skip" {
+  STUB_JOBS="59224459 close-resolved-conversations.service start running" _run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RESULT OK"* ]]
+  [ "$(_count 'systemctl stop')" -eq 1 ]
+}
+
+@test "mutation guard: a live rsync --server writing DEPLOY_PATH/ skips the prune" {
+  STUB_PGREP_OUT="4242 rsync --server --delete-before -g -l . $DEPLOY_PATH/" _run
+  _assert_skipped_untouched
+}
+
+@test "mutation guard: a live rsync --server writing another path does not skip" {
+  STUB_PGREP_OUT="4242 rsync --server --delete-before -g -l . /opt/other/" _run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RESULT OK"* ]]
+  [ "$(_count 'systemctl stop')" -eq 1 ]
+}
+
+@test "mutation guard: a fresh .deploy-mutating marker skips and names its owner" {
+  echo "ci-run-77" > "$DEPLOY_PATH/.deploy-mutating"
+  _run
+  _assert_skipped_untouched
+  [[ "$output" == *"ci-run-77"* ]]
+}
+
+@test "mutation guard: a marker older than the bound does not skip" {
+  echo stranded > "$DEPLOY_PATH/.deploy-mutating"
+  touch -t "$(date -u -v-3H +%Y%m%d%H%M 2>/dev/null || date -u -d '3 hours ago' +%Y%m%d%H%M)" "$DEPLOY_PATH/.deploy-mutating"
+  _run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RESULT OK"* ]]
+  [ "$(_count 'systemctl stop')" -eq 1 ]
+}
+
+@test "mutation guard: a marker that appears after the backup stops the run before main is stopped, and cleans up" {
+  # signals are clear at the first check; the maintenance stub (called after it) drops the marker
+  cat > "$MAINT_SH" <<'STUB'
+#!/usr/bin/env bash
+echo "maintenance $*" >> "$CALLS"
+[ "$1" = start ] && echo racing-deploy > "$DEPLOY_PATH/.deploy-mutating"
+exit 0
+STUB
+  mkdir -p "$TEST_TMPDIR/tmpdir"
+  TMPDIR="$TEST_TMPDIR/tmpdir" _run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SKIP deploy-mutation-in-flight before stop"* ]]
+  [ "$(_count 'systemctl stop')" -eq 0 ]
+  grep -q '^maintenance stop' "$CALLS"
+  [ -z "$(ls -A "$TEST_TMPDIR/tmpdir")" ]
 }
