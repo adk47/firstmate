@@ -7,7 +7,13 @@
 #
 # Usage:
 #   jev-shadow-report.sh [--surface <name>] [--window-hours <N>] \
-#     [--shadow-dir <dir>]
+#     [--shadow-dir <dir>] [--outcomes <path>]
+#
+# --outcomes joins each shadow row to a ground-truth sidecar JSONL (one
+# record per conversation turn, keyed by surface/item_id/ts -- see
+# scripts/jev-outcomes-collect.py for the writer) and scores agreement
+# against that instead of the router's own action in row["actual"]. Absent,
+# the report is unchanged from before this flag existed.
 #
 # Aggregation is implemented in an embedded python3 script (not jq): it needs
 # per-answer-type dispatch (noul/choice/score), a percentile calc, and
@@ -28,12 +34,14 @@ set -euo pipefail
 surface=""
 window_hours=""
 shadow_dir="$JEV_SHADOW_DIR"
+outcomes_path=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --surface) surface="$2"; shift 2 ;;
     --window-hours) window_hours="$2"; shift 2 ;;
     --shadow-dir) shadow_dir="$2"; shift 2 ;;
+    --outcomes) outcomes_path="$2"; shift 2 ;;
     *) echo "jev-shadow-report.sh: unknown argument: $1" >&2; exit 5 ;;
   esac
 done
@@ -51,7 +59,7 @@ if [ -n "$surface" ]; then
   esac
 fi
 
-python3 - "$shadow_dir" "$surface" "$window_hours" <<'PY'
+python3 - "$shadow_dir" "$surface" "$window_hours" "$outcomes_path" <<'PY'
 import glob
 import json
 import math
@@ -59,13 +67,23 @@ import os
 import sys
 from datetime import datetime, timezone
 
-shadow_dir, surface, window_hours = sys.argv[1], sys.argv[2], sys.argv[3]
+shadow_dir, surface, window_hours, outcomes_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 if surface:
     paths = [os.path.join(shadow_dir, f"{surface}.jsonl")]
     paths = [p for p in paths if os.path.isfile(p)]
 else:
     paths = sorted(glob.glob(os.path.join(shadow_dir, "*.jsonl")))
+    # Outcomes sidecars (<name>.outcomes.jsonl) are ground truth, not shadow
+    # logs, but the producer writes them into this same directory. Drop them
+    # by name so an alternate --outcomes path elsewhere cannot leave the
+    # default sidecar to be parsed as shadow rows; also drop the selected
+    # file by realpath (it may have any name). realpath both sides so ./x, an
+    # absolute join and a symlinked shadow dir all resolve to the same file.
+    paths = [p for p in paths if not p.endswith(".outcomes.jsonl")]
+    if outcomes_path:
+        outcomes_real = os.path.realpath(outcomes_path)
+        paths = [p for p in paths if os.path.realpath(p) != outcomes_real]
 
 cutoff = None
 if window_hours:
@@ -186,9 +204,64 @@ def row_ok(row):
     return True
 
 
+def outcome_row_ok(row):
+    # Whole-row shape check for a ground-truth sidecar record, mirroring
+    # row_ok's discipline: validate the whole shape before any field is
+    # used, so one bad record can never abort the read.
+    if not isinstance(row, dict):
+        return False
+    surface = row.get("surface")
+    if not isinstance(surface, str) or not surface:
+        return False
+    item_id = row.get("item_id")
+    if not isinstance(item_id, str) or not item_id:
+        return False
+    row_ts = row.get("row_ts")
+    if not isinstance(row_ts, list) or not row_ts or not all(isinstance(t, str) for t in row_ts):
+        return False
+    truth = row.get("truth")
+    if not isinstance(truth, dict):
+        return False
+    return True
+
+
 undated = 0  # rows dropped from a windowed report for a missing/unparseable ts
 malformed = 0  # rows that parsed as JSON but failed row_ok, or blew up while being processed
 surfaces = {}  # surface -> {"lines": [...], "questions": {qid: [ (bucket_idx, answer, actual) ]}}
+
+# outcomes_truth[(surface, item_id, ts)] -> truth dict. Absent key means "no
+# matching outcome record" (never scored); a present record whose truth omits
+# a qid means "unlabelled for that question" -- both must yield actual_q=None
+# but the footer's outcomes_matched distinguishes the two by counting only
+# the former as unmatched.
+outcomes_truth = {}
+outcomes_rows_by_surface = {}    # surface -> count of valid outcome records (pre row_ts expansion)
+outcomes_matched_by_surface = {}  # surface -> count of shadow rows whose join found a truth record
+
+if outcomes_path:
+    with open(outcomes_path, "r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                orow = json.loads(raw_line)
+            except Exception:
+                malformed += 1
+                continue
+            if not outcome_row_ok(orow):
+                malformed += 1
+                continue
+            try:
+                osurf = orow["surface"]
+                oitem = orow["item_id"]
+                otruth = orow["truth"]
+                outcomes_rows_by_surface[osurf] = outcomes_rows_by_surface.get(osurf, 0) + 1
+                for ts in orow["row_ts"]:
+                    outcomes_truth[(osurf, oitem, ts)] = otruth
+            except Exception:
+                malformed += 1
+                continue
 
 for path in paths:
     with open(path, "r", encoding="utf-8") as fh:
@@ -226,8 +299,17 @@ for path in paths:
                 entry = surfaces.setdefault(surf, {"lines": [], "questions": {}})
                 entry["lines"].append(row)
 
+                truth_rec = None
+                if outcomes_path:
+                    truth_rec = outcomes_truth.get((surf, row.get("item_id"), row.get("ts")))
+                    if truth_rec is not None:
+                        outcomes_matched_by_surface[surf] = outcomes_matched_by_surface.get(surf, 0) + 1
+
                 answers = row.get("answers")
-                actual = row.get("actual")
+                # actual is the router's own action, not ground truth -- with
+                # --outcomes it must never enter the comparison, so it is not
+                # even read in that mode (see truth_rec above).
+                actual = None if outcomes_path else row.get("actual")
                 if isinstance(answers, dict):
                     for qid, ans in answers.items():
                         if not isinstance(ans, dict):
@@ -246,8 +328,14 @@ for path in paths:
                             # defensive skip in case a future bucket edit reopens
                             # a gap.
                             continue
-                        # actual is one string for every question, or an object keyed by question id
-                        actual_q = actual.get(qid) if isinstance(actual, dict) else actual
+                        if outcomes_path:
+                            # No fallback to row["actual"] -- a qid absent
+                            # from the matched (or unmatched) truth record is
+                            # unlabelled, never silently scored.
+                            actual_q = truth_rec.get(qid) if truth_rec is not None else None
+                        else:
+                            # actual is one string for every question, or an object keyed by question id
+                            actual_q = actual.get(qid) if isinstance(actual, dict) else actual
                         entry["questions"].setdefault(qid, []).append((bucket_idx, answer, actual_q))
             except Exception:
                 malformed += 1
@@ -276,6 +364,10 @@ for surf in sorted(surfaces):
                 matched = sum(1 for r in judged if r[1] == r[2])
                 agreement = f"{round(100 * matched / len(judged), 1)}%"
             print(f"    {label}   {n}   {agreement}")
+        if outcomes_path:
+            labelled = sum(1 for r in rows if r[2] is not None)
+            unlabelled = len(rows) - labelled
+            print(f"    -- labelled={labelled} unlabelled={unlabelled}")
 
     lines = data["lines"]
     total = len(lines)
@@ -289,6 +381,21 @@ for surf in sorted(surfaces):
     p50_s = "n/a" if p50 is None else str(p50)
     p95_s = "n/a" if p95 is None else str(p95)
     tail = f" undated_excluded={undated}" if cutoff is not None else ""
+    if outcomes_path:
+        tail += (
+            f" outcomes_rows={outcomes_rows_by_surface.get(surf, 0)}"
+            f" outcomes_matched={outcomes_matched_by_surface.get(surf, 0)}"
+        )
     print(f"  -- footer: total={total} rc_nonzero={rc_nonzero} p50_ms={p50_s} p95_ms={p95_s}{tail} malformed_rows={malformed}")
+    # Failure breakdown: rc collapses timeout/network/http_*; rows written
+    # before `reason` existed count as "unknown".
+    reasons = {}
+    for r in lines:
+        if r.get("rc") not in (0, None):
+            key = r.get("reason")
+            key = key if isinstance(key, str) and key else "unknown"
+            reasons[key] = reasons.get(key, 0) + 1
+    if reasons:
+        print("  -- failures by reason: " + " ".join(f"{k}={v}" for k, v in sorted(reasons.items())))
     print()
 PY

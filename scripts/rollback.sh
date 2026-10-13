@@ -8,6 +8,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/deploy-mutation-marker.sh
 source "$SCRIPT_DIR/lib/deploy-mutation-marker.sh"
+# shellcheck source=lib/main-prune-lock.sh
+source "$SCRIPT_DIR/lib/main-prune-lock.sh"
 HYDRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/ovh_muso}"
@@ -102,6 +104,8 @@ read_deployed_sha() {
 GATEWAYS_RESTARTED=0
 ensure_gateways_up() {
   [ "$GATEWAYS_RESTARTED" = 1 ] && return 0
+  # The remote prune lock was lost (ssh holder died): starting main unlocked could race the offline prune.
+  main_prune_lock_lost && { log "rollback aborted: main prune lock lost; leaving main alone (the prune restarts it)"; return 0; }
   log "rollback exiting before Step 2: starting any stopped gateway so the fleet is not left down"
   local start_cmd='for svc in openclaw-gateway-main openclaw-gateway-edge; do
   if systemctl is-active "$svc" &>/dev/null || systemctl is-enabled "$svc" &>/dev/null; then
@@ -146,6 +150,29 @@ notify_slack ":warning: HYDRA rollback initiated. Reverting $CURRENT_SHA -> $PRE
 # checkout with two files reverted. Using a separate worktree also means we
 # never mutate $HYDRA_ROOT (the runner's checkout), so a partial rollback
 # can't leave the source tree in a franken-state.
+# Serialise with scripts/main-prune-restart.sh before any mutation (MUS-3742): Step 2 restarts the gateways
+# with raw systemctl, which would race an offline prune. Same lock as deploy.sh (lib/main-prune-lock.sh).
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+  lock_rc=0
+  log "Taking the main prune/restart lock (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock || lock_rc=$?
+  # Refused: a prune may have main stopped for offline cleanup. Starting it here, unlocked, is the race the lock exists
+  # to stop, so disarm the EXIT backstop (ensure_gateways_up). Nothing of ours is stopped yet; the server stays as-is.
+  [ "$lock_rc" = 0 ] || GATEWAYS_RESTARTED=1
+  case "$lock_rc" in
+    0) ;;
+    1) fail "a main prune/restart still holds $MAIN_PRUNE_LOCK_FILE after ${MAIN_PRUNE_LOCK_WAIT_SECS}s; refusing to roll back underneath it. Server left as-is; re-run once it finishes." ;;
+    *) fail "cannot open $MAIN_PRUNE_LOCK_FILE (rc=$lock_rc); refusing to roll back without the main prune/restart lock. Server left as-is." ;;
+  esac
+else
+  # ssh mode: hold the lock ON node-8 for the life of this process (lib/main-prune-lock.sh); refused = fail closed.
+  lock_rc=0
+  log "Taking the main prune/restart lock ON node-8 (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock_remote ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" || lock_rc=$?
+  # Same as the local branch: a refused lock must not let the EXIT backstop start main during an offline prune.
+  [ "$lock_rc" = 0 ] || { GATEWAYS_RESTARTED=1; fail "could not take $MAIN_PRUNE_LOCK_FILE on node-8 (rc=$lock_rc: a main prune/restart still holds it, or node-8 is unreachable); refusing to roll back underneath it. Server left as-is; re-run once it finishes."; }
+fi
+
 log "Step 1/4: Materializing last-known-good tree ($PREVIOUS_SHA)..."
 ROLLBACK_TREE="$(mktemp -d -t hydra-rollback-XXXXXX)"
 cleanup_rollback_tree() {

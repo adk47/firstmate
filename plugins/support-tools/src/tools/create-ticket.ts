@@ -20,7 +20,7 @@ import {
   intercomDeeplink,
 } from "./ticket-format.js";
 import { deriveConvId } from "./dedupe-check.js";
-import { markTicketFiled } from "../ticket-success-signal.js";
+import { markTicketFiled, markTicketId } from "../ticket-success-signal.js";
 import { validateProdigiAddress } from "../order-address.js";
 
 const Parameters = Type.Object({
@@ -406,10 +406,16 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       // Cross-conversation fallback. Skipped for profile-merge AND track-merge:
       // the merged-ticket sweep auto-closes those keyed on the ORIGINAL
       // description's ids, so appending a DIFFERENT merge request (a distinct
-      // track/profile set) cross-conversation could be closed unexecuted. The
+      // track/profile set) cross-conversation could be closed unexecuted. Also
+      // skipped for rights_holder: the lookup keys on (actionType, email) only,
+      // never on content, so a label/publisher/PRO/law firm mailing about a
+      // SECOND matter would be appended to the first matter's open record and
+      // lost when the sweep closes it on the first. Rights-holder mail always
+      // opens its own record (in-session follow-ups above still append). The
       // lookup GET is metered in its own bucket so a retry-looping session can't
       // hammer ClickUp search.
       if (!existingId && params.actionType !== "profile-merge" && params.actionType !== "track-merge"
+          && params.details?.escalation_reason !== "rights_holder"
           && isUsableDedupeEmail(customerEmail)
           && rateLimiter.check(sessionId, "create_ticket_lookup", 60, 10).allowed) {
         existingId = await lookupOpenTicket(params.actionType, customerEmail);
@@ -432,7 +438,11 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
           // Signal the intercom false-handoff-claim guard that a ticket really landed
           // for this conversation, so an "I've flagged this for the team" reply is
           // allowed through instead of being rewritten to the honest fallback.
-          markTicketFiled(deriveConvId(sessionKey));
+          const followupConvId = deriveConvId(sessionKey);
+          markTicketFiled(followupConvId);
+          // MUS-1516: also record WHICH id, so the guard's reference-id check
+          // can tell a real quoted id from one this conversation never filed.
+          markTicketId(followupConvId, existingId);
           // Escalation follow-up (e.g. customer already past the promised
           // SLA): give it teeth — tag the ticket so the overdue sweep groups
           // it, and bump urgent reasons to ClickUp priority 1. Both
@@ -526,7 +536,11 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       sessionTickets.record(sessionId, params.actionType, customerEmail, result.data.id);
       // Signal the intercom false-handoff-claim guard that a ticket really landed for
       // this conversation (mirrors the follow-up-append path above).
-      markTicketFiled(deriveConvId(sessionKey));
+      markTicketFiled(convId);
+      // MUS-1516: also record WHICH id (reuses the `convId` already derived above
+      // for the Intercom deeplink), so the guard's reference-id check can tell a
+      // real quoted id from one this conversation never filed.
+      markTicketId(convId, result.data.id);
       return ticketResult({ submitted: true, ticket_id: result.data.id, sla, action_type: params.actionType, tier });
     },
   };
