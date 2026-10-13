@@ -112,6 +112,27 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ "$(wc -c < "$CH/logs_2.sqlite")" -eq "$before" ]
 }
 
+@test "a non-numeric df Available column skips VACUUM but still visits every home" {
+  CH2="$TEST_TMPDIR/.openclaw-main/agents/zz/agent/codex-home"
+  mkdir -p "$CH2/sessions"
+  _chp_db "$CH/logs_2.sqlite"
+  _chp_db "$CH2/logs_2.sqlite"
+  cat > "$TEST_TMPDIR/bin/df" <<'DF'
+#!/bin/sh
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/fake 100 1 - 1% /"
+DF
+  chmod +x "$TEST_TMPDIR/bin/df"
+  before="$(wc -c < "$CH/logs_2.sqlite")"
+  run "$PRUNE" --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VACUUM skipped"* ]]
+  [[ "$output" != *"arithmetic"* ]]
+  [[ "$output" == *"/qa sessions_files="* ]]
+  [[ "$output" == *"/zz sessions_files="* ]]
+  [ "$(wc -c < "$CH/logs_2.sqlite")" -eq "$before" ]
+}
+
 @test "VACUUM runs when df reports below 80% used" {
   _chp_db "$CH/logs_2.sqlite"
   _chp_fake_df 79
