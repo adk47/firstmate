@@ -71,6 +71,16 @@ class ClassifyTest(unittest.TestCase):
                  decision("2026-10-12T10:00:02.000Z", provider="openrouter", model="openai/gpt-6-luna", err="stream ended")]
         self.assertEqual(self.cls(lines, 0), "unclassified")
 
+    def test_old_5xx_does_not_mask_a_later_successful_fetch(self):
+        # Intent: the latest completed fetch decides. A 500, then a 200, then a writer-admission
+        # failure is local; reading the old 500 would undercount local and mute the alert.
+        lines = [fetch("2026-10-12T10:00:00.000Z", "start"),
+                 fetch("2026-10-12T10:00:01.000Z", "response", status=500),
+                 fetch("2026-10-12T10:00:02.000Z", "start"),
+                 fetch("2026-10-12T10:00:03.000Z", "response", status=200),
+                 decision("2026-10-12T10:00:05.000Z", provider="openrouter", model="openai/gpt-6-luna", err="Session changed before writer admission")]
+        self.assertEqual(self.cls(lines, 0), "local")
+
     def test_fetch_for_another_model_is_ignored(self):
         lines = [fetch("2026-10-12T10:00:00.000Z", "start", model="other/model"),
                  fetch("2026-10-12T10:00:01.000Z", "response", model="other/model", status=500),
@@ -176,6 +186,50 @@ class CliTest(unittest.TestCase):
             self.assertEqual(r.main(["--log", p, "--threshold", "5"]), 10)
             self.assertEqual(r.main(["--log", p, "--threshold", "7"]), 0)
             self.assertEqual(r.main(["--log", os.path.join(d, "missing.log")]), 1)
+
+
+class PostTest(unittest.TestCase):
+    """--post must report delivery failure: slack_notify swallows it, so _post may not use it."""
+
+    def _stub(self, d, exit_code):
+        stub = os.path.join(d, "muso-stub")
+        with open(stub, "w") as fh:
+            fh.write(f"#!/bin/bash\nexit {exit_code}\n")
+        os.chmod(stub, 0o755)
+        env = {"MUSO_BIN": stub, "SLACK_NOTIFY_BOT": "devops", "SLACK_CHANNEL": "C123"}
+        # Skip slack_load_env's file lookup: the bot token var just has to be non-empty.
+        env["MUSO_SLACK_BOT_TOKEN_DEVOPS"] = "x"
+        return env
+
+    def _run_post(self, exit_code):
+        with tempfile.TemporaryDirectory() as d:
+            old = dict(os.environ)
+            os.environ.update(self._stub(d, exit_code))
+            try:
+                return r._post("hello")
+            finally:
+                os.environ.clear()
+                os.environ.update(old)
+
+    def test_post_returns_nonzero_when_slack_send_fails(self):
+        self.assertNotEqual(self._run_post(1), 0)
+
+    def test_post_returns_zero_when_slack_send_succeeds(self):
+        self.assertEqual(self._run_post(0), 0)
+
+    def test_main_exits_11_when_alert_not_delivered(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "openclaw-main-2026-10-12.log")
+            with open(p, "w") as fh:
+                fh.write("\n".join(decision(f"2026-10-12T10:00:{i:02d}.000Z", run=f"r{i}", err="local") for i in range(6)))
+            orig = r._post
+            try:
+                r._post = lambda text: 1
+                self.assertEqual(r.main(["--log", p, "--threshold", "5", "--post"]), 11)
+                r._post = lambda text: 0
+                self.assertEqual(r.main(["--log", p, "--threshold", "5", "--post"]), 10)
+            finally:
+                r._post = orig
 
 
 if __name__ == "__main__":

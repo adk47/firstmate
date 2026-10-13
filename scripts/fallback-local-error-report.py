@@ -32,7 +32,7 @@ The provider bucket never alerts; that is the existing notice's job.
 
 Usage: fallback-local-error-report.py [--profile main] [--date YYYY-MM-DD ...]
        [--log-dir DIR] [--log FILE ...] [--threshold N] [--top N] [--post]
-Exit: 0 report printed, no alert; 10 local bucket over threshold; 1 no log readable.
+Exit: 0 report printed, no alert; 10 local bucket over threshold; 11 alert not delivered (--post); 1 no log readable.
 `--post` sends the alert (alert days only) through scripts/lib/slack-notify.sh; without it the
 composed message is only printed (dry).
 """
@@ -127,8 +127,12 @@ def parse_lines(lines) -> Parsed:
 
 
 def _fetch_evidence(fetches, d):
-    """Return 'provider', 'started' or None from the [model-fetch] lines just before d."""
-    seen_start = False
+    """Return 'provider', 'started' or None from the [model-fetch] lines just before d.
+
+    The latest fetch event for the candidate decides: an old 5xx must not mask a later
+    2xx, after which the failure can only have come from the local side.
+    """
+    state = None
     for ts, kind, prov, model, status in fetches:
         if prov != d.provider or model != d.model:
             continue
@@ -136,12 +140,12 @@ def _fetch_evidence(fetches, d):
         if age < 0 or age > FETCH_WINDOW_S:
             continue
         if kind == "error" or (kind == "response" and status[:1] in ("4", "5")):
-            return "provider"
-        if kind == "start":
-            seen_start = True
+            state = "provider"
+        elif kind == "start":
+            state = "started"
         elif kind == "response":  # answered 2xx/3xx: the failure came after, locally
-            seen_start = False
-    return "started" if seen_start else None
+            state = None
+    return state
 
 
 def classify_all(p: Parsed):
@@ -227,7 +231,11 @@ def render(rep, threshold: int = DEFAULT_THRESHOLD, profile: str = "main") -> st
 
 def _post(text: str) -> int:
     lib = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "slack-notify.sh")
-    return subprocess.run(["bash", "-c", 'source "$1" && slack_notify "$2"', "_", lib, text]).returncode
+    # slack_notify swallows delivery failure by design; _slack_post_payload returns muso's real status.
+    script = ('source "$1" && f=$(mktemp) && '
+              'jq -n --arg c "$SLACK_CHANNEL" --arg t "$2" \'{channel:$c,text:$t}\' > "$f" && '
+              '_slack_post_payload "$f"; s=$?; rm -f "$f"; exit $s')
+    return subprocess.run(["bash", "-c", script, "_", lib, text]).returncode
 
 
 def main(argv=None) -> int:
@@ -264,8 +272,9 @@ def main(argv=None) -> int:
         text += f"\n:warning: {p.malformed} log line(s) mentioned a fallback but could not be decoded."
     print(text)
     hot = alerts(rep, a.threshold)
-    if hot and a.post:
-        _post(text)
+    if hot and a.post and _post(text) != 0:
+        print("alert NOT delivered: Slack post failed (alert text printed above).", file=sys.stderr)
+        return 11
     return 10 if hot else 0
 
 
