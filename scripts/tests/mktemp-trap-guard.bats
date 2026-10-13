@@ -255,6 +255,10 @@ SH
   cat > "$TEST_TMPDIR/scripts/okq.sh" <<'SH'
 #!/bin/bash
 work="$(mktemp -d)"; trap "rm -rf \"$work\"" ERR EXIT
+SH
+  # one effective EXIT trap per script: Bash keeps only the last
+  cat > "$TEST_TMPDIR/scripts/okq2.sh" <<'SH'
+#!/bin/bash
 d2="$(mktemp -d)"; trap -- 'rm -rf "$d2"' INT EXIT
 SH
   run_guard
@@ -298,6 +302,9 @@ SH
   cat > "$TEST_TMPDIR/scripts/multi.sh" <<'SH'
 #!/bin/bash
 work="$(mktemp -d)"; trap 'echo bye; rm -rf "$work" && true' EXIT
+SH
+  cat > "$TEST_TMPDIR/scripts/multi2.sh" <<'SH'
+#!/bin/bash
 d2="$(mktemp -d)"
 bye() {
   if [ -d "$d2" ]; then rm -rf "$d2"; fi
@@ -361,6 +368,52 @@ SH
 
 @test "top-level allocation with an EXIT trap passes" {
   printf '#!/bin/bash\nwork=$(mktemp -d)\ntrap '"'"'rm -rf "$work"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/topexit.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "EXIT trap that removes only a child of the allocation fails (parent dir leaks)" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ntrap '"'"'rm -rf "$work/child"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/child.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"child.sh:2"* ]]
+}
+
+@test "EXIT trap removing \${work} braced and quoted still passes" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ntrap '"'"'rm -rf -- "${work}"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/braced.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "a later non-cleaning EXIT trap replaces the cleanup trap and fails" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ntrap '"'"'rm -rf "$work"'"'"' EXIT\ntrap '"'"'echo done'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/replaced.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"replaced.sh:2"* ]]
+}
+
+@test "trap - EXIT after the cleanup trap clears it and fails" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ntrap '"'"'rm -rf "$work"'"'"' EXIT\ntrap - EXIT\n' > "$TEST_TMPDIR/scripts/cleared.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cleared.sh:2"* ]]
+}
+
+@test "a cleanup trap installed last (after a non-cleaning one) passes" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ntrap '"'"'echo hi'"'"' EXIT\ntrap '"'"'rm -rf "$work"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/lastok.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "a printed trap string is not a trap and fails" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\necho "trap '"'"'rm -rf $work'"'"' EXIT"\n' > "$TEST_TMPDIR/scripts/printed.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"printed.sh:2"* ]]
+}
+
+@test "a trap after then/&& on the same line still counts" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\n[ -n "$work" ] && trap '"'"'rm -rf "$work"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/andtrap.sh"
   run_guard
   [ "$status" -eq 0 ]
 }

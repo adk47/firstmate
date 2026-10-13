@@ -103,29 +103,40 @@ RE_Q1="trap[[:space:]]+(--[[:space:]]+)?'([^']*)'[[:space:]]+([^;&|]*)"
 RE_Q2='trap[[:space:]]+(--[[:space:]]+)?"(([^"\\]|\\.)*)"[[:space:]]+([^;&|]*)'
 RE_W="trap[[:space:]]+(--[[:space:]]+)?([^[:space:]'\"]+)[[:space:]]+([^;&|]*)"
 # an rm command (at a command start) that itself targets $1: split on ; & | first so an rm of
-# something else plus a mention of $1 in another command is not cleanup evidence
+# something else plus a mention of $1 in another command is not cleanup evidence. The operand must be
+# $1 itself: `rm -rf "$work/child"` leaves the allocated directory behind.
 rm_targets() {
   tr ';&|' '\n' | grep -E '(^|[{(]|(^|[[:space:]])(then|do|else))[[:space:]]*(command[[:space:]]+)?rm[[:space:]]' \
-    | grep -Eq "\\\$\{?$1([^A-Za-z0-9_]|\$)"
+    | grep -Eq "[[:space:]'\"\\\\]\\\$\{?$1(:\?)?\}?['\"\\\\]*([[:space:]]|\$|[)}])"
 }
+# a trap only counts at a command start (a printed "trap ..." string arms nothing)
+CMD_TRAP='(^|[;&|({]|[[:space:]](then|do|else))[[:space:]]*trap[[:space:]]'
+# Bash keeps only the last trap per signal, so the verdict is the LAST trap in the scope that arms EXIT
+# (or RETURN in a function): a later `trap 'echo done' EXIT` or `trap - EXIT` replaces the cleanup.
 trap_cleans() {
-  local scope="$1" var="$2" tl action sigs fn sigre="$SIG_TOP"
+  local scope="$1" var="$2" tl action sigs fn m cleans verdict=1 sigre="$SIG_TOP"
   # a function scope starts with its header line; top-level scope never does
   if [[ "$(printf '%s\n' "$scope" | head -n1)" =~ $FN_HEADER ]]; then sigre="$SIG_FN"; fi
   while IFS= read -r tl; do
+    [[ "$tl" =~ $CMD_TRAP ]] || continue
+    m="${BASH_REMATCH[0]}"; tl="trap ${tl#*"$m"}"
     action=""; sigs=""
     if   [[ "$tl" =~ $RE_Q1 ]]; then action="${BASH_REMATCH[2]}"; sigs="${BASH_REMATCH[3]}"
     elif [[ "$tl" =~ $RE_Q2 ]]; then action="${BASH_REMATCH[2]}"; sigs="${BASH_REMATCH[4]}"
     elif [[ "$tl" =~ $RE_W  ]]; then action="${BASH_REMATCH[2]}"; sigs="${BASH_REMATCH[3]}"
     else continue; fi
     printf '%s\n' "$sigs" | grep -Eq "$sigre" || continue
-    if printf '%s\n' "$action" | rm_targets "$var"; then return 0; fi
+    cleans=1
+    if printf '%s\n' "$action" | rm_targets "$var"; then cleans=0; fi
     # handlers: every function the action calls; the rm must sit in that function's own body
-    for fn in $(printf '%s\n' "$action" | grep -Eo '(^|[;&[:space:]])[A-Za-z_][A-Za-z0-9_]*' | tr -d ';& \t'); do
-      if printf '%s\n' "$src" | fn_body "$fn" | rm_targets "$var"; then return 0; fi
-    done
+    if [ "$cleans" -ne 0 ]; then
+      for fn in $(printf '%s\n' "$action" | grep -Eo '(^|[;&[:space:]])[A-Za-z_][A-Za-z0-9_]*' | tr -d ';& \t'); do
+        if printf '%s\n' "$src" | fn_body "$fn" | rm_targets "$var"; then cleans=0; break; fi
+      done
+    fi
+    verdict=$cleans
   done < <(printf '%s\n' "$scope" | grep -E '(^|[^A-Za-z_])trap[[:space:]]')
-  return 1
+  return "$verdict"
 }
 
 while IFS= read -r f; do
