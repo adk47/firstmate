@@ -35,6 +35,7 @@ STUB
   chmod +x "$TEST_TMPDIR/openclaw-stub"
   export OPENCLAW_BIN="$TEST_TMPDIR/openclaw-stub"
   export HYDRA_MAINTENANCE_FLAG="$TEST_TMPDIR/no-such-flag"
+  export HYDRA_DEPLOY_WINDOW_FLAG="$TEST_TMPDIR/no-such-window"
 }
 
 teardown() {
@@ -69,4 +70,24 @@ teardown() {
   [ "$status" -eq 2 ]
   [[ "$output" == *"PEER_LABELS_WAIT_SECS must be a positive integer"* ]]
   [ "$(wc -l < "$PROBES" | tr -d ' ')" -eq 0 ]
+}
+
+@test "inside a deploy window it stands down: exit 0, logged, no gateway RPC" {
+  jq -n --argjson e "$(( $(date -u +%s) + 600 ))" '{reason:"deploy gateway warm-up",expires_epoch:$e}' > "$HYDRA_DEPLOY_WINDOW_FLAG"
+  run env PEER_LABELS_WAIT_SECS=3 "$TEST_TMPDIR/scripts/provision-peer-labels.sh" main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"deploy window: deploy gateway warm-up - skipping"* ]]
+  [ "$(wc -l < "$PROBES" | tr -d ' ')" -eq 0 ]
+}
+
+@test "outside the window (absent or expired) the gateway is still probed" {
+  # An always-on window would be a silent monitoring outage.
+  run env PEER_LABELS_WAIT_SECS=3 "$TEST_TMPDIR/scripts/provision-peer-labels.sh" main
+  [ "$status" -eq 1 ]
+  [ "$(wc -l < "$PROBES" | tr -d ' ')" -ge 1 ]
+  : > "$PROBES"
+  jq -n --argjson e "$(( $(date -u +%s) - 60 ))" '{reason:"old",expires_epoch:$e}' > "$HYDRA_DEPLOY_WINDOW_FLAG"
+  run env PEER_LABELS_WAIT_SECS=3 "$TEST_TMPDIR/scripts/provision-peer-labels.sh" main
+  [ "$status" -eq 1 ]
+  [ "$(wc -l < "$PROBES" | tr -d ' ')" -ge 1 ]
 }

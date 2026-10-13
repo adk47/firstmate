@@ -14,6 +14,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/version-compare.sh
 source "$SCRIPT_DIR/lib/version-compare.sh"
+# shellcheck source=lib/maintenance-flag.sh
+source "$SCRIPT_DIR/lib/maintenance-flag.sh"
 
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
 PROFILE="main"
@@ -55,6 +57,19 @@ while (($#)); do
 done
 
 case "$PROFILE" in main|edge) ;; *) echo "--profile must be main or edge" >&2; exit 2 ;; esac
+
+# Stand down while the gateway is deliberately down (maintenance window) or
+# warming up after a deploy restart; this timer pages via OnFailure and would
+# otherwise report a non-actionable failure. Fail-safe: absent/expired/malformed
+# flags read as "not active".
+if maintenance_active; then
+  echo "prune: maintenance: $(maintenance_reason) - skipping"
+  exit 0
+fi
+if deploy_window_active; then
+  echo "prune: deploy window: $(deploy_window_reason) - skipping"
+  exit 0
+fi
 [[ "$RETENTION_DAYS" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "SESSION_THREAD_RETENTION_DAYS must be 1..3650" >&2; exit 2; }
 [[ "$MAX_DELETES" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "SESSION_THREAD_MAX_DELETES must be 1..1000" >&2; exit 2; }
 [[ "$NOW_MS" =~ ^[1-9][0-9]{0,15}$ ]] || { echo "SESSION_THREAD_NOW_MS must be a safe positive epoch in milliseconds" >&2; exit 2; }
