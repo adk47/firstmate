@@ -53,3 +53,58 @@ export function markTicketFiled(convId: string | null | undefined, nowMs: number
   }
   s.set(convId, nowMs);
 }
+
+// --- MUS-1516: which ticket ids were filed, additive to the signal above ---
+//
+// The reader half (plugins/intercom/src/ticket-success-signal.ts) needs to know
+// not just THAT a ticket was filed this conversation, but WHICH id(s) — so a
+// quoted reference number can be checked against ids this conversation actually
+// filed, instead of licensing any 9-character token once a ticket exists at all.
+//
+// Design call ① (MUS-1471 CTO comment): a NEW globalThis key, value shape
+// Map<convId, {atMs, ids:string[]}> — NOT a repointed value on SIGNAL_KEY above.
+// The two guards (handoff-claim verb check, reference-id check) are independently
+// bundled across two plugins sharing one process; widening the existing Map's
+// value would open a deploy-skew window where the working guard misreads a live
+// object as a lost signal. An additive key leaves the shipped guard behaviorally
+// byte-identical and lets the new check no-op until both halves have deployed.
+const IDS_KEY = "__musoSupportTicketIds";
+
+type IdsStore = Map<string, { atMs: number; ids: string[] }>;
+
+function idsStore(): IdsStore {
+  const g = globalThis as unknown as Record<string, unknown>;
+  const existing = g[IDS_KEY];
+  if (existing instanceof Map) return existing as IdsStore;
+  const created: IdsStore = new Map();
+  g[IDS_KEY] = created;
+  return created;
+}
+
+/**
+ * Record that `ticketId` was filed for `convId` at `nowMs`. Called from BOTH
+ * create-ticket.ts call sites — the fresh-create path and the append-to-existing
+ * (follow-up comment) path — so either one backs the id for the reference-id
+ * guard. No-ops on an empty convId/ticketId (mirrors markTicketFiled). Ids
+ * accumulate per conversation (a conversation can file more than one ticket) and
+ * de-dupe on repeat writes of the same id. Sweeps expired entries opportunistically
+ * (same TTL/pattern as markTicketFiled above).
+ */
+export function markTicketId(
+  convId: string | null | undefined,
+  ticketId: string | null | undefined,
+  nowMs: number = Date.now(),
+): void {
+  if (!convId || !ticketId) return;
+  const s = idsStore();
+  for (const [key, entry] of s) {
+    if (nowMs - entry.atMs > TTL_MS) s.delete(key);
+  }
+  const existing = s.get(convId);
+  if (existing) {
+    if (!existing.ids.includes(ticketId)) existing.ids.push(ticketId);
+    existing.atMs = nowMs;
+  } else {
+    s.set(convId, { atMs: nowMs, ids: [ticketId] });
+  }
+}

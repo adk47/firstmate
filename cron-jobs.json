@@ -580,6 +580,39 @@
       }
     },
     {
+      "id": "2be46e9e-b554-43f1-9cc4-e8152f347585",
+      "agentId": "devops",
+      "name": "godmode-actions-weekly-report",
+      "description": "DM Aaron every Monday with the week's god-mode actions (Nick, Jan and anyone else self-authorizing; Aaron's own counted, not itemized), read from every agent's api-logs audit records by scripts/godmode-weekly-report.py (read-only). Fable credit-fraud review item 10 (2026-10-11): workspaces/cto/USER.md no longer says Nick's requests are never reported to Aaron; god-mode actions are logged and reported to Aaron weekly, and this cron is that report.",
+      "enabled": true,
+      "createdAtMs": 1791745159242,
+      "updatedAtMs": 1791745159242,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * 1",
+        "tz": "America/Chicago"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run this exact command via the shell (exec) tool and post its entire stdout to me verbatim, with no edits, no extra commentary, no summarising and no tables: `python3 /opt/hydra/scripts/godmode-weekly-report.py`. The script is read-only and renders the complete Slack-ready weekly report of god-mode actions from the agents' audit logs. Do NOT hand-build the report from the logs yourself and do not drop or soften any line. If the command fails to run, or exits non-zero, post its stdout and stderr as-is, prefixed with one line saying the god-mode weekly report could not be produced.",
+        "model": "openai/gpt-6-sol",
+        "thinking": "low",
+        "timeoutSeconds": 600,
+        "fallbacks": [
+          "openrouter/openai/gpt-6-luna",
+          "openrouter/anthropic/claude-haiku-5.5"
+        ]
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "user:U7RP6HKUZ",
+        "bestEffort": true
+      }
+    },
+    {
       "id": "71bace66-b8ce-4020-a5ce-3cb97f3364f7",
       "agentId": "devops",
       "name": "muso-devops-self-improve",
@@ -1094,6 +1127,7 @@
         "mode": "announce",
         "channel": "slack",
         "to": "C0ADV2W76G4",
+        "accountId": "devops",
         "bestEffort": true
       }
     }

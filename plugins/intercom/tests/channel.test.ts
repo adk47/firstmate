@@ -15,6 +15,7 @@ import {
   mergeBatchMedia,
   classifyRuntimeNoticePayload,
   resolveJevShadowQuestionsVersion,
+  jevShadowRunnerConfig,
 } from "../src/channel.js";
 import { decide, type JevActionsConfig, type JevAnswers, type JevBands } from "../src/jev-router.js";
 import { canAgentReply } from "../src/handoff.js";
@@ -732,9 +733,10 @@ describe("jev [ROUTING] block in the dispatched raw body — kill-switched paths
     expect(rawBody).toContain("path: caroline_tool (0.45)");
   });
 
-  it("falsifiable: with silence ON the same turn's raw body DOES carry no_reply", () => {
+  it("MUS-1598: with silence ON the same turn's raw body still does NOT carry no_reply — masking is unconditional", () => {
     const rawBody = rawBodyFor(FP_ANSWERS, FP_MESSAGE, ALL_ON);
-    expect(rawBody).toContain("path: no_reply (0.97)");
+    expect(rawBody).not.toContain("no_reply");
+    expect(rawBody).not.toContain("path:");
   });
 });
 
@@ -941,5 +943,29 @@ describe("resolveJevShadowQuestionsVersion", () => {
     const warns: string[] = [];
     resolveJevShadowQuestionsVersion("v2", { warn: (m) => warns.push(m) });
     expect(warns).toHaveLength(0);
+  });
+});
+
+describe("jevShadowRunnerConfig (MUS-3192: shadow call has its own timeout)", () => {
+  // The v2 shadow prompt is ~5.85x v1's; on the live 1500ms budget 15-19% of
+  // shadow calls timed out, biasing the dataset toward fast turns. Shadow
+  // latency never reaches a customer, so it gets its own budget.
+  const jev = { apiKey: "k", model: "m", timeoutMs: 1500, agentInstructionsPath: "/x/SOUL.md" };
+
+  it("uses shadowTimeoutMs for the shadow runner when set, leaving the live timeout alone", () => {
+    const cfg = jevShadowRunnerConfig({ ...jev, shadowTimeoutMs: 5000 }, "v2");
+    expect(cfg.timeoutMs).toBe(5000);
+    expect(jev.timeoutMs).toBe(1500);
+    expect(cfg.questionsVersion).toBe("v2");
+  });
+
+  it("falls back to the live timeoutMs when shadowTimeoutMs is unset (byte-identical to before)", () => {
+    expect(jevShadowRunnerConfig(jev, "v2")).toEqual({
+      apiKey: "k",
+      model: "m",
+      timeoutMs: 1500,
+      questionsVersion: "v2",
+      agentInstructionsPath: "/x/SOUL.md",
+    });
   });
 });

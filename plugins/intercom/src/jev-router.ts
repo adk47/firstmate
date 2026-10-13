@@ -394,17 +394,24 @@ function choiceLabelAndProb(answer: JevAnswer | undefined): { label: string; p: 
   return { label: answer.choice, p };
 }
 
-// QA finding 3 (2026-09-22 PR #999): the `actions` kill switches stop the
-// PLUGIN from taking an action, but the [ROUTING] block is advisory text
-// Caroline is told to follow (workspaces/support/AGENTS.md), so naming a
-// path whose action is switched off routes the action around the switch —
-// `path: no_reply (0.97)` with `actions.silence=false` still gets Caroline
-// to emit [[NO_REPLY]]. All three of decide()'s renderRouteBlock call sites
-// leaked it, including the plain fall-through (the documented false
-// positive "Hi you got some news ?" scores no_reply 0.97 but is not
-// closer-shaped, so it never reaches the suppressed-silence branch at all).
-// Masked HERE, at the single choke point, so every call site is covered by
-// construction rather than per-site.
+// QA finding 3 (2026-09-22 PR #999), re-opened one band lower (MUS-1598):
+// the `actions` kill switches stop the PLUGIN from taking an action, but the
+// [ROUTING] block is advisory text Caroline is told to follow
+// (workspaces/support/AGENTS.md), so naming a path the plugin declined to
+// act on routes the action around the switch anyway. The original fix
+// masked a label only while its action flag was off — but `renderRouteBlock`
+// has exactly three call sites (all inside `decide()`), and every one of
+// them is reached ONLY on a turn where the gated action did NOT fire (the
+// two suppressed-branch early returns, and the plain fall-through below
+// band — see the documented false positive "Hi you got some news ?": scores
+// no_reply 0.97 but isn't closer-shaped, so it never reaches the
+// suppressed-silence branch, and decide() never silenced it). A block that
+// exists at all is therefore always a turn the gated action skipped, at ANY
+// value of `actions` — so the `actions[branch] === true` escape hatch could
+// never be correct: it just moved the leak from "action off" to "below
+// band". Masking is now UNCONDITIONAL: a label in PATH_KILL_SWITCH is never
+// named in a rendered block, full stop. Masked HERE, at the single choke
+// point, so every call site is covered by construction rather than per-site.
 const PATH_KILL_SWITCH: Record<string, keyof JevActionsConfig> = {
   no_reply: "silence",
   human_required: "escalate",
@@ -412,9 +419,8 @@ const PATH_KILL_SWITCH: Record<string, keyof JevActionsConfig> = {
 
 // `caroline_tool` / `ask_customer` (and the "none" placeholder for a missing
 // answer) have no kill switch and are always allowed.
-function isPathAllowed(label: string, actions: JevActionsConfig): boolean {
-  const branch = PATH_KILL_SWITCH[label];
-  return branch === undefined || actions[branch] === true;
+function isPathAllowed(label: string): boolean {
+  return PATH_KILL_SWITCH[label] === undefined;
 }
 
 // Floor for a SUBSTITUTED path only. `resolution_path` has exactly four
@@ -439,9 +445,9 @@ const FALLBACK_PATH_MIN_PROB = 0.25;
  * floor, the line is OMITTED rather than invented: a wrong path is worse than
  * no path, and the block's other lines still carry the routing signal.
  */
-function renderPathLine(answer: JevAnswer | undefined, actions: JevActionsConfig): string | null {
+function renderPathLine(answer: JevAnswer | undefined): string | null {
   const top = choiceLabelAndProb(answer);
-  if (isPathAllowed(top.label, actions)) return `path: ${top.label} (${fmt(top.p)})`;
+  if (isPathAllowed(top.label)) return `path: ${top.label} (${fmt(top.p)})`;
 
   const probs = answer && answer.type === "choice" ? answer.probabilities : undefined;
   // Same defensive posture as choiceProb: `probabilities` is typed as an
@@ -452,7 +458,7 @@ function renderPathLine(answer: JevAnswer | undefined, actions: JevActionsConfig
 
   let best: { label: string; p: number } | undefined;
   for (const [label, p] of Object.entries(probs)) {
-    if (!isPathAllowed(label, actions)) continue;
+    if (!isPathAllowed(label)) continue;
     if (typeof p !== "number" || !Number.isFinite(p)) continue;
     if (!best || p > best.p) best = { label, p };
   }
@@ -481,10 +487,18 @@ function v2PathNote(answer: JevAnswer | undefined): string | null {
   return Object.prototype.hasOwnProperty.call(V2_PATH_NOTES, answer.choice) ? V2_PATH_NOTES[answer.choice] : null;
 }
 
-// `actions` is deliberately REQUIRED (no default): a new call site that
-// cannot supply it must fail to compile rather than silently render an
-// unmasked block. decide()'s own `actions` parameter carries the restrictive
-// DEFAULT_JEV_ACTIONS default (silence/escalate off).
+// `actions` is still REQUIRED here (no default), even though the path mask
+// below (`isPathAllowed`) no longer reads it — masking a PATH_KILL_SWITCH
+// label is now unconditional, so there is no live branch left for `actions`
+// to control. It stays on the signature anyway: every one of decide()'s
+// three call sites already has its local `actions` binding in scope right
+// next to the action-gating checks above it, and keeping the parameter
+// required means a future call site still has to produce a real
+// JevActionsConfig to compile, rather than this function quietly growing an
+// implicit "no gate state available" caller. If a future kill-switched path
+// genuinely needs conditional masking again, `actions` is already threaded
+// through to `renderPathLine`'s call site here rather than needing to be
+// re-plumbed from scratch.
 function renderRouteBlock(
   answers: JevAnswers,
   intents: CarolineIntentMeta[],
@@ -492,7 +506,7 @@ function renderRouteBlock(
   actions: JevActionsConfig,
   questionsVersion: "v1" | "v2" = "v1",
 ): string {
-  const pathLine = renderPathLine(answers.resolution_path, actions);
+  const pathLine = renderPathLine(answers.resolution_path);
   const answerFromKnowledgeLine = questionsVersion === "v2" ? v2PathNote(answers.resolution_path) : null;
   const intent = choiceLabelAndProb(answers.intent);
 
@@ -723,6 +737,12 @@ export interface JevTurnFailure {
   reason: string;
   httpStatus: number | null;
   latencyMs: number;
+  // The payload the failed call carried, so the failure shadow row hashes the
+  // REAL state/questions instead of sha256("{}"). Absent only on
+  // "questions_unavailable", which fails before either exists.
+  state?: unknown;
+  questions?: unknown;
+  model?: string;
   // See JevTurnResult.stateVariant — set even on a failed call, since the
   // SOUL.md read (success or fallback) happens before callJev, independent
   // of whether the HTTP call itself later fails.
@@ -816,6 +836,9 @@ export function createJevTurnRunner(
             reason: result.reason,
             httpStatus: result.httpStatus,
             latencyMs: result.latencyMs,
+            state,
+            questions,
+            model: cfg.model ?? DEFAULT_JEV_MODEL,
             ...(stateVariant !== undefined ? { stateVariant } : {}),
           };
         }

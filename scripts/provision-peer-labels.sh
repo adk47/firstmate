@@ -75,6 +75,11 @@ if maintenance_active; then
   log "maintenance: $(maintenance_reason) - skipping"
   exit 0
 fi
+# Same for the deploy/gateway warm-up window deploy.sh arms (self-expiring).
+if deploy_window_active; then
+  log "deploy window: $(deploy_window_reason) - skipping"
+  exit 0
+fi
 
 if [[ ! -f "$OPENCLAW_JSON" ]]; then
   log "ERROR: $OPENCLAW_JSON not found — gateway not provisioned?"
