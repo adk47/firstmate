@@ -200,7 +200,7 @@ case "$MODE" in
     # on node-8 do not agree on \b.
     W='(^|[^A-Za-z0-9_])'; E='([^A-Za-z0-9_]|$)'
     leak=""
-    printf '%s' "$flat" | grep -qiE 'github\.com/|gitlab\.com/|issue #|#[0-9]{3,}|<@U[A-Z0-9]+>' && leak="an issue link, issue number or Slack mention"
+    printf '%s' "$flat" | grep -qiE 'github\.com/|gitlab\.com/|issues? +(#|[0-9]{3,})|#[0-9]{3,}|<@U[A-Z0-9]+>' && leak="an issue link, issue number or Slack mention"
     printf '%s' "$flat" | grep -qiE "${W}(Ops resolution|admin[ _]?id)${E}" && leak="internal wording (Ops resolution / admin id)"
     printf '%s' "$flat" | grep -qiE "${W}(${SANITIZER_WORDS})${E}" \
       && leak="a word Caroline's outbound sanitizer redacts ('$(printf '%s' "$flat" | grep -oiE "(${SANITIZER_WORDS})" | head -1)', see plugins/intercom/src/sanitize-tool-leak.ts)"
