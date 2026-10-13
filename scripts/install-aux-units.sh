@@ -1550,9 +1550,15 @@ for profile in main edge; do
   # must not be delayed by a 30-300s re-embed); leading `-` makes a
   # missing/failed trigger non-fatal to gateway start. main has no memory_search
   # consumer, so it gets no hook.
-  reindex_hook=""
+  # EDGE ONLY, same conditional: MemoryLow=6G protects edge (Caroline) from
+  # reclaim when main / Paperclip put the box under memory pressure (Aaron's go
+  # 9 Oct via Nick, MUS-5057 W3). Soft protection only; MemoryMax stays infinity.
+  # Both edge-only lines share one variable so main's drop-in stays
+  # byte-identical (a second bare ${...} line would add a blank line to main).
+  edge_only=""
   if [ "$profile" = "edge" ]; then
-    reindex_hook="ExecStartPost=-/usr/bin/systemctl start --no-block openclaw-edge-reindex.service"
+    edge_only="ExecStartPost=-/usr/bin/systemctl start --no-block openclaw-edge-reindex.service
+MemoryLow=6G"
   fi
   # MAIN ONLY, TEMPORARY (MUS-2652 / MUS-1295): openclaw's own startup trace +
   # diagnostics timeline, to name the 20-28 min post-start freeze (main thread
@@ -1583,7 +1589,7 @@ Environment=\"OPENCLAW_DIAGNOSTICS_TIMELINE_PATH=${DIAG_DIR}/main-timeline.jsonl
 Environment="NODE_OPTIONS=--max-old-space-size=8192 --diagnostic-dir=${HEAP_SNAPSHOT_DIR}"
 ${trace_env}
 ExecStartPre=$HYDRA_ROOT/scripts/openclaw-pre-start-heal.sh ${profile}
-${reindex_hook}
+${edge_only}
 [Unit]
 StartLimitBurst=5
 StartLimitIntervalSec=120
