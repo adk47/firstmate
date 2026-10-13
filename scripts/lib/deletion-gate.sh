@@ -101,6 +101,8 @@ THE ONLY SAFE FIX (do this, in order):
          required_excludes entry in .githooks/pre-commit (Check 2 enforces
          RSYNC_EXCLUDES ⊇ required_excludes). Then re-run pre-commit:
            bash .githooks/pre-commit
+         Agent output you only want kept off the deploy path belongs in the
+         root /scratch/ directory, which RSYNC_EXCLUDES already excludes.
          Per-path suggestions:
 $remedies
   2. Re-run deploy. Pre-flight should now report clean.
