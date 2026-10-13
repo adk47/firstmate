@@ -3529,6 +3529,7 @@ fi
 # restart, the pre-drain behavior); HYDRA_FORCE_RESTART=1 overrides the
 # restart-skip gate below (they compose).
 log "Step 6/8: Restarting OpenClaw Gateway ($TARGET)..."
+
 # shellcheck source=lib/gateway-restart.sh
 source "$SCRIPT_DIR/lib/gateway-restart.sh"
 export GATEWAY_EXEC_FN=run_on_node8   # every probe honors $HYDRA_LOCAL (ssh mode too)
@@ -3653,6 +3654,22 @@ check_gateway_not_crashlooping() {
 source "$SCRIPT_DIR/lib/edge-restart-gate.sh"
 
 if gateway_restart_needed; then
+  # Open the deploy/gateway warm-up stand-down window (MUS-5175) for the paging
+  # timers that hit the gateway WS. A SEPARATE flag from the maintenance one
+  # (the untracked gateway guard ignores that one's TTL). The TTL is the window:
+  # no disarm is needed or wanted. Observed 2026-10-08: restart 12:46, peer-labels
+  # still unhealthy at 12:51:47, recovered 12:55 (~9 min), so the warm-up term is
+  # 900s. That warm-up is measured from the RESTART, but this arm runs before
+  # Phase A and the drain can burn GATEWAY_DRAIN_DEADLINE_SECS (390) first. The
+  # gateways drain concurrently but finish_gateway_restart awaits main THEN edge,
+  # each with its own full deadline, so edge's hard restart can land after TWO
+  # drains. The TTL must cover 2 drains + warm-up (MUS-8501). Tradeoff accepted:
+  # on a fast drain the timers stay stood down up to ~780s longer than needed.
+  # Armed only inside the restart branch: a deploy that restarts no gateway must
+  # not stand the timers down. Non-fatal: no window just means the old behaviour.
+  HYDRA_DEPLOY_WINDOW_SECS="${HYDRA_DEPLOY_WINDOW_SECS:-$(( 2 * ${GATEWAY_DRAIN_DEADLINE_SECS:-390} + 900 ))}"
+  run_on_node8 "source '$DEPLOY_PATH/scripts/lib/maintenance-flag.sh' && deploy_window_arm '$HYDRA_DEPLOY_WINDOW_SECS' 'deploy gateway warm-up'" \
+    || log "  WARN: could not arm the deploy warm-up window — gateway timers may page during warm-up"
   # Phase A: request the safe restarts up front (each request returns in ~3s;
   # the gateways then drain CONCURRENTLY, so worst-case wall time is one drain
   # budget, not one per gateway). Phase B verifies serially.
