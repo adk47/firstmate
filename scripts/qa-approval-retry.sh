@@ -818,7 +818,18 @@ for repo in "${REPOS[@]}"; do
     # holds is the REAL remaining quota, re-read before every candidate: free
     # call, same fail-open as the per-repo probe (an unreadable answer proceeds).
     rate="$(qar_rate_core "$repo")"
-    if [ "$rate" != "ERR" ] && [ "${rate%% *}" -lt "$RATE_FLOOR" ]; then
+    if [ "$rate" = "ERR" ]; then
+      # Fail open exactly as the per-repo probe does — and as LOUDLY. Falling
+      # through silently spends the rest of the repo with no floor in force and
+      # leaves nothing in the tick log to say the guard was off, which is the
+      # invisible drain this script exists to remove (hydra#1119 review).
+      # Shares rate_warned with the per-repo probe on purpose: one WARN per
+      # tick, not one per candidate.
+      if [ "$rate_warned" -eq 0 ]; then
+        log "WARN: could not read rate_limit — proceeding WITHOUT the quota floor (fail-open by design: a dead probe must not silence the repair lane)."
+        rate_warned=1
+      fi
+    elif [ "${rate%% *}" -lt "$RATE_FLOOR" ]; then
       floor_hit=1; floor_at="$repo#$pr"; floor_rem="${rate%% *}"; break
     fi
     considered=$((considered + 1))

@@ -158,6 +158,11 @@ case "${1:-}" in
           read -ra _seq <<< "$STUB_RATE_SEQ"
           _i=$(( _n - 1 )); [ "$_i" -lt "${#_seq[@]}" ] || _i=$(( ${#_seq[@]} - 1 ))
           _rem="${_seq[$_i]}"
+          # A non-numeric element models a probe that dies on THAT call only, so
+          # a test can let the per-repo probe succeed and kill a later
+          # per-candidate one — the shape STUB_RATE_RC cannot express because it
+          # fails every call, per-repo one included.
+          case "$_rem" in ''|*[!0-9]*) exit 1 ;; esac
         fi
         _out="$(printf '{"remaining":%s,"reset":1791537180,"limit":5000,"used":0}' "$_rem")"
         printf '%s' "$_out" | jq -c '.resources.core // .' 2>/dev/null >/dev/null
@@ -1916,6 +1921,22 @@ go_review() { export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMM
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   [ "$(wc -l < "$REVIEWS_CALLS" | tr -d ' ')" -eq 3 ]
+}
+
+@test "floor: a per-candidate probe dying after a HEALTHY repo probe fails open and still warns, once" {
+  # The sibling test above kills every probe, so it passes via the PER-REPO
+  # WARN and says nothing about the per-candidate path. Here the repo probe
+  # succeeds (5000 → no WARN from it) and only the per-candidate probes die, so
+  # the WARN asserted below can ONLY come from the mid-repo path. Without it the
+  # tick sweeps the whole repo with the floor silently disabled (hydra#1119).
+  export STUB_PRS_JSON="$(jq -nc '[range(1;4)|{number:.,headRefOid:"abc123",author:{login:"azure-kirin"},isDraft:false}]')"
+  export STUB_RATE_SEQ="5000 ERR"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # fail-open is preserved: all three candidates are still read
+  [ "$(wc -l < "$REVIEWS_CALLS" | tr -d ' ')" -eq 3 ]
+  # and it is one WARN for the tick, not one per candidate
+  [ "$(printf '%s\n' "${lines[@]}" | grep -c 'WARN: could not read rate_limit')" -eq 1 ]
 }
 
 @test "budget: a non-numeric QA_APPROVAL_RETRY_MAX_CALLS warns and falls back to 600" {
