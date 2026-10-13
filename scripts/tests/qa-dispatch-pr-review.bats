@@ -480,6 +480,15 @@ gh_runs() {  # gh_runs <databaseId> <pr> <sha> [status] [repo] [age-seconds]
   [ ! -s "$STUB_CALLS" ]
 }
 
+@test "dedup: a leading-zero window (08) is read as decimal, not octal -> still refuses an in-flight duplicate" {
+  gh_runs 100 123 "$GOOD_SHA" queued Muso-AI/hydra 3600
+  QA_DEDUP_WINDOW_SECONDS=08 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [[ "$output" != *"value too great for base"* ]]
+  [[ "$output" != *"DEDUP-SKIPPED"* ]]
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
 @test "dedup: QA_DEDUP_REFUSED_RC=76 (the reconciler) makes a refusal exit 76, still no cron add" {
   gh_runs 100 123 "$GOOD_SHA"
   QA_DEDUP_REFUSED_RC=76 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"

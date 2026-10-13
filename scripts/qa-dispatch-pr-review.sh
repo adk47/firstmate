@@ -88,7 +88,8 @@ GH="${GH:-gh}"
 DEDUP_WINDOW_SECONDS="${QA_DEDUP_WINDOW_SECONDS:-14400}"
 # A malformed override must not reach the arithmetic below: under set -u it would
 # abort the dispatch before the fail-open branch. Fall back to the default.
-[[ "$DEDUP_WINDOW_SECONDS" =~ ^[0-9]+$ ]] || DEDUP_WINDOW_SECONDS=14400
+# 10# forces decimal: bash reads 08 as an invalid octal literal inside $(( )).
+[[ "$DEDUP_WINDOW_SECONDS" =~ ^[0-9]+$ ]] && DEDUP_WINDOW_SECONDS=$((10#$DEDUP_WINDOW_SECONDS)) || DEDUP_WINDOW_SECONDS=14400
 own_id="${GITHUB_RUN_ID:-0}"
 [[ "$own_id" =~ ^[0-9]+$ ]] || own_id=0
 if runs_json="$("$GH" run list -R Muso-AI/hydra --limit 200 --json databaseId,name,status,createdAt 2>/dev/null)" \
