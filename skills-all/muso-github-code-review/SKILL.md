@@ -531,8 +531,19 @@ cat "/var/lib/hydra-qa/blast-radius/${OWNER}__${REPO}-pr-${PR}-<pr.headRefOid>.j
 > `deploy-path` is reported as `info` and **never lowers the tier**. An undeployed
 > file is unproven, not proven safe — do not argue a finding down from it.
 
-**Tests** (when warranted): `qa-gh.sh ... pr checkout "$PR"` then `pnpm
-install --frozen-lockfile && npm test`.
+**Tests** (when warranted): never `pr checkout` into a fresh full clone — each
+one left 1.4-2.1G that nothing removed (MUS-5557). Run the tests through
+`qa-review-clone.sh`, which borrows objects from a shared bare mirror and
+deletes its checkout when the command ends, whatever the verdict:
+
+```bash
+/opt/hydra/scripts/qa-review-clone.sh "$OWNER/$REPO" "$PR" -- \
+  bash -c 'pnpm install --frozen-lockfile && npm test'
+```
+
+The command runs with cwd = the PR head; its exit code is yours. Do the whole
+test run inside that one call — the checkout is gone afterwards, so there is no
+cleanup step to remember, including on a NO-GO or an aborted run.
 
 ## Step 4 — Post the Slack summary
 
