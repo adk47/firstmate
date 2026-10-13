@@ -125,8 +125,10 @@ FAKE_SSH_OK='bash -c "${!#}"'
 
 # Bot finding (12 Oct): the remote lock lives only as long as the ssh holding it. If that dies after acquisition (link
 # drop) the prune can take the lock while the deploy keeps mutating, so the caller must be aborted, not left running.
+# Two sleeps: the watcher now stops the in-flight foreground child (the first sleep) before it TERMs the parent, so the
+# script moves on to the second one; the parent's TERM must land there.
 @test "ssh-mode deploy: the ssh holder dying AFTER the lock was taken aborts the deploy (fail closed)" {
-  _ssh_block "$FAKE_SSH_OK" 'kill -9 "$MAIN_PRUNE_LOCK_REMOTE_PID"; sleep 10; echo SURVIVED-LOCK-LOSS'
+  _ssh_block "$FAKE_SSH_OK" 'kill -9 "$MAIN_PRUNE_LOCK_REMOTE_PID"; sleep 10; sleep 10; echo SURVIVED-LOCK-LOSS'
   MAIN_PRUNE_LOCK_WATCH_SECS=0.2 run bash "$TEST_TMPDIR/ssh-block.sh"
   [ "$status" -ne 0 ]
   [[ "$output" == *"holding the main prune lock"*"died"* ]]
