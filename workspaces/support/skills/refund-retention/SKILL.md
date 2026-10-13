@@ -164,7 +164,7 @@ When all gates are exhausted and the customer confirms they want a refund, run `
 
 After calling `create_ticket`, read the structured JSON response and reply:
 
-- `{ submitted: true, ticket_id, sla, ... }` – use `sla` verbatim from the response: *"I've passed your refund request to our team. You'll hear back within `<sla>`. Your reference is `<ticket_id>`."*
+- `{ submitted: true, ticket_id, sla, ... }` – use `sla` verbatim from the response: *"I've passed your refund request to our team. You'll hear back within `<sla>`. If you need to add anything, just reply here."*
 - `{ submitted: false, reason: "rate_limited" }` – "Looks like a request is already on the way to our team for you. You'll hear back soon."
 - `{ submitted: false, reason: "queue_busy" }` – "Could you send that to me one more time? I want to make sure our team gets the full picture."
 

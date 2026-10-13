@@ -198,6 +198,60 @@ seed_restored_71_tree() { # <profile> — a restored pre-8.1 tree: a state DB WI
   grep -q "^systemctl start openclaw-gateway-main" "$CALLS"
 }
 
+# ── MUS-5212: intra-8.x state-schema boundary (2026.8.35 mutates shared state) ──
+
+@test "8.35 -> 8.2 REFUSES without --state-archive/--no-restart and names the 2026.8.35 boundary, before touching anything" {
+  export FAKE_OPENCLAW_VERSION="2026.8.35"
+  run "$SCRIPT" --to 2026.8.2 --yes
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"requires --state-archive"* ]]
+  [[ "$output" == *"2026.8.35"* ]]
+  if grep -qE "^(systemctl|npm) " "$CALLS" 2>/dev/null; then echo "NEGATED ASSERTION FAILED: grep -qE '^(systemctl|npm) ' '$CALLS' 2>/dev/null" >&2; false; fi
+}
+
+@test "8.35 -> 8.2 with --no-restart still REFUSES: no probe can prove a tree is pre-8.35, so only --state-archive satisfies it; no mutation" {
+  export FAKE_OPENCLAW_VERSION="2026.8.35"
+  run "$SCRIPT" --to 2026.8.2 --yes --no-restart
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"requires --state-archive"* ]]
+  [[ "$output" == *"2026.8.35"* ]]
+  if grep -qE "^(systemctl|npm) " "$CALLS" 2>/dev/null; then echo "NEGATED ASSERTION FAILED: grep -qE '^(systemctl|npm) ' '$CALLS' 2>/dev/null" >&2; false; fi
+}
+
+@test "8.35 -> 8.2 with --state-archive satisfies the guard (reaches the archive preflight, not the refusal)" {
+  export FAKE_OPENCLAW_VERSION="2026.8.35"
+  run "$SCRIPT" --to 2026.8.2 --yes --state-archive "$TEST_TMPDIR/no-such-archive.tgz"
+  [[ "$output" != *"requires --state-archive"* ]]
+  [[ "$output" == *"state-archive not found"* ]]
+}
+
+@test "8.35 -> 7.1 still REFUSES (the 2.0 boundary is unchanged)" {
+  export FAKE_OPENCLAW_VERSION="2026.8.35"
+  run "$SCRIPT" --to 2026.7.1 --yes
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"rolling back from a 2026.8+ runtime requires --state-archive <pre-8.1 cold archive>"* ]]
+}
+
+@test "8.2 -> 8.2 is not a downgrade across any boundary and needs no archive" {
+  export FAKE_OPENCLAW_VERSION="2026.8.2"
+  run "$SCRIPT" --to 2026.8.2 --yes
+  [ "$status" -eq 0 ]
+  grep -q "^systemctl start openclaw-gateway-main" "$CALLS"
+}
+
+@test "a FORWARD move 8.2 -> 8.35 is not guarded (the guard is for downgrades only)" {
+  export FAKE_OPENCLAW_VERSION="2026.8.2"
+  run "$SCRIPT" --to 2026.8.35 --yes
+  [ "$status" -eq 0 ]
+  grep -q "^npm install -g openclaw@2026.8.35" "$CALLS"
+}
+
+@test "8.36 -> 8.35 stays on the same side of every boundary and needs no archive" {
+  export FAKE_OPENCLAW_VERSION="2026.8.36"
+  run "$SCRIPT" --to 2026.8.35 --yes
+  [ "$status" -eq 0 ]
+}
+
 # ── QA round 9 ───────────────────────────────────────────────────────────────
 
 @test "EMPTY openclaw --version: refuses before choosing a target; no npm/systemctl mutation" {

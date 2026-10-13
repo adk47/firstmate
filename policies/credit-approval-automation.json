@@ -1,0 +1,27 @@
+{
+  "_doc": "Registry of every hydra automation that can APPROVE Muso credit requests without a human choosing each request. scripts/check-credit-approval-automation.sh (CI: scripts/tests/check-credit-approval-automation.bats) fails if a cron in cron-jobs.json calls one of these entrypoints without being registered here, or is enabled while its entry has approved=false. dispatch-cv-batch.sh reads approved for credit-verification-batch and forces DRY (zero writes) unless it is true. Flipping approved to true is a captain decision: set approved_by and approval_ref (who said yes, and where) in the same PR.",
+  "automations": {
+    "credit-verification-batch": {
+      "description": "Lobster credit-verification pipeline (verify-credit-batch-mvp.lobster): approves signal_approve rows and moves the rest to user_verification_needed. Reached by the credit-verification-batch-4h cron and by the @Ops 'run credit verification' / 'verify profile' / 'verify credit' Slack triggers.",
+      "entrypoints": [
+        "dispatch-cv-batch.sh",
+        "credit-verification-batch-cron.sh",
+        "verify-credit-batch-mvp.lobster"
+      ],
+      "cron_names": ["credit-verification-batch-4h"],
+      "approved": false,
+      "approved_by": null,
+      "approval_ref": null,
+      "status_note": "DISABLED 2026-10-11 (firstmate containment, captain standing order 'we can't let bad credits into the system'). Its approve rule (approve_owning_track == 100 AND total_risk_percent < 80) was inverted: 100 means the validator's owning-track shortcut did NOT fire, so the rule approved validator-DECLINED rows with risk 30-80. Real apply stays blocked until the captain approves the fixed pipeline."
+    },
+    "uvn-under30": {
+      "description": "scripts/uvn-under30-cron.py --mode apply: approves ticket-enrolled user_verification_needed rows with live Spotify popularity < 30 and no reject_*/review_* rule or batch fraud flag.",
+      "entrypoints": ["uvn-under30-cron.py"],
+      "cron_names": ["uvn-ticket-popularity-under30"],
+      "approved": true,
+      "approved_by": "Nick (nsollazzo)",
+      "approval_ref": "2026-08-13 authorization of the autonomous admin-write gate; apply mode + hourly from 2026-09-09 (recorded in the cron description in cron-jobs.json). This is Nick's approval as recorded, not a captain decision; firstmate to confirm or flip to false.",
+      "status_note": "From 2026-10-11 it also refuses rows with any review_* hold rule (IDP #1686) in verificationData."
+    }
+  }
+}

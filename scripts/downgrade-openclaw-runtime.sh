@@ -38,8 +38,10 @@ set -euo pipefail
 #                 gateways STOPPED and skip the smoke test. The caller owns the
 #                 state restore and the restart (the 2026.8.x runbook's Rollback
 #                 block restores the pre-8.1 archive FIRST, then starts).
-#                 On an auto-selected 2026.8+ -> 2026.7.1 rollback, one of
-#                 --state-archive or --no-restart is REQUIRED.
+#                 On a rollback below 2026.8 (e.g. auto-selected 2026.7.1), one
+#                 of --state-archive or --no-restart is REQUIRED. On a downgrade
+#                 across 2026.8.35 within 8.x, --state-archive is REQUIRED
+#                 (--no-restart is refused: the restored state is unverifiable).
 #
 # Companion: take the snapshots this script restores during the cutover —
 #   - config:  cp /root/.openclaw-<p>/openclaw.json  <dir>/openclaw-<p>.json
@@ -153,16 +155,43 @@ fi
 if version_at_least "2026.8" "$installed_ver" && ! version_at_least "2026.8" "$TO_VERSION"; then
   ROLLBACK_FROM_81=true
 fi
+# State-schema generation boundaries: a runtime at/after a boundary forward-
+# migrated shared state one-way, so a downgrade to the other side of ANY of
+# them must not restart on that state. The next bump that mutates state adds a
+# line here, not a new branch below. Each entry carries the evidence behind it.
+#   2026.8    2.0 shared-auth cell + sessions to SQLite (docs/runbooks/UPGRADE-2026.8.1.md);
+#             the ROLLBACK_FROM_81 path above adds the cell-table probe for this one.
+#   2026.8.35 intra-8.x: "refused shared state schema mutation at
+#             /root/.openclaw-main/state/openclaw.sqlite" (withStateSchemaFence),
+#             8 Oct deploy run 37791745129.
+STATE_SCHEMA_BOUNDARIES=(2026.8 2026.8.35)
+STATE_BOUNDARY_CROSSED=false
+STATE_BOUNDARY_NAMES=""
+for b in "${STATE_SCHEMA_BOUNDARIES[@]}"; do
+  if version_at_least "$b" "$installed_ver" && ! version_at_least "$b" "$TO_VERSION"; then
+    STATE_BOUNDARY_CROSSED=true
+    STATE_BOUNDARY_NAMES="${STATE_BOUNDARY_NAMES:+$STATE_BOUNDARY_NAMES, }$b"
+  fi
+done
 unset installed_ver
 
-if $ROLLBACK_FROM_81 && [[ -z "$STATE_ARCHIVE" ]] && ! $NO_RESTART; then
+# --no-restart is an escape ONLY where the restored-state probe below can verify
+# the caller really restored (the 2.0 boundary, ROLLBACK_FROM_81). Nothing can
+# prove a tree is pre-2026.8.35, so an intra-8.x crossing needs --state-archive.
+if $STATE_BOUNDARY_CROSSED && [[ -z "$STATE_ARCHIVE" ]] && { ! $NO_RESTART || ! $ROLLBACK_FROM_81; }; then
   # A 2026.8+ runtime migrated the state one-way (auth + sessions to SQLite).
   # Downgrading the binary and RESTARTING on that state would boot 2026.7.1
   # against stores it cannot read and then smoke-test the wreckage. Refuse
   # unless the operator either hands us the pre-8.1 cold archive to restore
   # BEFORE the restart, or takes the restart out of our hands (--no-restart:
   # the runbook restores first, then starts).
-  die "rolling back from a 2026.8+ runtime requires --state-archive <pre-8.1 cold archive> (restored before any restart) or --no-restart (the caller restores state, then starts the gateways) — see docs/runbooks/UPGRADE-2026.8.1.md §Rollback"
+  if $ROLLBACK_FROM_81; then
+    rb_from="a 2026.8+ runtime"; rb_archive="pre-8.1 cold archive"
+  else
+    rb_from="a runtime past state-schema boundary $STATE_BOUNDARY_NAMES"; rb_archive="cold archive taken before the first restart on that runtime"
+    die "rolling back from $rb_from requires --state-archive <$rb_archive> (restored before any restart); --no-restart is not accepted here because the restored state cannot be verified — see docs/runbooks/UPGRADE-2026.8.1.md §Rollback"
+  fi
+  die "rolling back from $rb_from requires --state-archive <$rb_archive> (restored before any restart) or --no-restart (the caller restores state, then starts the gateways) — see docs/runbooks/UPGRADE-2026.8.1.md §Rollback"
 fi
 if $ROLLBACK_FROM_81; then
   log "REMINDER: rolling back from a 2026.8+ runtime. State is NOT forward-compatible:"

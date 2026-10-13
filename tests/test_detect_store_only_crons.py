@@ -24,6 +24,11 @@ EPHEMERAL = {"id": "eph-1", "name": "qa-autoreview", "deleteAfterRun": True,
 # Recurring cron in the store but not in repo (the incident class) → must be FLAGGED.
 DURABLE = {"id": "store-only-1", "name": "Realtime MRR Movement",
            "schedule": {"kind": "cron", "expr": "*/5 * * * *"}}
+# MUS-1804 convention: a watch-cron re-armed each turn as a self-deleting
+# one-shot (deleteAfterRun + a one-time `at` schedule), never committed to
+# cron-jobs.json → must be EXEMPT, same shape as EPHEMERAL above.
+WATCH_CRON = {"id": "watch-1", "name": "monitor-removed-credit-streams",
+              "deleteAfterRun": True, "schedule": {"kind": "at", "at": 999}}
 
 
 class DetectStoreOnlyCrons(unittest.TestCase):
@@ -65,6 +70,31 @@ class DetectStoreOnlyCrons(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("dropping", r.stderr)
         self.assertIn("store-only-1", r.stderr)
+
+    def test_watch_cron_self_rearming_oneshot_is_exempt(self):
+        # MUS-1804: an agent watch-cron armed as a self-deleting one-shot
+        # (deleteAfterRun + schedule.kind "at") must pass — it is genuinely
+        # ephemeral, never committed to the repo.
+        r = self._run({"jobs": [REPO_JOB]}, {"jobs": [REPO_JOB, WATCH_CRON]})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_watch_cron_mutate_schedule_kind_alone_is_flagged(self):
+        # AC3: flip ONLY schedule.kind (deleteAfterRun stays True) — must
+        # still be flagged. This is also the exact MUS-1139 incident shape:
+        # the two monitors that blocked six days of deploys used
+        # schedule.kind "every" instead of re-arming a one-shot "at".
+        mutated = {**WATCH_CRON, "schedule": {"kind": "every", "everyMs": 600000}}
+        r = self._run({"jobs": [REPO_JOB]}, {"jobs": [mutated]})
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("watch-1", r.stderr)
+
+    def test_watch_cron_mutate_deleteafterrun_alone_is_flagged(self):
+        # AC3: flip ONLY deleteAfterRun (schedule stays a one-shot "at") —
+        # the predicate is `and`-ed, so this alone must still be flagged.
+        mutated = {**WATCH_CRON, "deleteAfterRun": False}
+        r = self._run({"jobs": [REPO_JOB]}, {"jobs": [mutated]})
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("watch-1", r.stderr)
 
     def test_recurring_deleteafterrun_is_still_flagged(self):
         # deleteAfterRun alone does NOT exempt — only deleteAfterRun + `at` does.

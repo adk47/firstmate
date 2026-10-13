@@ -47,8 +47,11 @@ Refund investigation and processing results posted to appropriate channels. Uses
 **Status: LIVE — @-mention AND the 4-hourly cron (the "cron disabled" note here was stale prose during the 2026-09-11 outage; the job has been `enabled: true` in `cron-jobs.json` throughout)**
 
 Triggered by @-mention in `#credit-verification` matching
-`^run credit verification(?:\s+dry)?(?:\s*\((\d+)\))?$`. Real apply is
-the default; pass `dry` for a no-write summary. Default batch = 500.
+`^run credit verification(?:\s+dry)?(?:\s*\((\d+)\))?$`. **Since 2026-10-11
+every run is DRY (score + report, zero writes)**: `dispatch-cv-batch.sh` forces
+dry unless `policies/credit-approval-automation.json` approves real apply, and
+it does not (the old approve rule was inverted and approved validator-declined
+credits). The 4h cron is disabled. Default batch = 500.
 See `workspaces/operations/skills/muso-ops-credit-verification/SKILL.md`
 for the dispatch contract. The 4h cron (`credit-verification-batch-4h`) runs
 `0 */4 * * *` UTC and now executes `dispatch-cv-batch.sh` DIRECTLY as a

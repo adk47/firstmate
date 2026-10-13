@@ -18,6 +18,9 @@ APPLY="$SCRIPTS_DIR/lobster-mvp/apply-verdicts.sh"
 
 setup() {
   setup_tmp_env
+  # Real apply is gated on the tracked registry (no env override); run a copy
+  # whose sibling registry approves it. See make_approval_tree in helpers.bash.
+  APPLY="$(make_approval_tree true)/lobster-mvp/apply-verdicts.sh"
   export OPS_LOBSTER_APPLY_LOG="$TEST_TMPDIR/lobster-apply.jsonl"
   export ADMIN_API_SH="$TEST_TMPDIR/muso-admin-api.sh"
   export CV_APPLY_CHUNK_SIZE=50

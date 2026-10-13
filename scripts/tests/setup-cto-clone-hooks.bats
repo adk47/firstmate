@@ -34,7 +34,7 @@ setup() {
   # Make every git command in the test use our isolated global config (which holds
   # the includeIf) and ignore the runner's system config.
   export GIT_CONFIG_GLOBAL="$CTO_GITCONFIG"
-  export GIT_CONFIG_SYSTEM=/dev/null
+  export GIT_CONFIG_NOSYSTEM=1
   export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
   export CTO_PUSH_GUARD_NOW="$NOW"
 

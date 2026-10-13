@@ -4,6 +4,14 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel a run superseded by a newer push to the same PR ref. Without this
+# every push stacks another full run on the 4 self-hosted runners (measured
+# 5 of 31 runs superseded, ~16% of pool minutes). A cancel only fires when a
+# newer run starts on this ref, so the current head always has a live run.
+concurrency:
+  group: pr-validate-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: [self-hosted, hydra]
@@ -599,6 +607,17 @@ jobs:
 
           echo "::endgroup::"
 
+      - name: No new literal /tmp scratch paths (MUS-5643)
+        # Agent Bash calls are separate shells, so `trap ... EXIT` never cleaned
+        # /tmp (536 pr-review-*.json, 1171 review clones). Scope is the ADDED
+        # lines of skills-all/**, workspaces/*/AGENTS.md and scripts/** vs base
+        # (scripts/check-no-tmp-scratch.sh SCOPE); legacy sites do not trip it.
+        run: |
+          echo "::group::No new /tmp scratch paths"
+          git fetch origin "${{ github.event.pull_request.base.ref }}" --depth=200 --quiet
+          scripts/check-no-tmp-scratch.sh --base "origin/${{ github.event.pull_request.base.ref }}"
+          echo "::endgroup::"
+
       - name: Skill drift check — skills-all/ vs workspaces/*/skills/
         # Per memory `feedback_skill_dual_tree.md` and incident 2026-04-29
         # postmortem: skill fixes have repeatedly landed in skills-all/ but
@@ -659,6 +678,16 @@ jobs:
         run: |
           echo "::group::Refund-denial honesty doctrine check"
           bash scripts/check-refund-doctrine.sh
+          echo "::endgroup::"
+
+      - name: "Ops-skill safety-clause doctrine check (#1047 silent-deletion regression class)"
+        # PR #1047 silently deleted 7 safety clauses from the customer-data-resolution
+        # and subscription-refund-reconciliation @Ops skills and every CI gate stayed
+        # green. MUS-1796 (#1050) restored the prose; this gate anchors it so the next
+        # silent deletion fails CI instead of shipping unnoticed.
+        run: |
+          echo "::group::Ops-skill safety-clause doctrine check"
+          bash scripts/check-ops-skill-doctrine.sh
           echo "::endgroup::"
 
       - name: Collaborator derived-table doctrine check — no hand-written SQL on a rebuilt table
@@ -774,6 +803,16 @@ jobs:
         run: |
           echo "::group::Data-sourcing doctrine check"
           bash scripts/check-data-sourcing-doctrine.sh
+          echo "::endgroup::"
+
+      - name: Analytics entitlement doctrine check — Caroline states no figures unless analytics.entitled is true
+        # Caroline disclosed a customer's lifetime stream figures to a non-subscriber
+        # on 2026-09-30. The rule lives in support/SOUL.md (entitlement is decided by
+        # profile_analytics_status, which returns analytics.entitled); prose != enforcement,
+        # so this gate fails if its load-bearing anchors are silently removed.
+        run: |
+          echo "::group::Analytics entitlement doctrine check"
+          bash scripts/check-analytics-entitlement-doctrine.sh
           echo "::endgroup::"
 
       - name: Admin-API doc contract check — analytics-sources payload must document {"link"}
@@ -992,7 +1031,8 @@ jobs:
             echo
             echo "Each deletion means one of three things:"
             echo "  (a) Real data created on the server that the repo doesn't know about"
-            echo "      → Pull it in: scripts/sync-from-server.sh <path> --apply, then commit"
+            echo "      → Pull it in: tracked file: scripts/sync-from-server.sh <target> --apply --only <path>;"
+            echo "        a path the repo never tracked is NOT pulled by that script: scp it, review it (no secrets), git add <path>. Then commit"
             echo "  (b) Runtime state the server should own"
             echo "      → Either commit a seed file under the path (auto-exclude will then kick in)"
             echo "        OR add an --exclude line to RSYNC_EXCLUDES in scripts/deploy.sh"
@@ -1018,77 +1058,33 @@ jobs:
           REPO_ROOT="$(pwd)" SERVER_ROOT=/opt/hydra scripts/pr-skill-drift-gate.sh
 
       - name: Cron job orphan check
-        # Compares cron-jobs.json in the PR against the server's live
-        # cron state. If the server has jobs not in the repo, the deploy
-        # Step 5a will block with "refusing to drop live state". Catching
-        # this at PR time means the author can either add the missing job
-        # to cron-jobs.json or confirm it should be dropped.
+        # Shift-left of deploy.sh's store-only cron guard. Dumps the LIVE
+        # SQLite cron store (scripts/lib/dump-cron-store.sh, the same read the
+        # deploy does) and runs scripts/lib/detect-store-only-crons.py against
+        # this PR's cron-jobs.json, so a PR that would make deploy Step 5a halt
+        # ("refusing to drop live state") goes red here instead.
+        # MUS-3346: this step used to read /root/.openclaw-main/cron/jobs.json,
+        # which the 7.x runtime never writes, and `exit 0`'d when it was
+        # absent — green on every PR. It now FAILS CLOSED when the store or SDK
+        # is missing; there is no skip branch.
         run: |
           set -euo pipefail
-          SERVER_CRON="/root/.openclaw-main/cron/jobs.json"
-          REPO_CRON="cron-jobs.json"
-
-          if [ ! -f "$SERVER_CRON" ]; then
-            echo "No server cron state found — skipping orphan check"
-            exit 0
-          fi
-          if [ ! -f "$REPO_CRON" ]; then
-            echo "No cron-jobs.json in repo — skipping"
-            exit 0
-          fi
-
-          # Extract job IDs from both. Skip ephemeral one-shot crons: any job
-          # with deleteAfterRun + a one-time `at` schedule is created at runtime
-          # by an agent and is never committed to cron-jobs.json by design (e.g.
-          # the QA bot's qa-autoreview-pr-<N> review jobs from PR #391, or the
-          # CMO agent's b2b-*-send-report reminders). They self-delete after
-          # firing, so they are not protected orphan state. Matching by PROPERTY
-          # rather than the qa-autoreview-pr- name prefix exempts EVERY agent's
-          # one-shots — otherwise this gate blocks any PR opened while such a job
-          # is pending on the server.
-          server_ids=$(python3 -c "
-          import json, sys
-          with open('$SERVER_CRON') as f:
-              data = json.load(f)
-          for job in data.get('jobs', []):
-              if job.get('deleteAfterRun') is True and job.get('schedule', {}).get('kind') == 'at':
-                  continue
-              print(job['id'])
-          " | sort)
-
-          repo_ids=$(python3 -c "
-          import json, sys
-          with open('$REPO_CRON') as f:
-              data = json.load(f)
-          for job in data.get('jobs', []):
-              print(job['id'])
-          " | sort)
-
-          # Find orphans (on server but not in repo)
-          orphans=$(comm -23 <(echo "$server_ids") <(echo "$repo_ids"))
-
-          if [ -n "$orphans" ]; then
-            echo "::error::Cron jobs exist on server but NOT in cron-jobs.json — deploy Step 5a will block"
-            echo
-            echo "Orphaned job IDs:"
-            for id in $orphans; do
-              name=$(python3 -c "
-          import json
-          with open('$SERVER_CRON') as f:
-              data = json.load(f)
-          for job in data.get('jobs', []):
-              if job['id'] == '$id':
-                  print(f\"{job.get('name', '?')} (agent: {job.get('agentId', '?')})\")
-                  break
-          ")
-              echo "  $id — $name"
-            done
-            echo
-            echo "Fix: pull the job into cron-jobs.json, or confirm it should be dropped"
-            echo "  (set HYDRA_ALLOW_ORPHAN_CRON=1 at deploy time to force-drop)"
+          if [ ! -f cron-jobs.json ]; then
+            echo "::error::cron-jobs.json missing from the repo — cannot check for orphaned crons"
             exit 1
           fi
-          echo "✓ All server cron jobs accounted for in cron-jobs.json"
+          STORE_DUMP=$(mktemp)
+          trap 'rm -f "$STORE_DUMP"' EXIT
+          if ! OPENCLAW_STATE_DIR=/root/.openclaw-main scripts/lib/dump-cron-store.sh "$STORE_DUMP"; then
+            echo "::error::could not read the live cron store on this runner — the orphan check cannot run (fail-closed)"
+            exit 1
+          fi
+          if ! python3 scripts/lib/detect-store-only-crons.py cron-jobs.json "$STORE_DUMP"; then
+            echo "::error::live cron store holds recurring cron(s) not in cron-jobs.json — deploy Step 5a will block"
+            echo "Fix: commit the job to cron-jobs.json, or convert a watch-cron to a self-re-arming one-shot (see detect-store-only-crons.py)"
+            exit 1
+          fi
+          echo "✓ No durable store-only crons — every live recurring cron is in cron-jobs.json"
 
       - name: Plugin env-var preflight (shift-left of deploy.sh Step 4d)
         # Mirrors scripts/deploy.sh Step 4d / install_plugin's call to
@@ -1190,7 +1186,7 @@ jobs:
           # the depth so those cases actually RUN on every runner, new or old.
           fetch-depth: 0
 
-      - name: Ensure bats + jq installed
+      - name: Ensure bats + jq + sqlite3 installed
         run: |
           set -e
           if ! command -v bats >/dev/null 2>&1; then
@@ -1199,8 +1195,15 @@ jobs:
           if ! command -v jq >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y jq
           fi
+          # rollback.bats and deploy-plugin-pin-stops-gateway.bats build state-DB
+          # fixtures (pragma user_version) with the sqlite3 CLI; without it they die
+          # rc=127 before exercising the runtime-restore guard (MUS-5079).
+          if ! command -v sqlite3 >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y sqlite3
+          fi
           bats --version
           jq --version
+          sqlite3 --version
 
       - name: Run all bats suites under scripts/ + ops-admin gate tests
         # Discovers every *.bats file under scripts/ so a future
@@ -1257,6 +1260,13 @@ jobs:
         # compute-run-summary.sh reconciliation built from it. End-to-end
         # (wrapper → ledger → canonical summary) with `curl` stubbed, so a
         # partially successful 409 can never again reconcile as zero landed.
+        #
+        # ALSO dispatch-cv-batch.bats — since 2026-10-11 it carries the real-apply
+        # approval gate: a real run (cron or @Ops Slack trigger) is forced DRY
+        # unless policies/credit-approval-automation.json approves it. The
+        # pipeline's old approve rule was inverted and approved validator-declined
+        # credits; this suite is what proves a real run cannot happen by default.
+        # Hermetic (curl stubbed, tmpdir state, tmpdir write lock).
         run: |
           set -euo pipefail
           # The self-hosted runner may carry production bot credentials. Bats
@@ -1294,6 +1304,7 @@ jobs:
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/render-slack-summary.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/apply-verdicts-attribution.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/results-per-row-attribution.bats \
+                       workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/dispatch-cv-batch.bats \
                        workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
                        workspaces/support/skills/order-fulfillment/scripts/tests \
                        "${sa_dirs[@]}" \
@@ -1428,6 +1439,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_data_complaint_watchdog
+      - name: Run rights-holder watchdog tests
+        # scripts/intercom-rights-holder-watchdog.py PAGES #cs_priority (Nick, Jan)
+        # on label/publisher/PRO/legal senders. These lock the domain boundary
+        # (notsonymusic.com must not match), subject-only 'urgent', the inbound-only
+        # author filter, and the post -> tag -> ledger ordering. Targeted by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_intercom_rights_holder_watchdog
       - name: Run resolution-matcher tests
         # scripts/resolution-matcher.py runs UNATTENDED daily (--apply) and both
         # MESSAGES customers and CLOSES their conversations/tickets on the strength
@@ -1440,6 +1459,17 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_resolution_matcher
+      - name: Run god-mode weekly report tests
+        # scripts/godmode-weekly-report.py is what makes workspaces/cto/USER.md's
+        # "god-mode actions are logged and reported to Aaron weekly" true (Fable
+        # item 10, 2026-10-11). These lock what the report must not get wrong:
+        # Nick's actions itemized first, automation on a requester's behalf (QA
+        # reviews of their PRs) excluded but counted, pre/result phases counted
+        # once, emails/secrets masked, and an unreadable log tree reported as
+        # "could not be counted", never as zero. Same bare stdlib unittest.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_godmode_weekly_report
       - name: Run cs-needs-human-digest tests
         # scripts/cs-needs-human-digest.py runs UNATTENDED daily and is
         # READ-ONLY on Intercom — its only effect is one Block Kit post to

@@ -44,7 +44,11 @@ set -euo pipefail
 #   OPENCLAW       openclaw binary (default: openclaw)
 # (No delivery-target override: the cron uses --no-deliver and the skill owns all
 # Slack delivery itself, so there is nothing for the cron to target.)
-# Exit codes: 0 dispatched | 2 usage/validation.
+# Exit codes: 0 dispatched | 2 usage/validation | 75 (EX_TEMPFAIL) the `cron add`
+# never reached the gateway (transport failure, see PRE_GATEWAY_SIGNATURES) so NO
+# review was queued and the attempt did not happen -- the reconciler must not
+# count it. Any other openclaw failure keeps openclaw's own rc (reached the
+# gateway and was rejected: a real attempt).
 
 OPENCLAW="${OPENCLAW:-openclaw}"
 PROFILE="main"
@@ -217,6 +221,20 @@ fi
 # `outcome=error error="Delivering to Slack requires target ..."` ~26-30x/day and the
 # failed one-shot is never --delete-after-run'd. --no-deliver disables that fallback
 # (the CLI equivalent of a `"mode": "none"` job). Verified: openclaw 2026.5.27.
+# Transport-failure signatures that mean the request never reached the gateway.
+# The ONE list; matched fixed-string + case-insensitive against openclaw's stderr.
+PRE_GATEWAY_SIGNATURES=(
+  "Opening handshake has timed out"
+  "ECONNREFUSED"
+  "ECONNRESET"
+  "connect ETIMEDOUT"
+  "socket hang up"
+  "fetch failed"
+)
+
+add_err="$(mktemp)"
+trap 'rm -f "$add_err"' EXIT
+add_rc=0
 "$OPENCLAW" --profile "$PROFILE" cron add \
   --name "$job_name" \
   --at "+5s" \
@@ -226,6 +244,17 @@ fi
   --timeout-seconds "$TIMEOUT_SECONDS" \
   --no-deliver \
   --delete-after-run \
-  --json
+  --json 2>"$add_err" || add_rc=$?
+# Re-emit verbatim: classification must never swallow the diagnostic.
+cat "$add_err" >&2
+if [ "$add_rc" -ne 0 ]; then
+  for sig in "${PRE_GATEWAY_SIGNATURES[@]}"; do
+    if grep -Fqi -- "$sig" "$add_err"; then
+      echo "qa-dispatch-pr-review: gateway unreachable ('$sig') -- no review queued; exiting 75 (not an attempt)." >&2
+      exit 75
+    fi
+  done
+  exit "$add_rc"
+fi
 
 echo "qa-dispatch-pr-review: dispatched auto-review of ${REPO}#${pr} (${sha}) -> agent ${AGENT}."

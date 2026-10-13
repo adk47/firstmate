@@ -48,11 +48,26 @@ log_event() {
     >> "$LOG_PATH"
 }
 
+# ---- REAL-APPLY APPROVAL (2026-10-11) ---------------------------------------
+# The write boundary re-checks what dispatch-cv-batch.sh checked, so a Lobster
+# run invoked directly (bypassing the dispatcher) cannot write either. Not
+# approved -> behave exactly like a dry run and say so in the output.
+# shellcheck source=../lib/real-apply-approval.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/real-apply-approval.sh"
+REAL_APPLY_BLOCKED=false
+if [[ "$DRY_RUN_APPLY" != "true" ]] && ! cv_real_apply_approved; then
+  echo "WARN: apply-verdicts: real apply is NOT approved (policies/credit-approval-automation.json); writing nothing" >&2
+  log_event "real_apply_not_approved" "$(jq -nc --argjson na "$N_APPROVE" --argjson nu "$N_UVN" '{would_approve_count:$na, would_uvn_count:$nu}')"
+  DRY_RUN_APPLY="true"
+  REAL_APPLY_BLOCKED=true
+fi
+
 # ---- DRY RUN: pass through, no API call ------------------------------------
 if [[ "$DRY_RUN_APPLY" == "true" ]]; then
   echo "$INPUT" | jq -c \
     --argjson apply '{"dry_run":true,"attempted":0,"approve":{"eligible":0,"landed":0,"refused":0,"transport_failed":0,"landed_ids":[],"refused_ids":[],"transport_failed_ids":[]},"uvn":{"eligible":0,"landed":0,"refused":0,"transport_failed":0,"landed_ids":[],"refused_ids":[],"transport_failed_ids":[]},"eligible":0,"landed":0,"refused":0,"transport_failed":0,"drifted":0,"http_status":null,"landed_ids":[],"refused_ids":[],"transport_failed_ids":[],"drifted_ids":[]}' \
-    '. + {apply:$apply}'
+    --argjson blocked "$REAL_APPLY_BLOCKED" \
+    '. + {apply:(if $blocked then $apply + {real_apply_blocked:true} else $apply end)}'
   exit 0
 fi
 

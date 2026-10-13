@@ -35,10 +35,10 @@ The openclaw runtime is pinned in `scripts/deploy.sh` via the
 the deploy and is idempotent — same-version deploys skip the global
 `npm install -g`.
 
-Currently pinned: **`openclaw@2026.7.1`** (Node floor >= 22.22.3, gated in
+Currently pinned: **`openclaw@2026.8.35`** (Node floor >= 22.22.3, gated in
 `install_openclaw()`; `@openclaw/codex` is lockstep via
 `scripts/lib/codex-version.sh`; upgrade procedure:
-`docs/runbooks/UPGRADE-2026.7.1.md`)
+`docs/runbooks/UPGRADE-2026.8.35.md`)
 
 Other runtime versions (nemoclaw, k3s, node) are not centrally pinned
 in this repo today; they live with the K8s manifests in the infra repo.

@@ -291,9 +291,12 @@ finance 1/1, operations 6/32, qa 522/12, scout 2/1 — base sessions clearly sur
 creates it (`dist isolated-agent-*.js` resolves `cron:${input.job.id}` inside the run path), and it
 is deleted with its owning job id (`removeCronJobBaseSession`: *"Removes the reusable base session
 whose owning isolated cron job was deleted"*). Declaration-keyed crons — every
-`skill-collection-review-<agent>`, `heartbeat:<agent>`, `memory-core:*` — are re-registered with a
+`skill-collection-review-<agent>` (registered only while `skills.workshop.autonomous.mode` is `auto`;
+`openclaw-main.json` pins `propose` since MUS-3105, so on the main profile they are ABSENT BY DESIGN,
+not a registration failure: do not open an incident or restore `auto`, which re-enables the live
+SKILL.md rewrite path), `heartbeat:<agent>`, `memory-core:*` — are re-registered with a
 FRESH uuid on every boot, so after a restart the old base session goes with the old job and the new
-job legitimately has none until its first fire. Verified after the 2026-09-16 09:41Z restart: all
+job legitimately has none until its first fire. Verified after the 2026-09-16 09:41Z restart (mode was still `auto`): all
 nine `skill-collection-review-*` jobs showed `lastRunAtMs` ABSENT with next fires days out, while
 repo-declared `support-email-triage-hourly` had a real run and a base session. So **"enabled cron +
 zero base keys" is the EXPECTED state for any declaration-keyed cron that has not fired under its
