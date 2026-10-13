@@ -37,7 +37,7 @@ A live estimate of the Lifetime total on the Summary card. Instruction for Carol
 
 **Why an eligible customer sees no movement, in this order (the first is by far the most common):**
 1. **The period is not Lifetime.** The live counter only runs on the Lifetime view. On any shorter period the Display button is still there and the switch still reads on, but the number is a fixed total and does not move. Fix: set the period selector to Lifetime.
-2. **Number format is Compact.** Compact shows a short figure such as 93.4B, which changes about once a day. Full shows every digit, so the movement is visible. Default is Full. Fix: pick Full.
+2. **Number format is Compact.** Compact rounds to a short figure such as 93.4B, so small movements do not show. Full shows every digit, so the movement is visible. Default is Full. Fix: pick Full.
 3. **Live updates was switched off in this browser.** Fix: switch it back on.
 4. **They are looking at a profile that is not on their workspace.** See who has it, below.
 

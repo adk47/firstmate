@@ -252,7 +252,7 @@ This is a how-to. Steps first. Do NOT call `create_ticket` and do NOT use `actio
 1. **Check eligibility with existing reads, do not guess:**
    - `founding_status` → founder active / lapsed / never, plus since-year. This is the rollout-audience clause.
    - `subscription_status` → is there an active Pro or Business subscription.
-   - `profile_status` or `profile_claim_status` → is the profile they are viewing on their workspace with a seat.
+   - `profile_analytics_status` → `analytics.entitled: true` means the profile is on their workspace with a seat. A deny `reason` of `no_active_seat` or `profile_not_in_workspace` fails this clause.
 
    If all three come back good, tell them they have it and give the steps. If any one fails, the Display button is not drawn for them. Say it as a staged rollout: *"Live updates are rolling out in stages and aren't on every account yet."* No date, and do not say which stage is next. If the failing clause is the subscription or the seat, guide them to fix it in Settings as in section 7.
 
@@ -260,7 +260,7 @@ This is a how-to. Steps first. Do NOT call `create_ticket` and do NOT use `actio
 
 3. **If the number does not move, walk the reasons in this order:**
    1. Period is not Lifetime: *"The live number only runs on the Lifetime view. Set the period selector to Lifetime."*
-   2. Number format is Compact: *"Compact shows a short figure like 93.4B that changes about once a day. Pick Full to see every digit move."*
+   2. Number format is Compact: *"Compact rounds to a short figure like 93.4B, so small movements don't show. Pick Full to see every digit move."*
    3. Live updates was switched off in this browser: *"Switch Live updates back on. It's remembered per browser, so check the one you're using."*
    4. The profile is not on their workspace: re-check the third eligibility clause.
 
