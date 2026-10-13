@@ -205,6 +205,18 @@ required_excludes=(
   ".ruff_cache/"
   "*.pyc"
   "workspaces/*/.wrangler/"
+  "workspaces/support/reference/hc-*.md"
+  "workspaces/support/reference/hc-manifest.json"
+  "/scratch/"
+  "/.openclaw/"
+  "/intercom/"
+  "/*.csv"
+  "/*.xlsx"
+  "/*.pdf"
+  "/*.jpeg"
+  "/*.jpg"
+  "/*.png"
+  "/pr-review*.json"
 )
 if [[ ! -f "$DEPLOY_SH" ]]; then
   fail "$DEPLOY_SH not found"

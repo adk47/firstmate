@@ -169,7 +169,11 @@ HOOK
   unset CAROLINE_KB_REPO_DIR
   # No global/system git identity: the clone must get a local identity from the
   # script, or `git commit` fails "Author identity unknown".
-  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+  # An empty temp file + GIT_CONFIG_NOSYSTEM, not /dev/null: node-8's /dev/null
+  # was a regular file with content from 2026-10-09 ("bad config line"), as #1062
+  # found for another suite.
+  : > "$TEST_TMPDIR/empty-gitconfig"
+  export GIT_CONFIG_GLOBAL="$TEST_TMPDIR/empty-gitconfig" GIT_CONFIG_NOSYSTEM=1
   # Stub `gh repo clone` to populate the target dir from the fixture checkout.
   cat > "$TEST_TMPDIR/bin/gh" <<STUB
 #!/usr/bin/env bash

@@ -390,7 +390,7 @@ def audit_memory_sizes():
 def audit_unanswered(config):
     """Scan for unanswered @mentions in last 24h."""
     findings = []
-    accounts = ["clio", "ceo", "cmo", "cto", "qa", "finance", "operations", "devops", "scout", "support"]
+    accounts = ["clio", "ceo", "cmo", "cto", "qa", "finance", "operations", "devops", "scout"]
     oldest = str(int(time.time()) - 24 * 3600)
 
     bot_ids = set()

@@ -19,6 +19,12 @@ setup() {
 echo "PATCH-INVOKED dist=${OPENCLAW_DIST_DIR:-unset}" >> "$TEST_TMPDIR/patch-calls"
 STUB
   chmod +x "$TEST_TMPDIR/repo/scripts/patch-openclaw-inactive-session-delete.sh"
+  cat > "$TEST_TMPDIR/repo/scripts/patch-openclaw-a2a-generation-scope.sh" <<'STUB'
+#!/bin/bash
+echo "A2A-INVOKED dist=${OPENCLAW_DIST_DIR:-unset}" >> "$TEST_TMPDIR/a2a-calls"
+exit "${FAKE_A2A_EXIT:-0}"
+STUB
+  chmod +x "$TEST_TMPDIR/repo/scripts/patch-openclaw-a2a-generation-scope.sh"
   cat > "$TEST_TMPDIR/bin/openclaw" <<'STUB'
 #!/bin/bash
 if [ "$1" = "--version" ]; then
@@ -62,4 +68,25 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   run "$SCRIPT"
   [ "$status" -eq 1 ]
   [ ! -f "$TEST_TMPDIR/patch-calls" ]
+}
+
+@test "a2a generation-scope patch runs on a pre-2026.8 runtime" {
+  export FAKE_OPENCLAW_VERSION="2026.7.1"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q "A2A-INVOKED dist=/usr/lib/node_modules/openclaw/dist" "$TEST_TMPDIR/a2a-calls"
+}
+
+@test "a2a generation-scope patch runs on 2026.8+ (outside the retired-patch gate)" {
+  export FAKE_OPENCLAW_VERSION="2026.8.2"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_TMPDIR/patch-calls" ]
+  grep -q "A2A-INVOKED" "$TEST_TMPDIR/a2a-calls"
+}
+
+@test "a2a generation-scope patch failure fails the hook" {
+  export FAKE_OPENCLAW_VERSION="2026.8.2" FAKE_A2A_EXIT=1
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
 }

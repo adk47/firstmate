@@ -37,6 +37,9 @@ set -euo pipefail
 # Note there is deliberately no "post only if absent" mode: the workflow's seed
 # SHOULD re-arm `pending` when it re-fires, because a re-fire means a fresh
 # review is running and the previous verdict is stale.
+# The one refused write is narrow and is NOT that mode: a `CANNOT REVIEW: ` failure
+# over a same-sha `success` GO (see the no-clobber guard below). `pending` re-arm and
+# NO-GO overwrite are unchanged.
 #
 # Exit codes: 0 ok | 2 usage | 3 post failed
 #
@@ -103,6 +106,25 @@ if [ "$gate_rc" -eq 0 ]; then
   qa_policy_has "$POLICY" '.identity.app_repos' "$repo" || app_rc=$?
   [ "$app_rc" -ne 2 ] || die 3 "cannot evaluate .identity.app_repos in $POLICY — refusing to post $CONTEXT (fail closed)."
   [ "$app_rc" -eq 0 ] || die 3 "$repo is in .merge_gate_repos but NOT in .identity.app_repos — the status would be posted by the host account and could never satisfy an app-pinned required check. Add it to app_repos first."
+fi
+
+# No-clobber for tool failures (MUS-7698). A CANNOT REVIEW carries no information
+# about the code: it says the review did not run. The sha is immutable, so a GO
+# already recorded on it still describes this exact code, and overwriting it would
+# turn a quota blip into an unmergeable sha. Only the CANNOT REVIEW prefix is
+# guarded: a NO-GO is a finding and always overwrites. If the lookup fails, post as
+# before: we cannot prove a GO exists, so we must not suppress. The GO must also be
+# the CURRENT verdict: a `pending` re-arm after it makes it stale, so the newest
+# non-CANNOT row has to be that GO itself, not merely some GO in the history.
+if [ "$state" = failure ] && [[ "$description" == "CANNOT REVIEW: "* ]]; then
+  go_at="$("$QA_GH" --repo "$repo" api "repos/$repo/statuses/$sha?per_page=100" 2>/dev/null \
+    | jq -r '[ .[]? | select(.context == "qa-review"
+        and ((.description // "") | startswith("CANNOT REVIEW: ") | not)) ] | first
+        | select(. != null and .state == "success") | .created_at' 2>/dev/null)" || go_at=""
+  if [ -n "$go_at" ]; then
+    echo "qa-review-status: $repo@${sha:0:7} $CONTEXT=failure NOT posted — a GO recorded at $go_at stands on this sha; a tool failure does not overwrite it."
+    exit 0
+  fi
 fi
 
 # target_url is the "Details" link. On a REQUIRED check it is the operator's only

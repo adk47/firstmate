@@ -4,6 +4,14 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel a run superseded by a newer push to the same PR ref. Without this
+# every push stacks another full run on the 4 self-hosted runners (measured
+# 5 of 31 runs superseded, ~16% of pool minutes). A cancel only fires when a
+# newer run starts on this ref, so the current head always has a live run.
+concurrency:
+  group: pr-validate-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: [self-hosted, hydra]
@@ -672,6 +680,16 @@ jobs:
           bash scripts/check-refund-doctrine.sh
           echo "::endgroup::"
 
+      - name: "Ops-skill safety-clause doctrine check (#1047 silent-deletion regression class)"
+        # PR #1047 silently deleted 7 safety clauses from the customer-data-resolution
+        # and subscription-refund-reconciliation @Ops skills and every CI gate stayed
+        # green. MUS-1796 (#1050) restored the prose; this gate anchors it so the next
+        # silent deletion fails CI instead of shipping unnoticed.
+        run: |
+          echo "::group::Ops-skill safety-clause doctrine check"
+          bash scripts/check-ops-skill-doctrine.sh
+          echo "::endgroup::"
+
       - name: Collaborator derived-table doctrine check — no hand-written SQL on a rebuilt table
         # Incident 2026-07-29: asked to remove ~24 named collaborators from a profile,
         # @Ops proposed a 32-row direct production DELETE against
@@ -785,6 +803,16 @@ jobs:
         run: |
           echo "::group::Data-sourcing doctrine check"
           bash scripts/check-data-sourcing-doctrine.sh
+          echo "::endgroup::"
+
+      - name: Analytics entitlement doctrine check — Caroline states no figures unless analytics.entitled is true
+        # Caroline disclosed a customer's lifetime stream figures to a non-subscriber
+        # on 2026-09-30. The rule lives in support/SOUL.md (entitlement is decided by
+        # profile_analytics_status, which returns analytics.entitled); prose != enforcement,
+        # so this gate fails if its load-bearing anchors are silently removed.
+        run: |
+          echo "::group::Analytics entitlement doctrine check"
+          bash scripts/check-analytics-entitlement-doctrine.sh
           echo "::endgroup::"
 
       - name: Admin-API doc contract check — analytics-sources payload must document {"link"}
@@ -1232,6 +1260,13 @@ jobs:
         # compute-run-summary.sh reconciliation built from it. End-to-end
         # (wrapper → ledger → canonical summary) with `curl` stubbed, so a
         # partially successful 409 can never again reconcile as zero landed.
+        #
+        # ALSO dispatch-cv-batch.bats — since 2026-10-11 it carries the real-apply
+        # approval gate: a real run (cron or @Ops Slack trigger) is forced DRY
+        # unless policies/credit-approval-automation.json approves it. The
+        # pipeline's old approve rule was inverted and approved validator-declined
+        # credits; this suite is what proves a real run cannot happen by default.
+        # Hermetic (curl stubbed, tmpdir state, tmpdir write lock).
         run: |
           set -euo pipefail
           # The self-hosted runner may carry production bot credentials. Bats
@@ -1269,6 +1304,7 @@ jobs:
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/render-slack-summary.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/apply-verdicts-attribution.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/results-per-row-attribution.bats \
+                       workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/dispatch-cv-batch.bats \
                        workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
                        workspaces/support/skills/order-fulfillment/scripts/tests \
                        "${sa_dirs[@]}" \
@@ -1403,6 +1439,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_data_complaint_watchdog
+      - name: Run rights-holder watchdog tests
+        # scripts/intercom-rights-holder-watchdog.py PAGES #cs_priority (Nick, Jan)
+        # on label/publisher/PRO/legal senders. These lock the domain boundary
+        # (notsonymusic.com must not match), subject-only 'urgent', the inbound-only
+        # author filter, and the post -> tag -> ledger ordering. Targeted by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_intercom_rights_holder_watchdog
       - name: Run resolution-matcher tests
         # scripts/resolution-matcher.py runs UNATTENDED daily (--apply) and both
         # MESSAGES customers and CLOSES their conversations/tickets on the strength
@@ -1415,6 +1459,24 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_resolution_matcher
+      - name: Run god-mode weekly report tests
+        # scripts/godmode-weekly-report.py is what makes workspaces/cto/USER.md's
+        # "god-mode actions are logged and reported to Aaron weekly" true (Fable
+        # item 10, 2026-10-11). These lock what the report must not get wrong:
+        # Nick's actions itemized first, automation on a requester's behalf (QA
+        # reviews of their PRs) excluded but counted, pre/result phases counted
+        # once, emails/secrets masked, and an unreadable log tree reported as
+        # "could not be counted", never as zero. Same bare stdlib unittest.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_godmode_weekly_report
+      - name: Run fallback-local-error-report tests
+        # scripts/fallback-local-error-report.py counts model fallbacks that a LOCAL
+        # runtime error caused (MUS-6727). These lock the structural classifier (no
+        # error-string list), the explicit unclassified bucket, and local-only alerting.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_fallback_local_error_report
       - name: Run cs-needs-human-digest tests
         # scripts/cs-needs-human-digest.py runs UNATTENDED daily and is
         # READ-ONLY on Intercom — its only effect is one Block Kit post to

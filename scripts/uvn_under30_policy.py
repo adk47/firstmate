@@ -251,8 +251,12 @@ def has_hard_reject_signal(credit_request: dict[str, Any]) -> bool:
     rules = verification.get("rule_risk_percent") if isinstance(verification, dict) else None
     if not isinstance(rules, dict):
         return True
+    # reject_* = validator auto-reject; review_* = IDP #1686 hold-for-review
+    # (e.g. review_role_credited_to_other_at_trusted_source: a trusted source
+    # credits this one-person role to someone else). A held row must never be
+    # approved by automation, whatever its popularity.
     for name, value in rules.items():
-        if not str(name).startswith("reject_"):
+        if not str(name).startswith(("reject_", "review_")):
             continue
         if isinstance(value, bool):
             if value:
