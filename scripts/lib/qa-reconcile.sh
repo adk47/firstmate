@@ -112,11 +112,68 @@ qar_qa_review_status_state() {
   printf '%s' "$out"
 }
 
-# qar_classify_verdict <has-bot-review 0|1> <status-state> <repo-is-merge-gated 0|1>
+# qar_qa_review_status_field <combined-status-json> <description|updated_at>
+# Same parse and same rc contract as qar_qa_review_status_state (rc 1 = jq
+# failed, never "empty"): echoes the qa-review context's description or
+# updated_at, or "" when the context or the field is absent.
+qar_qa_review_status_field() {
+  local status_json="$1" field="$2" out
+  case "$field" in description|updated_at) ;; *) return 1 ;; esac
+  out="$(jq -r --arg f "$field" '
+    (.statuses // []) | map(select(.context == "qa-review")) | first | (.[$f] // "")
+  ' <<<"$status_json" 2>/dev/null)" || return 1
+  printf '%s' "$out"
+}
+
+# Descriptions that mark a qa-review status as OUR OWN infrastructure writing,
+# not a review outcome. ONE place; the writers are
+#   .github/workflows/qa-autoreview.yml   say_status failure "QA review could not be dispatched — ..."
+#   scripts/qa-review-reconcile.sh        "QA review lost — reconciler exhausted N attempts"
+# Matched as a PREFIX of the description. The bats suite greps the workflow's
+# literal at test time, so renaming either side turns the suite red.
+QAR_INFRA_STATUS_MARKERS=(
+  "QA review could not be dispatched"
+  "QA review lost — reconciler exhausted"
+)
+
+# qar_status_is_infra <description> — rc 0 iff the description starts with a marker.
+qar_status_is_infra() {
+  local desc="$1" m
+  for m in "${QAR_INFRA_STATUS_MARKERS[@]}"; do
+    case "$desc" in "$m"*) return 0 ;; esac
+  done
+  return 1
+}
+
+# qar_qa_review_rollup_state <pr-list-rollup-json>
+# Input: the `statusCheckRollup` ARRAY that `gh pr list --json
+# statusCheckRollup` already returns per PR. That array is the same fact as
+# `gh api repos/<repo>/commits/<sha>/status` for our one context — GitHub's
+# rollup keeps the LATEST state per context for the PR's head commit — but it
+# arrives on the PR list's GraphQL budget instead of spending the shared REST
+# core budget every other gh call in this lane draws on.
+# Echoes success|failure|error|pending|absent, lowercased.
+# rc 1 (echoes nothing) when jq itself failed: the caller MUST treat that as
+# "no answer" and fall back to the per-PR reads, never as "absent" — the same
+# discipline qar_qa_review_status_state documents for its own parse.
+qar_qa_review_rollup_state() {
+  local rollup_json="$1" out
+  out="$(jq -r '
+    (if type == "array" then . else [] end)
+    | map(select((.context // .name // "") == "qa-review"))
+    | first
+    | (if . == null then "absent"
+       else ((.state // .conclusion // "absent") | ascii_downcase) end)
+  ' <<<"$rollup_json" 2>/dev/null)" || return 1
+  [ -n "$out" ] || out="absent"
+  printf '%s' "$out"
+}
+
+# qar_classify_verdict <has-bot-review 0|1> <status-state> <repo-is-merge-gated 0|1> [status-description] [pending-age-s] [stale-budget-s=1800]
 # Echoes one of: verdict | pending-suppress | candidate.
 #   verdict           — a terminal state exists (bot review on head, OR
 #                        status success/failure/error). No action needed.
-#   pending-suppress  — status is "pending" and the repo is NOT merge-gated.
+#   pending-suppress  — status is a FRESH "pending" (see optional args 4-6) and the repo is NOT merge-gated.
 #                        Not a verdict, but also not (yet) a provable loss on a
 #                        repo this reconciler does not enforce a merge gate
 #                        for — some other process (or a prior reconciler tick)
@@ -142,14 +199,30 @@ qar_qa_review_status_state() {
 # `candidate`, so it is retried and, on exhaustion, driven red.
 qar_classify_verdict() {
   local has_bot_review="$1" status_state="$2" gated="$3"
+  local status_desc="${4:-}" pending_age_s="${5:-}" pending_stale_s="${6:-1800}"
   case "$status_state" in
-    success|failure|error) echo "verdict"; return 0 ;;
+    success|failure|error)
+      # A failure/error we wrote ourselves because NO review happened is not a
+      # verdict: pinning the head as settled would turn a gateway blip into a
+      # permanently red PR. It goes through the normal grace/cooldown/attempts.
+      if [ "$status_state" != "success" ] && qar_status_is_infra "$status_desc"; then
+        echo "candidate"; return 0
+      fi
+      echo "verdict"; return 0 ;;
   esac
   # Ungated repo: no required check exists, so a bot review IS the verdict.
   if [ "$gated" != "1" ] && [ "$has_bot_review" = "1" ]; then
     echo "verdict"; return 0
   fi
   if [ "$status_state" = "pending" ] && [ "$gated" != "1" ]; then
+    # Bounded by the status's OWN age (same budget as the cron suppressor): an
+    # old `pending` is not evidence a review is in flight. Age omitted = the
+    # pre-bound call shape = suppress.
+    # A NEGATIVE age (status stamped in the future: clock skew) proves nothing
+    # about a review in flight either; it is stale, not fresh.
+    if [ -n "$pending_age_s" ] && { [ "$pending_age_s" -lt 0 ] || [ "$pending_age_s" -gt "$pending_stale_s" ]; }; then
+      echo "candidate"; return 0
+    fi
     echo "pending-suppress"; return 0
   fi
   echo "candidate"
@@ -401,6 +474,42 @@ qar_state_put() {
   jq -c --arg k "$key" --argjson a "$attempts" --argjson l "$last" \
     --argjson p "$([ "$paged" = "1" ] && echo true || echo false)" \
     '.[$k] = {"attempts": $a, "last_attempt_epoch": $l, "paged": $p}' <<<"$state" 2>/dev/null
+}
+
+# qar_state_put_unreachable <state-json> <key> <attempts> <last_attempt_epoch> <paged 0|1>
+# Echo a NEW state with that entry written back for a dispatch that NEVER
+# REACHED the gateway (dispatcher rc 75): attempts/paged are the caller's
+# UNCHANGED values, last_attempt_epoch is advanced (the cooldown bound stays),
+# and the entry's unreachable_attempts counter is incremented. qar_state_put
+# replaces the entry wholesale, so a later rc-0 dispatch drops the counter.
+qar_state_put_unreachable() {
+  local state="$1" key="$2" attempts="$3" last="$4" paged="$5"
+  jq -c --arg k "$key" --argjson a "$attempts" --argjson l "$last" \
+    --argjson p "$([ "$paged" = "1" ] && echo true || echo false)" \
+    '.[$k] = {"attempts": $a, "last_attempt_epoch": $l, "paged": $p,
+              "unreachable_attempts": ((.[$k].unreachable_attempts // 0) + 1)}' <<<"$state" 2>/dev/null
+}
+
+# qar_state_meta_unreachable_ticks <state-json> — echo
+# __meta__.consecutive_unreachable_ticks, default 0.
+qar_state_meta_unreachable_ticks() {
+  jq -r '(.__meta__.consecutive_unreachable_ticks // 0)' <<<"$1" 2>/dev/null || echo 0
+}
+
+# qar_state_set_meta_unreachable_ticks <state-json> <n> — echo new state with it set.
+qar_state_set_meta_unreachable_ticks() {
+  jq -c --argjson n "$2" '.__meta__.consecutive_unreachable_ticks = $n' <<<"$1" 2>/dev/null
+}
+
+# qar_state_meta_unreachable_last_alert <state-json> — epoch of the last
+# gateway-unreachable page, 0 if never.
+qar_state_meta_unreachable_last_alert() {
+  jq -r '(.__meta__.unreachable_last_alert // 0)' <<<"$1" 2>/dev/null || echo 0
+}
+
+# qar_state_set_meta_unreachable_last_alert <state-json> <epoch>
+qar_state_set_meta_unreachable_last_alert() {
+  jq -c --argjson e "$2" '.__meta__.unreachable_last_alert = $e' <<<"$1" 2>/dev/null
 }
 
 # qar_state_keep_only <state-json> <keys-newline-list>

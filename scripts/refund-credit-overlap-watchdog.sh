@@ -2,8 +2,9 @@
 # ──────────────────────────────────────────────────────────────
 # Refund + credit-balance overlap watchdog
 #
-# Pages #clio_devops when a customer receives BOTH a cash refund and a live
-# customer-balance concession credit — the same goodwill paid twice.
+# Pages #hydra-finance — as the finance bot, tagging Nick and Aaron — when a
+# customer receives BOTH a cash refund and a live customer-balance concession
+# credit: the same goodwill paid twice.
 #
 # WHY THIS EXISTS, AND WHY IT IS THE LOAD-BEARING LAYER
 # A 2026-09-09 finance audit found 223 customers in that state ($4,827.65),
@@ -63,6 +64,21 @@ WINDOW_MARGIN_HOURS="${REFUND_OVERLAP_WINDOW_MARGIN_HOURS:-8}"
 SETTLEMENT_HOURS="${REFUND_OVERLAP_SETTLEMENT_HOURS:-48}"
 DRY_RUN="${REFUND_OVERLAP_DRY_RUN:-0}"
 
+# Alerts land in #hydra-finance (private) as the finance bot, not in the devops
+# firehose. Every message this script sends names a customer id and a dollar
+# amount and is actioned by Nick or Aaron — the two people who can authorise
+# zeroing a balance — so the finance channel is where it belongs, and the bot
+# has to be one that is a MEMBER there (the operations bot is not; verified
+# 2026-09-17 via conversations.info).
+#
+# Set BEFORE sourcing slack-notify.sh: that lib assigns its own defaults with
+# `: "${VAR:=default}"`, which only fills a var that is still unset, so an
+# explicit export here — or from an operator rehearsing against a scratch
+# channel — wins over both.
+SLACK_CHANNEL="${SLACK_CHANNEL:-C0C2LT1HKDJ}"
+SLACK_NOTIFY_BOT="${SLACK_NOTIFY_BOT:-finance}"
+export SLACK_CHANNEL SLACK_NOTIFY_BOT
+
 for lib in "$STRIPE_CREDIT_LIB" "$SLACK_LIB"; do
   if [ ! -r "$lib" ]; then
     echo "FATAL: cannot read $lib" >&2
@@ -76,7 +92,7 @@ source "$SLACK_LIB"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 
-# Page #clio_devops and RETURN THE REAL DELIVERY STATUS.
+# Page #hydra-finance and RETURN THE REAL DELIVERY STATUS.
 #
 # slack_notify_critical() cannot be used for anything we gate on: it delegates to
 # slack_notify(), whose contract deliberately swallows failure — `slack_load_env
@@ -139,7 +155,10 @@ for _page in $(seq 1 "$PAGE_CEILING"); do
   fi
   if [ -z "$page" ] || ! printf '%s' "$page" | jq -e 'type == "object" and (.data | type == "array")' >/dev/null 2>&1; then
     log "FATAL: could not list refunds from Stripe"
-    slack_notify ":warning: refund-credit-overlap watchdog could not read Stripe refunds — duplicate-concession detection is BLIND right now."
+    # slack_notify_critical, not slack_notify: a blind watchdog means new
+    # duplicates are accruing with nobody watching, which is worse than any single
+    # finding. Untagged, it lands in a channel with no owner.
+    slack_notify_critical ":warning: refund-credit-overlap watchdog could not read Stripe refunds — duplicate-concession detection is BLIND right now."
     exit 2
   fi
   refunds_json="$(jq -s '{object:"list", data: (.[0].data + .[1].data)}' <(printf '%s' "$refunds_json") <(printf '%s' "$page"))"
@@ -161,7 +180,7 @@ done
 
 if [ "${sweep_incomplete:-0}" -eq 1 ]; then
   log "FATAL: refund pagination hit the ${PAGE_CEILING}-page ceiling with has_more=true; this sweep is INCOMPLETE"
-  slack_notify ":rotating_light: refund-credit-overlap watchdog sweep is INCOMPLETE — the ${LOOKBACK_HOURS}h window holds more refunds than the ${PAGE_CEILING}-page ceiling can scan, so an overlap may be sitting in a row this run never saw. Nothing was watermarked; raise the ceiling or shorten the window."
+  slack_notify_critical ":rotating_light: refund-credit-overlap watchdog sweep is INCOMPLETE — the ${LOOKBACK_HOURS}h window holds more refunds than the ${PAGE_CEILING}-page ceiling can scan, so an overlap may be sitting in a row this run never saw. Nothing was watermarked; raise the ceiling or shorten the window."
   exit 4
 fi
 total="$(printf '%s' "$refunds_json" | jq '.data | length')"
@@ -296,7 +315,7 @@ log "checked=$checked findings=${#findings[@]} unverifiable=$unverifiable"
 # code is what makes a wedged cron visible to the runner as well as to Slack.
 if [ "$unverifiable" -gt 0 ]; then
   unverified_msg=":warning: refund-credit-overlap watchdog left ${unverifiable} refund(s) UNVERIFIABLE this sweep — this is NOT a clean sweep. Those refunds are deliberately left un-watermarked so the next run retries them, but if the reads keep failing they will age out of the ${LOOKBACK_HOURS}h window unexamined and any duplicate concession on them is lost silently. Check Stripe API health."
-  slack_notify "$unverified_msg" || true
+  slack_notify_critical "$unverified_msg" || true
   log "PAGED: ${unverifiable} unverifiable refund(s) this sweep"
 fi
 
@@ -321,7 +340,7 @@ fi
 if page_critical_with_status "$msg"; then
   # Delivered: only now are these findings recorded as seen.
   for f in "${findings[@]}"; do echo "${f%%|*}" >>"$STATE_FILE"; done
-  log "paged #clio_devops with ${#findings[@]} finding(s); watermarked after delivery"
+  log "paged ${SLACK_CHANNEL} with ${#findings[@]} finding(s); watermarked after delivery"
   # Findings delivered, but the sweep was still incomplete.
   if [ "$unverifiable" -gt 0 ]; then exit 3; fi
 else

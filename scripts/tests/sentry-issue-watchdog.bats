@@ -1178,7 +1178,14 @@ OLD_ISO="2024-01-01T00:00:00"
 
 ledger_row() { # <id> <class> [outcome-json] [extra-json]
   mkdir -p "$SENTRY_WATCHDOG_LEDGER_DIR"
-  jq -nc --arg id "$1" --arg c "$2" --argjson o "${3:-null}" --argjson x "${4:-{\}}" \
+  # The extra-json default is a VARIABLE, not an inline "${4:-{\}}" default.
+  # bash 5 expands that to `{}`, but bash 3.2 (the /bin/bash every macOS ships)
+  # keeps the backslash and passes `{\}` to --argjson, which dies with "invalid
+  # JSON text" — four tests failed locally and passed on node-8, which is the
+  # worst shape for a test helper to fail in.
+  local _extra="${4:-}"
+  [ -n "$_extra" ] || _extra='{}'
+  jq -nc --arg id "$1" --arg c "$2" --argjson o "${3:-null}" --argjson x "$_extra" \
     '{ts:(($ENV.SENTRY_WATCHDOG_NOW|tonumber)|todateiso8601), short_id:$id, class:$c,
       summary:"s", outcome:$o, twin:null} + $x' >> "$SENTRY_WATCHDOG_LEDGER_DIR/seen.jsonl"
 }

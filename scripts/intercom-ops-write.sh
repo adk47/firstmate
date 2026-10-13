@@ -63,7 +63,7 @@ readonly PROD_LOG_DIR="/opt/hydra/workspaces/operations/api-logs"
 # a pattern added to either place without the other fails CI. (Prose word bans such as
 # "error" / "system" / "API" are Caroline's voice rules in workspaces/support/SOUL.md, not
 # sanitizer behaviour, and are NOT refused here — the support SOUL itself says "API" is fine.)
-readonly SANITIZER_WORDS="profile_status|profile_lookup|credits_search|create_ticket|subscription_status|remove_credits|dedupe_check|credit_verification_check|profiles_claim_self|credits_verify|profiles_consolidate|order_lookup|order_address_update|founding_status|founding_buyback_link|support_action_router|memory_search|memory_get|profile_analytics_status|profile_credits_status|profile_claim_status|retention_offer_check|retention_offer_apply|cancel_subscription|billing_status|track_analytics_status|analytics_refresh_request|analytics_recheck|subscription_cancel|refund_policy_check|refund_create|catalog_status|track_lookup|metadata_capture_request|artwork_refresh_request|catalog_recheck|user_status|resend_verification|email_delivery_status|login_recovery_packet|profile_change_packet|profile_merge_check|account_merge_preflight|email_change_preflight|profile_removal_preflight|ticket|tool failed|error fetching|unable to look up|the system says|my system|there was an issue with|ClickUp|openclaw|HYDRA"
+readonly SANITIZER_WORDS="profile_status|profile_lookup|credits_search|create_ticket|subscription_status|remove_credits|dedupe_check|credit_verification_check|profiles_claim_self|credits_verify|profiles_consolidate|order_lookup|order_address_update|founding_status|founding_buyback_link|support_action_router|memory_search|memory_get|profile_analytics_status|profile_credits_status|profile_claim_status|retention_offer_check|retention_offer_apply|cancel_subscription|billing_status|track_analytics_status|analytics_refresh_request|analytics_recheck|subscription_cancel|refund_policy_check|refund_create|catalog_status|track_lookup|metadata_capture_request|artwork_refresh_request|catalog_recheck|user_status|resend_verification|email_delivery_status|login_recovery_packet|profile_change_packet|profile_merge_check|account_merge_preflight|email_change_preflight|profile_removal_preflight|ticket|tool failed|error fetching|unable to look up|the system says|my system|there was an issue with|ClickUp|openclaw|HYDRA|platform-data-processing"
 readonly ALLOWLIST_TEXT="Aaron U7RP6HKUZ, Jan U038BM16T7W, Nick U0AL36NADEY"
 
 die()    { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
@@ -200,7 +200,7 @@ case "$MODE" in
     # on node-8 do not agree on \b.
     W='(^|[^A-Za-z0-9_])'; E='([^A-Za-z0-9_]|$)'
     leak=""
-    printf '%s' "$flat" | grep -qiE 'github\.com/|gitlab\.com/|issue #|#[0-9]{3,}|<@U[A-Z0-9]+>' && leak="an issue link, issue number or Slack mention"
+    printf '%s' "$flat" | grep -qiE 'github\.com/|gitlab\.com/|issues? +(#|[0-9]{3,})|#[0-9]{3,}|<@U[A-Z0-9]+>' && leak="an issue link, issue number or Slack mention"
     printf '%s' "$flat" | grep -qiE "${W}(Ops resolution|admin[ _]?id)${E}" && leak="internal wording (Ops resolution / admin id)"
     printf '%s' "$flat" | grep -qiE "${W}(${SANITIZER_WORDS})${E}" \
       && leak="a word Caroline's outbound sanitizer redacts ('$(printf '%s' "$flat" | grep -oiE "(${SANITIZER_WORDS})" | head -1)', see plugins/intercom/src/sanitize-tool-leak.ts)"

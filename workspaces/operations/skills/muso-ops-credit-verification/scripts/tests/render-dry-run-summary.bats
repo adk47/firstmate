@@ -265,3 +265,44 @@ EOF
   [[ "$output" == *"Apply outcomes"* ]]
   [[ "$output" != *"no-op —"* ]]
 }
+
+# --- machine-readable run contract (CV_BATCH_SUMMARY) ------------------------
+# dispatch-cv-batch.sh parses this ONE line to decide whether a run that
+# processed nothing is a scheduler error. 2026-09-11..09-17: the batch ran as
+# an agent turn, so its exit code never reached the scheduler and six days of
+# zero-work runs read as healthy. The control view has to be machine-readable
+# and present on EVERY path, including the compaction no-op — which is exactly
+# the shape a dead queue produces.
+
+@test "emits the machine-readable CV_BATCH_SUMMARY contract line (landed run)" {
+  run --separate-stderr env -u THREAD_TS POST_PARENT_TO_CHANNEL=0 bash -c "'$RENDER' < '$FIXTURE'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CV_BATCH_SUMMARY queue_depth=13864 fetch_size=500 sampled=500 "* ]]
+  [[ "$output" == *"attempted=500 landed=500 refused=0 transport_failed=0"* ]]
+  [[ "$output" == *"dry_run=false"* ]]
+}
+
+@test "the machine contract is emitted on the no-op path too" {
+  cat > "$TEST_TMPDIR/noop.json" <<'JSON'
+{
+  "queue_depth": 2700,
+  "fetch_size": 500,
+  "counts": { "total": 0, "would_approve": 0, "would_uvn": 0 },
+  "apply": { "dry_run": false,
+             "approve": { "landed": 0, "refused": 0 },
+             "uvn": { "landed": 0, "refused": 0 } }
+}
+JSON
+  run --separate-stderr env -u THREAD_TS POST_PARENT_TO_CHANNEL=0 bash -c "'$RENDER' < '$TEST_TMPDIR/noop.json'"
+  [ "$status" -eq 0 ]
+  # The zero the guard keys on: queue_depth>0 with sampled=0 must be visible.
+  [[ "$output" == *"CV_BATCH_SUMMARY queue_depth=2700 fetch_size=500 sampled=0 "* ]]
+  [[ "$output" == *"landed=0 refused=0"* ]]
+}
+
+@test "the machine contract reports a dry run as dry_run=true" {
+  run --separate-stderr env -u THREAD_TS POST_PARENT_TO_CHANNEL=0 bash -c "'$RENDER' < '$FIXTURE_DRY'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sampled=50"* ]]
+  [[ "$output" == *"dry_run=true"* ]]
+}

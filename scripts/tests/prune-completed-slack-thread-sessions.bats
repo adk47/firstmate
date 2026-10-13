@@ -9,12 +9,16 @@ setup() {
   export SESSION_THREAD_NOW_MS=2000000000000
   export SESSION_THREAD_RETENTION_DAYS=14
   export SESSION_THREAD_MAX_DELETES=100
+  export OPENCLAW_STUB_ARGV="$BATS_TEST_TMPDIR/argv.log"
+  export HYDRA_MAINTENANCE_FLAG="$BATS_TEST_TMPDIR/no-maintenance-flag"
+  export HYDRA_DEPLOY_WINDOW_FLAG="$BATS_TEST_TMPDIR/no-window-flag"
 
   export FAKE_OPENCLAW_VERSION="${FAKE_OPENCLAW_VERSION:-2026.7.1}"
 
   cat > "$OPENCLAW_STUB" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >> "${OPENCLAW_STUB_ARGV:-/dev/null}"
 
 if [[ " $* " == *" --version "* || "${*: -1}" == "--version" ]]; then
   echo "openclaw ${FAKE_OPENCLAW_VERSION:-2026.7.1}"
@@ -64,6 +68,20 @@ if [[ " $* " == *" gateway call sessions.delete "* ]]; then
   fi
   if [[ "$(jq -r '.expectedSessionId' <<<"$params")" == "broken" ]]; then
     echo 'gateway unavailable' >&2
+    exit 1
+  fi
+  # A TRANSIENT transport timeout, copied from the real 2026-09-17 incident
+  # payload. Distinct from 'broken' (an unclassifiable failure) on purpose:
+  # only this shape is tolerated, and the two must not converge.
+  # A transport error that is NOT a timeout. Structurally close to the
+  # tolerated shape on purpose: it shares `gateway_transport_error` and only
+  # differs in `kind`, which is exactly the case an alternation let through.
+  if [[ "$(jq -r '.expectedSessionId' <<<"$params")" == "gwprotocol" ]]; then
+    printf '%s\n' '{"ok":false,"error":{"type":"gateway_transport_error","kind":"protocol","message":"malformed response"}}' >&2
+    exit 1
+  fi
+  if [[ "$(jq -r '.expectedSessionId' <<<"$params")" == "gwtimeout" ]]; then
+    printf '%s\n' '{"ok":false,"error":{"type":"gateway_transport_error","kind":"timeout","message":"gateway timeout after 30000ms","timeoutMs":30000}}' >&2
     exit 1
   fi
   printf '%s\n' '{"ok":true,"deleted":true}'
@@ -387,4 +405,105 @@ Config (/root/.openclaw-main/openclaw.json): Removed retired agents.entries.*.de
   [ "$status" -eq 1 ]
   [ "$(jq -r '.error' <<<"$output")" = "SESSION_LIST_FAILED" ]
   [[ "$(jq -r '.stderr' <<<"$output")" == *"gateway unreachable"* ]]
+}
+
+
+# ── transient gateway failure must not page (2026-09-17 incident) ──────────
+# The gateway saturated during a deploy; one sessions.delete hit
+# `gateway timeout after 30000ms` AFTER 5 successful deletions, and this unit
+# exited 1 and paged with nothing for a human to do -- while the same
+# saturation was already paging through the deploy rollback. The failed
+# session stays ELIGIBLE, so the next 6h run retries it and nothing is lost.
+
+@test "a transient gateway timeout AFTER progress does not page" {
+  export OPENCLAW_STUB_SESSIONS='{"sessions":[
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000101","agentId":"scout","sessionId":"old-done","updatedAt":1990000000000,"status":"done"},
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000102","agentId":"scout","sessionId":"gwtimeout","updatedAt":1990000000001,"status":"done"}
+  ]}'
+
+  run bash "$SUT" --profile main --apply
+
+  [ "$status" -eq 0 ]                                   # no page
+  [ "$(jq -r '.deleted' <<<"$output")" -eq 1 ]          # progress was real
+  [ "$(jq -r '.failed'  <<<"$output")" -eq 1 ]          # and still RECORDED
+  echo "$output" | grep -q 'TRANSIENT gateway failure'
+  echo "$output" | grep -q 'next run retries'
+}
+
+@test "a transient timeout with ZERO progress still pages" {
+  # No progress means the sweep accomplished nothing; that is a real problem
+  # even though the error itself is transient-shaped.
+  export OPENCLAW_STUB_SESSIONS='{"sessions":[
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000103","agentId":"scout","sessionId":"gwtimeout","updatedAt":1990000000000,"status":"done"}
+  ]}'
+
+  run bash "$SUT" --profile main --apply
+
+  [ "$status" -eq 1 ]
+  [ "$(jq -r '.deleted' <<<"$output")" -eq 0 ]
+  [ "$(jq -r '.failed'  <<<"$output")" -eq 1 ]
+}
+
+@test "an UNCLASSIFIABLE failure after progress still pages — fail closed" {
+  # The scope guard. The tolerance covers exactly one recognised shape; any
+  # other failure must keep paging even when deletions succeeded first,
+  # because "could not classify" must never become "assumed fine".
+  export OPENCLAW_STUB_SESSIONS='{"sessions":[
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000104","agentId":"scout","sessionId":"old-done","updatedAt":1990000000000,"status":"done"},
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000105","agentId":"scout","sessionId":"broken","updatedAt":1990000000001,"status":"done"}
+  ]}'
+
+  run bash "$SUT" --profile main --apply
+
+  [ "$status" -eq 1 ]
+  [ "$(jq -r '.deleted' <<<"$output")" -eq 1 ]
+  echo "$output" | grep -qv 'TRANSIENT gateway failure'
+}
+
+@test "a clean run still exits 0 and reports no failures" {
+  # Guards the ordinary path against the new branching.
+  run bash "$SUT" --profile main --apply
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.failed' <<<"$output")" -eq 0 ]
+}
+
+@test "a NON-timeout gateway_transport_error after progress still pages" {
+  # QA finding on #979: the first cut matched `gateway_transport_error` OR the
+  # timeout message, so a `kind:"protocol"` failure — a malformed response,
+  # not self-healing — suppressed the page after one successful deletion.
+  # Only an actual timeout is tolerated.
+  export OPENCLAW_STUB_SESSIONS='{"sessions":[
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000106","agentId":"scout","sessionId":"old-done","updatedAt":1990000000000,"status":"done"},
+    {"key":"agent:scout:slack:channel:c1:thread:1900000000.000107","agentId":"scout","sessionId":"gwprotocol","updatedAt":1990000000001,"status":"done"}
+  ]}'
+
+  run bash "$SUT" --profile main --apply
+
+  [ "$status" -eq 1 ]                                   # must still page
+  [ "$(jq -r '.deleted' <<<"$output")" -eq 1 ]           # despite progress
+  [ "$(jq -r '.failed'  <<<"$output")" -eq 1 ]
+  echo "$output" | grep -qv 'TRANSIENT gateway failure'
+}
+
+@test "inside a deploy window it stands down: exit 0, logged, no gateway call" {
+  jq -n --argjson e "$(( $(date -u +%s) + 600 ))" '{reason:"deploy gateway warm-up",expires_epoch:$e}' > "$HYDRA_DEPLOY_WINDOW_FLAG"
+  run bash "$SUT" --profile main --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"deploy window: deploy gateway warm-up - skipping"* ]]
+  [ ! -s "$OPENCLAW_STUB_ARGV" ]
+}
+
+@test "inside a maintenance window it stands down: exit 0, logged, no gateway call" {
+  jq -n --argjson e "$(( $(date -u +%s) + 600 ))" '{reason:"openclaw bump",expires_epoch:$e}' > "$HYDRA_MAINTENANCE_FLAG"
+  run bash "$SUT" --profile main --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"maintenance: openclaw bump - skipping"* ]]
+  [ ! -s "$OPENCLAW_STUB_ARGV" ]
+}
+
+@test "an EXPIRED deploy window changes nothing: the gateway is called as today" {
+  jq -n --argjson e "$(( $(date -u +%s) - 60 ))" '{reason:"old",expires_epoch:$e}' > "$HYDRA_DEPLOY_WINDOW_FLAG"
+  run bash "$SUT" --profile main --apply
+  [ "$status" -eq 0 ]
+  grep -q 'gateway call sessions.delete' "$OPENCLAW_STUB_ARGV"
 }

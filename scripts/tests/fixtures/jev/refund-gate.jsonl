@@ -1,0 +1,5 @@
+{"ts":"2026-09-17T00:00:00Z","surface":"refund-gate","item_id":"a1","state_sha256":"x","questions_sha256":"y","model":"jev-1.13.0","answers":{"is_eligible":{"type":"noul","noul":0.92}},"usage":{"input_tokens":10,"output_tokens":2},"latency_ms":100,"actual":"true","rc":0,"http":200}
+{"ts":"2026-09-17T00:05:00Z","surface":"refund-gate","item_id":"a2","state_sha256":"x","questions_sha256":"y","model":"jev-1.13.0","answers":{"is_eligible":{"type":"noul","noul":0.55}},"usage":{"input_tokens":10,"output_tokens":2},"latency_ms":150,"actual":"false","rc":0,"http":200}
+{"ts":"2026-09-17T00:10:00Z","surface":"refund-gate","item_id":"a3","state_sha256":"x","questions_sha256":"y","model":"jev-1.13.0","answers":{"is_eligible":{"type":"noul","noul":0.97}},"usage":{"input_tokens":10,"output_tokens":2},"latency_ms":120,"actual":null,"rc":0,"http":200}
+{"ts":"2026-09-17T00:15:00Z","surface":"refund-gate","item_id":"a4","state_sha256":"x","questions_sha256":"y","model":"jev-1.13.0","answers":null,"usage":null,"latency_ms":1600,"actual":null,"rc":2,"http":null}
+this is not json

@@ -191,6 +191,11 @@ class PureLogic(unittest.TestCase):
 # --------------------------------------------------------------------------
 class MainFlow(unittest.TestCase):
     def setUp(self):
+        # Snapshot the WHOLE environment and restore it exactly in tearDown.
+        # Popping keys this class set also deleted values it did not own --
+        # including CI's JEV_SHADOW_DIR fence, so every later test class wrote
+        # fixture rows into the PRODUCTION shadow log on node-8 (2026-09-23).
+        self._env_snapshot = dict(os.environ)
         self.d = tempfile.mkdtemp()
         self.feed = os.path.join(self.d, "feed.jsonl")
         self.state = os.path.join(self.d, "state.json")
@@ -209,7 +214,7 @@ class MainFlow(unittest.TestCase):
         self.calls = {"reply": [], "close": []}
         self._orig = {k: getattr(rm, k) for k in
                       ("get_conversation", "post_intercom_reply", "close_conversation",
-                       "query_action_log", "post_slack")}
+                       "query_action_log", "post_slack", "shadow_judge")}
         rm.get_conversation = lambda cid, tok: conv(cid=cid, email="a@b.com")
         rm.post_intercom_reply = lambda cid, aid, msg, tok: self.calls["reply"].append(cid)
         rm.close_conversation = lambda cid, aid, tok: self.calls["close"].append(cid)
@@ -217,14 +222,16 @@ class MainFlow(unittest.TestCase):
             {"route": "/api/v3/admin/profile/x/credits", "method": "PUT",
              "requester": "aaron@muso.ai", "at": "2026-06-29 10:00:00 UTC"}]
         rm.post_slack = lambda *a, **k: True
+        # Hermetic: MainFlow exercises the matcher's decision path, not the
+        # Jev shadow. Without this stub it ran the REAL jev.sh (JevShadowWiring
+        # below is where the shadow call is actually tested).
+        rm.shadow_judge = lambda *a, **k: None
 
     def tearDown(self):
         for k, v in self._orig.items():
             setattr(rm, k, v)
-        for k in ("RESOLUTION_SKIP_HOST_GUARD", "MUSOAI_INTERCOM_TOKEN",
-                  "RESOLUTION_FEED_PATH", "RESOLUTION_STATE_PATH", "RESOLUTION_SHADOW_LOG",
-                  "RESOLUTION_NOW", "RESOLUTION_MATCHER_MAX"):
-            os.environ.pop(k, None)
+        os.environ.clear()
+        os.environ.update(self._env_snapshot)
 
     def _write_feed(self, *lines):
         with open(self.feed, "w") as f:
@@ -354,6 +361,188 @@ class MainFlow(unittest.TestCase):
         old = NOW - 48 * 3600
         os.utime(path, (old, old))
 
+
+# --------------------------------------------------------------------------
+# Phase 2a shadow wiring (docs/plans/jev-adoption.md #2a). The resolution-match
+# Jev call fires strictly AFTER detect_fix() already matched a member to a fix
+# row, and must never change `matched`, `to_act`, stdout, or the exit code —
+# regardless of whether jev.sh succeeds, fails, hangs, or is disabled.
+# --------------------------------------------------------------------------
+_FAKE_JEV = str(
+    pathlib.Path(__file__).resolve().parent.parent
+    / "scripts" / "tests" / "fixtures" / "jev" / "fake-jev-sh.sh"
+)
+_REAL_JEV = str(
+    pathlib.Path(__file__).resolve().parent.parent / "scripts" / "lib" / "jev.sh"
+)
+
+
+class JevShadowWiring(unittest.TestCase):
+    def setUp(self):
+        # Snapshot the WHOLE environment and restore it exactly in tearDown.
+        # Popping keys this class set also deleted values it did not own --
+        # including CI's JEV_SHADOW_DIR fence, so every later test class wrote
+        # fixture rows into the PRODUCTION shadow log on node-8 (2026-09-23).
+        self._env_snapshot = dict(os.environ)
+        self.d = tempfile.mkdtemp()
+        self.feed = os.path.join(self.d, "feed.jsonl")
+        self.state = os.path.join(self.d, "state.json")
+        self.shadow = os.path.join(self.d, "shadow.jsonl")
+        self.jev_shadow_dir = os.path.join(self.d, "jev-shadow")
+        os.makedirs(self.jev_shadow_dir, exist_ok=True)
+        os.environ.update({
+            "RESOLUTION_SKIP_HOST_GUARD": "1",
+            "MUSOAI_INTERCOM_TOKEN": "fake",
+            "RESOLUTION_FEED_PATH": self.feed,
+            "RESOLUTION_STATE_PATH": self.state,
+            "RESOLUTION_SHADOW_LOG": self.shadow,
+            "RESOLUTION_NOW": str(NOW),
+            "RESOLUTION_MATCHER_MAX": "15",
+            "JEV_SHADOW_DIR": self.jev_shadow_dir,
+        })
+        os.environ.pop("CLICKUP_API_KEY", None)
+        self.calls = {"reply": [], "close": []}
+        self._orig = {k: getattr(rm, k) for k in
+                      ("get_conversation", "post_intercom_reply", "close_conversation",
+                       "query_action_log", "post_slack", "shadow_judge")}
+        rm.get_conversation = lambda cid, tok: conv(cid=cid, email="a@b.com")
+        rm.post_intercom_reply = lambda cid, aid, msg, tok: self.calls["reply"].append(cid)
+        rm.close_conversation = lambda cid, aid, tok: self.calls["close"].append(cid)
+        rm.query_action_log = lambda sql, b: [
+            {"route": "/api/v3/admin/profile/x/credits", "method": "PUT",
+             "requester": "aaron@muso.ai", "at": "2026-06-29 10:00:00 UTC"}]
+        rm.post_slack = lambda *a, **k: True
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(rm, k, v)
+        os.environ.clear()
+        os.environ.update(self._env_snapshot)
+
+    def _write_feed(self, *lines):
+        with open(self.feed, "w") as f:
+            for ln in lines:
+                f.write(ln + "\n")
+
+    def _touch_old(self, path):
+        old = NOW - 48 * 3600
+        os.utime(path, (old, old))
+
+    def _run_scenario(self, jev_sh, disabled_file=None):
+        rm.write_state(self.state, {rm.SEED_SENTINEL: NOW - 86400})
+        self._touch_old(self.state)
+        self._write_feed(feed_line("111", "a@b.com", [f"track/{UUID}"]))
+        os.environ["JEV_SH"] = jev_sh
+        if disabled_file:
+            os.environ["JEV_DISABLED_FILE"] = disabled_file
+        else:
+            os.environ.pop("JEV_DISABLED_FILE", None)
+        rc = rm.main(["--apply"])
+        with open(self.state) as f:
+            state = json.load(f)
+        return {"rc": rc, "reply": list(self.calls["reply"]),
+                "close": list(self.calls["close"]), "state": state}
+
+    def test_shadow_call_never_changes_outcome_across_ok_rc2_hang_killswitch(self):
+        os.environ["JEV_SHADOW_FAKE_MODE"] = "ok"
+        baseline = self._run_scenario(_FAKE_JEV)
+        self.assertEqual(baseline["reply"], ["111"])  # sanity: this member did act
+
+        for mode in ("rc2", "hang"):
+            self.calls["reply"].clear()
+            self.calls["close"].clear()
+            os.environ["JEV_SHADOW_FAKE_MODE"] = mode
+            result = self._run_scenario(_FAKE_JEV)
+            self.assertEqual(result, baseline, f"mode={mode} changed observable behaviour")
+
+        # Kill switch: real jev.sh, JEV_DISABLED_FILE present -> jev.sh exits 6.
+        self.calls["reply"].clear()
+        self.calls["close"].clear()
+        ks_file = os.path.join(self.d, "jev.disabled")
+        with open(ks_file, "w"):
+            pass
+        result = self._run_scenario(_REAL_JEV, disabled_file=ks_file)
+        self.assertEqual(result, baseline, "kill switch changed observable behaviour")
+
+    def test_shadow_actual_is_matched_for_a_would_act_member(self):
+        captured = []
+        rm.shadow_judge = lambda surface, item_id, state, questions, actual=None: (
+            captured.append((surface, item_id, actual)) or None)
+        rm.write_state(self.state, {rm.SEED_SENTINEL: NOW - 86400})
+        self._touch_old(self.state)
+        self._write_feed(feed_line("111", "a@b.com", [f"track/{UUID}"]))
+        rc = rm.main(["--apply"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured, [("resolution-match", "111", "matched")])
+
+    def test_build_state_is_a_lazy_callable_not_a_pre_built_dict(self):
+        # Regression for the review-flagged bug class: the shadow state used
+        # to be a dict literal built as a bare argument to shadow_judge --
+        # evaluated BEFORE its own try/except boundary is ever entered, so
+        # any failure while building it (a bad m/fix lookup) would raise
+        # straight through the match loop.
+        #
+        # Unlike the other two Phase-2a call sites (close-duplicate's extra
+        # GETs, resolve-notify's conversation-part walk), this call site's
+        # `m`/`fix` are ALREADY plain, fully-realized dicts by the time the
+        # lambda is built (`m = dict(m, fix=fix)` runs first), and `fix` is
+        # unconditionally embedded verbatim in the script's OWN audit trail
+        # (shadow_append) regardless of Jev -- so there is no data shape that
+        # makes state-building raise in isolation without also breaking the
+        # script's own non-shadow logic. The property that actually matters
+        # here, and the one the fix (docs/plans/jev-adoption.md #2a review)
+        # asked for, is structural: state must be passed as a zero-arg
+        # callable, not a pre-built dict, so ANY future failure mode in this
+        # construction runs inside shadow_judge's boundary by construction.
+        captured = []
+        rm.shadow_judge = lambda surface, item_id, state, questions, actual=None: (
+            captured.append((surface, item_id, state, actual)) or None)
+        rm.write_state(self.state, {rm.SEED_SENTINEL: NOW - 86400})
+        self._touch_old(self.state)
+        self._write_feed(feed_line("111", "a@b.com", [f"track/{UUID}"]))
+        rc = rm.main(["--apply"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(captured), 1)
+        surface, item_id, state, actual = captured[0]
+        self.assertEqual((surface, item_id, actual), ("resolution-match", "111", "matched"))
+        self.assertTrue(callable(state), state)  # NOT a pre-built dict
+        self.assertEqual(state(), {
+            "customer_report": {"title": "Credits misattribution",
+                                 "symptom": "wrong name on credits"},
+            "action_log_row": {"route": "/api/v3/admin/profile/x/credits", "method": "PUT",
+                                "requester": "aaron@muso.ai", "at": "2026-06-29 10:00:00 UTC",
+                                "matched_entity": UUID}})
+
+
+
+class EnvironmentIsRestoredExactly(unittest.TestCase):
+    """CI sets JEV_SHADOW_DIR (and JEV_ENV_FILE) for the whole job so no test
+    can write the PRODUCTION shadow log on node-8. A test class that pops keys
+    in tearDown deletes that fence for every class after it -- which is how
+    fixture rows reached production on 2026-09-23 after the fence merged."""
+
+    def _roundtrip(self, cls):
+        name = next(n for n in dir(cls) if n.startswith("test_"))
+        sentinel = "/tmp/ci-fence-sentinel-do-not-touch"
+        prior = os.environ.get("JEV_SHADOW_DIR")
+        os.environ["JEV_SHADOW_DIR"] = sentinel
+        try:
+            t = cls(name)
+            t.setUp()
+            t.tearDown()
+            self.assertEqual(os.environ.get("JEV_SHADOW_DIR"), sentinel,
+                             f"{cls.__name__}.tearDown did not restore a pre-existing JEV_SHADOW_DIR")
+        finally:
+            if prior is None:
+                os.environ.pop("JEV_SHADOW_DIR", None)
+            else:
+                os.environ["JEV_SHADOW_DIR"] = prior
+
+    def test_mainflow_restores_a_preexisting_jev_shadow_dir(self):
+        self._roundtrip(MainFlow)
+
+    def test_jevshadowwiring_restores_a_preexisting_jev_shadow_dir(self):
+        self._roundtrip(JevShadowWiring)
 
 if __name__ == "__main__":
     unittest.main()

@@ -106,6 +106,8 @@ set -euo pipefail
 #   Grace:    no action until >=30 min since the PR's trigger_time (head
 #             push, or ready_for_review if later).
 #   Cooldown: >=30 min between attempts for the same (repo, pr, head_sha).
+#   Unreachable: a dispatch that never reached the gateway (rc 75) is NOT an
+#             attempt; see QA_RECONCILE_MAX_ATTEMPTS.
 #   Cap:      max 2 attempts per key; on the 2nd exhausted attempt, page
 #             once and (merge-gated repos only) drive the qa-review status
 #             red via qa-review-status.sh.
@@ -167,7 +169,12 @@ set -euo pipefail
 #   QA_RECONCILE_PROFILE             openclaw --profile (default: main)
 #   QA_RECONCILE_GRACE_S             grace window seconds (default 1800)
 #   QA_RECONCILE_COOLDOWN_S          cooldown seconds (default 1800)
-#   QA_RECONCILE_MAX_ATTEMPTS        attempts cap per key (default 2)
+#   QA_RECONCILE_MAX_ATTEMPTS        attempts cap per key (default 2). Bounds
+#                                     dispatches that REACHED the gateway; a
+#                                     dispatcher exit 75 (gateway unreachable)
+#                                     is not an attempt — cooldown, the global
+#                                     cap and a page after TICK_FAIL_THRESHOLD
+#                                     all-unreachable ticks bound those
 #   QA_RECONCILE_GLOBAL_CAP          re-dispatches per tick (default 3)
 #   QA_RECONCILE_PAGE_CAP             exhaustion pages + red-status calls per
 #                                     tick (default 3) — bounds the actuator
@@ -254,6 +261,18 @@ for arg in "$@"; do
 done
 
 NOW_EPOCH="${QA_RECONCILE_NOW_EPOCH:-$(date -u +%s)}"
+
+# Portable epoch -> UTC date (GNU date first, then BSD/macOS date). Mirrors
+# lib/cto-push-audit-guard.sh's epoch_to_date — not yet extracted to a
+# sourceable lib (only the second occurrence; see CLAUDE.md's "wait for the
+# third" DRY rule).
+epoch_to_date() {
+  date -u -d "@$1" +%Y-%m-%d 2>/dev/null || date -u -r "$1" +%Y-%m-%d 2>/dev/null
+}
+# The rollup enrichment call (see the split below) is scoped to the same
+# storm-guard age ceiling as qar_trigger_in_scope, since only in-scope PRs
+# ever reach the terminal-status short-circuit that consumes it.
+ROLLUP_SEARCH_DATE="$(epoch_to_date "$((NOW_EPOCH - AGE_CEILING_S))")"
 
 page() {
   # Best-effort, but never in dry-run: dry-run must page nothing.
@@ -463,12 +482,23 @@ else
 fi
 
 dispatched_this_tick=0
+# Dispatches this tick that exited 75 (never reached the gateway) / exited 0.
+unreachable_this_tick=0
+reached_this_tick=0
+# PRs whose head commit already carried a terminal qa-review status in the PR
+# list, so no per-PR REST read was needed (the read-amplification cut).
+terminal_skipped=0
 paged_this_tick=0
 page_cap_deferred=0
 pre_epoch_ignored_total=0
 declare -A pre_epoch_ignored_by_repo=()
 failed_repo_count=0
 total_repo_count=${#REPOS[@]}
+# Repos whose rollup-enrichment call (best-effort) failed or was malformed
+# this tick — NOT a READ-FAILURE (the authoritative listing still succeeded),
+# never touches the repo failure counter, never pages. Just disables the
+# terminal-status short-circuit for that repo this tick.
+rollup_degraded_count=0
 # Every key seen this tick that must survive pruning even though its repo's
 # listing may have failed later in the loop for a DIFFERENT repo; and every
 # (repo,pr,head_sha) confirmed still-open, for the prune pass below.
@@ -489,6 +519,9 @@ for repo in "${REPOS[@]}"; do
   repo_reads_attempted=0
   repo_reads_failed=0
   repo_failed_classes=""
+  # PRs skipped because the list already showed a terminal qa-review status on
+  # their head commit (the read-amplification cut; see the loop body).
+  repo_terminal_skipped=0
   # Per-STAGE attempted/failed counts for this repo, this tick — see
   # lib/qa-reconcile.sh's "Per-repo, per-STAGE read-failure tracking" block.
   # Pre-initialize every stage key: under `set -u`, referencing an
@@ -498,6 +531,9 @@ for repo in "${REPOS[@]}"; do
   declare -A stage_attempted=( [commit]=0 [timeline]=0 [reviews]=0 [status]=0 [author_uid]=0 )
   declare -A stage_failed=( [commit]=0 [timeline]=0 [reviews]=0 [status]=0 [author_uid]=0 )
 
+  # LISTING (authoritative): drives everything below — trigger scope, the
+  # truncation guard, and the prune keep-set. Its failure is a real
+  # READ-FAILURE. See "why statusCheckRollup is NOT requested here" below.
   if ! prs_json="$("$GH" pr list --repo "$repo" --state open \
         --json number,headRefOid,baseRefName,isDraft,author,updatedAt,createdAt,url \
         --limit "$PRLIST_LIMIT" 2>/dev/null)" || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$prs_json"; then
@@ -518,6 +554,38 @@ for repo in "${REPOS[@]}"; do
   repo_listed_ok["$repo"]=1
   state_json="$(qar_state_set_repo_failure_count "$state_json" "$repo" 0)"
   repo_file_key="${repo//\//-}"
+
+  # ── Rollup enrichment (best-effort, 2026-09-18) ────────────────────────
+  # `gh pr list --json ...,statusCheckRollup` for ALL open PRs 504s
+  # deterministically on Muso-AI/H-DevOps (133 open PRs, 30-50 check
+  # contexts each — measured live). The listing above no longer requests
+  # statusCheckRollup at all, so it stays cheap and reliable; the rollup is
+  # fetched separately, scoped to the same AGE_CEILING_S storm-guard window
+  # the terminal short-circuit's consumers (in-scope PRs only) ever reach —
+  # `--search "updated:>=<date>"` measured 49 rows / 1860 contexts on
+  # H-DevOps over 14d, vs a 504 for all 133. A failure or malformed result
+  # here is NOT a READ-FAILURE (the authoritative listing already
+  # succeeded): it just disables the short-circuit for this repo this tick,
+  # so every in-scope PR falls through to the existing per-PR reads —
+  # exactly the fail-safe direction the short-circuit's own comment above
+  # already documents for a rollup shape change.
+  rollup_call_ok=1
+  if ! rollup_json="$("$GH" pr list --repo "$repo" --state open \
+        --search "updated:>=$ROLLUP_SEARCH_DATE" \
+        --json number,statusCheckRollup \
+        --limit "$PRLIST_LIMIT" 2>/dev/null)" || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$rollup_json"; then
+    rollup_call_ok=0
+  fi
+  if [ "$rollup_call_ok" -eq 1 ] && merged_prs_json="$(jq -c --argjson rollups "$rollup_json" '
+        ( [ $rollups[] | { (.number|tostring): (.statusCheckRollup // []) } ] | add // {} ) as $by_number
+        | map(.statusCheckRollup = ($by_number[(.number|tostring)] // []))
+      ' <<<"$prs_json" 2>/dev/null)"; then
+    prs_json="$merged_prs_json"
+  else
+    rollup_degraded_count=$((rollup_degraded_count + 1))
+    log "ROLLUP-DEGRADED: statusCheckRollup unavailable for $repo this tick — terminal-status short-circuit disabled, every in-scope PR falls through to the per-PR reads (costs reads, never a missed recovery)."
+    prs_json="$(jq -c 'map(.statusCheckRollup = [])' <<<"$prs_json" 2>/dev/null || printf '%s' "$prs_json")"
+  fi
 
   # ── Truncation guard ──────────────────────────────────────────────────
   # A repo with more open PRs than PRLIST_LIMIT would otherwise silently
@@ -573,6 +641,57 @@ for repo in "${REPOS[@]}"; do
       continue
     fi
     [ -n "$author_uid" ] || continue
+
+    # ── Terminal-status short-circuit: do not re-read a settled PR ───────
+    # The PR list already carries each context's LATEST state for the head
+    # commit (`statusCheckRollup`), so a PR whose head holds a terminal
+    # qa-review status is classified `verdict` by qar_classify_verdict's very
+    # first case — the same answer the four per-PR REST reads below would
+    # produce, at zero REST cost. Without this, every tick re-read the commit,
+    # timeline, reviews and combined status of EVERY open PR on EVERY repo to
+    # re-derive a verdict it had already recorded: that is the per-tick read
+    # amplification measured on 2026-09-17 (352 CANDIDATE/STAGE READ FAILURE
+    # events in a day, all on the REST core budget the rest of the lane shares,
+    # while the GraphQL budget sat unused at 5,000/5,000).
+    # Fail-safe direction: anything other than a terminal state — including a
+    # jq failure (empty) or `absent` — falls through to the existing reads, so
+    # a rollup shape change can only cost reads, never a missed recovery.
+    #
+    # 2026-09-18: `statusCheckRollup` is no longer part of the LISTING call
+    # above (it now arrives via a separate best-effort enrichment call,
+    # merged into `.statusCheckRollup` by PR number before this loop) —
+    # `gh pr list --json ...,statusCheckRollup` for ALL open PRs 504s
+    # deterministically on Muso-AI/H-DevOps at 133 open PRs / 30-50 check
+    # contexts each. The enrichment call is scoped to AGE_CEILING_S (see
+    # ROLLUP_SEARCH_DATE) rather than "all open", because only an in-scope
+    # PR (this loop already `continue`s past out-of-scope ones below) ever
+    # reaches this short-circuit — scoping the rollup read to the same
+    # window costs nothing a wider read would have bought. An enrichment
+    # failure degrades to `.statusCheckRollup == []` for every row in that
+    # repo this tick (see ROLLUP-DEGRADED below), which lands in this same
+    # fail-safe fall-through, never a missed recovery.
+    rollup_state="$(qar_qa_review_rollup_state "$(jq -c '.statusCheckRollup // []' <<<"$pr_json" 2>/dev/null)")" || rollup_state=""
+    # The rollup carries no status DESCRIPTION, so a red it reports may be our
+    # own "no review happened" write (qar_status_is_infra), which is not a
+    # verdict. Only `success` is settled from the rollup alone; failure/error
+    # costs one REST status read to read the description, and falls through to
+    # the full reads if that read fails or the red is infrastructure.
+    case "$rollup_state" in
+      success)
+        terminal_skipped=$((terminal_skipped + 1))
+        repo_terminal_skipped=$((repo_terminal_skipped + 1))
+        continue
+        ;;
+      failure|error)
+        if rollup_status_json="$("$GH" api "repos/$repo/commits/$head_sha/status?per_page=100" 2>/dev/null)" \
+           && rollup_desc="$(qar_qa_review_status_field "$rollup_status_json" description)" \
+           && ! qar_status_is_infra "$rollup_desc"; then
+          terminal_skipped=$((terminal_skipped + 1))
+          repo_terminal_skipped=$((repo_terminal_skipped + 1))
+          continue
+        fi
+        ;;
+    esac
 
     # ── head-push trigger time ───────────────────────────────────────────
     repo_reads_attempted=$((repo_reads_attempted + 1))
@@ -708,7 +827,19 @@ for repo in "${REPOS[@]}"; do
     fi
     gated=0; [ "$gate_rc" -eq 0 ] && gated=1
 
-    verdict="$(qar_classify_verdict "$has_bot_review" "$status_state" "$gated")"
+    status_desc="$(qar_qa_review_status_field "$status_json" description)" || status_desc=""
+    # pending age from the status's own updated_at; unparseable/absent = treat as
+    # stale (a bounded extra dispatch beats suppressing forever).
+    pending_age_s=""
+    if [ "$status_state" = "pending" ]; then
+      status_updated="$(qar_qa_review_status_field "$status_json" updated_at)" || status_updated=""
+      if status_updated_epoch="$(iso_to_epoch "$status_updated" 2>/dev/null)" && [ -n "$status_updated_epoch" ]; then
+        pending_age_s=$((NOW_EPOCH - status_updated_epoch))
+      else
+        pending_age_s=$((CRON_STALE_S + 1))
+      fi
+    fi
+    verdict="$(qar_classify_verdict "$has_bot_review" "$status_state" "$gated" "$status_desc" "$pending_age_s" "$CRON_STALE_S")"
     [ "$verdict" = "candidate" ] || continue
 
     key="${repo}#${pr}@${head_sha}"
@@ -801,11 +932,38 @@ for repo in "${REPOS[@]}"; do
 
     log "DISPATCH: $key (attempt $((attempts + 1))/$MAX_ATTEMPTS)"
     dispatch_rc=0
-    "$DISPATCH_SCRIPT" "$pr" "$head_sha" "$repo" "$author_uid" || dispatch_rc=$?
-    [ "$dispatch_rc" -eq 0 ] || log "WARN: $DISPATCH_SCRIPT exited $dispatch_rc for $key (counted as an attempt regardless — a systematically broken dispatcher must still hit the attempts cap, not retry forever)."
-    state_json="$(qar_state_put "$state_json" "$key" "$((attempts + 1))" "$NOW_EPOCH" 0)"
+    QA_DEDUP_REFUSED_RC=76 "$DISPATCH_SCRIPT" "$pr" "$head_sha" "$repo" "$author_uid" || dispatch_rc=$?
+    # Invariant: `attempts` bounds dispatches that REACHED the gateway. rc 75
+    # (EX_TEMPFAIL) means the dispatcher never got to it, so it is not an
+    # attempt; cooldown (last_attempt_epoch still advances) + GLOBAL_CAP + the
+    # consecutive-unreachable-ticks page bound those. Every other non-zero rc
+    # stays counted — a systematically broken dispatcher must still hit the
+    # attempts cap, not retry forever.
+    # rc 76: the dispatcher refused because GitHub already holds an equivalent
+    # queued/in_progress review run (MUS-7955). That review is merely waiting for
+    # a runner, so it is neither an attempt nor an unreachable gateway: cooldown
+    # only, else a saturated runner pool would exhaust attempts and page "lost".
+    if [ "$dispatch_rc" -eq 76 ]; then
+      log "DEDUP: $DISPATCH_SCRIPT refused $key (an equivalent review run is already queued/in_progress) — NOT counted as an attempt; cooldown still applies."
+      state_json="$(qar_state_put "$state_json" "$key" "$attempts" "$NOW_EPOCH" "$paged")"
+    elif [ "$dispatch_rc" -eq 75 ]; then
+      log "WARN: $DISPATCH_SCRIPT exited 75 for $key (gateway unreachable — NOT counted as an attempt; cooldown still applies)."
+      state_json="$(qar_state_put_unreachable "$state_json" "$key" "$attempts" "$NOW_EPOCH" "$paged")"
+      unreachable_this_tick=$((unreachable_this_tick + 1))
+    else
+      [ "$dispatch_rc" -eq 0 ] || log "WARN: $DISPATCH_SCRIPT exited $dispatch_rc for $key (counted as an attempt regardless — a systematically broken dispatcher must still hit the attempts cap, not retry forever)."
+      state_json="$(qar_state_put "$state_json" "$key" "$((attempts + 1))" "$NOW_EPOCH" 0)"
+      [ "$dispatch_rc" -ne 0 ] || reached_this_tick=$((reached_this_tick + 1))
+    fi
     dispatched_this_tick=$((dispatched_this_tick + 1))
   done < <(jq -c '.[]' <<<"$prs_json")
+
+  # PRs whose head already showed a terminal qa-review status this tick —
+  # they consumed zero per-PR reads (see the loop's short-circuit). Reported
+  # per repo so a reader can compare read volume against the PR count.
+  if [ "$repo_terminal_skipped" -gt 0 ]; then
+    log "TERMINAL SKIP: $repo — $repo_terminal_skipped PR(s) already carried a terminal qa-review status on their head commit; no per-PR read issued for them this tick."
+  fi
 
   # ── Candidate-level (per-PR) read-failure watchdog ─────────────────────
   # A durable failure that leaves `gh pr list` working but every per-PR read
@@ -880,6 +1038,32 @@ if [ "$pre_epoch_ignored_total" -gt 0 ]; then
   log "pre-epoch ignored: $pre_epoch_ignored_total PRs across ${#pre_epoch_ignored_by_repo[@]} repos ($by_repo)"
 fi
 
+# ── Gateway-unreachable watchdog ───────────────────────────────────────────
+# rc-75 dispatches are not attempts, so this replaces the bound the attempts
+# cap used to give: a tick with >=1 unreachable and 0 successful dispatches
+# advances the counter; any rc-0 dispatch resets it; a tick with neither leaves
+# it alone. At TICK_FAIL_THRESHOLD, page once per READ_FAIL_ALERT_INTERVAL.
+if [ "$DRY_RUN" -eq 0 ]; then
+  if [ "$reached_this_tick" -gt 0 ]; then
+    state_json="$(qar_state_set_meta_unreachable_ticks "$state_json" 0)"
+  elif [ "$unreachable_this_tick" -gt 0 ]; then
+    unreach_n=$(( $(qar_state_meta_unreachable_ticks "$state_json") + 1 ))
+    state_json="$(qar_state_set_meta_unreachable_ticks "$state_json" "$unreach_n")"
+    log "GATEWAY UNREACHABLE: $unreachable_this_tick dispatch(es) never reached the gateway this tick; consecutive count now $unreach_n."
+    if [ "$unreach_n" -ge "$TICK_FAIL_THRESHOLD" ]; then
+      unreach_last="$(qar_state_meta_unreachable_last_alert "$state_json")"
+      if qar_read_fail_should_page "$unreach_last" "$NOW_EPOCH" "$READ_FAIL_ALERT_INTERVAL"; then
+        waiting_heads="$(jq '[to_entries[] | select(.key != "__meta__" and .key != "__repo_epochs__" and .key != "__ready_cache__") | select((.value.unreachable_attempts // 0) > 0)] | length' <<<"$state_json")"
+        if page_confirmed "qa-review-reconcile: the openclaw gateway has been unreachable for $unreach_n consecutive ticks; $waiting_heads PR head(s) are waiting for a review that could not be dispatched (not counted as attempts)."; then
+          state_json="$(qar_state_set_meta_unreachable_last_alert "$state_json" "$NOW_EPOCH")"
+        else
+          log "WARN: gateway-unreachable page was NOT confirmed delivered — suppression stamp NOT advanced; the next tick retries."
+        fi
+      fi
+    fi
+  fi
+fi
+
 # ── Whole-tick read-failure watchdog ───────────────────────────────────────
 meta_failures="$(qar_state_meta_failures "$state_json")"
 if [ "$total_repo_count" -gt 0 ] && [ "$failed_repo_count" -eq "$total_repo_count" ]; then
@@ -942,4 +1126,4 @@ else
   fi
 fi
 
-log "tick complete: repos=$total_repo_count failed_repo_listings=$failed_repo_count dispatched=$dispatched_this_tick pre_epoch_ignored=$pre_epoch_ignored_total"
+log "tick complete: repos=$total_repo_count failed_repo_listings=$failed_repo_count dispatched=$dispatched_this_tick pre_epoch_ignored=$pre_epoch_ignored_total terminal_skipped=$terminal_skipped rollup_degraded=$rollup_degraded_count"

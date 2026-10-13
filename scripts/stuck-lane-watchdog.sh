@@ -156,6 +156,28 @@ LIVE_PROFILES="${STUCK_LANE_LIVE_PROFILES:-main edge}"
 LIVE_SNAPSHOT_DIR="${STUCK_LANE_LIVE_SNAPSHOT_DIR:-}"
 LIVE_STATE_FILE="${STUCK_LANE_LIVE_STATE_FILE:-/var/lib/stuck-lane-watchdog/live-lanes.json}"
 LIVE_MIN_TICKS="${STUCK_LANE_LIVE_MIN_TICKS:-3}"
+
+# ── Detector 3: lane LATENCY (waits that already ENDED) ─────────────────────
+# This is the one thing `lane wait exceeded` IS authoritative for. The line is
+# emitted as a queued task STARTS, so it cannot prove a lane is stuck now
+# (detector 2 answers that from live state) — but `waitedMs` is a real, finished
+# measurement of how long that task sat queued. Nothing watched it, so a human
+# waiting a long time for an agent reply produced no signal at all: on
+# 2026-09-16 five messages to `cto` waited 107, 102, 91, 86 and 22 minutes and
+# the only reason anyone noticed was a person asking why Ops had not replied.
+#
+# Measured over 24h on node-8 (2026-09-17, main gateway; edge emits none):
+#   170 lines   p50=79s  p90=508s  p99=1013s  max=1271s (21.2 min)
+#   >= 5min -> 39 lines /  8 lanes      >= 15min -> 5 lines / 3 lanes
+#   >= 10min -> 11 lines /  4 lanes     >= 30min -> 0
+# 10 minutes is the floor: 4 lanes/day is a sane page rate, 5 minutes would be
+# 8 and chatty for something already-resolved, and 15 would have missed two of
+# the four worst cases today.
+LATENCY_UNITS="${STUCK_LANE_LATENCY_UNITS:-openclaw-gateway-main openclaw-gateway-edge}"
+LATENCY_JOURNAL_DIR="${STUCK_LANE_LATENCY_JOURNAL_DIR:-}"
+LATENCY_STATE_FILE="${STUCK_LANE_LATENCY_STATE_FILE:-/var/lib/stuck-lane-watchdog/lane-latency.json}"
+LATENCY_MIN_MS="${STUCK_LANE_LATENCY_MIN_MS:-600000}"
+LATENCY_STATE_EXPLICIT=0; [ -n "${STUCK_LANE_LATENCY_STATE_FILE+x}" ] && LATENCY_STATE_EXPLICIT=1
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
 
 # slack-notify.sh reads this (target channel).
@@ -505,6 +527,150 @@ PYLIVE
 }
 
 # ──────────────────────────────────────────────────────────────
+# scan_lane_latency — detector 3's pure core (see header).
+#   $1 journal_dir  $2 state_file  $3 payload_out  $4 persist(0|1)
+# Reads <journal_dir>/<unit>.txt per unit in $LATENCY_UNITS and reports lanes
+# whose worst COMPLETED wait crossed LATENCY_MIN_MS. Dedupes per lane on
+# COOLDOWN so one bad afternoon does not page per tick.
+# ──────────────────────────────────────────────────────────────
+scan_lane_latency() {
+  JOURNAL_DIR="$1" STATE_FILE="$2" PAYLOAD_OUT="$3" PERSIST="$4" \
+  SLACK_CHANNEL="$SLACK_CHANNEL" COOLDOWN="$COOLDOWN" MIN_MS="$LATENCY_MIN_MS" \
+  UNITS="$LATENCY_UNITS" python3 - <<'PYLAT'
+import json, os, re
+from datetime import datetime
+
+journal_dir = os.environ["JOURNAL_DIR"]
+state_file  = os.environ["STATE_FILE"]
+payload_out = os.environ["PAYLOAD_OUT"]
+persist     = os.environ.get("PERSIST", "1") == "1"
+channel     = os.environ["SLACK_CHANNEL"]
+cooldown    = int(os.environ.get("COOLDOWN", "21600"))
+min_ms      = int(os.environ.get("MIN_MS", "600000"))
+units       = os.environ.get("UNITS", "").split()
+
+LANE_RE = re.compile(r"lane=(?P<lane>\S+)")
+WAIT_RE = re.compile(r"waitedMs=(?P<waitedMs>\d+)")
+TS_RE   = re.compile(r"(\d{4}-\d{2}-\d{2}T[\d:.]+(?:[+-]\d{2}:?\d{2}|Z))")
+AGENT_RE = re.compile(r"^session:agent:(?P<agent>[a-z0-9_-]+)")
+
+def parse_epoch(ts):
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+seeded = os.path.exists(state_file)
+try:
+    with open(state_file) as f:
+        state = json.load(f)
+    if not isinstance(state, dict):
+        state = {}
+except Exception:
+    state = {}
+
+new_state = dict(state)
+pending = {}
+
+for unit in units:
+    path = os.path.join(journal_dir, f"{unit}.txt")
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except Exception:
+        # The caller refuses on a failed capture; a file missing HERE must not
+        # be read as "this unit had no slow lanes".
+        continue
+    for line in lines:
+        if "lane wait exceeded" not in line:
+            continue
+        lane_m, wait_m = LANE_RE.search(line), WAIT_RE.search(line)
+        if not (lane_m and wait_m):
+            continue      # malformed / format change: never guess
+        waited = int(wait_m.group("waitedMs"))
+        if waited < min_ms:
+            continue
+        lane = lane_m.group("lane")
+        ts_m = TS_RE.search(line)
+        ts = ts_m.group(1) if ts_m else ""
+        epoch = parse_epoch(ts) or 0.0
+        cur = pending.get(lane)
+        # Worst wait per lane — that is the number a human judges.
+        if cur is None or waited > cur["waitedMs"]:
+            pending[lane] = {"waitedMs": waited, "ts": ts, "epoch": epoch,
+                             "unit": unit, "count": (cur["count"] + 1) if cur else 1}
+        else:
+            cur["count"] += 1
+            if epoch > cur["epoch"]:
+                cur["epoch"], cur["ts"] = epoch, ts
+
+alerts = []
+for lane, info in pending.items():
+    prev = state.get(lane)
+    prev_epoch = prev.get("epoch", 0.0) if isinstance(prev, dict) else 0.0
+    # `0 <= elapsed`: a future-dated watermark makes elapsed negative and every
+    # negative value satisfies `< cooldown`, which would suppress forever.
+    _elapsed = (info["epoch"] - prev_epoch) if (info["epoch"] and prev_epoch) else None
+    within_cooldown = prev is not None and _elapsed is not None and 0 <= _elapsed < cooldown
+    if not seeded:
+        new_state[lane] = {"ts": info["ts"], "epoch": info["epoch"]}
+        continue
+    if within_cooldown:
+        # Do NOT advance on a suppressed tick: this is the last-ALERT epoch, and
+        # advancing it slides the window forward every tick so a lane pages once
+        # and then never again.
+        continue
+    new_state[lane] = {"ts": info["ts"], "epoch": info["epoch"]}
+    alerts.append((lane, info))
+
+if len(new_state) > 2000:
+    new_state = dict(sorted(new_state.items(),
+        key=lambda kv: (kv[1].get("epoch", 0.0) if isinstance(kv[1], dict) else 0.0))[-2000:])
+
+if persist:
+    d = os.path.dirname(state_file)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = state_file + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(new_state, f, indent=2)
+    os.replace(tmp, state_file)
+
+if not alerts:
+    raise SystemExit(0)
+
+alerts.sort(key=lambda a: -a[1]["waitedMs"])
+mins = min_ms / 60000.0
+lines_out = [
+    f":hourglass: *Slow agent replies — queued work waited a long time ({len(alerts)})*",
+    f"Each lane below had a task sit queued for over {mins:.0f} minutes before it started. "
+    f"These waits have ALREADY ENDED — this is a latency report, not a live wedge "
+    f"(`live-lanes` covers that). Nothing else surfaces it: a person waiting this long "
+    f"for an agent reply otherwise produces no signal.",
+]
+for lane, e in alerts:
+    agent_m = AGENT_RE.match(lane)
+    agent = agent_m.group("agent") if agent_m else "?"
+    extra = f", {e['count']} slow starts" if e["count"] > 1 else ""
+    prof = e["unit"].replace("openclaw-gateway-", "")
+    lines_out.append(f"• *{agent}* — `{lane}` waited {e['waitedMs'] / 60000.0:.1f} min"
+                     f"{extra} ({prof}), last {e['ts'] or '?'}")
+lines_out.append(
+    "_Informational — no action implied._ If the same lane keeps appearing, check whether "
+    "it is genuinely wedging (`gateway call diagnostics.lanes`) rather than merely busy."
+)
+text = "\n".join(lines_out)
+
+with open(payload_out, "w") as f:
+    json.dump({"channel": channel, "text": text}, f)
+
+print(text)
+PYLAT
+}
+
+# ──────────────────────────────────────────────────────────────
 # Inline self-test — runs on EVERY invocation (~30ms). Guards the failure that
 # would make THIS watchdog itself rot silently: a detector that no longer
 # detects, or one that fires on a lane that WAS released. Throwaway temp paths.
@@ -588,6 +754,45 @@ if ! _self_test_live_lanes; then
   exit 3
 fi
 
+# Detector 3's self-test: one wait over the floor must FIRE, one under it must
+# not, and a malformed line must be skipped rather than guessed at.
+_self_test_lane_latency() {
+  local td out bullets
+  td="$(mktemp -d)"
+  trap 'rm -rf "$td"' RETURN
+  mkdir -p "$td/j"
+  cat > "$td/j/openclaw-gateway-main.txt" <<'JNL'
+2026-09-17T01:00:00.000+00:00 node[1]: [diagnostic] lane wait exceeded: lane=session:agent:slowlane:main waitedMs=900000 queueAhead=0 activeAhead=1 activeNow=0 queueBehind=0
+2026-09-17T01:01:00.000+00:00 node[1]: [diagnostic] lane wait exceeded: lane=session:agent:fastlane:main waitedMs=5000 queueAhead=0 activeAhead=1 activeNow=0 queueBehind=0
+2026-09-17T01:02:00.000+00:00 node[1]: [diagnostic] lane wait exceeded: lane=session:agent:malformed:main queueAhead=0 activeAhead=1 activeNow=0 queueBehind=0
+JNL
+  printf '%s\n' '{"seed":{"ts":"2026-01-01T00:00:00Z","epoch":1}}' > "$td/state.json"
+  out="$(COOLDOWN=21600 LATENCY_MIN_MS=600000 LATENCY_UNITS=openclaw-gateway-main \
+        scan_lane_latency "$td/j" "$td/state.json" "$td/payload.json" 0 2>/dev/null || true)"
+  if ! printf '%s' "$out" | grep -q "slowlane"; then
+    echo "$LOGPREFIX SELF-TEST FAIL: latency detector missed a wait over the floor" >&2
+    return 1
+  fi
+  local bad
+  for bad in fastlane malformed; do
+    if printf '%s' "$out" | grep -q "$bad"; then
+      echo "$LOGPREFIX SELF-TEST FAIL: latency detector flagged '$bad' (must be suppressed)" >&2
+      return 1
+    fi
+  done
+  bullets="$(printf '%s\n' "$out" | grep -c '^• ' || true)"
+  if [ "$bullets" != "1" ]; then
+    echo "$LOGPREFIX SELF-TEST FAIL: latency detector expected 1 bullet, got $bullets" >&2
+    return 1
+  fi
+  return 0
+}
+
+if ! _self_test_lane_latency; then
+  log "ABORT: lane-latency self-test failed — refusing to run with a broken detector"
+  exit 3
+fi
+
 # ──────────────────────────────────────────────────────────────
 # Host guard: wrong node → no-op. Skippable for tests.
 # ──────────────────────────────────────────────────────────────
@@ -636,9 +841,27 @@ if [ -z "$LIVE_SNAPSHOT_DIR" ]; then
   LIVE_SNAPSHOT_DIR="$LIVE_SNAP_DIR"
 fi
 
+# Per-unit journal captures for the latency detector. Status preserved, not
+# `|| true`: an unreadable journal means we measured NOTHING, which is not the
+# same as no slow lanes.
+LAT_JOURNAL_DIR="$(mktemp -d)"
+LATENCY_CAPTURE_RC=0
+if [ -z "$LATENCY_JOURNAL_DIR" ]; then
+  for _u in $LATENCY_UNITS; do
+    LATENCY_CAPTURE_RC=0
+    journalctl -u "$_u" --since "$LOOKBACK" --no-pager -o short-iso 2>/dev/null \
+      > "$LAT_JOURNAL_DIR/$_u.txt" || LATENCY_CAPTURE_RC=$?
+    if [ "$LATENCY_CAPTURE_RC" -ne 0 ]; then
+      log "LATENCY-JOURNAL-FAILED: journalctl for '$_u' exited $LATENCY_CAPTURE_RC"
+      break
+    fi
+  done
+  LATENCY_JOURNAL_DIR="$LAT_JOURNAL_DIR"
+fi
+
 PAYLOAD_DIR="$(mktemp -d)"
 DRY_STATE_DIR=""
-trap '[ "$CLEANUP_JOURNAL" -eq 1 ] && rm -f "$JOURNAL_FILE"; rm -rf "$PAYLOAD_DIR" "$LIVE_SNAP_DIR" ${DRY_STATE_DIR:+"$DRY_STATE_DIR"}' EXIT
+trap '[ "$CLEANUP_JOURNAL" -eq 1 ] && rm -f "$JOURNAL_FILE"; rm -rf "$PAYLOAD_DIR" "$LIVE_SNAP_DIR" "$LAT_JOURNAL_DIR" ${DRY_STATE_DIR:+"$DRY_STATE_DIR"}' EXIT
 
 # --dry-run must not consume a production watermark. Shadow any state path still
 # at its DEFAULT with a temp copy; an absent source stays absent in the copy, so
@@ -654,6 +877,11 @@ if [ "$DRY_RUN" -eq 1 ]; then
     cp "$LIVE_STATE_FILE" "$DRY_STATE_DIR/live.json" 2>/dev/null || true
     LIVE_STATE_FILE="$DRY_STATE_DIR/live.json"
     log "DRY-RUN: live-lane watermark shadowed (production state will NOT be mutated)."
+  fi
+  if [ "$LATENCY_STATE_EXPLICIT" -eq 0 ]; then
+    cp "$LATENCY_STATE_FILE" "$DRY_STATE_DIR/latency.json" 2>/dev/null || true
+    LATENCY_STATE_FILE="$DRY_STATE_DIR/latency.json"
+    log "DRY-RUN: lane-latency watermark shadowed (production state will NOT be mutated)."
   fi
 fi
 
@@ -727,4 +955,6 @@ _run_detector "edge-intercom" scan_stuck_lanes "$JOURNAL_FILE" "$STATE_FILE" \
   "OK: no new stuck/discarded lanes." "$EDGE_CAPTURE_RC" || RC=1
 _run_detector "live-lanes" scan_wedged_lanes_live "$LIVE_SNAPSHOT_DIR" "$LIVE_STATE_FILE" \
   "OK[live-lanes]: no lane queued with nothing running." "$LIVE_CAPTURE_RC" || RC=1
+_run_detector "lane-latency" scan_lane_latency "$LATENCY_JOURNAL_DIR" "$LATENCY_STATE_FILE" \
+  "OK[lane-latency]: no lane waited past the floor." "$LATENCY_CAPTURE_RC" || RC=1
 exit "$RC"

@@ -1,0 +1,598 @@
+#!/usr/bin/env bats
+# Tests for scripts/lib/jev.sh, the TypeSafe System One ("Jev") client.
+# Hermetic: a fake `curl` shadowed onto PATH (mode selected via
+# JEV_FAKE_MODE, exported before `run` per the no-env-prefix-on-run rule),
+# throwaway state/shadow dirs, no network, no real API key.
+bats_require_minimum_version 1.5.0
+
+HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
+JEV="$HYDRA_REPO/scripts/lib/jev.sh"
+FIXTURE_OK="$HYDRA_REPO/scripts/tests/fixtures/jev/answers-ok.json"
+
+# Portable octal file mode (GNU `stat -c` vs BSD/macOS `stat -f`).
+_jev_test_stat_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%A' "$1"
+}
+
+setup() {
+  TEST_TMPDIR="$(mktemp -d)"
+  export TEST_TMPDIR
+  mkdir -p "$TEST_TMPDIR/bin" "$TEST_TMPDIR/shadow" "$TEST_TMPDIR/data"
+  export PATH="$TEST_TMPDIR/bin:$PATH"
+
+  export STATE_FILE="$TEST_TMPDIR/data/state.json"
+  export QUESTIONS_FILE="$TEST_TMPDIR/data/questions.json"
+  echo '{"foo":"bar"}' > "$STATE_FILE"
+  echo '{"q1":{"type":"noul","instructions":"is it a bar?"}}' > "$QUESTIONS_FILE"
+
+  export JEV_SHADOW_DIR="$TEST_TMPDIR/shadow"
+  export TYPESAFE_API_KEY="test-key-do-not-print"
+  export OPENROUTER_API_KEY="test-or-key-do-not-print"
+  export JEV_ENV_FILE="$TEST_TMPDIR/no-such-jev.env"
+  export CURL_MARKER="$TEST_TMPDIR/curl-was-called"
+  export CURL_URL_FILE="$TEST_TMPDIR/curl-url"
+  export CURL_HDR_FILE="$TEST_TMPDIR/curl-auth-header"
+  export CURL_MAXTIME_FILE="$TEST_TMPDIR/curl-max-time"
+  export CURL_CONNECT_TIMEOUT_FILE="$TEST_TMPDIR/curl-connect-timeout"
+
+  # Fake curl: reads JEV_FAKE_MODE, finds the -o target and -w %{http_code}
+  # args, writes the fixture (or an error body) to the -o file, and echoes
+  # the http status on stdout (mirroring curl -w behavior with -o set). It
+  # also captures the request URL (the final positional arg), the
+  # contents of the -H @<file> bearer-token header file, and the values
+  # passed to --max-time / --connect-timeout, so tests can assert which
+  # endpoint/key/timeouts were used without ever printing the key into test
+  # output.
+  cat > "$TEST_TMPDIR/bin/curl" <<STUB
+#!/bin/bash
+: > "$CURL_MARKER"
+out=""
+args=("\$@")
+for ((i=0; i<\${#args[@]}; i++)); do
+  if [ "\${args[i]}" = "-o" ]; then
+    out="\${args[i+1]}"
+  fi
+  if [ "\${args[i]}" = "-H" ]; then
+    hval="\${args[i+1]}"
+    if [ "\${hval:0:1}" = "@" ]; then
+      cp "\${hval:1}" "$CURL_HDR_FILE"
+    fi
+  fi
+  if [ "\${args[i]}" = "--max-time" ]; then
+    printf '%s' "\${args[i+1]}" > "$CURL_MAXTIME_FILE"
+  fi
+  if [ "\${args[i]}" = "--connect-timeout" ]; then
+    printf '%s' "\${args[i+1]}" > "$CURL_CONNECT_TIMEOUT_FILE"
+  fi
+done
+printf '%s' "\${args[\${#args[@]}-1]}" > "$CURL_URL_FILE"
+case "\${JEV_FAKE_MODE:-ok}" in
+  ok)
+    cat "$FIXTURE_OK" > "\$out"
+    echo "200"
+    exit 0
+    ;;
+  timeout)
+    exit 28
+    ;;
+  http500)
+    echo '{"error":"internal"}' > "\$out"
+    echo "500"
+    exit 0
+    ;;
+  malformed)
+    echo '{"nope":1}' > "\$out"
+    echo "200"
+    exit 0
+    ;;
+esac
+STUB
+  chmod +x "$TEST_TMPDIR/bin/curl"
+}
+
+teardown() {
+  rm -rf "$TEST_TMPDIR"
+}
+
+@test "ok: rc 0, answers object on stdout, clean shadow line" {
+  export JEV_FAKE_MODE="ok"
+  run "$JEV" --surface refund-gate --item-id conv-1 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --actual "true" --timeout-ms 200
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.is_refund_eligible.noul == 0.97' >/dev/null
+
+  shadow_file="$JEV_SHADOW_DIR/refund-gate.jsonl"
+  [ -f "$shadow_file" ]
+  [ "$(wc -l < "$shadow_file" | tr -d '[:space:]')" -eq 1 ]
+
+  line="$(cat "$shadow_file")"
+  echo "$line" | jq -e '.rc == 0' >/dev/null
+  echo "$line" | jq -e '.http == 200' >/dev/null
+  echo "$line" | jq -e '.surface == "refund-gate"' >/dev/null
+  echo "$line" | jq -e '.item_id == "conv-1"' >/dev/null
+  echo "$line" | jq -e '.actual == "true"' >/dev/null
+  echo "$line" | jq -e '(.latency_ms | type) == "number"' >/dev/null
+  echo "$line" | jq -e '.answers.is_refund_eligible.noul == 0.97' >/dev/null
+
+  # The raw state is stored next to the hash by default, so the row is
+  # replayable against Jev directly without the original request.
+  echo "$line" | jq -e '.state == {"foo":"bar"}' >/dev/null
+
+  # No secret anywhere in the shadow file — the API key never appears
+  # regardless of state storage.
+  if grep -q "test-key-do-not-print" "$shadow_file"; then
+    echo "shadow file leaks the API key" >&2
+    false
+  fi
+}
+
+@test "JEV_SHADOW_STORE_STATE=0: shadow row keeps the hash but omits raw state" {
+  export JEV_FAKE_MODE="ok"
+  export JEV_SHADOW_STORE_STATE=0
+  run "$JEV" --surface refund-gate --item-id conv-1b \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --actual "true" --timeout-ms 200
+  [ "$status" -eq 0 ]
+
+  shadow_file="$JEV_SHADOW_DIR/refund-gate.jsonl"
+  local line; line="$(tail -1 "$shadow_file")"
+  echo "$line" | jq -e '.state == null' >/dev/null
+  echo "$line" | jq -e '.state_sha256 != null' >/dev/null
+
+  # No secret or state content anywhere in the shadow file.
+  # `! cmd` on a non-final line is exempt from set -e and bats reads only the
+  # last command, so each forbidden value gets an explicit fail branch.
+  for forbidden in "test-key-do-not-print" "foo" "bar"; do
+    if grep -q "$forbidden" "$shadow_file"; then
+      echo "shadow file leaks: $forbidden" >&2
+      false
+    fi
+  done
+}
+
+@test "shadow file is created at mode 0600" {
+  export JEV_FAKE_MODE="ok"
+  run "$JEV" --surface refund-gate --item-id conv-mode1 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 0 ]
+  shadow_file="$JEV_SHADOW_DIR/refund-gate.jsonl"
+  [ -f "$shadow_file" ]
+  mode="$(_jev_test_stat_mode "$shadow_file")"
+  [ "$mode" = "600" ]
+}
+
+@test "an existing 0644 shadow file is tightened to 0600 on the next append" {
+  export JEV_FAKE_MODE="ok"
+  shadow_file="$JEV_SHADOW_DIR/refund-gate.jsonl"
+  : > "$shadow_file"
+  chmod 0644 "$shadow_file"
+  mode_before="$(_jev_test_stat_mode "$shadow_file")"
+  [ "$mode_before" = "644" ]
+
+  run "$JEV" --surface refund-gate --item-id conv-mode2 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 0 ]
+  mode_after="$(_jev_test_stat_mode "$shadow_file")"
+  [ "$mode_after" = "600" ]
+}
+
+@test "a lock holder is not clobbered: jev.sh appends after the lock frees, never before (QA finding)" {
+  # Every writer now shares the "<file>.lock" flock, so a first-writer race
+  # can no longer land two unlocked creates on the same path -- jev.sh's own
+  # append below only lands once this test's held lock is released.
+  export JEV_FAKE_MODE="ok"
+  shadow_file="$JEV_SHADOW_DIR/refund-gate.jsonl"
+  lock_file="${shadow_file}.lock"
+  mkdir -p "$JEV_SHADOW_DIR"
+  printf '{"item_id":"race-writer"}\n' > "$shadow_file"
+
+  (
+    exec 9>>"$lock_file"
+    flock -x 9
+    sleep 2
+  ) &
+  holder_pid=$!
+  # Give the holder a moment to actually acquire the lock before racing it.
+  sleep 0.3
+
+  run "$JEV" --surface refund-gate --item-id conv-race \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 0 ]
+
+  wait "$holder_pid" 2>/dev/null || true
+
+  [ "$(wc -l < "$shadow_file" | tr -d '[:space:]')" -eq 2 ]
+  grep -q '"race-writer"' "$shadow_file"
+  grep -q '"conv-race"' "$shadow_file"
+}
+
+@test "jev.sh waits on the shared lock, then times out and skips rather than writing unlocked (QA finding)" {
+  export JEV_FAKE_MODE="ok"
+  shadow_file="$JEV_SHADOW_DIR/refund-gate.jsonl"
+  lock_file="${shadow_file}.lock"
+  mkdir -p "$JEV_SHADOW_DIR"
+
+  # Hold the lock for longer than jev.sh's 5s wait, so the wait must time out.
+  (
+    exec 9>>"$lock_file"
+    flock -x 9
+    sleep 7
+  ) &
+  holder_pid=$!
+  sleep 0.3
+
+  start_ts="$(date +%s)"
+  run --separate-stderr "$JEV" --surface refund-gate --item-id conv-lockwait \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  end_ts="$(date +%s)"
+
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  # The primary call must never be made to wait or fail because shadow
+  # logging is stuck -- rc is unaffected, and the wait is bounded near the
+  # documented 5s (never unbounded, never near-instant).
+  [ "$status" -eq 0 ]
+  elapsed=$((end_ts - start_ts))
+  [ "$elapsed" -ge 4 ]
+  [ "$elapsed" -le 9 ]
+  [[ "$stderr" == *"could not lock"* ]]
+  [ ! -e "$shadow_file" ]
+}
+
+@test "timeout: rc 2, shadow line records rc 2 with null answers" {
+  export JEV_FAKE_MODE="timeout"
+  run "$JEV" --surface refund-gate --item-id conv-2 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 2 ]
+
+  shadow_file="$JEV_SHADOW_DIR/refund-gate.jsonl"
+  [ -f "$shadow_file" ]
+  line="$(cat "$shadow_file")"
+  echo "$line" | jq -e '.rc == 2' >/dev/null
+  echo "$line" | jq -e '.answers == null' >/dev/null
+}
+
+@test "http500: rc 2" {
+  export JEV_FAKE_MODE="http500"
+  run "$JEV" --surface refund-gate --item-id conv-3 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 2 ]
+}
+
+@test "malformed: rc 3" {
+  export JEV_FAKE_MODE="malformed"
+  run "$JEV" --surface refund-gate --item-id conv-4 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 3 ]
+}
+
+@test "oversize state: rc 4, curl never called" {
+  export JEV_FAKE_MODE="ok"
+  run "$JEV" --surface refund-gate --item-id conv-5 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --max-state-bytes 3 --timeout-ms 200
+  [ "$status" -eq 4 ]
+  [ ! -f "$CURL_MARKER" ]
+  # A pre-request failure is still one shadow row (rc 4, answers null), so a
+  # caller that keeps hitting the cap shows up in the report as rc≠0, never
+  # as silence.
+  local line; line="$(tail -1 "$JEV_SHADOW_DIR/refund-gate.jsonl")"
+  echo "$line" | jq -e '.rc == 4 and .answers == null and .http == null and .item_id == "conv-5"' >/dev/null
+  # The size cap only refuses to SEND the state to Jev; state was already
+  # read and validated as JSON before the cap is checked, so (like every
+  # other rc, default JEV_SHADOW_STORE_STATE=1) the shadow row still carries
+  # it for replay.
+  echo "$line" | jq -e '.state == {"foo":"bar"}' >/dev/null
+}
+
+@test "missing key: rc 5" {
+  # Explicit typesafe provider so unsetting TYPESAFE_API_KEY is the key
+  # actually consulted (default provider is openrouter, which reads
+  # OPENROUTER_API_KEY instead — see the provider tests below).
+  export JEV_PROVIDER=typesafe
+  unset TYPESAFE_API_KEY
+  run "$JEV" --surface refund-gate --item-id conv-6 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 5 ]
+  local line; line="$(tail -1 "$JEV_SHADOW_DIR/refund-gate.jsonl")"
+  echo "$line" | jq -e '.rc == 5 and .answers == null and .item_id == "conv-6"' >/dev/null
+}
+
+@test "--no-shadow: no shadow file written" {
+  export JEV_FAKE_MODE="ok"
+  run "$JEV" --surface refund-gate --item-id conv-7 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --no-shadow --timeout-ms 200
+  [ "$status" -eq 0 ]
+  [ ! -f "$JEV_SHADOW_DIR/refund-gate.jsonl" ]
+}
+
+@test "unwritable shadow dir: rc 0 and a WARN on stderr" {
+  export JEV_FAKE_MODE="ok"
+  # A regular file where a directory component belongs makes mkdir -p fail
+  # even as root (CI bats runs as ROOT, so chmod-based permission denial
+  # doesn't hold -- see docs/lessons/working-in-hydra.md).
+  : > "$TEST_TMPDIR/not-a-dir"
+  export JEV_SHADOW_DIR="$TEST_TMPDIR/not-a-dir/shadow"
+  run "$JEV" --surface refund-gate --item-id conv-8 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARN"* ]]
+}
+
+@test "--actual as a JSON object is stored as an object keyed by question id" {
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface s --item-id o1 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --actual '{"q1":"true","q2":"billing"}'
+  [ "$status" -eq 0 ]
+  run jq -r '.actual | type' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "object" ]
+  run jq -r '.actual.q2' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "billing" ]
+}
+
+@test "--actual as a plain string is stored as a string" {
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface s --item-id s1 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" --actual true
+  [ "$status" -eq 0 ]
+  run jq -r '.actual | type' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "string" ]
+}
+
+@test "unreadable state path: rc 5 and a shadow row with null hashes" {
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface refund-gate --item-id conv-9 \
+    --state-file "$TEST_TMPDIR/data/does-not-exist.json" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 5 ]
+  [ ! -f "$CURL_MARKER" ]
+  local line; line="$(tail -1 "$JEV_SHADOW_DIR/refund-gate.jsonl")"
+  echo "$line" | jq -e '.rc == 5 and .answers == null and .state_sha256 == null and .item_id == "conv-9"' >/dev/null
+  # the questions file WAS readable but is hashed only after both checks pass
+  echo "$line" | jq -e '.questions_sha256 == null' >/dev/null
+}
+
+@test "JEV_MODEL and JEV_TIMEOUT_MS env are honored, CLI flags win" {
+  export JEV_FAKE_MODE=timeout   # requested model is what the shadow row carries on failure
+  export JEV_MODEL="jev-env-model"
+  export JEV_TIMEOUT_MS="100"
+  run "$JEV" --surface s --item-id e1 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE"
+  [ "$status" -eq 2 ]
+  run jq -r 'select(.item_id=="e1") | .model' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "jev-env-model" ]
+  run "$JEV" --surface s --item-id e2 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" --model jev-cli-model
+  [ "$status" -eq 2 ]
+  run jq -r 'select(.item_id=="e2") | .model' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "jev-cli-model" ]
+}
+
+@test "--timeout-ms 1500: curl gets fractional --max-time 1.500, --connect-timeout capped to the same 1.500 budget" {
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface s --item-id tm1 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 1500
+  [ "$status" -eq 0 ]
+  run cat "$CURL_MAXTIME_FILE"
+  [ "$output" = "1.500" ]
+  run cat "$CURL_CONNECT_TIMEOUT_FILE"
+  [ "$output" = "1.500" ]
+}
+
+@test "--timeout-ms 200: curl gets --max-time 0.200 and a matching --connect-timeout 0.200" {
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface s --item-id tm2 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 0 ]
+  run cat "$CURL_MAXTIME_FILE"
+  [ "$output" = "0.200" ]
+  run cat "$CURL_CONNECT_TIMEOUT_FILE"
+  [ "$output" = "0.200" ]
+}
+
+@test "JEV_TIMEOUT_MS=1000: curl gets --max-time 1.000 and --connect-timeout 1.000" {
+  export JEV_FAKE_MODE=ok
+  export JEV_TIMEOUT_MS=1000
+  run "$JEV" --surface s --item-id tm3 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE"
+  [ "$status" -eq 0 ]
+  run cat "$CURL_MAXTIME_FILE"
+  [ "$output" = "1.000" ]
+  run cat "$CURL_CONNECT_TIMEOUT_FILE"
+  [ "$output" = "1.000" ]
+}
+
+@test "--timeout-ms 5000: curl gets --max-time 5.000, --connect-timeout stays at the 2s default" {
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface s --item-id tm4 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 5000
+  [ "$status" -eq 0 ]
+  run cat "$CURL_MAXTIME_FILE"
+  [ "$output" = "5.000" ]
+  run cat "$CURL_CONNECT_TIMEOUT_FILE"
+  [ "$output" = "2" ]
+}
+
+@test "JEV_TIMEOUT_MS=abc: rc 5 with a shadow row, curl never called" {
+  export JEV_FAKE_MODE=ok
+  export JEV_TIMEOUT_MS=abc
+  run "$JEV" --surface s --item-id k1 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE"
+  [ "$status" -eq 5 ]
+  [ ! -f "$CURL_MARKER" ]
+  run jq -r 'select(.item_id=="k1") | .rc' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "5" ]
+}
+
+@test "--max-state-bytes abc: rc 5, the cap is never silently bypassed" {
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface s --item-id k2 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" --max-state-bytes abc
+  [ "$status" -eq 5 ]
+  [ ! -f "$CURL_MARKER" ]
+  run jq -r 'select(.item_id=="k2") | .rc' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "5" ]
+}
+
+@test "default provider is openrouter: decisions URL, ~typesafe/jev-latest model, OpenRouter key, provider in shadow" {
+  # ok mode: assert URL/key, which the fixture response can't clobber.
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface s --item-id or1 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CURL_URL_FILE")" = "https://openrouter.ai/api/alpha/decisions" ]
+  grep -q "Bearer $OPENROUTER_API_KEY" "$CURL_HDR_FILE"
+  run jq -r 'select(.item_id=="or1") | .provider' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "openrouter" ]
+
+  # timeout mode: the shadow row's model is the *requested* model (a
+  # success response's own .model field would otherwise mask the default —
+  # same reasoning as the existing "JEV_MODEL env honored" test).
+  export JEV_FAKE_MODE=timeout
+  run "$JEV" --surface s --item-id or1b --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" --timeout-ms 200
+  [ "$status" -eq 2 ]
+  run jq -r 'select(.item_id=="or1b") | .model' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "~typesafe/jev-latest" ]
+}
+
+@test "JEV_PROVIDER=typesafe: TypeSafe URL, jev-latest model, TypeSafe key, provider in shadow" {
+  export JEV_PROVIDER=typesafe
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface s --item-id ts1 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CURL_URL_FILE")" = "https://api.typesafe.ai/v1/systemone" ]
+  grep -q "Bearer $TYPESAFE_API_KEY" "$CURL_HDR_FILE"
+  run jq -r 'select(.item_id=="ts1") | .provider' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "typesafe" ]
+
+  export JEV_FAKE_MODE=timeout
+  run "$JEV" --surface s --item-id ts1b --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" --timeout-ms 200
+  [ "$status" -eq 2 ]
+  run jq -r 'select(.item_id=="ts1b") | .model' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "jev-latest" ]
+}
+
+@test "explicit JEV_MODEL and --model still win under the default openrouter provider" {
+  export JEV_FAKE_MODE=timeout
+  export JEV_MODEL="typesafe/jev-1.13"
+  run "$JEV" --surface s --item-id or2 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" --timeout-ms 200
+  [ "$status" -eq 2 ]
+  run jq -r 'select(.item_id=="or2") | .model' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "typesafe/jev-1.13" ]
+
+  unset JEV_MODEL
+  run "$JEV" --surface s --item-id or3 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" --timeout-ms 200 --model jev-cli-override
+  [ "$status" -eq 2 ]
+  run jq -r 'select(.item_id=="or3") | .model' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "jev-cli-override" ]
+}
+
+@test "JEV_PROVIDER=nope: rc 5, a shadow row, curl never called" {
+  export JEV_FAKE_MODE=ok
+  export JEV_PROVIDER=nope
+  run "$JEV" --surface s --item-id bad1 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE"
+  [ "$status" -eq 5 ]
+  [ ! -f "$CURL_MARKER" ]
+  run jq -r 'select(.item_id=="bad1") | .rc' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "5" ]
+}
+
+@test "openrouter with only TYPESAFE_API_KEY set: rc 5, message names OPENROUTER_API_KEY" {
+  export JEV_FAKE_MODE=ok
+  unset OPENROUTER_API_KEY
+  run "$JEV" --surface s --item-id nokey1 --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE"
+  [ "$status" -eq 5 ]
+  [ ! -f "$CURL_MARKER" ]
+  [[ "$output" == *"OPENROUTER_API_KEY"* ]]
+  run jq -r 'select(.item_id=="nokey1") | .rc' "$JEV_SHADOW_DIR/s.jsonl"
+  [ "$output" = "5" ]
+}
+
+@test "--surface path traversal: rc 5, nothing written outside the shadow dir" {
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface ../escape --item-id esc1 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 5 ]
+  [ ! -f "$CURL_MARKER" ]
+  run find "$TEST_TMPDIR" -name 'escape.jsonl'
+  [ -z "$output" ]
+  [ ! -f "$TEST_TMPDIR/escape.jsonl" ]
+}
+
+@test "--surface with whitespace: rc 5" {
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface 'a b' --item-id ws1 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 5 ]
+  [ ! -f "$CURL_MARKER" ]
+}
+
+@test "--surface with a leading dot: rc 5" {
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface .hidden --item-id dot1 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 5 ]
+  [ ! -f "$CURL_MARKER" ]
+}
+
+@test "--surface with dots/underscores/dashes is still valid" {
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface 'refund-gate.v2_x' --item-id valid1 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 0 ]
+  [ -f "$JEV_SHADOW_DIR/refund-gate.v2_x.jsonl" ]
+}
+
+@test "kill switch: JEV_DISABLED_FILE present -> rc 6, curl never called, shadow row rc 6" {
+  export JEV_FAKE_MODE=ok
+  export JEV_DISABLED_FILE="$TEST_TMPDIR/jev.disabled"
+  : > "$JEV_DISABLED_FILE"
+  run "$JEV" --surface refund-gate --item-id ks1 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --actual "true" --timeout-ms 200
+  [ "$status" -eq 6 ]
+  [ ! -f "$CURL_MARKER" ]
+  local line; line="$(tail -1 "$JEV_SHADOW_DIR/refund-gate.jsonl")"
+  echo "$line" | jq -e '.rc == 6 and .answers == null and .item_id == "ks1" and .actual == "true"' >/dev/null
+}
+
+@test "kill switch: --no-shadow with JEV_DISABLED_FILE present -> rc 6, no shadow file" {
+  export JEV_FAKE_MODE=ok
+  export JEV_DISABLED_FILE="$TEST_TMPDIR/jev.disabled"
+  : > "$JEV_DISABLED_FILE"
+  run "$JEV" --surface refund-gate --item-id ks2 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --no-shadow --timeout-ms 200
+  [ "$status" -eq 6 ]
+  [ ! -f "$CURL_MARKER" ]
+  [ ! -f "$JEV_SHADOW_DIR/refund-gate.jsonl" ]
+}
+
+@test "kill switch: JEV_DISABLED_FILE absent -> normal ok flow unaffected" {
+  export JEV_FAKE_MODE=ok
+  export JEV_DISABLED_FILE="$TEST_TMPDIR/no-such-jev.disabled"
+  run "$JEV" --surface refund-gate --item-id ks3 \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 0 ]
+  [ -f "$CURL_MARKER" ]
+}
+
+@test "--item-id with a newline: rc 5, no shadow row" {
+  export JEV_FAKE_MODE=ok
+  run "$JEV" --surface refund-gate --item-id "$(printf 'a\nb')" \
+    --state-file "$STATE_FILE" --questions-file "$QUESTIONS_FILE" \
+    --timeout-ms 200
+  [ "$status" -eq 5 ]
+  [ ! -f "$CURL_MARKER" ]
+  [ ! -f "$JEV_SHADOW_DIR/refund-gate.jsonl" ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "1003",
+  "source": {
+    "author": {"type": "user"},
+    "body": "How do I claim my profile? Email me back at nick@example.com if you need anything",
+    "created_at": 300
+  },
+  "conversation_parts": {
+    "conversation_parts": [
+      {"author": {"type": "admin"}, "body": "Here is how", "created_at": 310},
+      {"author": {"type": "user"}, "body": "got it", "created_at": 320}
+    ]
+  }
+}

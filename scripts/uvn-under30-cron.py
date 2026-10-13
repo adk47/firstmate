@@ -164,6 +164,8 @@ def clickup(method: str, path: str, body: dict[str, Any] | None = None, query: l
         argv.extend(["--query", value])
     if method != "GET":
         argv.extend(["--requester", SERVICE_REQUESTER])
+    if method == "DELETE":
+        argv.append("--yes")
     if body is not None:
         argv.extend(["--data", json.dumps(body, separators=(",", ":"), sort_keys=True)])
     argv.append("--json")
@@ -671,7 +673,7 @@ def render_pending_lines(
         if request_id in fraud_ids:
             why = "excluded: fraud marker"
         elif has_hard_reject_signal(row):
-            why = "excluded: backend reject signal"
+            why = "excluded: backend reject or hold signal"
         elif not isinstance(track_id, str) or not track_id:
             why = "excluded: no Spotify track"
         elif track_id not in live_by_track:

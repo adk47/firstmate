@@ -33,7 +33,10 @@ Yes – our team handles profile merges directly. To get started, share the link
 Verified artists can become Album Admins, giving them control over the credits displayed for their albums and tracks. You must first verify your artist profile.
 
 ### How do I update my profile information?
-Log in at app.muso.ai and edit your profile page directly. Changes are reflected across the platform and shared with industry partners.
+Log in at app.muso.ai and edit your profile page directly. If the profile name cannot be changed in the editor, contact support with the claimed Muso profile link, the current name, and the requested professional name. Support may ask for artist-link or identity verification before making the change.
+
+### How do I change my account email?
+Contact support with the claimed Muso profile link and the new email address. If you cannot access the old email, support may ask for additional ownership verification before updating account access.
 
 ### Can I delete my profile?
 Account and profile deletion requests are handled by our support team. Create a support ticket with category "Account – Deletion Request" and we will process your request.
@@ -121,7 +124,7 @@ Analytics require an active Pro or Business subscription with an available seat 
 If subscription and seat are both fine and data still isn't showing,
 reach out to support and we'll take a closer look at your specific profile.
 Your data is being tracked in the background, and we can flag your profile
-for our team to investigate.
+for our team to review.
 
 ### What are Milestones?
 Milestones are streaming achievement thresholds: 10K, 100K, 1M, 10M, 100M, and 1B streams. They help you track career progress.
@@ -165,10 +168,10 @@ The audit identifies the issues; resolution typically involves working with your
 If you're on Pro or Business, API access to your own workspace data is included. You generate your key in Settings, under the API access section – request a key there and it's issued to you. On the free Lite plan, you'd upgrade to Pro or Business first. It's a newer feature still rolling out, so if you're on a paid plan and can't find it, let me know and I'll get the team on it.
 
 ### Is API access free?
-Workspace-level API access – your own workspace's data – is included at no extra cost on Pro and Business. Full-catalog access, meaning data across the whole Muso catalog beyond your workspace, is a separate enterprise plan that costs more. If that's what you need, let me know and the team can walk you through the options.
+Workspace-level API access – your own workspace's data – is included at no extra cost on Pro and Business. Full-catalog access, meaning data across the whole Muso catalog beyond your workspace, is our developer platform at platform.muso.ai, which is paid and self-service. Let me know what you're building and I can point you to the right one.
 
 ### Can I pull data for the whole catalog, not just my workspace?
-That's full-catalog access – a separate, enterprise-level plan rather than the included workspace key. We're rolling out a self-service option at platform.muso.ai with a lower-cost tier so you can test and explore the data first (it's rate-limited, so it's for trying things out, not bulk pulls). For a full contract or a quote, let me know and the team will get you set up. Developer docs live at developer.muso.ai.
+Yes – that's our developer platform at platform.muso.ai, which is separate from the workspace key included with your plan. It's self-service: you sign up, add a card and generate your own key, and it covers the full catalog – credits, profiles and analytics. Docs are at platform.muso.ai/docs. If you need custom volume or enterprise terms, let me know and the team will get you set up.
 
 ---
 
@@ -176,8 +179,10 @@ That's full-catalog access – a separate, enterprise-level plan rather than the
 
 ### What's the difference between Lite, Pro, and Business?
 - **Lite** (Free): Credit management, profile page, company page, notifications
-- **Pro** ($10-12.50/mo): Everything in Lite + Analytics, Catalog Audits, Discography Playlists, Milestones
-- **Business** ($24-30/mo+): Everything in Pro + Company Analytics, List Analytics, Multi-User Workspace, Discovery Tools
+- **Pro**: Everything in Lite + Analytics, Catalog Audits, Discography Playlists, Milestones
+- **Business**: Everything in Pro + Company Analytics, List Analytics, Multi-User Workspace, Discovery Tools
+
+(For prices, retrieve `app-pricing.md` and quote the table matching the customer's billing cadence.)
 
 ### Can I try Pro for free? / Is there a free trial?
 There's no free trial – Muso doesn't offer one. The way to use Muso at no cost is

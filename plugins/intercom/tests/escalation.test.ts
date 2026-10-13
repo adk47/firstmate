@@ -350,3 +350,170 @@ describe("assessRisk Layer 2 (judge)", () => {
     expect(r.source).toBe("rule");
   });
 });
+
+describe("assessRisk judge observability logging ([intercom:judge])", () => {
+  const CUSTOMER_MESSAGE = "hmm not great, this is really frustrating";
+
+  it("logs outcome=verdict with fields when the judge returns a verdict", async () => {
+    const judge = async (): Promise<JudgeOutput> => ({
+      shouldHandoff: true,
+      reasons: ["frustration", "stuck_in_loop"],
+      suggestedActionType: "support-general",
+      confidence: "high",
+    });
+    const lines: string[] = [];
+    await assessRisk(
+      CUSTOMER_MESSAGE,
+      [],
+      { ...baseState, userTurnCount: 4 },
+      { judge, log: { warn: (m) => lines.push(m) } },
+    );
+    const line = lines.find((l) => l.startsWith("[intercom:judge]"));
+    expect(line).toBeDefined();
+    expect(line).toContain("conv=conv1");
+    expect(line).toContain("outcome=verdict");
+    expect(line).toContain("shouldHandoff=true");
+    expect(line).toContain("confidence=high");
+    expect(line).toContain("actionType=support-general");
+    expect(line).toContain("reasons=frustration,stuck_in_loop");
+    expect(line).toMatch(/ms=\d+/);
+    expect(line).not.toContain(CUSTOMER_MESSAGE);
+  });
+
+  it("drops reasons outside the judge vocabulary so model free-text never reaches the journal", async () => {
+    // judge.ts validates `reasons` only as string[]; a model that echoes the
+    // customer's message as a "reason" passes that check.
+    const judge = async (): Promise<JudgeOutput> => ({
+      shouldHandoff: true,
+      reasons: ["frustration", CUSTOMER_MESSAGE, "totally made up token"],
+      suggestedActionType: "support-general",
+      confidence: "high",
+    });
+    const lines: string[] = [];
+    await assessRisk(
+      CUSTOMER_MESSAGE,
+      [],
+      { ...baseState, userTurnCount: 4 },
+      { judge, log: { warn: (m) => lines.push(m) } },
+    );
+    const line = lines.find((l) => l.startsWith("[intercom:judge]"));
+    expect(line).toBeDefined();
+    expect(line).toContain("reasons=frustration,unknown ");
+    expect(line).not.toContain(CUSTOMER_MESSAGE);
+    expect(line).not.toContain("made up");
+  });
+
+  it("logs outcome=null when the judge returns null (timeout/parse/rate-limit)", async () => {
+    const judge = async (): Promise<JudgeOutput | null> => null;
+    const lines: string[] = [];
+    await assessRisk(
+      CUSTOMER_MESSAGE,
+      [],
+      { ...baseState, userTurnCount: 4 },
+      { judge, log: { warn: (m) => lines.push(m) } },
+    );
+    const line = lines.find((l) => l.startsWith("[intercom:judge]"));
+    expect(line).toBeDefined();
+    expect(line).toContain("outcome=null");
+    expect(line).toContain("shouldHandoff=-");
+    expect(line).toContain("confidence=-");
+    expect(line).toContain("actionType=-");
+    expect(line).toContain("reasons=-");
+    expect(line).toMatch(/ms=\d+/);
+    expect(line).not.toContain(CUSTOMER_MESSAGE);
+  });
+
+  it("logs outcome=error when the judge throws, and escalation still fails open", async () => {
+    const judge = async (): Promise<JudgeOutput> => {
+      throw new Error("rate limited");
+    };
+    const lines: string[] = [];
+    const r = await assessRisk(
+      CUSTOMER_MESSAGE,
+      [],
+      { ...baseState, userTurnCount: 4 },
+      { judge, log: { warn: (m) => lines.push(m) } },
+    );
+    expect(r.triggered).toBe(false);
+    const line = lines.find((l) => l.startsWith("[intercom:judge]"));
+    expect(line).toBeDefined();
+    expect(line).toContain("outcome=error");
+    expect(line).toContain("shouldHandoff=-");
+    expect(line).toMatch(/ms=\d+/);
+    expect(line).not.toContain(CUSTOMER_MESSAGE);
+    // The pre-existing failure log still fires unchanged.
+    expect(lines.some((m) => m.includes("judge call failed"))).toBe(true);
+  });
+
+  it("logs outcome=skipped reason=min_turns when below the judge min-turn floor", async () => {
+    const judge = async (): Promise<JudgeOutput> => {
+      throw new Error("must not be called");
+    };
+    const lines: string[] = [];
+    await assessRisk(
+      CUSTOMER_MESSAGE,
+      [],
+      { ...baseState, userTurnCount: 1 },
+      { judge, log: { warn: (m) => lines.push(m) } },
+    );
+    const line = lines.find((l) => l.startsWith("[intercom:judge]"));
+    expect(line).toBe("[intercom:judge] conv=conv1 outcome=skipped reason=min_turns");
+  });
+
+  it("logs outcome=skipped reason=disabled when no judge is wired", async () => {
+    const lines: string[] = [];
+    await assessRisk(
+      CUSTOMER_MESSAGE,
+      [],
+      { ...baseState, userTurnCount: 4 },
+      { log: { warn: (m) => lines.push(m) } },
+    );
+    const line = lines.find((l) => l.startsWith("[intercom:judge]"));
+    expect(line).toBe("[intercom:judge] conv=conv1 outcome=skipped reason=disabled");
+  });
+
+  it("logs outcome=skipped reason=hard_cap when the turn-count cap fires before the judge", async () => {
+    const judge = async (): Promise<JudgeOutput> => {
+      throw new Error("must not be called");
+    };
+    const lines: string[] = [];
+    await assessRisk(
+      "just a normal question",
+      [],
+      { ...baseState, userTurnCount: 6 },
+      { judge, log: { warn: (m) => lines.push(m) } },
+    );
+    const line = lines.find((l) => l.startsWith("[intercom:judge]"));
+    expect(line).toBe("[intercom:judge] conv=conv1 outcome=skipped reason=hard_cap");
+  });
+
+  it("logs outcome=skipped reason=rule_escalated when a content rule fires before the judge", async () => {
+    const judge = async (): Promise<JudgeOutput> => {
+      throw new Error("must not be called");
+    };
+    const lines: string[] = [];
+    await assessRisk(
+      "i'm filing a chargeback",
+      [],
+      { ...baseState, userTurnCount: 5 },
+      { judge, log: { warn: (m) => lines.push(m) } },
+    );
+    const line = lines.find((l) => l.startsWith("[intercom:judge]"));
+    expect(line).toBe("[intercom:judge] conv=conv1 outcome=skipped reason=rule_escalated");
+  });
+
+  it("logs outcome=skipped reason=rule_escalated when the magic keyword fires before the judge", async () => {
+    const judge = async (): Promise<JudgeOutput> => {
+      throw new Error("must not be called");
+    };
+    const lines: string[] = [];
+    await assessRisk(
+      "can i talk to a human please",
+      [],
+      { ...baseState, userTurnCount: 5 },
+      { judge, log: { warn: (m) => lines.push(m) } },
+    );
+    const line = lines.find((l) => l.startsWith("[intercom:judge]"));
+    expect(line).toBe("[intercom:judge] conv=conv1 outcome=skipped reason=rule_escalated");
+  });
+});

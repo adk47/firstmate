@@ -67,6 +67,32 @@ case "$APPLY_MODE_RAW" in
     ;;
 esac
 
+# --- real-apply approval gate (2026-10-11) ---------------------------------
+# A REAL run is allowed only when policies/credit-approval-automation.json has
+# automations["credit-verification-batch"].approved == true. Otherwise every
+# caller (the cron and the @Ops Slack triggers alike) is forced to DRY: score and
+# report only, zero admin-API writes. Fails closed: if the registry is missing,
+# unreadable or malformed, the run is dry.
+#
+# Why: until 2026-10-11 this pipeline's approve rule was inverted
+# (approve_owning_track == 100 means the validator's owning-track shortcut did
+# NOT fire), so real runs approved validator-DECLINED credit requests. The cron
+# was disabled, but the Slack trigger defaults to real. Flipping `approved` is a
+# captain decision made in a reviewed PR, never a node-8 toggle or an env var, so
+# an agent with exec cannot re-arm it by pointing the gate at its own file. The
+# same check runs again at the write boundary (apply-verdicts.sh).
+# shellcheck source=../lib/real-apply-approval.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/real-apply-approval.sh"
+CV_REAL_APPLY_BLOCKED=0
+if [[ "$DRY_RUN_STR" == "false" ]]; then
+  if ! cv_real_apply_approved; then
+    DRY_RUN_STR="true"
+    CV_REAL_APPLY_BLOCKED=1
+    echo "WARN: real apply is NOT approved for credit-verification-batch (policies/credit-approval-automation.json: approved != true, approved_by/approval_ref empty, or unreadable). Running DRY: score + report only, zero writes." >&2
+    echo "CV_REAL_APPLY_BLOCKED registry=policies/credit-approval-automation.json mode=dry writes=0"
+  fi
+fi
+
 # Validate selector. Profile/credit modes REQUIRE a UUID; queue mode ignores ID.
 case "$SELECTOR_KIND" in
   queue)
@@ -186,7 +212,12 @@ fi
 
 CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-/root/.openclaw-main/openclaw.json}"
 GATEWAY_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
-PIPELINE_PATH="/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/pipelines/verify-credit-batch-mvp.lobster"
+# Env override exists so the regression suite can point at the repo's copy of
+# the pipeline instead of skipping every dispatch test on a host without
+# /opt/hydra (the suite's own pipeline_deployed() helper used to paper over
+# that by skipping — which is how the 2026-09-11 outbound-contract break could
+# ship untested). Production never sets it.
+PIPELINE_PATH="${CV_PIPELINE_PATH:-/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/pipelines/verify-credit-batch-mvp.lobster}"
 
 if [[ ! -r "$CONFIG_PATH" ]]; then
   echo "ERROR: openclaw config not readable at $CONFIG_PATH" >&2
@@ -258,10 +289,29 @@ ARGS_JSON=$(jq -nc \
   --arg rid "$RUN_ID" \
   '{batch_size:$bs, thread_ts:$tts, dry_run:$dry, selector_kind:$skind, selector_id:$sid, raw_batch_file:$rbf, run_id:$rid}')
 
+# Owner of the /tools/invoke call. A gateway with MORE THAN ONE configured
+# agent refuses an unowned session key: the body's sessionKey defaults to
+# "main", which belongs to no configured agent, and the call dies with
+#   invalid_request: Multiple agents are configured, but session key "main"
+#   has no explicit owner. Pass agentId or use an agent-prefixed session key.
+# That is exactly how this 4-hourly cron died on 2026-09-11T16:01Z — and
+# because the job ran as an agent turn, the scheduler kept reporting success
+# for six days while every fire processed nothing. Pass BOTH an explicit
+# agentId and an agent-prefixed sessionKey so resolution never depends on
+# what the default "main" store happens to be bound to (openclaw picks the
+# parsed session-key agent when the key is prefixed, and falls back to the
+# explicit agentId otherwise — see resolveRequestedSessionAgentId).
+# Env overrides exist so a test can pin the contract, not to retune prod.
+CV_INVOKE_AGENT_ID="${CV_INVOKE_AGENT_ID:-operations}"
+CV_INVOKE_SESSION_KEY="${CV_INVOKE_SESSION_KEY:-agent:operations:credit-verification-batch}"
+
 PAYLOAD=$(jq -nc \
+  --arg agentId "$CV_INVOKE_AGENT_ID" \
+  --arg sessionKey "$CV_INVOKE_SESSION_KEY" \
   --arg pipeline "$PIPELINE_PATH" \
   --arg argsJson "$ARGS_JSON" \
-  '{tool:"lobster", action:"run",
+  '{agentId:$agentId, sessionKey:$sessionKey,
+    tool:"lobster", action:"run",
     args:{pipeline:$pipeline, argsJson:$argsJson, timeoutMs:700000}}')
 
 # --- invoke ----------------------------------------------------------------
@@ -322,4 +372,112 @@ fi
 # render-dry-run-summary.sh step already posts to Slack itself when
 # thread_ts is non-empty; we surface the text here so the agent can read
 # it (e.g. for logging) without re-posting.
-echo "$RESPONSE" | jq -r '.result.details.output[-1] // .result.details.output // empty'
+SUMMARY=$(echo "$RESPONSE" | jq -r '.result.details.output[-1] // .result.details.output // empty')
+printf '%s\n' "$SUMMARY"
+
+# --- zero-work is a FAILURE, not a quiet success ---------------------------
+# A successful HTTP invoke is not a successful BATCH. On 2026-09-11..09-17
+# this cron processed zero credits on every fire while the scheduler reported
+# a healthy run, because a run's status was the agent turn finishing rather
+# than what the batch actually did. The transport half of that is fixed above;
+# this guard closes the other half. The pipeline publishes one
+# `CV_BATCH_SUMMARY key=value` line on the stdout we just printed
+# (render-dry-run-summary.sh), so the accounting comes from the pipeline's own
+# numbers instead of being re-derived here.
+#
+# Outcome table — `queue_depth > 0` is the "there was work" predicate:
+#   sampled=0 + queue_depth>0   silent_noop   exit 6  (the incident's shape)
+#   attempted>0 + landed=0      all_failed    exit 6
+#   line absent / malformed     unaccounted   exit 6
+#   sampled=0 + queue_depth=0   no_work       exit 0  (nothing to do)
+#   sampled>0 + attempted=0     no_eligible   exit 0  (nothing decidable)
+#   otherwise                   ok            exit 0
+# Dry runs never exit non-zero: they cannot write, so 0 processed is not a
+# fault. A partially-failed real run (transport_failed>0, landed>0) stays a
+# success here — the summary already pages it with :rotating_light: and the
+# instruction is about runs that did nothing at all.
+CV_ACCT_LINE=$(printf '%s\n' "$SUMMARY" | grep -oE '^CV_BATCH_SUMMARY .*' | tail -1 || true)
+cv_acct() {
+  [[ -n "$CV_ACCT_LINE" ]] || return 0
+  printf '%s\n' "$CV_ACCT_LINE" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1
+}
+CV_QUEUE_DEPTH=$(cv_acct queue_depth)
+CV_SAMPLED=$(cv_acct sampled)
+CV_ATTEMPTED=$(cv_acct attempted)
+CV_LANDED=$(cv_acct landed)
+CV_REFUSED=$(cv_acct refused)
+CV_TRANSPORT_FAILED=$(cv_acct transport_failed)
+
+cv_numeric() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
+
+# Every field the classification below depends on must be PRESENT and NUMERIC.
+# A present-but-malformed contract line is not accounting: treating it as one
+# recreates exactly the silent success this guard exists to prevent (QA on
+# PR #961: `sampled=null` — what the renderer prints when .counts.total is
+# absent after an upstream schema change — used to fall through the numeric
+# tests to no_eligible and exit 0). Missing keys are named so the run log says
+# which upstream field vanished.
+CV_ACCT_INVALID=""
+cv_required_numeric() {
+  local -a bad=()
+  local k v
+  for k in queue_depth sampled attempted landed refused transport_failed; do
+    v=$(cv_acct "$k")
+    cv_numeric "$v" || bad+=("$k=${v:-<absent>}")
+  done
+  if (( ${#bad[@]} > 0 )); then
+    CV_ACCT_INVALID=$(printf '%s,' "${bad[@]}")
+    CV_ACCT_INVALID=${CV_ACCT_INVALID%,}
+    return 1
+  fi
+  return 0
+}
+
+CV_OUTCOME=ok
+CV_RC=0
+if [[ "$DRY_RUN_STR" == "false" ]]; then
+  if [[ -z "$CV_ACCT_LINE" ]]; then
+    CV_OUTCOME=unaccounted; CV_RC=6
+  elif ! cv_required_numeric; then
+    CV_OUTCOME=unaccounted; CV_RC=6
+  elif (( CV_SAMPLED == 0 )) && (( CV_QUEUE_DEPTH > 0 )); then
+    CV_OUTCOME=silent_noop; CV_RC=6
+  elif (( CV_ATTEMPTED > 0 )) && (( CV_LANDED == 0 )); then
+    CV_OUTCOME=all_failed; CV_RC=6
+  elif (( CV_SAMPLED == 0 )); then
+    CV_OUTCOME=no_work
+  elif (( CV_ATTEMPTED == 0 )); then
+    CV_OUTCOME=no_eligible
+  fi
+elif (( CV_REAL_APPLY_BLOCKED )); then
+  # A real run was requested but not approved, so it ran dry. Named
+  # separately so the cron run log shows WHY nothing was written.
+  CV_OUTCOME=dry_run_real_apply_not_approved
+else
+  CV_OUTCOME=dry_run
+fi
+
+# Report the control line whenever there is accounting to report, and always
+# for a real run (where "no accounting" is itself the finding). A manual dry
+# run whose stub/summary carries no contract line stays quiet rather than
+# printing a row of `?`.
+if [[ -n "$CV_ACCT_LINE" || "$DRY_RUN_STR" == "false" ]] || (( CV_REAL_APPLY_BLOCKED )); then
+  printf 'CV_BATCH_RESULT queue_depth=%s sampled=%s attempted=%s landed=%s refused=%s transport_failed=%s outcome=%s\n' \
+    "${CV_QUEUE_DEPTH:-?}" "${CV_SAMPLED:-?}" "${CV_ATTEMPTED:-?}" "${CV_LANDED:-?}" \
+    "${CV_REFUSED:-?}" "${CV_TRANSPORT_FAILED:-?}" "$CV_OUTCOME"
+fi
+
+if (( CV_RC != 0 )); then
+  case "$CV_OUTCOME" in
+    silent_noop)
+      echo "ERROR: credit-verification batch processed 0 credits while the unverified queue holds ${CV_QUEUE_DEPTH} — the pipeline ran but sampled nothing. Either the fetch step is broken or the queue selector no longer matches; this is NOT a quiet day and must not read as one." >&2
+      ;;
+    all_failed)
+      echo "ERROR: credit-verification batch attempted ${CV_ATTEMPTED} credit write(s) and landed 0 (refused=${CV_REFUSED:-?}, transport_failed=${CV_TRANSPORT_FAILED:-?}) — the admin API rejected or never confirmed every write. Reconcile current credit state before retrying." >&2
+      ;;
+    unaccounted)
+      echo "ERROR: the pipeline output carries no usable CV_BATCH_SUMMARY accounting (${CV_ACCT_INVALID:+invalid fields: ${CV_ACCT_INVALID}; }raw tail: ${SUMMARY:0:300}) — the run cannot be credited with any work, so it cannot report success. The summary step (render-dry-run-summary.sh) may have failed, or Lobster's details.output shape changed." >&2
+      ;;
+  esac
+  exit "$CV_RC"
+fi

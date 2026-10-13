@@ -276,6 +276,42 @@ RUNBOOK_BLOCK
 Gateways stay stopped through Phase 4 — doctor REFUSES state mutation
 while one runs (observed).
 
+## Config/plugin ordering — DO NOT "fix" deploy.sh by syncing config first
+
+The 2026-09-10 window recorded a post-mortem item reading "deploy.sh syncs
+profile configs ~1600 lines AFTER Step 4d.5, so `plugins install` validated the
+LIVE (legacy-shaped) config and both plugin pins failed — sync profile configs
+BEFORE 4d.5." **Implementing that literally would wedge the deploy**, and the
+staging rehearsal for this same window proved why. Both directions are invalid:
+
+| live config | installed plugin | result |
+|---|---|---|
+| legacy `thread.requireExplicitMention` | slack **8.2** | rejected — the window's observed failure |
+| new `channels.slack.implicitMentions` | slack **7.1** | hard-invalid, AND `plugins install` itself refuses under an invalid config |
+
+So there is no static order of "sync config" and "install plugins" that is safe
+across a shape transition — the two are mutually blocking. What makes the
+CURRENT layout safe is that Step 1 validates SHAPE ONLY (python json.tool +
+mcp-remote lint + drift script, no runtime/plugin schemas), and the first
+plugin-schema validation is pre-start-heal's `config validate` at the Step 6
+restart — i.e. AFTER 4d.5 has installed the matching plugin versions.
+
+Therefore, for the NEXT runtime bump:
+
+- **Do not reorder Step 4d.5 and the profile-config sync.** Derive the sequence
+  for that bump's specific version pair instead; if a key's shape changes, the
+  re-migration goes BETWEEN the two plugin installs, which is the shape the
+  staging rehearsal validated (legacy-key config -> install slack+codex ->
+  re-migrate key -> doctor).
+- **The window MUST go through deploy.sh**, never a manual
+  config-sync-then-plugin sequence, for exactly this reason.
+- If it wedges anyway, the proven recovery is: revert the key -> install the
+  plugin -> re-migrate the key.
+
+This block exists because the post-mortem item and the rehearsal finding
+contradict each other, and the post-mortem item is the wrong one. Read this
+before acting on it.
+
 ## Phase 2 — pre-doctor scrub (per state dir; every item observed to block)
 
 ```bash
@@ -374,6 +410,15 @@ not advanced. **Pass 2 runs after Phase 4** (see there).
 bash -euo pipefail <<'RUNBOOK_BLOCK'
 # MAIN:
 export OPENCLAW_STATE_DIR=/root/.openclaw-main
+# REQUIRED on 8.2+, and not optional hygiene: doctor resolves our SYSTEM-scope
+# systemd units as "systemd user" and then REFUSES state maintenance with
+# "ownership or shutdown could not be verified" -- even with both gateways
+# provably stopped. Observed at the 2026-09-10 window; staging could never
+# catch it because staging has no systemd units at all. The policy skips ONLY
+# doctor's managed-service block, and `finish()` cannot restart anything
+# because `stopped` stays undefined, so it cannot fight our systemd-owned
+# lifecycle.
+export OPENCLAW_SERVICE_REPAIR_POLICY=external
 openclaw --profile main doctor --fix                                   # auth + routes + agent DBs + sessions
 # On 2026.8.2 the session import is already done by the line above; this is a
 # VERIFYING no-op that prints the tally (expect "0 target(s), 0 legacy entries"):
@@ -458,6 +503,7 @@ CODEX_AUTH_PROFILES=main /opt/hydra/scripts/lib/codex-auth-invariants.sh --check
 
 # EDGE (auth starts empty by design):
 export OPENCLAW_STATE_DIR=/root/.openclaw-edge
+export OPENCLAW_SERVICE_REPAIR_POLICY=external   # same reason as MAIN above
 openclaw --profile edge doctor --fix
 openclaw --profile edge doctor --fix --session-sqlite import --session-sqlite-all-agents
 for db in /root/.openclaw-edge/agents/*/agent/openclaw-agent.sqlite; do

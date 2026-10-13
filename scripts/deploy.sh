@@ -13,7 +13,7 @@ set -euo pipefail
 # IS node-8 or a similar Linux host with /root/.openclaw/ access.
 # In practice: SSH into node-8 first, then run deploy.sh from there.
 #     ssh -i ~/.ssh/nick_ovh root@40.160.32.80
-#     cd /opt/hydra && ./scripts/deploy.sh [--target main|edge|all]
+#     cd /opt/hydra && ./scripts/deploy.sh [--target main|edge|all] [--report-only]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HYDRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -23,7 +23,7 @@ DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"
 # Pinned openclaw runtime version. Updated together with this file so the
 # version change appears in git history alongside any deploy-script tweaks
 # the upgrade requires. Bump in lockstep with docs/guides/REPO-MANAGEMENT.md.
-OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.8.2}"
+OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.8.35}"
 
 # Minimum Node.js for the pinned runtime (openclaw 2026.7.1 raised the floor
 # to >=22.22.3 — its bin refuses to start below it, so a deploy on an old Node
@@ -57,6 +57,8 @@ source "$SCRIPT_DIR/lib/codex-version.sh"
 source "$SCRIPT_DIR/lib/deploy-lock.sh"
 # shellcheck source=lib/deploy-mutation-marker.sh
 source "$SCRIPT_DIR/lib/deploy-mutation-marker.sh"
+# shellcheck source=lib/main-prune-lock.sh
+source "$SCRIPT_DIR/lib/main-prune-lock.sh"
 
 # Effective systemd EnvironmentFile validation for the muso CLI credentials
 # used by the main gateway (unit-tested in scripts/tests/muso-env-preflight.bats).
@@ -198,13 +200,17 @@ export LC_ALL=C
 
 # Parse --target flag
 TARGET="all"
+# --report-only (env twin HYDRA_REPORT_ONLY=1): run Step 0 + Step 4a, then exit
+# before anything mutates. See the exit after preflight_drift_check below.
+REPORT_ONLY="${HYDRA_REPORT_ONLY:-0}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target)
       [[ -z "${2:-}" ]] && { echo "Error: --target requires a value (main|edge|all)"; exit 1; }
       TARGET="$2"; shift 2 ;;
+    --report-only) REPORT_ONLY=1; shift ;;
     main|edge|all) TARGET="$1"; shift ;;
-    *) echo "Usage: deploy.sh [--target main|edge|all]"; exit 1 ;;
+    *) echo "Usage: deploy.sh [--target main|edge|all] [--report-only]"; exit 1 ;;
   esac
 done
 
@@ -218,7 +224,14 @@ for t in "${TARGET_PARTS[@]}"; do
 done
 
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"; }
-fail() { log "FATAL: $*"; notify_slack ":x: HYDRA deploy FAILED ($TARGET): $*"; exit 1; }
+# A --report-only run is a read-only probe, not a deploy: a blocking rail exits
+# non-zero but must not raise a "deploy FAILED" alarm in #hydra-heartbeat.
+fail() { log "FATAL: $*"; [[ "$REPORT_ONLY" == "1" ]] || notify_slack ":x: HYDRA deploy FAILED ($TARGET): $*"; exit 1; }
+# --report-only reports the rails; HYDRA_FORCE / HYDRA_SKIP_DRIFT_CHECK bypass
+# them, so a bypassed run would exit 0 "clean" without having checked anything.
+if [[ "$REPORT_ONLY" == "1" ]] && { [[ "${HYDRA_FORCE:-0}" == "1" ]] || [[ "${HYDRA_SKIP_DRIFT_CHECK:-0}" == "1" ]]; }; then
+  fail "--report-only refuses to run with HYDRA_FORCE=1 or HYDRA_SKIP_DRIFT_CHECK=1: those bypass the rails it exists to report. Unset them."
+fi
 needs_target() { [[ "$TARGET" == "all" || ",$TARGET," == *",$1,"* ]]; }
 
 notify_slack() {
@@ -297,6 +310,48 @@ plugin_install_version_flags() {
   fi
 }
 
+# stop_gateway_for_plugin_pin <profile> — openclaw fences state-schema mutation
+# against a live gateway (dist/state-database-coordinator withStateSchemaFence:
+# "refused shared state schema mutation ... because another Gateway owns that
+# state directory. Stop that Gateway or perform the update through its managed
+# restart path"). The fence exists in 2026.8.2 AND 2026.8.35 alike; what decides
+# whether it fires is the fast path in ensureSchema: it skips the fence only when
+# the DB's stamped schema_meta.app_version equals the running binary's version.
+# So the trigger is "install_openclaw swapped the runtime in THIS deploy" (the
+# binary now differs from the version the DBs are stamped with), not a version
+# threshold. Deploy HYDRA run 37791745129 (8 Oct): Step 4c.5 made the binary
+# 8.35 over DBs stamped 8.2, then Step 4d.5 `plugins install` hit the fence and
+# the deploy auto-rolled back. The record install_openclaw writes is that signal
+# (Step 4c.5 runs before Step 4d.5), and it is version-free, so it cannot rot.
+# The unit stays stopped until Step 6, which must therefore restart it:
+# HYDRA_FORCE_RESTART=1 overrides the gateway-inert restart-skip gate. A
+# failure between here and Step 6 ends in rollback.sh, which restarts both.
+# Direct systemctl, not run_on_node8 (defined later, Step 5a): this function
+# already drives the host's own openclaw/npm directly.
+# Profiles recorded here were stopped ON PURPOSE: Step 6 then expects no MainPID
+# (see missing_pid_restart_req) instead of paging that the drain path is broken.
+GATEWAYS_STOPPED_BY_DEPLOY=""
+gateway_stopped_by_deploy() { [[ " $GATEWAYS_STOPPED_BY_DEPLOY " == *" $1 "* ]]; }
+
+# missing_pid_restart_req <profile> — Step 6 found no pre-request MainPID.
+# Returns finish_gateway_restart's req code: 4 = we stopped the unit ourselves
+# (hard restart, no page), 3 = PID genuinely unreadable (hard restart + page).
+missing_pid_restart_req() {
+  if gateway_stopped_by_deploy "$1"; then return 4; fi
+  return 3
+}
+
+stop_gateway_for_plugin_pin() {
+  local profile="$1"
+  if [[ -f "$DEPLOY_PATH/.pre-deploy-openclaw-version" ]]; then
+    log "    Stopping openclaw-gateway-${profile} for the plugin install (runtime was swapped this deploy; the state DB migration is fenced against a live gateway)"
+    systemctl stop "openclaw-gateway-${profile}" || return 1
+    gateway_stopped_by_deploy "$profile" || GATEWAYS_STOPPED_BY_DEPLOY="$GATEWAYS_STOPPED_BY_DEPLOY $profile"
+    export HYDRA_FORCE_RESTART=1
+  fi
+  return 0
+}
+
 install_external_plugin() {
   # Pins ONE externalized @openclaw/* plugin per-profile under
   # ~/.openclaw-<profile>/npm/. Args: <pkg> <version> (e.g.
@@ -331,6 +386,10 @@ install_external_plugin() {
       continue
     fi
     log "    Installing ${pkg}@$version on $profile (was: ${installed:-not installed})"
+    stop_gateway_for_plugin_pin "$profile" || {
+      log "    ✗ could not stop openclaw-gateway-${profile}; not installing ${pkg} against a live gateway"
+      return 1
+    }
     local install_out install_rc=0
     local -a extra_flags=()
     read -r -a extra_flags <<< "$(plugin_install_version_flags "$version")"
@@ -350,6 +409,25 @@ install_external_plugin() {
     fi
   done
   return 0
+}
+
+# state_user_versions <root> — "main=15 edge=15": each profile's state DB
+# PRAGMA user_version, "absent" if the DB file does not exist, "unreadable" if
+# it exists but cannot be read. rollback.sh Step 1c computes the same string
+# (inline, the restored tree may predate this function) and compares.
+state_user_versions() {
+  local p f v out=""
+  for p in main edge; do
+    f="$1/.openclaw-$p/state/openclaw.sqlite"
+    if [[ ! -f "$f" ]]; then
+      v=absent
+    else
+      v=$(sqlite3 -readonly "$f" 'pragma user_version;' 2>/dev/null) || v=""
+      [[ "$v" =~ ^[0-9]+$ ]] || v=unreadable
+    fi
+    out="${out:+$out }$p=$v"
+  done
+  printf '%s' "$out"
 }
 
 install_openclaw() {
@@ -377,6 +455,16 @@ install_openclaw() {
     return 0
   else
     log "    Upgrading openclaw $installed → $OPENCLAW_VERSION"
+    # Record what rollback.sh must restore: the swap below outlives a failed
+    # deploy (8 Oct run 37791745129 left runtime 8.35 under 8.2 plugins).
+    # Cleared once Step 6 has restarted the gateways.
+    # Line 1: the runtime to restore. Line 2: each state DB's user_version at
+    # swap time; rollback.sh restores the binary only while they are unchanged
+    # (a newer-schema DB makes the old binary refuse to boot).
+    local state_uv
+    state_uv=$(state_user_versions "${OPENCLAW_PROFILE_ROOT:-/root}")
+    printf '%s\n%s\n' "$installed" "$state_uv" > "$DEPLOY_PATH/.pre-deploy-openclaw-version" \
+      || { log "    ✗ cannot record the pre-swap runtime in $DEPLOY_PATH/.pre-deploy-openclaw-version"; return 1; }
   fi
 
   local npm_out
@@ -806,7 +894,7 @@ trap 'release_deploy_lock "$LOCK_DIR"' EXIT
 # instead of swallowing the error with `|| true`. The whole point of
 # setting hooks up here is "guarantee they're active"; silently
 # failing would break that guarantee while pretending it succeeded.
-if [[ -x "$SCRIPT_DIR/setup-hooks.sh" ]] && [[ -d "$HYDRA_ROOT/.git" ]]; then
+if [[ "$REPORT_ONLY" != "1" ]] && [[ -x "$SCRIPT_DIR/setup-hooks.sh" ]] && [[ -d "$HYDRA_ROOT/.git" ]]; then
   if ! hook_setup_out=$("$SCRIPT_DIR/setup-hooks.sh" 2>&1); then  # hydra-hook: reviewed-indirection (repo script by path)
     log "  WARNING: setup-hooks.sh failed — pre-commit guard may not be active."
     log "  Run manually to investigate: scripts/setup-hooks.sh"
@@ -846,6 +934,9 @@ RSYNC_EXCLUDES=(
   # In-progress marker (server-owned, written/removed by deploy.sh and
   # rollback.sh); must survive rsync --delete like .deployed-sha above.
   --exclude='.deploy-mutating'
+  # Pre-swap openclaw runtime version (written by install_openclaw, cleared by
+  # Step 6, consumed by rollback.sh Step 1c); same survive-rsync rule.
+  --exclude='.pre-deploy-openclaw-version'
   # Decommissioned CLIProxyAPI sidecar (PR #224). Files no longer in the
   # repo but may still exist on /opt/hydra/ until ops cleanup. Excluded
   # so rsync --delete doesn't trip the deploy pre-flight gate; safe to
@@ -946,6 +1037,16 @@ RSYNC_EXCLUDES=(
   # tracked file contains 'pr-review'). Mirrored KEEP glob in
   # scripts/qa-clean-merge-scratch.sh (lockstep rule).
   --exclude='workspaces/*/.*pr-review-*.json'
+  # Ops agent run-manifest ('TRIBUTARIES_EXECUTION_MANIFEST_2026-10-02.md',
+  # observed on node-8 workspaces/operations 2026-10-02, flagged by the Step 4a
+  # pre-flight) — dated per-run working state, never in the repo. Mirrored KEEP
+  # glob in scripts/qa-clean-merge-scratch.sh (lockstep rule).
+  --exclude='workspaces/*/*_MANIFEST_*.md'
+  # Ops agent run artifact, dot-prefixed ('.ops-2026-10-02-profile-916514bf-
+  # seven-track-metadata-followup-0232.json', observed on node-8 workspaces/
+  # operations 2026-10-02) — per-run scratch, never in the repo. Mirrored KEEP
+  # glob in scripts/qa-clean-merge-scratch.sh (lockstep rule).
+  --exclude='workspaces/*/.ops-*.json'
   # QA credit-verification todo inventory — dated per-run working state the QA
   # agent writes on node-8 (e.g. credit-verification-todo-inventory-2026-07-21.json),
   # never in the repo. Server-owned scratch; mirrored KEEP glob in
@@ -993,6 +1094,32 @@ RSYNC_EXCLUDES=(
   # does not require a mirror here. Keep it that way: a depth-1 rename would
   # silently start requiring one.
   --exclude='workspaces/support/reference/recent-changes.md'
+  # Caroline's platform.muso.ai API feed, GENERATED on the server by
+  # scripts/sync-platform-llms.sh from the PUBLIC
+  # https://platform.muso.ai/llms-full.txt. Same shape and same reasoning as
+  # recent-changes.md directly above: it must live inside reference/ to be
+  # RAG-indexed at all, so rsync --delete would wipe it every deploy and the
+  # Step 4a pre-flight would red every PR. It exists because hand-copied
+  # pricing is what went stale in api-access.md for ten weeks; the numbers are
+  # fetched, never written here. Server-owned, never tracked in the repo.
+  # Depth-2 shape, so the KEEP_GLOBS drift guard needs no mirror (see NOTE above).
+  --exclude='workspaces/support/reference/platform-api.md'
+  # Caroline's Muso-app plan pricing, GENERATED on the server by
+  # scripts/sync-app-pricing.sh from the PUBLIC anonymous plans API. Same shape and
+  # same reasoning as the two excludes above. It exists because the hand-written
+  # table blended monthly and annual rate cards and under-quoted monthly customers
+  # by ~25%; the numbers are now fetched per cadence, never typed. Server-owned,
+  # never tracked. Depth-2, so the KEEP_GLOBS drift guard needs no mirror.
+  --exclude='workspaces/support/reference/app-pricing.md'
+  # Caroline's help-centre corpus + citation manifest, GENERATED on the server by
+  # scripts/sync-help-centre.sh from the PUBLIC https://help.muso.ai/llms.txt
+  # (one flat hc-<id>.md per article, plus hc-manifest.json). Same shape and same
+  # reasoning as the three excludes above: it must live inside reference/ to be
+  # RAG-indexed, so rsync --delete would wipe it every deploy and the Step 4a
+  # pre-flight would red every PR. Server-owned, never tracked. Depth-2, so the
+  # KEEP_GLOBS drift guard needs no mirror.
+  --exclude='workspaces/support/reference/hc-*.md'
+  --exclude='workspaces/support/reference/hc-manifest.json'
   # Agent-created backups directory — never in repo, never overwritten.
   --exclude='workspaces/*/backups/'
   # Per-PR QA review state (external-pr-review runs write
@@ -1299,6 +1426,12 @@ RSYNC_EXCLUDES=(
   # otherwise delete the state of a live escalation -- and the pre-flight
   # dry-run fails on it, which twice blocked THIS PR on an unrelated lane.
   --exclude='workspaces/*/.bridge-*.json'
+  # Same state again, with an 'agent-' infix: workspaces/operations/
+  # .agent-bridge-215476152669042.json (838 B, opened 2026-10-01 17:38:14Z) is a
+  # live in-flight request on node-8. The dotted '.bridge-*' sibling above misses
+  # it (no 'agent-' infix) and 'bridge-*' misses the leading dot, so a deploy would
+  # delete it mid-escalation. Mirrored KEEP glob in qa-clean-merge-scratch.sh.
+  --exclude='workspaces/*/.agent-bridge-*.json'
   # Same state, un-dotted: the AGENT names its request payload at runtime and
   # wrote workspaces/operations/bridge-request-<conversationId>.json (2026-09-15,
   # blocked #943). Top-level workspace files never auto-classify, so the shape
@@ -1349,6 +1482,29 @@ RSYNC_EXCLUDES=(
   # deletion classifier chokes on the volume (~386K entries) and hangs the
   # single self-hosted CI runner for hours (2026-07-10).
   --exclude='workspaces/repos/'
+  # Sanctioned ROOT scratch home (MUS-1388, child 3 of MUS-1374). Agents that
+  # write output at the repo root (cwd=/opt/hydra) put it in /scratch/: server-
+  # owned, never tracked, never deleted by --delete. ANCHORED like /api-logs/
+  # above (a bare `scratch/` would match inside plugin trees that
+  # install_plugin() rsyncs with this array). Do NOT commit a tracked file
+  # under scratch/ — this exclude means it would never reach the server.
+  --exclude='/scratch/'
+  # ROOT-LEVEL twins of five excludes scoped one directory too deep
+  # (workspaces/*/.openclaw/, *.jpeg, *.csv, intercom/, qa/pr-review*.json) —
+  # the /api-logs/ mistake again. On 2026-09-28 node-8 held 2 Stripe payout
+  # reports, a payout debug CSV, a payout workbook and 2 customer Intercom
+  # attachments at the repo root, all classified non-suspicious by the old
+  # gate. Excluding them is lossless: never deleted, never overwritten.
+  # All anchored; verified no tracked path matches (git ls-files, MUS-1388).
+  --exclude='/.openclaw/'
+  --exclude='/intercom/'
+  --exclude='/*.csv'
+  --exclude='/*.xlsx'
+  --exclude='/*.pdf'
+  --exclude='/*.jpeg'
+  --exclude='/*.jpg'
+  --exclude='/*.png'
+  --exclude='/pr-review*.json'
 )
 
 # -------------------------------------------------------------------
@@ -1411,6 +1567,54 @@ DEPLOY_CHANGED_FILES=""
 # shellcheck disable=SC2034  # consumed by sourced lib/edge-restart-gate.sh
 DEPLOY_DIFF_COMPUTED=0
 
+# decide_marker_takeover <owner-token> [repo]
+#
+# Belt-and-braces for the leftover-marker WARN below: a rollback that dies
+# before clear_mutation_marker (SIGKILL, ssh drop — incident 2026-09-21, GHA
+# run 35636138551) leaves .deploy-mutating owned by a GitHub Actions run that
+# is provably dead, and nothing takes that over automatically, so the fleet
+# stays stranded until a human logs into node-8. This decides whether THAT
+# is the situation: only an owner shaped like `gha-<run_id>-<attempt>` (a
+# GitHub Actions run — NEVER a `manual-...` owner, which may be a laptop
+# deploy genuinely mid-flight) whose run is reported `completed` by the
+# GitHub API is taken over. Any other outcome (owner not a gha token, gh
+# missing, an API error/timeout, or a live status such as in_progress/
+# queued) leaves today's behaviour untouched: the WARN below, and later the
+# rc-2 refusal at the claim site. An operator-set
+# HYDRA_TAKEOVER_MUTATION_MARKER is never overridden.
+#
+# On takeover, exports HYDRA_TAKEOVER_MUTATION_MARKER so the existing claim
+# (claim_mutation_marker, below) performs its compare-and-swap. Logs its
+# reasoning either way via `log` (must be defined by the caller).
+decide_marker_takeover() {
+  local owner="${1:-}" repo="${2:-}"
+  if [[ -n "${HYDRA_TAKEOVER_MUTATION_MARKER:-}" ]]; then
+    log "  HYDRA_TAKEOVER_MUTATION_MARKER is already set by the operator; leaving it as is."
+    return 0
+  fi
+  if [[ ! "$owner" =~ ^gha-([0-9]+)-[0-9]+$ ]]; then
+    log "  owner '$owner' is not a GitHub Actions run token (gha-<run_id>-<attempt>); no automatic takeover (it may be a manual deploy genuinely mid-flight)."
+    return 0
+  fi
+  local run_id="${BASH_REMATCH[1]}"
+  if ! command -v gh >/dev/null 2>&1; then
+    log "  owner run $run_id: gh is not on PATH, cannot check whether it finished; no automatic takeover."
+    return 0
+  fi
+  local run_status="" gh_rc=0
+  run_status="$(timeout 20 gh api "repos/${repo}/actions/runs/${run_id}" --jq .status 2>/dev/null)" || gh_rc=$?  # hydra-hook: reviewed-indirection reviewed-argv (gh by literal name under a literal timeout; the gate cannot see through the substitution)
+  if [[ "$gh_rc" -ne 0 || -z "$run_status" ]]; then
+    log "  owner run $run_id: could not read its status from GitHub (gh rc=$gh_rc); no automatic takeover."
+    return 0
+  fi
+  if [[ "$run_status" != "completed" ]]; then
+    log "  owner run $run_id is '$run_status' on GitHub (not completed); no automatic takeover."
+    return 0
+  fi
+  log "  owner run $run_id is completed on GitHub; taking the marker over (compare-and-swap on token $owner)"
+  export HYDRA_TAKEOVER_MUTATION_MARKER="$owner"
+}
+
 # A leftover .deploy-mutating marker means a PREVIOUS run wrote it (right
 # after its Step 4a passed) and never reached a clean end state (neither
 # the .deployed-sha baseline write nor rollback.sh cleared it). That is a
@@ -1430,8 +1634,11 @@ else
   fi
 fi
 if $marker_precheck; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
-  log "WARN: $DEPLOY_PATH/.deploy-mutating already exists (owner: $(cat "$DEPLOY_PATH/.deploy-mutating" 2>/dev/null || echo unreadable)); a previous deploy never completed or rolled back, or another deploy is mid-flight."
+  marker_owner="$(cat "$DEPLOY_PATH/.deploy-mutating" 2>/dev/null || echo unreadable)"
+  log "WARN: $DEPLOY_PATH/.deploy-mutating already exists (owner: $marker_owner); a previous deploy never completed or rolled back, or another deploy is mid-flight."
   log "WARN: a halt in this run will therefore trigger a rollback (the marker looks the same either way)."
+  decide_marker_takeover "$marker_owner" "${REPO:-${GITHUB_REPOSITORY:-Muso-AI/hydra}}"
+  unset marker_owner
 fi
 unset marker_precheck
 
@@ -1457,6 +1664,54 @@ unset marker_precheck
 #   HYDRA_FORCE=1            skip both this check AND Step 4a pre-flight
 #   HYDRA_SKIP_DRIFT_CHECK=1 skip only Step 0; Step 4a pre-flight still runs
 #                            (use when SSH baseline read is genuinely broken)
+# Step 0 diagnostics (MUS-4098): name the skill-workshop proposal behind a
+# drifted SKILL.md. The workshop leaves the body it applied on disk at
+#   <proposals>/<skill>-<date>-<hash>/generations/<uuid>/PROPOSAL.md
+# so a proposal whose body equals the live file (proposal-only frontmatter
+# keys status/version/date stripped from BOTH sides) is the writer. Causal,
+# never temporal: no mtime, SSH-login or auth.log proximity is used (that
+# heuristic named the wrong writer on MUS-4069).
+#
+# Reads only, and fail-soft: stdout is `<path>\t<proposal>\t<date>` per
+# attributed file and nothing else; every error yields no output. It is
+# called only from the reporting block and never feeds the drift verdict.
+# stdin: drifted paths, one per line.
+drift_proposal_attribution() {
+  local script
+  script=$(cat <<'ATTRIB'
+  norm() {
+    awk 'NR==1 && $0=="---" {fm=1; print; next}
+         fm && $0=="---" {fm=0; print; next}
+         fm && /^(status|version|date):/ {next}
+         {print}' "$1"
+  }
+  while IFS= read -r p; do
+    [ "$(basename "$p")" = SKILL.md ] || continue
+    skill=$(basename "$(dirname "$p")")
+    live="$1/$p"
+    [ -r "$live" ] || continue
+    live_body=$(norm "$live") || continue
+    matches=""
+    for prop in $2/"$skill"-*/generations/*/PROPOSAL.md; do
+      [ -r "$prop" ] || continue
+      [ "$(norm "$prop")" = "$live_body" ] || continue
+      d=$(sed -n 's/^date: *//p' "$prop" | head -1)
+      matches="$matches$prop	$d"$'\n'
+    done
+    [ -n "$matches" ] || continue
+    printf '%s\t%s\n' "$p" "$(printf '%s' "$matches" | sort -t'	' -k2,2r | head -1)"
+  done
+ATTRIB
+)
+  local roots="${HYDRA_PROPOSALS_GLOB:-/root/.openclaw-*/skill-workshop/proposals}"
+  if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+    bash -c "$script" _ "$DEPLOY_PATH" "$roots" 2>/dev/null || true  # hydra-hook: reviewed-indirection (read-only; literal heredoc above)
+  else
+    ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" \
+      "bash -c $(printf '%q' "$script") _ $(printf '%q' "$DEPLOY_PATH") $(printf '%q' "$roots")" 2>/dev/null || true
+  fi
+}
+
 log "Step 0/8: Drift check (server vs last-deployed SHA)..."
 drift_check_against_baseline() {
   if [[ "${HYDRA_FORCE:-0}" == "1" ]]; then
@@ -1623,6 +1878,16 @@ drift_check_against_baseline() {
     return 0
   fi
 
+  # Reporting only: annotate each drifted file with the workshop proposal
+  # that wrote it. Falls back to the plain listing on any failure; nothing
+  # above this point or the verdict below depends on it.
+  local attribution drift_listing
+  attribution=$(echo "$drift" | drift_proposal_attribution 2>/dev/null || true)
+  drift_listing=$(echo "$drift" | ATTR="$attribution" awk '
+    BEGIN { n = split(ENVIRON["ATTR"], L, "\n"); for (i = 1; i <= n; i++) { split(L[i], f, "\t"); if (f[1] != "") A[f[1]] = f[2] " (date: " f[3] ")" } }
+    { print "  " $0; if ($0 in A) print "    ↳ skill-workshop proposal: " A[$0] }
+  ') || drift_listing=$(echo "$drift" | sed 's/^/  /')
+
   cat <<DRIFT_BRIEFING
 ================================================================================
 ✗ DEPLOY BLOCKED — server has edits this repo doesn't account for
@@ -1639,15 +1904,24 @@ WHAT THIS MEANS:
   Pushing now would silently overwrite their work. There is no backup.
 
 DRIFTED FILES (server has edits not in any local commit):
-$(echo "$drift" | sed 's/^/  /')
+$drift_listing
 
 WHAT TO DO (the only safe path, mirrors \`git pull --rebase\`):
-  1. Pull the server-side edits into your local repo:
-       scripts/sync-from-server.sh skills --apply       # if drift is in skills-all/
-       scripts/sync-from-server.sh workspaces --apply   # if drift is in workspaces/
-       scripts/sync-from-server.sh audit --apply        # if drift is in audit/
-       # or pull a single file directly (uses same defaults as deploy.sh):
-       scp -i "\$SSH_KEY" "\$NODE8_USER@\$NODE8_IP:$DEPLOY_PATH/<path>" ./<path>
+  1. Pull the server-side edits into your local repo, ONE PATH AT A TIME.
+     sync-from-server.sh pulls ONLY files git already tracks, so:
+       - an edited TRACKED file (skills-all/ or workspaces/):
+           scripts/sync-from-server.sh skills     --apply --only <path>
+           scripts/sync-from-server.sh workspaces --apply --only <path>
+       - a NEW file that exists only on the server is untracked, and
+         sync-from-server.sh will NOT pull it (even if it says "matches").
+         Capture it by hand, review it (no secrets/tokens), then add it
+         explicitly by path:
+           scp -i "\$SSH_KEY" "\$NODE8_USER@\$NODE8_IP:$DEPLOY_PATH/<path>" ./<path>
+           git add <path>
+       - audit/ is gitignored (nothing to commit); its target pulls the
+         whole subtree, which is large:
+           scripts/sync-from-server.sh audit --apply
+     # NEVER bulk-pull workspaces/: it is 125 GB / 6.2M files on node-8 (8 Oct).
   2. Review what came down:
        git status
        git diff -- <path>
@@ -1787,8 +2061,9 @@ log "  Deny lists validated (only growth detected)."
 # -------------------------------------------------------------------
 # Abort if the server has content in skills-all/ that the repo doesn't —
 # that means someone edited skills directly on the server and a deploy
-# would silently wipe their work. Also surface any suspicious deletions
-# inside workspaces/ or skills-all/.
+# would silently wipe their work. Also halt on ANY deletion rsync --delete
+# would perform — not just workspaces/ or skills-all/ (MUS-1374); the
+# decision lives in scripts/lib/deletion-gate.sh.
 # Bypass: HYDRA_FORCE=1 ./deploy.sh ...
 log "Step 4a/8: Pre-flight drift check..."
 preflight_drift_check() {
@@ -1868,6 +2143,8 @@ preflight_drift_check() {
   # deploy rather than silently auto-excluding everything.
   # shellcheck source=lib/classify-deletions.sh
   source "$SCRIPT_DIR/lib/classify-deletions.sh"
+  # shellcheck source=lib/deletion-gate.sh
+  source "$SCRIPT_DIR/lib/deletion-gate.sh"
 
   if [[ -n "$deletions" ]]; then
     local classified
@@ -1903,32 +2180,31 @@ preflight_drift_check() {
   if [[ -n "$skills_drift" ]]; then
     cat <<DRIFT_BRIEFING
 ================================================================================
-✗ DEPLOY BLOCKED — skills-all/ drift between node-8 and the repo
+✗ DEPLOY BLOCKED — skill drift between node-8 and the repo (skills-all/ or workspaces/)
 ================================================================================
 
 WHAT THIS MEANS:
-  These skill files differ between /opt/hydra/skills-all/ on node-8 and this
-  commit in a way the repo does NOT account for. Lines tagged SERVER-AHEAD were
-  edited directly on node-8 (often by an operator or an agent) and are not in the
-  repo; lines tagged CONFLICT were edited on BOTH sides. Your own intended
-  skill edits (REPO-AHEAD) are allowed through and are NOT listed here. If you
-  push past this check, rsync --delete OVERWRITES the server bytes with this
-  commit's bytes and there is NO backup — losing server-side work agents rely on.
+  These skill files differ between node-8 (under /opt/hydra/skills-all/ or
+  /opt/hydra/workspaces/<workspace>/skills/) and this commit in a way the repo
+  does NOT account for. Lines tagged SERVER-AHEAD were edited directly on
+  node-8 (often by an operator or an agent) and are not in the repo; lines
+  tagged CONFLICT were edited on BOTH sides. Your own intended skill edits
+  (REPO-AHEAD) are allowed through and are NOT listed here. If you push past
+  this check, rsync --delete OVERWRITES the server bytes with this commit's
+  bytes and there is NO backup — losing server-side work agents rely on.
   (Lines shown as raw rsync flags mean no baseline was available, so this fell
   back to a blunt "any difference" check — treat every line as SERVER-AHEAD.)
 
 DRIFTED FILES:
 $(echo "$skills_drift" | sed 's/^/  /')
 
-THE SAFE FIX — capture per file. Do NOT bulk-pull: a full
-scripts/sync-from-server.sh skills --apply would clobber your OTHER skill edits
-in this branch.
+THE SAFE FIX — capture per file. Do NOT bulk-pull: a full sync-from-server.sh
+pull would clobber your OTHER skill edits in this branch.
   SERVER-AHEAD — pull just that file and commit it:
-       scripts/sync-from-server.sh skills --apply --only <path>
-       git add <path> && git commit -m "chore: capture skill edit from node-8"
+$(format_skill_capture_commands "$skills_drift")
   CONFLICT — 3-way merge by hand (both sides changed); the baseline is the
   commit in /opt/hydra/.deployed-sha:
-       git show "\$(cat /opt/hydra/.deployed-sha)":<path>   # baseline version
+$(format_skill_conflict_commands "$skills_drift")
        # reconcile that, the node-8 copy, and your branch; commit the result
   Then re-run deploy — pre-flight should report clean.
 
@@ -1941,79 +2217,25 @@ WHEN BYPASSING IS ACTUALLY OK (HYDRA_FORCE=1):
 ================================================================================
 DRIFT_BRIEFING
     if [[ "${HYDRA_FORCE:-0}" != "1" ]]; then
-      fail "skills-all drift — refusing to deploy (override: HYDRA_FORCE=1)"
+      fail "skill drift — refusing to deploy (override: HYDRA_FORCE=1)"
     fi
     log "  HYDRA_FORCE=1 set — proceeding despite drift (will overwrite server)"
   fi
 
   if [[ -n "$deletions" ]]; then
-    local del_count sus_count
+    local del_count
     del_count=$(printf '%s\n' "$deletions" | grep -c .)
 
-    # Deletions inside workspaces/ or skills-all/ are likely real data
-    # (IDENTITY.md, workspace-state.json, custom skills) — these get a
-    # full briefing. Other deletions just get a heads-up.
-    local suspicious
-    suspicious=$(echo "$deletions" | grep -E 'workspaces/|skills-all/' || true)
-    sus_count=$(printf '%s\n' "$suspicious" | grep -c . || true)
-
-    if [[ -n "$suspicious" ]]; then
-      local sus_overflow=""
-      if (( sus_count > 30 )); then
-        sus_overflow="  ... ($((sus_count - 30)) more)"
-      fi
-      cat <<DEL_BRIEFING
-================================================================================
-✗ DEPLOY BLOCKED — sync would delete server state
-================================================================================
-
-WHAT THIS MEANS:
-  rsync --delete is about to remove files from /opt/hydra/ that exist
-  on the server but NOT in the repo. The files below sit under
-  workspaces/ or skills-all/, which means they're likely either:
-    - real accumulated data (dispute trackers, audit logs, scan results)
-    - runtime state generated by openclaw on the server
-    - skills someone added directly on node-8 without committing
-
-  Wiping any of these silently breaks production. There is no backup.
-
-FILES THAT WOULD BE DELETED ($del_count total, suspicious shown):
-$(echo "$suspicious" | head -30 | sed 's/^/  /')
-$sus_overflow
-
-THE ONLY SAFE FIX (do this, in order):
-  1. For each path above, decide:
-     (a) Is it real data? → Pull it into the repo:
-           scripts/sync-from-server.sh workspaces --apply   # for workspaces/*
-           scripts/sync-from-server.sh skills --apply       # for skills-all/*
-           scripts/sync-from-server.sh audit --apply        # for audit/*
-         Then commit.
-     (b) Is it runtime state we want server-owned? → Add an --exclude
-         line to RSYNC_EXCLUDES at the top of scripts/deploy.sh (it's
-         hoisted there because Step 0 also reads it) so rsync stops
-         trying to manage it. Then re-run pre-commit:
-           bash .githooks/pre-commit
-         The Check 2 list (required_excludes) in .githooks/pre-commit
-         must also be updated so future deploys keep enforcing it.
-  2. Re-run deploy. Pre-flight should now report clean.
-
-WHEN BYPASSING IS ACTUALLY OK (HYDRA_FORCE=1):
-  - You've individually verified every file in the list is regenerable
-    or genuinely garbage, AND
-  - You're certain no human or agent will need it again.
-
-  If you're not sure, STOP. Pull first.
-================================================================================
-DEL_BRIEFING
+    # $deletions here is already the post-classifier remainder (the
+    # AUTO:/REMAIN: split above), so it IS the suspicious set — no further
+    # workspaces/skills-all filtering. Every remaining deletion halts.
+    local briefing
+    if ! briefing=$(pending_deletion_briefing "$deletions"); then
+      echo "$briefing"
       if [[ "${HYDRA_FORCE:-0}" != "1" ]]; then
         fail "refusing to delete server state (override: HYDRA_FORCE=1)"
       fi
-      log "  HYDRA_FORCE=1 set — proceeding despite suspicious deletions"
-    else
-      # Non-suspicious deletions: just log them and continue
-      log "  ⚠ sync will delete $del_count file(s) on server (none under workspaces/ or skills-all/):"
-      echo "$deletions" | head -10 | sed 's/^/      /'
-      (( del_count > 10 )) && log "      ... ($((del_count - 10)) more)"
+      log "  HYDRA_FORCE=1 set — proceeding despite $del_count suspicious deletion(s)"
     fi
   fi
 
@@ -2021,6 +2243,18 @@ DEL_BRIEFING
 }
 preflight_drift_check
 
+# -------------------------------------------------------------------
+# --report-only: both read-only rails (Step 0 drift, Step 4a pre-flight) passed
+# — a blocking rail has already exited non-zero through fail() with its normal
+# briefing. Stop HERE, before the muso CLI pin (Step 4a.5), the mutation-marker
+# claim and every non-dry-run rsync, so nothing on the server is touched and
+# .deployed-sha is never written. Reuses the functions and RSYNC_EXCLUDES above;
+# it deliberately has no rail logic of its own.
+# -------------------------------------------------------------------
+if [[ "$REPORT_ONLY" == "1" ]]; then
+  log "--report-only: Step 0 and Step 4a are clean. Exiting before any mutation (no marker, no sync, no .deployed-sha)."
+  exit 0
+fi
 
 # -------------------------------------------------------------------
 # Step 4a.5: pin the muso CLI — BEFORE anything is synced.
@@ -2067,6 +2301,25 @@ DEPLOY_RUN_TOKEN="${HYDRA_DEPLOY_RUN_ID:-manual-$(hostname 2>/dev/null || echo h
 # marker held by another live owner is a refusal, never an overwrite; a
 # dead owner is cleared by hand or compare-and-swapped away with
 # HYDRA_TAKEOVER_MUTATION_MARKER=<that owner's token>.
+# Serialise with scripts/main-prune-restart.sh BEFORE the first node-8 mutation (MUS-3742): a restart during its
+# offline cleanup would race it. Held until exit (lib/main-prune-lock.sh); failing here touched nothing.
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+  lock_rc=0
+  log "Taking the main prune/restart lock (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock || lock_rc=$?
+  case "$lock_rc" in
+    0) ;;
+    1) fail "a main prune/restart still holds $MAIN_PRUNE_LOCK_FILE after ${MAIN_PRUNE_LOCK_WAIT_SECS}s; refusing to deploy underneath it (nothing was changed). Re-run once it finishes." ;;
+    *) fail "cannot open $MAIN_PRUNE_LOCK_FILE (rc=$lock_rc); refusing to deploy without the main prune/restart lock (nothing was changed)" ;;
+  esac
+else
+  # ssh mode: the lock must live on node-8 (a local flock would not exclude the prune there), held by a background ssh
+  # for the life of this process; refused = fail closed, same as the local branch.
+  lock_rc=0
+  log "Taking the main prune/restart lock ON node-8 (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock_remote ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" || lock_rc=$?
+  [ "$lock_rc" = 0 ] || fail "could not take $MAIN_PRUNE_LOCK_FILE on node-8 (rc=$lock_rc: a main prune/restart still holds it, or node-8 is unreachable); refusing to deploy underneath it (nothing was changed). Re-run once it finishes."
+fi
 log "Claiming the mutation marker ($DEPLOY_PATH/.deploy-mutating, owner $DEPLOY_RUN_TOKEN)"
 marker_rc=0
 if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
@@ -2202,6 +2455,30 @@ fi
 # discover it. Re-evaluate for docs/runbooks/UPGRADE-2026.8.1.md Phase 3.
 if version_at_least "2026.8" "$OPENCLAW_VERSION"; then
   log "  openclaw ${OPENCLAW_VERSION} >= 2026.8 — inactive-session-delete/mention-gate dist patches are retired-pending-reevaluation on 2.0, skipping (docs/runbooks/UPGRADE-2026.8.1.md)"
+  # gpt-6-sol/gpt-6-luna subscription route (MUS-5128). 2026.8.x routes these ids
+  # to the Platform (api-key) transport only, so the oauth-only fleet fell back to
+  # paid OpenRouter on every turn. 2026.9.x ships the same ids natively: the gate
+  # retires the backport there. Anchor-checked; fails the deploy on drift.
+  if version_at_least "2026.9" "$OPENCLAW_VERSION"; then
+    log "  openclaw ${OPENCLAW_VERSION} >= 2026.9 — gpt-6 subscription route is native, backport skipped"
+  elif ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
+    bash "$HYDRA_ROOT/scripts/patch-openclaw-gpt6-subscription-route.sh"; then
+    fail "OpenClaw gpt-6 subscription route backport failed"
+  fi
+  # a2a announce flow escapes the prepared-model-runtime generation scope
+  # (MUS-6707/MUS-6726). Reinstalling the dist drops it, so re-apply on every
+  # install. Anchor-checked; fails the deploy on drift (upstream may ship it
+  # natively — then retire this call, do not loosen the anchors).
+  # Upstream #168410 (2026.10.2) rewrites prepared-model-runtime-lease.ts, the
+  # file our anchors live in: expect the anchors to drift on that upgrade and
+  # the deploy to halt here. That halt is intended. Do NOT add a
+  # version_at_least "2026.10" skip. Retire this call only after PROVING the
+  # detached session:a2a-send continuation is fixed natively, not by inference
+  # from the changelog (CTO ruling, MUS-6726).
+  if ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
+    bash "$HYDRA_ROOT/scripts/patch-openclaw-a2a-generation-scope.sh"; then
+    fail "OpenClaw a2a generation-scope backport failed"
+  fi
 else
   if ! OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
     bash "$HYDRA_ROOT/scripts/patch-openclaw-inactive-session-delete.sh"; then
@@ -2297,6 +2574,33 @@ for _profile in main edge; do
   done
 done
 
+# Step 4d.6: SOUL/memory/skills/cron-mode delivery patch (MUS-6632).
+# codex 0.156.1 overwrites the turn-level collaboration_mode payload on gpt-6 slugs, so
+# delivery moves to the thread-level developerInstructions. Placement is load-bearing: it
+# patches the @openclaw/codex plugin tree (the code a gateway runs), which the Step 4d.5
+# install above rewrites with --force on any codex version change. Run it before 4d.5 and
+# a codex bump wipes it while the deploy stays green. One glob per targeted profile; the
+# script FAILS on a glob with no match and re-reads each tree after patching. Core dist is
+# not a target: it is dead code on this runtime. The gate shape is the OPPOSITE of the
+# gpt-6 route backport in Step 4c.5, on purpose: 2026.9.x does NOT fix this
+# (@openclaw/codex@2026.9.9 still uses the turn-level channel); only >= 2026.10 ships it.
+# Do not "tidy" it to match. The patch lands before the Step 6 restart; a running gateway
+# keeps the old code in memory until then.
+if version_at_least "2026.8" "$OPENCLAW_VERSION"; then
+  if version_at_least "2026.10" "$OPENCLAW_VERSION"; then
+    log "Step 4d.6: openclaw ${OPENCLAW_VERSION} >= 2026.10 — soul delivery is native, patch skipped"
+  else
+    _soul_globs=()
+    for _profile in main edge; do
+      needs_target "$_profile" || continue
+      _soul_globs+=("/root/.openclaw-${_profile}/npm/projects/openclaw-codex-*/node_modules/@openclaw/codex/dist/.setup")
+    done
+    if [[ "${#_soul_globs[@]}" -gt 0 ]] && ! bash "$HYDRA_ROOT/scripts/patch-openclaw-soul-delivery.sh" "${_soul_globs[@]}"; then
+      fail "OpenClaw soul-delivery patch failed"
+    fi
+  fi
+fi
+
 # -------------------------------------------------------------------
 # muso CLI pin: MOVED to Step 4a.5 (before the Step 4b rsync).
 # -------------------------------------------------------------------
@@ -2320,6 +2624,150 @@ done
 # passes), not here. Writing it now would advance the baseline before we
 # know the deploy actually works — a half-failed deploy would leave a
 # stale baseline that masks real drift on the next run.
+
+# ─── Caddy delivery + the loopback-bind ordering gate ───────────────────────
+#
+# WHY THIS EXISTS. `gateway.bind: "loopback"` is only safe while Caddy is the
+# thing listening publicly and reverse-proxying to localhost. Those two facts
+# live in DIFFERENT places -- the bind in openclaw-*.json (which deploy.sh
+# syncs, just below) and the reverse proxy in /etc/caddy/Caddyfile (which
+# NOTHING deployed until this block). So "Caddy first, then the loopback bind"
+# was enforced only by whoever read a PR description, while the reverse order
+# shipped automatically on the next scheduled deploy and took the Control UI
+# dark.
+#
+# That asymmetry is how the 2026-09-21 exposure survived ~5 months: on
+# 2026-04-28 the live Caddyfile became a 2-line
+# `respond "MINIMAL_RESTART_OK" 200` stub, and because the gateway was ALSO
+# bound to 0.0.0.0, nothing broke visibly -- traffic bypassed basic_auth and
+# hit :18789 directly. Untracked infra config plus a permissive bind hid an
+# authentication bypass.
+#
+# Ordering inside the function is the point: it INSTALLS before it GATES, so a
+# single deploy carrying both the Caddyfile and the loopback bind satisfies the
+# order by construction. Both halves are no-ops until the repo carries the
+# Caddyfile AND a profile asks for loopback, so this lands safely ahead of the
+# bind change instead of racing it.
+#
+# Seams exist so the block is unit testable; a gate no test can falsify is how
+# the last one rotted. `caddy_reload` is a FUNCTION, not a command in a
+# variable: the pre-commit indirection gate refuses a command word it cannot
+# read statically, and it is right to -- `cmd=rsync; $cmd --delete` is exactly
+# what that gate exists to catch. Tests redefine this function instead.
+caddy_reload() { systemctl reload caddy; }
+
+caddy_deliver_and_gate_bind() {
+  local deploy_path="$1" live="$2"
+  local repo_file="$deploy_path/infra/node-8/Caddyfile"
+
+  # (a) DELIVER first.
+  if [ -f "$repo_file" ]; then
+    if ! command -v caddy >/dev/null 2>&1; then
+      fail "infra/node-8/Caddyfile is in the repo but caddy is not installed — refusing to sync a config whose public entry point is missing."
+    fi
+    if cmp -s "$repo_file" "$live"; then
+      log "  Caddy: $live already matches the repo."
+    else
+      # Validate the REPO file before it may replace a working live one.
+      if ! caddy validate --config "$repo_file" --adapter caddyfile >/dev/null 2>&1; then
+        fail "caddy validate rejected infra/node-8/Caddyfile — refusing to install it."
+      fi
+      local backup=""
+      if [ -f "$live" ]; then
+        backup="${live}.pre-deploy-$(date -u +%Y%m%dT%H%M%SZ)"
+        cp -a "$live" "$backup"
+      fi
+      install -m 644 "$repo_file" "$live" \
+        || fail "could not install infra/node-8/Caddyfile to $live"
+      # A failed reload must ROLL THE FILE BACK. Otherwise the candidate is
+      # already installed, so the NEXT scheduled run sees `cmp -s` succeed,
+      # skips the reload, and the bind gate then reads routing out of a file
+      # Caddy never loaded -- permitting the loopback sync while the old stub
+      # is still being served. The retry this block exists to make safe would
+      # become the outage. (QA finding on #994.)
+      if ! caddy_reload; then
+        # FAIL CLOSED, in every branch. The candidate is already installed, so
+        # the next run must not be able to reach the `cmp -s` equality
+        # shortcut and skip the reload -- that is how a failed reload became a
+        # false success. Two branches, both of which an earlier cut got wrong:
+        #   - no predecessor  -> the installed candidate must be REMOVED
+        #   - restore fails   -> removing $live is the only fail-closed state
+        # An ignored restore failure left the candidate in place, which the
+        # reviewer reproduced adversarially. (QA findings on #994.)
+        if [ -n "$backup" ] && install -m 644 "$backup" "$live"; then
+          caddy_reload || true   # best effort: return Caddy to known-good
+          fail "caddy reload failed after installing the new Caddyfile — restored the previous file so the next run retries the install instead of trusting byte equality."
+        fi
+        rm -f "$live"
+        fail "caddy reload failed after installing the new Caddyfile and there was no restorable predecessor — REMOVED $live so the next run cannot skip the reload on byte equality. Caddy is still serving its previously loaded config; install a known-good Caddyfile before the next deploy."
+      fi
+      log "  Caddy: installed repo Caddyfile and reloaded (previous kept as .pre-deploy-*)."
+    fi
+  else
+    log "  Caddy: no infra/node-8/Caddyfile in the repo — skipping (nothing to deliver)."
+  fi
+
+  # (b) GATE second: a loopback bind requires the REVIEWED Caddyfile to be the
+  # one Caddy is serving.
+  #
+  # This deliberately does NOT analyse the config's routing. Three review
+  # rounds produced six distinct ways a Caddyfile can adapt cleanly and still
+  # not serve "/" to the gateway: a proxy in another site block, in an
+  # unimported snippet, scoped to a narrow path, placed after a terminal
+  # `respond` handler, or pointed at a non-loopback host that merely ends in
+  # the right port. Each fix produced another evasion, which is evidence the
+  # CONTRACT was wrong rather than the implementation.
+  #
+  # So the contract is now the narrow, unevadable one: `bind: loopback` is
+  # permitted only when /etc/caddy/Caddyfile is byte-identical to the repo's
+  # infra/node-8/Caddyfile. Whether THAT file routes "/" correctly is a code
+  # review question about a tracked, human-reviewed artifact -- not something
+  # this script should infer at 04:00 from an arbitrary file on disk. It also
+  # closes a case none of the routing checks covered: shipping loopback while
+  # Caddy serves some hand-edited config nobody reviewed.
+  #
+  # Delivery ran above, so on a correct deploy the files already match. A
+  # mismatch here means either no Caddyfile in the repo, or a reload that did
+  # not take -- both of which must block the bind.
+  local prof cfg mode
+  local reloaded_for_gate=0
+  for prof in main edge; do
+    case "$prof" in
+      main) cfg="$deploy_path/openclaw-main.json" ;;
+      edge) cfg="$deploy_path/openclaw-edge.json" ;;
+    esac
+    [ -f "$cfg" ] || continue
+    # Unreadable config is NOT a pass: it is the one state where we cannot
+    # tell whether a loopback bind is about to ship.
+    mode=$(jq -er '.gateway.bind // "unset"' "$cfg" 2>/dev/null) \
+      || fail "could not read gateway.bind from $cfg — refusing to sync configs blind while the bind gate cannot be evaluated."
+    [ "$mode" = "loopback" ] || continue
+    if [ ! -f "$repo_file" ]; then
+      fail "$prof requests gateway.bind=loopback but the repo carries no infra/node-8/Caddyfile — there is no reviewed public entry point to bind behind."
+    fi
+    if ! cmp -s "$repo_file" "$live"; then
+      fail "$prof requests gateway.bind=loopback but $live is not byte-identical to the repo's infra/node-8/Caddyfile — Caddy is serving something that was not reviewed, or the reload did not take. Refusing to take the surface dark."
+    fi
+    # Byte equality on DISK does not prove the running process LOADED it. If
+    # someone hand-copies the repo bytes over $live while Caddy still serves
+    # the prior stub, the delivery step above skips the reload on `cmp -s`,
+    # this identity check then compares the same two on-disk files and passes,
+    # and loopback ships against a stale in-memory config -- the exact
+    # file-versus-process gap the identity contract was meant to escape.
+    # So force ONE reload before clearing any loopback gate, even when the
+    # files already match, and fail closed if it does not take. Idempotence
+    # for the ordinary case is preserved: this runs only when a profile
+    # actually requests loopback. (QA finding on #994.)
+    if [ "$reloaded_for_gate" -eq 0 ]; then
+      caddy_reload || fail "$prof requests gateway.bind=loopback and $live matches the repo, but 'caddy reload' failed — cannot prove Caddy is serving the reviewed config, so refusing to take the surface dark."
+      reloaded_for_gate=1
+      log "  Bind gate: reloaded Caddy so the reviewed file is proven loaded, not merely on disk."
+    fi
+    log "  Bind gate: $prof loopback is safe — Caddy is serving the reviewed repo Caddyfile."
+  done
+}
+
+caddy_deliver_and_gate_bind "$DEPLOY_PATH" "${CADDY_LIVE_FILE:-/etc/caddy/Caddyfile}"
 
 # Sync per-profile configs to profile state dirs.
 # Preserves `.mcp.servers` from the live file across deploys so
@@ -2745,40 +3193,16 @@ for j in live.get('jobs', []):
 # human label that may change (e.g. b2b-reply-scanner-15m -> -1h cadence
 # rename).
 live_states = {j['id']: j.get('state', {}) for j in live.get('jobs', [])}
-# Ephemeral one-shot jobs (deleteAfterRun + a one-time `at` schedule) are
-# created at runtime by agents and self-delete after firing — never a
-# committable/protected orphan. Used by the orphan filter below.
-live_ephemeral = {j['id'] for j in live.get('jobs', [])
-                  if j.get('deleteAfterRun') is True and j.get('schedule', {}).get('kind') == 'at'}
-repo_ids = {j['id'] for j in repo.get('jobs', [])}
 preserved = 0
 for j in repo.get('jobs', []):
     if j['id'] in live_states:
         j['state'] = live_states[j['id']]
         preserved += 1
 
-# Orphaned ids = jobs that exist in live but no longer exist in repo.
-# Their runtime state will be permanently dropped on the next write.
-# That's a real data-loss event (lastRunMs/nextRunMs gone forever) and
-# should fail the deploy unless explicitly allowed via env var. The
-# common cases that legitimately produce orphans are: deliberate job
-# removal (set HYDRA_ALLOW_ORPHAN_CRON=1) or a refactor that changed
-# UUIDs (write a migration instead of bypassing the guard).
-orphaned = set(live_states) - repo_ids
-# Ephemeral one-shot crons (deleteAfterRun + a one-time `at` schedule) are
-# created at runtime by agents and never committed to the repo: the QA
-# auto-review bot's qa-autoreview-pr-<N> review jobs (PR #391), the CMO
-# agent's b2b-*-send-report reminders, etc. They are disposable and
-# self-delete after firing — not protected orphan state. Drop them from the
-# live file on sync without blocking the deploy (otherwise any deploy that
-# races a pending one-shot would halt). Matched by PROPERTY, not name, so
-# every agent's one-shots are covered — not just the QA bot's.
-orphaned = {i for i in orphaned if i not in live_ephemeral}
-if orphaned:
-    if os.environ.get('HYDRA_ALLOW_ORPHAN_CRON') == '1':
-        print(f'  HYDRA_ALLOW_ORPHAN_CRON=1: dropping live state for {len(orphaned)} job ids no longer in repo: {sorted(orphaned)}', file=sys.stderr)
-    else:
-        sys.exit(f"refusing to drop live state for {len(orphaned)} orphaned job id(s): {sorted(orphaned)}. Set HYDRA_ALLOW_ORPHAN_CRON=1 if this is intentional (e.g. you removed jobs from cron-jobs.json on purpose).")
+# NOTE: no orphan guard here (MUS-3346). This block reads cron/jobs.json, which
+# the 7.x runtime never writes, so a guard here was redundant with the
+# store-only cron guard below (detect-store-only-crons.py against a live
+# loadCronStore dump) and blind to live-created crons.
 
 # Heal-from-empty: live file existed but had 0 jobs. This is the exact
 # state the 2026-04-07 outage left the system in. Repo file will
@@ -2866,9 +3290,9 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
 
   # --- Store-only cron guard: fail-loud BEFORE the destructive import ---
   # saveCronStore below is delete-by-store_key + re-insert, so any cron in the
-  # live SQLite store but absent from cron-jobs.json is WIPED. The jobs.json
-  # orphan guard above cannot catch these: it reads the stale cron/jobs.json,
-  # which the 7.x runtime never writes to, so a cron created directly on the
+  # live SQLite store but absent from cron-jobs.json is WIPED. A
+  # jobs.json-based orphan guard (removed, MUS-3346) could not catch these: it
+  # read the stale cron/jobs.json, which the 7.x runtime never writes to, so a cron created directly on the
   # gateway (`openclaw cron add`) is invisible to it and silently lost
   # (incident 2026-07-16: Aaron's ChartMogul MRR/SaaS crons, PR #702). Read the
   # REAL store via loadCronStore and halt if it holds a durable (recurring,
@@ -2877,16 +3301,8 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
   # operator commits it or sets HYDRA_ALLOW_ORPHAN_CRON=1 to drop it.
   STORE_DUMP=$(mktemp) || fail "store-only cron guard: mktemp failed"
   DUMP_RC=0
-  DUMP_ERR=$(OPENCLAW_STATE_DIR=/root/.openclaw-main CRON_SDK="$CRON_SDK" STORE_DUMP="$STORE_DUMP" \
-    node --input-type=module -e '
-      import { writeFileSync } from "node:fs";
-      try {
-        const m = await import(process.env.CRON_SDK);
-        const cur = await m.loadCronStore(m.resolveCronStorePath());
-        writeFileSync(process.env.STORE_DUMP, JSON.stringify(cur));
-        process.exit(0);
-      } catch (e) { console.error(e); process.exit(1); }
-    ' 2>&1) || DUMP_RC=$?
+  DUMP_ERR=$(OPENCLAW_STATE_DIR=/root/.openclaw-main CRON_SDK="$CRON_SDK" \
+    bash "$HYDRA_ROOT/scripts/lib/dump-cron-store.sh" "$STORE_DUMP" 2>&1) || DUMP_RC=$?
   if (( DUMP_RC != 0 )); then
     rm -f "$STORE_DUMP"
     log "  ✗ store-only cron guard: loadCronStore read failed (rc=$DUMP_RC):"
@@ -3134,6 +3550,7 @@ fi
 # restart, the pre-drain behavior); HYDRA_FORCE_RESTART=1 overrides the
 # restart-skip gate below (they compose).
 log "Step 6/8: Restarting OpenClaw Gateway ($TARGET)..."
+
 # shellcheck source=lib/gateway-restart.sh
 source "$SCRIPT_DIR/lib/gateway-restart.sh"
 export GATEWAY_EXEC_FN=run_on_node8   # every probe honors $HYDRA_LOCAL (ssh mode too)
@@ -3169,6 +3586,8 @@ finish_gateway_restart() {
       ;;
     2)
       log "  HYDRA_HARD_RESTART=1 — skipping drain for $service" ;;
+    4)
+      log "  $service was stopped by this deploy for the plugin install — starting it (no PID to drain, by design)" ;;
     3)
       log "  WARN: no verified pre-request MainPID for $service — a drain result would be unverifiable; hard restart"
       notify_slack ":warning: HYDRA deploy: could not capture a pre-request MainPID for $service — hard restart without drain (in-flight turns may be cut)."
@@ -3182,6 +3601,70 @@ finish_gateway_restart() {
   verify_gateway_env_pin "$service"
 }
 
+# check_gateway_not_crashlooping <service> <baseline_nrestarts> — the
+# 2026-09-22 incident gate (deploy run 35773324797): edge crash-looped 43
+# times over ~17 min after a restart while Step 6/6b logged only a
+# non-fatal warning, and the smoke test didn't reach edge for ~12 more
+# minutes (main's #984 post-restart freeze stalled every earlier probe).
+# Deploy reported success the whole time.
+#
+# Called right after EVERY wait_for_agents_bound call site (the normal
+# warmup wait below, and the cron-store heal's own restart) so a gateway
+# that is merely SLOW to bind still just warns as before — this only fires
+# on a gateway that is actually crash-looping (systemd restarting it more
+# than it had immediately AFTER this deploy's own restart completed — see
+# each call site's comment for why the baseline is captured post-restart,
+# never pre-restart — or stuck failed / repeatedly auto-restarting). See
+# gateway_crash_looping in lib/gateway-restart.sh for why a frozen main
+# (#984) can never trip this: a freeze holds one PID, active, with an
+# unmoving NRestarts.
+#
+# baseline carries exactly THREE distinct meanings — never overload the
+# empty string to mean more than one of them (2026-09-23 QA finding on
+# #1010): an unreadable baseline after a restart that DID happen used to
+# collapse into the same "" a skipped restart passes, so a crash loop right
+# after a transient `systemctl show`/SSH hiccup was a silent no-op — exactly
+# the class this whole gate exists to close.
+#   ""                    this deploy did NOT restart the unit (the
+#                         gateway_restart_needed skip branch, or needs_target
+#                         false for this profile) — no-op, nothing to compare.
+#   a number              the normal path: gateway_crash_looping's numeric
+#                         NRestarts-since-baseline compare (falls back to the
+#                         is-failed/auto-restart sampling on its own if it
+#                         can't decide from the counter alone).
+#   UNREADABLE_BASELINE   this deploy DID restart the unit, but every
+#                         gateway_nrestarts_retry attempt right after still
+#                         failed to read a number. Falls back to
+#                         gateway_crash_looping_state_only (is-failed /
+#                         auto-restart sampling only — see that function's
+#                         header for why a raw "read NRestarts once more,
+#                         fail if > 0" heuristic is deliberately NOT used
+#                         here: it would false-fail every healthy
+#                         safe-restart deploy).
+check_gateway_not_crashlooping() {
+  local service="$1" baseline="$2"
+  case "$baseline" in
+    "") return 0 ;;
+    UNREADABLE_BASELINE)
+      log "  WARN: $service's NRestarts baseline was unreadable after this deploy's restart (systemctl/SSH hiccup?) — falling back to state-only crash-loop detection"
+      gateway_crash_looping_state_only "$service" || return 0
+      ;;
+    *)
+      gateway_crash_looping "$service" "$baseline" || return 0
+      ;;
+  esac
+  local current
+  current="$(gateway_nrestarts "$service")" || current="?"
+  # The journal tail goes to the deploy LOG (multi-line, unescaped, complete),
+  # never into the fail() message: fail() forwards its text to notify_slack,
+  # which interpolates it raw into a JSON body, so newlines or quotes from a
+  # journal would make that payload invalid. The message stays one bounded,
+  # quote-free line; the evidence is right above it in the log.
+  log "  $service journal tail (last 40 lines) follows:"
+  gateway_journal_tail "$service" 40 | sed 's/^/    | /' | while IFS= read -r line; do log "$line"; done
+  fail "$service is CRASH-LOOPING after this deploy's restart (NRestarts ${baseline} -> ${current}, or the unit is failed/auto-restarting); refusing to report success. Journal tail is in the deploy log above."
+}
+
 # gateway_restart_needed(): skip a gateway restart when a deploy provably changed
 # nothing that gateway loads (every restart costs ~12-30s of agent rebind, and on
 # edge it also pauses the memory_search index — so a needless restart is churn).
@@ -3192,14 +3675,31 @@ finish_gateway_restart() {
 source "$SCRIPT_DIR/lib/edge-restart-gate.sh"
 
 if gateway_restart_needed; then
+  # Open the deploy/gateway warm-up stand-down window (MUS-5175) for the paging
+  # timers that hit the gateway WS. A SEPARATE flag from the maintenance one
+  # (the untracked gateway guard ignores that one's TTL). The TTL is the window:
+  # no disarm is needed or wanted. Observed 2026-10-08: restart 12:46, peer-labels
+  # still unhealthy at 12:51:47, recovered 12:55 (~9 min), so the warm-up term is
+  # 900s. That warm-up is measured from the RESTART, but this arm runs before
+  # Phase A and the drain can burn GATEWAY_DRAIN_DEADLINE_SECS (390) first. The
+  # gateways drain concurrently but finish_gateway_restart awaits main THEN edge,
+  # each with its own full deadline, so edge's hard restart can land after TWO
+  # drains. The TTL must cover 2 drains + warm-up (MUS-8501). Tradeoff accepted:
+  # on a fast drain the timers stay stood down up to ~780s longer than needed.
+  # Armed only inside the restart branch: a deploy that restarts no gateway must
+  # not stand the timers down. Non-fatal: no window just means the old behaviour.
+  HYDRA_DEPLOY_WINDOW_SECS="${HYDRA_DEPLOY_WINDOW_SECS:-$(( 2 * ${GATEWAY_DRAIN_DEADLINE_SECS:-390} + 900 ))}"
+  run_on_node8 "source '$DEPLOY_PATH/scripts/lib/maintenance-flag.sh' && deploy_window_arm '$HYDRA_DEPLOY_WINDOW_SECS' 'deploy gateway warm-up'" \
+    || log "  WARN: could not arm the deploy warm-up window — gateway timers may page during warm-up"
   # Phase A: request the safe restarts up front (each request returns in ~3s;
   # the gateways then drain CONCURRENTLY, so worst-case wall time is one drain
   # budget, not one per gateway). Phase B verifies serially.
   main_old_pid="" main_req="" edge_old_pid="" edge_req=""
+  main_baseline_nrestarts="" edge_baseline_nrestarts=""
   if needs_target "main"; then
     main_old_pid=$(gateway_main_pid "openclaw-gateway-main") || main_old_pid=""
     if [ -z "$main_old_pid" ] || [ "$main_old_pid" = "0" ]; then
-      main_req=3   # no verified baseline PID -> drain unverifiable, fail closed
+      main_req=0; missing_pid_restart_req "main" || main_req=$?   # 4 = stopped by this deploy, 3 = unverifiable, fail closed
     else
       main_req=0; request_safe_restart "openclaw-gateway-main" "main" || main_req=$?
     fi
@@ -3207,13 +3707,37 @@ if gateway_restart_needed; then
   if needs_target "edge"; then
     edge_old_pid=$(gateway_main_pid "openclaw-gateway-edge") || edge_old_pid=""
     if [ -z "$edge_old_pid" ] || [ "$edge_old_pid" = "0" ]; then
-      edge_req=3   # no verified baseline PID -> drain unverifiable, fail closed
+      edge_req=0; missing_pid_restart_req "edge" || edge_req=$?   # 4 = stopped by this deploy, 3 = unverifiable, fail closed
     else
       edge_req=0; request_safe_restart "openclaw-gateway-edge" "edge" || edge_req=$?
     fi
   fi
-  if needs_target "main"; then finish_gateway_restart "openclaw-gateway-main" "$main_old_pid" "$main_req"; fi
-  if needs_target "edge"; then finish_gateway_restart "openclaw-gateway-edge" "$edge_old_pid" "$edge_req"; fi
+  # *_baseline_nrestarts is captured AFTER finish_gateway_restart returns —
+  # i.e. once THIS deploy's own restart of the unit (whichever of the safe or
+  # hard path actually fired) has completed — never before it. Live-measured
+  # on node-8 (systemd 255): an explicit `systemctl restart` RESETS NRestarts
+  # to 0, so a baseline read before our restart is worthless against a unit
+  # that was ALREADY crash-looping when the deploy touched it (exactly the
+  # 2026-09-22 incident — see gateway_crash_looping's header in
+  # lib/gateway-restart.sh for the full measurement and the safe-path case).
+  # check_gateway_not_crashlooping (called after the warmup wait below) then
+  # only ever sees restarts that happened AFTER this deploy finished
+  # restarting the unit.
+  #
+  # gateway_nrestarts_retry retries a bounded few times before giving up —
+  # a single transient read failure right here must not disable the gate for
+  # the rest of this deploy. On total failure the baseline is set to the
+  # UNREADABLE_BASELINE sentinel, never "" — see check_gateway_not_crashlooping's
+  # header for why conflating that with "this deploy never restarted the
+  # unit" was the 2026-09-23 QA finding on #1010.
+  if needs_target "main"; then
+    finish_gateway_restart "openclaw-gateway-main" "$main_old_pid" "$main_req"
+    main_baseline_nrestarts=$(gateway_nrestarts_retry "openclaw-gateway-main") || main_baseline_nrestarts="UNREADABLE_BASELINE"
+  fi
+  if needs_target "edge"; then
+    finish_gateway_restart "openclaw-gateway-edge" "$edge_old_pid" "$edge_req"
+    edge_baseline_nrestarts=$(gateway_nrestarts_retry "openclaw-gateway-edge") || edge_baseline_nrestarts="UNREADABLE_BASELINE"
+  fi
 else
   for svc_profile in main edge; do
     if needs_target "$svc_profile"; then
@@ -3221,6 +3745,12 @@ else
     fi
   done
 fi
+
+# Step 6 is done: the gateways run on the new runtime. Clear the record
+# install_openclaw wrote (rollback.sh Step 1c consumes it). A failure INSIDE
+# Step 6 keeps it on purpose: Step 1c then restores the binary only if every
+# state DB's user_version is unchanged, which is the real safety measure.
+rm -f "$DEPLOY_PATH/.pre-deploy-openclaw-version"
 
 # -------------------------------------------------------------------
 # WARMUP: wait for agents to bind before smoke test
@@ -3236,9 +3766,11 @@ fi
 log "  Waiting for agents to bind before smoke test..."
 if needs_target "main"; then
   wait_for_agents_bound "main" 30 || true
+  check_gateway_not_crashlooping "openclaw-gateway-main" "${main_baseline_nrestarts:-}"
 fi
 if needs_target "edge"; then
   wait_for_agents_bound "edge" 30 || true
+  check_gateway_not_crashlooping "openclaw-gateway-edge" "${edge_baseline_nrestarts:-}"
 fi
 
 # -------------------------------------------------------------------
@@ -3279,9 +3811,20 @@ if needs_target "main" && [ -f "$HYDRA_ROOT/cron-jobs.json" ]; then
   }
   cron_store_heal_start() {
     local profile="$1" svc="openclaw-gateway-${1}"
+    # Baseline captured immediately AFTER this restart completes, mirroring
+    # Step 6's Phase A/B above (see the comment there for why: a `systemctl
+    # restart` — this is always the hard path, since the unit was just
+    # explicitly stopped — resets NRestarts to 0, so reading it before the
+    # restart would be worthless against a unit that was already
+    # crash-looping when this heal restarted it). Retries a bounded few times
+    # on a read failure and falls back to the UNREADABLE_BASELINE sentinel
+    # rather than "" — see check_gateway_not_crashlooping's header.
+    local baseline
     hard_restart_gateway "$svc" || return 1
+    baseline=$(gateway_nrestarts_retry "$svc") || baseline="UNREADABLE_BASELINE"
     verify_gateway_env_pin "$svc"
     wait_for_agents_bound "$profile" 30 || true
+    check_gateway_not_crashlooping "$svc" "$baseline"
     CRON_HEAL_STOPPED=""
     return 0
   }
@@ -3293,8 +3836,25 @@ if needs_target "main" && [ -f "$HYDRA_ROOT/cron-jobs.json" ]; then
   cron_store_heal_trap() {
     if [ -n "${CRON_HEAL_STOPPED:-}" ]; then
       log "  ✗ deploy exited with $CRON_HEAL_STOPPED stopped — starting it back up"
-      run_on_node8 "${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || true
-      notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; attempted an emergency start. VERIFY the gateway is up."
+      if main_prune_lock_lost; then
+        # Our node-8 lock died with the holder ssh, so a prune may already own the freed lock with main stopped
+        # for offline SQLite cleanup (the race rollback.sh ensure_gateways_up refuses). Start ONLY under that lock,
+        # atomically: refused (99) means the prune owns it and starts main itself (main-prune-restart.sh).
+        heal_rc=0
+        run_on_node8 "flock -n -E 99 '$MAIN_PRUNE_LOCK_FILE' ${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || heal_rc=$?
+        case "$heal_rc" in
+          0)  notify_slack ":warning: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped and the node-8 prune lock lost; started it again UNDER the prune lock. VERIFY the gateway is up." ;;
+          99) log "    a prune holds $MAIN_PRUNE_LOCK_FILE — NOT starting $CRON_HEAL_STOPPED; the prune starts main itself"
+              notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped, the node-8 prune lock lost and a prune now holds it. It was deliberately NOT started (the prune restarts main). VERIFY the gateway is up." ;;
+          *)  log "    emergency start under the prune lock FAILED (rc=$heal_rc)"
+              notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; the emergency start under the prune lock FAILED (rc=$heal_rc). VERIFY the gateway is up." ;;
+        esac
+      else
+        # We still hold the lock (fd 213 locally, the holder ssh in ssh mode): a second flock would be refused
+        # by OURSELVES and main would never come back. Start directly.
+        run_on_node8 "${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || true
+        notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; attempted an emergency start. VERIFY the gateway is up."
+      fi
     fi
   }
   # COMPOSE with the existing EXIT trap (deploy lock release, set near the top
@@ -3319,7 +3879,7 @@ if needs_target "main" && [ -f "$HYDRA_ROOT/cron-jobs.json" ]; then
     2)
       fail "cron convergence: could not count jobs in $HYDRA_ROOT/cron-jobs.json" ;;
     3)
-      fail "cron convergence: 'openclaw --profile main cron list --all --json' failed or returned unparseable JSON after ${CRON_STORE_READ_TRIES} attempt(s) — refusing to assume the cron store is correct (the CLI's own error is logged directly above)" ;;
+      fail "cron convergence: 'openclaw --profile main cron list --all --json' failed or returned unparseable JSON within ${CRON_STORE_READ_DEADLINE_SECS:-420}s (attempt timeout ${CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS:-60}s) — refusing to assume the cron store is correct (the CLI's own error is logged directly above)" ;;
     4)
       fail "cron convergence: the gateway's cron list came back PAGINATED (hasMore=true). The durable count cannot be derived from a truncated page and this openclaw build exposes no paging flag, so the store is unverifiable — refusing to assume it is correct." ;;
     5)

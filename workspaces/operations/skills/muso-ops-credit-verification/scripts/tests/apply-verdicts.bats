@@ -6,6 +6,9 @@ APPLY="$SCRIPTS_DIR/lobster-mvp/apply-verdicts.sh"
 
 setup() {
   setup_tmp_env
+  # Real apply is gated on the tracked registry (no env override); run a copy
+  # whose sibling registry approves it. See make_approval_tree in helpers.bash.
+  APPLY="$(make_approval_tree true)/lobster-mvp/apply-verdicts.sh"
   export FIXTURE="$TEST_TMPDIR/verdicts.json"
   cat > "$FIXTURE" <<'JSON'
 {
@@ -129,5 +132,33 @@ run_apply() {
     and .apply.approve.transport_failed == 0
     and .apply.uvn.transport_failed == 0
   ' >/dev/null
+  [ ! -e "$ADMIN_CALLS" ]
+}
+
+@test "the write boundary refuses a REAL apply the registry does not approve (repo default)" {
+  # 2026-10-11: apply-verdicts.sh re-checks the tracked registry, so a Lobster
+  # run that bypasses dispatch-cv-batch.sh still cannot write. The repo's own
+  # copy (approved=false) must behave like a dry run and never call the API.
+  run --separate-stderr env \
+    ADMIN_API_SH="$ADMIN_STUB" \
+    OPS_LOBSTER_APPLY_LOG="$TEST_TMPDIR/apply.jsonl" \
+    CV_APPROVAL_REGISTRY="$TEST_TMPDIR/ignored.json" \
+    bash -c "'$SCRIPTS_DIR/lobster-mvp/apply-verdicts.sh' false < '$FIXTURE'"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.apply.dry_run == true and .apply.real_apply_blocked == true and .apply.attempted == 0' >/dev/null
+  [[ "$stderr" == *"real apply is NOT approved"* ]]
+  [ ! -e "$ADMIN_CALLS" ]
+  jq -e 'select(.event == "real_apply_not_approved")' "$TEST_TMPDIR/apply.jsonl" >/dev/null
+}
+
+@test "the write boundary refuses when the registry approves without who/where" {
+  local tree reg
+  tree="$(make_approval_tree false)"
+  reg="$tree/../../../../../policies/credit-approval-automation.json"
+  printf '{"automations":{"credit-verification-batch":{"approved":true,"approved_by":"","approval_ref":"x"}}}\n' > "$reg"
+  run --separate-stderr env ADMIN_API_SH="$ADMIN_STUB" OPS_LOBSTER_APPLY_LOG="$TEST_TMPDIR/apply.jsonl" \
+    bash -c "'$tree/lobster-mvp/apply-verdicts.sh' false < '$FIXTURE'"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.apply.real_apply_blocked == true' >/dev/null
   [ ! -e "$ADMIN_CALLS" ]
 }

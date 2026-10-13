@@ -10,6 +10,10 @@
 #     sessions.resolve({ label: "@Role" }) keeps working for
 #     agent-to-agent messaging. Also runs on boot.
 #
+#   hydra-main-prune-restart.timer / .service
+#     Nightly 02:30 UTC: scripts/main-prune-restart.sh prunes main's sessions idle >24h offline (backed up,
+#     fail-open) and restarts main (MUS-1295). Retires the hand-placed /usr/local/sbin bridge.
+#
 #   hydra-session-thread-retention@{main,edge}.timer / .service
 #     Every 6h, removes terminal Slack channel thread sessions older
 #     than 14d through each gateway's native sessions.delete lifecycle API.
@@ -56,6 +60,12 @@
 #     alert #clio_devops on any errored cron run (the missing
 #     failure-notification layer behind the 2026-06 silent
 #     b2b-reply-scanner breakage).
+#
+#   /etc/cron.d/agent-soul-delivery-guard
+#     Schedules scripts/check-agent-soul-delivery.sh --alert every 15
+#     minutes: pages #clio_devops when a live agent's newest codex session
+#     had no AGENT_SOUL / <available_skills> / cron-mode text in the
+#     developer message the model saw (MUS-6600 recurrence guard, MUS-6635).
 #
 #   /etc/cron.d/fallback-swallow-watchdog
 #     Schedules scripts/fallback-swallow-watchdog.sh every 5 minutes
@@ -151,8 +161,17 @@
 #     sales lead was closed-as-answered and forwarded to Nick by
 #     email; Aaron, who owns ads, never saw it).
 #
+#   /etc/systemd/system/intercom-rights-holder-watchdog.{service,timer}
+#     Runs scripts/intercom-rights-holder-watchdog.py every 10 min (oneshot).
+#     Pages #cs_priority (operations bot) when an inbound Intercom
+#     conversation is from a rights-holder or marked urgent and has gone
+#     unhandled (Sony/natori correction misfiled onto another customer's
+#     ticket, MUS-6566). A systemd unit, not cron.d: the Intercom token comes
+#     from EnvironmentFile (a 644 cron.d line would expose it) and the
+#     service is in AUX_ONFAILURE_UNITS so a failing run pages.
+#
 #   /etc/tmpfiles.d/tmp.conf
-#     /tmp age policy keyed on mtime only (`D /tmp 1777 root root mM:14d`),
+#     /tmp age policy keyed on mtime only (`D /tmp 1777 root root mM:24h`),
 #     installed verbatim from scripts/aux-units/tmp.conf. Codifies the
 #     2026-08-26 node-8 hand-edit that ended the disk-pressure alerts: the
 #     stock newest-of(atime,mtime,ctime) age test was permanently defeated by
@@ -203,6 +222,16 @@
 #     `--promote` publishes it, so review blocks publication rather
 #     than trailing it.
 #
+#   sync-platform-llms.timer / .service
+#     Daily refresh of Caroline's platform.muso.ai API + pricing feed
+#     into the same RAG-indexed reference/ directory, fetched from the
+#     PUBLIC https://platform.muso.ai/llms-full.txt. No staging gate,
+#     unlike the feed above: that one publishes model output over
+#     author-controlled PR titles, this one copies first-party pricing
+#     copy Muso already serves publicly. Fail-closed on a bad fetch, and
+#     it re-runs the CI blocklist because the file it writes is
+#     rsync-excluded and so invisible to pr-validate.yml.
+#
 #   hydra-release.timer / .service   [INSTALLED, DISABLED]
 #     The SUPERSEDED daily cut, kept installed so reverting to a daily
 #     cadence is one `systemctl enable --now` away. Do not run it
@@ -224,6 +253,22 @@
 #     other failures, e.g. dirty tree, auth, push failed). Caught in
 #     Clio's review of PR #340; pre-fix `0 1` would have masked real
 #     broken-release failures as success.
+#
+#   hydra-tmp-reaper.timer / .service
+#     Hourly. Runs scripts/tmp-reaper.sh: deletes the known /tmp scratch
+#     patterns (review clones, qa-pr-*, pr-review-*.json, tmp.XXXXXX) after a
+#     3h/24h idle TTL, only when lsof shows no open handles. Everything else
+#     is left to the tmpfiles 24h catch-all. jest_0 is never touched.
+#   hydra-codex-home-prune.timer / .service
+#     Daily 05:45 UTC. scripts/codex-home-prune.sh --apply: ages out codex
+#     rollout jsonl and logs_*.sqlite rows past CODEX_SESSION_TTL_DAYS (14).
+#
+#   hydra-jev-shadow-prune.timer / .service
+#     Daily. Runs scripts/jev-shadow-prune.sh, which drops shadow rows
+#     older than JEV_SHADOW_RETENTION_DAYS (default 30) from every
+#     $JEV_SHADOW_DIR/*.jsonl -- the row's `state` field (added so a
+#     misclassification can be replayed against Jev directly) is customer
+#     text, so it should not accumulate unbounded on disk.
 #
 # Also cleans up the retired `hydra-mcp-reap.{timer,service}` if
 # present on the host. That unit reaped orphan `mcp-remote`
@@ -296,6 +341,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/lib/codex-oauth-refresh.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/cron-health-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/cron-health-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/check-agent-soul-delivery.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/check-agent-soul-delivery.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/merge-landing-watchdog.sh" ]] \
@@ -310,6 +357,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/lib/ensure-mercury-token.sh" ]] \
@@ -334,6 +383,10 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/caroline-behavior-digest.py missing"
 [[ -f "$HYDRA_ROOT/scripts/support-changelog-sync.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/support-changelog-sync.sh missing"
+[[ -f "$HYDRA_ROOT/scripts/sync-platform-llms.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/sync-platform-llms.sh missing"
+[[ -f "$HYDRA_ROOT/scripts/sync-app-pricing.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/sync-app-pricing.sh missing"
 [[ -f "$HYDRA_ROOT/scripts/cs-needs-human-digest.py" ]] \
   || fail "$HYDRA_ROOT/scripts/cs-needs-human-digest.py missing"
 [[ -f "$HYDRA_ROOT/scripts/cs-sla-report.py" ]] \
@@ -492,6 +545,42 @@ systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
 
+# ─── Intercom rights-holder / urgent inbound watchdog (MUS-6566) ───────────
+# Live tick = no flag (--dry-run is the only mode switch). Token:
+# MUSOAI_INTERCOM_TOKEN from the env files; the Slack token is resolved inside
+# the script. No secret is written into the unit. See
+# scripts/intercom-rights-holder-watchdog.py.
+cat > /etc/systemd/system/intercom-rights-holder-watchdog.service << RIGHTSHOLDERWDSVC
+[Unit]
+Description=Intercom rights-holder / urgent inbound watchdog (alerts #cs_priority)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py
+RIGHTSHOLDERWDSVC
+
+cat > /etc/systemd/system/intercom-rights-holder-watchdog.timer << RIGHTSHOLDERWDTMR
+[Unit]
+Description=Run the Intercom rights-holder / urgent watchdog every 10 min
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=10min
+Unit=intercom-rights-holder-watchdog.service
+
+[Install]
+WantedBy=timers.target
+RIGHTSHOLDERWDTMR
+
+systemctl daemon-reload
+wd=intercom-rights-holder-watchdog.timer
+systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
+systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
+log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
 # ─── Retire the keyword Intercom data-complaint watchdog (replaced 2026-06-25) ──
 # The every-10m KEYWORD watchdog (coarse data-noun + complaint-signal buckets)
 # produced false "systemic" pages — three unrelated credit gripes grouped as one
@@ -506,6 +595,34 @@ for u in intercom-data-complaint-watchdog.timer intercom-data-complaint-watchdog
 done
 systemctl daemon-reload
 log "  intercom-data-complaint-watchdog: retired (replaced by systemic-data-issue-report-daily cron)"
+
+# ─── Enable sysstat for system diagnostics ────────────────────────────────
+# On 2026-09-28 the main gateway froze for 18 minutes with zero per-second
+# CPU or swap records because /etc/default/sysstat had ENABLED="false".
+# This section idempotently enables sysstat and sets retention to 28 days
+# (covering a full week-on-week comparison for incident diagnosis).
+# On Ubuntu/Debian: ENABLED lives in /etc/default/sysstat, HISTORY in /etc/sysstat/sysstat
+ETC_DEFAULT_SYSSTAT="/etc/default/sysstat"
+ETC_SYSSTAT_SYSSTAT="/etc/sysstat/sysstat"
+
+if [[ -f "$ETC_DEFAULT_SYSSTAT" ]] && grep -q '^ENABLED="false"' "$ETC_DEFAULT_SYSSTAT"; then
+  sed -i.bak 's/^ENABLED="false"/ENABLED="true"/' "$ETC_DEFAULT_SYSSTAT"
+  rm -f "$ETC_DEFAULT_SYSSTAT.bak"
+fi
+
+if [[ -f "$ETC_SYSSTAT_SYSSTAT" ]]; then
+  if ! grep -q '^HISTORY=28$' "$ETC_SYSSTAT_SYSSTAT"; then
+    if grep -q '^HISTORY=' "$ETC_SYSSTAT_SYSSTAT"; then
+      sed -i.bak 's/^HISTORY=.*/HISTORY=28/' "$ETC_SYSSTAT_SYSSTAT"
+      rm -f "$ETC_SYSSTAT_SYSSTAT.bak"
+    else
+      echo "HISTORY=28" >> "$ETC_SYSSTAT_SYSSTAT"
+    fi
+    log "  sysstat: set retention to 28 days"
+  fi
+fi
+
+systemctl enable --now sysstat >/dev/null 2>&1 && log "  sysstat: enabled" || log "WARN: could not enable sysstat"
 
 # ─── Close customer-complete conversations (steady-state sync) ──
 # Silently closes Intercom conversations whose linked ClickUp tickets are all
@@ -1140,6 +1257,148 @@ systemctl enable "$scs" >/dev/null 2>&1 || log "WARN: could not enable $scs"
 systemctl start "$scs" >/dev/null 2>&1 || log "WARN: could not start $scs"
 log "  $scs: $(systemctl is-active "$scs" 2>/dev/null || echo unknown)"
 
+# ─── Caroline platform.muso.ai API feed (daily 05:45 UTC) ─────────────────
+# Renders workspaces/support/reference/platform-api.md from the PUBLIC
+# https://platform.muso.ai/llms-full.txt -- the page the platform team already
+# publishes for machine readers, whose figures come from the pricing module
+# rather than being typed by hand.
+#
+# Unlike the shipped-work feed above there is NO staging and NO promote gate,
+# and that difference is deliberate. That feed passes author-controlled PR
+# titles through a language model, so its output has never been read by anyone.
+# This one copies first-party pricing copy that Muso already serves to the open
+# internet -- a human reviewed it when they shipped the page, and gating it again
+# would only guarantee Caroline's copy is older than the customer's.
+#
+# The run is still fail-closed: a failed, empty, truncated or unrecognisable
+# fetch leaves the previous file byte-for-byte intact. It also re-runs the CI
+# blocklist (shared from lib/cs-reference-blocklist.sh) because this file is
+# rsync-excluded and never committed, so pr-validate.yml structurally cannot see
+# it. A content change posts a Slack notice -- unreviewed publication is the
+# accepted trade-off here, so it must at least be visible.
+#   /opt/hydra/scripts/sync-platform-llms.sh --dry-run   # render, write nothing
+#   /opt/hydra/scripts/sync-platform-llms.sh --check     # is the live file current?
+# The file it writes is rsync-excluded in deploy.sh; without that exclude every
+# deploy would delete it AND red the Step 4a pre-flight.
+cat > /etc/systemd/system/sync-platform-llms.service << PLATLLMSSVC
+[Unit]
+Description=Refresh Caroline's platform.muso.ai API + pricing feed
+After=network-online.target
+# No OnFailure= here on purpose: this unit is a row in AUX_ONFAILURE_UNITS
+# below, and wire_unit_failure_paging inserts the directive. The script pages
+# #cs_chats itself on every refusal it can SEE; the table covers the failures it
+# cannot -- ExecStart missing after a bad deploy, killed by TimeoutStartSec --
+# which would otherwise freeze her Platform pricing silently.
+
+[Service]
+Type=oneshot
+# One curl plus local validation; seconds in practice. Set explicitly anyway --
+# node-8 SIGTERMs any Type=oneshot that outruns the 90s default, and a silent
+# kill here would freeze Caroline's pricing without failing anything.
+TimeoutStartSec=180
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$HYDRA_ROOT/scripts/sync-platform-llms.sh
+PLATLLMSSVC
+
+cat > /etc/systemd/system/sync-platform-llms.timer << PLATLLMSTMR
+[Unit]
+Description=Daily — refresh Caroline's platform.muso.ai feed at 05:45 UTC
+
+[Timer]
+# 15 min after the shipped-work feed's 05:30 UTC tick, so the two daily writers
+# into reference/ do not land on top of each other, and early enough that both
+# are settled before the working day starts.
+OnCalendar=*-*-* 05:45:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+Unit=sync-platform-llms.service
+
+[Install]
+WantedBy=timers.target
+PLATLLMSTMR
+
+systemctl daemon-reload
+spl=sync-platform-llms.timer
+systemctl enable "$spl" >/dev/null 2>&1 || log "WARN: could not enable $spl"
+systemctl start "$spl" >/dev/null 2>&1 || log "WARN: could not start $spl"
+log "  $spl: $(systemctl is-active "$spl" 2>/dev/null || echo unknown)"
+
+# Seed the feed immediately on first install. Without this the file does not
+# exist until the first timer tick, and Caroline's SOUL catalog would advertise
+# a reference file that retrieval cannot find. Best-effort: a fetch failure here
+# must not fail the whole aux-unit install.
+if [[ ! -f /opt/hydra/workspaces/support/reference/platform-api.md ]]; then
+  "$HYDRA_ROOT/scripts/sync-platform-llms.sh" >/dev/null 2>&1 \
+    && log "  platform-api.md: seeded" \
+    || log "  WARN: platform-api.md seed failed; timer will retry at 05:45 UTC"
+fi
+
+# ─── Caroline Muso-app plan pricing feed (daily 05:50 UTC) ────────────────
+# Renders workspaces/support/reference/app-pricing.md from the PUBLIC anonymous
+# https://api.muso.ai/api/w/v3/subscription/public-plans, which core-backend serves
+# straight from WEB_SUBSCRIPTION_PLANS_INFO -- the one module that owns these numbers.
+#
+# It replaces a hand-written table whose failure was not staleness but CADENCE
+# CONFLATION: it showed the ANNUAL roster bracket divided by 12 under a heading that
+# read monthly, so a customer on monthly billing was quoted ~25% under what they
+# would pay. The renderer emits monthly and annual as separate labelled tables and
+# has no code path that can blend them.
+#
+# Fail-closed and paging, like the platform feed: a bad fetch, malformed JSON, a
+# non-ok envelope, a coupon-discounted payload, a missing cadence or a missing seats
+# bracket all leave the previous file byte-for-byte intact and page #cs_chats.
+#   /opt/hydra/scripts/sync-app-pricing.sh --dry-run   # render, write nothing
+#   /opt/hydra/scripts/sync-app-pricing.sh --check     # is the live file current?
+# The file it writes is rsync-excluded in deploy.sh. OnFailure comes from the
+# AUX_ONFAILURE_UNITS table, not a hardcoded directive.
+cat > /etc/systemd/system/sync-app-pricing.service << APPPRICESVC
+[Unit]
+Description=Refresh Caroline's Muso-app plan pricing feed
+After=network-online.target
+
+[Service]
+Type=oneshot
+# One curl plus jq; seconds in practice. Set explicitly anyway -- node-8 SIGTERMs any
+# Type=oneshot that outruns the 90s default, and a silent kill here freezes her plan
+# prices without failing anything.
+TimeoutStartSec=180
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$HYDRA_ROOT/scripts/sync-app-pricing.sh
+APPPRICESVC
+
+cat > /etc/systemd/system/sync-app-pricing.timer << APPPRICETMR
+[Unit]
+Description=Daily — refresh Caroline's Muso-app plan pricing at 05:50 UTC
+
+[Timer]
+# Just after the platform feed, still well before the working day in Europe/Rome.
+OnCalendar=*-*-* 05:50:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+Unit=sync-app-pricing.service
+
+[Install]
+WantedBy=timers.target
+APPPRICETMR
+
+systemctl daemon-reload
+sap=sync-app-pricing.timer
+systemctl enable "$sap" >/dev/null 2>&1 || log "WARN: could not enable $sap"
+systemctl start "$sap" >/dev/null 2>&1 || log "WARN: could not start $sap"
+log "  $sap: $(systemctl is-active "$sap" 2>/dev/null || echo unknown)"
+
+if [[ ! -f /opt/hydra/workspaces/support/reference/app-pricing.md ]]; then
+  "$HYDRA_ROOT/scripts/sync-app-pricing.sh" >/dev/null 2>&1 \
+    && log "  app-pricing.md: seeded" \
+    || log "  WARN: app-pricing.md seed failed; timer will retry at 05:50 UTC"
+fi
+
 # ─── Daily ClickUp SLA digest (08:00 America/New_York) ────────
 # Posts overdue / due-today / due-tomorrow open support tickets to
 # #cs_chats. Deterministic bash (no LLM, fires even with the gateway
@@ -1300,13 +1559,45 @@ fi
 # ─── Gateway pre-start self-heal drop-ins ─────────────────────
 # One drop-in per profile, hard-coded with the profile name (the
 # base units are not systemd templates so %i is unavailable). The
-# drop-in adds ExecStartPre=…/openclaw-pre-start-heal.sh <profile>
-# and StartLimitBurst/IntervalSec to break crash-loops cleanly.
+# drop-in adds ExecStartPre=…/openclaw-pre-start-heal.sh <profile>,
+# StartLimitBurst/IntervalSec to break crash-loops cleanly, and a
+# raised node heap cap (NODE_OPTIONS).
 # A re-run of migrate-to-multi-gateway.sh recreates the base unit
 # but does NOT touch the .service.d/ directory, so the drop-in
 # survives. We daemon-reload + reset-failed at the end so a
 # previously-tripped restart limit doesn't stick around after
 # the heal infrastructure is in place.
+HEAP_SNAPSHOT_DIR=/var/lib/hydra/heap-snapshots
+cat > /etc/tmpfiles.d/hydra-heap-snapshots.conf << HEAPTMPFILES
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+# Gateway near-OOM heap snapshots are several GB each; keep 3 days by mtime
+# (not atime/ctime, so reading a snapshot during incident investigation does not reset the timer).
+d ${HEAP_SNAPSHOT_DIR} 0700 root root m:3d
+HEAPTMPFILES
+systemd-tmpfiles --create /etc/tmpfiles.d/hydra-heap-snapshots.conf
+DIAG_DIR=/var/lib/hydra/diag
+cat > /etc/tmpfiles.d/hydra-gateway-diag.conf << DIAGTMPFILES
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+# MUS-2652 temporary: main gateway diagnostics-timeline JSONL; keep 3 days.
+d ${DIAG_DIR} 0700 root root 3d
+DIAGTMPFILES
+systemd-tmpfiles --create /etc/tmpfiles.d/hydra-gateway-diag.conf
+# tmpfiles ages by mtime, and openclaw appends to this ONE fixed file, so every
+# append refreshes mtime and the 3d age never fires while main is active. Rotate
+# it for real. copytruncate: the writer holds the fd open, no reopen signal.
+cat > /etc/logrotate.d/hydra-gateway-diag << 'DIAGLOGROTATE'
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+/var/lib/hydra/diag/main-timeline.jsonl {
+    daily
+    maxsize 200M
+    rotate 3
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+DIAGLOGROTATE
+chmod 644 /etc/logrotate.d/hydra-gateway-diag
 for profile in main edge; do
   drop_dir="/etc/systemd/system/openclaw-gateway-${profile}.service.d"
   mkdir -p "$drop_dir"
@@ -1321,16 +1612,46 @@ for profile in main edge; do
   # must not be delayed by a 30-300s re-embed); leading `-` makes a
   # missing/failed trigger non-fatal to gateway start. main has no memory_search
   # consumer, so it gets no hook.
-  reindex_hook=""
+  # EDGE ONLY, same conditional: MemoryLow=6G protects edge (Caroline) from
+  # reclaim when main / Paperclip put the box under memory pressure (Aaron's go
+  # 9 Oct via Nick, MUS-5057 W3). Soft protection only; MemoryMax stays infinity.
+  # Both edge-only lines share one variable so main's drop-in stays
+  # byte-identical (a second bare ${...} line would add a blank line to main).
+  edge_only=""
   if [ "$profile" = "edge" ]; then
-    reindex_hook="ExecStartPost=-/usr/bin/systemctl start --no-block openclaw-edge-reindex.service"
+    edge_only="ExecStartPost=-/usr/bin/systemctl start --no-block openclaw-edge-reindex.service
+MemoryLow=6G"
   fi
+  # MAIN ONLY, TEMPORARY (MUS-2652 / MUS-1295): openclaw's own startup trace +
+  # diagnostics timeline, to name the 20-28 min post-start freeze (main thread
+  # at 100% CPU). Journal gets per-span "startup trace:" lines; the JSONL at
+  # ${DIAG_DIR} carries the span active at each event-loop stall. =timeline, NOT
+  # =1: =1 is the wildcard and enables all nine flags incl. brave.http and
+  # telegram.http (provider HTTP traffic in the journal). Edge never gets these.
+  # Remove: delete trace_env + the tmpfiles conf above, re-run this installer.
+  trace_env=""
+  if [ "$profile" = "main" ]; then
+    trace_env="Environment=\"OPENCLAW_GATEWAY_STARTUP_TRACE=1\"
+Environment=\"OPENCLAW_GATEWAY_RESTART_TRACE=1\"
+Environment=\"OPENCLAW_DIAGNOSTICS=timeline\"
+Environment=\"OPENCLAW_DIAGNOSTICS_EVENT_LOOP=1\"
+Environment=\"OPENCLAW_DIAGNOSTICS_TIMELINE_PATH=${DIAG_DIR}/main-timeline.jsonl\""
+  fi
+  # Heap cap: node's default (~4 GB) is below main's normal working set. Its
+  # heap swings 1-3.6 GB all day, and every spike past the cap is a V8
+  # "heap out of memory" SIGABRT plus a ~10 min post-restart freeze: 8 crashes
+  # 2026-09-17..23, two on 09-23 three hours apart. Not a steady leak (heap is
+  # back to ~2 GB within 30 min of a restart), so a higher ceiling is the fix.
+  # Snapshots were disabled (cost: ~2.5 min GC pause + 6-6.8 GB per crash).
+  # tmpfiles ages out any lingering snapshots from prior crashes after 3d.
   cat > "$drop_dir/override.conf" << GATEWAYDROP
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
 # Reference template: scripts/aux-units/openclaw-gateway.override.conf
 [Service]
+Environment="NODE_OPTIONS=--max-old-space-size=8192 --diagnostic-dir=${HEAP_SNAPSHOT_DIR}"
+${trace_env}
 ExecStartPre=$HYDRA_ROOT/scripts/openclaw-pre-start-heal.sh ${profile}
-${reindex_hook}
+${edge_only}
 [Unit]
 StartLimitBurst=5
 StartLimitIntervalSec=120
@@ -1529,6 +1850,19 @@ cat > /etc/cron.d/refund-credit-overlap-watchdog << REFUNDOVERLAP
 17 7 * * * root $HYDRA_ROOT/scripts/refund-credit-overlap-watchdog.sh >> /var/log/refund-credit-overlap-watchdog.log 2>&1
 REFUNDOVERLAP
 chmod 644 /etc/cron.d/refund-credit-overlap-watchdog
+
+# Agent SOUL-delivery guard (MUS-6635): MUS-6600 left every gpt-6 agent
+# soul-less for ~3h behind a green "answers PONG" check. Reads the model-visible
+# developer message of each live agent's newest session; pages #clio_devops on a
+# missing AGENT_SOUL / <available_skills> / cron-mode marker. 15 min: sessions
+# are the signal, not a deploy event (a deploy-time assertion would see no
+# post-restart session); identical failures re-page at most every 6h. Same
+# ownership rule: edit here + re-run install-aux-units.sh.
+cat > /etc/cron.d/agent-soul-delivery-guard << SOULGUARD
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+*/15 * * * * root $HYDRA_ROOT/scripts/check-agent-soul-delivery.sh --alert >> /var/log/agent-soul-delivery-guard.log 2>&1
+SOULGUARD
+chmod 644 /etc/cron.d/agent-soul-delivery-guard
 
 # Fallback-swallow watchdog: alerts #clio_devops when an agent turn ends in an
 # empty completion surfaced as an error — the residual of openclaw's
@@ -2080,6 +2414,228 @@ systemctl start "$ctmr" >/dev/null 2>&1 || log "WARN: could not start $ctmr"
 cstate=$(systemctl is-active "$ctmr" 2>/dev/null || echo unknown)
 log "  $ctmr: $cstate (fires Mon 04:30 UTC)"
 
+# ─── Jev shadow-row retention (daily 05:15 UTC) ──────────────────
+# Every Jev shadow row now carries the raw `state` object next to
+# state_sha256 (scripts/lib/jev.sh, plugins/intercom's jev-shadow-log.ts,
+# format-digest.sh) so a misclassification can be replayed against Jev
+# directly -- but that's customer text, so it must not accumulate on disk
+# unbounded. scripts/jev-shadow-prune.sh drops rows older than
+# JEV_SHADOW_RETENTION_DAYS (default 30) from every $JEV_SHADOW_DIR/*.jsonl,
+# atomically and under the same per-file flock the writers use. A single
+# global unit (not per-profile): the shadow dir is shared, not gateway-scoped.
+[[ -x "$HYDRA_ROOT/scripts/jev-shadow-prune.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/jev-shadow-prune.sh missing or not executable"
+
+cat > /etc/systemd/system/hydra-jev-shadow-prune.service << JEVPRUNESVC
+[Unit]
+Description=Prune Jev shadow rows older than the retention window
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/jev-shadow-prune.sh
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# A handful of small *.jsonl rewrites under flock; generous headroom over the
+# default 90s oneshot SIGTERM so a large/contended shadow dir never gets cut
+# off mid-run.
+TimeoutStartSec=10min
+StandardOutput=append:/var/log/hydra-jev-shadow-prune.log
+StandardError=append:/var/log/hydra-jev-shadow-prune.log
+JEVPRUNESVC
+
+cat > /etc/systemd/system/hydra-jev-shadow-prune.timer << JEVPRUNETMR
+[Unit]
+Description=Run the Jev shadow-row prune daily at 05:15 UTC
+
+[Timer]
+OnCalendar=*-*-* 05:15:00 UTC
+Persistent=true
+RandomizedDelaySec=10min
+Unit=hydra-jev-shadow-prune.service
+
+[Install]
+WantedBy=timers.target
+JEVPRUNETMR
+
+systemctl daemon-reload
+
+jptmr=hydra-jev-shadow-prune.timer
+systemctl enable "$jptmr" >/dev/null 2>&1 || fail "could not enable $jptmr"
+systemctl start "$jptmr" >/dev/null 2>&1 || fail "could not start $jptmr"
+jpstate="$(systemctl is-active "$jptmr" 2>/dev/null || true)"
+[[ "$jpstate" == "active" ]] || fail "$jptmr is not active (state: ${jpstate:-unknown})"
+log "  $jptmr: $jpstate (fires daily 05:15 UTC)"
+
+# ─── /tmp scratch reaper (hourly) ────────────────────────────────
+# systemd-tmpfiles has no open-handle check and its floor is 24h; on 2026-10-08
+# only 32 of 6,055 /tmp entries were >1d old while / went 85% -> 93% in 26h.
+# scripts/tmp-reaper.sh reaps the known scratch patterns within hours, skipping
+# anything with an open handle. Allow-list and TTLs live in the script.
+[[ -x "$HYDRA_ROOT/scripts/tmp-reaper.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/tmp-reaper.sh missing or not executable"
+
+cat > /etc/systemd/system/hydra-tmp-reaper.service << TMPREAPERSVC
+[Unit]
+Description=Reap idle /tmp scratch (review clones, qa-pr-*, tmp.XXXXXX) with no open handles
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/tmp-reaper.sh
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# lsof +D over multi-GB clones is slow; headroom over the 90s oneshot default.
+TimeoutStartSec=30min
+StandardOutput=append:/var/log/hydra-tmp-reaper.log
+StandardError=append:/var/log/hydra-tmp-reaper.log
+TMPREAPERSVC
+
+cat > /etc/systemd/system/hydra-tmp-reaper.timer << TMPREAPERTMR
+[Unit]
+Description=Run the /tmp scratch reaper hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5min
+Unit=hydra-tmp-reaper.service
+
+[Install]
+WantedBy=timers.target
+TMPREAPERTMR
+
+systemctl daemon-reload
+
+trtmr=hydra-tmp-reaper.timer
+systemctl enable "$trtmr" >/dev/null 2>&1 || fail "could not enable $trtmr"
+systemctl start "$trtmr" >/dev/null 2>&1 || fail "could not start $trtmr"
+trstate="$(systemctl is-active "$trtmr" 2>/dev/null || true)"
+[[ "$trstate" == "active" ]] || fail "$trtmr is not active (state: ${trstate:-unknown})"
+log "  $trtmr: $trstate (fires hourly)"
+
+# ─── Main gateway session prune + restart (nightly 02:30 UTC) ────
+# MUS-1295: see scripts/main-prune-restart.sh. Replaces the hand-placed bridge (/usr/local/sbin/
+# hydra-main-{prune-restart,nightly-reset}.sh via the TRANSIENT hydra-main-nightly-reset.timer). Both fire at
+# 02:30 UTC, so the bridge is retired BEFORE the managed timer is armed: no double prune+restart.
+[[ -x "$HYDRA_ROOT/scripts/main-prune-restart.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/main-prune-restart.sh missing or not executable"
+
+# Never kill a legacy prune/restart mid-flight (it has stopped main and has no exit trap): stop only the TIMER,
+# wait for any running legacy service/script, and if it never finishes fail the install with nothing removed
+# or armed, so the next deploy retries.
+AUX_BRIDGE_WAIT_SECS="${AUX_BRIDGE_WAIT_SECS:-900}"
+legacy_bridge_running() {
+  [[ "$(systemctl is-active hydra-main-nightly-reset.service 2>/dev/null || true)" =~ ^(active|activating|deactivating)$ ]] \
+    || pgrep -f '/usr/local/sbin/hydra-main-(prune-restart|nightly-reset)\.sh' >/dev/null 2>&1
+}
+retire_main_prune_bridge() {
+  local f waited=0
+  systemctl stop hydra-main-nightly-reset.timer >/dev/null 2>&1 || true
+  while legacy_bridge_running; do
+    if (( waited >= AUX_BRIDGE_WAIT_SECS )); then
+      fail "legacy main prune/restart bridge still running after ${AUX_BRIDGE_WAIT_SECS}s; refusing to kill it mid-flight (main may be stopped). Re-run install-aux-units.sh once it finishes."
+    fi
+    (( waited == 0 )) && log "  legacy main prune/restart bridge is running; waiting for it to finish (max ${AUX_BRIDGE_WAIT_SECS}s)"
+    sleep 5; waited=$((waited + 5))
+  done
+  systemctl reset-failed hydra-main-nightly-reset.timer hydra-main-nightly-reset.service >/dev/null 2>&1 || true
+  for f in /usr/local/sbin/hydra-main-prune-restart.sh /usr/local/sbin/hydra-main-nightly-reset.sh; do
+    if [[ -e "$f" ]]; then rm -f "$f"; log "  retired hand-placed bridge: $f"; fi
+  done
+  rm -f /usr/local/sbin/hydra-main-nightly-reset.sh.bak-*
+}
+retire_main_prune_bridge
+
+cat > /etc/systemd/system/hydra-main-prune-restart.service << MAINPRUNESVC
+[Unit]
+Description=Prune main-gateway sessions idle >24h offline, then restart openclaw-gateway-main
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/main-prune-restart.sh nightly
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HYDRA_MAIN_PRUNE_AFTER=24h
+# Skip when main restarted recently (already fresh).
+Environment=HYDRA_MAIN_MIN_UPTIME_H=4
+Environment=MAINT_SH=$HYDRA_ROOT/scripts/hydra-maintenance.sh
+# Backup + stop + prune (<=20 min) + start + health wait (<=45 min); a kill mid-run would leave main stopped.
+TimeoutStartSec=90min
+# No Restart=: a failed run must never re-run itself (never loops).
+StandardOutput=append:/var/log/hydra-main-prune-restart.log
+StandardError=append:/var/log/hydra-main-prune-restart.log
+MAINPRUNESVC
+
+cat > /etc/systemd/system/hydra-main-prune-restart.timer << MAINPRUNETMR
+[Unit]
+Description=Prune main-gateway sessions and restart main nightly at 02:30 UTC
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+# No Persistent=: a missed night must not become a boot-time restart.
+Unit=hydra-main-prune-restart.service
+
+[Install]
+WantedBy=timers.target
+MAINPRUNETMR
+
+systemctl daemon-reload
+
+mpt=hydra-main-prune-restart.timer
+systemctl enable "$mpt" >/dev/null 2>&1 || fail "could not enable $mpt"
+systemctl start "$mpt" >/dev/null 2>&1 || fail "could not start $mpt"
+mpstate="$(systemctl is-active "$mpt" 2>/dev/null || true)"
+[[ "$mpstate" == "active" ]] || fail "$mpt is not active (state: ${mpstate:-unknown})"
+log "  $mpt: $mpstate (fires nightly 02:30 UTC)"
+
+# ─── codex-home retention (daily 05:45 UTC) ──────────────────────
+# The codex binary writes sessions/**/rollout-*.jsonl and logs_*.sqlite under
+# every agent's codex-home and has no retention knob (72 GiB across 35 agents
+# on 8 Oct, MUS-5584). scripts/codex-home-prune.sh deletes rollout files and
+# log rows older than CODEX_SESSION_TTL_DAYS (default 14); VACUUM only below
+# 80% disk. One global unit: the glob spans every profile.
+[[ -x "$HYDRA_ROOT/scripts/codex-home-prune.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/codex-home-prune.sh missing or not executable"
+
+cat > /etc/systemd/system/hydra-codex-home-prune.service << CHPRUNESVC
+[Unit]
+Description=Prune codex-home session files and log rows older than the retention window
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/codex-home-prune.sh --apply
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Nice=10
+IOSchedulingClass=idle
+# ~60k file deletes plus 35 sqlite DELETE/checkpoint passes on the first run.
+TimeoutStartSec=30min
+StandardOutput=append:/var/log/hydra-codex-home-prune.log
+StandardError=append:/var/log/hydra-codex-home-prune.log
+CHPRUNESVC
+
+cat > /etc/systemd/system/hydra-codex-home-prune.timer << CHPRUNETMR
+[Unit]
+Description=Run the codex-home prune daily at 05:45 UTC
+
+[Timer]
+OnCalendar=*-*-* 05:45:00 UTC
+Persistent=true
+RandomizedDelaySec=10min
+Unit=hydra-codex-home-prune.service
+
+[Install]
+WantedBy=timers.target
+CHPRUNETMR
+
+systemctl daemon-reload
+
+chptmr=hydra-codex-home-prune.timer
+systemctl enable "$chptmr" >/dev/null 2>&1 || fail "could not enable $chptmr"
+systemctl start "$chptmr" >/dev/null 2>&1 || fail "could not start $chptmr"
+chpstate="$(systemctl is-active "$chptmr" 2>/dev/null || true)"
+[[ "$chpstate" == "active" ]] || fail "$chptmr is not active (state: ${chpstate:-unknown})"
+log "  $chptmr: $chpstate (fires daily 05:45 UTC)"
+
 # ─── Twice-weekly codex OAuth token refresh (Sun+Wed 04:00 UTC) ──
 # The DURABLE fix for the recurring ~10-day codex token lapse. hydra keeps the
 # bundled `openai` plugin DISABLED to dodge #90925, but that plugin owns the
@@ -2346,7 +2902,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/hydra-tmp-reaper.log /var/log/hydra-main-prune-restart.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log /var/log/agent-soul-delivery-guard.log {
     weekly
     rotate 4
     compress
@@ -2592,19 +3148,26 @@ AUX_ONFAILURE_UNITS=(
   cs-sla-report.service
   cto-nightly-driver.service
   hydra-company-finder-cache-refresh.service
+  hydra-codex-home-prune.service
   hydra-daily-audit.service
+  hydra-jev-shadow-prune.service
+  hydra-main-prune-restart.service
   hydra-peer-labels.service
   hydra-release-watch.service
   hydra-release.service
+  hydra-tmp-reaper.service
   hydra-session-thread-retention@.service
   hydra-weekly-cleanup.service
   intercom-intake-watchdog.service
+  intercom-rights-holder-watchdog.service
   overdue-verification-notifier.service
   qa-approval-retry.service
   qa-review-reconcile.service
   resolution-matcher.service
   resolve-notify.service
   support-changelog-sync.service
+  sync-app-pricing.service
+  sync-platform-llms.service
 )
 
 # wire_unit_failure_paging — idempotent: inserts OnFailure= into the [Unit]

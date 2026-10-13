@@ -1,0 +1,11 @@
+{
+  "id": "1002",
+  "source": {
+    "author": {"type": "user"},
+    "body": "I want a refund, this is a dispute",
+    "created_at": 200
+  },
+  "conversation_parts": {
+    "conversation_parts": []
+  }
+}

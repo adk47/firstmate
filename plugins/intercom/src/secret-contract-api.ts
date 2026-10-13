@@ -75,6 +75,23 @@ export const secretTargetRegistryEntries: SecretTargetRegistryEntry[] = [
     includeInConfigure: true,
     includeInAudit: true,
   },
+  // The Jev pre-turn router's OpenRouter key (docs/designs/2026-09-22-jev-
+  // caroline-router.md). Same nested-per-account shape as clickup.apiKey above
+  // and for the same reason: without this entry, config.ts's account.jev.enabled
+  // check at boot would see the raw SecretRef object as "truthy" (never a real
+  // 401 until the first live call), which is exactly the ClickUp OAUTH_019
+  // failure mode this file's header documents.
+  {
+    id: "channels.intercom.accounts.*.jev.apiKey",
+    targetType: "channels.intercom.accounts.*.jev.apiKey",
+    configFile: "openclaw.json",
+    pathPattern: "channels.intercom.accounts.*.jev.apiKey",
+    secretShape: "secret_input",
+    expectedResolvedValue: "string",
+    includeInPlan: true,
+    includeInConfigure: true,
+    includeInAudit: true,
+  },
 ];
 
 export function collectRuntimeConfigAssignments(params: {
@@ -105,6 +122,19 @@ export function collectRuntimeConfigAssignments(params: {
     context: params.context,
     topLevelActive: false,
     topInactiveReason: "ClickUp escalation config is per-account only.",
+    accountActive: (entry) => entry.enabled,
+    accountInactiveReason: "Intercom account is disabled.",
+  });
+  collectNestedChannelFieldAssignments({
+    channelKey: "intercom",
+    nestedKey: "jev",
+    field: "apiKey",
+    channel: intercom,
+    surface,
+    defaults: params.defaults,
+    context: params.context,
+    topLevelActive: false,
+    topInactiveReason: "Jev pre-turn router config is per-account only.",
     accountActive: (entry) => entry.enabled,
     accountInactiveReason: "Intercom account is disabled.",
   });

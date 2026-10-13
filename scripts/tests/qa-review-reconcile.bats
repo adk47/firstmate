@@ -119,6 +119,66 @@ setup_lib() {
   [ "$output" = "pending-suppress" ]
 }
 
+@test "lib: qar_classify_verdict — FRESH pending (within the budget) still suppresses" {
+  setup_lib
+  run qar_classify_verdict 0 "pending" 0 "QA review queued for abc1234" 60 1800
+  [ "$output" = "pending-suppress" ]
+  run qar_classify_verdict 0 "pending" 0 "" 1800 1800
+  [ "$output" = "pending-suppress" ]
+}
+
+@test "lib: qar_classify_verdict — a pending OLDER than the budget is not in-flight evidence -> candidate" {
+  setup_lib
+  run qar_classify_verdict 0 "pending" 0 "QA review queued for abc1234" 1801 1800
+  [ "$output" = "candidate" ]
+}
+
+@test "lib: qar_classify_verdict — a NEGATIVE pending age (future updated_at, clock skew) is stale -> candidate" {
+  setup_lib
+  run qar_classify_verdict 0 "pending" 0 "" -5 1800
+  [ "$output" = "candidate" ]
+  run qar_classify_verdict 0 "pending" 0 "" 0 1800
+  [ "$output" = "pending-suppress" ]
+}
+
+@test "lib: qar_classify_verdict — the workflow's own dispatch-failure literal is NOT a verdict" {
+  setup_lib
+  # Read the literal OUT of the workflow so renaming it on either side turns this red.
+  lit="$(grep -F 'say_status failure "QA review could not be dispatched' "$HYDRA_REPO/.github/workflows/qa-autoreview.yml" | sed -E 's/.*say_status failure "([^"]*)".*/\1/')"
+  [ -n "$lit" ]
+  run qar_classify_verdict 0 "failure" 0 "$lit"
+  [ "$output" = "candidate" ]
+  run qar_classify_verdict 0 "error" 0 "$lit"
+  [ "$output" = "candidate" ]
+}
+
+@test "lib: qar_classify_verdict — the reconciler's own exhaustion write is NOT a verdict (literal read from the script)" {
+  setup_lib
+  lit="$(grep -F 'failure "QA review lost' "$HYDRA_REPO/scripts/qa-review-reconcile.sh" | sed -E 's/.*failure "([^"]*)".*/\1/' | sed 's/\$attempts/2/')"
+  [ -n "$lit" ]
+  run qar_classify_verdict 0 "failure" 1 "$lit"
+  [ "$output" = "candidate" ]
+}
+
+@test "lib: qar_classify_verdict — a real NO-GO failure stays a verdict" {
+  setup_lib
+  run qar_classify_verdict 0 "failure" 0 "NO-GO — 1 blocking finding"
+  [ "$output" = "verdict" ]
+  run qar_classify_verdict 0 "success" 0 "QA review could not be dispatched"
+  [ "$output" = "verdict" ]
+}
+
+@test "lib: qar_qa_review_status_field — description/updated_at; malformed input is rc1" {
+  setup_lib
+  j='{"statuses":[{"context":"qa-review","state":"pending","description":"d","updated_at":"2026-01-01T00:00:00Z"}]}'
+  run qar_qa_review_status_field "$j" description
+  [ "$output" = "d" ]
+  run qar_qa_review_status_field "$j" updated_at
+  [ "$output" = "2026-01-01T00:00:00Z" ]
+  run qar_qa_review_status_field 'not json' description
+  [ "$status" -eq 1 ]
+}
+
 @test "lib: qar_classify_verdict — pending on a MERGE-GATED repo is a candidate (stale pending must not silence forever)" {
   setup_lib
   run qar_classify_verdict 0 "pending" 1
@@ -378,6 +438,50 @@ setup_lib() {
   [ -z "$output" ]
 }
 
+# ── qar_qa_review_rollup_state (2026-09-17 read-amplification cut) ─────────
+# The PR list carries each context's LATEST state for the head commit, which
+# is the same fact as the per-PR `commits/<sha>/status` read. These pin the
+# parse, including the two ways it must NOT answer: a missing context reads
+# `absent` (fall through to the reads) and a jq failure is rc 1 (fall through,
+# never "no verdict").
+
+@test "lib: qar_qa_review_rollup_state — reads the qa-review context state" {
+  setup_lib
+  run qar_qa_review_rollup_state '[{"context":"qa-review","state":"success"}]'
+  [ "$status" -eq 0 ]
+  [ "$output" = "success" ]
+  run qar_qa_review_rollup_state '[{"context":"build","state":"success"},{"context":"qa-review","state":"FAILURE"}]'
+  [ "$status" -eq 0 ]
+  [ "$output" = "failure" ]
+  run qar_qa_review_rollup_state '[{"context":"qa-review","state":"error"}]'
+  [ "$output" = "error" ]
+  run qar_qa_review_rollup_state '[{"context":"qa-review","state":"pending"}]'
+  [ "$output" = "pending" ]
+}
+
+@test "lib: qar_qa_review_rollup_state — check-run shape and missing context" {
+  setup_lib
+  # A CheckRun context (name+conclusion) rather than a StatusContext.
+  run qar_qa_review_rollup_state '[{"name":"qa-review","conclusion":"success"}]'
+  [ "$status" -eq 0 ]
+  [ "$output" = "success" ]
+  run qar_qa_review_rollup_state '[{"context":"other","state":"success"}]'
+  [ "$output" = "absent" ]
+  run qar_qa_review_rollup_state '[]'
+  [ "$output" = "absent" ]
+  # Not an array at all (a shape change) reads absent, i.e. fall through to
+  # the per-PR reads — the fail-safe direction.
+  run qar_qa_review_rollup_state '{"nodes":[]}'
+  [ "$output" = "absent" ]
+}
+
+@test "lib: qar_qa_review_rollup_state — jq failure is rc 1, never 'absent'" {
+  setup_lib
+  run qar_qa_review_rollup_state 'not json at all'
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
 # ─────────────────────────────────────────────────────────────────────────
 # Section 2: full entrypoint, PATH-shadowed
 # ─────────────────────────────────────────────────────────────────────────
@@ -393,6 +497,7 @@ setup() {
   export SLACK_CALLS="$TEST_TMPDIR/slack_calls"; : > "$SLACK_CALLS"
   export STATUS_CALLS="$TEST_TMPDIR/status_calls"; : > "$STATUS_CALLS"
   export GH_LOG="$TEST_TMPDIR/gh_log"; : > "$GH_LOG"
+  export ROLLUP_SEARCH_CALLS="$TEST_TMPDIR/rollup_search_calls"; : > "$ROLLUP_SEARCH_CALLS"
 
   # --- gh stub -------------------------------------------------------------
   cat > "$STUBBIN/gh" <<'STUB'
@@ -402,11 +507,34 @@ key() { printf '%s' "$1" | tr '/' '-'; }
 
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   repo=""
+  json_arg=""
+  search_arg=""
   prev=""
   for a in "$@"; do
     [ "$prev" = "--repo" ] && repo="$a"
+    [ "$prev" = "--json" ] && json_arg="$a"
+    [ "$prev" = "--search" ] && search_arg="$a"
     prev="$a"
   done
+  case "$json_arg" in
+    *statusCheckRollup*)
+      # ── Rollup enrichment call (best-effort, scoped by --search) ──────
+      [ -n "${ROLLUP_SEARCH_CALLS:-}" ] && printf '%s\t%s\n' "$repo" "$search_arg" >> "$ROLLUP_SEARCH_CALLS"
+      [ -n "${STUB_ROLLUP_FAIL:-}" ] && exit 1
+      [ -n "${STUB_ROLLUP_MALFORMED:-}" ] && { echo '{}'; exit 0; }
+      # Default: derive {number, statusCheckRollup} from the same listing
+      # fixture the LISTING call below reads, so a test that seeds a rollup
+      # by mutating $FIX/prlist/<repo>.json (the pre-existing terminal-skip
+      # convention) keeps working unchanged.
+      f="$FIX/prlist/$(key "$repo").json"
+      if [ -f "$f" ]; then
+        jq -c '[.[] | {number: .number, statusCheckRollup: (.statusCheckRollup // [])}]' "$f"
+      else
+        echo '[]'
+      fi
+      exit 0
+      ;;
+  esac
   if [ -n "${STUB_PRLIST_FAIL_REPOS:-}" ] && printf '%s\n' "$STUB_PRLIST_FAIL_REPOS" | grep -qxF "$repo"; then
     exit 1
   fi
@@ -544,7 +672,9 @@ STUB
   cat > "$DISPATCH_STUB" <<'STUB'
 #!/usr/bin/env bash
 printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" >> "$DISPATCH_CALLS"
-exit 0
+printf '%s\n' "${QA_DEDUP_REFUSED_RC:-unset}" >> "$DISPATCH_CALLS.refused_rc"
+# DISPATCH_RC lets a test simulate a failing dispatcher (75 = never reached the gateway).
+exit "${DISPATCH_RC:-0}"
 STUB
   chmod +x "$DISPATCH_STUB"
 
@@ -589,7 +719,7 @@ JSON
   export QA_RECONCILE_CRON_STALE_S=1800
   export QA_RECONCILE_AGE_CEILING_S=1209600
   export QA_RECONCILE_TICK_FAIL_THRESHOLD=3
-  unset STUB_SLACK_FAIL_ONCE STUB_SLACK_FAIL_ALWAYS STUB_REVIEWS_FAIL STUB_STATUS_FAIL STUB_STATUS_MALFORMED STUB_TIMELINE_FAIL STUB_COMMIT_FAIL STUB_CRON_JSON STUB_CRON_FAIL STUB_ALLOWLIST_REPOS STUB_DEFAULT_COMMIT_DATE STUB_AUTHOR_FAIL_RC STUB_PRLIST_FAIL_REPOS STUB_GH_STATUS_FAIL STUB_GH_STATUS_BODY
+  unset STUB_SLACK_FAIL_ONCE STUB_SLACK_FAIL_ALWAYS STUB_REVIEWS_FAIL STUB_STATUS_FAIL STUB_STATUS_MALFORMED STUB_TIMELINE_FAIL STUB_COMMIT_FAIL STUB_CRON_JSON STUB_CRON_FAIL STUB_ALLOWLIST_REPOS STUB_DEFAULT_COMMIT_DATE STUB_AUTHOR_FAIL_RC STUB_PRLIST_FAIL_REPOS STUB_GH_STATUS_FAIL STUB_GH_STATUS_BODY STUB_ROLLUP_FAIL STUB_ROLLUP_MALFORMED
   # Long enough that every pre-existing test keeps its single-page semantics
   # (each seeds a fresh state dir, so nothing is ever suppressed by inheritance);
   # the dedupe tests below set their own value.
@@ -673,6 +803,61 @@ JSON
   export QA_RECONCILE_NOW_EPOCH
   run "$SCRIPT" --once
   [ "$status" -eq 0 ]
+  [ ! -s "$DISPATCH_CALLS" ]
+}
+
+# MUS-3631: only a completed review ends the retry loop.
+_mus3631_run() {  # <pr> <sha> <status-json> [rollup-state]
+  seed_epoch_state "Muso-AI/core-backend"
+  mk_pr_list "Muso-AI/core-backend" "$1" "$2" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/core-backend" "$2" "2026-01-01T00:00:00Z"
+  printf '%s' "$3" > "$FIX/status/Muso-AI-core-backend-$2.json"
+  if [ -n "${4:-}" ]; then
+    jq --arg st "$4" '[.[] | .statusCheckRollup = [{"context":"qa-review","state":$st}]]' \
+      "$FIX/prlist/Muso-AI-core-backend.json" > "$FIX/prlist/tmp.json"
+    mv "$FIX/prlist/tmp.json" "$FIX/prlist/Muso-AI-core-backend.json"
+  fi
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+}
+
+@test "e2e MUS-3631: a head carrying only a STALE pending is dispatched" {
+  _mus3631_run 60 "shastale000000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"pending","description":"QA review queued for shastal","updated_at":"2026-01-01T00:00:00Z"}]}' PENDING
+  [ -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a pending stamped in the FUTURE (clock skew) is dispatched, not suppressed" {
+  _mus3631_run 64 "shafuture00000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"pending","description":"QA review queued for shafutu","updated_at":"2026-01-01T05:00:00Z"}]}' PENDING
+  [ -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a pending with an unparseable updated_at is dispatched, not suppressed" {
+  _mus3631_run 65 "shabadts00000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"pending","description":"QA review queued for shabads","updated_at":"garbage"}]}' PENDING
+  [ -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a head carrying a FRESH pending is not dispatched" {
+  _mus3631_run 61 "shafresh000000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"pending","description":"QA review queued for shafres","updated_at":"2026-01-01T00:59:00Z"}]}' PENDING
+  [ ! -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a head carrying the dispatch-failure red is re-dispatched, even via the rollup short-circuit" {
+  lit="$(grep -F 'say_status failure "QA review could not be dispatched' "$HYDRA_REPO/.github/workflows/qa-autoreview.yml" | sed -E 's/.*say_status failure "([^"]*)".*/\1/')"
+  [ -n "$lit" ]
+  _mus3631_run 62 "shainfra000000000000000000000000000000001" \
+    "$(jq -n --arg d "$lit" '{statuses:[{context:"qa-review",state:"failure",description:$d,updated_at:"2026-01-01T00:00:00Z"}]}')" FAILURE
+  [ -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a real NO-GO failure is NOT re-dispatched (rollup short-circuit)" {
+  _mus3631_run 63 "shanogo0000000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"failure","description":"NO-GO — 1 blocking finding","updated_at":"2026-01-01T00:00:00Z"}]}' FAILURE
   [ ! -s "$DISPATCH_CALLS" ]
 }
 
@@ -1787,4 +1972,259 @@ JSON
   [[ "$output" == *"ACTIVE INCIDENT"* ]]
   [[ "$output" == *"Pull Requests=major_outage"* ]]
   [[ "$output" != *"component detail unavailable"* ]]
+}
+
+@test "e2e 47: a terminal rollup status on the head supplies the verdict with ZERO per-PR reads" {
+  # The read-amplification cut. `statusCheckRollup` arrives with the PR list
+  # (GraphQL budget); before this, every tick re-read commit+timeline+reviews+
+  # status for EVERY open PR on EVERY repo to re-derive a verdict it had
+  # already recorded, on the REST core budget the whole lane shares — the
+  # 352 CANDIDATE/STAGE READ FAILURE events/day measured 2026-09-17.
+  # Nothing else is seeded here on purpose: if the short-circuit did not fire,
+  # the commit read would fall through to the stub's default and this PR would
+  # be read at least once.
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="sharollup000000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 47 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  jq --arg s "$sha" '[.[] | .statusCheckRollup = [{"context":"qa-review","state":"success","description":"GO"}] | .headRefOid = $s]' \
+    "$FIX/prlist/Muso-AI-core-backend.json" > "$FIX/prlist/tmp.json"
+  mv "$FIX/prlist/tmp.json" "$FIX/prlist/Muso-AI-core-backend.json"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ ! -s "$DISPATCH_CALLS" ]
+  # No per-PR REST read was issued for this head at all.
+  run grep -c "repos/Muso-AI/core-backend/commits/$sha" "$GH_LOG"
+  [ "$output" = "0" ]
+  [[ "$(cat "$GH_LOG")" != *"/pulls/47/reviews"* ]]
+  [[ "$(cat "$GH_LOG")" != *"/issues/47/timeline"* ]]
+}
+
+@test "e2e 48: a PR with no qa-review context in its rollup still takes the read path" {
+  # The other half of the contract: the cut must not swallow the PRs the
+  # reconciler exists to recover. Same shape as e2e 1, but with a rollup that
+  # carries only an unrelated context.
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="sharollupmiss00000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 48 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  jq '[.[] | .statusCheckRollup = [{"context":"pr-validate","state":"success"}] | .headRefOid = "'"$sha"'"]' \
+    "$FIX/prlist/Muso-AI-core-backend.json" > "$FIX/prlist/tmp.json"
+  mv "$FIX/prlist/tmp.json" "$FIX/prlist/Muso-AI-core-backend.json"
+  mk_commit "Muso-AI/core-backend" "$sha" "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  run grep -c "repos/Muso-AI/core-backend/commits/$sha" "$GH_LOG"
+  [ "$output" -ge 1 ]
+}
+
+@test "e2e 49: rollup call fails -- listing still succeeds, ROLLUP-DEGRADED logged, per-PR reads proceed" {
+  # The 2026-09-18 split's core contract: an H-DevOps-shaped rollup 504 must
+  # never be confused with a LISTING failure. Listing itself is untouched
+  # (fixture served normally), only the separate rollup call is broken.
+  # Scoped to the single-repo case (allowlist = Muso-AI/hydra, which
+  # qar_expected_repos always includes and dedupes) so the tick's
+  # rollup_degraded count is exact, since STUB_ROLLUP_FAIL is a global
+  # knob (fails every repo's rollup call, mirroring STUB_STATUS_FAIL /
+  # STUB_REVIEWS_FAIL's existing global-toggle convention).
+  export STUB_ALLOWLIST_REPOS="Muso-AI/hydra"
+  seed_epoch_state "Muso-AI/hydra"
+  sha="sharollupfail000000000000000000000001"
+  mk_pr_list "Muso-AI/hydra" 49 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/hydra" "$sha" "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  export STUB_ROLLUP_FAIL=1
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"READ-FAILURE: could not list open PRs"* ]]
+  [[ "$output" == *"ROLLUP-DEGRADED: statusCheckRollup unavailable for Muso-AI/hydra this tick"* ]]
+  [[ "$output" == *"tick complete:"*"rollup_degraded=1"* ]]
+  # Listing succeeded -> the repo-listing failure counter stays 0 (unset).
+  run jq -r '.__meta__.repo_failures["Muso-AI/hydra"] // 0' "$QA_RECONCILE_STATE_FILE"
+  [ "$output" = "0" ]
+  # The short-circuit is disabled this tick -> the per-PR commit read fired.
+  run grep -c "repos/Muso-AI/hydra/commits/$sha" "$GH_LOG"
+  [ "$output" -ge 1 ]
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 1 ]
+}
+
+@test "e2e 50: rollup call returns malformed JSON ({}) -- same degrade-not-fail handling as a hard failure" {
+  export STUB_ALLOWLIST_REPOS="Muso-AI/hydra"
+  seed_epoch_state "Muso-AI/hydra"
+  sha="sharollupmalform0000000000000000000001"
+  mk_pr_list "Muso-AI/hydra" 50 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/hydra" "$sha" "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  export STUB_ROLLUP_MALFORMED=1
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"READ-FAILURE: could not list open PRs"* ]]
+  [[ "$output" == *"ROLLUP-DEGRADED: statusCheckRollup unavailable for Muso-AI/hydra this tick"* ]]
+  [[ "$output" == *"tick complete:"*"rollup_degraded=1"* ]]
+  run jq -r '.__meta__.repo_failures["Muso-AI/hydra"] // 0' "$QA_RECONCILE_STATE_FILE"
+  [ "$output" = "0" ]
+  run grep -c "repos/Muso-AI/hydra/commits/$sha" "$GH_LOG"
+  [ "$output" -ge 1 ]
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 1 ]
+}
+
+@test "e2e 51: rollup enrichment merges by PR number -- a terminal status on one PR skips only that PR" {
+  # Two PRs in the same repo, distinct numbers: only #51's head carries a
+  # terminal qa-review context in the rollup fixture; #52 carries none. If
+  # the merge-by-number wiring were broken (e.g. rollups applied
+  # positionally, or to every row), either PR could wrongly gain or lose the
+  # short-circuit.
+  seed_epoch_state "Muso-AI/core-backend"
+  sha_a="sharollupmergea00000000000000000000001"
+  sha_b="sharollupmergeb00000000000000000000001"
+  f="$FIX/prlist/Muso-AI-core-backend.json"
+  cat > "$f" <<JSON
+[
+  {"number": 51, "headRefOid": "$sha_a", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/Muso-AI/core-backend/pull/51", "statusCheckRollup": [{"context":"qa-review","state":"success"}]},
+  {"number": 52, "headRefOid": "$sha_b", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/Muso-AI/core-backend/pull/52"}
+]
+JSON
+  # The default rollup stub derives {number, statusCheckRollup} straight from
+  # this same fixture file, so only #51 carries a terminal rollup; #52's
+  # array default (missing key) is [].
+  mk_commit "Muso-AI/core-backend" "$sha_b" "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  # #51 terminal-skipped: no per-PR read for sha_a.
+  run grep -c "repos/Muso-AI/core-backend/commits/$sha_a" "$GH_LOG"
+  [ "$output" = "0" ]
+  # #52 has no rollup match: falls through to the read path.
+  run grep -c "repos/Muso-AI/core-backend/commits/$sha_b" "$GH_LOG"
+  [ "$output" -ge 1 ]
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 1 ]
+  grep -q "^52 $sha_b Muso-AI/core-backend U0AL36NADEY\$" "$DISPATCH_CALLS"
+}
+
+@test "e2e 52: the rollup enrichment call is scoped to --search updated:>=<AGE_CEILING_S date>" {
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="sharolluspsearch000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 53 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/core-backend" "$sha" "2026-01-01T00:00:00Z"
+  base_epoch=$(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s)
+  QA_RECONCILE_NOW_EPOCH=$((base_epoch + 3600))
+  export QA_RECONCILE_NOW_EPOCH
+  export QA_RECONCILE_AGE_CEILING_S=864000  # fixed 10d ceiling for a fixed expected date
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  expected_date="$(date -u -d "@$((QA_RECONCILE_NOW_EPOCH - 864000))" +%Y-%m-%d 2>/dev/null || date -u -r "$((QA_RECONCILE_NOW_EPOCH - 864000))" +%Y-%m-%d)"
+  run grep -F "Muso-AI/core-backend" "$ROLLUP_SEARCH_CALLS"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"updated:>=$expected_date"* ]]
+}
+
+@test "e2e 53: listing (non-rollup) call fails -- READ-FAILURE / repo-failure behaviour unchanged (see e2e 29 for the consecutive-tick page)" {
+  # Confirms the split did not touch the authoritative-listing failure path:
+  # this is the same shape e2e 29 already exercises across ticks (this test
+  # pins the single-tick log line + counter).
+  seed_epoch_state "Muso-AI/core-backend"
+  mk_pr_list "Muso-AI/core-backend" 54 "shalisting0000000000000000000000000001" main false nsollazzo "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  export STUB_PRLIST_FAIL_REPOS="Muso-AI/core-backend"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"READ-FAILURE: could not list open PRs for Muso-AI/core-backend"* ]]
+  run jq -r '.__meta__.repo_failures["Muso-AI/core-backend"] // 0' "$QA_RECONCILE_STATE_FILE"
+  [ "$output" = "1" ]
+  [ ! -s "$DISPATCH_CALLS" ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Dispatch exit 75 (never reached the gateway) must not burn an attempt
+# ─────────────────────────────────────────────────────────────────────────
+
+unreach_epoch() {
+  echo "$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 7200 ))"
+}
+
+# unreach_setup <pr> <sha> — one candidate PR, epoch-seeded, no prior attempts.
+unreach_setup() {
+  seed_epoch_state "Muso-AI/core-backend"
+  mk_pr_list "Muso-AI/core-backend" "$1" "$2" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/core-backend" "$2" "2026-01-01T00:00:00Z"
+  export QA_RECONCILE_NOW_EPOCH="$(unreach_epoch)"
+}
+
+@test "e2e 75a: dispatch rc 75 -> attempts unchanged, cooldown stamp advanced, unreachable_attempts counted; a later tick re-dispatches instead of paging EXHAUSTED" {
+  sha="shaunr0000000000000000000000000000000001"
+  key="Muso-AI/core-backend#60@$sha"
+  unreach_setup 60 "$sha"
+  now="$QA_RECONCILE_NOW_EPOCH"
+  DISPATCH_RC=75 run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+  [ "$(jq -r --arg k "$key" '.[$k].last_attempt_epoch' "$QA_RECONCILE_STATE_FILE")" = "$now" ]
+  [ "$(jq -r --arg k "$key" '.[$k].unreachable_attempts' "$QA_RECONCILE_STATE_FILE")" = "1" ]
+  # Inside the cooldown: no hammering.
+  DISPATCH_RC=75 run "$SCRIPT" --once
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 1 ]
+  # Three more past-cooldown unreachable ticks: still never exhausted, never an EXHAUSTED page.
+  for i in 1 2 3; do
+    now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+    DISPATCH_RC=75 run "$SCRIPT" --once
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"EXHAUSTED"* ]]
+  done
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 4 ]
+  [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+}
+
+@test "e2e 76a: dispatcher dedup-refusal (rc 76) is NOT an attempt: N past-cooldown ticks never exhaust or page; the reconciler asks for rc 76" {
+  sha="shaunr0000000000000000000000000000000004"
+  key="Muso-AI/core-backend#63@$sha"
+  unreach_setup 63 "$sha"
+  now="$QA_RECONCILE_NOW_EPOCH"
+  for i in 1 2 3 4 5; do
+    DISPATCH_RC=76 run "$SCRIPT" --once
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"EXHAUSTED"* ]]
+    now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+  done
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 5 ]
+  [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+  [ "$(jq -r --arg k "$key" '.[$k].unreachable_attempts // 0' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+  [ ! -s "$SLACK_CALLS" ]
+  [ "$(sort -u "$DISPATCH_CALLS.refused_rc")" = "76" ]
+}
+
+@test "e2e 75b: dispatch rc 1 STILL counts as an attempt (a systematically broken dispatcher must hit the cap)" {
+  sha="shaunr0000000000000000000000000000000002"
+  key="Muso-AI/core-backend#61@$sha"
+  unreach_setup 61 "$sha"
+  DISPATCH_RC=1 run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "1" ]
+  [ "$(jq -r --arg k "$key" '.[$k].unreachable_attempts // 0' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+}
+
+@test "e2e 75c: three consecutive all-unreachable ticks page exactly ONCE, a fourth pages nothing, an rc-0 dispatch resets the counter" {
+  sha="shaunr0000000000000000000000000000000003"
+  unreach_setup 62 "$sha"
+  now="$QA_RECONCILE_NOW_EPOCH"
+  for i in 1 2; do
+    DISPATCH_RC=75 run "$SCRIPT" --once
+    [ ! -s "$SLACK_CALLS" ]
+    now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+  done
+  DISPATCH_RC=75 run "$SCRIPT" --once
+  [ "$(jq -r '.__meta__.consecutive_unreachable_ticks' "$QA_RECONCILE_STATE_FILE")" = "3" ]
+  [ "$(wc -l < "$SLACK_CALLS" | tr -d ' ')" -eq 1 ]
+  [[ "$output" == *"GATEWAY UNREACHABLE"* ]]
+  now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+  DISPATCH_RC=75 run "$SCRIPT" --once
+  [ "$(wc -l < "$SLACK_CALLS" | tr -d ' ')" -eq 1 ]
+  now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+  DISPATCH_RC=0 run "$SCRIPT" --once
+  [ "$(jq -r '.__meta__.consecutive_unreachable_ticks // 0' "$QA_RECONCILE_STATE_FILE")" = "0" ]
 }

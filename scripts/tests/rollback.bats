@@ -37,6 +37,9 @@ setup() {
   cp "$REPO_ROOT/scripts/lib/sync-profile-config.sh" "$SRC/scripts/lib/sync-profile-config.sh"
   # rollback.sh sources the mutation-marker lib (PR #948); the synthetic repo needs it too.
   cp "$REPO_ROOT/scripts/lib/deploy-mutation-marker.sh" "$SRC/scripts/lib/deploy-mutation-marker.sh"
+  # rollback.sh takes the main-prune lock (MUS-3742); the /run/lock default may not exist on a test host.
+  cp "$REPO_ROOT/scripts/lib/main-prune-lock.sh" "$SRC/scripts/lib/main-prune-lock.sh"
+  export MAIN_PRUNE_LOCK_FILE="$TMP/main-prune.lock"
   [ -f "$REPO_ROOT/scripts/lib/announce-legit-write.sh" ] \
     && cp "$REPO_ROOT/scripts/lib/announce-legit-write.sh" "$SRC/scripts/lib/announce-legit-write.sh"
   chmod +x "$SRC/scripts/rollback.sh"
@@ -80,9 +83,12 @@ setup() {
   export SLACK_WEBHOOK=""
 }
 
+# One process holds the lock (exec): kill $! releases it and leaves no orphan holding bats' fds.
+_hold_lock() { bash -c 'exec 8>"$1"; flock -n 8 && exec sleep "$2"' _ "$1" "$2" >/dev/null 2>&1 3>&- & }
+
 run_rollback() {
   run env HYDRA_LOCAL=true DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" \
-    SLACK_WEBHOOK="" \
+    OPENCLAW_PROFILE_ROOT="$TMP/oc" SLACK_WEBHOOK="" \
     bash "$SRC/scripts/rollback.sh"
 }
 
@@ -102,6 +108,27 @@ run_rollback() {
 
   run_rollback
 
+  [ "$status" -eq 0 ]
+  [ ! -f "$DEPLOY/.deploy-mutating" ]
+  [[ "$output" == *"Rollback complete."* ]]
+}
+
+@test "a smoke-test failure after rollback still exits non-zero AND the marker is already cleared (issue #984)" {
+  # Regression for 2026-09-21: the marker clear used to sit AFTER the smoke
+  # test, so a smoke-test failure (e.g. the post-restart event-loop freeze,
+  # issue #984) left the marker behind and blocked every later deploy for
+  # 16h even though the tree was already restored and the gateways already
+  # restarted. The clear must happen before the smoke test runs, so it has
+  # already happened by the time the smoke test fails.
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  : > "$DEPLOY/.deploy-mutating"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$SRC/scripts/smoke-test.sh"
+  chmod +x "$SRC/scripts/smoke-test.sh"
+
+  run_rollback
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Smoke test FAILED"* ]]
   [ ! -f "$DEPLOY/.deploy-mutating" ]
 }
 
@@ -350,9 +377,304 @@ run_rollback() {
   [ "$n" -ge 20 ]
 }
 
+@test "restores the exec bit on a directly-exec'd script committed 100644 (2026-09-22 203/EXEC incident, QA #1001)" {
+  # scripts/hydra-daily-audit.py is a real ExecStart-by-path target (see
+  # scripts/tests/exec-bits-guard.bats); it is what actually landed 100644
+  # and 203/EXEC'd hydra-daily-audit.service in the 2026-09-22 08:00Z
+  # incident. The guard added in this branch proves the git INDEX carries
+  # 100755 for such targets, but says nothing about the rollback path: if a
+  # last-known-good tree still has this file at 100644 (e.g. it predates the
+  # +x fix, or a future commit drops the mode bit again), rsync does not
+  # preserve +x, and only the post-rsync `chmod +x .../scripts/*.py` block in
+  # rollback.sh (search "Script permissions fixed") stands between that tree
+  # and another 203/EXEC. This drives the REAL rollback.sh entrypoint end to
+  # end (HYDRA_LOCAL=true, same seam every other test in this file uses) and
+  # asserts the deployed file, not the git index, is executable.
+  printf '#!/usr/bin/env python3\nprint("audit")\n' > "$SRC/scripts/hydra-daily-audit.py"
+  chmod 644 "$SRC/scripts/hydra-daily-audit.py"
+  git -C "$SRC" add -A
+  git -C "$SRC" commit -qm "add hydra-daily-audit.py at 644 (pre-fix mode)"
+  LKG_WITH_644_SCRIPT_SHA="$(git -C "$SRC" rev-parse HEAD)"
+  printf '%s\n' "$LKG_WITH_644_SCRIPT_SHA" > "$DEPLOY/.deployed-sha"
+
+  run_rollback
+
+  [ "$status" -eq 0 ]
+  [ -f "$DEPLOY/scripts/hydra-daily-audit.py" ]
+  [ -x "$DEPLOY/scripts/hydra-daily-audit.py" ]
+}
+
+@test "fails the rollback when restoring +x fails, instead of logging success (QA #1001)" {
+  # The chmod used to end in `|| true` and the next line always logged
+  # "Script permissions fixed", so a failed repair (read-only mount, foreign
+  # ownership) shipped non-executable scripts and a green rollback.
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/chmod"
+  command chmod +x "$TMP/bin/chmod"
+
+  run_rollback
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not restore +x"* ]]
+  [[ "$output" != *"Script permissions fixed"* ]]
+}
+
 @test "leaves no leftover git worktree in the source checkout" {
   printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
   run_rollback
   run git -C "$SRC" worktree list
   [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ]
+}
+
+# ── runtime restore (8 Oct, deploy run 37791745129) ───────────────────────────
+# deploy.sh Step 4c.5 swaps the GLOBAL openclaw binary before Step 4d.5 can fail.
+# rollback.sh restored only the tree, so node-8 was left with runtime 2026.8.35
+# under 2026.8.2 plugins. deploy.sh records the pre-swap version in
+# $DEPLOY_PATH/.pre-deploy-openclaw-version (line 1 = runtime, line 2 = each state
+# DB's user_version at swap time; removed once Step 6 is done); rollback.sh
+# reinstalls the runtime BEFORE restarting the gateways, but only while every
+# state DB's user_version still equals line 2 (CTO ruling, MUS-5232).
+
+stub_npm_and_openclaw() {
+  export NPM_LOG="$TMP/npm.log"; : > "$NPM_LOG"
+  printf '#!/usr/bin/env bash\necho "npm $*" >> "$NPM_LOG"\n[ -z "${NPM_RC:-}" ] || exit "$NPM_RC"\nif [ "$1 $2" = "install -g" ]; then echo "${3#openclaw@}" > "$TMP/runtime-version"; fi\nexit 0\n' > "$TMP/bin/npm"
+  printf '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "OpenClaw $(cat "$TMP/runtime-version") (abc1234)"; fi\nexit 0\n' > "$TMP/bin/openclaw"
+  chmod +x "$TMP/bin/npm" "$TMP/bin/openclaw"
+  export TMP
+  echo "2026.8.35" > "$TMP/runtime-version"
+}
+
+# write_record <runtime> — creates both profiles' state DBs at user_version 15
+# and records <runtime> with the matching "main=15 edge=15" line.
+write_record() {
+  for p in main edge; do
+    mkdir -p "$TMP/oc/.openclaw-$p/state"
+    sqlite3 "$TMP/oc/.openclaw-$p/state/openclaw.sqlite" "pragma user_version=15;"
+  done
+  printf '%s\nmain=15 edge=15\n' "$1" > "$DEPLOY/.pre-deploy-openclaw-version"
+}
+
+@test "a recorded pre-deploy runtime is reinstalled before the gateways restart, then the record is cleared" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw
+  write_record 2026.8.2
+
+  run_rollback
+
+  [ "$status" -eq 0 ]
+  grep -qxF "npm install -g openclaw@2026.8.2" "$NPM_LOG"
+  [ "$(cat "$TMP/runtime-version")" = "2026.8.2" ]
+  [ ! -f "$DEPLOY/.pre-deploy-openclaw-version" ]
+}
+
+@test "no recorded runtime (the swap never happened or gateways already ran it): npm is never touched" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw
+
+  run_rollback
+
+  [ "$status" -eq 0 ]
+  [ ! -s "$NPM_LOG" ]
+  [ "$(cat "$TMP/runtime-version")" = "2026.8.35" ]
+}
+
+@test "a runtime restore that fails FAILS the rollback and keeps the record (no silent mixed state)" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw
+  write_record 2026.8.2
+
+  NPM_RC=1 run_rollback
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"runtime"* ]]
+  [ -f "$DEPLOY/.pre-deploy-openclaw-version" ]
+}
+
+@test "state DB user_version moved since the swap: the old binary is NOT installed, record kept, rollback still completes" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw; stub_systemctl_log
+  write_record 2026.8.2
+  sqlite3 "$TMP/oc/.openclaw-main/state/openclaw.sqlite" "pragma user_version=16;"
+
+  run_rollback
+
+  [ "$status" -eq 0 ]
+  [ ! -s "$NPM_LOG" ]
+  [ "$(cat "$TMP/runtime-version")" = "2026.8.35" ]
+  [ -f "$DEPLOY/.pre-deploy-openclaw-version" ]
+  [[ "$output" == *"main=15 edge=15"* && "$output" == *"main=16 edge=15"* ]]
+  grep -qxF "systemctl restart openclaw-gateway-main" "$SYSTEMCTL_LOG"
+}
+
+@test "an old one-line record (no user_version to compare) is refused, never guessed" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw
+  write_record 2026.8.2
+  echo "2026.8.2" > "$DEPLOY/.pre-deploy-openclaw-version"
+
+  run_rollback
+
+  [ "$status" -eq 0 ]
+  [ ! -s "$NPM_LOG" ]
+  [ -f "$DEPLOY/.pre-deploy-openclaw-version" ]
+}
+
+@test "an unreadable state DB is refused, never treated as unchanged" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw
+  write_record 2026.8.2
+  printf 'not a database' > "$TMP/oc/.openclaw-edge/state/openclaw.sqlite"
+
+  run_rollback
+
+  [ "$status" -eq 0 ]
+  [ ! -s "$NPM_LOG" ]
+  [ -f "$DEPLOY/.pre-deploy-openclaw-version" ]
+}
+
+# ── availability window (MUS-5079): deploy.sh stops a gateway at Step 4d and only
+# its own Step 6 starts it again. Every rollback exit before rollback's Step 2
+# restart must still leave BOTH gateways started.
+
+stub_systemctl_log() {
+  export SYSTEMCTL_LOG="$TMP/systemctl.log"; : > "$SYSTEMCTL_LOG"
+  printf '#!/usr/bin/env bash\necho "systemctl $*" >> "$SYSTEMCTL_LOG"\nexit 0\n' > "$TMP/bin/systemctl"
+  chmod +x "$TMP/bin/systemctl"
+}
+
+assert_both_gateways_started() {
+  grep -qxF "systemctl start openclaw-gateway-main" "$SYSTEMCTL_LOG"
+  grep -qxF "systemctl start openclaw-gateway-edge" "$SYSTEMCTL_LOG"
+}
+
+@test "availability: runtime restore failure (exit before Step 2) still starts both gateways" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw; stub_systemctl_log
+  write_record 2026.8.2
+  NPM_RC=1 run_rollback
+  [ "$status" -ne 0 ]
+  assert_both_gateways_started
+}
+
+@test "availability: unreadable last-known-good SHA (earliest exit) still starts both gateways" {
+  printf 'not-a-sha\n' > "$DEPLOY/.deployed-sha"
+  stub_systemctl_log
+  run_rollback
+  [ "$status" -ne 0 ]
+  assert_both_gateways_started
+}
+
+@test "availability: a rollback that completes Step 2 does not start them a second time" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_systemctl_log
+  run_rollback
+  [ "$status" -eq 0 ]
+  grep -qxF "systemctl restart openclaw-gateway-main" "$SYSTEMCTL_LOG"
+  grep -qxF "systemctl restart openclaw-gateway-edge" "$SYSTEMCTL_LOG"
+  if grep -q "systemctl start" "$SYSTEMCTL_LOG"; then echo "NEGATED ASSERTION FAILED: backstop fired after Step 2" >&2; false; fi
+}
+
+# Asserts on the recorded argv, not on which branch ran: any `systemctl start|restart` here is a start without the lock.
+assert_no_systemctl_start() {
+  if grep -qE "^systemctl (start|restart)" "$SYSTEMCTL_LOG"; then
+    echo "started a gateway without the main prune lock:" >&2; cat "$SYSTEMCTL_LOG" >&2; false
+  fi
+}
+
+# MUS-3742: rollback.sh restarts with raw systemctl, so it takes the shared prune lock once, before any mutation.
+@test "rollback REFUSES while a main prune holds the lock: nothing is synced or restarted" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_systemctl_log
+  _hold_lock "$MAIN_PRUNE_LOCK_FILE" 30; holder=$!
+  sleep 1
+  run env HYDRA_LOCAL=true DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \
+    MAIN_PRUNE_LOCK_WAIT_SECS=1 bash "$SRC/scripts/rollback.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"still holds"* ]]
+  # server left as-is: the restore never ran
+  [ ! -f "$DEPLOY/skills-all/marker.md" ]
+  # the availability backstop must NOT start main without the lock: the prune has main stopped for offline cleanup
+  assert_no_systemctl_start
+}
+
+@test "rollback refuses (loudly, nothing touched) when the lock file cannot be opened" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_systemctl_log
+  run env HYDRA_LOCAL=true DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \
+    MAIN_PRUNE_LOCK_FILE=/dev/null/nope.lock bash "$SRC/scripts/rollback.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot open"* ]]
+  [ ! -f "$DEPLOY/skills-all/marker.md" ]
+  assert_no_systemctl_start
+}
+
+# ssh mode (laptop rollback): the lock is held ON node-8 by a background ssh; a refusal must not start main either.
+# The fake ssh runs the remote command (its last argument) locally, so the real remote flock runs on the test lock file.
+stub_ssh_local() {
+  printf '#!/usr/bin/env bash\nbash -c "${@: -1}"\n' > "$TMP/bin/ssh"
+  chmod +x "$TMP/bin/ssh"
+}
+
+@test "ssh-mode rollback REFUSES while a main prune holds the lock on node-8: nothing synced, no gateway started" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_systemctl_log; stub_ssh_local
+  _hold_lock "$MAIN_PRUNE_LOCK_FILE" 30; holder=$!
+  sleep 1
+  run env HYDRA_LOCAL=false DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \
+    MAIN_PRUNE_LOCK_WAIT_SECS=1 bash "$SRC/scripts/rollback.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not take"* ]]
+  [ ! -f "$DEPLOY/skills-all/marker.md" ]
+  assert_no_systemctl_start
+}
+
+# The ssh holding the node-8 prune lock dies mid-rollback (link drop): the watcher aborts rollback, and the EXIT
+# backstop must not then start main unlocked (the prune may now hold the store). The holder dies only once a REAL
+# foreground child is running (bot finding 13 Oct: TERMing just the parent leaves that child mutating node-8): a
+# `git worktree add` stand-in that heartbeats into a file, an unbounded-in-practice loop (20s cap so a red run ends).
+@test "ssh-mode rollback aborts when the node-8 lock holder dies mid-run, stops the in-flight child and starts no gateway" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_systemctl_log
+  HB="$TMP/hb"; HB_PIDFILE="$TMP/child.pid"; ORD="$TMP/order"
+  LOCKDIR=$(mktemp -d); rmdir "$LOCKDIR"; LOCKDIR=${LOCKDIR%/*}
+  find "$LOCKDIR" -maxdepth 2 -name lost 2>/dev/null | sort >"$TMP/lost.before"
+  cat > "$TMP/bin/ssh" <<'STUB'
+#!/usr/bin/env bash
+cmd="${@: -1}"
+case "$cmd" in
+  *flock*) bash -c "$cmd" <&0 & p=$!  # <&0: a bare background job gets /dev/null stdin, so `cat` would EOF and the holder die at once
+     ( for _ in $(seq 150); do [ -s "$HB_PIDFILE" ] && break; sleep 0.1; done; sleep 0.5; kill -9 "$p" 2>/dev/null ) >/dev/null 2>&1 & wait "$p" ;;
+  *) bash -c "$cmd" ;;
+esac
+STUB
+  cat > "$TMP/bin/git" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"worktree add"*)
+    # the lost flag lives in the lib's bare mktemp -d (macOS ignores TMPDIR for it): a lost file that was not there at start
+    trap 'find "$LOCKDIR" -maxdepth 2 -name lost 2>/dev/null | sort | comm -13 "$TMP/lost.before" - | grep -q . && echo flag-first >"$ORD"; exit 143' TERM
+    echo \$\$ >"$HB_PIDFILE"; for i in \$(seq 100); do echo tick >>"$HB"; sleep 0.2; done; exit 1 ;;
+  *) exec $(command -v git) "\$@" ;;
+esac
+STUB
+  chmod +x "$TMP/bin/ssh" "$TMP/bin/git"
+  start=$SECONDS
+  run env HYDRA_LOCAL=false DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \
+    HB_PIDFILE="$HB_PIDFILE" MAIN_PRUNE_LOCK_WATCH_SECS=0.2 bash "$SRC/scripts/rollback.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"holding the main prune lock"*"died"* ]]
+  # No "main prune lock lost" log assertion: stopping the child lets rollback's own EXIT path start at once and the
+  # watcher's TERM may land before that path logs (it only ever declines to start main). The flag order is pinned below.
+  assert_no_systemctl_start
+  # bash defers the parent's death until its foreground child ends, so without the descendant stop this takes the loop's full 20s
+  [ $((SECONDS - start)) -lt 15 ]
+  # the in-flight foreground child is dead the moment rollback returns and stays silent
+  [ -s "$HB_PIDFILE" ]
+  if kill -0 "$(cat "$HB_PIDFILE")" 2>/dev/null; then false; fi
+  n=$(wc -l <"$HB"); sleep 1
+  [ "$(wc -l <"$HB")" -eq "$n" ]
+  # the lost flag was written before the child was signalled
+  [ "$(cat "$ORD")" = flag-first ]
 }

@@ -1,0 +1,5 @@
+{"type":"tool.call","ts":"__TS__","sessionKey":"agent:support:intercom:direct:4001","data":{"name":"read","toolCallId":"t1","arguments":{}}}
+{"type":"tool.call","ts":"__TS__","sessionKey":"agent:support:intercom:direct:4001","data":{"name":"support_action_router","toolCallId":"t2","arguments":{}}}
+{"type":"tool.call","ts":"__TS__","sessionKey":"agent:support:intercom:direct:4002","data":{"name":"memory_search","toolCallId":"t3","arguments":{}}}
+{"type":"tool.call","ts":"__TS__","sessionKey":"agent:support:intercom:direct:4002","data":{"name":"support_action_router","toolCallId":"t4","arguments":{}}}
+{"type":"tool.call","ts":"__TS__","sessionKey":"agent:support:intercom:direct:4002","data":{"name":"credit_verification_check","toolCallId":"t5","arguments":{}}}

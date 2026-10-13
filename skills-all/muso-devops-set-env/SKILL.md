@@ -171,20 +171,35 @@ it grants broad dev authority (still audited + muso-dev-scoped).
   auto-restarting the consuming pods. A `kubectl patch secret` is NON-durable (ESO
   reverts it). So the wrapper does a Vault merge-patch (`backend=vault`, `--env dev`),
   hard-scoped to `secret/data/k8s/muso-dev/*` — a change propagates to the pods on its own.
-- **DEV go-live — one infra step remains (Artem/Aaron, via H-DevOps):** node-8's host has
-  NO `vault` CLI, NO `VAULT_*` creds, and Vault's in-cluster address
-  (`vault.vault.svc.cluster.local:8200`) is NOT host-reachable. Provision, in the DevOps
-  agent's env: `DEVOPS_DEV_VAULT_ADDR` (a node-8-reachable Vault endpoint) +
-  `DEVOPS_DEV_VAULT_TOKEN` (a token/AppRole with `read`+`patch` — the wrapper now reads the
-  prior value before writing so the audit/rollback prev-value is trustworthy, so `read` is
-  required, not optional — on **both** dev namespaces the allowlist permits:
-  `secret/data/k8s/muso-dev/*` AND `secret/data/k8s/muso-chat-dev/*`; a broad dev scope is
-  fine per Nick's directive), and set `DEVOPS_ENVSET_BACKEND=vault`. Vault policy sketch —
-  grant BOTH prefixes, or `muso-chat-dev/*` targets 403 even though the wrapper advertises
-  them (`config/dev-target-allowlist.txt` + the backend scope guard both allow chat-dev):
-  `path "secret/data/k8s/muso-dev/*"      { capabilities = ["read","patch","create","update"] }`
-  `path "secret/data/k8s/muso-chat-dev/*" { capabilities = ["read","patch","create","update"] }`.
-  Then prove on a throwaway dev key with rollback before anyone's real token.
+- **DEV go-live — DONE. Verified read-only on node-8, 2026-10-09 (MUS-6586).** `/etc/openclaw/main.env`
+  sets `DEVOPS_DEV_VAULT_ADDR=http://127.0.0.1:30820` (a NodePort onto the in-cluster Vault; the
+  `vault.vault.svc.cluster.local:8200` address is still NOT host-reachable, and node-8 still has NO
+  `vault` CLI — that is why this wrapper uses curl) and a `DEVOPS_DEV_VAULT_TOKEN`. That token's policy
+  grants `patch` on both dev namespaces and `read` on `muso-dev` (`read` on `muso-chat-dev` is NOT proven,
+  see the last bullet of this section):
+  - `read` on `secret/data/k8s/muso-dev/*` — proven: `GET .../muso-dev/core-backend-config` → **200**.
+  - `patch` on `secret/data/k8s/muso-dev/*` and `secret/data/k8s/muso-chat-dev/*` — proven: a
+    well-formed KV v2 merge-patch to a NON-EXISTENT secret under each returns **404** ("secret absent",
+    i.e. the ACL passed and the KV engine answered), while the same PATCH against
+    `secret/data/k8s/muso-prod/*` returns **403**. The prod arm is the control: the probe discriminates.
+  - Prod is correctly walled off: both `read` and `patch` on `secret/data/k8s/muso-prod/*` and
+    `secret/data/muso-prod/*` return **403**.
+- **What the dev token still LACKS — a diagnostic gap, not a write gap (MUS-6586, open for Aaron):**
+  `auth/token/lookup-self` and `sys/capabilities-self` both return **403**, so the token appears to
+  carry no `default` policy. Consequence: **its TTL and renewability are unobservable from node-8** —
+  the lane can expire silently with no way to check first, and the only symptom will be a 403 from the
+  wrapper. `secret/metadata/k8s/muso-dev/*` (incl. LIST) is also 403, so KV version history is
+  invisible. A 403 here is NOT proof the token is dead: Vault answers a *valid* token with an
+  insufficient policy as `permission denied` ALONE, and an *invalid/expired* token as
+  `permission denied` + `invalid token`. Read the error body before concluding anything.
+- **`create` capability on the dev prefixes is UNVERIFIED** (it cannot be probed without writing).
+  Treat it as absent: a merge-patch **cannot create** a secret that does not exist yet (404), and
+  metadata is denied. So for a genuinely NEW secret path, do not reach for this lane — reuse an
+  already-synced value via `remoteRef` instead. For a new KEY inside an EXISTING `muso-dev/*` or
+  `muso-chat-dev/*` secret, this lane works today on `muso-dev/*`; use it there. On `muso-chat-dev/*`
+  it is NOT yet proven: `cmd_set` runs a `dev_vault_read` before every write, so the token also needs
+  `read` on that prefix, and no GET there has been recorded. Do not use this lane for chat-dev until a
+  read-only GET of an existing `muso-chat-dev/*` secret returns **200** (open check on MUS-6604).
 - **There is exactly ONE Artem** as of 2026-07-30: Artem (Mobile Developer),
   `U02N2NP3H7F` / `artem@muso.ai`, mapped in `resolve_slack_to_email()`. Artem D
   (Dolobanko, `U0ACHTYUULT`, ex-DevOps Lead) **left the company and was revoked** from

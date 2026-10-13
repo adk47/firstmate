@@ -30,6 +30,7 @@ PROFILE="${1:-main}"
 OPENCLAW_HOME="/root/.openclaw-${PROFILE}"
 OPENCLAW_JSON="${OPENCLAW_HOME}/openclaw.json"
 OPENCLAW_BIN="${OPENCLAW_BIN:-/usr/bin/openclaw}"
+PEER_LABELS_WAIT_SECS="${PEER_LABELS_WAIT_SECS:-180}"
 
 # Port + label map by profile. Only main hosts the 10-agent roster.
 # Edge has an isolated single-agent workflow (support) and does not need
@@ -74,6 +75,11 @@ if maintenance_active; then
   log "maintenance: $(maintenance_reason) - skipping"
   exit 0
 fi
+# Same for the deploy/gateway warm-up window deploy.sh arms (self-expiring).
+if deploy_window_active; then
+  log "deploy window: $(deploy_window_reason) - skipping"
+  exit 0
+fi
 
 if [[ ! -f "$OPENCLAW_JSON" ]]; then
   log "ERROR: $OPENCLAW_JSON not found — gateway not provisioned?"
@@ -87,22 +93,27 @@ TOKEN=$(jq -er '.gateway.auth.token // empty' "$OPENCLAW_JSON") || {
   exit 1
 }
 
-# Wait up to 30s for the gateway to respond to health probes.
-# ExecStartPost fires immediately after ExecStart returns, but the
-# WebSocket server may still be binding. Without this wait the
-# sessions.create calls below race against startup and fail.
+# Wait up to PEER_LABELS_WAIT_SECS (default 180s) for the gateway to respond
+# to health probes. The WebSocket server may still be binding after ExecStart
+# returns, and a cold main can take longer than 30s to warm on deploy. Without
+# this wait the sessions.create calls below race against startup and fail.
+# The budget is wall-clock: a probe that never answers runs its full --timeout,
+# so counting probes would overrun the budget the ERROR line reports.
 wait_for_gateway() {
-  local attempt=0
-  while (( attempt < 30 )); do
+  [[ "$PEER_LABELS_WAIT_SECS" =~ ^[1-9][0-9]*$ ]] || {
+    log "ERROR: PEER_LABELS_WAIT_SECS must be a positive integer, got '$PEER_LABELS_WAIT_SECS'"
+    exit 2
+  }
+  local deadline=$(( SECONDS + PEER_LABELS_WAIT_SECS ))
+  while (( SECONDS < deadline )); do
     if "$OPENCLAW_BIN" --profile "$PROFILE" gateway call health \
         --token "$TOKEN" --url "$GATEWAY_URL" --timeout 2000 --json \
         > /dev/null 2>&1; then
       return 0
     fi
     sleep 1
-    attempt=$((attempt + 1))
   done
-  log "ERROR: gateway at $GATEWAY_URL did not respond within 30s"
+  log "ERROR: gateway at $GATEWAY_URL did not respond within ${PEER_LABELS_WAIT_SECS}s"
   return 1
 }
 

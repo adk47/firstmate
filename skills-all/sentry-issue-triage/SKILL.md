@@ -484,6 +484,13 @@ for every class and not only the ones that reach a fix:
 # Step 7 -- so it is recorded as `awaiting-approval`, which Step 1 resumes from
 # on SENTRY_APPROVED=1. Step 7 writes the real outcome row on top.
 [ "$class" = "code-fixable" ] && ledger_class=awaiting-approval || ledger_class="$class"
+# Phase 2d Jev shadow (docs/plans/jev-adoption.md) -- SHADOW ONLY, purely
+# observational, never changes $class/$ledger_class or anything below. Always
+# exits 0; a missing jev.sh or a disabled kill switch just skips it. Its
+# answer lands in Jev's OWN shadow log (jev-shadow-report.sh), never in this
+# ledger row -- do not add a `jev_class` field here.
+/opt/hydra/scripts/sentry-triage-jev-shadow.sh --short-id "$short_id" \
+  --class "$class" --summary "$summary" || true
 # Build the row first, then append under the lock. `tee -a` keeps the redirect
 # INSIDE the locked command: a locked `cmd >> file` opens the file in the
 # CALLER, before flock is ever acquired.

@@ -1,0 +1,5 @@
+1758358800.000000 node-8 openclaw[1]: replied conv=1001
+1758359100.000000 node-8 openclaw[1]: replied conv=1002
+1758359400.000000 node-8 openclaw[1]: ESCALATED conv=1002 source=rule reason=dispute over duplicate charge
+1758359460.000000 node-8 openclaw[1]: [intercom:escalation] ticket created conv=1002 id=CU-123
+1758359700.000000 node-8 openclaw[1]: replied conv=1003

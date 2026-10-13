@@ -44,7 +44,11 @@ set -euo pipefail
 #   OPENCLAW       openclaw binary (default: openclaw)
 # (No delivery-target override: the cron uses --no-deliver and the skill owns all
 # Slack delivery itself, so there is nothing for the cron to target.)
-# Exit codes: 0 dispatched | 2 usage/validation.
+# Exit codes: 0 dispatched | 2 usage/validation | 75 (EX_TEMPFAIL) the `cron add`
+# never reached the gateway (transport failure, see PRE_GATEWAY_SIGNATURES) so NO
+# review was queued and the attempt did not happen -- the reconciler must not
+# count it. Any other openclaw failure keeps openclaw's own rc (reached the
+# gateway and was rejected: a real attempt).
 
 OPENCLAW="${OPENCLAW:-openclaw}"
 PROFILE="main"
@@ -70,6 +74,46 @@ REQUESTER_UID="${4:-${QA_REVIEW_REQUESTER_UID:-}}"
 # forged/typo'd repo from steering the review at a non-Muso target.
 [[ "$REPO" =~ ^Muso-AI/[A-Za-z0-9._-]+$ ]] || die 2 "repo must be Muso-AI/<name>, got '$REPO'."
 [[ "$REQUESTER_UID" =~ ^U[A-Z0-9]+$ ]] || die 2 "requester-uid must be a Slack UID (U...), got '$REQUESTER_UID'."
+
+# In-flight dedup (MUS-7955): refuse when GitHub already holds an equivalent review.
+# Saves the downstream cost (an openclaw cron + a QA agent run), not runner time.
+# Reads external-pr-review.yml's run-name `qa <repo>#<pr> @ <sha> (<action>)` and
+# matches ONLY queued/in_progress runs GitHub actually created, within a tight
+# window: a dropped repository_dispatch creates no run, so a re-send of it still
+# dispatches. FAIL OPEN: any lookup problem dispatches anyway (a missed review is
+# worse than a duplicate one). Our own run (GITHUB_RUN_ID) never counts against us;
+# of two twins only the higher run id refuses, so one of them always proceeds.
+# Lives here, not in the workflow, so the reconciler hits the same guard.
+GH="${GH:-gh}"
+DEDUP_WINDOW_SECONDS="${QA_DEDUP_WINDOW_SECONDS:-14400}"
+# A malformed override must not reach the arithmetic below: under set -u it would
+# abort the dispatch before the fail-open branch. Fall back to the default.
+# 10# forces decimal: bash reads 08 as an invalid octal literal inside $(( )).
+[[ "$DEDUP_WINDOW_SECONDS" =~ ^[0-9]+$ ]] && DEDUP_WINDOW_SECONDS=$((10#$DEDUP_WINDOW_SECONDS)) || DEDUP_WINDOW_SECONDS=14400
+own_id="${GITHUB_RUN_ID:-0}"
+[[ "$own_id" =~ ^[0-9]+$ ]] || own_id=0
+if runs_json="$("$GH" run list -R Muso-AI/hydra --limit 200 --json databaseId,name,status,createdAt 2>/dev/null)" \
+   && verdict="$(echo "$runs_json" | jq -r --arg r "$REPO" --arg p "$pr" --arg s "$(echo "$sha" | tr A-F a-f)" \
+        --argjson own "$own_id" --argjson cut "$(( $(date -u +%s) - DEDUP_WINDOW_SECONDS ))" '
+      [ .[] | select(.status == "queued" or .status == "in_progress")
+            | select((.createdAt | fromdateiso8601) >= $cut)
+            | select(.databaseId != $own)
+            | (.name | capture("^qa (?<repo>[^#]+)#(?<pr>[0-9]+) @ (?<sha>[0-9a-fA-F]+) ") // empty) as $m
+            | select($m.repo == $r and $m.pr == $p)
+            | {id: .databaseId, same: (($m.sha | ascii_downcase) as $x | ($x | startswith($s)) or ($s | startswith($x)))} ] as $m
+      | if   any($m[]; .same and ($own == 0 or .id < $own)) then "duplicate"
+        elif $own > 0 and any($m[]; (.same | not) and .id > $own) then "superseded"
+        else "ok" end' 2>/dev/null)"; then
+  case "$verdict" in
+    duplicate|superseded)
+      echo "qa-dispatch-pr-review: DEDUP-REFUSED ${verdict} ${REPO}#${pr} @ ${sha} -- an equivalent review is already queued/in_progress; no cron minted (no-op)." >&2
+      # Exit 0 for the workflows; the reconciler sets QA_DEDUP_REFUSED_RC=76 so a
+      # refusal is not charged to it as an attempt (it would exhaust and page "lost").
+      exit "${QA_DEDUP_REFUSED_RC:-0}" ;;
+  esac
+else
+  echo "qa-dispatch-pr-review: DEDUP-SKIPPED ${REPO}#${pr} @ ${sha} -- in-flight lookup failed; dispatching anyway (fail open)." >&2
+fi
 
 # Namespace the one-shot job by repo so hydra#123 and ads-manager#123 never
 # collide in the cron list (idempotency cleanup keys on the full name below).
@@ -98,12 +142,12 @@ Follow the skill Auto mode section exactly. In short:
   of starting a new top-level DM (it owns the wording and prints the thread-root ts):
     bash /opt/hydra/scripts/qa-pr-thread-dm.sh ${REPO} ${pr} ${REQUESTER_UID}
 - Skip the Step 5 human gate; post the batched review (Step 6, COMMENT) to GitHub
-  yourself after the audit-log line. Check CI with "gh pr checks ${pr} --repo ${REPO}".
+  yourself after the audit-log line.
 - Before any GO, carry prior findings forward (skill "Carry forward prior findings"):
   resolve confirmed-fixed threads, treat any unresolved Critical/Important as a blocker.
-- Approve (Step 7, scripts/qa-pr-approve.sh, requester ${REQUESTER_UID}) ONLY IF every
-  CI check passed, the verdict is GO (no Critical, no Important), and the wrapper
-  allowlist passes. Otherwise post the review and DO NOT approve. Never merge.
+- Approve through scripts/qa-pr-approve.sh (Step 7, requester ${REQUESTER_UID}) whenever
+  the verdict is GO (no Critical, no Important). The wrapper decides CI greenness: advisory
+  checks alert, they do not withhold. Do not gate on CI yourself. Never merge.
 - LAST, DM the author the result as a threaded reply under that opening ts (one line:
   approved + safe to merge, or not-approved + the reason and finding counts).
 EOF
@@ -217,6 +261,20 @@ fi
 # `outcome=error error="Delivering to Slack requires target ..."` ~26-30x/day and the
 # failed one-shot is never --delete-after-run'd. --no-deliver disables that fallback
 # (the CLI equivalent of a `"mode": "none"` job). Verified: openclaw 2026.5.27.
+# Transport-failure signatures that mean the request never reached the gateway.
+# The ONE list; matched fixed-string + case-insensitive against openclaw's stderr.
+PRE_GATEWAY_SIGNATURES=(
+  "Opening handshake has timed out"
+  "ECONNREFUSED"
+  "ECONNRESET"
+  "connect ETIMEDOUT"
+  "socket hang up"
+  "fetch failed"
+)
+
+add_err="$(mktemp)"
+trap 'rm -f "$add_err"' EXIT
+add_rc=0
 "$OPENCLAW" --profile "$PROFILE" cron add \
   --name "$job_name" \
   --at "+5s" \
@@ -226,6 +284,17 @@ fi
   --timeout-seconds "$TIMEOUT_SECONDS" \
   --no-deliver \
   --delete-after-run \
-  --json
+  --json 2>"$add_err" || add_rc=$?
+# Re-emit verbatim: classification must never swallow the diagnostic.
+cat "$add_err" >&2
+if [ "$add_rc" -ne 0 ]; then
+  for sig in "${PRE_GATEWAY_SIGNATURES[@]}"; do
+    if grep -Fqi -- "$sig" "$add_err"; then
+      echo "qa-dispatch-pr-review: gateway unreachable ('$sig') -- no review queued; exiting 75 (not an attempt)." >&2
+      exit 75
+    fi
+  done
+  exit "$add_rc"
+fi
 
 echo "qa-dispatch-pr-review: dispatched auto-review of ${REPO}#${pr} (${sha}) -> agent ${AGENT}."

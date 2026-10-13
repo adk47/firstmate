@@ -66,8 +66,29 @@ if [ "${CURL_STUB_HTTP_CODE:-200}" != "200" ]; then
   exit 0
 fi
 page=$(printf '%s' "$url" | sed -n 's/.*[?&]page=\([0-9]*\).*/\1/p')
+# ORDER MATTERS. The task URL is `/list/<id>/task?…`, so a `*/list/[0-9]*`
+# pattern matches it too — placing the metadata branch first made the stub
+# answer every TASK fetch with a status document and broke 24 existing tests.
+# Task requests are matched first; metadata is only what is left.
 case "$url" in
   *date_updated_gt*) f="$COUNTS_STUB_DIR/cpage${page:-0}.json" ;;
+  */task\?*)         f="$CURL_STUB_DIR/page${page:-0}.json" ;;
+  # LIST METADATA: `/list/<id>` with no `/task`. The due fetch reads this to
+  # build its open-status filter. Without this branch the request fell through
+  # to the task-page fixture, `.statuses[]?` was empty, and EVERY test silently
+  # took the unfiltered fallback — so the filter was never exercised at all.
+  # That is the gap this closes (QA finding on PR #965).
+  */list/[0-9]*)
+    if [ -n "${CURL_STUB_STATUSES_FAIL:-}" ]; then
+      echo '{"tasks":[]}' > "$out"      # wrong-shape metadata -> fallback path
+    elif [ -f "$TEST_TMPDIR/statuses.json" ]; then
+      cat "$TEST_TMPDIR/statuses.json" > "$out"
+    else
+      echo '{"statuses":[]}' > "$out"
+    fi
+    printf '200'
+    exit 0
+    ;;
   *)                 f="$CURL_STUB_DIR/page${page:-0}.json" ;;
 esac
 if [ -f "$f" ]; then cat "$f" > "$out"; else echo '{"tasks":[]}' > "$out"; fi
@@ -75,6 +96,20 @@ printf '200'
 STUB
   chmod +x "$TEST_TMPDIR/bin/muso" "$TEST_TMPDIR/bin/curl"
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
+
+  # The real list's status set, including the SPACED names ("to do",
+  # "in progress") that a `for s in $(…)` word-split would mangle, and the
+  # done/closed-type ones that must never reach the filter.
+  cat > "$TEST_TMPDIR/statuses.json" <<'STATUSES'
+{"statuses":[
+  {"status":"to do","type":"open"},
+  {"status":"in progress","type":"custom"},
+  {"status":"waiting","type":"custom"},
+  {"status":"resolved","type":"done"},
+  {"status":"impossible","type":"done"},
+  {"status":"user updated","type":"closed"}
+]}
+STATUSES
 
   export CLICKUP_API_KEY=pk_test_fake
   # Freeze "now" at 2026-06-12 08:00 America/New_York (a Friday).
@@ -363,4 +398,82 @@ counts_with() { jq -n --argjson tasks "$(printf '%s\n' "$@" | jq -s '.')" '{task
   [ "$status" -ne 0 ]
   echo "$output" | grep -q "no tasks array"
   [ ! -s "$STUB_CALLS" ]
+}
+
+
+# ── the open-status filter (QA finding on PR #965) ─────────────────────────
+# `include_closed=false` drops only statuses of TYPE "closed"; this list also
+# defines `done`-type ones (resolved, impossible) and ClickUp returns those.
+# Measured: 64% of the fetched pages were tickets the jq filter discarded one
+# line later, so the due fetch burned its page budget and hit PAGINATION_CAP.
+# These cases pin the filter the fix added — before them, the stub served a
+# task-shaped payload for the metadata URL and every test took the fallback.
+
+# _due_url: the due-task request the script actually issued.
+_due_url() { grep '/task?' "$CURL_STUB_URLS" | grep 'due_date_lt' | head -1; }
+
+@test "the due fetch sends the list's OPEN statuses, url-encoded" {
+  page_with "$(task t1 'Due today' "$(due_ms 2026-06-12)" open open)"
+  run bash "$DIGEST" --dry-run
+  [ "$status" -eq 0 ]
+  url="$(_due_url)"
+  [[ "$url" == *"statuses%5B%5D=to%20do"* ]]
+  [[ "$url" == *"statuses%5B%5D=in%20progress"* ]]
+  [[ "$url" == *"statuses%5B%5D=waiting"* ]]
+}
+
+@test "the due fetch NEVER sends done- or closed-type statuses" {
+  # The whole point: resolved/impossible/user-updated are what filled the pages.
+  page_with "$(task t1 'Due today' "$(due_ms 2026-06-12)" open open)"
+  run bash "$DIGEST" --dry-run
+  [ "$status" -eq 0 ]
+  url="$(_due_url)"
+  [[ "$url" != *"resolved"* ]]
+  [[ "$url" != *"impossible"* ]]
+  [[ "$url" != *"user%20updated"* ]]
+}
+
+@test "spaced status names are sent as ONE parameter each, not word-split" {
+  # `for s in $(…)` splits "to do" into "to" and "do" and the filter then
+  # matches nothing it was meant to. I hit exactly that while measuring the fix.
+  page_with "$(task t1 'Due today' "$(due_ms 2026-06-12)" open open)"
+  run bash "$DIGEST" --dry-run
+  url="$(_due_url)"
+  [ "$(printf '%s' "$url" | grep -o 'statuses%5B%5D=' | wc -l | tr -d ' ')" -eq 3 ]
+  [[ "$url" != *"statuses%5B%5D=to&"* ]]
+  [[ "$url" != *"statuses%5B%5D=do"* ]]
+}
+
+@test "it announces how many open statuses it filtered to" {
+  page_with "$(task t1 'Due today' "$(due_ms 2026-06-12)" open open)"
+  run bash "$DIGEST" --dry-run
+  [[ "$output" == *"filtering server-side to 3 open status(es)"* ]]
+}
+
+@test "an EMPTY status list falls back to unfiltered and says so" {
+  printf '%s\n' '{"statuses":[]}' > "$TEST_TMPDIR/statuses.json"
+  page_with "$(task t1 'Due today' "$(due_ms 2026-06-12)" open open)"
+  run bash "$DIGEST" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"could not read open statuses"* ]]
+  [[ "$output" == *"fetching unfiltered"* ]]
+  [[ "$(_due_url)" != *"statuses%5B%5D"* ]]
+}
+
+@test "a metadata response of the WRONG SHAPE falls back rather than sending junk" {
+  # The exact pre-fix condition: the metadata URL answered with a task page.
+  run env CURL_STUB_STATUSES_FAIL=1 bash "$DIGEST" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"could not read open statuses"* ]]
+  [[ "$(_due_url)" != *"statuses%5B%5D"* ]]
+}
+
+@test "the COUNT fetch keeps include_closed=true — it measures closed flow" {
+  # Scope guard: the fix must not leak onto the count fetch, which genuinely
+  # needs closed tasks to report yesterday's opened/closed numbers.
+  page_with "$(task t1 'Due today' "$(due_ms 2026-06-12)" open open)"
+  run bash "$DIGEST" --dry-run
+  count_url="$(grep 'date_updated_gt' "$CURL_STUB_URLS" | head -1)"
+  [[ "$count_url" == *"include_closed=true"* ]]
+  [[ "$count_url" != *"statuses%5B%5D"* ]]
 }

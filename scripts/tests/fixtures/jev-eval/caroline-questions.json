@@ -1,0 +1,6 @@
+{
+  "resolution_path": {"type": "choice", "options": ["ask_customer", "caroline_tool", "human_required", "no_reply"]},
+  "intent": {"type": "choice", "options": ["credits_missing", "refund_request", "other"]},
+  "first_tool": {"type": "choice", "options": ["credits_lookup", "none"]},
+  "frustration": {"type": "score", "levels": 4}
+}

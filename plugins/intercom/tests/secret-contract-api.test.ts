@@ -100,14 +100,56 @@ describe("intercom channel secret-contract", () => {
       },
     };
     collectRuntimeConfigAssignments({ config, context: {} as any });
-    expect(collectNestedSpy).toHaveBeenCalledTimes(1);
-    const params = collectNestedSpy.mock.calls[0][0];
+    // Two nested fields are collected per call now (clickup + jev — see the
+    // jev nested-field test below); isolate the clickup one by nestedKey.
+    expect(collectNestedSpy).toHaveBeenCalledTimes(2);
+    const params = collectNestedSpy.mock.calls.map((c) => c[0]).find((p: any) => p.nestedKey === "clickup");
     expect(params.channelKey).toBe("intercom");
     expect(params.nestedKey).toBe("clickup");
     expect(params.field).toBe("apiKey");
     // clickup is per-account only — the top-level channel object never carries it.
     expect(params.topLevelActive).toBe(false);
     // Only enabled accounts are active for resolution.
+    const surface = params.surface;
+    const enabledEntry = surface.accounts.find((e: any) => e.accountId === "default");
+    const disabledEntry = surface.accounts.find((e: any) => e.accountId === "disabled");
+    expect(params.accountActive(enabledEntry)).toBe(true);
+    expect(params.accountActive(disabledEntry)).toBe(false);
+  });
+
+  it("registers the per-account jev apiKey as an env-resolvable secret_input target", () => {
+    // Same rationale as clickup.apiKey above (docs/designs/2026-09-22-jev-
+    // caroline-router.md §B): without this entry, config.ts's
+    // account.jev.enabled check would see the raw SecretRef object as
+    // "truthy" and jev-client.ts would 401 on every real call.
+    const patterns = secretTargetRegistryEntries.map((e) => e.pathPattern);
+    expect(patterns).toContain("channels.intercom.accounts.*.jev.apiKey");
+  });
+
+  it("collects the nested jev.apiKey field so a ref is resolved before callJev reads it", () => {
+    const config = {
+      channels: {
+        intercom: {
+          accounts: {
+            default: {
+              enabled: true,
+              token: "tok",
+              jev: {
+                enabled: true,
+                apiKey: { source: "env", provider: "hydra-env", id: "OPENROUTER_API_KEY" },
+              },
+            },
+            disabled: { enabled: false, token: "tok2" },
+          },
+        },
+      },
+    };
+    collectRuntimeConfigAssignments({ config, context: {} as any });
+    const params = collectNestedSpy.mock.calls.map((c) => c[0]).find((p: any) => p.nestedKey === "jev");
+    expect(params).toBeDefined();
+    expect(params.channelKey).toBe("intercom");
+    expect(params.field).toBe("apiKey");
+    expect(params.topLevelActive).toBe(false);
     const surface = params.surface;
     const enabledEntry = surface.accounts.find((e: any) => e.accountId === "default");
     const disabledEntry = surface.accounts.find((e: any) => e.accountId === "disabled");

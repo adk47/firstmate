@@ -1,5 +1,10 @@
 # Platform Features
 
+> "Platform" here means **the Muso app** and what a subscription includes. If the
+> customer is asking about **platform.muso.ai**, the self-service developer
+> platform for API access to the whole catalog, that is a different product --
+> see `platform.md`.
+
 ## Analytics
 
 Turn your credits into daily stats. Available on Pro and Business plans.
@@ -52,6 +57,22 @@ AI-curated Spotify playlist of your work. Available on Pro and Business plans.
 
 Share your discography playlist on resumes, social media, and portfolios to showcase your body of work as a producer, songwriter, or engineer.
 
+### If your playlist is missing or stale
+
+If your Muso-generated Spotify discography playlist is missing, expired, or
+stale, first confirm the tracks appear in your Muso discography. Then send your
+Muso profile link, the generated playlist link if available, and one example
+track that is missing so support can check the playlist mapping.
+
+---
+
+## App Language
+
+On iPhone, open Settings > Apps > Muso > Preferred Language, choose your
+language, and reopen Muso. On older iOS versions, use Settings > Muso >
+Language. If a screen remains in another language, send a screenshot and your
+device version to support.
+
 ---
 
 ## Business Workspaces
@@ -75,6 +96,18 @@ Track custom lists of profiles for monitoring specific groups of talent.
 
 ### Client Self-Service
 Enable clients to access their own analytics through your workspace.
+
+---
+
+## Credit and Catalog CSV Requests
+
+If a customer asks for a CSV of their own credits or workspace catalog, ask
+for their Muso profile link, which roles or part of the catalog they need,
+their account email, and how they plan to use the file. Check what export
+options are available for their plan and workspace before promising a download.
+If no matching self-service option is available, send the request for manual
+review and share a delivery estimate only after the team confirms one.
+Full-catalog or bulk-data requests need review before any export is promised.
 
 ---
 

@@ -46,6 +46,18 @@ Env:
   CLOSE_SUMMARY_SLACK_ACCOUNT  optional, default operations (which Slack bot posts)
   SLACK_NOTIFY_CONFIG          optional, default /root/.openclaw-main/openclaw.json
                                 (openclaw config holding the Slack bot token)
+  CLOSE_RESOLVED_JEV_SAMPLE_SIZE optional, default 25 — Phase 2a shadow-only
+                                Jev sample size (docs/plans/jev-adoption.md
+                                #2a; see JEV_SURFACE_CLOSE_RESOLVED below).
+                                Each run draws a FRESH random sample (never
+                                the head of the scan) of this size from the
+                                FULL open-conversation scan (~5,800/run
+                                measured), not just the eligible-to-close
+                                slice — so most sampled rows are
+                                `actual="not-eligible"` and a few are
+                                `actual="eligible"`, mirroring is_eligible()'s
+                                own decision. This can never change what gets
+                                closed.
 
 Flags:
   --apply       actually close (default: dry-run — list only, no writes)
@@ -64,6 +76,7 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -75,6 +88,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.customer_outcome import customer_complete  # noqa: E402
 from lib.intercom_identity import resolve_admin_id  # noqa: E402
+from lib.jev_shadow import shadow_judge  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
@@ -101,6 +115,36 @@ RESOLVE_STATE_VERSION = 2
 RESOLVE_STATE_VERSION_KEY = "__state_version__"
 RESOLVE_STATE_CHECKSUM_KEY = "__state_checksum__"
 RESOLVE_BULK_BACKLOG_KEY = "__bulk_backlog__"
+DEFAULT_JEV_SAMPLE_SIZE = 25
+
+# Phase 2a shadow-only Jev surface (docs/plans/jev-adoption.md #2a). Judges,
+# for a RANDOM sample of the full open-conversation scan, whether the
+# conversation reads as genuinely resolved from the customer's own
+# perspective — independent of and strictly AFTER this script's own
+# deterministic is_eligible() decision, never influencing it. See
+# CLOSE_RESOLVED_JEV_SAMPLE_SIZE above.
+JEV_SURFACE_CLOSE_RESOLVED = "close-resolved"
+CLOSE_RESOLVED_QUESTIONS = {
+    "conversation_genuinely_resolved": {
+        "type": "noul",
+        "instructions": (
+            "State carries the customer's most recent message in this open "
+            "conversation as `customer_message`, the admin's message "
+            "immediately BEFORE it (if any) as `preceding_admin_message`, "
+            "and whether every ClickUp ticket precisely linked to this "
+            "conversation (#417 field) is marked customer-complete as "
+            "`linked_ticket_customer_complete` (true/false/null — null means "
+            "no linked ticket was found for this conversation). Decide "
+            "whether this conversation reads as GENUINELY resolved from the "
+            "customer's own perspective, not merely administratively closed "
+            "out on the ticket side."
+        ),
+        "criteria": {
+            "true": "The conversation reads as genuinely resolved for the customer.",
+            "false": "The conversation does not read as resolved (an unanswered question, a still-open concern, or no evidence of resolution in the message text).",
+        },
+    },
+}
 
 
 def _resolve_state_checksum(state):
@@ -347,6 +391,81 @@ def fetch_open_convs(token):
     return convs
 
 
+# Bounded, single-attempt (no retry/backoff), short timeout — unlike
+# _retry_json (used by this script's own correctness-critical GETs, which
+# legitimately need generous retries), this fetch feeds ONLY a best-effort
+# shadow Jev sample: a failure here just means that one sample is skipped
+# this run (see close_resolved_shadow_state), so it must be bounded exactly
+# as tightly as the jev.sh call itself (jev_shadow.DEFAULT_TIMEOUT_S) rather
+# than able to add minutes of latency chasing a single dead sample.
+JEV_SHADOW_FETCH_TIMEOUT_S = 5
+
+
+def get_conversation_for_shadow(conv_id, token):
+    """GET /conversations/{id}?display_as=plaintext (read-only), single
+    attempt, JEV_SHADOW_FETCH_TIMEOUT_S bound.
+
+    Used ONLY to build state for the Phase 2a close-resolved shadow Jev
+    sample below — this script's own real is_eligible() decision never
+    depends on conversation body text (fetch_open_convs only reads
+    lar/lcr timestamps). Always called from inside shadow_judge's
+    build_state boundary (see close_resolved_shadow_state), so a failure
+    here is caught there and never reaches the close loop itself."""
+    req = urllib.request.Request(
+        f"{INTERCOM_API}/conversations/{conv_id}?display_as=plaintext",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
+                 "Intercom-Version": INTERCOM_VERSION},
+        method="GET")
+    with urllib.request.urlopen(req, timeout=JEV_SHADOW_FETCH_TIMEOUT_S) as resp:
+        return json.load(resp)
+
+
+def _text_of(part):
+    body = part.get("body") if part else None
+    return re.sub(r"<[^>]+>", " ", body).strip() if body else ""
+
+
+def close_resolved_shadow_state(conv_id, token, linked_ticket_complete):
+    """(state | None) for the close-resolved Jev question: the sampled
+    conversation's most recent customer message, the admin message
+    immediately before it (if any), and whether every #417-linked ticket is
+    customer-complete. Fetches the conversation (network — the reason this
+    is a build_state callable, not a plain dict). Returns None when the
+    fetched conversation has no customer part to judge."""
+    conv = get_conversation_for_shadow(conv_id, token)
+    parts = (conv.get("conversation_parts") or {}).get("conversation_parts") or []
+    last_customer_idx = None
+    for i in range(len(parts) - 1, -1, -1):
+        a = (parts[i].get("author") or {})
+        if a.get("type") == "user":
+            last_customer_idx = i
+            break
+    if last_customer_idx is None:
+        return None
+    preceding_admin = None
+    for i in range(last_customer_idx - 1, -1, -1):
+        a = (parts[i].get("author") or {})
+        if a.get("type") in ("admin", "team"):
+            preceding_admin = _text_of(parts[i])
+            break
+    return {
+        "customer_message": _text_of(parts[last_customer_idx]),
+        "preceding_admin_message": preceding_admin,
+        "linked_ticket_customer_complete": linked_ticket_complete,
+    }
+
+
+def _jev_sample_size():
+    raw = os.environ.get("CLOSE_RESOLVED_JEV_SAMPLE_SIZE")
+    if not raw:
+        return DEFAULT_JEV_SAMPLE_SIZE
+    try:
+        n = int(raw)
+    except ValueError:
+        return DEFAULT_JEV_SAMPLE_SIZE
+    return n if n > 0 else DEFAULT_JEV_SAMPLE_SIZE
+
+
 def is_eligible(conv, email_states, conv_states, backfill=False,
                 held_ticket_ids=None, defer_convs=None):
     """Eligible to close iff we spoke last and every linked ticket is customer-complete.
@@ -548,6 +667,27 @@ def main():
     print(f"deferred (resolve-notify owes an unsent note): {len(defer_convs)}")
     print(f"open conversations scanned: {len(convs)}")
     print(f"eligible (linked ticket customer-complete AND we replied last): {len(eligible)}")
+
+    # Shadow-only (Phase 2a #2a): fires strictly AFTER is_eligible() above, on
+    # a RANDOM sample of the FULL open-conversation scan (never the head),
+    # and can never change `eligible`, closes, stdout, or the exit code. A
+    # fresh, non-fixed seed each run is logged to stderr so a run can be
+    # reproduced. See docs/plans/jev-adoption.md #2a and
+    # CLOSE_RESOLVED_JEV_SAMPLE_SIZE above.
+    eligible_ids = {c["id"] for c in eligible}
+    jev_k = min(_jev_sample_size(), len(convs))
+    if jev_k > 0:
+        jev_seed = random.SystemRandom().randrange(2 ** 32)
+        print(f"jev shadow sample: seed={jev_seed} size={jev_k} "
+              f"(pool={len(convs)})", file=sys.stderr)
+        for c in random.Random(jev_seed).sample(convs, jev_k):
+            linked_complete = (all(conv_states[c["id"]]["complete"])
+                                if c["id"] in conv_states else None)
+            shadow_judge(JEV_SURFACE_CLOSE_RESOLVED, c["id"],
+                         lambda cid=c["id"], lc=linked_complete:
+                             close_resolved_shadow_state(cid, token, lc),
+                         CLOSE_RESOLVED_QUESTIONS,
+                         actual=("eligible" if c["id"] in eligible_ids else "not-eligible"))
 
     if not args.apply:
         for c in eligible[:15]:

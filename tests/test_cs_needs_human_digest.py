@@ -56,12 +56,23 @@ class TestBucketConversations(unittest.TestCase):
         self.assertEqual(buckets["needs_human"], [])
         self.assertEqual([x["id"] for x in buckets["needs_customer_input"]], ["c1"])
 
-    def test_needs_human_ranked_oldest_waiting_first(self):
+    def test_needs_human_ranked_newest_waiting_first(self):
         recent = conv(cid="R", lar=0, lcr=900)
         oldest = conv(cid="O", lar=0, lcr=100)
         middle = conv(cid="M", lar=0, lcr=500)
         buckets = d.bucket_conversations([recent, oldest, middle], set())
-        self.assertEqual([c["id"] for c in buckets["needs_human"]], ["O", "M", "R"])
+        self.assertEqual([c["id"] for c in buckets["needs_human"]], ["R", "M", "O"])
+
+    def test_ancient_item_ranks_last_and_stays_out_of_top_n(self):
+        # MUS-8853: oldest-first pinned the 194-day tail in the rendered
+        # [:top_n] slice while live threads never surfaced.
+        now = 1_000_000_000
+        live = [conv(cid=f"L{i}", lar=0, lcr=now - i * 3600) for i in range(1, 21)]
+        ancient = conv(cid="ANCIENT", lar=0, lcr=now - 194 * 86400)
+        buckets = d.bucket_conversations([ancient] + live, set())
+        ids = [c["id"] for c in buckets["needs_human"]]
+        self.assertEqual(ids[-1], "ANCIENT")
+        self.assertNotIn("ANCIENT", ids[:d.DEFAULT_TOP_N])
 
     def test_same_email_two_open_convs_is_dup_candidate(self):
         d1 = conv(cid="D1", email="dup@x.com")
@@ -99,7 +110,9 @@ class TestBucketConversations(unittest.TestCase):
         older = conv(cid="OLD", lar=0, lcr=0, created_at=1000)
         newer = conv(cid="NEW", lar=0, lcr=0, created_at=2000)
         buckets = d.bucket_conversations([newer, older], set())  # API order: NEW, OLD
-        self.assertEqual([c["id"] for c in buckets["needs_human"]], ["OLD", "NEW"])
+        self.assertEqual([c["id"] for c in buckets["needs_human"]], ["NEW", "OLD"])
+        self.assertNotEqual(d.waiting_since(older), 0)
+        self.assertNotEqual(d.waiting_since(newer), 0)
 
     def test_outbound_zero_zero_is_needs_customer_input_not_needs_human(self):
         # KEY regression (inbound-vs-outbound finding): lar==0 and lcr==0 is
@@ -142,6 +155,63 @@ class TestBucketConversations(unittest.TestCase):
         buckets = d.bucket_conversations([c], set())
         self.assertEqual([x["id"] for x in buckets["needs_human"]], ["CONTACT1"])
         self.assertEqual(buckets["needs_customer_input"], [])
+
+
+class TestSplitActionable(unittest.TestCase):
+    NOW = 1_000_000_000
+    DAY = 86400
+
+    def test_inside_outside_and_exact_boundary(self):
+        inside = conv(cid="IN", lar=0, lcr=self.NOW - 29 * self.DAY)
+        edge = conv(cid="EDGE", lar=0, lcr=self.NOW - 30 * self.DAY)
+        outside = conv(cid="OUT", lar=0, lcr=self.NOW - 30 * self.DAY - 1)
+        act, back = d.split_actionable([outside, inside, edge], self.NOW)
+        self.assertEqual([c["id"] for c in act], ["IN", "EDGE"])
+        self.assertEqual([c["id"] for c in back], ["OUT"])
+
+    def test_never_replied_rides_created_at_not_epoch(self):
+        fresh = conv(cid="NEW", lar=0, lcr=0, created_at=self.NOW - 3600)
+        act, back = d.split_actionable([fresh], self.NOW)
+        self.assertEqual([c["id"] for c in act], ["NEW"])
+        self.assertEqual(back, [])
+
+    def test_empty_input(self):
+        self.assertEqual(d.split_actionable([], self.NOW), ([], []))
+
+    def test_window_days_honoured(self):
+        c = conv(cid="C", lar=0, lcr=self.NOW - 10 * self.DAY)
+        self.assertEqual(d.split_actionable([c], self.NOW, window_days=7), ([], [c]))
+        self.assertEqual(d.split_actionable([c], self.NOW, window_days=10), ([c], []))
+
+
+class TestActionableDups(unittest.TestCase):
+    NOW = 1_000_000_000
+    DAY = 86400
+
+    def _ids(self, convs, **kw):
+        return [c["id"] for c in d.actionable_dups(convs, self.NOW, **kw)]
+
+    def test_group_with_one_recent_member_keeps_both(self):
+        new = conv(cid="NEW", email="a@x.com", lar=0, lcr=self.NOW - 3600)
+        old = conv(cid="OLD", email="a@x.com", lar=0, lcr=self.NOW - 194 * self.DAY)
+        self.assertEqual(self._ids([old, new]), ["OLD", "NEW"])
+
+    def test_group_entirely_ancient_is_dropped(self):
+        a = conv(cid="A", email="a@x.com", lar=0, lcr=self.NOW - 100 * self.DAY)
+        b = conv(cid="B", email="a@x.com", lar=0, lcr=self.NOW - 194 * self.DAY)
+        self.assertEqual(self._ids([a, b]), [])
+
+    def test_falsy_email_is_never_a_member(self):
+        fresh = conv(cid="F", email="", lar=0, lcr=self.NOW - 3600)
+        self.assertEqual(self._ids([fresh]), [])
+
+    def test_single_member_group_unaffected(self):
+        one = conv(cid="ONE", email="a@x.com", lar=0, lcr=self.NOW - 3600)
+        self.assertEqual(self._ids([one]), ["ONE"])
+
+    def test_window_days_honoured(self):
+        c = conv(cid="C", email="a@x.com", lar=0, lcr=self.NOW - 10 * self.DAY)
+        self.assertEqual(self._ids([c], window_days=7), [])
 
 
 class TestOwnedIds(unittest.TestCase):
@@ -282,6 +352,36 @@ class TestRenderTextDigest(unittest.TestCase):
         self.assertNotIn("alice@example.com", text)
         self.assertIn("a***@***", text)
 
+    def test_full_digest_states_observable_reply_order_without_waiting_claims(self):
+        now = 1_000_000
+        replied = conv(cid="REPLIED", lar=0, lcr=now - 3600)
+        tied = conv(cid="TIED", lar=now - (2 * 3600), lcr=now - (2 * 3600))
+        opened = conv(cid="OPENED", lar=0, lcr=0,
+                      created_at=now - (2 * 3600), is_inbound=True)
+        outbound = conv(cid="OUTBOUND", lar=0, lcr=0,
+                        created_at=now - (3 * 3600), is_inbound=False)
+        buckets = d.bucket_conversations([replied, tied, opened, outbound], set())
+
+        text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20)
+
+        self.assertIn("CS open-conversation review daily digest", text)
+        self.assertIn("customer-side activity is latest: 3", text)
+        self.assertIn(
+            "team-side activity is latest, or team initiated with no recorded "
+            "customer reply: 1", text)
+        self.assertIn(
+            "customer is last recorded replier; last customer reply 1h ago", text)
+        self.assertIn(
+            "customer and team share the latest recorded reply time; "
+            "last customer reply 2h ago", text)
+        self.assertIn(
+            "customer-initiated; opened 2h ago; no recorded reply", text)
+        self.assertIn(
+            "Open status and reply order do not prove that a customer went unanswered.",
+            text)
+        self.assertNotIn("waiting", text.lower())
+        self.assertNotIn("aging", text.lower())
+
 
 class TestBuildDigestBlocks(unittest.TestCase):
     def test_header_is_plain_text_never_pings(self):
@@ -314,7 +414,41 @@ class TestBuildDigestBlocks(unittest.TestCase):
         c = conv(cid="OLD", lar=0, lcr=0, created_at=now - (72 * 3600))  # 72h old
         buckets = d.bucket_conversations([c], set())
         blocks = d.build_digest_blocks(buckets, now_epoch=now)
-        self.assertIn("past 48h", str(blocks))
+        self.assertIn("customer-side activity older than 48h", str(blocks))
+
+    def test_full_blocks_use_neutral_title_counts_rows_and_caveat(self):
+        now = 1_000_000
+        c = conv(cid="C1", lar=0, lcr=now - (25 * 3600))
+        buckets = d.bucket_conversations([c], set())
+
+        blocks = d.build_digest_blocks(buckets, now_epoch=now, aging_hours=20)
+        rendered = str(blocks)
+
+        self.assertEqual(
+            blocks[0]["text"]["text"], "CS open-conversation review daily digest")
+        self.assertIn("customer-side activity is latest", rendered)
+        self.assertIn("older than 20h since customer-side activity", rendered)
+        self.assertIn("do not prove that a customer went unanswered", rendered)
+        self.assertNotIn("waiting", rendered.lower())
+        self.assertNotIn("aging", rendered.lower())
+
+    def test_full_blocks_keep_every_section_within_slack_limit(self):
+        now = 10_000_000
+        items = [
+            conv(cid=str(100_000_000_000_000 + i), lar=0,
+                 lcr=now - ((25 + i) * 3600))
+            for i in range(15)
+        ]
+        buckets = d.bucket_conversations(items, set())
+
+        blocks = d.build_digest_blocks(
+            buckets, now_epoch=now, top_n=15, aging_hours=20)
+
+        sections = [b for b in blocks if b["type"] == "section"]
+        self.assertTrue(all(len(b["text"]["text"]) <= 3000 for b in sections))
+        rendered_rows = sum(
+            b["text"]["text"].count("conversation/") for b in sections)
+        self.assertEqual(rendered_rows, 15)
 
 
 class TestPostSlackDigestBestEffort(unittest.TestCase):
@@ -907,14 +1041,16 @@ class TestAgingRenderingAndMention(unittest.TestCase):
         c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
         buckets = d.bucket_conversations([c], set())
         text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20)
-        self.assertIn("aging", text)
+        self.assertIn("older than 20h since customer-side activity", text)
+        self.assertNotIn("aging", text.lower())
 
     def test_aging_line_appears_in_blocks(self):
         now = 1_000_000
         c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
         buckets = d.bucket_conversations([c], set())
         blocks = d.build_digest_blocks(buckets, now_epoch=now, aging_hours=20)
-        self.assertIn("aging", str(blocks))
+        self.assertIn("older than 20h since customer-side activity", str(blocks))
+        self.assertNotIn("aging", str(blocks).lower())
 
     def test_no_aging_line_when_under_threshold(self):
         now = 1_000_000
@@ -983,17 +1119,48 @@ class TestMentionComputedOnceAndNoHeaderDuplication(unittest.TestCase):
         blocks = d.build_delta_digest_blocks([c], [], now_epoch=now, top_n=15)
         title_occurrences = sum(
             1 for b in blocks
-            if b["type"] == "header" and b["text"]["text"] == "CS needs-human delta digest"
+            if b["type"] == "header"
+            and b["text"]["text"] == "CS open-conversation review delta"
         )
         self.assertEqual(title_occurrences, 1)
         section_texts = [b["text"]["text"] for b in blocks if b["type"] == "section"]
         self.assertFalse(
-            any("CS needs-human delta digest" in t for t in section_texts))
+            any("CS open-conversation review delta" in t for t in section_texts))
+
+    def test_delta_digest_uses_neutral_counts_rows_and_caveat(self):
+        now = 1_000_000
+        replied = conv(cid="REPLIED", lar=0, lcr=now - 3600)
+        tied = conv(cid="TIED", lar=now - (2 * 3600), lcr=now - (2 * 3600))
+        opened = conv(cid="OPENED", lar=0, lcr=0,
+                      created_at=now - (25 * 3600), is_inbound=True)
+
+        text = d.render_delta_digest(
+            [replied, tied, opened], [opened], now_epoch=now, top_n=15)
+
+        self.assertIn("CS open-conversation review delta", text)
+        self.assertIn("new to this digest: 3", text)
+        self.assertIn(
+            "older than 20h since customer-side activity: 1", text)
+        self.assertIn(
+            "customer is last recorded replier; last customer reply 1h ago", text)
+        self.assertIn(
+            "customer and team share the latest recorded reply time; "
+            "last customer reply 2h ago", text)
+        self.assertIn(
+            "customer-initiated; opened 25h ago; no recorded reply", text)
+        self.assertIn(
+            "Open status and reply order do not prove that a customer went unanswered.",
+            text)
+        self.assertNotIn("waiting", text.lower())
+        self.assertNotIn("aging", text.lower())
 
 
 class TestMainDeltaFlow(unittest.TestCase):
     def _env(self, **extra):
-        base = {"MUSOAI_INTERCOM_TOKEN": "t", "DIGEST_SKIP_HOST_GUARD": "1"}
+        # DIGEST_NOW pinned near the fixtures' tiny lcr so they sit inside the
+        # 30d actionable window (real time would make them 20000d-old backlog).
+        base = {"MUSOAI_INTERCOM_TOKEN": "t", "DIGEST_SKIP_HOST_GUARD": "1",
+                "DIGEST_NOW": "10000"}
         base.update(extra)
         return base
 
@@ -1105,7 +1272,7 @@ class TestMainDeltaFlow(unittest.TestCase):
              redirect_stdout(out), redirect_stderr(err):
             rc = d.main()
         self.assertEqual(rc, 0)
-        self.assertIn("CS needs-human daily digest", out.getvalue())
+        self.assertIn("CS open-conversation review daily digest", out.getvalue())
         self.assertIn("corrupt", err.getvalue())
 
     def test_corrupt_state_full_post_renders_and_posts_but_skips_persistence(self):
@@ -1228,11 +1395,11 @@ class TestMainDeltaFlow(unittest.TestCase):
              redirect_stdout(io.StringIO()):
             rc = d.main()
         self.assertEqual(rc, 0)
-        # needs_human is ranked oldest-waiting-first — the 5 NEWEST (highest
-        # lcr, i.e. C15..C19) rank beyond top_n=15 and must be absent.
-        for i in range(15, 20):
+        # needs_human is ranked newest-waiting-first — the 5 OLDEST (lowest
+        # lcr, i.e. C0..C4) rank beyond top_n=15 and must be absent.
+        for i in range(0, 5):
             self.assertNotIn(f"C{i}", captured["next_state"])
-        for i in range(0, 15):
+        for i in range(5, 20):
             self.assertIn(f"C{i}", captured["next_state"])
 
     def test_full_post_failure_does_not_persist_state_and_exits_1(self):
@@ -1279,11 +1446,18 @@ class TestDeltaDigestLargeBacklogCap(unittest.TestCase):
         self.assertIn("13:30 full digest", text)
 
     def test_build_delta_digest_blocks_section_text_under_slack_cap(self):
-        now = 1_000_000
-        items = [conv(cid=f"N{i}", lar=0, lcr=now - i) for i in range(100)]
-        blocks = d.build_delta_digest_blocks(items, [], now_epoch=now, top_n=15)
-        section = [b for b in blocks if b["type"] == "section"][-1]
-        self.assertLess(len(section["text"]["text"]), 3000)
+        now = 10_000_000
+        items = [
+            conv(cid=str(100_000_000_000_000 + i), lar=0,
+                 lcr=now - ((25 + i) * 3600))
+            for i in range(100)
+        ]
+        blocks = d.build_delta_digest_blocks(items, items, now_epoch=now, top_n=15)
+        sections = [b for b in blocks if b["type"] == "section"]
+        self.assertTrue(all(len(b["text"]["text"]) <= 3000 for b in sections))
+        rendered_rows = sum(
+            b["text"]["text"].count("conversation/") for b in sections)
+        self.assertEqual(rendered_rows, 15)
 
     def test_state_records_only_the_rendered_subset_not_all_100(self):
         # Consistency with the rank-beyond-top_n fix: --delta state must only
@@ -1345,6 +1519,134 @@ class TestBuildNextStateAgingRefresh(unittest.TestCase):
         new_items, aging_items, _ = d.compute_delta_and_next_state(
             s2, [self._c(25)], now, ah)                          # re-cross
         self.assertEqual([c["id"] for c in aging_items], ["C1"])
+
+
+class TestActionableWindowWiring(unittest.TestCase):
+    """MUS-8853b: the 30d window reaches both renderers, --delta and the
+    persisted state through main() — a 194d-old thread is not listed, and is
+    rolled into exactly one backlog line carrying the real count."""
+    NOW = 1_800_000_000
+    DAY = 86400
+    OLD = conv(cid="OLD", lar=0, lcr=NOW - 194 * DAY)
+    NEW = conv(cid="NEW", lar=0, lcr=NOW - 2 * 3600)
+
+    def _env(self, **extra):
+        base = {"MUSOAI_INTERCOM_TOKEN": "t", "DIGEST_SKIP_HOST_GUARD": "1",
+                "DIGEST_NOW": str(self.NOW)}
+        base.update(extra)
+        return base
+
+    def _run(self, convs, argv, state=None, env=None, post=True):
+        import sys as _sys
+        import io
+        from contextlib import redirect_stdout
+        out, saved, blocks = io.StringIO(), {}, {}
+
+        def fake_post(b, text, *a):
+            blocks["b"] = b
+            return post
+
+        def fake_save(path, ns):
+            saved["state"] = ns
+
+        with mock.patch.object(d, "fetch_open_convs", return_value=convs), \
+             mock.patch.object(d, "load_delta_state", return_value=state or {}), \
+             mock.patch.object(d, "post_slack_digest", fake_post), \
+             mock.patch.object(d, "save_delta_state", fake_save), \
+             mock.patch.dict("os.environ", self._env(**(env or {}))), \
+             mock.patch.object(_sys, "argv", ["d"] + argv), \
+             redirect_stdout(out):
+            rc = d.main()
+        return rc, out.getvalue(), blocks.get("b"), saved.get("state")
+
+    def _block_text(self, blocks):
+        return "\n".join(b["text"]["text"] for b in blocks if b["type"] == "section")
+
+    def test_full_digest_lists_only_recent_and_rolls_up_backlog_once(self):
+        rc, out, blocks, _ = self._run([self.OLD, self.NEW], ["--post"])
+        self.assertEqual(rc, 0)
+        line = ("backlog: 1 open conversations with no customer-side activity "
+                "in the last 30d — being drained separately (not listed here)")
+        btxt = self._block_text(blocks)
+        for text in (out, btxt.replace("*", "")):
+            self.assertNotIn("conversations/OLD", text)
+            self.assertNotIn("194d", text)
+            self.assertIn(d.intercom_link("NEW"), text)
+            self.assertIn("customer-side activity is latest: 1", text)
+            self.assertEqual(text.count(line), 1)
+
+    def test_backlog_line_absent_when_everything_in_window(self):
+        rc, out, blocks, _ = self._run([self.NEW], ["--post"])
+        self.assertNotIn("backlog:", out)
+        self.assertNotIn("backlog:", self._block_text(blocks))
+
+    def test_counts_line_reports_aging_total(self):
+        old_ish = conv(cid="AGE", lar=0, lcr=self.NOW - 3 * self.DAY)
+        _, out, blocks, _ = self._run([old_ish, self.NEW], [])
+        self.assertIn("customer-side activity is latest: 2", out)
+        self.assertIn("older than 20h since customer-side activity: 1", out)
+        _, _, blocks, _ = self._run([old_ish, self.NEW], ["--post"])
+        self.assertIn("older than 20h since customer-side activity: 1",
+                      self._block_text(blocks).replace("*", ""))
+
+    def test_env_override_changes_which_rows_render(self):
+        week = conv(cid="WEEK", lar=0, lcr=self.NOW - 10 * self.DAY)
+        _, out, _, _ = self._run([week, self.NEW], [])
+        self.assertIn(d.intercom_link("WEEK"), out)
+        self.assertNotIn("backlog:", out)
+        _, out, _, _ = self._run([week, self.NEW], [],
+                                 env={"CS_DIGEST_ACTIONABLE_DAYS": "7"})
+        self.assertNotIn(d.intercom_link("WEEK"), out)
+        self.assertIn("backlog: 1 open conversations with no customer-side "
+                      "activity in the last 7d", out)
+
+    def test_delta_excludes_backlog_and_rolls_it_up(self):
+        _, out, blocks, state = self._run([self.OLD, self.NEW], ["--delta", "--post"])
+        self.assertNotIn(d.intercom_link("OLD"), out)
+        self.assertIn("new to this digest: 1", out)
+        self.assertEqual(out.count("backlog: 1 open conversations"), 1)
+        self.assertEqual(self._block_text(blocks).count("backlog: 1 open"), 1)
+        self.assertEqual(set(state), {"NEW"})
+
+    def test_delta_backlog_only_run_is_still_no_delta(self):
+        rc, out, blocks, _ = self._run([self.OLD], ["--delta", "--post"])
+        self.assertEqual(rc, 0)
+        self.assertIn("NO_DELTA", out)
+        self.assertIsNone(blocks)
+
+    def test_delta_prunes_backlog_entry_and_reentry_surfaces_as_new(self):
+        # D6: waiting_since only moves forward on a customer reply, so a thread
+        # re-entering the window has genuinely new activity -> new, not hidden.
+        state = {"OLD": {"first_surfaced": 1, "aged_flagged": True}}
+        _, _, _, saved = self._run([self.OLD], ["--delta", "--post"], state=state)
+        self.assertNotIn("OLD", saved)
+        replied = conv(cid="OLD", lar=0, lcr=self.NOW - 3600)
+        _, out, _, saved2 = self._run([replied], ["--delta", "--post"], state=saved)
+        self.assertIn("new to this digest: 1", out)
+        self.assertIn(d.intercom_link("OLD"), out)
+        self.assertIn("OLD", saved2)
+
+    def test_dry_run_delta_with_backlog_writes_nothing(self):
+        _, _, _, saved = self._run([self.OLD, self.NEW], ["--delta"])
+        self.assertIsNone(saved)
+
+    def test_dup_count_ignores_pair_that_is_entirely_backlog(self):
+        # Wiring of actionable_dups in main(): two 194d threads of one contact
+        # must not surface as a duplicate pair in either rendering.
+        o1 = conv(cid="O1", email="old@example.com", lar=0, lcr=self.NOW - 194 * self.DAY)
+        o2 = conv(cid="O2", email="old@example.com", lar=0, lcr=self.NOW - 195 * self.DAY)
+        _, out, blocks, _ = self._run([o1, o2, self.NEW], ["--post"])
+        self.assertIn("possible duplicate open conversations: 0", out)
+        self.assertIn("possible duplicate open conversations: 0",
+                      self._block_text(blocks).replace("*", ""))
+
+    def test_dup_count_keeps_pair_when_one_member_is_live(self):
+        live = conv(cid="L", email="mix@example.com", lar=0, lcr=self.NOW - 3600)
+        old = conv(cid="O", email="mix@example.com", lar=0, lcr=self.NOW - 194 * self.DAY)
+        _, out, blocks, _ = self._run([live, old], ["--post"])
+        self.assertIn("possible duplicate open conversations: 2", out)
+        self.assertIn("possible duplicate open conversations: 2",
+                      self._block_text(blocks).replace("*", ""))
 
 
 if __name__ == "__main__":

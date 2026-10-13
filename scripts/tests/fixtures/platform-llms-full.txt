@@ -1,0 +1,93 @@
+# Muso Platform API — full agent guide
+
+The developer platform for Muso's music-credits + analytics graph — the modern,
+self-serve evolution of the Muso developer API.
+Console: https://platform.muso.ai · API: https://api.platform.muso.ai/v1
+
+## Authentication
+Workspace API key in the `x-api-key` header: `x-api-key: msk_…`.
+Every key is live; there is no test mode. Issued in the console at /keys.
+
+## Commercial model (canonical)
+One meter only: `api_requests` (every REST, MCP, and CLI call — one meter, no
+per-surface pricing).
+
+### Pay as you go — no base fee
+- Add a card, start with $5 in credits, then pay per call in
+  MARGINAL volume bands — each band's rate applies only to the calls inside it:
+  $0.025/call for the first 100K, $0.020 to 300K, $0.015 beyond.
+  Committed enterprise agreements price below this card (better unit economics + support + SLA
+  + a term-limited storage license). Platform Analytics (system-wide, cross-catalog) is a
+  self-service capability: metered per call with a $3,000/mo minimum that credits toward
+  usage; streaming analytics is planned (not purchasable yet). Throughput scales via usage tiers
+  (Start/Build/Scale/Custom) — move up automatically as you spend, or buy a PLAN instantly:
+  Build $500/mo (25,000 calls included) ·
+  Scale $3,000/mo (150,000 calls included).
+  Plans sell the $0.020 rate from the first call (20% off the list entry rate); overage
+  beyond the included calls is $0.020/call, dropping to $0.015 past 300K total monthly
+  calls. Plan money counts toward usage — you only pay the difference. Platform Analytics
+  includes the Scale plan (one $3,000/mo, not two). No sales calls.
+- 300 requests/min · prepaid balance, card charged only on top-up · no subscription, no trial
+- Full catalog: credits, profiles, and analytics
+
+### Workspace API — included with Muso Pro/Business
+- 10K requests/day hard cap (429), roster-scoped, 60 rpm, no charge
+
+### Enterprise — custom
+- Committed volume at better unit economics than the public rate card, custom rate limits, premium support hours, SLA — and a term-limited license to locally cache and store licensed data for the duration of the agreement, with certified deletion at the end. Standard tiers are live-use only. Required above the overage ceiling.
+
+### Program fees (not metered)
+- "Login with Muso" SSO: $99/mo per registered app — the gate to publish
+  apps on the Muso graph; returns the signed-in user's OWN consented data free
+  (credits for Lite, credits + analytics for Pro)
+
+### The guardrail
+Money buys usage, never a licence to clone the database. Catalog-scale extraction is
+Enterprise-only under the data licence. What is enforced in the request path TODAY is
+per-key rate limiting and the 10× spend ceiling; sustained
+catalog-scale use is handled as a terms matter rather than silently permitted.
+
+## Request semantics
+- Base URL: https://api.platform.muso.ai/v1
+- Envelope: success is `{ "result": "ok", "code": 200, "data": … }`;
+  errors are `{ "result": "error", "code": 4xx, "message": "…" }`.
+- Pagination: `limit` (MAX 50 — 51+ returns 400 "Too big page, max page size is 50")
+  + `offset` on list endpoints. Rows are in `data.items`; `data.totalCount` is the
+  full size. There is no cursor: a `cursor` parameter is ignored, and an offset past
+  the end returns 200 with `items: []`.
+- Rate limits: `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (SECONDS
+  remaining, not a timestamp), plus `X-RateLimit-Limit-Minute` /
+  `X-RateLimit-Remaining-Minute` and `X-Kong-Request-Id` on every response.
+- Auth/quota failures are rejected at the gateway BEFORE the API runs, so they carry
+  `{ "message": "…", "request_id": "…" }` instead of the result/code envelope.
+- There is no idempotency support: sending `Idempotency-Key` has no effect.
+
+## OpenAPI summary (full spec: /openapi.yaml, also served at /api/openapi)
+OpenAPI 3.1 · server: production · security: x-api-key header
+- GET  /profile/{id} — Profile {id, name, country, city, website, …}
+- GET  /profile/{id}/credits — {limit, offset, totalCount, items:[{credits[], track{}}]}
+- GET  /profile/{id}/charts — [{chartName, position, score, creditsCount, percentage, …}]
+- GET  /profile/{id}/collaborators — top shared-credit collaborators
+- GET  /track/{idKey}/{idValue} — Track {id, title, isrcs[], spotifyIds[], label, …}
+- GET  /track/{idKey}/{idValue}/albums — albums containing the track
+- GET  /album/{idKey}/{idValue} — Album {id, title, upc, label, …}
+- GET  /album/{idKey}/{idValue}/credits — credits for the album's tracks
+- POST /search — {keyword, type:[track|profile|album]} → grouped results
+- GET  /search/autocomplete?q= — type-ahead suggestions
+- GET  /roles — credit-role taxonomy [{child, parent}]
+
+## The one data-use law (contractual, enforced technically)
+Muso data is licensed for in-app consumption only, for your own users.
+- No resale or sublicensing of the data as data
+- No redistribution that reconstitutes the Muso graph (bulk APIs, exports, feeds)
+- No systematic catalog replication; no training a competing credits/stats database
+- Anything beyond in-app consumption requires Muso's express written consent
+Enforcement: per-key rate limits + quotas, the 10× hard ceiling, and per-key
+traceability on every response.
+
+## Surfaces
+- REST (this spec) · MCP server (12 tools, hosted at https://mcp.muso.ai/mcp/ — no install) · `muso` CLI (built; repo still private, so nothing to install publicly yet) — all share the api_requests meter
+- Login with Muso (SSO): user-consented access to a signed-in user's own entitled data
+
+## Links
+/docs · /pricing · /openapi.yaml · /system-status · /trust · /login-with-muso · /llms.txt (short form)

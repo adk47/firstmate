@@ -108,6 +108,18 @@ from `skills-all/`), so it's empty there.
 
 ### Cron
 
+**Main's session store is pruned offline nightly (MUS-1295 / MUS-3737).** The
+gateway cannot prune its own store while serving; on cold start
+`listSqliteSessionEntriesFromDatabase` scans every `session_nodes` row, and at
+~7k rows the event loop did not return for ~20 min (froze main after every
+restart, fed a watchdog restart loop). Offline `sessions cleanup --all-agents
+--enforce` at `pruneAfter=24h` took it **7,076 → 2,728 rows**, rss 6,428 → 971 MB,
+stable `/health` 264 s after start. ~2,100 rows are protected at ANY `pruneAfter`
+(live Slack threads), so 24h is the floor, not a tunable. Owner:
+`hydra-main-prune-restart.timer` (02:30 UTC) running `scripts/main-prune-restart.sh`;
+the last 2 backups (7.0 GB each) are in `/var/backups/hydra-main-sessions/<UTC-ts>/`.
+Restore and disarm steps are in that script's header.
+
 **Two payload shapes, strictly enforced by the CLI.** "Run a task" = `--session
 isolated` (default) + `--message` + `--announce --channel slack --to <target>`;
 `--at "+0s"` makes a one-shot (defaults `deleteAfterRun:true`). `--session main`
@@ -898,6 +910,40 @@ one-shot "Full reset" credit with an `expiresAt`, redeemable via
 `account/rateLimitResetCredit/consume`. It is **use-it-or-lose-it and
 irreversible** — a human decision, never automation.
 
+### The model catalog can silently replace OpenClaw's turn instructions (2026-10-09)
+
+**A model switch can strip SOUL, memory and the skills list without touching
+config, skills or tools.** OpenClaw puts SOUL.md (+IDENTITY/USER), the memory
+block and `<available_skills>` into
+`collaborationMode.settings.developer_instructions` on `turn/start`. When the
+model catalog defines its own `model_messages.collaboration_modes.<mode>`, codex
+substitutes the catalog's template for the client's string before the model sees
+it, and the whole block is lost. On 2026-10-09, moving the fleet from
+`gpt-5.6-sol` to `gpt-6-sol`/`gpt-6-luna` did exactly this: 131 sessions across
+all 9 main agents ran with no SOUL and no skills, and 74 cron turns also lost
+`buildCronCollaborationInstructions()`'s "execute the payload directly"
+discipline, because it rides the same channel. `gpt-5.6-*` have
+`collaboration_modes: null`; the `gpt-6-*` ids do not.
+
+**Before any model-string move, diff `model_messages` for the old and the new
+slug.** In
+`/root/.openclaw-<profile>/agents/<agent>/agent/codex-home/models_cache.json`,
+compare `collaboration_modes` and `persistent_instructions` between the outgoing
+and incoming slug. A null-to-non-null transition on either field means
+OpenClaw's turn-scoped block will be dropped, and the switch needs a prompt-level
+fix before it ships. Do not hand-edit `models_cache.json` to work around it:
+codex refetches it (observed refetching mid-inspection, ~hourly).
+
+**"The agent answers PONG on the new model" is not an acceptance check.** It
+passes on an agent with no SOUL and no skills — that is how this shipped past
+both #1118 and #1126. The check that holds: read the **first `response_item` with
+`payload.role == "developer"`** from the newest
+`codex-home/sessions/**/rollout-*.jsonl` and assert `AGENT_SOUL` and
+`<available_skills>` are in it. Never assert on
+`turn_context.collaboration_mode.settings.developer_instructions` — that is the
+client-side record and it stays intact while the defect is active, which is
+precisely why this was invisible for three hours.
+
 ## The 2026.7.1 upgrade (staging-validated 2026-07-14)
 
 Full procedure in `docs/runbooks/UPGRADE-2026.7.1.md`. If you rehearse a future
@@ -1006,3 +1052,39 @@ account's QUOTA (see "auth.order head capped"), not auth: the winner was still
 **Do not** run the runbook's Phase 5 device logins on edge: a real refresh token on edge is
 a second single-use chain per account, and the mirror refuses to overwrite it precisely so
 the conflict is loud instead of silently rotating.
+
+## Jev (TypeSafe System One) — typed judgments
+
+Jev is TypeSafe's typed-judgment model (`POST /v1/systemone`): given `state` plus named
+`questions`, it returns typed answers with probabilities — Choice (pick one), Noul (a
+0-1 boolean-ish confidence), Score (an ordinal with a legend). It **selects, it never
+generates** — no free text comes back. Per TypeSafe's own docs it is NOT for literal
+reading, math/dates, multi-hop reasoning, noisy state, or adversarial text — the same
+class of input that already bites prompt-shaped calls elsewhere in this repo.
+
+Two rules, same posture as `release-watch.sh` highlights and `cq_format_evidence`:
+1. **Questions live in code; only data goes in `state`.** Customer messages, commit
+   subjects, ticket text are untrusted input, never instructions.
+2. **Jev never replaces a deterministic gate.** It adds a judgment beside a gate (or a
+   prose judgment), never the gate itself.
+
+By default `scripts/lib/jev.sh` calls Jev through OpenRouter's decisions endpoint
+(`POST https://openrouter.ai/api/alpha/decisions`, model `~typesafe/jev-latest`) rather than
+TypeSafe's own API — key `OPENROUTER_API_KEY`, 32k context, and the endpoint is labelled
+alpha (one report cites intermittent read timeouts). The direct TypeSafe path
+(`POST /v1/systemone`, `jev-latest`, `TYPESAFE_API_KEY`, 64k context) is still selectable via
+`JEV_PROVIDER=typesafe`. The model **refuses `/api/v1/chat/completions`** ("decisions
+model") — only the decisions endpoint works. Both keys live in `/etc/hydra/jev.env`
+(mode 600) — never in the repo. `scripts/lib/jev.sh` reads the provider's key from env (or
+the env file) and never prints, logs, or echoes the key or the state contents.
+
+Every call is shadow-logged (success or failure) to
+`${JEV_SHADOW_DIR:-/var/lib/hydra-jev/shadow}/<surface>.jsonl` — under `/var/lib`, not
+`/opt/hydra`, for the same reason release state lives there (the deploy rsync overwrites
+`/opt/hydra`). The line carries a sha256 of the state and questions, never their content.
+`scripts/jev-shadow-report.sh` turns the shadow log into a per-surface, per-question
+calibration table (probability bucket, n, agreement %, p50/p95 latency) — nothing is
+posted anywhere by the report; it just prints.
+
+The adoption plan, phasing, and the untouchable-gates list are in
+`docs/plans/jev-adoption.md`.

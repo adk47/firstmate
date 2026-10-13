@@ -1,0 +1,8 @@
+{
+  "resolution_path": {"type": "choice", "instructions": "which path resolved this turn?"},
+  "intent": {"type": "choice", "instructions": "the support intent, if any"},
+  "first_tool": {"type": "choice", "instructions": "the first tool Caroline would call, if any"},
+  "skill": {"type": "choice", "instructions": "the skill that would fire, if any"},
+  "off_topic_or_bad_faith": {"type": "noul", "instructions": "is this message off-topic or bad-faith?"},
+  "frustration": {"type": "score", "instructions": "customer frustration level"}
+}

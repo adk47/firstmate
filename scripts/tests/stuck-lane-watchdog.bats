@@ -48,6 +48,9 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 
 # $1 (optional): override STUCK_LANE_COOLDOWN_SECONDS
 run_wd() {
+  mkdir -p "$TEST_TMPDIR/latj-inert"
+  : > "$TEST_TMPDIR/latj-inert/openclaw-gateway-main.txt"
+  : > "$TEST_TMPDIR/latj-inert/openclaw-gateway-edge.txt"
   # Pin the LIVE-lane detector at an empty snapshot dir. This is hermeticity,
   # not tidiness: unset, the script shells out to
   # `openclaw --profile <p> gateway call diagnostics.lanes`, and this suite runs
@@ -58,6 +61,8 @@ run_wd() {
   printf '%s\n' '{"ts":1,"lanes":[]}' > "$TEST_TMPDIR/snap-empty/edge.json"
   run env \
     STUCK_LANE_SKIP_HOST_GUARD=1 \
+    STUCK_LANE_LATENCY_JOURNAL_DIR="$TEST_TMPDIR/latj-inert" \
+    STUCK_LANE_LATENCY_STATE_FILE="$TEST_TMPDIR/lat-state-inert.json" \
     STUCK_LANE_JOURNAL_FILE="$JNL" \
     STUCK_LANE_STATE_FILE="$STATE" \
     STUCK_LANE_LIVE_SNAPSHOT_DIR="$TEST_TMPDIR/snap-empty" \
@@ -139,12 +144,17 @@ run_wd() {
 
 # Live-path runner (no --dry-run). $1 = extra env assignments via env(1) args.
 run_wd_live() {
+  mkdir -p "$TEST_TMPDIR/latj-inert"
+  : > "$TEST_TMPDIR/latj-inert/openclaw-gateway-main.txt"
+  : > "$TEST_TMPDIR/latj-inert/openclaw-gateway-edge.txt"
   # Same pin, and it matters MORE here: this is the live delivery path.
   mkdir -p "$TEST_TMPDIR/snap-empty-live"
   printf '%s\n' '{"ts":1,"lanes":[]}' > "$TEST_TMPDIR/snap-empty-live/main.json"
   printf '%s\n' '{"ts":1,"lanes":[]}' > "$TEST_TMPDIR/snap-empty-live/edge.json"
   run env \
     STUCK_LANE_SKIP_HOST_GUARD=1 \
+    STUCK_LANE_LATENCY_JOURNAL_DIR="$TEST_TMPDIR/latj-inert" \
+    STUCK_LANE_LATENCY_STATE_FILE="$TEST_TMPDIR/lat-state-inert.json" \
     STUCK_LANE_JOURNAL_FILE="$JNL" \
     STUCK_LANE_STATE_FILE="$STATE" \
     STUCK_LANE_LIVE_SNAPSHOT_DIR="$TEST_TMPDIR/snap-empty-live" \

@@ -125,6 +125,19 @@ accept() {
   done
 }
 
+@test "rejects the plaque internal service names" {
+  # "plaque", "plaque-api", and "plaque-web" are internal service names.
+  # These were leaked in /var/lib/hydra-support-changelog/pending.md on 2026-09-21:
+  # line 44: "unavailable plaque streams..."
+  # line 62: "the new console and live plaque..."
+  reject "unavailable plaque streams is now fixed"
+  reject "the new console and live plaque integrations are ready"
+  reject "plaque-api now handles requests 10x faster"
+  reject "plaque-web deployment was successful"
+  # Ensure an ordinary customer line still passes
+  accept "your streams now load faster and work more reliably"
+}
+
 # --- security-disclosure: the gate was identifier-shaped, this class is not ---
 # Found by the human read-through gate on the first live render (2026-09-04).
 # All three lines below were PUBLISHED by the pre-fix gate: they carry no repo

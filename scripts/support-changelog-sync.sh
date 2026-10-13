@@ -232,7 +232,7 @@ _DENY_CI=(
   # the terms we actually say. The real control on novel jargon is the model
   # being asked for customer-visible EFFECT plus the human read-through of a
   # --dry-run before the timer is enabled. Add a term the day you see it leak.
-  '\b(uvn|idp|devlog|tier-?2|godmode|muso-cli|muso-read|cs-ops|ops-admin|matvw|backfill|blockkit|mrkdwn)\b'
+  '\b(uvn|idp|devlog|tier-?2|godmode|muso-cli|muso-read|cs-ops|ops-admin|matvw|backfill|blockkit|mrkdwn|plaque|plaque-api|plaque-web)\b'
 )
 # Security DISCLOSURE, which is a different class from every rule above. Those
 # reject a line for its SHAPE -- a path, an issue ref, a casing tell. These

@@ -896,7 +896,10 @@ fi
 # new request, and `--follow-up` could believe a thread exists that never did. Same defect
 # the notifier's escalation check had, and fixed the same way: the marker the wrapper itself
 # stamps, matched as a whole line.
-if [ -n "$EXISTING" ] && printf '%s' "$EXISTING" | grep -qE "^<!-- agent-bridge request_id=$REQUEST_ID type=[a-z_]+ from=[a-z]+ -->$"; then
+# Do not use grep -q here. With pipefail enabled, grep exits as soon as it finds
+# a marker and printf can receive SIGPIPE on a large mailbox, making the
+# successful match look false. Drain the input and discard matched output.
+if [ -n "$EXISTING" ] && printf '%s' "$EXISTING" | grep -E "^<!-- agent-bridge request_id=$REQUEST_ID type=[a-z_]+ from=[a-z]+ -->$" >/dev/null; then
   if [ "$FORCE" -eq 0 ]; then
     echo "DUPLICATE: request_id '$REQUEST_ID' is already on $REPO#$ISSUE." >&2
     echo "If you have NEW information — or the request has had no reply and you are chasing" >&2
@@ -920,7 +923,16 @@ if [ -n "$TEST_DIR" ]; then
   # recorded so tests can assert them, and the comment is appended to the fake thread so
   # de-duplication behaves as it does in production.
   mkdir -p "$TEST_DIR/posts"
-  cp "$BODY_FILE" "$TEST_DIR/posts/$REQUEST_ID.md"
+  # NOT `cp`: at-least-once means two callers can archive the SAME request_id
+  # concurrently, and GNU cp opens a destination it believes is new with
+  # O_CREAT|O_EXCL -- the loser gets EEXIST, cp exits 1, and `set -e` turns
+  # that into a THIRD outcome the at-least-once contract does not name (it
+  # promises only 0 "posted" or 3 "duplicate"). Measured on node-8, GNU
+  # coreutils 9.4: 67/400 with a fresh destination and 4 racers, 0/400 with
+  # this redirect. A shell redirect is O_CREAT|O_TRUNC and never fails on an
+  # existing file. `cp -f` does NOT fix it (58/400) -- it only retries after
+  # an open failure on a destination it already knew existed.
+  cat "$BODY_FILE" > "$TEST_DIR/posts/$REQUEST_ID.md"
   printf 'issue comment %s --repo %s --body-file <rendered>\n' "$ISSUE" "$REPO" >> "$TEST_DIR/calls.log"
   cat "$BODY_FILE" >> "$TEST_DIR/comments.txt"
   URL="https://github.com/$REPO/issues/$ISSUE#issuecomment-test"

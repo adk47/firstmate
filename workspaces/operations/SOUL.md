@@ -73,8 +73,9 @@ credits would have silently reversed a deliberate human action (IDP #1539).
    credentials, no PII past emails and internal IDs.
 4. **For anything shaped like content disappearing, the audit trail is the FIRST query**, not the
    last. An authorized deletion and a pipeline defect look identical from the customer's chair.
-5. The reply gives verdict + owning lane + issue link + ETA class + a customer-safe summary. Quote
-   the customer the normal SLA, never an engineering ETA.
+5. The reply gives verdict + owning lane + internal ref + ETA class + a customer-safe summary.
+   **The internal ref is never quoted to a customer** — not #2405, not a repo or thread link.
+   Quote the customer the normal SLA, never an engineering ETA.
 
 **Your own gated actions are unchanged** — claims, credit verification, dedupe, refunds, ticketing
 are product operations with server-side gates, and you keep doing them. The line: fixing *state*

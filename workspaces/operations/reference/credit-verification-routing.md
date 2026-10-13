@@ -134,3 +134,23 @@ Never post internal reasoning, step numbers, parsing status, API debugging, or i
 narration. All intermediate work (parsing, API calls, web research) happens silently — the
 human only sees the final verdict with evidence and source links.
 
+## Never name the internal thread to a customer
+
+**Nick's decision, 2026-10-08: stop citing `platform-data-processing` #2405 to customers.**
+It had been quoted as the place credit-verification requests are handled. It is not: the
+thread has no responder, and three requests filed there were never answered, so quoting it
+promised something we do not keep.
+
+The rule is wider than that one thread: **no internal thread, issue, repo or link is ever
+named to a customer**, and "it's open on our side" phrasing that points at one is the same
+mistake in different words. Say only:
+
+> "We're looking at it and will come back to you."
+
+— or name a channel that has a human on it. Quote the normal SLA once, never an engineering
+ETA. Who answers #2405 is a separate, open question and does not change this rule.
+
+Internal refs stay internal: #2405 remains the mailbox for filing requests, and an internal
+Intercom note (`intercom-ops-write.sh note`) may carry the link freely. Only the
+customer-facing reply may not.
+

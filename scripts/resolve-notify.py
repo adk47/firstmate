@@ -89,10 +89,40 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.customer_outcome import customer_complete, workflow_terminal  # noqa: E402
 from lib.intercom_identity import resolve_admin_id  # noqa: E402
+from lib.jev_shadow import shadow_judge  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
 CLICKUP_API = os.environ.get("CLICKUP_API", "https://api.clickup.com/api/v2")
+
+# Phase 2a shadow-only Jev surface (docs/plans/jev-adoption.md #2a). Judges
+# whether the customer's own last message actually closes the loop, so the
+# shadow report can compare Jev's read against this script's real suppress
+# decision without influencing it in any way (the call happens strictly AFTER
+# `conversation_suppressed()` below, never before or instead of it).
+JEV_SURFACE_CS_CLOSER = "cs-closer"
+CS_CLOSER_QUESTIONS = {
+    "last_customer_message_is_closer": {
+        "type": "noul",
+        "instructions": (
+            "State carries the customer's most recent message in this "
+            "conversation as `customer_message`, and — when one exists — the "
+            "admin's message immediately BEFORE it as `preceding_admin_message`. "
+            "Decide whether the customer's message genuinely closes the loop "
+            "(e.g. thanks, confirms it's resolved, says no further help is "
+            "needed) rather than just replying to something the admin asked. "
+            "You MUST weigh `preceding_admin_message`: if the admin asked a "
+            "yes/no question, a bare 'ok', 'yes', or 'thanks' from the customer "
+            "is CONSENT to that question, not a closer. A bare link, or a "
+            "message like 'urgent' or 'please help', is NEVER a closer even "
+            "though it is the last customer message."
+        ),
+        "criteria": {
+            "true": "The customer's message genuinely signals the conversation is finished/resolved from their side.",
+            "false": "The customer's message does not signal closure (an answer to the admin's question, a bare link, an urgency ping, or a new ask).",
+        },
+    },
+}
 
 CAROLINE_ADMIN_ID = "5763097"
 DEFAULT_LIST_ID = "901000600160"
@@ -335,6 +365,37 @@ def conversation_suppressed(conv, ticket_email, bot_admin_id):
         if a.get("type") in ("admin", "team") and str(a.get("id")) != str(bot_admin_id):
             return "human-reply"
     return None
+
+
+def _text_of(part):
+    body = part.get("body") if part else None
+    return re.sub(r"<[^>]+>", " ", body).strip() if body else ""
+
+
+def last_customer_message_state(conv):
+    """(state | None) for the cs-closer Jev question: the last customer part's
+    text plus the admin part immediately before it, if any. Pure/no network —
+    reads only the conversation_parts already present on `conv`. Returns None
+    when there is no customer part to judge (nothing to shadow-judge)."""
+    parts = (conv.get("conversation_parts") or {}).get("conversation_parts") or []
+    last_customer_idx = None
+    for i in range(len(parts) - 1, -1, -1):
+        a = (parts[i].get("author") or {})
+        if a.get("type") == "user":
+            last_customer_idx = i
+            break
+    if last_customer_idx is None:
+        return None
+    preceding_admin = None
+    for i in range(last_customer_idx - 1, -1, -1):
+        a = (parts[i].get("author") or {})
+        if a.get("type") in ("admin", "team"):
+            preceding_admin = _text_of(parts[i])
+            break
+    return {
+        "customer_message": _text_of(parts[last_customer_idx]),
+        "preceding_admin_message": preceding_admin,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -753,6 +814,19 @@ def main():
                 continue
             conv = get_conversation(c["conv_id"], token)
             reason = conversation_suppressed(conv, c["email"], admin_id)
+            # Shadow-only (Phase 2a #2a): fires strictly AFTER the real decision
+            # above and can never change it, `reason`, `to_send`, stdout, or the
+            # exit code. See docs/plans/jev-adoption.md #2a. State is built
+            # lazily inside shadow_judge's never-raise boundary (a build_state
+            # callable, not a pre-built dict) — last_customer_message_state()
+            # can raise on a malformed conv, and evaluating it as a bare
+            # argument here would raise BEFORE shadow_judge's own try is ever
+            # entered. build_state returning None (no customer part at all)
+            # is a legitimate no-op, not a failure.
+            shadow_judge(JEV_SURFACE_CS_CLOSER, c["conv_id"],
+                         lambda conv=conv: last_customer_message_state(conv),
+                         CS_CLOSER_QUESTIONS,
+                         actual=("sent" if not reason else f"suppressed:{reason}"))
             if reason:
                 suppressed[reason] = suppressed.get(reason, 0) + 1
                 if args.apply:

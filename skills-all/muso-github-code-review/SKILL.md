@@ -35,17 +35,23 @@ ARE the authorization. Message carries the author's Slack UID.
   substitute one for another), lead body `🤖 Muso QA Bot (automated
   review)`. Open with `qa-pr-thread-dm.sh`, keep `ts`. Skip Step 5; log
   then post yourself.
-- Approve (Step 7) only if `checks` are green **EXCEPT for the policy's
-  `advisory_checks`** — every check passed, none `fail` and none `pending`,
-  other than those the policy names advisory (the deploy pre-flight and
-  friends, which fail on live server drift rather than on the diff).
+- Approve (Step 7) through the wrapper only. **Never gate approval on `checks`
+  yourself.** `scripts/qa-pr-approve.sh` decides CI greenness, fail-closed (Guard 6):
+  it excludes the policy's `advisory_checks` (the deploy pre-flight and friends,
+  which fail on live server drift rather than on the diff), accepts `SUCCESS`,
+  `NEUTRAL` and `SKIPPED`, and holds on any other failing or pending check. A prose
+  restatement of that rule can only diverge from the wrapper, so do not write one.
   **Changed 2026-08-03:** this used to say "be strict — any non-green check
   means do not approve", which held hydra#780 at a clean GO for days because
   a live rsync dry-run was red against pre-existing server drift that had
   nothing to do with the diff. Advisory checks now alert instead of blocking;
-  every OTHER red check still holds the approval. (Ignore only your own
-  `qa-review` row — the wrapper excludes it too, to avoid a circular
-  dependency.) Plus: GO incl. carried-forward; `rebaseIntegrity` clear —
+  every OTHER red check still holds the approval, enforced by the wrapper. (Ignore
+  only your own `qa-review` row — the wrapper excludes it too, to avoid a circular
+  dependency.) **Changed 2026-10-13 (MUS-7727, CTO ruling 12 Oct):** the removed
+  rule came back as "requires every CI check to pass" and withheld approval on
+  hydra#1119 and hydra#1107, two clean GOs with a red `Deploy pre-flight` advisory
+  check. A red advisory check is normally relayed as an `⚠️ ALERT` line, never a withhold.
+  Plus: GO incl. carried-forward; `rebaseIntegrity` clear —
   **`WARN` holds only while its thread is still UNRESOLVED**; once it is
   resolved — by a human, or **by you** once you have verified the deletions
   were intended (Step 3) — the warning is acknowledged and no longer blocks,
@@ -109,9 +115,12 @@ isDraft, additions, deletions, changedFiles, headRefOid), `files[]`
 ### Check the bundle's integrity flags FIRST — before reviewing
 
 The bundle reports when its own view is incomplete. These are fail-closed
-signals: acting on a partial view is how a real blocker gets missed. Every one
-of them is a **CANNOT REVIEW** condition, never a NO-GO — see "CANNOT REVIEW"
-below for why the distinction is load-bearing and how to publish it.
+signals: acting on a partial view is how a real blocker gets missed.
+`filesCountMismatch`, `threadsTruncated`, and a failed `review-bundle` call
+are each an immediate **CANNOT REVIEW** condition, never a NO-GO — see
+"CANNOT REVIEW" below for why the distinction is load-bearing and how to
+publish it. `diffSource`/`diffDegraded` is different: it is reviewable, with
+a recovery step, not an immediate CANNOT REVIEW — see its own bullet below.
 
 - **`filesCountMismatch` set** → `pr.changedFiles` disagrees with the number of
   files returned. You are looking at an incomplete diff. Do NOT review it and do
@@ -135,12 +144,107 @@ below for why the distinction is load-bearing and how to publish it.
   read it as `"pr-diff"`, because that older CLI has no fallback at all: on an
   over-cap diff it fails the whole bundle, which is the last bullet below. Never
   read an absent field as "degraded".)
-- **`diffDegraded.filesWithoutPatch` non-empty** → those files' textual changes
-  are INVISIBLE to you: GitHub suppressed their patch for size. Binary files are
-  never listed here (they carry no reviewable text either way), so every name in
-  this list is a real hole. Post **CANNOT REVIEW**, name the files, and stop —
-  reviewing the other 200 files and calling it GO would be a verdict about a
-  diff you did not see.
+
+  **This is also the ONLY condition under which the git-clone recovery step
+  below applies.** It is deliberately gated on `diffSource`, not on
+  `diffDegraded.filesWithoutPatch` alone (that field is a symptom of this
+  mode, not a trigger in its own right — see why below) — on a normal
+  `"pr-diff"` bundle a `patch:null` entry is an ordinary binary file, full
+  stop, and must NOT trigger a clone: every PR that merely touches an image
+  would otherwise pay for a full clone, and a clone failure on one of THOSE
+  (a PR whose diff was actually complete) would manufacture a brand-new false
+  CANNOT REVIEW where none was warranted.
+
+  When `diffSource == "per-file-patches"`, GitHub already truncated
+  something once (the whole-diff call), and it can truncate the FILES
+  payload the same way on a large enough PR — `additions=0, deletions=0,
+  changes=0, patch=null` for a file that is not actually binary, which is
+  byte-for-byte indistinguishable from a genuine binary file from GitHub's
+  response alone (observed live: Muso-AI/web-credits-next#848 @ 6b88f447,
+  327 files — 17 came back exactly this shape, none of them binary).
+
+  `diffDegraded.filesWithoutPatch` is `muso gh`'s own attempt to flag that,
+  but it **under-reports and must not be trusted alone**: it only adds a
+  file when `patch==""` AND (`additions!=0` OR `deletions!=0`) — a file with
+  an EMPTY patch AND additions=0/deletions=0 (exactly the #848 shape) is
+  classified "binary, nothing lost" and never appears in
+  `filesWithoutPatch` at all, so the bundle can report `327/327 files, no
+  degradation` while 17 files' real content is invisible. `muso gh` is right
+  to pick that reading in isolation (it has no other signal, and a false
+  CANNOT REVIEW on every real binary file would be worse) — but it means
+  `filesWithoutPatch` is a *lower bound*, not the complete list, and reading
+  it as "empty ⇒ nothing missing" is exactly the bug this section exists to
+  close.
+
+  **So, whenever `diffSource == "per-file-patches"`, build your own
+  candidate list instead of trusting `filesWithoutPatch`.** For every entry
+  in `files[]` where `patch` is empty/absent AND `status` is not `removed`,
+  treat it as a candidate needing verification — regardless of whether it is
+  also in `filesWithoutPatch`:
+
+  ```bash
+  candidates="$(echo "$bundle" | jq -r '
+    .files[] | select((.patch // "") == "" and .status != "removed") | .path')"
+  ```
+
+  Feed EVERY candidate through the git-clone fallback, binary or not, and
+  let git's own diff decide — this stops trusting GitHub's zeroed counters
+  for this decision at all. Read `$candidates` into an ARRAY first — do not
+  pass the bare `$candidates` string as argv. Unquoted, a newline-joined
+  string is word-split on spaces AND glob-expanded before the script ever
+  sees it: `public/My Logo.svg` becomes two args (`public/My`, `Logo.svg`),
+  and a bracket path like `src/app/[id]/page.tsx` becomes whatever it
+  glob-matches in the agent's own cwd (QA round 2, finding 1 — the exact
+  hostile-input class `--literal-pathspecs` closes *inside* the script is
+  reopened by splitting *before* the script if the caller isn't careful).
+  Bash 3.2 (this runner's shell) has no `mapfile`, so read line-by-line:
+
+  ```bash
+  candidate_args=()
+  while IFS= read -r c; do
+    [ -n "$c" ] && candidate_args+=("$c")
+  done <<< "$candidates"
+
+  bash /opt/hydra/scripts/qa-bundle-diff-fallback.sh \
+    "$OWNER/$REPO" "<pr.baseRefOid>" "<pr.headRefOid>" "${candidate_args[@]}"
+  ```
+
+  Read the result:
+  - `cloneOk: false` → the clone/fetch itself failed (network, auth, or the
+    shas could not be resolved). Check `errors[]` first — it carries git's
+    own stderr verbatim from the clone/fetch/resolve attempt, so a real cause
+    (auth, DNS, a genuinely unreachable sha) is distinguishable from a
+    transient blip the script already retried once and still lost; quote it
+    in the CANNOT REVIEW rather than paraphrasing. The fallback bought
+    nothing — treat exactly as before: post **CANNOT REVIEW**, name the
+    candidate files, and stop.
+  - `cloneOk: true` → for every path in `recovered[]`, review its `diff` field
+    normally (`binary: true` with an empty `diff` means git independently
+    confirms it is genuinely binary — nothing was lost, do not flag it; this
+    is what most candidates will turn out to be, and that's fine — the point
+    was never to assume it without checking).
+    Any path still left in `stillMissing` is a real, unrecovered hole — each
+    entry there is `{path, reason, detail?}`, not a bare string: `reason` is
+    one of `git-diff-failed` (git itself could not compute the diff — a
+    failed on-demand blob fetch is the observed real case; `detail` carries
+    git's stderr) or `no-change` (git disagrees the file changed at all
+    between merge-base and head — a rebase-mid-review case, not a recovery
+    failure, but still worth naming since GitHub said otherwise). Name *only
+    those* in a **CANNOT REVIEW**, using their `reason`/`detail` rather than
+    a generic "could not recover" (or, if `stillMissing` ends up empty, there
+    is no CANNOT REVIEW from this signal at all — proceed with the recovered
+    diffs folded into the normal review).
+  - Say one line in the review body when this fired: `N file(s) had no patch
+    from GitHub's API; recovered via git clone.` — same spirit as the
+    `diffSource: "per-file-patches"` note above, so the reader knows why a
+    file's diff came from git instead of the bundle.
+  - This is a hydra-side recovery step, not a `muso gh` fallback — the script
+    lives at `scripts/qa-bundle-diff-fallback.sh` in this repo, run it, don't
+    hand-roll `git diff` yourself (it handles binary detection, renames,
+    literal (non-glob) path matching, and the throwaway-clone lifecycle
+    consistently; see its header for the exact contract). It routes its own
+    clone through `qa-gh.sh` (the same identity shim as every other write in
+    this skill), never bare `gh`.
 - **`muso gh review-bundle` itself failed** (non-zero exit, no bundle at all) →
   there is nothing to review. Post **CANNOT REVIEW** with the command's own
   error, verbatim. Do not retry more than once, and never fall back to a
@@ -150,6 +254,24 @@ below for why the distinction is load-bearing and how to publish it.
 None of these is a style nit. `scripts/qa-pr-approve.sh` refuses for the same
 reasons independently (Guards 7 and 11), so ignoring them here just moves the
 failure later and makes it more confusing.
+
+**Known gap (tracked separately, not fully closed by the above):** muso-cli's
+own `diffDegraded.filesWithoutPatch` builder (`internal/cli/gh.go
+diffFallbackFromFiles`) still under-reports exactly as described above — this
+skill works around it by deriving candidates from `files[]` directly, so no
+review here is blocked by it. The upstream field itself has a fix: muso-cli
+commit `ac996ab` (branch `fix/diff-degraded-files-patch-unknown`, tracked by
+hydra card `t_ec4e1d1d`) adds a superset field, `diffDegraded.filesPatchUnknown`
+— every no-patch, non-removed file regardless of additions/deletions, not just
+the ones `filesWithoutPatch` catches — without needing a git-level check
+(contrary to what an earlier draft of this note assumed). That fix is
+committed locally in the muso-cli repo but not yet merged/deployed; until it
+ships everywhere hydra's node-8 runner calls `muso gh`, THIS skill's own
+`files[]`-derived candidate list (above) remains the load-bearing check, not
+`filesPatchUnknown`. Once `filesPatchUnknown` is confirmed deployed, a
+follow-up card can simplify this skill's candidate derivation to read it
+directly instead of re-deriving from `files[]` — do not make that
+simplification before then.
 
 ### The head you reviewed vs. the head the dispatch named
 
@@ -192,10 +314,18 @@ diff is not the problem. Fail-closed in the direction of "blocking but honest".
 **When to use it — any INFRASTRUCTURAL reason review is impossible**, not just
 the diff cap: a failed/degraded bundle (every case under "Check the bundle's
 integrity flags FIRST"), a 403/404 that hides the PR, an unreadable file list,
-a thread list that cannot be completed. If you could read the change and chose
-to block it, that is NO-GO. If you could not read the change, that is CANNOT
-REVIEW. **Never mix them in one verdict**, and never dress a tool failure up as
-a finding to make the verdict look normal.
+a thread list that cannot be completed, and a GitHub API rate limit (quota
+exhausted) that blocks the bundle or the CI lookup. The rate-limit case uses the
+fixed wording `CANNOT REVIEW: GitHub API rate limit blocked the review bundle`.
+If you could read the change and chose to block it, that is NO-GO. If you could
+not read the change, that is CANNOT REVIEW. **Never mix them in one verdict**,
+and never dress a tool failure up as a finding to make the verdict look normal.
+
+**On a quota failure, do not self-retry.** Publish the verdict and stop: re-asking
+spends the bucket that just emptied. Do not read a prior GO on the same sha and
+adopt it as your verdict either. Whether a CANNOT REVIEW overwrites a standing GO
+is the status writer's call (`scripts/qa-review-status.sh` keeps the GO), not
+yours.
 
 **How to publish it** — same three writes as any other review, with the token
 carried through all three so no reader has to infer it:
@@ -415,8 +545,19 @@ cat "/var/lib/hydra-qa/blast-radius/${OWNER}__${REPO}-pr-${PR}-<pr.headRefOid>.j
 > `deploy-path` is reported as `info` and **never lowers the tier**. An undeployed
 > file is unproven, not proven safe — do not argue a finding down from it.
 
-**Tests** (when warranted): `qa-gh.sh ... pr checkout "$PR"` then `pnpm
-install --frozen-lockfile && npm test`.
+**Tests** (when warranted): never `pr checkout` into a fresh full clone — each
+one left 1.4-2.1G that nothing removed (MUS-5557). Run the tests through
+`qa-review-clone.sh`, which borrows objects from a shared bare mirror and
+deletes its checkout when the command ends, whatever the verdict:
+
+```bash
+/opt/hydra/scripts/qa-review-clone.sh "$OWNER/$REPO" "$PR" -- \
+  bash -c 'pnpm install --frozen-lockfile && npm test'
+```
+
+The command runs with cwd = the PR head; its exit code is yours. Do the whole
+test run inside that one call — the checkout is gone afterwards, so there is no
+cleanup step to remember, including on a NO-GO or an aborted run.
 
 ## Step 4 — Post the Slack summary
 
@@ -447,7 +588,7 @@ the dispatch message, `"authorization":"auto-review-dispatch"`.
 
 **Post one review** via the reviews API:
 
-**Use a per-run payload file, never a fixed `/tmp` path.** Reviews run
+**Use a per-run payload file under the run's scratch root, never a `/tmp` path.** Reviews run
 concurrently across repos, so a shared name (the old `/tmp/pr-review.json`) is a
 real race: another review overwrites the file between your heredoc and the POST,
 and you submit ITS payload — a 422 commit mismatch, no review, no status, and a
@@ -455,15 +596,29 @@ gated PR stuck. Observed live on hydra#790, where a core-backend payload replace
 the file mid-run.
 
 ```bash
-payload=$(mktemp "/tmp/pr-review-${REPO}-${PR}-XXXXXX.json")
-trap 'rm -f "$payload"' EXIT
+scratch="${PAPERCLIP_RUN_SCRATCH_DIR:-/opt/hydra/workspaces/qa/tmp}"; mkdir -p "$scratch"
+payload=$(mktemp "$scratch/pr-review-${REPO}-${PR}-XXXXXX.json")
 cat > "$payload" <<JSONEOF
 {"commit_id":"<pr.headRefOid>","event":"COMMENT","body":"🤖 **Muso QA Bot** (automated review)",
  "comments":[{"path":"src/auth.js","line":45,"side":"RIGHT","body":"🔴 **Critical:** ..."}]}
 JSONEOF
 bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" api \
   "repos/$OWNER/$REPO/pulls/$PR/reviews" --method POST --input "$payload"
+rc=$?; rm -f "$payload"; [ $rc -eq 0 ] || echo "review POST failed rc=$rc" >&2
+(exit $rc)  # keep the POST status as the block result
 ```
+
+**Why no `trap 'rm -f "$payload"' EXIT` (MUS-5643):** this skill used to carry
+that trap and `/tmp` held 536 leftover `pr-review-*.json` files (1G), plus 1,171
+`*-review-*` clones (27G). Each agent Bash call is its own shell, so the trap
+fires at the end of the call that created the file, before the next call uses
+it, or the agent drops the line. You cannot turn a multi-call session into one
+process lifetime. Fix the **location**, not the cleanup: scratch goes under
+`$PAPERCLIP_RUN_SCRATCH_DIR` when a Paperclip run sets it (the runtime deletes it),
+otherwise under the qa workspace's `tmp/` (`/opt/hydra/workspaces/qa/tmp`, TTL-swept,
+`docs/lessons/working-in-hydra.md`). The block creates, POSTs and `rm`s in one call, so
+nothing outlives it. Clone into the same root, never `/tmp`.
+`scripts/check-no-tmp-scratch.sh` fails a PR that adds a hard-coded tmp path here.
 
 **NEVER inline PR/diff text via `-f body='...'`** — always heredoc +
 `--input <file>` (backticks/`$(...)` re-parse through your shell; PR #287
@@ -635,6 +790,11 @@ bash /opt/hydra/scripts/qa-pr-approve.sh <repo> <pr> <requester-slack-uid> \
   (Guard 7 only blocks 🔴/🟡-tagged ones). It is the wrapper refusing to approve a
   PR its caller's verdict no longer describes, so it is a CORRECT outcome, never a
   fault to work around: a fresh review must supply the verdict.
+- A red `checks` entry is never a reason to skip the wrapper. When the verdict is GO
+  and the requester is authorized, **always invoke it**, then report its exit code and
+  message. Whether CI blocks is the wrapper's decision, not yours; a red advisory check
+  normally arrives as an `⚠️ ALERT` line (the wrapper withholds it only when the PR edits
+  `.github/workflows/`).
 - If the verdict is **not** GO, do NOT approve: post the findings and stop.
 
 Then report the wrapper's post-check (`reviewDecision` / `mergeStateStatus`). If
@@ -721,8 +881,10 @@ cannot work. Both channels below come after the wrapper returns:
    explicit — and there must be exactly ONE post attempt path, or the happy path
    posts the comment twice.
    ```bash
-   alerts_json=/tmp/qa-alerts.json
-   cat > /tmp/qa-alerts.md <<'EOF'
+   scratch="${PAPERCLIP_RUN_SCRATCH_DIR:-/opt/hydra/workspaces/qa/tmp}"; mkdir -p "$scratch"
+   alerts_json=$(mktemp "$scratch/qa-alerts-${REPO}-${PR}-XXXXXX.json")
+   alerts_md=$(mktemp "$scratch/qa-alerts-${REPO}-${PR}-XXXXXX.md")
+   cat > "$alerts_md" <<'EOF'
    ## ⚠️ Auto-approved with alerts
    <every ⚠️ ALERT line, verbatim>
    EOF
@@ -731,7 +893,7 @@ cannot work. Both channels below come after the wrapper returns:
    # markdown posts invalid JSON, and any -f/-F alongside --input lands in the
    # query string instead of the payload. `jq -Rs` slurps stdin into one
    # JSON-escaped string, so backticks, quotes and $VAR survive verbatim.
-   jq -Rs '{body: .}' < /tmp/qa-alerts.md > "$alerts_json"
+   jq -Rs '{body: .}' < "$alerts_md" > "$alerts_json"
 
    post_alerts() {
      bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" api \
@@ -763,6 +925,8 @@ cannot work. Both channels below come after the wrapper returns:
      sleep 3
      post_alerts || go_red "auto-approved with ALERTS that could not be published — NOT safe to merge"
    fi
+   rc=$?; rm -f "$alerts_json" "$alerts_md"
+   (exit $rc)  # keep go_red's status as the block result
    ```
    A green PR whose alert never published is worse than a red one, because it
    looks reviewed.
@@ -789,4 +953,14 @@ the alert is loud. If you swallow it, the trade is a straight loss.
   the identical procedure and the only thing that changes is the one line you
   add to the body saying the diff was paged. **A big PR is a longer review, not
   an unreviewable one** — reach for CANNOT REVIEW only when a named tool failure
-  actually hid something from you, never because the diff was tiring.
+  actually hid something from you, never because the diff was tiring. The same
+  rule applies to files recovered via the `qa-bundle-diff-fallback.sh` git
+  fallback (Step 1, `diffSource == "per-file-patches"`): fold each recovered
+  `diff` into the same file-by-file walk — it is not a separate mini-review, it
+  is the rest of the PR you were about to review anyway. If the combined
+  file-by-file walk still will not fit in one reasoning pass, split it into
+  multiple sequential passes over disjoint file subsets rather than skipping
+  any of them — the verdict must account for every file the bundle (plus the
+  fallback) returned; a file that was never walked is exactly the silent-gap
+  failure CANNOT REVIEW exists to prevent, so name it explicitly if a pass
+  genuinely has to be cut short instead of letting it vanish from the review.

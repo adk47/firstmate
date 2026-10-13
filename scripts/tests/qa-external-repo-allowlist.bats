@@ -44,6 +44,65 @@ ONBOARDED_REPOS=(
   Muso-AI/ios-app
   Muso-AI/android-app
   Muso-AI/muso-data-steward
+  # 2026-09-17: same ten repos, SAME ORDER as REPOS in the script — the
+  # enumeration/parity tests below compare element-by-element, so a reorder in
+  # one file without the other is a failure, not a cosmetic diff.
+  Muso-AI/chat-bakeoff
+  Muso-AI/customer-api-mcp
+  Muso-AI/devops
+  Muso-AI/hydra-audit
+  Muso-AI/mobile
+  Muso-AI/mobile-agents
+  Muso-AI/muso-docs
+  Muso-AI/platform-web
+  Muso-AI/render-service
+  Muso-AI/website-next
+  Muso-AI/digital-plaque
+  Muso-AI/muso-embeds
+  Muso-AI/help-web
+  Muso-AI/tuwunel
+  Muso-AI/matrix-dart-sdk
+  Muso-AI/omni-gateway
+  Muso-AI/muso-sdk
+  Muso-AI/ai-chat-service
+  Muso-AI/website
+  Muso-AI/web-encore
+  Muso-AI/core-ai
+  Muso-AI/customer-api-docs
+  Muso-AI/nocodb-scripts
+  Muso-AI/onboarding-nick
+  Muso-AI/onboarding-ihor
+  Muso-AI/jenkins-shared-library
+  Muso-AI/midika
+  Muso-AI/openclaw-muso
+  Muso-AI/openclaw-gmail
+  Muso-AI/openclaw
+  Muso-AI/clio-workspace
+  Muso-AI/Muso-Ads
+  Muso-AI/platform-import-controller
+  Muso-AI/platform-data-registry
+  Muso-AI/platform-crawling-worker
+  Muso-AI/flutter_packages
+  Muso-AI/clio-skills
+  Muso-AI/terraform-module-aws-fluent-bit
+  Muso-AI/terraform-module-keda
+  Muso-AI/Voice
+  Muso-AI/Clio-KB
+  Muso-AI/ByteDance-Proposal
+  Muso-AI/muso-mobile-translations
+  Muso-AI/web-exploration
+  Muso-AI/terraform-module-cluster-autoscaler
+  Muso-AI/experiment-puppeteer
+  Muso-AI/auth-demo
+  Muso-AI/capture-tests
+  Muso-AI/distrokids-demo
+  Muso-AI/lambda-api-gw-auth-handler
+  Muso-AI/terraform-module-aws-cloudwatch-agent
+  Muso-AI/terraform-module-aws-lb-controller
+  Muso-AI/docker-ci-tools
+  Muso-AI/terraform-module-metrics-server
+  Muso-AI/quality-checks
+  Muso-AI/muso-messaging
 )
 
 # The mobile repos were onboarded 2026-08-19 for REVIEW ONLY, on purpose: Artem

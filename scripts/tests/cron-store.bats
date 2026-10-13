@@ -274,6 +274,7 @@ stub_openclaw() {
 }
 
 @test "gateway count returns non-zero when the CLI exits non-zero" {
+  export CRON_STORE_READ_DEADLINE_SECS=2
   stub_openclaw '{"jobs":[]}' 1
   run cron_store_gateway_durable_count main
   [ "$status" -ne 0 ]
@@ -332,14 +333,165 @@ stub_openclaw_flaky() {
   [[ "$output" == *"j1"* ]]
 }
 
-@test "gateway read gives up after a bounded number of attempts" {
-  export CRON_STORE_READ_TRIES=4
-  stub_openclaw_flaky 99 '{"jobs":[]}'
-  run cron_store_gateway_jobset main
+@test "gateway read gives up on a bounded deadline, not attempt count" {
+  # Superseded by the deadline model (issue #984): a count bound made ten
+  # hanging attempts exhaust themselves entirely inside a single freeze
+  # (2026-09-21 18:12-18:15Z) without ever outlasting it. TRIES=1 proves the
+  # old count-based loop is no longer what stops this: with an instant
+  # (non-hanging) always-failing stub and a small deadline, the loop keeps
+  # retrying well past one attempt and only gives up when wall-clock time is
+  # exhausted.
+  export CRON_STORE_READ_TRIES=1
+  export CRON_STORE_READ_DEADLINE_SECS=3
+  # A huge fail count, not 99: with poll=0 an instant-failing stub can rack up
+  # hundreds of attempts inside a 3s deadline, so a small fail count risks the
+  # stub legitimately succeeding before the deadline hits -- flaking the test
+  # it means to prove fails.
+  stub_openclaw_flaky 1000000 '{"jobs":[]}'
+  run --separate-stderr cron_store_gateway_jobset main
   [ "$status" -ne 0 ]
+  [[ "$stderr" == *"gave up after"* ]]
   # Bounded: a permanently dead gateway must fail, not hang the deploy.
   run cat "$TEST_TMPDIR/attempts"
-  [ "$output" = "4" ]
+  [ "$output" -gt 1 ]
+}
+
+@test "the default budget covers the worst measured freeze, and default reads still retry past transient failures" {
+  # On openclaw 2026.8.2 the main gateway freezes its event loop ~55s after
+  # "http server listening" for a MEASURED 218s / 265s / 298s on 2026-09-17/18
+  # (issue #984) and 434s on 2026-09-22 (deploy run 35705040277). It is
+  # LISTENING, so each CLI attempt hangs on the WebSocket handshake instead of
+  # being refused; the old count bound (10 attempts) ended inside the freeze,
+  # the read failed, the deploy rolled back, and the rollback's own smoke test
+  # failed the same way. The default deadline must outlast 55s + the worst
+  # measured freeze (770s on 2026-09-24, which outlasted the old 600 s default and
+  # rolled a deploy back), so 825 s is the bare requirement; this floor holds the
+  # shipped 1200 s (~375 s of headroom), and a future cut below it must justify itself here.
+  # Reverting the default below that makes the first assertion false.
+  unset CRON_STORE_READ_TRIES CRON_STORE_READ_DEADLINE_SECS CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS
+  # shellcheck source=../lib/cron-store.sh
+  source "$LIB"
+  [ "$CRON_STORE_READ_DEADLINE_SECS" -ge 1200 ]
+  [ "$CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS" -ge 60 ]
+  stub_openclaw_flaky 9 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}' \
+    'Could not start the CLI. Reason: Opening handshake has timed out'
+  run cron_store_gateway_jobset main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"name":"a"'* ]] || [[ "$output" == *'"name": "a"'* ]]
+}
+
+# --- the per-attempt timeout wrapper (a genuinely HANGING attempt) --------
+#
+# The tests above prove the deadline bound with instant (non-hanging)
+# failures. That's not what a frozen-but-listening gateway does — it hangs
+# the WebSocket handshake instead of refusing it. These tests use a stub that
+# actually sleeps, so they exercise the `timeout`/`gtimeout` wrapper itself,
+# not just the wall-clock deadline math around it.
+
+# Sleep $2 seconds on the first $1 invocations, then serve $3. Counts every
+# invocation to $TEST_TMPDIR/attempts, same as stub_openclaw_flaky.
+stub_openclaw_hangs() {
+  local hang_times="$1" sleep_secs="$2" payload="$3"
+  local stub="$TEST_TMPDIR/bin/openclaw"
+  {
+    echo '#!/bin/bash'
+    printf 'n=$(cat %s/attempts 2>/dev/null || echo 0)\n' "$TEST_TMPDIR"
+    printf 'n=$((n+1)); printf "%%s" "$n" > %s/attempts\n' "$TEST_TMPDIR"
+    printf 'if [ "$n" -le %s ]; then sleep %s; exit 1; fi\n' "$hang_times" "$sleep_secs"
+    printf 'cat <<%s\n%s\nPAYLOAD\n' "'PAYLOAD'" "$payload"
+  } > "$stub"
+  chmod +x "$stub"
+  export OPENCLAW_BIN="$stub"
+}
+
+# Both hanging-stub tests need `timeout`/`gtimeout` for real: without it the
+# lib runs attempts uncapped (documented fallback), and a 30s sleep would make
+# these tests themselves hang for 30s+ instead of proving the cap. CI runs on
+# node-8 (root, linux, coreutils `timeout` always present); locally, skip
+# rather than hang the suite.
+_have_timeout_cmd() {
+  command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1
+}
+
+@test "a hung attempt is capped, so the deadline is met by RETRYING past it, not waiting it out" {
+  _have_timeout_cmd || skip "no timeout/gtimeout on PATH -- the attempt-timeout wrapper is a no-op here"
+  export CRON_STORE_READ_DEADLINE_SECS=20
+  export CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS=3
+  export CRON_STORE_READ_POLL_SECS=1
+  stub_openclaw_hangs 2 30 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}'
+  start=$(date +%s)
+  run cron_store_gateway_jobset main
+  elapsed=$(( $(date +%s) - start ))
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"name":"a"'* ]] || [[ "$output" == *'"name": "a"'* ]]
+  # Two 30s-hanging attempts capped at 3s each, plus polls, must finish well
+  # under the 20s deadline -- if the wrapper were a no-op this would still be
+  # sleeping at the 20s mark.
+  [ "$elapsed" -lt 20 ]
+}
+
+@test "an attempt that never stops hanging gives up on the deadline, not the hang" {
+  _have_timeout_cmd || skip "no timeout/gtimeout on PATH -- the attempt-timeout wrapper is a no-op here"
+  export CRON_STORE_READ_DEADLINE_SECS=8
+  export CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS=3
+  export CRON_STORE_READ_POLL_SECS=1
+  stub_openclaw_hangs 1000000 30 '{"jobs":[]}'
+  start=$(date +%s)
+  run --separate-stderr cron_store_gateway_jobset main
+  elapsed=$(( $(date +%s) - start ))
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"gave up after"* ]]
+  [[ "$stderr" == *"deadline 8"* ]]
+  [ "$elapsed" -ge 8 ]
+  [ "$elapsed" -lt 20 ]
+}
+
+@test "the per-attempt timeout is clamped to what's left, not the full budget, so the deadline is never overrun" {
+  # QA finding (D1): a fixed per-attempt timeout ignores how much of the
+  # deadline is already spent -- with deadline=2 and attempt-timeout=5, an
+  # attempt starting at t=0 was handed the FULL 5s, so a hanging CLI made the
+  # read return at ~5s while printing "deadline 2s": the caller's 2s promise
+  # was broken by more than double. The attempt timeout must be
+  # min(remaining, CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS), so this must return
+  # at (or just past) the 2s deadline, not the 5s attempt-timeout ceiling.
+  _have_timeout_cmd || skip "no timeout/gtimeout on PATH -- the attempt-timeout wrapper is a no-op here"
+  export CRON_STORE_READ_DEADLINE_SECS=2
+  export CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS=5
+  export CRON_STORE_READ_POLL_SECS=1
+  stub_openclaw_hangs 1000000 30 '{"jobs":[]}'
+  start=$(date +%s)
+  run --separate-stderr cron_store_gateway_jobset main
+  elapsed=$(( $(date +%s) - start ))
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"gave up after"* ]]
+  [[ "$stderr" == *"deadline 2"* ]]
+  # deadline plus scheduler tolerance, well short of the 5s attempt-timeout
+  # ceiling that would prove the clamp is NOT happening.
+  [ "$elapsed" -le 4 ]
+}
+
+@test "a garbage deadline/attempt-timeout override is REFUSED before any call, including an injection attempt" {
+  export CRON_STORE_READ_DEADLINE_SECS=banana
+  export CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS='a[$(touch '"$TEST_TMPDIR"'/pwned)0]'
+  stub_openclaw_flaky 0 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}'
+  run --separate-stderr cron_store_gateway_jobset main
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"CRON_STORE_READ_DEADLINE_SECS"* ]]
+  # DEADLINE is validated first, so the ATTEMPT_TIMEOUT injection is refused
+  # on the same up-front path and never reaches arithmetic either -- neither
+  # knob may consume an attempt or execute the payload on the way out.
+  [ ! -f "$TEST_TMPDIR/attempts" ]
+  [ ! -f "$TEST_TMPDIR/pwned" ]
+}
+
+@test "a garbage attempt-timeout override alone is REFUSED before any call" {
+  export CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS='a[$(touch '"$TEST_TMPDIR"'/pwned)0]'
+  stub_openclaw_flaky 0 '{"jobs":[{"name":"a","schedule":{"kind":"cron"}}]}'
+  run --separate-stderr cron_store_gateway_jobset main
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS"* ]]
+  [ ! -f "$TEST_TMPDIR/attempts" ]
+  [ ! -f "$TEST_TMPDIR/pwned" ]
 }
 
 @test "a successful first read does not retry" {
@@ -351,8 +503,10 @@ stub_openclaw_flaky() {
 }
 
 @test "a failed read reports WHY on stderr, not just that it failed" {
-  export CRON_STORE_READ_TRIES=2
-  stub_openclaw_flaky 99 '{"jobs":[]}' 'connect ECONNREFUSED 127.0.0.1:18789'
+  export CRON_STORE_READ_DEADLINE_SECS=2
+  # A huge fail count: see the deadline give-up test above for why 99 risks a
+  # flaky pass under poll=0.
+  stub_openclaw_flaky 1000000 '{"jobs":[]}' 'connect ECONNREFUSED 127.0.0.1:18789'
   # --separate-stderr: the payload goes to stdout, the diagnosis to stderr.
   # Without this the caller cannot tell a refused connection from a corrupt
   # store — which is exactly how a healthy cron store got a deploy rolled back.
@@ -431,15 +585,12 @@ stub_openclaw_flaky() {
 
 @test "shipped retry defaults cover a real gateway restart" {
   # Guards the budget, not the mechanism: the measured gap between exec and
-  # "http server listening" was ~5s on 2026-08-18. Defaults must exceed it.
-  ( unset CRON_STORE_READ_TRIES CRON_STORE_READ_POLL_SECS
+  # "http server listening" was ~5s on 2026-08-18. The deadline (the bound
+  # since issue #984) must exceed it with margin.
+  ( unset CRON_STORE_READ_TRIES CRON_STORE_READ_POLL_SECS \
+      CRON_STORE_READ_DEADLINE_SECS CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS
     source "$LIB"
-    # (N-1), not N: attempt 1 runs at t=0 and the sleep is skipped after the
-    # last one, so N attempts span (N-1) x poll seconds. Multiplying by N
-    # overstates the window — 4x2 would "prove" 8s while the final attempt
-    # actually lands at 6s, leaving a gateway that comes up at 7s to recreate
-    # the rollback race.
-    [ "$(( (CRON_STORE_READ_TRIES - 1) * CRON_STORE_READ_POLL_SECS ))" -ge 8 ] )
+    [ "$CRON_STORE_READ_DEADLINE_SECS" -ge 8 ] )
 }
 
 # --- cron_store_repo_count --------------------------------------------------
@@ -1579,8 +1730,10 @@ stub_openclaw_empty_then() {
 }
 
 @test "all attempts rc-0 EMPTY -> fails and says EMPTY output on stderr" {
-  export CRON_STORE_READ_TRIES=2 CRON_STORE_READ_POLL_SECS=0
-  stub_openclaw_empty_then 99 '{"jobs":[]}'
+  export CRON_STORE_READ_DEADLINE_SECS=2 CRON_STORE_READ_POLL_SECS=0
+  # A huge fail count: see the deadline give-up test above for why 99 risks a
+  # flaky pass under poll=0.
+  stub_openclaw_empty_then 1000000 '{"jobs":[]}'
   run --separate-stderr cron_store_gateway_durable_count main
   [ "$status" -ne 0 ]
   [[ "$stderr" == *"EMPTY output"* ]]

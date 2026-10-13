@@ -1,0 +1,7 @@
+{
+  "id": "2002",
+  "source": {"author": {"type": "user", "id": "u2"}, "body": "I want a refund now, this is fraud", "created_at": 200, "attachments": []},
+  "conversation_parts": {"conversation_parts": [
+    {"part_type": "comment", "author": {"type": "admin", "id": "bot-admin-1"}, "body": "let me pull in a teammate", "created_at": 210, "attachments": []}
+  ]}
+}

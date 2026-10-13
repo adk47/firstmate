@@ -5,7 +5,7 @@
 # Commands:
 #   login                              Get/refresh admin JWT token (cached 23h)
 #   call <METHOD> <path> [json-body]   Make an authenticated admin API call
-#   upload <path> <file> [fields...]   Multipart upload with auth
+#   upload [POST|PUT] <path> <file> [fields...]   Multipart upload with auth (default POST)
 #   resolve-email <slack_id>           Resolve Slack ID to muso.ai email
 #
 # Global Options:
@@ -1672,15 +1672,22 @@ EOF
 
 cmd_upload() {
     check_env
-    local path="${1:?Usage: upload <path> <file> [field=value...]}"
-    local file="${2:?Usage: upload <path> <file> [field=value...]}"
+    local method="POST"
+    case "${1:-}" in
+        POST|PUT) method="$1"; shift ;;
+        /*) ;;
+        *) die "Unsupported upload method: ${1:-<empty>} (expected POST or PUT)" ;;
+    esac
+
+    local path="${1:?Usage: upload [POST|PUT] <path> <file> [field=value...]}"
+    local file="${2:?Usage: upload [POST|PUT] <path> <file> [field=value...]}"
     shift 2
 
     [[ -f "$file" ]] || die "File not found: $file"
 
-    # Codex model-health gate — uploads are always writes (POST). Refuse while the
+    # Codex model-health gate — uploads are always writes. Refuse while the
     # fleet is degraded; self-skips in dry-run.
-    if ! enforce_codex_health_gate "POST"; then
+    if ! enforce_codex_health_gate "$method"; then
         return 1
     fi
 
@@ -1689,14 +1696,14 @@ cmd_upload() {
     # standing hole in the very promise this gate makes. (The OTHER gates --
     # tier-2, merge-reverse, bulk-destructive -- are still absent from this
     # function; that is pre-existing and flagged separately, not fixed here.)
-    if ! enforce_profile_enrich_link_gate "POST" "$path" ""; then
+    if ! enforce_profile_enrich_link_gate "$method" "$path" ""; then
         return 1
     fi
 
     # Uploads are always writes — short-circuit unconditionally in dry-run.
     if is_dry_run_mode; then
         DRY_RUN_AUDIT_FAILED=0
-        write_dry_run_audit "POST" "$path" "$file" "upload"
+        write_dry_run_audit "$method" "$path" "$file" "upload"
         emit_dry_run_response
         return 0
     fi
@@ -1706,7 +1713,7 @@ cmd_upload() {
 
     local -a curl_args=(
         -s -w "\n%{http_code}"
-        -X POST
+        -X "$method"
         "${MUSO_API_URL}${path}"
         -H "Authorization: Bearer $token"
         -H "Service: clio"

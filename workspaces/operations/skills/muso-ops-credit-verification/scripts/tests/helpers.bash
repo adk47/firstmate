@@ -92,3 +92,31 @@ past_touch_stamp_iso() {
 future_stamp_iso() {
   past_touch_stamp_iso "$(( -$1 ))"
 }
+
+# make_approval_tree <approved:true|false> — copy this skill's scripts/ into a
+# temp tree that mirrors the repo layout and carries its OWN
+# policies/credit-approval-automation.json, then print the copied scripts dir.
+#
+# Real apply is gated on the tracked registry, resolved relative to the script
+# (lib/real-apply-approval.sh) with NO env override, by design (QA on hydra#1138:
+# an env override let a caller point the gate at its own file). So a test that
+# needs a REAL run executes a copy whose sibling registry approves it.
+make_approval_tree() {
+  local approved="${1:-true}"
+  local src tree dest
+  src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  tree="$TEST_TMPDIR/approval-tree-$approved"
+  dest="$tree/workspaces/operations/skills/muso-ops-credit-verification/scripts"
+  if [[ ! -d "$dest" ]]; then
+    mkdir -p "$dest" "$tree/policies"
+    cp -R "$src/." "$dest/"
+    if [[ "$approved" == "true" ]]; then
+      printf '{"automations":{"credit-verification-batch":{"approved":true,"approved_by":"test","approval_ref":"test"}}}\n' \
+        > "$tree/policies/credit-approval-automation.json"
+    else
+      printf '{"automations":{"credit-verification-batch":{"approved":false,"approved_by":null,"approval_ref":null}}}\n' \
+        > "$tree/policies/credit-approval-automation.json"
+    fi
+  fi
+  printf '%s\n' "$dest"
+}

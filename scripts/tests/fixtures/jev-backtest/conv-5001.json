@@ -1,0 +1,28 @@
+{
+  "id": "5001",
+  "source": {
+    "author": {
+      "type": "user"
+    },
+    "body": "Can you help me understand why my streams dropped so much this month, this is really confusing to me?",
+    "created_at": 500
+  },
+  "conversation_parts": {
+    "conversation_parts": [
+      {
+        "author": {
+          "type": "admin"
+        },
+        "body": "Let me look into that",
+        "created_at": 510
+      },
+      {
+        "author": {
+          "type": "user"
+        },
+        "body": "ok",
+        "created_at": 520
+      }
+    ]
+  }
+}

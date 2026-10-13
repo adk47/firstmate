@@ -44,14 +44,22 @@ Refund investigation and processing results posted to appropriate channels. Uses
 ---
 
 ## Credit Verification → #credit-verification (C0APB2CMM7C)
-**Status: @-mention only (cron disabled 2026-05-18 with the Lobster cutover, PR #290)**
+**Status: LIVE — @-mention AND the 4-hourly cron (the "cron disabled" note here was stale prose during the 2026-09-11 outage; the job has been `enabled: true` in `cron-jobs.json` throughout)**
 
 Triggered by @-mention in `#credit-verification` matching
-`^run credit verification(?:\s+dry)?(?:\s*\((\d+)\))?$`. Real apply is
-the default; pass `dry` for a no-write summary. Default batch = 500.
+`^run credit verification(?:\s+dry)?(?:\s*\((\d+)\))?$`. **Since 2026-10-11
+every run is DRY (score + report, zero writes)**: `dispatch-cv-batch.sh` forces
+dry unless `policies/credit-approval-automation.json` approves real apply, and
+it does not (the old approve rule was inverted and approved validator-declined
+credits). The 4h cron is disabled. Default batch = 500.
 See `workspaces/operations/skills/muso-ops-credit-verification/SKILL.md`
-for the dispatch contract. The 4h cron
-(`credit-verification-batch-4h`) is disabled and will not fire until a
-follow-up PR migrates its payload to the new dispatcher.
+for the dispatch contract. The 4h cron (`credit-verification-batch-4h`) runs
+`0 */4 * * *` UTC and now executes `dispatch-cv-batch.sh` DIRECTLY as a
+deterministic command, so its exit code is the run status. That replaced an
+isolated agent turn, whose status was the model finishing: when the dispatch
+began failing on 2026-09-11 every fire still read `ok` with
+`consecutiveErrors: 0` for six days while ~2.7k declined credits piled up in
+`unverified`. A run that processes ZERO credits while the queue has work
+exits non-zero by design (`silent_noop` / `all_failed` / `unaccounted`).
 
 **Run logs & retention.** Each batch run writes a JSONL log to `OPS_RUNLOG_DIR/YYYY-MM-DD/<run_id>.jsonl` with a `latest.txt` pointer for quick lookup. Every batch also runs `workspaces/operations/skills/muso-ops-credit-verification/scripts/compress-old-logs.sh` which gzips directories older than 30 days. Per `muso-ops-audit` policy, **logs are never deleted** — only compressed. To investigate a past batch: `cat $OPS_RUNLOG_DIR/latest.txt` then inspect the JSONL, or extract an archived day with `tar -xzf $OPS_RUNLOG_DIR/YYYY-MM-DD.tar.gz`.

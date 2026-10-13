@@ -2,6 +2,10 @@ import { describe, it, expect, vi } from "vitest";
 import { createProfileAnalyticsStatusTool } from "../src/tools/profile-analytics-status.js";
 import { RateLimiter } from "../src/rate-limiter.js";
 import type { MusoAdminClient, AdminClientResult } from "../src/muso-admin-client.js";
+import type { IntercomReader } from "../src/intercom-client.js";
+
+const VERIFIED_EMAIL = "owner@example.com";
+const SESSION_KEY = "agent:support:intercom:direct:CONV123";
 
 function makeAdminClient(overrides: Partial<MusoAdminClient> = {}): MusoAdminClient {
   return {
@@ -10,11 +14,83 @@ function makeAdminClient(overrides: Partial<MusoAdminClient> = {}): MusoAdminCli
   };
 }
 
+function makeIntercomReader(email: string | null = VERIFIED_EMAIL, throws = false): IntercomReader {
+  return {
+    getAuthorEmail: vi.fn(async () => {
+      if (throws) throw new Error("intercom unavailable");
+      return email;
+    }),
+    getLatestCustomerPart: vi.fn(async () => null),
+  };
+}
+
+type ExecImpl = NonNullable<Parameters<typeof createProfileAnalyticsStatusTool>[0]["execFileImpl"]>;
+
+function usersSearchResult(rows: Array<{ id: number; email: string }>): string {
+  return JSON.stringify({ items: rows });
+}
+function teamsListResult(teamIds: string[]): string {
+  return JSON.stringify({ items: teamIds.map((id) => ({ id })) });
+}
+function seatsGetResult(seats: Array<{ id: string; seatStatus: string }>): string {
+  return JSON.stringify({ items: seats });
+}
+
+// A scripted exec mock: responses are consumed in call order (step 2 users
+// search, step 3 teams list, then one step-4 teams seats get per candidate).
+function makeExec(responses: Array<{ stdout?: string; rejectWith?: Error }>): { impl: ExecImpl; calls: { file: string; args: readonly string[] }[] } {
+  const calls: { file: string; args: readonly string[] }[] = [];
+  let i = 0;
+  const impl: ExecImpl = (file, args, _options, callback) => {
+    calls.push({ file, args });
+    const resp = responses[i] ?? responses[responses.length - 1];
+    i += 1;
+    if (resp.rejectWith) {
+      callback(resp.rejectWith, "", (resp.rejectWith as Error & { stderr?: string }).stderr ?? "");
+    } else {
+      callback(null, resp.stdout ?? "", "");
+    }
+    return undefined;
+  };
+  return { impl, calls };
+}
+
+// The default entitlement exec: grants an ACTIVE seat for WHATEVER profileId
+// is requested, by reading the --seat-id value back out of the `teams list`
+// call. Lets every pre-existing test in this file (which doesn't care about
+// entitlement) keep passing unmodified once the gate is wired in.
+function makeAutoGrantExec(): ExecImpl {
+  let seatProfileId = "";
+  const impl: ExecImpl = (_file, args, _options, callback) => {
+    if (args[0] === "users" && args[1] === "search") {
+      callback(null, usersSearchResult([{ id: 5001, email: VERIFIED_EMAIL }]), "");
+      return undefined;
+    }
+    if (args[0] === "teams" && args[1] === "list") {
+      const idx = args.indexOf("--seat-id");
+      seatProfileId = idx >= 0 ? String(args[idx + 1]) : "";
+      callback(null, teamsListResult(["team-1"]), "");
+      return undefined;
+    }
+    if (args[0] === "teams" && args[1] === "seats") {
+      callback(null, seatsGetResult([{ id: seatProfileId, seatStatus: "active" }]), "");
+      return undefined;
+    }
+    callback(new Error(`unexpected muso invocation: ${args.join(" ")}`), "", "");
+    return undefined;
+  };
+  return impl;
+}
+
 function makeDeps(overrides: Partial<Parameters<typeof createProfileAnalyticsStatusTool>[0]> = {}) {
   return {
     adminClient: makeAdminClient(),
     rateLimiter: new RateLimiter(),
     sessionId: "sess-1",
+    sessionKey: SESSION_KEY,
+    intercomReader: makeIntercomReader(),
+    intercomToken: "tok",
+    execFileImpl: makeAutoGrantExec(),
     ...overrides,
   };
 }
@@ -279,6 +355,8 @@ describe("profile_analytics_status — a cold cube must never read as zero", () 
     expect(out.analytics.metrics.measured).toBe(true);
     expect(out.analytics.metrics.tracks_with_data).toBe(278);
     expect(out.analytics.metrics.credit_count).toBe(327);
+    // Regression guard: the entitlement gate must not eat the warming retry.
+    expect(out.analytics.entitled).toBe(true);
   });
 
   it("never escalates, and never reports zeros, while the cube is still warming", async () => {
@@ -345,5 +423,178 @@ describe("profile_analytics_status — a cold cube must never read as zero", () 
     const coldOut = await call(cold.tool, { profile_id: COLD_PROFILE_ID });
     expect(coldOut.analytics.metrics.measured).toBe(false);
     expect(coldOut.analytics.metrics.tracks_with_data).toBeNull();
+  });
+});
+
+// ── Entitlement gate (MUS-1469/1475/1476) ─────────────────────────────────
+// A stream figure leaves this process only for a verified account holding an
+// ACTIVE seat on this exact profile. The 2026-09-30 Tobi Wikström incident:
+// an unsubscribed contact was handed another customer's lifetime streams.
+
+const ENTITLED_PROFILE_ID = "90b6866c-7026-458e-a1af-48b1c1ac1c37";
+
+const DENY_FIELD_PATTERN = /platform_totals|tracks_with_data|credit_count|_streams|shazams/;
+
+function makeResolvedProfileAdminClient(getMock?: MusoAdminClient["get"]): MusoAdminClient {
+  return makeAdminClient({
+    get:
+      getMock ??
+      ((vi.fn(async (path: string) => {
+        if (path.includes("/analytics-status")) {
+          return { ok: true, status: 200, data: { data: statusPayload() } } as AdminClientResult<unknown>;
+        }
+        if (path.includes(`/profile/${ENTITLED_PROFILE_ID}`)) {
+          return { ok: true, status: 200, data: { data: { id: ENTITLED_PROFILE_ID, name: "Aasis Beats", isClaimed: true } } } as AdminClientResult<unknown>;
+        }
+        return { ok: true, status: 200, data: {} } as AdminClientResult<unknown>;
+      })) as MusoAdminClient["get"]),
+  });
+}
+
+function neverCalledAnalyticsStatus(adminClient: MusoAdminClient) {
+  const calls = (adminClient.get as ReturnType<typeof vi.fn>).mock.calls as unknown[][];
+  return calls.every(([path]) => !String(path).includes("analytics-status"));
+}
+
+describe("profile_analytics_status — entitlement gate", () => {
+  it("1. entitled: ACTIVE seat, ready cube -> full payload, entitled:true, platform_totals present", async () => {
+    const adminClient = makeResolvedProfileAdminClient();
+    const tool = createProfileAnalyticsStatusTool(makeDeps({ adminClient }));
+    const out = await call(tool, { profile_id: ENTITLED_PROFILE_ID });
+
+    expect(out.found).toBe(true);
+    expect(out.analytics.entitled).toBe(true);
+    expect(out.analytics.grant).toBe("active_seat");
+    expect(out.analytics.metrics.platform_totals).toEqual({
+      spotify_streams: 600,
+      youtube_streams: 400,
+      youtube_views: 500,
+      tiktok_views: 0,
+    });
+  });
+
+  it("2. not entitled (no active seat) -> no figures anywhere, explain_pro_requirement, /analytics-status never called", async () => {
+    const exec = makeExec([
+      { stdout: usersSearchResult([{ id: 5001, email: VERIFIED_EMAIL }]) },
+      { stdout: teamsListResult(["team-1"]) },
+      { stdout: seatsGetResult([{ id: ENTITLED_PROFILE_ID, seatStatus: "paused" }]) },
+    ]);
+    const adminClient = makeResolvedProfileAdminClient();
+    const tool = createProfileAnalyticsStatusTool(makeDeps({ adminClient, execFileImpl: exec.impl }));
+    const out = await call(tool, { profile_id: ENTITLED_PROFILE_ID });
+
+    expect(out.found).toBe(true);
+    expect(out.analytics.entitled).toBe(false);
+    expect(out.analytics.reason).toBe("no_active_seat");
+    expect(out.analytics.support_action).toBe("explain_pro_requirement");
+    expect(JSON.stringify(out)).not.toMatch(DENY_FIELD_PATTERN);
+    expect(out.analytics).not.toHaveProperty("metrics");
+    expect(out.analytics).not.toHaveProperty("cube_status");
+    expect(neverCalledAnalyticsStatus(adminClient)).toBe(true);
+  });
+
+  it("3. profile outside the workspace -> same omission assertions, reason profile_not_in_workspace", async () => {
+    const exec = makeExec([
+      { stdout: usersSearchResult([{ id: 5001, email: VERIFIED_EMAIL }]) },
+      { stdout: teamsListResult([]) },
+    ]);
+    const adminClient = makeResolvedProfileAdminClient();
+    const tool = createProfileAnalyticsStatusTool(makeDeps({ adminClient, execFileImpl: exec.impl }));
+    const out = await call(tool, { profile_id: ENTITLED_PROFILE_ID });
+
+    expect(out.analytics.entitled).toBe(false);
+    expect(out.analytics.reason).toBe("profile_not_in_workspace");
+    // Confirmed negative: the customer was resolved, the profile just has no
+    // seat in any of their workspaces.
+    expect(out.analytics.support_action).toBe("explain_pro_requirement");
+    expect(JSON.stringify(out)).not.toMatch(DENY_FIELD_PATTERN);
+    expect(neverCalledAnalyticsStatus(adminClient)).toBe(true);
+  });
+
+  it("4. past_due subscription with a non-ACTIVE seat -> denied, no figures", async () => {
+    // past_due tears the roster seat down (verifyUserAnalyticsAccess reads no
+    // subscription state at all), so the seat simply never comes back ACTIVE.
+    const exec = makeExec([
+      { stdout: usersSearchResult([{ id: 5001, email: VERIFIED_EMAIL }]) },
+      { stdout: teamsListResult(["team-1"]) },
+      { stdout: seatsGetResult([{ id: ENTITLED_PROFILE_ID, seatStatus: "pending" }]) },
+    ]);
+    const adminClient = makeResolvedProfileAdminClient();
+    const tool = createProfileAnalyticsStatusTool(makeDeps({ adminClient, execFileImpl: exec.impl }));
+    const out = await call(tool, { profile_id: ENTITLED_PROFILE_ID });
+
+    expect(out.analytics.entitled).toBe(false);
+    expect(out.analytics.reason).toBe("no_active_seat");
+    // Confirmed negative: the seat was found and is not ACTIVE.
+    expect(out.analytics.support_action).toBe("explain_pro_requirement");
+    expect(JSON.stringify(out)).not.toMatch(DENY_FIELD_PATTERN);
+    expect(neverCalledAnalyticsStatus(adminClient)).toBe(true);
+  });
+
+  it("5. missing Intercom token -> denied owner_undetermined, route_to_human:true, human_review (NOT a Pro pitch), no admin analytics call", async () => {
+    const adminClient = makeResolvedProfileAdminClient();
+    const tool = createProfileAnalyticsStatusTool(makeDeps({ adminClient, intercomToken: "" }));
+    const out = await call(tool, { profile_id: ENTITLED_PROFILE_ID });
+
+    expect(out.analytics.entitled).toBe(false);
+    expect(out.analytics.reason).toBe("owner_undetermined");
+    expect(out.analytics.route_to_human).toBe(true);
+    // Undetermined outcome: verification itself did not complete. Must NOT
+    // assert the customer lacks a subscription — a missing/expired
+    // MUSOAI_INTERCOM_TOKEN would otherwise pitch Pro to every customer,
+    // including existing subscribers, permanently (QA finding, round 3).
+    expect(out.analytics.support_action).toBe("human_review");
+    expect(out.analytics.diagnosis).not.toMatch(/\bpro\b|subscription/i);
+    expect(JSON.stringify(out)).not.toMatch(DENY_FIELD_PATTERN);
+    expect(neverCalledAnalyticsStatus(adminClient)).toBe(true);
+  });
+
+  it("5b. check_unavailable (a muso CLI read failed) -> denied, human_review, NOT a Pro pitch, no admin analytics call", async () => {
+    // The transient failure scenario QA named: an existing Pro subscriber
+    // asks about their own analytics while `muso teams list` (or any other
+    // CLI hop) is failing. The gate fails closed to check_unavailable, and
+    // the customer must be routed to a human, not told to upgrade.
+    const exec = makeExec([{ rejectWith: Object.assign(new Error("muso exec failed"), { stderr: "connection refused" }) }]);
+    const adminClient = makeResolvedProfileAdminClient();
+    const tool = createProfileAnalyticsStatusTool(makeDeps({ adminClient, execFileImpl: exec.impl }));
+    const out = await call(tool, { profile_id: ENTITLED_PROFILE_ID });
+
+    expect(out.analytics.entitled).toBe(false);
+    expect(out.analytics.reason).toBe("check_unavailable");
+    expect(out.analytics.route_to_human).toBe(true);
+    expect(out.analytics.support_action).toBe("human_review");
+    expect(out.analytics.diagnosis).not.toMatch(/\bpro\b|subscription/i);
+    expect(JSON.stringify(out)).not.toMatch(DENY_FIELD_PATTERN);
+    expect(neverCalledAnalyticsStatus(adminClient)).toBe(true);
+  });
+
+  it("6. entitled path still returns figures with a valid agent:support:intercom:direct:<convId> session key", async () => {
+    // Proves the gate FUNCTION works through a real session-key shape, not
+    // just that non-entitled customers get denied — the positive path is the
+    // one nobody writes. This does NOT prove index.ts actually hands the
+    // gate ctx.sessionKey rather than ctx.sessionId: it constructs the tool
+    // directly, bypassing the factory. That wiring is covered separately by
+    // "anchors the entitlement gate on ctx.sessionKey" in tests/index.test.ts
+    // (QA finding, MUS-1528 round 1).
+    const adminClient = makeResolvedProfileAdminClient();
+    const tool = createProfileAnalyticsStatusTool(
+      makeDeps({ adminClient, sessionKey: "agent:support:intercom:direct:CONV999" }),
+    );
+    const out = await call(tool, { profile_id: ENTITLED_PROFILE_ID });
+
+    expect(out.analytics.entitled).toBe(true);
+    expect(out.analytics.metrics.platform_totals).toBeTruthy();
+  });
+
+  it("7. structural guard: no future analytics field leaks through the deny payload", async () => {
+    const exec = makeExec([
+      { stdout: usersSearchResult([{ id: 5001, email: VERIFIED_EMAIL }]) },
+      { stdout: teamsListResult([]) },
+    ]);
+    const adminClient = makeResolvedProfileAdminClient();
+    const tool = createProfileAnalyticsStatusTool(makeDeps({ adminClient, execFileImpl: exec.impl }));
+    const out = await call(tool, { profile_id: ENTITLED_PROFILE_ID });
+
+    expect(JSON.stringify(out)).not.toMatch(DENY_FIELD_PATTERN);
   });
 });

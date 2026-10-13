@@ -438,9 +438,9 @@ When ops uploads an image to Slack for a profile avatar:
 2. Upload via admin API multipart endpoint
 
 ```bash
-# Method PUT, route segment is /image (not /avatar). The wrapper's `upload` uses PUT.
+# Method PUT, route segment is /image (not /avatar). Select PUT explicitly.
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  upload "/admin/profile/<profile_id>/image" /tmp/avatar.jpg
+  upload PUT "/admin/profile/<profile_id>/image" /tmp/avatar.jpg
 ```
 
 ### Clear Profile Cache

@@ -166,6 +166,222 @@ srv_write() {
   [ "$output" = "REPO-AHEAD skills-all/foo bar/SKILL.md" ]
 }
 
+# ─── workspaces/*/skills coverage (MUS-1792) ────────────────────────
+# The candidate set used to be scoped to skills-all/ only, so a
+# workspaces/<ws>/skills/**/SKILL.md divergence was never enumerated —
+# the gate passed #1047 having examined 0 of its 5 files. These prove the
+# widened pathspec covers that tree with the same classification rules.
+
+@test "SERVER-AHEAD: workspaces/*/skills/**/SKILL.md node-8-ahead divergence" {
+  commit_skill workspaces/operations/skills/foo/SKILL.md "v0"
+  base=$(git -C "$REPO" rev-parse HEAD)             # HEAD == baseline
+  srv_write workspaces/operations/skills/foo/SKILL.md "v1-server"
+
+  run classify_skill_drift "$base" "$REPO" "$SERVER"
+  [ "$status" -eq 0 ]
+  [ "$output" = "SERVER-AHEAD workspaces/operations/skills/foo/SKILL.md" ]
+}
+
+@test "CONFLICT: workspaces/*/skills/**/SKILL.md both-sides divergence" {
+  commit_skill workspaces/operations/skills/foo/SKILL.md "v0"
+  base=$(git -C "$REPO" rev-parse HEAD)
+  commit_skill workspaces/operations/skills/foo/SKILL.md "v1-repo"
+  srv_write workspaces/operations/skills/foo/SKILL.md "v2-server"
+
+  run classify_skill_drift "$base" "$REPO" "$SERVER"
+  [ "$status" -eq 0 ]
+  [ "$output" = "CONFLICT workspaces/operations/skills/foo/SKILL.md" ]
+}
+
+@test "REPO-AHEAD: workspaces/*/skills/**/SKILL.md repo-ahead-only edit, real gate exits 0" {
+  commit_skill workspaces/operations/skills/foo/SKILL.md "v0"
+  base=$(git -C "$REPO" rev-parse HEAD)
+  commit_skill workspaces/operations/skills/foo/SKILL.md "v1-repo"
+  srv_write workspaces/operations/skills/foo/SKILL.md "v0"
+
+  run classify_skill_drift "$base" "$REPO" "$SERVER"
+  [ "$status" -eq 0 ]
+  [ "$output" = "REPO-AHEAD workspaces/operations/skills/foo/SKILL.md" ]
+}
+
+@test "untracked server-only workspaces/*/skills/**/SKILL.md is NOT classified" {
+  commit_skill workspaces/operations/skills/foo/SKILL.md "v0"
+  base=$(git -C "$REPO" rev-parse HEAD)
+  srv_write workspaces/operations/skills/foo/SKILL.md "v0"              # clean
+  srv_write workspaces/operations/skills/serveronly/SKILL.md "new"      # untracked at HEAD
+
+  run classify_skill_drift "$base" "$REPO" "$SERVER"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "workspaces/*/memory/**/SKILL.md is NOT classified (not under .../skills/)" {
+  commit_skill workspaces/operations/skills/foo/SKILL.md "v0"
+  base=$(git -C "$REPO" rev-parse HEAD)
+  commit_skill workspaces/operations/memory/notes/SKILL.md "repo-note"
+  srv_write workspaces/operations/skills/foo/SKILL.md "v0"              # clean
+  srv_write workspaces/operations/memory/notes/SKILL.md "server-note"   # diverges, but out of scope
+
+  run classify_skill_drift "$base" "$REPO" "$SERVER"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "workspaces/*/tmp*/**/SKILL.md is NOT classified (not under .../skills/)" {
+  commit_skill workspaces/operations/skills/foo/SKILL.md "v0"
+  base=$(git -C "$REPO" rev-parse HEAD)
+  commit_skill workspaces/operations/tmpwork/skills/x/SKILL.md "repo-scratch"
+  srv_write workspaces/operations/skills/foo/SKILL.md "v0"                    # clean
+  srv_write workspaces/operations/tmpwork/skills/x/SKILL.md "server-scratch"  # diverges, but out of scope
+
+  run classify_skill_drift "$base" "$REPO" "$SERVER"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "mixed skills-all/ + workspaces/ set classifies both trees in one pass" {
+  commit_skill skills-all/foo/SKILL.md "v0"
+  commit_skill workspaces/operations/skills/bar/SKILL.md "v0"
+  base=$(git -C "$REPO" rev-parse HEAD)
+  srv_write skills-all/foo/SKILL.md "v1-server"
+  srv_write workspaces/operations/skills/bar/SKILL.md "v1-server"
+
+  run classify_skill_drift "$base" "$REPO" "$SERVER"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx "SERVER-AHEAD skills-all/foo/SKILL.md"
+  echo "$output" | grep -qx "SERVER-AHEAD workspaces/operations/skills/bar/SKILL.md"
+  [ "$(echo "$output" | grep -c .)" -eq 2 ]
+}
+
+@test "block list: blunt fallback matches skills-all/ AND workspaces/ content drift" {
+  itemize=$'>fcsT...... skills-all/muso-anrok/SKILL.md\n>fcsT...... workspaces/operations/skills/foo/SKILL.md\n.f....t.... skills-all/unchanged/SKILL.md'
+  run compute_skill_block_lines "$itemize" "" "$REPO" "$SERVER" true
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ">fcsT...... skills-all/muso-anrok/SKILL.md"
+  echo "$output" | grep -qx ">fcsT...... workspaces/operations/skills/foo/SKILL.md"
+  if echo "$output" | grep -q "unchanged"; then echo "a metadata-only (non-content) change was wrongly included in the block list" >&2; false; fi
+}
+
+@test "block list: blunt fallback does NOT block on a non-skill workspaces/ file (GitHub QA Bot NO-GO on hydra#1051)" {
+  # The blunt fallback's grep 'skills-all/|workspaces/' matches ANY changed
+  # file under workspaces/, not just workspace SKILL.md files — so a remote
+  # deploy (HYDRA_LOCAL=false) or an unreachable baseline would classify a
+  # drifted workspaces/qa/SOUL.md as "skill drift" and block the deploy for
+  # a file that was never in scope. Scope it the same way the smart
+  # classifier's candidate pathspec already does.
+  itemize='>fcsT...... workspaces/qa/SOUL.md'
+  run compute_skill_block_lines "$itemize" "" "$REPO" "$SERVER" true
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "block list: blunt fallback STILL blocks on a non-SKILL.md skills-all/ file (internal QA round-4 NO-GO)" {
+  # The round-4 fix above over-corrected: it also narrowed the skills-all/
+  # arm from "any file under skills-all/" (the base behaviour) to
+  # "SKILL.md only", silently dropping 443 of 520 tracked skills-all/
+  # files -- including executable skill scripts like
+  # skills-all/muso-abuse-block/scripts/abuse-block.py. Unlike the smart
+  # classifier (which IS correctly SKILL.md-only -- Step 0 and the
+  # deletion rail cover the rest there), the blunt fallback's documented
+  # job is to degrade to the pre-change "any skills-all/ file" behaviour
+  # when it runs, i.e. precisely when Step 0 is ALSO skipped (no/
+  # unreachable baseline, HYDRA_SKIP_DRIFT_CHECK=1). Only the workspaces/
+  # arm needed SKILL.md-only scoping -- base already matched it not at
+  # all, so narrowing it to .../skills/.../SKILL.md is a pure widening,
+  # not a narrowing, for that arm.
+  itemize='>fcs..... skills-all/muso-abuse-block/scripts/abuse-block.py'
+  run compute_skill_block_lines "$itemize" "" "$REPO" "$SERVER" true
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'skills-all/muso-abuse-block/scripts/abuse-block.py'
+}
+
+# ─── remediation command target (MUS-1792 round 2 — QA finding 1) ──
+# deploy.sh's DRIFT_BRIEFING has its own copy of "which sync-from-server.sh
+# target accepts this path" — a second copy of the decision
+# pr-skill-drift-gate.sh already makes. A shared function is the fix: the
+# bug QA found was exactly this decision drifting out of sync between the
+# two printers when workspaces/ coverage was added to one but not the other.
+
+@test "sync_target_for_path: workspaces/ path picks the workspaces target" {
+  run sync_target_for_path "workspaces/operations/skills/foo/SKILL.md"
+  [ "$status" -eq 0 ]
+  [ "$output" = "workspaces" ]
+}
+
+@test "sync_target_for_path: skills-all/ path picks the skills target" {
+  run sync_target_for_path "skills-all/foo/SKILL.md"
+  [ "$status" -eq 0 ]
+  [ "$output" = "skills" ]
+}
+
+@test "format_skill_capture_commands: workspaces/ SERVER-AHEAD path gets the workspaces target, not skills" {
+  run format_skill_capture_commands "SERVER-AHEAD workspaces/operations/skills/foo/SKILL.md"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'scripts/sync-from-server.sh workspaces --apply --only workspaces/operations/skills/foo/SKILL.md'
+  echo "$output" | grep -qF 'git add workspaces/operations/skills/foo/SKILL.md && git commit'
+  # `!` must be the LAST command in the test body, or bats won't fail on it
+  # (SC2314) — the wrong-target string must never appear, checked last.
+  if echo "$output" | grep -qF 'scripts/sync-from-server.sh skills --apply --only workspaces/operations/skills/foo/SKILL.md'; then
+    echo "wrong target 'skills' leaked into the command for a workspaces/ path" >&2
+    return 1
+  fi
+}
+
+@test "format_skill_capture_commands: skills-all/ SERVER-AHEAD path still gets the skills target" {
+  run format_skill_capture_commands "SERVER-AHEAD skills-all/foo/SKILL.md"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'scripts/sync-from-server.sh skills --apply --only skills-all/foo/SKILL.md'
+}
+
+@test "format_skill_capture_commands: CONFLICT lines are excluded (handled by format_skill_conflict_commands)" {
+  run format_skill_capture_commands "CONFLICT workspaces/operations/skills/foo/SKILL.md"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "format_skill_capture_commands: blunt-fallback raw itemize line (11-char code, Linux rsync 3.x shape) is treated as SERVER-AHEAD, target picked from the parsed path" {
+  run format_skill_capture_commands ">fcsT...... workspaces/operations/skills/foo/SKILL.md"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'scripts/sync-from-server.sh workspaces --apply --only workspaces/operations/skills/foo/SKILL.md'
+}
+
+@test "format_skill_capture_commands: blunt-fallback raw itemize line (9-char code, macOS openrsync shape) parses the path correctly, not off by a fixed offset" {
+  # MUS-1792 round 3 (QA finding 1): the itemize code width is NOT fixed at
+  # 11 chars across rsync implementations. /usr/bin/rsync on macOS is
+  # openrsync (protocol 29, "rsync 2.6.9 compatible"), which emits a 9-char
+  # code — confirmed by running the real local rsync --itemize-changes, not
+  # assumed: `>f+++++++ SKILL.md` / `>f.s..... SKILL.md`. A fixed char-offset
+  # extraction (the previous `${line:12}`) silently truncates the path's
+  # first 2 characters on this shape ("workspaces/..." -> "rkspaces/..."),
+  # which sync_target_for_path then can't recognize, falling through to its
+  # 'skills' default and printing a dead-end command. This fixture is the
+  # real openrsync output shape, not a hand-typed guess.
+  run format_skill_capture_commands ">f+++++++ workspaces/operations/skills/foo/SKILL.md"
+  [ "$status" -eq 0 ]
+  # The full exact command string is the proof: a truncated path ("rkspaces/
+  # ...") cannot produce this string character-for-character. (A substring
+  # check for "rkspaces" alone is NOT a valid negative here — "workspaces"
+  # itself contains "rkspaces" as a substring, so that check would be
+  # vacuously true on correct output too.)
+  echo "$output" | grep -qF 'scripts/sync-from-server.sh workspaces --apply --only workspaces/operations/skills/foo/SKILL.md'
+  if echo "$output" | grep -qF -- '--only rkspaces'; then
+    echo "path was truncated by a fixed char-offset assumption" >&2
+    return 1
+  fi
+}
+
+@test "format_skill_conflict_commands: CONFLICT path gets a git show baseline command" {
+  run format_skill_conflict_commands "CONFLICT workspaces/operations/skills/bar/SKILL.md"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'git show "$(cat /opt/hydra/.deployed-sha)":workspaces/operations/skills/bar/SKILL.md'
+}
+
+@test "format_skill_conflict_commands: SERVER-AHEAD lines are excluded (handled by format_skill_capture_commands)" {
+  run format_skill_conflict_commands "SERVER-AHEAD workspaces/operations/skills/foo/SKILL.md"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
 # ─── fail-safe exit codes ──────────────────────────────────────────
 
 @test "empty baseline → exit 5 (caller falls back to blunt)" {

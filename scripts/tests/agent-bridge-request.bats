@@ -438,6 +438,26 @@ mut() { jq "$@" "$REQ" > "$REQ.tmp" && mv "$REQ.tmp" "$REQ"; }
   ! grep -q "issue comment" "$GH_STUB_LOG"
 }
 
+@test "a duplicate near the top of a mailbox larger than the pipe buffer is still refused" {
+  # Regression: the check was `printf '%s' "$EXISTING" | grep -qE <marker>`. Under
+  # `set -o pipefail`, grep -q exits on the first match, and when the mailbox is larger
+  # than the pipe buffer printf is still writing, takes SIGPIPE (141), and the pipeline
+  # reports FAILURE for a real match -- so the wrapper posted a duplicate instead of
+  # refusing it. The one-line mailboxes above cannot reproduce that: the marker must be
+  # followed by more data than a pipe can hold (64 KiB on Linux), so that grep closing
+  # early is observable. 1 MiB of filler is comfortably past it on every platform.
+  {
+    echo "<!-- agent-bridge request_id=cs-2026-08-26-analytics-zero-plays type=systemic_check from=operations -->"
+    head -c 1048576 /dev/zero | tr '\0' 'x'
+    echo
+  } > "$GH_STUB_COMMENTS"
+  run "$SCRIPT" --file "$REQ"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"DUPLICATE"* ]]
+  ! grep -q "issue comment" "$GH_STUB_LOG"
+  [ ! -d "$AGENT_BRIDGE_TEST_DIR/posts" ]
+}
+
 @test "--follow-up posts onto the same request_id, marked as a follow-up" {
   echo "<!-- agent-bridge request_id=cs-2026-08-26-analytics-zero-plays type=systemic_check from=operations -->" > "$GH_STUB_COMMENTS"
   run "$SCRIPT" --file "$REQ" --follow-up
@@ -1408,6 +1428,34 @@ EOF
   s1=0; wait "$p1" || s1=$?
   s2=0; wait "$p2" || s2=$?
 
+  # Diagnostic BEFORE the assertions, because this case has failed in CI twice
+  # and both times the log carried only `not ok` with no values — unactionable.
+  # bats surfaces a test's output only when it fails, so this costs nothing on a
+  # green run and names the actual outcome on a red one.
+  #
+  # ROOT-CAUSED 2026-09-22, from exactly the evidence this instrumentation was
+  # added to capture. The next occurrence arrived carrying:
+  #   cp: cannot create regular file '.../posts/<id>.md': File exists
+  #   concurrency outcome: s1=0 s2=1 posts=1
+  # s2=1 is not one of the contract's outcomes. The archive step used `cp`,
+  # and GNU cp opens a destination it believes is new with O_CREAT|O_EXCL, so
+  # the losing racer got EEXIST and `set -e` propagated cp's exit 1.
+  #
+  # Why 32 earlier runs missed it: the window is between cp's stat and its
+  # open, and it only exists when the destination starts ABSENT. Measured on
+  # node-8 (GNU coreutils 9.4): 0/300 with two racers on a pre-existing file,
+  # 67/400 with a fresh destination and four. The fix is a shell redirect
+  # (O_CREAT|O_TRUNC, cannot fail on an existing file): 0/400.
+  #
+  # The diagnostic below stays. It cost nothing on green runs and is what made
+  # the cause readable in one shot when it finally fired.
+  posts="$(grep -c "issue comment" "$GH_STUB_LOG" || true)"
+  echo "concurrency outcome: s1=$s1 s2=$s2 posts=$posts (expect s in {0,3}, at least one 0, posts in 1..2)" >&2
+  if [ -s "$GH_STUB_LOG" ]; then
+    echo "--- gh stub log ---" >&2
+    sed 's/^/  /' "$GH_STUB_LOG" >&2
+  fi
+
   # 0 = posted, 3 = duplicate. 2 would mean a usage/environment refusal — which is what a
   # lock timeout used to look like, so this is the assertion that says the lock is gone.
   [ "$s1" -eq 0 ] || [ "$s1" -eq 3 ]
@@ -1416,7 +1464,6 @@ EOF
   # AT LEAST once: they cannot BOTH decline. Losing the request is the failure that matters.
   [ "$s1" -eq 0 ] || [ "$s2" -eq 0 ]
 
-  posts="$(grep -c "issue comment" "$GH_STUB_LOG" || true)"
   [ "$posts" -ge 1 ]
   [ "$posts" -le 2 ]
 
@@ -1424,6 +1471,37 @@ EOF
   # duplicate harmless rather than merely rare.
   grep -q "cs-2026-08-26-analytics-zero-plays" \
     "$AGENT_BRIDGE_TEST_DIR/posts/cs-2026-08-26-analytics-zero-plays.md"
+}
+
+@test "the archive write cannot fail on a destination another caller just created" {
+  # The behavioural guard is the concurrency test above — it is what actually
+  # went red. But its red is PROBABILISTIC (the window sits between cp's stat
+  # and its open, and exists only while the destination is absent), so it
+  # cannot be relied on to catch a reintroduction: the same `cp` survived 32
+  # deliberate runs on node-8 before CI caught it.
+  #
+  # So this one is deterministic and deliberately shape-based: whatever writes
+  # the archive destination must be a command that cannot fail when the file
+  # already exists. `cp` and `cp -f` both can (measured 67/400 and 58/400 with
+  # four racers on GNU coreutils 9.4); a redirect and `mv` of a unique temp
+  # cannot (0/400 each).
+  local archive_cmd
+  archive_cmd="$(grep -vE '^[[:space:]]*#' "$SCRIPT" \
+    | grep -F 'TEST_DIR/posts/' \
+    | grep -vF 'mkdir' \
+    | head -1 \
+    | sed -E 's/^[[:space:]]+//' \
+    | awk '{ print $1 }')"
+
+  # Vacuity guard: an empty match would satisfy the assertion below trivially,
+  # which is how a shape-based test quietly stops testing anything.
+  [ -n "$archive_cmd" ]
+
+  if [ "$archive_cmd" = "cp" ]; then
+    echo "archive write uses cp, which exits 1 with EEXIST when a concurrent" >&2
+    echo "caller creates the destination first — see the concurrency test above." >&2
+    return 1
+  fi
 }
 
 @test "a second post on a live request_id is ACCEPTED, not blocked — no mutex survives" {

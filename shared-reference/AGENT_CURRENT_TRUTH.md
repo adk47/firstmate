@@ -218,13 +218,29 @@ Two consequences worth stating because agent memories have got them wrong:
 **Pricing, contracts, and data-licensing decisions are RESERVED FOR AARON.** No numbers
 live in this file on purpose.
 
-- `platform.muso.ai` and `api.platform.muso.ai` are **live** behind an @muso.ai gate —
-  not "coming". 270 legacy Kong consumers exist on the older surface.
+- `platform.muso.ai` and `api.platform.muso.ai` are **live** — not "coming". 270 legacy
+  Kong consumers exist on the older surface.
+  - **The apex `platform.muso.ai` is PUBLIC.** Its prod ingress routes straight to
+    `platform-web`, with the founder note *"PUBLIC (2026-07-09, founder): apex
+    marketing site is public — no @muso.ai gate"*
+    (`H-DevOps/k8s/prod/platform-web/ingress.yaml`). Console routes sit behind the
+    app's own `login.muso.ai` OIDC, which is ordinary customer sign-in.
+  - **The @muso.ai gate is on `platform.ak.muso.ai`** (the staff console, served by
+    `platform-gate`), and on `platform-dev.ak.muso.ai`. Those are different hosts.
+    An earlier revision of this line attributed that gate to the apex; agents read it
+    as "Platform is internal-only" and would not route customers there.
 - The commercial model was **locked 2026-08-06**, and any figure an agent remembers
-  from before that is stale.
-- **Do not quote a price, a plan, a contract minimum, or a licensing term to anyone.**
-  Route the question: "full-catalog access is a separate enterprise tier — let me get
-  the team to walk you through options and pricing." Escalate to Aaron for the rest.
+  from before that is stale. Do not quote Platform figures from memory — read them
+  from a surface that tracks the pricing module.
+- **Published, self-service platform.muso.ai pricing IS quotable**, because it is
+  already on a public pricing page the customer can read themselves. Caroline sources
+  it from `workspaces/support/reference/platform-api.md`, refreshed automatically from
+  `https://platform.muso.ai/llms-full.txt`.
+- **Everything negotiated is still RESERVED FOR AARON**: custom or committed volume,
+  contract minimums, enterprise terms, and any data-licensing question (including
+  storing or caching Muso data). **Do not quote those, and do not negotiate.** Route:
+  "that's an enterprise conversation rather than the self-service plans — let me get
+  the team to walk you through the options." Escalate to Aaron for the rest.
 
 ## 8. Customer data in agent memory
 

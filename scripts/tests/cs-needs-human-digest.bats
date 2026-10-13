@@ -24,6 +24,15 @@ setup() {
   export DIGEST_SKIP_HOST_GUARD=1
   # A fixed "now": 2026-06-17 12:00 UTC (a Wednesday).
   export DIGEST_NOW=1781784000
+
+  TEST_TMPDIR="$BATS_TEST_TMPDIR"
+  export TEST_TMPDIR
+  export FAKE_JEV="$SCRIPTS_DIR/tests/fixtures/jev/fake-jev-sh.sh"
+  export REAL_JEV="$SCRIPTS_DIR/lib/jev.sh"
+  # Point every run at a throwaway shadow dir so this file's shadow-wiring
+  # tests never touch a real /var/lib/hydra-jev/shadow.
+  export JEV_SHADOW_DIR="$BATS_TEST_TMPDIR/jev-shadow"
+  mkdir -p "$JEV_SHADOW_DIR"
 }
 
 @test "syntax-checks" {
@@ -121,7 +130,7 @@ PYEOF
   echo "$output" | grep -qx ok
 }
 
-@test "needs-human is ranked oldest-waiting-first" {
+@test "needs-human is ranked newest-waiting-first" {
   run python3 - <<'PYEOF'
 import os
 from importlib import util
@@ -131,7 +140,7 @@ recent = {"id": "R", "email": "r@x.com", "lar": 0, "lcr": 900, "url": ""}
 oldest = {"id": "O", "email": "o@x.com", "lar": 0, "lcr": 100, "url": ""}
 middle = {"id": "M", "email": "m@x.com", "lar": 0, "lcr": 500, "url": ""}
 buckets = mod.bucket_conversations([recent, oldest, middle], set())
-assert [c["id"] for c in buckets["needs_human"]] == ["O", "M", "R"], buckets["needs_human"]
+assert [c["id"] for c in buckets["needs_human"]] == ["R", "M", "O"], buckets["needs_human"]
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]
@@ -142,7 +151,7 @@ PYEOF
   # KEY regression (waiting-timestamp finding): last_contact_reply_at == 0
   # for a never-replied (unanswered first message) conversation must NOT be
   # treated as "waiting since the epoch" — two such conversations created at
-  # DIFFERENT times must rank in created_at order, never tied in API order.
+  # DIFFERENT times must rank in created_at order (newest first), never tied in API order.
   run python3 - <<'PYEOF'
 import os
 from importlib import util
@@ -151,7 +160,8 @@ mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 older = {"id": "OLD", "email": "o@x.com", "lar": 0, "lcr": 0, "created_at": 1000, "url": ""}
 newer = {"id": "NEW", "email": "n@x.com", "lar": 0, "lcr": 0, "created_at": 2000, "url": ""}
 buckets = mod.bucket_conversations([newer, older], set())  # API order: NEW, OLD
-assert [c["id"] for c in buckets["needs_human"]] == ["OLD", "NEW"], buckets["needs_human"]
+assert [c["id"] for c in buckets["needs_human"]] == ["NEW", "OLD"], buckets["needs_human"]
+assert mod.waiting_since(older) != 0 and mod.waiting_since(newer) != 0
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]
@@ -169,7 +179,7 @@ c = {"id": "NEW", "email": "n@x.com", "lar": 0, "lcr": 0,
      "created_at": now - (10 * 3600), "url": ""}
 buckets = mod.bucket_conversations([c], set())
 blocks = mod.build_digest_blocks(buckets, now_epoch=now)
-assert "past 48h" not in str(blocks), blocks
+assert "customer-side activity older than 48h" not in str(blocks), blocks
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]
@@ -187,7 +197,7 @@ c = {"id": "OLD", "email": "o@x.com", "lar": 0, "lcr": 0,
      "created_at": now - (72 * 3600), "url": ""}
 buckets = mod.bucket_conversations([c], set())
 blocks = mod.build_digest_blocks(buckets, now_epoch=now)
-assert "past 48h" in str(blocks), blocks
+assert "customer-side activity older than 48h" in str(blocks), blocks
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]
@@ -849,6 +859,281 @@ def fake_search(token, body):
 mod.intercom_search = fake_search
 out = mod.fetch_open_convs("tok", limit=5)
 assert len(out) == 5, len(out)
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
+}
+
+# --------------------------------------------------------------------------
+# Phase 2a shadow wiring (docs/plans/jev-adoption.md #2a): the needs-human
+# shadow Jev sample must never change the rendered digest, the delta state,
+# stdout, or the exit code. ok / non-zero exit / hang past timeout / kill
+# switch must all produce a byte-identical result to each other.
+# --------------------------------------------------------------------------
+
+_cs_digest_shadow_scenario() {
+  # Drives one --post run and writes the observable result (rc + the posted
+  # blocks/text/channel + the printed bucket counts) to RESULT_FILE,
+  # deliberately separate from stdout/stderr diagnostics that legitimately
+  # differ per jev failure mode. $1 = JEV_SH, $2 = JEV_DISABLED_FILE (optional).
+  RESULT_FILE="$TEST_TMPDIR/shadow-scenario-result.json"
+  rm -f "$RESULT_FILE"
+  JEV_SH="$1" JEV_DISABLED_FILE="${2:-}" RESULT_FILE="$RESULT_FILE" \
+    python3 - > /dev/null 2>&1 <<'PYEOF'
+import os, json, sys
+from importlib import util
+spec = util.spec_from_file_location('d', os.environ['DIGEST'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod.fetch_open_convs = lambda token, limit=0: [
+    {"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 200, "url": ""},
+    {"id": "C2", "email": "c@d.com", "lar": 0, "lcr": 300, "url": ""},
+]
+mod.get_conversation_for_shadow = lambda conv_id, token: {
+    "conversation_parts": {"conversation_parts": [
+        {"author": {"type": "admin", "id": "1"}, "body": "<p>did that answer it?</p>"},
+        {"author": {"type": "user"}, "body": "<p>still broken, please help</p>"},
+    ]}}
+posted = []
+mod.post_slack_digest = lambda blocks, text, channel, cfg, account: posted.append(
+    (blocks, text, channel)) or True
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+sys.argv = ["d", "--post"]
+rc = mod.main()
+result = {"rc": rc, "posted": posted}
+with open(os.environ["RESULT_FILE"], "w") as f:
+    json.dump(result, f, sort_keys=True)
+PYEOF
+  cat "$RESULT_FILE"
+}
+
+@test "shadow wiring: needs-human jev sample never changes the posted digest or rc (ok/rc2/hang/kill-switch all match)" {
+  export JEV_SHADOW_FAKE_MODE=ok
+  run _cs_digest_shadow_scenario "$FAKE_JEV"
+  [ "$status" -eq 0 ]
+  BASELINE="$output"
+  [ -n "$BASELINE" ]
+
+  export JEV_SHADOW_FAKE_MODE=rc2
+  run _cs_digest_shadow_scenario "$FAKE_JEV"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$BASELINE" ]
+
+  export JEV_SHADOW_FAKE_MODE=hang
+  run _cs_digest_shadow_scenario "$FAKE_JEV"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$BASELINE" ]
+
+  # Kill switch: real jev.sh, JEV_DISABLED_FILE present -> jev.sh itself exits 6.
+  KS_FILE="$TEST_TMPDIR/jev.disabled"
+  : > "$KS_FILE"
+  run _cs_digest_shadow_scenario "$REAL_JEV" "$KS_FILE"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$BASELINE" ]
+}
+
+@test "shadow wiring: actual is always the needs-human bucket the sample was drawn from" {
+  run python3 - <<'PYEOF'
+import os, sys
+from importlib import util
+spec = util.spec_from_file_location('d', os.environ['DIGEST'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod.fetch_open_convs = lambda token, limit=0: [
+    {"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 1781784000 - 3600, "url": ""}]
+captured = []
+mod.shadow_judge = lambda surface, item_id, state, questions, actual=None: captured.append(
+    (surface, item_id, actual)) or None
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+sys.argv = ["d"]
+mod.main()
+assert captured == [(mod.JEV_SURFACE_NEEDS_HUMAN_DIGEST, "C1", "needs-human")], captured
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "shadow wiring: the sample never exceeds CS_DIGEST_JEV_SAMPLE_SIZE even when the pool is much larger" {
+  run python3 - <<'PYEOF'
+import os, sys
+from importlib import util
+spec = util.spec_from_file_location('d', os.environ['DIGEST'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+os.environ["CS_DIGEST_JEV_SAMPLE_SIZE"] = "3"
+mod.fetch_open_convs = lambda token, limit=0: [
+    {"id": f"C{i}", "email": "a@b.com", "lar": 0, "lcr": 1781784000 - 3600, "url": ""} for i in range(40)]
+captured = []
+mod.shadow_judge = lambda surface, item_id, state, questions, actual=None: captured.append(item_id) or None
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+sys.argv = ["d"]
+mod.main()
+assert len(captured) == 3, captured
+assert len(set(captured)) == 3, captured  # no duplicate items in one sample
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "shadow wiring: a non-fixed seed is logged to stderr with the sample size" {
+  run python3 - <<'PYEOF'
+import os, sys
+from importlib import util
+spec = util.spec_from_file_location('d', os.environ['DIGEST'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod.fetch_open_convs = lambda token, limit=0: [
+    {"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 1781784000 - 3600, "url": ""}]
+mod.shadow_judge = lambda *a, **k: None
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+sys.argv = ["d"]
+mod.main()
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
+  echo "$output" | grep -Eq "jev shadow sample: seed=[0-9]+ size=1 \(pool=1\)"
+}
+
+@test "shadow wiring: two runs draw genuinely different seeds (never fixed)" {
+  run python3 - <<'PYEOF'
+import os, re, io, sys
+from contextlib import redirect_stderr
+from importlib import util
+spec = util.spec_from_file_location('d', os.environ['DIGEST'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod.fetch_open_convs = lambda token, limit=0: [
+    {"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 1781784000 - 3600, "url": ""}]
+mod.shadow_judge = lambda *a, **k: None
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+sys.argv = ["d"]
+seeds = []
+for _ in range(2):
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        mod.main()
+    m = re.search(r"seed=(\d+)", buf.getvalue())
+    assert m, buf.getvalue()
+    seeds.append(m.group(1))
+assert seeds[0] != seeds[1], seeds
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "shadow wiring: samples across runs vary -- never pinned to the ranked head" {
+  # needs_human is ranked newest-waiting-first (see "needs-human is ranked
+  # newest-waiting-first" above), so a caller that (bug) sliced jev_pool[:k]
+  # instead of drawing a random sample would deterministically pick the SAME
+  # item (the newest) on every run. Over enough runs a genuinely random draw
+  # from a 10-item pool with k=1 must land on more than one distinct id.
+  run python3 - <<'PYEOF'
+import os, sys
+from importlib import util
+spec = util.spec_from_file_location('d', os.environ['DIGEST'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod.fetch_open_convs = lambda token, limit=0: [
+    {"id": f"C{i}", "email": f"u{i}@x.com", "lar": 0, "lcr": 1781784000 - 3600 - i, "url": ""}
+    for i in range(10)]
+os.environ["CS_DIGEST_JEV_SAMPLE_SIZE"] = "1"
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+sys.argv = ["d"]
+seen = set()
+for _ in range(30):
+    captured = []
+    mod.shadow_judge = lambda surface, item_id, state, questions, actual=None: (
+        captured.append(item_id) or None)
+    mod.main()
+    seen.update(captured)
+assert len(seen) > 1, seen  # a head-slice would always yield {"C0"}
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "needs_human_shadow_state: extracts the last customer message and the preceding admin message" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('d', os.environ['DIGEST'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod.get_conversation_for_shadow = lambda conv_id, token: {
+    "conversation_parts": {"conversation_parts": [
+        {"author": {"type": "user"}, "body": "<p>hi, still broken</p>"},
+        {"author": {"type": "admin", "id": "1"}, "body": "<p>did that answer it?</p>"},
+        {"author": {"type": "user"}, "body": "<p>yes thanks, all set</p>"},
+    ]}}
+st = mod.needs_human_shadow_state("C1", "t")
+assert st == {"customer_message": "yes thanks, all set",
+              "preceding_admin_message": "did that answer it?"}, st
+
+mod.get_conversation_for_shadow = lambda conv_id, token: {
+    "conversation_parts": {"conversation_parts": []}}
+assert mod.needs_human_shadow_state("C1", "t") is None
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "build_state boundary: a raising get_conversation_for_shadow never blocks the digest" {
+  run python3 - <<'PYEOF'
+import os, sys
+from importlib import util
+spec = util.spec_from_file_location('d', os.environ['DIGEST'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod.fetch_open_convs = lambda token, limit=0: [
+    {"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 1781784000 - 3600, "url": ""}]
+def boom(conv_id, token):
+    raise RuntimeError("network boom")
+mod.get_conversation_for_shadow = boom
+posted = []
+mod.post_slack_digest = lambda blocks, text, channel, cfg, account: posted.append(
+    (blocks, text, channel)) or True
+os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
+# A writable --delta state path -- unrelated to the shadow boundary this test
+# targets (see the pre-existing /var/lib permission gap noted for "--post
+# posts the rendered digest to Slack" above); without this override rc would
+# reflect THAT sandbox limitation instead of the property under test here.
+os.environ["CS_DIGEST_STATE"] = os.path.join(os.environ["TEST_TMPDIR"], "delta-state.json")
+sys.argv = ["d", "--post"]
+rc = mod.main()
+assert rc == 0, rc
+assert len(posted) == 1, posted  # the digest still posts despite the shadow fetch raising
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "split_actionable: boundary inclusive, never-replied rides created_at" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('d', os.environ['DIGEST'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+now = 1_000_000_000
+mk = lambda i, lcr, ca=0: {"id": i, "email": i + "@x.com", "lar": 0, "lcr": lcr, "created_at": ca, "url": ""}
+edge = mk("EDGE", now - 30 * 86400)
+out = mk("OUT", now - 30 * 86400 - 1)
+fresh = mk("NEW", 0, now - 60)
+act, back = mod.split_actionable([out, edge, fresh], now)
+assert [c["id"] for c in act] == ["EDGE", "NEW"], act
+assert [c["id"] for c in back] == ["OUT"], back
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
+}
+
+@test "actionable_dups: live contact keeps whole group, all-ancient group dropped" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('d', os.environ['DIGEST'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+now = 1_000_000_000
+mk = lambda i, em, age: {"id": i, "email": em, "lar": 0, "lcr": now - age, "created_at": 0, "url": ""}
+convs = [mk("OLD", "a@x.com", 194 * 86400), mk("NEW", "a@x.com", 3600),
+         mk("X1", "b@x.com", 100 * 86400), mk("X2", "b@x.com", 194 * 86400),
+         mk("NOEM", "", 60)]
+got = [c["id"] for c in mod.actionable_dups(convs, now)]
+assert got == ["OLD", "NEW"], got
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]

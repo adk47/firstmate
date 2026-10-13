@@ -8,6 +8,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/deploy-mutation-marker.sh
 source "$SCRIPT_DIR/lib/deploy-mutation-marker.sh"
+# shellcheck source=lib/main-prune-lock.sh
+source "$SCRIPT_DIR/lib/main-prune-lock.sh"
 HYDRA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/ovh_muso}"
@@ -94,6 +96,32 @@ read_deployed_sha() {
   fi
 }
 
+# Availability backstop (MUS-5079): deploy.sh stops a gateway for the 8.35 plugin
+# install and only Step 6 starts it again, so a rollback that dies before its own
+# Step 2 restart (refuse-to-sync, chmod, config revert, runtime restore) would
+# otherwise leave the fleet down. EXIT trap, installed before the first possible
+# exit: if Step 2 never ran, START (not restart) every gateway that is enabled.
+GATEWAYS_RESTARTED=0
+ensure_gateways_up() {
+  [ "$GATEWAYS_RESTARTED" = 1 ] && return 0
+  # The remote prune lock was lost (ssh holder died): starting main unlocked could race the offline prune.
+  main_prune_lock_lost && { log "rollback aborted: main prune lock lost; leaving main alone (the prune restarts it)"; return 0; }
+  log "rollback exiting before Step 2: starting any stopped gateway so the fleet is not left down"
+  local start_cmd='for svc in openclaw-gateway-main openclaw-gateway-edge; do
+  if systemctl is-active "$svc" &>/dev/null || systemctl is-enabled "$svc" &>/dev/null; then
+    systemctl start "$svc" && echo "  Started $svc" || echo "  WARNING: Failed to start $svc"
+  fi
+done'
+  if $HYDRA_LOCAL; then
+    bash -c "$start_cmd" || true
+  else
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" "$start_cmd" || true
+  fi
+}
+
+# shellcheck disable=SC2154  # rc is assigned inside the trap string, at fire time
+trap 'rc=$?; ensure_gateways_up; exit $rc' EXIT
+
 TARGET_SHA="$(read_deployed_sha)"
 
 # Fail SAFE, not forward. If we cannot establish what was last known good,
@@ -122,13 +150,37 @@ notify_slack ":warning: HYDRA rollback initiated. Reverting $CURRENT_SHA -> $PRE
 # checkout with two files reverted. Using a separate worktree also means we
 # never mutate $HYDRA_ROOT (the runner's checkout), so a partial rollback
 # can't leave the source tree in a franken-state.
+# Serialise with scripts/main-prune-restart.sh before any mutation (MUS-3742): Step 2 restarts the gateways
+# with raw systemctl, which would race an offline prune. Same lock as deploy.sh (lib/main-prune-lock.sh).
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+  lock_rc=0
+  log "Taking the main prune/restart lock (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock || lock_rc=$?
+  # Refused: a prune may have main stopped for offline cleanup. Starting it here, unlocked, is the race the lock exists
+  # to stop, so disarm the EXIT backstop (ensure_gateways_up). Nothing of ours is stopped yet; the server stays as-is.
+  [ "$lock_rc" = 0 ] || GATEWAYS_RESTARTED=1
+  case "$lock_rc" in
+    0) ;;
+    1) fail "a main prune/restart still holds $MAIN_PRUNE_LOCK_FILE after ${MAIN_PRUNE_LOCK_WAIT_SECS}s; refusing to roll back underneath it. Server left as-is; re-run once it finishes." ;;
+    *) fail "cannot open $MAIN_PRUNE_LOCK_FILE (rc=$lock_rc); refusing to roll back without the main prune/restart lock. Server left as-is." ;;
+  esac
+else
+  # ssh mode: hold the lock ON node-8 for the life of this process (lib/main-prune-lock.sh); refused = fail closed.
+  lock_rc=0
+  log "Taking the main prune/restart lock ON node-8 (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock_remote ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" || lock_rc=$?
+  # Same as the local branch: a refused lock must not let the EXIT backstop start main during an offline prune.
+  [ "$lock_rc" = 0 ] || { GATEWAYS_RESTARTED=1; fail "could not take $MAIN_PRUNE_LOCK_FILE on node-8 (rc=$lock_rc: a main prune/restart still holds it, or node-8 is unreachable); refusing to roll back underneath it. Server left as-is; re-run once it finishes."; }
+fi
+
 log "Step 1/4: Materializing last-known-good tree ($PREVIOUS_SHA)..."
 ROLLBACK_TREE="$(mktemp -d -t hydra-rollback-XXXXXX)"
 cleanup_rollback_tree() {
   git -C "$HYDRA_ROOT" worktree remove --force "$ROLLBACK_TREE" 2>/dev/null || true
   rm -rf "$ROLLBACK_TREE" 2>/dev/null || true
 }
-trap cleanup_rollback_tree EXIT
+# shellcheck disable=SC2154  # rc is assigned inside the trap string, at fire time
+trap 'rc=$?; cleanup_rollback_tree; ensure_gateways_up; exit $rc' EXIT  # supersedes the earlier backstop-only trap
 if ! git -C "$HYDRA_ROOT" worktree add --detach --force "$ROLLBACK_TREE" "$TARGET_SHA" >/dev/null 2>&1; then
   fail "could not materialize $TARGET_SHA into a worktree. Refusing to sync the FAILED commit. Server left as-is."
 fi
@@ -277,6 +329,22 @@ else
     "$NODE8_USER@$NODE8_IP:$DEPLOY_PATH/"
 fi
 
+# Fix script permissions (rsync doesn't preserve +x from git; same fix as
+# deploy.sh Step 4d — its absence here is what let hydra-daily-audit.py land
+# non-executable and 203/EXEC the timer, 2026-09-22 08:00Z incident).
+# A failed chmod must fail the rollback: logging success over non-executable
+# scripts is the silent 203/EXEC this step exists to prevent.
+# find (not a glob) so a tree with no *.py is not itself a chmod error.
+if $HYDRA_LOCAL; then
+  find "$DEPLOY_PATH/scripts" -maxdepth 1 -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} + \
+    || fail "could not restore +x on $DEPLOY_PATH/scripts (rollback tree is non-executable)"
+else
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" \
+    "find '$DEPLOY_PATH/scripts' -maxdepth 1 -type f \\( -name '*.sh' -o -name '*.py' \\) -exec chmod +x {} +" \
+    || fail "could not restore +x on $NODE8_IP:$DEPLOY_PATH/scripts (rollback tree is non-executable)"
+fi
+log "  Script permissions fixed"
+
 # Sync to profile dirs.
 #
 # The local branch derives BOTH roots from variables. It used to hardcode
@@ -363,6 +431,67 @@ fi
 log "  Config synced."
 
 # -------------------------------------------------------------------
+# Step 1c: Restore the openclaw runtime if this deploy swapped it
+# -------------------------------------------------------------------
+# deploy.sh Step 4c.5 replaces the GLOBAL openclaw binary, which neither the
+# tree restore nor the config revert above touches. Deploy run 37791745129
+# (8 Oct) failed AFTER that swap and left runtime 2026.8.35 under 2026.8.2
+# plugins. deploy.sh records, in $DEPLOY_PATH/.pre-deploy-openclaw-version,
+# line 1 = the pre-swap runtime and line 2 = each state DB's PRAGMA user_version
+# at swap time ("main=15 edge=15"), and removes the file once Step 6 is done.
+# The old binary can read a DB the new one migrated only while user_version is
+# unchanged (assertSupportedSchemaVersion throws on a NEWER user_version, in both
+# 8.2 and 8.35), so the restore is automatic only under that measured guard.
+# Otherwise: install nothing, say so loudly, keep the record, and carry on to
+# Step 2. Never calls downgrade-openclaw-runtime.sh (no intra-8.x state guard,
+# MUS-5212). The state_user_versions block mirrors deploy.sh's function of the
+# same name; it is inline because the tree restored above may predate it.
+log "Step 1c/4: Restoring the openclaw runtime if the failed deploy swapped it..."
+# shellcheck disable=SC2016  # deliberately single-quoted: expanded by the (local or remote) shell that runs it
+RUNTIME_RESTORE_SCRIPT='
+f="$1/.pre-deploy-openclaw-version"
+[ -f "$f" ] || { echo "  No recorded runtime swap — leaving the openclaw binary alone."; exit 0; }
+prev=$(sed -n 1p "$f" | tr -d "[:space:]")
+want=$(sed -n 2p "$f")
+case "$prev" in [0-9][0-9][0-9][0-9].*) ;; *) echo "  unreadable recorded version: $prev"; exit 3 ;; esac
+root="${OPENCLAW_PROFILE_ROOT:-/root}"
+have=""
+for p in main edge; do
+  db="$root/.openclaw-$p/state/openclaw.sqlite"
+  if [ ! -f "$db" ]; then v=absent
+  else v=$(sqlite3 -readonly "$db" "pragma user_version;" 2>/dev/null) || v=""; case "$v" in ""|*[!0-9]*) v=unreadable ;; esac
+  fi
+  have="${have:+$have }$p=$v"
+done
+case "$want$have" in *unreadable*|"") echo "  cannot verify state schema: recorded [$want] now [$have]"; exit 6 ;; esac
+if [ "$want" != "$have" ]; then
+  echo "  state DB schema changed since the swap: recorded [$want] now [$have]"
+  exit 6
+fi
+cur=$(openclaw --version 2>/dev/null | awk "NR==1 {print \$2}")
+if [ "$cur" != "$prev" ]; then
+  echo "  Restoring openclaw $cur -> $prev"
+  npm install -g "openclaw@$prev" || exit 4
+  now=$(openclaw --version 2>/dev/null | awk "NR==1 {print \$2}")
+  [ "$now" = "$prev" ] || { echo "  runtime is $now after restore, expected $prev"; exit 5; }
+fi
+rm -f "$f"
+echo "  openclaw runtime is $prev"
+'
+runtime_rc=0
+if $HYDRA_LOCAL; then
+  bash -c "$RUNTIME_RESTORE_SCRIPT" _ "$DEPLOY_PATH" || runtime_rc=$?
+else
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" bash -s -- "$DEPLOY_PATH" <<<"$RUNTIME_RESTORE_SCRIPT" || runtime_rc=$?
+fi
+if [ "$runtime_rc" -eq 6 ]; then
+  log "  WARNING: runtime NOT restored (state DB schema differs from the swap-time record or cannot be verified); record kept."
+  notify_slack ":warning: HYDRA rollback did NOT restore the openclaw runtime: the state DB user_version no longer matches the record in $DEPLOY_PATH/.pre-deploy-openclaw-version (or cannot be read). Gateways are restarting on the CURRENT runtime. Manual step if wanted: scripts/downgrade-openclaw-runtime.sh --to <prev> (Nick's go)."
+elif [ "$runtime_rc" -ne 0 ]; then
+  fail "could not restore the openclaw runtime recorded in $DEPLOY_PATH/.pre-deploy-openclaw-version (rc=$runtime_rc); node-8 may run a new runtime under old plugins. Run scripts/downgrade-openclaw-runtime.sh by hand"
+fi
+
+# -------------------------------------------------------------------
 # Step 2: Restart all gateways
 # -------------------------------------------------------------------
 log "Step 2/4: Restarting all gateways..."
@@ -381,29 +510,28 @@ for svc in openclaw-gateway-main openclaw-gateway-edge; do
 done
 RESTART
 fi
+GATEWAYS_RESTARTED=1
 sleep 5
 log "  Gateways restarted."
 
 # -------------------------------------------------------------------
-# Step 3: Run smoke test
-# -------------------------------------------------------------------
-log "Step 3/4: Running smoke test..."
-if ! "$SCRIPT_DIR/smoke-test.sh" all; then
-  fail "Smoke test FAILED after rollback. System may be in a bad state."
-fi
-log "  Smoke test passed."
-
-# -------------------------------------------------------------------
-# Step 3b: Clear the mutation marker BEFORE announcing success
+# Step 2b: Clear the mutation marker (tree restored and gateways
+# restarted -- the mutation is over whatever the smoke test says)
 # -------------------------------------------------------------------
 # The tree is restored and the gateways are back, so the marker deploy.sh
 # wrote when it started mutating must go: a leftover marker is a foreign
 # owner to every later deploy, which then refuses to claim it and the daily
-# schedule stays blocked. That is why this runs BEFORE the success
-# notification and why a failure here is a FATAL, not a swallowed rc
-# (QA Important, PR #948 round 4). The helper retries once; the ssh path
-# streams the lib so the retry runs on node-8.
-log "Step 3b/4: Clearing the mutation marker..."
+# schedule stays blocked. This runs here -- right after the mutation itself
+# is over -- rather than after the smoke test below: on 2026-09-21 the
+# post-restart event-loop freeze (issue #984) hung the smoke test's
+# cron-store read for ~6 minutes, `fail` exited the script at the smoke-test
+# step, and because the clear used to sit AFTER that step the marker
+# survived and blocked every deploy for 16h even though the mutation itself
+# had already finished cleanly at Step 2. A failure to clear is still a
+# FATAL, not a swallowed rc (QA Important, PR #948 round 4) -- it just can no
+# longer be gated on smoke-test success. The helper retries once; the ssh
+# path streams the lib so the retry runs on node-8.
+log "Step 2b/4: Clearing the mutation marker (tree restored and gateways restarted -- the mutation is over whatever the smoke test says)..."
 marker_clear_rc=0
 if $HYDRA_LOCAL; then
   clear_mutation_marker "$DEPLOY_PATH/.deploy-mutating" || marker_clear_rc=$?
@@ -416,6 +544,15 @@ if [ "$marker_clear_rc" -ne 0 ]; then
   fail "rollback restored $PREVIOUS_SHA and restarted the gateways, but could not clear $DEPLOY_PATH/.deploy-mutating (rc=$marker_clear_rc). Every scheduled deploy will refuse to claim it: run  rm -f $DEPLOY_PATH/.deploy-mutating  on node-8, then re-check with scripts/lib/deploy-rollback-gate.sh."
 fi
 log "  Mutation marker cleared."
+
+# -------------------------------------------------------------------
+# Step 3: Run smoke test
+# -------------------------------------------------------------------
+log "Step 3/4: Running smoke test..."
+if ! "$SCRIPT_DIR/smoke-test.sh" all; then
+  fail "Smoke test FAILED after rollback. System may be in a bad state."
+fi
+log "  Smoke test passed."
 
 # -------------------------------------------------------------------
 # Step 4: Post rollback status

@@ -1,0 +1,14 @@
+{
+  "id": "1001",
+  "source": {
+    "author": {"type": "user"},
+    "body": "My credits are still not approved",
+    "created_at": 100
+  },
+  "conversation_parts": {
+    "conversation_parts": [
+      {"author": {"type": "admin"}, "body": "Let me check that for you", "created_at": 110},
+      {"author": {"type": "user"}, "body": "Thanks, still pending though", "created_at": 120}
+    ]
+  }
+}

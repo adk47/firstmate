@@ -33,6 +33,9 @@ setup() {
   export MUSO_SLACK_BOT_TOKEN_DEVOPS="xoxb-test-token"
   export MUSO_SLACK_ENV_FILE="$TEST_TMPDIR/main.env"; : > "$MUSO_SLACK_ENV_FILE"
 
+  # Retries on a failed `gh run list` must not sleep for real in tests.
+  export RELEASE_GH_RETRY_DELAYS="0 0"
+
   export STUB_GH_ARGV="$TEST_TMPDIR/gh-argv";           : > "$STUB_GH_ARGV"
   export STUB_CURL_ARGV="$TEST_TMPDIR/curl-argv"; : > "$STUB_CURL_ARGV"
   export STUB_OPENCLAW_CALLS="$TEST_TMPDIR/openclaw-calls"; : > "$STUB_OPENCLAW_CALLS"
@@ -46,6 +49,8 @@ setup() {
   export STUB_HL_CONTENT=""
   export STUB_MUSO_FAIL=""
   export STUB_GH_FAIL=""
+  export STUB_GH_RAW_STDOUT=""
+  export STUB_GH_STDERR_NOTICE=""
   export STUB_RELEASE_MISSING=""
   # Which shas H-DevOps has confirmed rolled out. Set per test.
   export STUB_ROLLED_OUT=""
@@ -170,6 +175,17 @@ case "$1" in
     filter=""; prev=""
     for a in "$@"; do [ "$prev" = "--jq" ] && filter="$a"; prev="$a"; done
     sha="$(printf '%s' "$2" | sed -n 's#.*/commits/\([0-9a-f]*\)/status#\1#p')"
+    # repos/<o>/<r>/compare/<base>...<head> -> {"status": ...}. Driven by
+    # $STUB_COMPARE_STATUS; unset behaves like a failing call, so a test that
+    # does not opt in can never be "covered" by accident. The argv is already
+    # recorded above, so a test can assert which two shas were compared.
+    case "$2" in
+      */compare/*)
+        [ -n "$STUB_COMPARE_STATUS" ] || { echo "gh: compare not stubbed" >&2; exit 1; }
+        body="{\"status\":\"$STUB_COMPARE_STATUS\"}"
+        if [ -n "$filter" ]; then printf '%s' "$body" | jq -r "$filter"; else printf '%s\n' "$body"; fi
+        exit 0 ;;
+    esac
     if [ -n "$sha" ]; then
       if printf '%s' "$STUB_ROLLED_OUT" | tr ' ' '\n' | grep -qx "$sha"; then
         body='{"state":"success","total_count":1,"statuses":[{"state":"success","context":"H-DevOps / deploy","description":"Rollout to muso-prod (success)"}]}'
@@ -190,6 +206,18 @@ case "$1" in
     if [ -n "$filter" ]; then printf '%s' "$body" | jq -r "$filter"; else printf '%s\n' "$body"; fi
     exit 0 ;;
   run)
+    # A zero-exit response whose stdout is NOT a JSON array. Real gh can do
+    # this; without a seam the bootstrap's shape guard is untestable and so
+    # is dead weight (mutation B2 stayed green until this existed).
+    if [ -n "${STUB_GH_RAW_STDOUT:-}" ]; then
+      printf '%s\n' "$STUB_GH_RAW_STDOUT"; exit 0
+    fi
+    # gh routinely writes NOTICES to stderr while succeeding. Capturing with
+    # `2>&1` folds those into the JSON and corrupts a perfectly good
+    # listing, so the seam exists to keep that regression caught.
+    if [ -n "${STUB_GH_STDERR_NOTICE:-}" ]; then
+      echo "gh: a note about authentication" >&2
+    fi
     # Real `gh run list` returns the NEWEST runs and truncates at --limit.
     # The stub MUST model that: a stub that always returns everything makes
     # the window-reach guard untestable and every backlog assertion pass for
@@ -325,7 +353,14 @@ _seed_state() {
 # ─────────────────────────────────────────────────────────────────
 
 @test "nothing shipped: prints NO_REPLY, exits 0, tags nothing" {
-  echo '[]' > "$STUB_RUNS_JSON"
+  # The listing reaches the checkpoint run itself (id 1000) and nothing
+  # newer -- a real "nothing new" tick. It must NOT be an empty array: a
+  # repo with an established checkpoint always has at least that run in its
+  # history, so a genuinely empty listing is the malformed/unmeasured case
+  # covered separately below, not this one.
+  cat > "$STUB_RUNS_JSON" <<JSON
+[ { "databaseId": 1000, "headSha": "$BASE_SHA", "conclusion": "success", "createdAt": "2026-08-27T11:00:00Z", "status": "completed" } ]
+JSON
   mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
   _seed_state "$BASE_SHA" "2026-08-27T11:00:00Z" "v2026.8.26"
 
@@ -335,6 +370,52 @@ _seed_state() {
   [ ! -s "$STUB_RELEASE_CREATE" ]
   run git -C "$ORIGIN" tag -l
   [ -z "$output" ] || [ "$output" = "v2026.8.26" ]
+}
+
+@test "status detector refuses an EMPTY run listing as unmeasured, not as nothing shipped" {
+  # QA probe B (MUS-1343): a repo wired into release-watch deploys, so a
+  # literally empty listing on its production branch is never a fact about
+  # production -- it must not render as the quiet "nothing shipped" tick.
+  echo '[]' > "$STUB_RUNS_JSON"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-27T11:00:00Z" "v2026.8.26"
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"WARN"* ]]
+  [[ "$output" == *"came back EMPTY"* ]]
+  [[ "$output" != *"NO_REPLY"* ]]
+  [ ! -s "$STUB_RELEASE_CREATE" ]
+}
+
+@test "status detector refuses an UNPARSEABLE run listing, it does not read it as nothing shipped" {
+  # QA probe A (MUS-1343): a zero-exit gh response carrying a GitHub error
+  # body must not reach jq and fail open into "no confirmed prod release".
+  export STUB_GH_RAW_STDOUT='{"message":"Bad credentials"}'
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-27T11:00:00Z" "v2026.8.26"
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a JSON array"* ]]
+  [[ "$output" == *"Bad credentials"* ]]
+  [[ "$output" != *"NO_REPLY"* ]]
+  [ ! -s "$STUB_RELEASE_CREATE" ]
+}
+
+@test "status detector catches TRUNCATED JSON with the same shape guard, not a downstream jq crash" {
+  # QA probe C (MUS-1343): a truncated body is still a zero-exit, non-array
+  # response and must be caught by the same guard as probe A, not left to
+  # crash a later jq call with no [release-watch] context.
+  export STUB_GH_RAW_STDOUT='[{"databaseId":123,"headSha":"dead'
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-27T11:00:00Z" "v2026.8.26"
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a JSON array"* ]]
+  [[ "$output" != *"jq: error"* ]]
+  [ ! -s "$STUB_RELEASE_CREATE" ]
 }
 
 @test "new bump: pins the dispatch sha, not whatever main has drifted to" {
@@ -1073,6 +1154,66 @@ JSON
   grep -q "last_marker=$MID_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/hydra"
 }
 
+@test "hydra detector refuses an UNPARSEABLE run listing, it pages WITH a reason not a bare jq crash" {
+  # QA probe D (MUS-1343): before this guard, detect_hydra's trailing jq
+  # crashed on the bad body, and the ONLY output reaching the log was two
+  # bare `jq:` lines -- an OnFailure page with no repo name and no cause.
+  export STUB_REPO_NAME="Muso-AI/hydra"
+  export STUB_GH_RAW_STDOUT='{"message":"API rate limit exceeded"}'
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  printf 'last_sha=%s\nlast_marker=%s\nlast_version=v2026.8.26\nlast_date=1970-01-01\nlast_run_at=2026-08-27T11:00:00Z\nlast_run_id=1000\n' \
+    "$BASE_SHA" "$BASE_SHA" > "$HYDRA_RELEASE_STATE_DIR/announced/hydra"
+
+  run "$SCRIPT" --repo=hydra --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"[release-watch] WARN:"* ]]
+  [[ "$output" == *"not a JSON array"* ]]
+  [[ "$output" == *"API rate limit exceeded"* ]]
+  [[ "$output" != *"Cannot index string with string"* ]]
+}
+
+@test "hydra detector refuses an EMPTY run listing as unmeasured, not as nothing shipped" {
+  # QA probe E (MUS-1343): hydra deploys itself, so an empty listing on its
+  # own prod branch is never a fact about production -- it must not render
+  # as the quiet "nothing shipped" tick the way it did before this guard.
+  export STUB_REPO_NAME="Muso-AI/hydra"
+  echo '[]' > "$STUB_RUNS_JSON"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  printf 'last_sha=%s\nlast_marker=%s\nlast_version=v2026.8.26\nlast_date=1970-01-01\nlast_run_at=2026-08-27T11:00:00Z\nlast_run_id=1000\n' \
+    "$BASE_SHA" "$BASE_SHA" > "$HYDRA_RELEASE_STATE_DIR/announced/hydra"
+
+  run "$SCRIPT" --repo=hydra --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"WARN"* ]]
+  [[ "$output" == *"came back EMPTY"* ]]
+  [[ "$output" != *"NO_REPLY"* ]]
+}
+
+@test "both detectors agree on disposition for an identical empty listing" {
+  # AC5 (MUS-1343): the status and hydra detectors used to behave
+  # OPPOSITELY on the same bad input -- status swallowed it (NO_REPLY, exit
+  # 0), hydra paged over it with no explanation. Both must now refuse it the
+  # same way: non-zero, warned, never NO_REPLY.
+  echo '[]' > "$STUB_RUNS_JSON"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-27T11:00:00Z" "v2026.8.26"
+  run "$SCRIPT" --repo=auth --no-highlights
+  status_rc="$status"; status_out="$output"
+
+  export STUB_REPO_NAME="Muso-AI/hydra"
+  printf 'last_sha=%s\nlast_marker=%s\nlast_version=v2026.8.26\nlast_date=1970-01-01\nlast_run_at=2026-08-27T11:00:00Z\nlast_run_id=1000\n' \
+    "$BASE_SHA" "$BASE_SHA" > "$HYDRA_RELEASE_STATE_DIR/announced/hydra"
+  run "$SCRIPT" --repo=hydra --no-highlights
+  hydra_rc="$status"; hydra_out="$output"
+
+  [ "$status_rc" -ne 0 ]
+  [ "$hydra_rc" -ne 0 ]
+  [[ "$status_out" != *"NO_REPLY"* ]]
+  [[ "$hydra_out" != *"NO_REPLY"* ]]
+  [[ "$status_out" == *"WARN"* ]]
+  [[ "$hydra_out" == *"WARN"* ]]
+}
+
 @test "every configured repo resolves its detector — no missing functions" {
   # Structural guard: walk EVERY row in the real table and assert the tick
   # completes without an unresolved helper. Catches a detector that is
@@ -1400,4 +1541,421 @@ JSON
   source "$HYDRA_REPO/scripts/lib/release-repos.sh"
   [ "$(release_repo_field core-backend cadence)" = "per-deploy" ]
   [ "$(release_repo_field core-backend detector)" = "status" ]
+}
+
+# ─── Standing-finding page dedupe ──────────────────────────────────────
+# Two refusals in this detector are STANDING findings: they are correct,
+# they are load-bearing, and they persist until a human re-seeds the
+# baseline. The timer runs every 5 minutes, so failing the unit on every
+# tick pages ~288 times a day for ONE finding. Measured on prod: wcn's
+# 06460cdf sat `pending` for 13 days and paged on every tick (22 failures
+# in 2h when Nick surfaced it).
+#
+# These cases pin the ONLY safe cure: the WARN record is still written
+# every tick, and only the PAGE is deduped. Going quiet instead would hide
+# a withheld release, which is the failure this detector exists to prevent.
+
+# _seed_finding <fingerprint> <paged_at-epoch>
+_seed_finding() {
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/findings"
+  printf 'fingerprint=%s\npaged_at=%s\n' "$1" "$2" \
+    > "$HYDRA_RELEASE_STATE_DIR/findings/auth"
+}
+
+# The standard "one unresolved pending rollout" fixture.
+_pending_fixture() {
+  cat > "$STUB_RUNS_JSON" <<JSON
+[ { "databaseId": 1001, "headSha": "$MID_SHA", "conclusion": "success", "createdAt": "2026-08-20T10:00:00Z", "status": "completed" } ]
+JSON
+  export STUB_ROLLED_OUT=""
+  export STUB_ROLLOUT_PENDING="$MID_SHA"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-20T09:00:00Z" "v2026.8.26" 1000
+}
+
+@test "the FIRST occurrence of a standing finding pages and records a stamp" {
+  _pending_fixture
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]
+  # The stamp is what makes the next tick quiet; without it this is a no-op.
+  grep -q "fingerprint=unresolved-rollout.*$MID_SHA.*pending" \
+    "$HYDRA_RELEASE_STATE_DIR/findings/auth"
+  grep -qE '^paged_at=[0-9]+$' "$HYDRA_RELEASE_STATE_DIR/findings/auth"
+}
+
+@test "an UNCHANGED standing finding is still logged but no longer pages" {
+  _pending_fixture
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 60 ))"
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]                      # no page
+  [[ "$output" == *"INDETERMINATE"* ]]     # but the record is NOT suppressed
+  [[ "$output" == *"not re-paged"* ]]
+  # And it still refuses to announce or advance past what it cannot resolve.
+  [ ! -f "$TEST_TMPDIR/posted.json" ]
+  [ -z "$(git -C "$ORIGIN" tag -l "$(_today_tag_glob)")" ]
+  grep -q 'last_run_id=1000' "$HYDRA_RELEASE_STATE_DIR/announced/auth"
+}
+
+@test "a CHANGED rollout state is a different finding and pages again" {
+  # pending -> absent means the writer's behaviour changed. Inheriting the
+  # old stamp's silence would swallow a genuinely new signal.
+  _pending_fixture
+  export STUB_ROLLOUT_PENDING=""           # now statusless, not pending
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 60 ))"
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"not re-paged"* ]]
+  grep -q "none" "$HYDRA_RELEASE_STATE_DIR/findings/auth"
+}
+
+@test "a different sha is a different finding and pages again" {
+  _pending_fixture
+  _seed_finding "unresolved-rollout	$BASE_SHA	1001	pending" "$(( $(date -u +%s) - 60 ))"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"not re-paged"* ]]
+}
+
+@test "past the re-page window a forgotten finding resurfaces on its own" {
+  # The dedupe must not become permanent amnesia.
+  _pending_fixture
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 90000 ))"
+  # The default is now "never on elapsed time alone"; the window is opt-in.
+  RELEASE_FINDING_REPAGE_SECONDS=86400 run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]
+}
+
+@test "the re-page window is configurable" {
+  _pending_fixture
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 600 ))"
+  RELEASE_FINDING_REPAGE_SECONDS=300 run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]                      # 600s elapsed > 300s window
+}
+
+@test "a stamp dated in the FUTURE pages rather than staying silent forever" {
+  # Clock skew must not be able to mute a finding until the clock catches
+  # up: a negative elapsed reads as "inside the window" under a naive
+  # upper-bound-only comparison.
+  _pending_fixture
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) + 99999 ))"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+}
+
+@test "a CORRUPT stamp pages rather than suppressing the finding" {
+  # `paged_at=not-a-number` is not merely unusable, it is FATAL without the
+  # validation: bash arithmetic resolves a variable's VALUE recursively, so
+  # $(( now - prev_at )) evaluates the identifier `not` and dies under
+  # `set -u`. A bare `status -ne 0` assertion cannot tell that crash apart
+  # from a correct page -- both are non-zero -- so pin the RECOVERY: the
+  # finding is reported and the bad stamp is replaced with a valid one.
+  _pending_fixture
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "not-a-number"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]
+  [[ "$output" != *"unbound variable"* ]]
+  grep -qE '^paged_at=[0-9]+$' "$HYDRA_RELEASE_STATE_DIR/findings/auth"
+}
+
+@test "a TRANSIENT failure still pages on every tick — the dedupe is scoped" {
+  # This is the scope guard. `could not measure` (rc 2) is self-resolving,
+  # so it must keep failing every tick; only the human-gated standing
+  # findings (rc 3) are deduped. A dedupe that widened to transient errors
+  # would mute real breakage for a day.
+  #
+  # The seeded fingerprint must be the EMPTY one an rc=2 path actually
+  # produces (those paths print no fingerprint). Seeding a non-matching
+  # value made this test pass even with the dedupe widened to rc=2 --
+  # it was green for the wrong reason, caught by mutation M5.
+  _pending_fixture
+  export STUB_GH_FAIL=1
+  _seed_finding "" "$(( $(date -u +%s) - 60 ))"
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"not re-paged"* ]]
+}
+
+@test "--dry-run does not write a findings stamp" {
+  # A dry run that stamped would silence the next REAL tick.
+  _pending_fixture
+  run "$SCRIPT" --repo=auth --no-highlights --dry-run
+  [ ! -f "$HYDRA_RELEASE_STATE_DIR/findings/auth" ]
+}
+
+@test "a non-numeric RELEASE_FINDING_REPAGE_SECONDS fails closed" {
+  # Same reason the grace window is validated: bash coerces a non-numeric
+  # value toward zero, which would silently re-page on every tick and undo
+  # the dedupe while looking configured.
+  _pending_fixture
+  RELEASE_FINDING_REPAGE_SECONDS=abc run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"RELEASE_FINDING_REPAGE_SECONDS must be"* ]]
+}
+
+# ─── bootstrap: "could not measure" is not "no" ─────────────────────────
+# The lookup used to be `gh run list ... || echo '[]'`, so ANY gh failure
+# became an empty run list and was then reported as "no successful prod
+# dispatch found for <sha>" — which tells the operator to go pick a
+# different sha. It cost a real investigation: core-backend's d0e4be09 was
+# refused exactly that way and written off as un-bootstrappable, while run
+# 35151474417 had succeeded for it the whole time.
+
+@test "bootstrap refuses DISTINCTLY when the dispatch listing cannot be read" {
+  # The message must not blame the sha, and must say retrying is the move.
+  export STUB_GH_FAIL=1
+  run "$SCRIPT" --repo=auth --bootstrap="$MID_SHA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not read the dispatch runs"* ]]
+  [[ "$output" == *"says NOTHING about whether"* ]]
+  # The misleading verdict must NOT be what an unreadable listing produces.
+  [[ "$output" != *"no successful prod dispatch found"* ]]
+  # And nothing may be seeded off an unmeasured read.
+  [ ! -f "$HYDRA_RELEASE_STATE_DIR/announced/auth" ] \
+    || ! grep -q "last_sha=$MID_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/auth"
+}
+
+@test "bootstrap refuses an EMPTY dispatch listing as unmeasured, not as proof" {
+  # Zero runs on a repo's production branch cannot be right, so it is a
+  # failed read wearing a valid shape.
+  echo '[]' > "$STUB_RUNS_JSON"
+  run "$SCRIPT" --repo=auth --bootstrap="$MID_SHA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"came back EMPTY"* ]]
+  [[ "$output" == *"not as proof"* ]]
+  [[ "$output" != *"no successful prod dispatch found"* ]]
+}
+
+@test "bootstrap still refuses a sha that genuinely never deployed" {
+  # The scope guard: with a well-formed, non-empty listing that simply does
+  # not contain the sha, the original refusal is CORRECT and must survive.
+  cat > "$STUB_RUNS_JSON" <<JSON
+[ { "databaseId": 1001, "headSha": "$SHIPPED_SHA", "conclusion": "success", "createdAt": "2026-08-20T10:00:00Z", "status": "completed" } ]
+JSON
+  run "$SCRIPT" --repo=auth --bootstrap="$BASE_SHA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no successful prod dispatch found"* ]]
+  # And it now reports how much it actually read, so the claim is checkable.
+  [[ "$output" == *"runs read"* ]]
+}
+
+@test "bootstrap refuses an UNPARSEABLE dispatch listing, it does not read a baseline out of it" {
+  # A zero-exit, non-array response would otherwise reach jq, fail open to
+  # empty, and land on the misleading "no successful dispatch" verdict.
+  export STUB_GH_RAW_STDOUT='gh: unexpected response'
+  run "$SCRIPT" --repo=auth --bootstrap="$MID_SHA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a JSON array"* ]]
+  [[ "$output" != *"no successful prod dispatch found"* ]]
+}
+
+@test "a gh NOTICE on stderr does not corrupt an otherwise good listing" {
+  # Regression guard for a bug introduced while fixing the fail-open: the
+  # first version captured with `2>&1`, which folded gh's stderr notices
+  # into the JSON and made a VALID listing fail the shape guard. stderr
+  # must go to a file, never into the captured stdout.
+  export STUB_GH_STDERR_NOTICE=1
+  _set_runs "$MID_SHA" "2026-08-27T11:55:00Z"
+  run "$SCRIPT" --repo=auth --bootstrap="$MID_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"baseline seeded"* ]]
+  [[ "$output" != *"not a JSON array"* ]]
+  grep -q "last_sha=$MID_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/auth"
+}
+
+@test "a REDEPLOY of the same sha after recovery pages again, it is not the old incident" {
+  # QA finding on #971, and a case I had wrongly dismissed as covered.
+  # Timeline: run 1001 for sha A goes indeterminate past grace and pages.
+  # It later succeeds and is announced. Then run 1002 REDEPLOYS the same A
+  # and goes indeterminate again, inside the 24h window. Keyed on
+  # sha+state alone the fingerprint is byte-identical to the stamped
+  # incident, so this brand-new deployment incident would inherit the old
+  # silence and the unit would exit 0. Nothing clears the stamp on
+  # recovery, so the dispatch RUN is what separates the two.
+  cat > "$STUB_RUNS_JSON" <<JSON
+[ { "databaseId": 1002, "headSha": "$MID_SHA", "conclusion": "success", "createdAt": "2026-08-20T12:00:00Z", "status": "completed" } ]
+JSON
+  export STUB_ROLLED_OUT=""
+  export STUB_ROLLOUT_PENDING="$MID_SHA"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-20T09:00:00Z" "v2026.8.26" 1000
+  # The stamp left behind by the run-1001 incident.
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 60 ))"
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]                       # a new incident must page
+  [[ "$output" == *"INDETERMINATE"* ]]
+  [[ "$output" != *"not re-paged"* ]]
+  # And the stamp now names the NEW run, so the next tick dedupes on it.
+  grep -q "1002" "$HYDRA_RELEASE_STATE_DIR/findings/auth"
+}
+
+@test "the SAME dispatch run still dedupes across ticks" {
+  # The other side of the run-id change: adding it must not defeat the
+  # dedupe for the ordinary case, where one incident persists tick after
+  # tick under the same run.
+  _pending_fixture
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 60 ))"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not re-paged"* ]]
+}
+
+# ─── Covered-by-later-success (MUS-5149) ───────────────────────────────
+# A statusless sha that is an ancestor of (or identical to) a LATER success is
+# covered: that release ships its commits. Anything we cannot prove stays
+# INDETERMINATE and pages (fail closed).
+
+# _covered_fixture <second-run-sha> — run 1001 = MID (statusless), run 1002 = $1 (success)
+_covered_fixture() {
+  cat > "$STUB_RUNS_JSON" <<JSON
+[ { "databaseId": 1001, "headSha": "$MID_SHA", "conclusion": "success", "createdAt": "2026-08-20T10:00:00Z", "status": "completed" },
+  { "databaseId": 1002, "headSha": "$1", "conclusion": "success", "createdAt": "2026-08-20T11:00:00Z", "status": "completed" } ]
+JSON
+  _rolled_out "$1"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-20T09:00:00Z" "v2026.8.26" 1000
+}
+
+@test "a statusless sha that is an ANCESTOR of a later success is skipped and the later one announced" {
+  _covered_fixture "$SHIPPED_SHA"
+  STUB_COMPARE_STATUS=ahead run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"INDETERMINATE"* ]]
+  [[ "$output" == *"${MID_SHA:0:8}"* && "$output" == *"${SHIPPED_SHA:0:8}"* ]]
+  [[ "$output" == *"rolled into"* ]]
+  # Pin the argv: the compare must be base=skipped sha, head=later success.
+  grep -q "compare/$MID_SHA...$SHIPPED_SHA" "$STUB_GH_ARGV"
+  tag="$(git -C "$ORIGIN" tag -l "$(_today_tag_glob)" | sort | tail -1)"
+  [ "$(git -C "$ORIGIN" rev-list -n1 "$tag")" = "$SHIPPED_SHA" ]
+  grep -q "last_marker=$SHIPPED_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/auth"
+  [ ! -f "$HYDRA_RELEASE_STATE_DIR/findings/auth" ]
+}
+
+@test "a sha REDEPLOYED by a later success run is never INDETERMINATE" {
+  # Status is per-SHA, so run 1001 and run 1002 on one sha read the same
+  # record and 1001 resolves on its own. The `identical` arm of the compare
+  # is therefore only reachable on a race between the two reads; it is kept
+  # because ahead alone would page on that race, but it cannot be driven
+  # through this stub.
+  _covered_fixture "$MID_SHA"
+  STUB_COMPARE_STATUS=identical run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"INDETERMINATE"* ]]
+  grep -q "last_marker=$MID_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/auth"
+  grep -q 'last_run_id=1001' "$HYDRA_RELEASE_STATE_DIR/announced/auth"
+}
+
+@test "a statusless sha with NO later success still fails loud" {
+  _pending_fixture
+  export STUB_ROLLOUT_PENDING=""
+  STUB_COMPARE_STATUS=ahead run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]
+  # No later success to look ahead to, so no compare is even attempted.
+  if grep -q "compare/" "$STUB_GH_ARGV"; then false; fi
+}
+
+@test "a later FAILED rollout does not cover a statusless sha" {
+  _covered_fixture "$SHIPPED_SHA"
+  export STUB_ROLLED_OUT=""; _rollout_failed "$SHIPPED_SHA"
+  STUB_COMPARE_STATUS=ahead run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]
+}
+
+@test "a DIVERGED statusless sha is not covered by a later success" {
+  _covered_fixture "$SHIPPED_SHA"
+  STUB_COMPARE_STATUS=diverged run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]
+  grep -q "compare/$MID_SHA...$SHIPPED_SHA" "$STUB_GH_ARGV"
+  [ -z "$(git -C "$ORIGIN" tag -l "$(_today_tag_glob)")" ]
+}
+
+@test "a BEHIND compare is not covered either" {
+  _covered_fixture "$SHIPPED_SHA"
+  STUB_COMPARE_STATUS=behind run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]
+}
+
+@test "a FAILING compare call fails closed" {
+  _covered_fixture "$SHIPPED_SHA"
+  run "$SCRIPT" --repo=auth --no-highlights      # STUB_COMPARE_STATUS unset -> gh exits 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]
+  grep -q "compare/$MID_SHA...$SHIPPED_SHA" "$STUB_GH_ARGV"
+  [ -z "$(git -C "$ORIGIN" tag -l "$(_today_tag_glob)")" ]
+}
+
+# ─── One page per new finding (MUS-5149) ───────────────────────────────
+
+@test "by default an unchanged finding never re-pages on elapsed time alone" {
+  _pending_fixture
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 90000 ))"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INDETERMINATE"* ]]      # still logged every tick
+  [[ "$output" == *"not re-paged"* ]]
+}
+
+@test "a clean tick clears the stamp so the same finding pages again afterwards" {
+  _pending_fixture
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 60 ))"
+  # Recovery: the rollout lands and the tick is clean.
+  _rolled_out "$MID_SHA"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [ ! -f "$HYDRA_RELEASE_STATE_DIR/findings/auth" ]
+  # The identical fingerprint recurs (same sha, run, state): it is a new page.
+  _pending_fixture
+  _seed_state "$BASE_SHA" "2026-08-20T09:00:00Z" "v2026.8.26" 1000
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"not re-paged"* ]]
+}
+
+@test "a TRANSIENT failure does not clear the stamp" {
+  _pending_fixture
+  export STUB_GH_FAIL=1
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 60 ))"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [ -f "$HYDRA_RELEASE_STATE_DIR/findings/auth" ]
+}
+
+@test "--dry-run does not delete a findings stamp" {
+  _pending_fixture
+  _seed_finding "unresolved-rollout	$MID_SHA	1001	pending" "$(( $(date -u +%s) - 60 ))"
+  _rolled_out "$MID_SHA"
+  run "$SCRIPT" --repo=auth --no-highlights --dry-run
+  [ -f "$HYDRA_RELEASE_STATE_DIR/findings/auth" ]
+}
+
+# rc 1 ("no confirmed prod release found") is the arm that heals a stamp left
+# naming a sha that is no longer a candidate -- node-8's real state after a
+# re-seed. The rc 0 arm is covered above.
+@test "a no-release tick (rc 1) clears a STALE stamp, and the finding pages again if it recurs" {
+  cat > "$STUB_RUNS_JSON" <<JSON
+[ { "databaseId": 1000, "headSha": "$BASE_SHA", "conclusion": "success", "createdAt": "2026-08-20T09:00:00Z", "status": "completed" } ]
+JSON
+  export STUB_ROLLED_OUT="$BASE_SHA"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-20T09:00:00Z" "v2026.8.26" 1000
+  _seed_finding "unresolved-rollout	$SHIPPED_SHA	999	pending" "$(( $(date -u +%s) - 60 ))"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no confirmed prod release found"* ]]
+  [ ! -f "$HYDRA_RELEASE_STATE_DIR/findings/auth" ]
+  # The identical fingerprint recurs: a new page, not a suppressed one.
+  _pending_fixture
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"not re-paged"* ]]
 }

@@ -42,30 +42,30 @@ walk through setup until you know which one they mean.
 
 ## Full-catalog API access
 
-This is a **separate, enterprise-level product** – not the workspace key above.
+This is **Muso Platform**, at **platform.muso.ai** – a separate product from the
+workspace key above.
 
-- **Separate, much pricier tier.** Pulling data beyond their own workspace (the full
-  catalog) is a different subscription tier and costs significantly more than the
-  standard plans.
-- **Custom contracts ~$3,000.** Historically this has been a high-touch custom
-  contract – around **$3,000** – with manual back-and-forth to set up. If a customer
-  asks about cost, it's fine to give that as a rough ballpark for the traditional
-  custom contract; it's not a fixed quote, and the coming self-service option (below)
-  is aimed at being more accessible.
-- **Self-service is coming.** Muso is rolling out a self-service model for catalog
-  access at **platform.muso.ai**, including a **lower-cost entry plan** so customers
-  can test and explore the data before committing to a full contract.
-- **Rate-limited entry plan.** That lower-cost plan has strict **per-minute request
-  limits** – it's for trying out the data, not for pulling large portions of the
-  catalog quickly. Set that expectation up front so nobody expects to bulk-download
-  the catalog on the cheap plan.
+- **It is live and self-service.** A customer signs up at platform.muso.ai, adds a
+  card, and generates their own key. No waiting list, no access request, and no
+  sales call for the standard plans. This is the single most important correction
+  to make: people still expect the old "apply and wait" developer programme.
+- **It covers the whole catalog** – credits, profiles and analytics across all of
+  Muso, not just the customer's own roster.
+- **Pricing is published and self-service.** Retrieve `platform-api.md` for the
+  current rates, included volumes and limits, and quote from it. Those figures are
+  refreshed from the public pricing page, so they match what the customer sees.
+- **Custom and enterprise terms are not yours to quote.** Negotiated volume,
+  committed contracts, licensing and any request to store or cache Muso data go to
+  the team.
+
+For the full picture – what Platform is, who it is for, how to get started and the
+data-licence caveats – retrieve `platform.md`.
 
 **How to answer:**
-1. Set the expectation that full-catalog access is a separate, enterprise tier – not
-   the included workspace key.
-2. Mention the coming self-service option at **platform.muso.ai** with a lower-cost
-   plan to test the data first (rate-limited, so it's for exploring, not bulk pulls).
-3. For a real quote or to move forward on a custom contract, flag it for the team
+1. Work out which access they need first (own roster vs whole catalog).
+2. For full-catalog: point them to **platform.muso.ai**, tell them it is
+   self-service, and answer pricing from `platform-api.md`.
+3. For anything custom, enterprise, or licensing-related, flag it for the team
    (`support-general`). Don't negotiate pricing or commit to contract terms yourself.
 
 ## What customers can build with it
@@ -73,9 +73,10 @@ This is a **separate, enterprise-level product** – not the workspace key above
 - The developer API gives programmatic (REST) access to the **same verified Muso
   credit and catalog data** that powers the AI and CLI tools – same data, accessed
   directly.
-- Third-party apps can integrate with Muso using single sign-on (SSO) with a
-  **workspace token**.
-- Developer documentation lives at **developer.muso.ai**.
+- Third-party apps can let their own users sign in with Muso ("Login with Muso"),
+  which returns that signed-in user's own data.
+- Platform documentation lives at **platform.muso.ai/docs**. The older
+  developer.muso.ai is the previous generation; send new integrations to Platform.
 
 ## Routing summary
 
@@ -83,9 +84,11 @@ This is a **separate, enterprise-level product** – not the workspace key above
   to request their key. Flag for the team only if it's genuinely broken.
 - **Workspace-level, on Lite/Free:** they need Pro or Business first; guide them to
   upgrade in Settings.
-- **Full-catalog / enterprise interest, or a custom quote:** flag it for the team
-  (`support-general`) – set expectations honestly, no pricing commitments, no invented
-  timelines.
+- **Full-catalog:** point them to **platform.muso.ai** – it is self-service, and
+  published pricing comes from `platform-api.md`.
+- **Enterprise, custom volume, licensing, or a negotiated quote:** flag it for the
+  team (`support-general`) – set expectations honestly, no pricing commitments, no
+  invented timelines.
 - Never promise a turnaround you can't verify. If you flag something for the team, use
   only the timeframe that comes back – don't invent one.
 
@@ -97,8 +100,7 @@ This is a **separate, enterprise-level product** – not the workspace key above
 > to point you to the exact spot?"
 
 > Customer: "Can I pull credits for the whole catalog, not just my workspace?"
-> Caroline: "That's our full-catalog access, which is a separate, enterprise-level
-> plan rather than the workspace key. We're also rolling out a self-service option at
-> platform.muso.ai with a lower-cost tier to test the data first (it's rate-limited,
-> so it's for exploring, not bulk pulls). Want me to get the team to walk you through
-> the options and pricing?"
+> Caroline: "Yes – that's our developer platform at platform.muso.ai, which is
+> separate from the workspace key. It's self-service: you sign up, add a card and
+> generate your own key, and it covers the full catalog. Want me to go through the
+> pricing with you?"

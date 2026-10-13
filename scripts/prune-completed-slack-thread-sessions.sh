@@ -14,6 +14,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/version-compare.sh
 source "$SCRIPT_DIR/lib/version-compare.sh"
+# shellcheck source=lib/maintenance-flag.sh
+source "$SCRIPT_DIR/lib/maintenance-flag.sh"
 
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
 PROFILE="main"
@@ -55,6 +57,19 @@ while (($#)); do
 done
 
 case "$PROFILE" in main|edge) ;; *) echo "--profile must be main or edge" >&2; exit 2 ;; esac
+
+# Stand down while the gateway is deliberately down (maintenance window) or
+# warming up after a deploy restart; this timer pages via OnFailure and would
+# otherwise report a non-actionable failure. Fail-safe: absent/expired/malformed
+# flags read as "not active".
+if maintenance_active; then
+  echo "prune: maintenance: $(maintenance_reason) - skipping"
+  exit 0
+fi
+if deploy_window_active; then
+  echo "prune: deploy window: $(deploy_window_reason) - skipping"
+  exit 0
+fi
 [[ "$RETENTION_DAYS" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "SESSION_THREAD_RETENTION_DAYS must be 1..3650" >&2; exit 2; }
 [[ "$MAX_DELETES" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "SESSION_THREAD_MAX_DELETES must be 1..1000" >&2; exit 2; }
 [[ "$NOW_MS" =~ ^[1-9][0-9]{0,15}$ ]] || { echo "SESSION_THREAD_NOW_MS must be a safe positive epoch in milliseconds" >&2; exit 2; }
@@ -208,4 +223,44 @@ jq -nc --arg mode "$MODE" --arg profile "$PROFILE" \
   '{mode:$mode,profile:$profile,retention_days:$retention_days,cutoff_ms:$cutoff_ms,
     eligible:$eligible,selected:$selected,deleted:$deleted,raced:$raced,failed:$failed,errors:$errors}'
 
-((failed == 0))
+# ── Exit status: page on a real problem, not on a self-healing one ──────────
+#
+# `failed` is 0 or 1 by construction -- the loop above BREAKS on the first
+# failure -- so a failure RATE is meaningless here. The only question is
+# whether that one failure is worth waking someone.
+#
+# A gateway transport timeout is infrastructural and self-healing: the session
+# is left untouched and stays ELIGIBLE, so the next 6h run retries it and
+# nothing is lost. Measured 2026-09-17: the gateway saturated during a deploy,
+# one delete hit `gateway timeout after 30000ms` AFTER 5 successful deletions,
+# and this unit paged `Result=exit-code` with nothing for a human to do --
+# while the SAME saturation was already paging loudly through the deploy
+# rollback. Two pages, one cause, one of them actionable.
+#
+# So: page when the run made NO progress, or when the failure is not a
+# recognised transient. An unclassifiable failure PAGES (fail closed) -- the
+# tolerance is deliberately narrow, because "we could not classify it" must
+# never become "we assumed it was fine".
+if ((failed == 0)); then
+  exit 0
+fi
+# `length > 0` is DEFENSIVE, not load-bearing today: `failed > 0` guarantees
+# `errors` is non-empty (both are set in the same branch above), so no test can
+# falsify it -- its mutation stays green and that is expected. It is here
+# because jq's `all` returns TRUE for an empty array, so if the loop ever stops
+# appending to `errors` this tolerance would silently accept EVERY failure.
+# The match requires an actual TIMEOUT, not merely a transport error. An
+# earlier cut used an alternation, so a structured
+# `{"type":"gateway_transport_error","kind":"protocol"}` (a malformed
+# response) also satisfied it and suppressed the page — broader than the
+# "deliberately narrow" tolerance this is supposed to be. QA finding on #979.
+if ((deleted > 0)) && jq -e '
+      length > 0 and all(.[]; (.detail // "") as $d
+        | ($d | test("gateway timeout after [0-9]+ms"))
+          or (($d | test("\"type\"[[:space:]]*:[[:space:]]*\"gateway_transport_error\""))
+              and ($d | test("\"kind\"[[:space:]]*:[[:space:]]*\"timeout\""))))
+    ' >/dev/null 2>&1 <<<"$errors"; then
+  echo "prune: deleted $deleted, then a TRANSIENT gateway failure ended the run early. The remaining candidates stay eligible and the next run retries them -- not paging." >&2
+  exit 0
+fi
+exit 1

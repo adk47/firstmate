@@ -607,7 +607,7 @@ if needs_target "main"; then
     if (( CRON_COUNT_RC == 2 )); then
       fail_check "Main: cron list came back PAGINATED (hasMore=true) — the durable cron count is unobtainable, so the store is unverifiable."
     elif (( CRON_COUNT_RC != 0 )); then
-      fail_check "Main: cron store read failed after ${CRON_STORE_READ_TRIES} attempt(s): $(tr '\n' ' ' < "$CRON_LIST_ERR" | sed 's/  */ /g')"
+      fail_check "Main: cron store read failed within ${CRON_STORE_READ_DEADLINE_SECS}s (attempt timeout ${CRON_STORE_READ_ATTEMPT_TIMEOUT_SECS}s): $(tr '\n' ' ' < "$CRON_LIST_ERR" | sed 's/  */ /g')"
     elif [[ "$EXPECTED_CRONS" == "?" ]]; then
       fail_check "Main: cron count check failed (expected=? loaded=$LOADED_CRONS) — could not parse /opt/hydra/cron-jobs.json"
     elif [[ "$LOADED_CRONS" == "$EXPECTED_CRONS" ]]; then

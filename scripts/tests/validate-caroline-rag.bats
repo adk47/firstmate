@@ -14,7 +14,14 @@ SCRIPT="$HYDRA_REPO/scripts/validate-caroline-rag.sh"
 
 # A single search line carrying every basename this suite asserts on, so any
 # assert_retrieval's `grep -qF "$want"` finds its file.
-ALL_HITS="founding-member.md credits-and-profiles.md subscriptions-and-billing.md common-issues.md active-incidents.md b2b-ads-pipeline.md"
+# platform.md is COMMITTED, so a grounded index always returns it and its
+# assertion in validate-caroline-rag.sh is HARD -- it belongs in this fixture.
+# platform-api.md is deliberately NOT here: it is generated on the server by
+# sync-platform-llms.sh and rsync-excluded, so it is legitimately absent on a
+# fresh box. Leaving it out keeps this fixture honest AND proves its assertion
+# really is soft -- if someone promotes that one to a hard assert, this test
+# goes red instead of passing on a stub that lies about what is on disk.
+ALL_HITS="founding-member.md credits-and-profiles.md subscriptions-and-billing.md common-issues.md active-incidents.md b2b-ads-pipeline.md platform.md"
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
@@ -34,6 +41,11 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 # or every suite aborts (exit 2) before reaching its assertions. Pass "none" to
 # model an unconfigured profile (the wrong-host case) and "" to model the line
 # being absent entirely.
+# The stub emits the REAL output shape: a path-qualified source label
+# ("reference/<file>.md:<start>-<end>") followed by the chunk text. It used to emit
+# a bare basename, which is why no test could reproduce the false green that shipped
+# -- a chunk from one file quoting another file's NAME. DECOY_TEXT models exactly
+# that: a hit on api-access.md whose text mentions another reference file.
 write_openclaw_stub() {
   local hit="$1" dreaming_line="Dreaming: off"
   local provider_line="Provider: openai (requested: openai)"
@@ -44,11 +56,17 @@ write_openclaw_stub() {
   esac
   cat > "$TEST_TMPDIR/bin/openclaw" <<STUB
 #!/usr/bin/env bash
+DECOY_TEXT="\${DECOY_TEXT:-}"
 args="\$*"
 if [[ "\$args" == *"memory status"* ]]; then
   printf '%s\n' "$provider_line" "Embeddings: ready" "Vector store: ready" "$dreaming_line" "Issues:"
 elif [[ "\$args" == *"memory search"* ]]; then
-  if [ -n "$hit" ]; then echo "  [0.70] $hit :: chunk"; else echo "No matches"; fi
+  if [ -n "$hit" ]; then
+    for h in $hit; do
+      printf '%s\n' "  0.70 reference/\$h:1-10" "    chunk text for \$h"
+    done
+    [ -z "\$DECOY_TEXT" ] || printf '%s\n' "  0.65 reference/api-access.md:1-10" "    \$DECOY_TEXT"
+  else echo "No matches"; fi
 fi
 STUB
   chmod +x "$TEST_TMPDIR/bin/openclaw"
@@ -58,7 +76,7 @@ STUB
   write_openclaw_stub "$ALL_HITS"
   run env PROFILE=main AGENT=cmo "$SCRIPT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"retrieval hit b2b-ads-pipeline.md"* ]]
+  [[ "$output" == *"retrieval hit reference/b2b-ads-pipeline.md"* ]]
   [[ "$output" == *"All Caroline RAG checks passed."* ]]
   # main asserts ONLY its canary doc, not the customer-KB files.
   [[ "$output" != *"founding-member.md"* ]]
@@ -78,9 +96,44 @@ STUB
   write_openclaw_stub "$ALL_HITS"
   run env PROFILE=edge AGENT=support "$SCRIPT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"retrieval hit founding-member.md"* ]]
-  [[ "$output" == *"retrieval hit common-issues.md"* ]]
+  [[ "$output" == *"retrieval hit reference/founding-member.md"* ]]
+  [[ "$output" == *"retrieval hit reference/common-issues.md"* ]]
   [[ "$output" == *"All Caroline RAG checks passed."* ]]
+}
+
+@test "a decoy chunk quoting a BARE filename does not satisfy that file's canary" {
+  # The original production false green: the canary grepped the whole output for a
+  # bare basename, and api-access.md's prose says "retrieve `platform.md`". Measured
+  # on node-8 2026-09-17: matched 1 while platform.md was absent from the results.
+  local hits="founding-member.md credits-and-profiles.md subscriptions-and-billing.md common-issues.md"
+  DECOY_TEXT='For the full picture retrieve platform.md and quote from it.' write_openclaw_stub "$hits"
+  run env PROFILE=edge AGENT=support DECOY_TEXT='For the full picture retrieve platform.md and quote from it.' "$SCRIPT"
+  [ "$status" -eq 1 ] || { echo "canary passed on a bare-name decoy" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"retrieval missed reference/platform.md"* ]]
+}
+
+@test "a decoy chunk quoting the FULL PATH does not satisfy the canary either" {
+  # The remaining class after path-anchoring: `grep -F` still scanned chunk PROSE, so
+  # a chunk saying "retrieve reference/platform.md" would satisfy the assert with the
+  # file absent. No KB file writes that today -- but a CRITICAL-radius deploy gate
+  # must not rest on nobody ever writing it. The gate now parses source-label RECORDS
+  # ("<score> <path>:<start>-<end>" on its own line), so prose cannot match at all.
+  local hits="founding-member.md credits-and-profiles.md subscriptions-and-billing.md common-issues.md"
+  DECOY_TEXT='See reference/platform.md for the full doctrine.' write_openclaw_stub "$hits"
+  run env PROFILE=edge AGENT=support DECOY_TEXT='See reference/platform.md for the full doctrine.' "$SCRIPT"
+  [ "$status" -eq 1 ] || {
+    echo "canary passed on a FULL-PATH decoy -- prose is still being scanned" >&2
+    echo "$output" >&2; return 1; }
+  [[ "$output" == *"retrieval missed reference/platform.md"* ]]
+}
+
+@test "the miss message lists the sources that WERE retrieved" {
+  # A bare "missed X" is unactionable at 04:00; naming what came back instead turns
+  # the failure into a diagnosis.
+  DECOY_TEXT='' write_openclaw_stub "founding-member.md credits-and-profiles.md subscriptions-and-billing.md common-issues.md"
+  run env PROFILE=edge AGENT=support "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"sources: reference/founding-member.md"* ]]
 }
 
 @test "main/cmo: passes even when status omits 'Dreaming: off' (dreaming is edge-only)" {

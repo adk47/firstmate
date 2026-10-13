@@ -99,6 +99,12 @@ Env:
                               carries "group_size" so a reviewer can filter
                               stratified by group size despite the masked
                               email)
+  CLOSE_DUP_JEV_SAMPLE_SIZE   optional, default 25 — dry-run's dedupe-same-
+                              request shadow-Jev sample size (see the
+                              JEV_SURFACE_DEDUPE comment above and
+                              _dedupe_jev_sample_size()); a FRESH random
+                              sample of the full candidate pool is drawn
+                              each run, never the head
   # De-confliction inputs (reused verbatim from cs-needs-human-digest.py's
   # default_state_paths() env vars — see that module for detail):
   CLOSE_SHADOW_LOG, RESOLVE_NOTIFY_STATE, RESOLUTION_STATE_PATH,
@@ -130,6 +136,8 @@ Exit codes: 0 ok; 1 usage/env error; 2 invalid --ceiling, or --apply sanity
 import argparse
 import json
 import os
+import random
+import re
 import stat
 import sys
 import tempfile
@@ -142,6 +150,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.intercom_identity import resolve_admin_id  # noqa: E402
+from lib.jev_shadow import shadow_judge  # noqa: E402
 
 INTERCOM_API = "https://api.intercom.io"
 INTERCOM_VERSION = "2.11"
@@ -150,6 +159,56 @@ DEFAULT_SUMMARY_CHANNEL = "C0ANM0PN9L5"  # #cs_chats
 DEFAULT_TIER_B_WINDOW_DAYS = 14
 DUP_CEILING = 20
 SUMMARY_MAX_LINES = 25
+DEFAULT_DEDUPE_JEV_SAMPLE_SIZE = 25
+
+# Phase 2a shadow-only Jev surface (docs/plans/jev-adoption.md #2a). Judges
+# whether the two threads a candidate close would merge are actually the
+# SAME request, using each thread's first customer message (the only text
+# reasonably available here — see get_conversation's source_body). This
+# script ships SHADOW-MODE ONLY today (no --apply in the prod timer —
+# install-aux-units.sh), and the prod timer runs dry-run only, so the fire
+# point differs by mode but is always strictly AFTER the script's own
+# decision is already final: in --apply, after reverify_still_valid() has
+# confirmed the real close; in dry-run (no reverify step there), after the
+# finalized `candidates` list itself. See _dedupe_shadow_judge for the
+# shared implementation. Either way the answer changes nothing about which
+# candidates close, stdout, or the exit code — the two extra read-only GETs
+# this call costs per candidate carry no write risk.
+#
+# --apply judges every targeted candidate (DUP_CEILING already bounds that
+# list to <=20, under jev_shadow's own default 25-call budget). Dry-run's
+# candidate pool has no such ceiling -- a backlogged run is exactly the
+# reviewable case DUP_CEILING deliberately lets through (see the ceiling-
+# gates-only---apply comment in main()) -- so `for c in candidates:` there
+# would silently judge only the head of the pool, run after run, in the SAME
+# order every time (a biased, non-representative sample). Dry-run instead
+# draws a FRESH random sample of CLOSE_DUP_JEV_SAMPLE_SIZE (default 25,
+# below) candidates each run, mirroring close-resolved-conversations.py's
+# own jev_k/_jev_sample_size()/SystemRandom pattern verbatim -- see that
+# script's "jev shadow sample" comment for the identical rationale.
+JEV_SURFACE_DEDUPE = "dedupe-same-request"
+DEDUPE_QUESTIONS = {
+    "same_request": {
+        "type": "noul",
+        "instructions": (
+            "State carries `thread_a_first_message` and `thread_b_first_message` "
+            "— the first customer message of each of two Intercom threads from "
+            "the SAME customer email that a duplicate-close candidate would "
+            "merge (thread A is being closed as a duplicate of thread B). "
+            "Decide whether they are genuinely the SAME request/issue, as "
+            "opposed to two different asks that merely came from the same "
+            "customer."
+        ),
+        "criteria": {
+            "true": "Both messages describe the same underlying request or issue.",
+            "false": "The messages describe different requests/issues even though they share a customer.",
+        },
+    },
+}
+
+
+def _strip_html(text):
+    return re.sub(r"<[^>]+>", " ", text).strip() if text else ""
 DEFAULT_REVIEW_DIR = "/var/lib/close-duplicate-conversations/"
 # Fallback dir when DEFAULT_REVIEW_DIR is unwritable — a private (0700)
 # subdir, never the bare world-readable /tmp root, since the export
@@ -543,6 +602,10 @@ def get_conversation(token, conv_id):
         "lcr": stats.get("last_contact_reply_at") or 0,
         "created_at": data.get("created_at") or 0,
         "confirm_email": confirm_email,
+        # First customer message text, for the shadow-only dedupe-same-request
+        # Jev surface (docs/plans/jev-adoption.md #2a) — no closing/dedup logic
+        # reads this field, it exists only to feed that shadow judgment.
+        "source_body": _strip_html((data.get("source") or {}).get("body")),
     }
 
 
@@ -880,6 +943,56 @@ def _slack_env():
     return channel, cfg, account
 
 
+def _dedupe_shadow_judge(token, older, kept, tier):
+    """Fire the dedupe-same-request shadow judgement for one candidate.
+    Shared by both callers so a given candidate is never judged twice:
+      - the --apply close loop, strictly AFTER reverify_still_valid() has
+        already confirmed this candidate closes -- called once per
+        candidate in `targets` (already <=DUP_CEILING, so every targeted
+        candidate is judged);
+      - the dry-run path, strictly AFTER `candidates` (the script's own
+        decision) is already final -- there is no reverify step in
+        dry-run, so the finalized candidate list itself is the "already
+        decided" point. Called once per candidate in a FRESH random
+        sample of that list (see _dedupe_jev_sample_size), never the
+        whole (potentially large) pool and never its head.
+    Can never change `tier`, a close, stdout, or the exit code. The two
+    re-fetches (read-only; this script is SHADOW-MODE ONLY, no --apply in
+    the prod timer) that source each thread's first customer message live
+    in build_state, run lazily INSIDE shadow_judge's never-raise boundary
+    — get_conversation only catches URLError/ValueError, so a
+    RemoteDisconnected/socket-timeout OSError here would otherwise raise
+    straight through the caller's loop and (in the --apply case) abort a
+    legitimate close.
+    """
+    def _dedupe_build_state(older=older, kept=kept):
+        older_detail = get_conversation(token, older["id"])
+        kept_detail = get_conversation(token, kept["id"])
+        if not older_detail or not kept_detail:
+            return None
+        return {"thread_a_first_message": older_detail.get("source_body"),
+                "thread_b_first_message": kept_detail.get("source_body")}
+
+    shadow_judge(JEV_SURFACE_DEDUPE, older["id"], _dedupe_build_state,
+                 DEDUPE_QUESTIONS, actual=tier)
+
+
+def _dedupe_jev_sample_size():
+    """CLOSE_DUP_JEV_SAMPLE_SIZE (env, default DEFAULT_DEDUPE_JEV_SAMPLE_SIZE)
+    -- validated identically to close-resolved-conversations.py's own
+    _jev_sample_size(): unset/unparseable/<=0 all fall back to the default,
+    never zero or negative (a caller passing 0 through would silently
+    disable the dry-run sample instead of erroring)."""
+    raw = os.environ.get("CLOSE_DUP_JEV_SAMPLE_SIZE")
+    if not raw:
+        return DEFAULT_DEDUPE_JEV_SAMPLE_SIZE
+    try:
+        n = int(raw)
+    except ValueError:
+        return DEFAULT_DEDUPE_JEV_SAMPLE_SIZE
+    return n if n > 0 else DEFAULT_DEDUPE_JEV_SAMPLE_SIZE
+
+
 def main():
     ap = argparse.ArgumentParser(description="Auto-close strictly-safe duplicate Intercom conversations")
     ap.add_argument("--apply", action="store_true",
@@ -958,6 +1071,24 @@ def main():
         print(f"candidate notify: {'posted' if posted else 'skipped/failed'} -> {channel}")
 
     if not args.apply:
+        # Shadow-only (Phase 2a #2a): the prod timer runs dry-run only, so
+        # this is the ONLY place dedupe-same-request ever fires in prod
+        # today (see _dedupe_shadow_judge's docstring). There's no reverify
+        # step in dry-run, so `candidates` above -- already final by this
+        # point -- is the "already decided" point instead. The pool has no
+        # ceiling (unlike --apply's `targets`), so this draws a FRESH
+        # random sample each run rather than `candidates[:15]` below or the
+        # whole pool -- a head slice would judge the SAME candidates in the
+        # SAME order every run, a biased, non-representative sample (verbatim
+        # close-resolved-conversations.py pattern; see its "jev shadow
+        # sample" comment).
+        jev_k = min(_dedupe_jev_sample_size(), len(candidates))
+        if jev_k > 0:
+            jev_seed = random.SystemRandom().randrange(2 ** 32)
+            print(f"jev shadow sample: seed={jev_seed} size={jev_k} "
+                  f"(pool={len(candidates)})", file=sys.stderr)
+            for c in random.Random(jev_seed).sample(candidates, jev_k):
+                _dedupe_shadow_judge(token, c["older"], c["kept"], c["tier"])
         for c in candidates[:15]:
             print(f"  would close conv={c['older']['id']} -> kept={c['kept']['id']} tier={c['tier']}")
         if len(candidates) > 15:
@@ -1001,6 +1132,11 @@ def main():
         if not reverify_still_valid(token, older, kept, tier, window_days):
             print(f"  SKIP conv={older['id']}: pre-close re-verify failed (state/tier/email changed)")
             continue
+        # Shadow-only (Phase 2a #2a): fires strictly AFTER reverify_still_valid()
+        # already confirmed this candidate closes. See _dedupe_shadow_judge's
+        # docstring for the full contract (never changes `tier`, `closed`,
+        # `fail`, stdout, or the exit code).
+        _dedupe_shadow_judge(token, older, kept, tier)
 
         if tier == "B":
             # Two-state marker ("pending" -> "posted"), keyed on the older

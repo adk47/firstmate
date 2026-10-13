@@ -5,6 +5,7 @@ import {
   accountSessions,
   joinDeliveryChunks,
   buildAgentRawBody,
+  resolveJevBlockForDispatch,
   stripConversationContext,
   buildRiskOptions,
   raceDispatchWithTimeout,
@@ -13,7 +14,10 @@ import {
   orderBatch,
   mergeBatchMedia,
   classifyRuntimeNoticePayload,
+  resolveJevShadowQuestionsVersion,
+  jevShadowRunnerConfig,
 } from "../src/channel.js";
+import { decide, type JevActionsConfig, type JevAnswers, type JevBands } from "../src/jev-router.js";
 import { canAgentReply } from "../src/handoff.js";
 import { stripModelFallbackNotice } from "../src/sanitize-model-fallback.js";
 
@@ -31,6 +35,87 @@ describe("buildRiskOptions", () => {
     expect(r.riskDeps?.judge).toBeUndefined();
     expect(r.riskDeps?.turnCountHardCap).toBe(14);
     expect(r.riskDeps?.judgeMinTurnCount).toBe(4);
+  });
+
+  it("wires a Jev-backed judge when account.jev.enabled and a runner is supplied — reusing the pre-turn answers, no second request", async () => {
+    const runner = async () => ({
+      ok: true as const,
+      answers: { resolution_path: { type: "choice" as const, choice: "human_required", probabilities: { human_required: 0.95 } } },
+      latencyMs: 10,
+      model: "typesafe/jev-1.13",
+      usage: null,
+      httpStatus: 200,
+      state: {},
+      questions: {},
+    });
+    const account = {
+      riskAssessment: { enabled: true },
+      jev: {
+        enabled: true,
+        apiKey: "k",
+        bands: { bad_faith: 0.85, no_reply: 0.9, human_required: 0.9 },
+        actions: { decline: true, silence: false, escalate: true },
+      },
+    } as never;
+    const r = buildRiskOptions(account, undefined, { runner, turnCountOf: () => 2 });
+    expect(r.riskAssessment.enabled).toBe(true);
+    expect(r.riskDeps?.judge).toBeDefined();
+    const out = await r.riskDeps!.judge!({ knownFacts: {}, recentParts: [], currentMessage: "delete my account" });
+    expect(out?.shouldHandoff).toBe(true);
+  });
+
+  it("falls back to the OpenRouter judge (or undefined) when account.jev.enabled but no runner is supplied", () => {
+    const account = {
+      riskAssessment: { enabled: true },
+      jev: {
+        enabled: true,
+        apiKey: "k",
+        bands: { bad_faith: 0.85, no_reply: 0.9, human_required: 0.9 },
+        actions: { decline: true, silence: false, escalate: true },
+      },
+    } as never;
+    const r = buildRiskOptions(account, undefined);
+    expect(r.riskDeps?.judge).toBeUndefined();
+  });
+
+  it("does NOT wire the Jev-backed judge at all when account.jev.actions.escalate is false, even with a runner supplied (belt and braces)", () => {
+    const runner = async () => ({
+      ok: true as const,
+      answers: { resolution_path: { type: "choice" as const, choice: "human_required", probabilities: { human_required: 0.95 } } },
+      latencyMs: 10,
+      model: "typesafe/jev-1.13",
+      usage: null,
+      httpStatus: 200,
+      state: {},
+      questions: {},
+    });
+    const account = {
+      riskAssessment: { enabled: true },
+      jev: {
+        enabled: true,
+        apiKey: "k",
+        bands: { bad_faith: 0.85, no_reply: 0.9, human_required: 0.9 },
+        actions: { decline: true, silence: false, escalate: false },
+      },
+    } as never;
+    const r = buildRiskOptions(account, undefined, { runner, turnCountOf: () => 2 });
+    expect(r.riskDeps?.judge).toBeUndefined();
+  });
+
+  it("does not build a Jev-backed judge when account.jev is absent, even with a runner supplied", () => {
+    const runner = async () => ({
+      ok: true as const,
+      answers: {},
+      latencyMs: 1,
+      model: "typesafe/jev-1.13",
+      usage: null,
+      httpStatus: 200,
+      state: {},
+      questions: {},
+    });
+    const account = { riskAssessment: { enabled: true } } as never;
+    const r = buildRiskOptions(account, undefined, { runner, turnCountOf: () => 1 });
+    expect(r.riskDeps?.judge).toBeUndefined();
   });
 });
 
@@ -490,6 +575,169 @@ describe("buildAgentRawBody", () => {
     expect(stripped).not.toContain("verified name: Jane Doe");
     expect(stripped).not.toContain("credits on file");
   });
+
+  it("appends the Jev [ROUTING] block last, immediately before [CUSTOMER_MESSAGE]", () => {
+    const jevBlock = "[ROUTING]\npath: caroline_tool (0.85)\n[/ROUTING]";
+    const out = buildAgentRawBody(
+      "where's my credit",
+      { accountEmail: "x@y.com" },
+      undefined,
+      [{ snippet: "some kb text" }],
+      undefined,
+      jevBlock,
+    );
+    expect(out).toContain(jevBlock);
+    expect(out.indexOf("[CONVERSATION_CONTEXT]")).toBeLessThan(out.indexOf("[ROUTING]"));
+    expect(out.indexOf("[KNOWLEDGE_BASE]")).toBeLessThan(out.indexOf("[ROUTING]"));
+    expect(out.indexOf("[ROUTING]")).toBeLessThan(out.indexOf("[CUSTOMER_MESSAGE]"));
+  });
+
+  it("omits the [ROUTING] block entirely when jevBlock is null/undefined", () => {
+    const out = buildAgentRawBody("hi", {}, undefined, undefined, undefined, null);
+    expect(out).not.toContain("[ROUTING]");
+    expect(out).toBe("hi");
+  });
+});
+
+// QA finding 1 (2026-09-22 PR #999): renderJevBlock alone only inspects the
+// PERSISTED decision, so a conversation with a stored "route"/"decline" from
+// an earlier turn kept rendering that stale [ROUTING] block even after the
+// account's jev.enabled kill switch was flipped off — the advertised
+// rollback did not actually disable the feature for existing conversations.
+describe("resolveJevBlockForDispatch", () => {
+  const staleRoute = {
+    action: "route" as const,
+    block: "[ROUTING]\npath: caroline_tool (0.85)\n[/ROUTING]",
+    badFaithDeclinedAt: undefined,
+  };
+
+  it("renders the block when jev is enabled and state has a route decision", () => {
+    expect(resolveJevBlockForDispatch(true, staleRoute)).toBe(staleRoute.block);
+  });
+
+  it("returns null for a stale route decision once jev.enabled is flipped off (rollback)", () => {
+    expect(resolveJevBlockForDispatch(false, staleRoute)).toBeNull();
+  });
+
+  it("returns null when jev.enabled is undefined (never configured), even with a stale route", () => {
+    expect(resolveJevBlockForDispatch(undefined, staleRoute)).toBeNull();
+  });
+
+  it("produces a byte-identical raw body to a jev-never-enabled run once disabled, even with a stale stored route", () => {
+    const facts = { accountEmail: "x@y.com" };
+    const rolledBack = buildAgentRawBody(
+      "where's my credit",
+      facts,
+      undefined,
+      undefined,
+      undefined,
+      resolveJevBlockForDispatch(false, staleRoute),
+    );
+    const neverEnabled = buildAgentRawBody(
+      "where's my credit",
+      facts,
+      undefined,
+      undefined,
+      undefined,
+      resolveJevBlockForDispatch(undefined, undefined),
+    );
+    expect(rolledBack).not.toContain("[ROUTING]");
+    expect(rolledBack).toBe(neverEnabled);
+  });
+});
+
+// QA finding 3 (2026-09-22 PR #999): the `actions` kill switches stop the
+// PLUGIN from acting, but the [ROUTING] block is advisory text Caroline is
+// instructed to follow (workspaces/support/AGENTS.md). A block naming
+// `path: no_reply (0.97)` under actions.silence=false therefore routes
+// [[NO_REPLY]] around the switch. These assert the END of the real
+// production chain — decide() -> state.jev -> resolveJevBlockForDispatch ->
+// buildAgentRawBody -> the agent raw body — never carries a kill-switched
+// path label, because that string is the thing the model reads.
+describe("jev [ROUTING] block in the dispatched raw body — kill-switched paths never reach the model", () => {
+  // Mirrors handler.ts's "route" branch: state.jev = { action, block,
+  // badFaithDeclinedAt }.
+  function rawBodyFor(answers: JevAnswers, message: string, actions: JevActionsConfig): string {
+    const decision = decide(answers, JEV_BANDS, message, undefined, [], [], actions);
+    const stored =
+      decision.action === "route" || decision.action === "decline"
+        ? { action: decision.action, block: decision.block, badFaithDeclinedAt: undefined }
+        : { action: decision.action, block: null, badFaithDeclinedAt: undefined };
+    return buildAgentRawBody(
+      message,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      resolveJevBlockForDispatch(true, stored),
+    );
+  }
+
+  const JEV_BANDS: JevBands = { bad_faith: 0.85, no_reply: 0.9, human_required: 0.9 };
+  const SWITCHED_OFF: JevActionsConfig = { decline: true, silence: false, escalate: false };
+  const ALL_ON: JevActionsConfig = { decline: true, silence: true, escalate: true };
+
+  // The documented real false positive (197-turn backtest): no_reply 0.97,
+  // but the "?" makes isCloserShaped false, so decide() never reaches the
+  // suppressed-silence branch — it falls through and renders a block.
+  const FP_MESSAGE = "Hi you got some news ?";
+  const FP_ANSWERS: JevAnswers = {
+    off_topic_or_bad_faith: { type: "noul", noul: 0.02 },
+    resolution_path: {
+      type: "choice",
+      choice: "no_reply",
+      probabilities: { no_reply: 0.97, caroline_tool: 0.02, ask_customer: 0.01 },
+    },
+    intent: { type: "choice", choice: "other", probabilities: { other: 0.8 } },
+  };
+
+  it("the raw body for the documented FP contains no 'no_reply' anywhere, with silence off", () => {
+    const rawBody = rawBodyFor(FP_ANSWERS, FP_MESSAGE, SWITCHED_OFF);
+    expect(rawBody).toContain("[ROUTING]");
+    expect(rawBody).not.toContain("no_reply");
+    expect(rawBody).not.toContain("human_required");
+    // The allowed alternatives score 0.02/0.01, below the uniform prior for
+    // a 4-option question — substituting one would hand Caroline a path the
+    // model effectively rejected, so no path line is rendered at all.
+    expect(rawBody).not.toContain("path:");
+    expect(rawBody).toContain("[CUSTOMER_MESSAGE]");
+  });
+
+  it("the raw body for a human_required turn contains no 'human_required' anywhere, with escalate off", () => {
+    const answers: JevAnswers = {
+      off_topic_or_bad_faith: { type: "noul", noul: 0.02 },
+      resolution_path: {
+        type: "choice",
+        choice: "human_required",
+        probabilities: { human_required: 0.93, ask_customer: 0.05, caroline_tool: 0.02 },
+      },
+    };
+    const rawBody = rawBodyFor(answers, "a human please, this is the third time", SWITCHED_OFF);
+    expect(rawBody).toContain("[ROUTING]");
+    expect(rawBody).not.toContain("human_required");
+    expect(rawBody).not.toContain("no_reply");
+    expect(rawBody).not.toContain("path:");
+  });
+
+  it("a genuinely split distribution still reaches the model with the allowed path named", () => {
+    const answers: JevAnswers = {
+      off_topic_or_bad_faith: { type: "noul", noul: 0.02 },
+      resolution_path: {
+        type: "choice",
+        choice: "no_reply",
+        probabilities: { no_reply: 0.5, caroline_tool: 0.45, ask_customer: 0.05 },
+      },
+    };
+    const rawBody = rawBodyFor(answers, FP_MESSAGE, SWITCHED_OFF);
+    expect(rawBody).not.toContain("no_reply");
+    expect(rawBody).toContain("path: caroline_tool (0.45)");
+  });
+
+  it("MUS-1598: with silence ON the same turn's raw body still does NOT carry no_reply — masking is unconditional", () => {
+    const rawBody = rawBodyFor(FP_ANSWERS, FP_MESSAGE, ALL_ON);
+    expect(rawBody).not.toContain("no_reply");
+    expect(rawBody).not.toContain("path:");
+  });
 });
 
 describe("discardBufferedChunksOnTimeout", () => {
@@ -663,5 +911,61 @@ describe("orderBatch", () => {
     const input = [qm("b", 2), qm("a", 1)];
     orderBatch(input);
     expect(input.map((m) => m.messageId)).toEqual(["b", "a"]);
+  });
+});
+
+describe("resolveJevShadowQuestionsVersion", () => {
+  // QA NO-GO on #1022 (finding 1, comment 4088080438): jevShadowRunners
+  // used to map ANY non-"v2" shadowVersions entry onto the v1 runner, so a
+  // typo like "v02" silently ran v1 while handler.ts still wrote
+  // questions_version: "v02" on the shadow row — a corrupted cohort. Dispatch
+  // must stay exhaustive: an unsupported version is never mapped to "v1".
+  it("resolves v1 and v2 to themselves", () => {
+    expect(resolveJevShadowQuestionsVersion("v1")).toBe("v1");
+    expect(resolveJevShadowQuestionsVersion("v2")).toBe("v2");
+  });
+
+  it("never maps an unknown version to v1 — returns null instead", () => {
+    expect(resolveJevShadowQuestionsVersion("v02")).toBeNull();
+    expect(resolveJevShadowQuestionsVersion("v3")).toBeNull();
+    expect(resolveJevShadowQuestionsVersion("")).toBeNull();
+  });
+
+  it("warns once with the offending version when given an unsupported entry", () => {
+    const warns: string[] = [];
+    const result = resolveJevShadowQuestionsVersion("v02", { warn: (m) => warns.push(m) });
+    expect(result).toBeNull();
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain("v02");
+  });
+
+  it("does not warn for a supported version", () => {
+    const warns: string[] = [];
+    resolveJevShadowQuestionsVersion("v2", { warn: (m) => warns.push(m) });
+    expect(warns).toHaveLength(0);
+  });
+});
+
+describe("jevShadowRunnerConfig (MUS-3192: shadow call has its own timeout)", () => {
+  // The v2 shadow prompt is ~5.85x v1's; on the live 1500ms budget 15-19% of
+  // shadow calls timed out, biasing the dataset toward fast turns. Shadow
+  // latency never reaches a customer, so it gets its own budget.
+  const jev = { apiKey: "k", model: "m", timeoutMs: 1500, agentInstructionsPath: "/x/SOUL.md" };
+
+  it("uses shadowTimeoutMs for the shadow runner when set, leaving the live timeout alone", () => {
+    const cfg = jevShadowRunnerConfig({ ...jev, shadowTimeoutMs: 5000 }, "v2");
+    expect(cfg.timeoutMs).toBe(5000);
+    expect(jev.timeoutMs).toBe(1500);
+    expect(cfg.questionsVersion).toBe("v2");
+  });
+
+  it("falls back to the live timeoutMs when shadowTimeoutMs is unset (byte-identical to before)", () => {
+    expect(jevShadowRunnerConfig(jev, "v2")).toEqual({
+      apiKey: "k",
+      model: "m",
+      timeoutMs: 1500,
+      questionsVersion: "v2",
+      agentInstructionsPath: "/x/SOUL.md",
+    });
   });
 });

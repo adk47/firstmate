@@ -90,46 +90,48 @@ Trusted by: Napster, SoundExchange, AAM, Rimas Publishing, Netflix, Neon16
 
 Documentation: https://developer.muso.ai
 
-**Two access levels:** workspace-level API access (your own workspace's data) is included free on Pro and Business and is self-service from Settings; full-catalog access (data across the whole Muso catalog) is a separate, pricier enterprise tier, with a self-service option coming at platform.muso.ai. See `api-access.md` for the full breakdown and how to handle these requests.
+**Two access levels:** workspace-level API access (your own workspace's data) is included free on Pro and Business and is self-service from Settings; full-catalog access (data across the whole Muso catalog) is **Muso Platform at platform.muso.ai**, which is live and self-service -- sign up, add a card, generate a key. See `platform.md` for what Platform is and `platform-api.md` for current pricing; `api-access.md` covers how to tell the two access levels apart.
 
 ---
 
 ## Pricing
 
-### Lite (Free Forever)
+**All plan prices live in `app-pricing.md`. Retrieve it and quote from there --
+never from memory, and never from this file.** That file is refreshed automatically
+from the same source the app itself renders, so it is the only place these numbers
+are current.
+
+**Always ask which billing cadence the customer is on first.** Monthly and annual
+are different rate cards, not one price shown two ways. `app-pricing.md` gives them
+as separate, labelled tables; quote from the one that matches the customer. Never
+divide an annual figure by 12 to produce a monthly price -- the monthly plan costs
+more, and doing exactly that is how this section previously under-quoted customers
+by about 25%.
+
+What each plan includes (the prices themselves are in `app-pricing.md`):
+
+### Lite (free forever)
 - Manage Credits
 - Update Profile Page
 - Access Company Page
 - Notifications
 
-### Pro ($10-12.50/month)
+### Pro
 - Everything in Lite
 - Profile Analytics
 - Catalog Audits
 - Discography Playlists
 - Milestones & Charts
-- 1 Pro Seat included
-- Additional seats: $7.50/month each
+- 1 Pro Seat included, additional seats available
 
-### Business ($24-30/month starting)
+### Business
 - Everything in Pro
 - Company Analytics
 - List Analytics
 - Multi-User Workspace
-- 5 Pro Seats included
-- 3 Users included
-
-**Business pricing scales by roster size:**
-
-| Profiles | Monthly (Annual) |
-|----------|------------------|
-| 1-5 | $24 |
-| 6-10 | $40 |
-| 11-50 | $104 |
-| 51-100 | $176 |
-| 101-250 | $384 |
-| 251-500 | $640 |
-| 501+ | $16/profile |
+- 5 Pro Seats and 3 Users included
+- Pricing scales by roster size, and extra org users are charged in bands --
+  both tables are in `app-pricing.md`, per cadence
 
 ---
 

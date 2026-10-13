@@ -1,0 +1,2 @@
+{"type":"tool.call","ts":"__TS__","sessionKey":"agent:support:intercom:direct:1001","data":{"name":"credit_verification_check","toolCallId":"tc1","arguments":{}}}
+{"type":"tool.call","ts":"__TS__","sessionKey":"agent:support:intercom:direct:1001","data":{"name":"create_ticket","toolCallId":"tc2","arguments":{"actionType":"credit-verify"}}}
