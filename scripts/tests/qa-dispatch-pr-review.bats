@@ -77,6 +77,19 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   grep -q 'U0AL36NADEY' "$STUB_ARGV"
 }
 
+@test "happy path: the dispatch prompt does not make the reviewer gate approval on its own CI read (MUS-7727)" {
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  # A model-side "every CI check passed" gate here outranks the skill. It
+  # withheld a clean GO on hydra#1119 and #1107 over the advisory Deploy
+  # pre-flight. The wrapper owns the CI decision, so the prompt must route to it.
+  run grep -q 'ONLY IF every' "$STUB_ARGV"
+  [ "$status" -ne 0 ]
+  run grep -q 'Check CI with' "$STUB_ARGV"
+  [ "$status" -ne 0 ]
+  grep -q 'scripts/qa-pr-approve.sh' "$STUB_ARGV"
+}
+
 @test "happy path: opening DM routed through the per-PR thread helper" {
   QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 0 ]
@@ -143,7 +156,6 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   grep -q 'github.com/Muso-AI/ads-manager/pull/123' "$STUB_ARGV"
   grep -q 'U03TYGJF1N3' "$STUB_ARGV"
   grep -q 'qa-pr-thread-dm.sh Muso-AI/ads-manager 123 U03TYGJF1N3' "$STUB_ARGV"
-  grep -q 'gh pr checks 123 --repo Muso-AI/ads-manager' "$STUB_ARGV"
 }
 
 @test "env overrides set repo + requester when positionals are absent" {
