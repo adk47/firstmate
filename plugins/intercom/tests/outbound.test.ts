@@ -365,7 +365,7 @@ describe("SanitizingIntercomClient", () => {
     await client.replyToConversation({
       conversationId: "conv_ref1",
       adminId: "admin_1",
-      body: "Your reference number is a1b2c3d4e.",
+      body: "Your reference number is 869f7v9v2.",
     });
     expect(inner.calls.replyToConversation[0].body).toBe("I'll make sure this gets to the team.");
     expect(logged.some((m) => m.includes("[intercom:false-handoff-claim]") && m.includes("conv=conv_ref1"))).toBe(true);
@@ -375,7 +375,7 @@ describe("SanitizingIntercomClient", () => {
     const IDS_KEY = "__musoSupportTicketIds";
     const g = globalThis as unknown as Record<string, unknown>;
     const store = new Map<string, { atMs: number; ids: string[] }>();
-    store.set("conv_ref2", { atMs: Date.now(), ids: ["a1b2c3d4e"] });
+    store.set("conv_ref2", { atMs: Date.now(), ids: ["869f7v9v2"] });
     g[IDS_KEY] = store;
     const inner = new MockIntercomClient();
     const logged: string[] = [];
@@ -383,16 +383,19 @@ describe("SanitizingIntercomClient", () => {
     await client.replyToConversation({
       conversationId: "conv_ref2",
       adminId: "admin_1",
-      body: "Your reference number is a1b2c3d4e.",
+      body: "Your reference number is 869f7v9v2.",
     });
-    expect(inner.calls.replyToConversation[0].body).toBe("Your reference number is a1b2c3d4e.");
+    // Filed, so the handoff guard keeps it; the internal-reference backstop then rewrites it.
+    expect(inner.calls.replyToConversation[0].body).toBe("Your reference number is our records.");
     expect(logged.some((m) => m.includes("[intercom:false-handoff-claim]"))).toBe(false);
     delete g[IDS_KEY];
   });
 
   // Nick, 13 Oct: no internal id ever reaches a customer, even one this conversation
   // filed. The handoff guard lets filed ids through, so the internal-reference pass
-  // must run first and rewrite them (sanitize-internal-reference.ts).
+  // runs after it as the backstop and rewrites them (sanitize-internal-reference.ts).
+  // It must run AFTER the handoff guard, or an unfiled 86… id is garbled to "our records"
+  // before the guard can replace the false claim with the honest fallback.
   it("rewrites a ClickUp-shaped id even when this conversation filed it", async () => {
     const IDS_KEY = "__musoSupportTicketIds";
     const g = globalThis as unknown as Record<string, unknown>;
