@@ -69,6 +69,11 @@ describe("sanitizeInternalReference", () => {
 
 describe("internal reference sanitizer on the flush path", () => {
   it("replyToConversation rewrites the id and logs one audit line", async () => {
+    // The id was filed in this conversation, so the handoff guard keeps it and this
+    // pass is the one that must catch it (an unfiled id gets the honest fallback instead).
+    const IDS_KEY = "__musoSupportTicketIds";
+    const g = globalThis as unknown as Record<string, unknown>;
+    g[IDS_KEY] = new Map([["conv_ir1", { atMs: Date.now(), ids: ["869fep919"] }]]);
     const inner = new MockIntercomClient();
     const logged: string[] = [];
     const client = new SanitizingIntercomClient(inner, { error: (m) => logged.push(m) });
@@ -85,6 +90,7 @@ describe("internal reference sanitizer on the flush path", () => {
     expect(lines[0]).toContain("conv=conv_ir1");
     expect(lines[0]).toContain("count=1");
     expect(lines[0]).toContain('rewritten=["869fep919"]');
+    delete g[IDS_KEY];
   });
 
   it("closeConversation note is sanitized too", async () => {
