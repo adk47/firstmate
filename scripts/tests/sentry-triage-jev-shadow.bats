@@ -160,11 +160,14 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ "$elapsed" -lt 10 ]
 }
 
+# Scoped to $TEST_TMPDIR, not the global ${TMPDIR:-/tmp}: runners share /tmp
+# (a sibling job's work dir flips the count), and on macOS /tmp is a symlink
+# that find does not descend, so a global count is always 0 and cannot fail.
 @test "work dir is cleaned up even after a hang" {
-  before="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'sentry-jev-shadow.*' 2>/dev/null | wc -l)"
-  WD_JEV_HANG=1 run "$SCRIPT" --short-id X-1 --class needs-human --summary "s" \
+  before="$(find "$TEST_TMPDIR" -maxdepth 1 -name 'sentry-jev-shadow.*' 2>/dev/null | wc -l)"
+  WD_JEV_HANG=1 TMPDIR="$TEST_TMPDIR" run "$SCRIPT" --short-id X-1 --class needs-human --summary "s" \
     --jev-sh "$TEST_TMPDIR/bin/jev-stub.sh" --timeout-ms 500
-  after="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'sentry-jev-shadow.*' 2>/dev/null | wc -l)"
+  after="$(find "$TEST_TMPDIR" -maxdepth 1 -name 'sentry-jev-shadow.*' 2>/dev/null | wc -l)"
   [ "$after" -eq "$before" ]
 }
 

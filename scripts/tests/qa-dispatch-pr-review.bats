@@ -51,6 +51,16 @@ case "$sub" in
 esac
 STUB
   chmod +x "$STUBBIN/openclaw"
+  # `gh run list` stub for the in-flight dedup. Records argv; prints STUB_GH_JSON
+  # (default: no runs); STUB_GH_FAIL makes the lookup fail (fail-open test).
+  cat > "$STUBBIN/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "$STUB_GH_ARGV"
+if [ -n "${STUB_GH_FAIL:-}" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
+if [ -f "${STUB_GH_JSON:-}" ]; then cat "$STUB_GH_JSON"; else echo '[]'; fi
+STUB
+  chmod +x "$STUBBIN/gh"
+  export STUB_GH_ARGV="$TEST_TMPDIR/gh_argv"; : > "$STUB_GH_ARGV"
   export PATH="$STUBBIN:$PATH"
   export OPENCLAW="openclaw"   # resolve via the stubbed PATH
 }
@@ -75,6 +85,19 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   grep -q 'AUTO-REVIEW' "$STUB_ARGV"
   grep -q 'github.com/Muso-AI/hydra/pull/123' "$STUB_ARGV"
   grep -q 'U0AL36NADEY' "$STUB_ARGV"
+}
+
+@test "happy path: the dispatch prompt does not make the reviewer gate approval on its own CI read (MUS-7727)" {
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  # A model-side "every CI check passed" gate here outranks the skill. It
+  # withheld a clean GO on hydra#1119 and #1107 over the advisory Deploy
+  # pre-flight. The wrapper owns the CI decision, so the prompt must route to it.
+  run grep -q 'ONLY IF every' "$STUB_ARGV"
+  [ "$status" -ne 0 ]
+  run grep -q 'Check CI with' "$STUB_ARGV"
+  [ "$status" -ne 0 ]
+  grep -q 'scripts/qa-pr-approve.sh' "$STUB_ARGV"
 }
 
 @test "happy path: opening DM routed through the per-PR thread helper" {
@@ -143,7 +166,6 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   grep -q 'github.com/Muso-AI/ads-manager/pull/123' "$STUB_ARGV"
   grep -q 'U03TYGJF1N3' "$STUB_ARGV"
   grep -q 'qa-pr-thread-dm.sh Muso-AI/ads-manager 123 U03TYGJF1N3' "$STUB_ARGV"
-  grep -q 'gh pr checks 123 --repo Muso-AI/ads-manager' "$STUB_ARGV"
 }
 
 @test "env overrides set repo + requester when positionals are absent" {
@@ -355,4 +377,174 @@ JSON
     QA_REVIEW_REQUESTER_UID="$NICK" run --separate-stderr "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 1 ]
   [[ "$stderr" == *"invalid --at value"* ]]
+}
+
+# --- in-flight dedup (MUS-7955): refuse a duplicate / superseded dispatch -------
+# Fixture: one queued dispatch run, named as external-pr-review.yml's run-name.
+gh_runs() {  # gh_runs <databaseId> <pr> <sha> [status] [repo] [age-seconds]
+  local t; t=$(( $(date -u +%s) - ${6:-0} ))
+  t="$(date -u -d "@$t" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$t" +%Y-%m-%dT%H:%M:%SZ)"
+  printf '[{"databaseId":%s,"name":"qa %s#%s @ %s (external-qa-review)","status":"%s","createdAt":"%s"}]\n' \
+    "$1" "${5:-Muso-AI/hydra}" "$2" "$3" "${4:-queued}" "$t" > "$TEST_TMPDIR/gh.json"
+  export STUB_GH_JSON="$TEST_TMPDIR/gh.json"
+}
+
+@test "dedup: lookup asks gh run list for hydra runs with the exact fields (argv, not branches)" {
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(sed -n 1p "$STUB_GH_ARGV")" = "run" ]
+  [ "$(sed -n 2p "$STUB_GH_ARGV")" = "list" ]
+  grep -qx -- '-R' "$STUB_GH_ARGV"
+  grep -qx 'Muso-AI/hydra' "$STUB_GH_ARGV"
+  grep -qx -- '--json' "$STUB_GH_ARGV"
+  grep -qx 'databaseId,name,status,createdAt' "$STUB_GH_ARGV"
+}
+
+@test "dedup: exact (repo,pr,sha) already queued -> refused, exit 0, greppable line, no cron add" {
+  gh_runs 100 123 "${GOOD_SHA}0000000000000000000000000000"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: in_progress duplicate is refused too" {
+  gh_runs 100 123 "${GOOD_SHA}0000000000000000000000000000" in_progress
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: a COMPLETED run for the same sha does not block a re-send (drop-resender protocol)" {
+  gh_runs 100 123 "${GOOD_SHA}0000000000000000000000000000" completed
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: our OWN run (GITHUB_RUN_ID) is never a duplicate of itself" {
+  gh_runs 100 123 "${GOOD_SHA}0000000000000000000000000000" in_progress
+  GITHUB_RUN_ID=100 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: two queued twins -> only the YOUNGER one refuses (the older proceeds)" {
+  gh_runs 100 123 "${GOOD_SHA}0000000000000000000000000000"
+  GITHUB_RUN_ID=200 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+  gh_runs 300 123 "${GOOD_SHA}0000000000000000000000000000"
+  GITHUB_RUN_ID=200 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: a NEWER sha already queued for the same PR -> this older sha is refused as superseded" {
+  gh_runs 300 123 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  GITHUB_RUN_ID=200 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DEDUP-REFUSED superseded"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: an OLDER sha queued for the same PR does not block the newer one" {
+  gh_runs 100 123 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  GITHUB_RUN_ID=200 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: different PR or different repo never matches" {
+  gh_runs 100 999 "${GOOD_SHA}0000000000000000000000000000"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: same PR number and sha under ANOTHER repo never matches (PR numbers collide across repos)" {
+  gh_runs 100 123 "$GOOD_SHA" queued Muso-AI/other
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: a run older than the 4h window is not in flight -> dispatches (a wedged queued run cannot block a re-send forever)" {
+  gh_runs 100 123 "$GOOD_SHA" queued Muso-AI/hydra 18000
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: a run inside the 4h window still refuses (window test is not vacuous)" {
+  gh_runs 100 123 "$GOOD_SHA" queued Muso-AI/hydra 3600
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: a malformed QA_DEDUP_WINDOW_SECONDS falls back to the default window, never aborts dispatch" {
+  gh_runs 100 999 "$GOOD_SHA"
+  QA_DEDUP_WINDOW_SECONDS=oops QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"unbound variable"* ]]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: a malformed window still refuses an in-flight duplicate (default window applies)" {
+  gh_runs 100 123 "$GOOD_SHA" queued Muso-AI/hydra 3600
+  QA_DEDUP_WINDOW_SECONDS=oops QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: a leading-zero window (08) is read as decimal, not octal -> still refuses an in-flight duplicate" {
+  gh_runs 100 123 "$GOOD_SHA" queued Muso-AI/hydra 2
+  QA_DEDUP_WINDOW_SECONDS=08 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [[ "$output" != *"value too great for base"* ]]
+  [[ "$output" != *"DEDUP-SKIPPED"* ]]
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: QA_DEDUP_REFUSED_RC=76 (the reconciler) makes a refusal exit 76, still no cron add" {
+  gh_runs 100 123 "$GOOD_SHA"
+  QA_DEDUP_REFUSED_RC=76 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 76 ]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: fresh (repo,pr,sha) with no runs dispatches" {
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: lookup FAILS -> fail OPEN, dispatches anyway, says so" {
+  STUB_GH_FAIL=1 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+  [[ "$output" == *"DEDUP-SKIPPED"* ]]
+}
+
+@test "dedup: lookup returns garbage -> fail OPEN, dispatches anyway" {
+  echo "not json" > "$TEST_TMPDIR/gh.json"; export STUB_GH_JSON="$TEST_TMPDIR/gh.json"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+# --- hydra's own path: qa-autoreview.yml calls this same script (MUS-7955 bot round) ---
+AUTOREVIEW="$HYDRA_REPO/.github/workflows/qa-autoreview.yml"
+
+@test "dedup: qa-autoreview.yml's run-name, rendered, is a name the guard matches -> second hydra dispatch refused" {
+  rn="$(grep -m1 '^run-name:' "$AUTOREVIEW")"
+  [ -n "$rn" ]
+  name="$(printf '%s' "${rn#run-name: }" | tr -d '"' \
+    | sed -e 's/\${{ github.repository }}/Muso-AI\/hydra/' \
+          -e 's/\${{ github.event.workflow_run.pull_requests\[0\].number }}/123/' \
+          -e "s/\${{ github.event.workflow_run.head_sha }}/${GOOD_SHA}0000000000000000000000000000/")"
+  [[ "$name" != *'${{'* ]]
+  printf '[{"databaseId":100,"name":"%s","status":"queued","createdAt":"%s"}]\n' "$name" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TEST_TMPDIR/gh.json"
+  export STUB_GH_JSON="$TEST_TMPDIR/gh.json"
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: qa-autoreview.yml grants actions: read at workflow level (gh run list 403s without it -> silent DEDUP-SKIPPED)" {
+  awk '/^permissions:/{p=1;next} /^[^ #]/{p=0} p' "$AUTOREVIEW" | grep -qE '^  actions: read$'
 }

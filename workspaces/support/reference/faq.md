@@ -33,7 +33,10 @@ Yes – our team handles profile merges directly. To get started, share the link
 Verified artists can become Album Admins, giving them control over the credits displayed for their albums and tracks. You must first verify your artist profile.
 
 ### How do I update my profile information?
-Log in at app.muso.ai and edit your profile page directly. Changes are reflected across the platform and shared with industry partners.
+Log in at app.muso.ai and edit your profile page directly. If the profile name cannot be changed in the editor, contact support with the claimed Muso profile link, the current name, and the requested professional name. Support may ask for artist-link or identity verification before making the change.
+
+### How do I change my account email?
+Contact support with the claimed Muso profile link and the new email address. If you cannot access the old email, support may ask for additional ownership verification before updating account access.
 
 ### Can I delete my profile?
 Account and profile deletion requests are handled by our support team. Create a support ticket with category "Account – Deletion Request" and we will process your request.
@@ -121,7 +124,7 @@ Analytics require an active Pro or Business subscription with an available seat 
 If subscription and seat are both fine and data still isn't showing,
 reach out to support and we'll take a closer look at your specific profile.
 Your data is being tracked in the background, and we can flag your profile
-for our team to investigate.
+for our team to review.
 
 ### What are Milestones?
 Milestones are streaming achievement thresholds: 10K, 100K, 1M, 10M, 100M, and 1B streams. They help you track career progress.

@@ -441,3 +441,428 @@ def test_since_hours_cutoff_between_a_turns_rows_drops_it_through_collect(invent
     records, summary = m.collect(str(shadow), inventory, [str(db)], since_hours=since_hours)
     assert summary["turns"] == 0
     assert records == []
+
+
+# ── --intercom leg (MUS-1543): resolution_path + needs_reply ground truth ──
+# Every fixture stubs the HTTP layer; nothing here touches the network.
+import http.client
+import io
+import re
+import urllib.error
+
+CAROLINE = "5763097"
+HUMAN = "9000001"
+T0 = "2026-09-23T10:00:00Z"
+T0_EPOCH = int(m.parse_ts(T0).timestamp())
+SECRET_TEXT = "SECRET-CUSTOMER-TEXT jane@example.com Jane Doe"
+
+
+def part(offset, author_type, author_id, part_type="comment"):
+    return {"part_type": part_type, "created_at": T0_EPOCH + offset,
+            "body": SECRET_TEXT,
+            "author": {"type": author_type, "id": str(author_id), "name": "Jane Doe",
+                       "email": "jane@example.com"}}
+
+
+def conv(parts=(), state="open", last_close=None, reopens=0, assignee=None,
+         first_assignment=None, rating=None):
+    return {"id": "C1", "state": state, "admin_assignee_id": assignee,
+            "conversation_rating": rating,
+            "statistics": {"count_reopens": reopens, "last_close_at": last_close,
+                           "first_assignment_at": first_assignment},
+            "conversation_parts": {"conversation_parts": list(parts)}}
+
+
+def run_intercom(tmp_path, inventory, convs, shadow_rows=None, tools=(), max_convs=None):
+    """convs: item_id -> payload dict, or None for a failed GET. Returns
+    (records, summary, calls) where calls is the list of fetched ids."""
+    shadow = tmp_path / "caroline.jsonl"
+    write_shadow(shadow, shadow_rows or [shadow_row("C1", T0)])
+    db = tmp_path / "traj.sqlite"
+    write_trajectory_db(db, [tool_call_event(n, ts, "C1") for n, ts in tools]
+                        or [non_tool_event("model.completed", T0, "C1")])
+    calls = []
+
+    def fetch(cid):
+        calls.append(cid)
+        return convs.get(cid)
+
+    records, summary = m.collect(str(shadow), inventory, [str(db)], intercom_fetch=fetch,
+                                 intercom_max_convs=max_convs)
+    return records, summary, calls
+
+
+def test_human_admin_part_in_window_is_human_required_and_beats_a_tool_call(inventory, tmp_path):
+    c = conv([part(30, "admin", HUMAN)])
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c},
+                              tools=[("profile_status", "2026-09-23T10:00:10Z")])
+    assert recs[0]["truth"]["first_tool"] == "profile_status"
+    assert recs[0]["truth"]["resolution_path"] == "human_required"
+    assert recs[0]["evidence"]["human_admin_replied"] is True
+
+
+def test_human_assignee_alone_is_not_human_required(inventory, tmp_path):
+    # Bot review on PR #1059: first_assignment_at is the first assignment to
+    # ANYONE while admin_assignee_id is the CURRENT one, so pairing them can
+    # label a turn human_required when Caroline was assigned first and a human
+    # only took over later. Assignment alone must stay unlabelled.
+    c = conv([], assignee=HUMAN, first_assignment=T0_EPOCH + 20)
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
+    assert "resolution_path" not in recs[0]["truth"]
+
+
+def test_reassignment_to_human_after_caroline_does_not_taint_earlier_turn(inventory, tmp_path):
+    rows = [shadow_row("C1", T0), shadow_row("C1", "2026-09-23T10:10:00Z")]
+    # Caroline assigned in turn 1 (first_assignment), human holds it by turn 2,
+    # but no human authored a part anywhere.
+    c = conv([], assignee=HUMAN, first_assignment=T0_EPOCH + 5)
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c}, shadow_rows=rows)
+    assert all("resolution_path" not in r["truth"] for r in recs)
+
+
+def test_caroline_assignee_is_not_a_human_takeover(inventory, tmp_path):
+    c = conv([], assignee=CAROLINE, first_assignment=T0_EPOCH + 20)
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
+    assert "resolution_path" not in recs[0]["truth"]
+
+
+def test_bot_author_and_caroline_admin_are_not_human(inventory, tmp_path):
+    c = conv([part(5, "bot", "77"), part(20, "admin", CAROLINE)])
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c},
+                              tools=[("profile_status", "2026-09-23T10:00:10Z")])
+    assert recs[0]["truth"]["resolution_path"] == "caroline_tool"
+    assert recs[0]["evidence"]["human_admin_replied"] is False
+    assert recs[0]["evidence"]["caroline_replied"] is True
+
+
+def test_tool_call_and_no_human_is_caroline_tool(inventory, tmp_path):
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": conv([])},
+                              tools=[("create_ticket", "2026-09-23T10:00:10Z")])
+    assert recs[0]["truth"]["resolution_path"] == "caroline_tool"
+
+
+def test_silence_then_close_without_reopen_is_no_reply(inventory, tmp_path):
+    c = conv([], state="closed", last_close=T0_EPOCH + 600)
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
+    assert recs[0]["truth"]["resolution_path"] == "no_reply"
+    assert recs[0]["truth"]["needs_reply"] == "false"
+    assert recs[0]["evidence"]["closed_without_human"] is True
+
+
+def test_same_shape_with_a_reopen_leaves_resolution_path_absent(inventory, tmp_path):
+    c = conv([], state="closed", last_close=T0_EPOCH + 600, reopens=1)
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
+    assert "resolution_path" not in recs[0]["truth"]
+    assert recs[0]["evidence"]["reopens"] == 1
+
+
+def test_caroline_replied_no_tool_customer_wrote_back_is_never_labelled(inventory, tmp_path):
+    # The "do not invent ask_customer / answer_from_knowledge" guard: this
+    # signature is identical for a clarifying question, a knowledge answer
+    # and a silently failed tool call, so the key must be ABSENT.
+    c = conv([part(20, "admin", CAROLINE), part(120, "user", "u1")])
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
+    assert "resolution_path" not in recs[0]["truth"]
+    assert recs[0]["truth"]["needs_reply"] == "true"
+
+
+def test_last_turn_of_open_conversation_omits_needs_reply(inventory, tmp_path):
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": conv([])})
+    assert "needs_reply" not in recs[0]["truth"]
+
+
+def test_open_conversation_reopened_after_an_earlier_close_still_omits_needs_reply(inventory, tmp_path):
+    # last_close_at predates this turn: the close belongs to an earlier turn.
+    c = conv([], state="open", last_close=T0_EPOCH - 3600, reopens=1)
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
+    assert "needs_reply" not in recs[0]["truth"]
+
+
+def test_last_turn_closed_after_start_but_reopened_omits_needs_reply(inventory, tmp_path):
+    # A close after turn_start followed by a reopen means the conversation is
+    # live again: we cannot tell "chose not to reply" from "not replied yet"
+    # (bot review, PR #1059).
+    c = conv([], state="open", last_close=T0_EPOCH + 60, reopens=1)
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
+    assert "needs_reply" not in recs[0]["truth"]
+
+
+def test_last_turn_closed_after_start_not_reopened_is_needs_reply_false(inventory, tmp_path):
+    c = conv([], state="closed", last_close=T0_EPOCH + 60, reopens=0)
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
+    assert recs[0]["truth"]["needs_reply"] == "false"
+
+
+def test_non_last_turn_without_caroline_part_is_needs_reply_false(inventory, tmp_path):
+    rows = [shadow_row("C1", T0), shadow_row("C1", "2026-09-23T10:10:00Z")]
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": conv([])}, shadow_rows=rows)
+    assert recs[0]["truth"]["needs_reply"] == "false"
+    assert "needs_reply" not in recs[1]["truth"]
+
+
+def test_parts_outside_the_turn_window_do_not_count(inventory, tmp_path):
+    rows = [shadow_row("C1", T0), shadow_row("C1", "2026-09-23T10:10:00Z")]
+    c = conv([part(700, "admin", HUMAN)])  # in turn 2's window only
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c}, shadow_rows=rows)
+    assert "resolution_path" not in recs[0]["truth"]
+    assert recs[1]["truth"]["resolution_path"] == "human_required"
+
+
+def test_failed_get_keeps_first_tool_and_marks_intercom_unseen(inventory, tmp_path):
+    rows = [shadow_row("C1", T0), shadow_row("C2", T0)]
+    db = tmp_path / "traj.sqlite"
+    shadow = tmp_path / "caroline.jsonl"
+    write_shadow(shadow, rows)
+    write_trajectory_db(db, [tool_call_event("profile_status", "2026-09-23T10:00:10Z", "C1"),
+                             tool_call_event("create_ticket", "2026-09-23T10:00:10Z", "C2")])
+    good = conv([part(30, "admin", HUMAN)])
+    recs, summary = m.collect(str(shadow), inventory, [str(db)],
+                              intercom_fetch=lambda cid: None if cid == "C1" else good)
+    c1, c2 = recs
+    assert c1["truth"] == {"first_tool": "profile_status"}
+    assert c1["evidence"]["intercom_seen"] is False
+    assert "csat" not in c1["evidence"]
+    assert c2["truth"]["resolution_path"] == "human_required"
+    assert c2["evidence"]["intercom_seen"] is True
+    assert summary["intercom_failed"] == 1
+
+
+def test_one_get_per_conversation_reused_across_turns(inventory, tmp_path):
+    rows = [shadow_row("C1", T0), shadow_row("C1", "2026-09-23T10:10:00Z"),
+            shadow_row("C1", "2026-09-23T10:20:00Z")]
+    _, _, calls = run_intercom(tmp_path, inventory, {"C1": conv([])}, shadow_rows=rows)
+    assert calls == ["C1"]
+
+
+def test_max_convs_caps_gets_and_marks_the_rest_unseen(inventory, tmp_path):
+    rows = [shadow_row("C1", T0), shadow_row("C2", T0)]
+    recs, _, calls = run_intercom(tmp_path, inventory, {"C1": conv([]), "C2": conv([])},
+                                  shadow_rows=rows, max_convs=1)
+    assert calls == ["C1"]
+    assert recs[1]["evidence"]["intercom_seen"] is False
+
+
+def test_intercom_off_adds_no_intercom_keys(inventory, tmp_path):
+    shadow = tmp_path / "caroline.jsonl"
+    write_shadow(shadow, [shadow_row("C1", T0)])
+    db = tmp_path / "traj.sqlite"
+    write_trajectory_db(db, [non_tool_event("model.completed", T0, "C1")])
+    recs, summary = m.collect(str(shadow), inventory, [str(db)])
+    assert "intercom_seen" not in recs[0]["evidence"]
+    assert set(recs[0]["truth"]) == {"first_tool"}
+    assert "intercom_failed" not in summary
+
+
+def test_csat_and_no_customer_text_in_the_sidecar(inventory, tmp_path):
+    c = conv([part(20, "admin", CAROLINE), part(30, "user", "u1")], state="closed",
+             last_close=T0_EPOCH + 90, rating={"rating": 5, "remark": SECRET_TEXT})
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
+    assert recs[0]["evidence"]["csat"] == 5
+    out = tmp_path / "out.jsonl"
+    m.write_atomic(recs, str(out))
+    blob = out.read_text()
+    for needle in ("SECRET-CUSTOMER-TEXT", "jane@example.com", "Jane Doe"):
+        assert needle not in blob
+
+
+def test_caroline_admin_id_default_matches_the_identity_gate_script():
+    src = (_REPO_ROOT / "scripts" / "check-intercom-reply-identity.sh").read_text()
+    pinned = re.search(r'^CAROLINE_ADMIN_ID="(\d+)"', src, re.M).group(1)
+    assert m.DEFAULT_CAROLINE_ADMIN_ID == pinned
+
+
+def test_caroline_admin_id_env_override(monkeypatch):
+    monkeypatch.setenv("JEV_OUTCOMES_CAROLINE_ADMIN_ID", "123")
+    assert m.caroline_admin_id_from_env() == "123"
+    monkeypatch.delenv("JEV_OUTCOMES_CAROLINE_ADMIN_ID")
+    assert m.caroline_admin_id_from_env() == m.DEFAULT_CAROLINE_ADMIN_ID
+
+
+# ── the HTTP layer ──
+
+class _Resp:
+    def __init__(self, payload):
+        self._b = json.dumps(payload).encode()
+
+    def read(self):
+        return self._b
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _http_error(code, headers=None):
+    import email.message
+    h = email.message.Message()
+    for k, v in (headers or {}).items():
+        h[k] = v
+    return urllib.error.HTTPError("https://x", code, "err", h, io.BytesIO(b"{}"))
+
+
+def test_fetcher_issues_a_get_with_pinned_headers_and_no_body():
+    seen = []
+
+    def opener(req, timeout):
+        seen.append(req)
+        return _Resp({"id": "C1"})
+
+    f = m.make_intercom_fetcher("tok123", opener=opener, sleep=lambda s: None)
+    assert f("C1") == {"id": "C1"}
+    req = seen[0]
+    assert req.get_method() == "GET" and req.data is None
+    assert req.full_url == "https://api.intercom.io/conversations/C1?display_as=plaintext"
+    assert req.get_header("Intercom-version") == "2.11"
+    assert req.get_header("Authorization") == "Bearer tok123"
+
+
+def test_fetcher_retries_429_honouring_retry_after_then_succeeds():
+    outcomes = [_http_error(429, {"Retry-After": "7"}), _Resp({"id": "C1"})]
+    sleeps = []
+
+    def opener(req, timeout):
+        o = outcomes.pop(0)
+        if isinstance(o, Exception):
+            raise o
+        return o
+
+    f = m.make_intercom_fetcher("t", opener=opener, sleep=sleeps.append)
+    assert f("C1") == {"id": "C1"}
+    assert sleeps == [7]
+
+
+@pytest.mark.parametrize("exc", [_http_error(500), _http_error(404),
+                                 urllib.error.URLError("boom"), TimeoutError("slow"),
+                                 http.client.IncompleteRead(b"x"), http.client.BadStatusLine("x")])
+def test_fetcher_returns_none_on_failure_never_raises(exc):
+    def opener(req, timeout):
+        raise exc
+
+    f = m.make_intercom_fetcher("t", opener=opener, sleep=lambda s: None)
+    assert f("C1") is None
+
+
+def test_fetcher_none_on_non_json_body():
+    class Bad(_Resp):
+        def read(self):
+            return b"<html>"
+
+    f = m.make_intercom_fetcher("t", opener=lambda r, timeout: Bad({}), sleep=lambda s: None)
+    assert f("C1") is None
+
+
+def test_token_file_parsing(tmp_path):
+    p = tmp_path / "edge.env"
+    p.write_text('OTHER=1\nexport MUSOAI_INTERCOM_TOKEN="abc def"\n')
+    assert m.read_intercom_token(str(p)) == "abc def"
+    p.write_text("MUSOAI_INTERCOM_TOKEN=plain\n")
+    assert m.read_intercom_token(str(p)) == "plain"
+    p.write_text("OTHER=1\n")
+    with pytest.raises(ValueError):
+        m.read_intercom_token(str(p))
+
+
+def test_cli_intercom_runs_end_to_end_exit_0_with_one_bad_conversation(inventory, tmp_path, monkeypatch, capsys):
+    shadow = tmp_path / "caroline.jsonl"
+    write_shadow(shadow, [shadow_row("C1", T0), shadow_row("C2", T0)])
+    db = tmp_path / "traj.sqlite"
+    write_trajectory_db(db, [tool_call_event("profile_status", "2026-09-23T10:00:10Z", "C1")])
+    envf = tmp_path / "edge.env"
+    envf.write_text("MUSOAI_INTERCOM_TOKEN=tok\n")
+
+    def fake_fetcher(token, **kw):
+        assert token == "tok"
+        return lambda cid: None if cid == "C1" else conv([part(30, "admin", HUMAN)])
+
+    monkeypatch.setattr(m, "make_intercom_fetcher", fake_fetcher)
+    out = tmp_path / "out.jsonl"
+    rc = m.main(["--shadow-file", str(shadow), "--out", str(out), "--inventory", inventory,
+                 "--trajectory-db", str(db), "--intercom", "--intercom-token-file", str(envf),
+                 "--json-summary"])
+    assert rc == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["intercom_failed"] == 1
+    assert summary["resolution_path_hist"] == {"human_required": 1}
+    assert "tok" not in out.read_text()
+
+
+def test_cli_intercom_without_a_token_fails_loud_and_preserves_the_sidecar(inventory, tmp_path):
+    shadow = tmp_path / "caroline.jsonl"
+    write_shadow(shadow, [shadow_row("C1", T0)])
+    out = tmp_path / "out.jsonl"
+    out.write_text("GOOD\n")
+    envf = tmp_path / "edge.env"
+    envf.write_text("OTHER=1\n")
+    rc = m.main(["--shadow-file", str(shadow), "--out", str(out), "--inventory", inventory,
+                 "--trajectory-db", str(tmp_path / "none.sqlite"),
+                 "--intercom", "--intercom-token-file", str(envf)])
+    assert rc == 3
+    assert out.read_text() == "GOOD\n"
+
+
+def test_malformed_payload_or_raising_fetch_marks_only_that_conversation_unseen(inventory, tmp_path, capsys):
+    rows = [shadow_row("C1", T0), shadow_row("C2", T0), shadow_row("C3", T0)]
+    shadow = tmp_path / "caroline.jsonl"
+    write_shadow(shadow, rows)
+    db = tmp_path / "traj.sqlite"
+    write_trajectory_db(db, [non_tool_event("model.completed", T0, "C1")])
+    good = conv([part(30, "admin", HUMAN)])
+
+    def fetch(cid):
+        if cid == "C1":
+            return {"statistics": [1]}
+        if cid == "C2":
+            raise http.client.IncompleteRead(b"x")
+        return good
+
+    recs, summary = m.collect(str(shadow), inventory, [str(db)], intercom_fetch=fetch)
+    assert [r["evidence"]["intercom_seen"] for r in recs] == [False, False, True]
+    assert recs[2]["truth"]["resolution_path"] == "human_required"
+    assert summary["intercom_failed"] == 2
+    assert "SECRET" not in capsys.readouterr().err
+
+
+def test_caroline_note_part_is_not_a_reply(inventory, tmp_path):
+    c = conv([part(20, "admin", CAROLINE, part_type="note")])
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c})
+    assert "needs_reply" not in recs[0]["truth"]
+    assert recs[0]["evidence"]["caroline_replied"] is False
+
+
+def test_capped_conversations_are_not_counted_as_failures(inventory, tmp_path):
+    rows = [shadow_row("C1", T0), shadow_row("C2", T0)]
+    _, summary, _ = run_intercom(tmp_path, inventory, {"C1": conv([]), "C2": conv([])},
+                                 shadow_rows=rows, max_convs=1)
+    assert summary["intercom_failed"] == 0 and summary["intercom_capped"] == 1
+
+
+def test_all_gets_failing_warns_loudly_on_stderr(inventory, tmp_path, capsys):
+    run_intercom(tmp_path, inventory, {"C1": None})
+    assert "every intercom GET failed" in capsys.readouterr().err
+
+
+def test_cli_max_convs_is_wired_through_main(inventory, tmp_path, monkeypatch):
+    shadow = tmp_path / "caroline.jsonl"
+    write_shadow(shadow, [shadow_row("C1", T0), shadow_row("C2", T0)])
+    envf = tmp_path / "edge.env"
+    envf.write_text("MUSOAI_INTERCOM_TOKEN=tok\n")
+    calls = []
+    monkeypatch.setattr(m, "make_intercom_fetcher",
+                        lambda token, **kw: (lambda cid: calls.append(cid) or conv([])))
+    rc = m.main(["--shadow-file", str(shadow), "--out", str(tmp_path / "o.jsonl"),
+                 "--inventory", inventory, "--trajectory-db", str(tmp_path / "n.sqlite"),
+                 "--intercom", "--intercom-token-file", str(envf), "--intercom-max-convs", "1"])
+    assert rc == 0 and calls == ["C1"]
+
+
+def test_close_in_a_later_turn_does_not_make_an_earlier_turn_no_reply(inventory, tmp_path):
+    # Bot R1: a close at 11:00 belongs to the 10:10 turn's window, not the
+    # 10:00 turn's. Only the turn whose own window holds the close is no_reply.
+    c = conv([], state="closed", last_close=T0_EPOCH + 3600)
+    rows = [shadow_row("C1", T0), shadow_row("C1", "2026-09-23T10:10:00Z")]
+    recs, _, _ = run_intercom(tmp_path, inventory, {"C1": c}, shadow_rows=rows)
+    first, second = sorted(recs, key=lambda r: r["turn_start"])
+    assert "resolution_path" not in first["truth"]
+    assert second["truth"]["resolution_path"] == "no_reply"

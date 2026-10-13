@@ -932,14 +932,21 @@ for repo in "${REPOS[@]}"; do
 
     log "DISPATCH: $key (attempt $((attempts + 1))/$MAX_ATTEMPTS)"
     dispatch_rc=0
-    "$DISPATCH_SCRIPT" "$pr" "$head_sha" "$repo" "$author_uid" || dispatch_rc=$?
+    QA_DEDUP_REFUSED_RC=76 "$DISPATCH_SCRIPT" "$pr" "$head_sha" "$repo" "$author_uid" || dispatch_rc=$?
     # Invariant: `attempts` bounds dispatches that REACHED the gateway. rc 75
     # (EX_TEMPFAIL) means the dispatcher never got to it, so it is not an
     # attempt; cooldown (last_attempt_epoch still advances) + GLOBAL_CAP + the
     # consecutive-unreachable-ticks page bound those. Every other non-zero rc
     # stays counted — a systematically broken dispatcher must still hit the
     # attempts cap, not retry forever.
-    if [ "$dispatch_rc" -eq 75 ]; then
+    # rc 76: the dispatcher refused because GitHub already holds an equivalent
+    # queued/in_progress review run (MUS-7955). That review is merely waiting for
+    # a runner, so it is neither an attempt nor an unreachable gateway: cooldown
+    # only, else a saturated runner pool would exhaust attempts and page "lost".
+    if [ "$dispatch_rc" -eq 76 ]; then
+      log "DEDUP: $DISPATCH_SCRIPT refused $key (an equivalent review run is already queued/in_progress) — NOT counted as an attempt; cooldown still applies."
+      state_json="$(qar_state_put "$state_json" "$key" "$attempts" "$NOW_EPOCH" "$paged")"
+    elif [ "$dispatch_rc" -eq 75 ]; then
       log "WARN: $DISPATCH_SCRIPT exited 75 for $key (gateway unreachable — NOT counted as an attempt; cooldown still applies)."
       state_json="$(qar_state_put_unreachable "$state_json" "$key" "$attempts" "$NOW_EPOCH" "$paged")"
       unreachable_this_tick=$((unreachable_this_tick + 1))
