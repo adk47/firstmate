@@ -16,10 +16,11 @@
 #   (cp while main runs corrupts the store):
 #     B=/var/backups/hydra-main-sessions/<UTC-ts>; SD=/root/.openclaw-main   # pick a dir whose log line says `backup ok`
 #     /opt/hydra/scripts/hydra-maintenance.sh start "restore main sessions" --ttl 60m --operator <you>
-#     systemctl stop openclaw-gateway-main && ! systemctl is-active --quiet openclaw-gateway-main || echo ABORT: main still up
-#     (cd "$B" && find . -name '*.sqlite' | while read -r f; do rm -f "$SD/$f-wal" "$SD/$f-shm"; cp -p "$f" "$SD/$f" || exit 1; done) || echo ABORT: restore incomplete
-#     Do the next lines ONLY if neither ABORT printed (a half-restored store must not be started):
-#     systemctl start openclaw-gateway-main
+#     # ONE && chain: a failed stop, a still-active main or a failed cp skips every later step (nothing is copied or started):
+#     systemctl stop openclaw-gateway-main && ! systemctl is-active --quiet openclaw-gateway-main \
+#       && (cd "$B" && find . -name '*.sqlite' | while read -r f; do rm -f "$SD/$f-wal" "$SD/$f-shm"; cp -p "$f" "$SD/$f" || exit 1; done) \
+#       && systemctl start openclaw-gateway-main || echo 'ABORT: restore not completed, main NOT started; fix before retrying'
+#     # only if no ABORT printed:
 #     until [ "$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:18789/health)" = 200 ]; do sleep 5; done
 #     /opt/hydra/scripts/hydra-maintenance.sh stop
 # Disarm without a revert: `systemctl disable --now hydra-main-prune-restart.timer`. The NEXT DEPLOY RE-ARMS IT
