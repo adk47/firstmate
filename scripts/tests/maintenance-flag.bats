@@ -166,6 +166,34 @@ write_window() { jq -n --argjson e "$1" '{reason:"deploy gateway warm-up",expire
   [ ! -e "$HYDRA_DEPLOY_WINDOW_FLAG" ]
 }
 
+# Run deploy.sh's REAL arm statement with an optional GATEWAY_DRAIN_DEADLINE_SECS
+# and print the armed ttl (expires_epoch - started_epoch).
+armed_ttl_with_drain() {
+  local d="$HYDRA_REPO/scripts/deploy.sh" lines
+  lines=$(sed -n '/^  HYDRA_DEPLOY_WINDOW_SECS=/,/^    || log /p' "$d")
+  rm -f "$HYDRA_DEPLOY_WINDOW_FLAG"
+  env ${1:+GATEWAY_DRAIN_DEADLINE_SECS="$1"} HYDRA_LOCAL=true DEPLOY_PATH="$HYDRA_REPO"     HYDRA_DEPLOY_WINDOW_FLAG="$HYDRA_DEPLOY_WINDOW_FLAG"     bash -c 'log() { echo "$*"; }; run_on_node8() { bash -c "$1"; }; '"$lines" >/dev/null
+  jq -r '.expires_epoch - .started_epoch' "$HYDRA_DEPLOY_WINDOW_FLAG"
+}
+
+@test "deploy window (delayed safe restart): drain burns the full deadline, window still covers the ~540s warm-up (MUS-8501)" {
+  # Armed at t=0 BEFORE Phase A; the drain can consume GATEWAY_DRAIN_DEADLINE_SECS
+  # (default 390) before the hard-restart fallback, and the warm-up (observed
+  # restart 12:46 -> recovered 12:55 = ~540s) runs from the RESTART, not the arm.
+  drain=390 warmup=540
+  ttl=$(armed_ttl_with_drain "")
+  [ "$ttl" -gt $(( drain + warmup )) ]
+  # simulate the timeline on the armed flag: at the end of warm-up the window is open
+  started=$(jq -r .started_epoch "$HYDRA_DEPLOY_WINDOW_FLAG")
+  end_of_warmup=$(( started + drain + warmup ))
+  [ "$(jq -r .expires_epoch "$HYDRA_DEPLOY_WINDOW_FLAG")" -gt "$end_of_warmup" ]
+}
+
+@test "deploy window: ttl tracks an operator override of GATEWAY_DRAIN_DEADLINE_SECS (drain + 900 warm-up)" {
+  [ "$(armed_ttl_with_drain 600)" -eq 1500 ]
+  [ "$(armed_ttl_with_drain "")" -eq 1290 ]
+}
+
 @test "deploy.sh's Step 6 arm lines, executed, open the window with a future numeric expiry" {
   d="$HYDRA_REPO/scripts/deploy.sh"
   # Extract the REAL arm statement (default assignment + run_on_node8 call + its

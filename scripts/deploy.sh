@@ -3635,10 +3635,14 @@ if gateway_restart_needed; then
   # timers that hit the gateway WS. A SEPARATE flag from the maintenance one
   # (the untracked gateway guard ignores that one's TTL). The TTL is the window:
   # no disarm is needed or wanted. Observed 2026-10-08: restart 12:46, peer-labels
-  # still unhealthy at 12:51:47, recovered 12:55 (~9 min), so default 900s.
+  # still unhealthy at 12:51:47, recovered 12:55 (~9 min), so the warm-up term is
+  # 900s. That warm-up is measured from the RESTART, but this arm runs before
+  # Phase A and the drain can burn GATEWAY_DRAIN_DEADLINE_SECS (390) first, so the
+  # TTL must cover drain + warm-up (MUS-8501). Tradeoff accepted: on a fast drain
+  # the timers stay stood down up to ~390s longer than needed.
   # Armed only inside the restart branch: a deploy that restarts no gateway must
   # not stand the timers down. Non-fatal: no window just means the old behaviour.
-  HYDRA_DEPLOY_WINDOW_SECS="${HYDRA_DEPLOY_WINDOW_SECS:-900}"
+  HYDRA_DEPLOY_WINDOW_SECS="${HYDRA_DEPLOY_WINDOW_SECS:-$(( ${GATEWAY_DRAIN_DEADLINE_SECS:-390} + 900 ))}"
   run_on_node8 "source '$DEPLOY_PATH/scripts/lib/maintenance-flag.sh' && deploy_window_arm '$HYDRA_DEPLOY_WINDOW_SECS' 'deploy gateway warm-up'" \
     || log "  WARN: could not arm the deploy warm-up window — gateway timers may page during warm-up"
   # Phase A: request the safe restarts up front (each request returns in ~3s;
