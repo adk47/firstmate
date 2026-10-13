@@ -1019,10 +1019,10 @@ PYEOF
 }
 
 @test "shadow wiring: samples across runs vary -- never pinned to the ranked head" {
-  # needs_human is ranked oldest-waiting-first (see "needs-human is ranked
+  # needs_human is ranked newest-waiting-first (see "needs-human is ranked
   # newest-waiting-first" above), so a caller that (bug) sliced jev_pool[:k]
   # instead of drawing a random sample would deterministically pick the SAME
-  # item (the oldest) on every run. Over enough runs a genuinely random draw
+  # item (the newest) on every run. Over enough runs a genuinely random draw
   # from a 10-item pool with k=1 must land on more than one distinct id.
   run python3 - <<'PYEOF'
 import os, sys

@@ -25,7 +25,7 @@ level by contact id to avoid an N+1 GET per conversation.
 Buckets (deterministic, no LLM judgment):
   - needs-human:          customer spoke last (last_contact_reply_at >
                            last_admin_reply_at, or never replied to) — we
-                           owe them a reply. Ranked oldest-waiting-first.
+                           owe them a reply. Ranked newest-waiting-first.
   - needs-customer-input: we (admin) spoke last — waiting on the customer.
   - dup-candidate:        the same contact email has >=2 open conversations
                            (checked independent of the two buckets above).
@@ -121,7 +121,7 @@ Env:
                                 #2a; see JEV_SURFACE_NEEDS_HUMAN_DIGEST
                                 below). Each run draws a FRESH random sample
                                 (never the ranked/rendered head — that order
-                                is oldest-waiting-first, so the head is a
+                                is newest-waiting-first, so the head is a
                                 biased slice) of this size from the full
                                 needs_human bucket and fires one shadow Jev
                                 judgment per sampled conversation; this can
@@ -620,7 +620,7 @@ def waiting_since(c):
     Intercom's statistics do not count as a "reply") — the conversation's
     created_at. NEVER bare last_contact_reply_at (0) for that case: treating
     a brand-new conversation as "waiting since the Unix epoch" corrupts the
-    oldest-waiting-first ranking (ties every such row together in API order)
+    newest-waiting-first ranking (ties every such row together in API order)
     and the elapsed-time/48h-SLA-flag signal (always flags it, regardless of
     real age)."""
     return c["lcr"] or c.get("created_at") or 0
@@ -1382,7 +1382,7 @@ def main():
 
     # Shadow-only (Phase 2a #2a): fires strictly AFTER bucket_conversations()
     # above, on a RANDOM sample (never the ranked/rendered head — needs_human
-    # is sorted oldest-waiting-first, so the head is a biased slice) of the
+    # is sorted newest-waiting-first, so the head is a biased slice) of the
     # needs_human bucket, and can never change buckets, rendered rows, stdout,
     # or the exit code. A fresh, non-fixed seed each run is logged to stderr
     # so a run can be reproduced. See docs/plans/jev-adoption.md #2a and
