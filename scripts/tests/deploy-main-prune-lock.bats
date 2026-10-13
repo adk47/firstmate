@@ -23,7 +23,11 @@ setup() {
 # One process holds the lock (exec): kill $! releases it and leaves no orphan holding bats' fds.
 _hold_lock() { bash -c 'exec 8>"$1"; flock -n 8 && exec sleep "$2"' _ "$1" "$2" >/dev/null 2>&1 3>&- & }
 
-teardown() { rm -rf "$TEST_TMPDIR"; }
+teardown() {
+  # a failing run must not orphan the heartbeat child (it is also bounded to ~60s)
+  [ -n "${HB_PIDFILE:-}" ] && [ -s "$HB_PIDFILE" ] && kill -9 "$(cat "$HB_PIDFILE")" 2>/dev/null || true
+  rm -rf "$TEST_TMPDIR"
+}
 
 line_of() {
   local n; n=$(grep -nE "$1" "$DEPLOY" | head -1 | cut -d: -f1)
@@ -134,4 +138,23 @@ FAKE_SSH_OK='bash -c "${!#}"'
   MAIN_PRUNE_LOCK_WATCH_SECS=0.2 run bash "$TEST_TMPDIR/ssh-block.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"STILL-HELD"* ]]
+}
+
+# Bot finding (13 Oct, lib/main-prune-lock.sh:60): TERMing only the parent leaves a foreground child (rsync, ssh) running
+# and mutating node-8 while the prune takes the freed lock. The child here is a real unbounded-in-practice loop (60s
+# cap only so a failing test cannot orphan it) that heartbeats; it must be dead the moment `run` returns and silent after.
+@test "ssh-mode deploy: lock loss stops the in-flight foreground child tree, flag first, before the parent exits" {
+  HB="$TEST_TMPDIR/hb"; HB_PIDFILE="$TEST_TMPDIR/child.pid"; ORD="$TEST_TMPDIR/order"
+  _ssh_block "$FAKE_SSH_OK" "( until [ -s $HB_PIDFILE ]; do sleep 0.1; done; sleep 0.3; kill -9 \"\$MAIN_PRUNE_LOCK_REMOTE_PID\" ) >/dev/null 2>&1 &
+LOST=\"\$MAIN_PRUNE_LOCK_LOST_FILE\" bash -c 'trap \"[ -e \\\"\\\$LOST\\\" ] && echo flag-first >$ORD; exit 143\" TERM; echo \$\$ >$HB_PIDFILE; for i in \$(seq 300); do echo tick >>$HB; sleep 0.2; done' >/dev/null 2>&1
+sleep 10; echo SURVIVED-LOCK-LOSS"
+  MAIN_PRUNE_LOCK_WATCH_SECS=0.2 run bash "$TEST_TMPDIR/ssh-block.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"holding the main prune lock"*"died"* ]]
+  [[ "$output" != *"SURVIVED-LOCK-LOSS"* ]]
+  [ -s "$HB_PIDFILE" ]
+  ! kill -0 "$(cat "$HB_PIDFILE")" 2>/dev/null
+  n=$(wc -l <"$HB"); sleep 1
+  [ "$(wc -l <"$HB")" -eq "$n" ]
+  [ "$(cat "$ORD")" = flag-first ]
 }

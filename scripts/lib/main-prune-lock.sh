@@ -50,6 +50,7 @@ acquire_main_prune_lock_remote() {
   rm -f "$tmp/in" "$tmp/out" "$tmp/err"
   (
     exec 214>&- </dev/null >/dev/null
+    self=$(sh -c 'echo $PPID')  # this subshell (bash 3.2 has no BASHPID); it is a child of $parent and must not signal itself
     while kill -0 "$MAIN_PRUNE_LOCK_REMOTE_PID" 2>/dev/null; do
       kill -0 "$parent" 2>/dev/null || { rm -rf "$tmp"; exit 0; }
       sleep "${MAIN_PRUNE_LOCK_WATCH_SECS:-1}"
@@ -57,8 +58,35 @@ acquire_main_prune_lock_remote() {
     kill -0 "$parent" 2>/dev/null || { rm -rf "$tmp"; exit 0; }
     : >"$tmp/lost"
     echo "FATAL: the ssh holding the main prune lock on node-8 died; aborting so we do not mutate without the lock" >&2
+    # A foreground child (rsync, ssh, systemctl) outlives a TERMed parent -- bash defers the signal until the child ends --
+    # and keeps mutating node-8 while the prune takes the freed lock. Stop the parent's descendant tree first (pids walked
+    # with pgrep -P only, never a process group: deploy/rollback share the caller's pgid), TERM then KILL stragglers, and
+    # only then TERM the parent. The flag above stays first: killing the child makes the parent's EXIT path run at once.
+    kids=$(_main_prune_lock_descendants "$parent" "$self")
+    # shellcheck disable=SC2086  # pids, word-split on purpose
+    if [ -n "$kids" ]; then
+      kill -TERM $kids 2>/dev/null
+      i=0
+      while [ "$i" -lt "${MAIN_PRUNE_LOCK_KILL_WAIT_TICKS:-30}" ]; do
+        alive=
+        for k in $kids; do kill -0 "$k" 2>/dev/null && alive=1; done
+        [ -z "$alive" ] && break
+        i=$((i + 1)); sleep 0.1
+      done
+      kill -KILL $kids 2>/dev/null
+    fi
     kill -TERM "$parent" 2>/dev/null
   ) &
+}
+
+# Print the pids of every descendant of $1, skipping $2 (the watcher) and whatever hangs under it.
+_main_prune_lock_descendants() {
+  local kid
+  for kid in $(pgrep -P "$1" 2>/dev/null); do
+    [ "$kid" = "$2" ] && continue
+    echo "$kid"
+    _main_prune_lock_descendants "$kid" "$2"
+  done
 }
 
 # True once the remote lock watcher has fired (callers' EXIT backstops must not start main unlocked after that).

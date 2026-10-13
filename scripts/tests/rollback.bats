@@ -631,24 +631,50 @@ stub_ssh_local() {
 }
 
 # The ssh holding the node-8 prune lock dies mid-rollback (link drop): the watcher aborts rollback, and the EXIT
-# backstop must not then start main unlocked (the prune may now hold the store). Non-lock ssh calls are slowed so
-# rollback is still running when the holder dies.
-@test "ssh-mode rollback aborts when the node-8 lock holder dies mid-run and starts no gateway" {
+# backstop must not then start main unlocked (the prune may now hold the store). The holder dies only once a REAL
+# foreground child is running (bot finding 13 Oct: TERMing just the parent leaves that child mutating node-8): a
+# `git worktree add` stand-in that heartbeats into a file, an unbounded-in-practice loop (20s cap so a red run ends).
+@test "ssh-mode rollback aborts when the node-8 lock holder dies mid-run, stops the in-flight child and starts no gateway" {
   printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
   stub_systemctl_log
+  HB="$TMP/hb"; HB_PIDFILE="$TMP/child.pid"; ORD="$TMP/order"
+  LOCKDIR=$(mktemp -d); rmdir "$LOCKDIR"; LOCKDIR=${LOCKDIR%/*}
+  find "$LOCKDIR" -maxdepth 2 -name lost 2>/dev/null | sort >"$TMP/lost.before"
   cat > "$TMP/bin/ssh" <<'STUB'
 #!/usr/bin/env bash
 cmd="${@: -1}"
 case "$cmd" in
-  *flock*) bash -c "$cmd" & p=$!; ( sleep 1; kill -9 "$p" 2>/dev/null ) >/dev/null 2>&1 & wait "$p" ;;
-  *) sleep 5; bash -c "$cmd" ;;
+  *flock*) bash -c "$cmd" <&0 & p=$!  # <&0: a bare background job gets /dev/null stdin, so `cat` would EOF and the holder die at once
+     ( for _ in $(seq 150); do [ -s "$HB_PIDFILE" ] && break; sleep 0.1; done; sleep 0.5; kill -9 "$p" 2>/dev/null ) >/dev/null 2>&1 & wait "$p" ;;
+  *) bash -c "$cmd" ;;
 esac
 STUB
-  chmod +x "$TMP/bin/ssh"
+  cat > "$TMP/bin/git" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"worktree add"*)
+    # the lost flag lives in the lib's bare mktemp -d (macOS ignores TMPDIR for it): a lost file that was not there at start
+    trap 'find "$LOCKDIR" -maxdepth 2 -name lost 2>/dev/null | sort | comm -13 "$TMP/lost.before" - | grep -q . && echo flag-first >"$ORD"; exit 143' TERM
+    echo \$\$ >"$HB_PIDFILE"; for i in \$(seq 100); do echo tick >>"$HB"; sleep 0.2; done; exit 1 ;;
+  *) exec $(command -v git) "\$@" ;;
+esac
+STUB
+  chmod +x "$TMP/bin/ssh" "$TMP/bin/git"
+  start=$SECONDS
   run env HYDRA_LOCAL=false DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" SLACK_WEBHOOK="" \
-    MAIN_PRUNE_LOCK_WATCH_SECS=0.2 bash "$SRC/scripts/rollback.sh"
+    HB_PIDFILE="$HB_PIDFILE" MAIN_PRUNE_LOCK_WATCH_SECS=0.2 bash "$SRC/scripts/rollback.sh"
   [ "$status" -ne 0 ]
   [[ "$output" == *"holding the main prune lock"*"died"* ]]
-  [[ "$output" == *"main prune lock lost"* ]]
+  # No "main prune lock lost" log assertion: stopping the child lets rollback's own EXIT path start at once and the
+  # watcher's TERM may land before that path logs (it only ever declines to start main). The flag order is pinned below.
   assert_no_systemctl_start
+  # bash defers the parent's death until its foreground child ends, so without the descendant stop this takes the loop's full 20s
+  [ $((SECONDS - start)) -lt 15 ]
+  # the in-flight foreground child is dead the moment rollback returns and stays silent
+  [ -s "$HB_PIDFILE" ]
+  ! kill -0 "$(cat "$HB_PIDFILE")" 2>/dev/null
+  n=$(wc -l <"$HB"); sleep 1
+  [ "$(wc -l <"$HB")" -eq "$n" ]
+  # the lost flag was written before the child was signalled
+  [ "$(cat "$ORD")" = flag-first ]
 }
