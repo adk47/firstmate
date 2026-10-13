@@ -86,8 +86,8 @@ const PATTERNS: RegExp[] = [
   // banned outcome. The cost is limited to an order number the model chooses to prefix with
   // `#` (nothing in TOOLS.md or SOUL.md asks for that); the hash-free form stays readable (see
   // the order-reference negative test). Same threshold as scripts/intercom-ops-write.sh.
-  /https?:\/\/(?:www\.)?(?:github|gitlab)\.com\/\S+/gi,
-  /\bissues?\s+#?\d+/gi,
+  /(?:https?:\/\/)?(?:www\.)?(?:github|gitlab)\.com\/\S+/gi,
+  /\bissues?\s+#?\d{3,}/gi,
   /#\d{3,}\b/g,
   /\bplatform-data-processing\b/gi,
 ];

@@ -186,6 +186,31 @@ describe("sanitizeToolLeak", () => {
     expect(out.redactions.length).toBeGreaterThan(0);
   });
 
+  it("redacts a scheme-less GitHub path (no https://)", () => {
+    for (const input of [
+      "See github.com/Muso-AI/platform-data-processing/issues/2405",
+      "See github.com/Muso-AI/core-backend/issues/1234",
+      "See www.gitlab.com/muso/tracker/-/issues/77",
+    ]) {
+      const out = sanitizeToolLeak(input);
+      expect(out.body).not.toMatch(/github\.com|gitlab\.com/);
+      expect(out.body).not.toMatch(/\d{2,}/);
+      expect(out.redactions.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("redacts 'issue <n>' with no hash (only the issue pattern covers this)", () => {
+    const out = sanitizeToolLeak("Your verification is open on issue 2405.");
+    expect(out.body).not.toContain("2405");
+  });
+
+  it("leaves a small number after 'issue' alone (no tracker has 1-2 digit ids worth hiding)", () => {
+    const input = "I raised issue 3 in your catalog and these issues 2 weeks ago.";
+    const out = sanitizeToolLeak(input);
+    expect(out.body).toBe(input);
+    expect(out.redactions).toEqual([]);
+  });
+
   it("redacts 'issue #<n>'", () => {
     const out = sanitizeToolLeak("Your verification is open on issue #2405.");
     expect(out.body).not.toContain("2405");
