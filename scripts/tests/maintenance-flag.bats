@@ -189,9 +189,19 @@ armed_ttl_with_drain() {
   [ "$(jq -r .expires_epoch "$HYDRA_DEPLOY_WINDOW_FLAG")" -gt "$end_of_warmup" ]
 }
 
-@test "deploy window: ttl tracks an operator override of GATEWAY_DRAIN_DEADLINE_SECS (drain + 900 warm-up)" {
-  [ "$(armed_ttl_with_drain 600)" -eq 1500 ]
-  [ "$(armed_ttl_with_drain "")" -eq 1290 ]
+@test "deploy window (serial main+edge drains): edge restarts after TWO drains, window still covers its warm-up (MUS-8501)" {
+  # finish_gateway_restart awaits main then edge serially, each with its own
+  # GATEWAY_DRAIN_DEADLINE_SECS, so edge's hard restart lands at ~2x drain and its
+  # ~540s warm-up runs from there (bot Important @62ec223d).
+  drain=390 warmup=540
+  armed_ttl_with_drain "" >/dev/null
+  started=$(jq -r .started_epoch "$HYDRA_DEPLOY_WINDOW_FLAG")
+  [ "$(jq -r .expires_epoch "$HYDRA_DEPLOY_WINDOW_FLAG")" -gt $(( started + 2 * drain + warmup )) ]
+}
+
+@test "deploy window: ttl tracks an operator override of GATEWAY_DRAIN_DEADLINE_SECS (2 serial drains + 900 warm-up)" {
+  [ "$(armed_ttl_with_drain 600)" -eq 2100 ]
+  [ "$(armed_ttl_with_drain "")" -eq 1680 ]
 }
 
 @test "deploy.sh's Step 6 arm lines, executed, open the window with a future numeric expiry" {
@@ -217,8 +227,8 @@ armed_ttl_with_drain() {
     bash -c 'log() { echo "$*"; }; run_on_node8() { bash -c "$1"; }; '"$lines"
   exp=$(jq -r .expires_epoch "$HYDRA_DEPLOY_WINDOW_FLAG")
   [[ "$exp" =~ ^[0-9]+$ ]]
-  [ "$exp" -ge $(( before + 390 + 900 )) ]
-  [ "$exp" -le $(( $(date -u +%s) + 390 + 900 )) ]
+  [ "$exp" -ge $(( before + 2 * 390 + 900 )) ]
+  [ "$exp" -le $(( $(date -u +%s) + 2 * 390 + 900 )) ]
   # decision 1: deploy.sh never writes the maintenance flag
   [ ! -e "$HYDRA_MAINTENANCE_FLAG" ]
   run grep -nE 'hydra-maintenance|HYDRA_MAINTENANCE_FLAG' "$d"
