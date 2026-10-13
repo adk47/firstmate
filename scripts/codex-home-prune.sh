@@ -8,6 +8,7 @@
 #   sessions/**/rollout-*.jsonl   older than CODEX_SESSION_TTL_DAYS -> deleted
 #   logs_*.sqlite                 rows with ts < cutoff -> DELETEd, WAL truncated,
 #                                 VACUUM only if the filesystem is < 80% used
+#                                 and free bytes >= 2x that DB's size
 #
 # Default is --dry-run: nothing is changed, per-agent bytes that WOULD be freed
 # are printed. --apply does the work. Never run by hand against node-8 without
@@ -82,6 +83,7 @@ is_locked() { grep -qiE 'database (table )?is locked|busy'; }
 
 rc=0
 grand_total=0
+found="$(mktemp)"; trap 'rm -f "$found"' EXIT
 
 log "mode=$mode ttl_days=$CODEX_SESSION_TTL_DAYS fs_used_pct=$used_pct vacuum_allowed=$vacuum_ok"
 
@@ -92,13 +94,20 @@ for home in "${homes[@]}"; do
 
   # ── sessions: rollout-*.jsonl past the TTL ──
   s_files=0; s_bytes=0
+  # find runs to a file, not a process substitution, so its exit status is
+  # visible: a traversal error (EIO, EACCES) leaves old rollouts behind and
+  # must turn the unattended timer red instead of passing as a clean run.
+  if [ -d "$home/sessions" ]; then
+    fst=0; find "$home/sessions" -type f -name 'rollout-*.jsonl' -mmin +"$ttl_min" -print0 >"$found" 2>/dev/null || fst=$?
+    if [ "$fst" -ne 0 ]; then log "WARN $label sessions traversal failed (find exit $fst) -- some old rollouts may remain"; rc=1; fi
+  else : >"$found"; fi
   while IFS= read -r -d '' f; do
     sz="$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')" || sz=0
     if [ "$apply" -eq 1 ]; then
       rm -f -- "$f" || { log "WARN $label rm failed for a rollout file -- skipped"; rc=1; continue; }
     fi
     s_bytes=$(( s_bytes + ${sz:-0} )); s_files=$(( s_files + 1 ))
-  done < <(find "$home/sessions" -type f -name 'rollout-*.jsonl' -mmin +"$ttl_min" -print0 2>/dev/null)
+  done <"$found"
 
   # ── logs_*.sqlite: rows past the TTL ──
   l_rows=0; l_bytes=0
@@ -140,7 +149,13 @@ for home in "${homes[@]}"; do
     fi
 
     if [ "$rows" -gt 0 ]; then
-      if [ "$vacuum_ok" -eq 1 ]; then
+      # VACUUM rewrites the DB: it needs free bytes ~ this DB's size, so the
+      # percent gate alone is not enough (79% of 100 GiB leaves 21 GiB free).
+      db_bytes="$(wc -c < "$db" | tr -d '[:space:]')"
+      avail_bytes=$(( $(df -Pk "$db" | awk 'NR==2 { print $4 }') * 1024 )) 2>/dev/null || avail_bytes=0
+      if [ "$vacuum_ok" -eq 1 ] && [ "$avail_bytes" -lt $(( db_bytes * 2 )) ]; then
+        log "$label/$name VACUUM skipped: ${avail_bytes} bytes free < 2x DB size ${db_bytes} (freed pages stay reusable)"
+      elif [ "$vacuum_ok" -eq 1 ]; then
         if ! out="$(sq "$db" "VACUUM;" 2>&1)"; then
           log "WARN $label/$name VACUUM failed -- continuing"
           printf '%s' "$out" | is_locked || rc=1

@@ -36,12 +36,12 @@ _chp_db() { # <db> : 3 old + 2 new rows, big bodies so VACUUM visibly shrinks th
   sqlite3 "$db" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null
 }
 
-_chp_fake_df() { # <used-pct>
+_chp_fake_df() { # <used-pct> [blocks-kb, default 1000000]
   mkdir -p "$TEST_TMPDIR/bin"
   cat > "$TEST_TMPDIR/bin/df" <<DF
 #!/bin/sh
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
-echo "/dev/fake 1000 $1 $((1000 - $1)) $1% /"
+echo "/dev/fake ${2:-1000000} $(( ${2:-1000000} * $1 / 100 )) $(( ${2:-1000000} * (100 - $1) / 100 )) $1% /"
 DF
   chmod +x "$TEST_TMPDIR/bin/df"
 }
@@ -99,6 +99,16 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   run "$PRUNE" --apply
   [ "$status" -eq 0 ]
   [[ "$output" == *"VACUUM skipped"* ]]
+  [ "$(wc -c < "$CH/logs_2.sqlite")" -eq "$before" ]
+}
+
+@test "VACUUM is skipped when pct is under 80 but free bytes are below 2x the DB size" {
+  _chp_db "$CH/logs_2.sqlite"
+  _chp_fake_df 79 1000   # 1000 KB fs, 21% free = 210 KB, far under 2x the DB
+  before="$(wc -c < "$CH/logs_2.sqlite")"
+  run "$PRUNE" --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VACUUM skipped"*"2x DB size"* ]]
   [ "$(wc -c < "$CH/logs_2.sqlite")" -eq "$before" ]
 }
 
@@ -222,4 +232,15 @@ SQ
 
 @test "the installer pages on failure of the prune unit" {
   grep -qx '  hydra-codex-home-prune.service' "$HYDRA_REPO/scripts/install-aux-units.sh"
+}
+
+@test "a sessions traversal error is a failure, not a silent clean run" {
+  [ "$(id -u)" -ne 0 ] || skip "root ignores directory permissions"
+  _chp_rollout "$CH/sessions/locked/rollout-1.jsonl" 20
+  chmod 000 "$CH/sessions/locked"
+  run "$PRUNE" --apply
+  chmod 755 "$CH/sessions/locked"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"traversal failed"* ]]
+  [[ "$output" == *"done."* ]]
 }
