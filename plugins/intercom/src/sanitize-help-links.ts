@@ -26,20 +26,9 @@ const TEMPLATE_LINE = new RegExp(`^${HELP_CITATION_LEAD.replace(/[.*+?^${}()|[\]
 const NAMED_ENTITIES: Record<string, string> = {
   period: ".", sol: "/", colon: ":", num: "#", amp: "&", quest: "?", equals: "=", lowbar: "_", hyphen: "-",
 };
-const NAMED_FOR_CHAR: Record<string, string> = Object.fromEntries(Object.entries(NAMED_ENTITIES).map(([n, c]) => [c, n]));
 
-// Any help.muso.ai-looking token, whatever its path; every host char may be percent- or entity-encoded. Kept only if it decodes to an article URL.
-const hex = (c: string) => c.charCodeAt(0).toString(16).padStart(2, "0");
-const hostChar = (c: string) => {
-  const code = c.toLowerCase().charCodeAt(0);
-  const forms = [
-    c === "." ? "\\." : c, `%${hex(c.toLowerCase())}`, `%${hex(c.toUpperCase())}`,
-    `&#0*${code};?`, `&#x0*${code.toString(16)};?`,
-    ...(NAMED_FOR_CHAR[c] ? [`&${NAMED_FOR_CHAR[c]};?`] : []),
-  ];
-  return `(?:${forms.join("|")})`;
-};
-const HELP_TOKEN_G = new RegExp(`(?:https?:\\/\\/)?${[..."help.muso.ai"].map(hostChar).join("")}[^\\s<>()[\\]"']*`, "gi");
+// Any whitespace/delimiter-bounded token; dropped when its decoded form carries an article URL, whatever the encoding.
+const TOKEN_G = /[^\s<>()[\]"']+/g;
 
 /** Decode HTML character references (semicolon optional: we decide what to strip, so leniency is safe). An out-of-range code point is left alone, never throws. */
 function decodeEntities(s: string): string {
@@ -72,7 +61,7 @@ function stripUrlTokensOnly(body: string): string {
   const stripped = body
     .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, (m) => (hasArticleUrl(m) ? "" : m))
     .replace(/\[[^\]]*\]\([^)]*\)/g, (m) => (hasArticleUrl(m) ? "" : m))
-    .replace(HELP_TOKEN_G, (m) => (hasArticleUrl(m) ? "" : m));
+    .replace(TOKEN_G, (m) => (hasArticleUrl(m) ? "" : m));
   return stripped
     .split("\n")
     .map((l) => l.replace(LEAD_RE, "").replace(/[ \t]{2,}/g, " ").replace(/\s+$/, ""))

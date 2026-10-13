@@ -73,7 +73,8 @@ describe("sanitizeHelpLinks", () => {
   });
 
   it("fallback strips an entity-encoded bare token from a single prose line (detection-only fix leaks here)", () => {
-    for (const host of ["help&#46;muso.ai", "help&#x2e;muso.ai", "help&period;muso.ai", "&#104;elp.muso.ai"]) {
+    for (const host of ["help&#46;muso.ai", "help&#x2e;muso.ai", "help&period;muso.ai", "&#104;elp.muso.ai",
+      "&#72;elp.muso.ai", "help.&#x4D;uso.ai", "help.muso.&#65;i", "help&amp;#46;muso.ai", "help&#37;2Emuso.ai", "help%252emuso.ai"]) {
       const out = sanitizeHelpLinks(`Here you go: https://${host}/en/articles/9999999-invented`, MANIFEST);
       expect(out.redactions.length).toBe(1);
       expect(out.body).toContain("Here you go");
