@@ -1,0 +1,25 @@
+# Sender domains that mean "rights-holder / label / publisher / PRO / legal".
+# One per line, `#` comments. Read by scripts/intercom-rights-holder-watchdog.py;
+# override the file with RIGHTS_HOLDER_DOMAINS_FILE.
+#
+# Matching is on a boundary, never a substring: `ascap.com` matches
+# `@ascap.com` and `@mail.ascap.com`, NOT `@notascap.com`. A trailing `.*`
+# stands for any TLD / second-level suffix (`sonymusic.*` = sonymusic.com,
+# sonymusic.co.jp, sonymusic.de ...).
+sonymusic.*
+sme.co.jp
+umusic.*
+universalmusic.*
+warnermusic.*
+wmg.*
+bmg.*
+kobaltmusic.*
+concord.*
+downtown.*
+ascap.com
+bmi.com
+sesac.com
+prs.org
+jasrac.or.jp
+gema.de
+sacem.fr

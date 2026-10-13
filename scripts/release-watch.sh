@@ -33,7 +33,11 @@ set -euo pipefail
 #                            record before it is retired (default 7200)
 #   RELEASE_FINDING_REPAGE_SECONDS  how long a STANDING finding stays quiet
 #                            between pages; it is still logged every tick
-#                            (default 86400)
+#                            (default 0 = never re-page on elapsed time
+#                            alone: one page per new or changed finding)
+#   RELEASE_GH_RETRY_DELAYS  whitespace-separated backoff seconds between
+#                            the (up to 3) `gh run list` attempts at each
+#                            detector call site (default "2 5")
 #   RELEASE_HL_MODEL         model for the highlights call
 #                            (default: openai/gpt-5.6-luna)
 #   RELEASE_HL_KEY_FILE      OpenRouter key JSON
@@ -155,8 +159,10 @@ state_get() {
 # The cure is NOT silence. The WARN block is still written on every tick, so
 # the record stays complete and greppable. Only the PAGE is deduped, and it
 # re-fires when the finding is new, when its fingerprint changes (a
-# different sha or rollout state is a different finding), or once per
-# FINDING_REPAGE_SECONDS so a forgotten one resurfaces on its own.
+# different sha or rollout state is a different finding), or -- only when
+# FINDING_REPAGE_SECONDS is set above 0 -- once per that window. The default
+# 0 never re-pages on elapsed time alone; process_repo clears the stamp on a
+# clean tick, so a finding that recurs after a recovery is new again.
 standing_finding_should_page() {
   local key="$1" fp="$2" f="$FINDINGS_DIR/$1" prev_fp="" prev_at="" now elapsed
   now="$(date -u +%s)"
@@ -171,9 +177,13 @@ standing_finding_should_page() {
   # The lower bound matters: if the clock jumps backwards, a negative
   # elapsed would otherwise read as "inside the window" and silence the
   # finding until the clock caught up.
-  if [[ "$fp" == "$prev_fp" && "$prev_at" -gt 0 \
-        && "$elapsed" -ge 0 && "$elapsed" -lt "$FINDING_REPAGE_SECONDS" ]]; then
-    log "$key: standing finding unchanged, last paged ${elapsed}s ago — logged above, not re-paged (re-pages after ${FINDING_REPAGE_SECONDS}s or on any change)."
+  if [[ "$fp" == "$prev_fp" && "$prev_at" -gt 0 && "$elapsed" -ge 0 \
+        && ( "$FINDING_REPAGE_SECONDS" -eq 0 || "$elapsed" -lt "$FINDING_REPAGE_SECONDS" ) ]]; then
+    if [[ "$FINDING_REPAGE_SECONDS" -eq 0 ]]; then
+      log "$key: standing finding unchanged, last paged ${elapsed}s ago — logged above, not re-paged (re-pages only on a change or after a clean tick)."
+    else
+      log "$key: standing finding unchanged, last paged ${elapsed}s ago — logged above, not re-paged (re-pages after ${FINDING_REPAGE_SECONDS}s or on any change)."
+    fi
     return 1
   fi
   if [[ "$DRY_RUN" -eq 0 ]]; then
@@ -260,10 +270,10 @@ fi
 # standing_finding_should_page: the timer runs every 5 minutes and these
 # findings persist until a human re-seeds, so failing the unit on every tick
 # turns one real signal into ~288 pages a day.
-FINDING_REPAGE_SECONDS="${RELEASE_FINDING_REPAGE_SECONDS:-86400}"
-# Validated for the same reason as the grace window above: a non-numeric
-# value coerces toward zero, which here would re-page on every tick and
-# quietly undo the dedupe this knob exists to provide.
+FINDING_REPAGE_SECONDS="${RELEASE_FINDING_REPAGE_SECONDS:-0}"
+# 0 means never re-page on elapsed time alone (standing_finding_should_page
+# guards it explicitly). Validated for the same reason as the grace window
+# above: a non-numeric value must not slip through as a silent zero.
 if ! [[ "$FINDING_REPAGE_SECONDS" =~ ^[0-9]+$ ]]; then
   die "RELEASE_FINDING_REPAGE_SECONDS must be a non-negative integer number of seconds, got '$FINDING_REPAGE_SECONDS'."
 fi
@@ -289,6 +299,18 @@ unset _knob _var _env
 if [[ "$RUN_WINDOW_MAX" -lt "$RUN_WINDOW" ]]; then
   die "RELEASE_RUN_WINDOW_MAX ($RUN_WINDOW_MAX) must not be smaller than RELEASE_RUN_WINDOW ($RUN_WINDOW)."
 fi
+
+# Backoff between `gh run list` attempts (see gh_run_list_retry below). A
+# single transient GitHub blip (rate limit, network hiccup, a 5xx) must not
+# immediately fail the tick and page -- it gets up to 3 attempts total, so
+# this array holds the 2 delays BETWEEN them.
+GH_RETRY_DELAYS="${RELEASE_GH_RETRY_DELAYS:-2 5}"
+read -r -a GH_RETRY_DELAY_ARR <<< "$GH_RETRY_DELAYS"
+for _d in "${GH_RETRY_DELAY_ARR[@]}"; do
+  [[ "$_d" =~ ^[0-9]+$ ]] \
+    || die "RELEASE_GH_RETRY_DELAYS must be whitespace-separated non-negative integers, got '$GH_RETRY_DELAYS'."
+done
+unset _d
 
 RELEASE_TZ="${RELEASE_TZ:-Europe/Rome}"
 DAILY_HOUR="${RELEASE_DAILY_HOUR:-8}"
@@ -334,6 +356,121 @@ daily_gate_open() {
 # PROD release, or nothing at all. The marker is whatever uniquely names
 # that release on the deploy side; state compares against it verbatim.
 
+# gh_run_list_retry <key> <repo> <workflow> <branch> <limit>
+# Wraps `gh run list`, printing its JSON on stdout. stderr goes to a FILE,
+# never merged into the captured stdout -- gh writes routine notices to
+# stderr, and folding those in would corrupt a perfectly good listing. This
+# is the same pattern the --bootstrap path below already uses; the two
+# detector call sites had been left behind on `2>/dev/null`, which is why a
+# real gh failure (rate limit vs auth vs network) could never be told apart
+# in the log.
+#
+# A single gh hiccup must not fail the tick (and page) on its own, so this
+# retries up to 3 attempts total with backoff (GH_RETRY_DELAY_ARR) before
+# giving up. Only once every attempt has failed does it warn with the
+# caller-supplied key and the actual gh error text, then return non-zero --
+# a caller seeing that IS a real, page-worthy failure, not a transient one.
+gh_run_list_retry() {
+  local key="$1" repo="$2" workflow="$3" branch="$4" limit="$5"
+  local attempt out err detail delay
+  for attempt in 1 2 3; do
+    err="$(mktemp)"
+    if out="$(gh run list --repo "$repo" --workflow "$workflow" --branch "$branch" \
+                --limit "$limit" --json databaseId,headSha,conclusion,createdAt,status 2>"$err")"; then
+      rm -f "$err"
+      # A zero-exit response is not necessarily a usable one: gh can print a
+      # GitHub error body (rate limit, bad credentials) or a truncated page
+      # and still exit 0. Refuse it here, once, so every caller treats it as
+      # "could not measure" (the detectors map non-zero to rc 2 / rc 1)
+      # instead of reaching a bare `jq:` crash or reading it as "nothing
+      # shipped". Not retried: a malformed body is not a transient gh failure.
+      if ! printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        warn "$key: gh run list for $repo returned a response that was not a JSON array: $(printf '%s' "$out" | tr -d '\0' | head -c 300)"
+        return 1
+      fi
+      # An empty listing is shaped correctly but no more believable: $key is
+      # configured because it deploys, so a truly empty prod-branch listing
+      # is never a fact about production -- it is an unmeasured tick.
+      if [[ "$(printf '%s' "$out" | jq -r 'length')" -eq 0 ]]; then
+        warn "$key: gh run list for $repo came back EMPTY for the production branch, which cannot be right for a repo that deploys. Treating this as unmeasured, not as proof nothing shipped."
+        return 1
+      fi
+      printf '%s' "$out"
+      return 0
+    fi
+    # `head` MUST run first, reading straight from the file: with `set -o
+    # pipefail`, `tr -d '\0' < "$err" | head -c 300` lets a large stderr
+    # payload SIGPIPE `tr` the instant `head` has its 300 bytes, and that
+    # 141 -- not caught by `local` on this bare assignment -- trips `set -e`
+    # and kills the whole script before `rm`, the retry log, or attempts
+    # 2-3 ever run. `head -c 300 "$err"` reads a bounded slice directly off
+    # disk and always exits 0, so there is nothing left to SIGPIPE.
+    detail="$(head -c 300 "$err" | tr -d '\0')"
+    rm -f "$err"
+    if [[ "$attempt" -lt 3 ]]; then
+      delay="${GH_RETRY_DELAY_ARR[$((attempt - 1))]:-2}"
+      log "$key: gh run list failed (attempt $attempt/3): ${detail}. Retrying in ${delay}s..."
+      sleep "$delay"
+    else
+      warn "$key: gh run list failed after 3 attempts: ${detail}"
+    fi
+  done
+  return 1
+}
+
+# gh_listing_max_run_id <runs_json> -- the highest databaseId in a listing,
+# or empty for an empty listing. Shared by both detectors' stale-listing
+# guard below.
+gh_listing_max_run_id() {
+  printf '%s' "$1" | jq '[.[].databaseId] | max // empty'
+}
+
+# clear_finding_stamp <key>
+# A tick that produced no standing finding (rc 0 or 1) ends the incident, so
+# the next occurrence of the same fingerprint is a new page. Never called on
+# rc 2: transient failures say nothing about whether the finding is gone.
+clear_finding_stamp() {
+  [[ "$DRY_RUN" -eq 0 ]] || return 0
+  rm -f "$FINDINGS_DIR/$1"
+}
+
+# covered_by_later_success <key> <repo> <ctx> <sha> <run_id> <candidates>
+# rc 0 when <sha> has no resolved rollout of its own but is contained in a
+# LATER candidate whose rollout succeeded (GitHub compare says `ahead`, or
+# `identical` for the same sha REDEPLOYED by a later run). Ancestry comes
+# from the compare API because next_release_by_status is clone-free.
+#
+# Looks ahead newest-first and stops at the first `success`, so a healthy
+# tick costs no extra calls. If <sha> is an ancestor of an older success but
+# not of the newest one (a history rewrite) this does NOT cover it: that is
+# fail-closed on purpose and still pages. Any compare answer other than
+# ahead/identical, and any failed call, also returns 1.
+#
+# Skipping needs no roll-in: the announcement range is prior-tag..sha, so
+# announcing the later success already spans the skipped commits.
+covered_by_later_success() {
+  local key="$1" repo="$2" ctx="$3" sha="$4" run_id="$5" candidates="$6"
+  local later succ s cmp
+  later="$(printf '%s\n' "$candidates" | awk -F'\t' -v id="$run_id" '
+    seen && $1 != "" { l[++n] = $1 } $3 == id { seen = 1 }
+    END { for (i = n; i >= 1; i--) print l[i] }')"
+  succ=""
+  while IFS= read -r s; do
+    [[ -n "$s" ]] || continue
+    [[ "$(gh api "repos/$repo/commits/$s/status" \
+            --jq "[.statuses[]|select(.context==\"$ctx\")]|max_by(.created_at)|.state // empty" 2>/dev/null)" == "success" ]] \
+      && { succ="$s"; break; }
+  done <<< "$later"
+  [[ -n "$succ" ]] || return 1
+  cmp="$(gh api "repos/$repo/compare/$sha...$succ" --jq .status 2>/dev/null)" || return 1
+  case "$cmp" in
+    ahead|identical)
+      log "$key: ${sha:0:8} has no resolved '$ctx' rollout but is contained in ${succ:0:8}, which succeeded (compare: $cmp) — rolled into that release, skipping it."
+      return 0 ;;
+  esac
+  return 1
+}
+
 # next_release_by_status <key>
 # Prints "<sha>\t<run_at>" for the OLDEST commit that has not been announced
 # and that H-DevOps has recorded as a successful prod rollout.
@@ -371,6 +508,11 @@ next_release_by_status() {
   last_run_at="$(state_get "$key" last_run_at)"
   last_run_id="$(state_get "$key" last_run_id)"
   last_sha="$(state_get "$key" last_sha)"
+  # The RAW checkpoint from state, kept aside from $last_run_id below: that
+  # local gets overwritten with a DERIVED value for legacy state (see the
+  # migration a few lines down), but the stale-listing guard must compare
+  # against what we actually recorded, not a value reconstructed from it.
+  local state_last_run_id="$last_run_id"
 
   # `gh run list` returns the NEWEST runs, so the window is a tail, not a
   # complete history. If it does not reach back far enough to contain the
@@ -378,13 +520,26 @@ next_release_by_status() {
   # announced and checkpointed past -- silently burying every unannounced
   # release below the window. Start at one page, escalate once for a real
   # backlog, and fail loud rather than announce over a gap we cannot see.
-  local limit="$RUN_WINDOW" candidates reached
+  local limit="$RUN_WINDOW" candidates reached max_id
   while :; do
-    runs="$(gh run list --repo "$repo" --workflow "$sender" --branch "$branch" \
-              --limit "$limit" --json databaseId,headSha,conclusion,createdAt,status 2>/dev/null)" || {
-      warn "$key: gh run list failed"
-      return 2
-    }
+    runs="$(gh_run_list_retry "$key" "$repo" "$sender" "$branch" "$limit")" || return 2
+
+    # GitHub's workflow-runs index is occasionally served from a lagging
+    # replica: a complete-looking page of OLDER runs, which the reach guard
+    # below cannot see (it isn't truncated -- it's just wrong). But we
+    # always know something the listing doesn't: our own checkpoint. A
+    # listing whose newest run is older than what we already announced is
+    # not believable, so treat the tick as "nothing new" rather than either
+    # announcing a stale candidate or paging over a transient replica lag.
+    # Skipped when there is no checkpoint yet (fresh or legacy state) --
+    # there is nothing to compare against.
+    if [[ -n "$state_last_run_id" ]]; then
+      max_id="$(gh_listing_max_run_id "$runs")"
+      if [[ -n "$max_id" && "$max_id" -lt "$state_last_run_id" ]]; then
+        warn "$key: gh run list returned a listing whose newest run (id $max_id) is older than our last announced run (id $state_last_run_id) -- this is a stale/lagging replica, not a new production state. Treating this tick as nothing new."
+        return 1
+      fi
+    fi
 
     # Checkpoint on the run's databaseId, not its createdAt. createdAt is
     # second-resolution, so two dispatches created in the same second share it
@@ -509,6 +664,11 @@ next_release_by_status() {
         u_run="$(jq -rn --arg t "$run_at" '($t|fromdateiso8601)' 2>/dev/null || echo 0)"
         u_age=$(( u_now - u_run ))
         if [[ "$u_run" -gt 0 && "$u_age" -gt "$STATUS_GRACE_SECONDS" ]]; then
+          # A later `success` whose commit contains this sha has shipped it,
+          # so this one is covered rather than indeterminate.
+          if covered_by_later_success "$key" "$repo" "$ctx" "$sha" "$run_id" "$candidates"; then
+            continue
+          fi
           warn "$key: ${sha:0:8} has no resolved '$ctx' rollout after ${u_age}s (state='${st:-none}')."
           warn "    Whether it reached production is INDETERMINATE, so this will not guess:"
           warn "    skipping could drop a real release, announcing past it could strand one."
@@ -521,9 +681,9 @@ next_release_by_status() {
           # run 1002 redeploys A and goes indeterminate again inside the
           # window. Keyed on sha+state alone that is byte-identical to the
           # incident already stamped, so a genuinely new deployment incident
-          # would inherit the old silence and the unit would exit 0. Nothing
-          # clears the stamp on recovery, so the run id is what separates
-          # them. (QA finding on #971 — I had dismissed this case.)
+          # would inherit the old silence and the unit would exit 0. A clean
+          # tick now clears the stamp, but the run id stays as defence in
+          # depth for a recurrence inside one tick window. (QA finding on #971 — I had dismissed this case.)
           printf 'unresolved-rollout\t%s\t%s\t%s\n' "$sha" "$run_id" "${st:-none}"
           return 3
         fi
@@ -546,7 +706,7 @@ next_release_by_status() {
 # createdAt, so this can legitimately point backwards; the monotonicity
 # guard in process_repo is what rejects that.
 detect_hydra() {
-  local key="$1" repo sender runs branch
+  local key="$1" repo sender runs branch last_run_id max_id
   repo="$(release_repo_field "$key" repo)"     || return 1
   sender="$(release_repo_field "$key" sender)" || return 1
   branch="$(release_repo_field "$key" branch)" || return 1
@@ -556,11 +716,22 @@ detect_hydra() {
   # below the window. The status detector drains oldest-first against a
   # checkpoint, which is why a truncated window loses releases there and needs
   # the reach guard. Do not copy that guard here; do not shrink this to 1.
-  runs="$(gh run list --repo "$repo" --workflow "$sender" --branch "$branch" \
-            --limit 20 --json databaseId,headSha,conclusion,createdAt,status 2>/dev/null)" || {
-    warn "$key: gh run list failed"
-    return 1
-  }
+  runs="$(gh_run_list_retry "$key" "$repo" "$sender" "$branch" 20)" || return 1
+
+  # Same stale-replica guard as the status detector (see
+  # next_release_by_status): a listing whose newest run is older than the
+  # run we already announced is not believable. Print nothing and return 0
+  # rather than 1 -- this is "nothing new", the same as an ordinary tick
+  # with no fresh deploy, not a measurement failure that should page.
+  last_run_id="$(state_get "$key" last_run_id)"
+  if [[ -n "$last_run_id" ]]; then
+    max_id="$(gh_listing_max_run_id "$runs")"
+    if [[ -n "$max_id" && "$max_id" -lt "$last_run_id" ]]; then
+      warn "$key: gh run list returned a listing whose newest run (id $max_id) is older than our last announced run (id $last_run_id) -- this is a stale/lagging replica, not a new production state. Announcing nothing this tick."
+      return 0
+    fi
+  fi
+
   # Order by databaseId, not createdAt. createdAt is second-resolution, and
   # jq's sort is stable: two runs sharing a second keep their input order,
   # which GitHub returns newest-first, so `last` would pick the OLDER run and
@@ -747,9 +918,11 @@ process_repo() {
         0) sha="$(printf '%s' "$paired" | cut -f1)"
            run_at="$(printf '%s' "$paired" | cut -f2)"
            run_id="$(printf '%s' "$paired" | cut -f3)"
+           clear_finding_stamp "$key"
            # The rollout record is per-sha, so the sha IS the marker.
            marker="$sha" ;;
-        1) log "$key: no confirmed prod release found."; return 0 ;;
+        1) clear_finding_stamp "$key"
+           log "$key: no confirmed prod release found."; return 0 ;;
         3) # A standing finding: already fully logged by the detector. Fail
            # the unit only when it is new, changed, or due to re-page.
            standing_finding_should_page "$key" "$(printf '%s' "$paired" | head -1)" \
@@ -1044,7 +1217,10 @@ if [[ -n "$BOOTSTRAP_REF" ]]; then
                  --workflow "$(release_repo_field "$bkey" sender)" \
                  --branch "$(release_repo_field "$bkey" branch)" \
                  --limit 100 --json databaseId,headSha,conclusion,createdAt,status 2>"$brun_err")"; then
-    bdetail="$(tr -d '\0' < "$brun_err" | head -c 300)"
+    # head first, off disk -- see gh_run_list_retry's comment above for why
+    # `tr | head` can SIGPIPE under `set -o pipefail` and trip `set -e`
+    # before this bare assignment even reaches `die` below.
+    bdetail="$(head -c 300 "$brun_err" | tr -d '\0')"
     rm -f "$brun_err"
     die "$bkey: could not read the dispatch runs (gh failed): ${bdetail}. This says NOTHING about whether ${bsha:0:8} deployed -- retry rather than choosing another sha."
   fi

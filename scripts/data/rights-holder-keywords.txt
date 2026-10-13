@@ -1,0 +1,26 @@
+# Subject/body keywords for scripts/intercom-rights-holder-watchdog.py.
+# One per line, `#` comments. Override the file with RIGHTS_HOLDER_KEYWORDS_FILE.
+#
+# Plain line  = case-insensitive, word-anchored literal (no `urgent` inside
+#               `insurgent`). Japanese terms need no anchor.
+# `re:<rx>`   = case-insensitive regex, for loose words that must be anchored to
+#               a rights-holder context (a bare `legal` hits "my legal name").
+# `subject:`  = prefix; match the subject line only (combine: `subject:re:...`).
+#
+# This list is a TUNING knob, not a coverage target: every word added here pages
+# #cs_priority. Add one only when a missed rights-holder would have carried it.
+subject:urgent
+correction request
+takedown
+DMCA
+cease and desist
+infringement
+re:\blegal (notice|department|team|counsel|action|request|representative)s?\b
+lawyer
+attorney
+GDPR
+erasure
+within 24 hours
+至急
+訂正
+削除

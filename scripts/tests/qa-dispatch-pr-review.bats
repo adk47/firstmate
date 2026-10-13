@@ -41,7 +41,12 @@ case "$sub" in
     if [ -n "${STUB_LIST_GARBAGE:-}" ]; then echo "not json at all"; exit 0; fi
     if [ -f "${STUB_LIST_JSON:-}" ]; then cat "${STUB_LIST_JSON}"; else echo '{"jobs":[]}'; fi
     ;;
-  add)  echo "cron-add" >> "$STUB_CALLS"; echo '{"ok":true}' ;;
+  add)
+    echo "cron-add" >> "$STUB_CALLS"
+    # STUB_ADD_ERR/STUB_ADD_RC simulate a failing `cron add` (stderr text + exit code).
+    if [ -n "${STUB_ADD_ERR:-}" ]; then echo "$STUB_ADD_ERR" >&2; fi
+    if [ -n "${STUB_ADD_RC:-}" ]; then exit "$STUB_ADD_RC"; fi
+    echo '{"ok":true}' ;;
   rm)   echo "cron-rm"  >> "$STUB_CALLS" ;;
 esac
 STUB
@@ -329,4 +334,25 @@ JSON
   # the stale sweep) -- both must carry --all, or a disabled row is invisible
   # to whichever one dropped it (bare `cron list` HIDES disabled rows).
   [ "$(grep -cx -- '--all' "$STUB_ARGV")" -eq 2 ]
+}
+
+@test "gateway unreachable (handshake timeout) -> exit 75, openclaw's stderr still re-emitted" {
+  STUB_ADD_ERR="Error: Opening handshake has timed out" STUB_ADD_RC=1 \
+    QA_REVIEW_REQUESTER_UID="$NICK" run --separate-stderr "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 75 ]
+  [[ "$stderr" == *"Opening handshake has timed out"* ]]
+}
+
+@test "each pre-gateway transport signature maps to exit 75, case-insensitively" {
+  for sig in "connect ETIMEDOUT 1.2.3.4:18789" "ECONNREFUSED" "read ECONNRESET" "socket hang up" "TypeError: fetch failed" "opening handshake HAS TIMED OUT"; do
+    STUB_ADD_ERR="$sig" STUB_ADD_RC=1 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+    [ "$status" -eq 75 ]
+  done
+}
+
+@test "an unrelated cron add failure keeps openclaw's exit 1 (75 is not a blanket any-failure)" {
+  STUB_ADD_ERR="Error: invalid --at value" STUB_ADD_RC=1 \
+    QA_REVIEW_REQUESTER_UID="$NICK" run --separate-stderr "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 1 ]
+  [[ "$stderr" == *"invalid --at value"* ]]
 }

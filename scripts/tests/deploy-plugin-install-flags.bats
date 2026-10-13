@@ -52,7 +52,7 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 # deploy.sh; deploy.sh's surrounding globals are supplied here.
 
 setup_install_path() {
-  for fn in plugin_runtime_version plugin_install_version_flags install_external_plugin; do
+  for fn in plugin_runtime_version plugin_install_version_flags stop_gateway_for_plugin_pin install_external_plugin; do
     awk "/^${fn}\\(\\) \\{/,/^\\}\$/" "$DEPLOY_SH" >> "$TEST_TMPDIR/install.sh"
     grep -q "^${fn}() {" "$TEST_TMPDIR/install.sh" || { echo "extraction missing $fn" >&2; return 1; }
   done

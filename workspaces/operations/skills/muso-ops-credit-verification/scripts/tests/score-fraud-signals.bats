@@ -60,6 +60,9 @@ MING="11111111-1111-1111-1111-111111111111"
 
 setup() {
   setup_tmp_env
+  # Real apply is gated on the tracked registry (no env override); run a copy
+  # whose sibling registry approves it. See make_approval_tree in helpers.bash.
+  APPLY="$(make_approval_tree true)/lobster-mvp/apply-verdicts.sh"
   [[ -f "$SCORER" ]] || { echo "SCORER missing: $SCORER" >&2; return 1; }
   [[ -f "$RAW" ]] || { echo "RAW fixture missing: $RAW" >&2; return 1; }
   [[ -f "$SCORED" ]] || { echo "SCORED fixture missing: $SCORED" >&2; return 1; }

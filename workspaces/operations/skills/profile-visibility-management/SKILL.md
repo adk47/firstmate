@@ -19,7 +19,7 @@ Use this procedure when an authorized operations requester says to hide, remove 
 6. Verify the final state through independent views:
    - `GET /admin/profile?includeDeleted=true&limit=1&ids=:profileId` returns exactly that profile with a populated `deleted` object.
    - The same list call without `includeDeleted=true` returns no active item for the ID.
-   - The public profile API and public profile URL both return 404.
+   - The exact public profile API `GET https://api.muso.ai/api/w/v3/profile/:profileId` and canonical public URL `GET https://muso.ai/profile/:profileId` both return 404; use the `/w/v3/profile/` route rather than guessing `/api/v3/profile` or `/api/v3/profiles`.
    - If the API is 404 but the canonical URL still returns 200, inspect the response cache headers and load a cache-busted URL. A canonical `cf-cache-status: HIT` serving profile content while the cache-busted URL returns 404 proves a stale CDN object, not a failed soft-delete.
    - In that stale-CDN state, call `DELETE /admin/profile/:profileId/cache` once through the same dry-run, audit, and requester gates, then recheck the canonical URL. Treat `deletedKeys: []` plus a continued CDN HIT as unresolved: route the exact URL and cache evidence for a CDN purge, and do not report completion until the canonical URL no longer serves the profile.
 7. Append the write results and final verification to the audit log. Report completion only when the requested track cleanup (when applicable), live catalog tombstone, active-list exclusion, and canonical public-page checks all agree; successful empty write responses and a cache-busted 404 are not proof that the canonical page is hidden.
