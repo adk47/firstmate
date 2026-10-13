@@ -28,6 +28,28 @@ Track career achievements at streaming thresholds:
 ### Charts
 Track chart positions and movement over time.
 
+### Live updates (the live counter)
+A live estimate of the Lifetime total on the Summary card. Instruction for Caroline: describe it only in the product's own words, *"Live estimate – projected in real time from the latest verified totals, and refined as new data syncs."* Never explain how it is computed and never quote a refresh cadence.
+
+**Where it is (web):** Analytics → the **Summary** card → the **Display** button (top-right of the card, next to the period selector) → a **Live updates** switch and a **Number format** choice of **Full** or **Compact**.
+
+**It is already on.** Live updates defaults to on, per browser, and the choice is kept in that browser only. Turning it on is the fix only for someone who switched it off, or who is on a different browser or device from the one where they switched it off.
+
+**Why an eligible customer sees no movement, in this order (the first is by far the most common):**
+1. **The period is not Lifetime.** The live counter only runs on the Lifetime view. On any shorter period the Display button is still there and the switch still reads on, but the number is a fixed total and does not move. Fix: set the period selector to Lifetime.
+2. **Number format is Compact.** Compact shows a short figure such as 93.4B, which changes about once a day. Full shows every digit, so the movement is visible. Default is Full. Fix: pick Full.
+3. **Live updates was switched off in this browser.** Fix: switch it back on.
+4. **They are looking at a profile that is not on their workspace.** See who has it, below.
+
+**Who has it today.** Live updates are rolling out in stages and aren't on every account yet. Do not promise a date and do not say which stage is next. All of these must hold; if any fails, the Display button is simply not drawn, with no message and no empty state:
+- the customer's workspace is a founding-member workspace (today's rollout audience),
+- that workspace has an active Pro or Business subscription,
+- the profile they are viewing is on that workspace's roster with a seat (or they are a Muso admin).
+
+Caroline confirms these with existing reads, see `common-issues.md` section 7b.
+
+**In the apps (iOS and Android) there is no switch.** The live counter and the LIVE badge appear by themselves on the Analytics **Lifetime** view when the workspace has the feature and the subscription is active. In the app there is nothing to turn on. Never name an app version and never say "update your app".
+
 ### Discovery
 Find new and rising artists with data-driven insights. Available on Business plans. Filter songwriters by stream count, genre, and independence status.
 
