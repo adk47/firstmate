@@ -57,6 +57,12 @@
 #     failure-notification layer behind the 2026-06 silent
 #     b2b-reply-scanner breakage).
 #
+#   /etc/cron.d/agent-soul-delivery-guard
+#     Schedules scripts/check-agent-soul-delivery.sh --alert every 15
+#     minutes: pages #clio_devops when a live agent's newest codex session
+#     had no AGENT_SOUL / <available_skills> / cron-mode text in the
+#     developer message the model saw (MUS-6600 recurrence guard, MUS-6635).
+#
 #   /etc/cron.d/fallback-swallow-watchdog
 #     Schedules scripts/fallback-swallow-watchdog.sh every 5 minutes
 #     to alert #clio_devops when an agent turn ends in an empty
@@ -319,6 +325,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/lib/codex-oauth-refresh.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/cron-health-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/cron-health-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/check-agent-soul-delivery.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/check-agent-soul-delivery.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/merge-landing-watchdog.sh" ]] \
@@ -533,6 +541,34 @@ for u in intercom-data-complaint-watchdog.timer intercom-data-complaint-watchdog
 done
 systemctl daemon-reload
 log "  intercom-data-complaint-watchdog: retired (replaced by systemic-data-issue-report-daily cron)"
+
+# ─── Enable sysstat for system diagnostics ────────────────────────────────
+# On 2026-09-28 the main gateway froze for 18 minutes with zero per-second
+# CPU or swap records because /etc/default/sysstat had ENABLED="false".
+# This section idempotently enables sysstat and sets retention to 28 days
+# (covering a full week-on-week comparison for incident diagnosis).
+# On Ubuntu/Debian: ENABLED lives in /etc/default/sysstat, HISTORY in /etc/sysstat/sysstat
+ETC_DEFAULT_SYSSTAT="/etc/default/sysstat"
+ETC_SYSSTAT_SYSSTAT="/etc/sysstat/sysstat"
+
+if [[ -f "$ETC_DEFAULT_SYSSTAT" ]] && grep -q '^ENABLED="false"' "$ETC_DEFAULT_SYSSTAT"; then
+  sed -i.bak 's/^ENABLED="false"/ENABLED="true"/' "$ETC_DEFAULT_SYSSTAT"
+  rm -f "$ETC_DEFAULT_SYSSTAT.bak"
+fi
+
+if [[ -f "$ETC_SYSSTAT_SYSSTAT" ]]; then
+  if ! grep -q '^HISTORY=28$' "$ETC_SYSSTAT_SYSSTAT"; then
+    if grep -q '^HISTORY=' "$ETC_SYSSTAT_SYSSTAT"; then
+      sed -i.bak 's/^HISTORY=.*/HISTORY=28/' "$ETC_SYSSTAT_SYSSTAT"
+      rm -f "$ETC_SYSSTAT_SYSSTAT.bak"
+    else
+      echo "HISTORY=28" >> "$ETC_SYSSTAT_SYSSTAT"
+    fi
+    log "  sysstat: set retention to 28 days"
+  fi
+fi
+
+systemctl enable --now sysstat >/dev/null 2>&1 && log "  sysstat: enabled" || log "WARN: could not enable sysstat"
 
 # ─── Close customer-complete conversations (steady-state sync) ──
 # Silently closes Intercom conversations whose linked ClickUp tickets are all
@@ -1522,9 +1558,15 @@ for profile in main edge; do
   # must not be delayed by a 30-300s re-embed); leading `-` makes a
   # missing/failed trigger non-fatal to gateway start. main has no memory_search
   # consumer, so it gets no hook.
-  reindex_hook=""
+  # EDGE ONLY, same conditional: MemoryLow=6G protects edge (Caroline) from
+  # reclaim when main / Paperclip put the box under memory pressure (Aaron's go
+  # 9 Oct via Nick, MUS-5057 W3). Soft protection only; MemoryMax stays infinity.
+  # Both edge-only lines share one variable so main's drop-in stays
+  # byte-identical (a second bare ${...} line would add a blank line to main).
+  edge_only=""
   if [ "$profile" = "edge" ]; then
-    reindex_hook="ExecStartPost=-/usr/bin/systemctl start --no-block openclaw-edge-reindex.service"
+    edge_only="ExecStartPost=-/usr/bin/systemctl start --no-block openclaw-edge-reindex.service
+MemoryLow=6G"
   fi
   # MAIN ONLY, TEMPORARY (MUS-2652 / MUS-1295): openclaw's own startup trace +
   # diagnostics timeline, to name the 20-28 min post-start freeze (main thread
@@ -1555,7 +1597,7 @@ Environment=\"OPENCLAW_DIAGNOSTICS_TIMELINE_PATH=${DIAG_DIR}/main-timeline.jsonl
 Environment="NODE_OPTIONS=--max-old-space-size=8192 --diagnostic-dir=${HEAP_SNAPSHOT_DIR}"
 ${trace_env}
 ExecStartPre=$HYDRA_ROOT/scripts/openclaw-pre-start-heal.sh ${profile}
-${reindex_hook}
+${edge_only}
 [Unit]
 StartLimitBurst=5
 StartLimitIntervalSec=120
@@ -1754,6 +1796,19 @@ cat > /etc/cron.d/refund-credit-overlap-watchdog << REFUNDOVERLAP
 17 7 * * * root $HYDRA_ROOT/scripts/refund-credit-overlap-watchdog.sh >> /var/log/refund-credit-overlap-watchdog.log 2>&1
 REFUNDOVERLAP
 chmod 644 /etc/cron.d/refund-credit-overlap-watchdog
+
+# Agent SOUL-delivery guard (MUS-6635): MUS-6600 left every gpt-6 agent
+# soul-less for ~3h behind a green "answers PONG" check. Reads the model-visible
+# developer message of each live agent's newest session; pages #clio_devops on a
+# missing AGENT_SOUL / <available_skills> / cron-mode marker. 15 min: sessions
+# are the signal, not a deploy event (a deploy-time assertion would see no
+# post-restart session); identical failures re-page at most every 6h. Same
+# ownership rule: edit here + re-run install-aux-units.sh.
+cat > /etc/cron.d/agent-soul-delivery-guard << SOULGUARD
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+*/15 * * * * root $HYDRA_ROOT/scripts/check-agent-soul-delivery.sh --alert >> /var/log/agent-soul-delivery-guard.log 2>&1
+SOULGUARD
+chmod 644 /etc/cron.d/agent-soul-delivery-guard
 
 # Fallback-swallow watchdog: alerts #clio_devops when an agent turn ends in an
 # empty completion surfaced as an error — the residual of openclaw's
@@ -2669,7 +2724,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/hydra-tmp-reaper.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/hydra-tmp-reaper.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log /var/log/agent-soul-delivery-guard.log {
     weekly
     rotate 4
     compress

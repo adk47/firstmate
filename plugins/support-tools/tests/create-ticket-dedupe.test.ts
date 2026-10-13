@@ -112,6 +112,24 @@ describe("create_ticket dedupe", () => {
     expect(commentBody.comment_text).toContain("---ACTION-REQUEST-UPDATE---");
   });
 
+  // MUS-1516: the append (follow-up-comment) path is the OTHER call site that must
+  // record the filed id — a conversation whose second create_ticket call merely
+  // commented on the existing ticket still needs that id backed for the intercom
+  // reference-id guard (design call ① on MUS-1471 — "both must record the id").
+  it("records the existing ticket's id on the follow-up-comment (append) path too", async () => {
+    const IDS_KEY = "__musoSupportTicketIds";
+    delete (globalThis as unknown as Record<string, unknown>)[IDS_KEY];
+    const deps = makeDeps({ sessionKey: "agent:support:intercom:direct:conv_append1" });
+    const tool = createCreateTicketTool(deps);
+
+    await run(tool, CLAIM, "c1"); // creates task_1
+    const second = await run(tool, { ...CLAIM, summary: "customer added the track URL" }, "c2"); // appends
+    expect(second).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "task_1" });
+
+    const store = (globalThis as unknown as Record<string, unknown>)[IDS_KEY] as Map<string, { atMs: number; ids: string[] }> | undefined;
+    expect(store?.get("conv_append1")?.ids).toEqual(["task_1"]);
+  });
+
   it("still creates a new ticket for a different action type in the same session", async () => {
     const deps = makeDeps();
     const tool = createCreateTicketTool(deps);
@@ -243,6 +261,47 @@ describe("create_ticket dedupe", () => {
     });
     expect(result.submitted).toBe(true);
     expect(vi.mocked(get).mock.calls).toHaveLength(0);
+  });
+
+  describe("rights_holder cross-conversation dedupe", () => {
+    const openLookup = () => vi.fn(async () => ({
+      ok: true,
+      data: { tasks: [
+        { id: "open_rh", status: { status: "to do" }, date_created: String(Date.now() - 1000), custom_fields: [{ id: "ef", value: "u@example.com" }] },
+      ] } as any,
+    }));
+    const taskPosts = (deps: ReturnType<typeof makeDeps>) =>
+      vi.mocked(deps.http.post).mock.calls.filter(([u]) => TASK_URL_RE.test(u as string));
+    const commentPosts = (deps: ReturnType<typeof makeDeps>) =>
+      vi.mocked(deps.http.post).mock.calls.filter(([u]) => COMMENT_URL_RE.test(u as string));
+
+    it("opens its own record instead of appending to another matter's open ticket", async () => {
+      const deps = makeDeps({ http: makeHttp({ get: openLookup() }) });
+      const tool = createCreateTicketTool(deps);
+      const result = await run(tool, { ...CLAIM, details: { escalation_reason: "rights_holder" } });
+      expect(result.submitted).toBe(true);
+      expect(result.updated_existing).toBeUndefined();
+      expect(taskPosts(deps)).toHaveLength(1);
+      expect(commentPosts(deps)).toHaveLength(0);
+    });
+
+    it("still appends the same shape without rights_holder", async () => {
+      const deps = makeDeps({ http: makeHttp({ get: openLookup() }) });
+      const tool = createCreateTicketTool(deps);
+      const result = await run(tool, { ...CLAIM, details: { escalation_reason: "sla_breach_customer_followup" } });
+      expect(result).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "open_rh" });
+      expect(taskPosts(deps)).toHaveLength(0);
+    });
+
+    it("keeps the in-session repeat append for rights_holder", async () => {
+      const deps = makeDeps();
+      const tool = createCreateTicketTool(deps);
+      const details = { escalation_reason: "rights_holder" };
+      await run(tool, { ...CLAIM, details }, "c1");
+      const second = await run(tool, { ...CLAIM, details }, "c2");
+      expect(second).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "task_1" });
+      expect(taskPosts(deps)).toHaveLength(1);
+    });
   });
 
   it("meters the lookup GET in its own bucket (10/60min)", async () => {
