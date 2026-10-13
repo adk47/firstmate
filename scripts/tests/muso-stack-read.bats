@@ -67,10 +67,24 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   [ "$status" -eq 0 ]
 }
 
-@test "ch always runs clickhouse-client with readonly=1 and limits" {
+@test "ch always runs clickhouse-client with readonly=1 and fail-closed limits" {
   run "$S" ch "SELECT 1"
   [ "$status" -eq 0 ]
-  grep -q -- "clickhouse-client --readonly=1 --max_execution_time=60 --max_result_rows=100000" "$KUBECTL_CALLS"
+  grep -q -- "clickhouse-client --readonly=1 --max_execution_time=60 --max_result_rows=100000 --result_overflow_mode=throw" "$KUBECTL_CALLS"
+}
+
+@test "ch prints nothing when the query fails mid-stream (no partial answer)" {
+  cat > "$TEST_TMPDIR/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"get pods"*) echo -n "chi-product-analytics-product-0-0-0" ;;
+  *exec*) printf 'number\n1\n2\n'; echo "Code: 396. TOO_MANY_ROWS_OR_BYTES" >&2; exit 140 ;;
+esac
+STUB
+  run --separate-stderr "$S" ch "SELECT number FROM numbers(100001)"
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"nothing printed"* ]]
 }
 
 @test "pg refuses an unknown database" {
@@ -89,7 +103,7 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
   STUB_RECOVERY="f" run "$S" pg notify "SELECT 1"
   [ "$status" -eq 3 ]
   [[ "$output" == *"not a hot standby"* ]]
-  ! grep -q "default_transaction_read_only" "$KUBECTL_CALLS"
+  if grep -q "default_transaction_read_only" "$KUBECTL_CALLS"; then false; fi
 }
 
 @test "pg reads the replica with a read-only transaction" {
@@ -121,11 +135,12 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 @test "router credential goes over stdin, never argv" {
   MUSOAI_EVENT_ROUTER_QUERY="hydra:s3cr3t-value" run "$S" router "/api/2/usersearch?user=123"
   [ "$status" -eq 0 ]
-  ! grep -q "s3cr3t-value" "$CURL_CALLS"
-  ! grep -q "s3cr3t-value" "$KUBECTL_CALLS"
+  # Negative asserts must be terminal (bats does not fail on a bare negated grep).
+  if grep -q "s3cr3t-value" "$CURL_CALLS"; then false; fi
+  if grep -q "s3cr3t-value" "$KUBECTL_CALLS"; then false; fi
   grep -q 'user = "hydra:s3cr3t-value"' "$CURL_STDIN"
   grep -q "http://127.0.0.1:41234/api/2/usersearch?user=123" "$CURL_CALLS"
-  [[ "$output" != *"s3cr3t-value"* ]]
+  if [[ "$output" == *"s3cr3t-value"* ]]; then false; fi
 }
 
 @test "router falls back to the hydra-namespace Secret" {

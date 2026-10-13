@@ -13,7 +13,8 @@
 #       usersearch, useractivity. Basic auth with the hydra query credential.
 #   muso-stack-read.sh ch '<SELECT ...>'
 #       One read query on the product-analytics ClickHouse (product_events.*,
-#       messaging.email_events), session readonly=1, 60 s, 100k rows max.
+#       messaging.email_events), session readonly=1, 60 s. More than 100k result
+#       rows FAILS (exit 1, never a silently truncated answer): aggregate or LIMIT.
 #   muso-stack-read.sh pg <notify|preferences|listmonk> '<SELECT ...>'
 #       One read query on the messaging Postgres REPLICA (a hot standby cannot write),
 #       with default_transaction_read_only on top. CSV out.
@@ -104,14 +105,18 @@ ch_run() {  # $1 = SQL (already guarded or internal)
   local pod; pod="$(ch_pod)"
   timeout "$((TIMEOUT_S + 15))" "$KUBECTL" -n "$CH_NS" exec "$pod" -c clickhouse -- \
     clickhouse-client --readonly=1 --max_execution_time="$TIMEOUT_S" \
-      --max_result_rows=100000 --result_overflow_mode=break \
+      --max_result_rows=100000 --result_overflow_mode=throw \
       --format=TSVWithNames -q "$1" </dev/null
 }
 
 cmd_ch() {
   [ $# -eq 1 ] || usage
   guard_sql "$1"; need_kubectl
-  ch_run "$1" || die 1 "ClickHouse query failed"
+  # Buffer, print only on success: ClickHouse streams rows before an overflow or
+  # timeout exception, and a partial TSV must never look like an answer.
+  RESP="$(mktemp)"; trap cleanup EXIT
+  ch_run "$1" >"$RESP" || die 1 "ClickHouse query failed, nothing printed (a result over 100000 rows fails on purpose: aggregate or add LIMIT)"
+  cat "$RESP"
 }
 
 # ── messaging Postgres replica ───────────────────────────────────────────────
@@ -211,10 +216,10 @@ cmd_coverage() {
     || echo "analytics: UNREACHABLE"
   echo "## email history (ClickHouse messaging.email_events)"
   if [ "$(ch_run "SELECT count() FROM system.tables WHERE database = 'messaging' AND name = 'email_events'" 2>/dev/null | tail -1)" = "1" ]; then
-    ch_run "SELECT source, count() AS rows, toString(max(event_time)) AS max_event_time FROM messaging.email_events GROUP BY source ORDER BY source" \
+    ch_run "SELECT source, class, count() AS rows, toString(min(event_time)) AS min_event_time, toString(max(event_time)) AS max_event_time FROM messaging.email_events GROUP BY source, class ORDER BY source, class" \
       || echo "email_events: query failed"
   else
-    echo "email_events: - (table not created: the Klaviyo history import has not run; email reads stay on Klaviyo)"
+    echo "email_events: - (table not created: no history import and no live sends yet; every email read is Klaviyo's)"
   fi
   echo "## messaging Postgres (replica)"
   local db sql
