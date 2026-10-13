@@ -1695,6 +1695,34 @@ P
   [ "$status" -eq 8 ]
 }
 
+@test "guard6: a SKIPPED non-advisory check does not block — approves (wrapper tri-state)" {
+  # MUS-6075 (f): web-credits-next#1304 was withheld twice because `e2e-parity`
+  # was `skipped`. The wrapper has always accepted SUCCESS/NEUTRAL/SKIPPED
+  # (:595, :610); nothing pinned it, so a "fix" toward the old SKILL.md prose
+  # would have gone green. This test is that pin.
+  ROLLUP='{"statusCheckRollup":[
+    {"__typename":"CheckRun","name":"pr-validate","conclusion":"SUCCESS"},
+    {"__typename":"CheckRun","name":"e2e-parity","conclusion":"SKIPPED"}]}'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_ROLLUP_JSON="$ROLLUP" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard6: a NEUTRAL non-advisory check does not block either" {
+  ROLLUP='{"statusCheckRollup":[
+    {"__typename":"CheckRun","name":"pr-validate","conclusion":"SUCCESS"},
+    {"__typename":"CheckRun","name":"e2e-parity","conclusion":"NEUTRAL"}]}'
+  test_policy '{"identity":{"bot_logins":["muso-qa-bot"],"app_repos":[]},"author_deny":[],
+    "require_human_codeowner_repos":[],"sensitive_paths":{"*":["nope/"]}}'
+  STUB_ME="muso-qa-bot" STUB_AUTHOR="nsollazzo" STUB_ROLLUP_JSON="$ROLLUP" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
 @test "guard6: an all-advisory rollup still refuses, and SAYS so accurately" {
   # Both this and the empty-rollup case refuse — neither proves CI gated the PR —
   # but they must not share a message. The old code answered "did CI run" from

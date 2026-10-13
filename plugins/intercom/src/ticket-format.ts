@@ -54,7 +54,7 @@ const ACTION_LABELS: Record<string, string> = {
 // are NOT tagged — tags are a filtering surface, not a free-form channel.
 const ESCALATION_REASONS = new Set([
   "customer_requested_human", "frustration_detected", "loop_detected",
-  "intercom_email_mismatch",
+  "intercom_email_mismatch", "rights_holder",
   "sla_breach_customer_followup", "on_behalf_claim_manual_review",
 ]);
 

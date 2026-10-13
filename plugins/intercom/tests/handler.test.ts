@@ -1348,6 +1348,33 @@ describe("handler — Jev pre-turn router", () => {
   // Finding 3 (2026-09-22 PR #999 QA): state.jev persists across turns and
   // renderJevBlock reads it at render time (not decide time) — a stale
   // PRIOR turn's route must not bleed into a turn whose Jev call failed.
+  it("a failure row hashes the REAL state/questions (not sha256 of {}), carries the reason token, and honours storeState:false (MUS-3191)", async () => {
+    const EMPTY_OBJ_SHA = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
+    const rows: Array<Record<string, unknown>> = [];
+    for (const [questions, storeState] of [[{ q1: 1 }, true], [{ q2: 2 }, false]] as const) {
+      appendFileMock.mockClear();
+      const runJev = vi.fn(async () => ({
+        ok: false as const, reason: "http_502", httpStatus: 502, latencyMs: 5,
+        state: { some: "state" }, questions, model: "jev-x",
+      }));
+      await handleWebhookEvent(
+        makeUserPayload("hi"), makeState(), "bot", undefined,
+        { jev: { enabled: true, bands: JEV_BANDS, shadow: { storeState } }, runJev },
+      );
+      await vi.waitFor(() => expect(appendFileMock).toHaveBeenCalledTimes(1));
+      rows.push(JSON.parse((appendFileMock.mock.calls[0][1] as string).trim()));
+    }
+    expect(rows[0].state_sha256).not.toBe(EMPTY_OBJ_SHA);
+    expect(rows[0].questions_sha256).not.toBe(EMPTY_OBJ_SHA);
+    expect(rows[0].questions_sha256).not.toBe(rows[1].questions_sha256);
+    expect(rows[0].reason).toBe("http_502");
+    expect(rows[0].rc).toBe(2);
+    expect(rows[0].model).toBe("jev-x");
+    expect(rows[0].state).toEqual({ some: "state" });
+    expect(rows[1].state).toBeNull();
+    expect(rows[1].state_sha256).toBe(rows[0].state_sha256);
+  });
+
   it("clears a stale routing block on Jev failure while preserving cross-turn bad-faith memory", async () => {
     const state = makeState();
     state.jev = {
@@ -1587,6 +1614,34 @@ describe("handler — Jev pre-turn router", () => {
     await flushMicrotasks();
     expect(warnSpy).toHaveBeenCalled();
     warnSpy.mockRestore();
+  });
+
+  it("a shadow-version failure row records reason + real hashes and honours storeState:false (MUS-3191 QA)", async () => {
+    const EMPTY_OBJ_SHA = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
+    appendFileMock.mockClear();
+    const runJev = vi.fn(async () => jevResult({
+      off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
+      resolution_path: { type: "choice", choice: "caroline_tool", probabilities: { caroline_tool: 0.85 } },
+    }));
+    const runJevShadow = vi.fn(async () => ({
+      ok: false as const, reason: "http_502", httpStatus: 502, latencyMs: 5,
+      state: { message: "SECRET-CUSTOMER-TEXT" }, questions: { q: 1 }, model: "jev-shadow",
+    }));
+    await handleWebhookEvent(
+      makeUserPayload("where's my credit"), makeState(), "bot", undefined,
+      {
+        jev: { enabled: true, bands: JEV_BANDS, questionsVersion: "v1", shadowVersions: ["v2"], shadow: { storeState: false } },
+        runJev,
+        runJevShadow,
+      },
+    );
+    await vi.waitFor(() => expect(appendFileMock.mock.calls.length).toBeGreaterThanOrEqual(1));
+    const rows = appendFileMock.mock.calls.map((c) => JSON.parse((c[1] as string).trim()));
+    const row = rows.find((r) => r.questions_version === "v2")!;
+    expect(row.state).toBeNull();
+    expect(row.state_sha256).not.toBe(EMPTY_OBJ_SHA);
+    expect(row.reason).toBe("http_502");
+    expect(row.model).toBe("jev-shadow");
   });
 
   it("dual-call isolation: a shadow call resolving with a malformed/garbage outcome never throws out of handleWebhookEvent", async () => {
