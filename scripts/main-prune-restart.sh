@@ -11,6 +11,18 @@
 # stopped; a failed stop skips the prune. Exit non-zero (so OnFailure= pages) if the prune, stop or start
 # failed or health never stabilised; main is started first, so paging never costs availability.
 # Data rollback: $BACKUP_ROOT/<ts>/ (stop main, copy the .sqlite files back, start).
+#   Backups mirror agents/<id>/agent/openclaw-agent.sqlite and state/openclaw.sqlite under $SD; the 2 NEWEST are kept,
+#   rotated AFTER the new one is written, so peak disk is 3 snapshots (~7 GB each on 5 Oct). Restore, whole sequence
+#   (cp while main runs corrupts the store):
+#     B=/var/backups/hydra-main-sessions/<UTC-ts>; SD=/root/.openclaw-main
+#     /opt/hydra/scripts/hydra-maintenance.sh start "restore main sessions" --ttl 60m --operator <you>
+#     systemctl stop openclaw-gateway-main
+#     (cd "$B" && find . -name '*.sqlite' | while read -r f; do rm -f "$SD/$f-wal" "$SD/$f-shm"; cp -p "$f" "$SD/$f"; done)
+#     systemctl start openclaw-gateway-main
+#     until [ "$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:18789/health)" = 200 ]; do sleep 5; done
+#     /opt/hydra/scripts/hydra-maintenance.sh stop
+# Disarm without a revert: `systemctl disable --now hydra-main-prune-restart.timer`. The NEXT DEPLOY RE-ARMS IT
+# (install-aux-units.sh enables + starts it and fails closed), so the only durable rollback is reverting the PR.
 # One run at a time: flock on $LOCK_FILE, the SAME lock deploy.sh/rollback.sh take (lib/main-prune-lock.sh).
 # Held from before the pgrep check through `systemctl start`, then released; a second run skips.
 # Usage: main-prune-restart.sh [reason]; HYDRA_MAIN_MIN_UPTIME_H=N skips when main is younger (timer sets 4).
