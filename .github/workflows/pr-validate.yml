@@ -1267,6 +1267,11 @@ jobs:
         # pipeline's old approve rule was inverted and approved validator-declined
         # credits; this suite is what proves a real run cannot happen by default.
         # Hermetic (curl stubbed, tmpdir state, tmpdir write lock).
+        #
+        # ALSO score-backend-signals.bats: the batch's approve rule. Until
+        # 2026-10-11 it was inverted (approve_owning_track == 100 means the
+        # shortcut did NOT fire) and approved validator-declined credits. This
+        # suite pins the replacement: only validator-approved rows approve.
         run: |
           set -euo pipefail
           # The self-hosted runner may carry production bot credentials. Bats
@@ -1305,6 +1310,7 @@ jobs:
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/apply-verdicts-attribution.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/results-per-row-attribution.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/dispatch-cv-batch.bats \
+                       workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-backend-signals.bats \
                        workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
                        workspaces/support/skills/order-fulfillment/scripts/tests \
                        "${sa_dirs[@]}" \
@@ -1605,6 +1611,9 @@ jobs:
           set -euo pipefail
           python3 scripts/tests/test_uvn_under30_policy.py
           python3 scripts/tests/test_uvn_under30_cron.py
+          # AI credit reviewer / approval auditor (scripts/credit_review). Stdlib
+          # only; the admin API and the model are faked, so no network.
+          python3 scripts/tests/test_credit_review.py
 
   plugin-tests:
     name: Plugin tests (vitest)
