@@ -939,7 +939,7 @@ from importlib import util
 spec = util.spec_from_file_location('d', os.environ['DIGEST'])
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 mod.fetch_open_convs = lambda token, limit=0: [
-    {"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 200, "url": ""}]
+    {"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 1781784000 - 3600, "url": ""}]
 captured = []
 mod.shadow_judge = lambda surface, item_id, state, questions, actual=None: captured.append(
     (surface, item_id, actual)) or None
@@ -960,7 +960,7 @@ spec = util.spec_from_file_location('d', os.environ['DIGEST'])
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 os.environ["CS_DIGEST_JEV_SAMPLE_SIZE"] = "3"
 mod.fetch_open_convs = lambda token, limit=0: [
-    {"id": f"C{i}", "email": "a@b.com", "lar": 0, "lcr": 200, "url": ""} for i in range(40)]
+    {"id": f"C{i}", "email": "a@b.com", "lar": 0, "lcr": 1781784000 - 3600, "url": ""} for i in range(40)]
 captured = []
 mod.shadow_judge = lambda surface, item_id, state, questions, actual=None: captured.append(item_id) or None
 os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
@@ -980,7 +980,7 @@ from importlib import util
 spec = util.spec_from_file_location('d', os.environ['DIGEST'])
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 mod.fetch_open_convs = lambda token, limit=0: [
-    {"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 200, "url": ""}]
+    {"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 1781784000 - 3600, "url": ""}]
 mod.shadow_judge = lambda *a, **k: None
 os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
 sys.argv = ["d"]
@@ -1000,7 +1000,7 @@ from importlib import util
 spec = util.spec_from_file_location('d', os.environ['DIGEST'])
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 mod.fetch_open_convs = lambda token, limit=0: [
-    {"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 200, "url": ""}]
+    {"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 1781784000 - 3600, "url": ""}]
 mod.shadow_judge = lambda *a, **k: None
 os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
 sys.argv = ["d"]
@@ -1030,7 +1030,7 @@ from importlib import util
 spec = util.spec_from_file_location('d', os.environ['DIGEST'])
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 mod.fetch_open_convs = lambda token, limit=0: [
-    {"id": f"C{i}", "email": f"u{i}@x.com", "lar": 0, "lcr": 100 + i, "url": ""}
+    {"id": f"C{i}", "email": f"u{i}@x.com", "lar": 0, "lcr": 1781784000 - 3600 - i, "url": ""}
     for i in range(10)]
 os.environ["CS_DIGEST_JEV_SAMPLE_SIZE"] = "1"
 os.environ["MUSOAI_INTERCOM_TOKEN"] = "t"
@@ -1079,7 +1079,7 @@ from importlib import util
 spec = util.spec_from_file_location('d', os.environ['DIGEST'])
 mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
 mod.fetch_open_convs = lambda token, limit=0: [
-    {"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 200, "url": ""}]
+    {"id": "C1", "email": "a@b.com", "lar": 0, "lcr": 1781784000 - 3600, "url": ""}]
 def boom(conv_id, token):
     raise RuntimeError("network boom")
 mod.get_conversation_for_shadow = boom

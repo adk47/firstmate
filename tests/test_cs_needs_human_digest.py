@@ -1157,7 +1157,10 @@ class TestMentionComputedOnceAndNoHeaderDuplication(unittest.TestCase):
 
 class TestMainDeltaFlow(unittest.TestCase):
     def _env(self, **extra):
-        base = {"MUSOAI_INTERCOM_TOKEN": "t", "DIGEST_SKIP_HOST_GUARD": "1"}
+        # DIGEST_NOW pinned near the fixtures' tiny lcr so they sit inside the
+        # 30d actionable window (real time would make them 20000d-old backlog).
+        base = {"MUSOAI_INTERCOM_TOKEN": "t", "DIGEST_SKIP_HOST_GUARD": "1",
+                "DIGEST_NOW": "10000"}
         base.update(extra)
         return base
 
@@ -1520,3 +1523,113 @@ class TestBuildNextStateAgingRefresh(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestActionableWindowWiring(unittest.TestCase):
+    """MUS-8853b: the 30d window reaches both renderers, --delta and the
+    persisted state through main() — a 194d-old thread is not listed, and is
+    rolled into exactly one backlog line carrying the real count."""
+    NOW = 1_800_000_000
+    DAY = 86400
+    OLD = conv(cid="OLD", lar=0, lcr=NOW - 194 * DAY)
+    NEW = conv(cid="NEW", lar=0, lcr=NOW - 2 * 3600)
+
+    def _env(self, **extra):
+        base = {"MUSOAI_INTERCOM_TOKEN": "t", "DIGEST_SKIP_HOST_GUARD": "1",
+                "DIGEST_NOW": str(self.NOW)}
+        base.update(extra)
+        return base
+
+    def _run(self, convs, argv, state=None, env=None, post=True):
+        import sys as _sys
+        import io
+        from contextlib import redirect_stdout
+        out, saved, blocks = io.StringIO(), {}, {}
+
+        def fake_post(b, text, *a):
+            blocks["b"] = b
+            return post
+
+        def fake_save(path, ns):
+            saved["state"] = ns
+
+        with mock.patch.object(d, "fetch_open_convs", return_value=convs), \
+             mock.patch.object(d, "load_delta_state", return_value=state or {}), \
+             mock.patch.object(d, "post_slack_digest", fake_post), \
+             mock.patch.object(d, "save_delta_state", fake_save), \
+             mock.patch.dict("os.environ", self._env(**(env or {}))), \
+             mock.patch.object(_sys, "argv", ["d"] + argv), \
+             redirect_stdout(out):
+            rc = d.main()
+        return rc, out.getvalue(), blocks.get("b"), saved.get("state")
+
+    def _block_text(self, blocks):
+        return "\n".join(b["text"]["text"] for b in blocks if b["type"] == "section")
+
+    def test_full_digest_lists_only_recent_and_rolls_up_backlog_once(self):
+        rc, out, blocks, _ = self._run([self.OLD, self.NEW], ["--post"])
+        self.assertEqual(rc, 0)
+        line = ("backlog: 1 open conversations with no customer-side activity "
+                "in the last 30d — being drained separately (not listed here)")
+        btxt = self._block_text(blocks)
+        for text in (out, btxt.replace("*", "")):
+            self.assertNotIn("conversations/OLD", text)
+            self.assertNotIn("194d", text)
+            self.assertIn(d.intercom_link("NEW"), text)
+            self.assertIn("customer-side activity is latest: 1", text)
+            self.assertEqual(text.count(line), 1)
+
+    def test_backlog_line_absent_when_everything_in_window(self):
+        rc, out, blocks, _ = self._run([self.NEW], ["--post"])
+        self.assertNotIn("backlog:", out)
+        self.assertNotIn("backlog:", self._block_text(blocks))
+
+    def test_counts_line_reports_aging_total(self):
+        old_ish = conv(cid="AGE", lar=0, lcr=self.NOW - 3 * self.DAY)
+        _, out, blocks, _ = self._run([old_ish, self.NEW], [])
+        self.assertIn("customer-side activity is latest: 2", out)
+        self.assertIn("older than 20h since customer-side activity: 1", out)
+        _, _, blocks, _ = self._run([old_ish, self.NEW], ["--post"])
+        self.assertIn("older than 20h since customer-side activity: 1",
+                      self._block_text(blocks).replace("*", ""))
+
+    def test_env_override_changes_which_rows_render(self):
+        week = conv(cid="WEEK", lar=0, lcr=self.NOW - 10 * self.DAY)
+        _, out, _, _ = self._run([week, self.NEW], [])
+        self.assertIn(d.intercom_link("WEEK"), out)
+        self.assertNotIn("backlog:", out)
+        _, out, _, _ = self._run([week, self.NEW], [],
+                                 env={"CS_DIGEST_ACTIONABLE_DAYS": "7"})
+        self.assertNotIn(d.intercom_link("WEEK"), out)
+        self.assertIn("backlog: 1 open conversations with no customer-side "
+                      "activity in the last 7d", out)
+
+    def test_delta_excludes_backlog_and_rolls_it_up(self):
+        _, out, blocks, state = self._run([self.OLD, self.NEW], ["--delta", "--post"])
+        self.assertNotIn(d.intercom_link("OLD"), out)
+        self.assertIn("new to this digest: 1", out)
+        self.assertEqual(out.count("backlog: 1 open conversations"), 1)
+        self.assertEqual(self._block_text(blocks).count("backlog: 1 open"), 1)
+        self.assertEqual(set(state), {"NEW"})
+
+    def test_delta_backlog_only_run_is_still_no_delta(self):
+        rc, out, blocks, _ = self._run([self.OLD], ["--delta", "--post"])
+        self.assertEqual(rc, 0)
+        self.assertIn("NO_DELTA", out)
+        self.assertIsNone(blocks)
+
+    def test_delta_prunes_backlog_entry_and_reentry_surfaces_as_new(self):
+        # D6: waiting_since only moves forward on a customer reply, so a thread
+        # re-entering the window has genuinely new activity -> new, not hidden.
+        state = {"OLD": {"first_surfaced": 1, "aged_flagged": True}}
+        _, _, _, saved = self._run([self.OLD], ["--delta", "--post"], state=state)
+        self.assertNotIn("OLD", saved)
+        replied = conv(cid="OLD", lar=0, lcr=self.NOW - 3600)
+        _, out, _, saved2 = self._run([replied], ["--delta", "--post"], state=saved)
+        self.assertIn("new to this digest: 1", out)
+        self.assertIn(d.intercom_link("OLD"), out)
+        self.assertIn("OLD", saved2)
+
+    def test_dry_run_delta_with_backlog_writes_nothing(self):
+        _, _, _, saved = self._run([self.OLD, self.NEW], ["--delta"])
+        self.assertIsNone(saved)
