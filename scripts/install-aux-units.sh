@@ -534,6 +534,34 @@ done
 systemctl daemon-reload
 log "  intercom-data-complaint-watchdog: retired (replaced by systemic-data-issue-report-daily cron)"
 
+# ─── Enable sysstat for system diagnostics ────────────────────────────────
+# On 2026-09-28 the main gateway froze for 18 minutes with zero per-second
+# CPU or swap records because /etc/default/sysstat had ENABLED="false".
+# This section idempotently enables sysstat and sets retention to 28 days
+# (covering a full week-on-week comparison for incident diagnosis).
+# On Ubuntu/Debian: ENABLED lives in /etc/default/sysstat, HISTORY in /etc/sysstat/sysstat
+ETC_DEFAULT_SYSSTAT="/etc/default/sysstat"
+ETC_SYSSTAT_SYSSTAT="/etc/sysstat/sysstat"
+
+if [[ -f "$ETC_DEFAULT_SYSSTAT" ]] && grep -q '^ENABLED="false"' "$ETC_DEFAULT_SYSSTAT"; then
+  sed -i.bak 's/^ENABLED="false"/ENABLED="true"/' "$ETC_DEFAULT_SYSSTAT"
+  rm -f "$ETC_DEFAULT_SYSSTAT.bak"
+fi
+
+if [[ -f "$ETC_SYSSTAT_SYSSTAT" ]]; then
+  if ! grep -q '^HISTORY=28$' "$ETC_SYSSTAT_SYSSTAT"; then
+    if grep -q '^HISTORY=' "$ETC_SYSSTAT_SYSSTAT"; then
+      sed -i.bak 's/^HISTORY=.*/HISTORY=28/' "$ETC_SYSSTAT_SYSSTAT"
+      rm -f "$ETC_SYSSTAT_SYSSTAT.bak"
+    else
+      echo "HISTORY=28" >> "$ETC_SYSSTAT_SYSSTAT"
+    fi
+    log "  sysstat: set retention to 28 days"
+  fi
+fi
+
+systemctl enable --now sysstat >/dev/null 2>&1 && log "  sysstat: enabled" || log "WARN: could not enable sysstat"
+
 # ─── Close customer-complete conversations (steady-state sync) ──
 # Silently closes Intercom conversations whose linked ClickUp tickets are all
 # customer-complete AND where we replied last — keeps "request done" and "chat
