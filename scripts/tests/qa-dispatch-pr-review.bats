@@ -481,7 +481,7 @@ gh_runs() {  # gh_runs <databaseId> <pr> <sha> [status] [repo] [age-seconds]
 }
 
 @test "dedup: a leading-zero window (08) is read as decimal, not octal -> still refuses an in-flight duplicate" {
-  gh_runs 100 123 "$GOOD_SHA" queued Muso-AI/hydra 3600
+  gh_runs 100 123 "$GOOD_SHA" queued Muso-AI/hydra 2
   QA_DEDUP_WINDOW_SECONDS=08 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [[ "$output" != *"value too great for base"* ]]
   [[ "$output" != *"DEDUP-SKIPPED"* ]]
