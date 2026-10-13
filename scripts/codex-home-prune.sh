@@ -73,7 +73,7 @@ if [ "${#homes[@]}" -eq 0 ]; then
   exit 0
 fi
 
-used_pct="$(df -P "${homes[0]}" | awk 'NR==2 { gsub("%", "", $5); print $5 }')"
+used_pct="$(df -P "${homes[0]}" | awk 'NR==2 { gsub("%", "", $5); print $5 }')" || used_pct=''
 case "$used_pct" in ''|*[!0-9]*) used_pct=100 ;; esac # unreadable -> treat as full, never VACUUM
 if [ "$used_pct" -lt "$CODEX_VACUUM_MAX_USED_PCT" ]; then vacuum_ok=1; else vacuum_ok=0; fi
 
@@ -152,7 +152,7 @@ for home in "${homes[@]}"; do
       # VACUUM rewrites the DB: it needs free bytes ~ this DB's size, so the
       # percent gate alone is not enough (79% of 100 GiB leaves 21 GiB free).
       db_bytes="$(wc -c < "$db" | tr -d '[:space:]')"
-      avail_kb="$(df -Pk "$db" | awk 'NR==2 { print $4 }')"
+      avail_kb="$(df -Pk "$db" 2>/dev/null | awk 'NR==2 { print $4 }')" || avail_kb=''
       case "$avail_kb" in ''|*[!0-9]*) avail_bytes=0 ;; *) avail_bytes=$(( avail_kb * 1024 )) ;; esac
       if [ "$vacuum_ok" -eq 1 ] && [ "$avail_bytes" -lt $(( db_bytes * 2 )) ]; then
         log "$label/$name VACUUM skipped: ${avail_bytes} bytes free < 2x DB size ${db_bytes} (freed pages stay reusable)"

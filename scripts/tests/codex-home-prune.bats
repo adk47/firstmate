@@ -133,6 +133,30 @@ DF
   [ "$(wc -c < "$CH/logs_2.sqlite")" -eq "$before" ]
 }
 
+@test "df exiting non-zero for the free-bytes probe skips VACUUM but still visits every home" {
+  CH2="$TEST_TMPDIR/.openclaw-main/agents/zz/agent/codex-home"
+  mkdir -p "$CH2/sessions"
+  _chp_db "$CH/logs_2.sqlite"
+  _chp_db "$CH2/logs_2.sqlite"
+  cat > "$TEST_TMPDIR/bin/df" <<'DF'
+#!/bin/sh
+case "$*" in
+  *-Pk*) exit 1 ;;
+esac
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/fake 100 50 50 50% /"
+DF
+  chmod +x "$TEST_TMPDIR/bin/df"
+  before="$(wc -c < "$CH/logs_2.sqlite")"
+  run "$PRUNE" --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VACUUM skipped"* ]]
+  [[ "$output" == *"/qa sessions_files="* ]]
+  [[ "$output" == *"/zz sessions_files="* ]]
+  [[ "$output" == *"done."* ]]
+  [ "$(wc -c < "$CH/logs_2.sqlite")" -eq "$before" ]
+}
+
 @test "VACUUM runs when df reports below 80% used" {
   _chp_db "$CH/logs_2.sqlite"
   _chp_fake_df 79
