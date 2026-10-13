@@ -106,7 +106,8 @@ RE_W="trap[[:space:]]+(--[[:space:]]+)?([^[:space:]'\"]+)[[:space:]]+([^;&|]*)"
 # something else plus a mention of $1 in another command is not cleanup evidence. The operand must be
 # $1 itself: `rm -rf "$work/child"` leaves the allocated directory behind.
 rm_targets() {
-  tr ';&|' '\n' | grep -E '(^|[{(]|(^|[[:space:]])(then|do|else))[[:space:]]*(command[[:space:]]+)?rm[[:space:]]' \
+  # command starts: line start, { ( then do else, or a case arm `pattern)` (one token, so a printed "foo) rm" is not one)
+  tr ';&|' '\n' | grep -E '(^|[{(]|(^|[[:space:]])(then|do|else)|^[[:space:]]*\(?[^[:space:]]+\))[[:space:]]*(command[[:space:]]+)?rm[[:space:]]' \
     | grep -Eq "[[:space:]'\"\\\\]\\\$\{?$1(:\?)?\}?['\"\\\\]*([[:space:]]|\$|[)}])"
 }
 # a trap only counts at a command start (a printed "trap ..." string arms nothing)

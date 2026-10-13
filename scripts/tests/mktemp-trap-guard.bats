@@ -417,3 +417,41 @@ SH
   run_guard
   [ "$status" -eq 0 ]
 }
+
+@test "rm inside a case arm of the EXIT handler counts (qa-review-clone.sh shape)" {
+  cat > "$TEST_TMPDIR/scripts/casearm.sh" <<'SH'
+#!/bin/bash
+CLONE_DIR="$(mktemp -d "$ROOT/x-XXXXXX")" || exit 1
+cleanup() {
+  case "$CLONE_DIR" in
+    "$ROOT"/*-review-??????) rm -rf "$CLONE_DIR" ;;
+  esac
+}
+trap cleanup EXIT
+SH
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "a case arm that removes a different path does not count" {
+  cat > "$TEST_TMPDIR/scripts/casearm-other.sh" <<'SH'
+#!/bin/bash
+CLONE_DIR="$(mktemp -d)"
+cleanup() {
+  case "$1" in
+    *) rm -rf "$OTHER" ;;
+  esac
+}
+trap cleanup EXIT
+SH
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"casearm-other.sh:2"* ]]
+}
+
+@test "a printed 'foo) rm -rf' string in the trap action is not a case arm" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ntrap '"'"'echo "foo) rm -rf $work"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/printarm.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"printarm.sh:2"* ]]
+}
