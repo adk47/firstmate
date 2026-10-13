@@ -465,6 +465,21 @@ gh_runs() {  # gh_runs <databaseId> <pr> <sha> [status] [repo] [age-seconds]
   [ ! -s "$STUB_CALLS" ]
 }
 
+@test "dedup: a malformed QA_DEDUP_WINDOW_SECONDS falls back to the default window, never aborts dispatch" {
+  gh_runs 100 999 "$GOOD_SHA"
+  QA_DEDUP_WINDOW_SECONDS=oops QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"unbound variable"* ]]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "dedup: a malformed window still refuses an in-flight duplicate (default window applies)" {
+  gh_runs 100 123 "$GOOD_SHA" queued Muso-AI/hydra 3600
+  QA_DEDUP_WINDOW_SECONDS=oops QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
 @test "dedup: QA_DEDUP_REFUSED_RC=76 (the reconciler) makes a refusal exit 76, still no cron add" {
   gh_runs 100 123 "$GOOD_SHA"
   QA_DEDUP_REFUSED_RC=76 QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
