@@ -290,5 +290,15 @@ for surf in sorted(surfaces):
     p95_s = "n/a" if p95 is None else str(p95)
     tail = f" undated_excluded={undated}" if cutoff is not None else ""
     print(f"  -- footer: total={total} rc_nonzero={rc_nonzero} p50_ms={p50_s} p95_ms={p95_s}{tail} malformed_rows={malformed}")
+    # Failure breakdown: rc collapses timeout/network/http_*; rows written
+    # before `reason` existed count as "unknown".
+    reasons = {}
+    for r in lines:
+        if r.get("rc") not in (0, None):
+            key = r.get("reason")
+            key = key if isinstance(key, str) and key else "unknown"
+            reasons[key] = reasons.get(key, 0) + 1
+    if reasons:
+        print("  -- failures by reason: " + " ".join(f"{k}={v}" for k, v in sorted(reasons.items())))
     print()
 PY

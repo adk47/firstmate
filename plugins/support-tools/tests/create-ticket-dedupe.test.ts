@@ -112,6 +112,24 @@ describe("create_ticket dedupe", () => {
     expect(commentBody.comment_text).toContain("---ACTION-REQUEST-UPDATE---");
   });
 
+  // MUS-1516: the append (follow-up-comment) path is the OTHER call site that must
+  // record the filed id — a conversation whose second create_ticket call merely
+  // commented on the existing ticket still needs that id backed for the intercom
+  // reference-id guard (design call ① on MUS-1471 — "both must record the id").
+  it("records the existing ticket's id on the follow-up-comment (append) path too", async () => {
+    const IDS_KEY = "__musoSupportTicketIds";
+    delete (globalThis as unknown as Record<string, unknown>)[IDS_KEY];
+    const deps = makeDeps({ sessionKey: "agent:support:intercom:direct:conv_append1" });
+    const tool = createCreateTicketTool(deps);
+
+    await run(tool, CLAIM, "c1"); // creates task_1
+    const second = await run(tool, { ...CLAIM, summary: "customer added the track URL" }, "c2"); // appends
+    expect(second).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "task_1" });
+
+    const store = (globalThis as unknown as Record<string, unknown>)[IDS_KEY] as Map<string, { atMs: number; ids: string[] }> | undefined;
+    expect(store?.get("conv_append1")?.ids).toEqual(["task_1"]);
+  });
+
   it("still creates a new ticket for a different action type in the same session", async () => {
     const deps = makeDeps();
     const tool = createCreateTicketTool(deps);
@@ -131,7 +149,7 @@ describe("create_ticket dedupe", () => {
         tasks: [
           { id: "old_closed", status: { status: "complete" }, date_created: String(now - 1000) },
           { id: "older_open", status: { status: "to do" }, date_created: String(now - 60_000) },
-          { id: "newest_open", status: { status: "to do" }, date_created: String(now - 1000) },
+          { id: "newest_open", status: { status: "to do" }, date_created: String(now - 1000), custom_fields: [{ id: "ef", value: "u@example.com" }] },
           { id: "stale_open", status: { status: "to do" }, date_created: String(now - 8 * 24 * 60 * 60_000) },
         ],
       } as any,
@@ -196,7 +214,7 @@ describe("create_ticket dedupe", () => {
     const now = Date.now();
     const get = vi.fn(async () => ({
       ok: true,
-      data: { tasks: [{ id: "wip_1", status: { status: "in progress", type: "custom" }, date_created: String(now - 1000) }] } as any,
+      data: { tasks: [{ id: "wip_1", status: { status: "in progress", type: "custom" }, date_created: String(now - 1000), custom_fields: [{ id: "ef", value: "u@example.com" }] }] } as any,
     }));
     const deps = makeDeps({ http: makeHttp({ get }) });
     const tool = createCreateTicketTool(deps);
@@ -245,6 +263,47 @@ describe("create_ticket dedupe", () => {
     expect(vi.mocked(get).mock.calls).toHaveLength(0);
   });
 
+  describe("rights_holder cross-conversation dedupe", () => {
+    const openLookup = () => vi.fn(async () => ({
+      ok: true,
+      data: { tasks: [
+        { id: "open_rh", status: { status: "to do" }, date_created: String(Date.now() - 1000), custom_fields: [{ id: "ef", value: "u@example.com" }] },
+      ] } as any,
+    }));
+    const taskPosts = (deps: ReturnType<typeof makeDeps>) =>
+      vi.mocked(deps.http.post).mock.calls.filter(([u]) => TASK_URL_RE.test(u as string));
+    const commentPosts = (deps: ReturnType<typeof makeDeps>) =>
+      vi.mocked(deps.http.post).mock.calls.filter(([u]) => COMMENT_URL_RE.test(u as string));
+
+    it("opens its own record instead of appending to another matter's open ticket", async () => {
+      const deps = makeDeps({ http: makeHttp({ get: openLookup() }) });
+      const tool = createCreateTicketTool(deps);
+      const result = await run(tool, { ...CLAIM, details: { escalation_reason: "rights_holder" } });
+      expect(result.submitted).toBe(true);
+      expect(result.updated_existing).toBeUndefined();
+      expect(taskPosts(deps)).toHaveLength(1);
+      expect(commentPosts(deps)).toHaveLength(0);
+    });
+
+    it("still appends the same shape without rights_holder", async () => {
+      const deps = makeDeps({ http: makeHttp({ get: openLookup() }) });
+      const tool = createCreateTicketTool(deps);
+      const result = await run(tool, { ...CLAIM, details: { escalation_reason: "sla_breach_customer_followup" } });
+      expect(result).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "open_rh" });
+      expect(taskPosts(deps)).toHaveLength(0);
+    });
+
+    it("keeps the in-session repeat append for rights_holder", async () => {
+      const deps = makeDeps();
+      const tool = createCreateTicketTool(deps);
+      const details = { escalation_reason: "rights_holder" };
+      await run(tool, { ...CLAIM, details }, "c1");
+      const second = await run(tool, { ...CLAIM, details }, "c2");
+      expect(second).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "task_1" });
+      expect(taskPosts(deps)).toHaveLength(1);
+    });
+  });
+
   it("meters the lookup GET in its own bucket (10/60min)", async () => {
     // A retry-looping session must not hammer ClickUp search unbounded —
     // after the lookup budget is gone, calls proceed straight to the create
@@ -289,7 +348,7 @@ describe("create_ticket dedupe", () => {
     const now = Date.now();
     const get = vi.fn(async (url: string) =>
       url.includes("/list/")
-        ? ({ ok: true, data: { tasks: [{ id: "found_1", status: { status: "to do" }, date_created: String(now - 1000) }] } } as any)
+        ? ({ ok: true, data: { tasks: [{ id: "found_1", status: { status: "to do" }, date_created: String(now - 1000), custom_fields: [{ id: "ef", value: "u@example.com" }] }] } } as any)
         : ({ ok: true, data: { id: "found_1", status: { status: "to do" } } } as any));
     const deps = makeDeps({ http: makeHttp({ get }) });
     const tool = createCreateTicketTool(deps);
@@ -474,6 +533,123 @@ describe("create_ticket escalation follow-up", () => {
       }),
     });
     const second = await fileThenFollowUp(deps, { escalation_reason: "sla_breach_customer_followup" });
+    expect(second).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "task_1" });
+  });
+});
+
+// MUS-6588: 2026-10-09 a create_ticket call with customer_email "" took the
+// cross-conversation lookup and appended Sony's correction onto another
+// customer's ticket (27 misfiles on 19 tickets since 2026-09-09, 13 of them
+// GDPR/deletion). ClickUp returns unrelated tasks for `value: ""`.
+describe("create_ticket cross-conversation dedupe never trusts an unusable or unverified email", () => {
+  const now = Date.now();
+  const stranger = (extra: Record<string, unknown> = {}) => ({
+    id: "strangers_ticket",
+    status: { status: "to do" },
+    date_created: String(now - 1000),
+    custom_fields: [{ id: "ef", value: "fabian@example.com" }],
+    ...extra,
+  });
+  const listGet = (tasks: unknown[], single?: unknown) =>
+    vi.fn(async (url: string) =>
+      url.includes("/list/")
+        ? ({ ok: true, data: { tasks } } as any)
+        : ({ ok: true, data: single ?? { id: "x" } } as any));
+  const posts = (deps: ReturnType<typeof makeDeps>) => {
+    const calls = vi.mocked(deps.http.post).mock.calls;
+    return {
+      creates: calls.filter(([u]) => TASK_URL_RE.test(u as string)),
+      comments: calls.filter(([u]) => COMMENT_URL_RE.test(u as string)),
+    };
+  };
+
+  it.each([
+    ["credit-correction", "empty", ""],
+    ["credit-correction", "whitespace-only", "   "],
+    ["credit-correction", "not an email", "not-an-email"],
+    ["data-deletion", "empty (GDPR erasure must never land on a stranger's ticket)", ""],
+  ])("%s with %s customerEmail creates a new ticket and never comments", async (actionType, _label, email) => {
+    const get = listGet([stranger()]);
+    const deps = makeDeps({ http: makeHttp({ get }) });
+    const tool = createCreateTicketTool(deps);
+    const result = await run(tool, { ...CLAIM, actionType, customerEmail: email });
+    expect(result).toMatchObject({ submitted: true, ticket_id: "task_1" });
+    expect(result.updated_existing).toBeUndefined();
+    const { creates, comments } = posts(deps);
+    expect(creates).toHaveLength(1);
+    expect(comments).toHaveLength(0);
+    // The lookup itself is skipped: nothing to ask ClickUp.
+    expect(vi.mocked(get).mock.calls.filter(([u]) => (u as string).includes("/list/"))).toHaveLength(0);
+  });
+
+  it("trims the email once: padded real email still dedupes against a matching ticket", async () => {
+    const get = listGet([stranger({ id: "mine", custom_fields: [{ id: "ef", value: "u@example.com" }] })]);
+    const deps = makeDeps({ http: makeHttp({ get }) });
+    const result = await run(createCreateTicketTool(deps), { ...CLAIM, customerEmail: "  U@Example.com " });
+    expect(result).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "mine" });
+    expect(decodeURIComponent(vi.mocked(get).mock.calls[0][0] as string)).toContain('"value":"U@Example.com"');
+  });
+
+  it("real email + list payload carries a matching email field (case-insensitive) => still appends, no extra GET", async () => {
+    const get = listGet([stranger({ id: "mine", custom_fields: [{ id: "other", value: "z" }, { id: "ef", value: "U@EXAMPLE.com" }] })]);
+    const deps = makeDeps({ http: makeHttp({ get }) });
+    const result = await run(createCreateTicketTool(deps), CLAIM);
+    expect(result).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "mine" });
+    expect(vi.mocked(get).mock.calls).toHaveLength(1);
+  });
+
+  it("real email + candidate belongs to a DIFFERENT customer => creates, never comments", async () => {
+    const get = listGet([stranger()]);
+    const deps = makeDeps({ http: makeHttp({ get }) });
+    const result = await run(createCreateTicketTool(deps), CLAIM);
+    expect(result).toMatchObject({ submitted: true, ticket_id: "task_1" });
+    expect(result.updated_existing).toBeUndefined();
+    expect(posts(deps).comments).toHaveLength(0);
+  });
+
+  it("list payload omits custom_fields => ONE single-task GET verifies the email, then appends", async () => {
+    const get = listGet(
+      [stranger({ id: "mine", custom_fields: undefined })],
+      { id: "mine", status: { status: "to do" }, custom_fields: [{ id: "ef", value: "u@example.com" }] },
+    );
+    const deps = makeDeps({ http: makeHttp({ get }) });
+    const result = await run(createCreateTicketTool(deps), CLAIM);
+    expect(result).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "mine" });
+    const urls = vi.mocked(get).mock.calls.map(([u]) => u as string);
+    expect(urls).toHaveLength(2);
+    expect(urls[1]).toBe("https://api.clickup.com/api/v2/task/mine");
+  });
+
+  it("list payload omits custom_fields and the single GET shows another customer => creates", async () => {
+    const get = listGet(
+      [stranger({ custom_fields: undefined })],
+      { id: "strangers_ticket", custom_fields: [{ id: "ef", value: "fabian@example.com" }] },
+    );
+    const deps = makeDeps({ http: makeHttp({ get }) });
+    const result = await run(createCreateTicketTool(deps), CLAIM);
+    expect(result.updated_existing).toBeUndefined();
+    expect(posts(deps).comments).toHaveLength(0);
+  });
+
+  it("email cannot be read at all (single GET fails or has no email field) => creates, never appends unverified", async () => {
+    for (const single of [undefined, { id: "strangers_ticket", custom_fields: [] }]) {
+      const get = vi.fn(async (url: string) =>
+        url.includes("/list/")
+          ? ({ ok: true, data: { tasks: [stranger({ custom_fields: undefined })] } } as any)
+          : single ? ({ ok: true, data: single } as any) : ({ ok: false, status: 500 } as any));
+      const deps = makeDeps({ http: makeHttp({ get }) });
+      const result = await run(createCreateTicketTool(deps), CLAIM);
+      expect(result.updated_existing).toBeUndefined();
+      expect(posts(deps).comments).toHaveLength(0);
+    }
+  });
+
+  it("same-conversation registry hit with an empty email still appends (intra-conversation dedupe unchanged)", async () => {
+    const deps = makeDeps();
+    const tool = createCreateTicketTool(deps);
+    const empty = { ...CLAIM, customerEmail: "" };
+    await run(tool, empty, "c1");
+    const second = await run(tool, empty, "c2");
     expect(second).toMatchObject({ submitted: true, updated_existing: true, ticket_id: "task_1" });
   });
 });
