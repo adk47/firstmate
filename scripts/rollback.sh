@@ -94,6 +94,30 @@ read_deployed_sha() {
   fi
 }
 
+# Availability backstop (MUS-5079): deploy.sh stops a gateway for the 8.35 plugin
+# install and only Step 6 starts it again, so a rollback that dies before its own
+# Step 2 restart (refuse-to-sync, chmod, config revert, runtime restore) would
+# otherwise leave the fleet down. EXIT trap, installed before the first possible
+# exit: if Step 2 never ran, START (not restart) every gateway that is enabled.
+GATEWAYS_RESTARTED=0
+ensure_gateways_up() {
+  [ "$GATEWAYS_RESTARTED" = 1 ] && return 0
+  log "rollback exiting before Step 2: starting any stopped gateway so the fleet is not left down"
+  local start_cmd='for svc in openclaw-gateway-main openclaw-gateway-edge; do
+  if systemctl is-active "$svc" &>/dev/null || systemctl is-enabled "$svc" &>/dev/null; then
+    systemctl start "$svc" && echo "  Started $svc" || echo "  WARNING: Failed to start $svc"
+  fi
+done'
+  if $HYDRA_LOCAL; then
+    bash -c "$start_cmd" || true
+  else
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" "$start_cmd" || true
+  fi
+}
+
+# shellcheck disable=SC2154  # rc is assigned inside the trap string, at fire time
+trap 'rc=$?; ensure_gateways_up; exit $rc' EXIT
+
 TARGET_SHA="$(read_deployed_sha)"
 
 # Fail SAFE, not forward. If we cannot establish what was last known good,
@@ -128,7 +152,8 @@ cleanup_rollback_tree() {
   git -C "$HYDRA_ROOT" worktree remove --force "$ROLLBACK_TREE" 2>/dev/null || true
   rm -rf "$ROLLBACK_TREE" 2>/dev/null || true
 }
-trap cleanup_rollback_tree EXIT
+# shellcheck disable=SC2154  # rc is assigned inside the trap string, at fire time
+trap 'rc=$?; cleanup_rollback_tree; ensure_gateways_up; exit $rc' EXIT  # supersedes the earlier backstop-only trap
 if ! git -C "$HYDRA_ROOT" worktree add --detach --force "$ROLLBACK_TREE" "$TARGET_SHA" >/dev/null 2>&1; then
   fail "could not materialize $TARGET_SHA into a worktree. Refusing to sync the FAILED commit. Server left as-is."
 fi
@@ -379,6 +404,67 @@ fi
 log "  Config synced."
 
 # -------------------------------------------------------------------
+# Step 1c: Restore the openclaw runtime if this deploy swapped it
+# -------------------------------------------------------------------
+# deploy.sh Step 4c.5 replaces the GLOBAL openclaw binary, which neither the
+# tree restore nor the config revert above touches. Deploy run 37791745129
+# (8 Oct) failed AFTER that swap and left runtime 2026.8.35 under 2026.8.2
+# plugins. deploy.sh records, in $DEPLOY_PATH/.pre-deploy-openclaw-version,
+# line 1 = the pre-swap runtime and line 2 = each state DB's PRAGMA user_version
+# at swap time ("main=15 edge=15"), and removes the file once Step 6 is done.
+# The old binary can read a DB the new one migrated only while user_version is
+# unchanged (assertSupportedSchemaVersion throws on a NEWER user_version, in both
+# 8.2 and 8.35), so the restore is automatic only under that measured guard.
+# Otherwise: install nothing, say so loudly, keep the record, and carry on to
+# Step 2. Never calls downgrade-openclaw-runtime.sh (no intra-8.x state guard,
+# MUS-5212). The state_user_versions block mirrors deploy.sh's function of the
+# same name; it is inline because the tree restored above may predate it.
+log "Step 1c/4: Restoring the openclaw runtime if the failed deploy swapped it..."
+# shellcheck disable=SC2016  # deliberately single-quoted: expanded by the (local or remote) shell that runs it
+RUNTIME_RESTORE_SCRIPT='
+f="$1/.pre-deploy-openclaw-version"
+[ -f "$f" ] || { echo "  No recorded runtime swap — leaving the openclaw binary alone."; exit 0; }
+prev=$(sed -n 1p "$f" | tr -d "[:space:]")
+want=$(sed -n 2p "$f")
+case "$prev" in [0-9][0-9][0-9][0-9].*) ;; *) echo "  unreadable recorded version: $prev"; exit 3 ;; esac
+root="${OPENCLAW_PROFILE_ROOT:-/root}"
+have=""
+for p in main edge; do
+  db="$root/.openclaw-$p/state/openclaw.sqlite"
+  if [ ! -f "$db" ]; then v=absent
+  else v=$(sqlite3 -readonly "$db" "pragma user_version;" 2>/dev/null) || v=""; case "$v" in ""|*[!0-9]*) v=unreadable ;; esac
+  fi
+  have="${have:+$have }$p=$v"
+done
+case "$want$have" in *unreadable*|"") echo "  cannot verify state schema: recorded [$want] now [$have]"; exit 6 ;; esac
+if [ "$want" != "$have" ]; then
+  echo "  state DB schema changed since the swap: recorded [$want] now [$have]"
+  exit 6
+fi
+cur=$(openclaw --version 2>/dev/null | awk "NR==1 {print \$2}")
+if [ "$cur" != "$prev" ]; then
+  echo "  Restoring openclaw $cur -> $prev"
+  npm install -g "openclaw@$prev" || exit 4
+  now=$(openclaw --version 2>/dev/null | awk "NR==1 {print \$2}")
+  [ "$now" = "$prev" ] || { echo "  runtime is $now after restore, expected $prev"; exit 5; }
+fi
+rm -f "$f"
+echo "  openclaw runtime is $prev"
+'
+runtime_rc=0
+if $HYDRA_LOCAL; then
+  bash -c "$RUNTIME_RESTORE_SCRIPT" _ "$DEPLOY_PATH" || runtime_rc=$?
+else
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$NODE8_USER@$NODE8_IP" bash -s -- "$DEPLOY_PATH" <<<"$RUNTIME_RESTORE_SCRIPT" || runtime_rc=$?
+fi
+if [ "$runtime_rc" -eq 6 ]; then
+  log "  WARNING: runtime NOT restored (state DB schema differs from the swap-time record or cannot be verified); record kept."
+  notify_slack ":warning: HYDRA rollback did NOT restore the openclaw runtime: the state DB user_version no longer matches the record in $DEPLOY_PATH/.pre-deploy-openclaw-version (or cannot be read). Gateways are restarting on the CURRENT runtime. Manual step if wanted: scripts/downgrade-openclaw-runtime.sh --to <prev> (Nick's go)."
+elif [ "$runtime_rc" -ne 0 ]; then
+  fail "could not restore the openclaw runtime recorded in $DEPLOY_PATH/.pre-deploy-openclaw-version (rc=$runtime_rc); node-8 may run a new runtime under old plugins. Run scripts/downgrade-openclaw-runtime.sh by hand"
+fi
+
+# -------------------------------------------------------------------
 # Step 2: Restart all gateways
 # -------------------------------------------------------------------
 log "Step 2/4: Restarting all gateways..."
@@ -397,6 +483,7 @@ for svc in openclaw-gateway-main openclaw-gateway-edge; do
 done
 RESTART
 fi
+GATEWAYS_RESTARTED=1
 sleep 5
 log "  Gateways restarted."
 

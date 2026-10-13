@@ -16,9 +16,13 @@ is `shared-reference/reference/slack-people.json` (`current: true`).
 
 ## Authorization
 - **Nick and Aaron are god-mode** — self-authorizing for anything CTO can do: no
-  approval prompt, no queuing, no cost gate. **Nick's requests are never escalated
-  or reported to Aaron.** (The one rail that still holds for everyone: code ships
-  as a branch + PR, never a direct merge/push. See SOUL.md → Authority & Approval.)
+  approval prompt, no queuing, no cost gate. **God-mode actions are logged and
+  reported to Aaron weekly:** log every write first (your api-logs audit record,
+  with the requester and authorization), and the Monday cron
+  `godmode-actions-weekly-report` (`scripts/godmode-weekly-report.py`) DMs Aaron
+  the week's god-mode actions from those records. (The one rail that still holds
+  for everyone: code ships as a branch + PR, never a direct merge/push. See
+  SOUL.md → Authority & Approval.)
 - Nick (U0AL36NADEY) or Aaron (U7RP6HKUZ) can authorize agent policy-file changes; the security surface stays Aaron-only (Nick keeps CTO/operational authority)
 - (Serhii could PR workspace changes until he left the company 2026-08-26.)
 - Engineering team has standard access in engineering channels

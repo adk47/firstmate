@@ -9,6 +9,8 @@
 # 1. Non-interrupting inactive-session deletion (runtime JS) — skipped on
 #    openclaw >=2026.8 (retired-pending-reevaluation on 2.0, see
 #    docs/runbooks/UPGRADE-2026.8.1.md; mirrors the same gate in deploy.sh).
+# 2. a2a announce flow escapes the prepared-model-runtime generation scope
+#    (MUS-6707) — runs on every runtime, including >=2026.8.
 # The historical mention-gate patch is retired on current versions and is not run.
 #
 # Retired:
@@ -50,6 +52,16 @@ else
         echo "ERROR: patch-openclaw-inactive-session-delete.sh not found"
         exit 1
     fi
+fi
+
+# a2a announce flow escapes the prepared-model-runtime generation scope (MUS-6707).
+# Not version-gated: it targets the 2.0 runtime the block above skips.
+if [ -f "$HYDRA_ROOT/scripts/patch-openclaw-a2a-generation-scope.sh" ]; then
+    OPENCLAW_DIST_DIR=/usr/lib/node_modules/openclaw/dist \
+        bash "$HYDRA_ROOT/scripts/patch-openclaw-a2a-generation-scope.sh"
+else
+    echo "ERROR: patch-openclaw-a2a-generation-scope.sh not found"
+    exit 1
 fi
 
 echo "=== Post-OpenClaw-Update: Complete ==="

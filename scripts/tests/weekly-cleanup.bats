@@ -96,6 +96,75 @@ slack_fixture() {
   [ "${BASH_REMATCH[1]}" -gt 0 ]
 }
 
+@test "qa-pr-* dirs use the 2d TTL; other entries stay at 14d (MUS-5583)" {
+  local r="$WEEKLY_CLEANUP_TMP_ROOT" n
+  for n in qa-pr-10179-abc other-dir qa-pr-fresh; do
+    mkdir -p "$r/$n"; echo x > "$r/$n/f"
+  done
+  for n in qa-pr-10179-abc other-dir; do old 5 "$r/$n/f"; old 5 "$r/$n"; done
+  old 1 "$r/qa-pr-fresh/f"; old 1 "$r/qa-pr-fresh"
+  run bash "$WC"
+  [ "$status" -eq 0 ]
+  [ ! -e "$r/qa-pr-10179-abc" ]
+  [ -e "$r/other-dir" ]
+  [ -e "$r/qa-pr-fresh" ]
+}
+
+@test "qa-pr-* with a fresh file inside is still kept (active rail uses the 2d cutoff)" {
+  local r="$WEEKLY_CLEANUP_TMP_ROOT"
+  mkdir -p "$r/qa-pr-busy"; echo x > "$r/qa-pr-busy/f"
+  old 5 "$r/qa-pr-busy"
+  run bash "$WC"
+  [ "$status" -eq 0 ]
+  [ -e "$r/qa-pr-busy" ]
+}
+
+@test "qa-pr-* TTL is exactly 2d, not 3d (find -mtime rounds down; bot finding 1)" {
+  local r="$WEEKLY_CLEANUP_TMP_ROOT"
+  mkdir -p "$r/qa-pr-2d5h"; echo x > "$r/qa-pr-2d5h/f"
+  touch -h -d "53 hours ago" "$r/qa-pr-2d5h/f" "$r/qa-pr-2d5h"
+  run bash "$WC"
+  [ "$status" -eq 0 ]
+  [ ! -e "$r/qa-pr-2d5h" ]
+}
+
+@test "non-numeric WEEKLY_CLEANUP_QA_PR_AGE_DAYS fails loud, deletes nothing (bot finding 2)" {
+  local r="$WEEKLY_CLEANUP_TMP_ROOT"
+  mkdir -p "$r/qa-pr-old"; echo x > "$r/qa-pr-old/f"; old 5 "$r/qa-pr-old/f"; old 5 "$r/qa-pr-old"
+  WEEKLY_CLEANUP_QA_PR_AGE_DAYS=abc run bash "$WC"
+  [ "$status" -eq 2 ]
+  [ -e "$r/qa-pr-old" ]
+}
+
+@test "leading-zero WEEKLY_CLEANUP_QA_PR_AGE_DAYS=08 is read as decimal, lane still runs (QA finding 1)" {
+  local r="$WEEKLY_CLEANUP_TMP_ROOT"
+  mkdir -p "$r/qa-pr-old"; echo x > "$r/qa-pr-old/f"; old 10 "$r/qa-pr-old/f"; old 10 "$r/qa-pr-old"
+  mkdir -p "$r/qa-pr-young"; echo x > "$r/qa-pr-young/f"; old 5 "$r/qa-pr-young/f"; old 5 "$r/qa-pr-young"
+  WEEKLY_CLEANUP_QA_PR_AGE_DAYS=08 run bash "$WC"
+  [ "$status" -eq 0 ]
+  [ ! -e "$r/qa-pr-old" ]
+  [ -e "$r/qa-pr-young" ]
+}
+
+@test "/tmp <repo>-<n>-review-<6> clones use the 2d TTL; near-miss names stay at 14d (CTO widening)" {
+  local r="$WEEKLY_CLEANUP_TMP_ROOT" n
+  for n in core-backend-10192-review-lMTbi5 core-backend-review-lMTbi5 core-backend-10192-review-TOOLONG9 core-backend-10192-review-fresh1; do
+    mkdir -p "$r/$n/repo"; echo x > "$r/$n/repo/f"
+  done
+  for n in core-backend-10192-review-lMTbi5 core-backend-review-lMTbi5 core-backend-10192-review-TOOLONG9; do
+    old 5 "$r/$n/repo/f"; old 5 "$r/$n/repo"; old 5 "$r/$n"
+  done
+  # plain-file near-miss: only the 14d re-check keeps it (no active-content rail for files)
+  echo x > "$r/foo-review-abcdef"; old 5 "$r/foo-review-abcdef"
+  run bash "$WC"
+  [ "$status" -eq 0 ]
+  [ -e "$r/foo-review-abcdef" ]
+  [ ! -e "$r/core-backend-10192-review-lMTbi5" ]
+  [ -e "$r/core-backend-review-lMTbi5" ]
+  [ -e "$r/core-backend-10192-review-TOOLONG9" ]
+  [ -e "$r/core-backend-10192-review-fresh1" ]
+}
+
 @test "fresh depth-1 file → kept" {
   echo x > "$WEEKLY_CLEANUP_TMP_ROOT/recent.json"
   old 3 "$WEEKLY_CLEANUP_TMP_ROOT/recent.json"

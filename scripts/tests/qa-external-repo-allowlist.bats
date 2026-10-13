@@ -102,6 +102,7 @@ ONBOARDED_REPOS=(
   Muso-AI/docker-ci-tools
   Muso-AI/terraform-module-metrics-server
   Muso-AI/quality-checks
+  Muso-AI/muso-messaging
 )
 
 # The mobile repos were onboarded 2026-08-19 for REVIEW ONLY, on purpose: Artem

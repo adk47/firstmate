@@ -37,6 +37,7 @@ setup() {
   # Secret-perm guard sees a clean 0600 fixture (no drift alarm).
   printf 'x' > "$TEST_TMPDIR/secrets/llm-provider-keys.json"
   chmod 600 "$TEST_TMPDIR/secrets/llm-provider-keys.json"
+  export WATCHDOG_LOCK_FILE="$TEST_TMPDIR/watchdog.lock"
   export HYDRA_SECRETS_DIR="$TEST_TMPDIR/secrets"
 
   # Hermeticity: the watchdog's codex checks + cooldown stamps must NOT read or

@@ -55,17 +55,22 @@
 #
 # Ladder (checked most-specific-first — a >=2026.8 runtime also satisfies
 # version_at_least "2026.7", so 2026.8 MUST be tested before it):
-#   >= 2026.8  -> 2026.8.2  (2.0 upgrade window — docs/runbooks/UPGRADE-2026.8.1.md;
-#                            2026.8.2 is the correction release, staging-validated
-#                            2026-09-01: fixes the exec-approvals doctor abort and
-#                            folds session import into plain `doctor --fix`)
+#   >= 2026.8.35 -> 2026.8.35 (MUS-5079: lockstep with OPENCLAW_VERSION 2026.8.35; its
+#                            bundled @openai/codex binary moves 0.151.0 -> 0.156.1,
+#                            read from `npm view @openclaw/codex@2026.8.35
+#                            dependencies`)
+#   >= 2026.8  -> 2026.8.2  (a box still on the 2.0 upgrade-window core must NOT
+#                            get the 8.35 plugin before the runtime moves;
+#                            docs/runbooks/UPGRADE-2026.8.1.md)
 #   >= 2026.7  -> 2026.7.1  (staging-validated 2026-07-14, see history above)
 #   otherwise  -> 2026.5.27 (the #90925 dodge, held for pre-7.x cores)
 # shellcheck source=version-compare.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/version-compare.sh"
 if [ -z "${OPENCLAW_CODEX_VERSION:-}" ]; then
   _codex_pin_ref="${OPENCLAW_VERSION:-$(openclaw_runtime_version)}"
-  if [ -n "$_codex_pin_ref" ] && version_at_least "2026.8" "$_codex_pin_ref"; then
+  if [ -n "$_codex_pin_ref" ] && version_at_least "2026.8.35" "$_codex_pin_ref"; then
+    OPENCLAW_CODEX_VERSION="2026.8.35"
+  elif [ -n "$_codex_pin_ref" ] && version_at_least "2026.8" "$_codex_pin_ref"; then
     OPENCLAW_CODEX_VERSION="2026.8.2"
   elif [ -n "$_codex_pin_ref" ] && version_at_least "2026.7" "$_codex_pin_ref"; then
     OPENCLAW_CODEX_VERSION="2026.7.1"
