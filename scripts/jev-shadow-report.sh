@@ -74,9 +74,13 @@ if surface:
     paths = [p for p in paths if os.path.isfile(p)]
 else:
     paths = sorted(glob.glob(os.path.join(shadow_dir, "*.jsonl")))
-    # The outcomes sidecar is ground truth, not a shadow log, but the producer
-    # writes it into this same directory. realpath both sides so ./x, an
+    # Outcomes sidecars (<name>.outcomes.jsonl) are ground truth, not shadow
+    # logs, but the producer writes them into this same directory. Drop them
+    # by name so an alternate --outcomes path elsewhere cannot leave the
+    # default sidecar to be parsed as shadow rows; also drop the selected
+    # file by realpath (it may have any name). realpath both sides so ./x, an
     # absolute join and a symlinked shadow dir all resolve to the same file.
+    paths = [p for p in paths if not p.endswith(".outcomes.jsonl")]
     if outcomes_path:
         outcomes_real = os.path.realpath(outcomes_path)
         paths = [p for p in paths if os.path.realpath(p) != outcomes_real]

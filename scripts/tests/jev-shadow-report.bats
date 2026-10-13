@@ -482,3 +482,23 @@ J
   [[ "$output" == *"outcomes_rows=2 outcomes_matched=2"* ]]
   rm -rf "$d" "$o"
 }
+
+# The default sidecar stays in the shadow dir while --outcomes points at an
+# alternate file elsewhere: the default one must still not be read as shadow.
+@test "alternate --outcomes path: default sidecar in shadow dir is still excluded" {
+  local d o; _outcomes_in_shadow_dir_fixture
+  o="$(mktemp -d)"; cp "$d/caroline.outcomes.jsonl" "$o/backfill.jsonl"
+  run "$REPORT" --shadow-dir "$d" --outcomes "$o/backfill.jsonl"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"total=2 "* ]]
+  [[ "$output" == *"outcomes_rows=2 outcomes_matched=2"* ]]
+  rm -rf "$d" "$o"
+}
+
+@test "no --outcomes flag: sidecar in shadow dir is not counted as shadow rows" {
+  local d; _outcomes_in_shadow_dir_fixture
+  run "$REPORT" --shadow-dir "$d"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"total=2 "* ]]
+  rm -rf "$d"
+}
