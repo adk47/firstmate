@@ -15,10 +15,10 @@ set -euo pipefail
 #   Only depth-1 REGULAR FILES under TARGET that are BOTH
 #     (a) NOT tracked at the merged repo HEAD, AND
 #     (b) NOT matched by the depth-1-file subset of deploy.sh's RSYNC_EXCLUDES.
-#   That is EXACTLY the set the deploy pre-flight would flag (scripts/lib/
-#   classify-deletions.sh auto-excludes never-tracked *subdirs*, but a never-
-#   tracked top-level FILE falls through to the drift briefing — so files are the
-#   only class we touch). Untracked-but-legit runtime files like IDENTITY.md and
+#   That is the set the deploy pre-flight USED to flag (scripts/lib/
+#   classify-deletions.sh now auto-excludes any never-tracked path, files
+#   included, so the pre-flight no longer halts on these; this cleanup stays as
+#   a conservative backstop and still touches only depth-1 files). Untracked-but-legit runtime files like IDENTITY.md and
 #   HEARTBEAT.md are protected by (b); tracked seeds (AGENTS/SOUL/USER/...) by (a);
 #   subdirs (api-logs/, skills/, memory/, ...) are never touched at all.
 #
@@ -53,6 +53,7 @@ KEEP_GLOBS=(
   'openclaw-workspace-state.json'
   '*tmp*'                              # any 'tmp'-marked scratch: .tmp-*, tmp_*, *.tmp
   '.bridge-*.json'                     # agent-bridge in-flight request state (#877)
+  '.agent-bridge-*.json'               # same, 'agent-' infix variant (2026-10-01, live .agent-bridge-215476152669042.json)
   'bridge-request-*.json'              # same, un-dotted agent-named variant (2026-09-15, #943)
   'bridge-*.json'                      # agent names bridge payloads by case too (2026-09-16, #950)
   'final-*.json'                       # scout company-finder run scratch (2026-07-21, #719)
@@ -63,6 +64,8 @@ KEEP_GLOBS=(
                                         # widened 2026-08-19 for the external cross-repo
                                         # review shape '.qa-pr-review-<repo>-<pr>-<sha>.json'
   'credit-verification-todo-inventory-*.json'  # QA credit-verification run scratch
+  '*_MANIFEST_*.md'                    # ops agent run manifest (2026-10-02, Step 4a pre-flight)
+  '.ops-*.json'                        # ops agent run artifact, dot-prefixed (2026-10-02, Step 4a pre-flight)
   'package-lock.json'                  # npm install artifact, any workspace (2026-09-08, #915)
   'TOOLS.md.bak-*' '*.md.bak-*'
   'write-activity.log'

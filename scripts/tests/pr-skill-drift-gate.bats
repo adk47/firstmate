@@ -106,3 +106,41 @@ gate() { run env REPO_ROOT="$REPO" SERVER_ROOT="$SERVER" "$GATE"; }
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '::warning::'
 }
+
+# ─── workspaces/*/skills coverage (MUS-1792) ────────────────────────
+
+@test "SERVER-AHEAD under workspaces/ fails the PR with the matching tree's error text" {
+  commit_skill workspaces/operations/skills/foo/SKILL.md "v0"
+  set_baseline "$(git -C "$REPO" rev-parse HEAD)"
+  srv_write workspaces/operations/skills/foo/SKILL.md "v1-server"
+
+  gate
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'workspaces/operations/skills/foo/SKILL.md'
+  echo "$output" | grep -qiE 'skills-all/.*workspaces/|workspaces/.*skills-all/'
+}
+
+@test "remediation command for a workspaces/ path uses the 'workspaces' sync target, not 'skills'" {
+  commit_skill workspaces/operations/skills/foo/SKILL.md "v0"
+  set_baseline "$(git -C "$REPO" rev-parse HEAD)"
+  srv_write workspaces/operations/skills/foo/SKILL.md "v1-server"
+
+  gate
+  [ "$status" -eq 1 ]
+  # Assert the literal printed command, not the constant the code built it
+  # from — sync-from-server.sh rejects --only workspaces/... under the
+  # 'skills' target (prefix skills-all/ only), so the wrong target is a
+  # dead-end capture command, not just a cosmetic label.
+  echo "$output" | grep -qF 'scripts/sync-from-server.sh workspaces --apply --only workspaces/operations/skills/foo/SKILL.md'
+  run ! grep -qF 'scripts/sync-from-server.sh skills --apply --only workspaces/operations/skills/foo/SKILL.md' <<< "$output"
+}
+
+@test "remediation command for a skills-all/ path still uses the 'skills' sync target" {
+  commit_skill skills-all/bar/SKILL.md "v0"
+  set_baseline "$(git -C "$REPO" rev-parse HEAD)"
+  srv_write skills-all/bar/SKILL.md "v1-server"
+
+  gate
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -qF 'scripts/sync-from-server.sh skills --apply --only skills-all/bar/SKILL.md'
+}

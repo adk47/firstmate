@@ -52,7 +52,7 @@ JSON
 
 write_cron() {
   local fb="$1"
-  local model="${2:-openai/gpt-5.6-sol}"
+  local model="${2:-openai/gpt-6-sol}"
   cat > "$CRON" <<JSON
 { "version": 1, "jobs": [
   { "id": "a", "name": "test-job", "payload": { "kind": "agentTurn",
@@ -103,17 +103,17 @@ JSON
   [ "$status" -eq 0 ]
 }
 
-@test "check5: cron with gpt-5.6-luna first fallback passes" {
-  write_cron '["openrouter/openai/gpt-5.6-luna","openrouter/anthropic/claude-haiku-4.5"]'
+@test "check5: cron with gpt-6-luna first fallback passes" {
+  write_cron '["openrouter/openai/gpt-6-luna","openrouter/anthropic/claude-haiku-5.5"]'
   run "$SCRIPT" "$CRON"
   [ "$status" -eq 0 ]
 }
 
 @test "check5: cron with old gemini first fallback now FAILS" {
-  write_cron '["openrouter/google/gemini-3.5-flash","openrouter/anthropic/claude-haiku-4.5"]'
+  write_cron '["openrouter/google/gemini-3.5-flash","openrouter/anthropic/claude-haiku-5.5"]'
   run "$SCRIPT" "$CRON"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"gpt-5.6-luna"* ]]
+  [[ "$output" == *"gpt-6-luna"* ]]
 }
 
 @test "check5: cron still on old gpt-5.5/mini/sonnet chain now FAILS" {
@@ -121,5 +121,17 @@ JSON
     "openai/gpt-5.5"
   run "$SCRIPT" "$CRON"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"must be on openai/gpt-5.6-sol"* ]]
+  [[ "$output" == *"must be on openai/gpt-6-sol"* ]]
+}
+
+@test "check6: gpt-6-luna mid-fallback passes (classifier has no model-id gate on the pinned build)" {
+  write_profile '["openrouter/openai/gpt-6-luna","openrouter/anthropic/claude-haiku-5.5"]'
+  run "$SCRIPT" "$PROFILE"
+  [ "$status" -eq 0 ]
+}
+
+@test "check6: gpt-7 mid-fallback still FAILS (only gpt-5/gpt-6 families are accepted)" {
+  write_profile '["openrouter/openai/gpt-7-luna","openrouter/anthropic/claude-haiku-5.5"]'
+  run "$SCRIPT" "$PROFILE"
+  [ "$status" -eq 1 ]
 }

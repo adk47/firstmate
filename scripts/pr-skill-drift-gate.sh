@@ -63,15 +63,20 @@ if [[ -z "$server_ahead" && -z "$conflicts" ]]; then
   exit 0
 fi
 
-echo "::error::skills-all/ drift vs node-8 — capture or reconcile before merging"
+echo "::error::skills-all/ or workspaces/ drift vs node-8 — capture or reconcile before merging"
 if [[ -n "$server_ahead" ]]; then
   echo
   echo "SERVER-AHEAD — node-8 has skill edits not in this PR. Capture each one"
   echo "WITHOUT clobbering your other edits (do NOT bulk-pull):"
   while IFS= read -r p; do
     [[ -n "$p" ]] || continue
+    # sync_target_for_path (scripts/lib/drift-check.sh) is the single source
+    # of truth for this: sync-from-server.sh validates --only against the
+    # target's prefix, and the 'skills' target allows only skills-all/ — a
+    # workspaces/ path under it is a dead end. deploy.sh's DRIFT_BRIEFING
+    # uses the same function so the two printers can't drift apart again.
     # %q shell-quotes the path so copy-paste survives spaces/specials.
-    printf '  scripts/sync-from-server.sh skills --apply --only %q\n' "$p"
+    printf '  scripts/sync-from-server.sh %s --apply --only %q\n' "$(sync_target_for_path "$p")" "$p"
   done <<< "$server_ahead"
   echo "  then: git add <path> && git commit, and rebase this PR onto it."
 fi

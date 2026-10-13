@@ -67,6 +67,32 @@ case "$APPLY_MODE_RAW" in
     ;;
 esac
 
+# --- real-apply approval gate (2026-10-11) ---------------------------------
+# A REAL run is allowed only when policies/credit-approval-automation.json has
+# automations["credit-verification-batch"].approved == true. Otherwise every
+# caller (the cron and the @Ops Slack triggers alike) is forced to DRY: score and
+# report only, zero admin-API writes. Fails closed: if the registry is missing,
+# unreadable or malformed, the run is dry.
+#
+# Why: until 2026-10-11 this pipeline's approve rule was inverted
+# (approve_owning_track == 100 means the validator's owning-track shortcut did
+# NOT fire), so real runs approved validator-DECLINED credit requests. The cron
+# was disabled, but the Slack trigger defaults to real. Flipping `approved` is a
+# captain decision made in a reviewed PR, never a node-8 toggle or an env var, so
+# an agent with exec cannot re-arm it by pointing the gate at its own file. The
+# same check runs again at the write boundary (apply-verdicts.sh).
+# shellcheck source=../lib/real-apply-approval.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/real-apply-approval.sh"
+CV_REAL_APPLY_BLOCKED=0
+if [[ "$DRY_RUN_STR" == "false" ]]; then
+  if ! cv_real_apply_approved; then
+    DRY_RUN_STR="true"
+    CV_REAL_APPLY_BLOCKED=1
+    echo "WARN: real apply is NOT approved for credit-verification-batch (policies/credit-approval-automation.json: approved != true, approved_by/approval_ref empty, or unreadable). Running DRY: score + report only, zero writes." >&2
+    echo "CV_REAL_APPLY_BLOCKED registry=policies/credit-approval-automation.json mode=dry writes=0"
+  fi
+fi
+
 # Validate selector. Profile/credit modes REQUIRE a UUID; queue mode ignores ID.
 case "$SELECTOR_KIND" in
   queue)
@@ -423,6 +449,10 @@ if [[ "$DRY_RUN_STR" == "false" ]]; then
   elif (( CV_ATTEMPTED == 0 )); then
     CV_OUTCOME=no_eligible
   fi
+elif (( CV_REAL_APPLY_BLOCKED )); then
+  # A real run was requested but not approved, so it ran dry. Named
+  # separately so the cron run log shows WHY nothing was written.
+  CV_OUTCOME=dry_run_real_apply_not_approved
 else
   CV_OUTCOME=dry_run
 fi
@@ -431,7 +461,7 @@ fi
 # for a real run (where "no accounting" is itself the finding). A manual dry
 # run whose stub/summary carries no contract line stays quiet rather than
 # printing a row of `?`.
-if [[ -n "$CV_ACCT_LINE" || "$DRY_RUN_STR" == "false" ]]; then
+if [[ -n "$CV_ACCT_LINE" || "$DRY_RUN_STR" == "false" ]] || (( CV_REAL_APPLY_BLOCKED )); then
   printf 'CV_BATCH_RESULT queue_depth=%s sampled=%s attempted=%s landed=%s refused=%s transport_failed=%s outcome=%s\n' \
     "${CV_QUEUE_DEPTH:-?}" "${CV_SAMPLED:-?}" "${CV_ATTEMPTED:-?}" "${CV_LANDED:-?}" \
     "${CV_REFUSED:-?}" "${CV_TRANSPORT_FAILED:-?}" "$CV_OUTCOME"

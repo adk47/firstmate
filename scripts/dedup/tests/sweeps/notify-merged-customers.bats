@@ -12,6 +12,12 @@
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../../../.." && pwd)"
   NOTIFY="$REPO_ROOT/scripts/dedup/sweeps/notify-merged-customers.py"
+  # Empty stdin from a real empty file, NOT </dev/null: on 2026-10-09 node-8's
+  # /dev/null (the host of every hydra CI runner) became a regular file that
+  # collects whatever is written to it, so reading it fed junk "ticket ids" to
+  # the script and these cases failed intermittently.
+  EMPTY_STDIN="$BATS_TEST_TMPDIR/empty-stdin"
+  : > "$EMPTY_STDIN"
 }
 
 @test "notify-merged-customers syntax-checks" {
@@ -21,13 +27,13 @@ setup() {
 
 @test "refuses to run without CLICKUP_API_KEY" {
   # Use bash subshell + unset for portability — macOS env has no -u.
-  run bash -c "unset CLICKUP_API_KEY; MUSOAI_INTERCOM_TOKEN=fake python3 '$NOTIFY' </dev/null"
+  run bash -c "unset CLICKUP_API_KEY; MUSOAI_INTERCOM_TOKEN=fake python3 '$NOTIFY' <'$EMPTY_STDIN'"
   [ "$status" -eq 1 ]
   echo "$output" | grep -qi "env required.*CLICKUP_API_KEY"
 }
 
 @test "refuses to run without MUSOAI_INTERCOM_TOKEN" {
-  run bash -c "unset MUSOAI_INTERCOM_TOKEN; CLICKUP_API_KEY=fake python3 '$NOTIFY' </dev/null"
+  run bash -c "unset MUSOAI_INTERCOM_TOKEN; CLICKUP_API_KEY=fake python3 '$NOTIFY' <'$EMPTY_STDIN'"
   [ "$status" -eq 1 ]
   echo "$output" | grep -qi "env required.*MUSOAI_INTERCOM_TOKEN"
 }
@@ -36,7 +42,7 @@ setup() {
   # New contract: unset INTERCOM_ADMIN_ID falls back to CAROLINE_ADMIN_ID
   # (5763097) so the reply matches the rest of the Intercom thread.
   # Should NOT complain about a missing env var.
-  run bash -c "unset INTERCOM_ADMIN_ID; CLICKUP_API_KEY=fake MUSOAI_INTERCOM_TOKEN=fake python3 '$NOTIFY' --apply </dev/null"
+  run bash -c "unset INTERCOM_ADMIN_ID; CLICKUP_API_KEY=fake MUSOAI_INTERCOM_TOKEN=fake python3 '$NOTIFY' --apply <'$EMPTY_STDIN'"
   # exits 1 because stdin is empty, NOT because of missing INTERCOM_ADMIN_ID
   [ "$status" -eq 1 ]
   echo "$output" | grep -qi "no ticket ids on stdin"
@@ -44,7 +50,7 @@ setup() {
 }
 
 @test "allows dry-run (default) without INTERCOM_ADMIN_ID" {
-  run bash -c "unset INTERCOM_ADMIN_ID; CLICKUP_API_KEY=fake MUSOAI_INTERCOM_TOKEN=fake python3 '$NOTIFY' </dev/null"
+  run bash -c "unset INTERCOM_ADMIN_ID; CLICKUP_API_KEY=fake MUSOAI_INTERCOM_TOKEN=fake python3 '$NOTIFY' <'$EMPTY_STDIN'"
   # exits 1 because stdin is empty, NOT because of missing INTERCOM_ADMIN_ID
   [ "$status" -eq 1 ]
   echo "$output" | grep -qi "no ticket ids on stdin"
@@ -53,7 +59,7 @@ setup() {
 
 @test "exits 1 with no ticket ids on stdin" {
   run env CLICKUP_API_KEY=fake MUSOAI_INTERCOM_TOKEN=fake \
-      python3 "$NOTIFY" </dev/null
+      python3 "$NOTIFY" <"$EMPTY_STDIN"
   [ "$status" -eq 1 ]
   echo "$output" | grep -qi "no ticket ids"
 }
@@ -198,7 +204,7 @@ PYEOF
   # `or CAROLINE_ADMIN_ID` fallback in main() handles both unset AND empty
   # string so a stale `INTERCOM_ADMIN_ID=` in a launcher script no longer
   # silently breaks the apply path mid-run.
-  run bash -c "INTERCOM_ADMIN_ID='' CLICKUP_API_KEY=fake MUSOAI_INTERCOM_TOKEN=fake python3 '$NOTIFY' --apply </dev/null"
+  run bash -c "INTERCOM_ADMIN_ID='' CLICKUP_API_KEY=fake MUSOAI_INTERCOM_TOKEN=fake python3 '$NOTIFY' --apply <'$EMPTY_STDIN'"
   # exits 1 because stdin is empty, NOT because of missing INTERCOM_ADMIN_ID
   [ "$status" -eq 1 ]
   echo "$output" | grep -qi "no ticket ids on stdin"

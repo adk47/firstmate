@@ -86,6 +86,9 @@ workspaces/*/.bridge-*.json
 # pinned by scripts/tests/pre-commit-rsync-invariant.bats).
 workspaces/*/bridge-request-*.json
 workspaces/*/bridge-*.json
+# In-flight agent-bridge request payload (scripts/agent-bridge-request.sh), dotted
+# + agent-bridge- prefix; server-owned, rsync-excluded in scripts/deploy.sh.
+workspaces/*/.agent-bridge-*.json
 # Agent ad-hoc shell at a workspace root (e.g. a one-off reply poller); tracked
 # shell lives under skills/ or scripts/.
 workspaces/*/*.sh

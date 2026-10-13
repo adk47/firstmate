@@ -19,6 +19,7 @@ from uvn_under30_policy import (  # noqa: E402
     no_pending_rows_remaining,
     parse_ticket_scope,
     pending_request_ids,
+    has_hard_reject_signal,
     qualifies_for_approval,
     resolve_profile_scope,
 )
@@ -349,6 +350,25 @@ class QualificationTests(unittest.TestCase):
         risky = row(verificationData={"rule_risk_percent": {"reject_role_mismatch": 1}})
         self.assertFalse(qualifies_for_approval(risky, spotify(1), set()))
         self.assertFalse(qualifies_for_approval(row(verificationData=None), spotify(1), set()))
+
+    def test_rejects_idp_1686_review_holds(self):
+        # A review_* hold (IDP #1686) blocks approval exactly like a reject_*.
+        held = row(verificationData={"rule_risk_percent": {
+            "reject_artist_credit": 0,
+            "review_role_credited_to_other_at_trusted_source": 100,
+        }})
+        self.assertTrue(has_hard_reject_signal(held))
+        self.assertFalse(qualifies_for_approval(held, spotify(1), set()))
+        # A hold rule that did not fire (0) does not block.
+        clear = row(verificationData={"rule_risk_percent": {
+            "reject_artist_credit": 0,
+            "review_role_credited_to_other_at_trusted_source": 0,
+        }})
+        self.assertFalse(has_hard_reject_signal(clear))
+        self.assertTrue(qualifies_for_approval(clear, spotify(1), set()))
+        # A non-numeric hold value fails closed.
+        odd = row(verificationData={"rule_risk_percent": {"review_big_track_uncorroborated": "yes"}})
+        self.assertFalse(qualifies_for_approval(odd, spotify(1), set()))
 
 
 class ResolutionTests(unittest.TestCase):

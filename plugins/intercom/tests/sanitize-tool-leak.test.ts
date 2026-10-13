@@ -139,4 +139,33 @@ describe("sanitizeToolLeak", () => {
     const lowerRed = out.redactions.map((r) => r.toLowerCase());
     expect(lowerRed).toContain("create_ticket");
   });
+
+  it("allows the instructed truncation suffix from SKILL.md to pass unsanitized", async () => {
+    const skillPath = new URL("../../../workspaces/support/skills/output-sanitizer/SKILL.md", import.meta.url);
+    const skillText = await import("fs").then((fs) => fs.promises.readFile(skillPath, "utf-8"));
+
+    // Extract the suffix from the "If truncated, append: "..." line
+    const match = skillText.match(/If truncated, append: "([^"]+)"/);
+    if (!match || !match[1]) {
+      throw new Error("Could not find 'If truncated, append: \"...\"' line in SKILL.md");
+    }
+    const suffix = match[1];
+
+    // The instructed suffix must survive sanitization without redaction
+    const out = sanitizeToolLeak(suffix);
+    expect(out.redactions).toEqual([]);
+    expect(out.body).toBe(suffix);
+  });
+
+  it("the instructed truncation suffix contains no customer-banned word", async () => {
+    const skillPath = new URL("../../../workspaces/support/skills/output-sanitizer/SKILL.md", import.meta.url);
+    const skillText = await import("fs").then((fs) => fs.promises.readFile(skillPath, "utf-8"));
+    const match = skillText.match(/If truncated, append: "([^"]+)"/);
+    if (!match || !match[1]) {
+      throw new Error("Could not find 'If truncated, append: \"...\"' line in SKILL.md");
+    }
+    for (const word of ["tool", "lookup", "error", "unavailable", "system", "api", "ticket", "clickup", "openclaw", "hydra"]) {
+      expect(match[1].toLowerCase()).not.toMatch(new RegExp(`\\b${word}\\b`));
+    }
+  });
 });

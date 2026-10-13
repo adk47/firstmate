@@ -891,7 +891,54 @@ def build_next_state(state, needs_human, rendered_items, now_epoch, aging_hours)
     return next_state
 
 
-def _delta_body_lines(new_items, aging_items, now_epoch, top_n):
+def _threshold_label(hours):
+    return f"{hours:g}h"
+
+
+def _customer_activity_fact(c, now_epoch):
+    """Slack-visible facts only; never infer that a customer was unanswered."""
+    if c["lcr"] > c["lar"]:
+        return ("customer is last recorded replier; last customer reply "
+                f"{age_str(c['lcr'], now_epoch)} ago")
+    if c["lcr"]:
+        return ("customer and team share the latest recorded reply time; "
+                f"last customer reply {age_str(c['lcr'], now_epoch)} ago")
+    return ("customer-initiated; opened "
+            f"{age_str(waiting_since(c), now_epoch)} ago; no recorded reply")
+
+
+DAILY_TITLE = "CS open-conversation review daily digest"
+DELTA_TITLE = "CS open-conversation review delta"
+REPLY_ORDER_CAVEAT = (
+    "Open status and reply order do not prove that a customer went unanswered."
+)
+SLACK_SECTION_CHAR_LIMIT = 3000
+
+
+def _slack_section_blocks(lines):
+    """Pack complete lines into Slack section blocks below the 3000-char cap."""
+    chunks = []
+    current = []
+    current_length = 0
+    for line in lines:
+        added_length = len(line) + (1 if current else 0)
+        if current and current_length + added_length > SLACK_SECTION_CHAR_LIMIT:
+            chunks.append("\n".join(current))
+            current = []
+            current_length = 0
+            added_length = len(line)
+        current.append(line)
+        current_length += added_length
+    if current:
+        chunks.append("\n".join(current))
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
+        for chunk in chunks
+    ]
+
+
+def _delta_body_lines(new_items, aging_items, now_epoch, top_n,
+                      aging_hours=DEFAULT_AGING_HOURS):
     """Counts + capped rows + overflow pointer — the digest BODY, with no
     title/mention line (callers own that, exactly once each, so the title
     never appears twice — see render_delta_digest / build_delta_digest_blocks).
@@ -904,20 +951,26 @@ def _delta_body_lines(new_items, aging_items, now_epoch, top_n):
     the true new/aging totals, so the cap only affects which rows are
     listed, never what's reported as counted."""
     rendered, overflow = _cap_delta_items(new_items, aging_items, top_n)
-    lines = [f"new: {len(new_items)}  aging: {len(aging_items)}"]
+    threshold = _threshold_label(aging_hours)
+    lines = [
+        f"new to this digest: {len(new_items)}  "
+        f"older than {threshold} since customer-side activity: {len(aging_items)}"
+    ]
     for c in rendered:
-        since = waiting_since(c)
-        never_replied = "never replied, " if not c["lcr"] else ""
-        aging_suffix = "  ⚠️ aging" if c in aging_items else ""
+        threshold_suffix = (
+            f"  ⚠️ older than {threshold} since customer-side activity"
+            if c in aging_items else "")
         lines.append(f"  {intercom_link(c['id'])}  {mask_email(c['email'])}  "
-                      f"waiting {never_replied}{age_str(since, now_epoch)}{aging_suffix}")
+                     f"{_customer_activity_fact(c, now_epoch)}{threshold_suffix}")
     if overflow > 0:
         lines.append(f"  …and {overflow} more (see 13:30 full digest)")
+    lines.append(REPLY_ORDER_CAVEAT)
     return lines
 
 
 def render_delta_digest(new_items, aging_items, now_epoch, top_n=DEFAULT_TOP_N,
-                         mention_uid=None, mention=None):
+                         mention_uid=None, mention=None,
+                         aging_hours=DEFAULT_AGING_HOURS):
     """Plain-text rendering of a --delta run's surfaced items (new + newly
     aging, deduped, capped at top_n — see _delta_body_lines). Mention
     rendered per the same rule as render_text_digest (see its docstring);
@@ -925,13 +978,15 @@ def render_delta_digest(new_items, aging_items, now_epoch, top_n=DEFAULT_TOP_N,
     missing UID) when the caller already has one — see main()."""
     if mention is None:
         mention = _mention_prefix(mention_uid, aging_items)
-    lines = [mention + "CS needs-human delta digest"]
-    lines.extend(_delta_body_lines(new_items, aging_items, now_epoch, top_n))
+    lines = [mention + DELTA_TITLE]
+    lines.extend(_delta_body_lines(
+        new_items, aging_items, now_epoch, top_n, aging_hours))
     return "\n".join(lines)
 
 
 def build_delta_digest_blocks(new_items, aging_items, now_epoch, top_n=DEFAULT_TOP_N,
-                               mention_uid=None, mention=None):
+                               mention_uid=None, mention=None,
+                               aging_hours=DEFAULT_AGING_HOURS):
     """Block Kit rendering. Builds the body directly via _delta_body_lines
     rather than calling render_delta_digest (which would recompute the
     mention and re-render the title a second time — the title lives ONLY in
@@ -939,12 +994,12 @@ def build_delta_digest_blocks(new_items, aging_items, now_epoch, top_n=DEFAULT_T
     if mention is None:
         mention = _mention_prefix(mention_uid, aging_items)
     blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": "CS needs-human delta digest"}},
+        {"type": "header", "text": {"type": "plain_text", "text": DELTA_TITLE}},
     ]
     if mention:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": mention.strip()}})
-    body = "\n".join(_delta_body_lines(new_items, aging_items, now_epoch, top_n))
-    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
+    blocks.extend(_slack_section_blocks(_delta_body_lines(
+        new_items, aging_items, now_epoch, top_n, aging_hours)))
     return blocks
 
 
@@ -999,31 +1054,39 @@ def build_digest_blocks(buckets, now_epoch, top_n=DEFAULT_TOP_N,
     blocks = [
         # plain_text header (no mrkdwn/mention parsing -> never pings anyone,
         # matching the repo convention: reference_slack_blockkit_header_mention_no_ping).
-        {"type": "header", "text": {"type": "plain_text", "text": "CS needs-human daily digest"}},
+        {"type": "header", "text": {"type": "plain_text", "text": DAILY_TITLE}},
     ]
     if mention:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": mention}})
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
-        f"*needs-human:* {len(nh)}  ·  *needs-customer-input:* {len(nci)}  ·  "
-        f"*dup-candidate:* {len(dup)}")}})
+        f"*customer-side activity is latest:* {len(nh)}  ·  "
+        f"*team-side activity is latest, or team initiated with no recorded customer "
+        f"reply:* {len(nci)}  ·  "
+        f"*possible duplicate open conversations:* {len(dup)}")}})
+    blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                   "text": f"_{REPLY_ORDER_CAVEAT}_"}})
     if not nh:
         blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                       "text": ":white_check_mark: nothing waiting on us right now."}})
+                       "text": (":white_check_mark: no open conversations currently "
+                                "have customer-side activity as the latest recorded event.")}})
         return blocks
 
     lines = []
+    threshold = _threshold_label(aging_hours)
     for c in nh[:top_n]:
         since = waiting_since(c)
-        flag = " :rotating_light: past 48h" if now_epoch - since > SLA_HOURS_FLAG * 3600 else ""
-        aging_flag = "  ⚠️ aging" if c in aging_items else ""
-        never_replied = "never replied, " if not c["lcr"] else ""
+        flag = (" :rotating_light: customer-side activity older than 48h"
+                if now_epoch - since > SLA_HOURS_FLAG * 3600 else "")
+        threshold_flag = (
+            f"  ⚠️ older than {threshold} since customer-side activity"
+            if c in aging_items else "")
         lines.append(
             f"• <{intercom_link(c['id'])}|conversation {c['id']}> — "
-            f"{_slack_escape(mask_email(c['email']))} — waiting {never_replied}"
-            f"{age_str(since, now_epoch)}{flag}{aging_flag}")
+            f"{_slack_escape(mask_email(c['email']))} — "
+            f"{_customer_activity_fact(c, now_epoch)}{flag}{threshold_flag}")
     if len(nh) > top_n:
         lines.append(f"…and {len(nh) - top_n} more")
-    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+    blocks.extend(_slack_section_blocks(lines))
     return blocks
 
 
@@ -1036,15 +1099,20 @@ def render_text_digest(buckets, now_epoch, top_n=DEFAULT_TOP_N,
     if mention is None:
         mention = _mention_prefix(mention_uid, aging_items)
     lines = [
-        mention + "CS needs-human daily digest",
-        f"needs-human: {len(nh)}  needs-customer-input: {len(nci)}  dup-candidate: {len(dup)}",
+        mention + DAILY_TITLE,
+        f"customer-side activity is latest: {len(nh)}  "
+        f"team-side activity is latest, or team initiated with no recorded customer "
+        f"reply: {len(nci)}  "
+        f"possible duplicate open conversations: {len(dup)}",
+        REPLY_ORDER_CAVEAT,
     ]
+    threshold = _threshold_label(aging_hours)
     for c in nh[:top_n]:
-        since = waiting_since(c)
-        never_replied = "never replied, " if not c["lcr"] else ""
-        aging_suffix = "  ⚠️ aging" if c in aging_items else ""
+        threshold_suffix = (
+            f"  ⚠️ older than {threshold} since customer-side activity"
+            if c in aging_items else "")
         lines.append(f"  {intercom_link(c['id'])}  {mask_email(c['email'])}  "
-                      f"waiting {never_replied}{age_str(since, now_epoch)}{aging_suffix}")
+                     f"{_customer_activity_fact(c, now_epoch)}{threshold_suffix}")
     if len(nh) > top_n:
         lines.append(f"  ...and {len(nh) - top_n} more")
     return "\n".join(lines)
@@ -1353,13 +1421,16 @@ def main():
             return 0
 
         mention = _mention_prefix(mention_uid, aging_items)
-        text = render_delta_digest(new_items, aging_items, now_epoch, top_n, mention=mention)
+        text = render_delta_digest(
+            new_items, aging_items, now_epoch, top_n,
+            mention=mention, aging_hours=aging_hours)
         print(text)
         if not args.post:
             print("DRY-RUN — nothing posted. Re-run with --post to post to Slack.")
             return 0
-        blocks = build_delta_digest_blocks(new_items, aging_items, now_epoch,
-                                            top_n, mention=mention)
+        blocks = build_delta_digest_blocks(
+            new_items, aging_items, now_epoch, top_n,
+            mention=mention, aging_hours=aging_hours)
         posted = post_slack_digest(blocks, text, channel, cfg, account)
         print(f"slack post: {'posted' if posted else 'skipped/failed'} -> {channel}")
         if posted:

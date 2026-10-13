@@ -3,9 +3,9 @@ name: muso-ops-credit-verification
 description: |
   Deterministic credit verification via the Lobster pipeline. Triggered by
   @mention in #credit-verification (C0APB2CMM7C). Three selectors — the
-  unverified queue, a specific profile, or a single credit-request. Real
-  apply is the default in all modes; pass the `dry` keyword to force a
-  no-write summary instead.
+  unverified queue, a specific profile, or a single credit-request. Since
+  2026-10-11 every run is DRY (score + report, zero writes) until the
+  captain approves the fixed pipeline; the dispatcher enforces it.
 
   Triggers: @mention in #credit-verification matching one of the regex
   patterns in "Trigger phrases" below.
@@ -33,9 +33,15 @@ Slack thread reply — that IS the entire response.
 | profile | profile UUID          | All unverified credits on that profile (cap 500)   |
 | credit  | credit-request UUID   | The one specified credit-request                   |
 
-In every mode, real apply is the default — the pipeline bulk-PUTs
-`would_approve` credits to `status="approved"` via the admin API. Pass
-the `dry` keyword to force a no-write summary instead.
+**Since 2026-10-11 every run is DRY: score + report only, zero writes.**
+`dispatch-cv-batch.sh` downgrades a `real` request to dry (and prints
+`CV_REAL_APPLY_BLOCKED`) unless `policies/credit-approval-automation.json`
+sets `credit-verification-batch.approved: true`. It does not. The old
+approve rule was inverted and approved credits the validator had declined.
+Do not try to work around the downgrade. Tell the requester the run was a
+dry run, and that real apply waits on the captain. When real apply is
+re-approved, the pipeline bulk-PUTs `would_approve` credits to
+`status="approved"` via the admin API, and `dry` forces a no-write summary.
 
 ## Trigger phrases (case-insensitive, whitespace tolerant)
 
