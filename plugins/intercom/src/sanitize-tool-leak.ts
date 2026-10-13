@@ -79,6 +79,17 @@ const PATTERNS: RegExp[] = [
   /\bClickUp\b/gi,
   /\bopenclaw\b/gi,
   /\bHYDRA\b/g, // case-sensitive: only the all-caps internal moniker
+  // internal threads, issues and repos: a customer is never told where our work is tracked.
+  // Nick, 2026-10-08 (MUS-5248): platform-data-processing#2405 had been quoted to customers
+  // as the place credit-verification requests are handled, by a thread nobody answers.
+  // `#\d{3,}` is deliberate: without it a bare "Tracked on #2405." ships, which is exactly the
+  // banned outcome. The cost is limited to an order number the model chooses to prefix with
+  // `#` (nothing in TOOLS.md or SOUL.md asks for that); the hash-free form stays readable (see
+  // the order-reference negative test). Same threshold as scripts/intercom-ops-write.sh.
+  /https?:\/\/(?:www\.)?(?:github|gitlab)\.com\/\S+/gi,
+  /\bissues?\s+#?\d+/gi,
+  /#\d{3,}\b/g,
+  /\bplatform-data-processing\b/gi,
 ];
 
 export function sanitizeToolLeak(body: string): ToolLeakSanitizeResult {
