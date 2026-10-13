@@ -33,6 +33,9 @@ interface AdminCreditsResponse {
     items: Record<string, unknown>[];
     totalCount?: number;
     hasMoreToLoad?: boolean;
+    total?: number;
+    limit?: number;
+    offset?: number;
   };
 }
 
@@ -44,9 +47,13 @@ interface ToolDeps {
 
 export function filterCreditsResults(raw: Record<string, unknown>): FilteredCreditsResult {
   const items = (raw.items as Record<string, unknown>[]) ?? [];
+  const totalCount = Number(raw.totalCount ?? raw.total ?? items.length);
+  const hasMore = raw.hasMoreToLoad !== undefined
+    ? Boolean(raw.hasMoreToLoad)
+    : Number(raw.offset ?? 0) + Number(raw.limit ?? items.length) < totalCount;
   return {
-    totalCount: Number(raw.totalCount ?? items.length),
-    hasMore: Boolean(raw.hasMoreToLoad),
+    totalCount,
+    hasMore,
     credits: items.map((item) => {
       const rawCredits = (item.credits as unknown[]) ?? [];
       const creditRoles = rawCredits.map((c) =>

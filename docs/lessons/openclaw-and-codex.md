@@ -108,6 +108,18 @@ from `skills-all/`), so it's empty there.
 
 ### Cron
 
+**Main's session store is pruned offline nightly (MUS-1295 / MUS-3737).** The
+gateway cannot prune its own store while serving; on cold start
+`listSqliteSessionEntriesFromDatabase` scans every `session_nodes` row, and at
+~7k rows the event loop did not return for ~20 min (froze main after every
+restart, fed a watchdog restart loop). Offline `sessions cleanup --all-agents
+--enforce` at `pruneAfter=24h` took it **7,076 → 2,728 rows**, rss 6,428 → 971 MB,
+stable `/health` 264 s after start. ~2,100 rows are protected at ANY `pruneAfter`
+(live Slack threads), so 24h is the floor, not a tunable. Owner:
+`hydra-main-prune-restart.timer` (02:30 UTC) running `scripts/main-prune-restart.sh`;
+the last 2 backups (7.0 GB each) are in `/var/backups/hydra-main-sessions/<UTC-ts>/`.
+Restore and disarm steps are in that script's header.
+
 **Two payload shapes, strictly enforced by the CLI.** "Run a task" = `--session
 isolated` (default) + `--message` + `--announce --channel slack --to <target>`;
 `--at "+0s"` makes a one-shot (defaults `deleteAfterRun:true`). `--session main`
