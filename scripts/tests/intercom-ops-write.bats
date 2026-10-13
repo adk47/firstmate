@@ -206,6 +206,8 @@ curl_calls() { if [ -f "$CURL_STUB_LOG" ]; then wc -l < "$CURL_STUB_LOG" | tr -d
     "Our tool failed on the first try, sorry." \
     "I ran profile_status for you." \
     "Tracked on #2405." \
+    "Your verification is open on issue 2405." \
+    "Both are tracked under issues 2405 and 2406." \
     "Ask <@U038BM16T7W> for details." \
     "The admin id on this thread is fine."; do
     run "$SCRIPT" reply --conversation 1 --requested-by U038BM16T7W --customer-facing --approved-by U038BM16T7W --body "$bad"

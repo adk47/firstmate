@@ -91,9 +91,13 @@ DEVOPS_ENVSET_BACKEND="${DEVOPS_ENVSET_BACKEND:-}"
 # stakater/reloader auto-restarting the consuming pods. So the DURABLE dev write
 # is a Vault merge-patch (mirrors `vault kv patch`); a `kubectl patch secret`
 # would be reverted by ESO within 30s. node-8 has NO vault CLI, so we use curl
-# against the HTTP API. Fail-closed until an operator provides a reachable Vault
-# address + a token/AppRole scoped to `secret/data/k8s/muso-dev/*` — Vault's
-# in-cluster svc address is NOT reachable from node-8's host (see SKILL.md).
+# against the HTTP API (Vault's in-cluster svc address is NOT reachable from
+# node-8's host; main.env points at a NodePort instead). Still fail-closed when
+# unconfigured, but on node-8 this IS provisioned and working as of 2026-10-09:
+# the token holds patch on secret/data/k8s/{muso-dev,muso-chat-dev}/*, read on
+# muso-dev/* only (read on muso-chat-dev is UNVERIFIED), and is correctly denied on
+# muso-prod/*. It does NOT hold token-self-lookup, so its TTL
+# is unobservable — see SKILL.md "DEV go-live" and MUS-6586.
 DEVOPS_DEV_VAULT_ADDR="${DEVOPS_DEV_VAULT_ADDR:-${VAULT_ADDR:-}}"
 DEVOPS_DEV_VAULT_TOKEN="${DEVOPS_DEV_VAULT_TOKEN:-${VAULT_TOKEN:-}}"
 DEVOPS_DEV_VAULT_MOUNT="${DEVOPS_DEV_VAULT_MOUNT:-secret}"   # KV v2 mount

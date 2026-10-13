@@ -61,6 +61,15 @@ STUB
   export CV_DISPATCH_GUARD_WINDOW_SECS=600
   export CV_DISPATCH_GUARD_MAX=2
   unset CV_DISPATCH_GUARD_DISABLE
+
+  # Real apply is gated on the TRACKED policies/credit-approval-automation.json,
+  # resolved next to the script with no env override (2026-10-11). The
+  # accounting/lock tests below exercise a REAL run, so they run a copy of the
+  # scripts whose sibling registry approves it. The gate's own tests use the
+  # repo copy (approved=false) or an unapproved/broken tree.
+  APPROVED_SCRIPTS="$(make_approval_tree true)"
+  DISPATCH="$APPROVED_SCRIPTS/lobster-mvp/dispatch-cv-batch.sh"
+  CRON_ENTRY="$APPROVED_SCRIPTS/credit-verification-batch-cron.sh"
 }
 teardown() { teardown_tmp_env; }
 
@@ -136,6 +145,77 @@ make_raw_response() { # <response-file> <summary-text-file>
     run --separate-stderr "$CRON_ENTRY"
   [ "$status" -eq 6 ]
   [[ "$output" == *"outcome=silent_noop"* ]]
+}
+
+@test "real apply is forced DRY when the registry does not approve it (the repo default)" {
+  # 2026-10-11 containment: the approve rule was inverted, so a real run must be
+  # impossible until the captain approves the fixed pipeline in a reviewed PR.
+  # The REPO's registry says approved=false, so a real request becomes dry.
+  run jq -e '.automations["credit-verification-batch"].approved == false' "$SCRIPTS_DIR/../../../../../policies/credit-approval-automation.json"
+  [ "$status" -eq 0 ]
+  DISPATCH="$SCRIPTS_DIR/lobster-mvp/dispatch-cv-batch.sh"
+  real_dispatch 500 "" real queue ""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CV_REAL_APPLY_BLOCKED"* ]]
+  [[ "$output" == *"outcome=dry_run_real_apply_not_approved"* ]]
+  [[ "$stderr" == *"real apply is NOT approved"* ]]
+  run jq -e '.args.argsJson | fromjson | .dry_run == "true"' <<< "$(last_body)"
+  [ "$status" -eq 0 ]
+}
+
+@test "a caller cannot re-arm real apply by pointing an env var at its own registry" {
+  # QA finding on hydra#1138: CV_APPROVAL_REGISTRY used to be a caller-controlled
+  # override. It must now be ignored.
+  printf '{"automations":{"credit-verification-batch":{"approved":true,"approved_by":"me","approval_ref":"me"}}}\n' > "$TEST_TMPDIR/forged.json"
+  DISPATCH="$SCRIPTS_DIR/lobster-mvp/dispatch-cv-batch.sh"
+  CV_APPROVAL_REGISTRY="$TEST_TMPDIR/forged.json" real_dispatch 500 "" real queue ""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CV_REAL_APPLY_BLOCKED"* ]]
+  run jq -e '.args.argsJson | fromjson | .dry_run == "true"' <<< "$(last_body)"
+  [ "$status" -eq 0 ]
+}
+
+@test "real apply is forced DRY when the registry is unapproved, malformed, or approved without who/where" {
+  local unapproved
+  unapproved="$(make_approval_tree false)"
+  DISPATCH="$unapproved/lobster-mvp/dispatch-cv-batch.sh"
+  real_dispatch 5 "" real profile 8b3859c5-7930-4a48-8078-7262b2bb8dc6
+  [ "$status" -eq 0 ]
+  run jq -e '.args.argsJson | fromjson | .dry_run == "true"' <<< "$(last_body)"
+  [ "$status" -eq 0 ]
+  local reg="$unapproved/../../../../../policies/credit-approval-automation.json"
+  printf 'not json' > "$reg"
+  : > "$TEST_TMPDIR/curl.body"
+  real_dispatch 1 "" real credit b490eaad-7575-4ff9-9f08-804e37ce51e3
+  run jq -e '.args.argsJson | fromjson | .dry_run == "true"' <<< "$(last_body)"
+  [ "$status" -eq 0 ]
+  printf '{"automations":{"credit-verification-batch":{"approved":true,"approved_by":null,"approval_ref":"x"}}}\n' > "$reg"
+  : > "$TEST_TMPDIR/curl.body"
+  real_dispatch 1 "" real credit b490eaad-7575-4ff9-9f08-804e37ce51e3
+  run jq -e '.args.argsJson | fromjson | .dry_run == "true"' <<< "$(last_body)"
+  [ "$status" -eq 0 ]
+  rm -f "$reg"
+  : > "$TEST_TMPDIR/curl.body"
+  real_dispatch 1 "" real credit b490eaad-7575-4ff9-9f08-804e37ce51e3
+  run jq -e '.args.argsJson | fromjson | .dry_run == "true"' <<< "$(last_body)"
+  [ "$status" -eq 0 ]
+}
+
+@test "the cron entrypoint (no args) is also forced DRY without approval" {
+  CV_DISPATCH_GUARD_DISABLE=1 run --separate-stderr "$SCRIPTS_DIR/credit-verification-batch-cron.sh"
+  [ "$status" -eq 0 ]
+  run jq -e '.args.argsJson | fromjson | .dry_run == "true"' <<< "$(last_body)"
+  [ "$status" -eq 0 ]
+}
+
+@test "real apply proceeds only when the registry approves it" {
+  make_response "$TEST_TMPDIR/resp.json" 10 10 10 10
+  export CV_TEST_RESPONSE_FILE="$TEST_TMPDIR/resp.json"
+  real_dispatch 500 "" real queue ""
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"CV_REAL_APPLY_BLOCKED"* ]]
+  run jq -e '.args.argsJson | fromjson | .dry_run == "false"' <<< "$(last_body)"
+  [ "$status" -eq 0 ]
 }
 
 @test "every dispatch names an explicit agent owner in the invoke body" {

@@ -152,8 +152,28 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
     };
     api.registerTool(profileStatusFactory, { name: "profile_status" });
 
+    // intercomToken / intercomReader are hoisted here (created further down for
+    // dedupe_check et al.) because profile_analytics_status needs them too, and
+    // this factory is registered before that later block. A missing token still
+    // registers the tool and it fails CLOSED at call time (owner_undetermined) —
+    // it does not unregister and does not break sibling tools.
+    const intercomToken = pluginConfig.intercomToken ?? process.env.MUSOAI_INTERCOM_TOKEN ?? "";
+    if (!intercomToken) {
+      console.warn("[support-tools] MUSOAI_INTERCOM_TOKEN not set; dedupe_check, credit_verification_check, and profile_analytics_status will fail closed (no ownership verification).");
+    }
+    const intercomReader = createIntercomReader(http);
+
     const profileAnalyticsStatusFactory = (ctx: any) => {
-      return createProfileAnalyticsStatusTool({ adminClient: musoAdminClient, rateLimiter, sessionId: ctx.sessionId ?? "unknown" });
+      return createProfileAnalyticsStatusTool({
+        adminClient: musoAdminClient,
+        rateLimiter,
+        sessionId: ctx.sessionId ?? "unknown",
+        // Anti-spoof anchor: the trusted gateway session KEY (carries the convId),
+        // NOT ctx.sessionId (an ephemeral UUID that never matches). See deriveConvId.
+        sessionKey: ctx.sessionKey ?? "unknown",
+        intercomReader,
+        intercomToken,
+      });
     };
     api.registerTool(profileAnalyticsStatusFactory, { name: "profile_analytics_status" });
 
@@ -211,11 +231,8 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
     // read from process.env (it lives in edge.env); it is NOT a hydra-env
     // secret-ref and NOT a hard-required key — when absent the tool fails
     // CLOSED (owner_undetermined), it does not break the other tools.
-    const intercomToken = pluginConfig.intercomToken ?? process.env.MUSOAI_INTERCOM_TOKEN ?? "";
-    if (!intercomToken) {
-      console.warn("[support-tools] MUSOAI_INTERCOM_TOKEN not set; dedupe_check and credit_verification_check will fail closed (no ownership verification).");
-    }
-    const intercomReader = createIntercomReader(http);
+    // (intercomToken / intercomReader are declared above, hoisted for
+    // profile_analytics_status — not re-created here.)
     const dedupeCheckFactory = (ctx: any) => {
       return createDedupeCheckTool({
         adminClient: musoAdminClient,

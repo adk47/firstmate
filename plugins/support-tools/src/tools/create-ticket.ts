@@ -20,7 +20,7 @@ import {
   intercomDeeplink,
 } from "./ticket-format.js";
 import { deriveConvId } from "./dedupe-check.js";
-import { markTicketFiled } from "../ticket-success-signal.js";
+import { markTicketFiled, markTicketId } from "../ticket-success-signal.js";
 import { validateProdigiAddress } from "../order-address.js";
 
 const Parameters = Type.Object({
@@ -166,6 +166,15 @@ interface ClickupTaskSummary {
   status?: { status?: string; type?: string };
   date_created?: string;
   tags?: { name?: string }[];
+  custom_fields?: { id?: string; value?: unknown }[];
+}
+
+// Minimal shape check, not RFC validation: the only job is to refuse to ask
+// ClickUp "who matches this email" with "", whitespace or free text (MUS-6588).
+const DEDUPE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function isUsableDedupeEmail(e: string): boolean {
+  const t = e.trim();
+  return t !== "" && DEDUPE_EMAIL_RE.test(t);
 }
 
 // "Open" = not done/closed by status TYPE ("to do" and "in progress" are both
@@ -188,6 +197,11 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
   // email + action tag, across conversations — a second same-type ask within
   // a week is treated as the same request. Fail-soft — any error means "no
   // existing ticket", never a blocked filing.
+  // This is the ONLY cross-conversation lookup in the plugin (class sweep:
+  // `git grep custom_fields=` over plugins/support-tools finds only this file).
+  // ClickUp's custom_fields filter is not trusted: `value: ""` returned
+  // unrelated customers' tasks (MUS-6588), so the newest candidate's email is
+  // verified below and an unverifiable candidate is dropped, never appended to.
   async function lookupOpenTicket(actionType: string, customerEmail: string): Promise<string | null> {
     try {
       const customFieldsFilter = JSON.stringify([
@@ -212,11 +226,30 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
           Number(t.date_created) >= cutoff &&
           !t.tags?.some((tag) => tag.name === "intercom-auto-handoff"))
         .sort((a, b) => Number(b.date_created) - Number(a.date_created));
-      return open[0]?.id ?? null;
+      const candidate = open[0];
+      if (!candidate) return null;
+      return (await candidateMatchesEmail(candidate, customerEmail)) ? candidate.id : null;
     } catch (err) {
       console.warn(`[support-tools] create_ticket dedupe lookup failed (creating anyway): ${err}`);
       return null;
     }
+  }
+
+  // Verify-or-reject: read the email custom field from the list payload, or
+  // (when ClickUp omits custom_fields there) from one single-task GET. Cannot
+  // read it, or it differs => not our customer's ticket.
+  async function candidateMatchesEmail(task: ClickupTaskSummary, customerEmail: string): Promise<boolean> {
+    const emailOf = (t: ClickupTaskSummary) => t.custom_fields?.find((f) => f.id === clickupUserEmailFieldId)?.value;
+    let value = emailOf(task);
+    if (value === undefined) {
+      const res = await http.get<ClickupTaskSummary>(
+        `https://api.clickup.com/api/v2/task/${task.id}`,
+        { headers: { Authorization: clickupApiKey } },
+      );
+      if (!res?.ok || !res.data) return false;
+      value = emailOf(res.data);
+    }
+    return typeof value === "string" && value.trim().toLowerCase() === customerEmail.toLowerCase();
   }
 
   // Registry entries can outlive the ticket they point at (ops closes it
@@ -241,6 +274,8 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
     description: "Create a support ticket in the team's task system for customer requests that require human action (credit claims, profile merges, analytics followups, refunds, data deletion, etc.). When the same request already has a ticket in this conversation, the new information is appended to it instead of opening a duplicate.",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
+      // Normalize once: "empty" has a single shape everywhere below.
+      const customerEmail = params.customerEmail.trim();
       // Action-specific detail enrichment, normalized ONCE up front so the
       // validation gate below and the rendered ticket read the same object.
       let details = params.details;
@@ -356,27 +391,34 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
 
       const contentParams = {
         summary: params.summary, actionType: params.actionType, tier,
-        customerEmail: params.customerEmail, customerProfileId: params.customerProfileId,
+        customerEmail: customerEmail, customerProfileId: params.customerProfileId,
         details, conversationSummary: params.conversationSummary, sessionId,
       };
 
       // --- Dedupe: same conversation + same action type → append, don't re-file.
       // (Live 2026-06-10 audit: customers adding one detail produced up to 5
       // duplicate tickets per conversation — see jurakez1/jenarobinson10.)
-      let existingId = sessionTickets.get(sessionId, params.actionType, params.customerEmail);
+      let existingId = sessionTickets.get(sessionId, params.actionType, customerEmail);
       if (existingId && !(await isTicketStillOpen(existingId))) {
-        sessionTickets.invalidate(sessionId, params.actionType, params.customerEmail);
+        sessionTickets.invalidate(sessionId, params.actionType, customerEmail);
         existingId = null;
       }
       // Cross-conversation fallback. Skipped for profile-merge AND track-merge:
       // the merged-ticket sweep auto-closes those keyed on the ORIGINAL
       // description's ids, so appending a DIFFERENT merge request (a distinct
-      // track/profile set) cross-conversation could be closed unexecuted. The
+      // track/profile set) cross-conversation could be closed unexecuted. Also
+      // skipped for rights_holder: the lookup keys on (actionType, email) only,
+      // never on content, so a label/publisher/PRO/law firm mailing about a
+      // SECOND matter would be appended to the first matter's open record and
+      // lost when the sweep closes it on the first. Rights-holder mail always
+      // opens its own record (in-session follow-ups above still append). The
       // lookup GET is metered in its own bucket so a retry-looping session can't
       // hammer ClickUp search.
       if (!existingId && params.actionType !== "profile-merge" && params.actionType !== "track-merge"
+          && params.details?.escalation_reason !== "rights_holder"
+          && isUsableDedupeEmail(customerEmail)
           && rateLimiter.check(sessionId, "create_ticket_lookup", 60, 10).allowed) {
-        existingId = await lookupOpenTicket(params.actionType, params.customerEmail);
+        existingId = await lookupOpenTicket(params.actionType, customerEmail);
       }
       if (existingId) {
         // Follow-ups get their own (more generous) budget — appending info is
@@ -392,11 +434,15 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
           },
         );
         if (comment?.ok) {
-          sessionTickets.record(sessionId, params.actionType, params.customerEmail, existingId);
+          sessionTickets.record(sessionId, params.actionType, customerEmail, existingId);
           // Signal the intercom false-handoff-claim guard that a ticket really landed
           // for this conversation, so an "I've flagged this for the team" reply is
           // allowed through instead of being rewritten to the honest fallback.
-          markTicketFiled(deriveConvId(sessionKey));
+          const followupConvId = deriveConvId(sessionKey);
+          markTicketFiled(followupConvId);
+          // MUS-1516: also record WHICH id, so the guard's reference-id check
+          // can tell a real quoted id from one this conversation never filed.
+          markTicketId(followupConvId, existingId);
           // Escalation follow-up (e.g. customer already past the promised
           // SLA): give it teeth — tag the ticket so the overdue sweep groups
           // it, and bump urgent reasons to ClickUp priority 1. Both
@@ -430,7 +476,7 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       }
 
       const customFields: { id: string; value: string }[] = [
-        { id: clickupUserEmailFieldId, value: params.customerEmail },
+        { id: clickupUserEmailFieldId, value: customerEmail },
       ];
       if (params.customerProfileId) {
         customFields.push({ id: clickupProfileIdFieldId, value: params.customerProfileId });
@@ -465,7 +511,7 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       }
 
       const body: Record<string, unknown> = {
-        name: buildTicketTitle({ actionType: params.actionType, gist, customerEmail: params.customerEmail }),
+        name: buildTicketTitle({ actionType: params.actionType, gist, customerEmail }),
         markdown_description: buildTicketMarkdown({ ...contentParams, gist, sla, customerName, intercomUrl }),
         status: "to do",
         priority,
@@ -487,10 +533,14 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         return ticketResult({ submitted: false, reason: "queue_busy" });
       }
 
-      sessionTickets.record(sessionId, params.actionType, params.customerEmail, result.data.id);
+      sessionTickets.record(sessionId, params.actionType, customerEmail, result.data.id);
       // Signal the intercom false-handoff-claim guard that a ticket really landed for
       // this conversation (mirrors the follow-up-append path above).
-      markTicketFiled(deriveConvId(sessionKey));
+      markTicketFiled(convId);
+      // MUS-1516: also record WHICH id (reuses the `convId` already derived above
+      // for the Intercom deeplink), so the guard's reference-id check can tell a
+      // real quoted id from one this conversation never filed.
+      markTicketId(convId, result.data.id);
       return ticketResult({ submitted: true, ticket_id: result.data.id, sla, action_type: params.actionType, tier });
     },
   };

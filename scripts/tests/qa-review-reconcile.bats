@@ -119,6 +119,66 @@ setup_lib() {
   [ "$output" = "pending-suppress" ]
 }
 
+@test "lib: qar_classify_verdict — FRESH pending (within the budget) still suppresses" {
+  setup_lib
+  run qar_classify_verdict 0 "pending" 0 "QA review queued for abc1234" 60 1800
+  [ "$output" = "pending-suppress" ]
+  run qar_classify_verdict 0 "pending" 0 "" 1800 1800
+  [ "$output" = "pending-suppress" ]
+}
+
+@test "lib: qar_classify_verdict — a pending OLDER than the budget is not in-flight evidence -> candidate" {
+  setup_lib
+  run qar_classify_verdict 0 "pending" 0 "QA review queued for abc1234" 1801 1800
+  [ "$output" = "candidate" ]
+}
+
+@test "lib: qar_classify_verdict — a NEGATIVE pending age (future updated_at, clock skew) is stale -> candidate" {
+  setup_lib
+  run qar_classify_verdict 0 "pending" 0 "" -5 1800
+  [ "$output" = "candidate" ]
+  run qar_classify_verdict 0 "pending" 0 "" 0 1800
+  [ "$output" = "pending-suppress" ]
+}
+
+@test "lib: qar_classify_verdict — the workflow's own dispatch-failure literal is NOT a verdict" {
+  setup_lib
+  # Read the literal OUT of the workflow so renaming it on either side turns this red.
+  lit="$(grep -F 'say_status failure "QA review could not be dispatched' "$HYDRA_REPO/.github/workflows/qa-autoreview.yml" | sed -E 's/.*say_status failure "([^"]*)".*/\1/')"
+  [ -n "$lit" ]
+  run qar_classify_verdict 0 "failure" 0 "$lit"
+  [ "$output" = "candidate" ]
+  run qar_classify_verdict 0 "error" 0 "$lit"
+  [ "$output" = "candidate" ]
+}
+
+@test "lib: qar_classify_verdict — the reconciler's own exhaustion write is NOT a verdict (literal read from the script)" {
+  setup_lib
+  lit="$(grep -F 'failure "QA review lost' "$HYDRA_REPO/scripts/qa-review-reconcile.sh" | sed -E 's/.*failure "([^"]*)".*/\1/' | sed 's/\$attempts/2/')"
+  [ -n "$lit" ]
+  run qar_classify_verdict 0 "failure" 1 "$lit"
+  [ "$output" = "candidate" ]
+}
+
+@test "lib: qar_classify_verdict — a real NO-GO failure stays a verdict" {
+  setup_lib
+  run qar_classify_verdict 0 "failure" 0 "NO-GO — 1 blocking finding"
+  [ "$output" = "verdict" ]
+  run qar_classify_verdict 0 "success" 0 "QA review could not be dispatched"
+  [ "$output" = "verdict" ]
+}
+
+@test "lib: qar_qa_review_status_field — description/updated_at; malformed input is rc1" {
+  setup_lib
+  j='{"statuses":[{"context":"qa-review","state":"pending","description":"d","updated_at":"2026-01-01T00:00:00Z"}]}'
+  run qar_qa_review_status_field "$j" description
+  [ "$output" = "d" ]
+  run qar_qa_review_status_field "$j" updated_at
+  [ "$output" = "2026-01-01T00:00:00Z" ]
+  run qar_qa_review_status_field 'not json' description
+  [ "$status" -eq 1 ]
+}
+
 @test "lib: qar_classify_verdict — pending on a MERGE-GATED repo is a candidate (stale pending must not silence forever)" {
   setup_lib
   run qar_classify_verdict 0 "pending" 1
@@ -612,7 +672,8 @@ STUB
   cat > "$DISPATCH_STUB" <<'STUB'
 #!/usr/bin/env bash
 printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" >> "$DISPATCH_CALLS"
-exit 0
+# DISPATCH_RC lets a test simulate a failing dispatcher (75 = never reached the gateway).
+exit "${DISPATCH_RC:-0}"
 STUB
   chmod +x "$DISPATCH_STUB"
 
@@ -741,6 +802,61 @@ JSON
   export QA_RECONCILE_NOW_EPOCH
   run "$SCRIPT" --once
   [ "$status" -eq 0 ]
+  [ ! -s "$DISPATCH_CALLS" ]
+}
+
+# MUS-3631: only a completed review ends the retry loop.
+_mus3631_run() {  # <pr> <sha> <status-json> [rollup-state]
+  seed_epoch_state "Muso-AI/core-backend"
+  mk_pr_list "Muso-AI/core-backend" "$1" "$2" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/core-backend" "$2" "2026-01-01T00:00:00Z"
+  printf '%s' "$3" > "$FIX/status/Muso-AI-core-backend-$2.json"
+  if [ -n "${4:-}" ]; then
+    jq --arg st "$4" '[.[] | .statusCheckRollup = [{"context":"qa-review","state":$st}]]' \
+      "$FIX/prlist/Muso-AI-core-backend.json" > "$FIX/prlist/tmp.json"
+    mv "$FIX/prlist/tmp.json" "$FIX/prlist/Muso-AI-core-backend.json"
+  fi
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+}
+
+@test "e2e MUS-3631: a head carrying only a STALE pending is dispatched" {
+  _mus3631_run 60 "shastale000000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"pending","description":"QA review queued for shastal","updated_at":"2026-01-01T00:00:00Z"}]}' PENDING
+  [ -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a pending stamped in the FUTURE (clock skew) is dispatched, not suppressed" {
+  _mus3631_run 64 "shafuture00000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"pending","description":"QA review queued for shafutu","updated_at":"2026-01-01T05:00:00Z"}]}' PENDING
+  [ -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a pending with an unparseable updated_at is dispatched, not suppressed" {
+  _mus3631_run 65 "shabadts00000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"pending","description":"QA review queued for shabads","updated_at":"garbage"}]}' PENDING
+  [ -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a head carrying a FRESH pending is not dispatched" {
+  _mus3631_run 61 "shafresh000000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"pending","description":"QA review queued for shafres","updated_at":"2026-01-01T00:59:00Z"}]}' PENDING
+  [ ! -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a head carrying the dispatch-failure red is re-dispatched, even via the rollup short-circuit" {
+  lit="$(grep -F 'say_status failure "QA review could not be dispatched' "$HYDRA_REPO/.github/workflows/qa-autoreview.yml" | sed -E 's/.*say_status failure "([^"]*)".*/\1/')"
+  [ -n "$lit" ]
+  _mus3631_run 62 "shainfra000000000000000000000000000000001" \
+    "$(jq -n --arg d "$lit" '{statuses:[{context:"qa-review",state:"failure",description:$d,updated_at:"2026-01-01T00:00:00Z"}]}')" FAILURE
+  [ -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e MUS-3631: a real NO-GO failure is NOT re-dispatched (rollup short-circuit)" {
+  _mus3631_run 63 "shanogo0000000000000000000000000000000001" \
+    '{"statuses":[{"context":"qa-review","state":"failure","description":"NO-GO — 1 blocking finding","updated_at":"2026-01-01T00:00:00Z"}]}' FAILURE
   [ ! -s "$DISPATCH_CALLS" ]
 }
 
@@ -2021,4 +2137,75 @@ JSON
   run jq -r '.__meta__.repo_failures["Muso-AI/core-backend"] // 0' "$QA_RECONCILE_STATE_FILE"
   [ "$output" = "1" ]
   [ ! -s "$DISPATCH_CALLS" ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Dispatch exit 75 (never reached the gateway) must not burn an attempt
+# ─────────────────────────────────────────────────────────────────────────
+
+unreach_epoch() {
+  echo "$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 7200 ))"
+}
+
+# unreach_setup <pr> <sha> — one candidate PR, epoch-seeded, no prior attempts.
+unreach_setup() {
+  seed_epoch_state "Muso-AI/core-backend"
+  mk_pr_list "Muso-AI/core-backend" "$1" "$2" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/core-backend" "$2" "2026-01-01T00:00:00Z"
+  export QA_RECONCILE_NOW_EPOCH="$(unreach_epoch)"
+}
+
+@test "e2e 75a: dispatch rc 75 -> attempts unchanged, cooldown stamp advanced, unreachable_attempts counted; a later tick re-dispatches instead of paging EXHAUSTED" {
+  sha="shaunr0000000000000000000000000000000001"
+  key="Muso-AI/core-backend#60@$sha"
+  unreach_setup 60 "$sha"
+  now="$QA_RECONCILE_NOW_EPOCH"
+  DISPATCH_RC=75 run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+  [ "$(jq -r --arg k "$key" '.[$k].last_attempt_epoch' "$QA_RECONCILE_STATE_FILE")" = "$now" ]
+  [ "$(jq -r --arg k "$key" '.[$k].unreachable_attempts' "$QA_RECONCILE_STATE_FILE")" = "1" ]
+  # Inside the cooldown: no hammering.
+  DISPATCH_RC=75 run "$SCRIPT" --once
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 1 ]
+  # Three more past-cooldown unreachable ticks: still never exhausted, never an EXHAUSTED page.
+  for i in 1 2 3; do
+    now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+    DISPATCH_RC=75 run "$SCRIPT" --once
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"EXHAUSTED"* ]]
+  done
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 4 ]
+  [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+}
+
+@test "e2e 75b: dispatch rc 1 STILL counts as an attempt (a systematically broken dispatcher must hit the cap)" {
+  sha="shaunr0000000000000000000000000000000002"
+  key="Muso-AI/core-backend#61@$sha"
+  unreach_setup 61 "$sha"
+  DISPATCH_RC=1 run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "1" ]
+  [ "$(jq -r --arg k "$key" '.[$k].unreachable_attempts // 0' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+}
+
+@test "e2e 75c: three consecutive all-unreachable ticks page exactly ONCE, a fourth pages nothing, an rc-0 dispatch resets the counter" {
+  sha="shaunr0000000000000000000000000000000003"
+  unreach_setup 62 "$sha"
+  now="$QA_RECONCILE_NOW_EPOCH"
+  for i in 1 2; do
+    DISPATCH_RC=75 run "$SCRIPT" --once
+    [ ! -s "$SLACK_CALLS" ]
+    now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+  done
+  DISPATCH_RC=75 run "$SCRIPT" --once
+  [ "$(jq -r '.__meta__.consecutive_unreachable_ticks' "$QA_RECONCILE_STATE_FILE")" = "3" ]
+  [ "$(wc -l < "$SLACK_CALLS" | tr -d ' ')" -eq 1 ]
+  [[ "$output" == *"GATEWAY UNREACHABLE"* ]]
+  now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+  DISPATCH_RC=75 run "$SCRIPT" --once
+  [ "$(wc -l < "$SLACK_CALLS" | tr -d ' ')" -eq 1 ]
+  now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+  DISPATCH_RC=0 run "$SCRIPT" --once
+  [ "$(jq -r '.__meta__.consecutive_unreachable_ticks // 0' "$QA_RECONCILE_STATE_FILE")" = "0" ]
 }

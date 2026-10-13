@@ -59,6 +59,9 @@ export interface JevShadowRowInput {
   actual: string;
   rc: 0 | 2 | 3;
   http: number | null;
+  // Failure token (timeout, network, http_<code>, shape, questions_unavailable)
+  // — rc collapses these; journalctl, which rolls, was the only other record.
+  reason?: string | null;
   // Default true — see IntercomAccountConfig.jev.shadow.storeState.
   storeState?: boolean;
   // Which caroline-questions*.json shape produced `answers` — "v1" for the
@@ -108,6 +111,7 @@ export async function appendJevShadowRow(
       actual: input.actual,
       rc: input.rc,
       http: input.http,
+      reason: input.reason ?? null,
       provider: input.provider ?? "openrouter",
       questions_version: input.questionsVersion ?? "v1",
       state_variant: input.stateVariant ?? null,

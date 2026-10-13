@@ -261,3 +261,15 @@ J
   [[ "$output" == *"total=2 rc_nonzero=0 p50_ms=10 p95_ms=1000"* ]]
   rm -rf "$d"
 }
+
+@test "footer breaks failures down by reason, counting rows with no reason as unknown (MUS-3191)" {
+  cat > "$TEST_TMPDIR/caroline.jsonl" <<'J'
+{"ts":"2026-10-05T08:00:00Z","surface":"caroline","item_id":"a","answers":null,"latency_ms":1500,"actual":"none","rc":2,"http":null,"reason":"timeout"}
+{"ts":"2026-10-05T08:01:00Z","surface":"caroline","item_id":"b","answers":null,"latency_ms":1500,"actual":"none","rc":2,"http":null,"reason":"timeout"}
+{"ts":"2026-10-05T08:02:00Z","surface":"caroline","item_id":"c","answers":null,"latency_ms":20,"actual":"none","rc":3,"http":200,"reason":"shape"}
+{"ts":"2026-10-05T08:03:00Z","surface":"caroline","item_id":"d","answers":null,"latency_ms":20,"actual":"none","rc":2,"http":null}
+J
+  run "$REPORT" --shadow-dir "$TEST_TMPDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"failures by reason: shape=1 timeout=2 unknown=1"* ]]
+}

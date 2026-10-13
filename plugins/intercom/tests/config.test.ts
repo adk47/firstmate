@@ -426,3 +426,22 @@ describe("jev.questionsVersion / jev.shadowVersions config (shadow-only rollout 
     expect(() => resolveIntercomAccount(cfg)).toThrow(/agentInstructionsPath must be a non-empty string/);
   });
 });
+
+describe("jev.shadowTimeoutMs config (MUS-3192)", () => {
+  const base = { enabled: true, workspaceId: "w", token: "t", webhookSecret: "s", botAdminId: "b" };
+  const withJev = (jev: Record<string, unknown>) => ({
+    channels: { intercom: { accounts: { default: { ...base, jev: { enabled: true, apiKey: "k", ...jev } } } } },
+  });
+
+  it("passes a positive integer through", () => {
+    expect(resolveIntercomAccount(withJev({ shadowTimeoutMs: 5000 })).jev?.shadowTimeoutMs).toBe(5000);
+  });
+
+  it("leaves it undefined when unset", () => {
+    expect(resolveIntercomAccount(withJev({})).jev?.shadowTimeoutMs).toBeUndefined();
+  });
+
+  it.each([0, -1, 1.5, "5000", Number.NaN, null])("rejects %p", (bad) => {
+    expect(() => resolveIntercomAccount(withJev({ shadowTimeoutMs: bad }))).toThrow(/jev\.shadowTimeoutMs/);
+  });
+});

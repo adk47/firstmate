@@ -82,7 +82,7 @@ setup() {
 
 run_rollback() {
   run env HYDRA_LOCAL=true DEPLOY_PATH="$DEPLOY" PROFILE_STATE_ROOT="$STATE" \
-    SLACK_WEBHOOK="" \
+    OPENCLAW_PROFILE_ROOT="$TMP/oc" SLACK_WEBHOOK="" \
     bash "$SRC/scripts/rollback.sh"
 }
 
@@ -418,4 +418,152 @@ run_rollback() {
   run_rollback
   run git -C "$SRC" worktree list
   [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ]
+}
+
+# ── runtime restore (8 Oct, deploy run 37791745129) ───────────────────────────
+# deploy.sh Step 4c.5 swaps the GLOBAL openclaw binary before Step 4d.5 can fail.
+# rollback.sh restored only the tree, so node-8 was left with runtime 2026.8.35
+# under 2026.8.2 plugins. deploy.sh records the pre-swap version in
+# $DEPLOY_PATH/.pre-deploy-openclaw-version (line 1 = runtime, line 2 = each state
+# DB's user_version at swap time; removed once Step 6 is done); rollback.sh
+# reinstalls the runtime BEFORE restarting the gateways, but only while every
+# state DB's user_version still equals line 2 (CTO ruling, MUS-5232).
+
+stub_npm_and_openclaw() {
+  export NPM_LOG="$TMP/npm.log"; : > "$NPM_LOG"
+  printf '#!/usr/bin/env bash\necho "npm $*" >> "$NPM_LOG"\n[ -z "${NPM_RC:-}" ] || exit "$NPM_RC"\nif [ "$1 $2" = "install -g" ]; then echo "${3#openclaw@}" > "$TMP/runtime-version"; fi\nexit 0\n' > "$TMP/bin/npm"
+  printf '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "OpenClaw $(cat "$TMP/runtime-version") (abc1234)"; fi\nexit 0\n' > "$TMP/bin/openclaw"
+  chmod +x "$TMP/bin/npm" "$TMP/bin/openclaw"
+  export TMP
+  echo "2026.8.35" > "$TMP/runtime-version"
+}
+
+# write_record <runtime> — creates both profiles' state DBs at user_version 15
+# and records <runtime> with the matching "main=15 edge=15" line.
+write_record() {
+  for p in main edge; do
+    mkdir -p "$TMP/oc/.openclaw-$p/state"
+    sqlite3 "$TMP/oc/.openclaw-$p/state/openclaw.sqlite" "pragma user_version=15;"
+  done
+  printf '%s\nmain=15 edge=15\n' "$1" > "$DEPLOY/.pre-deploy-openclaw-version"
+}
+
+@test "a recorded pre-deploy runtime is reinstalled before the gateways restart, then the record is cleared" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw
+  write_record 2026.8.2
+
+  run_rollback
+
+  [ "$status" -eq 0 ]
+  grep -qxF "npm install -g openclaw@2026.8.2" "$NPM_LOG"
+  [ "$(cat "$TMP/runtime-version")" = "2026.8.2" ]
+  [ ! -f "$DEPLOY/.pre-deploy-openclaw-version" ]
+}
+
+@test "no recorded runtime (the swap never happened or gateways already ran it): npm is never touched" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw
+
+  run_rollback
+
+  [ "$status" -eq 0 ]
+  [ ! -s "$NPM_LOG" ]
+  [ "$(cat "$TMP/runtime-version")" = "2026.8.35" ]
+}
+
+@test "a runtime restore that fails FAILS the rollback and keeps the record (no silent mixed state)" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw
+  write_record 2026.8.2
+
+  NPM_RC=1 run_rollback
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"runtime"* ]]
+  [ -f "$DEPLOY/.pre-deploy-openclaw-version" ]
+}
+
+@test "state DB user_version moved since the swap: the old binary is NOT installed, record kept, rollback still completes" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw; stub_systemctl_log
+  write_record 2026.8.2
+  sqlite3 "$TMP/oc/.openclaw-main/state/openclaw.sqlite" "pragma user_version=16;"
+
+  run_rollback
+
+  [ "$status" -eq 0 ]
+  [ ! -s "$NPM_LOG" ]
+  [ "$(cat "$TMP/runtime-version")" = "2026.8.35" ]
+  [ -f "$DEPLOY/.pre-deploy-openclaw-version" ]
+  [[ "$output" == *"main=15 edge=15"* && "$output" == *"main=16 edge=15"* ]]
+  grep -qxF "systemctl restart openclaw-gateway-main" "$SYSTEMCTL_LOG"
+}
+
+@test "an old one-line record (no user_version to compare) is refused, never guessed" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw
+  write_record 2026.8.2
+  echo "2026.8.2" > "$DEPLOY/.pre-deploy-openclaw-version"
+
+  run_rollback
+
+  [ "$status" -eq 0 ]
+  [ ! -s "$NPM_LOG" ]
+  [ -f "$DEPLOY/.pre-deploy-openclaw-version" ]
+}
+
+@test "an unreadable state DB is refused, never treated as unchanged" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw
+  write_record 2026.8.2
+  printf 'not a database' > "$TMP/oc/.openclaw-edge/state/openclaw.sqlite"
+
+  run_rollback
+
+  [ "$status" -eq 0 ]
+  [ ! -s "$NPM_LOG" ]
+  [ -f "$DEPLOY/.pre-deploy-openclaw-version" ]
+}
+
+# ── availability window (MUS-5079): deploy.sh stops a gateway at Step 4d and only
+# its own Step 6 starts it again. Every rollback exit before rollback's Step 2
+# restart must still leave BOTH gateways started.
+
+stub_systemctl_log() {
+  export SYSTEMCTL_LOG="$TMP/systemctl.log"; : > "$SYSTEMCTL_LOG"
+  printf '#!/usr/bin/env bash\necho "systemctl $*" >> "$SYSTEMCTL_LOG"\nexit 0\n' > "$TMP/bin/systemctl"
+  chmod +x "$TMP/bin/systemctl"
+}
+
+assert_both_gateways_started() {
+  grep -qxF "systemctl start openclaw-gateway-main" "$SYSTEMCTL_LOG"
+  grep -qxF "systemctl start openclaw-gateway-edge" "$SYSTEMCTL_LOG"
+}
+
+@test "availability: runtime restore failure (exit before Step 2) still starts both gateways" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_npm_and_openclaw; stub_systemctl_log
+  write_record 2026.8.2
+  NPM_RC=1 run_rollback
+  [ "$status" -ne 0 ]
+  assert_both_gateways_started
+}
+
+@test "availability: unreadable last-known-good SHA (earliest exit) still starts both gateways" {
+  printf 'not-a-sha\n' > "$DEPLOY/.deployed-sha"
+  stub_systemctl_log
+  run_rollback
+  [ "$status" -ne 0 ]
+  assert_both_gateways_started
+}
+
+@test "availability: a rollback that completes Step 2 does not start them a second time" {
+  printf '%s\n' "$GOOD_SHA" > "$DEPLOY/.deployed-sha"
+  stub_systemctl_log
+  run_rollback
+  [ "$status" -eq 0 ]
+  grep -qxF "systemctl restart openclaw-gateway-main" "$SYSTEMCTL_LOG"
+  grep -qxF "systemctl restart openclaw-gateway-edge" "$SYSTEMCTL_LOG"
+  if grep -q "systemctl start" "$SYSTEMCTL_LOG"; then echo "NEGATED ASSERTION FAILED: backstop fired after Step 2" >&2; false; fi
 }

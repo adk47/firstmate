@@ -169,6 +169,8 @@ required_excludes=(
   "workspaces/*/write-activity.log"
   "workspaces/*/*.csv"
   "workspaces/*/.*pr-review-*.json"
+  "workspaces/*/*_MANIFEST_*.md"
+  "workspaces/*/.ops-*.json"
   "secrets/"
   "audit/"
   "audit-local-backup/"
@@ -192,6 +194,7 @@ required_excludes=(
   "workspaces/*/*.sql"
   "workspaces/*/*.sh"
   "workspaces/*/.bridge-*.json"
+  "workspaces/*/.agent-bridge-*.json"
   "workspaces/*/bridge-request-*.json"
   "workspaces/*/bridge-*.json"
   "workspaces/*/skills/*/references/daily-batches/"
@@ -202,6 +205,8 @@ required_excludes=(
   ".ruff_cache/"
   "*.pyc"
   "workspaces/*/.wrangler/"
+  "workspaces/support/reference/hc-*.md"
+  "workspaces/support/reference/hc-manifest.json"
 )
 if [[ ! -f "$DEPLOY_SH" ]]; then
   fail "$DEPLOY_SH not found"
@@ -1557,6 +1562,17 @@ else
   ──────────────────────────────────────────────────────────────────
 BRIEFING
   fi
+fi
+
+# MUS-5643: no new literal /tmp/ scratch paths (trap-EXIT cannot clean agent shells)
+echo "▸ no new /tmp scratch paths"
+if [[ ! -f scripts/check-no-tmp-scratch.sh ]]; then
+  ok "no /tmp scratch guard in this tree (synthetic fixture repo)"
+elif tmp_out=$(bash scripts/check-no-tmp-scratch.sh --staged 2>&1); then
+  ok "no new /tmp/ scratch paths"
+else
+  fail "new literal /tmp/ scratch path (use \${PAPERCLIP_RUN_SCRATCH_DIR:-\${TMPDIR:-/tmp}}/..., or '# tmp-ok: <reason>')"
+  printf '%s\n' "$tmp_out"
 fi
 
 echo

@@ -1999,7 +1999,7 @@ BODY
 # poll script). QA on PR #950 found the third list missing for the new shapes.
 @test "workspace-root runtime shapes are in all three lists: deploy excludes, hook required_excludes, .gitignore" {
   root="${BATS_TEST_DIRNAME}/../.."
-  for pat in 'workspaces/*/bridge-request-*.json' 'workspaces/*/bridge-*.json' 'workspaces/*/*.sh'; do
+  for pat in 'workspaces/*/bridge-request-*.json' 'workspaces/*/bridge-*.json' 'workspaces/*/*.sh' 'workspaces/*/.agent-bridge-*.json'; do
     grep -Fxq -- "  --exclude='$pat'" "$root/scripts/deploy.sh"
     run awk '/^required_excludes=\(/{f=1;next} f&&/^\)/{f=0;exit} f' "$HOOK"
     [[ "$output" == *"\"$pat\""* ]]

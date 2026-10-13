@@ -11,7 +11,9 @@
 # an actual write, so "nobody touched the content in N days" means
 # dead. Categories:
 #
-#   1. /tmp depth-1 entries with mtime > TMP_AGE_DAYS (14d), minus
+#   1. /tmp depth-1 entries with mtime > TMP_AGE_DAYS (14d; 2d for
+#      qa-pr-* and <repo>-<n>-review-<6 chars> review clones,
+#      QA_PR_AGE_DAYS), minus
 #      an exclude list (sockets, openclaw runtime files, locks) and
 #      two rails: a dir containing ANY file fresher than the cutoff
 #      is skipped (still in use), and a dir with a mountpoint under
@@ -55,6 +57,7 @@
 # Env knobs (mainly for tests — defaults target production):
 #   WEEKLY_CLEANUP_TMP_ROOT          default /tmp
 #   WEEKLY_CLEANUP_TMP_AGE_DAYS      default 14
+#   WEEKLY_CLEANUP_QA_PR_AGE_DAYS    default 2 (qa-pr-* and *-review-* clones only)
 #   WEEKLY_CLEANUP_TMP_EXCLUDES     space-separated basename globs;
 #                                    REPLACES the default list when set
 #   WEEKLY_CLEANUP_BAK_ROOTS         default "/opt/hydra /root/hydra-hotpatch-backups"
@@ -69,6 +72,11 @@ set -euo pipefail
 LOGPREFIX="[weekly-cleanup $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
 TMP_ROOT="${WEEKLY_CLEANUP_TMP_ROOT:-/tmp}"
 TMP_AGE_DAYS="${WEEKLY_CLEANUP_TMP_AGE_DAYS:-14}"
+QA_PR_AGE_DAYS="${WEEKLY_CLEANUP_QA_PR_AGE_DAYS:-2}"
+case "$QA_PR_AGE_DAYS" in
+  ''|*[!0-9]*) echo "weekly-cleanup: WEEKLY_CLEANUP_QA_PR_AGE_DAYS must be a non-negative integer, got '$QA_PR_AGE_DAYS'" >&2; exit 2 ;;
+esac
+QA_PR_AGE_DAYS=$((10#$QA_PR_AGE_DAYS))  # "08" is invalid octal in $(( )) and would silently skip the lane
 BAK_ROOTS="${WEEKLY_CLEANUP_BAK_ROOTS:-/opt/hydra /root/hydra-hotpatch-backups}"
 BAK_AGE_DAYS="${WEEKLY_CLEANUP_BAK_AGE_DAYS:-30}"
 SKIP_APT="${WEEKLY_CLEANUP_SKIP_APT:-0}"
@@ -172,10 +180,18 @@ guard_tmp_root() {
 # Category 1: stale depth-1 /tmp entries (mtime-keyed)
 # ──────────────────────────────────────────────────────────────
 clean_tmp() {
-  local cutoff_epoch p name kb err
-  cutoff_epoch=$(( $(date +%s) - TMP_AGE_DAYS * 86400 ))
+  local cutoff_epoch p name kb err now
+  now="$(date +%s)"
   while IFS= read -r -d '' p; do
     name="$(basename "$p")"
+    # PR-review clones are disposable (verdict lives on GitHub): short TTL.
+    if [[ "$name" == qa-pr-* || "$name" =~ ^[A-Za-z0-9._-]+-[0-9]+-review-[A-Za-z0-9]{6}$ ]]; then
+      cutoff_epoch=$(( now - QA_PR_AGE_DAYS * 86400 ))
+    else
+      cutoff_epoch=$(( now - TMP_AGE_DAYS * 86400 ))
+      # find's short-TTL arm below is a broad glob; re-check the long TTL here.
+      [ -n "$(find "$p" -maxdepth 0 -mtime +"$TMP_AGE_DAYS" -print -quit 2>/dev/null)" ] || continue
+    fi
     if is_excluded "$name"; then
       tmp_excluded=$((tmp_excluded + 1)); continue
     fi
@@ -211,7 +227,8 @@ clean_tmp() {
       }
     fi
     tmp_deleted=$((tmp_deleted + 1)); tmp_freed_kb=$((tmp_freed_kb + kb))
-  done < <(find "$TMP_ROOT" -mindepth 1 -maxdepth 1 -xdev -mtime +"$TMP_AGE_DAYS" -print0 2>/dev/null)
+  done < <(find "$TMP_ROOT" -mindepth 1 -maxdepth 1 -xdev \
+    \( -mtime +"$TMP_AGE_DAYS" -o \( \( -name 'qa-pr-*' -o -name '*-review-??????' \) -mmin +"$(( QA_PR_AGE_DAYS * 1440 ))" \) \) -print0 2>/dev/null)
 }
 
 # ──────────────────────────────────────────────────────────────

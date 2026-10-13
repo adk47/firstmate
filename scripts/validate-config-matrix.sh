@@ -124,9 +124,13 @@ for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
   #    model in a non-final position that returns an empty completion is scored
   #    candidate_succeeded and silently STOPS the chain instead of advancing to
   #    the stronger model behind it (2026-06-08 @CMO incident, PR #450).
-  #    GPT-5 id pattern matches openclaw's: (^|[/:])gpt-5([.-]|$), so
-  #    openrouter/openai/gpt-5.4-mini and openai/gpt-5.5 qualify; gemini / haiku
-  #    / sonnet / opus do not. Scope: agent text `model` chains only — NOT
+  #    GPT id pattern: (^|[/:])gpt-[56]([.-]|$), so openrouter/openai/gpt-5.4-mini,
+  #    openai/gpt-5.5 and openrouter/openai/gpt-6-luna qualify; gemini / haiku
+  #    / sonnet / opus do not. openclaw's own isGpt5ModelId is /gpt-5/ only, but
+  #    on the pinned @openclaw/codex 2026.8.35 the fallback classifier
+  #    (result-fallback-classifier) no longer consults it — any empty result
+  #    cascades (MUS-5128) — so gpt-6 is safe here; this gate stays as a belt.
+  #    Scope: agent text `model` chains only — NOT
   #    imageModel (separate path; gpt-5.4-mini is not an image model). A non-GPT-5
   #    *primary* (e.g. cmo on opus-4.7 by choice) keeps an unavoidable
   #    empty-swallow residual that the cron-health watchdog covers; this gate
@@ -139,7 +143,7 @@ for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
     | select($n > 1)
     | range(0; $n - 1) as $i
     | $fb[$i] as $m
-    | select(($m | test("(^|[/:])gpt-5([.-]|$)"; "i")) | not)
+    | select(($m | test("(^|[/:])gpt-[56]([.-]|$)"; "i")) | not)
     | $id + " fallback[" + ($i | tostring) + "]=" + $m
   ' "$cfg")
   if [[ -n "$bad" ]]; then
@@ -411,8 +415,8 @@ if [[ -n "$CRON" && -f "$CRON" ]]; then
       fail=1
     fi
 
-    # 5. Every cron payload must run on codex (openai/gpt-5.6-sol) with the full
-    #    intended fallback chain: gpt-5.6-luna first (GPT-5-family hop — same
+    # 5. Every cron payload must run on codex (openai/gpt-6-sol) with the full
+    #    intended fallback chain: gpt-6-luna first (GPT-5-family hop — same
     #    brain via the OpenRouter api-key route when codex OAuth is down), then
     #    claude-haiku as the last-resort non-OpenAI backstop. Pins the 2026-06
     #    cutover that moved all crons off Opus/Haiku onto codex, plus the
@@ -423,14 +427,14 @@ if [[ -n "$CRON" && -f "$CRON" ]]; then
     #    in result-fallback-classifier). A non-GPT-5 first hop (gemini) that
     #    returns an empty completion counts as candidate_succeeded and STOPS the
     #    chain — never reaching the sonnet backstop (the 2026-06-08 @CMO incident,
-    #    PR #450). gpt-5.6-luna is GPT-5-family so its empties cascade.
+    #    PR #450). gpt-6-luna is in the GPT-5/6 family so its empties cascade.
     #    A future cron with any other primary silently re-introduces OpenRouter
     #    Opus spend, a non-GPT-5 first fallback re-introduces the swallow bug,
     #    and dropping the haiku second fallback removes the non-OpenAI backstop
     #    the money-touching crons rely on when OpenAI is down entirely.
-    REQUIRED_CRON_MODEL="openai/gpt-5.6-sol"
-    REQUIRED_CRON_FALLBACK1="openrouter/openai/gpt-5.6-luna"
-    REQUIRED_CRON_FALLBACK2="openrouter/anthropic/claude-haiku-4.5"
+    REQUIRED_CRON_MODEL="openai/gpt-6-sol"
+    REQUIRED_CRON_FALLBACK1="openrouter/openai/gpt-6-luna"
+    REQUIRED_CRON_FALLBACK2="openrouter/anthropic/claude-haiku-5.5"
     #    Applies ONLY to agentTurn crons (the ones that invoke a model). A
     #    deterministic `command`/`script` cron runs an argv with no model call
     #    (payload.model is absent by design), so the fallback-chain rule is N/A;
@@ -449,7 +453,7 @@ if [[ -n "$CRON" && -f "$CRON" ]]; then
     ' "$CRON")
     if [[ -n "$bad" ]]; then
       while IFS= read -r line; do
-        echo "ERROR: $CRON cron job must be on $REQUIRED_CRON_MODEL with fallbacks [$REQUIRED_CRON_FALLBACK1, $REQUIRED_CRON_FALLBACK2] (gpt-5.6-luna GPT-5 hop first, haiku backstop): $line" >&2
+        echo "ERROR: $CRON cron job must be on $REQUIRED_CRON_MODEL with fallbacks [$REQUIRED_CRON_FALLBACK1, $REQUIRED_CRON_FALLBACK2] (gpt-6-luna hop first, haiku backstop): $line" >&2
       done <<< "$bad"
       fail=1
     fi

@@ -19,11 +19,22 @@
  *
  * So: `measured` gates every cube-derived field, unmeasured reads report null
  * rather than zero, and a warming cube retries once before answering.
+ *
+ * A SECOND, ORTHOGONAL INVARIANT: a stream figure is serialized only for a
+ * verified account holding an ACTIVE seat on this exact profile. On
+ * 2026-09-30 Caroline handed an unsubscribed contact, Tobi Wikström, another
+ * customer's lifetime stream breakdown — this tool resolved the profile from
+ * whatever the customer typed and had no entitlement check at all. The gate
+ * (`resolveAnalyticsEntitlement`) runs before the cube read above and on
+ * deny returns before any of the cube logic below executes; the two
+ * invariants never interact.
  */
 import { Type, type Static } from "@sinclair/typebox";
 import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
 import type { RateLimiter } from "../rate-limiter.js";
 import type { MusoAdminClient } from "../muso-admin-client.js";
+import type { IntercomReader } from "../intercom-client.js";
+import { resolveAnalyticsEntitlement, type AnalyticsEntitlementDeps, type AnalyticsDenyReason } from "../analytics-entitlement.js";
 import { extractProfileIdFromUrl } from "./profile-lookup.js";
 
 const Parameters = Type.Object({
@@ -42,6 +53,16 @@ interface ToolDeps {
   adminClient: MusoAdminClient;
   rateLimiter: RateLimiter;
   sessionId: string;
+  // Anti-spoof anchor for the entitlement gate: the trusted gateway session
+  // KEY (carries the convId), NOT sessionId (an ephemeral UUID that never
+  // matches — see resolveAnalyticsEntitlement / deriveConvId). sessionId
+  // stays separate because the rate limiter above keys on it.
+  sessionKey: string;
+  intercomReader: IntercomReader;
+  intercomToken: string;
+  musoBin?: AnalyticsEntitlementDeps["musoBin"];
+  env?: AnalyticsEntitlementDeps["env"];
+  execFileImpl?: AnalyticsEntitlementDeps["execFileImpl"];
   /** Injectable for tests; defaults to a real timer. */
   sleep?: (ms: number) => Promise<void>;
 }
@@ -182,14 +203,49 @@ function diagnosisForStatus(status: string): string {
   }
 }
 
+// The entitlement gate's five deny reasons split into two kinds, and the
+// deny payload must say which kind it is (QA finding, MUS-1476 round 3): a
+// CONFIRMED negative (no_active_seat, profile_not_in_workspace — the module
+// resolved the customer and checked their seat) versus an UNDETERMINED
+// outcome (owner_undetermined, account_not_resolved, check_unavailable — a
+// verification step itself did not complete). Collapsing both into "you
+// need Pro" pitches an upgrade to an existing paying subscriber whenever
+// verification fails transiently, or permanently whenever
+// MUSOAI_INTERCOM_TOKEN is unset. `routeToHuman` already marks this split at
+// every deny() call site; these two maps make the customer-facing payload
+// agree with it instead of asserting a conclusion the gate never reached.
+function supportActionForDeny(reason: AnalyticsDenyReason): "explain_pro_requirement" | "human_review" {
+  switch (reason) {
+    case "no_active_seat":
+    case "profile_not_in_workspace":
+      return "explain_pro_requirement";
+    case "owner_undetermined":
+    case "account_not_resolved":
+    case "check_unavailable":
+      return "human_review";
+  }
+}
+
+function diagnosisForDeny(reason: AnalyticsDenyReason): string {
+  switch (reason) {
+    case "no_active_seat":
+    case "profile_not_in_workspace":
+      return "Detailed analytics require an active Pro or Business subscription with a seat assigned to this profile.";
+    case "owner_undetermined":
+    case "account_not_resolved":
+    case "check_unavailable":
+      return "We could not confirm your account access to this profile's analytics right now. A team member will follow up.";
+  }
+}
+
 export function createProfileAnalyticsStatusTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
-  const { adminClient, rateLimiter, sessionId, sleep = defaultSleep } = deps;
+  const { adminClient, rateLimiter, sessionId, sessionKey, intercomReader, intercomToken, musoBin, env, execFileImpl, sleep = defaultSleep } = deps;
 
   return {
     name: "profile_analytics_status",
     label: "Profile Analytics Status",
     description:
-      "Read-only support diagnosis for a profile's analytics state. Use after profile_status and subscription_status on analytics, streams, stale numbers, or missing-data complaints. Returns structured JSON; never triggers refreshes or writes.",
+      "Read-only support diagnosis for a profile's analytics state. Use after profile_status and subscription_status on analytics, streams, stale numbers, or missing-data complaints. Gated on the verified customer's own access to that profile's analytics (an ACTIVE seat) — a non-entitled customer gets a diagnosis with no figures. Returns structured JSON; never triggers refreshes or writes.",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
       try {
@@ -234,6 +290,46 @@ export function createProfileAnalyticsStatusTool(deps: ToolDeps): AgentTool<type
         }
 
         if (!profileId) return structuredFailure("no_match");
+
+        const profileSummary = {
+          id: profileId,
+          name: String(profileRow.name ?? ""),
+          verified: Boolean(profileRow.isClaimed ?? profileRow.verified),
+          primary_role: (() => {
+            const cc = profileRow.commonCredits;
+            if (Array.isArray(cc) && cc.length > 0) return String(cc[0]);
+            return String(profileRow.role ?? profileRow.primaryRole ?? "");
+          })(),
+        };
+
+        // The gate runs BEFORE the analytics-status read and on deny we go no
+        // further — the endpoint must never be hit, and the deny payload OMITS
+        // every numeric key rather than nulling it (nulling collides with the
+        // cold-cache `measured: false` meaning below).
+        const entitlement = await resolveAnalyticsEntitlement({
+          profileId,
+          sessionKey,
+          intercomReader,
+          intercomToken,
+          musoBin,
+          env,
+          execFileImpl,
+        });
+        if (!entitlement.entitled) {
+          return textResult(
+            JSON.stringify({
+              found: true,
+              profile: profileSummary,
+              analytics: {
+                entitled: false,
+                reason: entitlement.reason,
+                route_to_human: entitlement.routeToHuman,
+                support_action: supportActionForDeny(entitlement.reason),
+                diagnosis: diagnosisForDeny(entitlement.reason),
+              },
+            }),
+          );
+        }
 
         const readAnalytics = async (): Promise<Record<string, unknown> | null> => {
           const resp = await adminClient.get<{ data?: Record<string, unknown> } | Record<string, unknown>>(
@@ -286,17 +382,10 @@ export function createProfileAnalyticsStatusTool(deps: ToolDeps): AgentTool<type
 
         const output = {
           found: true,
-          profile: {
-            id: profileId,
-            name: String(profileRow.name ?? ""),
-            verified: Boolean(profileRow.isClaimed ?? profileRow.verified),
-            primary_role: (() => {
-              const cc = profileRow.commonCredits;
-              if (Array.isArray(cc) && cc.length > 0) return String(cc[0]);
-              return String(profileRow.role ?? profileRow.primaryRole ?? "");
-            })(),
-          },
+          profile: profileSummary,
           analytics: {
+            entitled: true,
+            grant: entitlement.grant,
             status,
             // initialized is derived from the history row, which IS read on a
             // cold pass, so it stays a boolean.
