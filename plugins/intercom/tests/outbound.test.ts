@@ -991,6 +991,13 @@ describe("SanitizingIntercomClient help-centre link gate", () => {
     const out = await send("Answer.\nMore detail here: https://help.muso.ai/en/%61rticles/9999999-invented", () => manifest);
     expect(out).toBe("Answer.");
   });
+  it("strips an invented link whose host is HTML-entity encoded in an anchor and logs it", async () => {
+    const errors: string[] = [];
+    const out = await send('Answer.\n<a href="https://help&#46;muso.ai/en/articles/9999999-invented">guide</a>', () => manifest, errors);
+    expect(out).not.toContain("9999999");
+    expect(out).toContain("Answer.");
+    expect(errors.join()).toContain("[intercom:help-link]");
+  });
   it("fails closed when the manifest is unavailable, customer sees no trace", async () => {
     const errors: string[] = [];
     const out = await send(`Answer.\nMore detail here: ${GOOD}`, () => null, errors);

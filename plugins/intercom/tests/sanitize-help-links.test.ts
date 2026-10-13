@@ -43,6 +43,12 @@ describe("sanitizeHelpLinks", () => {
     ["double-encoded path segment", "https://help.muso.ai/en/%2561rticles/9999999-invented"],
     ["percent-encoded slash", "https://help.muso.ai/en%2Farticles%2F9999999-invented"],
     ["valid article, percent-encoded", "https://help.muso.ai/en/%61rticles/1111111-how-do-i-claim-my-profile"],
+    ["html decimal entity host", "https://help&#46;muso.ai/en/articles/9999999-invented"],
+    ["html hex entity host", "https://help&#x2E;muso.ai/en/articles/9999999-invented"],
+    ["named entity host", "https://help&period;muso.ai/en/articles/9999999-invented"],
+    ["entity slash in path", "https://help.muso.ai/en/articles&#47;9999999-invented"],
+    ["leading-zero entity", "https://help&#046;muso.ai/en/articles/9999999-invented"],
+    ["entity-encoded percent (double encoding)", "https://help&#37;2Emuso.ai/en/articles/9999999-invented"],
   ])("strips %s variant together with its lead-in line", (_n, url) => {
     const out = sanitizeHelpLinks(`Here is the answer.\n\n${HELP_CITATION_LEAD} ${url}`, MANIFEST);
     expect(out.body).toBe("Here is the answer.");
@@ -64,6 +70,34 @@ describe("sanitizeHelpLinks", () => {
     const out = sanitizeHelpLinks("See https://%68elp.muso.ai/en/articles/9999999-invented for details", MANIFEST);
     expect(out.body).toBe("See for details");
     expect(out.body).not.toMatch(/muso\.ai/i);
+  });
+
+  it("fallback strips an entity-encoded bare token from a single prose line (detection-only fix leaks here)", () => {
+    for (const host of ["help&#46;muso.ai", "help&#x2e;muso.ai", "help&period;muso.ai", "&#104;elp.muso.ai"]) {
+      const out = sanitizeHelpLinks(`Here you go: https://${host}/en/articles/9999999-invented`, MANIFEST);
+      expect(out.redactions.length).toBe(1);
+      expect(out.body).toContain("Here you go");
+      expect(out.body).not.toContain("9999999");
+      expect(out.body).not.toContain("articles");
+    }
+  });
+
+  it("entity-encoded anchor is stripped", () => {
+    const out = sanitizeHelpLinks('Hi.\n<p><a href="https://help&#46;muso.ai/en/articles/9999999-x">guide</a></p>', MANIFEST);
+    expect(out.redactions.length).toBe(1);
+    expect(out.body).not.toContain("9999999");
+  });
+
+  it("positive controls stay byte-identical", () => {
+    for (const b of [`Answer.\n${HELP_CITATION_LEAD} ${GOOD}`, "Plain, see help.muso.ai.", "Tom &amp; Jerry &lt;3 you"]) {
+      expect(sanitizeHelpLinks(b, MANIFEST)).toEqual({ body: b, redactions: [] });
+    }
+  });
+
+  it("malformed entities never throw", () => {
+    for (const b of ["a &#999999999; b", "a &#x; b", "a &#xFFFFFFFFFF; b", `a &#999999999;\n${HELP_CITATION_LEAD} https://help.muso.ai/en/articles/9999999-x`]) {
+      expect(() => sanitizeHelpLinks(b, MANIFEST)).not.toThrow();
+    }
   });
 
   it("strips a URL whose host letter is percent-encoded in uppercase code, keeping the prose", () => {

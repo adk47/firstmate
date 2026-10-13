@@ -22,24 +22,46 @@ export interface HelpLinkSanitizeResult {
 const ARTICLE_URL = /(?:https?:\/\/)?help\.muso\.ai\.?(?::\d*)?\/[^\s<>()[\]"']*articles\/[^\s<>()[\]"']*/i;
 const TEMPLATE_LINE = new RegExp(`^${HELP_CITATION_LEAD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} (\\S+)$`);
 
-// Any help.muso.ai-looking token, whatever its path; every host char may be percent-encoded. Kept only if it decodes to an article URL.
+// Named HTML entities for characters that can appear in a URL (detection only).
+const NAMED_ENTITIES: Record<string, string> = {
+  period: ".", sol: "/", colon: ":", num: "#", amp: "&", quest: "?", equals: "=", lowbar: "_", hyphen: "-",
+};
+const NAMED_FOR_CHAR: Record<string, string> = Object.fromEntries(Object.entries(NAMED_ENTITIES).map(([n, c]) => [c, n]));
+
+// Any help.muso.ai-looking token, whatever its path; every host char may be percent- or entity-encoded. Kept only if it decodes to an article URL.
 const hex = (c: string) => c.charCodeAt(0).toString(16).padStart(2, "0");
-const hostChar = (c: string) =>
-  c === "." ? "(?:\\.|%2e)" : `(?:${c}|%${hex(c.toLowerCase())}|%${hex(c.toUpperCase())})`;
+const hostChar = (c: string) => {
+  const code = c.toLowerCase().charCodeAt(0);
+  const forms = [
+    c === "." ? "\\." : c, `%${hex(c.toLowerCase())}`, `%${hex(c.toUpperCase())}`,
+    `&#0*${code};?`, `&#x0*${code.toString(16)};?`,
+    ...(NAMED_FOR_CHAR[c] ? [`&${NAMED_FOR_CHAR[c]};?`] : []),
+  ];
+  return `(?:${forms.join("|")})`;
+};
 const HELP_TOKEN_G = new RegExp(`(?:https?:\\/\\/)?${[..."help.muso.ai"].map(hostChar).join("")}[^\\s<>()[\\]"']*`, "gi");
 
-/** Percent-decode every well-formed %XX (repeatedly, so double encoding resolves too); a malformed % is left alone, never aborts the decode. */
+/** Decode HTML character references (semicolon optional: we decide what to strip, so leniency is safe). An out-of-range code point is left alone, never throws. */
+function decodeEntities(s: string): string {
+  return s.replace(/&(?:#(\d+)|#x([0-9a-f]+)|(period|sol|colon|num|amp|quest|equals|lowbar|hyphen));?/gi, (m, dec?: string, hexs?: string, name?: string) => {
+    if (name) return NAMED_ENTITIES[name.toLowerCase()] ?? m;
+    const cp = dec !== undefined ? parseInt(dec, 10) : parseInt(hexs as string, 16);
+    return Number.isFinite(cp) && cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+  });
+}
+
+/** Undo HTML entities then percent-escapes (repeatedly, so mixed and double encoding resolve too); a malformed % or entity is left alone, never aborts the decode. Detection only: never the outbound body. */
 function decodeAll(s: string): string {
   let cur = s;
   for (let i = 0; i < 4; i++) {
-    const next = cur.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+    const next = decodeEntities(cur).replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
     if (next === cur) break;
     cur = next;
   }
   return cur;
 }
 
-/** True when the text, once percent-decoding is undone, carries an article URL. */
+/** True when the text, once entity- and percent-decoding are undone, carries an article URL. */
 function hasArticleUrl(s: string): boolean {
   return ARTICLE_URL.test(s) || ARTICLE_URL.test(decodeAll(s));
 }
