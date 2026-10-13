@@ -176,3 +176,56 @@ echo SURVIVED-LOCK-LOSS"
   [ ! -s "$HB2" ]
   pkill -f "$HB2" 2>/dev/null || true
 }
+
+# cron_store_heal_trap (deploy.sh EXIT backstop, MUS-8719): when the node-8 lock was LOST, a prune may own it with main
+# stopped for offline SQLite cleanup, so the emergency start must run ONLY under that lock (flock -n -E 99). While we
+# still hold the lock a second flock would be refused by ourselves, so the start stays bare. The REAL trap function is
+# lifted out of deploy.sh; run_on_node8 records the command string and really executes it so the real flock decides.
+_heal_trap() {
+  local lost="$1"
+  [ -n "$MAIN_PRUNE_LOCK_FILE" ]
+  {
+    echo 'log() { echo "$*"; }'
+    echo 'notify_slack() { echo "SLACK: $*"; }'
+    echo "source '$LIB'"
+    echo "run_on_node8() { printf '%s\n' \"\$1\" >>\"$TEST_TMPDIR/node8.cmds\"; bash -c \"\$1\"; }"
+    printf '%s\n' "printf '#!/bin/sh\necho \"\$*\" >>\"$TEST_TMPDIR/systemctl.argv\"\n' >\"$TEST_TMPDIR/systemctl\"; chmod +x \"$TEST_TMPDIR/systemctl\""
+    echo "SYSTEMCTL_BIN='$TEST_TMPDIR/systemctl'"
+    echo 'CRON_HEAL_STOPPED=openclaw-gateway-main'
+    [ "$lost" = lost ] && echo "MAIN_PRUNE_LOCK_LOST_FILE='$TEST_TMPDIR/lost'; : >\"\$MAIN_PRUNE_LOCK_LOST_FILE\""
+    awk '/^  cron_store_heal_trap\(\) \{/ { on = 1 } on { print } on && /^  \}$/ { exit }' "$DEPLOY"
+    echo 'cron_store_heal_trap'
+  } > "$TEST_TMPDIR/heal.sh"
+  grep -q 'cron_store_heal_trap()' "$TEST_TMPDIR/heal.sh"
+}
+
+@test "heal trap, lock lost and free: main is started UNDER the prune lock (flock -n -E 99)" {
+  _heal_trap lost
+  run bash "$TEST_TMPDIR/heal.sh"
+  [ "$status" -eq 0 ]
+  grep -q 'flock -n -E 99' "$TEST_TMPDIR/node8.cmds"
+  [ "$(cat "$TEST_TMPDIR/systemctl.argv")" = "start openclaw-gateway-main" ]
+  if grep -qv 'flock' "$TEST_TMPDIR/node8.cmds"; then false; fi
+}
+
+@test "heal trap, lock lost and a prune holds it: NOT started, the prune restarts main" {
+  _heal_trap lost
+  _hold_lock "$MAIN_PRUNE_LOCK_FILE" 30; holder=$!
+  sleep 1
+  run bash "$TEST_TMPDIR/heal.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  grep -q 'flock -n -E 99' "$TEST_TMPDIR/node8.cmds"
+  [ ! -e "$TEST_TMPDIR/systemctl.argv" ]
+  [[ "$output" == *"a prune holds"* ]]
+}
+
+@test "heal trap, holder alive: the start is BARE systemctl, not flock-wrapped (our own holder would refuse it)" {
+  _heal_trap held
+  run bash "$TEST_TMPDIR/heal.sh"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l <"$TEST_TMPDIR/node8.cmds")" -eq 1 ]
+  if grep -q 'flock' "$TEST_TMPDIR/node8.cmds"; then false; fi
+  grep -q "systemctl start openclaw-gateway-main" "$TEST_TMPDIR/node8.cmds"
+  [ "$(cat "$TEST_TMPDIR/systemctl.argv")" = "start openclaw-gateway-main" ]
+}

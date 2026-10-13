@@ -3796,8 +3796,25 @@ if needs_target "main" && [ -f "$HYDRA_ROOT/cron-jobs.json" ]; then
   cron_store_heal_trap() {
     if [ -n "${CRON_HEAL_STOPPED:-}" ]; then
       log "  ✗ deploy exited with $CRON_HEAL_STOPPED stopped — starting it back up"
-      run_on_node8 "${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || true
-      notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; attempted an emergency start. VERIFY the gateway is up."
+      if main_prune_lock_lost; then
+        # Our node-8 lock died with the holder ssh, so a prune may already own the freed lock with main stopped
+        # for offline SQLite cleanup (the race rollback.sh ensure_gateways_up refuses). Start ONLY under that lock,
+        # atomically: refused (99) means the prune owns it and starts main itself (main-prune-restart.sh).
+        heal_rc=0
+        run_on_node8 "flock -n -E 99 '$MAIN_PRUNE_LOCK_FILE' ${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || heal_rc=$?
+        case "$heal_rc" in
+          0)  notify_slack ":warning: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped and the node-8 prune lock lost; started it again UNDER the prune lock. VERIFY the gateway is up." ;;
+          99) log "    a prune holds $MAIN_PRUNE_LOCK_FILE — NOT starting $CRON_HEAL_STOPPED; the prune starts main itself"
+              notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped, the node-8 prune lock lost and a prune now holds it. It was deliberately NOT started (the prune restarts main). VERIFY the gateway is up." ;;
+          *)  log "    emergency start under the prune lock FAILED (rc=$heal_rc)"
+              notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; the emergency start under the prune lock FAILED (rc=$heal_rc). VERIFY the gateway is up." ;;
+        esac
+      else
+        # We still hold the lock (fd 213 locally, the holder ssh in ssh mode): a second flock would be refused
+        # by OURSELVES and main would never come back. Start directly.
+        run_on_node8 "${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || true
+        notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; attempted an emergency start. VERIFY the gateway is up."
+      fi
     fi
   }
   # COMPOSE with the existing EXIT trap (deploy lock release, set near the top
