@@ -73,6 +73,7 @@
 #   SWEEP_WS_ROOT           default /opt/hydra/workspaces
 #   SWEEP_REPOS_TTL_DAYS    default 14
 #   SWEEP_TMP_TTL_DAYS      default 7
+#   QA_REVIEW_TTL_DAYS      default 2 (workspaces/qa/tmp review clones only)
 #   SWEEP_KEEP_LIST         space-separated basenames under repos/;
 #                           REPLACES the default list when set
 #   SWEEP_FRESH_WINDOW_SECS default 3600 (pre-rm recheck window)
@@ -92,6 +93,7 @@ REPOS_ROOT="${SWEEP_REPOS_ROOT:-/opt/hydra/workspaces/repos}"
 WS_ROOT="${SWEEP_WS_ROOT:-/opt/hydra/workspaces}"
 REPOS_TTL_DAYS="${SWEEP_REPOS_TTL_DAYS:-14}"
 TMP_TTL_DAYS="${SWEEP_TMP_TTL_DAYS:-7}"
+QA_REVIEW_TTL_DAYS="${QA_REVIEW_TTL_DAYS:-2}"
 FRESH_WINDOW_SECS="${SWEEP_FRESH_WINDOW_SECS:-3600}"
 LOCKFILE="${SWEEP_LOCKFILE:-/var/run/hydra-sweep-clones.lock}"
 SKIP_HOST_GUARD="${SWEEP_SKIP_HOST_GUARD:-0}"
@@ -123,7 +125,7 @@ done
 
 # Garbage TTLs must fail loud, not silently sweep nothing (or everything):
 # bash arithmetic treats a non-numeric var as 0 → cutoff = now → no-op.
-for ttl_var in REPOS_TTL_DAYS TMP_TTL_DAYS FRESH_WINDOW_SECS; do
+for ttl_var in REPOS_TTL_DAYS TMP_TTL_DAYS QA_REVIEW_TTL_DAYS FRESH_WINDOW_SECS; do
   case "${!ttl_var}" in
     ''|*[!0-9]*) echo "invalid $ttl_var='${!ttl_var}' — must be a non-negative integer" >&2; exit 2 ;;
   esac
@@ -434,6 +436,43 @@ reaudit_junk() {  # <quarantined-path> <cutoff-ref-file>
   return 0
 }
 
+
+# QA review clones (workspaces/qa/tmp/<repo>-<pr>-review-<6 alnum>/repo) are
+# disposable: the verdict lives on GitHub. Their .git sits at depth 2, which
+# junk_repo_hazard always reads as "nested repo", so no TTL could ever free
+# them. The NAME PATTERN plus the exact tree shape is the entire safety
+# argument for skipping the dirty/unpushed/nested holds — anything that
+# deviates returns 1 and takes the ordinary conservative path.
+QA_REVIEW_NAME_RE='^[A-Za-z0-9._-]+-[0-9]+-review-[A-Za-z0-9]{6}$'
+qa_review_shape_ok() {  # <dir>
+  local d="$1" gits rc=0
+  [[ "$(basename "$d")" =~ $QA_REVIEW_NAME_RE ]] || return 1
+  [ -d "$d/repo/.git" ] && [ ! -L "$d/repo" ] && [ ! -L "$d/repo/.git" ] || return 1
+  is_bare_repo "$d" && return 1
+  gits="$(find "$d" -xdev -name .git 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] && [ "$gits" = "$d/repo/.git" ] || return 1
+  # find_nested_bare only prunes <dir>/.git, so repo/.git/HEAD would read as
+  # a bare repo here; prune every .git and look for HEAD files outside them.
+  rc=0; gits="$(find "$d" -xdev -name .git -prune -o -type f -name HEAD -print 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] && [ -z "$gits" ]
+}
+
+reaudit_qa_review() {  # <quarantined-path> <cutoff-ref-file>
+  local q="$1" cutoff_ref="$2"
+  # Shape check is name-based; the quarantine name differs, so only the tree is re-proved.
+  if [ -n "$(find "$q" -xdev -name .git -not -path "$q/repo/.git" -print -quit 2>/dev/null)" ]; then
+    REAUDIT_REASON="extra repo appeared before removal"; return 1
+  fi
+  if tree_fresh_since "$q" "$cutoff_ref"; then
+    REAUDIT_REASON="tree written to before removal"; return 1
+  fi
+  # A bind mount can land between the last pre-quarantine guard and now; rm
+  # --one-file-system would follow a same-device one out of the clone.
+  if mount_hazard "$q"; then
+    REAUDIT_REASON="mount appeared before removal"; return 1
+  fi
+  return 0
+}
 
 # ── quarantine primitives ────────────────────────────────────
 QPATH=""; QDIR=""; QUARANTINE_ERROR=""
@@ -816,7 +855,7 @@ clone_policy_audit() {  # <audit-path> <report-path>
   return 0
 }
 # ── per-candidate policy ─────────────────────────────────────
-sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
+sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp|qa-tmp>
   local d="$1" cutoff="$2" ref="$3" lane="$4"
   local name kb head_sha probe_out rc cand_id
   name="$(basename "$d")"
@@ -857,6 +896,26 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp>
   if [ "$lane" = "repos" ] && is_kept "$name"; then
     kept=$((kept + 1))
     log "kept (keep-list): $d"
+    return 0
+  fi
+
+  if [ "$lane" = "qa-tmp" ] && qa_review_shape_ok "$d"; then
+    if tree_fresh_since "$d" "$QA_REF"; then
+      active=$((active + 1)); return 0
+    fi
+    if mount_hazard "$d"; then
+      held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
+    fi
+    kb="$(entry_kb "$d")"
+    if ! qa_review_shape_ok "$d" || tree_fresh_since "$d" "$QA_REF"; then
+      active=$((active + 1)); return 0
+    fi
+    if mount_hazard "$d"; then
+      held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate (appeared during size scan)"; return 0
+    fi
+    if remove_entry "$d" "$kb" "qa-review" tree "$cand_id" reaudit_qa_review "$QA_REF"; then
+      junk_deleted=$((junk_deleted + 1)); freed_kb=$((freed_kb + kb))
+    fi
     return 0
   fi
 
@@ -1082,8 +1141,9 @@ REPOS_CUTOFF=$(( NOW_EPOCH - REPOS_TTL_DAYS * 86400 ))
 TMP_CUTOFF=$(( NOW_EPOCH - TMP_TTL_DAYS * 86400 ))
 REPOS_REF="$(make_ref "$REPOS_CUTOFF")"
 TMP_REF="$(make_ref "$TMP_CUTOFF")"
+QA_REF="$(make_ref "$(( NOW_EPOCH - QA_REVIEW_TTL_DAYS * 86400 ))")"
 WINDOW_REF="$(make_ref "$(( NOW_EPOCH - FRESH_WINDOW_SECS ))")"
-trap 'rm -f "$HELD_FILE" "$ERRORS_FILE" "$PAYLOAD_FILE" "$REPOS_REF" "$TMP_REF" "$WINDOW_REF"' EXIT
+trap 'rm -f "$HELD_FILE" "$ERRORS_FILE" "$PAYLOAD_FILE" "$REPOS_REF" "$TMP_REF" "$QA_REF" "$WINDOW_REF"' EXIT
 
 # A swept root that is ITSELF a clone (someone ran `git clone repo .` in it)
 # must be skipped whole: its depth-1 entries are that clone's worktree files.
@@ -1140,7 +1200,9 @@ for ws_tmp in "$WS_ROOT"/*/tmp "$WS_ROOT"/*/.tmp; do
     held_mount=$((held_mount + 1))
     continue
   fi
-  sweep_root_depth1 "$ws_tmp_real" "$TMP_CUTOFF" "$TMP_REF" "tmp"
+  tmp_lane="tmp"
+  [ "$ws_tmp_real" = "$WS_ROOT/qa/tmp" ] && tmp_lane="qa-tmp"
+  sweep_root_depth1 "$ws_tmp_real" "$TMP_CUTOFF" "$TMP_REF" "$tmp_lane"
 done
 
 print_summary

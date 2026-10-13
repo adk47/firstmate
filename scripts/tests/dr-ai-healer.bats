@@ -94,7 +94,9 @@ STUB
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$SYSCTL_CALLS"
 case "$1" in
-  is-active) f="$STUB_SYSCTL_DIR/$2.status"; [ -f "$f" ] && cat "$f" || echo active ;;
+  # Real is-active prints the state and exits 3 for every state but `active`.
+  is-active) f="$STUB_SYSCTL_DIR/$2.status"; st=active; [ -f "$f" ] && st=$(cat "$f")
+             echo "$st"; [ "$st" = "active" ] && exit 0; exit 3 ;;
   restart)   echo active > "$STUB_SYSCTL_DIR/$2.status" ;;
   *) : ;;
 esac
@@ -295,13 +297,17 @@ remediation_calls() { grep -v -- '--check' "$GUARD_CALLS" | grep -c . || true; }
   cat > "$STUBBIN/systemctl" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$SYSCTL_CALLS"
-[ "$1" = "is-active" ] && echo failed
+[ "$1" = "is-active" ] && { echo failed; exit 3; }
 exit 0
 STUB
   chmod +x "$STUBBIN/systemctl"
   run "$HEALER" --trigger gateway_down
   [ "$status" -eq 0 ]
   [[ "$output" == *"OUTCOME: unresolved"* ]]
+  # MUS-5173: a definitive `failed` aborts the stability poll on its first
+  # sample.
+  # One main-gateway read per round (DR_MAX_ROUNDS=2); the old code ran six.
+  [ "$(grep -cx 'is-active openclaw-gateway-main' "$SYSCTL_CALLS")" -eq 2 ]
   grep -q 'did NOT recover' "$MUSO_TEXTS"
   [ "$(remediation_calls)" -eq 2 ]   # one remediation per round
 }

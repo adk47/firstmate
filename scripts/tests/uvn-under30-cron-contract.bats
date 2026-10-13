@@ -80,9 +80,12 @@ cadence_matches() {
 }
 
 @test "the main unverified batch remains at minute zero" {
+  # Pins the schedule only (the :30 offset of this cron depends on it). The
+  # batch is DISABLED since 2026-10-11 (inverted approve rule, contained); its
+  # enabled flag is owned by scripts/check-credit-approval-automation.sh.
   run jq -e '
     .jobs[] | select(.name == "credit-verification-batch-4h")
-    | .schedule.expr == "0 */4 * * *" and .enabled == true
+    | .schedule.expr == "0 */4 * * *"
   ' "$ROOT/cron-jobs.json"
   [ "$status" -eq 0 ]
 }
