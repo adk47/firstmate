@@ -196,6 +196,9 @@ describe("buildTicketTags", () => {
     expect(
       buildTicketTags({ actionType: "profile-claim", tier: 1, details: { escalation_reason: "on_behalf_claim_manual_review" } }),
     ).toContain("escalation:on-behalf-claim-manual-review");
+    expect(
+      buildTicketTags({ actionType: "credit-correction", tier: 1, details: { escalation_reason: "rights_holder" } }),
+    ).toContain("escalation:rights-holder");
   });
 
   it("ignores unknown escalation reasons (no free-form tag injection)", () => {
