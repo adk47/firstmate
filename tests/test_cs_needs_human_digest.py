@@ -1583,7 +1583,7 @@ class TestActionableWindowWiring(unittest.TestCase):
     def test_delta_excludes_backlog_and_rolls_it_up(self):
         _, out, blocks, state = self._run([self.OLD, self.NEW], ["--delta", "--post"])
         self.assertNotIn(d.intercom_link("OLD"), out)
-        self.assertIn("new to this digest: 1", out)
+        self.assertIn("first shown in this digest: 1", out)
         self.assertEqual(out.count("backlog: 1 open conversations"), 1)
         self.assertEqual(self._block_text(blocks).count("backlog: 1 open"), 1)
         self.assertEqual(set(state), {"NEW"})
@@ -1602,7 +1602,7 @@ class TestActionableWindowWiring(unittest.TestCase):
         self.assertNotIn("OLD", saved)
         replied = conv(cid="OLD", lar=0, lcr=self.NOW - 3600)
         _, out, _, saved2 = self._run([replied], ["--delta", "--post"], state=saved)
-        self.assertIn("new to this digest: 1", out)
+        self.assertIn("first shown in this digest: 1", out)
         self.assertIn(d.intercom_link("OLD"), out)
         self.assertIn("OLD", saved2)
 
