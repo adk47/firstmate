@@ -1010,6 +1010,24 @@ export function resolveJevShadowQuestionsVersion(
   return null;
 }
 
+// Runner config for one shadow version. Shadow calls are fire-and-forget and
+// run concurrently with the live call, so their latency never reaches a
+// customer; they get their own budget (jev.shadowTimeoutMs) because the v2
+// prompt is ~5.85x v1's and the live 1500ms budget was dropping 15-19% of
+// them (the slow turns), biasing the shadow dataset. Unset → live timeoutMs.
+export function jevShadowRunnerConfig(
+  jev: { apiKey: string; model?: string; timeoutMs?: number; shadowTimeoutMs?: number; agentInstructionsPath?: string },
+  questionsVersion: "v1" | "v2",
+) {
+  return {
+    apiKey: jev.apiKey,
+    model: jev.model,
+    timeoutMs: jev.shadowTimeoutMs ?? jev.timeoutMs,
+    questionsVersion,
+    agentInstructionsPath: jev.agentInstructionsPath,
+  };
+}
+
 // Construct the per-webhook risk-assessment options. When the flag is on AND
 // an OpenRouter key is configured, the LLM-judge backstop is wired; otherwise
 // only Layer 0/1/1b (magic-keyword + content rules + turn-count cap) run.
@@ -1746,13 +1764,7 @@ export const intercomPlugin = createChatChannelPlugin({
                             [
                               version,
                               createJevTurnRunner(
-                                {
-                                  apiKey: account.jev!.apiKey,
-                                  model: account.jev!.model,
-                                  timeoutMs: account.jev!.timeoutMs,
-                                  questionsVersion: resolved,
-                                  agentInstructionsPath: account.jev!.agentInstructionsPath,
-                                },
+                                jevShadowRunnerConfig(account.jev!, resolved),
                                 jevLog,
                               ),
                             ] as const,

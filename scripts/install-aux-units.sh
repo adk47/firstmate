@@ -161,6 +161,15 @@
 #     sales lead was closed-as-answered and forwarded to Nick by
 #     email; Aaron, who owns ads, never saw it).
 #
+#   /etc/systemd/system/intercom-rights-holder-watchdog.{service,timer}
+#     Runs scripts/intercom-rights-holder-watchdog.py every 10 min (oneshot).
+#     Pages #cs_priority (operations bot) when an inbound Intercom
+#     conversation is from a rights-holder or marked urgent and has gone
+#     unhandled (Sony/natori correction misfiled onto another customer's
+#     ticket, MUS-6566). A systemd unit, not cron.d: the Intercom token comes
+#     from EnvironmentFile (a 644 cron.d line would expose it) and the
+#     service is in AUX_ONFAILURE_UNITS so a failing run pages.
+#
 #   /etc/tmpfiles.d/tmp.conf
 #     /tmp age policy keyed on mtime only (`D /tmp 1777 root root mM:24h`),
 #     installed verbatim from scripts/aux-units/tmp.conf. Codifies the
@@ -250,6 +259,9 @@
 #     patterns (review clones, qa-pr-*, pr-review-*.json, tmp.XXXXXX) after a
 #     3h/24h idle TTL, only when lsof shows no open handles. Everything else
 #     is left to the tmpfiles 24h catch-all. jest_0 is never touched.
+#   hydra-codex-home-prune.timer / .service
+#     Daily 05:45 UTC. scripts/codex-home-prune.sh --apply: ages out codex
+#     rollout jsonl and logs_*.sqlite rows past CODEX_SESSION_TTL_DAYS (14).
 #
 #   hydra-jev-shadow-prune.timer / .service
 #     Daily. Runs scripts/jev-shadow-prune.sh, which drops shadow rows
@@ -345,6 +357,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/lib/ensure-mercury-token.sh" ]] \
@@ -527,6 +541,42 @@ INTAKEWDTMR
 
 systemctl daemon-reload
 wd=intercom-intake-watchdog.timer
+systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
+systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
+log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
+# ─── Intercom rights-holder / urgent inbound watchdog (MUS-6566) ───────────
+# Live tick = no flag (--dry-run is the only mode switch). Token:
+# MUSOAI_INTERCOM_TOKEN from the env files; the Slack token is resolved inside
+# the script. No secret is written into the unit. See
+# scripts/intercom-rights-holder-watchdog.py.
+cat > /etc/systemd/system/intercom-rights-holder-watchdog.service << RIGHTSHOLDERWDSVC
+[Unit]
+Description=Intercom rights-holder / urgent inbound watchdog (alerts #cs_priority)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py
+RIGHTSHOLDERWDSVC
+
+cat > /etc/systemd/system/intercom-rights-holder-watchdog.timer << RIGHTSHOLDERWDTMR
+[Unit]
+Description=Run the Intercom rights-holder / urgent watchdog every 10 min
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=10min
+Unit=intercom-rights-holder-watchdog.service
+
+[Install]
+WantedBy=timers.target
+RIGHTSHOLDERWDTMR
+
+systemctl daemon-reload
+wd=intercom-rights-holder-watchdog.timer
 systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
@@ -2537,6 +2587,55 @@ mpstate="$(systemctl is-active "$mpt" 2>/dev/null || true)"
 [[ "$mpstate" == "active" ]] || fail "$mpt is not active (state: ${mpstate:-unknown})"
 log "  $mpt: $mpstate (fires nightly 02:30 UTC)"
 
+# ─── codex-home retention (daily 05:45 UTC) ──────────────────────
+# The codex binary writes sessions/**/rollout-*.jsonl and logs_*.sqlite under
+# every agent's codex-home and has no retention knob (72 GiB across 35 agents
+# on 8 Oct, MUS-5584). scripts/codex-home-prune.sh deletes rollout files and
+# log rows older than CODEX_SESSION_TTL_DAYS (default 14); VACUUM only below
+# 80% disk. One global unit: the glob spans every profile.
+[[ -x "$HYDRA_ROOT/scripts/codex-home-prune.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/codex-home-prune.sh missing or not executable"
+
+cat > /etc/systemd/system/hydra-codex-home-prune.service << CHPRUNESVC
+[Unit]
+Description=Prune codex-home session files and log rows older than the retention window
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/codex-home-prune.sh --apply
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Nice=10
+IOSchedulingClass=idle
+# ~60k file deletes plus 35 sqlite DELETE/checkpoint passes on the first run.
+TimeoutStartSec=30min
+StandardOutput=append:/var/log/hydra-codex-home-prune.log
+StandardError=append:/var/log/hydra-codex-home-prune.log
+CHPRUNESVC
+
+cat > /etc/systemd/system/hydra-codex-home-prune.timer << CHPRUNETMR
+[Unit]
+Description=Run the codex-home prune daily at 05:45 UTC
+
+[Timer]
+OnCalendar=*-*-* 05:45:00 UTC
+Persistent=true
+RandomizedDelaySec=10min
+Unit=hydra-codex-home-prune.service
+
+[Install]
+WantedBy=timers.target
+CHPRUNETMR
+
+systemctl daemon-reload
+
+chptmr=hydra-codex-home-prune.timer
+systemctl enable "$chptmr" >/dev/null 2>&1 || fail "could not enable $chptmr"
+systemctl start "$chptmr" >/dev/null 2>&1 || fail "could not start $chptmr"
+chpstate="$(systemctl is-active "$chptmr" 2>/dev/null || true)"
+[[ "$chpstate" == "active" ]] || fail "$chptmr is not active (state: ${chpstate:-unknown})"
+log "  $chptmr: $chpstate (fires daily 05:45 UTC)"
+
 # ─── Twice-weekly codex OAuth token refresh (Sun+Wed 04:00 UTC) ──
 # The DURABLE fix for the recurring ~10-day codex token lapse. hydra keeps the
 # bundled `openai` plugin DISABLED to dodge #90925, but that plugin owns the
@@ -3049,6 +3148,7 @@ AUX_ONFAILURE_UNITS=(
   cs-sla-report.service
   cto-nightly-driver.service
   hydra-company-finder-cache-refresh.service
+  hydra-codex-home-prune.service
   hydra-daily-audit.service
   hydra-jev-shadow-prune.service
   hydra-main-prune-restart.service
@@ -3059,6 +3159,7 @@ AUX_ONFAILURE_UNITS=(
   hydra-session-thread-retention@.service
   hydra-weekly-cleanup.service
   intercom-intake-watchdog.service
+  intercom-rights-holder-watchdog.service
   overdue-verification-notifier.service
   qa-approval-retry.service
   qa-review-reconcile.service

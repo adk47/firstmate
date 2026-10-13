@@ -41,3 +41,37 @@ export function wasTicketFiledRecently(
   const ts = s.get(convId);
   return typeof ts === "number" && nowMs - ts <= windowMs;
 }
+
+// MUS-1516: which ticket ids were filed, additive to the signal above (design
+// call ① on MUS-1471 — see the writer, plugins/support-tools/src/ticket-success-
+// signal.ts, for the full contract). Same globalThis-key-only contract as the
+// signal above: a rename on either side is caught by the literal key assertion
+// in this file's test.
+const IDS_KEY = "__musoSupportTicketIds";
+
+/**
+ * The reference ids (ClickUp task ids) filed for `convId` within `windowMs` —
+ * read the same window as wasTicketFiledRecently by default, since both answer
+ * the same underlying question ("did create_ticket succeed for this conversation
+ * recently"); see that function's docstring for the window rationale and the
+ * multi-topic-conversation caveat, which applies here too.
+ *
+ * Fail-safe (design call ② on MUS-1471): an empty convId, a missing store, or a
+ * stale entry all return []. The outbound guard (sanitize-handoff-claim.ts)
+ * treats [] as "no id is backed" — every reference-shaped token in the reply is
+ * then unbacked and gets redacted. A lost/absent signal can only downgrade an
+ * otherwise-true claim toward the honest fallback, it can never license a
+ * fake or foreign id.
+ */
+export function getFiledTicketIds(
+  convId: string | null | undefined,
+  nowMs: number = Date.now(),
+  windowMs: number = DEFAULT_WINDOW_MS,
+): string[] {
+  if (!convId) return [];
+  const s = (globalThis as unknown as Record<string, unknown>)[IDS_KEY];
+  if (!(s instanceof Map)) return [];
+  const entry = (s as Map<string, { atMs: number; ids: string[] }>).get(convId);
+  if (!entry || typeof entry.atMs !== "number" || nowMs - entry.atMs > windowMs) return [];
+  return Array.isArray(entry.ids) ? entry.ids : [];
+}

@@ -59,9 +59,9 @@ setup() {
   # (b) the matching .githooks/pre-commit required_excludes entry.
   [[ "$output" == *'"/payout-report-2026-08.csv"'* ]]
 
-  # (c) no remedy may point at a root scratch/ directory: RSYNC_EXCLUDES has
-  # no such entry, so following it re-halts the next deploy.
-  [[ "$output" != *"scratch/"* ]]
+  # (c) remedy (b) names the sanctioned root home /scratch/ (MUS-1388 added
+  # the anchored exclude to RSYNC_EXCLUDES; root-scratch-excludes.bats pins it).
+  [[ "$output" == *"/scratch/"* ]]
 
   # (d) the scripts/sync-from-server.sh pull command.
   [[ "$output" == *"scripts/sync-from-server.sh"* ]]

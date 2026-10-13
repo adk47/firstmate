@@ -16,6 +16,7 @@ HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 SCRIPT="$HYDRA_REPO/scripts/check-agent-soul-delivery.sh"
 
 CRON_MARKER='This is an OpenClaw cron automation turn. Apply these instructions only to this scheduled job.'
+DREAM_SENTINEL='__openclaw_memory_core_short_term_promotion_dream__'
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
@@ -51,7 +52,12 @@ config() {
 }
 
 # mk_session <profile-dir> <agent> <name> <kind>
-# kinds: compliant | stripped | stripped-no-ctx | lightweight-cron | cron-lostsoul | cron-ok | cron-nomarker
+# kinds: compliant | stripped | stripped-no-ctx | lightweight-cron | dreaming-nomarker | cron-lostsoul |
+#        cron-lostsoul-multiagent | cron-ok | cron-nomarker
+# lightweight-cron is the LIVE MUS-8377 shape (13 Oct): the plugin-managed Memory Dreaming job
+# (lightContext:true) -> sentinel in the [cron:] user turn, model-visible cron marker, no SOUL/skills,
+# and NO "Lightweight bootstrap context" in session_meta.base_instructions (0 of 400 live rollouts
+# carry it there; the string only lives in the cron tool's description under dynamic_tools).
 mk_session() {
   local dir="$1" agent="$2" name="$3" kind="$4"
   local d="$dir/agents/$agent/agent/codex-home/sessions/2026/10/12"
@@ -72,14 +78,18 @@ You are $agent." skills="<available_skills>
     cron-ok)          item0="$base $soul $skills $CRON_MARKER"; user_msg='[cron:1111 nightly] run it' ;;
     cron-nomarker)    item0="$base $soul $skills"; user_msg='[cron:1111 nightly] run it' ;;
     lightweight-cron) item0="$base"; items="$perms <collaboration_mode>$CRON_MARKER</collaboration_mode>"
-                      user_msg='[cron:2222 Memory Dreaming Promotion] go'; ctx_di="$CRON_MARKER"
-                      meta_bi="You are a personal agent. Lightweight bootstrap context (skip full workspace)." ;;
+                      user_msg="[cron:2222 Memory Dreaming Promotion] $DREAM_SENTINEL"; ctx_di="$CRON_MARKER" ;;
+    dreaming-nomarker) item0="$base"; items="$perms $codex_tpl"
+                      user_msg="[cron:2222 Memory Dreaming Promotion] $DREAM_SENTINEL"; ctx_di="$CRON_MARKER" ;;
+    cron-lostsoul-multiagent) item0="$base"
+                      items="$perms <multi_agent_role>You are \`/root\`, the primary agent</multi_agent_role> <collaboration_mode>$CRON_MARKER</collaboration_mode>"
+                      user_msg='[cron:3333 nightly] go'; ctx_di="$CRON_MARKER" ;;
     cron-lostsoul)    item0="$base"; items="$perms <collaboration_mode>$CRON_MARKER</collaboration_mode>"
                       user_msg='[cron:3333 nightly] go'; ctx_di="$CRON_MARKER" ;;
     *) echo "bad kind $kind" >&2; return 1 ;;
   esac
   {
-    jq -nc --arg bi "$meta_bi" '{type:"session_meta",payload:{id:"s",base_instructions:{text:$bi}}}'
+    jq -nc --arg bi "$meta_bi" '{type:"session_meta",payload:{id:"s",base_instructions:{text:$bi},dynamic_tools:[{name:"cron",description:"lightContext: Lightweight bootstrap context (skip full workspace context)"}]}}'
     jq -nc --arg di "$ctx_di" '{type:"turn_context",payload:{collaboration_mode:{settings:{developer_instructions:$di}}}}'
     jq -nc --arg a "$item0" --arg b "${items:-}" \
       '{type:"response_item",payload:{role:"developer",content:([{type:"input_text",text:$a}] + (if $b == "" then [] else [{type:"input_text",text:$b}] end))}}'
@@ -315,4 +325,39 @@ STUB
   [ "$status" -eq 1 ]
   [[ "$output" == *"FAIL clio"*"unparsable"* ]]
   [[ "$output" != *"PASS clio"* ]]
+}
+
+@test "MUS-8377: a stripped INTERACTIVE session after a dreaming cron still FAILs (exemption never widens to interactive)" {
+  config "$MAIN" clio
+  mk_session "$MAIN" clio 2026-10-12T03-00-00-aaa lightweight-cron
+  mk_session "$MAIN" clio 2026-10-12T01-00-00-bbb stripped
+  run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FAIL clio"*"AGENT_SOUL"* ]]
+}
+
+@test "MUS-8377: a stripped non-dreaming cron in the multi-agent shape is NOT exempt (multi_agent_role alone exempts nothing)" {
+  config "$MAIN" clio
+  mk_session "$MAIN" clio 2026-10-12T03-00-00-aaa cron-lostsoul-multiagent
+  run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FAIL clio"* ]]
+}
+
+@test "MUS-8377: a dreaming cron that also lost the cron-mode marker (MUS-6600 signature) -> FAIL naming the marker" {
+  config "$MAIN" clio
+  mk_session "$MAIN" clio 2026-10-12T03-00-00-aaa dreaming-nomarker
+  run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FAIL clio"*"OpenClaw cron automation turn"* ]]
+}
+
+@test "MUS-8377: dreaming cron with SOUL+skills present is a normal PASS, not an exemption" {
+  config "$MAIN" clio
+  f="$(mk_session "$MAIN" clio 2026-10-12T03-00-00-aaa cron-ok)"
+  tmp="$f.tmp"
+  jq -c 'if .type=="response_item" and .payload.role=="user" then (.payload.content[0].text="[cron:2222 Memory Dreaming Promotion] '"$DREAM_SENTINEL"'") else . end' "$f" > "$tmp" && mv "$tmp" "$f"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS clio"* ]]
 }

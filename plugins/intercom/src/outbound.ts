@@ -4,7 +4,7 @@ import { sanitizeOutboundBody } from "./sanitize-email.js";
 import { sanitizeToolLeak } from "./sanitize-tool-leak.js";
 import { sanitizeTypography } from "./sanitize-typography.js";
 import { sanitizeHandoffClaim } from "./sanitize-handoff-claim.js";
-import { wasTicketFiledRecently } from "./ticket-success-signal.js";
+import { wasTicketFiledRecently, getFiledTicketIds } from "./ticket-success-signal.js";
 
 // --- Outbound reply retry (design §7 Rate Limiting) ---
 // "Intercom returns 429 with Retry-After. Retry with capped exponential
@@ -613,7 +613,10 @@ export class SanitizingIntercomClient implements IntercomClient {
     // sanctioned "I'll make sure this gets to the team." fallback. Runs last so it sees
     // the fully-sanitized body; a lost/absent signal errs toward the honest fallback.
     const ticketConfirmed = wasTicketFiledRecently(params.conversationId);
-    const handoffPass = sanitizeHandoffClaim(typoPass.body, { ticketConfirmed });
+    // MUS-1516: which ids this conversation actually filed, so the guard can
+    // tell a real quoted reference number from one it never filed.
+    const filedTicketIds = getFiledTicketIds(params.conversationId);
+    const handoffPass = sanitizeHandoffClaim(typoPass.body, { ticketConfirmed, filedTicketIds });
     if (handoffPass.redactions.length > 0) {
       const unique = Array.from(new Set(handoffPass.redactions));
       const msg = `[intercom:false-handoff-claim] conv=${params.conversationId} count=${unique.length} rewritten=${JSON.stringify(unique)}`;

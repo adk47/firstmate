@@ -22,13 +22,19 @@
 # Agent list: the live openclaw.json agents.list of each profile, NOT `ls agents/`
 # (design/main/ops/openclaw dirs are stale leftovers with no live config).
 #
-# By-design exemption (and only it): a lightweight-context cron turn
-# (shouldInjectCodexOpenClawPromptContext(), bootstrapContextMode=lightweight &&
-# runKind=cron) deliberately omits SOUL/memory/skills but still delivers the cron
-# marker. Recognised from the session itself: cron turn + marker present
-# model-visible + neither SOUL nor skills + the "Lightweight bootstrap context"
-# line in session_meta.base_instructions. A cron turn that lost the marker too
-# (the MUS-6600 signature) is NOT exempt. An exempt session is skipped, not
+# By-design exemption (and only it): the plugin-managed Memory Dreaming cron
+# (memory-core reconciles it with payload.lightContext:true, so
+# shouldInjectCodexOpenClawPromptContext() is false: bootstrapContextMode=lightweight
+# && runKind=cron) deliberately omits SOUL/memory/skills but still delivers the cron
+# marker. Recognised from the session itself: cron turn whose [cron:<id> …] user item
+# carries the job's sentinel (DREAM_SENTINEL) + marker present model-visible + neither
+# SOUL nor skills. MUS-8377 (13 Oct): the old evidence, "Lightweight bootstrap context" in
+# session_meta.base_instructions, is true in 0 of 400 live rollouts (the string only
+# appears in the cron tool's description under dynamic_tools), so the exemption never
+# matched and the 03:00 dreaming turn was a nightly false FAIL. Every other cron job on the
+# fleet carries SOUL, and <multi_agent_role> is orthogonal (full crons carry it too), so
+# neither a different job nor a multi-agent shape is exempt. A cron turn that lost the
+# marker too (the MUS-6600 signature) is NOT exempt. An exempt session is skipped, not
 # counted as evidence: the agent is judged on its newest NON-exempt session, so
 # a nightly lightweight cron can never mask a stripped interactive session.
 #
@@ -73,14 +79,15 @@ done
 _DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 CRON_MARKER='OpenClaw cron automation turn'
+DREAM_SENTINEL='__openclaw_memory_core_short_term_promotion_dream__'
 
 # classify <rollout> → "<cron 0|1> <soul 0|1> <skills 0|1> <marker 0|1> <has_dev 0|1> <lightweight 0|1>"
-# lightweight = session_meta.base_instructions carries the bootstrap-mode line a lightweight run
-# gets (absent from full-context runs): independent evidence, so a full cron that merely lost
+# lightweight = the cron user item carries the managed Memory Dreaming sentinel (the one job
+# run with lightContext:true): independent evidence, so a full cron that merely lost
 # SOUL+skills cannot pass as the by-design exemption.
 # Reads only the head of the file (lazy `limit`), so MB-sized rollouts are cheap.
 classify() {
-  jq -nr --arg m "$CRON_MARKER" '
+  jq -nr --arg m "$CRON_MARKER" --arg dream "$DREAM_SENTINEL" '
     def txt: if (.payload.content|type) == "array"
              then [.payload.content[] | (.text? // "")] | join("\n")
              else (.payload.content // "" | tostring) end;
@@ -94,8 +101,8 @@ classify() {
     | ($h | map(select(.type == "turn_context")
           | (.payload.collaboration_mode.settings.developer_instructions // "" | tostring))
          | any(.[]; contains($m))) as $cron_ctx
-    | ($h | map(select(.type == "session_meta") | (.payload.base_instructions // "" | tostring))
-         | any(.[]; contains("Lightweight bootstrap context"))) as $lw
+    | ($h | map(select(.type == "response_item" and .payload.role == "user") | txt)
+         | any(.[]; startswith("[cron:") and contains($dream))) as $lw
     | [ (if ($cron_user or $cron_ctx) then 1 else 0 end),
         (if ($d | contains("AGENT_SOUL")) then 1 else 0 end),
         (if ($d | contains("<available_skills>")) then 1 else 0 end),

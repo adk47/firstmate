@@ -1482,6 +1482,29 @@ RSYNC_EXCLUDES=(
   # deletion classifier chokes on the volume (~386K entries) and hangs the
   # single self-hosted CI runner for hours (2026-07-10).
   --exclude='workspaces/repos/'
+  # Sanctioned ROOT scratch home (MUS-1388, child 3 of MUS-1374). Agents that
+  # write output at the repo root (cwd=/opt/hydra) put it in /scratch/: server-
+  # owned, never tracked, never deleted by --delete. ANCHORED like /api-logs/
+  # above (a bare `scratch/` would match inside plugin trees that
+  # install_plugin() rsyncs with this array). Do NOT commit a tracked file
+  # under scratch/ — this exclude means it would never reach the server.
+  --exclude='/scratch/'
+  # ROOT-LEVEL twins of five excludes scoped one directory too deep
+  # (workspaces/*/.openclaw/, *.jpeg, *.csv, intercom/, qa/pr-review*.json) —
+  # the /api-logs/ mistake again. On 2026-09-28 node-8 held 2 Stripe payout
+  # reports, a payout debug CSV, a payout workbook and 2 customer Intercom
+  # attachments at the repo root, all classified non-suspicious by the old
+  # gate. Excluding them is lossless: never deleted, never overwritten.
+  # All anchored; verified no tracked path matches (git ls-files, MUS-1388).
+  --exclude='/.openclaw/'
+  --exclude='/intercom/'
+  --exclude='/*.csv'
+  --exclude='/*.xlsx'
+  --exclude='/*.pdf'
+  --exclude='/*.jpeg'
+  --exclude='/*.jpg'
+  --exclude='/*.png'
+  --exclude='/pr-review*.json'
 )
 
 # -------------------------------------------------------------------
