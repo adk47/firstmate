@@ -57,6 +57,8 @@ source "$SCRIPT_DIR/lib/codex-version.sh"
 source "$SCRIPT_DIR/lib/deploy-lock.sh"
 # shellcheck source=lib/deploy-mutation-marker.sh
 source "$SCRIPT_DIR/lib/deploy-mutation-marker.sh"
+# shellcheck source=lib/main-prune-lock.sh
+source "$SCRIPT_DIR/lib/main-prune-lock.sh"
 
 # Effective systemd EnvironmentFile validation for the muso CLI credentials
 # used by the main gateway (unit-tested in scripts/tests/muso-env-preflight.bats).
@@ -2299,6 +2301,25 @@ DEPLOY_RUN_TOKEN="${HYDRA_DEPLOY_RUN_ID:-manual-$(hostname 2>/dev/null || echo h
 # marker held by another live owner is a refusal, never an overwrite; a
 # dead owner is cleared by hand or compare-and-swapped away with
 # HYDRA_TAKEOVER_MUTATION_MARKER=<that owner's token>.
+# Serialise with scripts/main-prune-restart.sh BEFORE the first node-8 mutation (MUS-3742): a restart during its
+# offline cleanup would race it. Held until exit (lib/main-prune-lock.sh); failing here touched nothing.
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+  lock_rc=0
+  log "Taking the main prune/restart lock (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock || lock_rc=$?
+  case "$lock_rc" in
+    0) ;;
+    1) fail "a main prune/restart still holds $MAIN_PRUNE_LOCK_FILE after ${MAIN_PRUNE_LOCK_WAIT_SECS}s; refusing to deploy underneath it (nothing was changed). Re-run once it finishes." ;;
+    *) fail "cannot open $MAIN_PRUNE_LOCK_FILE (rc=$lock_rc); refusing to deploy without the main prune/restart lock (nothing was changed)" ;;
+  esac
+else
+  # ssh mode: the lock must live on node-8 (a local flock would not exclude the prune there), held by a background ssh
+  # for the life of this process; refused = fail closed, same as the local branch.
+  lock_rc=0
+  log "Taking the main prune/restart lock ON node-8 (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock_remote ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" || lock_rc=$?
+  [ "$lock_rc" = 0 ] || fail "could not take $MAIN_PRUNE_LOCK_FILE on node-8 (rc=$lock_rc: a main prune/restart still holds it, or node-8 is unreachable); refusing to deploy underneath it (nothing was changed). Re-run once it finishes."
+fi
 log "Claiming the mutation marker ($DEPLOY_PATH/.deploy-mutating, owner $DEPLOY_RUN_TOKEN)"
 marker_rc=0
 if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
@@ -3815,8 +3836,25 @@ if needs_target "main" && [ -f "$HYDRA_ROOT/cron-jobs.json" ]; then
   cron_store_heal_trap() {
     if [ -n "${CRON_HEAL_STOPPED:-}" ]; then
       log "  ✗ deploy exited with $CRON_HEAL_STOPPED stopped — starting it back up"
-      run_on_node8 "${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || true
-      notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; attempted an emergency start. VERIFY the gateway is up."
+      if main_prune_lock_lost; then
+        # Our node-8 lock died with the holder ssh, so a prune may already own the freed lock with main stopped
+        # for offline SQLite cleanup (the race rollback.sh ensure_gateways_up refuses). Start ONLY under that lock,
+        # atomically: refused (99) means the prune owns it and starts main itself (main-prune-restart.sh).
+        heal_rc=0
+        run_on_node8 "flock -n -E 99 '$MAIN_PRUNE_LOCK_FILE' ${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || heal_rc=$?
+        case "$heal_rc" in
+          0)  notify_slack ":warning: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped and the node-8 prune lock lost; started it again UNDER the prune lock. VERIFY the gateway is up." ;;
+          99) log "    a prune holds $MAIN_PRUNE_LOCK_FILE — NOT starting $CRON_HEAL_STOPPED; the prune starts main itself"
+              notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped, the node-8 prune lock lost and a prune now holds it. It was deliberately NOT started (the prune restarts main). VERIFY the gateway is up." ;;
+          *)  log "    emergency start under the prune lock FAILED (rc=$heal_rc)"
+              notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; the emergency start under the prune lock FAILED (rc=$heal_rc). VERIFY the gateway is up." ;;
+        esac
+      else
+        # We still hold the lock (fd 213 locally, the holder ssh in ssh mode): a second flock would be refused
+        # by OURSELVES and main would never come back. Start directly.
+        run_on_node8 "${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || true
+        notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; attempted an emergency start. VERIFY the gateway is up."
+      fi
     fi
   }
   # COMPOSE with the existing EXIT trap (deploy lock release, set near the top
