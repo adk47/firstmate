@@ -240,6 +240,34 @@ describe("named HTML entities the parser ignores or maps into a URL", () => {
   });
 });
 
+describe("named entities that decode to a letter or a backslash (parser differential)", () => {
+  // name -> [char it decodes to, ASCII char it stands in for after URL host parsing]
+  const FOLDS: Array<[string, string, string]> = [
+    ["escr", "\u212F", "e"], ["Escr", "\u2130", "E"], ["ell", "\u2113", "l"], ["ee", "\u2147", "e"], ["ExponentialE", "\u2147", "e"],
+    ["hopf", "\u{1D559}", "h"], ["Hopf", "\u210D", "H"], ["hfr", "\u{1D525}", "h"], ["Hfr", "\u210C", "H"], ["afr", "\u{1D51E}", "a"],
+    ["ascr", "\u{1D4B6}", "a"], ["aopf", "\u{1D552}", "a"], ["efr", "\u{1D522}", "e"], ["eopf", "\u{1D556}", "e"], ["circledS", "\u24C8", "S"],
+  ];
+  const INVENTED = "9999999-invented";
+  it.each(FOLDS)("&%s; standing in for a host letter really resolves to help.muso.ai, and the gate strips it", (name, ch, ascii) => {
+    const at = "help.muso.ai".indexOf(ascii.toLowerCase());
+    const real = `help.muso.ai`.slice(0, at) + ch + `help.muso.ai`.slice(at + 1);
+    // Oracle: the URL parser agrees this is the help-centre host.
+    expect(new URL(`https://${real}/en/articles/${INVENTED}`).host).toBe("help.muso.ai");
+    const host = `help.muso.ai`.slice(0, at) + `&${name};` + `help.muso.ai`.slice(at + 1);
+    const out = sanitizeHelpLinks(`Answer.\n<a href="https://${host}/en/articles/${INVENTED}">guide</a>`, MANIFEST);
+    expect(out.body).toBe("Answer.");
+    expect(out.redactions.length).toBeGreaterThan(0);
+  });
+  it("strips &bsol; used as the path separator", () => {
+    const out = sanitizeHelpLinks(`Answer.\n<a href="https://help.muso.ai&bsol;en/articles/${INVENTED}">guide</a>`, MANIFEST);
+    expect(out.body).toBe("Answer.");
+  });
+  it("prose fallback strips it too", () => {
+    const out = sanitizeHelpLinks(`See https://h&escr;lp.muso.ai/en/articles/${INVENTED} for details`, MANIFEST);
+    expect(out.body).not.toContain("articles");
+  });
+});
+
 describe("a link split across lines next to a valid citation", () => {
   const SPLIT = '<a href="https://help.muso.ai/en/ar\narticles/9999999-invented">x</a>';
   const VALID = `${HELP_CITATION_LEAD} ${GOOD}`;

@@ -20,11 +20,16 @@ export interface HelpLinkSanitizeResult {
 
 // Any URL (scheme optional; port and trailing-dot host forms count) on help.muso.ai whose path has an /articles/ segment.
 const ARTICLE_URL = /(?:https?:\/\/)?help\.muso\.ai\.?(?::\d*)?\/[^\s<>()[\]"']*articles\/[^\s<>()[\]"']*/i;
+// An unknown named entity (&escr; -> U+212F, which NFKC folds to "e") cannot be resolved without the HTML5 table, so
+// decoding leaves a placeholder and detection fails closed: the placeholder may stand for any one character, or for nothing.
+const PH = "\u0001";
+const loose = (lit: string) => [...lit].map((c) => `${PH}*(?:${c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}|${PH})`).join("") + `${PH}*`;
+const ARTICLE_URL_LOOSE = new RegExp(`(?:https?:\\/\\/)?${loose("help.muso.ai")}\\.?(?::\\d*)?[^\\s<>()[\\]"']*${loose("articles/")}[^\\s<>()[\\]"']*`, "i");
 const TEMPLATE_LINE = new RegExp(`^${HELP_CITATION_LEAD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} (\\S+)$`);
 
 // Named HTML entities for characters that can appear in a URL (detection only).
 const NAMED_ENTITIES: Record<string, string> = {
-  period: ".", sol: "/", colon: ":", num: "#", amp: "&", quest: "?", equals: "=", lowbar: "_", hyphen: "-",
+  period: ".", sol: "/", colon: ":", num: "#", amp: "&", quest: "?", equals: "=", lowbar: "_", hyphen: "-", bsol: "\\",
 };
 
 // Any whitespace/delimiter-bounded token; dropped when its decoded form carries an article URL, whatever the encoding.
@@ -33,10 +38,10 @@ const TOKEN_G = /(?:[^\s<>()[\]"']|\uFEFF)+/g;
 
 /** Decode HTML character references (semicolon optional for the URL-char names: we decide what to strip, so leniency is safe). An out-of-range code point is left alone, never throws. */
 function decodeEntities(s: string): string {
-  return s.replace(/&(?:(?:#(\d+)|#x([0-9a-f]+)|(period|sol|colon|num|amp|quest|equals|lowbar|hyphen));?|([a-z][a-z0-9]*);)/gi, (m, dec?: string, hexs?: string, name?: string, other?: string) => {
+  return s.replace(/&(?:(?:#(\d+)|#x([0-9a-f]+)|(period|sol|colon|num|amp|quest|equals|lowbar|hyphen|bsol));?|([a-z][a-z0-9]*);)/gi, (m, dec?: string, hexs?: string, name?: string, other?: string) => {
     if (name) return NAMED_ENTITIES[name.toLowerCase()] ?? m;
-    // Any other named entity (&Tab;, &NewLine;, &shy;, ...) never yields an ASCII letter or digit, and the ones a URL parser drops would split "articles": remove it so detection fails closed.
-    if (other) return "";
+    // Any other named entity may decode to anything (ignorable, letter-folding, ...): leave a wildcard placeholder.
+    if (other) return PH;
     const cp = dec !== undefined ? parseInt(dec, 10) : parseInt(hexs as string, 16);
     return Number.isFinite(cp) && cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
   });
@@ -55,7 +60,7 @@ function decodePercent(s: string): string {
 
 /** What a URL parser folds away: ASCII tab/LF/CR anywhere in the URL, NFKC (fullwidth letters), IDNA dot equivalents, and every default-ignorable code point (the full Unicode class, not a list). */
 function normalizeHost(s: string): string {
-  return s.normalize("NFKC").replace(/[\u3002\uFF0E\uFF61]/g, ".").replace(/[\t\n\r]|\p{Default_Ignorable_Code_Point}/gu, "");
+  return s.normalize("NFKC").replace(/[\u3002\uFF0E\uFF61]/g, ".").replace(/\\/g, "/").replace(/[\t\n\r]|\p{Default_Ignorable_Code_Point}/gu, "");
 }
 
 /** Undo HTML entities, percent-escapes and host normalisation (repeatedly, so mixed and double encoding resolve too); a malformed % or entity is left alone, never aborts the decode. Detection only: never the outbound body. */
@@ -70,8 +75,11 @@ function decodeAll(s: string): string {
 }
 
 /** True when the text, once entity- and percent-decoding are undone, carries an article URL. */
+function findArticleUrl(s: string): RegExpExecArray | null {
+  return ARTICLE_URL.exec(s) ?? ARTICLE_URL_LOOSE.exec(decodeAll(s));
+}
 function hasArticleUrl(s: string): boolean {
-  return ARTICLE_URL.test(s) || ARTICLE_URL.test(decodeAll(s));
+  return findArticleUrl(s) !== null;
 }
 const LEAD_RE = new RegExp(`${HELP_CITATION_LEAD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*(?=(?:<\\/\\w+>\\s*)*$)`, "i");
 
@@ -100,7 +108,7 @@ export function sanitizeHelpLinks(body: string, manifest: HelpManifest | null): 
   let keptLine = "";
   const out: string[] = [];
   for (const line of body.split("\n")) {
-    const hit = ARTICLE_URL.exec(line) ?? ARTICLE_URL.exec(decodeAll(line));
+    const hit = findArticleUrl(line);
     if (!hit) {
       out.push(line);
       continue;
