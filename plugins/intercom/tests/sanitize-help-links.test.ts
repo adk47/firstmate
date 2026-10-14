@@ -83,6 +83,18 @@ describe("sanitizeHelpLinks", () => {
     }
   });
 
+  it("strips a host written with a Unicode dot equivalent, fullwidth letters or ignorable characters", () => {
+    for (const host of ["help\u3002muso.ai", "help\uFF0Emuso.ai", "help\uFF61muso.ai", "help.muso\u3002ai", "help%E3%80%82muso.ai",
+      "help&#x3002;muso.ai", "\uFF48elp.muso.ai", "help.muso.a\u00ADi", "he\u200Blp.muso.ai"]) {
+      const line = `More detail here: https://${host}/en/articles/9999999-invented`;
+      const out = sanitizeHelpLinks(`Answer.\n${line}`, MANIFEST);
+      expect(out.body, host).toBe("Answer.");
+      expect(out.redactions.length, host).toBe(1);
+      const prose = sanitizeHelpLinks(`See https://${host}/en/articles/9999999-invented for details`, MANIFEST);
+      expect(prose.body, host).toBe("See for details");
+    }
+  });
+
   it("entity-encoded anchor is stripped", () => {
     const out = sanitizeHelpLinks('Hi.\n<p><a href="https://help&#46;muso.ai/en/articles/9999999-x">guide</a></p>', MANIFEST);
     expect(out.redactions.length).toBe(1);
