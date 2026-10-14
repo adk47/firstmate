@@ -177,7 +177,7 @@ def pick($k; $set): .[$k] | select(type == "object" and .type == "choice"
 
 # screen <adId> <ad-json> <packet>: Jev call, map, render reason, PUT. Returns 1 when unscreened.
 screen() {
-  local id="$1" ad="$2" packet="$3" answers rc v rec fit flags eff conf payload
+  local id="$1" ad="$2" packet="$3" answers rc v rec fit flags eff conf payload brief
   jq -n --arg p "$packet" '{ad_application: $p}' >"$workdir/state.json" || return 1
   # shellcheck disable=SC2086
   answers="$($jev --surface ad-screening --item-id "$id" --state-file "$workdir/state.json" \
@@ -205,8 +205,14 @@ screen() {
   $put put "$id" "$payload" >"$workdir/err" 2>&1 || { log "ad $id: write failed (rc=$?), suggestion not stored: $(first_line "$workdir/err")"; return 1; }
   log "ad $id: screened ($eff)"
   slack_load_env "$SLACK_NOTIFY_BOT" || log "ad $id: brief not posted (no Slack bot token)"
-  slack_notify "$(ad_screening_brief "$ad" "$(cat "$workdir/creative.$id" 2>/dev/null)" "$eff" "$conf" "$flags" \
-    "$(ad_screening_reason "$rec" "$fit" "$flags")")" || true
+  brief="$workdir/brief.$id.json"
+  ad_screening_brief_payload "$SLACK_CHANNEL" "$brief" "$ad" "$(cat "$workdir/creative.$id" 2>/dev/null)" "$eff" "$conf" "$flags" \
+    "$(ad_screening_reason "$rec" "$fit" "$flags")" || { log "ad $id: brief not composed"; return 0; }
+  # Slack rejects the whole message on one bad block; re-post once text-only so the brief is never lost.
+  _slack_post_payload "$brief" || {
+    log "ad $id: card not posted, retrying text-only"
+    jq 'del(.blocks)' "$brief" >"$brief.text" && _slack_post_payload "$brief.text"
+  } || true
 }
 
 n=0

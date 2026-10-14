@@ -40,7 +40,13 @@ S
 #!/usr/bin/env bash
 n=$(( $(cat "$STUB_DIR/slack.n" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$STUB_DIR/slack.n"
 echo "$*" | head -n1 >>"$STUB_DIR/slack.argv"
-while [ $# -gt 0 ]; do [ "$1" = --text ] && printf '%s' "$2" >"$STUB_DIR/slack.$n.txt"; shift; done
+blocks=0
+while [ $# -gt 0 ]; do
+  [ "$1" = --text ] && printf '%s' "$2" >"$STUB_DIR/slack.$n.txt"
+  [ "$1" = --blocks-file ] && { cp "$2" "$STUB_DIR/slack.$n.blocks.json"; blocks=1; }
+  shift
+done
+[ "$blocks" = 1 ] && [ -n "${STUB_FAIL_BLOCKS:-}" ] && exit 1
 exit "${STUB_SLACK_RC:-0}"
 S
   chmod +x "$AD_SCREENING_MUSO_READ" "$AD_SCREENING_DESCRIBE" "$AD_SCREENING_JEV" "$AD_SCREENING_PUT" "$MUSO_BIN"
@@ -117,7 +123,7 @@ sends() { cat "$T/slack.n" 2>/dev/null || echo 0; }
   { ad 101; ad 102; } | fixture; answers reject 0.87 weak adult
   STUB_SLACK_RC=1 run "$SCRIPT" --run
   [ "$status" -eq 0 ]
-  [ "$(sends)" -eq 2 ]
+  [ "$(sends)" -eq 4 ]   # card + one text-only retry per ad
   [ "$(wc -l <"$T/put.ids")" -eq 2 ]
 }
 
@@ -174,4 +180,73 @@ sends() { cat "$T/slack.n" 2>/dev/null || echo 0; }
   "$SCRIPT" --run
   if grep -q $'\xef\xbf\xbd' "$T/slack.1.txt"; then false; fi
   [ "$(head -n1 "$T/slack.1.txt" | grep -o 'é' | wc -l)" -eq 80 ]
+}
+
+MENTION='<@U7RP6HKUZ>'
+blocks() { cat "$T/slack.${1:-1}.blocks.json"; }
+
+@test "card: valid Block Kit, one structural check per block type, Aaron mention in mrkdwn and text" {
+  ad 101 | fixture; answers reject 0.87 weak adult
+  "$SCRIPT" --run
+  blocks | jq -e '.[0].type=="header" and .[0].text.type=="plain_text" and (.[0].text.text|test("Acme Records"))'
+  blocks | jq -e 'map(.type) == ["header","section","section","context","section","actions"]'
+  blocks | jq -e '.[1].text.type=="plain_text" and .[1].accessory.type=="image" and (.[1].accessory.alt_text|length>0)'
+  blocks | jq -e '.[2].fields|length==4 and (.[0].text|test("Spend: USD 500/day")) and (.[1].text=="Goal: awareness") and (.[2].text=="Advertiser account: Acme")'
+  blocks | jq -e '.[3].elements[0].text|test("✅|⛔|👀") and test("reject") and test("87%")'
+  blocks | jq -e '.[5].elements[0] | .type=="button" and .url=="https://promote.muso.ai/portal/admin/review" and .text.type=="plain_text"'
+  blocks | jq -e --arg m "$MENTION" '[.[]|select(.type=="section")|.text|select(.type=="mrkdwn")|.text]|map(select(test($m)))|length==1'
+  blocks | jq -e '.[4].type=="section"'   # the mention sits directly above the actions block
+  [[ "$(cat "$T/slack.1.txt")" == *"$MENTION"* ]]
+}
+
+@test "card: destination is a link for a valid https url, unlinked plain_text for a rejected one" {
+  ad 101 | fixture; answers approve 0.9 strong ""
+  "$SCRIPT" --run
+  blocks 1 | jq -e '.[2].fields[3] | .type=="mrkdwn" and (.text|test("<https://acme.example\\|Open destination>"))'
+  ad 102 | jq '.destinationUrl="http://acme.example/a b"' | fixture
+  "$SCRIPT" --run
+  blocks 2 | jq -e '.[2].fields[3] | .type=="plain_text" and (.text|test("<")|not)'
+}
+
+@test "card: image accessory only for a plain https image url" {
+  local i=0 u
+  for u in "http://cdn.example/a.png" "https://cdn.example/a.mp4" "" "https://cdn.example/a b.png" "https://cdn.example/a<b>.png"; do
+    i=$((i + 1)); ad "20$i" | jq --arg u "$u" '.primaryMediaUrl=$u' | fixture; answers approve 0.9 strong ""
+    "$SCRIPT" --run
+    blocks "$i" | jq -e '.[1] | has("accessory") | not' || { echo "accessory for: $u"; return 1; }
+  done
+  ad 301 | jq '.primaryMediaUrl="https://cdn.example/a.JPEG"' | fixture
+  "$SCRIPT" --run
+  blocks "$((i + 1))" | jq -e '.[1].accessory.image_url=="https://cdn.example/a.JPEG"'
+}
+
+@test "card: advertiser text lands only in plain_text, no <! anywhere, one fixed mrkdwn mention" {
+  ad 101 | jq '.adHeadline="<!channel> *bold* <@U7RP6HKUZ>" | .adBody="x\ny <!here>" | .advertiserName="<!channel> <@U7RP6HKUZ> *Acme*"' | fixture
+  answers approve 0.9 strong ""
+  "$SCRIPT" --run
+  ! grep -q '<!' "$T/slack.1.blocks.json"
+  blocks | jq -e --arg m "$MENTION" '[.. | objects | select(.type=="mrkdwn") | .text | select(test("<@U"))] == [$m + " new ad waiting for your decision"]'
+  blocks | jq -e '[.. | objects | select(.type=="mrkdwn") | .text | select(test("channel|here|bold|Acme"))] | length == 0'
+  blocks | jq -e '[.[0].text.text, .[1].text.text] | all(type=="string" and (test("\n.*\n")|not))'
+}
+
+@test "card: no campaign still shows Spend and Goal as not stated, never linked, mention kept" {
+  ad 101 | jq 'del(.campaign) | del(.destinationUrl)' | fixture; answers approve 0.9 strong ""
+  "$SCRIPT" --run
+  blocks | jq -e '.[2].fields | (.[0].text=="Spend: not stated") and (.[1].text=="Goal: not stated") and (.[3].type=="plain_text" and .[3].text=="Destination: not stated")'
+  ! grep -q '<not stated' "$T/slack.1.blocks.json"
+  blocks | jq -e '[.[] | select(.type=="section") | .text | select(.type=="mrkdwn") | .text] | map(select(test("<@U7RP6HKUZ>"))) | length == 1'
+  [[ "$(cat "$T/slack.1.txt")" == *"<@U7RP6HKUZ>"* ]]
+}
+
+@test "retry: card post fails once -> exactly one text-only re-post, batch continues" {
+  { ad 101; ad 102; } | fixture; answers reject 0.87 weak adult
+  STUB_FAIL_BLOCKS=1 run "$SCRIPT" --run
+  [ "$status" -eq 0 ]
+  [ "$(sends)" -eq 4 ]
+  # sends 1 and 3 carry the card, 2 and 4 are the text-only re-posts: text kept, no blocks
+  [ -e "$T/slack.1.blocks.json" ] && [ -e "$T/slack.3.blocks.json" ]
+  [ ! -e "$T/slack.2.blocks.json" ] && [ ! -e "$T/slack.4.blocks.json" ]
+  grep -q "$MENTION" "$T/slack.2.txt"
+  [ "$(wc -l <"$T/put.ids")" -eq 2 ]
 }
