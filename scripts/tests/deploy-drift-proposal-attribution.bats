@@ -49,6 +49,7 @@ HYDRA_LOCAL=true
 HYDRA_ROOT="$REPO"
 DEPLOY_PATH="$SERVER"
 RSYNC_EXCLUDES=()
+FULL_SYNC=1
 export HYDRA_PROPOSALS_GLOB="$PROPS"
 log() { echo "[t] \$*"; }
 fail() { log "FATAL: \$*"; exit 1; }

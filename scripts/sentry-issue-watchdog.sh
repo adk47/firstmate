@@ -440,7 +440,7 @@ if ! flock -n 9; then
   exit 0
 fi
 
-WORKDIR="$(mktemp -d)"
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/sentry-issue-watchdog.XXXXXX")"
 cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT
 

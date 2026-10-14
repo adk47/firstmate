@@ -45,7 +45,7 @@ gateway_restart_needed() {
       # Inert = the gateway process never reads it. Root docs are enumerated by
       # exact name (no slash) on purpose: a bare *.md glob would also match
       # skills-all/**/SKILL.md and wrongly skip a restart on a real skill change.
-      .github/*|docs/*|.claude/*|scripts/tests/*|scripts/aux-units/*|README.md|CLAUDE.md) ;;  # inert
+      .github/*|docs/*|.claude/*|scripts/tests/*|scripts/aux-units/*|README.md|CLAUDE.md|AGENTS.md) ;;  # inert
       *) return 0 ;;   # anything else could affect a gateway -> restart
     esac
   done <<< "${DEPLOY_CHANGED_FILES:-}"

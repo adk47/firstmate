@@ -356,6 +356,14 @@ _dir_bytes() {
 # reaching this function was already enumerated FROM `stores[]` (see
 # _agent_dirs), so a missing/unreadable path here is a genuine anomaly, not
 # an expected "no store entry" case.
+# SCOPE (MUS-5588): this measures ONLY what openclaw's reaper measures —
+# agents/<id>/sessions/ (7.1) or the per-agent SQLite store (2026.8+). It does
+# NOT measure agents/<id>/agent/codex-home/ (codex transcripts + logs_*.sqlite;
+# 14G of a 23G `qa` agent on 8 Oct, 72 GiB fleet-wide). That dir is owned by the
+# codex binary and openclaw's sessions.delete cannot touch it, so counting it
+# here would page on a breach that no raise of maxDiskBytes could clear. A green
+# maxDiskBytes result is therefore NOT fleet-wide disk coverage; codex-home is
+# retained by scripts/codex-home-prune.sh (its own timer), not by this guard.
 _agent_bytes() {
   local profile="$1" agent="$2" path
   if [ "$SESSION_BUDGET_2026_8_PLUS" -eq 1 ]; then

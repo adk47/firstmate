@@ -148,7 +148,7 @@ die() {
 # the same defect and this file is already deployed.
 body() { sed '/^Rendered: /d' "$1"; }
 
-TMPDIR_RUN="$(mktemp -d)"
+TMPDIR_RUN="$(mktemp -d "${TMPDIR:-/tmp}/sync-platform-llms.XXXXXX")"
 # The staging name for the atomic install. It lives NEXT TO $OUT (rename is only
 # atomic within a filesystem), which means it lives inside Caroline's
 # reference/ directory -- a directory whose deploy rsync exclude is the exact
