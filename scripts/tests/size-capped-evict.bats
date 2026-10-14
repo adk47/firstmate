@@ -135,8 +135,9 @@ SH
 }
 
 @test "a root whose name is not jest_* is refused" {
-  mkdir -p "$BATS_TEST_TMPDIR/other"
-  SIZE_CAP_ROOT="$BATS_TEST_TMPDIR/other" SIZE_CAP_KIB=0 run "$RULE"
+  canon_tmp="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"  # canonical, so only the jest_* check can refuse
+  mkdir -p "$canon_tmp/other"
+  SIZE_CAP_ROOT="$canon_tmp/other" SIZE_CAP_KIB=0 run "$RULE"
   [ "$status" -eq 2 ]
 }
 
@@ -168,4 +169,12 @@ SH
   [ "$status" -ne 0 ]
   [[ "$output" != *"remaining_kib=0"* ]]
   [ -d "$SIZE_CAP_ROOT/old" ]
+}
+
+@test "a du that prints the container total but exits 1 (entry vanished mid-walk) still evicts" {
+  mk old 30 100
+  mkdir -p "$BATS_TEST_TMPDIR/shim"
+  printf '#!/bin/bash\n/usr/bin/du "$@"\nexit 1\n' > "$BATS_TEST_TMPDIR/shim/du"; chmod +x "$BATS_TEST_TMPDIR/shim/du"
+  PATH="$BATS_TEST_TMPDIR/shim:$PATH" SIZE_CAP_APPLY=1 SIZE_CAP_KIB=0 SIZE_CAP_MIN_AGE_MIN=0 run "$RULE"
+  [ ! -d "$SIZE_CAP_ROOT/old" ]
 }

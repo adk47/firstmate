@@ -54,8 +54,9 @@ case "${ROOT##*/}" in jest_*) ;; *) echo "size-capped: refusing container '$ROOT
 dry=1; [ "$APPLY" = 1 ] && dry=0
 mtime() { stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1"; }
 
-# An unknown total must not read as 0 (cap met, exit 0): fail instead.
-total_kib="$(du -skx -- "$ROOT" 2>/dev/null | awk '{print $1}')" || total_kib=""
+# An unknown total must not read as 0 (cap met, exit 0): fail instead. du exits 1 on a vanished
+# entry but still prints a valid total, so judge the output, not the exit status.
+total_kib="$(du -skx -- "$ROOT" 2>/dev/null | awk '{print $1}' || true)"
 case "$total_kib" in ""|*[!0-9]*) echo "size-capped: could not measure $ROOT, evicting nothing" >&2; exit 1 ;; esac
 evicted=0; freed_kib=0; skipped_open=0; failures=0
 now="$(date +%s)"
