@@ -227,6 +227,19 @@ describe("URL-parser-ignored ASCII whitespace (tab, LF, CR) inside a link", () =
   });
 });
 
+describe("named HTML entities the parser ignores or maps into a URL", () => {
+  const INVENTED = "9999999-invented";
+  it.each(["&Tab;", "&NewLine;", "&tab;", "&shy;", "&zwj;", "&NoBreak;"])("strips an unlisted article link with %s in the path", (ent) => {
+    const body = `Answer.\n<a href="https://help.muso.ai/en/ar${ent}ticles/${INVENTED}">guide</a>`;
+    const out = sanitizeHelpLinks(body, MANIFEST);
+    expect(out.body).toBe("Answer.");
+    expect(out.redactions.length).toBeGreaterThan(0);
+  });
+  it("leaves a harmless ampersand phrase alone", () => {
+    expect(sanitizeHelpLinks("Tom &amp; Jerry; R&D", MANIFEST).body).toBe("Tom &amp; Jerry; R&D");
+  });
+});
+
 describe("a link split across lines next to a valid citation", () => {
   const SPLIT = '<a href="https://help.muso.ai/en/ar\narticles/9999999-invented">x</a>';
   const VALID = `${HELP_CITATION_LEAD} ${GOOD}`;

@@ -31,10 +31,12 @@ const NAMED_ENTITIES: Record<string, string> = {
 // Delimiter is \s minus U+FEFF: JS \s counts it as whitespace but URL parsers ignore it inside a host, so splitting on it would cut a token in two.
 const TOKEN_G = /(?:[^\s<>()[\]"']|\uFEFF)+/g;
 
-/** Decode HTML character references (semicolon optional: we decide what to strip, so leniency is safe). An out-of-range code point is left alone, never throws. */
+/** Decode HTML character references (semicolon optional for the URL-char names: we decide what to strip, so leniency is safe). An out-of-range code point is left alone, never throws. */
 function decodeEntities(s: string): string {
-  return s.replace(/&(?:#(\d+)|#x([0-9a-f]+)|(period|sol|colon|num|amp|quest|equals|lowbar|hyphen));?/gi, (m, dec?: string, hexs?: string, name?: string) => {
+  return s.replace(/&(?:(?:#(\d+)|#x([0-9a-f]+)|(period|sol|colon|num|amp|quest|equals|lowbar|hyphen));?|([a-z][a-z0-9]*);)/gi, (m, dec?: string, hexs?: string, name?: string, other?: string) => {
     if (name) return NAMED_ENTITIES[name.toLowerCase()] ?? m;
+    // Any other named entity (&Tab;, &NewLine;, &shy;, ...) never yields an ASCII letter or digit, and the ones a URL parser drops would split "articles": remove it so detection fails closed.
+    if (other) return "";
     const cp = dec !== undefined ? parseInt(dec, 10) : parseInt(hexs as string, 16);
     return Number.isFinite(cp) && cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
   });
