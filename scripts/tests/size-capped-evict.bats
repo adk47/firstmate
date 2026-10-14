@@ -91,3 +91,32 @@ setup() {
   run "$RULE"
   [ "$status" -eq 0 ]
 }
+
+@test "non-numeric SIZE_CAP_KIB is refused (exit 2), nothing evicted" {
+  mk old 30 100
+  SIZE_CAP_KIB=5G run "$RULE"
+  [ "$status" -eq 2 ]
+  [ -d "$SIZE_CAP_ROOT/old" ]
+}
+
+@test "non-numeric SIZE_CAP_MIN_AGE_MIN is refused (exit 2), fresh child survives" {
+  mk fresh 0 100
+  SIZE_CAP_MIN_AGE_MIN=1h SIZE_CAP_KIB=0 run "$RULE"
+  [ "$status" -eq 2 ]
+  [ -d "$SIZE_CAP_ROOT/fresh" ]
+}
+
+@test "a failing du on one child still emits the summary and evicts later children" {
+  mk old 30 100; mk mid 20 100
+  mkdir -p "$BATS_TEST_TMPDIR/shim"
+  real_du="$(command -v du)"
+  cat > "$BATS_TEST_TMPDIR/shim/du" <<SH
+#!/bin/bash
+case "\$*" in *"/old"*) exit 1 ;; esac
+exec "$real_du" "\$@"
+SH
+  chmod +x "$BATS_TEST_TMPDIR/shim/du"
+  PATH="$BATS_TEST_TMPDIR/shim:$PATH" SIZE_CAP_KIB=0 SIZE_CAP_MIN_AGE_MIN=0 run "$RULE"
+  [[ "$output" == *"size-capped: done"* ]]
+  [ ! -e "$SIZE_CAP_ROOT/mid" ]
+}

@@ -20,7 +20,7 @@
 #   SIZE_CAP_KIB          cap in KiB, default 5242880 (5 GiB)
 #   SIZE_CAP_MIN_AGE_MIN  children newer than this are never evicted, default 60
 #   SIZE_CAP_APPLY        1 = delete, anything else = dry-run
-# Exit: 0 ok, 1 an eviction failed, 2 refused container.
+# Exit: 0 ok, 1 an eviction failed, 2 refused container or bad numeric knob.
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -28,6 +28,12 @@ ROOT="${SIZE_CAP_ROOT:-/tmp/jest_0}"  # tmp-ok: the cache being capped
 CAP_KIB="${SIZE_CAP_KIB:-5242880}"
 MIN_AGE_MIN="${SIZE_CAP_MIN_AGE_MIN:-60}"
 APPLY="${SIZE_CAP_APPLY:-0}"
+
+# A non-numeric knob would make the -le/-lt tests error (rc 2), which `A && break` reads as
+# "false": the cap and the age floor would silently stop protecting anything. Refuse instead.
+for v in CAP_KIB MIN_AGE_MIN; do
+  case "${!v}" in ""|*[!0-9]*) echo "size-capped: $v must be a non-negative integer, got '${!v}'" >&2; exit 2 ;; esac
+done
 
 # shellcheck source=lib/safe-delete.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/safe-delete.sh"
@@ -42,7 +48,7 @@ if [ ! -d "$ROOT" ]; then echo "size-capped: no container at $ROOT, nothing to d
 dry=1; [ "$APPLY" = 1 ] && dry=0
 mtime() { stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1"; }
 
-total_kib="$(du -skx -- "$ROOT" | awk '{print $1}')"
+total_kib="$(du -skx -- "$ROOT" 2>/dev/null | awk '{print $1}' || true)"; total_kib="${total_kib:-0}"
 evicted=0; freed_kib=0; skipped_open=0; failures=0
 now="$(date +%s)"
 
@@ -51,7 +57,8 @@ while IFS= read -r path; do
   [ "$total_kib" -le "$CAP_KIB" ] && break
   age_min=$(( (now - $(mtime "$path")) / 60 ))
   [ "$age_min" -lt "$MIN_AGE_MIN" ] && continue
-  kib="$(du -skx -- "$path" 2>/dev/null | awk '{print $1}')"; kib="${kib:-0}"
+  # du exits 1 when an entry vanishes mid-walk (live cache); a size estimate must not kill the run.
+  kib="$(du -skx -- "$path" 2>/dev/null | awk '{print $1}' || true)"; kib="${kib:-0}"
   if [ "$dry" -eq 1 ]; then
     echo "size-capped: would evict $path (${kib} KiB)"
     evicted=$((evicted + 1)); freed_kib=$((freed_kib + kib)); total_kib=$((total_kib - kib))
