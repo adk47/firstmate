@@ -1712,21 +1712,34 @@ ATTRIB
   fi
 }
 
+# Step 4b applies the GIT DELTA since .deployed-sha and never --deletes (MUS-5069,
+# scripts/lib/delta-sync.sh). HYDRA_FULL_SYNC=1 is the explicit, human-chosen
+# escape hatch back to the whole-tree mirror (Step 0 rsync drift + Step 4a + a
+# `--delete` Step 4b); it is also the only way to deploy with no usable baseline.
+FULL_SYNC="${HYDRA_FULL_SYNC:-0}"
+# shellcheck source=lib/delta-sync.sh
+source "$SCRIPT_DIR/lib/delta-sync.sh"
+
 log "Step 0/8: Drift check (server vs last-deployed SHA)..."
 drift_check_against_baseline() {
-  if [[ "${HYDRA_FORCE:-0}" == "1" ]]; then
+  if [[ "$FULL_SYNC" == "1" ]]; then
+    log "  HYDRA_FULL_SYNC=1 — whole-tree mirror mode (no delta transfer)"
+  fi
+  if [[ "$FULL_SYNC" == "1" && "${HYDRA_FORCE:-0}" == "1" ]]; then
     log "  Skipped (HYDRA_FORCE=1 set)"
     return 0
   fi
-  if [[ "${HYDRA_SKIP_DRIFT_CHECK:-0}" == "1" ]]; then
+  if [[ "$FULL_SYNC" == "1" && "${HYDRA_SKIP_DRIFT_CHECK:-0}" == "1" ]]; then
     log "  Skipped (HYDRA_SKIP_DRIFT_CHECK=1 set; Step 4a pre-flight will still run)"
     return 0
   fi
   if ! command -v git >/dev/null 2>&1; then
+    [[ "$FULL_SYNC" == "1" ]] || fail "git not found — the delta transfer needs it (HYDRA_FULL_SYNC=1 for a whole-tree mirror)"
     log "  git not found — skipping drift check"
     return 0
   fi
   if ! git -C "$HYDRA_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    [[ "$FULL_SYNC" == "1" ]] || fail "not a git checkout — the delta transfer needs one (HYDRA_FULL_SYNC=1 for a whole-tree mirror)"
     log "  not a git checkout — skipping drift check"
     return 0
   fi
@@ -1761,6 +1774,9 @@ drift_check_against_baseline() {
   fi
   last_sha=$(echo "$last_sha" | tr -d '[:space:]')
 
+  if [[ -z "$last_sha" && "$FULL_SYNC" != "1" ]]; then
+    fail "no .deployed-sha on the server: there is no baseline to compute a delta from. Choose a full sync explicitly: HYDRA_FULL_SYNC=1."
+  fi
   if [[ -z "$last_sha" ]]; then
     log "  No .deployed-sha on server (first deploy with this guard)"
     log "  → drift check skipped, will be enabled after this deploy succeeds"
@@ -1771,6 +1787,39 @@ drift_check_against_baseline() {
   # baseline file by hand) should not silently degrade to "skip check".
   if ! [[ "$last_sha" =~ ^[0-9a-f]{40}$ ]]; then
     fail "baseline .deployed-sha on server is not a valid 40-char hex SHA: '$last_sha'. Inspect /opt/hydra/.deployed-sha and remove it if corrupted."
+  fi
+
+  if [[ "$FULL_SYNC" != "1" ]]; then
+    local why
+    why=$(delta_check_baseline "$last_sha") || fail "$why. Fix the checkout, or choose a full sync explicitly: HYDRA_FULL_SYNC=1."
+    log "  Baseline: $last_sha (server's last successful deploy)"
+    delta_compute "$last_sha" || fail "Could not compute the delta (git diff failed, or it holds a path git quotes; see above). Rename a quoted path in git, or choose a full sync explicitly: HYDRA_FULL_SYNC=1."
+    local dirty untracked_n
+    # git diff has no --pathspec-from-file (exit 129): pass the paths as pathspec args, and
+    # let a git error fail the deploy instead of reading as "no dirty paths".
+    local -a delta_paths=()
+    local delta_p
+    while IFS= read -r delta_p; do [[ -n "$delta_p" ]] && delta_paths+=("$delta_p"); done <<< "$DELTA_UPSERT"
+    dirty=""
+    if (( ${#delta_paths[@]} > 0 )); then
+      dirty=$(git -C "$HYDRA_ROOT" --literal-pathspecs diff --name-only HEAD -- "${delta_paths[@]}") \
+        || fail "could not check the delta paths for uncommitted edits (git diff failed); refusing to ship unverified bytes"
+    fi
+    [[ -z "$dirty" ]] || fail "uncommitted changes in paths this deploy ships (the deploy applies committed bytes only; commit or stash): $(echo "$dirty" | head -5 | tr '\n' ' ')"
+    untracked_n=$(git -C "$HYDRA_ROOT" ls-files --others --exclude-standard 2>/dev/null | sed '/^$/d' | wc -l | tr -d ' ')
+    (( untracked_n == 0 )) || log "  Skipping $untracked_n untracked local file(s): the deploy applies committed changes only"
+    # shellcheck disable=SC2034
+    DEPLOY_CHANGED_FILES=$(printf '%s\n%s\n' "$DELTA_UPSERT" "$DELTA_DELETE" | sed '/^$/d' | sort -u)
+    # shellcheck disable=SC2034
+    DEPLOY_DIFF_COMPUTED=1
+    log "  Delta: $(printf '%s\n' "$DELTA_UPSERT" | sed '/^$/d' | wc -l | tr -d ' ') changed, $(printf '%s\n' "$DELTA_DELETE" | sed '/^$/d' | wc -l | tr -d ' ') removed since $last_sha"
+    # shellcheck disable=SC2034  # read by delta_gate in lib/delta-sync.sh
+    DELTA_HALT_SUPPRESSED=0
+    # shellcheck disable=SC2034
+    if [[ "${HYDRA_FORCE:-0}" == "1" || "${HYDRA_SKIP_DRIFT_CHECK:-0}" == "1" ]]; then DELTA_HALT_SUPPRESSED=1; fi
+    delta_gate "$last_sha" || fail "server and repo both changed the paths above since baseline $last_sha (override: HYDRA_FORCE=1)"
+    log "  Clean — the delta is applied per file; paths outside it are never touched"
+    return 0
   fi
 
   if ! git -C "$HYDRA_ROOT" cat-file -e "$last_sha^{commit}" 2>/dev/null; then
@@ -2241,7 +2290,11 @@ DRIFT_BRIEFING
 
   log "  Pre-flight clean."
 }
-preflight_drift_check
+if [[ "$FULL_SYNC" == "1" ]]; then
+  preflight_drift_check
+else
+  log "  Skipped — the delta transfer never deletes server-only files (HYDRA_FULL_SYNC=1 restores this pre-flight)"
+fi
 
 # -------------------------------------------------------------------
 # --report-only: both read-only rails (Step 0 drift, Step 4a pre-flight) passed
@@ -2342,7 +2395,10 @@ unset marker_rc
 # -------------------------------------------------------------------
 # Step 4b: rsync repo to Node 8
 # -------------------------------------------------------------------
-if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+if [[ "$FULL_SYNC" != "1" ]]; then
+  log "Step 4b/8: Applying the git delta (no --delete)..."
+  delta_apply
+elif $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
   log "Step 4b/8: Local sync (running on Node 8)..."
   rsync -a --delete \
     "${RSYNC_EXCLUDES[@]}" \
