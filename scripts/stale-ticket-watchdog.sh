@@ -101,7 +101,7 @@ fi
 # ─── Fetch all open tasks (paginated) ─────────────────────────
 # Pages land in temp files and are merged via jq -s: task descriptions make
 # pages far bigger than ARG_MAX allows, so they must never ride in argv.
-WORKDIR=$(mktemp -d)
+WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/stale-ticket-watchdog.XXXXXX")
 trap 'rm -rf "$WORKDIR"' EXIT
 page=0
 while :; do

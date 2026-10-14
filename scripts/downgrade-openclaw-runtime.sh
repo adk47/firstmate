@@ -255,6 +255,7 @@ fi
 restore_tmp=""
 if [[ -n "$STATE_ARCHIVE" ]]; then
   log "Preflighting cold archive $STATE_ARCHIVE (extract + validate before any mutation) ..."
+  # mktemp-ok: removed inline on every refusal path; kept on purpose if the live swap dies mid-restore (it holds the only copy)
   restore_tmp="$(mktemp -d "$RESTORE_ROOT/pre81-restore.XXXXXX")" || die "cannot create a temp restore root under $RESTORE_ROOT"
   tar -C "$restore_tmp" -xzf "$STATE_ARCHIVE" || { rm -rf "$restore_tmp"; die "state archive does not extract (truncated/corrupt?) — nothing was stopped or downgraded"; }
   for p in $(profiles); do

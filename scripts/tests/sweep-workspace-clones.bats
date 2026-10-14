@@ -1450,3 +1450,18 @@ SH
   [ -d "$TEST_TMPDIR/ws/cto/tmp/core-backend-10179-review-JjcqCp" ]
   [ -d "$TEST_TMPDIR/repos/core-backend-10179-review-JjcqCp" ]
 }
+
+@test "capability probe dir is removed even when rm rejects --one-file-system (BSD)" {
+  # BSD rm exits 64 on --one-file-system WITHOUT removing the target; the probe
+  # dir must still be cleaned up or every sweep run leaks one into $TMPDIR.
+  cat > "$TEST_TMPDIR/bin/rm" <<'STUB'
+#!/bin/bash
+for a in "$@"; do [ "$a" = "--one-file-system" ] && exit 64; done
+exec /bin/rm "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/rm"
+  mkdir -p "$TEST_TMPDIR/probe-tmp"
+  TMPDIR="$TEST_TMPDIR/probe-tmp" run "$SWEEP"
+  [ "$status" -eq 0 ]
+  [ "$(find "$TEST_TMPDIR/probe-tmp" -mindepth 1 | wc -l | tr -d ' ')" -eq 0 ]
+}

@@ -574,6 +574,7 @@ query_catalog() {
     ''|*[!0-9]*|0) echo "invalid catalog batch size: $CATALOG_BATCH_SIZE" >&2; return 1 ;;
   esac
   [ -s "$ids_file" ] || return 1
+  # mktemp-ok: rm -rf "$query_tmp" on every return path below
   query_tmp="$(mktemp -d "$temp_parent/catalog-query.XXXXXX")" || return 1
   if ! split -l "$CATALOG_BATCH_SIZE" "$ids_file" "$query_tmp/ids-"; then
     rm -rf "$query_tmp"
@@ -683,7 +684,7 @@ PYEOF
 # ──────────────────────────────────────────────────────────────
 _self_test() {
   local td out
-  td="$(mktemp -d)"
+  td="$(mktemp -d "${TMPDIR:-/tmp}/merge-landing-watchdog.XXXXXX")"
   trap 'rm -rf "$td"' RETURN
   # Candidate pairs: L1 stuck, L2 landed-never-alerted, L3 landed-after-alerted.
   # L5 is a DIRECTION-FLIP: its survivor S5 merged INTO
@@ -752,7 +753,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 NOW_EPOCH="${MERGE_LANDING_NOW_EPOCH:-$(date -u +%s)}"
-RUN_TMP_DIR="$(mktemp -d)"
+RUN_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/merge-landing-watchdog.XXXXXX")"
 CANDIDATES_FILE="$RUN_TMP_DIR/candidates.json"
 IDS_FILE="$RUN_TMP_DIR/ids.txt"
 CATALOG_FILE="$RUN_TMP_DIR/catalog.json"

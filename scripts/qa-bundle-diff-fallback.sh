@@ -189,7 +189,8 @@ trap on_exit EXIT
 if [ -n "${QA_BUNDLE_FALLBACK_WORKDIR:-}" ]; then
   WORKDIR="$QA_BUNDLE_FALLBACK_WORKDIR"
 else
-  WORKDIR="$(mktemp -d)"
+  # mktemp-ok: CLEANUP_DIR is set to it on the next line and on_exit (EXIT trap) removes it
+  WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/qa-bundle-diff-fallback.XXXXXX")"
   CLEANUP_DIR="$WORKDIR"
 fi
 
