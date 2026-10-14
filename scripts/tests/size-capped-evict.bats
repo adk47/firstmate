@@ -15,7 +15,8 @@ mk() {
 }
 
 setup() {
-  export SIZE_CAP_ROOT="$BATS_TEST_TMPDIR/jest_0"
+  # physical path: the script refuses any root that is not its own canonical spelling
+  export SIZE_CAP_ROOT="$(cd -P "$BATS_TEST_TMPDIR" && pwd)/jest_0"
   mkdir -p "$SIZE_CAP_ROOT"
   : > "$BATS_TEST_TMPDIR/mounts"
   export SAFE_DELETE_MOUNTS_FILE="$BATS_TEST_TMPDIR/mounts"
@@ -119,4 +120,52 @@ SH
   PATH="$BATS_TEST_TMPDIR/shim:$PATH" SIZE_CAP_KIB=0 SIZE_CAP_MIN_AGE_MIN=0 run "$RULE"
   [[ "$output" == *"size-capped: done"* ]]
   [ ! -e "$SIZE_CAP_ROOT/mid" ]
+}
+
+@test "a root that climbs out of jest_0 via .. is refused, sibling dir untouched" {
+  mk old 30 100
+  mkdir -p "$BATS_TEST_TMPDIR/sibling"; echo x > "$BATS_TEST_TMPDIR/sibling/f"
+  touch -t 200001010000 "$BATS_TEST_TMPDIR/sibling"
+  SIZE_CAP_ROOT="$SIZE_CAP_ROOT/.." SIZE_CAP_KIB=0 run "$RULE"
+  [ "$status" -eq 2 ]
+  SIZE_CAP_ROOT="$SIZE_CAP_ROOT/../jest_0" SIZE_CAP_KIB=0 run "$RULE"
+  [ "$status" -eq 2 ]
+  [ -d "$BATS_TEST_TMPDIR/sibling" ]
+  [ -d "$SIZE_CAP_ROOT/old" ]
+}
+
+@test "a root whose name is not jest_* is refused" {
+  mkdir -p "$BATS_TEST_TMPDIR/other"
+  SIZE_CAP_ROOT="$BATS_TEST_TMPDIR/other" SIZE_CAP_KIB=0 run "$RULE"
+  [ "$status" -eq 2 ]
+}
+
+@test "a root reached through a symlinked parent is refused" {
+  mk old 30 100
+  ln -s "$BATS_TEST_TMPDIR" "$BATS_TEST_TMPDIR/viaparent"
+  SIZE_CAP_ROOT="$BATS_TEST_TMPDIR/viaparent/jest_0" SIZE_CAP_KIB=0 run "$RULE"
+  [ "$status" -eq 2 ]
+  [ -d "$SIZE_CAP_ROOT/old" ]
+}
+
+@test "a child name containing a newline never makes the rule select a path outside the container" {
+  mk $'x\nscripts' 30 100
+  mkdir -p "$BATS_TEST_TMPDIR/cwd/scripts"; touch -t 200001010000 "$BATS_TEST_TMPDIR/cwd/scripts"
+  cd "$BATS_TEST_TMPDIR/cwd"
+  SIZE_CAP_KIB=0 run "$RULE"
+  [ -d "$BATS_TEST_TMPDIR/cwd/scripts" ]
+  [[ "$output" != *"evicted scripts"* ]]
+  while IFS= read -r l; do
+    case "$l" in "size-capped: evicted "*|"size-capped: would evict "*) [[ "$l" == *"$SIZE_CAP_ROOT/"* ]] ;; esac
+  done <<< "$output"
+}
+
+@test "a failing du on the container itself is a failure, not a met cap" {
+  mk old 30 100
+  mkdir -p "$BATS_TEST_TMPDIR/shim"
+  printf '#!/bin/bash\nexit 1\n' > "$BATS_TEST_TMPDIR/shim/du"; chmod +x "$BATS_TEST_TMPDIR/shim/du"
+  PATH="$BATS_TEST_TMPDIR/shim:$PATH" SIZE_CAP_KIB=0 SIZE_CAP_MIN_AGE_MIN=0 run "$RULE"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"remaining_kib=0"* ]]
+  [ -d "$SIZE_CAP_ROOT/old" ]
 }

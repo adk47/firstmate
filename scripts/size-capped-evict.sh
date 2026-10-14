@@ -20,7 +20,8 @@
 #   SIZE_CAP_KIB          cap in KiB, default 5242880 (5 GiB)
 #   SIZE_CAP_MIN_AGE_MIN  children newer than this are never evicted, default 60
 #   SIZE_CAP_APPLY        1 = delete, anything else = dry-run
-# Exit: 0 ok, 1 an eviction failed, 2 refused container or bad numeric knob.
+# Exit: 0 ok, 1 an eviction failed or the container size could not be measured,
+#       2 refused container (not canonical / not jest_*) or bad numeric knob.
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -44,11 +45,18 @@ case "$ROOT" in
 esac
 if [ -L "$ROOT" ]; then echo "size-capped: refusing symlinked container '$ROOT'" >&2; exit 2; fi
 if [ ! -d "$ROOT" ]; then echo "size-capped: no container at $ROOT, nothing to do"; exit 0; fi
+# The literal denylist above is not a boundary ("jest_0/.." is its parent). Only a canonical,
+# physical path whose last component is a jest cache dir may be capped: no "..", no symlinked parent.
+canon="$(cd -P -- "$ROOT" && pwd)"
+case "$canon" in "$ROOT") ;; *) echo "size-capped: refusing non-canonical container '$ROOT' (physical path '$canon')" >&2; exit 2 ;; esac
+case "${ROOT##*/}" in jest_*) ;; *) echo "size-capped: refusing container '$ROOT': name is not jest_*" >&2; exit 2 ;; esac
 
 dry=1; [ "$APPLY" = 1 ] && dry=0
 mtime() { stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1"; }
 
-total_kib="$(du -skx -- "$ROOT" 2>/dev/null | awk '{print $1}' || true)"; total_kib="${total_kib:-0}"
+# An unknown total must not read as 0 (cap met, exit 0): fail instead.
+total_kib="$(du -skx -- "$ROOT" 2>/dev/null | awk '{print $1}')" || total_kib=""
+case "$total_kib" in ""|*[!0-9]*) echo "size-capped: could not measure $ROOT, evicting nothing" >&2; exit 1 ;; esac
 evicted=0; freed_kib=0; skipped_open=0; failures=0
 now="$(date +%s)"
 
@@ -74,7 +82,11 @@ while IFS= read -r path; do
   fi
 done < <(
   find "$ROOT" -mindepth 1 -maxdepth 1 -print0 \
-    | while IFS= read -r -d '' p; do printf '%s %s\n' "$(mtime "$p")" "$p"; done \
+    | while IFS= read -r -d '' p; do
+        # newline-delimited records would let a name like $'\nscripts' split into a path outside ROOT
+        case "$p" in *$'\n'*) echo "size-capped: skip (newline in name) ${p//$'\n'/?}" >&2; continue ;; esac
+        printf '%s %s\n' "$(mtime "$p")" "$p"
+      done \
     | sort -n | cut -d' ' -f2-
 )
 
