@@ -94,7 +94,8 @@ export function sanitizeHelpLinks(body: string, manifest: HelpManifest | null): 
 
   const redactions: string[] = [];
   let kept = false;
-  let anyHit = false;
+  let keptIdx = -1;
+  let keptLine = "";
   const out: string[] = [];
   for (const line of body.split("\n")) {
     const hit = ARTICLE_URL.exec(line) ?? ARTICLE_URL.exec(decodeAll(line));
@@ -102,20 +103,30 @@ export function sanitizeHelpLinks(body: string, manifest: HelpManifest | null): 
       out.push(line);
       continue;
     }
-    anyHit = true;
     const url = TEMPLATE_LINE.exec(line.trim())?.[1];
     const id = url ? /^https:\/\/help\.muso\.ai\/en\/articles\/(\d+)-/.exec(url)?.[1] : undefined;
     const valid = !!url && !!id && manifest?.articles[id]?.url === url;
     if (valid && !kept) {
       kept = true;
+      keptIdx = out.length;
+      keptLine = line;
       out.push(line);
     } else {
       redactions.push(hit[0]);
     }
   }
-  // A link split across lines (LF/CR inside an href) matches no single line; strip it by token instead.
-  if (!anyHit) return { body: stripUrlTokensOnly(body), redactions: [body] };
-  const cleaned = out.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "");
+  // A link split across lines (LF/CR inside an href) matches no single line, even when another line
+  // is a valid citation; sweep the remainder by token, shielding the kept citation line.
+  const SHIELD = "\u0000KEPT\u0000";
+  if (keptIdx >= 0) out[keptIdx] = SHIELD;
+  const rest = out.join("\n");
+  let joined = rest;
+  if (hasArticleUrl(rest)) {
+    joined = stripUrlTokensOnly(rest);
+    redactions.push(rest);
+  }
+  joined = joined.replace(SHIELD, keptLine);
+  const cleaned = joined.replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "");
   if (cleaned.trim().length > 0 || !stripUrlTokensOnly(body).trim()) return { body: cleaned, redactions };
   // Dropping whole lines emptied a reply that had prose around the URL (a model that
   // ignored the template). Never post an empty body: keep the prose, lose only the URL.

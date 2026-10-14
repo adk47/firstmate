@@ -227,6 +227,25 @@ describe("URL-parser-ignored ASCII whitespace (tab, LF, CR) inside a link", () =
   });
 });
 
+describe("a link split across lines next to a valid citation", () => {
+  const SPLIT = '<a href="https://help.muso.ai/en/ar\narticles/9999999-invented">x</a>';
+  const VALID = `${HELP_CITATION_LEAD} ${GOOD}`;
+  it.each([
+    ["split anchor after the valid line", `Answer.\n${VALID}\n${SPLIT}`],
+    ["split anchor before the valid line", `Answer.\n${SPLIT}\n${VALID}`],
+  ])("strips the split link and keeps the valid citation: %s", (_n, body) => {
+    const out = sanitizeHelpLinks(body, MANIFEST);
+    expect(out.body).not.toContain("9999999");
+    expect(out.body).toContain(VALID);
+    expect(out.redactions.length).toBeGreaterThan(0);
+  });
+  it("strips the split link when the other article line is itself invalid", () => {
+    const out = sanitizeHelpLinks(`Answer.\nSee https://help.muso.ai/en/articles/5-x\n${SPLIT}`, MANIFEST);
+    expect(out.body).not.toContain("9999999");
+    expect(out.body).not.toContain("articles/5-x");
+  });
+});
+
 describe("parseHelpManifest / loadHelpManifest", () => {
   it.each(["", "not json", "[]", '{"articles":[]}', '{"articles":{"1":{"slug":5}}}', '{"articles":{"1":{"slug":"a","url":"http://evil.example/1-a"}}}'])(
     "rejects malformed input %j",
