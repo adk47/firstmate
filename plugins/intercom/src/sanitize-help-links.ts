@@ -51,9 +51,9 @@ function decodePercent(s: string): string {
   });
 }
 
-/** What a URL parser's host step folds away: NFKC (fullwidth letters), IDNA dot equivalents, and every default-ignorable code point (the full Unicode class, not a list). */
+/** What a URL parser folds away: ASCII tab/LF/CR anywhere in the URL, NFKC (fullwidth letters), IDNA dot equivalents, and every default-ignorable code point (the full Unicode class, not a list). */
 function normalizeHost(s: string): string {
-  return s.normalize("NFKC").replace(/[\u3002\uFF0E\uFF61]/g, ".").replace(/\p{Default_Ignorable_Code_Point}/gu, "");
+  return s.normalize("NFKC").replace(/[\u3002\uFF0E\uFF61]/g, ".").replace(/[\t\n\r]|\p{Default_Ignorable_Code_Point}/gu, "");
 }
 
 /** Undo HTML entities, percent-escapes and host normalisation (repeatedly, so mixed and double encoding resolve too); a malformed % or entity is left alone, never aborts the decode. Detection only: never the outbound body. */
@@ -94,6 +94,7 @@ export function sanitizeHelpLinks(body: string, manifest: HelpManifest | null): 
 
   const redactions: string[] = [];
   let kept = false;
+  let anyHit = false;
   const out: string[] = [];
   for (const line of body.split("\n")) {
     const hit = ARTICLE_URL.exec(line) ?? ARTICLE_URL.exec(decodeAll(line));
@@ -101,6 +102,7 @@ export function sanitizeHelpLinks(body: string, manifest: HelpManifest | null): 
       out.push(line);
       continue;
     }
+    anyHit = true;
     const url = TEMPLATE_LINE.exec(line.trim())?.[1];
     const id = url ? /^https:\/\/help\.muso\.ai\/en\/articles\/(\d+)-/.exec(url)?.[1] : undefined;
     const valid = !!url && !!id && manifest?.articles[id]?.url === url;
@@ -111,6 +113,8 @@ export function sanitizeHelpLinks(body: string, manifest: HelpManifest | null): 
       redactions.push(hit[0]);
     }
   }
+  // A link split across lines (LF/CR inside an href) matches no single line; strip it by token instead.
+  if (!anyHit) return { body: stripUrlTokensOnly(body), redactions: [body] };
   const cleaned = out.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "");
   if (cleaned.trim().length > 0 || !stripUrlTokensOnly(body).trim()) return { body: cleaned, redactions };
   // Dropping whole lines emptied a reply that had prose around the URL (a model that

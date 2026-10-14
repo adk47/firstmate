@@ -987,6 +987,10 @@ describe("SanitizingIntercomClient help-centre link gate", () => {
     const out = await send("Answer.\nMore detail here: https://help.muso.ai:443/en/articles/9999999-invented", () => manifest);
     expect(out).toBe("Answer.");
   });
+  it("strips an invented link whose anchor href carries a tab inside the path", async () => {
+    const out = await send('Answer.\n<a href="https://help.muso.ai/en/ar\tticles/9999999-invented">guide</a>', () => manifest);
+    expect(out).toBe("Answer.");
+  });
   it("strips an invented link written with a percent-encoded path", async () => {
     const out = await send("Answer.\nMore detail here: https://help.muso.ai/en/%61rticles/9999999-invented", () => manifest);
     expect(out).toBe("Answer.");

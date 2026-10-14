@@ -210,6 +210,23 @@ describe("sanitizeHelpLinks", () => {
   });
 });
 
+describe("URL-parser-ignored ASCII whitespace (tab, LF, CR) inside a link", () => {
+  const INVENTED = "9999999-invented";
+  const shapes: Array<[string, string]> = [
+    ["tab in path, html anchor", `Answer.\n<a href="https://help.muso.ai/en/ar\tticles/${INVENTED}">guide</a>`],
+    ["newline in path, html anchor", `Answer.\n<a href="https://help.muso.ai/en/ar\nticles/${INVENTED}">guide</a>`],
+    ["CR in host, html anchor", `Answer.\n<a href="https://help.mu\rso.ai/en/articles/${INVENTED}">guide</a>`],
+    ["tab in path, template line", `Answer.\n${HELP_CITATION_LEAD} https://help.muso.ai/en/ar\tticles/${INVENTED}`],
+    ["entity-encoded tab in path", `Answer.\n<a href="https://help.muso.ai/en/ar&#9;ticles/${INVENTED}">guide</a>`],
+    ["tab in markdown link", `Answer.\n[guide](https://help.muso.ai/en/ar\tticles/${INVENTED})`],
+  ];
+  it.each(shapes)("strips an unlisted article link: %s", (_n, body) => {
+    const out = sanitizeHelpLinks(body, MANIFEST);
+    expect(out.redactions.length).toBeGreaterThan(0);
+    expect(out.body).toBe("Answer.");
+  });
+});
+
 describe("parseHelpManifest / loadHelpManifest", () => {
   it.each(["", "not json", "[]", '{"articles":[]}', '{"articles":{"1":{"slug":5}}}', '{"articles":{"1":{"slug":"a","url":"http://evil.example/1-a"}}}'])(
     "rejects malformed input %j",
