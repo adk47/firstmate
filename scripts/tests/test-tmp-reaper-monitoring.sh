@@ -6,6 +6,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$HERE/../tmp-reaper.sh"
 BATS_FILE="$HERE/tmp-reaper.bats"
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+ln -s "$HERE/../lib" "$work/lib"  # the reaper sources lib/ beside itself
 fail=0
 
 run_suite() { TMP_REAPER_SCRIPT="$1" bats "$BATS_FILE" >"$work/out" 2>&1; }
