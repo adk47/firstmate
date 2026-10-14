@@ -208,10 +208,12 @@ cqp_probe_account() {
   # Layer 4 — scratch on tmpfs when available.
   mkdir -p "$CODEX_PROBE_SCRATCH_ROOT" 2>/dev/null && chmod 700 "$CODEX_PROBE_SCRATCH_ROOT" 2>/dev/null
   if [ -d "$CODEX_PROBE_SCRATCH_ROOT" ] && [ -w "$CODEX_PROBE_SCRATCH_ROOT" ]; then
+    # mktemp-ok: handed to CQP_SCRATCH, removed by the _cqp_cleanup EXIT/INT/TERM traps armed below
     sc="$(mktemp -d "$CODEX_PROBE_SCRATCH_ROOT/codex-quota-probe.XXXXXX" 2>/dev/null)" || sc=""
   else
     sc=""
   fi
+  # mktemp-ok: same CQP_SCRATCH hand-off as above
   [ -n "$sc" ] || sc="$(mktemp -d "${TMPDIR:-/tmp}/codex-quota-probe.XXXXXX" 2>/dev/null)" || {
     cqp_log "FATAL: cannot create scratch dir"; return 2; }
 

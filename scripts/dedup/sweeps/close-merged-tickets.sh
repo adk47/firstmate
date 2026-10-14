@@ -72,7 +72,7 @@ api_key="${CLICKUP_API_KEY:-}"
 # tasks across all action types). Override with PAGINATION_CAP if you must.
 pagination_cap="${PAGINATION_CAP:-20}"
 
-tmp=$(mktemp -d)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/close-merged-tickets.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 # Curl wrapper that fails loud on non-2xx — refuses to keep going on 4xx/5xx.

@@ -506,7 +506,8 @@ install_muso() {
     *) log "    ✗ install_muso: unsupported arch $(uname -m)"; return 1 ;;
   esac
   asset="muso_linux_${arch}.tar.gz"
-  tmp=$(mktemp -d) || return 1
+  # mktemp-ok: rm -rf "$tmp" on every return path below; a kill mid-install leaks one dir
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/deploy.XXXXXX") || return 1
 
   local dl_rc=0
   dl_out=$(timeout 120 gh release download "v${MUSO_CLI_VERSION}" --repo Muso-AI/muso-cli \

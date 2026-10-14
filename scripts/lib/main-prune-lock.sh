@@ -29,6 +29,7 @@ acquire_main_prune_lock() {
 # (a prune may still run; the remote flock itself exits 1 on timeout); 2 local setup failed.
 acquire_main_prune_lock_remote() {
   local tmp wait_secs="$MAIN_PRUNE_LOCK_WAIT_SECS" i=0 parent=$$
+  # mktemp-ok: every failure return rm -rf's it; on success the watcher subshell removes it when this process exits (no trap: it would clobber the caller's)
   tmp="$(mktemp -d 2>/dev/null)" || return 2
   mkfifo "$tmp/in" || { rm -rf "$tmp"; return 2; }
   "$@" "exec 9>'$MAIN_PRUNE_LOCK_FILE' && flock -w $wait_secs 9 && echo LOCKED && exec cat >/dev/null" \
