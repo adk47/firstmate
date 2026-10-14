@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { sanitizeHelpLinks, hasArticleUrl } from "../src/sanitize-help-links.js";
+import { sanitizeHelpLinks, hasArticleUrl, dropLinesCarryingUrl } from "../src/sanitize-help-links.js";
 import { parseHelpManifest, loadHelpManifest, HELP_CITATION_LEAD } from "../src/help-manifest.js";
 
 const MANIFEST = parseHelpManifest(
@@ -381,5 +381,31 @@ describe("invariant: no variant leaves an article URL in the body (fail closed)"
       const out = sanitizeHelpLinks(body, null);
       if (out.redactions.length) expect(out.body).not.toBe(body);
     }
+  });
+});
+
+describe("last-resort drop removes only the lines that make up the link", () => {
+  const INV = "9999999-invented";
+  const SPLIT = `See help.muso.ai/en/ar\t\nticles/${INV} ok`;
+  it("keeps prose before and after a tab+LF split link", () => {
+    const out = sanitizeHelpLinks(`Intro one.\nIntro two.\nIntro three.\n${SPLIT}\nOutro line.`, null);
+    expect(out.body).toContain("Intro one.\nIntro two.\nIntro three.");
+    expect(out.body).toContain("Outro line.");
+    expect(out.body).not.toContain(INV);
+  });
+  it("never empties a prose-bearing reply whose last line is the split link", () => {
+    const out = sanitizeHelpLinks(`Intro one is here.\nSecond line of the answer.\n${HELP_CITATION_LEAD} https://help.muso.ai/en/ar\t\nticles/${INV}`, null);
+    expect(out.body).toContain("Intro one is here.\nSecond line of the answer.");
+    expect(hasArticleUrl(out.body)).toBe(false);
+  });
+  it("the guard itself drops just the link lines", () => {
+    expect(dropLinesCarryingUrl(`A\nB\nhelp.muso.ai/en/ar\nticles/${INV}\nC`)).toBe("A\nB\nC");
+  });
+  it("is not cubic: 240 prose lines then a split link finishes fast", () => {
+    const body = Array.from({ length: 240 }, (_, i) => `Line ${i} of prose.`).join("\n") + `\n${SPLIT}`;
+    const t = Date.now();
+    const out = sanitizeHelpLinks(body, null);
+    expect(Date.now() - t).toBeLessThan(1500);
+    expect(out.body).toContain("Line 239 of prose.");
   });
 });

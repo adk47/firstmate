@@ -103,19 +103,29 @@ function stripUrlTokensOnly(body: string): string {
     .trim();
 }
 
-/** Last resort: drop every line that is part of the shortest run of adjacent lines whose join carries an article URL. */
-function dropLinesCarryingUrl(text: string): string {
+/** Longest run of adjacent lines one link may span in the last-resort drop (bounds the cost). */
+const MAX_LINK_LINES = 12;
+
+/**
+ * Last resort: drop only the lines that make up each link. Left to right, per end line, the latest start whose
+ * run of lines carries an article URL (the minimal run); prose before or after the link is kept.
+ * If a URL still survives, fail closed and return nothing.
+ */
+export function dropLinesCarryingUrl(text: string): string {
   const lines = text.split("\n");
   const drop = new Set<number>();
-  for (let i = 0; i < lines.length; i++) {
-    for (let w = 1; i + w <= lines.length; w++) {
-      if (hasArticleUrl(lines.slice(i, i + w).join("\n"))) {
-        for (let k = i; k < i + w; k++) drop.add(k);
+  let floor = 0;
+  for (let e = 0; e < lines.length; e++) {
+    for (let s = e; s >= Math.max(floor, e - MAX_LINK_LINES + 1); s--) {
+      if (hasArticleUrl(lines.slice(s, e + 1).join("\n"))) {
+        for (let k = s; k <= e; k++) drop.add(k);
+        floor = e + 1;
         break;
       }
     }
   }
-  return lines.filter((_, i) => !drop.has(i)).join("\n");
+  const kept = lines.filter((_, i) => !drop.has(i)).join("\n");
+  return hasArticleUrl(kept) ? "" : kept;
 }
 
 export function sanitizeHelpLinks(body: string, manifest: HelpManifest | null): HelpLinkSanitizeResult {
@@ -155,7 +165,7 @@ export function sanitizeHelpLinks(body: string, manifest: HelpManifest | null): 
     redactions.push(rest);
   }
   // Invariant: a claimed redaction never leaves an article URL behind. If a pass mismatch let one through
-  // (a span the token sweep cannot locate), drop whole lines, widest spans first, until none is left.
+  // (a span the token sweep cannot locate), drop only the lines that carry it.
   if (hasArticleUrl(joined)) {
     joined = dropLinesCarryingUrl(joined);
     if (!redactions.length) redactions.push(rest);
