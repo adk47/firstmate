@@ -52,10 +52,10 @@ ad_screening_brief_payload() {
     --arg head "$head" --arg body "$body" --arg creative "$creative" --arg spend "$spend" --arg goal "$goal" \
     --arg acct "$acct" --arg dest "$dest" --arg destplain "$(_brief_clean "$dest" 200)" --arg img "$img" \
     --arg rec "$rec" --arg pct "$pct" --arg flags "${flags:-none}" --arg reason "$reason" --arg url "$AD_SCREENING_REVIEW_URL" '
-    def okurl: length <= 500 and test("^https://[^\\s<>|`]+$");
+    def okurl: length <= 500 and test("^https://[^\\s<>|`]+\\z");
     def pt(t): {type: "plain_text", text: t};
     def icon: {approve: "✅", reject: "⛔", needs_human: "👀"}[$rec] // "";
-    (if ($img | okurl and test("\\.(png|jpe?g|gif|webp)$"; "i")) then $img else null end) as $image
+    (if ($img | okurl and test("\\.(png|jpe?g|gif|webp)\\z"; "i")) then $img else null end) as $image
     | {channel: $channel, text: $text, blocks: [
         {type: "header", text: pt("New ad to review: \($who)")},
         ({type: "section", text: pt("\($head)\n\($body)")}

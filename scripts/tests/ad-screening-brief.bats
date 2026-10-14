@@ -224,7 +224,7 @@ blocks() { cat "$T/slack.${1:-1}.blocks.json"; }
   ad 101 | jq '.adHeadline="<!channel> *bold* <@U7RP6HKUZ>" | .adBody="x\ny <!here>" | .advertiserName="<!channel> <@U7RP6HKUZ> *Acme*"' | fixture
   answers approve 0.9 strong ""
   "$SCRIPT" --run
-  ! grep -q '<!' "$T/slack.1.blocks.json"
+  if grep -q '<!' "$T/slack.1.blocks.json"; then false; fi
   blocks | jq -e --arg m "$MENTION" '[.. | objects | select(.type=="mrkdwn") | .text | select(test("<@U"))] == [$m + " new ad waiting for your decision"]'
   blocks | jq -e '[.. | objects | select(.type=="mrkdwn") | .text | select(test("channel|here|bold|Acme"))] | length == 0'
   blocks | jq -e '[.[0].text.text, .[1].text.text] | all(type=="string" and (test("\n.*\n")|not))'
@@ -234,7 +234,7 @@ blocks() { cat "$T/slack.${1:-1}.blocks.json"; }
   ad 101 | jq 'del(.campaign) | del(.destinationUrl)' | fixture; answers approve 0.9 strong ""
   "$SCRIPT" --run
   blocks | jq -e '.[2].fields | (.[0].text=="Spend: not stated") and (.[1].text=="Goal: not stated") and (.[3].type=="plain_text" and .[3].text=="Destination: not stated")'
-  ! grep -q '<not stated' "$T/slack.1.blocks.json"
+  if grep -q '<not stated' "$T/slack.1.blocks.json"; then false; fi
   blocks | jq -e '[.[] | select(.type=="section") | .text | select(.type=="mrkdwn") | .text] | map(select(test("<@U7RP6HKUZ>"))) | length == 1'
   [[ "$(cat "$T/slack.1.txt")" == *"<@U7RP6HKUZ>"* ]]
 }
