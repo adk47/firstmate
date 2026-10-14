@@ -193,7 +193,7 @@ close conversations and add/remove openclaw crons. Verify on the next tick:
 | `support-changelog-sync` `:1126`, `sync-platform-llms` `:1193`, `sync-app-pricing` `:1267` | curl/gh/jq + `lib/slack-notify.sh:90` (`muso`, Go); the `openclaw` hits are prose |
 | `hydra-release` `:2005`, `hydra-release-watch` `:2098` | `release-cron.sh:116` → `release.sh`; git/gh only |
 | `hydra-daily-audit` `:2172` | `hydra-daily-audit.py:172,249` `journalctl` only |
-| `hydra-weekly-cleanup` `:2228` | `weekly-cleanup.sh:116` is an rsync-style exclude string, not a call |
+| `hydra-weekly-cleanup` `:2228` | `clean-my-linux.sh:116` is an rsync-style exclude string, not a call |
 | `openclaw-config-write-audit@` `:1559` | `openclaw-config-write-audit.sh:75` `pgrep` only |
 | **read, no hit:** `hydra-jev-shadow-prune` `:2281`, `hydra-tmp-reaper` `:2329`, `hydra-company-finder-cache-refresh` `:2572` (uses `muso nocodb`, Go), `qa-approval-retry` `:2796` (`qa-slack-dm.sh:55` `muso`, Go), `intercom-rights-holder-watchdog` `:548-579` (`origin/main` line; `.service` + `.timer`, every 10 min, `ExecStart=/usr/bin/python3`; `openclaw` appears only in a docstring) | no node, no openclaw call (python3 only) |
 

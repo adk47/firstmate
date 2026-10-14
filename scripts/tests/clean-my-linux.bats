@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for scripts/weekly-cleanup.sh — the weekly node-8 junk sweeper
+# Tests for scripts/clean-my-linux.sh — the weekly node-8 junk sweeper
 # (stale /tmp entries by MTIME, hot-patch *.bak*/*.orig, apt autoremove).
 #
 # PATH-shadows muso + ssh + apt-get so a real Slack send / remote call /
@@ -10,7 +10,7 @@
 bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
-WC="$HYDRA_REPO/scripts/weekly-cleanup.sh"
+WC="$HYDRA_REPO/scripts/clean-my-linux.sh"
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"
@@ -56,15 +56,15 @@ STUB
     "$TEST_TMPDIR/bin/apt-get" "$TEST_TMPDIR/bin/flock"
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
 
-  export WEEKLY_CLEANUP_TMP_ROOT="$TEST_TMPDIR/tmproot"
-  export WEEKLY_CLEANUP_TMP_AGE_DAYS=14
-  export WEEKLY_CLEANUP_BAK_ROOTS="$TEST_TMPDIR/bakroot-a $TEST_TMPDIR/bakroot-b"
-  export WEEKLY_CLEANUP_BAK_AGE_DAYS=30
-  export WEEKLY_CLEANUP_LOCKFILE="$TEST_TMPDIR/wc.lock"
-  export WEEKLY_CLEANUP_SKIP_HOST_GUARD=1
+  export CLEAN_MY_LINUX_TMP_ROOT="$TEST_TMPDIR/tmproot"
+  export CLEAN_MY_LINUX_TMP_AGE_DAYS=14
+  export CLEAN_MY_LINUX_BAK_ROOTS="$TEST_TMPDIR/bakroot-a $TEST_TMPDIR/bakroot-b"
+  export CLEAN_MY_LINUX_BAK_AGE_DAYS=30
+  export CLEAN_MY_LINUX_LOCKFILE="$TEST_TMPDIR/wc.lock"
+  export CLEAN_MY_LINUX_SKIP_HOST_GUARD=1
   # CRITICAL: the CI runner IS node-8 — without this, a test run would
   # invoke the clone sweeper against the real workspace roots.
-  export WEEKLY_CLEANUP_SKIP_SWEEP=1
+  export CLEAN_MY_LINUX_SKIP_SWEEP=1
   # MUSO_SLACK_ENV_FILE is absent by default → no token → slack-notify
   # silently skips the send (no muso call).
 }
@@ -86,18 +86,18 @@ slack_fixture() {
 # ──────────────────────────────────────────────────────────────
 
 @test "old depth-1 file → deleted, counted, bytes freed > 0" {
-  head -c 5000 /dev/zero > "$WEEKLY_CLEANUP_TMP_ROOT/stale.json"
-  old 20 "$WEEKLY_CLEANUP_TMP_ROOT/stale.json"
+  head -c 5000 /dev/zero > "$CLEAN_MY_LINUX_TMP_ROOT/stale.json"
+  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/stale.json"
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ ! -e "$WEEKLY_CLEANUP_TMP_ROOT/stale.json" ]
+  [ ! -e "$CLEAN_MY_LINUX_TMP_ROOT/stale.json" ]
   [[ "$output" == *"tmp: deleted=1"* ]]
   [[ "$output" =~ TOTAL\ freed_kb=([0-9]+) ]]
   [ "${BASH_REMATCH[1]}" -gt 0 ]
 }
 
 @test "qa-pr-* dirs use the 2d TTL; other entries stay at 14d (MUS-5583)" {
-  local r="$WEEKLY_CLEANUP_TMP_ROOT" n
+  local r="$CLEAN_MY_LINUX_TMP_ROOT" n
   for n in qa-pr-10179-abc other-dir qa-pr-fresh; do
     mkdir -p "$r/$n"; echo x > "$r/$n/f"
   done
@@ -111,7 +111,7 @@ slack_fixture() {
 }
 
 @test "qa-pr-* with a fresh file inside is still kept (active rail uses the 2d cutoff)" {
-  local r="$WEEKLY_CLEANUP_TMP_ROOT"
+  local r="$CLEAN_MY_LINUX_TMP_ROOT"
   mkdir -p "$r/qa-pr-busy"; echo x > "$r/qa-pr-busy/f"
   old 5 "$r/qa-pr-busy"
   run bash "$WC"
@@ -120,7 +120,7 @@ slack_fixture() {
 }
 
 @test "qa-pr-* TTL is exactly 2d, not 3d (find -mtime rounds down; bot finding 1)" {
-  local r="$WEEKLY_CLEANUP_TMP_ROOT"
+  local r="$CLEAN_MY_LINUX_TMP_ROOT"
   mkdir -p "$r/qa-pr-2d5h"; echo x > "$r/qa-pr-2d5h/f"
   touch -h -d "53 hours ago" "$r/qa-pr-2d5h/f" "$r/qa-pr-2d5h"
   run bash "$WC"
@@ -128,26 +128,26 @@ slack_fixture() {
   [ ! -e "$r/qa-pr-2d5h" ]
 }
 
-@test "non-numeric WEEKLY_CLEANUP_QA_PR_AGE_DAYS fails loud, deletes nothing (bot finding 2)" {
-  local r="$WEEKLY_CLEANUP_TMP_ROOT"
+@test "non-numeric CLEAN_MY_LINUX_QA_PR_AGE_DAYS fails loud, deletes nothing (bot finding 2)" {
+  local r="$CLEAN_MY_LINUX_TMP_ROOT"
   mkdir -p "$r/qa-pr-old"; echo x > "$r/qa-pr-old/f"; old 5 "$r/qa-pr-old/f"; old 5 "$r/qa-pr-old"
-  WEEKLY_CLEANUP_QA_PR_AGE_DAYS=abc run bash "$WC"
+  CLEAN_MY_LINUX_QA_PR_AGE_DAYS=abc run bash "$WC"
   [ "$status" -eq 2 ]
   [ -e "$r/qa-pr-old" ]
 }
 
-@test "leading-zero WEEKLY_CLEANUP_QA_PR_AGE_DAYS=08 is read as decimal, lane still runs (QA finding 1)" {
-  local r="$WEEKLY_CLEANUP_TMP_ROOT"
+@test "leading-zero CLEAN_MY_LINUX_QA_PR_AGE_DAYS=08 is read as decimal, lane still runs (QA finding 1)" {
+  local r="$CLEAN_MY_LINUX_TMP_ROOT"
   mkdir -p "$r/qa-pr-old"; echo x > "$r/qa-pr-old/f"; old 10 "$r/qa-pr-old/f"; old 10 "$r/qa-pr-old"
   mkdir -p "$r/qa-pr-young"; echo x > "$r/qa-pr-young/f"; old 5 "$r/qa-pr-young/f"; old 5 "$r/qa-pr-young"
-  WEEKLY_CLEANUP_QA_PR_AGE_DAYS=08 run bash "$WC"
+  CLEAN_MY_LINUX_QA_PR_AGE_DAYS=08 run bash "$WC"
   [ "$status" -eq 0 ]
   [ ! -e "$r/qa-pr-old" ]
   [ -e "$r/qa-pr-young" ]
 }
 
 @test "/tmp <repo>-<n>-review-<6> clones use the 2d TTL; near-miss names stay at 14d (CTO widening)" {
-  local r="$WEEKLY_CLEANUP_TMP_ROOT" n
+  local r="$CLEAN_MY_LINUX_TMP_ROOT" n
   for n in core-backend-10192-review-lMTbi5 core-backend-review-lMTbi5 core-backend-10192-review-TOOLONG9 core-backend-10192-review-fresh1; do
     mkdir -p "$r/$n/repo"; echo x > "$r/$n/repo/f"
   done
@@ -166,74 +166,74 @@ slack_fixture() {
 }
 
 @test "fresh depth-1 file → kept" {
-  echo x > "$WEEKLY_CLEANUP_TMP_ROOT/recent.json"
-  old 3 "$WEEKLY_CLEANUP_TMP_ROOT/recent.json"
+  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/recent.json"
+  old 3 "$CLEAN_MY_LINUX_TMP_ROOT/recent.json"
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ -e "$WEEKLY_CLEANUP_TMP_ROOT/recent.json" ]
+  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/recent.json" ]
   [[ "$output" == *"tmp: deleted=0"* ]]
 }
 
 @test "old depth-1 directory → deleted recursively" {
-  mkdir -p "$WEEKLY_CLEANUP_TMP_ROOT/dead-clone/nested"
-  echo x > "$WEEKLY_CLEANUP_TMP_ROOT/dead-clone/nested/f"
-  old 20 "$WEEKLY_CLEANUP_TMP_ROOT/dead-clone/nested/f"
-  old 20 "$WEEKLY_CLEANUP_TMP_ROOT/dead-clone/nested"
-  old 20 "$WEEKLY_CLEANUP_TMP_ROOT/dead-clone"
+  mkdir -p "$CLEAN_MY_LINUX_TMP_ROOT/dead-clone/nested"
+  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/dead-clone/nested/f"
+  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/dead-clone/nested/f"
+  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/dead-clone/nested"
+  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/dead-clone"
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ ! -e "$WEEKLY_CLEANUP_TMP_ROOT/dead-clone" ]
+  [ ! -e "$CLEAN_MY_LINUX_TMP_ROOT/dead-clone" ]
   [[ "$output" == *"tmp: deleted=1"* ]]
 }
 
 @test "default excludes survive despite age (systemd-private/openclaw/lock.d)" {
-  mkdir "$WEEKLY_CLEANUP_TMP_ROOT/systemd-private-zz"
-  echo x > "$WEEKLY_CLEANUP_TMP_ROOT/openclaw-foo"
-  mkdir "$WEEKLY_CLEANUP_TMP_ROOT/hydra-deploy.lock.d"
-  old 40 "$WEEKLY_CLEANUP_TMP_ROOT/systemd-private-zz"
-  old 40 "$WEEKLY_CLEANUP_TMP_ROOT/openclaw-foo"
-  old 40 "$WEEKLY_CLEANUP_TMP_ROOT/hydra-deploy.lock.d"
+  mkdir "$CLEAN_MY_LINUX_TMP_ROOT/systemd-private-zz"
+  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/openclaw-foo"
+  mkdir "$CLEAN_MY_LINUX_TMP_ROOT/hydra-deploy.lock.d"
+  old 40 "$CLEAN_MY_LINUX_TMP_ROOT/systemd-private-zz"
+  old 40 "$CLEAN_MY_LINUX_TMP_ROOT/openclaw-foo"
+  old 40 "$CLEAN_MY_LINUX_TMP_ROOT/hydra-deploy.lock.d"
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ -e "$WEEKLY_CLEANUP_TMP_ROOT/systemd-private-zz" ]
-  [ -e "$WEEKLY_CLEANUP_TMP_ROOT/openclaw-foo" ]
-  [ -e "$WEEKLY_CLEANUP_TMP_ROOT/hydra-deploy.lock.d" ]
+  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/systemd-private-zz" ]
+  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/openclaw-foo" ]
+  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/hydra-deploy.lock.d" ]
   [[ "$output" == *"excluded=3"* ]]
   [[ "$output" == *"tmp: deleted=0"* ]]
 }
 
-@test "WEEKLY_CLEANUP_TMP_EXCLUDES override REPLACES the default list" {
-  export WEEKLY_CLEANUP_TMP_EXCLUDES='keepme-*'
-  echo x > "$WEEKLY_CLEANUP_TMP_ROOT/keepme-x"
-  mkdir "$WEEKLY_CLEANUP_TMP_ROOT/systemd-private-zz"
-  old 40 "$WEEKLY_CLEANUP_TMP_ROOT/keepme-x"
-  old 40 "$WEEKLY_CLEANUP_TMP_ROOT/systemd-private-zz"
+@test "CLEAN_MY_LINUX_TMP_EXCLUDES override REPLACES the default list" {
+  export CLEAN_MY_LINUX_TMP_EXCLUDES='keepme-*'
+  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/keepme-x"
+  mkdir "$CLEAN_MY_LINUX_TMP_ROOT/systemd-private-zz"
+  old 40 "$CLEAN_MY_LINUX_TMP_ROOT/keepme-x"
+  old 40 "$CLEAN_MY_LINUX_TMP_ROOT/systemd-private-zz"
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ -e "$WEEKLY_CLEANUP_TMP_ROOT/keepme-x" ]
-  [ ! -e "$WEEKLY_CLEANUP_TMP_ROOT/systemd-private-zz" ]
+  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/keepme-x" ]
+  [ ! -e "$CLEAN_MY_LINUX_TMP_ROOT/systemd-private-zz" ]
 }
 
 @test "active-content rail: old dir with one fresh nested file → kept" {
-  mkdir -p "$WEEKLY_CLEANUP_TMP_ROOT/live-clone/sub"
-  echo x > "$WEEKLY_CLEANUP_TMP_ROOT/live-clone/sub/fresh"
-  old 1 "$WEEKLY_CLEANUP_TMP_ROOT/live-clone/sub/fresh"
-  old 20 "$WEEKLY_CLEANUP_TMP_ROOT/live-clone/sub"
-  old 20 "$WEEKLY_CLEANUP_TMP_ROOT/live-clone"
+  mkdir -p "$CLEAN_MY_LINUX_TMP_ROOT/live-clone/sub"
+  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/live-clone/sub/fresh"
+  old 1 "$CLEAN_MY_LINUX_TMP_ROOT/live-clone/sub/fresh"
+  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/live-clone/sub"
+  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/live-clone"
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ -e "$WEEKLY_CLEANUP_TMP_ROOT/live-clone/sub/fresh" ]
+  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/live-clone/sub/fresh" ]
   [[ "$output" == *"active_skipped=1"* ]]
   [[ "$output" == *"tmp: deleted=0"* ]]
 }
 
 @test "old depth-1 symlink: link removed, target untouched" {
   echo precious > "$TEST_TMPDIR/target-file"
-  ln -s "$TEST_TMPDIR/target-file" "$WEEKLY_CLEANUP_TMP_ROOT/stale-link"
-  old 20 "$WEEKLY_CLEANUP_TMP_ROOT/stale-link"
+  ln -s "$TEST_TMPDIR/target-file" "$CLEAN_MY_LINUX_TMP_ROOT/stale-link"
+  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/stale-link"
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ ! -e "$WEEKLY_CLEANUP_TMP_ROOT/stale-link" ]
+  [ ! -e "$CLEAN_MY_LINUX_TMP_ROOT/stale-link" ]
   [ -e "$TEST_TMPDIR/target-file" ]
   [[ "$output" == *"tmp: deleted=1"* ]]
 }
@@ -243,7 +243,7 @@ slack_fixture() {
 # ──────────────────────────────────────────────────────────────
 
 @test "tmp root missing → exit 1, nothing else deleted" {
-  export WEEKLY_CLEANUP_TMP_ROOT="$TEST_TMPDIR/nonexistent"
+  export CLEAN_MY_LINUX_TMP_ROOT="$TEST_TMPDIR/nonexistent"
   echo x > "$TEST_TMPDIR/bakroot-a/dead.bak"
   old 40 "$TEST_TMPDIR/bakroot-a/dead.bak"
   run bash "$WC"
@@ -254,13 +254,13 @@ slack_fixture() {
 @test "tmp root is a symlink → exit 1 (refuses)" {
   mkdir "$TEST_TMPDIR/real-tmp"
   ln -s "$TEST_TMPDIR/real-tmp" "$TEST_TMPDIR/tmp-link"
-  export WEEKLY_CLEANUP_TMP_ROOT="$TEST_TMPDIR/tmp-link"
+  export CLEAN_MY_LINUX_TMP_ROOT="$TEST_TMPDIR/tmp-link"
   run bash "$WC"
   [ "$status" -eq 1 ]
 }
 
 @test "tmp root '/' → exit 1 (refuses)" {
-  export WEEKLY_CLEANUP_TMP_ROOT="/"
+  export CLEAN_MY_LINUX_TMP_ROOT="/"
   run bash "$WC"
   [ "$status" -eq 1 ]
 }
@@ -299,7 +299,7 @@ slack_fixture() {
 }
 
 @test "missing bak root → skipped with note, exit 0, other root still cleaned" {
-  export WEEKLY_CLEANUP_BAK_ROOTS="$TEST_TMPDIR/nonexistent-root $TEST_TMPDIR/bakroot-a"
+  export CLEAN_MY_LINUX_BAK_ROOTS="$TEST_TMPDIR/nonexistent-root $TEST_TMPDIR/bakroot-a"
   echo x > "$TEST_TMPDIR/bakroot-a/dead.bak"
   old 40 "$TEST_TMPDIR/bakroot-a/dead.bak"
   run bash "$WC"
@@ -324,13 +324,13 @@ slack_fixture() {
 
 @test "--dry-run: deletes nothing, prints would-delete lines, no muso, no apt" {
   slack_fixture
-  echo x > "$WEEKLY_CLEANUP_TMP_ROOT/stale"
-  old 20 "$WEEKLY_CLEANUP_TMP_ROOT/stale"
+  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/stale"
+  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/stale"
   echo x > "$TEST_TMPDIR/bakroot-a/dead.bak"
   old 40 "$TEST_TMPDIR/bakroot-a/dead.bak"
   run bash "$WC" --dry-run
   [ "$status" -eq 0 ]
-  [ -e "$WEEKLY_CLEANUP_TMP_ROOT/stale" ]
+  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/stale" ]
   [ -e "$TEST_TMPDIR/bakroot-a/dead.bak" ]
   [[ "$output" == *"DRY-RUN: would delete"* ]]
   [ ! -s "$STUB_CALLS" ]
@@ -343,8 +343,8 @@ slack_fixture() {
 
 @test "real run posts Block Kit blocks + counts to #clio_devops as devops bot" {
   slack_fixture
-  echo x > "$WEEKLY_CLEANUP_TMP_ROOT/stale"
-  old 20 "$WEEKLY_CLEANUP_TMP_ROOT/stale"
+  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/stale"
+  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/stale"
   run bash "$WC"
   [ "$status" -eq 0 ]
   grep -q -- '--bot devops' "$STUB_CALLS"
@@ -389,8 +389,8 @@ STUB
   [[ "$output" == *"autoclean"* ]]
 }
 
-@test "WEEKLY_CLEANUP_SKIP_APT=1 → apt never invoked" {
-  export WEEKLY_CLEANUP_SKIP_APT=1
+@test "CLEAN_MY_LINUX_SKIP_APT=1 → apt never invoked" {
+  export CLEAN_MY_LINUX_SKIP_APT=1
   run bash "$WC"
   [ "$status" -eq 0 ]
   [ ! -f "$TEST_TMPDIR/apt-calls.log" ]
@@ -406,7 +406,7 @@ STUB
   cat > "$TEST_TMPDIR/bin/rm" <<'STUB'
 #!/bin/bash
 for a in "$@"; do
-  if [ -n "${WEEKLY_CLEANUP_TEST_RM_FAIL:-}" ] && [ "$a" = "$WEEKLY_CLEANUP_TEST_RM_FAIL" ]; then
+  if [ -n "${CLEAN_MY_LINUX_TEST_RM_FAIL:-}" ] && [ "$a" = "$CLEAN_MY_LINUX_TEST_RM_FAIL" ]; then
     echo "rm: stub: cannot remove '$a'" >&2
     exit 1
   fi
@@ -414,12 +414,12 @@ done
 exec /bin/rm "$@"
 STUB
   chmod +x "$TEST_TMPDIR/bin/rm"
-  export WEEKLY_CLEANUP_TEST_RM_FAIL="$WEEKLY_CLEANUP_TMP_ROOT/stuck"
-  echo x > "$WEEKLY_CLEANUP_TMP_ROOT/stuck"
-  old 20 "$WEEKLY_CLEANUP_TMP_ROOT/stuck"
+  export CLEAN_MY_LINUX_TEST_RM_FAIL="$CLEAN_MY_LINUX_TMP_ROOT/stuck"
+  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/stuck"
+  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/stuck"
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ -e "$WEEKLY_CLEANUP_TMP_ROOT/stuck" ]
+  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/stuck" ]
   [[ "$output" == *"errors=1"* ]]
   [[ "$output" == *"tmp: deleted=0"* ]]
   [ -f "$TEST_TMPDIR/last-text" ]
@@ -427,8 +427,8 @@ STUB
 }
 
 @test "idempotent: immediate second run deletes 0" {
-  echo x > "$WEEKLY_CLEANUP_TMP_ROOT/stale"
-  old 20 "$WEEKLY_CLEANUP_TMP_ROOT/stale"
+  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/stale"
+  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/stale"
   run bash "$WC"
   [ "$status" -eq 0 ]
   [[ "$output" == *"tmp: deleted=1"* ]]
@@ -446,7 +446,7 @@ STUB
   # Point the sweeper at sandbox roots so enabling it is safe, then verify
   # the weekly wrapper invokes it and forwards --dry-run.
   mkdir -p "$TEST_TMPDIR/sweeproot/repos" "$TEST_TMPDIR/sweeproot/ws"
-  export WEEKLY_CLEANUP_SKIP_SWEEP=0
+  export CLEAN_MY_LINUX_SKIP_SWEEP=0
   export SWEEP_REPOS_ROOT="$TEST_TMPDIR/sweeproot/repos"
   export SWEEP_WS_ROOT="$TEST_TMPDIR/sweeproot/ws"
   export SWEEP_SKIP_HOST_GUARD=1
@@ -462,7 +462,7 @@ STUB
   # leave systemd reporting a healthy weekly cleanup — exactly what this
   # script's exit contract forbids.
   mkdir -p "$TEST_TMPDIR/sweeproot/ws"
-  export WEEKLY_CLEANUP_SKIP_SWEEP=0
+  export CLEAN_MY_LINUX_SKIP_SWEEP=0
   # Missing repos root => the sweeper's structural refusal, exit 1.
   export SWEEP_REPOS_ROOT="$TEST_TMPDIR/sweeproot/does-not-exist"
   export SWEEP_WS_ROOT="$TEST_TMPDIR/sweeproot/ws"

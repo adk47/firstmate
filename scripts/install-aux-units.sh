@@ -403,8 +403,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/cs-ops-drain-candidates.py missing"
 [[ -x "$HYDRA_ROOT/scripts/release-cron.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-cron.sh missing or not executable"
-[[ -x "$HYDRA_ROOT/scripts/weekly-cleanup.sh" ]] \
-  || fail "$HYDRA_ROOT/scripts/weekly-cleanup.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/clean-my-linux.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/clean-my-linux.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/dedup/sweeps/close-merged-tickets.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/dedup/sweeps/close-merged-tickets.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/cto-nightly-driver.sh" ]] \
@@ -2379,7 +2379,7 @@ Description=HYDRA weekly server cleanup (/tmp mtime>14d, .bak/.orig>30d, apt)
 
 [Service]
 Type=oneshot
-ExecStart=$HYDRA_ROOT/scripts/weekly-cleanup.sh
+ExecStart=$HYDRA_ROOT/scripts/clean-my-linux.sh
 Environment=HOME=/root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Disk-bound housekeeping: keep it polite to the gateways.

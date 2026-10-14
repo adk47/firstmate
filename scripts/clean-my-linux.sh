@@ -55,38 +55,38 @@
 #               rm, no apt, no Slack, no lock.
 #
 # Env knobs (mainly for tests — defaults target production):
-#   WEEKLY_CLEANUP_TMP_ROOT          default /tmp
-#   WEEKLY_CLEANUP_TMP_AGE_DAYS      default 14
-#   WEEKLY_CLEANUP_QA_PR_AGE_DAYS    default 2 (qa-pr-* and *-review-* clones only)
-#   WEEKLY_CLEANUP_TMP_EXCLUDES     space-separated basename globs;
+#   CLEAN_MY_LINUX_TMP_ROOT          default /tmp
+#   CLEAN_MY_LINUX_TMP_AGE_DAYS      default 14
+#   CLEAN_MY_LINUX_QA_PR_AGE_DAYS    default 2 (qa-pr-* and *-review-* clones only)
+#   CLEAN_MY_LINUX_TMP_EXCLUDES     space-separated basename globs;
 #                                    REPLACES the default list when set
-#   WEEKLY_CLEANUP_BAK_ROOTS         default "/opt/hydra /root/hydra-hotpatch-backups"
-#   WEEKLY_CLEANUP_BAK_AGE_DAYS      default 30
-#   WEEKLY_CLEANUP_SKIP_APT          1 = skip apt-get step
-#   WEEKLY_CLEANUP_SLACK_CHANNEL     default C0ADV2W76G4 (#clio_devops)
-#   WEEKLY_CLEANUP_LOCKFILE          single-run lock
-#   WEEKLY_CLEANUP_SKIP_HOST_GUARD   1 = skip the ovh-node-8 guard (tests)
+#   CLEAN_MY_LINUX_BAK_ROOTS         default "/opt/hydra /root/hydra-hotpatch-backups"
+#   CLEAN_MY_LINUX_BAK_AGE_DAYS      default 30
+#   CLEAN_MY_LINUX_SKIP_APT          1 = skip apt-get step
+#   CLEAN_MY_LINUX_SLACK_CHANNEL     default C0ADV2W76G4 (#clio_devops)
+#   CLEAN_MY_LINUX_LOCKFILE          single-run lock
+#   CLEAN_MY_LINUX_SKIP_HOST_GUARD   1 = skip the ovh-node-8 guard (tests)
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
 LOGPREFIX="[weekly-cleanup $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
-TMP_ROOT="${WEEKLY_CLEANUP_TMP_ROOT:-/tmp}"
-TMP_AGE_DAYS="${WEEKLY_CLEANUP_TMP_AGE_DAYS:-14}"
-QA_PR_AGE_DAYS="${WEEKLY_CLEANUP_QA_PR_AGE_DAYS:-2}"
+TMP_ROOT="${CLEAN_MY_LINUX_TMP_ROOT:-/tmp}"
+TMP_AGE_DAYS="${CLEAN_MY_LINUX_TMP_AGE_DAYS:-14}"
+QA_PR_AGE_DAYS="${CLEAN_MY_LINUX_QA_PR_AGE_DAYS:-2}"
 case "$QA_PR_AGE_DAYS" in
-  ''|*[!0-9]*) echo "weekly-cleanup: WEEKLY_CLEANUP_QA_PR_AGE_DAYS must be a non-negative integer, got '$QA_PR_AGE_DAYS'" >&2; exit 2 ;;
+  ''|*[!0-9]*) echo "weekly-cleanup: CLEAN_MY_LINUX_QA_PR_AGE_DAYS must be a non-negative integer, got '$QA_PR_AGE_DAYS'" >&2; exit 2 ;;
 esac
 QA_PR_AGE_DAYS=$((10#$QA_PR_AGE_DAYS))  # "08" is invalid octal in $(( )) and would silently skip the lane
-BAK_ROOTS="${WEEKLY_CLEANUP_BAK_ROOTS:-/opt/hydra /root/hydra-hotpatch-backups}"
-BAK_AGE_DAYS="${WEEKLY_CLEANUP_BAK_AGE_DAYS:-30}"
-SKIP_APT="${WEEKLY_CLEANUP_SKIP_APT:-0}"
-LOCKFILE="${WEEKLY_CLEANUP_LOCKFILE:-/var/run/hydra-weekly-cleanup.lock}"
-SKIP_HOST_GUARD="${WEEKLY_CLEANUP_SKIP_HOST_GUARD:-0}"
+BAK_ROOTS="${CLEAN_MY_LINUX_BAK_ROOTS:-/opt/hydra /root/hydra-hotpatch-backups}"
+BAK_AGE_DAYS="${CLEAN_MY_LINUX_BAK_AGE_DAYS:-30}"
+SKIP_APT="${CLEAN_MY_LINUX_SKIP_APT:-0}"
+LOCKFILE="${CLEAN_MY_LINUX_LOCKFILE:-/var/run/hydra-weekly-cleanup.lock}"
+SKIP_HOST_GUARD="${CLEAN_MY_LINUX_SKIP_HOST_GUARD:-0}"
 DRY_RUN=0
 
 # slack-notify.sh reads this (target channel).
 # Export before sourcing so its `:=` default doesn't override us.
-export SLACK_CHANNEL="${WEEKLY_CLEANUP_SLACK_CHANNEL:-C0ADV2W76G4}"  # #clio_devops
+export SLACK_CHANNEL="${CLEAN_MY_LINUX_SLACK_CHANNEL:-C0ADV2W76G4}"  # #clio_devops
 
 log() { echo "$LOGPREFIX $1"; }
 
@@ -107,8 +107,8 @@ command -v python3 >/dev/null 2>&1 || { log "ERROR: python3 required but not on 
 
 # Exclude list: basename globs matched against depth-1 /tmp entries.
 # Sockets/IPC dirs, openclaw runtime artifacts, and anything lock-shaped.
-if [ -n "${WEEKLY_CLEANUP_TMP_EXCLUDES:-}" ]; then
-  read -r -a TMP_EXCLUDES <<< "$WEEKLY_CLEANUP_TMP_EXCLUDES"
+if [ -n "${CLEAN_MY_LINUX_TMP_EXCLUDES:-}" ]; then
+  read -r -a TMP_EXCLUDES <<< "$CLEAN_MY_LINUX_TMP_EXCLUDES"
 else
   TMP_EXCLUDES=(
     'systemd-private-*' '.X11-unix' '.ICE-unix' '.XIM-unix' '.font-unix'
@@ -283,12 +283,12 @@ run_apt() {
 # ──────────────────────────────────────────────────────────────
 # Category 4: stale agent git clones (workspaces/repos + */tmp).
 # Policy + its own Slack summary live in sweep-workspace-clones.sh;
-# this only wires it into the weekly cadence. WEEKLY_CLEANUP_SKIP_SWEEP=1
+# this only wires it into the weekly cadence. CLEAN_MY_LINUX_SKIP_SWEEP=1
 # opts out (the bats suite MUST set it — the CI runner is node-8, so an
 # unstubbed test run would sweep the real workspace roots).
 # ──────────────────────────────────────────────────────────────
 run_clone_sweep() {
-  if [ "${WEEKLY_CLEANUP_SKIP_SWEEP:-0}" = "1" ]; then
+  if [ "${CLEAN_MY_LINUX_SKIP_SWEEP:-0}" = "1" ]; then
     sweep_status="skipped"
     return 0
   fi
