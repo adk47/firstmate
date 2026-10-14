@@ -108,3 +108,29 @@ del() {
     run --separate-stderr env bash "$SCRIPT" call GET /admin/track/abc
     [ ! -e "$BULK_DESTRUCTIVE_RESULTS_PATH" ]
 }
+
+@test "login failure (no cached token, 401 login) writes outcome=not_sent, not transport_error" {
+    rm -f "$ADMIN_TOKEN_CACHE_PATH"
+    cat > "$TEST_ROOT/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+printf '{"errors":[{"message":"bad creds"}]}\n401'
+STUB
+    run --separate-stderr bash "$SCRIPT" --requester jan@muso.ai call DELETE /admin/track/abc
+    [ "$status" -ne 0 ]
+    [ "$(wc -l < "$BULK_DESTRUCTIVE_RESULTS_PATH")" -eq 1 ]
+    jq -e '.outcome == "not_sent" and .http_status == null and .path == "/admin/track/abc"' "$BULK_DESTRUCTIVE_RESULTS_PATH"
+}
+
+@test "invalid preconnect retry config writes outcome=not_sent so every counter row has an outcome" {
+    run --separate-stderr env MUSO_ADMIN_PRECONNECT_RETRIES=5 bash "$SCRIPT" --requester jan@muso.ai call DELETE /admin/track/abc
+    [ "$status" -ne 0 ]
+    [ "$(wc -l < "$BULK_DESTRUCTIVE_PATH")" -eq 1 ]
+    jq -e '.outcome == "not_sent"' "$BULK_DESTRUCTIVE_RESULTS_PATH"
+}
+
+@test "dry-run writes neither a counter row nor an outcome row" {
+    run --separate-stderr env OPS_DRY_RUN=1 bash "$SCRIPT" --requester jan@muso.ai call DELETE /admin/track/abc
+    [ "$status" -eq 0 ]
+    [ ! -e "$BULK_DESTRUCTIVE_PATH" ]
+    [ ! -e "$BULK_DESTRUCTIVE_RESULTS_PATH" ]
+}

@@ -2470,7 +2470,8 @@ record_destructive_op() {
 # shape there would skew the blast-radius gate. No-op unless this call wrote a
 # counter row. Failure mode matches write_dry_run_audit: LOUD stderr warning,
 # never break the call (the DELETE has already happened; refusing now helps no one).
-# OUTCOME: ok | http_error | transport_error. HTTP_STATUS empty -> null.
+# OUTCOME: ok | http_error | transport_error (sent, delivery ambiguous) |
+# not_sent (login or retry config failed, DELETE definitely never left). HTTP_STATUS empty -> null.
 DESTRUCTIVE_OP_EPOCH=""
 DESTRUCTIVE_OP_PATH=""
 write_destructive_op_result() {
@@ -2716,7 +2717,7 @@ EOF
                 "$token_attempts" "$token_retry_exits"
             printf '%s\n' "$token_json"
         fi
-        write_destructive_op_result "transport_error" ""
+        write_destructive_op_result "not_sent" ""
         return "$token_rc"
     fi
 
@@ -2753,6 +2754,7 @@ EOF
         # Invalid retry configuration failed before curl ran; surface the
         # configuration error without misclassifying it as transport.
         if (( transport_attempts == 0 )); then
+            write_destructive_op_result "not_sent" ""
             return "$curl_rc"
         fi
 
