@@ -1,0 +1,43 @@
+name: Sync-back (node-8 -> git)
+
+# MUS-5104 (W2b-2b). Manual only: arming the timer is MUS-5106, gated on a
+# human merging the catch-up PR. All logic lives in scripts/sync-back-run.sh.
+on:
+  workflow_dispatch:
+
+# Two overlapping runs amending the same branch is how a day's capture is lost.
+concurrency:
+  group: sync-back-hydra
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync-back:
+    # The runner IS node-8: /opt/hydra is a local directory, so no ssh and no
+    # new secret (same runner class as deploy.yml).
+    runs-on: [self-hosted, hydra]
+    env:
+      # Push and open the PR with node-8's own `gh` login, NOT GITHUB_TOKEN: a
+      # PR opened by GITHUB_TOKEN triggers no workflows, so pr-validate and the
+      # QA bot would skip the sync PR. Set through env so no host git config is
+      # written; the empty value resets any inherited helper first.
+      GIT_CONFIG_COUNT: "2"
+      GIT_CONFIG_KEY_0: credential.helper
+      GIT_CONFIG_VALUE_0: ""
+      GIT_CONFIG_KEY_1: credential.helper
+      GIT_CONFIG_VALUE_1: "!gh auth git-credential"
+      GIT_AUTHOR_NAME: hydra sync-back
+      GIT_AUTHOR_EMAIL: hydra-sync-back@muso.ai
+      GIT_COMMITTER_NAME: hydra sync-back
+      GIT_COMMITTER_EMAIL: hydra-sync-back@muso.ai
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Sync node-8 -> git
+        run: scripts/sync-back-run.sh

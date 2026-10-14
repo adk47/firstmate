@@ -24,8 +24,8 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
-@test "skips restart when only repo-root docs changed (README.md/CLAUDE.md)" {
-  DEPLOY_CHANGED_FILES=$'README.md\nCLAUDE.md'
+@test "skips restart when only repo-root docs changed (README.md/CLAUDE.md/AGENTS.md)" {
+  DEPLOY_CHANGED_FILES=$'README.md\nCLAUDE.md\nAGENTS.md'
   run gateway_restart_needed
   [ "$status" -eq 1 ]
 }

@@ -26,7 +26,7 @@ for f in "${CHECKED_IN_DIR}/caroline-inventory.json" "${CHECKED_IN_DIR}/caroline
   [[ -f "$f" ]] || { echo "FATAL: $f not found" >&2; exit 2; }
 done
 
-WORK_DIR="$(mktemp -d)"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/check-caroline-inventory.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 if ! "$GEN" --out-dir "$WORK_DIR"; then

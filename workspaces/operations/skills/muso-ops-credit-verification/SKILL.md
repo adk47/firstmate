@@ -224,15 +224,23 @@ the pipeline.)
 
 Two outcomes, single backend-signal rule, no external lookups.
 
-- **approved** = `signal_approve` only
-  - `verificationData.rule_risk_percent.approve_owning_track == 100`
-    AND `verificationData.total_risk_percent < 80`.
-  - Backtested at 99.34% precision over 90 days / 200k credits.
+- **approved** = `signal_approve` only. That means **the IDP validator itself
+  approved the request**: `verificationData.is_approved == true` AND
+  `total_risk_percent < 30` AND no `reject_*` or `review_*` (hold) rule fired
+  AND no `rule_errors` AND no `track_pending_capture`. The pipeline never
+  approves a request the validator declined or held.
 - **user_verification_needed** = everything else
-  - `signal_review`: no strong approve signal, but no hard-reject either.
-    Operator decides.
-  - `signal_uvn`: `track_pending_capture` set, hard-reject flags fired,
-    or empty `verificationData`. Backend already says not auto-approvable.
+  - `signal_review`: the validator declined it. A human decides.
+  - `signal_uvn`: `track_pending_capture` set, a reject or hold rule fired,
+    or empty `verificationData`. The backend already says not auto-approvable.
+
+**History, do not reintroduce:** from 2026-05-18 to 2026-10-11 the rule was
+`approve_owning_track == 100 AND total_risk_percent < 80`. In the validator an
+`approve_*` rule FIRES below 30, so 100 meant the shortcut did NOT fire. The
+queue holds declined rows, so the rule approved declined rows with risk 30-80
+(e.g. a joke Producer claim on a Taylor Swift single, 2026-10-11 00:01Z). Its
+"99.34% precision" backtest was circular: it scored rows that ended up approved,
+mostly by the validator or by this pipeline.
 
 The summary reports both `approved.landed` and `uvn.landed` counts.
 

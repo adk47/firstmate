@@ -34,6 +34,7 @@ write_profile() {
   local image_fb="${2:-[\"openrouter/anthropic/claude-haiku-4.5\"]}"
   cat > "$PROFILE" <<JSON
 {
+  "gateway": { "auth": { "mode": "token" } },
   "agents": {
     "defaults": {
       "thinkingDefault": "medium",
