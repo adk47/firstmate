@@ -152,9 +152,9 @@ while IFS= read -r f; do
         :
       else
         # every allocation on the line needs its own assigned variable with its own cleanup:
-        # more `mktemp -d` occurrences than `VAR=$(mktemp` assignments fails closed
+        # more `mktemp -d` occurrences than distinct `VAR=$(mktemp -d` assignments fails closed
         allocs=$(printf '%s\n' "$code" | grep -Eo '(\$\(|`|^|[;&|({])[[:space:]]*(command[[:space:]]+)?mktemp[[:space:]]+(-d|--directory|-[a-z]*d)([[:space:]]|\)|"|$)' | wc -l)
-        vars=$(printf '%s\n' "$code" | grep -Eo '[A-Za-z_][A-Za-z0-9_]*=["'"'"']?\$\([[:space:]]*mktemp' | sed -E 's/=.*//')
+        vars=$(printf '%s\n' "$code" | grep -Eo '[A-Za-z_][A-Za-z0-9_]*=["'"'"']?\$\([[:space:]]*(command[[:space:]]+)?mktemp[[:space:]]+(-d|--directory|-[a-z]*d)([[:space:]]|\)|"|$)' | sed -E 's/=.*//' | sort -u)
         nvars=$(printf '%s' "$vars" | grep -c . || true)
         ok=0
         if [ -n "$vars" ] && [ "$nvars" -ge "$allocs" ]; then

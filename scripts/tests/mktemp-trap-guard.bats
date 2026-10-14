@@ -475,3 +475,23 @@ SH
   [ "$status" -eq 1 ]
   [[ "$output" == *"bare2.sh:2"* ]]
 }
+
+@test "a file mktemp assignment does not pay for a bare dir allocation on the same line" {
+  printf '#!/bin/bash\na="$(mktemp -d)"; b="$(mktemp)"; cp x "$(mktemp -d)"\ntrap '"'"'rm -rf "$a" "$b"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/filebare.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"filebare.sh:2"* ]]
+}
+
+@test "the same variable assigned twice on one line leaks the first dir" {
+  printf '#!/bin/bash\na="$(mktemp -d)"; a="$(mktemp -d)"\ntrap '"'"'rm -rf "$a"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/dupvar.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"dupvar.sh:2"* ]]
+}
+
+@test "a dir allocation plus a file mktemp on one line, dir cleaned, passes" {
+  printf '#!/bin/bash\na="$(mktemp -d)"; b="$(mktemp)"\ntrap '"'"'rm -rf "$a"; rm -f "$b"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/filedir-ok.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}
