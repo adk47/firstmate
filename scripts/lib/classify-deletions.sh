@@ -29,8 +29,9 @@
 # EXIT CODES
 #   0 — classification succeeded (may emit zero of either type)
 #   2 — bad args
-#   4 — git unavailable or not a git repo (caller should fail closed —
-#       cannot safely classify without the ever-tracked predicate)
+#   4 — git unavailable, not a git repo, or a SHALLOW clone (caller should
+#       fail closed — cannot safely classify without the full ever-tracked
+#       predicate; callers must check out with fetch-depth: 0)
 #   5 — tracked set is empty but workspaces/ has content on disk: strongly
 #       suggests a shallow/broken clone. Refusing to classify would silently
 #       auto-exclude every deletion.
@@ -74,6 +75,17 @@ classify_workspace_deletions() {
     # Zero-deletion short circuit: no classification needed.
     if [[ -z "$deletions" ]]; then
         return 0
+    fi
+
+    # A shallow clone has truncated history, so the log half of the
+    # ever-tracked union below is a PARTIAL set: a tracked-then-deleted path
+    # reads as never-tracked and gets auto-excluded (the original Critical),
+    # and the empty-set rc 5 guard cannot see it. Fail closed. The predicate is
+    # `--is-shallow-repository`, not a .git/shallow stat: that file lives in
+    # the common git dir, so a stat is wrong inside a linked worktree.
+    if [[ "$(git -C "$hydra_root" rev-parse --is-shallow-repository 2>/dev/null)" != "false" ]]; then
+        echo "classify_workspace_deletions: $hydra_root is a shallow clone (or its depth is unknown); history is truncated so deleted tracked paths cannot be told from server-only ones; cannot classify. Use fetch-depth: 0 (actions/checkout) or git fetch --unshallow" >&2
+        return 4
     fi
 
     # Compute the ever-tracked set. tr -d '\r' normalizes filenames

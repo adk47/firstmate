@@ -1143,3 +1143,26 @@ STUB
   [ "$status" -eq 1 ]
   [[ "$output" == *"ZERO"* ]]
 }
+
+# MUS-5588: the guard mirrors openclaw's reaper, which only ever sums
+# agents/<id>/sessions/. codex-home belongs to the codex binary, which openclaw's
+# sessions.delete cannot touch, so counting it would page on a breach no raise of
+# maxDiskBytes could clear. The gap is deliberate and covered by codex-home-prune.
+@test "codex-home bytes are NOT counted toward the session disk budget" {
+  _mk_profile main 1000000
+  _mk_agent main ops 1024 0
+  mkdir -p "$SESSION_BUDGET_STATE_ROOT/.openclaw-main/agents/ops/agent/codex-home/sessions"
+  head -c 2000000 /dev/zero > "$SESSION_BUDGET_STATE_ROOT/.openclaw-main/agents/ops/agent/codex-home/sessions/rollout-x.jsonl"
+  _set_enabled_crons ops 0
+  run "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean:"* ]]
+}
+
+@test "the measurement site documents that codex-home is unmeasured and names codex-home-prune" {
+  run grep -n -B12 '^_agent_bytes()' "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"codex-home"* ]]
+  [[ "$output" == *"codex-home-prune.sh"* ]]
+  [[ "$output" == *"NOT measure "* ]]
+}

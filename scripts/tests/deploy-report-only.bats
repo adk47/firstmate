@@ -63,8 +63,8 @@ assert_nothing_mutated() {
   [ ! -s "$STUB_LOG" ] || { echo "mutating tool called:"; cat "$STUB_LOG"; return 1; }
 }
 
-@test "clean tree: Step 0 + Step 4a clean, exit 0, nothing mutated" {
-  run_report
+@test "clean tree (HYDRA_FULL_SYNC=1 mirror mode): Step 0 + Step 4a clean, exit 0, nothing mutated" {
+  run_report HYDRA_FULL_SYNC=1
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"Step 0/8"* ]]
   [[ "$output" == *"Pre-flight clean."* ]]
@@ -75,15 +75,15 @@ assert_nothing_mutated() {
 }
 
 @test "HYDRA_REPORT_ONLY=1 is the env twin of --report-only" {
-  run env PATH="$WORK/bin:$PATH" HYDRA_REPORT_ONLY=1 bash "$DEPLOY"
+  run env PATH="$WORK/bin:$PATH" HYDRA_REPORT_ONLY=1 HYDRA_FULL_SYNC=1 bash "$DEPLOY"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"Pre-flight clean."* ]]
   assert_nothing_mutated
 }
 
-@test "blocking rail: ever-tracked server-only workspace file prints the briefing, exits non-zero, nothing mutated" {
+@test "blocking rail (HYDRA_FULL_SYNC=1 mirror mode): ever-tracked server-only workspace file prints the briefing, exits non-zero, nothing mutated" {
   make_ever_tracked_drift
-  run_report_src
+  run_report_src HYDRA_FULL_SYNC=1
   [ "$status" -ne 0 ]
   [[ "$output" == *"server-only-note.md"* ]]
   [[ "$output" == *"refusing to delete server state"* ]]
@@ -105,7 +105,7 @@ assert_nothing_mutated() {
 
 @test "blocking rail with SLACK_WEBHOOK set posts nothing (a report is not a failed deploy)" {
   make_ever_tracked_drift
-  run_report_src SLACK_WEBHOOK=http://example.invalid/hook
+  run_report_src HYDRA_FULL_SYNC=1 SLACK_WEBHOOK=http://example.invalid/hook
   [ "$status" -ne 0 ]
   [[ "$output" == *"refusing to delete server state"* ]]
   assert_nothing_mutated

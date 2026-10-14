@@ -57,7 +57,7 @@ Mirrors the proven `CV_EVIDENCE_MODE` flag-off rollout pattern.
   "counts": {"total":2,"signal_approve":2,"signal_review":0,"signal_uvn":0},
   "signal_approve": [
     {"cr_id":"cr-1","profile_id":"<uuid>","isrc":"US1","credited_name":"Ming Vauz","role":"Editorial",
-     "_signal":{"bucket":"signal_approve","reason":"approve_owning_track=100,risk=10"}}
+     "_signal":{"bucket":"signal_approve","reason":"validator_approved,risk=10","validator_approved":true,"total_risk_percent":10}}
   ],
   "signal_review": [], "signal_uvn": [] }
 ```
@@ -71,8 +71,8 @@ batch** (stdout of `pick-credits.sh` / `fetch-*.sh`):
     {"id":"cr-1","profileId":"<uuid>","credits":["Editorial"],
      "metadata":{"source":"spclient","label":"X","isrc":"US1"},
      "profile":{"creditCount":34,"popularity":5,"name":"Ming Vauz"},
-     "verificationData":{"total_risk_percent":10,
-       "rule_risk_percent":{"approve_owning_track":100,"reject_high_velocity_profile":50}}},
+     "verificationData":{"is_approved":true,"total_risk_percent":10,
+       "rule_risk_percent":{"approve_owning_track":0,"reject_high_velocity_profile":0}}},
     ...
   ] }
 ```
@@ -182,8 +182,8 @@ over  = score ≥ CV_FRAUD_THRESHOLD
 | `role_inflation` | non-creative-role fraction across the profile's batch roles ≥ `CV_FRAUD_ROLE_INFLATION_FRAC` **OR** max roles-per-track breadth ≥ `CV_FRAUD_ROLE_BREADTH_MAX` | investigator non-creative list; absolute "11-role bundle" breadth (NOT the profile-relative Tier-0 G5 — relative-G5 is a deferred follow-up); "Javon"/"Ming Vauz" patterns |
 | `source_quality` | fraction of credits with `metadata.source != "industry"` > `(1 − CV_TIER0_MIN_INDUSTRY)` (i.e. spclient-heavy) | Tier-0 G3 inverse; "Roberto Junior" (84% spclient) |
 | `establishment` | `profile.creditCount < CV_TIER0_MIN_CC` **OR** `profile.popularity < CV_TIER0_MIN_POP` | Tier-0 G1/G2 inverse; "Ming Vauz" (cc=34) |
-| `velocity` | any credit's `verificationData.rule_risk_percent.reject_high_velocity_profile > 0` | the input the backend scorer currently ignores |
-| `backend_hard_reject` | any of the 5 `reject_*` signals > 0 (artist / deleted_catalog_track / individual_org / publisher_label / high_risk_profile) | already-known fraud-ish; same set score-backend uses for `signal_uvn` |
+| `velocity` | any credit's `verificationData.rule_risk_percent.reject_high_velocity_profile > 0` | since 2026-10-11 score-backend also routes such a credit to `signal_uvn` (any `reject_*` > 0) |
+| `backend_hard_reject` | any of the 5 `reject_*` signals > 0 (artist / deleted_catalog_track / individual_org / publisher_label / high_risk_profile) | already-known fraud-ish; score-backend now sends ANY `reject_*` / `review_*` rule > 0 to `signal_uvn` (a superset of these 5) |
 | `muso_only` | profile's muso-only popularity fraction > `CV_FRAUD_MUSO_ONLY_PCT`, **and the Trino lookup succeeded** | `potential_fraud_accounts_muso_only_credits.sql` |
 
 **Non-creative role list** (case-insensitive, **whole-word** match — `\bart\b`
