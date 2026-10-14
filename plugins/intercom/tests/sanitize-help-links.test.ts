@@ -116,6 +116,21 @@ describe("sanitizeHelpLinks", () => {
     }
   });
 
+  it("prose fallback strips a host carrying ANY default-ignorable code point, incl. U+FEFF which JS \\s treats as whitespace", () => {
+    const ignorable: string[] = [];
+    for (let cp = 0x80; cp <= 0x2ffff; cp++) {
+      const ch = String.fromCodePoint(cp);
+      if (/^\p{Default_Ignorable_Code_Point}$/u.test(ch)) ignorable.push(ch);
+    }
+    expect(ignorable).toContain("﻿");
+    for (const ch of ignorable) {
+      for (const host of [`help${ch}.muso.ai`, `he${ch}lp.muso.ai`, `help.muso${ch}.ai`, `help.muso.ai${ch}`]) {
+        const prose = sanitizeHelpLinks(`See https://${host}/en/articles/9999999-invented for details`, MANIFEST);
+        expect(prose.body, `U+${ch.codePointAt(0)!.toString(16)} in ${host}`).toBe("See for details");
+      }
+    }
+  });
+
   it("entity-encoded anchor is stripped", () => {
     const out = sanitizeHelpLinks('Hi.\n<p><a href="https://help&#46;muso.ai/en/articles/9999999-x">guide</a></p>', MANIFEST);
     expect(out.redactions.length).toBe(1);

@@ -28,7 +28,8 @@ const NAMED_ENTITIES: Record<string, string> = {
 };
 
 // Any whitespace/delimiter-bounded token; dropped when its decoded form carries an article URL, whatever the encoding.
-const TOKEN_G = /[^\s<>()[\]"']+/g;
+// Delimiter is \s minus U+FEFF: JS \s counts it as whitespace but URL parsers ignore it inside a host, so splitting on it would cut a token in two.
+const TOKEN_G = /(?:[^\s<>()[\]"']|\uFEFF)+/g;
 
 /** Decode HTML character references (semicolon optional: we decide what to strip, so leniency is safe). An out-of-range code point is left alone, never throws. */
 function decodeEntities(s: string): string {
