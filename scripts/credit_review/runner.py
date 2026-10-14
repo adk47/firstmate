@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -38,8 +39,35 @@ AUDIT_CHUNK = 100
 AUDIT_DEADLINE_S = 1800.0
 
 
-def log(msg: str) -> None:
-    print(f"[credit-review] {msg}", file=sys.stderr)
+# Operational log. The crons are openclaw command crons, which post stdout AND
+# stderr to Slack ("stdout: NO_REPLY / stderr: [credit-review] ..." on
+# 2026-10-14), so a cron run must write nothing to stderr: a quiet run posts
+# exactly NO_REPLY (silent), a run with something to act on posts only its
+# alert lines. Progress goes to this file; stderr only on an interactive terminal.
+LOG_PATH = os.environ.get("CREDIT_REVIEW_LOG", "/var/lib/hydra/credit-review/run.log")
+LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+def log(msg: str) -> bool:
+    """Append msg to the run log; False when the log could not be written."""
+    line = f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} [credit-review] {msg}"
+    if sys.stderr.isatty():
+        print(line, file=sys.stderr)
+    try:
+        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > LOG_MAX_BYTES:
+            os.replace(LOG_PATH, LOG_PATH + ".1")
+        os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
+        with open(LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        return False  # a log we cannot write never turns into Slack noise
+    return True
+
+
+def plain_line(value: Any) -> str:
+    """Untrusted text (a profile name) as one plain line: control characters and
+    line breaks become spaces, so it can never split or spoof an alert line."""
+    return " ".join("".join(c if c.isprintable() else " " for c in str(value)).split())
 
 
 def sampled(request_id: str, rate: float) -> bool:
@@ -426,6 +454,120 @@ def run_review(admin: admin_api.Admin, ledger: Ledger, judge: Judge | None, cfg:
         if cfg.phase == "advise" and d.verdict in (R_REJECT, R_HUMAN) and ev.status == "unverified":
             cards.append(f"AI REVIEW {d.verdict} ({d.confidence:.2f}): " + one_line(ev, d))
     return cards, stats
+
+
+# Per-profile burst alert (firstmate 035, 2026-10-14): one profile filed 421
+# requests in under 2h and the validator approved 35 of them; the audit marked 25
+# SUSPECT in one hour and raised NO alert, because row alerts fire only for a
+# CONTRADICTED big track. A burst is judged on the ledger, across runs.
+BURST_WINDOW = timedelta(hours=2)
+BURST_FLAGGED_MIN = 10      # SUSPECT or CONTRADICTED approvals for one profile in the window
+BURST_APPROVALS_MIN = 20    # approvals of any verdict for one profile in the window
+BURST_MAX_LOOKBACK = timedelta(hours=24)
+BURST_STATE = "burst_last_check"
+PROFILE_URL = "https://credits.muso.ai/profile/{id}"
+
+
+def _worst_burst(events: list[tuple[datetime, bool, bool]],
+                 after: datetime) -> tuple[int, int, datetime, int, datetime] | None:
+    """Over every BURST_WINDOW ending at an approval later than ``after``, the
+    window meeting a threshold with the most flagged (then most) approvals.
+    Events are (approved_at, flagged, parked); returns (flagged, approvals,
+    window end, parked, end of the latest window meeting a threshold)."""
+    best: tuple[int, int, datetime, int] | None = None
+    latest: datetime | None = None
+    lo = 0
+    flagged = 0
+    parked = 0
+    for hi, (t, f, p) in enumerate(events):
+        flagged += f
+        parked += p
+        while events[lo][0] < t - BURST_WINDOW:
+            flagged -= events[lo][1]
+            parked -= events[lo][2]
+            lo += 1
+        if t <= after:
+            continue
+        n = hi - lo + 1
+        if flagged >= BURST_FLAGGED_MIN or n >= BURST_APPROVALS_MIN:
+            latest = t
+            if best is None or (flagged, n) > best[:2]:
+                best = (flagged, n, t, parked)
+    return (*best, latest) if best and latest else None
+
+
+def profile_burst_alerts(ledger: Ledger, now: datetime | None = None) -> list[str]:
+    """One CREDIT-AUDIT ALERT per profile with >= BURST_FLAGGED_MIN
+    SUSPECT/CONTRADICTED approvals or >= BURST_APPROVALS_MIN approvals within
+    any BURST_WINDOW that ends after the previous check (at most
+    BURST_MAX_LOOKBACK back), so approvals a catch-up run records late, or a
+    burst split across two hourly runs, still alert. Each request counts once
+    (its latest audit verdict). Approvals parked because their evidence could
+    not be read count as approvals, never as flagged, and the check never moves
+    past the earliest of them parked within BURST_MAX_LOOKBACK, so their windows
+    are judged again once they are recorded. A profile is alerted again only for
+    a window holding an approval newer than every approval already alerted."""
+    now = now or datetime.now(timezone.utc)
+    prev = parse_ts(ledger.get_state(BURST_STATE)) or now - BURST_WINDOW
+    prev = max(prev, now - BURST_MAX_LOOKBACK)
+    rows = ledger.db.execute(
+        "SELECT r.profile_id, r.verdict, r.evidence_json, COALESCE(r.approved_at, r.reviewed_at) ts FROM reviews r "
+        "JOIN (SELECT request_id, MAX(id) mid FROM reviews WHERE mode='audit' GROUP BY request_id) l ON r.id = l.mid "
+        "WHERE COALESCE(r.approved_at, r.reviewed_at) >= ? AND COALESCE(r.approved_at, r.reviewed_at) <= ? "
+        "AND r.profile_id IS NOT NULL",
+        (_iso(prev - BURST_WINDOW - timedelta(seconds=1)), _iso(now) + "~")).fetchall()  # "~" sorts after any fraction/Z
+    per: dict[str, dict[str, Any]] = {}
+    resume = now
+
+    def add(pid: str, ts: Any, flagged: bool, parked: bool, name: Any) -> None:
+        at = parse_ts(ts)
+        if at is None or at > now or at < prev - BURST_WINDOW:
+            return
+        p = per.setdefault(pid, {"events": [], "name": None})
+        p["events"].append((at, flagged, parked))
+        if not p["name"] and name:
+            p["name"] = str(name)
+
+    for r in rows:
+        try:
+            name = (json.loads(r["evidence_json"] or "{}").get("claim") or {}).get("person_or_profile_name")
+        except ValueError:
+            name = None
+        add(r["profile_id"], r["ts"], r["verdict"] in (A_SUSPECT, A_CONTRADICTED), False, name)
+    for r in ledger.db.execute(
+            "SELECT request_json, first_failed_at FROM evidence_retry WHERE mode='audit' AND request_id NOT IN "
+            "(SELECT request_id FROM reviews WHERE mode='audit')").fetchall():
+        try:
+            req = json.loads(r["request_json"])
+        except ValueError:
+            continue
+        if not isinstance(req, dict):
+            continue
+        parked_at = parse_ts(req.get("updatedAt"))
+        parked_since = parse_ts(r["first_failed_at"])
+        if parked_at is not None and parked_since is not None and parked_since >= now - BURST_MAX_LOOKBACK:
+            resume = min(resume, parked_at - timedelta(seconds=1))
+        if not req.get("profileId"):
+            continue
+        prof = req.get("profile") if isinstance(req.get("profile"), dict) else {}
+        add(str(req["profileId"]), req.get("updatedAt"), False, True, prof.get("name"))
+    bursts = []
+    for pid, p in per.items():
+        through = parse_ts(ledger.get_state(f"burst_alerted_through:{pid}"))
+        worst = _worst_burst(sorted(p["events"]), max(prev, through) if through else prev)
+        if worst:
+            bursts.append((pid, p["name"], *worst))
+    out: list[str] = []
+    for pid, name, flagged, approvals, end, parked, latest in sorted(bursts, key=lambda b: (-b[3], b[0])):
+        ledger.set_state(f"burst_alerted_through:{pid}", latest.isoformat())
+        who = plain_line(name or "") or "unnamed profile"
+        out.append(f"CREDIT-AUDIT ALERT: burst of approvals on one profile - {who} ({plain_line(pid)}): "
+                   f"{approvals} approval(s) within {int(BURST_WINDOW.total_seconds() // 3600)}h "
+                   f"(up to {_iso(end)}), {flagged} of them SUSPECT or CONTRADICTED"
+                   f"{f', {parked} not yet auditable' if parked else ''}. Nothing was changed; "
+                   f"a human should review this profile's recent approvals. {PROFILE_URL.format(id=plain_line(pid))}")
+    ledger.set_state(BURST_STATE, _iso(max(resume, now - BURST_MAX_LOOKBACK)))
+    return out
 
 
 def render_digest(ledger: Ledger, now: datetime | None = None, hours: int = 24) -> str:
