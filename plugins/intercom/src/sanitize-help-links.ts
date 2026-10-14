@@ -50,9 +50,9 @@ function decodePercent(s: string): string {
   });
 }
 
-/** What a URL parser's host step folds away: NFKC (fullwidth letters), IDNA dot equivalents, and characters it ignores. */
+/** What a URL parser's host step folds away: NFKC (fullwidth letters), IDNA dot equivalents, and every default-ignorable code point (the full Unicode class, not a list). */
 function normalizeHost(s: string): string {
-  return s.normalize("NFKC").replace(/[\u3002\uFF0E\uFF61]/g, ".").replace(/[\u00AD\u200B-\u200D\u2060\uFEFF]/g, "");
+  return s.normalize("NFKC").replace(/[\u3002\uFF0E\uFF61]/g, ".").replace(/\p{Default_Ignorable_Code_Point}/gu, "");
 }
 
 /** Undo HTML entities, percent-escapes and host normalisation (repeatedly, so mixed and double encoding resolve too); a malformed % or entity is left alone, never aborts the decode. Detection only: never the outbound body. */

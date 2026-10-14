@@ -95,6 +95,27 @@ describe("sanitizeHelpLinks", () => {
     }
   });
 
+  it("strips a host carrying ANY default-ignorable code point the URL parser ignores (not a hand-picked list)", () => {
+    const ignorable: string[] = [];
+    for (let cp = 0x80; cp <= 0x2ffff; cp++) {
+      const ch = String.fromCodePoint(cp);
+      if (/^\p{Default_Ignorable_Code_Point}$/u.test(ch)) ignorable.push(ch);
+    }
+    expect(ignorable.length).toBeGreaterThan(70);
+    for (const ch of ignorable) {
+      for (const host of [`help${ch}.muso.ai`, `he${ch}lp.muso.ai`, `help.muso${ch}.ai`, `help.muso.ai${ch}`]) {
+        const out = sanitizeHelpLinks(`Answer.\nMore detail here: https://${host}/en/articles/9999999-invented`, MANIFEST);
+        expect(out.body, `U+${ch.codePointAt(0)!.toString(16)} in ${host}`).toBe("Answer.");
+        expect(out.redactions.length).toBe(1);
+      }
+    }
+    // the parser-reported cases from the QA round: CGJ, VS16, Mongolian FVS, invisible separator, Hangul filler
+    for (const host of ["help\u034F.muso.ai", "help.muso\uFE0F.ai", "he\u180Blp.muso.ai", "help.muso.ai\u2063", "help\u3164.muso.ai"]) {
+      const prose = sanitizeHelpLinks(`See https://${host}/en/articles/9999999-invented for details`, MANIFEST);
+      expect(prose.body, host).toBe("See for details");
+    }
+  });
+
   it("entity-encoded anchor is stripped", () => {
     const out = sanitizeHelpLinks('Hi.\n<p><a href="https://help&#46;muso.ai/en/articles/9999999-x">guide</a></p>', MANIFEST);
     expect(out.redactions.length).toBe(1);
