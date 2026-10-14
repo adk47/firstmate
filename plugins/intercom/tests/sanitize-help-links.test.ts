@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { sanitizeHelpLinks } from "../src/sanitize-help-links.js";
+import { sanitizeHelpLinks, hasArticleUrl } from "../src/sanitize-help-links.js";
 import { parseHelpManifest, loadHelpManifest, HELP_CITATION_LEAD } from "../src/help-manifest.js";
 
 const MANIFEST = parseHelpManifest(
@@ -307,7 +307,7 @@ describe("a bare plain-text link split across lines", () => {
     ["no manifest", "Answer.\nSee https://help.muso.ai/en/ar\nticles/9999999-invented for details", null],
     ["manifest, no other hit", "Answer.\nSee https://help.muso.ai/en/ar\nticles/9999999-invented for details", MANIFEST],
     ["manifest, valid line kept", `Answer.\n${VALID}\nSee https://help.muso.ai/en/ar\nticles/9999999-invented for details`, MANIFEST],
-    ["CR split", "Answer.\nSee https://help.muso.ai/en/ar\rticles/9999999-invented", MANIFEST],
+    ["CR split", "Answer.\nSee https://help.muso.ai/en/ar\r\nticles/9999999-invented", MANIFEST],
   ])("strips the invented link: %s", (_n, body, manifest) => {
     const out = sanitizeHelpLinks(body, manifest);
     expect(out.body).not.toContain("9999999");
@@ -349,5 +349,37 @@ describe("customer-visible output carries no banned word", () => {
   });
   it("the citation template itself is clean", () => {
     expect(HELP_CITATION_LEAD).not.toMatch(BANNED);
+  });
+});
+
+describe("invariant: no variant leaves an article URL in the body (fail closed)", () => {
+  const INV = "9999999-invented";
+  const variants: [string, string][] = [
+    ["scheme-less 2-part LF split", `Answer.\nSee help.muso.ai/en/ar\nticles/${INV} for details`],
+    ["3-part LF split", `Answer.\nSee https://help.muso.ai/en/\nar\nticles/${INV} ok`],
+    ["CRLF split", `Answer.\nSee https://help.muso.ai/en/ar\r\nticles/${INV}`],
+    ["split next to a valid citation", `Answer.\n${HELP_CITATION_LEAD} ${GOOD}\nSee help.muso.ai/en/ar\nticles/${INV}`],
+    ["tab", `Answer.\nhttps://help.muso.ai/en/art\ticles/${INV}`],
+    ["&Tab; entity", `Answer.\n<a href="https://help.muso.ai/en/ar&Tab;ticles/${INV}">x</a>`],
+    ["&NewLine; entity", `Answer.\n<a href="https://help.muso.ai/en/ar&NewLine;ticles/${INV}">x</a>`],
+    ["%09", `Answer.\nSee https://help.muso.ai/en/ar%09ticles/${INV}`],
+    ["%0a", `Answer.\nSee https://help.muso.ai/en/ar%0aticles/${INV}`],
+    ["uppercase entity", `Answer.\n<a href="https://help.muso.ai/en/ar&TAB;ticles/${INV}">x</a>`],
+    ["semicolon-less entity", `Answer.\n<a href="https://help&shy.muso.ai/en/articles/${INV}">x</a>`],
+  ];
+  it.each(variants)("%s: stripped, and no article URL survives", (_n, body) => {
+    for (const m of [null, MANIFEST]) {
+      const out = sanitizeHelpLinks(body, m);
+      const rest = out.body.split(`${HELP_CITATION_LEAD} ${GOOD}`).join("");
+      expect(hasArticleUrl(rest)).toBe(false);
+      expect(rest).not.toContain(INV);
+      expect(out.body).toContain("Answer.");
+    }
+  });
+  it("a claimed redaction never returns the original body", () => {
+    for (const [, body] of variants) {
+      const out = sanitizeHelpLinks(body, null);
+      if (out.redactions.length) expect(out.body).not.toBe(body);
+    }
   });
 });

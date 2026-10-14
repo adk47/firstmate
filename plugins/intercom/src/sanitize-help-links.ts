@@ -79,7 +79,7 @@ function decodeAll(s: string): string {
 function findArticleUrl(s: string): RegExpExecArray | null {
   return ARTICLE_URL.exec(s) ?? ARTICLE_URL_LOOSE.exec(decodeAll(s));
 }
-function hasArticleUrl(s: string): boolean {
+export function hasArticleUrl(s: string): boolean {
   return findArticleUrl(s) !== null;
 }
 const LEAD_RE = new RegExp(`${HELP_CITATION_LEAD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*(?=(?:<\\/\\w+>\\s*)*$)`, "i");
@@ -90,8 +90,9 @@ function stripUrlTokensOnly(body: string): string {
     .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, (m) => (hasArticleUrl(m) ? "" : m))
     .replace(/\[[^\]]*\]\([^)]*\)/g, (m) => (hasArticleUrl(m) ? "" : m))
     .replace(TOKEN_G, (m) => (hasArticleUrl(m) ? "" : m))
-    // A bare link broken by LF/CR is two tokens that each look harmless; join the halves and test them together.
-    .replace(/https?:\/\/[^\s<>()[\]"']*[\r\n]+[^\s<>()[\]"']+/gi, (m) => (hasArticleUrl(m) ? "" : m));
+    // A link broken by LF/CR (any number of breaks, scheme or not) is several tokens that each look harmless:
+    // join the chain of break-separated tokens and test it whole. The kept-citation shield (NUL) never joins a chain.
+    .replace(/(?:[^\s\u0000<>()[\]"']+[\r\n]+)+[^\s\u0000<>()[\]"']+/g, (m) => (hasArticleUrl(m) ? "" : m));
   return stripped
     .split("\n")
     .map((l) => l.replace(LEAD_RE, "").replace(/[ \t]{2,}/g, " ").replace(/\s+$/, ""))
@@ -100,6 +101,21 @@ function stripUrlTokensOnly(body: string): string {
     .replace(/<p>\s*<\/p>/gi, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+/** Last resort: drop every line that is part of the shortest run of adjacent lines whose join carries an article URL. */
+function dropLinesCarryingUrl(text: string): string {
+  const lines = text.split("\n");
+  const drop = new Set<number>();
+  for (let i = 0; i < lines.length; i++) {
+    for (let w = 1; i + w <= lines.length; w++) {
+      if (hasArticleUrl(lines.slice(i, i + w).join("\n"))) {
+        for (let k = i; k < i + w; k++) drop.add(k);
+        break;
+      }
+    }
+  }
+  return lines.filter((_, i) => !drop.has(i)).join("\n");
 }
 
 export function sanitizeHelpLinks(body: string, manifest: HelpManifest | null): HelpLinkSanitizeResult {
@@ -138,10 +154,17 @@ export function sanitizeHelpLinks(body: string, manifest: HelpManifest | null): 
     joined = stripUrlTokensOnly(rest);
     redactions.push(rest);
   }
+  // Invariant: a claimed redaction never leaves an article URL behind. If a pass mismatch let one through
+  // (a span the token sweep cannot locate), drop whole lines, widest spans first, until none is left.
+  if (hasArticleUrl(joined)) {
+    joined = dropLinesCarryingUrl(joined);
+    if (!redactions.length) redactions.push(rest);
+  }
   joined = joined.replace(SHIELD, keptLine);
   const cleaned = joined.replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "");
   if (cleaned.trim().length > 0 || !stripUrlTokensOnly(body).trim()) return { body: cleaned, redactions };
   // Dropping whole lines emptied a reply that had prose around the URL (a model that
   // ignored the template). Never post an empty body: keep the prose, lose only the URL.
-  return { body: stripUrlTokensOnly(body), redactions };
+  const tokenOnly = stripUrlTokensOnly(body);
+  return { body: hasArticleUrl(tokenOnly) ? dropLinesCarryingUrl(tokenOnly) : tokenOnly, redactions };
 }

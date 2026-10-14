@@ -997,6 +997,19 @@ describe("SanitizingIntercomClient help-centre link gate", () => {
     expect(out).not.toContain("9999999");
     expect(out).toContain(valid);
   });
+  it.each([
+    ["scheme-less LF split", "See help.muso.ai/en/ar\nticles/9999999-invented for details"],
+    ["3-part LF split", "See https://help.muso.ai/en/\nar\nticles/9999999-invented ok"],
+    ["CRLF split", "See https://help.muso.ai/en/ar\r\nticles/9999999-invented"],
+    ["raw tab", "See https://help.muso.ai/en/art\ticles/9999999-invented"],
+    ["&NewLine; entity", '<a href="https://help.muso.ai/en/ar&NewLine;ticles/9999999-invented">x</a>'],
+    ["%09", "See https://help.muso.ai/en/ar%09ticles/9999999-invented"],
+    ["%0a", "See https://help.muso.ai/en/ar%0aticles/9999999-invented"],
+  ])("variant table through the client: %s never reaches the customer", async (_n, tail) => {
+    const out = await send(`Answer.\n${tail}`, () => manifest);
+    expect(out).not.toContain("9999999");
+    expect(out).toContain("Answer.");
+  });
   it("strips an invented link written with a percent-encoded path", async () => {
     const out = await send("Answer.\nMore detail here: https://help.muso.ai/en/%61rticles/9999999-invented", () => manifest);
     expect(out).toBe("Answer.");
