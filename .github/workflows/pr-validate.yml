@@ -1187,6 +1187,7 @@ jobs:
       JEV_ENV_FILE: /dev/null
       JEV_SHADOW_DIR: /tmp/hydra-ci-jev-shadow-${{ github.run_id }}-${{ github.job }}
       JEV_EVAL_DIR: /tmp/hydra-ci-jev-eval-${{ github.run_id }}-${{ github.job }}
+      MUSO_SLACK_ENV_FILE: /dev/null
     steps:
       - name: Checkout
         uses: actions/checkout@v5

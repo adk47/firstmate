@@ -25,7 +25,7 @@
 # batch). The PUT stamps screenedAt, so the next poll will not list the ad again: that is the
 # once-per-submission guarantee. Post-PUT order also means no brief for an unwritten suggestion.
 #
-# Env: AD_SCREENING_SLACK_CHANNEL (brief destination, default the slack-notify.sh channel),
+# Env: AD_SCREENING_SLACK_CHANNEL (brief destination, default #ads-screening C0C97R3Q0TB, posted as the cmo bot),
 #      AD_SCREENING_MUSO_READ / AD_SCREENING_DESCRIBE / AD_SCREENING_JEV / AD_SCREENING_PUT
 #      (command overrides, tests), AD_SCREENING_MODEL (default JEV_MODEL, else the JEV_PROVIDER default),
 #      AD_SCREENING_POLICY_VERSION (default v1),
@@ -61,7 +61,9 @@ esac
 # shellcheck source=/dev/null
 source "$here/lib/ad-screening-reason.sh"
 if [ "$mode" = run ]; then
-  [ -z "${AD_SCREENING_SLACK_CHANNEL:-}" ] || export SLACK_CHANNEL="$AD_SCREENING_SLACK_CHANNEL"
+  # Briefs go out as the cmo bot into private #ads-screening; set before the lib's := defaults.
+  export SLACK_NOTIFY_BOT=cmo
+  export SLACK_CHANNEL="${AD_SCREENING_SLACK_CHANNEL:-${SLACK_CHANNEL:-C0C97R3Q0TB}}"
   # shellcheck source=/dev/null
   source "$here/lib/slack-notify.sh"
   # shellcheck source=/dev/null
@@ -202,7 +204,7 @@ screen() {
   # shellcheck disable=SC2086
   $put put "$id" "$payload" >"$workdir/err" 2>&1 || { log "ad $id: write failed (rc=$?), suggestion not stored: $(first_line "$workdir/err")"; return 1; }
   log "ad $id: screened ($eff)"
-  slack_load_env "${SLACK_NOTIFY_BOT:-devops}" || log "ad $id: brief not posted (no Slack bot token)"
+  slack_load_env "$SLACK_NOTIFY_BOT" || log "ad $id: brief not posted (no Slack bot token)"
   slack_notify "$(ad_screening_brief "$ad" "$(cat "$workdir/creative.$id" 2>/dev/null)" "$eff" "$conf" "$flags" \
     "$(ad_screening_reason "$rec" "$fit" "$flags")")" || true
 }

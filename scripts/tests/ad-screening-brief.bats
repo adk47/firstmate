@@ -16,7 +16,7 @@ setup() {
   export AD_SCREENING_JEV="$T/jev" AD_SCREENING_PUT="$T/put"
   export AD_SCREENING_DISABLED_FILE="$T/ad-screening.disabled"
   export STUB_FIXTURE="$T/fixture.json" STUB_ANSWERS="$T/answers.json"
-  export MUSO_BIN="$T/muso" MUSO_SLACK_BOT_TOKEN_DEVOPS=x MUSO_SLACK_ENV_FILE="$T/none.env"
+  export MUSO_BIN="$T/muso" MUSO_SLACK_BOT_TOKEN_CMO=x MUSO_SLACK_ENV_FILE="$T/none.env"
   unset SLACK_CHANNEL AD_SCREENING_SLACK_CHANNEL
   cat >"$AD_SCREENING_MUSO_READ" <<'S'
 #!/usr/bin/env bash
@@ -104,10 +104,11 @@ sends() { cat "$T/slack.n" 2>/dev/null || echo 0; }
   if grep -qiwE "$BANNED" "$T/slack.1.txt"; then cat "$T/slack.1.txt"; return 1; fi
 }
 
-@test "channel defaults, and AD_SCREENING_SLACK_CHANNEL overrides it" {
+@test "posts as cmo to #ads-screening by default, and AD_SCREENING_SLACK_CHANNEL overrides the channel" {
   ad 101 | fixture; answers approve 0.9 strong ""
   "$SCRIPT" --run
-  grep -q -- "--channel C0ADV2W76G4" "$T/slack.argv"
+  grep -q -- "--bot cmo" "$T/slack.argv"
+  grep -q -- "--channel C0C97R3Q0TB" "$T/slack.argv"
   AD_SCREENING_SLACK_CHANNEL=C123TEST "$SCRIPT" --run
   grep -q -- "--channel C123TEST" "$T/slack.argv"
 }
