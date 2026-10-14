@@ -547,3 +547,29 @@ SH
   run_guard
   [ "$status" -eq 0 ]
 }
+
+@test "a function called after a top-level alloc replaces its EXIT cleanup and fails" {
+  printf '#!/bin/bash\nwork=$(mktemp -d)\ntrap '"'"'rm -rf "$work"'"'"' EXIT\ng() { trap : EXIT; }\ng\n' > "$TEST_TMPDIR/scripts/top-fn-replace.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"top-fn-replace.sh:2"* ]]
+}
+
+@test "a function that clears EXIT (trap - EXIT) after a top-level alloc fails" {
+  printf '#!/bin/bash\nwork=$(mktemp -d)\ntrap '"'"'rm -rf "$work"'"'"' EXIT\ng() {\n  trap - EXIT\n}\ng\n' > "$TEST_TMPDIR/scripts/top-fn-clear.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"top-fn-clear.sh:2"* ]]
+}
+
+@test "a function whose EXIT trap still removes the top-level dir passes" {
+  printf '#!/bin/bash\nwork=$(mktemp -d)\ntrap '"'"'rm -rf "$work"'"'"' EXIT\ng() { trap '"'"'rm -rf "$work"; echo bye'"'"' EXIT; }\ng\n' > "$TEST_TMPDIR/scripts/top-fn-keep.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "a function with only a RETURN trap does not disturb the top-level EXIT cleanup" {
+  printf '#!/bin/bash\nwork=$(mktemp -d)\ntrap '"'"'rm -rf "$work"'"'"' EXIT\ng() { trap : RETURN; }\ng\n' > "$TEST_TMPDIR/scripts/top-fn-return.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}

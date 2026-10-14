@@ -181,6 +181,14 @@ while IFS= read -r f; do
               rest=$(printf '%s\n' "$src" | tail -n +$(( $(printf '%s\n' "$src" | region "$n" end) + 1 )))
               if ! trap_cleans "$rest" "$var" top && [ "$TRAP_SEEN" -eq 1 ]; then ok=0; break; fi
             fi
+            # mirror case: a top-level EXIT cleanup is replaced when any function in the file arms or clears EXIT
+            # without removing the dir (fail closed: the function may run after the allocation)
+            if [ "$TRAP_EXIT" -eq 1 ] && ! [[ "$(printf '%s\n' "$scope" | head -n1)" =~ $FN_HEADER ]]; then
+              for fn in $(printf '%s\n' "$src" | grep -E "$FN_HEADER" | sed -E 's/^[[:space:]]*(function[[:space:]]+)?([A-Za-z_][A-Za-z0-9_:.-]*).*/\2/'); do
+                fbody=$(printf '%s\n' "$src" | fn_body "$fn")
+                if ! trap_cleans "$fbody" "$var" top && [ "$TRAP_SEEN" -eq 1 ]; then ok=0; break 2; fi
+              done
+            fi
           done
         fi
         if [ "$ok" -eq 0 ]; then
