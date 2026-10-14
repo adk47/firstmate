@@ -495,3 +495,29 @@ SH
   run_guard
   [ "$status" -eq 0 ]
 }
+
+@test "a second EXIT trap on the same line replaces the cleanup and fails" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ntrap '"'"'rm -rf "$work"'"'"' EXIT; trap '"'"':'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/oneline-replace.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"oneline-replace.sh:2"* ]]
+}
+
+@test "trap - EXIT on the same line as the cleanup trap fails" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ntrap '"'"'rm -rf "$work"'"'"' EXIT; trap - EXIT\n' > "$TEST_TMPDIR/scripts/oneline-reset.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"oneline-reset.sh:2"* ]]
+}
+
+@test "a cleanup trap after a non-EXIT trap on the same line passes" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ntrap '"'"'echo int'"'"' INT; trap '"'"'rm -rf "$work"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/oneline-ok.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "a cleanup trap whose action prints a later trap command still passes" {
+  printf '#!/bin/bash\nwork="$(mktemp -d)"\ntrap '"'"'rm -rf "$work"; echo "x; trap : EXIT"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/oneline-printed.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}
