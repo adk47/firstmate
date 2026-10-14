@@ -23,6 +23,9 @@
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# shellcheck source=lib/safe-delete.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/safe-delete.sh"
+
 ROOT="${TMP_REAPER_ROOT:-/tmp}"
 DEFAULT_DIR_RE='^[a-z0-9-]+-[0-9]+(-review)?-[A-Za-z0-9]{6}$'
 DIR_RE="${TMP_REAPER_DIR_RE:-$DEFAULT_DIR_RE}"
@@ -69,8 +72,8 @@ reap() {
     echo "tmp-reaper: WARN lsof failed, keeping $path" >&2
     return 0
   fi
-  kib=$(du -sk "$path" 2>/dev/null | cut -f1 || true)
-  if rm -rf -- "$path"; then
+  # Quarantine-first removal: mount/identity re-checks, then rm in a private name.
+  if kib=$(safe_delete_path "$path"); then
     reaped=$((reaped + 1))
     total_kib=$((total_kib + ${kib:-0}))
     echo "tmp-reaper: deleted $path (${kib:-0} KiB)"
