@@ -145,6 +145,13 @@ export function resolveIntercomAccount(
       }
     });
   }
+  if (account.jev?.shadowTimeoutMs !== undefined) {
+    if (!Number.isInteger(account.jev.shadowTimeoutMs) || account.jev.shadowTimeoutMs <= 0) {
+      throw new Error(
+        `intercom: account "${id}" jev.shadowTimeoutMs must be a positive integer (got: ${account.jev.shadowTimeoutMs})`,
+      );
+    }
+  }
   if (account.jev?.agentInstructionsPath !== undefined) {
     if (typeof account.jev.agentInstructionsPath !== "string" || account.jev.agentInstructionsPath.trim() === "") {
       throw new Error(`intercom: account "${id}" jev.agentInstructionsPath must be a non-empty string`);
@@ -196,6 +203,7 @@ export function resolveIntercomAccount(
           apiKey: account.jev.apiKey,
           ...(typeof account.jev.model === "string" ? { model: account.jev.model } : {}),
           ...(typeof account.jev.timeoutMs === "number" ? { timeoutMs: account.jev.timeoutMs } : {}),
+          ...(typeof account.jev.shadowTimeoutMs === "number" ? { shadowTimeoutMs: account.jev.shadowTimeoutMs } : {}),
           bands: { ...DEFAULT_JEV_BANDS, ...(account.jev.bands ?? {}) },
           actions: { ...DEFAULT_JEV_ACTIONS, ...(account.jev.actions ?? {}) },
           shadow: { ...DEFAULT_JEV_SHADOW, ...(account.jev.shadow ?? {}) },

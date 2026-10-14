@@ -62,3 +62,61 @@ maintenance_reason() {
   [ -f "$flag" ] || return 0
   jq -r '.reason // empty' "$flag" 2>/dev/null || true
 }
+
+# ──────────────────────────────────────────────────────────────
+# Deploy / gateway warm-up window (MUS-5175) — a SEPARATE flag from the above.
+#
+# WHY SEPARATE: the untracked hydra-gateway-guard.sh on node-8 reads
+# /run/hydra-maintenance with a bare `[[ -f ]]` and ignores the TTL, so a
+# deploy that armed THAT path would muzzle the guard until someone removed the
+# file. This flag has its own path and nobody else reads it.
+#
+# deploy.sh arms it just before the gateway restart (deploy_window_arm) with an
+# expiry covering restart + warm-up. THE TTL IS THE WINDOW: it lapses on its
+# own, there is no clear step, and a still-unhealthy gateway pages normally on
+# the first tick after it. Same fail-safe as maintenance_active: absent,
+# unreadable, malformed, non-numeric or expired all read as NOT active.
+#
+# Env knobs:
+#   HYDRA_DEPLOY_WINDOW_FLAG   flag file path (default /run/hydra-deploy-window).
+# ──────────────────────────────────────────────────────────────
+
+: "${HYDRA_DEPLOY_WINDOW_FLAG:=/run/hydra-deploy-window}"
+
+# deploy_window_active: return 0 iff the deploy window is open (flag present,
+# valid JSON, numeric expires_epoch, now < expires_epoch). Every failure path
+# returns 1 (NOT active).
+deploy_window_active() {
+  local flag="${HYDRA_DEPLOY_WINDOW_FLAG:-/run/hydra-deploy-window}"
+  [ -f "$flag" ] || return 1
+  local exp now
+  exp=$(jq -r '.expires_epoch // empty' "$flag" 2>/dev/null) || return 1
+  case "$exp" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  now=$(date -u +%s 2>/dev/null) || return 1
+  [ "$now" -lt "$exp" ]
+}
+
+# deploy_window_reason: echo the window's reason for a stand-down log line.
+deploy_window_reason() {
+  local flag="${HYDRA_DEPLOY_WINDOW_FLAG:-/run/hydra-deploy-window}"
+  [ -f "$flag" ] || return 0
+  jq -r '.reason // empty' "$flag" 2>/dev/null || true
+}
+
+# deploy_window_arm <ttl_seconds> <reason>: open the window for ttl seconds from
+# now. Atomic (tmp + mv) so a reader never sees a half-written flag. Returns 1
+# on a non-positive-integer ttl or any write failure; the caller treats that as
+# non-fatal (no window means the old behaviour, never a stuck deploy).
+deploy_window_arm() {
+  local ttl="${1:-}" reason="${2:-deploy}"
+  local flag="${HYDRA_DEPLOY_WINDOW_FLAG:-/run/hydra-deploy-window}"
+  [[ "$ttl" =~ ^[1-9][0-9]*$ ]] || return 1
+  local now tmp
+  now=$(date -u +%s) || return 1
+  tmp="$flag.tmp.$$"
+  jq -n --arg reason "$reason" --argjson now "$now" --argjson ttl "$ttl" \
+    '{reason:$reason, started_epoch:$now, ttl_seconds:$ttl, expires_epoch:($now+$ttl)}' \
+    > "$tmp" 2>/dev/null && mv -f "$tmp" "$flag" || { rm -f "$tmp"; return 1; }
+}

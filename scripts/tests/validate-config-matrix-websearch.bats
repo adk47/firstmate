@@ -45,6 +45,7 @@ write_ws_profile() {
   fi
   cat > "$PROFILE" <<JSON
 {
+  "gateway": { "auth": { "mode": "token" } },
   "agents": {
     "defaults": { "thinkingDefault": "medium",
       "model": { "primary": "openai/gpt-5.5",

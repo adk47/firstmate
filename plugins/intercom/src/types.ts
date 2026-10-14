@@ -324,6 +324,9 @@ export interface IntercomAccountConfig {
     // it never affects the live call, the live decision, or turn latency.
     // Default [] (no shadow calls).
     shadowVersions: string[];
+    // Timeout (ms) for shadow calls only; the live call keeps `timeoutMs`.
+    // Optional positive integer; falls back to `timeoutMs` when unset.
+    shadowTimeoutMs?: number;
     // v2-only. Absolute path to Caroline's SOUL.md, sent as
     // agent_instructions on every v2 call (live or shadow). Defaults to
     // DEFAULT_AGENT_INSTRUCTIONS_PATH (caroline-agent-instructions-loader.ts,

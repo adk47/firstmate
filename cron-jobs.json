@@ -393,8 +393,8 @@
       "id": "081a0d98-4627-49cd-8c7a-334b927fe2ff",
       "agentId": "operations",
       "name": "credit-verification-batch-4h",
-      "description": "Autonomous drain of the unverified-credits queue via the Lobster pipeline. Fires every 4h and runs the dispatcher DIRECTLY as a deterministic command (500-credit FIFO real apply), self-posting the batch summary to #credit-verification (verify-credit-batch-mvp.lobster sets POST_PARENT_TO_CHANNEL=1); see hydra#305. WAS an isolated agent turn until 2026-09-17: that shape reported every run success from the MODEL finishing, so when the dispatch started failing on 2026-09-11 (openclaw 2026.8.x AGENT_SELECTION_REQUIRED: an unowned \"main\" session key is refused once multiple agents are configured) the cron read ok, consecutiveErrors=0, for six days while ~2.7k declined credits piled up in 'unverified' (firstmate task credit-submissions-stuck-rca-c5). As a command, the dispatcher's exit code IS the run status, and dispatch-cv-batch.sh exits non-zero when the run processed ZERO credits while the queue had work (silent_noop / all_failed / unaccounted), so that failure mode now reports as one.",
-      "enabled": true,
+      "description": "DISABLED 2026-10-11 (firstmate containment; captain: 'we can't let bad credits into the system'): its approve rule approve_owning_track==100 AND total_risk_percent<80 was inverted (100 = the validator's owning-track shortcut did NOT fire), so it approved validator-DECLINED rows. Disabled live on node-8 at 02:26Z; this repo flag keeps deploys from re-arming it. Re-enabling needs the captain's approval recorded in policies/credit-approval-automation.json (CI: scripts/check-credit-approval-automation.sh). Autonomous drain of the unverified-credits queue via the Lobster pipeline. Fires every 4h and runs the dispatcher DIRECTLY as a deterministic command (500-credit FIFO real apply), self-posting the batch summary to #credit-verification (verify-credit-batch-mvp.lobster sets POST_PARENT_TO_CHANNEL=1); see hydra#305. WAS an isolated agent turn until 2026-09-17: that shape reported every run success from the MODEL finishing, so when the dispatch started failing on 2026-09-11 (openclaw 2026.8.x AGENT_SELECTION_REQUIRED: an unowned \"main\" session key is refused once multiple agents are configured) the cron read ok, consecutiveErrors=0, for six days while ~2.7k declined credits piled up in 'unverified' (firstmate task credit-submissions-stuck-rca-c5). As a command, the dispatcher's exit code IS the run status, and dispatch-cv-batch.sh exits non-zero when the run processed ZERO credits while the queue had work (silent_noop / all_failed / unaccounted), so that failure mode now reports as one.",
+      "enabled": false,
       "createdAtMs": 1776358066484,
       "updatedAtMs": 1776358066484,
       "schedule": {
@@ -451,6 +451,158 @@
         "to": "C0APB2CMM7C",
         "accountId": "operations",
         "bestEffort": false
+      }
+    },
+    {
+      "id": "afc7d2bf-766f-4a39-aadc-1088c9a91d35",
+      "agentId": "operations",
+      "name": "credit-approval-auditor-hourly",
+      "description": "APPROVAL AUDITOR (captain 2026-10-11: 'need a monitor that closely watches credit approvals on our side to check if they should have been given ... with AI and internet searches'). Hourly at :45 it re-checks every credit request APPROVED in the last 90 minutes (or since the previous successful run, minus 15 minutes, if that is earlier - at most 24h back; an older gap is alerted as 'N minutes not audited'; approvals are recorded oldest first in chunks, no chunk or model batch starts past an 1800s deadline (a chunk starts only if the longest one so far still fits) so alerts are always printed, and an early stop alerts and resumes from the last finished chunk), by any path (validator, admin queue, any job). Catalog evidence (Spotify/Tidal/MLC/Jaxsta raw credits) runs for every approval. PHASE A (now): catalog-only - every approval is checked against the trusted sources and the identity/velocity/approver signals, no model calls. PHASE B (once the captain tops up OpenRouter, by creating /etc/hydra/credit-review-model.enabled on node-8): the model with web search (Discogs, AllMusic, label/liner notes, trade press; the claimant's own sites and profiles and user-generated platforms such as Instagram/SoundCloud/Bandcamp/Wix/Blogspot never count as evidence) runs for 100% of big tracks (catalog track popularity >= 60, any track artist >= 90, or either unknown) and a stable 10% sample of the rest, capped at $2 per run, skipped entirely while the shared OpenRouter balance is under the floor in the design doc (one 'CREDIT-AUDIT NOTE' per day says so), and $8 per UTC day (measured ~$7/day at full coverage on grok-4.3: ~47 big-track approvals/day + 10% of ~3,100 others, minus the ones the catalog already decides). Verdicts CONFIRMED / SUSPECT / CONTRADICTED / UNVERIFIABLE go to /var/lib/hydra/credit-review/ledger.sqlite3. Stdout (announced to #credit-verification) is one 'CREDIT-AUDIT ALERT:' line per CONTRADICTED big-track credit (also queued for human re-review) and per approver-identity problem (agent-hydra-main / admin_u / unknown approver, or a validator-declined row approved with no recorded approver), else NO_REPLY. READ-ONLY on credits: GETs only, never removes or changes a credit. Kill switch: /etc/hydra/credit-review.disabled. Design: docs/credit-verification/ai-credit-reviewer.md.",
+      "enabled": true,
+      "createdAtMs": 1791688394000,
+      "updatedAtMs": 1791688394000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "45 * * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "audit",
+          "--window-min",
+          "90",
+          "--sample-rate",
+          "0.10",
+          "--budget-usd",
+          "2",
+          "--daily-budget-usd",
+          "8",
+          "--model",
+          "x-ai/grok-4.3"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 2400
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
+      }
+    },
+    {
+      "id": "66bb552a-dfc8-40e5-85d2-3c2b5e4309bc",
+      "agentId": "operations",
+      "name": "credit-approval-audit-digest-daily",
+      "description": "Daily 08:15 UTC digest of the approval auditor: every SUSPECT / CONTRADICTED approval of the last 24h with its reason and link, verdict counts, approver-identity problems and model spend. Read-only (reads the ledger only). NO_REPLY when nothing was audited.",
+      "enabled": true,
+      "createdAtMs": 1791688394000,
+      "updatedAtMs": 1791688394000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "15 8 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "digest",
+          "--hours",
+          "24"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 300
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
+      }
+    },
+    {
+      "id": "87d4835b-1b5c-417f-b3d6-ad9e67bc3978",
+      "agentId": "operations",
+      "name": "credit-approval-audit-metrics-weekly",
+      "description": "Weekly (Mon 08:20 UTC) approval-auditor precision report: verdict counts, model cost per 1k checks, and the lower-bound precision of last week's SUSPECT / CONTRADICTED flags (share that a human has since removed or reverted, re-read via admin GETs), next to the last labelled-set eval result. Read-only.",
+      "enabled": true,
+      "createdAtMs": 1791688394000,
+      "updatedAtMs": 1791688394000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "20 8 * * 1",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "metrics",
+          "--days",
+          "7"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 900
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
+      }
+    },
+    {
+      "id": "8bed6d2b-ba2b-4475-924a-09f35126597e",
+      "agentId": "operations",
+      "name": "credit-review-shadow-4h",
+      "description": "PRE-APPROVAL AI REVIEWER, Phase 0 SHADOW: every 4h at :15 it reviews up to 20 HELD (status=unverified) credit requests plus 5 sampled recent approvals and records APPROVE-RECOMMENDED / NEEDS-HUMAN / REJECT-RECOMMENDED with cited evidence in the ledger ($1 per run cap, at most $6/day). No effect: no Slack output, never writes a credit-request status. Phase 1 (advise: cards to human approvers) and Phase 2 (auto-approve with trusted-source corroboration) are captain decisions; Phase 2 is not implemented. Catalog-only until /etc/hydra/credit-review-model.enabled exists; same OpenRouter balance floor as the auditor.",
+      "enabled": true,
+      "createdAtMs": 1791688394000,
+      "updatedAtMs": 1791688394000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "15 */4 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "review",
+          "--phase",
+          "shadow",
+          "--limit",
+          "20",
+          "--sample-approved",
+          "5",
+          "--budget-usd",
+          "1",
+          "--model",
+          "x-ai/grok-4.3"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 2400
+      },
+      "delivery": {
+        "mode": "none"
       }
     },
     {
@@ -576,6 +728,39 @@
         "mode": "announce",
         "channel": "slack",
         "to": "user:U0AL36NADEY",
+        "bestEffort": true
+      }
+    },
+    {
+      "id": "2be46e9e-b554-43f1-9cc4-e8152f347585",
+      "agentId": "devops",
+      "name": "godmode-actions-weekly-report",
+      "description": "DM Aaron every Monday with the week's god-mode actions (Nick, Jan and anyone else self-authorizing; Aaron's own counted, not itemized), read from every agent's api-logs audit records by scripts/godmode-weekly-report.py (read-only). Fable credit-fraud review item 10 (2026-10-11): workspaces/cto/USER.md no longer says Nick's requests are never reported to Aaron; god-mode actions are logged and reported to Aaron weekly, and this cron is that report.",
+      "enabled": true,
+      "createdAtMs": 1791745159242,
+      "updatedAtMs": 1791745159242,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * 1",
+        "tz": "America/Chicago"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run this exact command via the shell (exec) tool and post its entire stdout to me verbatim, with no edits, no extra commentary, no summarising and no tables: `python3 /opt/hydra/scripts/godmode-weekly-report.py`. The script is read-only and renders the complete Slack-ready weekly report of god-mode actions from the agents' audit logs. Do NOT hand-build the report from the logs yourself and do not drop or soften any line. If the command fails to run, or exits non-zero, post its stdout and stderr as-is, prefixed with one line saying the god-mode weekly report could not be produced.",
+        "model": "openai/gpt-6-sol",
+        "thinking": "low",
+        "timeoutSeconds": 600,
+        "fallbacks": [
+          "openrouter/openai/gpt-6-luna",
+          "openrouter/anthropic/claude-haiku-5.5"
+        ]
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "user:U7RP6HKUZ",
         "bestEffort": true
       }
     },
@@ -1062,6 +1247,40 @@
       },
       "state": {
         "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "9dd605f5-1ded-4245-9ee7-f051c481755b",
+      "agentId": "scout",
+      "name": "hydra-health-watch-twice-daily",
+      "description": "Read-only twice-daily Hydra health check on node-8: gateway units and ports, deploy drift, last Deploy HYDRA run. Posts to Slack so it works when the Mac is down. Does not cover Sentry (MUS-7155, MUS-7136).",
+      "enabled": true,
+      "createdAtMs": 1791800852194,
+      "updatedAtMs": 1791800852194,
+      "schedule": {
+        "kind": "cron",
+        "expr": "5 9,21 * * *",
+        "tz": "Europe/Rome"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Hydra health watch for node-8. Read-only, twice daily. It covers the gateway units, the gateway ports, deploy drift and the last deploy only. It does NOT check Sentry or any Muso app errors, so HEALTHY here is not a prod-wide all-clear.\n\nREAD-ONLY RULE: run only the read commands below. Do not restart any service. Do not run deploy.sh, rollback.sh, or any kubectl command that writes. Do not create or change any file on the host. Never use a path under /dev as the target of any command; /dev/null may only be used as a redirect sink.\n\nRun these checks in order with the shell (exec) tool:\n\n1. Gateway units. Run `systemctl is-active openclaw-gateway-main openclaw-gateway-edge` and `systemctl show -p NRestarts -p ActiveEnterTimestamp openclaw-gateway-main openclaw-gateway-edge`. A unit that is not `active` is a failure. Report the NRestarts value and the ActiveEnterTimestamp for each unit. Do not judge a restart yet: check 4 decides it. Deploy HYDRA restarts both gateways on purpose every day at about 04:00 UTC, so a restart on its own is not a failure.\n\n2. Gateway ports. For each of 18789 and 18810, run `curl -s --max-time 10 -w '%{http_code}' http://127.0.0.1:<port>/ | tail -c 3`. The last three characters are the HTTP code. Any code that is not 2xx is a failure. `000` means no connection, which is also a failure.\n\n3. Deploy drift. Run `cat /opt/hydra/.deployed-sha` and `gh api repos/Muso-AI/hydra/git/ref/heads/main --jq .object.sha`. Report both shas. If they differ, report that main has moved since the last deploy. This is information, not a failure.\n\n4. Last deploy. Run `gh run list -R Muso-AI/hydra --workflow 'Deploy HYDRA' --limit 1 --json conclusion,status,createdAt,updatedAt,url`. A conclusion of `failure` or `cancelled` is a failure. A status of `in_progress` or `queued` is information. Now judge the restarts from check 1. Convert every timestamp to UTC before you compare. If the run's status is `completed`, a gateway whose ActiveEnterTimestamp is before the run's `updatedAt` was restarted by that deploy: information only. A gateway whose ActiveEnterTimestamp is after the run's `updatedAt` restarted after the last deploy finished: a failure. If the run's status is `in_progress` or `queued`, every restart is information.\n\nPost ONE message in this form:\n- All four checks were read and none failed: start with `HEALTHY`, then one line of evidence per check.\n- Any check failed: start with `FAILURES`, then one line per failure with its evidence.\n- Any check could not be read (command error, empty output, unreachable): add `PARTIAL - <check name> not read` for each one. A run with an unread check is never `HEALTHY`, even if every other check passed.\n\nState facts only. Give no advice. Do not restart or fix anything.",
+        "timeoutSeconds": 300,
+        "thinking": "low",
+        "model": "openai/gpt-6-sol",
+        "fallbacks": [
+          "openrouter/openai/gpt-6-luna",
+          "openrouter/anthropic/claude-haiku-5.5"
+        ]
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0ADV2W76G4",
+        "accountId": "devops",
+        "bestEffort": true
       }
     }
   ]

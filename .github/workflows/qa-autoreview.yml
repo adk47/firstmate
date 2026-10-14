@@ -13,6 +13,11 @@ name: qa-autoreview
 # in the skill + qa-pr-approve.sh to CI-green + GO verdict + allowlist, and it
 # NEVER merges — a human merges.
 
+# Coordinates in the run name so scripts/qa-dispatch-pr-review.sh can see an in-flight
+# review for the same (repo, pr, sha) straight from `gh run list` (MUS-7955). Same shape
+# as external-pr-review.yml's run-name. Empty pr (fork PR) never matches: fail open.
+run-name: "qa ${{ github.repository }}#${{ github.event.workflow_run.pull_requests[0].number }} @ ${{ github.event.workflow_run.head_sha }} (autoreview)"
+
 on:
   workflow_run:
     # Must match the validation workflow's `name:` ("PR Validation"), NOT its
@@ -21,6 +26,9 @@ on:
     types: [completed]
 
 permissions:
+  # actions: read lets the dispatcher's `gh run list` in-flight dedup work; without it the
+  # lookup fails and every dispatch takes the DEDUP-SKIPPED fail-open path.
+  actions: read
   contents: read
   pull-requests: read
   # Needed for the qa-review gate status below. NOTE: this covers the fallback

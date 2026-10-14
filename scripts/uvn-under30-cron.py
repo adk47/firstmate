@@ -673,7 +673,7 @@ def render_pending_lines(
         if request_id in fraud_ids:
             why = "excluded: fraud marker"
         elif has_hard_reject_signal(row):
-            why = "excluded: backend reject signal"
+            why = "excluded: backend reject or hold signal"
         elif not isinstance(track_id, str) or not track_id:
             why = "excluded: no Spotify track"
         elif track_id not in live_by_track:

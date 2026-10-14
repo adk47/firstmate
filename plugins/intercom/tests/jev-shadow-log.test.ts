@@ -35,6 +35,20 @@ describe("appendJevShadowRow", () => {
     return JSON.parse(lines[0]);
   }
 
+  it("writes the failure reason token, defaulting to null for old callers", async () => {
+    const { appendJevShadowRow } = await importFresh();
+    const base = {
+      conversationId: "c", state: { a: 1 }, questions: {}, model: "m", answers: null,
+      usage: null, latencyMs: 1, actual: "none", rc: 2 as const, http: null,
+    };
+    await appendJevShadowRow({ ...base, reason: "timeout" });
+    const raw = (await readFile(join(dir, "caroline.jsonl"), "utf8")).trim();
+    expect(JSON.parse(raw).reason).toBe("timeout");
+    await rm(join(dir, "caroline.jsonl"));
+    await appendJevShadowRow(base);
+    expect((await readRow()).reason).toBeNull();
+  });
+
   it("includes the raw state object next to state_sha256 by default", async () => {
     const { appendJevShadowRow } = await importFresh();
     const state = { message: "where's my credit", turnCount: 1 };

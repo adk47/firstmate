@@ -353,7 +353,14 @@ _seed_state() {
 # ─────────────────────────────────────────────────────────────────
 
 @test "nothing shipped: prints NO_REPLY, exits 0, tags nothing" {
-  echo '[]' > "$STUB_RUNS_JSON"
+  # The listing reaches the checkpoint run itself (id 1000) and nothing
+  # newer -- a real "nothing new" tick. It must NOT be an empty array: a
+  # repo with an established checkpoint always has at least that run in its
+  # history, so a genuinely empty listing is the malformed/unmeasured case
+  # covered separately below, not this one.
+  cat > "$STUB_RUNS_JSON" <<JSON
+[ { "databaseId": 1000, "headSha": "$BASE_SHA", "conclusion": "success", "createdAt": "2026-08-27T11:00:00Z", "status": "completed" } ]
+JSON
   mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
   _seed_state "$BASE_SHA" "2026-08-27T11:00:00Z" "v2026.8.26"
 
@@ -363,6 +370,52 @@ _seed_state() {
   [ ! -s "$STUB_RELEASE_CREATE" ]
   run git -C "$ORIGIN" tag -l
   [ -z "$output" ] || [ "$output" = "v2026.8.26" ]
+}
+
+@test "status detector refuses an EMPTY run listing as unmeasured, not as nothing shipped" {
+  # QA probe B (MUS-1343): a repo wired into release-watch deploys, so a
+  # literally empty listing on its production branch is never a fact about
+  # production -- it must not render as the quiet "nothing shipped" tick.
+  echo '[]' > "$STUB_RUNS_JSON"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-27T11:00:00Z" "v2026.8.26"
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"WARN"* ]]
+  [[ "$output" == *"came back EMPTY"* ]]
+  [[ "$output" != *"NO_REPLY"* ]]
+  [ ! -s "$STUB_RELEASE_CREATE" ]
+}
+
+@test "status detector refuses an UNPARSEABLE run listing, it does not read it as nothing shipped" {
+  # QA probe A (MUS-1343): a zero-exit gh response carrying a GitHub error
+  # body must not reach jq and fail open into "no confirmed prod release".
+  export STUB_GH_RAW_STDOUT='{"message":"Bad credentials"}'
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-27T11:00:00Z" "v2026.8.26"
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a JSON array"* ]]
+  [[ "$output" == *"Bad credentials"* ]]
+  [[ "$output" != *"NO_REPLY"* ]]
+  [ ! -s "$STUB_RELEASE_CREATE" ]
+}
+
+@test "status detector catches TRUNCATED JSON with the same shape guard, not a downstream jq crash" {
+  # QA probe C (MUS-1343): a truncated body is still a zero-exit, non-array
+  # response and must be caught by the same guard as probe A, not left to
+  # crash a later jq call with no [release-watch] context.
+  export STUB_GH_RAW_STDOUT='[{"databaseId":123,"headSha":"dead'
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-27T11:00:00Z" "v2026.8.26"
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a JSON array"* ]]
+  [[ "$output" != *"jq: error"* ]]
+  [ ! -s "$STUB_RELEASE_CREATE" ]
 }
 
 @test "new bump: pins the dispatch sha, not whatever main has drifted to" {
@@ -1099,6 +1152,66 @@ JSON
   [ -n "$tag" ]
   [ "$(git -C "$ORIGIN" rev-list -n1 "$tag")" = "$MID_SHA" ]
   grep -q "last_marker=$MID_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/hydra"
+}
+
+@test "hydra detector refuses an UNPARSEABLE run listing, it pages WITH a reason not a bare jq crash" {
+  # QA probe D (MUS-1343): before this guard, detect_hydra's trailing jq
+  # crashed on the bad body, and the ONLY output reaching the log was two
+  # bare `jq:` lines -- an OnFailure page with no repo name and no cause.
+  export STUB_REPO_NAME="Muso-AI/hydra"
+  export STUB_GH_RAW_STDOUT='{"message":"API rate limit exceeded"}'
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  printf 'last_sha=%s\nlast_marker=%s\nlast_version=v2026.8.26\nlast_date=1970-01-01\nlast_run_at=2026-08-27T11:00:00Z\nlast_run_id=1000\n' \
+    "$BASE_SHA" "$BASE_SHA" > "$HYDRA_RELEASE_STATE_DIR/announced/hydra"
+
+  run "$SCRIPT" --repo=hydra --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"[release-watch] WARN:"* ]]
+  [[ "$output" == *"not a JSON array"* ]]
+  [[ "$output" == *"API rate limit exceeded"* ]]
+  [[ "$output" != *"Cannot index string with string"* ]]
+}
+
+@test "hydra detector refuses an EMPTY run listing as unmeasured, not as nothing shipped" {
+  # QA probe E (MUS-1343): hydra deploys itself, so an empty listing on its
+  # own prod branch is never a fact about production -- it must not render
+  # as the quiet "nothing shipped" tick the way it did before this guard.
+  export STUB_REPO_NAME="Muso-AI/hydra"
+  echo '[]' > "$STUB_RUNS_JSON"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  printf 'last_sha=%s\nlast_marker=%s\nlast_version=v2026.8.26\nlast_date=1970-01-01\nlast_run_at=2026-08-27T11:00:00Z\nlast_run_id=1000\n' \
+    "$BASE_SHA" "$BASE_SHA" > "$HYDRA_RELEASE_STATE_DIR/announced/hydra"
+
+  run "$SCRIPT" --repo=hydra --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"WARN"* ]]
+  [[ "$output" == *"came back EMPTY"* ]]
+  [[ "$output" != *"NO_REPLY"* ]]
+}
+
+@test "both detectors agree on disposition for an identical empty listing" {
+  # AC5 (MUS-1343): the status and hydra detectors used to behave
+  # OPPOSITELY on the same bad input -- status swallowed it (NO_REPLY, exit
+  # 0), hydra paged over it with no explanation. Both must now refuse it the
+  # same way: non-zero, warned, never NO_REPLY.
+  echo '[]' > "$STUB_RUNS_JSON"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-27T11:00:00Z" "v2026.8.26"
+  run "$SCRIPT" --repo=auth --no-highlights
+  status_rc="$status"; status_out="$output"
+
+  export STUB_REPO_NAME="Muso-AI/hydra"
+  printf 'last_sha=%s\nlast_marker=%s\nlast_version=v2026.8.26\nlast_date=1970-01-01\nlast_run_at=2026-08-27T11:00:00Z\nlast_run_id=1000\n' \
+    "$BASE_SHA" "$BASE_SHA" > "$HYDRA_RELEASE_STATE_DIR/announced/hydra"
+  run "$SCRIPT" --repo=hydra --no-highlights
+  hydra_rc="$status"; hydra_out="$output"
+
+  [ "$status_rc" -ne 0 ]
+  [ "$hydra_rc" -ne 0 ]
+  [[ "$status_out" != *"NO_REPLY"* ]]
+  [[ "$hydra_out" != *"NO_REPLY"* ]]
+  [[ "$status_out" == *"WARN"* ]]
+  [[ "$hydra_out" == *"WARN"* ]]
 }
 
 @test "every configured repo resolves its detector — no missing functions" {
