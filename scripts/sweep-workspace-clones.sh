@@ -405,8 +405,12 @@ QPATH=""; QDIR=""; QUARANTINE_ERROR=""
 # .git-only writes never move the worktree-freshness rail.
 #
 # Called immediately AFTER the rename on purpose: from that moment the set of
-# holders can only shrink, so one scan is sound. Scanning per candidate before
-# quarantine would be both slower and racy.
+# holders can only shrink, so one scan is sound. That scan MUST be fresh per
+# candidate: the kernel reports a handle under the tree's CURRENT name, so a
+# snapshot taken before this candidate was renamed lists it under its old name
+# and would never match the quarantine path (MUS-10455 QA). The once-per-run
+# snapshot below is therefore only a pre-rename filter (held_by_snapshot), never
+# the authority for "not held".
 #
 # Cannot enumerate → cannot prove absence → hazard. SWEEP_PROC_DIR is
 # dependency injection for tests (same role SWEEP_MOUNTS_FILE plays for the
@@ -452,9 +456,11 @@ proc_link_targets() {
   done
 }
 
-# Run-scoped cache of the enumeration: has_live_handles runs per candidate and
-# the walk is the same constant every time (2,361 candidates x ~208ms was ~8
-# minutes of /proc walking per run).
+# Run-scoped snapshot of the enumeration, taken once. It lets candidates that
+# are visibly held skip the rename and the fresh walk (2,361 candidates x
+# ~208ms was ~8 minutes of /proc walking per run). It is only trusted for
+# "held": a handle taken after the snapshot, or on a tree renamed after it, is
+# not in it.
 PROC_CACHE_READY=0
 PROC_CACHE_USABLE=0
 PROC_CACHE=""
@@ -492,14 +498,28 @@ load_proc_cache() {
   rm -f "$err"
 }
 
-has_live_handles() {  # <path>
-  local p="$1"
-  [ "$PROC_CACHE_READY" -eq 1 ] || load_proc_cache
-  [ "$PROC_CACHE_USABLE" -eq 1 ] || return 0
-  printf '%s\n' "$PROC_CACHE" | HP_P="$p" awk '
+targets_name() {  # <path>  (link targets on stdin)
+  HP_P="$1" awk '
     $0 == ENVIRON["HP_P"] { found = 1 }
     index($0, ENVIRON["HP_P"] "/") == 1 { found = 1 }
     END { exit found ? 0 : 1 }'
+}
+
+# The authority: a FRESH walk, called by safe_delete_quarantine on the
+# quarantined path. Cannot enumerate → cannot prove absence → held.
+has_live_handles() {  # <path>
+  load_proc_cache
+  [ "$PROC_CACHE_USABLE" -eq 1 ] || return 0
+  printf '%s\n' "$PROC_CACHE" | targets_name "$1"
+}
+
+# Cheap pre-rename filter on the run-scoped snapshot: true only when the
+# snapshot already shows a holder under the candidate's current name. An
+# unusable snapshot says nothing here — has_live_handles still fails closed.
+held_by_snapshot() {  # <path>
+  [ "$PROC_CACHE_READY" -eq 1 ] || load_proc_cache
+  [ "$PROC_CACHE_USABLE" -eq 1 ] || return 1
+  printf '%s\n' "$PROC_CACHE" | targets_name "$1"
 }
 
 # Removal primitives live in lib/safe-delete.sh (the one implementation of
@@ -520,6 +540,10 @@ safe_delete_on_restore_blocked() {  # <quarantined>
 
 quarantine_candidate() {  # <path> <id-at-classification>
   QPATH=""; QDIR=""; QUARANTINE_ERROR=""
+  if held_by_snapshot "$1"; then
+    QUARANTINE_ERROR="live process holds the tree open (cwd or open fd)"
+    return 1
+  fi
   if safe_delete_quarantine "$1" "$2"; then
     QPATH="$SD_QPATH"; QDIR="$SD_QDIR"
     return 0

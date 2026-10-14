@@ -42,6 +42,16 @@ if [[ "$*" == *"$SWEEP_PROC_DIR"* ]]; then
     wrongpath) echo /elsewhere/a; echo "find: '/etc/999': No such file or directory" >&2; exit 1 ;;
     empty) exit 0 ;;
     emptygone) echo "find: '$SWEEP_PROC_DIR/999': No such file or directory" >&2; exit 1 ;;
+    # The kernel reports a handle under the tree's CURRENT name, so this stub
+    # lists wherever clones ca/cb/cc live right now (original or quarantined).
+    renamed) "$REAL_FIND" "$TEST_TMPDIR/repos" -maxdepth 3 -name f.txt -exec dirname {} \; | grep -E '/(ca|cb|cc)$'
+           echo "find: '$SWEEP_PROC_DIR/999': No such file or directory" >&2; exit 1 ;;
+    # Holder invisible to the run-scoped snapshot (first walk), present on every
+    # later walk: only a fresh post-rename walk can see it.
+    late)  if [ "$(wc -l < "$FIND_COUNT" | tr -d ' ')" -gt 1 ]; then
+             "$REAL_FIND" "$TEST_TMPDIR/repos" -maxdepth 3 -name f.txt -exec dirname {} \; | grep -E '/(cb)$'
+           else echo /elsewhere/a; fi
+           echo "find: '$SWEEP_PROC_DIR/999': No such file or directory" >&2; exit 1 ;;
     holds) "$REAL_FIND" "$TEST_TMPDIR/repos" -maxdepth 3 -name f.txt -path '*/.sweep-quarantine.*' -print
            echo "find: '$SWEEP_PROC_DIR/999': No such file or directory" >&2; exit 1 ;;
   esac
@@ -117,13 +127,31 @@ mkold() {
   [[ "$output" == *"live process holds the tree open"* ]]
 }
 
-@test "7: the enumeration runs once per sweep, not once per candidate" {
+@test "7: a visibly-held candidate costs no extra walk; each quarantined one gets a fresh walk" {
   mkold c7a; mkold c7b; mkold c7c
   PROC_MODE=gone run "$SWEEP" --apply
   [ ! -d "$TEST_TMPDIR/repos/c7a" ]
   [ ! -d "$TEST_TMPDIR/repos/c7b" ]
   [ ! -d "$TEST_TMPDIR/repos/c7c" ]
-  [ "$(wc -l < "$FIND_COUNT" | tr -d ' ')" -eq 1 ]
+  # one run-scoped snapshot + one post-rename walk per deleted candidate
+  [ "$(wc -l < "$FIND_COUNT" | tr -d ' ')" -eq 4 ]
+}
+
+@test "7b: every held candidate stays when the holder reports CURRENT names (rename-aware)" {
+  mkold ca; mkold cb; mkold cc; mkold cd
+  PROC_MODE=renamed run "$SWEEP" --apply
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMPDIR/repos/ca/f.txt" ]
+  [ -f "$TEST_TMPDIR/repos/cb/f.txt" ]
+  [ -f "$TEST_TMPDIR/repos/cc/f.txt" ]
+  [ ! -d "$TEST_TMPDIR/repos/cd" ]
+}
+
+@test "7c: a holder the snapshot never saw is still caught by the post-rename walk" {
+  mkold ca; mkold cb
+  PROC_MODE=late run "$SWEEP" --apply
+  [ -f "$TEST_TMPDIR/repos/cb/f.txt" ]
+  [ ! -d "$TEST_TMPDIR/repos/ca" ]
 }
 
 @test "8: held summary reports bytes per class, and '?' when sizing fails" {
