@@ -5,8 +5,13 @@
 # One unit owns the ordering and the brakes; the focused scripts own the
 # policies. This script contains no /tmp pattern logic of its own: R1 is
 # scripts/tmp-reaper.sh, whose allow-list, TTLs and open-handle guard are its
-# own. (Predecessor: weekly-cleanup.sh, whose mtime-only /tmp sweep was
-# replaced by the reaper; see docs/designs/2026-10-09-clean-my-linux.md.)
+# own. /tmp is covered in two layers, neither of them here:
+#   * allow-listed scratch, within hours, open-handle guarded: tmp-reaper.sh (R1)
+#   * everything else, generic, mtime-keyed, 24h, recursive: the tmpfiles catch-all
+#     scripts/aux-units/tmp.conf ("D /tmp 1777 root root mM:24h"), installed by
+#     install-aux-units.sh. It replaces the old weekly 14d depth-1 sweep and is
+#     stricter (daily, 24h, recursive); /etc/tmpfiles.d/tmp.conf is never touched here.
+# (Predecessor: weekly-cleanup.sh; see docs/designs/2026-10-09-clean-my-linux.md.)
 #
 # Rule table, run in this order (cheapest-safe first):
 #   R1 tmp-reaper       scripts/tmp-reaper.sh           /tmp scratch allow-list

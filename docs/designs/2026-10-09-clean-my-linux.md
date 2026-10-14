@@ -16,6 +16,15 @@ script header is the authoritative reference; this page is the summary.
 | R4 | `.bak` / `.orig` > 30d | in-script | tight patterns (`*.bak`, `*.bak.*`, `*.bak-*`, `*.orig`), never `*.bak*` |
 | R5 | `apt autoremove --purge` + `autoclean` | in-script | at most once per 24h; watermark `/var/lib/hydra/clean-my-linux/apt.last` (not `/opt/hydra`: the deploy rsync overwrites it) |
 
+**Where the generic `/tmp` sweep went.** `/tmp` has two layers and neither is in
+this script: allow-listed scratch within hours, open-handle guarded, is R1
+(`tmp-reaper.sh`); everything else is the tmpfiles catch-all
+`scripts/aux-units/tmp.conf` (`D /tmp 1777 root root mM:24h`: generic, mtime-keyed,
+24h, recursive, daily timer), installed by `install-aux-units.sh`, which refuses a
+source without the `mM:` prefix. It replaces the old weekly 14d depth-1 sweep and
+reaps everything that sweep could. Regression test:
+`tests/test_install_aux_units_tmpfiles.sh` (run in PR Validation).
+
 ## What only the orchestrator owns
 
 - **Apply gate.** `--apply` is explicit; the default is a dry-run. The mode is
