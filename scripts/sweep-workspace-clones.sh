@@ -253,9 +253,12 @@ entry_kb() {
 # GNU rm has --one-file-system (prod / CI); BSD rm (dev laptops) does not.
 # The has_mount_under skip is the primary rail either way — this is backstop.
 RM_ONEFS=()
-if rm --one-file-system -rf "$(mktemp -d)" 2>/dev/null; then
+# mktemp-ok: removed unconditionally below, even when BSD rm rejects the flag
+probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/sweep-workspace-clones.XXXXXX")"
+if rm --one-file-system -rf "$probe_dir" 2>/dev/null; then
   RM_ONEFS=(--one-file-system)
 fi
+rm -rf "$probe_dir"
 
 is_kept() {
   local name="$1" k
@@ -500,7 +503,8 @@ PROC_DIR="${SWEEP_PROC_DIR:-/proc}"
 # mid-scan — measured on node-8), so "nonzero => fall back" meant the fallback
 # was the normal path in production, not the dev-laptop exception.
 FIND_GNU=0
-_probe_dir="$(mktemp -d)"
+# mktemp-ok: rmdir'd four lines below, nothing writes into it
+_probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/sweep-workspace-clones.XXXXXX")"
 if find "$_probe_dir" -maxdepth 0 -ignore_readdir_race -printf '' >/dev/null 2>&1; then
   FIND_GNU=1
 fi
@@ -554,6 +558,7 @@ has_live_handles() {  # <path>
 quarantine_candidate() {  # <path> <id-at-classification>
   local p="$1" id="$2" qdir q err
   QPATH=""; QDIR=""; QUARANTINE_ERROR=""
+  # mktemp-ok: quarantine dir persists by design: the rest of the sweep deletes it, or holds it on failure
   qdir="$(mktemp -d "$(dirname -- "$p")/${QUARANTINE_PREFIX}XXXXXX" 2>/dev/null)" || {
     QUARANTINE_ERROR="could not create a private sibling directory"
     return 1

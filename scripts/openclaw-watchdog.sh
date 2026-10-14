@@ -572,6 +572,30 @@ _within_uptime_floor() {
   return 1
 }
 
+# ── /dev/null char-device guard (MUS-6775) ──────────────────────────────────
+# On 2026-10-09 /dev/null became a regular root-owned file (a `rm -rf /dev/null`
+# over SSH); non-root `> /dev/null` then failed and PR Validation went red for
+# hours as unrelated bats failures. PAGES ONLY: recreating a device node is a
+# node-8 write that needs Nick (MUS-6760), and the file's content is the only
+# record of what wrote to it. DEVNULL_PATH is a test seam.
+DEVNULL_PATH="${DEVNULL_PATH:-/dev/null}"
+# The cooldown stamp is written as root, so it lives in the root-owned 0700
+# HEAP_STATE_DIR (same gate and mktemp+mv pattern as _stamp_cooldown), never under
+# the world-writable /tmp default of WATCHDOG_STATE_DIR.
+DEVNULL_STAMP="$HEAP_STATE_DIR/openclaw-watchdog-devnull-cooldown"
+# An unsafe state dir (symlink/not ours) has no trustworthy stamp: never read one
+# through it, or a planted recent stamp mutes the page. Page every tick instead.
+if ! [ -c "$DEVNULL_PATH" ] && { ! _heap_state_ok || _codex_cooldown_ok "$DEVNULL_STAMP" "$CODEX_COOLDOWN_MIN"; }; then
+  DEVNULL_LS=$(ls -ld "$DEVNULL_PATH" 2>&1 || true)
+  log "DEVNULL NOT A CHAR DEVICE: ${DEVNULL_LS}"
+  slack_notify_critical ":rotating_light: *node-8 ${DEVNULL_PATH} is not a char device* — every non-root \`> /dev/null\` fails and CI shows unrelated bats failures. The watchdog does NOT repair it (the file content is evidence). Restore is MUS-6760 and needs Nick.\n\`\`\`${DEVNULL_LS}\`\`\`"
+  if _heap_state_ok && DEVNULL_TMP=$(mktemp "$HEAP_STATE_DIR/devnull.XXXXXX" 2>/dev/null); then
+    date +%s > "$DEVNULL_TMP" && mv -f "$DEVNULL_TMP" "$DEVNULL_STAMP" || rm -f "$DEVNULL_TMP"
+  else
+    log "devnull cooldown dir $HEAP_STATE_DIR unsafe (symlink/not ours) — NOT stamping cooldown"
+  fi
+fi
+
 # MUS-1298: gate the STUCK restart on a real liveness probe. 3 attempts, 10s
 # apart. Any HTTP response (1xx-5xx) means the gateway is answering — the run
 # failures are application-level and a restart won't fix them. Restart only

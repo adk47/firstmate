@@ -1470,7 +1470,7 @@ EOF
 # ──────────────────────────────────────────────────────────────
 _self_test() {
   local td out
-  td="$(mktemp -d)"
+  td="$(mktemp -d "${TMPDIR:-/tmp}/prod-log-alert-watchdog.XXXXXX")"
   trap 'rm -rf "$td"' RETURN
   mkdir -p "$td/collect"
   printf '%s\n' \
@@ -1695,7 +1695,7 @@ export FASTPATH_PATTERN
 exec 9>"$LOCKFILE"
 flock -n 9 || { log "SKIP: another prod-log-alert-watchdog run holds $LOCKFILE"; exit 0; }
 
-COLLECT_DIR="$(mktemp -d)"
+COLLECT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/prod-log-alert-watchdog.XXXXXX")"
 PAYLOAD_FILE="$(mktemp)"
 MARKS_FILE="$(mktemp)"
 CANDIDATES_FILE="$(mktemp)"
