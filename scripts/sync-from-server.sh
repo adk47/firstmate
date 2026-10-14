@@ -65,7 +65,7 @@ SSH_OPTS_STR="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes 
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/sync-from-server.sh <target> [--apply [--allow-dirty]] [--only <path> ...]
+Usage: scripts/sync-from-server.sh <target> [--apply [--allow-dirty]] [--from-local] [--only <path> ...]
 
 Targets:
   skills        Pull git-tracked files under skills-all/ from node-8
@@ -78,6 +78,8 @@ Flags:
                 A bulk --apply (no --only) refuses a dirty git tree.
   --allow-dirty Let a bulk --apply run on a dirty tree (it can overwrite many
                 files at once; --only --apply never needs this).
+  --from-local  Read $DEPLOY_PATH as a LOCAL directory: no ssh, no -e. For a
+                process already running on node-8 (the sync-back runner).
   --only <path> Pull ONLY this repo-relative path instead of the whole target
                 subdir. Repeatable. Use this to capture a single drifted file
                 (e.g. one a drift gate flagged SERVER-AHEAD) WITHOUT clobbering
@@ -111,11 +113,13 @@ USAGE
 TARGET=""
 APPLY=false
 ALLOW_DIRTY=false
+FROM_LOCAL=false
 ONLY=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --apply) APPLY=true ;;
     --allow-dirty) ALLOW_DIRTY=true ;;
+    --from-local) FROM_LOCAL=true ;;
     --only)
       shift
       [[ $# -gt 0 ]] || { echo "--only requires a <path> argument" >&2; usage; }
@@ -138,6 +142,12 @@ done
 
 DRY_FLAG="-n"
 $APPLY && DRY_FLAG=""
+
+# Transport: remote = rsync over ssh to node-8; --from-local = $DEPLOY_PATH is a
+# local directory (we ARE node-8), so no ssh key and no -e at all.
+RSYNC_E=(-e "ssh -i $SSH_KEY $SSH_OPTS_STR")
+SRC_HOST="$NODE8_USER@$NODE8_IP:"
+if $FROM_LOCAL; then RSYNC_E=(); SRC_HOST=""; fi
 
 # ─── NEVER_PULL: tracked paths that must never be overwritten from node-8 ──
 # Matched as a path COMPONENT anywhere in the repo-relative path (deploy.sh's
@@ -262,8 +272,8 @@ pull_tracked() {
   # noise doesn't pollute the diff.
   # shellcheck disable=SC2086  # DRY_FLAG is empty or -n
   rsync -az $DRY_FLAG --checksum --itemize-changes --from0 --files-from="$LIST" \
-       -e "ssh -i $SSH_KEY $SSH_OPTS_STR" \
-       "$NODE8_USER@$NODE8_IP:$DEPLOY_PATH/" \
+       ${RSYNC_E[@]+"${RSYNC_E[@]}"} \
+       "$SRC_HOST$DEPLOY_PATH/" \
        "$HYDRA_ROOT/" 2>"$ERR" | tee "$TMP" || rc=${PIPESTATUS[0]}
   if (( rc == 23 )); then
     local missing_re='^rsync: (\[sender\] )?link_stat ".*" failed: No such file or directory \(2\)$'
@@ -293,8 +303,8 @@ pull() {
   # No --delete: we never remove repo files based on server state.
   # --checksum so mtime noise doesn't pollute the diff.
   if rsync -az $DRY_FLAG --checksum --itemize-changes \
-       -e "ssh -i $SSH_KEY $SSH_OPTS_STR" \
-       "$NODE8_USER@$NODE8_IP:$DEPLOY_PATH/$subdir/" \
+       ${RSYNC_E[@]+"${RSYNC_E[@]}"} \
+       "$SRC_HOST$DEPLOY_PATH/$subdir/" \
        "$HYDRA_ROOT/$subdir/" \
        | tee "$TMP" ; then
     # Count how many files would actually transfer.
@@ -376,8 +386,8 @@ pull_files() {
   for p in "${ONLY[@]}"; do
     log "Pulling $p  ($mode)"
     if ! rsync -az $DRY_FLAG -R --checksum --itemize-changes \
-         -e "ssh -i $SSH_KEY $SSH_OPTS_STR" \
-         "$NODE8_USER@$NODE8_IP:$DEPLOY_PATH/./$p" \
+         ${RSYNC_E[@]+"${RSYNC_E[@]}"} \
+         "$SRC_HOST$DEPLOY_PATH/./$p" \
          "$HYDRA_ROOT/" \
          | tee -a "$TMP" ; then
       red "  rsync failed for $p"

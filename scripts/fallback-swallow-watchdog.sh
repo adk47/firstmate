@@ -204,7 +204,7 @@ PYEOF
 # ──────────────────────────────────────────────────────────────
 _self_test() {
   local td out bullets
-  td="$(mktemp -d)"
+  td="$(mktemp -d "${TMPDIR:-/tmp}/fallback-swallow-watchdog.XXXXXX")"
   trap 'rm -rf "$td"' RETURN
   # Pre-seeded state (so runIds are "new", not seed-suppressed). One empty turn
   # (payloads=0 → must FIRE) and one non-empty incomplete turn (payloads=3 →

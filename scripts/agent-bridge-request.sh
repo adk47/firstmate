@@ -212,7 +212,7 @@ command -v jq >/dev/null 2>&1 || die "jq is required"
 # what it likes to the original afterwards; it is no longer part of this transaction.
 # The copy lives in a 0700 dir because it holds the request's own contents.
 SNAP_ORIG_LABEL="$FILE"
-SNAP_DIR="$(mktemp -d)"
+SNAP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agent-bridge-request.XXXXXX")"
 chmod 700 "$SNAP_DIR"
 SNAP="$SNAP_DIR/request.json"
 trap 'rm -rf "$SNAP_DIR"' EXIT

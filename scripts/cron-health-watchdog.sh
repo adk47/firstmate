@@ -559,7 +559,7 @@ PYEOF
 # ──────────────────────────────────────────────────────────────
 _self_test() {
   local td out
-  td="$(mktemp -d)"
+  td="$(mktemp -d "${TMPDIR:-/tmp}/cron-health-watchdog.XXXXXX")"
   trap 'rm -rf "$td"' RETURN
   mkdir -p "$td/runs"
   # Eight jobs, all pre-seeded watermark at ts=100 (transient cases documented

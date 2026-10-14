@@ -162,6 +162,7 @@ assert_passthrough "uvn passthrough (approve gate)" enforce_credit_approve_gate
 # before the dry-run short-circuit, so the refusal is what we observe.
 assert_cli_gated() {
     local label="$1" method="$2" path="$3" body="$4" marker="$5" sandbox out grc
+    # mktemp-ok: rm -rf "$sandbox" right after the CLI call; no early exit in between
     sandbox="$(mktemp -d "${TMPDIR:-/tmp}/credit-gate-cli.XXXXXX")" || {
         echo "INVALID: $label — could not create CLI sandbox dir"
         rc=2; return
