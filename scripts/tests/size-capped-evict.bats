@@ -16,11 +16,16 @@ mk() {
 
 setup() {
   # physical path: the script refuses any root that is not its own canonical spelling
-  export SIZE_CAP_ROOT="$(cd -P "$BATS_TEST_TMPDIR" && pwd)/jest_0"
+  # The rule only accepts a jest_* dir directly under /tmp, so the fixture lives there.
+  export SIZE_CAP_ROOT="$(cd -P /tmp && pwd)/jest_bats_$$_${BATS_TEST_NUMBER}"
   mkdir -p "$SIZE_CAP_ROOT"
   : > "$BATS_TEST_TMPDIR/mounts"
   export SAFE_DELETE_MOUNTS_FILE="$BATS_TEST_TMPDIR/mounts"
   export SIZE_CAP_APPLY=1
+}
+
+teardown() {
+  rm -rf "$SIZE_CAP_ROOT"
 }
 
 @test "evicts oldest children first until under the cap" {
@@ -128,23 +133,24 @@ SH
   touch -t 200001010000 "$BATS_TEST_TMPDIR/sibling"
   SIZE_CAP_ROOT="$SIZE_CAP_ROOT/.." SIZE_CAP_KIB=0 run "$RULE"
   [ "$status" -eq 2 ]
-  SIZE_CAP_ROOT="$SIZE_CAP_ROOT/../jest_0" SIZE_CAP_KIB=0 run "$RULE"
+  SIZE_CAP_ROOT="$SIZE_CAP_ROOT/../${SIZE_CAP_ROOT##*/}" SIZE_CAP_KIB=0 run "$RULE"
   [ "$status" -eq 2 ]
   [ -d "$BATS_TEST_TMPDIR/sibling" ]
   [ -d "$SIZE_CAP_ROOT/old" ]
 }
 
 @test "a root whose name is not jest_* is refused" {
-  canon_tmp="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"  # canonical, so only the jest_* check can refuse
-  mkdir -p "$canon_tmp/other"
-  SIZE_CAP_ROOT="$canon_tmp/other" SIZE_CAP_KIB=0 run "$RULE"
+  canon_tmp="$(cd -P /tmp && pwd)"  # canonical and under /tmp, so only the jest_* check can refuse
+  mkdir -p "$canon_tmp/other_bats_$$"
+  SIZE_CAP_ROOT="$canon_tmp/other_bats_$$" SIZE_CAP_KIB=0 run "$RULE"
+  rmdir "$canon_tmp/other_bats_$$"
   [ "$status" -eq 2 ]
 }
 
 @test "a root reached through a symlinked parent is refused" {
   mk old 30 100
-  ln -s "$BATS_TEST_TMPDIR" "$BATS_TEST_TMPDIR/viaparent"
-  SIZE_CAP_ROOT="$BATS_TEST_TMPDIR/viaparent/jest_0" SIZE_CAP_KIB=0 run "$RULE"
+  ln -s /tmp "$BATS_TEST_TMPDIR/viaparent"
+  SIZE_CAP_ROOT="$BATS_TEST_TMPDIR/viaparent/${SIZE_CAP_ROOT##*/}" SIZE_CAP_KIB=0 run "$RULE"
   [ "$status" -eq 2 ]
   [ -d "$SIZE_CAP_ROOT/old" ]
 }
@@ -177,4 +183,26 @@ SH
   printf '#!/bin/bash\n/usr/bin/du "$@"\nexit 1\n' > "$BATS_TEST_TMPDIR/shim/du"; chmod +x "$BATS_TEST_TMPDIR/shim/du"
   PATH="$BATS_TEST_TMPDIR/shim:$PATH" SIZE_CAP_APPLY=1 SIZE_CAP_KIB=0 SIZE_CAP_MIN_AGE_MIN=0 run "$RULE"
   [ ! -d "$SIZE_CAP_ROOT/old" ]
+}
+
+@test "a canonical jest_* dir outside /tmp is refused (boundary is the tmp cache, not any jest_* name)" {
+  outside="$(cd -P "$BATS_TEST_TMPDIR" && pwd)/jest_0"
+  mkdir -p "$outside/old"; touch -t 200001010000 "$outside/old"
+  SIZE_CAP_ROOT="$outside" SIZE_CAP_KIB=0 SIZE_CAP_MIN_AGE_MIN=0 run "$RULE"
+  [ "$status" -eq 2 ]
+  [ -d "$outside/old" ]
+}
+
+@test "an oversized SIZE_CAP_MIN_AGE_MIN is refused, old child survives" {
+  mk old 30 100
+  SIZE_CAP_MIN_AGE_MIN=999999999999999999999999999999 SIZE_CAP_KIB=0 run "$RULE"
+  [ "$status" -eq 2 ]
+  [ -d "$SIZE_CAP_ROOT/old" ]
+}
+
+@test "an oversized SIZE_CAP_KIB is refused, nothing evicted" {
+  mk old 30 100
+  SIZE_CAP_KIB=999999999999999999999999999999 SIZE_CAP_MIN_AGE_MIN=0 run "$RULE"
+  [ "$status" -eq 2 ]
+  [ -d "$SIZE_CAP_ROOT/old" ]
 }

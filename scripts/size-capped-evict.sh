@@ -21,7 +21,7 @@
 #   SIZE_CAP_MIN_AGE_MIN  children newer than this are never evicted, default 60
 #   SIZE_CAP_APPLY        1 = delete, anything else = dry-run
 # Exit: 0 ok, 1 an eviction failed or the container size could not be measured,
-#       2 refused container (not canonical / not jest_*) or bad numeric knob.
+#       2 refused container (not canonical / not jest_* / not directly under /tmp) or bad/oversized numeric knob.
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -32,8 +32,12 @@ APPLY="${SIZE_CAP_APPLY:-0}"
 
 # A non-numeric knob would make the -le/-lt tests error (rc 2), which `A && break` reads as
 # "false": the cap and the age floor would silently stop protecting anything. Refuse instead.
+# More than 15 digits overflows the same tests (rc 2), so bound the length too.
 for v in CAP_KIB MIN_AGE_MIN; do
   case "${!v}" in ""|*[!0-9]*) echo "size-capped: $v must be a non-negative integer, got '${!v}'" >&2; exit 2 ;; esac
+  if [ "$(printf %s "${!v}" | wc -c)" -gt 15 ]; then
+    echo "size-capped: $v out of range (max 15 digits)" >&2; exit 2
+  fi
 done
 
 # shellcheck source=lib/safe-delete.sh
@@ -50,6 +54,8 @@ if [ ! -d "$ROOT" ]; then echo "size-capped: no container at $ROOT, nothing to d
 canon="$(cd -P -- "$ROOT" && pwd)"
 case "$canon" in "$ROOT") ;; *) echo "size-capped: refusing non-canonical container '$ROOT' (physical path '$canon')" >&2; exit 2 ;; esac
 case "${ROOT##*/}" in jest_*) ;; *) echo "size-capped: refusing container '$ROOT': name is not jest_*" >&2; exit 2 ;; esac
+# The intended boundary: a jest cache dir directly under tmp (/private/tmp is macOS's spelling).
+case "${ROOT%/*}" in /tmp|/private/tmp) ;; *) echo "size-capped: refusing container '$ROOT': not directly under /tmp" >&2; exit 2 ;; esac
 
 dry=1; [ "$APPLY" = 1 ] && dry=0
 mtime() { stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1"; }
