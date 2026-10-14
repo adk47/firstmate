@@ -1,12 +1,19 @@
 #!/usr/bin/env bats
-# Tests for scripts/clean-my-linux.sh — the weekly node-8 junk sweeper
-# (stale /tmp entries by MTIME, hot-patch *.bak*/*.orig, apt autoremove).
+# Tests for scripts/clean-my-linux.sh: the node-8 disk cleaner's orchestrator
+# (rule order, df early-stop, per-run caps, apply gate, one Slack report).
 #
-# PATH-shadows muso + ssh + apt-get so a real Slack send / remote call /
+# The /tmp, clone and codex rules are DELEGATES (tmp-reaper.sh,
+# sweep-workspace-clones.sh, codex-home-prune.sh): each keeps its own policy
+# and its own suite, and every one is stubbed here. The /tmp pattern tests of
+# the predecessor weekly-cleanup.bats (age TTLs, excludes, the old
+# "active-content rail") exercised logic that no longer lives in this script;
+# the reaper's open-handle guard (tmp-reaper.bats) is its replacement.
+#
+# PATH-shadows muso + ssh + apt-get + df so a real Slack send / remote call /
 # package mutation during a test fails loudly instead of touching the
 # production box (this suite runs on node-8's self-hosted CI runner).
 # Every filesystem path the script touches is overridden into a mktemp
-# sandbox — the suite must never point at the real /tmp or /opt/hydra.
+# sandbox, and the suite must never point at the real /tmp or /opt/hydra.
 bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
@@ -15,11 +22,9 @@ WC="$HYDRA_REPO/scripts/clean-my-linux.sh"
 setup() {
   TEST_TMPDIR="$(mktemp -d)"
   export TEST_TMPDIR
-  mkdir -p "$TEST_TMPDIR/bin" "$TEST_TMPDIR/tmproot" \
+  mkdir -p "$TEST_TMPDIR/bin" "$TEST_TMPDIR/tmproot" "$TEST_TMPDIR/delegates" \
     "$TEST_TMPDIR/bakroot-a" "$TEST_TMPDIR/bakroot-b"
 
-  # Refuse real network / package ops: stub ssh, muso, apt-get; never read
-  # the real main.env.
   unset MUSO_SLACK_BOT_TOKEN_DEVOPS
   export MUSO_SLACK_ENV_FILE="$TEST_TMPDIR/muso-slack.env"  # absent → no token
   export STUB_CALLS="$TEST_TMPDIR/muso-calls"
@@ -28,7 +33,6 @@ setup() {
 #!/bin/bash
 echo "test stub: ssh refused ($*)" >&2; exit 99
 STUB
-  # muso stub: record argv, capture --text / --blocks-file for inspection.
   cat > "$TEST_TMPDIR/bin/muso" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_CALLS"
@@ -40,203 +44,276 @@ for a in "$@"; do
 done
 echo '{"channel":"C0TEST","ts":"1717171717.000100"}'
 STUB
-  # apt-get stub: record the invocation, mutate nothing.
   cat > "$TEST_TMPDIR/bin/apt-get" <<'STUB'
 #!/bin/bash
 echo "$*" >> "$TEST_TMPDIR/apt-calls.log"
 exit 0
 STUB
-  # flock shim: macOS has no flock(1); use the real one when present (Linux CI).
+  # df stub: used% comes from $TEST_TMPDIR/df-pct (default 99 = every rule runs).
+  cat > "$TEST_TMPDIR/bin/df" <<'STUB'
+#!/bin/bash
+pct="$(cat "$TEST_TMPDIR/df-pct" 2>/dev/null || echo 99)"
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/test 1000 $pct $((100 - pct)) ${pct}% /"
+STUB
   cat > "$TEST_TMPDIR/bin/flock" <<'STUB'
 #!/bin/bash
 [ -x /usr/bin/flock ] && exec /usr/bin/flock "$@"
 exit 0
 STUB
-  chmod +x "$TEST_TMPDIR/bin/ssh" "$TEST_TMPDIR/bin/muso" \
-    "$TEST_TMPDIR/bin/apt-get" "$TEST_TMPDIR/bin/flock"
+  chmod +x "$TEST_TMPDIR/bin/"*
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
+  echo 99 > "$TEST_TMPDIR/df-pct"
+
+  # Delegate stubs: log "<name> <argv>", print $STUB_<NAME>_OUT, exit $STUB_<NAME>_RC.
+  export DELEG_LOG="$TEST_TMPDIR/delegate-calls.log"; : > "$DELEG_LOG"
+  local n
+  for n in REAPER SWEEP CODEX; do
+    cat > "$TEST_TMPDIR/delegates/$n" <<STUB
+#!/bin/bash
+echo "$n \$*" >> "\$DELEG_LOG"
+[ -n "\${STUB_${n}_OUT:-}" ] && echo "\$STUB_${n}_OUT"
+[ -n "\${STUB_${n}_HOOK:-}" ] && eval "\$STUB_${n}_HOOK"
+exit "\${STUB_${n}_RC:-0}"
+STUB
+    chmod +x "$TEST_TMPDIR/delegates/$n"
+  done
+  export CLEAN_MY_LINUX_TMP_REAPER="$TEST_TMPDIR/delegates/REAPER"
+  export CLEAN_MY_LINUX_SWEEP_SCRIPT="$TEST_TMPDIR/delegates/SWEEP"
+  export CLEAN_MY_LINUX_CODEX_PRUNE="$TEST_TMPDIR/delegates/CODEX"
 
   export CLEAN_MY_LINUX_TMP_ROOT="$TEST_TMPDIR/tmproot"
-  export CLEAN_MY_LINUX_TMP_AGE_DAYS=14
   export CLEAN_MY_LINUX_BAK_ROOTS="$TEST_TMPDIR/bakroot-a $TEST_TMPDIR/bakroot-b"
   export CLEAN_MY_LINUX_BAK_AGE_DAYS=30
   export CLEAN_MY_LINUX_LOCKFILE="$TEST_TMPDIR/wc.lock"
+  export CLEAN_MY_LINUX_STATE_DIR="$TEST_TMPDIR/state"
   export CLEAN_MY_LINUX_SKIP_HOST_GUARD=1
-  # CRITICAL: the CI runner IS node-8 — without this, a test run would
-  # invoke the clone sweeper against the real workspace roots.
+  # CRITICAL: the CI runner IS node-8. Delegates are stubbed above; this also
+  # opts out of R2 by default so an unstubbed run can never sweep real roots.
   export CLEAN_MY_LINUX_SKIP_SWEEP=1
-  # MUSO_SLACK_ENV_FILE is absent by default → no token → slack-notify
-  # silently skips the send (no muso call).
 }
 
-# /bin/rm + hash -r: the rm-failure test installs an rm stub in PATH; once
-# the sandbox is deleted bash's hashed lookup would point at the dead stub.
+# /bin/rm + hash -r: the rm-failure test installs an rm stub in PATH.
 teardown() { /bin/rm -rf "$TEST_TMPDIR"; hash -r; }
 
-# Helper: set mtime N days into the past (-h: follow nothing, works on links).
 old() { touch -h -d "$1 days ago" -- "$2"; }
 
-# Helper: give slack-notify a token so it calls the (stubbed) muso.
 slack_fixture() {
   echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
 }
 
 # ──────────────────────────────────────────────────────────────
-# /tmp category: age predicate, excludes, rails
+# Apply gate (default dry-run) + mode propagation
 # ──────────────────────────────────────────────────────────────
 
-@test "old depth-1 file → deleted, counted, bytes freed > 0" {
-  head -c 5000 /dev/zero > "$CLEAN_MY_LINUX_TMP_ROOT/stale.json"
-  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/stale.json"
+@test "default (no flags) deletes NOTHING and runs every delegate in --dry-run" {
+  export CLEAN_MY_LINUX_SKIP_SWEEP=0
+  echo x > "$TEST_TMPDIR/bakroot-a/dead.bak"; old 40 "$TEST_TMPDIR/bakroot-a/dead.bak"
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ ! -e "$CLEAN_MY_LINUX_TMP_ROOT/stale.json" ]
-  [[ "$output" == *"tmp: deleted=1"* ]]
-  [[ "$output" =~ TOTAL\ freed_kb=([0-9]+) ]]
-  [ "${BASH_REMATCH[1]}" -gt 0 ]
+  [ -e "$TEST_TMPDIR/bakroot-a/dead.bak" ]
+  [ ! -f "$TEST_TMPDIR/apt-calls.log" ]
+  [[ "$output" == *"mode=dry-run"* ]]
+  grep -qx 'REAPER --dry-run' "$DELEG_LOG"
+  grep -qx 'SWEEP --dry-run' "$DELEG_LOG"
+  grep -qx 'CODEX --dry-run' "$DELEG_LOG"
+  ! grep -q -- '--apply' "$DELEG_LOG"
 }
 
-@test "qa-pr-* dirs use the 2d TTL; other entries stay at 14d (MUS-5583)" {
-  local r="$CLEAN_MY_LINUX_TMP_ROOT" n
-  for n in qa-pr-10179-abc other-dir qa-pr-fresh; do
-    mkdir -p "$r/$n"; echo x > "$r/$n/f"
-  done
-  for n in qa-pr-10179-abc other-dir; do old 5 "$r/$n/f"; old 5 "$r/$n"; done
-  old 1 "$r/qa-pr-fresh/f"; old 1 "$r/qa-pr-fresh"
+@test "--apply propagates --apply to every delegate and really deletes" {
+  export CLEAN_MY_LINUX_SKIP_SWEEP=0
+  echo x > "$TEST_TMPDIR/bakroot-a/dead.bak"; old 40 "$TEST_TMPDIR/bakroot-a/dead.bak"
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ ! -e "$TEST_TMPDIR/bakroot-a/dead.bak" ]
+  grep -qx 'REAPER --apply' "$DELEG_LOG"
+  grep -qx 'SWEEP --apply' "$DELEG_LOG"
+  grep -qx 'CODEX --apply' "$DELEG_LOG"
+  ! grep -q -- '--dry-run' "$DELEG_LOG"
+  [ -f "$TEST_TMPDIR/apt-calls.log" ]
+}
+
+@test "rules run in the documented order" {
+  export CLEAN_MY_LINUX_SKIP_SWEEP=0
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1 "$DELEG_LOG" | paste -sd, -)" = "REAPER,SWEEP,CODEX" ]
+}
+
+@test "dry-run still posts its Slack report (that is how the first prod run is read)" {
+  slack_fixture
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ ! -e "$r/qa-pr-10179-abc" ]
-  [ -e "$r/other-dir" ]
-  [ -e "$r/qa-pr-fresh" ]
+  [ -f "$TEST_TMPDIR/last-text" ]
+  grep -q 'DRY-RUN' "$TEST_TMPDIR/last-text"
 }
 
-@test "qa-pr-* with a fresh file inside is still kept (active rail uses the 2d cutoff)" {
-  local r="$CLEAN_MY_LINUX_TMP_ROOT"
-  mkdir -p "$r/qa-pr-busy"; echo x > "$r/qa-pr-busy/f"
-  old 5 "$r/qa-pr-busy"
-  run bash "$WC"
-  [ "$status" -eq 0 ]
-  [ -e "$r/qa-pr-busy" ]
-}
-
-@test "qa-pr-* TTL is exactly 2d, not 3d (find -mtime rounds down; bot finding 1)" {
-  local r="$CLEAN_MY_LINUX_TMP_ROOT"
-  mkdir -p "$r/qa-pr-2d5h"; echo x > "$r/qa-pr-2d5h/f"
-  touch -h -d "53 hours ago" "$r/qa-pr-2d5h/f" "$r/qa-pr-2d5h"
-  run bash "$WC"
-  [ "$status" -eq 0 ]
-  [ ! -e "$r/qa-pr-2d5h" ]
-}
-
-@test "non-numeric CLEAN_MY_LINUX_QA_PR_AGE_DAYS fails loud, deletes nothing (bot finding 2)" {
-  local r="$CLEAN_MY_LINUX_TMP_ROOT"
-  mkdir -p "$r/qa-pr-old"; echo x > "$r/qa-pr-old/f"; old 5 "$r/qa-pr-old/f"; old 5 "$r/qa-pr-old"
-  CLEAN_MY_LINUX_QA_PR_AGE_DAYS=abc run bash "$WC"
+@test "unknown flag → exit 2" {
+  run bash "$WC" --bogus
   [ "$status" -eq 2 ]
-  [ -e "$r/qa-pr-old" ]
 }
 
-@test "leading-zero CLEAN_MY_LINUX_QA_PR_AGE_DAYS=08 is read as decimal, lane still runs (QA finding 1)" {
-  local r="$CLEAN_MY_LINUX_TMP_ROOT"
-  mkdir -p "$r/qa-pr-old"; echo x > "$r/qa-pr-old/f"; old 10 "$r/qa-pr-old/f"; old 10 "$r/qa-pr-old"
-  mkdir -p "$r/qa-pr-young"; echo x > "$r/qa-pr-young/f"; old 5 "$r/qa-pr-young/f"; old 5 "$r/qa-pr-young"
-  CLEAN_MY_LINUX_QA_PR_AGE_DAYS=08 run bash "$WC"
+# ──────────────────────────────────────────────────────────────
+# df early-stop
+# ──────────────────────────────────────────────────────────────
+
+@test "already at/below target: no rule runs, target-reached-after=none" {
+  echo 60 > "$TEST_TMPDIR/df-pct"
+  run bash "$WC" --apply
   [ "$status" -eq 0 ]
-  [ ! -e "$r/qa-pr-old" ]
-  [ -e "$r/qa-pr-young" ]
+  [ ! -s "$DELEG_LOG" ]
+  [[ "$output" == *"target-reached-after=none"* ]]
 }
 
-@test "/tmp <repo>-<n>-review-<6> clones use the 2d TTL; near-miss names stay at 14d (CTO widening)" {
-  local r="$CLEAN_MY_LINUX_TMP_ROOT" n
-  for n in core-backend-10192-review-lMTbi5 core-backend-review-lMTbi5 core-backend-10192-review-TOOLONG9 core-backend-10192-review-fresh1; do
-    mkdir -p "$r/$n/repo"; echo x > "$r/$n/repo/f"
-  done
-  for n in core-backend-10192-review-lMTbi5 core-backend-review-lMTbi5 core-backend-10192-review-TOOLONG9; do
-    old 5 "$r/$n/repo/f"; old 5 "$r/$n/repo"; old 5 "$r/$n"
-  done
-  # plain-file near-miss: only the 14d re-check keeps it (no active-content rail for files)
-  echo x > "$r/foo-review-abcdef"; old 5 "$r/foo-review-abcdef"
+@test "target reached mid-table: later rules are skipped, named in the report" {
+  export STUB_REAPER_HOOK='echo 60 > "$TEST_TMPDIR/df-pct"'
+  export CLEAN_MY_LINUX_SKIP_SWEEP=0
+  slack_fixture
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1 "$DELEG_LOG")" = "REAPER" ]
+  [[ "$output" == *"target-reached-after=tmp-reaper"* ]]
+  [ ! -f "$TEST_TMPDIR/apt-calls.log" ]
+  grep -q 'target-reached-after=tmp-reaper' "$TEST_TMPDIR/last-text"
+}
+
+@test "TARGET_USED_PCT is honored (66% runs at default 65, stops at 70)" {
+  echo 66 > "$TEST_TMPDIR/df-pct"
+  run bash "$WC" --apply
+  [ -s "$DELEG_LOG" ]
+  : > "$DELEG_LOG"
+  CLEAN_MY_LINUX_TARGET_USED_PCT=70 run bash "$WC" --apply
+  [ ! -s "$DELEG_LOG" ]
+}
+
+@test "unreadable df fails closed (keeps cleaning)" {
+  printf '#!/bin/bash\nexit 1\n' > "$TEST_TMPDIR/bin/df"
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ -s "$DELEG_LOG" ]
+}
+
+# ──────────────────────────────────────────────────────────────
+# Per-run caps
+# ──────────────────────────────────────────────────────────────
+
+@test "MAX_ENTRIES stops the run mid-table, exits 0, reports cap-hit=entries" {
+  export STUB_REAPER_OUT="tmp-reaper: done reaped=5 skipped_busy=0 reclaimed_kib=10 failures=0"
+  export CLEAN_MY_LINUX_MAX_ENTRIES=5 CLEAN_MY_LINUX_SKIP_SWEEP=0
+  slack_fixture
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1 "$DELEG_LOG")" = "REAPER" ]
+  [[ "$output" == *"cap-hit=entries"* ]]
+  [ ! -f "$TEST_TMPDIR/apt-calls.log" ]
+  grep -q 'cap-hit=entries' "$TEST_TMPDIR/last-text"
+}
+
+@test "MAX_BYTES stops the run mid-table, exits 0, reports cap-hit=bytes" {
+  export STUB_REAPER_OUT="tmp-reaper: done reaped=1 skipped_busy=0 reclaimed_kib=2048 failures=0"
+  export CLEAN_MY_LINUX_MAX_BYTES=2097152 CLEAN_MY_LINUX_SKIP_SWEEP=0
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1 "$DELEG_LOG")" = "REAPER" ]
+  [[ "$output" == *"cap-hit=bytes"* ]]
+}
+
+@test "below both caps nothing trips" {
+  export STUB_REAPER_OUT="tmp-reaper: done reaped=4 skipped_busy=0 reclaimed_kib=2047 failures=0"
+  export CLEAN_MY_LINUX_MAX_ENTRIES=5 CLEAN_MY_LINUX_MAX_BYTES=2097152
+  run bash "$WC" --apply
+  [[ "$output" != *"cap-hit"* ]]
+  grep -q CODEX "$DELEG_LOG"
+}
+
+@test "R4 is capped per entry: MAX_ENTRIES=2 deletes exactly 2 of 3 old .bak files" {
+  local f
+  for f in a b c; do echo x > "$TEST_TMPDIR/bakroot-a/$f.bak"; old 40 "$TEST_TMPDIR/bakroot-a/$f.bak"; done
+  export CLEAN_MY_LINUX_MAX_ENTRIES=2
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ "$(find "$TEST_TMPDIR/bakroot-a" -name '*.bak' | wc -l)" -eq 1 ]
+  [[ "$output" == *"cap-hit=entries"* ]]
+  [ ! -f "$TEST_TMPDIR/apt-calls.log" ]
+}
+
+@test "non-numeric cap fails loud with exit 2, deletes nothing" {
+  CLEAN_MY_LINUX_MAX_ENTRIES=lots run bash "$WC" --apply
+  [ "$status" -eq 2 ]
+  [ ! -s "$DELEG_LOG" ]
+}
+
+# ──────────────────────────────────────────────────────────────
+# Delegates: missing / failing
+# ──────────────────────────────────────────────────────────────
+
+@test "a MISSING codex-home-prune.sh is skipped, run still exits 0" {
+  export CLEAN_MY_LINUX_CODEX_PRUNE="$TEST_TMPDIR/delegates/does-not-exist"
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rule codex-prune: skipped (script missing)"* ]]
+  [ -f "$TEST_TMPDIR/apt-calls.log" ]
+}
+
+@test "delegate exit 1 propagates, after the summary, Slack post and later rules" {
+  export STUB_REAPER_RC=1
+  slack_fixture
+  run bash "$WC" --apply
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"rule tmp-reaper: failed (exit 1)"* ]]
+  grep -q CODEX "$DELEG_LOG"
+  [ -f "$TEST_TMPDIR/last-text" ]
+  grep -q 'errors=1' "$TEST_TMPDIR/last-text"
+}
+
+@test "delegate exit 2 propagates" {
+  export STUB_CODEX_RC=2
+  run bash "$WC" --apply
+  [ "$status" -eq 2 ]
+}
+
+@test "the FIRST failing delegate's rc wins" {
+  export STUB_REAPER_RC=1 STUB_CODEX_RC=2
+  run bash "$WC" --apply
+  [ "$status" -eq 1 ]
+}
+
+@test "real clone sweeper is wired in and dry-run propagates (hermetic roots)" {
+  mkdir -p "$TEST_TMPDIR/sweeproot/repos" "$TEST_TMPDIR/sweeproot/ws"
+  export CLEAN_MY_LINUX_SKIP_SWEEP=0
+  export CLEAN_MY_LINUX_SWEEP_SCRIPT="$HYDRA_REPO/scripts/sweep-workspace-clones.sh"
+  export SWEEP_REPOS_ROOT="$TEST_TMPDIR/sweeproot/repos"
+  export SWEEP_WS_ROOT="$TEST_TMPDIR/sweeproot/ws"
+  export SWEEP_SKIP_HOST_GUARD=1
+  export SWEEP_LOCKFILE="$TEST_TMPDIR/sweep.lock"
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ -e "$r/foo-review-abcdef" ]
-  [ ! -e "$r/core-backend-10192-review-lMTbi5" ]
-  [ -e "$r/core-backend-review-lMTbi5" ]
-  [ -e "$r/core-backend-10192-review-TOOLONG9" ]
-  [ -e "$r/core-backend-10192-review-fresh1" ]
+  [[ "$output" == *"rule clone-sweep: ok"* ]]
+  [[ "$output" == *"[sweep-clones"* ]]
 }
 
-@test "fresh depth-1 file → kept" {
-  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/recent.json"
-  old 3 "$CLEAN_MY_LINUX_TMP_ROOT/recent.json"
+@test "a failing real clone sweeper fails the run (structural breakage is not masked)" {
+  mkdir -p "$TEST_TMPDIR/sweeproot/ws"
+  export CLEAN_MY_LINUX_SKIP_SWEEP=0
+  export CLEAN_MY_LINUX_SWEEP_SCRIPT="$HYDRA_REPO/scripts/sweep-workspace-clones.sh"
+  export SWEEP_REPOS_ROOT="$TEST_TMPDIR/sweeproot/does-not-exist"
+  export SWEEP_WS_ROOT="$TEST_TMPDIR/sweeproot/ws"
+  export SWEEP_SKIP_HOST_GUARD=1
+  export SWEEP_LOCKFILE="$TEST_TMPDIR/sweep.lock"
   run bash "$WC"
-  [ "$status" -eq 0 ]
-  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/recent.json" ]
-  [[ "$output" == *"tmp: deleted=0"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"rule clone-sweep: failed"* ]]
+  [[ "$output" == *"TOTAL entries="* ]]
 }
 
-@test "old depth-1 directory → deleted recursively" {
-  mkdir -p "$CLEAN_MY_LINUX_TMP_ROOT/dead-clone/nested"
-  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/dead-clone/nested/f"
-  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/dead-clone/nested/f"
-  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/dead-clone/nested"
-  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/dead-clone"
+@test "clone sweeper skip knob is honored" {
   run bash "$WC"
   [ "$status" -eq 0 ]
-  [ ! -e "$CLEAN_MY_LINUX_TMP_ROOT/dead-clone" ]
-  [[ "$output" == *"tmp: deleted=1"* ]]
+  [[ "$output" == *"rule clone-sweep: skipped"* ]]
+  ! grep -q SWEEP "$DELEG_LOG"
 }
 
-@test "default excludes survive despite age (systemd-private/openclaw/lock.d)" {
-  mkdir "$CLEAN_MY_LINUX_TMP_ROOT/systemd-private-zz"
-  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/openclaw-foo"
-  mkdir "$CLEAN_MY_LINUX_TMP_ROOT/hydra-deploy.lock.d"
-  old 40 "$CLEAN_MY_LINUX_TMP_ROOT/systemd-private-zz"
-  old 40 "$CLEAN_MY_LINUX_TMP_ROOT/openclaw-foo"
-  old 40 "$CLEAN_MY_LINUX_TMP_ROOT/hydra-deploy.lock.d"
-  run bash "$WC"
-  [ "$status" -eq 0 ]
-  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/systemd-private-zz" ]
-  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/openclaw-foo" ]
-  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/hydra-deploy.lock.d" ]
-  [[ "$output" == *"excluded=3"* ]]
-  [[ "$output" == *"tmp: deleted=0"* ]]
-}
-
-@test "CLEAN_MY_LINUX_TMP_EXCLUDES override REPLACES the default list" {
-  export CLEAN_MY_LINUX_TMP_EXCLUDES='keepme-*'
-  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/keepme-x"
-  mkdir "$CLEAN_MY_LINUX_TMP_ROOT/systemd-private-zz"
-  old 40 "$CLEAN_MY_LINUX_TMP_ROOT/keepme-x"
-  old 40 "$CLEAN_MY_LINUX_TMP_ROOT/systemd-private-zz"
-  run bash "$WC"
-  [ "$status" -eq 0 ]
-  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/keepme-x" ]
-  [ ! -e "$CLEAN_MY_LINUX_TMP_ROOT/systemd-private-zz" ]
-}
-
-@test "active-content rail: old dir with one fresh nested file → kept" {
-  mkdir -p "$CLEAN_MY_LINUX_TMP_ROOT/live-clone/sub"
-  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/live-clone/sub/fresh"
-  old 1 "$CLEAN_MY_LINUX_TMP_ROOT/live-clone/sub/fresh"
-  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/live-clone/sub"
-  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/live-clone"
-  run bash "$WC"
-  [ "$status" -eq 0 ]
-  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/live-clone/sub/fresh" ]
-  [[ "$output" == *"active_skipped=1"* ]]
-  [[ "$output" == *"tmp: deleted=0"* ]]
-}
-
-@test "old depth-1 symlink: link removed, target untouched" {
-  echo precious > "$TEST_TMPDIR/target-file"
-  ln -s "$TEST_TMPDIR/target-file" "$CLEAN_MY_LINUX_TMP_ROOT/stale-link"
-  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/stale-link"
-  run bash "$WC"
-  [ "$status" -eq 0 ]
-  [ ! -e "$CLEAN_MY_LINUX_TMP_ROOT/stale-link" ]
-  [ -e "$TEST_TMPDIR/target-file" ]
-  [[ "$output" == *"tmp: deleted=1"* ]]
-}
+# ──────────────────────────────────────────────────────────────
 
 # ──────────────────────────────────────────────────────────────
 # Structural guards (fail-closed)
@@ -264,7 +341,6 @@ slack_fixture() {
   run bash "$WC"
   [ "$status" -eq 1 ]
 }
-
 # ──────────────────────────────────────────────────────────────
 # .bak / .orig category
 # ──────────────────────────────────────────────────────────────
@@ -277,7 +353,7 @@ slack_fixture() {
     done
     echo x > "$r/recent.bak"; old 5 "$r/recent.bak"
   done
-  run bash "$WC"
+  run bash "$WC" --apply
   [ "$status" -eq 0 ]
   [[ "$output" == *"bak: deleted=8"* ]]
   [ ! -e "$TEST_TMPDIR/bakroot-a/a.bak" ]
@@ -291,7 +367,7 @@ slack_fixture() {
   echo x > "$TEST_TMPDIR/bakroot-a/foo.original"
   old 100 "$TEST_TMPDIR/bakroot-a/foo.bakery"
   old 100 "$TEST_TMPDIR/bakroot-a/foo.original"
-  run bash "$WC"
+  run bash "$WC" --apply
   [ "$status" -eq 0 ]
   [ -e "$TEST_TMPDIR/bakroot-a/foo.bakery" ]
   [ -e "$TEST_TMPDIR/bakroot-a/foo.original" ]
@@ -302,7 +378,7 @@ slack_fixture() {
   export CLEAN_MY_LINUX_BAK_ROOTS="$TEST_TMPDIR/nonexistent-root $TEST_TMPDIR/bakroot-a"
   echo x > "$TEST_TMPDIR/bakroot-a/dead.bak"
   old 40 "$TEST_TMPDIR/bakroot-a/dead.bak"
-  run bash "$WC"
+  run bash "$WC" --apply
   [ "$status" -eq 0 ]
   [ ! -e "$TEST_TMPDIR/bakroot-a/dead.bak" ]
   [[ "$output" == *"bak root missing, skipped"* ]]
@@ -320,22 +396,6 @@ slack_fixture() {
 
 # ──────────────────────────────────────────────────────────────
 # --dry-run
-# ──────────────────────────────────────────────────────────────
-
-@test "--dry-run: deletes nothing, prints would-delete lines, no muso, no apt" {
-  slack_fixture
-  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/stale"
-  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/stale"
-  echo x > "$TEST_TMPDIR/bakroot-a/dead.bak"
-  old 40 "$TEST_TMPDIR/bakroot-a/dead.bak"
-  run bash "$WC" --dry-run
-  [ "$status" -eq 0 ]
-  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/stale" ]
-  [ -e "$TEST_TMPDIR/bakroot-a/dead.bak" ]
-  [[ "$output" == *"DRY-RUN: would delete"* ]]
-  [ ! -s "$STUB_CALLS" ]
-  [ ! -f "$TEST_TMPDIR/apt-calls.log" ]
-}
 
 # ──────────────────────────────────────────────────────────────
 # Slack summary
@@ -343,58 +403,69 @@ slack_fixture() {
 
 @test "real run posts Block Kit blocks + counts to #clio_devops as devops bot" {
   slack_fixture
-  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/stale"
-  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/stale"
-  run bash "$WC"
+  echo x > "$TEST_TMPDIR/bakroot-a/dead.bak"; old 40 "$TEST_TMPDIR/bakroot-a/dead.bak"
+  run bash "$WC" --apply
   [ "$status" -eq 0 ]
   grep -q -- '--bot devops' "$STUB_CALLS"
   grep -q -- '--channel C0ADV2W76G4' "$STUB_CALLS"
   grep -q -- '--requester' "$STUB_CALLS"
-  # Block Kit blocks were sent and are valid JSON (python-built payload).
   [ -f "$TEST_TMPDIR/last-blocks" ]
   run python3 -m json.tool "$TEST_TMPDIR/last-blocks"
   [ "$status" -eq 0 ]
-  grep -q 'deleted=1' "$TEST_TMPDIR/last-text"
+  grep -q 'entries=1' "$TEST_TMPDIR/last-text"
 }
 
 @test "zero-work run still posts a summary (silence means broken)" {
   slack_fixture
-  run bash "$WC"
+  run bash "$WC" --apply
   [ "$status" -eq 0 ]
   [ -f "$TEST_TMPDIR/last-text" ]
-  grep -q 'deleted=0' "$TEST_TMPDIR/last-text"
+  grep -q 'entries=0' "$TEST_TMPDIR/last-text"
 }
 
 @test "Slack delivery is best-effort: muso failure → still exit 0" {
   slack_fixture
-  cat > "$TEST_TMPDIR/bin/muso" <<'STUB'
-#!/bin/bash
-exit 7
-STUB
-  chmod +x "$TEST_TMPDIR/bin/muso"
-  run bash "$WC"
+  printf '#!/bin/bash\nexit 7\n' > "$TEST_TMPDIR/bin/muso"
+  run bash "$WC" --apply
   [ "$status" -eq 0 ]
 }
 
 # ──────────────────────────────────────────────────────────────
-# apt step
+# apt step: once per 24h
 # ──────────────────────────────────────────────────────────────
 
-@test "real run invokes apt-get autoremove + autoclean (stubbed)" {
-  run bash "$WC"
+@test "--apply invokes apt-get autoremove + autoclean (stubbed)" {
+  run bash "$WC" --apply
   [ "$status" -eq 0 ]
-  [ -f "$TEST_TMPDIR/apt-calls.log" ]
   run cat "$TEST_TMPDIR/apt-calls.log"
   [[ "$output" == *"autoremove"* ]]
   [[ "$output" == *"autoclean"* ]]
 }
 
+@test "apt watermark suppresses a second apt inside 24h, allows it after" {
+  run bash "$WC" --apply
+  [ "$(grep -c autoremove "$TEST_TMPDIR/apt-calls.log")" -eq 1 ]
+  [ -e "$TEST_TMPDIR/state/apt.last" ]
+  run bash "$WC" --apply
+  [ "$(grep -c autoremove "$TEST_TMPDIR/apt-calls.log")" -eq 1 ]
+  [[ "$output" == *"rule apt: skipped (ran <24h ago)"* ]]
+  touch -d '25 hours ago' "$TEST_TMPDIR/state/apt.last"
+  run bash "$WC" --apply
+  [ "$(grep -c autoremove "$TEST_TMPDIR/apt-calls.log")" -eq 2 ]
+}
+
+@test "dry-run never writes the apt watermark nor runs apt" {
+  run bash "$WC"
+  [ ! -e "$TEST_TMPDIR/state/apt.last" ]
+  [ ! -f "$TEST_TMPDIR/apt-calls.log" ]
+}
+
 @test "CLEAN_MY_LINUX_SKIP_APT=1 → apt never invoked" {
   export CLEAN_MY_LINUX_SKIP_APT=1
-  run bash "$WC"
+  run bash "$WC" --apply
   [ "$status" -eq 0 ]
   [ ! -f "$TEST_TMPDIR/apt-calls.log" ]
-  [[ "$output" == *"apt: skipped"* ]]
+  [[ "$output" == *"rule apt: skipped"* ]]
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -414,69 +485,20 @@ done
 exec /bin/rm "$@"
 STUB
   chmod +x "$TEST_TMPDIR/bin/rm"
-  export CLEAN_MY_LINUX_TEST_RM_FAIL="$CLEAN_MY_LINUX_TMP_ROOT/stuck"
-  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/stuck"
-  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/stuck"
-  run bash "$WC"
+  export CLEAN_MY_LINUX_TEST_RM_FAIL="$TEST_TMPDIR/bakroot-a/stuck.bak"
+  echo x > "$TEST_TMPDIR/bakroot-a/stuck.bak"; old 40 "$TEST_TMPDIR/bakroot-a/stuck.bak"
+  run bash "$WC" --apply
   [ "$status" -eq 0 ]
-  [ -e "$CLEAN_MY_LINUX_TMP_ROOT/stuck" ]
-  [[ "$output" == *"errors=1"* ]]
-  [[ "$output" == *"tmp: deleted=0"* ]]
-  [ -f "$TEST_TMPDIR/last-text" ]
+  [ -e "$TEST_TMPDIR/bakroot-a/stuck.bak" ]
+  [[ "$output" == *"bak: deleted=0 errors=1"* ]]
   grep -q 'errors=1' "$TEST_TMPDIR/last-text"
 }
 
 @test "idempotent: immediate second run deletes 0" {
-  echo x > "$CLEAN_MY_LINUX_TMP_ROOT/stale"
-  old 20 "$CLEAN_MY_LINUX_TMP_ROOT/stale"
-  run bash "$WC"
+  echo x > "$TEST_TMPDIR/bakroot-a/dead.bak"; old 40 "$TEST_TMPDIR/bakroot-a/dead.bak"
+  run bash "$WC" --apply
+  [[ "$output" == *"bak: deleted=1"* ]]
+  run bash "$WC" --apply
   [ "$status" -eq 0 ]
-  [[ "$output" == *"tmp: deleted=1"* ]]
-  run bash "$WC"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"tmp: deleted=0"* ]]
-}
-
-@test "unknown flag → exit 2" {
-  run bash "$WC" --bogus
-  [ "$status" -eq 2 ]
-}
-
-@test "clone sweeper is wired in and dry-run propagates (hermetic roots)" {
-  # Point the sweeper at sandbox roots so enabling it is safe, then verify
-  # the weekly wrapper invokes it and forwards --dry-run.
-  mkdir -p "$TEST_TMPDIR/sweeproot/repos" "$TEST_TMPDIR/sweeproot/ws"
-  export CLEAN_MY_LINUX_SKIP_SWEEP=0
-  export SWEEP_REPOS_ROOT="$TEST_TMPDIR/sweeproot/repos"
-  export SWEEP_WS_ROOT="$TEST_TMPDIR/sweeproot/ws"
-  export SWEEP_SKIP_HOST_GUARD=1
-  export SWEEP_LOCKFILE="$TEST_TMPDIR/sweep.lock"
-  run bash "$WC" --dry-run
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"clone-sweep: ok"* ]]
-  [[ "$output" == *"[sweep-clones"* ]]
-}
-
-@test "a failing clone sweeper fails the weekly cleanup (structural breakage is not masked)" {
-  # The sweeper's exit 1/2 mean the category never ran. Masking that would
-  # leave systemd reporting a healthy weekly cleanup — exactly what this
-  # script's exit contract forbids.
-  mkdir -p "$TEST_TMPDIR/sweeproot/ws"
-  export CLEAN_MY_LINUX_SKIP_SWEEP=0
-  # Missing repos root => the sweeper's structural refusal, exit 1.
-  export SWEEP_REPOS_ROOT="$TEST_TMPDIR/sweeproot/does-not-exist"
-  export SWEEP_WS_ROOT="$TEST_TMPDIR/sweeproot/ws"
-  export SWEEP_SKIP_HOST_GUARD=1
-  export SWEEP_LOCKFILE="$TEST_TMPDIR/sweep.lock"
-  run bash "$WC" --dry-run
-  [ "$status" -eq 1 ]
-  # The summary still had to be emitted before the failure surfaced.
-  [[ "$output" == *"clone-sweep: failed"* ]]
-  [[ "$output" == *"TOTAL freed_kb="* ]]
-}
-
-@test "clone sweeper skip knob is honored" {
-  run bash "$WC" --dry-run
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"clone-sweep: skipped"* ]]
+  [[ "$output" == *"bak: deleted=0"* ]]
 }

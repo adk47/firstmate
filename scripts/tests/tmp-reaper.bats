@@ -166,3 +166,26 @@ setup() {
   [ "$status" -ne 0 ]
   [ -f "$TMP_REAPER_ROOT/core-backend-8-review-MOUNT1/repo/f" ]
 }
+
+@test "--dry-run reports would-delete lines and removes nothing (clean-my-linux apply gate)" {
+  mk core-backend-20-review-DRYRUN 10
+  run "$REAPER" --dry-run
+  [ "$status" -eq 0 ]
+  [ -d "$TMP_REAPER_ROOT/core-backend-20-review-DRYRUN" ]
+  [[ "$output" == *"DRY-RUN would delete"*"core-backend-20-review-DRYRUN"* ]]
+  [[ "$output" == *"reaped=1"* ]]
+}
+
+@test "--apply is the explicit spelling of the default and deletes" {
+  mk core-backend-21-review-APPLY1 10
+  run "$REAPER" --apply
+  [ "$status" -eq 0 ]
+  [ ! -e "$TMP_REAPER_ROOT/core-backend-21-review-APPLY1" ]
+}
+
+@test "an unknown flag exits 2 and deletes nothing" {
+  mk core-backend-22-review-BADFLG 10
+  run "$REAPER" --bogus
+  [ "$status" -eq 2 ]
+  [ -d "$TMP_REAPER_ROOT/core-backend-22-review-BADFLG" ]
+}

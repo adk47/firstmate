@@ -17,6 +17,10 @@
 #
 # Logs path + reclaimed KiB per deletion; never file contents.
 #
+# Flags: --dry-run (log would-delete lines, remove nothing; the open-handle
+# check still runs) | --apply (the default: the hourly unit passes no flag).
+# Exit 2 on anything else.
+#
 # Env:
 #   TMP_REAPER_ROOT     default /tmp
 #   TMP_REAPER_DIR_RE   test hook only (the unit never sets it)
@@ -25,6 +29,13 @@ set -euo pipefail
 
 # shellcheck source=lib/safe-delete.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/safe-delete.sh"
+
+DRY_RUN=0
+case "${1:-}" in
+  ''|--apply) ;;
+  --dry-run) DRY_RUN=1 ;;
+  *) echo "tmp-reaper.sh: usage: $0 [--dry-run|--apply]" >&2; exit 2 ;;
+esac
 
 ROOT="${TMP_REAPER_ROOT:-/tmp}"
 DEFAULT_DIR_RE='^[a-z0-9-]+-[0-9]+(-review)?-[A-Za-z0-9]{6}$'
@@ -70,6 +81,13 @@ reap() {
   elif [ "$rc" -eq 2 ]; then
     failures=$((failures + 1))
     echo "tmp-reaper: WARN lsof failed, keeping $path" >&2
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    kib=$(du -sk -- "$path" 2>/dev/null | awk '{print $1}' || true)
+    reaped=$((reaped + 1))
+    total_kib=$((total_kib + ${kib:-0}))
+    echo "tmp-reaper: DRY-RUN would delete $path (${kib:-0} KiB)"
     return 0
   fi
   # Quarantine-first removal: mount/identity re-checks, then rm in a private name.

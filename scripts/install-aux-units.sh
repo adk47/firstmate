@@ -2373,13 +2373,15 @@ log "  $atmr: $astate (fires daily 08:00 UTC)"
 # autoremove/autoclean. Posts a Block Kit summary to #clio_devops
 # on every run. Exit 1 = structural refusal (surfaces as a failed
 # unit); per-file delete errors stay exit 0 and report via Slack.
+# clean-my-linux.sh defaults to a dry-run, so the unit passes --apply
+# explicitly; its cadence/rename is MUS-6056's.
 cat > /etc/systemd/system/hydra-weekly-cleanup.service << CLEANUPSVC
 [Unit]
 Description=HYDRA weekly server cleanup (/tmp mtime>14d, .bak/.orig>30d, apt)
 
 [Service]
 Type=oneshot
-ExecStart=$HYDRA_ROOT/scripts/clean-my-linux.sh
+ExecStart=$HYDRA_ROOT/scripts/clean-my-linux.sh --apply
 Environment=HOME=/root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Disk-bound housekeeping: keep it polite to the gateways.
