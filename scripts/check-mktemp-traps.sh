@@ -151,13 +151,19 @@ while IFS= read -r f; do
       if [[ "$cmt" == *"mktemp-ok:"* || ( "$prev_code" =~ ^[[:space:]]*$ && "$prev_cmt" == *"mktemp-ok:"* ) ]]; then
         :
       else
-        var=""
-        [[ "$code" =~ ([A-Za-z_][A-Za-z0-9_]*)=[\"\']?\$\([[:space:]]*mktemp ]] && var="${BASH_REMATCH[1]}"
+        # every allocation on the line needs its own assigned variable with its own cleanup:
+        # more `mktemp -d` occurrences than `VAR=$(mktemp` assignments fails closed
+        allocs=$(printf '%s\n' "$code" | grep -Eo '(\$\(|`|^|[;&|({])[[:space:]]*(command[[:space:]]+)?mktemp[[:space:]]+(-d|--directory|-[a-z]*d)([[:space:]]|\)|"|$)' | wc -l)
+        vars=$(printf '%s\n' "$code" | grep -Eo '[A-Za-z_][A-Za-z0-9_]*=["'"'"']?\$\([[:space:]]*mktemp' | sed -E 's/=.*//')
+        nvars=$(printf '%s' "$vars" | grep -c . || true)
         ok=0
-        if [ -n "$var" ]; then
+        if [ -n "$vars" ] && [ "$nvars" -ge "$allocs" ]; then
           # cleanup evidence must sit in the allocation's own function, not elsewhere in the file
           scope=$(printf '%s\n' "$src" | region "$n")
-          if trap_cleans "$scope" "$var"; then ok=1; fi
+          ok=1
+          for var in $vars; do
+            trap_cleans "$scope" "$var" || { ok=0; break; }
+          done
         fi
         if [ "$ok" -eq 0 ]; then
           # mktemp-ok: message text, not an allocation

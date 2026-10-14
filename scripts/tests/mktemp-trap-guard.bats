@@ -455,3 +455,23 @@ SH
   [ "$status" -eq 1 ]
   [[ "$output" == *"printarm.sh:2"* ]]
 }
+
+@test "two allocations on one line: the second leaks and fails" {
+  printf '#!/bin/bash\na="$(mktemp -d)"; b="$(mktemp -d)"\ntrap '"'"'rm -rf "$a"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/two.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"two.sh:2"* ]]
+}
+
+@test "two allocations on one line, both cleaned by the trap, pass" {
+  printf '#!/bin/bash\na="$(mktemp -d)"; b="$(mktemp -d)"\ntrap '"'"'rm -rf "$a" "$b"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/two-ok.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "second allocation on a line with no assignment fails closed" {
+  printf '#!/bin/bash\na="$(mktemp -d)"; cp x "$(mktemp -d)"\ntrap '"'"'rm -rf "$a"'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/bare2.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"bare2.sh:2"* ]]
+}
