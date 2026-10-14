@@ -1,7 +1,7 @@
 # HYDRA Docs
 
 Documentation for **HYDRA** — the OpenClaw agent fleet on OVH node-8 (see the
-[root README](../README.md) for the project overview, and [`CLAUDE.md`](../CLAUDE.md)
+[root README](../README.md) for the project overview, and [`AGENTS.md`](../AGENTS.md)
 for the operating doctrine that agents follow).
 
 Docs are grouped by purpose. Distilled hard-won knowledge lives in **Lessons**;

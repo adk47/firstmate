@@ -107,7 +107,7 @@ apply_chunked() {
 
   local evidence
   if [[ "$status" == "approved" ]]; then
-    evidence="lobster-signal:approve_owning_track=100;total_risk<80;backtested_99.34pct"
+    evidence="lobster-signal:validator_approved;risk<30;no_reject_or_hold;no_rule_errors"
   else
     evidence="lobster-signal:no_signal_approve;routed_to_uvn"
   fi
