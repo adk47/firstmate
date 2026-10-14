@@ -36,12 +36,13 @@ const NAMED_ENTITIES: Record<string, string> = {
 // Delimiter is \s minus U+FEFF: JS \s counts it as whitespace but URL parsers ignore it inside a host, so splitting on it would cut a token in two.
 const TOKEN_G = /(?:[^\s<>()[\]"']|\uFEFF)+/g;
 
-/** Decode HTML character references (semicolon optional for the URL-char names: we decide what to strip, so leniency is safe). An out-of-range code point is left alone, never throws. */
+/** Decode HTML character references (semicolon optional for every named entity: legacy names like &shy decode without one, and we only decide what to strip, so leniency is safe). An out-of-range code point is left alone, never throws. */
 function decodeEntities(s: string): string {
-  return s.replace(/&(?:(?:#(\d+)|#x([0-9a-f]+)|(period|sol|colon|num|amp|quest|equals|lowbar|hyphen|bsol));?|([a-z][a-z0-9]*);)/gi, (m, dec?: string, hexs?: string, name?: string, other?: string) => {
+  return s.replace(/&(?:(?:#(\d+)|#x([0-9a-f]+)|(period|sol|colon|num|amp|quest|equals|lowbar|hyphen|bsol));?|([a-z][a-z0-9]*)(;?))/gi, (m, dec?: string, hexs?: string, name?: string, other?: string, semi?: string) => {
     if (name) return NAMED_ENTITIES[name.toLowerCase()] ?? m;
     // Any other named entity may decode to anything (ignorable, letter-folding, ...): leave a wildcard placeholder.
-    if (other) return PH;
+    // Without a semicolon the entity may end anywhere inside the run of letters (&ordfi = &ordf + "i"): one wildcard per character.
+    if (other) return semi ? PH : PH.repeat(other.length);
     const cp = dec !== undefined ? parseInt(dec, 10) : parseInt(hexs as string, 16);
     return Number.isFinite(cp) && cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
   });

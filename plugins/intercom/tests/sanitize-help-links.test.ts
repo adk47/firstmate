@@ -266,6 +266,20 @@ describe("named entities that decode to a letter or a backslash (parser differen
     const out = sanitizeHelpLinks(`See https://h&escr;lp.muso.ai/en/articles/${INVENTED} for details`, MANIFEST);
     expect(out.body).not.toContain("articles");
   });
+  // Legacy entities decode without a trailing semicolon (HTML5 has 106 such names).
+  it.each([
+    ["help&shy.muso.ai", "help­.muso.ai"],
+    ["help.mus&ordm.ai", "help.musº.ai"],
+  ])("semicolon-less legacy entity in an href (%s) resolves to help.muso.ai and is stripped", (written, real) => {
+    expect(new URL(`https://${real}/en/articles/${INVENTED}`).host).toBe("help.muso.ai");
+    const out = sanitizeHelpLinks(`Answer.\n<a href="https://${written}/en/articles/${INVENTED}">guide</a>`, MANIFEST);
+    expect(out.body).toBe("Answer.");
+    expect(out.redactions.length).toBeGreaterThan(0);
+  });
+  it("semicolon-less legacy entity in prose (&ordf) is stripped", () => {
+    const out = sanitizeHelpLinks(`See https://help.muso.&ordfi/en/articles/${INVENTED} for details`, MANIFEST);
+    expect(out.body).not.toContain("articles");
+  });
 });
 
 describe("a link split across lines next to a valid citation", () => {
