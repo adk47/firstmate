@@ -16,6 +16,10 @@ on:
         type: choice
         options: [all, main, edge]
         default: all
+      full_sync:
+        description: 'Restore the whole-tree rsync --delete mirror for this run only. CAN DELETE server-only files; Step 0 rsync drift and the Step 4a deletion pre-flight come back with it.'
+        type: boolean
+        default: false
 
 # Serialize deploys: without this, a queued run for an OLDER commit can start
 # after a newer commit's run finishes and rsync the stale tree over node-8
@@ -122,6 +126,10 @@ jobs:
           # back a mutation THIS run started (never one a concurrent manual
           # deploy owns).
           HYDRA_DEPLOY_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          # One-shot per run: a dispatch checkbox, never a repo variable (a
+          # forgotten sticky value would turn every scheduled deploy back into
+          # a deleting mirror). Scheduled runs have no inputs, so '0'.
+          HYDRA_FULL_SYNC: ${{ github.event.inputs.full_sync == 'true' && '1' || '0' }}
         timeout-minutes: 40
         run: |
           echo "::group::Running deploy script"
