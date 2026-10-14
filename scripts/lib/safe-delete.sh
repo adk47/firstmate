@@ -27,9 +27,13 @@
 # GNU rm has --one-file-system (prod / CI); BSD rm (dev laptops) does not.
 # mount_hazard is the primary rail either way — this is the backstop.
 SAFE_DELETE_RM_ONEFS=()
-if rm --one-file-system -rf "$(mktemp -d)" 2>/dev/null; then
+# mktemp-ok: removed unconditionally below, even when BSD rm rejects the flag
+_sd_probe="$(mktemp -d)"
+if rm --one-file-system -rf "$_sd_probe" 2>/dev/null; then
   SAFE_DELETE_RM_ONEFS=(--one-file-system)
 fi
+rm -rf "$_sd_probe" || true
+unset _sd_probe
 
 # True if $1 IS a mountpoint or any mountpoint lives under it. The exact-match
 # case matters: rm --one-file-system treats a command-line argument that is
@@ -176,6 +180,7 @@ safe_delete_quarantine() {  # <path> <id-at-classification>
   local p="$1" id="$2" qdir q err
   local handle_check="${SAFE_DELETE_HANDLE_CHECK:-safe_delete_has_open_handle}"
   SD_QPATH=""; SD_QDIR=""; SD_ERROR=""
+  # mktemp-ok: quarantine dir persists by design: the caller deletes it, or holds it on failure
   qdir="$(mktemp -d "$(dirname -- "$p")/${SAFE_DELETE_QUARANTINE_PREFIX:-.safe-delete-quarantine.}XXXXXX" 2>/dev/null)" || {
     SD_ERROR="could not create a private sibling directory"
     return 1
