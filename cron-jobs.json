@@ -1282,6 +1282,34 @@
         "accountId": "devops",
         "bestEffort": true
       }
+    },
+    {
+      "id": "9631a113-cf40-4705-b11c-ce65eef905c7",
+      "agentId": "devops",
+      "name": "Ad screening",
+      "description": "Every 5 min: screen new ad applications (Jev + creative description), write the suggestion to the admin review queue, and post a brief to Slack. Deterministic command cron (no model).",
+      "enabled": true,
+      "createdAtMs": 1791900000000,
+      "updatedAtMs": 1791900000000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/5 * * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "bash",
+          "/opt/hydra/scripts/ad-screening.sh",
+          "--run"
+        ],
+        "timeoutSeconds": 240
+      },
+      "delivery": {
+        "mode": "none"
+      }
     }
   ]
 }
