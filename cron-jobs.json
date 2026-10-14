@@ -454,6 +454,158 @@
       }
     },
     {
+      "id": "afc7d2bf-766f-4a39-aadc-1088c9a91d35",
+      "agentId": "operations",
+      "name": "credit-approval-auditor-hourly",
+      "description": "APPROVAL AUDITOR (captain 2026-10-11: 'need a monitor that closely watches credit approvals on our side to check if they should have been given ... with AI and internet searches'). Hourly at :45 it re-checks every credit request APPROVED in the last 90 minutes (or since the previous successful run, minus 15 minutes, if that is earlier - at most 24h back; an older gap is alerted as 'N minutes not audited'; approvals are recorded oldest first in chunks, no chunk or model batch starts past an 1800s deadline (a chunk starts only if the longest one so far still fits) so alerts are always printed, and an early stop alerts and resumes from the last finished chunk), by any path (validator, admin queue, any job). Catalog evidence (Spotify/Tidal/MLC/Jaxsta raw credits) runs for every approval. PHASE A (now): catalog-only - every approval is checked against the trusted sources and the identity/velocity/approver signals, no model calls. PHASE B (once the captain tops up OpenRouter, by creating /etc/hydra/credit-review-model.enabled on node-8): the model with web search (Discogs, AllMusic, label/liner notes, trade press; the claimant's own sites and profiles and user-generated platforms such as Instagram/SoundCloud/Bandcamp/Wix/Blogspot never count as evidence) runs for 100% of big tracks (catalog track popularity >= 60, any track artist >= 90, or either unknown) and a stable 10% sample of the rest, capped at $2 per run, skipped entirely while the shared OpenRouter balance is under the floor in the design doc (one 'CREDIT-AUDIT NOTE' per day says so), and $8 per UTC day (measured ~$7/day at full coverage on grok-4.3: ~47 big-track approvals/day + 10% of ~3,100 others, minus the ones the catalog already decides). Verdicts CONFIRMED / SUSPECT / CONTRADICTED / UNVERIFIABLE go to /var/lib/hydra/credit-review/ledger.sqlite3. Stdout (announced to #credit-verification) is one 'CREDIT-AUDIT ALERT:' line per CONTRADICTED big-track credit (also queued for human re-review) and per approver-identity problem (agent-hydra-main / admin_u / unknown approver, or a validator-declined row approved with no recorded approver), plus one per-profile burst alert naming the profile when one profile has >= 10 SUSPECT/CONTRADICTED or >= 20 approvals within 2h (re-alerted only when the profile has approvals newer than its last alert); a quiet run prints only NO_REPLY and posts nothing, logs go to /var/lib/hydra/credit-review/run.log, never stderr. READ-ONLY on credits: GETs only, never removes or changes a credit. Kill switch: /etc/hydra/credit-review.disabled. Design: docs/credit-verification/ai-credit-reviewer.md.",
+      "enabled": true,
+      "createdAtMs": 1791688394000,
+      "updatedAtMs": 1791688394000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "45 * * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "audit",
+          "--window-min",
+          "90",
+          "--sample-rate",
+          "0.10",
+          "--budget-usd",
+          "2",
+          "--daily-budget-usd",
+          "8",
+          "--model",
+          "x-ai/grok-4.3"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 2400
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
+      }
+    },
+    {
+      "id": "66bb552a-dfc8-40e5-85d2-3c2b5e4309bc",
+      "agentId": "operations",
+      "name": "credit-approval-audit-digest-daily",
+      "description": "Daily 08:15 UTC digest of the approval auditor: every SUSPECT / CONTRADICTED approval of the last 24h with its reason and link, verdict counts, approver-identity problems and model spend. Read-only (reads the ledger only). NO_REPLY when nothing was audited.",
+      "enabled": true,
+      "createdAtMs": 1791688394000,
+      "updatedAtMs": 1791688394000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "15 8 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "digest",
+          "--hours",
+          "24"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 300
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
+      }
+    },
+    {
+      "id": "87d4835b-1b5c-417f-b3d6-ad9e67bc3978",
+      "agentId": "operations",
+      "name": "credit-approval-audit-metrics-weekly",
+      "description": "Weekly (Mon 08:20 UTC) approval-auditor precision report: verdict counts, model cost per 1k checks, and the lower-bound precision of last week's SUSPECT / CONTRADICTED flags (share that a human has since removed or reverted, re-read via admin GETs), next to the last labelled-set eval result. Read-only.",
+      "enabled": true,
+      "createdAtMs": 1791688394000,
+      "updatedAtMs": 1791688394000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "20 8 * * 1",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "metrics",
+          "--days",
+          "7"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 900
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
+      }
+    },
+    {
+      "id": "8bed6d2b-ba2b-4475-924a-09f35126597e",
+      "agentId": "operations",
+      "name": "credit-review-shadow-4h",
+      "description": "PRE-APPROVAL AI REVIEWER, Phase 0 SHADOW: every 4h at :15 it reviews up to 20 HELD (status=unverified) credit requests plus 5 sampled recent approvals and records APPROVE-RECOMMENDED / NEEDS-HUMAN / REJECT-RECOMMENDED with cited evidence in the ledger ($1 per run cap, at most $6/day). No effect: no Slack output, never writes a credit-request status. Phase 1 (advise: cards to human approvers) and Phase 2 (auto-approve with trusted-source corroboration) are captain decisions; Phase 2 is not implemented. Catalog-only until /etc/hydra/credit-review-model.enabled exists; same OpenRouter balance floor as the auditor.",
+      "enabled": true,
+      "createdAtMs": 1791688394000,
+      "updatedAtMs": 1791688394000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "15 */4 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "review",
+          "--phase",
+          "shadow",
+          "--limit",
+          "20",
+          "--sample-approved",
+          "5",
+          "--budget-usd",
+          "1",
+          "--model",
+          "x-ai/grok-4.3"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 2400
+      },
+      "delivery": {
+        "mode": "none"
+      }
+    },
+    {
       "id": "fa4bb786-08fb-4437-a8b4-06654eff077e",
       "agentId": "operations",
       "name": "cs-ops-drain-4h",

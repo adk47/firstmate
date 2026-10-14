@@ -84,7 +84,7 @@ max_chars="${SLA_DIGEST_MAX_CHARS:-3500}"
 pagination_cap="${PAGINATION_CAP:-20}"
 [ -n "$api_key" ] || { echo "clickup-sla-digest: CLICKUP_API_KEY not set" >&2; exit 2; }
 
-tmp=$(mktemp -d)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/clickup-sla-digest.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 # Day boundaries in $tz, as ClickUp ms epochs. Computed via calendar

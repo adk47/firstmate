@@ -677,7 +677,7 @@ PYLAT
 # ──────────────────────────────────────────────────────────────
 _self_test() {
   local td out bullets
-  td="$(mktemp -d)"
+  td="$(mktemp -d "${TMPDIR:-/tmp}/stuck-lane-watchdog.XXXXXX")"
   trap 'rm -rf "$td"' RETURN
   # Pre-seeded state (so the conv is "new", not seed-suppressed). One abort that
   # did NOT release the lane (released=0 → must FIRE) and one that DID
@@ -709,7 +709,7 @@ JNL
 # maxConcurrent=0 disabled lane must all be SUPPRESSED.
 _self_test_live_lanes() {
   local td out bullets
-  td="$(mktemp -d)"
+  td="$(mktemp -d "${TMPDIR:-/tmp}/stuck-lane-watchdog.XXXXXX")"
   trap 'rm -rf "$td"' RETURN
   mkdir -p "$td/snap"
   cat > "$td/snap/main.json" <<'SNAP'
@@ -758,7 +758,7 @@ fi
 # not, and a malformed line must be skipped rather than guessed at.
 _self_test_lane_latency() {
   local td out bullets
-  td="$(mktemp -d)"
+  td="$(mktemp -d "${TMPDIR:-/tmp}/stuck-lane-watchdog.XXXXXX")"
   trap 'rm -rf "$td"' RETURN
   mkdir -p "$td/j"
   cat > "$td/j/openclaw-gateway-main.txt" <<'JNL'
@@ -821,7 +821,7 @@ if [ -z "$JOURNAL_FILE" ]; then
 fi
 
 # Snapshot each profile's live lane table. Same rule: a failed capture refuses.
-LIVE_SNAP_DIR="$(mktemp -d)"
+LIVE_SNAP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/stuck-lane-watchdog.XXXXXX")"
 LIVE_CAPTURE_RC=0
 if [ -z "$LIVE_SNAPSHOT_DIR" ]; then
   for _p in $LIVE_PROFILES; do
@@ -844,7 +844,7 @@ fi
 # Per-unit journal captures for the latency detector. Status preserved, not
 # `|| true`: an unreadable journal means we measured NOTHING, which is not the
 # same as no slow lanes.
-LAT_JOURNAL_DIR="$(mktemp -d)"
+LAT_JOURNAL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/stuck-lane-watchdog.XXXXXX")"
 LATENCY_CAPTURE_RC=0
 if [ -z "$LATENCY_JOURNAL_DIR" ]; then
   for _u in $LATENCY_UNITS; do
@@ -859,7 +859,7 @@ if [ -z "$LATENCY_JOURNAL_DIR" ]; then
   LATENCY_JOURNAL_DIR="$LAT_JOURNAL_DIR"
 fi
 
-PAYLOAD_DIR="$(mktemp -d)"
+PAYLOAD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/stuck-lane-watchdog.XXXXXX")"
 DRY_STATE_DIR=""
 trap '[ "$CLEANUP_JOURNAL" -eq 1 ] && rm -f "$JOURNAL_FILE"; rm -rf "$PAYLOAD_DIR" "$LIVE_SNAP_DIR" "$LAT_JOURNAL_DIR" ${DRY_STATE_DIR:+"$DRY_STATE_DIR"}' EXIT
 
@@ -867,7 +867,7 @@ trap '[ "$CLEANUP_JOURNAL" -eq 1 ] && rm -f "$JOURNAL_FILE"; rm -rf "$PAYLOAD_DI
 # at its DEFAULT with a temp copy; an absent source stays absent in the copy, so
 # first-run semantics are rehearsed faithfully too.
 if [ "$DRY_RUN" -eq 1 ]; then
-  DRY_STATE_DIR="$(mktemp -d)"
+  DRY_STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/stuck-lane-watchdog.XXXXXX")"
   if [ "$EDGE_STATE_EXPLICIT" -eq 0 ]; then
     cp "$STATE_FILE" "$DRY_STATE_DIR/edge.json" 2>/dev/null || true
     STATE_FILE="$DRY_STATE_DIR/edge.json"

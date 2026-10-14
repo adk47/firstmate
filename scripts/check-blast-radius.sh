@@ -76,7 +76,7 @@ head_sha="$2"
 [[ "$BR_MAX_FILES" =~ ^[0-9]+$ ]] || { echo "check-blast-radius: BR_MAX_FILES must be numeric, got '$BR_MAX_FILES'" >&2; exit 2; }
 [[ "$BR_CALLERS_HIGH" =~ ^[0-9]+$ ]] || { echo "check-blast-radius: BR_CALLERS_HIGH must be numeric, got '$BR_CALLERS_HIGH'" >&2; exit 2; }
 
-WORK="$(mktemp -d)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/check-blast-radius.XXXXXX")"
 : > "$WORK/signals.ndjson"
 : > "$WORK/skipped"
 : > "$WORK/severities"

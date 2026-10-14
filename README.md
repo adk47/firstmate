@@ -29,7 +29,7 @@ Two gateway processes run the fleet:
 - **Releases** are cut daily off `main` (`vYYYY.M.D` tags via `scripts/release.sh`);
   GitHub Releases are the changelog.
 - **Agent behavior, infra conventions, and the "where does this go?" decision tree**
-  live in [`CLAUDE.md`](CLAUDE.md) — read it before adding code.
+  live in [`AGENTS.md`](AGENTS.md) — read it before adding code.
 
 ## Start here
 
@@ -38,7 +38,7 @@ Two gateway processes run the fleet:
 - 🏗️ **[Architecture](docs/reference/ARCHITECTURE.md)** — how the fleet is put together
 - 🧭 **[Onboarding](docs/guides/ONBOARDING.md)** — for new owners / admins / developers
 - ⚖️ **[Governance](docs/reference/GOVERNANCE.md)** — ownership, security boundaries, branch protection
-- 🤖 **[CLAUDE.md](CLAUDE.md)** — operating doctrine for agents working in this repo
+- 🤖 **[AGENTS.md](AGENTS.md)** — operating doctrine for agents working in this repo (`CLAUDE.md` imports it)
 
 ## Repo layout
 

@@ -14,23 +14,40 @@
 # removed 2026-05-18 because mb_confirmed=0 across runs — see
 # ba836ac).
 #
-# Policy (backtested 2026-05-15 against 90 days of historical credits):
+# Policy (rewritten 2026-10-11, firstmate task ai-credit-validator-h1):
 #
-#   signal_approve   if verificationData.rule_risk_percent.approve_owning_track == 100
-#                    AND verificationData.total_risk_percent < 80
-#                    → historical precision 99.34%, catches ~30% of today's queue
+#   signal_approve   ONLY when the IDP validator ITSELF approved the request:
+#                    verificationData.is_approved == true
+#                    AND total_risk_percent < 30 (the validator's APPROVE_THRESHOLD)
+#                    AND no reject_* / review_* (hold) rule fired
+#                    AND no rule_errors
+#                    AND track_pending_capture != 100.
+#                    This pipeline never approves a request the validator
+#                    declined or held.
 #
 #   signal_uvn       if rule_risk_percent.track_pending_capture == 100
 #                    OR no verificationData at all
-#                    OR any hard-reject signal fires
-#                    (reject_artist_credit, reject_deleted_catalog_track,
-#                     reject_individual_org_credit, reject_publisher_label_credit,
-#                     reject_high_risk_profile)
-#                    → can't evaluate or backend already says no
+#                    OR any hard-reject (reject_*) or hold (review_*) rule fired
+#                    → can't evaluate, or the backend already says no
 #
-#   signal_review    everything else — currently treated the same as
-#                    signal_uvn downstream (both route to user_verification_needed).
-#                    Kept as a separate bucket for visibility / future use.
+#   signal_review    everything else, i.e. the validator declined it
+#                    (is_approved != true). Downstream this is treated the same
+#                    as signal_uvn (both route to user_verification_needed).
+#
+# WHY THE OLD RULE WAS WRONG (do not reintroduce it). From 2026-05-18
+# (#290) until 2026-10-11 the rule was
+#   approve_owning_track == 100 AND total_risk_percent < 80.
+# In the IDP validator (processors/raw/validation/user_credit_validator.py),
+# an approve_* rule FIRES when its risk is BELOW APPROVE_THRESHOLD (30).
+# approve_owning_track == 100 therefore means the owning-track shortcut did
+# NOT fire. The queue this pipeline drains (status=unverified) holds rows the
+# validator declined (risk >= 30), so the old rule meant "approve any declined
+# row with risk 30-80 and no reject signal". The "99.34% precision" backtest
+# was circular: it scored rows that ended up approved, most of them approved by
+# the validator itself or by this pipeline. Example: a Producer claim on a
+# Taylor Swift single, risk 58.26, collaborations 100 (the submitter had never
+# worked with anyone on the track). The validator declined it and this
+# pipeline approved it on 2026-10-11 at 00:01Z.
 #
 # Pure jq. No I/O. No side effects. Fully testable from a static fixture.
 
@@ -48,29 +65,39 @@ echo "$INPUT" | jq -c --argjson qd "$QUEUE_DEPTH" --argjson fs "$FETCH_SIZE" '
 
   def classify:
     . as $c
-    | (.verificationData // {}) as $vd
-    | ($vd.rule_risk_percent // {}) as $rrp
-    | num($rrp.approve_owning_track)         as $aot
+    | (.verificationData // {} | if type == "object" then . else {} end) as $vd
+    | ($vd.rule_risk_percent // {}) as $rrp_raw
+    | (if ($rrp_raw | type) == "object" then $rrp_raw else {} end) as $rrp
     | num($rrp.track_pending_capture)        as $tpc
     | num($vd.total_risk_percent)            as $trp
-    | (num($rrp.reject_artist_credit) > 0
-       or num($rrp.reject_deleted_catalog_track) > 0
-       or num($rrp.reject_individual_org_credit) > 0
-       or num($rrp.reject_publisher_label_credit) > 0
-       or num($rrp.reject_high_risk_profile) > 0) as $hard_reject
+    # Any reject_* (auto-reject) or review_* (IDP #1686 hold) rule with a
+    # non-zero risk blocks approval. Match by prefix so a newly added rule of
+    # either kind is covered without editing this file. A non-numeric value is
+    # treated as fired (fail closed).
+    | (if ($rrp_raw | type) != "object" then true
+       else ([$rrp | to_entries[]
+              | select(.key | test("^(reject|review)_"))
+              | select((.value | tonumber? // 100) > 0)] | length > 0)
+       end) as $blocked
+    | (($vd.total_risk_percent | type) == "number") as $has_risk
+    | (($vd.rule_errors // {}) | if type == "object" then length > 0 else true end) as $has_errors
+    | ($vd.is_approved == true) as $validator_approved
     | if ($vd == {} or $vd == null) then
-        {bucket: "signal_uvn", reason: "no_verification_data"}
+        {bucket: "signal_uvn", reason: "no_verification_data", validator_approved: false}
       elif $tpc == 100 then
-        {bucket: "signal_uvn", reason: "track_pending_capture"}
-      elif $hard_reject then
-        {bucket: "signal_uvn", reason: "hard_reject_signal"}
-      elif $aot == 100 and $trp < 80 then
+        {bucket: "signal_uvn", reason: "track_pending_capture", validator_approved: $validator_approved}
+      elif $blocked then
+        {bucket: "signal_uvn", reason: "hard_reject_or_hold_signal", validator_approved: $validator_approved}
+      elif $validator_approved and $has_risk and ($trp < 30) and ($has_errors | not) then
         {bucket: "signal_approve",
-         reason: "approve_owning_track=100,risk=\($trp|tostring)",
+         reason: "validator_approved,risk=\($trp|tostring)",
+         validator_approved: true,
          total_risk_percent: $trp}
       else
         {bucket: "signal_review",
-         reason: "no_strong_approve_signal,risk=\($trp|tostring)",
+         reason: (if $validator_approved then "validator_approved_but_errors_or_risk,risk=\($trp|tostring)"
+                  else "validator_declined,risk=\($trp|tostring)" end),
+         validator_approved: $validator_approved,
          total_risk_percent: $trp}
       end;
 

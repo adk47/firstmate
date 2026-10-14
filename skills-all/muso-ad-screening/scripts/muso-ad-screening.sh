@@ -15,7 +15,7 @@
 #   <adId>          must match ^[0-9]+$
 #   <payload.json>  must be a JSON object whose top-level keys are a subset of:
 #                   screeningKey recommendation confidence brandFit harmFlags
-#                   reason creativeDescription modelVersion
+#                   reason creativeDescription modelVersion riskFlags model policyVersion
 #
 # Env:
 #   MUSO_BIN                    muso binary (default: muso, else /usr/local/bin/muso)
@@ -37,7 +37,7 @@ if [ "$MUSO_BIN" = "muso" ] && ! command -v muso >/dev/null 2>&1 && [ -x /usr/lo
   MUSO_BIN=/usr/local/bin/muso
 fi
 
-ALLOWED_KEYS='screeningKey recommendation confidence brandFit harmFlags reason creativeDescription modelVersion'
+ALLOWED_KEYS='screeningKey recommendation confidence brandFit harmFlags reason creativeDescription modelVersion riskFlags model policyVersion'
 
 usage() {
   awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"

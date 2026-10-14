@@ -131,7 +131,7 @@ clickup_call() {
 # ─── Fetch tasks (paginated, closed INCLUDED) ─────────────────
 # Pages land in temp files and are merged via jq -s: task text makes pages
 # far bigger than ARG_MAX allows, so they must never ride in argv.
-WORKDIR=$(mktemp -d)
+WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/ads-inquiry-watchdog.XXXXXX")
 trap 'rm -rf "$WORKDIR"' EXIT
 SINCE_MS=$(( (NOW - LOOKBACK) * 1000 ))
 page=0
