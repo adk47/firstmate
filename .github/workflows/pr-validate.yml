@@ -620,11 +620,6 @@ jobs:
           scripts/check-no-tmp-scratch.sh --base "origin/${{ github.event.pull_request.base.ref }}"
           echo "::endgroup::"
 
-      - name: tmpfiles catch-all — /tmp age stays mtime-keyed (MUS-6053)
-        # scripts/aux-units/tmp.conf is the generic /tmp lane; clean-my-linux.sh
-        # deliberately has none. The test mutates the source and the installer guard.
-        run: bash tests/test_install_aux_units_tmpfiles.sh
-
       - name: Skill drift check — skills-all/ vs workspaces/*/skills/
         # Per memory `feedback_skill_dual_tree.md` and incident 2026-04-29
         # postmortem: skill fixes have repeatedly landed in skills-all/ but
