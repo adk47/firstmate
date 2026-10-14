@@ -102,3 +102,13 @@ run_block() {
   [ -z "$(ls -A "$TMP/elsewhere")" ]
   [ "$(grep -c '^CRITICAL' "$CALLS")" -eq 1 ]
 }
+
+@test "a forged recent stamp behind a symlinked state dir does not mute the page" {
+  touch "$TMP/null"
+  mkdir "$TMP/elsewhere"
+  date +%s > "$TMP/elsewhere/openclaw-watchdog-devnull-cooldown"
+  ln -s "$TMP/elsewhere" "$HEAP_STATE_DIR"
+  DEVNULL_PATH="$TMP/null" run_block
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^CRITICAL' "$CALLS")" -eq 1 ]
+}
