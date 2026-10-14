@@ -319,7 +319,7 @@ build_payload() {
   for r in "${RULES[@]}"; do rules+="$r|${rule_status[$r]}"$'\n'; done
   MODE="$MODE" RULES_STATUS="$rules" ENTRIES="$entries_total" TOTAL_KB="$kb_total" \
   CAP_HIT="$cap_hit" TARGET_REACHED="$target_reached" TARGET_PCT="$TARGET_USED_PCT" \
-  CHILD_RC="$child_rc" BAK_ERRORS="$bak_errors" ERRORS_FILE="$ERRORS_FILE" \
+  ERRORS_FILE="$ERRORS_FILE" \
   PAYLOAD_OUT="$PAYLOAD_FILE" SLACK_CHANNEL="$SLACK_CHANNEL" python3 - <<'PYEOF'
 import json, os
 

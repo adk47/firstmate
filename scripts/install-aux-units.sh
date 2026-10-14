@@ -2365,19 +2365,17 @@ astate=$(systemctl is-active "$atmr" 2>/dev/null || echo unknown)
 log "  $atmr: $astate (fires daily 08:00 UTC)"
 
 # ─── Weekly server cleanup (Mon 04:30 UTC) ────────────────────
-# Reclaims the junk systemd-tmpfiles misses: /tmp depth-1 entries
-# whose MTIME (not atime/ctime — scanners refresh those, which is
-# how 19GB of dead PR-review clones survived the daily
-# `D /tmp ... 30d` tmpfiles rule) is >14d; hot-patch *.bak*/*.orig
-# >30d under /opt/hydra + /root/hydra-hotpatch-backups; apt
-# autoremove/autoclean. Posts a Block Kit summary to #clio_devops
-# on every run. Exit 1 = structural refusal (surfaces as a failed
-# unit); per-file delete errors stay exit 0 and report via Slack.
+# Runs clean-my-linux.sh, the orchestrator that orders and gates the
+# reaping rules (tmp-reaper, workspace clones, codex home, hot-patch
+# *.bak/*.orig >30d, apt autoremove/autoclean) under per-run caps.
+# Posts a Block Kit summary to #clio_devops on every run. Exit 1 =
+# structural refusal (surfaces as a failed unit); per-file delete errors
+# stay exit 0 and report via Slack.
 # clean-my-linux.sh defaults to a dry-run, so the unit passes --apply
 # explicitly; its cadence/rename is MUS-6056's.
 cat > /etc/systemd/system/hydra-weekly-cleanup.service << CLEANUPSVC
 [Unit]
-Description=HYDRA weekly server cleanup (/tmp mtime>14d, .bak/.orig>30d, apt)
+Description=HYDRA weekly server cleanup (clean-my-linux orchestrator)
 
 [Service]
 Type=oneshot

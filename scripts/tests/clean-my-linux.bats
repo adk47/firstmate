@@ -502,3 +502,9 @@ STUB
   [ "$status" -eq 0 ]
   [[ "$output" == *"bak: deleted=0"* ]]
 }
+
+@test "weekly unit ExecStart requests --apply (the dry-run default would reclaim nothing)" {
+  line="$(sed -n '/^cat > \/etc\/systemd\/system\/hydra-weekly-cleanup.service/,/^CLEANUPSVC$/p' \
+    "$HYDRA_REPO/scripts/install-aux-units.sh" | grep '^ExecStart=')"
+  [[ "$line" == *"/scripts/clean-my-linux.sh --apply" ]]
+}
