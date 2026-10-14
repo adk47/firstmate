@@ -28,8 +28,9 @@ from credit_review.policy import (  # noqa: E402
     approver_identity_alert, combine, deterministic, facts_from_record,
 )
 from credit_review.roles import family_of, names_match  # noqa: E402
+from credit_review import runner as runner_mod  # noqa: E402
 from credit_review.runner import (  # noqa: E402
-    Config, fetch_approved_window, record, render_digest, run_audit, run_review, sampled,
+    Config, fetch_approved_window, profile_burst_alerts, record, render_digest, run_audit, run_review, sampled,
 )
 
 NOW = datetime(2026, 10, 11, 3, 0, tzinfo=timezone.utc)
@@ -1164,6 +1165,393 @@ class CronContractTests(unittest.TestCase):
             self.assertIn(argv[2], ("audit", "review", "digest", "metrics"))
             if argv[2] == "review":
                 self.assertIn("shadow", argv, "the reviewer ships in shadow (Phase 0)")
+
+
+def _audit_row(ledger, rid, pid, verdict, approved_at, name="Zach Miller"):
+    ledger.record({"request_id": rid, "mode": "audit", "phase": "live", "verdict": verdict, "confidence": 0.5,
+                   "basis": "catalog_only", "big_track": False, "profile_id": pid, "approved_at": approved_at,
+                   "status_at_review": "approved",
+                   "evidence_json": {"claim": {"person_or_profile_name": name, "claimed_roles": ["Mixing"]}}})
+
+
+def _park(ledger, rid, pid, updated_at, since, name=None):
+    req = {"id": rid, "profileId": pid, "status": "approved", "updatedAt": updated_at}
+    if name:
+        req["profile"] = {"name": name}
+    ledger.note_evidence_failure(req, "audit", "raw credits unreadable")
+    ledger.db.execute("UPDATE evidence_retry SET first_failed_at=? WHERE request_id=? AND mode='audit'", (since, rid))
+    ledger.db.commit()
+
+
+class ProfileBurstAlertTests(unittest.TestCase):
+    """firstmate 035: a profile with 421 requests in <2h, 35 validator approvals and
+    25 SUSPECT in one hour raised ZERO alerts (row alerts fire only on a CONTRADICTED
+    big track). A per-profile burst now alerts once, naming the profile."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ledger = Ledger(str(Path(self.tmp.name) / "l.sqlite3"))
+
+    def tearDown(self):
+        self.ledger.close()
+        self.tmp.cleanup()
+
+    def at(self, minutes_ago):
+        return (NOW - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def test_ten_flagged_approvals_alert_once_naming_the_profile(self):
+        for i in range(10):
+            _audit_row(self.ledger, f"s{i}", "zach", "SUSPECT" if i % 2 else "CONTRADICTED", self.at(10 + i))
+        alerts = profile_burst_alerts(self.ledger, now=NOW)
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("CREDIT-AUDIT ALERT", alerts[0])
+        self.assertIn("Zach Miller (zach)", alerts[0])
+        self.assertIn("10 approval(s) within 2h (up to 2026-10-11T02:50:00Z), 10 of them SUSPECT or CONTRADICTED",
+                      alerts[0])
+        self.assertIn("https://credits.muso.ai/profile/zach", alerts[0])
+        # The next run, with no new approval, does not repeat it; a continuing burst alerts again.
+        self.assertEqual(profile_burst_alerts(self.ledger, now=NOW + timedelta(hours=1)), [])
+        _audit_row(self.ledger, "s-more", "zach", "SUSPECT", self.ts(NOW + timedelta(hours=1, minutes=30)))
+        alerts = profile_burst_alerts(self.ledger, now=NOW + timedelta(hours=2))
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("(up to 2026-10-11T04:30:00Z)", alerts[0])
+        self.assertEqual(profile_burst_alerts(self.ledger, now=NOW + timedelta(hours=3)), [])
+
+    def test_twenty_approvals_alert_even_when_none_are_flagged(self):
+        for i in range(20):
+            _audit_row(self.ledger, f"c{i}", "busy", "CONFIRMED", self.at(5 * i))
+        alerts = profile_burst_alerts(self.ledger, now=NOW)
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("20 approval(s) within 2h (up to 2026-10-11T03:00:00Z), 0 of them SUSPECT or CONTRADICTED",
+                      alerts[0])
+
+    def test_below_thresholds_outside_window_and_other_profiles_do_not_alert(self):
+        for i in range(9):
+            _audit_row(self.ledger, f"s{i}", "p1", "SUSPECT", self.at(10))
+        for i in range(10):
+            _audit_row(self.ledger, f"u{i}", "p1", "UNVERIFIABLE", self.at(10))   # 19 approvals, 9 flagged
+        for i in range(15):
+            _audit_row(self.ledger, f"old{i}", "p2", "SUSPECT", self.at(121 + i))  # outside 2h
+        for i in range(5):
+            _audit_row(self.ledger, f"a{i}", f"solo{i}", "SUSPECT", self.at(10))
+        self.assertEqual(profile_burst_alerts(self.ledger, now=NOW), [])
+
+    def test_approvals_after_now_are_not_counted(self):
+        for i in range(12):
+            _audit_row(self.ledger, f"f{i}", "p4", "SUSPECT", (NOW + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.assertEqual(profile_burst_alerts(self.ledger, now=NOW), [])
+
+    def test_a_request_counts_once_by_its_latest_verdict(self):
+        # A re-reviewed request has two audit rows; only its latest verdict counts.
+        for i in range(10):
+            _audit_row(self.ledger, f"r{i}", "p3", "SUSPECT", self.at(10))
+        for i in range(10):
+            _audit_row(self.ledger, f"r{i}", "p3", "CONFIRMED", self.at(10))
+        self.assertEqual(profile_burst_alerts(self.ledger, now=NOW), [])
+
+    @staticmethod
+    def ts(dt):
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def test_catch_up_run_after_an_outage_alerts_on_older_approvals(self):
+        day = datetime(2026, 10, 14, tzinfo=timezone.utc)
+        self.ledger.set_state("burst_last_check", "2026-10-14T10:45:00Z")
+        # Admin API down 10:45-13:45: those runs never reach the burst check. The
+        # 14:45 catch-up run records 25 SUSPECT approvals made 11:00-12:30.
+        for i in range(25):
+            _audit_row(self.ledger, f"o{i}", "zach", "SUSPECT", self.ts(day + timedelta(hours=11, minutes=90 * i // 24)))
+        alerts = profile_burst_alerts(self.ledger, now=day + timedelta(hours=14, minutes=45))
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("Zach Miller (zach): 25 approval(s) within 2h (up to 2026-10-14T12:30:00Z), 25 of them", alerts[0])
+        self.assertEqual(self.ledger.get_state("burst_last_check"), "2026-10-14T14:45:00Z")
+        # The next hourly run neither re-alerts nor finds anything new.
+        self.assertEqual(profile_burst_alerts(self.ledger, now=day + timedelta(hours=15, minutes=45)), [])
+
+    def test_burst_split_across_two_hourly_runs_alerts(self):
+        day = datetime(2026, 10, 14, tzinfo=timezone.utc)
+        for i in range(6):
+            _audit_row(self.ledger, f"a{i}", "split", "SUSPECT", self.ts(day + timedelta(hours=10, minutes=40)))
+        self.assertEqual(profile_burst_alerts(self.ledger, now=day + timedelta(hours=11, minutes=45)), [])
+        for i in range(6):
+            _audit_row(self.ledger, f"b{i}", "split", "SUSPECT", self.ts(day + timedelta(hours=12, minutes=30)))
+        # A trailing [10:45, 12:45] window sees only 6; the 10:30-12:30 window holds all 12.
+        alerts = profile_burst_alerts(self.ledger, now=day + timedelta(hours=12, minutes=45))
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("12 approval(s) within 2h (up to 2026-10-14T12:30:00Z), 12 of them", alerts[0])
+        self.assertEqual(profile_burst_alerts(self.ledger, now=day + timedelta(hours=13, minutes=45)), [])
+
+    def test_first_run_without_state_judges_windows_ending_in_the_last_2h(self):
+        for i in range(12):
+            _audit_row(self.ledger, f"old{i}", "stale", "SUSPECT", self.at(150))
+        for i in range(12):
+            _audit_row(self.ledger, f"new{i}", "fresh", "SUSPECT", self.at(30))
+        alerts = profile_burst_alerts(self.ledger, now=NOW)
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("(fresh)", alerts[0])
+        self.assertEqual(self.ledger.get_state("burst_last_check"), "2026-10-11T03:00:00Z")
+
+    def test_approvals_parked_on_evidence_failure_count_toward_the_burst(self):
+        day = datetime(2026, 10, 14, tzinfo=timezone.utc)
+        self.ledger.set_state("burst_last_check", "2026-10-14T09:45:00Z")
+        times = [day + timedelta(hours=10, minutes=90 * i // 21) for i in range(22)]
+        for i, t in enumerate(times[:17]):
+            _audit_row(self.ledger, f"ok{i}", "zach", "CONFIRMED", self.ts(t))
+        for i, t in enumerate(times[17:]):
+            _park(self.ledger, f"pk{i}", "zach", self.ts(t), "2026-10-14T11:00:00Z", name="Zach Miller")
+        alerts = profile_burst_alerts(self.ledger, now=day + timedelta(hours=11, minutes=45))
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("Zach Miller (zach): 22 approval(s) within 2h (up to 2026-10-14T11:30:00Z), "
+                      "0 of them SUSPECT or CONTRADICTED, 5 not yet auditable. Nothing was changed", alerts[0])
+
+    def test_parked_approvals_are_never_flagged_and_count_once_when_recorded(self):
+        for i in range(9):
+            _audit_row(self.ledger, f"s{i}", "p5", "SUSPECT", self.at(10))
+        for i in range(5):
+            _park(self.ledger, f"pk{i}", "p5", self.at(10), self.at(5))
+        self.assertEqual(profile_burst_alerts(self.ledger, now=NOW), [])
+        for i in range(9):
+            _park(self.ledger, f"s{i}", "p5", self.at(10), self.at(5))
+        self.ledger.set_state("burst_last_check", self.at(60))
+        self.assertEqual(profile_burst_alerts(self.ledger, now=NOW), [])
+
+    def test_parked_approval_later_recorded_suspect_completes_a_burst(self):
+        day = datetime(2026, 10, 14, tzinfo=timezone.utc)
+        self.ledger.set_state("burst_last_check", "2026-10-14T09:45:00Z")
+        for i in range(8):
+            _audit_row(self.ledger, f"s{i}", "zach", "SUSPECT", self.ts(day + timedelta(hours=10, minutes=4 * i)))
+        late = self.ts(day + timedelta(hours=10, minutes=40))
+        for i in range(4):
+            _park(self.ledger, f"pk{i}", "zach", late, "2026-10-14T10:45:00Z")
+        self.assertEqual(profile_burst_alerts(self.ledger, now=day + timedelta(hours=11, minutes=45)), [])
+        self.assertEqual(self.ledger.get_state("burst_last_check"), "2026-10-14T10:39:59Z")
+        for i in range(4):
+            self.ledger.clear_evidence_failure(f"pk{i}", "audit")
+            _audit_row(self.ledger, f"pk{i}", "zach", "SUSPECT", late)
+        alerts = profile_burst_alerts(self.ledger, now=day + timedelta(hours=12, minutes=45))
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("Zach Miller (zach): 12 approval(s) within 2h (up to 2026-10-14T10:40:00Z), 12 of them", alerts[0])
+        self.assertEqual(self.ledger.get_state("burst_last_check"), "2026-10-14T12:45:00Z")
+        self.assertEqual(profile_burst_alerts(self.ledger, now=day + timedelta(hours=13, minutes=45)), [])
+
+    def test_a_stuck_parked_approval_never_repeats_an_old_burst_alert(self):
+        day = datetime(2026, 10, 14, tzinfo=timezone.utc)
+        self.ledger.set_state("burst_last_check", "2026-10-14T09:45:00Z")
+        for i in range(10):
+            _audit_row(self.ledger, f"s{i}", "zach", "SUSPECT", self.ts(day + timedelta(hours=10, minutes=3 * i)))
+        _park(self.ledger, "stuck", "zach", self.ts(day + timedelta(hours=10, minutes=5)), "2026-10-14T10:45:00Z")
+        self.assertEqual(len(profile_burst_alerts(self.ledger, now=day + timedelta(hours=10, minutes=45))), 1)
+        self.assertEqual(profile_burst_alerts(self.ledger, now=day + timedelta(hours=23, minutes=45)), [])
+
+    def test_a_long_stuck_parked_row_on_another_profile_never_repeats_alerts(self):
+        day = datetime(2026, 10, 14, tzinfo=timezone.utc)
+        self.ledger.set_state("burst_last_check", "2026-10-14T07:45:00Z")
+        _park(self.ledger, "stuck", "other", self.ts(day + timedelta(hours=8)), "2026-10-14T08:45:00Z")
+        for i in range(30):
+            _audit_row(self.ledger, f"a{i}", "zach", "CONFIRMED", self.ts(day + timedelta(hours=9, minutes=2 * i)))
+        for i in range(30):
+            _audit_row(self.ledger, f"b{i}", "zach", "CONFIRMED", self.ts(day + timedelta(hours=12, minutes=i)))
+        self.assertEqual(len(profile_burst_alerts(self.ledger, now=day + timedelta(hours=10, minutes=45))), 1)
+        self.assertEqual(self.ledger.get_state("burst_last_check"), "2026-10-14T07:59:59Z")
+        seen = []
+        for hour in range(11, 33):
+            seen += profile_burst_alerts(self.ledger, now=day + timedelta(hours=hour, minutes=45))
+        self.assertEqual(len(seen), 1, seen)
+        self.assertIn("30 approval(s) within 2h (up to 2026-10-14T12:29:00Z)", seen[0])
+        # A new burst on the same profile, while the old windows are still in reach, alerts.
+        for i in range(20):
+            _audit_row(self.ledger, f"c{i}", "zach", "CONFIRMED", self.ts(day + timedelta(hours=33, minutes=3 * i)))
+        alerts = profile_burst_alerts(self.ledger, now=day + timedelta(hours=34, minutes=45))
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("20 approval(s) within 2h (up to 2026-10-15T09:57:00Z)", alerts[0])
+        # Parked for more than 24h, the row no longer holds the check back.
+        self.assertEqual(self.ledger.get_state("burst_last_check"), "2026-10-15T10:45:00Z")
+
+    def test_lookback_is_capped_at_24h(self):
+        self.ledger.set_state("burst_last_check", "2026-10-08T03:00:00Z")
+        for i in range(12):
+            _audit_row(self.ledger, f"x{i}", "ancient", "SUSPECT", self.ts(NOW - timedelta(hours=30)))
+        for i in range(12):
+            _audit_row(self.ledger, f"y{i}", "recent", "SUSPECT", self.ts(NOW - timedelta(hours=23)))
+        alerts = profile_burst_alerts(self.ledger, now=NOW)
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("(recent)", alerts[0])
+
+
+class CronOutputTests(unittest.TestCase):
+    """firstmate 035: #credit-verification showed 'stdout: NO_REPLY / stderr:
+    [credit-review] ...'. openclaw posts stdout AND stderr of a command cron, so a
+    cron run writes nothing to stderr: NO_REPLY alone when there is nothing to act
+    on, plain alert lines otherwise, and a crash is one plain line."""
+
+    def setUp(self):
+        self.cli = load_cli()
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.cli.KILL_SWITCH = d / "off"
+        self.cli.MODEL_ENABLE_FILE = d / "model.enabled"   # absent: catalog-only, no balance read
+        self.log_path = d / "run.log"
+        self._saved_log = runner_mod.LOG_PATH
+        runner_mod.LOG_PATH = str(self.log_path)
+        self.ledger_path = str(d / "l.sqlite3")
+        self.cli.admin_api.AdminClient = lambda *a, **k: FakeAdmin([], {}, PROFILES)
+
+    def tearDown(self):
+        runner_mod.LOG_PATH = self._saved_log
+        self.cli.admin_api.AdminClient = admin_api.AdminClient
+        self.tmp.cleanup()
+
+    def run_cli(self, *argv):
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.cli.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_quiet_audit_posts_exactly_no_reply_and_logs_to_the_file(self):
+        rc, out, err = self.run_cli("--ledger", self.ledger_path, "audit")
+        self.assertEqual((rc, out, err), (0, "NO_REPLY\n", ""))
+        self.assertIn("[credit-review] audit", self.log_path.read_text())
+
+    def test_quiet_review_posts_exactly_no_reply(self):
+        rc, out, err = self.run_cli("--ledger", self.ledger_path, "review", "--phase", "shadow")
+        self.assertEqual((rc, out, err), (0, "NO_REPLY\n", ""))
+
+    def test_burst_reaches_the_cron_output_with_no_stderr(self):
+        led = Ledger(self.ledger_path)
+        recent = (datetime.now(timezone.utc) - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for i in range(12):
+            _audit_row(led, f"z{i}", "zach", "SUSPECT", recent)
+        led.close()
+        rc, out, err = self.run_cli("--ledger", self.ledger_path, "audit")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(out.count("CREDIT-AUDIT ALERT: burst of approvals on one profile - Zach Miller (zach)"), 1)
+        self.assertNotIn("NO_REPLY", out)
+        self.assertNotIn("[credit-review]", out)
+
+    def audit_with(self, reqs, **run_kwargs):
+        self.cli.admin_api.AdminClient = lambda *a, **k: FakeAdmin(reqs, {"t3": []}, PROFILES)
+        self.cli.run_audit = lambda *a, **k: run_audit(*a, **{**k, **run_kwargs})
+        try:
+            return self.run_cli("--ledger", self.ledger_path, "audit", "--sample-rate", "0")
+        finally:
+            self.cli.run_audit = run_audit
+
+    @staticmethod
+    def approvals(prefix, minutes_ago):
+        now = datetime.now(timezone.utc)
+        return [request(f"{prefix}{m}", pid=PID_GOOD, track="t3",
+                        updated=(now - timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+                for m in minutes_ago]
+
+    def burst_lines(self, out):
+        return [line for line in out.splitlines() if "burst of approvals on one profile" in line and PID_GOOD in line]
+
+    def test_approvals_beyond_an_early_stop_mark_alert_on_the_next_run(self):
+        reqs = self.approvals("e", range(60, 38, -1))
+        orig = runner_mod.AUDIT_CHUNK
+        runner_mod.AUDIT_CHUNK = 5
+        try:
+            rc, out, err = self.audit_with(reqs, deadline_s=0)
+        finally:
+            runner_mod.AUDIT_CHUNK = orig
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("stopped at its 0s deadline", out)
+        self.assertEqual(self.burst_lines(out), [])
+        rc, out, err = self.audit_with(reqs)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(len(self.burst_lines(out)), 1, out)
+        self.assertIn("22 approval(s) within 2h", self.burst_lines(out)[0])
+        rc, out, _ = self.audit_with(reqs)
+        self.assertEqual(self.burst_lines(out), [])
+
+    def test_approvals_made_after_the_audit_fetch_alert_on_the_next_run(self):
+        early = self.approvals("f", range(30, 15, -1))
+        rc, out, err = self.audit_with(early, now=datetime.now(timezone.utc) - timedelta(minutes=10))
+        self.assertEqual((rc, out, err), (0, "NO_REPLY\n", ""))
+        late = self.approvals("g", range(9, 2, -1))
+        rc, out, err = self.audit_with(early + late)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(len(self.burst_lines(out)), 1, out)
+        self.assertIn("22 approval(s) within 2h", self.burst_lines(out)[0])
+
+    def test_a_crash_is_one_plain_line_and_the_traceback_goes_to_the_log(self):
+        def boom(*a, **k):
+            raise RuntimeError("kaboom-detail")
+        self.cli.run_audit = boom
+        rc, out, err = self.run_cli("--ledger", self.ledger_path, "audit")
+        self.assertEqual((rc, err), (1, ""))
+        self.assertEqual(len(out.strip().splitlines()), 1)
+        self.assertIn("internal error (RuntimeError)", out)
+        self.assertNotIn("kaboom-detail", out)
+        self.assertNotIn("Traceback", out)
+        self.assertIn("kaboom-detail", self.log_path.read_text())
+
+    def test_admin_api_failure_is_one_plain_line_without_wrapper_stderr(self):
+        def down(*a, **k):
+            raise admin_api.AdminError("admin GET failed rc=7: curl: (7) Failed to connect\n"
+                                       "muso-admin-api.sh: line 42: wrapper-detail")
+        self.cli.run_audit = down
+        rc, out, err = self.run_cli("--ledger", self.ledger_path, "audit")
+        self.assertEqual((rc, err), (1, ""))
+        self.assertEqual(len(out.strip().splitlines()), 1)
+        self.assertIn("admin API is unavailable. No credits were changed.", out)
+        self.assertNotIn("wrapper-detail", out)
+        self.assertNotIn("curl", out)
+        self.assertIn("wrapper-detail", self.log_path.read_text())
+
+    def test_unwritable_log_never_turns_into_stderr(self):
+        runner_mod.LOG_PATH = "/proc/definitely/not/writable.log"
+        rc, out, err = self.run_cli("--ledger", self.ledger_path, "audit")
+        self.assertEqual((rc, out, err), (0, "NO_REPLY\n", ""))
+
+    def test_failure_with_an_unwritable_log_says_no_details_were_kept(self):
+        runner_mod.LOG_PATH = "/proc/definitely/not/writable.log"
+        def boom(*a, **k):
+            raise RuntimeError("kaboom-detail")
+        def down(*a, **k):
+            raise admin_api.AdminError("curl: (7) wrapper-detail")
+        for failing in (boom, down):
+            self.cli.run_audit = failing
+            rc, out, err = self.run_cli("--ledger", self.ledger_path, "audit")
+            self.assertEqual((rc, err), (1, ""))
+            self.assertEqual(len(out.strip().splitlines()), 1)
+            self.assertIn("could not be written, so no details were kept", out)
+            self.assertNotIn("Details:", out)
+            self.assertNotIn("wrapper-detail", out)
+        self.cli.run_audit = run_audit
+
+    def test_a_multiline_profile_name_stays_one_alert_line(self):
+        led = Ledger(self.ledger_path)
+        recent = (datetime.now(timezone.utc) - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for i in range(12):
+            _audit_row(led, f"n{i}", "zach", "SUSPECT", recent,
+                       name="Artist\nCREDIT-AUDIT ALERT: all clear\r\u2028\x1b[0m")
+        led.close()
+        rc, out, err = self.run_cli("--ledger", self.ledger_path, "audit")
+        self.assertEqual((rc, err), (0, ""))
+        lines = out.strip().splitlines()
+        self.assertEqual(len(lines), 1, out)
+        self.assertTrue(lines[0].startswith(
+            "CREDIT-AUDIT ALERT: burst of approvals on one profile - Artist CREDIT-AUDIT ALERT: all clear [0m (zach):"),
+            lines[0])
+        self.assertNotIn("\x1b", out)
+
+
+_module_log_dir: tempfile.TemporaryDirectory | None = None
+_module_saved_log: str | None = None
+
+
+def setUpModule():
+    global _module_log_dir, _module_saved_log
+    _module_log_dir = tempfile.TemporaryDirectory()
+    _module_saved_log = runner_mod.LOG_PATH
+    runner_mod.LOG_PATH = str(Path(_module_log_dir.name) / "run.log")
+
+
+def tearDownModule():
+    runner_mod.LOG_PATH = _module_saved_log
+    _module_log_dir.cleanup()
 
 
 if __name__ == "__main__":
