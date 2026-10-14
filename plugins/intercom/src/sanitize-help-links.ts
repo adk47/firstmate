@@ -89,7 +89,9 @@ function stripUrlTokensOnly(body: string): string {
   const stripped = body
     .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, (m) => (hasArticleUrl(m) ? "" : m))
     .replace(/\[[^\]]*\]\([^)]*\)/g, (m) => (hasArticleUrl(m) ? "" : m))
-    .replace(TOKEN_G, (m) => (hasArticleUrl(m) ? "" : m));
+    .replace(TOKEN_G, (m) => (hasArticleUrl(m) ? "" : m))
+    // A bare link broken by LF/CR is two tokens that each look harmless; join the halves and test them together.
+    .replace(/https?:\/\/[^\s<>()[\]"']*[\r\n]+[^\s<>()[\]"']+/gi, (m) => (hasArticleUrl(m) ? "" : m));
   return stripped
     .split("\n")
     .map((l) => l.replace(LEAD_RE, "").replace(/[ \t]{2,}/g, " ").replace(/\s+$/, ""))

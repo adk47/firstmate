@@ -301,6 +301,25 @@ describe("a link split across lines next to a valid citation", () => {
   });
 });
 
+describe("a bare plain-text link split across lines", () => {
+  const VALID = `${HELP_CITATION_LEAD} ${GOOD}`;
+  it.each([
+    ["no manifest", "Answer.\nSee https://help.muso.ai/en/ar\nticles/9999999-invented for details", null],
+    ["manifest, no other hit", "Answer.\nSee https://help.muso.ai/en/ar\nticles/9999999-invented for details", MANIFEST],
+    ["manifest, valid line kept", `Answer.\n${VALID}\nSee https://help.muso.ai/en/ar\nticles/9999999-invented for details`, MANIFEST],
+    ["CR split", "Answer.\nSee https://help.muso.ai/en/ar\rticles/9999999-invented", MANIFEST],
+  ])("strips the invented link: %s", (_n, body, manifest) => {
+    const out = sanitizeHelpLinks(body, manifest);
+    expect(out.body).not.toContain("9999999");
+    expect(out.body).not.toMatch(/en\/ar[\r\n]/);
+    expect(out.body).toContain("Answer.");
+  });
+  it("does not eat the next line when a whole link ends a line", () => {
+    const out = sanitizeHelpLinks("Answer.\nSee https://help.muso.ai/en/articles/5-x\nKeep this sentence.", null);
+    expect(out.body).toContain("Keep this sentence.");
+  });
+});
+
 describe("parseHelpManifest / loadHelpManifest", () => {
   it.each(["", "not json", "[]", '{"articles":[]}', '{"articles":{"1":{"slug":5}}}', '{"articles":{"1":{"slug":"a","url":"http://evil.example/1-a"}}}'])(
     "rejects malformed input %j",
