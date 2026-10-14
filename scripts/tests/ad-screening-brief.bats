@@ -171,6 +171,6 @@ sends() { cat "$T/slack.n" 2>/dev/null || echo 0; }
 @test "accented advertiser text is capped on characters, not bytes" {
   ad 101 | jq --arg n "$(printf 'é%.0s' $(seq 1 300))" '.advertiserName=$n' | fixture; answers reject 0.87 weak adult
   "$SCRIPT" --run
-  ! grep -q $'\xef\xbf\xbd' "$T/slack.1.txt"
+  if grep -q $'\xef\xbf\xbd' "$T/slack.1.txt"; then false; fi
   [ "$(head -n1 "$T/slack.1.txt" | grep -o 'é' | wc -l)" -eq 80 ]
 }

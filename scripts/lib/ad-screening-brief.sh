@@ -13,7 +13,7 @@ _brief_clean() { # <text> <cap>
   local t="${1//[$'\001'-$'\037\177\\<>']/ }"
   t="$(printf '%s' "$t" | tr -s ' ')"
   [ -n "${t// /}" ] || t="not stated"
-  printf '%s' "$(printf '%s' "$t" | LC_ALL=C.UTF-8 cut -c1-"$2")"
+  jq -rj --argjson n "$2" '.[0:$n]' <<<"$(jq -Rn --arg t "$t" '$t')"
 }
 
 ad_screening_brief() {
