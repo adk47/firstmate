@@ -13,7 +13,7 @@ _brief_clean() { # <text> <cap>
   local t="${1//[$'\001'-$'\037\177\\<>']/ }"
   t="$(printf '%s' "$t" | tr -s ' ')"
   [ -n "${t// /}" ] || t="not stated"
-  printf '%s' "${t:0:$2}"
+  printf '%s' "$(printf '%s' "$t" | LC_ALL=C.UTF-8 cut -c1-"$2")"
 }
 
 ad_screening_brief() {
@@ -22,9 +22,15 @@ ad_screening_brief() {
   who="$(jq -r '[.advertiserName, .adAccount.name, .company] | map(select(. != null and . != "")) | .[0] // ""' <<<"$ad")"
   head="$(jq -r '.adHeadline // ""' <<<"$ad")"; body="$(jq -r '.adBody // ""' <<<"$ad")"
   goal="$(jq -r '.campaign.objective // ""' <<<"$ad")"
-  spend="$(jq -r '(.campaign.budget.amount) as $b | (.campaign.schedule.days) as $d | .campaign.budget.currency as $c
-    | if ($b | type) == "number" and ($d | type) == "number"
-      then "\($c // "") \($b) × \($d) days = \($c // "") \($b * $d)" else "not stated" end' <<<"$ad")"
+  spend="$(jq -r '
+    def day: (.[0:10] + "T00:00:00Z") | fromdateiso8601;
+    .campaign as $c | ($c.budget.amount) as $b | ($c.budget.currency // "") as $cur
+    | (try ((($c.schedule.end | day) - ($c.schedule.start | day)) / 86400 + 1) catch null) as $d
+    | if ($b | type) != "number" or $b < 0 or $b > 1e12 then "not stated"
+      elif $c.budget.type == "lifetime" then "\($cur) \($b) total"
+      elif $c.budget.type == "daily" and ($d | type) == "number" and $d >= 1 and $d <= 3650
+        then "\($cur) \($b)/day × \($d) days = \($cur) \($b * $d)"
+      else "\($cur) \($b) (budget type or term not stated)" end' <<<"$ad")"
   pct="$(awk -v c="$conf" 'BEGIN { printf "%d%%", c * 100 + 0.5 }')"
   printf '%s\n' \
     "<@${SLACK_UID_AARON:-U7RP6HKUZ}> New ad to screen — advertiser: $(_brief_clean "$who" 80)" \

@@ -50,7 +50,7 @@ ad() {
   jq -n --arg id "$1" '{id:$id, advertiserName:"Acme Records", adHeadline:"Hear it first", adBody:"New single out Friday",
     destinationUrl:"https://acme.example", primaryMediaUrl:"https://cdn.example/a.png",
     updatedAt:"2026-10-05T09:00:00Z", screenedAt:null, adAccount:{name:"Acme"},
-    campaign:{objective:"awareness", budget:{amount:500,currency:"USD"}, schedule:{days:30}}}'
+    campaign:{objective:"awareness", budget:{amount:500,currency:"USD",type:"daily"}, schedule:{start:"2026-10-20",end:"2026-11-18"}}}'
 }
 fixture() { jq -s '{items: .}' >"$STUB_FIXTURE"; }
 
@@ -89,7 +89,7 @@ sends() { cat "$T/slack.n" 2>/dev/null || echo 0; }
   "$SCRIPT" --run
   out="$(cat "$T/slack.1.txt")"
   for s in "<@U7RP6HKUZ>" "Acme Records" "Hear it first" "New single out Friday" "purple album cover" \
-    'USD 500 × 30 days = USD 15000' "awareness" "reject" "87%" "adult" "https://promote.muso.ai/portal/admin/review"; do
+    'USD 500/day × 30 days = USD 15000' "awareness" "reject" "87%" "adult" "https://promote.muso.ai/portal/admin/review"; do
     [[ "$out" == *"$s"* ]] || { echo "missing: $s"; echo "$out"; return 1; }
   done
   [[ "$out" != *"@aaron"* ]]
@@ -150,4 +150,27 @@ sends() { cat "$T/slack.n" 2>/dev/null || echo 0; }
   [ "$status" -eq 0 ]
   run "$SCRIPT"
   [ "$status" -eq 2 ]
+}
+
+@test "spend: lifetime budget is shown as the total, never multiplied by the term" {
+  ad 101 | jq '.campaign.budget.type="lifetime"' | fixture; answers reject 0.87 weak adult
+  "$SCRIPT" --run
+  grep -q 'Spend: USD 500 total' "$T/slack.1.txt"
+}
+
+@test "spend: unknown budget type or an absurd term shows the amount and never multiplies" {
+  ad 101 | jq 'del(.campaign.budget.type)' | fixture; answers reject 0.87 weak adult
+  "$SCRIPT" --run
+  grep -q 'Spend: USD 500 (budget type or term not stated)' "$T/slack.1.txt"
+  ad 102 | jq '.campaign.schedule={start:"2026-10-20",end:"2026-10-01"}' | fixture
+  "$SCRIPT" --run
+  grep -q 'Spend: USD 500/day' "$T/slack.2.txt" && return 1
+  grep -q 'Spend: USD 500 (budget type or term not stated)' "$T/slack.2.txt"
+}
+
+@test "accented advertiser text is capped on characters, not bytes" {
+  ad 101 | jq --arg n "$(printf 'é%.0s' $(seq 1 300))" '.advertiserName=$n' | fixture; answers reject 0.87 weak adult
+  "$SCRIPT" --run
+  ! grep -q $'\xef\xbf\xbd' "$T/slack.1.txt"
+  [ "$(head -n1 "$T/slack.1.txt" | grep -o 'é' | wc -l)" -eq 80 ]
 }

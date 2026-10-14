@@ -202,6 +202,7 @@ screen() {
   # shellcheck disable=SC2086
   $put put "$id" "$payload" >"$workdir/err" 2>&1 || { log "ad $id: write failed (rc=$?), suggestion not stored: $(first_line "$workdir/err")"; return 1; }
   log "ad $id: screened ($eff)"
+  slack_load_env "${SLACK_NOTIFY_BOT:-devops}" || log "ad $id: brief not posted (no Slack bot token)"
   slack_notify "$(ad_screening_brief "$ad" "$(cat "$workdir/creative.$id" 2>/dev/null)" "$eff" "$conf" "$flags" \
     "$(ad_screening_reason "$rec" "$fit" "$flags")")" || true
 }
