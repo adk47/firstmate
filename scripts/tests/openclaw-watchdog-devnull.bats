@@ -13,7 +13,13 @@ WATCHDOG="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/openclaw
 setup() {
   TMP="$BATS_TEST_TMPDIR/c"; mkdir -p "$TMP"
   export CALLS="$TMP/calls.log"; : > "$CALLS"
-  export WATCHDOG_STATE_DIR="$TMP"
+  # WATCHDOG_STATE_DIR plays the world-writable /tmp: the stamp must NOT land there.
+  export WATCHDOG_STATE_DIR="$TMP/tmp"; mkdir -p "$WATCHDOG_STATE_DIR"
+  export HEAP_STATE_DIR="$TMP/state"
+  OLD_STAMP="$WATCHDOG_STATE_DIR/openclaw-watchdog-devnull-cooldown"
+  GATE="$TMP/gate.sh"
+  awk '/^_heap_state_ok\(\) \{/,/^\}$/' "$WATCHDOG" > "$GATE"
+  [ -s "$GATE" ] || { echo "could not extract _heap_state_ok" >&2; return 1; }
   BLOCK="$TMP/block.sh"
   awk '/^# ── \/dev\/null char-device guard/,/^fi$/' "$WATCHDOG" > "$BLOCK"
   [ -s "$BLOCK" ] || { echo "extraction produced nothing — did the section banner change?" >&2; return 1; }
@@ -26,6 +32,7 @@ run_block() {
     slack_notify() { printf "NOTIFY %s\n" "$*" >> "$CALLS"; }
     slack_notify_critical() { printf "CRITICAL %s\n" "$*" >> "$CALLS"; }
     CODEX_COOLDOWN_MIN=60
+    . "$2"
     _sane_epoch() { printf "%s" "$1"; }
     _codex_cooldown_ok() {
       local f="$1" mins="$2" last now
@@ -33,7 +40,7 @@ run_block() {
       last=$(cat "$f"); now=$(date +%s)
       [ "$(( (now - last) / 60 ))" -ge "$mins" ]
     }
-    . "$1"' _ "$BLOCK"
+    . "$1"' _ "$BLOCK" "$GATE"
 }
 
 @test "char device present: no alert" {
@@ -66,4 +73,32 @@ run_block() {
   touch "$TMP/null"
   DEVNULL_PATH="$TMP/null" run_block
   [ -f "$TMP/null" ] && [ ! -c "$TMP/null" ]
+}
+
+@test "stamp lands in the 0700 state dir, never in the /tmp-style dir" {
+  touch "$TMP/null"
+  DEVNULL_PATH="$TMP/null" run_block
+  [ -f "$HEAP_STATE_DIR/openclaw-watchdog-devnull-cooldown" ]
+  [ ! -e "$OLD_STAMP" ]
+  [ "$(stat -c %a "$HEAP_STATE_DIR" 2>/dev/null || stat -f %Lp "$HEAP_STATE_DIR")" = 700 ]
+}
+
+@test "a symlink pre-planted at the old /tmp stamp path is neither followed nor fatal" {
+  touch "$TMP/null"
+  echo victim > "$TMP/victim"
+  ln -s "$TMP/victim" "$OLD_STAMP"
+  DEVNULL_PATH="$TMP/null" run_block
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TMP/victim")" = victim ]
+  [ "$(grep -c '^CRITICAL' "$CALLS")" -eq 1 ]
+}
+
+@test "a symlinked state dir is refused: still pages, writes nothing through it" {
+  touch "$TMP/null"
+  mkdir "$TMP/elsewhere"
+  ln -s "$TMP/elsewhere" "$HEAP_STATE_DIR"
+  DEVNULL_PATH="$TMP/null" run_block
+  [ "$status" -eq 0 ]
+  [ -z "$(ls -A "$TMP/elsewhere")" ]
+  [ "$(grep -c '^CRITICAL' "$CALLS")" -eq 1 ]
 }
