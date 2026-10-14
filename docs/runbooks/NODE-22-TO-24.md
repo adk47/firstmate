@@ -153,6 +153,13 @@ Node. Host fact to confirm: `file "$(command -v muso)"` says `ELF`. It also mean
 | `openclaw-gateway-main` | `migrate-to-multi-gateway.sh:96` | `systemctl restart openclaw-gateway-main` | `systemctl is-active` = `active`; `openclaw --profile main gateway call health` ok; `journalctl -u openclaw-gateway-main --since -2m \| grep -cE 'ERR_DLOPEN\|NODE_MODULE_VERSION'` = `0` |
 | `openclaw-gateway-edge` | `migrate-to-multi-gateway.sh:124` | `systemctl restart openclaw-gateway-edge` | same with `--profile edge` and `-u openclaw-gateway-edge` |
 | host-only node units from §1 (`intercom-webhook`, `muso-mcp-gate` if present) | not in repo | `systemctl restart <unit>` | `active`, no DLOPEN in journal |
+| `hydra-main-prune-restart.timer` → `.service` (`install-aux-units.sh:2548-2585` at `origin/main`, not the base above) | `scripts/main-prune-restart.sh:8-9` → `openclaw sessions cleanup --enforce` (offline) → start main | **No manual restart.** The timer stops and starts `openclaw-gateway-main` itself, nightly **02:30 UTC**. Verify on the first run: `systemctl show hydra-main-prune-restart.service -p Result -p ExecMainStatus` → `Result=success` `ExecMainStatus=0`; `systemctl is-active openclaw-gateway-main` = `active`; `openclaw --profile main gateway call health` ok. |
+
+**`hydra-main-prune-restart` notes (all citations at `origin/main`, not the base above).**
+
+- **It replaces the hand-placed main bridge; expect exactly one 02:30 UTC main restart.** The bridge (`/usr/local/sbin/hydra-main-{prune-restart,nightly-reset}.sh`, via the transient `hydra-main-nightly-reset.timer`) also fired at 02:30 UTC. `install-aux-units.sh:2517-2546` retires it before the managed timer is armed: it stops the bridge timer, waits up to `AUX_BRIDGE_WAIT_SECS` (900 s) for a legacy run to finish, and deletes the hand-placed scripts. If a legacy run is still going after 900 s, the install fails with nothing removed and nothing armed, and the next deploy retries. **Passing looks like:** `systemctl list-timers --all` shows one 02:30 UTC main timer (`hydra-main-prune-restart.timer`), `hydra-main-nightly-reset.timer` is not active (stopped or absent), and `/usr/local/sbin/hydra-main-*.sh` are gone. Two armed at 02:30 is an anomaly: stop and escalate. One is correct.
+- **Shared lock, by design.** The prune, `deploy.sh` and `rollback.sh` share `/run/lock/hydra-main-prune-restart.lock` (`scripts/lib/main-prune-lock.sh`, commit `61f60bdfe`). The prune takes it without waiting, so it skips while a deploy holds it. Its 02:30 start is 90 min before the 04:00 UTC deploy (`.github/workflows/deploy.yml:11`). Do not "fix" that apparent collision; the lock serialises the two on purpose.
+- **First execution is the night after install.** If the 14 Oct 04:00 UTC deploy installs it, the first timer run is **15 Oct 02:30 UTC**, on whichever Node runtime is live then (22 or 24, depending on whether §2 has run). A run skips if main restarted less than 4 h earlier (`HYDRA_MAIN_MIN_UPTIME_H=4`, same unit block), so a manual restart shortly before 02:30 makes that night's run a no-op.
 
 **2. Timer units that reach node.** Cron/timers re-exec per tick, so these need
 **no restart**. Do **not** `systemctl start` them to test: they post to Intercom,
@@ -188,7 +195,7 @@ close conversations and add/remove openclaw crons. Verify on the next tick:
 | `hydra-daily-audit` `:2172` | `hydra-daily-audit.py:172,249` `journalctl` only |
 | `hydra-weekly-cleanup` `:2228` | `weekly-cleanup.sh:116` is an rsync-style exclude string, not a call |
 | `openclaw-config-write-audit@` `:1559` | `openclaw-config-write-audit.sh:75` `pgrep` only |
-| **read, no hit:** `hydra-jev-shadow-prune` `:2281`, `hydra-tmp-reaper` `:2329`, `hydra-company-finder-cache-refresh` `:2572` (uses `muso nocodb`, Go), `qa-approval-retry` `:2796` (`qa-slack-dm.sh:55` `muso`, Go) | no node, no openclaw |
+| **read, no hit:** `hydra-jev-shadow-prune` `:2281`, `hydra-tmp-reaper` `:2329`, `hydra-company-finder-cache-refresh` `:2572` (uses `muso nocodb`, Go), `qa-approval-retry` `:2796` (`qa-slack-dm.sh:55` `muso`, Go), `intercom-rights-holder-watchdog` `:548-579` (`origin/main` line; `.service` + `.timer`, every 10 min, `ExecStart=/usr/bin/python3`; `openclaw` appears only in a docstring) | no node, no openclaw call (python3 only) |
 
 ## §6 The 15 `/etc/cron.d/` jobs (not in the parent card's list)
 
@@ -222,9 +229,9 @@ after the next tick — expect fresh timestamps and no `ERR_DLOPEN`,
 `NODE_MODULE_VERSION`, or `node: bad option` lines. Also run the read-only
 auth guard: `/opt/hydra/scripts/lib/codex-auth-sync.sh --check` → `clean`.
 
-Close the window: `systemctl start codex-canonical-refresh.timer; /opt/hydra/scripts/hydra-maintenance.sh stop`. Do **not** start `codex-token-refresh.timer`: `install-aux-units.sh:2438-2439` retires it on openclaw >= 2026.8 (it refreshes the archived pre-8.1 JSON store), so it is meant to stay off.
-
 **Self-hosted CI check (after the restarts, before closing the window).** The hydra runners use the system Node, so confirm CI still works on Node 24: `node --version` shows `v24.x` (>= 24.16, < 25) and `pnpm --version` succeeds on the runner host. Then re-run the `plugin-tests` job (`pr-validate.yml:1609`) by re-running it on the latest `PR Validation` run (`gh run rerun <run-id> --job <job-id>` as `adk47`). Expected: green. A red `pnpm install`/`build`/`test` step for a plugin under Node 24 ⇒ record it on the card; it breaks validation of every PR, so treat it as a §8 rollback trigger unless the CTO says otherwise.
+
+Close the window: `systemctl start codex-canonical-refresh.timer; /opt/hydra/scripts/hydra-maintenance.sh stop`. Do **not** start `codex-token-refresh.timer`: `install-aux-units.sh:2438-2439` retires it on openclaw >= 2026.8 (it refreshes the archived pre-8.1 JSON store), so it is meant to stay off.
 
 ## §7 NOT affected — do not check
 
@@ -235,7 +242,7 @@ Close the window: `systemctl start codex-canonical-refresh.timer; /opt/hydra/scr
   calls the **system** `node`/`npm` (`:1640-1656`) and runs `pnpm install
   --frozen-lockfile`, `pnpm run build` and `pnpm test` for every `plugins/*`
   (`:1765-1795`). After the swap this is verified in the window — see the
-  "Self-hosted CI check" paragraph at the end of §6.
+  "Self-hosted CI check" paragraph in §6, before `Close the window`.
 - **k8s pods:** own images (`k8s/prod/**`); no host Node.
 - **`@openclaw/fs-safe@0.5.6`:** pure JS — `engines {"node":">=22"}`, no
   gypfile, no native optional deps; its `native:*` scripts are dev-only. There is
