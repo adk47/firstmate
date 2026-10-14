@@ -7,8 +7,9 @@ Subcommands:
            Every big track (catalog pop >= 60, any track artist >= 90, or
            either unknown) gets the model + web check; other approvals are model-checked at
            --sample-rate (catalog evidence runs for all of them). Prints one
-           alert line per CONTRADICTED big-track credit and per approver-
-           identity problem, else NO_REPLY (cron announce contract).
+           alert line per CONTRADICTED big-track credit, per approver-
+           identity problem and per profile burst, else NO_REPLY (cron
+           announce contract; logs go to $CREDIT_REVIEW_LOG, never stderr).
   review   Review HELD (status=unverified) requests and recommend
            APPROVE-RECOMMENDED / NEEDS-HUMAN / REJECT-RECOMMENDED.
            --phase shadow records only; --phase advise also prints cards.
@@ -30,16 +31,18 @@ import json
 from datetime import datetime, timezone
 import os
 import sys
+import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from credit_review import admin as admin_api  # noqa: E402
 from credit_review import evaluate  # noqa: E402
-from credit_review.evidence import EvidenceBuilder  # noqa: E402
+from credit_review.evidence import EvidenceBuilder, parse_ts  # noqa: E402
 from credit_review.judge import DEFAULT_MIN_BALANCE_USD, Judge, account_balance_usd  # noqa: E402
 from credit_review.ledger import Ledger  # noqa: E402
-from credit_review.runner import Config, log, render_digest, render_metrics, run_audit, run_review  # noqa: E402
+from credit_review.runner import (  # noqa: E402
+    LOG_PATH, Config, log, profile_burst_alerts, render_digest, render_metrics, run_audit, run_review)
 
 KILL_SWITCH = Path(os.environ.get("CREDIT_REVIEW_KILL_SWITCH", "/etc/hydra/credit-review.disabled"))
 # The model + web-search judge is OFF unless this file exists (captain decision
@@ -89,7 +92,8 @@ def cmd_audit(args: argparse.Namespace) -> int:
                               window_min=args.window_min,
                               daily_budget_usd=args.daily_budget_usd)
     log("audit " + stats.line())
-    alerts = notes + alerts
+    recorded_to = parse_ts(ledger.get_state("audit_last_run"))
+    alerts = notes + alerts + (profile_burst_alerts(ledger, now=recorded_to) if recorded_to else [])
     print("\n".join(alerts) if alerts else "NO_REPLY")
     return 0
 
@@ -253,7 +257,14 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def _warning_to_log(message, category, filename, lineno, file=None, line=None) -> None:
+    log(f"warning: {category.__name__}: {message} ({filename}:{lineno})")
+
+
 def main(argv: list[str] | None = None) -> int:
+    # Python warnings go to the run log, never to stderr: openclaw posts a command
+    # cron's stderr to Slack next to its stdout.
+    warnings.showwarning = _warning_to_log
     args = parser().parse_args(argv)
     if args.cmd in ("audit", "review", "digest", "metrics") and KILL_SWITCH.exists():
         log(f"kill switch present at {KILL_SWITCH}; nothing reviewed")
@@ -262,9 +273,22 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.fn(args)
     except admin_api.AdminError as exc:
-        log(f"admin API unavailable: {exc}")
-        print(f"Credit review could not run: the admin API is unavailable ({str(exc)[:200]}). No credits were changed.")
+        kept = log(f"admin API unavailable: {exc}")
+        print(f"Credit review could not run: the admin API is unavailable. No credits were changed. "
+              f"{_details(kept)}")
         return 1
+    except Exception as exc:  # noqa: BLE001 - a crash is one plain line in Slack, the traceback goes to the log
+        import traceback
+        kept = log("crash: " + "".join(traceback.format_exception(exc)))
+        print(f"Credit review {args.cmd} failed with an internal error ({type(exc).__name__}). "
+              f"No credits were changed. {_details(kept)}")
+        return 1
+
+
+def _details(kept: bool) -> str:
+    if kept:
+        return f"Details: {LOG_PATH} on node-8."
+    return f"The run log {LOG_PATH} on node-8 could not be written, so no details were kept."
 
 
 if __name__ == "__main__":
