@@ -16,10 +16,13 @@
 #   (cp while main runs corrupts the store):
 #     B=/var/backups/hydra-main-sessions/<UTC-ts>; SD=/root/.openclaw-main   # pick a dir whose log line says `backup ok`
 #     /opt/hydra/scripts/hydra-maintenance.sh start "restore main sessions" --ttl 60m --operator <you>
-#     # ONE && chain: a failed stop, a still-active main, a failed stale -wal/-shm removal or a failed cp skips every later step (nothing is copied or started):
+#     # ONE && chain: a failed stop, a still-active main, a failed or empty backup scan (no state/openclaw.sqlite), a failed
+#     # stale -wal/-shm removal or a failed cp skips every later step and main is NOT started. A cp that already landed
+#     # before a later failure stays in place, so after an ABORT re-run the WHOLE sequence from the stop:
 #     systemctl stop openclaw-gateway-main && ! systemctl is-active --quiet openclaw-gateway-main \
-#       && (cd "$B" && find . -name '*.sqlite' | while read -r f; do rm -f "$SD/$f-wal" "$SD/$f-shm" \
-#         && cp -p "$f" "$SD/$f" || exit 1; done) \
+#       && L=$(cd "$B" && find . -name '*.sqlite') && [ -f "$B/state/openclaw.sqlite" ] \
+#       && (printf '%s\n' "$L" | while read -r f; do rm -f "$SD/$f-wal" "$SD/$f-shm" \
+#         && cp -p "$B/$f" "$SD/$f" || exit 1; done) \
 #       && systemctl start openclaw-gateway-main || echo 'ABORT: restore not completed, main NOT started; fix before retrying'
 #     # only if no ABORT printed:
 #     until [ "$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:18789/health)" = 200 ]; do sleep 5; done
