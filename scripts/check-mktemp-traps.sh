@@ -53,7 +53,7 @@ split_comment() {
 
 # lines of the top-level function (name() {, function name {, or Allman) or top-level code enclosing line $1, from stdin
 region() {
-  awk -v n="$1" '
+  awk -v n="$1" -v mode="${2:-lines}" '
     {
       l[NR] = $0
       # heredoc body is data: its braces never move scope depth
@@ -86,7 +86,11 @@ region() {
         hd = s
       }
     }
-    END { for (i = 1; i <= NR; i++) if (id[i] == id[n]) print l[i] }
+    END {
+      # mode "end": the line number where the enclosing block ends, not its lines
+      if (mode == "end") { for (i = 1; i <= NR; i++) if (id[i] == id[n]) e = i; print e; exit }
+      for (i = 1; i <= NR; i++) if (id[i] == id[n]) print l[i]
+    }
   '
 }
 
@@ -114,10 +118,13 @@ rm_targets() {
 CMD_TRAP='(^|[;&|({]|[[:space:]](then|do|else))[[:space:]]*trap[[:space:]]'
 # Bash keeps only the last trap per signal, so the verdict is the LAST trap in the scope that arms EXIT
 # (or RETURN in a function): a later `trap 'echo done' EXIT` or `trap - EXIT` replaces the cleanup.
+# TRAP_SEEN / TRAP_EXIT report on the last scan: a counting trap was parsed, and the winning one armed EXIT.
+# $3=top forces the top-level signal set (used on the code that runs after a function returns).
 trap_cleans() {
   local scope="$1" var="$2" line tl action sigs full fn m cleans verdict=1 sigre="$SIG_TOP"
+  TRAP_SEEN=0; TRAP_EXIT=0
   # a function scope starts with its header line; top-level scope never does
-  if [[ "$(printf '%s\n' "$scope" | head -n1)" =~ $FN_HEADER ]]; then sigre="$SIG_FN"; fi
+  if [ "${3:-}" != top ] && [[ "$(printf '%s\n' "$scope" | head -n1)" =~ $FN_HEADER ]]; then sigre="$SIG_FN"; fi
   while IFS= read -r line; do
     # several traps can share a line: take them in execution order, each parsed from its own start
     while [[ "$line" =~ $CMD_TRAP ]]; do
@@ -130,6 +137,8 @@ trap_cleans() {
       if [ -z "$full" ]; then line="${tl#trap}"; continue; fi
       line="${tl:${#full}}"
       printf '%s\n' "$sigs" | grep -Eq "$sigre" || continue
+      TRAP_SEEN=1; TRAP_EXIT=0
+      if printf '%s\n' "$sigs" | grep -Eq "$SIG_TOP"; then TRAP_EXIT=1; fi
       cleans=1
       if printf '%s\n' "$action" | rm_targets "$var"; then cleans=0; fi
       # handlers: every function the action calls; the rm must sit in that function's own body
@@ -167,6 +176,11 @@ while IFS= read -r f; do
           ok=1
           for var in $vars; do
             trap_cleans "$scope" "$var" || { ok=0; break; }
+            # an EXIT trap set inside a function is global: a later EXIT trap outside it replaces the cleanup
+            if [ "$TRAP_EXIT" -eq 1 ] && [[ "$(printf '%s\n' "$scope" | head -n1)" =~ $FN_HEADER ]]; then
+              rest=$(printf '%s\n' "$src" | tail -n +$(( $(printf '%s\n' "$src" | region "$n" end) + 1 )))
+              if ! trap_cleans "$rest" "$var" top && [ "$TRAP_SEEN" -eq 1 ]; then ok=0; break; fi
+            fi
           done
         fi
         if [ "$ok" -eq 0 ]; then

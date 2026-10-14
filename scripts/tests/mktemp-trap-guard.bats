@@ -521,3 +521,29 @@ SH
   run_guard
   [ "$status" -eq 0 ]
 }
+
+@test "a later top-level EXIT trap replaces a function's EXIT cleanup and fails" {
+  printf '#!/bin/bash\nf() {\n  work="$(mktemp -d)"\n  trap '"'"'rm -rf "$work"'"'"' EXIT\n}\nf\ntrap '"'"':'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/fn-replaced.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"fn-replaced.sh:3"* ]]
+}
+
+@test "a later top-level trap - EXIT also replaces a function's EXIT cleanup" {
+  printf '#!/bin/bash\nf() {\n  work="$(mktemp -d)"\n  trap '"'"'rm -rf "$work"'"'"' EXIT\n}\nf\ntrap - EXIT\n' > "$TEST_TMPDIR/scripts/fn-reset.sh"
+  run_guard
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"fn-reset.sh:3"* ]]
+}
+
+@test "a later top-level EXIT trap that still removes the dir passes" {
+  printf '#!/bin/bash\nf() {\n  work="$(mktemp -d)"\n  trap '"'"'rm -rf "$work"'"'"' EXIT\n}\nf\ntrap '"'"'rm -rf "$work"; echo bye'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/fn-kept.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "a function RETURN cleanup is not replaced by a later top-level EXIT trap" {
+  printf '#!/bin/bash\nf() {\n  local work\n  work="$(mktemp -d)"\n  trap '"'"'rm -rf "$work"'"'"' RETURN\n}\nf\ntrap '"'"':'"'"' EXIT\n' > "$TEST_TMPDIR/scripts/fn-return.sh"
+  run_guard
+  [ "$status" -eq 0 ]
+}
