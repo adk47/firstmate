@@ -20,7 +20,8 @@
 #   SIZE_CAP_KIB          cap in KiB, default 5242880 (5 GiB)
 #   SIZE_CAP_MIN_AGE_MIN  children newer than this are never evicted, default 60
 #   SIZE_CAP_APPLY        1 = delete, anything else = dry-run
-# Exit: 0 ok, 1 an eviction failed or the container size could not be measured,
+# Exit: 0 ok, 1 an eviction failed, a child name was unprocessable, or the container could not be
+#       measured or enumerated,
 #       2 refused container (not canonical / not jest_* / not directly under /tmp) or bad/oversized numeric knob.
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
