@@ -43,21 +43,24 @@ bash /opt/hydra/scripts/muso-stack-read.sh coverage
 
 Klaviyo and our stack overlap until each stream cuts over (auth first, then receipts,
 dunning, notifications, marketing on Listmonk). Decide **per stream and per time
-window**, never for the whole answer. `coverage` lists `messaging.email_events` by
-`source` and `class` with each row group's `min_event_time` / `max_event_time`:
+window**, never for the whole answer. `coverage` lists `messaging.email_events` per
+`source` x `class` with a `kind`, `live_from`, `shadow_rows` and `min/max_event_time`:
 
-- **Our sends** (`source` = `send-gateway`, `mailgun`, `smtp2go`) for a class (`auth`,
-  `receipt`, `notify`, `digest`, `marketing`) cover that class from its `min_event_time`
-  on. Read those from our stack, even when no Klaviyo history is imported.
-- **Imported Klaviyo history** (`source='klaviyo'`) covers everything up to its
+- `kind = live`: our stack really sends that class (`auth`, `receipt`, `notify`,
+  `digest`, `marketing`) **from `live_from` on** (its first provider-accepted `sent` or
+  provider-webhook row). Read those windows from our stack, even when no Klaviyo history
+  is imported.
+- `kind = shadow-only`: our stack only *recorded* what it would send (`would_send`,
+  `skipped`). Nothing was delivered by us; Klaviyo did the real send, so every delivery
+  fact for that class comes from Klaviyo. The same holds for a `live` class **before**
+  its `live_from` (its earlier rows are shadow rows).
+- `kind = history` (`source='klaviyo'`): the imported Klaviyo history, covering up to its
   `max_event_time` (the archive's t0, 6 Oct 2026).
 - **Everything else** comes from Klaviyo (`muso-klaviyo`, read-only): a class with no rows
-  of ours, the gap between the history's `max_event_time` and our first send for that
-  class, or every email if `email_events` does not exist yet. Example: a password reset
-  sent today after `auth` cut over → our stack; a dunning email from last week, before
-  `receipt` cut over and after the archive t0 → Klaviyo.
-- In shadow mode our rows are `would_send`. Klaviyo still did the real send, so the
-  delivery facts for that window are Klaviyo's.
+  of ours, the gap between the history's `max_event_time` and a class's `live_from`, or
+  every email if `email_events` does not exist yet. Example: a password reset sent today
+  after `auth` went live -> our stack; a dunning email from last week while `receipt` was
+  shadow-only -> Klaviyo.
 - Consent/suppressions: `preferences: -` or `contacts` near 0 → still Klaviyo's. Listmonk
   with a handful of subscribers → test data; marketing still runs in Klaviyo.
 

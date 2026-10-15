@@ -203,6 +203,30 @@ cmd_router() {
 }
 
 # ── coverage ─────────────────────────────────────────────────────────────────
+# Email coverage per source x class. A class is LIVE on our stack only from its
+# first REAL send: a provider-accepted `sent` (send-gateway emits it only outside
+# shadow mode) or any provider-webhook row (mailgun / smtp2go exist only for real
+# sends). Shadow mode writes `would_send` (and `skipped`), which are NOT
+# deliveries, so a class with only those rows is `shadow-only` and its delivery
+# facts are still Klaviyo's. source='klaviyo' is the imported history.
+# $1 = table expression (messaging.email_events, or a fixture subquery in tests).
+email_coverage_sql() {
+  cat <<SQL
+SELECT source, class,
+  multiIf(source = 'klaviyo', 'history',
+          countIf(event_type = 'sent' OR source IN ('mailgun', 'smtp2go')) > 0, 'live',
+          'shadow-only') AS kind,
+  if(kind = 'live', toString(minIf(event_time, event_type = 'sent' OR source IN ('mailgun', 'smtp2go'))), '-') AS live_from,
+  count() AS rows,
+  countIf(event_type = 'would_send') AS shadow_rows,
+  toString(min(event_time)) AS min_event_time,
+  toString(max(event_time)) AS max_event_time
+FROM $1
+GROUP BY source, class
+ORDER BY source, class
+SQL
+}
+
 cmd_coverage() {
   need_kubectl
   echo "# muso-stack-read coverage ($(date -u +%Y-%m-%dT%H:%MZ)); '-' = store not there yet"
@@ -216,7 +240,7 @@ cmd_coverage() {
     || echo "analytics: UNREACHABLE"
   echo "## email history (ClickHouse messaging.email_events)"
   if [ "$(ch_run "SELECT count() FROM system.tables WHERE database = 'messaging' AND name = 'email_events'" 2>/dev/null | tail -1)" = "1" ]; then
-    ch_run "SELECT source, class, count() AS rows, toString(min(event_time)) AS min_event_time, toString(max(event_time)) AS max_event_time FROM messaging.email_events GROUP BY source, class ORDER BY source, class" \
+    ch_run "$(email_coverage_sql messaging.email_events)" \
       || echo "email_events: query failed"
   else
     echo "email_events: - (table not created: no history import and no live sends yet; every email read is Klaviyo's)"
@@ -233,6 +257,9 @@ cmd_coverage() {
     pg_run "$db" "$sql" 2>/dev/null || echo "$db: - (unreachable or schema not migrated)"
   done
 }
+
+# Sourced (tests): define the functions only.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 [ $# -ge 1 ] || usage
 sub="$1"; shift

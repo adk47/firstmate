@@ -113,6 +113,38 @@ STUB
   grep -q "SET default_transaction_read_only = on" "$KUBECTL_CALLS"
 }
 
+# ── email coverage (live vs shadow) ──────────────────────────────────────────
+# Live-verified on ClickHouse with fixture rows (PR #1177): a class with only
+# would_send/skipped rows is shadow-only; live_from = first real send, not the
+# first shadow row. These pin the SQL so a refactor cannot regress it.
+@test "email coverage: only a real send (sent / provider webhook) marks a class live" {
+  sql="$(bash -c ". '$S'; email_coverage_sql messaging.email_events")"
+  [[ "$sql" == *"countIf(event_type = 'sent' OR source IN ('mailgun', 'smtp2go')) > 0, 'live'"* ]]
+  [[ "$sql" == *"'shadow-only'"* ]]
+  [[ "$sql" == *"minIf(event_time, event_type = 'sent' OR source IN ('mailgun', 'smtp2go'))"* ]]
+  # shadow rows must never feed the live test or live_from
+  live_line="$(printf '%s\n' "$sql" | grep -E "'live'|live_from")"
+  if [[ "$live_line" == *would_send* || "$live_line" == *skipped* ]]; then false; fi
+}
+
+@test "coverage runs the live/shadow email query when email_events exists" {
+  cat > "$TEST_TMPDIR/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$KUBECTL_CALLS"
+case "$*" in
+  *"get pods"*clickhouse*)   echo -n "chi-product-analytics-product-0-0-0" ;;
+  *"get pods"*role=replica*) echo -n "messaging-pg-pgha-x-0" ;;
+  *"pg_is_in_recovery"*)     echo t ;;
+  *"system.tables"*)         printf 'count()\n1\n' ;;
+  *exec*)                    echo "ok-row" ;;
+esac
+STUB
+  run "$S" coverage
+  [ "$status" -eq 0 ]
+  grep -q "shadow-only" "$KUBECTL_CALLS"
+  grep -q "FROM messaging.email_events" "$KUBECTL_CALLS"
+}
+
 # ── router ───────────────────────────────────────────────────────────────────
 @test "router refuses an endpoint that is not rebuilt" {
   run "$S" router "/api/2/funnels?e=x"
