@@ -42,14 +42,50 @@ _dropin() { echo "$TEST_TMPDIR/openclaw-gateway-$1.service.d/override.conf"; }
   [ -s "$(_dropin edge)" ]
 }
 
+_cap() { sed -n 's/^Environment="NODE_OPTIONS=.*--max-old-space-size=\([0-9]*\).*/\1/p' "$(_dropin "$1")"; }
+
 @test "both gateways get exactly one heap cap, and it is above node's ~4 GB default" {
   local p mb
   for p in main edge; do
     [ "$(grep -c '^Environment="NODE_OPTIONS=' "$(_dropin "$p")")" -eq 1 ]
-    mb="$(sed -n 's/^Environment="NODE_OPTIONS=.*--max-old-space-size=\([0-9]*\).*/\1/p' "$(_dropin "$p")")"
+    mb="$(_cap "$p")"
     [ -n "$mb" ]
     [ "$mb" -ge 8192 ]
   done
+}
+
+# The hand-placed zz-heap-bridge.conf gave main 12 GiB after the 7-8 Oct OOMs
+# at 8 GiB. Retiring it is only safe if the managed unit carries that cap.
+# Literals on purpose: a test comparing the script to its own constant cannot fail.
+@test "main's managed cap is 12288 (the bridge's value), edge stays 8192" {
+  [ "$(_cap main)" = "12288" ]
+  [ "$(_cap edge)" = "8192" ]
+}
+
+@test "main's managed NODE_OPTIONS is exactly the cap plus the diagnostic dir, no snapshot flag" {
+  grep -qxF 'Environment="NODE_OPTIONS=--max-old-space-size=12288 --diagnostic-dir=/var/lib/hydra/heap-snapshots"' "$(_dropin main)"
+}
+
+@test "a stale zz-heap-bridge.conf in main's drop-in dir is removed, and the removal is logged" {
+  local bridge="$TEST_TMPDIR/openclaw-gateway-main.service.d/zz-heap-bridge.conf"
+  echo 'stale' > "$bridge"
+  sed -i.bak 's/^log() { :; }$/log() { echo "LOG: $*"; }/' "$SNIPPET"
+  run bash "$SNIPPET"
+  [ "$status" -eq 0 ]
+  [ ! -e "$bridge" ]
+  [[ "$output" == *"zz-heap-bridge.conf"* ]]
+  [ "$(_cap main)" = "12288" ]
+}
+
+@test "the bridge removal is exact: edge's copy and other drop-ins are untouched, rerun is a no-op" {
+  local m="$TEST_TMPDIR/openclaw-gateway-main.service.d" e="$TEST_TMPDIR/openclaw-gateway-edge.service.d"
+  echo keep > "$e/zz-heap-bridge.conf"
+  echo keep > "$m/zz-other.conf"
+  run bash "$SNIPPET"; [ "$status" -eq 0 ]
+  run bash "$SNIPPET"; [ "$status" -eq 0 ]
+  [ -e "$e/zz-heap-bridge.conf" ]
+  [ -e "$m/zz-other.conf" ]
+  [ -s "$m/override.conf" ]
 }
 
 @test "the heap cap is in [Service], where systemd honours Environment=" {
