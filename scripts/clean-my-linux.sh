@@ -252,6 +252,10 @@ clean_bak_root() {
     check_caps
     [ -n "$cap_hit" ] && break
     kb="$(entry_kb "$p")"
+    if [ $(( (kb_total + kb) * 1024 )) -gt "$MAX_BYTES" ]; then
+      cap_hit="bytes"
+      break
+    fi
     if [ "$APPLY" -eq 0 ]; then
       log "DRY-RUN: would delete $p (${kb} KB)"
     else

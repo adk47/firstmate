@@ -252,6 +252,25 @@ slack_fixture() {
   [ ! -f "$TEST_TMPDIR/apt-calls.log" ]
 }
 
+@test "R4 never overshoots MAX_BYTES: an entry that would cross the budget is kept" {
+  local f
+  for f in a b; do head -c 8192 /dev/zero > "$TEST_TMPDIR/bakroot-a/$f.bak"; old 40 "$TEST_TMPDIR/bakroot-a/$f.bak"; done
+  export CLEAN_MY_LINUX_MAX_BYTES=12288
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ "$(find "$TEST_TMPDIR/bakroot-a" -name '*.bak' | wc -l)" -eq 1 ]
+  [[ "$output" == *"cap-hit=bytes"* ]]
+}
+
+@test "R4 keeps a first backup that is larger than the whole byte budget" {
+  head -c 16384 /dev/zero > "$TEST_TMPDIR/bakroot-a/big.bak"; old 40 "$TEST_TMPDIR/bakroot-a/big.bak"
+  export CLEAN_MY_LINUX_MAX_BYTES=8192
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMPDIR/bakroot-a/big.bak" ]
+  [[ "$output" == *"cap-hit=bytes"* ]]
+}
+
 @test "non-numeric cap fails loud with exit 2, deletes nothing" {
   CLEAN_MY_LINUX_MAX_ENTRIES=lots run bash "$WC" --apply
   [ "$status" -eq 2 ]
