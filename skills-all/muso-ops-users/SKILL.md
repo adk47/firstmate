@@ -14,12 +14,14 @@ description: |
 depends-on:
   - muso-ops-admin
   - muso-ops-audit
+  - muso-analytics
   - muso-amplitude
   - muso-stripe
   - muso-intercom
   - muso-slack-formatter
 compatibility: |
-  Requires: muso-ops-admin (API gateway), Trino, Amplitude, Stripe, Intercom
+  Requires: muso-ops-admin (API gateway), Trino, muso-analytics (Amplitude as
+  fallback until its cutover), Stripe, Intercom
   for comprehensive user investigation.
 metadata:
   version: "1.1"
@@ -62,8 +64,13 @@ WHERE lower(email) = 'john@example.com'
 stripe customers search --query "email:'john@example.com'" --limit 5
 ```
 
-**Step 4: Amplitude (activity)**
-Use the Muso internal user ID (from Step 2) to search Amplitude.
+**Step 4: Product activity (`muso-analytics`)**
+Use the Muso internal user ID (from Step 2). Our stack first; Amplitude (`muso-amplitude`)
+only when `coverage` shows the window is not covered yet or the user is not found:
+```bash
+bash /opt/hydra/scripts/muso-stack-read.sh router '/api/2/usersearch?user=<user_id>'
+bash /opt/hydra/scripts/muso-stack-read.sh router '/api/2/useractivity?user=<user_id>&limit=200'
+```
 
 **Step 5: Intercom (support history)**
 Check for any open conversations or recent support tickets.
@@ -82,7 +89,7 @@ Check for any open conversations or recent support tickets.
 • Status: active
 • Customer: cus_ABC123
 
-*Activity (Amplitude):*
+*Activity (our stack | Amplitude):*
 • Last seen: 2026-03-06
 • Events (30d): 247
 • Top actions: analytics_view (89), profile_view (45), credits_edit (12)
@@ -154,5 +161,5 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
 
 ### "User wants to cancel + refund"
 1. Look up user → get Stripe customer
-2. Check activity (Amplitude) — were they active?
+2. Check product activity (`muso-analytics`) — were they active?
 3. Delegate to `muso-refund-processor` skill for investigation + execution

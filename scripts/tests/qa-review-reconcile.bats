@@ -686,10 +686,21 @@ if [ "$1" = "api" ]; then
       if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi
       exit 0
       ;;
+    rate_limit)
+      printf '{"resources":{"core":{"limit":5000,"remaining":%s,"reset":1767225600}}}' "${STUB_RL_REMAINING:-0}"
+      exit 0
+      ;;
     repos/*/commits/*)
       [ -n "${STUB_COMMIT_FAIL:-}" ] && exit 1
       repo="$(printf '%s' "$path_no_query" | sed -E 's#repos/([^/]+/[^/]+)/commits/.*#\1#')"
       sha="$(printf '%s' "$path_no_query" | sed -E 's#repos/[^/]+/[^/]+/commits/([^/]+)#\1#')"
+      # STUB_COMMIT_ERR_DIR/<sha>: stderr text to emit with exit 1 for that sha.
+      if [ -n "${STUB_COMMIT_ERR_DIR:-}" ] && [ -f "$STUB_COMMIT_ERR_DIR/$sha" ]; then
+        cat "$STUB_COMMIT_ERR_DIR/$sha" >&2
+        exit 1
+      fi
+      # STUB_COMMIT_OK_STDERR: a routine notice on stderr alongside a good body.
+      [ -n "${STUB_COMMIT_OK_STDERR:-}" ] && printf '%s\n' "$STUB_COMMIT_OK_STDERR" >&2
       f="$FIX/commit/$(key "$repo")-$sha.json"
       if [ -f "$f" ]; then cat "$f"; else printf '{"commit":{"committer":{"date":"%s"}}}' "${STUB_DEFAULT_COMMIT_DATE:-2026-01-01T00:00:00Z}"; fi
       exit 0
@@ -820,7 +831,7 @@ JSON
   export QA_RECONCILE_CRON_STALE_S=1800
   export QA_RECONCILE_AGE_CEILING_S=1209600
   export QA_RECONCILE_TICK_FAIL_THRESHOLD=3
-  unset STUB_SLACK_FAIL_ONCE STUB_SLACK_FAIL_ALWAYS STUB_REVIEWS_FAIL STUB_STATUS_FAIL STUB_STATUS_MALFORMED STUB_TIMELINE_FAIL STUB_COMMIT_FAIL STUB_CRON_JSON STUB_CRON_FAIL STUB_ALLOWLIST_REPOS STUB_DEFAULT_COMMIT_DATE STUB_AUTHOR_FAIL_RC STUB_PRLIST_FAIL_REPOS STUB_GH_STATUS_FAIL STUB_GH_STATUS_BODY STUB_ROLLUP_FAIL STUB_ROLLUP_MALFORMED
+  unset STUB_SLACK_FAIL_ONCE STUB_SLACK_FAIL_ALWAYS STUB_REVIEWS_FAIL STUB_STATUS_FAIL STUB_STATUS_MALFORMED STUB_TIMELINE_FAIL STUB_COMMIT_FAIL STUB_COMMIT_ERR_DIR STUB_COMMIT_OK_STDERR STUB_RL_REMAINING STUB_CRON_JSON STUB_CRON_FAIL STUB_ALLOWLIST_REPOS STUB_DEFAULT_COMMIT_DATE STUB_AUTHOR_FAIL_RC STUB_PRLIST_FAIL_REPOS STUB_GH_STATUS_FAIL STUB_GH_STATUS_BODY STUB_ROLLUP_FAIL STUB_ROLLUP_MALFORMED
   # Long enough that every pre-existing test keeps its single-page semantics
   # (each seeds a fresh state dir, so nothing is ever suppressed by inheritance);
   # the dedupe tests below set their own value.
@@ -2328,6 +2339,85 @@ unreach_setup() {
   now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
   DISPATCH_RC=0 run "$SCRIPT" --once
   [ "$(jq -r '.__meta__.consecutive_unreachable_ticks // 0' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# MUS-6089: per-PR gh stderr capture + ONE TOKEN EXHAUSTED line per tick
+# ─────────────────────────────────────────────────────────────────────────
+
+# mk_multi_pr_list <repo> <n> — n open PRs (numbers 101..), shaNN heads.
+mk_multi_pr_list() {
+  local repo="$1" n="$2" i
+  local f="$FIX/prlist/$(printf '%s' "$repo" | tr '/' '-').json"
+  jq -n --argjson n "$n" --arg repo "$repo" '[range(0; $n) | {number: (101 + .), headRefOid: ("rlsha\(101 + .)"), baseRefName: "main", isDraft: false, author: {login: "nsollazzo"}, updatedAt: "2026-01-01T00:00:00Z", createdAt: "2026-01-01T00:00:00Z", url: ("https://github.com/" + $repo + "/pull/\(101 + .)")}]' > "$f"
+  for ((i = 0; i < n; i++)); do mk_commit "$repo" "rlsha$((101 + i))" "2026-01-01T00:00:00Z"; done
+  mkdir -p "$TEST_TMPDIR/errs"
+  export STUB_COMMIT_ERR_DIR="$TEST_TMPDIR/errs"
+  seed_epoch_state "$repo"
+  QA_RECONCILE_NOW_EPOCH="$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))"
+  export QA_RECONCILE_NOW_EPOCH
+}
+
+RL_ERR='gh: API rate limit exceeded for user ID 1234. (HTTP 403)'
+
+@test "e2e 6089-1: 5 rate-limited commit reads -> exactly ONE TOKEN EXHAUSTED line (k=5), no per-PR line" {
+  mk_multi_pr_list "Muso-AI/core-backend" 5
+  for p in 101 102 103 104 105; do printf '%s\n' "$RL_ERR" > "$STUB_COMMIT_ERR_DIR/rlsha$p"; done
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'TOKEN EXHAUSTED' <<<"$output")" -eq 1 ]
+  [[ "$output" == *"TOKEN EXHAUSTED — core remaining 0/5000, reset at 2026-01-01T00:00:00Z; 5 per-PR read(s) failed on this cause. This is the shared adk47 bucket, not a permissions problem."* ]]
+  [[ "$output" != *"READ-FAILURE: could not fetch commit"* ]]
+}
+
+@test "e2e 6089-2: a scope failure is NOT called token exhaustion -- per-PR line carries gh's text" {
+  mk_multi_pr_list "Muso-AI/core-backend" 1
+  printf '%s\n' 'gh: Resource not accessible by integration (HTTP 403)' > "$STUB_COMMIT_ERR_DIR/rlsha101"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"READ-FAILURE: could not fetch commit Muso-AI/core-backend@rlsha10"*"Resource not accessible by integration"* ]]
+  [[ "$output" != *"TOKEN EXHAUSTED"* ]]
+}
+
+@test "e2e 6089-3: mixed tick -- 2 rate-limit + 1 scope failure -> one TOKEN EXHAUSTED (k=2) and one detailed per-PR line" {
+  mk_multi_pr_list "Muso-AI/core-backend" 3
+  printf '%s\n' "$RL_ERR" > "$STUB_COMMIT_ERR_DIR/rlsha101"
+  printf '%s\n' 'gh: Resource not accessible by integration (HTTP 403)' > "$STUB_COMMIT_ERR_DIR/rlsha102"
+  printf '%s\n' "$RL_ERR" > "$STUB_COMMIT_ERR_DIR/rlsha103"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'TOKEN EXHAUSTED' <<<"$output")" -eq 1 ]
+  [[ "$output" == *"; 2 per-PR read(s) failed on this cause."* ]]
+  [ "$(grep -c 'READ-FAILURE: could not fetch commit' <<<"$output")" -eq 1 ]
+  [[ "$output" == *"Resource not accessible by integration"* ]]
+}
+
+@test "e2e 6089-4: a good body with a routine stderr notice is used unmodified (stderr never merged into stdout)" {
+  mk_multi_pr_list "Muso-AI/core-backend" 1
+  # If this notice were folded into stdout, jq on the commit body would die.
+  export STUB_COMMIT_OK_STDERR='{ not json: gh notice'
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"READ-FAILURE"* ]]
+  [[ "$output" != *"TOKEN EXHAUSTED"* ]]
+}
+
+@test "e2e 6089-5: rate-limit failures still advance the read-failure counters (CANDIDATE READ FAILURE unchanged)" {
+  mk_multi_pr_list "Muso-AI/core-backend" 2
+  for p in 101 102; do printf '%s\n' "$RL_ERR" > "$STUB_COMMIT_ERR_DIR/rlsha$p"; done
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CANDIDATE READ FAILURE: Muso-AI/core-backend — all 2 per-PR read(s) failed this tick (classes: commit,commit); consecutive count now 1."* ]]
+  [ "$(jq -r '.__meta__.candidate_read_failures["Muso-AI/core-backend"]' "$QA_RECONCILE_STATE_FILE")" -eq 1 ]
+}
+
+@test "e2e 6089-6: 4MB of gh stderr does not kill the tick (SIGPIPE trap)" {
+  mk_multi_pr_list "Muso-AI/core-backend" 1
+  { printf 'gh: boom (HTTP 500) '; head -c 4194304 /dev/zero | tr '\0' 'x'; echo; } > "$STUB_COMMIT_ERR_DIR/rlsha101"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"READ-FAILURE: could not fetch commit"*"boom (HTTP 500)"* ]]
+  [[ "$output" == *"CANDIDATE READ FAILURE"* ]]
 }
 
 @test "e2e 76: a CANNOT REVIEW bot review is NOT a verdict -> the PR is re-dispatched" {
