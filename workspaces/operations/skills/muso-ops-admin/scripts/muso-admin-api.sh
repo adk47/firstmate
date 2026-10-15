@@ -65,6 +65,7 @@ TIER2_REVERSE_WINDOW_SECS="${TIER2_REVERSE_WINDOW_SECS:-300}"
 # in-thread, so by itself it is not evidence that a human chose these rows.
 BULK_DESTRUCTIVE_PATH="${BULK_DESTRUCTIVE_PATH:-${MUSO_OPS_STATE_DIR}/destructive-ops.jsonl}"
 BULK_DESTRUCTIVE_AUDIT_PATH="${BULK_DESTRUCTIVE_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/bulk-destructive-audit.jsonl}"
+BULK_DESTRUCTIVE_RESULTS_PATH="${BULK_DESTRUCTIVE_RESULTS_PATH:-${MUSO_OPS_STATE_DIR}/destructive-ops-results.jsonl}"
 BULK_DESTRUCTIVE_THRESHOLD="${BULK_DESTRUCTIVE_THRESHOLD:-10}"
 BULK_DESTRUCTIVE_WINDOW_SECS="${BULK_DESTRUCTIVE_WINDOW_SECS:-900}"
 BULK_DESTRUCTIVE_EXCLUDE_PATH="${BULK_DESTRUCTIVE_EXCLUDE_PATH:-${SCRIPT_DIR}/../config/bulk-destructive-exclude.txt}"
@@ -2455,6 +2456,48 @@ record_destructive_op() {
         --arg requester "${REQUESTER_EMAIL:-}" \
         '{ts:$ts, epoch:$epoch, method:$method, path:$path, requester:$requester}' 2>/dev/null) || return 1
     printf '%s\n' "$line" >> "$BULK_DESTRUCTIVE_PATH" 2>/dev/null || return 1
+    # Remember the row's correlation key (epoch + path) for the outcome ledger.
+    DESTRUCTIVE_OP_EPOCH="$epoch"
+    DESTRUCTIVE_OP_PATH="$_path"
+    return 0
+}
+
+# write_destructive_op_result OUTCOME HTTP_STATUS -> always 0.
+# Post-call companion to record_destructive_op: one row in
+# destructive-ops-results.jsonl per counter row, keyed by the same (epoch, path)
+# pair, saying whether the DELETE landed. Kept OUT of destructive-ops.jsonl on
+# purpose — count_recent_destructive_ops reads that file, and a changed row
+# shape there would skew the blast-radius gate. No-op unless this call wrote a
+# counter row. Failure mode matches write_dry_run_audit: LOUD stderr warning,
+# never break the call (the DELETE has already happened; refusing now helps no one).
+# OUTCOME: ok | http_error | transport_error (sent, delivery ambiguous) |
+# not_sent (login or retry config failed, DELETE definitely never left). HTTP_STATUS empty -> null.
+DESTRUCTIVE_OP_EPOCH=""
+DESTRUCTIVE_OP_PATH=""
+write_destructive_op_result() {
+    local outcome="$1" http_status="${2:-}"
+    [[ -n "$DESTRUCTIVE_OP_EPOCH" ]] || return 0
+    local ts line
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if ! line=$(jq -n -c \
+        --arg ts "$ts" \
+        --argjson epoch "$DESTRUCTIVE_OP_EPOCH" \
+        --arg method "$CALL_METHOD_FOR_RESULT" \
+        --arg path "$DESTRUCTIVE_OP_PATH" \
+        --arg requester "${REQUESTER_EMAIL:-}" \
+        --arg http_status "$http_status" \
+        --arg outcome "$outcome" \
+        '{ts:$ts, epoch:$epoch, method:$method, path:$path, requester:$requester,
+          http_status:($http_status | tonumber? // null), outcome:$outcome}' 2>/dev/null); then
+        echo "MUSO_DESTRUCTIVE_OUTCOME_UNWRITABLE: could not build the outcome row for ${CALL_METHOD_FOR_RESULT} ${DESTRUCTIVE_OP_PATH} (${outcome}); the call itself proceeded." >&2
+        DESTRUCTIVE_OP_EPOCH=""
+        return 0
+    fi
+    if ! { mkdir -p "$(dirname "$BULK_DESTRUCTIVE_RESULTS_PATH")" \
+            && printf '%s\n' "$line" >> "$BULK_DESTRUCTIVE_RESULTS_PATH"; } 2>/dev/null; then
+        echo "MUSO_DESTRUCTIVE_OUTCOME_UNWRITABLE: could not append to ${BULK_DESTRUCTIVE_RESULTS_PATH}; outcome row LOST for ${CALL_METHOD_FOR_RESULT} ${DESTRUCTIVE_OP_PATH} (${outcome}, status ${http_status:-none}); the call itself proceeded." >&2
+    fi
+    DESTRUCTIVE_OP_EPOCH=""   # exactly one outcome row per counter row
     return 0
 }
 
@@ -2590,6 +2633,8 @@ EOF
     # radius of mass DELETEs. God-mode requesters self-approve with
     # --approval-msg-id (policy 2026-08-26); everyone else needs an approver's
     # --confirmed-by. Self-skips in dry-run.
+    DESTRUCTIVE_OP_EPOCH=""
+    CALL_METHOD_FOR_RESULT="$method"
     if ! enforce_bulk_destructive_gate "$method" "$path"; then
         return 1
     fi
@@ -2672,6 +2717,7 @@ EOF
                 "$token_attempts" "$token_retry_exits"
             printf '%s\n' "$token_json"
         fi
+        write_destructive_op_result "not_sent" ""
         return "$token_rc"
     fi
 
@@ -2717,12 +2763,14 @@ EOF
         # Invalid retry configuration failed before curl ran; surface the
         # configuration error without misclassifying it as transport.
         if (( transport_attempts == 0 )); then
+            write_destructive_op_result "not_sent" ""
             return "$curl_rc"
         fi
 
         write_credit_request_result "$method" "$path" "$body" \
             "transport_error" "" "curl_exit_${curl_rc}" \
             "$transport_attempts" "$transport_retry_exits"
+        write_destructive_op_result "transport_error" ""
         jq -nc \
             --argjson rc "$curl_rc" \
             --argjson attempts "$transport_attempts" \
@@ -2754,6 +2802,12 @@ EOF
             write_credit_request_result "$method" "$path" "$body" "http_error" "$http_code" "$response_body" \
                 "$transport_attempts" "$transport_retry_exits"
         fi
+    fi
+
+    if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+        write_destructive_op_result "ok" "$http_code"
+    else
+        write_destructive_op_result "http_error" "$http_code"
     fi
 
     # Record successful merges for the reverse-direction guard.
