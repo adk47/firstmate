@@ -1,7 +1,9 @@
 ---
 name: muso-klaviyo
 description: |
-  Klaviyo email/SMS marketing analytics and management. Query metrics, profiles, campaigns, flows, lists, segments.
+  Klaviyo (LEGACY, being replaced): email/SMS marketing analytics and management. Query metrics, profiles, campaigns, flows, lists, segments.
+  For READS use the muso-email skill FIRST (our stack); use Klaviyo for a stream that has not cut over yet
+  (see `muso-stack-read.sh coverage`), and name Klaviyo as the source.
   WRITE ACCESS: Aaron (U7RP6HKUZ) and Nick (U0AL36NADEY) only. All other users are READ-ONLY.
 
   Use when: checking email campaign performance, SMS metrics, subscriber profiles, list/segment sizes,
@@ -18,7 +20,13 @@ metadata:
   source-repo: "Muso-AI/muso-skills"
 ---
 
-# Klaviyo Skill
+# Klaviyo Skill (LEGACY, being replaced)
+
+> **Stack swap (Oct 2026):** email moves to our own stack (send-gateway, preferences, Listmonk;
+> history in ClickHouse `messaging.email_events`), stream by stream. For reads start with the
+> `muso-email` skill; use Klaviyo for whatever `muso-stack-read.sh coverage` shows is not on our
+> stack yet, and label those facts "Klaviyo". Do not start new Klaviyo flows, templates or
+> lists without Aaron's or Nick's explicit word: anything built here has to be rebuilt.
 
 Query and manage Muso.AI email/SMS marketing data from Klaviyo.
 

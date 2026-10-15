@@ -1,11 +1,14 @@
 ---
 name: muso-amplitude
 description: |
-  Amplitude product analytics - READ ONLY. Query user behavior, events, cohorts, and metrics.
+  LEGACY FALLBACK - Amplitude vendor API, READ ONLY. Use the muso-analytics skill FIRST
+  (our stack: same API shapes, full history). Use this skill only for a window
+  `muso-stack-read.sh coverage` says our stack does not cover yet, until Amplitude's
+  cutover / downgrade (30 Oct 2026), and name Amplitude as the source.
   CRITICAL: This skill is READ-ONLY. Never modify data.
 
-  Use when: looking up user activity, searching users, viewing events, checking cohorts,
-  exporting chart data, analyzing product usage, retention, or funnels.
+  Use when: muso-analytics cannot answer (window not covered, user not found) and
+  Amplitude is still live; cohort definitions that exist only in Amplitude.
 
   Triggers: "amplitude", "user activity", "events", "cohorts", "product analytics",
   "retention", "funnel", "user behavior"
@@ -18,7 +21,12 @@ metadata:
   source-repo: "Muso-AI/muso-skills"
 ---
 
-# Amplitude Skill (READ-ONLY)
+# Amplitude Skill (READ-ONLY, LEGACY FALLBACK)
+
+> **Stack swap (Oct 2026):** product analytics moved to our own stack. Start with the
+> `muso-analytics` skill (`/opt/hydra/scripts/muso-stack-read.sh`). This skill stays
+> working until Amplitude's cutover so recent windows can still be answered; every number
+> taken from here must be labelled "Amplitude". Do not build new workflows on it.
 
 Query Muso.AI product analytics data from Amplitude.
 
