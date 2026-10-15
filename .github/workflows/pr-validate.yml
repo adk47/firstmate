@@ -1278,6 +1278,11 @@ jobs:
         # 2026-10-11 it was inverted (approve_owning_track == 100 means the
         # shortcut did NOT fire) and approved validator-declined credits. This
         # suite pins the replacement: only validator-approved rows approve.
+        #
+        # ALSO customer-credit-removal/tests/remove-credits.bats (30 tests on the
+        # credit-removal wrapper's refusals and dry-run-before-apply gate). It
+        # lives under tests/, not scripts/tests/, and its skill was never pinned,
+        # so it had never run in CI (MUS-10237). Hermetic (curl stubbed).
         run: |
           set -euo pipefail
           # The self-hosted runner may carry production bot credentials. Bats
@@ -1319,6 +1324,7 @@ jobs:
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-backend-signals.bats \
                        workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
                        workspaces/support/skills/order-fulfillment/scripts/tests \
+                       workspaces/support/skills/customer-credit-removal/tests \
                        "${sa_dirs[@]}" \
                        -type f -name '*.bats' | sort)
           if [ -z "$files" ]; then
