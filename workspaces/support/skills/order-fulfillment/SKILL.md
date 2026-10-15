@@ -170,8 +170,8 @@ confirmed address back to Prodigi.
      long or missing and ask again.
   4. Show the customer the previewed change (current → new) and wait for an explicit
      "yes".
-  5. On confirmation, call `order_address_update` with `apply: true` and the
-     `intercomConvId`. On `{ applied: true }`, confirm it's updated. On `apply_failed`
+  5. On confirmation, call `order_address_update` with `apply: true` (the
+     conversation is bound automatically; never ask for a conversation id). On `{ applied: true }`, confirm it's updated. On `apply_failed`
      (e.g. the order already shipped), tell them it couldn't be changed and file a
      request for the team.
   Never promise a change before `applied: true` comes back.

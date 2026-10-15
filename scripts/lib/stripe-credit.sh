@@ -286,6 +286,93 @@ credit_live_window_total() {
   printf '%s\n' "$out" | head -1
 }
 
+# credit_refund_overlap_eval <refund_amount> <refund_created> — PURE.
+# Balance-transactions JSON on stdin. Emits:
+#   line 1  : live concession that actually overlaps THIS refund, positive cents
+#   line 2+ : the surviving concession rows from credit_live_window_eval
+# Non-zero EXIT = UNVERIFIABLE.
+#
+# A positive balance `adjustment` immediately before a cash refund can be the
+# deliberate bridge from account credit back to cash. In that chronology the
+# adjustment removes the portion being refunded, so any credit left afterward
+# is not duplicated by that refund. The first watchdog ignored that link and
+# treated every negative ending balance as overlap; re_3UE7weLsjTo3Ar3l2TKuWJq9
+# was therefore paired with a legitimate 1261c residual even though an explicit
+# +26038c reversal landed 72 seconds before the 26039c cash refund.
+#
+# Suppression is deliberately narrow and fail-closed. The adjustment must:
+#   * be positive and type=adjustment;
+#   * precede the refund by at most one hour;
+#   * explicitly describe a refund reversal/cash refund; and
+#   * match the refund amount within one cent.
+# Anything ambiguous remains an overlap finding for human review.
+CREDIT_REFUND_REVERSAL_WINDOW_SECONDS=3600
+CREDIT_REFUND_REVERSAL_TOLERANCE_CENTS=1
+
+credit_refund_overlap_eval() {
+  local refund_amount="${1:-}" refund_created="${2:-}" allow_reversal="${3:-}"
+  # These are safety bounds, not tuning knobs. An accidentally widened window
+  # or tolerance would turn an unrelated adjustment into a suppression rule.
+  local window="$CREDIT_REFUND_REVERSAL_WINDOW_SECONDS"
+  local tolerance="$CREDIT_REFUND_REVERSAL_TOLERANCE_CENTS"
+  local btjson live_eval live_total live_rows live_ids linked_reversal overlap
+
+  [[ "$refund_amount" =~ ^[0-9]+$ ]] && [ "$refund_amount" -gt 0 ] || return 1
+  [[ "$refund_created" =~ ^[0-9]+$ ]] && [ "$refund_created" -gt 0 ] || return 1
+  [[ "$allow_reversal" =~ ^[01]$ ]] || return 1
+  btjson="$(cat)" || return 1
+  live_eval="$(printf '%s' "$btjson" | credit_live_window_eval)" || return 1
+  live_total="$(printf '%s\n' "$live_eval" | head -1)"
+  [[ "$live_total" =~ ^[0-9]+$ ]] || return 1
+  [ "$live_total" -gt 0 ] || { echo 0; return 0; }
+  live_rows="$(printf '%s\n' "$live_eval" | tail -n +2 | sed '/^$/d')"
+  [ -n "$live_rows" ] || return 1
+  live_ids="$(printf '%s\n' "$live_rows" | awk '{print $1}')"
+
+  linked_reversal="$(printf '%s' "$btjson" | jq -e -r \
+    --argjson refund "$refund_amount" \
+    --argjson created "$refund_created" \
+    --argjson window "$window" \
+    --argjson tolerance "$tolerance" \
+    --arg live_ids "$live_ids" \
+    --argjson allow "$allow_reversal" '
+      .data as $transactions
+      | ([$transactions[] | .ending_balance] | index(0)) as $zero
+      | (if $zero == null then $transactions else $transactions[0:$zero] end) as $live_window
+      | [ $live_window[]
+        | select($allow == 1)
+        | select(.type == "adjustment" and .amount > 0)
+        | select(.created <= $created and .created >= ($created - $window))
+        | (.description // "") as $description
+        | select($description | type == "string")
+        | ($description | ascii_downcase) as $text
+        | select(($text | test("refund")) and ($text | test("revers|cash")))
+        | (.amount - $refund) as $delta
+        | select((if $delta < 0 then -$delta else $delta end) <= $tolerance)
+        | . as $adjustment
+        | select([ $live_window[]
+                   | . as $row
+                   | select(($live_ids | split("\n") | index($row.id)) != null)
+                   # Stripe timestamps are second-resolution. API order is the
+                   # only ordering signal inside one second, so equality is
+                   # ambiguous and must not suppress a financial alert.
+                   | select($row.created >= $adjustment.created)
+                 ] | length == 0)
+        | .amount
+      ] | max // 0
+    ' 2>/dev/null)" || return 1
+  [[ "$linked_reversal" =~ ^[0-9]+$ ]] || return 1
+
+  overlap=$(( refund_amount - linked_reversal ))
+  if [ "$overlap" -le "$tolerance" ]; then
+    echo 0
+    return 0
+  fi
+  [ "$overlap" -lt "$live_total" ] || overlap="$live_total"
+  printf '%s\n' "$overlap"
+  printf '%s\n' "$live_eval" | tail -n +2
+}
+
 # customer_live_concession_rows <customer_id> — IO wrapper echoing one
 # "<cbtxn_id> <type> <amount>" line per still-reclaimable concession row.
 # Non-zero EXIT = UNVERIFIABLE.
@@ -370,6 +457,35 @@ customer_live_concession_amount() {
   total="$(printf '%s' "$btjson" | credit_live_window_total)" || return 1
   [[ "$total" =~ ^[0-9]+$ ]] || return 1
   if [ "$total" -lt "$live" ]; then echo "$total"; else echo "$live"; fi
+}
+
+# customer_refund_credit_overlap <customer_id> <refund_amount> <refund_created>
+#
+# Echoes "" when this refund has no live overlap, otherwise a display-safe
+# summary that keeps three concepts separate: overlap, current balance, and the
+# remaining portion of each source credit. Non-zero EXIT = UNVERIFIABLE.
+customer_refund_credit_overlap() {
+  local cus="$1" refund_amount="$2" refund_created="$3" allow_reversal="$4"
+  local cjson bal live btjson eval overlap rows ids
+  [ -n "$cus" ] || return 1
+  cjson="$("${STRIPE_BIN:-stripe}" customers retrieve "$cus" 2>/dev/null)" || return 1
+  printf '%s' "$cjson" | jq -e 'type == "object" and has("balance")' >/dev/null 2>&1 || return 1
+  bal="$(printf '%s' "$cjson" | jq -r '.balance')"
+  [[ "$bal" =~ ^-?[0-9]+$ ]] || return 1
+  [ "$bal" -lt 0 ] || { echo ""; return 0; }
+  live="${bal#-}"
+
+  btjson="$("${STRIPE_BIN:-stripe}" get "/v1/customers/$cus/balance_transactions" -d "limit=100" 2>/dev/null)" || return 1
+  eval="$(printf '%s' "$btjson" | credit_refund_overlap_eval "$refund_amount" "$refund_created" "$allow_reversal")" || return 1
+  overlap="$(printf '%s\n' "$eval" | head -1)"
+  [[ "$overlap" =~ ^[0-9]+$ ]] || return 1
+  [ "$overlap" -gt 0 ] || { echo ""; return 0; }
+  [ "$overlap" -lt "$live" ] || overlap="$live"
+
+  rows="$(printf '%s\n' "$eval" | tail -n +2 | sed '/^$/d')"
+  [ -n "$rows" ] || return 1
+  ids="$(printf '%s\n' "$rows" | awk '{a=$3; sub(/^-/, "", a); printf "%s%s(%s remaining=%sc)", (NR>1 ? " " : ""), $1, $2, a}')"
+  echo "${overlap}c overlap; current balance ${bal}c; live source remainder: $ids"
 }
 
 # customer_live_proration_credit <customer_id> — IO wrapper around the above.

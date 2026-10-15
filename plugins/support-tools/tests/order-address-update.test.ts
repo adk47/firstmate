@@ -34,13 +34,16 @@ const VALID_RECIPIENT = {
   country: "DO",
 };
 
-function makeTool(opts: Parameters<typeof makeMockExecFile>[0] = {}) {
+const CONV_KEY = "agent:support:intercom:direct:215476355817432";
+
+function makeTool(opts: Parameters<typeof makeMockExecFile>[0] = {}, sessionKey: string = CONV_KEY) {
   const rateLimiter = new RateLimiter();
   const { mock, calls } = makeMockExecFile(opts);
   const tool = createOrderAddressUpdateTool({
     scriptPath: "/test/update-order-address.sh",
     rateLimiter,
     sessionId: "s",
+    sessionKey,
     execFileImpl: mock as never,
   });
   return { tool, calls, rateLimiter };
@@ -50,11 +53,38 @@ const parse = (r: { content: Array<{ type: string; text?: string }> }) => JSON.p
 const argFlag = (args: string[], flag: string) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
 
 describe("createOrderAddressUpdateTool", () => {
-  it("fast-refuses apply=true without intercomConvId and does NOT exec", async () => {
+  it.each([
+    ["main session", "agent:support:main"],
+    ["ephemeral UUID", "3f2b8c1e-7a4d-4e0b-9c55-1d2e3f4a5b6c"],
+    ["unknown", "unknown"],
+  ])("fails closed with conv_id_unavailable (%s) and does NOT exec, dry-run or apply", async (_n, key) => {
+    for (const apply of [false, true]) {
+      const { tool, calls } = makeTool({ stdout: '{"ok":true}' }, key);
+      const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: VALID_RECIPIENT, apply }));
+      expect(out.error).toBe("conv_id_unavailable");
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it("derives --intercom-conv-id from the session key on dry-run too", async () => {
     const { tool, calls } = makeTool({ stdout: '{"ok":true}' });
-    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: VALID_RECIPIENT, apply: true }));
-    expect(out.error).toBe("intercom_conv_id_required");
-    expect(calls).toHaveLength(0);
+    await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: VALID_RECIPIENT });
+    expect(argFlag(calls[0].args, "--intercom-conv-id")).toBe("215476355817432");
+  });
+
+  it("derives from the legacy {wsId}:conversation:{convId} key shape", async () => {
+    const { tool, calls } = makeTool({ stdout: '{"ok":true}' }, "agent:support:intercom:ws1:conversation:999111");
+    await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: VALID_RECIPIENT, apply: true });
+    expect(argFlag(calls[0].args, "--intercom-conv-id")).toBe("999111");
+  });
+
+  it("schema no longer accepts intercomConvId, and a model-supplied one never reaches argv", async () => {
+    const { tool, calls } = makeTool({ stdout: '{"ok":true}' });
+    expect((tool.parameters as { properties: Record<string, unknown> }).properties).not.toHaveProperty("intercomConvId");
+    await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: VALID_RECIPIENT, apply: true, intercomConvId: "ATTACKER999" } as never);
+    expect(calls[0].args).not.toContain("ATTACKER999");
+    expect(calls[0].args.filter((a) => a === "--intercom-conv-id")).toHaveLength(1);
+    expect(argFlag(calls[0].args, "--intercom-conv-id")).toBe("215476355817432");
   });
 
   it("refuses an invalid address (over-length line) before exec", async () => {
@@ -86,7 +116,6 @@ describe("createOrderAddressUpdateTool", () => {
     expect(argFlag(args, "--order-ref")).toBe("ZGOP1");
     expect(argFlag(args, "--customer-email")).toBe("owner@x.com");
     expect(args).not.toContain("--apply");
-    expect(args).not.toContain("--intercom-conv-id");
     // Body is the backend PUT shape: top-level name/phoneNumber + Stripe-shape address.
     expect(body).toEqual({
       name: "Maria Perez",
@@ -156,10 +185,10 @@ describe("createOrderAddressUpdateTool", () => {
 
   it("apply: passes --apply and --intercom-conv-id through", async () => {
     const { tool, calls } = makeTool({ stdout: '{"ok":true,"mode":"apply","applied":true}' });
-    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "owner@x.com", recipient: VALID_RECIPIENT, apply: true, intercomConvId: "conv123" }));
+    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "owner@x.com", recipient: VALID_RECIPIENT, apply: true }));
     expect(out.applied).toBe(true);
     expect(calls[0].args).toContain("--apply");
-    expect(argFlag(calls[0].args, "--intercom-conv-id")).toBe("conv123");
+    expect(argFlag(calls[0].args, "--intercom-conv-id")).toBe("215476355817432");
   });
 
   it("maps wrapper empty / non-JSON output to structured errors", async () => {

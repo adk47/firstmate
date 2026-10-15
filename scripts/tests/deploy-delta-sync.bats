@@ -425,3 +425,12 @@ delta_compute_with_failing_diff() {  # <diff-filter value to fail: D (delete pas
   [[ "$output" == *"gate rc=1"* ]]
   [ -e "$SERVER/scripts/a.sh" ]
 }
+
+@test "delta_filter_excludes called in the parent shell (not in \$( )): its RETURN trap does not fire again on the caller's return" {
+  # Both production callers use $( ), a subshell, which hides a trap that stays armed. A direct call
+  # in the parent shell exposes it: the stale trap would run after $tree is out of scope.
+  lib 'set -e; wrap() { delta_filter_excludes <<<"scripts/a.sh"; echo "wrap after"; }; outer() { wrap; echo "outer after"; }; outer; echo "script rc=$?"'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"script rc=0"* ]]
+  [[ "$output" != *"unbound variable"* ]]
+}

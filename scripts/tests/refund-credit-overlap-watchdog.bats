@@ -38,6 +38,8 @@ case "$1 $2" in
         for i in $(seq 1 100); do [ "$i" -gt 1 ] && printf ','; printf '{"id":"re_p1_%d","charge":"ch_CLEAN","amount":100,"created":1,"status":"succeeded"}' "$i"; done
         printf ']}\n'
       fi
+    elif [ "${STUB_REFUNDS_TWO_MATCHING:-0}" -gt 0 ]; then
+      echo '{"object":"list","data":[{"id":"re_TEST_2","charge":"ch_TEST","amount":26039,"created":1789396257,"status":"succeeded"},{"id":"re_TEST","charge":"ch_TEST","amount":26039,"created":1789395957,"status":"succeeded"}]}'
     else
       # Honour created[gte] the way Stripe does: a refund older than the
       # requested window is simply not returned. Without this the stub hands
@@ -46,21 +48,22 @@ case "$1 $2" in
       gte=0
       for a in "$@"; do case "$a" in created\[gte\]=*) gte="${a#created\[gte\]=}" ;; esac; done
       rc_created="${STUB_REFUND_CREATED:-9999999999}"
+      rc_amount="${STUB_REFUND_AMOUNT:-10750}"
       if [ "$rc_created" -ge "$gte" ]; then
         if [ "${STUB_REFUND_NO_CHARGE:-0}" -gt 0 ]; then
-          echo "{\"object\":\"list\",\"data\":[{\"id\":\"re_TEST\",\"charge\":\"\",\"amount\":10750,\"created\":$rc_created,\"status\":\"succeeded\"}]}"
+          echo "{\"object\":\"list\",\"data\":[{\"id\":\"re_TEST\",\"charge\":\"\",\"amount\":$rc_amount,\"created\":$rc_created,\"status\":\"succeeded\"}]}"
         elif [ "${STUB_UNVERIFIABLE_EXTRA:-0}" -gt 0 ]; then
-          echo "{\"object\":\"list\",\"data\":[{\"id\":\"re_TEST\",\"charge\":\"ch_TEST\",\"amount\":10750,\"created\":$rc_created,\"status\":\"succeeded\"},{\"id\":\"re_BAD\",\"charge\":\"ch_MISSING\",\"amount\":500,\"created\":$rc_created,\"status\":\"succeeded\"}]}"
+          echo "{\"object\":\"list\",\"data\":[{\"id\":\"re_TEST\",\"charge\":\"ch_TEST\",\"amount\":$rc_amount,\"created\":$rc_created,\"status\":\"succeeded\"},{\"id\":\"re_BAD\",\"charge\":\"ch_MISSING\",\"amount\":500,\"created\":$rc_created,\"status\":\"succeeded\"}]}"
         else
           if [ "${STUB_REFUND_NO_CREATED:-0}" -gt 0 ]; then
-            echo "{\"object\":\"list\",\"data\":[{\"id\":\"re_TEST\",\"charge\":\"ch_TEST\",\"amount\":10750,\"status\":\"succeeded\"}]}"
+            echo "{\"object\":\"list\",\"data\":[{\"id\":\"re_TEST\",\"charge\":\"ch_TEST\",\"amount\":$rc_amount,\"status\":\"succeeded\"}]}"
             exit 0
           fi
           st="${STUB_REFUND_STATUS:-succeeded}"
           if [ "$st" = "absent" ]; then
-            echo "{\"object\":\"list\",\"data\":[{\"id\":\"re_TEST\",\"charge\":\"ch_TEST\",\"amount\":10750,\"created\":$rc_created}]}"
+            echo "{\"object\":\"list\",\"data\":[{\"id\":\"re_TEST\",\"charge\":\"ch_TEST\",\"amount\":$rc_amount,\"created\":$rc_created}]}"
           else
-            echo "{\"object\":\"list\",\"data\":[{\"id\":\"re_TEST\",\"charge\":\"ch_TEST\",\"amount\":10750,\"created\":$rc_created,\"status\":\"$st\"}]}"
+            echo "{\"object\":\"list\",\"data\":[{\"id\":\"re_TEST\",\"charge\":\"ch_TEST\",\"amount\":$rc_amount,\"created\":$rc_created,\"status\":\"$st\"}]}"
           fi
         fi
       else
@@ -89,6 +92,14 @@ case "$1 $2" in
     if [ "${STUB_CBT_BROKEN:-0}" -gt 0 ]; then echo ""
     elif [ "${STUB_CBT_TAGGED:-0}" -gt 0 ]; then
       echo '{"object":"list","data":[{"id":"cbtxn_REF","type":"adjustment","amount":-11772,"ending_balance":-11772,"created":1,"metadata":{"referralId":"r1"}}]}'
+    elif [ "${STUB_CBT_REFUND_REVERSED:-0}" -gt 0 ]; then
+      echo '{"object":"list","data":[{"id":"cbtxn_1UFaoLLsjTo3Ar3lSBLsdKR4","type":"adjustment","amount":26038,"ending_balance":-1261,"created":1789395885,"description":"Reverse accidental annual-to-monthly proration credit before cash refund; preserve $12.61 legitimate credit","metadata":{}},{"id":"cbtxn_1UE8BBLsjTo3Ar3lBeWKXP4O","type":"invoice_too_small","amount":-27299,"ending_balance":-27299,"created":1789047497,"description":null,"metadata":{}},{"id":"cbtxn_1UE7wgLsjTo3Ar3lM8C7B5Xu","type":"applied_to_invoice","amount":1746,"ending_balance":0,"created":1789046596,"description":null,"metadata":{}},{"id":"cbtxn_1UC6ceLsjTo3Ar3lgrrZNYOL","type":"invoice_too_small","amount":-1746,"ending_balance":-1746,"created":1788564856,"description":null,"metadata":{}}]}'
+    elif [ "${STUB_CBT_UNLINKED_ADJUSTMENT:-0}" -gt 0 ]; then
+      echo '{"object":"list","data":[{"id":"cbtxn_ADJ","type":"adjustment","amount":26038,"ending_balance":-1261,"created":1789395885,"description":"Account correction","metadata":{}},{"id":"cbtxn_CREDIT","type":"invoice_too_small","amount":-27299,"ending_balance":-27299,"created":1789047497,"description":null,"metadata":{}}]}'
+    elif [ "${STUB_CBT_LATE_CREDIT:-0}" -gt 0 ]; then
+      echo '{"object":"list","data":[{"id":"cbtxn_LATE","type":"invoice_too_small","amount":-100,"ending_balance":-100,"created":1789396057,"description":null,"metadata":{}},{"id":"cbtxn_ADJ","type":"adjustment","amount":100,"ending_balance":0,"created":1789395885,"description":"Reverse account credit before cash refund","metadata":{}},{"id":"cbtxn_OLD","type":"invoice_too_small","amount":-100,"ending_balance":-100,"created":1789395000,"description":null,"metadata":{}}]}'
+    elif [ "${STUB_CBT_SAME_SECOND_CREDIT:-0}" -gt 0 ]; then
+      echo '{"object":"list","data":[{"id":"cbtxn_SAME_SECOND","type":"invoice_too_small","amount":-100,"ending_balance":-200,"created":1789395885,"description":null,"metadata":{}},{"id":"cbtxn_ADJ","type":"adjustment","amount":100,"ending_balance":-100,"created":1789395885,"description":"Reverse account credit before cash refund","metadata":{}},{"id":"cbtxn_OLD","type":"invoice_too_small","amount":-200,"ending_balance":-200,"created":1789395000,"description":null,"metadata":{}}]}'
     else
       echo '{"object":"list","data":[{"id":"cbtxn_LIVE","type":"invoice_too_small","amount":-11772,"ending_balance":-11772,"created":1,"metadata":{}}]}'
     fi
@@ -127,6 +138,7 @@ SH
 }
 
 slack_log() { cat "$BATS_TEST_TMPDIR/slack.log" 2>/dev/null || true; }
+historical_refund_fixture() { export REFUND_OVERLAP_LOOKBACK_HOURS=1000000; }
 
 @test "refund with a live concession credit -> pages, and moves no money" {
   export STUB_CREDIT_BALANCE=-11772
@@ -137,6 +149,87 @@ slack_log() { cat "$BATS_TEST_TMPDIR/slack.log" 2>/dev/null || true; }
   [[ "$(slack_log)" == *"re_TEST"* ]]
   # DETECT-ONLY: it must never write a balance transaction.
   [[ "$output" != *"STRIPE_CALLED post"* ]]
+}
+
+@test "refund preceded by an explicit matching balance reversal does not page on the legitimate residual" {
+  # Regression: re_3UE7weLsjTo3Ar3l2TKuWJq9. The immutable source credit is
+  # -27299c; a documented +26038c adjustment immediately before the 26039c
+  # cash refund removes the overlapping portion and intentionally leaves
+  # -1261c. Treating that ending balance as the source transaction amount made
+  # the watchdog recommend clawing back legitimate credit.
+  export STUB_CREDIT_BALANCE=-1261
+  historical_refund_fixture
+  export STUB_CBT_REFUND_REVERSED=1
+  export STUB_REFUND_AMOUNT=26039
+  export STUB_REFUND_CREATED=1789395957
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -z "$(slack_log)" ]
+  [[ "$output" != *"FINDING"* ]]
+}
+
+@test "a same-sized adjustment without an explicit refund-reversal link still pages" {
+  # Amount and proximity alone are not enough evidence to suppress a financial
+  # alert. Ambiguous adjustments must fail closed for human review.
+  export STUB_CREDIT_BALANCE=-1261
+  historical_refund_fixture
+  export STUB_CBT_UNLINKED_ADJUSTMENT=1
+  export STUB_REFUND_AMOUNT=26039
+  export STUB_REFUND_CREATED=1789395957
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$(slack_log)" == *"Duplicate concession detected"* ]]
+  [[ "$(slack_log)" == *"1261c overlap"* ]]
+}
+
+@test "an explicitly described reversal outside the one-cent tolerance still pages" {
+  historical_refund_fixture
+  export STUB_CREDIT_BALANCE=-1261
+  export STUB_CBT_REFUND_REVERSED=1
+  export STUB_REFUND_AMOUNT=26000
+  export STUB_REFUND_CREATED=1789395957
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$(slack_log)" == *"Duplicate concession detected"* ]]
+  [[ "$(slack_log)" == *"1261c overlap"* ]]
+}
+
+@test "a matching reversal never suppresses concession credit minted after it" {
+  historical_refund_fixture
+  export STUB_CREDIT_BALANCE=-100
+  export STUB_CBT_LATE_CREDIT=1
+  export STUB_REFUND_AMOUNT=100
+  export STUB_REFUND_CREATED=1789395957
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$(slack_log)" == *"Duplicate concession detected"* ]]
+  [[ "$(slack_log)" == *"100c overlap"* ]]
+  [[ "$(slack_log)" == *"cbtxn_LATE"* ]]
+}
+
+@test "a same-second live credit is ambiguous and cannot be suppressed" {
+  historical_refund_fixture
+  export STUB_CREDIT_BALANCE=-200
+  export STUB_CBT_SAME_SECOND_CREDIT=1
+  export STUB_REFUND_AMOUNT=100
+  export STUB_REFUND_CREATED=1789395957
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$(slack_log)" == *"Duplicate concession detected"* ]]
+  [[ "$(slack_log)" == *"100c overlap"* ]]
+  [[ "$(slack_log)" == *"cbtxn_SAME_SECOND"* ]]
+}
+
+@test "one balance reversal cannot suppress two matching refunds" {
+  historical_refund_fixture
+  export STUB_REFUNDS_TWO_MATCHING=1
+  export STUB_CREDIT_BALANCE=-1261
+  export STUB_CBT_REFUND_REVERSED=1
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$(slack_log)" == *"re_TEST"* ]]
+  [[ "$(slack_log)" == *"re_TEST_2"* ]]
+  [[ "$(slack_log)" == *"1261c overlap"* ]]
 }
 
 @test "refund with zero balance -> no page" {
