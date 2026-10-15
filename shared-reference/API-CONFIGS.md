@@ -1,6 +1,6 @@
 # API-CONFIGS.md — Extended API Reference
 
-_Load this file when working with any of these systems. Core configs (Stripe, GHL, Klaviyo, AWS, email) are in TOOLS.md._
+_Load this file when working with any of these systems. Core configs (Stripe, GHL, Klaviyo, AWS, email) are in TOOLS.md. Our email/analytics stack (Klaviyo/Amplitude/Knock replacement): skills `muso-email`, `muso-analytics`._
 
 ## MongoDB Atlas
 
@@ -68,18 +68,21 @@ _Load this file when working with any of these systems. Core configs (Stripe, GH
 - Key: `ORSHOT_API_KEY` | MCP server: `orshot` | Workspace: Federico's (ID: 2879)
 - Usage: `mcporter call orshot.<tool_name> key=value`
 
-## Knock (Notifications)
+## Knock (Notifications) — being replaced
 
 - Keys: `KNOCK_PUBLIC_KEY`, `KNOCK_SECRET_KEY` (test env) | Base: `https://api.knock.app/v1`
-- Note: Test keys only — need prod keys for go-live.
+- Note: Test keys only. Knock is being replaced by notify-gateway + Novu (stack swap, Oct 2026); do not build on it.
+- A user's bell, read-only from our store (mirrors Knock's last 30 days, then the new path):
+  `bash /opt/hydra/scripts/muso-stack-read.sh pg notify "SELECT workflow_key, inserted_at, read_at, seen_at FROM notify.feed_items WHERE user_id = '<user_id>' ORDER BY inserted_at DESC LIMIT 20"`
 
 ## Retool API
 
 - Key: `RETOOL_ACCESS_TOKEN` | For admin panel lookups.
 
-## Amplitude Lookup Rule
+## Product Analytics Lookup Rule (our stack first, Amplitude as fallback)
 
-Always use Muso internal user ID (numeric) for searches — NOT email. Get user ID from Retool → User Management.
+Always use Muso internal user ID (numeric) for searches — NOT email. Get user ID from the admin API / `muso users search`.
+Use the `muso-analytics` skill (`muso-stack-read.sh router '/api/2/usersearch?user=<id>'`); fall back to Amplitude (`muso-amplitude`) only for windows `muso-stack-read.sh coverage` says are not covered yet.
 
 ## Industry Realtime Import Checkpoints
 

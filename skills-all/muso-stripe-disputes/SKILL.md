@@ -15,7 +15,7 @@ depends-on:
   - muso-slack-formatter
 compatibility: |
   Requires Stripe CLI with rak_dispute_read and rak_dispute_write, and Trino access
-  via the muso CLI (`muso query`). Optional: Amplitude.
+  via the muso CLI (`muso query`). Optional: product activity (`muso-analytics`).
 metadata:
   version: "1.0"
   source-repo: "Muso-AI/muso-skills"
@@ -104,17 +104,18 @@ WHERE userid = USER_ID
 SQL
 ```
 
-#### c) Amplitude — Product Engagement (if available)
+#### c) Product Engagement (`muso-analytics`; Amplitude as fallback)
 ```bash
-# Search user
-curl -s -u "$MUSOAI_AMPLITUDE_TOKEN:$MUSOAI_AMPLITUDE_SECRET_KEY" \
-  "https://amplitude.com/api/2/usersearch?user=USER_EMAIL"
-
-# Activity timeline
-# Same Amplitude auth as above
-curl -s \
-  "https://amplitude.com/api/2/useractivity?user=AMPLITUDE_ID&length=1000"
+# Is the window covered by our stack? (events_view_max_event_time / cutover_at)
+bash /opt/hydra/scripts/muso-stack-read.sh coverage
+# Search user by Muso user id (the API does not search by email)
+bash /opt/hydra/scripts/muso-stack-read.sh router '/api/2/usersearch?user=USER_ID'
+# Activity timeline (newest first, limit max 1000)
+bash /opt/hydra/scripts/muso-stack-read.sh router '/api/2/useractivity?user=USER_ID&limit=1000'
 ```
+While Amplitude is live and the dispute window ends after our coverage (or the user is
+not found), also read it via the `muso-amplitude` skill (`usersearch?user=USER_EMAIL`, then
+`useractivity?user=AMPLITUDE_ID&length=1000`). Evidence must name its source.
 
 ### 3. Build Evidence
 

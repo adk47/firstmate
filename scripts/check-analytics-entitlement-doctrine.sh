@@ -75,6 +75,15 @@ require "$SOUL" "the refusal copy" \
 # The copy is customer-facing and was reviewed for word cleanliness.
 require "$SOUL" "the complete refusal copy with pro+seat requirement" \
   "Stream and analytics figures come with Pro – on an active Pro or Business plan with a seat"
+# Figure-disclosure cases the original prohibition did not cover (MUS-10647).
+require "$SOUL" "the per-reply entitlement rule" \
+  "Entitlement is per reply, not per thread"
+require "$SOUL" "the fresh status check on this turn" \
+  'you need a fresh `profile_analytics_status` saying `analytics.entitled` is `true` on THIS turn'
+require "$SOUL" "the customer-supplied figure rule" \
+  "A figure the customer gave you is still a figure you may not repeat"
+require "$SOUL" "the data-fix confirmation rule" \
+  "After a data fix: confirm that the fix landed, never the number"
 
 if [ "$fail" -ne 0 ]; then
   echo "" >&2

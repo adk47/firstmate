@@ -12,6 +12,12 @@ pii: unknown
 last_exported: 2025-01-31
 */
 
+-- STACK SWAP (Oct 2026): "platform-industry-amplitude-bi-prod".events is the Amplitude export lake.
+-- At Amplitude's cutover the event router's lake sink takes over the same files (analytics lane A11), so
+-- this query is meant to stay valid; check the latest partition if a result looks short. For a current or per-user read prefer ClickHouse product_events.events (skill muso-analytics).
+-- STACK SWAP (Oct 2026): this audience used to be uploaded to Klaviyo. Klaviyo is being retired; marketing
+-- audiences go to Listmonk (skill muso-email) from the marketing cutover (~28 Oct). The SQL is unchanged;
+-- only the destination moves, and the upload is a human step (Aaron / Nick).
 with du as (
 	select try_cast(user_id as int) as id,
 		country

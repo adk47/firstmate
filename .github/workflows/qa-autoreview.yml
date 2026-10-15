@@ -41,8 +41,13 @@ permissions:
 
 jobs:
   dispatch:
-    # Same on-box runner as pr-validate; the openclaw CLI + gateway live here.
-    runs-on: [self-hosted, hydra]
+    # Same on-box HOST (node-8) as pr-validate; the openclaw CLI + gateway live here.
+    # 2026-10-12 (H-DevOps lane, firstmate 5383/5385): own runner label. This job is a ~7-10 s hand-off to the
+    # on-box gateway, but on the shared [self-hosted, hydra] pool it queued FIFO behind pr-validate's 20-25 min
+    # Bats jobs: 65 queued, 20:12 -> ~22:10Z dispatch latency ~2 h on 10-12. Runners labelled hydra-dispatch
+    # (and NOT hydra) serve only dispatches. PRECONDITION: >= 1 online runner carries hydra-dispatch BEFORE
+    # this merges, or every dispatch queues forever. Revert = put back [self-hosted, hydra].
+    runs-on: [self-hosted, hydra-dispatch]
     # pr-validate only runs on pull_request, but guard explicitly anyway.
     if: github.event.workflow_run.event == 'pull_request'
     steps:

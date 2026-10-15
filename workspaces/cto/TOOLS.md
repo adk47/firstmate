@@ -43,7 +43,13 @@
 - **Priority system**: Tasks have priority levels that affect queue ordering
 - **KEDA scaling**: Autoscaling based on queue depth for analytics workers
 
-## Klaviyo
+## Our email + analytics stack (replaces Klaviyo / Amplitude reads, stack swap Oct 2026)
+- READ ONLY, via `bash /opt/hydra/scripts/muso-stack-read.sh` (run `coverage` first: it says what our stack holds today)
+- Email: skill `muso-email` (send log + engagement in ClickHouse `messaging.email_events`, consent/suppressions in preferences, campaigns/lists in Listmonk)
+- Product analytics: skill `muso-analytics` (event router query API = Amplitude's Dashboard API paths; ClickHouse `product_events`)
+- Read from both while a stream overlaps, prefer ours, and name the source of every number
+
+## Klaviyo (legacy; until each stream cuts over, marketing ~28 Oct)
 - Email marketing platform — full access for template management, API integration, and engineering support
 - API base: `https://a.klaviyo.com/api/`
 - **Revision header required**: Always include `revision` header in API calls
