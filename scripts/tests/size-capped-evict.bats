@@ -220,3 +220,21 @@ SH
   [ ! -d "$SIZE_CAP_ROOT/old" ]
   [ -d "$SIZE_CAP_ROOT/bad" ]
 }
+
+@test "a failing find (incomplete enumeration) exits 1 and evicts nothing" {
+  mk old 30 100
+  mkdir -p "$BATS_TEST_TMPDIR/shim"
+  printf '#!/bin/bash\nexit 1\n' > "$BATS_TEST_TMPDIR/shim/find"; chmod +x "$BATS_TEST_TMPDIR/shim/find"
+  PATH="$BATS_TEST_TMPDIR/shim:$PATH" SIZE_CAP_KIB=0 SIZE_CAP_MIN_AGE_MIN=0 run "$RULE"
+  [ "$status" -eq 1 ]
+  [ -d "$SIZE_CAP_ROOT/old" ]
+}
+
+@test "a newline-named child is counted as a failure, not a silent success" {
+  mk $'x\nscripts' 30 100
+  mk old 30 100
+  SIZE_CAP_KIB=0 SIZE_CAP_MIN_AGE_MIN=0 run "$RULE"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"failures=1"* ]]
+  [ ! -d "$SIZE_CAP_ROOT/old" ]
+}

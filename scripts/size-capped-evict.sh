@@ -68,7 +68,24 @@ evicted=0; freed_kib=0; skipped_open=0; failures=0
 now="$(date +%s)"
 
 # Oldest first. Only direct children, never symlinks followed, never the root.
-while IFS= read -r path; do
+# Enumerate before deleting: a failed find or sorter must exit 1, not read as "nothing to do".
+# A newline-named child cannot travel through a line-based list: it is emitted as an NL record and
+# counted as a failure below.
+listing="$(
+  find "$ROOT" -mindepth 1 -maxdepth 1 -print0 \
+    | while IFS= read -r -d '' p; do
+        case "$p" in *$'\n'*) printf 'NL %s\n' "${p//$'\n'/?}"; continue ;; esac
+        ts="$(mtime "$p")" || ts=""; ts="${ts:-0}"   # unstat-able sorts first; the loop below judges it
+        printf '%s %s\n' "$ts" "$p"
+      done \
+    | sort -n
+)" || { echo "size-capped: could not enumerate $ROOT, evicting nothing" >&2; exit 1; }
+
+while IFS=' ' read -r tag path; do
+  [ -n "$path" ] || continue
+  if [ "$tag" = NL ]; then
+    failures=$((failures + 1)); echo "size-capped: WARN cannot process newline in name $path" >&2; continue
+  fi
   [ "$total_kib" -le "$CAP_KIB" ] && break
   # A child that vanished after find listed it (live cache) is skipped; one that exists but cannot
   # be stat'ed is a failure. Never feed an empty mtime to arithmetic: that aborts the loop with rc 0.
@@ -99,16 +116,7 @@ while IFS= read -r path; do
     failures=$((failures + 1))
     echo "size-capped: WARN could not evict $path" >&2
   fi
-done < <(
-  find "$ROOT" -mindepth 1 -maxdepth 1 -print0 \
-    | while IFS= read -r -d '' p; do
-        # newline-delimited records would let a name like $'\nscripts' split into a path outside ROOT
-        case "$p" in *$'\n'*) echo "size-capped: skip (newline in name) ${p//$'\n'/?}" >&2; continue ;; esac
-        ts="$(mtime "$p")" || ts=""; ts="${ts:-0}"   # unstat-able sorts first; the loop above judges it
-        printf '%s %s\n' "$ts" "$p"
-      done \
-    | sort -n | cut -d' ' -f2-
-)
+done <<< "$listing"
 
 echo "size-capped: done root=$ROOT cap_kib=$CAP_KIB remaining_kib=$total_kib evicted=$evicted freed_kib=$freed_kib skipped_open=$skipped_open dry_run=$dry failures=$failures"
 [ "$failures" -eq 0 ]
