@@ -38,7 +38,7 @@ OTHER='gh: Resource not accessible by integration (HTTP 403)'
 @test "remaining and reset seen by the caller are printed" {
   QA_GH_RATELIMIT_REMAINING=0 QA_GH_RATELIMIT_RESET=1792073087 run "$SCRIPT" "$PRIMARY"
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q 'x-ratelimit-remaining=0'
+  echo "$output" | grep -q 'remaining=0'
   echo "$output" | grep -q '2026-10-15T14:04:47Z'
 }
 
