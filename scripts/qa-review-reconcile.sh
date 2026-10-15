@@ -344,6 +344,18 @@ github_status_probe() {
   return 0
 }
 
+# dedupe_classes <comma list> — "commit,commit,status" -> "commit=2 status=1",
+# in stage order. Log output only; the paged message keeps the raw list.
+dedupe_classes() {
+  local -A seen=()
+  local t st out=""
+  for t in ${1//,/ }; do seen[$t]=$(( ${seen[$t]:-0} + 1 )); done
+  for st in commit timeline reviews status; do
+    [ -z "${seen[$st]:-}" ] || out="${out:+$out }$st=${seen[$st]}"
+  done
+  printf '%s' "$out"
+}
+
 # page_read_failure <repo> <stage> <message> — page for a read failure, at most
 # once per (repo, stage) per READ_FAIL_ALERT_INTERVAL, appending what
 # githubstatus.com actually said. Reads and writes the caller's $state_json in
@@ -351,9 +363,13 @@ github_status_probe() {
 # end-of-tick), so a suppressed page leaves the stamp untouched.
 page_read_failure() {
   local repo="$1" stage="$2" msg="$3" last
+  PRF_SUPPRESS_NOTE=""
   last="$(qar_state_read_fail_last_alert "$state_json" "$repo" "$stage")"
   if ! qar_read_fail_should_page "$last" "$NOW_EPOCH" "$READ_FAIL_ALERT_INTERVAL"; then
-    log "read-failure page suppressed for $repo/$stage (last paged $((NOW_EPOCH - last))s ago, interval ${READ_FAIL_ALERT_INTERVAL}s) — detection counters still advancing."
+    # Log-only: the caller prints this (alone, or folded into the per-repo
+    # READ FAILURE DIGEST). It changes nothing about whether we page.
+    PRF_SUPPRESS_NOTE="last paged $((NOW_EPOCH - last))s ago, interval ${READ_FAIL_ALERT_INTERVAL}s"
+    tick_pages_suppressed=$((tick_pages_suppressed + 1))
     return 0
   fi
   github_status_probe
@@ -490,6 +506,11 @@ reached_this_tick=0
 terminal_skipped=0
 paged_this_tick=0
 page_cap_deferred=0
+# Log-only roll-up inputs for the TICK DIGEST line (nothing here gates paging).
+tick_pages_suppressed=0
+tick_repos_degraded=0
+tick_prs_degraded=0
+declare -A tick_stage_failed=( [commit]=0 [timeline]=0 [reviews]=0 [status]=0 [author_uid]=0 )
 pre_epoch_ignored_total=0
 declare -A pre_epoch_ignored_by_repo=()
 failed_repo_count=0
@@ -662,7 +683,14 @@ for repo in "${REPOS[@]}"; do
     page "qa-review-reconcile: $repo's open-PR list returned exactly $PRLIST_LIMIT (the --limit cap) — presumed truncated. Some open PRs may be invisible to this tick's reconciliation. Pruning of this repo's attempt state is skipped while truncated (never wipe state for a PR that was merely invisible)."
   fi
 
+  # PRs with >=1 failed read this tick (TICK DIGEST input; log-only). Counted
+  # at the top of the next iteration and once after the loop, because the
+  # failure branches `continue`.
+  repo_pr_read_failures=0
+  pr_fail_mark=0
   while IFS= read -r pr_json; do
+    [ "$repo_reads_failed" -le "$pr_fail_mark" ] || repo_pr_read_failures=$((repo_pr_read_failures + 1))
+    pr_fail_mark="$repo_reads_failed"
     [ -n "$pr_json" ] || continue
     pr="$(jq -r '.number' <<<"$pr_json")"
     head_sha="$(jq -r '.headRefOid' <<<"$pr_json")"
@@ -1017,6 +1045,7 @@ for repo in "${REPOS[@]}"; do
     fi
     dispatched_this_tick=$((dispatched_this_tick + 1))
   done < <(jq -c '.[]' <<<"$prs_json")
+  [ "$repo_reads_failed" -le "$pr_fail_mark" ] || repo_pr_read_failures=$((repo_pr_read_failures + 1))
 
   # PRs whose head already showed a terminal qa-review status this tick —
   # they consumed zero per-PR reads (see the loop's short-circuit). Reported
@@ -1034,13 +1063,16 @@ for repo in "${REPOS[@]}"; do
   # failed" is call-level (commit/timeline/reviews/status attempts), not
   # PR-level, so a single successful read anywhere this tick resets it — a
   # partial degradation is not this failure's signature.
+  cand_fired=0 cand_line="" cand_supp="" cand_fail_n=0
   if [ "$repo_reads_attempted" -gt 0 ] && [ "$repo_reads_failed" -ge "$repo_reads_attempted" ]; then
     cand_fail_n=$(( $(qar_state_repo_candidate_failure_count "$state_json" "$repo") + 1 ))
     state_json="$(qar_state_set_repo_candidate_failure_count "$state_json" "$repo" "$cand_fail_n")"
-    log "CANDIDATE READ FAILURE: $repo — all $repo_reads_attempted per-PR read(s) failed this tick (classes: $repo_failed_classes); consecutive count now $cand_fail_n."
+    cand_fired=1
+    cand_line="CANDIDATE READ FAILURE: $repo — all $repo_reads_attempted per-PR read(s) failed this tick (classes: $(dedupe_classes "$repo_failed_classes")); consecutive count now $cand_fail_n."
     if [ "$cand_fail_n" -ge "$TICK_FAIL_THRESHOLD" ]; then
       page_read_failure "$repo" "__candidate__" \
         "qa-review-reconcile: $repo — every per-PR read (classes: $repo_failed_classes) has failed for $cand_fail_n consecutive ticks. Reviews for this repo may be silently unclassifiable — this is the invisible-loss class this reconciler exists to kill."
+      cand_supp="$PRF_SUPPRESS_NOTE"
     fi
   else
     state_json="$(qar_state_set_repo_candidate_failure_count "$state_json" "$repo" 0)"
@@ -1058,6 +1090,8 @@ for repo in "${REPOS[@]}"; do
   # reviews endpoint alone fails every tick while commit reads keep
   # succeeding: the aggregate never fires (failed < attempted overall), but
   # every affected PR is silently unclassifiable on its reviews read forever.
+  fired_stages=""
+  declare -A stage_streak=() stage_supp=() stage_line=()
   for stage in commit timeline reviews status author_uid; do
     st_attempted="${stage_attempted[$stage]}"
     st_failed="${stage_failed[$stage]}"
@@ -1078,17 +1112,59 @@ for repo in "${REPOS[@]}"; do
     # attempted): increment the durable per-repo-per-stage counter.
     stage_fail_n=$(( $(qar_state_stage_failure_count "$state_json" "$repo" "$stage") + 1 ))
     state_json="$(qar_state_set_stage_failure_count "$state_json" "$repo" "$stage" "$stage_fail_n")"
-    log "STAGE READ FAILURE: $repo/$stage — all $st_attempted attempt(s) of this stage failed this tick; consecutive count now $stage_fail_n."
+    fired_stages="${fired_stages:+$fired_stages }$stage"
+    stage_streak[$stage]="$stage_fail_n"
+    stage_supp[$stage]=""
+    stage_line[$stage]="STAGE READ FAILURE: $repo/$stage — all $st_attempted attempt(s) of this stage failed this tick; consecutive count now $stage_fail_n."
     if [ "$stage_fail_n" -ge "$TICK_FAIL_THRESHOLD" ]; then
       page_read_failure "$repo" "$stage" \
         "qa-review-reconcile: $repo — the '$stage' read stage has failed every attempt for $stage_fail_n consecutive ticks. PRs in this repo may be silently unclassifiable on this stage alone (other stages may be healthy) — this is the invisible-loss class this reconciler exists to kill."
+      stage_supp[$stage]="$PRF_SUPPRESS_NOTE"
     fi
   done
+
+  # ── Log output for the two watchdogs above (printing only) ─────────────
+  # When the candidate watchdog and the stage watchdogs fired for the SAME
+  # cause — the stages that fired are exactly the stages named in the failed
+  # classes — print one READ FAILURE DIGEST. Any divergence (candidate with no
+  # matching stage, a stage with no candidate, author_uid alongside) keeps the
+  # separate lines: that disagreement is information.
+  cls_pairs="$(dedupe_classes "$repo_failed_classes")"
+  cls_stages=""
+  for pair in $cls_pairs; do cls_stages="${cls_stages:+$cls_stages }${pair%%=*}"; done
+  if [ "$cand_fired" -eq 1 ] && [ -n "$fired_stages" ] && [ "$fired_stages" = "$cls_stages" ]; then
+    stage_streaks=""
+    for stage in $fired_stages; do stage_streaks="${stage_streaks:+$stage_streaks, }$stage=${stage_streak[$stage]}"; done
+    supp_note="$cand_supp"
+    for stage in $fired_stages; do [ -n "$supp_note" ] || supp_note="${stage_supp[$stage]}"; done
+    log "READ FAILURE DIGEST: $repo — $repo_reads_failed/$repo_reads_attempted per-PR read(s) failed (stages: ${cls_pairs// /, }); candidate streak $cand_fail_n, stage streaks $stage_streaks;${supp_note:+ page suppressed ($supp_note) — detection counters still advancing.}"
+  else
+    if [ "$cand_fired" -eq 1 ]; then
+      log "$cand_line"
+      [ -z "$cand_supp" ] || log "read-failure page suppressed for $repo/__candidate__ ($cand_supp) — detection counters still advancing."
+    fi
+    for stage in $fired_stages; do
+      log "${stage_line[$stage]}"
+      [ -z "${stage_supp[$stage]}" ] || log "read-failure page suppressed for $repo/$stage (${stage_supp[$stage]}) — detection counters still advancing."
+    done
+  fi
+
+  if [ "$repo_reads_failed" -gt 0 ]; then
+    tick_repos_degraded=$((tick_repos_degraded + 1))
+    tick_prs_degraded=$((tick_prs_degraded + repo_pr_read_failures))
+    for stage in commit timeline reviews status author_uid; do
+      tick_stage_failed[$stage]=$((tick_stage_failed[$stage] + stage_failed[$stage]))
+    done
+  fi
 done
 
 # One tick-level line for the whole rate-limit cause (never one per PR/repo).
 if [ "$rate_limit_failed_reads" -gt 0 ]; then
   log "TOKEN EXHAUSTED — ${rate_limit_probe:-core remaining unknown}; $rate_limit_failed_reads per-PR read(s) failed on this cause. This is the shared adk47 bucket, not a permissions problem."
+fi
+
+if [ "$tick_repos_degraded" -gt 0 ]; then
+  log "TICK DIGEST: $tick_repos_degraded repo(s) with read failures across $tick_prs_degraded PR(s); stages: commit=${tick_stage_failed[commit]}, timeline=${tick_stage_failed[timeline]}, reviews=${tick_stage_failed[reviews]}, status=${tick_stage_failed[status]}, author_uid=${tick_stage_failed[author_uid]}; $tick_pages_suppressed page(s) suppressed, $page_cap_deferred deferred by PAGE_CAP."
 fi
 
 if [ "$page_cap_deferred" -gt 0 ]; then
