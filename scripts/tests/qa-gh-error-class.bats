@@ -53,3 +53,31 @@ OTHER='gh: Resource not accessible by integration (HTTP 403)'
   [ "$status" -eq 1 ]
   [ -z "$output" ]
 }
+
+@test "malformed reset still classifies the 403 and prints the raw value" {
+  for bad in abc null; do
+    QA_GH_RATELIMIT_REMAINING=0 QA_GH_RATELIMIT_RESET=$bad run "$SCRIPT" "$PRIMARY"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q 'primary rate limit'
+    echo "$output" | grep -q "reset=$bad"
+  done
+}
+
+@test "every branch is one line of <=140 chars with the seen values intact" {
+  export QA_GH_RATELIMIT_REMAINING=4940 QA_GH_RATELIMIT_RESET=1792073087
+  for e in "$PRIMARY" "$SECONDARY" "$OTHER" "$(printf 'gh: Forbidden %0200d\nline2 (HTTP 403)' 0)"; do
+    run "$SCRIPT" "$e"
+    [ "$status" -eq 0 ]
+    [ "${#output}" -le 140 ]
+    [[ "$output" != *$'\n'* ]]
+    [[ "$output" == "CANNOT REVIEW: "* ]]
+    echo "$output" | grep -q 'remaining=4940, resets 2026-10-15T14:04:47Z'
+  done
+}
+
+@test "legacy abuse-detection 403 is a secondary limit, not 'not throttling'" {
+  run "$SCRIPT" 'gh: You have triggered an abuse detection mechanism. (HTTP 403)'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'secondary rate limit'
+  if echo "$output" | grep -q 'not throttling'; then false; fi
+}

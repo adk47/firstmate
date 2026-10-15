@@ -315,13 +315,19 @@ diff is not the problem. Fail-closed in the direction of "blocking but honest".
 the diff cap: a failed/degraded bundle (every case under "Check the bundle's
 integrity flags FIRST"), a 403/404 that hides the PR, an unreadable file list,
 a thread list that cannot be completed, and a GitHub 403 that blocks the bundle
-or the CI lookup. **Never assume a 403 is an empty quota** (MUS-11176): pipe the
-failing `gh` error text through `scripts/lib/qa-gh-error-class.sh` and use its
-output verbatim as the reason. It tells a primary hourly quota (`API rate limit
-exceeded`) from a secondary burst limit and from a plain permission 403, and
-prints `x-ratelimit-remaining` and the reset time when you export
-`QA_GH_RATELIMIT_REMAINING` / `QA_GH_RATELIMIT_RESET` (read them with
-`gh api rate_limit`). Exit 1 means it is not a 403; keep your own concrete reason.
+or the CI lookup. **Never assume a 403 is an empty quota** (MUS-11176): read the
+bucket, then pipe the failing `gh` error text through the classifier and use its
+output verbatim as the reason:
+
+```bash
+read -r rem rst < <(gh api rate_limit --jq '.resources.core | "\(.remaining) \(.reset)"')
+QA_GH_RATELIMIT_REMAINING=$rem QA_GH_RATELIMIT_RESET=$rst \
+  bash /opt/hydra/scripts/lib/qa-gh-error-class.sh "<failing gh error text>"
+```
+
+It tells a primary hourly quota (`API rate limit exceeded`) from a secondary
+burst limit and from a plain permission 403, and prints the remaining count and
+reset time. Exit 1 means it is not a 403; keep your own concrete reason.
 If you could read the change and chose to block it, that is NO-GO. If you could
 not read the change, that is CANNOT REVIEW. **Never mix them in one verdict**,
 and never dress a tool failure up as a finding to make the verdict look normal.

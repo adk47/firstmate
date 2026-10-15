@@ -22,21 +22,30 @@ err="${1-}"
 
 [[ "$err" == *"HTTP 403"* ]] || exit 1
 
+# The output becomes a commit-status description: one line, <=140 chars
+# (qa-review-status.sh cuts at 137 + "..."). So the seen values go BEFORE the
+# prose and only the raw gh text, which is last, is ever cut.
+err="$(printf '%s' "$err" | tr '\n\r' '  ')"
+
 seen=""
 if [ -n "${QA_GH_RATELIMIT_REMAINING:-}" ]; then
-  seen=" (x-ratelimit-remaining=${QA_GH_RATELIMIT_REMAINING}"
-  if [ -n "${QA_GH_RATELIMIT_RESET:-}" ]; then
-    seen+=", window resets $(date -u -d "@${QA_GH_RATELIMIT_RESET}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-      || date -u -r "${QA_GH_RATELIMIT_RESET}" +%Y-%m-%dT%H:%M:%SZ)"
+  seen="[remaining=${QA_GH_RATELIMIT_REMAINING:0:8}"
+  reset="${QA_GH_RATELIMIT_RESET:-}"
+  if [[ "$reset" =~ ^[0-9]+$ ]]; then
+    seen+=", resets $(date -u -d "@${reset}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u -r "${reset}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "@${reset}")"
+  elif [ -n "$reset" ]; then
+    seen+=", reset=${reset:0:12}"
   fi
-  seen+=")"
+  seen+="] "
 fi
 
 shopt -s nocasematch
-if [[ "$err" == *"secondary rate limit"* ]]; then
-  echo "CANNOT REVIEW: GitHub secondary rate limit (burst) blocked the review bundle, HTTP 403 — the hourly quota is not necessarily empty; retry after a few minutes${seen}"
+if [[ "$err" == *"secondary rate limit"* || "$err" == *"abuse detection"* ]]; then
+  out="CANNOT REVIEW: ${seen}GitHub secondary rate limit (burst), HTTP 403; quota may be full, retry in minutes"
 elif [[ "$err" == *"rate limit exceeded"* ]]; then
-  echo "CANNOT REVIEW: GitHub primary rate limit (hourly quota) is exhausted, HTTP 403${seen}"
+  out="CANNOT REVIEW: ${seen}GitHub primary rate limit (hourly quota) exhausted, HTTP 403"
 else
-  echo "CANNOT REVIEW: GitHub returned HTTP 403 (a permission or resource error, not throttling) —${err:0:160}${seen}"
+  out="CANNOT REVIEW: ${seen}GitHub HTTP 403, permission or resource error, not throttling: ${err}"
 fi
+echo "${out:0:140}"
