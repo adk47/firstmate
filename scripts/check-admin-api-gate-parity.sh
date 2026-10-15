@@ -111,7 +111,7 @@ command -v awk >/dev/null 2>&1 || { echo "FATAL: awk not found." >&2; exit 2; }
 command -v sed >/dev/null 2>&1 || { echo "FATAL: sed not found." >&2; exit 2; }
 command -v diff >/dev/null 2>&1 || { echo "FATAL: diff not found." >&2; exit 2; }
 
-WORKDIR="$(mktemp -d)" || { echo "FATAL: mktemp -d failed." >&2; exit 2; }
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/check-admin-api-gate-parity.XXXXXX")" || { echo "FATAL: mktemp -d failed." >&2; exit 2; }
 trap 'rm -rf "$WORKDIR"' EXIT
 
 # extract_function FILE FUNCNAME -> prints the function body (from the

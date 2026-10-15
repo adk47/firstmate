@@ -56,6 +56,45 @@ const CLAIM_B =
 const INVENTED_SLA =
   /\byou['’]?ll hear back\b|\bfollow[- ]?up within\b|\bget back to you within\b/i;
 
+// Family C (MUS-1516) — a quoted reference number is the STRONGEST possible
+// handoff claim, and the one shape Families A/B never covered (no verb required:
+// "Your reference numbers are 869f7v9v2, 869f7va3b and 869f7vabr." has no "I've
+// flagged"/"raised"/etc). A ClickUp task id is a bare 9-character lowercase
+// alnum token (e.g. "869f7v9v2" — the 27 Sep incident; "869dgkzga" —
+// sanitize-reasoning-leak.test.ts's fixture).
+//
+// Containment (design call ③ on MUS-1471): \b on both sides means this can ONLY
+// match a token that is EXACTLY 9 word-characters end to end — \b lands only at
+// the edges of a contiguous run of word-characters, never inside one, so a
+// profile/order UUID (ticket-format.ts's musoProfileUrl; order-lookup.ts's
+// order_ref) can never match: its hyphen-separated segments are 8/4/4/4/12
+// characters, none of them 9. Lowercase-only excludes the order number
+// (core-backend createOrder.js: customAlphabet('0-9A-Z',10)(5) — 5 UPPERCASE+
+// digit characters) even if its length ever changed. "At least one digit AND
+// at least one letter" is enforced in code, not the regex (extractReferenceIds
+// below), to keep the character class simple. Both halves matter: a bare
+// all-digit run (a long Prodigi order id, a confirmation code) is excluded,
+// and so is a bare all-letter run — a plain 9-letter English word
+// ("processed", "reference" are both exactly 9 letters) would otherwise
+// false-positive on ordinary prose. A genuine id missing either a digit or a
+// letter is a false negative only, which downgrades toward the honest
+// fallback — the safe direction (design call ②).
+const REFERENCE_ID_RE = /\b[0-9a-z]{9}\b/g;
+
+function extractReferenceIds(sentence: string): string[] {
+  const matches = sentence.match(REFERENCE_ID_RE);
+  if (!matches) return [];
+  return matches.filter((id) => /[a-z]/.test(id) && /[0-9]/.test(id));
+}
+
+// True iff `sentence` quotes a reference-shaped token that is NOT in
+// `filedIds` — this conversation's actual create_ticket result(s). Any single
+// unbacked token is enough to redact the whole sentence (never blank the id in
+// place: "Your reference numbers are , and ." must never ship).
+function sentenceHasUnbackedReference(sentence: string, filedIds: ReadonlySet<string>): boolean {
+  return extractReferenceIds(sentence).some((id) => !filedIds.has(id));
+}
+
 function isClaim(sentence: string): boolean {
   return CLAIM_A.test(sentence) || CLAIM_B.test(sentence);
 }
@@ -68,32 +107,21 @@ function splitSentences(body: string): string[] {
   return matches && matches.length > 0 ? matches : [body];
 }
 
-export function sanitizeHandoffClaim(
-  body: string,
-  opts: { ticketConfirmed: boolean },
-): HandoffClaimSanitizeResult {
-  if (typeof body !== "string") {
-    return { body: FALLBACK, redactions: [`<non-string body: ${typeof body}>`] };
-  }
-  // A real, confirmed ticket makes the claim TRUE — never touch the reply. This is the
-  // guarantee that legitimate post-ticket replies pass through unchanged.
-  if (opts.ticketConfirmed) return { body, redactions: [] };
-
-  const truncated = body.length > MAX_BODY_LENGTH;
-  const input = truncated ? body.slice(0, MAX_BODY_LENGTH) : body;
-
-  const sentences = splitSentences(input);
-  if (!sentences.some((s) => isClaim(s))) {
-    // No unbacked handoff claim → leave the reply alone (do NOT strip standalone SLAs;
-    // without a claim they are far more likely to be factual than a false promise).
-    return { body, redactions: [] };
-  }
-
+// Redact every sentence `isTrigger` flags: the first gets replaced by FALLBACK
+// (fallback emitted once), the rest are dropped silently. When `dropSla` is set,
+// a sentence matching INVENTED_SLA is ALSO dropped (no fallback) even if it
+// isn't itself a trigger — this is what lets a co-occurring or standalone SLA
+// promise collapse once the body is already being processed.
+function redactSentences(
+  sentences: string[],
+  isTrigger: (sentence: string) => boolean,
+  dropSla: boolean,
+): { out: string[]; redactions: string[] } {
   const redactions: string[] = [];
   let fallbackEmitted = false;
   const out: string[] = [];
   for (const sentence of sentences) {
-    if (isClaim(sentence)) {
+    if (isTrigger(sentence)) {
       redactions.push(sentence.trim());
       if (!fallbackEmitted) {
         // Preserve the claim's trailing whitespace so following sentences stay spaced
@@ -102,18 +130,72 @@ export function sanitizeHandoffClaim(
         out.push(FALLBACK + trailing);
         fallbackEmitted = true;
       }
-      continue; // drop any subsequent claim sentences (fallback emitted once)
+      continue; // drop any subsequent trigger sentences (fallback emitted once)
     }
-    if (INVENTED_SLA.test(sentence)) {
+    if (dropSla && INVENTED_SLA.test(sentence)) {
       redactions.push(sentence.trim());
-      continue; // drop the co-occurring, now-unbacked SLA promise
+      continue; // drop the unbacked SLA promise (co-occurring or standalone)
     }
     out.push(sentence);
   }
-  if (truncated) redactions.push(`<truncated: ${body.length} -> ${MAX_BODY_LENGTH} bytes>`);
+  return { out, redactions };
+}
 
+function finalize(out: string[], redactions: string[]): HandoffClaimSanitizeResult {
   let finalBody = out.join("").trim();
   if (finalBody.length === 0) finalBody = FALLBACK;
   if (finalBody.length > MAX_BODY_LENGTH) finalBody = finalBody.slice(0, MAX_BODY_LENGTH);
   return { body: finalBody, redactions };
+}
+
+export function sanitizeHandoffClaim(
+  body: string,
+  opts: { ticketConfirmed: boolean; filedTicketIds?: readonly string[] },
+): HandoffClaimSanitizeResult {
+  if (typeof body !== "string") {
+    return { body: FALLBACK, redactions: [`<non-string body: ${typeof body}>`] };
+  }
+
+  // Fail-closed by construction (design call ② on MUS-1471): an omitted
+  // filedTicketIds — an old caller, or a missing/stale id store upstream
+  // (plugins/intercom/src/ticket-success-signal.ts's getFiledTicketIds already
+  // returns [] in that case) — resolves to an empty set, so every
+  // reference-shaped token in the body is treated as unbacked. A lost signal
+  // can only downgrade a reply toward the honest fallback, never license a
+  // fake or foreign id.
+  const filedIds = new Set(opts.filedTicketIds ?? []);
+
+  const truncated = body.length > MAX_BODY_LENGTH;
+  const input = truncated ? body.slice(0, MAX_BODY_LENGTH) : body;
+  const sentences = splitSentences(input);
+
+  if (opts.ticketConfirmed) {
+    // A real, confirmed ticket makes a completed-action claim and its SLA
+    // promise TRUE — those are untouched. But (MUS-1516 AC6 / the :80
+    // short-circuit this closes) a confirmed ticket must not license a quoted
+    // id THIS conversation never filed, so the reference-id family is still
+    // checked on its own.
+    if (!sentences.some((s) => sentenceHasUnbackedReference(s, filedIds))) {
+      return { body, redactions: [] };
+    }
+    const { out, redactions } = redactSentences(
+      sentences,
+      (s) => sentenceHasUnbackedReference(s, filedIds),
+      /* dropSla */ false, // the SLA promise is still true given the real ticket
+    );
+    if (truncated) redactions.push(`<truncated: ${body.length} -> ${MAX_BODY_LENGTH} bytes>`);
+    return finalize(out, redactions);
+  }
+
+  const isUnbackedClaim = (s: string) => isClaim(s) || sentenceHasUnbackedReference(s, filedIds);
+  if (!sentences.some(isUnbackedClaim) && !sentences.some((s) => INVENTED_SLA.test(s))) {
+    // No unbacked handoff claim, unbacked reference id, or standalone SLA
+    // promise → leave the reply alone. (A factual timeframe with no claim never
+    // matches INVENTED_SLA — see that regex's own carve-out comment.)
+    return { body, redactions: [] };
+  }
+
+  const { out, redactions } = redactSentences(sentences, isUnbackedClaim, /* dropSla */ true);
+  if (truncated) redactions.push(`<truncated: ${body.length} -> ${MAX_BODY_LENGTH} bytes>`);
+  return finalize(out, redactions);
 }

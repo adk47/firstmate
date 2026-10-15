@@ -116,7 +116,7 @@ command -v jq >/dev/null 2>&1 || die "jq not found"
 # one line.
 body() { sed '/^Rendered: /d' "$1"; }
 
-TMPDIR_RUN="$(mktemp -d)"
+TMPDIR_RUN="$(mktemp -d "${TMPDIR:-/tmp}/sync-app-pricing.XXXXXX")"
 TMP_INSTALL=""
 cleanup() { rm -rf "$TMPDIR_RUN"; [ -z "$TMP_INSTALL" ] || rm -f "$TMP_INSTALL"; }
 trap cleanup EXIT

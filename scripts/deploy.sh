@@ -57,6 +57,8 @@ source "$SCRIPT_DIR/lib/codex-version.sh"
 source "$SCRIPT_DIR/lib/deploy-lock.sh"
 # shellcheck source=lib/deploy-mutation-marker.sh
 source "$SCRIPT_DIR/lib/deploy-mutation-marker.sh"
+# shellcheck source=lib/main-prune-lock.sh
+source "$SCRIPT_DIR/lib/main-prune-lock.sh"
 
 # Effective systemd EnvironmentFile validation for the muso CLI credentials
 # used by the main gateway (unit-tested in scripts/tests/muso-env-preflight.bats).
@@ -504,7 +506,8 @@ install_muso() {
     *) log "    ✗ install_muso: unsupported arch $(uname -m)"; return 1 ;;
   esac
   asset="muso_linux_${arch}.tar.gz"
-  tmp=$(mktemp -d) || return 1
+  # mktemp-ok: rm -rf "$tmp" on every return path below; a kill mid-install leaks one dir
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/deploy.XXXXXX") || return 1
 
   local dl_rc=0
   dl_out=$(timeout 120 gh release download "v${MUSO_CLI_VERSION}" --repo Muso-AI/muso-cli \
@@ -1480,6 +1483,29 @@ RSYNC_EXCLUDES=(
   # deletion classifier chokes on the volume (~386K entries) and hangs the
   # single self-hosted CI runner for hours (2026-07-10).
   --exclude='workspaces/repos/'
+  # Sanctioned ROOT scratch home (MUS-1388, child 3 of MUS-1374). Agents that
+  # write output at the repo root (cwd=/opt/hydra) put it in /scratch/: server-
+  # owned, never tracked, never deleted by --delete. ANCHORED like /api-logs/
+  # above (a bare `scratch/` would match inside plugin trees that
+  # install_plugin() rsyncs with this array). Do NOT commit a tracked file
+  # under scratch/ — this exclude means it would never reach the server.
+  --exclude='/scratch/'
+  # ROOT-LEVEL twins of five excludes scoped one directory too deep
+  # (workspaces/*/.openclaw/, *.jpeg, *.csv, intercom/, qa/pr-review*.json) —
+  # the /api-logs/ mistake again. On 2026-09-28 node-8 held 2 Stripe payout
+  # reports, a payout debug CSV, a payout workbook and 2 customer Intercom
+  # attachments at the repo root, all classified non-suspicious by the old
+  # gate. Excluding them is lossless: never deleted, never overwritten.
+  # All anchored; verified no tracked path matches (git ls-files, MUS-1388).
+  --exclude='/.openclaw/'
+  --exclude='/intercom/'
+  --exclude='/*.csv'
+  --exclude='/*.xlsx'
+  --exclude='/*.pdf'
+  --exclude='/*.jpeg'
+  --exclude='/*.jpg'
+  --exclude='/*.png'
+  --exclude='/pr-review*.json'
 )
 
 # -------------------------------------------------------------------
@@ -1687,21 +1713,34 @@ ATTRIB
   fi
 }
 
+# Step 4b applies the GIT DELTA since .deployed-sha and never --deletes (MUS-5069,
+# scripts/lib/delta-sync.sh). HYDRA_FULL_SYNC=1 is the explicit, human-chosen
+# escape hatch back to the whole-tree mirror (Step 0 rsync drift + Step 4a + a
+# `--delete` Step 4b); it is also the only way to deploy with no usable baseline.
+FULL_SYNC="${HYDRA_FULL_SYNC:-0}"
+# shellcheck source=lib/delta-sync.sh
+source "$SCRIPT_DIR/lib/delta-sync.sh"
+
 log "Step 0/8: Drift check (server vs last-deployed SHA)..."
 drift_check_against_baseline() {
-  if [[ "${HYDRA_FORCE:-0}" == "1" ]]; then
+  if [[ "$FULL_SYNC" == "1" ]]; then
+    log "  HYDRA_FULL_SYNC=1 — whole-tree mirror mode (no delta transfer)"
+  fi
+  if [[ "$FULL_SYNC" == "1" && "${HYDRA_FORCE:-0}" == "1" ]]; then
     log "  Skipped (HYDRA_FORCE=1 set)"
     return 0
   fi
-  if [[ "${HYDRA_SKIP_DRIFT_CHECK:-0}" == "1" ]]; then
+  if [[ "$FULL_SYNC" == "1" && "${HYDRA_SKIP_DRIFT_CHECK:-0}" == "1" ]]; then
     log "  Skipped (HYDRA_SKIP_DRIFT_CHECK=1 set; Step 4a pre-flight will still run)"
     return 0
   fi
   if ! command -v git >/dev/null 2>&1; then
+    [[ "$FULL_SYNC" == "1" ]] || fail "git not found — the delta transfer needs it (HYDRA_FULL_SYNC=1 for a whole-tree mirror)"
     log "  git not found — skipping drift check"
     return 0
   fi
   if ! git -C "$HYDRA_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    [[ "$FULL_SYNC" == "1" ]] || fail "not a git checkout — the delta transfer needs one (HYDRA_FULL_SYNC=1 for a whole-tree mirror)"
     log "  not a git checkout — skipping drift check"
     return 0
   fi
@@ -1736,6 +1775,9 @@ drift_check_against_baseline() {
   fi
   last_sha=$(echo "$last_sha" | tr -d '[:space:]')
 
+  if [[ -z "$last_sha" && "$FULL_SYNC" != "1" ]]; then
+    fail "no .deployed-sha on the server: there is no baseline to compute a delta from. Choose a full sync explicitly: HYDRA_FULL_SYNC=1."
+  fi
   if [[ -z "$last_sha" ]]; then
     log "  No .deployed-sha on server (first deploy with this guard)"
     log "  → drift check skipped, will be enabled after this deploy succeeds"
@@ -1746,6 +1788,39 @@ drift_check_against_baseline() {
   # baseline file by hand) should not silently degrade to "skip check".
   if ! [[ "$last_sha" =~ ^[0-9a-f]{40}$ ]]; then
     fail "baseline .deployed-sha on server is not a valid 40-char hex SHA: '$last_sha'. Inspect /opt/hydra/.deployed-sha and remove it if corrupted."
+  fi
+
+  if [[ "$FULL_SYNC" != "1" ]]; then
+    local why
+    why=$(delta_check_baseline "$last_sha") || fail "$why. Fix the checkout, or choose a full sync explicitly: HYDRA_FULL_SYNC=1."
+    log "  Baseline: $last_sha (server's last successful deploy)"
+    delta_compute "$last_sha" || fail "Could not compute the delta (git diff failed, or it holds a path git quotes; see above). Rename a quoted path in git, or choose a full sync explicitly: HYDRA_FULL_SYNC=1."
+    local dirty untracked_n
+    # git diff has no --pathspec-from-file (exit 129): pass the paths as pathspec args, and
+    # let a git error fail the deploy instead of reading as "no dirty paths".
+    local -a delta_paths=()
+    local delta_p
+    while IFS= read -r delta_p; do [[ -n "$delta_p" ]] && delta_paths+=("$delta_p"); done <<< "$DELTA_UPSERT"
+    dirty=""
+    if (( ${#delta_paths[@]} > 0 )); then
+      dirty=$(git -C "$HYDRA_ROOT" --literal-pathspecs diff --name-only HEAD -- "${delta_paths[@]}") \
+        || fail "could not check the delta paths for uncommitted edits (git diff failed); refusing to ship unverified bytes"
+    fi
+    [[ -z "$dirty" ]] || fail "uncommitted changes in paths this deploy ships (the deploy applies committed bytes only; commit or stash): $(echo "$dirty" | head -5 | tr '\n' ' ')"
+    untracked_n=$(git -C "$HYDRA_ROOT" ls-files --others --exclude-standard 2>/dev/null | sed '/^$/d' | wc -l | tr -d ' ')
+    (( untracked_n == 0 )) || log "  Skipping $untracked_n untracked local file(s): the deploy applies committed changes only"
+    # shellcheck disable=SC2034
+    DEPLOY_CHANGED_FILES=$(printf '%s\n%s\n' "$DELTA_UPSERT" "$DELTA_DELETE" | sed '/^$/d' | sort -u)
+    # shellcheck disable=SC2034
+    DEPLOY_DIFF_COMPUTED=1
+    log "  Delta: $(printf '%s\n' "$DELTA_UPSERT" | sed '/^$/d' | wc -l | tr -d ' ') changed, $(printf '%s\n' "$DELTA_DELETE" | sed '/^$/d' | wc -l | tr -d ' ') removed since $last_sha"
+    # shellcheck disable=SC2034  # read by delta_gate in lib/delta-sync.sh
+    DELTA_HALT_SUPPRESSED=0
+    # shellcheck disable=SC2034
+    if [[ "${HYDRA_FORCE:-0}" == "1" || "${HYDRA_SKIP_DRIFT_CHECK:-0}" == "1" ]]; then DELTA_HALT_SUPPRESSED=1; fi
+    delta_gate "$last_sha" || fail "server and repo both changed the paths above since baseline $last_sha (override: HYDRA_FORCE=1)"
+    log "  Clean — the delta is applied per file; paths outside it are never touched"
+    return 0
   fi
 
   if ! git -C "$HYDRA_ROOT" cat-file -e "$last_sha^{commit}" 2>/dev/null; then
@@ -2036,8 +2111,9 @@ log "  Deny lists validated (only growth detected)."
 # -------------------------------------------------------------------
 # Abort if the server has content in skills-all/ that the repo doesn't —
 # that means someone edited skills directly on the server and a deploy
-# would silently wipe their work. Also surface any suspicious deletions
-# inside workspaces/ or skills-all/.
+# would silently wipe their work. Also halt on ANY deletion rsync --delete
+# would perform — not just workspaces/ or skills-all/ (MUS-1374); the
+# decision lives in scripts/lib/deletion-gate.sh.
 # Bypass: HYDRA_FORCE=1 ./deploy.sh ...
 log "Step 4a/8: Pre-flight drift check..."
 preflight_drift_check() {
@@ -2117,6 +2193,8 @@ preflight_drift_check() {
   # deploy rather than silently auto-excluding everything.
   # shellcheck source=lib/classify-deletions.sh
   source "$SCRIPT_DIR/lib/classify-deletions.sh"
+  # shellcheck source=lib/deletion-gate.sh
+  source "$SCRIPT_DIR/lib/deletion-gate.sh"
 
   if [[ -n "$deletions" ]]; then
     local classified
@@ -2195,84 +2273,29 @@ DRIFT_BRIEFING
   fi
 
   if [[ -n "$deletions" ]]; then
-    local del_count sus_count
+    local del_count
     del_count=$(printf '%s\n' "$deletions" | grep -c .)
 
-    # Deletions inside workspaces/ or skills-all/ are likely real data
-    # (IDENTITY.md, workspace-state.json, custom skills) — these get a
-    # full briefing. Other deletions just get a heads-up.
-    local suspicious
-    suspicious=$(echo "$deletions" | grep -E 'workspaces/|skills-all/' || true)
-    sus_count=$(printf '%s\n' "$suspicious" | grep -c . || true)
-
-    if [[ -n "$suspicious" ]]; then
-      local sus_overflow=""
-      if (( sus_count > 30 )); then
-        sus_overflow="  ... ($((sus_count - 30)) more)"
-      fi
-      cat <<DEL_BRIEFING
-================================================================================
-✗ DEPLOY BLOCKED — sync would delete server state
-================================================================================
-
-WHAT THIS MEANS:
-  rsync --delete is about to remove files from /opt/hydra/ that exist
-  on the server but NOT in the repo. The files below sit under
-  workspaces/ or skills-all/, which means they're likely either:
-    - real accumulated data (dispute trackers, audit logs, scan results)
-    - runtime state generated by openclaw on the server
-    - skills someone added directly on node-8 without committing
-
-  Wiping any of these silently breaks production. There is no backup.
-
-FILES THAT WOULD BE DELETED ($del_count total, suspicious shown):
-$(echo "$suspicious" | head -30 | sed 's/^/  /')
-$sus_overflow
-
-THE ONLY SAFE FIX (do this, in order):
-  1. For each path above, decide:
-     (a) Is it real data? → Pull it into the repo. sync-from-server.sh
-         pulls only TRACKED files, so a path the repo has never seen is
-         NOT pulled by it. Capture it by hand and review it first (no
-         secrets/tokens):
-           scp -i "\$SSH_KEY" "\$NODE8_USER@\$NODE8_IP:$DEPLOY_PATH/<path>" ./<path>
-           git add <path>
-         (an already-tracked file: sync-from-server.sh skills --apply --only <path>
-          or workspaces --apply --only <path>; audit/* is gitignored: audit --apply.
-          NEVER bulk-pull workspaces/: 125 GB / 6.2M files on node-8, 8 Oct.)
-         Then commit.
-     (b) Is it runtime state we want server-owned? → Add an --exclude
-         line to RSYNC_EXCLUDES at the top of scripts/deploy.sh (it's
-         hoisted there because Step 0 also reads it) so rsync stops
-         trying to manage it. Then re-run pre-commit:
-           bash .githooks/pre-commit
-         The Check 2 list (required_excludes) in .githooks/pre-commit
-         must also be updated so future deploys keep enforcing it.
-  2. Re-run deploy. Pre-flight should now report clean.
-
-WHEN BYPASSING IS ACTUALLY OK (HYDRA_FORCE=1):
-  - You've individually verified every file in the list is regenerable
-    or genuinely garbage, AND
-  - You're certain no human or agent will need it again.
-
-  If you're not sure, STOP. Pull first.
-================================================================================
-DEL_BRIEFING
+    # $deletions here is already the post-classifier remainder (the
+    # AUTO:/REMAIN: split above), so it IS the suspicious set — no further
+    # workspaces/skills-all filtering. Every remaining deletion halts.
+    local briefing
+    if ! briefing=$(pending_deletion_briefing "$deletions"); then
+      echo "$briefing"
       if [[ "${HYDRA_FORCE:-0}" != "1" ]]; then
         fail "refusing to delete server state (override: HYDRA_FORCE=1)"
       fi
-      log "  HYDRA_FORCE=1 set — proceeding despite suspicious deletions"
-    else
-      # Non-suspicious deletions: just log them and continue
-      log "  ⚠ sync will delete $del_count file(s) on server (none under workspaces/ or skills-all/):"
-      echo "$deletions" | head -10 | sed 's/^/      /'
-      (( del_count > 10 )) && log "      ... ($((del_count - 10)) more)"
+      log "  HYDRA_FORCE=1 set — proceeding despite $del_count suspicious deletion(s)"
     fi
   fi
 
   log "  Pre-flight clean."
 }
-preflight_drift_check
+if [[ "$FULL_SYNC" == "1" ]]; then
+  preflight_drift_check
+else
+  log "  Skipped — the delta transfer never deletes server-only files (HYDRA_FULL_SYNC=1 restores this pre-flight)"
+fi
 
 # -------------------------------------------------------------------
 # --report-only: both read-only rails (Step 0 drift, Step 4a pre-flight) passed
@@ -2332,6 +2355,25 @@ DEPLOY_RUN_TOKEN="${HYDRA_DEPLOY_RUN_ID:-manual-$(hostname 2>/dev/null || echo h
 # marker held by another live owner is a refusal, never an overwrite; a
 # dead owner is cleared by hand or compare-and-swapped away with
 # HYDRA_TAKEOVER_MUTATION_MARKER=<that owner's token>.
+# Serialise with scripts/main-prune-restart.sh BEFORE the first node-8 mutation (MUS-3742): a restart during its
+# offline cleanup would race it. Held until exit (lib/main-prune-lock.sh); failing here touched nothing.
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+  lock_rc=0
+  log "Taking the main prune/restart lock (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock || lock_rc=$?
+  case "$lock_rc" in
+    0) ;;
+    1) fail "a main prune/restart still holds $MAIN_PRUNE_LOCK_FILE after ${MAIN_PRUNE_LOCK_WAIT_SECS}s; refusing to deploy underneath it (nothing was changed). Re-run once it finishes." ;;
+    *) fail "cannot open $MAIN_PRUNE_LOCK_FILE (rc=$lock_rc); refusing to deploy without the main prune/restart lock (nothing was changed)" ;;
+  esac
+else
+  # ssh mode: the lock must live on node-8 (a local flock would not exclude the prune there), held by a background ssh
+  # for the life of this process; refused = fail closed, same as the local branch.
+  lock_rc=0
+  log "Taking the main prune/restart lock ON node-8 (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock_remote ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" || lock_rc=$?
+  [ "$lock_rc" = 0 ] || fail "could not take $MAIN_PRUNE_LOCK_FILE on node-8 (rc=$lock_rc: a main prune/restart still holds it, or node-8 is unreachable); refusing to deploy underneath it (nothing was changed). Re-run once it finishes."
+fi
 log "Claiming the mutation marker ($DEPLOY_PATH/.deploy-mutating, owner $DEPLOY_RUN_TOKEN)"
 marker_rc=0
 if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
@@ -2354,7 +2396,10 @@ unset marker_rc
 # -------------------------------------------------------------------
 # Step 4b: rsync repo to Node 8
 # -------------------------------------------------------------------
-if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+if [[ "$FULL_SYNC" != "1" ]]; then
+  log "Step 4b/8: Applying the git delta (no --delete)..."
+  delta_apply
+elif $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
   log "Step 4b/8: Local sync (running on Node 8)..."
   rsync -a --delete \
     "${RSYNC_EXCLUDES[@]}" \
@@ -3562,6 +3607,7 @@ fi
 # restart, the pre-drain behavior); HYDRA_FORCE_RESTART=1 overrides the
 # restart-skip gate below (they compose).
 log "Step 6/8: Restarting OpenClaw Gateway ($TARGET)..."
+
 # shellcheck source=lib/gateway-restart.sh
 source "$SCRIPT_DIR/lib/gateway-restart.sh"
 export GATEWAY_EXEC_FN=run_on_node8   # every probe honors $HYDRA_LOCAL (ssh mode too)
@@ -3686,6 +3732,22 @@ check_gateway_not_crashlooping() {
 source "$SCRIPT_DIR/lib/edge-restart-gate.sh"
 
 if gateway_restart_needed; then
+  # Open the deploy/gateway warm-up stand-down window (MUS-5175) for the paging
+  # timers that hit the gateway WS. A SEPARATE flag from the maintenance one
+  # (the untracked gateway guard ignores that one's TTL). The TTL is the window:
+  # no disarm is needed or wanted. Observed 2026-10-08: restart 12:46, peer-labels
+  # still unhealthy at 12:51:47, recovered 12:55 (~9 min), so the warm-up term is
+  # 900s. That warm-up is measured from the RESTART, but this arm runs before
+  # Phase A and the drain can burn GATEWAY_DRAIN_DEADLINE_SECS (390) first. The
+  # gateways drain concurrently but finish_gateway_restart awaits main THEN edge,
+  # each with its own full deadline, so edge's hard restart can land after TWO
+  # drains. The TTL must cover 2 drains + warm-up (MUS-8501). Tradeoff accepted:
+  # on a fast drain the timers stay stood down up to ~780s longer than needed.
+  # Armed only inside the restart branch: a deploy that restarts no gateway must
+  # not stand the timers down. Non-fatal: no window just means the old behaviour.
+  HYDRA_DEPLOY_WINDOW_SECS="${HYDRA_DEPLOY_WINDOW_SECS:-$(( 2 * ${GATEWAY_DRAIN_DEADLINE_SECS:-390} + 900 ))}"
+  run_on_node8 "source '$DEPLOY_PATH/scripts/lib/maintenance-flag.sh' && deploy_window_arm '$HYDRA_DEPLOY_WINDOW_SECS' 'deploy gateway warm-up'" \
+    || log "  WARN: could not arm the deploy warm-up window — gateway timers may page during warm-up"
   # Phase A: request the safe restarts up front (each request returns in ~3s;
   # the gateways then drain CONCURRENTLY, so worst-case wall time is one drain
   # budget, not one per gateway). Phase B verifies serially.
@@ -3831,8 +3893,25 @@ if needs_target "main" && [ -f "$HYDRA_ROOT/cron-jobs.json" ]; then
   cron_store_heal_trap() {
     if [ -n "${CRON_HEAL_STOPPED:-}" ]; then
       log "  ✗ deploy exited with $CRON_HEAL_STOPPED stopped — starting it back up"
-      run_on_node8 "${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || true
-      notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; attempted an emergency start. VERIFY the gateway is up."
+      if main_prune_lock_lost; then
+        # Our node-8 lock died with the holder ssh, so a prune may already own the freed lock with main stopped
+        # for offline SQLite cleanup (the race rollback.sh ensure_gateways_up refuses). Start ONLY under that lock,
+        # atomically: refused (99) means the prune owns it and starts main itself (main-prune-restart.sh).
+        heal_rc=0
+        run_on_node8 "flock -n -E 99 '$MAIN_PRUNE_LOCK_FILE' ${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || heal_rc=$?
+        case "$heal_rc" in
+          0)  notify_slack ":warning: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped and the node-8 prune lock lost; started it again UNDER the prune lock. VERIFY the gateway is up." ;;
+          99) log "    a prune holds $MAIN_PRUNE_LOCK_FILE — NOT starting $CRON_HEAL_STOPPED; the prune starts main itself"
+              notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped, the node-8 prune lock lost and a prune now holds it. It was deliberately NOT started (the prune restarts main). VERIFY the gateway is up." ;;
+          *)  log "    emergency start under the prune lock FAILED (rc=$heal_rc)"
+              notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; the emergency start under the prune lock FAILED (rc=$heal_rc). VERIFY the gateway is up." ;;
+        esac
+      else
+        # We still hold the lock (fd 213 locally, the holder ssh in ssh mode): a second flock would be refused
+        # by OURSELVES and main would never come back. Start directly.
+        run_on_node8 "${SYSTEMCTL_BIN:-systemctl} start $CRON_HEAL_STOPPED" || true
+        notify_slack ":rotating_light: HYDRA deploy: exited mid cron-store heal with $CRON_HEAL_STOPPED stopped; attempted an emergency start. VERIFY the gateway is up."
+      fi
     fi
   }
   # COMPOSE with the existing EXIT trap (deploy lock release, set near the top

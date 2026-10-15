@@ -236,7 +236,7 @@ LIMIT $limit"
 
 main() {
   [ $# -eq 0 ] && { usage; exit 1; }
-  TMPDIR_ROOT=$(mktemp -d)
+  TMPDIR_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/find-dupes.XXXXXX")
   trap 'rm -rf "$TMPDIR_ROOT"' EXIT
   case "$1" in
     --profile) run_profile_mode "$2" ;;

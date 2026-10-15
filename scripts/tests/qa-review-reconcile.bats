@@ -168,6 +168,36 @@ setup_lib() {
   [ "$output" = "verdict" ]
 }
 
+# Incident anchor (the producer string is off-repo, on node-8/openclaw, so it cannot be
+# read out of a writer like the two tests above): Muso-AI/hydra#1092, head b730c1c9b, carried
+# qa-review=failure "CANNOT REVIEW: GitHub review publication failed after 3 attempts"
+# (written 2026-10-06T19:46:43Z) and sat parked ~46h as a "verdict". The review happened; only the
+# GitHub write failed, so a re-dispatch is correct and terminates.
+@test "lib: qar_classify_verdict — a publication-failure CANNOT REVIEW (hydra#1092 b730c1c9b) is NOT a verdict" {
+  setup_lib
+  lit="CANNOT REVIEW: GitHub review publication failed after 3 attempts"
+  for st in failure error; do
+    for gated in 0 1; do
+      run qar_classify_verdict 0 "$st" "$gated" "$lit"
+      [ "$output" = "candidate" ]
+    done
+  done
+}
+
+# Narrowness (CTO ruling, MUS-5260): the bot never saw the diff, so retrying loops forever;
+# qa-approval-retry.sh says a human must review it. Only "publication failed" is infra.
+@test "lib: qar_classify_verdict — the other CANNOT REVIEW family (diff cap / unfetchable bundle) stays a verdict" {
+  setup_lib
+  for d in "CANNOT REVIEW: the diff exceeded the GitHub 20,000-line cap" "CANNOT REVIEW: diff bundle unfetchable"; do
+    for st in failure error; do
+      run qar_classify_verdict 0 "$st" 0 "$d"
+      [ "$output" = "verdict" ]
+    done
+  done
+  run qar_classify_verdict 0 "success" 0 "CANNOT REVIEW: GitHub review publication failed after 3 attempts"
+  [ "$output" = "verdict" ]
+}
+
 @test "lib: qar_qa_review_status_field — description/updated_at; malformed input is rc1" {
   setup_lib
   j='{"statuses":[{"context":"qa-review","state":"pending","description":"d","updated_at":"2026-01-01T00:00:00Z"}]}'
@@ -482,6 +512,77 @@ setup_lib() {
   [ -z "$output" ]
 }
 
+@test "lib: qar_has_bot_review — a diff-cap / unfetchable-bundle CANNOT REVIEW stays a verdict (terminal, human case)" {
+  setup_lib
+  local_bots='["muso-qa-bot"]'
+  sha="abc123"
+  for b in "Verdict: CANNOT REVIEW — the diff exceeded the GitHub 20,000-line cap" "Verdict: CANNOT REVIEW — diff bundle unfetchable"; do
+    reviews=$(jq -nc --arg sha "$sha" --arg b "$b" '[{commit_id:$sha,user:{login:"muso-qa-bot"},body:$b}]')
+    run qar_has_bot_review "$reviews" "$sha" "$local_bots"
+    [ "$status" -eq 0 ]
+  done
+  # ...while the retryable infra bodies still are not a verdict.
+  for b in "Verdict: CANNOT REVIEW — GitHub API rate limit blocked it" "Verdict: CANNOT REVIEW: GitHub review publication failed after 3 attempts"; do
+    reviews=$(jq -nc --arg sha "$sha" --arg b "$b" '[{commit_id:$sha,user:{login:"muso-qa-bot"},body:$b}]')
+    run qar_has_bot_review "$reviews" "$sha" "$local_bots"
+    [ "$status" -ne 0 ]
+  done
+}
+
+@test "lib: qar_has_bot_review — a CANNOT REVIEW comment is not a verdict" {
+  setup_lib
+  local_bots='["muso-qa-bot","muso-qa-bot[bot]","adk47"]'
+  sha="abc123"
+  reviews=$(cat <<JSON
+[{"commit_id":"$sha","user":{"login":"muso-qa-bot"},"body":"GO — 0 Critical, 0 Important"}]
+JSON
+)
+  run qar_has_bot_review "$reviews" "$sha" "$local_bots"
+  [ "$status" -eq 0 ]
+
+  # A bodiless bot review still counts (conservative: this change must not
+  # re-dispatch PRs that were settled before bodies existed).
+  reviews=$(cat <<JSON
+[{"commit_id":"$sha","user":{"login":"muso-qa-bot"}}]
+JSON
+)
+  run qar_has_bot_review "$reviews" "$sha" "$local_bots"
+  [ "$status" -eq 0 ]
+
+  # ...but the infrastructure verdict does NOT (2026-09-17: hydra#975).
+  reviews=$(cat <<JSON
+[{"commit_id":"$sha","user":{"login":"muso-qa-bot"},"body":"🤖 **Muso QA Bot** (automated review)\n\n⛔ **Verdict: CANNOT REVIEW** — the required review bundle could not be loaded because the GitHub API rate limit blocked it."}]
+JSON
+)
+  run qar_has_bot_review "$reviews" "$sha" "$local_bots"
+  [ "$status" -ne 0 ]
+
+  # An older CANNOT REVIEW plus a later real verdict on the SAME head settles.
+  reviews=$(cat <<JSON
+[{"commit_id":"$sha","user":{"login":"muso-qa-bot"},"body":"Verdict: CANNOT REVIEW"},
+ {"commit_id":"$sha","user":{"login":"muso-qa-bot"},"body":"Verdict: GO — 0 blocking findings"}]
+JSON
+)
+  run qar_has_bot_review "$reviews" "$sha" "$local_bots"
+  [ "$status" -eq 0 ]
+
+  # A CANNOT REVIEW on a different commit is irrelevant to this head.
+  reviews=$(cat <<JSON
+[{"commit_id":"othersha","user":{"login":"muso-qa-bot"},"body":"Verdict: CANNOT REVIEW"}]
+JSON
+)
+  run qar_has_bot_review "$reviews" "$sha" "$local_bots"
+  [ "$status" -ne 0 ]
+
+  # A non-bot review is never a verdict, whatever its body says.
+  reviews=$(cat <<JSON
+[{"commit_id":"$sha","user":{"login":"nsollazzo"},"body":"Verdict: GO"}]
+JSON
+)
+  run qar_has_bot_review "$reviews" "$sha" "$local_bots"
+  [ "$status" -ne 0 ]
+}
+
 # ─────────────────────────────────────────────────────────────────────────
 # Section 2: full entrypoint, PATH-shadowed
 # ─────────────────────────────────────────────────────────────────────────
@@ -585,10 +686,21 @@ if [ "$1" = "api" ]; then
       if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi
       exit 0
       ;;
+    rate_limit)
+      printf '{"resources":{"core":{"limit":5000,"remaining":%s,"reset":1767225600}}}' "${STUB_RL_REMAINING:-0}"
+      exit 0
+      ;;
     repos/*/commits/*)
       [ -n "${STUB_COMMIT_FAIL:-}" ] && exit 1
       repo="$(printf '%s' "$path_no_query" | sed -E 's#repos/([^/]+/[^/]+)/commits/.*#\1#')"
       sha="$(printf '%s' "$path_no_query" | sed -E 's#repos/[^/]+/[^/]+/commits/([^/]+)#\1#')"
+      # STUB_COMMIT_ERR_DIR/<sha>: stderr text to emit with exit 1 for that sha.
+      if [ -n "${STUB_COMMIT_ERR_DIR:-}" ] && [ -f "$STUB_COMMIT_ERR_DIR/$sha" ]; then
+        cat "$STUB_COMMIT_ERR_DIR/$sha" >&2
+        exit 1
+      fi
+      # STUB_COMMIT_OK_STDERR: a routine notice on stderr alongside a good body.
+      [ -n "${STUB_COMMIT_OK_STDERR:-}" ] && printf '%s\n' "$STUB_COMMIT_OK_STDERR" >&2
       f="$FIX/commit/$(key "$repo")-$sha.json"
       if [ -f "$f" ]; then cat "$f"; else printf '{"commit":{"committer":{"date":"%s"}}}' "${STUB_DEFAULT_COMMIT_DATE:-2026-01-01T00:00:00Z}"; fi
       exit 0
@@ -672,6 +784,7 @@ STUB
   cat > "$DISPATCH_STUB" <<'STUB'
 #!/usr/bin/env bash
 printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" >> "$DISPATCH_CALLS"
+printf '%s\n' "${QA_DEDUP_REFUSED_RC:-unset}" >> "$DISPATCH_CALLS.refused_rc"
 # DISPATCH_RC lets a test simulate a failing dispatcher (75 = never reached the gateway).
 exit "${DISPATCH_RC:-0}"
 STUB
@@ -718,7 +831,7 @@ JSON
   export QA_RECONCILE_CRON_STALE_S=1800
   export QA_RECONCILE_AGE_CEILING_S=1209600
   export QA_RECONCILE_TICK_FAIL_THRESHOLD=3
-  unset STUB_SLACK_FAIL_ONCE STUB_SLACK_FAIL_ALWAYS STUB_REVIEWS_FAIL STUB_STATUS_FAIL STUB_STATUS_MALFORMED STUB_TIMELINE_FAIL STUB_COMMIT_FAIL STUB_CRON_JSON STUB_CRON_FAIL STUB_ALLOWLIST_REPOS STUB_DEFAULT_COMMIT_DATE STUB_AUTHOR_FAIL_RC STUB_PRLIST_FAIL_REPOS STUB_GH_STATUS_FAIL STUB_GH_STATUS_BODY STUB_ROLLUP_FAIL STUB_ROLLUP_MALFORMED
+  unset STUB_SLACK_FAIL_ONCE STUB_SLACK_FAIL_ALWAYS STUB_REVIEWS_FAIL STUB_STATUS_FAIL STUB_STATUS_MALFORMED STUB_TIMELINE_FAIL STUB_COMMIT_FAIL STUB_COMMIT_ERR_DIR STUB_COMMIT_OK_STDERR STUB_RL_REMAINING STUB_CRON_JSON STUB_CRON_FAIL STUB_ALLOWLIST_REPOS STUB_DEFAULT_COMMIT_DATE STUB_AUTHOR_FAIL_RC STUB_PRLIST_FAIL_REPOS STUB_GH_STATUS_FAIL STUB_GH_STATUS_BODY STUB_ROLLUP_FAIL STUB_ROLLUP_MALFORMED
   # Long enough that every pre-existing test keeps its single-page semantics
   # (each seeds a fresh state dir, so nothing is ever suppressed by inheritance);
   # the dedupe tests below set their own value.
@@ -2179,6 +2292,24 @@ unreach_setup() {
   [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "0" ]
 }
 
+@test "e2e 76a: dispatcher dedup-refusal (rc 76) is NOT an attempt: N past-cooldown ticks never exhaust or page; the reconciler asks for rc 76" {
+  sha="shaunr0000000000000000000000000000000004"
+  key="Muso-AI/core-backend#63@$sha"
+  unreach_setup 63 "$sha"
+  now="$QA_RECONCILE_NOW_EPOCH"
+  for i in 1 2 3 4 5; do
+    DISPATCH_RC=76 run "$SCRIPT" --once
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"EXHAUSTED"* ]]
+    now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
+  done
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 5 ]
+  [ "$(jq -r --arg k "$key" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+  [ "$(jq -r --arg k "$key" '.[$k].unreachable_attempts // 0' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+  [ ! -s "$SLACK_CALLS" ]
+  [ "$(sort -u "$DISPATCH_CALLS.refused_rc")" = "76" ]
+}
+
 @test "e2e 75b: dispatch rc 1 STILL counts as an attempt (a systematically broken dispatcher must hit the cap)" {
   sha="shaunr0000000000000000000000000000000002"
   key="Muso-AI/core-backend#61@$sha"
@@ -2208,4 +2339,138 @@ unreach_setup() {
   now=$((now + 2000)); export QA_RECONCILE_NOW_EPOCH="$now"
   DISPATCH_RC=0 run "$SCRIPT" --once
   [ "$(jq -r '.__meta__.consecutive_unreachable_ticks // 0' "$QA_RECONCILE_STATE_FILE")" = "0" ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# MUS-6089: per-PR gh stderr capture + ONE TOKEN EXHAUSTED line per tick
+# ─────────────────────────────────────────────────────────────────────────
+
+# mk_multi_pr_list <repo> <n> — n open PRs (numbers 101..), shaNN heads.
+mk_multi_pr_list() {
+  local repo="$1" n="$2" i
+  local f="$FIX/prlist/$(printf '%s' "$repo" | tr '/' '-').json"
+  jq -n --argjson n "$n" --arg repo "$repo" '[range(0; $n) | {number: (101 + .), headRefOid: ("rlsha\(101 + .)"), baseRefName: "main", isDraft: false, author: {login: "nsollazzo"}, updatedAt: "2026-01-01T00:00:00Z", createdAt: "2026-01-01T00:00:00Z", url: ("https://github.com/" + $repo + "/pull/\(101 + .)")}]' > "$f"
+  for ((i = 0; i < n; i++)); do mk_commit "$repo" "rlsha$((101 + i))" "2026-01-01T00:00:00Z"; done
+  mkdir -p "$TEST_TMPDIR/errs"
+  export STUB_COMMIT_ERR_DIR="$TEST_TMPDIR/errs"
+  seed_epoch_state "$repo"
+  QA_RECONCILE_NOW_EPOCH="$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))"
+  export QA_RECONCILE_NOW_EPOCH
+}
+
+RL_ERR='gh: API rate limit exceeded for user ID 1234. (HTTP 403)'
+
+@test "e2e 6089-1: 5 rate-limited commit reads -> exactly ONE TOKEN EXHAUSTED line (k=5), no per-PR line" {
+  mk_multi_pr_list "Muso-AI/core-backend" 5
+  for p in 101 102 103 104 105; do printf '%s\n' "$RL_ERR" > "$STUB_COMMIT_ERR_DIR/rlsha$p"; done
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'TOKEN EXHAUSTED' <<<"$output")" -eq 1 ]
+  [[ "$output" == *"TOKEN EXHAUSTED — core remaining 0/5000, reset at 2026-01-01T00:00:00Z; 5 per-PR read(s) failed on this cause. This is the shared adk47 bucket, not a permissions problem."* ]]
+  [[ "$output" != *"READ-FAILURE: could not fetch commit"* ]]
+}
+
+@test "e2e 6089-2: a scope failure is NOT called token exhaustion -- per-PR line carries gh's text" {
+  mk_multi_pr_list "Muso-AI/core-backend" 1
+  printf '%s\n' 'gh: Resource not accessible by integration (HTTP 403)' > "$STUB_COMMIT_ERR_DIR/rlsha101"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"READ-FAILURE: could not fetch commit Muso-AI/core-backend@rlsha10"*"Resource not accessible by integration"* ]]
+  [[ "$output" != *"TOKEN EXHAUSTED"* ]]
+}
+
+@test "e2e 6089-3: mixed tick -- 2 rate-limit + 1 scope failure -> one TOKEN EXHAUSTED (k=2) and one detailed per-PR line" {
+  mk_multi_pr_list "Muso-AI/core-backend" 3
+  printf '%s\n' "$RL_ERR" > "$STUB_COMMIT_ERR_DIR/rlsha101"
+  printf '%s\n' 'gh: Resource not accessible by integration (HTTP 403)' > "$STUB_COMMIT_ERR_DIR/rlsha102"
+  printf '%s\n' "$RL_ERR" > "$STUB_COMMIT_ERR_DIR/rlsha103"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'TOKEN EXHAUSTED' <<<"$output")" -eq 1 ]
+  [[ "$output" == *"; 2 per-PR read(s) failed on this cause."* ]]
+  [ "$(grep -c 'READ-FAILURE: could not fetch commit' <<<"$output")" -eq 1 ]
+  [[ "$output" == *"Resource not accessible by integration"* ]]
+}
+
+@test "e2e 6089-4: a good body with a routine stderr notice is used unmodified (stderr never merged into stdout)" {
+  mk_multi_pr_list "Muso-AI/core-backend" 1
+  # If this notice were folded into stdout, jq on the commit body would die.
+  export STUB_COMMIT_OK_STDERR='{ not json: gh notice'
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"READ-FAILURE"* ]]
+  [[ "$output" != *"TOKEN EXHAUSTED"* ]]
+}
+
+@test "e2e 6089-5: rate-limit failures still advance the read-failure counters (CANDIDATE READ FAILURE unchanged)" {
+  mk_multi_pr_list "Muso-AI/core-backend" 2
+  for p in 101 102; do printf '%s\n' "$RL_ERR" > "$STUB_COMMIT_ERR_DIR/rlsha$p"; done
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CANDIDATE READ FAILURE: Muso-AI/core-backend — all 2 per-PR read(s) failed this tick (classes: commit,commit); consecutive count now 1."* ]]
+  [ "$(jq -r '.__meta__.candidate_read_failures["Muso-AI/core-backend"]' "$QA_RECONCILE_STATE_FILE")" -eq 1 ]
+}
+
+@test "e2e 6089-6: 4MB of gh stderr does not kill the tick (SIGPIPE trap)" {
+  mk_multi_pr_list "Muso-AI/core-backend" 1
+  { printf 'gh: boom (HTTP 500) '; head -c 4194304 /dev/zero | tr '\0' 'x'; echo; } > "$STUB_COMMIT_ERR_DIR/rlsha101"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"READ-FAILURE: could not fetch commit"*"boom (HTTP 500)"* ]]
+  [[ "$output" == *"CANDIDATE READ FAILURE"* ]]
+}
+
+@test "e2e 76: a CANNOT REVIEW bot review is NOT a verdict -> the PR is re-dispatched" {
+  # The 2026-09-17 defect: the reviewer posts "Verdict: CANNOT REVIEW" as a
+  # review comment when the bundle cannot load, and the status POST can fail on
+  # the same exhausted budget — so that comment used to be the only bot review
+  # on the head, qar_classify_verdict called it a verdict on a repo outside
+  # merge_gate_repos, and the reconciler never re-dispatched the PR it exists to
+  # recover. Measured on hydra#975 (CANNOT REVIEW 16:05:09Z; the 16:33Z tick
+  # dispatched a different PR and never mentioned 975).
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="shacannot000000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 49 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/core-backend" "$sha" "2026-01-01T00:00:00Z"
+  cat > "$FIX/reviews/Muso-AI-core-backend-49.json" <<JSON
+[{"commit_id": "$sha", "user": {"login": "muso-qa-bot"},
+  "body": "🤖 **Muso QA Bot** (automated review)\n\n⛔ **Verdict: CANNOT REVIEW** — the required review bundle could not be loaded because the GitHub API rate limit blocked it."}]
+JSON
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 1 ]
+  grep -q "49 $sha Muso-AI/core-backend U0AL36NADEY" "$DISPATCH_CALLS"
+}
+
+@test "e2e 78: a diff-cap CANNOT REVIEW bot review with NO qa-review status stays terminal (no dispatch)" {
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="shadiffcap00000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 51 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/core-backend" "$sha" "2026-01-01T00:00:00Z"
+  cat > "$FIX/reviews/Muso-AI-core-backend-51.json" <<JSON
+[{"commit_id": "$sha", "user": {"login": "muso-qa-bot"},
+  "body": "🤖 **Muso QA Bot** (automated review)\n\n⛔ **Verdict: CANNOT REVIEW** — the diff exceeded the GitHub 20,000-line cap and cannot be fetched."}]
+JSON
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ ! -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e 77: a real GO bot review on the head still settles (no dispatch)" {
+  seed_epoch_state "Muso-AI/core-backend"
+  sha="shagoverdict000000000000000000000000001"
+  mk_pr_list "Muso-AI/core-backend" 50 "$sha" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/core-backend" "$sha" "2026-01-01T00:00:00Z"
+  cat > "$FIX/reviews/Muso-AI-core-backend-50.json" <<JSON
+[{"commit_id": "$sha", "user": {"login": "muso-qa-bot"}, "body": "🤖 **Muso QA Bot** (automated review)\n\n✅ **Verdict: GO** — 0 Critical, 0 Important."}]
+JSON
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ ! -s "$DISPATCH_CALLS" ]
 }

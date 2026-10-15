@@ -147,7 +147,7 @@ PY
 }
 
 selftest() {
-  local dir; dir="$(mktemp -d)"; trap 'rm -rf "$dir"' RETURN
+  local dir; dir="$(mktemp -d "${TMPDIR:-/tmp}/rename-merge-precision.XXXXXX")"; trap 'rm -rf "$dir"' RETURN
   local now; now="$(python3 -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat())')"
   # 3 DISTINCT would-merges (s1->d1 logged TWICE to prove dedup): one the human
   # confirmed (s1->d1), one the human REVERSED (would s2->d2 but human merged

@@ -13,6 +13,11 @@ name: qa-autoreview
 # in the skill + qa-pr-approve.sh to CI-green + GO verdict + allowlist, and it
 # NEVER merges — a human merges.
 
+# Coordinates in the run name so scripts/qa-dispatch-pr-review.sh can see an in-flight
+# review for the same (repo, pr, sha) straight from `gh run list` (MUS-7955). Same shape
+# as external-pr-review.yml's run-name. Empty pr (fork PR) never matches: fail open.
+run-name: "qa ${{ github.repository }}#${{ github.event.workflow_run.pull_requests[0].number }} @ ${{ github.event.workflow_run.head_sha }} (autoreview)"
+
 on:
   workflow_run:
     # Must match the validation workflow's `name:` ("PR Validation"), NOT its
@@ -21,6 +26,9 @@ on:
     types: [completed]
 
 permissions:
+  # actions: read lets the dispatcher's `gh run list` in-flight dedup work; without it the
+  # lookup fails and every dispatch takes the DEDUP-SKIPPED fail-open path.
+  actions: read
   contents: read
   pull-requests: read
   # Needed for the qa-review gate status below. NOTE: this covers the fallback
@@ -33,8 +41,13 @@ permissions:
 
 jobs:
   dispatch:
-    # Same on-box runner as pr-validate; the openclaw CLI + gateway live here.
-    runs-on: [self-hosted, hydra]
+    # Same on-box HOST (node-8) as pr-validate; the openclaw CLI + gateway live here.
+    # 2026-10-12 (H-DevOps lane, firstmate 5383/5385): own runner label. This job is a ~7-10 s hand-off to the
+    # on-box gateway, but on the shared [self-hosted, hydra] pool it queued FIFO behind pr-validate's 20-25 min
+    # Bats jobs: 65 queued, 20:12 -> ~22:10Z dispatch latency ~2 h on 10-12. Runners labelled hydra-dispatch
+    # (and NOT hydra) serve only dispatches. PRECONDITION: >= 1 online runner carries hydra-dispatch BEFORE
+    # this merges, or every dispatch queues forever. Revert = put back [self-hosted, hydra].
+    runs-on: [self-hosted, hydra-dispatch]
     # pr-validate only runs on pull_request, but guard explicitly anyway.
     if: github.event.workflow_run.event == 'pull_request'
     steps:

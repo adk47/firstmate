@@ -4,6 +4,14 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel a run superseded by a newer push to the same PR ref. Without this
+# every push stacks another full run on the 4 self-hosted runners (measured
+# 5 of 31 runs superseded, ~16% of pool minutes). A cancel only fires when a
+# newer run starts on this ref, so the current head always has a live run.
+concurrency:
+  group: pr-validate-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: [self-hosted, hydra]
@@ -12,6 +20,8 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
 
       - name: Rebase staleness check — flag overlapping changes on main
         # Why this gate exists: GitHub's "merge" button doesn't refuse to
@@ -889,6 +899,8 @@ jobs:
           # baseline blob (git show <.deployed-sha>:<path>); that baseline
           # can lag this PR by many commits.
           fetch-depth: 0
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
 
       - name: skills-all config include pairs (same guard the deploy runs)
         # THE SHIFT-LEFT THIS JOB ALREADY CLAIMED TO BE. The deploy carries a guard that
@@ -1177,6 +1189,8 @@ jobs:
           # becomes a green tick" outcome that file's header exists to prevent. Pin
           # the depth so those cases actually RUN on every runner, new or old.
           fetch-depth: 0
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
 
       - name: Ensure bats + jq + sqlite3 installed
         run: |
@@ -1259,6 +1273,16 @@ jobs:
         # pipeline's old approve rule was inverted and approved validator-declined
         # credits; this suite is what proves a real run cannot happen by default.
         # Hermetic (curl stubbed, tmpdir state, tmpdir write lock).
+        #
+        # ALSO score-backend-signals.bats: the batch's approve rule. Until
+        # 2026-10-11 it was inverted (approve_owning_track == 100 means the
+        # shortcut did NOT fire) and approved validator-declined credits. This
+        # suite pins the replacement: only validator-approved rows approve.
+        #
+        # ALSO customer-credit-removal/tests/remove-credits.bats (30 tests on the
+        # credit-removal wrapper's refusals and dry-run-before-apply gate). It
+        # lives under tests/, not scripts/tests/, and its skill was never pinned,
+        # so it had never run in CI (MUS-10237). Hermetic (curl stubbed).
         run: |
           set -euo pipefail
           # The self-hosted runner may carry production bot credentials. Bats
@@ -1297,8 +1321,10 @@ jobs:
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/apply-verdicts-attribution.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/results-per-row-attribution.bats \
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/dispatch-cv-batch.bats \
+                       workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-backend-signals.bats \
                        workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
                        workspaces/support/skills/order-fulfillment/scripts/tests \
+                       workspaces/support/skills/customer-credit-removal/tests \
                        "${sa_dirs[@]}" \
                        -type f -name '*.bats' | sort)
           if [ -z "$files" ]; then
@@ -1321,6 +1347,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
       - name: py_compile every .py file in operational paths
         run: |
           set -euo pipefail
@@ -1363,6 +1391,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
       - name: Run watchdog behavioral tests
         run: |
           set -euo pipefail
@@ -1470,6 +1500,13 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_godmode_weekly_report
+      - name: Run fallback-local-error-report tests
+        # scripts/fallback-local-error-report.py counts model fallbacks that a LOCAL
+        # runtime error caused (MUS-6727). These lock the structural classifier (no
+        # error-string list), the explicit unclassified bucket, and local-only alerting.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_fallback_local_error_report
       - name: Run cs-needs-human-digest tests
         # scripts/cs-needs-human-digest.py runs UNATTENDED daily and is
         # READ-ONLY on Intercom — its only effect is one Block Kit post to
@@ -1598,6 +1635,9 @@ jobs:
           set -euo pipefail
           python3 scripts/tests/test_uvn_under30_policy.py
           python3 scripts/tests/test_uvn_under30_cron.py
+          # AI credit reviewer / approval auditor (scripts/credit_review). Stdlib
+          # only; the admin API and the model are faked, so no network.
+          python3 scripts/tests/test_credit_review.py
 
   plugin-tests:
     name: Plugin tests (vitest)
@@ -1630,6 +1670,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
       - name: Ensure pnpm available
         # The hydra runner doesn't have pnpm pre-installed (the gateway
         # uses `openclaw plugins install` which handles deps internally,
@@ -1805,6 +1847,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
 
       - name: Ensure shellcheck installed
         run: |

@@ -144,7 +144,7 @@ Pipeline: lobster.verify-credit-batch (signal-first)${OPS_RUN_ID:+ | run_id: ${O
   :white_check_mark: $APPROVE_LABEL : $WOULD_APPROVE
   :no_entry: $UVN_LABEL : $WOULD_UVN
 
-_Backend-signal policy: approve_owning_track=100 AND total_risk_percent<80 (backtested 99.34% precision over 90 days). Everything not auto-approved is moved to user_verification_needed for human review._
+_Backend-signal policy: approve only what the IDP validator itself approved (is_approved, risk<30, no reject/hold rule, no rule errors). Everything else is moved to user_verification_needed for human review._
 $TAIL_LINE
 EOF
 )

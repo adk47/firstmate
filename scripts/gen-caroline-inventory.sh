@@ -81,7 +81,7 @@ command -v python3 >/dev/null 2>&1 || { echo "FATAL: python3 not found on PATH" 
 
 mkdir -p "$OUT_DIR"
 
-WORK_DIR="$(mktemp -d)"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gen-caroline-inventory.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 python3 - "$REPO_ROOT" "$WORK_DIR" <<'PY'

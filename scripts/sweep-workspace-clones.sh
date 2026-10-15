@@ -134,6 +134,8 @@ done
 _SWEEP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/slack-notify.sh
 source "$_SWEEP_DIR/lib/slack-notify.sh"
+# shellcheck source=lib/safe-delete.sh
+source "$_SWEEP_DIR/lib/safe-delete.sh"
 
 command -v python3 >/dev/null 2>&1 || { log "ERROR: python3 required"; exit 2; }
 command -v git >/dev/null 2>&1 || { log "ERROR: git required"; exit 2; }
@@ -202,60 +204,11 @@ guard_prod_topology() {
   fi
 }
 
-# True if $1 IS a mountpoint or any mountpoint lives under it. The exact-match
-# case matters: rm --one-file-system treats a command-line argument that is
-# itself a mountpoint as that filesystem's root and would wipe its contents.
-# SWEEP_MOUNTS_FILE overrides the mounts table for hermetic tests.
-MOUNTS_FILE="${SWEEP_MOUNTS_FILE:-/proc/self/mounts}"
-mount_hazard() {
-  # Cannot inspect the mount table → cannot prove absence of a mount → hazard.
-  [ -r "$MOUNTS_FILE" ] || return 0
-  # The kernel octal-escapes whitespace in mount paths (' ' → \040): decode
-  # before comparing, or a mount named "old clone" is invisible to the guard.
-  # The candidate path rides in via ENVIRON — awk -v would itself interpret
-  # backslash escapes, corrupting a path that literally contains one.
-  MH_P="$1" awk '
-    {
-      m = $2
-      gsub(/\\040/, " ", m); gsub(/\\011/, "\t", m)
-      gsub(/\\012/, "\n", m); gsub(/\\134/, "\\", m)
-      if (m == ENVIRON["MH_P"]) found = 1
-      if (index(m, ENVIRON["MH_P"] "/") == 1) found = 1
-    }
-    END { exit found ? 0 : 1 }' "$MOUNTS_FILE"
-}
-
-# True only if $1 IS ITSELF a mountpoint — EXACT match, no "or under".
-# A sweep ROOT needs this narrower form: mount_hazard's "anything beneath"
-# reading would refuse an entire lane the moment one candidate is a mount,
-# instead of holding just that candidate. An unreadable table returns false
-# here on purpose — the per-candidate mount_hazard is already fail-closed and
-# holds everything in that case, so this rail must not additionally convert
-# it into a whole-run structural abort.
-is_mountpoint() {
-  [ -r "$MOUNTS_FILE" ] || return 1
-  MP_P="$1" awk '
-    {
-      m = $2
-      gsub(/\\040/, " ", m); gsub(/\\011/, "\t", m)
-      gsub(/\\012/, "\n", m); gsub(/\\134/, "\\", m)
-      if (m == ENVIRON["MP_P"]) found = 1
-    }
-    END { exit found ? 0 : 1 }' "$MOUNTS_FILE"
-}
-
 entry_kb() {
   local kb
   kb="$(du -skx -- "$1" 2>/dev/null | awk '{print $1}' || true)"
   echo "${kb:-0}"
 }
-
-# GNU rm has --one-file-system (prod / CI); BSD rm (dev laptops) does not.
-# The has_mount_under skip is the primary rail either way — this is backstop.
-RM_ONEFS=()
-if rm --one-file-system -rf "$(mktemp -d)" 2>/dev/null; then
-  RM_ONEFS=(--one-file-system)
-fi
 
 is_kept() {
   local name="$1" k
@@ -294,40 +247,6 @@ tree_fresh_since() {  # <dir> <ref-file>
 # Portable mtime epoch (GNU stat -c, BSD stat -f); unknown → now (fail-safe).
 mtime_epoch() {
   stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1" 2>/dev/null || echo "$NOW_EPOCH"
-}
-
-# Full identity of a path WITHOUT dereferencing symlinks (GNU stat -c, BSD
-# stat -f): device, inode, mtime, ctime, size. Empty when it cannot be read,
-# which the removal gate treats as a mismatch.
-#
-# device:inode ALONE is not enough — unlink+create in the same directory
-# hands the new object the just-freed inode number on ext4, so a replacement
-# compares equal (demonstrated by the file→file regression failing on the
-# Linux CI runner while passing on APFS). ctime is what closes it: it is set
-# by the kernel on every inode change and is settable by NO userspace API —
-# not touch, not utimensat — so a replacement object cannot carry the stale
-# one's ctime. mtime and size are cheap corroboration in the same call.
-# NANOSECOND forms deliberately: GNU %Y/%Z and BSD %m/%c are whole SECONDS, so
-# a replacement created in the same second as the original's last status change
-# compares equal when the inode is reused and size/mtime are forged. GNU's
-# human-readable %y/%z and BSD's %Fm/%Fc carry the full ns timestamp
-# (verified on ovh-node-8/ext4: %z -> '2026-07-27 11:57:33.770505722 +0000').
-# '|' separates the fields: the ns timestamps contain both ':' and ' '.
-path_id() {
-  stat -c '%d|%i|%y|%z|%s' -- "$1" 2>/dev/null \
-    || stat -f '%d|%i|%Fm|%Fc|%z' -- "$1" 2>/dev/null \
-    || true
-}
-
-# The rename-INVARIANT subset of a path_id: device, inode, mtime, size.
-# rename(2) bumps ctime (measured on ovh-node-8: .770505722 -> .776505699
-# across a mv), so the post-quarantine re-audit must drop that field while
-# the pre-quarantine check keeps it.
-id_stable() {  # <path_id>
-  local dev ino mtime ctime size
-  # shellcheck disable=SC2034  # ctime is parsed precisely so it can be DROPPED
-  IFS='|' read -r dev ino mtime ctime size <<< "$1"
-  printf '%s|%s|%s|%s' "$dev" "$ino" "$mtime" "$size"
 }
 
 # `git fetch --no-write-fetch-head` (git >= 2.29) keeps our own live-origin
@@ -468,7 +387,7 @@ reaudit_qa_review() {  # <quarantined-path> <cutoff-ref-file>
   fi
   # A bind mount can land between the last pre-quarantine guard and now; rm
   # --one-file-system would follow a same-device one out of the clone.
-  if mount_hazard "$q"; then
+  if safe_delete_mount_hazard "$q"; then
     REAUDIT_REASON="mount appeared before removal"; return 1
   fi
   return 0
@@ -500,7 +419,8 @@ PROC_DIR="${SWEEP_PROC_DIR:-/proc}"
 # mid-scan — measured on node-8), so "nonzero => fall back" meant the fallback
 # was the normal path in production, not the dev-laptop exception.
 FIND_GNU=0
-_probe_dir="$(mktemp -d)"
+# mktemp-ok: rmdir'd four lines below, nothing writes into it
+_probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/sweep-workspace-clones.XXXXXX")"
 if find "$_probe_dir" -maxdepth 0 -ignore_readdir_race -printf '' >/dev/null 2>&1; then
   FIND_GNU=1
 fi
@@ -544,78 +464,45 @@ has_live_handles() {  # <path>
     END { exit found ? 0 : 1 }'
 }
 
-# Take the candidate OUT of the namespace, atomically. The target must be
-# GUARANTEED-private, not merely unlikely to collide: leftovers are retained
-# forever by design, so a recurring name (a PID, a timestamp) could already
-# exist and mv would then overwrite a held file or nest inside a held
-# directory. mktemp -d creates the sibling exclusively, in the same directory
-# and therefore the same filesystem — no cross-device copy fallback, which a
-# deletion path must never do.
-quarantine_candidate() {  # <path> <id-at-classification>
-  local p="$1" id="$2" qdir q err
-  QPATH=""; QDIR=""; QUARANTINE_ERROR=""
-  qdir="$(mktemp -d "$(dirname -- "$p")/${QUARANTINE_PREFIX}XXXXXX" 2>/dev/null)" || {
-    QUARANTINE_ERROR="could not create a private sibling directory"
-    return 1
-  }
-  q="$qdir/$(basename -- "$p")"
-  err="$(mv -- "$p" "$q" 2>&1)" || {
-    QUARANTINE_ERROR="quarantine rename failed: ${err:0:120}"
-    rmdir "$qdir" 2>/dev/null || true
-    return 1
-  }
-  # Explicit move verification — never infer the outcome from mv's exit status
-  # alone. -e is false for a dangling symlink, so -L is its companion.
-  if { [ ! -e "$q" ] && [ ! -L "$q" ]; } || [ -e "$p" ] || [ -L "$p" ]; then
-    QUARANTINE_ERROR="quarantine rename did not land at $q"
-    rmdir "$qdir" 2>/dev/null || true
-    return 1
-  fi
-  # rename(2) bumps ctime, so compare the rename-invariant subset.
-  if [ -z "$id" ] || [ "$(id_stable "$(path_id "$q")")" != "$(id_stable "$id")" ]; then
-    QUARANTINE_ERROR="object replaced before removal"
-    restore_quarantine "$q" "$p" "$qdir" || true
-    return 1
-  fi
-  # No new handle can be acquired from here (the name is private), so this one
-  # scan settles it: if nobody holds the tree open now, nobody will.
-  if has_live_handles "$q"; then
-    QUARANTINE_ERROR="live process holds the tree open (cwd or open fd)"
-    restore_quarantine "$q" "$p" "$qdir" || true
-    return 1
-  fi
-  QPATH="$q"; QDIR="$qdir"
-  return 0
-}
+# Removal primitives live in lib/safe-delete.sh (the one implementation of
+# quarantine-first rm, shared with every other deleter). These wrappers add this
+# script's accounting; the live-handle scan stays this script's /proc walk.
+# shellcheck disable=SC2034  # read by lib/safe-delete.sh at call time
+SAFE_DELETE_HANDLE_CHECK=has_live_handles
+# shellcheck disable=SC2034
+SAFE_DELETE_QUARANTINE_PREFIX="$QUARANTINE_PREFIX"
+# shellcheck disable=SC2034
+SAFE_DELETE_MOUNTS_FILE="${SWEEP_MOUNTS_FILE:-/proc/self/mounts}"
 
-# Put it back, NEVER clobbering a name another writer has retaken. GNU mv -n
-# exits 0 when it declines, so the move is proven rather than assumed.
-restore_quarantine() {  # <quarantined> <original> <qdir>
-  if mv -n -- "$1" "$2" 2>/dev/null && [ ! -e "$1" ] && [ ! -L "$1" ]; then
-    rmdir "$3" 2>/dev/null || true
-    log "restored from quarantine: $2"
-    return 0
-  fi
+safe_delete_on_restore_blocked() {  # <quarantined>
   rm_errors=$((rm_errors + 1))
   echo "quarantine restore blocked (name retaken): object left at $1" >> "$ERRORS_FILE"
   hold "in-use" "$1" "restore blocked — LEFT QUARANTINED, needs human review"
+}
+
+quarantine_candidate() {  # <path> <id-at-classification>
+  QPATH=""; QDIR=""; QUARANTINE_ERROR=""
+  if safe_delete_quarantine "$1" "$2"; then
+    QPATH="$SD_QPATH"; QDIR="$SD_QDIR"
+    return 0
+  fi
+  QUARANTINE_ERROR="$SD_ERROR"
   return 1
 }
 
+safe_delete_on_restored() { log "restored from quarantine: $1"; }
+
+restore_quarantine() {  # <quarantined> <original> <qdir>
+  safe_delete_restore "$1" "$2" "$3"
+}
+
 delete_quarantined() {  # <quarantined> <qdir> <label> <original> <kb> <is-tree>
-  local q="$1" qdir="$2" label="$3" p="$4" kb="$5" is_tree="$6" err rm_cmd
-  rm_cmd=(rm -f --)
-  if [ "$is_tree" -eq 1 ]; then
-    # ${arr[@]+...}: safe under set -u with an empty array on bash 3.2 (macOS dev).
-    rm_cmd=(rm -rf ${RM_ONEFS[@]+"${RM_ONEFS[@]}"} --)
-  fi
-  err="$("${rm_cmd[@]}" "$q" 2>&1)" || {
+  if ! safe_delete_rm_quarantined "$1" "$2" "$6"; then
     rm_errors=$((rm_errors + 1))
-    echo "rm failed: $q (quarantined from $p): ${err:0:200}" >> "$ERRORS_FILE"
+    echo "rm failed: $1 (quarantined from $4): ${SD_ERROR#rm failed: }" >> "$ERRORS_FILE"
     return 1
-  }
-  rmdir "$qdir" 2>/dev/null || true
-  log "deleted $label $p (${kb} KB)"
+  fi
+  log "deleted $3 $4 (${5} KB)"
 }
 
 remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id> <reaudit-fn> [reaudit-args...]
@@ -649,18 +536,12 @@ remove_entry() {  # <path> <kb> <label> <expect:entry|tree> <id> <reaudit-fn> [r
   # different directory, during the du seam: same type, different object, and
   # none of the guards ever saw the new one. Compare the full stat identity
   # captured at classification — an unreadable one on either side is a mismatch.
-  now_id="$(path_id "$p")"
+  now_id="$(safe_delete_path_id "$p")"
   if [ -z "$id" ] || [ -z "$now_id" ] || [ "$id" != "$now_id" ]; then
     held_inuse=$((held_inuse + 1))
     hold "in-use" "$p" "path identity changed between classification and removal (${id:-unreadable} -> ${now_id:-unreadable})"
     return 1
   fi
-  rm_cmd=(rm -f --)
-  if [ "$is_tree" -eq 1 ]; then
-    # ${arr[@]+...}: safe under set -u with an empty array on bash 3.2 (macOS dev).
-    rm_cmd=(rm -rf ${RM_ONEFS[@]+"${RM_ONEFS[@]}"} --)
-  fi
-
   # Quarantine through the SAME primitives the clone lane uses. An inline
   # copy of this logic lived here before, and that is exactly how the
   # live-handle gate ended up missing from this lane: a process with its cwd
@@ -878,7 +759,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp|q
 
   # Identity of the object every guard below is about to be run against.
   # Everything that reaches a removal must still BE this object.
-  cand_id="$(path_id "$d")"
+  cand_id="$(safe_delete_path_id "$d")"
 
   # Symlinks and plain files: never followed; junk-aged by own mtime.
   if [ -L "$d" ] || [ ! -d "$d" ]; then
@@ -903,14 +784,14 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp|q
     if tree_fresh_since "$d" "$QA_REF"; then
       active=$((active + 1)); return 0
     fi
-    if mount_hazard "$d"; then
+    if safe_delete_mount_hazard "$d"; then
       held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
     fi
     kb="$(entry_kb "$d")"
     if ! qa_review_shape_ok "$d" || tree_fresh_since "$d" "$QA_REF"; then
       active=$((active + 1)); return 0
     fi
-    if mount_hazard "$d"; then
+    if safe_delete_mount_hazard "$d"; then
       held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate (appeared during size scan)"; return 0
     fi
     if remove_entry "$d" "$kb" "qa-review" tree "$cand_id" reaudit_qa_review "$QA_REF"; then
@@ -938,7 +819,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp|q
     if tree_fresh_since "$d" "$ref"; then
       active=$((active + 1)); return 0
     fi
-    if mount_hazard "$d"; then
+    if safe_delete_mount_hazard "$d"; then
       held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
     fi
     # du over a large tree takes time — re-run every junk-lane guard right
@@ -950,7 +831,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp|q
     if tree_fresh_since "$d" "$ref"; then
       active=$((active + 1)); return 0
     fi
-    if mount_hazard "$d"; then
+    if safe_delete_mount_hazard "$d"; then
       held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
     fi
     if remove_entry "$d" "$kb" "junk" tree "$cand_id" reaudit_junk "$ref"; then
@@ -965,7 +846,7 @@ sweep_candidate() {  # <path> <cutoff-epoch> <cutoff-ref-file> <lane:repos|tmp|q
   if tree_fresh_since "$d" "$ref"; then
     active=$((active + 1)); return 0
   fi
-  if mount_hazard "$d"; then
+  if safe_delete_mount_hazard "$d"; then
     held_mount=$((held_mount + 1)); hold "mount" "$d" "mountpoint at or under candidate"; return 0
   fi
   # Same fail-closed contract as the plain-junk lane: a scan that ERRORS has
@@ -1167,7 +1048,7 @@ fi
 # guard only sees mounts at or under a CHILD, and rm --one-file-system is no
 # protection because every child already lives inside that filesystem. So a
 # bind-mounted root would have its children recursively deleted.
-if is_mountpoint "$REPOS_ROOT"; then
+if safe_delete_is_mountpoint "$REPOS_ROOT"; then
   log "FATAL: $REPOS_ROOT is itself a mountpoint — refusing to sweep it"; exit 1
 fi
 
@@ -1181,7 +1062,7 @@ for ws_tmp in "$WS_ROOT"/*/tmp "$WS_ROOT"/*/.tmp; do
   ws_tmp_real="$(realpath -- "$ws_tmp" 2>/dev/null)" || continue
   case "$ws_tmp_real" in "$WS_ROOT"/*) ;; *) continue ;; esac
   # ...and from here ONLY the resolved path is used. /proc/self/mounts records
-  # REAL paths, so is_mountpoint/mount_hazard comparisons against the alias
+  # REAL paths, so safe_delete_is_mountpoint/safe_delete_mount_hazard comparisons against the alias
   # would miss a mount at or under the aliased tree — and rm
   # --one-file-system cannot protect a candidate that already lives inside
   # that mounted filesystem. Sweeping the alias name was the hole.
@@ -1195,7 +1076,7 @@ for ws_tmp in "$WS_ROOT"/*/tmp "$WS_ROOT"/*/.tmp; do
     held_gitfile=$((held_gitfile + 1))
     continue
   fi
-  if is_mountpoint "$ws_tmp_real"; then
+  if safe_delete_is_mountpoint "$ws_tmp_real"; then
     hold "mount" "$ws_tmp_real" "tmp root is itself a mountpoint — skipped whole"
     held_mount=$((held_mount + 1))
     continue
