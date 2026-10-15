@@ -316,11 +316,12 @@ the diff cap: a failed/degraded bundle (every case under "Check the bundle's
 integrity flags FIRST"), a 403/404 that hides the PR, an unreadable file list,
 a thread list that cannot be completed, and a GitHub 403 that blocks the bundle
 or the CI lookup. **Never assume a 403 is an empty quota** (MUS-11176): read the
-bucket, then pipe the failing `gh` error text through the classifier and use its
+bucket **as the same identity the failed call used** (through `qa-gh.sh`, never
+bare `gh`, which may be a different account), then pipe the failing `gh` error text through the classifier and use its
 output verbatim as the reason:
 
 ```bash
-read -r rem rst < <(gh api rate_limit --jq '.resources.core | "\(.remaining) \(.reset)"')
+read -r rem rst < <(bash /opt/hydra/scripts/qa-gh.sh --repo <owner/repo> api rate_limit --jq '.resources.core | "\(.remaining) \(.reset)"')
 QA_GH_RATELIMIT_REMAINING=$rem QA_GH_RATELIMIT_RESET=$rst \
   bash /opt/hydra/scripts/lib/qa-gh-error-class.sh "<failing gh error text>"
 ```
