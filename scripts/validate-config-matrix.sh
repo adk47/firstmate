@@ -71,6 +71,19 @@ for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
     continue
   fi
 
+  # 0b. gateway.auth.mode must be set and not "none". The gateways listen on
+  #     0.0.0.0 (bind:"lan") BY DESIGN: the in-cluster Intercom -> Caroline path
+  #     reaches them on 10.0.0.8, so loopback is not an option. That makes token
+  #     auth the only thing between the pod network and the Control UI's RPC
+  #     layer -- an auth.mode of "none" (or an absent key) would be an
+  #     unauthenticated admin API reachable from every pod in the cluster. This
+  #     deliberately does NOT gate `bind`: "lan" is the required value.
+  authv=$(jq -r '.gateway.auth.mode // "MISSING"' "$cfg")
+  if [[ "$authv" == "none" || "$authv" == "MISSING" ]]; then
+    echo "ERROR: $cfg gateway.auth.mode must not be none/absent (was: $authv)" >&2
+    fail=1
+  fi
+
   # 1. Every agent in agents.list[] has thinkingDefault, none "off".
   bad=$(jq -r --argjson allowed "$AGENT_THINKING_LEVELS" '
     .agents.list // []

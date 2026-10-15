@@ -53,6 +53,19 @@ describe("createCreateTicketTool", () => {
     expect(store?.has("conv_sig1")).toBe(true);
   });
 
+  // MUS-1516: the create path must ALSO record the filed ticket id on the new
+  // additive store, so the intercom guard's reference-id cross-check has something
+  // to compare against (design call ① on MUS-1471).
+  it("records the filed ticket id (for the reference-id guard) on a fresh successful file", async () => {
+    const IDS_KEY = "__musoSupportTicketIds";
+    delete (globalThis as unknown as Record<string, unknown>)[IDS_KEY];
+    vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "869f7v9v2" } });
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_sig", sessionKey: "agent:support:intercom:direct:conv_sig1" });
+    await tool.execute("call_1", { actionType: "credit-claim", customerEmail: "user@example.com", summary: "Missing credit", conversationSummary: "ctx" });
+    const store = (globalThis as unknown as Record<string, unknown>)[IDS_KEY] as Map<string, { atMs: number; ids: string[] }> | undefined;
+    expect(store?.get("conv_sig1")?.ids).toEqual(["869f7v9v2"]);
+  });
+
   it("does NOT mark the ticket-success signal when the file fails (queue_busy)", async () => {
     const SIGNAL_KEY = "__musoSupportTicketSignal";
     delete (globalThis as unknown as Record<string, unknown>)[SIGNAL_KEY];

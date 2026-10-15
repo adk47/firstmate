@@ -4,7 +4,8 @@ import { sanitizeOutboundBody } from "./sanitize-email.js";
 import { sanitizeToolLeak } from "./sanitize-tool-leak.js";
 import { sanitizeTypography } from "./sanitize-typography.js";
 import { sanitizeHandoffClaim } from "./sanitize-handoff-claim.js";
-import { wasTicketFiledRecently } from "./ticket-success-signal.js";
+import { sanitizeInternalReference } from "./sanitize-internal-reference.js";
+import { wasTicketFiledRecently, getFiledTicketIds } from "./ticket-success-signal.js";
 
 // --- Outbound reply retry (design §7 Rate Limiting) ---
 // "Intercom returns 429 with Retry-After. Retry with capped exponential
@@ -610,10 +611,13 @@ export class SanitizingIntercomClient implements IntercomClient {
     // "I've flagged this for our team" is only honest if create_ticket actually
     // succeeded for this conversation; the cross-plugin signal (set by support-tools on
     // a successful file) tells us. When it did not, rewrite the claim down to the
-    // sanctioned "I'll make sure this gets to the team." fallback. Runs last so it sees
-    // the fully-sanitized body; a lost/absent signal errs toward the honest fallback.
+    // sanctioned "I'll make sure this gets to the team." fallback. Runs after the other
+    // text passes; a lost/absent signal errs toward the honest fallback.
     const ticketConfirmed = wasTicketFiledRecently(params.conversationId);
-    const handoffPass = sanitizeHandoffClaim(typoPass.body, { ticketConfirmed });
+    // MUS-1516: which ids this conversation actually filed, so the guard can
+    // tell a real quoted reference number from one it never filed.
+    const filedTicketIds = getFiledTicketIds(params.conversationId);
+    const handoffPass = sanitizeHandoffClaim(typoPass.body, { ticketConfirmed, filedTicketIds });
     if (handoffPass.redactions.length > 0) {
       const unique = Array.from(new Set(handoffPass.redactions));
       const msg = `[intercom:false-handoff-claim] conv=${params.conversationId} count=${unique.length} rewritten=${JSON.stringify(unique)}`;
@@ -624,7 +628,22 @@ export class SanitizingIntercomClient implements IntercomClient {
         try { console.error(msg); } catch { /* noop */ }
       }
     }
-    return this.inner.replyToConversation({ ...params, body: handoffPass.body });
+    // Internal-reference pass: a bare ClickUp task id must never reach a customer
+    // (sanitize-tool-leak bans the words, not the id). Rewrites to a neutral phrase.
+    // Runs AFTER the handoff guard so that guard still sees 86… ids and can swap a false
+    // claim for the honest fallback; this pass is the backstop for whatever it keeps.
+    const refPass = sanitizeInternalReference(handoffPass.body);
+    if (refPass.redactions.length > 0) {
+      const unique = Array.from(new Set(refPass.redactions));
+      const msg = `[intercom:internal-reference] conv=${params.conversationId} count=${unique.length} rewritten=${JSON.stringify(unique)}`;
+      // Logging must never block delivery (same contract as the passes above).
+      try {
+        this.log?.error?.(msg);
+      } catch {
+        try { console.error(msg); } catch { /* noop */ }
+      }
+    }
+    return this.inner.replyToConversation({ ...params, body: refPass.body });
   }
 
   async assignConversation(params: {
@@ -659,7 +678,8 @@ export class SanitizingIntercomClient implements IntercomClient {
       const emailPass = sanitizeOutboundBody(params.body);
       const toolPass = sanitizeToolLeak(emailPass.body);
       const typoPass = sanitizeTypography(toolPass.body);
-      return this.inner.closeConversation({ ...params, body: typoPass.body });
+      const refPass = sanitizeInternalReference(typoPass.body);
+      return this.inner.closeConversation({ ...params, body: refPass.body });
     }
     return this.inner.closeConversation(params);
   }

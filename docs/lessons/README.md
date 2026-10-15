@@ -6,10 +6,10 @@ rather than leaving it in one operator's local notes.
 
 Where this sits relative to the rest of the docs:
 
-- `CLAUDE.md` (repo root) is the short, always-loaded doctrine agents follow.
+- `AGENTS.md` (repo root; `CLAUDE.md` imports it) is the short, always-loaded doctrine agents follow.
 - `docs/runbooks/RUNBOOK.md` is the step-by-step operate / troubleshoot / recover procedure.
 - This `docs/lessons/` cluster is the detailed "what bites you and why" reference
-  behind both. When `CLAUDE.md` or the RUNBOOK states a rule tersely, the reasoning
+  behind both. When `AGENTS.md` or the RUNBOOK states a rule tersely, the reasoning
   and the failure history live here.
 
 These files are curated, not a memory dump: they capture durable mechanisms and

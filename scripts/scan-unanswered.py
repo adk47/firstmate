@@ -41,7 +41,7 @@ def get_user_name(token, uid, cache):
 
 def main():
     config = load_config()
-    accounts = ["clio", "ceo", "cmo", "cto", "qa", "finance", "operations", "devops", "scout", "support"]
+    accounts = ["clio", "ceo", "cmo", "cto", "qa", "finance", "operations", "devops", "scout"]
     oldest = str(int(time.time()) - LOOKBACK_HOURS * 3600)
     user_cache = {}
 

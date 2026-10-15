@@ -72,7 +72,7 @@ if [ -z "$api_key" ] && [ -r "$JEV_ENV_FILE" ]; then
 fi
 [ -n "$api_key" ] || fail "OPENROUTER_API_KEY is not set and not found in $JEV_ENV_FILE"
 
-work="$(mktemp -d)"
+work="$(mktemp -d "${TMPDIR:-/tmp}/describe-creative.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
 # Fetch the image ourselves so the byte cap is enforced and the model never

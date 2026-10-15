@@ -73,7 +73,7 @@ def main():
 
     config = load_config()
     gw_token = config.get("gateway", {}).get("auth", {}).get("token", "")
-    accounts = ["clio", "ceo", "cmo", "cto", "qa", "finance", "operations", "devops", "scout", "support"]
+    accounts = ["clio", "ceo", "cmo", "cto", "qa", "finance", "operations", "devops", "scout"]
     oldest = str(int(time.time()) - LOOKBACK_HOURS * 3600)
     user_cache = {}
 

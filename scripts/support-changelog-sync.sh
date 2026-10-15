@@ -501,7 +501,7 @@ command -v jq >/dev/null 2>&1 || { echo "jq not found" >&2; exit 2; }
 SINCE="$(date -u -d "${DAYS} days ago" +%Y-%m-%d 2>/dev/null \
         || date -u -v-"${DAYS}"d +%Y-%m-%d)"
 
-WORK="$(mktemp -d)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/support-changelog-sync.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 

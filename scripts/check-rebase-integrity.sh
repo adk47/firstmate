@@ -68,7 +68,7 @@ head_sha="$2"
 # ever reads (and a name with '/' would break the path).
 [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "check-rebase-integrity: head-sha must be a full 40-hex oid, got '$head_sha'" >&2; exit 2; }
 
-WORK="$(mktemp -d)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/check-rebase-integrity.XXXXXX")"
 : > "$WORK/signals.ndjson"
 : > "$WORK/skipped"
 
