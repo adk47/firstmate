@@ -238,3 +238,13 @@ SH
   [[ "$output" == *"failures=1"* ]]
   [ ! -d "$SIZE_CAP_ROOT/old" ]
 }
+
+@test "a child whose name ends in a space is evicted, not silently skipped" {
+  mk "trail " 30 100
+  mk plain 20 100
+  SIZE_CAP_KIB=0 SIZE_CAP_MIN_AGE_MIN=0 SIZE_CAP_APPLY=1 run "$RULE"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"failures=0"* ]]
+  [ ! -d "$SIZE_CAP_ROOT/trail " ]
+  [ ! -d "$SIZE_CAP_ROOT/plain" ]
+}

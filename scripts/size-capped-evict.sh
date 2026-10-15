@@ -82,7 +82,8 @@ listing="$(
     | sort -n
 )" || { echo "size-capped: could not enumerate $ROOT, evicting nothing" >&2; exit 1; }
 
-while IFS=' ' read -r tag path; do
+while IFS= read -r line; do
+  tag="${line%% *}"; path="${line#* }"   # no IFS splitting: a trailing space in the name must survive
   [ -n "$path" ] || continue
   if [ "$tag" = NL ]; then
     failures=$((failures + 1)); echo "size-capped: WARN cannot process newline in name $path" >&2; continue
