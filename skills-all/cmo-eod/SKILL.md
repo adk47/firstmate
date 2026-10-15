@@ -45,7 +45,8 @@ Use bullet points. Each bullet = 1-2 lines max. Group by section. Add a Slack or
 - #clio_analyst: reports, insights, data requests
 
 **Marketing Systems**
-- Klaviyo: campaigns sent, flow changes, list/segment updates, template edits in last 24h
+- Email (our stack, `muso-email` skill): last 24h sends / bounces / unsubscribes by stream and template from `messaging.email_events`, plus Listmonk campaigns sent or scheduled. Run `bash /opt/hydra/scripts/muso-stack-read.sh coverage` first; report only streams that are live on our stack.
+- Klaviyo (until each stream and marketing move off it, ~28 Oct): campaigns sent, flow changes, list/segment updates, template edits in last 24h. Once a stream is on our stack, report it from there, not from Klaviyo; never count the same send twice.
 - GoHighLevel: workflow changes, campaign activity, pipeline updates (when API access available)
 - n8n: workflow executions, new/modified workflows (when API access available)
 - Only include items that changed — skip if no activity

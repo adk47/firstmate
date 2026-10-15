@@ -89,7 +89,8 @@ Sales team creates workspaces, then Catalog team cleanses them.
    - Add workspace to demo account for easy review
 
 7. **Send USER LOGINS**
-   - Use Klaviyo for bulk sends (20+ users)
+   - Bulk sends (20+ users): Klaviyo until the marketing cutover (~28 Oct 2026), then a
+     Listmonk private list + campaign. Either way a human (Aaron / Nick) sends it; agents never do.
 
 ---
 
@@ -99,7 +100,9 @@ Sales team creates workspaces, then Catalog team cleanses them.
 
 1. Search using name or email
 2. Copy the user ID
-3. Paste ID in Amplitude (remove any commas)
+3. Product activity for that ID (remove any commas): our stack via the `muso-analytics` skill
+   (`muso-stack-read.sh router '/api/2/useractivity?user=<id>'`).
+   Amplitude only for windows `muso-stack-read.sh coverage` says are not covered yet.
 
 ---
 
