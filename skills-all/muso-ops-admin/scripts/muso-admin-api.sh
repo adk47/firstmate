@@ -1649,6 +1649,15 @@ EOF
         curl_args+=(-H "Requester: $REQUESTER_EMAIL")
     fi
 
+    # Actor headers (audit trail — approver + Slack ts of the in-thread approval);
+    # blank or whitespace-only counts as absent, never as a valid approver
+    if [[ "$CONFIRMED_BY" =~ [^[:space:]] ]]; then
+        curl_args+=(-H "Approved-By: $CONFIRMED_BY")
+    fi
+    if [[ "$APPROVAL_MSG_ID" =~ [^[:space:]] ]]; then
+        curl_args+=(-H "Request-Ref: $APPROVAL_MSG_ID")
+    fi
+
     if [[ -n "$body" ]]; then
         curl_args+=(-d "$body")
     fi
@@ -1722,6 +1731,15 @@ cmd_upload() {
     # Add Requester header if set
     if [[ -n "$REQUESTER_EMAIL" ]]; then
         curl_args+=(-H "Requester: $REQUESTER_EMAIL")
+    fi
+
+    # Actor headers (audit trail — approver + Slack ts of the in-thread approval);
+    # blank or whitespace-only counts as absent, never as a valid approver
+    if [[ "$CONFIRMED_BY" =~ [^[:space:]] ]]; then
+        curl_args+=(-H "Approved-By: $CONFIRMED_BY")
+    fi
+    if [[ "$APPROVAL_MSG_ID" =~ [^[:space:]] ]]; then
+        curl_args+=(-H "Request-Ref: $APPROVAL_MSG_ID")
     fi
 
     curl_args+=(-F "file=@$file")
