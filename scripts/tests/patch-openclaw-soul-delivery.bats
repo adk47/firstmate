@@ -328,7 +328,7 @@ rotation() {
 
 @test "deploy.sh: gated per profile, runs AFTER the codex plugin install (Step 4d.5), skips at 2026.10" {
   D="$BATS_TEST_DIRNAME/../deploy.sh"
-  grep -q 'version_at_least "2026.10" "$OPENCLAW_VERSION"' "$D"
+  grep -q 'version_at_least "2026.10" "$OPENCLAW_CODEX_VERSION"' "$D"
   install_line=$(grep -n 'install_external_plugin "@openclaw/codex"' "$D" | tail -1 | cut -d: -f1)
   call_line=$(grep -n 'bash "$HYDRA_ROOT/scripts/patch-openclaw-soul-delivery.sh"' "$D" | head -1 | cut -d: -f1)
   [ -n "$install_line" ] && [ -n "$call_line" ]
@@ -336,4 +336,46 @@ rotation() {
   # one glob per profile, gated by needs_target
   grep -q 'openclaw-\${_profile}/npm/projects/openclaw-codex-' "$D"
   grep -q 'needs_target "\$_profile"' "$D"
+}
+
+# Step 4d.6 retirement gate (MUS-6777): runs the REAL block extracted from deploy.sh with a
+# stub patch script that records its argv. The inner gate must read the version of the
+# artifact it patches (@openclaw/codex), not the core version: codex-version.sh pins the
+# plugin separately and has no >= 2026.9 arm, so a core bump to 2026.10 still installs the
+# buggy 2026.8.35 plugin.
+run_step_4d6() {
+  local root="$BATS_TEST_TMPDIR/hydra"
+  mkdir -p "$root/scripts"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s/argv"\n' "$BATS_TEST_TMPDIR" > "$root/scripts/patch-openclaw-soul-delivery.sh"
+  rm -f "$BATS_TEST_TMPDIR/argv"
+  awk '/^# Step 4d\.6: SOUL\/memory/{p=1} p{print} p&&/^fi$/{exit}' "$BATS_TEST_DIRNAME/../deploy.sh" > "$BATS_TEST_TMPDIR/block.sh"
+  [ -s "$BATS_TEST_TMPDIR/block.sh" ] && grep -q 'patch-openclaw-soul-delivery.sh' "$BATS_TEST_TMPDIR/block.sh"
+  OPENCLAW_VERSION="$1" OPENCLAW_CODEX_VERSION="$2" HYDRA_ROOT="$root" TARGET=all \
+    bash -c 'source "$1"; log() { echo "$*"; }; fail() { echo "FAIL: $*"; exit 1; }
+      needs_target() { [[ "$TARGET" == "all" || ",$TARGET," == *",$1,"* ]]; }
+      source "$2"' _ "$BATS_TEST_DIRNAME/../lib/version-compare.sh" "$BATS_TEST_TMPDIR/block.sh"
+}
+
+@test "Step 4d.6: core 2026.10 with the 2026.8.35 plugin still patches (argv is one glob per profile)" {
+  run run_step_4d6 2026.10.0 2026.8.35
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/argv" ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/argv" | tr -d ' ')" = "2" ]
+  grep -qx '/root/.openclaw-main/npm/projects/openclaw-codex-\*/node_modules/@openclaw/codex/dist/.setup' "$BATS_TEST_TMPDIR/argv"
+  grep -qx '/root/.openclaw-edge/npm/projects/openclaw-codex-\*/node_modules/@openclaw/codex/dist/.setup' "$BATS_TEST_TMPDIR/argv"
+}
+
+@test "Step 4d.6: plugin 2026.10 retires the patch whatever the core version is" {
+  run run_step_4d6 2026.8.35 2026.10.0
+  [ "$status" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/argv" ]
+  run run_step_4d6 2026.10.0 2026.10.0
+  [ "$status" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/argv" ]
+}
+
+@test "Step 4d.6: today's pair (core 2026.8.35, plugin 2026.8.35) patches" {
+  run run_step_4d6 2026.8.35 2026.8.35
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/argv" ]
 }
