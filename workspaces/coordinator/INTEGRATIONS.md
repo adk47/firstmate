@@ -12,9 +12,11 @@ _Every system I have access to, what it does, and who can use it. Load this EVER
 | **Slack** | Messaging, channels | Read + Write | All (via message tool) | Built-in |
 | **GitHub** | Code repos, PRs, issues | Read-only default | Aaron authorizes writes | `gh` CLI, github skill |
 | **ClickUp** | Task management | Read-only | — | `muso-clickup` skill |
-| **Amplitude** | Product analytics | Read-only | — | `muso-amplitude` skill |
+| **Our analytics stack** (event router + ClickHouse) | Product analytics (replaces Amplitude) | Read-only | — | `muso-analytics` skill |
+| **Amplitude** (legacy fallback until its cutover) | Product analytics | Read-only | — | `muso-amplitude` skill |
 | **ProfitWell** | Subscription metrics | Read-only | — | `muso-profitwell` skill |
-| **Klaviyo** | Email/SMS marketing | Read + Write | Aaron+Nick=write, others=read | `muso-klaviyo` skill |
+| **Our email stack** (send-gateway, preferences, Listmonk) | Email (replaces Klaviyo) | Read-only | — (sends go through the product) | `muso-email` skill |
+| **Klaviyo** (legacy; until each stream cuts over) | Email/SMS marketing | Read + Write | Aaron+Nick=write, others=read | `muso-klaviyo` skill |
 | **Intercom** | Customer support/messaging | Read + Write | Aaron=write, others=read | `muso-intercom` skill |
 | **GoHighLevel (GHL)** | Sales/marketing CRM & pipeline | Read + Write | Aaron+Nick (no autonomous writes) | `muso-outreach-engine` skill |
 | **n8n** | Workflow automation | Read + Write | Aaron+Nick=write, others=read | `muso-n8n` skill + MCP |
@@ -28,7 +30,8 @@ _Every system I have access to, what it does, and who can use it. Load this EVER
 | **Rewardful** | Affiliate program | Read + Write | — | TOOLS.md |
 | **Figma** | Design files | Read + Write | — | TOOLS.md |
 | **Orshot** | Dynamic image generation | Read + Write | — | MCP (`orshot`) |
-| **Knock** | Push notifications | Read (test keys) | — | TOOLS.md |
+| **Bell / push store** (notify-gateway, replaces Knock) | In-app bell + push tokens | Read-only | — | `muso-stack-read.sh pg notify` |
+| **Knock** (legacy; test keys only) | Push notifications | Read (test keys) | — | TOOLS.md |
 | **Retool API** | Admin panel queries | Read | — | TOOLS.md |
 
 ## Ops Skills (Retool Replacement)
