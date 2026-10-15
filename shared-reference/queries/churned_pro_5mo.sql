@@ -1,3 +1,6 @@
+-- STACK SWAP (Oct 2026): "platform-industry-amplitude-bi-prod".events is the Amplitude export lake.
+-- At Amplitude's cutover the event router's lake sink takes over the same files (analytics lane A11), so
+-- this query is meant to stay valid; check the latest partition if a result looks short. For a current or per-user read prefer ClickHouse product_events.events (skill muso-analytics).
 WITH cancelled_subs AS (
     SELECT
         s.id AS sub_id,

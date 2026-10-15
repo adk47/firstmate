@@ -428,6 +428,8 @@
           "muso-refund-processor",
           "muso-stripe",
           "muso-refund-investigation",
+          "muso-analytics",
+          "muso-email",
           "muso-amplitude",
           "muso-streams-lookup",
           "muso-founding-member",
