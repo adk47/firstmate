@@ -364,21 +364,20 @@ class TestRenderTextDigest(unittest.TestCase):
 
         text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20)
 
-        self.assertIn("CS open-conversation review daily digest", text)
+        self.assertIn("CS Intercom open-state reconciliation — daily", text)
         self.assertIn("customer-side activity is latest: 3", text)
         self.assertIn(
             "team-side activity is latest, or team initiated with no recorded "
             "customer reply: 1", text)
         self.assertIn(
-            "customer is last recorded replier; last customer reply 1h ago", text)
+            "last recorded reply: customer, 1h ago", text)
         self.assertIn(
-            "customer and team share the latest recorded reply time; "
-            "last customer reply 2h ago", text)
+            "customer and team reply timestamps tied, 2h ago", text)
         self.assertIn(
-            "customer-initiated; opened 2h ago; no recorded reply", text)
+            "customer-initiated; opened 2h ago; no reply timestamp recorded", text)
         self.assertIn(
-            "Open status and reply order do not prove that a customer went unanswered.",
-            text)
+            "Handover records may already be resolved in practice", text)
+        self.assertIn("Verify each record before follow-up or closure", text)
         self.assertNotIn("waiting", text.lower())
         self.assertNotIn("aging", text.lower())
 
@@ -414,7 +413,7 @@ class TestBuildDigestBlocks(unittest.TestCase):
         c = conv(cid="OLD", lar=0, lcr=0, created_at=now - (72 * 3600))  # 72h old
         buckets = d.bucket_conversations([c], set())
         blocks = d.build_digest_blocks(buckets, now_epoch=now)
-        self.assertIn("customer-side activity older than 48h", str(blocks))
+        self.assertIn("customer-side timestamp older than 48h", str(blocks))
 
     def test_full_blocks_use_neutral_title_counts_rows_and_caveat(self):
         now = 1_000_000
@@ -425,10 +424,14 @@ class TestBuildDigestBlocks(unittest.TestCase):
         rendered = str(blocks)
 
         self.assertEqual(
-            blocks[0]["text"]["text"], "CS open-conversation review daily digest")
+            blocks[0]["text"]["text"], "CS Intercom open-state reconciliation — daily")
+        self.assertIn("not confirmed unresolved requests", blocks[1]["text"]["text"])
         self.assertIn("customer-side activity is latest", rendered)
-        self.assertIn("older than 20h since customer-side activity", rendered)
-        self.assertIn("do not prove that a customer went unanswered", rendered)
+        self.assertIn("customer-side timestamp older than 20h", rendered)
+        self.assertIn("Handover records may already be resolved in practice", rendered)
+        self.assertIn("Verify each record before follow-up or closure", rendered)
+        self.assertNotIn(":rotating_light:", rendered)
+        self.assertNotIn("⚠️", rendered)
         self.assertNotIn("waiting", rendered.lower())
         self.assertNotIn("aging", rendered.lower())
 
@@ -865,11 +868,11 @@ class TestMainFailsLoudOnSystematicContactLookupFailure(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# WS2: --delta flag + aging escalation.
+# WS2: --delta flag + age-threshold surfacing.
 # --------------------------------------------------------------------------
 class TestDeltaStateLoadSave(unittest.TestCase):
     """Missing state = empty (first run). Corrupt state = FAIL LOUD, never a
-    silent reset (repo doctrine: a reset would re-ping Jan with hundreds of
+    silent reset (repo doctrine: a reset would re-surface hundreds of
     items)."""
 
     def test_missing_file_is_empty_state(self):
@@ -987,7 +990,7 @@ class TestComputeDeltaAndNextState(unittest.TestCase):
         self.assertTrue(next_state["C1"]["aged_flagged"])
 
     def test_already_aged_flagged_item_is_not_re_surfaced_as_aging(self):
-        # Aging is a ONE-TIME crossing ping, not a re-ping every run.
+        # The age entry is surfaced once per crossing, not on every run.
         now = 1_000_000
         c1 = conv(cid="C1", lar=0, lcr=now - (30 * 3600))
         state = {"C1": {"first_surfaced": now - 200000, "aged_flagged": True}}
@@ -1035,13 +1038,13 @@ class TestIsAging(unittest.TestCase):
         self.assertTrue(d.is_aging(c, now_epoch=now, aging_hours=20))
 
 
-class TestAgingRenderingAndMention(unittest.TestCase):
+class TestAgingRendering(unittest.TestCase):
     def test_aging_line_appears_in_text_digest(self):
         now = 1_000_000
         c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
         buckets = d.bucket_conversations([c], set())
         text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20)
-        self.assertIn("older than 20h since customer-side activity", text)
+        self.assertIn("customer-side timestamp older than 20h", text)
         self.assertNotIn("aging", text.lower())
 
     def test_aging_line_appears_in_blocks(self):
@@ -1049,7 +1052,7 @@ class TestAgingRenderingAndMention(unittest.TestCase):
         c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
         buckets = d.bucket_conversations([c], set())
         blocks = d.build_digest_blocks(buckets, now_epoch=now, aging_hours=20)
-        self.assertIn("older than 20h since customer-side activity", str(blocks))
+        self.assertIn("customer-side timestamp older than 20h", str(blocks))
         self.assertNotIn("aging", str(blocks).lower())
 
     def test_no_aging_line_when_under_threshold(self):
@@ -1059,59 +1062,34 @@ class TestAgingRenderingAndMention(unittest.TestCase):
         text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20)
         self.assertNotIn("aging", text)
 
-    def test_mention_rendered_when_env_set_and_aging_present(self):
-        now = 1_000_000
-        c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
-        buckets = d.bucket_conversations([c], set())
-        text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20,
-                                     mention_uid="U038BM16T7W")
-        self.assertIn("<@U038BM16T7W>", text)
-
-    def test_no_mention_when_no_aging_even_if_env_set(self):
-        now = 1_000_000
-        c = conv(cid="NEW", lar=0, lcr=now - (5 * 3600))
-        buckets = d.bucket_conversations([c], set())
-        text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20,
-                                     mention_uid="U038BM16T7W")
-        self.assertNotIn("<@", text)
-
-    def test_no_mention_when_aging_present_but_env_unset(self):
-        import io
-        from contextlib import redirect_stderr
-        now = 1_000_000
-        c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
-        buckets = d.bucket_conversations([c], set())
-        with redirect_stderr(io.StringIO()) as err:
-            text = d.render_text_digest(buckets, now_epoch=now, aging_hours=20,
-                                         mention_uid=None)
-        self.assertNotIn("<@", text)
-        self.assertIn("CS_DIGEST_AGING_MENTION_UID", err.getvalue())
-
-
-class TestMentionComputedOnceAndNoHeaderDuplication(unittest.TestCase):
-    """finding: _mention_prefix was being computed twice per posted run (once
-    for the printed text, once for the Slack blocks), duplicating the
-    stderr WARN when the mention UID is unset. main() now computes it once
-    and passes the result down via the `mention` kwarg."""
-
-    def test_full_post_prints_the_missing_uid_warning_exactly_once(self):
+class TestNoAgeBasedMentionsAndHeader(unittest.TestCase):
+    def test_legacy_mention_setting_does_not_ping_on_age_in_either_mode(self):
         import sys as _sys
         import io
         from contextlib import redirect_stderr
         now = 1_000_000
         c = conv(cid="OLD", lar=0, lcr=now - (25 * 3600))
-        err = io.StringIO()
-        with mock.patch.object(d, "fetch_open_convs", return_value=[c]), \
-             mock.patch.object(d, "load_delta_state", return_value={}), \
-             mock.patch.object(d, "post_slack_digest", return_value=True), \
-             mock.patch.object(d, "save_delta_state"), \
-             mock.patch.dict("os.environ", {"MUSOAI_INTERCOM_TOKEN": "t",
-                                             "DIGEST_SKIP_HOST_GUARD": "1",
-                                             "DIGEST_NOW": str(now)}), \
-             mock.patch.object(_sys, "argv", ["d", "--post"]), \
-             redirect_stderr(err):
-            d.main()
-        self.assertEqual(err.getvalue().count("CS_DIGEST_AGING_MENTION_UID"), 1)
+        for mode in ([], ["--delta"]):
+            for uid in (None, "U038BM16T7W"):
+                err = io.StringIO()
+                env = {"MUSOAI_INTERCOM_TOKEN": "t",
+                       "DIGEST_SKIP_HOST_GUARD": "1",
+                       "DIGEST_NOW": str(now)}
+                if uid:
+                    env["CS_DIGEST_AGING_MENTION_UID"] = uid
+                with mock.patch.object(d, "fetch_open_convs", return_value=[c]), \
+                     mock.patch.object(d, "load_delta_state", return_value={}), \
+                     mock.patch.object(d, "post_slack_digest", return_value=True) as post, \
+                     mock.patch.object(d, "save_delta_state"), \
+                     mock.patch.object(d, "shadow_judge"), \
+                     mock.patch.dict("os.environ", env, clear=True), \
+                     mock.patch.object(_sys, "argv", ["d", *mode, "--post"]), \
+                     redirect_stderr(err):
+                    self.assertEqual(d.main(), 0)
+                post.assert_called_once()
+                blocks, text = post.call_args.args[:2]
+                self.assertNotIn("<@", str(blocks) + text)
+                self.assertNotIn("CS_DIGEST_AGING_MENTION_UID", err.getvalue())
 
     def test_delta_digest_blocks_do_not_duplicate_the_header_line(self):
         now = 1_000_000
@@ -1120,12 +1098,13 @@ class TestMentionComputedOnceAndNoHeaderDuplication(unittest.TestCase):
         title_occurrences = sum(
             1 for b in blocks
             if b["type"] == "header"
-            and b["text"]["text"] == "CS open-conversation review delta"
+            and b["text"]["text"] == "CS Intercom open-state reconciliation — delta"
         )
         self.assertEqual(title_occurrences, 1)
         section_texts = [b["text"]["text"] for b in blocks if b["type"] == "section"]
         self.assertFalse(
-            any("CS open-conversation review delta" in t for t in section_texts))
+            any("CS Intercom open-state reconciliation — delta" in t for t in section_texts))
+        self.assertIn("not confirmed unresolved requests", section_texts[0])
 
     def test_delta_digest_uses_neutral_counts_rows_and_caveat(self):
         now = 1_000_000
@@ -1137,20 +1116,21 @@ class TestMentionComputedOnceAndNoHeaderDuplication(unittest.TestCase):
         text = d.render_delta_digest(
             [replied, tied, opened], [opened], now_epoch=now, top_n=15)
 
-        self.assertIn("CS open-conversation review delta", text)
-        self.assertIn("new to this digest: 3", text)
+        self.assertIn("CS Intercom open-state reconciliation — delta", text)
+        self.assertIn("first shown in this digest: 3", text)
         self.assertIn(
-            "older than 20h since customer-side activity: 1", text)
+            "customer-side timestamp older than 20h: 1", text)
         self.assertIn(
-            "customer is last recorded replier; last customer reply 1h ago", text)
+            "last recorded reply: customer, 1h ago", text)
         self.assertIn(
-            "customer and team share the latest recorded reply time; "
-            "last customer reply 2h ago", text)
+            "customer and team reply timestamps tied, 2h ago", text)
         self.assertIn(
-            "customer-initiated; opened 25h ago; no recorded reply", text)
+            "customer-initiated; opened 25h ago; no reply timestamp recorded", text)
         self.assertIn(
-            "Open status and reply order do not prove that a customer went unanswered.",
-            text)
+            "Handover records may already be resolved in practice", text)
+        self.assertIn("Verify each record before follow-up or closure", text)
+        self.assertNotIn("⚠️", text)
+        self.assertNotIn(":rotating_light:", text)
         self.assertNotIn("waiting", text.lower())
         self.assertNotIn("aging", text.lower())
 
@@ -1272,7 +1252,7 @@ class TestMainDeltaFlow(unittest.TestCase):
              redirect_stdout(out), redirect_stderr(err):
             rc = d.main()
         self.assertEqual(rc, 0)
-        self.assertIn("CS open-conversation review daily digest", out.getvalue())
+        self.assertIn("CS Intercom open-state reconciliation — daily", out.getvalue())
         self.assertIn("corrupt", err.getvalue())
 
     def test_corrupt_state_full_post_renders_and_posts_but_skips_persistence(self):
@@ -1495,10 +1475,10 @@ class TestBuildNextStateAgingRefresh(unittest.TestCase):
         now = 1_000_000
         unflagged = {"C1": {"first_surfaced": now - 200000, "aged_flagged": False}}
         ns = d.build_next_state(unflagged, [self._c(30)], [], now, aging_hours=20)
-        self.assertFalse(ns["C1"]["aged_flagged"])   # still false -> will ping when shown
+        self.assertFalse(ns["C1"]["aged_flagged"])   # still false -> surfaces when shown
         flagged = {"C1": {"first_surfaced": now - 200000, "aged_flagged": True}}
         ns2 = d.build_next_state(flagged, [self._c(30)], [], now, aging_hours=20)
-        self.assertTrue(ns2["C1"]["aged_flagged"])    # already pinged -> stays true
+        self.assertTrue(ns2["C1"]["aged_flagged"])    # already shown -> stays true
 
     def test_aging_and_rendered_sets_flag_true(self):
         now = 1_000_000
@@ -1603,7 +1583,7 @@ class TestActionableWindowWiring(unittest.TestCase):
     def test_delta_excludes_backlog_and_rolls_it_up(self):
         _, out, blocks, state = self._run([self.OLD, self.NEW], ["--delta", "--post"])
         self.assertNotIn(d.intercom_link("OLD"), out)
-        self.assertIn("new to this digest: 1", out)
+        self.assertIn("first shown in this digest: 1", out)
         self.assertEqual(out.count("backlog: 1 open conversations"), 1)
         self.assertEqual(self._block_text(blocks).count("backlog: 1 open"), 1)
         self.assertEqual(set(state), {"NEW"})
@@ -1622,7 +1602,7 @@ class TestActionableWindowWiring(unittest.TestCase):
         self.assertNotIn("OLD", saved)
         replied = conv(cid="OLD", lar=0, lcr=self.NOW - 3600)
         _, out, _, saved2 = self._run([replied], ["--delta", "--post"], state=saved)
-        self.assertIn("new to this digest: 1", out)
+        self.assertIn("first shown in this digest: 1", out)
         self.assertIn(d.intercom_link("OLD"), out)
         self.assertIn("OLD", saved2)
 
