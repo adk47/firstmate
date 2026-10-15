@@ -109,6 +109,25 @@ mutate_expect_fail() {
   mutate_expect_fail "analytics.entitled" "the analytics.entitled boolean" "analytics.allowed"
 }
 
+@test "fails if the fresh-status-on-this-turn instruction is deleted" {
+  mutate_expect_fail 'you need a fresh `profile_analytics_status` saying `analytics.entitled` is `true` on THIS turn' \
+    "the fresh status check on this turn"
+}
+
+@test "fails if the per-reply entitlement lead sentence is deleted" {
+  mutate_expect_fail "Entitlement is per reply, not per thread" "the per-reply entitlement rule"
+}
+
+@test "fails if the customer-supplied figure rule is deleted" {
+  mutate_expect_fail "A figure the customer gave you is still a figure you may not repeat" \
+    "the customer-supplied figure rule"
+}
+
+@test "fails if the data-fix confirmation rule is deleted" {
+  mutate_expect_fail "After a data fix: confirm that the fix landed, never the number" \
+    "the data-fix confirmation rule"
+}
+
 @test "exits 2 (script error) when the doctrine file is missing" {
   rm -f "$TEST_TMPDIR/SOUL.md"
   run "$SCRIPT"
