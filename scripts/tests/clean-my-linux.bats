@@ -191,8 +191,11 @@ slack_fixture() {
   run bash "$WC" --apply
   [ "$status" -eq 0 ]
   [ -s "$DELEG_LOG" ]
+  # The warning must go to stderr: on stdout it would corrupt $(used_pct).
+  run bash -c 'bash "$1" --apply 2>&1 >/dev/null' _ "$WC"
   [[ "$output" == *"cannot read df"* ]]
-  [[ "$output" != *"integer expression expected"* ]]
+  run bash -c 'bash "$1" --apply 2>/dev/null' _ "$WC"
+  [[ "$output" != *"cannot read df"* ]]
 }
 
 @test "a zero cap deletes nothing: MAX_ENTRIES=0 and MAX_BYTES=0 never enter a rule" {
