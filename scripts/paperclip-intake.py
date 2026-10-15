@@ -270,7 +270,8 @@ def cmd_precheck(client, args, env):
         return None
     ids = {c["id"] for c in waiting}
     last, seen = _woken_ids(state)
-    if ids <= seen and time.time() - last < args.rewake_minutes * 60:
+    # 0 <= : a ts ahead of the clock (stepped backward) must not hold the wake back.
+    if ids <= seen and 0 <= time.time() - last < args.rewake_minutes * 60:
         return {"waiting": len(waiting), "woke": False, "reason": "recently woken"}
     wake_job(args.wake_job)
     with open(state, "w", encoding="utf-8") as fh:

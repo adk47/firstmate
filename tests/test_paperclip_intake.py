@@ -33,6 +33,7 @@ import pathlib
 import re
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -448,6 +449,17 @@ class PrecheckTests(Base):
         self.file("cron failed")
         self.run_cli("precheck", "--wake-job", "job-1")
         self.assertEqual(self.wakes, ["job-1", "job-1"])
+
+    def test_a_wake_stamped_in_the_future_does_not_suppress_triage(self):
+        # Clock stepped backward after a wake: the stored ts is ahead of now.
+        self.file("deploy failed")
+        card_id = next(iter(self.api.issues))
+        pathlib.Path(self.env["PAPERCLIP_INTAKE_STATE"]).write_text(
+            json.dumps({"ts": time.time() + 86400, "ids": [card_id]}))
+        rc, out, _ = self.run_cli("precheck", "--wake-job", "job-1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.wakes, ["job-1"])
+        self.assertTrue(json.loads(out)["woke"])
 
     def test_search_failure_exits_nonzero_and_does_not_wake(self):
         env = {**self.env, "PAPERCLIP_INTAKE_URL": "http://127.0.0.1:1"}
