@@ -147,7 +147,7 @@ entry_kb() {
 used_pct() {
   local u
   u="$(df -P "$DF_PATH" 2>/dev/null | awk 'NR==2 { gsub("%", "", $5); print $5 }' || true)"
-  case "$u" in ''|*[!0-9]*) log "WARN: cannot read df for $DF_PATH, assuming 100%"; u=100 ;; esac
+  case "$u" in ''|*[!0-9]*) log "WARN: cannot read df for $DF_PATH, assuming 100%" >&2; u=100 ;; esac
   echo "$u"
 }
 
@@ -394,6 +394,8 @@ exec 9>"$LOCKFILE"
 flock -n 9 || { log "SKIP: another clean-my-linux run holds $LOCKFILE"; exit 0; }
 
 prev=""
+# A zero cap means a zero budget: check before the first rule can delete.
+check_caps
 for rule in "${RULES[@]}"; do
   [ -n "$cap_hit" ] && break
   if [ "$(used_pct)" -le "$TARGET_USED_PCT" ]; then

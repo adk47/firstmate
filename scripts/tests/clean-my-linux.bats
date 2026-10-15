@@ -186,11 +186,24 @@ slack_fixture() {
   [ ! -s "$DELEG_LOG" ]
 }
 
-@test "unreadable df fails closed (keeps cleaning)" {
+@test "unreadable df fails closed (keeps cleaning) and the warning is visible" {
   printf '#!/bin/bash\nexit 1\n' > "$TEST_TMPDIR/bin/df"
   run bash "$WC" --apply
   [ "$status" -eq 0 ]
   [ -s "$DELEG_LOG" ]
+  [[ "$output" == *"cannot read df"* ]]
+  [[ "$output" != *"integer expression expected"* ]]
+}
+
+@test "a zero cap deletes nothing: MAX_ENTRIES=0 and MAX_BYTES=0 never enter a rule" {
+  CLEAN_MY_LINUX_MAX_ENTRIES=0 run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ ! -s "$DELEG_LOG" ]
+  [[ "$output" == *"cap-hit=entries"* ]]
+  CLEAN_MY_LINUX_MAX_BYTES=0 run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ ! -s "$DELEG_LOG" ]
+  [[ "$output" == *"cap-hit=bytes"* ]]
 }
 
 # ──────────────────────────────────────────────────────────────
