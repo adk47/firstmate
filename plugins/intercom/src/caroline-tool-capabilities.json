@@ -132,7 +132,7 @@
         "update an order that's already shipped or otherwise non-editable",
         "apply an address the customer hasn't confirmed (dry-run required first)"
       ],
-      "needs": "order_ref, customer_email (must match order owner), full recipient address; intercomConvId required to apply."
+      "needs": "order_ref, customer_email (must match order owner), full recipient address. The conversation is bound automatically."
     },
     {
       "name": "order_lookup",

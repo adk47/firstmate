@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
 import type { RateLimiter } from "../rate-limiter.js";
+import { deriveConvId } from "./dedupe-check.js";
 import { validateProdigiAddress, toStripeAddress, normalizeTaxId, type ProdigiAddressInput } from "../order-address.js";
 
 // Hand-rolled promisifier (mirrors remove-credits.ts) so a test mock can use the
@@ -54,7 +55,6 @@ const Parameters = Type.Object({
   customer_email: Type.String({ pattern: EMAIL_PATTERN, description: "The order owner's verified Intercom email. The wrapper re-verifies ownership against this." }),
   recipient: Recipient,
   apply: Type.Optional(Type.Boolean({ default: false, description: "false = dry-run preview (default), true = apply. Always dry-run first, show the customer, get explicit confirmation, then apply." })),
-  intercomConvId: Type.Optional(Type.String({ minLength: 1, description: "Intercom conversation id. REQUIRED when apply=true (re-verifies the email against Intercom's contact record)." })),
 });
 
 type Params = Static<typeof Parameters>;
@@ -63,6 +63,9 @@ interface ToolDeps {
   scriptPath: string;
   rateLimiter: RateLimiter;
   sessionId: string;
+  // Trusted gateway session KEY (carries the Intercom conv id). The conv id is derived
+  // from it, never taken from a model argument.
+  sessionKey: string;
   execFileImpl?: ExecFileLike;
 }
 
@@ -71,7 +74,7 @@ export const DEFAULT_UPDATE_ORDER_ADDRESS_SCRIPT =
   "/opt/hydra/workspaces/support/skills/order-fulfillment/scripts/update-order-address.sh";
 
 export function createOrderAddressUpdateTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
-  const { scriptPath, rateLimiter, sessionId, execFileImpl } = deps;
+  const { scriptPath, rateLimiter, sessionId, sessionKey, execFileImpl } = deps;
   const exec = execFileToPromise(execFileImpl ?? (execFile as ExecFileLike));
 
   return {
@@ -81,16 +84,18 @@ export function createOrderAddressUpdateTool(deps: ToolDeps): AgentTool<typeof P
       "Correct a plaque/poster order's shipping recipient (name, phone, address, and tax id) and push it to the print vendor. " +
       "ONLY for the verified order owner — the wrapper refuses if the requester isn't the owner. " +
       "For a customs-gated destination (MX, BR, CL, AR, PE, CO, EC, DO), also collect the recipient's tax id via tax_id — customs holds and returns the parcel without it, and supplying it releases a NEEDS_TAX_ID hold. " +
-      "Always call apply=false first to preview, get explicit customer confirmation, then call apply=true with intercomConvId. " +
+      "Always call apply=false first to preview, get explicit customer confirmation, then call apply=true. The Intercom conversation is bound automatically; do not supply it. " +
       "Rejects addresses with lines over 40 chars or missing required fields. Rate limit: 5 calls per 60 minutes per session.",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
-      // apply=true requires intercomConvId (the wrapper re-enforces independently).
-      if (params.apply === true && (!params.intercomConvId || !params.intercomConvId.trim())) {
+      // The wrapper's ownership re-check anchors on the Intercom conversation id. Derive
+      // it from the trusted session key (never a model arg) and fail closed without it.
+      const convId = deriveConvId(sessionKey);
+      if (!convId) {
         return textResult(JSON.stringify({
           ok: false,
-          error: "intercom_conv_id_required",
-          detail: "apply: true requires intercomConvId so the wrapper can verify the customer against Intercom's contact record",
+          error: "conv_id_unavailable",
+          detail: "no Intercom conversation is bound to this session, so the customer cannot be verified",
         }));
       }
 
@@ -145,9 +150,9 @@ export function createOrderAddressUpdateTool(deps: ToolDeps): AgentTool<typeof P
           "--order-ref", params.order_ref,
           "--customer-email", params.customer_email,
           "--body-file", bodyFile,
+          "--intercom-conv-id", convId,
         ];
         if (params.apply === true) argv.push("--apply");
-        if (params.intercomConvId) argv.push("--intercom-conv-id", params.intercomConvId);
 
         const { stdout, stderr } = await exec("bash", argv, {
           timeout: 60 * 1000,
