@@ -25,6 +25,8 @@ JSON
   export COMMENT_CALLS="$TEST_TMPDIR/comment-calls"; : > "$COMMENT_CALLS"
   export STATUS_CALLS="$TEST_TMPDIR/status-calls";   : > "$STATUS_CALLS"
   export DM_CALLS="$TEST_TMPDIR/dm-calls";           : > "$DM_CALLS"
+  export REVIEWS_CALLS="$TEST_TMPDIR/reviews-calls"; : > "$REVIEWS_CALLS"
+  export RATE_CALLS="$TEST_TMPDIR/rate-calls";       : > "$RATE_CALLS"
   # Never let a test write the real /var/lib/hydra audit dir.
   export QA_APPROVAL_RETRY_LOG_DIR="$TEST_TMPDIR/api-logs/github"
 
@@ -139,6 +141,32 @@ case "${1:-}" in
        printf '%s' "${STUB_PRS_JSON:-[]}" ;;
   api)
     case "${2:-}" in
+      user)
+        # The acting identity. STUB_ME_RC=1 models an App token 403ing here.
+        [ "${STUB_ME_RC:-0}" = "0" ] || exit 1
+        printf '%s\n' "${STUB_ME:-adk47}"; exit 0 ;;
+      rate_limit)
+        # Free quota probe. STUB_RATE_SEQ is a space-separated list of
+        # `remaining` values consumed one per call (the last repeats), so a
+        # mid-tick depletion is expressible; else STUB_RATE_REMAINING.
+        echo x >> "$RATE_CALLS"
+        [ "${STUB_RATE_RC:-0}" = "0" ] || exit 1
+        [ -z "${STUB_RATE_GARBAGE:-}" ] || { printf '%s' "$STUB_RATE_GARBAGE"; exit 0; }
+        _n="$(wc -l < "$RATE_CALLS" | tr -d ' ')"
+        _rem="${STUB_RATE_REMAINING:-5000}"
+        if [ -n "${STUB_RATE_SEQ:-}" ]; then
+          read -ra _seq <<< "$STUB_RATE_SEQ"
+          _i=$(( _n - 1 )); [ "$_i" -lt "${#_seq[@]}" ] || _i=$(( ${#_seq[@]} - 1 ))
+          _rem="${_seq[$_i]}"
+          # A non-numeric element models a probe that dies on THAT call only, so
+          # a test can let the per-repo probe succeed and kill a later
+          # per-candidate one — the shape STUB_RATE_RC cannot express because it
+          # fails every call, per-repo one included.
+          case "$_rem" in ''|*[!0-9]*) exit 1 ;; esac
+        fi
+        _out="$(printf '{"remaining":%s,"reset":1791537180,"limit":5000,"used":0}' "$_rem")"
+        printf '%s' "$_out" | jq -c '.resources.core // .' 2>/dev/null >/dev/null
+        printf '{"resources":{"core":%s}}' "$_out" | jq -c '.resources.core'; exit 0 ;;
       */issues/*/comments)
         # GET = the idempotency read (what is already on the PR);
         # POST = the alert comment itself. Record the exact JSON body that would
@@ -188,12 +216,13 @@ case "${1:-}" in
         fi
         printf '%s' "${STUB_TIMELINE_JSON:-[]}"
         exit 0 ;;
-      */reviews)
+      */reviews|*/reviews\?*)
+        echo "$2" >> "$REVIEWS_CALLS"
         # STUB_REVIEWS_FAIL_PR fails the reviews read for ONE pr number, so a
         # per-candidate failure stays a counter instead of tripping the
         # all-candidates blackout.
         if [ -n "${STUB_REVIEWS_FAIL_PR:-}" ]; then
-          case "${2:-}" in */pulls/"$STUB_REVIEWS_FAIL_PR"/reviews) exit 1 ;; esac
+          case "${2:-}" in */pulls/"$STUB_REVIEWS_FAIL_PR"/reviews*) exit 1 ;; esac
         fi
         # A truncated / non-array body returned with exit 0 and non-empty — the
         # shape that slips past an rc-and-emptiness check.
@@ -217,7 +246,15 @@ case "${1:-}" in
         for _a in "$@"; do
           [ "$_a" = "--paginate" ] && { printf '%s' "${STUB_REVIEWS_JSON:-[]}"; exit 0; }
         done
-        printf '%s' "${STUB_REVIEWS_JSON:-[]}" | jq -c '.[0:30]'
+        # Explicit paging (?per_page=N&page=M), default 30 / page 1 like the API.
+        _pp="$(printf '%s' "$2" | sed -n 's/.*per_page=\([0-9]*\).*/\1/p')"; _pp="${_pp:-30}"
+        _pg="$(printf '%s' "$2" | sed -n 's/.*[?&]page=\([0-9]*\).*/\1/p')"; _pg="${_pg:-1}"
+        # STUB_REVIEWS_FILE: file-backed, for bodies too big for an env var.
+        if [ -n "${STUB_REVIEWS_FILE:-}" ]; then
+          jq -c --argjson pp "$_pp" --argjson pg "$_pg" '.[(($pg-1)*$pp):($pg*$pp)]' "$STUB_REVIEWS_FILE"
+        else
+          printf '%s' "${STUB_REVIEWS_JSON:-[]}" | jq -c --argjson pp "$_pp" --argjson pg "$_pg" '.[(($pg-1)*$pp):($pg*$pp)]'
+        fi
         ;;
       *)
         # The pre-write head re-confirmation (repos/<r>/pulls/<n>).
@@ -1693,4 +1730,289 @@ SH
   run wc -l < "$APPROVE_CALLS"
   [ "$status" -eq 0 ]
   [ "${output// /}" = "0" ]
+}
+
+
+# ── MUS-6087: self-authored PRs cost zero reads ──────────────────────────
+# Self-approval is permanently blocked by GitHub (qa-pr-approve.sh exit 4), so
+# re-asking every tick only burns the shared REST bucket. Assert on the stub
+# call logs, never on the exit code.
+
+@test "an acting-identity-authored PR costs 0 reviews reads and 0 approve calls" {
+  export STUB_PRS_JSON='[{"number":636,"headRefOid":"abc123","author":{"login":"adk47"},"isDraft":false}]'
+  export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMMENTED","commit_id":"abc123","submitted_at":"2026-08-17T10:51:41Z","body":"**Verdict: GO**"}]'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -s "$REVIEWS_CALLS" ]
+  [ ! -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" == *"1 PR(s) authored by the acting QA identity (adk47)"* ]]
+}
+
+@test "all three login spellings collapse to the acting identity" {
+  for who in adk47 app/adk47 'adk47[bot]' ADK47; do
+    : > "$REVIEWS_CALLS"; : > "$APPROVE_CALLS"
+    export STUB_PRS_JSON="[{\"number\":636,\"headRefOid\":\"abc123\",\"author\":{\"login\":\"$who\"},\"isDraft\":false}]"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ ! -s "$REVIEWS_CALLS" ] || { echo "spelling $who reached the reviews read"; false; }
+    [ ! -s "$APPROVE_CALLS" ]
+  done
+}
+
+@test "a PR by someone else still reaches the approve wrapper" {
+  export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMMENTED","commit_id":"abc123","submitted_at":"2026-08-17T10:51:41Z","body":"**Verdict: GO**"}]'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$REVIEWS_CALLS" ]
+  [ -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" == *"self_authored=0"* ]]
+}
+
+@test "gh api user failing falls back to bot_logins[0] and the skip still works" {
+  export STUB_ME_RC=1
+  # policy bot_logins[0] is muso-qa-bot
+  export STUB_PRS_JSON='[{"number":636,"headRefOid":"abc123","author":{"login":"app/muso-qa-bot"},"isDraft":false}]'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -s "$REVIEWS_CALLS" ]
+  [ ! -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" == *"(muso-qa-bot)"* ]]
+}
+
+@test "self-authored skip logs once per repo, not once per PR" {
+  export STUB_PRS_JSON='[{"number":1,"headRefOid":"a","author":{"login":"adk47"},"isDraft":false},{"number":2,"headRefOid":"b","author":{"login":"adk47"},"isDraft":false},{"number":3,"headRefOid":"c","author":{"login":"adk47"},"isDraft":false}]'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  n="$(printf '%s\n' "${lines[@]}" | grep -c 'authored by the acting QA identity')"
+  [ "$n" -eq 1 ]
+  [[ "${lines[*]}" == *"3 PR(s) authored"* ]]
+  [[ "${lines[*]}" == *"self_authored=3"* ]]
+}
+
+@test "a permanent wrapper decline (exit 4) logs DECLINED-PERMANENT; exit 8 stays transient" {
+  export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMMENTED","commit_id":"abc123","submitted_at":"2026-08-17T10:51:41Z","body":"**Verdict: GO**"}]'
+  export STUB_APPROVE_RC=4
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "${lines[*]}" == *"DECLINED-PERMANENT (exit 4)"* ]]
+  [[ "${lines[*]}" == *"declined_permanent=1"* ]]
+  [[ "${lines[*]}" == *"declined=0"* ]]
+  export STUB_APPROVE_RC=8
+  run "$SCRIPT"
+  [[ "${lines[*]}" == *"DECLINED (exit 8)"* ]]
+  [[ "${lines[*]}" != *"DECLINED-PERMANENT"* ]]
+  [[ "${lines[*]}" == *"declined_permanent=0"* ]]
+  [[ "${lines[*]}" == *"declined=1"* ]]
+}
+
+@test "every permanent exit code is classified permanent" {
+  export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMMENTED","commit_id":"abc123","submitted_at":"2026-08-17T10:51:41Z","body":"**Verdict: GO**"}]'
+  for rc in 3 4 5 11 12; do
+    export STUB_APPROVE_RC=$rc
+    run "$SCRIPT"
+    [[ "${lines[*]}" == *"DECLINED-PERMANENT (exit $rc)"* ]] || { echo "exit $rc not permanent"; false; }
+  done
+}
+
+# ── MUS-6088: rate-limit floor + per-tick call budget ────────────────────
+# Assert on the stub call logs and on the log lines, never on intent. The
+# quota guard stands down with exit 0: a non-zero would page for a working guard.
+
+go_review() { export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMMENTED","commit_id":"abc123","submitted_at":"2026-08-17T10:51:41Z","body":"**Verdict: GO**"}]'; }
+
+@test "floor: remaining 999 stops the tick — 0 reads, 0 approves, exit 0, one line with floor and reset" {
+  go_review
+  export STUB_RATE_REMAINING=999
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -s "$REVIEWS_CALLS" ]
+  [ ! -s "$APPROVE_CALLS" ]
+  n="$(printf '%s\n' "${lines[@]}" | grep -c 'RATE FLOOR')"
+  [ "$n" -eq 1 ]
+  line="$(printf '%s\n' "${lines[@]}" | grep 'RATE FLOOR')"
+  [[ "$line" == *"remaining=999"* ]]
+  [[ "$line" == *"floor=1000"* ]]
+  [[ "$line" == *"2026-10-"* ]]
+  [[ "$line" == *"1 of 1 repo(s) not swept"* ]]
+  [ ! -s "$PAGE_CALLS" ]
+}
+
+@test "floor: remaining 1001 proceeds (boundary pinned on the other side)" {
+  go_review
+  export STUB_RATE_REMAINING=1001
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$REVIEWS_CALLS" ]
+  [ -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" != *"RATE FLOOR"* ]]
+}
+
+@test "floor: an unreadable rate_limit FAILS OPEN with one WARN" {
+  go_review
+  export STUB_RATE_RC=1
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" == *"WARN: could not read rate_limit"* ]]
+  # garbage body, exit 0
+  : > "$APPROVE_CALLS"; rm -f "$TEST_TMPDIR/approved-sha"; unset STUB_RATE_RC
+  export STUB_RATE_GARBAGE='not json'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" == *"WARN: could not read rate_limit"* ]]
+}
+
+@test "floor: a non-numeric QA_APPROVAL_RETRY_RATE_FLOOR warns, falls back to 1000, guard still works" {
+  go_review
+  export QA_APPROVAL_RETRY_RATE_FLOOR=abc STUB_RATE_REMAINING=999
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "${lines[*]}" == *"QA_APPROVAL_RETRY_RATE_FLOOR='abc'"* ]]
+  [[ "${lines[*]}" == *"floor=1000"* ]]
+  [ ! -s "$REVIEWS_CALLS" ]
+}
+
+@test "floor: depleting mid-tick leaves the second repo unswept, one stand-down line" {
+  go_review
+  export STUB_REPOS="Muso-AI/a Muso-AI/b" STUB_RATE_SEQ="5000 5000 999"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q 'Muso-AI/a/' "$REVIEWS_CALLS"
+  # `! cmd` is exempt from set -e, so a failure here would be silently ignored.
+  if grep -q 'Muso-AI/b/' "$REVIEWS_CALLS"; then false; fi
+  n="$(printf '%s\n' "${lines[@]}" | grep -c 'RATE FLOOR')"
+  [ "$n" -eq 1 ]
+  [[ "${lines[*]}" == *"1 of 2 repo(s) not swept"* ]]
+}
+
+@test "budget: MAX_CALLS=2 with 5 candidates stops early, exit 0, one line naming budget and count" {
+  export QA_APPROVAL_RETRY_MAX_CALLS=2
+  export STUB_PRS_JSON='[1,2,3,4,5]'
+  export STUB_PRS_JSON="$(jq -nc '[range(1;6)|{number:.,headRefOid:"abc123",author:{login:"azure-kirin"},isDraft:false}]')"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$REVIEWS_CALLS" | tr -d ' ')" -eq 2 ]
+  n="$(printf '%s\n' "${lines[@]}" | grep -c 'CALL BUDGET')"
+  [ "$n" -eq 1 ]
+  line="$(printf '%s\n' "${lines[@]}" | grep 'CALL BUDGET')"
+  [[ "$line" == *"budget of 2"* ]]
+  [[ "$line" == *"2 REST call(s)"* ]]
+  [[ "$line" == *"Muso-AI/web-credits-next#3"* ]]
+}
+
+@test "floor: quota that empties mid-repo stops before the next candidate, one line, exit 0" {
+  export STUB_PRS_JSON="$(jq -nc '[range(1;6)|{number:.,headRefOid:"abc123",author:{login:"azure-kirin"},isDraft:false}]')"
+  # probes: repo(1) + candidate 1 + candidate 2 healthy, candidate 3 below floor
+  export STUB_RATE_SEQ="5000 5000 5000 999"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$REVIEWS_CALLS" | tr -d ' ')" -eq 2 ]
+  n="$(printf '%s\n' "${lines[@]}" | grep -c 'RATE FLOOR')"
+  [ "$n" -eq 1 ]
+  line="$(printf '%s\n' "${lines[@]}" | grep 'RATE FLOOR')"
+  [[ "$line" == *"remaining=999"* ]]
+  [[ "$line" == *"Muso-AI/web-credits-next#3"* ]]
+}
+
+@test "floor: a dead rate_limit probe mid-repo fails open — candidates still read" {
+  export STUB_PRS_JSON="$(jq -nc '[range(1;4)|{number:.,headRefOid:"abc123",author:{login:"azure-kirin"},isDraft:false}]')"
+  export STUB_RATE_RC=1
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$REVIEWS_CALLS" | tr -d ' ')" -eq 3 ]
+}
+
+@test "floor: a per-candidate probe dying after a HEALTHY repo probe fails open and still warns, once" {
+  # The sibling test above kills every probe, so it passes via the PER-REPO
+  # WARN and says nothing about the per-candidate path. Here the repo probe
+  # succeeds (5000 → no WARN from it) and only the per-candidate probes die, so
+  # the WARN asserted below can ONLY come from the mid-repo path. Without it the
+  # tick sweeps the whole repo with the floor silently disabled (hydra#1119).
+  export STUB_PRS_JSON="$(jq -nc '[range(1;4)|{number:.,headRefOid:"abc123",author:{login:"azure-kirin"},isDraft:false}]')"
+  export STUB_RATE_SEQ="5000 ERR"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # fail-open is preserved: all three candidates are still read
+  [ "$(wc -l < "$REVIEWS_CALLS" | tr -d ' ')" -eq 3 ]
+  # and it is one WARN for the tick, not one per candidate
+  [ "$(printf '%s\n' "${lines[@]}" | grep -c 'WARN: could not read rate_limit')" -eq 1 ]
+}
+
+@test "budget: a non-numeric QA_APPROVAL_RETRY_MAX_CALLS warns and falls back to 600" {
+  export QA_APPROVAL_RETRY_MAX_CALLS=abc
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "${lines[*]}" == *"QA_APPROVAL_RETRY_MAX_CALLS='abc'"* ]]
+}
+
+@test "floor: remaining == floor (1000) proceeds — the floor is 'below', not 'at or below'" {
+  go_review
+  export STUB_RATE_REMAINING=1000
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -s "$REVIEWS_CALLS" ]
+  [[ "${lines[*]}" != *"RATE FLOOR"* ]]
+}
+
+# ── Reviews pagination is bounded and counted per page (hydra#1119 review) ──
+
+stale_reviews() { # $1 = count of stale NO-GOs ahead of one live-head GO
+  jq -c -n --argjson n "$1" '
+    [range($n) | {user:{login:"adk47"}, state:"COMMENTED", commit_id:"OLDSHA",
+                  submitted_at:"2026-08-17T09:00:00Z", body:"**Verdict: NO-GO** — 1 Important."}]
+    + [{user:{login:"adk47"}, state:"COMMENTED", commit_id:"abc123",
+        submitted_at:"2026-08-17T10:51:41Z", body:"**Verdict: GO** — 0 Critical."}]'
+}
+
+@test "pagination: a 251-review history is read page by page (3 reads) and the live-head GO is found" {
+  export STUB_REVIEWS_JSON="$(stale_reviews 250)"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'per_page=100&page=' "$REVIEWS_CALLS")" -eq 3 ]
+  run grep -c "Muso-AI/web-credits-next 636 U03LP8YHLPK" "$APPROVE_CALLS"
+  [ "$output" = "1" ]
+}
+
+@test "pagination: a page above the Linux 128 KiB argv limit does not abort the tick" {
+  # Reviews must never travel through argv: one argv string is capped at 128 KiB
+  # (MAX_ARG_STRLEN) on node-8, and under set -e the exec failure kills the tick
+  # with no log line. 100 reviews x 12 KB = 1.2 MB on page 1.
+  jq -c -n '[range(100) | {user:{login:"adk47"}, state:"COMMENTED", commit_id:"OLDSHA",
+      submitted_at:"2026-08-17T09:00:00Z", body:("**Verdict: NO-GO** " + ("x" * 12000))}]
+    + [{user:{login:"adk47"}, state:"COMMENTED", commit_id:"abc123",
+      submitted_at:"2026-08-17T10:51:41Z", body:"**Verdict: GO** — 0 Critical."}]' > "$TEST_TMPDIR/big-reviews.json"
+  export STUB_REVIEWS_FILE="$TEST_TMPDIR/big-reviews.json"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "${lines[*]}" == *"tick done"* ]]
+  run grep -c "Muso-AI/web-credits-next 636 U03LP8YHLPK" "$APPROVE_CALLS"
+  [ "$output" = "1" ]
+}
+
+@test "pagination: every page is charged to the call budget, not one call per candidate" {
+  # Two candidates of 3 pages each. At one-call-per-read the budget of 3 would
+  # let both through (2 spent); charged per page, the first uses all 3. No live
+  # head verdict, so nothing else (approve path) spends and only pages count.
+  export QA_APPROVAL_RETRY_MAX_CALLS=3
+  export STUB_REVIEWS_JSON="$(stale_reviews 250 | jq -c 'del(.[-1])')"
+  export STUB_PRS_JSON="$(jq -nc '[range(1;3)|{number:.,headRefOid:"abc123",author:{login:"azure-kirin"},isDraft:false}]')"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'per_page=100&page=' "$REVIEWS_CALLS")" -eq 3 ]
+  [[ "${lines[*]}" == *"CALL BUDGET"* ]]
+}
+
+@test "pagination: a history past the page cap stops at 10 reads and is a read failure, never 'no verdict'" {
+  # file-backed: 1500 reviews (~225 KB) in one env var exceeds Linux's 128 KiB
+  # per-string limit and breaks bats' own teardown `rm` in CI.
+  stale_reviews 1500 > "$TEST_TMPDIR/cap-reviews.json"
+  export STUB_REVIEWS_FILE="$TEST_TMPDIR/cap-reviews.json"
+  run "$SCRIPT"
+  # the lone candidate is unreadable -> the existing total-blackout exit
+  [ "$status" -eq 3 ]
+  [ "$(grep -c 'per_page=100&page=' "$REVIEWS_CALLS")" -eq 10 ]
+  [ ! -s "$APPROVE_CALLS" ]
+  [[ "${lines[*]}" == *"READ-FAILURE"* ]]
+  [[ "${lines[*]}" == *"page cap"* ]]
 }

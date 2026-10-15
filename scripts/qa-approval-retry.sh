@@ -64,6 +64,17 @@ set -euo pipefail
 # that is one cheap API call against a small candidate set, and it is logged
 # at DECLINED rather than silently swallowed.
 #
+# ── QUOTA BOUNDS (MUS-6088) ──────────────────────────────────────────────
+# This lane shares the adk47 REST bucket with every other QA script; on 8 Oct
+# core went 3296 -> 5000 used between 08:33Z and 08:51Z, and the :46 tick read
+# into an empty bucket. Two env knobs bound what one tick can spend. Neither
+# sleeps, retries or keeps state (see WHY STATELESS): a stand-down is a
+# normal, logged, exit-0 outcome, never a page.
+#   QA_APPROVAL_RETRY_RATE_FLOOR  (default 1000) stop the tick when the core
+#       bucket's `remaining` is below this. Probed before every repo.
+#   QA_APPROVAL_RETRY_MAX_CALLS   (default 600) stop the tick after this many
+#       REST calls issued by this script (see qar_spend below).
+#
 # Exit codes: 0 tick completed (declines are normal) | 2 usage/env |
 #             4 a PR was approved but could NOT be marked unsafe (every channel
 #               failed) — the most severe outcome, checked before 3 |
@@ -105,6 +116,10 @@ TRUNCATION_STAMP="${QA_APPROVAL_RETRY_TRUNCATION_STAMP:-/var/lib/hydra/qa-approv
 # the cap is still DETECTED below, because headroom is not a guarantee.
 PRLIST_LIMIT="${QA_APPROVAL_RETRY_PRLIST_LIMIT:-300}"
 BLACKOUT_PAGE_COOLDOWN="${QA_APPROVAL_RETRY_BLACKOUT_COOLDOWN:-3600}"
+RATE_FLOOR="${QA_APPROVAL_RETRY_RATE_FLOOR:-1000}"
+MAX_CALLS="${QA_APPROVAL_RETRY_MAX_CALLS:-600}"
+# Hard cap on pages (100 reviews each) read for ONE PR; bounds a single candidate.
+MAX_REVIEW_PAGES=10
 
 # Overridable so the suite can stub it: slack_notify_critical sends a REAL page
 # through `muso slack dm`, and an unstubbed test run has fired real alerts here
@@ -144,6 +159,18 @@ case "$BLACKOUT_PAGE_COOLDOWN" in
   ''|*[!0-9]*)
     log "WARN: QA_APPROVAL_RETRY_BLACKOUT_COOLDOWN='$BLACKOUT_PAGE_COOLDOWN' is not a non-negative integer — falling back to 3600s, because a bad override must never silence the blackout page."
     BLACKOUT_PAGE_COOLDOWN=3600 ;;
+esac
+
+case "$RATE_FLOOR" in
+  ''|*[!0-9]*)
+    log "WARN: QA_APPROVAL_RETRY_RATE_FLOOR='$RATE_FLOOR' is not a non-negative integer — falling back to 1000. A bad value here would make the floor comparison an integer error and silently disable the guard."
+    RATE_FLOOR=1000 ;;
+esac
+
+case "$MAX_CALLS" in
+  ''|*[!0-9]*)
+    log "WARN: QA_APPROVAL_RETRY_MAX_CALLS='$MAX_CALLS' is not a non-negative integer — falling back to 600. A bad value here would make the budget comparison an integer error and silently disable the guard."
+    MAX_CALLS=600 ;;
 esac
 
 # QA_REVIEW_STATUS and QA_SLACK_DM are required even though they only run on the
@@ -655,6 +682,41 @@ qar_publish_alerts() { # <repo> <pr> <head-sha> <uid> <rc> <wrapper-output>
   return 0
 }
 
+# ── Quota bounds ─────────────────────────────────────────────────────────
+# qar_rate_core <repo> — prints "<remaining> <reset-epoch>" or ERR.
+#
+# `gh api rate_limit` does NOT consume quota (verified 9 Oct: the response
+# itself reported used:0), so probing before EVERY repo is free. Do not drop
+# the per-repo probe to "save a call" — the bucket is shared with other
+# scripts and can empty mid-tick.
+#
+# This guard FAILS OPEN, deliberately the inverse of the fail-closed reads
+# elsewhere in this file (CTO ruling R4, MUS-6075). Those reads gate a WRITE,
+# where doubt must mean "do nothing". This one gates a SPEND: the real daily
+# work of this lane is a handful of PRs, and silencing the repair lane because
+# a free probe hiccuped costs far more than the reads it would have saved. An
+# unreadable answer therefore logs a WARN and the tick proceeds. Do not
+# "fix" this to fail closed.
+qar_rate_core() { # <repo>
+  local core remaining reset
+  core="$("$QA_GH" --repo "$1" api rate_limit --jq '.resources.core' 2>/dev/null)" || { printf 'ERR'; return 0; }
+  remaining="$(printf '%s' "$core" | jq -r '.remaining' 2>/dev/null)" || { printf 'ERR'; return 0; }
+  reset="$(printf '%s' "$core" | jq -r '.reset' 2>/dev/null)" || { printf 'ERR'; return 0; }
+  case "$remaining" in ''|*[!0-9]*) printf 'ERR'; return 0 ;; esac
+  case "$reset" in ''|*[!0-9]*) printf 'ERR'; return 0 ;; esac
+  printf '%s %s' "$remaining" "$reset"
+}
+
+# REST calls issued by THIS script, counted at the call site (a count kept
+# inside a $(...) helper would be lost with its subshell). The reviews read is
+# charged per page; the other `--paginate` reads count as ONE call however many
+# pages they fetch, and the post-approval readbacks are not counted, so this is a FLOOR on real spend, not exact
+# accounting. It is checked once per candidate, so a PR in flight may overshoot
+# by its handful of calls. Sized (600) to bite on a pathological repo, not on
+# normal volume.
+rest_calls=0
+qar_spend() { rest_calls=$(( rest_calls + $1 )); }
+
 # If invoked as a library (tests source this file), stop here — everything above
 # only DEFINES things, so sourcing stays side-effect free; everything below
 # performs live API calls.
@@ -671,10 +733,39 @@ while IFS= read -r _r; do
 done < <(QA_EXTERNAL_REPO_ALLOWLIST_ENUMERATE=1 "$QA_REPO_ALLOWLIST")
 [ "${#REPOS[@]}" -gt 0 ] || die 2 "external repo allowlist enumerated empty — refusing."
 
-log "tick start — ${#REPOS[@]} repo(s) in scope${DRY_RUN:+, dry_run=$DRY_RUN}"
-considered=0; approved=0; declined=0; skipped=0; read_fail=0; alerts_unpublished=0; raced=0; repo_fail=0; reviews_fail=0; truncated=0; safety_considered=0; safety_fail=0; unsafe_unflagged=0
+# Acting identity, resolved once per tick. Self-approval is permanently refused
+# by GitHub (qa-pr-approve.sh exit 4), so a PR authored by this identity is
+# skipped before any read is spent on it. Mirrors qa-pr-approve.sh:262-263,
+# including the `|| true`: an App token 403s on `gh api user`, so fall back to
+# the policy's first bot login.
+# mirrors qa-pr-approve.sh:273 — do not diverge
+norm_login() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's,^app/,,' -e 's,\[bot\]$,,'; }
+me="$("$QA_GH" --repo "${REPOS[0]}" api user --jq .login 2>/dev/null || true)"
+[ -n "$me" ] || me="$(printf '%s' "$bot_logins_json" | jq -r '.[0] // "muso-qa-bot"' 2>/dev/null || echo "muso-qa-bot")"
+me_norm="$(norm_login "$me")"
 
+log "tick start — ${#REPOS[@]} repo(s) in scope${DRY_RUN:+, dry_run=$DRY_RUN}"
+considered=0; approved=0; declined=0; skipped=0; read_fail=0; alerts_unpublished=0; raced=0; repo_fail=0; reviews_fail=0; truncated=0; safety_considered=0; safety_fail=0; unsafe_unflagged=0; self_authored=0; declined_permanent=0
+
+budget_hit=0; floor_hit=0; floor_at=""; floor_rem=""; rate_warned=0; repo_idx=0; budget_at=""
 for repo in "${REPOS[@]}"; do
+  # Floor probe, before every repo (this also covers tick start: repo 1). Free
+  # call, see qar_rate_core. Below the floor the whole tick stops — `continue`
+  # would just spend the same shared bucket on the next repo.
+  rate="$(qar_rate_core "$repo")"
+  if [ "$rate" = "ERR" ]; then
+    if [ "$rate_warned" -eq 0 ]; then
+      log "WARN: could not read rate_limit — proceeding WITHOUT the quota floor (fail-open by design: a dead probe must not silence the repair lane)."
+      rate_warned=1
+    fi
+  else
+    rate_remaining="${rate%% *}"; rate_reset="${rate##* }"
+    if [ "$rate_remaining" -lt "$RATE_FLOOR" ]; then
+      log "RATE FLOOR: core remaining=$rate_remaining is below floor=$RATE_FLOOR (resets $(jq -rn --argjson t "$rate_reset" '$t | todate')) — standing down; $(( ${#REPOS[@]} - repo_idx )) of ${#REPOS[@]} repo(s) not swept. Expected steady state, not a failure."
+      break
+    fi
+  fi
+  repo_idx=$((repo_idx + 1))
   prs_json="$("$QA_GH" --repo "$repo" pr list --repo "$repo" --state open \
                 --json number,headRefOid,author,isDraft --limit "$PRLIST_LIMIT" 2>/dev/null || echo "__ERR__")"
   if [ "$prs_json" = "__ERR__" ] || [ -z "$prs_json" ]; then
@@ -709,29 +800,71 @@ for repo in "${REPOS[@]}"; do
       "qa-approval-retry: TRUNCATED PR LIST — $repo returned exactly $PRLIST_LIMIT open PRs (the --limit cap), so the overflow is invisible to this sweep. Any withheld approval on those PRs is NOT being repaired. Raise QA_APPROVAL_RETRY_PRLIST_LIMIT."
   fi
 
+  repo_self=0
   while IFS=$'\t' read -r pr head_sha author is_draft; do
     [ -n "${pr:-}" ] || continue
     [ "$is_draft" = "true" ] && continue
+    # Before the reviews read: this PR can never be approved by us, and every
+    # call below it (reviews, timeline, threads, head re-read) is wasted quota.
+    if [ "$(norm_login "$author")" = "$me_norm" ]; then
+      self_authored=$((self_authored + 1)); repo_self=$((repo_self + 1)); continue
+    fi
+    # Per-tick REST budget, checked per candidate before it spends anything.
+    if [ "$rest_calls" -ge "$MAX_CALLS" ]; then
+      budget_hit=1; budget_at="$repo#$pr"; break
+    fi
+    # The budget above counts calls, not pages, so it can sit under its ceiling
+    # while the shared bucket empties (hydra#1119 review). The ceiling that
+    # holds is the REAL remaining quota, re-read before every candidate: free
+    # call, same fail-open as the per-repo probe (an unreadable answer proceeds).
+    rate="$(qar_rate_core "$repo")"
+    if [ "$rate" = "ERR" ]; then
+      # Fail open exactly as the per-repo probe does — and as LOUDLY. Falling
+      # through silently spends the rest of the repo with no floor in force and
+      # leaves nothing in the tick log to say the guard was off, which is the
+      # invisible drain this script exists to remove (hydra#1119 review).
+      # Shares rate_warned with the per-repo probe on purpose: one WARN per
+      # tick, not one per candidate.
+      if [ "$rate_warned" -eq 0 ]; then
+        log "WARN: could not read rate_limit — proceeding WITHOUT the quota floor (fail-open by design: a dead probe must not silence the repair lane)."
+        rate_warned=1
+      fi
+    elif [ "${rate%% *}" -lt "$RATE_FLOOR" ]; then
+      floor_hit=1; floor_at="$repo#$pr"; floor_rem="${rate%% *}"; break
+    fi
     considered=$((considered + 1))
 
-    # Reviews: --paginate is load-bearing. GitHub returns reviews OLDEST-first
-    # and pages at 30 — on a PR with a long review history the current head's
-    # verdict is on page 2, and an unpaginated read sees only stale ones.
-    reviews="$("$QA_GH" --repo "$repo" api "repos/$repo/pulls/$pr/reviews" --paginate 2>/dev/null || echo "__ERR__")"
+    # Reviews: paging is load-bearing. GitHub returns reviews OLDEST-first, so on
+    # a long history the current head's verdict is on a late page and a one-page
+    # read sees only stale ones. Paged by hand rather than with --paginate so
+    # every HTTP request is charged to rest_calls and the spend is bounded:
+    # --paginate is one call to the counter however many pages it fetches
+    # (hydra#1119 review). Past MAX_REVIEW_PAGES the history is unreadable, which
+    # is a read failure, never "no verdict".
+    reviews="[]"; page=1
+    while :; do
+      qar_spend 1
+      pg="$("$QA_GH" --repo "$repo" api "repos/$repo/pulls/$pr/reviews?per_page=100&page=$page" 2>/dev/null)" || { reviews="__ERR__"; break; }
+      # The same shape-check the PR list gets: a truncated or non-array body
+      # arrives with exit 0, so only this catches it (and must count as a failure).
+      if ! printf '%s' "$pg" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        log "READ-FAILURE: the reviews body for $repo#$pr was not a JSON array — counted, never treated as 'no verdict'."
+        reviews="__ERR__"; break
+      fi
+      # Combined on stdin, never argv: a page can exceed the 128 KiB per-argument
+      # cap on Linux, and under set -e the exec failure would kill the whole tick.
+      reviews="$(printf '%s\n%s' "$reviews" "$pg" | jq -cs 'add')"
+      [ "$(printf '%s' "$pg" | jq 'length')" -lt 100 ] && break
+      page=$((page + 1))
+      if [ "$page" -gt "$MAX_REVIEW_PAGES" ]; then
+        log "READ-FAILURE: $repo#$pr has more than $((MAX_REVIEW_PAGES * 100)) reviews (page cap $MAX_REVIEW_PAGES) — not read, skipped."
+        reviews="__ERR__"; break
+      fi
+    done
     if [ "$reviews" = "__ERR__" ] || [ -z "$reviews" ]; then
       log "READ-FAILURE: could not read reviews for $repo#$pr — skipped."
       read_fail=$((read_fail + 1)); reviews_fail=$((reviews_fail + 1)); continue
     fi
-    # The SAME shape-check the PR list gets, for the same reason and in the same
-    # place: a truncated or non-array body arrives with exit 0 and non-empty, so
-    # the checks above pass, the classification jq below fails, and only
-    # read_fail moves — which would leave the all-candidates blackout unable to
-    # fire no matter how total the outage. Non-array is a read failure here.
-    if ! printf '%s' "$reviews" | jq -e 'type == "array"' >/dev/null 2>&1; then
-      log "READ-FAILURE: the reviews body for $repo#$pr was not a JSON array — counted, never treated as 'no verdict'."
-      read_fail=$((read_fail + 1)); reviews_fail=$((reviews_fail + 1)); continue
-    fi
-
     # Already approved by the bot on THIS head? Then there is nothing to repair.
     # Scoped to the live head sha: dismiss_stale_reviews drops an approval when a
     # new commit lands, so an approval on an older sha is not a current approval.
@@ -798,6 +931,7 @@ for repo in "${REPOS[@]}"; do
       skipped=$((skipped + 1)); continue
     fi
 
+    qar_spend 1
     stale="$(qar_staleness "$repo" "$pr" "$go_at")"
     case "$stale" in
       ERR)
@@ -829,6 +963,7 @@ for repo in "${REPOS[@]}"; do
     # verdict was formed against (name + tip). All three are handed to the
     # wrapper below so it can re-verify them under the same read that performs
     # the write — the window this side genuinely cannot close.
+    qar_spend 1
     pr_state="$("$QA_GH" --repo "$repo" api "repos/$repo/pulls/$pr" \
       --jq '[(.head.sha // ""), (.base.ref // ""), (.base.sha // "")] | @tsv' 2>/dev/null || echo "")"
     live_head="$(printf '%s' "$pr_state" | cut -f1)"
@@ -865,6 +1000,7 @@ for repo in "${REPOS[@]}"; do
     # by expansion (`${x:+VAR=val}`) is NOT treated as an assignment by bash — it
     # becomes a positional ARGUMENT to the command, which silently corrupts the
     # wrapper's argv. The subshell also keeps these out of the rest of the tick.
+    qar_spend 2   # the wrapper spends `gh api user` + `gh pr view`
     out="$(
       export QA_PR_APPROVE_EXPECT_HEAD="$head_sha"
       export QA_PR_APPROVE_EXPECT_QUIET_SINCE="$go_at"
@@ -917,6 +1053,7 @@ for repo in "${REPOS[@]}"; do
         # The pre-write staleness read cannot be atomic with the wrapper's
         # write, so re-ask now: a retarget or objection that landed inside that
         # window has already been approved and can only be surfaced, not undone.
+        qar_spend 1
         post_stale="$(qar_staleness "$repo" "$pr" "$go_at")"
         if [ "$post_stale" = "OK" ]; then
           log "APPROVED: $repo#$pr (head ${head_sha:0:7}, author $author) — verdict GO, CI green."
@@ -957,8 +1094,18 @@ for repo in "${REPOS[@]}"; do
       # exit 8 while CI is still running is the EXPECTED steady state between
       # the review landing and CI going green — that is the whole race this
       # script exists to ride out. It is logged, not paged.
-      log "DECLINED (exit $rc): $repo#$pr — $(printf '%s' "$out" | tail -1)"
-      declined=$((declined + 1))
+      # Exits 3/4/5/11/12 (repo not muso, self-approval, requester not
+      # authorized, sensitive path, policy malformed) never clear on retry.
+      # Everything else — 8 above all — is transient. No state file: see
+      # WHY STATELESS above.
+      case "$rc" in
+        3|4|5|11|12)
+          log "DECLINED-PERMANENT (exit $rc): $repo#$pr — $(printf '%s' "$out" | tail -1)"
+          declined_permanent=$((declined_permanent + 1)) ;;
+        *)
+          log "DECLINED (exit $rc): $repo#$pr — $(printf '%s' "$out" | tail -1)"
+          declined=$((declined + 1)) ;;
+      esac
     fi
 
     # Relay the wrapper's alerts on BOTH branches. GO is exactly when they
@@ -966,9 +1113,21 @@ for repo in "${REPOS[@]}"; do
     qar_publish_alerts "$repo" "$pr" "$head_sha" "$uid" "$rc" "$out" \
       || alerts_unpublished=$((alerts_unpublished + 1))
   done < <(printf '%s' "$prs_json" | jq -r '.[] | [.number, .headRefOid, .author.login, .isDraft] | @tsv')
+  if [ "$repo_self" -gt 0 ]; then
+    log "SKIP: $repo — $repo_self PR(s) authored by the acting QA identity ($me); self-approval is permanently blocked by GitHub, so they cost 0 reads"
+  fi
+  if [ "$budget_hit" -eq 1 ] || [ "$floor_hit" -eq 1 ]; then break; fi
 done
 
-log "tick done — considered=$considered approved=$approved declined=$declined skipped=$skipped read_failures=$read_fail alerts_unpublished=$alerts_unpublished raced=$raced repo_read_failures=$repo_fail/${#REPOS[@]} reviews_read_failures=$reviews_fail/$considered truncated_repos=$truncated safety_read_failures=$safety_fail/$safety_considered unsafe_unflagged=$unsafe_unflagged"
+if [ "$floor_hit" -eq 1 ]; then
+  log "RATE FLOOR: core remaining=$floor_rem is below floor=$RATE_FLOOR at $floor_at — standing down mid-repo; $(( ${#REPOS[@]} - repo_idx )) repo(s) after it not swept. Expected steady state, not a failure."
+fi
+
+if [ "$budget_hit" -eq 1 ]; then
+  log "CALL BUDGET: $rest_calls REST call(s) reached the per-tick budget of $MAX_CALLS — standing down at $budget_at; $(( ${#REPOS[@]} - repo_idx )) repo(s) after it not swept. Counts calls (reviews per page, other reads once), so real spend can be higher. Expected steady state, not a failure."
+fi
+
+log "tick done — considered=$considered approved=$approved declined=$declined declined_permanent=$declined_permanent self_authored=$self_authored skipped=$skipped read_failures=$read_fail alerts_unpublished=$alerts_unpublished raced=$raced repo_read_failures=$repo_fail/${#REPOS[@]} reviews_read_failures=$reviews_fail/$considered truncated_repos=$truncated safety_read_failures=$safety_fail/$safety_considered unsafe_unflagged=$unsafe_unflagged"
 
 # ── Total blackout ───────────────────────────────────────────────────────
 # Per-repo read failures are counted above, but counters in a log nobody reads

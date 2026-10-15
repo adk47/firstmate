@@ -152,7 +152,8 @@ Verify analytics are populating before delivering to client.
 
 ### Step 7: Send User Logins
 - Small batch: individual emails
-- Large batch (20+): use Klaviyo
+- Large batch (20+): a human bulk send: Klaviyo until the marketing cutover (~28 Oct 2026),
+  then a Listmonk private list + campaign (see `muso-email`; agents read, never send)
 
 ## Seat Management
 
