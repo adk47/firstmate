@@ -70,7 +70,19 @@ now="$(date +%s)"
 # Oldest first. Only direct children, never symlinks followed, never the root.
 while IFS= read -r path; do
   [ "$total_kib" -le "$CAP_KIB" ] && break
-  age_min=$(( (now - $(mtime "$path")) / 60 ))
+  # A child that vanished after find listed it (live cache) is skipped; one that exists but cannot
+  # be stat'ed is a failure. Never feed an empty mtime to arithmetic: that aborts the loop with rc 0.
+  ts="$(mtime "$path")" || ts=""
+  case "$ts" in
+    ""|*[!0-9]*)
+      if [ -e "$path" ] || [ -L "$path" ]; then
+        failures=$((failures + 1)); echo "size-capped: WARN could not stat $path" >&2
+      else
+        echo "size-capped: skip (vanished) $path"
+      fi
+      continue ;;
+  esac
+  age_min=$(( (now - ts) / 60 ))
   [ "$age_min" -lt "$MIN_AGE_MIN" ] && continue
   # du exits 1 when an entry vanishes mid-walk (live cache); a size estimate must not kill the run.
   kib="$(du -skx -- "$path" 2>/dev/null | awk '{print $1}' || true)"; kib="${kib:-0}"
@@ -92,7 +104,8 @@ done < <(
     | while IFS= read -r -d '' p; do
         # newline-delimited records would let a name like $'\nscripts' split into a path outside ROOT
         case "$p" in *$'\n'*) echo "size-capped: skip (newline in name) ${p//$'\n'/?}" >&2; continue ;; esac
-        printf '%s %s\n' "$(mtime "$p")" "$p"
+        ts="$(mtime "$p")" || ts=""; ts="${ts:-0}"   # unstat-able sorts first; the loop above judges it
+        printf '%s %s\n' "$ts" "$p"
       done \
     | sort -n | cut -d' ' -f2-
 )

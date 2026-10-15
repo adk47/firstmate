@@ -206,3 +206,17 @@ SH
   [ "$status" -eq 2 ]
   [ -d "$SIZE_CAP_ROOT/old" ]
 }
+
+@test "a child that cannot be stat'ed is a failure (exit 1) and later eligible children are still evicted" {
+  mk bad 40 100
+  mk old 30 100
+  mkdir -p "$BATS_TEST_TMPDIR/shim"
+  real_stat="$(command -v stat)"
+  printf '#!/bin/bash\nfor a in "$@"; do case "$a" in */bad) exit 1 ;; esac; done\nexec %s "$@"\n' "$real_stat" > "$BATS_TEST_TMPDIR/shim/stat"
+  chmod +x "$BATS_TEST_TMPDIR/shim/stat"
+  PATH="$BATS_TEST_TMPDIR/shim:$PATH" SIZE_CAP_KIB=0 SIZE_CAP_MIN_AGE_MIN=0 run "$RULE"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"failures=1"* ]]
+  [ ! -d "$SIZE_CAP_ROOT/old" ]
+  [ -d "$SIZE_CAP_ROOT/bad" ]
+}
