@@ -11,6 +11,8 @@ pii: unknown
 last_exported: 2025-01-31
 */
 
+-- STACK SWAP (Oct 2026): built for Amplitude cohort uploads. Amplitude is being retired; cohorts now live as
+-- SQL over ClickHouse product_events (skill muso-analytics). The SQL reads Muso's own tables and is unchanged.
 -- Users who joined and never started the trial (no subscription status) +
 -- Stripe/PayPal users who had a trial but didn't upgrade (expired)  +
 -- Stripe/PayPal who canceled (canceled) +

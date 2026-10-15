@@ -20,7 +20,13 @@ _All tools the CMO agent has access to. See individual skill files for full API 
   with `--dry-run`; every write is audited.
 - **Credit-request approvals stay on `muso-admin-api.sh`** (the ops soak boundary), not muso-cli.
 
-### Klaviyo
+### Our email + analytics stack (replaces Klaviyo / Amplitude reads, stack swap Oct 2026)
+- READ ONLY, via `bash /opt/hydra/scripts/muso-stack-read.sh` (run `coverage` first: it says what our stack holds today)
+- Email: skill `muso-email` (send log + engagement in ClickHouse `messaging.email_events`, consent/suppressions in preferences, campaigns/lists in Listmonk)
+- Product analytics: skill `muso-analytics` (event router query API = Amplitude's Dashboard API paths; ClickHouse `product_events`)
+- Read from both while a stream overlaps, prefer ours, and name the source of every number
+
+### Klaviyo (legacy; until each stream cuts over, marketing ~28 Oct)
 - Email/SMS marketing platform
 - API base: `https://a.klaviyo.com/api/`
 - Auth: `Klaviyo-API-Key $MUSOAI_KLAVIYO_TOKEN` + `revision: 2025-01-15`
@@ -107,11 +113,11 @@ _All tools the CMO agent has access to. See individual skill files for full API 
 - If ProfitWell disagrees with the reproducible Stripe result → Stripe wins for current metrics; disclose the definition difference
 - Skill: `muso-profitwell`
 
-### Amplitude
+### Amplitude (legacy fallback; use `muso-analytics` first)
 - Product analytics
 - Auth: Basic `$MUSOAI_AMPLITUDE_TOKEN:$MUSOAI_AMPLITUDE_SECRET_KEY`
 - API base: `https://amplitude.com/api/2/`
-- Use for: DAU/MAU, funnels, retention, user activity, cohorts
+- Use for: windows our stack does not cover yet (see `muso-stack-read.sh coverage`), until Amplitude's cutover
 - Skill: `muso-amplitude`
 
 ### Rewardful
