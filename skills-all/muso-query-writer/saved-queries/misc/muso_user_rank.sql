@@ -12,6 +12,9 @@ pii: unknown
 last_exported: 2025-01-31
 */
 
+-- STACK SWAP (Oct 2026): this audience used to be uploaded to Klaviyo. Klaviyo is being retired; marketing
+-- audiences go to Listmonk (skill muso-email) from the marketing cutover (~28 Oct). The SQL is unchanged;
+-- only the destination moves, and the upload is a human step (Aaron / Nick).
 with u AS (
 select 
     t.email,

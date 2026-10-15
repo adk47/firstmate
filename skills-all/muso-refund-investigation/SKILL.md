@@ -11,10 +11,12 @@ description: |
   "evaluate refund", "refund decision", "cancel and refund", "chargeback"
 depends-on:
   - muso-stripe
+  - muso-analytics
   - muso-amplitude
   - muso-slack-formatter
 compatibility: |
-  Requires muso-stripe, muso-amplitude, muso-slack-formatter skills. Trino access
+  Requires muso-stripe, muso-analytics (muso-amplitude as fallback until the
+  Amplitude cutover), muso-slack-formatter skills. Trino access
   (via `muso query`) for deep investigation.
 metadata:
   version: "1.0"
@@ -33,7 +35,7 @@ All SQL below runs on Trino: `muso query - <<'SQL'` heredocs (CSV with header; s
 
 Get user email or name from the requester. Use it to find:
 - Stripe customer ID (`stripe customers list --email="..."`)
-- Amplitude user (search by email via usersearch API)
+- Muso user id (from the Muso user record below; product activity is looked up by user id, step 5)
 - Muso user record: `muso users search '<email>' --env prod --json` (typed; use this, not SQL)
 
 ### 2. Repeat Offender Check (Stripe)
@@ -82,7 +84,7 @@ Users may create a new account with a different email to get another refund. Cro
    # Note the card fingerprint, then search for it across other customers
    ```
 
-3. *Name + behavioral match* — Same name on Stripe customer records, similar Amplitude behavior patterns, same IP or device (if available in Amplitude user properties).
+3. *Name + behavioral match* — Same name on Stripe customer records, similar product-activity patterns, same IP or device (if available in the activity user properties, `muso-analytics`).
 
 If any cross-reference matches an account with a prior refund → *REFUND NOT ALLOWED (previous refund on linked account)*.
 
@@ -181,17 +183,23 @@ Capture:
 - Any previous refunds
 - Cancellation date (if applicable)
 
-### 5. Product Activity (Amplitude) — KEY STEP
+### 5. Product Activity — KEY STEP
+
+Our stack first (`muso-analytics` skill), Amplitude only for a window ours does not cover yet:
 
 ```bash
-# Search user
-curl -s -u "$MUSOAI_AMPLITUDE_TOKEN:$MUSOAI_AMPLITUDE_SECRET_KEY" \
-  "https://amplitude.com/api/2/usersearch?user=USER_EMAIL" | jq
-
-# Get activity timeline (use amplitude_id from search)
-curl -s -u "$MUSOAI_AMPLITUDE_TOKEN:$MUSOAI_AMPLITUDE_SECRET_KEY" \
-  "https://amplitude.com/api/2/useractivity?user=AMPLITUDE_ID&length=1000" | jq
+# Is the window covered? (events_view_max_event_time / cutover_at)
+bash /opt/hydra/scripts/muso-stack-read.sh coverage
+# Find the user (Muso user id from step 1; the API does not search by email)
+bash /opt/hydra/scripts/muso-stack-read.sh router '/api/2/usersearch?user=USER_ID'
+# Activity timeline, newest first (limit max 1000)
+bash /opt/hydra/scripts/muso-stack-read.sh router '/api/2/useractivity?user=USER_ID&limit=1000'
 ```
+
+If the period since the subscription started ends after `events_view_max_event_time`, or the
+user is not found, ALSO read Amplitude while it is live (`muso-amplitude` skill:
+`usersearch?user=USER_EMAIL`, then `useractivity?user=AMPLITUDE_ID&length=1000`) and name the
+source of each fact in the report.
 
 Capture:
 - Last active date
@@ -208,7 +216,7 @@ Capture:
 
 ### 6. Trino Deep Dive (if needed)
 
-Only query Trino if Amplitude data is insufficient or user is not found there.
+Only query Trino if the product-activity data (our stack / Amplitude) is insufficient or the user is not found there.
 
 ```sql
 -- Basic user info
@@ -235,7 +243,7 @@ Report sections (use Slack bullet format, not tables):
 
 *4️⃣ REPEAT OFFENDER* — Total subs, avg length, pattern flag, shortest sub.
 
-*5️⃣ PRODUCT ACTIVITY* — Amplitude: last active, events/sessions, key pages (analytics tiles, profiles, catalog), activity pattern and level (🔴 None / 🟠 Low / 🟡 Medium / 🟢 High).
+*5️⃣ PRODUCT ACTIVITY* — (source: our stack / Amplitude) last active, events/sessions, key pages (analytics tiles, profiles, catalog), activity pattern and level (🔴 None / 🟠 Low / 🟡 Medium / 🟢 High).
 
 *6️⃣ PRORATION* — Original charge, proration credits, live credit balance, and which SINGLE concession we are making (credit OR cash, never both). Never refund more than the live credit balance.
 
