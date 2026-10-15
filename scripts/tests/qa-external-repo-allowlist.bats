@@ -103,6 +103,7 @@ ONBOARDED_REPOS=(
   Muso-AI/terraform-module-metrics-server
   Muso-AI/quality-checks
   Muso-AI/muso-messaging
+  Muso-AI/muso-backend
 )
 
 # The mobile repos were onboarded 2026-08-19 for REVIEW ONLY, on purpose: Artem

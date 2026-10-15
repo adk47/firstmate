@@ -150,6 +150,7 @@ REPOS=(
   # 2026-10-09: private monorepo of the Klaviyo/Knock/Amplitude stack swap (created
   # 2026-10-06, after #972's all-repos pass). Authors (adk47) are already mapped.
   Muso-AI/muso-messaging
+  Muso-AI/muso-backend
   # Add more as repos come into scope, e.g.:
   #   Muso-AI/<repo>
 )
