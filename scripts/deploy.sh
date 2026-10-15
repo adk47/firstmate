@@ -2643,9 +2643,15 @@ done
 # (@openclaw/codex@2026.9.9 still uses the turn-level channel); only >= 2026.10 ships it.
 # Do not "tidy" it to match. The patch lands before the Step 6 restart; a running gateway
 # keeps the old code in memory until then.
+# The two gates read DIFFERENT versions on purpose (MUS-6777). Outer: "is this runtime new
+# enough for the anchors to exist at all" is a question about the CORE ($OPENCLAW_VERSION).
+# Inner: "has the patched artifact retired the bug" is a question about the PLUGIN
+# ($OPENCLAW_CODEX_VERSION), which codex-version.sh pins separately and lower, with no
+# 2026.9/2026.10 arm. Keyed on core, a bump to 2026.10 would keep the buggy 2026.8.35 plugin
+# AND skip this patch with a green deploy. Do not make them read the same variable.
 if version_at_least "2026.8" "$OPENCLAW_VERSION"; then
-  if version_at_least "2026.10" "$OPENCLAW_VERSION"; then
-    log "Step 4d.6: openclaw ${OPENCLAW_VERSION} >= 2026.10 — soul delivery is native, patch skipped"
+  if version_at_least "2026.10" "$OPENCLAW_CODEX_VERSION"; then
+    log "Step 4d.6: @openclaw/codex ${OPENCLAW_CODEX_VERSION} >= 2026.10 — soul delivery is native, patch skipped"
   else
     _soul_globs=()
     for _profile in main edge; do

@@ -91,6 +91,7 @@ TIER2_REVERSE_WINDOW_SECS="${TIER2_REVERSE_WINDOW_SECS:-300}"
 # in-thread, so by itself it is not evidence that a human chose these rows.
 BULK_DESTRUCTIVE_PATH="${BULK_DESTRUCTIVE_PATH:-${MUSO_OPS_STATE_DIR}/destructive-ops.jsonl}"
 BULK_DESTRUCTIVE_AUDIT_PATH="${BULK_DESTRUCTIVE_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/bulk-destructive-audit.jsonl}"
+BULK_DESTRUCTIVE_RESULTS_PATH="${BULK_DESTRUCTIVE_RESULTS_PATH:-${MUSO_OPS_STATE_DIR}/destructive-ops-results.jsonl}"
 BULK_DESTRUCTIVE_THRESHOLD="${BULK_DESTRUCTIVE_THRESHOLD:-10}"
 BULK_DESTRUCTIVE_WINDOW_SECS="${BULK_DESTRUCTIVE_WINDOW_SECS:-900}"
 BULK_DESTRUCTIVE_EXCLUDE_PATH="${BULK_DESTRUCTIVE_EXCLUDE_PATH:-${SCRIPT_DIR}/../config/bulk-destructive-exclude.txt}"
@@ -1483,6 +1484,48 @@ record_destructive_op() {
         --arg requester "${REQUESTER_EMAIL:-}" \
         '{ts:$ts, epoch:$epoch, method:$method, path:$path, requester:$requester}' 2>/dev/null) || return 1
     printf '%s\n' "$line" >> "$BULK_DESTRUCTIVE_PATH" 2>/dev/null || return 1
+    # Remember the row's correlation key (epoch + path) for the outcome ledger.
+    DESTRUCTIVE_OP_EPOCH="$epoch"
+    DESTRUCTIVE_OP_PATH="$_path"
+    return 0
+}
+
+# write_destructive_op_result OUTCOME HTTP_STATUS -> always 0.
+# Post-call companion to record_destructive_op: one row in
+# destructive-ops-results.jsonl per counter row, keyed by the same (epoch, path)
+# pair, saying whether the DELETE landed. Kept OUT of destructive-ops.jsonl on
+# purpose — count_recent_destructive_ops reads that file, and a changed row
+# shape there would skew the blast-radius gate. No-op unless this call wrote a
+# counter row. Failure mode matches write_dry_run_audit: LOUD stderr warning,
+# never break the call (the DELETE has already happened; refusing now helps no one).
+# OUTCOME: ok | http_error | transport_error (sent, delivery ambiguous) |
+# not_sent (login or retry config failed, DELETE definitely never left). HTTP_STATUS empty -> null.
+DESTRUCTIVE_OP_EPOCH=""
+DESTRUCTIVE_OP_PATH=""
+write_destructive_op_result() {
+    local outcome="$1" http_status="${2:-}"
+    [[ -n "$DESTRUCTIVE_OP_EPOCH" ]] || return 0
+    local ts line
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if ! line=$(jq -n -c \
+        --arg ts "$ts" \
+        --argjson epoch "$DESTRUCTIVE_OP_EPOCH" \
+        --arg method "$CALL_METHOD_FOR_RESULT" \
+        --arg path "$DESTRUCTIVE_OP_PATH" \
+        --arg requester "${REQUESTER_EMAIL:-}" \
+        --arg http_status "$http_status" \
+        --arg outcome "$outcome" \
+        '{ts:$ts, epoch:$epoch, method:$method, path:$path, requester:$requester,
+          http_status:($http_status | tonumber? // null), outcome:$outcome}' 2>/dev/null); then
+        echo "MUSO_DESTRUCTIVE_OUTCOME_UNWRITABLE: could not build the outcome row for ${CALL_METHOD_FOR_RESULT} ${DESTRUCTIVE_OP_PATH} (${outcome}); the call itself proceeded." >&2
+        DESTRUCTIVE_OP_EPOCH=""
+        return 0
+    fi
+    if ! { mkdir -p "$(dirname "$BULK_DESTRUCTIVE_RESULTS_PATH")" \
+            && printf '%s\n' "$line" >> "$BULK_DESTRUCTIVE_RESULTS_PATH"; } 2>/dev/null; then
+        echo "MUSO_DESTRUCTIVE_OUTCOME_UNWRITABLE: could not append to ${BULK_DESTRUCTIVE_RESULTS_PATH}; outcome row LOST for ${CALL_METHOD_FOR_RESULT} ${DESTRUCTIVE_OP_PATH} (${outcome}, status ${http_status:-none}); the call itself proceeded." >&2
+    fi
+    DESTRUCTIVE_OP_EPOCH=""   # exactly one outcome row per counter row
     return 0
 }
 
@@ -1608,6 +1651,8 @@ EOF
 
     # Bulk destructive-operation gate (incident 2026-05-26). Caps the blast
     # radius of mass DELETEs. Self-skips in dry-run.
+    DESTRUCTIVE_OP_EPOCH=""
+    CALL_METHOD_FOR_RESULT="$method"
     if ! enforce_bulk_destructive_gate "$method" "$path"; then
         return 1
     fi
@@ -1632,8 +1677,12 @@ EOF
         esac
     fi
 
-    local token
-    token=$(get_token)
+    local token token_rc=0
+    token=$(get_token) || token_rc=$?
+    if (( token_rc != 0 )); then
+        write_destructive_op_result "not_sent" ""
+        return "$token_rc"
+    fi
 
     local -a curl_args=(
         -s -w "\n%{http_code}"
@@ -1649,18 +1698,37 @@ EOF
         curl_args+=(-H "Requester: $REQUESTER_EMAIL")
     fi
 
+    # Actor headers (audit trail — approver + Slack ts of the in-thread approval);
+    # blank or whitespace-only counts as absent, never as a valid approver
+    if [[ "$CONFIRMED_BY" =~ [^[:space:]] ]]; then
+        curl_args+=(-H "Approved-By: $CONFIRMED_BY")
+    fi
+    if [[ "$APPROVAL_MSG_ID" =~ [^[:space:]] ]]; then
+        curl_args+=(-H "Request-Ref: $APPROVAL_MSG_ID")
+    fi
+
     if [[ -n "$body" ]]; then
         curl_args+=(-d "$body")
     fi
 
-    local response
-    response=$(curl "${curl_args[@]}")
+    local response curl_rc=0
+    response=$(curl "${curl_args[@]}") || curl_rc=$?
+    if (( curl_rc != 0 )); then
+        write_destructive_op_result "transport_error" ""
+        return "$curl_rc"
+    fi
 
     # Extract HTTP status code (last line) and body (everything else)
     local http_code
     http_code=$(echo "$response" | tail -1)
     local response_body
     response_body=$(echo "$response" | sed '$d')
+
+    if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+        write_destructive_op_result "ok" "$http_code"
+    else
+        write_destructive_op_result "http_error" "$http_code"
+    fi
 
     # Record successful merges for the reverse-direction guard.
     record_merge_call "$method" "$path" "$body" "$http_code"
@@ -1722,6 +1790,15 @@ cmd_upload() {
     # Add Requester header if set
     if [[ -n "$REQUESTER_EMAIL" ]]; then
         curl_args+=(-H "Requester: $REQUESTER_EMAIL")
+    fi
+
+    # Actor headers (audit trail — approver + Slack ts of the in-thread approval);
+    # blank or whitespace-only counts as absent, never as a valid approver
+    if [[ "$CONFIRMED_BY" =~ [^[:space:]] ]]; then
+        curl_args+=(-H "Approved-By: $CONFIRMED_BY")
+    fi
+    if [[ "$APPROVAL_MSG_ID" =~ [^[:space:]] ]]; then
+        curl_args+=(-H "Request-Ref: $APPROVAL_MSG_ID")
     fi
 
     curl_args+=(-F "file=@$file")

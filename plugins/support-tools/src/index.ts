@@ -223,6 +223,8 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
         scriptPath: updateOrderAddressScriptPath,
         rateLimiter,
         sessionId: ctx.sessionId ?? "unknown",
+        // Anti-spoof anchor: the trusted session KEY (carries the convId), see deriveConvId.
+        sessionKey: ctx.sessionKey ?? "unknown",
       });
     };
     api.registerTool(orderAddressUpdateFactory, { name: "order_address_update" });

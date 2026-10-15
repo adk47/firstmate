@@ -19,6 +19,7 @@ compatibility: |
   Auth: retool@muso.ai service account → JWT Bearer token (cached 23h).
   Requester header: Slack ID auto-resolved to muso.ai email by wrapper script.
   Service header: "clio" (identifies changes came through this agent).
+  Approved-By / Request-Ref headers: sent when --confirmed-by / --approval-msg-id are given (audit only).
   WRITE APPROVAL: Tier-1 (Aaron, Jan, Nick — see tier2-godmode-allowlist.txt) self-authorize every ops write, bulk work included; execute immediately and never page one of them to approve another's request. Everyone else queues for a Tier-1 approver.
 metadata:
   version: "2.0"
@@ -354,6 +355,8 @@ knows which human initiated the change. This mirrors Retool's pattern:
 
 - `Requester: <user's muso email>` — the human who asked for the operation
 - `Service: clio` — identifies that the change came through Clio
+- `Approved-By: <approver>` and `Request-Ref: <Slack ts of the in-thread approval>` — sent only when
+  `--confirmed-by` / `--approval-msg-id` are passed; absent (not empty) otherwise. Audit only, never a gate.
 
 **The wrapper script auto-resolves Slack IDs to emails.** The map holds exactly
 the people `shared-reference/reference/slack-people.json` lists as current staff
