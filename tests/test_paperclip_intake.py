@@ -545,6 +545,18 @@ class EscalateTests(Base):
         self.assertEqual(rc, 1)
         self.assertIsNone(card["assigneeAgentId"])
 
+    def test_unknown_pilot_agent_fails_loud_even_with_nothing_to_escalate(self):
+        # The lookup used to sit after the age check, so a wrong --to-agent only
+        # surfaced when a card reached 30 minutes: the cron exited 0 until then.
+        rc, _, err = self.run_cli("escalate", "--to-agent", "ghost")
+        self.assertEqual(rc, 1)
+        self.assertIn("ghost", err)
+        self.file("deploy failed")
+        card = next(iter(self.api.issues.values()))
+        card["createdAt"] = self.old(10)
+        rc, _, _ = self.run_cli("escalate", "--to-agent", "ghost")
+        self.assertEqual(rc, 1)
+
     def test_fresh_card_is_left_alone(self):
         self.file("deploy failed")
         card = next(iter(self.api.issues.values()))

@@ -289,12 +289,13 @@ def _age_minutes(card):
 
 def cmd_escalate(client, args):
     n = 0
-    label = target = None
+    label = None
+    # Resolve first: a wrong --to-agent must fail on every run, not only once a card ages out.
+    target = client.agent_id(args.to_agent)
     for card in waiting_cards(client):
         if _age_minutes(card) < args.after_minutes:
             continue
         label = label or client.label_id(ESCALATED_LABEL)
-        target = target or client.agent_id(args.to_agent)
         client.call("PATCH", f"/api/issues/{card['id']}",
                     {"assigneeAgentId": target,
                      "labelIds": sorted(set(card.get("labelIds") or []) | {label})})

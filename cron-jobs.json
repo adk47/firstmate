@@ -1355,7 +1355,7 @@
       },
       "id": "2db95923-f7b9-4fb3-bf0c-26ee4768b635",
       "name": "paperclip-intake-escalate",
-      "description": "Zero-token 30-minute fallback for the node-8 pilot: an intake card still untouched after 30 minutes is reassigned to the pilot agent (oc-scout) with label intake-escalated. The pilot report counts those (`paperclip-intake.py escalations`). After the full move the target becomes the CEO / Chief of staff: change --to-agent.",
+      "description": "Zero-token 30-minute fallback for the node-8 pilot: an intake card still untouched after 30 minutes is reassigned to the pilot agent (Scout (OpenClaw), id 43599bf0-6d53-48a2-a8d0-a78a23f41f9a on the node-8 instance; the id, because a rename would silently break a fallback that only fails when a card ages) with label intake-escalated. The pilot report counts those (`paperclip-intake.py escalations`). After the full move the target becomes the CEO / Chief of staff: change --to-agent.",
       "schedule": {
         "kind": "cron",
         "expr": "7,22,37,52 * * * *",
@@ -1368,7 +1368,7 @@
           "/opt/hydra/scripts/paperclip-intake.py",
           "escalate",
           "--to-agent",
-          "oc-scout"
+          "43599bf0-6d53-48a2-a8d0-a78a23f41f9a"
         ],
         "cwd": "/opt/hydra",
         "timeoutSeconds": 120
