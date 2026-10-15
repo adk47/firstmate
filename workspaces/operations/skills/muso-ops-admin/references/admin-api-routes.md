@@ -4,7 +4,7 @@ _Source: `core-backend/src/apis/index.w.js` (re-verified 2026-03-15)_
 _Base URL: `https://api.muso.ai/api/v3` — routes use `/admin/*` prefix (NOT `/w/admin/`)_
 _Auth: JWT Bearer token from `data.authentication.accessToken`. All routes require `admin` role except login._
 _Service account: `retool@muso.ai` (same account Retool uses)_
-_Required headers: `Authorization: Bearer <token>`, `Requester: <user-email>`, `Service: clio`_
+_Required headers: `Authorization: Bearer <token>`, `Requester: <user-email>`, `Service: clio`; optional audit headers `Approved-By`, `Request-Ref` (sent when `--confirmed-by` / `--approval-msg-id` are given)_
 
 ## User Management
 | Method | Path | Handler | Notes |

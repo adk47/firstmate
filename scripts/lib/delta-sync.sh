@@ -118,7 +118,7 @@ delta_filter_excludes() {
   [[ -n "$all" ]] || return 0
   tree=$(mktemp -d) || return 1
   # A trap, not only the inline rm: a return path that forgets its rm still cleans up the dir.
-  trap 'rm -rf "$tree"' RETURN
+  trap 'rm -rf "$tree"; trap - RETURN' RETURN
   mkdir -p "$tree/src" "$tree/dst"
   # A path whose placeholder was not created would read as "excluded": fail the gate instead.
   _delta_placeholders "$tree/src" <<<"$all" \

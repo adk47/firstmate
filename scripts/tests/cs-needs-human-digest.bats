@@ -179,7 +179,7 @@ c = {"id": "NEW", "email": "n@x.com", "lar": 0, "lcr": 0,
      "created_at": now - (10 * 3600), "url": ""}
 buckets = mod.bucket_conversations([c], set())
 blocks = mod.build_digest_blocks(buckets, now_epoch=now)
-assert "customer-side activity older than 48h" not in str(blocks), blocks
+assert "customer-side timestamp older than 48h" not in str(blocks), blocks
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]
@@ -197,7 +197,7 @@ c = {"id": "OLD", "email": "o@x.com", "lar": 0, "lcr": 0,
      "created_at": now - (72 * 3600), "url": ""}
 buckets = mod.bucket_conversations([c], set())
 blocks = mod.build_digest_blocks(buckets, now_epoch=now)
-assert "customer-side activity older than 48h" in str(blocks), blocks
+assert "customer-side timestamp older than 48h" in str(blocks), blocks
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]
