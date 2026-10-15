@@ -81,3 +81,10 @@ OTHER='gh: Resource not accessible by integration (HTTP 403)'
   echo "$output" | grep -q 'secondary rate limit'
   if echo "$output" | grep -q 'not throttling'; then false; fi
 }
+
+@test "a multi-line gh error is flattened to one line" {
+  run "$SCRIPT" $'gh: Forbidden\nline2 (HTTP 403)'
+  [ "$status" -eq 0 ]
+  [[ "$output" != *$'\n'* ]]
+  echo "$output" | grep -q 'Forbidden line2'
+}
