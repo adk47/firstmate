@@ -14,10 +14,11 @@ description: |
 depends-on:
   - muso-refund-investigation
   - muso-stripe
+  - muso-analytics
   - muso-amplitude
   - muso-slack-formatter
 compatibility: |
-  Requires muso-refund-investigation, muso-stripe, muso-amplitude, muso-slack-formatter. WRITE access to Stripe.
+  Requires muso-refund-investigation, muso-stripe, muso-analytics (muso-amplitude as fallback until the Amplitude cutover), muso-slack-formatter. WRITE access to Stripe.
 metadata:
   version: "1.0"
   source-repo: "Muso-AI/muso-skills"
