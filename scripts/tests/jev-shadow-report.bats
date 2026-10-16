@@ -654,3 +654,27 @@ _pair_dir() {
   [[ "$output" == *"paired=1"* ]]
   [[ "$output" == *"unpaired=1"* ]]
 }
+
+@test "pair-versions: --window-hours keeps fresh millisecond-stamped rows and still pairs them" {
+  _pair_dir
+  local now; now="$(date -u +%Y-%m-%dT%H:%M)"
+  { _row "${now}:00.123Z" t1 v1 route 0.85
+    _row "${now}:01.456Z" t1 v2 decline 0.6; } >> "$PAIR_DIR/pairs.jsonl"
+  run "$REPORT" --shadow-dir "$PAIR_DIR" --pair-versions --window-hours 1
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"no shadow lines"* ]]
+  [[ "$output" == *"paired=1"* ]]
+}
+
+@test "pair-versions: a paired row with an unhashable choice is counted, not fatal" {
+  _pair_dir
+  { printf '%s\n' '{"ts":"2026-10-01T10:00:00.000Z","surface":"pairs","item_id":"t1","questions_version":"v1","answers":{"intent":{"type":"choice","choice":["a"],"probabilities":{"a":0.85}}},"latency_ms":1,"rc":0}'
+    _row 2026-10-01T10:00:01.000Z t1 v2 decline 0.6
+    _row 2026-10-01T10:01:00.000Z t2 v1 route 0.85
+    _row 2026-10-01T10:01:01.000Z t2 v2 decline 0.6; } >> "$PAIR_DIR/pairs.jsonl"
+  run "$REPORT" --shadow-dir "$PAIR_DIR" --pair-versions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"paired=2"* ]]
+  [[ "$output" == *"q_not_compared=1"* ]]
+  [[ "$output" =~ 0\.8-0\.9[[:space:]]+1[[:space:]]+100\.0% ]]
+}

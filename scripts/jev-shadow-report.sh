@@ -315,7 +315,9 @@ for path in paths:
             # that keeps a still-unanticipated shape from aborting the report.
             try:
                 ts = row.get("ts")
-                t = parse_ts(ts) if ts else None
+                # pair mode keeps the live writer's milliseconds (parse_ts is
+                # whole-second and would drop every fresh row from a window)
+                t = (parse_ts_precise(ts) if pair_versions else parse_ts(ts)) if ts else None
                 if cutoff is not None:
                     # A windowed report must not keep undated or unparseable
                     # rows forever: with no usable ts the row cannot be placed
@@ -428,8 +430,13 @@ def report_pairs():
                 paired += 1
                 a2 = v2s[best[1]][2]["answers"]
                 for qid, ans1 in r1["answers"].items():
-                    o1, p1 = top_answer(ans1)
-                    o2, _p2 = top_answer(a2.get(qid))
+                    try:
+                        o1, p1 = top_answer(ans1)
+                        o2, _p2 = top_answer(a2.get(qid))
+                    except TypeError:
+                        # e.g. an unhashable nested choice: count it, never abort
+                        q_not_compared += 1
+                        continue
                     if p1 is None or o2 is None:
                         q_not_compared += 1
                         continue
