@@ -30,11 +30,11 @@ setup() {
 
     # Pre-seed a token cache so get_token never tries to log in during any
     # real-path regressions. If dry-run intercepts correctly, this is unused.
-    local script_dir
-    script_dir="$(cd "$(dirname "$SCRIPT")" && pwd)"
-    printf '%s\ndummy-token\n' "$(date +%s)" > "$script_dir/.admin-token-cache"
-    chmod 600 "$script_dir/.admin-token-cache"
-    TOKEN_CACHE_SEED="$script_dir/.admin-token-cache"
+    # Per-test cache under TEST_ROOT: a seed in the repo tree is shared by every
+    # file and races under `bats --jobs` (MUS-11315).
+    export ADMIN_TOKEN_CACHE_PATH="$TEST_ROOT/.admin-token-cache"
+    printf '%s\ndummy-token\n' "$(date +%s)" > "$ADMIN_TOKEN_CACHE_PATH"
+    chmod 600 "$ADMIN_TOKEN_CACHE_PATH"
 
     # Disable the credit-approve gate by default for dry-run tests so the
     # write-short-circuit behavior itself is isolated. The gate-still-fires
@@ -49,7 +49,6 @@ setup() {
 
 teardown() {
     rm -rf "$TEST_ROOT"
-    rm -f "${TOKEN_CACHE_SEED:-}"
 }
 
 # --- Layer 1: write short-circuit ---
@@ -200,14 +199,14 @@ teardown() {
 # --- Default audit path ---
 
 @test "audit path defaults to /tmp/ops-dry-run-audit.jsonl when unset" {
-    unset OPS_DRY_RUN_AUDIT_PATH
-    local default_path="/tmp/ops-dry-run-audit.jsonl"
-    # Clean slate so we can detect our own write
-    rm -f "$default_path"
+    # The default is a fixed global path that other suites append to, so the
+    # write is asserted on a per-test path (parallel-safe, MUS-11315) and the
+    # shipped default is asserted on the script source.
+    grep -qF 'OPS_DRY_RUN_AUDIT_PATH="${OPS_DRY_RUN_AUDIT_PATH:-/tmp/ops-dry-run-audit.jsonl}"' "$SCRIPT"
+    export OPS_DRY_RUN_AUDIT_PATH="$TEST_ROOT/default-path-audit.jsonl"
     bash "$SCRIPT" call PUT /admin/x '{}' >/dev/null
-    [ -f "$default_path" ]
-    jq -e '.method == "PUT"' "$default_path" >/dev/null
-    rm -f "$default_path"
+    [ -f "$OPS_DRY_RUN_AUDIT_PATH" ]
+    jq -e '.method == "PUT"' "$OPS_DRY_RUN_AUDIT_PATH" >/dev/null
 }
 
 # --- Gate-still-fires: dry-run does NOT bypass the credit-approve gate ---

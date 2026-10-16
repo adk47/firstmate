@@ -228,6 +228,12 @@ POINTER_TEXT = (
 # Network seam — copied by DUPLICATION (see module docstring for why not
 # imported), not by reference, so each script's behavior can drift safely.
 # --------------------------------------------------------------------------
+def _backoff(a):
+    # Linear retry backoff. CLOSE_DUP_RETRY_BASE_SECS lets the bats suite skip the
+    # wait against a dead port (MUS-11315); the default 2 s is production timing.
+    time.sleep(float(os.environ.get("CLOSE_DUP_RETRY_BASE_SECS", "2")) * (a + 1))
+
+
 def _retry_json(req, attempts=4):
     # <- scripts/close-resolved-conversations.py:86-94
     for a in range(attempts):
@@ -237,7 +243,7 @@ def _retry_json(req, attempts=4):
         except urllib.error.URLError:
             if a == attempts - 1:
                 raise
-            time.sleep(2 * (a + 1))
+            _backoff(a)
 
 
 def intercom_search(token, body):
@@ -284,7 +290,7 @@ def get_contact(contact_id, token, attempts=4):
                     raise ContactLookupFailed(
                         f"GET /contacts/{contact_id} -> {e.code} persisted "
                         f"through {attempts} attempts") from e
-                time.sleep(2 * (a + 1))
+                _backoff(a)
                 continue
             raise ContactLookupFailed(
                 f"GET /contacts/{contact_id} -> {e.code} (unexpected status)") from e
@@ -293,7 +299,7 @@ def get_contact(contact_id, token, attempts=4):
                 raise ContactLookupFailed(
                     f"GET /contacts/{contact_id} failed after {attempts} "
                     f"attempts: {type(e).__name__}: {e}") from e
-            time.sleep(2 * (a + 1))
+            _backoff(a)
     return None  # unreachable — the loop always returns or raises
 
 

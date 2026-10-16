@@ -1350,8 +1350,29 @@ jobs:
           count=$(echo "$files" | wc -l | tr -d ' ')
           echo "Running $count bats file(s):"
           echo "$files" | sed 's/^/  /'
+          # Parallel across FILES, serial within a file (MUS-11315, from the MUS-7954
+          # audit on node-8: corpus 1493 s serial -> 279 s at --jobs 8, identical
+          # 6497-test name set). Slowest files go first so the long poles start at
+          # once (merge-landing-watchdog 178 s, rollback 121 s, close-duplicate 82 s).
+          # --jobs 8 is the knee: 16 buys 33 s because merge-landing-watchdog is the
+          # floor. Do NOT add within-file parallelism: 423 s and 4 tests break.
+          # Rollback: drop `--jobs 8 --no-parallelize-within-files`.
+          slow="scripts/tests/merge-landing-watchdog.bats
+          scripts/tests/rollback.bats
+          scripts/tests/close-duplicate-conversations.bats
+          scripts/tests/prod-log-alert-watchdog.bats
+          scripts/tests/sync-help-centre.bats
+          scripts/tests/deploy-agents-bound-probe.bats
+          scripts/tests/support-changelog-sync.bats
+          scripts/tests/rollback-preserves-mcp.bats
+          scripts/tests/codex-quota-probe.bats
+          scripts/tests/qa-approval-retry.bats
+          scripts/tests/cron-store.bats
+          scripts/tests/qa-review-reconcile.bats"
+          ordered=$( { for f in $slow; do grep -Fx -- "$f" <<<"$files" || true; done
+                       grep -vFx -- "$slow" <<<"$files" || true; } )
           # shellcheck disable=SC2086
-          bats $files
+          bats --jobs 8 --no-parallelize-within-files $ordered
 
   py-syntax:
     name: Python syntax check (py_compile)
