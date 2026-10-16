@@ -6,7 +6,8 @@
 # Writes a chat.postMessage payload {channel, text, blocks} to <out-file>, built with jq --arg only.
 # Advertiser text is attacker-controlled: it lands only in plain_text objects (mentions and *bold* are
 # inert there), and is also stripped of control chars and <> and length-capped. The one mrkdwn
-# mention block and the fallback text carry the fixed Aaron mention. No deep link: the review page reads no ?ad= param.
+# mention block and the fallback text carry the fixed Aaron mention. The review link gets ?ad=<Ads.id>
+# (MUS-12304) only when the id is all digits; anything else falls back to the bare review URL.
 
 AD_SCREENING_REVIEW_URL="https://promote.muso.ai/portal/admin/review"
 
@@ -19,7 +20,7 @@ _brief_clean() { # <text> <cap>
 
 ad_screening_brief_payload() {
   local channel="$1" out="$2" ad="$3" creative="$4" rec="$5" conf="$6" flags="$7" reason="$8"
-  local who head body goal spend pct acct dest img mention text
+  local who head body goal spend pct acct dest img mention text link adid
   who="$(jq -r '[.advertiserName, .adAccount.name, .company] | map(select(. != null and . != "")) | .[0] // ""' <<<"$ad")"
   head="$(jq -r '.adHeadline // ""' <<<"$ad")"; body="$(jq -r '.adBody // ""' <<<"$ad")"
   goal="$(jq -r '.campaign.objective // ""' <<<"$ad")"
@@ -35,6 +36,8 @@ ad_screening_brief_payload() {
         then "\($cur) \($b)/day × \($d) days = \($cur) \($b * $d)"
       else "\($cur) \($b) (budget type or term not stated)" end' <<<"$ad")"
   pct="$(awk -v c="$conf" 'BEGIN { printf "%d%%", c * 100 + 0.5 }')"
+  adid="$(jq -r '.id // "" | tostring' <<<"$ad")"
+  link="$AD_SCREENING_REVIEW_URL"; [[ "$adid" =~ ^[0-9]+$ ]] && link="$link?ad=$adid"
   mention="<@${SLACK_UID_AARON:-U7RP6HKUZ}>"
   who="$(_brief_clean "$who" 80)"; head="$(_brief_clean "$head" 80)"; body="$(_brief_clean "$body" 140)"
   creative="$(_brief_clean "$creative" 140)"; spend="$(_brief_clean "$spend" 80)"; goal="$(_brief_clean "$goal" 60)"
@@ -47,11 +50,11 @@ ad_screening_brief_payload() {
     "Goal: $goal" \
     "Jev: $rec ($pct confident), flags: ${flags:-none}" \
     "Why: $reason" \
-    "Decide here: $AD_SCREENING_REVIEW_URL")"
+    "Decide here: $link")"
   jq -n --arg channel "$channel" --arg text "$text" --arg mention "$mention" --arg who "$who" \
     --arg head "$head" --arg body "$body" --arg creative "$creative" --arg spend "$spend" --arg goal "$goal" \
     --arg acct "$acct" --arg dest "$dest" --arg destplain "$(_brief_clean "$dest" 200)" --arg img "$img" \
-    --arg rec "$rec" --arg pct "$pct" --arg flags "${flags:-none}" --arg reason "$reason" --arg url "$AD_SCREENING_REVIEW_URL" '
+    --arg rec "$rec" --arg pct "$pct" --arg flags "${flags:-none}" --arg reason "$reason" --arg url "$link" '
     def okurl: length <= 500 and test("^https://[^\\s<>|`]+\\z");
     def pt(t): {type: "plain_text", text: t};
     def icon: {approve: "✅", reject: "⛔", needs_human: "👀"}[$rec] // "";
@@ -67,6 +70,5 @@ ad_screening_brief_payload() {
         {type: "context", elements: [
           {type: "mrkdwn", text: "\(icon) Jev suggests *\($rec)* · \($pct) · flags: \($flags)"}, pt("Why: \($reason)")]},
         {type: "section", text: {type: "mrkdwn", text: "\($mention) new ad waiting for your decision"}},
-        # TODO MUS-9894: append ?ad=<id> once the deep link is on prod
         {type: "actions", elements: [{type: "button", action_id: "review_ad", url: $url, text: pt("Review in Ads Manager")}]}]}' >"$out"
 }
