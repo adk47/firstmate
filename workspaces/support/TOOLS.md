@@ -13,7 +13,7 @@ This agent has the most restricted tool set in HYDRA. Only these 25 tools are pe
 
 `profile_lookup`, `credits_search`, `profile_status`, `profile_analytics_status`, `profile_credits_status`, `dedupe_check`, `credit_verification_check`, and `order_lookup` use `MusoAdminClient` to call `api.muso.ai/api/v3/admin/*` with a JWT bearer token obtained via admin login (`MUSO_ADMIN_EMAIL` + `MUSO_ADMIN_PASSWORD` env vars). The client is GET-only and regex-allowlisted to exactly eight read paths (`profile/search`, `profile/<id>`, `profile/<id>/analytics-status`, `profile/<id>/credits`, the `credit-requests` LIST endpoint -- never `credit-requests/<id>`, the item path the gated approve PUT lives under -- the single-order read `orders/<id>`, never the `orders/<id>/...` write sub-paths or the bare `orders` list, and the claiming reads `claiming` LIST + `claiming/<id>` -- never the `claiming/<id>/verify|reject|revert` write sub-paths). The JWT is never returned to the agent and never logged.
 
-`remove_credits` (tool 7) also depends on the same Muso admin auth -- it inherits via the JWT cache maintained by `muso-admin-api.sh`. Rotating `MUSO_ADMIN_EMAIL` / `MUSO_ADMIN_PASSWORD` breaks the bash wrapper too; flush `~/.cache/muso-admin-token.json` (or whatever `$TOKEN_CACHE` points to) after a rotation.
+`remove_credits` (tool 7, preview only) also depends on the same Muso admin auth -- it inherits via the JWT cache maintained by `muso-admin-api.sh`. Rotating `MUSO_ADMIN_EMAIL` / `MUSO_ADMIN_PASSWORD` breaks the bash wrapper too; flush `~/.cache/muso-admin-token.json` (or whatever `$TOKEN_CACHE` points to) after a rotation.
 
 `create_ticket` uses a separate ClickUp API key. `subscription_status` reads the workspace subscription via the `muso` CLI (`teams list --email`), anchored to the verified Intercom contact email (not MusoAdminClient: the GET allowlist does not cover the team endpoints, and an account email does not resolve through the profile-search index).
 
@@ -79,18 +79,19 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 
 ### 7. remove_credits
 
+- **Status: PREVIEW ONLY.** Since core-backend#10310 (2026-10-12) the server refuses every agent-token credit removal (`403 credit_removal_agent_refused`). Use `apply: false` only; never call with `apply: true`. A credit removal is never an agent write: the owner removes it in the app, or Jan or Nick does it in their own session. This file is repo documentation only: `scripts/deploy.sh:1216` excludes `workspaces/*/TOOLS.md`, so this edit changes no live agent behaviour.
 - **Wraps**: `DELETE /api/v3/admin/track/{trackId}/profile/{profileId}/credits` via the bash wrapper at `workspaces/support/skills/customer-credit-removal/scripts/remove-credits.sh`. The TS tool is a typed dispatcher only – all ownership-check, title-resolution, cap-enforcement, and audit-log logic lives in the wrapper script (single source of truth).
-- **Returns**: Structured JSON. On success: `{ ok: true, mode: "apply" | "dry-run", profile_id, owner_email, ownership_check: "passed", results: [...], summary: {requested, removed, already_removed, not_found, ambiguous, errors} }`. On refusal: `{ ok: false, error: <key>, detail }`. See `skills/customer-credit-removal/SKILL.md` for the per-error customer-facing reply mapping.
+- **Returns**: Structured JSON. On a preview: `{ ok: true, mode: "dry-run", profile_id, owner_email, ownership_check: "passed", results: [...], summary: {requested, removed, already_removed, not_found, ambiguous, errors} }`. On refusal: `{ ok: false, error: <key>, detail }`. See `skills/customer-credit-removal/SKILL.md` for the per-error customer-facing reply mapping.
 - **Auth**: The wrapper uses `muso-admin-api.sh`'s JWT cache (same Muso admin JWT as the other admin-API tools). The agent never sees the token.
 - **Rate limit**: 10 per session (60-minute window). Plus hard caps inside the wrapper: 50 tracks per call, 100 per customer per day.
 - **Required fields**: `profileId` (UUID), `requesterEmail` (Intercom-verified), `tracks[]` (max 50 "Artist - Title" strings).
 - **Conditionally-required**: `intercomConvId` – required whenever `apply: true`. The tool fast-refuses `intercom_conv_id_required` without ever exec'ing the wrapper if missing. Strongly recommended on dry-run too (the dry-run audit row is keyed by it, and the wrapper does the Intercom-email cross-check whenever a conv-id is present).
-- **Optional fields**: `apply` (default false = dry-run).
+- **Optional fields**: `apply` (default false = dry-run). Leave it false; `apply: true` is refused for agent tokens.
 - **Safety model**: ownership re-verified inside the wrapper, independent of whatever the LLM passes. Three mechanical refusals beyond ownership:
   - `intercom_email_mismatch` – the wrapper fetches `source.author.email` from Intercom for the conversation and refuses if it doesn't match `requesterEmail`. Closes the message-text-injection vector.
-  - `dry_run_required` – every track applied must have a matching `would_remove` audit row from the same `(profile_id, requester_email)` within the last 15 minutes. Forces the dry-run-then-confirm-then-apply pattern mechanically; no SKILL prose required.
+  - `dry_run_required` – every track applied must have a matching `would_remove` audit row from the same `(profile_id, requester_email)` within the last 15 minutes. Legacy apply gate; an apply is refused for an agent token whatever the preview shows.
   - `intercom_conv_id_required` – apply-without-conv-id refuses at the TS-tool layer before exec.
-- **Idempotency**: re-running the same input is safe – already-removed credits return 404 from the API and are tagged `already_removed` in the response.
+- **Idempotency**: a preview changes nothing, so re-running it is always safe.
 
 ### 8. dedupe_check
 

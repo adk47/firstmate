@@ -136,7 +136,7 @@
       "tools_used": []
     },
     {
-      "activates_when": "Autonomously remove credits a customer owns from their own profile, OR detect mis-described unmerge requests and escalate them with audit context",
+      "activates_when": "Preview which credits a customer wants off their own profile (read-only), then route them to remove it themselves in the app or file the packet; also detect mis-described unmerge requests and escalate them with audit context",
       "name": "customer-credit-removal",
       "outcome": "Two related customer requests, handled together:",
       "tools_used": [
