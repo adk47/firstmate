@@ -316,7 +316,8 @@ family_for_basename() {
       printf '%s\n' afk
       ;;
     fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|\
-    fm-fleet-snapshot-view.test.sh|fm-home-summary-refresh.test.sh)
+    fm-fleet-snapshot-view.test.sh|fm-home-summary-refresh.test.sh|\
+    fm-fleet-snapshot-impl.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
     fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
@@ -588,6 +589,7 @@ tests/fm-cursor-primary.test.sh 54947
 tests/fm-daemon.test.sh 26870
 tests/fm-documentation-audiences.test.sh 732
 tests/fm-extension-binding.test.sh 7398
+tests/fm-fleet-snapshot-impl.test.sh 121000
 tests/fm-fleet-snapshot-view.test.sh 8547
 tests/fm-fleet-sync.test.sh 37749
 tests/fm-gate-refuse.test.sh 4977

@@ -6,8 +6,9 @@
 # The command does not acquire the session lock, drain wakes, arm watchers,
 # mutate backlog state, or write reports. Its default ledger collector may
 # atomically refresh parent-side cached copies of remote home summaries under
-# state/secondmate-summary-cache; those observational cache writes are its only
-# fleet-state mutation. Its per-task open-decision fold reads the shared
+# state/secondmate-summary-cache, and its python per-task pass keeps
+# observational caches under state/snapshot-cache (bin/fm-fleet-snapshot.py owns
+# their reuse rules); those cache writes are its only fleet-state mutation. Its per-task open-decision fold reads the shared
 # state/.<id>.open-decisions-cursor but never advances it
 # (FM_OPEN_DECISIONS_READONLY), because that cursor is also a presentation
 # offset the wake drain owns, and keeps that fold's scratch chunk in its own
@@ -261,6 +262,10 @@ observations run concurrently, up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY (default
 and the whole local observation pass is bounded by FM_SNAPSHOT_PREFETCH_TIMEOUT
 (default 45 seconds): a task the deadline cannot reach is reported unknown rather
 than extending the pass.
+FM_SNAPSHOT_IMPL=python (default) runs the per-task pass in one process
+(bin/fm-fleet-snapshot.py) with observational caches reused for
+FM_SNAPSHOT_RUNS_CACHE_SECS (default 600); FM_SNAPSHOT_IMPL=bash runs the
+original pass. Both print the same task rows.
 Remote secondmate endpoint liveness is not probed by this command.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
@@ -2038,9 +2043,45 @@ scout_report_lines() {
     | jq -s 'sort_by(.id)'
 }
 
+# The per-task pass (manifest capture, current state, endpoint, open decisions,
+# and task rows). FM_SNAPSHOT_IMPL=python (the default) runs it in one process
+# through bin/fm-fleet-snapshot.py, which owns its own equivalence contract;
+# FM_SNAPSHOT_IMPL=bash keeps the original pass below, and a host without
+# python3 falls back to it.
+python_task_pass() {
+  snapshot_task_cleanup
+  SNAPSHOT_TASK_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-tasks.XXXXXX") || return 1
+  env FM_ROOT="$FM_ROOT" FM_HOME="$FM_HOME" STATE="$STATE" DATA="$DATA" CONFIG="$CONFIG" \
+    PROJECTS="$PROJECTS" SNAPSHOT_NOW="$SNAPSHOT_NOW" \
+    FM_SNAPSHOT_CREW_STATE_TIMEOUT="$FM_SNAPSHOT_CREW_STATE_TIMEOUT" \
+    FM_SNAPSHOT_LOCAL_READ_CONCURRENCY="$FM_SNAPSHOT_LOCAL_READ_CONCURRENCY" \
+    FM_SNAPSHOT_PREFETCH_TIMEOUT="$FM_SNAPSHOT_PREFETCH_TIMEOUT" \
+    python3 "$SCRIPT_DIR/fm-fleet-snapshot.py" tasks --task-dir "$SNAPSHOT_TASK_DIR"
+}
+
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
-prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
-TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+FM_SNAPSHOT_IMPL=${FM_SNAPSHOT_IMPL:-python}
+case "$FM_SNAPSHOT_IMPL" in
+  python) command -v python3 >/dev/null 2>&1 || FM_SNAPSHOT_IMPL=bash ;;
+  bash) ;;
+  *) echo "fm-fleet-snapshot: FM_SNAPSHOT_IMPL must be python or bash" >&2; exit 2 ;;
+esac
+if [ "$FM_SNAPSHOT_IMPL" = python ]; then
+  # Not a command substitution: the task capture directory must outlive the
+  # pass for the secondmate composition below.
+  TASKS_JSON_RAW=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-tasks-json.XXXXXX") \
+    || { echo "fm-fleet-snapshot: temporary task file creation failed" >&2; exit 1; }
+  if ! python_task_pass > "$TASKS_JSON_RAW"; then
+    rm -f -- "$TASKS_JSON_RAW"
+    echo "fm-fleet-snapshot: task observation failed" >&2
+    exit 1
+  fi
+  TASKS_JSON=$(<"$TASKS_JSON_RAW")
+  rm -f -- "$TASKS_JSON_RAW"
+else
+  prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
+  TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+fi
 
 JSON_TRANSPORT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX") \
   || { echo "fm-fleet-snapshot: temporary transport directory creation failed" >&2; exit 1; }
