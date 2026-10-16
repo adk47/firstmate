@@ -49,6 +49,7 @@ jobs:
 
       - name: Check deploy notification path
         timeout-minutes: 5
+        continue-on-error: true
         run: |
           # Deploy notifications go through `muso slack send --bot devops`
           # (scripts/lib/slack-notify.sh) — the same path the watchdogs use,

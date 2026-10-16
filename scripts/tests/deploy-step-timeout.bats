@@ -207,3 +207,15 @@ assert "timeout 240 bash scripts/lib/deploy-notify.sh critical" in p, "page noti
 '
   [ "$status" -eq 0 ]
 }
+
+# Bot NO-GO @2142c7293: the optional notification-path probe got a step timeout;
+# without continue-on-error a stall there fails the job and skips the stale-check
+# and deploy steps, so no rollback or page runs.
+@test "notification-path probe: non-blocking (continue-on-error) with an integer timeout" {
+  run wf_py '
+s = by["Check deploy notification path"]
+assert s.get("continue-on-error") is True, "continue-on-error missing"
+assert isinstance(s["timeout-minutes"], int)
+'
+  [ "$status" -eq 0 ]
+}
