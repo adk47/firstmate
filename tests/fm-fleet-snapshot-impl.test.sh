@@ -17,7 +17,9 @@
 #   2. The runs ledger is read once per repository and reused inside
 #      FM_SNAPSHOT_RUNS_CACHE_SECS, and refreshed when the window is 0, while
 #      every ship branch still gets its own fresh `axi status` read.
-#   3. An unknown FM_SNAPSHOT_IMPL is refused.
+#   3. A reused open-decision fold stays identical to the bash pass's fresh
+#      fold, and an appended decision invalidates it.
+#   4. An unknown FM_SNAPSHOT_IMPL is refused.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -205,11 +207,14 @@ printf 'failed fm/elsewhere %s 2026-10-14 09:00\n' "$RUN_SHA" >> "$FAKE/runs"
 # only the delegated owner's fresh `axi status` read finds this branch's run.
 printf 'cancelled fm/old-run %s 2026-09-01 08:00\n' "$(git -C "$WT_OLD" rev-parse --short HEAD)" >> "$FAKE/runs"
 
+# Generous read bounds: a parity reference that times out on a loaded host
+# would compare a bound, not a classification.
 snapshot() {  # <impl> <mode> [env...]
   local impl=$1 mode=$2
   shift 2
   env PATH="$FAKEBIN:$PATH" FM_FAKE="$FAKE" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
     FM_SNAPSHOT_NOW=2026-10-16T05:00:00Z FM_SNAPSHOT_NOW_EPOCH=1792126800 \
+    FM_SNAPSHOT_CREW_STATE_TIMEOUT=60 FM_SNAPSHOT_PREFETCH_TIMEOUT=900 \
     FM_SNAPSHOT_IMPL="$impl" FM_SNAPSHOT_SECONDMATES=0 FM_CREW_STATE_RUNS_LIMIT=2 "$@" "$SNAP" "$mode"
 }
 
@@ -262,6 +267,29 @@ test_runs_ledger_cached_per_repo() {
   pass "fleet snapshot: one runs-ledger read per repo is reused inside FM_SNAPSHOT_RUNS_CACHE_SECS"
 }
 
+keyed_decisions() {  # <impl>
+  snapshot "$1" --json 2>/dev/null \
+    | jq -S '[.tasks[] | select(.id=="keyed") | .hints.open_decisions[]]'
+}
+
+test_fold_reuse_matches_and_invalidates() {
+  local warm cached fresh
+  rm -rf "$STATE/snapshot-cache"
+  warm=$(keyed_decisions python)
+  cached=$(keyed_decisions python)
+  fresh=$(keyed_decisions bash)
+  [ -n "$fresh" ] && [ "$fresh" != "[]" ] || fail "the keyed fixture should fold open decisions"
+  [ -f "$STATE/snapshot-cache/fold/keyed" ] || fail "a finished fold should be kept for reuse"
+  [ "$warm" = "$fresh" ] && [ "$cached" = "$fresh" ] \
+    || fail "a reused fold diverged from the bash pass:"$'\n'"cached=$cached"$'\n'"bash=$fresh"
+  printf 'needs-decision [key=late-call]: appended after the cached fold\n' >> "$STATE/keyed.status"
+  cached=$(keyed_decisions python)
+  fresh=$(keyed_decisions bash)
+  assert_contains "$cached" "late-call" "an appended decision must invalidate the cached fold"
+  [ "$cached" = "$fresh" ] || fail "the refolded result diverged from the bash pass"
+  pass "fleet snapshot: a reused open-decision fold matches a fresh one and an appended decision invalidates it"
+}
+
 test_unknown_impl_refused() {
   local rc
   snapshot nope --json >/dev/null 2>&1; rc=$?
@@ -271,4 +299,5 @@ test_unknown_impl_refused() {
 
 test_parity_json_and_home_summary
 test_runs_ledger_cached_per_repo
+test_fold_reuse_matches_and_invalidates
 test_unknown_impl_refused

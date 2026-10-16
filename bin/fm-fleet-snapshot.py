@@ -42,7 +42,14 @@ How it stays faithful to the owners it does not restate:
     in a few batched bash processes rather than being restated here. Like the
     bash pass, a started fold is never cut short by the observation deadline;
     only a generous safety bound stops a hung batch, and a fold that did not
-    finish leaves no result rather than a partial one.
+    finish leaves no result rather than a partial one. Only a fold that
+    finished is kept in state/snapshot-cache/fold/<id>, and it is reused only
+    while every input it read is identical - the status log's identity, size,
+    and mtime, the captured end, the fold cursor's bytes, the FM_CLASSIFY_*
+    vocabulary, and the fold's own code - and FM_SNAPSHOT_RUNS_CACHE_SECS has
+    not elapsed. A read-only fold of a log whose cursor the wake drain has not
+    advanced re-reads the whole log every time, which was a third of a
+    snapshot on a busy home; an unchanged log now costs one stat.
   - Status-line parsing (verb, note, paused) and the busy-record read are
     direct ports of bin/fm-classify-lib.sh and bin/fm-busy-lib.sh; the parity
     test drives both passes over the same fixtures so the ports cannot drift
@@ -51,6 +58,7 @@ How it stays faithful to the owners it does not restate:
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import os
 import re
@@ -398,6 +406,32 @@ def current_branch(worktree):
     return None
 
 
+def file_sig(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return "absent"
+    return "%d:%d:%d:%d" % (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def file_bytes(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return b"<absent>"
+
+
+def digest(*parts):
+    h = hashlib.sha256()
+    for part in parts:
+        if isinstance(part, str):
+            part = part.encode("utf-8", "surrogateescape")
+        h.update(len(part).to_bytes(8, "big"))
+        h.update(part)
+    return h.hexdigest()
+
+
 def run_bounded(cmd, timeout, cwd=None, env=None, stdin_text=None):
     """Run cmd in its own process group; (rc, stdout), rc 124 on timeout."""
     try:
@@ -600,8 +634,55 @@ class Snapshot:
             alive = lines[1] if len(lines) > 1 and lines[1] else "unknown"
         return exists, alive
 
-    def fold_open_decisions(self, jobs):
+    def fold_cache_dir(self, task_ids):
+        """state/snapshot-cache/fold, with entries of departed tasks retired."""
+        directory = os.path.join(self.state, "snapshot-cache", "fold")
+        if self.runs_ttl == 0 or os.path.islink(self.state) or not os.path.isdir(self.state):
+            return None
+        try:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+        except OSError:
+            return None
+        if any(os.path.islink(p) or not os.path.isdir(p)
+               for p in (os.path.dirname(directory), directory)):
+            return None
+        for name in os.listdir(directory):
+            if name not in task_ids:
+                try:
+                    os.unlink(os.path.join(directory, name))
+                except OSError:
+                    pass
+        return directory
+
+    def fold_open_decisions(self, jobs, task_ids=()):
         """bin/fm-classify-lib.sh's read-only fold, batched over a few bash processes."""
+        if not jobs:
+            return
+        cache = self.fold_cache_dir(set(task_ids))
+        code = digest(file_bytes(os.path.join(SCRIPT_DIR, "fm-classify-lib.sh")), file_bytes(__file__))
+        vocab = "\n".join("%s=%s" % kv for kv in sorted(os.environ.items()) if kv[0].startswith("FM_CLASSIFY_"))
+        pending, keys = [], {}
+        for log, end, out in jobs:
+            tid = os.path.basename(log)[:-len(".status")]
+            cursor = os.path.join(os.path.dirname(log), ".%s.open-decisions-cursor" % tid)
+            key = digest("fold-v1", code, log, end, file_sig(log), file_bytes(cursor), vocab)
+            hit = None
+            if cache:
+                path = os.path.join(cache, tid)
+                try:
+                    if not os.path.islink(path) and time.time() - os.path.getmtime(path) < self.runs_ttl:
+                        stored, sep, value = read_text(path).partition("\n")
+                        if sep and stored == key:
+                            hit = value
+                except OSError:
+                    hit = None
+            if hit is not None:
+                with open(out, "w", encoding="utf-8", errors="replace") as fh:
+                    fh.write(hit)
+            else:
+                pending.append((log, end, out))
+                keys[out] = (tid, key)
+        jobs = pending
         if not jobs:
             return
         script = ('. "$1" || exit 1; while IFS=$\'\\t\' read -r log end out; do '
@@ -621,7 +702,17 @@ class Snapshot:
             list(pool.map(run, groups))
         for _, _, out in jobs:
             if not os.path.exists(out):
+                # Unfinished: report no decisions this time and keep nothing.
                 open(out, "w").close()
+            elif cache:
+                tid, key = keys[out]
+                try:
+                    fd, tmp = tempfile.mkstemp(prefix="." + tid + ".", dir=cache)
+                    with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
+                        fh.write(key + "\n" + read_text(out))
+                    os.replace(tmp, os.path.join(cache, tid))
+                except OSError:
+                    pass
 
     # -- per-task current state ----------------------------------------------------
 
@@ -772,7 +863,7 @@ class Snapshot:
             if t.get("generation_current_before") and os.path.isfile(t["status_capture"]):
                 folds.append((os.path.join(self.state, t["id"] + ".status"),
                               str(os.path.getsize(t["status_capture"])), t["opendecisions"]))
-        self.fold_open_decisions(folds)
+        self.fold_open_decisions(folds, [t["id"] for t in tasks])
         for t in tasks:
             self.finish(t)
         rows = [self.task_row(t) for t in tasks]
