@@ -738,6 +738,15 @@ jobs:
           bash scripts/check-agent-bridge-doctrine.sh
           echo "::endgroup::"
 
+      - name: Gateway profile-parity check — every openclaw-<profile>.json is in every enumerated deploy/ops list
+        # MUS-2654 splits agents onto their own gateways. A profile missing from any one list
+        # (deploy.sh parser/loops, aux units, watchdog, config matrix, peer labels, deploy.yml)
+        # is silent. Enumeration parity only: deploy.sh's per-profile branches are not checked.
+        run: |
+          echo "::group::Gateway profile-parity check"
+          bash scripts/check-gateway-profile-parity.sh
+          echo "::endgroup::"
+
       - name: Intercom reply-identity doctrine check — agents post as Caroline, never as a human
         # 2026-08-31: customers saw escalation follow-ups signed "Nicholas Sollazzo"
         # mid-thread. Caroline's own replies were correct (the plugin uses
