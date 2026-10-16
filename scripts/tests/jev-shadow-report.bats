@@ -678,3 +678,23 @@ _pair_dir() {
   [[ "$output" == *"q_not_compared=1"* ]]
   [[ "$output" =~ 0\.8-0\.9[[:space:]]+1[[:space:]]+100\.0% ]]
 }
+
+@test "pair-versions: a question only the v2 row answers is counted in q_not_compared" {
+  _pair_dir
+  { printf '%s\n' '{"ts":"2026-10-01T10:00:00.000Z","surface":"pairs","item_id":"t1","questions_version":"v1","answers":{"intent":{"type":"noul","noul":0.9}},"latency_ms":1,"rc":0}'
+    printf '%s\n' '{"ts":"2026-10-01T10:00:01.000Z","surface":"pairs","item_id":"t1","questions_version":"v2","answers":{"intent":{"type":"noul","noul":0.9},"new_question":{"type":"noul","noul":0.9}},"latency_ms":1,"rc":0}'; } >> "$PAIR_DIR/pairs.jsonl"
+  run "$REPORT" --shadow-dir "$PAIR_DIR" --pair-versions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"paired=1"* ]]
+  [[ "$output" == *"q_not_compared=1"* ]]
+}
+
+@test "pair-versions: a score answer with a nested legend label is counted, not fatal" {
+  _pair_dir
+  { printf '%s\n' '{"ts":"2026-10-01T10:00:00.000Z","surface":"pairs","item_id":"t1","questions_version":"v1","answers":{"intent":{"type":"score","score":0,"probabilities":{"0":0.9,"1":0.1},"legend":{"0":["nested"]}}},"latency_ms":1,"rc":0}'
+    printf '%s\n' '{"ts":"2026-10-01T10:00:01.000Z","surface":"pairs","item_id":"t1","questions_version":"v2","answers":{"intent":{"type":"noul","noul":0.9}},"latency_ms":1,"rc":0}'; } >> "$PAIR_DIR/pairs.jsonl"
+  run "$REPORT" --shadow-dir "$PAIR_DIR" --pair-versions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"paired=1"* ]]
+  [[ "$output" == *"q_not_compared=1"* ]]
+}

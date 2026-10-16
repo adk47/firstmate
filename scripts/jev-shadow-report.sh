@@ -144,7 +144,7 @@ def _prob_ok(p):
 
 def top_answer(ans):
     # Returns (answer_str, probability) or (None, None) if the shape is
-    # unrecognized (never raises -- a malformed answer just contributes
+    # unrecognized (an unhashable choice can still raise; pair mode catches it at the call site -- a malformed answer just contributes
     # nothing to the bucket table).
     if not isinstance(ans, dict):
         return None, None
@@ -194,6 +194,14 @@ def top_answer(ans):
         label = legend.get(key, key) if isinstance(legend, dict) else key
         return label, prob
     return None, None
+
+
+def _hashable(x):
+    try:
+        hash(x)
+        return True
+    except TypeError:
+        return False
 
 
 def pctile(sorted_vals, p):
@@ -437,7 +445,7 @@ def report_pairs():
                         # e.g. an unhashable nested choice: count it, never abort
                         q_not_compared += 1
                         continue
-                    if p1 is None or o2 is None:
+                    if p1 is None or o2 is None or not (_hashable(o1) and _hashable(o2)):
                         q_not_compared += 1
                         continue
                     bi = next((i for i, (lo, hi) in enumerate(BUCKETS) if lo <= p1 < hi), None)
@@ -449,6 +457,8 @@ def report_pairs():
                     cell[1] += 1 if o1 != o2 else 0
                     tk = trans.setdefault(qid, {})
                     tk[(o1, o2)] = tk.get((o1, o2), 0) + 1
+                # a question only the v2 row answers (version migration) is not comparable
+                q_not_compared += sum(1 for q in a2 if q not in r1["answers"])
         for qid in sorted(stats):
             print(f"  question: {qid}")
             print("    bucket(v1)  n_paired   disagree%")
