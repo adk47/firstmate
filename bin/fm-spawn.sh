@@ -35,10 +35,15 @@
 #   positional, and batch pairs are all refused alongside it; only harness,
 #   model, and effort may change, which is what makes a harness switch one
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
-#   agent-free on a backend with a recovery-grade agent-state classifier (tmux
-#   or herdr), refuses unless the endpoint's shell is sitting in the recorded
-#   worktree, and clears the previous harness's per-task wiring before arming
-#   the new incarnation.
+#   agent-free on a backend with a proven in-place relaunch (tmux or herdr),
+#   refuses unless the endpoint's shell is sitting in the recorded worktree,
+#   and clears the previous harness's per-task wiring before arming the new
+#   incarnation. Orca is the one exception to "same endpoint": when Orca
+#   reports the recorded terminal gone (classifier verdict `missing`, e.g.
+#   after an Orca or host restart), the replacement launches in a NEW terminal
+#   created in the task's recorded Orca worktree, whose path must match the
+#   recorded worktree, and the record is republished with that terminal; a
+#   live or shell-only Orca terminal still refuses.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -787,6 +792,8 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+ORCA_RELAUNCH_NEWTERM=0
+ORCA_RELAUNCH_TERMINAL_CLEANUP=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -883,6 +890,12 @@ spawn_abort_cleanup() {
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
+  # A relaunch's new Orca terminal is closed again only while the record still
+  # names the old one; the worktree is the task's own and is never touched.
+  if [ "$ORCA_RELAUNCH_TERMINAL_CLEANUP" = 1 ]; then
+    ORCA_RELAUNCH_TERMINAL_CLEANUP=0
+    [ -z "${ORCA_TERMINAL:-}" ] || fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -1204,11 +1217,31 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # A relaunch must PROVE the previous agent is gone before it launches another
   # one into the same endpoint, and only backends whose in-place relaunch is
   # proven may do it (bin/fm-control-lib.sh owns that capability table).
-  fm_control_backend_relaunch_verified "$BACKEND" || {
-    echo "error: backend '$BACKEND' has no proven in-place relaunch (a recovery-grade agent-state classifier plus a verified replacement launch into the same endpoint); refusing rather than risking two agents in one endpoint" >&2
-    exit 1
-  }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  if [ "$BACKEND" = orca ]; then
+    # Orca's in-place relaunch is unproven, but a terminal Orca itself reports
+    # gone (its classifier's `missing`: the terminal handle is stale, as after
+    # an Orca or host restart) provably hosts no agent. Only that case
+    # relaunches, into a NEW terminal in the task's own recorded Orca
+    # worktree; a live or shell-only terminal still refuses.
+    RELAUNCH_STATE=$(fm_backend_agent_state orca "$RELAUNCH_TARGET")
+    [ "$RELAUNCH_STATE" = missing ] || {
+      echo "error: task $ID's Orca terminal $RELAUNCH_TARGET reads '$RELAUNCH_STATE'; Orca relaunch only replaces a terminal Orca no longer has (missing), into a new terminal" >&2
+      exit 1
+    }
+    ORCA_WORKTREE_ID=$(fm_meta_get "$RELAUNCH_META" orca_worktree_id)
+    [ -n "$ORCA_WORKTREE_ID" ] || {
+      echo "error: task $ID has no recorded orca_worktree_id; refusing to relaunch" >&2
+      exit 1
+    }
+    ORCA_RELAUNCH_NEWTERM=1
+    RELAUNCH_STATE=dead
+  else
+    fm_control_backend_relaunch_verified "$BACKEND" || {
+      echo "error: backend '$BACKEND' has no proven in-place relaunch (a recovery-grade agent-state classifier plus a verified replacement launch into the same endpoint); refusing rather than risking two agents in one endpoint" >&2
+      exit 1
+    }
+    RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  fi
   [ "$RELAUNCH_STATE" = dead ] || {
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
@@ -2360,6 +2393,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a
   # fresh secondmate spawn uses; every other kind takes the recorded worktree.
   [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
+  if [ "$ORCA_RELAUNCH_NEWTERM" = 1 ]; then
+    orca_wt_path=$(fm_backend_orca_worktree_path "$ORCA_WORKTREE_ID") || exit 1
+    [ "$(real_path_or_raw "$orca_wt_path")" = "$(real_path_or_raw "$WT")" ] || {
+      echo "error: Orca worktree $ORCA_WORKTREE_ID resolves to '$orca_wt_path', not task $ID's recorded worktree '$WT'; refusing to relaunch" >&2
+      exit 1
+    }
+    ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+    ORCA_RELAUNCH_TERMINAL_CLEANUP=1
+    T=$ORCA_TERMINAL
+  fi
   WT_TARGET=$T
   SES=${T%%:*}
 else
@@ -2788,7 +2831,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # than wherever the pane happened to drift.
   relaunch_wt_real=$(real_path_or_raw "$WT")
   relaunch_seen=
+  # A new Orca terminal starts in its Orca worktree, whose path was verified
+  # against the recorded worktree above; Orca exposes no cwd read.
+  [ "$ORCA_RELAUNCH_NEWTERM" != 1 ] || relaunch_seen=$WT
   for _ in $(seq 1 10); do
+    [ "$ORCA_RELAUNCH_NEWTERM" != 1 ] || break
     relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
     sleep 0.5
@@ -3373,6 +3420,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
+  # The published record now names the new Orca terminal, so it stays.
+  ORCA_RELAUNCH_TERMINAL_CLEANUP=0
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=

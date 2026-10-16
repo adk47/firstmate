@@ -14,6 +14,8 @@
 #      is dead.
 #   4. The watcher runs the sweep on its own cadence and records reaps in its
 #      triage log without waking firstmate.
+#   5. A holder owned by another user (kill -0 answers EPERM) is alive, never
+#      reaped as dead; pid 1 is that process for any non-root test run.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -97,6 +99,21 @@ test_inbox_swept_watch_lock_untouched() {
   pass "lock-reap: inbox sequence locks are swept; the watcher lock is never touched"
 }
 
+test_other_users_live_holder_is_kept() {
+  local state out
+  if [ "$(id -u)" = 0 ]; then
+    pass "lock-reap: skip other-user holder case (running as root, kill -0 1 cannot answer EPERM)"
+    return 0
+  fi
+  kill -0 1 2>/dev/null && fail "fixture assumption broken: kill -0 1 succeeded for a non-root user"
+  state="$TMP_ROOT/eperm/state"; mkdir -p "$state"
+  make_lock "$state/.meta-foreign.lock" 1
+  out=$(run_reap "$state" --min-age 0)
+  [ -L "$state/.meta-foreign.lock" ] \
+    || fail "a lock held by another user's live process was reaped as dead: $out"
+  pass "lock-reap: a holder owned by another user (EPERM) is alive and its lock is kept"
+}
+
 test_watcher_runs_sweep_quietly() {
   local state fakebin out dead pid i
   state="$TMP_ROOT/watcher/state"; mkdir -p "$state"
@@ -125,4 +142,5 @@ test_watcher_runs_sweep_quietly() {
 test_dead_holder_reaped_after_min_age
 test_reused_pid_reaped_live_holder_kept
 test_inbox_swept_watch_lock_untouched
+test_other_users_live_holder_is_kept
 test_watcher_runs_sweep_quietly
