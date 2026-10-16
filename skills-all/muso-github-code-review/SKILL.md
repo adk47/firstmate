@@ -321,7 +321,8 @@ bare `gh`, which may be a different account), then pipe the failing `gh` error t
 output verbatim as the reason:
 
 ```bash
-read -r rem rst < <(bash /opt/hydra/scripts/qa-gh.sh --repo <owner/repo> api rate_limit --jq '.resources.core | "\(.remaining) \(.reset)"')
+OWNER_REPO="Muso-AI/hydra"   # the repo the failed call targeted
+read -r rem rst < <(bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER_REPO" api rate_limit --jq '.resources.core | "\(.remaining) \(.reset)"')
 QA_GH_RATELIMIT_REMAINING=$rem QA_GH_RATELIMIT_RESET=$rst \
   bash /opt/hydra/scripts/lib/qa-gh-error-class.sh "<failing gh error text>"
 ```

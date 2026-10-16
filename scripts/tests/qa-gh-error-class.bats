@@ -93,6 +93,6 @@ OTHER='gh: Resource not accessible by integration (HTTP 403)'
 # ambient host `gh`, or remaining/reset describe a different account's quota.
 @test "SKILL.md reads rate_limit through qa-gh.sh, never bare gh" {
   skill="$HYDRA_REPO/skills-all/muso-github-code-review/SKILL.md"
-  grep -q 'qa-gh.sh --repo <owner/repo> api rate_limit' "$skill"
+  grep -qF 'qa-gh.sh --repo "$OWNER_REPO" api rate_limit' "$skill"
   if grep -qE '(^|[^.a-z-])gh api rate_limit' "$skill"; then false; fi
 }
