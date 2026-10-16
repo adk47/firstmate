@@ -1039,8 +1039,9 @@ jobs:
           # Attribute what is left (MUS-1390). A deletion the PR's own diff
           # causes blocks (the author can fix it); unrelated node-8 state only
           # warns, because no PR author can clean it and a check that is red on
-          # every PR carries no signal. deploy.sh Step 4a (hydra#1117) stays the
-          # authoritative blocker for the real deploy. Same lib as the tests.
+          # every PR carries no signal. deploy.sh Step 4a (hydra#1117) only governs an
+          # explicit HYDRA_FULL_SYNC=1 deploy; the delta-mode deploy a merge
+          # triggers never reaches it. Same lib as the tests.
           if [ -n "$deletions" ]; then
             # shellcheck disable=SC1091
             . scripts/lib/attribute-deletions.sh
@@ -1060,7 +1061,7 @@ jobs:
             echo "Deploy pre-flight: no deletion is caused by this PR (warnings above are unrelated node-8 state)"
             exit 0
           fi
-          echo "✓ Zero suspicious deletions — safe to deploy"
+          echo "✓ No deletion found against the live /opt/hydra tree under this PR's excludes"
 
       - name: Skill drift 3-way gate (server-ahead / conflict vs node-8)
         # Shift-left of the deploy's baseline-aware skill-drift check
@@ -1068,10 +1069,11 @@ jobs:
         # SERVER-AHEAD edits (capture them) and CONFLICTs (reconcile) BEFORE
         # merge, while letting the PR's own REPO-AHEAD edits through (the
         # #366 false-block fix). Runs on the self-hosted runner so /opt/hydra/
-        # is local. The merge-deploy Step 4a stays the authoritative backstop;
-        # this gate is intentionally stricter than the deploy (it does not
-        # honor the hot-patch ack window) and warns-not-blocks when no node-8
-        # baseline is available.
+        # is local. The merge-triggered (delta-mode) deploy does not run Step 4a;
+        # it only governs an explicit HYDRA_FULL_SYNC=1 deploy. This gate is
+        # intentionally stricter than the deploy (it does not honor the
+        # hot-patch ack window) and warns-not-blocks when no node-8 baseline
+        # is available.
         run: |
           set -euo pipefail
           chmod +x scripts/pr-skill-drift-gate.sh
