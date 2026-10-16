@@ -8,7 +8,20 @@
 #
 # Usage:
 #   jev-shadow-report.sh [--surface <name>] [--window-hours <N>] \
-#     [--shadow-dir <dir>] [--outcomes <path>]
+#     [--shadow-dir <dir>] [--outcomes <path>] [--pair-versions] [--router-agreement]
+#
+# Without --outcomes the agreement column is omitted: row["actual"] is the
+# action Jev's own router took, so scoring against it is Jev vs itself and
+# only ever reads as a product signal by mistake. --router-agreement brings
+# that column back for debugging the logger; it is not accuracy.
+#
+# --pair-versions replaces the per-version tables with a v1-vs-v2 report: per
+# (surface, item_id) a v1 row is paired with the nearest unused v2 row within
+# 5.0 s (the turn definition measured in MUS-1541), and per question we print
+# the share of pairs whose top option differs, bucketed on v1's probability,
+# plus the most common v1_option -> v2_option transitions. Rows that cannot
+# pair (rc != 0, unversioned v1-legacy, partner missing or outside 5 s) are
+# counted in the footer, never dropped silently.
 #
 # --outcomes joins each shadow row to a ground-truth sidecar JSONL (one
 # record per conversation turn, keyed by surface/item_id/ts -- see
@@ -36,6 +49,8 @@ surface=""
 window_hours=""
 shadow_dir="$JEV_SHADOW_DIR"
 outcomes_path=""
+pair_versions=0
+router_agreement=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,6 +58,8 @@ while [ $# -gt 0 ]; do
     --window-hours) window_hours="$2"; shift 2 ;;
     --shadow-dir) shadow_dir="$2"; shift 2 ;;
     --outcomes) outcomes_path="$2"; shift 2 ;;
+    --pair-versions) pair_versions=1; shift ;;
+    --router-agreement) router_agreement=1; shift ;;
     *) echo "jev-shadow-report.sh: unknown argument: $1" >&2; exit 5 ;;
   esac
 done
@@ -60,7 +77,7 @@ if [ -n "$surface" ]; then
   esac
 fi
 
-python3 - "$shadow_dir" "$surface" "$window_hours" "$outcomes_path" <<'PY'
+python3 - "$shadow_dir" "$surface" "$window_hours" "$outcomes_path" "$pair_versions" "$router_agreement" <<'PY'
 import glob
 import json
 import math
@@ -69,6 +86,9 @@ import sys
 from datetime import datetime, timezone
 
 shadow_dir, surface, window_hours, outcomes_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+pair_versions = sys.argv[5] == "1"
+show_agreement = bool(outcomes_path) or sys.argv[6] == "1"
+PAIR_WINDOW_S = 5.0
 
 if surface:
     paths = [os.path.join(shadow_dir, f"{surface}.jsonl")]
@@ -102,6 +122,15 @@ BUCKET_LABELS = ["0.0-0.5", "0.5-0.6", "0.6-0.7", "0.7-0.8", "0.8-0.9", "0.9-1.0
 def parse_ts(ts):
     try:
         return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        return None
+
+
+def parse_ts_precise(ts):
+    # The live writer stamps new Date().toISOString() (milliseconds); parse_ts
+    # above is whole-second only, which is too coarse for a 5 s pairing window.
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
     except Exception:
         return None
 
@@ -228,6 +257,7 @@ def outcome_row_ok(row):
 
 undated = 0  # rows dropped from a windowed report for a missing/unparseable ts
 malformed = 0  # rows that parsed as JSON but failed row_ok, or blew up while being processed
+pair_rows = []  # (surface, item_id, version, precise ts or None, row) -- only filled under --pair-versions
 surfaces = {}  # (surface, questions_version) -> {"lines": [...], "questions": {qid: [ (bucket_idx, answer, actual) ]}}
 
 # outcomes_truth[(surface, item_id, ts)] -> truth dict. Absent key means "no
@@ -304,6 +334,8 @@ for path in paths:
                 ver = ver if isinstance(ver, str) and ver else "v1-legacy"
                 entry = surfaces.setdefault((surf, ver), {"lines": [], "questions": {}})
                 entry["lines"].append(row)
+                if pair_versions:
+                    pair_rows.append((surf, row.get("item_id"), ver, parse_ts_precise(ts) if ts else None, row))
 
                 truth_rec = None
                 if outcomes_path:
@@ -351,6 +383,84 @@ if not surfaces:
     print("no shadow lines")
     sys.exit(0)
 
+def report_pairs():
+    by_surf = {}
+    for surf, item, ver, t, row in pair_rows:
+        by_surf.setdefault(surf, []).append((item, ver, t, row))
+    for surf in sorted(by_surf):
+        print(f"== {surf} ==")
+        rc_nonzero = v1_legacy = other_version = 0
+        groups = {}
+        for item, ver, t, row in by_surf[surf]:
+            if row.get("rc") not in (0, None):
+                rc_nonzero += 1
+            elif ver == "v1-legacy":
+                v1_legacy += 1
+            elif ver not in ("v1", "v2"):
+                other_version += 1
+            elif not isinstance(row.get("answers"), dict) or t is None or not isinstance(item, str):
+                # a usable pair row needs answers, a parseable ts and an item_id
+                groups.setdefault(None, []).append((ver, t, row))
+            else:
+                groups.setdefault(item, []).append((ver, t, row))
+        candidates = sum(len(v) for v in groups.values())
+        paired = 0
+        q_not_compared = 0
+        stats = {}  # qid -> {bucket_idx: [n, disagree]}
+        trans = {}  # qid -> {(v1_opt, v2_opt): n}
+        for item, members in groups.items():
+            if item is None:
+                continue
+            v1s = sorted((m for m in members if m[0] == "v1"), key=lambda m: m[1])
+            v2s = [m for m in members if m[0] == "v2"]
+            used = set()
+            for _, t1, r1 in v1s:
+                best = None
+                for j, (_, t2, _r2) in enumerate(v2s):
+                    if j in used:
+                        continue
+                    gap = abs(t2 - t1)
+                    if gap <= PAIR_WINDOW_S and (best is None or gap < best[0]):
+                        best = (gap, j)
+                if best is None:
+                    continue
+                used.add(best[1])
+                paired += 1
+                a2 = v2s[best[1]][2]["answers"]
+                for qid, ans1 in r1["answers"].items():
+                    o1, p1 = top_answer(ans1)
+                    o2, _p2 = top_answer(a2.get(qid))
+                    if p1 is None or o2 is None:
+                        q_not_compared += 1
+                        continue
+                    bi = next((i for i, (lo, hi) in enumerate(BUCKETS) if lo <= p1 < hi), None)
+                    if bi is None:
+                        q_not_compared += 1
+                        continue
+                    cell = stats.setdefault(qid, {}).setdefault(bi, [0, 0])
+                    cell[0] += 1
+                    cell[1] += 1 if o1 != o2 else 0
+                    tk = trans.setdefault(qid, {})
+                    tk[(o1, o2)] = tk.get((o1, o2), 0) + 1
+        for qid in sorted(stats):
+            print(f"  question: {qid}")
+            print("    bucket(v1)  n_paired   disagree%")
+            for i, label in enumerate(BUCKET_LABELS):
+                if i in stats[qid]:
+                    n, d = stats[qid][i]
+                    print(f"    {label}   {n}   {round(100 * d / n, 1)}%")
+            print("    v1 -> v2 transitions:")
+            for (o1, o2), n in sorted(trans[qid].items(), key=lambda kv: (-kv[1], str(kv[0])))[:10]:
+                print(f"      {o1} -> {o2}   {n}")
+        unpaired = candidates - 2 * paired
+        print(f"  -- pairing footer: paired={paired} unpaired={unpaired} rc_nonzero={rc_nonzero} v1_legacy={v1_legacy} other_version={other_version} q_not_compared={q_not_compared} window_s={PAIR_WINDOW_S} malformed_rows={malformed}")
+        print()
+
+
+if pair_versions:
+    report_pairs()
+    sys.exit(0)
+
 last_surf = None
 for surf, ver in sorted(surfaces):
     data = surfaces[(surf, ver)]
@@ -360,7 +470,7 @@ for surf, ver in sorted(surfaces):
     print(f"  --- questions_version: {ver} ---")
     for qid in sorted(data["questions"]):
         print(f"  question: {qid}")
-        print("    bucket      n   agreement")
+        print("    bucket      n   agreement" if show_agreement else "    bucket      n")
         rows = data["questions"][qid]
         for i, label in enumerate(BUCKET_LABELS):
             in_bucket = [r for r in rows if r[0] == i]
@@ -368,6 +478,9 @@ for surf, ver in sorted(surfaces):
             if n == 0:
                 continue
             judged = [r for r in in_bucket if r[2] is not None]
+            if not show_agreement:
+                print(f"    {label}   {n}")
+                continue
             if not judged:
                 agreement = "n/a"
             else:
@@ -416,4 +529,6 @@ for surf, ver in sorted(surfaces):
     if reasons:
         print(f"  -- failures by reason [{ver}]: " + " ".join(f"{k}={v}" for k, v in sorted(reasons.items())))
     print()
+if not show_agreement:
+    print("agreement omitted: it needs outcome ground truth (--outcomes, hydra#1041), not row[actual], which is the action Jev's own router took")
 PY

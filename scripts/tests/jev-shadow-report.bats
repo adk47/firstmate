@@ -20,7 +20,7 @@ teardown() {
 }
 
 @test "two-surface fixture: buckets, agreement, footer" {
-  run "$REPORT" --shadow-dir "$FIXTURE_DIR"
+  run "$REPORT" --router-agreement --shadow-dir "$FIXTURE_DIR"
   [ "$status" -eq 0 ]
 
   # refund-gate / is_eligible:
@@ -84,7 +84,7 @@ teardown() {
   cat > "$TEST_TMPDIR/windowed.jsonl" <<EOF
 {"ts":"2020-01-01T00:00:00Z","surface":"windowed","item_id":"old","state_sha256":"x","questions_sha256":"y","model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.9}},"usage":null,"latency_ms":50,"actual":"true","rc":0,"http":200}
 EOF
-  run "$REPORT" --shadow-dir "$TEST_TMPDIR" --surface windowed --window-hours 1
+  run "$REPORT" --router-agreement --shadow-dir "$TEST_TMPDIR" --surface windowed --window-hours 1
   [ "$status" -eq 0 ]
   [[ "$output" == *"no shadow lines"* ]]
 }
@@ -97,7 +97,7 @@ EOF
   cat > "$d/multi.jsonl" <<'J'
 {"ts":"2026-09-17T00:00:00Z","surface":"multi","item_id":"m1","state_sha256":"x","questions_sha256":"y","model":"jev-1.13.0","answers":{"a":{"type":"noul","noul":0.92},"b":{"type":"choice","choice":"x","confidence":0.8,"probabilities":{"x":0.85,"y":0.15}}},"usage":null,"latency_ms":50,"actual":{"a":"true","b":"y"},"rc":0,"http":200}
 J
-  run "$REPORT" --shadow-dir "$d" --surface multi
+  run "$REPORT" --router-agreement --shadow-dir "$d" --surface multi
   [ "$status" -eq 0 ]
   [[ "$output" == *"question: a"* ]]
   [[ "$output" =~ 0\.9-1\.0[[:space:]]+1[[:space:]]+100\.0% ]]
@@ -114,13 +114,13 @@ J
 {"ts":"not-a-time","surface":"undated","item_id":"badts","state_sha256":"x","questions_sha256":"y","model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.9}},"usage":null,"latency_ms":50,"actual":"false","rc":0,"http":200}
 J
   # windowed: only the fresh row counts -> n=1, 100% agreement, 2 excluded
-  run "$REPORT" --shadow-dir "$d" --surface undated --window-hours 1
+  run "$REPORT" --router-agreement --shadow-dir "$d" --surface undated --window-hours 1
   [ "$status" -eq 0 ]
   [[ "$output" =~ 0\.9-1\.0[[:space:]]+1[[:space:]]+100\.0% ]]
   [[ "$output" == *"total=1"* ]]
   [[ "$output" == *"undated_excluded=2"* ]]
   # unwindowed: all three rows are valid data -> n=3, 1 of 3 agree
-  run "$REPORT" --shadow-dir "$d" --surface undated
+  run "$REPORT" --router-agreement --shadow-dir "$d" --surface undated
   [ "$status" -eq 0 ]
   [[ "$output" =~ 0\.9-1\.0[[:space:]]+3[[:space:]]+33\.3% ]]
   [[ "$output" == *"total=3"* ]]
@@ -138,7 +138,7 @@ J
 {"ts":"2026-09-17T00:00:00Z","surface":"bad","item_id":"s3","state_sha256":"x","questions_sha256":"y","model":"jev-1.13.0","answers":{"q":"not-an-object"},"usage":null,"latency_ms":50,"actual":"true","rc":0,"http":200}
 {"ts":"2026-09-17T00:00:00Z","surface":"bad","item_id":"s4","state_sha256":"x","questions_sha256":"y","model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.92}},"usage":null,"latency_ms":50,"actual":"true","rc":0,"http":200}
 J
-  run "$REPORT" --shadow-dir "$d" --surface bad
+  run "$REPORT" --router-agreement --shadow-dir "$d" --surface bad
   [ "$status" -eq 0 ]
   [[ "$output" != *"Traceback"* ]]
   [[ "$output" =~ 0\.9-1\.0[[:space:]]+1[[:space:]]+100\.0% ]]
@@ -168,7 +168,7 @@ J
 {"ts":"2026-09-17T00:10:00Z","surface":"multiclass","item_id":"c3","state_sha256":"x","questions_sha256":"y","model":"jev-1.13.0","answers":{"intent":{"type":"choice","choice":"opt1","probabilities":{"opt1":0.62,"opt2":0.10,"opt3":0.06,"opt4":0.05,"opt5":0.04,"opt6":0.04,"opt7":0.03,"opt8":0.02,"opt9":0.02,"opt10":0.01,"opt11":0.01}}},"usage":null,"latency_ms":50,"actual":"opt1","rc":0,"http":200}
 {"ts":"2026-09-17T00:15:00Z","surface":"multiclass","item_id":"c4","state_sha256":"x","questions_sha256":"y","model":"jev-1.13.0","answers":{"scoreq":{"type":"score","score":1.1,"legend":{"0":"low","1":"medium","2":"high"},"probabilities":{"0":0.35,"1":0.40,"2":0.25}}},"usage":null,"latency_ms":50,"actual":"medium","rc":0,"http":200}
 J
-  run "$REPORT" --shadow-dir "$d" --surface multiclass
+  run "$REPORT" --router-agreement --shadow-dir "$d" --surface multiclass
   [ "$status" -eq 0 ]
   [[ "$output" == *"question: intent"* ]]
   [[ "$output" =~ 0\.0-0\.5[[:space:]]+2[[:space:]]+50\.0% ]]
@@ -194,7 +194,7 @@ J
 {"surface":"","ts":"2026-09-21T00:00:00Z","answers":{"q":{"type":"noul","noul":0.9}},"actual":"true","rc":0,"latency_ms":50}
 {"surface":"guard","ts":"2026-09-21T00:00:00Z","answers":{"q":{"type":"noul","noul":0.92}},"actual":"true","rc":0,"latency_ms":50}
 J
-  run "$REPORT" --shadow-dir "$d" --surface guard
+  run "$REPORT" --router-agreement --shadow-dir "$d" --surface guard
   [ "$status" -eq 0 ]
   [[ "$output" != *"Traceback"* ]]
   [[ "$output" =~ 0\.9-1\.0[[:space:]]+1[[:space:]]+100\.0% ]]
@@ -220,7 +220,7 @@ J
 {"ts":"2026-09-17T00:00:00Z","surface":"scoreargmax","item_id":"d1","state_sha256":"x","questions_sha256":"y","model":"jev-1.13.0","answers":{"scoreq":{"type":"score","score":1.0,"legend":{"0":"low","1":"medium","2":"high"},"probabilities":{"0":0.5,"1":0.0,"2":0.5}}},"usage":null,"latency_ms":50,"actual":"medium","rc":0,"http":200}
 {"ts":"2026-09-17T00:05:00Z","surface":"scoreargmax","item_id":"d2","state_sha256":"x","questions_sha256":"y","model":"jev-1.13.0","answers":{"scoreq":{"type":"score","score":0.9,"legend":{"0":"low","1":"medium","2":"high"},"probabilities":{"0":0.2,"1":0.7,"2":0.1}}},"usage":null,"latency_ms":50,"actual":"medium","rc":0,"http":200}
 J
-  run "$REPORT" --shadow-dir "$d" --surface scoreargmax
+  run "$REPORT" --router-agreement --shadow-dir "$d" --surface scoreargmax
   [ "$status" -eq 0 ]
   [[ "$output" == *"question: scoreq"* ]]
   [[ "$output" =~ 0\.5-0\.6[[:space:]]+1[[:space:]]+0\.0% ]]
@@ -467,7 +467,7 @@ J
   # Re-runs the primary two-surface fixture without --outcomes and checks the
   # same pre-existing numbers from the first test in this file still hold,
   # plus that none of the new --outcomes-only output appears.
-  run "$REPORT" --shadow-dir "$FIXTURE_DIR"
+  run "$REPORT" --router-agreement --shadow-dir "$FIXTURE_DIR"
   [ "$status" -eq 0 ]
   [[ "$output" == *"0.9-1.0   2   100.0%"* ]]
   [[ "$output" == *"total=4 rc_nonzero=1 p50_ms=120 p95_ms=1600"* ]]
@@ -553,4 +553,104 @@ J
   [ "$status" -eq 0 ]
   [[ "$output" == *"total=2 "* ]]
   rm -rf "$d"
+}
+
+# ── MUS-5251: --pair-versions, and no self-agreement in the default mode ──
+# Row builder: _row <ts> <item_id> <version|-> <choice> <prob> [rc]
+# `-` writes no questions_version (v1-legacy). One question, "intent".
+_row() {
+  local ts="$1" item="$2" ver="$3" choice="$4" prob="$5" rc="${6:-0}"
+  local verjson='' answers
+  [ "$ver" = "-" ] || verjson="\"questions_version\":\"$ver\","
+  if [ "$rc" = "0" ]; then
+    answers="{\"intent\":{\"type\":\"choice\",\"choice\":\"$choice\",\"probabilities\":{\"$choice\":$prob}}}"
+  else
+    answers=null
+  fi
+  printf '{"ts":"%s","surface":"pairs","item_id":"%s",%s"answers":%s,"latency_ms":100,"actual":"route","rc":%s}\n' \
+    "$ts" "$item" "$verjson" "$answers" "$rc"
+}
+
+_pair_dir() {
+  PAIR_DIR="$TEST_TMPDIR/pair"
+  mkdir -p "$PAIR_DIR"
+  : > "$PAIR_DIR/pairs.jsonl"
+}
+
+@test "pair-versions: a v1/v2 pair 2s apart with different top options is 100% disagreement in v1's bucket" {
+  _pair_dir
+  { _row 2026-10-01T10:00:00.000Z t1 v1 route 0.85
+    _row 2026-10-01T10:00:02.000Z t1 v2 decline 0.6; } >> "$PAIR_DIR/pairs.jsonl"
+  run "$REPORT" --shadow-dir "$PAIR_DIR" --pair-versions
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ 0\.8-0\.9[[:space:]]+1[[:space:]]+100\.0% ]]
+  # v2's own probability (0.6) must not pick the bucket
+  [[ "$output" != *"0.6-0.7"* ]]
+  [[ "$output" == *"route -> decline"*"1"* ]]
+}
+
+@test "pair-versions: the same pair 6s apart does not pair and is counted as unpaired" {
+  _pair_dir
+  { _row 2026-10-01T10:00:00.000Z t1 v1 route 0.85
+    _row 2026-10-01T10:00:06.000Z t1 v2 decline 0.6; } >> "$PAIR_DIR/pairs.jsonl"
+  run "$REPORT" --shadow-dir "$PAIR_DIR" --pair-versions
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"disagree%"* ]]
+  [[ "$output" != *"route -> decline"* ]]
+  [[ "$output" == *"paired=0"* ]]
+  [[ "$output" == *"unpaired=2"* ]]
+}
+
+@test "pair-versions: a question present only in the v1 row is in neither numerator nor denominator" {
+  _pair_dir
+  { printf '{"ts":"2026-10-01T10:00:00Z","surface":"pairs","item_id":"t1","questions_version":"v1","answers":{"intent":{"type":"choice","choice":"route","probabilities":{"route":0.85}},"only_v1":{"type":"noul","noul":0.9}},"rc":0}\n'
+    printf '{"ts":"2026-10-01T10:00:01Z","surface":"pairs","item_id":"t1","questions_version":"v2","answers":{"intent":{"type":"choice","choice":"route","probabilities":{"route":0.7}}},"rc":0}\n'
+  } >> "$PAIR_DIR/pairs.jsonl"
+  run "$REPORT" --shadow-dir "$PAIR_DIR" --pair-versions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"question: intent"* ]]
+  [[ "$output" != *"only_v1"* ]]
+  [[ "$output" =~ 0\.8-0\.9[[:space:]]+1[[:space:]]+0\.0% ]]
+}
+
+@test "default mode prints no agreement column and says why" {
+  run "$REPORT" --shadow-dir "$FIXTURE_DIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"agreement"*"%"* ]]
+  [[ "$output" != *"0.5-0.6   1   0.0%"* ]]
+  [[ "$output" == *"0.5-0.6   1"* ]]
+  [[ "$output" == *"it needs outcome ground truth (--outcomes, hydra#1041)"* ]]
+}
+
+@test "pair-versions: an rc=2 row never pairs and is counted" {
+  _pair_dir
+  { _row 2026-10-01T10:00:00.000Z t1 v1 route 0.85
+    _row 2026-10-01T10:00:01.000Z t1 v2 decline 0.6 2; } >> "$PAIR_DIR/pairs.jsonl"
+  run "$REPORT" --shadow-dir "$PAIR_DIR" --pair-versions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"paired=0"* ]]
+  [[ "$output" == *"rc_nonzero=1"* ]]
+  [[ "$output" != *"route -> decline"* ]]
+}
+
+@test "pair-versions: a v1-legacy (unversioned) row never pairs and is counted" {
+  _pair_dir
+  { _row 2026-10-01T10:00:00.000Z t1 - route 0.85
+    _row 2026-10-01T10:00:01.000Z t1 v2 decline 0.6; } >> "$PAIR_DIR/pairs.jsonl"
+  run "$REPORT" --shadow-dir "$PAIR_DIR" --pair-versions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"paired=0"* ]]
+  [[ "$output" == *"v1_legacy=1"* ]]
+  [[ "$output" != *"route -> decline"* ]]
+}
+
+@test "pair-versions: one v2 row pairs at most once" {
+  _pair_dir
+  { _row 2026-10-01T10:00:00.000Z t1 v1 route 0.85
+    _row 2026-10-01T10:00:01.000Z t1 v1 route 0.85
+    _row 2026-10-01T10:00:01.500Z t1 v2 route 0.9; } >> "$PAIR_DIR/pairs.jsonl"
+  run "$REPORT" --shadow-dir "$PAIR_DIR" --pair-versions
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"paired=1"* ]]
+  [[ "$output" == *"unpaired=1"* ]]
 }
