@@ -247,7 +247,7 @@ family_for_basename() {
     fm-tool-update-check.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
     fm-watch-triage.test.sh|fm-task-inbox.test.sh|\
-    fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh)
+    fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh|fm-lock-reap.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     fm-afk-inject-herdr-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
@@ -605,6 +605,7 @@ tests/fm-home-summary-refresh.test.sh 34793
 tests/fm-inactive-reconcile.test.sh 41826
 tests/fm-kimi-harness.test.sh 18015
 tests/fm-lint-workflows.test.sh 855
+tests/fm-lock-reap.test.sh 18900
 tests/fm-muse-harness.test.sh 55572
 tests/fm-muse-signals-live-e2e.test.sh 23
 tests/fm-no-mistakes-required.test.sh 370

@@ -1055,6 +1055,146 @@ fm_lock_release() {
   rmdir "$lockdir" 2>/dev/null || true
 }
 
+# Stale-lock reaping (one owner for the pid-record lock family above).
+#
+# fm_lock_try_acquire already reclaims a lock whose recorded pid is dead, but
+# only when someone next contends for it, and it trusts kill -0: on a host that
+# forks fast enough to recycle the pid space, a dead holder's pid can belong to
+# an unrelated live process, and that lock then refuses every acquirer for as
+# long as the stranger lives. The reaper adds the one missing proof - a pid
+# record whose process STARTED AFTER the record was written cannot be the
+# holder, because every writer records its own pid or a still-live caller's
+# pid (the bounded-wait handoff) - and lets a periodic sweep retire leftovers
+# nobody contends for. Any uncertainty (unreadable pid, mtime, or process age)
+# keeps the lock. FM_STALE_LOCK_REAP_SECS (default 60) is the minimum record
+# age before a lock may be reaped at all.
+FM_STALE_LOCK_REAP_DEFAULT=60
+
+fm_stale_lock_reap_secs() {
+  local s=${FM_STALE_LOCK_REAP_SECS:-$FM_STALE_LOCK_REAP_DEFAULT}
+  case "$s" in ''|*[!0-9]*) s=$FM_STALE_LOCK_REAP_DEFAULT ;; esac
+  printf '%s' "$s"
+}
+
+# fm_pid_elapsed_secs <pid>: whole seconds since <pid> started (ps etime,
+# portable across macOS and Linux), or fail when it cannot be read.
+fm_pid_elapsed_secs() {
+  local pid=$1 et d=0 a='' b='' c='' h=0 m=0 s=0
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  et=$(LC_ALL=C ps -o etime= -p "$pid" 2>/dev/null) || return 1
+  et=${et//[[:space:]]/}
+  case "$et" in *-*) d=${et%%-*}; et=${et#*-} ;; esac
+  IFS=: read -r a b c <<< "$et"
+  if [ -n "$c" ]; then
+    h=$a; m=$b; s=$c
+  elif [ -n "$b" ]; then
+    m=$a; s=$b
+  else
+    return 1
+  fi
+  for a in "$d" "$h" "$m" "$s"; do
+    case "$a" in ''|*[!0-9]*) return 1 ;; esac
+  done
+  printf '%s\n' "$(( 10#$d * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$s ))"
+}
+
+# fm_lock_record_dir <lockdir>: the directory holding the lock's pid record -
+# the symlink's owner directory, or the legacy lock directory itself.
+fm_lock_record_dir() {
+  if [ -L "$1" ]; then
+    fm_lock_link_owner "$1"
+  elif [ -d "$1" ]; then
+    printf '%s\n' "$1"
+  else
+    return 1
+  fi
+}
+
+# fm_lock_record_holder_gone <record-dir>: 0 when the pid recorded in
+# <record-dir>/pid provably no longer names its holder. Sets
+# FM_LOCK_GONE_PID and FM_LOCK_GONE_REASON (dead | reused). Non-zero on a live
+# holder AND on any uncertainty.
+FM_LOCK_GONE_PID=
+FM_LOCK_GONE_REASON=
+fm_lock_record_holder_gone() {
+  local record=$1 pid mtime elapsed now
+  FM_LOCK_GONE_PID=
+  FM_LOCK_GONE_REASON=
+  pid=$(cat "$record/pid" 2>/dev/null) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  FM_LOCK_GONE_PID=$pid
+  if ! fm_pid_alive "$pid"; then
+    FM_LOCK_GONE_REASON=dead
+    return 0
+  fi
+  mtime=$(fm_path_mtime "$record/pid") || return 1
+  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+  elapsed=$(fm_pid_elapsed_secs "$pid") || return 1
+  now=$(date +%s) || return 1
+  # Two seconds of slack absorbs ps's whole-second start rounding.
+  if [ "$(( now - elapsed ))" -gt "$(( mtime + 2 ))" ]; then
+    FM_LOCK_GONE_REASON=reused
+    return 0
+  fi
+  return 1
+}
+
+# fm_lock_reap_stale <lockdir> [min-age-secs]: remove a lock whose pid record
+# is at least min-age old (default fm_stale_lock_reap_secs) and whose holder is
+# provably gone. Serializes with fm_lock_try_acquire's own stale takeover on
+# <lockdir>.steal and re-proves the same owner under it. Returns 0 only when it
+# removed the lock, printing one "reaped <lock> pid=<pid> reason=<dead|reused>
+# age=<n>s" line to stdout; never removes a lock it cannot prove abandoned.
+fm_lock_reap_stale() {
+  local lockdir=$1 min_age=${2:-} record owner_before age pid reason steal rc=1
+  [ -n "$min_age" ] || min_age=$(fm_stale_lock_reap_secs)
+  [ -e "$lockdir" ] || [ -L "$lockdir" ] || return 1
+  record=$(fm_lock_record_dir "$lockdir") || return 1
+  [ -d "$record" ] || return 1
+  age=$(fm_path_mtime "$record/pid") || return 1
+  case "$age" in ''|*[!0-9]*) return 1 ;; esac
+  age=$(( $(date +%s) - age ))
+  [ "$age" -ge "$min_age" ] || return 1
+  fm_lock_record_holder_gone "$record" || return 1
+  pid=$FM_LOCK_GONE_PID
+  owner_before=$(readlink "$lockdir" 2>/dev/null || true)
+  steal="$lockdir.steal"
+  fm_lock_try_acquire "$steal" || return 1
+  if [ "$(readlink "$lockdir" 2>/dev/null || true)" = "$owner_before" ] \
+    && record=$(fm_lock_record_dir "$lockdir") \
+    && fm_lock_record_holder_gone "$record" \
+    && [ "$FM_LOCK_GONE_PID" = "$pid" ]; then
+    reason=$FM_LOCK_GONE_REASON
+    if fm_lock_remove_path "$lockdir" && [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+      printf 'reaped %s pid=%s reason=%s age=%ss\n' "$lockdir" "$pid" "$reason" "$age"
+      rc=0
+    fi
+  fi
+  fm_lock_release "$steal"
+  return "$rc"
+}
+
+# fm_lock_reap_orphan_owner <owner-dir> <lockdir> [min-age-secs]: remove an
+# owner directory that <lockdir> does not point at, once its record is old
+# enough and its holder is provably gone (or it never recorded a pid). These
+# are left behind when a holder is killed between owner creation and link, or
+# when a lock link is removed by hand. Prints "reaped-owner <dir>" on removal.
+fm_lock_reap_orphan_owner() {
+  local owner=$1 lockdir=$2 min_age=${3:-} age
+  [ -n "$min_age" ] || min_age=$(fm_stale_lock_reap_secs)
+  [ -d "$owner" ] && [ ! -L "$owner" ] || return 1
+  [ "$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)" != "$owner" ] || return 1
+  age=$(fm_path_mtime "$owner") || return 1
+  case "$age" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$(( $(date +%s) - age ))" -ge "$min_age" ] || return 1
+  if [ -e "$owner/pid" ]; then
+    fm_lock_record_holder_gone "$owner" || return 1
+  fi
+  fm_lock_discard_owner "$owner"
+  [ ! -e "$owner" ] || return 1
+  printf 'reaped-owner %s\n' "$owner"
+}
+
 fm_meta_lock_path() {
   local meta=$1 dir base id
   dir=${meta%/*}

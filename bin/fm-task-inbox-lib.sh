@@ -33,6 +33,7 @@
 #   schema=fm-task-inbox.v1
 #   at=<utc timestamp>
 #   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
+#   coalesce=<key>             present only on a coalescing record (below)
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
@@ -41,6 +42,18 @@
 # inbox root and handled/, so a message is processed at most once per worker
 # lifetime even if every doorbell is duplicated. Concurrent writers serialize
 # on .seq.lock; the worst racing outcome is ordering, never loss.
+#
+# Coalescing (fm_task_inbox_write_coalesced): a periodic idempotent
+# instruction - a scheduled lane tick - must not pile up behind a worker that
+# has not drained it, because N unhandled copies carry no more information
+# than one. A coalescing write records coalesce=<key> and then deletes every
+# OTHER unhandled record that carries the same key or whose exact body equals
+# the new one (the second rule also drains copies queued before the sender
+# marked them). The new record is written first, so at least one copy is
+# always present, and it takes a fresh sequence number, so it orders after
+# every instruction already queued. Handled records are never touched, a
+# fire-and-forget record is never replaced by body match, and a worker that
+# loses a race to the deletion only finds its mv target gone.
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
@@ -119,9 +132,16 @@ fm_task_inbox_next_seq() {  # <inbox-dir>
   printf '%03d' "$((max + 1))"
 }
 
+# Bounded acquire for the sequence lock and the task metadata lock that
+# fm-send and the remote steer leg take around final delivery validation.
+# A holder that died is reclaimed by fm_lock_try_acquire; a holder whose pid
+# was recycled by an unrelated live process is reaped by fm_lock_reap_stale
+# (bin/fm-wake-lib.sh) once its record is old enough. Either reclaim prints
+# one stderr line naming the lock and the gone holder, so a recovered send
+# leaves evidence instead of silently stealing.
 fm_task_inbox_lock_acquire() {  # <lock-path>
   local lock=$1 wait=${FM_TASK_INBOX_LOCK_WAIT_SECS:-$FM_TASK_INBOX_LOCK_WAIT_DEFAULT}
-  local deadline probe
+  local deadline probe reaped reap_tried=0
   case "$wait" in ''|*[!0-9]*) wait=$FM_TASK_INBOX_LOCK_WAIT_DEFAULT ;; esac
   probe=$(mktemp "${lock%/*}/.lock-probe.XXXXXX") || return 1
   rm -f "$probe" || return 1
@@ -130,15 +150,29 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
   fi
   deadline=$(( $(date +%s) + wait ))
   while ! fm_lock_try_acquire "$lock"; do
+    # One reuse probe per acquisition: a record's age cannot cross the reap
+    # threshold meaningfully inside this short wait, and probing every spin
+    # would tax the very contention it waits out.
+    if [ "$reap_tried" -eq 0 ] && [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+      reap_tried=1
+      if reaped=$(fm_lock_reap_stale "$lock"); then
+        echo "fm-task-inbox: reclaimed stale lock: $reaped" >&2
+        continue
+      fi
+    fi
     [ "$(date +%s)" -lt "$deadline" ] || return 1
     sleep 0.1
   done
+  if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
+    echo "fm-task-inbox: reclaimed stale lock: $lock from dead holder pid=$FM_LOCK_RECOVERED_PID" >&2
+  fi
+  return 0
 }
 
 # Write one record into the next sequence slot: temp-write, then atomic
 # rename. Prints the record path. Caller must hold .seq.lock.
-_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
-  local dir=$1 text=$2 delivery_mode=${3:-} seq tmp rec status=0
+_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [coalesce-key]
+  local dir=$1 text=$2 delivery_mode=${3:-} coalesce=${4:-} seq tmp rec status=0
   seq=$(fm_task_inbox_next_seq "$dir")
   rec="$dir/$seq.msg"
   tmp=$(mktemp "$dir/.staging.XXXXXX") || return 1
@@ -146,6 +180,7 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
     printf 'schema=%s\n' "$FM_TASK_INBOX_SCHEMA"
     printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
+    [ -z "$coalesce" ] || printf 'coalesce=%s\n' "$coalesce"
     printf -- '--\n'
     printf '%s' "$text"
   } > "$tmp" && mv "$tmp" "$rec" || status=1
@@ -228,6 +263,50 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
   fi
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1
+  printf '%s' "$rec"
+}
+
+# The coalesce key a record carries, or fail when it carries none.
+fm_task_inbox_coalesce_key() {  # <record-path>
+  [ -f "$1" ] || return 1
+  awk '
+    $0 == "--" { exit }
+    index($0, "coalesce=") == 1 { key = substr($0, 10) }
+    END { if (key == "") exit 1; print key }
+  ' "$1"
+}
+
+# Enqueue one coalescing record, then retire every other unhandled record it
+# supersedes (see "Coalescing" above). Prints the new record path on stdout
+# and, when it superseded any, one count line on stderr.
+fm_task_inbox_write_coalesced() {  # <state-dir> <task-id> <text> <coalesce-key>
+  local state=$1 task=$2 text=$3 key=$4 dir lock rec want have f status=0 removed=0
+  case "$key" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  dir=$(fm_task_inbox_dir "$state" "$task")
+  mkdir -p "$dir/handled" || return 1
+  lock="$dir/.seq.lock"
+  fm_task_inbox_lock_acquire "$lock" || return 1
+  rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "" "$key") || status=1
+  if [ "$status" -eq 0 ] && want=$(mktemp "$dir/.dedup.XXXXXX") \
+    && have=$(mktemp "$dir/.dedup.XXXXXX"); then
+    printf '%s' "$text" > "$want"
+    for f in "$dir"/*.msg; do
+      [ -f "$f" ] && [ "$f" != "$rec" ] || continue
+      if [ "$(fm_task_inbox_coalesce_key "$f" 2>/dev/null)" != "$key" ]; then
+        fm_task_inbox_is_fire_and_forget "$f" && continue
+        fm_task_inbox_body "$f" > "$have" 2>/dev/null || continue
+        cmp -s "$want" "$have" || continue
+      fi
+      rm -f "$f" 2>/dev/null && removed=$((removed + 1))
+    done
+    rm -f "$want" "$have"
+  else
+    rm -f "${want:-}" 2>/dev/null || true
+  fi
+  fm_lock_release "$lock"
+  [ "$status" -eq 0 ] || return 1
+  [ "$removed" -eq 0 ] \
+    || echo "fm-task-inbox: coalesced $removed superseded unhandled record(s) into ${rec##*/}" >&2
   printf '%s' "$rec"
 }
 
