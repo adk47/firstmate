@@ -1670,6 +1670,9 @@ jobs:
           # AI credit reviewer / approval auditor (scripts/credit_review). Stdlib
           # only; the admin API and the model are faked, so no network.
           python3 scripts/tests/test_credit_review.py
+          # credit-retro r1 role-scoped take-back + prepared waves (scripts/credit_retro).
+          # Stdlib only; the admin API is faked. Also pins the committed manifests.
+          python3 scripts/tests/test_credit_retro.py
 
   plugin-tests:
     name: Plugin tests (vitest)

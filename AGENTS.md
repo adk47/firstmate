@@ -559,6 +559,11 @@ dispatch and at the write boundary. Why: from 05-18 to 10-11 the batch approved
 validator-DECLINED credits through an inverted rule (`approve_owning_track == 100`
 means the shortcut did NOT fire). Approvals are audited read-only by
 `scripts/credit-review.py` (see `docs/credit-verification/ai-credit-reviewer.md`).
+Credit REMOVALS are the mirror: core-backend #10310 refuses every agent/API token on the
+admin credit DELETE routes and on approved->unverified/rejected take-backs, and
+approved->user_verification_needed is illegal (the only exit deletes every role on the
+request). Retro take-backs are role-scoped and run from a named human's own session via
+`scripts/credit-retro.py` (`docs/credit-verification/credit-retro-r1.md`).
 
 ## Picking the right extension mechanism
 

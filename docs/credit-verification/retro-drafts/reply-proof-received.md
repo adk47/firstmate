@@ -1,0 +1,1 @@
+Thanks {first_name}, got it. I've added your document to the review of "{track_title}" ({role}). We check the document and compare it with the release data, and we aim to get back to you within 14 days. Your credit stays visible in the meantime. If you have a second document that names the same track, feel free to send it too, but one is usually enough.
