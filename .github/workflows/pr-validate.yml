@@ -1036,22 +1036,29 @@ jobs:
             fi
           fi
 
+          # Attribute what is left (MUS-1390). A deletion the PR's own diff
+          # causes blocks (the author can fix it); unrelated node-8 state only
+          # warns, because no PR author can clean it and a check that is red on
+          # every PR carries no signal. deploy.sh Step 4a (hydra#1117) stays the
+          # authoritative blocker for the real deploy. Same lib as the tests.
           if [ -n "$deletions" ]; then
-            echo "::error::This PR would delete files from /opt/hydra/ on merge-triggered deploy"
-            echo
-            echo "Files that would be wiped:"
-            echo "$deletions" | sed 's/^/  /'
-            echo
-            echo "Each deletion means one of three things:"
-            echo "  (a) Real data created on the server that the repo doesn't know about"
-            echo "      → Pull it in: tracked file: scripts/sync-from-server.sh <target> --apply --only <path>;"
-            echo "        a path the repo never tracked is NOT pulled by that script: scp it, review it (no secrets), git add <path>. Then commit"
-            echo "  (b) Runtime state the server should own"
-            echo "      → Either commit a seed file under the path (auto-exclude will then kick in)"
-            echo "        OR add an --exclude line to RSYNC_EXCLUDES in scripts/deploy.sh"
-            echo "  (c) Actual garbage left on the server"
-            echo "      → Clean it up on node-8, then re-run this check"
-            exit 1
+            # shellcheck disable=SC1091
+            . scripts/lib/attribute-deletions.sh
+            # Baseline: what rsync would delete under the BASE's excludes. A
+            # residual deletion missing from it is exposed by this PR removing
+            # or narrowing an RSYNC_EXCLUDES entry (git shows no removed path).
+            attr_rc=0
+            baseline=$(base_exclude_deletions "$(pwd)" /opt/hydra origin/main) || attr_rc=$?
+            if [ "$attr_rc" -ne 0 ]; then
+              echo "$baseline"
+              exit 1
+            fi
+            attribute_deletions "$deletions" "$(pwd)" origin/main "$baseline" || attr_rc=$?
+            if [ "$attr_rc" -ne 0 ]; then
+              exit 1
+            fi
+            echo "Deploy pre-flight: no deletion is caused by this PR (warnings above are unrelated node-8 state)"
+            exit 0
           fi
           echo "✓ Zero suspicious deletions — safe to deploy"
 
