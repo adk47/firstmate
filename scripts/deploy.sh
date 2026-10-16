@@ -25,12 +25,19 @@ DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"
 # the upgrade requires. Bump in lockstep with docs/guides/REPO-MANAGEMENT.md.
 OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.8.35}"
 
-# Minimum Node.js for the pinned runtime (openclaw 2026.7.1 raised the floor
-# to >=22.22.3 — its bin refuses to start below it, so a deploy on an old Node
-# would install a runtime that can never boot). Checked fail-loud in
-# install_openclaw(); upgrading Node is a manual pre-step, see
-# docs/runbooks/UPGRADE-2026.7.1.md.
+# Accepted Node.js bands for the pinned runtime. openclaw 2026.8.35 declares
+# engines.node ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0"; its bin refuses
+# to start outside that range, so a deploy on the wrong Node would install a
+# runtime that can never boot. install_openclaw() accepts, fail-loud and before
+# `npm install -g`:
+#   22.22.3 <= v < 23   (OPENCLAW_NODE_FLOOR — MUST stay on 22 so a rollback
+#                        to the recorded 22.x host still passes the gate)
+#   24.15.0 <= v < 25   (OPENCLAW_NODE_24_FLOOR)
+# Everything else is rejected, including >=25.9.0 which engines allow: hydra
+# deploys on LTS majors only. Upgrading Node is a manual pre-step, see
+# docs/runbooks/NODE-22-TO-24.md and docs/runbooks/UPGRADE-2026.7.1.md §Node.
 OPENCLAW_NODE_FLOOR="${OPENCLAW_NODE_FLOOR:-22.22.3}"
+OPENCLAW_NODE_24_FLOOR="${OPENCLAW_NODE_24_FLOOR:-24.15.0}"
 
 # Pinned @openclaw/slack version. 2026.5.12 externalized Slack into this
 # npm package; the bundled `channels.slack` plugin no longer ships. Kept
@@ -437,12 +444,14 @@ install_openclaw() {
   local node_ver
   node_ver=$(node --version 2>/dev/null | sed 's/^v//' || true)
   if [[ -z "$node_ver" ]]; then
-    log "    ✗ install_openclaw: node not found in PATH (need >= ${OPENCLAW_NODE_FLOOR})"
+    log "    ✗ install_openclaw: node not found in PATH (need >=${OPENCLAW_NODE_FLOOR} <23 || >=${OPENCLAW_NODE_24_FLOOR} <25)"
     return 1
   fi
-  if ! version_at_least "$OPENCLAW_NODE_FLOOR" "$node_ver"; then
-    log "    ✗ install_openclaw: Node $node_ver < required ${OPENCLAW_NODE_FLOOR} for openclaw ${OPENCLAW_VERSION}."
-    log "      Upgrade Node first (manual pre-step): see docs/runbooks/UPGRADE-2026.7.1.md §Node."
+  if ! { version_at_least "$OPENCLAW_NODE_FLOOR" "$node_ver" && ! version_at_least 23.0.0 "$node_ver"; } \
+    && ! { version_at_least "$OPENCLAW_NODE_24_FLOOR" "$node_ver" && ! version_at_least 25.0.0 "$node_ver"; }; then
+    log "    ✗ install_openclaw: Node $node_ver is outside the accepted bands (>=${OPENCLAW_NODE_FLOOR} <23 || >=${OPENCLAW_NODE_24_FLOOR} <25) for openclaw ${OPENCLAW_VERSION}."
+    log "      hydra deploys on LTS majors only, so Node >=25.9.0 is rejected even though the runtime's engines allow it."
+    log "      Upgrade Node first (manual pre-step): see docs/runbooks/NODE-22-TO-24.md and docs/runbooks/UPGRADE-2026.7.1.md §Node."
     return 1
   fi
 
