@@ -6,9 +6,10 @@
 # The command does not acquire the session lock, drain wakes, arm watchers,
 # mutate backlog state, or write reports. Its default ledger collector may
 # atomically refresh parent-side cached copies of remote home summaries under
-# state/secondmate-summary-cache, and its python per-task pass keeps
-# observational caches under state/snapshot-cache (bin/fm-fleet-snapshot.py owns
-# their reuse rules); those cache writes are its only fleet-state mutation. Its per-task open-decision fold reads the shared
+# state/secondmate-summary-cache, and its python per-task pass keeps one
+# observational cache of per-repository `no-mistakes runs` listings under
+# state/snapshot-cache/runs (bin/fm-fleet-snapshot.py owns its reuse rule);
+# those cache writes are its only fleet-state mutation. Its per-task open-decision fold reads the shared
 # state/.<id>.open-decisions-cursor but never advances it
 # (FM_OPEN_DECISIONS_READONLY), because that cursor is also a presentation
 # offset the wake drain owns, and keeps that fold's scratch chunk in its own
@@ -263,9 +264,9 @@ and the whole local observation pass is bounded by FM_SNAPSHOT_PREFETCH_TIMEOUT
 (default 45 seconds): a task the deadline cannot reach is reported unknown rather
 than extending the pass.
 FM_SNAPSHOT_IMPL=python (default) runs the per-task pass in one process
-(bin/fm-fleet-snapshot.py) with observational caches reused for
-FM_SNAPSHOT_RUNS_CACHE_SECS (default 600); FM_SNAPSHOT_IMPL=bash runs the
-original pass. Both print the same task rows.
+(bin/fm-fleet-snapshot.py) with each repository's `no-mistakes runs` listing
+reused for FM_SNAPSHOT_RUNS_CACHE_SECS (default 600); FM_SNAPSHOT_IMPL=bash
+runs the original pass. Both print the same task rows.
 Remote secondmate endpoint liveness is not probed by this command.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and

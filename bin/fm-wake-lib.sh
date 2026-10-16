@@ -1174,27 +1174,6 @@ fm_lock_reap_stale() {
   return "$rc"
 }
 
-# fm_lock_reap_orphan_owner <owner-dir> <lockdir> [min-age-secs]: remove an
-# owner directory that <lockdir> does not point at, once its record is old
-# enough and its holder is provably gone (or it never recorded a pid). These
-# are left behind when a holder is killed between owner creation and link, or
-# when a lock link is removed by hand. Prints "reaped-owner <dir>" on removal.
-fm_lock_reap_orphan_owner() {
-  local owner=$1 lockdir=$2 min_age=${3:-} age
-  [ -n "$min_age" ] || min_age=$(fm_stale_lock_reap_secs)
-  [ -d "$owner" ] && [ ! -L "$owner" ] || return 1
-  [ "$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)" != "$owner" ] || return 1
-  age=$(fm_path_mtime "$owner") || return 1
-  case "$age" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$(( $(date +%s) - age ))" -ge "$min_age" ] || return 1
-  if [ -e "$owner/pid" ]; then
-    fm_lock_record_holder_gone "$owner" || return 1
-  fi
-  fm_lock_discard_owner "$owner"
-  [ ! -e "$owner" ] || return 1
-  printf 'reaped-owner %s\n' "$owner"
-}
-
 fm_meta_lock_path() {
   local meta=$1 dir base id
   dir=${meta%/*}

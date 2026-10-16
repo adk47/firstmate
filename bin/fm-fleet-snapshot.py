@@ -21,37 +21,28 @@ took minutes on a loaded host and the home-summary refresh never finished.
 How it stays faithful to the owners it does not restate:
   - Current state. A task is classified here only on the paths where
     bin/fm-crew-state.sh's answer is fully determined by file reads plus one
-    fleet-wide endpoint inventory: no attributable no-mistakes run (its branch
-    has no row in the repo's complete runs ledger), an endpoint the backend's own
+    fleet-wide endpoint inventory: no no-mistakes run to attribute (not a ship
+    task, or a ship worktree at detached HEAD), an endpoint the backend's own
     inventory decides (orca terminal list, tmux list-windows), and a busy
     verdict from a semantic busy record (bin/fm-busy-lib.sh's record path, for
     the record-backed harnesses on non-herdr backends). Every other task - a
-    branch with a ledger row, an endpoint the inventory cannot decide, a
-    harness whose busy source is not a record - is DELEGATED to
-    fm-crew-state.sh itself, unchanged, under the bounds the bash pass used.
+    ship task on a branch, which needs a fresh `no-mistakes axi status` read,
+    an endpoint the inventory cannot decide, a harness whose busy source is
+    not a record - is DELEGATED to fm-crew-state.sh itself, unchanged, under
+    the bounds the bash pass used.
     tests/fm-fleet-snapshot-impl.test.sh pins both passes to identical output.
-  - Observational caches under state/snapshot-cache/, all bounded by
-    FM_SNAPSHOT_RUNS_CACHE_SECS (default 600; 0 disables reuse):
-      runs/  per repository, the owner's bounded `no-mistakes runs` listing
-             (shared verbatim with delegated fm-crew-state.sh reads through
-             FM_CREW_STATE_RUNS_LIST_DIR; keys match bin/fm-nm-run-lib.sh
-             fm_nm_repo_cache_key) and the complete listing (<key>.all), the
-             only proof that a branch has never run; a run started inside the
-             window is seen on the next refresh.
-      crew/  a delegated fm-crew-state.sh line, reused only while the task's
-             newest ledger row is TERMINAL (completed, failed, cancelled) and
-             every input that line reads is byte-identical: metadata, the
-             status capture's size and mtime, the worktree HEAD commit, that
-             ledger row and whether the bounded listing still holds it, the
-             busy record, the endpoint inventory verdict, and the owner
-             scripts themselves.
-             An active run is always read fresh.
-      fold/  an open-decision fold result, reused while the fold's inputs are
-             identical: the status log's identity, size, and captured end, the
-             fold cursor's bytes, the FM_CLASSIFY_* vocabulary, and the owner
-             scripts themselves.
+  - The one observational cache: state/snapshot-cache/runs/ holds, per
+    repository, the owner's bounded `no-mistakes runs` listing for
+    FM_SNAPSHOT_RUNS_CACHE_SECS (default 600; 0 refreshes every snapshot).
+    It is shared verbatim with delegated fm-crew-state.sh reads through
+    FM_CREW_STATE_RUNS_LIST_DIR (keys match bin/fm-nm-run-lib.sh
+    fm_nm_repo_cache_key), which consult it only as their coarse fallback
+    after their own fresh `axi status` read.
   - Open decisions. bin/fm-classify-lib.sh's read-only incremental fold runs
-    in a few batched bash processes rather than being restated here.
+    in a few batched bash processes rather than being restated here. Like the
+    bash pass, a started fold is never cut short by the observation deadline;
+    only a generous safety bound stops a hung batch, and a fold that did not
+    finish leaves no result rather than a partial one.
   - Status-line parsing (verb, note, paused) and the busy-record read are
     direct ports of bin/fm-classify-lib.sh and bin/fm-busy-lib.sh; the parity
     test drives both passes over the same fixtures so the ports cannot drift
@@ -60,7 +51,6 @@ How it stays faithful to the owners it does not restate:
 
 import argparse
 import concurrent.futures
-import hashlib
 import json
 import os
 import re
@@ -73,6 +63,7 @@ import time
 
 SEP = " · "
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+FOLD_SAFETY_SECS = 300
 
 
 def env_int(name, default, minimum=1):
@@ -407,64 +398,6 @@ def current_branch(worktree):
     return None
 
 
-def resolve_head(worktree):
-    """The worktree's HEAD commit read from git files, or None."""
-    gitdir, common = git_dir_of(worktree)
-    if not gitdir:
-        return None
-    try:
-        head = read_text(os.path.join(gitdir, "HEAD")).strip()
-    except OSError:
-        return None
-    if not head.startswith("ref: "):
-        return head if re.match(r"^[0-9a-f]{40,64}$", head) else None
-    ref = head[5:].strip()
-    for base in (gitdir, common):
-        try:
-            value = read_text(os.path.join(base, ref)).strip()
-            if re.match(r"^[0-9a-f]{40,64}$", value):
-                return value
-        except OSError:
-            pass
-    try:
-        for line in read_text(os.path.join(common, "packed-refs")).split("\n"):
-            parts = line.split(" ")
-            if len(parts) == 2 and parts[1] == ref:
-                return parts[0]
-    except OSError:
-        pass
-    return None
-
-
-def file_sig(path, identity=True):
-    """Size and mtime, plus device and inode unless the path is a fresh copy."""
-    try:
-        st = os.stat(path)
-    except OSError:
-        return "absent"
-    if not identity:
-        return "%d:%d" % (st.st_size, st.st_mtime_ns)
-    return "%d:%d:%d:%d" % (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
-
-
-def file_bytes(path):
-    try:
-        with open(path, "rb") as fh:
-            return fh.read()
-    except OSError:
-        return b"<absent>"
-
-
-def digest(*parts):
-    h = hashlib.sha256()
-    for part in parts:
-        if isinstance(part, str):
-            part = part.encode("utf-8", "surrogateescape")
-        h.update(len(part).to_bytes(8, "big"))
-        h.update(part)
-    return h.hexdigest()
-
-
 def run_bounded(cmd, timeout, cwd=None, env=None, stdin_text=None):
     """Run cmd in its own process group; (rc, stdout), rc 124 on timeout."""
     try:
@@ -533,14 +466,7 @@ class Snapshot:
         self.runs_ttl = env_int("FM_SNAPSHOT_RUNS_CACHE_SECS", 600, minimum=0)
         self.runs_limit = os.environ.get("FM_CREW_STATE_RUNS_LIMIT", "200")
         self.have_nm = shutil.which("no-mistakes") is not None
-        # Cached answers are bound to the exact owner code that produced them.
-        self.code = digest(*[file_bytes(os.path.join(SCRIPT_DIR, name)) for name in (
-            "fm-crew-state.sh", "fm-classify-lib.sh", "fm-busy-lib.sh", "fm-nm-run-lib.sh",
-            "fm-backend.sh", "fm-fleet-snapshot.py")])
-        self.cache_root = None
         self.runs_dir = None
-        self.runs = {}
-        self.all_runs = {}
         self.inventory = {}
         self.deadline = time.time() + self.prefetch_timeout
 
@@ -580,61 +506,21 @@ class Snapshot:
 
     # -- runs ledger ------------------------------------------------------------
 
-    def prepare_cache(self, task_ids):
-        root = os.path.join(self.state, "snapshot-cache")
-        if not task_ids or os.path.islink(self.state) or not os.path.isdir(self.state):
-            return
-        try:
-            for sub in ("runs", "crew", "fold"):
-                os.makedirs(os.path.join(root, sub), mode=0o700, exist_ok=True)
-        except OSError:
-            return
-        for path in (root, os.path.join(root, "runs"), os.path.join(root, "crew"), os.path.join(root, "fold")):
-            if os.path.islink(path) or not os.path.isdir(path):
-                return
-        self.cache_root = root
-        # Entries of tasks that no longer exist are retired, never reused.
-        for sub in ("crew", "fold"):
-            for name in os.listdir(os.path.join(root, sub)):
-                if name not in task_ids:
-                    try:
-                        os.unlink(os.path.join(root, sub, name))
-                    except OSError:
-                        pass
-
-    def cache_get(self, sub, name, key):
-        if not self.cache_root or self.runs_ttl == 0:
-            return None
-        path = os.path.join(self.cache_root, sub, name)
-        try:
-            if os.path.islink(path) or time.time() - os.path.getmtime(path) >= self.runs_ttl:
-                return None
-            data = read_text(path)
-        except OSError:
-            return None
-        stored, sep, value = data.partition("\n")
-        return value if sep and stored == key else None
-
-    def cache_put(self, sub, name, key, value):
-        if not self.cache_root:
-            return
-        directory = os.path.join(self.cache_root, sub)
-        try:
-            fd, tmp = tempfile.mkstemp(prefix="." + name + ".", dir=directory)
-            with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
-                fh.write(key + "\n" + value)
-            os.replace(tmp, os.path.join(directory, name))
-        except OSError:
-            pass
-
     def prepare_runs(self, ship_worktrees):
-        """Two listings per repository: the owner's bounded one, shared verbatim
-        with delegated fm-crew-state.sh reads, and the complete one, which alone
-        can prove a branch has never run (`axi status` attributes a branch's run
-        however old it is)."""
-        if not self.have_nm or not ship_worktrees or not self.cache_root:
+        """The owner's bounded `no-mistakes runs` listing, once per repository,
+        shared verbatim with delegated fm-crew-state.sh reads."""
+        if not self.have_nm or not ship_worktrees:
             return
-        cache = os.path.join(self.cache_root, "runs")
+        root = os.path.join(self.state, "snapshot-cache")
+        cache = os.path.join(root, "runs")
+        if os.path.islink(self.state) or not os.path.isdir(self.state):
+            return
+        try:
+            os.makedirs(cache, mode=0o700, exist_ok=True)
+        except OSError:
+            return
+        if any(os.path.islink(p) or not os.path.isdir(p) for p in (root, cache)):
+            return
         self.runs_dir = cache
         keys = {}
         for wt in ship_worktrees:
@@ -644,74 +530,39 @@ class Snapshot:
         now = time.time()
         stale = []
         for key, wt in keys.items():
-            for name, limit, store in ((key, self.runs_limit, self.runs),
-                                       (key + ".all", "1000000", self.all_runs)):
-                path = os.path.join(cache, name)
-                try:
-                    fresh = (not os.path.islink(path)) and os.path.getsize(path) > 0 \
-                        and now - os.path.getmtime(path) < self.runs_ttl
-                except OSError:
-                    fresh = False
-                if fresh:
-                    store[key] = read_text(path)
-                else:
-                    stale.append((name, limit, store, key, wt))
+            path = os.path.join(cache, key)
+            try:
+                fresh = (not os.path.islink(path)) and os.path.getsize(path) > 0 \
+                    and now - os.path.getmtime(path) < self.runs_ttl
+            except OSError:
+                fresh = False
+            if not fresh:
+                stale.append((key, wt))
 
         def refresh(item):
-            name, limit, store, key, wt = item
+            key, wt = item
             bound = min(self.crew_timeout, max(1, int(self.deadline - time.time())))
-            rc, out = run_bounded(["no-mistakes", "runs", "--limit", limit], bound, cwd=wt)
-            path = os.path.join(cache, name)
+            rc, out = run_bounded(["no-mistakes", "runs", "--limit", self.runs_limit], bound, cwd=wt)
+            path = os.path.join(cache, key)
             if rc == 0 and out:
-                fd, tmp = tempfile.mkstemp(prefix="." + name + ".", dir=cache)
-                with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
-                    fh.write(out)
-                os.replace(tmp, path)
-                return item, out
+                try:
+                    fd, tmp = tempfile.mkstemp(prefix="." + key + ".", dir=cache)
+                    with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
+                        fh.write(out)
+                    os.replace(tmp, path)
+                    return
+                except OSError:
+                    pass
             # A listing that cannot be refreshed is no longer current; leave the
             # delegated owner to its own read rather than a stale cache entry.
             try:
                 os.unlink(path)
             except OSError:
                 pass
-            return item, None
 
         if stale:
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(stale))) as pool:
-                for item, out in pool.map(refresh, stale):
-                    if out is not None:
-                        item[2][item[3]] = out
-
-    def branch_rows(self, worktree, branch):
-        """Every ledger row naming branch (newest first), or None when only a
-        complete listing could tell and none is available."""
-        listing = self.all_runs.get(repo_cache_key(worktree))
-        if listing is None or "more runs, use --limit" in listing:
-            return None
-        return [row.strip() for row in listing.split("\n") if branch in row.split()]
-
-    def crew_cache_key(self, t):
-        """Key for reusing a delegated read, or None when it must be read fresh."""
-        wt = t["worktree"]
-        if t["kind"] != "ship" or not self.have_nm or not wt or not os.path.isdir(wt):
-            return None
-        branch = current_branch(wt)
-        rows = self.branch_rows(wt, branch) if branch else None
-        if not rows:
-            return None
-        newest = rows[0]
-        if newest.split()[0] not in ("completed", "failed", "cancelled"):
-            return None
-        head = resolve_head(wt)
-        if not head:
-            return None
-        listed = self.endpoint_listed(t["backend"], t["target"]) if t["target"] else None
-        bounded = self.runs.get(repo_cache_key(wt), "")
-        in_bounded = any(branch in row.split() for row in bounded.split("\n"))
-        return digest("crew-v1", self.code, t["meta_text"], file_sig(t["status_capture"], identity=False), head, newest,
-                      repr(in_bounded),
-                      file_bytes(os.path.join(self.state, t["id"] + ".busy-state")),
-                      file_bytes(os.path.join(self.state, t["id"] + ".busy-gen")), repr(listed))
+                list(pool.map(refresh, stale))
 
     # -- owners called through bash -----------------------------------------------
 
@@ -751,43 +602,26 @@ class Snapshot:
 
     def fold_open_decisions(self, jobs):
         """bin/fm-classify-lib.sh's read-only fold, batched over a few bash processes."""
-        vocab = "\n".join("%s=%s" % kv for kv in sorted(os.environ.items()) if kv[0].startswith("FM_CLASSIFY_"))
-        pending, keys = [], {}
-        for log, end, out in jobs:
-            tid = os.path.basename(log)[:-len(".status")]
-            cursor = os.path.join(os.path.dirname(log), ".%s.open-decisions-cursor" % tid)
-            key = digest("fold-v1", self.code, log, end, file_sig(log), file_bytes(cursor), vocab)
-            cached = self.cache_get("fold", tid, key)
-            if cached is not None:
-                with open(out, "w", encoding="utf-8", errors="replace") as fh:
-                    fh.write(cached)
-            else:
-                pending.append((log, end, out))
-                keys[out] = (tid, key)
-        jobs = pending
         if not jobs:
             return
         script = ('. "$1" || exit 1; while IFS=$\'\\t\' read -r log end out; do '
-                  'FM_OPEN_DECISIONS_READONLY=1 FM_OPEN_DECISIONS_SCRATCH_DIR="$2" '
-                  'status_open_decisions_incremental "$log" "$end" > "$out" 2>/dev/null || : > "$out"; done')
+                  'if FM_OPEN_DECISIONS_READONLY=1 FM_OPEN_DECISIONS_SCRATCH_DIR="$2" '
+                  'status_open_decisions_incremental "$log" "$end" > "$out.tmp" 2>/dev/null; '
+                  'then mv -f "$out.tmp" "$out"; else rm -f "$out.tmp"; fi; done')
         chunks = max(1, min(4, len(jobs) // 8 + 1))
         groups = [jobs[i::chunks] for i in range(chunks)]
 
         def run(group):
             lines = "".join("%s\t%s\t%s\n" % job for job in group)
-            remaining = max(1, int(self.deadline - time.time())) + self.crew_timeout
             run_bounded(["bash", "-c", script, "fm-snapshot-fold",
                          os.path.join(SCRIPT_DIR, "fm-classify-lib.sh"), self.task_dir],
-                        remaining, env=self.bash_env(), stdin_text=lines)
+                        FOLD_SAFETY_SECS, env=self.bash_env(), stdin_text=lines)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(groups)) as pool:
             list(pool.map(run, groups))
         for _, _, out in jobs:
             if not os.path.exists(out):
                 open(out, "w").close()
-            else:
-                tid, key = keys[out]
-                self.cache_put("fold", tid, key, read_text(out))
 
     # -- per-task current state ----------------------------------------------------
 
@@ -798,9 +632,7 @@ class Snapshot:
             return crew("unknown", "none", "worktree gone (torn down?)")
         if kind == "ship" and self.have_nm:
             branch = current_branch(wt)
-            if branch is None:
-                return None
-            if branch and self.branch_rows(wt, branch) != []:
+            if branch is None or branch:
                 return None
         target, backend = t["target"], t["backend"]
         if not target:
@@ -858,16 +690,7 @@ class Snapshot:
             if native is not None:
                 t["current"] = native
             else:
-                key = self.crew_cache_key(t)
-                cached = self.cache_get("crew", tid, key) if key else None
-                if cached is not None:
-                    t["current"] = parse_crew_line(cached)
-                else:
-                    t["current"] = self.delegated_crew_state(tid, t["meta_path"], t["status_capture"], bound)
-                    # Only a classified answer is worth keeping; a timed-out or
-                    # failed read must be retried next time.
-                    if key and t["current"]["raw"] and t["current"]["state"] != "unknown":
-                        self.cache_put("crew", tid, key, t["current"]["raw"])
+                t["current"] = self.delegated_crew_state(tid, t["meta_path"], t["status_capture"], bound)
             if t["target"]:
                 want_agent = t["kind"] == "secondmate"
                 listed = self.endpoint_listed(t["backend"], t["target"])
@@ -939,7 +762,6 @@ class Snapshot:
         # The pass deadline starts after the manifest copy, as in the bash pass.
         self.deadline = time.time() + self.prefetch_timeout
         local = [t for t in tasks if not t["remote_host"]]
-        self.prepare_cache({t["id"] for t in tasks})
         self.prepare_runs([t["worktree"] for t in local if t["kind"] == "ship" and t["worktree"]])
         self.endpoint_inventory({t["backend"] for t in local if t["target"]})
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.concurrency) as pool:

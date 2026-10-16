@@ -9,9 +9,9 @@
 #      record was written (pid reuse) is reaped as reused, while a live
 #      holder that predates its record is never touched - the two cases are
 #      driven apart by the record mtime alone, so the divergence is asserted.
-#   3. Steering-inbox sequence locks and orphaned owner directories are swept
-#      too, and a lock outside the sweep's scope (the watcher lock) is never
-#      touched even when its holder is dead.
+#   3. Steering-inbox sequence locks are swept too, and a lock outside the
+#      sweep's scope (the watcher lock) is never touched even when its holder
+#      is dead.
 #   4. The watcher runs the sweep on its own cadence and records reaps in its
 #      triage log without waking firstmate.
 set -u
@@ -81,23 +81,20 @@ test_reused_pid_reaped_live_holder_kept() {
   pass "lock-reap: a recycled pid is reaped as reused while a genuine live holder is kept"
 }
 
-test_inbox_and_orphan_owner_swept_watch_lock_untouched() {
-  local state out dead orphan watch_owner
+test_inbox_swept_watch_lock_untouched() {
+  local state out dead watch_owner
   state="$TMP_ROOT/scope/state"; mkdir -p "$state/t1.inbox/handled"
   dead=$(dead_pid)
   make_lock "$state/t1.inbox/.seq.lock" "$dead" 202001010000
-  orphan=$(mktemp -d "$state/.meta-gone.lock.owner.XXXXXX")
-  printf '%s\n' "$dead" > "$orphan/pid"
-  touch -t 202001010000 "$orphan/pid" "$orphan"
   make_lock "$state/.watch.lock" "$dead" 202001010000
   watch_owner=$(readlink "$state/.watch.lock")
   out=$(run_reap "$state" --min-age 60)
   [ ! -L "$state/t1.inbox/.seq.lock" ] || fail "a stale inbox sequence lock was not reaped"
-  [ ! -d "$orphan" ] || fail "an orphaned owner directory was not reaped"
-  assert_contains "$out" "reaped-owner $orphan" "orphan owner removal should be logged"
+  assert_contains "$out" "reaped $state/t1.inbox/.seq.lock pid=$dead reason=dead" \
+    "the inbox lock reap should be logged"
   [ -L "$state/.watch.lock" ] && [ -d "$watch_owner" ] \
     || fail "the watcher lock is outside the sweep's scope and must be untouched"
-  pass "lock-reap: inbox sequence locks and orphan owners are swept; the watcher lock is never touched"
+  pass "lock-reap: inbox sequence locks are swept; the watcher lock is never touched"
 }
 
 test_watcher_runs_sweep_quietly() {
@@ -127,5 +124,5 @@ test_watcher_runs_sweep_quietly() {
 
 test_dead_holder_reaped_after_min_age
 test_reused_pid_reaped_live_holder_kept
-test_inbox_and_orphan_owner_swept_watch_lock_untouched
+test_inbox_swept_watch_lock_untouched
 test_watcher_runs_sweep_quietly

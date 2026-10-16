@@ -8,16 +8,16 @@
 #      --secondmate-home-summary modes over a fixture that exercises every
 #      native classification path (busy, idle, malformed, gen-mismatch, and
 #      untrusted busy records; status-log fallbacks with keys, timestamps,
-#      correlation tokens, and pauses; a gone worktree; a missing target; an
-#      Orca terminal absent from the inventory; PR and report hints; open
-#      decisions) and every delegated one (a branch with a runs-ledger row,
-#      including one older than the owner's bounded listing, a Grok
-#      rendered-tail harness, a local secondmate, a remote secondmate).
+#      correlation tokens, and pauses; a ship worktree at detached HEAD; a
+#      gone worktree; a missing target; an Orca terminal absent from the
+#      inventory; PR and report hints; open decisions) and every delegated one
+#      (a ship branch with a run, including one older than the owner's bounded
+#      listing, a ship branch with no run, a Grok rendered-tail harness, a
+#      local secondmate, a remote secondmate).
 #   2. The runs ledger is read once per repository and reused inside
-#      FM_SNAPSHOT_RUNS_CACHE_SECS, and refreshed when the window is 0.
-#   3. A delegated read of a terminal run is reused while its inputs are
-#      unchanged and re-read once the status capture changes.
-#   4. An unknown FM_SNAPSHOT_IMPL is refused.
+#      FM_SNAPSHOT_RUNS_CACHE_SECS, and refreshed when the window is 0, while
+#      every ship branch still gets its own fresh `axi status` read.
+#   3. An unknown FM_SNAPSHOT_IMPL is refused.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -143,7 +143,9 @@ WT_SCOUT=$(add_worktree scout fm/scout)
 WT_SHIP=$(add_worktree ship fm/ship-native)
 WT_RUN=$(add_worktree run fm/run-branch)
 WT_OLD=$(add_worktree old fm/old-run)
+WT_DETACHED=$(add_worktree detached fm/detached)
 git -C "$WT_SCOUT" checkout -q --detach
+git -C "$WT_DETACHED" checkout -q --detach
 
 orca_task busy pi scout "$WT_SCOUT"
 busy_record busy busy pi-ext
@@ -169,8 +171,12 @@ printf 'done: finished\n' > "$STATE/norecord.status"
 orca_task resolvedonly pi scout "$WT_SCOUT"
 busy_record resolvedonly idle pi-ext
 printf 'resolved: answered\n' > "$STATE/resolvedonly.status"
-orca_task gone pi ship "$WT_SHIP"
-sed -i.bak '/^term-gone$/d' "$FAKE/orca-live" && rm -f "$FAKE/orca-live.bak"
+orca_task gone pi scout "$WT_SCOUT"
+orca_task shipgone pi ship "$WT_SHIP"
+sed -i.bak -e '/^term-gone$/d' -e '/^term-shipgone$/d' "$FAKE/orca-live" && rm -f "$FAKE/orca-live.bak"
+orca_task detached pi ship "$WT_DETACHED"
+busy_record detached idle pi-ext
+printf 'done: detached ship finished\n' > "$STATE/detached.status"
 orca_task wtgone pi ship "$TMP_ROOT/never-created"
 fm_write_meta "$STATE/notarget.meta" "endpoint_task_id=notarget" "worktree=$WT_SCOUT" \
   "harness=pi" "kind=scout" "backend=orca"
@@ -196,7 +202,7 @@ printf 'completed fm/run-branch %s 2026-10-15 10:00 https://github.com/example/r
   > "$FAKE/runs"
 printf 'failed fm/elsewhere %s 2026-10-14 09:00\n' "$RUN_SHA" >> "$FAKE/runs"
 # Older than the owner's bounded listing (FM_CREW_STATE_RUNS_LIMIT=2 below), so
-# only the complete listing proves this branch has a run.
+# only the delegated owner's fresh `axi status` read finds this branch's run.
 printf 'cancelled fm/old-run %s 2026-09-01 08:00\n' "$(git -C "$WT_OLD" rev-parse --short HEAD)" >> "$FAKE/runs"
 
 snapshot() {  # <impl> <mode> [env...]
@@ -225,7 +231,8 @@ test_parity_json_and_home_summary() {
   states=$(jq -r '.tasks[] | "\(.id)=\(.current_state.state)/\(.current_state.source)"' "$TMP_ROOT/python--json.json")
   for want in busy=working/pane idle=done/status-log keyed=paused/status-log \
     malformed=unknown/pane stalegen=unknown/pane untrusted=unknown/pane norecord=unknown/pane \
-    resolvedonly=unknown/none gone=unknown/none wtgone=unknown/none notarget=unknown/none \
+    resolvedonly=unknown/none gone=unknown/none shipgone=unknown/none detached=done/status-log \
+    wtgone=unknown/none notarget=unknown/none \
     report=done/status-log run=done/run-step oldrun=failed/run-step mate=working/status-log far=unknown/none; do
     case $'\n'"$states"$'\n' in
       *$'\n'"$want"$'\n'*) ;;
@@ -238,33 +245,21 @@ test_parity_json_and_home_summary() {
 }
 
 test_runs_ledger_cached_per_repo() {
-  local n
+  local n a
   rm -rf "$STATE/snapshot-cache"
   : > "$FAKE/calls"
   snapshot python --json >/dev/null 2>&1 || fail "first cached snapshot failed"
   snapshot python --json >/dev/null 2>&1 || fail "second cached snapshot failed"
   n=$(grep -c '^no-mistakes runs' "$FAKE/calls")
-  [ "$n" = 2 ] || fail "the bounded and complete runs listings should each be read once per repo inside the cache window, read $n times"
+  [ "$n" = 1 ] || fail "the runs listing should be read once per repo inside the cache window, read $n times"
+  # run, oldrun, idle, and shipgone sit on branches; each snapshot reads each fresh.
+  a=$(grep -c '^no-mistakes axi status' "$FAKE/calls")
+  [ "$a" = 8 ] || fail "every ship branch needs its own fresh axi status read per snapshot, saw $a"
   : > "$FAKE/calls"
   snapshot python --json FM_SNAPSHOT_RUNS_CACHE_SECS=0 >/dev/null 2>&1 || fail "uncached snapshot failed"
   n=$(grep -c '^no-mistakes runs' "$FAKE/calls")
-  [ "$n" = 2 ] || fail "a zero cache window should refresh both listings, read $n times"
+  [ "$n" = 1 ] || fail "a zero cache window should refresh the listing, read $n times"
   pass "fleet snapshot: one runs-ledger read per repo is reused inside FM_SNAPSHOT_RUNS_CACHE_SECS"
-}
-
-test_terminal_run_read_reused_until_inputs_change() {
-  local n
-  rm -rf "$STATE/snapshot-cache"
-  snapshot python --json >/dev/null 2>&1 || fail "warming snapshot failed"
-  : > "$FAKE/calls"
-  snapshot python --json >/dev/null 2>&1 || fail "cached snapshot failed"
-  n=$(grep -c '^no-mistakes axi status' "$FAKE/calls")
-  [ "$n" = 0 ] || fail "an unchanged terminal run should not be re-read, saw $n axi status calls"
-  printf 'working: more\n' >> "$STATE/run.status"
-  snapshot python --json >/dev/null 2>&1 || fail "post-change snapshot failed"
-  n=$(grep -c '^no-mistakes axi status' "$FAKE/calls")
-  [ "$n" -ge 1 ] || fail "a changed status capture must invalidate the cached terminal-run read"
-  pass "fleet snapshot: a terminal run's delegated read is reused only while its inputs are unchanged"
 }
 
 test_unknown_impl_refused() {
@@ -276,5 +271,4 @@ test_unknown_impl_refused() {
 
 test_parity_json_and_home_summary
 test_runs_ledger_cached_per_repo
-test_terminal_run_read_reused_until_inputs_change
 test_unknown_impl_refused

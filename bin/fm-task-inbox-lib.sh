@@ -53,7 +53,11 @@
 # always present, and it takes a fresh sequence number, so it orders after
 # every instruction already queued. Handled records are never touched, a
 # fire-and-forget record is never replaced by body match, and a worker that
-# loses a race to the deletion only finds its mv target gone.
+# loses a race to the deletion only finds its mv target gone. Replacing the
+# re-ring ladder's current oldest record must not restart that ladder: the
+# record that becomes oldest inherits the superseded one's mtime and its
+# .ring-state/.escalated bookkeeping, so a worker that never drains its ticks
+# still escalates.
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
@@ -281,6 +285,7 @@ fm_task_inbox_coalesce_key() {  # <record-path>
 # and, when it superseded any, one count line on stderr.
 fm_task_inbox_write_coalesced() {  # <state-dir> <task-id> <text> <coalesce-key>
   local state=$1 task=$2 text=$3 key=$4 dir lock rec want have f status=0 removed=0
+  local oldest='' ref='' heir ladder rec_base count last
   case "$key" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
@@ -290,6 +295,10 @@ fm_task_inbox_write_coalesced() {  # <state-dir> <task-id> <text> <coalesce-key>
   if [ "$status" -eq 0 ] && want=$(mktemp "$dir/.dedup.XXXXXX") \
     && have=$(mktemp "$dir/.dedup.XXXXXX"); then
     printf '%s' "$text" > "$want"
+    oldest=$(fm_task_inbox_oldest_unhandled "$state" "$task") || oldest=
+    if [ -n "$oldest" ] && [ "$oldest" != "$rec" ] && ref=$(mktemp "$dir/.dedup.XXXXXX"); then
+      touch -r "$oldest" "$ref" 2>/dev/null || { rm -f "$ref"; ref=; }
+    fi
     for f in "$dir"/*.msg; do
       [ -f "$f" ] && [ "$f" != "$rec" ] || continue
       if [ "$(fm_task_inbox_coalesce_key "$f" 2>/dev/null)" != "$key" ]; then
@@ -299,7 +308,21 @@ fm_task_inbox_write_coalesced() {  # <state-dir> <task-id> <text> <coalesce-key>
       fi
       rm -f "$f" 2>/dev/null && removed=$((removed + 1))
     done
-    rm -f "$want" "$have"
+    if [ -n "$ref" ] && [ ! -e "$oldest" ] \
+      && heir=$(fm_task_inbox_oldest_unhandled "$state" "$task"); then
+      touch -r "$ref" "$heir" 2>/dev/null || true
+      ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
+      IFS=$'\t' read -r rec_base count last <<EOF
+$ladder
+EOF
+      if [ "$rec_base" = "${oldest##*/}" ]; then
+        printf '%s\t%s\t%s\n' "${heir##*/}" "$count" "$last" > "$dir/.ring-state" 2>/dev/null || true
+      fi
+      if [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "${oldest##*/}" ]; then
+        printf '%s\n' "${heir##*/}" > "$dir/.escalated" 2>/dev/null || true
+      fi
+    fi
+    rm -f "$want" "$have" ${ref:+"$ref"}
   else
     rm -f "${want:-}" 2>/dev/null || true
   fi

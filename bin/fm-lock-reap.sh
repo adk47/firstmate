@@ -5,11 +5,10 @@
 # Usage: fm-lock-reap.sh [--min-age <secs>]
 #
 # Scope: the task metadata locks (state/.meta-<id>.lock), their takeover locks
-# (.meta-<id>.lock.steal), every steering-inbox sequence lock
-# (state/<id>.inbox/.seq.lock and its .steal), and orphaned owner directories
-# of those locks (<lock>.owner.* that the lock no longer points at). Other
-# locks keep their own recovery owners; in particular the watcher, session,
-# and wake-queue locks are never touched here.
+# (.meta-<id>.lock.steal), and every steering-inbox sequence lock
+# (state/<id>.inbox/.seq.lock and its .steal). Other locks keep their own
+# recovery owners; in particular the watcher, session, and wake-queue locks
+# are never touched here.
 #
 # A lock is removed only when bin/fm-wake-lib.sh's fm_lock_reap_stale proves
 # it: its pid record is at least --min-age seconds old (default
@@ -38,7 +37,7 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     -h|--help)
-      sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -54,35 +53,11 @@ reap_log() {
   printf '[%s] lock-reap: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$1"
 }
 
-reap_lock() {  # <lockdir>
-  local lock=$1 line owner
-  for owner in "$lock".owner.*; do
-    [ -d "$owner" ] || continue
-    if line=$(fm_lock_reap_orphan_owner "$owner" "$lock" "$MIN_AGE"); then
-      reap_log "$line"
-    fi
-  done
-  [ -e "$lock" ] || [ -L "$lock" ] || return 0
+for lock in "$STATE"/.meta-*.lock "$STATE"/.meta-*.lock.steal \
+  "$STATE"/*.inbox/.seq.lock "$STATE"/*.inbox/.seq.lock.steal; do
+  [ -e "$lock" ] || [ -L "$lock" ] || continue
   if line=$(fm_lock_reap_stale "$lock" "$MIN_AGE"); then
     reap_log "$line"
   fi
-}
-
-# Every lock path with either a live link/dir or a leftover owner directory.
-candidate_locks() {
-  local path base
-  for path in "$STATE"/.meta-*.lock "$STATE"/.meta-*.lock.steal \
-    "$STATE"/.meta-*.lock.owner.* "$STATE"/.meta-*.lock.steal.owner.* \
-    "$STATE"/*.inbox/.seq.lock "$STATE"/*.inbox/.seq.lock.steal \
-    "$STATE"/*.inbox/.seq.lock.owner.* "$STATE"/*.inbox/.seq.lock.steal.owner.*; do
-    [ -e "$path" ] || [ -L "$path" ] || continue
-    base=${path%.owner.*}
-    printf '%s\n' "$base"
-  done | sort -u
-}
-
-while IFS= read -r lock; do
-  [ -n "$lock" ] || continue
-  reap_lock "$lock"
-done < <(candidate_locks)
+done
 exit 0

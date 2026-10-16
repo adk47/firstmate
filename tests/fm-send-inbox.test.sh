@@ -28,6 +28,9 @@
 #  11. --coalesce replaces still-unhandled copies of a periodic tick (same key
 #      or same body) instead of queueing them, keeps handled records and other
 #      steers, and is refused where there is no local inbox to coalesce.
+#  12. Replacing the oldest unhandled tick keeps the watcher's re-ring ladder:
+#      the replacement inherits its age, ring count, and escalation, so a
+#      worker that never drains its ticks still surfaces as stale exactly once.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -409,6 +412,37 @@ test_coalesce_replaces_unhandled_ticks() {
   pass "fm-send inbox: --coalesce replaces unhandled same-key or same-body ticks instead of queueing them"
 }
 
+inbox_ladder() {  # <fn> <args...>
+  env FM_TASK_INBOX_GRACE_SECS=90 FM_TASK_INBOX_RING_MAX=3 \
+    bash -c '. "$1"; . "$2"; shift 2; "$@"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-task-inbox-lib.sh" "$@"
+}
+
+test_coalesce_keeps_reringing_ladder() {
+  local dir err state inbox action
+  dir=$(setup_case coalesce-ladder); err="$dir/send.err"
+  state="$dir/home/state"; inbox="$state/t1.inbox"
+  run_send "$dir" "$err" -- t1 --coalesce tick "tick" || fail "first coalescing tick failed"
+  touch -t 202001010000 "$inbox/001.msg"
+  # The watcher spent the whole ring budget on the first, never-drained tick.
+  inbox_ladder fm_task_inbox_record_ring "$state" t1 "$inbox/001.msg"
+  inbox_ladder fm_task_inbox_record_ring "$state" t1 "$inbox/001.msg"
+  inbox_ladder fm_task_inbox_record_ring "$state" t1 "$inbox/001.msg"
+  run_send "$dir" "$err" -- t1 --coalesce tick "tick" || fail "second coalescing tick failed"
+  [ ! -e "$inbox/001.msg" ] && [ -f "$inbox/002.msg" ] \
+    || fail "the second tick should replace the first:"$'\n'"$(ls "$inbox")"
+  action=$(inbox_ladder fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "escalate $inbox/002.msg 3" ] \
+    || fail "a replaced tick restarted the re-ring ladder instead of escalating: $action"
+  inbox_ladder fm_task_inbox_record_escalated "$state" t1 "$inbox/002.msg" \
+    || fail "recording the escalation failed"
+  run_send "$dir" "$err" -- t1 --coalesce tick "tick" || fail "third coalescing tick failed"
+  [ -f "$inbox/003.msg" ] || fail "the third tick should replace the second:"$'\n'"$(ls "$inbox")"
+  action=$(inbox_ladder fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "an already-escalated stuck worker was escalated again: $action"
+  pass "fm-send inbox: a coalesced replacement keeps the oldest tick's age, ring count, and escalation"
+}
+
 test_coalesce_refusals() {
   local dir err rc
   dir=$(setup_case coalesce-refuse); err="$dir/send.err"
@@ -441,4 +475,5 @@ test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_stranded_meta_lock_is_reclaimed
 test_coalesce_replaces_unhandled_ticks
+test_coalesce_keeps_reringing_ladder
 test_coalesce_refusals
