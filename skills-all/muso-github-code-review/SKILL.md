@@ -420,6 +420,23 @@ doctrine — be specific, cite `file:line`, and prefer real problems over style 
      flagged content is unchanged. A digest that merely churns silently destroys the
      feature it protects.
 
+### Tier label (MUS-12064) — a blocking finding class
+
+Every PR to a prod branch must carry exactly one `tier:0`, `tier:1`, `tier:2` or
+`tier:3` label and a `Tier: N, because ...` line in the body. Tiers: 0 = no user
+impact (scripts, tests, docs, CI, alerts, dev-only config, code nothing calls yet,
+staff-only screens); 1 = narrow, user-visible; 2 = broad but reversible; 3 = every
+login or every profile save. Read the label and the body line, then check the claim
+against the diff:
+
+- **No tier label, or no `Tier: N, because ...` line:** NO-GO, reason `tier missing`.
+- **`tier:0` but the diff touches a path a user's request can reach** (an API route
+  or handler, a rendered page or component, a published API contract, a data
+  pipeline whose output is displayed, a prod manifest): NO-GO, reason
+  **`tier understated`**, naming the file that disproves the claim.
+- **Never lower a tier label yourself and never approve a lowering you did not agree
+  to.** Raising a tier is always allowed.
+
 ### Every 🔴 and 🟡 needs a failure scenario
 
 These eight lenses push toward flagging more; this is the counterweight. A finding is
