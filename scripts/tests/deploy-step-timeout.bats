@@ -51,6 +51,7 @@ subs = {
     "github.run_attempt": "1",
     "steps.detect.outputs.target": "all",
     "steps.rollback.outputs.action": rollback_action,
+    "github.event.inputs.target || 'all'": "all",
     "github.sha": "deadbeefcafef00dfacade1234567890abcdef0",
     "github.actor": "test-actor",
     "github.server_url": "https://github.com",
@@ -218,4 +219,30 @@ assert s.get("continue-on-error") is True, "continue-on-error missing"
 assert isinstance(s["timeout-minutes"], int)
 '
   [ "$status" -eq 0 ]
+}
+
+# Bot NO-GO @44c5de33d: a timed-out "Refuse stale deploys" fails before writing
+# `proceed`, and Rollback/Page both gate on proceed == 'true', so a scheduled
+# deploy dying in the stale check paged nobody. Rollback stays gated on the
+# deploy having started; this sibling pages the pre-deploy failure.
+@test "pre-deploy failure page: fires on a failed stale check without proceed, pages critical, never rolls back" {
+  run wf_py '
+n = "Page on pre-deploy failure"
+assert n in names, "no pre-deploy page step"
+s = by[n]
+assert "stale_check.outcome" in s["if"] and "failure" in s["if"], s["if"]
+assert "proceed" not in s["if"], "must not require proceed"
+assert s.get("continue-on-error") is True and isinstance(s["timeout-minutes"], int)
+assert "timeout 240 bash scripts/lib/deploy-notify.sh critical" in s["run"]
+assert "rollback.sh" not in s["run"]
+assert "proceed" in by["Rollback on failure"]["if"]
+'
+  [ "$status" -eq 0 ]
+}
+
+@test "pre-deploy failure page body: posts critical via the notifier" {
+  extract_step "Page on pre-deploy failure" predeploy.sh ""
+  run run_step predeploy.sh
+  [ "$status" -eq 0 ]
+  grep -qx "deploy-notify.sh critical" "$LOG"
 }
