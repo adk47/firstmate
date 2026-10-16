@@ -2526,7 +2526,9 @@ exec "$REAL_CP" "$@"
 SH
   chmod +x "$fakebin/cp"
 
-  REAL_CP="$real_cp" FAKE_CP_STARTED="$home/cp-started" FAKE_CP_RELEASE="$home/cp-release" \
+  # The race is injected through `cp`, which only the bash per-task pass uses;
+  # the python pass skips a vanished record the same way (FileNotFoundError).
+  FM_SNAPSHOT_IMPL=bash REAL_CP="$real_cp" FAKE_CP_STARTED="$home/cp-started" FAKE_CP_RELEASE="$home/cp-release" \
     run "$home" "$fakebin" --json > "$home/snapshot.json" &
   snapshot_pid=$!
   i=0
@@ -2582,7 +2584,9 @@ done
 SH
   chmod +x "$fakebin/cp"
 
+  # Injected through `cp`, which only the bash per-task pass uses.
   json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_IMPL=bash \
     FM_SNAPSHOT_NOW_EPOCH=1783792800 NET_LOG="$home/net.log" REAL_CP="$real_cp" \
     RACE_ONCE="$home/status-race-once" RACE_STATUS="$home/state/captured-status.status" \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json) \

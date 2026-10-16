@@ -79,9 +79,11 @@
 #   - A backend that cannot deliver the harness's interrupt key is refused
 #     (Orca's terminal API has no Escape).
 #   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
-#     classifier (tmux, herdr), because without one the "the agent stopped"
-#     postcondition cannot be proven. zellij, orca, and cmux are refused rather
-#     than reported as successful blind.
+#     classifier (tmux, herdr, orca), because without one the "the agent
+#     stopped" postcondition cannot be proven; zellij and cmux are refused
+#     rather than reported as successful blind. `relaunch` additionally needs a
+#     proven in-place relaunch, which orca does not have yet
+#     (bin/fm-control-lib.sh owns both capability tables).
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #
@@ -349,20 +351,33 @@ require_state_verified_backend() {  # <verb>
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
 }
 
+require_relaunch_verified_backend() {
+  require_state_verified_backend relaunch
+  fm_control_backend_relaunch_verified "$BACKEND" && return 0
+  die "task $ID runs on the $BACKEND backend, whose in-place relaunch is not proven end to end; exit the agent with 'exit' and respawn the task instead"
+}
+
 # send_interrupt_keys: deliver the harness's interrupt key the verified number
 # of times, then the composer-clear key when the adapter needs one. Refuses
 # before sending anything when the backend cannot deliver either key, because
 # an interrupt that cancels the turn but leaves the restored prompt in the
 # composer would make the next submitted line concatenate onto it.
-send_interrupt_keys() {
-  local key repeat clear i=0
+require_interrupt_keys_deliverable() {
+  local key clear
   key=$(fm_control_interrupt_key "$HARNESS")
-  repeat=$(fm_control_interrupt_repeat "$HARNESS")
   clear=$(fm_control_interrupt_clear_key "$HARNESS")
   fm_control_backend_supports_key "$BACKEND" "$key" \
     || die "harness $HARNESS interrupts with $key, which the $BACKEND backend cannot deliver; refusing to send a different key"
   [ -z "$clear" ] || fm_control_backend_supports_key "$BACKEND" "$clear" \
     || die "harness $HARNESS needs $clear to clear its composer after an interrupt, which the $BACKEND backend cannot deliver; refusing to leave the cancelled prompt where the next submitted line would concatenate onto it"
+}
+
+send_interrupt_keys() {
+  local key repeat clear i=0
+  key=$(fm_control_interrupt_key "$HARNESS")
+  repeat=$(fm_control_interrupt_repeat "$HARNESS")
+  clear=$(fm_control_interrupt_clear_key "$HARNESS")
+  require_interrupt_keys_deliverable
   while [ "$i" -lt "$repeat" ]; do
     fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
       || die "interrupt key $key was not delivered to task $ID on $BACKEND"
@@ -787,7 +802,7 @@ do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
 
-  require_state_verified_backend relaunch
+  require_relaunch_verified_backend
   resolve_relaunch_profile
 
   case "$KIND" in
@@ -855,6 +870,8 @@ do_relaunch() {
 
 case "$VERB" in
   interrupt)
+    # A key the backend cannot deliver refuses before any endpoint read.
+    require_interrupt_keys_deliverable
     state=$(agent_state)
     case "$state" in
       alive) ;;

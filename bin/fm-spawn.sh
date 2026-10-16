@@ -1202,10 +1202,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
   # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
-  # classifier that can (bin/fm-control-lib.sh owns that capability table).
-  fm_control_backend_state_verified "$BACKEND" || {
-    echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
+  # one into the same endpoint, and only backends whose in-place relaunch is
+  # proven may do it (bin/fm-control-lib.sh owns that capability table).
+  fm_control_backend_relaunch_verified "$BACKEND" || {
+    echo "error: backend '$BACKEND' has no proven in-place relaunch (a recovery-grade agent-state classifier plus a verified replacement launch into the same endpoint); refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")

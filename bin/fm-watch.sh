@@ -183,6 +183,11 @@ HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
 esac
+# Seconds between stale per-task lock sweeps (bin/fm-lock-reap.sh); 0 disables.
+LOCK_REAP_INTERVAL=${FM_LOCK_REAP_INTERVAL:-300}
+case "$LOCK_REAP_INTERVAL" in
+  ''|*[!0-9]*) LOCK_REAP_INTERVAL=300 ;;
+esac
 # Per-file cap on the bytes the heartbeat backstop folds in one scan. The
 # backstop is fail-safe, not the primary path: the per-wake signal scan already
 # classifies each task's appended span, so a heartbeat that meets a huge stale
@@ -1670,6 +1675,24 @@ home_summary_refresh_detached() {
   HOME_SUMMARY_PID=$!
 }
 
+# Stale per-task lock sweep, detached for the same beacon reason as the ledger
+# publication above. Cadence rides the .last-lock-reap mtime so it survives
+# watcher restarts; each reaped lock lands as one line in the triage log.
+LOCK_REAP_PID=
+lock_reap_detached() {
+  if [ -n "$LOCK_REAP_PID" ]; then
+    if kill -0 "$LOCK_REAP_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$LOCK_REAP_PID" 2>/dev/null || true
+    LOCK_REAP_PID=
+  fi
+  touch "$STATE/.last-lock-reap" 2>/dev/null || true
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-lock-reap.sh" </dev/null >> "$TRIAGE_LOG" 2>/dev/null &
+  LOCK_REAP_PID=$!
+}
+
 RECONCILE_REQUEST_PID=
 reconcile_requests_pending() {
   local request
@@ -1787,6 +1810,10 @@ while :; do
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
+  fi
+  if [ "$LOCK_REAP_INTERVAL" -gt 0 ] \
+    && [ "$(age_of "$STATE/.last-lock-reap")" -ge "$LOCK_REAP_INTERVAL" ]; then
+    lock_reap_detached
   fi
 
   # Bearings publishes reconcile asks as local one-shot request files and

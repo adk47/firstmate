@@ -1029,6 +1029,21 @@ tests/fm-bootstrap.test.sh
 tests/fm-teardown-endpoint-safety.test.sh
 ```
 
+On 2026-10-16, the recovery-grade agent-state classifier (`fm_backend_orca_agent_state` in `bin/backends/orca.sh`) was verified against Orca 1.4.224 on the live fleet.
+Orca's per-terminal `agentIdentity` and title are sticky: a terminal whose pi agent had exited to the zsh prompt still reported `agentIdentity=pi` and the title `Pi ready`, so neither field can prove a stop.
+`orca terminal show --json` returns `result.terminal.ptyId`, `orca diagnostics memory --json` returns `result.worktrees[].sessions[]` entries whose `sessionId` equals that ptyId with the pty root `pid` (every one of 200 listed terminals matched a swept session), and a non-existent handle answers `ok=false` with `error.code=terminal_handle_stale`.
+
+```sh
+orca --version
+orca terminal show --terminal <handle> --json
+orca diagnostics memory --json
+. bin/fm-backend.sh; fm_backend_agent_state orca <handle>
+```
+
+Observed verdicts across the 126 Orca-backed task records in one home: 107 `alive` (105 pi, 2 grok), 4 `dead` (the zsh-only panes, including the sticky `Pi ready` one), and 15 `missing` (stale handles, each with no process using its worktree as cwd), with no `ambiguous` or `unreadable` result.
+Each read took about 1-3 seconds at host load 30-140.
+`tests/fm-backend-orca-agent-state.test.sh` pins the classifier against real process trees under a fake Orca CLI.
+
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, composite worktree id acceptance, and path-matched release refusal.
 
 ## cmux

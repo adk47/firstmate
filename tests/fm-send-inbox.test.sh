@@ -22,6 +22,15 @@
 #      retryable send failure that could duplicate the durable instruction.
 #   9. An unwritable inbox is a real local failure: nonzero exit, nothing
 #      typed, and a just-created pending-reply expectation is discarded.
+#  10. A metadata lock stranded by a dead holder, or by a holder whose pid a
+#      later unrelated process now owns, is reclaimed with a stderr notice
+#      instead of refusing the send.
+#  11. --coalesce replaces still-unhandled copies of a periodic tick (same key
+#      or same body) instead of queueing them, keeps handled records and other
+#      steers, and is refused where there is no local inbox to coalesce.
+#  12. Replacing the oldest unhandled tick keeps the watcher's re-ring ladder:
+#      the replacement inherits its age, ring count, and escalation, so a
+#      worker that never drains its ticks still surfaces as stale exactly once.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -338,6 +347,120 @@ test_unwritable_inbox_fails_loudly() {
   pass "fm-send inbox: an unwritable record is a loud local failure that leaves no false expectation"
 }
 
+# A stranded metadata lock: the owner record names a dead pid, or a live pid
+# whose process started after the record was written (pid reuse).
+strand_meta_lock() {  # <lock> <pid> [record-mtime]
+  local lock=$1 pid=$2 when=${3:-} owner
+  owner=$(mktemp -d "$lock.owner.XXXXXX")
+  printf '%s\n' "$pid" > "$owner/pid"
+  [ -z "$when" ] || touch -t "$when" "$owner/pid" "$owner"
+  ln -s "$owner" "$lock"
+}
+
+test_stranded_meta_lock_is_reclaimed() {
+  local dir err rc lock dead reuser
+  dir=$(setup_case stranded-dead); err="$dir/send.err"
+  lock="$dir/home/state/.meta-t1.lock"
+  sh -c 'exit 0' & dead=$!; wait "$dead"
+  strand_meta_lock "$lock" "$dead"
+  run_send "$dir" "$err" FM_TASK_INBOX_LOCK_WAIT_SECS=0 -- t1 "after a dead holder"; rc=$?
+  expect_code 0 "$rc" "a dead holder's metadata lock should be reclaimed, not refuse the send"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the reclaimed send did not record its steer"
+  assert_contains "$(cat "$err")" "reclaimed stale lock" "a reclaim should leave a stderr notice"
+
+  dir=$(setup_case stranded-reused); err="$dir/send.err"
+  lock="$dir/home/state/.meta-t1.lock"
+  sleep 30 & reuser=$!
+  # Record written in 2020: the live pid cannot be its holder.
+  strand_meta_lock "$lock" "$reuser" 202001010000
+  run_send "$dir" "$err" FM_TASK_INBOX_LOCK_WAIT_SECS=0 -- t1 "after a recycled pid"; rc=$?
+  kill "$reuser" 2>/dev/null; wait "$reuser" 2>/dev/null
+  expect_code 0 "$rc" "a lock whose pid now names a younger unrelated process should be reaped"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the reaped send did not record its steer"
+  assert_contains "$(cat "$err")" "reason=reused" "the reap notice should name pid reuse"
+  pass "fm-send inbox: a metadata lock stranded by a dead or recycled holder pid is reclaimed with a notice"
+}
+
+test_coalesce_replaces_unhandled_ticks() {
+  local dir err rc inbox tick count body
+  dir=$(setup_case coalesce); err="$dir/send.err"
+  inbox="$dir/home/state/t1.inbox"
+  tick="Scheduled tick: run one cycle"
+  # Two copies queued before the sender marked its ticks, one handled copy,
+  # and an unrelated steer between them.
+  run_send "$dir" "$err" -- t1 "$tick" || fail "fixture tick 1 failed"
+  run_send "$dir" "$err" -- t1 "a real instruction" || fail "fixture steer failed"
+  run_send "$dir" "$err" -- t1 "$tick" || fail "fixture tick 2 failed"
+  run_send "$dir" "$err" -- t1 "$tick" || fail "fixture tick 3 failed"
+  mv "$inbox/001.msg" "$inbox/handled/"
+  run_send "$dir" "$err" -- t1 --coalesce tick "$tick"; rc=$?
+  expect_code 0 "$rc" "a coalescing tick should send"
+  assert_contains "$(cat "$err")" "coalesced 2 superseded" "the coalesce should report what it replaced"
+  [ -f "$inbox/005.msg" ] || fail "the coalescing tick should take a fresh sequence:"$'\n'"$(ls "$inbox")"
+  [ ! -e "$inbox/003.msg" ] && [ ! -e "$inbox/004.msg" ] \
+    || fail "unhandled identical ticks were not replaced:"$'\n'"$(ls "$inbox")"
+  [ -f "$inbox/002.msg" ] || fail "an unrelated steer must survive coalescing"
+  [ -f "$inbox/handled/001.msg" ] || fail "a handled record must never be touched"
+  # A later tick with the same key but new wording still replaces the marked one.
+  run_send "$dir" "$err" -- t1 --coalesce tick "Scheduled tick v2"; rc=$?
+  expect_code 0 "$rc" "a second coalescing tick should send"
+  [ ! -e "$inbox/005.msg" ] || fail "a same-key record was not replaced"
+  count=$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 2 ] || fail "expected the steer plus one tick, found $count:"$'\n'"$(ls "$inbox")"
+  body=$(record_body _ "$inbox/006.msg")
+  [ "$body" = "Scheduled tick v2" ] || fail "the surviving tick body differs: $body"
+  pass "fm-send inbox: --coalesce replaces unhandled same-key or same-body ticks instead of queueing them"
+}
+
+inbox_ladder() {  # <fn> <args...>
+  env FM_TASK_INBOX_GRACE_SECS=90 FM_TASK_INBOX_RING_MAX=3 \
+    bash -c '. "$1"; . "$2"; shift 2; "$@"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-task-inbox-lib.sh" "$@"
+}
+
+test_coalesce_keeps_reringing_ladder() {
+  local dir err state inbox action
+  dir=$(setup_case coalesce-ladder); err="$dir/send.err"
+  state="$dir/home/state"; inbox="$state/t1.inbox"
+  run_send "$dir" "$err" -- t1 --coalesce tick "tick" || fail "first coalescing tick failed"
+  touch -t 202001010000 "$inbox/001.msg"
+  # The watcher spent the whole ring budget on the first, never-drained tick.
+  inbox_ladder fm_task_inbox_record_ring "$state" t1 "$inbox/001.msg"
+  inbox_ladder fm_task_inbox_record_ring "$state" t1 "$inbox/001.msg"
+  inbox_ladder fm_task_inbox_record_ring "$state" t1 "$inbox/001.msg"
+  run_send "$dir" "$err" -- t1 --coalesce tick "tick" || fail "second coalescing tick failed"
+  [ ! -e "$inbox/001.msg" ] && [ -f "$inbox/002.msg" ] \
+    || fail "the second tick should replace the first:"$'\n'"$(ls "$inbox")"
+  action=$(inbox_ladder fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "escalate $inbox/002.msg 3" ] \
+    || fail "a replaced tick restarted the re-ring ladder instead of escalating: $action"
+  inbox_ladder fm_task_inbox_record_escalated "$state" t1 "$inbox/002.msg" \
+    || fail "recording the escalation failed"
+  run_send "$dir" "$err" -- t1 --coalesce tick "tick" || fail "third coalescing tick failed"
+  [ -f "$inbox/003.msg" ] || fail "the third tick should replace the second:"$'\n'"$(ls "$inbox")"
+  action=$(inbox_ladder fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "an already-escalated stuck worker was escalated again: $action"
+  pass "fm-send inbox: a coalesced replacement keeps the oldest tick's age, ring count, and escalation"
+}
+
+test_coalesce_refusals() {
+  local dir err rc
+  dir=$(setup_case coalesce-refuse); err="$dir/send.err"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
+  run_send "$dir" "$err" -- t1 --coalesce 'bad key' "tick"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an invalid coalesce key should be refused"
+  run_send "$dir" "$err" -- t1 --coalesce tick "/compact"; rc=$?
+  [ "$rc" -ne 0 ] || fail "coalescing typed-plane text should be refused"
+  run_send "$dir" "$err" -- fm-domain --coalesce tick "tick"; rc=$?
+  [ "$rc" -ne 0 ] || fail "coalescing to a secondmate should be refused"
+  assert_contains "$(cat "$err")" "--coalesce refused" "the refusal should be explicit"
+  run_send "$dir" "$err" -- sess:fm-t1 --coalesce tick "tick"; rc=$?
+  [ "$rc" -ne 0 ] || fail "coalescing to an explicit backend target should be refused"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "a refused coalesce must not enqueue anything"
+  [ ! -s "$dir/send.log" ] || fail "a refused coalesce typed something"
+  pass "fm-send inbox: --coalesce is refused where no local task inbox can coalesce"
+}
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
@@ -350,3 +473,7 @@ test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
+test_stranded_meta_lock_is_reclaimed
+test_coalesce_replaces_unhandled_ticks
+test_coalesce_keeps_reringing_ladder
+test_coalesce_refusals

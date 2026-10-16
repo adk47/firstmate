@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] [--coalesce <key>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -190,6 +190,14 @@
 # working:, or done: event still cannot clear a captain decision. The flag is
 # refused with --key, with an explicit backend target (no task ledger in this
 # home), and with an empty message.
+#
+# Coalescing: --coalesce <key> ([A-Za-z0-9._-]+) marks a periodic, idempotent
+# instruction such as a scheduled lane tick. The record replaces, instead of
+# queueing behind, every still-unhandled record for the same task that carries
+# the same key or the exact same body (bin/fm-task-inbox-lib.sh owns the
+# semantics). It needs a local task selector on the inbox plane and is refused
+# with --key, --resolve-key, --fire-and-forget, FM_SEND_IDEMPOTENT=1, any
+# secondmate target, an explicit backend target, and parser-native typed text.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
@@ -449,6 +457,7 @@ fi
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
+COALESCE_KEY=
 fm_send_add_resolve_key() {  # <key>
   local k=$1
   case "$k" in
@@ -486,6 +495,23 @@ while :; do
       [ -z "$FIRE_AND_FORGET_ID" ] || { echo "error: duplicate --fire-and-forget" >&2; exit 1; }
       FIRE_AND_FORGET_ID=${1#--fire-and-forget=}
       shift
+      ;;
+    --coalesce|--coalesce=*)
+      [ -z "$COALESCE_KEY" ] || { echo "error: duplicate --coalesce" >&2; exit 1; }
+      if [ "$1" = --coalesce ]; then
+        [ $# -ge 2 ] || { echo "error: --coalesce requires a key" >&2; exit 1; }
+        COALESCE_KEY=$2
+        shift 2
+      else
+        COALESCE_KEY=${1#--coalesce=}
+        shift
+      fi
+      case "$COALESCE_KEY" in
+        ''|*[!A-Za-z0-9._-]*)
+          echo "error: --coalesce '$COALESCE_KEY' is not a valid key (allowed: A-Z a-z 0-9 . _ -)" >&2
+          exit 1
+          ;;
+      esac
       ;;
     *) break ;;
   esac
@@ -573,6 +599,35 @@ if [ -n "$FIRE_AND_FORGET_ID" ]; then
     || { echo "error: --fire-and-forget requires a recorded secondmate task selector" >&2; exit 1; }
   [ -z "$RESOLVE_KEYS" ] \
     || { echo "error: --fire-and-forget cannot accompany --resolve-key" >&2; exit 1; }
+fi
+
+if [ -n "$COALESCE_KEY" ]; then
+  coalesce_refusal=
+  if [ "${1:-}" = "--key" ]; then
+    coalesce_refusal="it cannot accompany --key"
+  elif [ -z "$*" ]; then
+    coalesce_refusal="it requires a nonempty message"
+  elif [ -n "$RESOLVE_KEYS" ] || [ -n "$FIRE_AND_FORGET_ID" ]; then
+    coalesce_refusal="it cannot accompany --resolve-key or --fire-and-forget"
+  elif [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
+    coalesce_refusal="it cannot combine with FM_SEND_IDEMPOTENT=1"
+  elif [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
+    coalesce_refusal="it needs a task selector resolved through this home's metadata"
+  elif [ "$TARGET_BACKEND" = remote ] || [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
+    coalesce_refusal="a secondmate request carries a reply expectation that a replaced record would orphan"
+  else
+    case "$*" in
+      /*) coalesce_refusal="parser-native text rides the typed plane, which has no inbox to coalesce" ;;
+      \$*)
+        [ "$TARGET_HARNESS" != codex ] \
+          || coalesce_refusal="parser-native text rides the typed plane, which has no inbox to coalesce"
+        ;;
+    esac
+  fi
+  if [ -n "$coalesce_refusal" ]; then
+    echo "error: --coalesce refused: $coalesce_refusal; nothing was sent" >&2
+    exit 1
+  fi
 fi
 
 if [ -n "$RESOLVE_KEYS" ]; then
@@ -956,7 +1011,10 @@ else
       echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
     fi
-    if [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
+    if [ -n "$COALESCE_KEY" ]; then
+      INBOX_RECORD=$(fm_task_inbox_write_coalesced "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
+        "$COALESCE_KEY") || inbox_write_rc=$?
+    elif [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
       INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
         "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
     else

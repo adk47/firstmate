@@ -194,12 +194,23 @@ fm_control_backend_supports_key() {  # <backend> <key>
   return 1
 }
 
-# Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, and cmux report
+# Whether <backend> has a recovery-grade agent-state classifier. tmux, herdr,
+# and orca implement fm_backend_agent_state; zellij and cmux report
 # `unverified`, so no reading of theirs can prove an agent stopped. The control
 # plane refuses a stop-proving verb there instead of reporting an unprovable
 # transition as success.
 fm_control_backend_state_verified() {  # <backend>
+  case "${1-}" in
+    tmux|herdr|orca) return 0 ;;
+  esac
+  return 1
+}
+
+# Whether a relaunch into <backend>'s existing endpoint is proven end to end:
+# a classifier that can prove the old agent stopped AND a verified relaunch of
+# a replacement into that same endpoint. Orca has the first (exit works) but
+# its in-place relaunch has not been proven, so it stays refused.
+fm_control_backend_relaunch_verified() {  # <backend>
   case "${1-}" in
     tmux|herdr) return 0 ;;
   esac
