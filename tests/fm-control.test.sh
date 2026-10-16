@@ -432,15 +432,22 @@ test_unverified_state_backends_refuse_stop_verbs() {
   pass "fm-control: a backend that cannot prove an agent stopped refuses exit and relaunch"
 }
 
-test_state_verified_backends_are_exactly_tmux_and_herdr() {
-  fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
-  fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
+test_state_verified_backends_are_exactly_tmux_herdr_and_orca() {
   local backend
-  for backend in zellij orca cmux; do
+  for backend in tmux herdr orca; do
+    fm_control_backend_state_verified "$backend" || fail "$backend has a recovery-grade classifier"
+  done
+  for backend in zellij cmux; do
     fm_control_backend_state_verified "$backend" \
       && fail "$backend has no recovery-grade classifier and must not claim one"
   done
-  pass "fm-control-lib: stop-proving verbs are gated on the backends that really classify agent state"
+  fm_control_backend_relaunch_verified tmux || fail "tmux relaunch is proven"
+  fm_control_backend_relaunch_verified herdr || fail "herdr relaunch is proven"
+  for backend in orca zellij cmux; do
+    fm_control_backend_relaunch_verified "$backend" \
+      && fail "$backend has no proven in-place relaunch and must not claim one"
+  done
+  pass "fm-control-lib: stop-proving verbs are gated on the backends that really classify agent state, relaunch on proven relaunches"
 }
 
 # --- 3. exact-id scoping ----------------------------------------------------
@@ -883,7 +890,7 @@ test_backend_key_capability_matrix
 test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
-test_state_verified_backends_are_exactly_tmux_and_herdr
+test_state_verified_backends_are_exactly_tmux_herdr_and_orca
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused

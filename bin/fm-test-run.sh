@@ -325,7 +325,7 @@ family_for_basename() {
     fm-backend-zellij.test.sh|fm-backend-zellij-smoke.test.sh)
       printf '%s\n' zellij
       ;;
-    fm-backend-orca.test.sh)
+    fm-backend-orca.test.sh|fm-backend-orca-agent-state.test.sh)
       printf '%s\n' orca
       ;;
     fm-branch-supervision.test.sh|fm-busy-adapter-wiring.test.sh|\
@@ -554,6 +554,7 @@ tests/fm-afk-return.test.sh 1837
 tests/fm-ask-user-authority.test.sh 128
 tests/fm-backend-cmux-smoke.test.sh 33
 tests/fm-backend-cmux.test.sh 3657
+tests/fm-backend-orca-agent-state.test.sh 32000
 tests/fm-backend-orca.test.sh 19253
 tests/fm-backend-tmux-smoke.test.sh 393
 tests/fm-backend-zellij-smoke.test.sh 23

@@ -288,3 +288,137 @@ fm_backend_orca_kill() {  # <terminal-id>
   fm_backend_orca_tool_check || return 0
   orca terminal close --terminal "$1" --json >/dev/null 2>&1 || true
 }
+
+# --- recovery-grade agent state ---------------------------------------------
+#
+# Orca's per-terminal agentIdentity and title are sticky: a terminal keeps
+# agentIdentity=pi and a "Pi ready" title after the agent has exited back to
+# the shell (observed live on Orca 1.4.224), so no Orca display field can
+# prove a stop. The classifier reads the pane's process tree instead, using
+# Orca only to name that tree's root:
+#   1. `orca terminal show` gives the terminal's ptyId; Orca's
+#      terminal_handle_stale answer is its authoritative "no such terminal"
+#      (`missing`), and any other failure is `unreadable`.
+#   2. `orca diagnostics memory` (Orca's own host process sweep, ~0.3s) maps
+#      that ptyId to the pty's root pid. A terminal with no swept session is
+#      `unreadable`.
+#   3. One `ps` snapshot gives every descendant of that root. Any descendant
+#      the shared harness-name classifier (the tmux adapter's
+#      fm_backend_tmux_classify_process_name) calls an agent is `alive`; a tree
+#      holding nothing but shells below the root is `dead`; any other
+#      descendant (an unrecognized process that could be a renamed harness) is
+#      `ambiguous`, the same fail-safe fold the tmux adapter applies.
+# Exit (bin/fm-control.sh) is the consumer; relaunch stays gated separately
+# (bin/fm-control-lib.sh) until an Orca relaunch is proven end to end.
+
+# fm_backend_orca_terminal_pty_id <terminal>: prints the terminal's ptyId.
+# Returns 3 for Orca's authoritative stale-handle answer, 1 otherwise.
+fm_backend_orca_terminal_pty_id() {  # <terminal-id>
+  local terminal=$1 out
+  fm_backend_orca_tool_check 2>/dev/null || return 1
+  out=$(orca terminal show --terminal "$terminal" --json 2>/dev/null || true)
+  [ -n "$out" ] || return 1
+  printf '%s' "$out" | node -e '
+const fs = require("fs");
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (err) { process.exit(1); }
+if (data.ok === false) {
+  const code = data.error && data.error.code;
+  process.exit(code === "terminal_handle_stale" ? 3 : 1);
+}
+const t = (data.result && data.result.terminal) || {};
+const id = typeof t.ptyId === "string" ? t.ptyId : "";
+if (!id || /[\t\n]/.test(id)) process.exit(1);
+process.stdout.write(id);
+'
+}
+
+# fm_backend_orca_pty_root_pid <pty-id>: the root pid Orca's host process
+# sweep records for that pty session, or fail.
+fm_backend_orca_pty_root_pid() {  # <pty-id>
+  local pty=$1 out
+  out=$(orca diagnostics memory --json 2>/dev/null || true)
+  [ -n "$out" ] || return 1
+  printf '%s' "$out" | node -e '
+const fs = require("fs");
+const want = process.argv[1];
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (err) { process.exit(1); }
+if (data.ok === false) process.exit(1);
+const worktrees = (data.result && data.result.worktrees) || [];
+for (const w of worktrees) {
+  for (const s of (w.sessions || [])) {
+    if (s && s.sessionId === want && Number.isInteger(s.pid) && s.pid > 1) {
+      process.stdout.write(String(s.pid));
+      process.exit(0);
+    }
+  }
+}
+process.exit(1);
+' "$pty"
+}
+
+# fm_backend_orca_tree_state <root-pid>: alive|dead|ambiguous|unreadable for
+# the processes below <root-pid> (the root itself is Orca's pty wrapper, such
+# as /usr/bin/login, and is never classified).
+fm_backend_orca_tree_state() {  # <root-pid>
+  local root=$1 snapshot tree pid comm verdict sep=$'\x1f' verdicts=$'\x1f' other=0
+  case "$root" in ''|*[!0-9]*) printf 'unreadable'; return 0 ;; esac
+  fm_backend_source tmux || { printf 'unreadable'; return 0; }
+  snapshot=$(LC_ALL=C ps -axo pid=,ppid=,comm= 2>/dev/null) || { printf 'unreadable'; return 0; }
+  printf '%s\n' "$snapshot" | awk -v r="$root" '$1 == r { found = 1 } END { exit !found }' \
+    || { printf 'unreadable'; return 0; }
+  # Every descendant of the root as "<pid>\t<comm>", breadth-first.
+  tree=$(printf '%s\n' "$snapshot" | awk -v r="$root" '
+    {
+      pid = $1; ppid = $2
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+/, "")
+      comm[pid] = $0; kids[ppid] = kids[ppid] " " pid
+    }
+    END {
+      n = split(kids[r], q, " "); head = 1
+      while (head <= n) {
+        p = q[head++]
+        if (p == "") continue
+        print p "\t" comm[p]
+        m = split(kids[p], more, " ")
+        for (i = 1; i <= m; i++) if (more[i] != "") q[++n] = more[i]
+      }
+    }')
+  while IFS=$'\t' read -r pid comm; do
+    [ -n "$pid" ] || continue
+    # Classify each distinct name once; every classification is a subshell.
+    case "$verdicts" in
+      *"$sep$comm=agent$sep"*) verdict=agent ;;
+      *"$sep$comm=shell$sep"*) verdict=shell ;;
+      *"$sep$comm=other$sep"*) verdict=other ;;
+      *)
+        verdict=$(fm_backend_tmux_classify_process_name "$comm")
+        verdicts="$verdicts$comm=$verdict$sep"
+        ;;
+    esac
+    case "$verdict" in
+      agent) printf 'alive'; return 0 ;;
+      shell) ;;
+      *) other=1 ;;
+    esac
+  done <<< "$tree"
+  if [ "$other" -eq 1 ]; then
+    printf 'ambiguous'
+  else
+    printf 'dead'
+  fi
+}
+
+fm_backend_orca_agent_state() {  # <terminal-id>
+  local terminal=$1 pty root rc=0
+  case "$terminal" in ''|*[!A-Za-z0-9_-]*) printf 'unreadable'; return 0 ;; esac
+  pty=$(fm_backend_orca_terminal_pty_id "$terminal") || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    printf 'missing'
+    return 0
+  fi
+  [ "$rc" -eq 0 ] || { printf 'unreadable'; return 0; }
+  root=$(fm_backend_orca_pty_root_pid "$pty") || { printf 'unreadable'; return 0; }
+  fm_backend_orca_tree_state "$root"
+}
