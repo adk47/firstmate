@@ -1119,6 +1119,7 @@ FM_INACTIVE_RECONCILE_BUDGET_SECS=10  # 1..30-second scan deadline; wedged-scan 
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or Relay dispatch)
 FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may sit before the watcher attempts doorbell delivery on an idle pane; also the minimum spacing between attempts
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
+FM_TASK_INBOX_LOCK_WAIT_SECS=15   # bounded wait for a task's inbox sequence lock and metadata lock before fm-send refuses the steer as undelivered
 FM_LOCK_REAP_INTERVAL=300     # seconds between the watcher's detached stale per-task lock sweeps (bin/fm-lock-reap.sh); each reap lands in state/.watch-triage.log; 0 disables
 FM_STALE_LOCK_REAP_SECS=60    # minimum pid-record age before a metadata or inbox lock whose holder is dead or whose pid was recycled may be reaped (bin/fm-wake-lib.sh fm_lock_reap_stale)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script

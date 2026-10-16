@@ -79,6 +79,8 @@
 # Tunables (env):
 #   FM_TASK_INBOX_GRACE_SECS   default 90; delivery-attempt grace and spacing
 #   FM_TASK_INBOX_RING_MAX     default 3; delivery attempts before escalation
+#   FM_TASK_INBOX_LOCK_WAIT_SECS  default 15; bounded wait for the sequence and
+#                              metadata locks before a send is refused
 
 _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Both dependencies are canonical lint roots in their own right. Keep them as
@@ -92,7 +94,7 @@ _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
 FM_TASK_INBOX_RING_MAX_DEFAULT=3
-FM_TASK_INBOX_LOCK_WAIT_DEFAULT=5
+FM_TASK_INBOX_LOCK_WAIT_DEFAULT=15
 
 fm_task_inbox_grace_secs() {
   local g=${FM_TASK_INBOX_GRACE_SECS:-$FM_TASK_INBOX_GRACE_DEFAULT}
@@ -143,28 +145,49 @@ fm_task_inbox_next_seq() {  # <inbox-dir>
 # (bin/fm-wake-lib.sh) once its record is old enough. Either reclaim prints
 # one stderr line naming the lock and the gone holder, so a recovered send
 # leaves evidence instead of silently stealing.
+# While a verified live holder keeps the lock, the wait re-reads its pid with
+# shell builtins instead of re-running the claim: each claim attempt forks a
+# dozen processes, and on a loaded host contending writers spent the whole
+# bounded wait in those forks (slowing the holder too) and refused sends that
+# a cheaper wait would have delivered.
+_fm_task_inbox_lock_live_holder() {  # <lock-path> <own-pid>
+  local pid
+  [ -e "$1/pid" ] || return 1
+  IFS= read -r pid < "$1/pid" 2>/dev/null || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" != "$2" ] || return 1
+  fm_pid_alive "$pid"
+}
+
 fm_task_inbox_lock_acquire() {  # <lock-path>
   local lock=$1 wait=${FM_TASK_INBOX_LOCK_WAIT_SECS:-$FM_TASK_INBOX_LOCK_WAIT_DEFAULT}
-  local deadline probe reaped reap_tried=0
+  local deadline probe reaped reap_tried=0 self=
   case "$wait" in ''|*[!0-9]*) wait=$FM_TASK_INBOX_LOCK_WAIT_DEFAULT ;; esac
   probe=$(mktemp "${lock%/*}/.lock-probe.XXXXXX") || return 1
   rm -f "$probe" || return 1
   if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
     fm_lock_try_create "$lock" && return 0
   fi
-  deadline=$(( $(date +%s) + wait ))
-  while ! fm_lock_try_acquire "$lock"; do
+  fm_current_pid self || self=
+  deadline=$(( SECONDS + wait ))
+  while :; do
+    if [ "$reap_tried" -eq 1 ] && _fm_task_inbox_lock_live_holder "$lock" "$self"; then
+      [ "$SECONDS" -lt "$deadline" ] || return 1
+      sleep 0.05
+      continue
+    fi
+    fm_lock_try_acquire "$lock" && break
     # One reuse probe per acquisition: a record's age cannot cross the reap
     # threshold meaningfully inside this short wait, and probing every spin
     # would tax the very contention it waits out.
-    if [ "$reap_tried" -eq 0 ] && [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+    if [ "$reap_tried" -eq 0 ]; then
       reap_tried=1
-      if reaped=$(fm_lock_reap_stale "$lock"); then
+      if [ -n "${FM_LOCK_HELD_PID:-}" ] && reaped=$(fm_lock_reap_stale "$lock"); then
         echo "fm-task-inbox: reclaimed stale lock: $reaped" >&2
         continue
       fi
     fi
-    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 0.1
   done
   if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
