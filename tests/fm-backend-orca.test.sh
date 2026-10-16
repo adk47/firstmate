@@ -545,6 +545,82 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
 }
 
+# An Orca relaunch replaces a terminal Orca reports gone with a NEW terminal in
+# the task's recorded Orca worktree, republishes the record with it, and keeps
+# refusing while the recorded terminal still exists.
+spawn_orca_task_for_relaunch() {  # <id> <name> -> sets RL_* paths
+  local id=$1 name=$2 out
+  RL_PROJ="$TMP_ROOT/$name-project"
+  RL_WT="$TMP_ROOT/$name-wt"
+  RL_DATA="$TMP_ROOT/$name-data"
+  RL_STATE="$TMP_ROOT/$name-state"
+  RL_CONFIG="$TMP_ROOT/$name-config"
+  fm_git_worktree "$RL_PROJ" "$RL_WT" "fm/$id"
+  mkdir -p "$RL_DATA/$id" "$RL_STATE" "$RL_CONFIG"
+  write_spawn_brief "$RL_DATA" "$id"
+  touch "$RL_STATE/.last-watcher-beat"
+  orca_case "$name"
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-rl"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-rl","path":"%s"},"terminal":{"handle":"term-old"}}}\n' "$RL_WT" > "$RESP/3.out"
+  out=$(run_relaunch_spawn "$id" "$RL_PROJ" claude --mode no-mistakes --yolo off --backend orca) \
+    || fail "fixture spawn for the Orca relaunch failed: $out"
+  assert_grep "terminal=term-old" "$RL_STATE/$id.meta" "fixture spawn did not record its terminal"
+}
+
+run_relaunch_spawn() {  # <fm-spawn args...>
+  HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$RL_STATE" FM_DATA_OVERRIDE="$RL_DATA" FM_CONFIG_OVERRIDE="$RL_CONFIG" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$@" 2>&1
+}
+
+reset_orca_responses() {
+  rm -f "$RESP"/*.out "$RESP"/*.exit "$RESP/.count"
+  : > "$LOG"
+}
+
+test_relaunch_replaces_a_gone_orca_terminal_with_a_new_one() {
+  local id=orcarelaunchz1 out spawn_gen
+  spawn_orca_task_for_relaunch "$id" relaunch-gone
+  spawn_gen=$(grep '^spawn_gen=' "$RL_STATE/$id.meta")
+  reset_orca_responses
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-rl","path":"%s"}}}\n' "$RL_WT" > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-new"}}}\n' > "$RESP/3.out"
+  out=$(run_relaunch_spawn "$id" --relaunch)
+  expect_code 0 $? "relaunching a task whose Orca terminal is gone should succeed"$'\n'"$out"
+  assert_grep "terminal=term-new" "$RL_STATE/$id.meta" "the republished record should name the new terminal"
+  assert_grep "orca_worktree_id=wt-rl" "$RL_STATE/$id.meta" "the relaunch must keep the recorded Orca worktree"
+  assert_grep "worktree=$RL_WT" "$RL_STATE/$id.meta" "the relaunch must keep the recorded worktree"
+  [ "$(grep '^spawn_gen=' "$RL_STATE/$id.meta")" != "$spawn_gen" ] \
+    || fail "a relaunch must record a new incarnation"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create'$'\x1f''--worktree'$'\x1f''id:wt-rl' \
+    "the replacement terminal should be created in the recorded Orca worktree"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-new' \
+    "the replacement agent should launch in the new terminal"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "a relaunch must never remove the task's worktree"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn --relaunch on Orca: a gone terminal is replaced by a new one in the recorded worktree"
+}
+
+test_relaunch_refuses_while_the_orca_terminal_exists() {
+  local id=orcarelaunchz2 out rc
+  spawn_orca_task_for_relaunch "$id" relaunch-live
+  reset_orca_responses
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-old","ptyId":"wt-rl@@p1","worktreePath":"%s"}}}\n' "$RL_WT" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[]}}\n' > "$RESP/2.out"
+  out=$(run_relaunch_spawn "$id" --relaunch); rc=$?
+  [ "$rc" -ne 0 ] || fail "relaunch must refuse while Orca still has the terminal"$'\n'"$out"
+  assert_contains "$out" "only replaces a terminal Orca no longer has" "the refusal should name the missing-terminal rule"
+  assert_grep "terminal=term-old" "$RL_STATE/$id.meta" "a refused relaunch must leave the record untouched"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create' \
+    "a refused relaunch must not create a terminal"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn --relaunch on Orca: a terminal Orca still has is refused and left untouched"
+}
+
 test_spawn_refuses_orca_secondmate_before_home_mutation() {
   local home subhome data state config id out status
   id="orcasmz1"
@@ -1435,6 +1511,8 @@ test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
+test_relaunch_replaces_a_gone_orca_terminal_with_a_new_one
+test_relaunch_refuses_while_the_orca_terminal_exists
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree

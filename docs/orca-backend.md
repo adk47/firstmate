@@ -61,6 +61,7 @@ The recovery-grade agent state that `fm-control.sh exit` needs comes from the pa
 Orca keeps a terminal's `agentIdentity` and agent title after the agent exits back to the shell, so those fields never prove a stop.
 `orca terminal show` names the terminal's pty, Orca's own host process sweep (`orca diagnostics memory`) names that pty's root pid, and the shared harness-name classifier reads every process below it: a harness is `alive`, only shells is `dead`, anything else is `ambiguous`, and Orca's stale-handle answer is `missing` (`bin/backends/orca.sh` owns the mechanics).
 In-place `relaunch` stays refused on Orca until a replacement launch into the same terminal is proven.
+When Orca reports a task's terminal gone (`missing`, as after an Orca or host restart), `bin/fm-spawn.sh <id> --relaunch` launches the replacement in a new terminal in the task's recorded Orca worktree and republishes the record with it; a live or shell-only terminal still refuses.
 
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
@@ -76,7 +77,7 @@ It never raw-deletes an Orca worktree.
 - The app must be running and report ready.
 - Secondmate spawns are unsupported.
 - Escape is unsupported.
-- `fm-control.sh relaunch` is unsupported; exit the worker and respawn the task instead.
+- `fm-control.sh relaunch` is unsupported; exit the worker and respawn the task instead, or use `fm-spawn.sh <id> --relaunch` once Orca no longer has the terminal.
 - Firstmate does not gate on the version or capability list Orca reports, so readiness is the compatibility gate rather than a version floor.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.
 - Orca's worktree shape is unverified against the spawn-time Claude workspace-trust check in `bin/fm-claude-trust.sh`, which refuses any path that is not a linked git worktree sharing the project's git common dir, so a claude spawn on Orca fails loudly at that check rather than launching if Orca clones instead of linking.

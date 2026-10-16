@@ -45,12 +45,17 @@ fm_current_pid() {  # [output-variable]
   fi
 }
 
+# fm_pid_alive <pid>: 0 while <pid> names a running process. kill -0 also
+# fails with EPERM for a live process owned by another user, which must never
+# read as dead (a lock held by it would be stolen or reaped), so a failed
+# signal probe is confirmed with ps before the pid is reported gone.
 fm_pid_alive() {
   local pid=$1
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  kill -0 "$pid" 2>/dev/null
+  kill -0 "$pid" 2>/dev/null && return 0
+  ps -p "$pid" >/dev/null 2>&1
 }
 
 fm_pid_identity() {
