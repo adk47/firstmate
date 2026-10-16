@@ -7,6 +7,8 @@ setup() {
   export MUSO_BIN="$BATS_TEST_DIRNAME/fixtures/ad-screening/fake-muso.sh"
   export FAKE_MUSO_CALL_MARKER="$BATS_TEST_TMPDIR/calls"
   export AD_SCREENING_DISABLED_FILE="$BATS_TEST_TMPDIR/absent.disabled"
+  export MUSO_ENV=prod
+  unset MUSO_AD_SCREENING_ENV
   PAYLOAD="$BATS_TEST_TMPDIR/payload.json"
   echo '{"screeningKey":"k1","recommendation":"approve","confidence":0.9,"brandFit":"good","harmFlags":[],"reason":"ok","creativeDescription":"d","modelVersion":"v1"}' > "$PAYLOAD"
 }
@@ -17,7 +19,7 @@ assert_stub_not_called() { [ ! -e "$FAKE_MUSO_CALL_MARKER" ]; }
   run "$WRAPPER" put 4242 "$PAYLOAD"
   [ "$status" -eq 0 ]
   [ "$(wc -l < "$FAKE_MUSO_CALL_MARKER")" -eq 1 ]
-  grep -qx -- "api PUT /admin/ads/4242/screening --data @$PAYLOAD --requester screener@hydra-ad-screening" "$FAKE_MUSO_CALL_MARKER"
+  grep -qx -- "api PUT /admin/ads/4242/screening --data @$PAYLOAD --requester screener@hydra-ad-screening --env prod" "$FAKE_MUSO_CALL_MARKER"
   # --file is multipart upload in muso api, not a JSON body
   ! grep -q -- "--file" "$FAKE_MUSO_CALL_MARKER"
 }
@@ -107,4 +109,38 @@ assert_stub_not_called() { [ ! -e "$FAKE_MUSO_CALL_MARKER" ]; }
   AD_SCREENING_CALLER='a b' run "$WRAPPER" put 4242 "$PAYLOAD"
   [ "$status" -eq 3 ]
   assert_stub_not_called
+}
+
+@test "MUSO_ENV unset and no override -> exit 3 refused, stub not called" {
+  unset MUSO_ENV
+  run "$WRAPPER" put 4242 "$PAYLOAD"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"refused — MUSO_ENV unset"* ]]
+  assert_stub_not_called
+}
+
+@test "MUSO_ENV empty and no override -> exit 3 refused, stub not called" {
+  MUSO_ENV= run "$WRAPPER" put 4242 "$PAYLOAD"
+  [ "$status" -eq 3 ]
+  assert_stub_not_called
+}
+
+@test "MUSO_ENV=dev passes --env dev explicitly" {
+  MUSO_ENV=dev run "$WRAPPER" put 4242 "$PAYLOAD"
+  [ "$status" -eq 0 ]
+  grep -q -- " --env dev$" "$FAKE_MUSO_CALL_MARKER"
+}
+
+@test "MUSO_AD_SCREENING_ENV wins over MUSO_ENV" {
+  MUSO_ENV=prod MUSO_AD_SCREENING_ENV=dev run "$WRAPPER" put 4242 "$PAYLOAD"
+  [ "$status" -eq 0 ]
+  grep -q -- " --env dev$" "$FAKE_MUSO_CALL_MARKER"
+  ! grep -q -- "--env prod" "$FAKE_MUSO_CALL_MARKER"
+}
+
+@test "MUSO_AD_SCREENING_ENV alone is enough when MUSO_ENV is unset" {
+  unset MUSO_ENV
+  MUSO_AD_SCREENING_ENV=prod run "$WRAPPER" put 4242 "$PAYLOAD"
+  [ "$status" -eq 0 ]
+  grep -q -- " --env prod$" "$FAKE_MUSO_CALL_MARKER"
 }
