@@ -23,7 +23,7 @@ setup() {
     # was inherited from /var/log/openclaw/credit-batch-runs.
     export OPS_RUNLOG_DIR="$TEST_ROOT/runlogs"
     mkdir -p "$OPS_RUNLOG_DIR"
-    unset REQUESTER_EMAIL UVN_POPULARITY_CRON CV_APPROVE_GATE_DISABLED EVIDENCE_EXCERPT \
+    unset REQUESTER_EMAIL UVN_POPULARITY_CRON CREDIT_TRUST_DECIDE CV_APPROVE_GATE_DISABLED EVIDENCE_EXCERPT \
           CV_SESSION_LOG_OVERRIDE CV_SESSION_RUN_STARTED_TS
     export CV_REQUIRED_LOADS=2
     export CV_SESSION_MAX_AGE_MIN=10
@@ -200,6 +200,67 @@ write_session_log() {
     source_gate
     write_session_log "s.jsonl" '{}'
     REQUESTER_EMAIL="someone@evil.com" run enforce_credit_approve_gate PUT /admin/credit-requests '{"requestIds":["cr-1"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+}
+
+# --- Trust-yet-verify decider (credit-trust-decide) ------------------------
+
+decide_registry() {
+    # $1 = approved (true|false), $2 = approved_by
+    jq -n --argjson a "$1" --arg by "$2" '{automations:{"credit-trust-decide":{approved:$a, approved_by:$by, approval_ref:"captain 2026-10-15 ~22:12Z"}}}' \
+        > "$TEST_ROOT/registry.json"
+    export CREDIT_APPROVAL_REGISTRY="$TEST_ROOT/registry.json"
+}
+
+@test "credit-trust-decide: exact conditional unverified-to-approved batch is allowed when registered" {
+    decide_registry true "captain (Aaron)"
+    source_gate
+    REQUESTER_EMAIL="credit-trust-decide@hydra-ops" CREDIT_TRUST_DECIDE=1 \
+        run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status \
+            '{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"unverified"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "credit-trust-decide: registry not approved (or no approver) refuses at the write boundary" {
+    local valid='{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"unverified"}'
+    decide_registry false "captain (Aaron)"
+    source_gate
+    REQUESTER_EMAIL="credit-trust-decide@hydra-ops" CREDIT_TRUST_DECIDE=1 \
+        run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$valid"
+    [ "$status" -eq 1 ]
+    decide_registry true ""
+    REQUESTER_EMAIL="credit-trust-decide@hydra-ops" CREDIT_TRUST_DECIDE=1 \
+        run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$valid"
+    [ "$status" -eq 1 ]
+    export CREDIT_APPROVAL_REGISTRY="$TEST_ROOT/missing.json"
+    REQUESTER_EMAIL="credit-trust-decide@hydra-ops" CREDIT_TRUST_DECIDE=1 \
+        run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$valid"
+    [ "$status" -eq 1 ]
+}
+
+@test "credit-trust-decide: near-miss shapes and identities still require normal evidence" {
+    decide_registry true "captain (Aaron)"
+    source_gate
+    export REQUESTER_EMAIL="credit-trust-decide@hydra-ops"
+    export CREDIT_TRUST_DECIDE=1
+    local valid='{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"unverified"}'
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status \
+        '{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"user_verification_needed"}'
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PUT /admin/credit-requests \
+        '{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved"}'
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status \
+        '{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"unverified","force":true}'
+    [ "$status" -eq 1 ]
+    local too_many
+    too_many=$(jq -nc '{requestIds:[range(51) | "11111111-1111-4111-8111-" + (("000000000000" + tostring)[-12:])],status:"approved",expectedStatus:"unverified"}')
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$too_many"
+    [ "$status" -eq 1 ]
+    CREDIT_TRUST_DECIDE=0 run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$valid"
+    [ "$status" -eq 1 ]
+    REQUESTER_EMAIL="uvn-popularity-cron@hydra-ops" run enforce_credit_approve_gate \
+        PUT /admin/credit-requests/conditional-status "$valid"
     [ "$status" -eq 1 ]
 }
 

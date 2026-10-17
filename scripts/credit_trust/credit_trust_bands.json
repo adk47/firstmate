@@ -1,0 +1,148 @@
+{
+  "_comment": "Credit-trust band table shared by IDP (validator band_hint) and hydra (Ops decision runner, T07). Fable credit-trust design 2026-10-15: report.md section 3.4 + tickets T07/T11. hydra keeps a byte-identical mirror; tests/common/credit_trust_bands_parity_test.py compares the two. Change both in the same pair of PRs.",
+  "version": 1,
+  "approve_threshold": 30.0,
+  "big_track_popularity": 60,
+  "big_artist_popularity": 90,
+  "tiers": {
+    "_comment": "Verifier design R1 (by Spotify popularity). IDP's big track (_is_big_track) = T2/T3: popularity >= big_track_popularity, a track artist >= big_artist_popularity, or an unknown popularity.",
+    "T0": {"min_popularity": 0, "max_popularity": 29},
+    "T1": {"min_popularity": 30, "max_popularity": 59},
+    "T2": {"min_popularity": 60, "max_popularity": 79},
+    "T3": {"min_popularity": 80, "max_popularity": 100}
+  },
+  "bands": {
+    "A": "auto-approve: the validator approved and the approval rests on trusted (non-muso) evidence: a trusted shortcut, or a score approval by a claimant with a trusted footprint",
+    "B": "request info: held or declined on evidence the claimant can supply (a high profile-level risk, big track without a trusted credit, weak footprint, risk >= approve_threshold), or approved on muso-only evidence / a weak footprint (audit, never band A)",
+    "C": "Ops decision: held for a reason the claimant cannot answer (trusted contradiction, account flags, velocity except an editing burst, Ops tombstone, a duplicate request, an auto-reject rule, an evaluation error)",
+    "D": "human only (never emitted by IDP): forged document on T2/T3, take-back on a paying account, T3 approvals, two escalations"
+  },
+  "band_c_rules": [
+    "reject_deleted_catalog_track",
+    "reject_high_risk_profile",
+    "reject_artist_credit",
+    "reject_individual_org_credit",
+    "reject_publisher_label_credit",
+    "review_role_credited_to_other_at_trusted_source",
+    "review_high_velocity_profile",
+    "review_hourly_velocity_profile",
+    "review_held_submitter",
+    "review_operations_tombstone",
+    "review_duplicate_of_approved_credit",
+    "validation_error"
+  ],
+  "band_c_error_keys": [
+    "_hold_on_error",
+    "_no_signal",
+    "validation_error"
+  ],
+  "band_b_rules": [
+    "review_org_role_without_outside_source",
+    "review_high_risk_profile_score",
+    "review_editing_role_without_trusted_credit",
+    "review_big_track_weak_footprint",
+    "review_big_track_without_trusted_credit"
+  ],
+  "trusted_shortcut_rules": [
+    "approve_owning_track",
+    "approve_credit_exists",
+    "approve_common_collaborator"
+  ],
+  "shortcut_sources": ["trusted", "muso"],
+  "band_a_requires_shortcut_source": "trusted",
+  "evidence_bar": {
+    "_comment": "Captain 2026-10-15 ~22:04Z: 'it should be very hard to get a high popularity track credit approved if the documentation is weak'. The bar scales with the tier. On T2/T3 an approval needs ALL of: a forensically genuine primary document naming the claimant in the claimed role, independent corroboration, and a footprint consistent with the role. Weak documents never count. Enforced by the deciding server (core T02/T12, hydra T07) with evidence_bar_missing(); IDP stamps the tier and the requirements on every claim.",
+    "big_tiers": ["T2", "T3"],
+    "requirements": ["genuine_primary_document", "independent_corroboration", "consistent_footprint"],
+    "final_decider": {"T0": "band_table", "T1": "band_table", "T2": "ops", "T3": "human"},
+    "primary_document_kinds": ["split_sheet", "label_paperwork", "studio_paperwork", "pro_registration", "mlc_registration", "liner_credit"],
+    "weak_document_kinds": ["screenshot", "self_made_sheet", "unverifiable", "web_mention_only"],
+    "genuine_forensic_verdicts": ["VERIFIED"],
+    "min_independent_cited_domains": 2
+  },
+  "high_risk_roles": {
+    "_comment": "Captain 2026-10-15 ~23:42Z: 'also some abusers of editorial roles - we need this to be verified on high risk too'. Editing/editorial roles are easy to claim and rarely in public credits. A claimed credit is high-risk when its dict code matches code_pattern or one of its catalog roles is in catalog_children. Rules: never band A unless a trusted source credits the claimant in that role on the track (or its master); from documents_from_tier up a claim without that trusted credit is held for documents; a claim with a high-risk role runs at 1/velocity_weight of the velocity caps.",
+    "catalog_children": ["Editorial", "Assembly"],
+    "code_pattern": "edit|compil|assembl",
+    "documents_from_tier": "T1",
+    "velocity_weight": 2
+  },
+  "profile_risk": {
+    "_comment": "Captain 2026-10-15 ~23:44Z: a holistic PROFILE-level (claimant) risk score, computed outside IDP (V2 ticket; core T02 kind=profile_review, board T03). Core sends it on the claim as content.profile_risk = {score, band, reasons, computed_at}; a band in hold_bands holds the claim under rule (docs required, no auto-approve). Absent or unparsable = no effect (the per-credit rules still apply).",
+    "bands": ["low", "elevated", "high", "critical"],
+    "hold_bands": ["high", "critical"],
+    "rule": "review_high_risk_profile_score"
+  },
+  "proof_required": {
+    "_comment": "Captain 2026-10-16 ~02:03Z: proof before approval is SCORE-DRIVEN for anyone, never a named-user list; no blanket or staff auto-approval. Every verdict carries proof_required + proof_required_reasons, consistent with band_hint: a proof ask exactly when a non-approval is band B. Band C (any band C rule fired or an evaluation error key, alone or layered under other holds) never asks the claimant: only Ops can clear it. Otherwise a non-approval asks when a rule in rules fired, an editing role was held by a velocity rule (editing_burst_rules -> reason editing_burst; that velocity hold is band B, not C), or the weighted score declined it (score_declined_reason).",
+    "rules": [
+      "review_org_role_without_outside_source",
+      "review_high_risk_profile_score",
+      "review_big_track_weak_footprint",
+      "review_editing_role_without_trusted_credit",
+      "review_big_track_without_trusted_credit"
+    ],
+    "editing_burst_rules": [
+      "review_hourly_velocity_profile",
+      "review_high_velocity_profile"
+    ],
+    "editing_burst_reason": "editing_burst",
+    "score_declined_reason": "risk_score_at_or_above_threshold"
+  },
+  "org_roles": {
+    "_comment": "Studio claims fraud check 2026-10-16: an organization role (Studio, Record Label, Publisher, Distributor, Recording Location, ...) claimed for a profile with NO outside (non-muso) source is held for proof (band B, never auto-approve): a claimant-minted org crediting itself on its own releases. A claimed credit is an org role when one of its catalog roles has a parent in catalog_parents or a child in catalog_children.",
+    "catalog_parents": ["Organizations"],
+    "catalog_children": ["Studio", "Recording Location", "Record Label", "Publisher", "Distributor"],
+    "rule": "review_org_role_without_outside_source"
+  },
+  "dedupe": {
+    "_comment": "Studio claims fraud check 2026-10-16: a user request whose every (track, role) is already a live approved credit of the profile is a duplicate: no new approval (reported not approved under rule, band C, no proof ask), logged [CREDIT_DEDUPE]. A redelivery of the request that wrote the credit (it holds the request's hourly velocity slot) is not a duplicate.",
+    "rule": "review_duplicate_of_approved_credit"
+  },
+  "hold_reasons": {
+    "_comment": "Audit finding #8 (2026-10-16): every verdict that is not an approval stores hold_reason_codes (machine) and hold_reason (one plain sentence for the board and Ops). rules: the sentence for a hold/reject rule or an error key. scoring: the phrase for a weighted scoring rule, used when the score alone declined the claim ('{score}' and '{threshold}' are filled in). Every banded rule, error key and scoring rule must have text (parity test).",
+    "rules": {
+      "reject_deleted_catalog_track": "The track has been removed from the catalog.",
+      "reject_high_risk_profile": "The claimant's profile is flagged as high risk.",
+      "reject_artist_credit": "Artist credits are taken from the streaming services and cannot be claimed.",
+      "reject_individual_org_credit": "An organization role was claimed for a person's profile.",
+      "reject_publisher_label_credit": "Label and publisher credits come from MLC and Spotify data, so a new one needs Ops review.",
+      "review_role_credited_to_other_at_trusted_source": "A trusted source credits this one-person role on the track to someone else.",
+      "review_big_track_weak_footprint": "A popular track was claimed by a profile with no trusted credit in this role on any track, no verified streaming identity, and no ownership of the release.",
+      "review_org_role_without_outside_source": "An organization role (studio, label, publisher) was claimed for a profile that exists only on Muso, with no outside source.",
+      "review_editing_role_without_trusted_credit": "An editing role was claimed on a mid-size or popular track with no trusted source naming the claimant as an editor there.",
+      "review_big_track_without_trusted_credit": "A popular track was claimed with no trusted source crediting the claimant in this role on the track.",
+      "review_high_velocity_profile": "Too many claims on popular tracks were approved for this profile in the last 24 hours.",
+      "review_hourly_velocity_profile": "Too many claims were approved for this profile in the last hour.",
+      "review_held_submitter": "The submitting account is on the credit hold list.",
+      "review_high_risk_profile_score": "The claimant's overall profile risk score is high.",
+      "review_operations_tombstone": "Muso Operations removed this credit earlier, so it cannot be re-added automatically.",
+      "review_duplicate_of_approved_credit": "Every credit in this request is already approved on this profile.",
+      "validation_error": "The claim could not be checked because of a processing error.",
+      "_hold_on_error": "A required check could not be completed, so the claim is held.",
+      "_no_signal": "No scoring check had enough data to score the claim.",
+      "profile_not_in_catalog": "The claimed profile was not found in the catalog.",
+      "track_not_in_catalog": "The claimed track was not found in the catalog.",
+      "track_pending_capture": "The track is still being imported from the streaming service.",
+      "missing_recording_ids": "The request did not name a track."
+    },
+    "score_only_code": "risk_score_at_or_above_threshold",
+    "score_only_sentence": "The risk score is {score} (approval needs under {threshold}){drivers}.",
+    "scoring": {
+      "popularity": "the track is far more popular than the claimant's profile",
+      "release_date": "the track's release date is far outside the claimant's known career",
+      "collaborations": "the claimant has not worked with these artists or collaborators before",
+      "profile_credit": "the claimant rarely or never holds this role on other tracks",
+      "track_credit": "the role is a high-risk one, or the track already has someone in this one-person role",
+      "track_artists_popularity": "the track's artists are far more popular than the claimant's profile"
+    },
+    "max_drivers": 3
+  },
+  "one_person_children": [
+    "Mixing",
+    "Immersive Mixing",
+    "Mastering",
+    "Immersive Mastering",
+    "Remastering"
+  ]
+}

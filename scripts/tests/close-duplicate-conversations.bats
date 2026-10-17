@@ -17,6 +17,8 @@ setup() {
   SCRIPTS_DIR="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   export CLOSEDUP="$SCRIPTS_DIR/close-duplicate-conversations.py"
   export STATE_DIR="$BATS_TEST_TMPDIR/state"
+  # Skip retry backoff against dead ports (24 s x 3 tests, MUS-11315); default asserted below.
+  export CLOSE_DUP_RETRY_BASE_SECS=0
   mkdir -p "$STATE_DIR"
   export CLOSE_SHADOW_LOG="$STATE_DIR/close-resolved-shadow.jsonl"
   export RESOLVE_NOTIFY_STATE="$STATE_DIR/resolve-notify.json"
@@ -833,4 +835,19 @@ assert len(seen) > 1, seen  # a head-slice would always yield {"P0"}
 print("ok")
 PYEOF
   [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+# MUS-11315: the suite zeroes the backoff; production timing must not move.
+@test "retry backoff defaults to 2 s * (attempt+1) when the knob is unset" {
+  run env -u CLOSE_DUP_RETRY_BASE_SECS python3 - <<'PYEOF'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("cd", os.environ['CLOSEDUP'])
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+slept = []
+mod.time.sleep = slept.append
+for a in range(3):
+    mod._backoff(a)
+assert slept == [2.0, 4.0, 6.0], slept
+PYEOF
+  [ "$status" -eq 0 ]
 }

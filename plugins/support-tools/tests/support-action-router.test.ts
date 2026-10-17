@@ -35,6 +35,29 @@ describe("support_action_router", () => {
     });
     expect(start.live_tools.write).toEqual(["credits_verify"]);
 
+    for (const state of ["read_ok", "missing_info"]) {
+      const out = await call({ intent: "credit_verification", state });
+      expect(out.next.outcome).not.toBe("ask_missing_info");
+      expect(out.next).toMatchObject({
+        outcome: "run_skill",
+        skill: "customer-credit-verification",
+      });
+      expect(out.next.instruction).toContain("ONLY if none was given before");
+      expect(out.next.instruction).toContain("needs-human credit-verify ticket");
+    }
+
+    // The emitted sequence must not hand off before corroboration: the proof
+    // step defers to the checks, and the handoff is only the final fallback.
+    const seq: string[] = start.sequence;
+    const proofIdx = seq.findIndex((s) => s.includes("ONLY if none was given before"));
+    const previewIdx = seq.findIndex((s) => s.includes("preview credits_verify"));
+    const handoffIdx = seq.findIndex((s) => /ticket|handoff/i.test(s));
+    expect(proofIdx).toBeGreaterThanOrEqual(0);
+    expect(seq[proofIdx]).toContain("continue with the skill's Step 3 checks");
+    expect(proofIdx).toBeLessThan(previewIdx);
+    expect(previewIdx).toBeLessThan(handoffIdx);
+    expect(handoffIdx).toBe(seq.length - 1);
+
     const preview = await call({ intent: "credit_verification", state: "preview_ok" });
     expect(preview.next).toMatchObject({
       outcome: "ask_confirmation",

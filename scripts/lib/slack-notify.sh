@@ -45,6 +45,28 @@ if [ "$MUSO_BIN" = "muso" ] && ! command -v muso >/dev/null 2>&1 && [ -x /usr/lo
   MUSO_BIN=/usr/local/bin/muso
 fi
 
+# Test fence (hydra#1195: an unfenced bats run posted 68 real messages). Both are
+# no-ops outside bats (BATS_TEST_FILENAME unset).
+# Belt 1: under bats slack_load_env never reads the live /etc/openclaw/main.env; a
+# test that points MUSO_SLACK_ENV_FILE at its own fixture still works.
+# Belt 2: under bats the installed muso is never exec'd, even with a token already
+# exported. The live env path and the installed-muso list are variables only so a
+# test can point them at fixtures.
+: "${SLACK_NOTIFY_LIVE_ENV_FILE:=/etc/openclaw/main.env}"
+: "${SLACK_NOTIFY_INSTALLED_MUSO:=/usr/local/bin/muso /usr/bin/muso}"
+_slack_refuse_installed_muso() {
+  [ -n "${BATS_TEST_FILENAME:-}" ] || return 1
+  local resolved p
+  resolved="$(command -v -- "$MUSO_BIN" 2>/dev/null)" || return 1
+  for p in $SLACK_NOTIFY_INSTALLED_MUSO; do
+    if [ "$resolved" = "$p" ]; then
+      echo "slack-notify: refusing to exec installed $p under bats" >&2
+      return 0
+    fi
+  done
+  return 1
+}
+
 # slack_load_env [BOT]: make sure the muso slack token vars are exported and
 # the token for BOT (default devops) is present. The watchdog/cron units load
 # shared.env+edge.env, not main.env where the MUSO_SLACK_* vars live — so pull
@@ -54,7 +76,8 @@ fi
 slack_load_env() {
   local bot_var
   bot_var="MUSO_SLACK_BOT_TOKEN_$(printf '%s' "${1:-devops}" | tr '[:lower:]' '[:upper:]')"
-  if [ -z "${!bot_var:-}" ] && [ -r "$MUSO_SLACK_ENV_FILE" ]; then
+  if [ -z "${!bot_var:-}" ] && [ -r "$MUSO_SLACK_ENV_FILE" ] \
+    && ! { [ -n "${BATS_TEST_FILENAME:-}" ] && [ "$MUSO_SLACK_ENV_FILE" = "$SLACK_NOTIFY_LIVE_ENV_FILE" ]; }; then
     # MUSO_STATE_DIR rides along so muso's fail-closed audit log lands in
     # the shared /var/log/muso-ops trail (RUNBOOK) even under units/crons
     # that carry neither main.env nor HOME.
@@ -86,6 +109,7 @@ slack_notify() {
   # JSON body decode to render newlines; muso's --text marshals it literally,
   # so translate here to keep the old contract.
   msg="${msg//\\n/$'\n'}"
+  _slack_refuse_installed_muso && return 0
   slack_load_env "$SLACK_NOTIFY_BOT" || return 0
   "$MUSO_BIN" slack send --bot "$SLACK_NOTIFY_BOT" \
     --channel "$SLACK_CHANNEL" --text "$msg" \
@@ -102,6 +126,7 @@ slack_notify() {
 _slack_post_payload() {
   local payload_file="$1"
   [ -r "$payload_file" ] || return 1
+  _slack_refuse_installed_muso && return 1
   slack_load_env "$SLACK_NOTIFY_BOT" || return 1
 
   local channel text thread_ts
@@ -168,6 +193,7 @@ slack_notify_payload_file_status() {
 slack_notify_payload_file_ts() {
   local payload_file="$1"
   [ -r "$payload_file" ] || return 1
+  _slack_refuse_installed_muso && return 1
   slack_load_env "$SLACK_NOTIFY_BOT" || return 1
 
   local channel text thread_ts

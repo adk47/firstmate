@@ -14,6 +14,7 @@
 # against it via args, so no real config is touched. Modeled on
 # scripts/tests/codex-auth-fanout.bats (sandbox + `run` + status/output asserts).
 bats_require_minimum_version 1.5.0
+load fixtures/declare-model-catalog
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 SCRIPT="$HYDRA_REPO/scripts/validate-config-matrix.sh"
@@ -49,6 +50,7 @@ write_profile() {
   }
 }
 JSON
+  declare_model_catalog
 }
 
 write_cron() {

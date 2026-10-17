@@ -1,4 +1,5 @@
 # Common Issues – Troubleshooting Guide
+<!-- Reviewed baseline: deploy overwrites the live copy of this file. The live edits of 2026-10-15/16 (section 8b sign-out workaround; plaque ordering) are folded in here together with PR #1224, so overwriting loses nothing. Drop this line once the next release has shipped (MUS-13058). -->
 
 Decision-tree reference for the 10 most frequent customer scenarios, based on real conversation data.
 
@@ -90,9 +91,9 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
 **Customer says:** "My credit isn't showing" / "The credit is wrong."
 
 **Resolution path:**
-0. **Ground first**: call `profile_credits_status` with the profile and the track/role in question, then branch on its diagnosis: `on_this_profile` → the credit is already visible, show them where; `pending_verification` → it's in review, not missing (Row #5 flow); `on_other_profile` → wrong-profile correction, file the handoff packet it returns; `not_found` → continue below.
+0. **Ground first**: call `profile_credits_status` with the profile and the track/role in question, then branch on its diagnosis: `on_this_profile` → the credit is already visible, show them where; `pending_verification` → it's in review, not missing (Row #5 flow); `awaiting_review` → answer from status: "N credits are waiting for our team to review - nothing you need to do right now", taking N from the diagnosis (it says "more than N" when the queue is truncated; never quote an exact capped count) (no proof ask, no date promise, and do NOT continue to step 1); `on_other_profile` → wrong-profile correction, file the handoff packet it returns; `not_found` → continue below.
 1. Is the credit missing or incorrect?
-   - If **missing**: first check the track is on Spotify – if it isn't (YouTube/Instagram-only release, live session video), we cannot add the track or its credits for now; say so plainly instead of promising a review. Otherwise ask if they've tried "Add Missing Credits" in the app. If not, walk them through it (log in > navigate to track/album > Add Missing Credits > specify role > submit). Reviews within 48 hours.
+   - If **missing**: first check the track is on Spotify – if it isn't (YouTube/Instagram-only release, live session video), we cannot add the track or its credits for now; say so plainly instead of promising a review. Otherwise ask if they've tried adding it themselves. If not, walk them through it for where they are – web: own profile > Summary panel > Add Credits > search or paste Spotify link > specify role > submit; app: track/album > Add Missing Credits > specify role > submit. Our team reviews submitted credits; review times vary, so don't promise a set time – the customer doesn't need to do anything while it waits for review.
    - If **incorrect**: continue to step 2.
 2. Is the credit sourced from Muso or an external platform?
    - Ask: does the incorrect credit appear on Spotify, Apple Music, or their distributor in the same wrong form?
@@ -131,8 +132,9 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
 6. If the credit is in "user verification needed", the `customer-credit-verification`
    skill governs the full flow (ownership check, proof intake, routing to the team).
    When it's unclear whether the credit is pending at all, `profile_credits_status`
-   reads the pending queue (`credit.pending`, `pending_verification` state) before
-   you enter the proof flow.
+   reads the pending queue (`credit.pending`, `pending_verification` state) and the
+   awaiting-review queue (`credit.awaiting_review`, `awaiting_review` state) before
+   you enter the proof flow. Awaiting-review credits need nothing from the customer.
 7. **Escalate:** If they've submitted documentation and the claim has been open more than 5 business days with no update, create a ticket with category "Credit Claim – Documentation Submitted". SLA: 2 business days.
 
 **Notes:**
@@ -291,6 +293,35 @@ This is a how-to. Steps first. Do NOT call `create_ticket` and do NOT use `actio
    - Check if they're using the right email – common issue is having multiple email addresses.
 6. If still unable to log in after all steps:
    - **Escalate:** Create a ticket with category "Login – Account Access". Include: account email (or emails they've tried), login method (email/social), error message if any. SLA: 1 business day.
+
+---
+
+## 8b. App stuck on "Error occurred. Try to reload" (iPhone or Android)
+
+**Customer says:** "The app won't load / it only works in the browser", "it keeps showing
+Error occurred. Try to reload", "reloading or restarting my phone doesn't help". The website
+(app.muso.ai) works for them.
+
+**Cause (known, 2026-10-16):** their saved login in the app has expired, and the current app
+version cannot sign itself out of an expired login, so it stays on the error screen. Reloading,
+restarting the phone or reinstalling over the top does not clear it. Signing out and back in
+does. A permanent app fix is in progress.
+
+**Resolution path:**
+1. Tell them the fix: on the error screen, tap the **sign-out icon at the top right**, then sign
+   back in with the same method they normally use (Google, Apple or email).
+   Saved reply: "Thanks for reporting this. Your app is holding on to an expired login, which it
+   can't recover from on its own yet. To fix it, tap the sign-out icon at the top right of the
+   error screen, then sign back in the way you usually do (Google, Apple or email). Everything
+   will be there. We're also releasing an app update so this can't get stuck again."
+2. If they cannot sign in again, follow section 8 (Can't log in).
+3. If the error screen comes back right after a fresh sign-in, that is a different problem:
+   create a ticket with category "App – startup error" and include the device, the app version,
+   and a screenshot of the error screen.
+
+Do NOT tell them to reinstall the app, wait, or update as the fix: none of those clears an
+expired login. (The freeze on "Add Missing Credits" on iOS 17 is a different issue, fixed by
+updating the app.)
 
 ---
 

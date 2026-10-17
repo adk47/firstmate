@@ -738,6 +738,15 @@ jobs:
           bash scripts/check-agent-bridge-doctrine.sh
           echo "::endgroup::"
 
+      - name: Gateway profile-parity check — every openclaw-<profile>.json is in every enumerated deploy/ops list
+        # MUS-2654 splits agents onto their own gateways. A profile missing from any one list
+        # (deploy.sh parser/loops, aux units, watchdog, config matrix, peer labels, deploy.yml)
+        # is silent. Enumeration parity only: deploy.sh's per-profile branches are not checked.
+        run: |
+          echo "::group::Gateway profile-parity check"
+          bash scripts/check-gateway-profile-parity.sh
+          echo "::endgroup::"
+
       - name: Intercom reply-identity doctrine check — agents post as Caroline, never as a human
         # 2026-08-31: customers saw escalation follow-ups signed "Nicholas Sollazzo"
         # mid-thread. Caroline's own replies were correct (the plugin uses
@@ -1027,24 +1036,32 @@ jobs:
             fi
           fi
 
+          # Attribute what is left (MUS-1390). A deletion the PR's own diff
+          # causes blocks (the author can fix it); unrelated node-8 state only
+          # warns, because no PR author can clean it and a check that is red on
+          # every PR carries no signal. deploy.sh Step 4a (hydra#1117) only governs an
+          # explicit HYDRA_FULL_SYNC=1 deploy; the delta-mode deploy a merge
+          # triggers never reaches it. Same lib as the tests.
           if [ -n "$deletions" ]; then
-            echo "::error::This PR would delete files from /opt/hydra/ on merge-triggered deploy"
-            echo
-            echo "Files that would be wiped:"
-            echo "$deletions" | sed 's/^/  /'
-            echo
-            echo "Each deletion means one of three things:"
-            echo "  (a) Real data created on the server that the repo doesn't know about"
-            echo "      → Pull it in: tracked file: scripts/sync-from-server.sh <target> --apply --only <path>;"
-            echo "        a path the repo never tracked is NOT pulled by that script: scp it, review it (no secrets), git add <path>. Then commit"
-            echo "  (b) Runtime state the server should own"
-            echo "      → Either commit a seed file under the path (auto-exclude will then kick in)"
-            echo "        OR add an --exclude line to RSYNC_EXCLUDES in scripts/deploy.sh"
-            echo "  (c) Actual garbage left on the server"
-            echo "      → Clean it up on node-8, then re-run this check"
-            exit 1
+            # shellcheck disable=SC1091
+            . scripts/lib/attribute-deletions.sh
+            # Baseline: what rsync would delete under the BASE's excludes. A
+            # residual deletion missing from it is exposed by this PR removing
+            # or narrowing an RSYNC_EXCLUDES entry (git shows no removed path).
+            attr_rc=0
+            baseline=$(base_exclude_deletions "$(pwd)" /opt/hydra origin/main) || attr_rc=$?
+            if [ "$attr_rc" -ne 0 ]; then
+              echo "$baseline"
+              exit 1
+            fi
+            attribute_deletions "$deletions" "$(pwd)" origin/main "$baseline" || attr_rc=$?
+            if [ "$attr_rc" -ne 0 ]; then
+              exit 1
+            fi
+            echo "Deploy pre-flight: no deletion is caused by this PR (warnings above are unrelated node-8 state)"
+            exit 0
           fi
-          echo "✓ Zero suspicious deletions — safe to deploy"
+          echo "✓ No deletion found against the live /opt/hydra tree under this PR's excludes"
 
       - name: Skill drift 3-way gate (server-ahead / conflict vs node-8)
         # Shift-left of the deploy's baseline-aware skill-drift check
@@ -1052,10 +1069,11 @@ jobs:
         # SERVER-AHEAD edits (capture them) and CONFLICTs (reconcile) BEFORE
         # merge, while letting the PR's own REPO-AHEAD edits through (the
         # #366 false-block fix). Runs on the self-hosted runner so /opt/hydra/
-        # is local. The merge-deploy Step 4a stays the authoritative backstop;
-        # this gate is intentionally stricter than the deploy (it does not
-        # honor the hot-patch ack window) and warns-not-blocks when no node-8
-        # baseline is available.
+        # is local. The merge-triggered (delta-mode) deploy does not run Step 4a;
+        # it only governs an explicit HYDRA_FULL_SYNC=1 deploy. This gate is
+        # intentionally stricter than the deploy (it does not honor the
+        # hot-patch ack window) and warns-not-blocks when no node-8 baseline
+        # is available.
         run: |
           set -euo pipefail
           chmod +x scripts/pr-skill-drift-gate.sh
@@ -1171,6 +1189,7 @@ jobs:
       JEV_ENV_FILE: /dev/null
       JEV_SHADOW_DIR: /tmp/hydra-ci-jev-shadow-${{ github.run_id }}-${{ github.job }}
       JEV_EVAL_DIR: /tmp/hydra-ci-jev-eval-${{ github.run_id }}-${{ github.job }}
+      MUSO_SLACK_ENV_FILE: /dev/null
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -1334,8 +1353,29 @@ jobs:
           count=$(echo "$files" | wc -l | tr -d ' ')
           echo "Running $count bats file(s):"
           echo "$files" | sed 's/^/  /'
+          # Parallel across FILES, serial within a file (MUS-11315, from the MUS-7954
+          # audit on node-8: corpus 1493 s serial -> 279 s at --jobs 8, identical
+          # 6497-test name set). Slowest files go first so the long poles start at
+          # once (merge-landing-watchdog 178 s, rollback 121 s, close-duplicate 82 s).
+          # --jobs 8 is the knee: 16 buys 33 s because merge-landing-watchdog is the
+          # floor. Do NOT add within-file parallelism: 423 s and 4 tests break.
+          # Rollback: drop `--jobs 8 --no-parallelize-within-files`.
+          slow="scripts/tests/merge-landing-watchdog.bats
+          scripts/tests/rollback.bats
+          scripts/tests/close-duplicate-conversations.bats
+          scripts/tests/prod-log-alert-watchdog.bats
+          scripts/tests/sync-help-centre.bats
+          scripts/tests/deploy-agents-bound-probe.bats
+          scripts/tests/support-changelog-sync.bats
+          scripts/tests/rollback-preserves-mcp.bats
+          scripts/tests/codex-quota-probe.bats
+          scripts/tests/qa-approval-retry.bats
+          scripts/tests/cron-store.bats
+          scripts/tests/qa-review-reconcile.bats"
+          ordered=$( { for f in $slow; do grep -Fx -- "$f" <<<"$files" || true; done
+                       grep -vFx -- "$slow" <<<"$files" || true; } )
           # shellcheck disable=SC2086
-          bats $files
+          bats --jobs 8 --no-parallelize-within-files $ordered
 
   py-syntax:
     name: Python syntax check (py_compile)
@@ -1630,6 +1670,19 @@ jobs:
           # AI credit reviewer / approval auditor (scripts/credit_review). Stdlib
           # only; the admin API and the model are faked, so no network.
           python3 scripts/tests/test_credit_review.py
+          # credit-retro r1 role-scoped take-back + prepared waves (scripts/credit_retro).
+          # Stdlib only; the admin API is faked. Also pins the committed manifests.
+          python3 scripts/tests/test_credit_retro.py
+          # credit-trust band table mirror (scripts/credit_trust): byte-identical to IDP's
+          # common/credit_trust_bands.json at the pinned sha. Stdlib only.
+          python3 scripts/tests/test_credit_trust_bands.py
+          # Credit-trust model ladder + fetched-source evidence (scripts/credit_trust,
+          # T01). Stdlib only; codex, Jev, OpenRouter and HTTP are faked, and the
+          # bash helper is exercised only via --print-argv / census / quota gate.
+          python3 scripts/tests/test_credit_trust_llm.py
+          # credit-trust-decide (trust-yet-verify decider): server-mirror conflict
+          # predicate, big tracks never approved, never re-ask, ledger before PUT.
+          python3 scripts/tests/test_credit_trust_decide.py
 
   plugin-tests:
     name: Plugin tests (vitest)
