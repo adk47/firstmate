@@ -63,7 +63,12 @@ Do not proactively reach out about pending credits.
   (anti-spoof via the Intercom contact email – you do **NOT** pass a conversation id,
   it's derived from the session) and returns their UVN credits
   (`{ verified_owner, owner_undetermined, impersonation_flag, profile_id,
-  uvn_credits: [{ cr_id, role, track_title, artist, isrc }], count, notes }`).
+  uvn_credits: [{ cr_id, role, track_title, artist, isrc }], count,
+  awaiting_review: { count, truncated } | null,
+  pending_by_status: { user_verification_needed, unverified } | null, notes }`).
+  `awaiting_review` counts credits waiting for OUR team's review (status
+  `unverified`): the customer has nothing to do for those. `null` means the tool
+  could not check, never zero.
   **Always pass `requesterEmail`** when the customer has stated one. Fails closed
   (`owner_undetermined`) when ownership can't be verified. If it returns
   `{ disabled: true }`, the flow is not enabled yet – fall back to a normal
@@ -103,12 +108,24 @@ profile, the tool resolves the one they own from their verified email.
   contact email. The tool has already withheld the pending list (fail-closed).
   Treat as identity-verification / security review; do not proceed on the typed
   email.
-- `count: 0` → **nothing is in "user verification needed" – that is NOT the same as
-  "no submission exists."** This check only sees credits flagged for verification;
-  submissions in normal review, already approved, or already decided by the team are
-  invisible to it. **Never deny that a customer's submission exists.** Say that
-  nothing on their profile is currently waiting on proof from them, that recent
-  submissions go through a normal review you can't see into from here, and offer a
+- `awaiting_review.count > 0` → tell the customer plainly, with the number:
+  "N of your credits are waiting for our team to review – there's nothing you need
+  to do right now. Once they're reviewed, the approved ones will appear on your
+  profile." Do **not** ask for proof for these, do **not** promise a date, and do
+  **not** say nothing is pending. (2026-10-16: this queue held ~5,500 credits for
+  ~100 customers a day, and customers were wrongly told they had 0 pending.) If
+  `count > 0` too, cover both: the awaiting-review ones need nothing, the
+  `uvn_credits` ones need proof (Step 2).
+  If `awaiting_review.truncated` is true, the count is a floor: say "more than N"
+  (e.g. "more than 100"), never the exact number.
+- `awaiting_review: null` → the review queue could not be read. Do **not** say
+  nothing is pending; say you can't see the review status right now and offer a
+  `credit-claim` ticket.
+- `count: 0` and `awaiting_review.count: 0` → **nothing is in "user verification
+  needed" or waiting for our review – that is still NOT the same as "no submission
+  exists."** Already approved or already decided submissions are invisible here.
+  **Never deny that a customer's submission exists.** Say that nothing on their
+  profile is currently waiting on proof from them or on our review, and offer a
   `credit-claim` / `support-general` ticket if they want the team to check status.
   If the customer says their credit was **rejected**: you never reject, but a human
   may have – do not deny or contradict that; acknowledge it and file a

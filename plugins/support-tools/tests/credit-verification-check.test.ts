@@ -378,3 +378,62 @@ describe("credit_verification_check — fail-closed orchestration", () => {
     expect(out.error).toBe("rate_limited");
   });
 });
+
+// 2026-10-16: credits in status `unverified` (waiting for OUR review) were invisible,
+// so a verified owner with 54 waiting was told nothing was pending.
+function statusAdmin(byStatus: Record<string, unknown[] | "fail">) {
+  return makeAdminClient({
+    get: vi.fn(async (path: string) => {
+      const m = path.match(/status=([a-z_]+)/);
+      if (path.includes("/credit-requests") && m) {
+        const v = byStatus[m[1]];
+        if (v === "fail") return { ok: false, status: 500, error: "upstream" } as AdminClientResult<unknown>;
+        return { ok: true, status: 200, data: { data: { items: v ?? [] } } } as AdminClientResult<unknown>;
+      }
+      return OWNED_PROFILE;
+    }) as MusoAdminClient["get"],
+  });
+}
+
+describe("credit_verification_check — credits awaiting our review (status unverified)", () => {
+  const P = { profileId: "11111111-1111-4111-8111-111111111111", requesterEmail: "owner@example.com" };
+
+  it("reports awaiting_review and per-status counts for a verified owner", async () => {
+    const unverified = Array.from({ length: 54 }, (_, i) => ({ id: `u${i}` }));
+    const tool = createCreditVerificationCheckTool(makeDeps({ adminClient: statusAdmin({ user_verification_needed: [], unverified }) }));
+    const out = await run(tool, P);
+    expect(out.verified_owner).toBe(true);
+    expect(out.count).toBe(0);
+    expect(out.awaiting_review).toEqual({ count: 54, truncated: false });
+    expect(out.pending_by_status).toEqual({ user_verification_needed: 0, unverified: 54 });
+    expect(JSON.stringify(out.notes)).toMatch(/54 credit\(s\) are awaiting our team's review/);
+  });
+
+  it("a failed awaiting-review read is null with a warning, never zero, and the UVN result still stands", async () => {
+    const uvn = [{ id: "cr1", spotifyTrackTitle: "Track X", credits: ["Producer"], metadata: {} }];
+    const tool = createCreditVerificationCheckTool(makeDeps({ adminClient: statusAdmin({ user_verification_needed: uvn, unverified: "fail" }) }));
+    const out = await run(tool, P);
+    expect(out.count).toBe(1);
+    expect(out.awaiting_review).toBeNull();
+    expect(out.pending_by_status).toEqual({ user_verification_needed: 1, unverified: null });
+    expect(JSON.stringify(out.notes)).toMatch(/do NOT tell the customer nothing is pending/);
+  });
+
+  it("more than 100 awaiting review is reported as a floor, never an exact 100", async () => {
+    const unverified = Array.from({ length: 300 }, (_, i) => ({ id: `u${i}` }));
+    const tool = createCreditVerificationCheckTool(makeDeps({ adminClient: statusAdmin({ user_verification_needed: [], unverified }) }));
+    const out = await run(tool, P);
+    expect(out.awaiting_review).toEqual({ count: 100, truncated: true });
+    const notes = JSON.stringify(out.notes);
+    expect(notes).toMatch(/more than 100 credit\(s\) are awaiting our team's review/);
+    expect(notes).not.toMatch(/"100 credit/);
+  });
+
+  it("a fail-closed verdict exposes no review-queue data", async () => {
+    const tool = createCreditVerificationCheckTool(makeDeps({ intercomToken: "", adminClient: statusAdmin({ unverified: [{ id: "u1" }] }) }));
+    const out = await run(tool, P);
+    expect(out.verified_owner).toBe(false);
+    expect(out.awaiting_review).toBeNull();
+    expect(out.pending_by_status).toBeNull();
+  });
+});
