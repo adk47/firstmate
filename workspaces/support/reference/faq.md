@@ -48,8 +48,8 @@ Account and profile deletion requests are handled by our support team. Create a 
 
 ### How do I add a missing credit?
 1. Log in to your account
-2. Navigate to the track or album where the credit is missing
-3. Use the "Add Missing Credits" feature and specify your role (producer, songwriter, engineer, etc.)
+2. Web: open your profile and click "Add Credits" at the top right of the Summary panel, then search for the track or paste its Spotify link. App: open the track or album and tap "Add Missing Credits"
+3. Specify your role (producer, songwriter, engineer, etc.)
 4. Submit the claim with proof that connects you to that role
 
 **Before submitting, check:**
@@ -81,7 +81,7 @@ Credits come from multiple industry sources. A missing credit usually means one 
 - The source doesn't have it in their database
 - There's a name/ISRC mismatch preventing the link
 
-Try adding it manually via "Add Missing Credits." If you believe it should be automatically sourced and it's not appearing, create a support ticket with category "Missing Credit – Source Discrepancy."
+Try adding it manually: on web via "Add Credits" in your profile's Summary panel, in the app via "Add Missing Credits" on the track or album. If you believe it should be automatically sourced and it's not appearing, create a support ticket with category "Missing Credit – Source Discrepancy."
 
 ### How long does credit verification take?
 Our team reviews submitted credits. Review times vary, so we don't promise a set
