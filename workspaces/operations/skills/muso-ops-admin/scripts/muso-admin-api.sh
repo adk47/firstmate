@@ -65,6 +65,7 @@ TIER2_REVERSE_WINDOW_SECS="${TIER2_REVERSE_WINDOW_SECS:-300}"
 # in-thread, so by itself it is not evidence that a human chose these rows.
 BULK_DESTRUCTIVE_PATH="${BULK_DESTRUCTIVE_PATH:-${MUSO_OPS_STATE_DIR}/destructive-ops.jsonl}"
 BULK_DESTRUCTIVE_AUDIT_PATH="${BULK_DESTRUCTIVE_AUDIT_PATH:-${MUSO_OPS_STATE_DIR}/bulk-destructive-audit.jsonl}"
+BULK_DESTRUCTIVE_RESULTS_PATH="${BULK_DESTRUCTIVE_RESULTS_PATH:-${MUSO_OPS_STATE_DIR}/destructive-ops-results.jsonl}"
 BULK_DESTRUCTIVE_THRESHOLD="${BULK_DESTRUCTIVE_THRESHOLD:-10}"
 BULK_DESTRUCTIVE_WINDOW_SECS="${BULK_DESTRUCTIVE_WINDOW_SECS:-900}"
 BULK_DESTRUCTIVE_EXCLUDE_PATH="${BULK_DESTRUCTIVE_EXCLUDE_PATH:-${SCRIPT_DIR}/../config/bulk-destructive-exclude.txt}"
@@ -596,6 +597,49 @@ resolve_slack_to_email() {
 # --- Helpers ---
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+# Per-automation admin identity. An automation sets MUSO_ADMIN_IDENTITY in its
+# own process (credit-trust-decide: credit-decider = agent-credit-decider@muso.ai,
+# uvn-under30: uvn-cron = agent-uvn-cron@muso.ai; core-backend binds each
+# automation's grant to that account, T12 / core #10595) and
+# logs in with that identity's credentials, read from
+# $MUSO_ADMIN_IDENTITY_DIR/<identity>.env, with a token cache of its own. The
+# file is PARSED (MUSO_ADMIN_EMAIL= / MUSO_ADMIN_PASSWORD= lines), never
+# sourced, so nothing in it executes. There is no fallback: an unknown
+# identity or a missing/incomplete file fails before any request.
+# The directory is the one H-DevOps' sync-credit-agent-creds-from-vault.sh
+# provisions from Vault (contract: H-DevOps #4131,
+# data/security-backlog-s2/credit-agent-accounts.md).
+MUSO_ADMIN_IDENTITY_DIR="${MUSO_ADMIN_IDENTITY_DIR:-/etc/openclaw/agents}"
+load_admin_identity() {
+    local identity="${MUSO_ADMIN_IDENTITY:-}"
+    [[ -n "$identity" ]] || return 0
+    case "$identity" in
+        credit-decider|uvn-cron) ;;
+        *) die "MUSO_ADMIN_IDENTITY '$identity' is not a known automation identity (credit-decider, uvn-cron)" ;;
+    esac
+    local file="$MUSO_ADMIN_IDENTITY_DIR/$identity.env"
+    [[ -f "$file" && -r "$file" ]] || die "admin identity '$identity': $file is missing or unreadable (no fallback)"
+    local line key value email="" password=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        [[ -z "${line//[[:space:]]/}" || "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" == *=* ]] || die "admin identity '$identity': malformed line in $file"
+        key="${line%%=*}"
+        value="${line#*=}"
+        if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then
+            value="${BASH_REMATCH[1]}"
+        fi
+        case "$key" in
+            MUSO_ADMIN_EMAIL) email="$value" ;;
+            MUSO_ADMIN_PASSWORD) password="$value" ;;
+        esac
+    done < "$file"
+    [[ -n "$email" && -n "$password" ]] || die "admin identity '$identity': $file needs MUSO_ADMIN_EMAIL and MUSO_ADMIN_PASSWORD"
+    MUSO_ADMIN_EMAIL="$email"
+    MUSO_ADMIN_PASSWORD="$password"
+    TOKEN_CACHE="${TOKEN_CACHE}.${identity}"
+}
 
 check_env() {
     [[ -n "${MUSO_API_URL:-}" ]] || die "MUSO_API_URL not set"
@@ -1147,6 +1191,49 @@ is_uvn_popularity_cron_approval() {
     ' >/dev/null 2>&1
 }
 
+# Standing authorization for the trust-yet-verify decider (credit-review.py
+# decide --mode apply, cron credit-trust-decide-15m; captain 2026-10-15 ~22:12Z
+# "i want AI live now ... trust yet verify approach"). Same narrow shape as the
+# UVN cron above, for the unverified -> approved transition, PLUS a write-
+# boundary re-check of the registry: if policies/credit-approval-automation.json
+# does not carry credit-trust-decide approved:true with approved_by and
+# approval_ref, nothing is approved even when the cron is enabled. The server
+# (agentApprovalGuard) still refuses any row with a validator conflict.
+CREDIT_APPROVAL_REGISTRY="${CREDIT_APPROVAL_REGISTRY:-${HYDRA_ROOT:-/opt/hydra}/policies/credit-approval-automation.json}"
+is_credit_trust_decide_approval() {
+    local method="$1" path="$2" body="$3"
+    [[ "${CREDIT_TRUST_DECIDE:-0}" == "1" ]] || return 1
+    [[ "${REQUESTER_EMAIL:-}" == "credit-trust-decide@hydra-ops" ]] || return 1
+    [[ "$method" == "PUT" ]] || return 1
+    [[ "$path" == "/admin/credit-requests/conditional-status" ]] || return 1
+    jq -e '.automations["credit-trust-decide"]
+           | .approved == true
+             and ((.approved_by // "") | tostring | length > 0)
+             and ((.approval_ref // "") | tostring | length > 0)' \
+        "$CREDIT_APPROVAL_REGISTRY" >/dev/null 2>&1 || {
+        echo "credit_approve_gate: credit-trust-decide is not approved in $CREDIT_APPROVAL_REGISTRY - refusing" >&2
+        return 1
+    }
+    printf '%s' "$body" | jq -e '
+        type == "object"
+        and ((keys | sort) == ["expectedStatus", "requestIds", "status"])
+        and .status == "approved"
+        and .expectedStatus == "unverified"
+        and (
+            .requestIds as $ids
+            | ($ids | type) == "array"
+            and ($ids | length) > 0
+            and ($ids | length) <= 50
+            and all($ids[];
+                type == "string"
+                and length == 36
+                and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+            )
+            and (($ids | map(ascii_downcase) | unique | length) == ($ids | length))
+        )
+    ' >/dev/null 2>&1
+}
+
 enforce_credit_approve_gate() {
     local method="$1" path="$2" body="$3"
 
@@ -1180,6 +1267,9 @@ enforce_credit_approve_gate() {
     fi
 
     if is_uvn_popularity_cron_approval "$method" "$path" "$body"; then
+        return 0
+    fi
+    if is_credit_trust_decide_approval "$method" "$path" "$body"; then
         return 0
     fi
 
@@ -2455,6 +2545,48 @@ record_destructive_op() {
         --arg requester "${REQUESTER_EMAIL:-}" \
         '{ts:$ts, epoch:$epoch, method:$method, path:$path, requester:$requester}' 2>/dev/null) || return 1
     printf '%s\n' "$line" >> "$BULK_DESTRUCTIVE_PATH" 2>/dev/null || return 1
+    # Remember the row's correlation key (epoch + path) for the outcome ledger.
+    DESTRUCTIVE_OP_EPOCH="$epoch"
+    DESTRUCTIVE_OP_PATH="$_path"
+    return 0
+}
+
+# write_destructive_op_result OUTCOME HTTP_STATUS -> always 0.
+# Post-call companion to record_destructive_op: one row in
+# destructive-ops-results.jsonl per counter row, keyed by the same (epoch, path)
+# pair, saying whether the DELETE landed. Kept OUT of destructive-ops.jsonl on
+# purpose — count_recent_destructive_ops reads that file, and a changed row
+# shape there would skew the blast-radius gate. No-op unless this call wrote a
+# counter row. Failure mode matches write_dry_run_audit: LOUD stderr warning,
+# never break the call (the DELETE has already happened; refusing now helps no one).
+# OUTCOME: ok | http_error | transport_error (sent, delivery ambiguous) |
+# not_sent (login or retry config failed, DELETE definitely never left). HTTP_STATUS empty -> null.
+DESTRUCTIVE_OP_EPOCH=""
+DESTRUCTIVE_OP_PATH=""
+write_destructive_op_result() {
+    local outcome="$1" http_status="${2:-}"
+    [[ -n "$DESTRUCTIVE_OP_EPOCH" ]] || return 0
+    local ts line
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if ! line=$(jq -n -c \
+        --arg ts "$ts" \
+        --argjson epoch "$DESTRUCTIVE_OP_EPOCH" \
+        --arg method "$CALL_METHOD_FOR_RESULT" \
+        --arg path "$DESTRUCTIVE_OP_PATH" \
+        --arg requester "${REQUESTER_EMAIL:-}" \
+        --arg http_status "$http_status" \
+        --arg outcome "$outcome" \
+        '{ts:$ts, epoch:$epoch, method:$method, path:$path, requester:$requester,
+          http_status:($http_status | tonumber? // null), outcome:$outcome}' 2>/dev/null); then
+        echo "MUSO_DESTRUCTIVE_OUTCOME_UNWRITABLE: could not build the outcome row for ${CALL_METHOD_FOR_RESULT} ${DESTRUCTIVE_OP_PATH} (${outcome}); the call itself proceeded." >&2
+        DESTRUCTIVE_OP_EPOCH=""
+        return 0
+    fi
+    if ! { mkdir -p "$(dirname "$BULK_DESTRUCTIVE_RESULTS_PATH")" \
+            && printf '%s\n' "$line" >> "$BULK_DESTRUCTIVE_RESULTS_PATH"; } 2>/dev/null; then
+        echo "MUSO_DESTRUCTIVE_OUTCOME_UNWRITABLE: could not append to ${BULK_DESTRUCTIVE_RESULTS_PATH}; outcome row LOST for ${CALL_METHOD_FOR_RESULT} ${DESTRUCTIVE_OP_PATH} (${outcome}, status ${http_status:-none}); the call itself proceeded." >&2
+    fi
+    DESTRUCTIVE_OP_EPOCH=""   # exactly one outcome row per counter row
     return 0
 }
 
@@ -2590,6 +2722,8 @@ EOF
     # radius of mass DELETEs. God-mode requesters self-approve with
     # --approval-msg-id (policy 2026-08-26); everyone else needs an approver's
     # --confirmed-by. Self-skips in dry-run.
+    DESTRUCTIVE_OP_EPOCH=""
+    CALL_METHOD_FOR_RESULT="$method"
     if ! enforce_bulk_destructive_gate "$method" "$path"; then
         return 1
     fi
@@ -2672,6 +2806,7 @@ EOF
                 "$token_attempts" "$token_retry_exits"
             printf '%s\n' "$token_json"
         fi
+        write_destructive_op_result "not_sent" ""
         return "$token_rc"
     fi
 
@@ -2687,6 +2822,23 @@ EOF
     # Add Requester header if set (audit trail — tells backend which human initiated this)
     if [[ -n "$REQUESTER_EMAIL" ]]; then
         curl_args+=(-H "Requester: $REQUESTER_EMAIL")
+    fi
+
+    # core-backend binds the credit-trust-decide grant to this header on the
+    # decider's own account, agent-credit-decider@muso.ai (T12, core #10595;
+    # identity credit-decider, never agent-hydra-main@). Only the decider's
+    # own calls ever carry it.
+    if [[ "${CREDIT_TRUST_DECIDE:-0}" == "1" && "$REQUESTER_EMAIL" == "credit-trust-decide@hydra-ops" ]]; then
+        curl_args+=(-H "X-Credit-Automation-Id: credit-trust-decide")
+    fi
+
+    # Actor headers (audit trail — approver + Slack ts of the in-thread approval);
+    # blank or whitespace-only counts as absent, never as a valid approver
+    if [[ "$CONFIRMED_BY" =~ [^[:space:]] ]]; then
+        curl_args+=(-H "Approved-By: $CONFIRMED_BY")
+    fi
+    if [[ "$APPROVAL_MSG_ID" =~ [^[:space:]] ]]; then
+        curl_args+=(-H "Request-Ref: $APPROVAL_MSG_ID")
     fi
 
     if [[ -n "$body" ]]; then
@@ -2708,12 +2860,14 @@ EOF
         # Invalid retry configuration failed before curl ran; surface the
         # configuration error without misclassifying it as transport.
         if (( transport_attempts == 0 )); then
+            write_destructive_op_result "not_sent" ""
             return "$curl_rc"
         fi
 
         write_credit_request_result "$method" "$path" "$body" \
             "transport_error" "" "curl_exit_${curl_rc}" \
             "$transport_attempts" "$transport_retry_exits"
+        write_destructive_op_result "transport_error" ""
         jq -nc \
             --argjson rc "$curl_rc" \
             --argjson attempts "$transport_attempts" \
@@ -2745,6 +2899,12 @@ EOF
             write_credit_request_result "$method" "$path" "$body" "http_error" "$http_code" "$response_body" \
                 "$transport_attempts" "$transport_retry_exits"
         fi
+    fi
+
+    if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+        write_destructive_op_result "ok" "$http_code"
+    else
+        write_destructive_op_result "http_error" "$http_code"
     fi
 
     # Record successful merges for the reverse-direction guard.
@@ -2835,6 +2995,15 @@ cmd_upload() {
         curl_args+=(-H "Requester: $REQUESTER_EMAIL")
     fi
 
+    # Actor headers (audit trail — approver + Slack ts of the in-thread approval);
+    # blank or whitespace-only counts as absent, never as a valid approver
+    if [[ "$CONFIRMED_BY" =~ [^[:space:]] ]]; then
+        curl_args+=(-H "Approved-By: $CONFIRMED_BY")
+    fi
+    if [[ "$APPROVAL_MSG_ID" =~ [^[:space:]] ]]; then
+        curl_args+=(-H "Request-Ref: $APPROVAL_MSG_ID")
+    fi
+
     curl_args+=(-F "file=@$file")
 
     for field in "$@"; do
@@ -2907,6 +3076,10 @@ done
 
 command="${1:-help}"
 shift || true
+
+case "$command" in
+    login|call|upload) load_admin_identity ;;
+esac
 
 case "$command" in
     login)          cmd_login "$@" ;;

@@ -75,6 +75,12 @@ const closeStep = (instruction = "Reply with the result and close the loop. Do n
   instruction,
 });
 
+const creditProofStep: NextStep = {
+  outcome: "run_skill",
+  skill: "customer-credit-verification",
+  instruction: "Ask for proof ONLY if none was given before (customer-credit-verification skill Step 2 no-re-ask rule), once, in one message covering all pending credits. Otherwise do not ask: still run the skill's Step 3 contradiction and catalog-corroboration checks on what is visible or stated, and if they do not resolve it, file the needs-human credit-verify ticket and tell the customer it is with the team. Never approve from prose alone.",
+};
+
 // Billing-route failure handoff: intentionally NO action_type. The route
 // serves both refund and charge/billing-issue complaints and cannot see
 // customer_request, so the agent must file with the request-appropriate type —
@@ -125,7 +131,7 @@ export const SUPPORT_ACTION_ROUTES: Record<string, RouteDefinition> = {
   credit_verification: {
     label: "Pending credit verification",
     availability: "live",
-    goal: "Inspect pending UVN credits, ask for exact proof, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
+    goal: "Inspect pending UVN credits, ask for proof at most once and only if none was given before, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
     live_read_tools: ["credit_verification_check", "profile_credits_status"],
     live_write_tools: ["credits_verify"],
     live_handoff_tools: ["create_ticket"],
@@ -134,7 +140,7 @@ export const SUPPORT_ACTION_ROUTES: Record<string, RouteDefinition> = {
     sequence: [
       "Use profile_credits_status first when it is unclear whether the credit already exists or is merely pending.",
       "Run credit_verification_check.",
-      "Ask for the exact missing proof when ownership or corroboration is incomplete.",
+      "Ask for proof once, in one message covering all pending credits, ONLY if none was given before (customer-credit-verification skill Step 2 no-re-ask rule); otherwise do not ask and continue with the skill's Step 3 checks and the steps below.",
       "For catalog-corroborated owned requests, preview credits_verify with apply:false.",
       "After customer confirmation, apply credits_verify with apply:true.",
       "For every other case, create a credit-verify handoff packet.",
@@ -145,8 +151,8 @@ export const SUPPORT_ACTION_ROUTES: Record<string, RouteDefinition> = {
     tags: ["intent:credits", "bundle:credit-verification", "outcome:self-serve-or-handoff"],
     steps: {
       new_request: { outcome: "run_skill", skill: "customer-credit-verification", tool: "credit_verification_check", instruction: "Enter the credit verification skill and start with the read-only pending-credit check." },
-      read_ok: { outcome: "ask_missing_info", instruction: "Ask only for the missing proof fields the check indicates; do not approve from prose alone." },
-      missing_info: { outcome: "ask_missing_info", instruction: "Ask for exact proof for the specific pending credit, not a generic support request." },
+      read_ok: creditProofStep,
+      missing_info: creditProofStep,
       preview_ok: { outcome: "ask_confirmation", tool: "credits_verify", instruction: "Tell the customer which credit would be verified and wait for explicit confirmation before apply:true." },
       customer_confirmed: { outcome: "apply_tool", tool: "credits_verify", instruction: "Apply the already-previewed owned, catalog-corroborated credit verification." },
       applied_ok: closeStep("Tell the customer the credit has been verified. Do not also create a ticket."),

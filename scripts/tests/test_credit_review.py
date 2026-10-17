@@ -79,6 +79,9 @@ class FakeAdmin:
         self.raw_by_track = raw_by_track
         self.profiles = profiles
         self.tracks = TRACKS if tracks is None else tracks
+        self.unreadable: set[str] = set()   # ids whose read fails (a 5xx); an absent id answers 404
+        self.transient_404: dict[str, int] = {}
+        self.raw_404: set[str] = set()      # tracks whose raw-credits read answers 404   # id -> how many reads answer 404 before it is served
         self.paths = []
 
     def get(self, path, params=None):
@@ -92,16 +95,28 @@ class FakeAdmin:
             limit, page = int(params.get("limit", 200)), int(params.get("page", 1))
             return {"items": rows[(page - 1) * limit: page * limit]}
         if path.startswith("/admin/track/") and path.endswith("/raw-credits"):
+            if path.split("/")[3] in self.raw_404:
+                raise admin_api.NotFound("404")
             return {"items": self.raw_by_track.get(path.split("/")[3], [])}
         if path.startswith("/admin/track/") and path.count("/") == 3:
             tid = path.split("/")[3]
+            if self.transient_404.get(tid, 0) > 0:
+                self.transient_404[tid] -= 1
+                raise admin_api.NotFound("404")
+            if tid in self.unreadable:
+                raise admin_api.AdminError("503")
             if tid not in self.tracks:
-                raise admin_api.AdminError("404")
+                raise admin_api.NotFound("404")
             return self.tracks[tid]
         if path.startswith("/admin/profile/"):
             pid = path.split("/")[3]
+            if self.transient_404.get(pid, 0) > 0:
+                self.transient_404[pid] -= 1
+                raise admin_api.NotFound("404")
+            if pid in self.unreadable:
+                raise admin_api.AdminError("503")
             if pid not in self.profiles:
-                raise admin_api.AdminError("404")
+                raise admin_api.NotFound("404")
             return self.profiles[pid]
         raise AssertionError(f"unexpected path {path}")
 
@@ -124,6 +139,13 @@ class FakeJudge:
         self.calls += 1
         self.evidence.append(evidence)
         return self.result
+
+    def judge_many(self, mode, evidences, ids):
+        """One call answering every claim with the same result (cost split)."""
+        self.calls += 1
+        self.evidence.extend(evidences)
+        share = (self.result.cost_usd / len(ids)) if self.result.cost_usd is not None else None
+        return {rid: JudgeResult(**{**self.result.__dict__, "cost_usd": share, "batch_size": len(ids)}) for rid in ids}
 
 
 def jr(verdict, conf=0.9, findings=(), cited=(), ok=True, ident=None, error=None, cost=0.001):
@@ -358,6 +380,97 @@ class ApproverTests(unittest.TestCase):
         self.assertIsNone(self.rec(via="admin", account="Jan@muso.ai", isAgent=False, requester="jan@muso.ai"))
 
 
+class KnownAgentApproverTests(unittest.TestCase):
+    """A registered automation's own account is a known AGENT approver: clean
+    approvals pass, rule breaks alert with the automation and the rule."""
+
+    TERMS = ("edit", "compil", "assembl", "pro tools", "protools")
+    DECIDER = "agent-credit-decider@muso.ai"
+
+    def alert(self, *, account=DECIDER, track="t3", roles=("Mixing",), rules=None, raws=None,
+              approved=("credit-trust-decide", "uvn-under30"), doc_required=(), proof_id=None, terms=TERMS):
+        from credit_review.policy import AgentApprovalContext
+        r = request("a1", pid=PID_GOOD, track=track, roles=roles, approved=False)
+        r["verificationData"]["rule_risk_percent"] = dict(rules or {})
+        r["metadata"]["approval"] = {"via": "admin", "account": account, "isAgent": True}
+        raws = {"t3": [raw("Real Engineer", "mixer")], "t1": []} if raws is None else raws
+        ev = EvidenceBuilder(FakeAdmin([], raws, PROFILES, TRACKS), now=NOW).build(r)
+        proofs = {"a1": proof_id} if proof_id else {}
+        return approver_identity_alert(r, ev, AgentApprovalContext(frozenset(approved), terms, frozenset(doc_required),
+                                                                   proofs))
+
+    def test_clean_registered_automation_approval_is_not_alerted(self):
+        self.assertIsNone(self.alert())
+        self.assertIsNone(self.alert(account="agent-uvn-cron@muso.ai"))
+        self.assertIsNone(self.alert(doc_required=("a1",), proof_id="intercom:proof-7"))
+
+    def test_only_the_deciders_recorded_proof_counts(self):
+        a = self.alert(account="agent-uvn-cron@muso.ai", doc_required=("a1",), proof_id="intercom:proof-7")
+        self.assertIn("automation uvn-under30", a)
+        self.assertIn("documentation-required row approved without a proof id", a)
+
+    def test_more_than_ten_rule_breaks_report_the_total(self):
+        reqs = []
+        for i in range(12):
+            r = request(f"b{i}", pid=PID_GOOD, track="t1", roles=("Mixing",), approved=False)
+            r["metadata"]["approval"] = {"via": "admin", "account": self.DECIDER, "isAgent": True}
+            reqs.append(r)
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Ledger(str(Path(tmp) / "l.sqlite3"))
+            alerts, _ = run_audit(FakeAdmin(reqs, {"t1": []}, PROFILES, TRACKS), ledger, None,
+                                  Config(mode="audit", sample_rate=0.0), window_min=90, now=NOW)
+            ledger.close()
+        self.assertEqual(sum("registered automation approval broke a rule" in a for a in alerts), 10)
+        self.assertIn("... and 2 more automation rule break(s) (12 in total", " ".join(alerts))
+
+    def test_each_rule_break_alerts_naming_the_automation_and_rule(self):
+        cases = {
+            "the validator declined it": dict(rules={"reject_role_mismatch": 100}),
+            "validator conflict (review_role_credited_to_other_at_trusted_source)":
+                dict(rules={"review_role_credited_to_other_at_trusted_source": 80}),
+            "big track approved without trusted-source confirmation": dict(track="t1"),
+            "editorial role without a trusted credit for the claimant (Vocal Editing)": dict(roles=("Mixing", "Vocal Editing")),
+            "documentation-required row approved without a proof id": dict(doc_required=("a1",)),
+            "editorial-role rule could not be checked": dict(terms=None),
+        }
+        for rule, kw in cases.items():
+            a = self.alert(**kw)
+            self.assertIsNotNone(a, rule)
+            self.assertTrue(a.startswith(f"automation credit-trust-decide ({self.DECIDER}) approval broke:"), a)
+            self.assertIn(rule, a)
+
+    def test_unknown_agent_and_unapproved_automation_alert(self):
+        self.assertIn("agent token", self.alert(account="agent-someone-else@muso.ai"))
+        a = self.alert(account="agent-uvn-cron@muso.ai", approved=("credit-trust-decide",))
+        self.assertIn("automation uvn-under30", a)
+        self.assertIn("not approved:true", a)
+
+    def test_registry_reading_fails_closed(self):
+        from credit_review.policy import approved_automations
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = Path(tmp) / "registry.json"
+            self.assertEqual(approved_automations(reg), frozenset())
+            reg.write_text(json.dumps({"automations": {
+                "credit-trust-decide": {"approved": True, "approved_by": "captain", "approval_ref": "x"},
+                "uvn-under30": {"approved": False, "approved_by": "Nick", "approval_ref": "y"},
+                "other": {"approved": True, "approved_by": "", "approval_ref": "z"}}}))
+            self.assertEqual(approved_automations(reg), frozenset({"credit-trust-decide"}))
+
+    def test_audit_run_routes_automation_breaks_to_their_own_alert(self):
+        r = request("a2", pid=PID_GOOD, track="t1", roles=("Mixing",), approved=False)
+        r["metadata"]["approval"] = {"via": "admin", "account": self.DECIDER, "isAgent": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Ledger(str(Path(tmp) / "l.sqlite3"))
+            alerts, _ = run_audit(FakeAdmin([r], {"t1": []}, PROFILES, TRACKS), ledger, None,
+                                  Config(mode="audit", sample_rate=0.0), window_min=90, now=NOW)
+            ledger.close()
+        mine = [a for a in alerts if "registered automation approval broke a rule" in a]
+        self.assertEqual(len(mine), 1, alerts)
+        self.assertIn("a2: automation credit-trust-decide", mine[0])
+        self.assertIn("big track approved without trusted-source confirmation", mine[0])
+        self.assertFalse(any("forbidden or unknown approver" in a for a in alerts), alerts)
+
+
 class JudgeTests(unittest.TestCase):
     def test_parse(self):
         p = parse_answer('blah {"verdict":"suspect","confidence":1.4,"findings":[{"source_url":"u","effect":"Supports"}]} x', "audit")
@@ -418,6 +531,16 @@ class AdminClientTests(unittest.TestCase):
             argv = log.read_text()
             self.assertIn("call GET /admin/credit-requests?status=approved", argv)
             self.assertNotIn(" PUT ", argv)
+
+    def test_404_is_not_found_and_5xx_is_a_plain_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "wrapper.sh"
+            for status, exc in ((404, admin_api.NotFound), (503, admin_api.AdminError)):
+                fake.write_text(f"#!/usr/bin/env bash\necho '{{\"http_status\":{status},\"body\":{{}}}}'\n")
+                fake.chmod(0o755)
+                with self.assertRaises(exc) as ctx:
+                    admin_api.AdminClient(script=str(fake)).get("/admin/profile/x")
+                self.assertEqual(isinstance(ctx.exception, admin_api.NotFound), status == 404)
 
 
 class RunnerTests(unittest.TestCase):
@@ -665,7 +788,17 @@ class CatalogBigTrackTests(unittest.TestCase):
 
     def test_artist_without_readable_popularity_is_big(self):
         self.assertTrue(self.ev(track(20, artists=(ART_SMALL, "no-such-profile")), pop=5).big_track)
-        self.assertTrue(self.ev(track(20, artists=()), pop=5).big_track)
+
+    def test_big_track_matches_the_idp_rule(self):
+        # IDP _is_big_track: no linked artist -> decided by track popularity alone.
+        self.assertFalse(self.ev(track(20, artists=()), pop=5).big_track)
+        self.assertFalse(self.ev({"popularity": 1, "artists": [{"name": "unlinked"}]}, pop=1).big_track)
+        self.assertTrue(self.ev({"popularity": 61, "artists": []}, pop=1).big_track)
+        self.assertTrue(self.ev({"artists": []}, pop=1).big_track)            # unknown track popularity
+        self.assertTrue(self.ev(track(20, artists=(ART_STAR,)), pop=5).big_track)  # artist >= 90
+        # an unlinked artist next to a linked small one does not make it big
+        self.assertFalse(self.ev({"popularity": 20, "artists": [{"name": "x"}, {"id": ART_SMALL, "name": ART_SMALL}]},
+                                 pop=5).big_track)
 
     def test_low_request_popularity_on_catalog_big_track_is_big_and_model_checked(self):
         ev = self.ev(track(75), pop=3)
@@ -978,7 +1111,10 @@ class AuditWindowTests(unittest.TestCase):
 
     def test_slow_deferred_pass_stops_and_reports_the_unjudged_sample(self):
         iso = lambda m: (NOW - timedelta(minutes=m)).isoformat().replace("+00:00", "Z")  # noqa: E731
-        reqs = [request(f"n{m}", pid=PID_GOOD, track="t3", roles=("Producer",), updated=iso(m)) for m in (40, 30, 20)]
+        # Three different profiles, so three separate model calls (one profile's
+        # non-big claims would be one batched call).
+        reqs = [request(f"n{m}", pid=pid, track="t3", roles=("Producer",), updated=iso(m))
+                for m, pid in ((40, PID_GOOD), (30, PID_BAD), (20, ART_SMALL))]
         clock = [0.0]
         kill_at = 200.0
 
@@ -1162,7 +1298,16 @@ class CronContractTests(unittest.TestCase):
             argv = j["payload"]["argv"]
             self.assertEqual(j["payload"]["kind"], "command")
             self.assertTrue(all(isinstance(a, str) and a for a in argv), "cron argv must not contain empty strings")
-            self.assertIn(argv[2], ("audit", "review", "digest", "metrics"))
+            # verify-notify writes no credit-request status either: it sends the
+            # captain-approved verify note through intercom-verify-request.sh.
+            self.assertIn(argv[2], ("audit", "review", "digest", "metrics", "decide", "verify-notify", "verify-wave", "removal-notice"))
+            if argv[2] == "decide":
+                # The one writing subcommand: only as the registered, captain-approved
+                # credit-trust-decide automation (policies/credit-approval-automation.json).
+                reg = json.loads((Path(__file__).resolve().parents[2] / "policies"
+                                  / "credit-approval-automation.json").read_text())["automations"]["credit-trust-decide"]
+                self.assertIn(j["name"], reg["cron_names"])
+                self.assertTrue(reg["approved"] is True and reg["approved_by"] and reg["approval_ref"])
             if argv[2] == "review":
                 self.assertIn("shadow", argv, "the reviewer ships in shadow (Phase 0)")
 
@@ -1375,6 +1520,215 @@ class ProfileBurstAlertTests(unittest.TestCase):
         alerts = profile_burst_alerts(self.ledger, now=NOW)
         self.assertEqual(len(alerts), 1)
         self.assertIn("(recent)", alerts[0])
+
+
+class BatchJudge(FakeJudge):
+    """Answers judge_many with one result per id and counts calls."""
+
+    def __init__(self, result, cost=0.06):
+        super().__init__(result)
+        self.batches = []
+        self.cost = cost
+
+    def judge_many(self, mode, evidences, ids):
+        self.calls += 1
+        self.batches.append(list(ids))
+        out = {}
+        for rid in ids:
+            r = JudgeResult(**{**self.result.__dict__})
+            r.cost_usd, r.batch_size = self.cost / len(ids), len(ids)
+            out[rid] = r
+        return out
+
+
+class CostFixTests(unittest.TestCase):
+    """Fable credit-AI report fixes (2026-10-14): profile batching, audit/shadow
+    dedupe, search-junk filter."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ledger = Ledger(str(Path(self.tmp.name) / "l.sqlite3"))
+
+    def tearDown(self):
+        self.ledger.close()
+        self.tmp.cleanup()
+
+    def burst(self, n, pid=PID_BAD, status="approved"):
+        return [request(f"b{i}", pid=pid, track="t9", pop=75, roles=("Producer",), status=status,
+                        updated=(NOW - timedelta(minutes=10 + i)).isoformat().replace("+00:00", "Z"))
+                for i in range(n)]
+
+    def test_big_tracks_are_never_batched(self):
+        judge = BatchJudge(jr("SUSPECT", 0.6))
+        _, stats = run_audit(FakeAdmin(self.burst(3), {"t9": []}, PROFILES), self.ledger, judge,
+                             Config(mode="audit", sample_rate=0.0, budget_usd=5), window_min=90, now=NOW)
+        self.assertEqual(judge.batches, [])          # t9 is a big track (pop 75): one call each
+        self.assertEqual(stats.model_calls, 3)
+
+    def test_audit_judges_a_profile_burst_in_one_call_per_batch(self):
+        judge = BatchJudge(jr("SUSPECT", 0.6))
+        reqs = [dict(r, trackId="t3", spotifyPopularity=3) for r in self.burst(8)]   # t3: small track
+        _, stats = run_audit(FakeAdmin(reqs, {"t3": []}, PROFILES), self.ledger, judge,
+                             Config(mode="audit", sample_rate=1.0, budget_usd=5), window_min=90, now=NOW)
+        self.assertEqual([len(b) for b in judge.batches], [6, 2])      # PROFILE_BATCH_MAX = 6
+        self.assertEqual(stats.model_calls, 2)
+        rows = self.ledger.db.execute("SELECT verdict, cost_usd, judge_json FROM reviews WHERE mode='audit'").fetchall()
+        self.assertEqual(len(rows), 8)
+        self.assertAlmostEqual(sum(r["cost_usd"] for r in rows), 0.12)   # per-claim shares add up to the calls
+        self.assertTrue(all(json.loads(r["judge_json"])["batch_size"] in (6, 2) for r in rows))
+
+    def test_a_claim_missing_from_a_batch_answer_is_a_model_error_not_a_pass(self):
+        class Partial(BatchJudge):
+            def judge_many(self, mode, evidences, ids):
+                out = super().judge_many(mode, evidences, ids)
+                self.dropped = ids[-1]
+                out[ids[-1]] = JudgeResult(ok=False, error="claim missing from the batch answer", batch_size=len(ids))
+                return out
+        judge = Partial(jr("CONFIRMED", 0.95))
+        reqs = [dict(r, trackId="t3", spotifyPopularity=3) for r in self.burst(3)]
+        run_audit(FakeAdmin(reqs, {"t3": []}, PROFILES), self.ledger, judge,
+                  Config(mode="audit", sample_rate=1.0, budget_usd=5), window_min=90, now=NOW)
+        last = self.ledger.db.execute("SELECT verdict, basis FROM reviews WHERE request_id=?", (judge.dropped,)).fetchone()
+        self.assertEqual(last["basis"], "model_error")
+        self.assertNotEqual(last["verdict"], "CONFIRMED")
+        others = self.ledger.db.execute("SELECT DISTINCT basis FROM reviews WHERE request_id != ?", (judge.dropped,)).fetchall()
+        self.assertNotIn("model_error", {r[0] for r in others})
+
+    def test_each_claim_missing_from_a_batch_answer_counts_as_an_error(self):
+        class MostlyMissing(BatchJudge):
+            def judge_many(self, mode, evidences, ids):
+                out = super().judge_many(mode, evidences, ids)
+                for rid in ids[1:]:
+                    out[rid] = JudgeResult(ok=False, error="claim missing from the batch answer", batch_size=len(ids))
+                return out
+        judge = MostlyMissing(jr("SUSPECT", 0.6))
+        reqs = [dict(r, trackId="t3", spotifyPopularity=3) for r in self.burst(6)]
+        _, stats = run_audit(FakeAdmin(reqs, {"t3": []}, PROFILES), self.ledger, judge,
+                             Config(mode="audit", sample_rate=1.0, budget_usd=5), window_min=90, now=NOW)
+        self.assertEqual(stats.model_calls, 1)
+        self.assertEqual(stats.errors, 5)
+
+    def test_budget_reservation_covers_a_whole_prior_batch_call(self):
+        ts = (NOW - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for i in range(6):
+            self.ledger.record({"request_id": f"p{i}", "mode": "audit", "phase": "live", "verdict": "SUSPECT",
+                                "confidence": 0.5, "basis": "model_suspect", "model": "x-ai/grok-4.3",
+                                "cost_usd": 0.025, "judge_json": {"ok": True, "batch_size": 6}, "reviewed_at": ts})
+        self.assertAlmostEqual(self.ledger.dearest_call_since(ts), 0.15)
+        judge = BatchJudge(jr("SUSPECT", 0.6), cost=0.15)
+        reqs = [dict(r, trackId="t3", spotifyPopularity=3) for r in self.burst(6)]
+        _, stats = run_audit(FakeAdmin(reqs, {"t3": []}, PROFILES), self.ledger, judge,
+                             Config(mode="audit", sample_rate=1.0, budget_usd=0.10), window_min=90, now=NOW)
+        self.assertEqual(judge.calls, 0)
+        self.assertTrue(stats.budget_stopped)
+
+    def test_eval_batch_reports_model_spend_when_the_first_row_has_no_evidence(self):
+        from credit_review import evaluate
+
+        class BrokenFirstTrack(FakeAdmin):
+            def get(self, path, params=None):
+                if path == "/admin/track/tx/raw-credits":
+                    raise admin_api.AdminError("503")
+                return super().get(path, params)
+        reqs = [request("e0", pid=PID_BAD, track="tx", pop=75, roles=("Producer",))] + [
+            request(f"e{i}", pid=PID_BAD, track="t9", pop=75, roles=("Producer",)) for i in range(1, 4)]
+        judge = FakeJudge(jr("SUSPECT", 0.6, cost=0.04))
+        orig = evaluate.Judge
+        evaluate.Judge = lambda *a, **k: judge
+        try:
+            res = evaluate.run_arm(BrokenFirstTrack(reqs, {"t9": []}, PROFILES), self.ledger,
+                                   [("known_bad", r) for r in reqs], "fake", "full", "audit",
+                                   budget_usd=5, batch=True)
+        finally:
+            evaluate.Judge = orig
+        self.assertEqual(judge.calls, 3)
+        self.assertEqual(res.stats.model_calls, 3)
+        self.assertAlmostEqual(res.stats.cost_usd, 0.12)
+        self.assertEqual(res.stats.errors, 1)
+
+    def test_review_batches_held_claims_per_profile(self):
+        judge = BatchJudge(jr("NEEDS-HUMAN", 0.5))
+        reqs = [dict(r, trackId="t3", spotifyPopularity=3) for r in self.burst(4, status="unverified")] + [
+            request("solo", pid=PID_GOOD, track="t9", pop=75, roles=("Producer",), status="unverified")]
+        _, stats = run_review(FakeAdmin(reqs, {"t9": [], "t3": []}, PROFILES), self.ledger, judge,
+                              Config(mode="review", phase="shadow", budget_usd=5), limit=10, sample_approved=0, now=NOW)
+        self.assertEqual(stats.model_calls, 2)          # one batch of 4 + one single call
+        self.assertEqual(sorted(len(b) for b in judge.batches), [4])
+        self.assertEqual(stats.reviewed, 5)
+
+    def test_shadow_sample_skips_approvals_the_audit_already_model_checked(self):
+        approved = [request(f"a{i}", pid=PID_GOOD, track="t9", pop=75, roles=("Producer",)) for i in range(40)]
+        picked = [r["id"] for r in approved if sampled(r["id"], 0.5)]
+        for rid in picked[:3]:
+            self.ledger.record({"request_id": rid, "mode": "audit", "phase": "live", "verdict": "SUSPECT",
+                                "confidence": 0.5, "basis": "model_suspect", "big_track": True,
+                                "model": "x-ai/grok-4.3", "reviewed_at": (NOW - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")})
+        judge = FakeJudge(jr("NEEDS-HUMAN", 0.5))
+        run_review(FakeAdmin(approved, {"t9": []}, PROFILES), self.ledger, judge,
+                   Config(mode="review", phase="shadow", budget_usd=50), limit=0, sample_approved=len(picked), now=NOW)
+        reviewed = {r[0] for r in self.ledger.db.execute("SELECT request_id FROM reviews WHERE mode='review'")}
+        self.assertFalse(reviewed & set(picked[:3]))
+        self.assertEqual(reviewed, set(picked[3:]))
+
+    def test_shadow_sample_keeps_approvals_whose_audit_model_check_failed(self):
+        approved = [request(f"a{i}", pid=PID_GOOD, track="t9", pop=75, roles=("Producer",)) for i in range(40)]
+        picked = [r["id"] for r in approved if sampled(r["id"], 0.5)]
+        for rid in picked[:3]:
+            self.ledger.record({"request_id": rid, "mode": "audit", "phase": "live", "verdict": "SUSPECT",
+                                "confidence": 0.3, "basis": "model_error", "big_track": True,
+                                "model": "x-ai/grok-4.3", "reviewed_at": (NOW - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")})
+        judge = FakeJudge(jr("NEEDS-HUMAN", 0.5))
+        run_review(FakeAdmin(approved, {"t9": []}, PROFILES), self.ledger, judge,
+                   Config(mode="review", phase="shadow", budget_usd=50), limit=0, sample_approved=len(picked), now=NOW)
+        reviewed = {r[0] for r in self.ledger.db.execute("SELECT request_id FROM reviews WHERE mode='review'")}
+        self.assertEqual(reviewed, set(picked))
+
+    def test_search_junk_domains_are_excluded_from_the_web_search(self):
+        import os
+        body = Judge("x-ai/grok-4.3", key="k").payload("audit", {})
+        self.assertEqual(body["plugins"][0]["exclude_domains"],
+                         ["muso.ai", "soundbetter.com", "pandora.com", "imdb.com", "mobygames.com"])
+        os.environ["CREDIT_REVIEW_WEB_EXCLUDE"] = "a.com, B.com,a.com,c.com,d.com,e.com,f.com"
+        try:
+            self.assertEqual(Judge(key="k").payload("audit", {})["plugins"][0]["exclude_domains"],
+                             ["a.com", "b.com", "c.com", "d.com", "e.com"])   # xAI native: at most 5
+            os.environ["CREDIT_REVIEW_WEB_EXCLUDE"] = ""
+            self.assertNotIn("exclude_domains", Judge(key="k").payload("audit", {})["plugins"][0])
+        finally:
+            del os.environ["CREDIT_REVIEW_WEB_EXCLUDE"]
+
+    def test_batch_answer_parsing(self):
+        from credit_review.judge import parse_batch_answer
+        text = json.dumps({"claims": [
+            {"claim_id": "c1", "verdict": "SUSPECT", "confidence": 0.7, "findings": []},
+            {"claim_id": "c2", "verdict": "BOGUS", "confidence": 0.7},
+            {"claim_id": "zz", "verdict": "SUSPECT", "confidence": 0.7},
+            {"claim_id": "c1", "verdict": "CONFIRMED", "confidence": 0.99}]})
+        out = parse_batch_answer(text, "audit", ["c1", "c2", "c3"])
+        self.assertEqual(set(out), {"c1"})                 # invalid, unknown and missing ids are absent
+        self.assertEqual(out["c1"]["verdict"], "SUSPECT")  # first answer per id wins
+
+    def test_judge_many_end_to_end_shares_citations_and_splits_cost(self):
+        resp = {"usage": {"cost": 0.09, "prompt_tokens": 9000, "completion_tokens": 900},
+                "choices": [{"message": {"annotations": [
+                    {"type": "url_citation", "url_citation": {"url": "https://www.discogs.com/release/1"}}],
+                    "content": json.dumps({"claims": [
+                        {"claim_id": "c1", "verdict": "CONTRADICTED", "confidence": 0.9,
+                         "findings": [{"source_url": "https://www.discogs.com/release/1", "says": "x",
+                                       "effect": "contradicts"}]},
+                        {"claim_id": "c2", "verdict": "SUSPECT", "confidence": 0.6}]})}}]}
+        j = Judge(key="k")
+        sent = []
+        j._post = lambda body, res, timeout=None: sent.append(json.dumps(body)) or resp
+        out = j.judge_many("audit", [{"claim": {}}, {"claim": {}}, {"claim": {}}], ["r1", "r2", "r3"])
+        self.assertEqual(out["r1"].verdict, "CONTRADICTED")
+        self.assertEqual(out["r1"].contradicting_domains(), {"discogs.com"})
+        self.assertEqual(out["r2"].cited_urls, ["https://www.discogs.com/release/1"])
+        self.assertFalse(out["r3"].ok)
+        self.assertAlmostEqual(sum(r.cost_usd for r in out.values()), 0.09)
+        # firstmate 042: internal request ids never reach the provider; local aliases do.
+        self.assertNotIn("r1", sent[0].replace("\\", ""))
+        self.assertIn('\\"claim_id\\": \\"c1\\"', sent[0])
 
 
 class CronOutputTests(unittest.TestCase):

@@ -55,7 +55,10 @@ STUB
   # Same dependency-injection role for the live-handle scan: an empty proc
   # tree means "no process holds anything open". Pointing at the REAL /proc
   # would make every test depend on whatever else is running on the box.
-  mkdir -p "$TEST_TMPDIR/proc-empty"
+  # One process that holds nothing under the roots: an enumeration that comes
+  # back with ZERO links is itself held (an empty table proves nothing).
+  mkdir -p "$TEST_TMPDIR/proc-empty/1"
+  ln -s / "$TEST_TMPDIR/proc-empty/1/cwd"
   export SWEEP_PROC_DIR="$TEST_TMPDIR/proc-empty"
 
   export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \

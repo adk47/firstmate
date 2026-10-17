@@ -75,9 +75,9 @@ _dropin() { echo "$TEST_TMPDIR/openclaw-gateway-$1.service.d/override.conf"; }
   [ "$path" = "$want/main-timeline.jsonl" ]
 }
 
-@test "main's NODE_OPTIONS is still present, unchanged, exactly once" {
+@test "main's NODE_OPTIONS is still present (12 GiB managed cap, MUS-6143), exactly once" {
   [ "$(grep -c '^Environment="NODE_OPTIONS=' "$(_dropin main)")" -eq 1 ]
-  grep -qx 'Environment="NODE_OPTIONS=--max-old-space-size=8192 --diagnostic-dir=/var/lib/hydra/heap-snapshots"' "$(_dropin main)"
+  grep -qx 'Environment="NODE_OPTIONS=--max-old-space-size=12288 --diagnostic-dir=/var/lib/hydra/heap-snapshots"' "$(_dropin main)"
 }
 
 # Bot finding on #1065: openclaw appends to ONE fixed file, so every append

@@ -65,7 +65,10 @@ case "$1" in
     echo "${STUB_UNIT_ENABLED:-enabled}" ;;
   restart)
     [ "${STUB_RESTART_RECOVERS:-1}" = "1" ] && echo active > "$STUB_SYSCTL_DIR/$2.status" ;;
-  reset-failed|show|stop|start) : ;;
+  show)
+    # ActiveEnterTimestampMonotonic (µs since boot) for the uptime floor; unset = unreadable.
+    case "$*" in *ActiveEnterTimestampMonotonic*) [ -n "${STUB_ACTIVE_ENTER_MONO:-}" ] && echo "$STUB_ACTIVE_ENTER_MONO" ;; esac ;;
+  reset-failed|stop|start) : ;;
 esac
 exit 0
 STUB
@@ -128,6 +131,7 @@ STUB
 printf '%s\n' "$*" >> "$MUSO_CALLS"
 exit 0
 STUB
+  export PROC_UPTIME_FILE="$TEST_TMPDIR/proc-uptime"; echo "100000.00 0.00" > "$PROC_UPTIME_FILE"
   chmod +x "$TEST_TMPDIR"/bin/*
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
 
@@ -298,4 +302,88 @@ _run_wd() {
   [[ "$output" == *"STUCK: 3 agent runs but 0 successes"* ]]
   [[ "$output" == *"Restarting openclaw-gateway..."* ]]
   grep -q "restart openclaw-gateway-main" "$SYSCTL_CALLS"
+}
+
+# MUS-1320: 30-min uptime floor. The cooldown only knows restarts THIS script
+# made; a crash-restart, deploy or manual restart leaves it hours stale while
+# openclaw re-runs a ~20-min migration during which the probe is dead too. The
+# floor reads the unit's own start time, so it covers every restarter.
+# Host up 100000s; unit started `$1` seconds ago.
+_unit_started_ago() { export STUB_ACTIVE_ENTER_MONO=$(( (100000 - $1) * 1000000 )); }
+
+@test "uptime floor: unit started 5min ago, NO cooldown file → restart suppressed, probe never fired" {
+  _stub_n_failed_runs 3
+  printf '000\n000\n000\n' > "$CURL_CODES_FILE"
+  _unit_started_ago 300
+  [ ! -e "$HEAP_STATE_DIR/openclaw-watchdog-cooldown" ]
+  _run_wd
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"UPTIME FLOOR: openclaw-gateway-main started 5min ago (< 30min) — not restarting"* ]]
+  [[ "$output" != *"Restarting openclaw-gateway"* ]]
+  run grep -q "restart openclaw-gateway-main" "$SYSCTL_CALLS"
+  [ "$status" -ne 0 ]
+  [ ! -s "$CURL_CALLS" ]
+}
+
+@test "uptime floor: stale cooldown stamp (6h) does not defeat the floor" {
+  _stub_n_failed_runs 3
+  printf '000\n000\n000\n' > "$CURL_CODES_FILE"
+  _unit_started_ago 600
+  echo $(( $(date +%s) - 21600 )) > "$HEAP_STATE_DIR/openclaw-watchdog-cooldown"
+  _run_wd
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"UPTIME FLOOR"* ]]
+  run grep -q "restart openclaw-gateway-main" "$SYSCTL_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "uptime floor: unit up 45min, genuinely stuck → still restarted" {
+  _stub_n_failed_runs 3
+  printf '000\n000\n000\n' > "$CURL_CODES_FILE"
+  _unit_started_ago 2700
+  _run_wd
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"UPTIME FLOOR"* ]]
+  [[ "$output" == *"Restarting openclaw-gateway..."* ]]
+  grep -q "restart openclaw-gateway-main" "$SYSCTL_CALLS"
+}
+
+@test "uptime floor: exactly 30min is allowed (floor is strict <)" {
+  _stub_n_failed_runs 3
+  printf '000\n000\n000\n' > "$CURL_CODES_FILE"
+  _unit_started_ago 1800
+  _run_wd
+  [[ "$output" == *"Restarting openclaw-gateway..."* ]]
+}
+
+@test "uptime floor: GATEWAY_UPTIME_FLOOR_MIN is env-injectable" {
+  export GATEWAY_UPTIME_FLOOR_MIN=60
+  _stub_n_failed_runs 3
+  printf '000\n000\n000\n' > "$CURL_CODES_FILE"
+  _unit_started_ago 2700
+  _run_wd
+  [[ "$output" == *"UPTIME FLOOR: openclaw-gateway-main started 45min ago (< 60min) — not restarting"* ]]
+  run grep -q "restart openclaw-gateway-main" "$SYSCTL_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "uptime floor: malformed GATEWAY_UPTIME_FLOOR_MIN falls back to 30, floor still enforced" {
+  export GATEWAY_UPTIME_FLOOR_MIN=soon
+  _stub_n_failed_runs 3
+  printf '000\n000\n000\n' > "$CURL_CODES_FILE"
+  _unit_started_ago 300
+  _run_wd
+  [[ "$output" == *"GATEWAY_UPTIME_FLOOR_MIN='soon' is not a positive integer — falling back to 30"* ]]
+  [[ "$output" == *"UPTIME FLOOR"* ]]
+  run grep -q "restart openclaw-gateway-main" "$SYSCTL_CALLS"
+  [ "$status" -ne 0 ]
+}
+
+@test "uptime floor: unreadable start time (unit never started / 0) does not block recovery" {
+  _stub_n_failed_runs 3
+  printf '000\n000\n000\n' > "$CURL_CODES_FILE"
+  export STUB_ACTIVE_ENTER_MONO=0
+  _run_wd
+  [[ "$output" == *"UPTIME FLOOR: start time unreadable"* ]]
+  [[ "$output" == *"Restarting openclaw-gateway..."* ]]
 }

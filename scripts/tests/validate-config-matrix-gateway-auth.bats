@@ -10,6 +10,7 @@
 # Each case writes a throwaway fixture under mktemp -d and runs the real script
 # against it via args. Modeled on validate-config-matrix-fallback.bats.
 bats_require_minimum_version 1.5.0
+load fixtures/declare-model-catalog
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 SCRIPT="$HYDRA_REPO/scripts/validate-config-matrix.sh"
@@ -39,6 +40,7 @@ write_gw_profile() {
   }$gw_block
 }
 JSON
+  declare_model_catalog
 }
 
 @test "check0b: gateway.auth.mode=token PASSES" {

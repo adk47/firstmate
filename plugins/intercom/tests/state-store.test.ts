@@ -141,6 +141,7 @@ describe("state-store", () => {
       const state = loaded.get("acct1")!.get("conv1")!;
 
       expect(state.userTurnCount).toBe(0);
+      expect(state.userExchangeCount).toBe(0);
       expect(state.escalationFiredAt).toBeNull();
       expect(state.knownFacts).toEqual({});
     });

@@ -271,7 +271,28 @@ J
 J
   run "$REPORT" --shadow-dir "$TEST_TMPDIR"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"failures by reason: shape=1 timeout=2 unknown=1"* ]]
+  [[ "$output" == *"failures by reason [v1-legacy]: shape=1 timeout=2 unknown=1"* ]]
+}
+
+@test "footer is split per questions_version; unversioned rows are v1-legacy, never pooled into v1 (MUS-3193)" {
+  cat > "$TEST_TMPDIR/caroline.jsonl" <<'J'
+{"ts":"2026-10-05T08:00:00Z","surface":"caroline","answers":{"q":{"type":"noul","noul":0.9}},"latency_ms":100,"actual":"true","rc":0,"questions_version":"v1"}
+{"ts":"2026-10-05T08:01:00Z","surface":"caroline","answers":null,"latency_ms":200,"actual":"none","rc":2,"reason":"timeout","questions_version":"v1"}
+{"ts":"2026-10-05T08:02:00Z","surface":"caroline","answers":{"q":{"type":"noul","noul":0.9}},"latency_ms":100,"actual":"true","rc":0,"questions_version":"v2"}
+{"ts":"2026-10-05T08:03:00Z","surface":"caroline","answers":null,"latency_ms":300,"actual":"none","rc":2,"reason":"timeout","questions_version":"v2"}
+{"ts":"2026-10-05T08:04:00Z","surface":"caroline","answers":null,"latency_ms":300,"actual":"none","rc":3,"questions_version":"v2"}
+{"ts":"2026-10-05T08:05:00Z","surface":"caroline","answers":null,"latency_ms":50,"actual":"none","rc":3}
+J
+  run "$REPORT" --shadow-dir "$TEST_TMPDIR" --surface caroline
+  [ "$status" -eq 0 ]
+  # v1: 2 rows, 1 failure; v2: 3 rows, 2 failures; unversioned: 1 row, 1 failure
+  [[ "$output" == *"footer [v1]: total=2 rc_nonzero=1 "* ]]
+  [[ "$output" == *"footer [v2]: total=3 rc_nonzero=2 "* ]]
+  [[ "$output" == *"footer [v1-legacy]: total=1 rc_nonzero=1 "* ]]
+  # per-version failure rate and reason breakdown (missing reason -> unknown)
+  [[ "$output" == *"[v1]: total=2 rc_nonzero=1 "*"failure_rate=50.0%"* ]]
+  [[ "$output" == *"failures by reason [v2]: timeout=1 unknown=1"* ]]
+  [[ "$output" == *"failures by reason [v1-legacy]: unknown=1"* ]]
 }
 
 # ─── --outcomes: join real ground truth instead of the router's own action ───
@@ -383,6 +404,37 @@ J
   [[ "$output" =~ 0\.8-0\.9[[:space:]]+1[[:space:]]+100\.0% ]]
   [[ "$output" == *"labelled=1 unlabelled=0"* ]]
   [[ "$output" != *"route"* ]]
+  rm -rf "$d"
+}
+
+@test "outcomes: a genuine v1/v2 pair splits outcomes_matched per questions_version (MUS-3193)" {
+  local d; d="$(mktemp -d)"
+  # One turn, two calls: the live v1 call and its v2 shadow twin, joined by one
+  # outcome record. Each row lands in its OWN (surface, questions_version)
+  # bucket, so each bucket's footer matched exactly ONE row -- not two. A
+  # surface-keyed counter prints outcomes_matched=2 under BOTH footers, which is
+  # precisely the live/shadow pooling this card exists to remove. The existing
+  # "(v1/v2 pair)" test cannot catch this: its fixture rows carry no
+  # questions_version at all, so both land in v1-legacy and its assertion is
+  # vacuous.
+  cat > "$d/outc3.jsonl" <<'J'
+{"ts":"Ta","surface":"outc3","item_id":"iX","questions_version":"v1","answers":{"first_tool":{"type":"choice","choice":"ticket_open","probabilities":{"ticket_open":0.95,"other":0.05}}},"actual":"route","rc":0,"latency_ms":100}
+{"ts":"Tb","surface":"outc3","item_id":"iX","questions_version":"v2","answers":{"first_tool":{"type":"choice","choice":"ticket_open","probabilities":{"ticket_open":0.72,"other":0.28}}},"actual":"decline","rc":0,"latency_ms":100}
+J
+  cat > "$d/outcomes.jsonl" <<'J'
+{"v":1,"surface":"outc3","item_id":"iX","row_ts":["Ta","Tb"],"truth":{"first_tool":"ticket_open"}}
+J
+  run "$REPORT" --shadow-dir "$d" --surface outc3 --outcomes "$d/outcomes.jsonl"
+  [ "$status" -eq 0 ]
+  # one shadow row per version bucket
+  [[ "$output" == *"footer [v1]: total=1 "* ]]
+  [[ "$output" == *"footer [v2]: total=1 "* ]]
+  # outcomes_matched is bucket-scoped: exactly 1 under each of the two footers, never 2
+  [[ "$output" != *"outcomes_matched=2"* ]]
+  [ "$(grep -c 'outcomes_matched=1' <<<"$output")" -eq 2 ]
+  # outcomes_rows stays surface-scoped on purpose -- the sidecar record carries
+  # no questions_version, so the same 1 is correct under both footers
+  [ "$(grep -c 'outcomes_rows=1' <<<"$output")" -eq 2 ]
   rm -rf "$d"
 }
 

@@ -322,12 +322,15 @@ export async function assessRisk(
     };
   }
 
-  // Layer 1b — hard turn-count cap. Force a handoff once the user has sent
-  // turnCountHardCap messages without a rule or judge already firing — protects
-  // against unbounded loops even when no other layer matches.
+  // Layer 1b — hard turn-count cap. Force a handoff once the user has had
+  // turnCountHardCap exchanges (consecutive customer messages with no reply in
+  // between count once: handler.ts continuesCustomerBurst) without a rule or judge
+  // already firing — protects against unbounded loops even when no other layer matches.
+  // Sessions persisted before userExchangeCount existed fall back to the message count.
   const cap = deps.turnCountHardCap ?? DEFAULT_TURN_HARD_CAP;
   const turns = state.userTurnCount ?? 0;
-  if (turns >= cap && !state.escalationFiredAt) {
+  const exchanges = state.userExchangeCount ?? turns;
+  if (exchanges >= cap && !state.escalationFiredAt) {
     logJudgeSkip(deps.log, state.conversationId, "hard_cap");
     return {
       triggered: true,

@@ -1,6 +1,6 @@
 ---
 name: customer-credit-verification
-description: When a customer asks about credits they submitted that are stuck in "user verification needed", confirm ownership with the read-only credit_verification_check tool, ask the customer for proof, and route the outcome. Caroline approves ONLY the catalog-corroborated case via the gated credits_verify tool; otherwise she files a recommend-approve ticket for a human or keeps asking for more proof. She NEVER rejects.
+description: When a customer asks about credits they submitted that are stuck in "user verification needed", confirm ownership with the read-only credit_verification_check tool, ask the customer for proof, and route the outcome. Caroline approves ONLY the catalog-corroborated case via the gated credits_verify tool; otherwise she files a recommend-approve / needs-human ticket for a human. She asks for proof at most once and NEVER rejects.
 triggers:
   - "verify my credits"
   - "my credits are pending"
@@ -23,7 +23,9 @@ A customer is asking about credits they submitted that are stuck in
 proof. Caroline confirms the customer owns the profile, shows them what's pending,
 asks them for proof, and routes the outcome. The outcomes are **approve** (Caroline
 executes it via the gated `credits_verify` tool, but ONLY for the catalog-corroborated
-case – everything else is a human decision) or **ask the customer for more proof**.
+case – everything else is a human decision) or **file it for a human** with whatever
+proof was given. Caroline asks for proof at most once per customer, never again for
+the same credits.
 
 **Caroline approves ONLY the catalog-corroborated case, and NEVER rejects.** The
 single approve path is the gated `credits_verify` tool (Step 3 case 2), which
@@ -33,8 +35,8 @@ private/uncorroborated claim can NEVER be auto-approved; it stays a human decisi
 via a recommend-approve / needs-human ticket. If `credits_verify` returns
 `{disabled:true}` (the flag is off for this account), even the corroborated case
 files a recommend-approve ticket for a human instead. There is **no reject** – when proof is insufficient,
-Caroline asks for more (the case stays open); a hard reject is a human decision /
-the 14-day-no-response policy, never Caroline's.
+Caroline files a needs-human ticket with what was given (the case stays open); a hard
+reject is a human decision / the 14-day-no-response policy, never Caroline's.
 
 This skill is **inbound-only**: act only inside a conversation the customer started.
 Do not proactively reach out about pending credits.
@@ -63,7 +65,12 @@ Do not proactively reach out about pending credits.
   (anti-spoof via the Intercom contact email – you do **NOT** pass a conversation id,
   it's derived from the session) and returns their UVN credits
   (`{ verified_owner, owner_undetermined, impersonation_flag, profile_id,
-  uvn_credits: [{ cr_id, role, track_title, artist, isrc }], count, notes }`).
+  uvn_credits: [{ cr_id, role, track_title, artist, isrc }], count,
+  awaiting_review: { count, truncated } | null,
+  pending_by_status: { user_verification_needed, unverified } | null, notes }`).
+  `awaiting_review` counts credits waiting for OUR team's review (status
+  `unverified`): the customer has nothing to do for those. `null` means the tool
+  could not check, never zero.
   **Always pass `requesterEmail`** when the customer has stated one. Fails closed
   (`owner_undetermined`) when ownership can't be verified. If it returns
   `{ disabled: true }`, the flow is not enabled yet – fall back to a normal
@@ -103,12 +110,24 @@ profile, the tool resolves the one they own from their verified email.
   contact email. The tool has already withheld the pending list (fail-closed).
   Treat as identity-verification / security review; do not proceed on the typed
   email.
-- `count: 0` → **nothing is in "user verification needed" – that is NOT the same as
-  "no submission exists."** This check only sees credits flagged for verification;
-  submissions in normal review, already approved, or already decided by the team are
-  invisible to it. **Never deny that a customer's submission exists.** Say that
-  nothing on their profile is currently waiting on proof from them, that recent
-  submissions go through a normal review you can't see into from here, and offer a
+- `awaiting_review.count > 0` → tell the customer plainly, with the number:
+  "N of your credits are waiting for our team to review – there's nothing you need
+  to do right now. Once they're reviewed, the approved ones will appear on your
+  profile." Do **not** ask for proof for these, do **not** promise a date, and do
+  **not** say nothing is pending. (2026-10-16: this queue held ~5,500 credits for
+  ~100 customers a day, and customers were wrongly told they had 0 pending.) If
+  `count > 0` too, cover both: the awaiting-review ones need nothing, the
+  `uvn_credits` ones need proof (Step 2).
+  If `awaiting_review.truncated` is true, the count is a floor: say "more than N"
+  (e.g. "more than 100"), never the exact number.
+- `awaiting_review: null` → the review queue could not be read. Do **not** say
+  nothing is pending; say you can't see the review status right now and offer a
+  `credit-claim` ticket.
+- `count: 0` and `awaiting_review.count: 0` → **nothing is in "user verification
+  needed" or waiting for our review – that is still NOT the same as "no submission
+  exists."** Already approved or already decided submissions are invisible here.
+  **Never deny that a customer's submission exists.** Say that nothing on their
+  profile is currently waiting on proof from them or on our review, and offer a
   `credit-claim` / `support-general` ticket if they want the team to check status.
   If the customer says their credit was **rejected**: you never reject, but a human
   may have – do not deny or contradict that; acknowledge it and file a
@@ -117,8 +136,49 @@ profile, the tool resolves the one they own from their verified email.
 
 ### Step 2 – Tell the customer what's pending and ask for proof
 
-Plainly list the pending tracks + claimed roles. Then ask for proof, and **tell the
-customer what they can send** (screenshots are accepted for all of these):
+**Never ask for proof the customer has already given (captain's standing order,
+2026-10-16: "make sure you aren't asking for things from users that already
+submitted documents and we approved").** Muso has no separate proof store, so check
+only what you can actually see:
+
+- **This conversation.** Proof the customer attaches, links, or forwards here is a
+  submission: route it via Step 3 (which files the ticket). Do not ask for it again.
+- **The prior-chat summary in your context** (`prior support chats: N (most recent:
+  ...)`). You see only the count and the most recent chat's title/snippet and date,
+  never any chat's messages or attachments, so you can never rule out proof sent in
+  one of them. Never say you checked earlier conversations' contents.
+  `prior support chats: 0` means the lookup ran and found none. **No such line at
+  all means unknown** (the lookup failed, timed out, or didn't run), never "no prior
+  chats".
+- **The customer's own statement** that they already sent proof, or that the team
+  already received or approved it.
+- **An existing `credit-verify` ticket**, which you only learn about when
+  `create_ticket` returns `updated_existing: true`.
+
+If the customer says proof was sent before this conversation, or your context shows
+`prior support chats: N` with N of 1 or more (whatever the most recent title says –
+proof could be in that chat or an older one you can't see), or shows no `prior
+support chats` line at all, do **not** ask: take their word, and still run Step 3's checks that need
+nothing from the customer on whatever is visible or stated – case 1 (contradiction /
+credit-theft routing) and case 2 (catalog corroboration, approving via
+`credits_verify` when it applies). Skipping the ask is the only change. If those
+checks don't resolve it, or nothing can be checked, file a **needs-human**
+`credit-verify` ticket (Step 4, `proof.kind:"none"`) whose `reason` states the actual basis –
+`"customer says proof already sent"` when they said so, or `"prior support chats
+exist; earlier proof cannot be ruled out"` when only the prior-chat line is the
+basis, or `"prior-chat history unavailable; earlier proof cannot be ruled out"`
+when the line is missing – the dedupe appends to the open ticket if there is one – and only then
+tell them it is with the team and there is nothing more they need to send. When in
+doubt, don't ask.
+
+Ask at most once per customer, in one message covering all their pending credits
+together, never one message per credit, and never a second proof request for the
+same credits.
+
+Otherwise (only when your context shows `prior support chats: 0` and nothing in this
+conversation or from the customer says proof was given), plainly list the pending
+tracks + claimed roles. Then ask for proof, and
+**tell the customer what they can send** (screenshots are accepted for all of these):
 
 - **A public link where the credit is listed** – Tidal, Genius, Jaxsta, Discogs,
   AllMusic, ASCAP, or BMI.
@@ -138,9 +198,9 @@ skill.
 1. **Contradiction (credit-theft guard).** If a public/official source or Muso's own
    catalog shows **someone else** credited for the claimed role on that track (or the
    customer is only credited in a *different* role), do **NOT** recommend approve.
-   Explain what the public credits show and ask for stronger proof; if they push,
-   file a **needs-human** `credit-verify` ticket flagged as a possible credit-theft /
-   contradicting-credit case. Never approve over a contradicting credit.
+   Do not ask for stronger proof: file a **needs-human** `credit-verify` ticket with
+   what was given, flagged as a possible credit-theft / contradicting-credit case, and
+   tell the customer it is with the team. Never approve over a contradicting credit.
 2. **Catalog corroboration.** Muso's **own catalog** (`credits_search` /
    `profile_status`) confirms **their** name in the **exact** claimed role on the
    track. This is the **only** approvable path, and it must rest on a check **you
@@ -162,12 +222,15 @@ skill.
    submitted; "not independently cross-checkable"), and file a **needs-human**
    `credit-verify` ticket carrying the links / referencing the attachments. Do
    **not** grade the proof or recommend approve on it.
-4. **Insufficient / no proof** → ask for more proof (Step 2 list). This is the only
-   "negative" – keep the case open, never reject.
+4. **Insufficient / no proof** → if the customer sent anything, or you already asked
+   once, or Step 2's no-ask rule applies (proof said to be sent, or any prior support
+   chats), do **not** ask: file a **needs-human** `credit-verify` ticket with what was
+   given and tell the customer it is with the team. Only when none of that holds do
+   you make the single Step 2 ask. Keep the case open, never reject.
 
-**Bounded ask-for-more:** if you have asked for proof **twice** in this case without
-catalog corroboration, stop looping – file a **needs-human** `credit-verify` ticket so
-a person can take it from here. Do not keep asking indefinitely, and never reject.
+**One ask, ever:** never send a second proof request for the same credits. Anything
+that would have been a follow-up ask becomes a **needs-human** `credit-verify` ticket
+so a person can take it from here.
 
 ### Step 4 – File via `create_ticket`
 
@@ -195,8 +258,8 @@ Include this literal banner so the human reviewer is not anchored by the evidenc
   "done", and never say "I've recommended approval" (it sets an expectation a human may
   not honor) – say you've **passed it to the team for review**. A `route_to_human`,
   `{disabled:true}`, or any non-success from `credits_verify` is NOT an approval – route it.
-- Never tell a customer their credit is **rejected** – you don't reject. Say you need
-  more proof, or that you've **filed it for the team** to review. (If a human already
+- Never tell a customer their credit is **rejected** – you don't reject. Say you've
+  **filed it for the team** to review. (If a human already
   rejected it, see Step 1 – acknowledge, don't deny.)
 - **No approval timeline.** Never promise when (or whether) a credit will be
   approved. When you file a ticket, DO relay the literal `sla` field that
