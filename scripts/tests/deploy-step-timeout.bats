@@ -233,7 +233,7 @@ s = by[n]
 assert "stale_check.outcome" in s["if"] and "failure" in s["if"], s["if"]
 assert "proceed" not in s["if"], "must not require proceed"
 assert s.get("continue-on-error") is True and isinstance(s["timeout-minutes"], int)
-assert "timeout 240 bash scripts/lib/deploy-notify.sh critical" in s["run"]
+assert "timeout 240 bash \"$NOTIFY\" critical" in s["run"] and "scripts/lib/deploy-notify.sh" in s["run"]
 assert "rollback.sh" not in s["run"]
 assert "proceed" in by["Rollback on failure"]["if"]
 '
@@ -242,6 +242,31 @@ assert "proceed" in by["Rollback on failure"]["if"]
 
 @test "pre-deploy failure page body: posts critical via the notifier" {
   extract_step "Page on pre-deploy failure" predeploy.sh ""
+  run run_step predeploy.sh
+  [ "$status" -eq 0 ]
+  grep -qx "deploy-notify.sh critical" "$LOG"
+}
+
+# A Checkout that stalls to its 10m cap fails before stale_check runs, so
+# stale_check.outcome is "skipped" and every page above is skipped too. The
+# pre-deploy page therefore also keys on the checkout outcome, and must not
+# need the (possibly absent) workspace copy of the notifier.
+@test "checkout timeout: step has an id, pre-deploy page keys on its outcome and falls back to the host notifier" {
+  run wf_py '
+c = by["Checkout"]
+assert c.get("id") == "checkout", c
+s = by["Page on pre-deploy failure"]
+assert "steps.checkout.outcome" in s["if"] and "stale_check.outcome" in s["if"], s["if"]
+assert "/opt/hydra/scripts/lib/deploy-notify.sh" in s["run"]
+'
+  [ "$status" -eq 0 ]
+}
+
+@test "pre-deploy failure page body: workspace notifier missing (checkout died) -> host copy pages critical" {
+  extract_step "Page on pre-deploy failure" predeploy.sh ""
+  grep -q "/opt/hydra/scripts/lib/deploy-notify.sh" "$SANDBOX/predeploy.sh"
+  sed -i.bak 's#/opt/hydra/scripts/lib/deploy-notify.sh#scripts/lib/host-notify.sh#g' "$SANDBOX/predeploy.sh"
+  mv "$SANDBOX/scripts/lib/deploy-notify.sh" "$SANDBOX/scripts/lib/host-notify.sh"
   run run_step predeploy.sh
   [ "$status" -eq 0 ]
   grep -qx "deploy-notify.sh critical" "$LOG"
