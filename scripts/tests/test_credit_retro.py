@@ -179,16 +179,22 @@ def write_manifest(tmp: Path, rows) -> str:
 
 
 def live_sources(tmp: Path, *, proof_entries=(), age=timedelta(0), stale_source=False, affiliation=None,
-                 tagged=(), affiliation_file=True):
+                 tagged=(), affiliation_file=True, sources=None, extra=None):
     """Write the live exclusion sources (credit-trust proof-on-file + org-affiliation, Caroline's
-    send ledger) and load them through the real loader."""
+    send ledger) and load them through the real loader. The proof file has the live export's
+    shape (firstmate 032): `core` carries NO stale key (its freshness is its generated_at),
+    `cs-intercom` and `cs-gmail` carry stale flags."""
     tmp.mkdir(parents=True, exist_ok=True)
     proof = tmp / "proof-on-file.json"
+    stamp = (datetime.now(timezone.utc) - age).isoformat().replace("+00:00", "Z")
     proof.write_text(json.dumps({
-        "generated_at": (datetime.now(timezone.utc) - age).isoformat().replace("+00:00", "Z"),
-        "sources": [{"name": "intercom", "stale": stale_source, "age_hours": 0.5},
-                    {"name": "verifications", "stale": False, "age_hours": 0.2}],
-        "entries": list(proof_entries)}))
+        "generated_at": stamp,
+        "sources": sources if sources is not None else [
+            {"name": "core", "generated_at": stamp, "count": 3, "detail": {"verifications": 3}},
+            {"name": "cs-intercom", "generated_at": stamp, "stale": stale_source, "count": 1},
+            {"name": "cs-gmail", "generated_at": stamp, "stale": False, "count": 0}],
+        "entries": list(proof_entries), "users": len({str(e["user_id"]) for e in proof_entries}),
+        **(extra or {})}))
     aff = tmp / "org-affiliation.json"
     if affiliation_file:
         aff.write_text(json.dumps(affiliation if affiliation is not None else
@@ -1676,6 +1682,96 @@ class LiveExclusionTests(unittest.TestCase):
         _, counts = takeback.plan(api, self.ledger, rows, manifest=manifest, excl=no_verdict, argv=[],
                                   log=self.out.append)
         self.assertEqual(counts, {"skip:affiliation_unknown": 1, "skip:evidence_unverified": 1})
+
+    def test_live_part_names_core_without_stale_key_is_usable(self):
+        # firstmate 032 (c): core has no `stale` key; requiring stale:false on every source
+        # skipped every run. Its own fresh generated_at is what makes it usable.
+        self.assertIsNone(OPEN.unavailable, OPEN.detail)
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat().replace("+00:00", "Z")
+        gmail = {"name": "cs-gmail", "generated_at": now, "stale": False}
+        legacy = live_sources(self.dir / "legacy", sources=[
+            {"name": "core", "generated_at": now}, {"name": "cs-systemic intercom+gmail", "generated_at": now,
+                                                      "stale": False}, gmail])
+        self.assertIsNone(legacy.unavailable, legacy.detail)
+        self.assertEqual(takeback.gate(FakeApi(), row(), legacy).ok, True)
+        for name, srcs in (("core-old", [{"name": "core", "generated_at": old},
+                                         {"name": "cs-intercom", "generated_at": now, "stale": False}, gmail]),
+                           ("core-unstamped", [{"name": "core"}, {"name": "cs-intercom", "generated_at": now,
+                                                                   "stale": False}, gmail]),
+                           ("no-intercom", [{"name": "core", "generated_at": now}, gmail]),
+                           ("intercom-stale", [{"name": "core", "generated_at": now},
+                                               {"name": "cs-intercom", "generated_at": now, "stale": True}, gmail])):
+            excl = live_sources(self.dir / name, sources=srcs)
+            self.assertEqual(excl.unavailable, "proof_source_unavailable", name)
+        for name in ("cs-systemic", "cs-systemic gmail"):
+            excl = live_sources(self.dir / name, sources=[{"name": "core", "generated_at": now},
+                                                          {"name": name, "generated_at": now, "stale": False}, gmail])
+            self.assertEqual(excl.unavailable, "proof_source_unavailable", name)
+            self.assertIn("part 'cs-intercom' is missing", excl.detail)
+        truthy = live_sources(self.dir / "truthy", sources=[
+            {"name": "core", "generated_at": now}, {"name": "cs-intercom", "generated_at": now, "stale": "true"},
+            gmail])
+        self.assertEqual(truthy.unavailable, "proof_source_unavailable")
+
+    def test_gmail_part_unusable_removes_nobody(self):
+        # cs-gmail missing, stale or old: anyone may have emailed a document to support@
+        # after any snapshot of who wrote in, so the whole export is UNKNOWN and nothing is
+        # removed (a contact list, even a fresh one, does not narrow the hold).
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat().replace("+00:00", "Z")
+        base = [{"name": "core", "generated_at": now}, {"name": "cs-intercom", "generated_at": now, "stale": False}]
+        api = FakeApi()
+        listed = {"gmail_contacts_90d": {"generated_at": now, "source": "gmail support@ inbox, 90 days",
+                                         "user_ids": [5]}}
+        for name, gmail in (("gmail-missing", []),
+                            ("gmail-stale", [{"name": "cs-gmail", "generated_at": now, "stale": True}]),
+                            ("gmail-old", [{"name": "cs-gmail", "generated_at": old, "stale": False}])):
+            excl = live_sources(self.dir / name, sources=base + gmail, extra=listed)
+            self.assertEqual(excl.unavailable, "proof_source_unavailable", name)
+            self.assertIn("part 'cs-gmail'", excl.detail)
+            self.assertEqual(takeback.gate(api, row(), excl).reason, "proof_source_unavailable")
+        _, counts = self.plan(api, live_sources(self.dir / "pl", sources=base, extra=listed))
+        self.assertEqual(counts, {"skip:proof_source_unavailable": 1})
+
+    def test_live_gmail_contacts_object_is_accepted_and_unused(self):
+        # firstmate 037: the live export carries gmail_contacts_90d as an object; a file with
+        # it is not malformed, and it never narrows a cs-gmail hold.
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        live = {"gmail_contacts_90d": {"generated_at": now, "source": "cs-gmail support@ scan, 90 days",
+                                       "user_ids": [34135, 161128]}}
+        api = FakeApi()
+        fresh = live_sources(self.dir / "fresh", extra=live)
+        self.assertIsNone(fresh.unavailable, fresh.detail)
+        self.assertEqual(self.plan(api, fresh)[1], {"would_remove": 1})
+        stale = live_sources(self.dir / "stale", extra=live, sources=[
+            {"name": "core", "generated_at": now}, {"name": "cs-intercom", "generated_at": now, "stale": False},
+            {"name": "cs-gmail", "generated_at": now, "stale": True}])
+        self.assertEqual(stale.unavailable, "proof_source_unavailable")
+        self.assertEqual(self.plan(api, stale)[1], {"skip:proof_source_unavailable": 1})
+
+    def test_half_written_proof_export_removes_nothing(self):
+        # firstmate 038: the take-back gate refuses a half-written export exactly like the
+        # verify notes: users not the distinct user ids, or any malformed entry.
+        api = FakeApi()
+        plan_id, _ = self.plan(api, OPEN)
+        other = {"user_id": 999, "request_id": None, "kind": "approved_doc", "source": "verifications", "ref": "v 1"}
+        cases = {
+            "users-mismatch": dict(proof_entries=[other], extra={"users": 2}),
+            "users-missing": dict(proof_entries=[other], extra={"users": None}),
+            "not-an-object": dict(proof_entries=[other], extra={"entries": [other, 42]}),
+            "no-user-id": dict(proof_entries=[{**other, "user_id": None}]),
+            "bad-request-id": dict(proof_entries=[{**other, "request_id": 5}]),
+            "unknown-kind": dict(proof_entries=[{**other, "kind": "maybe_doc"}]),
+        }
+        for name, kw in cases.items():
+            excl = live_sources(self.dir / name, **kw)
+            self.assertEqual(excl.unavailable, "proof_source_unavailable", name)
+            self.assertEqual(self.plan(api, excl)[1], {"skip:proof_source_unavailable": 1}, name)
+            with self.assertRaises(SystemExit):
+                self.apply(api, plan_id, excl)
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
+        self.assertEqual(api.sender.sent, [])
 
     def test_malformed_proof_file_is_unavailable_not_a_crash(self):
         bad = self.dir / "bad"

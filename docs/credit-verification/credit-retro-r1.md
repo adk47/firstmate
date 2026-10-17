@@ -264,9 +264,14 @@ message going out.
 `--doc-submitted`. The hand-set `excluded` flags stay, but they were a 2026-10-16 snapshot:
 a user who sends a document after a deferred day keeps the role.
 - proof-on-file missing, unreadable, `generated_at` older than 3 hours or more than 5 minutes in
-  the future, or any source with
-  `stale` not `false`; or the send ledger or doc manifest unreadable: `plan` skips every row
-  as `proof_source_unavailable` and `apply` refuses before any execute.
+  the future, or a required part unusable (`scripts/credit_review/proof_parts.py`, the same rule
+  as the verify notes: `core`, `cs-intercom` and `cs-gmail` must each be present, not
+  flagged `stale`/`missing`, with their OWN fresh timezone-aware `generated_at`; `core` has no `stale` key, so its
+  stamp is its freshness), or any other part flagged stale/missing, or a half-written export
+  (`users` not the distinct user ids in `entries[]`, or any malformed entry); or the send ledger or doc
+  manifest unreadable: `plan` skips every row as `proof_source_unavailable` and `apply`
+  refuses before any execute. An unusable `cs-gmail` (documents emailed to support@) holds
+  everyone: a snapshot of who emailed support@ cannot cover mail sent after it.
 - proof-on-file, the send ledger or the doc manifest malformed (wrong shape): same as
   unreadable.
 - org-affiliation missing, unreadable or malformed: every row

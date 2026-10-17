@@ -49,7 +49,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from . import admin as admin_api
-from . import verify_ledger
+from . import proof_parts, verify_ledger
 from .roles import family_of
 
 WRAPPER = os.environ.get("CREDIT_VERIFY_NOTIFY_WRAPPER", "/opt/hydra/scripts/intercom-verify-request.sh")
@@ -63,13 +63,8 @@ PROOF_MAX_AGE_H = 3
 # so its age is unknowable and the list is not authoritative (a future stamp would otherwise
 # pass the age check long after the export went stale).
 PROOF_MAX_SKEW_H = 0.1
-# The parts the exporter must have written (and fresh) for the list to be authoritative.
-# A document without them, or with an empty sources[], is a half-written export: no asks.
-# The part ids the LIVE exporter writes in sources[].name (node-8
-# /var/lib/credit-trust/proof-on-file.json, 2026-10-17: "core" and "cs-systemic intercom+gmail";
-# the latter carries the Intercom + Gmail document replies, ~94% of entries). Matched exactly:
-# a renamed or missing part is UNKNOWN, so no ask goes out until this constant follows it.
-PROOF_REQUIRED_SOURCES = ("core", "cs-systemic intercom+gmail")
+# Which parts make the list authoritative (core, cs-intercom and cs-gmail, all required):
+# credit_review/proof_parts.py, shared with the take-back gate.
 CAPTAIN_UID = "U7RP6HKUZ"
 DECISION_COLUMNS = ("run_id", "request_id", "profile_id", "track_id")
 OUTCOME_COLUMNS = ("id", "run_id", "at", "request_id", "action", "outcome")
@@ -269,7 +264,8 @@ def load_proof_on_file(path: str | None = None, *, max_age_h: float = PROOF_MAX_
     users, entries: [{user_id, request_id|null, kind, source, ref}]}; kinds approved_doc,
     pending_doc, human_approved_after_doc. Past credits: any entry excludes the whole user.
     New credits: screen_live. A missing, unreadable, stale, future-dated or half-written file,
-    or one with any malformed entry, raises ProofFileError: when in doubt, no ask goes out."""
+    or one with any malformed entry, raises ProofFileError: when in doubt, no ask goes out
+    (which parts must be usable: credit_review/proof_parts.py)."""
     path = path or PROOF_ON_FILE
     try:
         with open(path, encoding="utf-8") as fh:
@@ -294,35 +290,13 @@ def load_proof_on_file(path: str | None = None, *, max_age_h: float = PROOF_MAX_
     # authoritative. sources[] must be a non-empty list that names every required part, each
     # fresh and neither stale nor missing; `users` must equal the distinct user ids in
     # entries[]. Anything else: when in doubt, no ask goes out.
-    sources = doc.get("sources")
-    if not isinstance(sources, list) or not sources:
-        raise ProofFileError(f"the proof-on-file list {path} has no sources[] (a half-written export is not authoritative)")
-    by_name = {str(x.get("name") or ""): x for x in sources if isinstance(x, dict)}
-    absent = [n for n in PROOF_REQUIRED_SOURCES if n not in by_name]
-    if absent:
-        raise ProofFileError(f"the proof-on-file list {path} lacks required part(s): {', '.join(absent)}")
-    bad = [str(x.get("name") or "?") for x in sources
-           if not isinstance(x, dict) or x.get("stale") or x.get("missing")]
-    if bad:
-        raise ProofFileError(f"the proof-on-file list {path} has stale or missing part(s): {', '.join(bad)}")
-    for name in PROOF_REQUIRED_SOURCES:
-        sg = parse_ts(by_name[name].get("generated_at"))
-        if sg is None or not -PROOF_MAX_SKEW_H <= (now - sg).total_seconds() / 3600 <= max_age_h:
-            raise ProofFileError(f"the proof-on-file list {path} part '{name}' has no fresh generated_at")
     # Every entry must be well-formed (QA review of hydra#1239): a malformed row may be the
     # one user with a document on file, so it is never skipped -- the whole file is refused.
-    from .decide import PROOF_KINDS
-    for i, e in enumerate(doc["entries"]):
-        uid = e.get("user_id") if isinstance(e, dict) else None
-        rid = e.get("request_id") if isinstance(e, dict) else None
-        if (isinstance(uid, bool) or not isinstance(uid, (int, str)) or not str(uid).strip()
-                or not (rid is None or isinstance(rid, str)) or e.get("kind") not in PROOF_KINDS):
-            raise ProofFileError(f"the proof-on-file list {path} has a malformed entries[{i}] "
-                                 "(needs user_id, request_id|null and a known kind)")
-    uids = {str(e["user_id"]).strip() for e in doc["entries"]}
-    if not isinstance(doc.get("users"), int) or doc["users"] != len(uids):
-        raise ProofFileError(f"the proof-on-file list {path} is inconsistent (users={doc.get('users')!r}, "
-                             f"{len(uids)} distinct user ids in entries[]): treated as a half-written export")
+    try:
+        proof_parts.check(doc, now=now, max_age_h=max_age_h, max_skew_h=PROOF_MAX_SKEW_H)
+        proof_parts.check_entries(doc)
+    except proof_parts.PartsError as exc:
+        raise ProofFileError(f"the proof-on-file list {path}: {exc}") from exc
     out: ProofOnFile = {}
     for e in doc["entries"]:
         rid = str(e.get("request_id") or "").strip() or None

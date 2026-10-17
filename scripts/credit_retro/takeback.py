@@ -38,7 +38,8 @@ Caroline's send ledger and the committed doc-submitted manifest. Last, only for 
 passed everything else and would be removed: org affiliation (credit-trust
 ``org-affiliation.json``): no verdict skips the row, and an affiliated user is human
 review + a polite contact, never automatic. If a source cannot be read or is stale,
-nothing is removed that run.
+nothing is removed that run (which proof-on-file parts must be usable:
+credit_review/proof_parts.py).
 
 A row that fails any gate is SKIPPED with the reason, recorded, and left for
 the verify waves. Nothing is retried around a gate.
@@ -74,6 +75,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from credit_review import proof_parts
 from credit_review.evidence import CONTRADICTED, classify_roles
 from credit_review.roles import ONE_PERSON_FAMILIES, family_of, is_trusted_source, names_match
 
@@ -223,7 +225,6 @@ PROOF_ON_FILE = os.environ.get("CREDIT_RETRO_PROOF_ON_FILE", "/var/lib/credit-tr
 ORG_AFFILIATION = os.environ.get("CREDIT_RETRO_ORG_AFFILIATION", "/var/lib/credit-trust/org-affiliation.json")
 PROOF_MAX_AGE = timedelta(hours=3)
 CLOCK_SKEW = timedelta(minutes=5)  # a generated_at later than now + this is not "fresh", it is wrong
-PROOF_KINDS = frozenset({"approved_doc", "pending_doc", "human_approved_after_doc"})
 AFFILIATION_VERDICTS = frozenset({"none", "claimed_unverified", "contributor", "verified_org",
                                   "authenticated_domain"})
 AFFILIATED = frozenset({"contributor", "verified_org", "authenticated_domain"})
@@ -258,22 +259,24 @@ def require_fresh(generated_at: Any, now: datetime) -> None:
 
 
 def _read_proof_on_file(path: str, now: datetime) -> tuple[dict[str, str], dict[str, str]]:
+    """(proof by request, proof by whole user). Which parts must be usable, and that a
+    half-written export (a malformed entry, or ``users`` not the distinct user ids in
+    entries[]) is refused whole, is credit_review.proof_parts (shared with the verify notes).
+    Each part's freshness comes from its OWN generated_at; core carries no ``stale`` key, so
+    requiring ``stale: false`` on every source would refuse every run (cs lane, firstmate 032)."""
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
     require_fresh(doc["generated_at"], now)
-    stale = [str(src.get("name") or src.get("source") or i) for i, src in enumerate(doc["sources"])
-             if src.get("stale") is not False]
-    if stale:
-        raise ValueError(f"stale sources: {', '.join(stale)}")
+    proof_parts.check(doc, now=now, max_age_h=PROOF_MAX_AGE.total_seconds() / 3600,
+                      max_skew_h=CLOCK_SKEW.total_seconds() / 3600)
+    proof_parts.check_entries(doc)
     by_request: dict[str, str] = {}
     by_user: dict[str, str] = {}
     for e in doc["entries"]:
-        if e["kind"] not in PROOF_KINDS:
-            raise ValueError(f"unknown proof kind {e['kind']!r}")
-        if e.get("request_id"):
-            by_request[str(e["request_id"])] = e["kind"]
+        if (e.get("request_id") or "").strip():
+            by_request[e["request_id"].strip()] = e["kind"]
         else:
-            by_user[str(e["user_id"])] = e["kind"]
+            by_user[str(e["user_id"]).strip()] = e["kind"]
     return by_request, by_user
 
 
@@ -292,7 +295,8 @@ def load_exclusions(*, proof_on_file: str = PROOF_ON_FILE, org_affiliation: str 
                     verify_db: str | None, doc_submitted: str | Path | None = None,
                     now: datetime | None = None) -> Exclusions:
     """Read every live exclusion source now. Never raises: a source that cannot be read (or
-    proof-on-file older than 3h / with a stale source) makes ``unavailable`` the skip reason."""
+    proof-on-file older than 3h / with a required part unusable) makes ``unavailable`` the skip
+    reason."""
     from . import waves  # noqa: PLC0415
     now = now or datetime.now(timezone.utc)
     try:

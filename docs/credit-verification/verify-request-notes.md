@@ -101,11 +101,27 @@ rule silently, so for them the documents rule is per CREDIT:
    the decider uses; owner the credit-system lane, refreshed hourly; entries
    `{user_id, request_id|null, kind}`, kinds `approved_doc`, `pending_doc`,
    `human_approved_after_doc`). The list is authoritative only when it is complete: a
-   non-empty `sources[]` naming every required part (`core` and `cs-systemic intercom+gmail`, the exact part ids the live exporter writes; a renamed part sends nothing until `PROOF_REQUIRED_SOURCES` follows it), each fresh and neither `stale` nor `missing`, and
+   non-empty `sources[]` with every required part usable (`scripts/credit_review/proof_parts.py`,
+   shared with the take-back gate and, in TypeScript, Caroline's support tool
+   `plugins/support-tools/src/tools/proof-on-file.ts`; one fixture file,
+   `scripts/tests/fixtures/proof-parts-contract.json`, pins both): `core`, `cs-intercom` (only the exact legacy label
+   `cs-systemic intercom+gmail` is read as Intercom, and as Intercom only) and `cs-gmail`
+   (documents emailed to support@), each present once, not flagged `stale`/`missing` (any
+   truthy value) and carrying its OWN fresh timezone-aware `generated_at`; no other
+   part flagged stale or missing; and
    `users` equal to the distinct user ids in `entries[]`, and every entry well-formed (a
    malformed row is never skipped: it refuses the whole file). A missing, unreadable, older-than-3h,
    future-dated (beyond 6 minutes of clock skew, file or any part) or half-written export makes the run send **zero** asks and exit non-zero, in both
    campaigns (`--proof-on-file FILE` overrides the path).
+   - **Gmail (`cs-gmail`):** while it is missing or stale nobody is asked, reminded or
+     made removal-due: a snapshot of who emailed support@ cannot cover mail sent after it,
+     so no contact list narrows the hold. The live export does carry `gmail_contacts_90d`
+     (`{generated_at, source, user_ids[]}`); every reader accepts a file with it and
+     deliberately ignores it.
+   - **The decider does not follow this rule yet:** `decide.py` only refuses a part with a
+     truthy `stale`/`missing` flag; it neither requires `cs-gmail` nor checks each part's own
+     `generated_at`. It must import `proof_parts` (credit-trust-llm-t01 owns that switch);
+     until it does it lacks the `cs-gmail` rule.
    - **Past credits (`retro-past`):** a `user_id` listed with ANY entry is never asked, and
      their credits are closed as `skipped`.
    - **New credits (`verify-live`, the note and its day-14/day-25 reminders):** a credit with
