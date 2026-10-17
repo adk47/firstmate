@@ -249,9 +249,11 @@ message going out.
   escalate to #clio_devops if it keeps failing.
 - **Preview:** `python3 $S notice-preview --plan <plan_run>` renders every user's notice
   without sending.
-- **Dependency:** the gate needs a `takeback-notice` campaign (credit-trust-caroline-t06)
-  whose `--validate` reports the per-day cap with exit 3. Until it has one, `--validate`
-  fails and `apply` refuses.
+- **Dependency:** the gate's `takeback-notice` campaign (credit-trust-caroline-t06, #1239):
+  its `--validate` reports the per-day cap with exit 3. A real send also needs the gate's
+  `TAKEBACK_COPY_APPROVED` lock flipped (Fable copy GO + captain). Until then `--validate`
+  refuses too (exit 1), so `apply` fails its notice preflight and removes nothing: no
+  removal without its notice. `notice-preview` still renders the copy.
 
 ### Live exclusion sources fail closed
 

@@ -1670,6 +1670,10 @@ jobs:
           # AI credit reviewer / approval auditor (scripts/credit_review). Stdlib
           # only; the admin API and the model are faked, so no network.
           python3 scripts/tests/test_credit_review.py
+          # Trust-yet-verify user notes (credit-review.py verify-notify + the
+          # verify ledger). Stdlib only; the admin API is faked and the gate
+          # script runs as its TESTABLE copy against a curl stub (no network).
+          python3 scripts/tests/test_credit_verify_notify.py
           # credit-retro r1 role-scoped take-back + prepared waves (scripts/credit_retro).
           # Stdlib only; the admin API is faked. Also pins the committed manifests.
           python3 scripts/tests/test_credit_retro.py

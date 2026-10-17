@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import string
 import subprocess
 import tempfile
 from collections import defaultdict
@@ -36,6 +37,7 @@ from .takeback import evidence_label
 CAMPAIGN = "takeback-notice"
 DEFAULT_SCRIPT = "/opt/hydra/scripts/intercom-verify-request.sh"
 MAX_LISTED = 25
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
 
 SUBJECT_ONE = 'About your {role} credit on "{track_title}"'
 SUBJECT_MANY = "About {n} of your credits on Muso"
@@ -74,10 +76,12 @@ def notice_credit(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def lines_of(credits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One line per track title + artist + role: two requests for the same credit are one line."""
+    """One line per track title + artist + role: two requests for the same credit are one line.
+    Matching lowercases ASCII letters only (the send gate's jq ascii_downcase), so "Café" and
+    "CAFÉ" stay two lines here exactly as they do in the message that is sent."""
     seen: dict[tuple[str, str, str], dict[str, Any]] = {}
     for c in credits:
-        seen.setdefault((c["track_title"].casefold(), c["artist_name"].casefold(), c["role"].casefold()), c)
+        seen.setdefault(tuple(c[k].translate(_ASCII_LOWER) for k in ("track_title", "artist_name", "role")), c)
     return list(seen.values())
 
 

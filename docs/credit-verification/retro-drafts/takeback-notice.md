@@ -6,9 +6,9 @@ the public credits name, with the link), and how to dispute it by replying with 
 It is sent when the removal executes, never before.
 
 - **Sender:** Caroline's gate, `scripts/intercom-verify-request.sh send --campaign
-  takeback-notice`. That campaign does not exist yet. The gate (credit-trust-caroline-t06)
-  has to add it with exactly this copy, behind its own send lock, and its `--validate` has
-  to report the per-day cap with exit 3.
+  takeback-notice`. The gate renders exactly this copy (a bats test diffs it against
+  `notice.py`'s preview), behind its own send lock `TAKEBACK_COPY_APPROVED` (0 until Fable's
+  copy GO and the captain's approval), and its `--validate` reports the per-day cap with exit 3.
 - **Approval:** the human who approved this copy and the run passes
   `--notice-approved-by <SlackUID>` to `apply` / `notify`. It is never defaulted.
 - **Source of truth:** this file. `scripts/credit_retro/notice.py` renders the same text
