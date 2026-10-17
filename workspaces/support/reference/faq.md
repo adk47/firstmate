@@ -1,4 +1,5 @@
 # Frequently Asked Questions
+<!-- Reviewed baseline: deploy overwrites the live copy of this file. The live edits of 2026-10-15/16 (section 8b sign-out workaround; plaque ordering) are folded in here together with PR #1224, so overwriting loses nothing. Drop this line once the next release has shipped (MUS-13058). -->
 
 ## Account and Profile
 
@@ -231,7 +232,9 @@ and we'll re-check what your profile is showing and flag it for our
 team if needed.
 
 ### The mobile app is not working
-Make sure you have the latest version from the App Store or Google Play. Try force-closing and reopening the app. If issues persist, create a support ticket.
+If the app shows "Error occurred. Try to reload", follow common-issues.md section 8b: tap the sign-out icon at the top right of the error screen, then sign back in. Updating or reinstalling the app is not the fix for that screen.
+
+For other app problems: make sure you have the latest version from the App Store or Google Play. Try force-closing and reopening the app. If issues persist, create a support ticket.
 
 ---
 
@@ -255,11 +258,21 @@ Make sure you have the latest version from the App Store or Google Play. Try for
 
 ## Plaque orders
 
+### Where do I order a plaque?
+In the **Muso mobile app (iOS or Android)**: open the **Analytics** tab for the profile and tap
+**Plaque**, or go to **Flex** and choose **Make it Official** or one of the milestone / track /
+album plaque cards. Customise it there and check out. Plaque ordering is **not available on the
+website** right now (do not send customers to app.muso.ai → Milestones; that button is hidden).
+One-line answer: "You can order a plaque in the Muso mobile app (iOS or Android): open the
+Analytics tab and tap Plaque, or go to Flex and choose Make it Official or one of your milestone
+cards. Plaque ordering isn't available on the website right now, and it needs an active subscription
+(Pro or Business)."
+
 ### Do I need a paid subscription to order a plaque?
-No. Subscriptions unlock analytics and performance insights – they aren't
-required for managing your profile or ordering a plaque. You can add,
-remove, and correct credits on a free Lite account, and the plaque order
-flow is available regardless of your plan.
+Yes, today. In the app the plaque options are locked (they open the paywall) unless the workspace
+has an active subscription and the selected seat is a profile (not a list). Managing your profile
+and correcting credits stay free on Lite. (Corrected 2026-10-15: every paid plaque order in the
+last 30 days came from a paid workspace.)
 
 ### My plaque shows old stream numbers – can it be updated?
 If your plaque shows numbers that don't match what you'd expect, open a
@@ -283,7 +296,8 @@ the fulfillment team. See `orders-and-fulfillment.md`.
 ## Profile management
 
 ### I don't have a paid plan – can I still fix wrong credits on my profile?
-Yes. Adding, removing, and correcting credits is free. Subscriptions are
-only needed for analytics and insights, not for basic profile work. If
+Yes. Adding, removing, and correcting credits is free. Subscriptions
+unlock analytics and insights and are needed to order a plaque; basic
+profile work like correcting credits is free. If
 you're hitting a UI issue while editing, let me know and I'll open a ticket
 so the team can look.

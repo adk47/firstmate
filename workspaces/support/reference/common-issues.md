@@ -1,4 +1,5 @@
 # Common Issues – Troubleshooting Guide
+<!-- Reviewed baseline: deploy overwrites the live copy of this file. The live edits of 2026-10-15/16 (section 8b sign-out workaround; plaque ordering) are folded in here together with PR #1224, so overwriting loses nothing. Drop this line once the next release has shipped (MUS-13058). -->
 
 Decision-tree reference for the 10 most frequent customer scenarios, based on real conversation data.
 
@@ -257,6 +258,35 @@ If the tool call did not succeed, do not say you escalated. Either retry the too
    - Check if they're using the right email – common issue is having multiple email addresses.
 6. If still unable to log in after all steps:
    - **Escalate:** Create a ticket with category "Login – Account Access". Include: account email (or emails they've tried), login method (email/social), error message if any. SLA: 1 business day.
+
+---
+
+## 8b. App stuck on "Error occurred. Try to reload" (iPhone or Android)
+
+**Customer says:** "The app won't load / it only works in the browser", "it keeps showing
+Error occurred. Try to reload", "reloading or restarting my phone doesn't help". The website
+(app.muso.ai) works for them.
+
+**Cause (known, 2026-10-16):** their saved login in the app has expired, and the current app
+version cannot sign itself out of an expired login, so it stays on the error screen. Reloading,
+restarting the phone or reinstalling over the top does not clear it. Signing out and back in
+does. A permanent app fix is in progress.
+
+**Resolution path:**
+1. Tell them the fix: on the error screen, tap the **sign-out icon at the top right**, then sign
+   back in with the same method they normally use (Google, Apple or email).
+   Saved reply: "Thanks for reporting this. Your app is holding on to an expired login, which it
+   can't recover from on its own yet. To fix it, tap the sign-out icon at the top right of the
+   error screen, then sign back in the way you usually do (Google, Apple or email). Everything
+   will be there. We're also releasing an app update so this can't get stuck again."
+2. If they cannot sign in again, follow section 8 (Can't log in).
+3. If the error screen comes back right after a fresh sign-in, that is a different problem:
+   create a ticket with category "App – startup error" and include the device, the app version,
+   and a screenshot of the error screen.
+
+Do NOT tell them to reinstall the app, wait, or update as the fix: none of those clears an
+expired login. (The freeze on "Add Missing Credits" on iOS 17 is a different issue, fixed by
+updating the app.)
 
 ---
 
