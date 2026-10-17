@@ -2099,7 +2099,8 @@ EOF
     last_event=$FM_WAKE_EVENT_LINE
     while IFS= read -r event_line || [ -n "$event_line" ]; do
       [ -n "$event_line" ] || continue
-      event_line=$(printf '%s' "$event_line" | LC_ALL=C tr '\t\r' '  ')
+      event_line=${event_line//$'\t'/ }
+      event_line=${event_line//$'\r'/ }
       prefix="wake annotation: latest wake-EVENT observed at drain, not current state"
       if [ "$event_line" != "$last_event" ]; then
         prefix="wake annotation: unread wake-EVENT since last drain, not current state"

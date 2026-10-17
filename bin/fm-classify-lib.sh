@@ -812,10 +812,37 @@ EOF
 # equal to or behind an already-recorded byte position, and the next call
 # re-derives from whatever offset actually landed on disk.
 _fm_open_decisions_cursor_path() {  # <status-file>
+  _fm_open_decisions_cursor_path_var "$1"
+  printf '%s' "$_FM_OD_CURSOR_PATH"
+}
+
+# Fork-free core of _fm_open_decisions_cursor_path: assigns the path to
+# _FM_OD_CURSOR_PATH with the same dirname/basename semantics, so per-file
+# loops over the whole fleet pay no subshell for it.
+_FM_OD_CURSOR_PATH=
+_fm_open_decisions_cursor_path_var() {  # <status-file> -> _FM_OD_CURSOR_PATH
   local f=$1 dir base
-  dir=$(dirname "$f")
-  base=$(basename "$f")
-  printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
+  case "$f" in
+    */*) dir=${f%/*}; [ -n "$dir" ] || dir=/ ;;
+    *) dir=. ;;
+  esac
+  base=${f##*/}
+  _FM_OD_CURSOR_PATH="$dir/.${base%.status}.open-decisions-cursor"
+}
+
+# Fork-free whole-file read into a named variable with command-substitution
+# semantics (trailing newlines dropped). Fails when the file cannot be opened.
+_fm_status_read_text_var() {  # <file> <output-variable>
+  local _fm_rt_data=
+  [ -r "$1" ] || return 1
+  { IFS= read -r -d '' _fm_rt_data || true; } < "$1" 2>/dev/null || return 1
+  while :; do
+    case "$_fm_rt_data" in
+      *$'\n') _fm_rt_data=${_fm_rt_data%$'\n'} ;;
+      *) break ;;
+    esac
+  done
+  printf -v "$2" '%s' "$_fm_rt_data"
 }
 
 # 4: verb parsing ends at the first "[name=value]" tag rather than only at a
@@ -844,10 +871,14 @@ export _FM_CLASSIFY_UNAME_S
 # One `stat` call answers identity, birth epoch, and birth string together, so
 # the three forks the separate reads cost are paid once per call.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
-  local f=$1 line ident epoch birth
+  local f=$1 line
   if [ -n "${FM_STATUS_IDENTITY_READER:-}" ]; then
     "$FM_STATUS_IDENTITY_READER" "$f"
     return
+  fi
+  if _fm_status_stat_cache_row "$f"; then
+    printf '%s' "$_FM_SC_IDENT"
+    return 0
   fi
   if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
     line=$(LC_ALL=C stat -f '%d:%i|%B|%FB' "$f" 2>/dev/null) \
@@ -856,13 +887,146 @@ _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
     line=$(LC_ALL=C stat -c '%d:%i|%W|%w' "$f" 2>/dev/null) \
       || line=$(LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null) || return 1
   fi
+  _fm_status_ident_parse "$line" || return 1
+  printf '%s' "$_FM_STATUS_IDENT"
+}
+
+# The one parse of a "<dev:ino>|<birth-epoch>|<birth-string>" stat answer
+# (or a bare "<dev:ino>" from the fallback format) into the identity token.
+_FM_STATUS_IDENT=
+_fm_status_ident_parse() {  # <stat-line> -> _FM_STATUS_IDENT
+  local line=$1 ident epoch birth
+  _FM_STATUS_IDENT=
   ident=${line%%|*}
-  line=${line#*|}
-  epoch=${line%%|*}
-  birth=${line#*|}
+  case "$line" in
+    *'|'*)
+      line=${line#*|}
+      epoch=${line%%|*}
+      birth=${line#*|}
+      ;;
+    *) epoch=; birth= ;;
+  esac
   case "$epoch" in ''|*[!0-9]*|0) birth='' ;; esac
   case "$ident$birth" in *$'\t'*|*$'\n'*|'') return 1 ;; esac
-  if [ -n "$birth" ]; then printf 'strong:%s:%s' "$ident" "$birth"; else printf 'weak:%s' "$ident"; fi
+  if [ -n "$birth" ]; then _FM_STATUS_IDENT="strong:$ident:$birth"; else _FM_STATUS_IDENT="weak:$ident"; fi
+}
+
+# --- per-pass stat cache ------------------------------------------------------
+#
+# A fleet-wide presentation pass (bin/fm-wake-drain.sh) asks the size, mtime,
+# and identity of every status log in every one of its sections; one `stat`
+# fork per question was ~5,000 forks per drain, minutes of kernel time on a
+# loaded host. fm_status_stat_cache_load answers all three for every
+# <state>/*.status in ONE stat call; while it is loaded, the three readers
+# below answer those paths from it without forking. It is a snapshot: the
+# caller loads it at a defined point, reloads it wherever it must re-prove a
+# file is unchanged (the drain reloads before committing its cursors), and
+# clears it. Paths the cache does not hold, and every test reader seam, keep
+# their ordinary per-call read. No caller that never loads it is affected.
+# The cache is a bash 4.2+ associative array (a hash lookup per question; a
+# plain-string search was slower than the forks it replaced). On an older bash
+# loading is a no-op and every reader keeps its per-call stat.
+# Result slot of the fork-free *_r cores below; copy it before the next call.
+_FM_R=
+FM_STATUS_STAT_CACHE_LOADED=0
+_FM_STATUS_STAT_CACHE_SUPPORTED=0
+if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] \
+  || { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 2 ]; }; then
+  declare -gA _FM_STATUS_STAT_CACHE_MAP=() 2>/dev/null \
+    && declare -gA _FM_STATUS_SPAN_MEMO=() 2>/dev/null \
+    && declare -gA _FM_STATUS_LATEST_MEMO=() 2>/dev/null \
+    && declare -gA _FM_PM_IDX=() _FM_PM_CNT=() _FM_PM_ID=() _FM_PM_LEG=() _FM_PM_BS=() 2>/dev/null \
+    && _FM_STATUS_STAT_CACHE_SUPPORTED=1
+fi
+_FM_SC_SIZE=
+_FM_SC_MTIME=
+_FM_SC_IDENT=
+fm_status_stat_cache_load() {  # <state>
+  local state=$1 out path size mtime raw
+  local -a files=()
+  fm_status_stat_cache_clear
+  [ "$_FM_STATUS_STAT_CACHE_SUPPORTED" = 1 ] || return 0
+  # A test reader seam owns those answers; never shadow it with real stats.
+  [ -z "${FM_STATUS_IDENTITY_READER:-}" ] && [ -z "${FM_STATUS_SIZE_READER:-}" ] || return 0
+  for path in "$state"/*.status; do
+    [ -f "$path" ] && [ ! -L "$path" ] || continue
+    case "$path" in *$'\t'*|*$'\n'*) continue ;; esac
+    files+=("$path")
+  done
+  [ "${#files[@]}" -gt 0 ] || return 0
+  if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
+    out=$(LC_ALL=C stat -f '%N%t%z%t%m%t%d:%i|%B|%FB' -- "${files[@]}" 2>/dev/null) || true
+  else
+    out=$(LC_ALL=C stat --printf '%n\t%s\t%Y\t%d:%i|%W|%w\n' -- "${files[@]}" 2>/dev/null) || true
+  fi
+  while IFS=$'\t' read -r path size mtime raw; do
+    [ -n "$path" ] && [ -n "$raw" ] || continue
+    case "$size:$mtime" in *[!0-9:]*|:*|*:) continue ;; esac
+    _fm_status_ident_parse "$raw" || continue
+    _FM_STATUS_STAT_CACHE_MAP[$path]="$size"$'\t'"$mtime"$'\t'"$_FM_STATUS_IDENT"
+  done <<EOF
+$out
+EOF
+  FM_STATUS_STAT_CACHE_LOADED=1
+}
+
+fm_status_stat_cache_clear() {
+  FM_STATUS_STAT_CACHE_LOADED=0
+  [ "$_FM_STATUS_STAT_CACHE_SUPPORTED" = 1 ] || return 0
+  _FM_STATUS_STAT_CACHE_MAP=()
+  _FM_STATUS_SPAN_MEMO=()
+  _FM_STATUS_LATEST_MEMO=()
+  _FM_PM_PATH=
+  _FM_PM_RAW=
+  _FM_PM_IDX=() _FM_PM_CNT=() _FM_PM_ID=() _FM_PM_LEG=() _FM_PM_BS=()
+}
+
+# Per-pass parse of the presentation manifest. Both manifest readers below
+# walked every row for every task (quadratic in the fleet); while a stat pass
+# is loaded they read the manifest bytes (no fork) and reparse only when those
+# bytes differ from the last parse, recording for each task its first row and
+# row count and the index of the first malformed row, which is exactly what
+# each reader's own row walk decides from.
+_FM_PM_PATH=
+_FM_PM_RAW=
+_FM_PM_BAD=
+_fm_presentation_manifest_parse() {  # <manifest> <data>
+  local row_task ident legacy backstop extra idx=0
+  [ "$_FM_PM_PATH" = "$1" ] && [ "$_FM_PM_RAW" = "$2" ] && return 0
+  _FM_PM_IDX=() _FM_PM_CNT=() _FM_PM_ID=() _FM_PM_LEG=() _FM_PM_BS=()
+  _FM_PM_BAD=
+  while IFS=$'\t' read -r row_task ident legacy backstop extra; do
+    [ -n "$row_task" ] || continue
+    idx=$((idx + 1))
+    if [ -z "$_FM_PM_BAD" ]; then
+      case "$legacy:$backstop" in *[!0-9:]*) _FM_PM_BAD=$idx ;; esac
+      { [ -z "$extra" ] && [ -n "$legacy" ] && [ -n "$ident" ]; } || _FM_PM_BAD=$idx
+    fi
+    if [ -n "${_FM_PM_CNT[$row_task]+set}" ]; then
+      _FM_PM_CNT[$row_task]=$((_FM_PM_CNT[$row_task] + 1))
+    else
+      _FM_PM_CNT[$row_task]=1
+      _FM_PM_IDX[$row_task]=$idx
+      _FM_PM_ID[$row_task]=$ident
+      _FM_PM_LEG[$row_task]=$legacy
+      _FM_PM_BS[$row_task]=$backstop
+    fi
+  done <<EOF
+$2
+EOF
+  _FM_PM_PATH=$1
+  _FM_PM_RAW=$2
+}
+
+_fm_status_stat_cache_row() {  # <path> -> _FM_SC_SIZE _FM_SC_MTIME _FM_SC_IDENT
+  local row
+  [ "$FM_STATUS_STAT_CACHE_LOADED" = 1 ] || return 1
+  row=${_FM_STATUS_STAT_CACHE_MAP[$1]-}
+  [ -n "$row" ] || return 1
+  _FM_SC_SIZE=${row%%$'\t'*}
+  row=${row#*$'\t'}
+  _FM_SC_MTIME=${row%%$'\t'*}
+  _FM_SC_IDENT=${row#*$'\t'}
 }
 
 _fm_status_file_size() {  # <status-file>
@@ -870,6 +1034,10 @@ _fm_status_file_size() {  # <status-file>
   if [ -n "${FM_STATUS_SIZE_READER:-}" ]; then
     "$FM_STATUS_SIZE_READER" "$f"
     return
+  fi
+  if _fm_status_stat_cache_row "$f"; then
+    printf '%s' "$_FM_SC_SIZE"
+    return 0
   fi
   if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
     LC_ALL=C stat -f '%z' "$f" 2>/dev/null
@@ -880,11 +1048,48 @@ _fm_status_file_size() {  # <status-file>
 
 _fm_status_file_mtime() {  # <status-file>
   local f=$1
+  if _fm_status_stat_cache_row "$f"; then
+    printf '%s' "$_FM_SC_MTIME"
+    return 0
+  fi
   if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
     LC_ALL=C stat -f '%m' "$f" 2>/dev/null
   else
     LC_ALL=C stat -c '%Y' "$f" 2>/dev/null
   fi
+}
+
+# Fork-free variants of the three readers for per-file loops: they assign the
+# answer to the named variable instead of printing it, so a cache hit costs no
+# subshell at all. A miss runs the ordinary reader.
+_fm_status_size_into() {  # <file> <output-variable>
+  local _fm_si_v
+  if [ -z "${FM_STATUS_SIZE_READER:-}" ] && _fm_status_stat_cache_row "$1"; then
+    printf -v "$2" '%s' "$_FM_SC_SIZE"
+    return 0
+  fi
+  _fm_si_v=$(_fm_status_file_size "$1") || return 1
+  printf -v "$2" '%s' "$_fm_si_v"
+}
+
+_fm_status_ident_into() {  # <file> <output-variable>
+  local _fm_ii_v
+  if [ -z "${FM_STATUS_IDENTITY_READER:-}" ] && _fm_status_stat_cache_row "$1"; then
+    printf -v "$2" '%s' "$_FM_SC_IDENT"
+    return 0
+  fi
+  _fm_ii_v=$(_fm_open_decisions_file_ident "$1") || return 1
+  printf -v "$2" '%s' "$_fm_ii_v"
+}
+
+_fm_status_mtime_into() {  # <file> <output-variable>
+  local _fm_mi_v
+  if _fm_status_stat_cache_row "$1"; then
+    printf -v "$2" '%s' "$_FM_SC_MTIME"
+    return 0
+  fi
+  _fm_mi_v=$(_fm_status_file_mtime "$1") || return 1
+  printf -v "$2" '%s' "$_fm_mi_v"
 }
 
 # Private scratch path for a one-shot span read, alongside the status file the
@@ -933,16 +1138,25 @@ _fm_status_read_complete_span() {  # <status-file> <start-offset> <byte-length>
     | perl -e 'local $/; my $d = <>; my $i = rindex(defined($d) ? $d : "", "\n"); exit 1 if $i < 0; print substr($d, 0, $i + 1)'
 }
 
+# Prints the open set; _status_open_decisions_incremental_r below is the one
+# implementation and leaves it in _FM_R for callers that loop over the fleet.
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
+  _status_open_decisions_incremental_r "$@" || return
+  printf '%s' "$_FM_R"
+}
+
+_status_open_decisions_incremental_r() {  # <status-file> [<captured-end-offset>]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
   local target_cursor
+  _FM_R=
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
-  cf=$(_fm_open_decisions_cursor_path "$f")
+  _fm_open_decisions_cursor_path_var "$f"
+  cf=$_FM_OD_CURSOR_PATH
   offset=0
   ident=''
   if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
-    cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null) || cursor_data=''
+    _fm_status_read_text_var "$cf" cursor_data || cursor_data=''
   fi
   if [ -n "${cursor_data:-}" ]; then
       first=${cursor_data%%$'\n'*}
@@ -985,17 +1199,17 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
   # report the already-trusted persisted set unchanged rather than risking a
   # silent invalidation that would wipe it.
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$trusted_open"; return 0; }
-  [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
-  actual_size=$(_fm_status_file_size "$f") \
-    || { printf '%s' "$trusted_open"; return 0; }
+  _fm_status_ident_into "$f" cur_ident || { _FM_R=$trusted_open; return 0; }
+  [ -n "$cur_ident" ] || { _FM_R=$trusted_open; return 0; }
+  _fm_status_size_into "$f" actual_size \
+    || { _FM_R=$trusted_open; return 0; }
   actual_size=${actual_size//[[:space:]]/}
-  case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
+  case "$actual_size" in ''|*[!0-9]*) _FM_R=$trusted_open; return 0 ;; esac
   if [ -n "$captured_end" ]; then
     case "$captured_end" in
-      ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;;
+      ''|*[!0-9]*) _FM_R=$trusted_open; return 0 ;;
     esac
-    [ "$captured_end" -le "$actual_size" ] || { printf '%s' "$trusted_open"; return 0; }
+    [ "$captured_end" -le "$actual_size" ] || { _FM_R=$trusted_open; return 0; }
     size=$captured_end
   else
     size=$actual_size
@@ -1021,12 +1235,12 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   if [ "$offset" -lt "$size" ]; then
     chunk_file="${FM_OPEN_DECISIONS_SCRATCH_DIR:-${cf%/*}}/${cf##*/}.read.$$"
     _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      || { rm -f "$chunk_file"; _FM_R=$trusted_open; return 0; }
     chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      || { rm -f "$chunk_file"; _FM_R=$trusted_open; return 0; }
     chunk_size=${chunk_size//[[:space:]]/}
     case "$chunk_size" in
-      ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
+      ''|*[!0-9]*) rm -f "$chunk_file"; _FM_R=$trusted_open; return 0 ;;
     esac
     # Test-only observability seam (off by default, no production behavior
     # change): when set, records exactly how many bytes THIS call folded, so a
@@ -1064,7 +1278,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     } > "$target_cursor" || return 1
     mv -f "$target_cursor" "$cf" || return 1
   fi
-  printf '%s' "$open"
+  _FM_R=$open
 }
 
 # Incremental sibling of scan_open_decisions: same fleet-wide directory walk and
@@ -1094,10 +1308,10 @@ status_presentation_snapshot() {  # <state>
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
-    task=$(basename "$f"); task="${task%.status}"
-    size=$(_fm_status_file_size "$f") || return 1
+    task=${f##*/}; task="${task%.status}"
+    _fm_status_size_into "$f" size || return 1
     size=${size//[[:space:]]/}
-    ident=$(_fm_open_decisions_file_ident "$f") || return 1
+    _fm_status_ident_into "$f" ident || return 1
     case "$size" in ''|*[!0-9]*) return 1 ;; esac
     [ -n "$ident" ] || return 1
     printf '%s\t%s\t%s\n' "$task" "$size" "$ident" || return 1
@@ -1118,6 +1332,7 @@ FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=
 # shellcheck disable=SC2034 # Output globals are consumed by sourcing drain scripts.
 status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-identity>
   local f=$1 endpoint=$2 expected_ident=$3 limit=65536 start length scratch record line event_endpoint
+  local expected_devino expected_ino memo
   local before_mtime after_mtime before_size after_size before_ident after_ident skip_first=0
   FM_STATUS_SNAPSHOT_EVENT_LINE=
   FM_STATUS_SNAPSHOT_EVENT_MTIME=
@@ -1125,10 +1340,10 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   case "$endpoint" in ''|*[!0-9]*|0) return 1 ;; esac
   [ -n "$expected_ident" ] || return 1
 
-  before_mtime=$(_fm_status_file_mtime "$f") || return 1
-  before_size=$(_fm_status_file_size "$f") || return 1
+  _fm_status_mtime_into "$f" before_mtime || return 1
+  _fm_status_size_into "$f" before_size || return 1
   before_size=${before_size//[[:space:]]/}
-  before_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  _fm_status_ident_into "$f" before_ident || return 1
   case "$before_mtime:$before_size" in *[!0-9:]*) return 1 ;; esac
   [ "$before_size" -eq "$endpoint" ] && [ "$before_ident" = "$expected_ident" ] || return 1
 
@@ -1139,33 +1354,91 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
     start=0
   fi
   length=$((endpoint - start))
-  scratch="$(_fm_status_span_scratch "$f").latest"
-  _fm_status_read_span "$f" "$start" "$length" > "$scratch" 2>/dev/null \
-    || { rm -f "$scratch"; return 1; }
-  if record=$(LC_ALL=C perl -e '
-    my ($path, $start, $skip_first) = @ARGV;
-    open my $file, "<", $path or exit 1;
-    binmode $file;
-    scalar(<$file>) if $skip_first;
-    my ($latest, $end);
-    while (defined(my $line = <$file>)) {
-      next unless $line =~ /[^\s]/;
-      $line =~ s/[\r\n]+\z//;
-      ($latest, $end) = ($line, $start + tell($file));
-    }
-    exit 1 unless defined $end;
-    print "$end\t$latest";
-  ' "$scratch" "$start" "$skip_first"); then :; else rm -f "$scratch"; return 1; fi
-  rm -f "$scratch"
+  memo=
+  if [ "$FM_STATUS_STAT_CACHE_LOADED" = 1 ]; then
+    memo=${_FM_STATUS_LATEST_MEMO["$f"$'\t'"$endpoint"$'\t'"$expected_ident"]-}
+  fi
+  if [ "$memo" = '!' ]; then
+    return 1
+  elif [ -n "$memo" ]; then
+    record=$memo
+  elif [ -z "${FM_STATUS_SPAN_READER:-}" ] && [ -z "${FM_STATUS_SPAN_READ_PROBE:-}" ]; then
+    # One process reads and scans the window straight from the file, and
+    # proves through the open handle that it is the captured inode and still
+    # reaches the captured endpoint - the guarantee the after-read stat below
+    # cannot give while a per-pass stat cache is answering it.
+    # Identity tokens are strong:<dev>:<ino>:<birth> or weak:<dev>:<ino>, and
+    # a Linux birth string itself contains colons, so take the two fields
+    # after the kind rather than trimming from the end.
+    expected_devino=${expected_ident#*:}
+    expected_ino=${expected_devino#*:}
+    expected_devino="${expected_devino%%:*}:${expected_ino%%:*}"
+    # A test identity seam supplies synthetic tokens with no inode to compare.
+    [ -z "${FM_STATUS_IDENTITY_READER:-}" ] || expected_devino=
+    record=$(LC_ALL=C perl -MFcntl=:DEFAULT -e '
+      my ($path, $start, $length, $skip_first, $devino, $endpoint) = @ARGV;
+      sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+      my @st = stat($file) or exit 1;
+      exit 1 if length $devino && "$st[0]:$st[1]" ne $devino;
+      exit 1 if $st[7] < $endpoint;
+      sysseek($file, $start, 0) == $start or exit 1;
+      my $data = "";
+      while (length($data) < $length) {
+        my $want = $length - length($data);
+        $want = 65536 if $want > 65536;
+        my $read = sysread($file, my $chunk, $want);
+        defined($read) && $read > 0 or exit 1;
+        $data .= $chunk;
+      }
+      my $pos = 0;
+      if ($skip_first) {
+        my $nl = index($data, "\n");
+        exit 1 if $nl < 0;
+        $pos = $nl + 1;
+      }
+      my ($latest, $end);
+      while ($pos < length($data)) {
+        my $nl = index($data, "\n", $pos);
+        my $next = $nl < 0 ? length($data) : $nl + 1;
+        my $line = substr($data, $pos, $next - $pos);
+        if ($line =~ /[^\s]/) {
+          $line =~ s/[\r\n]+\z//;
+          ($latest, $end) = ($line, $start + $next);
+        }
+        $pos = $next;
+      }
+      exit 1 unless defined $end;
+      print "$end\t$latest";
+    ' "$f" "$start" "$length" "$skip_first" "$expected_devino" "$endpoint") || return 1
+  else
+    scratch="$(_fm_status_span_scratch "$f").latest"
+    _fm_status_read_span "$f" "$start" "$length" > "$scratch" 2>/dev/null \
+      || { rm -f "$scratch"; return 1; }
+    if record=$(LC_ALL=C perl -e '
+      my ($path, $start, $skip_first) = @ARGV;
+      open my $file, "<", $path or exit 1;
+      binmode $file;
+      scalar(<$file>) if $skip_first;
+      my ($latest, $end);
+      while (defined(my $line = <$file>)) {
+        next unless $line =~ /[^\s]/;
+        $line =~ s/[\r\n]+\z//;
+        ($latest, $end) = ($line, $start + tell($file));
+      }
+      exit 1 unless defined $end;
+      print "$end\t$latest";
+    ' "$scratch" "$start" "$skip_first"); then :; else rm -f "$scratch"; return 1; fi
+    rm -f "$scratch"
+  fi
   event_endpoint=${record%%$'\t'*}
   line=${record#*$'\t'}
   case "$event_endpoint" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$line" ] || return 1
 
-  after_mtime=$(_fm_status_file_mtime "$f") || return 1
-  after_size=$(_fm_status_file_size "$f") || return 1
+  _fm_status_mtime_into "$f" after_mtime || return 1
+  _fm_status_size_into "$f" after_size || return 1
   after_size=${after_size//[[:space:]]/}
-  after_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  _fm_status_ident_into "$f" after_ident || return 1
   case "$after_mtime:$after_size" in *[!0-9:]*) return 1 ;; esac
   [ "$after_mtime" = "$before_mtime" ] \
     && [ "$after_size" -eq "$endpoint" ] \
@@ -1177,7 +1450,96 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=$event_endpoint
 }
 
+# Batched form of the window read in status_snapshot_latest_event: one process
+# answers every <status-file> <captured-endpoint> <captured-identity> row of a
+# snapshot whose backstop receipt is behind its endpoint, under the same inode
+# and endpoint proof, and records each answer in a per-pass memo that
+# status_snapshot_latest_event consults before reading on its own. A no-op
+# without a loaded stat pass or under a span test seam.
+status_snapshot_latest_event_prefetch() {  # <state> <snapshot>
+  local state=$1 snapshot=$2 task endpoint ident f start skip devino ino out rec key i=0 limit=65536
+  local -a args=() keys=()
+  [ "$FM_STATUS_STAT_CACHE_LOADED" = 1 ] || return 0
+  [ -z "${FM_STATUS_SPAN_READER:-}" ] && [ -z "${FM_STATUS_SPAN_READ_PROBE:-}" ] || return 0
+  while IFS=$'\t' read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    case "$endpoint" in ''|*[!0-9]*|0) continue ;; esac
+    f="$state/$task.status"
+    _status_outcome_backstop_cursor_offset_r "$f" || continue
+    [ "$_FM_R" -lt "$endpoint" ] || continue
+    if [ "$endpoint" -gt "$limit" ]; then start=$((endpoint - limit)); skip=1; else start=0; skip=0; fi
+    devino=${ident#*:}
+    ino=${devino#*:}
+    devino="${devino%%:*}:${ino%%:*}"
+    [ -z "${FM_STATUS_IDENTITY_READER:-}" ] || devino=
+    args+=("$f" "$start" "$((endpoint - start))" "$skip" "$devino" "$endpoint")
+    keys+=("$f"$'\t'"$endpoint"$'\t'"$ident")
+  done <<EOF
+$snapshot
+EOF
+  [ "${#keys[@]}" -gt 0 ] || return 0
+  out=$(LC_ALL=C perl -MFcntl=:DEFAULT -e '
+    sub latest {
+      my ($path, $start, $length, $skip_first, $devino, $endpoint) = @_;
+      sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or return;
+      my @st = stat($file) or return;
+      return if length $devino && "$st[0]:$st[1]" ne $devino;
+      return if $st[7] < $endpoint;
+      sysseek($file, $start, 0) == $start or return;
+      my $data = "";
+      while (length($data) < $length) {
+        my $want = $length - length($data);
+        $want = 65536 if $want > 65536;
+        my $read = sysread($file, my $chunk, $want);
+        defined($read) && $read > 0 or return;
+        $data .= $chunk;
+      }
+      my $pos = 0;
+      if ($skip_first) {
+        my $nl = index($data, "\n");
+        return if $nl < 0;
+        $pos = $nl + 1;
+      }
+      my ($latest, $end);
+      while ($pos < length($data)) {
+        my $nl = index($data, "\n", $pos);
+        my $next = $nl < 0 ? length($data) : $nl + 1;
+        my $line = substr($data, $pos, $next - $pos);
+        if ($line =~ /[^\s]/) {
+          $line =~ s/[\r\n]+\z//;
+          ($latest, $end) = ($line, $start + $next);
+        }
+        $pos = $next;
+      }
+      return unless defined $end;
+      return "$end\t$latest";
+    }
+    while (@ARGV >= 6) {
+      my $r = latest(splice(@ARGV, 0, 6));
+      print defined $r ? "ok\t$r\n" : "fail\n";
+    }
+  ' "${args[@]}" 2>/dev/null) || return 0
+  while IFS= read -r rec; do
+    [ "$i" -lt "${#keys[@]}" ] || break
+    key=${keys[$i]}
+    i=$((i + 1))
+    case "$rec" in
+      ok$'\t'*) _FM_STATUS_LATEST_MEMO[$key]=${rec#ok$'\t'} ;;
+      *) _FM_STATUS_LATEST_MEMO[$key]=! ;;
+    esac
+  done <<EOF
+$out
+EOF
+  return 0
+}
+
 status_presentation_cursor_offset() {  # <status-file>
+  _status_presentation_cursor_offset_r "$1" || return
+  printf '%s' "$_FM_R"
+}
+
+# Fork-free core of status_presentation_cursor_offset (result in _FM_R).
+_status_presentation_cursor_offset_r() {  # <status-file>
   local f=$1 state task manifest data row_task offset ident backstop extra cur_ident size legacy
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
@@ -1185,8 +1547,18 @@ status_presentation_cursor_offset() {  # <status-file>
   manifest="$state/.status-presentation-cursor"
   if [ -e "$manifest" ] || [ -L "$manifest" ]; then
     [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
-    data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
+    _fm_status_read_text_var "$manifest" data || return 1
     offset=
+    if [ "$FM_STATUS_STAT_CACHE_LOADED" = 1 ]; then
+      _fm_presentation_manifest_parse "$manifest" "$data"
+      [ -z "$_FM_PM_BAD" ] || return 1
+      if [ -n "${_FM_PM_CNT[$task]+set}" ]; then
+        [ "${_FM_PM_CNT[$task]}" -eq 1 ] || return 1
+        offset=${_FM_PM_LEG[$task]}
+        cur_ident=${_FM_PM_ID[$task]}
+      fi
+      data=
+    fi
     while IFS=$'\t' read -r row_task ident legacy backstop extra; do
       [ -n "$row_task" ] || continue
       [ -z "$extra" ] || return 1
@@ -1201,57 +1573,84 @@ status_presentation_cursor_offset() {  # <status-file>
 $data
 EOF
     if [ -z "$offset" ]; then
-      printf '0'
+      _FM_R=0
       return 0
     fi
     ident=$cur_ident
   else
-    legacy=$(_fm_open_decisions_cursor_path "$f")
+    _fm_open_decisions_cursor_path_var "$f"
+    legacy=$_FM_OD_CURSOR_PATH
     if [ -e "$legacy" ] || [ -L "$legacy" ]; then
-      status_open_decisions_cursor_offset "$f"
-      return
+      _FM_R=$(status_open_decisions_cursor_offset "$f") || return 1
+      return 0
     fi
     offset=0
-    ident=$(_fm_open_decisions_file_ident "$f") || return 1
+    _fm_status_ident_into "$f" ident || return 1
   fi
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || return 1
-  size=$(_fm_status_file_size "$f") || return 1
+  _fm_status_ident_into "$f" cur_ident || return 1
+  _fm_status_size_into "$f" size || return 1
   size=${size//[[:space:]]/}
   case "$size:$offset" in *[!0-9:]*) return 1 ;; esac
   if [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then offset=0; fi
-  printf '%s' "$offset"
+  _FM_R=$offset
 }
 
 status_outcome_backstop_cursor_offset() {  # <status-file>
+  _status_outcome_backstop_cursor_offset_r "$1" || return
+  printf '%s' "$_FM_R"
+}
+
+# Fork-free core of status_outcome_backstop_cursor_offset (result in _FM_R).
+_status_outcome_backstop_cursor_offset_r() {  # <status-file>
   local f=$1 state task manifest data row_task ident presented row_backstop backstop extra current size
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
   manifest="$state/.status-presentation-cursor"
-  [ -e "$manifest" ] || { printf '0'; return 0; }
+  [ -e "$manifest" ] || { _FM_R=0; return 0; }
   [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
-  data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
+  _fm_status_read_text_var "$manifest" data || return 1
   backstop=0
+  if [ "$FM_STATUS_STAT_CACHE_LOADED" = 1 ]; then
+    _fm_presentation_manifest_parse "$manifest" "$data"
+    if [ -n "${_FM_PM_IDX[$task]+set}" ]; then
+      [ -z "$_FM_PM_BAD" ] || [ "$_FM_PM_BAD" -gt "${_FM_PM_IDX[$task]}" ] || return 1
+      ident=${_FM_PM_ID[$task]}
+      row_backstop=${_FM_PM_BS[$task]}
+      _fm_status_ident_into "$f" current || return 1
+      _fm_status_size_into "$f" size || return 1
+      size=${size//[[:space:]]/}
+      case "$size" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$ident" = "$current" ] || { _FM_R=0; return 0; }
+      backstop=${row_backstop:-0}
+      [ "$backstop" -le "$size" ] || backstop=0
+      _FM_R=$backstop
+      return 0
+    fi
+    [ -z "$_FM_PM_BAD" ] || return 1
+    _FM_R=0
+    return 0
+  fi
   while IFS=$'\t' read -r row_task ident presented row_backstop extra; do
     [ -n "$row_task" ] || continue
     [ -z "$extra" ] || return 1
     case "$presented:$row_backstop" in *[!0-9:]*) return 1 ;; esac
     [ -n "$presented" ] && [ -n "$ident" ] || return 1
     if [ "$row_task" = "$task" ]; then
-      current=$(_fm_open_decisions_file_ident "$f") || return 1
-      size=$(_fm_status_file_size "$f") || return 1
+      _fm_status_ident_into "$f" current || return 1
+      _fm_status_size_into "$f" size || return 1
       size=${size//[[:space:]]/}
       case "$size" in ''|*[!0-9]*) return 1 ;; esac
-      [ "$ident" = "$current" ] || { printf '0'; return 0; }
+      [ "$ident" = "$current" ] || { _FM_R=0; return 0; }
       backstop=${row_backstop:-0}
       [ "$backstop" -le "$size" ] || backstop=0
-      printf '%s' "$backstop"
+      _FM_R=$backstop
       return 0
     fi
   done <<EOF
 $data
 EOF
-  printf '0'
+  _FM_R=0
 }
 
 status_signal_seen_marker_path() {  # <state> <task-id>
@@ -1459,6 +1858,71 @@ EOF
   return "$rc"
 }
 
+# Read every captured unread span once in the CALLING shell while a stat pass
+# is loaded, so sections that run in command substitutions (acknowledgement,
+# the unread surface) inherit the memo instead of each re-reading the same
+# bytes. A no-op without a loaded pass; a failed read is left for the section
+# itself to report.
+status_presentation_prefetch_spans() {  # <state> <snapshot>
+  local state=$1 snapshot=$2 task endpoint ident f offset size out rec n line lines i=0
+  local -a args=() keys=()
+  [ "$FM_STATUS_STAT_CACHE_LOADED" = 1 ] || return 0
+  [ -z "${FM_STATUS_SPAN_READER:-}" ] && [ -z "${FM_STATUS_SPAN_READ_PROBE:-}" ] || return 0
+  while IFS=$'\t' read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    case "$endpoint" in ''|*[!0-9]*) continue ;; esac
+    f="$state/$task.status"
+    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
+    _status_presentation_cursor_offset_r "$f" || continue
+    offset=$_FM_R
+    case "$offset" in ''|*[!0-9]*) continue ;; esac
+    _fm_status_size_into "$f" size || continue
+    [ "$endpoint" -le "$size" ] && [ "$offset" -lt "$endpoint" ] || continue
+    args+=("$f" "$offset" "$((endpoint - offset))")
+    keys+=("$f"$'\t'"$offset"$'\t'"$endpoint")
+  done <<EOF
+$snapshot
+EOF
+  [ "${#keys[@]}" -gt 0 ] || return 0
+  # One process reads every span: per span a "<ok|fail>\t<count>" header, then
+  # its <count> non-blank lines exactly as the per-span `read -r` loop keeps
+  # them (newline-split, a final unterminated line included, NULs dropped).
+  out=$(LC_ALL=C perl -MFcntl=:DEFAULT -e '
+    while (@ARGV >= 3) {
+      my ($path, $start, $length) = splice(@ARGV, 0, 3);
+      my $ok = sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW)
+        && sysseek($file, $start, 0) == $start;
+      my $data = "";
+      while ($ok && length($data) < $length) {
+        my $want = $length - length($data);
+        $want = 65536 if $want > 65536;
+        my $read = sysread($file, my $chunk, $want);
+        if (defined($read) && $read > 0) { $data .= $chunk } else { $ok = 0 }
+      }
+      unless ($ok) { print "fail\t0\n"; next }
+      $data =~ tr/\0//d;
+      my @keep = grep { /[^ \t\n\x0B\f\r]/ } split /\n/, $data;
+      print "ok\t" . scalar(@keep) . "\n";
+      print "$_\n" for @keep;
+    }
+  ' "${args[@]}" 2>/dev/null) || return 0
+  while IFS=$'\t' read -r rec n; do
+    [ "$i" -lt "${#keys[@]}" ] || break
+    case "$n" in ''|*[!0-9]*) break ;; esac
+    lines=
+    while [ "$n" -gt 0 ] && IFS= read -r line; do
+      lines="$lines$line"$'\n'
+      n=$((n - 1))
+    done
+    [ "$n" -eq 0 ] || break
+    [ "$rec" != ok ] || _FM_STATUS_SPAN_MEMO[${keys[$i]}]=${lines%$'\n'}
+    i=$((i + 1))
+  done <<EOF
+$out
+EOF
+  return 0
+}
+
 status_acknowledge_presented_snapshot() {  # <state> <snapshot> [<fully-presented-task-ids>]
   local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident f offset lines line safe
   while IFS=$'\t' read -r task endpoint ident; do
@@ -1469,8 +1933,10 @@ $fully_presented
 " in *$'\n'"$task"$'\n'*) safe=true ;; esac
     if [ "$safe" = false ]; then
       f="$state/$task.status"
-      offset=$(status_presentation_cursor_offset "$f") || return 1
-      lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1
+      _status_presentation_cursor_offset_r "$f" || return 1
+      offset=$_FM_R
+      _status_new_lines_since_cursor_r "$f" "$endpoint" || return 1
+      lines=$_FM_R
       # Once any informational line in this span is presented fleet-wide, the
       # contiguous cursor may advance through the captured endpoint. Routine
       # lines remain unacknowledged only while they are the sole unread content,
@@ -1503,13 +1969,14 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
     [ -n "$ident" ] || { rm -f "$tmp"; return 1; }
     f="$state/$task.status"
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { rm -f "$tmp"; return 1; }
-    cur_ident=$(_fm_open_decisions_file_ident "$f") || { rm -f "$tmp"; return 1; }
-    size=$(_fm_status_file_size "$f") || { rm -f "$tmp"; return 1; }
+    _fm_status_ident_into "$f" cur_ident || { rm -f "$tmp"; return 1; }
+    _fm_status_size_into "$f" size || { rm -f "$tmp"; return 1; }
     size=${size//[[:space:]]/}
     case "$size" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
     [ "$cur_ident" = "$ident" ] && [ "$endpoint" -le "$size" ] \
       || { rm -f "$tmp"; return 1; }
-    backstop=$(status_outcome_backstop_cursor_offset "$f") || { rm -f "$tmp"; return 1; }
+    _status_outcome_backstop_cursor_offset_r "$f" || { rm -f "$tmp"; return 1; }
+    backstop=$_FM_R
     while IFS=$'\t' read -r acknowledged_task acknowledged_endpoint; do
       if [ "$acknowledged_task" = "$task" ]; then backstop=$acknowledged_endpoint; fi
     done <<EOF
@@ -1530,7 +1997,8 @@ scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>
   while IFS=$'\t' read -r task endpoint ident; do
     [ -n "$task" ] || continue
     f="$state/$task.status"
-    open=$(status_open_decisions_incremental "$f" "$endpoint") || return 1
+    _status_open_decisions_incremental_r "$f" "$endpoint" || return 1
+    open=$_FM_R
     [ -n "$open" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
@@ -1572,10 +2040,11 @@ status_open_decisions_cursor_offset() {  # <status-file>
   local f=$1 cf offset=0 ident='' version='' cursor_data first rest open=''
   local offset_line ident_line cur_ident size
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
-  cf=$(_fm_open_decisions_cursor_path "$f")
+  _fm_open_decisions_cursor_path_var "$f"
+  cf=$_FM_OD_CURSOR_PATH
   if [ -e "$cf" ] || [ -L "$cf" ]; then
     [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ] || return 1
-    if cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null); then
+    if _fm_status_read_text_var "$cf" cursor_data; then
       first=${cursor_data%%$'\n'*}
       case "$first" in
         version=*)
@@ -1638,13 +2107,24 @@ status_open_decisions_cursor_offset() {  # <status-file>
 # unreadable cursor state fails the scan. Symlinks and unreadable status files
 # print nothing.
 status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
-  local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line rc=0
+  _status_new_lines_since_cursor_r "$@" || return
+  [ -z "$_FM_R" ] || printf '%s\n' "$_FM_R"
+}
+
+# Fork-free core of status_new_lines_since_cursor: the same non-blank lines,
+# newline-joined in _FM_R (no trailing newline).
+_status_new_lines_since_cursor_r() {  # <status-file> [<captured-end-offset>]
+  local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line rc=0 out='' memo_key chunk
+  _FM_R=
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
-  cf=$(_fm_open_decisions_cursor_path "$f")
+  _fm_open_decisions_cursor_path_var "$f"
+  cf=$_FM_OD_CURSOR_PATH
   chunk_file="$cf.unread.$$"
-  offset=$(status_presentation_cursor_offset "$f") || return 1
+  _status_presentation_cursor_offset_r "$f" || return 1
+  offset=$_FM_R
+  _FM_R=
   case "$offset" in ''|*[!0-9]*) return 1 ;; esac
-  actual_size=$(_fm_status_file_size "$f") || return 1
+  _fm_status_size_into "$f" actual_size || return 1
   actual_size=${actual_size//[[:space:]]/}
   case "$actual_size" in ''|*[!0-9]*) return 1 ;; esac
   if [ -n "$captured_end" ]; then
@@ -1655,14 +2135,51 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
     size=$actual_size
   fi
   [ "$offset" -lt "$size" ] || return 0
-  _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
-    || { rm -f "$chunk_file"; return 1; }
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      *[![:space:]]*) printf '%s\n' "$line" || { rc=1; break; } ;;
-    esac
-  done < "$chunk_file"
-  rm -f "$chunk_file"
+  # Within one loaded stat pass the same captured span is asked for by more
+  # than one section (acknowledgement, then the unread surface); the bytes
+  # below a captured endpoint of an unchanged file cannot change, so the
+  # first answer is reused. The memo is cleared with the pass.
+  memo_key="$f"$'\t'"$offset"$'\t'"$size"
+  if [ "$FM_STATUS_STAT_CACHE_LOADED" = 1 ] && [ -n "${_FM_STATUS_SPAN_MEMO[$memo_key]+set}" ]; then
+    _FM_R=${_FM_STATUS_SPAN_MEMO[$memo_key]}
+    return 0
+  fi
+  if [ "$FM_STATUS_STAT_CACHE_LOADED" = 1 ] && [ -z "${FM_STATUS_SPAN_READER:-}" ] \
+    && [ -z "${FM_STATUS_SPAN_READ_PROBE:-}" ]; then
+    # A fleet pass reads the span with one process and no scratch file; the
+    # non-blank lines are all it keeps, so command substitution's trailing
+    # newline trim cannot change them.
+    chunk=$(LC_ALL=C perl -MFcntl=:DEFAULT -e '
+      my ($path, $start, $length) = @ARGV;
+      sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+      sysseek($file, $start, 0) == $start or exit 1;
+      while ($length > 0) {
+        my $want = $length > 65536 ? 65536 : $length;
+        my $read = sysread($file, my $part, $want);
+        defined($read) && $read > 0 or exit 1;
+        print $part or exit 1;
+        $length -= $read;
+      }
+    ' "$f" "$offset" "$((size - offset))" 2>/dev/null) || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        *[![:space:]]*) out="$out$line"$'\n' ;;
+      esac
+    done <<EOF
+$chunk
+EOF
+  else
+    _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
+      || { rm -f "$chunk_file"; return 1; }
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        *[![:space:]]*) out="$out$line"$'\n' ;;
+      esac
+    done < "$chunk_file"
+    rm -f "$chunk_file"
+  fi
+  _FM_R=${out%$'\n'}
+  [ "$FM_STATUS_STAT_CACHE_LOADED" != 1 ] || _FM_STATUS_SPAN_MEMO[$memo_key]=$_FM_R
   return "$rc"
 }
 
@@ -1724,7 +2241,8 @@ scan_unread_surface_snapshot() {  # <state> <task-and-endpoint-snapshot>
   while IFS=$'\t' read -r task endpoint ident; do
     [ -n "$task" ] || continue
     f="$state/$task.status"
-    lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1
+    _status_new_lines_since_cursor_r "$f" "$endpoint" || return 1
+    lines=$_FM_R
     [ -n "$lines" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue

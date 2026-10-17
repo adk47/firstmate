@@ -231,7 +231,9 @@ outcome_index_ready_ok() { # <ready-path>
 }
 
 load_branch_outcome_index() { # <task>
-  local task=$1 path data version seq endpoint ident extra size
+  # Byte semantics for the bounded read and its length check below.
+  local LC_ALL=C
+  local task=$1 path data version seq endpoint ident extra
   BRANCH_OUTCOME_INDEX_STATE=ok
   BRANCH_OUTCOME_INDEX_ENDPOINT=
   BRANCH_OUTCOME_INDEX_IDENT=
@@ -242,15 +244,22 @@ load_branch_outcome_index() { # <task>
     BRANCH_OUTCOME_INDEX_STATE=invalid
     return 0
   fi
-  size=$(_fm_status_file_size "$path") || { BRANCH_OUTCOME_INDEX_STATE=invalid; return 0; }
-  size=${size//[[:space:]]/}
-  case "$size" in ''|*[!0-9]*) BRANCH_OUTCOME_INDEX_STATE=invalid; return 0 ;; esac
-  if [ "$size" -gt "$BRANCH_OUTCOME_INDEX_MAX_BYTES" ]; then
+  # A bounded builtin read stands in for a stat-then-cat pair (two forks per
+  # task on every drain): it reads at most one byte past the cap, so an
+  # oversized index is still rejected without being read whole.
+  data=
+  { IFS= read -r -d '' -n "$((BRANCH_OUTCOME_INDEX_MAX_BYTES + 1))" data || true; } \
+    < "$path" 2>/dev/null || { BRANCH_OUTCOME_INDEX_STATE=invalid; return 0; }
+  if [ "${#data}" -gt "$BRANCH_OUTCOME_INDEX_MAX_BYTES" ]; then
     BRANCH_OUTCOME_INDEX_STATE=invalid
     return 0
   fi
-  data=$(LC_ALL=C command cat "$path" 2>/dev/null) \
-    || { BRANCH_OUTCOME_INDEX_STATE=invalid; return 0; }
+  while :; do
+    case "$data" in
+      *$'\n') data=${data%$'\n'} ;;
+      *) break ;;
+    esac
+  done
   case "$data" in *$'\n'*) BRANCH_OUTCOME_INDEX_STATE=invalid; return 0 ;; esac
   IFS=$'\t' read -r version seq endpoint ident extra <<EOF
 $data
@@ -296,19 +305,23 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
   fi
 
   STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
+  # One process reads every candidate's newest-event window up front.
+  status_snapshot_latest_event_prefetch "$STATE" "$snapshot"
   while IFS=$'\t' read -r task endpoint ident; do
     [ -n "$task" ] || continue
-    receipt=$(status_outcome_backstop_cursor_offset "$STATE/$task.status") || { rc=1; break; }
+    _status_outcome_backstop_cursor_offset_r "$STATE/$task.status" || { rc=1; break; }
+    receipt=$_FM_R
     [ "$receipt" -lt "$endpoint" ] || continue
     status_snapshot_latest_event "$STATE/$task.status" "$endpoint" "$ident" || continue
     event=$FM_STATUS_SNAPSHOT_EVENT_LINE
     event_endpoint=$FM_STATUS_SNAPSHOT_EVENT_ENDPOINT
     [ "$receipt" -lt "$event_endpoint" ] || continue
     status_is_captain_relevant "$event" || continue
-    verb=$(status_line_verb "$event")
+    status_line_verb_core "$event"
+    verb=$_FM_STATUS_VERB
     case "$verb" in
       needs-decision|blocked)
-        key=$(_fm_decision_key "$event") || key=
+        if _fm_decision_key_core "$event"; then key=$_FM_DECISION_KEY; else key=; fi
         # Parseable decisions belong exclusively to the durable fold. That
         # includes reserved-key transitions the fold rejects; resurfacing one
         # here would let a foreign writer bypass the namespace guard. A line
@@ -560,6 +573,7 @@ print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
+  status_presentation_prefetch_spans "$STATE" "$snapshot"
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
   prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
   if ! {
@@ -578,6 +592,9 @@ print_status_sections() {
     rm -f -- "$prepared"
     return 1
   fi
+  # The commit re-proves every captured identity and endpoint, so it reads a
+  # fresh stat pass rather than the one the sections were prepared from.
+  fm_status_stat_cache_load "$STATE"
   if ! status_commit_presentation_snapshot "$STATE" "$acknowledged"; then
     rm -f -- "$prepared"
     return 1
@@ -601,6 +618,11 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     fi
     return 1
   fi
+  # One batched stat of every status log answers the size, mtime, and identity
+  # questions each section below asks per log (fm-classify-lib.sh's per-pass
+  # stat cache); the snapshot taken from it fixes every endpoint, and the
+  # commit reloads it to re-prove them.
+  fm_status_stat_cache_load "$STATE"
   # Independent of the status snapshot: a watch whose check file was deleted
   # must surface even on a home whose status logs say nothing at all.
   print_sentry_watch_liveness_section || true
@@ -616,6 +638,7 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     fi
   fi
   if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  fm_status_stat_cache_clear
   fm_lock_release "$lock"
   return "$rc"
 }

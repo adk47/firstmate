@@ -222,16 +222,13 @@ test_read_failure_preserves_state_for_retry() {
 }
 
 test_cursor_cache_read_failure_refolds_without_replaying_unread_status() {
-  local dir state fakebin statusfile cursor out probe real_cat status_bytes probe_bytes
+  local dir state statusfile cursor out probe status_bytes probe_bytes
   dir=$(make_case cursor-cache-read-failure)
   state="$dir/state"
-  fakebin="$dir/failbin"
-  mkdir -p "$fakebin"
   statusfile="$state/task5.status"
   cursor="$state/.task5.open-decisions-cursor"
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
-  real_cat=$(command -v cat)
 
   {
     printf 'needs-decision [key=cache]: recover from authoritative status\n'
@@ -249,17 +246,17 @@ test_cursor_cache_read_failure_refolds_without_replaying_unread_status() {
   printf 'working: appended before cache failure\n' >> "$statusfile"
   status_bytes=$(LC_ALL=C wc -c < "$statusfile" | tr -d '[:space:]')
   : > "$probe"
-  cat > "$fakebin/cat" <<SH
-#!/usr/bin/env bash
-if [ "\$#" -eq 1 ] && [ "\$1" = "$cursor" ]; then
-  exit 1
-fi
-exec "$real_cat" "\$@"
-SH
-  chmod +x "$fakebin/cat"
+  # The cursor is read with a builtin, so the failure is injected by making
+  # the cursor unreadable; a superuser reads through mode 000, so skip there.
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "a cursor-cache read failure refolds decisions without replaying handled unread status (skipped as root)"
+    return 0
+  fi
+  chmod 000 "$cursor"
 
-  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" PATH="$fakebin:$PATH" "$DRAIN" > "$out" \
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
     || fail "wake drain failed instead of refolding after the cursor-cache read failure"
+  [ ! -e "$cursor" ] || chmod 600 "$cursor"
   grep -F 'task5' "$out" | grep -F '[key=cache]' | grep -F 'authoritative status' >/dev/null \
     || fail "the cursor-cache read failure hid the recurring open decision: $(command cat "$out")"
   if grep -F 'UNREAD STATUS' "$out" >/dev/null \
