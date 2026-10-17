@@ -229,12 +229,14 @@ jobs:
       # A stalled `git fetch` in "Refuse stale deploys" hits its 10m cap and
       # fails BEFORE writing `proceed`, so every proceed-gated step above is
       # skipped. Nothing mutated node-8 (no rollback needed) but an unattended
-      # deploy still died: page it, keyed on the step's outcome instead. Same
-      # for a Checkout that hits its 10m cap (stale_check is then skipped, and
-      # the workspace may hold no scripts/), so the notifier falls back to the
-      # server-owned copy under /opt/hydra, which needs no checkout.
+      # deploy still died. Keyed on "nothing was deployed" (proceed != 'true'),
+      # not on one step's outcome: a Checkout that hits its 10m cap skips
+      # stale_check entirely. A deliberate stale refusal succeeds with
+      # proceed=false, so failure() is false and it pages nothing. The workspace
+      # may hold no scripts/, so the notifier falls back to the server-owned
+      # copy under /opt/hydra, which needs no checkout.
       - name: Page on pre-deploy failure
-        if: failure() && (steps.stale_check.outcome == 'failure' || steps.checkout.outcome == 'failure')
+        if: failure() && steps.stale_check.outputs.proceed != 'true'
         timeout-minutes: 5
         continue-on-error: true
         run: |
@@ -243,7 +245,7 @@ jobs:
             ":rotating_light: *HYDRA Deploy FAILED before deploying* (target: ${{ github.event.inputs.target || 'all' }})" \
             "*Commit:* \`${{ github.sha }}\`" \
             "*Author:* ${{ github.actor }}" \
-            "*Action:* No rollback needed - checkout or the stale-deploy check failed or timed out before any change to node-8" \
+            "*Action:* No rollback needed - the deploy failed before any change to node-8 (checkout / stale-check stage)" \
             "*Run:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
           NOTIFY=scripts/lib/deploy-notify.sh
           [ -r "$NOTIFY" ] || NOTIFY=/opt/hydra/scripts/lib/deploy-notify.sh

@@ -230,8 +230,8 @@ assert isinstance(s["timeout-minutes"], int)
 n = "Page on pre-deploy failure"
 assert n in names, "no pre-deploy page step"
 s = by[n]
-assert "stale_check.outcome" in s["if"] and "failure" in s["if"], s["if"]
-assert "proceed" not in s["if"], "must not require proceed"
+q = chr(39)
+assert s["if"] == "failure() && steps.stale_check.outputs.proceed != " + q + "true" + q, s["if"]
 assert s.get("continue-on-error") is True and isinstance(s["timeout-minutes"], int)
 assert "timeout 240 bash \"$NOTIFY\" critical" in s["run"] and "scripts/lib/deploy-notify.sh" in s["run"]
 assert "rollback.sh" not in s["run"]
@@ -256,7 +256,12 @@ assert "proceed" in by["Rollback on failure"]["if"]
 c = by["Checkout"]
 assert c.get("id") == "checkout", c
 s = by["Page on pre-deploy failure"]
-assert "steps.checkout.outcome" in s["if"] and "stale_check.outcome" in s["if"], s["if"]
+q = chr(39)
+assert "proceed != " + q + "true" + q in s["if"], s["if"]
+assert "outcome" not in s["if"], "must not key on a single step outcome"
+# Checkout timeout: checkout fails, stale_check skipped -> proceed empty -> pages
+# and cannot double-page with Page on failure (proceed == 'true').
+assert "proceed == " + q + "true" + q in by["Page on failure"]["if"], by["Page on failure"]["if"]
 assert "/opt/hydra/scripts/lib/deploy-notify.sh" in s["run"]
 '
   [ "$status" -eq 0 ]

@@ -145,3 +145,15 @@ assert val is False, f"concurrency.cancel-in-progress is {val!r}, expected False
 PY
   [ "$status" -eq 0 ]
 }
+
+@test "pre-deploy page condition is the literal 'nothing was deployed' predicate" {
+  run python3 - <<PY
+import yaml
+wf = yaml.safe_load(open("$WF"))
+steps = {s.get("name"): s for s in wf["jobs"][next(iter(wf["jobs"]))]["steps"]}
+cond = steps["Page on pre-deploy failure"]["if"]
+want = "failure() && steps.stale_check.outputs.proceed != 'true'"
+assert cond == want, f"pre-deploy page if: is {cond!r}, expected {want!r}"
+PY
+  [ "$status" -eq 0 ]
+}
