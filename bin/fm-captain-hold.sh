@@ -1360,23 +1360,56 @@ open_task_ids() {
   '
 }
 
-# Every key token stated anywhere in a status log. A cheap candidate scan: it
-# over-includes tokens that are only prose, and status_key_closing_verb below is
-# what actually decides what the stream says about a key.
-status_log_key_tokens() {  # <status-file>
-  grep -o '\[key=[A-Za-z0-9._-]*\]' "$1" 2>/dev/null |
-    sed 's/^\[key=//; s/\]$//' | LC_ALL=C sort -u
-}
-
-list_has_line() {  # <newline-separated-list> <value>
-  case $'\n'"$1"$'\n' in
-    *$'\n'"$2"$'\n'*) return 0 ;;
-    *) return 1 ;;
-  esac
+# Candidate (status log, task id, key) triples, in status-log then task-listing
+# then key order: every key token stated anywhere in a log that could name a
+# still-open task - the key IS the task id (the collapsed identity) or, for a
+# pre-collapse row, the legacy `<origin>-decision-<key>` id that origin would
+# have minted. One grep reads every log and one awk joins its tokens against the
+# open-task list, so a healthy home pays two processes for the whole scan rather
+# than a pipeline per log. It over-includes tokens that are only prose;
+# status_key_closing_verb below is what actually decides what the stream says
+# about a key.
+diverged_candidates() {  # <open-task-ids> <status-file>...
+  local ids=$1
+  shift
+  [ "$#" -gt 0 ] || return 0
+  # The lists travel through the environment: awk -v cannot carry newlines.
+  grep -o -H '\[key=[A-Za-z0-9._-]*\]' -- "$@" 2>/dev/null \
+    | FM_DIVERGED_IDS=$ids FM_DIVERGED_FILES=$(printf '%s\n' "$@") LC_ALL=C awk '
+    {
+      i = index($0, ":[key=")
+      if (i == 0) next
+      f = substr($0, 1, i - 1)
+      k = substr($0, i + 6)
+      sub(/\]$/, "", k)
+      if (k != "") tok[f SUBSEP k] = 1
+    }
+    END {
+      nf = split(ENVIRON["FM_DIVERGED_FILES"], fl, "\n")
+      ni = split(ENVIRON["FM_DIVERGED_IDS"], il, "\n")
+      for (a = 1; a <= nf; a++) {
+        f = fl[a]
+        if (f == "") continue
+        origin = f
+        sub(/^.*\//, "", origin)
+        sub(/\.status$/, "", origin)
+        prefix = origin "-decision-"
+        for (b = 1; b <= ni; b++) {
+          id = il[b]
+          if (id == "") continue
+          if ((f SUBSEP id) in tok) print f "\t" origin "\t" id "\t" id
+          if (length(id) > length(prefix) && substr(id, 1, length(prefix)) == prefix) {
+            k = substr(id, length(prefix) + 1)
+            if ((f SUBSEP k) in tok) print f "\t" origin "\t" id "\t" k
+          }
+        }
+      }
+    }'
 }
 
 command_diverged() {
-  local ids resolve f origin tokens id keys key show title
+  local ids resolve f origin id key show title done_pairs=$'\n'
+  local -a files=()
   [ "$#" -eq 0 ] || { usage >&2; exit 2; }
   # Both records must belong to the SAME home or the comparison is meaningless:
   # tasks-axi reads $FM_HOME's backlog, so a state dir pointed somewhere else
@@ -1393,37 +1426,28 @@ command_diverged() {
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   for f in "$STATE"/*.status; do
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
-    origin=$(basename "$f"); origin=${origin%.status}
-    tokens=$(status_log_key_tokens "$f")
-    [ -n "$tokens" ] || continue
-    while IFS= read -r id; do
-      [ -n "$id" ] || continue
-      # The keys that could name this task in THIS log: the collapsed identity
-      # (the key IS the task id) and, for a pre-collapse row, the legacy derived
-      # one this origin would have minted.
-      keys=$id
-      case "$id" in
-        "$origin-decision-"?*) keys="$keys"$'\n'"${id#"$origin-decision-"}" ;;
-      esac
-      while IFS= read -r key; do
-        list_has_line "$tokens" "$key" || continue
-        [ "$(status_key_closing_verb "$f" "$key")" = "$resolve" ] || continue
-        show=$(task_show "$id") || continue
-        [ "$(show_field "$show" state)" != "done" ] || continue
-        [ "$(show_field_value "$show" hold_kind)" = captain ] || continue
-        # The title is the only free-text field here, and the report is
-        # TAB-separated, so it goes through the same sanitizer every other
-        # emitted field uses rather than being trusted to stay one clean line.
-        title=$(sanitize_field "$(show_field_value "$show" title)")
-        printf '%s\t%s\t%s\t%s\n' "$id" "$origin" "$key" "$title"
-        break
-      done <<INNER
-$keys
-INNER
-    done <<EOF
-$ids
-EOF
+    case "$f" in *$'\n'*|*$'\t'*) continue ;; esac
+    files+=("$f")
   done
+  [ "${#files[@]}" -gt 0 ] || return 0
+  while IFS=$'\t' read -r f origin id key; do
+    [ -n "$key" ] || continue
+    # At most one report per (log, task): the first key that proves it wins,
+    # exactly as a per-task key loop that stops at its first report.
+    case "$done_pairs" in *$'\n'"$f"$'\t'"$id"$'\n'*) continue ;; esac
+    [ "$(status_key_closing_verb "$f" "$key")" = "$resolve" ] || continue
+    show=$(task_show "$id") || continue
+    [ "$(show_field "$show" state)" != "done" ] || continue
+    [ "$(show_field_value "$show" hold_kind)" = captain ] || continue
+    # The title is the only free-text field here, and the report is
+    # TAB-separated, so it goes through the same sanitizer every other
+    # emitted field uses rather than being trusted to stay one clean line.
+    title=$(sanitize_field "$(show_field_value "$show" title)")
+    printf '%s\t%s\t%s\t%s\n' "$id" "$origin" "$key" "$title"
+    done_pairs="$done_pairs$f"$'\t'"$id"$'\n'
+  done <<EOF
+$(diverged_candidates "$ids" "${files[@]}")
+EOF
 }
 
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
