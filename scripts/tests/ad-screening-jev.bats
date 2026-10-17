@@ -15,6 +15,11 @@ setup() {
   export AD_SCREENING_JEV="$T/jev" AD_SCREENING_PUT="$T/put"
   export AD_SCREENING_DISABLED_FILE="$T/ad-screening.disabled"
   export STUB_FIXTURE="$T/fixture.json" STUB_ANSWERS="$T/answers.json"
+  # Fence off real Slack (hydra#1195): recorder muso, absent env file, no token.
+  export MUSO_BIN="$T/muso-recorder" MUSO_SLACK_ENV_FILE="$T/none.env"
+  unset MUSO_SLACK_BOT_TOKEN_CMO MUSO_SLACK_BOT_TOKEN_DEVOPS
+  printf '#!/usr/bin/env bash\necho "$*" >>"%s/muso.argv"\nexit 0\n' "$T" >"$MUSO_BIN"
+  chmod +x "$MUSO_BIN"
   cat >"$AD_SCREENING_MUSO_READ" <<'S'
 #!/usr/bin/env bash
 cat "$STUB_FIXTURE"
@@ -68,6 +73,15 @@ answers() {
 edit_answers() { jq "$1" "$STUB_ANSWERS" >"$T/a" && mv "$T/a" "$STUB_ANSWERS"; }
 
 puts() { if [ -f "$T/put.args" ]; then wc -l <"$T/put.args" | tr -d ' '; else echo 0; fi; }
+
+# Regression for hydra#1195: 34 fixture briefs hit the real #clio_devops per Bats run.
+@test "a full --run with no Slack token never execs muso" {
+  ad 101 | fixture; answers approve 0.9 strong ""
+  run "$SCRIPT" --run
+  [ "$status" -eq 0 ]
+  [ "$(puts)" -eq 1 ]
+  [ ! -e "$T/muso.argv" ]
+}
 
 # ── failure handling first: no PUT, ever ──────────────────────────────
 

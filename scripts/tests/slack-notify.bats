@@ -130,3 +130,30 @@ with_lib() { bash -c "source '$LIB'; $1"; }
   MUSO_HOOK_PROVIDER=slack run "$HYDRA_REPO/scripts/muso-prewrite-hook.sh" POST /chat.postMessage prod
   [ "$status" -eq 0 ]
 }
+
+# ── bats fence (hydra#1195): no test run may reach real Slack ──────────
+
+@test "fence belt 1: under bats the live env file is never read" {
+  export SLACK_NOTIFY_LIVE_ENV_FILE="$MUSO_SLACK_ENV_FILE"
+  run with_lib 'slack_load_env devops'
+  [ "$status" -eq 1 ]
+}
+
+@test "fence belt 2: slack_notify refuses the installed muso, returns 0, sends nothing" {
+  export SLACK_NOTIFY_INSTALLED_MUSO="$STUBBIN/muso"
+  run with_lib 'slack_notify hi; echo rc=$?'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rc=0"* ]]
+  [[ "$output" == *"refusing to exec installed"* ]]
+  [ ! -s "$STUB_CALLS" ]
+}
+
+@test "fence belt 2: payload posters refuse with rc 1, sends nothing" {
+  export SLACK_NOTIFY_INSTALLED_MUSO="$STUBBIN/muso"
+  echo '{"channel":"C1","text":"x"}' > "$TEST_TMPDIR/p.json"
+  run with_lib "slack_notify_payload_file_status '$TEST_TMPDIR/p.json'"
+  [ "$status" -eq 1 ]
+  run with_lib "slack_notify_payload_file_ts '$TEST_TMPDIR/p.json'"
+  [ "$status" -eq 1 ]
+  [ ! -s "$STUB_CALLS" ]
+}

@@ -1,0 +1,1 @@
+Hi {first_name}, a quick follow-up on your {role} credit for "{track_title}" ({artist_name}). We haven't received a document yet. Nothing has been removed: the credit stays on your profile and the review stays open. Whenever you're ready, reply to this message with any one of the documents from my earlier note and we'll pick it up right away.

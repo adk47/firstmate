@@ -19,7 +19,19 @@ Subcommands:
   eval     Labelled-set precision run (stillfloo = known bad, trusted-source
            confirmed = known good), per model, full and blind arms.
 
-Read-only on credits: the admin client issues GETs only.
+  decide   credit-trust-decide (trust-yet-verify, captain 2026-10-15 ~22:12Z):
+           decide the HELD queue - provisional approval on catalog / footprint /
+           verified-web evidence for non-big rows without a validator conflict,
+           a support request (user_verification_needed) for the rest. --mode
+           shadow records only; --mode apply writes, and only when
+           policies/credit-approval-automation.json approves credit-trust-decide.
+           Exit code = run status (command-shaped cron).
+  explain <request-id>        every decision + server outcome for one row.
+  export-decisions --since T  JSON lines for the board / digest.
+  revert --run <id> [--apply] take a run's provisional approvals back.
+
+Read-only on credits EXCEPT `decide --mode apply` and `revert --apply`, which
+write only through muso-admin-api.sh's conditional endpoint.
 Kill switch: /etc/hydra/credit-review.disabled -> NO_REPLY, nothing runs.
 Design: docs/credit-verification/ai-credit-reviewer.md
 """
@@ -52,6 +64,29 @@ KILL_SWITCH = Path(os.environ.get("CREDIT_REVIEW_KILL_SWITCH", "/etc/hydra/credi
 MODEL_ENABLE_FILE = Path(os.environ.get("CREDIT_REVIEW_MODEL_ENABLE_FILE", "/etc/hydra/credit-review-model.enabled"))
 
 
+_SEARCHER = None
+
+
+def codex_judge(args: argparse.Namespace, model: str | None = None, fallback=None):
+    """credit-trust T01: the server fetches free sources (MusicBrainz,
+    Wikipedia, ...) and Codex judges them tool-less on the subscription ($0).
+    Every call is a row in the credit-trust llm_calls ledger. One Searcher per
+    process, so an eval's two arms fetch each track once."""
+    global _SEARCHER
+    from credit_trust.credibility import FetchedSourcesJudge
+    from credit_trust.ledger import Ledger as TrustLedger
+    from credit_trust.llm import Provider
+    from credit_trust.websearch import Searcher
+    if _SEARCHER is None:
+        _SEARCHER = Searcher(max_docs=4)
+    ledger = TrustLedger(args.trust_ledger)
+    provider = Provider(ledger, ladder=("codex",), codex_model=model)
+    decide = args.cmd == "decide"
+    return FetchedSourcesJudge(provider, _SEARCHER, fallback=fallback, step=f"credit_review_{args.cmd}",
+                               skip_model_without_sources=decide,
+                               combiner=Provider(ledger, ladder=("jev",)) if decide else None)
+
+
 def make_judge(args: argparse.Namespace, notes: list[str] | None = None) -> Judge | None:
     """The judge, or None (catalog-only) when the model is off.
 
@@ -62,7 +97,13 @@ def make_judge(args: argparse.Namespace, notes: list[str] | None = None) -> Judg
     """
     if getattr(args, "no_model", False):
         return None
-    if args.cmd in ("audit", "review") and not MODEL_ENABLE_FILE.exists():
+    if getattr(args, "provider", "openrouter") == "codex":
+        # $0 first: Codex on fetched sources; the OpenRouter judge (with every
+        # guard below) is only the fallback when nothing could be fetched or
+        # Codex is unavailable.
+        args_or = argparse.Namespace(**{**vars(args), "provider": "openrouter"})
+        return codex_judge(args, fallback=make_judge(args_or, notes))
+    if args.cmd in ("audit", "review", "decide") and not MODEL_ENABLE_FILE.exists():
         log(f"model judge disabled ({MODEL_ENABLE_FILE} absent): catalog-only run")
         return None
     floor = getattr(args, "min_balance_usd", DEFAULT_MIN_BALANCE_USD)
@@ -124,7 +165,8 @@ def cmd_metrics(args: argparse.Namespace) -> int:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
-    if not args.no_model:
+    codex = args.provider == "codex"
+    if not args.no_model and not codex:
         bal = account_balance_usd()
         if bal is None or bal < args.min_balance_usd:
             log(f"refusing a model eval: shared OpenRouter balance {bal} is below ${args.min_balance_usd:.0f} (pass --no-model for catalog-only)")
@@ -172,16 +214,88 @@ def cmd_eval(args: argparse.Namespace) -> int:
         for arm in args.arms.split(","):
             res = evaluate.run_arm(admin, ledger, items, model.strip(), arm.strip(), args.mode,
                                    web=not args.no_web, web_engine=args.web_engine, budget_usd=args.budget_usd,
-                                   use_model=not args.no_model)
+                                   use_model=not args.no_model, batch=args.batch,
+                                   # the eval measures Codex alone: no OpenRouter fallback
+                                   judge_factory=(lambda m: codex_judge(args, m)) if codex else None)
             m = res.metrics()
+            m["batch"] = bool(args.batch)
             metrics.append(m)
-            evaluate.dump(str(out / f"eval-{args.mode}-{model.strip().replace('/', '_').replace(':', '_')}-{arm.strip()}.json"),
+            evaluate.dump(str(out / f"eval-{args.mode}-{model.strip().replace('/', '_').replace(':', '_')}-{arm.strip()}"
+                              f"{'-batch' if args.batch else ''}.json"),
                           {"metrics": m, "rows": res.rows})
             log(json.dumps(m))
     tag = args.models.replace("/", "_").replace(",", "+").replace(":", "_")
+    tag += "-batch" if args.batch else ""
     evaluate.dump(str(out / f"eval-{args.mode}-{tag}-summary.json"), metrics)
     (out / f"eval-{args.mode}-{tag}-summary.md").write_text(evaluate.to_markdown(metrics) + "\n")
     print(evaluate.to_markdown(metrics))
+    return 0
+
+
+def cmd_decide(args: argparse.Namespace) -> int:
+    from credit_review import decide
+    if decide.KILL_SWITCH.exists():
+        log(f"decide: kill switch present at {decide.KILL_SWITCH}; nothing decided")
+        print("NO_REPLY")
+        return 0
+    if args.provider != "codex":
+        log("decide: refused --provider openrouter (the metered judge runs only as the capped --paid-fallback)")
+        print("credit-trust-decide refused: --provider openrouter is not allowed; decide runs Codex, and the "
+              "metered OpenRouter judge only as the capped --paid-fallback. No credits were changed.")
+        return 2
+    os.environ["MUSO_ADMIN_IDENTITY"] = decide.ADMIN_IDENTITY
+    policy = decide.Policy.load()
+    if args.max_rows:
+        policy.max_rows_per_run = args.max_rows
+    ledger = Ledger(args.ledger)
+    judge = make_judge(args)
+    fb = getattr(judge, "fallback", None)
+    if fb is not None and not args.paid_fallback:
+        # $0 by default (measured 2026-10-15 on 60 held rows: free sources covered none,
+        # the grok fallback cost $1.86 for ONE approval; 55 rows got the same support
+        # request they get without it).
+        judge.fallback = fb = None
+    if fb is not None:
+        # The paid fallback is capped per run and by the shared $25/day verifier budget.
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+        judge.fallback = decide.CappedJudge(fb, run_cap_usd=args.budget_usd, daily_cap_usd=args.daily_budget_usd,
+                                            spent_today_usd=decide.spent_today_usd(ledger.db, day))
+    res = decide.run(admin_api.AdminClient(), ledger.db, judge, mode=args.mode, policy=policy,
+                     max_model_calls=args.max_model_calls, workers=args.workers, budget_s=args.budget_s)
+    log("decide " + res.line())
+    if res.write_errors:
+        print(res.line())
+        return 1
+    if res.scanned == 0:
+        print("NO_REPLY")
+        return 0
+    decided = res.approved + res.support + sum(res.skipped_by_server.values())
+    if res.mode == "apply" and decided == 0 and res.deferred == res.scanned and res.errors:
+        # zero processed while work existed = a failed run, not a quiet one
+        print(res.line())
+        return 1
+    print(res.line() if (res.approved or res.support or res.note) else "NO_REPLY")
+    return 0
+
+
+def cmd_explain(args: argparse.Namespace) -> int:
+    from credit_review import decide
+    print(json.dumps(decide.explain(Ledger(args.ledger).db, args.request_id), indent=1, ensure_ascii=False, default=str))
+    return 0
+
+
+def cmd_export_decisions(args: argparse.Namespace) -> int:
+    from credit_review import decide
+    for row in decide.export(Ledger(args.ledger).db, args.since):
+        print(json.dumps(row, ensure_ascii=False, default=str))
+    return 0
+
+
+def cmd_revert(args: argparse.Namespace) -> int:
+    from credit_review import decide
+    os.environ["MUSO_ADMIN_IDENTITY"] = decide.ADMIN_IDENTITY
+    out = decide.revert(Ledger(args.ledger).db, args.run, apply=args.apply)
+    print(json.dumps(out, indent=1, default=str))
     return 0
 
 
@@ -210,6 +324,11 @@ def parser() -> argparse.ArgumentParser:
         sp.add_argument("--no-model", action="store_true", help="catalog evidence only")
         sp.add_argument("--min-balance-usd", type=float, default=DEFAULT_MIN_BALANCE_USD,
                         help="skip model calls when the shared OpenRouter balance is below this")
+        sp.add_argument("--provider", choices=["openrouter", "codex"], default="openrouter",
+                        help="codex = server-fetched sources judged by tool-less Codex on the subscription "
+                             "($0; credit-trust T01); openrouter = the web-plugin judge")
+        sp.add_argument("--trust-ledger", default=None,
+                        help="credit-trust llm_calls ledger (default /var/lib/hydra/credit-trust/ledger.sqlite3)")
 
     a = sub.add_parser("audit")
     a.add_argument("--window-min", type=int, default=90)
@@ -235,6 +354,8 @@ def parser() -> argparse.ArgumentParser:
     m.set_defaults(fn=cmd_metrics)
 
     e = sub.add_parser("eval")
+    e.add_argument("--batch", action="store_true",
+                   help="judge the way the crons do: one model call per profile unit (judge_grouped)")
     e.add_argument("--mode", choices=["audit", "review"], default="audit")
     e.add_argument("--bad-profile", default="94ad2ad2-0be9-4b8e-94a6-dc85eb100310")
     e.add_argument("--bad-requests", default=None, help="JSON snapshot of the bad profile's requests")
@@ -248,6 +369,31 @@ def parser() -> argparse.ArgumentParser:
     e.add_argument("--out", required=True)
     model_flags(e)
     e.set_defaults(fn=cmd_eval)
+
+    dc = sub.add_parser("decide", help="trust-yet-verify decisions on the held queue (credit-trust-decide)")
+    dc.add_argument("--mode", choices=["shadow", "apply"], default="shadow")
+    dc.add_argument("--max-rows", type=int, default=None, help="held rows per run (default: policy, 500)")
+    dc.add_argument("--workers", type=int, default=6)
+    dc.add_argument("--budget-s", type=int, default=720, help="stop building evidence after this many seconds")
+    dc.add_argument("--paid-fallback", action="store_true",
+                    help="let rows no free source covers fall back to the OpenRouter web judge (metered, capped)")
+    dc.add_argument("--daily-budget-usd", type=float, default=25.0,
+                    help="shared per-UTC-day cap on metered model spend (audit + decide; captain: $25/day)")
+    model_flags(dc)
+    dc.set_defaults(fn=cmd_decide, provider="codex", max_model_calls=120, budget_usd=2.0)
+
+    ex = sub.add_parser("explain", help="every decision + server outcome for one credit request")
+    ex.add_argument("request_id")
+    ex.set_defaults(fn=cmd_explain)
+
+    xd = sub.add_parser("export-decisions", help="decisions as JSON lines (board / digest)")
+    xd.add_argument("--since", required=True, help="ISO time, e.g. 2026-10-15T00:00:00Z")
+    xd.set_defaults(fn=cmd_export_decisions)
+
+    rv = sub.add_parser("revert", help="take a decide run's provisional approvals back (named human path)")
+    rv.add_argument("--run", required=True)
+    rv.add_argument("--apply", action="store_true", help="attempt the write (the server allows a named human only)")
+    rv.set_defaults(fn=cmd_revert)
 
     rs = sub.add_parser("rescore", help="re-apply the current policy to stored eval ledgers (no API or model calls)")
     rs.add_argument("ledgers", nargs="+")
@@ -266,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
     # cron's stderr to Slack next to its stdout.
     warnings.showwarning = _warning_to_log
     args = parser().parse_args(argv)
-    if args.cmd in ("audit", "review", "digest", "metrics") and KILL_SWITCH.exists():
+    if args.cmd in ("audit", "review", "digest", "metrics", "decide") and KILL_SWITCH.exists():
         log(f"kill switch present at {KILL_SWITCH}; nothing reviewed")
         print("NO_REPLY")
         return 0

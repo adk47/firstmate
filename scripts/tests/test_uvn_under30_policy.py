@@ -2,6 +2,7 @@
 
 import gzip
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from uvn_under30_policy import (  # noqa: E402
+    DenyList,
     PolicyError,
     approved_ids_from_records,
     reversal_verdict,
@@ -20,6 +22,7 @@ from uvn_under30_policy import (  # noqa: E402
     parse_ticket_scope,
     pending_request_ids,
     has_hard_reject_signal,
+    load_deny_list,
     qualifies_for_approval,
     resolve_profile_scope,
 )
@@ -29,6 +32,8 @@ CR1 = "11111111-1111-4111-8111-111111111111"
 CR2 = "22222222-2222-4222-8222-222222222222"
 PROFILE1 = "33333333-3333-4333-8333-333333333333"
 PROFILE2 = "44444444-4444-4444-8444-444444444444"
+NO_DENY = DenyList((), ())
+SHIPPED_DENY_POLICY = Path(__file__).resolve().parents[2] / "policies" / "credit-trust-decide.json"
 
 
 def block(
@@ -335,21 +340,21 @@ class ReversalCircuitTests(unittest.TestCase):
 
 class QualificationTests(unittest.TestCase):
     def test_accepts_authoritative_numeric_29(self):
-        self.assertTrue(qualifies_for_approval(row(), spotify(29), set()))
+        self.assertTrue(qualifies_for_approval(row(), spotify(29), set(), NO_DENY))
 
     def test_rejects_boundary_30(self):
-        self.assertFalse(qualifies_for_approval(row(), spotify(30), set()))
+        self.assertFalse(qualifies_for_approval(row(), spotify(30), set(), NO_DENY))
 
     def test_rejects_missing_or_null_popularity_even_when_stored_value_is_zero(self):
-        self.assertFalse(qualifies_for_approval(row(spotifyPopularity=0), spotify(), set()))
-        self.assertFalse(qualifies_for_approval(row(spotifyPopularity=0), spotify(None), set()))
+        self.assertFalse(qualifies_for_approval(row(spotifyPopularity=0), spotify(), set(), NO_DENY))
+        self.assertFalse(qualifies_for_approval(row(spotifyPopularity=0), spotify(None), set(), NO_DENY))
 
     def test_rejects_stale_state_fraud_and_hard_rejects(self):
-        self.assertFalse(qualifies_for_approval(row(status="rejected"), spotify(1), set()))
-        self.assertFalse(qualifies_for_approval(row(), spotify(1), {CR1}))
+        self.assertFalse(qualifies_for_approval(row(status="rejected"), spotify(1), set(), NO_DENY))
+        self.assertFalse(qualifies_for_approval(row(), spotify(1), {CR1}, NO_DENY))
         risky = row(verificationData={"rule_risk_percent": {"reject_role_mismatch": 1}})
-        self.assertFalse(qualifies_for_approval(risky, spotify(1), set()))
-        self.assertFalse(qualifies_for_approval(row(verificationData=None), spotify(1), set()))
+        self.assertFalse(qualifies_for_approval(risky, spotify(1), set(), NO_DENY))
+        self.assertFalse(qualifies_for_approval(row(verificationData=None), spotify(1), set(), NO_DENY))
 
     def test_rejects_idp_1686_review_holds(self):
         # A review_* hold (IDP #1686) blocks approval exactly like a reject_*.
@@ -358,17 +363,84 @@ class QualificationTests(unittest.TestCase):
             "review_role_credited_to_other_at_trusted_source": 100,
         }})
         self.assertTrue(has_hard_reject_signal(held))
-        self.assertFalse(qualifies_for_approval(held, spotify(1), set()))
+        self.assertFalse(qualifies_for_approval(held, spotify(1), set(), NO_DENY))
         # A hold rule that did not fire (0) does not block.
         clear = row(verificationData={"rule_risk_percent": {
             "reject_artist_credit": 0,
             "review_role_credited_to_other_at_trusted_source": 0,
         }})
         self.assertFalse(has_hard_reject_signal(clear))
-        self.assertTrue(qualifies_for_approval(clear, spotify(1), set()))
+        self.assertTrue(qualifies_for_approval(clear, spotify(1), set(), NO_DENY))
         # A non-numeric hold value fails closed.
         odd = row(verificationData={"rule_risk_percent": {"review_big_track_uncorroborated": "yes"}})
-        self.assertFalse(qualifies_for_approval(odd, spotify(1), set()))
+        self.assertFalse(qualifies_for_approval(odd, spotify(1), set(), NO_DENY))
+
+
+def decide_ledger(tmp, marked=()):
+    """A decider ledger (the decisions table as credit_review.decide writes it)."""
+    from credit_review import decide
+    path = Path(tmp) / "ledger.sqlite3"
+    db = sqlite3.connect(str(path))
+    decide.ensure_schema(db)
+    for rid, doc in marked:
+        db.execute("INSERT INTO decisions (run_id, decided_at, request_id, big_track, decision, reason, mode,"
+                   " doc_required) VALUES ('r', '2026-10-15T00:00:00Z', ?, 0, 'support', 'x', 'apply', ?)",
+                   (rid, doc))
+    db.commit()
+    db.close()
+    return path
+
+
+class SharedDenyListTests(unittest.TestCase):
+    """A row the credit-trust decider routed to UVN because its user or profile
+    is deny-listed, because its role is editorial, or because
+    it marked it doc_required, must never be approved here."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def test_shipped_deny_listed_rows_are_never_approved(self):
+        deny = load_deny_list(SHIPPED_DENY_POLICY, decide_ledger(self.tmp))
+        self.assertTrue(qualifies_for_approval(row(userId=500), spotify(1), set(), deny))
+        self.assertFalse(qualifies_for_approval(row(userId=13373), spotify(1), set(), deny))
+        stillfloo = "94AD2AD2-0BE9-4B8E-94A6-DC85EB100310"
+        self.assertFalse(qualifies_for_approval(row(profileId=stillfloo), spotify(1), set(), deny))
+
+    def test_editorial_roles_are_never_approved(self):
+        deny = load_deny_list(SHIPPED_DENY_POLICY, decide_ledger(self.tmp))
+        for role in ("Editor", "Editorial", "Vocal Editing", "Pro Tools Editing", "Compilation", "Assembly"):
+            self.assertFalse(qualifies_for_approval(row(credits=["Mixing", role]), spotify(12), set(), deny), role)
+        self.assertTrue(qualifies_for_approval(row(credits=["Mixing", "Credit Manager"]), spotify(12), set(), deny))
+
+    def test_decider_doc_required_rows_are_never_approved(self):
+        deny = load_deny_list(SHIPPED_DENY_POLICY, decide_ledger(self.tmp, [(CR1, 1), (CR2, 0)]))
+        self.assertFalse(qualifies_for_approval(row(), spotify(12), set(), deny))
+        self.assertTrue(qualifies_for_approval(row(id=CR2), spotify(12), set(), deny))
+        self.assertIn("documentation", deny.why(row()))
+
+    def test_unreadable_or_malformed_sources_are_fatal(self):
+        ledger = decide_ledger(self.tmp)
+        path = Path(self.tmp) / "deny.json"
+        with self.assertRaises(PolicyError):
+            load_deny_list(path, ledger)
+        good = json.loads(SHIPPED_DENY_POLICY.read_text())
+        for bad in ("not json", "[]", json.dumps({"deny_user_ids": []}),
+                    json.dumps({**good, "deny_user_ids": ["13373"]}),
+                    json.dumps({**good, "deny_profile_ids": ["x"]}),
+                    json.dumps({**good, "editorial_role_terms": []}),
+                    json.dumps({**good, "editorial_role_terms": ["Edit!"]})):
+            path.write_text(bad)
+            with self.assertRaises(PolicyError):
+                load_deny_list(path, ledger)
+        with self.assertRaises(PolicyError):
+            load_deny_list(SHIPPED_DENY_POLICY, Path(self.tmp) / "missing.sqlite3")
+        legacy = Path(self.tmp) / "legacy.sqlite3"
+        db = sqlite3.connect(str(legacy))
+        db.execute("CREATE TABLE decisions (request_id TEXT)")
+        db.commit()
+        db.close()
+        with self.assertRaises(PolicyError):
+            load_deny_list(SHIPPED_DENY_POLICY, legacy)
 
 
 class ResolutionTests(unittest.TestCase):

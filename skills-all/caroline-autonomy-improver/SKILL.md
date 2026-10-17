@@ -146,15 +146,16 @@ the behavior-stat number), the concrete edit, and a class.
   | Broaden `credits_verify` corroboration **sources** (never drop corroboration) | server-side muso capability gate (likely `Muso-AI/muso-cli`, not hydra) | **Aaron** | the digest's **routed-then-later-approved count** (`route_reconcile.approved`) sustained above ~0 — a real false-REFUSAL signal, NOT a raw route rate whose reason is "no corroboration" |
   | Relax `profiles_consolidate` name guard (e.g. normalize trailing punctuation/whitespace/case before the equality check) | server-side muso capability gate (likely `Muso-AI/muso-cli`) | **Aaron** | documented false-positive refusals (e.g. "Name ." vs "Name"); conservative normalization only, never fuzzy/nickname matching |
   | Raise `remove_credits` caps | server-side gate (+ `TOOLS.md` flag-only) | **Aaron** | legitimate customers hitting the cap, ~0 abuse |
-  | Enable the riskAssessment judge (LLM judge + configurable turn cap + broadened RISK_RULES) | `openclaw-edge.json` (`channels.intercom.accounts.default.riskAssessment` block) | **Aaron** | a real over/under-escalation signal — decide on policy, not on a quiet week |
+  | Enable the riskAssessment LLM judge layer (`riskAssessment` itself — rules + turn cap 14, counting exchanges — is already ON; no judge is wired: `jev.actions.escalate` is false and no `openrouterApiKey` is set) | `openclaw-edge.json` (`channels.intercom.accounts.default` `riskAssessment` / `jev.actions` blocks) | **Aaron** | a real over/under-escalation signal — decide on policy, not on a quiet week |
 
-  > **Verified fact (do not get this wrong):** Caroline's turn hard-cap is `6`
-  > (`plugins/intercom/src/types.ts:444`), and it plus the LLM judge plus the broadened
-  > `RISK_RULES` live ONLY inside `assessRisk()`, which runs ONLY when
-  > `riskAssessment.enabled === true` (`channel.ts:286-303`). It is OFF today → the
-  > legacy keyword-only path runs, with no active turn cap and no judge. So "raise the
-  > 15-turn cap" is NOT a real lever; "enable the judge" is ONE lever = adding the
-  > `riskAssessment` block. Never propose a standalone turn-cap edit.
+  > **Verified fact (do not get this wrong):** the turn hard-cap, the judge, and the
+  > broadened `RISK_RULES` live ONLY inside `assessRisk()` (`escalation.ts`, Layer 1b
+  > for the cap), which runs only when `riskAssessment.enabled === true`. `openclaw-edge.json`
+  > enables it with `turnCountHardCap: 14`; `DEFAULT_TURN_HARD_CAP` in
+  > `plugins/intercom/src/types.ts` is only the fallback when that key is unset. The cap
+  > counts customer EXCHANGES (`userExchangeCount`: a burst of customer messages with no
+  > reply in between counts once); `userTurnCount` (every message) still feeds Jev's
+  > `turn_count`. A cap change is an edit to that `riskAssessment` block, never code.
 
   `TOOLS.md` is rsync-excluded at deploy — never auto-edit it; note any needed change
   in the PR body. Levers whose target is server-side (`muso-cli`) or Aaron-gated

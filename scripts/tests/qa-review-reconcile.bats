@@ -596,6 +596,7 @@ setup() {
 
   export DISPATCH_CALLS="$TEST_TMPDIR/dispatch_calls"; : > "$DISPATCH_CALLS"
   export SLACK_CALLS="$TEST_TMPDIR/slack_calls"; : > "$SLACK_CALLS"
+  export SLACK_ARGS="$TEST_TMPDIR/slack_args"; : > "$SLACK_ARGS"
   export STATUS_CALLS="$TEST_TMPDIR/status_calls"; : > "$STATUS_CALLS"
   export GH_LOG="$TEST_TMPDIR/gh_log"; : > "$GH_LOG"
   export ROLLUP_SEARCH_CALLS="$TEST_TMPDIR/rollup_search_calls"; : > "$ROLLUP_SEARCH_CALLS"
@@ -724,6 +725,7 @@ STUB
   cat > "$STUBBIN/muso" <<'STUB'
 #!/usr/bin/env bash
 echo "slack-send" >> "$SLACK_CALLS"
+[ -z "${SLACK_ARGS:-}" ] || printf '%s\n' "$*" >> "$SLACK_ARGS"
 # STUB_SLACK_FAIL_ONCE: fail the first send only, then succeed -- models a
 # transient Slack/API outage so we can prove `paged` is not persisted on a
 # send that never landed.
@@ -1644,18 +1646,18 @@ JSON
   run "$SCRIPT" --once
   [ "$status" -eq 0 ]
   [ ! -s "$SLACK_CALLS" ]
-  [[ "$output" == *"CANDIDATE READ FAILURE: Muso-AI/core-backend"*"consecutive count now 1"* ]]
+  [[ "$output" == *"READ FAILURE DIGEST: Muso-AI/core-backend"*"candidate streak 1"* ]]
   [[ "$output" != *"REPO FAILURE"* ]]
 
   run "$SCRIPT" --once
   [ "$status" -eq 0 ]
   [ ! -s "$SLACK_CALLS" ]
-  [[ "$output" == *"consecutive count now 2"* ]]
+  [[ "$output" == *"candidate streak 2"* ]]
 
   run "$SCRIPT" --once
   [ "$status" -eq 0 ]
   [ -s "$SLACK_CALLS" ]
-  [[ "$output" == *"CANDIDATE READ FAILURE: Muso-AI/core-backend"*"consecutive count now 3"* ]]
+  [[ "$output" == *"READ FAILURE DIGEST: Muso-AI/core-backend"*"candidate streak 3"* ]]
 
   # A clean tick (commit fetch now succeeds) resets the durable counter to 0.
   unset STUB_COMMIT_FAIL
@@ -1854,8 +1856,8 @@ JSON
   export QA_RECONCILE_NOW_EPOCH="$(( base + 900 ))"
   run "$SCRIPT" --once
   [ "$status" -eq 0 ]
-  [[ "$output" == *"consecutive count now 4"* ]]
-  [[ "$output" == *"page suppressed for Muso-AI/core-backend"* ]]
+  [[ "$output" == *"candidate streak 4"* ]]
+  [[ "$output" == *"READ FAILURE DIGEST: Muso-AI/core-backend"*"page suppressed (last paged 900s ago"* ]]
   [ "$(wc -l < "$SLACK_CALLS")" -eq "$first_sends" ]
 
   # Still suppressed just before the interval elapses.
@@ -2402,12 +2404,12 @@ RL_ERR='gh: API rate limit exceeded for user ID 1234. (HTTP 403)'
   [[ "$output" != *"TOKEN EXHAUSTED"* ]]
 }
 
-@test "e2e 6089-5: rate-limit failures still advance the read-failure counters (CANDIDATE READ FAILURE unchanged)" {
+@test "e2e 6089-5: rate-limit failures still advance the read-failure counters (candidate streak still reported)" {
   mk_multi_pr_list "Muso-AI/core-backend" 2
   for p in 101 102; do printf '%s\n' "$RL_ERR" > "$STUB_COMMIT_ERR_DIR/rlsha$p"; done
   run "$SCRIPT" --once
   [ "$status" -eq 0 ]
-  [[ "$output" == *"CANDIDATE READ FAILURE: Muso-AI/core-backend — all 2 per-PR read(s) failed this tick (classes: commit,commit); consecutive count now 1."* ]]
+  [[ "$output" == *"READ FAILURE DIGEST: Muso-AI/core-backend — 2/2 per-PR read(s) failed (stages: commit=2); candidate streak 1, stage streaks commit=1;"* ]]
   [ "$(jq -r '.__meta__.candidate_read_failures["Muso-AI/core-backend"]' "$QA_RECONCILE_STATE_FILE")" -eq 1 ]
 }
 
@@ -2417,7 +2419,7 @@ RL_ERR='gh: API rate limit exceeded for user ID 1234. (HTTP 403)'
   run "$SCRIPT" --once
   [ "$status" -eq 0 ]
   [[ "$output" == *"READ-FAILURE: could not fetch commit"*"boom (HTTP 500)"* ]]
-  [[ "$output" == *"CANDIDATE READ FAILURE"* ]]
+  [[ "$output" == *"READ FAILURE DIGEST"* ]]
 }
 
 @test "e2e 76: a CANNOT REVIEW bot review is NOT a verdict -> the PR is re-dispatched" {
@@ -2473,4 +2475,97 @@ JSON
   run "$SCRIPT" --once
   [ "$status" -eq 0 ]
   [ ! -s "$DISPATCH_CALLS" ]
+}
+
+# ── MUS-6075 b2: one READ FAILURE DIGEST per repo, one TICK DIGEST per tick ──
+# These change what is PRINTED only. Cases 3 and 4 are the pins that matter:
+# the page_confirmed text and the persisted state must not move.
+
+# mk_digest_repo <repo> <n> <tag> — n open PRs whose head shas are <tag>1..n.
+mk_digest_repo() {
+  local repo="$1" n="$2" tag="$3" i
+  local f="$FIX/prlist/$(printf '%s' "$repo" | tr '/' '-').json"
+  jq -n --argjson n "$n" --arg repo "$repo" --arg tag "$tag" '[range(1; $n + 1) | {number: (200 + .), headRefOid: ("\($tag)\(.)"), baseRefName: "main", isDraft: false, author: {login: "nsollazzo"}, updatedAt: "2026-01-01T00:00:00Z", createdAt: "2026-01-01T00:00:00Z", url: ("https://github.com/" + $repo + "/pull/\(200 + .)")}]' > "$f"
+  for ((i = 1; i <= n; i++)); do mk_commit "$repo" "$tag$i" "2026-01-01T00:00:00Z"; done
+}
+
+digest_now() {
+  QA_RECONCILE_NOW_EPOCH="$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))"
+  export QA_RECONCILE_NOW_EPOCH
+}
+
+@test "e2e b2-1: one repo, 10 PRs, every commit read fails -> ONE digest with commit=10; the four old lines are gone" {
+  mk_digest_repo "Muso-AI/core-backend" 10 dga
+  seed_epoch_state "Muso-AI/core-backend"; digest_now
+  export STUB_COMMIT_FAIL=1
+  for _ in 1 2 3; do run "$SCRIPT" --once; [ "$status" -eq 0 ]; done
+  [[ "$output" == *"READ FAILURE DIGEST: Muso-AI/core-backend — 10/10 per-PR read(s) failed (stages: commit=10); candidate streak 3, stage streaks commit=3;"* ]]
+  [ "$(grep -c 'READ FAILURE DIGEST' <<<"$output")" -eq 1 ]
+  [[ "$output" != *"commit,commit"* ]]
+  [[ "$output" != *"CANDIDATE READ FAILURE"* ]]
+  [[ "$output" != *"STAGE READ FAILURE"* ]]
+  [[ "$output" != *"read-failure page suppressed"* ]]
+}
+
+@test "e2e b2-2: divergence stays visible -- one stage fails every attempt while the others succeed (no candidate-level failure) -> the separate STAGE line, no digest" {
+  mk_digest_repo "Muso-AI/core-backend" 2 dgb
+  seed_epoch_state "Muso-AI/core-backend"; digest_now
+  export STUB_REVIEWS_FAIL=1
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STAGE READ FAILURE: Muso-AI/core-backend/reviews — all 2 attempt(s) of this stage failed this tick; consecutive count now 1."* ]]
+  [[ "$output" != *"READ FAILURE DIGEST"* ]]
+  [[ "$output" != *"CANDIDATE READ FAILURE"* ]]
+}
+
+@test "e2e b2-3: paging is unchanged -- page_confirmed is called the same number of times with the same text" {
+  mk_digest_repo "Muso-AI/core-backend" 10 dga
+  seed_epoch_state "Muso-AI/core-backend"; digest_now
+  export STUB_COMMIT_FAIL=1
+  run "$SCRIPT" --once; run "$SCRIPT" --once
+  [ ! -s "$SLACK_CALLS" ]
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  # Threshold tick: one page for the candidate watchdog + one for the commit stage.
+  [ "$(wc -l < "$SLACK_CALLS" | tr -d ' ')" -eq 2 ]
+  [ "$(grep -c "qa-review-reconcile: Muso-AI/core-backend — every per-PR read (classes: commit,commit,commit,commit,commit,commit,commit,commit,commit,commit) has failed for 3 consecutive ticks. Reviews for this repo may be silently unclassifiable — this is the invisible-loss class this reconciler exists to kill." "$SLACK_ARGS")" -eq 1 ]
+  [ "$(grep -c "qa-review-reconcile: Muso-AI/core-backend — the 'commit' read stage has failed every attempt for 3 consecutive ticks. PRs in this repo may be silently unclassifiable on this stage alone (other stages may be healthy) — this is the invisible-loss class this reconciler exists to kill." "$SLACK_ARGS")" -eq 1 ]
+  # Next tick inside the interval: suppressed, no new send, and it is reported once.
+  run "$SCRIPT" --once
+  [ "$(wc -l < "$SLACK_CALLS" | tr -d ' ')" -eq 2 ]
+  [[ "$output" == *"READ FAILURE DIGEST: Muso-AI/core-backend"*"candidate streak 4, stage streaks commit=4; page suppressed (last paged 0s ago, interval 21600s)"* ]]
+}
+
+@test "e2e b2-4: state.json after degraded ticks (incl. the paging tick) is byte-identical to the pre-change script's" {
+  mk_digest_repo "Muso-AI/core-backend" 3 dgd
+  seed_epoch_state "Muso-AI/core-backend"; digest_now
+  export STUB_COMMIT_FAIL=1
+  for _ in 1 2 3; do run "$SCRIPT" --once; [ "$status" -eq 0 ]; done
+  # Golden captured by running this same scenario against the pre-change script (c0b38818).
+  [ "$(jq -cS . "$QA_RECONCILE_STATE_FILE")" = '{"__meta__":{"candidate_read_failures":{"Muso-AI/core-backend":3},"consecutive_tick_failures":0,"read_fail_last_alert":{"Muso-AI/core-backend":{"__candidate__":1767229200,"commit":1767229200}},"repo_failures":{},"stage_failures":{"Muso-AI/core-backend":{"commit":3}}},"__repo_epochs__":{"Muso-AI/core-backend":1,"Muso-AI/hydra":1767229200}}' ]
+}
+
+@test "e2e b2-5: TICK DIGEST appears once, with per-stage totals across 3 repos" {
+  export STUB_ALLOWLIST_REPOS="$(printf 'Muso-AI/repo-a\nMuso-AI/repo-b\nMuso-AI/repo-c')"
+  mk_digest_repo "Muso-AI/repo-a" 3 dgea
+  mk_digest_repo "Muso-AI/repo-b" 2 dgeb
+  mk_digest_repo "Muso-AI/repo-c" 1 dgec
+  jq -n '{"__repo_epochs__": {"Muso-AI/repo-a": 1, "Muso-AI/repo-b": 1, "Muso-AI/repo-c": 1}}' > "$QA_RECONCILE_STATE_FILE"
+  digest_now
+  mkdir -p "$TEST_TMPDIR/errs"; export STUB_COMMIT_ERR_DIR="$TEST_TMPDIR/errs"
+  for sha in dgea1 dgea2 dgea3 dgec1; do echo 'gh: boom (HTTP 500)' > "$STUB_COMMIT_ERR_DIR/$sha"; done
+  export STUB_REVIEWS_FAIL=1
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'TICK DIGEST' <<<"$output")" -eq 1 ]
+  [[ "$output" == *"TICK DIGEST: 3 repo(s) with read failures across 6 PR(s); stages: commit=4, timeline=0, reviews=2, status=0, author_uid=0; 0 page(s) suppressed, 0 deferred by PAGE_CAP."* ]]
+}
+
+@test "e2e b2-6: a fully healthy tick emits no digest line of either kind" {
+  mk_digest_repo "Muso-AI/core-backend" 3 dgf
+  seed_epoch_state "Muso-AI/core-backend"; digest_now
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"READ FAILURE DIGEST"* ]]
+  [[ "$output" != *"TICK DIGEST"* ]]
 }

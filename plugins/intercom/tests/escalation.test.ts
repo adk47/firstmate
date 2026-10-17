@@ -265,6 +265,22 @@ describe("assessRisk Layer 1 (rules)", () => {
     expect(r.triggered).toBe(false);
   });
 
+  it("caps on userExchangeCount, not the per-message userTurnCount", async () => {
+    const burstyBelow = { ...baseState, userTurnCount: 9, userExchangeCount: 5 };
+    expect((await assessRisk("just any reply", [], burstyBelow, noJudge)).triggered).toBe(false);
+    const atCap = { ...baseState, userTurnCount: 9, userExchangeCount: 6 };
+    const r = await assessRisk("just any reply", [], atCap, noJudge);
+    expect(r.triggered).toBe(true);
+    expect(r.reason).toBe("turn_count_cap");
+  });
+
+  it("falls back to userTurnCount for the cap when userExchangeCount is absent", async () => {
+    const legacy = { ...baseState, userTurnCount: 6, userExchangeCount: undefined };
+    const r = await assessRisk("just any reply", [], legacy, noJudge);
+    expect(r.triggered).toBe(true);
+    expect(r.reason).toBe("turn_count_cap");
+  });
+
   it("does not fire turn-count cap when escalationFiredAt is already set", async () => {
     const already = { ...baseState, userTurnCount: 7, escalationFiredAt: "2026-05-04T00:00:00Z" };
     const r = await assessRisk("any reply", [], already, noJudge);

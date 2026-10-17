@@ -21,7 +21,12 @@
 # model prompt: control chars stripped, length capped, packet fenced as data.
 # Per-ad best-effort: one bad ad is logged and skipped, never aborts the batch.
 #
-# Env: AD_SCREENING_MUSO_READ / AD_SCREENING_DESCRIBE / AD_SCREENING_JEV / AD_SCREENING_PUT
+# After a successful PUT, one Slack brief per ad (slack_notify: best-effort, never fails the
+# batch). The PUT stamps screenedAt, so the next poll will not list the ad again: that is the
+# once-per-submission guarantee. Post-PUT order also means no brief for an unwritten suggestion.
+#
+# Env: AD_SCREENING_SLACK_CHANNEL (brief destination, default #ads-screening C0C97R3Q0TB, posted as the cmo bot),
+#      AD_SCREENING_MUSO_READ / AD_SCREENING_DESCRIBE / AD_SCREENING_JEV / AD_SCREENING_PUT
 #      (command overrides, tests), AD_SCREENING_MODEL (default JEV_MODEL, else the JEV_PROVIDER default),
 #      AD_SCREENING_POLICY_VERSION (default v1),
 #      AD_SCREENING_MAX_PACKET_BYTES (default 20000; jev.sh refuses at 200000),
@@ -55,6 +60,15 @@ case "${1:-}" in
 esac
 # shellcheck source=/dev/null
 source "$here/lib/ad-screening-reason.sh"
+if [ "$mode" = run ]; then
+  # Briefs go out as the cmo bot into private #ads-screening; set before the lib's := defaults.
+  export SLACK_NOTIFY_BOT=cmo
+  export SLACK_CHANNEL="${AD_SCREENING_SLACK_CHANNEL:-${SLACK_CHANNEL:-C0C97R3Q0TB}}"
+  # shellcheck source=/dev/null
+  source "$here/lib/slack-notify.sh"
+  # shellcheck source=/dev/null
+  source "$here/lib/ad-screening-brief.sh"
+fi
 # The PUT wrapper honours this switch too, but only after Jev has been paid for: check it first.
 if [ "$mode" = run ] && [ -e "$disabled_file" ]; then
   log "disabled ($disabled_file): no Jev call, nothing screened"
@@ -119,9 +133,11 @@ assemble() {
   [ "$id" != "not stated" ] || return 1
   media="$(jq -r '.primaryMediaUrl // .mediaUrls[0]? // empty' <<<"$ad")" || return 1
   creative=""
+  rm -f "$workdir/creative.$id"
   [ -z "$media" ] || creative="$("$describe" "$media" 2>/dev/null)" || creative=""
   if [ -z "$creative" ]; then creative="creative could not be described"
   else creative="$(jq -Rrs "$PRELUDE"' s(1200)' <<<"$creative")"; fi
+  printf '%s' "$creative" >"$workdir/creative.$id"
   mapfile -t lines < <(jq -r --argjson n "$FIELD_CAP" "$PRELUDE $fields" <<<"$ad") || return 1
   [ "${#lines[@]}" -gt 0 ] || return 1
   # Trusted account context leads, so padded advertiser copy cannot crowd it out;
@@ -159,9 +175,9 @@ def pick($k; $set): .[$k] | select(type == "object" and .type == "choice"
 | select(.rec != null and .fit != null and (.flags | length) == 7 and (.probs | type == "object"))
 | del(.flags)'
 
-# screen <adId> <packet>: Jev call, map, render reason, PUT. Returns 1 when unscreened.
+# screen <adId> <ad-json> <packet>: Jev call, map, render reason, PUT. Returns 1 when unscreened.
 screen() {
-  local id="$1" packet="$2" answers rc v rec fit flags eff conf payload
+  local id="$1" ad="$2" packet="$3" answers rc v rec fit flags eff conf payload brief
   jq -n --arg p "$packet" '{ad_application: $p}' >"$workdir/state.json" || return 1
   # shellcheck disable=SC2086
   answers="$($jev --surface ad-screening --item-id "$id" --state-file "$workdir/state.json" \
@@ -188,6 +204,15 @@ screen() {
   # shellcheck disable=SC2086
   $put put "$id" "$payload" >"$workdir/err" 2>&1 || { log "ad $id: write failed (rc=$?), suggestion not stored: $(first_line "$workdir/err")"; return 1; }
   log "ad $id: screened ($eff)"
+  slack_load_env "$SLACK_NOTIFY_BOT" || log "ad $id: brief not posted (no Slack bot token)"
+  brief="$workdir/brief.$id.json"
+  ad_screening_brief_payload "$SLACK_CHANNEL" "$brief" "$ad" "$(cat "$workdir/creative.$id" 2>/dev/null)" "$eff" "$conf" "$flags" \
+    "$(ad_screening_reason "$rec" "$fit" "$flags")" || { log "ad $id: brief not composed"; return 0; }
+  # Slack rejects the whole message on one bad block; re-post once text-only so the brief is never lost.
+  _slack_post_payload "$brief" || {
+    log "ad $id: card not posted, retrying text-only"
+    jq 'del(.blocks)' "$brief" >"$brief.text" && _slack_post_payload "$brief.text"
+  } || true
 }
 
 n=0
@@ -196,6 +221,6 @@ while IFS= read -r ad; do
   packet="$(assemble "$ad")" || { log "skipping ad #$n: could not assemble packet"; continue; }
   if [ "$mode" = dry ]; then printf '%s\n' "$packet"; continue; fi
   id="$(jq -r "$PRELUDE"' .id | v(64)' <<<"$ad")"
-  screen "$id" "$packet" || true
+  screen "$id" "$ad" "$packet" || true
 done < <(jq -c "$eligible" <<<"$response")
 exit 0
