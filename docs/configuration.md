@@ -705,9 +705,24 @@ See [`docs/examples/sentry-watch.json`](examples/sentry-watch.json) for a starti
     "repos": ["Muso-AI/core-backend"],
     "branch_prefix": "cto/sentry",
     "id_prefixes": ["CORE-BACKEND"]
+  },
+  "fetch": {
+    "http_timeout_secs": 8,
+    "budget_secs": 25,
+    "retry": {"attempts": 2, "backoff_secs": 1.5, "on": ["timeout", "network", "http_5xx", "http_429"]},
+    "transient_polls_before_cnd": 2
   }
 }
 ```
+
+`fetch` bounds and retries the Sentry reads.
+`budget_secs` bounds a whole poll and must leave room inside the watcher's `FM_CHECK_TIMEOUT`.
+`http_timeout_secs` bounds one read, or what is left of the budget when that is less, so a slow project borrows the time the fast ones leave unused.
+A failure whose kind `retry.on` lists is retried up to `retry.attempts` reads in total, `retry.backoff_secs` apart (a shorter HTTP 429 `Retry-After` wins), and only while the budget still holds the wait plus two seconds; `on` may list only `timeout`, `network`, `http_5xx`, and `http_429`.
+A project still failing that way is reported as `could-not-determine` only after `transient_polls_before_cnd` consecutive polls, counted in the same unread streak as a project the budget skipped.
+HTTP 401, 403, 404, any other 4xx, and a malformed response are never retried and are reported at once.
+The project list gets the same retry, and a list still failing is reported at once.
+`FM_SENTRY_WATCH_BUDGET_SECS` and `FM_SENTRY_WATCH_HTTP_TIMEOUT` override `budget_secs` and `http_timeout_secs` when set, and `bin/fm-sentry-watch.sh status` prints the effective values.
 
 The watch fires three states and never goes silent on error: it wakes, stays silent, or reports `could-not-determine`.
 A project whose issues cannot be read is reported as `could-not-determine` for that project, and one unreadable project never stops the others; a poll that cannot enumerate projects at all reports it too.
@@ -1127,8 +1142,8 @@ FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 pro
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=24   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
-FM_SENTRY_WATCH_BUDGET_SECS=20   # seconds allowed for one whole Sentry watch poll, shared fairly across the projects it reads; must end inside FM_CHECK_TIMEOUT
-FM_SENTRY_WATCH_HTTP_TIMEOUT=5   # seconds allowed for one Sentry API request; also caps any single project's share of the poll budget
+FM_SENTRY_WATCH_BUDGET_SECS=   # when set, overrides config/sentry-watch.json fetch.budget_secs (default 25): seconds allowed for one whole Sentry watch poll; must end inside FM_CHECK_TIMEOUT
+FM_SENTRY_WATCH_HTTP_TIMEOUT=  # when set, overrides fetch.http_timeout_secs (default 8): seconds allowed for one Sentry API read
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
