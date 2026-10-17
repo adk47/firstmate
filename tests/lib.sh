@@ -83,14 +83,45 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   return 1
 }
 
+# A fixture copy of this library without the reaper keeps plain removal.
+if [ -r "$ROOT/bin/fm-test-reap-lib.sh" ]; then
+  # shellcheck source=bin/fm-test-reap-lib.sh
+  . "$ROOT/bin/fm-test-reap-lib.sh"
+fi
+
+# Stop every process still running from a fixture directory (a server the test
+# started in its own process group survives the test's own exit), then remove
+# it. bin/fm-test-reap-lib.sh owns the matching.
+fm_test_reap_fixture_processes() {  # <dir>
+  [ -n "$1" ] && [ -d "$1" ] || return 0
+  command -v fm_test_reap_processes_under >/dev/null 2>&1 || return 0
+  fm_test_reap_processes_under "$1" 2>/dev/null || true
+}
+
 fm_test_cleanup() {
   local d
+  # A time-bounded run gets KILL one second after TERM, so every fixture's
+  # processes are signaled first, in one fast pass, before any waiting.
+  if command -v fm_test_signal_processes_under >/dev/null 2>&1; then
+    for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
+      [ -n "$d" ] && [ -d "$d" ] && fm_test_signal_processes_under "$d" TERM 2>/dev/null
+    done
+    if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
+      while IFS= read -r d; do
+        [ -n "$d" ] && [ -d "$d" ] && fm_test_signal_processes_under "$d" TERM 2>/dev/null
+      done < "$FM_TEST_CLEANUP_REGISTRY"
+    fi
+  fi
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    [ -n "$d" ] || continue
+    fm_test_reap_fixture_processes "$d"
+    rm -rf "$d"
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && rm -rf "$d"
+      [ -n "$d" ] || continue
+      fm_test_reap_fixture_processes "$d"
+      rm -rf "$d"
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
@@ -113,6 +144,7 @@ fm_test_tmproot() {
 trap fm_test_cleanup EXIT
 trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM
+trap 'fm_test_cleanup; exit 129' HUP
 
 # fm_test_reap_orphans: best-effort sweep for fixture roots left behind by a
 # prior run that was killed hard enough to skip the traps above (e.g. a

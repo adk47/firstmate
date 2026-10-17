@@ -1200,7 +1200,7 @@ crew_dispatch_validate() {
 # snapshot's classifier and bin/fm-secondmate-reconcile.sh's nudge stay as
 # backstops for what this cannot see. Never reads or writes another home.
 backlog_record_reconcile() {
-  local marker meta control_lock meta_lock id row label has_record=0 gate_status
+  local marker meta control_lock meta_lock id row label gate_status
   # A fresh home with no state directory has no physical task records to pair.
   # Keep bootstrap diagnostics working without creating state just for a no-op.
   [ -e "$STATE" ] || [ -L "$STATE" ] || return 0
@@ -1266,23 +1266,33 @@ backlog_record_reconcile() {
   # A home that owns no records has nothing to pair, so it never pays for a
   # backlog read. A pending close remains authoritative even when replay failed:
   # the record sweep below must not start that item while its marker survives.
+  local -a metas=()
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || [ -L "$meta" ] || continue
-    if ! fm_backlog_record_present "$meta" "task record" "$STATE"; then
-      echo "BACKLOG_RECONCILE: unsafe worker record refused: $FM_BACKLOG_TRANSITION_ERROR"
-      return 2
-    fi
-    has_record=1
-    break
+    metas+=("$meta")
   done
-  [ "$has_record" = 1 ] || return 0
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || [ -L "$meta" ] || continue
-    if ! fm_backlog_record_present "$meta" "task record" "$STATE"; then
-      echo "BACKLOG_RECONCILE: unsafe worker record refused: $FM_BACKLOG_TRANSITION_ERROR"
-      return 2
+  [ "${#metas[@]}" -gt 0 ] || return 0
+  # One resolver process checks every record, rather than several per record.
+  if ! fm_backlog_records_present_all "task record" "$STATE" "${metas[@]}"; then
+    echo "BACKLOG_RECONCILE: unsafe worker record refused: $FM_BACKLOG_TRANSITION_ERROR"
+    return 2
+  fi
+  # Only a queued row is ever healed, so one listing of the queued rows picks
+  # the candidates; every other record skips its lock and per-row read. When
+  # the listing cannot be trusted every record is probed, as before.
+  local queued listed=0
+  if queued=$(fm_backlog_queued_ids "$DATA"); then
+    listed=1
+  fi
+  for meta in "${metas[@]}"; do
+    id=${meta##*/}
+    id=${id%.meta}
+    if [ "$listed" = 1 ]; then
+      case $'\n'"$queued"$'\n' in
+        *$'\n'"$id"$'\n'*) ;;
+        *) continue ;;
+      esac
     fi
-    id=$(basename "$meta" .meta)
     meta_lock=$(fm_meta_lock_path "$meta") || continue
     fm_lock_try_acquire "$meta_lock" || continue
     if [ -e "$STATE/$id.backlog-close" ] || [ -L "$STATE/$id.backlog-close" ]; then

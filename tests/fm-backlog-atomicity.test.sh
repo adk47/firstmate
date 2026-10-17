@@ -1522,6 +1522,42 @@ test_recovery_marks_an_owned_record_in_flight() {
   pass "session start marks an item In flight when this home already owns a worker for it"
 }
 
+# The sweep runs at every session start over every record this home owns. It
+# once read each row with its own `tasks-axi show` and took its lock, minutes on
+# a busy home; only a queued row is ever healed, so one queued listing picks the
+# candidates and only they are read.
+test_recovery_reads_only_queued_candidates() {
+  local case_dir id out real shows n=12 i
+  case_dir=$(make_home heal-bounded)
+  i=1
+  while [ "$i" -le "$n" ]; do
+    id=atomic-heal-bounded-$i
+    add_item "$case_dir" "$id"
+    start_item "$case_dir" "$id"
+    write_task_meta "$case_dir" "$id" ship no-mistakes
+    i=$((i + 1))
+  done
+  id=atomic-heal-bounded-queued
+  add_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes
+  real=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\${1:-}" >> "$case_dir/tasks-axi.calls"
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+  : > "$case_dir/tasks-axi.calls"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "the bounded sweep left the queued owned record's item queued: $out"
+  shows=$(grep -cx show "$case_dir/tasks-axi.calls")
+  [ "$shows" -eq 1 ] \
+    || fail "the sweep read $shows rows one at a time over $((n + 1)) records; only the one queued candidate should be read"
+  pass "session start reads only the queued candidates, not every owned record"
+}
+
 test_recovery_rejects_an_internal_worker_record_symlink() {
   local case_dir home id target_id out rc=0
   id=atomic-heal-internal-symlink-b8
@@ -2422,6 +2458,7 @@ test_recovery_retries_when_a_close_marker_cannot_be_removed
 test_recovery_reports_an_owned_row_read_failure
 test_orca_cleanup_recovery_never_transitions_the_backlog
 test_recovery_marks_an_owned_record_in_flight
+test_recovery_reads_only_queued_candidates
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
