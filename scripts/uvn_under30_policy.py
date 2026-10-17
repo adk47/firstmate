@@ -6,9 +6,13 @@ from __future__ import annotations
 import gzip
 import json
 import re
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
+
+from credit_review.policy import doc_required_ids
+from credit_review.roles import editorial_terms, is_editorial
 
 
 UVN = "user_verification_needed"
@@ -270,13 +274,91 @@ def has_hard_reject_signal(credit_request: dict[str, Any]) -> bool:
     return False
 
 
+class DenyList:
+    """Rows no automation may approve on popularity alone, shared with the
+    credit-trust decider:
+      * users / profiles on the deny lists of
+        policies/credit-trust-decide.json;
+      * editorial roles (its editorial_role_terms, matched exactly as the
+        decider matches them);
+      * request ids the decider recorded ``doc_required`` (a support request
+        that needs documents) in its decisions ledger."""
+
+    def __init__(self, user_ids: Iterable[int], profile_ids: Iterable[str],
+                 editorial_terms: tuple[str, ...] = (), doc_required_ids: Iterable[str] = ()):
+        self.user_ids = frozenset(user_ids)
+        self.profile_ids = frozenset(str(p).lower() for p in profile_ids)
+        self.editorial_terms = tuple(editorial_terms)
+        self.doc_required_ids = frozenset(str(i).lower() for i in doc_required_ids)
+
+    def why(self, credit_request: dict[str, Any]) -> str | None:
+        user_id = credit_request.get("userId")
+        if isinstance(user_id, int) and not isinstance(user_id, bool) and user_id in self.user_ids:
+            return "deny-listed user"
+        if str(credit_request.get("profileId") or "").lower() in self.profile_ids:
+            return "deny-listed profile"
+        roles = [str(r) for r in credit_request.get("credits") or [] if is_editorial(str(r), self.editorial_terms)]
+        if roles:
+            return f"editorial role ({', '.join(roles)}), documentation required"
+        if str(credit_request.get("id") or "").lower() in self.doc_required_ids:
+            return "the credit-trust decider requires documentation"
+        return None
+
+    def blocks(self, credit_request: dict[str, Any]) -> bool:
+        return self.why(credit_request) is not None
+
+
+def load_doc_required_ids(ledger_path: Path) -> set[str]:
+    """Request ids the decider marked doc_required, read-only. An unreadable
+    ledger or one without the marker is fatal."""
+    try:
+        db = sqlite3.connect(Path(ledger_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
+        try:
+            return set(doc_required_ids(db))
+        finally:
+            db.close()
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        raise PolicyError(f"doc_required marker is unavailable: {ledger_path}: {exc}") from exc
+
+
+def load_deny_list(path: Path, ledger_path: Path) -> DenyList:
+    """Load the shared deny lists, editorial terms and doc_required marker; an
+    unreadable or malformed source is fatal."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise PolicyError(f"deny list is unavailable: {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise PolicyError(f"deny list is not an object: {path}")
+    lists = {}
+    for key in ("deny_user_ids", "deny_profile_ids"):
+        value = data.get(key)
+        if not isinstance(value, list):
+            raise PolicyError(f"deny list {path} has no {key} list")
+        lists[key] = value
+    users = lists["deny_user_ids"]
+    if not all(isinstance(u, int) and not isinstance(u, bool) for u in users):
+        raise PolicyError(f"deny list {path} has a non-integer user id")
+    profiles = []
+    for value in lists["deny_profile_ids"]:
+        profiles.append(_normalize_uuid(value, "deny profile id"))
+    try:
+        terms = editorial_terms(data.get("editorial_role_terms"))
+    except ValueError as exc:
+        raise PolicyError(f"deny list {path}: {exc}") from exc
+    return DenyList(users, profiles, terms, load_doc_required_ids(ledger_path))
+
+
 def qualifies_for_approval(
     credit_request: dict[str, Any],
     live_spotify: dict[str, Any],
     fraud_ids: set[str],
+    deny: DenyList,
 ) -> bool:
     request_id = str(credit_request.get("id", ""))
     if credit_request.get("status") != UVN or request_id in fraud_ids:
+        return False
+    if deny.blocks(credit_request):
         return False
     if has_hard_reject_signal(credit_request):
         return False

@@ -70,7 +70,7 @@ Caroline wiring:
 - Caroline must **never auto-approve** a fraud-flagged credit. A fraud flag on
   the customer-facing path routes to a **flagged security-review ticket**, not
   to an automated grant or rejection — mirroring the existing
-  never-reject / ask-for-more posture and the customer-credit-verification
+  never-reject / ask-once posture and the customer-credit-verification
   red-team rule (no autonomous approve on private proof).
 - Reuse the same profile-level scorer and reason string so operations and
   Caroline share one explainable verdict format.

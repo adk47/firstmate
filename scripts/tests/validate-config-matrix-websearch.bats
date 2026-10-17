@@ -16,6 +16,7 @@
 # against it via args, so no real config is touched. Modeled on
 # scripts/tests/validate-config-matrix-fallback.bats.
 bats_require_minimum_version 1.5.0
+load fixtures/declare-model-catalog
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
 SCRIPT="$HYDRA_REPO/scripts/validate-config-matrix.sh"
@@ -60,6 +61,7 @@ write_ws_profile() {
   "tools": { "exec": { "security": "full" }$web_block }
 }
 JSON
+  declare_model_catalog
 }
 
 @test "check7: native-only (openaiCodex.enabled, NO provider) PASSES" {

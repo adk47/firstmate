@@ -23,7 +23,7 @@ to fold in, then files a `track-merge` action-request for the Catalog/Operations
 **Caroline never merges** – the track merge is an irreversible tier-2 write
 (`POST /admin/tracks/merge`) executed by a trusted human after their own pre-merge
 checks. This is distinct from a *profile* merge (see `customer-profile-dedupe`) and from
-"remove these tracks from my profile" (see `customer-credit-removal`).
+"remove these tracks from my profile" (see `customer-credit-removal`, which previews and routes, never removes).
 
 ## What this skill does NOT do
 

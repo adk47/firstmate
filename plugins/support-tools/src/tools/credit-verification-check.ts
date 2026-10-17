@@ -125,6 +125,16 @@ export interface Verdict {
   profile_id: string | null;
   uvn_credits: UvnCredit[];
   count: number;
+  // Credits in status `unverified`: submitted and waiting for OUR team's review.
+  // Different from UVN above (where the customer must send proof): the customer
+  // has nothing to do. null = not assessed (fail-closed verdict, or the lookup
+  // failed); never read null as zero. Since 2026-10-11 this queue holds
+  // thousands of credits, and reading only UVN told those customers "nothing
+  // is pending".
+  awaiting_review: { count: number; truncated: boolean } | null;
+  // Per-status counts for the verified owner's profile; a status whose lookup
+  // failed is null, not 0.
+  pending_by_status: { user_verification_needed: number; unverified: number | null } | null;
   notes: string[];
 }
 
@@ -136,6 +146,8 @@ export function failClosedVerdict(notes: string[] = []): Verdict {
     profile_id: null,
     uvn_credits: [],
     count: 0,
+    awaiting_review: null,
+    pending_by_status: null,
     notes: notes.map(sanitizeStr),
   };
 }
@@ -185,12 +197,15 @@ function extractTrackTitle(item: CreditRequestItem): string {
   return String(item.spotifyTrackTitle ?? "");
 }
 
-function extractRole(item: CreditRequestItem): string {
+export function creditRequestRoles(item: CreditRequestItem): string[] {
   const arr = Array.isArray(item.credits) ? item.credits : [];
-  const roles = arr
+  return arr
     .map((c) => (typeof c === "string" ? c : String((c as { child?: string })?.child ?? "")))
     .filter(Boolean);
-  return roles.join(", ");
+}
+
+function extractRole(item: CreditRequestItem): string {
+  return creditRequestRoles(item).join(", ");
 }
 
 export function toUvnCredit(item: CreditRequestItem): UvnCredit {
@@ -312,12 +327,26 @@ export function createCreditVerificationCheckTool(
     return Array.isArray(items) ? (items as CreditRequestItem[]) : null;
   }
 
+  // Credits waiting for OUR review (status `unverified`). Count only: the
+  // customer has nothing to act on, so no per-item list is surfaced. null on
+  // any failure or schema drift, so the caller never reports a failed lookup
+  // as "nothing pending".
+  async function fetchAwaitingReview(profileId: string): Promise<{ count: number; truncated: boolean } | null> {
+    const resp = await adminClient.get<{ data?: { items?: unknown[] } }>(
+      `/api/v3/admin/credit-requests?profilesIds=${encodeURIComponent(profileId)}&status=unverified&limit=${MAX_UVN_CREDITS + 1}`,
+    );
+    if (!resp.ok) return null;
+    const items = (resp.data as any)?.data?.items;
+    if (!Array.isArray(items)) return null;
+    return { count: Math.min(items.length, MAX_UVN_CREDITS), truncated: items.length > MAX_UVN_CREDITS };
+  }
+
   return {
     name: "credit_verification_check",
-    label: "Look up a customer's pending (user-verification-needed) credits (read-only)",
+    label: "Look up a customer's pending credits: needs-proof and awaiting-review (read-only)",
     description:
-      "Read-only lookup of the credits a customer has stuck in 'user verification needed'. Anchors ownership to the Intercom contact's real email (anti-spoof), confirms the requester owns the profile, and returns a PII-safe structured list of pending credits (claimed role, track, artist, ISRC) for the credit-verification flow. " +
-      "It NEVER approves, rejects, or writes anything — after verifying, ask the customer for proof and (when warranted) file a recommend-approve ticket via create_ticket for a human to execute the gated approval. " +
+      "Read-only lookup of the credits a customer has stuck in 'user verification needed'. Anchors ownership to the Intercom contact's real email (anti-spoof), confirms the requester owns the profile, and returns a PII-safe structured list of pending credits (claimed role, track, artist, ISRC) for the credit-verification flow, plus awaiting_review (credits waiting for OUR review, where the customer has nothing to do) and pending_by_status counts. Never tell a customer nothing is pending unless BOTH counts are 0. " +
+      "It NEVER approves, rejects, or writes anything — after verifying, ask for proof only if none was given before (see the customer-credit-verification skill) and (when warranted) file a recommend-approve ticket via create_ticket for a human to execute the gated approval. " +
       "Fails closed (owner_undetermined) when ownership cannot be verified. Rate limit: 10 calls / 60 min per session.",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
@@ -373,6 +402,14 @@ export function createCreditVerificationCheckTool(
         // impersonation_flag:false must not read as "identity cross-check
         // passed" when no requesterEmail was supplied to compare.
         if (!requester) notes.push("requester email not provided; no impersonation cross-check performed");
+        const awaiting_review = await fetchAwaitingReview(profileId);
+        if (awaiting_review === null) {
+          notes.push("the awaiting-review queue could not be read; do NOT tell the customer nothing is pending");
+        } else if (awaiting_review.count > 0) {
+          notes.push(
+            `${awaiting_review.truncated ? `more than ${awaiting_review.count}` : awaiting_review.count} credit(s) are awaiting our team's review: not missing, and the customer does not need to do anything for those right now`,
+          );
+        }
         const verdict: Verdict = {
           verified_owner: true,
           owner_undetermined: false,
@@ -380,6 +417,11 @@ export function createCreditVerificationCheckTool(
           profile_id: profileId,
           uvn_credits,
           count: uvn_credits.length,
+          awaiting_review,
+          pending_by_status: {
+            user_verification_needed: uvn_credits.length,
+            unverified: awaiting_review === null ? null : awaiting_review.count,
+          },
           notes,
         };
         return textResult(JSON.stringify(verdict));

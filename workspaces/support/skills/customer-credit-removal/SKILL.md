@@ -1,6 +1,6 @@
 ---
 name: customer-credit-removal
-description: Autonomously remove credits a customer owns from their own profile, OR detect mis-described unmerge requests and escalate them with audit context
+description: Preview which credits a customer wants off their own profile (read-only), then route them to remove it themselves in the app or file the packet; also detect mis-described unmerge requests and escalate them with audit context
 triggers:
   - "remove these tracks"
   - "remove this track"
@@ -17,13 +17,13 @@ triggers:
   - "unmerge"
 ---
 
-# Customer Credit Removal (self-service)
+# Customer Credit Removal (preview and route; never removes)
 
 ## Purpose
 
 Two related customer requests, handled together:
 
-**Capability A – track removal**: customer says "remove these tracks from my profile," lists tracks that don't belong, expects them gone. Mechanical, high-volume, low blast radius. Caroline **executes autonomously** for the verified owner of the profile.
+**Capability A – track removal**: customer says "remove these tracks from my profile," lists tracks that don't belong, expects them gone. Caroline **previews and routes**. She never removes a credit: since core-backend#10310 the server refuses every agent-token credit removal, so a removal is done by the owner in the app, or by Jan or Nick in their own session.
 
 **Capability B – unmerge-mistake triage**: customer says the same thing, but what's actually happened is two distinct artists were merged into one profile – removing tracks won't fix it because they'll re-appear on the next ingest. Caroline **detects this case, gathers context, and escalates** to Operations via `action-request` (tier 2). She does NOT execute the unmerge – that's Aaron-approved only.
 
@@ -31,7 +31,8 @@ Both share the same ownership-check chain.
 
 ## What this skill does NOT do
 
-- Remove tracks from a profile the requester doesn't own (refuses)
+- **Remove any credit, for anyone, ever.** There is no apply step. Do not call `remove_credits` with `apply: true`, and never tell a customer you will remove, are removing, or have removed something.
+- Preview tracks on a profile the requester doesn't own (refuses)
 - Add credits, merge profiles, change profile metadata (out of scope)
 - Execute an unmerge directly (escalates to Aaron via action-request)
 - Operate on unclaimed profiles (refuses – routes to action-request for human handling)
@@ -42,9 +43,9 @@ Both share the same ownership-check chain.
 - `profile_status` – read the target profile. Returns `{found, profile:{id, name, verified, isClaimed, primary_role, credits_count, workspaces:[{email,isClaimed}], knownAsNames}, latest_credits[3], latest_credit_date}`. The `isClaimed`, `workspaces`, and `knownAsNames` fields drive the Step-2 ownership check. Already allowlisted.
 - `credits_search` – read the credits on the profile (paginate with `limit=100` if the profile has more credits than fit in one page). Already allowlisted.
 - `create_ticket` – escalate capability-B unmerge-mistake cases as tier-2 `unmerge-request`. Already allowlisted.
-- `remove_credits` – the typed wrapper around the deletion script. Caroline does NOT use raw `exec`; this tool is the only way to issue a DELETE. The script independently re-verifies ownership, runs the Intercom-email cross-check, and refuses on any production-side role on the matched track – so `remove_credits` is its own security boundary, not just a thin call site.
+- `remove_credits` – **preview only, always `apply: false`**. Caroline does NOT use raw `exec`. The script independently re-verifies ownership, runs the Intercom-email cross-check, and flags any production-side role on the matched track, so the preview is trustworthy for routing.
 
-`remove_credits` does its OWN independent ownership check + audit logging inside the underlying bash script. Caroline's ownership check (Step 2 below) is the first line of defense; the tool re-verifies independently as the second line.
+`remove_credits` does its OWN independent ownership check + audit logging inside the underlying bash script. Caroline's ownership check (Step 2 below) is the first line of defense; the tool re-verifies independently as the second line. Neither ever leads to an apply.
 
 ## Flow
 
@@ -100,7 +101,7 @@ If profile_uuid is missing, ask:
 
 If tracks list is missing or unclear, ask for it explicitly. Do NOT guess what the customer wants removed.
 
-If `intercom_email` is missing from `[CONVERSATION_CONTEXT]` (the extractor sometimes fails on edge-case message shapes – see `plugins/intercom/src/extractors.ts`), do NOT proceed and do NOT ask the customer for their email – a self-declared email is exactly the verification gap this skill is built to avoid. Instead, file via `action-request` (tier 2, `action_type: credit-correction`) with:
+If `intercom_email` is missing from `[CONVERSATION_CONTEXT]` (the extractor sometimes fails on edge-case message shapes – see `plugins/intercom/src/extractors.ts`), do NOT proceed and do NOT ask the customer for their email – a self-declared email is exactly the verification gap this skill is built to avoid. Instead, file via `action-request` (`action_type: credit-correction`) with:
 
 > "Want to get this sorted for you – I've passed it to our team and they'll follow up shortly."
 
@@ -108,7 +109,7 @@ The verified email property of `intercom_email` is load-bearing for the entire s
 
 ### Step 2 – Ownership verification (hard gate)
 
-Call `profile_status` for `profile_uuid`. The wrapper script will re-verify independently as the load-bearing gate, so this Caroline-level check is a fast-fail UX optimization – it lets the customer-facing reply tell them WHY before invoking the deletion path. The wrapper is the actual security boundary.
+Call `profile_status` for `profile_uuid`. The wrapper script will re-verify independently as the load-bearing gate, so this Caroline-level check is a fast-fail UX optimization – it lets the customer-facing reply tell them WHY before running the preview. The wrapper is the actual security boundary.
 
 When ownership fails, ALSO compute Step 3's unmerge-detection heuristic before filing the action-request – the refusal table below uses the detection result to pick the right `action_type`. This is the only case where Step 3 runs even though we won't proceed to Step 4+.
 
@@ -123,9 +124,9 @@ If the ownership signal looks ambiguous, call `remove_credits` with `apply: fals
 
 | Case | What to tell the customer |
 |------|---------------------------|
-| Profile is unclaimed | "I can't make changes to an unclaimed profile from here – I've flagged this for our team to review." Then file `action-request` tier 2. Pick the action_type based on Step 3's heuristic: if the unmerge-detection fires, use `action_type: unmerge-request` (so Aaron gets the merge audit upfront); otherwise `action_type: credit-correction`. The two action_types lead to different ops playbooks, so picking the right one saves a triage round-trip. |
-| Profile has multiple claimed workspaces | "This profile has multiple owners on it, so I'd like to have our team sort it out. I've flagged it for review." Then file `action-request` tier 2 (same routing rule as above – `unmerge-request` if detection fires, else `credit-correction`). |
-| Email mismatch | "I'm not seeing this profile under your account. Could you double-check the URL?" Don't escalate by default; ask the customer to confirm. If they insist it's theirs, file tier 2 for ops to review. |
+| Profile is unclaimed | "I can't make changes to an unclaimed profile from here – I've flagged this for our team to review." Then file `action-request`; for `credit-correction` stage the empty packet described under Step 6 (`removal_rows: []`, verbatim request, tracks by title). Pick the action_type based on Step 3's heuristic: if the unmerge-detection fires, use `action_type: unmerge-request` (so Aaron gets the merge audit upfront); otherwise `action_type: credit-correction`. The two action_types lead to different ops playbooks, so picking the right one saves a triage round-trip. |
+| Profile has multiple claimed workspaces | "This profile has multiple owners on it, so I'd like to have our team sort it out. I've flagged it for review." Then file `action-request` with the same empty packet (same routing rule as above – `unmerge-request` if detection fires, else `credit-correction`). |
+| Email mismatch | "I'm not seeing this profile under your account. Could you double-check the URL?" Don't escalate by default; ask the customer to confirm. If they insist it's theirs, file `action-request` for ops to review. |
 
 ### Step 3 – Unmerge-mistake detection (capability B pre-step)
 
@@ -188,19 +189,19 @@ If capability A:
 2. Normalize each customer "Artist - Title" line: lowercase, strip `(feat. X)` / `(ft. X)`.
 3. Match against profile credits where normalized titles match AND any `artists[].name` (normalized) matches the customer's artist.
 
-The wrapper script does this matching itself in step 6 – Caroline doesn't need to compute the resolution by hand. She just needs to NOT proceed if the inputs are obviously wrong (no profile, no tracks).
+The wrapper script does this matching itself in Step 5 – Caroline doesn't need to compute the resolution by hand. She just needs to NOT proceed if the inputs are obviously wrong (no profile, no tracks).
 
-### Step 5 – Preview and customer confirmation
+### Step 5 – Preview (mandatory, read-only)
 
-**This step is mandatory.** Caroline calls `remove_credits` in dry-run mode (`apply: false`) to get the resolved set, shows it to the customer, and waits for explicit confirmation before applying.
+**This step is mandatory before any routing.** Caroline calls `remove_credits` in dry-run mode (`apply: false`) to get the resolved `(track, roles)` list. The preview changes nothing.
 
-**If the dry-run resolves ZERO tracks** (all rows came back `not_found` or `ambiguous`), do NOT proceed to apply. Instead, tell the customer:
+**If the preview resolves ZERO tracks** (all rows came back `not_found` or `ambiguous`), tell the customer:
 
 > "I couldn't match any of the tracks you listed against your profile – they might be spelled slightly differently, or they may have already been removed. Could you double-check the titles, or paste a Spotify/Apple Music link for one or two of them?"
 
-Wait for them to clarify. If after one round of clarification the resolution is still zero, file `action-request` (tier 1, `action_type: credit-correction`) with the customer's verbatim list – ops can dig into the catalog manually.
+Stage first, then wait: file `action-request` (`action_type: credit-correction`) with `removal_rows: []` and the customer's verbatim list now, so a customer who never replies is still staged. If they clarify, update the packet with the resolved rows (or file the rows as a follow-up packet that references it).
 
-Dry-run call:
+Preview call:
 
 ```
 remove_credits({
@@ -212,105 +213,84 @@ remove_credits({
 })
 ```
 
-Read the wrapper's JSON output and present the summary to the customer:
+The parameter schema accepts exactly these five fields. Do not invent additional fields. **Pass `intercomConvId` whenever you have it**: the wrapper uses it to verify your `requesterEmail` matches the Intercom contact's actual email-of-record, closing a message-text injection vector.
 
-> "I can remove the following from your profile:
+### Step 6 – Stage and route (no apply, no confirmation-to-apply)
+
+Every route stages the request. No conversation may end with nothing staged, and the self-service hint is additive, never a substitute.
+
+**Staged row.** One row per resolved preview result (`results[]` entry with `matched_track_id`), six fields, which a staff run reads as six tab-separated columns with no header:
+
+```
+track_id <TAB> profile_id <TAB> label <TAB> track_title <TAB> roles <TAB> ref
+<track uuid> <TAB> <profile uuid> <TAB> Min Sun Song (Doohee Cho req) <TAB> 더는 슬픔 없네 - LIVE <TAB> Composer <TAB> Intercom 215476363016810 / Nick Buzz 84a6fa2a 2026-10-14
+```
+
+`label` is the artist, or "Name (requester req)". `track_id` is the preview's `matched_track_id` and `track_title` its `matched_title`. A `would_remove` preview row carries no roles: match the Step 3 `credits_search` `credits[]` entries by `trackTitle` and `artists` (roles are `creditRoles`; if the track was not in the fetched pages, call `credits_search` with `keyword`). Comma-join the distinct roles of all matching entries, never invented. If two entries share title and artists but differ in roles, list every role and put "(same-title tracks, check)" in `label`; the staff run removes the (track, profile) pair by `track_id`, so `roles` is only the label. (The example values above are illustrative; ids are always full uuids.) `ref` is `Intercom <conv_id>`, a ClickUp id, or a Slack/Buzz ts. File the rows via `action-request` (`action_type: credit-correction`; the tool assigns its tier, do not state one to the customer) as `details.removal_rows` (see the Credit Correction section there). Jan or Nick run the batch; Caroline never does.
+
+**When no row resolved** (a direct Step 2 handoff for an unclaimed or multi-claimed profile, or the wrapper refused before resolving anything: ownership refusals, missing `intercom_email`, `cap_exceeded_per_day`, `profile_lookup_failed`, `wrapper_*`): stage the packet with `removal_rows: []`, the customer's request quoted verbatim in the packet, and each requested track named by title. The packet is still the staged request, so the same replies apply once it is filed.
+
+Read the preview, stage the rows, then pick ONE reply:
+
+**Reply A – verified owner, every resolved row is a non-production role, every row is a track row, and the seat is not view-only.** Show the resolved list, tell them the self-service step AND that the request is queued:
+
+> "Here are the ones I found on your profile:
 >   • Don Pero - Big Don Dada
 >   • Don Pero - Baby Mama
->   • Baby Gang - Bentley (feat. Simba La Rue, J Lord)
 >
-> A couple I couldn't match – could you double-check these?
->   • Don Pero - Notatrack Xyz (didn't find this one)
->
-> Want me to go ahead and remove the three I can find?"
+> You can take these off yourself now: on your profile's credits list, open the ⋯ menu on that track and choose Remove Credit. I've also queued the request for our team (ref <conv_id>), so it's covered either way."
 
-Wait for an explicit "yes" / "remove them" / "go ahead." Do not proceed on ambiguous replies ("maybe", "I think so").
+The control is "Remove Credit" in the row ⋯ menu, only on track rows of a claimed profile, and not for a view-only seat. If any row is not a track row or the seat is view-only, use Reply B.
 
-### Step 6 – Apply removal (capability A only, after confirmation)
+**Reply B – everything else** (not the owner, unclaimed or multi-owner profile, email mismatch, a production-side role on any row (`refused_production_role_on_track`), a role-based ask, a non-track row, a view-only seat). Use the Step 2 refusal wording where it applies, then: "I've queued this for our team (ref <conv_id>) and they'll follow up within 5 business days."
 
-Call `remove_credits` again with the same tracks list but `apply: true`:
-
-```
-remove_credits({
-  profileId: "<uuid>",
-  requesterEmail: "<intercom_email>",
-  tracks: ["Don Pero - Big Don Dada", "Don Pero - Baby Mama", ...],
-  apply: true,
-  intercomConvId: "<conv_id>"
-})
-```
-
-The parameter schema accepts exactly these five fields. Do not invent additional fields – even when the runtime doesn't reject unknowns at the schema level, the wrapper script ignores them and the agent has no upside to passing them.
-
-**Pass `intercomConvId` whenever you have it.** Required for `apply: true`. Strongly recommended on dry-run too – the wrapper uses it to verify your `requesterEmail` matches the Intercom contact's actual email-of-record whenever a conv-id is present, closing a message-text injection vector. Missing conv-id on dry-run means that verification is skipped on that call. (The dry-run audit row records the conv-id for forensics, but the apply-gate match key is `(profile_id, requester_email, track_id)` – not the conv-id.)
-
-**Mechanical apply gate**: when `apply: true`, the wrapper refuses unless every track being applied has a matching `would_remove` audit row from the last 15 min. If you ran the dry-run, got customer confirmation, and call apply within 15 minutes, this is invisible. If the confirmation took longer or you tried to apply tracks that weren't in the dry-run preview, the wrapper refuses with `dry_run_required` – re-run the dry-run and try again.
+Rules for both replies:
+- Never say "queued" without having staged the rows in the same turn.
+- Never say removed, removing, fixed or "will remove". The change is queued for staff.
+- Never ask the customer "want me to go ahead and remove these?" There is nothing to go ahead with.
+- If a row came back `not_found` or `ambiguous`, ask them to double-check it as in Step 5. Stage only the resolved rows.
 
 ### Step 7 – Report back
 
-Read the wrapper's JSON output and compose the customer-facing reply.
-
-Key fields in the wrapper response:
-- `ok` (bool) – true if the script ran cleanly (the customer-facing outcome may still include some rows that couldn't be processed)
-- `mode` – "apply" or "dry-run"
-- `summary.removed` – how many tracks were actually deleted
-- `summary.already_removed` – tracks the API returned 404 for (idempotent – likely fine)
-- `summary.not_found` – couldn't match the input to a credit
-- `summary.ambiguous` – input matched more than one credit on the profile
-- `summary.errors` – HTTP errors on individual deletions (not refusal of the whole batch)
-- `results[]` – per-row breakdown
-
-Compose the reply:
-
-```
-"Done – removed N of M:
-  • <list of removed titles>
-
-[If not_found > 0:]
-A few I couldn't match on the profile:
-  • <list of inputs that came back not_found>
-[Could you double-check those? Either the title is slightly different or they were already removed.]
-
-[If ambiguous > 0:]
-A couple were ambiguous (more than one track with that title):
-  • <list>
-Could you share Spotify links for those? That'll help me pick the right one."
-```
-
-If `summary.errors > 0`, tell the customer some failed and that you've flagged them for the team. File an `action-request` (tier 2) with the failing rows in `details.failed_removals[]`.
+Read the preview's JSON output and compose the reply from Step 6. Key fields:
+- `ok` (bool) – true if the script ran cleanly
+- `mode` – always "dry-run" here. If it ever says "apply", something is wrong: stop, do not report a removal, and file `action-request`.
+- `summary.not_found` / `summary.ambiguous` – ask the customer to double-check those titles or share Spotify links
+- `results[]` – per-row breakdown (resolved track and roles)
 
 ## Refusal handling (full table)
 
-Every refusal returned by `remove_credits` is a JSON object `{ok: false, error: <key>, detail?: <string>}`. Customer-facing replies:
+Every refusal returned by `remove_credits` is a JSON object `{ok: false, error: <key>, detail?: <string>}`. Customer-facing replies. Only `owner_mismatch`, `profile_unclaimed`, `profile_multi_claimed` and `intercom_email_mismatch` say anything about who owns the profile; a refusal of the agent itself (`credit_removal_agent_refused`, or any unlisted 403) must never be blamed on ownership. Two rules for every reply below: (1) mention ownership only when the audit row is a genuine `owner_mismatch`, `profile_unclaimed`, `profile_multi_claimed` or `refused_intercom_email_mismatch`; any other refusal gets a reply that attributes no cause to the customer or their profile. (2) Never state or imply that a removal will happen, is happening or has happened, including splitting it into batches. The preview shows what the owner can remove themselves; it never commits us to removing it. (3) Never say "queued" without having staged the rows (Step 6).
 
 | `error` key | Caroline's reply | Follow-up action |
 |------------|------------------|------------------|
-| `rate_limited` | "Looks like we've made a few changes already – let's give it a moment and try again in a bit." | Wait; the cap resets after 60 min |
-| `wrapper_empty_output` / `wrapper_invalid_output` / `wrapper_exec_failed` | "Something's off on our end – I've let the team know and someone will look at it." | File `action-request` tier 2 with the error key + detail |
+| `rate_limited` | "Give me a moment and I'll pick this back up in a bit." | Wait; the cap resets after 60 min |
+| `wrapper_empty_output` / `wrapper_invalid_output` / `wrapper_exec_failed` | "Something's off on our end – I've let the team know and someone will look at it." | File `action-request` with the error key + detail |
 | `missing_arg` / `invalid_*` / `tracks_file_missing` / `unknown_arg` | Internal bug – don't tell the customer about it; retry with corrected args | Log to session for review |
 | `empty_tracks_file` | "Could you list the tracks you want removed? One per line works best." | Wait for customer |
-| `cap_exceeded_per_request` | "That's more than I can do in a single round – let me handle the first 50 now and we can do the rest after. Want me to start with the first 50?" | Split into batches with confirmation each time |
-| `apply_batch_too_large` | "Let me apply these in a couple of smaller batches so nothing times out – I'll do the first 15 now, then carry on with the rest. Sound good?" | The dry-run already previewed them all; re-call `remove_credits` with `apply: true` on ≤ `max_apply_tracks` tracks at a time, confirming each batch. Not a customer error – purely an internal batching limit. |
-| `cap_exceeded_per_day` | "I've helped you remove quite a few today already – to be safe, let me flag the rest for our team to handle." | File `action-request` tier 1 with the leftover tracks |
-| `profile_lookup_failed` | "Hmm, having trouble loading that profile – could you share the URL again so I can double-check it?" | If repeats, file `action-request` tier 2 |
-| `profile_unclaimed` | "I can't make changes to an unclaimed profile from here – I've flagged this for our team." | File `action-request` tier 2, action_type `credit-correction` |
-| `no_claimed_workspace` | same as `profile_unclaimed` (rare edge case) | same |
-| `profile_multi_claimed` | "This profile has multiple owners – I'd like to have our team sort it out. Flagged for review." | File `action-request` tier 2 |
-| `owner_mismatch` | "I'm not seeing this profile under your account. Could you double-check the URL?" | If customer insists, file tier 2 |
-| `intercom_conv_id_required` | Don't surface to customer – this is an internal contract bug. Retry the same call WITH `intercomConvId` from the conversation context | Log; if it repeats across retries, file tier 2 |
-| `intercom_email_mismatch` | "For destructive changes I have to make sure I'm talking with the right person – could you tell me a bit more about who you are and what you're trying to do? I've also flagged this for our team to double-check." | File `action-request` tier 2, `escalation_reason: "intercom_email_mismatch"`. Possible impersonation – treat as a signal worth ops eyes. |
-| `dry_run_required` | "Let me run that one more time to confirm what we're removing." Then call `remove_credits` with `apply: false` again, show the preview, get confirmation, then re-apply. | If happens twice in the same conversation, file tier 2 |
-| `missing_admin_api_script` / `credits_list_failed` / `credits_list_too_large` | "Something's off on our end – I've let the team know and someone will look at it." | File `action-request` tier 2 with the error key |
-| `invalid_intercom_conv_id` | Don't surface to customer – internal contract bug. Retry the same call without conv_id (dry-run only) OR with a valid alphanumeric conv-id | Log; if it repeats, file tier 2 |
-| `ops_dry_run_set` / `audit_unwritable` | "Something's off on our end – I've let the team know and someone will look at it." | File `action-request` tier 2 with the error key. Both indicate a host-side ops issue (env misconfiguration or audit-log permissions); flag for ops attention. |
-| `refused_production_role_on_track` (per-row in `results[]`, not a top-level `error`) | "Looking at this, you're credited as a {role} on this track, which is usually a deliberate listing rather than a mis-attribution. Could you double-check whether you really want that removed? If so, I'll pass it to our team to handle." | Wait for explicit re-confirmation; if customer insists, file `action-request` tier 2 (`action_type: credit-correction`) listing the role-affected tracks. |
-| `upstream_dry_run_short_circuit` (per-row in `results[]`) | "Something's off on our end – I've let the team know and someone will look at it." | File `action-request` tier 2. This indicates `OPS_DRY_RUN=1` somewhere in the prod path – high-priority ops issue. |
+| `cap_exceeded_per_request` | "That's a long list to go through in one go – could you send the ones you most want sorted first, up to 50? I'll check those and tell you the quickest way to take them off." | Preview the first 50 only, then Step 6 |
+| `apply_batch_too_large` | Not expected in preview mode. Don't surface it to the customer. | Never retry with `apply: true`. Treat it as a script mismatch and file `action-request` with the error key |
+| `cap_exceeded_per_day` | "I've checked quite a lot for you today already – to be safe, let me flag the rest for our team to look at." | File `action-request` (`credit-correction`) with the leftover tracks |
+| `profile_lookup_failed` | "Hmm, having trouble loading that profile – could you share the URL again so I can double-check it?" | If repeats, file `action-request` |
+| `profile_unclaimed` | "I can't make changes to an unclaimed profile from here – I've flagged this for our team." | File `action-request`, action_type `credit-correction`, empty packet per Step 6 |
+| `no_claimed_workspace` | "I can't match this to a profile from here – I've passed it to our team to take a look." | Same as `profile_unclaimed` routing |
+| `profile_multi_claimed` | "This profile has multiple owners – I'd like to have our team sort it out. Flagged for review." | File `action-request`, action_type `credit-correction`, empty packet per Step 6 (`unmerge-request` if Step 3 detection fires) |
+| `owner_mismatch` | "I'm not seeing this profile under your account. Could you double-check the URL?" | If customer insists, file `action-request`, action_type `credit-correction`, empty packet per Step 6 |
+| `intercom_conv_id_required` | Don't surface to customer – this is an internal contract bug. Retry the same call WITH `intercomConvId` from the conversation context | Log; if it repeats across retries, file `action-request` |
+| `intercom_email_mismatch` | "I need to make sure I'm talking with the right person – could you tell me a bit more about who you are and what you're trying to do? I've also flagged this for our team to double-check." | File `action-request`, `escalation_reason: "intercom_email_mismatch"`. Possible impersonation – treat as a signal worth ops eyes. |
+| `credit_removal_agent_refused` (403 "Access denied") | "This is something I can't do from my side, so I'll pass it to our team." Do NOT say the customer isn't the owner, and do not say it was refused. The server refuses every agent, whoever is asking. This refusal is not an approval gate. Do not ask Jan, Nick, Aaron or any human to approve a removal, and do not re-try with an approval reference. Stage the row and hand over the run. | If the customer is a verified owner, stage the rows and use Step 6 Reply A. Otherwise stage them and use Reply B |
+| `dry_run_required` | Internal only, don't surface it. | Re-run the preview (`apply: false`) and continue from Step 6. If it happens twice in the same conversation, file `action-request` |
+| `missing_admin_api_script` / `credits_list_failed` / `credits_list_too_large` | "Something's off on our end – I've let the team know and someone will look at it." | File `action-request` with the error key |
+| `invalid_intercom_conv_id` | Don't surface to customer – internal contract bug. Retry the same call without conv_id (dry-run only) OR with a valid alphanumeric conv-id | Log; if it repeats, file `action-request` |
+| `ops_dry_run_set` / `audit_unwritable` | "Something's off on our end – I've let the team know and someone will look at it." | File `action-request` with the error key. Both indicate a host-side ops issue (env misconfiguration or audit-log permissions); flag for ops attention. |
+| `refused_production_role_on_track` (per-row in `results[]`, not a top-level `error`) | "Looking at this, you're credited as a {role} on this track, which is usually a deliberate listing rather than a mis-attribution. Could you double-check whether you really want that taken off? If so, I'll pass it to our team to look at." | Don't remove anything; if the customer still wants it gone, file `action-request` (`action_type: credit-correction`) listing the role-affected tracks. |
+| `upstream_dry_run_short_circuit` (per-row in `results[]`) | "Something's off on our end – I've let the team know and someone will look at it." | File `action-request`. This indicates `OPS_DRY_RUN=1` somewhere in the prod path – high-priority ops issue. |
 
 Never use the words "ticket," "ClickUp," "wrapper," "script," "API," "DELETE," or `support@muso.ai` in customer-facing replies. Stay conversational.
 
 ## Operational notes
 
 - Per-request cap: 50 tracks. Per-customer-per-day cap: 100 tracks. Both enforced inside the wrapper.
-- Audit log lives at `/var/log/openclaw/customer-credit-removal.jsonl` – one line per attempted removal (resolved or refused). Operations can grep this if a customer disputes.
-- Idempotency: re-running on the same input is safe – the second run reports `already_removed` for tracks the first run removed (the API returns 404 for already-removed credits).
+- Audit log lives at `/var/log/openclaw/customer-credit-removal.jsonl` – one line per preview or refused attempt. Operations can grep this if a customer disputes.
+- Preview is read-only, so re-running it is always safe.
 - Field paths (`isClaimed`, `workspaces[].email`, etc.) are recon-confirmed against the live admin API as of 2026-05-25. See `reference_muso_admin_api_profile_fields.md` (operator memory) if they ever drift.

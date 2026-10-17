@@ -77,6 +77,8 @@ setup() {
   STATE="$TMP/state"
   mkdir -p "$STATE"
 
+  # Skip the post-restart settle delay (5 s x 23 tests, MUS-11315); the default is asserted below.
+  export ROLLBACK_RESTART_SETTLE_SECS=0
   export HYDRA_LOCAL=true
   export DEPLOY_PATH="$DEPLOY"
   export PROFILE_STATE_ROOT="$STATE"
@@ -677,4 +679,9 @@ STUB
   [ "$(wc -l <"$HB")" -eq "$n" ]
   # the lost flag was written before the child was signalled
   [ "$(cat "$ORD")" = flag-first ]
+}
+
+# MUS-11315: the suite zeroes the settle delay; production timing must not move.
+@test "restart settle delay defaults to 5 s when the knob is unset" {
+  grep -qF 'sleep "${ROLLBACK_RESTART_SETTLE_SECS:-5}"' "$REPO_ROOT/scripts/rollback.sh"
 }

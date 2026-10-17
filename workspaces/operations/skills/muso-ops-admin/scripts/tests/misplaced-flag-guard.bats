@@ -24,16 +24,15 @@ setup() {
     export CODEX_HEALTH_LIB="$TEST_ROOT/codex-health-stub.sh"
     printf '%s\n' 'codex_health_gate() { return 0; }' > "$CODEX_HEALTH_LIB"
 
-    local script_dir
-    script_dir="$(cd "$(dirname "$SCRIPT")" && pwd)"
-    printf '%s\ndummy-token\n' "$(date +%s)" > "$script_dir/.admin-token-cache"
-    chmod 600 "$script_dir/.admin-token-cache"
-    TOKEN_CACHE_SEED="$script_dir/.admin-token-cache"
+    # Per-test cache under TEST_ROOT: a seed in the repo tree is shared by every
+    # file and races under `bats --jobs` (MUS-11315).
+    export ADMIN_TOKEN_CACHE_PATH="$TEST_ROOT/.admin-token-cache"
+    printf '%s\ndummy-token\n' "$(date +%s)" > "$ADMIN_TOKEN_CACHE_PATH"
+    chmod 600 "$ADMIN_TOKEN_CACHE_PATH"
 }
 
 teardown() {
     rm -rf "$TEST_ROOT"
-    rm -f "${TOKEN_CACHE_SEED:-}"
 }
 
 @test "guard: --requester misplaced after path (as body) is refused, exit !=0" {

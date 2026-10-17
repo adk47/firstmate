@@ -1,0 +1,1 @@
+Hi {first_name}, a friendly follow-up on my note from {sent_date} about documenting your credits ({credits_count} credits, starting with "{first_track_title}"). Nothing has changed on your profile. If you have a split sheet, invoice, registration or session file for any of them, just reply to this message with it. One document can cover several tracks. Thank you!

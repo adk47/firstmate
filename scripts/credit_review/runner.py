@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass, field
@@ -20,7 +21,9 @@ from .policy import (
     A_SUSPECT,
     R_HUMAN,
     R_REJECT,
+    AgentApprovalContext,
     Decision,
+    approved_automations,
     approver_identity_alert,
     combine,
     deterministic,
@@ -155,6 +158,68 @@ def review_one(request: dict[str, Any], builder: EvidenceBuilder, judge: Judge |
     return ev, decision, judged
 
 
+PROFILE_BATCH_MAX = 6   # claims of one profile judged in one model call
+
+
+def profile_units(evs: list[Evidence]) -> list[list[Evidence]]:
+    """Model call units, in the caller's order (big tracks first). A BIG track is
+    always its own call. Non-big claims of one profile are batched, in chunks of
+    PROFILE_BATCH_MAX, positioned at the profile's first non-big claim; a lone
+    claim stays a single call.
+
+    Why big tracks are never batched (same-day A/B on the labelled set, 10-14,
+    grok-4.3, audit): batching every claim cut model calls 32 -> 6, kept flag
+    precision/recall and CONFIRMED precision at 1.00, but CONTRADICTED recall fell
+    0.68 -> 0.45, and 11 of the 13 lost contradictions were big tracks, the very
+    rows whose CONTRADICTED verdict raises the alert. A batched call searches less
+    per track. Obscure-track bursts (the 10-14 Zach Miller case) are non-big and
+    are where batching saves the calls."""
+    units: list[list[Evidence]] = []
+    batches: dict[str, list[Evidence]] = {}
+    for ev in evs:
+        if ev.big_track:
+            units.append([ev])
+            continue
+        key = ev.profile_id or ev.request_id
+        grp = batches.get(key)
+        if grp is None or len(grp) >= PROFILE_BATCH_MAX:
+            grp = []
+            batches[key] = grp
+            units.append(grp)
+        grp.append(ev)
+    return units
+
+
+def judge_grouped(judge: Judge | None, cfg: Config, stats: RunStats, evs: list[Evidence], *,
+                  budget: float, stop_at: float | None = None) -> tuple[dict[str, JudgeResult], int, int]:
+    """Model results for `evs`, one call per profile unit, ONE call in flight at a
+    time (a call's cost is only known after it returns, so each call is launched
+    against the spend so far and a run overshoots its cap by at most one call; QA
+    on hydra#1142). Returns (results by request_id, skipped for time, skipped for
+    budget). Every judge backend implements judge() and judge_many()."""
+    judged: dict[str, JudgeResult] = {}
+    if judge is None:
+        return judged, 0, 0
+    units = profile_units(evs)
+    for i, unit in enumerate(units):
+        left = sum(len(u) for u in units[i:])
+        if stop_at is not None and time.monotonic() >= stop_at:
+            return judged, left, 0
+        if (stats.model_calls >= cfg.max_model_calls
+                or stats.affordable_calls(budget, cfg.est_call_cost_usd) < 1):
+            stats.budget_stopped = True
+            return judged, 0, left
+        if len(unit) == 1:
+            res = {unit[0].request_id: judge.judge(cfg.mode, unit[0].for_model())}
+        else:
+            res = judge.judge_many(cfg.mode, [e.for_model() for e in unit], [e.request_id for e in unit])
+        costs = [r.cost_usd for r in res.values() if r.cost_usd is not None]
+        stats.charge(sum(costs) if costs else None)   # one call, whatever its batch size
+        stats.errors += sum(not r.ok for r in res.values())
+        judged.update(res)
+    return judged, 0, 0
+
+
 def record(ledger: Ledger, cfg: Config, ev: Evidence, d: Decision, j: JudgeResult | None,
            approver_alert: str | None = None, label: str | None = None, mode: str | None = None) -> int:
     return ledger.record({
@@ -208,6 +273,27 @@ def _iso(ts: datetime) -> str:
 
 def _day_start(now: datetime) -> str:
     return now.strftime("%Y-%m-%dT00:00:00Z")
+
+
+def agent_approval_context(ledger: Ledger) -> AgentApprovalContext:
+    """Registry approvals, the decider's editorial terms and its
+    documentation-required marker, read once per audit run."""
+    from .policy import DECIDE_POLICY, decider_proof_ids, doc_required_ids
+    from .roles import editorial_terms
+    try:
+        terms: tuple[str, ...] | None = editorial_terms(
+            json.loads(DECIDE_POLICY.read_text(encoding="utf-8")).get("editorial_role_terms"))
+    except (OSError, ValueError, AttributeError):
+        terms = None
+    try:
+        doc = doc_required_ids(ledger.db)
+    except sqlite3.Error:
+        doc = frozenset()
+    try:
+        proofs = decider_proof_ids(ledger.db)
+    except sqlite3.Error:
+        proofs = {}
+    return AgentApprovalContext(approved_automations(), terms, doc, proofs)
 
 
 def run_audit(admin: admin_api.Admin, ledger: Ledger, judge: Judge | None, cfg: Config, *,
@@ -291,42 +377,30 @@ def run_audit(admin: admin_api.Admin, ledger: Ledger, judge: Judge | None, cfg: 
     over_budget = 0
 
     def judge_batch(want: list[Evidence]) -> dict[str, JudgeResult]:
-        # One model call in flight at a time: a call's cost is only known
-        # after it returns, so each call is launched against the spend so far
-        # and a run can overshoot its cap by at most one call (QA on
-        # hydra#1142: parallel calls sized on an earlier cheap call overspent).
         nonlocal late, over_budget
-        judged: dict[str, JudgeResult] = {}
-        for i, ev in enumerate(want if judge is not None else []):
-            if time.monotonic() >= stop_at:
-                late += len(want) - i
-                break
-            if (stats.model_calls >= cfg.max_model_calls
-                    or stats.affordable_calls(budget, cfg.est_call_cost_usd) < 1):
-                stats.budget_stopped = True
-                over_budget += len(want) - i
-                break
-            res = judge.judge(cfg.mode, ev.for_model())
-            judged[ev.request_id] = res
-            stats.charge(res.cost_usd)
-            if not res.ok:
-                stats.errors += 1
+        judged, n_late, n_over = judge_grouped(judge, cfg, stats, want, budget=budget, stop_at=stop_at)
+        late += n_late
+        over_budget += n_over
         return judged
 
     unknown_approvals: list[str] = []
     forbidden: list[str] = []
+    automation_breaks: list[str] = []
+    agent_ctx = agent_approval_context(ledger)
     evidence_failed: list[str] = []
 
     def finish(req: dict[str, Any], ev: Evidence, j: JudgeResult | None) -> None:
         rid = ev.request_id
-        approver_alert = approver_identity_alert(req)
+        approver_alert = approver_identity_alert(req, ev, agent_ctx)
         d = combine(ev, cfg.mode, j)
         stats.reviewed += 1
         stats.big += 1 if ev.big_track else 0
         stats.bump(d.verdict)
         row_id = record(ledger, cfg, ev, d, j, approver_alert=approver_alert)
         ledger.clear_evidence_failure(rid, "audit")
-        if approver_alert:
+        if approver_alert and approver_alert.startswith("automation "):
+            automation_breaks.append(f"{rid}: {approver_alert}")
+        elif approver_alert:
             (unknown_approvals if "validator declined" in approver_alert else forbidden).append(rid)
         if d.verdict == A_CONTRADICTED:
             fresh = ledger.queue_rereview(rid, d.verdict, "; ".join(d.reasons)[:500])
@@ -381,6 +455,11 @@ def run_audit(admin: admin_api.Admin, ledger: Ledger, judge: Judge | None, cfg: 
         judged = judge_batch([ev for _req, ev in deferred])
         for req, ev in deferred:
             finish(req, ev, judged.get(ev.request_id))
+    for line in automation_breaks[:10]:
+        alerts.append("CREDIT-AUDIT ALERT: registered automation approval broke a rule - " + line)
+    if len(automation_breaks) > 10:
+        alerts.append(f"CREDIT-AUDIT ALERT: ... and {len(automation_breaks) - 10} more automation rule break(s) "
+                      f"({len(automation_breaks)} in total; every one is in the ledger)")
     if forbidden:
         alerts.append(f"CREDIT-AUDIT ALERT: {len(forbidden)} approval(s) by a forbidden or unknown approver identity - "
                       f"{', '.join(forbidden[:10])}")
@@ -436,17 +515,27 @@ def run_review(admin: admin_api.Admin, ledger: Ledger, judge: Judge | None, cfg:
 
     batch = unseen("unverified", limit, lambda r: True)
     if sample_approved > 0:
-        batch += unseen("approved", sample_approved, lambda r: sampled(str(r.get("id")), 0.5))
+        # Audit/shadow dedupe (Fable credit-AI report, 10-14): an approval the
+        # auditor already model-checked in the last 24h is not paid for twice.
+        recent = _iso(now - timedelta(hours=24))
+        batch += unseen("approved", sample_approved,
+                        lambda r: sampled(str(r.get("id")), 0.5)
+                        and not ledger.model_checked_since(str(r.get("id")), "audit", recent))
     stats.scanned = len(batch)
     builder = EvidenceBuilder(admin, now=now, prior_contradicted=ledger.contradicted_by_profile())
-    cards: list[str] = []
+    built: list[tuple[dict[str, Any], Evidence]] = []
     for req in batch:
         try:
-            ev, d, j = review_one(req, builder, judge, cfg, stats, force_model=True)
+            built.append((req, builder.build(req)))
         except admin_api.AdminError as exc:
             stats.errors += 1
             log(f"evidence failed for {req.get('id')}: {exc}")
-            continue
+    want = [ev for _req, ev in built if deterministic(ev, cfg.mode).needs_model]
+    judged, _late, _over = judge_grouped(judge, cfg, stats, want, budget=cfg.budget_usd)
+    cards: list[str] = []
+    for _req, ev in built:
+        j = judged.get(ev.request_id)
+        d = combine(ev, cfg.mode, j)
         stats.reviewed += 1
         stats.big += 1 if ev.big_track else 0
         stats.bump(d.verdict)

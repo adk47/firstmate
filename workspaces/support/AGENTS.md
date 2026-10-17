@@ -57,8 +57,9 @@ probability. Treat it as a strong hint, not a verdict:
 ## Skill routing
 
 - "My credit is missing / wrong / did it sync" -> `profile_credits_status` first; branch on its
-  diagnosis (already visible, pending verification, wrong profile, or genuinely absent).
-- "Remove these tracks" + owns the profile + specific tracks + mechanical -> `customer-credit-removal`.
+  diagnosis (already visible, pending verification, awaiting our review, wrong profile, or
+  genuinely absent).
+- "Remove these tracks" + owns the profile + specific tracks + mechanical -> `customer-credit-removal` (previews and routes; it never removes a credit).
 - Duplicate / merge profiles -> `dedupe_check` first, then `profiles_consolidate` (self-serve) or a
   merge ticket.
 - Credits stuck in verification -> `credit_verification_check`, then `credits_verify` or a

@@ -406,6 +406,82 @@ for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
       fail=1
     fi
   fi
+
+  # 9. Every agent model ref must be declared in THIS file's own catalog
+  #    (models.providers.<provider>.models[].id). An undeclared ref does not
+  #    refuse at runtime: openclaw synthesizes a model with default metadata
+  #    (text-only, 200k context), so an image sent to a fallback is silently
+  #    mis-handled (MUS-8506 Row D; QA's mutation on hydra#1176 set an
+  #    undeclared openai/gpt-7-sol and every gate exited 0).
+  #    Ref form is <provider>/<id>; split on the FIRST slash only, because
+  #    openrouter ids are themselves namespaced (openrouter/google/gemini-3.5-flash).
+  #    The prefix resolves to a models.providers key, else to the single
+  #    provider whose agentRuntime.id equals it. The runtime hop is deliberate:
+  #    imageModel MUST use the codex/ prefix (openai/<id> as an imageModel hits
+  #    the HTTP media-understanding route and TypeErrors,
+  #    docs/lessons/openclaw-and-codex.md:617), and the codex -> openai mapping
+  #    lives in the config (models.providers.openai.agentRuntime.id), so do not
+  #    collapse it into a hardcoded codex->openai literal. Zero or several
+  #    matching providers FAIL loud rather than pick one.
+  #    Invariant: gate the LITERAL imageModel prefix (before resolution), because
+  #    codex/ and openai/ resolve to the same provider; a declared openai/<id>
+  #    imageModel must still FAIL, expected prefix = that provider's agentRuntime.id.
+  #    A provider-key imageModel prefix is accepted only for an HTTP provider (baseUrl)
+  #    with NO agentRuntime.id; the runtime arm is checked first, so a provider with
+  #    both still refuses. No agentRuntime.id and no baseUrl refuses too (never fail open).
+  #    Scope: agents.defaults + per-agent model/imageModel, primary and
+  #    fallbacks, walking the same shape check 8 picks (keyed agents.entries{}
+  #    when present, else agents.list[]). Reads only .models.providers.
+  bad=$(jq -r '
+    def refs($root; $m):
+      if ($m | type) == "object" then
+        ( if ($m.primary | type) == "string"
+          then [{path: ($root + ".primary"), ref: $m.primary}] else [] end )
+        + [ ($m.fallbacks // []) | to_entries[] | select(.value | type == "string")
+            | {path: ($root + ".fallbacks[" + (.key | tostring) + "]"), ref: .value} ]
+      elif ($m | type) == "string" then [{path: $root, ref: $m}]
+      else [] end;
+    (.models.providers // {}) as $p
+    | ( refs("agents.defaults.model"; .agents.defaults.model)
+        + refs("agents.defaults.imageModel"; .agents.defaults.imageModel)
+        + [ (if (.agents.entries | type) == "object"
+             then (.agents.entries | to_entries[] | {shape: "entries", id: .key, a: .value})
+             else ((.agents.list // [])[] | {shape: "list", id: (.id // "<no-id>"), a: .}) end)
+            | ("agents." + .shape + "[" + .id + "]") as $root
+            | refs($root + ".model"; .a.model),
+              refs($root + ".imageModel"; .a.imageModel) ]
+          | flatten )
+    | .[]
+    | .path as $path | .ref as $ref
+    | ($ref | index("/")) as $s
+    | if $s == null or $s == 0 then
+        "  - " + $path + " = " + $ref + ": malformed model ref (expected <provider>/<id>)"
+      else
+        $ref[:$s] as $pre | $ref[$s + 1:] as $id
+        | ( if ($p | has($pre)) then {prov: $pre}
+            else ( [ $p | to_entries[] | select(.value.agentRuntime.id == $pre) | .key ] ) as $m
+              | if ($m | length) == 0
+                then {err: ("unknown model-ref prefix \"" + $pre + "\" (not a models.providers key and not any provider'\''s agentRuntime.id)")}
+                elif ($m | length) > 1
+                then {err: ("ambiguous runtime prefix \"" + $pre + "\" matches " + ($m | length | tostring) + " providers")}
+                else {prov: $m[0]} end
+            end ) as $r
+        | ( if ($path | test("\\.imageModel(\\.|$)")) and ($p | has($pre)) and (($p[$pre].agentRuntime.id | type) == "string")
+            then "  - " + $path + " = " + $ref + ": imageModel must use the runtime prefix \"" + $p[$pre].agentRuntime.id + "/\", not the provider key \"" + $pre + "/\" (image input takes the HTTP media-understanding route and TypeErrors)"
+            elif ($path | test("\\.imageModel(\\.|$)")) and ($p | has($pre)) and (($p[$pre].baseUrl | type) != "string")
+            then "  - " + $path + " = " + $ref + ": models.providers." + $pre + " declares neither agentRuntime.id nor baseUrl, so an image cannot be routed (image input would take the HTTP media-understanding route and TypeError); declare baseUrl, or use the runtime prefix"
+            else empty end ),
+          ( if $r.err then "  - " + $path + " = " + $ref + ": " + $r.err
+            elif any($p[$r.prov].models[]?; .id == $id) then empty
+            else "  - " + $path + " = " + $ref + ": \"" + $id + "\" is not declared in models.providers." + $r.prov + ".models[].id (openclaw would synthesize text-only / 200k default metadata)"
+            end )
+      end
+  ' "$cfg")
+  if [[ -n "$bad" ]]; then
+    echo "ERROR: $cfg has agent model refs not declared in its own models.providers catalog:" >&2
+    echo "$bad" >&2
+    fail=1
+  fi
 done
 
 # 4. Cron payload thinking values must be in the allowed enum.

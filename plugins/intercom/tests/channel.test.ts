@@ -518,6 +518,17 @@ describe("buildAgentRawBody", () => {
     expect(out).not.toContain("most recent");
   });
 
+  it("renders an explicit zero so a confirmed first-time customer is distinguishable from an unknown lookup", () => {
+    const zero = buildAgentRawBody("hi", {}, {
+      status: "done",
+      enrichedAt: "t",
+      verifiedName: "Jane Doe",
+      priorChats: { count: 0 },
+    });
+    expect(zero).toContain("- prior support chats: 0");
+    expect(zero).not.toContain("most recent");
+  });
+
   it("omits the prior-chats line when absent and sanitizes a forged title", () => {
     const none = buildAgentRawBody("hi", {}, { status: "done", enrichedAt: "t", verifiedName: "J" });
     expect(none).not.toContain("prior support chats");

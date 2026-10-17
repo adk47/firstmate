@@ -20,11 +20,21 @@ Nothing here writes anything. Verdicts land in the ledger and in Slack.
 
 from __future__ import annotations
 
+import json
+import os
+import sqlite3
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from .evidence import Evidence
+from .evidence import CONFIRMED, Evidence
 from .judge import JudgeResult
+from .roles import is_editorial
+
+ROOT = Path(__file__).resolve().parents[2]
+AUTOMATION_REGISTRY = Path(os.environ.get("CREDIT_APPROVAL_REGISTRY",
+                                          ROOT / "policies" / "credit-approval-automation.json"))
+DECIDE_POLICY = Path(os.environ.get("CREDIT_TRUST_DECIDE_POLICY", ROOT / "policies" / "credit-trust-decide.json"))
 
 # Auditor verdicts.
 A_CONFIRMED = "CONFIRMED"
@@ -51,6 +61,121 @@ KNOWN_APPROVERS = frozenset({
     "jan@muso.ai", "aaron@muso.ai", "nick@muso.ai", "caroline@muso.ai",
     "uvn-popularity-cron@hydra-ops",
 })
+# Registered automations' own admin accounts (T12, core #10595): an agent
+# approval from one of these is accepted only while the automation is
+# approved:true in policies/credit-approval-automation.json, and only when it
+# breaks none of the automation approval rules (agent_rule_breaks).
+KNOWN_AGENT_APPROVERS = {
+    "agent-credit-decider@muso.ai": "credit-trust-decide",
+    "agent-uvn-cron@muso.ai": "uvn-under30",
+}
+
+# Server mirror (core-backend services/credit-requests/agentApprovalGuard.js).
+CONFLICT_TRACK_CREDIT = 70
+CONFLICT_COLLABORATIONS = 90
+HOLD_RULE_PREFIX = "review_"
+HOLD_RULE_MIN_SCORE = 30
+HOLD_ON_ERROR_KEY = "_hold_on_error"
+REJECT_RULE_PREFIX = "reject_"
+
+
+def _num(v: Any) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def validator_conflict(vd: Any) -> dict[str, Any] | None:
+    """The validator conflict the server holds an AGENT approval on, or None.
+    Mirrors agentApprovalGuard.validatorConflict exactly: only JSON numbers
+    count as rule scores."""
+    vd = vd if isinstance(vd, dict) else {}
+    rules = vd.get("rule_risk_percent") if isinstance(vd.get("rule_risk_percent"), dict) else {}
+    tc, col = _num(rules.get("track_credit")), _num(rules.get("collaborations"))
+    class_c = tc is not None and col is not None and tc >= CONFLICT_TRACK_CREDIT and col >= CONFLICT_COLLABORATIONS
+    holds = sorted(k for k, v in rules.items()
+                   if str(k).startswith(HOLD_RULE_PREFIX) and _num(v) is not None and _num(v) >= HOLD_RULE_MIN_SCORE)
+    errors = vd.get("rule_errors") if isinstance(vd.get("rule_errors"), dict) else {}
+    hold_on_error = HOLD_ON_ERROR_KEY in errors
+    if not (class_c or holds or hold_on_error):
+        return None
+    return {"class_c": class_c, "hold_rules": holds, "hold_on_error": hold_on_error,
+            "track_credit": tc, "collaborations": col}
+
+
+def validator_rejected_rules(vd: Any) -> list[str]:
+    """The validator ``reject_*`` rules that fired (a JSON number > 0). No
+    automation approves such a row: the decider HOLDS it for a human, and the
+    auditor alerts when a registered automation approved one."""
+    vd = vd if isinstance(vd, dict) else {}
+    rules = vd.get("rule_risk_percent") if isinstance(vd.get("rule_risk_percent"), dict) else {}
+    return sorted(k for k, v in rules.items() if str(k).startswith(REJECT_RULE_PREFIX) and (_num(v) or 0) > 0)
+
+
+def doc_required_ids(db: sqlite3.Connection) -> frozenset[str]:
+    """Requests the decider marked documentation-required in APPLY mode (shadow
+    runs never mark a row)."""
+    return frozenset(str(r[0]).lower() for r in db.execute(
+        "SELECT DISTINCT request_id FROM decisions WHERE doc_required = 1 AND mode = 'apply'"))
+
+
+def decider_proof_ids(db: sqlite3.Connection) -> dict[str, str]:
+    """request id -> the proof id the decider relied on when it approved a
+    documentation-required row (its own audit record; core-backend's
+    metadata.approval carries no proof id)."""
+    return {str(r[0]).lower(): str(r[1]) for r in db.execute(
+        "SELECT request_id, proof_id FROM decisions WHERE decision = 'approve' AND mode = 'apply'"
+        " AND proof_id IS NOT NULL AND proof_id != '' ORDER BY id")}
+
+
+def approved_automations(path: Path | None = None) -> frozenset[str]:
+    """Automations the registry lists approved:true with approved_by and
+    approval_ref. Unreadable registry -> none (every agent approval alerts)."""
+    try:
+        entries = json.loads(Path(path or AUTOMATION_REGISTRY).read_text(encoding="utf-8"))["automations"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return frozenset()
+    return frozenset(name for name, e in (entries.items() if isinstance(entries, dict) else ())
+                     if isinstance(e, dict) and e.get("approved") is True
+                     and str(e.get("approved_by") or "").strip() and str(e.get("approval_ref") or "").strip())
+
+
+@dataclass(frozen=True)
+class AgentApprovalContext:
+    """What the auditor needs to judge a registered automation's approval."""
+    approved_automations: frozenset[str] = frozenset()
+    editorial_terms: tuple[str, ...] | None = None   # None: the policy was unreadable, the check fails closed
+    doc_required_ids: frozenset[str] = frozenset()   # requests the decider marked documentation-required
+    proof_ids: dict[str, str] = field(default_factory=dict)  # decider's recorded proof id per approved request
+
+
+def agent_rule_breaks(request: dict[str, Any], ev: Evidence | None, ctx: AgentApprovalContext,
+                      automation: str) -> list[str]:
+    """The automation approval rules an agent approval broke (empty = clean)."""
+    vd = request.get("verificationData") if isinstance(request.get("verificationData"), dict) else {}
+    breaks: list[str] = []
+    rejected = validator_rejected_rules(vd)
+    if rejected:
+        breaks.append(f"the validator declined it ({', '.join(rejected)})")
+    conflict = validator_conflict(vd)
+    if conflict:
+        breaks.append("validator conflict (" + ",".join(conflict["hold_rules"] + (["class_c"] if conflict["class_c"] else [])
+                                                         + (["hold_on_error"] if conflict["hold_on_error"] else [])) + ")")
+    if ev is None:
+        breaks.append("evidence unavailable: big-track and editorial rules could not be checked")
+        return breaks
+    if ev.big_track and not ev.all_confirmed:
+        breaks.append("big track approved without trusted-source confirmation")
+    if ctx.editorial_terms is None:
+        breaks.append("editorial-role rule could not be checked (policy unreadable)")
+    else:
+        weak = [r.claimed_role for r in ev.roles
+                if is_editorial(r.claimed_role, ctx.editorial_terms) and r.status != CONFIRMED]
+        if weak:
+            breaks.append(f"editorial role without a trusted credit for the claimant ({', '.join(weak)})")
+    rid = str(request.get("id") or "").lower()
+    proof = ctx.proof_ids.get(rid) if automation == "credit-trust-decide" else None
+    if rid in ctx.doc_required_ids and not proof:
+        breaks.append("documentation-required row approved without a proof id")
+    return breaks
 
 
 @dataclass
@@ -248,9 +373,13 @@ def combine(ev: Evidence | Facts, mode: str, judged: JudgeResult | None) -> Deci
     return Decision(R_HUMAN, conf, "model_needs_human", reasons)
 
 
-def approver_identity_alert(request: dict[str, Any]) -> str | None:
+def approver_identity_alert(request: dict[str, Any], ev: Evidence | None = None,
+                            ctx: AgentApprovalContext | None = None) -> str | None:
     """Captain 2026-10-11: alert on any approval by agent-hydra-main, admin_u or
-    an unknown identity.
+    an unknown identity. A registered automation's own account
+    (KNOWN_AGENT_APPROVERS) is accepted only while that automation is
+    approved:true and its approval breaks none of ``agent_rule_breaks``; the
+    alert then names the automation and the rule (it starts "automation ").
 
     core-backend records the approver on the row since 2026-10-11 (#10306 /
     #10307) as ``metadata.approval = {via, at, account, service, requester,
@@ -272,6 +401,16 @@ def approver_identity_alert(request: dict[str, Any]) -> str | None:
         who = str(approval.get("account") or approval.get("email") or approval.get("approvedBy") or "").lower()
         if who in FORBIDDEN_APPROVERS:
             return f"approved by forbidden agent identity {who} (via {via or '?'})"
+        if who in KNOWN_AGENT_APPROVERS:
+            ctx = ctx or AgentApprovalContext()
+            automation = KNOWN_AGENT_APPROVERS[who]
+            if automation not in ctx.approved_automations:
+                return (f"automation {automation} ({who}) approved while it is not approved:true in "
+                        "policies/credit-approval-automation.json")
+            breaks = agent_rule_breaks(request, ev, ctx, automation)
+            if breaks:
+                return f"automation {automation} ({who}) approval broke: " + "; ".join(breaks)
+            return None
         if approval.get("isAgent") is True:
             return f"approved by an agent token {who or '(no account)'} (via {via or '?'})"
         if not who:
