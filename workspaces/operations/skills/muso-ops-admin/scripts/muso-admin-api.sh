@@ -607,7 +607,10 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 # file is PARSED (MUSO_ADMIN_EMAIL= / MUSO_ADMIN_PASSWORD= lines), never
 # sourced, so nothing in it executes. There is no fallback: an unknown
 # identity or a missing/incomplete file fails before any request.
-MUSO_ADMIN_IDENTITY_DIR="${MUSO_ADMIN_IDENTITY_DIR:-/etc/hydra/muso-admin-identities}"
+# The directory is the one H-DevOps' sync-credit-agent-creds-from-vault.sh
+# provisions from Vault (contract: H-DevOps #4131,
+# data/security-backlog-s2/credit-agent-accounts.md).
+MUSO_ADMIN_IDENTITY_DIR="${MUSO_ADMIN_IDENTITY_DIR:-/etc/openclaw/agents}"
 load_admin_identity() {
     local identity="${MUSO_ADMIN_IDENTITY:-}"
     [[ -n "$identity" ]] || return 0

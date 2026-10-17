@@ -146,7 +146,7 @@ a ticket.
 
    **Own admin identity.** The decider sets `MUSO_ADMIN_IDENTITY=credit-decider` in its own process
    (uvn-under30 sets `uvn-cron`). The wrapper then logs in with that identity's credentials from
-   `/etc/hydra/muso-admin-identities/<identity>.env` (`MUSO_ADMIN_EMAIL=` / `MUSO_ADMIN_PASSWORD=`
+   `/etc/openclaw/agents/<identity>.env` (provisioned from Vault by H-DevOps #4131; `MUSO_ADMIN_EMAIL=` / `MUSO_ADMIN_PASSWORD=`
    lines; parsed, never sourced) with a token cache of its own. `credit-decider` is
    `agent-credit-decider@muso.ai` (core user 1407251) and `uvn-cron` is `agent-uvn-cron@muso.ai`
    (1407252): core-backend binds each automation's grant to its own account, and

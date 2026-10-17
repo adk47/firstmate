@@ -92,3 +92,16 @@ EOF
 
     [ ! -e "$CURL_LOG" ]
 }
+
+@test "default identity dir is the one H-DevOps provisions (/etc/openclaw/agents)" {
+    # Regression (2026-10-17): the shipped default pointed at a directory nothing
+    # provisions, so both automations failed closed on their first live tick.
+    # Read the resolved default from the sourced script (source-safe guard), so the
+    # result does not depend on whether the real files exist on this host.
+    run --separate-stderr env -u MUSO_ADMIN_IDENTITY_DIR bash -c '. "$1" >/dev/null 2>&1; printf "%s" "$MUSO_ADMIN_IDENTITY_DIR"' _ "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$output" = "/etc/openclaw/agents" ]
+    # The override still wins.
+    run --separate-stderr env MUSO_ADMIN_IDENTITY_DIR=/tmp/elsewhere bash -c '. "$1" >/dev/null 2>&1; printf "%s" "$MUSO_ADMIN_IDENTITY_DIR"' _ "$SCRIPT"
+    [ "$output" = "/tmp/elsewhere" ]
+}
