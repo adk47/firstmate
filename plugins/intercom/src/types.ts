@@ -524,7 +524,8 @@ export interface EnrichmentState {
   // Prior-support-chat pointer for THIS verified contact, summarized from
   // Intercom's per-contact conversation search (system of record — correctly
   // scoped per contact, which is what keeps cross-customer isolation intact).
-  // Count excludes the current conversation; absent when there are none.
+  // Count excludes the current conversation; count 0 when the lookup succeeded
+  // and found none, absent when the lookup did not run or failed (unknown).
   priorChats?: {
     count: number;
     mostRecentTitle?: string;

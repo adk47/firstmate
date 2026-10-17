@@ -57,7 +57,7 @@
     },
     {
       "action_type_on_handoff": "credit-verify",
-      "description": "Inspect pending UVN credits, ask for exact proof, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
+      "description": "Inspect pending UVN credits, ask for proof at most once and only if none was given before, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
       "first_read_tool": "credit_verification_check",
       "handoff_when": "owner_undetermined, impersonation, shared profile, disabled, no approver, non-corroborated proof, or wrapper refusal",
       "intent": "credit_verification",

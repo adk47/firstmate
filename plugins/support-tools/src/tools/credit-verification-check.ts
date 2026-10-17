@@ -346,7 +346,7 @@ export function createCreditVerificationCheckTool(
     label: "Look up a customer's pending credits: needs-proof and awaiting-review (read-only)",
     description:
       "Read-only lookup of the credits a customer has stuck in 'user verification needed'. Anchors ownership to the Intercom contact's real email (anti-spoof), confirms the requester owns the profile, and returns a PII-safe structured list of pending credits (claimed role, track, artist, ISRC) for the credit-verification flow, plus awaiting_review (credits waiting for OUR review, where the customer has nothing to do) and pending_by_status counts. Never tell a customer nothing is pending unless BOTH counts are 0. " +
-      "It NEVER approves, rejects, or writes anything — after verifying, ask the customer for proof and (when warranted) file a recommend-approve ticket via create_ticket for a human to execute the gated approval. " +
+      "It NEVER approves, rejects, or writes anything — after verifying, ask for proof only if none was given before (see the customer-credit-verification skill) and (when warranted) file a recommend-approve ticket via create_ticket for a human to execute the gated approval. " +
       "Fails closed (owner_undetermined) when ownership cannot be verified. Rate limit: 10 calls / 60 min per session.",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {

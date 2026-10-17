@@ -37,7 +37,7 @@
       "analytics_data_complaint": "Ground the answer in profile, subscription, and analytics-status data; explain current state; file a follow-up only when evidence shows an account-specific issue.",
       "billing_cancel_refund": "Read subscription state, run the retention save hierarchy (50% offer, then free plan), cancel at period end when the customer insists; refunds stay a handoff packet.",
       "catalog_metadata_repair": "Use available profile/credit visibility and file a repair packet until catalog capture tools exist.",
-      "credit_verification": "Inspect pending UVN credits, ask for exact proof, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
+      "credit_verification": "Inspect pending UVN credits, ask for proof at most once and only if none was given before, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
       "founding_member": "Read founder status and mint only the customer-requested paid buy-back checkout link.",
       "login_email_verification": "Collect exact account-state facts and hand off until login/email tools are exposed.",
       "order_fulfillment": "Answer order status and correct the verified customer's own shipping address when the order is still editable.",
