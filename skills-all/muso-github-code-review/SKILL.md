@@ -425,8 +425,8 @@ doctrine — be specific, cite `file:line`, and prefer real problems over style 
 Every PR to a prod branch (`baseRefName` is `master` for core-backend, `main` for
 every other repo; a PR into `develop` is exempt) must carry exactly one `tier:0`, `tier:1`, `tier:2` or
 `tier:3` label and a `Tier: N, because ...` line in the body. Tiers: 0 = no user
-impact (scripts, tests, docs, CI, alerts, dev-only config, code nothing calls yet,
-staff-only screens); 1 = narrow, user-visible; 2 = broad but reversible; 3 = every
+impact (tests, docs, alerts, dev-only config, code nothing calls yet, staff-only
+screens, and scripts or CI that cannot change what ships or runs in production); 1 = narrow, user-visible; 2 = broad but reversible; 3 = every
 login or every profile save. The bundle has no labels field, so read them with a GET
 through the shim, then read the body line and check the claim against the diff:
 
@@ -441,7 +441,10 @@ from the body line alone.
 - **No tier label, or no `Tier: N, because ...` line:** NO-GO, reason `tier missing`.
 - **`tier:0` but the diff touches a path a user's request can reach** (an API route
   or handler, a rendered page or component, a published API contract, a data
-  pipeline whose output is displayed, a prod manifest): NO-GO, reason
+  pipeline whose output is displayed, a prod manifest) **or a production
+  deployment, rollback or release-gate path** (a deploy or rollback script, a health
+  check or smoke gate, a workflow that publishes or promotes a release), even though
+  no request reaches it: it decides what users get served. NO-GO, reason
   **`tier understated`**, naming the file that disproves the claim.
 - **Never lower a tier label yourself and never approve a lowering you did not agree
   to.** Raising a tier is always allowed.
