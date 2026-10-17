@@ -1673,6 +1673,9 @@ jobs:
           # credit-retro r1 role-scoped take-back + prepared waves (scripts/credit_retro).
           # Stdlib only; the admin API is faked. Also pins the committed manifests.
           python3 scripts/tests/test_credit_retro.py
+          # credit-trust band table mirror (scripts/credit_trust): byte-identical to IDP's
+          # common/credit_trust_bands.json at the pinned sha. Stdlib only.
+          python3 scripts/tests/test_credit_trust_bands.py
 
   plugin-tests:
     name: Plugin tests (vitest)
