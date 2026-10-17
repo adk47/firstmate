@@ -3029,7 +3029,10 @@ check_media_host_binaries
 # (set -u) plus "fail: command not found" — wrong error message AND
 # silently bypassed notify_slack(). Caught by silent-failure-hunter
 # during the second-round PR review.
-export HYDRA_ROOT TARGET DEPLOY_PATH HYDRA_LOCAL
+# REPORT_ONLY (read by fail) and SLACK_WEBHOOK (read by notify_slack) are
+# exported for the same reason: without them a POSTSYNC-side fail() printed FATAL
+# and then died on "REPORT_ONLY: unbound variable" before paging Slack (2026-10-17).
+export HYDRA_ROOT TARGET DEPLOY_PATH HYDRA_LOCAL REPORT_ONLY SLACK_WEBHOOK
 # muso_main_env_report + its dependency muso_main_env_missing are sourced into
 # the PARENT shell (top of file) but used inside this heredoc's child bash — so
 # they MUST be exported too, or the call command-not-founds in the child and the
