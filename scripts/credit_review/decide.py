@@ -97,6 +97,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import admin as admin_api
+from . import proof_parts
 from .evidence import (BIG_ARTIST_POPULARITY, BIG_TRACK_POPULARITY, Evidence, EvidenceBuilder,
                        EvidenceIncomplete, parse_ts)
 from .judge import JudgeResult
@@ -569,14 +570,31 @@ def support_contacts_of(value: Any) -> frozenset[int] | None:
     return frozenset(out)
 
 
+def muso_user_id(value: Any) -> int | None:
+    """An entry's user id as the integer Muso id (proof_parts accepts "111" and 111 as
+    the same user), or None when it is not one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    return int(text) if text.isdigit() else None
+
+
 def proof_on_file(path: Path | None = None, now: datetime | None = None
                   ) -> tuple[ProofOnFile | None, str | None]:
     """(proof, None) from the hourly proof-on-file export
     {generated_at, sources: [{name, generated_at, count, stale?, missing?}],
-    users, entries: [{user_id, request_id | null, kind, source, ref}]}, or
-    (None, why) when proof status is UNKNOWN: missing, unreadable, malformed,
-    older than 3h, dated in the future, or any source flagged missing/stale (a
-    user whose proof sits only in that source would be asked again)."""
+    users, entries: [{user_id, request_id | null, kind, source, ref}],
+    gmail_contacts_90d}, or (None, why) when proof status is UNKNOWN.
+
+    Completeness is THE shared rule, credit_review.proof_parts (the verify notes,
+    the take-back gate and Caroline's support tool read it the same way): core,
+    cs-intercom and cs-gmail all present, unflagged and fresh by their own stamps,
+    no other part flagged, entries well-formed and ``users`` consistent. On top of
+    it the decider is stricter, never looser: the export's own stamp must be fresh,
+    every user id must be a Muso (integer) id, and the support@ contact list must be
+    readable (firstmate 041: those users are held, never asked)."""
     path = Path(path or PROOF_ON_FILE)
     now = now or datetime.now(timezone.utc)
     try:
@@ -588,33 +606,33 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
     malformed = f"{path} is malformed (want generated_at, sources[], users, entries[])"
     if not isinstance(data, dict):
         return None, malformed
-    ts, sources, entries = parse_ts(data.get("generated_at")), data.get("sources"), data.get("entries")
-    users_n = data.get("users")
-    if (ts is None or not isinstance(sources, list) or not isinstance(entries, list)
-            or not isinstance(users_n, int) or isinstance(users_n, bool)
-            or not all(isinstance(s, dict) and isinstance(s.get("name"), str) for s in sources)):
+    try:
+        proof_parts.check(data, now=now, max_age_h=PROOF_MAX_AGE.total_seconds() / 3600,
+                          max_skew_h=PAYING_USERS_MAX_SKEW.total_seconds() / 3600)
+        proof_parts.check_entries(data)
+    except proof_parts.PartsError as exc:
+        return None, f"{path} is not authoritative: {exc}"[:200]
+    ts = parse_ts(data.get("generated_at"))
+    if ts is None:
         return None, malformed
     contacts = support_contacts_of(data.get(SUPPORT_CONTACTS_KEY))
     if contacts is None:
         return None, f"{path} has no readable {SUPPORT_CONTACTS_KEY} list (anyone may have emailed support@)"
-    incomplete = [f"{s['name']} is {'missing' if s.get('missing') else 'stale'}"
-                  for s in sources if s.get("missing") or s.get("stale")]
-    if incomplete:
-        return None, f"{path} is incomplete (source {', '.join(incomplete)})"[:200]
     users: set[int] = set()
     requests: set[str] = set()
     approved: dict[str, str] = {}
-    for e in entries:
-        uid = e.get("user_id") if isinstance(e, dict) else None
-        rid = e.get("request_id") if isinstance(e, dict) else None
-        if (not isinstance(uid, int) or isinstance(uid, bool) or e.get("kind") not in PROOF_KINDS
-                or not (rid is None or isinstance(rid, str))):
-            return None, malformed
+    for e in data["entries"]:
+        uid = muso_user_id(e["user_id"])
+        if uid is None:
+            return None, f"{path} has a user_id that is not a Muso user id: {e['user_id']!r}"[:200]
+        rid = e.get("request_id")
         if rid is not None:
             try:
                 rid = str(uuid.UUID(rid))
             except ValueError:
-                return None, malformed
+                # Not a credit request id: it can name no request, but its user is
+                # still covered below (whole-user), so nobody is asked by mistake.
+                rid = rid.strip().lower()
             requests.add(rid)
             if e.get("kind") in APPROVED_PROOF_KINDS and str(e.get("ref") or "").strip():
                 approved.setdefault(rid, f"{e.get('source') or 'proof'}:{str(e['ref']).strip()}")

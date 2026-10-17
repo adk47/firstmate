@@ -135,7 +135,9 @@ class Base(unittest.TestCase):
             "generated_at": generated_at,
             "gmail_contacts_90d": {"generated_at": generated_at, "source": "test", "user_ids": list(contacts)},
             "sources": sources if sources is not None else [
-                {"name": "core_proofs", "generated_at": generated_at, "count": len(entries)}],
+                {"name": "core", "generated_at": generated_at, "count": len(entries)},
+                {"name": "cs-intercom", "generated_at": generated_at, "stale": False, "count": 0},
+                {"name": "cs-gmail", "generated_at": generated_at, "stale": False, "count": 0}],
             "users": len({e["user_id"] for e in entries}), "entries": entries}))
 
     def go(self, rows, raws=None, judge=None, mode="apply", skip=None, policy=POLICY, admin_requests=(),
@@ -767,7 +769,7 @@ class NeverReAsk(Base):
 
     def test_unknown_proof_status_sends_no_support_request_at_all(self):
         rows = [req(uuid_of(120), track="t1"), req(uuid_of(121))]
-        cases = {"missing": None, "stale": "2026-10-10T23:00:00Z", "malformed": "{}"}
+        cases = {"missing": None, "old": "2026-10-10T23:00:00Z", "not authoritative": "{}"}  # word the logged reason carries
         for why, content in cases.items():
             if content is None:
                 decide.PROOF_ON_FILE.unlink(missing_ok=True)
@@ -792,18 +794,27 @@ class NeverReAsk(Base):
         self.assertIsNone(decide.proof_on_file(now=T.NOW)[0])
 
     def test_a_missing_or_stale_source_makes_proof_status_unknown(self):
-        """A user whose proof sits only in the missing source is absent from
-        entries: asking them now would re-ask for documents already given."""
-        sources = {"missing": {"name": "gmail", "count": 0, "missing": True},
-                   "stale": {"name": "intercom", "generated_at": "2026-10-10T00:00:00Z", "count": 0, "stale": True}}
-        for n, (why, src) in enumerate(sources.items()):
-            self.proof(sources=[{"name": "core_proofs", "count": 0}, src])
+        """A user whose proof sits only in an unusable part is absent from entries:
+        asking them now would re-ask for documents already given. The rule is the
+        shared credit_review.proof_parts (all three parts required, for everyone)."""
+        g = "2026-10-11T02:12:00Z"
+        core, inter, gmail = ({"name": "core", "generated_at": g}, {"name": "cs-intercom", "generated_at": g},
+                              {"name": "cs-gmail", "generated_at": g})
+        cases = {
+            "part 'cs-gmail' is missing": [core, inter],
+            "part 'cs-gmail' is marked missing": [core, inter, {"name": "cs-gmail", "missing": True}],
+            "part 'cs-intercom' is marked stale": [core, {**inter, "stale": True}, gmail],
+            "part 'core' is": [{"name": "core", "generated_at": "2026-10-10T00:00:00Z"}, inter, gmail],
+            "stale or missing part(s): x-part": [core, inter, gmail, {"name": "x-part", "missing": True}],
+        }
+        for n, (why, srcs) in enumerate(cases.items()):
+            self.proof(sources=srcs)
             res, w = self.go([req(uuid_of(130 + n), uid=760 + n, track="t1")], self.RAWS)
             self.assertEqual(self.support_writes(w), [], why)
             d = self.decisions()[uuid_of(130 + n)]
             self.assertEqual(d["decision"], "defer", why)
             self.assertTrue(d["reason"].startswith("proof_status_unknown"), why)
-            self.assertIn(f"{src['name']} is {why}", d["reason"])
+            self.assertIn(why, d["reason"])
             self.assertEqual(res.deferred_proof_unknown, 1, why)
 
     def test_support_contacts_are_held_never_asked(self):

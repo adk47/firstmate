@@ -1,10 +1,9 @@
 """Which parts of the credit-trust proof-on-file export make it authoritative.
 
 THE one completeness rule for every Python reader of /var/lib/credit-trust/proof-on-file.json
-(verify_notify: the verify notes; credit_retro.takeback: the take-back gate). The decider
-(decide.py) does NOT follow it yet: it only refuses a part with a truthy stale/missing flag,
-never requires cs-gmail and never checks a part's own stamp. It must import this module
-(credit-trust-llm-t01 owns that switch). Caroline's support tool (plugins/support-tools/src/tools/proof-on-file.ts)
+(verify_notify: the verify notes; credit_retro.takeback: the take-back gate; decide: the
+credit decider, which is stricter on top - integer user ids, a readable gmail_contacts_90d list
+whose users it never asks). Caroline's support tool (plugins/support-tools/src/tools/proof-on-file.ts)
 implements the same contract in TypeScript; scripts/tests/fixtures/proof-parts-contract.json
 pins both sides (scripts/tests/test_proof_parts_contract.py and the vitest suite). Parts, by their exact ``sources[].name`` (cs lane, firstmate 761/762/032/033),
 ALL required for everyone:

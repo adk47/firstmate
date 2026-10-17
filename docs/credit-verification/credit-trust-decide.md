@@ -229,3 +229,6 @@ If the server still answers `agent_cannot_approve_declined`, it wrote nothing: t
 
 
 **Support@ contacts are never asked (firstmate 041).** Every user in the export's top-level `gmail_contacts_90d` (a list, or `{generated_at, source, user_ids}`) emailed support@ in the last 90 days: their support rows are held for a human, never asked, even when no document was found. A missing or malformed list makes proof status UNKNOWN, so nobody is asked.
+
+**One proof-on-file rule.** The decider reads the export through `credit_review.proof_parts`, the same completeness rule as the verify notes, the take-back gate and Caroline's support tool (pinned by `scripts/tests/fixtures/proof-parts-contract.json`, which the decider now answers too): `core`, `cs-intercom` and `cs-gmail` must all be present, unflagged and fresh by their own stamps, no other part may be flagged, entries must be well-formed and `users` consistent; anything else is UNKNOWN and no proof request is sent. The decider is stricter on top, never looser: integer user ids only, and a readable `gmail_contacts_90d` list (its users are held, never asked).
+
