@@ -216,7 +216,17 @@ class Ledger:
         """Re-adds that went out with no known result (crash or transport error)."""
         return [e for e in self.revert_results(apply_run) if e["outcome"] in UNRESOLVED]
 
-    def apply_runs(self, manifest_sha256: str) -> list[str]:
+    def takeback_notified(self, since: str) -> set[str]:
+        """User ids that got a ``sent`` take-back notice (any apply run) at or after ``since``."""
+        return {r["user_id"] for r in self.db.execute(
+            "SELECT e.user_id FROM events e JOIN runs r ON r.run_id = e.run_id WHERE r.kind = 'apply' "
+            "AND e.action = 'notify' AND e.outcome = 'sent' AND e.at >= ?", (since,))}
+
+    def apply_runs(self, manifest_sha256: str | None = None) -> list[str]:
+        """Apply runs on one manifest, or every apply run when ``manifest_sha256`` is None."""
+        if manifest_sha256 is None:
+            return [r["run_id"] for r in self.db.execute(
+                "SELECT run_id FROM runs WHERE kind = 'apply' ORDER BY started_at")]
         return [r["run_id"] for r in self.db.execute(
             "SELECT run_id FROM runs WHERE kind = 'apply' AND manifest_sha256 = ? ORDER BY started_at",
             (manifest_sha256,))]

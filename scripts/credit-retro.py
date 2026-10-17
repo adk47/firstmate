@@ -13,6 +13,10 @@ Runbook: docs/credit-verification/credit-retro-r1.md. Package: scripts/credit_re
   revert         re-add exactly the roles one apply run removed
   report         counts, refused/errored rows, the revert command
   prepare-waves  build the verify-with-documents payloads, one per user (NOT sent)
+  send-check     MANDATORY immediately before each wave send: re-check one payload
+                 against the take-back quiet window, proof on file, human-approved
+                 requests, a doc-submitted list built within 3h, and already-asked;
+                 exit 0 send, 1 drop, 2 cannot check
   restore        re-add one request's removed roles when valid proof arrives later
 
 Transports: reads use the agent's GET-only wrapper (``--admin-script``) unless
@@ -26,11 +30,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from credit_retro import takeback, waves  # noqa: E402
+from credit_retro import notice, takeback, waves  # noqa: E402
 from credit_retro.api import ApiError, SessionApi, WrapperReadApi, read_token_file  # noqa: E402
 from credit_retro.ledger import DEFAULT_DIR, Ledger  # noqa: E402
 
@@ -39,6 +44,7 @@ DEFAULT_TAKEBACK = MANIFEST_DIR / "takeback-r1.jsonl"
 DEFAULT_POPULATION = MANIFEST_DIR / "population-r1.jsonl.gz"
 DEFAULT_WATCH = MANIFEST_DIR / "watch-velocity-r1.jsonl"
 DEFAULT_EDITING_ASK = MANIFEST_DIR / "editing-ask-r1.json"
+DEFAULT_DOC_SUBMITTED = MANIFEST_DIR / "doc-submitted-r1.json"
 
 
 def session_api(args) -> SessionApi:
@@ -68,8 +74,17 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--session-file", help="0600 file with the human's own session token")
         p.add_argument("--admin-script", help="reads only: muso-admin-api.sh path (agent token, GET only)")
 
+    def live_sources(p):
+        p.add_argument("--proof-on-file", default=takeback.PROOF_ON_FILE,
+                       help="credit-trust proof-on-file.json (env CREDIT_RETRO_PROOF_ON_FILE)")
+        p.add_argument("--org-affiliation", default=takeback.ORG_AFFILIATION,
+                       help="credit-trust org-affiliation.json (env CREDIT_RETRO_ORG_AFFILIATION)")
+        p.add_argument("--verify-ledger", default=waves.VERIFY_LEDGER, help="Caroline send ledger (read-only)")
+        p.add_argument("--doc-submitted", default=str(DEFAULT_DOC_SUBMITTED))
+
     p = sub.add_parser("plan", help="dry-run: live gate per row, no writes")
     p.add_argument("--manifest", default=str(DEFAULT_TAKEBACK))
+    live_sources(p)
     auth(p)
     p = sub.add_parser("stage", help="stage the plan's rows as approval sets for Nick/Jan (#10597)")
     p.add_argument("--manifest", default=str(DEFAULT_TAKEBACK))
@@ -86,6 +101,20 @@ def main(argv: list[str] | None = None) -> int:
                    help="required, repeatable: credit-removal approval id; only the pairs these approved are removed")
     p.add_argument("--yes-remove", action="store_true", required=True,
                    help="required: you read the plan output and every row is yours to remove")
+    p.add_argument("--notice-script", help="Caroline's send gate (default /opt/hydra/scripts/intercom-verify-request.sh)")
+    p.add_argument("--notice-approved-by", required=True,
+                   help="required: Slack user id of the human who approved THIS take-back notice copy and run")
+    live_sources(p)
+    auth(p)
+    p = sub.add_parser("notice-preview", help="render the take-back notice each user of a plan would get (no send)")
+    p.add_argument("--manifest", default=str(DEFAULT_TAKEBACK))
+    p.add_argument("--plan", required=True)
+    p = sub.add_parser("notify", help="send the take-back notices an apply run still owes (deferred, failed, reconciled)")
+    p.add_argument("--run", required=True)
+    p.add_argument("--manifest", default=str(DEFAULT_TAKEBACK))
+    p.add_argument("--notice-script")
+    p.add_argument("--notice-approved-by", required=True,
+                   help="required: Slack user id of the human who approved THIS take-back notice copy and run")
     auth(p)
     p = sub.add_parser("readback", help="verify an apply (or revert) run against live data")
     p.add_argument("--run", required=True)
@@ -107,10 +136,19 @@ def main(argv: list[str] | None = None) -> int:
                    help="ask unverifiable editing claims only on tracks at or above this popularity")
     p.add_argument("--verify-ledger", default=waves.VERIFY_LEDGER,
                    help="Caroline send ledger: never re-ask proof senders, one past-credit message per user")
-    p.add_argument("--apply-run", help="use this apply run's manifest; the take-back wave covers every apply "
-                                        "run on it (canary included)")
+    p.add_argument("--doc-submitted", default=str(DEFAULT_DOC_SUBMITTED),
+                   help="users who already sent a document/proof and human-approved requests: never asked")
+    p.add_argument("--apply-run", help="use this apply run's manifest; every apply run on it (canary included) "
+                                        "counts as removed, and its notified users are left out")
     p.add_argument("--offline", action="store_true", help="do not read Muso (no emails, no live filter)")
     auth(p)
+    p = sub.add_parser("send-check", help="mandatory last step before each wave send (exit 0 send, 1 drop, "
+                                          "2 cannot check)")
+    p.add_argument("--file", required=True, help="the one prepared payload file about to be sent")
+    p.add_argument("--verify-ledger", default=waves.VERIFY_LEDGER, help="Caroline send ledger (read-only)")
+    p.add_argument("--doc-submitted", default=str(DEFAULT_DOC_SUBMITTED),
+                   help="doc-submitted list rebuilt within the last 3h (its generated_at); the committed r1 "
+                        "snapshot has none, so it never clears a send")
     p = sub.add_parser("restore", help="re-add a request's roles removed by an apply run")
     p.add_argument("--run", required=True, help="the apply run that removed them")
     p.add_argument("--request", action="append", required=True, help="credit request id (repeatable)")
@@ -118,13 +156,18 @@ def main(argv: list[str] | None = None) -> int:
     auth(p)
 
     args = ap.parse_args(argv)
+    if args.cmd == "send-check" and not (Path(args.state_dir) / "ledger.sqlite3").is_file():
+        print(f"CANNOT CHECK: no credit-retro ledger in {args.state_dir}; nothing is sent", file=sys.stderr)
+        return 2
     ledger = Ledger(args.state_dir)
     try:
         if args.cmd == "plan":
             manifest = str(Path(args.manifest).resolve())
             run_id, counts = takeback.plan(read_api(args), ledger, takeback.load_manifest(manifest),
-                                           manifest=manifest, argv=argv)
-            print(json.dumps({"plan_run": run_id, "counts": counts}, indent=1, sort_keys=True))
+                                           manifest=manifest, argv=argv, excl=exclusions(args))
+            needs_human = takeback.report(ledger, run_id)["needs_human_review"]
+            print(json.dumps({"plan_run": run_id, "counts": counts, "needs_human_review": needs_human},
+                             indent=1, sort_keys=True))
             print(f"next: python3 {Path(__file__).resolve()} stage --plan {run_id}")
         elif args.cmd == "stage":
             manifest = str(Path(args.manifest).resolve())
@@ -136,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
                 ids = " ".join(f"--approval {a}" for a in out["approval_ids"])
                 print(f"next: Nick or Jan approves {', '.join(out['approval_ids'])} (POST /admin/credit-removals/"
                       f"<id>/approve from their own session), then: python3 {Path(__file__).resolve()} apply "
-                      f"--plan {args.plan} {ids} --login --yes-remove")
+                      f"--plan {args.plan} {ids} --notice-approved-by <SlackUID> --login --yes-remove")
         elif args.cmd == "approval-status":
             print(json.dumps(read_api(args).get(f"/admin/credit-removals/{args.id}"), indent=1, sort_keys=True))
         elif args.cmd == "apply":
@@ -144,9 +187,22 @@ def main(argv: list[str] | None = None) -> int:
             api = session_api(args)
             run_id, _ = takeback.apply(api, ledger, takeback.load_manifest(manifest), manifest=manifest,
                                        plan_run=args.plan, argv=argv, only=set(args.only or []) or None,
-                                       approvals=args.approval)
+                                       approvals=args.approval, excl=exclusions(args),
+                                       sender=notice.ScriptSender(args.notice_script,
+                                                                  approved_by=args.notice_approved_by))
             print(json.dumps(takeback.report(ledger, run_id, script=str(Path(__file__).resolve())),
                              indent=1, sort_keys=True))
+        elif args.cmd == "notice-preview":
+            manifest = str(Path(args.manifest).resolve())
+            rows = takeback.planned_rows(ledger, args.plan, takeback.load_manifest(manifest))
+            for n in notice.preview(rows):
+                print(f"=== user {n['user_id']} ({len(n['credits'])} role(s))\nSubject: {n['subject']}\n\n{n['body']}")
+        elif args.cmd == "notify":
+            manifest = str(Path(args.manifest).resolve())
+            counts = takeback.notify(read_api(args), ledger, args.run, takeback.load_manifest(manifest),
+                                     notice.ScriptSender(args.notice_script,
+                                                         approved_by=args.notice_approved_by))
+            print(json.dumps({"notify": counts}, indent=1, sort_keys=True))
         elif args.cmd == "readback":
             run_id, counts = takeback.readback(read_api(args), ledger, args.run, argv=argv)
             print(json.dumps({"readback_run": run_id, "counts": counts}, indent=1, sort_keys=True))
@@ -163,7 +219,10 @@ def main(argv: list[str] | None = None) -> int:
             waves.prepare(ledger, population_path=str(Path(args.population).resolve()), watch_path=str(Path(args.watch).resolve()),
                           takeback_path=str(Path(args.takeback).resolve()), apply_run=args.apply_run, out_root=Path(args.state_dir) / "waves", argv=argv,
                           actor=actor, api=api, per_day=args.per_day, editing_ask_path=args.editing_ask,
-                          editing_min_pop=args.editing_min_pop, verify_db=args.verify_ledger)
+                          editing_min_pop=args.editing_min_pop, verify_db=args.verify_ledger,
+                          doc_submitted_path=args.doc_submitted)
+        elif args.cmd == "send-check":
+            return send_check(ledger, args)
         elif args.cmd == "restore":
             run_id, counts = takeback.revert(session_api(args), ledger, args.run, argv=argv,
                                              requests=set(args.request),
@@ -175,6 +234,23 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         ledger.close()
     return 0
+
+
+def exclusions(args) -> takeback.Exclusions:
+    return takeback.load_exclusions(proof_on_file=args.proof_on_file, org_affiliation=args.org_affiliation,
+                                    verify_db=args.verify_ledger, doc_submitted=args.doc_submitted)
+
+
+def send_check(ledger: Ledger, args) -> int:
+    try:
+        state = waves.send_state(ledger, verify_db=args.verify_ledger, now=datetime.now(timezone.utc),
+                                 doc_submitted_path=args.doc_submitted)
+    except waves.SendStateUnavailable as exc:
+        print(f"CANNOT CHECK: {exc}; nothing is sent", file=sys.stderr)
+        return 2
+    verdict, reason = waves.send_check_file(state, args.file)
+    print(f"{verdict.upper()} {reason}")
+    return 0 if verdict == "send" else 1
 
 
 if __name__ == "__main__":

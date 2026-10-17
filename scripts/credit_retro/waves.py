@@ -9,17 +9,26 @@ raises trust; silence leaves the credit on the profile, flagged unverified inter
 (board / valuation basis). Only obvious, evidence-backed fraud is removed (the take-back
 of proven one-person roles). Nothing here ever removes a credit.
 
+Captain standing order (013): "make sure you arent asking for things from users that
+already submitted documents and we approved. dont piss anyoen off". Nobody in
+``manifests/doc-submitted-r1.json`` (an Intercom attachment in any conversation, or an
+identity/upload document in the verifications table, approved or pending) is ever asked,
+and no request a human (jan@/nick@) approved is asked about. When in doubt, don't send.
+
+Firstmate 016: the take-back notice ``apply`` sends is a removed user's ONLY message. A
+user with a ``sent`` take-back notice in any apply run is in no wave for 30 days after it
+(NOTICE_QUIET_DAYS), and a user still owed a notice is in none either. No wave ever
+restates a removal: a removed role is never listed or asked about again.
+
 One payload file per USER, in exactly one wave:
 
-  T-01        take-back users (first day): the roles any apply run on the take-back
-              manifest removed and no revert re-added (proven fraud evidence), plus a
-              friendly ask for their other credits
-  W-01..W-nn  everybody else, ``per_day`` users a day from FIRST_SEND, ordered paid
-              first, then by the user's biggest track, then by credit count
+  W-01..W-nn  ``per_day`` users a day from FIRST_SEND, ordered paid first, then by the
+              user's biggest track, then by credit count
 
 The payload is the ``--credits-file`` shape of scripts/intercom-verify-request.sh
-(``user`` + ``credits[]``) plus grouped sections, the template, the reason-line class,
-an optional friendly follow-up date and the silence rule. Nothing here posts anything.
+(``user`` + ``credits[]``) plus grouped sections, the template, the reason-line class
+and the silence rule. It is the user's one past-credit message: no follow-up is scheduled
+(the send-time check drops anyone already asked). Nothing here posts anything.
 """
 
 from __future__ import annotations
@@ -28,7 +37,7 @@ import gzip
 import json
 import os
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -36,17 +45,16 @@ from credit_review.roles import family_of
 
 from .api import ApiError, ReadApi
 from .ledger import Ledger, sha256_file
+from .takeback import require_fresh, unnotified_row_ids
 
 FIRST_SEND = date(2026, 10, 16)
 PER_DAY = 200            # users per day; the send tool rate-limits within the day
-FOLLOW_UP_DAYS = 14     # one friendly follow-up, no deadline (optional; the sender may skip it)
 UNVERIFIED_AFTER_DAYS = 30  # internal flag only: no proof by then -> "unverified" on the board
 MAX_CREDITS = 200        # intercom-verify-request.sh MAX_CREDITS per message
 TEMPLATE = "retro-verify-grouped"
-FOLLOW_UP_TEMPLATE = "retro-follow-up"
 SEND_CAMPAIGN = "retro-past"  # the send tool's past-credit campaign (credit_review/verify_ledger.py CAMPAIGNS)
 VERIFY_LEDGER = "/var/lib/hydra/credit-review/ledger.sqlite3"  # Caroline send ledger, read-only
-TAKEBACK_TEMPLATE = "takeback-mixing-mastering"
+NOTICE_QUIET_DAYS = 30  # firstmate 016: no wave for a user within 30 days of their take-back notice
 PROOF_CHANNEL = "intercom (reply with attachments); email channel when E-IN lands"
 ON_SILENCE = ("credit stays on the profile; flagged unverified internally (board / valuation basis); "
               "never removed for silence (captain 2026-10-16 ~00:35Z)")
@@ -54,6 +62,7 @@ APPROVAL_REF = ("captain 2026-10-15 ~23:35Z via firstmate 002 (ask for documents
                 "approvals), narrowed 2026-10-16 ~00:35Z via firstmate 005 (past credits: friendly ask, no removal); "
                 "sends need intercom-verify-request.sh (credit-trust-caroline-t06) and a GO")
 CONTRADICTION_VERDICTS = {"CONTRADICTED_one", "CONTRADICTED_multi"}
+DOC_SUBMITTED = Path(__file__).resolve().parent / "manifests" / "doc-submitted-r1.json"
 
 GROUP_BY_FAMILY = {
     "mix": "mixing-mastering", "master": "mixing-mastering", "immersive_mix": "mixing-mastering",
@@ -69,6 +78,31 @@ def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
     opener = gzip.open if str(path).endswith(".gz") else open
     with opener(path, "rt", encoding="utf-8") as fh:
         return [json.loads(line) for line in fh if line.strip()]
+
+
+def load_doc_submitted(path: str | Path = DOC_SUBMITTED) -> tuple[set[str], set[str]]:
+    """(user ids who already submitted a document/proof, request ids a human approved)."""
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    return _doc_sets(doc)
+
+
+def _doc_sets(doc: dict[str, Any]) -> tuple[set[str], set[str]]:
+    return {str(u) for u in doc["users_doc_submitted"]}, {str(r) for r in doc["human_approved_requests"]}
+
+
+def load_fresh_doc_submitted(path: str | Path, now: datetime) -> tuple[set[str], set[str]]:
+    """``load_doc_submitted`` for send time: the list must say when it was built
+    (``generated_at``) and pass ``takeback.require_fresh``. A document a user attached after the
+    list was built (untagged, so not in the send ledger) is in no other source, so an older
+    list, or one with no ``generated_at`` (the committed r1 snapshot), cannot clear a send."""
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    try:
+        require_fresh(doc["generated_at"], now)
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}; rebuild the doc-submitted list before sending") from exc
+    return _doc_sets(doc)
 
 
 def group_of(role: str) -> str:
@@ -108,8 +142,8 @@ ACCOUNT_TEMPLATE = "account-three-tracks"
 
 
 def select(population: list[dict[str, Any]], watch: list[dict[str, Any]], editing_ask: dict[str, Any] | None, *,
-           editing_min_pop: int = EDITING_MIN_POP) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]],
-                                                             list[dict[str, Any]]]:
+           editing_min_pop: int = EDITING_MIN_POP, doc: tuple[set[str], set[str]] | None = None,
+           ) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     """Firstmate 006 (captain ~02:00Z "are you annoying people fornbackup that we shpuldnt be?"):
     ask only GENUINE risk. Returns (asked request rows, account asks by user, not-asked rows).
 
@@ -120,16 +154,22 @@ def select(population: list[dict[str, Any]], watch: list[dict[str, Any]], editin
     Asked once per ACCOUNT: the WATCH velocity accounts and the editing burst accounts whose
     whole-profile review did not clear them; their burst rows are not listed one by one.
     Everyone else (small unverifiable claims, established / web-credible / confirmed claimants,
-    ordinary small accounts) is NOT asked: flagged unverified internally only."""
+    ordinary small accounts) is NOT asked: flagged unverified internally only.
+
+    ``doc`` = (users who already submitted documents, human-approved request ids): captain
+    013, those users get no ask at all and those requests are never asked about."""
+    doc_users, doc_requests = doc or (set(), set())
     accounts: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for w in watch:
+        if str(w["user_id"]) in doc_users:
+            continue
         accounts[w["user_id"]].append({"kind": "velocity", "rows": w["velocity_rows"], "paying": bool(w.get("paying")),
                                        "peak_per_day": w["max_requests_per_day"], "first": w["first_request"],
                                        "profile_ids": w["profile_ids"], "example_tracks": w["example_tracks"]})
     editing_rows: dict[str, dict[str, Any]] = {}
     if editing_ask:
         for a in editing_ask.get("accounts", []):
-            if a.get("ask"):
+            if a.get("ask") and str(a["user_id"]) not in doc_users:
                 accounts[a["user_id"]].append({"kind": "editing_burst", "rows": a["editing_rows"],
                                                "paying": bool(a.get("paying")),
                                                "peak_per_day": a["peak_per_day"], "first": a["first"],
@@ -140,6 +180,9 @@ def select(population: list[dict[str, Any]], watch: list[dict[str, Any]], editin
                 editing_rows[r["request_id"]] = r
     asked, not_asked = [], []
     for h in population:
+        if str(h["user_id"]) in doc_users or h["request_id"] in doc_requests:
+            not_asked.append(h)
+            continue
         if h.get("tier") in ASK_TIERS:
             asked.append(h)
             continue
@@ -157,40 +200,32 @@ def select(population: list[dict[str, Any]], watch: list[dict[str, Any]], editin
     return asked, dict(accounts), not_asked
 
 
-def assemble(population: list[dict[str, Any]], watch: list[dict[str, Any]], removed: list[dict[str, Any]],
+def assemble(population: list[dict[str, Any]], watch: list[dict[str, Any]],
              editing_ask: dict[str, Any] | None = None, *, editing_min_pop: int = EDITING_MIN_POP,
-             per_day: int = PER_DAY, first_send: date = FIRST_SEND) -> list[dict[str, Any]]:
-    """Pure: at most ONE payload per user, waves assigned. ``removed`` = take-back rows
-    an apply run actually removed (empty before the run)."""
-    asked, accounts, _ = select(population, watch, editing_ask, editing_min_pop=editing_min_pop)
+             per_day: int = PER_DAY, first_send: date = FIRST_SEND,
+             doc: tuple[set[str], set[str]] | None = None) -> list[dict[str, Any]]:
+    """Pure: at most ONE payload per user, waves assigned. ``doc``: see ``select``."""
+    asked, accounts, _ = select(population, watch, editing_ask, editing_min_pop=editing_min_pop, doc=doc)
     by_user: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for h in asked:
         by_user[h["user_id"]].append(h)
-    removed_by_user: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for r in removed:
-        removed_by_user[r["user_id"]].append(r)
 
     def payload(uid: str) -> dict[str, Any]:
         rows = sorted(by_user.get(uid, []), key=lambda h: (-int(h.get("pop_now") or 0), h["request_id"]))
         verify = [_credit(h, x["role"], "verify", x.get("verdict")) for h in rows for x in h["roles"]]
-        taken = [_credit(r, r["role"], "takeback", "CONTRADICTED_one") for r in removed_by_user.get(uid, [])]
         acct = accounts.get(uid, [])
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for c in verify:
             groups[group_of(c["role"])].append(c)
-        if taken:
-            template, kind = TAKEBACK_TEMPLATE, "takeback"
-        elif verify:
+        if verify:
             template, kind = TEMPLATE, "verify"
         else:
             template, kind = ACCOUNT_TEMPLATE, acct[0]["kind"]
         p: dict[str, Any] = {
             "schema": "credit-retro-wave.v3", "status": "prepared_not_sent", "kind": kind,
             "user": {"id": uid, "email": None, "first_name": None},
-            "paying": (any(h.get("paying") for h in rows) or any(r.get("paying") for r in removed_by_user[uid])
-                       or any(a.get("paying") for a in acct)),
+            "paying": any(h.get("paying") for h in rows) or any(a.get("paying") for a in acct),
             "template": template,
-            "takeback_credits": taken,
             "groups": [{"group": g, "credits": groups[g]} for g in GROUP_ORDER if g in groups],
             # velocity / editing-burst: ONE ask for the whole burst, three tracks of their choice
             "account_asks": acct,
@@ -199,11 +234,11 @@ def assemble(population: list[dict[str, Any]], watch: list[dict[str, Any]], remo
             "proof_channel": PROOF_CHANNEL, "on_silence": ON_SILENCE, "proof_effect": "raises trust (verified)",
             "credits_stay_visible": True, "approval_ref": APPROVAL_REF,
         }
-        flat = taken + [c for g in p["groups"] for c in g["credits"]]
+        flat = [c for g in p["groups"] for c in g["credits"]]
         p["credits_total"] = len(flat)
         p["request_ids_all"] = sorted({c["request_id"] for c in flat})
         # the send tool's per-message cap; biggest tracks first so the cut drops the smallest
-        p["credits"] = sorted(flat, key=lambda c: (c["kind"] != "takeback", -int(c.get("pop_now") or 0)))[:MAX_CREDITS]
+        p["credits"] = sorted(flat, key=lambda c: -int(c.get("pop_now") or 0))[:MAX_CREDITS]
         p["more_credits"] = max(0, len(flat) - MAX_CREDITS)
         pops = [int(c.get("pop_now") or 0) for c in flat] + [
             int(t.get("pop_now") or 0) for a in acct for t in a["example_tracks"]]
@@ -214,21 +249,13 @@ def assemble(population: list[dict[str, Any]], watch: list[dict[str, Any]], remo
                             else "no_public_data")
         return p
 
-    users = set(by_user) | set(removed_by_user) | set(accounts)
-    t_users = sorted(removed_by_user)
-    payloads = [payload(u) for u in t_users]
-    others = [payload(u) for u in sorted(users - set(t_users))]
-    others.sort(key=lambda p: (not p["paying"], -p["max_pop"], -p["credits_total"], p["user"]["id"]))
-    for p in payloads:
-        p["wave"], p["day"] = "T-01", 0
-    for i, p in enumerate(others):
+    payloads = [payload(u) for u in sorted(set(by_user) | set(accounts))]
+    payloads.sort(key=lambda p: (not p["paying"], -p["max_pop"], -p["credits_total"], p["user"]["id"]))
+    for i, p in enumerate(payloads):
         p["wave"], p["day"] = f"W-{i // per_day + 1:02d}", i // per_day
-    payloads += others
     for p in payloads:
         send = first_send + timedelta(days=p.pop("day"))
         p["send_not_before"] = send.isoformat()
-        p["follow_up_on"] = (send + timedelta(days=FOLLOW_UP_DAYS)).isoformat()
-        p["follow_up_template"] = FOLLOW_UP_TEMPLATE
         p["flag_unverified_after"] = (send + timedelta(days=UNVERIFIED_AFTER_DAYS)).isoformat()
     return payloads
 
@@ -293,32 +320,115 @@ def resolve_live(api: ReadApi, payload: dict[str, Any], profiles: set[str]) -> N
     def keep(c: dict[str, Any]) -> bool:
         it = approved.get(c["request_id"])
         if it is None:
-            return c["kind"] == "takeback"
+            return False
         c["track_title"] = it.get("spotifyTrackTitle") or c["track_title"]
         artists = [a.get("name") for a in (it.get("spotifyTrackArtists") or []) if isinstance(a, dict)]
         c["artist_name"] = ", ".join(a for a in artists if a) or c["artist_name"]
         return True
 
     before = payload["credits_total"]
-    payload["takeback_credits"] = [c for c in payload["takeback_credits"] if keep(c)]
+    _keep_credits(payload, keep)
+    payload["live"] = {"dropped_not_approved": before - payload["credits_total"],
+                       "email_resolved": bool(payload["user"]["email"])}
+    if not payload["credits_total"] and not payload.get("account_asks"):
+        payload["status"] = "nothing_to_send"
+
+
+def _keep_credits(payload: dict[str, Any], keep: Callable[[dict[str, Any]], bool]) -> None:
+    """Keep only the credits ``keep`` accepts and refresh the derived lists. Mutates ``payload``."""
     for g in payload["groups"]:
         g["credits"] = [c for c in g["credits"] if keep(c)]
     payload["groups"] = [g for g in payload["groups"] if g["credits"]]
-    flat = payload["takeback_credits"] + [c for g in payload["groups"] for c in g["credits"]]
+    flat = [c for g in payload["groups"] for c in g["credits"]]
     payload["credits_total"] = len(flat)
     payload["request_ids_all"] = sorted({c["request_id"] for c in flat})
-    payload["credits"] = sorted(flat, key=lambda c: (c["kind"] != "takeback", -int(c.get("pop_now") or 0)))[:MAX_CREDITS]
+    payload["credits"] = sorted(flat, key=lambda c: -int(c.get("pop_now") or 0))[:MAX_CREDITS]
     payload["more_credits"] = max(0, len(flat) - MAX_CREDITS)
-    payload["live"] = {"dropped_not_approved": before - len(flat), "email_resolved": bool(payload["user"]["email"])}
-    if not flat and not payload.get("account_asks"):
-        payload["status"] = "nothing_to_send"
+
+
+def quiet_users(ledger: Ledger, apply_runs: list[str], now: datetime) -> set[str]:
+    """Firstmate 016: users who got a ``sent`` take-back notice within NOTICE_QUIET_DAYS of
+    ``now`` (any apply run), plus users ``apply_runs`` removed a role from and still owe a
+    notice. The notice is their only message."""
+    since = (now - timedelta(days=NOTICE_QUIET_DAYS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return ledger.takeback_notified(since) | {e["user_id"] for r in apply_runs for e in ledger.removed_rows(r)
+                                               if e["row_id"] in unnotified_row_ids(ledger, r)}
+
+
+class SendStateUnavailable(Exception):
+    """The credit-retro ledger or the send ledger cannot be read, or the doc-submitted list
+    is unreadable or not fresh: nothing can be proven safe to send."""
+
+
+def send_state(ledger: Ledger, *, verify_db: str | None, now: datetime,
+               doc_submitted_path: str | Path = DOC_SUBMITTED) -> dict[str, Any]:
+    """Everything ``send_check`` re-checks, read once at send time. The doc-submitted list
+    must be fresh (``load_fresh_doc_submitted``)."""
+    try:
+        engaged = already_engaged(verify_db)
+        doc_users, doc_requests = load_fresh_doc_submitted(doc_submitted_path, now)
+    except (SystemExit, OSError, ValueError, KeyError, TypeError) as exc:
+        raise SendStateUnavailable(str(exc)) from exc
+    if engaged is None:
+        raise SendStateUnavailable(f"send ledger {verify_db} is not readable")
+    proof_ids, proof_users, asked_users = engaged
+    runs = ledger.apply_runs()
+    removed: set[tuple[str, str]] = set()
+    for r in runs:
+        reverted = ledger.reverted_row_ids(r)
+        removed |= {(e["request_id"], e["role"].strip().lower()) for e in ledger.removed_rows(r)
+                    if e["row_id"] not in reverted}
+    return {"quiet": quiet_users(ledger, runs, now), "doc_users": doc_users,
+            "skip_requests": proof_ids | doc_requests, "proof_users": proof_users, "asked_users": asked_users,
+            "removed": removed}
+
+
+def send_check(state: dict[str, Any], payload: dict[str, Any]) -> tuple[str, str]:
+    """Firstmate 018, the mandatory last step before any wave send: (``send`` | ``drop``,
+    reason). Re-checks the take-back quiet window, proof on file, human-approved requests and
+    one past-credit message per user, and filters the credits list (proof-covered,
+    human-approved and removed roles go). Mutates ``payload``."""
+    uid = str(payload["user"]["id"])
+    key = str(payload["user"].get("email") or "").lower()
+    if payload.get("status") != "prepared_not_sent":
+        return "drop", f"status:{payload.get('status')}"
+    if uid in state["quiet"]:
+        return "drop", "takeback_notice_quiet_window"
+    if uid in state["doc_users"]:
+        return "drop", "doc_submitted"
+    if not key:
+        return "drop", "no_account_email"
+    if key in state["proof_users"]:
+        return "drop", "already_sent_proof"
+    if key in state["asked_users"]:
+        return "drop", "already_asked"
+    _keep_credits(payload, lambda c: c["request_id"] not in state["skip_requests"]
+                  and (c["request_id"], c["role"].strip().lower()) not in state["removed"])
+    if not payload["credits_total"] and not payload.get("account_asks"):
+        return "drop", "nothing_left_to_ask"
+    return "send", "ok"
+
+
+def send_check_file(state: dict[str, Any], path: str | Path) -> tuple[str, str]:
+    """``send_check`` one payload file and write it back in place: the filtered credits when it
+    may be sent, ``status: dropped_at_send_check`` with the reason when it may not."""
+    with open(path, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    verdict, reason = send_check(state, payload)
+    if verdict == "drop":
+        payload["status"] = "dropped_at_send_check"
+    payload["send_check"] = {"verdict": verdict, "reason": reason,
+                             "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=1, sort_keys=True)
+    return verdict, reason
 
 
 def prepare(ledger: Ledger, *, population_path: str, watch_path: str, takeback_path: str, apply_run: str | None,
             out_root: Path, argv: list[str], actor: str, api: ReadApi | None = None, per_day: int = PER_DAY,
             editing_ask_path: str | None = None, editing_min_pop: int = EDITING_MIN_POP,
-            verify_db: str | None = None,
-            log: Callable[[str], None] = print) -> tuple[str, dict[str, Any]]:
+            verify_db: str | None = None, doc_submitted_path: str | Path = DOC_SUBMITTED,
+            now: datetime | None = None, log: Callable[[str], None] = print) -> tuple[str, dict[str, Any]]:
     watch = load_jsonl(watch_path)
     editing_ask = None
     if editing_ask_path:
@@ -341,12 +451,16 @@ def prepare(ledger: Ledger, *, population_path: str, watch_path: str, takeback_p
     if unresolved or unresolved_re:
         raise SystemExit(f"results unknown: DELETE {unresolved}, re-add {unresolved_re}: run "
                          "`readback --run <apply_run>` first")
-    removed = [r for r in load_jsonl(takeback_path) if r["row_id"] in removed_ids]
-    population = merge_unremoved(load_jsonl(population_path), load_jsonl(takeback_path),
-                                 {r["row_id"] for r in removed})
+    population = merge_unremoved(load_jsonl(population_path), load_jsonl(takeback_path), removed_ids)
     # a request already covered by submitted proof is never asked again
     population = [h for h in population if h["request_id"] not in proof_ids]
-    payloads = assemble(population, watch, removed, editing_ask, editing_min_pop=editing_min_pop, per_day=per_day)
+    # firstmate 016: the take-back notice is a removed user's only message (and one still owed it gets nothing first)
+    quiet = quiet_users(ledger, apply_runs, now or datetime.now(timezone.utc))
+    doc = load_doc_submitted(doc_submitted_path)
+    before = assemble(population, watch, editing_ask, editing_min_pop=editing_min_pop, per_day=per_day,
+                      doc=(quiet, set()))
+    payloads = assemble(population, watch, editing_ask, editing_min_pop=editing_min_pop, per_day=per_day,
+                        doc=(doc[0] | quiet, doc[1]))
     asked_ids = {i for p in payloads for i in p["request_ids_all"]}
     run_id = ledger.start_run(kind="prepare-waves", actor=actor, manifest=population_path, parent_run=apply_run,
                               argv=argv)
@@ -356,8 +470,6 @@ def prepare(ledger: Ledger, *, population_path: str, watch_path: str, takeback_p
     profiles: dict[str, set[str]] = defaultdict(set)
     for h in population:
         profiles[h["user_id"]].add(h["profile_id"])
-    for r in removed:
-        profiles[r["user_id"]].add(r["profile_id"])
     for a in (editing_ask or {}).get("accounts", []):
         profiles[a["user_id"]].update(a["profile_ids"])
     for w in watch:
@@ -366,6 +478,13 @@ def prepare(ledger: Ledger, *, population_path: str, watch_path: str, takeback_p
                              "send_campaign": SEND_CAMPAIGN, "removal": "never for silence (past credits)",
                              "on_silence": ON_SILENCE, "editing_min_pop": editing_min_pop,
                              "send_ledger": verify_db if not ledger_missing else f"UNAVAILABLE ({verify_db})",
+                             "takeback_notice_quiet_users": len(quiet),
+                             "doc_submitted": {
+                                 "source": str(doc_submitted_path), "users": len(doc[0]),
+                                 "human_approved_requests": len(doc[1]),
+                                 "before": {"users": len(before), "paying_users": sum(int(p["paying"]) for p in before)},
+                                 "after": {"users": len(payloads),
+                                           "paying_users": sum(int(p["paying"]) for p in payloads)}},
                              "waves": {}}
     for n, p in enumerate(payloads, 1):
         if api is not None:

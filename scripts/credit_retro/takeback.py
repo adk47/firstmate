@@ -22,10 +22,23 @@ re-proves that at run time, row by row, immediately before the write:
       credit_review.evidence.classify_roles == CONTRADICTED
   G6  at least one person named in the manifest's evidence is still among
       those trusted holders (the cited URL still describes today's data)
+  G7  a row resting on the trusted DSP credit alone (``trusted_dsp_only``) has
+      a named person who is still a live holder in EACH of its cited Spotify/Tidal
+      sources, the evidence URL's own source among them (``dsp_holder_vanished``
+      otherwise)
 
 The gate also RECORDS (never skips on) whether the role is the claimant's
 last live credit on the track (``last_credit_on_track``): removing it also
 drops the track's feed activity, which a revert does not bring back.
+
+The gate also reads the LIVE exclusion sources, loaded fresh by every plan and apply run
+(firstmate 020/021; the hand-set ``excluded`` flags stay, but are not enough). Before any
+of the above: proof on file (credit-trust ``proof-on-file.json``), proof-tagged notes in
+Caroline's send ledger and the committed doc-submitted manifest. Last, only for a row that
+passed everything else and would be removed: org affiliation (credit-trust
+``org-affiliation.json``): no verdict skips the row, and an affiliated user is human
+review + a polite contact, never automatic. If a source cannot be read or is stale,
+nothing is removed that run.
 
 A row that fails any gate is SKIPPED with the reason, recorded, and left for
 the verify waves. Nothing is retried around a gate.
@@ -49,10 +62,14 @@ live after the removal, which the read-back does.
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from credit_review.evidence import CONTRADICTED, classify_roles
 from credit_review.roles import ONE_PERSON_FAMILIES, family_of, is_trusted_source, names_match
@@ -91,6 +108,37 @@ def load_manifest(path: str | Path) -> list[dict[str, Any]]:
             seen.add(row["row_id"])
             rows.append(row)
     return rows
+
+
+EVIDENCE_KINDS = ("public_page", "trusted_dsp_only")
+DSP_SOURCES = {"spotify": "Spotify", "tidal": "Tidal"}
+DSP_HOSTS = {"open.spotify.com": "spotify", "listen.tidal.com": "tidal"}  # evidence URL host -> its source
+
+
+def evidence_verified(row: dict[str, Any]) -> bool:
+    """True when the row carries checked evidence for ITS OWN role: a public page of this
+    track/release naming the other person in this role (``public_page``), or a current
+    Spotify/Tidal credit on this recording naming them (``trusted_dsp_only``: sources only
+    spotify/tidal, URL on open.spotify.com or listen.tidal.com and its source among them), with that URL as
+    ``evidence_url``. Every name must be quoted in the recorded evidence note."""
+    ev = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    url = str(ev.get("url") or "")
+    names = [str(n) for n in ev.get("names") or []]
+    note = str(ev.get("note") or "").lower()
+    if not (ev.get("verified") in EVIDENCE_KINDS and names and all(n and n.lower() in note for n in names)
+            and url == row.get("evidence_url") and url.startswith("https://")):
+        return False
+    if ev.get("verified") == "trusted_dsp_only":
+        sources = set(ev.get("sources") or [])
+        return sources <= set(DSP_SOURCES) and DSP_HOSTS.get(urlparse(url).hostname or "") in sources
+    return True
+
+
+def evidence_label(row: dict[str, Any]) -> str:
+    ev = row.get("evidence") or {}
+    if ev.get("verified") == "trusted_dsp_only":
+        return " and ".join(DSP_SOURCES[s] for s in DSP_SOURCES if s in (ev.get("sources") or [])) + " credits"
+    return "public credits page"
 
 
 def approval_ref(row: dict[str, Any], approval_id: str | None = None) -> str:
@@ -180,6 +228,129 @@ def trusted_holders(raws: list[dict[str, Any]], family: str) -> list[dict[str, s
     return out
 
 
+# -- live exclusion sources (firstmate 020) -----------------------------------
+
+PROOF_ON_FILE = os.environ.get("CREDIT_RETRO_PROOF_ON_FILE", "/var/lib/credit-trust/proof-on-file.json")
+ORG_AFFILIATION = os.environ.get("CREDIT_RETRO_ORG_AFFILIATION", "/var/lib/credit-trust/org-affiliation.json")
+PROOF_MAX_AGE = timedelta(hours=3)
+CLOCK_SKEW = timedelta(minutes=5)  # a generated_at later than now + this is not "fresh", it is wrong
+PROOF_KINDS = frozenset({"approved_doc", "pending_doc", "human_approved_after_doc"})
+AFFILIATION_VERDICTS = frozenset({"none", "claimed_unverified", "contributor", "verified_org",
+                                  "authenticated_domain"})
+AFFILIATED = frozenset({"contributor", "verified_org", "authenticated_domain"})
+
+
+@dataclass
+class Exclusions:
+    """The live exclusion sources, read once per run. ``unavailable`` is the skip reason for
+    every row when a source could not be read (nothing is removed that run)."""
+    unavailable: str | None = None
+    detail: str = ""
+    proof_requests: dict[str, str] = field(default_factory=dict)
+    proof_users: dict[str, str] = field(default_factory=dict)
+    tagged_requests: set[str] = field(default_factory=set)
+    tagged_accounts: set[str] = field(default_factory=set)
+    doc_users: set[str] = field(default_factory=set)
+    human_approved: set[str] = field(default_factory=set)
+    affiliation: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+def require_fresh(generated_at: Any, now: datetime) -> None:
+    """Raise ValueError unless ``generated_at`` is a timezone-aware time at most PROOF_MAX_AGE
+    before ``now`` and no more than CLOCK_SKEW after it (a future stamp would otherwise stay
+    "fresh" indefinitely while the data under it goes stale)."""
+    generated = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+    if generated.tzinfo is None:
+        raise ValueError(f"generated_at {generated_at} has no timezone")
+    if now - generated > PROOF_MAX_AGE:
+        raise ValueError(f"generated_at {generated_at} is older than {PROOF_MAX_AGE}")
+    if generated - now > CLOCK_SKEW:
+        raise ValueError(f"generated_at {generated_at} is in the future (more than {CLOCK_SKEW} ahead)")
+
+
+def _read_proof_on_file(path: str, now: datetime) -> tuple[dict[str, str], dict[str, str]]:
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    require_fresh(doc["generated_at"], now)
+    stale = [str(src.get("name") or src.get("source") or i) for i, src in enumerate(doc["sources"])
+             if src.get("stale") is not False]
+    if stale:
+        raise ValueError(f"stale sources: {', '.join(stale)}")
+    by_request: dict[str, str] = {}
+    by_user: dict[str, str] = {}
+    for e in doc["entries"]:
+        if e["kind"] not in PROOF_KINDS:
+            raise ValueError(f"unknown proof kind {e['kind']!r}")
+        if e.get("request_id"):
+            by_request[str(e["request_id"])] = e["kind"]
+        else:
+            by_user[str(e["user_id"])] = e["kind"]
+    return by_request, by_user
+
+
+def _read_affiliation(path: str) -> dict[str, dict[str, Any]]:
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    if not isinstance(doc, dict):
+        raise ValueError("not a user_id -> verdict object")
+    for uid, v in doc.items():
+        if not isinstance(v, dict) or v.get("verdict") not in AFFILIATION_VERDICTS:
+            raise ValueError(f"user {uid}: no valid verdict")
+    return {str(uid): v for uid, v in doc.items()}
+
+
+def load_exclusions(*, proof_on_file: str = PROOF_ON_FILE, org_affiliation: str = ORG_AFFILIATION,
+                    verify_db: str | None, doc_submitted: str | Path | None = None,
+                    now: datetime | None = None) -> Exclusions:
+    """Read every live exclusion source now. Never raises: a source that cannot be read (or
+    proof-on-file older than 3h / with a stale source) makes ``unavailable`` the skip reason."""
+    from . import waves  # noqa: PLC0415
+    now = now or datetime.now(timezone.utc)
+    try:
+        proof_requests, proof_users = _read_proof_on_file(proof_on_file, now)
+        engaged = waves.already_engaged(verify_db)
+        if engaged is None:
+            raise ValueError(f"send ledger {verify_db} is not readable")
+        doc_users, human_approved = waves.load_doc_submitted(doc_submitted or waves.DOC_SUBMITTED)
+    except (SystemExit, OSError, ValueError, KeyError, TypeError, AttributeError, sqlite3.Error) as exc:
+        return Exclusions("proof_source_unavailable", str(exc))
+    try:
+        affiliation = _read_affiliation(org_affiliation)
+    except (OSError, ValueError, TypeError) as exc:
+        return Exclusions("affiliation_source_unavailable", str(exc))
+    tagged_requests, tagged_accounts, _ = engaged
+    return Exclusions(None, "", proof_requests, proof_users, tagged_requests, tagged_accounts,
+                      doc_users, human_approved, affiliation)
+
+
+def _excluded_live(excl: Exclusions, row: dict[str, Any], before: dict[str, Any]) -> str | None:
+    """The skip reason from the live proof / document sources (no admin read), or None."""
+    if excl.unavailable:
+        before["exclusions_unavailable"] = excl.detail
+        return excl.unavailable
+    uid, rid = str(row["user_id"]), row["request_id"]
+    kind = excl.proof_requests.get(rid) or excl.proof_users.get(uid)
+    if kind:
+        return f"proof_on_file:{kind}"
+    if rid in excl.tagged_requests:
+        return "proof_tagged"
+    if uid in excl.doc_users:
+        return "doc_submitted"
+    if rid in excl.human_approved:
+        return "human_approved_after_doc"
+    return None
+
+
+def _affiliation_hold(excl: Exclusions, row: dict[str, Any], before: dict[str, Any]) -> str | None:
+    """For a row that passed every other gate: no verdict, or an affiliated user (human review +
+    a polite contact, never automatic), holds it."""
+    aff = excl.affiliation.get(str(row["user_id"]))
+    if aff is None:
+        return "affiliation_unknown"
+    before["affiliation"] = {"verdict": aff["verdict"], "evidence": aff.get("evidence") or []}
+    return "org_affiliated" if aff["verdict"] in AFFILIATED else None
+
+
 # -- gate --------------------------------------------------------------------
 
 @dataclass
@@ -189,11 +360,20 @@ class GateResult:
     before: dict[str, Any] = field(default_factory=dict)
 
 
-def gate(api: ReadApi, row: dict[str, Any]) -> GateResult:
+def gate(api: ReadApi, row: dict[str, Any], excl: Exclusions) -> GateResult:
     fam = family_of(row["role"])
     before: dict[str, Any] = {"manifest_displaced": row.get("displaced") or []}
     if str(row["user_id"]) in EXCLUDED_USERS:
         return GateResult(False, "excluded_user", before)
+    if row.get("excluded"):
+        return GateResult(False, "excluded_row", {**before, "excluded": row["excluded"]})
+    if reason := _excluded_live(excl, row, before):
+        return GateResult(False, reason, before)
+    if not evidence_verified(row):
+        # firstmate 012: the cited page must be this track/release and name the other
+        # person in this role, or the trusted DSP credit stands alone; nothing else is removed
+        return GateResult(False, "evidence_unverified", before)
+    before["evidence"] = row["evidence"]
     try:
         req = find_request(api, row)
         if req is None:
@@ -204,6 +384,9 @@ def gate(api: ReadApi, row: dict[str, Any]) -> GateResult:
             return GateResult(False, f"request_not_approved:{req.get('status')}", before)
         if str(req.get("userId")) != str(row["user_id"]):
             return GateResult(False, "user_mismatch", before)
+        account = req.get("user") if isinstance(req.get("user"), dict) else {}
+        if str(account.get("email") or "").lower() in excl.tagged_accounts:
+            return GateResult(False, "proof_tagged", before)
         roles = [str(c) for c in (req.get("credits") or [])]
         if not any(c.strip().lower() == row["role"].strip().lower() for c in roles):
             return GateResult(False, "role_not_on_request", before)
@@ -232,12 +415,20 @@ def gate(api: ReadApi, row: dict[str, Any]) -> GateResult:
         before["trusted_holders"] = holders
         if verdict.status != CONTRADICTED:
             return GateResult(False, f"not_contradicted_live:{verdict.status}", before)
-        displaced = [d for d in (row.get("displaced") or []) if d]
-        if displaced and not any(names_match(h["name"], d) for h in holders for d in displaced):
+        named = row["evidence"]["names"]
+        if not any(names_match(h["name"], d) for h in holders for d in named):
             return GateResult(False, "evidence_holder_changed", before)
+        if row["evidence"]["verified"] == "trusted_dsp_only":
+            # every cited source (the notice names each one; the URL's own source is among them)
+            # must still credit a named person, not just any one of them
+            if not all(any(h["source"] == src and names_match(h["name"], d) for h in holders for d in named)
+                       for src in row["evidence"]["sources"]):
+                return GateResult(False, "dsp_holder_vanished", before)
     except ApiError as exc:
         before["error"] = str(exc)
         return GateResult(False, "read_error", before)
+    if reason := _affiliation_hold(excl, row, before):
+        return GateResult(False, reason, before)
     return GateResult(True, "pass", before)
 
 
@@ -248,11 +439,13 @@ def _common(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def plan(api: ReadApi, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str,
-         argv: list[str], log: Callable[[str], None] = print) -> tuple[str, dict[str, int]]:
+         argv: list[str], excl: Exclusions, log: Callable[[str], None] = print) -> tuple[str, dict[str, int]]:
     run_id = ledger.start_run(kind="plan", actor=api.actor, manifest=manifest, argv=argv)
     counts: dict[str, int] = {}
+    if excl.unavailable:
+        log(f"{excl.unavailable}: {excl.detail}; nothing can be removed this run")
     for row in rows:
-        res = gate(api, row)
+        res = gate(api, row, excl)
         outcome = "would_remove" if res.ok else "skip"
         key = outcome if res.ok else f"skip:{res.reason}"
         counts[key] = counts.get(key, 0) + 1
@@ -261,7 +454,8 @@ def plan(api: ReadApi, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: 
             counts["would_remove_last_credit_on_track"] = counts.get("would_remove_last_credit_on_track", 0) + 1
         ledger.event(run_id, api.actor, **_common(row), action="gate", outcome=outcome, before=res.before,
                      evidence_url=row["evidence_url"], approval_ref=approval_ref(row), reason=res.reason)
-        log(f"{outcome:13} {row['row_id']}  user={row['user_id']} {res.reason}"
+        aff = (res.before.get("affiliation") or {}).get("verdict", "-")
+        log(f"{outcome:13} {row['row_id']}  user={row['user_id']} affiliation={aff} {res.reason}"
             + (" (last credit on track)" if last else ""))
     ledger.finish_run(run_id, counts)
     return run_id, counts
@@ -298,8 +492,11 @@ REASON_MAX = 2000  # core-backend #10597 normalize.js MAX_TEXT
 
 
 def evidence_line(r: dict[str, Any]) -> str:
-    """One pair's evidence, keyed so a reviewer can match it to the pair in the set."""
-    return f"[{r['profile_id'][:8]}/{r['track_id'][:8]}/{r['role']}] {r['evidence_url']}"
+    """One pair's evidence, keyed so a reviewer can match it to the pair in the set. A row
+    resting on the Spotify/Tidal credit alone says so (``evidence_class=dsp_track_level``):
+    the #10597 stage body has no per-pair field for it."""
+    dsp = ", evidence_class=dsp_track_level" if r["evidence"]["verified"] == "trusted_dsp_only" else ""
+    return f"[{r['profile_id'][:8]}/{r['track_id'][:8]}/{r['role']}] ({evidence_label(r)}{dsp}) {r['evidence_url']}"
 
 
 def chunk_for_reasons(rows: list[dict[str, Any]], head: str, limit: int = REASON_MAX) -> list[list[dict[str, Any]]]:
@@ -449,11 +646,118 @@ def require_reconciled(api: ReadApi, ledger: Ledger, apply_runs: list[str], log:
                          "until they are known")
 
 
+def account_of(api: ReadApi, rows: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str]:
+    """The ACCOUNT (id, email, first name) on the first of ``rows``' credit requests that
+    still exists AND still belongs to the planned user (request ``userId`` and its account
+    id), for the take-back notice; never written to the ledger. A request that moved to
+    another user never names the recipient. (None, reason) when no such request exists:
+    ``user_mismatch`` if one exists but belongs to someone else, else ``request_not_found``."""
+    reason = "request_not_found"
+    for row in rows:
+        req = find_request(api, row)
+        if req is None:
+            continue
+        acct = req.get("user") if isinstance(req.get("user"), dict) else {}
+        if not str(req.get("userId")) == str(acct.get("id")) == str(row["user_id"]):
+            reason = "user_mismatch"
+            continue
+        return {"id": acct.get("id"), "email": acct.get("email"),
+                "first_name": (str(acct.get("fullName") or "").split() or [None])[0]}, ""
+    return None, reason
+
+
+def notice_preflight(api: ReadApi, sender, rows: list[dict[str, Any]],
+                     log: Callable[[str], None] = print) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """Before the first DELETE: every user who may lose a role must be reachable through
+    Caroline's gate with the fixed take-back notice, TODAY. Returns (user_id -> account,
+    user_id -> skip reason for users whose roles are not removed this run: the gate would
+    defer their notice, or none of their requests still belongs to them). Any other refusal
+    refuses the whole run (captain via firstmate 012/014: never remove without the message
+    going out)."""
+    from . import notice  # noqa: PLC0415
+    accounts: dict[str, dict[str, Any]] = {}
+    held: dict[str, str] = {}
+    problems = []
+    for uid, rs in notice.by_user(rows).items():
+        try:
+            acct, why = account_of(api, rs)
+        except ApiError as exc:
+            problems.append(f"user {uid}: {exc}")
+            continue
+        if acct is None:
+            held[uid] = why
+            log(f"no request still owned by user {uid} ({why}): nothing of theirs is removed")
+            continue
+        if not acct["email"]:
+            problems.append(f"user {uid}: no account email on the request")
+            continue
+        accounts[uid] = acct
+        verdict, msg = sender.validate(notice.credits_file(acct, [notice.notice_credit(r) for r in rs]))
+        if verdict == "deferred":
+            held[uid] = "notice_would_defer"
+            log(f"notice would defer for user {uid} ({msg}): their roles wait for a later run")
+        elif verdict != "valid":
+            problems.append(f"user {uid}: notice refused by the send gate: {msg}")
+    if problems:
+        raise SystemExit("take-back notices cannot be sent, so nothing is removed:\n  " + "\n  ".join(problems))
+    log(f"notice preflight: {sum(1 for u in accounts if u not in held)} users reachable today "
+        f"through {notice.CAMPAIGN}")
+    return accounts, held
+
+
+def unnotified_row_ids(ledger: Ledger, apply_run: str) -> list[str]:
+    """Rows ``apply_run`` removed (incl. a later live reconcile), not re-added by a revert,
+    and not covered by a ``sent`` take-back notice."""
+    done = {rid for e in ledger.events(apply_run, "notify") if e["outcome"] == "sent"
+            for rid in json.loads(e["after_json"] or "{}").get("row_ids", [])}
+    reverted = ledger.reverted_row_ids(apply_run)
+    return [e["row_id"] for e in ledger.removed_rows(apply_run)
+            if e["row_id"] not in done and e["row_id"] not in reverted]
+
+
+def require_notified(ledger: Ledger, apply_run: str) -> None:
+    """Stop, loudly, while ``apply_run`` has a removed role whose take-back notice did not go
+    out: the run is never reported as complete, and no new role is removed until it is sent."""
+    owed = unnotified_row_ids(ledger, apply_run)
+    if owed:
+        raise SystemExit(f"apply run {apply_run} removed {len(owed)} role(s) whose take-back notice was not "
+                         f"sent: {owed}. Nothing new is removed until it is: re-run `notify --run {apply_run}` "
+                         "(a deferred notice goes on the next UTC day) or escalate to #clio_devops")
+
+
+def send_notices(ledger: Ledger, apply_run: str, actor: str, sender, rows: list[dict[str, Any]],
+                 accounts: dict[str, dict[str, Any]], log: Callable[[str], None] = print) -> dict[str, int]:
+    """One notice per user for the roles ``apply_run`` removed that no notice covered yet
+    (and no revert re-added). Recorded in the apply run (action ``notify``) with the
+    human who approved the notice."""
+    from . import notice  # noqa: PLC0415
+    by_id = {r["row_id"]: r for r in rows}
+    removed = [by_id[rid] for rid in unnotified_row_ids(ledger, apply_run) if rid in by_id]
+    counts: dict[str, int] = {}
+    for uid, rs in sorted(notice.by_user(removed).items()):
+        acct = accounts.get(uid)
+        if not acct:
+            outcome, msg = "failed", "no account resolved for this user"
+        else:
+            outcome, msg = sender.send(notice.credits_file(acct, [notice.notice_credit(r) for r in rs]))
+        counts[f"notice_{outcome}"] = counts.get(f"notice_{outcome}", 0) + 1
+        ledger.event(apply_run, actor, row_id=f"user:{uid}", user_id=uid, action="notify", outcome=outcome,
+                     after={"row_ids": [r["row_id"] for r in rs], "campaign": notice.CAMPAIGN, "detail": msg,
+                            "approved_by": sender.approved_by},
+                     reason="take-back notice")
+        log(f"notice {outcome:8} user {uid}  {len(rs)} role(s)")
+    return counts
+
+
 def apply(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, plan_run: str,
-          argv: list[str], approvals: list[str], only: set[str] | None = None, pause_s: float = 0.5,
-          log: Callable[[str], None] = print) -> tuple[str, dict[str, int]]:
+          argv: list[str], approvals: list[str], excl: Exclusions, sender=None, only: set[str] | None = None,
+          pause_s: float = 0.5, log: Callable[[str], None] = print) -> tuple[str, dict[str, int]]:
     from .ledger import sha256_file  # noqa: PLC0415
     check_plan(ledger, plan_run, manifest)
+    if excl.unavailable:
+        raise SystemExit(f"{excl.unavailable}: {excl.detail}; nothing is removed this run (firstmate 020)")
+    if sender is None:
+        raise SystemExit("apply needs the take-back notice sender (Caroline's gate): every removal tells its user")
     if not approvals:
         raise SystemExit("apply removes only pairs Nick or Jan approved: run `stage`, get the set approved, "
                          "then pass --approval <id>")
@@ -461,17 +765,40 @@ def apply(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, pla
     for aid in approvals:
         covered.update({k: aid for k in approved_pairs(api, aid)})
     # an earlier run's DELETE with no known result is resolved before anything is retried
-    require_reconciled(api, ledger, ledger.apply_runs(sha256_file(manifest)), log)
-    run_id = ledger.start_run(kind="apply", actor=api.actor, manifest=manifest, parent_run=plan_run, argv=argv)
+    earlier_runs = ledger.apply_runs(sha256_file(manifest))
+    require_reconciled(api, ledger, earlier_runs, log)
+    # ...and a removal resolved only now (or whose notice failed) is announced before anything new
     counts: dict[str, int] = {}
+    for prior in earlier_runs:
+        for k, v in notify(api, ledger, prior, rows, sender, log).items():
+            counts[f"earlier_{k}"] = counts.get(f"earlier_{k}", 0) + v
+    todo = [r for r in planned_rows(ledger, plan_run, rows) if not only or r["row_id"] in only]
+    accounts, held = notice_preflight(api, sender, todo, log)
+    run_id = ledger.start_run(kind="apply", actor=api.actor, manifest=manifest, parent_run=plan_run, argv=argv)
 
     def bump(key: str) -> None:
         counts[key] = counts.get(key, 0) + 1
 
-    for row in planned_rows(ledger, plan_run, rows):
-        if only and row["row_id"] not in only:
-            continue
-        res = gate(api, row)  # re-proved immediately before the write
+    try:
+        _remove_rows(api, ledger, run_id, todo, covered, held, excl, counts, bump, pause_s, log)
+    finally:
+        try:
+            # the removals that happened are announced, whatever stopped the loop
+            counts.update(send_notices(ledger, run_id, api.actor, sender, rows, accounts, log))
+        finally:
+            ledger.finish_run(run_id, counts)
+    require_notified(ledger, run_id)
+    return run_id, counts
+
+
+def _remove_rows(api, ledger: Ledger, run_id: str, todo: list[dict[str, Any]], covered: dict[str, str],
+                 held: dict[str, str], excl: Exclusions, counts: dict[str, int], bump, pause_s: float,
+                 log: Callable[[str], None]) -> None:
+    for row in todo:
+        if str(row["user_id"]) in held:
+            res = GateResult(False, held[str(row["user_id"])])
+        else:
+            res = gate(api, row, excl)  # re-proved immediately before the write
         if res.ok and _pair_key(row["profile_id"], row["track_id"], row["role"]) not in covered:
             res = GateResult(False, "not_in_approval", res.before)
         ledger.event(run_id, api.actor, **_common(row), action="gate", outcome="pass" if res.ok else "skip",
@@ -523,8 +850,26 @@ def apply(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, pla
             counts["stopped_on_refusal"] = 1
             break
         time.sleep(pause_s)
-    ledger.finish_run(run_id, counts)
-    return run_id, counts
+
+
+def notify(api: ReadApi, ledger: Ledger, apply_run: str, rows: list[dict[str, Any]], sender,
+           log: Callable[[str], None] = print) -> dict[str, int]:
+    """Send the take-back notices of ``apply_run`` that are still owed: deferred or failed
+    sends, and removals a later live reconcile confirmed. Re-added roles are never announced.
+    Raises SystemExit (``require_notified``) while any notice is still owed afterwards."""
+    from . import notice  # noqa: PLC0415
+    run = ledger.run(apply_run)
+    if run is None or run["kind"] != "apply":
+        raise SystemExit(f"{apply_run}: not an apply run")
+    by_id = {r["row_id"]: r for r in rows}
+    removed = [by_id[rid] for rid in unnotified_row_ids(ledger, apply_run) if rid in by_id]
+    accounts = {}
+    for uid, rs in notice.by_user(removed).items():
+        if (acct := account_of(api, rs)[0]) is not None and acct["email"]:
+            accounts[uid] = acct
+    counts = send_notices(ledger, apply_run, api.actor, sender, rows, accounts, log)
+    require_notified(ledger, apply_run)
+    return counts
 
 
 def readback(api: ReadApi, ledger: Ledger, apply_run: str, *, argv: list[str],
@@ -637,6 +982,12 @@ def report(ledger: Ledger, run_id: str, *, script: str = "/opt/hydra/scripts/cre
         "counts": json.loads(end["counts_json"]) if end else None,
         "jsonl": str(ledger.jsonl_path(run_id)),
     }
+    if run["kind"] in ("plan",) + REMOVAL_KINDS:
+        # firstmate 020: affiliated users are human review + a polite contact, never automatic
+        out["needs_human_review"] = [
+            {"row_id": e["row_id"], "user_id": e["user_id"], "role": e["role"], "track_id": e["track_id"],
+             "affiliation": json.loads(e["before_json"] or "{}").get("affiliation")}
+            for e in events if e["action"] == "gate" and e["reason"] == "org_affiliated"]
     if run["kind"] in REMOVAL_KINDS:
         results = ledger.remove_results(run_id)
         removed = [e for e in results if e["outcome"] == "removed"]
@@ -650,6 +1001,8 @@ def report(ledger: Ledger, run_id: str, *, script: str = "/opt/hydra/scripts/cre
         # sent / indeterminate: the DELETE went out with no known result; readback, revert or
         # the next apply reconciles them against live credits before anything else
         out["unresolved"] = [e["row_id"] for e in ledger.unresolved_rows(run_id)]
+        # removed and still owed their take-back notice: the next apply or `notify --run` sends it
+        out["unnotified"] = unnotified_row_ids(ledger, run_id)
         out["skipped"] = [{"row_id": e["row_id"], "reason": e["reason"]}
                           for e in events if e["action"] == "gate" and e["outcome"] == "skip"]
         out["revert_command"] = f"python3 {script} revert --run {run_id} --login"

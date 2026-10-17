@@ -57,11 +57,19 @@ come first, so the cap can only ever cut the short decision tag.
 | Gate | Skip reason |
 |---|---|
 | user 15 is excluded | `excluded_user` |
+| The row is not marked `excluded` in the manifest (14 rows: 5 for alias risk, live-edition mismatch or press that may name the claimant; 9 because their users (119347, 178113, 178851, 260893, 1392361, 1403656) sent documents in Intercom, and a human must check none covers the credit before any removal, captain 013) | `excluded_row` |
+| **Live exclusion sources, read fresh by every `plan` and `apply` (firstmate 020).** Proof on file in credit-trust `proof-on-file.json` (an entry with a `request_id` matches that request, one without matches every row of the user) | `proof_on_file:<kind>` |
+| No proof-tagged note in Caroline's send ledger covers the request or the request's account | `proof_tagged` |
+| The user is not in `manifests/doc-submitted-r1.json` and the request is not one a human approved there | `doc_submitted`, `human_approved_after_doc` |
+| The row carries checked evidence for ITS OWN role (`evidence.verified` = `public_page`: a page of this track/release naming the other person in this role, or `trusted_dsp_only`: a CURRENT Spotify or Tidal credit on this recording naming them, with `evidence.sources` only `spotify`/`tidal` and the URL on `open.spotify.com` or `listen.tidal.com`, the URL's own source among `evidence.sources`; never Jaxsta or MLC alone). `evidence.url` is the cited `evidence_url`, and every name in `evidence.names` is quoted in the recorded `evidence.note` (only those names are cited to the user). 10 rows pass this and are not excluded (users 197122, 161128, 182594, 150514; checked 2026-10-16) | `evidence_unverified` |
 | The request still exists, is `approved`, has the same user/profile/track, and still lists the role | `request_not_found`, `request_not_approved:*`, `user_mismatch`, `role_not_on_request` |
 | The claimant is not one of the track's own artists (by profile id or by name) | `claimant_is_track_artist` |
 | The claimant still holds the role (a live muso credit) | `claimant_credit_already_gone` |
 | Spotify/Tidal/MLC/Jaxsta credit the role to someone else and NOT to the claimant. The claimant is matched by raw-profile link, name, known-as names or legal name (`credit_review.evidence.classify_roles`) | `not_contradicted_live:CONFIRMED` / `:UNVERIFIABLE` |
-| A person named in the cited evidence is still among those trusted holders | `evidence_holder_changed` |
+| A person named in the checked evidence (`evidence.names`) is still among those trusted holders | `evidence_holder_changed` |
+| `trusted_dsp_only` only: a named person is still a live holder in EVERY cited source (Spotify/Tidal; the notice names each one and links the URL's), not only in Jaxsta/MLC or in just one of them | `dsp_holder_vanished` |
+| **Last, only for a row that passed every gate above and would be removed (firstmate 021).** Org affiliation (credit-trust `org-affiliation.json`, captain 2026-10-16 ~18:36Z: "make sure these guys you remove credits or ban are not part of any major label or publisher too"): `contributor`, `verified_org` or `authenticated_domain` is human review + a polite contact, never automatic; `claimed_unverified` and `none` are allowed and shown in the plan's `affiliation=` column; a user with no verdict is skipped. A row that failed an earlier gate keeps that reason and is never in `needs_human_review` | `org_affiliated` (listed under `needs_human_review` by `plan` and `report`), `affiliation_unknown` |
+| The user's take-back notice would go out today (see the notice section) | `notice_would_defer` |
 
 Any skip is recorded with its reason and is never retried around. Those roles join the
 verify waves.
@@ -93,12 +101,17 @@ current counts): 30 roles would be removed, on 24 requests from 13 users. 18 rol
 S=/opt/hydra/scripts/credit-retro.py     # on node-8 (or a checkout of main)
 python3 $S plan                           # dry-run; prints the plan run id
 python3 $S stage --plan <plan_run>        # approval set(s); Nick or Jan approves each (see Approval path)
-python3 $S apply --plan <plan_run> --approval <id> --login --yes-remove --only '<one row_id>'   # canary
+python3 $S apply --plan <plan_run> --approval <id> --notice-approved-by <SlackUID> --login --yes-remove --only '<one row_id>'   # canary
 python3 $S readback --run <apply_run>     # canary removed, trusted holders intact
-python3 $S apply --plan <plan_run> --approval <id> [--approval <id2>] --login --yes-remove
+python3 $S apply --plan <plan_run> --approval <id> [--approval <id2>] --notice-approved-by <SlackUID> --login --yes-remove
 python3 $S readback --run <apply_run>     # re-run until no row is `pending` (ingestion is async)
 python3 $S report --run <apply_run>       # counts, refused/errored rows, the revert command
 ```
+
+Pick the canary row from a user with ONE take-back role (182594 or 150514). The canary's
+notice uses up that user's one message for the UTC day, so a second role of the same user
+would be skipped as `notice_would_defer` by the full apply that day and wait for a later
+day's `plan` + `apply`.
 
 **One-command revert:** `python3 $S revert --run <apply_run> --login`. It re-adds exactly
 the roles that run removed (a POST to the same path) and never re-adds a role twice. Verify
@@ -141,11 +154,13 @@ python3 $S plan
 python3 $S stage --plan <plan_run>          # agent token is fine: staging grants nothing
 #   -> Nick or Jan approves each set once, from their own session: POST /admin/credit-removals/<id>/approve
 python3 $S approval-status --id <id>         # status, pairs, consumed
-python3 $S apply --plan <plan_run> --approval <id1> [--approval <id2>] --login --yes-remove
+python3 $S apply --plan <plan_run> --approval <id1> [--approval <id2>] --notice-approved-by <SlackUID> --login --yes-remove
 ```
 
 - `stage` posts the plan's would-remove rows: one pair per profile+track with its roles.
   - `sourceRef` names the plan run, the manifest sha256 and the set number.
+  - A row resting on the Spotify/Tidal credit alone carries `evidence_class=dsp_track_level`
+    in its evidence line, so the board can tell it apart from a public credits page.
   - Fable: an approval alone is never enough; the evidence must be attached. #10597's
     stage body has no per-pair evidence field (the `payload` column is not exposed), so
     every pair's public-credit URL goes, untruncated and keyed `[profile/track/role]`,
@@ -161,6 +176,75 @@ python3 $S apply --plan <plan_run> --approval <id1> [--approval <id2>] --login -
   yet. Once the consume wiring lands (core-backend #10578's coverage on the removal route),
   `apply --approval` is where the agent token plus the approval id replaces the session.
   That change is one transport branch.
+
+### The take-back notice (captain requirement, firstmate 012)
+
+Every take-back tells its user, when the removal executes and never before. The copy is in
+`retro-drafts/takeback-notice.md`. It is one short, polite message per user, and it says:
+- which credit and role was removed;
+- why: who the public credits name, with the evidence link;
+- how to dispute it: reply with one document.
+
+Removal and notice are ONE step (firstmate 014): a role is never removed without its
+message going out.
+
+- **Approval of the copy:** `apply` and `notify` require `--notice-approved-by <SlackUID>`,
+  the human who approved THIS copy and run. There is no default and the captain is never
+  assumed; the id is passed to the gate as `--approved-by` and recorded with every
+  `notify` event in the ledger.
+- **Before the first DELETE:** `apply` resolves each affected user's account from a
+  credit request that still belongs to that user (request `userId` and account id). A user
+  with no such request is held (`user_mismatch` or `request_not_found`): nothing of theirs is
+  removed and nobody is messaged. It then validates that user's notice through Caroline's gate
+  (`intercom-verify-request.sh send --campaign takeback-notice --validate`).
+  - If the gate would defer it today (exit 3: one message per user per UTC day), that
+    user's roles are NOT removed this run (`notice_would_defer`). The pair stays in the
+    plan's rows and goes on a later run, with its message.
+  - Any other refusal refuses the whole run: nothing is removed.
+- **After the removals:** one notice per user lists the roles THIS run removed. Every
+  outcome (`sent`, `deferred`, `failed`) is recorded in the apply run as action `notify`,
+  without the email. If the run stopped early, the roles it did remove are still announced.
+  A send-gate call that hangs or cannot run is recorded as `failed`, and the run is always
+  finished in the ledger.
+- **Removals confirmed later:** a DELETE whose result was unknown (`sent` after a crash,
+  `indeterminate` after a lost response) and that a later live reconcile records as
+  `removed` is announced by the next `apply` before anything new is removed (counts
+  `earlier_notice_*`). `report` lists every removed role still owed a notice under
+  `unnotified`; a role re-added by `revert`/`restore` is never announced.
+- **Never reported complete while a notice is owed:** if any role the run removed has no
+  `sent` notice (the send deferred or failed after the DELETE), `apply` exits non-zero naming
+  the run and its unnotified rows. Every later `apply` first retries the notices earlier runs
+  owe and removes nothing new until they are all sent.
+- **Retry:** `python3 $S notify --run <apply_run> --notice-approved-by <SlackUID>` sends the
+  notices that run still owes (deferred, failed, or confirmed by a later reconcile). It too
+  exits non-zero while any notice is still owed (a deferred one goes on the next UTC day);
+  escalate to #clio_devops if it keeps failing.
+- **Preview:** `python3 $S notice-preview --plan <plan_run>` renders every user's notice
+  without sending.
+- **Dependency:** the gate needs a `takeback-notice` campaign (credit-trust-caroline-t06)
+  whose `--validate` reports the per-day cap with exit 3. Until it has one, `--validate`
+  fails and `apply` refuses.
+
+### Live exclusion sources fail closed
+
+`plan` and `apply` read them every run: `--proof-on-file` (default
+`/var/lib/credit-trust/proof-on-file.json`, env `CREDIT_RETRO_PROOF_ON_FILE`),
+`--org-affiliation` (default `/var/lib/credit-trust/org-affiliation.json`, env
+`CREDIT_RETRO_ORG_AFFILIATION`), `--verify-ledger` (Caroline's send ledger) and
+`--doc-submitted`. The hand-set `excluded` flags stay, but they were a 2026-10-16 snapshot:
+a user who sends a document after a deferred day keeps the role.
+- proof-on-file missing, unreadable, `generated_at` older than 3 hours or more than 5 minutes in
+  the future, or any source with
+  `stale` not `false`; or the send ledger or doc manifest unreadable: `plan` skips every row
+  as `proof_source_unavailable` and `apply` refuses before the first DELETE.
+- proof-on-file, the send ledger or the doc manifest malformed (wrong shape): same as
+  unreadable.
+- org-affiliation missing, unreadable or malformed: every row
+  `affiliation_source_unavailable`, and `apply` refuses before the first DELETE.
+- A single user with no verdict does NOT stop the run (firstmate 021): that user's
+  would-be-removed rows are skipped as `affiliation_unknown`, so nothing of theirs is
+  removed, and every other user's rows go ahead.
+- Every skip is in the ledger with its reason; no email is written there.
 
 ## Ledger
 
@@ -227,8 +311,9 @@ KEEP_established, KEEP_web_credible (aliases), KEEP_confirmed and user 15 were n
 | Editing burst accounts: at least 40 loose editing claims and a peak of 40/day, kept only if the whole-profile review of their 8 biggest tracks did not find trusted sources naming them as editor on at least half | ONE ask per account | 27 of 29 (Benedikt Schröder and René Möller cleared) |
 | Editing rows of everyone else: a trusted source names a different editor (any track), or unverifiable on a track with popularity >= 30 (the editing role only) | rows | 702 requests / 94 users |
 
-**Total: 417 users (141 paying), 2,069 requests / 5,124 role credits listed, plus 36
-account asks.** Waves: W-01 and W-02 (200 a day, paid first, then big tracks), W-03 17 users.
+**Total before the captain 013 exclusion: 417 users (141 paying), 2,069 requests / 5,124
+role credits listed, plus 36 account asks; after it: 219 users (46 paying).** Waves (before
+the exclusion): W-01 and W-02 (200 a day, paid first, then big tracks), W-03 17 users.
 With `--editing-min-pop 60` (big tracks only) the total is 361 users (123 paying). Firstmate's
 target was ~300-350; the choice of mid (30) vs big (60) is the lever.
 
@@ -238,8 +323,25 @@ small accounts. They are left alone and written to `<run>/unverified-internal.js
 (request ids only), the basis for the internal unverified flag on the board / valuation.
 
 **Rules:**
+- **Never ask anyone who already submitted a document** (captain 013, verbatim: "make sure
+  you arent asking for things from users that already submitted documents and we approved.
+  dont piss anyoen off"). `manifests/doc-submitted-r1.json` (user ids only, checked
+  2026-10-16) lists 198 users with an Intercom attachment in any conversation or an
+  identity/upload document in the verifications table, approved or pending, and the
+  requests a human (jan@/nick@) approved. `waves.select` drops those users from every ask
+  (rows, velocity and editing-burst account asks) and drops
+  those requests. `index.json` reports `doc_submitted.before` / `.after` (417 users / 141
+  paying -> 219 / 46). Once a `credit_proofs` table exists, its users join the list. When in
+  doubt, don't send.
 - **At most one message per user.** Rows and account asks are merged into one payload
   (`account_asks[]` is a section).
+- **The take-back notice is a removed user's only message** (firstmate 016). A user with a
+  `sent` take-back notice in any apply run is in no wave for 30 days after it, and a user
+  still owed a notice (deferred, failed, or confirmed by a later reconcile) is in none
+  either; `index.json` counts them under `takeback_notice_quiet_users`. No wave restates a
+  removal: a role removed by ANY apply run on the take-back manifest (the canary, the full
+  run, re-runs after a stop) and not re-added by a revert/restore is never listed or asked
+  about again. `index.json` lists those runs under `apply_runs`.
 - **Never re-ask someone who sent proof.** `prepare-waves --verify-ledger` drops every
   request already covered by a proof-tagged note. With live reads it also skips accounts
   that ever sent proof (`skip_already_sent_proof`) or already got a past-credit ask
@@ -247,6 +349,25 @@ small accounts. They are left alone and written to `<run>/unverified-internal.js
   safe: every payload is marked `send_ledger_unavailable` (not sendable) and the index says
   `send_ledger: UNAVAILABLE`.
 - **Nothing is sent** before Fable's copy GO and the merged send tool.
+- **`send-check` immediately before EVERY send (firstmate 018).** A payload is prepared
+  days before it goes out, and a take-back notice, a proof or an ask can land in between.
+  The sender runs `python3 $S send-check --file <payload.json> --doc-submitted <list>` right before each POST
+  and sends only on exit 0. There is no batch form: a wave dir checked ahead of time
+  could hold a dropped user and still read green. It re-reads, at
+  that moment: the 30-day take-back quiet window and users still owed a notice (this
+  ledger), proof-tagged notes, proof senders and past-credit asks (`--verify-ledger`), and
+  the doc-submitted list (`--doc-submitted`). That list must be rebuilt from the same
+  sources (Intercom attachments in any conversation, the verifications table, human
+  approvals) before sending: its `generated_at` must be at most 3 hours old (and not more
+  than 5 minutes in the future: a future stamp never reads as fresh). An untagged
+  document a user attached after the list was built is in no other source. The committed
+  `manifests/doc-submitted-r1.json` has no `generated_at`, so it never clears a send. A failing payload is rewritten in place with
+  `status: dropped_at_send_check` and the reason (exit 1) and is never sent. A passing one
+  is rewritten with its credits filtered (proof-covered, human-approved and removed roles
+  go). Exit 2 means it could not check (no ledger, an unreadable send ledger, or a
+  doc-submitted list that is unreadable, has no `generated_at`, is older than 3 hours or is
+  future-dated):
+  nothing is sent and no file is touched.
 
 The editing selection comes from `manifests/editing-ask-r1.json`. It was built from the
 live trusted-credit check on 2026-10-16: 3,837 rows. The burst accounts' whole-profile
@@ -256,13 +377,9 @@ sample is 8 tracks each, and every non-burst editing row was checked.
 user to `<state-dir>/waves/<run_id>/<wave>/user-<id>.json` (mode 0600) and an `index.json`.
 `--apply-run` only selects the take-back manifest that run used (and refuses if it changed
 since); without it, `--takeback` names the manifest.
-- **T-01** (10-16): the take-back users. The note about their removed (proven) roles and the
-  friendly ask for their other credits go in one message. "Removed" means removed by ANY apply
-  run on the take-back manifest (the canary, the full run, re-runs after a stop) and not
-  re-added by a revert/restore, so a removed role is never asked about again. `index.json`
-  lists those runs under `apply_runs`.
-- **W-01..W-nn**: every other ASKED user, `--per-day` users a day from 10-16. Paid users
-  come first, then by the user's biggest current track, then by credit count.
+- **W-01..W-nn**: every ASKED user, `--per-day` users a day from 10-16. Paid users come
+  first, then by the user's biggest current track, then by credit count. There is no T-01
+  take-back wave any more: the removal is announced only by the notice `apply` sends.
 
 Payload contents:
 - the `--credits-file` shape of `scripts/intercom-verify-request.sh` (`user` + `credits[]`,
@@ -275,7 +392,8 @@ Payload contents:
   tool must never use its removal-promising `verify-live` campaign for these. The same name
   is what `--verify-ledger` reads back to skip users already asked;
 - `removal_threat: false` and `deadline_language: false`;
-- `follow_up_on`: one optional friendly nudge at day 14 (`retro-follow-up`), no deadline;
+- no follow-up: the payload is the user's one past-credit message (send-check drops anyone
+  already asked);
 - `flag_unverified_after` (day 30, internal flag only);
 - `on_silence`: the credit stays, flagged unverified internally, never removed;
 - `proof_channel` (Intercom now, email when E-IN lands);
@@ -286,9 +404,10 @@ refresh titles, and drop credits that are no longer approved. A user whose live 
 is written with status `live_read_error` and is not sendable (counted under
 `not_sendable`); prepare again when the API answers. `--offline` skips Muso entirely.
 
-Templates are in `retro-drafts/`. The past-credit grouped ask, the account ask, the
-follow-up and the take-back note are new drafts that still need Fable's review. None of them
-carries a removal date.
+Templates are in `retro-drafts/`. The past-credit grouped ask and the account ask are new
+drafts that still need Fable's review; the take-back notice has Fable's copy edits applied,
+the old take-back wave note is retired, and the follow-up draft is not scheduled. None of
+them carries a removal date.
 
 Velocity and editing-burst accounts get ONE ask each (`account-three-tracks`): three tracks
 of their choice from the burst. A user who also has HOLD rows gets that as a section of the
