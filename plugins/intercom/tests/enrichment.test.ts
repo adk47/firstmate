@@ -181,14 +181,14 @@ describe("enrichSession — prior-chat recall", () => {
     expect(state.enrichment?.priorChats?.mostRecentTitle).toBe("how do I claim my profile");
   });
 
-  it("omits priorChats entirely when there are no prior conversations", async () => {
+  it("records an explicit zero count when the lookup succeeded with no prior conversations", async () => {
     const state = stateWithConv("conv_current");
     await enrichSession(state, IDENTITY, {
       lookupSnapshot: async () => null,
       // only the current one matched
       listPriorConversations: async () => ({ conversations: [CONVOS[0]], totalCount: 1 }),
     });
-    expect(state.enrichment?.priorChats).toBeUndefined();
+    expect(state.enrichment?.priorChats).toEqual({ count: 0 });
   });
 
   it("does not attempt prior-chat lookup without a contactId", async () => {

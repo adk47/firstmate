@@ -171,7 +171,7 @@
         ]
       },
       "credit_verification": {
-        "what": "Inspect pending UVN credits, ask for exact proof, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
+        "what": "Inspect pending UVN credits, ask for proof at most once and only if none was given before, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
         "examples": [
           "my submitted credit is stuck in verification"
         ],

@@ -47,10 +47,12 @@ VELOCITY_CATALOG_TRACKS = 50
 
 @dataclass(frozen=True)
 class TrackCatalog:
-    """Catalog popularity of a track and of every one of its artists."""
+    """Catalog popularity of a track and of its linked artists (artists that link a catalog profile)."""
     popularity: int | None
-    artist_popularity: int | None   # highest catalog popularity among the track's artists
-    artists_known: bool             # every artist's popularity was read
+    artist_popularity: int | None   # highest catalog popularity among the track's linked artists
+    artists_known: bool             # every linked artist's popularity was read
+    artist_read_failed: bool = False  # a linked artist's profile could not be read this run (5xx or 404)
+    not_found: bool = False         # the track or a linked artist answered 404 on the re-read too
 
     @property
     def big(self) -> bool:
@@ -61,6 +63,7 @@ class TrackCatalog:
 
 
 UNKNOWN_TRACK = TrackCatalog(None, None, False)
+NOT_FOUND_TRACK = TrackCatalog(None, None, False, not_found=True)
 
 
 def _int(value: Any) -> int | None:
@@ -226,6 +229,7 @@ class Evidence:
     errors: list[str] = field(default_factory=list)
     claimant_domains: list[str] | None = None   # None: the claimant profile was unreadable
     claimant_names: list[str] = field(default_factory=list)
+    catalog_not_found: bool = False   # a catalog read (track, linked artist, claimant) answered 404 twice
 
     @property
     def track_popularity(self) -> int | None:
@@ -354,6 +358,7 @@ class EvidenceBuilder:
         self.velocity_pages = velocity_pages
         self.always_velocity = always_velocity
         self._profiles: dict[str, dict[str, Any] | None] = {}
+        self._not_found: set[str] = set()   # ids that answered 404 twice this run
         self._signals: dict[str, ProfileSignals] = {}
         self._raw: dict[str, list[dict[str, Any]]] = {}
         self._tracks: dict[str, tuple[TrackCatalog, str | None]] = {}
@@ -368,15 +373,28 @@ class EvidenceBuilder:
             return self._profile_locks.setdefault(profile_id, threading.Lock())
 
     # -- cached reads -------------------------------------------------------
+    def _reread(self, fn: Any, record_id: str) -> Any:
+        """One read, and ONE re-read on a 404 (core-backend answers 404 for a
+        failed catalog read as well as for a missing record). A second 404 is
+        remembered and propagates."""
+        try:
+            return fn(self.admin, record_id)
+        except admin_api.NotFound:
+            try:
+                return fn(self.admin, record_id)
+            except admin_api.NotFound:
+                self._not_found.add(record_id)
+                raise
+
     def raw_credits(self, track_id: str) -> list[dict[str, Any]]:
         if track_id not in self._raw:
-            self._raw[track_id] = admin_api.track_raw_credits(self.admin, track_id)
+            self._raw[track_id] = self._reread(admin_api.track_raw_credits, track_id)
         return self._raw[track_id]
 
     def profile_doc(self, profile_id: str) -> dict[str, Any] | None:
         if profile_id not in self._profiles:
             try:
-                self._profiles[profile_id] = admin_api.profile(self.admin, profile_id)
+                self._profiles[profile_id] = self._reread(admin_api.profile, profile_id)
             except admin_api.AdminError:
                 self._profiles[profile_id] = None
         return self._profiles[profile_id]
@@ -387,7 +405,9 @@ class EvidenceBuilder:
             return UNKNOWN_TRACK, "track: no trackId"
         if track_id not in self._tracks:
             try:
-                doc = admin_api.track(self.admin, track_id)
+                doc = self._reread(admin_api.track, track_id)
+            except admin_api.NotFound as exc:
+                self._tracks[track_id] = (NOT_FOUND_TRACK, f"track {track_id}: 404 on the re-read too: {exc}")
             except admin_api.AdminError as exc:
                 self._tracks[track_id] = (UNKNOWN_TRACK, f"track {track_id}: {exc}")
             else:
@@ -395,17 +415,28 @@ class EvidenceBuilder:
         return self._tracks[track_id]
 
     def _catalog_of(self, doc: dict[str, Any]) -> TrackCatalog:
+        """Same rule as the IDP's _is_big_track (industry-data-processing
+        credit_validation_rules.py): unknown TRACK popularity is big; only the
+        artists that link a catalog profile are checked; a track with no linked
+        artist is decided by its own popularity (not big below 60); a linked
+        artist whose popularity cannot be read is unknown, so big. Before this
+        (Fable credit-AI report, 10-14) an unlinked artist made the track big:
+        35 of 89 model calls that day were on pop-0/1 tracks the IDP calls small."""
         artists = doc.get("artists") if isinstance(doc.get("artists"), list) else []
-        ids = [_artist_id(a) for a in artists]
-        known = bool(ids) and all(ids)
+        ids = list(dict.fromkeys(filter(None, (_artist_id(a) for a in artists))))
+        known = True
+        failed = False
         pops: list[int] = []
         for aid in filter(None, ids):
-            pop = _int((self.profile_doc(aid) or {}).get("popularity"))
+            artist = self.profile_doc(aid)
+            failed = failed or artist is None
+            pop = _int((artist or {}).get("popularity"))
             if pop is None:
                 known = False
             else:
                 pops.append(pop)
-        return TrackCatalog(_int(doc.get("popularity")), max(pops) if pops else None, known)
+        return TrackCatalog(_int(doc.get("popularity")), max(pops) if pops else None, known, failed,
+                            bool(self._not_found.intersection(ids)))
 
     def profile_signals(self, profile_id: str, fallback: dict[str, Any]) -> ProfileSignals:
         with self._profile_lock(profile_id):
@@ -578,4 +609,5 @@ class EvidenceBuilder:
             errors=errors,
             claimant_domains=claimant_domains(doc) if claimant_doc is not None else None,
             claimant_names=[n for n in names if n],
+            catalog_not_found=catalog.not_found or (claimant_doc is None and profile_id in self._not_found),
         )

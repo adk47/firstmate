@@ -69,11 +69,11 @@ export interface EnrichDeps {
 function summarizePriorChats(
   page: ContactConversationsPage,
   currentConversationId: string,
-): EnrichmentState["priorChats"] | undefined {
+): NonNullable<EnrichmentState["priorChats"]> {
   const prior = page.conversations.filter((c) => c.id !== currentConversationId);
   const excluded = page.conversations.length - prior.length;
   const count = Math.max(page.totalCount - excluded, prior.length);
-  if (count === 0) return undefined;
+  if (count === 0) return { count: 0 };
   const mostRecent = prior[0]; // client returns most-recent-first
   const ref = mostRecent?.title ?? mostRecent?.snippet;
   return {

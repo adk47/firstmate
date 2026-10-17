@@ -90,14 +90,22 @@ class ArmResult:
 
 def run_arm(admin, ledger: Ledger, items: list[tuple[str, dict[str, Any]]], model: str, arm: str, mode: str,
             web: bool = True, web_engine: str | None = None, budget_usd: float = 20.0,
-            use_model: bool = True, workers: int = 6) -> ArmResult:
+            use_model: bool = True, workers: int = 6, batch: bool = False,
+            judge_factory: Any = None) -> ArmResult:
     from concurrent.futures import ThreadPoolExecutor
 
     from .evidence import EvidenceBuilder
 
     cfg = Config(mode=mode, phase="shadow", sample_rate=1.0, max_model_calls=10_000, budget_usd=budget_usd,
                  web=web, model=model, web_engine=web_engine)
-    judge = Judge(model, web=web, web_engine=web_engine) if use_model else None
+    # judge_factory(model) supplies another backend with the same interface
+    # (credit-trust's fetched-sources Codex judge, `--provider codex`).
+    if not use_model:
+        judge = None
+    elif judge_factory is not None:
+        judge = judge_factory(model)
+    else:
+        judge = Judge(model, web=web, web_engine=web_engine)
     res = ArmResult(model=model if use_model else "catalog-only", arm=arm, mode=mode)
     builder = EvidenceBuilder(admin, always_velocity=True)
     hook = blind if arm == "blind" else None
@@ -134,8 +142,38 @@ def run_arm(admin, ledger: Ledger, items: list[tuple[str, dict[str, Any]]], mode
             stats.budget_stopped = True
         return label, ev, d, j, stats, None
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(one, items))
+    def batched() -> list:
+        """The production path: evidence for every row first, then the model
+        once per profile unit (runner.judge_grouped), then the policy."""
+        from .policy import combine, deterministic
+        from .runner import judge_grouped
+        built = []
+        for label, req in items:
+            try:
+                ev = builder.build(req)
+            except Exception as exc:  # noqa: BLE001
+                built.append((label, None, str(exc)))
+                continue
+            if hook:
+                hook(ev)
+            built.append((label, ev, None))
+        stats = RunStats()
+        want = [ev for _l, ev, _e in built if ev is not None and deterministic(ev, mode).needs_model]
+        judged, _late, _over = judge_grouped(judge, cfg, stats, want, budget=budget_usd)
+        out = [(None, None, None, None, stats, None)]
+        for label, ev, err in built:
+            if ev is None:
+                out.append((label, None, None, None, RunStats(), err))
+                continue
+            j = judged.get(ev.request_id)
+            out.append((label, ev, combine(ev, mode, j), j, RunStats(), None))
+        return out
+
+    if batch:
+        results = batched()
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(one, items))
     for label, ev, d, j, stats, err in results:
         res.stats.model_calls += stats.model_calls
         res.stats.cost_usd += stats.cost_usd
