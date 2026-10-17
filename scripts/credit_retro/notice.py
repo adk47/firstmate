@@ -12,10 +12,11 @@ ACCOUNT email, HTML-escapes the structured fields, runs the leak check and recor
 send in its ledger. This module only builds the structured credits file, renders the
 preview for review, and calls the tool. It never posts anything itself.
 
-``apply`` validates every notice through the tool (``--validate``) BEFORE the first DELETE
+``apply`` validates every notice through the tool (``--validate``) BEFORE the execute
 and refuses the whole run if any notice cannot be sent: no removal without its message. A
-user whose notice the tool would defer today (exit 3, one message per user per day) keeps
-their roles this run; the pair is retried on a later run.
+user whose notice the tool would defer today (exit 3, one message per user per day) has
+their whole set withheld this run (``notice_would_defer``); it stays approved and is
+executed, with its notice, on a later day's run.
 
 The human who approved THIS copy and run is passed per run (``--notice-approved-by``); it is
 never defaulted and is recorded in the ledger with every notice.

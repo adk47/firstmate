@@ -181,7 +181,7 @@ class Ledger:
                                (parent_run, kind)).fetchall()
 
     def remove_results(self, apply_run: str) -> list[sqlite3.Row]:
-        """The LATEST remove event per row of an apply run. A DELETE is recorded as
+        """The LATEST remove event per row of an apply run. A removal (execute pair) is recorded as
         ``sent`` before it goes out; the response (or a later live reconcile) appends
         the result, so a row whose latest outcome is still in UNRESOLVED may or may
         not have been removed."""
@@ -195,7 +195,7 @@ class Ledger:
         return [e for e in self.remove_results(apply_run) if e["outcome"] == "removed"]
 
     def unresolved_rows(self, apply_run: str) -> list[sqlite3.Row]:
-        """Rows whose DELETE went out with no known result (crash or transport error)."""
+        """Rows whose removal went out with no known result (crash or lost response)."""
         return [e for e in self.remove_results(apply_run) if e["outcome"] in UNRESOLVED]
 
     def revert_results(self, apply_run: str) -> list[sqlite3.Row]:

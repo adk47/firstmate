@@ -108,27 +108,68 @@ class FakeApi:
 
     approval = None
 
-    def approve(self):
-        """Nick/Jan approved a set covering the row's pair."""
+    def approve(self, pairs=None):
+        """Nick/Jan approved a set covering the row's pair (#10633 stamps each pair's decision)."""
         self.approval = {"id": "ap-1", "status": "approved", "expiresAt": None,
-                         "pairs": [{"profileId": PID, "trackId": TID, "role": "mixing"}]}
+                         "pairs": pairs or [{"id": "1", "profileId": PID, "trackId": TID, "role": "mixing",
+                                             "decision": "approved", "consumedAt": None}]}
         return ["ap-1"]
+
+    def execute(self):
+        """core #10638: spend every approved, unconsumed pair; remove the role; per-pair results."""
+        results = []
+        for p in self.approval["pairs"]:
+            base = {k: p[k] for k in ("profileId", "trackId", "role")} | {"pairId": p["id"]}
+            if p.get("decision") != "approved":
+                results.append(base | {"status": "not_approved"})
+            elif p.get("consumedAt"):
+                results.append(base | {"status": "already_executed"})
+            else:
+                p["consumedAt"] = "2026-10-17T04:00:00Z"
+                self.raws = [r for r in self.raws if not (r["profile"]["id"] == p["profileId"]
+                                                           and r["credit"] == p["role"])]
+                results.append(base | {"status": "removed", "removalEventId": "9"})
+        return {"id": self.approval["id"], "ok": True, "results": results}
 
     def write(self, method, path, body, headers=None):
         self.writes.append((method, path, body, headers))
         if path == "/admin/credit-removals":
             self.approval = {"id": "ap-1", "status": "pending", "expiresAt": None,
-                             "pairs": [{"profileId": p["profileId"], "trackId": p["trackId"], "role": r.lower()}
-                                       for p in body["pairs"] for r in p["roles"]]}
+                             "pairs": [{"id": str(n), "profileId": p["profileId"], "trackId": p["trackId"],
+                                        "role": r.lower(), "decision": None, "consumedAt": None}
+                                       for n, (p, r) in enumerate(((p, r) for p in body["pairs"]
+                                                                   for r in p["roles"]), 1)]}
             return 201, {"result": "ok", "data": {"id": "ap-1", "status": "pending"}}
         if self.write_status >= 300:
             return self.write_status, {"result": "error", "errorCode": "credit_removal_agent_refused"}
+        if path.endswith("/execute"):
+            return 200, {"result": "ok", "data": self.execute()}
         role = body["credits"][0].lower()
-        if method == "DELETE":
-            self.raws = [r for r in self.raws if not (r["profile"]["id"] == PID and r["credit"] == role)]
-        else:
-            self.raws.append(raw("muso", "Rishi Krishnan", role, PID))
+        self.raws.append(raw("muso", "Rishi Krishnan", role, PID))
         return 200, {"result": "ok"}
+
+
+def cli_apply(api, state_dir, manifest, plan_id) -> tuple[int, str]:
+    """Run ``credit-retro.py apply`` in-process with ``api`` as the human's session and its FakeSender
+    as Caroline's gate. Returns (exit code, stderr)."""
+    import contextlib  # noqa: PLC0415
+    import importlib.util  # noqa: PLC0415
+    import io  # noqa: PLC0415
+    from unittest import mock  # noqa: PLC0415
+    spec = importlib.util.spec_from_file_location("credit_retro_cli", CLI)
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    live = Path(_LIVE_DIR.name)
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.object(cli, "session_api", lambda args: api), \
+            mock.patch.object(notice, "ScriptSender", lambda *a, **k: api.sender), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = cli.main(["--state-dir", str(state_dir), "apply", "--manifest", manifest, "--plan", plan_id,
+                       "--approval", "ap-1", "--yes-remove", "--notice-approved-by", "U0TESTAPPR",
+                       "--proof-on-file", str(live / "proof-on-file.json"),
+                       "--org-affiliation", str(live / "org-affiliation.json"),
+                       "--verify-ledger", str(live / "verify.sqlite3")])
+    return rc, err.getvalue()
 
 
 def write_manifest(tmp: Path, rows) -> str:
@@ -281,10 +322,8 @@ class FlowTests(unittest.TestCase):
         apply_id, counts = takeback.apply(api, self.ledger, self.rows, manifest=self.manifest, plan_run=plan_id,
                                           excl=OPEN, argv=[], pause_s=0, approvals=api.approve(), sender=api.sender, log=self.log)
         self.assertEqual(counts, {"removed": 1, "notice_sent": 1})
-        method, path, body, headers = api.writes[0]
-        self.assertEqual((method, path, body), ("DELETE", f"/admin/track/{TID}/profile/{PID}/credits",
-                                                {"credits": ["Mixing"]}))
-        self.assertIn("https://www.qobuz.com/x", headers["X-Removal-Approval-Ref"])
+        # core #10638: the human's session executes the approved set; the tool never DELETEs itself
+        self.assertEqual([w[:3] for w in api.writes], [("POST", "/admin/credit-removals/ap-1/execute", {})])
         # the Engineer role on the same request is untouched
         self.assertTrue(any(r["credit"] == "engineer" and r["profile"]["id"] == PID for r in api.raws))
 
@@ -315,10 +354,17 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(counts, {"skip:evidence_holder_changed": 1})
         api.raws = good  # the source changed after the plan: the live gate alone would now pass
         self.assertTrue(takeback.gate(api, row(), OPEN).ok)
-        _, counts = takeback.apply(api, self.ledger, self.rows, manifest=self.manifest, plan_run=plan_id,
-                                   excl=OPEN, argv=[], pause_s=0, approvals=api.approve(), sender=api.sender, log=self.log)
-        self.assertEqual(counts, {})
-        self.assertEqual(api.writes, [])
+        api.approve()
+        rc, err = cli_apply(api, self.dir / "state", self.manifest, plan_id)
+        # the approved set holds a pair the plan never showed as would_remove: the WHOLE set is withheld,
+        # the pair is recorded, and the CLI exits 3 so Nick or Jan decides
+        self.assertEqual((rc, api.writes), (3, []))
+        self.assertIn("WITHHELD", err)
+        apply_id = self.ledger.child_runs(plan_id, "apply")[0]["run_id"]
+        rep = takeback.report(self.ledger, apply_id)
+        self.assertEqual(rep["counts"], {"withheld_sets": 1, "withheld:pair_not_in_plan": 1})
+        self.assertEqual(rep["withheld"], [{"row_id": f"pair:{PID}/{TID}/mixing", "user_id": None,
+                                            "reason": "pair_not_in_plan", "approval": "credit-removal-approval ap-1"}])
 
     def test_last_credit_on_track_is_recorded(self):
         api = FakeApi()
@@ -382,11 +428,13 @@ class FlowTests(unittest.TestCase):
     def test_a_role_removed_by_an_earlier_apply_run_is_never_asked_again(self):
         api = FakeApi()
         plan_id, _ = takeback.plan(api, self.ledger, self.rows, manifest=self.manifest, excl=OPEN, argv=[], log=self.log)
+        # canary: one user's set executed first (one set per user, firstmate 026)
         takeback.apply(api, self.ledger, self.rows, manifest=self.manifest, plan_run=plan_id, excl=OPEN, argv=[],
-                       only={f"{RID}:Mixing"}, pause_s=0, approvals=api.approve(), sender=api.sender, log=self.log)
+                       pause_s=0, approvals=api.approve(), sender=api.sender, log=self.log)
         plan2, _ = takeback.plan(api, self.ledger, self.rows, manifest=self.manifest, excl=OPEN, argv=[], log=self.log)
+        # the same set again: its pair is consumed, so execute spends nothing
         full_id, counts = takeback.apply(api, self.ledger, self.rows, manifest=self.manifest, plan_run=plan2,
-                                         excl=OPEN, argv=[], pause_s=0, approvals=api.approve(), sender=api.sender, log=self.log)
+                                         excl=OPEN, argv=[], pause_s=0, approvals=["ap-1"], sender=api.sender, log=self.log)
         self.assertNotIn("removed", counts)
         hold = {"request_id": RID, "user_id": UID, "profile_id": PID, "track_id": TID, "track_title": "Lemonade",
                 "artist": "k3", "pop_now": 35, "paying": False, "tier": "HOLD", "sources": ["C"],
@@ -432,7 +480,7 @@ class FlowTests(unittest.TestCase):
         api.sender.verdict = "deferred"
         _, day1 = takeback.apply(api, self.ledger, self.rows, manifest=self.manifest, plan_run=plan_id, excl=OPEN, argv=[],
                                  pause_s=0, approvals=api.approve(), sender=api.sender, log=self.log)
-        self.assertEqual(day1, {"skip:notice_would_defer": 1})
+        self.assertEqual(day1, {"withheld:notice_would_defer": 1, "withheld_sets": 1})
         hold = {"request_id": RID, "user_id": UID, "profile_id": PID, "track_id": TID, "track_title": "Lemonade",
                 "artist": "k3", "pop_now": 35, "paying": False, "tier": "HOLD", "sources": ["C"],
                 "roles": [{"role": "Engineer", "verdict": "UNVERIFIABLE"}]}
@@ -589,15 +637,15 @@ class FlowTests(unittest.TestCase):
         self.assertFalse((self.dir / "cli").exists())
 
     def lost_response(self, api, *, reads_fail):
-        """The server performs the DELETE, then the response is lost."""
+        """The server performs the execute, then the response is lost."""
         real_write, real_get = api.write, api.get
 
         def write(method, path, body, headers=None):
             real_write(method, path, body, headers)
-            if method == "DELETE":
+            if path.endswith("/execute"):
                 if reads_fail:
                     api.get = lambda *a, **k: (_ for _ in ()).throw(ApiError("read timed out"))
-                raise ApiError("DELETE: transport error timed out")
+                raise ApiError("POST execute: transport error timed out")
             return 200, {"result": "ok"}
         api.write = write
         return real_get
@@ -613,6 +661,37 @@ class FlowTests(unittest.TestCase):
         self.assertEqual((rep["removed"], rep["server_refused_or_error"], rep["unresolved"]), (1, [], []))
         _, rv = takeback.revert(api, self.ledger, apply_id, argv=[], pause_s=0, log=self.log)
         self.assertEqual(rv, {"re_added": 1})
+
+    def test_gateway_error_after_the_server_removed_is_reconciled_announced_and_revertible(self):
+        api = FakeApi()
+        plan_id, _ = takeback.plan(api, self.ledger, self.rows, manifest=self.manifest, excl=OPEN, argv=[], log=self.log)
+        real_write = api.write
+
+        def bad_gateway(method, path, body, headers=None):
+            real_write(method, path, body, headers)  # core executes the set...
+            return 502, {"raw": "Bad Gateway"}       # ...and the ingress answers 502
+        api.write = bad_gateway
+        apply_id, counts = takeback.apply(api, self.ledger, self.rows, manifest=self.manifest, plan_run=plan_id,
+                                          excl=OPEN, argv=[], pause_s=0, approvals=api.approve(), sender=api.sender,
+                                          log=self.log)
+        self.assertEqual(counts, {"removed": 1, "stopped_on_error_response": 1, "notice_sent": 1})
+        self.assertEqual([c["role"] for c in api.sender.sent[0]["credits"]], ["Mixing"])
+        rep = takeback.report(self.ledger, apply_id)
+        self.assertEqual((rep["removed"], rep["unresolved"], rep["unnotified"]), (1, [], []))
+        self.assertEqual(self.ledger.removed_rows(apply_id)[0]["http_status"], 502)
+        api.write = real_write
+        _, rv = takeback.revert(api, self.ledger, apply_id, argv=[], pause_s=0, log=self.log)
+        self.assertEqual(rv, {"re_added": 1})
+
+    def test_gateway_error_with_the_credit_still_live_is_not_removed_and_stops(self):
+        api = FakeApi()
+        plan_id, _ = takeback.plan(api, self.ledger, self.rows, manifest=self.manifest, excl=OPEN, argv=[], log=self.log)
+        api.write_status = 504
+        apply_id, counts = takeback.apply(api, self.ledger, self.rows, manifest=self.manifest, plan_run=plan_id,
+                                          excl=OPEN, argv=[], pause_s=0, approvals=api.approve(), sender=api.sender,
+                                          log=self.log)
+        self.assertEqual(counts, {"not_removed": 1, "stopped_on_error_response": 1})
+        self.assertEqual(api.sender.sent, [])
 
     def test_unknown_delete_result_blocks_retry_revert_and_waves_until_reconciled(self):
         api = FakeApi()
@@ -688,12 +767,13 @@ class FlowTests(unittest.TestCase):
         self.assertIsNotNone(self.ledger.run_end(first))
         api.write = real_write
         plan2, _ = takeback.plan(api, self.ledger, self.rows, manifest=self.manifest, excl=OPEN, argv=[], log=self.log)
+        # the same approved set again: its pair was consumed by the first execute
         _, counts = takeback.apply(api, self.ledger, self.rows, manifest=self.manifest, plan_run=plan2,
-                                   excl=OPEN, argv=[], pause_s=0, approvals=api.approve(), sender=api.sender, log=self.log)
-        # the plan already skipped it as gone (no DELETE re-sent); the removal the reconcile
-        # confirmed in the first run is announced to its user now
+                                   excl=OPEN, argv=[], pause_s=0, approvals=["ap-1"], sender=api.sender, log=self.log)
+        # nothing is executed again; the removal the reconcile confirmed in the first run is
+        # announced to its user now
         self.assertEqual(counts, {"earlier_notice_sent": 1})
-        self.assertEqual(sum(1 for w in api.writes if w[0] == "DELETE"), 1)
+        self.assertEqual(sum(1 for w in api.writes if w[1].endswith("/execute")), 1)
         self.assertEqual([c["role"] for c in api.sender.sent[0]["credits"]], ["Mixing"])
         rep = takeback.report(self.ledger, first)
         self.assertEqual((rep["removed"], rep["unresolved"], rep["unnotified"]), (1, [], []))
@@ -988,35 +1068,233 @@ class ApprovalTests(unittest.TestCase):
         for c in chunks:
             self.assertLessEqual(300 + sum(len(takeback.evidence_line(r)) + 2 for r in c), 2000)
 
-    def test_apply_refuses_until_approved_then_only_covered_pairs(self):
+    def test_apply_refuses_until_approved_then_spends_only_pairs_whose_own_decision_is_approved(self):
         takeback.stage(self.api, self.ledger, self.rows, manifest=self.manifest, plan_run=self.plan_id,
                        argv=[], log=lambda *_: None)
         with self.assertRaises(SystemExit):
             takeback.apply(self.api, self.ledger, self.rows, manifest=self.manifest, plan_run=self.plan_id,
                            excl=OPEN, argv=[], pause_s=0, approvals=["ap-1"], sender=self.api.sender, log=lambda *_: None)
+        # Fable 024: a set counts as approved once ANY pair is; an undecided pair is never spent
         self.api.approval["status"] = "approved"
+        _, counts = takeback.apply(self.api, self.ledger, self.rows, manifest=self.manifest, plan_run=self.plan_id,
+                                   excl=OPEN, argv=[], pause_s=0, approvals=["ap-1"], sender=self.api.sender,
+                                   log=lambda *_: None)
+        self.assertEqual(counts, {})
+        self.assertFalse(any(w[1].endswith("/execute") for w in self.api.writes))
+        self.api.approval["pairs"][0]["decision"] = "approved"
         apply_id, counts = takeback.apply(self.api, self.ledger, self.rows, manifest=self.manifest,
-                                          plan_run=self.plan_id, excl=OPEN, argv=[], pause_s=0, approvals=["ap-1"], sender=self.api.sender,
-                                          log=lambda *_: None)
+                                          plan_run=self.plan_id, excl=OPEN, argv=[], pause_s=0, approvals=["ap-1"],
+                                          sender=self.api.sender, log=lambda *_: None)
         self.assertEqual(counts, {"removed": 1, "notice_sent": 1})
-        self.assertTrue(self.api.writes[-1][3]["X-Removal-Approval-Ref"].startswith(
-            "approval ap-1 | https://www.qobuz.com/x"))
+        self.assertEqual(self.api.writes[-1][:3], ("POST", "/admin/credit-removals/ap-1/execute", {}))
         removed = self.ledger.events(apply_id, "remove")
         self.assertTrue(removed[0]["approval_ref"].startswith(f"credit-removal-approval ap-1 | {takeback.DECISION_REF}"))
 
-    def test_row_outside_the_approval_is_skipped(self):
+    def test_a_rejected_pair_in_an_approved_set_is_never_removed_or_announced(self):
+        mastering = row(row_id=f"{RID}:Mastering", role="Mastering")
+        (self.dir / "two").mkdir()
+        manifest = write_manifest(self.dir / "two", [row(), mastering])
+        rows = takeback.load_manifest(manifest)
+        api = FakeApi()
+        api.request["credits"] = ["Mixing", "Mastering"]
+        api.raws += [raw("tidal", "Eli WTF", "mastering engineer", "td2"), raw("muso", "Rishi Krishnan", "mastering", PID)]
+        plan_id, counts = takeback.plan(api, self.ledger, rows, manifest=manifest, excl=OPEN, argv=[], log=lambda *_: None)
+        self.assertEqual(counts, {"would_remove": 2})
+        takeback.stage(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, argv=[], log=lambda *_: None)
+        self.assertEqual(sum(1 for w in api.writes if w[1] == "/admin/credit-removals"), 1)  # one user, one set
+        api.approval["status"] = "approved"
+        api.approval["pairs"][0]["decision"] = "approved"   # Mixing
+        api.approval["pairs"][1]["decision"] = "rejected"   # Mastering: Nick said no to this one
+        apply_id, counts = takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN,
+                                          argv=[], pause_s=0, approvals=["ap-1"], sender=api.sender, log=lambda *_: None)
+        self.assertEqual(counts, {"removed": 1, "notice_sent": 1})
+        self.assertTrue(any(r["credit"] == "mastering" and r["profile"]["id"] == PID for r in api.raws))
+        self.assertEqual([c["role"] for c in api.sender.sent[0]["credits"]], ["Mixing"])
+        self.assertEqual([e["row_id"] for e in self.ledger.removed_rows(apply_id)], [f"{RID}:Mixing"])
+
+    def test_execute_result_that_is_not_removed_gets_no_notice_on_a_guess(self):
+        takeback.stage(self.api, self.ledger, self.rows, manifest=self.manifest, plan_run=self.plan_id,
+                       argv=[], log=lambda *_: None)
+        self.api.approve()
+        self.api.execute = lambda: {"id": "ap-1", "ok": False, "results": [
+            {"pairId": "1", "profileId": PID, "trackId": TID, "role": "mixing", "status": "error"}]}
+        apply_id, counts = takeback.apply(self.api, self.ledger, self.rows, manifest=self.manifest,
+                                          plan_run=self.plan_id, excl=OPEN, argv=[], pause_s=0, approvals=["ap-1"],
+                                          sender=self.api.sender, log=lambda *_: None)
+        # the credit is still live: recorded not_removed, nobody is told anything
+        self.assertEqual(counts, {"not_removed": 1})
+        self.assertEqual(self.api.sender.sent, [])
+        self.assertEqual(takeback.report(self.ledger, apply_id)["server_refused_or_error"][0]["outcome"], "not_removed")
+
+    def test_set_with_no_spendable_pair_executes_nothing(self):
         takeback.stage(self.api, self.ledger, self.rows, manifest=self.manifest, plan_run=self.plan_id,
                        argv=[], log=lambda *_: None)
         self.api.approval.update(status="approved", pairs=[])
         _, counts = takeback.apply(self.api, self.ledger, self.rows, manifest=self.manifest, plan_run=self.plan_id,
                                    excl=OPEN, argv=[], pause_s=0, approvals=["ap-1"], sender=self.api.sender, log=lambda *_: None)
-        self.assertEqual(counts, {"skip:not_in_approval": 1})
+        self.assertEqual(counts, {})
+        self.assertFalse(any(w[1].endswith("/execute") for w in self.api.writes))
+
+    def test_stage_one_set_per_user(self):
+        other = row(row_id="r2:Mixing", request_id="r2", user_id="161128")
+        (self.dir / "users").mkdir()
+        manifest = write_manifest(self.dir / "users", [row(), other])
+        rows = takeback.load_manifest(manifest)
+        api = FakeApi()
+        orig = api.get
+
+        def get(path, params=None):
+            if path == "/admin/credit-requests" and params and params.get("page", 1) == 1:
+                return {"items": [api.request, dict(api.request, id="r2", userId=161128,
+                                                    user={"id": 161128, "email": "o@example.com", "fullName": "O"})]}
+            return orig(path, params)
+        api.get = get
+        plan_id, counts = takeback.plan(api, self.ledger, rows, manifest=manifest, excl=OPEN, argv=[], log=lambda *_: None)
+        self.assertEqual(counts, {"would_remove": 2})
+        _, out = takeback.stage(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, argv=[], log=lambda *_: None)
+        stages = [w for w in api.writes if w[1] == "/admin/credit-removals"]
+        self.assertEqual(len(stages), 2)
+        self.assertEqual(sorted(w[2]["sourceRef"].split("; ")[-1].split(" (")[0] for w in stages),
+                         ["user 161128", f"user {UID}"])
 
     def test_agent_wrapper_may_only_stage(self):
         from credit_retro.api import WrapperReadApi
         w = WrapperReadApi.__new__(WrapperReadApi)
         with self.assertRaises(ApiError):
             w.write("DELETE", f"/admin/track/{TID}/profile/{PID}/credits", {})
+
+
+class ExecuteRaceTests(unittest.TestCase):
+    """A set changes on the board while apply runs, or is executed outside the tool."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.ledger = Ledger(self.dir / "state")
+        self.api = FakeApi()
+        self.api.request["credits"] = ["Mixing", "Mastering"]
+        self.api.raws += [raw("tidal", "Eli WTF", "mastering engineer", "td2"),
+                          raw("muso", "Rishi Krishnan", "mastering", PID)]
+        self.mastering = [{"id": "2", "profileId": PID, "trackId": TID, "role": "mastering", "decision": None,
+                           "consumedAt": None}]
+
+    def tearDown(self):
+        self.ledger.close()
+        self.tmp.cleanup()
+
+    def planned(self, rows):
+        self.manifest = write_manifest(self.dir, rows)
+        self.rows = takeback.load_manifest(self.manifest)
+        plan_id, _ = takeback.plan(self.api, self.ledger, self.rows, manifest=self.manifest, excl=OPEN, argv=[],
+                                   log=lambda *_: None)
+        return plan_id
+
+    def apply(self, plan_id):
+        return takeback.apply(self.api, self.ledger, self.rows, manifest=self.manifest, plan_run=plan_id, excl=OPEN,
+                              argv=[], pause_s=0, approvals=["ap-1"], sender=self.api.sender, log=lambda *_: None)
+
+    def holds(self, role):
+        return any(r["credit"] == role and r["profile"]["id"] == PID for r in self.api.raws)
+
+    def test_a_set_with_an_undecided_pair_is_withheld_whole_until_every_pair_is_decided(self):
+        plan_id = self.planned([row(), row(row_id=f"{RID}:Mastering", role="Mastering")])
+        self.api.approve()
+        self.api.approval["pairs"] += self.mastering
+        apply_id, counts = self.apply(plan_id)
+        self.assertFalse([w for w in self.api.writes if w[1].endswith("/execute")])
+        self.assertTrue(self.holds("mixing") and self.holds("mastering"))
+        self.assertEqual(counts, {"withheld:pair_undecided": 1, "withheld_sets": 1})
+        self.assertEqual([(e["row_id"], e["reason"]) for e in takeback.report(self.ledger, apply_id)["withheld"]],
+                         [(f"{RID}:Mixing", "pair_undecided")])
+        self.assertEqual(self.api.sender.sent, [])
+        # Jan decides the last pair: the next apply gates and executes both, and the user is told
+        self.api.approval["pairs"][1]["decision"] = "approved"
+        _, counts = self.apply(plan_id)
+        self.assertEqual(counts, {"removed": 2, "notice_sent": 1})
+        self.assertEqual(sorted(c["role"] for c in self.api.sender.sent[0]["credits"]), ["Mastering", "Mixing"])
+
+    def approve_mastering_just_before_the_execute(self):
+        """Jan approves the undecided pair between apply's live gate and its execute POST."""
+        real_write = self.api.write
+
+        def write(method, path, body, headers=None):
+            if path.endswith("/execute"):
+                self.api.approval["pairs"][1]["decision"] = "approved"
+            return real_write(method, path, body, headers)
+        self.api.write = write
+
+    def test_a_planned_pair_approved_between_the_gate_and_the_execute_is_never_removed(self):
+        plan_id = self.planned([row(), row(row_id=f"{RID}:Mastering", role="Mastering")])
+        self.api.approve()
+        self.api.approval["pairs"] += self.mastering
+        self.approve_mastering_just_before_the_execute()
+        _, counts = self.apply(plan_id)
+        self.assertFalse([w for w in self.api.writes if w[1].endswith("/execute")])
+        self.assertTrue(self.holds("mixing") and self.holds("mastering"))
+        self.assertEqual(counts, {"withheld:pair_undecided": 1, "withheld_sets": 1})
+        self.assertEqual(self.api.sender.sent, [])
+
+    def test_an_unplanned_pair_approved_between_the_gate_and_the_execute_is_never_removed(self):
+        plan_id = self.planned([row()])
+        self.api.approve()
+        self.api.approval["pairs"] += self.mastering
+        self.approve_mastering_just_before_the_execute()
+        rc, err = cli_apply(self.api, self.dir / "state", self.manifest, plan_id)
+        self.assertEqual(rc, 3)
+        self.assertIn("WITHHELD", err)
+        self.assertFalse([w for w in self.api.writes if w[1].endswith("/execute")])
+        self.assertTrue(self.holds("mixing") and self.holds("mastering"))
+        apply_id = self.ledger.child_runs(plan_id, "apply")[0]["run_id"]
+        rep = takeback.report(self.ledger, apply_id)
+        self.assertEqual([(e["row_id"], e["reason"]) for e in rep["withheld"]], [(f"{RID}:Mixing", "pair_undecided")])
+        self.assertEqual(self.api.sender.sent, [])
+
+    def board_executes(self, plan_id, *, removes=True):
+        self.api.approve()
+        if removes:
+            self.api.execute()
+        else:
+            self.api.approval["pairs"][0]["consumedAt"] = "2026-10-17T04:00:00Z"
+
+    def test_a_set_executed_on_the_board_is_resolved_live_and_announced(self):
+        plan_id = self.planned([row()])
+        self.board_executes(plan_id)
+        apply_id, counts = self.apply(plan_id)
+        self.assertFalse([w for w in self.api.writes if w[1].endswith("/execute")])
+        self.assertEqual(counts, {"removed": 1, "executed_outside_tool": 1, "notice_sent": 1})
+        self.assertEqual([e["reason"] for e in self.ledger.removed_rows(apply_id)], ["executed_outside_tool"])
+        self.assertEqual([c["role"] for c in self.api.sender.sent[0]["credits"]], ["Mixing"])
+        # recorded once: the next apply sees the removal as ours and says nothing again
+        _, again = self.apply(plan_id)
+        self.assertEqual((again, len(self.api.sender.sent)), ({}, 1))
+
+    def test_a_set_consumed_on_the_board_with_the_credit_still_live_is_withheld(self):
+        plan_id = self.planned([row()])
+        self.board_executes(plan_id, removes=False)
+        apply_id, counts = self.apply(plan_id)
+        self.assertEqual(counts, {"withheld:consumed_still_credited": 1})
+        self.assertEqual([(e["row_id"], e["reason"]) for e in takeback.report(self.ledger, apply_id)["withheld"]],
+                         [(f"{RID}:Mixing", "consumed_still_credited")])
+        self.assertEqual(self.api.sender.sent, [])
+
+    def test_a_set_executed_on_the_board_with_an_unreadable_credit_stays_unresolved(self):
+        plan_id = self.planned([row()])
+        self.board_executes(plan_id)
+        real_get = self.api.get
+
+        def get(path, params=None):
+            if path.endswith("/raw-credits"):
+                raise ApiError("read timed out")
+            return real_get(path, params)
+        self.api.get = get
+        apply_id, counts = self.apply(plan_id)
+        self.assertEqual(counts, {"indeterminate": 1, "executed_outside_tool": 1})
+        self.assertEqual(takeback.report(self.ledger, apply_id)["unresolved"], [f"{RID}:Mixing"])
+        self.assertEqual(self.api.sender.sent, [])
+        self.api.get = real_get  # the API answers: the next apply reconciles it and announces it
+        _, counts = self.apply(plan_id)
+        self.assertEqual(counts, {"earlier_notice_sent": 1})
+        self.assertEqual(takeback.report(self.ledger, apply_id)["removed"], 1)
 
 
 class EvidenceAndNoticeTests(unittest.TestCase):
@@ -1091,7 +1369,7 @@ class EvidenceAndNoticeTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN, argv=[], pause_s=0,
                            approvals=api.approve(), sender=None, log=self.out.append)
-        self.assertFalse([w for w in api.writes if w[0] == "DELETE"])
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
 
     def test_notice_sent_after_removal_with_who_why_and_how_to_dispute(self):
         api, manifest, rows, plan_id = self.plan_for([row()])
@@ -1146,8 +1424,8 @@ class EvidenceAndNoticeTests(unittest.TestCase):
         apply_id, counts = takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN, argv=[],
                                           pause_s=0, approvals=api.approve(), sender=api.sender,
                                           log=self.out.append)
-        self.assertEqual(counts, {"skip:notice_would_defer": 1})
-        self.assertFalse([w for w in api.writes if w[0] == "DELETE"])
+        self.assertEqual(counts, {"withheld:notice_would_defer": 1, "withheld_sets": 1})
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
         self.assertEqual(api.sender.sent, [])
         self.assertEqual(takeback.report(self.ledger, apply_id)["skipped"],
                          [{"row_id": f"{RID}:Mixing", "reason": "notice_would_defer"}])
@@ -1242,8 +1520,8 @@ class EvidenceAndNoticeTests(unittest.TestCase):
         apply_id, counts = takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN, argv=[],
                                           pause_s=0, approvals=api.approve(), sender=api.sender,
                                           log=self.out.append)
-        self.assertEqual(counts, {"skip:request_not_found": 1})
-        self.assertFalse([w for w in api.writes if w[0] == "DELETE"])
+        self.assertEqual(counts, {"withheld:request_not_found": 1, "withheld_sets": 1})
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
         api.request["id"] = RID
         del api.request["user"]["email"]
         with self.assertRaises(SystemExit):
@@ -1265,19 +1543,26 @@ class EvidenceAndNoticeTests(unittest.TestCase):
         second.update(b)
         _, counts = takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN, argv=[],
                                    pause_s=0, approvals=api.approve(), sender=api.sender, log=self.out.append)
-        self.assertEqual(counts, {"skip:user_mismatch": 2})
+        self.assertEqual(counts, {"withheld:user_mismatch": 2, "withheld_sets": 1})
         self.assertEqual((api.sender.validated, api.sender.sent), ([], []))
         # the second request is A's again (the account id too); the first still belongs to B
         second.update(userId=int(UID), user=dict(second["user"], id=999))
         _, counts = takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN, argv=[],
                                    pause_s=0, approvals=api.approve(), sender=api.sender, log=self.out.append)
-        self.assertEqual(counts, {"skip:user_mismatch": 2})
+        self.assertEqual(counts, {"withheld:user_mismatch": 2, "withheld_sets": 1})
         second["user"] = {"id": int(UID), "email": "rk@example.com", "fullName": "Rishi Krishnan"}
         _, counts = takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN, argv=[],
                                    pause_s=0, approvals=api.approve(), sender=api.sender, log=self.out.append)
-        self.assertEqual(counts, {"skip:user_mismatch": 1, "removed": 1, "notice_sent": 1})
-        self.assertEqual([p["user"]["email"] for p in api.sender.validated + api.sender.sent],
-                         ["rk@example.com", "rk@example.com"])
+        # the first request still belongs to B: the WHOLE set is withheld, never part of it (firstmate 026)
+        self.assertEqual(counts, {"withheld:user_mismatch": 1, "withheld:with_set": 1, "withheld_sets": 1})
+        self.assertEqual(api.sender.sent, [])
+        self.assertEqual([p["user"]["email"] for p in api.sender.validated], ["rk@example.com"])
+        # both requests are A's again: the one pair goes, and A is told once
+        api.request.update(userId=int(UID), user=dict(second["user"]))
+        _, counts = takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN, argv=[],
+                                   pause_s=0, approvals=api.approve(), sender=api.sender, log=self.out.append)
+        self.assertEqual(counts, {"removed": 2, "notice_sent": 1})
+        self.assertEqual([p["user"]["email"] for p in api.sender.sent], ["rk@example.com"])
 
     def test_preview_groups_by_user(self):
         rows = [row(), row(row_id=f"{RID}:Mastering", role="Mastering")]
@@ -1314,7 +1599,7 @@ class LiveExclusionTests(unittest.TestCase):
         plan_id, _ = self.plan(api, OPEN)
         api.sender.verdict = "deferred"
         _, day1 = self.apply(api, plan_id, OPEN)
-        self.assertEqual(day1, {"skip:notice_would_defer": 1})
+        self.assertEqual(day1, {"withheld:notice_would_defer": 1, "withheld_sets": 1})
         api.sender.verdict = "valid"
         # X sends an invoice: credit-trust lists it, or Caroline proof-tags the note
         for n, (excl, reason) in enumerate((
@@ -1331,8 +1616,8 @@ class LiveExclusionTests(unittest.TestCase):
             _, counts = self.plan(api, excl)
             self.assertEqual(counts, {f"skip:{reason}": 1}, n)
             _, day2 = self.apply(api, plan_id, excl)
-            self.assertEqual(day2, {f"skip:{reason}": 1}, n)
-        self.assertFalse([w for w in api.writes if w[0] == "DELETE"])
+            self.assertEqual(day2, {f"withheld:{reason}": 1, "withheld_sets": 1}, n)
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
         self.assertEqual(api.sender.sent, [])
         events = json.dumps([dict(e) for e in self.ledger.db.execute("SELECT * FROM events")])
         self.assertNotIn("rk@example.com", events)
@@ -1357,7 +1642,7 @@ class LiveExclusionTests(unittest.TestCase):
             self.assertEqual(counts, {"skip:proof_source_unavailable": 1})
             with self.assertRaises(SystemExit):
                 self.apply(api, plan_id, excl)
-        self.assertFalse([w for w in api.writes if w[0] == "DELETE"])
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
 
     def test_missing_affiliation_removes_nothing(self):
         api = FakeApi()
@@ -1370,8 +1655,8 @@ class LiveExclusionTests(unittest.TestCase):
         no_verdict = live_sources(self.dir / "n", affiliation={"161128": {"verdict": "none", "evidence": []}})
         self.assertEqual(self.plan(api, no_verdict)[1], {"skip:affiliation_unknown": 1})
         _, counts = self.apply(api, plan_id, no_verdict)
-        self.assertEqual(counts, {"skip:affiliation_unknown": 1})
-        self.assertFalse([w for w in api.writes if w[0] == "DELETE"])
+        self.assertEqual(counts, {"withheld:affiliation_unknown": 1, "withheld_sets": 1})
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
         self.assertEqual(api.sender.sent, [])
 
     def test_affiliation_only_holds_rows_that_would_be_removed(self):
@@ -1439,9 +1724,6 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(r["web"]["verdict"], "CONTRADICTED")
             # the cited web check read THIS role's credit, not a sibling role's on the same track
             self.assertEqual((r["web"]["scope"], r["web"]["role_checked"]), ("role", r["role"]), r["row_id"])
-            # the server caps the logged header at 255: the approval id and the URL always survive it
-            ref = header_value(takeback.header_ref(r, "00000000-0000-4000-8000-000000000000"))
-            self.assertIn(r["evidence_url"], ref, r["row_id"])
         # firstmate 012/014: rows carry checked evidence for their own role; every name cited
         # to the user is quoted in the recorded evidence note
         for r in rows:

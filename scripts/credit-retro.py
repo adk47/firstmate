@@ -5,10 +5,13 @@ plus the prepared (never sent) proof-request waves.
 Runbook: docs/credit-verification/credit-retro-r1.md. Package: scripts/credit_retro.
 
   plan           dry-run: re-prove every take-back row live, write nothing to Muso
-  stage          stage the plan's rows as credit-removal approval sets, as few as the
-                 untruncated evidence URLs allow (core-backend #10597)
-  apply          remove the proven roles (named human's own session only; --approval <id>
-                 is required: only the pairs Nick/Jan approved are removed)
+  stage          stage the plan's rows as credit-removal approval sets, ONE SET PER USER,
+                 every pair's evidence URL untruncated in its reason (core-backend #10597)
+  apply          execute approved sets through core #10638 (POST /admin/credit-removals/:id/execute)
+                 from Nick's/Jan's own session, and send each user's take-back notice in the
+                 same step. Every pair is re-proved live first; any failure withholds that
+                 user's WHOLE set (exit 3) and names the reason. Only pairs whose own decision
+                 is approved are ever spent or announced
   readback       confirm the roles are gone and the trusted holders are still live
   revert         re-add exactly the roles one apply run removed
   report         counts, refused/errored rows, the revert command
@@ -96,9 +99,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("apply", help="remove the proven roles (named human only)")
     p.add_argument("--manifest", default=str(DEFAULT_TAKEBACK))
     p.add_argument("--plan", required=True, help="the plan run id this executes (same manifest, < 24h)")
-    p.add_argument("--only", action="append", help="row_id to apply (repeatable): canary one row first")
     p.add_argument("--approval", action="append", required=True,
-                   help="required, repeatable: credit-removal approval id; only the pairs these approved are removed")
+                   help="required, repeatable: one user's approval set id (canary: pass one set first)")
     p.add_argument("--yes-remove", action="store_true", required=True,
                    help="required: you read the plan output and every row is yours to remove")
     p.add_argument("--notice-script", help="Caroline's send gate (default /opt/hydra/scripts/intercom-verify-request.sh)")
@@ -177,21 +179,26 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"stage_run": run_id, **out}, indent=1, sort_keys=True))
             if out["approval_ids"]:
                 ids = " ".join(f"--approval {a}" for a in out["approval_ids"])
-                print(f"next: Nick or Jan approves {', '.join(out['approval_ids'])} (POST /admin/credit-removals/"
-                      f"<id>/approve from their own session), then: python3 {Path(__file__).resolve()} apply "
-                      f"--plan {args.plan} {ids} --notice-approved-by <SlackUID> --login --yes-remove")
+                print(f"next: Nick or Jan decides each pair of {', '.join(out['approval_ids'])} (board, or "
+                      f"POST /admin/credit-removals/<id>/decide|approve from their own session), then executes "
+                      f"ONLY through: python3 {Path(__file__).resolve()} apply --plan {args.plan} {ids} "
+                      f"--notice-approved-by <SlackUID> --login --yes-remove")
         elif args.cmd == "approval-status":
             print(json.dumps(read_api(args).get(f"/admin/credit-removals/{args.id}"), indent=1, sort_keys=True))
         elif args.cmd == "apply":
             manifest = str(Path(args.manifest).resolve())
             api = session_api(args)
             run_id, _ = takeback.apply(api, ledger, takeback.load_manifest(manifest), manifest=manifest,
-                                       plan_run=args.plan, argv=argv, only=set(args.only or []) or None,
-                                       approvals=args.approval, excl=exclusions(args),
+                                       plan_run=args.plan, argv=argv, approvals=args.approval,
+                                       excl=exclusions(args),
                                        sender=notice.ScriptSender(args.notice_script,
                                                                   approved_by=args.notice_approved_by))
-            print(json.dumps(takeback.report(ledger, run_id, script=str(Path(__file__).resolve())),
-                             indent=1, sort_keys=True))
+            rep = takeback.report(ledger, run_id, script=str(Path(__file__).resolve()))
+            print(json.dumps(rep, indent=1, sort_keys=True))
+            if rep["withheld"]:
+                print("WITHHELD: the sets above were not executed (nothing of theirs removed); Nick/Jan "
+                      "decide with the reason given", file=sys.stderr)
+                return 3
         elif args.cmd == "notice-preview":
             manifest = str(Path(args.manifest).resolve())
             rows = takeback.planned_rows(ledger, args.plan, takeback.load_manifest(manifest))

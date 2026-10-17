@@ -3,8 +3,9 @@
 Two transports, on purpose:
 
 * ``SessionApi`` (reads AND writes): a named human's own login session.
-  core-backend #10310 lets the admin credit DELETE route run only for an
-  interactive login of a NAMED_HUMAN_APPROVER_ACCOUNTS user (nick@ / jan@)
+  core-backend #10310 lets the admin credit DELETE route (and #10638 the
+  credit-removal execute) run only for an interactive login of a
+  NAMED_HUMAN_APPROVER_ACCOUNTS user (nick@ / jan@)
   signed in after CREDIT_GUARD_SESSION_CUTOFF; any agent or API token gets
   403 ``credit_removal_agent_refused``. The token comes from an interactive
   sign-in at run time (``--login``: email + password prompted, never stored)

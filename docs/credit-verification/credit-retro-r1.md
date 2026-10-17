@@ -20,9 +20,11 @@ Part A covers the older loose paths in `report.md`). Captain, 2026-10-15:
 
 ## What it does (firstmate decision 001, 2026-10-15T23:09Z, "A + X")
 
-**A. The take-back is role-scoped.** It removes ONLY the proven one-person roles, through
-`DELETE /admin/track/:trackId/profile/:profileId/credits {credits:[role]}`. It never moves a
-credit request to another status and never sends the generic notice.
+**A. The take-back is role-scoped.** It removes ONLY the proven one-person roles: each is one
+(profile, track, role) pair of an approval set, spent by core-backend #10638
+`POST /admin/credit-removals/:id/execute` through `removeTrackProfileCredits` (the same removal
+as `DELETE /admin/track/:trackId/profile/:profileId/credits {credits:[role]}`). It never moves
+a credit request to another status and never sends the generic notice.
 - Why not the whole request: the server forbids `approved -> user_verification_needed`. The
   only legal exit is `approved -> unverified`, and that publishes a catalog delete of every
   role on the request (`statusTransitions.js`, `updateStatus.js` in core-backend). 36 of the
@@ -32,10 +34,12 @@ credit request to another status and never sends the generic notice.
   it, so the role is not re-added while the request stays `approved`.
 - Every unproven role stays live and goes to the verify waves.
 
-**X. Only a named human runs it.** core-backend #10310 refuses every agent or API token on
-this route (403 `credit_removal_agent_refused`). The removal-approval path
-(core-backend #10578) is not wired yet. So `apply` and `revert` run from nick@'s or jan@'s
-own login: `--login` prompts for the email and password and stores neither.
+**X. Only a named human executes it, and only through the tool (firstmate 025/026).** The agent
+stages (#10597); Nick or Jan decides each pair; execute (#10638) refuses every agent or API token
+(`requireHumanApprover`), as #10310 does on the removal routes. So `apply` (which calls execute)
+and `revert` run from nick@'s or jan@'s own login, and `apply` sends each user's notice in the
+same step: sets staged by credit-retro are never executed from the board, or the notice would
+not go out with the removal. `--login` prompts for the email and password and stores neither.
 `--session-file` takes a 0600 file holding their own session token. Reads (`plan`,
 `readback`, `prepare-waves`) can use hydra's GET-only wrapper.
 
@@ -49,10 +53,8 @@ documentation-ask rows (tier HOLD in the population, asked in the verify waves),
 removed on borrowed evidence.
 
 The manifest records the review-time evidence: the trusted holders and a cited
-public-credit URL. The ledger's `approval_ref` holds the full decision reference, the
-approval id and the URL. The logged `X-Removal-Approval-Ref` header (the server caps it at
-255 chars) is `approval <id> | <URL> | credit-retro-r1 fm001`: the approval id and the URL
-come first, so the cap can only ever cut the short decision tag.
+public-credit URL. The ledger's `approval_ref` holds the approval id, the full decision
+reference and the URL; the set's `reason` on the server carries every pair's URL.
 
 | Gate | Skip reason |
 |---|---|
@@ -100,18 +102,18 @@ current counts): 30 roles would be removed, on 24 requests from 13 users. 18 rol
 ```bash
 S=/opt/hydra/scripts/credit-retro.py     # on node-8 (or a checkout of main)
 python3 $S plan                           # dry-run; prints the plan run id
-python3 $S stage --plan <plan_run>        # approval set(s); Nick or Jan approves each (see Approval path)
-python3 $S apply --plan <plan_run> --approval <id> --notice-approved-by <SlackUID> --login --yes-remove --only '<one row_id>'   # canary
+python3 $S stage --plan <plan_run>        # one approval set per user; Nick or Jan decides each pair (see Approval path)
+python3 $S apply --plan <plan_run> --approval <one user's set> --notice-approved-by <SlackUID> --login --yes-remove   # canary
 python3 $S readback --run <apply_run>     # canary removed, trusted holders intact
-python3 $S apply --plan <plan_run> --approval <id> [--approval <id2>] --notice-approved-by <SlackUID> --login --yes-remove
+python3 $S apply --plan <plan_run> --approval <id> [--approval <id2> ...] --notice-approved-by <SlackUID> --login --yes-remove
 python3 $S readback --run <apply_run>     # re-run until no row is `pending` (ingestion is async)
 python3 $S report --run <apply_run>       # counts, refused/errored rows, the revert command
 ```
 
-Pick the canary row from a user with ONE take-back role (182594 or 150514). The canary's
-notice uses up that user's one message for the UTC day, so a second role of the same user
-would be skipped as `notice_would_defer` by the full apply that day and wait for a later
-day's `plan` + `apply`.
+Pick the canary set of a user with ONE take-back role (182594 or 150514). A set is one user,
+so the canary never touches anyone else. A user who already got a message that UTC day has
+their whole set withheld as `notice_would_defer` and executed on a later day (the set stays
+approved for 7 days).
 
 **One-command revert:** `python3 $S revert --run <apply_run> --login`. It re-adds exactly
 the roles that run removed (a POST to the same path) and never re-adds a role twice. Verify
@@ -123,15 +125,37 @@ removal is their last one there. The gate records it per row (`last_credit_on_tr
 `plan` and `report` list those rows; read them before `apply`.
 
 `apply` refuses to run without a finished `plan` of the same manifest bytes from the last
-24 h, and it only ever considers the rows that plan showed as `would_remove`. A row the plan
-skipped is never removed by that apply, even if the live data changed since; run `plan`
-again to pick it up. A server 403 stops the run, because every #10310 refusal is about the session, not
-the row. `--approval` is required: there is no unapproved apply.
+24 h. A set holding a pair that plan did not show as `would_remove` is withheld whole
+(`pair_not_in_plan`), even if the live data changed since; each such pair is recorded
+`withheld` as `pair:<profile>/<track>/<role>`, so the CLI exits 3; run `plan` and `stage`
+again. A server 403 stops the run, because every refusal is about the session, not the pair.
+`--approval` is required: there is no unapproved apply.
 
-Each DELETE is recorded as `sent` in the ledger before it goes out. When its response is
-lost (transport error, timeout), apply reads the claimant's live credits and records
-`removed` or `not_removed`, then stops the run; if that read fails too the row is
-`indeterminate`. A row left `sent` (a crash) or `indeterminate` is listed under
+**Whole sets, never part of one (firstmate 026).** Immediately before each execute, `apply`
+re-runs every gate on every pair the set would spend and pre-flights the user's notice. ANY
+failure withholds the WHOLE set: nothing of that user's is removed, every row is recorded
+`withheld` with its reason, `report` lists them under `withheld`, and the CLI exits 3 so
+Nick or Jan decides with the reason. Core cannot un-approve a decided pair (`/decide` 409s,
+`/reject` is staged-only), so a withheld set stays approved and unspent until it expires
+(7 days): a passing re-run on a later day executes it; a lasting reason lets it expire.
+A set executes only once EVERY pair is decided: one undecided pair withholds the whole set
+(`pair_undecided`). Core decisions are write-once (every decide path is guarded by
+`decision IS NULL`), and #10638 execute takes no expected-pairs condition, so an undecided
+pair is the only way what an execute spends could grow after the live gate: a pair approved
+between the gate and the POST would be removed without being re-proved or announced. With
+every pair decided, the execute spends exactly the pairs that were gated.
+
+A pair already consumed with no removal recorded by this manifest's apply runs was executed
+outside the tool (the board). `apply` reads the live credit: gone is recorded `removed`
+(`executed_outside_tool`) and announced in that run; still credited is recorded `withheld`
+(`consumed_still_credited`, exit 3); an unreadable credit is `indeterminate` (unresolved).
+
+Each pair is recorded as `sent` in the ledger before the execute goes out. The server's
+per-pair result decides: `removed` (or `already_executed`) is a removal; any other result
+(`error`, `refused`, `not_executable`, `consumed_unconfirmed`, missing) is resolved by a live
+read of the claimant's credits, never assumed. When the response is lost (transport error,
+timeout, or any non-2xx other than 403, such as a 502 from the ingress), apply reads the live credits and records `removed` or `not_removed`, then stops
+the run; if that read fails too the row is `indeterminate`. A row left `sent` (a crash) or `indeterminate` is listed under
 `unresolved` by `report`. The next `apply` on the manifest, `readback` and `revert`
 reconcile those rows against live credits first, recording the result in the original run,
 and refuse while the result is still unknown. `prepare-waves` refuses until they are
@@ -143,39 +167,42 @@ first; a lost response is resolved by a live read (`re_added`, `not_re_added` or
 `readback` of that revert and `prepare-waves` until a live read resolves it, so a re-added
 credit is never POSTed twice and never announced as removed.
 
-### Approval path (core-backend #10597, merged to develop 2026-10-16 03:03Z)
+### Approval path (core-backend #10597 stage, #10631/#10633 decide, #10638 execute)
 
-Firstmate 007: once core-backend #10597 lands, route the take-back through its removal
-approvals instead of a hand-run session alone. It adds `POST /admin/credit-removals` (stage),
-`POST /:id/approve` and `/:id/reject` (a named human), and `GET /:id`.
+Firstmate 025/026: the agent stages, a HUMAN decides and executes, and the tool sends the
+notice in the same step.
 
 ```bash
 python3 $S plan
-python3 $S stage --plan <plan_run>          # agent token is fine: staging grants nothing
-#   -> Nick or Jan approves each set once, from their own session: POST /admin/credit-removals/<id>/approve
-python3 $S approval-status --id <id>         # status, pairs, consumed
+python3 $S stage --plan <plan_run>          # agent token is fine: staging grants nothing; one set per user
+#   -> Nick or Jan decides each pair from their own session (board, or POST /admin/credit-removals/<id>/decide
+#      | /approve, which stamps every pair approved)
+python3 $S approval-status --id <id>         # status, pairs (decision, consumedAt)
 python3 $S apply --plan <plan_run> --approval <id1> [--approval <id2>] --notice-approved-by <SlackUID> --login --yes-remove
 ```
 
-- `stage` posts the plan's would-remove rows: one pair per profile+track with its roles.
-  - `sourceRef` names the plan run, the manifest sha256 and the set number.
+- `stage` posts ONE SET PER USER: one pair per profile+track with its roles.
+  - #10638 execute spends every approved pair of a set at once and cannot pick a subset,
+    while the notice, the daily cap and every exclusion are per user. One user per set means
+    one user's problem never blocks or forces another's removal.
+  - `sourceRef` names the plan run, the manifest sha256 and the user.
   - A row resting on the Spotify/Tidal credit alone carries `evidence_class=dsp_track_level`
     in its evidence line, so the board can tell it apart from a public credits page.
-  - Fable: an approval alone is never enough; the evidence must be attached. #10597's
-    stage body has no per-pair evidence field (the `payload` column is not exposed), so
-    every pair's public-credit URL goes, untruncated and keyed `[profile/track/role]`,
-    into its set's `reason` (2,000 chars). When they do not fit one set, the rows are
-    split over as few sets as needed (the 2026-10-15 dry-run's 30 rows needed 2 sets); a
-    profile+track never spans two sets.
-- `apply --approval <id>` (required, repeatable) refuses unless every named set is `approved` and unexpired. It then
-  removes only the rows whose (profile, track, role) the set approved and has not consumed
-  (`not_in_approval` otherwise). It records the approval id in the ledger and in the
-  logged reference header.
-- Still a gap: #10597 leaves the removal routes untouched (delegation flag off). The DELETE
-  therefore still needs a named human's session, and the server does not consume the pairs
-  yet. Once the consume wiring lands (core-backend #10578's coverage on the removal route),
-  `apply --approval` is where the agent token plus the approval id replaces the session.
-  That change is one transport branch.
+  - Fable: an approval alone is never enough; the evidence must be attached. The stage body
+    has no per-pair evidence field, so every pair's public-credit URL goes, untruncated and
+    keyed `[profile/track/role]`, into its set's `reason` (2,000 chars). A user whose
+    evidence does not fit one set is not staged (`user_evidence_exceeds_one_set`) and goes
+    to a human.
+- `apply --approval <id>` (required, repeatable, one user's set each) refuses unless every
+  named set is `approved` and unexpired. A set is approved once ANY pair is (Fable 024), so
+  `apply` only ever spends, and announces, pairs whose OWN `decision` is `approved` and that
+  are not consumed; the server enforces the same (`consumeCoverage` carries
+  `decision = 'approved'`). A rejected or undecided pair is never removed and never in a
+  notice. The approval id is in the ledger's `approval_ref`.
+- Never execute a credit-retro set from the board: the notice is sent by `apply` in the same
+  step as the execute.
+- Needs on prod: the master twin of #10597/#10631/#10633/#10638 (core-backend #10614,
+  re-twinned at one frozen develop sha for the next core window).
 
 ### The take-back notice (captain requirement, firstmate 012)
 
@@ -192,27 +219,28 @@ message going out.
   the human who approved THIS copy and run. There is no default and the captain is never
   assumed; the id is passed to the gate as `--approved-by` and recorded with every
   `notify` event in the ledger.
-- **Before the first DELETE:** `apply` resolves each affected user's account from a
+- **Before the execute:** `apply` resolves each affected user's account from a
   credit request that still belongs to that user (request `userId` and account id). A user
-  with no such request is held (`user_mismatch` or `request_not_found`): nothing of theirs is
-  removed and nobody is messaged. It then validates that user's notice through Caroline's gate
+  with no such request has their whole set withheld (`user_mismatch` or `request_not_found`):
+  nothing of theirs is removed and nobody is messaged. It then validates that user's notice through Caroline's gate
   (`intercom-verify-request.sh send --campaign takeback-notice --validate`).
   - If the gate would defer it today (exit 3: one message per user per UTC day), that
-    user's roles are NOT removed this run (`notice_would_defer`). The pair stays in the
-    plan's rows and goes on a later run, with its message.
+    user's set is withheld this run (`notice_would_defer`). It stays approved and goes on a
+    later day's run, with its message.
   - Any other refusal refuses the whole run: nothing is removed.
-- **After the removals:** one notice per user lists the roles THIS run removed. Every
+- **After the execute:** one notice per user lists the roles the server reported removed in
+  THIS run (never a pair it did not report removed). Every
   outcome (`sent`, `deferred`, `failed`) is recorded in the apply run as action `notify`,
   without the email. If the run stopped early, the roles it did remove are still announced.
   A send-gate call that hangs or cannot run is recorded as `failed`, and the run is always
   finished in the ledger.
-- **Removals confirmed later:** a DELETE whose result was unknown (`sent` after a crash,
+- **Removals confirmed later:** an execute whose result was unknown (`sent` after a crash,
   `indeterminate` after a lost response) and that a later live reconcile records as
   `removed` is announced by the next `apply` before anything new is removed (counts
   `earlier_notice_*`). `report` lists every removed role still owed a notice under
   `unnotified`; a role re-added by `revert`/`restore` is never announced.
 - **Never reported complete while a notice is owed:** if any role the run removed has no
-  `sent` notice (the send deferred or failed after the DELETE), `apply` exits non-zero naming
+  `sent` notice (the send deferred or failed after the execute), `apply` exits non-zero naming
   the run and its unnotified rows. Every later `apply` first retries the notices earlier runs
   owe and removes nothing new until they are all sent.
 - **Retry:** `python3 $S notify --run <apply_run> --notice-approved-by <SlackUID>` sends the
@@ -236,14 +264,14 @@ a user who sends a document after a deferred day keeps the role.
 - proof-on-file missing, unreadable, `generated_at` older than 3 hours or more than 5 minutes in
   the future, or any source with
   `stale` not `false`; or the send ledger or doc manifest unreadable: `plan` skips every row
-  as `proof_source_unavailable` and `apply` refuses before the first DELETE.
+  as `proof_source_unavailable` and `apply` refuses before any execute.
 - proof-on-file, the send ledger or the doc manifest malformed (wrong shape): same as
   unreadable.
 - org-affiliation missing, unreadable or malformed: every row
-  `affiliation_source_unavailable`, and `apply` refuses before the first DELETE.
-- A single user with no verdict does NOT stop the run (firstmate 021): that user's
-  would-be-removed rows are skipped as `affiliation_unknown`, so nothing of theirs is
-  removed, and every other user's rows go ahead.
+  `affiliation_source_unavailable`, and `apply` refuses before any execute.
+- A single user with no verdict does NOT stop the run (firstmate 021): `plan` skips that
+  user's would-be-removed rows as `affiliation_unknown`, and `apply` withholds that user's
+  whole set, so nothing of theirs is removed, and every other user's set goes ahead.
 - Every skip is in the ledger with its reason; no email is written there.
 
 ## Ledger

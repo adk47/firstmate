@@ -43,16 +43,19 @@ nothing is removed that run.
 A row that fails any gate is SKIPPED with the reason, recorded, and left for
 the verify waves. Nothing is retried around a gate.
 
-The write is the existing removal route
-``DELETE /admin/track/:trackId/profile/:profileId/credits {credits:[role]}``.
-core-backend records a credit_removal_events row for it (the orphan
-reconciler then never re-adds the role) and publishes the catalog delete.
-The request's status is NOT changed. A 403 from the server (#10310) is
-recorded as ``refused`` with the server's errorCode. apply removes only pairs
-in an approved set (``--approval``, core-backend #10597); there is no
-unapproved path. Each DELETE is recorded as ``sent`` before it goes out; a
-lost response (or a crash) is reconciled against live credits by apply,
-readback and revert before anything is retried, reverted or reported done.
+The agent stages ONE approval set per user (core-backend #10597); Nick or Jan
+decides each pair; ``apply``, from their own session, calls core-backend #10638
+``POST /admin/credit-removals/:id/execute`` and sends the user's take-back notice
+in the same step (firstmate 025/026). Execute spends only pairs whose own decision
+is ``approved`` and removes each through ``removeTrackProfileCredits`` (a
+credit_removal_events row, so the orphan reconciler never re-adds it; the
+request's status is NOT changed). A set executes only once EVERY pair is decided:
+core decisions are write-once, so what the execute spends cannot grow after the
+live gate. Every pair a set would spend is re-proved live first; any failure
+withholds the WHOLE set, never part of it. A 403 is recorded as
+``refused``. Each pair is recorded as ``sent`` before the execute goes out; a lost
+response (or a crash) is reconciled against live credits by apply, readback and
+revert before anything is retried, reverted or reported done.
 
 The displaced engineer's trusted credit is never written: trusted raw credits
 coexist with the user claim, so "restoring" it means proving it is still
@@ -80,7 +83,6 @@ from .ledger import Ledger
 EXCLUDED_USERS = frozenset({"15"})  # captain 2026-10-15 ~21:50Z: Jay Baumgardner's profile left alone
 DECISION_REF = ("captain 2026-10-15 20:00Z delete rule + 22:02Z; firstmate decision 001 "
                 "credit-retro-exec-r1 2026-10-15T23:09Z (role-scoped A, named-human X)")
-DECISION_TAG = "credit-retro-r1 fm001"
 RAW_PAGE = 200
 RAW_MAX_PAGES = 10
 REQUEST_SCAN_LIMIT = 100
@@ -145,19 +147,6 @@ def approval_ref(row: dict[str, Any], approval_id: str | None = None) -> str:
     """The full reference, kept in the ledger."""
     ref = f"{DECISION_REF} | {row['evidence_url']}"
     return f"credit-removal-approval {approval_id} | {ref}" if approval_id else ref
-
-
-def header_ref(row: dict[str, Any], approval_id: str | None = None) -> str:
-    """The logged X-Removal-Approval-Ref (capped at 255 by the server): approval id and
-    evidence URL first, so the cap can only ever cut the short decision tag."""
-    return " | ".join(([f"approval {approval_id}"] if approval_id else [])
-                      + [row["evidence_url"], DECISION_TAG])
-
-
-def removal_reason(row: dict[str, Any]) -> str:
-    holders = ", ".join(row.get("displaced") or []) or "another person"
-    return (f"credit-retro-r1 take-back {row['row_id']}: trusted sources credit {row['role']} "
-            f"to {holders}; web check {row.get('web', {}).get('verdict', '?')}")
 
 
 # -- live reads --------------------------------------------------------------
@@ -527,8 +516,11 @@ def stage(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, pla
           log: Callable[[str], None] = print) -> tuple[str, dict[str, Any]]:
     """Stage the plan's would-remove rows as credit-removal approval sets (core-backend
     #10597 ``POST /admin/credit-removals``) for Nick or Jan to approve. Staging writes
-    nothing destructive. Every pair's public-credit URL is in its set's ``reason`` in
-    full; when they do not fit one set, the rows are split over as few sets as needed."""
+    nothing destructive. ONE SET PER USER (firstmate 026): core #10638 execute spends every
+    approved pair of a set at once, and the notice, the daily cap and every exclusion are
+    per user, so one user's problem never blocks or forces another's removal. Every pair's
+    public-credit URL is in its set's ``reason`` in full; a user whose evidence does not
+    fit one set is not staged (``user_evidence_exceeds_one_set``) and goes to a human."""
     from .ledger import sha256_file  # noqa: PLC0415
     check_plan(ledger, plan_run, manifest)
     passing = planned_rows(ledger, plan_run, rows)
@@ -536,21 +528,37 @@ def stage(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, pla
         raise SystemExit(f"{plan_run}: no row passed the gate; nothing to stage")
     head = (f"{DECISION_REF}. Trusted public credits name a different person for each one-person role "
             f"below [profile/track/role] public-credit URL: ")
-    chunks = chunk_for_reasons(passing, head)
+    by_user: dict[str, list[dict[str, Any]]] = {}
+    for r in passing:
+        by_user.setdefault(str(r["user_id"]), []).append(r)
     source = f"hydra credit-retro-r1 plan {plan_run}; manifest takeback-r1.jsonl sha256 {sha256_file(manifest)}"
     run_id = ledger.start_run(kind="stage", actor=api.actor, manifest=manifest, parent_run=plan_run, argv=argv)
     approvals: list[str] = []
     counts: dict[str, int] = {}
-    for n, chunk in enumerate(chunks, 1):
+    for n, (uid, urows) in enumerate(sorted(by_user.items()), 1):
+        try:
+            chunks = chunk_for_reasons(urows, head)
+        except SystemExit as exc:
+            chunks, why = [], str(exc)
+        else:
+            why = "" if len(chunks) == 1 else f"{len(chunks)} sets needed"
+        if why:
+            for r in urows:
+                ledger.event(run_id, api.actor, **_common(r), action="stage", outcome="skip",
+                             evidence_url=r["evidence_url"], approval_ref=approval_ref(r),
+                             reason=f"user_evidence_exceeds_one_set: {why}")
+            counts["skip:user_evidence_exceeds_one_set"] = counts.get("skip:user_evidence_exceeds_one_set", 0) + len(urows)
+            log(f"skip: user {uid}: evidence does not fit one set ({why}); route to a human")
+            continue
         pairs: dict[tuple[str, str], list[str]] = {}
-        for r in chunk:
+        for r in urows:
             pairs.setdefault((r["profile_id"], r["track_id"]), []).append(r["role"])
         body = {
             "kind": "credit_removal",
             "pairs": [{"profileId": p, "trackId": t, "roles": roles} for (p, t), roles in pairs.items()],
             "requestedForKind": "internal",
-            "sourceRef": f"{source}; set {n}/{len(chunks)}",
-            "reason": head + "; ".join(evidence_line(r) for r in chunk),
+            "sourceRef": f"{source}; user {uid} (set {n}/{len(by_user)})",
+            "reason": head + "; ".join(evidence_line(r) for r in urows),
         }
         assert len(body["reason"]) <= REASON_MAX
         status, resp = api.write("POST", STAGE_PATH, body)
@@ -559,13 +567,13 @@ def stage(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, pla
         outcome = "staged" if approval_id else ("refused" if status == 403 else "error")
         if approval_id:
             approvals.append(approval_id)
-        for r in chunk:
+        for r in urows:
             ledger.event(run_id, api.actor, **_common(r), action="stage", outcome=outcome, http_status=status,
                          after={"approval_id": approval_id} if approval_id else {"response": resp},
                          evidence_url=r["evidence_url"], approval_ref=approval_ref(r),
                          reason=f"credit-removal-approval {approval_id}" if approval_id else "stage failed")
-        counts[outcome] = counts.get(outcome, 0) + len(chunk)
-        log(f"{outcome}: set {n}/{len(chunks)}, {len(chunk)} roles as approval {approval_id or '-'} (HTTP {status})")
+        counts[outcome] = counts.get(outcome, 0) + len(urows)
+        log(f"{outcome}: user {uid}, {len(urows)} roles as approval {approval_id or '-'} (HTTP {status})")
         if not approval_id:
             break
     counts["sets"] = len(approvals)
@@ -573,18 +581,29 @@ def stage(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, pla
     return run_id, {"approval_ids": approvals, "counts": counts}
 
 
-def approved_pairs(api: ReadApi, approval_id: str) -> set[str]:
-    """The (profile|track|role) keys of an APPROVED, unexpired, unconsumed approval set."""
-    from datetime import datetime, timezone  # noqa: PLC0415
-    data = api.get(f"{STAGE_PATH}/{approval_id}")
+def set_problem(approval_id: str, data: Any) -> str | None:
+    """Why a set as ``GET /admin/credit-removals/:id`` returned it cannot be executed, or None."""
     if not isinstance(data, dict) or data.get("status") != "approved":
-        raise SystemExit(f"approval {approval_id} is {data.get('status') if isinstance(data, dict) else '?'}, "
-                         "not approved: Nick or Jan approves it first")
+        return (f"approval {approval_id} is {data.get('status') if isinstance(data, dict) else '?'}, "
+                "not approved: Nick or Jan approves it first")
     exp = data.get("expiresAt")
     if exp and datetime.fromisoformat(str(exp).replace("Z", "+00:00")) <= datetime.now(timezone.utc):
-        raise SystemExit(f"approval {approval_id} expired at {exp}: stage again")
-    return {_pair_key(p["profileId"], p["trackId"], p["role"]) for p in data.get("pairs") or []
-            if not p.get("consumedAt")}
+        return f"approval {approval_id} expired at {exp}: stage again"
+    return None
+
+
+def approval_set(api: ReadApi, approval_id: str) -> dict[str, Any]:
+    """An APPROVED, unexpired approval set as ``GET /admin/credit-removals/:id`` returns it."""
+    data = api.get(f"{STAGE_PATH}/{approval_id}")
+    if why := set_problem(approval_id, data):
+        raise SystemExit(why)
+    return data
+
+
+def spendable_pairs(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """The pairs core #10638 execute would spend: the pair's OWN decision is ``approved``
+    (Fable 024: a set is approved once any pair is) and it is not consumed yet."""
+    return [p for p in data.get("pairs") or [] if p.get("decision") == "approved" and not p.get("consumedAt")]
 
 
 def live_removed(api: ReadApi, e: dict[str, Any] | Any) -> bool | None:
@@ -598,8 +617,8 @@ def live_removed(api: ReadApi, e: dict[str, Any] | Any) -> bool | None:
 
 
 def reconcile(api: ReadApi, ledger: Ledger, apply_run: str, log: Callable[[str], None] = print) -> list[str]:
-    """Resolve every DELETE of ``apply_run`` that went out with no known result (a
-    crash or a transport error after sending) against live credits, and record the
+    """Resolve every removal of ``apply_run`` that went out with no known result (a
+    crash or a lost response after sending) against live credits, and record the
     result in THAT run, so report, revert and the waves see the removal. Returns the
     row ids still unresolved (the live read failed too)."""
     left = []
@@ -668,7 +687,7 @@ def account_of(api: ReadApi, rows: list[dict[str, Any]]) -> tuple[dict[str, Any]
 
 def notice_preflight(api: ReadApi, sender, rows: list[dict[str, Any]],
                      log: Callable[[str], None] = print) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
-    """Before the first DELETE: every user who may lose a role must be reachable through
+    """Before any execute: every user who may lose a role must be reachable through
     Caroline's gate with the fixed take-back notice, TODAY. Returns (user_id -> account,
     user_id -> skip reason for users whose roles are not removed this run: the gate would
     defer their notice, or none of their requests still belongs to them). Any other refusal
@@ -749,9 +768,79 @@ def send_notices(ledger: Ledger, apply_run: str, actor: str, sender, rows: list[
     return counts
 
 
+EXECUTE_REMOVED = ("removed", "already_executed")
+Index = dict[str, list[dict[str, Any]]]
+
+
+def _key_of(p: dict[str, Any]) -> str:
+    return _pair_key(p["profileId"], p["trackId"], p["role"])
+
+
+def _index(rows: list[dict[str, Any]]) -> Index:
+    """Rows by pair key. Two requests can claim the same profile/track/role (Fable: 161128's two
+    "Autentica" requests): core holds ONE pair for them, and its result is every such row's result."""
+    by_key: Index = {}
+    for r in rows:
+        by_key.setdefault(_pair_key(r["profile_id"], r["track_id"], r["role"]), []).append(r)
+    return by_key
+
+
+def _pair_row_id(p: dict[str, Any]) -> str:
+    return f"pair:{p['profileId']}/{p['trackId']}/{p['role']}"
+
+
+@dataclass
+class ExecSet:
+    """One user's approval set, mapped back to the plan's rows."""
+    approval_id: str
+    user_id: str = ""
+    rows: list[dict[str, Any]] = field(default_factory=list)      # plan rows of the pairs execute would spend
+    unknown: list[dict[str, Any]] = field(default_factory=list)   # spendable pairs that are no row of the plan
+    consumed: list[dict[str, Any]] = field(default_factory=list)  # manifest rows of pairs consumed outside the tool
+    withheld: str = ""                                             # why the WHOLE set is not executed
+
+
+def _exec_sets(api: ReadApi, approvals: list[str], planned: Index, manifest_rows: Index) -> list[ExecSet]:
+    """Read every set before anything is executed: a set must be approved and unexpired, belong
+    to ONE user, every pair it would spend must be a row of this plan, and every pair must be
+    decided. Core decisions are write-once (``decision IS NULL`` guards every decide path), so
+    an undecided pair is the only way what the execute spends could grow after the live gate:
+    a pair approved between the gate and the POST would be removed un-proved and unannounced."""
+    out = []
+    for aid in dict.fromkeys(approvals):
+        data = approval_set(api, aid)
+        spend = spendable_pairs(data)
+        es = ExecSet(aid)
+        es.unknown = [p for p in spend if _key_of(p) not in planned]
+        es.rows = [r for p in spend for r in planned.get(_key_of(p), [])]
+        es.consumed = [r for p in data.get("pairs") or [] if p.get("consumedAt")
+                       for r in manifest_rows.get(_key_of(p), [])]
+        users = {str(r["user_id"]) for r in es.rows}
+        es.user_id = next(iter(users)) if len(users) == 1 else ",".join(sorted(users))
+        if es.unknown:
+            es.withheld = f"pair_not_in_plan:{len(es.unknown)}"
+        elif len(users) > 1:
+            es.withheld = "set_spans_users"
+        elif any(p.get("decision") not in ("approved", "rejected") for p in data.get("pairs") or []):
+            es.withheld = "pair_undecided"
+        out.append(es)
+    return out
+
+
 def apply(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, plan_run: str,
-          argv: list[str], approvals: list[str], excl: Exclusions, sender=None, only: set[str] | None = None,
+          argv: list[str], approvals: list[str], excl: Exclusions, sender=None,
           pause_s: float = 0.5, log: Callable[[str], None] = print) -> tuple[str, dict[str, int]]:
+    """Execute approved take-back sets through core #10638 ``POST /admin/credit-removals/:id/execute``
+    from the named human's own session, and send each user's take-back notice in the same step
+    (firstmate 025/026). Per set (= one user): every pair it would spend is re-proved live (gate,
+    proof on file, affiliation, evidence) and the user's notice is pre-flighted; ANY failure
+    withholds the WHOLE set, never part of it, and routes it to the human with the reason (core
+    cannot un-approve a decided pair). A set with any undecided pair is withheld
+    (``pair_undecided``) until Nick/Jan decide every pair, so the execute spends exactly the pairs
+    that were gated. The server spends only pairs whose own decision is ``approved``; a notice
+    names only the pairs it reports removed.
+    A pair consumed with no removal of this manifest's apply runs (executed outside the tool) is
+    resolved by a live read and announced when gone."""
     from .ledger import sha256_file  # noqa: PLC0415
     check_plan(ledger, plan_run, manifest)
     if excl.unavailable:
@@ -759,12 +848,11 @@ def apply(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, pla
     if sender is None:
         raise SystemExit("apply needs the take-back notice sender (Caroline's gate): every removal tells its user")
     if not approvals:
-        raise SystemExit("apply removes only pairs Nick or Jan approved: run `stage`, get the set approved, "
+        raise SystemExit("apply executes only sets Nick or Jan approved: run `stage`, get the set approved, "
                          "then pass --approval <id>")
-    covered: dict[str, str] = {}
-    for aid in approvals:
-        covered.update({k: aid for k in approved_pairs(api, aid)})
-    # an earlier run's DELETE with no known result is resolved before anything is retried
+    planned = _index(planned_rows(ledger, plan_run, rows))
+    sets = _exec_sets(api, approvals, planned, _index(rows))
+    # an earlier run's removal with no known result is resolved before anything is retried
     earlier_runs = ledger.apply_runs(sha256_file(manifest))
     require_reconciled(api, ledger, earlier_runs, log)
     # ...and a removal resolved only now (or whose notice failed) is announced before anything new
@@ -772,15 +860,24 @@ def apply(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, pla
     for prior in earlier_runs:
         for k, v in notify(api, ledger, prior, rows, sender, log).items():
             counts[f"earlier_{k}"] = counts.get(f"earlier_{k}", 0) + v
-    todo = [r for r in planned_rows(ledger, plan_run, rows) if not only or r["row_id"] in only]
-    accounts, held = notice_preflight(api, sender, todo, log)
+    ours = {e["row_id"] for prior in earlier_runs for e in ledger.removed_rows(prior)}
+    for es in sets:
+        es.consumed = [r for r in es.consumed if r["row_id"] not in ours]
+    accounts, held = notice_preflight(api, sender, [r for es in sets if not es.withheld for r in es.rows]
+                                      + [r for es in sets for r in es.consumed], log)
+    for es in sets:
+        if not es.withheld and es.user_id in held:
+            es.withheld = held[es.user_id]
     run_id = ledger.start_run(kind="apply", actor=api.actor, manifest=manifest, parent_run=plan_run, argv=argv)
 
-    def bump(key: str) -> None:
-        counts[key] = counts.get(key, 0) + 1
+    def bump(key: str, n: int = 1) -> None:
+        counts[key] = counts.get(key, 0) + n
 
     try:
-        _remove_rows(api, ledger, run_id, todo, covered, held, excl, counts, bump, pause_s, log)
+        for es in sets:
+            if not _execute_set(api, ledger, run_id, es, excl, bump, log):
+                break
+            time.sleep(pause_s)
     finally:
         try:
             # the removals that happened are announced, whatever stopped the loop
@@ -791,65 +888,137 @@ def apply(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, pla
     return run_id, counts
 
 
-def _remove_rows(api, ledger: Ledger, run_id: str, todo: list[dict[str, Any]], covered: dict[str, str],
-                 held: dict[str, str], excl: Exclusions, counts: dict[str, int], bump, pause_s: float,
-                 log: Callable[[str], None]) -> None:
-    for row in todo:
-        if str(row["user_id"]) in held:
-            res = GateResult(False, held[str(row["user_id"])])
-        else:
-            res = gate(api, row, excl)  # re-proved immediately before the write
-        if res.ok and _pair_key(row["profile_id"], row["track_id"], row["role"]) not in covered:
-            res = GateResult(False, "not_in_approval", res.before)
-        ledger.event(run_id, api.actor, **_common(row), action="gate", outcome="pass" if res.ok else "skip",
-                     before=res.before, evidence_url=row["evidence_url"], approval_ref=approval_ref(row),
-                     reason=res.reason)
-        if not res.ok:
-            bump(f"skip:{res.reason}")
-            log(f"skip          {row['row_id']}  {res.reason}")
+def _withhold(ledger: Ledger, run_id: str, actor: str, es: ExecSet, reasons: dict[str, str],
+              befores: dict[str, dict[str, Any]], bump, log: Callable[[str], None]) -> None:
+    """The WHOLE set stays unexecuted (approved, unspent until it expires); the human gets why."""
+    for r in es.rows:
+        why = reasons.get(r["row_id"]) or (es.withheld if not reasons else "with_set")
+        ledger.event(run_id, actor, **_common(r), action="gate", outcome="withheld", before=befores.get(r["row_id"]),
+                     evidence_url=r["evidence_url"], approval_ref=approval_ref(r, es.approval_id),
+                     reason=why if why == es.withheld else f"{why} (set withheld: {es.withheld})")
+        bump(f"withheld:{why}")
+    for p in es.unknown:
+        ledger.event(run_id, actor, row_id=_pair_row_id(p), user_id=es.user_id or None, profile_id=p["profileId"],
+                     track_id=p["trackId"], role=p["role"], action="gate", outcome="withheld",
+                     approval_ref=f"credit-removal-approval {es.approval_id}", reason="pair_not_in_plan")
+        bump("withheld:pair_not_in_plan")
+    bump("withheld_sets")
+    log(f"WITHHELD      approval {es.approval_id} user {es.user_id}: {es.withheld} (whole set, nothing removed; "
+        "Nick/Jan decide: it stays approved and unspent until it expires)")
+
+
+def _resolve_consumed(api, ledger: Ledger, run_id: str, es: ExecSet, bump, log: Callable[[str], None]) -> None:
+    """A pair consumed with no removal recorded by this manifest's apply runs was executed outside
+    the tool (the board): the live credit decides. Gone is a removal, announced in this run;
+    still credited is withheld for Nick/Jan; an unreadable credit stays unresolved."""
+    for r in es.consumed:
+        gone = live_removed(api, r)
+        ref = approval_ref(r, es.approval_id)
+        if gone is False:
+            ledger.event(run_id, api.actor, **_common(r), action="gate", outcome="withheld",
+                         evidence_url=r["evidence_url"], approval_ref=ref, reason="consumed_still_credited")
+            bump("withheld:consumed_still_credited")
+            log(f"WITHHELD      {r['row_id']}  approval {es.approval_id}: pair consumed outside credit-retro, "
+                "credit still live; Nick/Jan decide")
             continue
-        path = f"/admin/track/{row['track_id']}/profile/{row['profile_id']}/credits"
-        aid = covered[_pair_key(row["profile_id"], row["track_id"], row["role"])]
-        ref = approval_ref(row, aid)
-        # intent first: a crash or a lost response leaves a `sent` row that reconcile resolves
-        ledger.event(run_id, api.actor, **_common(row), action="remove", outcome="sent", before=res.before,
-                     evidence_url=row["evidence_url"], approval_ref=ref, reason="DELETE sent")
-        try:
-            status, body = api.write("DELETE", path, {"credits": [row["role"]]}, headers={
-                "X-Removal-Approval-Ref": header_ref(row, aid),
-                "X-Removal-Reason": removal_reason(row),
-                "X-Removal-Confirmed-By": api.actor,
-            })
-        except ApiError as exc:
-            gone = live_removed(api, row)
-            outcome = "indeterminate" if gone is None else ("removed" if gone else "not_removed")
-            ledger.event(run_id, api.actor, **_common(row), action="remove", outcome=outcome, before=res.before,
-                         after={"transport_error": str(exc)}, evidence_url=row["evidence_url"], approval_ref=ref,
-                         reason=f"no DELETE response; live read: {outcome}")
-            bump(outcome)
-            log(f"{outcome:13} {row['row_id']}  transport error; stopping. {exc}")
-            counts["stopped_on_transport_error"] = 1
-            break
-        if 200 <= status < 300:
-            outcome = "removed"
-        elif status == 403:
-            outcome = "refused"
-        else:
-            outcome = "error"
-        err = body.get("errorCode") if isinstance(body, dict) else None
-        ledger.event(run_id, api.actor, **_common(row), action="remove", outcome=outcome, http_status=status,
-                     before=res.before, after={"response": body if outcome != "removed" else None},
-                     evidence_url=row["evidence_url"], approval_ref=ref,
-                     reason=err or removal_reason(row))
+        outcome = "removed" if gone else "indeterminate"
+        ledger.event(run_id, api.actor, **_common(r), action="remove", outcome=outcome,
+                     after={"executed_outside_tool": es.approval_id}, evidence_url=r["evidence_url"],
+                     approval_ref=ref, reason="executed_outside_tool" + ("" if gone else "; live read failed"))
         bump(outcome)
-        log(f"{outcome:13} {row['row_id']}  HTTP {status} {err or ''}".rstrip())
-        if outcome == "refused":
-            # Every #10310 refusal is about the SESSION (agent token, stale sign-in,
-            # impersonation), never the row, so every later row would be refused too.
-            log("server refused the session; stopping. Sign in again (nick@/jan@) and re-run plan + apply")
-            counts["stopped_on_refusal"] = 1
-            break
-        time.sleep(pause_s)
+        bump("executed_outside_tool")
+        log(f"{outcome:13} {r['row_id']}  executed outside credit-retro (approval {es.approval_id})")
+
+
+def _resolve_lost(api, ledger: Ledger, run_id: str, es: ExecSet, befores: dict[str, dict[str, Any]],
+                  status: int | None, what: str, after: dict[str, Any], bump, log: Callable[[str], None]) -> None:
+    """The execute's result is unknown: each pair's live credit decides."""
+    for r in es.rows:
+        gone = live_removed(api, r)
+        outcome = "indeterminate" if gone is None else ("removed" if gone else "not_removed")
+        _record_result(ledger, run_id, api.actor, es, r, befores, outcome, status, f"{what}; live read: {outcome}",
+                       after, bump, log)
+
+
+def _execute_set(api, ledger: Ledger, run_id: str, es: ExecSet, excl: Exclusions, bump,
+                 log: Callable[[str], None]) -> bool:
+    """Re-prove, then execute one set. Returns False when the run must stop (session refused,
+    or no usable response from the server)."""
+    _resolve_consumed(api, ledger, run_id, es, bump, log)
+    if not es.rows and not es.unknown:
+        log(f"nothing to spend in approval {es.approval_id} (every pair consumed or not approved)")
+        return True
+    reasons: dict[str, str] = {}
+    befores: dict[str, dict[str, Any]] = {}
+    if not es.withheld:
+        for r in es.rows:
+            res = gate(api, r, excl)  # re-proved immediately before the execute
+            befores[r["row_id"]] = res.before
+            if not res.ok:
+                reasons[r["row_id"]] = res.reason
+        if reasons:
+            es.withheld = "live_gate:" + ",".join(sorted(set(reasons.values())))
+    if es.withheld:
+        _withhold(ledger, run_id, api.actor, es, reasons, befores, bump, log)
+        return True
+    for r in es.rows:
+        ledger.event(run_id, api.actor, **_common(r), action="gate", outcome="pass", before=befores[r["row_id"]],
+                     evidence_url=r["evidence_url"], approval_ref=approval_ref(r, es.approval_id), reason="")
+        # intent first: a crash or a lost response leaves a `sent` row that reconcile resolves
+        ledger.event(run_id, api.actor, **_common(r), action="remove", outcome="sent", before=befores[r["row_id"]],
+                     evidence_url=r["evidence_url"], approval_ref=approval_ref(r, es.approval_id),
+                     reason=f"execute sent ({es.approval_id})")
+    try:
+        status, body = api.write("POST", f"{STAGE_PATH}/{es.approval_id}/execute", {})
+    except ApiError as exc:
+        _resolve_lost(api, ledger, run_id, es, befores, None, "no execute response",
+                      {"transport_error": str(exc)}, bump, log)
+        log(f"transport error on approval {es.approval_id}; stopping. {exc}")
+        bump("stopped_on_transport_error")
+        return False
+    err = body.get("errorCode") if isinstance(body, dict) else None
+    if status == 403:
+        for r in es.rows:
+            _record_result(ledger, run_id, api.actor, es, r, befores, "refused", status, err or f"HTTP {status}",
+                           {"response": body}, bump, log)
+        # every refusal is about the SESSION (agent token, stale sign-in, impersonation)
+        log("server refused the session; stopping. Sign in again (nick@/jan@) and re-run")
+        bump("stopped_on_refusal")
+        return False
+    if not 200 <= status < 300:
+        # a gateway error can arrive after core executed: a lost response, never a final error
+        _resolve_lost(api, ledger, run_id, es, befores, status, f"execute HTTP {status}{(' ' + err) if err else ''}",
+                      {"response": body}, bump, log)
+        log(f"execute of approval {es.approval_id} answered HTTP {status}; resolved by live read; stopping")
+        bump("stopped_on_error_response")
+        return False
+    data = body.get("data") if isinstance(body, dict) and "data" in body else body
+    results = {_key_of(x): x for x in (data.get("results") if isinstance(data, dict) else None) or []}
+    for r in es.rows:
+        res = results.get(_pair_key(r["profile_id"], r["track_id"], r["role"])) or {}
+        st = res.get("status") or "missing"
+        if st in EXECUTE_REMOVED:
+            outcome, why = "removed", f"execute {st}"
+        else:
+            # not spent, or spent with an unknown result: the live credit decides; never a notice on a guess
+            gone = live_removed(api, r)
+            outcome = "indeterminate" if gone is None else ("removed" if gone else
+                                                            ("refused" if st == "refused" else "not_removed"))
+            why = f"execute {st}{(' ' + res['code']) if res.get('code') else ''}; live read: {outcome}"
+        _record_result(ledger, run_id, api.actor, es, r, befores, outcome, status, why,
+                       {"execute": res} if outcome != "removed" else {"removal_event_id": res.get("removalEventId")},
+                       bump, log)
+    return True
+
+
+def _record_result(ledger: Ledger, run_id: str, actor: str, es: ExecSet, r: dict[str, Any],
+                   befores: dict[str, dict[str, Any]], outcome: str, status: int | None, reason: str,
+                   after: dict[str, Any], bump, log: Callable[[str], None]) -> None:
+    ledger.event(run_id, actor, **_common(r), action="remove", outcome=outcome, http_status=status,
+                 before=befores.get(r["row_id"]), after=after, evidence_url=r["evidence_url"],
+                 approval_ref=approval_ref(r, es.approval_id), reason=reason)
+    bump(outcome)
+    log(f"{outcome:13} {r['row_id']}  {reason}")
 
 
 def notify(api: ReadApi, ledger: Ledger, apply_run: str, rows: list[dict[str, Any]], sender,
@@ -998,12 +1167,16 @@ def report(ledger: Ledger, run_id: str, *, script: str = "/opt/hydra/scripts/cre
         out["server_refused_or_error"] = [
             {"row_id": e["row_id"], "outcome": e["outcome"], "http_status": e["http_status"], "reason": e["reason"]}
             for e in results if e["outcome"] != "removed"]
-        # sent / indeterminate: the DELETE went out with no known result; readback, revert or
+        # sent / indeterminate: the removal went out with no known result; readback, revert or
         # the next apply reconciles them against live credits before anything else
         out["unresolved"] = [e["row_id"] for e in ledger.unresolved_rows(run_id)]
         # removed and still owed their take-back notice: the next apply or `notify --run` sends it
         out["unnotified"] = unnotified_row_ids(ledger, run_id)
         out["skipped"] = [{"row_id": e["row_id"], "reason": e["reason"]}
-                          for e in events if e["action"] == "gate" and e["outcome"] == "skip"]
+                          for e in events if e["action"] == "gate" and e["outcome"] in ("skip", "withheld")]
+        # firstmate 026: a whole user set held back; Nick/Jan get the reason (it stays approved and unspent)
+        out["withheld"] = [{"row_id": e["row_id"], "user_id": e["user_id"], "reason": e["reason"],
+                            "approval": (e["approval_ref"] or "").split(" | ")[0]}
+                           for e in events if e["action"] == "gate" and e["outcome"] == "withheld"]
         out["revert_command"] = f"python3 {script} revert --run {run_id} --login"
     return out
