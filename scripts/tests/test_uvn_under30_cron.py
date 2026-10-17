@@ -76,6 +76,9 @@ def credit(status="user_verification_needed", request_id=CR_ID, track="spotify-1
         "spotifyTrackId": track,
         "spotifyTrackTitle": f"Song {request_id[:2]}",
         "credits": ["Mixing"],
+        # Stored (server-side) popularity: core-backend's T12 guard reads it, and
+        # outside 1..29 it refuses uvn-under30's approval (band A).
+        "spotifyPopularity": 12,
         "verificationData": {"rule_risk_percent": {}},
     }
 
@@ -1060,6 +1063,24 @@ class ApprovalReadbackTests(unittest.TestCase):
         self.assertEqual(raised.exception.confirmed_ids, {CR_ID})
         self.assertEqual(mark_unresolved.call_count, 2)
         self.assertIn("attempt started", mark_unresolved.call_args_list[0].args[2])
+
+    def test_server_agent_guard_refusal_clears_the_blocker_and_approves_nothing(self):
+        # core-backend T12: HTTP 400 agent_cannot_approve_declined means nothing was
+        # written, so the attempt is resolved (not approved) and must not block the ticket.
+        response = {"http_status": 400, "body": {
+            "errorCode": "agent_cannot_approve_declined", "refusedRequestIds": [CR_ID],
+            "refused": [{"id": CR_ID, "band": "B_request_info", "reasons": ["proof_required"]}]}}
+        with (
+            patch.object(cron, "audit") as audit,
+            patch.object(cron, "admin_raw", return_value=response),
+            patch.object(cron, "verify_status", return_value=set()),
+            patch.object(cron, "mark_unresolved"),
+            patch.object(cron, "clear_unresolved") as clear_unresolved,
+        ):
+            confirmed = cron.approve_chunk("run-1", "ticket-1", [CR_ID])
+        self.assertEqual(confirmed, set())
+        clear_unresolved.assert_called_once_with("run-1", [CR_ID])
+        self.assertIn("approve_refused_by_server", [c.args[1] for c in audit.call_args_list])
 
     def test_exact_2xx_and_readback_clears_prior_unresolved_state(self):
         response = {

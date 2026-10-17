@@ -40,6 +40,9 @@ PROFILES["art-nopop"] = {"name": "No Pop Artist", "rawProfiles": []}
 
 
 def req(rid, *, uid=500, pid=T.PID_GOOD, track="small", roles=("Mixing",), vd_rules=None, errors=None, **kw):
+    # The row's own stored spotifyPopularity follows the catalog track, as on prod
+    # (core-backend's agent guard reads the STORED value).
+    kw.setdefault("pop", (TRACKS.get(track) or {}).get("popularity", 20))
     r = T.request(rid, pid=pid, track=track, roles=roles, status="unverified", approved=False, risk=40, **kw)
     r["userId"] = uid
     r["verificationData"]["rule_risk_percent"] = dict(vd_rules or {})
@@ -1047,6 +1050,68 @@ class Cli(unittest.TestCase):
         self.assertNotIn(15, p.deny_user_ids, "no named-user rules: the fixture user is caught by the score")
         self.assertIn("94ad2ad2-0be9-4b8e-94a6-dc85eb100310", p.deny_profile_ids)
         self.assertTrue(p.editorial_role_terms)
+
+
+class ServerAgentGuardMirror(Base):
+    """Approvals core-backend's T12 agent guard would refuse are never sent, and
+    a refusal of some rows never rejects the rest of the batch (firstmate 036)."""
+
+    RAWS = {"small": [T.raw("Real Engineer", "mixer")]}
+
+    def test_stored_popularity_zero_goes_to_a_human_not_an_ask(self):
+        res, w = self.go([req(uuid_of(300), pop=0)], self.RAWS)
+        d = self.decisions()[uuid_of(300)]
+        self.assertEqual(d["decision"], "hold")
+        self.assertIn("popularity_unattributable", d["reason"])
+        self.assertEqual(w.calls, [])
+
+    def test_stored_big_popularity_or_client_metadata_or_proof_marker_asks_for_documents(self):
+        rows = [req(uuid_of(301), pop=70), req(uuid_of(302)), req(uuid_of(303))]
+        rows[1]["metadata"]["source"] = "client"
+        rows[2]["metadata"]["proofRequest"] = {"at": "2026-10-10T00:00:00Z"}
+        self.proof([])
+        res, w = self.go(rows, self.RAWS)
+        d = self.decisions()
+        for i in (301, 302, 303):
+            self.assertEqual(d[uuid_of(i)]["decision"], "support", i)
+            self.assertIn("server approval guard would refuse", d[uuid_of(i)]["reason"])
+        self.assertEqual([c for c in w.calls if c["status"] == decide.APPROVED], [])
+
+    def test_validator_approved_row_is_not_scoped(self):
+        r = req(uuid_of(304), pop=0)
+        r["verificationData"]["is_approved"] = True
+        res, w = self.go([r], self.RAWS)
+        self.assertEqual(self.decisions()[uuid_of(304)]["decision"], "approve")
+
+    def test_a_refusal_of_some_rows_never_rejects_the_rest_of_the_batch(self):
+        refused = uuid_of(311)
+        calls = []
+
+        def writer(status, ids, expected):
+            calls.append(list(ids))
+            if refused in ids:
+                raise decide.WriteFailed("PUT HTTP 400", {
+                    "result": "error", "code": 400, "errorCode": "agent_cannot_approve_declined",
+                    "refusedRequestIds": [refused],
+                    "refused": [{"id": refused, "band": "B_request_info", "reasons": ["popularity_unattributable"]}]})
+            return {"data": {"updatedIds": list(ids)}}
+        outs, err = decide.write_chunk(writer, lambda st, ids: set(), decide.APPROVED,
+                                       [uuid_of(310), refused, uuid_of(312)], decide.UNVERIFIED)
+        self.assertIsNone(err)
+        self.assertEqual(outs[uuid_of(310)], decide.APPROVED)
+        self.assertEqual(outs[uuid_of(312)], decide.APPROVED)
+        self.assertEqual(outs[refused], "skipped:agent_cannot_approve_declined:popularity_unattributable")
+        self.assertEqual(calls, [[uuid_of(310), refused, uuid_of(312)], [uuid_of(310), uuid_of(312)]])
+
+    def test_a_second_refusal_is_not_retried_again(self):
+        def writer(status, ids, expected):
+            raise decide.WriteFailed("PUT HTTP 400", {"errorCode": "agent_cannot_approve_declined",
+                                                       "refusedRequestIds": [ids[0]], "refused": []})
+        outs, err = decide.write_chunk(writer, lambda st, ids: set(), decide.APPROVED,
+                                       [uuid_of(320), uuid_of(321)], decide.UNVERIFIED)
+        self.assertTrue(outs[uuid_of(320)].startswith("skipped:agent_cannot_approve_declined"))
+        self.assertTrue(outs[uuid_of(321)].startswith("error:"), "one retry only; then it is an error")
+        self.assertIsNotNone(err)
 
 
 if __name__ == "__main__":

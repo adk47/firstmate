@@ -104,6 +104,7 @@ from .policy import AUTOMATION_REGISTRY as REGISTRY
 from .policy import DECIDE_POLICY as POLICY
 from .policy import (WEB_CONFIRM_MIN_CONFIDENCE, WEB_CONFIRM_MIN_DOMAINS, WEB_CONTRADICT_MIN_CONFIDENCE,
                      doc_required_ids, facts_of, validator_conflict, validator_rejected_rules)
+from .policy import server_approval_refusal
 from .roles import ONE_PERSON_FAMILIES, editorial_terms, family_of, is_editorial
 from .runner import log
 
@@ -157,6 +158,7 @@ EDITORIAL_MID_POPULARITY = 30
 EDITORIAL_VELOCITY_WEIGHT = 2
 HIGH_VELOCITY_24H = 50
 HIGH_VELOCITY_7D = 150
+
 
 
 @dataclass
@@ -868,8 +870,19 @@ def status_readback(script: str | None = None) -> Readback:
     return read
 
 
+def refused_by_agent_guard(body: Any, chunk: list[str]) -> dict[str, str]:
+    """{request id: reasons} when the answer is core-backend's
+    agent_cannot_approve_declined refusal (nothing written), else {}."""
+    if not isinstance(body, dict) or body.get("errorCode") != "agent_cannot_approve_declined":
+        return {}
+    ids = {str(i) for i in body.get("refusedRequestIds") or []} & set(chunk)
+    reasons = {str(r.get("id")): ",".join(str(x) for x in r.get("reasons") or [])
+               for r in body.get("refused") or [] if isinstance(r, dict)}
+    return {i: reasons.get(i, "refused") for i in ids}
+
+
 def write_chunk(writer: Writer, readback: Readback, status: str, chunk: list[str],
-                expected: str) -> tuple[dict[str, str], str | None]:
+                expected: str, _retry: bool = False) -> tuple[dict[str, str], str | None]:
     """Per-row outcomes of one conditional PUT, and the write error if any. A
     failed or timed-out PUT may still have committed rows, so the outcome of a
     failed chunk comes from the server's updatedIds and a status readback; a
@@ -879,6 +892,17 @@ def write_chunk(writer: Writer, readback: Readback, status: str, chunk: list[str
     except (admin_api.AdminError, subprocess.TimeoutExpired, ValueError) as exc:
         err = str(exc)
         body = getattr(exc, "body", None)
+        refused = refused_by_agent_guard(body, chunk)
+        if refused and not _retry:
+            # The server wrote NOTHING and named the rows it refuses: record those
+            # as skipped with its reasons and send the rest of the batch once more.
+            outs = {rid: f"skipped:agent_cannot_approve_declined:{why}"[:200] for rid, why in refused.items()}
+            rest = [i for i in chunk if i not in refused]
+            if not rest:
+                return outs, None
+            more, err2 = write_chunk(writer, readback, status, rest, expected, _retry=True)
+            outs.update(more)
+            return outs, err2
         data = body.get("data") if isinstance(body, dict) and isinstance(body.get("data"), dict) else body
         committed = {str(i) for i in (data.get("updatedIds") or [])} & set(chunk) if isinstance(data, dict) else set()
         rest = [i for i in chunk if i not in committed]
@@ -1082,6 +1106,27 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             else:
                 _set(d, "hold", "documentation required for this credit and no approved proof is on file for it: "
                      "never approved without a recorded proof id; human review")
+
+    # Approvals core-backend would refuse are never sent (T12 agent guard): a
+    # stored popularity outside 1..59 / client-sourced metadata needs documents
+    # (support, like any big track); a server proof requirement needs the
+    # claimant's proof (support); anything else goes to a human.
+    req_of = {str(r.get("id")): r for r in batch}
+    for d in decisions:
+        if d.decision != "approve" or d.request_id not in req_of:
+            continue
+        refusal = server_approval_refusal(req_of[d.request_id])
+        if not refusal:
+            continue
+        why = ",".join(refusal)
+        # firstmate 036: a stored popularity of 0 is NOT evidence of a big track
+        # (it is just unattributed), so those rows go to a human, never a proof ask.
+        if "popularity_unattributable" not in refusal and (
+                refusal[0] == "proof_required"
+                or set(refusal) <= {"popularity_unknown", "big_track", "client_sourced_metadata"}):
+            _set(d, "support", f"server approval guard would refuse ({why}): documentation required")
+        else:
+            _set(d, "hold", f"server approval guard would refuse ({why}): human review")
 
     # Daily per-user approval cap.
     counts = approvals_today_by_user(db, now.strftime("%Y-%m-%dT00:00:00Z"))

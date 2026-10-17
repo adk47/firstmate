@@ -220,3 +220,10 @@ ask are owned by other tickets:
   approvals (retro execution, the HTML report): T05 / retro.
 
 **Daily ask cap.** At most `max_ask_users_per_day` distinct users (policy file; 100 for the first 48h of go-live, firstmate 031) get a support request per UTC day, counting users already asked that day. A user admitted under the cap gets all of their rows in that run as one batch; the rest are deferred with reason `daily ask cap:` and go out on a later day. The cap is re-checked under the shared credit-write lock immediately before each support batch, on the UTC day that batch is sent (after the approval writes); outcomes are booked at the time the PUT returned, so a request in flight across midnight counts on the later day, so overlapping runs or a run crossing midnight cannot exceed it (rows trimmed there get outcome `deferred:daily_ask_cap`, or `deferred:per_user_window` when another run asked that user meanwhile).
+
+**Server approval guard mirror (T12).** core-backend refuses an agent approval of a validator-declined row unless the row is inside the automation's scope, judged on the row as the server stores it (`spotifyPopularity`, `metadata`, `verificationData`). `credit_review.policy.server_approval_refusal` (decider, scope not-big-no-hold) and `server_band_a_refusal` (uvn-under30, scope band A) mirror that rule, so neither automation sends an approval the server will refuse:
+- a stored popularity of 0 is unattributed, not big: the row goes to a human, never a proof ask (firstmate 036);
+- a stored popularity >= 60, unknown, client-sourced metadata or a server proof requirement (validator hold, risk 100, band hint not A, high/critical profile risk, a `proofRequest` marker) gets a support request;
+- anything else the server would refuse is held for a human.
+If the server still answers `agent_cannot_approve_declined`, it wrote nothing: the decider records the refused rows as `skipped:agent_cannot_approve_declined:<reasons>` and sends the rest of the batch once more; uvn-under30 clears its unresolved-attempt blocker and leaves the rows held.
+
