@@ -185,6 +185,10 @@ export interface IntercomSessionState {
   // human-takeover handoff.
   priorityFiredAt?: string | null;
   userTurnCount?: number;
+  // Customer EXCHANGES (a burst of customer messages before any reply counts once; see
+  // handler.ts continuesCustomerBurst). Drives only the hard turn-count cap; Jev and the
+  // judge keep reading the per-message userTurnCount.
+  userExchangeCount?: number;
   // Personalization context for a verified, logged-in customer. Populated at
   // most once per conversation (gated behind account.personalization.enabled),
   // fetched live from systems-of-record, and held ONLY here in session state —
