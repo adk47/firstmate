@@ -118,7 +118,7 @@ Example `details` block:
 
 ### Human Handoff (`support-general` with `escalation_reason`)
 
-When the customer-credit-removal skill (or any future skill) decides to bail out and hand off to a teammate, file `support-general` with a `details.escalation_reason`:
+When the customer-credit-removal skill (preview and route only; it never removes a credit) or any future skill decides to bail out and hand off to a teammate, file `support-general` with a `details.escalation_reason`:
 
 | `escalation_reason` | Trigger | Notes |
 |---------------------|---------|-------|
@@ -142,7 +142,7 @@ After filing, **stop the current skill flow.** Don't propose further fixes or as
 
 ### Unmerge Request (`unmerge-request` only)
 
-Filed by the `customer-credit-removal` skill when it detects that a customer's "remove these tracks" request looks like a wrong-merge case. Trigger: 10+ listed tracks share a single primary artist NOT on the profile's roster (i.e., not in `profile.name` or `profile.knownAsNames`), AND the profile owner has no production-side role on those tracks (see canonical role list below). Caroline does NOT execute the unmerge – Aaron approval is required (see `muso-ops-profiles/SKILL.md`). This ticket gives Aaron pre-fetched context so he can decide in seconds.
+Filed by the `customer-credit-removal` skill (preview and route only) when it detects that a customer's "remove these tracks" request looks like a wrong-merge case. Trigger: 10+ listed tracks share a single primary artist NOT on the profile's roster (i.e., not in `profile.name` or `profile.knownAsNames`), AND the profile owner has no production-side role on those tracks (see canonical role list below). Caroline does NOT execute the unmerge – Aaron approval is required (see `muso-ops-profiles/SKILL.md`). This ticket gives Aaron pre-fetched context so he can decide in seconds.
 
 **Canonical production-side role list** (used by Caroline's unmerge-detection AND by the wrapper script's `refused_production_role_on_track` guard):
 
@@ -177,6 +177,25 @@ Fields:
 
 **Not supplied by Caroline** – fetched by ops at triage time:
 - `raw_profile_sources[]` – the upstream sources this profile pulls from. `profile_status` doesn't expose `rawProfiles[]`, so Caroline can't include it. Ops fetches it directly via the admin API when investigating (it's the load-bearing field for "which raw_profile brought the unwanted tracks in").
+
+### Credit Correction – removal (`credit-correction` from `customer-credit-removal`)
+
+Caroline never removes a credit. When `customer-credit-removal` routes a removal ask, the packet IS the staged request: it carries one row per preview result so a staff run can consume them directly. Removal packets file as `credit-correction`, which `TIER_MAP` puts at tier 1 with a 2-business-day SLA; a dedicated tier-2 `credit-removal-request` type is tracked in MUS-10728 and this section changes with it. Required `details` block:
+
+```json
+"details": {
+  "removal_rows": [
+    {"track_id": "<uuid>", "profile_id": "<uuid>", "label": "<artist, or 'Name (requester req)'>",
+     "track_title": "<title>", "roles": "Composer,Co-Producer", "ref": "Intercom <conv_id>"}
+  ],
+  "requester_email": "<intercom-verified>",
+  "preview_source": "remove_credits dry-run <ISO ts>"
+}
+```
+
+- One object per `results[]` row the preview resolved (`track_id` = `matched_track_id`, `track_title` = `matched_title`). A `would_remove` row has no roles: take `roles` from the Step 3 `credits_search` `credits[]` entries matched by title and artists (`creditRoles`), comma-joined, never invented; same-title tracks with different roles are flagged in `label`.
+- `ref` is a traceable origin: `Intercom <conv_id>`, a ClickUp id, or a Slack/Buzz ts.
+- The six row fields map, in order, to six tab-separated columns (`track_id`, `profile_id`, `label`, `track_title`, `roles`, `ref`; no header) that a staff run reads. If the preview resolved no rows (the wrapper refused first), file `removal_rows: []` plus the customer's verbatim request with each track named by title; otherwise do not file the packet without rows.
 
 ### Order Fulfillment (`order-fulfillment` only)
 

@@ -2,8 +2,9 @@
 # ──────────────────────────────────────────────────────────────
 # jev-shadow-report.sh — reads the shadow JSONL written by scripts/lib/jev.sh
 # and prints a plain-text calibration table per (surface, question id):
-# probability bucket, n, agreement %, plus a per-surface footer (total lines,
-# rc != 0 count, p50/p95 latency_ms).
+# probability bucket, n, agreement %, plus a footer per (surface,
+# questions_version) -- total lines, rc != 0 count and rate, p50/p95 latency_ms.
+# Rows with no questions_version are labelled v1-legacy, never folded into v1.
 #
 # Usage:
 #   jev-shadow-report.sh [--surface <name>] [--window-hours <N>] \
@@ -227,7 +228,7 @@ def outcome_row_ok(row):
 
 undated = 0  # rows dropped from a windowed report for a missing/unparseable ts
 malformed = 0  # rows that parsed as JSON but failed row_ok, or blew up while being processed
-surfaces = {}  # surface -> {"lines": [...], "questions": {qid: [ (bucket_idx, answer, actual) ]}}
+surfaces = {}  # (surface, questions_version) -> {"lines": [...], "questions": {qid: [ (bucket_idx, answer, actual) ]}}
 
 # outcomes_truth[(surface, item_id, ts)] -> truth dict. Absent key means "no
 # matching outcome record" (never scored); a present record whose truth omits
@@ -236,7 +237,7 @@ surfaces = {}  # surface -> {"lines": [...], "questions": {qid: [ (bucket_idx, a
 # the former as unmatched.
 outcomes_truth = {}
 outcomes_rows_by_surface = {}    # surface -> count of valid outcome records (pre row_ts expansion)
-outcomes_matched_by_surface = {}  # surface -> count of shadow rows whose join found a truth record
+outcomes_matched_by_bucket = {}  # (surface, questions_version) -> count of shadow rows whose join found a truth record
 
 if outcomes_path:
     with open(outcomes_path, "r", encoding="utf-8") as fh:
@@ -296,14 +297,19 @@ for path in paths:
                         continue
 
                 surf = row["surface"]
-                entry = surfaces.setdefault(surf, {"lines": [], "questions": {}})
+                # Live (v1) and shadow (v2) calls share one surface file; a row
+                # with no questions_version predates the field and is kept
+                # apart as v1-legacy so it cannot inflate v1's failure rate.
+                ver = row.get("questions_version")
+                ver = ver if isinstance(ver, str) and ver else "v1-legacy"
+                entry = surfaces.setdefault((surf, ver), {"lines": [], "questions": {}})
                 entry["lines"].append(row)
 
                 truth_rec = None
                 if outcomes_path:
                     truth_rec = outcomes_truth.get((surf, row.get("item_id"), row.get("ts")))
                     if truth_rec is not None:
-                        outcomes_matched_by_surface[surf] = outcomes_matched_by_surface.get(surf, 0) + 1
+                        outcomes_matched_by_bucket[(surf, ver)] = outcomes_matched_by_bucket.get((surf, ver), 0) + 1
 
                 answers = row.get("answers")
                 # actual is the router's own action, not ground truth -- with
@@ -345,9 +351,13 @@ if not surfaces:
     print("no shadow lines")
     sys.exit(0)
 
-for surf in sorted(surfaces):
-    data = surfaces[surf]
-    print(f"== {surf} ==")
+last_surf = None
+for surf, ver in sorted(surfaces):
+    data = surfaces[(surf, ver)]
+    if surf != last_surf:
+        print(f"== {surf} ==")
+        last_surf = surf
+    print(f"  --- questions_version: {ver} ---")
     for qid in sorted(data["questions"]):
         print(f"  question: {qid}")
         print("    bucket      n   agreement")
@@ -382,11 +392,19 @@ for surf in sorted(surfaces):
     p95_s = "n/a" if p95 is None else str(p95)
     tail = f" undated_excluded={undated}" if cutoff is not None else ""
     if outcomes_path:
+        # outcomes_rows is surface-scoped by construction: a sidecar record
+        # carries no questions_version, so it cannot be split per bucket and
+        # the same count is correct under every version footer. outcomes_matched
+        # counts shadow rows, and each shadow row belongs to exactly one
+        # (surface, questions_version) bucket, so it IS bucket-scoped -- keying
+        # it by surface would print the surface-wide total under every version
+        # footer and reinstate the live/shadow pooling this script now splits.
         tail += (
             f" outcomes_rows={outcomes_rows_by_surface.get(surf, 0)}"
-            f" outcomes_matched={outcomes_matched_by_surface.get(surf, 0)}"
+            f" outcomes_matched={outcomes_matched_by_bucket.get((surf, ver), 0)}"
         )
-    print(f"  -- footer: total={total} rc_nonzero={rc_nonzero} p50_ms={p50_s} p95_ms={p95_s}{tail} malformed_rows={malformed}")
+    rate = f"{round(100 * rc_nonzero / total, 2)}%" if total else "n/a"
+    print(f"  -- footer [{ver}]: total={total} rc_nonzero={rc_nonzero} p50_ms={p50_s} p95_ms={p95_s} failure_rate={rate}{tail} malformed_rows={malformed}")
     # Failure breakdown: rc collapses timeout/network/http_*; rows written
     # before `reason` existed count as "unknown".
     reasons = {}
@@ -396,6 +414,6 @@ for surf in sorted(surfaces):
             key = key if isinstance(key, str) and key else "unknown"
             reasons[key] = reasons.get(key, 0) + 1
     if reasons:
-        print("  -- failures by reason: " + " ".join(f"{k}={v}" for k, v in sorted(reasons.items())))
+        print(f"  -- failures by reason [{ver}]: " + " ".join(f"{k}={v}" for k, v in sorted(reasons.items())))
     print()
 PY

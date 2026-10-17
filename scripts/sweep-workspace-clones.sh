@@ -405,8 +405,12 @@ QPATH=""; QDIR=""; QUARANTINE_ERROR=""
 # .git-only writes never move the worktree-freshness rail.
 #
 # Called immediately AFTER the rename on purpose: from that moment the set of
-# holders can only shrink, so one scan is sound. Scanning per candidate before
-# quarantine would be both slower and racy.
+# holders can only shrink, so one scan is sound. That scan MUST be fresh per
+# candidate: the kernel reports a handle under the tree's CURRENT name, so a
+# snapshot taken before this candidate was renamed lists it under its old name
+# and would never match the quarantine path (MUS-10455 QA). The once-per-run
+# snapshot below is therefore only a pre-rename filter (held_by_snapshot), never
+# the authority for "not held".
 #
 # Cannot enumerate → cannot prove absence → hazard. SWEEP_PROC_DIR is
 # dependency injection for tests (same role SWEEP_MOUNTS_FILE plays for the
@@ -426,17 +430,16 @@ if find "$_probe_dir" -maxdepth 0 -ignore_readdir_race -printf '' >/dev/null 2>&
 fi
 rmdir "$_probe_dir" 2>/dev/null || true
 
-# Every link target under the proc tree, one per line. Returns NONZERO if the
-# enumeration could not be completed — the caller treats that as a hazard.
+# Every link target under the proc tree, one per line. stderr is NOT discarded:
+# load_proc_cache classifies it, because on node-8 GNU find exits 1 on EVERY
+# walk (a pid vanishing at descend, plus `/proc/<pid>/net: Invalid argument`,
+# which -ignore_readdir_race never suppresses), so the exit code alone says
+# nothing. ~208ms on node-8 (725 processes / 11k links) in a single pass.
 proc_link_targets() {
   local l t
   if [ "$FIND_GNU" -eq 1 ]; then
-    # -ignore_readdir_race: a process disappearing mid-scan is expected here
-    # and is NOT a failure (a dead process holds nothing). Any OTHER error
-    # still surfaces as a nonzero exit, which is exactly what we want.
-    # ~208ms on node-8 (725 processes / 11k links) in a single pass.
     find "$PROC_DIR" -ignore_readdir_race -mindepth 2 -maxdepth 3 \
-      \( -name cwd -o -path "$PROC_DIR/[0-9]*/fd/*" \) -printf '%l\n' 2>/dev/null
+      \( -name cwd -o -path "$PROC_DIR/[0-9]*/fd/*" \) -printf '%l\n'
     return
   fi
   # BSD find (dev laptops) has neither flag. Fixture trees are tiny, so the
@@ -453,15 +456,70 @@ proc_link_targets() {
   done
 }
 
-has_live_handles() {  # <path>
-  local p="$1" targets rc=0
+# Run-scoped snapshot of the enumeration, taken once. It lets candidates that
+# are visibly held skip the rename and the fresh walk (2,361 candidates x
+# ~208ms was ~8 minutes of /proc walking per run). It is only trusted for
+# "held": a handle taken after the snapshot, or on a tree renamed after it, is
+# not in it.
+PROC_CACHE_READY=0
+PROC_CACHE_USABLE=0
+PROC_CACHE=""
+
+# The only stderr a usable enumeration may carry: a pid vanishing mid-walk (a
+# dead process holds nothing) and the /proc/<pid>/net EINVAL. Anything else —
+# a permission error, another path, /proc not a directory — is "cannot prove
+# absence of a writer".
+proc_stderr_benign() {  # <stderr-file>
+  local line rest
+  local re_gone="^[0-9]+(/[^']*)?': No such file or directory\$"
+  local re_net="^[0-9]+/net': Invalid argument\$"
+  while IFS= read -r line; do
+    rest="${line#"find: '$PROC_DIR/"}"
+    [ "$rest" != "$line" ] || return 1
+    [[ "$rest" =~ $re_gone || "$rest" =~ $re_net ]] || return 1
+  done < "$1"
+  return 0
+}
+
+load_proc_cache() {
+  local err rc=0 out
+  PROC_CACHE_READY=1; PROC_CACHE_USABLE=0; PROC_CACHE=""
   [ -d "$PROC_DIR" ] || return 0
-  targets="$(proc_link_targets)" || rc=$?
-  [ "$rc" -eq 0 ] || return 0
-  printf '%s\n' "$targets" | HP_P="$p" awk '
+  # mktemp-ok: removed below, holds only find's stderr
+  err="$(mktemp)"
+  out="$(proc_link_targets 2>"$err")" || rc=$?
+  # Judge the result, not $?: usable = at least one link back (an empty process
+  # table proves nothing) and every complaint on stderr is on the allowlist.
+  # A nonzero exit must be EXPLAINED by such a complaint; rc>1 is never benign.
+  if [ -n "$out" ] && [ "$rc" -le 1 ] \
+     && { [ "$rc" -eq 0 ] || [ -s "$err" ]; } && proc_stderr_benign "$err"; then
+    PROC_CACHE="$out"; PROC_CACHE_USABLE=1
+  fi
+  rm -f "$err"
+}
+
+targets_name() {  # <path>  (link targets on stdin)
+  HP_P="$1" awk '
     $0 == ENVIRON["HP_P"] { found = 1 }
     index($0, ENVIRON["HP_P"] "/") == 1 { found = 1 }
     END { exit found ? 0 : 1 }'
+}
+
+# The authority: a FRESH walk, called by safe_delete_quarantine on the
+# quarantined path. Cannot enumerate → cannot prove absence → held.
+has_live_handles() {  # <path>
+  load_proc_cache
+  [ "$PROC_CACHE_USABLE" -eq 1 ] || return 0
+  printf '%s\n' "$PROC_CACHE" | targets_name "$1"
+}
+
+# Cheap pre-rename filter on the run-scoped snapshot: true only when the
+# snapshot already shows a holder under the candidate's current name. An
+# unusable snapshot says nothing here — has_live_handles still fails closed.
+held_by_snapshot() {  # <path>
+  [ "$PROC_CACHE_READY" -eq 1 ] || load_proc_cache
+  [ "$PROC_CACHE_USABLE" -eq 1 ] || return 1
+  printf '%s\n' "$PROC_CACHE" | targets_name "$1"
 }
 
 # Removal primitives live in lib/safe-delete.sh (the one implementation of
@@ -482,6 +540,10 @@ safe_delete_on_restore_blocked() {  # <quarantined>
 
 quarantine_candidate() {  # <path> <id-at-classification>
   QPATH=""; QDIR=""; QUARANTINE_ERROR=""
+  if held_by_snapshot "$1"; then
+    QUARANTINE_ERROR="live process holds the tree open (cwd or open fd)"
+    return 1
+  fi
   if safe_delete_quarantine "$1" "$2"; then
     QPATH="$SD_QPATH"; QDIR="$SD_QDIR"
     return 0
@@ -923,10 +985,30 @@ sweep_root_depth1() {  # <root> <cutoff-epoch> <cutoff-ref-file> <lane>
   rm -f "$listing"
 }
 
+# Size of the held paths for one summary class, as a human string ("?" when any
+# du fails: a sizing problem must never fail the run or print a made-up number).
+# Lanes are those hold() records in HELD_FILE ("<lane> <path> — <detail>").
+held_size() {  # <lane>...
+  local lanes=" $* " line lane path kb total=0
+  while IFS= read -r line; do
+    lane="${line%% *}"
+    case "$lanes" in *" $lane "*) ;; *) continue ;; esac
+    path="${line#* }"; path="${path%% — *}"
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    kb="$(du -skx -- "$path" 2>/dev/null | awk '{print $1}')" || { echo "?"; return; }
+    case "$kb" in ''|*[!0-9]*) echo "?"; return ;; esac
+    total=$((total + kb))
+  done < <(sort -u "$HELD_FILE")
+  awk -v kb="$total" 'BEGIN {
+    if (kb >= 1048576) printf "%.1f GB", kb / 1048576
+    else if (kb >= 1024) printf "%.1f MB", kb / 1024
+    else printf "%d KB", kb }'
+}
+
 print_summary() {
   log "swept_clones=$swept junk=$junk_deleted freed_kb=$freed_kb"
   log "active_skipped=$active kept=$kept rm_errors=$rm_errors"
-  log "held: dirty/unpushed/stash=$held_dirty probe-fail=$held_probe gitfile=$held_gitfile nested=$held_nested no-remote=$held_noremote mount=$held_mount in-use=$held_inuse"
+  log "held: dirty/unpushed/stash=$held_dirty ($(held_size dirty unpushed unpushed-live local-branch local-tag stash)) probe-fail=$held_probe ($(held_size probe-fail)) gitfile=$held_gitfile ($(held_size gitfile clone-root)) nested=$held_nested ($(held_size nested)) no-remote=$held_noremote ($(held_size no-remote)) mount=$held_mount ($(held_size mount)) in-use=$held_inuse ($(held_size in-use))"
 }
 
 build_payload() {

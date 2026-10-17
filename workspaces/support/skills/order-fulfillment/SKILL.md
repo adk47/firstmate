@@ -75,7 +75,7 @@ Look at who sent the message (the contact email in `[CONVERSATION_CONTEXT]`).
 - **Vendor lane** – the sender is **Prodigi** (email ends in `@prodigi.com` /
   `@prodigigroup.com`, or signs off as "Prodigi") **and** the message references an
   order. The sender is the VENDOR, not the order owner – **do NOT run the customer
-  ownership checks** (the ones in `customer-credit-removal`); they don't apply to a
+  ownership checks** (the preview-only ownership checks in `customer-credit-removal`); they don't apply to a
   vendor. Go to Step 2.
 - **Customer lane** – anyone else (a customer asking about their own plaque). Go to
   Step 3.
@@ -170,8 +170,8 @@ confirmed address back to Prodigi.
      long or missing and ask again.
   4. Show the customer the previewed change (current → new) and wait for an explicit
      "yes".
-  5. On confirmation, call `order_address_update` with `apply: true` and the
-     `intercomConvId`. On `{ applied: true }`, confirm it's updated. On `apply_failed`
+  5. On confirmation, call `order_address_update` with `apply: true` (the
+     conversation is bound automatically; never ask for a conversation id). On `{ applied: true }`, confirm it's updated. On `apply_failed`
      (e.g. the order already shipped), tell them it couldn't be changed and file a
      request for the team.
   Never promise a change before `applied: true` comes back.

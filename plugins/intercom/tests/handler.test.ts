@@ -817,6 +817,64 @@ describe("handler — flag on (assessRisk path)", () => {
     expect(result.action).toBe("escalate");
   });
 
+  it("turn count: a customer message continuing their own unanswered burst is the same turn", async () => {
+    const client = new MockIntercomClient();
+    client.getConversation = async (params) => {
+      client.calls.getConversation.push(params);
+      return {
+        type: "conversation" as const, id: "conv1", title: null, created_at: 0, updated_at: 0, open: true, state: "open" as const,
+        admin_assignee_id: null,
+        source: { body: "Hi", author: { type: "user", id: "u1" } },
+        conversation_parts: { conversation_parts: [
+          { id: "p1", part_type: "comment", body: "I want to add credits", author: { type: "user", id: "u1" } },
+        ] },
+      } as any;
+    };
+    const { state: out } = await handleWebhookEvent(
+      makeUserPayload("I want to add credits"), { ...makeState(), userTurnCount: 1, userExchangeCount: 1 }, "bot", client,
+      { riskAssessment: { enabled: true } },
+    );
+    expect(out!.userExchangeCount).toBe(1);
+    expect(out!.userTurnCount).toBe(2);
+  });
+
+  it("turn count: a customer message after a reply is a new turn; no live data still counts", async () => {
+    const client = new MockIntercomClient();
+    client.getConversation = async (params) => {
+      client.calls.getConversation.push(params);
+      return {
+        type: "conversation" as const, id: "conv1", title: null, created_at: 0, updated_at: 0, open: true, state: "open" as const,
+        admin_assignee_id: null,
+        source: { body: "Hi", author: { type: "user", id: "u1" } },
+        conversation_parts: { conversation_parts: [
+          { id: "p1", part_type: "comment", body: "Hey! How can I help?", author: { type: "admin", id: "bot" } },
+          { id: "p2", part_type: "comment", body: "I want to add credits", author: { type: "user", id: "u1" } },
+        ] },
+      } as any;
+    };
+    const a = await handleWebhookEvent(
+      makeUserPayload("I want to add credits"), { ...makeState(), userTurnCount: 1, userExchangeCount: 1 }, "bot", client,
+      { riskAssessment: { enabled: true } },
+    );
+    expect(a.state!.userExchangeCount).toBe(2);
+    expect(a.state!.userTurnCount).toBe(2);
+    const b = await handleWebhookEvent(
+      makeUserPayload("anything"), { ...makeState(), userTurnCount: 1, userExchangeCount: 1 }, "bot", undefined,
+      { riskAssessment: { enabled: true } },
+    );
+    expect(b.state!.userExchangeCount).toBe(2);
+    expect(b.state!.userTurnCount).toBe(2);
+  });
+
+  it("turn count: a session without userExchangeCount seeds it from the message count", async () => {
+    const { state: out } = await handleWebhookEvent(
+      makeUserPayload("anything"), { ...makeState(), userTurnCount: 5 }, "bot", undefined,
+      { riskAssessment: { enabled: true } },
+    );
+    expect(out!.userExchangeCount).toBe(6);
+    expect(out!.userTurnCount).toBe(6);
+  });
+
   it("pinned-fact extractor runs and updates knownFacts", async () => {
     const state = makeState();
     const { state: out } = await handleWebhookEvent(

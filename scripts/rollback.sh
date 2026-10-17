@@ -511,7 +511,9 @@ done
 RESTART
 fi
 GATEWAYS_RESTARTED=1
-sleep 5
+# Settle delay after the gateway restart. Env knob so the bats suite does not pay 5 s x 23 tests
+# (MUS-11315); the default is the production timing and must not change.
+sleep "${ROLLBACK_RESTART_SETTLE_SECS:-5}"
 log "  Gateways restarted."
 
 # -------------------------------------------------------------------
