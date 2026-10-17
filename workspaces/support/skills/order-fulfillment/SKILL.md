@@ -75,7 +75,7 @@ Look at who sent the message (the contact email in `[CONVERSATION_CONTEXT]`).
 - **Vendor lane** – the sender is **Prodigi** (email ends in `@prodigi.com` /
   `@prodigigroup.com`, or signs off as "Prodigi") **and** the message references an
   order. The sender is the VENDOR, not the order owner – **do NOT run the customer
-  ownership checks** (the ones in `customer-credit-removal`); they don't apply to a
+  ownership checks** (the preview-only ownership checks in `customer-credit-removal`); they don't apply to a
   vendor. Go to Step 2.
 - **Customer lane** – anyone else (a customer asking about their own plaque). Go to
   Step 3.

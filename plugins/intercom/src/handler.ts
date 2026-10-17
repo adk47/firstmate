@@ -40,6 +40,49 @@ import {
 // surfacing shape drift the first time it's seen per process lifetime.
 const apiShapeWarned = new Set<string>();
 
+// Turn counting for the hard turn-count cap (escalation.ts Layer 1b) counts EXCHANGES, not
+// messages: a customer message that follows another customer message with no reply in between
+// (any admin comment: Caroline or a human) continues the same turn. Customers routinely split
+// one ask across several messages ("Hi" / the ask / a link / another link). On 2026-10-15/16
+// all 9 conversations that hit the cap (14) were long legitimate multi-step requests (merges,
+// multi-track credit adds), with 3-11 sub-25-character messages each, and none would have
+// reached 14 exchanges when the cap fired (9-13). The cap still bounds a runaway loop:
+// every counted turn needs a reply in between.
+//
+// Fails toward COUNTING: when the live conversation is unavailable or the current message
+// cannot be located, the message counts as a new turn, exactly as before this change.
+export function continuesCustomerBurst(
+  source: IntercomConversation["source"] | undefined,
+  parts: IntercomConversationPart[] | undefined,
+  currentBody: string,
+): boolean {
+  if (!parts) return false;
+  const isUser = (t: string | undefined) => t === "user" || t === "lead" || t === "contact";
+  const strip = (b: string | null | undefined) => (b ?? "").replace(/<[^>]*>/g, "").trim();
+  // Visible customer/admin messages in order. Notes and system parts never end a burst.
+  const visible: Array<{ user: boolean; body: string }> = [];
+  // Attachment-only messages (e.g. an opening screenshot with an empty body) are still messages.
+  if (source && (strip(source.body) || source.attachments?.length)) {
+    visible.push({ user: isUser(source.author?.type), body: strip(source.body) });
+  }
+  for (const p of parts) {
+    if (p.part_type === "note") continue;
+    const body = strip(p.body);
+    if (!body && !(p.attachments && p.attachments.length)) continue;
+    const t = p.author?.type;
+    if (isUser(t)) visible.push({ user: true, body });
+    else if (t === "admin" && (p.part_type === "comment" || p.part_type === "assign_and_reopen" || p.part_type === "open")) {
+      visible.push({ user: false, body });
+    }
+  }
+  // The live GET runs after the webhook, so the current message is normally the LAST user
+  // entry with nothing after it. Anything else (a later reply or message) means the GET does not
+  // reflect this message as the latest, so don't guess.
+  const idx = visible.length - 1;
+  if (idx <= 0 || !visible[idx].user || visible[idx].body !== strip(currentBody)) return false;
+  return visible[idx - 1].user;
+}
+
 // Finding 2 (2026-09-22 PR #999 QA): assessRisk (Layer 1b judge) and runJev
 // both need the conversation SO FAR to classify a follow-up correctly (e.g.
 // "it still is not fixed" is meaningless without the request it answers).
@@ -402,6 +445,12 @@ export async function handleWebhookEvent(
       // Update pinned facts from the customer message.
       if (state) {
         state.knownFacts = updateKnownFacts(classified.body, state.knownFacts ?? {});
+        // Exchange count for the hard cap (see continuesCustomerBurst): a message that only
+        // continues the customer's own unanswered burst is the same exchange.
+        const priorExchanges = state.userExchangeCount ?? state.userTurnCount ?? 0;
+        state.userExchangeCount = continuesCustomerBurst(liveConversationSource, liveConversationParts, classified.body)
+          ? priorExchanges
+          : priorExchanges + 1;
         // Increment user-turn count (only on customer messages).
         state.userTurnCount = (state.userTurnCount ?? 0) + 1;
         state.updatedAt = new Date().toISOString();

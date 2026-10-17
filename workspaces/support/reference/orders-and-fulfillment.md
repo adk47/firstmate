@@ -7,9 +7,10 @@ names or mechanics out to a customer.
 ## What the product is
 
 Muso sells physical **acrylic plaques** (and posters) that celebrate an artist's
-streams/milestones. They're customized in the web app, paid via Stripe checkout, then
-**printed and shipped by a third-party print-on-demand vendor, Prodigi**. Plaques can
-be ordered on any plan (including free Lite) – a paid subscription is not required.
+streams/milestones. They're customized and ordered in the **Muso mobile app** (iOS/Android:
+Analytics → Plaque, or Flex → Make it Official / milestone cards), paid via Stripe checkout, then
+**printed and shipped by a third-party print-on-demand vendor, Prodigi**. Not orderable on the
+website right now. Ordering needs an active subscription on the workspace (corrected 2026-10-15).
 
 ## Order lifecycle
 
@@ -218,8 +219,7 @@ back to Prodigi – say so in the request you file.
 
 ## Quick customer answers
 
-- *Do I need a paid plan to order a plaque?* No – available on any plan, including free
-  Lite.
+- *Do I need a paid plan to order a plaque?* Yes, today: the app locks plaque ordering without an active subscription (corrected 2026-10-15).
 - *How long until it arrives?* It's printed to order then shipped, so allow time for
   both; if they want the live status, get the order id and flag it for the team.
 - *Can you change my delivery address?* Get the order id and the full corrected address
