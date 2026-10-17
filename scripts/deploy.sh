@@ -3539,7 +3539,11 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
   # different count would otherwise silently ship a wrong cron table.
   EXPECTED_JOBS=$(jq '.jobs | length' "$HYDRA_ROOT/cron-jobs.json") \
     || fail "cron SQLite import: could not count repo jobs in $HYDRA_ROOT/cron-jobs.json"
-  PERSISTED_JOBS=$(echo "$IMPORT_OUT" | jq -r '.persisted' 2>/dev/null) || PERSISTED_JOBS=""
+  # IMPORT_OUT is stdout+stderr (2>&1). The node import can log warnings to stderr ahead of
+  # its one JSON result line (e.g. "[sqlite/transaction] slow SQLite transaction hold"), which made
+  # the whole blob unparseable and failed a SUCCESSFUL import (2026-10-17 06:33Z, run 39010306853).
+  # Read only the result line. Still fails closed: no such line -> empty -> the check below fails.
+  PERSISTED_JOBS=$(printf '%s\n' "$IMPORT_OUT" | grep -E '^\{.*"persisted"' | tail -n 1 | jq -r '.persisted' 2>/dev/null) || PERSISTED_JOBS=""
   if [ "$PERSISTED_JOBS" != "$EXPECTED_JOBS" ]; then
     fail "cron SQLite import: store persisted ${PERSISTED_JOBS:-<unparseable>} jobs, expected $EXPECTED_JOBS (import output: $IMPORT_OUT)"
   fi
