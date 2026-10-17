@@ -218,3 +218,5 @@ ask are owned by other tickets:
 - removing the 403 blocks on credit requests and deletes: T04;
 - deletes that must prove removal from Spotify/Tidal or a different same-name profile, and fixing past
   approvals (retro execution, the HTML report): T05 / retro.
+
+**Daily ask cap.** At most `max_ask_users_per_day` distinct users (policy file; 100 for the first 48h of go-live, firstmate 031) get a support request per UTC day, counting users already asked that day. A user admitted under the cap gets all of their rows in that run as one batch; the rest are deferred with reason `daily ask cap:` and go out on a later day. The cap is re-checked under the shared credit-write lock immediately before each support batch, on the UTC day that batch is sent (after the approval writes); outcomes are booked at the time the PUT returned, so a request in flight across midnight counts on the later day, so overlapping runs or a run crossing midnight cannot exceed it (rows trimmed there get outcome `deferred:daily_ask_cap`, or `deferred:per_user_window` when another run asked that user meanwhile).

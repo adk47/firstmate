@@ -166,6 +166,9 @@ class Policy:
     editorial_role_terms: tuple[str, ...]
     max_rows_per_run: int = 500
     max_approvals_per_user_per_day: int = 200
+    # Distinct users who may receive a support request (Knock "more info needed")
+    # per UTC day. firstmate 031: 100/day for the first 48h of go-live.
+    max_ask_users_per_day: int = 100
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Policy":
@@ -182,7 +185,8 @@ class Policy:
                    deny_profile_ids={p.strip().lower() for p in profiles},
                    editorial_role_terms=editorial_terms(d.get("editorial_role_terms")),
                    max_rows_per_run=int(d.get("max_rows_per_run") or 500),
-                   max_approvals_per_user_per_day=int(d.get("max_approvals_per_user_per_day") or 200))
+                   max_approvals_per_user_per_day=int(d.get("max_approvals_per_user_per_day") or 200),
+                   max_ask_users_per_day=_nonneg_int(d.get("max_ask_users_per_day", 100), "max_ask_users_per_day"))
 
 
 def registry_approved(path: Path | None = None) -> tuple[bool, str]:
@@ -623,8 +627,18 @@ def users_asked_since(db: sqlite3.Connection, since: str) -> set[int]:
         " AND o.at >= ? AND d.user_id IS NOT NULL", (UVN, since))}
 
 
+def _nonneg_int(v: Any, key: str) -> int:
+    if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+        raise ValueError(f"{key} must be a non-negative integer")
+    return v
+
+
+ASK_CAP_DEFER = "daily ask cap: "
+
+
 def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "RunResult",
-                   proof: ProofOnFile | None, proof_why: str | None, now: datetime) -> None:
+                   proof: ProofOnFile | None, proof_why: str | None, now: datetime,
+                   max_ask_users_per_day: int | None = None) -> None:
     """Never re-ask: turn support decisions that must not be sent into HOLD or
     DEFER, counting each reason on the run."""
     support = [d for d in decisions if d.decision == "support"]
@@ -647,6 +661,52 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
             _set(d, "defer", WINDOW_DEFER + "this user was asked in the last 24h; this row goes out with "
                  "the user's next batch")
             res.deferred_window += 1
+    if max_ask_users_per_day is None:
+        return
+    # Daily cap on DISTINCT users asked (UTC day): users already asked today count;
+    # a user admitted under the cap gets all of their rows in this run (one batch).
+    asked_today = users_asked_since(db, now.strftime("%Y-%m-%dT00:00:00Z"))
+    admitted: set[int] = set()
+    for d in support:
+        if d.decision != "support" or d.user_id is None:
+            continue
+        if d.user_id in asked_today or d.user_id in admitted:
+            continue
+        if len(asked_today) + len(admitted) < max_ask_users_per_day:
+            admitted.add(d.user_id)
+    for d in support:
+        if d.decision != "support":
+            continue
+        if d.user_id is None or (d.user_id not in asked_today and d.user_id not in admitted):
+            _set(d, "defer", ASK_CAP_DEFER + f"{max_ask_users_per_day} users/day already reached; "
+                 "this row goes out on a later day")
+            res.deferred_ask_cap += 1
+
+
+def cap_at_write(db: sqlite3.Connection, res: "RunResult", support_ids: list[str], user_of: dict[str, int | None],
+                 cap: int | None, send_at: datetime) -> list[str]:
+    """Support ids that still fit the day's cap at send time (call under write_lock)."""
+    if cap is None:
+        return support_ids
+    asked_today = users_asked_since(db, send_at.strftime("%Y-%m-%dT00:00:00Z"))
+    # A user another run asked since this run decided is now inside their 24h
+    # window: this run's rows for them wait for the next batch.
+    asked_window = users_asked_since(db, utc(send_at - SUPPORT_WINDOW))
+    admitted: set[int] = set()
+    keep: list[str] = []
+    for rid in support_ids:
+        uid = user_of.get(rid)
+        if uid is not None and uid in asked_window:
+            record_outcome(db, res.run_id, rid, "support", "deferred:per_user_window", send_at)
+            res.deferred_window += 1
+            continue
+        if uid is not None and (uid in admitted or len(asked_today) + len(admitted) < cap):
+            admitted.add(uid)
+            keep.append(rid)
+            continue
+        record_outcome(db, res.run_id, rid, "support", "deferred:daily_ask_cap", send_at)
+        res.deferred_ask_cap += 1
+    return keep
 
 
 def paying_users(path: Path | None = None, now: datetime | None = None) -> tuple[frozenset[int] | None, str | None]:
@@ -878,6 +938,7 @@ class RunResult:
     held_proof: int = 0
     held_reasked: int = 0
     deferred_window: int = 0
+    deferred_ask_cap: int = 0
     deferred_proof_unknown: int = 0
     spend_usd: float = 0.0
     n1: int = 0
@@ -897,7 +958,8 @@ class RunResult:
                 f"OpenRouter fallback ${self.spend_usd:.2f}{jev}; the rest had no free source to cite), "
                 f"{self.errors} evidence errors. Support asks: {self.support_candidates} before filters, "
                 f"{self.held_proof} held for proof on file, {self.held_reasked} held as already asked once, "
-                f"{self.deferred_window} deferred for the per-user 24h window, {self.deferred_proof_unknown} deferred "
+                f"{self.deferred_window} deferred for the per-user 24h window, {self.deferred_ask_cap} deferred by the "
+                f"daily ask cap, {self.deferred_proof_unknown} deferred "
                 f"(proof status unknown), {self.support} {'would be sent' if self.mode == 'shadow' else 'sent'}."
                 + (f" {self.note}" if self.note else "")
                 + (f" WRITE ERRORS: {'; '.join(self.write_errors)[:400]}" if self.write_errors else ""))
@@ -927,10 +989,14 @@ def held_rows(admin: admin_api.Admin, skip: set[str], page_size: int = 200, max_
 def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str, policy: Policy,
         writer: Writer | None = None, readback: Readback | None = None, now: datetime | None = None,
         max_model_calls: int = 120,
-        workers: int = 6, budget_s: int = 720, rows: list[dict[str, Any]] | None = None) -> RunResult:
+        workers: int = 6, budget_s: int = 720, rows: list[dict[str, Any]] | None = None,
+        clock: Callable[[], datetime] | None = None) -> RunResult:
     if mode not in ("shadow", "apply"):
         raise ValueError("mode must be shadow or apply")
     ensure_schema(db)
+    # `clock` is the wall clock at the WRITE boundary (a run can cross UTC midnight
+    # between deciding and sending); an injected `now` pins both for tests.
+    clock = clock or ((lambda: now) if now is not None else (lambda: datetime.now(timezone.utc)))
     now = now or datetime.now(timezone.utc)
     t0 = time.monotonic()
     res = RunResult(run_id=now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6], mode=mode)
@@ -1026,7 +1092,7 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             else:
                 counts[d.user_id] = counts.get(d.user_id, 0) + 1
 
-    filter_support(db, decisions, res, proof, proof_why, now)
+    filter_support(db, decisions, res, proof, proof_why, now, policy.max_ask_users_per_day)
     if mode != "apply":
         for d in decisions:
             d.doc_required = False
@@ -1050,23 +1116,51 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         return res
     writer = writer or admin_writer()
     readback = readback or status_readback()
+    user_of = {d.request_id: d.user_id for d in decisions}
+
+    def write_ids(action: str, status: str, chunk: list[str]) -> None:
+        outs, err = write_chunk(writer, readback, status, chunk, UNVERIFIED)
+        # Outcomes are booked at the time the PUT (and its readback) RETURNED, not
+        # when it started: a request in flight across UTC midnight counts on the
+        # later day. The pre-PUT check already fitted it into the earlier day, so
+        # neither day can exceed the cap (the later day is counted conservatively).
+        done_at = clock()
+        if err is not None:
+            res.write_errors.append(f"{action} batch of {len(chunk)}: {err}"[:200])
+        for rid, out in outs.items():
+            record_outcome(db, res.run_id, rid, action, out, done_at)
+            if out == status:
+                if action == "approve":
+                    res.approved += 1
+                else:
+                    res.support += 1
+            elif out.startswith("skipped:"):
+                k = out.split(":", 1)[1]
+                res.skipped_by_server[k] = res.skipped_by_server.get(k, 0) + 1
+
     with write_lock():
-        for action, status, ids in (("approve", APPROVED, approve_ids), ("support", UVN, support_ids)):
-            for i in range(0, len(ids), BATCH):
-                chunk = ids[i:i + BATCH]
-                outs, err = write_chunk(writer, readback, status, chunk, UNVERIFIED)
-                if err is not None:
-                    res.write_errors.append(f"{action} batch of {len(chunk)}: {err}"[:200])
-                for rid, out in outs.items():
-                    record_outcome(db, res.run_id, rid, action, out, now)
-                    if out == status:
-                        if action == "approve":
-                            res.approved += 1
-                        else:
-                            res.support += 1
-                    elif out.startswith("skipped:"):
-                        k = out.split(":", 1)[1]
-                        res.skipped_by_server[k] = res.skipped_by_server.get(k, 0) + 1
+        for i in range(0, len(approve_ids), BATCH):
+            write_ids("approve", APPROVED, approve_ids[i:i + BATCH])
+        # The daily ask cap is checked at the SUPPORT-write boundary, under the
+        # shared write lock, on the UTC day each support batch is actually sent:
+        # the clock is read immediately before every batch, and if the day has
+        # rolled over since the last check the remaining rows are re-capped
+        # against the new day. Overlapping runs, a run crossing midnight, or
+        # approval writes that cross midnight can never push a day past the cap.
+        # Rows trimmed here get 'deferred:daily_ask_cap' (or
+        # 'deferred:per_user_window') and are retried later.
+        pending = list(support_ids)
+        checked_day: str | None = None
+        while pending:
+            at = clock()
+            day = at.strftime("%Y-%m-%d")
+            if day != checked_day:
+                pending = cap_at_write(db, res, pending, user_of, policy.max_ask_users_per_day, at)
+                checked_day = day
+                if not pending:
+                    break
+            chunk, pending = pending[:BATCH], pending[BATCH:]
+            write_ids("support", UVN, chunk)
     return res
 
 
