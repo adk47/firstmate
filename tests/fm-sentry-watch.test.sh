@@ -995,6 +995,127 @@ test_status_reports_the_liveness_verdict() {
   pass "status reports the liveness verdict"
 }
 
+# A read slower than the per-read timeout (8s by default) is a transient
+# failure: it is retried once inside the poll budget, and a project still unread
+# after its retry is reported only on the second consecutive poll, the same
+# streak a budget skip counts toward. Real defaults, no fetch config: one poll
+# here is two timed-out 8s reads 1.5s apart.
+test_slow_read_is_tolerated_for_one_poll() {
+  local home out
+  home=$(make_home slow-read)
+  write_projects "$home" apple-ios core-backend
+  printf '[]\n' > "$home/fix/issues-apple-ios.json"
+  printf '[]\n' > "$home/fix/issues-core-backend.json"
+  printf '[]\n' > "$home/fix/rail.json"
+  mark_armed "$home" 1000
+  poll "$home" 1000 >/dev/null
+  printf '{"sleep":9,"issues":[]}\n' > "$home/fix/issues-apple-ios.json"
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-SLO","title":"TypeError: null name","culprit":"/api/v4/onboarding/name","userCount":1,"count":2,"level":"fatal","substatus":"new","permalink":"https://x/9/"}]
+JSON
+  out=$(poll "$home" 1300)
+  assert_not_contains "$out" "could-not-determine apple-ios" "one slow read woke firstmate on its first poll"
+  assert_contains "$out" "P1 CORE-BACKEND-SLO" "the slow project starved the fast one"
+  out=$(poll "$home" 1600)
+  assert_contains "$out" "could-not-determine apple-ios" "a read still timing out on the second poll was not reported"
+  assert_contains "$out" "2 consecutive polls" "the persisting timeout did not say how long it held"
+  printf '[]\n' > "$home/fix/issues-apple-ios.json"
+  out=$(poll "$home" 1900)
+  assert_contains "$out" "recovered apple-ios" "the recovered read did not close the condition"
+  pass "a read past the timeout is retried, silent on its first poll, and could-not-determine on the second"
+}
+
+# A slow first attempt that still lands inside the 8s default read timeout is
+# not a failure at all, even with the poll-streak tolerance turned off.
+test_slow_read_inside_the_default_timeout_is_no_condition() {
+  local home out
+  home=$(make_home slow-inside-timeout)
+  write_config "$home" <<'JSON'
+{"rail":{"enabled":false},"fetch":{"transient_polls_before_cnd":1}}
+JSON
+  write_projects "$home" apple-ios
+  printf '[]\n' > "$home/fix/issues-apple-ios.json"
+  printf '[]\n' > "$home/fix/rail.json"
+  mark_armed "$home" 1000
+  poll "$home" 1000 >/dev/null
+  printf '{"attempts":[{"sleep":6,"issues":[]},{"issues":[]}]}\n' > "$home/fix/issues-apple-ios.json"
+  out=$(poll "$home" 1300)
+  [ -z "$out" ] || fail "a 6s read inside the 8s default timeout raised a condition: $out"
+  pass "a 6s read inside the default 8s read timeout raises no condition"
+}
+
+# Timeouts, network errors, HTTP 5xx, and HTTP 429 are retried once, so a single
+# blip inside one poll never reaches the streak at all; the project list gets the
+# same single retry.
+test_transient_failure_is_retried_within_the_poll() {
+  local home out
+  home=$(make_home transient-retry)
+  write_config "$home" <<'JSON'
+{"rail":{"enabled":false},"fetch":{"http_timeout_secs":1,"retry":{"backoff_secs":0.2},"transient_polls_before_cnd":1}}
+JSON
+  write_projects "$home" alpha bravo charlie
+  printf '[]\n' > "$home/fix/issues-alpha.json"
+  printf '[]\n' > "$home/fix/issues-bravo.json"
+  printf '[]\n' > "$home/fix/issues-charlie.json"
+  printf '[]\n' > "$home/fix/rail.json"
+  mark_armed "$home" 1000
+  poll "$home" 1000 >/dev/null
+  printf '{"attempts":[{"sleep":9},{"issues":[]}]}\n' > "$home/fix/issues-alpha.json"
+  printf '{"attempts":[{"status":503},{"issues":[]}]}\n' > "$home/fix/issues-bravo.json"
+  printf '{"attempts":[{"status":429,"retry_after":0.1},{"issues":[]}]}\n' > "$home/fix/issues-charlie.json"
+  printf '{"attempts":[{"status":502},{"projects":[{"slug":"alpha"},{"slug":"bravo"},{"slug":"charlie"}]}]}\n' \
+    > "$home/fix/projects.json"
+  out=$(poll "$home" 1300)
+  [ -z "$out" ] || fail "a transient failure that succeeded on its retry raised a condition: $out"
+  # With retries off, the same blips are reported at once under this config.
+  write_config "$home" <<'JSON'
+{"rail":{"enabled":false},"fetch":{"http_timeout_secs":1,"retry":{"attempts":1},"transient_polls_before_cnd":1}}
+JSON
+  printf '[{"slug":"alpha"},{"slug":"bravo"},{"slug":"charlie"}]\n' > "$home/fix/projects.json"
+  out=$(poll "$home" 1600)
+  assert_contains "$out" "could-not-determine alpha" "a timeout with no retry left was not reported"
+  assert_contains "$out" "could-not-determine bravo: HTTP 503" "an HTTP 503 with no retry left was not reported"
+  pass "timeouts, 5xx, 429, and a failed project list are retried once inside the poll"
+}
+
+# 401, 403, and 404 are real auth or config problems: no retry, no tolerance.
+test_auth_failure_is_reported_at_once_without_retry() {
+  local home out
+  home=$(make_home auth-failure)
+  write_projects "$home" core-backend
+  printf '[]\n' > "$home/fix/issues-core-backend.json"
+  printf '[]\n' > "$home/fix/rail.json"
+  mark_armed "$home" 1000
+  poll "$home" 1000 >/dev/null
+  # A retry would read the second attempt and succeed, so a report proves none ran.
+  printf '{"attempts":[{"status":401},{"issues":[]}]}\n' > "$home/fix/issues-core-backend.json"
+  out=$(poll "$home" 1300)
+  assert_contains "$out" "could-not-determine core-backend: HTTP 401" "an HTTP 401 was not reported on its first poll"
+  pass "an HTTP 401 is could-not-determine on the first poll, with no retry"
+}
+
+test_fetch_config_is_validated_and_reported_by_status() {
+  local home out
+  home=$(make_home fetch-config)
+  write_config "$home" <<'JSON'
+{"fetch":{"http_timeout_secs":6,"budget_secs":22,"retry":{"attempts":3,"backoff_secs":1,"on":["timeout","http_404"]},"transient_polls_before_cnd":0,"bogus":1}}
+JSON
+  prime_baseline "$home" 1000
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SENTRY_WATCH_NOW=1300 "$SW" status 2>/dev/null)
+  assert_contains "$out" "read timeout 6.0s, poll budget 22.0s, 3 attempts 1.0s apart on timeout,network,http_5xx,http_429, could-not-determine after 2 polls" \
+    "status did not report the effective fetch settings"
+  assert_contains "$out" "fetch.retry.on must list only" "a non-retryable kind in retry.on was not reported"
+  assert_contains "$out" "fetch.transient_polls_before_cnd must be" "a zero poll streak was not reported"
+  assert_contains "$out" "fetch.bogus is not a known key" "an unknown fetch key was not reported"
+  rm -f "$home/config/sentry-watch.json"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SENTRY_WATCH_NOW=1300 "$SW" status 2>/dev/null)
+  assert_contains "$out" "read timeout 8.0s, poll budget 25.0s, 2 attempts 1.5s apart on timeout,network,http_5xx,http_429, could-not-determine after 2 polls" \
+    "status did not report the built-in fetch defaults"
+  pass "fetch config is validated, and status reports the effective fetch settings"
+}
+
 test_first_poll_records_the_estate_and_wakes_nobody
 test_sensitive_route_pages_at_one_user
 test_nonsensitive_route_pages_at_three_users
@@ -1032,3 +1153,8 @@ test_arm_refuses_an_id_that_is_also_a_task
 test_arm_registers_and_disarm_removes
 test_wake_drain_reports_a_deleted_check
 test_status_reports_the_liveness_verdict
+test_slow_read_is_tolerated_for_one_poll
+test_slow_read_inside_the_default_timeout_is_no_condition
+test_transient_failure_is_retried_within_the_poll
+test_auth_failure_is_reported_at_once_without_retry
+test_fetch_config_is_validated_and_reported_by_status

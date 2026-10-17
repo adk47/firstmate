@@ -121,17 +121,29 @@
 # READ-ONLY AND BOUNDED. The watch only reads Sentry and GitHub. It makes no
 # model calls, prints no token, and passes no token on any command line: the
 # token is read from the vault path by the interpreter only. A whole poll is
-# bounded by FM_SENTRY_WATCH_BUDGET_SECS (default 20), shared fairly: each
-# project's read gets that budget divided by the project count (at least 2s,
-# never more than FM_SENTRY_WATCH_HTTP_TIMEOUT, default 5), and the read order
-# rotates round-robin each poll starting after the last project read, so a slow
-# host starves no fixed tail and every project is read within a bounded number
-# of polls. A project left unread for three consecutive polls is reported as
-# could-not-determine. The poll ends inside the watcher's own FM_CHECK_TIMEOUT
-# rather than being killed with nothing printed.
+# bounded by the config's fetch.budget_secs (default 25), and each read by
+# fetch.http_timeout_secs (default 8) or what is left of the budget when that is
+# less, so one slow project borrows from the time the fast ones leave unused;
+# FM_SENTRY_WATCH_BUDGET_SECS and FM_SENTRY_WATCH_HTTP_TIMEOUT override both
+# when set. The read order rotates round-robin each poll starting after the
+# last project read, so a slow host starves no fixed tail and every project is
+# read within a bounded number of polls. A project left unread by the budget for
+# three consecutive polls is reported as could-not-determine.
+#
+# TRANSIENT FAILURES. A timeout, network error, HTTP 5xx, or HTTP 429 (the kinds
+# fetch.retry.on lists) is retried within the poll, up to fetch.retry.attempts
+# reads (default 2) fetch.retry.backoff_secs apart (default 1.5; a 429's shorter
+# Retry-After wins), only while the budget still holds the wait plus two
+# seconds. A project still failing that way joins the same unread streak and is
+# reported only after fetch.transient_polls_before_cnd consecutive polls
+# (default 2). HTTP 401, 403, 404, any other 4xx, and a malformed response are
+# never retried and are reported at once. The project list gets the same retry,
+# and a list still failing is reported at once. The poll ends inside the
+# watcher's own FM_CHECK_TIMEOUT rather than being killed with nothing printed.
 #
 # Test seams: FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, FM_SENTRY_WATCH_NOW,
-# FM_SENTRY_WATCH_FIXTURES (stubbed Sentry and rail responses), FM_SENTRY_WATCH_VAULT,
+# FM_SENTRY_WATCH_FIXTURES (stubbed Sentry and rail responses; fixture_read in
+# the engine owns their sleep, status, and per-attempt format), FM_SENTRY_WATCH_VAULT,
 # FM_SENTRY_WATCH_GH, FM_SENTRY_WATCH_CADENCE, and FM_SENTRY_WATCH_LEGACY.
 set -u
 export LC_ALL=C
@@ -214,8 +226,8 @@ run_engine() {  # <action>
   FM_SENTRY_WATCH_GH="${FM_SENTRY_WATCH_GH:-gh}" \
   FM_SENTRY_WATCH_ORG="${FM_SENTRY_WATCH_ORG:-}" \
   FM_SENTRY_WATCH_HOST="${FM_SENTRY_WATCH_HOST:-}" \
-  FM_SENTRY_WATCH_BUDGET_SECS="${FM_SENTRY_WATCH_BUDGET_SECS:-20}" \
-  FM_SENTRY_WATCH_HTTP_TIMEOUT="${FM_SENTRY_WATCH_HTTP_TIMEOUT:-5}" \
+  FM_SENTRY_WATCH_BUDGET_SECS="${FM_SENTRY_WATCH_BUDGET_SECS:-}" \
+  FM_SENTRY_WATCH_HTTP_TIMEOUT="${FM_SENTRY_WATCH_HTTP_TIMEOUT:-}" \
   FM_SENTRY_WATCH_LEGACY="${FM_SENTRY_WATCH_LEGACY:-}" \
   FM_SENTRY_WATCH_REGISTERED="$registered" \
   python3 - <<'PY'
@@ -223,6 +235,7 @@ import datetime
 import json
 import os
 import re
+import socket
 import subprocess
 import time
 import urllib.error
@@ -267,8 +280,16 @@ SHIM = Path(env("FM_SENTRY_WATCH_SHIM"))
 TRUST = Path(env("FM_SENTRY_WATCH_TRUST"))
 FIXTURES = env("FM_SENTRY_WATCH_FIXTURES")
 GH = env("FM_SENTRY_WATCH_GH", "gh")
-BUDGET_SECS = env_int("FM_SENTRY_WATCH_BUDGET_SECS", 20)
-HTTP_TIMEOUT = env_float("FM_SENTRY_WATCH_HTTP_TIMEOUT", 5.0)
+# The fetch settings come from config/sentry-watch.json "fetch" (defaults in
+# DEFAULT_FETCH below); a set FM_SENTRY_WATCH_BUDGET_SECS or
+# FM_SENTRY_WATCH_HTTP_TIMEOUT overrides the configured value. apply_fetch()
+# fills these once the config is loaded.
+BUDGET_SECS = 25.0
+HTTP_TIMEOUT = 8.0
+RETRY_ATTEMPTS = 2
+RETRY_BACKOFF_SECS = 1.5
+RETRY_ON = ("timeout", "network", "http_5xx", "http_429")
+TRANSIENT_POLLS = 2
 CADENCE = env_int("FM_SENTRY_WATCH_CADENCE", 0)
 DARK_FACTOR = 3
 
@@ -327,6 +348,16 @@ PROJECT_DEFAULTS = {
     "users_p0": 25,
     "burst_min_events": 10,
     "burst_min_events_transport": 25,
+}
+# Failure kinds a fetch can be retried on; every other failure (HTTP 401, 403,
+# 404, any other 4xx, a malformed response) is a real auth or config problem and
+# is reported at once without a retry.
+RETRYABLE_KINDS = ("timeout", "network", "http_5xx", "http_429")
+DEFAULT_FETCH = {
+    "http_timeout_secs": 8,
+    "budget_secs": 25,
+    "retry": {"attempts": 2, "backoff_secs": 1.5, "on": list(RETRYABLE_KINDS)},
+    "transient_polls_before_cnd": 2,
 }
 DEFAULTS = {
     "cadence_secs": 300,
@@ -388,6 +419,70 @@ def compile_re(pattern, label, problems):
         return None
 
 
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def parse_fetch_config(raw, fetch, problems):
+    """Merge a config "fetch" object into the defaults in place, reporting every
+    key or value it cannot use; a bad value keeps its default."""
+    if not isinstance(raw, dict):
+        problems.append("config fetch must be an object")
+        return
+    for key, value in raw.items():
+        if key in ("http_timeout_secs", "budget_secs"):
+            if _number(value) and value > 0:
+                fetch[key] = value
+            else:
+                problems.append("config fetch.%s must be a positive number" % key)
+        elif key == "transient_polls_before_cnd":
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+                fetch[key] = value
+            else:
+                problems.append("config fetch.transient_polls_before_cnd must be a whole number of at least 1")
+        elif key == "retry":
+            if not isinstance(value, dict):
+                problems.append("config fetch.retry must be an object")
+                continue
+            for rkey, rvalue in value.items():
+                if rkey == "attempts":
+                    if isinstance(rvalue, int) and not isinstance(rvalue, bool) and 1 <= rvalue <= 5:
+                        fetch["retry"]["attempts"] = rvalue
+                    else:
+                        problems.append("config fetch.retry.attempts must be a whole number from 1 to 5")
+                elif rkey == "backoff_secs":
+                    if _number(rvalue) and rvalue >= 0:
+                        fetch["retry"]["backoff_secs"] = rvalue
+                    else:
+                        problems.append("config fetch.retry.backoff_secs must be a number of at least 0")
+                elif rkey == "on":
+                    if isinstance(rvalue, list) and all(k in RETRYABLE_KINDS for k in rvalue):
+                        fetch["retry"]["on"] = list(rvalue)
+                    else:
+                        problems.append("config fetch.retry.on must list only %s" % ", ".join(RETRYABLE_KINDS))
+                else:
+                    problems.append("config fetch.retry.%s is not a known key" % rkey)
+        else:
+            problems.append("config fetch.%s is not a known key" % key)
+
+
+def apply_fetch(config):
+    """Set the fetch globals from the loaded config; a set environment override
+    wins for the budget and the per-read timeout."""
+    global BUDGET_SECS, HTTP_TIMEOUT, RETRY_ATTEMPTS, RETRY_BACKOFF_SECS, RETRY_ON, TRANSIENT_POLLS
+    fetch = config["fetch"]
+    BUDGET_SECS = env_float("FM_SENTRY_WATCH_BUDGET_SECS", float(fetch["budget_secs"]))
+    HTTP_TIMEOUT = env_float("FM_SENTRY_WATCH_HTTP_TIMEOUT", float(fetch["http_timeout_secs"]))
+    if BUDGET_SECS <= 0:
+        BUDGET_SECS = float(fetch["budget_secs"])
+    if HTTP_TIMEOUT <= 0:
+        HTTP_TIMEOUT = float(fetch["http_timeout_secs"])
+    RETRY_ATTEMPTS = int(fetch["retry"]["attempts"])
+    RETRY_BACKOFF_SECS = float(fetch["retry"]["backoff_secs"])
+    RETRY_ON = tuple(fetch["retry"]["on"])
+    TRANSIENT_POLLS = int(fetch["transient_polls_before_cnd"])
+
+
 def load_config():
     """Return (config, problems). The config is always complete: built-in
     defaults fill anything absent, so a missing or broken local file degrades to
@@ -401,6 +496,12 @@ def load_config():
         "signatures": dict(DEFAULT_SIGNATURES),
         "projects": {},
         "rail": dict(DEFAULT_RAIL),
+        "fetch": {
+            "http_timeout_secs": DEFAULT_FETCH["http_timeout_secs"],
+            "budget_secs": DEFAULT_FETCH["budget_secs"],
+            "retry": dict(DEFAULT_FETCH["retry"]),
+            "transient_polls_before_cnd": DEFAULT_FETCH["transient_polls_before_cnd"],
+        },
         "org": "",
     }
     problems = []
@@ -452,6 +553,8 @@ def load_config():
                 continue
             rail[key] = value
         config["rail"] = rail
+    if "fetch" in raw:
+        parse_fetch_config(raw["fetch"], config["fetch"], problems)
     if isinstance(raw.get("org"), str):
         config["org"] = raw["org"]
     # A signature that is not a usable regular expression silently disables the
@@ -502,30 +605,110 @@ def resolve_credentials(config, problems):
 # --- fetch layer ------------------------------------------------------------
 
 class FetchError(Exception):
-    pass
+    """A failed read. kind is one of RETRYABLE_KINDS for a transient failure,
+    or None for a real auth, config, or response problem; retry_after carries
+    an HTTP 429's Retry-After seconds when it gave one."""
+
+    def __init__(self, message, kind=None, retry_after=None):
+        Exception.__init__(self, message)
+        self.kind = kind
+        self.retry_after = retry_after
+
+
+def _retry_after_secs(value):
+    try:
+        secs = float(value)
+    except (TypeError, ValueError):
+        return None
+    return secs if secs >= 0 else None
+
+
+def http_status_error(code, retry_after=None):
+    if code == 429:
+        return FetchError("HTTP 429", "http_429", _retry_after_secs(retry_after))
+    if 500 <= code <= 599:
+        return FetchError("HTTP %s" % code, "http_5xx")
+    return FetchError("HTTP %s" % code)
 
 
 def http_get(url, token, timeout=None):
     request = urllib.request.Request(url, headers={"Authorization": "Bearer %s" % token})
     try:
         with urllib.request.urlopen(request, timeout=timeout or HTTP_TIMEOUT) as response:
-            return json.loads(response.read())
+            body = response.read()
     except urllib.error.HTTPError as exc:
-        raise FetchError("HTTP %s" % exc.code)
+        raise http_status_error(exc.code, exc.headers.get("Retry-After") if exc.headers else None)
     except urllib.error.URLError as exc:
-        raise FetchError("network error: %s" % (exc.reason,))
-    except (ValueError, OSError) as exc:
+        kind = "timeout" if isinstance(exc.reason, (socket.timeout, TimeoutError)) else "network"
+        raise FetchError("network error: %s" % (exc.reason,), kind)
+    except (socket.timeout, TimeoutError) as exc:
+        raise FetchError("unreadable response: %s" % exc, "timeout")
+    except OSError as exc:
+        raise FetchError("unreadable response: %s" % exc, "network")
+    try:
+        return json.loads(body)
+    except ValueError as exc:
         raise FetchError("unreadable response: %s" % exc)
 
 
-def fetch_projects(org, host, token):
-    if FIXTURES:
-        data = read_json(Path(FIXTURES) / "projects.json")
-        if data is None:
-            raise FetchError("fixture projects.json is missing or unreadable")
+def fetch_with_retry(read, deadline):
+    """Run read(timeout) and retry a transient failure. Each read may take up
+    to HTTP_TIMEOUT, or what is left of the poll budget when that is less. A
+    failure is retried only when its kind is in RETRY_ON, attempts remain, and
+    the budget still holds the backoff (or a 429's shorter Retry-After) plus
+    two seconds for the next read; otherwise the failure is raised as is."""
+    attempt = 0
+    while True:
+        attempt += 1
+        timeout = max(0.1, min(HTTP_TIMEOUT, deadline - time.time()))
+        try:
+            return read(timeout)
+        except FetchError as exc:
+            if attempt >= RETRY_ATTEMPTS or exc.kind not in RETRY_ON:
+                raise
+            wait = RETRY_BACKOFF_SECS
+            if exc.retry_after is not None and exc.retry_after < deadline - time.time():
+                wait = exc.retry_after
+            if deadline - time.time() < wait + 2.0:
+                raise
+            time.sleep(wait)
+
+
+# Fixture calls per fixture file in this process, so an "attempts" fixture can
+# answer each retry differently.
+FIXTURE_CALLS = {}
+
+
+def fixture_read(name, payload_key, timeout):
+    """A stubbed Sentry read. The file is the payload itself (a list), or an
+    object with an optional "sleep" (seconds; longer than the read's timeout
+    is a timeout), "status" (an HTTP status, with "retry_after" for a 429),
+    and the payload under payload_key, or an "attempts" list of such objects
+    answering successive reads (the last one repeats)."""
+    data = read_json(Path(FIXTURES) / name)
+    if data is None:
+        raise FetchError("fixture %s is missing or unreadable" % name)
+    calls = FIXTURE_CALLS.get(name, 0)
+    FIXTURE_CALLS[name] = calls + 1
+    if isinstance(data, dict) and isinstance(data.get("attempts"), list) and data["attempts"]:
+        data = data["attempts"][min(calls, len(data["attempts"]) - 1)]
+    if not isinstance(data, dict):
         return data
+    delay = float(data.get("sleep") or 0)
+    if delay > timeout:
+        time.sleep(timeout)
+        raise FetchError("unreadable response: The read operation timed out", "timeout")
+    time.sleep(delay)
+    if data.get("status"):
+        raise http_status_error(int(data["status"]), data.get("retry_after"))
+    return data.get(payload_key, [])
+
+
+def fetch_projects(org, host, token, timeout=None):
+    if FIXTURES:
+        return fixture_read("projects.json", "projects", timeout or HTTP_TIMEOUT)
     url = "https://%s/api/0/organizations/%s/projects/?per_page=100" % (host, org)
-    data = http_get(url, token)
+    data = http_get(url, token, timeout)
     if not isinstance(data, list):
         raise FetchError("projects response was not a list")
     return data
@@ -533,13 +716,7 @@ def fetch_projects(org, host, token):
 
 def fetch_issues(org, host, token, slug, timeout=None):
     if FIXTURES:
-        data = read_json(Path(FIXTURES) / ("issues-%s.json" % slug))
-        if data is None:
-            raise FetchError("fixture issues-%s.json is missing or unreadable" % slug)
-        if isinstance(data, dict):
-            time.sleep(float(data.get("sleep") or 0))
-            data = data.get("issues", [])
-        return data
+        return fixture_read("issues-%s.json" % slug, "issues", timeout or HTTP_TIMEOUT)
     query = urllib.parse.urlencode({
         "query": "is:unresolved lastSeen:-2d !environment:development",
         "limit": "50",
@@ -1007,7 +1184,8 @@ def prune_issues(issues, now, retention):
 
 def action_projects(config, org, host, token, problems):
     try:
-        projects = fetch_projects(org, host, token)
+        projects = fetch_with_retry(
+            lambda timeout: fetch_projects(org, host, token, timeout), time.time() + BUDGET_SECS)
     except FetchError as exc:
         print("sentry-watch: could-not-determine projects: %s" % exc)
         return
@@ -1033,6 +1211,9 @@ def action_status(config, problems):
     print("sentry-watch status")
     print("config: %s (%s)" % (CONFIG, "present" if CONFIG.is_file() else "absent, built-in defaults"))
     print("cadence: %ss dark-after: %ss" % (cadence, DARK_FACTOR * cadence))
+    print("fetch: read timeout %ss, poll budget %ss, %s attempts %ss apart on %s, could-not-determine after %s polls" % (
+        HTTP_TIMEOUT, BUDGET_SECS, RETRY_ATTEMPTS, RETRY_BACKOFF_SECS,
+        ",".join(RETRY_ON) or "nothing", TRANSIENT_POLLS))
     beat = read_int(BEAT)
     if beat is None:
         print("beat: missing")
@@ -1157,7 +1338,8 @@ def action_poll(config, org, host, token, problems):
 
     enumerated = True
     try:
-        projects = fetch_projects(org, host, token)
+        projects = fetch_with_retry(
+            lambda timeout: fetch_projects(org, host, token, timeout), deadline)
     except FetchError as exc:
         conditions["projects"] = "could-not-determine projects: %s" % exc
         enumerated = False
@@ -1175,7 +1357,6 @@ def action_poll(config, org, host, token, problems):
     if cursor in slugs:
         start = slugs.index(cursor) + 1
         slugs = slugs[start:] + slugs[:start]
-    per_project = max(2.0, float(project_budget) / max(1, len(slugs)))
 
     signatures = {}
     for key in ("sensitive", "noise", "transport", "retired", "crash", "critical"):
@@ -1197,10 +1378,22 @@ def action_poll(config, org, host, token, problems):
                     slug, unread[slug])
             continue
         try:
-            rows = fetch_issues(org, host, token, slug, min(HTTP_TIMEOUT, per_project, remaining))
+            rows = fetch_with_retry(
+                lambda timeout: fetch_issues(org, host, token, slug, timeout), deadline)
         except FetchError as exc:
+            # A transient failure that survived its retry counts toward the same
+            # unread streak as a budget skip and is reported only once it
+            # persists for TRANSIENT_POLLS consecutive polls (or while an open
+            # condition must stay open); any other failure is reported at once.
             unread[slug] = unread.get(slug, 0) + 1
-            conditions[slug] = "could-not-determine %s: %s" % (slug, exc)
+            prior = prior_conditions.get(slug)
+            if exc.kind not in RETRY_ON:
+                conditions[slug] = "could-not-determine %s: %s" % (slug, exc)
+            elif unread[slug] >= TRANSIENT_POLLS:
+                conditions[slug] = "could-not-determine %s: %s (%s consecutive polls)" % (
+                    slug, exc, unread[slug])
+            elif isinstance(prior, dict) and prior.get("message"):
+                conditions[slug] = prior["message"]
             continue
         window_start = last_read.get(slug, now - cadence)
         project_baseline = not project_seen(slug, issues, last_read)
@@ -1326,6 +1519,7 @@ def action_poll(config, org, host, token, problems):
 
 def main():
     config, problems = load_config()
+    apply_fetch(config)
     org, host, token = resolve_credentials(config, problems)
     if ACTION == "status":
         action_status(config, problems)

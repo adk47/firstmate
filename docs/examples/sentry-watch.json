@@ -28,5 +28,11 @@
     "repos": ["Muso-AI/core-backend"],
     "branch_prefix": "cto/sentry",
     "id_prefixes": ["CORE-BACKEND"]
+  },
+  "fetch": {
+    "http_timeout_secs": 8,
+    "budget_secs": 25,
+    "retry": {"attempts": 2, "backoff_secs": 1.5, "on": ["timeout", "network", "http_5xx", "http_429"]},
+    "transient_polls_before_cnd": 2
   }
 }
