@@ -1676,6 +1676,13 @@ jobs:
           # credit-trust band table mirror (scripts/credit_trust): byte-identical to IDP's
           # common/credit_trust_bands.json at the pinned sha. Stdlib only.
           python3 scripts/tests/test_credit_trust_bands.py
+          # Credit-trust model ladder + fetched-source evidence (scripts/credit_trust,
+          # T01). Stdlib only; codex, Jev, OpenRouter and HTTP are faked, and the
+          # bash helper is exercised only via --print-argv / census / quota gate.
+          python3 scripts/tests/test_credit_trust_llm.py
+          # credit-trust-decide (trust-yet-verify decider): server-mirror conflict
+          # predicate, big tracks never approved, never re-ask, ledger before PUT.
+          python3 scripts/tests/test_credit_trust_decide.py
 
   plugin-tests:
     name: Plugin tests (vitest)

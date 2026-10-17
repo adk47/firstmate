@@ -3148,6 +3148,18 @@ check_statedir_pin() {
 if needs_target "main"; then check_statedir_pin main; fi
 if needs_target "edge"; then check_statedir_pin edge; fi
 
+# Credit-trust judge user (T01). scripts/lib/codex-judge-exec.sh runs the
+# tool-less `codex exec` as this unprivileged system user and REFUSES to run
+# it as root, so the judge is unavailable (its ladder falls through) until the
+# user exists. Idempotent; no home, no login shell, no groups.
+if ! id hydra-judge >/dev/null 2>&1; then
+  if useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hydra-judge; then
+    log "  created system user hydra-judge (credit-trust codex judge)"
+  else
+    log "  WARN: could not create system user hydra-judge — the credit-trust Codex rung stays unavailable"
+  fi
+fi
+
 # muso CLI host config (main profile only; soak phase). Files are RENDERED
 # on every deploy from the OPERATIONS WORKSPACE muso-ops-admin config — the
 # same files muso-admin-api.sh resolves at runtime (TIER2_APPROVERS_PATH=

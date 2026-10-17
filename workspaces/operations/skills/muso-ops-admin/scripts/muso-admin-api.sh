@@ -598,6 +598,46 @@ resolve_slack_to_email() {
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# Per-automation admin identity. An automation sets MUSO_ADMIN_IDENTITY in its
+# own process (credit-trust-decide: credit-decider = agent-credit-decider@muso.ai,
+# uvn-under30: uvn-cron = agent-uvn-cron@muso.ai; core-backend binds each
+# automation's grant to that account, T12 / core #10595) and
+# logs in with that identity's credentials, read from
+# $MUSO_ADMIN_IDENTITY_DIR/<identity>.env, with a token cache of its own. The
+# file is PARSED (MUSO_ADMIN_EMAIL= / MUSO_ADMIN_PASSWORD= lines), never
+# sourced, so nothing in it executes. There is no fallback: an unknown
+# identity or a missing/incomplete file fails before any request.
+MUSO_ADMIN_IDENTITY_DIR="${MUSO_ADMIN_IDENTITY_DIR:-/etc/hydra/muso-admin-identities}"
+load_admin_identity() {
+    local identity="${MUSO_ADMIN_IDENTITY:-}"
+    [[ -n "$identity" ]] || return 0
+    case "$identity" in
+        credit-decider|uvn-cron) ;;
+        *) die "MUSO_ADMIN_IDENTITY '$identity' is not a known automation identity (credit-decider, uvn-cron)" ;;
+    esac
+    local file="$MUSO_ADMIN_IDENTITY_DIR/$identity.env"
+    [[ -f "$file" && -r "$file" ]] || die "admin identity '$identity': $file is missing or unreadable (no fallback)"
+    local line key value email="" password=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        [[ -z "${line//[[:space:]]/}" || "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" == *=* ]] || die "admin identity '$identity': malformed line in $file"
+        key="${line%%=*}"
+        value="${line#*=}"
+        if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then
+            value="${BASH_REMATCH[1]}"
+        fi
+        case "$key" in
+            MUSO_ADMIN_EMAIL) email="$value" ;;
+            MUSO_ADMIN_PASSWORD) password="$value" ;;
+        esac
+    done < "$file"
+    [[ -n "$email" && -n "$password" ]] || die "admin identity '$identity': $file needs MUSO_ADMIN_EMAIL and MUSO_ADMIN_PASSWORD"
+    MUSO_ADMIN_EMAIL="$email"
+    MUSO_ADMIN_PASSWORD="$password"
+    TOKEN_CACHE="${TOKEN_CACHE}.${identity}"
+}
+
 check_env() {
     [[ -n "${MUSO_API_URL:-}" ]] || die "MUSO_API_URL not set"
     [[ -n "${MUSO_ADMIN_EMAIL:-}" ]] || die "MUSO_ADMIN_EMAIL not set"
@@ -1148,6 +1188,49 @@ is_uvn_popularity_cron_approval() {
     ' >/dev/null 2>&1
 }
 
+# Standing authorization for the trust-yet-verify decider (credit-review.py
+# decide --mode apply, cron credit-trust-decide-15m; captain 2026-10-15 ~22:12Z
+# "i want AI live now ... trust yet verify approach"). Same narrow shape as the
+# UVN cron above, for the unverified -> approved transition, PLUS a write-
+# boundary re-check of the registry: if policies/credit-approval-automation.json
+# does not carry credit-trust-decide approved:true with approved_by and
+# approval_ref, nothing is approved even when the cron is enabled. The server
+# (agentApprovalGuard) still refuses any row with a validator conflict.
+CREDIT_APPROVAL_REGISTRY="${CREDIT_APPROVAL_REGISTRY:-${HYDRA_ROOT:-/opt/hydra}/policies/credit-approval-automation.json}"
+is_credit_trust_decide_approval() {
+    local method="$1" path="$2" body="$3"
+    [[ "${CREDIT_TRUST_DECIDE:-0}" == "1" ]] || return 1
+    [[ "${REQUESTER_EMAIL:-}" == "credit-trust-decide@hydra-ops" ]] || return 1
+    [[ "$method" == "PUT" ]] || return 1
+    [[ "$path" == "/admin/credit-requests/conditional-status" ]] || return 1
+    jq -e '.automations["credit-trust-decide"]
+           | .approved == true
+             and ((.approved_by // "") | tostring | length > 0)
+             and ((.approval_ref // "") | tostring | length > 0)' \
+        "$CREDIT_APPROVAL_REGISTRY" >/dev/null 2>&1 || {
+        echo "credit_approve_gate: credit-trust-decide is not approved in $CREDIT_APPROVAL_REGISTRY - refusing" >&2
+        return 1
+    }
+    printf '%s' "$body" | jq -e '
+        type == "object"
+        and ((keys | sort) == ["expectedStatus", "requestIds", "status"])
+        and .status == "approved"
+        and .expectedStatus == "unverified"
+        and (
+            .requestIds as $ids
+            | ($ids | type) == "array"
+            and ($ids | length) > 0
+            and ($ids | length) <= 50
+            and all($ids[];
+                type == "string"
+                and length == 36
+                and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+            )
+            and (($ids | map(ascii_downcase) | unique | length) == ($ids | length))
+        )
+    ' >/dev/null 2>&1
+}
+
 enforce_credit_approve_gate() {
     local method="$1" path="$2" body="$3"
 
@@ -1181,6 +1264,9 @@ enforce_credit_approve_gate() {
     fi
 
     if is_uvn_popularity_cron_approval "$method" "$path" "$body"; then
+        return 0
+    fi
+    if is_credit_trust_decide_approval "$method" "$path" "$body"; then
         return 0
     fi
 
@@ -2735,6 +2821,14 @@ EOF
         curl_args+=(-H "Requester: $REQUESTER_EMAIL")
     fi
 
+    # core-backend binds the credit-trust-decide grant to this header on the
+    # decider's own account, agent-credit-decider@muso.ai (T12, core #10595;
+    # identity credit-decider, never agent-hydra-main@). Only the decider's
+    # own calls ever carry it.
+    if [[ "${CREDIT_TRUST_DECIDE:-0}" == "1" && "$REQUESTER_EMAIL" == "credit-trust-decide@hydra-ops" ]]; then
+        curl_args+=(-H "X-Credit-Automation-Id: credit-trust-decide")
+    fi
+
     # Actor headers (audit trail — approver + Slack ts of the in-thread approval);
     # blank or whitespace-only counts as absent, never as a valid approver
     if [[ "$CONFIRMED_BY" =~ [^[:space:]] ]]; then
@@ -2979,6 +3073,10 @@ done
 
 command="${1:-help}"
 shift || true
+
+case "$command" in
+    login|call|upload) load_admin_identity ;;
+esac
 
 case "$command" in
     login)          cmd_login "$@" ;;
