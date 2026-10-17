@@ -407,8 +407,21 @@ def removal_due(db: sqlite3.Connection, admin: admin_api.Admin, documented: Proo
     wanted = [(r["request_id"], str(r["profile_id"]), str(r["track_id"] or "")) for r in due + held if r["profile_id"]]
     live, _ = reread(admin, wanted) if wanted else ({}, set())
     by_person = {rid for rid, req in live.items() if human_approved(req)}
-    return ([r for r in due if r["request_id"] not in by_person],
-            [r for r in held if r["request_id"] not in by_person])
+    # Proof is matched by USER as well as by credit (firstmate 042): a user with a
+    # whole-user document waiting for review (e.g. emailed to support@, no request id)
+    # never reaches a per-credit removal day - their credits are held for a human.
+    waiting = {rid for rid, req in live.items() if _user_pending_doc(documented, _user_id(req))}
+    for r in due:
+        if r["request_id"] in waiting:
+            r["reason"] = verify_ledger.HELD_AWAITING_REVIEW
+    return ([r for r in due if r["request_id"] not in by_person and r["request_id"] not in waiting],
+            [r for r in held if r["request_id"] not in by_person]
+            + [r for r in due if r["request_id"] in waiting and r["request_id"] not in by_person])
+
+
+def _user_pending_doc(documented: ProofOnFile, uid: str) -> bool:
+    """The user has a whole-user (no request id) document waiting for review."""
+    return bool(uid) and any(rid is None and kind == "pending_doc" for rid, kind in documented.get(uid, []))
 
 
 def human_approved(req: dict[str, Any]) -> bool:

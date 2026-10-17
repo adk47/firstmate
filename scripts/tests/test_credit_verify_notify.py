@@ -1167,6 +1167,27 @@ class WaveTests(unittest.TestCase):
         rows, held = verify_notify.removal_due(db, admin, verify_notify.load_proof_on_file(proof), day="2026-11-02")
         self.assertEqual(([r["request_id"] for r in rows], held), (["r3"], []))
 
+    def test_a_whole_user_document_holds_every_credit_past_its_removal_day(self):
+        """firstmate 042: a document emailed to support@ is a user-level entry (no
+        request id); that user never hits a per-credit removal day."""
+        db = verify_ledger.connect(self.path)
+        self.addCleanup(db.close)
+        c = verify_ledger.claim(db, user_key="jane@example.com", day="2026-10-01", request_ids=["r1", "r2"],
+                                message_type="email", approved_by=CAPTAIN_UID, approval_ref="ref", windowed=True,
+                                refs=[{"request_id": f"r{i}", "profile_id": PID, "track_id": f"t{i}"} for i in (1, 2)])
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="500")
+        admin = FakeAdmin([req("r1", track="t1"), req("r2", track="t2")])
+        proof = os.path.join(self.tmp, "proof.json")
+        write_proof(proof, [{"user_id": 42, "request_id": None, "kind": "pending_doc", "source": "gmail", "ref": "g"}])
+        rows, held = verify_notify.removal_due(db, admin, verify_notify.load_proof_on_file(proof), day="2026-11-02")
+        self.assertEqual(rows, [])
+        self.assertEqual(sorted(r["request_id"] for r in held), ["r1", "r2"])
+        self.assertTrue(all(r["reason"] == verify_ledger.HELD_AWAITING_REVIEW for r in held))
+        # A whole-user identity check is no reason to hold (only a document under review is).
+        write_proof(proof, [{"user_id": 42, "request_id": None, "kind": "approved_doc", "source": "core", "ref": "n"}])
+        rows, held = verify_notify.removal_due(db, admin, verify_notify.load_proof_on_file(proof), day="2026-11-02")
+        self.assertEqual(sorted(r["request_id"] for r in rows), ["r1", "r2"])
+
     def test_the_removal_export_lists_credits_held_by_a_user_reply_separately(self):
         db = verify_ledger.connect(self.path)
         for mid, user, ids in (("500", "jane@example.com", ("r1",)), ("600", "bob@example.com", ("r2",))):

@@ -128,11 +128,12 @@ class Base(unittest.TestCase):
         decide.WRITE_LOCK = self._lock
         decide.PAYING_USERS_FILE, decide.log, decide.PROOF_ON_FILE = self._paying, self._log, self._proof
 
-    def proof(self, entries=(), generated_at="2026-10-11T02:12:00Z", sources=None):
+    def proof(self, entries=(), generated_at="2026-10-11T02:12:00Z", sources=None, contacts=()):
         """The proof-on-file export as the producer lane writes it."""
         entries = list(entries)
         decide.PROOF_ON_FILE.write_text(json.dumps({
             "generated_at": generated_at,
+            "gmail_contacts_90d": {"generated_at": generated_at, "source": "test", "user_ids": list(contacts)},
             "sources": sources if sources is not None else [
                 {"name": "core_proofs", "generated_at": generated_at, "count": len(entries)}],
             "users": len({e["user_id"] for e in entries}), "entries": entries}))
@@ -804,6 +805,30 @@ class NeverReAsk(Base):
             self.assertTrue(d["reason"].startswith("proof_status_unknown"), why)
             self.assertIn(f"{src['name']} is {why}", d["reason"])
             self.assertEqual(res.deferred_proof_unknown, 1, why)
+
+    def test_support_contacts_are_held_never_asked(self):
+        """firstmate 041: everyone who emailed support@ in the last 90 days is held for
+        a human, even with no document found; everyone else may be asked."""
+        self.proof(contacts=[781])
+        res, w = self.go([req(uuid_of(160), uid=781, track="t1"), req(uuid_of(161), uid=782, track="t1")], self.RAWS)
+        d = self.decisions()
+        self.assertEqual(d[uuid_of(160)]["decision"], "hold")
+        self.assertIn("emailed support@", d[uuid_of(160)]["reason"])
+        self.assertEqual(self.support_writes(w), [uuid_of(161)])
+
+    def test_a_missing_or_malformed_contact_list_asks_nobody(self):
+        for bad in (None, {"user_ids": "x"}, [True], ["abc"]):
+            self.proof()
+            doc = json.loads(decide.PROOF_ON_FILE.read_text())
+            if bad is None:
+                doc.pop("gmail_contacts_90d")
+            else:
+                doc["gmail_contacts_90d"] = bad
+            decide.PROOF_ON_FILE.write_text(json.dumps(doc))
+            p, why = decide.proof_on_file(now=T.NOW)
+            self.assertIsNone(p, bad)
+            self.assertIn("gmail_contacts_90d", why)
+        self.assertEqual(decide.support_contacts_of([1, "2"]), frozenset({1, 2}))
 
     def test_a_credit_is_asked_about_once_ever(self):
         row = req(uuid_of(140), uid=720, track="t1")

@@ -227,3 +227,5 @@ ask are owned by other tickets:
 - anything else the server would refuse is held for a human.
 If the server still answers `agent_cannot_approve_declined`, it wrote nothing: the decider records the refused rows as `skipped:agent_cannot_approve_declined:<reasons>` and sends the rest of the batch once more; uvn-under30 clears its unresolved-attempt blocker and leaves the rows held.
 
+
+**Support@ contacts are never asked (firstmate 041).** Every user in the export's top-level `gmail_contacts_90d` (a list, or `{generated_at, source, user_ids}`) emailed support@ in the last 90 days: their support rows are held for a human, never asked, even when no document was found. A missing or malformed list makes proof status UNKNOWN, so nobody is asked.

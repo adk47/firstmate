@@ -537,8 +537,36 @@ class ProofOnFile:
     request_ids: frozenset[str]
     approved_refs: dict[str, str] = field(default_factory=dict)  # request id -> ref of an APPROVED proof
 
+    # Users who emailed support@ in the last 90 days (top-level gmail_contacts_90d):
+    # firstmate 041 - always held for a human, never asked, whatever the Gmail scan found.
+    support_contacts: frozenset[int] = frozenset()
+
     def covers(self, d: "Decision") -> bool:
         return d.user_id in self.user_ids or d.request_id.lower() in self.request_ids
+
+    def contacted_support(self, d: "Decision") -> bool:
+        return d.user_id is not None and d.user_id in self.support_contacts
+
+
+SUPPORT_CONTACTS_KEY = "gmail_contacts_90d"
+
+
+def support_contacts_of(value: Any) -> frozenset[int] | None:
+    """User ids from gmail_contacts_90d - a list, or {generated_at, source, user_ids: [...]}
+    as the cs lane publishes it; None when absent or malformed (the caller then treats
+    proof status as UNKNOWN: nobody is asked)."""
+    ids = value.get("user_ids") if isinstance(value, dict) else value
+    if not isinstance(ids, list):
+        return None
+    out: set[int] = set()
+    for u in ids:
+        if isinstance(u, bool):
+            return None
+        try:
+            out.add(int(str(u).strip()))
+        except ValueError:
+            return None
+    return frozenset(out)
 
 
 def proof_on_file(path: Path | None = None, now: datetime | None = None
@@ -566,6 +594,9 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
             or not isinstance(users_n, int) or isinstance(users_n, bool)
             or not all(isinstance(s, dict) and isinstance(s.get("name"), str) for s in sources)):
         return None, malformed
+    contacts = support_contacts_of(data.get(SUPPORT_CONTACTS_KEY))
+    if contacts is None:
+        return None, f"{path} has no readable {SUPPORT_CONTACTS_KEY} list (anyone may have emailed support@)"
     incomplete = [f"{s['name']} is {'missing' if s.get('missing') else 'stale'}"
                   for s in sources if s.get("missing") or s.get("stale")]
     if incomplete:
@@ -592,7 +623,7 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
         return None, f"{path} is stale (generated {utc(ts)})"
     if ts - now > PAYING_USERS_MAX_SKEW:
         return None, f"{path} is dated in the future ({utc(ts)})"
-    return ProofOnFile(frozenset(users), frozenset(requests), approved), None
+    return ProofOnFile(frozenset(users), frozenset(requests), approved, support_contacts=contacts), None
 
 
 def proof_status_transition(db: sqlite3.Connection, mode: str, proof_why: str | None) -> str | None:
@@ -655,6 +686,10 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
     for d in support:
         if proof.covers(d):
             _set(d, "hold", "proof on file: human review (a document is already on file; never ask again)")
+            res.held_proof += 1
+        elif proof.contacted_support(d):
+            _set(d, "hold", "emailed support@ in the last 90 days: human review, never asked "
+                 "(when in doubt, don't send)")
             res.held_proof += 1
         elif d.request_id in asked:
             _set(d, "hold", "support already requested for this credit once: never re-ask; human review")
