@@ -280,11 +280,14 @@ def cmd_precheck(client, args, env):
 
 
 def _age_minutes(card):
-    raw = card.get("createdAt") or ""
+    raw = card.get("createdAt")
     try:
         ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return 0
+        if ts.tzinfo is None:
+            raise ValueError("no timezone")
+    except (AttributeError, ValueError):
+        # Age 0 would skip the card on every run and exit 0: fail loud instead.
+        raise ApiError(f"card {card.get('id')} has no usable createdAt: {raw!r}")
     return (datetime.now(timezone.utc) - ts).total_seconds() / 60
 
 

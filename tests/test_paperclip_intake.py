@@ -569,6 +569,18 @@ class EscalateTests(Base):
         rc, _, _ = self.run_cli("escalate", "--to-agent", "ghost")
         self.assertEqual(rc, 1)
 
+    def test_missing_or_malformed_created_at_fails_loud(self):
+        # An unreadable createdAt used to count as age 0: the card was skipped on
+        # every run and the cron exited 0, stranding it with no signal.
+        self.file("deploy failed")
+        card = next(iter(self.api.issues.values()))
+        for bad in (None, "", "not-a-date", "2026-10-17T10:00:00"):
+            card["createdAt"] = bad
+            rc, out, err = self.run_cli("escalate", "--to-agent", "pilot-agent-id")
+            self.assertEqual(rc, 1, bad)
+            self.assertIn("createdAt", err)
+            self.assertIsNone(card["assigneeAgentId"])
+
     def test_fresh_card_is_left_alone(self):
         self.file("deploy failed")
         card = next(iter(self.api.issues.values()))
