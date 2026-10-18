@@ -36,7 +36,11 @@
 #               a seen issue on any new event, subject to the tier throttle below.
 #   P0          a user tier: a NEW issue at users>=users_p0, and a seen issue only
 #               when it crosses a new tier (users_p0, twice it, four times it), so
-#               a chronic issue pages once per tier rather than every poll. Or a
+#               a chronic issue pages once per tier rather than every poll. The
+#               user-tier rule pages only an issue at level error or fatal (or
+#               one Sentry reports with no level): an info, debug, or warning
+#               event reaching many users is a log line many users emit, such
+#               as a launch-time "refresh succeeded", not an outage. Or a
 #               burst. Until an issue has two full reads by this watch the rule
 #               is absolute and window-scoped: burst_min_events or more events in
 #               this poll window (a NEW issue counts the events since its
@@ -931,6 +935,10 @@ def classify(entry, old, settings, signatures, config, window_start, now, cadenc
         if pattern is not None and not pattern.search(blob):
             live = False
     level = entry["level"]
+    # The user-tier P0 rule counts people, so it pages only events that are
+    # failures: an issue whose level says otherwise is a log line, however many
+    # users emit it. A missing level is not evidence of a log line.
+    tier_level = level in ("error", "fatal", "")
     transport = bool(signatures["transport"] and signatures["transport"].search(blob))
     crash = bool(signatures["crash"] and signatures["crash"].search(blob))
     critical = bool(signatures["critical"] and signatures["critical"].search(blob))
@@ -993,7 +1001,7 @@ def classify(entry, old, settings, signatures, config, window_start, now, cadenc
             return finding("CRASH", "crash-signature")
         if critical:
             return finding("CRITICAL", "critical-signature")
-        if users >= settings["users_p0"] and not transport:
+        if users >= settings["users_p0"] and not transport and tier_level:
             return finding("P0", "users>=%s" % settings["users_p0"])
         first_seen = entry.get("first_seen")
         if first_seen is not None and first_seen >= window_start \
@@ -1025,7 +1033,7 @@ def classify(entry, old, settings, signatures, config, window_start, now, cadenc
             return finding("P0", "burst>=%s/window prior<=%.0f/h" % (burst_floor, baseline_rate))
     if critical and delta >= 1 and not throttled("CRITICAL"):
         return finding("CRITICAL", "critical-signature")
-    if new_tier and live and not transport:
+    if new_tier and live and not transport and tier_level:
         return finding("P0", "users>=%s" % tier)
     return None
 

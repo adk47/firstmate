@@ -429,6 +429,41 @@ JSON
   pass "a seen P0 pages once per user tier, never every poll"
 }
 
+# 2026-10-18: APPLE-IOS-MY, an info-level "refresh succeeded" log emitted once
+# per app launch, paged as P0 at 100 users and would have re-paged at every
+# tier. The user-tier rule counts people, so it must page only failures.
+test_user_tier_p0_requires_a_failure_level() {
+  local home out
+  home=$(make_home p0-level)
+  prime_baseline "$home" 1000
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-INF","title":"Token refresh succeeded","culprit":"AuthSession.refresh","userCount":30,"count":924,"level":"info","substatus":"new","permalink":"https://x/inf/"},
+ {"shortId":"CORE-BACKEND-WRN","title":"Slow launch","culprit":"AppLaunch","userCount":30,"count":300,"level":"warning","substatus":"new","permalink":"https://x/wrn/"},
+ {"shortId":"CORE-BACKEND-ERR","title":"TypeError: refresh failed","culprit":"AuthSession.refresh","userCount":30,"count":120,"level":"error","substatus":"new","permalink":"https://x/err/"}]
+JSON
+  out=$(poll "$home" 1300)
+  assert_not_contains "$out" "CORE-BACKEND-INF" "an info-level log past the first user tier paged"
+  assert_not_contains "$out" "CORE-BACKEND-WRN" "a warning-level log past the first user tier paged"
+  assert_contains "$out" "P0 CORE-BACKEND-ERR" "an error-level issue past the first user tier did not page P0"
+  assert_contains "$out" "rule=users>=25" "the error-level P0 did not name its user tier"
+  # The next tiers stay silent for the log line and still page the failure.
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-INF","title":"Token refresh succeeded","culprit":"AuthSession.refresh","userCount":120,"count":3900,"level":"info","substatus":"ongoing","permalink":"https://x/inf/"},
+ {"shortId":"CORE-BACKEND-ERR","title":"TypeError: refresh failed","culprit":"AuthSession.refresh","userCount":120,"count":121,"level":"error","substatus":"ongoing","permalink":"https://x/err/"}]
+JSON
+  out=$(poll "$home" 99000)
+  assert_not_contains "$out" "CORE-BACKEND-INF" "an info-level log re-paged at a higher user tier"
+  assert_contains "$out" "P0 CORE-BACKEND-ERR" "an error-level issue crossing a higher tier did not page"
+  assert_contains "$out" "rule=users>=100" "the higher-tier P0 did not name its tier"
+  # A regression is a different rule and still pages whatever the level.
+  write_issues "$home" core-backend <<'JSON'
+[{"shortId":"CORE-BACKEND-INF","title":"Token refresh succeeded","culprit":"AuthSession.refresh","userCount":121,"count":3901,"level":"info","substatus":"regressed","permalink":"https://x/inf/"}]
+JSON
+  out=$(poll "$home" 99300)
+  assert_contains "$out" "REGRESSION CORE-BACKEND-INF" "the level gate leaked into the regression rule"
+  pass "the user-tier P0 pages error and fatal issues only, on first sight and at later tiers; other rules are unchanged"
+}
+
 test_critical_signature_pages_at_any_user_count() {
   local home out
   home=$(make_home critical)
@@ -1130,6 +1165,7 @@ test_transport_pages_only_through_the_raised_burst_floor
 test_burst_window_runs_from_the_last_real_read
 test_new_issue_burst_needs_events_inside_the_poll_window
 test_seen_p0_pages_once_per_user_tier
+test_user_tier_p0_requires_a_failure_level
 test_critical_signature_pages_at_any_user_count
 test_every_finding_pages_on_its_own_line
 test_regression_pages_when_a_resolved_issue_refires
