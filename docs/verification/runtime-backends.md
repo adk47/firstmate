@@ -1911,6 +1911,34 @@ tests/fm-bootstrap.test.sh
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
+### Terminal inventory as relaunch absence proof
+
+On 2026-10-18 at 16:55Z, read-only against Orca 1.4.224 (`orca --version`) with 128 Orca-backed task records in one home:
+
+```sh
+orca status --json
+orca terminal list --json --limit 100000
+orca terminal list --json --limit 3
+orca terminal show --terminal <handle> --json
+```
+
+Observed fields:
+
+```text
+status: result.runtime.state=ready reachable=true connectionState=connected
+list (--limit 100000): ok=true, result keys hostScope, terminals, topologyRevisions, totalCount, truncated
+list (--limit 100000): terminals=209 totalCount=209 truncated=false hostScope={hostIds:["local"],omittedHostIds:[]}, 115 distinct worktreeId values
+list (--limit 3): terminals=3 totalCount=209 truncated=true
+show, listed handle: ok=true, result.terminal
+show, 15 unlisted recorded handles: ok=false error.code=terminal_handle_stale for all 15; no unlisted handle answered ok
+recorded handles: 113 listed, 15 unlisted
+```
+
+So the CLI reports truncation and a total count itself, one list covers every worktree on the host, and every recorded terminal missing from a complete list was confirmed stale by `terminal show`.
+An earlier read on 2026-10-09 against Orca 1.4.221 gave the same shape (112/112, truncated=false, 68 worktrees; `--limit 5` truncated=true; 17 unlisted recorded handles all `terminal_handle_stale`).
+`fm_backend_orca_terminal_listed` in `bin/backends/orca.sh` accepts absence only on exactly that evidence: a ready runtime, `truncated=false`, `totalCount` equal to the returned count, a complete host census by Orca's own `hostScopeCensusIsComplete` rule (at least one host id; omitted ids only `runtime:` ones), and a `terminal_handle_stale` show for the handle; anything else refuses the relaunch.
+`tests/fm-spawn-orca-worktree.test.sh` pins each refusal and the rebind against a fake orca.
+
 ## cmux
 
 The current compatibility floor is cmux 0.64, and the active live evidence uses 0.64.17 build 97 on macOS aarch64.

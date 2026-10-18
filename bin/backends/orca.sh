@@ -166,16 +166,22 @@ fm_backend_orca_terminal_create() {  # <worktree-id> <title>
 }
 
 # fm_backend_orca_terminal_listed: whether Orca's live terminal inventory still
-# lists <terminal-id>. Returns 0 when it is listed, 1 only when a successful,
-# well-formed, complete `orca terminal list` from a ready runtime omits it, and
-# 2 when the runtime is not ready or the inventory could not be read, was
-# truncated, omitted a host, or could not be parsed, so a partial inventory is
-# never mistaken for absence.
+# lists <terminal-id>. Returns 0 when it is listed; 1 only when a ready runtime
+# returned a complete inventory that omits it AND `orca terminal show` answers
+# terminal_handle_stale for it; 2 for anything else (runtime not ready, list
+# unreadable, malformed, truncated, a totalCount mismatch, an incomplete host
+# census, or a show that does not report the handle stale), so a partial or
+# ambiguous inventory is never mistaken for absence.
+# The host-census rule mirrors Orca's own hostScopeCensusIsComplete: hostScope
+# must be present with at least one host id, and omittedHostIds may name only
+# `runtime:` ids, which Orca deliberately over-reports for unpaired servers.
+# docs/verification/runtime-backends.md "Orca" records the real-Orca evidence.
 fm_backend_orca_terminal_listed() {  # <terminal-id>
-  local terminal=${1:-} out
+  local terminal=${1:-} out rc
   [ -n "$terminal" ] || return 2
   fm_backend_orca_runtime_check >/dev/null 2>&1 || return 2
   out=$(orca terminal list --json --limit 100000 2>/dev/null) || return 2
+  rc=0
   printf '%s' "$out" | node -e '
 const fs = require("fs");
 let data;
@@ -183,9 +189,21 @@ try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (err) { process.exi
 if (!data || data.ok !== true || !data.result || !Array.isArray(data.result.terminals)) process.exit(2);
 const r = data.result;
 if (r.truncated !== false || r.totalCount !== r.terminals.length) process.exit(2);
-if (r.hostScope && Array.isArray(r.hostScope.omittedHostIds) && r.hostScope.omittedHostIds.length) process.exit(2);
+const hs = r.hostScope;
+if (!hs || !Array.isArray(hs.hostIds) || hs.hostIds.length === 0) process.exit(2);
+if (!hs.hostIds.every((h) => typeof h === "string" && h.length > 0)) process.exit(2);
+const omitted = hs.omittedHostIds === undefined ? [] : hs.omittedHostIds;
+if (!Array.isArray(omitted) || !omitted.every((h) => typeof h === "string" && h.startsWith("runtime:"))) process.exit(2);
 process.exit(r.terminals.some((t) => t && t.handle === process.argv[1]) ? 0 : 1);
-' "$terminal"
+' "$terminal" || rc=$?
+  [ "$rc" -eq 1 ] || return "$rc"
+  out=$(orca terminal show --terminal "$terminal" --json 2>/dev/null) || :
+  printf '%s' "$out" | node -e '
+const fs = require("fs");
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (err) { process.exit(2); }
+process.exit(data && data.ok === false && data.error && data.error.code === "terminal_handle_stale" ? 1 : 2);
+'
 }
 
 fm_backend_orca_send_text_line() {  # <terminal-id> <text>

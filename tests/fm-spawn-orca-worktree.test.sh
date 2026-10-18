@@ -79,8 +79,16 @@ case "$1 $2" in
     count=$(printf '%s' "$listed" | grep -o '"handle"' | wc -l | tr -d ' ')
     truncated=false
     [ -f "$DIR/orca-list-truncated" ] && truncated=true
-    printf '{"ok":true,"result":{"terminals":[%s],"hostScope":{"hostIds":["local"],"omittedHostIds":[]},"totalCount":%s,"truncated":%s}}\n' "$listed" "$count" "$truncated"
+    scope='"hostScope":{"hostIds":["local"],"omittedHostIds":[]},'
+    [ -f "$DIR/orca-host-scope" ] && scope=$(cat "$DIR/orca-host-scope")
+    printf '{"ok":true,"result":{"terminals":[%s],%s"totalCount":%s,"truncated":%s}}\n' "$listed" "$scope" "$count" "$truncated"
     exit 0
+    ;;
+  "terminal show")
+    printf 'show\n' >> "$DIR/orca-calls"
+    if [ -f "$DIR/orca-show" ]; then cat "$DIR/orca-show"; exit 0; fi
+    printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal_handle_stale"}}\n'
+    exit 1
     ;;
   "worktree show")
     printf '{"ok":true,"result":{"worktree":{"path":"%s"}}}\n' "$(cat "$DIR/orca-worktree-path")"
@@ -241,7 +249,7 @@ test_orca_relaunch_closes_its_fresh_terminal_when_it_refuses_after_creating_it()
   : > "$case_dir/orca-listed"
   plain="$case_dir/plain-dir"
   mkdir -p "$plain"
-  sed -i.bak "s|^worktree=.*|worktree=$plain|" "$case_dir/home/state/$id.meta"
+  perl -pi -e "s|^worktree=.*|worktree=$plain|" "$case_dir/home/state/$id.meta"
   printf '%s\n' "$plain" > "$case_dir/orca-worktree-path"
   out=$(run_orca_relaunch "$case_dir" "$id"); status=$?
   expect_code 1 "$status" "a relaunch into a non-isolated worktree must refuse"$'\n'"$out"
@@ -250,6 +258,46 @@ test_orca_relaunch_closes_its_fresh_terminal_when_it_refuses_after_creating_it()
   [ "$(grep '^terminal=' "$case_dir/home/state/$id.meta" | tail -1 | cut -d= -f2-)" = term-old ] \
     || fail "a refused relaunch must leave the recorded terminal unchanged"
   pass "orca relaunch closes the fresh terminal it created when it refuses before rebinding the record"
+}
+
+# orca_relaunch_refuses_on <case> <id> <file> <content> <label>: a relaunch whose
+# fake Orca answer is changed by <file>=<content> must refuse with no terminal created.
+orca_relaunch_refuses_on() {
+  local name=$1 id=$2 file=$3 content=$4 label=$5 case_dir out status
+  case_dir=$(make_orca_relaunch_case "$name" "$id")
+  : > "$case_dir/orca-listed"
+  printf '%s' "$content" > "$case_dir/$file"
+  out=$(run_orca_relaunch "$case_dir" "$id"); status=$?
+  expect_code 1 "$status" "$label must refuse"$'\n'"$out"
+  assert_contains "$out" "could not read Orca's terminal inventory" "$label: the refusal should name the unproven inventory"
+  assert_not_contains "$(cat "$case_dir/orca-calls" 2>/dev/null)" "create" "$label must never be read as absence"
+  pass "orca relaunch refuses on $label"
+}
+
+test_orca_relaunch_refuses_an_incomplete_host_census() {
+  orca_relaunch_refuses_on nohostscope orca-relaunch-b1 orca-host-scope '' "a list with no hostScope"
+  orca_relaunch_refuses_on omittedhost orca-relaunch-b2 orca-host-scope \
+    '"hostScope":{"hostIds":["local"],"omittedHostIds":["ssh:remote-1"]},' "a list that omitted a non-runtime host"
+  orca_relaunch_refuses_on nohostids orca-relaunch-b3 orca-host-scope \
+    '"hostScope":{"hostIds":[],"omittedHostIds":[]},' "a list naming no host"
+}
+
+test_orca_relaunch_refuses_when_show_does_not_report_the_handle_stale() {
+  orca_relaunch_refuses_on showok orca-relaunch-b4 orca-show \
+    '{"ok":true,"result":{"terminal":{"handle":"term-old"}}}' "an unlisted terminal that show still answers"
+  orca_relaunch_refuses_on showother orca-relaunch-b5 orca-show \
+    '{"ok":false,"error":{"code":"runtime_unavailable"}}' "a show error other than terminal_handle_stale"
+}
+
+test_orca_relaunch_rebinds_past_a_stale_runtime_omission() {
+  local id=orca-relaunch-b6 case_dir out status
+  case_dir=$(make_orca_relaunch_case staleruntime "$id")
+  : > "$case_dir/orca-listed"
+  printf '%s' '"hostScope":{"hostIds":["local"],"omittedHostIds":["runtime:unpaired-1"]},' > "$case_dir/orca-host-scope"
+  out=$(run_orca_relaunch "$case_dir" "$id"); status=$?
+  expect_code 0 "$status" "a runtime: omission Orca over-reports must not block a proven-gone rebind"$'\n'"$out"
+  [ "$(grep -c '^create ' "$case_dir/orca-calls")" = 1 ] || fail "exactly one terminal must be created"$'\n'"$out"
+  pass "orca relaunch treats Orca's over-reported runtime: omissions as a complete census, as Orca itself does"
 }
 
 test_orca_relaunch_refuses_a_worktree_that_resolves_elsewhere() {
@@ -291,6 +339,9 @@ test_orca_relaunch_refuses_before_the_runtime_is_ready
 test_orca_relaunch_refuses_a_truncated_inventory
 test_orca_relaunch_closes_its_fresh_terminal_when_it_refuses_after_creating_it
 test_orca_relaunch_refuses_a_worktree_that_resolves_elsewhere
+test_orca_relaunch_refuses_an_incomplete_host_census
+test_orca_relaunch_refuses_when_show_does_not_report_the_handle_stale
+test_orca_relaunch_rebinds_past_a_stale_runtime_omission
 test_orca_relaunch_rebinds_a_gone_terminal_in_the_recorded_worktree
 
 echo "# all fm-spawn-orca-worktree tests passed"
