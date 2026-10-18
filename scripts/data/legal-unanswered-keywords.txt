@@ -1,0 +1,24 @@
+# Keywords for scripts/intercom-legal-unanswered-watchdog.py (firstmate 766, 2026-10-17).
+# A conversation whose subject or ANY customer message carries one of these, and whose
+# latest customer message has had no HUMAN reply for 24 h, pages #cs_priority (Jan).
+# Same syntax as rights-holder-keywords.txt: plain = case-insensitive word-anchored literal;
+# `re:<rx>` = regex; `subject:` = subject only. Override with LEGAL_UNANSWERED_KEYWORDS_FILE.
+#
+# Born from two GDPR erasure requests (received 6 and 7 Oct 2026) that sat 9-10 days with
+# Caroline replies but no human answer.
+GDPR
+CCPA
+erasure
+right to be forgotten
+re:\barticle\s*17\b
+re:\bdelete\s+(all\s+)?(of\s+)?my\s+(personal\s+)?(data|information|account|profile)\b
+re:\b(remove|erase)\s+(all\s+)?(of\s+)?my\s+(personal\s+)?(data|information)\b
+re:\b(personal\s+)?data\s+(request|deletion|removal|access\s+request)\b
+re:\bsubject\s+access\s+request\b
+DSAR
+cease and desist
+DMCA
+takedown
+lawyer
+attorney
+re:\blegal\s+(notice|department|team|counsel|action|request|representative|proceedings)s?\b
