@@ -39,6 +39,7 @@ fm_remote_handoff_teardown() {
       done
     fi
   fi
+  fm_test_reap_fixture_processes "$TMP_ROOT"
   wait 2>/dev/null || true
   i=0
   while [ "$i" -lt 50 ]; do

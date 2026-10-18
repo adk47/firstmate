@@ -237,7 +237,7 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-reap.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
@@ -675,6 +675,7 @@ tests/fm-teardown.test.sh 97603
 tests/fm-test-fixture-cleanup.test.sh 915
 tests/fm-test-fixtures.test.sh 151
 tests/fm-test-isolation-proof.test.sh 2567
+tests/fm-test-reap.test.sh 12000
 tests/fm-tmux-agent-liveness.test.sh 1516
 tests/fm-tool-update-check.test.sh 14176
 tests/fm-trace-context-lib.test.sh 209
@@ -1183,7 +1184,7 @@ families_for_changed_path() {
       # resolution in the caller; emit a marker family of __script__
       printf '%s\n' "__script__:$(basename "$path")"
       ;;
-    bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
+    bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh|bin/fm-test-reap-lib.sh)
       # Deliberately the WHOLE family, not just the two contract tests. This
       # runner executes every pure-contract-unit script, so a change to it is
       # only proven by running them: its own contract test passing says the
@@ -2011,6 +2012,18 @@ if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
   . "$ROOT/bin/fm-timeout-lib.sh"
 fi
 
+# A concurrent script runs with a private TMPDIR, so whatever it left running
+# under that directory (a server in its own process group outlives even the
+# per-script bound's group kill) is reaped as soon as the script returns.
+# bin/fm-test-reap-lib.sh owns the matching; a fixture copy of this runner
+# without it simply skips the sweep.
+FM_TEST_RUN_REAP=0
+if [ -r "$ROOT/bin/fm-test-reap-lib.sh" ]; then
+  # shellcheck source=bin/fm-test-reap-lib.sh
+  . "$ROOT/bin/fm-test-reap-lib.sh"
+  FM_TEST_RUN_REAP=1
+fi
+
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
@@ -2263,6 +2276,9 @@ else
       set +e
       run_script_bounded "$script" "$work/output" 0 "w$worker_n"
       rc=$?
+      if [ "$FM_TEST_RUN_REAP" = 1 ]; then
+        fm_test_reap_processes_under "$work/tmp" 2>>"$work/output" || true
+      fi
       set -e
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))

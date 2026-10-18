@@ -26,6 +26,11 @@ HOST="$ROOT/bin/fm-extension.mjs"
 PROCEVENT="$ROOT/bin/fm-procevent.sh"
 TMP_ROOT_RAW=$(fm_test_tmproot fm-extension-binding)
 TMP_ROOT=$(cd "$TMP_ROOT_RAW" && pwd -P)
+# A section lane publishes its fixture root so the coordinator can reap what it
+# started (the remote job worker runs in its own process group) when it has to
+# stop the lane before the lane's own cleanup finishes.
+[ -z "${FM_EXTENSION_BINDING_LANE_ROOT_FILE:-}" ] \
+  || printf '%s\n' "$TMP_ROOT" > "$FM_EXTENSION_BINDING_LANE_ROOT_FILE"
 first_bind_pid=
 second_bind_pid=
 handshake_orphan_pid=
@@ -106,6 +111,7 @@ extension_test_cleanup() {
       fm_remote_job_stop_worker_tree "$(cat "$TMP_ROOT/remote-jobs/worker.pid")"
     ) 2>/dev/null || true
   fi
+  fm_test_reap_fixture_processes "$TMP_ROOT"
   if [ -n "$first_bind_pid" ]; then
     kill -CONT "$first_bind_pid" 2>/dev/null || true
     kill -TERM "$first_bind_pid" 2>/dev/null || true
@@ -393,14 +399,14 @@ terminate_section_lanes() {
     section_child_pid=$(sed -n '1p' "${section_results[$index]}.pid" 2>/dev/null || true)
     case "$section_child_pid" in
       ''|*[!0-9]*) ;;
-      *) terminate_section_lane_child "$section_child_pid" ;;
+      *) terminate_section_lane_child "$section_child_pid" "${section_results[$index]}.root" ;;
     esac
     wait "$section_pid" 2>/dev/null || true
   done
 }
 
 terminate_section_lane_child() {
-  local section_child_pid=$1 cleanup_attempt
+  local section_child_pid=$1 root_file=${2:-} cleanup_attempt lane_root
   kill -TERM "$section_child_pid" 2>/dev/null || true
   for ((cleanup_attempt = 0; cleanup_attempt < 20; cleanup_attempt++)); do
     kill -0 "$section_child_pid" 2>/dev/null || break
@@ -408,6 +414,14 @@ terminate_section_lane_child() {
   done
   kill -0 "$section_child_pid" 2>/dev/null && kill -KILL "$section_child_pid" 2>/dev/null || true
   wait "$section_child_pid" 2>/dev/null || true
+  # A lane killed mid-cleanup leaves its fixture and anything it started.
+  lane_root=$(sed -n '1p' "$root_file" 2>/dev/null || true)
+  if [ -n "$lane_root" ] && [ -d "$lane_root" ]; then
+    fm_test_reap_fixture_processes "$lane_root"
+    # Package fixtures are installed read-only.
+    find "$lane_root" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+    rm -rf -- "$lane_root" 2>/dev/null || true
+  fi
 }
 
 run_extension_section_lane() {
@@ -415,8 +429,8 @@ run_extension_section_lane() {
   # A backgrounded function inherits the aggregate test's cleanup traps.
   # This lane owns only its separately launched child and result publication.
   trap - EXIT HUP INT TERM
-  trap 'if [ -n "$current_section_pid" ]; then terminate_section_lane_child "$current_section_pid"; fi; publish_section_lane_result "$result_file" 143; exit 143' TERM
-  FM_EXTENSION_BINDING_SECTION_CHILD=1 \
+  trap 'if [ -n "$current_section_pid" ]; then terminate_section_lane_child "$current_section_pid" "${result_file}.root"; fi; publish_section_lane_result "$result_file" 143; exit 143' TERM
+  FM_EXTENSION_BINDING_SECTION_CHILD=1 FM_EXTENSION_BINDING_LANE_ROOT_FILE="${result_file}.root" \
     FM_EXTENSION_BINDING_SEGMENT="$section" bash "$0" &
   current_section_pid=$!
   printf '%s\n' "$current_section_pid" > "${result_file}.pid"

@@ -29,6 +29,8 @@ cleanup() {
   local worker_pid='' wait_attempt=0
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \
     "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true
+  # First, because a time-bounded run is killed one second after its TERM.
+  fm_test_signal_processes_under "$TMP_ROOT" TERM 2>/dev/null || true
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
@@ -39,9 +41,20 @@ cleanup() {
       sleep 0.05
     done
   fi
+  # The worker runs in its own process group under a restart supervisor, with
+  # lanes beside it, so the recorded pid alone is not the whole tree: stop
+  # everything still running from this fixture before removing it.
+  fm_test_reap_fixture_processes "$TMP_ROOT"
   rm -rf -- "$TMP_ROOT"
+  fm_test_cleanup
 }
+# A per-script time bound ends a hung run with TERM, which must stop the worker
+# tree as surely as a normal exit; otherwise it serves from the left-over
+# fixture forever.
 trap cleanup EXIT
+trap 'cleanup; trap - EXIT; exit 130' INT
+trap 'cleanup; trap - EXIT; exit 143' TERM
+trap 'cleanup; trap - EXIT; exit 129' HUP
 
 # Materialize the current branch as the remote host's tracked code root. The
 # fixture is a real git repository because provisioning and guarded sync exercise

@@ -236,6 +236,22 @@ fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
   fi
 }
 
+# Every queued row id in one `tasks-axi list --state queued`, one per line, for a
+# sweep that would otherwise run one `tasks-axi show` per task record. Only the
+# first comma-separated field is read (an id slug precedes any quoted title).
+# Fails, so the caller falls back to per-row probes, when the listing errors or
+# its stated count disagrees with the rows it printed.
+fm_backlog_queued_ids() {  # <data-dir>
+  local data out count rows
+  data=$(fm_backlog_data_absolute "$1") || return 1
+  out=$(fm_backlog_row_list "$data" --state queued) || return 1
+  count=$(printf '%s\n' "$out" | LC_ALL=C awk '/^count: [0-9]+$/ { print $2; exit }')
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  rows=$(printf '%s\n' "$out" | LC_ALL=C awk -F, '/^  [A-Za-z0-9._-]+,/ { id = $1; sub(/^ +/, "", id); print id }')
+  [ "$(printf '%s' "$rows" | LC_ALL=C awk 'END { print NR }')" -eq "$count" ] || return 1
+  [ -z "$rows" ] || printf '%s\n' "$rows"
+}
+
 fm_backlog_row_probe() {  # <data-dir> <id>
   local data authorized_data=$1 file id=$2 out state held blocked hold_kind command_status root
   if ! data=$(fm_backlog_data_absolute "$1"); then
@@ -412,13 +428,45 @@ fm_backlog_canonical_existing() {
   ' "$1" 2>/dev/null
 }
 
-fm_backlog_record_parent_authorized() {
-  local path=$1 label=$2 root=$3 parent base parent_resolved expected_path
-  local path_resolved root_resolved home_resolved final_matches=1
-  parent=${path%/*}
-  [ "$parent" != "$path" ] || parent=.
+# Resolve every argument with the same realpath as fm_backlog_canonical_existing,
+# in ONE perl process: FM_BACKLOG_RESOLVED[i] holds the resolved path and
+# FM_BACKLOG_RESOLVED_OK[i] is 1 when argument i resolved. Returns non-zero when
+# the resolver itself could not answer for every argument.
+FM_BACKLOG_RESOLVED=()
+FM_BACKLOG_RESOLVED_OK=()
+fm_backlog_resolve_many() {  # <path>...
+  local i=0 rec
+  FM_BACKLOG_RESOLVED=()
+  FM_BACKLOG_RESOLVED_OK=()
+  [ "$#" -gt 0 ] || return 0
+  while IFS= read -r -d '' rec; do
+    case "$rec" in
+      1*) FM_BACKLOG_RESOLVED[i]=${rec#1}; FM_BACKLOG_RESOLVED_OK[i]=1 ;;
+      *) FM_BACKLOG_RESOLVED[i]=; FM_BACKLOG_RESOLVED_OK[i]=0 ;;
+    esac
+    i=$((i + 1))
+  done < <(LC_ALL=C perl -MCwd=realpath -e '
+    for my $path (@ARGV) {
+      my $resolved = realpath($path);
+      print defined($resolved) ? "1$resolved\0" : "0\0";
+    }
+  ' "$@" 2>/dev/null)
+  [ "$i" -eq "$#" ]
+}
+
+# The authorization decision for one record from already-resolved paths: the
+# authorized root, this home (when the root names a path under FM_HOME), the
+# record's parent, and the record itself. Each *_ok is 1 when that path
+# resolved. fm_backlog_record_parent_authorized and the batched
+# fm_backlog_records_present_all both decide through here, so the rule is
+# stated once.
+_fm_backlog_record_authorized_resolved() {
+  # <path> <label> <root> <root-ok> <root-res> <home-ok> <home-res> <parent-ok> <parent-res> <path-ok> <path-res>
+  local path=$1 label=$2 root=$3 root_ok=$4 root_resolved=$5 home_ok=$6 home_resolved=$7
+  local parent_ok=$8 parent_resolved=$9 path_ok=${10} path_res=${11}
+  local base expected_path path_resolved final_matches=1
   base=${path##*/}
-  root_resolved=$(fm_backlog_canonical_existing "$root") || {
+  [ "$root_ok" = 1 ] || {
     FM_BACKLOG_TRANSITION_ERROR="$label authorized directory cannot be resolved at $root"
     return 1
   }
@@ -429,7 +477,7 @@ fm_backlog_record_parent_authorized() {
   if [ -n "${FM_HOME:-}" ]; then
     case "$root" in
       "$FM_HOME"|"$FM_HOME"/*)
-        home_resolved=$(fm_backlog_canonical_existing "$FM_HOME") || {
+        [ "$home_ok" = 1 ] || {
           FM_BACKLOG_TRANSITION_ERROR="$label home directory cannot be resolved at $FM_HOME"
           return 1
         }
@@ -443,16 +491,17 @@ fm_backlog_record_parent_authorized() {
         ;;
     esac
   fi
-  parent_resolved=$(fm_backlog_canonical_existing "$parent") || {
+  [ "$parent_ok" = 1 ] || {
     FM_BACKLOG_TRANSITION_ERROR="$label parent directory cannot be resolved at $path"
     return 1
   }
   expected_path=${parent_resolved%/}/$base
   if [ -e "$path" ] || [ -L "$path" ]; then
-    path_resolved=$(fm_backlog_canonical_existing "$path") || {
+    [ "$path_ok" = 1 ] || {
       FM_BACKLOG_TRANSITION_ERROR="$label cannot be resolved at $path"
       return 1
     }
+    path_resolved=$path_res
     [ "$path_resolved" = "$expected_path" ] || final_matches=0
   else
     path_resolved=$expected_path
@@ -470,6 +519,25 @@ fm_backlog_record_parent_authorized() {
   fi
 }
 
+_fm_backlog_record_parent() {  # <path> -> _FM_BACKLOG_PARENT
+  _FM_BACKLOG_PARENT=${1%/*}
+  [ "$_FM_BACKLOG_PARENT" != "$1" ] || _FM_BACKLOG_PARENT=.
+}
+
+fm_backlog_record_parent_authorized() {
+  local path=$1 label=$2 root=$3
+  _fm_backlog_record_parent "$path"
+  if ! fm_backlog_resolve_many "$root" "${FM_HOME:-.}" "$_FM_BACKLOG_PARENT" "$path"; then
+    FM_BACKLOG_TRANSITION_ERROR="$label authorized directory cannot be resolved at $root"
+    return 1
+  fi
+  _fm_backlog_record_authorized_resolved "$path" "$label" "$root" \
+    "${FM_BACKLOG_RESOLVED_OK[0]}" "${FM_BACKLOG_RESOLVED[0]}" \
+    "${FM_BACKLOG_RESOLVED_OK[1]}" "${FM_BACKLOG_RESOLVED[1]}" \
+    "${FM_BACKLOG_RESOLVED_OK[2]}" "${FM_BACKLOG_RESOLVED[2]}" \
+    "${FM_BACKLOG_RESOLVED_OK[3]}" "${FM_BACKLOG_RESOLVED[3]}"
+}
+
 fm_backlog_record_present() {
   local path=$1 label=${2:-record} root=$3
   fm_backlog_record_parent_authorized "$path" "$label" "$root" || return 1
@@ -477,6 +545,48 @@ fm_backlog_record_present() {
     FM_BACKLOG_TRANSITION_ERROR="$label is not a regular file at $path"
     return 1
   fi
+  return 0
+}
+
+# fm_backlog_record_present for many records under one root, resolving every
+# path in a single process so a sweep over the whole fleet pays one fork, not
+# several per record. Stops at the first record that fails, naming it in
+# FM_BACKLOG_TRANSITION_ERROR and FM_BACKLOG_RECORD_FAILED, exactly as the
+# per-record check would have reported it.
+FM_BACKLOG_RECORD_FAILED=
+fm_backlog_records_present_all() {  # <label> <root> <path>...
+  local label=$1 root=$2 path i=0 n
+  local -a args=()
+  shift 2
+  FM_BACKLOG_RECORD_FAILED=
+  [ "$#" -gt 0 ] || return 0
+  args=("$root" "${FM_HOME:-.}")
+  for path in "$@"; do
+    _fm_backlog_record_parent "$path"
+    args+=("$_FM_BACKLOG_PARENT" "$path")
+  done
+  if ! fm_backlog_resolve_many "${args[@]}"; then
+    FM_BACKLOG_RECORD_FAILED=$1
+    FM_BACKLOG_TRANSITION_ERROR="$label authorized directory cannot be resolved at $root"
+    return 1
+  fi
+  for path in "$@"; do
+    n=$((2 + 2 * i))
+    i=$((i + 1))
+    if ! _fm_backlog_record_authorized_resolved "$path" "$label" "$root" \
+      "${FM_BACKLOG_RESOLVED_OK[0]}" "${FM_BACKLOG_RESOLVED[0]}" \
+      "${FM_BACKLOG_RESOLVED_OK[1]}" "${FM_BACKLOG_RESOLVED[1]}" \
+      "${FM_BACKLOG_RESOLVED_OK[n]}" "${FM_BACKLOG_RESOLVED[n]}" \
+      "${FM_BACKLOG_RESOLVED_OK[n + 1]}" "${FM_BACKLOG_RESOLVED[n + 1]}"; then
+      FM_BACKLOG_RECORD_FAILED=$path
+      return 1
+    fi
+    if [ ! -f "$path" ]; then
+      FM_BACKLOG_RECORD_FAILED=$path
+      FM_BACKLOG_TRANSITION_ERROR="$label is not a regular file at $path"
+      return 1
+    fi
+  done
   return 0
 }
 

@@ -62,6 +62,8 @@ cleanup() {
     worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
     kill "$worker_pid" 2>/dev/null || true
   fi
+  # The recorded pid is only the serving child; stop the whole fixture tree.
+  fm_test_reap_fixture_processes "$TMP_ROOT"
   rm -rf -- "$TMP_ROOT"
 }
 trap cleanup EXIT
