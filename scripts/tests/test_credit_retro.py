@@ -178,6 +178,14 @@ def write_manifest(tmp: Path, rows) -> str:
     return str(p)
 
 
+def affiliation_v1(users, held=None, age=timedelta(0)):
+    """An org-affiliation/v1 export (H-DevOps credit-trust-exports/org-affiliation)."""
+    return {"schema": "org-affiliation/v1",
+            "generated_at": (datetime.now(timezone.utc) - age).isoformat().replace("+00:00", "Z"),
+            "registry_version": "test", "sources": {}, "counts": {},
+            "users": {u: dict({"coverage": "full"}, **v) for u, v in users.items()}, "held": held or {}}
+
+
 def live_sources(tmp: Path, *, proof_entries=(), age=timedelta(0), stale_source=False, affiliation=None,
                  tagged=(), affiliation_file=True, sources=None, extra=None):
     """Write the live exclusion sources (credit-trust proof-on-file + org-affiliation, Caroline's
@@ -197,9 +205,9 @@ def live_sources(tmp: Path, *, proof_entries=(), age=timedelta(0), stale_source=
         **(extra or {})}))
     aff = tmp / "org-affiliation.json"
     if affiliation_file:
-        aff.write_text(json.dumps(affiliation if affiliation is not None else
-                                  {UID: {"verdict": "none", "evidence": []},
-                                   "161128": {"verdict": "none", "evidence": []}}))
+        aff.write_text(json.dumps(affiliation_v1(affiliation if affiliation is not None else
+                                                 {UID: {"verdict": "none", "evidence": []},
+                                                  "161128": {"verdict": "none", "evidence": []}})))
     db_path = tmp / "verify.sqlite3"
     db = sqlite3.connect(db_path)
     db.execute("CREATE TABLE IF NOT EXISTS verify_messages (campaign TEXT, kind TEXT, status TEXT, user_key TEXT, "
@@ -1787,6 +1795,53 @@ class LiveExclusionTests(unittest.TestCase):
             malformed = live_sources(self.dir / "aff", affiliation={UID: {"verdict": verdict, "evidence": []}})
             self.assertEqual(malformed.unavailable, "affiliation_source_unavailable")
 
+    def test_org_affiliation_v1_consumer_rule(self):
+        # H-DevOps credit-trust-exports/org-affiliation README: absent, held, or a file older
+        # than 2 h = UNKNOWN = held; per-row removal allowed on none / claimed_unverified
+        api = FakeApi()
+        plan_id, _ = self.plan(api, OPEN)
+        d = self.dir / "v1"
+        d.mkdir()
+
+        def excl(doc):
+            live_sources(d)  # proof-on-file, send ledger
+            (d / "org-affiliation.json").write_text(json.dumps(doc))
+            return takeback.load_exclusions(proof_on_file=str(d / "proof-on-file.json"),
+                                            org_affiliation=str(d / "org-affiliation.json"),
+                                            verify_db=str(d / "verify.sqlite3"))
+        held = excl(affiliation_v1({UID: {"verdict": "none", "evidence": []}},
+                                   held={UID: {"reason": "catalog_unread"}}))
+        self.assertEqual(self.plan(api, held)[1], {"skip:affiliation_unknown": 1})
+        self.assertEqual(self.apply(api, plan_id, held)[1], {"withheld:affiliation_unknown": 1, "withheld_sets": 1})
+        absent = excl(affiliation_v1({"161128": {"verdict": "none", "evidence": []}}))
+        self.assertEqual(self.plan(api, absent)[1], {"skip:affiliation_unknown": 1})
+        for bad in (affiliation_v1({UID: {"verdict": "none", "evidence": []}}, age=timedelta(hours=2, minutes=1)),
+                    affiliation_v1({UID: {"verdict": "none", "evidence": []}}, age=-timedelta(hours=1)),
+                    {UID: {"verdict": "none", "evidence": []}},                           # the pre-v1 flat shape
+                    dict(affiliation_v1({}), schema="org-affiliation/v2"),
+                    dict(affiliation_v1({}), held=["x"]),
+                    dict(affiliation_v1({}), users={UID: "none"})):
+            e = excl(bad)
+            self.assertEqual(e.unavailable, "affiliation_source_unavailable", bad)
+            with self.assertRaises(SystemExit):
+                self.apply(api, plan_id, e)
+        # a verdict not checked on full coverage is not proof of no affiliation: the user is held
+        for partial in ({"verdict": "none", "coverage": "labels_only", "evidence": []},
+                        {"verdict": "claimed_unverified", "coverage": "labels_only", "evidence": []}):
+            e = excl(affiliation_v1({UID: partial}))
+            self.assertEqual(self.plan(api, e)[1], {"skip:affiliation_partial": 1}, partial)
+            self.assertEqual(self.apply(api, plan_id, e)[1],
+                             {"withheld:affiliation_partial": 1, "withheld_sets": 1}, partial)
+        no_coverage = affiliation_v1({UID: {"verdict": "none", "evidence": []}})
+        del no_coverage["users"][UID]["coverage"]
+        self.assertEqual(self.plan(api, excl(no_coverage))[1], {"skip:affiliation_partial": 1})
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
+        self.assertEqual(api.sender.sent, [])
+        # a fresh export with verdict none on full coverage lets the per-row removal go
+        ok = excl(affiliation_v1({UID: {"verdict": "none", "coverage": "full", "evidence": []}},
+                                 age=timedelta(hours=1, minutes=59)))
+        self.assertEqual(self.plan(api, ok)[1], {"would_remove": 1})
+
     def test_affiliated_user_is_skipped_and_listed_for_human_review(self):
         api = FakeApi()
         evidence = [{"org": "Sony Music Publishing", "source": "pro-registry"}]
@@ -1797,6 +1852,7 @@ class LiveExclusionTests(unittest.TestCase):
         rep = takeback.report(self.ledger, plan_id)
         self.assertEqual(rep["needs_human_review"], [{"row_id": f"{RID}:Mixing", "user_id": UID, "role": "Mixing",
                                                       "track_id": TID, "affiliation": {"verdict": "verified_org",
+                                                                                       "coverage": "full",
                                                                                        "evidence": evidence}}])
         claimed = live_sources(self.dir / "c", affiliation={UID: {"verdict": "claimed_unverified", "evidence": []}})
         plan2, counts2 = self.plan(api, claimed)

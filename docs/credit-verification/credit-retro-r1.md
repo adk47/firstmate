@@ -70,7 +70,7 @@ reference and the URL; the set's `reason` on the server carries every pair's URL
 | Spotify/Tidal/MLC/Jaxsta credit the role to someone else and NOT to the claimant. The claimant is matched by raw-profile link, name, known-as names or legal name (`credit_review.evidence.classify_roles`) | `not_contradicted_live:CONFIRMED` / `:UNVERIFIABLE` |
 | A person named in the checked evidence (`evidence.names`) is still among those trusted holders | `evidence_holder_changed` |
 | `trusted_dsp_only` only: a named person is still a live holder in EVERY cited source (Spotify/Tidal; the notice names each one and links the URL's), not only in Jaxsta/MLC or in just one of them | `dsp_holder_vanished` |
-| **Last, only for a row that passed every gate above and would be removed (firstmate 021).** Org affiliation (credit-trust `org-affiliation.json`, captain 2026-10-16 ~18:36Z: "make sure these guys you remove credits or ban are not part of any major label or publisher too"): `contributor`, `verified_org` or `authenticated_domain` is human review + a polite contact, never automatic; `claimed_unverified` and `none` are allowed and shown in the plan's `affiliation=` column; a user with no verdict is skipped. A row that failed an earlier gate keeps that reason and is never in `needs_human_review` | `org_affiliated` (listed under `needs_human_review` by `plan` and `report`), `affiliation_unknown` |
+| **Last, only for a row that passed every gate above and would be removed (firstmate 021).** Org affiliation (credit-trust `org-affiliation.json`, captain 2026-10-16 ~18:36Z: "make sure these guys you remove credits or ban are not part of any major label or publisher too"): `contributor`, `verified_org` or `authenticated_domain` is human review + a polite contact, never automatic; `claimed_unverified` and `none` are allowed only with `coverage: full` and shown in the plan's `affiliation=` column; a user with no verdict is skipped, and so is one whose coverage is not `full`. A row that failed an earlier gate keeps that reason and is never in `needs_human_review` | `org_affiliated` (listed under `needs_human_review` by `plan` and `report`), `affiliation_unknown`, `affiliation_partial` |
 | The user's take-back notice would go out today (see the notice section) | `notice_would_defer` |
 
 Any skip is recorded with its reason and is never retried around. Those roles join the
@@ -274,11 +274,27 @@ a user who sends a document after a deferred day keeps the role.
   everyone: a snapshot of who emailed support@ cannot cover mail sent after it.
 - proof-on-file, the send ledger or the doc manifest malformed (wrong shape): same as
   unreadable.
-- org-affiliation missing, unreadable or malformed: every row
-  `affiliation_source_unavailable`, and `apply` refuses before any execute.
-- A single user with no verdict does NOT stop the run (firstmate 021): `plan` skips that
-  user's would-be-removed rows as `affiliation_unknown`, and `apply` withholds that user's
-  whole set, so nothing of theirs is removed, and every other user's set goes ahead.
+- org-affiliation is the credit-trust export, schema `org-affiliation/v1` (H-DevOps
+  `scripts/credit-trust-exports/org-affiliation/README.md`, published hourly at :23):
+  `users{id: {verdict, coverage, evidence[]}}` and `held{id: {reason}}`. Its consumer rule
+  applies here:
+  - file missing, unreadable, not `org-affiliation/v1`, malformed, `generated_at` older than
+    2 hours or more than 5 minutes in the future: every row `affiliation_source_unavailable`,
+    and `apply` refuses before any execute;
+  - a user absent from `users`, or listed in `held`, is UNKNOWN: that does NOT stop the run
+    (firstmate 021), `plan` skips the user's would-be-removed rows as `affiliation_unknown`
+    and `apply` withholds the user's whole set; every other user's set goes ahead;
+  - a per-row take-back is allowed only on `coverage: full` with `none` or
+    `claimed_unverified`. Any other coverage (`labels_only`, or missing) means the user's
+    publisher / major-label links were not all checked, so `none` there is not proof of no
+    affiliation: `plan` skips the user's would-be-removed rows as `affiliation_partial` and
+    `apply` withholds the user's whole set (it does not stop the run). The plan records
+    `coverage`. The priority input below is what gives the take-back users full coverage.
+- **Priority input:** before staging, write the users about to be acted on to node-8
+  `/var/lib/credit-trust/inputs/org-affiliation-priority-credit-retro-exec-r1.json` as
+  `{"user_ids": [...]}`, so the next hourly export checks them fully (every row and the login
+  profile, `coverage: full`). On 2026-10-18 it holds the four take-back users
+  (150514, 161128, 182594, 197122).
 - Every skip is in the ledger with its reason; no email is written there.
 
 ## Ledger

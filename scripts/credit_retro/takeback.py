@@ -36,10 +36,11 @@ The gate also reads the LIVE exclusion sources, loaded fresh by every plan and a
 of the above: proof on file (credit-trust ``proof-on-file.json``), proof-tagged notes in
 Caroline's send ledger and the committed doc-submitted manifest. Last, only for a row that
 passed everything else and would be removed: org affiliation (credit-trust
-``org-affiliation.json``): no verdict skips the row, and an affiliated user is human
-review + a polite contact, never automatic. If a source cannot be read or is stale,
-nothing is removed that run (which proof-on-file parts must be usable:
-credit_review/proof_parts.py).
+``org-affiliation.json``, schema org-affiliation/v1): absent or held users skip the row, a
+user whose coverage is not ``full`` skips it too, a file older than 2 h removes nothing,
+and an affiliated user is human review + a polite contact, never automatic. If a source
+cannot be read or is stale, nothing is removed that run (which proof-on-file parts must be
+usable: credit_review/proof_parts.py).
 
 A row that fails any gate is SKIPPED with the reason, recorded, and left for
 the verify waves. Nothing is retried around a gate.
@@ -228,6 +229,8 @@ CLOCK_SKEW = timedelta(minutes=5)  # a generated_at later than now + this is not
 AFFILIATION_VERDICTS = frozenset({"none", "claimed_unverified", "contributor", "verified_org",
                                   "authenticated_domain"})
 AFFILIATED = frozenset({"contributor", "verified_org", "authenticated_domain"})
+AFFILIATION_SCHEMA = "org-affiliation/v1"
+AFFILIATION_MAX_AGE = timedelta(hours=2)  # export README consumer rule: older than 2 h = UNKNOWN for everyone
 
 
 @dataclass
@@ -243,17 +246,18 @@ class Exclusions:
     doc_users: set[str] = field(default_factory=set)
     human_approved: set[str] = field(default_factory=set)
     affiliation: dict[str, dict[str, Any]] = field(default_factory=dict)
+    affiliation_held: dict[str, str] = field(default_factory=dict)
 
 
-def require_fresh(generated_at: Any, now: datetime) -> None:
-    """Raise ValueError unless ``generated_at`` is a timezone-aware time at most PROOF_MAX_AGE
+def require_fresh(generated_at: Any, now: datetime, max_age: timedelta = PROOF_MAX_AGE) -> None:
+    """Raise ValueError unless ``generated_at`` is a timezone-aware time at most ``max_age``
     before ``now`` and no more than CLOCK_SKEW after it (a future stamp would otherwise stay
     "fresh" indefinitely while the data under it goes stale)."""
     generated = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
     if generated.tzinfo is None:
         raise ValueError(f"generated_at {generated_at} has no timezone")
-    if now - generated > PROOF_MAX_AGE:
-        raise ValueError(f"generated_at {generated_at} is older than {PROOF_MAX_AGE}")
+    if now - generated > max_age:
+        raise ValueError(f"generated_at {generated_at} is older than {max_age}")
     if generated - now > CLOCK_SKEW:
         raise ValueError(f"generated_at {generated_at} is in the future (more than {CLOCK_SKEW} ahead)")
 
@@ -280,15 +284,24 @@ def _read_proof_on_file(path: str, now: datetime) -> tuple[dict[str, str], dict[
     return by_request, by_user
 
 
-def _read_affiliation(path: str) -> dict[str, dict[str, Any]]:
+def _read_affiliation(path: str, now: datetime) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """(user_id -> {verdict, coverage, evidence}, user_id -> held reason) from the credit-trust
+    export, schema ``org-affiliation/v1`` (H-DevOps scripts/credit-trust-exports/org-affiliation).
+    Consumer rule there: a file older than 2 h is UNKNOWN for everyone, so it raises (nothing is
+    removed that run); a user absent from ``users`` or present in ``held`` is UNKNOWN = held."""
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
-    if not isinstance(doc, dict):
-        raise ValueError("not a user_id -> verdict object")
-    for uid, v in doc.items():
+    if not isinstance(doc, dict) or doc.get("schema") != AFFILIATION_SCHEMA:
+        raise ValueError(f"not an {AFFILIATION_SCHEMA} export")
+    require_fresh(doc["generated_at"], now, AFFILIATION_MAX_AGE)
+    users, held = doc["users"], doc.get("held") or {}
+    if not isinstance(users, dict) or not isinstance(held, dict):
+        raise ValueError("users / held are not objects")
+    for uid, v in users.items():
         if not isinstance(v, dict) or v.get("verdict") not in AFFILIATION_VERDICTS:
             raise ValueError(f"user {uid}: no valid verdict")
-    return {str(uid): v for uid, v in doc.items()}
+    return ({str(uid): v for uid, v in users.items()},
+            {str(uid): str((v or {}).get("reason") if isinstance(v, dict) else v) for uid, v in held.items()})
 
 
 def load_exclusions(*, proof_on_file: str = PROOF_ON_FILE, org_affiliation: str = ORG_AFFILIATION,
@@ -308,12 +321,12 @@ def load_exclusions(*, proof_on_file: str = PROOF_ON_FILE, org_affiliation: str 
     except (SystemExit, OSError, ValueError, KeyError, TypeError, AttributeError, sqlite3.Error) as exc:
         return Exclusions("proof_source_unavailable", str(exc))
     try:
-        affiliation = _read_affiliation(org_affiliation)
-    except (OSError, ValueError, TypeError) as exc:
+        affiliation, affiliation_held = _read_affiliation(org_affiliation, now)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         return Exclusions("affiliation_source_unavailable", str(exc))
     tagged_requests, tagged_accounts, _ = engaged
     return Exclusions(None, "", proof_requests, proof_users, tagged_requests, tagged_accounts,
-                      doc_users, human_approved, affiliation)
+                      doc_users, human_approved, affiliation, affiliation_held)
 
 
 def _excluded_live(excl: Exclusions, row: dict[str, Any], before: dict[str, Any]) -> str | None:
@@ -335,13 +348,22 @@ def _excluded_live(excl: Exclusions, row: dict[str, Any], before: dict[str, Any]
 
 
 def _affiliation_hold(excl: Exclusions, row: dict[str, Any], before: dict[str, Any]) -> str | None:
-    """For a row that passed every other gate: no verdict, or an affiliated user (human review +
-    a polite contact, never automatic), holds it."""
-    aff = excl.affiliation.get(str(row["user_id"]))
+    """For a row that passed every other gate: no verdict (absent from the export, or held by it),
+    an affiliated user (human review + a polite contact, never automatic), or a verdict not
+    checked on full coverage (``affiliation_partial``) holds it. A per-row removal is allowed
+    only on ``coverage: full`` with ``none`` or ``claimed_unverified``."""
+    uid = str(row["user_id"])
+    if uid in excl.affiliation_held:
+        before["affiliation"] = {"held": excl.affiliation_held[uid]}
+        return "affiliation_unknown"
+    aff = excl.affiliation.get(uid)
     if aff is None:
         return "affiliation_unknown"
-    before["affiliation"] = {"verdict": aff["verdict"], "evidence": aff.get("evidence") or []}
-    return "org_affiliated" if aff["verdict"] in AFFILIATED else None
+    before["affiliation"] = {"verdict": aff["verdict"], "coverage": aff.get("coverage"),
+                             "evidence": aff.get("evidence") or []}
+    if aff["verdict"] in AFFILIATED:
+        return "org_affiliated"
+    return None if aff.get("coverage") == "full" else "affiliation_partial"
 
 
 # -- gate --------------------------------------------------------------------
