@@ -1712,6 +1712,60 @@ def user_req(rid, uid, *, pid=PID, track=None, created="2026-10-15T20:00:00Z"):
     return r
 
 
+class AffiliationV1Tests(unittest.TestCase):
+    """org-affiliation/v1 (cmux-credit-system-lane, firstmate 054): absent, held, a partial
+    check or a file older than 2h = UNKNOWN = held."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.path = os.path.join(self.tmp, "aff.json")
+
+    def write(self, users=None, held=None, age_h=0.1, schema="org-affiliation/v1"):
+        gen = (datetime.now(timezone.utc) - timedelta(hours=age_h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        Path(self.path).write_text(json.dumps({"schema": schema, "generated_at": gen, "users": users or {},
+                                               "held": held or {}}))
+
+    def test_per_user_rule(self):
+        from credit_review import affiliation
+        self.write({"1": {"verdict": "none", "coverage": "full", "evidence": []},
+                    "2": {"verdict": "none", "coverage": "labels_only", "evidence": []},
+                    "3": {"verdict": "contributor", "coverage": "full", "evidence": []},
+                    "4": {"verdict": "claimed_unverified", "coverage": "full", "evidence": []}},
+                   held={"5": {"reason": "catalog read failed"}})
+        v = affiliation.read(self.path)
+        got = {u: affiliation.hold_reason(v, u) for u in ("1", "2", "3", "4", "5", "6")}
+        self.assertEqual(got, {"1": None, "2": "affiliation_partial_check", "3": "org_affiliated", "4": None,
+                               "5": "affiliation_held", "6": "affiliation_unknown"})
+
+    def test_an_untrustworthy_file_is_unknown_for_everyone(self):
+        from credit_review import affiliation
+        for kw in ({"age_h": 2.5}, {"age_h": -1}, {"schema": "org-affiliation/v2"},
+                   {"users": {"1": {"verdict": "maybe", "coverage": "full"}}}):
+            with self.subTest(kw):
+                self.write(**kw)
+                with self.assertRaises(ValueError):
+                    affiliation.read(self.path)
+
+    def test_the_decider_asks_for_a_full_check_of_the_next_recipients(self):
+        led = os.path.join(self.tmp, "ledger.sqlite3")
+        decisions_db(led, [dec("p1"), dec("p2", outcome="error:x")])
+        db = verify_ledger.connect(led)
+        try:
+            path, n = verify_notify.write_affiliation_priority(db, directory=self.tmp)
+        finally:
+            db.close()
+        self.assertEqual((n, json.loads(Path(path).read_text())["user_ids"]), (1, [42]))
+        self.assertTrue(path.endswith("org-affiliation-priority-credit-trust-llm-t01.json"))
+
+    def test_priority_file_is_written_atomically(self):
+        from credit_review import affiliation
+        out = affiliation.write_priority("lane-x", [5, "3", "x", 5], source="t", directory=self.tmp)
+        doc = json.loads(Path(out).read_text())
+        self.assertEqual((os.path.basename(out), doc["user_ids"], doc["source"]),
+                         ("org-affiliation-priority-lane-x.json", [3, 5], "t"))
+
+
 class EnableGateTests(unittest.TestCase):
     """Fable 2026-10-17, decision-verify-notify-enable: the gates before the first live send."""
 

@@ -685,6 +685,26 @@ def send_followups(db: sqlite3.Connection, admin: admin_api.Admin, report: Repor
     return attempted
 
 
+AFFILIATION_LANE = "credit-trust-llm-t01"
+
+
+def write_affiliation_priority(db: sqlite3.Connection, *, directory: str | None = None) -> tuple[str, int]:
+    """Ask the org-affiliation producer for a FULL check of everyone the next verify-notify
+    run may write to: the account users of every candidate credit (decider-approved and not
+    yet notified, plus held-back ones), from the decider's decisions.user_id. Called after
+    every decider apply run, so the hourly producer has them well before 09:00 Rome.
+    Returns (path, number of users)."""
+    rids = [rid for rid, _, _ in candidates(db, since_hours=None)]
+    uids: set[int] = set()
+    for i in range(0, len(rids), 500):
+        part = rids[i:i + 500]
+        q = f"SELECT DISTINCT user_id FROM decisions WHERE user_id IS NOT NULL AND request_id IN ({','.join('?' * len(part))})"
+        uids |= {int(u) for (u,) in db.execute(q, part)}
+    path = affiliation.write_priority(AFFILIATION_LANE, uids, directory=directory,
+                                      source="credit-trust-llm-t01: verify-notify candidates (decider-approved, not yet noted)")
+    return path, len(uids)
+
+
 def _ref(req: dict[str, Any]) -> tuple[str, str, str]:
     return (str(req.get("id")), str(req.get("profileId") or ""), str(req.get("trackId") or ""))
 

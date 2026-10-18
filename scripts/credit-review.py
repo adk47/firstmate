@@ -297,6 +297,21 @@ def cmd_decide(args: argparse.Namespace) -> int:
     res = decide.run(admin_api.AdminClient(), ledger.db, judge, mode=args.mode, policy=policy,
                      max_model_calls=args.max_model_calls, workers=args.workers, budget_s=args.budget_s)
     log("decide " + res.line())
+    prod_ledger = "/var/lib/hydra/credit-review/ledger.sqlite3"
+    if res.mode == "apply" and os.path.realpath(args.ledger or prod_ledger) == prod_ledger:
+        # Best effort: ask for a full org-affiliation check of the next verify-notify
+        # recipients (firstmate 054). Production ledger only (a test run on node-8 must
+        # never overwrite the live input). A failure never fails the decider run.
+        try:
+            from credit_review import verify_ledger, verify_notify
+            vdb = verify_ledger.connect(prod_ledger)
+            try:
+                path, n = verify_notify.write_affiliation_priority(vdb)
+            finally:
+                vdb.close()
+            log(f"decide: org-affiliation priority list {path}: {n} user(s)")
+        except Exception as exc:  # noqa: BLE001 - never fail the decider for this
+            log(f"decide: org-affiliation priority list not written: {exc}"[:300])
     if res.write_errors:
         print(res.line())
         return 1
