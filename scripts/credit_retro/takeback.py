@@ -334,7 +334,7 @@ def _affiliation_hold(excl: Exclusions, row: dict[str, Any], before: dict[str, A
         before["affiliation"] = {"verdict": aff.get("verdict"), "evidence": aff.get("evidence") or []}
     # The shared rule (credit_review.affiliation): no verdict, held, a partial check or an
     # affiliated verdict all hold the row for a human.
-    return affiliation.hold_reason(excl.affiliation, row["user_id"])
+    return affiliation.hold_reason(excl.affiliation, row["user_id"], affiliation.ACTION_TRUSTED_REMOVAL)
 
 
 # -- gate --------------------------------------------------------------------

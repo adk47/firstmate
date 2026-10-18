@@ -13,8 +13,9 @@ The producer's rule, applied here: absent, held, or a file older than 2h = UNKNO
 A file that cannot be read, is not v1, is stale or dated in the future, or has any entry
 without a known verdict raises ValueError: the caller sends or removes nothing at all.
 Per user, nothing automatic happens unless the user has a verdict, is not held, was checked
-with coverage ``full`` (all rows + login profile; ``labels_only`` is a partial check), and is
-not AFFILIATED; otherwise a human looks and uses the polite-contact variant. A sender asks
+with coverage ``full`` (all rows + login profile; ``labels_only`` is a partial check), and the
+verdict allows the action (ALLOWED: a note needs ``none``; a trusted-contradicted removal also
+accepts ``claimed_unverified``); otherwise a human looks and uses the polite-contact variant. A sender asks
 for full coverage of the users it is about to act on by writing their ids to
 ``/var/lib/credit-trust/inputs/org-affiliation-priority-<lane>.json`` (``write_priority``).
 
@@ -87,8 +88,19 @@ def read(path: str | None = None, *, now: datetime | None = None) -> dict[str, d
     return out
 
 
-def hold_reason(verdicts: dict[str, dict[str, Any]], user_id: Any) -> str | None:
-    """Why this user must not be actioned automatically, or None."""
+# The producer's consumer table (cmux-credit-system-lane README, firstmate 055): which
+# verdicts allow which automatic action. Anything else is human review (+ polite contact).
+#   none                everything automatic
+#   claimed_unverified  ONLY per-row trusted-contradicted removals (the take-back gate)
+#   affiliated          nothing automatic
+ACTION_NOTE = "note"                      # verify-notify: any automatic user message
+ACTION_TRUSTED_REMOVAL = "trusted_removal"  # credit-retro take-back of a trusted-contradicted row
+ALLOWED = {ACTION_NOTE: frozenset({"none"}),
+           ACTION_TRUSTED_REMOVAL: frozenset({"none", "claimed_unverified"})}
+
+
+def hold_reason(verdicts: dict[str, dict[str, Any]], user_id: Any, action: str = ACTION_NOTE) -> str | None:
+    """Why this user must not get `action` automatically, or None."""
     v = verdicts.get(str(user_id).strip())
     if v is None:
         return "affiliation_unknown"
@@ -96,7 +108,9 @@ def hold_reason(verdicts: dict[str, dict[str, Any]], user_id: Any) -> str | None
         return "affiliation_held"
     if v.get("coverage") != FULL:
         return "affiliation_partial_check"
-    return "org_affiliated" if v["verdict"] in AFFILIATED else None
+    if v["verdict"] in AFFILIATED:
+        return "org_affiliated"
+    return None if v["verdict"] in ALLOWED[action] else f"affiliation_{v['verdict']}"
 
 
 def write_priority(lane: str, user_ids: Iterable[Any], *, source: str, directory: str | None = None) -> str:

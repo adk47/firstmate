@@ -1735,8 +1735,12 @@ class AffiliationV1Tests(unittest.TestCase):
                    held={"5": {"reason": "catalog read failed"}})
         v = affiliation.read(self.path)
         got = {u: affiliation.hold_reason(v, u) for u in ("1", "2", "3", "4", "5", "6")}
-        self.assertEqual(got, {"1": None, "2": "affiliation_partial_check", "3": "org_affiliated", "4": None,
-                               "5": "affiliation_held", "6": "affiliation_unknown"})
+        self.assertEqual(got, {"1": None, "2": "affiliation_partial_check", "3": "org_affiliated",
+                               "4": "affiliation_claimed_unverified", "5": "affiliation_held",
+                               "6": "affiliation_unknown"})
+        # claimed_unverified allows only a trusted-contradicted removal (producer README, firstmate 055).
+        self.assertIsNone(affiliation.hold_reason(v, "4", affiliation.ACTION_TRUSTED_REMOVAL))
+        self.assertEqual(affiliation.hold_reason(v, "3", affiliation.ACTION_TRUSTED_REMOVAL), "org_affiliated")
 
     def test_an_untrustworthy_file_is_unknown_for_everyone(self):
         from credit_review import affiliation

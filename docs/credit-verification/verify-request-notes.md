@@ -313,7 +313,7 @@ daily line.
 |---|---|---|
 | Proof on file from any source (Intercom, support@ Gmail, core): no note at all | `/var/lib/credit-trust/proof-on-file.json`, through `credit_review.proof_parts` | no sends |
 | Emailed support@ in the last 90 days | the same file's `gmail_contacts_90d` (`proof_parts.support_contacts`, the decider's reader) | no sends |
-| Org affiliation (RULE-org-affiliation, schema `org-affiliation/v1` from cmux-credit-system-lane): no verdict, `held`, coverage other than `full`, or `contributor` / `verified_org` / `authenticated_domain` | `/var/lib/credit-trust/org-affiliation.json` (`credit_review.affiliation`, shared with the take-back gate); older than 2h or dated in the future = unknown for everyone | no sends |
+| Org affiliation (RULE-org-affiliation, schema `org-affiliation/v1` from cmux-credit-system-lane): a note needs verdict `none` with coverage `full`; no verdict, `held`, `labels_only`, `claimed_unverified` (automatic only for trusted-contradicted removals) or `contributor` / `verified_org` / `authenticated_domain` = human | `/var/lib/credit-trust/org-affiliation.json` (`credit_review.affiliation`, shared with the take-back gate); older than 2h or dated in the future = unknown for everyone | no sends |
 | One ask per user per 90 days across verify-live and retro-past | verify ledger (`verify_ledger.asked_within`, checked in the run and again at the claim) | n/a |
 
 Cadence: once a day at 09:00 Europe/Rome, paying users first, at most 200 messages a day for
