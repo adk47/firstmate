@@ -660,6 +660,42 @@ No single call may exceed a fixed 5-second cap, nor a quarter of what is left of
 None of those bounds is tunable: an override could only weaken the bound it exists to enforce.
 `quota-axi` needs its one-time Keychain approval (run `quota-axi --allow-keychain-prompt` once by hand); the monitor itself reads strictly, with `--no-credential-refresh`, and never prompts.
 
+## Fleet stall watch (config/fleet-stall.env)
+
+[`bin/fm-fleet-stall-check.sh`](../bin/fm-fleet-stall-check.sh) is a registered watcher check that wakes firstmate when several live workers stall on the model gateway at the same time, and pages the captain when the stall persists.
+It exists because a gateway outage is a fleet event: on 2026-10-18 fifteen workers sat stopped for five hours on an expired gateway credential while every per-worker signal treated each one as that worker's own business.
+Its header owns the exact stall rules, the gateway probe, and the record format; this section owns the configuration and the operator contract.
+
+A live worker is stalled when its pane shows an upstream or gateway error line that holds across two polls, or when it reads busy while neither its token counter nor its pane has moved for the no-progress interval.
+An episode opens when at least the minimum number of live workers are stalled at once: the check prints one line naming every stalled worker, its reason, and the gateway's own condition, reminds while the episode holds, pages the captain once the episode has held the page interval, and prints a recovered line when it ends.
+The same poll probes the local CLIProxyAPI gateway read-only and reports, on onset and on clearing, a gateway that does not answer, an enabled account whose access token expires within the window without refreshing, and a high 5xx-or-401 error rate in its log.
+A home with no gateway inventory and nothing answering at the gateway URL runs no CLIProxyAPI, and that is not a condition.
+
+`config/fleet-stall.env` is optional, local, gitignored, and not inherited by secondmate homes.
+It holds `KEY=value` lines, it is parsed rather than sourced, and a set environment variable of the same name wins.
+
+```sh
+FM_FLEET_STALL_MIN_WORKERS=3            # stalled live workers that open an episode
+FM_FLEET_STALL_NO_PROGRESS_SECS=900     # busy without token or pane movement this long is a stall
+FM_FLEET_STALL_PAGE_AFTER_SECS=900      # an episode this old pages the captain, once
+FM_FLEET_STALL_REMIND_SECS=1800         # reminder interval while an episode holds
+FM_FLEET_STALL_PAGE_CMD=                # shell command given the page text as $1 and on stdin, bounded at 20s
+FM_FLEET_STALL_PROXY=on                 # off disables the gateway probe
+FM_FLEET_STALL_PROXY_URL=http://127.0.0.1:8317
+FM_FLEET_STALL_PROXY_AUTH_DIR=~/.cli-proxy-api
+FM_FLEET_STALL_PROXY_LOG=~/.cli-proxy-api/logs/main.log
+FM_FLEET_STALL_EXPIRY_WINDOW_SECS=1800  # how close to expiry an account must be to be watched
+FM_FLEET_STALL_REFRESH_GRACE_SECS=900   # time an account may sit in that window unrefreshed
+FM_FLEET_STALL_ERROR_WINDOW_SECS=300    # gateway log window for the error rate
+FM_FLEET_STALL_ERROR_MIN=30             # error count that can raise the error-rate condition
+FM_FLEET_STALL_ERROR_RATE_PCT=50        # error percentage that raises it
+FM_FLEET_STALL_CAPTURE_JOBS=16          # pane captures run at once
+```
+
+The page always posts a macOS notification, and `FM_FLEET_STALL_PAGE_CMD` is how it reaches the captain's phone, for example a Slack bot DM; with no page command configured the onset line says so.
+Arm the check once per home with `bin/fm-fleet-stall-check.sh arm`, which writes `state/fleet-stall.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
+`bin/fm-fleet-stall-check.sh status` prints the last recorded verdict, and `bin/fm-fleet-stall-check.sh disarm` removes the shim, its trust binding, and `state/.fleet-stall.json`.
+
 ## Sentry watch (config/sentry-watch.json)
 
 [`bin/fm-sentry-watch.sh`](../bin/fm-sentry-watch.sh) is the one firstmate-owned Sentry watch for the organization, and it replaces the per-lane scratch checks that used to live in `state/`.
