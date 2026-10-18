@@ -110,6 +110,46 @@ class Keywords(unittest.TestCase):
         for text in ("my legal name is shown", "please delete this track credit", "I need my data to update"):
             self.assertIsNone(wd.matches(self.conv(body=text), self.kw), text)
 
+    def test_profile_removal_requests_hit(self):
+        # 2026-10-18: "request to have the account removed" (an artist objecting to his
+        # auto-created profile) was not caught by the first keyword set.
+        for text in ("I'm against AI and request to have the account removed as I did not make it",
+                     "Could you please remove my profile from your website",
+                     "please delete my artist profile", "I request removal of my information",
+                     "remove my profile", "remove my profile from your platform",
+                     "Please delete my personal data from your records",
+                     "Please remove my information from your record label database",
+                     "please delete my personal data from your record company files",
+                     "Please delete my account from Muso and my credits too",
+                     "I want my account deleted", "please take my profile down",
+                     "Please remove my information from the record label database",
+                     "please delete my account, you merged me with another artist without consent"):
+            self.assertIsNotNone(wd.matches(self.conv(body=text), self.kw), text)
+
+    def test_html_paragraph_boundaries_do_not_fuse_words(self):
+        for body in ("<p>Hi,</p><p>Please remove my profile</p><p>Thanks</p>",
+                     "<p>I request to have the account removed</p><p>Regards</p>",
+                     "Please delete my account<br>Thanks",
+                     "<p>please remove&nbsp;my&nbsp;profile</p>"):
+            self.assertIsNotNone(wd.matches(self.conv(body=body), self.kw), body)
+        self.assertIsNotNone(wd.matches(self.conv(subject="<b>GDPR</b>request"), self.kw))
+
+    def test_merge_and_credit_removals_miss(self):
+        for text in ("can you remove this duplicate profile", "please remove the old account and merge",
+                     "remove the credit from my profile", "how do I add my account to a team",
+                     "Please remove my profile from the credits of this album",
+                     "remove my info from this track", "remove my profile from this song",
+                     "there's a duplicate of my artist page, can I have the page removed and merged into mine?",
+                     "please remove my profile and merge it with my other one",
+                     "Please remove my profile from these tracks", "remove my profile from all my songs",
+                     "remove my profile from my credits", "remove my profile from a song",
+                     "remove my info from those releases", "remove my profile off of this track",
+                     "remove my account from this EP", "remove my profile from one of my tracks",
+                     "remove my info from their album credits",
+                     "I want my profile removed from this track",
+                     "please take my page down and merge it into mine"):
+            self.assertIsNone(wd.matches(self.conv(body=text), self.kw), text)
+
     def test_outbound_never_matches(self):
         self.assertIsNone(wd.matches(self.conv(body="GDPR", author="admin"), self.kw))
 

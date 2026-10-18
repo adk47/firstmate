@@ -53,11 +53,13 @@ Usage:
       # --dry-run --at ignores the ledger (fresh 45-day scan as of that instant)
 """
 import argparse
+import html
 import http.client
 import importlib.util
 import json
 import os
 import pathlib
+import re
 import sys
 import time
 import urllib.error
@@ -103,6 +105,15 @@ def load_keywords():
     return rh.load_list(os.environ.get("LEGAL_UNANSWERED_KEYWORDS_FILE", DEFAULT_KEYWORDS_FILE))
 
 
+_TAG_RE = re.compile(r"<[^>]*>")
+
+
+def _match_text(text):
+    """Customer HTML as plain text with every tag turned into a space, so adjacent paragraphs
+    (`<p>…profile</p><p>Thanks`) never fuse into one word and defeat a keyword's `\\b`."""
+    return " ".join(html.unescape(_TAG_RE.sub(" ", text or "")).split())
+
+
 def _all_parts(detail):
     return [detail.get("source") or {}] + list(((detail.get("conversation_parts") or {})
                                                 .get("conversation_parts")) or [])
@@ -114,8 +125,8 @@ def matches(detail, keywords):
     request made in a later message is caught and our own outbound text never pages."""
     src = detail.get("source") or {}
     inbound = (src.get("author") or {}).get("type") in INBOUND
-    subject = base._strip_html(src.get("subject") or "") if inbound else ""
-    bodies = [base._strip_html(p.get("body") or "") for p in _all_parts(detail)
+    subject = _match_text(src.get("subject")) if inbound else ""
+    bodies = [_match_text(p.get("body")) for p in _all_parts(detail)
               if (p.get("author") or {}).get("type") in INBOUND and p.get("body")]
     for body in [""] + bodies:
         rule = rh.match_keyword(subject, body, keywords)

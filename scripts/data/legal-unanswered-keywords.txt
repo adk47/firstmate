@@ -14,6 +14,17 @@ re:\barticle\s*17\b
 re:\bdelete\s+(all\s+)?(of\s+)?my\s+(personal\s+)?(data|information|account|profile)\b
 re:\b(remove|erase)\s+(all\s+)?(of\s+)?my\s+(personal\s+)?(data|information)\b
 re:\b(personal\s+)?data\s+(request|deletion|removal|access\s+request)\b
+# Profile/account removal requests (2026-10-18: "request to have the account removed" was not
+# caught). Possessive "my" (or "have the ... removed") only, so "remove this duplicate profile"
+# / "remove the old account" merge requests don't page. Each rule below also refuses a
+# credit-scoped target ("... from this track/album/credits") and a merge/duplicate request
+# later in the same sentence; the #1256 delete/remove-my-data rules above stay unguarded.
+# Accepted residual: "duplicate" said BEFORE the removal phrase still pages (one extra human read).
+re:\b(remove|delete|take\s+down|erase)\s+my\s+(artist\s+)?(profile|account|page|listing|info|information|data)\b(?!\s+(from|on|off)(\s+of)?\s+((the|a|an|this|that|these|those|my|his|her|their|our|some|all|all\s+(of\s+)?my|all\s+(of\s+)?the|one\s+of\s+the|one\s+of\s+my)\s+)?(credits?|tracks?|albums?|songs?|releases?|recordings?|eps?)\b)(?![^.!?]{0,60}\b(merg(e|ed|ing)|duplicate|combined?|into\s+mine)\b)
+re:\bhave\s+(my|the)\s+(artist\s+)?(profile|account|page|listing)\s+(removed|deleted|taken\s+down)\b(?!\s+(from|on|off)(\s+of)?\s+((the|a|an|this|that|these|those|my|his|her|their|our|some|all|all\s+(of\s+)?my|all\s+(of\s+)?the|one\s+of\s+the|one\s+of\s+my)\s+)?(credits?|tracks?|albums?|songs?|releases?|recordings?|eps?)\b)(?![^.!?]{0,60}\b(merg(e|ed|ing)|duplicate|combined?|into\s+mine)\b)
+re:\b(removal|deletion)\s+of\s+my\s+(artist\s+)?(profile|account|page|listing|info|information|data)\b(?!\s+(from|on|off)(\s+of)?\s+((the|a|an|this|that|these|those|my|his|her|their|our|some|all|all\s+(of\s+)?my|all\s+(of\s+)?the|one\s+of\s+the|one\s+of\s+my)\s+)?(credits?|tracks?|albums?|songs?|releases?|recordings?|eps?)\b)(?![^.!?]{0,60}\b(merg(e|ed|ing)|duplicate|combined?|into\s+mine)\b)
+re:\b(want|need|would\s+like)\s+my\s+(artist\s+)?(profile|account|page|data|information)\s+(deleted|removed|erased|taken\s+down)\b(?!\s+(from|on|off)(\s+of)?\s+((the|a|an|this|that|these|those|my|his|her|their|our|some|all|all\s+(of\s+)?my|all\s+(of\s+)?the|one\s+of\s+the|one\s+of\s+my)\s+)?(credits?|tracks?|albums?|songs?|releases?|recordings?|eps?)\b)(?![^.!?]{0,60}\b(merg(e|ed|ing)|duplicate|combined?|into\s+mine)\b)
+re:\btake\s+my\s+(artist\s+)?(profile|account|page)\s+down\b(?!\s+(from|on|off)(\s+of)?\s+((the|a|an|this|that|these|those|my|his|her|their|our|some|all|all\s+(of\s+)?my|all\s+(of\s+)?the|one\s+of\s+the|one\s+of\s+my)\s+)?(credits?|tracks?|albums?|songs?|releases?|recordings?|eps?)\b)(?![^.!?]{0,60}\b(merg(e|ed|ing)|duplicate|combined?|into\s+mine)\b)
 re:\bsubject\s+access\s+request\b
 DSAR
 cease and desist
