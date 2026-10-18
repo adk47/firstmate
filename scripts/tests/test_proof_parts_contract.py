@@ -58,7 +58,11 @@ class ContractTests(unittest.TestCase):
             path = Path(tmp) / "proof-on-file.json"
             for case in CONTRACT["cases"]:
                 with self.subTest(case["name"]):
-                    path.write_text(json.dumps(contract_doc(case)), encoding="utf-8")
+                    # The senders (verify notes, decider) also need the support@ contact
+                    # list; add one where a case has none (completeness never depends on it).
+                    doc = contract_doc(case)
+                    doc.setdefault("gmail_contacts_90d", {"generated_at": iso(0.5), "source": "t", "user_ids": []})
+                    path.write_text(json.dumps(doc), encoding="utf-8")
                     try:
                         verify_notify.load_proof_on_file(str(path), max_age_h=3, now=NOW)
                         got = "ok"
@@ -71,14 +75,11 @@ class ContractTests(unittest.TestCase):
                     except ValueError:
                         removal_gate = "unknown"
                     self.assertEqual(removal_gate, case["expect"], "take-back gate")
-                    doc = contract_doc(case)
-                    doc.setdefault("gmail_contacts_90d", {"generated_at": iso(0.5), "source": "t", "user_ids": []})
-                    path.write_text(json.dumps(doc), encoding="utf-8")
                     proof, why = decide.proof_on_file(path, now=NOW)
                     self.assertEqual("ok" if proof is not None else "unknown", case["expect"], f"decider: {why}")
 
-    def test_the_decider_without_a_contact_list_is_unknown(self):
-        """Stricter, never looser: no support@ contact list means nobody is asked."""
+    def test_the_senders_without_a_contact_list_are_unknown(self):
+        """Stricter, never looser: no support@ contact list means nobody is asked or noted."""
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "proof-on-file.json"
             doc = contract_doc(CONTRACT["cases"][0])
@@ -87,6 +88,9 @@ class ContractTests(unittest.TestCase):
             proof, why = decide.proof_on_file(path, now=NOW)
             self.assertIsNone(proof)
             self.assertIn("gmail_contacts_90d", why)
+            with self.assertRaises(verify_notify.ProofFileError) as raised:
+                verify_notify.load_proof_on_file(str(path), max_age_h=3, now=NOW)
+            self.assertIn("gmail_contacts_90d", str(raised.exception))
 
 
 if __name__ == "__main__":

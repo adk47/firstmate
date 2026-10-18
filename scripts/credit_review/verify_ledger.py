@@ -245,6 +245,23 @@ def capped(db: sqlite3.Connection, *, user_key: str, day: str) -> bool:
                       "LIMIT 1", (user_key, day)).fetchone() is not None
 
 
+ASK_CAMPAIGNS = ("verify-live", "retro-past")  # campaigns that ASK the user for something
+REASK_LOCK_DAYS = 90
+
+
+def asked_within(db: sqlite3.Connection, *, user_key: str, day: str, days: int = REASK_LOCK_DAYS) -> bool:
+    """True when this user got an initial ASK (verify-live or retro-past, attempted or sent)
+    in the last `days` days: the shared per-user re-ask lock (Fable 2026-10-17, decision
+    verify-notify-enable precondition 4). Follow-ups of that note are not new asks."""
+    try:
+        since = _plus(day, -days)
+    except ValueError:
+        since = ""  # an unreadable day: any earlier ask counts (stricter, never looser)
+    q = ("SELECT 1 FROM verify_messages WHERE user_key=? AND kind='initial' AND status IN ('attempted','sent') "
+         f"AND campaign IN ({','.join('?' * len(ASK_CAMPAIGNS))}) AND day > ? LIMIT 1")
+    return db.execute(q, (user_key, *ASK_CAMPAIGNS, since)).fetchone() is not None
+
+
 def past_user_done(db: sqlite3.Connection, user_key: str) -> str:
     """retro-past: why this user must not get a past-credit ask ('' when they may).
     One message per user, ever (a note from ANY campaign counts: no repeats across
@@ -285,6 +302,11 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
         if enforce_cap and capped(db, user_key=user_key, day=day):
             db.execute("COMMIT")
             return {"result": "daily_cap", "request_ids": fresh}
+        if campaign == "verify-live" and enforce_cap and asked_within(db, user_key=user_key, day=day):
+            # One note per user per 90 days across the ask campaigns: the credits wait
+            # (nothing is closed) until the lock lapses or a human acts.
+            db.execute("COMMIT")
+            return {"result": "recently_asked", "request_ids": fresh}
         keep = [r for r in (refs or []) if str(r.get("request_id")) in set(fresh)]
         due, removal = window(day) if windowed else (None, None)
         cur = db.execute(

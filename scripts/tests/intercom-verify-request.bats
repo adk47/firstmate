@@ -179,7 +179,7 @@ plain() { python3 -c 'import html,re,sys; print(html.unescape(re.sub(r"</p>|</li
   [ "$(msg .to.id)" = "6650aa01" ]
   [ "$(msg .message_type)" = "email" ]
   [ "$(msg .subject)" = 'We added your Mixing credit on "Song A". Please help us verify it' ]
-  expected='Hi Jane, good news: your Mixing credit on "Song A" by Big Star is now live on your Muso profile. We add credits on trust and then verify them, so please help us confirm this one. Reply to this message by November 15 (30 days from today) with any one of these: a split sheet, a label or distributor statement, a PRO or MLC registration, a studio or session invoice, or liner notes or an official release page that names you (PDF, PNG or JPG). A document that names several tracks counts for each track it names. If we can'"'"'t verify this credit by November 15, it will be removed from your profile after that day. If you send a valid document later, we'"'"'ll review it and can restore the credit. Thanks for helping us keep credits accurate. Caroline, Muso Support'
+  expected='Hi Jane, good news: your Mixing credit on "Song A" by Big Star is now live on your Muso profile. We add credits on trust and then verify them, so please help us confirm this one. Reply to this message by November 15 (30 days from today) with any one of these: a split sheet, a label or distributor statement, a PRO or MLC registration, a studio or session invoice, or liner notes or an official release page that names you (PDF, PNG or JPG). A document that names several tracks counts for each track it names. If we can'"'"'t verify this credit by November 15, it will be removed from your profile that day. If you send a valid document after that, we'"'"'ll review it and can restore the credit. Thanks for helping us keep credits accurate. Caroline, Muso Support'
   [ "$(msg .body | plain | tr '\n' ' ' | tr -s ' ' | sed 's/ $//')" = "$expected" ]
   # Fable's v1 copy (no date) still renders for review, but only as a preview.
   run -0 send --dry-run --copy v1
@@ -336,7 +336,7 @@ plain() { python3 -c 'import html,re,sys; print(html.unescape(re.sub(r"</p>|</li
 sent|1001" ]
 }
 
-@test "one note per user per UTC day: new credits the same day are DEFERRED, then sent alone the next day" {
+@test "one note per user per UTC day, then the 90-day re-ask lock: new credits wait, then go alone once it lapses" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -0 send
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star" "r2:Producer:Song B:Other" "r3:Mastering:Song C:Other"
@@ -346,7 +346,11 @@ sent|1001" ]
   # Deferred before any Intercom call: one contact lookup (the first send), not two.
   [ "$(grep -c '/contacts/search$' "$CURL_STUB_LOG")" -eq 1 ]
   [ -z "$(sql "select * from verify_requests where request_id in ('r2','r3')")" ]
-  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send
+  # Fable 2026-10-17: one ask per user per 90 days across verify-live and retro-past.
+  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -3 send
+  [[ "$output" == "DEFERRED recently-asked credits=2"* ]]
+  [ "$(posts)" -eq 1 ]
+  INTERCOM_VERIFY_TEST_DAY=2027-01-13 run -0 send
   [[ "$output" == "POSTED email message=1002 credits=2" ]]
   # The digest covers only the not-yet-notified credits.
   [ "$(msg .subject)" = "We added 2 new credits to your Muso profile. Please help us verify them" ]
@@ -483,17 +487,18 @@ rcredits() { # like credits, with role_families taken from a 5th field
 }
 rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
 
-@test "as committed, both new copies are send-locked and no verify-live note can be sent" {
+@test "as committed: verify-live windowed is unlocked (Fable 2026-10-17 enable), retro-past stays send-locked" {
   rcredits "$TEST_TMPDIR/c.json" Jane "r1:Producer:Song A:Big Star:producer"
+  grep -qx 'readonly LIVE_WINDOWED_COPY_APPROVED=1' "$REAL_SCRIPT"
+  grep -qx 'readonly RETRO_COPY_APPROVED=0' "$REAL_SCRIPT"
+  grep -qx 'readonly REMOVAL_COPY_APPROVED=0' "$REAL_SCRIPT"
+  grep -q 'decision-verify-notify-enable-2026-10-17' "$REAL_SCRIPT"
   run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --campaign retro-past --validate
   [[ "$output" == "VALID retro-past initial email credits=1 copy=past" ]]
   run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --campaign retro-past
   [[ "$output" == *"retro-past copy is not approved for sending yet"* ]]
   run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --validate
   [[ "$output" == "VALID verify-live initial email credits=1 copy=windowed" ]]
-  run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
-  [[ "$output" == *"verify-live windowed copy is not approved for sending yet"* ]]
-  [[ "$output" == *"v1 is preview-only"* ]]
   run -1 send --copy v1
   [[ "$output" == *"--copy is preview-only"* ]]
   [ "$(calls)" -eq 0 ]
@@ -536,16 +541,14 @@ rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
   [ "$(rendered .subject)" = 'We added your Mixing credit on "Song A". Please help us verify it' ]
   [[ "$body" == *"is now live on your Muso profile. We add credits on trust and then verify them"* ]]
   [[ "$body" == *"Reply to this message by November 15 (30 days from today) with any one of these:"* ]]
-  [[ "$body" == *"If we can't verify this credit by November 15, it will be removed from your profile after that day. If you send a valid document later, we'll review it and can restore the credit."* ]]
+  [[ "$body" == *"If we can't verify this credit by November 15, it will be removed from your profile that day. If you send a valid document after that, we'll review it and can restore the credit."* ]]
   [[ "$body" != *"November 16"* ]]
   [[ "$body" != *"Nothing changes while we check"* ]]
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send --dry-run --kind reminder-25 --parent-message-id 1
   [[ "$output" == "DRY-RUN verify-live reminder-25 email credits=1 copy=windowed"* ]]
   body="$(rendered .body | plain)"
-  [[ "$body" == *"the credit stays on your profile. If we can't verify it by November 15, it will be removed from your profile after that day."* ]]
-  [[ "$body" != *"more time"* ]]
-  [[ "$body" != *"keep the request open"* ]]
-  [[ "$body" == *"This is my last reminder about this review."* ]]
+  [[ "$body" == *"the credit stays on your profile. If we can't verify it by November 15, it will be removed from your profile that day."* ]]
+  [[ "$body" == *"This is my last reminder about this review. If you need more time, tell us which credit and why, and we will keep the request open."* ]]
   run -1 send --dry-run --copy v1 --kind reminder-14 --parent-message-id 1
   [[ "$output" == *"v1 copy names no date"* ]]
 }
@@ -561,7 +564,7 @@ rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
   credits "$TEST_TMPDIR/c.json" Jane "r1:Producer:Song A:Big Star"
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$GATE" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1001 credits=1" ]]
-  [[ "$(msg .body | plain)" == *"by November 15, it will be removed from your profile after that day"* ]]
+  [[ "$(msg .body | plain)" == *"by November 15, it will be removed from your profile that day"* ]]
   [ "$(sql "select due_day, removal_day from verify_messages where message_id='1001'")" = "2026-11-15|2026-11-16" ]
   rem() { "$GATE" send --kind "$1" --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
   INTERCOM_VERIFY_TEST_DAY=2026-10-29 run -3 rem reminder-14
@@ -587,7 +590,7 @@ rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
 @test "a real verify-live send is always the windowed copy and records its removal date" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send
-  [[ "$(msg .body | plain)" == *"it will be removed from your profile after that day"* ]]
+  [[ "$(msg .body | plain)" == *"it will be removed from your profile that day"* ]]
   [[ "$(msg .body | plain)" != *"Nothing changes while we check"* ]]
   [ "$(sql "select due_day, removal_day from verify_messages where message_id='1001'")" = "2026-11-15|2026-11-16" ]
 }
@@ -878,8 +881,9 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$SCRIPT" send --kind after-rejection --parent-message-id 1 \
     --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$(rendered .body | plain)" == *"because we couldn't read it."* ]]
+  # Unlocked as committed (Fable 2026-10-17): without a sent note in the ledger it is still refused.
   run -1 "$LOCKED" send --kind after-rejection --parent-message-id 1 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
-  [[ "$output" == *"verify-live windowed copy is not approved for sending yet"* ]]
+  [[ "$output" != *"not approved for sending yet"* ]]
   run -1 "$SCRIPT" send --campaign retro-past --kind after-rejection --parent-message-id 1 \
     --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$output" == *"no follow-ups"* ]]

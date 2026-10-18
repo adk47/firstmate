@@ -23,7 +23,9 @@ flagged stale or missing makes the whole export UNKNOWN too.
 While ``cs-gmail`` is unusable EVERYONE is UNKNOWN: a snapshot of
 who emailed support@ cannot cover mail sent after it, so no contact list narrows the hold.
 UNKNOWN never asks and never removes. The live export also carries ``gmail_contacts_90d``
-({generated_at, source, user_ids[]}); it is accepted and deliberately unused.
+({generated_at, source, user_ids[]}): completeness never depends on it (it narrows nothing),
+but the readers that SEND (the decider's asks, the verify notes) hold every listed user for a
+human, read through ``support_contacts`` below, the one parser for it.
 
 A half-written export is UNKNOWN too: every entry must be an object with a user_id, a
 request_id that is null or a string and a known kind, and ``users`` must be the number of
@@ -46,6 +48,7 @@ INTERCOM = "cs-intercom"
 GMAIL = "cs-gmail"
 LEGACY_INTERCOM = "cs-systemic intercom+gmail"
 KINDS = frozenset({"approved_doc", "pending_doc", "human_approved_after_doc"})
+SUPPORT_CONTACTS = "gmail_contacts_90d"
 
 
 def _is_intercom(name: str) -> bool:
@@ -138,3 +141,20 @@ def check_entries(doc: dict[str, Any]) -> None:
     if not isinstance(users, int) or isinstance(users, bool) or users != len(uids):
         raise PartsError(f"it is inconsistent (users={users!r}, {len(uids)} distinct user ids in entries[]): "
                          "treated as a half-written export")
+
+
+def support_contacts(doc: dict[str, Any]) -> frozenset[int] | None:
+    """User ids that emailed support@ in the last 90 days, from ``gmail_contacts_90d`` (a
+    list, or {generated_at, source, user_ids: [...]} as the cs lane publishes it); None when
+    absent or malformed - a sender then sends to nobody (anyone may have emailed support@)."""
+    value = doc.get(SUPPORT_CONTACTS)
+    ids = value.get("user_ids") if isinstance(value, dict) else value
+    if not isinstance(ids, list):
+        return None
+    out: set[int] = set()
+    for u in ids:
+        text = "" if isinstance(u, bool) else str(u).strip()
+        if not text.isdigit():
+            return None
+        out.add(int(text))
+    return frozenset(out)

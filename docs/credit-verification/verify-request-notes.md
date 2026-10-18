@@ -11,11 +11,15 @@ instruction.
 ```
 credit-trust-decide-15m  (credit-review.py decide --mode apply, Piece 1)
    └─ decision_outcomes action='approve' AND outcome='approved' (+ decisions)
-credit-trust-verify-notify-15m  (credit-review.py verify-notify --mode apply, :07/:22/:37/:52; shipped disabled)
+credit-trust-verify-notify-15m  (credit-review.py verify-notify --mode apply --max-users 200; ONCE A DAY 09:00 Europe/Rome;
+                                 enabled Monday 2026-10-20 per Fable's decision-verify-notify-enable-2026-10-17)
+   ├─ day-14 / day-25 reminders of windowed notes FIRST (they count against the day's 200)
    ├─ re-read every candidate (GET /admin/credit-requests); keep only rows the server says are approved NOW
+   ├─ hold for a human (never notified; credits kept for later runs): proof on file from ANY source,
+   │    the support@ 90-day contacts, org affiliation unknown or affiliated, an ask in the last 90 days
+   ├─ paying users first
    ├─ group by the request's account (user.email); one gate call per account
    │    scripts/intercom-verify-request.sh send   -> POST /messages (email; Caroline; windowed copy)
-   ├─ day-14 / day-25 reminders of windowed notes
    └─ proof sweep over sent notes (note families with a send in the last 45 days)
         scripts/intercom-verify-request.sh tag-proof -> tag the conversation `credit-proof`
 ```
@@ -170,7 +174,7 @@ notes.
 
 | | NEW provisional approvals (`verify-live`) | PAST credits (`retro-past`) |
 |---|---|---|
-| Copy | `windowed`, the only copy ever sent: Fable's v1 with ONE date, the reply-by date 30 days out ("Reply to this message by {reply_by} (30 days from today)", "If we can't verify this credit by {reply_by}, it will be removed from your profile after that day"), and a restore line. The ledger stores `due_day` = reply-by and `removal_day` = the day after it. No reminder promises more time. `v1` (no date) is preview-only | Fable's GO'd role drafts: routine review, one document per credit, **no deadline, no removal language** |
+| Copy | `windowed`, the only copy ever sent: Fable's v1 with ONE date, the reply-by date 30 days out ("Reply to this message by {reply_by} (30 days from today)", "If we can't verify this credit by {reply_by}, it will be removed from your profile that day"), and a restore line ("If you send a valid document after that, we'll review it and can restore the credit"). The ledger stores `due_day` = reply-by and `removal_day` = the day after it, so nothing is ever removed before the date the note named. The day-25 reminder adds "If you need more time, tell us which credit and why, and we will keep the request open." (Fable copy review 2026-10-17, pack 1). `v1` (no date) is preview-only | Fable's GO'd role drafts: routine review, one document per credit, **no deadline, no removal language** |
 | Follow-ups | day 14 and day 25 (the second says it is the last), only for credits no review has ruled on; one `after-rejection` note after a rejected document. A follow-up with nothing left to send (every credit documented, approved by a person or no longer approved) is closed as `skipped`; one whose user is waiting on a pending document stays due. Only follow-ups actually sent count against `--max-users` | **none**: one message per user, ever, and never to a user who already sent proof |
 | No reply | windowed: `credit-review.py verify-notify --removal-due FILE` lists the credits from their `removal_day` (00:00Z after the reply-by date ends; a reply on the reply-by date is never already in the export), minus any with their own proof-on-file entry (any kind) or a human approval. Credits whose user replied to the note are held for a human and written separately to `FILE.held`, never to FILE. A missing or stale proof-on-file list exports nothing and exits non-zero | the credit stays; `credit-review.py verify-wave --unverified FILE` lists it as `unverified` for the board / valuation basis after 30 days |
 | Send lock | `LIVE_WINDOWED_COPY_APPROVED=0`: every real verify-live send is refused, and the cron ships disabled | `RETRO_COPY_APPROVED=0`; cron ships disabled |
@@ -298,3 +302,22 @@ can restore the credit. Each line states the reason first, then the action (Fabl
   from self-removals until core records the actor.
 
 Tests: `scripts/tests/intercom-verify-request.bats`, `scripts/tests/test_credit_verify_notify.py`.
+
+## Enable gates (Fable decision 2026-10-17, `decision-verify-notify-enable-2026-10-17.md`)
+
+Every gate holds the user for a human: no note, nothing closed, the credits are re-offered on
+every later run (verify ledger `deferred_pending_doc` rows) and the held users are in the
+daily line.
+
+| Gate | Source | Missing source |
+|---|---|---|
+| Proof on file from any source (Intercom, support@ Gmail, core): no note at all | `/var/lib/credit-trust/proof-on-file.json`, through `credit_review.proof_parts` | no sends |
+| Emailed support@ in the last 90 days | the same file's `gmail_contacts_90d` (`proof_parts.support_contacts`, the decider's reader) | no sends |
+| Org affiliation (RULE-org-affiliation): no verdict, `contributor`, `verified_org`, `authenticated_domain` | `/var/lib/credit-trust/org-affiliation.json` (`credit_review.affiliation`, shared with the take-back gate) | no sends |
+| One ask per user per 90 days across verify-live and retro-past | verify ledger (`verify_ledger.asked_within`, checked in the run and again at the claim) | n/a |
+
+Cadence: once a day at 09:00 Europe/Rome, paying users first, at most 200 messages a day for
+the first week (then 500), reminders included and sent first. Removal, expiry and the
+retro-past wave stay disabled (`RETRO_COPY_APPROVED=0`, `REMOVAL_COPY_APPROVED=0`, no expiry
+job): `--removal-due` is a manual export only.
+

@@ -839,7 +839,7 @@ class NeverReAsk(Base):
             p, why = decide.proof_on_file(now=T.NOW)
             self.assertIsNone(p, bad)
             self.assertIn("gmail_contacts_90d", why)
-        self.assertEqual(decide.support_contacts_of([1, "2"]), frozenset({1, 2}))
+        self.assertEqual(decide.proof_parts.support_contacts({"gmail_contacts_90d": [1, "2"]}), frozenset({1, 2}))
 
     def test_a_credit_is_asked_about_once_ever(self):
         row = req(uuid_of(140), uid=720, track="t1")

@@ -549,25 +549,7 @@ class ProofOnFile:
         return d.user_id is not None and d.user_id in self.support_contacts
 
 
-SUPPORT_CONTACTS_KEY = "gmail_contacts_90d"
-
-
-def support_contacts_of(value: Any) -> frozenset[int] | None:
-    """User ids from gmail_contacts_90d - a list, or {generated_at, source, user_ids: [...]}
-    as the cs lane publishes it; None when absent or malformed (the caller then treats
-    proof status as UNKNOWN: nobody is asked)."""
-    ids = value.get("user_ids") if isinstance(value, dict) else value
-    if not isinstance(ids, list):
-        return None
-    out: set[int] = set()
-    for u in ids:
-        if isinstance(u, bool):
-            return None
-        try:
-            out.add(int(str(u).strip()))
-        except ValueError:
-            return None
-    return frozenset(out)
+SUPPORT_CONTACTS_KEY = proof_parts.SUPPORT_CONTACTS
 
 
 def muso_user_id(value: Any) -> int | None:
@@ -615,7 +597,7 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
     ts = parse_ts(data.get("generated_at"))
     if ts is None:
         return None, malformed
-    contacts = support_contacts_of(data.get(SUPPORT_CONTACTS_KEY))
+    contacts = proof_parts.support_contacts(data)
     if contacts is None:
         return None, f"{path} has no readable {SUPPORT_CONTACTS_KEY} list (anyone may have emailed support@)"
     users: set[int] = set()

@@ -75,7 +75,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from credit_review import proof_parts
+from credit_review import affiliation, proof_parts
 from credit_review.evidence import CONTRADICTED, classify_roles
 from credit_review.roles import ONE_PERSON_FAMILIES, family_of, is_trusted_source, names_match
 
@@ -225,9 +225,8 @@ PROOF_ON_FILE = os.environ.get("CREDIT_RETRO_PROOF_ON_FILE", "/var/lib/credit-tr
 ORG_AFFILIATION = os.environ.get("CREDIT_RETRO_ORG_AFFILIATION", "/var/lib/credit-trust/org-affiliation.json")
 PROOF_MAX_AGE = timedelta(hours=3)
 CLOCK_SKEW = timedelta(minutes=5)  # a generated_at later than now + this is not "fresh", it is wrong
-AFFILIATION_VERDICTS = frozenset({"none", "claimed_unverified", "contributor", "verified_org",
-                                  "authenticated_domain"})
-AFFILIATED = frozenset({"contributor", "verified_org", "authenticated_domain"})
+AFFILIATION_VERDICTS = affiliation.VERDICTS
+AFFILIATED = affiliation.AFFILIATED
 
 
 @dataclass
@@ -281,14 +280,7 @@ def _read_proof_on_file(path: str, now: datetime) -> tuple[dict[str, str], dict[
 
 
 def _read_affiliation(path: str) -> dict[str, dict[str, Any]]:
-    with open(path, encoding="utf-8") as fh:
-        doc = json.load(fh)
-    if not isinstance(doc, dict):
-        raise ValueError("not a user_id -> verdict object")
-    for uid, v in doc.items():
-        if not isinstance(v, dict) or v.get("verdict") not in AFFILIATION_VERDICTS:
-            raise ValueError(f"user {uid}: no valid verdict")
-    return {str(uid): v for uid, v in doc.items()}
+    return affiliation.read(path)
 
 
 def load_exclusions(*, proof_on_file: str = PROOF_ON_FILE, org_affiliation: str = ORG_AFFILIATION,
