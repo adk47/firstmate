@@ -11,6 +11,7 @@ one where a case has none; with it, the decider answers every case exactly the s
 
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import json
 import sys
 import tempfile

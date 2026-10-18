@@ -7,6 +7,7 @@ Stdlib unittest, no network: the admin API is faked. Run:
 
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import base64
 import json
 import os

@@ -1673,6 +1673,10 @@ jobs:
         # directly, same bare python3.
         run: |
           set -euo pipefail
+          # This job runs ON node-8: never let a test write the production
+          # /var/lib/hydra/credit-review/run.log (firstmate 056). Each suite also
+          # imports scripts/tests/credit_test_env.py, which forces its own temp log.
+          export CREDIT_REVIEW_LOG="${RUNNER_TEMP:-/tmp}/credit-review-test-run.log"
           python3 scripts/tests/test_uvn_under30_policy.py
           python3 scripts/tests/test_uvn_under30_cron.py
           # AI credit reviewer / approval auditor (scripts/credit_review). Stdlib

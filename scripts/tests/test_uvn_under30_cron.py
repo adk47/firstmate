@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import fcntl
 import importlib.util
 import io

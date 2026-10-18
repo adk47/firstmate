@@ -9,6 +9,7 @@ Run:
 
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import json
 import os
 import shutil
@@ -1673,6 +1674,21 @@ class WiringTests(unittest.TestCase):
         log = Path(self.env["STUB_LOG"]).read_text()
         self.assertEqual(sum(1 for ln in log.splitlines() if ln.endswith("/messages")), 1)
         self.assertNotIn("conversations/search", log, "a removal notice is not an ask: no document check")
+
+class TestLogIsolation(unittest.TestCase):
+    def test_tests_and_their_subprocesses_never_log_to_the_production_run_log(self):
+        """firstmate 056: PR Validation runs on node-8; a halt line from a test must not reach
+        /var/lib/hydra/credit-review/run.log."""
+        from credit_review import runner
+        self.assertEqual(runner.LOG_PATH, credit_test_env.LOG_PATH)
+        self.assertFalse(os.path.realpath(runner.LOG_PATH).startswith("/var/lib/"))
+        res = subprocess.run([sys.executable, str(ROOT / "scripts" / "credit-review.py"), "verify-notify",
+                              "--removal-due", os.path.join(credit_test_env._dir, "due.jsonl"),
+                              "--proof-on-file", os.path.join(credit_test_env._dir, "absent.json")],
+                             capture_output=True, text=True, timeout=60, check=False)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("absent.json is missing", Path(credit_test_env.LOG_PATH).read_text())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
