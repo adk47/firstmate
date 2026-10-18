@@ -44,6 +44,10 @@ source "$_SMOKE_DIR/lib/credit-gate-probe.sh"
 source "$_SMOKE_DIR/lib/cron-store.sh"
 # shellcheck source=lib/mesh-probe.sh
 source "$_SMOKE_DIR/lib/mesh-probe.sh"
+# slack_probe_* — hard gate that every Slack account in openclaw-main.json came
+# up with a RESOLVED botToken SecretRef (lib/slack-probe.sh has the rationale).
+# shellcheck source=lib/slack-probe.sh
+source "$_SMOKE_DIR/lib/slack-probe.sh"
 # restart_recovery_* — same split rationale; tells a main-session restart
 # recovery REPLAY (every direct turn on `agent:<id>:main` is rejected with
 # "changed while starting work" until the replay's journal terminal line) apart
@@ -553,6 +557,17 @@ if needs_target "main"; then
   ping_agent main operations "Main"
 
   check_channel_health main "Main"
+
+  # Slack SecretRef gate — a botToken ref that fails to resolve leaves the
+  # account with botTokenSource != "config" and the bot silently dark. HARD fail
+  # (no soft warn): the deploy rollback must run. Account list is read from the
+  # deployed config, not hard-coded.
+  if slack_out=$(slack_probe_run /opt/hydra/openclaw-main.json); then
+    pass_check "Main: all Slack accounts resolved botToken and probe ok"
+  else
+    fail_check "Main: Slack botToken SecretRef gate failed"
+    printf '    %s\n' "${slack_out//$'\n'/$'\n'    }"
+  fi
 
   # web_search post-restart probe — see check_web_search's comment above
   # for the #695/#701 incident this guards against.
