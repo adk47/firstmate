@@ -274,6 +274,9 @@ a user who sends a document after a deferred day keeps the role.
   everyone: a snapshot of who emailed support@ cannot cover mail sent after it.
 - proof-on-file, the send ledger or the doc manifest malformed (wrong shape): same as
   unreadable.
+  A send ledger without Caroline's `verify_messages` table, or missing any of its
+  `verify_ledger.READER_COLUMNS`, counts as malformed; every deploy creates it (schema: `verify-request-notes.md` → Operate),
+  so its absence means that deploy step failed.
 - org-affiliation is the credit-trust export, schema `org-affiliation/v1` (H-DevOps
   `scripts/credit-trust-exports/org-affiliation/README.md`, published hourly at :23):
   `users{id: {verdict, coverage, evidence[]}}` and `held{id: {reason}}`. Its consumer rule

@@ -89,6 +89,11 @@ them, "we'll check it, usually within a few days", never decide.
   `/opt/hydra/workspaces/operations/api-logs/`.
 - To re-open a refused or stuck (`attempted`) request, delete its `verify_requests` row.
   The next run offers it again.
+- Schema: every deploy runs `verify_ledger.py --db /var/lib/hydra/credit-review/ledger.sqlite3
+  migrate` (Step 5a, warn-only), which creates or upgrades only the `verify_*` tables in the
+  ledger it shares with the decider. credit-retro's take-back gate reads `verify_messages`
+  (columns pinned as `verify_ledger.READER_COLUMNS`); `scripts/tests/test_verify_ledger_contract.py`
+  keeps the writer and that reader in agreement.
 
 ## Never ask someone who already sent documents
 
