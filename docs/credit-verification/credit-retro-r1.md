@@ -63,7 +63,7 @@ reference and the URL; the set's `reason` on the server carries every pair's URL
 | **Live exclusion sources, read fresh by every `plan` and `apply` (firstmate 020).** Proof on file in credit-trust `proof-on-file.json` (an entry with a `request_id` matches that request, one without matches every row of the user) | `proof_on_file:<kind>` |
 | No proof-tagged note in Caroline's send ledger covers the request or the request's account | `proof_tagged` |
 | The user is not in `manifests/doc-submitted-r1.json` and the request is not one a human approved there | `doc_submitted`, `human_approved_after_doc` |
-| The row carries checked evidence for ITS OWN role (`evidence.verified` = `public_page`: a page of this track/release naming the other person in this role, or `trusted_dsp_only`: a CURRENT Spotify or Tidal credit on this recording naming them, with `evidence.sources` only `spotify`/`tidal` and the URL on `open.spotify.com` or `listen.tidal.com`, the URL's own source among `evidence.sources`; never Jaxsta or MLC alone). `evidence.url` is the cited `evidence_url`, and every name in `evidence.names` is quoted in the recorded `evidence.note` (only those names are cited to the user). 10 rows pass this and are not excluded (users 197122, 161128, 182594, 150514; checked 2026-10-16) | `evidence_unverified` |
+| The row carries checked evidence for ITS OWN role (`evidence.verified` = `public_page`: a page of this track/release naming the other person in this role, or `trusted_dsp_only`: a CURRENT Spotify or Tidal credit on this recording naming them, with `evidence.sources` only `spotify`/`tidal` and the URL on `open.spotify.com` or `listen.tidal.com`, the URL's own source among `evidence.sources`; never Jaxsta or MLC alone). `evidence.url` is the cited `evidence_url`, and every name in `evidence.names` is quoted in the recorded `evidence.note` (only those names are cited to the user). An optional `evidence.corroboration` (e.g. a press article) must be a link Caroline's gate accepts (public https, at most 300 characters, never a Muso or internal surface: `verify-request-notes.md` → Take-back notices) other than `evidence.url`, checked here at plan time so a bad link shows up as `evidence_unverified` before approval instead of getting that user's set withheld as `notice_refused` at apply (firstmate 041); it is cited next to the evidence, never instead of it (`takeback-notice.md`). 10 rows pass this and are not excluded (users 197122, 161128, 182594, 150514; checked 2026-10-16, row 8999a707 re-checked 2026-10-18) | `evidence_unverified` |
 | The request still exists, is `approved`, has the same user/profile/track, and still lists the role | `request_not_found`, `request_not_approved:*`, `user_mismatch`, `role_not_on_request` |
 | The claimant is not one of the track's own artists (by profile id or by name) | `claimant_is_track_artist` |
 | The claimant still holds the role (a live muso credit) | `claimant_credit_already_gone` |
@@ -71,7 +71,7 @@ reference and the URL; the set's `reason` on the server carries every pair's URL
 | A person named in the checked evidence (`evidence.names`) is still among those trusted holders | `evidence_holder_changed` |
 | `trusted_dsp_only` only: a named person is still a live holder in EVERY cited source (Spotify/Tidal; the notice names each one and links the URL's), not only in Jaxsta/MLC or in just one of them | `dsp_holder_vanished` |
 | **Last, only for a row that passed every gate above and would be removed (firstmate 021).** Org affiliation (credit-trust `org-affiliation.json`, captain 2026-10-16 ~18:36Z: "make sure these guys you remove credits or ban are not part of any major label or publisher too"): `contributor`, `verified_org` or `authenticated_domain` is human review + a polite contact, never automatic; `claimed_unverified` and `none` are allowed only with `coverage: full` and shown in the plan's `affiliation=` column; a user with no verdict is skipped, and so is one whose coverage is not `full`. A row that failed an earlier gate keeps that reason and is never in `needs_human_review` | `org_affiliated` (listed under `needs_human_review` by `plan` and `report`), `affiliation_unknown`, `affiliation_partial` |
-| The user's take-back notice would go out today (see the notice section) | `notice_would_defer` |
+| The user's take-back notice would go out today and Caroline's gate accepts it (see the notice section) | `notice_would_defer`, `notice_refused` |
 
 Any skip is recorded with its reason and is never retried around. Those roles join the
 verify waves.
@@ -110,10 +110,28 @@ python3 $S readback --run <apply_run>     # re-run until no row is `pending` (in
 python3 $S report --run <apply_run>       # counts, refused/errored rows, the revert command
 ```
 
-Pick the canary set of a user with ONE take-back role (182594 or 150514). A set is one user,
-so the canary never touches anyone else. A user who already got a message that UTC day has
-their whole set withheld as `notice_would_defer` and executed on a later day (the set stays
-approved for 7 days).
+**Canary first, alone (Fable v3, firstmate 035): 182594's set (one role, Tidal-only).** A set
+is one user, so the canary never touches anyone else. It runs first and ALONE; every other set
+the live plan stages runs only after these canary checks pass:
+1. the notice was delivered (the Intercom conversation event, not only the gate's exit 0);
+2. the removal is tombstoned: `readback` shows the role gone with the trusted holder intact,
+   the pair is consumed with a `credit_removal_events` id (`approval-status --id <set>`), and
+   24 h later the role has not come back (the orphan reconciler honours the event);
+3. the restore path is ready for that row: `report` prints the revert command, and
+   `restore --run <apply_run> --request <id> --proof-ref <ref>` is the one used if the user
+   replies with a document that checks out.
+
+Then every other staged set. As of the 2026-10-18 plans that is only 161128's set: 197122 and
+150514 are held by proof on file (documents they sent after the 10-16 snapshot,
+`proof_on_file:human_approved_after_doc`), and any user the live gate releases later also waits
+for the canary. A user who already got a message that UTC day has their whole set withheld
+as `notice_would_defer` and executed on a later day (the set stays approved for 7 days).
+
+**Before the first real `stage` (Fable v3 §4):** Caroline's send ledger has its
+`verify_messages` table (every deploy creates it, schema: `verify-request-notes.md` → Operate;
+without it every run is `proof_source_unavailable`, by design); prod answers
+`GET /admin/credit-removals` (core #10614 re-twin deployed); the `takeback-notice` campaign is
+in Caroline's gate with the wording rules below enforced by its renderer.
 
 **One-command revert:** `python3 $S revert --run <apply_run> --login`. It re-adds exactly
 the roles that run removed (a POST to the same path) and never re-adds a role twice. Verify
@@ -227,7 +245,13 @@ message going out.
   - If the gate would defer it today (exit 3: one message per user per UTC day), that
     user's set is withheld this run (`notice_would_defer`). It stays approved and goes on a
     later day's run, with its message.
-  - Any other refusal refuses the whole run: nothing is removed.
+  - If the gate refuses that user's notice (exit 1, e.g. its leak check on a track title,
+    name or link containing an issue number or a word Caroline's sanitizer redacts), ONLY that
+    user's whole set is withheld (`notice_refused`, with the gate's reason in `report`'s
+    `withheld`; `apply` exits 3 for Nick or Jan). Every other user's set goes ahead with its
+    notice (firstmate 041).
+  - If the gate cannot run at all (script missing, usage/environment error, hung), or an
+    account has no email, the whole run is refused: nothing is removed for anyone.
 - **After the execute:** one notice per user lists the roles the server reported removed in
   THIS run (never a pair it did not report removed). Every
   outcome (`sent`, `deferred`, `failed`) is recorded in the apply run as action `notify`,
@@ -252,8 +276,8 @@ message going out.
 - **Dependency:** the gate's `takeback-notice` campaign (credit-trust-caroline-t06, #1239):
   its `--validate` reports the per-day cap with exit 3. A real send also needs the gate's
   `TAKEBACK_COPY_APPROVED` lock flipped (Fable copy GO + captain). Until then `--validate`
-  refuses too (exit 1), so `apply` fails its notice preflight and removes nothing: no
-  removal without its notice. `notice-preview` still renders the copy.
+  refuses every notice (exit 1), so `apply` withholds every set as `notice_refused` and
+  removes nothing: no removal without its notice. `notice-preview` still renders the copy.
 
 ### Live exclusion sources fail closed
 
@@ -274,9 +298,11 @@ a user who sends a document after a deferred day keeps the role.
   everyone: a snapshot of who emailed support@ cannot cover mail sent after it.
 - proof-on-file, the send ledger or the doc manifest malformed (wrong shape): same as
   unreadable.
-  A send ledger without Caroline's `verify_messages` table, or missing any of its
-  `verify_ledger.READER_COLUMNS`, counts as malformed; every deploy creates it (schema: `verify-request-notes.md` → Operate),
-  so its absence means that deploy step failed.
+  A send ledger without Caroline's `verify_messages` table (for example one holding only the
+  decider's tables), or missing any of its `verify_ledger.READER_COLUMNS`, counts as malformed;
+  every deploy creates it (schema: `verify-request-notes.md` → Operate), so its absence means
+  that deploy step failed. "Cannot check proof" is never "no proof" (Fable v3; contract test
+  `test_send_ledger_without_verify_messages_removes_nothing`).
 - org-affiliation is the credit-trust export, schema `org-affiliation/v1` (H-DevOps
   `scripts/credit-trust-exports/org-affiliation/README.md`, published hourly at :23):
   `users{id: {verdict, coverage, evidence[]}}` and `held{id: {reason}}`. Its consumer rule

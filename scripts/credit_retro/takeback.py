@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -120,6 +121,18 @@ DSP_SOURCES = {"spotify": "Spotify", "tidal": "Tidal"}
 DSP_HOSTS = {"open.spotify.com": "spotify", "listen.tidal.com": "tidal"}  # evidence URL host -> its source
 
 
+# Caroline's gate (intercom-verify-request.sh, campaign takeback-notice) refuses any other link,
+# and a refusal in notice_preflight withholds that user's whole set: check the same rule at plan time.
+_PUBLIC_LINK = re.compile(r"^https://[A-Za-z0-9.-]+(/\S*)?$")
+_INTERNAL_LINK = re.compile(r"^https://([A-Za-z0-9-]+\.)*(muso\.ai|clickup\.com|slack\.com|intercom\.io|github\.com|"
+                            r"gitlab\.com)(/|$)", re.IGNORECASE)  # DNS hosts are case-insensitive
+
+
+def public_link(url: str) -> bool:
+    """A public https link of at most 300 characters, never an internal or Muso surface."""
+    return len(url) <= 300 and bool(_PUBLIC_LINK.match(url)) and not _INTERNAL_LINK.match(url)
+
+
 def evidence_verified(row: dict[str, Any]) -> bool:
     """True when the row carries checked evidence for ITS OWN role: a public page of this
     track/release naming the other person in this role (``public_page``), or a current
@@ -132,6 +145,10 @@ def evidence_verified(row: dict[str, Any]) -> bool:
     note = str(ev.get("note") or "").lower()
     if not (ev.get("verified") in EVIDENCE_KINDS and names and all(n and n.lower() in note for n in names)
             and url == row.get("evidence_url") and url.startswith("https://")):
+        return False
+    # an optional corroborating page (e.g. a press article): cited next to the evidence, never instead of it
+    corr = ev.get("corroboration")
+    if corr is not None and not (isinstance(corr, str) and public_link(corr) and corr != url):
         return False
     if ev.get("verified") == "trusted_dsp_only":
         sources = set(ev.get("sources") or [])
@@ -511,7 +528,9 @@ def evidence_line(r: dict[str, Any]) -> str:
     resting on the Spotify/Tidal credit alone says so (``evidence_class=dsp_track_level``):
     the #10597 stage body has no per-pair field for it."""
     dsp = ", evidence_class=dsp_track_level" if r["evidence"]["verified"] == "trusted_dsp_only" else ""
-    return f"[{r['profile_id'][:8]}/{r['track_id'][:8]}/{r['role']}] ({evidence_label(r)}{dsp}) {r['evidence_url']}"
+    corr = r["evidence"].get("corroboration")
+    corr = f", corroboration={corr}" if corr else ""
+    return f"[{r['profile_id'][:8]}/{r['track_id'][:8]}/{r['role']}] ({evidence_label(r)}{dsp}{corr}) {r['evidence_url']}"
 
 
 def chunk_for_reasons(rows: list[dict[str, Any]], head: str, limit: int = REASON_MAX) -> list[list[dict[str, Any]]]:
@@ -716,9 +735,11 @@ def notice_preflight(api: ReadApi, sender, rows: list[dict[str, Any]],
     """Before any execute: every user who may lose a role must be reachable through
     Caroline's gate with the fixed take-back notice, TODAY. Returns (user_id -> account,
     user_id -> skip reason for users whose roles are not removed this run: the gate would
-    defer their notice, or none of their requests still belongs to them). Any other refusal
-    refuses the whole run (captain via firstmate 012/014: never remove without the message
-    going out)."""
+    defer their notice, the gate refused that user's notice (``notice_refused: <gate reason>``,
+    e.g. its leak check on a title; firstmate 041: only that user's set is withheld), or none of
+    their requests still belongs to them). A gate that cannot run at all, an unreadable
+    request or an account with no email refuses the whole run (captain via firstmate
+    012/014: never remove without the message going out)."""
     from . import notice  # noqa: PLC0415
     accounts: dict[str, dict[str, Any]] = {}
     held: dict[str, str] = {}
@@ -741,8 +762,11 @@ def notice_preflight(api: ReadApi, sender, rows: list[dict[str, Any]],
         if verdict == "deferred":
             held[uid] = "notice_would_defer"
             log(f"notice would defer for user {uid} ({msg}): their roles wait for a later run")
+        elif verdict == "refused":
+            held[uid] = f"notice_refused: {' '.join(str(msg).split())[:200]}"
+            log(f"notice refused by the send gate for user {uid} ({msg}): their whole set is withheld")
         elif verdict != "valid":
-            problems.append(f"user {uid}: notice refused by the send gate: {msg}")
+            problems.append(f"user {uid}: the send gate could not check the notice ({verdict}): {msg}")
     if problems:
         raise SystemExit("take-back notices cannot be sent, so nothing is removed:\n  " + "\n  ".join(problems))
     log(f"notice preflight: {sum(1 for u in accounts if u not in held)} users reachable today "
@@ -824,6 +848,7 @@ class ExecSet:
     unknown: list[dict[str, Any]] = field(default_factory=list)   # spendable pairs that are no row of the plan
     consumed: list[dict[str, Any]] = field(default_factory=list)  # manifest rows of pairs consumed outside the tool
     withheld: str = ""                                             # why the WHOLE set is not executed
+    detail: str = ""                                               # e.g. the send gate's refusal text
 
 
 def _exec_sets(api: ReadApi, approvals: list[str], planned: Index, manifest_rows: Index) -> list[ExecSet]:
@@ -893,7 +918,7 @@ def apply(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, pla
                                       + [r for es in sets for r in es.consumed], log)
     for es in sets:
         if not es.withheld and es.user_id in held:
-            es.withheld = held[es.user_id]
+            es.withheld, _, es.detail = held[es.user_id].partition(": ")
     run_id = ledger.start_run(kind="apply", actor=api.actor, manifest=manifest, parent_run=plan_run, argv=argv)
 
     def bump(key: str, n: int = 1) -> None:
@@ -921,7 +946,8 @@ def _withhold(ledger: Ledger, run_id: str, actor: str, es: ExecSet, reasons: dic
         why = reasons.get(r["row_id"]) or (es.withheld if not reasons else "with_set")
         ledger.event(run_id, actor, **_common(r), action="gate", outcome="withheld", before=befores.get(r["row_id"]),
                      evidence_url=r["evidence_url"], approval_ref=approval_ref(r, es.approval_id),
-                     reason=why if why == es.withheld else f"{why} (set withheld: {es.withheld})")
+                     reason=(why if why == es.withheld else f"{why} (set withheld: {es.withheld})")
+                     + (f": {es.detail}" if es.detail else ""))
         bump(f"withheld:{why}")
     for p in es.unknown:
         ledger.event(run_id, actor, row_id=_pair_row_id(p), user_id=es.user_id or None, profile_id=p["profileId"],

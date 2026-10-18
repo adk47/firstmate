@@ -21,7 +21,7 @@ Subject: About your {role} credit on "{track_title}"
 ```
 Hi {first_name},
 
-I'm Caroline from Muso support. The public credits for "{track_title}" by {artist_name} name {other_names} for {role} ({evidence_source}: {evidence_url}), so we have removed the {role} credit from your profile.
+I'm Caroline from Muso support. The public credits for "{track_title}" by {artist_name} name {other_names} for {role} ({evidence_source}: {evidence_url}[; also named in {corroboration_url}]), so we have removed the {role} credit from your profile.
 
 If you did this work, reply to this message with one document that shows it, for example an invoice, a work order, or an email from the artist, label or studio that names the track and your role. If the document checks out, we will put the credit back. Your other credits are not affected.
 
@@ -39,7 +39,7 @@ Subject: About {n} of your credits on Muso
 Hi {first_name},
 
 I'm Caroline from Muso support. The public credits name someone else for these roles, so we have removed them from your profile:
-- {role} on "{track_title}" by {artist_name}: {other_names} ({evidence_source}: {evidence_url})
+- {role} on "{track_title}" by {artist_name}: {other_names} ({evidence_source}: {evidence_url}[; also named in {corroboration_url}])
 - ...
 
 If you did this work, reply ... (as above)
@@ -53,6 +53,12 @@ If you did this work, reply ... (as above)
   "Spotify and Tidal credits" when a current Spotify or Tidal credit stands alone. Jaxsta
   and MLC never stand alone.
 - `{other_names}` are only the names quoted in the row's recorded evidence note.
+- A row may carry a corroborating page (`evidence.corroboration`, e.g. a press article). It
+  is never called a "public credits page" and never stands alone: the cite becomes
+  `({evidence_source}: {evidence_url}; also named in {corroboration_url})`, e.g. "(Tidal
+  credits: https://listen.tidal.com/track/527926451; also named in https://stereobeso.com/…)"
+  (Fable v3, row 8999a707). The structured credits file carries `corroboration_url` (empty
+  when none); the gate's renderer applies this rule, not a human.
 - One line per track title + artist + role: two credit requests for the same credit (e.g.
   two request ids for "Autentica" by Manuel Medrano) are one line. When that leaves one
   line, the one-credit copy is used. One message per user.
