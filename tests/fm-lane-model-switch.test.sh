@@ -245,7 +245,7 @@ test_clean_switch_verifies_records_and_kicks() {
   screen_json "$SCREENS/5.json" 'previous output' 'Opus 5 · 1M context' '❯'
   printf '7,37 * * * *\n' > "$DATA/lane-f/crons"
   run_switch lane-f 'opus[1m]'
-  expect_code 0 "$RC" "a clean lane must switch"
+  expect_code 0 "$RC" "a clean lane must switch"$'\n'"$OUT"
   assert_contains "$OUT" "switched: lane-f opus -> opus[1m]" "the switch must be reported with before and after"
   assert_contains "$OUT" "kicked:" "the lane must be kicked back to work"
   assert_contains "$OUT" "ticks:   7,37 * * * *" "the lane's recorded cron expression must be printed verbatim"

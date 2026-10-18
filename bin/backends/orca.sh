@@ -165,6 +165,46 @@ fm_backend_orca_terminal_create() {  # <worktree-id> <title>
   printf '%s' "$terminal"
 }
 
+# fm_backend_orca_terminal_listed: whether Orca's live terminal inventory still
+# lists <terminal-id>. Returns 0 when it is listed; 1 only when a ready runtime
+# returned a complete inventory that omits it AND `orca terminal show` answers
+# terminal_handle_stale for it; 2 for anything else (runtime not ready, list
+# unreadable, malformed, truncated, a totalCount mismatch, an incomplete host
+# census, or a show that does not report the handle stale), so a partial or
+# ambiguous inventory is never mistaken for absence.
+# The host-census rule mirrors Orca's own hostScopeCensusIsComplete: hostScope
+# must be present with at least one host id, and omittedHostIds may name only
+# `runtime:` ids, which Orca deliberately over-reports for unpaired servers.
+# docs/verification/runtime-backends.md "Orca" records the real-Orca evidence.
+fm_backend_orca_terminal_listed() {  # <terminal-id>
+  local terminal=${1:-} out rc
+  [ -n "$terminal" ] || return 2
+  fm_backend_orca_runtime_check >/dev/null 2>&1 || return 2
+  out=$(orca terminal list --json --limit 100000 2>/dev/null) || return 2
+  rc=0
+  printf '%s' "$out" | node -e '
+const fs = require("fs");
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (err) { process.exit(2); }
+if (!data || data.ok !== true || !data.result || !Array.isArray(data.result.terminals)) process.exit(2);
+const r = data.result;
+if (r.truncated !== false || r.totalCount !== r.terminals.length) process.exit(2);
+const hs = r.hostScope;
+if (!hs || !Array.isArray(hs.hostIds) || hs.hostIds.length === 0) process.exit(2);
+if (!hs.hostIds.every((h) => typeof h === "string" && h.length > 0)) process.exit(2);
+const omitted = hs.omittedHostIds === undefined ? [] : hs.omittedHostIds;
+if (!Array.isArray(omitted) || !omitted.every((h) => typeof h === "string" && h.startsWith("runtime:"))) process.exit(2);
+process.exit(r.terminals.some((t) => t && t.handle === process.argv[1]) ? 0 : 1);
+' "$terminal" || rc=$?
+  [ "$rc" -eq 1 ] || return "$rc"
+  # The stale-handle read is the classifier's own (fm_backend_orca_terminal_pty_id
+  # returns 3 only for Orca's terminal_handle_stale answer).
+  rc=0
+  fm_backend_orca_terminal_pty_id "$terminal" >/dev/null || rc=$?
+  [ "$rc" -eq 3 ] && return 1
+  return 2
+}
+
 fm_backend_orca_send_text_line() {  # <terminal-id> <text>
   local terminal=$1 text=$2
   fm_backend_orca_tool_check || return 1
@@ -284,8 +324,16 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
     "$terminal" "$retries" "$sleep_s"
 }
 
+# fm_backend_orca_kill: close one recorded task terminal. A missing CLI is a
+# close that was never even attempted, not an endpoint proven gone - with no
+# CLI there is no read that could show the terminal absent - so it reports the
+# failure its tool check already named instead of a success. The close call
+# itself stays best-effort: whether an accepted-then-failed close left the
+# terminal alive is not yet decidable without a presence re-read proven
+# against the real Orca binary (docs/verification/runtime-backends.md
+# "Endpoint close").
 fm_backend_orca_kill() {  # <terminal-id>
-  fm_backend_orca_tool_check || return 0
+  fm_backend_orca_tool_check || return 1
   orca terminal close --terminal "$1" --json >/dev/null 2>&1 || true
 }
 

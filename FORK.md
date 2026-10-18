@@ -1,0 +1,26 @@
+# Fork features
+
+This fork (`adk47/firstmate`) tracks upstream [`kunchenguid/firstmate`](https://github.com/kunchenguid/firstmate) and carries the local changes below.
+Each row names the owner file, why the fork keeps it, and whether it is meant to go upstream.
+Keep this table current in the same change that adds, removes, or upstreams a fork feature.
+
+| Feature | Owner | Why the fork keeps it | Upstream status |
+| --- | --- | --- | --- |
+| No-fork status-log fold, timestamp-first status lines, bounded reads | `bin/fm-classify-lib.sh` | Upstream's per-line fold forks a subshell per line; multi-megabyte lane logs made drains and session start take minutes | Candidate PR |
+| Fleet-size watcher liveness and restart attach | `bin/fm-watch.sh`, `bin/fm-watch-arm.sh`, `bin/fm-wake-lib.sh` | Polls of ~80 tasks aged the beacon past its grace | Candidate PR |
+| Bounded heartbeat folds, snapshot deadline, single-flight home summary | `bin/fm-watch.sh`, `bin/fm-fleet-snapshot.sh`, `bin/fm-home-summary-refresh.sh` | Fleet-size stalls of the heartbeat and snapshot | Candidate PR |
+| Tool-update wakes deduped by finding identity | `bin/fm-tool-update-check.sh` | Reworded findings re-woke firstmate | Candidate PR |
+| Pi wake fold under an unconsumed follow-up | `.pi/extensions/fm-primary-pi-watch.ts` | Stacked follow-up doorbells | Candidate PR |
+| Orca relaunch of a terminal Orca no longer lists | `bin/fm-spawn.sh`, `bin/backends/orca.sh` | Orca tasks could not be resumed after a host or Orca restart | Candidate PR |
+| Gateway-503 keep-alive | `bin/fm-gateway-retry-lib.sh`, `docs/gateway-keepalive.md` | Workers idled by a pooled-gateway 503 were escalated as wedges | Candidate PR |
+| `/roster` fleet matrix | `bin/fm-roster.sh`, `.agents/skills/roster/` | Captain-requested fleet view | Candidate PR |
+| Sentry watch | `bin/fm-sentry-watch.sh` | Muso production alerting | Fork-only until upstream has a generic armed-check liveness line |
+| Post-merge change watch | `bin/fm-change-watch.sh` | Kubernetes deploy regression watch | Fork-only until upstream has a post-merge hook |
+| DeepSeek lane gateway and lane model switch | `bin/fm-deepseek-gateway.sh`, `bin/fm-lane-model-switch.sh`, `docs/deepseek-lane-gateway.md` | Serves DeepSeek V4.1 Flash to Claude Code lanes | Fork-only |
+| Firstmate chair sentinel and flip | `bin/fm-chair-*.sh` | Pi+Fable to SuperGrok supervisor failover | Fork-only |
+| Fable runway monitor | `bin/fm-fable-runway*.sh`, `docs/runbooks/supervisor-failover-grok.md` | Wakes before the Fable supervisor runs out | Fork-only |
+
+Not in tracked files, by design:
+
+- The house-wiki rule for workers lives in each home's `config/brief-include.md`, which `bin/fm-brief.sh` appends to ship and scout briefs; the chair's copy lives in that home's `data/captain.md` and in `~/.pi/agent/AGENTS.md`.
+- The no-mistakes 1.75.2 upgrade evaluation was dropped as stale; the installed version is newer.
