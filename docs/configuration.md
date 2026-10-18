@@ -667,7 +667,8 @@ It exists because a gateway outage is a fleet event: on 2026-10-18 fifteen worke
 Its header owns the exact stall rules, the gateway probe, and the record format; this section owns the configuration and the operator contract.
 
 A live worker is stalled when its pane shows an upstream or gateway error line that holds across two polls, or when it reads busy while neither its token counter nor its pane has moved for the no-progress interval.
-An episode opens when at least the minimum number of live workers are stalled at once: the check prints one line naming every stalled worker, its reason, and the gateway's own condition, reminds while the episode holds, pages the captain once the episode has held the page interval, and prints a recovered line when it ends.
+A worker waiting on firstmate or on its own pipeline is not stalled: before a flagged worker counts, it is read once more through `bin/fm-crew-state.sh`, and one that reads parked, paused, blocked, done, or failed, one whose newest status event declares needs-decision, blocked, or paused, or a no-progress one whose no-mistakes run owns its current state is left out.
+An episode opens when at least the minimum number of live workers are stalled at once: the check prints one line naming every stalled worker and its reason, plus the gateway's condition as the likely cause when a stalled pane actually shows a gateway error, reminds while the episode holds, pages the captain once the episode has held the page interval, and prints a recovered line when it ends.
 The same poll probes the local CLIProxyAPI gateway read-only and reports, on onset and on clearing, a gateway that does not answer, an enabled account whose access token expires within the window without refreshing, and a high 5xx-or-401 error rate in its log.
 A home with no gateway inventory and nothing answering at the gateway URL runs no CLIProxyAPI, and that is not a condition.
 

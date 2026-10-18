@@ -38,6 +38,19 @@
 #                  has moved for no_progress_secs. Both are required, because a
 #                  long silent tool call legitimately holds the counter still.
 #
+# WAITING IS NOT STALLED. A worker that is waiting on firstmate or on its own
+# pipeline is quiet by design, so every worker the rules above flag is read once
+# more, through bin/fm-crew-state.sh (bounded, and only for those candidates),
+# before it counts (inside what the captures left of a 26-second poll budget; a
+# candidate whose state could not be read in time counts as flagged). A worker
+# that reads parked, paused, blocked, done, or failed
+# is excluded, and so is one whose newest status-log event declares
+# needs-decision, blocked, or paused: a busy pane makes fm-crew-state report
+# working without consulting the log, and that declared wait is exactly what a
+# crew parked at a decision leaves behind. A no-progress candidate whose current
+# state comes from its no-mistakes run-step is excluded too, because the
+# pipeline, not the agent, is doing the work its quiet pane waits on.
+#
 # THE FLEET. A stall opens an episode when at least min_workers (default 3) live
 # workers are stalled at once. The check prints one line on the onset, naming
 # every stalled worker and its reason plus the gateway probe below; it reminds
@@ -66,7 +79,9 @@
 #              below half of either bound, so a hovering rate does not flap.
 #
 # Each gateway condition prints on its onset and once more when it clears, and
-# rides on every fleet-stall line as the likely cause. A home whose auth
+# rides on a fleet-stall line as the likely cause only when at least one stalled
+# worker shows a gateway error: an account that expired hours ago does not
+# explain workers that merely stopped moving. A home whose auth
 # inventory is absent and whose URL does not answer runs no CLIProxyAPI, which
 # is not a condition; FM_FLEET_STALL_PROXY=off disables the probe.
 #
@@ -98,7 +113,8 @@
 # FM_CHECK_TIMEOUT; a worker not captured in time is simply not counted.
 #
 # Test seams: FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, FM_FLEET_STALL_NOW (frozen
-# clock), and FM_FLEET_STALL_CAPTURE_DIR, a directory of <id>.cap pane texts and
+# clock), FM_FLEET_STALL_CREW_STATE_BIN (the current-state reader, default
+# bin/fm-crew-state.sh), and FM_FLEET_STALL_CAPTURE_DIR, a directory of <id>.cap pane texts and
 # <id>.busy verdicts used instead of live captures (a missing .cap is a gone
 # endpoint). osascript is resolved from PATH.
 set -u
@@ -124,6 +140,8 @@ CHECK_ID='fleet-stall'
 RECORD="$STATE/.fleet-stall.json"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 CAPTURE_DEADLINE_SECS=18
+# The whole poll, captures and current-state reads together, ends inside this.
+POLL_BUDGET_SECS=26
 MAX_LINE=1500
 
 usage() {
@@ -308,10 +326,31 @@ EOF
   rm -f "$out"/*.tmp 2>/dev/null || true
 }
 
+# crew_states <capture-dir> <ids>: the current state of each stall candidate,
+# written as <id>.crew, all at once and inside one bound. A reader that times
+# out leaves no file, and the candidate then counts as it would have.
+crew_states() {
+  local dir=$1 ids=$2 bin id bound
+  bin=${FM_FLEET_STALL_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}
+  [ -n "$ids" ] && [ -x "$bin" ] || return 0
+  # What the captures left of the poll budget, at most 12 seconds.
+  bound=$((POLL_BUDGET_SECS - SECONDS))
+  [ "$bound" -le 12 ] || bound=12
+  [ "$bound" -ge 2 ] || return 0
+  for id in $ids; do
+    (
+      FM_CREW_STATE_NM_TIMEOUT=4 fm_run_timed "$bound" "$bin" "$id" > "$dir/$id.crew.tmp" 2>/dev/null \
+        && mv -f "$dir/$id.crew.tmp" "$dir/$id.crew"
+      rm -f "$dir/$id.crew.tmp"
+    ) &
+  done
+  wait 2>/dev/null || true
+}
+
 notify_macos() {  # <text>
   command -v osascript >/dev/null 2>&1 || return 0
   fm_run_timed 10 osascript -e \
-    "display notification \"$(printf '%s' "$1" | tr -d '"\\' | cut -c1-200)\" with title \"Firstmate: fleet stalled\" sound name \"Submarine\"" \
+    "display notification \"$(printf '%s' "$1" | tr -d '"\134' | cut -c1-200)\" with title \"Firstmate: fleet stalled\" sound name \"Submarine\"" \
     >/dev/null 2>&1 || true
 }
 
@@ -618,6 +657,8 @@ def action_status():
     print("live workers: %s, stalled: %s" % (rec.get("live", 0), len(rec.get("stalled") or {})))
     for wid, reason in sorted((rec.get("stalled") or {}).items()):
         print("  %s: %s" % (wid, reason))
+    for wid, why in sorted((rec.get("waiting") or {}).items()):
+        print("  %s: quiet but waiting (%s), not counted" % (wid, why))
     ep = rec.get("episode")
     if ep:
         print("episode: open %s, paged=%s" % (fmt_age(NOW - ep.get("since", NOW)), "yes" if ep.get("paged") else "no"))
@@ -627,8 +668,48 @@ def action_status():
         print("gateway: %s" % msg)
 
 
-def action_check():
-    rec = load_record()
+WAITING_STATES = ("parked", "paused", "blocked", "done", "failed")
+DECLARED_WAIT = re.compile(r"^(needs-decision|blocked|paused)\b")
+
+
+def crew_state(wid):
+    """(state, source) from the candidate's fm-crew-state.sh line, or None."""
+    try:
+        with open(os.path.join(DIR, wid + ".crew"), errors="replace") as f:
+            line = f.readline()
+    except OSError:
+        return None
+    m = re.match(r"state:\s*(\S+)\s*\S*\s*source:\s*(\S+)", line)
+    return (m.group(1), m.group(2)) if m else None
+
+
+def declared_wait(wid):
+    """The verb of the newest status-log event when it declares a wait."""
+    path = os.path.join(E.get("FS_STATE", ""), wid + ".status")
+    text = tail_bytes(path, 8192)
+    if not text:
+        return None
+    for line in reversed(text.splitlines()):
+        if line.strip():
+            m = DECLARED_WAIT.match(line.strip())
+            return m.group(1) if m else None
+    return None
+
+
+def waiting_reason(wid, reason):
+    """Why a stall candidate is waiting rather than stalled, or None."""
+    current = crew_state(wid)
+    if current and current[0] in WAITING_STATES:
+        return "current state %s" % current[0]
+    verb = declared_wait(wid)
+    if verb:
+        return "declared %s" % verb
+    if current and current[1] == "run-step" and not reason.startswith("gateway-error"):
+        return "its no-mistakes run is %s" % current[0]
+    return None
+
+
+def classify_all(rec):
     prev_tasks = rec.get("tasks") or {}
     # A worker the capture deadline skipped keeps its history for a day, so a
     # stall it was building is not reset by one missed read.
@@ -653,6 +734,29 @@ def action_check():
         tasks[wid] = cur
         if reason:
             stalled[wid] = reason
+    return tasks, stalled, live
+
+
+def action_candidates():
+    _, stalled, _ = classify_all(load_record())
+    for wid in sorted(stalled):
+        print(wid)
+
+
+def action_check():
+    rec = load_record()
+    tasks, candidates, live = classify_all(rec)
+    stalled = {}
+    waiting = {}
+    for wid, reason in candidates.items():
+        why = waiting_reason(wid, reason)
+        if why:
+            waiting[wid] = why
+        else:
+            stalled[wid] = reason
+    # A gateway condition explains the stall only when a stalled pane shows the
+    # gateway failing; otherwise it is reported on its own, not as the cause.
+    gateway_seen = any(r.startswith("gateway-error") for r in stalled.values())
 
     prev_proxy = rec.get("proxy") or {}
     proxy = probe_proxy(rec)
@@ -667,7 +771,7 @@ def action_check():
         if len(stalled) > 15:
             parts.append("+%d more" % (len(stalled) - 15))
         text = "%d of %d live workers stalled: %s" % (len(stalled), live, "; ".join(parts))
-        if proxy:
+        if proxy and gateway_seen:
             text += " | likely cause: " + "; ".join(proxy[k] for k in sorted(proxy))
         return text
 
@@ -689,7 +793,7 @@ def action_check():
                          "If firstmate has not acted, open the firstmate chat." % (
                              len(stalled), fmt_age(NOW - ep["since"]),
                              ", ".join(sorted(stalled)[:10]) + (" ..." if len(stalled) > 10 else ""),
-                             ("Likely cause: " + "; ".join(proxy[k] for k in sorted(proxy)) + ". ") if proxy else ""))
+                             ("Likely cause: " + "; ".join(proxy[k] for k in sorted(proxy)) + ". ") if proxy and gateway_seen else ""))
             lines.append("WAKE\tfleet-stall: FLEET-STALL paged the captain after %s: %s" % (
                 fmt_age(NOW - ep["since"]), summary()))
         rec["episode"] = ep
@@ -700,6 +804,7 @@ def action_check():
 
     rec["tasks"] = tasks
     rec["stalled"] = stalled
+    rec["waiting"] = waiting
     rec["live"] = live
     rec["proxy"] = proxy
     save_record(rec)
@@ -709,6 +814,8 @@ def action_check():
 
 if ACTION == "status":
     action_status()
+elif ACTION == "candidates":
+    action_candidates()
 else:
     action_check()
 PY
@@ -724,6 +831,7 @@ action_check() {
     own_dir=1
     capture_all "$dir"
   fi
+  crew_states "$dir" "$(run_engine candidates "$dir" 2>/dev/null)"
   out=$(run_engine check "$dir" 2>/dev/null) || out='WAKE	fleet-stall: could-not-determine the poll engine failed'
   [ "$own_dir" = 0 ] || rm -rf -- "$dir"
   while IFS= read -r line; do
