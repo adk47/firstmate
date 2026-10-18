@@ -201,7 +201,7 @@ test_orca_relaunch_refuses_a_terminal_orca_still_lists() {
   printf '{"handle":"term-other"},{"handle":"term-old"}' > "$case_dir/orca-listed"
   out=$(run_orca_relaunch "$case_dir" "$id"); status=$?
   expect_code 1 "$status" "a relaunch must refuse while Orca still lists the terminal"$'\n'"$out"
-  assert_contains "$out" "still exists" "the refusal should say the terminal still exists"
+  assert_contains "$out" "Orca still lists that terminal" "the refusal should say Orca still lists the terminal"
   assert_not_contains "$(cat "$case_dir/orca-calls" 2>/dev/null)" "create" "no terminal may be created while the old one is listed"
   [ "$(grep '^terminal=' "$case_dir/home/state/$id.meta" | cut -d= -f2-)" = term-old ] \
     || fail "a refused relaunch must leave the recorded terminal unchanged"
@@ -214,7 +214,7 @@ test_orca_relaunch_refuses_when_the_inventory_cannot_be_read() {
   : > "$case_dir/orca-list-fails"
   out=$(run_orca_relaunch "$case_dir" "$id"); status=$?
   expect_code 1 "$status" "an unreadable Orca inventory must refuse"$'\n'"$out"
-  assert_contains "$out" "could not read Orca's terminal inventory" "the refusal should name the unreadable inventory"
+  assert_contains "$out" "terminal inventory was not ready, readable, and complete" "the refusal should name the unreadable inventory"
   assert_not_contains "$(cat "$case_dir/orca-calls" 2>/dev/null)" "create" "an unreadable inventory must never be read as absence"
   pass "orca relaunch never reads an unreadable terminal inventory as a gone terminal"
 }
@@ -226,7 +226,7 @@ test_orca_relaunch_refuses_before_the_runtime_is_ready() {
   : > "$case_dir/orca-runtime-starting"
   out=$(run_orca_relaunch "$case_dir" "$id"); status=$?
   expect_code 1 "$status" "a relaunch must refuse while the Orca runtime is not ready"$'\n'"$out"
-  assert_contains "$out" "could not read Orca's terminal inventory" "the refusal should name the unreadable inventory"
+  assert_contains "$out" "terminal inventory was not ready, readable, and complete" "the refusal should name the unreadable inventory"
   assert_not_contains "$(cat "$case_dir/orca-calls" 2>/dev/null)" "create" "an inventory from a runtime that is not ready must never be read as absence"
   pass "orca relaunch never reads an empty inventory from a runtime that is not ready as a gone terminal"
 }
@@ -238,7 +238,7 @@ test_orca_relaunch_refuses_a_truncated_inventory() {
   : > "$case_dir/orca-list-truncated"
   out=$(run_orca_relaunch "$case_dir" "$id"); status=$?
   expect_code 1 "$status" "a truncated Orca inventory must refuse"$'\n'"$out"
-  assert_contains "$out" "could not read Orca's terminal inventory" "the refusal should name the unreadable inventory"
+  assert_contains "$out" "terminal inventory was not ready, readable, and complete" "the refusal should name the unreadable inventory"
   assert_not_contains "$(cat "$case_dir/orca-calls" 2>/dev/null)" "create" "a truncated inventory must never be read as absence"
   pass "orca relaunch never reads a truncated terminal inventory as a gone terminal"
 }
@@ -264,12 +264,13 @@ test_orca_relaunch_closes_its_fresh_terminal_when_it_refuses_after_creating_it()
 # fake Orca answer is changed by <file>=<content> must refuse with no terminal created.
 orca_relaunch_refuses_on() {
   local name=$1 id=$2 file=$3 content=$4 label=$5 case_dir out status
+  local expect=${6:-terminal inventory was not ready, readable, and complete}
   case_dir=$(make_orca_relaunch_case "$name" "$id")
   : > "$case_dir/orca-listed"
   printf '%s' "$content" > "$case_dir/$file"
   out=$(run_orca_relaunch "$case_dir" "$id"); status=$?
   expect_code 1 "$status" "$label must refuse"$'\n'"$out"
-  assert_contains "$out" "could not read Orca's terminal inventory" "$label: the refusal should name the unproven inventory"
+  assert_contains "$out" "$expect" "$label: the refusal should name what is unproven"
   assert_not_contains "$(cat "$case_dir/orca-calls" 2>/dev/null)" "create" "$label must never be read as absence"
   pass "orca relaunch refuses on $label"
 }
@@ -283,10 +284,14 @@ test_orca_relaunch_refuses_an_incomplete_host_census() {
 }
 
 test_orca_relaunch_refuses_when_show_does_not_report_the_handle_stale() {
+  # The agent-state classifier reads show first, so a show that does not
+  # report the handle stale refuses before any inventory is consulted.
   orca_relaunch_refuses_on showok orca-relaunch-b4 orca-show \
-    '{"ok":true,"result":{"terminal":{"handle":"term-old"}}}' "an unlisted terminal that show still answers"
+    '{"ok":true,"result":{"terminal":{"handle":"term-old"}}}' "an unlisted terminal that show still answers" \
+    "only replaces a terminal Orca no longer has"
   orca_relaunch_refuses_on showother orca-relaunch-b5 orca-show \
-    '{"ok":false,"error":{"code":"runtime_unavailable"}}' "a show error other than terminal_handle_stale"
+    '{"ok":false,"error":{"code":"runtime_unavailable"}}' "a show error other than terminal_handle_stale" \
+    "only replaces a terminal Orca no longer has"
 }
 
 test_orca_relaunch_rebinds_past_a_stale_runtime_omission() {

@@ -384,7 +384,7 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
           case "$(fm_backend_orca_agent_state "$target")" in
             dead) printf 'dead\t' ;;
             alive) printf 'alive\t' ;;
-            *) printf 'unproven\tOrca still lists that terminal, yet its state could not be classified' ;;
+            *) printf 'unproven\tOrca still lists that terminal although its handle read stale, so its state is contradictory' ;;
           esac
           ;;
         *) printf 'unproven\tOrca'"'"'s terminal inventory was not ready, readable, and complete for the whole host, or did not report that terminal'"'"'s handle stale, so its absence is not proven' ;;

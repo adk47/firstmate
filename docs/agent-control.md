@@ -97,7 +97,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 A Herdr pane or workspace can be destroyed out from under a live task by churn or a session restart.
 The task's worktree, branch, commits, and uncommitted changes all survive that; only its terminal does not.
 
-**Reclaim is Herdr-only through this plane** (Orca's narrower launch-owner rebind is below). On tmux, both verbs refuse a `missing` endpoint, leaving it exactly as deadlocked as it was before this mechanism existed - deliberately, and with the reason stated rather than guessed past.
+**Reclaim is Herdr-only through this plane** (Orca's narrower launch-owner rebind is below, and `exit` reports a proven-gone Orca terminal as gone). On tmux, both verbs refuse a `missing` endpoint, leaving it exactly as deadlocked as it was before this mechanism existed - deliberately, and with the reason stated rather than guessed past.
 
 Two endpoint verdicts are agent-free, and both license a relaunch:
 
@@ -115,8 +115,9 @@ An unreachable endpoint can still hold the live agent a rebind would duplicate, 
 - **tmux cannot.** `list-windows -a` describes only the tmux server the *current process* addresses (its `TMUX_TMPDIR`/socket), and a task record carries no socket identity for its endpoint.
   A different but running server would answer "not anywhere" about a window it was never able to see, so a server-wide read cannot tell a destroyed window from one on a server this process cannot address.
   There is no read available that closes that gap, so tmux always refuses - for a renamed session, a moved window, a foreign socket, and a dead server alike.
-- **Orca proves only absence, and only at the launch owner.** Orca has no recovery-grade classifier for a live terminal, so `bin/fm-control.sh` still refuses an Orca task, and `bin/fm-spawn.sh --relaunch` refuses every terminal Orca still lists.
-  It rebinds only when `orca status` reports a ready runtime, a successful, well-formed, untruncated `orca terminal list` covering every host no longer lists the recorded terminal, and the recorded `orca_worktree_id` still resolves to the task's worktree; any other inventory refuses.
+- **Orca can prove it, and never adopts.** Its classifier reads `missing` only on Orca's own `terminal_handle_stale` answer, and absence additionally needs `orca status` to report a ready runtime and a successful, well-formed, untruncated `orca terminal list` covering every host to omit the recorded terminal; a terminal still listed is reclassified, and any other inventory stays unproven.
+  `exit` reports a proven-gone Orca terminal as gone, but Orca's in-place relaunch is unproven, so `bin/fm-control.sh relaunch` still refuses an Orca task and `bin/fm-spawn.sh --relaunch` refuses every live or shell-only terminal.
+  The launch owner rebinds only a proven-gone terminal, and only when the recorded `orca_worktree_id` still resolves to the task's worktree.
   A refusal after the fresh terminal is created closes that terminal, so a retry never leaves a stray one behind.
 
 Every transient or self-contradicting read stays `unreadable` or `ambiguous` and still refuses, so a momentary backend failure can never be mistaken for absence.
@@ -175,7 +176,7 @@ The worktree and the task's records are unaffected either way.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `exit`'s composer-empty check, above, is itself a fail-closed boundary that `relaunch` inherits by stopping the old agent through `exit`.
-- `fm-spawn --relaunch` independently refuses unless the endpoint is positively agent-free - either a `dead` endpoint that survives, or a Herdr endpoint proven gone by the absence proof above - so a replacement can never join a live agent.
+- `fm-spawn --relaunch` independently refuses unless the endpoint is positively agent-free - either a `dead` endpoint that survives (never on Orca), or a Herdr or Orca endpoint proven gone by the absence proof above - so a replacement can never join a live agent.
   An `alive`, `ambiguous`, or `unreadable` verdict all refuse, and so does any endpoint whose absence is not provable, which on tmux is every `missing`; absence is claimed only from positive evidence of it.
   It also requires the shell to be in the recorded worktree: every backend but Orca (which owns its own task worktree with no current-path probe) gets one explicit `cd` to the recorded path, then a pre-launch path read that refuses before any harness starts unless it confirms the endpoint is sitting in the recorded copy.
 

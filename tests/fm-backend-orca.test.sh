@@ -588,7 +588,7 @@ spawn_orca_task_for_relaunch() {  # <id> <name> -> sets RL_* paths
   orca_case "$name"
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-rl"}}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-rl","path":"%s"},"terminal":{"handle":"term-old"}}}\n' "$RL_WT" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-rl::%s","path":"%s"},"terminal":{"handle":"term-old"}}}\n' "$RL_WT" "$RL_WT" > "$RESP/3.out"
   out=$(run_relaunch_spawn "$id" "$RL_PROJ" claude --mode no-mistakes --yolo off --backend orca) \
     || fail "fixture spawn for the Orca relaunch failed: $out"
   assert_grep "terminal=term-old" "$RL_STATE/$id.meta" "fixture spawn did not record its terminal"
@@ -611,17 +611,21 @@ test_relaunch_replaces_a_gone_orca_terminal_with_a_new_one() {
   spawn_orca_task_for_relaunch "$id" relaunch-gone
   spawn_gen=$(grep '^spawn_gen=' "$RL_STATE/$id.meta")
   reset_orca_responses
+  # The classifier's stale read, then the absence proof: a complete host-wide
+  # inventory without the terminal and a second stale read.
   printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal_handle_stale"}}\n' > "$RESP/1.out"
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-rl","path":"%s"}}}\n' "$RL_WT" > "$RESP/2.out"
-  printf '{"ok":true,"result":{"terminal":{"handle":"term-new"}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-other"}],"hostScope":{"hostIds":["local"],"omittedHostIds":[]},"totalCount":1,"truncated":false}}\n' > "$RESP/2.out"
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal_handle_stale"}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-rl::%s","path":"%s"}}}\n' "$RL_WT" "$RL_WT" > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-new"}}}\n' > "$RESP/5.out"
   out=$(run_relaunch_spawn "$id" --relaunch)
   expect_code 0 $? "relaunching a task whose Orca terminal is gone should succeed"$'\n'"$out"
   assert_grep "terminal=term-new" "$RL_STATE/$id.meta" "the republished record should name the new terminal"
-  assert_grep "orca_worktree_id=wt-rl" "$RL_STATE/$id.meta" "the relaunch must keep the recorded Orca worktree"
+  assert_grep "orca_worktree_id=wt-rl::$RL_WT" "$RL_STATE/$id.meta" "the relaunch must keep the recorded Orca worktree"
   assert_grep "worktree=$RL_WT" "$RL_STATE/$id.meta" "the relaunch must keep the recorded worktree"
   [ "$(grep '^spawn_gen=' "$RL_STATE/$id.meta")" != "$spawn_gen" ] \
     || fail "a relaunch must record a new incarnation"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create'$'\x1f''--worktree'$'\x1f''id:wt-rl' \
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create'$'\x1f''--worktree'$'\x1f''id:wt-rl::'"$RL_WT" \
     "the replacement terminal should be created in the recorded Orca worktree"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-new' \
     "the replacement agent should launch in the new terminal"

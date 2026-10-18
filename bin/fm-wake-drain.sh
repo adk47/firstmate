@@ -375,11 +375,10 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
     event_endpoint=$FM_STATUS_SNAPSHOT_EVENT_ENDPOINT
     [ "$receipt" -lt "$event_endpoint" ] || continue
     status_is_captain_relevant "$event" || continue
-    status_line_verb_core "$event"
-    verb=$_FM_STATUS_VERB
+    status_line_verb "$event" verb
     case "$verb" in
       needs-decision|blocked)
-        if _fm_decision_key_core "$event"; then key=$_FM_DECISION_KEY; else key=; fi
+        if _fm_decision_key_v "$event"; then key=$_FM_DECISION_KEY; else key=; fi
         # Parseable decisions belong exclusively to the durable fold. That
         # includes reserved-key transitions the fold rejects; resurfacing one
         # here would let a foreign writer bypass the namespace guard. A line

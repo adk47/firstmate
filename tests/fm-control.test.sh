@@ -594,6 +594,27 @@ test_unverified_state_backends_refuse_stop_verbs() {
   pass "fm-control: a backend that cannot prove an agent stopped refuses exit and relaunch"
 }
 
+# Orca absence is proven only when a complete host-wide inventory omits the
+# terminal; a still-listed terminal is reclassified, and anything else refuses.
+test_orca_absence_verdict_needs_a_complete_inventory() {
+  local got
+  got=$(
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-backend.sh" || exit 1
+    fm_backend_source orca || exit 1
+    fm_backend_orca_terminal_listed() { return "$ORCA_LISTED_RC"; }
+    fm_backend_orca_agent_state() { printf '%s' "$ORCA_STATE"; }
+    for case in "1 x" "0 dead" "0 alive" "0 missing" "2 x"; do
+      ORCA_LISTED_RC=${case%% *} ORCA_STATE=${case#* }
+      verdict=$(fm_control_endpoint_absence_verdict orca term-1)
+      printf '%s=%s\n' "$case" "${verdict%%$'\t'*}"
+    done
+  )
+  [ "$got" = $'1 x=gone\n0 dead=dead\n0 alive=alive\n0 missing=unproven\n2 x=unproven' ] \
+    || fail "orca absence verdicts differ:"$'\n'"$got"
+  pass "fm-control-lib: Orca absence needs a complete inventory that omits the terminal"
+}
+
 test_state_verified_backends_are_exactly_tmux_herdr_and_orca() {
   local backend
   for backend in tmux herdr orca; do
@@ -1196,6 +1217,7 @@ test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_herdr_and_orca
+test_orca_absence_verdict_needs_a_complete_inventory
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused

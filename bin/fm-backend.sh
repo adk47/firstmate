@@ -638,7 +638,7 @@ fm_backend_source() {  # <name>
       set -- fm-backend-hometag-lib.sh fm-composer-lib.sh
       ;;
     orca)
-      set -- fm-composer-lib.sh
+      set -- fm-composer-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh
       ;;
     cmux)
       set -- fm-backend-hometag-lib.sh fm-composer-lib.sh

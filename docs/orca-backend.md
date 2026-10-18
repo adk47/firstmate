@@ -61,7 +61,7 @@ The recovery-grade agent state that `fm-control.sh exit` needs comes from the pa
 Orca keeps a terminal's `agentIdentity` and agent title after the agent exits back to the shell, so those fields never prove a stop.
 `orca terminal show` names the terminal's pty, Orca's own host process sweep (`orca diagnostics memory`) names that pty's root pid, and the shared harness-name classifier reads every process below it: a harness is `alive`, only shells is `dead`, anything else is `ambiguous`, and Orca's stale-handle answer is `missing` (`bin/backends/orca.sh` owns the mechanics).
 In-place `relaunch` stays refused on Orca until a replacement launch into the same terminal is proven.
-When Orca reports a task's terminal gone (`missing`, as after an Orca or host restart), `bin/fm-spawn.sh <id> --relaunch` launches the replacement in a new terminal in the task's recorded Orca worktree and republishes the record with it; a live or shell-only terminal still refuses.
+When Orca reports a task's terminal gone (`missing`, as after an Orca or host restart) and a complete host-wide `orca terminal list` no longer lists it, `bin/fm-spawn.sh <id> --relaunch` launches the replacement in a new terminal in the task's recorded Orca worktree and republishes the record with it; a live or shell-only terminal, or an incomplete inventory, still refuses ([`docs/agent-control.md`](agent-control.md) owns the absence proof).
 
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.

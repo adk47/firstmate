@@ -57,6 +57,7 @@ How it stays faithful to the owners it does not restate:
 """
 
 import argparse
+import calendar
 import concurrent.futures
 import hashlib
 import json
@@ -230,6 +231,58 @@ def status_line_note(line):
                 n = n[len(prefix):]
             n = n.lstrip(SPACE)
     return n
+
+
+def status_tip_is_current_line(path, tip):
+    """True when bin/fm-classify-lib.sh's status_current_line must equal the tip.
+
+    That reader prefers the newest open needs-decision or blocked record, then
+    a declared wait found behind trailing resolved lines, then the tip. A log
+    that never states either opening verb folds to an empty open set, and a tip
+    that is not a resolved line needs no declared-wait scan, so the tip is the
+    current line. Anything else is left to fm-crew-state.sh.
+    """
+    resolve = os.environ.get("FM_CLASSIFY_RESOLVE_VERB") or "resolved"
+    if status_line_verb(tip) == resolve:
+        return False
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return False
+    return b"needs-decision" not in data and b"blocked" not in data
+
+
+def status_line_age(line, now_epoch):
+    """age_seconds for a status line's [at=<epoch>] stamp, as status_event_json."""
+    if ":" not in line:
+        return None
+    head = line.split(":", 1)[0]
+    i = head.find("[at=")
+    if i < 0:
+        return None
+    rest = head[i + 4:]
+    if "]" not in rest:
+        return None
+    value, after = rest.split("]", 1)
+    if "[at=" in after:
+        return None
+    if not value.isdigit() or not value.isascii() or (len(value) > 1 and value[0] == "0") or len(value) > 12:
+        return None
+    epoch = int(value)
+    if now_epoch is None or epoch > now_epoch:
+        return None
+    return now_epoch - epoch
+
+
+def snapshot_epoch(now):
+    raw = os.environ.get("SNAPSHOT_EPOCH", "")
+    if raw.isdigit():
+        return int(raw)
+    try:
+        return int(calendar.timegm(time.strptime(now, "%Y-%m-%dT%H:%M:%SZ")))
+    except ValueError:
+        return int(time.time())
 
 
 def map_log_state(line):
@@ -494,6 +547,7 @@ class Snapshot:
         self.config = os.environ.get("CONFIG", "")
         self.projects = os.environ.get("PROJECTS", "")
         self.now = os.environ["SNAPSHOT_NOW"]
+        self.now_epoch = snapshot_epoch(self.now)
         self.crew_timeout = env_int("FM_SNAPSHOT_CREW_STATE_TIMEOUT", 4)
         self.concurrency = env_int("FM_SNAPSHOT_LOCAL_READ_CONCURRENCY", 16)
         self.prefetch_timeout = env_int("FM_SNAPSHOT_PREFETCH_TIMEOUT", 45)
@@ -744,6 +798,15 @@ class Snapshot:
             if state != "idle":
                 return crew("unknown", "pane", "harness state unavailable (%s)" % verdict)
         line = last_status_line(t["status_capture"]) if os.path.isfile(t["status_capture"]) else ""
+        # fm-crew-state.sh reads status_current_line, not the log's tip: an open
+        # decision anywhere in the log, or a trailing resolved line (which hands
+        # off to the declared-wait scan), can make the current line differ from
+        # the tip. Only a log with neither is decided here.
+        if line and not status_tip_is_current_line(t["status_capture"], line):
+            return None
+        # A ship's done claim passes bin/fm-dod-lib.sh's named-head gate first.
+        if kind == "ship" and status_line_verb(line) == "done":
+            return None
         if status_line_verb(line):
             log_state = map_log_state(line)
             if log_state != "unknown":
@@ -884,7 +947,8 @@ class Snapshot:
         raw = last_status_line(t["status_capture"]) if present else ""
         event = {"path": os.path.join(self.state, tid + ".status"), "present": present,
                  "kind": "event_history",
-                 "last_event": {"state": status_line_verb(raw), "note": status_line_note(raw), "raw": raw}}
+                 "last_event": {"state": status_line_verb(raw), "note": status_line_note(raw), "raw": raw,
+                                "age_seconds": status_line_age(raw, self.now_epoch) if present else None}}
         try:
             folded = read_text(t["opendecisions"])
         except OSError:
@@ -938,6 +1002,7 @@ class Snapshot:
             "harness": meta_get(meta, "harness"),
             "mode": meta_get(meta, "mode"),
             "yolo": meta_get(meta, "yolo"),
+            "branch": meta_get(meta, "branch") or None,
             "project": meta_get(meta, "project"),
             "spawn_gen": meta_get(meta, "spawn_gen") or None,
             "backend": t["backend"],
@@ -953,7 +1018,7 @@ class Snapshot:
             "current_state": cur,
             "endpoint": {"target": t["target"] or None, "exists": exists, "agent_alive": alive,
                          "status": endpoint_status, "observed_at": self.now, "freshness": "fresh"},
-            "pr": {"url": pr or None, "source": pr_source},
+            "pr": {"url": pr or None, "source": pr_source, "head": meta_get(meta, "pr_head") or None},
             "hints": {
                 "pending_decision": any(d["verb"] == "needs-decision" for d in decisions),
                 "blocked_event": any(d["verb"] == "blocked" for d in decisions),

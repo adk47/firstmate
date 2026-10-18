@@ -11,6 +11,10 @@
 # every backend so the decision cannot drift.
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
+# Shared, backend-neutral harness-process identity, used by the recovery-grade
+# agent-state classifier below.
+# shellcheck source=bin/fm-agent-process-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/../fm-agent-process-lib.sh"
 
 fm_backend_orca_tool_check() {
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }
@@ -351,8 +355,8 @@ fm_backend_orca_kill() {  # <terminal-id>
 #      that ptyId to the pty's root pid. A terminal with no swept session is
 #      `unreadable`.
 #   3. One `ps` snapshot gives every descendant of that root. Any descendant
-#      the shared harness-name classifier (the tmux adapter's
-#      fm_backend_tmux_classify_process_name) calls an agent is `alive`; a tree
+#      the shared harness-name classifier (bin/fm-agent-process-lib.sh's
+#      fm_agent_process_classify_name) calls an agent is `alive`; a tree
 #      holding nothing but shells below the root is `dead`; any other
 #      descendant (an unrecognized process that could be a renamed harness) is
 #      `ambiguous`, the same fail-safe fold the tmux adapter applies.
@@ -412,7 +416,6 @@ process.exit(1);
 fm_backend_orca_tree_state() {  # <root-pid>
   local root=$1 snapshot tree pid comm verdict sep=$'\x1f' verdicts=$'\x1f' other=0
   case "$root" in ''|*[!0-9]*) printf 'unreadable'; return 0 ;; esac
-  fm_backend_source tmux || { printf 'unreadable'; return 0; }
   snapshot=$(LC_ALL=C ps -axo pid=,ppid=,comm= 2>/dev/null) || { printf 'unreadable'; return 0; }
   printf '%s\n' "$snapshot" | awk -v r="$root" '$1 == r { found = 1 } END { exit !found }' \
     || { printf 'unreadable'; return 0; }
@@ -441,7 +444,7 @@ fm_backend_orca_tree_state() {  # <root-pid>
       *"$sep$comm=shell$sep"*) verdict=shell ;;
       *"$sep$comm=other$sep"*) verdict=other ;;
       *)
-        verdict=$(fm_backend_tmux_classify_process_name "$comm")
+        verdict=$(fm_agent_process_classify_name "$comm")
         verdicts="$verdicts$comm=$verdict$sep"
         ;;
     esac
