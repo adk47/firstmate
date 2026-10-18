@@ -591,6 +591,7 @@ tests/fm-documentation-audiences.test.sh 732
 tests/fm-extension-binding.test.sh 7398
 tests/fm-fleet-snapshot-impl.test.sh 121000
 tests/fm-fleet-snapshot-view.test.sh 8547
+tests/fm-fleet-stall-check.test.sh 25000
 tests/fm-fleet-sync.test.sh 37749
 tests/fm-gate-refuse.test.sh 4977
 tests/fm-gitignore-config.test.sh 62
