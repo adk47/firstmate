@@ -716,6 +716,18 @@ export class SanitizingIntercomClient implements IntercomClient {
       const toolPass = sanitizeToolLeak(emailPass.body);
       const typoPass = sanitizeTypography(this.helpLinkPass(toolPass.body, params.conversationId));
       const refPass = sanitizeInternalReference(typoPass.body);
+      // A note the gate emptied must not go out as `body: ""`. Closing is the intended
+      // action, so close without a note, and alert: nothing else reports the dropped note.
+      if (refPass.body.trim().length === 0) {
+        const msg = `[intercom:ALERT] [intercom:empty-after-sanitize] conv=${params.conversationId} close note dropped`;
+        try {
+          this.log?.error?.(msg);
+        } catch {
+          try { console.error(msg); } catch { /* noop */ }
+        }
+        const { body: _dropped, ...rest } = params;
+        return this.inner.closeConversation(rest);
+      }
       return this.inner.closeConversation({ ...params, body: refPass.body });
     }
     return this.inner.closeConversation(params);
