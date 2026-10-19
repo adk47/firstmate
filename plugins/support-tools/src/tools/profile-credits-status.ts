@@ -6,7 +6,13 @@ import type { IntercomReader } from "../intercom-client.js";
 import { extractProfileIdFromUrl } from "./profile-lookup.js";
 import { filterCreditsResults } from "./credits-search.js";
 import { deriveConvId } from "./dedupe-check.js";
-import { sanitizeStr, classifyOwnership, type ProfileBody } from "./credit-verification-check.js";
+import {
+  sanitizeStr,
+  classifyOwnership,
+  creditRequestRoles,
+  type CreditRequestItem,
+  type ProfileBody,
+} from "./credit-verification-check.js";
 
 // profile_credits_status — READ-ONLY diagnosis of a customer's credit/profile
 // state for "my credit is missing / on the wrong profile / is there a
@@ -69,6 +75,7 @@ type CreditState =
   | "on_this_profile"
   | "on_other_profile"
   | "pending_verification"
+  | "awaiting_review"
   | "not_found"
   | "not_checked";
 type ClaimState = "unclaimed" | "claimed_same_owner" | "claimed_different_user" | "unresolved";
@@ -78,6 +85,7 @@ type AskClassification =
   | "duplicate_cleanup"
   | "profile_claim"
   | "credit_verification"
+  | "credit_awaiting_review"
   | "unclear";
 type SupportAction =
   | "answer_from_status"
@@ -142,6 +150,11 @@ export interface DiagnosisInput {
   // self-serve routing (claim included) requires it — an owner-undetermined
   // session gets a handoff, never a self-serve suggestion.
   anchor_verified: boolean;
+  // Credits on the resolved profile in status `unverified` (waiting for OUR
+  // review; nothing for the customer to do). undefined/null = not assessed.
+  awaiting_review_count?: number | null;
+  // The awaiting-review read hit its cap: the count is a floor, not exact.
+  awaiting_review_truncated?: boolean;
 }
 
 // Evidence → what the customer is actually asking for. Priority order matters:
@@ -149,6 +162,7 @@ export interface DiagnosisInput {
 // concrete wrong-profile finding beats a generic duplicate observation.
 export function classifyAsk(input: DiagnosisInput): AskClassification {
   if (input.credit_state === "pending_verification") return "credit_verification";
+  if (input.credit_state === "awaiting_review") return "credit_awaiting_review";
   if (input.credit_state === "on_other_profile") return "credit_move";
   if (input.credit_queried && input.credit_state === "not_found") return "credit_add";
   if (input.duplicate_candidates.length > 0) return "duplicate_cleanup";
@@ -162,6 +176,7 @@ export function supportActionFor(input: DiagnosisInput, ask: AskClassification):
   if (input.impersonation_flag) return "human_review";
   switch (ask) {
     case "credit_verification":
+    case "credit_awaiting_review":
       return "answer_from_status";
     case "credit_move":
     case "credit_add":
@@ -185,17 +200,35 @@ export function supportActionFor(input: DiagnosisInput, ask: AskClassification):
 }
 
 export function diagnosisFor(input: DiagnosisInput, ask: AskClassification): string {
+  return baseDiagnosis(input, ask) + awaitingReviewNote(input);
+}
+
+function awaitingReviewNote(input: DiagnosisInput): string {
+  const n = input.awaiting_review_count;
+  if (typeof n !== "number" || n <= 0) return "";
+  const shown = input.awaiting_review_truncated ? `More than ${n}` : `${n}`;
+  return ` ${shown} credit(s) on this profile are awaiting our team's review: they are not missing and the customer does not need to do anything for them right now.`;
+}
+
+function baseDiagnosis(input: DiagnosisInput, ask: AskClassification): string {
   const dupNote =
     input.duplicate_candidates.length > 0
       ? ` ${input.duplicate_candidates.length} same-name profile(s) exist — duplicate CANDIDATES only, never confirmed duplicates (same-name distinct artists are common).`
       : "";
   switch (input.credit_state) {
+    case "awaiting_review":
+      return `The referenced credit was submitted and is waiting for our team to review: it is not missing, and the customer does not need to do anything right now. Do not ask for proof and do not promise a date.${dupNote}`;
     case "pending_verification":
       return `The referenced credit is in the pending verification queue, not missing — it is waiting on review/proof, so route the credit-verification flow.${dupNote}`;
     case "on_other_profile":
       return `The referenced credit exists but is attached to a different profile than the customer's — a credit move needs a human-executed correction.${dupNote}`;
     case "on_this_profile":
       return `The referenced credit is already visible on the resolved profile.${dupNote}`;
+    case "not_checked":
+      if (input.credit_queried) {
+        return `Whether the referenced credit exists or is queued could not be fully assessed (see notes) — do not tell the customer it is missing.${dupNote}`;
+      }
+      break;
     case "not_found":
       return `The referenced credit was not found on the resolved profile${input.duplicate_candidates.length > 0 ? " or the same-name candidates checked" : ""} — likely a credit-add request for a human to review.${dupNote}`;
     default:
@@ -239,7 +272,7 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
     name: "profile_credits_status",
     label: "Profile Credits Status",
     description:
-      "Read-only diagnosis for missing-credit, wrong-profile, duplicate-profile, and did-my-credit-sync questions. Resolves the profile, scans same-name duplicate candidates, checks whether a referenced credit exists (here, on a candidate, or on a stated target profile), and — for the verified sole owner ONLY — reads the pending-verification queue (private data; suppressed for anyone else). " +
+      "Read-only diagnosis for missing-credit, wrong-profile, duplicate-profile, and did-my-credit-sync questions. Resolves the profile, scans same-name duplicate candidates, checks whether a referenced credit exists (here, on a candidate, or on a stated target profile), and — for the verified sole owner ONLY — reads the pending-verification queue and the queue of credits awaiting our team's review (private data; suppressed for anyone else; a failed read is null, never 0). " +
       "Returns a structured diagnosis with the suggested support action (answer, ask for one missing fact, route self-serve claim/consolidate, or a ticket-ready handoff packet). " +
       "It NEVER writes — credit corrections and merges stay on their gated paths. Rate limit: 10 calls / 60 min per session.",
     parameters: Parameters,
@@ -408,6 +441,7 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
         // of the resolved profile — unlike the public catalog facts above,
         // which degrade. A non-owner must not learn whether/what is pending.
         let pending: { count: number; truncated: boolean; referenced_track_pending: boolean } | null = null;
+        let awaiting_review: { count: number; truncated: boolean; referenced_track_awaiting_review: boolean } | null = null;
         if (ownership === "owned") {
           // Fetch one more than surfaced so >MAX profiles are detectable
           // (same truncation guard as credit_verification_check).
@@ -428,6 +462,46 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
             }
           }
           if (!pending) notes.push("pending-verification queue unavailable; sync state was not assessed");
+          // Credits waiting for OUR review (status `unverified`). Read for the
+          // same verified sole owner only, independent of the UVN read. A
+          // failed read stays null: it must never become "nothing is pending"
+          // to the customer.
+          const arResp = await adminClient.get<{ data?: { items?: CreditRequestItem[] } }>(
+            `/api/v3/admin/credit-requests?profilesIds=${encodeURIComponent(profileId)}&status=unverified&limit=${MAX_UVN_CREDITS + 1}`,
+          );
+          const arItems = arResp.ok ? (arResp.data as any)?.data?.items : undefined;
+          if (Array.isArray(arItems)) {
+            const arSurfaced = arItems.slice(0, MAX_UVN_CREDITS) as CreditRequestItem[];
+            const wantedRole = params.credit_role?.trim() ? lc(params.credit_role.trim()) : null;
+            awaiting_review = {
+              count: arSurfaced.length,
+              truncated: arItems.length > MAX_UVN_CREDITS,
+              // Exact title match: a substring would let "Ghost Songs" stand in
+              // for "Ghost Song" and tell the customer the wrong credit is queued.
+              referenced_track_awaiting_review:
+                credit_queried &&
+                arSurfaced.some(
+                  (it) =>
+                    lc(String(it.spotifyTrackTitle ?? "").trim()) === lc(trackTitle) &&
+                    (wantedRole === null || creditRequestRoles(it).some((r) => lc(r) === wantedRole)),
+                ),
+            };
+            if (credit_state === "not_found" && awaiting_review.referenced_track_awaiting_review) {
+              credit_state = "awaiting_review";
+            } else if (credit_state === "not_found" && awaiting_review.truncated) {
+              // Only the first MAX_UVN_CREDITS queued credits were searched, so
+              // "not in the queue" is unproven: never file a credit-add for it.
+              credit_state = "not_checked";
+              notes.push(
+                `more than ${MAX_UVN_CREDITS} credits are awaiting review and only the first ${MAX_UVN_CREDITS} were searched; whether the referenced credit is among them was not assessed, so do NOT tell the customer it is missing`,
+              );
+            }
+          } else {
+            // The referenced credit may be in the unread queue: never route it
+            // as missing (no credit-add handoff) on a failed read.
+            if (credit_state === "not_found") credit_state = "not_checked";
+            notes.push("awaiting-review queue unavailable; do NOT tell the customer nothing is pending");
+          }
         } else {
           notes.push("pending-verification state requires verified profile ownership; not assessed");
         }
@@ -442,6 +516,8 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
           impersonation_flag,
           sole_owner: ownership === "owned",
           anchor_verified: !!trustedEmail,
+          awaiting_review_count: awaiting_review?.count ?? null,
+          awaiting_review_truncated: awaiting_review?.truncated ?? false,
         };
         const ask_classification = classifyAsk(diagInput);
         const support_action = supportActionFor(diagInput, ask_classification);
@@ -471,6 +547,7 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
                   profile_state,
                   credit_state,
                   pending_verification_count: pending?.count ?? null,
+                  awaiting_review_count: awaiting_review?.count ?? null,
                 },
               }
             : null;
@@ -492,6 +569,7 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
             matched_tracks,
             located_on_profile_id: credit_located_on,
             pending,
+            awaiting_review,
           },
           target_profile,
           duplicate_candidates,

@@ -75,6 +75,19 @@ const closeStep = (instruction = "Reply with the result and close the loop. Do n
   instruction,
 });
 
+const creditProofStep: NextStep = {
+  outcome: "run_skill",
+  skill: "customer-credit-verification",
+  instruction: "Ask for proof ONLY if none was given before (customer-credit-verification skill Step 2 no-re-ask rule), once, in one message covering all pending credits. Otherwise do not ask: still run the skill's Step 3 contradiction and catalog-corroboration checks on what is visible or stated, and if they do not resolve it, file the needs-human credit-verify ticket and tell the customer it is with the team. Never approve from prose alone.",
+};
+
+// remove_wrong_credits never applies a removal: core-backend refuses agent-token
+// removals, so every post-preview state files the packet; the in-app instruction is additive.
+const removalRouteStep = (): NextStep => handoffStep(
+  "credit-correction",
+  "Show the resolved (track, roles) list. File the credit-correction packet first (every route, including self-service), then tell an owner how to remove the credits themselves in the app. Do not tell the customer any removal happened.",
+);
+
 // Billing-route failure handoff: intentionally NO action_type. The route
 // serves both refund and charge/billing-issue complaints and cannot see
 // customer_request, so the agent must file with the request-appropriate type —
@@ -125,7 +138,7 @@ export const SUPPORT_ACTION_ROUTES: Record<string, RouteDefinition> = {
   credit_verification: {
     label: "Pending credit verification",
     availability: "live",
-    goal: "Inspect pending UVN credits, ask for exact proof, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
+    goal: "Inspect pending UVN credits, ask for proof at most once and only if none was given before, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
     live_read_tools: ["credit_verification_check", "profile_credits_status"],
     live_write_tools: ["credits_verify"],
     live_handoff_tools: ["create_ticket"],
@@ -134,7 +147,7 @@ export const SUPPORT_ACTION_ROUTES: Record<string, RouteDefinition> = {
     sequence: [
       "Use profile_credits_status first when it is unclear whether the credit already exists or is merely pending.",
       "Run credit_verification_check.",
-      "Ask for the exact missing proof when ownership or corroboration is incomplete.",
+      "Ask for proof once, in one message covering all pending credits, ONLY if none was given before (customer-credit-verification skill Step 2 no-re-ask rule); otherwise do not ask and continue with the skill's Step 3 checks and the steps below.",
       "For catalog-corroborated owned requests, preview credits_verify with apply:false.",
       "After customer confirmation, apply credits_verify with apply:true.",
       "For every other case, create a credit-verify handoff packet.",
@@ -145,8 +158,8 @@ export const SUPPORT_ACTION_ROUTES: Record<string, RouteDefinition> = {
     tags: ["intent:credits", "bundle:credit-verification", "outcome:self-serve-or-handoff"],
     steps: {
       new_request: { outcome: "run_skill", skill: "customer-credit-verification", tool: "credit_verification_check", instruction: "Enter the credit verification skill and start with the read-only pending-credit check." },
-      read_ok: { outcome: "ask_missing_info", instruction: "Ask only for the missing proof fields the check indicates; do not approve from prose alone." },
-      missing_info: { outcome: "ask_missing_info", instruction: "Ask for exact proof for the specific pending credit, not a generic support request." },
+      read_ok: creditProofStep,
+      missing_info: creditProofStep,
       preview_ok: { outcome: "ask_confirmation", tool: "credits_verify", instruction: "Tell the customer which credit would be verified and wait for explicit confirmation before apply:true." },
       customer_confirmed: { outcome: "apply_tool", tool: "credits_verify", instruction: "Apply the already-previewed owned, catalog-corroborated credit verification." },
       applied_ok: closeStep("Tell the customer the credit has been verified. Do not also create a ticket."),
@@ -208,26 +221,26 @@ export const SUPPORT_ACTION_ROUTES: Record<string, RouteDefinition> = {
     },
   },
   remove_wrong_credits: {
-    label: "Remove wrong credits from owned profile",
+    label: "Remove wrong credits from owned profile (preview and route only)",
     availability: "live",
-    goal: "Remove mechanical wrong credits from a profile the customer owns, without touching production-side roles or wrong-merge cases.",
-    live_read_tools: ["profile_status", "credits_search", "profile_credits_status"],
-    live_write_tools: ["remove_credits"],
+    goal: "Resolve which mechanical wrong credits a customer owns on their profile, then route: file the staff packet and additionally point an owner to the in-app removal. The agent never removes a credit itself.",
+    live_read_tools: ["profile_status", "credits_search", "profile_credits_status", "remove_credits"],
+    live_write_tools: [],
     live_handoff_tools: ["create_ticket"],
     planned_tools: [],
-    human_gated_writes: ["unmerge", "role-based bulk removals", "production-side credit removals"],
-    sequence: ["Run the customer-credit-removal skill.", "Resolve ownership with profile_status.", "Dry-run remove_credits.", "Show the preview and apply only after explicit confirmation.", "Hand off wrong-merge or production-side refusals."],
-    close_when: ["remove_credits apply:true returns ok with removals or already_removed"],
-    handoff_when: ["unmerge-shaped cluster, owner mismatch, unclaimed/multi-owner profile, production-side role refusal, or repeated ambiguity"],
+    human_gated_writes: ["credit removal", "unmerge", "role-based bulk removals", "production-side credit removals"],
+    sequence: ["Run the customer-credit-removal skill.", "Resolve ownership with profile_status.", "Dry-run remove_credits (apply:false only) to resolve the exact tracks.", "Show the resolved (track, roles) list.", "File the credit-correction packet (mandatory on every route).", "Then tell an owner how to remove the credits in the app."],
+    close_when: ["the customer has the resolved list and a filed packet (plus the in-app removal steps for an owner)"],
+    handoff_when: ["staff removal requested, unmerge-shaped cluster, owner mismatch, unclaimed/multi-owner profile, production-side role refusal, or repeated ambiguity"],
     missing_info: ["Profile URL", "Specific track titles to remove"],
     tags: ["intent:credit-removal", "bundle:credits", "outcome:self-serve-or-handoff"],
     steps: {
       new_request: { outcome: "run_skill", skill: "customer-credit-removal", tool: "profile_status", instruction: "Use the credit-removal skill; do the ownership pre-check first." },
-      read_ok: { outcome: "call_tool", tool: "remove_credits", instruction: "Run remove_credits apply:false to resolve the exact tracks." },
+      read_ok: { outcome: "call_tool", tool: "remove_credits", instruction: "Run remove_credits apply:false to resolve the exact tracks. Preview only; the apply mode is not available to the agent." },
       missing_info: { outcome: "ask_missing_info", instruction: "Ask for the profile URL and the exact track titles." },
-      preview_ok: { outcome: "ask_confirmation", tool: "remove_credits", instruction: "Show the dry-run list and wait for explicit confirmation." },
-      customer_confirmed: { outcome: "apply_tool", tool: "remove_credits", instruction: "Apply the already-previewed removal set." },
-      applied_ok: closeStep("Tell the customer the listed credits were removed or already gone. Do not create a ticket."),
+      preview_ok: removalRouteStep(),
+      customer_confirmed: removalRouteStep(),
+      applied_ok: removalRouteStep(),
       tool_refused: handoffStep("credit-correction"),
       tool_disabled: handoffStep("credit-correction"),
       loop_detected: handoffStep("credit-correction"),

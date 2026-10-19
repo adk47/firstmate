@@ -57,7 +57,7 @@
     },
     {
       "action_type_on_handoff": "credit-verify",
-      "description": "Inspect pending UVN credits, ask for exact proof, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
+      "description": "Inspect pending UVN credits, ask for proof at most once and only if none was given before, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
       "first_read_tool": "credit_verification_check",
       "handoff_when": "owner_undetermined, impersonation, shared profile, disabled, no approver, non-corroborated proof, or wrapper refusal",
       "intent": "credit_verification",
@@ -115,13 +115,11 @@
     },
     {
       "action_type_on_handoff": "credit-correction",
-      "description": "Remove mechanical wrong credits from a profile the customer owns, without touching production-side roles or wrong-merge cases.",
+      "description": "Resolve which mechanical wrong credits a customer owns on their profile, then route: file the staff packet and additionally point an owner to the in-app removal. The agent never removes a credit itself.",
       "first_read_tool": "profile_status",
-      "handoff_when": "unmerge-shaped cluster, owner mismatch, unclaimed/multi-owner profile, production-side role refusal, or repeated ambiguity",
+      "handoff_when": "staff removal requested, unmerge-shaped cluster, owner mismatch, unclaimed/multi-owner profile, production-side role refusal, or repeated ambiguity",
       "intent": "remove_wrong_credits",
-      "write_tools": [
-        "remove_credits"
-      ]
+      "write_tools": []
     }
   ],
   "no_reply": [
@@ -136,7 +134,7 @@
       "tools_used": []
     },
     {
-      "activates_when": "Autonomously remove credits a customer owns from their own profile, OR detect mis-described unmerge requests and escalate them with audit context",
+      "activates_when": "Preview which credits a customer wants off their own profile (read-only), then route them to remove it themselves in the app or file the packet; also detect mis-described unmerge requests and escalate them with audit context",
       "name": "customer-credit-removal",
       "outcome": "Two related customer requests, handled together:",
       "tools_used": [
