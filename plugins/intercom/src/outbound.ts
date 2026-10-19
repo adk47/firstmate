@@ -716,17 +716,17 @@ export class SanitizingIntercomClient implements IntercomClient {
       const toolPass = sanitizeToolLeak(emailPass.body);
       const typoPass = sanitizeTypography(this.helpLinkPass(toolPass.body, params.conversationId));
       const refPass = sanitizeInternalReference(typoPass.body);
-      // A note the gate emptied must not go out as `body: ""`. Closing is the intended
-      // action, so close without a note, and alert: nothing else reports the dropped note.
+      // A note the gate emptied must not go out as `body: ""`, and closing without it
+      // would swallow the intended answer and drop the conversation from the open
+      // queue. Leave it open for a human and alert: nothing else reports it.
       if (refPass.body.trim().length === 0) {
-        const msg = `[intercom:ALERT] [intercom:empty-after-sanitize] conv=${params.conversationId} close note dropped`;
+        const msg = `[intercom:ALERT] [intercom:empty-after-sanitize] conv=${params.conversationId} close suppressed \u2014 note emptied by help-link gate, conversation left open for a human`;
         try {
           this.log?.error?.(msg);
         } catch {
           try { console.error(msg); } catch { /* noop */ }
         }
-        const { body: _dropped, ...rest } = params;
-        return this.inner.closeConversation(rest);
+        return;
       }
       return this.inner.closeConversation({ ...params, body: refPass.body });
     }

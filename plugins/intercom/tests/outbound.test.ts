@@ -999,14 +999,13 @@ describe("SanitizingIntercomClient help-centre link gate", () => {
   it.each([
     ["unlisted citation only", "More detail here: https://help.muso.ai/en/articles/9-fake", () => manifest],
     ["valid citation, manifest unavailable", `More detail here: ${GOOD}`, () => null],
-  ])("closes without a note when the gate empties a close note: %s", async (_n, body, loader) => {
+  ])("does not close when the gate empties a close note: %s", async (_n, body, loader) => {
     const inner = new MockIntercomClient();
     const errors: string[] = [];
     const client = new SanitizingIntercomClient(inner, { error: (m: string) => { errors.push(m); } }, loader as any);
     await client.closeConversation({ conversationId: "c1", adminId: "a1", body });
-    expect(inner.calls.closeConversation).toHaveLength(1);
-    expect(inner.calls.closeConversation[0].body).toBeUndefined();
-    expect(errors.some((m) => m.startsWith("[intercom:ALERT] [intercom:empty-after-sanitize] conv=c1 close note dropped"))).toBe(true);
+    expect(inner.calls.closeConversation).toHaveLength(0);
+    expect(errors).toContain("[intercom:ALERT] [intercom:empty-after-sanitize] conv=c1 close suppressed — note emptied by help-link gate, conversation left open for a human");
   });
   it("leaves dropped undefined for a delivered reply", async () => {
     const inner = new MockIntercomClient();
