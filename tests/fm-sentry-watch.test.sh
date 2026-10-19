@@ -951,9 +951,8 @@ test_a_task_pr_poll_cannot_touch_the_watch() {
   # this case proves a real PR poll for another task leaves it byte-identical.
   # fm-pr-check.sh arms only a ship whose named head is reachable outside the
   # worker copy, so the task gets a git copy whose HEAD a remote-tracking ref holds.
-  fm_git_init_commit "$home/wt" >/dev/null 2>&1 \
-    && git -C "$home/wt" update-ref refs/remotes/origin/main HEAD \
-    || fail "could not create the task's git copy"
+  fm_git_init_commit "$home/wt" >/dev/null 2>&1 || fail "could not create the task's git copy"
+  git -C "$home/wt" update-ref refs/remotes/origin/main HEAD || fail "could not publish the task's head"
   cat > "$home/state/sample-task.meta" <<EOF
 window=sample-task
 endpoint_task_id=sample-task
