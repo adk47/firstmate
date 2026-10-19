@@ -790,13 +790,39 @@ def paying_users(path: Path | None = None, now: datetime | None = None) -> tuple
     return frozenset(ids), None
 
 
-def order_rows(rows: list[dict[str, Any]], paying: frozenset[int] | None) -> list[dict[str, Any]]:
-    """Oldest-created first; with a known paying set, paying users' rows first."""
+PAID_SLA = timedelta(hours=24)
+
+
+def paid_tier(user_id: Any, created_at: Any, paying: frozenset[int] | None, now: datetime) -> int:
+    """Fable ruling 6 (credit-backlog-1019): 0 = paid and older than 24h, 1 = paid within
+    24h, 2 = free (or paying status unknown)."""
+    if paying is None or user_id not in paying:
+        return 2
+    ts = parse_ts(created_at)
+    return 0 if ts is None or now - ts > PAID_SLA else 1
+
+
+PROVISIONAL_KIND = "provisional_paid"
+PROVISIONAL_MAX_PER_USER_PER_DAY = 20
+
+
+def provisional_today_by_user(db: sqlite3.Connection, since: str) -> dict[int, int]:
+    """Paid provisional approvals per user since `since` (apply mode, server-confirmed or
+    attempted: every approve decision of that kind counts against the cap)."""
+    return {int(u): n for u, n in db.execute(
+        "SELECT user_id, COUNT(*) FROM decisions WHERE mode = 'apply' AND decision = 'approve' "
+        "AND evidence_kind = ? AND decided_at >= ? AND user_id IS NOT NULL GROUP BY user_id",
+        (PROVISIONAL_KIND, since))}
+
+
+def order_rows(rows: list[dict[str, Any]], paying: frozenset[int] | None,
+               now: datetime | None = None) -> list[dict[str, Any]]:
+    """PAID > 24h, then PAID < 24h, then FREE; oldest-created first inside each (Fable
+    ruling 6). Paying status unknown = everyone oldest-first."""
+    now = now or datetime.now(timezone.utc)
     def created(r: dict[str, Any]) -> str:
         return str(r.get("createdAt") or "")
-    if paying is None:
-        return sorted(rows, key=created)
-    return sorted(rows, key=lambda r: (r.get("userId") not in paying, created(r)))
+    return sorted(rows, key=lambda r: (paid_tier(r.get("userId"), r.get("createdAt"), paying, now), created(r)))
 
 
 def _set(d: Decision, decision: str, reason: str, *, doc_required: bool | None = None) -> Decision:
@@ -1089,7 +1115,7 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     proof, proof_why = proof_on_file(now=now)
     if proof_why:
         log(f"decide: proof-on-file status unknown ({proof_why}); no support request is written this run")
-    batch = order_rows(rows if rows is not None else held_rows(admin, skip), paying)[:policy.max_rows_per_run]
+    batch = order_rows(rows if rows is not None else held_rows(admin, skip), paying, now)[:policy.max_rows_per_run]
     builder = EvidenceBuilder(admin, now=now)
     decisions: list[Decision] = []
     needs_web: list[tuple[dict[str, Any], Evidence, int]] = []
@@ -1145,6 +1171,34 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             if n >= CATALOG_404_MAX_DEFERS:
                 _set(d, "support", f"catalog_unreadable: the admin catalog still answers 404 after {n} deferred runs; "
                      "a human checks the catalog and the claim (never approved or denied on a 404)")
+
+    # Fable ruling 4 (credit-backlog-1019, firstmate 072): trust yet verify for PAID users.
+    # A small/medium track (big tracks never reach here: pre_model asks for proof) whose
+    # web check found nothing against the claim (NOT_FOUND: no contradiction, no red flag,
+    # no validator conflict, no editorial-role rule; each of those returned before the web
+    # check) is provisionally approved instead of asked. The user gets the verify note
+    # (credit live + a document request, removed on day 30 without one). Capped at
+    # PROVISIONAL_MAX_PER_USER_PER_DAY per user per UTC day. Free users stay on the ask path.
+    req_by_id = {str(r.get("id")): r for r in batch}
+    prov_today = provisional_today_by_user(db, now.strftime("%Y-%m-%dT00:00:00Z"))
+    for d in decisions:
+        if not (d.decision == "support" and d.web_verdict == "NOT_FOUND" and d.paid_priority
+                and not d.big_track and d.conflict is None and not d.n1):
+            continue
+        if d.user_id is not None and prov_today.get(d.user_id, 0) >= PROVISIONAL_MAX_PER_USER_PER_DAY:
+            _set(d, "defer", f"paid provisional approvals for this user reached {PROVISIONAL_MAX_PER_USER_PER_DAY} "
+                 "today; next UTC day")
+            continue
+        d.evidence_kind = PROVISIONAL_KIND
+        _set(d, "approve", "trust yet verify (Fable ruling 4): paid user, small/medium track, nothing contradicts "
+             "the claim and no red flag; provisional approval with a document request, removed on day 30 "
+             "without a valid document")
+        if d.user_id is not None:
+            prov_today[d.user_id] = prov_today.get(d.user_id, 0) + 1
+
+    # Ruling 6 also orders the asks: paid > 24h first, so the daily cap admits them first.
+    decisions.sort(key=lambda d: (paid_tier(d.user_id, (req_by_id.get(d.request_id) or {}).get("createdAt"),
+                                            paying, now), str((req_by_id.get(d.request_id) or {}).get("createdAt") or "")))
 
     needs_proof = doc_required_ids(db)
     for d in decisions:

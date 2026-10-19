@@ -618,7 +618,61 @@ class PaidUsersFirst(Base):
         self.assertIsNone(paying)
         self.assertIn("count == len(ids)", why)
 
+    def test_tiers_paid_over_24h_then_paid_under_24h_then_free_oldest_first(self):
+        """Fable ruling 6 (credit-backlog-1019). NOW is 10-11 03:00Z."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900, 901))
+        rows = [req(uuid_of(180), uid=501, created="2026-10-01T00:00:00Z"),          # free, oldest
+                req(uuid_of(181), uid=900, created="2026-10-10T20:00:00Z"),          # paid < 24h
+                req(uuid_of(182), uid=901, created="2026-10-09T00:00:00Z"),          # paid > 24h
+                req(uuid_of(183), uid=900, created="2026-10-08T00:00:00Z")]          # paid > 24h, older
+        self.assertEqual([r["id"] for r in decide.order_rows(rows, frozenset({900, 901}), T.NOW)],
+                         [uuid_of(183), uuid_of(182), uuid_of(181), uuid_of(180)])
+        self.assertEqual([r["id"] for r in decide.order_rows(rows, None, T.NOW)],
+                         [uuid_of(180), uuid_of(183), uuid_of(182), uuid_of(181)], "unknown paying = oldest first")
+
+    def test_paid_not_found_small_track_is_provisionally_approved_free_is_asked(self):
+        """Fable ruling 4: trust yet verify for PAID users (small/medium, NOT_FOUND, nothing
+        against the claim); free users stay on the ask path; big tracks stay strict."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        rows = [req(uuid_of(190), uid=900, track="t3"), req(uuid_of(191), uid=501, track="t3"),
+                req(uuid_of(192), uid=900, track="t2")]
+        res, w = self.go(rows, {}, judge=judge)
+        d = self.decisions()
+        self.assertEqual((d[uuid_of(190)]["decision"], d[uuid_of(190)]["evidence_kind"], d[uuid_of(190)]["web_verdict"]),
+                         ("approve", "provisional_paid", "NOT_FOUND"))
+        self.assertIn("trust yet verify", d[uuid_of(190)]["reason"])
+        self.assertEqual(d[uuid_of(191)]["decision"], "support", "free user: asked")
+        self.assertEqual(d[uuid_of(192)]["decision"], "support", "big track (pop 70): proof required")
+        self.assertIn(uuid_of(190), [i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]])
+
+    def test_the_daily_ask_cap_admits_paid_users_first(self):
+        """Ruling 1 + 6: with room for one user, the paid user is asked, the older free one waits."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        self.proof([])
+        rows = [req(uuid_of(210), uid=501, track="t1", created="2026-10-01T00:00:00Z"),
+                req(uuid_of(211), uid=900, track="t1", created="2026-10-09T00:00:00Z")]
+        res, w = self.go(rows, {"t1": [T.raw("Real Engineer", "mixer")]},
+                         policy=dataclasses.replace(POLICY, max_ask_users_per_day=1))
+        asked = [i for c in w.calls if c["status"] == decide.UVN for i in c["ids"]]
+        self.assertEqual(asked, [uuid_of(211)])
+        self.assertTrue(self.decisions()[uuid_of(210)]["reason"].startswith(decide.ASK_CAP_DEFER))
+
+    def test_paid_provisional_approvals_are_capped_per_user_per_day(self):
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        old = decide.PROVISIONAL_MAX_PER_USER_PER_DAY
+        decide.PROVISIONAL_MAX_PER_USER_PER_DAY = 2
+        try:
+            res, _ = self.go([req(uuid_of(200 + i), uid=900, track="t3") for i in range(3)], {}, judge=judge)
+        finally:
+            decide.PROVISIONAL_MAX_PER_USER_PER_DAY = old
+        got = sorted(x["decision"] for x in self.decisions().values() if x["request_id"] in {uuid_of(200 + i) for i in range(3)})
+        self.assertEqual(got, ["approve", "approve", "defer"])
+
     def test_paying_status_never_changes_a_decision(self):
+        """Except ruling 4 (paid NOT_FOUND provisional approval, tested above): with catalog
+        evidence or a big track, paying status only changes the ORDER."""
         res_a, _ = self.go(self.rows(), self.RAWS, mode="shadow")
         self.paying("2026-10-11T02:30:00Z")
         res_b, _ = self.go(self.rows(), self.RAWS, mode="shadow")
@@ -762,7 +816,8 @@ class NeverReAsk(Base):
         self.assertEqual(res2.deferred_ask_cap, 1)
 
     def test_policy_ask_cap_defaults_and_validates(self):
-        self.assertEqual(decide.Policy.load().max_ask_users_per_day, 100)
+        # Fable ruling 1 (credit-backlog-1019): 100 -> 400 users/day after the 48h go-live cap.
+        self.assertEqual(decide.Policy.load().max_ask_users_per_day, 400)
         with self.assertRaises(ValueError):
             decide._nonneg_int(-1, "max_ask_users_per_day")
         with self.assertRaises(ValueError):
