@@ -26,6 +26,12 @@ class AdminError(RuntimeError):
     pass
 
 
+class NotFound(AdminError):
+    """HTTP 404. It does NOT prove the record is missing: core-backend's admin
+    track/profile routes also answer 404 when their own catalog (industry API)
+    read failed, so a caller treats it as UNKNOWN - re-read, then defer."""
+
+
 class Admin(Protocol):
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any: ...
 
@@ -56,6 +62,8 @@ class AdminClient:
         except (json.JSONDecodeError, IndexError) as exc:
             raise AdminError(f"admin GET returned non-JSON for {path}") from exc
         status = envelope.get("http_status") if isinstance(envelope, dict) else None
+        if status == 404:
+            raise NotFound(f"admin GET {path} returned HTTP 404")
         if not isinstance(status, int) or not 200 <= status < 300:
             raise AdminError(f"admin GET {path} returned HTTP {status}")
         body = envelope.get("body")

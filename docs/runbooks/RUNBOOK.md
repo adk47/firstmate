@@ -324,11 +324,10 @@ and deliberately NOT gated — a deploy must converge and an auto-rollback must 
 `hydra-maintenance is-active`).
 
 **Which do NOT** (business/prod — a fleet window must not blind you to a real Muso
-prod incident or a sales lead): `prod-log-alert-watchdog`, `ads-inquiry-watchdog`,
-`merge-landing-watchdog`, `stale-ticket-watchdog`, and the systemic
-`intercom-data-complaint-watchdog`. This split is enforced: any new
-`*-watchdog.{sh,py}` that is neither guarded nor listed in
-`scripts/tests/fixtures/maintenance-guard-exempt.txt` fails CI
+prod incident, a sales lead, or a legal deadline): every script listed, with its
+reason, in `scripts/tests/fixtures/maintenance-guard-exempt.txt` (the authoritative
+list). This split is enforced: any new
+`*-watchdog.{sh,py}` that is neither guarded nor listed there fails CI
 (`scripts/tests/maintenance-guard-drift.bats`), so exempting one is always a
 conscious decision.
 

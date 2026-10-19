@@ -25,12 +25,19 @@ DEPLOY_PATH="${DEPLOY_PATH:-/opt/hydra}"
 # the upgrade requires. Bump in lockstep with docs/guides/REPO-MANAGEMENT.md.
 OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.8.35}"
 
-# Minimum Node.js for the pinned runtime (openclaw 2026.7.1 raised the floor
-# to >=22.22.3 — its bin refuses to start below it, so a deploy on an old Node
-# would install a runtime that can never boot). Checked fail-loud in
-# install_openclaw(); upgrading Node is a manual pre-step, see
-# docs/runbooks/UPGRADE-2026.7.1.md.
+# Accepted Node.js bands for the pinned runtime. openclaw 2026.8.35 declares
+# engines.node ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0"; its bin refuses
+# to start outside that range, so a deploy on the wrong Node would install a
+# runtime that can never boot. install_openclaw() accepts, fail-loud and before
+# `npm install -g`:
+#   22.22.3 <= v < 23   (OPENCLAW_NODE_FLOOR — MUST stay on 22 so a rollback
+#                        to the recorded 22.x host still passes the gate)
+#   24.15.0 <= v < 25   (OPENCLAW_NODE_24_FLOOR)
+# Everything else is rejected, including >=25.9.0 which engines allow: hydra
+# deploys on LTS majors only. Upgrading Node is a manual pre-step, see
+# docs/runbooks/NODE-22-TO-24.md and docs/runbooks/UPGRADE-2026.7.1.md §Node.
 OPENCLAW_NODE_FLOOR="${OPENCLAW_NODE_FLOOR:-22.22.3}"
+OPENCLAW_NODE_24_FLOOR="${OPENCLAW_NODE_24_FLOOR:-24.15.0}"
 
 # Pinned @openclaw/slack version. 2026.5.12 externalized Slack into this
 # npm package; the bundled `channels.slack` plugin no longer ships. Kept
@@ -437,12 +444,14 @@ install_openclaw() {
   local node_ver
   node_ver=$(node --version 2>/dev/null | sed 's/^v//' || true)
   if [[ -z "$node_ver" ]]; then
-    log "    ✗ install_openclaw: node not found in PATH (need >= ${OPENCLAW_NODE_FLOOR})"
+    log "    ✗ install_openclaw: node not found in PATH (need >=${OPENCLAW_NODE_FLOOR} <23 || >=${OPENCLAW_NODE_24_FLOOR} <25)"
     return 1
   fi
-  if ! version_at_least "$OPENCLAW_NODE_FLOOR" "$node_ver"; then
-    log "    ✗ install_openclaw: Node $node_ver < required ${OPENCLAW_NODE_FLOOR} for openclaw ${OPENCLAW_VERSION}."
-    log "      Upgrade Node first (manual pre-step): see docs/runbooks/UPGRADE-2026.7.1.md §Node."
+  if ! { version_at_least "$OPENCLAW_NODE_FLOOR" "$node_ver" && ! version_at_least 23.0.0 "$node_ver"; } \
+    && ! { version_at_least "$OPENCLAW_NODE_24_FLOOR" "$node_ver" && ! version_at_least 25.0.0 "$node_ver"; }; then
+    log "    ✗ install_openclaw: Node $node_ver is outside the accepted bands (>=${OPENCLAW_NODE_FLOOR} <23 || >=${OPENCLAW_NODE_24_FLOOR} <25) for openclaw ${OPENCLAW_VERSION}."
+    log "      hydra deploys on LTS majors only, so Node >=25.9.0 is rejected even though the runtime's engines allow it."
+    log "      Upgrade Node first (manual pre-step): see docs/runbooks/NODE-22-TO-24.md and docs/runbooks/UPGRADE-2026.7.1.md §Node."
     return 1
   fi
 
@@ -3006,6 +3015,31 @@ check_media_host_binaries() {
 log "  Pre-flight: host media binaries (pdftoppm, heif-convert)..."
 check_media_host_binaries
 
+# -------------------------------------------------------------------
+# Caroline's verify-send ledger schema (WARN ONLY — never halts a deploy)
+# -------------------------------------------------------------------
+# credit-retro's take-back gate reads verify_messages from Caroline's send ledger
+# (/var/lib/hydra/credit-review/ledger.sqlite3, shared with the decider) and refuses
+# every row while the table is absent. Until 2026-10-18 the table only appeared on the
+# gate's first send, and every send is locked, so take-back skipped everything.
+# `verify_ledger.py migrate` creates/upgrades ONLY the verify_* tables (CREATE TABLE IF
+# NOT EXISTS + ALTER TABLE ADD COLUMN), idempotent, never touching the decider's tables
+# or any row. A failure leaves take-back fail-closed (no removals), so it WARNS: an
+# unrelated deploy must not wedge on it.
+migrate_verify_ledger() {
+  local out rc=0
+  out=$(run_on_node8 '/usr/bin/python3 -I /opt/hydra/scripts/credit_review/verify_ledger.py --db /var/lib/hydra/credit-review/ledger.sqlite3 migrate' 2>&1) || rc=$?
+  if (( rc != 0 )); then
+    log "  ⚠ verify ledger migrate failed (rc=$rc): $(printf '%s' "$out" | tail -c 400)"
+    log "    take-back stays fail-closed (proof_source_unavailable) until it succeeds"
+  else
+    log "  ✓ verify ledger schema present (verify_messages, verify_proof_reviews, verify_requests)"
+  fi
+  return 0
+}
+log "  Caroline verify-send ledger schema..."
+migrate_verify_ledger
+
 # Post-sync inline (runs locally on node-8).
 #
 # IMPORTANT: `bash << 'POSTSYNC'` starts a CHILD bash process. The child
@@ -3020,7 +3054,10 @@ check_media_host_binaries
 # (set -u) plus "fail: command not found" — wrong error message AND
 # silently bypassed notify_slack(). Caught by silent-failure-hunter
 # during the second-round PR review.
-export HYDRA_ROOT TARGET DEPLOY_PATH HYDRA_LOCAL
+# REPORT_ONLY (read by fail) and SLACK_WEBHOOK (read by notify_slack) are
+# exported for the same reason: without them a POSTSYNC-side fail() printed FATAL
+# and then died on "REPORT_ONLY: unbound variable" before paging Slack (2026-10-17).
+export HYDRA_ROOT TARGET DEPLOY_PATH HYDRA_LOCAL REPORT_ONLY SLACK_WEBHOOK
 # muso_main_env_report + its dependency muso_main_env_missing are sourced into
 # the PARENT shell (top of file) but used inside this heredoc's child bash — so
 # they MUST be exported too, or the call command-not-founds in the child and the
@@ -3138,6 +3175,18 @@ check_statedir_pin() {
 }
 if needs_target "main"; then check_statedir_pin main; fi
 if needs_target "edge"; then check_statedir_pin edge; fi
+
+# Credit-trust judge user (T01). scripts/lib/codex-judge-exec.sh runs the
+# tool-less `codex exec` as this unprivileged system user and REFUSES to run
+# it as root, so the judge is unavailable (its ladder falls through) until the
+# user exists. Idempotent; no home, no login shell, no groups.
+if ! id hydra-judge >/dev/null 2>&1; then
+  if useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hydra-judge; then
+    log "  created system user hydra-judge (credit-trust codex judge)"
+  else
+    log "  WARN: could not create system user hydra-judge — the credit-trust Codex rung stays unavailable"
+  fi
+fi
 
 # muso CLI host config (main profile only; soak phase). Files are RENDERED
 # on every deploy from the OPERATIONS WORKSPACE muso-ops-admin config — the
@@ -3518,7 +3567,11 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
   # different count would otherwise silently ship a wrong cron table.
   EXPECTED_JOBS=$(jq '.jobs | length' "$HYDRA_ROOT/cron-jobs.json") \
     || fail "cron SQLite import: could not count repo jobs in $HYDRA_ROOT/cron-jobs.json"
-  PERSISTED_JOBS=$(echo "$IMPORT_OUT" | jq -r '.persisted' 2>/dev/null) || PERSISTED_JOBS=""
+  # IMPORT_OUT is stdout+stderr (2>&1). The node import can log warnings to stderr ahead of
+  # its one JSON result line (e.g. "[sqlite/transaction] slow SQLite transaction hold"), which made
+  # the whole blob unparseable and failed a SUCCESSFUL import (2026-10-17 06:33Z, run 39010306853).
+  # Read only the result line. Still fails closed: no such line -> empty -> the check below fails.
+  PERSISTED_JOBS=$(printf '%s\n' "$IMPORT_OUT" | grep -E '^\{.*"persisted"' | tail -n 1 | jq -r '.persisted' 2>/dev/null) || PERSISTED_JOBS=""
   if [ "$PERSISTED_JOBS" != "$EXPECTED_JOBS" ]; then
     fail "cron SQLite import: store persisted ${PERSISTED_JOBS:-<unparseable>} jobs, expected $EXPECTED_JOBS (import output: $IMPORT_OUT)"
   fi

@@ -246,6 +246,97 @@ describe("assessRisk Layer 1 (rules)", () => {
     expect(r.triggered).toBe(false);
   });
 
+  // Credit PROOF that mentions a platform post is not a threat (3 of 3 rule
+  // escalations 2026-10-11..18 were these, all handed to a human mid-proof).
+  it.each([
+    "These documents support my mixing credits. Apple Music lists the songwriter, and the attached Instagram post from April 26, 2019 credits me as mixing and mastering engineer and tags the band.",
+    "Moving forward I also have most of the songs posted on my social media profile as that's how I post my professional work.",
+    "My contributions are often acknowledged on the artists' personal social media profiles, YouTube videos, and TV appearances.",
+    "here is the youtube video where they shared my name in the description",
+    "I tell everyone about Muso, love the app",
+    "I'll share the YouTube video where the artist credits me",
+    "I'll post the link to the Instagram post here",
+    "I'm going to share the facebook post that credits me as producer",
+    "We'll share the YouTube link with you",
+    "I'll write down my instagram handle",
+    "I\u2019ll post the link to my Instagram post that credits me as producer",
+    "Well I post all my work on Instagram",
+    "I'm writing to let you know my credits are listed on my YouTube channel",
+    "I'm writing to you because my credits aren't showing online",
+    "I am writing because my name is missing everywhere",
+    "I'm writing on behalf of my artist about credits on YouTube",
+    "I'm writing to ask why my song shows up online but not in Muso",
+    "I'm writing to you about this credit on Instagram",
+    "I'm telling you the song is on YouTube under my name",
+    "I'm telling you my credits are online",
+    "I'm warning you the credits on Instagram are wrong",
+    "We are posting the music video on YouTube tomorrow",
+    "I'll attach the post on Instagram that credits me",
+    "I'll find the post on Instagram where they tagged me",
+    "I'll send you the post on my Instagram",
+    "I'll share the link to my Instagram profile so you can verify",
+    "I'll share the link to my YouTube channel",
+    "I'm sharing the link to my Instagram",
+    "I'm sharing the YouTube video about this release",
+    "I'll post the screenshots about this credit below",
+    "I'll share a screenshot about this credit",
+    "I'll share more details about this song",
+    "Sure, I'll share what I know about this track",
+    "I'm telling the truth about this credit",
+    "I will tell my manager about this",
+    "I'll tell my co-writer about this so he can verify",
+    "I'll write to my publisher about this",
+    "I'll share the Instagram post about this song",
+    "My artist is going to tell everyone about the app",
+    "I'll tell my fans about my new release on Muso",
+    "I'm telling my followers to check my profile",
+    "I'll tell my fans to check out my Muso profile",
+    "I will tell my followers to stream it",
+    "I'll tell people to tag me in the credits",
+    "Once it's verified I'll post about this on my Instagram",
+    "I'll share about this on social media when it's fixed",
+    "I'll write about this on twitter",
+    "I'll post a screenshot showing how you can find my credit on Spotify",
+    "I'm posting this to show how you can see my name in the credits",
+    "I'll post the Instagram link, that's how you can verify",
+    "I'll share about how you can find it",
+    "I'm going to post my song all over YouTube",
+    "I'll share this release all over social media",
+    "I have a screenshot from the mastering session, some WhatsApp screenshots and an instagram post.",
+  ])("does NOT fire on proof/benign platform text: %s", async (msg) => {
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.reason).not.toBe("public_shaming_intent");
+  });
+
+  it.each([
+    "i'm going to post a youtube review about this",
+    "I will expose this on twitter if you don't fix it",
+    "I'm gonna tell everyone how you treat customers",
+    "I'll warn my followers about you",
+    "I'm going to leave a 1-star review",
+    "I will expose you",
+    "we're going public with this",
+    "I\u2019ll expose this on reddit",
+    "I\u2018ll be ranting about you guys all over Instagram",
+    "I\u02BCm gonna tell everyone how you treat customers",
+    "we're warning our fans online",
+    "I'm going to post a video on YouTube about how you treat artists",
+    "I\u2019m going to post a video on YouTube about how you treat artists",
+    "I will definitely warn people about your company",
+    "We\u2019re going to share about your app on social media",
+    "I'm going to blast you on twitter",
+    "I'm going to post on twitter how you deleted my credits",
+    "I'll put this on blast on twitter",
+    "I'm about to post this all over twitter",
+    "I\u2019ll call you out on Instagram",
+    "Don't make me tell everyone how you treat artists",
+    "I'll make sure to tell everyone how you treat artists",
+  ])("still fires on a real threat: %s", async (msg) => {
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.triggered).toBe(true);
+    expect(r.reason).toBe("public_shaming_intent");
+  });
+
   it("fires legacy 'lawyer' rule under reason legal_threat", async () => {
     const r = await assessRisk("i'm getting a lawyer", [], baseState, noJudge);
     expect(r.triggered).toBe(true);
@@ -263,6 +354,22 @@ describe("assessRisk Layer 1 (rules)", () => {
     const stateBelow = { ...baseState, userTurnCount: 5 };
     const r = await assessRisk("just any reply", [], stateBelow, noJudge);
     expect(r.triggered).toBe(false);
+  });
+
+  it("caps on userExchangeCount, not the per-message userTurnCount", async () => {
+    const burstyBelow = { ...baseState, userTurnCount: 9, userExchangeCount: 5 };
+    expect((await assessRisk("just any reply", [], burstyBelow, noJudge)).triggered).toBe(false);
+    const atCap = { ...baseState, userTurnCount: 9, userExchangeCount: 6 };
+    const r = await assessRisk("just any reply", [], atCap, noJudge);
+    expect(r.triggered).toBe(true);
+    expect(r.reason).toBe("turn_count_cap");
+  });
+
+  it("falls back to userTurnCount for the cap when userExchangeCount is absent", async () => {
+    const legacy = { ...baseState, userTurnCount: 6, userExchangeCount: undefined };
+    const r = await assessRisk("just any reply", [], legacy, noJudge);
+    expect(r.triggered).toBe(true);
+    expect(r.reason).toBe("turn_count_cap");
   });
 
   it("does not fire turn-count cap when escalationFiredAt is already set", async () => {

@@ -17,3 +17,4 @@ stale-ticket-watchdog.sh             # daily overdue-ClickUp digest; business, h
 mercury-token-watchdog.sh            # Mercury bank API credential revoked at the vendor; nothing to do with gateway health
 refund-credit-overlap-watchdog.sh    # Stripe duplicate cash-refund+credit concession; finance state, unrelated to gateway health
 intercom-data-complaint-watchdog.py  # agent-invoked systemic-data-issue pipeline (compliance); not schedule-fired fleet-health
+intercom-legal-unanswered-watchdog.py  # unanswered GDPR/legal requests -> #cs_priority (Jan); Intercom-sourced, GDPR clock runs during a fleet window

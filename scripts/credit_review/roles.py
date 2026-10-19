@@ -31,6 +31,29 @@ def is_trusted_source(source: str) -> bool:
     return (source or "").strip().lower() in TRUSTED_SOURCES
 
 
+_TERM = re.compile(r"[a-z]+(?: [a-z]+)*")
+
+
+def editorial_terms(value: object) -> tuple[str, ...]:
+    """The editorial_role_terms list of policies/credit-trust-decide.json,
+    validated. Shared by the decider and uvn-under30, so both refuse the same
+    roles; a missing or malformed list is an error, never an empty list."""
+    if not isinstance(value, list) or not value:
+        raise ValueError("editorial_role_terms must be a non-empty list")
+    terms = tuple(t for t in value if isinstance(t, str) and _TERM.fullmatch(t))
+    if len(terms) != len(value):
+        raise ValueError("editorial_role_terms entries must be lowercase words")
+    return terms
+
+
+def is_editorial(role: str, terms: tuple[str, ...]) -> bool:
+    """True when a claimed role is editorial (editing, compilation, assembly,
+    ...). A term matches at the start of a word: "edit" matches "Vocal
+    Editing" and "Editor", never "Credit"."""
+    r = " " + re.sub(r"[^a-z]+", " ", (role or "").lower()).strip()
+    return any(" " + t in r for t in terms)
+
+
 def family_of(role: str) -> str:
     """Map a display role or a raw-credit role string to a role family."""
     r = " " + re.sub(r"[^a-z&]+", " ", (role or "").lower()).strip() + " "
