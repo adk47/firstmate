@@ -66,6 +66,40 @@ SH
   pass "checkpoint preserves watcher environment for registered custom checks"
 }
 
+test_slow_check_is_logged_and_the_beacon_advances_between_checks() {
+  local home out err status age
+  home=$(make_home slow-check)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  # Checks run one after another: a slow first check must not leave the beacon
+  # unrefreshed for the rest of the sweep, and must leave a timing trace.
+  cat > "$home/state/a-slow.check.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 6
+SH
+  cat > "$home/state/b-beat.check.sh" <<'SH'
+#!/usr/bin/env bash
+now=$(date +%s)
+beat=$(stat -f %m "$FM_HOME/state/.last-watcher-beat" 2>/dev/null || stat -c %Y "$FM_HOME/state/.last-watcher-beat")
+printf 'beacon age %ss after the slow check\n' "$((now - beat))"
+SH
+  chmod 0700 "$home/state/a-slow.check.sh" "$home/state/b-beat.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" a-slow >/dev/null || fail "could not register the slow check"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" b-beat >/dev/null || fail "could not register the beacon check"
+  status=0
+  FM_HOME="$home" FM_GUARD_GRACE=2 FM_CHECK_SLOW_LOG_SECS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 \
+    "$CHECKPOINT" --seconds 90 >"$out" 2>"$err" || status=$?
+  expect_code 0 "$status" "slow check checkpoint exit"
+  age=$(sed -n 's/.*beacon age \([0-9]*\)s after the slow check.*/\1/p' "$out" | head -1)
+  [ -n "$age" ] || fail "the beacon check did not report: $(cat "$out")"
+  # The 6-second check ran first; a beacon touched only before the sweep is at
+  # least that old, while one refreshed between checks is only as old as the
+  # next check's own start-up.
+  [ "$age" -lt 6 ] || fail "the beacon was ${age}s old after a 6-second check in the same sweep; it was not refreshed between checks"
+  assert_contains "$(cat "$home/state/.watch-triage.log")" "slow check a-slow.check.sh took" "a slow check left no timing trace in the triage log"
+  pass "a slow check is triage-logged and the beacon advances between checks"
+}
+
 test_existing_singleton_watcher_is_not_success() {
   local home out err status
   home=$(make_home singleton)
@@ -199,6 +233,7 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
+test_slow_check_is_logged_and_the_beacon_advances_between_checks
 test_existing_singleton_watcher_is_not_success
 test_host_checkpoint_bounds_the_park_by_posture
 test_host_checkpoint_passes_a_handback_and_reports_a_stand_down

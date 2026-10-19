@@ -295,6 +295,8 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+CHECK_SLOW_LOG_SECS=${FM_CHECK_SLOW_LOG_SECS:-10}  # a check at least this slow is triage-logged
+case "$CHECK_SLOW_LOG_SECS" in ''|*[!0-9]*) CHECK_SLOW_LOG_SECS=10 ;; esac
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
@@ -3012,6 +3014,7 @@ while :; do
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
+      check_started=$SECONDS
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
@@ -3053,6 +3056,14 @@ while :; do
           continue
         fi
       fi
+      # Checks run one after another, so a sweep over many of them can outlast
+      # the guard's grace on its own: refresh the beacon between checks (only
+      # once it has aged, see watch_beat) and log any check slow enough to
+      # matter, which is how a sweep's cost is measured after the fact.
+      check_secs=$((SECONDS - check_started))
+      [ "$check_secs" -lt "$CHECK_SLOW_LOG_SECS" ] \
+        || triage_log "slow check $(basename "$c") took ${check_secs}s (limit ${CHECK_TIMEOUT}s)"
+      watch_beat
       if [ -n "$out" ]; then
         if [ "$(basename "$c")" = contributions.check.sh ]; then
           contribution_check_output=
