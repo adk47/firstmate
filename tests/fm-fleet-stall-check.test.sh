@@ -34,6 +34,8 @@ worker() {
 }
 
 pi_pane() {  # <body-line> <footer-tokens>
+  # The tilde is literal pane text, not a path to expand.
+  # shellcheck disable=SC2088
   printf '%s\n' \
     ' working on the task' \
     "$1" \

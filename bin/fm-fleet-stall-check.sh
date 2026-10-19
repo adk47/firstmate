@@ -311,7 +311,7 @@ EOF
 notify_macos() {  # <text>
   command -v osascript >/dev/null 2>&1 || return 0
   fm_run_timed 10 osascript -e \
-    "display notification \"$(printf '%s' "$1" | tr -d '"\\' | cut -c1-200)\" with title \"Firstmate: fleet stalled\" sound name \"Submarine\"" \
+    "display notification \"$(printf '%s' "$1" | tr -d '\\"' | cut -c1-200)\" with title \"Firstmate: fleet stalled\" sound name \"Submarine\"" \
     >/dev/null 2>&1 || true
 }
 
