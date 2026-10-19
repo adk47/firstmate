@@ -97,6 +97,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import admin as admin_api
+from . import proof_parts
 from .evidence import (BIG_ARTIST_POPULARITY, BIG_TRACK_POPULARITY, Evidence, EvidenceBuilder,
                        EvidenceIncomplete, parse_ts)
 from .judge import JudgeResult
@@ -104,6 +105,7 @@ from .policy import AUTOMATION_REGISTRY as REGISTRY
 from .policy import DECIDE_POLICY as POLICY
 from .policy import (WEB_CONFIRM_MIN_CONFIDENCE, WEB_CONFIRM_MIN_DOMAINS, WEB_CONTRADICT_MIN_CONFIDENCE,
                      doc_required_ids, facts_of, validator_conflict, validator_rejected_rules)
+from .policy import server_approval_refusal
 from .roles import ONE_PERSON_FAMILIES, editorial_terms, family_of, is_editorial
 from .runner import log
 
@@ -159,6 +161,7 @@ HIGH_VELOCITY_24H = 50
 HIGH_VELOCITY_7D = 150
 
 
+
 @dataclass
 class Policy:
     deny_user_ids: set[int]
@@ -166,6 +169,9 @@ class Policy:
     editorial_role_terms: tuple[str, ...]
     max_rows_per_run: int = 500
     max_approvals_per_user_per_day: int = 200
+    # Distinct users who may receive a support request (Knock "more info needed")
+    # per UTC day. firstmate 031: 100/day for the first 48h of go-live.
+    max_ask_users_per_day: int = 100
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Policy":
@@ -182,7 +188,8 @@ class Policy:
                    deny_profile_ids={p.strip().lower() for p in profiles},
                    editorial_role_terms=editorial_terms(d.get("editorial_role_terms")),
                    max_rows_per_run=int(d.get("max_rows_per_run") or 500),
-                   max_approvals_per_user_per_day=int(d.get("max_approvals_per_user_per_day") or 200))
+                   max_approvals_per_user_per_day=int(d.get("max_approvals_per_user_per_day") or 200),
+                   max_ask_users_per_day=_nonneg_int(d.get("max_ask_users_per_day", 100), "max_ask_users_per_day"))
 
 
 def registry_approved(path: Path | None = None) -> tuple[bool, str]:
@@ -531,18 +538,63 @@ class ProofOnFile:
     request_ids: frozenset[str]
     approved_refs: dict[str, str] = field(default_factory=dict)  # request id -> ref of an APPROVED proof
 
+    # Users who emailed support@ in the last 90 days (top-level gmail_contacts_90d):
+    # firstmate 041 - always held for a human, never asked, whatever the Gmail scan found.
+    support_contacts: frozenset[int] = frozenset()
+
     def covers(self, d: "Decision") -> bool:
         return d.user_id in self.user_ids or d.request_id.lower() in self.request_ids
+
+    def contacted_support(self, d: "Decision") -> bool:
+        return d.user_id is not None and d.user_id in self.support_contacts
+
+
+SUPPORT_CONTACTS_KEY = "gmail_contacts_90d"
+
+
+def support_contacts_of(value: Any) -> frozenset[int] | None:
+    """User ids from gmail_contacts_90d - a list, or {generated_at, source, user_ids: [...]}
+    as the cs lane publishes it; None when absent or malformed (the caller then treats
+    proof status as UNKNOWN: nobody is asked)."""
+    ids = value.get("user_ids") if isinstance(value, dict) else value
+    if not isinstance(ids, list):
+        return None
+    out: set[int] = set()
+    for u in ids:
+        if isinstance(u, bool):
+            return None
+        try:
+            out.add(int(str(u).strip()))
+        except ValueError:
+            return None
+    return frozenset(out)
+
+
+def muso_user_id(value: Any) -> int | None:
+    """An entry's user id as the integer Muso id (proof_parts accepts "111" and 111 as
+    the same user), or None when it is not one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    return int(text) if text.isdigit() else None
 
 
 def proof_on_file(path: Path | None = None, now: datetime | None = None
                   ) -> tuple[ProofOnFile | None, str | None]:
     """(proof, None) from the hourly proof-on-file export
     {generated_at, sources: [{name, generated_at, count, stale?, missing?}],
-    users, entries: [{user_id, request_id | null, kind, source, ref}]}, or
-    (None, why) when proof status is UNKNOWN: missing, unreadable, malformed,
-    older than 3h, dated in the future, or any source flagged missing/stale (a
-    user whose proof sits only in that source would be asked again)."""
+    users, entries: [{user_id, request_id | null, kind, source, ref}],
+    gmail_contacts_90d}, or (None, why) when proof status is UNKNOWN.
+
+    Completeness is THE shared rule, credit_review.proof_parts (the verify notes,
+    the take-back gate and Caroline's support tool read it the same way): core,
+    cs-intercom and cs-gmail all present, unflagged and fresh by their own stamps,
+    no other part flagged, entries well-formed and ``users`` consistent. On top of
+    it the decider is stricter, never looser: the export's own stamp must be fresh,
+    every user id must be a Muso (integer) id, and the support@ contact list must be
+    readable (firstmate 041: those users are held, never asked)."""
     path = Path(path or PROOF_ON_FILE)
     now = now or datetime.now(timezone.utc)
     try:
@@ -554,30 +606,33 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
     malformed = f"{path} is malformed (want generated_at, sources[], users, entries[])"
     if not isinstance(data, dict):
         return None, malformed
-    ts, sources, entries = parse_ts(data.get("generated_at")), data.get("sources"), data.get("entries")
-    users_n = data.get("users")
-    if (ts is None or not isinstance(sources, list) or not isinstance(entries, list)
-            or not isinstance(users_n, int) or isinstance(users_n, bool)
-            or not all(isinstance(s, dict) and isinstance(s.get("name"), str) for s in sources)):
+    try:
+        proof_parts.check(data, now=now, max_age_h=PROOF_MAX_AGE.total_seconds() / 3600,
+                          max_skew_h=PAYING_USERS_MAX_SKEW.total_seconds() / 3600)
+        proof_parts.check_entries(data)
+    except proof_parts.PartsError as exc:
+        return None, f"{path} is not authoritative: {exc}"[:200]
+    ts = parse_ts(data.get("generated_at"))
+    if ts is None:
         return None, malformed
-    incomplete = [f"{s['name']} is {'missing' if s.get('missing') else 'stale'}"
-                  for s in sources if s.get("missing") or s.get("stale")]
-    if incomplete:
-        return None, f"{path} is incomplete (source {', '.join(incomplete)})"[:200]
+    contacts = support_contacts_of(data.get(SUPPORT_CONTACTS_KEY))
+    if contacts is None:
+        return None, f"{path} has no readable {SUPPORT_CONTACTS_KEY} list (anyone may have emailed support@)"
     users: set[int] = set()
     requests: set[str] = set()
     approved: dict[str, str] = {}
-    for e in entries:
-        uid = e.get("user_id") if isinstance(e, dict) else None
-        rid = e.get("request_id") if isinstance(e, dict) else None
-        if (not isinstance(uid, int) or isinstance(uid, bool) or e.get("kind") not in PROOF_KINDS
-                or not (rid is None or isinstance(rid, str))):
-            return None, malformed
+    for e in data["entries"]:
+        uid = muso_user_id(e["user_id"])
+        if uid is None:
+            return None, f"{path} has a user_id that is not a Muso user id: {e['user_id']!r}"[:200]
+        rid = e.get("request_id")
         if rid is not None:
             try:
                 rid = str(uuid.UUID(rid))
             except ValueError:
-                return None, malformed
+                # Not a credit request id: it can name no request, but its user is
+                # still covered below (whole-user), so nobody is asked by mistake.
+                rid = rid.strip().lower()
             requests.add(rid)
             if e.get("kind") in APPROVED_PROOF_KINDS and str(e.get("ref") or "").strip():
                 approved.setdefault(rid, f"{e.get('source') or 'proof'}:{str(e['ref']).strip()}")
@@ -586,7 +641,7 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
         return None, f"{path} is stale (generated {utc(ts)})"
     if ts - now > PAYING_USERS_MAX_SKEW:
         return None, f"{path} is dated in the future ({utc(ts)})"
-    return ProofOnFile(frozenset(users), frozenset(requests), approved), None
+    return ProofOnFile(frozenset(users), frozenset(requests), approved, support_contacts=contacts), None
 
 
 def proof_status_transition(db: sqlite3.Connection, mode: str, proof_why: str | None) -> str | None:
@@ -623,8 +678,18 @@ def users_asked_since(db: sqlite3.Connection, since: str) -> set[int]:
         " AND o.at >= ? AND d.user_id IS NOT NULL", (UVN, since))}
 
 
+def _nonneg_int(v: Any, key: str) -> int:
+    if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+        raise ValueError(f"{key} must be a non-negative integer")
+    return v
+
+
+ASK_CAP_DEFER = "daily ask cap: "
+
+
 def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "RunResult",
-                   proof: ProofOnFile | None, proof_why: str | None, now: datetime) -> None:
+                   proof: ProofOnFile | None, proof_why: str | None, now: datetime,
+                   max_ask_users_per_day: int | None = None) -> None:
     """Never re-ask: turn support decisions that must not be sent into HOLD or
     DEFER, counting each reason on the run."""
     support = [d for d in decisions if d.decision == "support"]
@@ -640,6 +705,10 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
         if proof.covers(d):
             _set(d, "hold", "proof on file: human review (a document is already on file; never ask again)")
             res.held_proof += 1
+        elif proof.contacted_support(d):
+            _set(d, "hold", "emailed support@ in the last 90 days: human review, never asked "
+                 "(when in doubt, don't send)")
+            res.held_proof += 1
         elif d.request_id in asked:
             _set(d, "hold", "support already requested for this credit once: never re-ask; human review")
             res.held_reasked += 1
@@ -647,6 +716,52 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
             _set(d, "defer", WINDOW_DEFER + "this user was asked in the last 24h; this row goes out with "
                  "the user's next batch")
             res.deferred_window += 1
+    if max_ask_users_per_day is None:
+        return
+    # Daily cap on DISTINCT users asked (UTC day): users already asked today count;
+    # a user admitted under the cap gets all of their rows in this run (one batch).
+    asked_today = users_asked_since(db, now.strftime("%Y-%m-%dT00:00:00Z"))
+    admitted: set[int] = set()
+    for d in support:
+        if d.decision != "support" or d.user_id is None:
+            continue
+        if d.user_id in asked_today or d.user_id in admitted:
+            continue
+        if len(asked_today) + len(admitted) < max_ask_users_per_day:
+            admitted.add(d.user_id)
+    for d in support:
+        if d.decision != "support":
+            continue
+        if d.user_id is None or (d.user_id not in asked_today and d.user_id not in admitted):
+            _set(d, "defer", ASK_CAP_DEFER + f"{max_ask_users_per_day} users/day already reached; "
+                 "this row goes out on a later day")
+            res.deferred_ask_cap += 1
+
+
+def cap_at_write(db: sqlite3.Connection, res: "RunResult", support_ids: list[str], user_of: dict[str, int | None],
+                 cap: int | None, send_at: datetime) -> list[str]:
+    """Support ids that still fit the day's cap at send time (call under write_lock)."""
+    if cap is None:
+        return support_ids
+    asked_today = users_asked_since(db, send_at.strftime("%Y-%m-%dT00:00:00Z"))
+    # A user another run asked since this run decided is now inside their 24h
+    # window: this run's rows for them wait for the next batch.
+    asked_window = users_asked_since(db, utc(send_at - SUPPORT_WINDOW))
+    admitted: set[int] = set()
+    keep: list[str] = []
+    for rid in support_ids:
+        uid = user_of.get(rid)
+        if uid is not None and uid in asked_window:
+            record_outcome(db, res.run_id, rid, "support", "deferred:per_user_window", send_at)
+            res.deferred_window += 1
+            continue
+        if uid is not None and (uid in admitted or len(asked_today) + len(admitted) < cap):
+            admitted.add(uid)
+            keep.append(rid)
+            continue
+        record_outcome(db, res.run_id, rid, "support", "deferred:daily_ask_cap", send_at)
+        res.deferred_ask_cap += 1
+    return keep
 
 
 def paying_users(path: Path | None = None, now: datetime | None = None) -> tuple[frozenset[int] | None, str | None]:
@@ -808,8 +923,19 @@ def status_readback(script: str | None = None) -> Readback:
     return read
 
 
+def refused_by_agent_guard(body: Any, chunk: list[str]) -> dict[str, str]:
+    """{request id: reasons} when the answer is core-backend's
+    agent_cannot_approve_declined refusal (nothing written), else {}."""
+    if not isinstance(body, dict) or body.get("errorCode") != "agent_cannot_approve_declined":
+        return {}
+    ids = {str(i) for i in body.get("refusedRequestIds") or []} & set(chunk)
+    reasons = {str(r.get("id")): ",".join(str(x) for x in r.get("reasons") or [])
+               for r in body.get("refused") or [] if isinstance(r, dict)}
+    return {i: reasons.get(i, "refused") for i in ids}
+
+
 def write_chunk(writer: Writer, readback: Readback, status: str, chunk: list[str],
-                expected: str) -> tuple[dict[str, str], str | None]:
+                expected: str, _retry: bool = False) -> tuple[dict[str, str], str | None]:
     """Per-row outcomes of one conditional PUT, and the write error if any. A
     failed or timed-out PUT may still have committed rows, so the outcome of a
     failed chunk comes from the server's updatedIds and a status readback; a
@@ -819,6 +945,17 @@ def write_chunk(writer: Writer, readback: Readback, status: str, chunk: list[str
     except (admin_api.AdminError, subprocess.TimeoutExpired, ValueError) as exc:
         err = str(exc)
         body = getattr(exc, "body", None)
+        refused = refused_by_agent_guard(body, chunk)
+        if refused and not _retry:
+            # The server wrote NOTHING and named the rows it refuses: record those
+            # as skipped with its reasons and send the rest of the batch once more.
+            outs = {rid: f"skipped:agent_cannot_approve_declined:{why}"[:200] for rid, why in refused.items()}
+            rest = [i for i in chunk if i not in refused]
+            if not rest:
+                return outs, None
+            more, err2 = write_chunk(writer, readback, status, rest, expected, _retry=True)
+            outs.update(more)
+            return outs, err2
         data = body.get("data") if isinstance(body, dict) and isinstance(body.get("data"), dict) else body
         committed = {str(i) for i in (data.get("updatedIds") or [])} & set(chunk) if isinstance(data, dict) else set()
         rest = [i for i in chunk if i not in committed]
@@ -878,6 +1015,7 @@ class RunResult:
     held_proof: int = 0
     held_reasked: int = 0
     deferred_window: int = 0
+    deferred_ask_cap: int = 0
     deferred_proof_unknown: int = 0
     spend_usd: float = 0.0
     n1: int = 0
@@ -897,7 +1035,8 @@ class RunResult:
                 f"OpenRouter fallback ${self.spend_usd:.2f}{jev}; the rest had no free source to cite), "
                 f"{self.errors} evidence errors. Support asks: {self.support_candidates} before filters, "
                 f"{self.held_proof} held for proof on file, {self.held_reasked} held as already asked once, "
-                f"{self.deferred_window} deferred for the per-user 24h window, {self.deferred_proof_unknown} deferred "
+                f"{self.deferred_window} deferred for the per-user 24h window, {self.deferred_ask_cap} deferred by the "
+                f"daily ask cap, {self.deferred_proof_unknown} deferred "
                 f"(proof status unknown), {self.support} {'would be sent' if self.mode == 'shadow' else 'sent'}."
                 + (f" {self.note}" if self.note else "")
                 + (f" WRITE ERRORS: {'; '.join(self.write_errors)[:400]}" if self.write_errors else ""))
@@ -927,10 +1066,14 @@ def held_rows(admin: admin_api.Admin, skip: set[str], page_size: int = 200, max_
 def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str, policy: Policy,
         writer: Writer | None = None, readback: Readback | None = None, now: datetime | None = None,
         max_model_calls: int = 120,
-        workers: int = 6, budget_s: int = 720, rows: list[dict[str, Any]] | None = None) -> RunResult:
+        workers: int = 6, budget_s: int = 720, rows: list[dict[str, Any]] | None = None,
+        clock: Callable[[], datetime] | None = None) -> RunResult:
     if mode not in ("shadow", "apply"):
         raise ValueError("mode must be shadow or apply")
     ensure_schema(db)
+    # `clock` is the wall clock at the WRITE boundary (a run can cross UTC midnight
+    # between deciding and sending); an injected `now` pins both for tests.
+    clock = clock or ((lambda: now) if now is not None else (lambda: datetime.now(timezone.utc)))
     now = now or datetime.now(timezone.utc)
     t0 = time.monotonic()
     res = RunResult(run_id=now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6], mode=mode)
@@ -1017,6 +1160,27 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
                 _set(d, "hold", "documentation required for this credit and no approved proof is on file for it: "
                      "never approved without a recorded proof id; human review")
 
+    # Approvals core-backend would refuse are never sent (T12 agent guard): a
+    # stored popularity outside 1..59 / client-sourced metadata needs documents
+    # (support, like any big track); a server proof requirement needs the
+    # claimant's proof (support); anything else goes to a human.
+    req_of = {str(r.get("id")): r for r in batch}
+    for d in decisions:
+        if d.decision != "approve" or d.request_id not in req_of:
+            continue
+        refusal = server_approval_refusal(req_of[d.request_id])
+        if not refusal:
+            continue
+        why = ",".join(refusal)
+        # firstmate 036: a stored popularity of 0 is NOT evidence of a big track
+        # (it is just unattributed), so those rows go to a human, never a proof ask.
+        if "popularity_unattributable" not in refusal and (
+                refusal[0] == "proof_required"
+                or set(refusal) <= {"popularity_unknown", "big_track", "client_sourced_metadata"}):
+            _set(d, "support", f"server approval guard would refuse ({why}): documentation required")
+        else:
+            _set(d, "hold", f"server approval guard would refuse ({why}): human review")
+
     # Daily per-user approval cap.
     counts = approvals_today_by_user(db, now.strftime("%Y-%m-%dT00:00:00Z"))
     for d in decisions:
@@ -1026,7 +1190,7 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             else:
                 counts[d.user_id] = counts.get(d.user_id, 0) + 1
 
-    filter_support(db, decisions, res, proof, proof_why, now)
+    filter_support(db, decisions, res, proof, proof_why, now, policy.max_ask_users_per_day)
     if mode != "apply":
         for d in decisions:
             d.doc_required = False
@@ -1050,23 +1214,51 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         return res
     writer = writer or admin_writer()
     readback = readback or status_readback()
+    user_of = {d.request_id: d.user_id for d in decisions}
+
+    def write_ids(action: str, status: str, chunk: list[str]) -> None:
+        outs, err = write_chunk(writer, readback, status, chunk, UNVERIFIED)
+        # Outcomes are booked at the time the PUT (and its readback) RETURNED, not
+        # when it started: a request in flight across UTC midnight counts on the
+        # later day. The pre-PUT check already fitted it into the earlier day, so
+        # neither day can exceed the cap (the later day is counted conservatively).
+        done_at = clock()
+        if err is not None:
+            res.write_errors.append(f"{action} batch of {len(chunk)}: {err}"[:200])
+        for rid, out in outs.items():
+            record_outcome(db, res.run_id, rid, action, out, done_at)
+            if out == status:
+                if action == "approve":
+                    res.approved += 1
+                else:
+                    res.support += 1
+            elif out.startswith("skipped:"):
+                k = out.split(":", 1)[1]
+                res.skipped_by_server[k] = res.skipped_by_server.get(k, 0) + 1
+
     with write_lock():
-        for action, status, ids in (("approve", APPROVED, approve_ids), ("support", UVN, support_ids)):
-            for i in range(0, len(ids), BATCH):
-                chunk = ids[i:i + BATCH]
-                outs, err = write_chunk(writer, readback, status, chunk, UNVERIFIED)
-                if err is not None:
-                    res.write_errors.append(f"{action} batch of {len(chunk)}: {err}"[:200])
-                for rid, out in outs.items():
-                    record_outcome(db, res.run_id, rid, action, out, now)
-                    if out == status:
-                        if action == "approve":
-                            res.approved += 1
-                        else:
-                            res.support += 1
-                    elif out.startswith("skipped:"):
-                        k = out.split(":", 1)[1]
-                        res.skipped_by_server[k] = res.skipped_by_server.get(k, 0) + 1
+        for i in range(0, len(approve_ids), BATCH):
+            write_ids("approve", APPROVED, approve_ids[i:i + BATCH])
+        # The daily ask cap is checked at the SUPPORT-write boundary, under the
+        # shared write lock, on the UTC day each support batch is actually sent:
+        # the clock is read immediately before every batch, and if the day has
+        # rolled over since the last check the remaining rows are re-capped
+        # against the new day. Overlapping runs, a run crossing midnight, or
+        # approval writes that cross midnight can never push a day past the cap.
+        # Rows trimmed here get 'deferred:daily_ask_cap' (or
+        # 'deferred:per_user_window') and are retried later.
+        pending = list(support_ids)
+        checked_day: str | None = None
+        while pending:
+            at = clock()
+            day = at.strftime("%Y-%m-%d")
+            if day != checked_day:
+                pending = cap_at_write(db, res, pending, user_of, policy.max_ask_users_per_day, at)
+                checked_day = day
+                if not pending:
+                    break
+            chunk, pending = pending[:BATCH], pending[BATCH:]
+            write_ids("support", UVN, chunk)
     return res
 
 

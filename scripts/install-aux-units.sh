@@ -359,6 +359,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py" ]] \
   || fail "$HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/intercom-legal-unanswered-watchdog.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/intercom-legal-unanswered-watchdog.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/lib/ensure-mercury-token.sh" ]] \
@@ -577,6 +579,43 @@ RIGHTSHOLDERWDTMR
 
 systemctl daemon-reload
 wd=intercom-rights-holder-watchdog.timer
+systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
+systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
+log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
+# ─── Intercom legal / privacy request unanswered-by-a-human watchdog ───────
+# Hourly. Pages #cs_priority (Jan) when a GDPR / erasure / legal / cease-and-desist
+# conversation's latest customer message has had no HUMAN reply for 24 h (Caroline's
+# replies do not count). Born 2026-10-17: two GDPR erasures sat 9-10 days. Token from
+# the env files; Slack token resolved in the script. See
+# scripts/intercom-legal-unanswered-watchdog.py.
+cat > /etc/systemd/system/intercom-legal-unanswered-watchdog.service << LEGALUNANSWEREDSVC
+[Unit]
+Description=Intercom legal/privacy request unanswered-by-a-human watchdog (alerts #cs_priority)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/intercom-legal-unanswered-watchdog.py
+LEGALUNANSWEREDSVC
+
+cat > /etc/systemd/system/intercom-legal-unanswered-watchdog.timer << LEGALUNANSWEREDTMR
+[Unit]
+Description=Run the Intercom legal/privacy unanswered watchdog hourly
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=60min
+Unit=intercom-legal-unanswered-watchdog.service
+
+[Install]
+WantedBy=timers.target
+LEGALUNANSWEREDTMR
+
+systemctl daemon-reload
+wd=intercom-legal-unanswered-watchdog.timer
 systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
@@ -3174,6 +3213,7 @@ AUX_ONFAILURE_UNITS=(
   hydra-session-thread-retention@.service
   hydra-weekly-cleanup.service
   intercom-intake-watchdog.service
+  intercom-legal-unanswered-watchdog.service
   intercom-rights-holder-watchdog.service
   overdue-verification-notifier.service
   qa-approval-retry.service

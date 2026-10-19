@@ -233,13 +233,14 @@
     {
       "name": "remove_credits",
       "answers": [
-        "remove a wrong/mechanical credit from my own profile"
+        "preview which wrong/mechanical credits on my own profile match my request (read-only; removal is done by the owner in the app or by staff)"
       ],
       "cannot_answer": [
+        "remove any credit (agent tokens are refused; preview only)",
         "remove a credit from a profile the customer doesn't own",
         "apply without a matching dry-run in the last 15 minutes"
       ],
-      "needs": "profileId, requesterEmail (Intercom-verified), tracks[]; intercomConvId required to apply."
+      "needs": "profileId, requesterEmail (Intercom-verified), tracks[]; preview only (apply:false)."
     },
     {
       "name": "retention_offer_apply",

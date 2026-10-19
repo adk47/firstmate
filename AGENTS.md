@@ -564,6 +564,9 @@ admin credit DELETE routes and on approved->unverified/rejected take-backs, and
 approved->user_verification_needed is illegal (the only exit deletes every role on the
 request). Retro take-backs are role-scoped and run from a named human's own session via
 `scripts/credit-retro.py` (`docs/credit-verification/credit-retro-r1.md`).
+The "we added your credit, please help us verify it" note to users goes ONLY through
+`scripts/intercom-verify-request.sh` (fixed copy, captain-approved, idempotent via the
+verify ledger); see `docs/credit-verification/verify-request-notes.md`.
 
 Every credit-trust AI call goes through `scripts/credit_trust/llm.py` (Codex on the
 subscription, tool-less via `scripts/lib/codex-judge-exec.sh` -> Jev), which writes

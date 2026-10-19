@@ -3015,6 +3015,31 @@ check_media_host_binaries() {
 log "  Pre-flight: host media binaries (pdftoppm, heif-convert)..."
 check_media_host_binaries
 
+# -------------------------------------------------------------------
+# Caroline's verify-send ledger schema (WARN ONLY — never halts a deploy)
+# -------------------------------------------------------------------
+# credit-retro's take-back gate reads verify_messages from Caroline's send ledger
+# (/var/lib/hydra/credit-review/ledger.sqlite3, shared with the decider) and refuses
+# every row while the table is absent. Until 2026-10-18 the table only appeared on the
+# gate's first send, and every send is locked, so take-back skipped everything.
+# `verify_ledger.py migrate` creates/upgrades ONLY the verify_* tables (CREATE TABLE IF
+# NOT EXISTS + ALTER TABLE ADD COLUMN), idempotent, never touching the decider's tables
+# or any row. A failure leaves take-back fail-closed (no removals), so it WARNS: an
+# unrelated deploy must not wedge on it.
+migrate_verify_ledger() {
+  local out rc=0
+  out=$(run_on_node8 '/usr/bin/python3 -I /opt/hydra/scripts/credit_review/verify_ledger.py --db /var/lib/hydra/credit-review/ledger.sqlite3 migrate' 2>&1) || rc=$?
+  if (( rc != 0 )); then
+    log "  ⚠ verify ledger migrate failed (rc=$rc): $(printf '%s' "$out" | tail -c 400)"
+    log "    take-back stays fail-closed (proof_source_unavailable) until it succeeds"
+  else
+    log "  ✓ verify ledger schema present (verify_messages, verify_proof_reviews, verify_requests)"
+  fi
+  return 0
+}
+log "  Caroline verify-send ledger schema..."
+migrate_verify_ledger
+
 # Post-sync inline (runs locally on node-8).
 #
 # IMPORTANT: `bash << 'POSTSYNC'` starts a CHILD bash process. The child
