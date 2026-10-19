@@ -25,8 +25,9 @@ Keep this table current in the same change that adds, removes, or upstreams a fo
 | DeepSeek lane gateway and lane model switch | `bin/fm-deepseek-gateway.sh`, `bin/fm-lane-model-switch.sh`, `docs/deepseek-lane-gateway.md` | Serves DeepSeek V4.1 Flash to Claude Code lanes | Fork-only |
 | Firstmate chair sentinel and flip | `bin/fm-chair-*.sh` | Pi+Fable to SuperGrok supervisor failover | Fork-only |
 | Fable runway monitor | `bin/fm-fable-runway*.sh`, `docs/runbooks/supervisor-failover-grok.md` | Wakes before the Fable supervisor runs out | Fork-only |
+| House-wiki stanza and worker `lesson:` rule | `bin/fm-house-wiki-stanza.txt`, `bin/fm-brief.sh`, `bin/fm-session-start.sh`, `AGENTS.md` | Muso house knowledge lives in `~/.llm-wiki`, and workers report lessons through their `done:` or `failed:` line | Fork-only |
 
-Not in tracked files, by design:
+Dropped from the tracked tree:
 
-- The house-wiki rule for workers lives in each home's `config/brief-include.md`, which `bin/fm-brief.sh` appends to ship and scout briefs; the chair's copy lives in that home's `data/captain.md` and in `~/.pi/agent/AGENTS.md`.
-- The no-mistakes 1.75.2 upgrade evaluation was dropped as stale; the installed version is newer.
+- The no-mistakes 1.75.2 note (`docs/tool-updates/no-mistakes-1.75.2.md`) evaluated an upgrade to 1.75.2.
+  The installed no-mistakes is already newer (the v1.64.0+fm.1 fork build tracking upstream, with v1.84.0 available), so the evaluation no longer describes a pending decision.

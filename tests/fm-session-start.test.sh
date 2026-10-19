@@ -2690,8 +2690,48 @@ EOF
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: claude" "supervision block missing"
   assert_contains "$out" "- X mode: active" "supervision block did not mention X cadence"
   assert_contains "$out" "Follow the supervision operating instructions block above" "next step did not point back to the emitted supervision block"
+  assert_contains "$out" "# House wiki" "next step missing the house-wiki stanza"
+  assert_contains "$out" "Never claim a fact is absent from memory without grepping" "next step missing the house-wiki absence guard"
+  assert_contains "$out" "permitted only on a worker's \`done:\` or \`failed:\` line" "next step missing the done/failed-only lesson host rule"
+  assert_contains "$out" "Before running \`bin/fm-teardown.sh\` for a task, which removes \`state/<id>.status\`, scan that log for \`lesson:\` clauses" "next step missing the firstmate-side pre-teardown filing rule"
+  assert_contains "$out" "\`lesson:\` is not a status state" "next step missing the lesson-is-a-clause rule"
+  assert_contains "$out" "Never edit \`raw/\` or \`meta/\`" "next step missing the vault raw/meta guard"
 
   pass "session start emits X-mode cadence guidance in the harness supervision block"
+}
+
+# A checkout missing the house-wiki stanza is broken, not a reason to emit a
+# digest without the source-of-truth contract: session start must refuse
+# before taking the session lock, matching fm-brief.sh's hard error.
+test_missing_house_wiki_stanza_refuses_before_lock() {
+  local rec root home fakebin stripped out rc
+  rec=$(new_world missing-wiki-stanza)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  stripped="$TMP_ROOT/missing-wiki-stanza-bin"
+  mkdir -p "$stripped"
+  cp "$ROOT"/bin/*.sh "$stripped/"
+
+  rc=0
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    "$stripped/fm-session-start.sh" 2>&1) || rc=$?
+
+  [ "$rc" -eq 1 ] || fail "session start without the stanza exited $rc, expected 1: $out"
+  assert_contains "$out" "missing house-wiki stanza" "missing stanza was not reported"
+  assert_not_contains "$out" "SESSION START" "session start emitted a digest without the house-wiki stanza"
+  assert_absent "$home/state/.lock" "session start took the lock before refusing on the missing stanza"
+
+  rc=0
+  out=$("$stripped/fm-session-start.sh" --help 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "--help on a checkout missing the stanza exited $rc, expected 0: $out"
+  assert_contains "$out" "Usage: fm-session-start.sh" "--help did not print usage on a checkout missing the stanza"
+  assert_contains "$out" "missing bin/fm-house-wiki-stanza.txt refuses with exit 1" "--help does not document the missing-stanza exit-1 exception"
+  assert_not_contains "$out" "missing house-wiki stanza $stripped" "--help refused on the missing stanza instead of printing usage"
+  pass "session start refuses loudly when the house-wiki stanza is missing"
 }
 
 test_next_step_afk_delegates_to_daemon() {
@@ -3053,6 +3093,7 @@ test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
+test_missing_house_wiki_stanza_refuses_before_lock
 test_next_step_afk_delegates_to_daemon
 test_next_step_quiet_mode_delegates_to_daemon
 test_quiet_record_digest_holds_nothing_for_a_return

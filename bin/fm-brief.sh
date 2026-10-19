@@ -116,6 +116,12 @@
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
+# Ship and scout briefs include the house-wiki stanza from
+# bin/fm-house-wiki-stanza.txt (single owner of the shared read contract) plus
+# the worker rule: never write the vault; carry `lesson: ...` as a trailing
+# clause on the done:/failed: status line only, which firstmate scans for
+# before running bin/fm-teardown.sh and files with wiki-retro. A missing
+# stanza file is a broken checkout and refuses the scaffold with exit 1.
 # A home may carry standing worker instructions without editing this tracked
 # script: when config/brief-include.md exists under the active home, ship and
 # scout scaffolds append its text verbatim as their last section, "# Home brief
@@ -546,6 +552,19 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+WIKI_STANZA_FILE="$SCRIPT_DIR/fm-house-wiki-stanza.txt"
+if [ ! -f "$WIKI_STANZA_FILE" ]; then
+  echo "fm-brief.sh: missing house-wiki stanza $WIKI_STANZA_FILE" >&2
+  exit 1
+fi
+WIKI_SECTION=$(cat "$WIKI_STANZA_FILE")
+WIKI_SECTION=${WIKI_SECTION%$'\n'}
+IFS= read -r -d '' WIKI_WORKER_RULE <<'EOF' || true
+Never write to `~/.llm-wiki` from this task. When you learn a durable Muso fact, add `lesson: {fact}` to the end of your `done:` or `failed:` line only (for example `done [at=<epoch>]: {conclusion} lesson: {fact}`), never on a `working:` line; `lesson:` is not a status state, so never write it as its own line. Before running `bin/fm-teardown.sh`, which removes this task's status log, firstmate scans that log for `lesson:` clauses and files each with `wiki-retro`.
+EOF
+WIKI_SECTION="$WIKI_SECTION
+${WIKI_WORKER_RULE%$'\n'}"
+
 IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 # Task
 ## Captain's intent
@@ -605,6 +624,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $TASK_SECTION
 
 $HERDR_SECTION
+
+$WIKI_SECTION
 
 # Setup
 $SETUP_BASE
@@ -676,6 +697,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $TASK_SECTION
 
 $HERDR_SECTION
+
+$WIKI_SECTION
 
 # Setup
 $SETUP_BASE

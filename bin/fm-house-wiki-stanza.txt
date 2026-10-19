@@ -1,0 +1,5 @@
+# House wiki
+Muso house knowledge lives at `~/.llm-wiki` and is the source of truth for Muso goals, infra, memories, and apps.
+Grep `wiki/index.md` then Read the matching page before acting on a Muso fact.
+Grep `raw/sources/*/extracted.md` for identifiers (PR URLs, job ids, image tags); read `wiki/` for meaning. `wiki-find` searches both; Pi uses `wiki_recall`.
+Never claim a fact is absent from memory without grepping `~/.llm-wiki` first.
