@@ -746,7 +746,7 @@ function buildEnrichmentLines(e: EnrichmentState): string[] {
     if (s.plan) lines.push(`- plan: ${clean(s.plan)}`);
   }
   const p = e.priorChats;
-  if (p && p.count > 0) {
+  if (p) {
     // Most-recent reference may be a conversation title OR a customer-typed
     // snippet — always sanitized. Date trimmed to the day; the agent doesn't
     // need timestamps.

@@ -245,3 +245,169 @@ run_step5a() { run --separate-stderr node --input-type=module -e "$(cat "$PROG")
   generic_line=$(grep -n 'IMPORT_RC != 0' "$DEPLOY_SH" | head -1 | cut -d: -f1)
   [ "$rc9_line" -lt "$generic_line" ]
 }
+
+# --- the persisted-count check must read only the JSON result line ----------
+#
+# deploy.sh captures the import as IMPORT_OUT=$(node ... 2>&1), so stdout AND
+# stderr land in one blob. On 2026-10-17 06:33Z (run 39010306853) the runtime
+# logged "[sqlite/transaction] slow SQLite transaction hold" to stderr ahead of
+# the {"target":...,"persisted":N} line; piping the whole blob to jq made a
+# SUCCESSFUL import look unparseable and failed the deploy. These tests run the
+# shipped node program with deploy's exact 2>&1 capture, then run the shipped
+# verification block (lifted verbatim out of deploy.sh) over that output.
+
+# Lift the post-import verification block (EXPECTED_JOBS .. the success log).
+extract_verify_block() {
+  VERIFY="$TEST_TMPDIR/step5a-verify.sh"
+  awk '/^  EXPECTED_JOBS=\$\(jq /{f=1} f{print} f&&/^  log "  Imported /{exit}' \
+    "$DEPLOY_SH" > "$VERIFY"
+  grep -q 'PERSISTED_JOBS' "$VERIFY" || {
+    echo "could not extract the Step 5a verification block from deploy.sh — the markers moved"
+    return 1
+  }
+}
+
+# Run the verification block under deploy's POSTSYNC shell options, with
+# deploy's fail/log semantics (fail exits non-zero; Slack is out of scope).
+run_verify() {
+  export IMPORT_OUT="$1"
+  export HYDRA_ROOT="$TEST_TMPDIR/repo"
+  export VERIFY
+  run bash -c '
+    set -euo pipefail
+    log() { echo "LOG: $*"; }
+    fail() { log "FATAL: $*"; exit 1; }
+    source "$VERIFY"
+    echo "VERIFY_OK persisted=$PERSISTED_JOBS"
+  '
+}
+
+seed_hydra_root() {
+  mkdir -p "$TEST_TMPDIR/repo"
+  cp "$LIVE_CRON" "$TEST_TMPDIR/repo/cron-jobs.json"
+}
+
+# Make the stub SDK emit a stderr warning during the save, the way the real
+# runtime did on 2026-10-17, before the program prints its JSON result.
+warn_on_save() {
+  cat > "$CRON_SDK" <<'SDK'
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+export function resolveCronStorePath() {
+  return process.env.OPENCLAW_STATE_DIR + "/cron/jobs.json";
+}
+export async function saveCronStore(target, store) {
+  console.error("[sqlite/transaction] slow SQLite transaction hold: 1834ms (cron_jobs)");
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target + ".sqlite-sim", JSON.stringify(store));
+}
+export async function loadCronStore(target) {
+  try { return JSON.parse(readFileSync(target + ".sqlite-sim", "utf8")); }
+  catch (e) { return { jobs: [] }; }
+}
+SDK
+}
+
+@test "step5a verify: a stderr warning before the JSON result does NOT fail a successful import" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  seed_repo
+  seed_hydra_root
+  seed_store '{"jobs":[]}'
+  warn_on_save
+  extract_verify_block
+
+  # deploy.sh's exact capture: stdout+stderr in one variable.
+  out=$(node --input-type=module -e "$(cat "$PROG")" 2>&1)
+  # Precondition: the reproduced blob really is warning-then-JSON, which the
+  # pre-fix whole-blob `jq .persisted` could not parse.
+  [[ "$(printf '%s\n' "$out" | head -n 1)" == "[sqlite/transaction]"* ]]
+  ! printf '%s' "$out" | jq -r '.persisted' >/dev/null 2>&1
+
+  run_verify "$out"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERIFY_OK persisted=2"* ]]
+  [[ "$output" == *"Imported 2 cron jobs"* ]]
+}
+
+@test "step5a verify: a clean JSON-only import still passes" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  seed_repo
+  seed_hydra_root
+  seed_store '{"jobs":[]}'
+  extract_verify_block
+
+  out=$(node --input-type=module -e "$(cat "$PROG")" 2>&1)
+  run_verify "$out"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERIFY_OK persisted=2"* ]]
+}
+
+@test "step5a verify: FAILS CLOSED when the output has no JSON result line" {
+  extract_verify_block
+  seed_repo
+  seed_hydra_root
+  run_verify "[sqlite/transaction] slow SQLite transaction hold: 1834ms (cron_jobs)"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FATAL: cron SQLite import: store persisted <unparseable> jobs, expected 2"* ]]
+  [[ "$output" != *"VERIFY_OK"* ]]
+}
+
+@test "step5a verify: FAILS CLOSED when the result line reports the wrong count, even behind a warning" {
+  extract_verify_block
+  seed_repo
+  seed_hydra_root
+  run_verify '[sqlite/transaction] slow SQLite transaction hold: 1834ms (cron_jobs)
+{"target":"/x/cron/jobs.json","persisted":0}'
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FATAL: cron SQLite import: store persisted 0 jobs, expected 2"* ]]
+}
+
+@test "step5a verify: FAILS CLOSED on empty import output" {
+  extract_verify_block
+  seed_repo
+  seed_hydra_root
+  run_verify ""
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"store persisted <unparseable> jobs, expected 2"* ]]
+}
+
+# D2 (MUS-13135): the POSTSYNC heredoc is a CHILD bash under `set -euo
+# pipefail`. `fail` reads $REPORT_ONLY and `notify_slack` reads $SLACK_WEBHOOK;
+# if the parent's export line omits them, the child prints FATAL and then dies
+# on "REPORT_ONLY: unbound variable" BEFORE it can page Slack (2026-10-17).
+@test "POSTSYNC child: a fail() reaches notify_slack, not an unbound REPORT_ONLY" {
+  # Mirror the parent: shipped bytes of the vars, the functions and the export lines.
+  fn() { grep -E "^$1\(\) \{" "$DEPLOY_SH"; }
+  export_line=$(grep -E '^export HYDRA_ROOT TARGET' "$DEPLOY_SH")
+  [ -n "$export_line" ]
+  cat > "$TEST_TMPDIR/bin/curl" <<'STUB'
+#!/bin/bash
+echo "CURL_CALLED $*" >> "$TEST_TMPDIR/curl.log"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/curl"
+
+  parent="$TEST_TMPDIR/parent.sh"
+  {
+    echo 'HYDRA_ROOT=/x TARGET=all DEPLOY_PATH=/x HYDRA_LOCAL=/x REPORT_ONLY=0'
+    echo 'SLACK_WEBHOOK=https://hooks.invalid/x'
+    fn log; fn fail; fn notify_slack; fn needs_target
+    echo "$export_line"
+    echo 'export -f fail log notify_slack needs_target'
+    echo "bash <<'CHILD'"
+    echo 'set -euo pipefail'
+    echo 'fail "cron SQLite import: store persisted <unparseable> jobs, expected 40"'
+    echo 'CHILD'
+  } > "$parent"
+  # notify_slack is multi-line; the grep above only lifts its first line.
+  awk '/^notify_slack\(\) \{/{f=1} f{print} f&&/^}/{exit}' "$DEPLOY_SH" > "$TEST_TMPDIR/ns.sh"
+  sed -i.bak '/^notify_slack() {/d' "$parent"
+  sed -i.bak "/^needs_target/r $TEST_TMPDIR/ns.sh" "$parent"
+
+  run bash "$parent"
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FATAL: cron SQLite import"* ]]
+  [[ "$output" != *"unbound variable"* ]]
+  grep -q CURL_CALLED "$TEST_TMPDIR/curl.log"
+}

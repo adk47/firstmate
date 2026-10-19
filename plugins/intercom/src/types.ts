@@ -185,6 +185,10 @@ export interface IntercomSessionState {
   // human-takeover handoff.
   priorityFiredAt?: string | null;
   userTurnCount?: number;
+  // Customer EXCHANGES (a burst of customer messages before any reply counts once; see
+  // handler.ts continuesCustomerBurst). Drives only the hard turn-count cap; Jev and the
+  // judge keep reading the per-message userTurnCount.
+  userExchangeCount?: number;
   // Personalization context for a verified, logged-in customer. Populated at
   // most once per conversation (gated behind account.personalization.enabled),
   // fetched live from systems-of-record, and held ONLY here in session state —
@@ -524,7 +528,8 @@ export interface EnrichmentState {
   // Prior-support-chat pointer for THIS verified contact, summarized from
   // Intercom's per-contact conversation search (system of record — correctly
   // scoped per contact, which is what keeps cross-customer isolation intact).
-  // Count excludes the current conversation; absent when there are none.
+  // Count excludes the current conversation; count 0 when the lookup succeeded
+  // and found none, absent when the lookup did not run or failed (unknown).
   priorChats?: {
     count: number;
     mostRecentTitle?: string;

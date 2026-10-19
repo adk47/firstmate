@@ -120,7 +120,7 @@
       "profile_status": "what's the current state of my profile (verified, claimed, credit count); what are my most recent credits",
       "profiles_claim_self": "approve my own pending profile claim",
       "profiles_consolidate": "merge my duplicate profiles into the one I own",
-      "remove_credits": "remove a wrong/mechanical credit from my own profile",
+      "remove_credits": "preview which wrong/mechanical credits on my own profile match my request (read-only)",
       "retention_offer_apply": "apply the 50% retention discount I just accepted",
       "retention_offer_check": "am I eligible for a discount if I don't cancel",
       "subscription_status": "what plan am I on; is my subscription active",
@@ -171,7 +171,7 @@
         ]
       },
       "credit_verification": {
-        "what": "Inspect pending UVN credits, ask for exact proof, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
+        "what": "Inspect pending UVN credits, ask for proof at most once and only if none was given before, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
         "examples": [
           "my submitted credit is stuck in verification"
         ],
@@ -237,7 +237,7 @@
         ]
       },
       "remove_wrong_credits": {
-        "what": "Remove mechanical wrong credits from a profile the customer owns, without touching production-side roles or wrong-merge cases.",
+        "what": "Customer wants mechanical wrong credits taken off a profile they own; Caroline previews the list and routes to in-app removal or staff review, without touching production-side roles or wrong-merge cases.",
         "examples": [
           "this track shouldn't be credited to me, please remove it"
         ],
@@ -252,7 +252,7 @@
   "skill": {
     "criteria": {
       "action-request": "Submit structured action requests via ClickUp tasks for operations review",
-      "customer-credit-removal": "Autonomously remove credits a customer owns from their own profile, OR detect mis-described unmerge requests and escalate them with audit context",
+      "customer-credit-removal": "Preview the wrong credits a customer owns on their own profile and route to in-app removal or staff review, OR detect mis-described unmerge requests and escalate them with audit context",
       "customer-credit-verification": "When a customer asks about credits they submitted that are stuck in \"user verification needed\", confirm ownership with the read-only credit_verification_check tool, ask the customer for proof, and route the outcome.",
       "customer-profile-claim": "Use when a verified customer asks to claim/verify their profile and a pending claim exists on it.",
       "customer-profile-consolidate": "Merge a customer's OWN duplicate profiles into the profile they own – the SAFE self-service merge case, gated by the muso capability gate. The gate corroborates identity server-side (same or near-same name, the customer's own verified/pending claim, empty dup, or shared tracks) and refuses…",

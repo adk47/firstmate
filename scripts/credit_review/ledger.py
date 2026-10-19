@@ -174,6 +174,12 @@ class Ledger:
         r = self.db.execute("SELECT v FROM state WHERE k=?", (k,)).fetchone()
         return r["v"] if r else None
 
+    def model_checked_since(self, request_id: str, mode: str, ts: str) -> bool:
+        r = self.db.execute("SELECT 1 FROM reviews WHERE request_id=? AND mode=? AND model IS NOT NULL "
+                            "AND COALESCE(basis,'') != 'model_error' AND reviewed_at >= ? LIMIT 1",
+                            (request_id, mode, ts)).fetchone()
+        return r is not None
+
     def reviewed(self, request_id: str, mode: str) -> bool:
         r = self.db.execute("SELECT 1 FROM reviews WHERE request_id=? AND mode=? LIMIT 1", (request_id, mode)).fetchone()
         return r is not None
@@ -206,9 +212,13 @@ class Ledger:
     def dearest_call_since(self, ts: str) -> float:
         """The most expensive single model call recorded since `ts` (0 if none).
         Seeds the per-call budget reservation so a run never launches a call
-        it could only afford if calls were cheaper than they have been."""
-        r = self.db.execute("SELECT COALESCE(MAX(cost_usd),0) c FROM reviews WHERE reviewed_at >= ? AND model IS NOT NULL",
-                            (ts,)).fetchone()
+        it could only afford if calls were cheaper than they have been. A batched
+        call's cost is split across its claims' rows, so each row's share is
+        scaled back up by the call's batch_size."""
+        r = self.db.execute(
+            "SELECT COALESCE(MAX(cost_usd * COALESCE(CASE WHEN json_valid(judge_json) "
+            "THEN json_extract(judge_json,'$.batch_size') END, 1)),0) c "
+            "FROM reviews WHERE reviewed_at >= ? AND model IS NOT NULL", (ts,)).fetchone()
         return float(r["c"])
 
     def cost_since(self, ts: str) -> tuple[float, int]:

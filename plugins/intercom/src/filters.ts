@@ -291,6 +291,12 @@ export function extractDocumentAttachments(
   return out;
 }
 
+// Intercom author types that are the customer (identified user, anonymous
+// lead, or the generic `contact`). Everything else (admin, bot, team) is us.
+function isCustomerAuthored(type: string | undefined): boolean {
+  return type === "user" || type === "lead" || type === "contact";
+}
+
 export function classifyEvent(
   payload: IntercomWebhookPayload,
   log: FilterLog = defaultFilterLog,
@@ -302,7 +308,20 @@ export function classifyEvent(
   switch (topic) {
     case "conversation.user.created":
     case "conversation.user.replied": {
-      const lastPart = conversation.conversation_parts?.conversation_parts?.at(-1);
+      // The message is the latest CUSTOMER-authored part, never a system/bot
+      // part. By the time Intercom fires `user.created`, it has usually
+      // already appended bot parts to the payload (conversation_attribute_
+      // updated_by_admin, default_assignment, language_detection_details,
+      // company_updated), each with `attachments: []` and no body. Taking
+      // `.at(-1)` blindly made that empty array win over
+      // `source.attachments`, so EVERY opening-message image was dropped
+      // and Caroline answered "I can't see the image" (measured 2026-10-17:
+      // 4 of 4 customer openers with an image, 2 of them paying). With no
+      // customer part yet, the opening message (`source`) is the message.
+      const parts = conversation.conversation_parts?.conversation_parts ?? [];
+      const customerPart = [...parts].reverse().find((p) => isCustomerAuthored(p?.author?.type));
+      const lastPart =
+        customerPart ?? (topic === "conversation.user.created" ? undefined : parts.at(-1));
       const body = lastPart?.body ?? conversation.source?.body ?? "";
       // Structured attachments live on the conversation_part when one exists,
       // OR on `conversation.source` for an image-only new conversation

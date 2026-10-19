@@ -16,10 +16,13 @@ import time
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(SCRIPT_DIR)
 
-# Load token
+# Load token (botToken is a SecretRef in openclaw-main.json; resolve it)
+sys.path.insert(0, "/opt/hydra/scripts")
+from lib.slack_token import resolve_secret  # noqa: E402
+
 with open("/opt/hydra/openclaw-main.json") as f:
     cfg = json.load(f)
-SLACK_TOKEN = cfg["channels"]["slack"]["accounts"]["cmo"]["botToken"]
+SLACK_TOKEN = resolve_secret(cfg["channels"]["slack"]["accounts"]["cmo"]["botToken"])
 
 # Load transcripts for titles/descriptions
 with open(os.path.join(SKILL_DIR, "transcripts.json")) as f:
