@@ -245,3 +245,129 @@ run_step5a() { run --separate-stderr node --input-type=module -e "$(cat "$PROG")
   generic_line=$(grep -n 'IMPORT_RC != 0' "$DEPLOY_SH" | head -1 | cut -d: -f1)
   [ "$rc9_line" -lt "$generic_line" ]
 }
+
+# --- the persisted-count check must read only the JSON result line ----------
+#
+# deploy.sh captures the import as IMPORT_OUT=$(node ... 2>&1), so stdout AND
+# stderr land in one blob. On 2026-10-17 06:33Z (run 39010306853) the runtime
+# logged "[sqlite/transaction] slow SQLite transaction hold" to stderr ahead of
+# the {"target":...,"persisted":N} line; piping the whole blob to jq made a
+# SUCCESSFUL import look unparseable and failed the deploy. These tests run the
+# shipped node program with deploy's exact 2>&1 capture, then run the shipped
+# verification block (lifted verbatim out of deploy.sh) over that output.
+
+# Lift the post-import verification block (EXPECTED_JOBS .. the success log).
+extract_verify_block() {
+  VERIFY="$TEST_TMPDIR/step5a-verify.sh"
+  awk '/^  EXPECTED_JOBS=\$\(jq /{f=1} f{print} f&&/^  log "  Imported /{exit}' \
+    "$DEPLOY_SH" > "$VERIFY"
+  grep -q 'PERSISTED_JOBS' "$VERIFY" || {
+    echo "could not extract the Step 5a verification block from deploy.sh — the markers moved"
+    return 1
+  }
+}
+
+# Run the verification block under deploy's POSTSYNC shell options, with
+# deploy's fail/log semantics (fail exits non-zero; Slack is out of scope).
+run_verify() {
+  export IMPORT_OUT="$1"
+  export HYDRA_ROOT="$TEST_TMPDIR/repo"
+  export VERIFY
+  run bash -c '
+    set -euo pipefail
+    log() { echo "LOG: $*"; }
+    fail() { log "FATAL: $*"; exit 1; }
+    source "$VERIFY"
+    echo "VERIFY_OK persisted=$PERSISTED_JOBS"
+  '
+}
+
+seed_hydra_root() {
+  mkdir -p "$TEST_TMPDIR/repo"
+  cp "$LIVE_CRON" "$TEST_TMPDIR/repo/cron-jobs.json"
+}
+
+# Make the stub SDK emit a stderr warning during the save, the way the real
+# runtime did on 2026-10-17, before the program prints its JSON result.
+warn_on_save() {
+  cat > "$CRON_SDK" <<'SDK'
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+export function resolveCronStorePath() {
+  return process.env.OPENCLAW_STATE_DIR + "/cron/jobs.json";
+}
+export async function saveCronStore(target, store) {
+  console.error("[sqlite/transaction] slow SQLite transaction hold: 1834ms (cron_jobs)");
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target + ".sqlite-sim", JSON.stringify(store));
+}
+export async function loadCronStore(target) {
+  try { return JSON.parse(readFileSync(target + ".sqlite-sim", "utf8")); }
+  catch (e) { return { jobs: [] }; }
+}
+SDK
+}
+
+@test "step5a verify: a stderr warning before the JSON result does NOT fail a successful import" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  seed_repo
+  seed_hydra_root
+  seed_store '{"jobs":[]}'
+  warn_on_save
+  extract_verify_block
+
+  # deploy.sh's exact capture: stdout+stderr in one variable.
+  out=$(node --input-type=module -e "$(cat "$PROG")" 2>&1)
+  # Precondition: the reproduced blob really is warning-then-JSON, which the
+  # pre-fix whole-blob `jq .persisted` could not parse.
+  [[ "$(printf '%s\n' "$out" | head -n 1)" == "[sqlite/transaction]"* ]]
+  ! printf '%s' "$out" | jq -r '.persisted' >/dev/null 2>&1
+
+  run_verify "$out"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERIFY_OK persisted=2"* ]]
+  [[ "$output" == *"Imported 2 cron jobs"* ]]
+}
+
+@test "step5a verify: a clean JSON-only import still passes" {
+  if ! command -v node >/dev/null 2>&1; then skip "node not available"; fi
+  seed_repo
+  seed_hydra_root
+  seed_store '{"jobs":[]}'
+  extract_verify_block
+
+  out=$(node --input-type=module -e "$(cat "$PROG")" 2>&1)
+  run_verify "$out"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERIFY_OK persisted=2"* ]]
+}
+
+@test "step5a verify: FAILS CLOSED when the output has no JSON result line" {
+  extract_verify_block
+  seed_repo
+  seed_hydra_root
+  run_verify "[sqlite/transaction] slow SQLite transaction hold: 1834ms (cron_jobs)"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FATAL: cron SQLite import: store persisted <unparseable> jobs, expected 2"* ]]
+  [[ "$output" != *"VERIFY_OK"* ]]
+}
+
+@test "step5a verify: FAILS CLOSED when the result line reports the wrong count, even behind a warning" {
+  extract_verify_block
+  seed_repo
+  seed_hydra_root
+  run_verify '[sqlite/transaction] slow SQLite transaction hold: 1834ms (cron_jobs)
+{"target":"/x/cron/jobs.json","persisted":0}'
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FATAL: cron SQLite import: store persisted 0 jobs, expected 2"* ]]
+}
+
+@test "step5a verify: FAILS CLOSED on empty import output" {
+  extract_verify_block
+  seed_repo
+  seed_hydra_root
+  run_verify ""
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"store persisted <unparseable> jobs, expected 2"* ]]
+}

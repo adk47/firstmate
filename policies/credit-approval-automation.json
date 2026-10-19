@@ -8,7 +8,9 @@
         "credit-verification-batch-cron.sh",
         "verify-credit-batch-mvp.lobster"
       ],
-      "cron_names": ["credit-verification-batch-4h"],
+      "cron_names": [
+        "credit-verification-batch-4h"
+      ],
       "approved": false,
       "approved_by": null,
       "approval_ref": null,
@@ -16,12 +18,29 @@
     },
     "uvn-under30": {
       "description": "scripts/uvn-under30-cron.py --mode apply: approves ticket-enrolled user_verification_needed rows with live Spotify popularity < 30 and no reject_*/review_* rule or batch fraud flag.",
-      "entrypoints": ["uvn-under30-cron.py"],
-      "cron_names": ["uvn-ticket-popularity-under30"],
+      "entrypoints": [
+        "uvn-under30-cron.py"
+      ],
+      "cron_names": [
+        "uvn-ticket-popularity-under30"
+      ],
       "approved": true,
       "approved_by": "Nick (nsollazzo)",
       "approval_ref": "2026-08-13 authorization of the autonomous admin-write gate; apply mode + hourly from 2026-09-09 (recorded in the cron description in cron-jobs.json). This is Nick's approval as recorded, not a captain decision; firstmate to confirm or flip to false.",
       "status_note": "From 2026-10-11 it also refuses rows with any review_* hold rule (IDP #1686) in verificationData."
+    },
+    "credit-trust-decide": {
+      "description": "scripts/credit-review.py decide --mode apply (cron credit-trust-decide-15m): trust-yet-verify on the held (unverified) queue. Provisionally approves non-big rows with no validator conflict that have ONE evidence kind (all roles trusted-confirmed, a trusted footprint of >= 3 confirmed claims in each claimed role family, or Codex on server-fetched sources with verified quoted citations on >= 2 independent domains, never crowd-edited MusicBrainz/Wikipedia alone; editorial roles only on trusted catalog confirmation under pop 30), and moves the rest to user_verification_needed (Knock asks the user for proof). The fraud/PULL/HOLD/RE-VERIFY lists in policies/credit-trust-decide.json are never approved. Writes only via muso-admin-api.sh's conditional endpoint as credit-trust-decide@hydra-ops; the wrapper re-checks this entry at the write boundary and core-backend's agentApprovalGuard refuses any row with a validator conflict.",
+      "entrypoints": [
+        "credit-review.py decide"
+      ],
+      "cron_names": [
+        "credit-trust-decide-15m"
+      ],
+      "approved": true,
+      "approved_by": "captain (Aaron)",
+      "approval_ref": "2026-10-15 ~22:12Z (verbatim, relayed by firstmate inbox 002/003): 'i want AI live now - we have too many credits to approve and to get supporting data for - let users know where there was a credit given and that it needs support (trust yet verify approach)'",
+      "status_note": "Wiring: data/credit-trust-system-fable-a1/live-tonight.md Piece 1 (Fable). Cron ships enabled=true from the repo (captain's 22:12Z approval above); there are no live toggles, because deploy.sh re-syncs cron-jobs.json on every deploy, so disabling it durably is a repo PR. Kill switches: /etc/hydra/credit-trust-decide.disabled (silences it), cron enabled=false, or approved=false here (the wrapper then refuses every approval)."
     }
   }
 }

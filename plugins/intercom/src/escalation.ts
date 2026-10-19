@@ -33,6 +33,22 @@ interface RiskRule {
   patterns: RegExp[];
 }
 
+const FUTURE_SUBJECT = String.raw`(?:i'?ll|i will|i'?m going to|i am going to|i'?m gonna|i am gonna|i'?m about to|i am about to|we'll|we will|we're going to|we are going to|we're gonna)`;
+const PROGRESSIVE_SUBJECT = String.raw`(?:i'?m|i am|i'?ll be|i will be|we're|we are|we'll be|we will be)`;
+const ADVERBS = String.raw`(?:(?:just|definitely|also|totally|literally|now|really|absolutely)\s+){0,2}`;
+const SHAMING_SUBJECT_VERB =
+  String.raw`\b(?:${FUTURE_SUBJECT}\s+${ADVERBS}(?:post|share|expose|blast|rant|warn|tell|write)` +
+  String.raw`|${PROGRESSIVE_SUBJECT}\s+${ADVERBS}(?:posting|sharing|exposing|blasting|ranting|warning|telling))\b`;
+const HOSTILE_SUBJECT_VERB =
+  String.raw`\b(?:${FUTURE_SUBJECT}\s+${ADVERBS}(?:blast|drag|call (?:you|muso) out|put (?:this|you|it) on blast)` +
+  String.raw`|${PROGRESSIVE_SUBJECT}\s+${ADVERBS}(?:blasting|dragging|calling (?:you|muso) out|putting (?:this|you|it) on blast))\b`;
+const PLATFORM = String.raw`(?:youtube|twitter|x\.com|x|instagram|tiktok|facebook|reddit|social media)`;
+const PLATFORM_TARGET = String.raw`(?:(?:on|across|all over)\s+(?:my\s+|our\s+)?${PLATFORM}\b|online\b)`;
+const US = String.raw`(?:you guys|you|muso|your (?:company|app|service|site|platform|team))`;
+const HOW_YOU = String.raw`how you (?:guys )?(?:treat(?:ed)?|scam(?:med)?|deleted?|removed?|ignored?|stole|lied?|screw(?:ed)?|rip(?:ped)? off|cheat(?:ed)?|handled?)\b`;
+const OWN_WORK = String.raw`(?!\s+(?:(?:my|our)\s+(?:songs?|tracks?|music|releases?|work|albums?|videos?|eps?)|this\s+(?:release|song|track))\b)`;
+const AUDIENCE = String.raw`(?:everyone|everybody|the world|people|others|(?:my|our) (?:friends|followers|fans|audience))`;
+
 const RISK_RULES: RiskRule[] = [
   {
     // Dispute-grade billing signals ONLY. Plain "refund" / "money back" /
@@ -84,11 +100,38 @@ const RISK_RULES: RiskRule[] = [
     // Standalone platform names (youtube/twitter/etc.) match routine product
     // questions in a music-credits product ("my YouTube credits aren't showing"),
     // so platform names must be paired with a shaming verb to fire.
+    //
+    // A platform + "post" is ALSO how people describe credit PROOF ("the attached
+    // Instagram post credits me", "my songs are posted on my social media"), so a
+    // platform match now needs a THREAT: first-person intent ("I'll / I'm going
+    // to / I will ...") before the shaming verb. Measured 2026-10-11..18: the old
+    // adjacency + bare "social media" patterns fired 3 times, and all 3 were
+    // proof submissions handed to a human mid-verification (convs
+    // 215476432654075, 215476425525761, 215476444241127).
+    //
+    // So a platform name alone never fires: the first-person verb must be aimed at
+    // us ("about you / your company / how you ...", "expose you", "warn everyone")
+    // or be openly hostile ("blast you on twitter", "post this all over instagram").
+    // This deliberately trades recall for precision: in the measured week the rule
+    // had 0 true positives against 3 proof false positives, and anything it misses
+    // stays with Caroline (and the judge once it runs).
     patterns: [
-      /\btell\s+(everyone|my friends|everybody|the world)\b/i,
-      /\bsocial media\b/i,
-      /\b(post|share|expose|blast|review|rant|warn)\b[^.]{0,40}\b(youtube|twitter|x\.com|instagram|tiktok|facebook|reddit)\b/i,
-      /\b(youtube|twitter|x\.com|instagram|tiktok|facebook|reddit)\b[^.]{0,40}\b(post|share|expose|blast|review|rant|warn)\b/i,
+      new RegExp(
+        String.raw`${SHAMING_SUBJECT_VERB}(?:(?!\byou\b)[^.!?]){0,60}?\babout\s+` +
+          String.raw`(?:${US}\b|${HOW_YOU}|what you (?:did|do|have done)\b)`,
+        "i",
+      ),
+      new RegExp(String.raw`\b(?:${FUTURE_SUBJECT}\s+${ADVERBS}post|${PROGRESSIVE_SUBJECT}\s+${ADVERBS}posting)\b(?:(?!\byou\b)[^.!?]){0,60}?\b${HOW_YOU}`, "i"),
+      new RegExp(String.raw`\b(?:${FUTURE_SUBJECT}\s+${ADVERBS}expose|${PROGRESSIVE_SUBJECT}\s+${ADVERBS}exposing)\s+(?:${US}|this)\b`, "i"),
+      new RegExp(String.raw`\b(?:${FUTURE_SUBJECT}\s+${ADVERBS}warn|${PROGRESSIVE_SUBJECT}\s+${ADVERBS}warning)\s+${AUDIENCE}\b`, "i"),
+      new RegExp(String.raw`${HOSTILE_SUBJECT_VERB}[^.!?]{0,40}?\b${PLATFORM_TARGET}`, "i"),
+      new RegExp(String.raw`${SHAMING_SUBJECT_VERB}${OWN_WORK}[^.!?]{0,40}?\ball over\s+(?:my\s+|our\s+)?${PLATFORM}\b`, "i"),
+      new RegExp(
+        String.raw`\b(?:${FUTURE_SUBJECT}|${PROGRESSIVE_SUBJECT})\s+${ADVERBS}(?:leav(?:e|ing)|writ(?:e|ing)|post(?:ing)?|giv(?:e|ing))\s+(?:you\s+)?(?:an?\s+)?${PLATFORM}\s+review\b`,
+        "i",
+      ),
+      /\btell\s+(?:everyone|everybody|the world|people)\s+how\s+you\s+treat\b/i,
+      /\b(leave|write|post|give)\s+(?:you\s+)?(?:a\s+)?(bad|negative|terrible|awful|1[- ]star|one[- ]star)\s+review\b/i,
       /\bscorched earth\b/i,
       /\bgoing public\b/i,
     ],
@@ -178,9 +221,10 @@ function logJudgeOutcome(
 }
 
 function checkRules(message: string): { reason: string; actionType: RiskActionType; matched: string } | null {
+  const text = message.replace(/[\u2018\u2019\u02BC]/g, "'");
   for (const rule of RISK_RULES) {
     for (const p of rule.patterns) {
-      if (p.test(message)) {
+      if (p.test(text)) {
         return { reason: rule.reason, actionType: rule.actionType, matched: p.source };
       }
     }

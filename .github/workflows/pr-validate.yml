@@ -1466,6 +1466,13 @@ jobs:
           python3 -m unittest -v \
             tests.test_customer_outcome \
             tests.test_resolution_writers
+      - name: Run Slack botToken SecretRef reader tests
+        # openclaw-main.json carries botToken as a SecretRef; scripts that
+        # json.load() it must resolve it via scripts/lib/slack_token.py or they
+        # send a dict as the Bearer token. Same bare stdlib unittest.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_slack_token
       - name: Run Intercom reply-identity resolver tests
         # scripts/lib/intercom_identity.py is the single resolution point for the
         # admin id EVERY unattended Intercom writer posts under. 2026-08-31:
@@ -1509,6 +1516,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_rights_holder_watchdog
+      - name: Run legal-unanswered watchdog tests
+        # scripts/intercom-legal-unanswered-watchdog.py PAGES #cs_priority (Jan) when a
+        # legal/privacy request has no HUMAN reply for 24h. These lock the watch set,
+        # later-part matching, cursor/retry rules, 48h re-page spacing and the hard
+        # error on an unrecognised ledger. Targeted by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_intercom_legal_unanswered_watchdog
       - name: Run resolution-matcher tests
         # scripts/resolution-matcher.py runs UNATTENDED daily (--apply) and both
         # MESSAGES customers and CLOSES their conversations/tickets on the strength
@@ -1665,17 +1680,41 @@ jobs:
         # directly, same bare python3.
         run: |
           set -euo pipefail
+          # This job runs ON node-8: never let a test write the production
+          # /var/lib/hydra/credit-review/run.log (firstmate 056). Each suite also
+          # imports scripts/tests/credit_test_env.py, which forces its own temp log.
+          export CREDIT_REVIEW_LOG="${RUNNER_TEMP:-/tmp}/credit-review-test-run.log"
           python3 scripts/tests/test_uvn_under30_policy.py
           python3 scripts/tests/test_uvn_under30_cron.py
           # AI credit reviewer / approval auditor (scripts/credit_review). Stdlib
           # only; the admin API and the model are faked, so no network.
           python3 scripts/tests/test_credit_review.py
+          # Trust-yet-verify user notes (credit-review.py verify-notify + the
+          # verify ledger). Stdlib only; the admin API is faked and the gate
+          # script runs as its TESTABLE copy against a curl stub (no network).
+          python3 scripts/tests/test_credit_verify_notify.py
           # credit-retro r1 role-scoped take-back + prepared waves (scripts/credit_retro).
           # Stdlib only; the admin API is faked. Also pins the committed manifests.
           python3 scripts/tests/test_credit_retro.py
+          # The proof-on-file completeness contract (scripts/credit_review/proof_parts.py),
+          # same fixture file as plugins/support-tools/tests/proof-on-file.test.ts. Stdlib only.
+          python3 scripts/tests/test_proof_parts_contract.py
+          # Caroline's send ledger: writer (verify_ledger) and take-back reader agree on
+          # verify_messages, and `verify_ledger.py migrate` (run by deploy.sh) creates it. Stdlib only.
+          python3 scripts/tests/test_verify_ledger_contract.py
           # credit-trust band table mirror (scripts/credit_trust): byte-identical to IDP's
           # common/credit_trust_bands.json at the pinned sha. Stdlib only.
           python3 scripts/tests/test_credit_trust_bands.py
+          # Credit-trust model ladder + fetched-source evidence (scripts/credit_trust,
+          # T01). Stdlib only; codex, Jev, OpenRouter and HTTP are faked, and the
+          # bash helper is exercised only via --print-argv / census / quota gate.
+          python3 scripts/tests/test_credit_trust_llm.py
+          # credit-trust-decide (trust-yet-verify decider): server-mirror conflict
+          # predicate, big tracks never approved, never re-ask, ledger before PUT.
+          python3 scripts/tests/test_credit_trust_decide.py
+          # Supporting-document forensics (scripts/credit_verify/proof). Synthetic
+          # forgeries built in-test; uses the runner's PyMuPDF/Pillow/OpenCV/tesseract.
+          python3 scripts/tests/test_credit_proof.py
 
   plugin-tests:
     name: Plugin tests (vitest)

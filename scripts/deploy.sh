@@ -3015,6 +3015,31 @@ check_media_host_binaries() {
 log "  Pre-flight: host media binaries (pdftoppm, heif-convert)..."
 check_media_host_binaries
 
+# -------------------------------------------------------------------
+# Caroline's verify-send ledger schema (WARN ONLY — never halts a deploy)
+# -------------------------------------------------------------------
+# credit-retro's take-back gate reads verify_messages from Caroline's send ledger
+# (/var/lib/hydra/credit-review/ledger.sqlite3, shared with the decider) and refuses
+# every row while the table is absent. Until 2026-10-18 the table only appeared on the
+# gate's first send, and every send is locked, so take-back skipped everything.
+# `verify_ledger.py migrate` creates/upgrades ONLY the verify_* tables (CREATE TABLE IF
+# NOT EXISTS + ALTER TABLE ADD COLUMN), idempotent, never touching the decider's tables
+# or any row. A failure leaves take-back fail-closed (no removals), so it WARNS: an
+# unrelated deploy must not wedge on it.
+migrate_verify_ledger() {
+  local out rc=0
+  out=$(run_on_node8 '/usr/bin/python3 -I /opt/hydra/scripts/credit_review/verify_ledger.py --db /var/lib/hydra/credit-review/ledger.sqlite3 migrate' 2>&1) || rc=$?
+  if (( rc != 0 )); then
+    log "  ⚠ verify ledger migrate failed (rc=$rc): $(printf '%s' "$out" | tail -c 400)"
+    log "    take-back stays fail-closed (proof_source_unavailable) until it succeeds"
+  else
+    log "  ✓ verify ledger schema present (verify_messages, verify_proof_reviews, verify_requests)"
+  fi
+  return 0
+}
+log "  Caroline verify-send ledger schema..."
+migrate_verify_ledger
+
 # Post-sync inline (runs locally on node-8).
 #
 # IMPORTANT: `bash << 'POSTSYNC'` starts a CHILD bash process. The child
@@ -3147,6 +3172,18 @@ check_statedir_pin() {
 }
 if needs_target "main"; then check_statedir_pin main; fi
 if needs_target "edge"; then check_statedir_pin edge; fi
+
+# Credit-trust judge user (T01). scripts/lib/codex-judge-exec.sh runs the
+# tool-less `codex exec` as this unprivileged system user and REFUSES to run
+# it as root, so the judge is unavailable (its ladder falls through) until the
+# user exists. Idempotent; no home, no login shell, no groups.
+if ! id hydra-judge >/dev/null 2>&1; then
+  if useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hydra-judge; then
+    log "  created system user hydra-judge (credit-trust codex judge)"
+  else
+    log "  WARN: could not create system user hydra-judge — the credit-trust Codex rung stays unavailable"
+  fi
+fi
 
 # muso CLI host config (main profile only; soak phase). Files are RENDERED
 # on every deploy from the OPERATIONS WORKSPACE muso-ops-admin config — the
@@ -3527,7 +3564,11 @@ if [ -f "$HYDRA_ROOT/cron-jobs.json" ] && needs_target "main"; then
   # different count would otherwise silently ship a wrong cron table.
   EXPECTED_JOBS=$(jq '.jobs | length' "$HYDRA_ROOT/cron-jobs.json") \
     || fail "cron SQLite import: could not count repo jobs in $HYDRA_ROOT/cron-jobs.json"
-  PERSISTED_JOBS=$(echo "$IMPORT_OUT" | jq -r '.persisted' 2>/dev/null) || PERSISTED_JOBS=""
+  # IMPORT_OUT is stdout+stderr (2>&1). The node import can log warnings to stderr ahead of
+  # its one JSON result line (e.g. "[sqlite/transaction] slow SQLite transaction hold"), which made
+  # the whole blob unparseable and failed a SUCCESSFUL import (2026-10-17 06:33Z, run 39010306853).
+  # Read only the result line. Still fails closed: no such line -> empty -> the check below fails.
+  PERSISTED_JOBS=$(printf '%s\n' "$IMPORT_OUT" | grep -E '^\{.*"persisted"' | tail -n 1 | jq -r '.persisted' 2>/dev/null) || PERSISTED_JOBS=""
   if [ "$PERSISTED_JOBS" != "$EXPECTED_JOBS" ]; then
     fail "cron SQLite import: store persisted ${PERSISTED_JOBS:-<unparseable>} jobs, expected $EXPECTED_JOBS (import output: $IMPORT_OUT)"
   fi
