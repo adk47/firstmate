@@ -114,6 +114,41 @@ fixture() { jq -s '{items: .}' >"$STUB_FIXTURE"; }
   if grep -q 'purple' <<<"$output"; then return 1; fi
 }
 
+# The describe stub echoes the URL it was handed, so these tests see WHICH image was picked.
+url_stub() {
+  cat >"$AD_SCREENING_DESCRIBE" <<'S'
+#!/usr/bin/env bash
+echo "described:$1"
+S
+}
+
+@test "media[0].url beats a placeholder primaryMediaUrl (MUS-12319)" {
+  url_stub
+  ad a1 null 2026-10-05T09:00:00Z \
+    | jq '.primaryMediaUrl="https://cdn.example/placeholders/amp-cover-placeholder.png" | .media=[{url:"https://cdn.example/media/real.png"}]' | fixture
+  run "$SCRIPT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"described:https://cdn.example/media/real.png"* ]]
+  [[ "$output" != *"placeholder"* ]]
+}
+
+@test "ad with only primaryMediaUrl still describes it" {
+  url_stub
+  ad a1 null 2026-10-05T09:00:00Z | fixture
+  run "$SCRIPT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"described:https://cdn.example/a.png"* ]]
+}
+
+@test "ad with no media at all says it could not be described" {
+  url_stub
+  ad a1 null 2026-10-05T09:00:00Z | jq 'del(.primaryMediaUrl)' | fixture
+  run "$SCRIPT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"creative could not be described"* ]]
+  [[ "$output" != *"described:"* ]]
+}
+
 @test "absent budget and schedule render 'not stated'" {
   ad a1 null 2026-10-05T09:00:00Z | jq 'del(.campaign.budget, .campaign.schedule)' | fixture
   run "$SCRIPT" --dry-run
