@@ -72,7 +72,23 @@
 #              the same value for refresh_grace_secs (default 900, one
 #              CLIProxyAPI auto-refresh interval), or the log shows a refresh
 #              failure for it within error_window_secs. One condition per
-#              account.
+#              account. This file-based rule applies only when no better-ccflare
+#              account store is present (below).
+#   ccflare    when better-ccflare owns refresh (its account store
+#              ~/.config/better-ccflare/better-ccflare.db exists), auth health is
+#              read from that store instead, read-only: an anthropic account
+#              that is not paused and either requires re-authentication or
+#              expires within expiry_window_secs, or no usable account at all
+#              (every one paused or needing re-authentication). The access-sync
+#              agent that copies ccflare's access tokens into the CLIProxyAPI
+#              inventory (log ~/Library/Logs/ccflare-access-sync.log, errors in
+#              the .err beside it) is a condition when its log has not moved
+#              for access_sync_stale_secs (default 600) or its newest run wrote
+#              an error. In this mode the claude-* inventory files (the
+#              sync's copies) and CLIProxyAPI's "credential refresh failed"
+#              lines for them are ignored: CLIProxyAPI never holds a refresh
+#              token ccflare has not rotated, so its invalid_grant warnings are
+#              expected noise. Other inventory files keep the file rule.
 #   errors     the gateway answered at least error_min (default 30) requests in
 #              the last error_window_secs (default 300) and error_rate_pct
 #              (default 50) percent or more of them were 5xx or 401; it clears
@@ -97,6 +113,9 @@
 #   FM_FLEET_STALL_EXPIRY_WINDOW_SECS (1800) FM_FLEET_STALL_REFRESH_GRACE_SECS (900)
 #   FM_FLEET_STALL_ERROR_WINDOW_SECS (300)   FM_FLEET_STALL_ERROR_MIN (30)
 #   FM_FLEET_STALL_ERROR_RATE_PCT (50)       FM_FLEET_STALL_CAPTURE_JOBS (16)
+#   FM_FLEET_STALL_CCFLARE_DB (~/.config/better-ccflare/better-ccflare.db; empty = file mode)
+#   FM_FLEET_STALL_ACCESS_SYNC_LOG (~/Library/Logs/ccflare-access-sync.log; empty = not watched)
+#   FM_FLEET_STALL_ACCESS_SYNC_STALE_SECS (600)
 #
 # Paging. FM_FLEET_STALL_PAGE_CMD is a shell command run with the page text as
 # both $1 and stdin, bounded at 20 seconds; point it at whatever reaches the
@@ -403,6 +422,9 @@ run_engine() {  # <action> <capture-dir>
   FS_ERROR_WINDOW_SECS="$(conf_int FM_FLEET_STALL_ERROR_WINDOW_SECS 300)" \
   FS_ERROR_MIN="$(conf_int FM_FLEET_STALL_ERROR_MIN 30)" \
   FS_ERROR_RATE_PCT="$(conf_int FM_FLEET_STALL_ERROR_RATE_PCT 50)" \
+  FS_CCFLARE_DB="$(conf FM_FLEET_STALL_CCFLARE_DB "$HOME/.config/better-ccflare/better-ccflare.db")" \
+  FS_ACCESS_SYNC_LOG="$(conf FM_FLEET_STALL_ACCESS_SYNC_LOG "$HOME/Library/Logs/ccflare-access-sync.log")" \
+  FS_ACCESS_SYNC_STALE_SECS="$(conf_int FM_FLEET_STALL_ACCESS_SYNC_STALE_SECS 600)" \
   python3 - <<'PY'
 import datetime
 import glob
@@ -410,6 +432,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import time
 import urllib.error
 import urllib.request
@@ -574,6 +597,59 @@ GIN = re.compile(r"\[gin_logger\.go:\d+\]\s+(\d{3})\s+\|")
 REFRESH_FAIL = re.compile(r"credential refresh failed for \S+ \(([^)]+)\)")
 
 
+# Inventory files the ccflare access sync writes (claude-<ccflare name>.json).
+CCFLARE_PREFIX = "claude-"
+
+
+def probe_ccflare(db_path):
+    """Return {key: message} for the better-ccflare-owned auth conditions."""
+    out = {}
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True, timeout=2)
+        try:
+            rows = con.execute(
+                "SELECT name, expires_at, requires_reauth, paused FROM accounts"
+                " WHERE coalesce(provider, 'anthropic') = 'anthropic'").fetchall()
+        finally:
+            con.close()
+    except Exception as exc:
+        out["ccflare"] = "gateway account store %s cannot be read: %s" % (db_path, exc)
+        return out
+    usable = 0
+    for name, expires_at, reauth, paused in rows:
+        if paused:
+            continue
+        if reauth:
+            out["auth:" + name] = "gateway account %s needs re-authentication in better-ccflare" % name
+            continue
+        usable += 1
+        if not isinstance(expires_at, int) or expires_at <= 0:
+            continue
+        remaining = expires_at / 1000.0 - NOW
+        if remaining <= 0:
+            out["auth:" + name] = "gateway account %s expired %s ago in better-ccflare" % (name, fmt_age(-remaining))
+        elif remaining <= EXPIRY_WINDOW:
+            out["auth:" + name] = "gateway account %s expires in %s in better-ccflare" % (name, fmt_age(remaining))
+    if rows and usable == 0:
+        out["ccflare"] = "better-ccflare has no usable account: every one is paused or needs re-authentication"
+    log = E.get("FS_ACCESS_SYNC_LOG", "")
+    if log and os.path.isfile(log):
+        stale = ival("FS_ACCESS_SYNC_STALE_SECS")
+        log_mtime = os.path.getmtime(log)
+        err = os.path.splitext(log)[0] + ".err"
+        if NOW - log_mtime >= stale:
+            out["access-sync-stale"] = "ccflare access sync has not run for %s (log %s)" % (fmt_age(NOW - log_mtime), log)
+        elif os.path.isfile(err) and os.path.getsize(err) > 0 and os.path.getmtime(err) >= log_mtime - 5:
+            last = ""
+            text = tail_bytes(err, 4096) or ""
+            for line in reversed(text.splitlines()):
+                if line.strip():
+                    last = line.strip()[:200]
+                    break
+            out["access-sync-failed"] = "ccflare access sync's last run failed: %s" % (last or "see %s" % err)
+    return out
+
+
 def probe_proxy(rec):
     """Return {key: message} for the gateway conditions holding now."""
     out = {}
@@ -594,6 +670,11 @@ def probe_proxy(rec):
         return out
     if not answered:
         out["down"] = "gateway %s gives no answer" % E.get("FS_PROXY_URL", "")
+
+    # When better-ccflare owns refresh, its store is the auth truth and the
+    # inventory files are only access-token copies.
+    ccflare_db = E.get("FS_CCFLARE_DB", "")
+    ccflare = bool(ccflare_db) and os.path.isfile(ccflare_db)
 
     log = tail_bytes(E.get("FS_PROXY_LOG", "")) if E.get("FS_PROXY_LOG") else None
     total = errors = 0
@@ -618,7 +699,7 @@ def probe_proxy(rec):
                     errors += 1
                 continue
             r = REFRESH_FAIL.search(line)
-            if r:
+            if r and not (ccflare and os.path.basename(r.group(1)).startswith(CCFLARE_PREFIX)):
                 refresh_failed.add(os.path.basename(r.group(1)))
     prev_errors = "errors" in (rec.get("proxy") or {})
     rate = (100.0 * errors / total) if total else 0.0
@@ -632,9 +713,15 @@ def probe_proxy(rec):
 
     seen = rec.get("auth_seen") or {}
     now_seen = {}
+    if ccflare:
+        out.update(probe_ccflare(ccflare_db))
     if have_inventory:
         for path in sorted(glob.glob(os.path.join(auth_dir, "*.json"))):
             name = os.path.basename(path)
+            # The access sync owns the claude-* copies of ccflare's accounts;
+            # every other inventory file is still CLIProxyAPI's own.
+            if ccflare and name.startswith(CCFLARE_PREFIX):
+                continue
             try:
                 with open(path) as f:
                     data = json.load(f)

@@ -671,6 +671,8 @@ A worker waiting on firstmate or on its own pipeline is not stalled: before a fl
 An episode opens when at least the minimum number of live workers are stalled at once: the check prints one line naming every stalled worker and its reason, plus the gateway's condition as the likely cause when a stalled pane actually shows a gateway error, reminds while the episode holds, pages the captain once the episode has held the page interval, and prints a recovered line when it ends.
 The same poll probes the local CLIProxyAPI gateway read-only and reports, on onset and on clearing, a gateway that does not answer, an enabled account whose access token expires within the window without refreshing, and a high 5xx-or-401 error rate in its log.
 A home with no gateway inventory and nothing answering at the gateway URL runs no CLIProxyAPI, and that is not a condition.
+When better-ccflare owns token refresh (its account store exists), account health is read from that store instead of from CLIProxyAPI's copies: an unpaused account that needs re-authentication or expires within the window, no usable account at all, and an access-sync agent whose log has stopped moving or whose newest run wrote an error.
+CLIProxyAPI's own refresh-failure warnings for those copied accounts are then ignored, because CLIProxyAPI only ever holds access tokens there and its failing refresh is expected.
 
 `config/fleet-stall.env` is optional, local, gitignored, and not inherited by secondmate homes.
 It holds `KEY=value` lines, it is parsed rather than sourced, and a set environment variable of the same name wins.
@@ -691,6 +693,9 @@ FM_FLEET_STALL_ERROR_WINDOW_SECS=300    # gateway log window for the error rate
 FM_FLEET_STALL_ERROR_MIN=30             # error count that can raise the error-rate condition
 FM_FLEET_STALL_ERROR_RATE_PCT=50        # error percentage that raises it
 FM_FLEET_STALL_CAPTURE_JOBS=16          # pane captures run at once
+FM_FLEET_STALL_CCFLARE_DB=~/.config/better-ccflare/better-ccflare.db   # empty = judge auth from the CLIProxyAPI inventory files
+FM_FLEET_STALL_ACCESS_SYNC_LOG=~/Library/Logs/ccflare-access-sync.log # the access-sync agent's log; its .err sits beside it; empty = not watched
+FM_FLEET_STALL_ACCESS_SYNC_STALE_SECS=600  # an access-sync log this old is a condition
 ```
 
 The page always posts a macOS notification, and `FM_FLEET_STALL_PAGE_CMD` is how it reaches the captain's phone, for example a Slack bot DM; with no page command configured the onset line says so.
