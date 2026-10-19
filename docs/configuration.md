@@ -680,7 +680,7 @@ FM_FLEET_STALL_MIN_WORKERS=3            # stalled live workers that open an epis
 FM_FLEET_STALL_NO_PROGRESS_SECS=900     # busy without token or pane movement this long is a stall
 FM_FLEET_STALL_PAGE_AFTER_SECS=900      # an episode this old pages the captain, once
 FM_FLEET_STALL_REMIND_SECS=1800         # reminder interval while an episode holds
-FM_FLEET_STALL_PAGE_CMD=                # shell command given the page text as $1 and on stdin, bounded at 20s
+FM_FLEET_STALL_PAGE_CMD=                # shell command given the page text as $1 and on stdin, bounded at 20s and by what is left of FM_CHECK_TIMEOUT less 3s
 FM_FLEET_STALL_PROXY=on                 # off disables the gateway probe
 FM_FLEET_STALL_PROXY_URL=http://127.0.0.1:8317
 FM_FLEET_STALL_PROXY_AUTH_DIR=~/.cli-proxy-api
@@ -695,6 +695,7 @@ FM_FLEET_STALL_CAPTURE_JOBS=16          # pane captures run at once
 
 The page always posts a macOS notification, and `FM_FLEET_STALL_PAGE_CMD` is how it reaches the captain's phone, for example a Slack bot DM; with no page command configured the onset line says so.
 Arm the check once per home with `bin/fm-fleet-stall-check.sh arm`, which writes `state/fleet-stall.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
+A whole poll is budgeted at half of `FM_CHECK_TIMEOUT`, at most 15 seconds, because the watcher runs its checks one after another and a check that spends most of its timeout on every sweep holds the whole sweep back; a worker the pane captures do not reach in time is not counted that poll and keeps its history.
 `bin/fm-fleet-stall-check.sh status` prints the last recorded verdict, and `bin/fm-fleet-stall-check.sh disarm` removes the shim, its trust binding, and `state/.fleet-stall.json`.
 
 ## Sentry watch (config/sentry-watch.json)
@@ -1175,6 +1176,7 @@ FM_TASK_INBOX_LOCK_WAIT_SECS=15   # bounded wait for a task's inbox sequence loc
 FM_LOCK_REAP_INTERVAL=300     # seconds between the watcher's detached stale per-task lock sweeps (bin/fm-lock-reap.sh); each reap lands in state/.watch-triage.log; 0 disables
 FM_STALE_LOCK_REAP_SECS=60    # minimum pid-record age before a metadata or inbox lock whose holder is dead or whose pid was recycled may be reaped (bin/fm-wake-lib.sh fm_lock_reap_stale)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_CHECK_SLOW_LOG_SECS=10   # a slow check that takes at least this long is logged to state/.watch-triage.log with its duration; the watcher also refreshes its liveness beacon between checks
 FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 probes on every run, other values must be 60..86400
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=24   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported

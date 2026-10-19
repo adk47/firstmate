@@ -84,6 +84,9 @@ test_three_workers_on_a_gateway_error_wake_then_page_then_recover() {
   assert_contains "$out" "FLEET-STALL paged the captain after 15m" "a 15-minute episode did not page"
   assert_present "$home/paged" "the page command did not run"
   assert_contains "$(cat "$home/paged")" "3 workers have been stuck for 15m (w1, w2, w3)" "the page text did not say what is stuck"
+  # The notification is detached so the poll never waits on it; give it a moment.
+  local i=0
+  while [ ! -s "$home/notified" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
   assert_present "$home/notified" "the page did not post a macOS notification"
   rm -f "$home/paged"
   out=$(poll "$home" 11500)
@@ -279,6 +282,28 @@ test_waiting_workers_are_not_stalled_and_old_auth_is_not_the_cause() {
   pass "parked, declared-waiting, and pipeline-owned workers are not stalls, and gateway conditions are a cause only when panes show gateway errors"
 }
 
+test_a_slow_current_state_reader_stays_inside_the_poll_budget() {
+  local home out start secs
+  home=$(make_home budget)
+  for w in s1 s2 s3; do
+    worker "$home" "$w" busy "$(pi_pane ' waiting' "↑1.0M ↓$w")"
+  done
+  # A current-state reader that hangs, as fm-crew-state does at Mac load.
+  cat > "$home/fakebin/slow-crew-state" <<'SH'
+#!/usr/bin/env bash
+sleep 20
+printf 'state: working · source: pane · slow\n'
+SH
+  chmod +x "$home/fakebin/slow-crew-state"
+  poll "$home" 1000 FM_FLEET_STALL_CREW_STATE_BIN="$home/fakebin/slow-crew-state" >/dev/null
+  start=$(date +%s)
+  out=$(poll "$home" 2400 FM_FLEET_STALL_CREW_STATE_BIN="$home/fakebin/slow-crew-state" FM_CHECK_TIMEOUT=30)
+  secs=$(( $(date +%s) - start ))
+  [ "$secs" -le 10 ] || fail "the poll took ${secs}s with a hanging current-state reader; its budget is 15s of a 30s timeout and the reads get at most 4s"
+  assert_contains "$out" "FLEET-STALL 3 of 3 live workers stalled" "a candidate whose state could not be read in time did not count as flagged"
+  pass "a hanging current-state reader is cut off well inside the watcher's per-check timeout"
+}
+
 test_status_and_arm() {
   local home out
   home=$(make_home arm)
@@ -330,5 +355,6 @@ test_busy_without_token_movement_is_a_stall
 test_gateway_probe_reports_auth_errors_and_down
 test_stall_line_carries_the_gateway_cause_and_a_missing_page_command
 test_waiting_workers_are_not_stalled_and_old_auth_is_not_the_cause
+test_a_slow_current_state_reader_stays_inside_the_poll_budget
 test_status_and_arm
 test_live_capture_skips_gone_orca_terminals
