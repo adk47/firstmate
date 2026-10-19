@@ -977,6 +977,21 @@ describe("SanitizingIntercomClient help-centre link gate", () => {
     const body = `Answer.\nMore detail here: ${GOOD}`;
     expect(await send(body, () => manifest)).toBe(body);
   });
+  it("does not log a valid citation as an error", async () => {
+    const errors: string[] = [];
+    await send(`Answer.\nMore detail here: ${GOOD}`, () => manifest, errors);
+    expect(errors).toEqual([]);
+  });
+  it.each([
+    ["unlisted citation only", "More detail here: https://help.muso.ai/en/articles/9-fake", () => manifest],
+    ["valid citation, manifest unavailable", `More detail here: ${GOOD}`, () => null],
+  ])("posts nothing when the gate leaves an empty reply: %s", async (_n, body, loader) => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner, { error: () => {} }, loader as any);
+    const res = await client.replyToConversation({ conversationId: "c1", adminId: "a1", body });
+    expect(inner.calls.replyToConversation).toHaveLength(0);
+    expect(res.messageId).toBe("");
+  });
   it("strips an invented link and logs internally only", async () => {
     const errors: string[] = [];
     const out = await send("Answer.\nMore detail here: https://help.muso.ai/en/articles/99-x", () => manifest, errors);

@@ -576,11 +576,14 @@ export class SanitizingIntercomClient implements IntercomClient {
     if (probe.redactions.length === 0) return body;
     const manifest = this.helpManifestLoader();
     const pass = sanitizeHelpLinks(body, manifest);
-    const msg = `[intercom:help-link] conv=${conversationId} stripped=${pass.redactions.length}${manifest ? "" : " manifest=unavailable"} urls=${JSON.stringify(pass.redactions)}`;
-    try {
-      this.log?.error?.(msg);
-    } catch {
-      try { console.error(msg); } catch { /* noop */ }
+    // A valid citation survives with no redactions: nothing to report.
+    if (pass.redactions.length > 0) {
+      const msg = `[intercom:help-link] conv=${conversationId} stripped=${pass.redactions.length}${manifest ? "" : " manifest=unavailable"} urls=${JSON.stringify(pass.redactions)}`;
+      try {
+        this.log?.error?.(msg);
+      } catch {
+        try { console.error(msg); } catch { /* noop */ }
+      }
     }
     return pass.body;
   }
@@ -664,6 +667,17 @@ export class SanitizingIntercomClient implements IntercomClient {
       } catch {
         try { console.error(msg); } catch { /* noop */ }
       }
+    }
+    // The channel's empty-reply guard runs before this wrapper, so a reply that was
+    // only a citation the gate removed would otherwise post `body: ""`. Post nothing.
+    if (refPass.body.trim().length === 0 && params.body.trim().length > 0) {
+      const msg = `[intercom:empty-after-sanitize] conv=${params.conversationId} posting nothing`;
+      try {
+        this.log?.error?.(msg);
+      } catch {
+        try { console.error(msg); } catch { /* noop */ }
+      }
+      return { messageId: "" };
     }
     return this.inner.replyToConversation({ ...params, body: refPass.body });
   }
