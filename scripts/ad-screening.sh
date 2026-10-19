@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
+# Reviewed baseline: deploy overwrites the node-8 hot patch (MUS-14258); this copy is the QA'd superset.
 # ad-screening.sh — poll the admin pending-review queue and assemble one
 # text packet per ad that needs screening (MUS-3635 §5 steps 1-3).
 #
@@ -134,7 +135,7 @@ assemble() {
   local ad="$1" id media creative lines packet last
   id="$(jq -r "$PRELUDE"' .id | v(64)' <<<"$ad")" || return 1
   [ "$id" != "not stated" ] || return 1
-  media="$(jq -r '.primaryMediaUrl // .mediaUrls[0]? // empty' <<<"$ad")" || return 1
+  media="$(jq -r '.media[0].url? // .primaryMediaUrl // .mediaUrls[0]? // empty' <<<"$ad")" || return 1
   creative=""
   rm -f "$workdir/creative.$id"
   [ -z "$media" ] || creative="$("$describe" "$media" 2>/dev/null)" || creative=""
