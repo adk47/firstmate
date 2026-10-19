@@ -366,7 +366,8 @@ def _read_slack_token(config_path, account):
     try:
         with open(config_path) as f:
             cfg = json.load(f)
-        return cfg["channels"]["slack"]["accounts"][account]["botToken"]
+        from lib.slack_token import resolve_secret
+        return resolve_secret(cfg["channels"]["slack"]["accounts"][account]["botToken"])
     except (OSError, KeyError, ValueError, TypeError):
         return None
 
