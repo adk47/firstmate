@@ -109,7 +109,13 @@ readonly TESTABLE=0
 # copy. While 0 the copy renders (--dry-run) but never posts.
 #   LIVE_WINDOWED_COPY_APPROVED  verify-live (new credits): the windowed copy, the only one sent.
 #   RETRO_COPY_APPROVED          the retro-past no-threat ask.
-readonly LIVE_WINDOWED_COPY_APPROVED=0
+readonly LIVE_WINDOWED_COPY_APPROVED=1
+#   LIVE_V1_COPY_APPROVED        verify-live, PAID PROVISIONAL approvals only (decider evidence_kind
+#                                provisional_paid): Fable's no-deadline v1 copy, no date, no removal
+#                                language, no follow-ups (Fable ruling 4 as amended, firstmate 073:
+#                                never auto-removed; day-30 Ops review list instead). Sent only when
+#                                the caller passes --copy v1 (verify_notify does, for those credits).
+readonly LIVE_V1_COPY_APPROVED=1
 readonly RETRO_COPY_APPROVED=0
 #   REMOVAL_COPY_APPROVED        the removal notice (and its one-time backfill).
 #   TAKEBACK_COPY_APPROVED       the take-back notice (credit-retro apply/notify, #1237/#1242).
@@ -128,7 +134,8 @@ readonly PROOF_TAG="credit-proof"
 # The ONLY approver of these campaigns, and where he approved each.
 readonly CAPTAIN_UID="U7RP6HKUZ"
 readonly APPROVAL_REF_LIVE="captain U7RP6HKUZ 2026-10-15 22:12Z: \"i want AI live now - we have too many credits to approve and to get supporting data for - let users know where there was a credit given and that it needs support (trust yet verify approach)\""
-readonly APPROVAL_REF_LIVE_WINDOWED="$APPROVAL_REF_LIVE; 2026-10-15 23:40Z: \"if no valid verification comes it should be removed\" (kept for new provisional approvals at 2026-10-16 00:35Z)"
+readonly APPROVAL_REF_LIVE_WINDOWED="$APPROVAL_REF_LIVE; 2026-10-15 23:40Z: \"if no valid verification comes it should be removed\" (kept for new provisional approvals at 2026-10-16 00:35Z); copy = Fable copy-review-fable-2026-10-17 pack 1 (GO with edits); enable = Fable decision-verify-notify-enable-2026-10-17 (firstmate 051, 2026-10-17 23:15Z: enable Monday 2026-10-20 under its 7 conditions)"
+readonly APPROVAL_REF_LIVE_V1="$APPROVAL_REF_LIVE; paid provisional approvals: Fable credit-backlog-1019 ruling 4 as amended by firstmate 073 (2026-10-19 14:58Z: provisional approve + doc request, NO day-30 auto-removal, no removal language; captain rule 10-15: deletes must confirm removal at Spotify/Tidal or prove a different profile)"
 readonly APPROVAL_REF_TAKEBACK="captain via firstmate 012, 2026-10-16: every take-back sends the user a short, polite message saying which credit and role, why (who the public credits name, with the link), and how to dispute it by replying with a document."
 readonly APPROVAL_REF_REMOVAL="firstmate 2026-10-16 15:14Z, captain-driven: owners of credits WE removed must be told which credit and role, why, and how to dispute by replying with a document (support measured 35 owners never told). Fraud removals stay silent by captain order (firstmate 2026-10-16 15:48Z)."
 readonly APPROVAL_REF_PAST="captain U7RP6HKUZ 2026-10-15 23:35Z: \"im referring to before when nick made changes and did a trust verify flow and now we have a lotnof credits to verify with documents and give people 30 days to send something in for the ones missing documents\"; 2026-10-16 00:35Z: \"how many credits were approved without documentstion i dont want to lose users unless its obvious fraud feom tbe past\""
@@ -343,8 +350,12 @@ case "$CAMPAIGN" in
   verify-live)
     MAX_CREDITS=200; MAX_LISTED=25
     case "$COPY_ARG" in ""|v1|windowed) ;; *) refuse "--copy must be v1 or windowed (got '$COPY_ARG')." ;; esac
-    if [ "$ACTION" = "post" ]; then
-      [ -z "$COPY_ARG" ] || refuse "--copy is preview-only; a real send always uses the windowed copy."
+    if [ "$ACTION" = "post" ] && [ "$COPY_ARG" = "v1" ] && [ "$KIND" = "initial" ]; then
+      # Paid provisional approvals (firstmate 073): the no-threat v1 note, never removal-due.
+      [ "$LIVE_V1_COPY_APPROVED" = "1" ] || refuse "the verify-live v1 copy is not approved for sending (LIVE_V1_COPY_APPROVED=0)."
+      COPY="v1"
+    elif [ "$ACTION" = "post" ]; then
+      [ -z "$COPY_ARG" ] || refuse "--copy windowed is implied for a real send; --copy v1 is for a paid provisional approval's initial note only."
       COPY="windowed"
     elif [ "$KIND" != "initial" ]; then
       [ "$COPY_ARG" != "v1" ] || refuse "the v1 copy names no date and has no follow-ups; preview follow-ups with --copy windowed."
@@ -352,7 +363,7 @@ case "$CAMPAIGN" in
     else
       COPY="${COPY_ARG:-windowed}"
     fi
-    if [ "$COPY" = "windowed" ]; then APPROVAL_REF="$APPROVAL_REF_LIVE_WINDOWED"; else APPROVAL_REF="$APPROVAL_REF_LIVE"; fi
+    if [ "$COPY" = "windowed" ]; then APPROVAL_REF="$APPROVAL_REF_LIVE_WINDOWED"; else APPROVAL_REF="$APPROVAL_REF_LIVE_V1"; fi
     ;;
   retro-past)
     MAX_CREDITS=1000; MAX_LISTED=100; COPY="past"; APPROVAL_REF="$APPROVAL_REF_PAST"
@@ -636,11 +647,11 @@ def docs: {
 def it1($n; $one; $many): if $n == 1 then $one else $many end;
 def live_initial($fn; $c; $maxl; $windowed; $due):
   ($c | length) as $n
-  | "any one of these: a split sheet, a label or distributor statement, a PRO or MLC registration, a studio or session invoice, or liner notes or an official release page that names you (PDF, PNG or JPG). A document that names several tracks counts for each track it names." as $docs
+  | "any one of these: a split sheet, a label or distributor statement, a PRO or MLC registration, a studio or session invoice, or liner notes or an official release page that names you (PDF, PNG or JPG). A document that names several \(it1($n; ""; "of these ")) tracks counts for each track it names." as $docs
   | (if $windowed then "Reply to this message by \($due) (30 days from today) with \($docs)"
      else "Reply to this message with \($docs)" end) as $p2
   | (if $windowed then
-       "If we can't verify \(it1($n; "this credit"; "a credit")) by \($due), \(it1($n; "it"; "that credit")) will be removed from your profile after that day. If you send a valid document later, we'll review it and can restore the credit."
+       "If we can't verify \(it1($n; "this credit"; "a credit")) by \($due), \(it1($n; "it"; "that credit")) will be removed from your profile that day. If you send a valid document after that, we'll review it and can restore the credit."
      else
        "Nothing changes while we check. If public sources later disagree with \(it1($n; "the credit"; "a credit")), we'll review it with you before anything changes."
      end) as $p3
@@ -670,8 +681,8 @@ def follow_intro($fn; $c; $maxl):
 def live_followup($fn; $c; $maxl; $kind; $due):
   ($c | length) as $n
   | follow_intro($fn; $c; $maxl)
-  | .segs += [ {p: "Nothing has been removed yet: \(it1($n; "the credit stays"; "the credits stay")) on your profile. If we can't verify \(it1($n; "it"; "a credit")) by \($due), \(it1($n; "it"; "that credit")) will be removed from your profile after that day. Reply to this message with any one of the documents from my earlier note and we'll pick it up right away."} ]
-  | .segs += (if $kind == "reminder-25" then [ {p: "This is my last reminder about this review."} ] else [] end)
+  | .segs += [ {p: "Nothing has been removed yet: \(it1($n; "the credit stays"; "the credits stay")) on your profile. If we can't verify \(it1($n; "it"; "a credit")) by \($due), \(it1($n; "it"; "that credit")) will be removed from your profile that day. Reply to this message with any one of the documents from my earlier note and we'll pick it up right away."} ]
+  | .segs += (if $kind == "reminder-25" then [ {p: "This is my last reminder about this review. If you need more time, tell us which credit and why, and we will keep the request open."} ] else [] end)
   | .segs += sig;
 def rejection_text: $rt[.reason];
 def after_rejection($fn; $c; $maxl; $due):
@@ -944,6 +955,14 @@ fi
 # ---------------------------------------------------------------------------------------
 # Claim in the ledger (idempotency + per-day cap), BEFORE the api-log and the POST.
 [ "$ACTION" = "post" ] || die "action '$ACTION' reached the send path; only a real send claims or posts. Nothing was claimed or sent."
+if [ "$KIND" = "initial" ] && [ "$COPY" = "v1" ]; then
+  # The no-deadline v1 copy only for a note the decider ledger proves is a paid provisional
+  # approval's (QA review of hydra#1257 @53428d0): every credit a server-confirmed decider
+  # approval, at least one of them provisional_paid. Checked HERE, so no caller can choose it.
+  V1="$(ledger v1-eligible --request-ids "$ALL_IDS")" || die "the ledger read failed; refusing to send without proof the v1 copy applies."
+  [ "$(printf '%s' "$V1" | "$JQ_BIN" -r '.eligible')" = "true" ] \
+    || refuse "the v1 (no-deadline) copy applies only to a paid provisional approval's note: $(printf '%s' "$V1" | "$JQ_BIN" -r '.reason')."
+fi
 if [ "$KIND" = "initial" ]; then
   REFS_FILE="$(mktemp)"
   trap 'rm -f "$REFS_FILE"' EXIT
@@ -966,6 +985,9 @@ case "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.result')" in
   daily_cap)
     printf 'DEFERRED daily-cap credits=%s (this user already had a verify message on %s UTC; they go in the next one)\n' \
       "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')" "$DAY"; exit 3 ;;
+  recently_asked)
+    printf 'DEFERRED recently-asked credits=%s (this user got an ask in the last 90 days; the credits wait)\n' \
+      "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')"; exit 3 ;;
   proof_received|done)
     printf 'SKIPPED %s message=%s\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.result')" "$PARENT_ID"; exit 0 ;;
   not_due|not_applicable)

@@ -179,7 +179,7 @@ plain() { python3 -c 'import html,re,sys; print(html.unescape(re.sub(r"</p>|</li
   [ "$(msg .to.id)" = "6650aa01" ]
   [ "$(msg .message_type)" = "email" ]
   [ "$(msg .subject)" = 'We added your Mixing credit on "Song A". Please help us verify it' ]
-  expected='Hi Jane, good news: your Mixing credit on "Song A" by Big Star is now live on your Muso profile. We add credits on trust and then verify them, so please help us confirm this one. Reply to this message by November 15 (30 days from today) with any one of these: a split sheet, a label or distributor statement, a PRO or MLC registration, a studio or session invoice, or liner notes or an official release page that names you (PDF, PNG or JPG). A document that names several tracks counts for each track it names. If we can'"'"'t verify this credit by November 15, it will be removed from your profile after that day. If you send a valid document later, we'"'"'ll review it and can restore the credit. Thanks for helping us keep credits accurate. Caroline, Muso Support'
+  expected='Hi Jane, good news: your Mixing credit on "Song A" by Big Star is now live on your Muso profile. We add credits on trust and then verify them, so please help us confirm this one. Reply to this message by November 15 (30 days from today) with any one of these: a split sheet, a label or distributor statement, a PRO or MLC registration, a studio or session invoice, or liner notes or an official release page that names you (PDF, PNG or JPG). A document that names several tracks counts for each track it names. If we can'"'"'t verify this credit by November 15, it will be removed from your profile that day. If you send a valid document after that, we'"'"'ll review it and can restore the credit. Thanks for helping us keep credits accurate. Caroline, Muso Support'
   [ "$(msg .body | plain | tr '\n' ' ' | tr -s ' ' | sed 's/ $//')" = "$expected" ]
   # Fable's v1 copy (no date) still renders for review, but only as a preview.
   run -0 send --dry-run --copy v1
@@ -336,7 +336,7 @@ plain() { python3 -c 'import html,re,sys; print(html.unescape(re.sub(r"</p>|</li
 sent|1001" ]
 }
 
-@test "one note per user per UTC day: new credits the same day are DEFERRED, then sent alone the next day" {
+@test "one note per user per UTC day, then the 90-day re-ask lock: new credits wait, then go alone once it lapses" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -0 send
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star" "r2:Producer:Song B:Other" "r3:Mastering:Song C:Other"
@@ -346,7 +346,11 @@ sent|1001" ]
   # Deferred before any Intercom call: one contact lookup (the first send), not two.
   [ "$(grep -c '/contacts/search$' "$CURL_STUB_LOG")" -eq 1 ]
   [ -z "$(sql "select * from verify_requests where request_id in ('r2','r3')")" ]
-  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send
+  # Fable 2026-10-17: one ask per user per 90 days across verify-live and retro-past.
+  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -3 send
+  [[ "$output" == "DEFERRED recently-asked credits=2"* ]]
+  [ "$(posts)" -eq 1 ]
+  INTERCOM_VERIFY_TEST_DAY=2027-01-13 run -0 send
   [[ "$output" == "POSTED email message=1002 credits=2" ]]
   # The digest covers only the not-yet-notified credits.
   [ "$(msg .subject)" = "We added 2 new credits to your Muso profile. Please help us verify them" ]
@@ -483,21 +487,72 @@ rcredits() { # like credits, with role_families taken from a 5th field
 }
 rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
 
-@test "as committed, both new copies are send-locked and no verify-live note can be sent" {
+@test "as committed: verify-live windowed is unlocked (Fable 2026-10-17 enable), retro-past stays send-locked" {
   rcredits "$TEST_TMPDIR/c.json" Jane "r1:Producer:Song A:Big Star:producer"
+  grep -qx 'readonly LIVE_WINDOWED_COPY_APPROVED=1' "$REAL_SCRIPT"
+  grep -qx 'readonly RETRO_COPY_APPROVED=0' "$REAL_SCRIPT"
+  grep -qx 'readonly REMOVAL_COPY_APPROVED=0' "$REAL_SCRIPT"
+  grep -q 'decision-verify-notify-enable-2026-10-17' "$REAL_SCRIPT"
   run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --campaign retro-past --validate
   [[ "$output" == "VALID retro-past initial email credits=1 copy=past" ]]
   run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --campaign retro-past
   [[ "$output" == *"retro-past copy is not approved for sending yet"* ]]
   run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --validate
   [[ "$output" == "VALID verify-live initial email credits=1 copy=windowed" ]]
-  run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
-  [[ "$output" == *"verify-live windowed copy is not approved for sending yet"* ]]
-  [[ "$output" == *"v1 is preview-only"* ]]
-  run -1 send --copy v1
-  [[ "$output" == *"--copy is preview-only"* ]]
+  run -1 send --copy windowed
+  [[ "$output" == *"--copy windowed is implied"* ]]
   [ "$(calls)" -eq 0 ]
   [ ! -f "$INTERCOM_VERIFY_TEST_LEDGER" ] || [ -z "$(sql 'select * from verify_messages')" ]
+}
+
+# Fable ruling 4 as amended (firstmate 073): a PAID PROVISIONAL approval gets the no-threat v1
+# note: no date, no removal language, no follow-ups, and its ledger row is never removal-due.
+# decider_approved <request_id> <evidence_kind>: a server-confirmed decider approval in the ledger.
+decider_approved() {
+  python3 - "$INTERCOM_VERIFY_TEST_LEDGER" "$1" "$2" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute("CREATE TABLE IF NOT EXISTS decisions (run_id TEXT, request_id TEXT, decision TEXT, evidence_kind TEXT)")
+db.execute("CREATE TABLE IF NOT EXISTS decision_outcomes (run_id TEXT, request_id TEXT, action TEXT, outcome TEXT)")
+db.execute("INSERT INTO decisions VALUES ('run-1', ?, 'approve', ?)", (sys.argv[2], sys.argv[3]))
+db.execute("INSERT INTO decision_outcomes VALUES ('run-1', ?, 'approve', 'approved')", (sys.argv[2],))
+db.commit()
+PY
+}
+
+@test "paid provisional approval: --copy v1 sends the no-threat note, never removal-due, no follow-ups" {
+  grep -qx 'readonly LIVE_V1_COPY_APPROVED=1' "$REAL_SCRIPT"
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  decider_approved r1 provisional_paid
+  run -0 send --copy v1
+  [[ "$output" == "POSTED email message=1001 credits=1"* ]]
+  body="$(msg .body | plain)"
+  [[ "$body" == *"Nothing changes while we check"* ]]
+  [[ "$body" != *"removed"* ]]
+  [[ "$body" != *"30 days"* ]]
+  [ "$(sql "select coalesce(removal_day,'NULL')||'|'||coalesce(due_day,'NULL') from verify_messages where message_id='1001'")" = "NULL|NULL" ]
+  [[ "$(sql "select approval_ref from verify_messages where message_id='1001'")" == *"firstmate 073"* ]]
+  [ "$(sql "select count(*) from verify_messages where message_id='1001' and kind='initial'")" = "1" ]
+  run -1 send --copy v1 --kind reminder-14 --parent-message-id 1001
+  [ "$(posts)" -eq 1 ]
+}
+
+# QA review of #1257 @53428d0: the gate itself proves v1 applies; no caller can pick it.
+@test "--copy v1 is refused for an ordinary credit: not provisional, or not a decider approval at all" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  run -1 send --copy v1
+  [[ "$output" == *"applies only to a paid provisional approval"*"not server-confirmed decider approvals"* ]]
+  decider_approved r1 catalog_confirmed
+  run -1 send --copy v1
+  [[ "$output" == *"no credit in this note is a paid provisional approval"* ]]
+  [ "$(posts)" -eq 0 ]
+  [ -z "$(sql 'select * from verify_messages')" ]
+  # A user's other decider approval may ride in a provisional credit's v1 note (one note per user).
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star" "r2:Mixing:Song B:Big Star"
+  decider_approved r2 provisional_paid
+  run -0 send --copy v1
+  [[ "$output" == "POSTED email message="*" credits=2"* ]]
+  [ "$(sql "select coalesce(removal_day,'NULL') from verify_messages where kind='initial'")" = "NULL" ]
 }
 
 @test "PAST credits: the no-threat ask has no deadline and no removal language" {
@@ -536,16 +591,14 @@ rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
   [ "$(rendered .subject)" = 'We added your Mixing credit on "Song A". Please help us verify it' ]
   [[ "$body" == *"is now live on your Muso profile. We add credits on trust and then verify them"* ]]
   [[ "$body" == *"Reply to this message by November 15 (30 days from today) with any one of these:"* ]]
-  [[ "$body" == *"If we can't verify this credit by November 15, it will be removed from your profile after that day. If you send a valid document later, we'll review it and can restore the credit."* ]]
+  [[ "$body" == *"If we can't verify this credit by November 15, it will be removed from your profile that day. If you send a valid document after that, we'll review it and can restore the credit."* ]]
   [[ "$body" != *"November 16"* ]]
   [[ "$body" != *"Nothing changes while we check"* ]]
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send --dry-run --kind reminder-25 --parent-message-id 1
   [[ "$output" == "DRY-RUN verify-live reminder-25 email credits=1 copy=windowed"* ]]
   body="$(rendered .body | plain)"
-  [[ "$body" == *"the credit stays on your profile. If we can't verify it by November 15, it will be removed from your profile after that day."* ]]
-  [[ "$body" != *"more time"* ]]
-  [[ "$body" != *"keep the request open"* ]]
-  [[ "$body" == *"This is my last reminder about this review."* ]]
+  [[ "$body" == *"the credit stays on your profile. If we can't verify it by November 15, it will be removed from your profile that day."* ]]
+  [[ "$body" == *"This is my last reminder about this review. If you need more time, tell us which credit and why, and we will keep the request open."* ]]
   run -1 send --dry-run --copy v1 --kind reminder-14 --parent-message-id 1
   [[ "$output" == *"v1 copy names no date"* ]]
 }
@@ -561,7 +614,7 @@ rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
   credits "$TEST_TMPDIR/c.json" Jane "r1:Producer:Song A:Big Star"
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$GATE" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1001 credits=1" ]]
-  [[ "$(msg .body | plain)" == *"by November 15, it will be removed from your profile after that day"* ]]
+  [[ "$(msg .body | plain)" == *"by November 15, it will be removed from your profile that day"* ]]
   [ "$(sql "select due_day, removal_day from verify_messages where message_id='1001'")" = "2026-11-15|2026-11-16" ]
   rem() { "$GATE" send --kind "$1" --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
   INTERCOM_VERIFY_TEST_DAY=2026-10-29 run -3 rem reminder-14
@@ -587,7 +640,7 @@ rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
 @test "a real verify-live send is always the windowed copy and records its removal date" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send
-  [[ "$(msg .body | plain)" == *"it will be removed from your profile after that day"* ]]
+  [[ "$(msg .body | plain)" == *"it will be removed from your profile that day"* ]]
   [[ "$(msg .body | plain)" != *"Nothing changes while we check"* ]]
   [ "$(sql "select due_day, removal_day from verify_messages where message_id='1001'")" = "2026-11-15|2026-11-16" ]
 }
@@ -878,8 +931,9 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$SCRIPT" send --kind after-rejection --parent-message-id 1 \
     --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$(rendered .body | plain)" == *"because we couldn't read it."* ]]
+  # Unlocked as committed (Fable 2026-10-17): without a sent note in the ledger it is still refused.
   run -1 "$LOCKED" send --kind after-rejection --parent-message-id 1 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
-  [[ "$output" == *"verify-live windowed copy is not approved for sending yet"* ]]
+  [[ "$output" != *"not approved for sending yet"* ]]
   run -1 "$SCRIPT" send --campaign retro-past --kind after-rejection --parent-message-id 1 \
     --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$output" == *"no follow-ups"* ]]
