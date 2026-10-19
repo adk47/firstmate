@@ -7,6 +7,7 @@ Stdlib unittest, no network: the admin API is faked. Run:
 
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import base64
 import json
 import os
@@ -178,22 +179,36 @@ def write_manifest(tmp: Path, rows) -> str:
     return str(p)
 
 
+def affiliation_v1(users, held=None, age=timedelta(0)):
+    """An org-affiliation/v1 export (H-DevOps credit-trust-exports/org-affiliation)."""
+    return {"schema": "org-affiliation/v1",
+            "generated_at": (datetime.now(timezone.utc) - age).isoformat().replace("+00:00", "Z"),
+            "registry_version": "test", "sources": {}, "counts": {},
+            "users": {u: dict({"coverage": "full"}, **v) for u, v in users.items()}, "held": held or {}}
+
+
 def live_sources(tmp: Path, *, proof_entries=(), age=timedelta(0), stale_source=False, affiliation=None,
-                 tagged=(), affiliation_file=True):
+                 tagged=(), affiliation_file=True, sources=None, extra=None):
     """Write the live exclusion sources (credit-trust proof-on-file + org-affiliation, Caroline's
-    send ledger) and load them through the real loader."""
+    send ledger) and load them through the real loader. The proof file has the live export's
+    shape (firstmate 032): `core` carries NO stale key (its freshness is its generated_at),
+    `cs-intercom` and `cs-gmail` carry stale flags."""
     tmp.mkdir(parents=True, exist_ok=True)
     proof = tmp / "proof-on-file.json"
+    stamp = (datetime.now(timezone.utc) - age).isoformat().replace("+00:00", "Z")
     proof.write_text(json.dumps({
-        "generated_at": (datetime.now(timezone.utc) - age).isoformat().replace("+00:00", "Z"),
-        "sources": [{"name": "intercom", "stale": stale_source, "age_hours": 0.5},
-                    {"name": "verifications", "stale": False, "age_hours": 0.2}],
-        "entries": list(proof_entries)}))
+        "generated_at": stamp,
+        "sources": sources if sources is not None else [
+            {"name": "core", "generated_at": stamp, "count": 3, "detail": {"verifications": 3}},
+            {"name": "cs-intercom", "generated_at": stamp, "stale": stale_source, "count": 1},
+            {"name": "cs-gmail", "generated_at": stamp, "stale": False, "count": 0}],
+        "entries": list(proof_entries), "users": len({str(e["user_id"]) for e in proof_entries}),
+        **(extra or {})}))
     aff = tmp / "org-affiliation.json"
     if affiliation_file:
-        aff.write_text(json.dumps(affiliation if affiliation is not None else
-                                  {UID: {"verdict": "none", "evidence": []},
-                                   "161128": {"verdict": "none", "evidence": []}}))
+        aff.write_text(json.dumps(affiliation_v1(affiliation if affiliation is not None else
+                                                 {UID: {"verdict": "none", "evidence": []},
+                                                  "161128": {"verdict": "none", "evidence": []}})))
     db_path = tmp / "verify.sqlite3"
     db = sqlite3.connect(db_path)
     db.execute("CREATE TABLE IF NOT EXISTS verify_messages (campaign TEXT, kind TEXT, status TEXT, user_key TEXT, "
@@ -365,6 +380,19 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(rep["counts"], {"withheld_sets": 1, "withheld:pair_not_in_plan": 1})
         self.assertEqual(rep["withheld"], [{"row_id": f"pair:{PID}/{TID}/mixing", "user_id": None,
                                             "reason": "pair_not_in_plan", "approval": "credit-removal-approval ap-1"}])
+
+    def test_cli_apply_exits_3_when_the_send_gate_refuses_the_notice(self):
+        api = FakeApi()
+        plan_id, _ = takeback.plan(api, self.ledger, self.rows, manifest=self.manifest, excl=OPEN, argv=[], log=self.log)
+        api.approve()
+        api.sender = FakeSender(verdict="refused")
+        rc, err = cli_apply(api, self.dir / "state", self.manifest, plan_id)
+        self.assertEqual((rc, api.writes, api.sender.sent), (3, [], []))
+        self.assertIn("WITHHELD", err)
+        apply_id = self.ledger.child_runs(plan_id, "apply")[0]["run_id"]
+        rep = takeback.report(self.ledger, apply_id)
+        self.assertEqual([e["row_id"] for e in rep["withheld"]], [f"{RID}:Mixing"])
+        self.assertTrue(rep["withheld"][0]["reason"].startswith("notice_refused"))
 
     def test_last_credit_on_track_is_recorded(self):
         api = FakeApi()
@@ -1363,13 +1391,76 @@ class EvidenceAndNoticeTests(unittest.TestCase):
 
     def test_no_removal_when_the_notice_cannot_be_sent(self):
         api, manifest, rows, plan_id = self.plan_for([row()])
+        # the gate cannot run at all (missing, usage/environment, hung): nothing is removed for anyone
         with self.assertRaises(SystemExit):
             takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN, argv=[], pause_s=0,
-                           approvals=api.approve(), sender=FakeSender(verdict="refused"), log=self.out.append)
+                           approvals=api.approve(), sender=FakeSender(verdict="unavailable"), log=self.out.append)
         with self.assertRaises(SystemExit):
             takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN, argv=[], pause_s=0,
                            approvals=api.approve(), sender=None, log=self.out.append)
         self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
+
+    def test_a_refused_notice_withholds_only_that_users_set(self):
+        # firstmate 041 (option A): the gate refuses user A's notice (its leak check on a title with
+        # "#1234"); only A's set is withheld (notice_refused, exit 3), user B's set goes with its notice
+        pid_b, uid_b, rid_b = "55555555-5555-4555-8555-555555555555", "161128", "r2"
+        rows_in = [row(track_title="Song #1234"), row(row_id=f"{rid_b}:Mixing", request_id=rid_b, user_id=uid_b,
+                                                     profile_id=pid_b)]
+        manifest = write_manifest(self.dir, rows_in)
+        rows = takeback.load_manifest(manifest)
+        api = FakeApi()
+        api.raws.append(raw("muso", "Bea B", "mixing", pid_b))
+        req_b = dict(api.request, id=rid_b, userId=int(uid_b), profileId=pid_b,
+                     user={"id": int(uid_b), "email": "b@example.com", "fullName": "Bea B"})
+        sets: dict[str, dict] = {}
+        get, write = api.get, api.write
+
+        def multi_get(path, params=None):
+            if path == "/admin/credit-requests":
+                mine = [r for r in (api.request, req_b) if r["profileId"] in str((params or {}).get("profilesIds"))]
+                return {"items": mine if (params or {}).get("page", 1) == 1 else []}
+            if path.startswith("/admin/credit-removals/"):
+                return sets[path.rsplit("/", 1)[-1]]
+            return get(path, params)
+
+        def multi_write(method, path, body, headers=None):
+            if path == "/admin/credit-removals":
+                write(method, path, body, headers)
+                sid = f"ap-{len(sets) + 1}"
+                sets[sid] = dict(api.approval, id=sid, status="approved")
+                for p in sets[sid]["pairs"]:
+                    p["decision"] = "approved"
+                return 201, {"result": "ok", "data": {"id": sid}}
+            if path.endswith("/execute"):
+                api.writes.append((method, path, body, headers))
+                api.approval = sets[path.split("/")[-2]]
+                return 200, {"result": "ok", "data": api.execute()}
+            return write(method, path, body, headers)
+        api.get, api.write = multi_get, multi_write
+
+        class OneRefused(FakeSender):
+            def validate(self, payload):
+                self.validated.append(payload)
+                if payload["user"]["email"] == "rk@example.com":
+                    return "refused", "REFUSED: the rendered note contains an issue link, issue number or Slack mention"
+                return "valid", "VALID"
+        sender = OneRefused()
+        plan_id, counts = takeback.plan(api, self.ledger, rows, manifest=manifest, excl=OPEN, argv=[], log=self.out.append)
+        self.assertEqual(counts["would_remove"], 2)
+        _, staged = takeback.stage(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, argv=[],
+                                   log=self.out.append)
+        apply_id, counts = takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN,
+                                          argv=[], pause_s=0, approvals=staged["approval_ids"], sender=sender,
+                                          log=self.out.append)
+        self.assertEqual(counts, {"withheld:notice_refused": 1, "withheld_sets": 1, "removed": 1, "notice_sent": 1})
+        executed = [w[1] for w in api.writes if w[1].endswith("/execute")]
+        self.assertEqual(len(executed), 1)
+        self.assertEqual([p["user"]["email"] for p in sender.sent], ["b@example.com"])
+        self.assertTrue(any(r["credit"] == "mixing" and r["profile"]["id"] == PID for r in api.raws))  # A keeps it
+        self.assertFalse(any(r["credit"] == "mixing" and r["profile"]["id"] == pid_b for r in api.raws))
+        withheld = takeback.report(self.ledger, apply_id)["withheld"]
+        self.assertEqual([(w["user_id"], w["reason"].split(":")[0]) for w in withheld], [(UID, "notice_refused")])
+        self.assertIn("issue link", withheld[0]["reason"])
 
     def test_notice_sent_after_removal_with_who_why_and_how_to_dispute(self):
         api, manifest, rows, plan_id = self.plan_for([row()])
@@ -1472,7 +1563,8 @@ class EvidenceAndNoticeTests(unittest.TestCase):
             env = dict(os.environ)
             try:
                 for code, verdict, outcome in (("0", "valid", "sent"), ("3", "deferred", "deferred"),
-                                               ("1", "refused", "failed"), ("sleep", "refused", "failed")):
+                                               ("1", "refused", "failed"), ("2", "unavailable", "failed"),
+                                               ("4", "unavailable", "failed"), ("sleep", "unavailable", "failed")):
                     os.environ["CODE"] = code
                     self.assertEqual(sender.validate(payload)[0], verdict, code)
                     self.assertEqual(sender.send(payload)[0], outcome, code)
@@ -1499,6 +1591,28 @@ class EvidenceAndNoticeTests(unittest.TestCase):
         self.assertIn("If the document checks out, we will put the credit back. Your other credits are not "
                       "affected.", body)
         self.assertNotIn("\u2014", body)
+
+    def test_corroborating_article_is_never_called_a_credits_page(self):
+        # Fable v3 (8999a707): the removal rests on the Tidal credit; the press article only corroborates
+        art = "https://stereobeso.com/2026/08/26/santiago-cruz-cardellino-4-vasos-1-florero/"
+        tidal = "https://listen.tidal.com/track/527926451"
+        ev = {"verified": "trusted_dsp_only", "url": tidal, "names": ["Nacho Sotelo"], "sources": ["tidal"],
+              "note": "Tidal credits Nacho Sotelo (mixing engineer)", "corroboration": art}
+        r = row(evidence_url=tidal, evidence=ev, track_title="4 Vasos y 1 Florero", artist="Santiago Cruz")
+        self.assertTrue(takeback.evidence_verified(r))
+        line = takeback.evidence_line(r)
+        self.assertIn("(Tidal credits, evidence_class=dsp_track_level, corroboration=" + art + ") " + tidal, line)
+        _, body = notice.render("Rishi", [notice.notice_credit(r)])
+        self.assertIn(f"name Nacho Sotelo for Mixing (Tidal credits: {tidal}; also named in {art})", body)
+        _, body = notice.render("Rishi", [notice.notice_credit(r), notice.notice_credit(row())])
+        self.assertIn(f'- Mixing on "4 Vasos y 1 Florero" by Santiago Cruz: Nacho Sotelo (Tidal credits: {tidal}; '
+                      f"also named in {art})", body)
+        self.assertNotIn("public credits page: " + art, body)
+        # the gate's link rule, applied at plan time: a bad link is evidence_unverified before approval
+        # instead of getting the user's set withheld as notice_refused at apply (firstmate 041)
+        for bad in ("http://stereobeso.com/x", tidal, 7, "https://app.muso.ai/x", "https://APP.Muso.AI/x", "https://x.slack.com/a",
+                    "https://stereobeso.com/" + "x" * 300, "https://stereobeso.com/a b"):
+            self.assertFalse(takeback.evidence_verified(dict(r, evidence=dict(ev, corroboration=bad))), bad)
 
     def test_two_requests_for_the_same_credit_are_one_line(self):
         # Fable: user 161128 has two request ids for "Autentica" by Manuel Medrano (Mixing)
@@ -1622,6 +1736,32 @@ class LiveExclusionTests(unittest.TestCase):
         events = json.dumps([dict(e) for e in self.ledger.db.execute("SELECT * FROM events")])
         self.assertNotIn("rk@example.com", events)
 
+    def test_send_ledger_without_verify_messages_removes_nothing(self):
+        # Fable v3 contract: a ledger holding only the decider's tables (every deploy now creates
+        # verify_messages, so its absence means that deploy step failed). "Cannot check proof" is
+        # never "no proof".
+        api = FakeApi()
+        plan_id, _ = self.plan(api, OPEN)
+        d = self.dir / "decider-only"
+        live_sources(d)
+        (d / "verify.sqlite3").unlink()
+        db = sqlite3.connect(d / "verify.sqlite3")
+        for t in ("decision_outcomes", "decisions", "evidence_retry", "rereview_queue", "reviews", "state"):
+            db.execute(f"CREATE TABLE {t} (id INTEGER PRIMARY KEY)")
+        db.commit()
+        db.close()
+        excl = takeback.load_exclusions(proof_on_file=str(d / "proof-on-file.json"),
+                                        org_affiliation=str(d / "org-affiliation.json"),
+                                        verify_db=str(d / "verify.sqlite3"))
+        self.assertEqual(excl.unavailable, "proof_source_unavailable")
+        _, counts = self.plan(api, excl)
+        self.assertEqual(counts, {"skip:proof_source_unavailable": 1})
+        self.assertNotIn("would_remove", counts)
+        with self.assertRaises(SystemExit):
+            self.apply(api, plan_id, excl)
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
+        self.assertEqual(api.sender.sent, [])
+
     def test_doc_submitted_users_and_human_approved_requests_are_skipped(self):
         api = FakeApi()
         self.assertEqual(takeback.gate(api, row(user_id="119347"), OPEN).reason, "doc_submitted")
@@ -1677,6 +1817,96 @@ class LiveExclusionTests(unittest.TestCase):
                                   log=self.out.append)
         self.assertEqual(counts, {"skip:affiliation_unknown": 1, "skip:evidence_unverified": 1})
 
+    def test_live_part_names_core_without_stale_key_is_usable(self):
+        # firstmate 032 (c): core has no `stale` key; requiring stale:false on every source
+        # skipped every run. Its own fresh generated_at is what makes it usable.
+        self.assertIsNone(OPEN.unavailable, OPEN.detail)
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat().replace("+00:00", "Z")
+        gmail = {"name": "cs-gmail", "generated_at": now, "stale": False}
+        legacy = live_sources(self.dir / "legacy", sources=[
+            {"name": "core", "generated_at": now}, {"name": "cs-systemic intercom+gmail", "generated_at": now,
+                                                      "stale": False}, gmail])
+        self.assertIsNone(legacy.unavailable, legacy.detail)
+        self.assertEqual(takeback.gate(FakeApi(), row(), legacy).ok, True)
+        for name, srcs in (("core-old", [{"name": "core", "generated_at": old},
+                                         {"name": "cs-intercom", "generated_at": now, "stale": False}, gmail]),
+                           ("core-unstamped", [{"name": "core"}, {"name": "cs-intercom", "generated_at": now,
+                                                                   "stale": False}, gmail]),
+                           ("no-intercom", [{"name": "core", "generated_at": now}, gmail]),
+                           ("intercom-stale", [{"name": "core", "generated_at": now},
+                                               {"name": "cs-intercom", "generated_at": now, "stale": True}, gmail])):
+            excl = live_sources(self.dir / name, sources=srcs)
+            self.assertEqual(excl.unavailable, "proof_source_unavailable", name)
+        for name in ("cs-systemic", "cs-systemic gmail"):
+            excl = live_sources(self.dir / name, sources=[{"name": "core", "generated_at": now},
+                                                          {"name": name, "generated_at": now, "stale": False}, gmail])
+            self.assertEqual(excl.unavailable, "proof_source_unavailable", name)
+            self.assertIn("part 'cs-intercom' is missing", excl.detail)
+        truthy = live_sources(self.dir / "truthy", sources=[
+            {"name": "core", "generated_at": now}, {"name": "cs-intercom", "generated_at": now, "stale": "true"},
+            gmail])
+        self.assertEqual(truthy.unavailable, "proof_source_unavailable")
+
+    def test_gmail_part_unusable_removes_nobody(self):
+        # cs-gmail missing, stale or old: anyone may have emailed a document to support@
+        # after any snapshot of who wrote in, so the whole export is UNKNOWN and nothing is
+        # removed (a contact list, even a fresh one, does not narrow the hold).
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat().replace("+00:00", "Z")
+        base = [{"name": "core", "generated_at": now}, {"name": "cs-intercom", "generated_at": now, "stale": False}]
+        api = FakeApi()
+        listed = {"gmail_contacts_90d": {"generated_at": now, "source": "gmail support@ inbox, 90 days",
+                                         "user_ids": [5]}}
+        for name, gmail in (("gmail-missing", []),
+                            ("gmail-stale", [{"name": "cs-gmail", "generated_at": now, "stale": True}]),
+                            ("gmail-old", [{"name": "cs-gmail", "generated_at": old, "stale": False}])):
+            excl = live_sources(self.dir / name, sources=base + gmail, extra=listed)
+            self.assertEqual(excl.unavailable, "proof_source_unavailable", name)
+            self.assertIn("part 'cs-gmail'", excl.detail)
+            self.assertEqual(takeback.gate(api, row(), excl).reason, "proof_source_unavailable")
+        _, counts = self.plan(api, live_sources(self.dir / "pl", sources=base, extra=listed))
+        self.assertEqual(counts, {"skip:proof_source_unavailable": 1})
+
+    def test_live_gmail_contacts_object_is_accepted_and_unused(self):
+        # firstmate 037: the live export carries gmail_contacts_90d as an object; a file with
+        # it is not malformed, and it never narrows a cs-gmail hold.
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        live = {"gmail_contacts_90d": {"generated_at": now, "source": "cs-gmail support@ scan, 90 days",
+                                       "user_ids": [34135, 161128]}}
+        api = FakeApi()
+        fresh = live_sources(self.dir / "fresh", extra=live)
+        self.assertIsNone(fresh.unavailable, fresh.detail)
+        self.assertEqual(self.plan(api, fresh)[1], {"would_remove": 1})
+        stale = live_sources(self.dir / "stale", extra=live, sources=[
+            {"name": "core", "generated_at": now}, {"name": "cs-intercom", "generated_at": now, "stale": False},
+            {"name": "cs-gmail", "generated_at": now, "stale": True}])
+        self.assertEqual(stale.unavailable, "proof_source_unavailable")
+        self.assertEqual(self.plan(api, stale)[1], {"skip:proof_source_unavailable": 1})
+
+    def test_half_written_proof_export_removes_nothing(self):
+        # firstmate 038: the take-back gate refuses a half-written export exactly like the
+        # verify notes: users not the distinct user ids, or any malformed entry.
+        api = FakeApi()
+        plan_id, _ = self.plan(api, OPEN)
+        other = {"user_id": 999, "request_id": None, "kind": "approved_doc", "source": "verifications", "ref": "v 1"}
+        cases = {
+            "users-mismatch": dict(proof_entries=[other], extra={"users": 2}),
+            "users-missing": dict(proof_entries=[other], extra={"users": None}),
+            "not-an-object": dict(proof_entries=[other], extra={"entries": [other, 42]}),
+            "no-user-id": dict(proof_entries=[{**other, "user_id": None}]),
+            "bad-request-id": dict(proof_entries=[{**other, "request_id": 5}]),
+            "unknown-kind": dict(proof_entries=[{**other, "kind": "maybe_doc"}]),
+        }
+        for name, kw in cases.items():
+            excl = live_sources(self.dir / name, **kw)
+            self.assertEqual(excl.unavailable, "proof_source_unavailable", name)
+            self.assertEqual(self.plan(api, excl)[1], {"skip:proof_source_unavailable": 1}, name)
+            with self.assertRaises(SystemExit):
+                self.apply(api, plan_id, excl)
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
+        self.assertEqual(api.sender.sent, [])
+
     def test_malformed_proof_file_is_unavailable_not_a_crash(self):
         bad = self.dir / "bad"
         bad.mkdir()
@@ -1691,6 +1921,53 @@ class LiveExclusionTests(unittest.TestCase):
             malformed = live_sources(self.dir / "aff", affiliation={UID: {"verdict": verdict, "evidence": []}})
             self.assertEqual(malformed.unavailable, "affiliation_source_unavailable")
 
+    def test_org_affiliation_v1_consumer_rule(self):
+        # H-DevOps credit-trust-exports/org-affiliation README: absent, held, or a file older
+        # than 2 h = UNKNOWN = held; per-row removal allowed on none / claimed_unverified
+        api = FakeApi()
+        plan_id, _ = self.plan(api, OPEN)
+        d = self.dir / "v1"
+        d.mkdir()
+
+        def excl(doc):
+            live_sources(d)  # proof-on-file, send ledger
+            (d / "org-affiliation.json").write_text(json.dumps(doc))
+            return takeback.load_exclusions(proof_on_file=str(d / "proof-on-file.json"),
+                                            org_affiliation=str(d / "org-affiliation.json"),
+                                            verify_db=str(d / "verify.sqlite3"))
+        held = excl(affiliation_v1({UID: {"verdict": "none", "evidence": []}},
+                                   held={UID: {"reason": "catalog_unread"}}))
+        self.assertEqual(self.plan(api, held)[1], {"skip:affiliation_unknown": 1})
+        self.assertEqual(self.apply(api, plan_id, held)[1], {"withheld:affiliation_unknown": 1, "withheld_sets": 1})
+        absent = excl(affiliation_v1({"161128": {"verdict": "none", "evidence": []}}))
+        self.assertEqual(self.plan(api, absent)[1], {"skip:affiliation_unknown": 1})
+        for bad in (affiliation_v1({UID: {"verdict": "none", "evidence": []}}, age=timedelta(hours=2, minutes=1)),
+                    affiliation_v1({UID: {"verdict": "none", "evidence": []}}, age=-timedelta(hours=1)),
+                    {UID: {"verdict": "none", "evidence": []}},                           # the pre-v1 flat shape
+                    dict(affiliation_v1({}), schema="org-affiliation/v2"),
+                    dict(affiliation_v1({}), held=["x"]),
+                    dict(affiliation_v1({}), users={UID: "none"})):
+            e = excl(bad)
+            self.assertEqual(e.unavailable, "affiliation_source_unavailable", bad)
+            with self.assertRaises(SystemExit):
+                self.apply(api, plan_id, e)
+        # a verdict not checked on full coverage is not proof of no affiliation: the user is held
+        for partial in ({"verdict": "none", "coverage": "labels_only", "evidence": []},
+                        {"verdict": "claimed_unverified", "coverage": "labels_only", "evidence": []}):
+            e = excl(affiliation_v1({UID: partial}))
+            self.assertEqual(self.plan(api, e)[1], {"skip:affiliation_partial": 1}, partial)
+            self.assertEqual(self.apply(api, plan_id, e)[1],
+                             {"withheld:affiliation_partial": 1, "withheld_sets": 1}, partial)
+        no_coverage = affiliation_v1({UID: {"verdict": "none", "evidence": []}})
+        del no_coverage["users"][UID]["coverage"]
+        self.assertEqual(self.plan(api, excl(no_coverage))[1], {"skip:affiliation_partial": 1})
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
+        self.assertEqual(api.sender.sent, [])
+        # a fresh export with verdict none on full coverage lets the per-row removal go
+        ok = excl(affiliation_v1({UID: {"verdict": "none", "coverage": "full", "evidence": []}},
+                                 age=timedelta(hours=1, minutes=59)))
+        self.assertEqual(self.plan(api, ok)[1], {"would_remove": 1})
+
     def test_affiliated_user_is_skipped_and_listed_for_human_review(self):
         api = FakeApi()
         evidence = [{"org": "Sony Music Publishing", "source": "pro-registry"}]
@@ -1701,6 +1978,7 @@ class LiveExclusionTests(unittest.TestCase):
         rep = takeback.report(self.ledger, plan_id)
         self.assertEqual(rep["needs_human_review"], [{"row_id": f"{RID}:Mixing", "user_id": UID, "role": "Mixing",
                                                       "track_id": TID, "affiliation": {"verdict": "verified_org",
+                                                                                       "coverage": "full",
                                                                                        "evidence": evidence}}])
         claimed = live_sources(self.dir / "c", affiliation={UID: {"verdict": "claimed_unverified", "evidence": []}})
         plan2, counts2 = self.plan(api, claimed)
@@ -1730,6 +2008,11 @@ class ManifestTests(unittest.TestCase):
             for name in (r.get("evidence") or {}).get("names") or []:
                 self.assertIn(name.lower(), r["evidence"]["note"].lower(), r["row_id"])
         verified = [r for r in rows if takeback.evidence_verified(r)]
+        # Fable v3: 8999a707 rests on the Tidal credit; the press article is corroboration only
+        by_id = {r["row_id"][:8]: r for r in rows}
+        self.assertEqual((by_id["8999a707"]["evidence"]["verified"], by_id["8999a707"]["evidence_url"]),
+                         ("trusted_dsp_only", "https://listen.tidal.com/track/527926451"))
+        self.assertTrue(by_id["8999a707"]["evidence"]["corroboration"].startswith("https://stereobeso.com/"))
         # 5 excluded by review (alias risk / live edition / press naming the claimant) and 9 more
         # because their users sent documents in Intercom (captain 013); the rest stay unverified
         # and can never pass the gate

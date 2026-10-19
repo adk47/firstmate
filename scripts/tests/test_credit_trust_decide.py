@@ -9,7 +9,9 @@ faked (fixtures shared with test_credit_review.py). Run:
 
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import dataclasses
+from datetime import timedelta
 import json
 import os
 import sqlite3
@@ -39,6 +41,9 @@ PROFILES["art-nopop"] = {"name": "No Pop Artist", "rawProfiles": []}
 
 
 def req(rid, *, uid=500, pid=T.PID_GOOD, track="small", roles=("Mixing",), vd_rules=None, errors=None, **kw):
+    # The row's own stored spotifyPopularity follows the catalog track, as on prod
+    # (core-backend's agent guard reads the STORED value).
+    kw.setdefault("pop", (TRACKS.get(track) or {}).get("popularity", 20))
     r = T.request(rid, pid=pid, track=track, roles=roles, status="unverified", approved=False, risk=40, **kw)
     r["userId"] = uid
     r["verificationData"]["rule_risk_percent"] = dict(vd_rules or {})
@@ -124,13 +129,16 @@ class Base(unittest.TestCase):
         decide.WRITE_LOCK = self._lock
         decide.PAYING_USERS_FILE, decide.log, decide.PROOF_ON_FILE = self._paying, self._log, self._proof
 
-    def proof(self, entries=(), generated_at="2026-10-11T02:12:00Z", sources=None):
+    def proof(self, entries=(), generated_at="2026-10-11T02:12:00Z", sources=None, contacts=()):
         """The proof-on-file export as the producer lane writes it."""
         entries = list(entries)
         decide.PROOF_ON_FILE.write_text(json.dumps({
             "generated_at": generated_at,
+            "gmail_contacts_90d": {"generated_at": generated_at, "source": "test", "user_ids": list(contacts)},
             "sources": sources if sources is not None else [
-                {"name": "core_proofs", "generated_at": generated_at, "count": len(entries)}],
+                {"name": "core", "generated_at": generated_at, "count": len(entries)},
+                {"name": "cs-intercom", "generated_at": generated_at, "stale": False, "count": 0},
+                {"name": "cs-gmail", "generated_at": generated_at, "stale": False, "count": 0}],
             "users": len({e["user_id"] for e in entries}), "entries": entries}))
 
     def go(self, rows, raws=None, judge=None, mode="apply", skip=None, policy=POLICY, admin_requests=(),
@@ -650,9 +658,119 @@ class NeverReAsk(Base):
         self.assertIn("4 before filters, 3 held for proof on file", res.line())
         self.assertIn("1 sent", res.line())
 
+    def test_daily_ask_cap_limits_distinct_users_and_keeps_a_users_batch_whole(self):
+        self.proof([])
+        policy = dataclasses.replace(POLICY, max_ask_users_per_day=2)
+        rows = [req(uuid_of(160), uid=801, track="t1"), req(uuid_of(161), uid=801, track="t9"),
+                req(uuid_of(162), uid=802, track="t1"), req(uuid_of(163), uid=803, track="t1")]
+        res, w = self.go(rows, self.RAWS, policy=policy)
+        self.assertEqual(sorted(self.support_writes(w)), sorted([uuid_of(160), uuid_of(161), uuid_of(162)]))
+        d = self.decisions()
+        self.assertEqual(d[uuid_of(163)]["decision"], "defer")
+        self.assertTrue(d[uuid_of(163)]["reason"].startswith(decide.ASK_CAP_DEFER))
+        self.assertEqual(res.deferred_ask_cap, 1)
+        self.assertIn("1 deferred by the daily ask cap", res.line())
+
+    def test_daily_ask_cap_counts_users_already_asked_today(self):
+        self.proof([])
+        policy = dataclasses.replace(POLICY, max_ask_users_per_day=1)
+        res, w = self.go([req(uuid_of(170), uid=811, track="t1")], self.RAWS, policy=policy)
+        self.assertEqual(self.support_writes(w), [uuid_of(170)])
+        res2, w2 = self.go([req(uuid_of(171), uid=812, track="t1")], self.RAWS, policy=policy)
+        self.assertEqual(self.support_writes(w2), [], "the day's one ask slot is already used")
+        self.assertEqual(res2.deferred_ask_cap, 1)
+
+    def test_ask_cap_is_rechecked_at_the_write_boundary_for_overlapping_runs(self):
+        # Run A decides against an empty day; before it reaches the write lock,
+        # an overlapping run B has already asked another user and used the day's
+        # only slot. Run A must defer at the write boundary (QA on #1251).
+        self.proof([])
+        policy = dataclasses.replace(POLICY, max_ask_users_per_day=1)
+        admin = T.FakeAdmin([], self.RAWS, PROFILES, TRACKS)
+
+        def run_b_sends_first():
+            b = decide.Decision(request_id=uuid_of(181), profile_id=T.PID_GOOD, user_id=822, track_id="t1",
+                                track_title="x", claimed_roles=["Mixing"], popularity=88, big_track=True,
+                                decision="support", reason="run B")
+            decide.record_decision(self.db, "run-B", "apply", b)
+            decide.record_outcome(self.db, "run-B", uuid_of(181), "support", decide.UVN, T.NOW)
+            return T.NOW
+        w = Writer(self.db)
+        res = decide.run(admin, self.db, None, mode="apply", policy=policy, writer=w, now=T.NOW,
+                         clock=run_b_sends_first, rows=[req(uuid_of(180), uid=821, track="t1")])
+        sent = [i for c in w.calls if c["status"] == decide.UVN for i in c["ids"]]
+        self.assertEqual(sent, [], "run B used the day's only slot; run A's ask is deferred at the write boundary")
+        self.assertEqual(res.deferred_ask_cap, 1)
+        outs = [o["outcome"] for o in decide.explain(self.db, uuid_of(180))[0]["outcomes"]]
+        self.assertEqual(outs, ["deferred:daily_ask_cap"])
+
+    def test_ask_cap_uses_the_send_day_not_the_run_start_day(self):
+        self.proof([], generated_at="2026-10-11T23:30:00Z")
+        policy = dataclasses.replace(POLICY, max_ask_users_per_day=1)
+        before = T.NOW.replace(hour=23, minute=45)
+        after = before + timedelta(minutes=20)        # crosses UTC midnight before the PUT
+        admin = T.FakeAdmin([], self.RAWS, PROFILES, TRACKS)
+        decide.run(admin, self.db, None, mode="apply", policy=policy, writer=Writer(self.db), now=before,
+                   clock=lambda: after, rows=[req(uuid_of(190), uid=831, track="t1")])
+        w2 = Writer(self.db)
+        res2 = decide.run(admin, self.db, None, mode="apply", policy=policy, writer=w2, now=after,
+                          rows=[req(uuid_of(191), uid=832, track="t1")])
+        self.assertEqual([i for c in w2.calls for i in c["ids"] if c["status"] == decide.UVN], [],
+                         "the first ask was recorded on the day it was SENT, so the cap holds")
+        self.assertEqual(res2.deferred_ask_cap, 1)
+
+    def test_ask_cap_day_is_read_at_the_support_write_not_before_approvals(self):
+        # QA on #1251 (2nd round): the lock is taken at 23:59, approval writes
+        # finish after midnight, then support is sent; it must count on the new day.
+        self.proof([], generated_at="2026-10-11T23:30:00Z")
+        policy = dataclasses.replace(POLICY, max_ask_users_per_day=1)
+        before = T.NOW.replace(hour=23, minute=59)
+        after = before + timedelta(minutes=3)
+        ticks = iter([before, before] + [after] * 20)   # approval PUT starts and ends before midnight
+        admin = T.FakeAdmin([], self.RAWS, PROFILES, TRACKS)
+        w = Writer(self.db)
+        res = decide.run(admin, self.db, None, mode="apply", policy=policy, writer=w, now=before,
+                         clock=lambda: next(ticks),
+                         rows=[req(uuid_of(200), uid=850), req(uuid_of(201), uid=851, track="t1")])
+        self.assertEqual((res.approved, res.support), (1, 1))
+        at = {o["outcome"]: o["at"] for o in decide.explain(self.db, uuid_of(201))[0]["outcomes"]}
+        self.assertEqual(at[decide.UVN], decide.utc(after))
+        w2 = Writer(self.db)
+        res2 = decide.run(admin, self.db, None, mode="apply", policy=policy, writer=w2, now=after,
+                          rows=[req(uuid_of(202), uid=852, track="t1")])
+        self.assertEqual([i for c in w2.calls for i in c["ids"] if c["status"] == decide.UVN], [])
+        self.assertEqual(res2.deferred_ask_cap, 1)
+
+    def test_a_support_put_in_flight_across_midnight_counts_on_the_later_day(self):
+        # QA on #1251 (3rd round): the PUT starts at 23:59:59 and returns after
+        # midnight; the asks must be booked to the new day.
+        self.proof([], generated_at="2026-10-11T23:30:00Z")
+        policy = dataclasses.replace(POLICY, max_ask_users_per_day=1)
+        pre = T.NOW.replace(hour=23, minute=59, second=59)
+        post = pre + timedelta(seconds=4)
+        ticks = iter([pre] + [post] * 20)       # cap check before the PUT, then the PUT returns
+        admin = T.FakeAdmin([], self.RAWS, PROFILES, TRACKS)
+        res = decide.run(admin, self.db, None, mode="apply", policy=policy, writer=Writer(self.db), now=pre,
+                         clock=lambda: next(ticks), rows=[req(uuid_of(210), uid=861, track="t1")])
+        self.assertEqual(res.support, 1)
+        at = {o["outcome"]: o["at"] for o in decide.explain(self.db, uuid_of(210))[0]["outcomes"]}
+        self.assertEqual(at[decide.UVN], decide.utc(post))
+        w2 = Writer(self.db)
+        res2 = decide.run(admin, self.db, None, mode="apply", policy=policy, writer=w2, now=post,
+                          rows=[req(uuid_of(211), uid=862, track="t1")])
+        self.assertEqual([i for c in w2.calls for i in c["ids"] if c["status"] == decide.UVN], [])
+        self.assertEqual(res2.deferred_ask_cap, 1)
+
+    def test_policy_ask_cap_defaults_and_validates(self):
+        self.assertEqual(decide.Policy.load().max_ask_users_per_day, 100)
+        with self.assertRaises(ValueError):
+            decide._nonneg_int(-1, "max_ask_users_per_day")
+        with self.assertRaises(ValueError):
+            decide._nonneg_int(True, "max_ask_users_per_day")
+
     def test_unknown_proof_status_sends_no_support_request_at_all(self):
         rows = [req(uuid_of(120), track="t1"), req(uuid_of(121))]
-        cases = {"missing": None, "stale": "2026-10-10T23:00:00Z", "malformed": "{}"}
+        cases = {"missing": None, "old": "2026-10-10T23:00:00Z", "not authoritative": "{}"}  # word the logged reason carries
         for why, content in cases.items():
             if content is None:
                 decide.PROOF_ON_FILE.unlink(missing_ok=True)
@@ -677,19 +795,52 @@ class NeverReAsk(Base):
         self.assertIsNone(decide.proof_on_file(now=T.NOW)[0])
 
     def test_a_missing_or_stale_source_makes_proof_status_unknown(self):
-        """A user whose proof sits only in the missing source is absent from
-        entries: asking them now would re-ask for documents already given."""
-        sources = {"missing": {"name": "gmail", "count": 0, "missing": True},
-                   "stale": {"name": "intercom", "generated_at": "2026-10-10T00:00:00Z", "count": 0, "stale": True}}
-        for n, (why, src) in enumerate(sources.items()):
-            self.proof(sources=[{"name": "core_proofs", "count": 0}, src])
+        """A user whose proof sits only in an unusable part is absent from entries:
+        asking them now would re-ask for documents already given. The rule is the
+        shared credit_review.proof_parts (all three parts required, for everyone)."""
+        g = "2026-10-11T02:12:00Z"
+        core, inter, gmail = ({"name": "core", "generated_at": g}, {"name": "cs-intercom", "generated_at": g},
+                              {"name": "cs-gmail", "generated_at": g})
+        cases = {
+            "part 'cs-gmail' is missing": [core, inter],
+            "part 'cs-gmail' is marked missing": [core, inter, {"name": "cs-gmail", "missing": True}],
+            "part 'cs-intercom' is marked stale": [core, {**inter, "stale": True}, gmail],
+            "part 'core' is": [{"name": "core", "generated_at": "2026-10-10T00:00:00Z"}, inter, gmail],
+            "stale or missing part(s): x-part": [core, inter, gmail, {"name": "x-part", "missing": True}],
+        }
+        for n, (why, srcs) in enumerate(cases.items()):
+            self.proof(sources=srcs)
             res, w = self.go([req(uuid_of(130 + n), uid=760 + n, track="t1")], self.RAWS)
             self.assertEqual(self.support_writes(w), [], why)
             d = self.decisions()[uuid_of(130 + n)]
             self.assertEqual(d["decision"], "defer", why)
             self.assertTrue(d["reason"].startswith("proof_status_unknown"), why)
-            self.assertIn(f"{src['name']} is {why}", d["reason"])
+            self.assertIn(why, d["reason"])
             self.assertEqual(res.deferred_proof_unknown, 1, why)
+
+    def test_support_contacts_are_held_never_asked(self):
+        """firstmate 041: everyone who emailed support@ in the last 90 days is held for
+        a human, even with no document found; everyone else may be asked."""
+        self.proof(contacts=[781])
+        res, w = self.go([req(uuid_of(160), uid=781, track="t1"), req(uuid_of(161), uid=782, track="t1")], self.RAWS)
+        d = self.decisions()
+        self.assertEqual(d[uuid_of(160)]["decision"], "hold")
+        self.assertIn("emailed support@", d[uuid_of(160)]["reason"])
+        self.assertEqual(self.support_writes(w), [uuid_of(161)])
+
+    def test_a_missing_or_malformed_contact_list_asks_nobody(self):
+        for bad in (None, {"user_ids": "x"}, [True], ["abc"]):
+            self.proof()
+            doc = json.loads(decide.PROOF_ON_FILE.read_text())
+            if bad is None:
+                doc.pop("gmail_contacts_90d")
+            else:
+                doc["gmail_contacts_90d"] = bad
+            decide.PROOF_ON_FILE.write_text(json.dumps(doc))
+            p, why = decide.proof_on_file(now=T.NOW)
+            self.assertIsNone(p, bad)
+            self.assertIn("gmail_contacts_90d", why)
+        self.assertEqual(decide.support_contacts_of([1, "2"]), frozenset({1, 2}))
 
     def test_a_credit_is_asked_about_once_ever(self):
         row = req(uuid_of(140), uid=720, track="t1")
@@ -936,6 +1087,68 @@ class Cli(unittest.TestCase):
         self.assertNotIn(15, p.deny_user_ids, "no named-user rules: the fixture user is caught by the score")
         self.assertIn("94ad2ad2-0be9-4b8e-94a6-dc85eb100310", p.deny_profile_ids)
         self.assertTrue(p.editorial_role_terms)
+
+
+class ServerAgentGuardMirror(Base):
+    """Approvals core-backend's T12 agent guard would refuse are never sent, and
+    a refusal of some rows never rejects the rest of the batch (firstmate 036)."""
+
+    RAWS = {"small": [T.raw("Real Engineer", "mixer")]}
+
+    def test_stored_popularity_zero_goes_to_a_human_not_an_ask(self):
+        res, w = self.go([req(uuid_of(300), pop=0)], self.RAWS)
+        d = self.decisions()[uuid_of(300)]
+        self.assertEqual(d["decision"], "hold")
+        self.assertIn("popularity_unattributable", d["reason"])
+        self.assertEqual(w.calls, [])
+
+    def test_stored_big_popularity_or_client_metadata_or_proof_marker_asks_for_documents(self):
+        rows = [req(uuid_of(301), pop=70), req(uuid_of(302)), req(uuid_of(303))]
+        rows[1]["metadata"]["source"] = "client"
+        rows[2]["metadata"]["proofRequest"] = {"at": "2026-10-10T00:00:00Z"}
+        self.proof([])
+        res, w = self.go(rows, self.RAWS)
+        d = self.decisions()
+        for i in (301, 302, 303):
+            self.assertEqual(d[uuid_of(i)]["decision"], "support", i)
+            self.assertIn("server approval guard would refuse", d[uuid_of(i)]["reason"])
+        self.assertEqual([c for c in w.calls if c["status"] == decide.APPROVED], [])
+
+    def test_validator_approved_row_is_not_scoped(self):
+        r = req(uuid_of(304), pop=0)
+        r["verificationData"]["is_approved"] = True
+        res, w = self.go([r], self.RAWS)
+        self.assertEqual(self.decisions()[uuid_of(304)]["decision"], "approve")
+
+    def test_a_refusal_of_some_rows_never_rejects_the_rest_of_the_batch(self):
+        refused = uuid_of(311)
+        calls = []
+
+        def writer(status, ids, expected):
+            calls.append(list(ids))
+            if refused in ids:
+                raise decide.WriteFailed("PUT HTTP 400", {
+                    "result": "error", "code": 400, "errorCode": "agent_cannot_approve_declined",
+                    "refusedRequestIds": [refused],
+                    "refused": [{"id": refused, "band": "B_request_info", "reasons": ["popularity_unattributable"]}]})
+            return {"data": {"updatedIds": list(ids)}}
+        outs, err = decide.write_chunk(writer, lambda st, ids: set(), decide.APPROVED,
+                                       [uuid_of(310), refused, uuid_of(312)], decide.UNVERIFIED)
+        self.assertIsNone(err)
+        self.assertEqual(outs[uuid_of(310)], decide.APPROVED)
+        self.assertEqual(outs[uuid_of(312)], decide.APPROVED)
+        self.assertEqual(outs[refused], "skipped:agent_cannot_approve_declined:popularity_unattributable")
+        self.assertEqual(calls, [[uuid_of(310), refused, uuid_of(312)], [uuid_of(310), uuid_of(312)]])
+
+    def test_a_second_refusal_is_not_retried_again(self):
+        def writer(status, ids, expected):
+            raise decide.WriteFailed("PUT HTTP 400", {"errorCode": "agent_cannot_approve_declined",
+                                                       "refusedRequestIds": [ids[0]], "refused": []})
+        outs, err = decide.write_chunk(writer, lambda st, ids: set(), decide.APPROVED,
+                                       [uuid_of(320), uuid_of(321)], decide.UNVERIFIED)
+        self.assertTrue(outs[uuid_of(320)].startswith("skipped:agent_cannot_approve_declined"))
+        self.assertTrue(outs[uuid_of(321)].startswith("error:"), "one retry only; then it is an error")
+        self.assertIsNotNone(err)
 
 
 if __name__ == "__main__":

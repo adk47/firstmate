@@ -6,13 +6,16 @@ ACTION="${1:-pre}"
 REASON="${2:-routine maintenance}"
 CONFIG="/root/.openclaw-main/openclaw.json"
 ACTIVE_WINDOW_SEC=60
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Get Clio token
 CLIO_TOKEN=$(python3 -c "
-import json
+import json, sys
+sys.path.insert(0, '$SCRIPT_DIR')
+from lib.slack_token import resolve_secret
 with open('$CONFIG') as f:
     c = json.load(f)
-print(c.get('channels',{}).get('slack',{}).get('accounts',{}).get('clio',{}).get('botToken',''))
+print(resolve_secret(c.get('channels',{}).get('slack',{}).get('accounts',{}).get('clio',{}).get('botToken','')))
 " 2>/dev/null)
 
 if [ -z "$CLIO_TOKEN" ]; then
@@ -22,7 +25,9 @@ fi
 
 # All channels the bots are in
 ALL_CHANNELS=$(python3 -c "
-import json, urllib.request, time
+import json, urllib.request, time, sys
+sys.path.insert(0, '$SCRIPT_DIR')
+from lib.slack_token import resolve_secret
 
 with open('$CONFIG') as f:
     c = json.load(f)
@@ -35,7 +40,7 @@ active = []
 for name, acct in c.get('channels',{}).get('slack',{}).get('accounts',{}).items():
     if name == 'default':
         continue
-    token = acct.get('botToken','')
+    token = resolve_secret(acct.get('botToken',''))
     if not token:
         continue
     try:

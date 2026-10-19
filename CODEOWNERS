@@ -33,3 +33,55 @@ openclaw.json           @adk47
 cliproxyapi.conf        @adk47
 scripts/                @adk47
 CODEOWNERS              @adk47
+
+# ── Credit-approval system: guardrail (captain, 2026-10-11) ─────────────────
+# Anyone with write access may PR these paths. A PR that does is labelled
+# `credit-approval-change` and the `credit-approval-guard` check
+# (.github/workflows/credit-approval-guard.yaml) fails until the PR body has a
+# `## Credit approval impact` section (what changes + before/after measured on
+# prod data) and @adk47 has approved the current head commit.
+# The guard reads its path list from THIS block (base + head), so keep every
+# credit-approval path inside the markers. This block stays LAST so it wins.
+# >>> credit-approval
+# cron definitions (incl. the cron that approved ~57,400 validator-declined credits)
+/cron-jobs.json                                         @adk47
+# credit verification / approval / admin / fraud skills (both skills-all and workspace copies)
+**/muso-ops-credit-verification/                        @adk47
+**/muso-ops-admin/                                      @adk47
+**/muso-ops-fraud/                                      @adk47
+**/muso-ops-credits/                                    @adk47
+**/muso-ops-claiming/                                   @adk47
+**/customer-credit-verification/                        @adk47
+/plugins/muso-credit-verification-enforcer/             @adk47
+/docs/credit-verification/                              @adk47
+/workspaces/operations/reference/credit-verification-routing.md  @adk47
+# scripts that approve / reject credits or gate that path
+/scripts/uvn-under30-cron.py                            @adk47
+/scripts/lib/credit-gate-probe.sh                       @adk47
+/scripts/tests/credit-gate-probe.bats                   @adk47
+/scripts/tests/muso-admin-api-*-gate.bats               @adk47
+/scripts/tests/uvn-under30-cron-contract.bats           @adk47
+# credit decision engines + their policies (landed on main after this PR opened)
+/scripts/credit_review/                                 @adk47
+/scripts/credit-review.py                               @adk47
+/scripts/credit_trust/                                  @adk47
+/scripts/credit-trust.py                                @adk47
+/scripts/credit_retro/                                  @adk47
+/scripts/credit-retro.py                                @adk47
+/scripts/tests/test_credit_*                            @adk47
+/policies/credit-*.json                                 @adk47
+/scripts/check-credit-approval-automation.sh            @adk47
+/scripts/tests/check-credit-approval-automation.bats    @adk47
+**/muso-fraud-cases/                                    @adk47
+**/customer-credit-removal/                             @adk47
+**/customer-profile-claim/                              @adk47
+# QA bot approve path: Guard 3d keeps the bot (which approves as adk47) off credit-approval PRs
+/scripts/qa-pr-approve.sh                               @adk47
+/scripts/tests/qa-pr-approve.bats                       @adk47
+/scripts/qa-approval-retry.sh                           @adk47
+/policies/qa-approval-policy.json                       @adk47
+# the guard itself
+/CODEOWNERS                                             @adk47
+/.github/credit-approval/                               @adk47
+/.github/workflows/credit-approval-guard.yaml           @adk47
+# <<< credit-approval
