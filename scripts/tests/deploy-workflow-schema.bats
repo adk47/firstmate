@@ -68,6 +68,34 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "workflow_dispatch exposes a one-shot full_sync boolean defaulting to false" {
+  run python3 - <<PY
+import yaml
+wf = yaml.safe_load(open("$WF"))
+on = wf.get("on", wf.get(True))  # PyYAML reads the bare key on as boolean True
+inp = on["workflow_dispatch"]["inputs"].get("full_sync")
+assert inp is not None, "workflow_dispatch has no full_sync input"
+assert inp.get("type") == "boolean", f"full_sync type is {inp.get('type')!r}"
+assert inp.get("default") is False, f"full_sync default is {inp.get('default')!r}"
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "Deploy with target sets HYDRA_FULL_SYNC from the input with an explicit '0' fallback" {
+  run python3 - <<PY
+import yaml
+steps = yaml.safe_load(open("$WF"))["jobs"]["deploy"]["steps"]
+st = next(s for s in steps if s.get("name") == "Deploy with target")
+env = st.get("env") or {}
+assert "HYDRA_FULL_SYNC" in env, "Deploy with target does not set HYDRA_FULL_SYNC"
+assert env["HYDRA_FULL_SYNC"] == "\${{ github.event.inputs.full_sync == 'true' && '1' || '0' }}", repr(env["HYDRA_FULL_SYNC"])
+# The button must restore the mirror with every guard intact.
+for bad in ("HYDRA_FORCE", "HYDRA_SKIP_DRIFT_CHECK"):
+    assert bad not in env, f"{bad} must not be set by the full_sync button"
+PY
+  [ "$status" -eq 0 ]
+}
+
 # NOTE on actionlint: deliberately NOT gated here. It is already non-clean on
 # origin/main — it flags the custom `hydra` self-hosted runner label (needs an
 # actionlint.yaml to declare it) and two pre-existing SC2086 infos in steps this
