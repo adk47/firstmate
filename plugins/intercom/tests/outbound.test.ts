@@ -987,10 +987,13 @@ describe("SanitizingIntercomClient help-centre link gate", () => {
     ["valid citation, manifest unavailable", `More detail here: ${GOOD}`, () => null],
   ])("posts nothing when the gate leaves an empty reply: %s", async (_n, body, loader) => {
     const inner = new MockIntercomClient();
-    const client = new SanitizingIntercomClient(inner, { error: () => {} }, loader as any);
+    const errors: string[] = [];
+    const client = new SanitizingIntercomClient(inner, { error: (m: string) => { errors.push(m); } }, loader as any);
     const res = await client.replyToConversation({ conversationId: "c1", adminId: "a1", body });
     expect(inner.calls.replyToConversation).toHaveLength(0);
     expect(res.messageId).toBe("");
+    // Ops alert on the [intercom:ALERT] prefix (channel.ts); nothing else pages a dropped reply.
+    expect(errors.some((m) => m.startsWith("[intercom:ALERT] [intercom:empty-after-sanitize] conv=c1 posting nothing"))).toBe(true);
   });
   it("strips an invented link and logs internally only", async () => {
     const errors: string[] = [];

@@ -669,9 +669,10 @@ export class SanitizingIntercomClient implements IntercomClient {
       }
     }
     // The channel's empty-reply guard runs before this wrapper, so a reply that was
-    // only a citation the gate removed would otherwise post `body: ""`. Post nothing.
+    // only a citation the gate removed would otherwise post `body: ""`. Post nothing, and
+    // alert: no other mechanism pages a dropped reply (the wrapper returns messageId "").
     if (refPass.body.trim().length === 0 && params.body.trim().length > 0) {
-      const msg = `[intercom:empty-after-sanitize] conv=${params.conversationId} posting nothing`;
+      const msg = `[intercom:ALERT] [intercom:empty-after-sanitize] conv=${params.conversationId} posting nothing`;
       try {
         this.log?.error?.(msg);
       } catch {
