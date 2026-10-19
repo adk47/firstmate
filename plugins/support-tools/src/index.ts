@@ -410,6 +410,9 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
       ) ?? process.env.CREDIT_VERIFICATION_ENABLED;
     const creditVerificationEnabled =
       creditVerificationRaw === true || creditVerificationRaw === 1 || creditVerificationRaw === "true" || creditVerificationRaw === "1";
+    const intercomBotAdminIdRaw = (api.config as any)?.channels?.intercom?.accounts?.default?.botAdminId;
+    const intercomBotAdminId =
+      typeof intercomBotAdminIdRaw === "string" || typeof intercomBotAdminIdRaw === "number" ? String(intercomBotAdminIdRaw) : "";
     const creditVerificationCheckFactory = (ctx: any) => {
       return createCreditVerificationCheckTool({
         adminClient: musoAdminClient,
@@ -420,6 +423,7 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
         sessionKey: ctx.sessionKey ?? "unknown",
         intercomToken,
         enabled: creditVerificationEnabled,
+        botAdminId: intercomBotAdminId,
       });
     };
     api.registerTool(creditVerificationCheckFactory, { name: "credit_verification_check" });

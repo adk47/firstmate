@@ -421,3 +421,104 @@ def approver_identity_alert(request: dict[str, Any], ev: Evidence | None = None,
     if vd.get("is_approved") is True:
         return None
     return "approved although the validator declined it; approver identity not recorded (admin queue)"
+
+# Mirror of core-backend agentApprovalGuard (T12, src/services/credit-requests/
+# agentApprovalGuard.js) on the row as the SERVER stores it, shared by the
+# decider (scope NOT_BIG_NO_HOLD) and uvn-under30 (scope BAND_A). The server is the authority; this only stops the decider sending an
+# approval the server will refuse (one refused row rejects a whole batch).
+SERVER_BAND_A_MIN_POPULARITY = 1
+SERVER_BIG_TRACK_MIN_POPULARITY = 60
+SERVER_BAND_A_MAX_POPULARITY = 29
+SERVER_PROOF_REQUIRED_MIN_RISK = 100
+SERVER_PROFILE_RISK_FIELD = "profile_risk_level"
+SERVER_PROOF_PROFILE_RISK_LEVELS = ("high", "critical")
+SERVER_PROOF_REQUEST_MARKER = "proofRequest"
+SERVER_CLIENT_SOURCED = "client"
+
+
+def server_big_track_reasons(row: dict[str, Any]) -> list[str]:
+    pop = row.get("spotifyPopularity")
+    pop = pop if isinstance(pop, int) and not isinstance(pop, bool) and 0 <= pop <= 100 else None
+    out: list[str] = []
+    if pop is None:
+        out.append("popularity_unknown")
+    elif pop >= SERVER_BIG_TRACK_MIN_POPULARITY:
+        out.append("big_track")
+    elif pop < SERVER_BAND_A_MIN_POPULARITY:
+        out.append("popularity_unattributable")
+    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    if meta.get("source") == SERVER_CLIENT_SOURCED:
+        out.append("client_sourced_metadata")
+    return out
+
+
+def server_proof_reasons(row: dict[str, Any]) -> list[str]:
+    vd = row.get("verificationData") if isinstance(row.get("verificationData"), dict) else {}
+    out: list[str] = []
+    if validator_conflict(vd):
+        out.append("validator_hold")
+    risk = _num(vd.get("total_risk_percent"))
+    if risk is not None and risk >= SERVER_PROOF_REQUIRED_MIN_RISK:
+        out.append("high_risk_score")
+    hint = vd.get("band_hint")
+    if hint is not None and hint != "A":
+        out.append("validator_band_hint")
+    if vd.get(SERVER_PROFILE_RISK_FIELD) in SERVER_PROOF_PROFILE_RISK_LEVELS:
+        out.append("profile_risk")
+    meta = row.get("metadata")
+    if isinstance(meta, dict) and SERVER_PROOF_REQUEST_MARKER in meta:
+        out.append("proof_requested")
+    return out
+
+
+def server_approval_refusal(row: dict[str, Any]) -> list[str]:
+    """Reasons core-backend would refuse this decider approval ([] = allowed)."""
+    proof = server_proof_reasons(row)
+    if proof:
+        return ["proof_required", *proof]
+    vd = row.get("verificationData") if isinstance(row.get("verificationData"), dict) else {}
+    if vd.get("is_approved") is True:
+        return []
+    reasons = server_big_track_reasons(row)
+    if validator_conflict(vd):
+        reasons.append("validator_hold")
+    if not isinstance(vd.get("rule_risk_percent"), dict):
+        reasons.append("verdict_missing")
+    elif validator_rejected_rules(vd):
+        reasons.append("reject_rule")
+    return reasons
+
+
+def server_band_a_refusal(row: dict[str, Any]) -> list[str]:
+    """Reasons core-backend would refuse a uvn-under30 (scope BAND_A) approval of
+    this row ([] = allowed): creditTrustBand must be A, and no claimant proof."""
+    proof = server_proof_reasons(row)
+    if proof:
+        return ["proof_required", *proof]
+    vd = row.get("verificationData") if isinstance(row.get("verificationData"), dict) else {}
+    if vd.get("is_approved") is True:
+        return []
+    out: list[str] = []
+    pop = row.get("spotifyPopularity")
+    pop = pop if isinstance(pop, int) and not isinstance(pop, bool) and 0 <= pop <= 100 else None
+    if pop is None:
+        out.append("popularity_unknown")
+    elif pop >= SERVER_BIG_TRACK_MIN_POPULARITY:
+        out.append("big_track")
+    elif pop > SERVER_BAND_A_MAX_POPULARITY:
+        out.append("tier_t1_needs_evidence")
+    elif pop < SERVER_BAND_A_MIN_POPULARITY:
+        out.append("popularity_unattributable")
+    rules = vd.get("rule_risk_percent")
+    if not isinstance(rules, dict):
+        out.append("verdict_missing")
+    elif any((str(k).startswith("reject_") or str(k).startswith("review_"))
+             and not (v == 0 or v is False or v is None) for k, v in rules.items()):
+        out.append("reject_or_review_rule")
+    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    if meta.get("source") == SERVER_CLIENT_SOURCED:
+        out.append("client_sourced_metadata")
+    if not row.get("spotifyTrackId"):
+        out.append("no_spotify_track")
+    return out
+

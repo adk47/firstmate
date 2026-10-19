@@ -581,6 +581,15 @@ def approve_chunk(run_id: str, task_id: str, ids: list[str]) -> set[str]:
         raise ApprovalAttemptError(str(exc)) from exc
     status = response.get("http_status") if isinstance(response, dict) else None
     response_body = response.get("body") if isinstance(response, dict) else None
+    if (status == 400 and not confirmed and isinstance(response_body, dict)
+            and response_body.get("errorCode") == "agent_cannot_approve_declined"):
+        # The server wrote NOTHING and said so: the attempt is resolved (not
+        # approved). Clear the blocker, record why, and leave the rows held.
+        audit(run_id, "approve_refused_by_server", {
+            "ticket_id": task_id, "request_ids": ids,
+            "refused": response_body.get("refused"), "refused_request_ids": response_body.get("refusedRequestIds")})
+        clear_unresolved(run_id, ids)
+        return set()
     data = response_body.get("data") if isinstance(response_body, dict) else None
     updated = data.get("updatedIds") if isinstance(data, dict) else None
     exact_success = (

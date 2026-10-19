@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
+# Reviewed baseline: deploy overwrites the node-8 hot patch (MUS-14258); this copy is the QA'd superset.
 # ad-screening.sh — poll the admin pending-review queue and assemble one
 # text packet per ad that needs screening (MUS-3635 §5 steps 1-3).
 #
@@ -86,8 +87,11 @@ def j($n): if . == null or . == {} then "not stated" else tojson | s($n) end;
 '
 
 # shellcheck disable=SC2086
-response="$($muso_read api GET '/admin/ads/pending-review?limit=200' --json)" \
+raw="$($muso_read api GET '/admin/ads/pending-review?limit=200' --json)" \
   || { log "poll failed"; exit 1; }
+# `muso --json` wraps the API body in {"data": …} (same assumption as scripts/dedup/lib/fetch-profile.sh:10-24). Accept both shapes.
+response="$(jq -c 'if type == "object" and has("data") and (.data | type == "object") then .data else . end' <<<"$raw")" \
+  || { log "poll response is not JSON"; exit 1; }
 jq -e 'type == "object" and (.items | type == "array")' >/dev/null 2>&1 <<<"$response" \
   || { log "poll response is not a pending-review list (bad body, error body or missing items)"; exit 1; }
 jq -r '"\(.totalCount // 0) \(.items | length)"' <<<"$response" | {
@@ -131,7 +135,7 @@ assemble() {
   local ad="$1" id media creative lines packet last
   id="$(jq -r "$PRELUDE"' .id | v(64)' <<<"$ad")" || return 1
   [ "$id" != "not stated" ] || return 1
-  media="$(jq -r '.primaryMediaUrl // .mediaUrls[0]? // empty' <<<"$ad")" || return 1
+  media="$(jq -r '.media[0].url? // .primaryMediaUrl // .mediaUrls[0]? // empty' <<<"$ad")" || return 1
   creative=""
   rm -f "$workdir/creative.$id"
   [ -z "$media" ] || creative="$("$describe" "$media" 2>/dev/null)" || creative=""

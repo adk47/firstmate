@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
-from credit_review.policy import doc_required_ids
+from credit_review.policy import doc_required_ids, server_band_a_refusal
 from credit_review.roles import editorial_terms, is_editorial
 
 
@@ -361,6 +361,11 @@ def qualifies_for_approval(
     if deny.blocks(credit_request):
         return False
     if has_hard_reject_signal(credit_request):
+        return False
+    # core-backend's T12 agent guard refuses this automation anything outside band A
+    # (stored popularity 1..29, no claimant-proof requirement, ...); one refused row
+    # rejects the whole batch, so such rows are never sent (left for the reviewer).
+    if server_band_a_refusal(credit_request):
         return False
     if not credit_request.get("spotifyTrackId"):
         return False

@@ -32,17 +32,6 @@
         },
         "models": [
           {
-            "id": "gpt-5.5",
-            "name": "gpt-5.5",
-            "input": [
-              "text",
-              "image"
-            ],
-            "maxTokens": 128000,
-            "reasoning": true,
-            "contextWindow": 1050000
-          },
-          {
             "id": "gpt-5.6-sol",
             "name": "gpt-5.6-sol",
             "input": [
@@ -269,9 +258,6 @@
         ]
       },
       "models": {
-        "openai/gpt-5.5": {
-          "alias": "gpt-5p5-codex"
-        },
         "openai/gpt-5.6-sol": {
           "alias": "gpt-5p6-sol-codex"
         },
@@ -592,7 +578,11 @@
       "channels": {},
       "accounts": {
         "ceo": {
-          "botToken": "xoxb-264358207284-10738640379095-BLv8jA5GbCE8gwUzO7UUrcHi",
+          "botToken": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_SLACK_BOT_TOKEN_CEO"
+          },
           "appToken": "xapp-1-A0ANK0C88UR-10747728049043-fc595e0f9642831f901e4338d20bb02d33be1651674a3747206a4cc4aac540a8",
           "userTokenReadOnly": true,
           "streaming": {
@@ -601,7 +591,11 @@
           }
         },
         "cmo": {
-          "botToken": "xoxb-264358207284-10738651143975-Fe2xsLCEWxhHKVJshWHVhTst",
+          "botToken": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_SLACK_BOT_TOKEN_CMO"
+          },
           "appToken": "xapp-1-A0AP0B47RLG-10738668161527-53a1f1f6bfa7437269b71ee240f9708638034ad8710d922336756c005c93981e",
           "userTokenReadOnly": true,
           "streaming": {
@@ -610,7 +604,11 @@
           }
         },
         "cto": {
-          "botToken": "xoxb-264358207284-10767021749249-Q20ITV3VWq4Q7gXVPOXCUf5R",
+          "botToken": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_SLACK_BOT_TOKEN_CTO"
+          },
           "appToken": "xapp-1-A0AP0B4CP08-10754128687330-50099a03f851e7bed0edf0f0261db6d0070c1c05e0563425f15a448a05c346fa",
           "userTokenReadOnly": true,
           "channels": {
@@ -631,7 +629,11 @@
           }
         },
         "qa": {
-          "botToken": "xoxb-264358207284-10757702542116-kuQjLB58zytZqdncE32M9ZQr",
+          "botToken": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_SLACK_BOT_TOKEN_QA"
+          },
           "appToken": "xapp-1-A0AN2L3NW4V-10738682131751-44b019cc3720cf8078d0d0f8f86876db63ea457d07124a29d0aca1f6dc4605e1",
           "userTokenReadOnly": true,
           "streaming": {
@@ -640,7 +642,11 @@
           }
         },
         "finance": {
-          "botToken": "xoxb-264358207284-10767100804193-PWcPEMlZtcQgJpF3k8pzlD2I",
+          "botToken": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_SLACK_BOT_TOKEN_FINANCE"
+          },
           "appToken": "xapp-1-A0AN9P6FKU4-10767112468801-e4c75bbeaed3c96d2893a8e99892593dc8a6d871d4728d90ef83a765a2fe402a",
           "userTokenReadOnly": true,
           "streaming": {
@@ -649,7 +655,11 @@
           }
         },
         "operations": {
-          "botToken": "xoxb-264358207284-10767029891185-Se5OwpfMa6ys8bUGs8PYBXIT",
+          "botToken": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_SLACK_BOT_TOKEN_OPERATIONS"
+          },
           "appToken": "xapp-1-A0AMZM40E83-10738686680327-0aaa13ccb1e763ae929a217c9f912fd8884ca29cba034a88c95abb8fac9401d1",
           "userTokenReadOnly": true,
           "channels": {
@@ -665,7 +675,11 @@
           }
         },
         "devops": {
-          "botToken": "xoxb-264358207284-10752067401878-s93Zptv9uHE8IFeM8HJZCF2D",
+          "botToken": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_SLACK_BOT_TOKEN_DEVOPS"
+          },
           "appToken": "xapp-1-A0AN2L4CP8V-10752084514230-62b1f5263f8ab4e8faec477afa18ad3d1955b4782e794066e39e2c4b0da39ed4",
           "userTokenReadOnly": true,
           "streaming": {
@@ -674,7 +688,11 @@
           }
         },
         "scout": {
-          "botToken": "xoxb-264358207284-10767034790193-dgyaLmnOZDQ6kcQDCopkc3Xh",
+          "botToken": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_SLACK_BOT_TOKEN_SCOUT"
+          },
           "appToken": "xapp-1-A0AN2L42ZT7-10757731989748-f452bd16c711beaefd656f9871ac5d848e87b172cc0ff2dab5585c9306936f36",
           "userTokenReadOnly": true,
           "streaming": {
@@ -683,7 +701,11 @@
           }
         },
         "default": {
-          "botToken": "xoxb-264358207284-10767000436401-eWLy29bXu71IK8WU5xUNcxmo",
+          "botToken": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_SLACK_BOT_TOKEN_DEFAULT"
+          },
           "appToken": "xapp-1-A0AP0B43E56-10754112341106-bcf89629183c7b8af5b55b09b1a83f5c77480c6d1f99a606fa1d87bf0bd21eb2",
           "userTokenReadOnly": true,
           "streaming": {
@@ -692,7 +714,11 @@
           }
         },
         "clio": {
-          "botToken": "xoxb-264358207284-10767000436401-eWLy29bXu71IK8WU5xUNcxmo",
+          "botToken": {
+            "source": "env",
+            "provider": "hydra-env",
+            "id": "MUSO_SLACK_BOT_TOKEN_CLIO"
+          },
           "appToken": "xapp-1-A0AP0B43E56-10754112341106-bcf89629183c7b8af5b55b09b1a83f5c77480c6d1f99a606fa1d87bf0bd21eb2",
           "userTokenReadOnly": true,
           "streaming": {
@@ -874,7 +900,17 @@
         "allowlist": [
           "CLICKUP_API_KEY",
           "MUSO_ADMIN_EMAIL",
-          "MUSO_ADMIN_PASSWORD"
+          "MUSO_ADMIN_PASSWORD",
+          "MUSO_SLACK_BOT_TOKEN_CEO",
+          "MUSO_SLACK_BOT_TOKEN_CMO",
+          "MUSO_SLACK_BOT_TOKEN_CTO",
+          "MUSO_SLACK_BOT_TOKEN_QA",
+          "MUSO_SLACK_BOT_TOKEN_FINANCE",
+          "MUSO_SLACK_BOT_TOKEN_OPERATIONS",
+          "MUSO_SLACK_BOT_TOKEN_DEVOPS",
+          "MUSO_SLACK_BOT_TOKEN_SCOUT",
+          "MUSO_SLACK_BOT_TOKEN_DEFAULT",
+          "MUSO_SLACK_BOT_TOKEN_CLIO"
         ]
       }
     }
