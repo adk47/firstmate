@@ -841,7 +841,7 @@ class RunTests(unittest.TestCase):
         verify_ledger.record_proof_review(db, message_id="500", request_ids=["r1"], outcome="rejected", reviewer="x",
                                           reason="other_role")
         fake, rep = Fake(), Report()
-        verify_notify.send_followups(db, FakeAdmin([req("r1", track="t1"), req("r2", track="t2")]), rep,
+        verify_notify.send_followups(db, FakeAdmin([req("r1", track="t1"), req("r2", track="t2")]), rep, verdicts=verify_notify.affiliation.read(AFFILIATION_FILE),
                                      campaign="verify-live", day="2026-10-20",
                                      documented=verify_notify.load_proof_on_file(PROOF_FILE), limit=150,
                                      pace_seconds=0, wrapper="/w", runner=fake)
@@ -1214,7 +1214,7 @@ class WaveTests(unittest.TestCase):
         proof = os.path.join(self.tmp, "proof.json")
         write_proof(proof, entries)
         fake, rep = Fake(), Report()
-        verify_notify.send_followups(db, FakeAdmin(rows), rep, campaign="verify-live", day="2026-10-15",
+        verify_notify.send_followups(db, FakeAdmin(rows), rep, verdicts=verify_notify.affiliation.read(AFFILIATION_FILE), campaign="verify-live", day="2026-10-15",
                                      documented=verify_notify.load_proof_on_file(proof), limit=150, pace_seconds=0,
                                      wrapper="/w", runner=fake)
         self.assertEqual([[c["request_id"] for c in p["credits"]] for p in fake.payloads], [["ok"]])
@@ -1354,7 +1354,7 @@ class WaveTests(unittest.TestCase):
             if human:
                 admin.rows[1]["metadata"] = {"approval": {"isAgent": False}}
             fake, rep = Fake(), Report()
-            verify_notify.send_followups(db, admin, rep, campaign="verify-live", day="2026-10-15",
+            verify_notify.send_followups(db, admin, rep, verdicts=verify_notify.affiliation.read(AFFILIATION_FILE), campaign="verify-live", day="2026-10-15",
                                          documented=verify_notify.load_proof_on_file(proof), limit=10,
                                          pace_seconds=0, wrapper="/w", runner=fake)
             return fake, rep
@@ -1563,6 +1563,27 @@ class WiringTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_a_mixed_user_gets_one_v1_note_through_the_real_gate(self):
+        """QA review of #1257 @53428d0, through the real gate and ledger (not Fake): a provisional
+        credit and an ordinary decider approval of one user go out as ONE v1 note with no
+        removal date; nothing is refused and nothing waits 90 days."""
+        decisions_db(self.path, [dec("r1"), dec("r2", track="t2")])
+        db = sqlite3.connect(self.path)
+        db.execute("UPDATE decisions SET evidence_kind = 'catalog_confirmed' WHERE request_id = 'r1'")
+        db.execute("UPDATE decisions SET evidence_kind = 'provisional_paid' WHERE request_id = 'r2'")
+        db.commit(); db.close()
+        admin = FakeAdmin([req("r1"), req("r2", title="Other Song", track="t2")])
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper=os.path.join(self.tmp, "gate-windowed.sh"))
+        self.assertEqual((rep.sent_notes, rep.sent_credits, rep.refused_users, rep.mixed_v1_users), (1, 2, 0, 1), rep)
+        db = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(db.execute("SELECT COUNT(*), MAX(removal_day) FROM verify_messages WHERE kind='initial'")
+                             .fetchone(), (1, None))
+        finally:
+            db.close()
+        body = json.loads(next(Path(self.env["INTERCOM_VERIFY_TEST_LOG_DIR"]).glob("*.json")).read_text())
+        self.assertNotIn("removed", json.dumps(body))
+
     def test_past_wave_end_to_end_locked_then_one_message_never_removed(self):
         wave = os.path.join(self.tmp, "wave.csv")
         wave_file(wave, [("HOLD", "r1", "1", PID, "t1", "Mixing", 10, 0, "2026-09-02"),
@@ -1760,6 +1781,14 @@ class AffiliationV1Tests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     affiliation.read(self.path)
 
+    def test_a_legacy_flat_file_is_never_trusted(self):
+        """QA review of #1257 @53428d0: the pre-v1 flat shape has no coverage and no stamp, so an
+        old one could authorize sends forever."""
+        from credit_review import affiliation
+        Path(self.path).write_text(json.dumps({"1": {"verdict": "none", "evidence": []}}))
+        with self.assertRaises(ValueError):
+            affiliation.read(self.path)
+
     def test_the_decider_asks_for_a_full_check_of_the_next_recipients(self):
         led = os.path.join(self.tmp, "ledger.sqlite3")
         decisions_db(led, [dec("p1"), dec("p2", outcome="error:x")])
@@ -1852,22 +1881,73 @@ class EnableGateTests(unittest.TestCase):
         self.assertEqual((rep.recently_asked_users, rep.recently_asked_credits), (1, 1))
         self.assertEqual(self.deferred(), {"e1"})
 
-    def test_paid_provisional_credits_get_their_own_no_threat_v1_note(self):
-        """Fable ruling 4 as amended (firstmate 073): a provisional_paid credit's note is the v1
-        copy (no date, no removal); the same user's other credits keep the windowed note."""
-        rows = [user_req("g1", 54), user_req("g2", 54)]
+    def test_a_mixed_user_gets_one_v1_note_covering_every_credit(self):
+        """QA review of #1257 @53428d0: two notes for one user could never both be delivered
+        (the 90-day re-ask lock refuses the second), so a user with ANY provisional_paid credit
+        gets ONE note, the v1 copy (no date, no removal), for all of them."""
+        rows = [user_req("g1", 54), user_req("g2", 54), user_req("g3", 55)]
         decisions_db(self.path, [dec(r["id"], pid=r["profileId"], track=r["trackId"]) for r in rows])
         db = sqlite3.connect(self.path)
         db.execute("UPDATE decisions SET evidence_kind = 'provisional_paid' WHERE request_id = 'g2'")
-        db.execute("UPDATE decisions SET evidence_kind = 'catalog_confirmed' WHERE request_id = 'g1'")
+        db.execute("UPDATE decisions SET evidence_kind = 'catalog_confirmed' WHERE request_id IN ('g1', 'g3')")
         db.commit(); db.close()
         write_proof(self.proof, [])
         fake = Fake()
-        verify_notify.run(FakeAdmin(rows), ledger_path=self.path, mode="apply", runner=fake, wrapper="/w",
-                          proof_path=self.proof, sweep=False, since_hours=None, affiliation_path=self.aff)
-        sent = [([c["request_id"] for c in p["credits"]], "--copy" in a and a[a.index("--copy") + 1])
-                for p, a in zip(fake.payloads, [x for x in fake.argv if x[1] == "send"])]
-        self.assertEqual(sent, [(["g1"], False), (["g2"], "v1")])
+        rep = verify_notify.run(FakeAdmin(rows), ledger_path=self.path, mode="apply", runner=fake, wrapper="/w",
+                                proof_path=self.proof, sweep=False, since_hours=None, affiliation_path=self.aff)
+        sent = sorted((sorted(c["request_id"] for c in p["credits"]), "--copy" in a and a[a.index("--copy") + 1])
+                      for p, a in zip(fake.payloads, [x for x in fake.argv if x[1] == "send"]))
+        self.assertEqual(sent, [(["g1", "g2"], "v1"), (["g3"], False)])
+        self.assertEqual(rep.mixed_v1_users, 1)
+
+    def test_the_days_cap_counts_what_the_ledger_already_sent_today(self):
+        """QA review of #1257 @53428d0: a same-day retry or second invocation never gets a fresh cap."""
+        db = verify_ledger.connect(self.path)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        for i, who in enumerate(("u90@example.com", "u91@example.com")):
+            c = verify_ledger.claim(db, user_key=who, day=today, request_ids=[f"z{i}"], message_type="email",
+                                    approved_by=CAPTAIN_UID, approval_ref="ref", windowed=True)
+            verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=str(800 + i))
+        db.close()
+        rep, fake = self.go([user_req("h1", 56), user_req("h2", 57), user_req("h3", 58)], max_users=3)
+        self.assertEqual(len(fake.payloads), 1)
+        self.assertEqual(rep.already_today, 2)
+        self.assertEqual(len(self.deferred()), 2, "the rest wait for tomorrow")
+        rep2, fake2 = self.go([user_req("h1", 56), user_req("h2", 57), user_req("h3", 58)], max_users=2)
+        self.assertEqual(fake2.payloads, [], "cap already used up today")
+
+    def test_reminders_pass_the_affiliation_gate_too(self):
+        """QA review of #1257 @53428d0: a day-14 reminder is a user message like the note itself."""
+        db = verify_ledger.connect(self.path)
+        day = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
+        c = verify_ledger.claim(db, user_key="u50@example.com", day=day, request_ids=["f0"], message_type="email",
+                                approved_by=CAPTAIN_UID, approval_ref="ref", windowed=True,
+                                refs=[{"request_id": "f0", "profile_id": PID, "track_id": "t-f0"}])
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="700")
+        db.close()
+        write_affiliation({"50": {"verdict": "contributor", "evidence": []}}, path=self.aff)
+        rep, fake = self.go([user_req("f0", 50)])
+        self.assertEqual((rep.reminders_sent, fake.payloads), (0, []))
+        self.assertTrue(any(h.startswith("user 50: org_affiliated") for h in rep.affiliation_held), rep.affiliation_held)
+        write_affiliation({"50": {"verdict": "none", "evidence": []}}, path=self.aff)
+        rep, fake = self.go([user_req("f0", 50)])
+        self.assertEqual(rep.reminders_sent, 1, "not closed: it goes out once the user is cleared")
+
+    def test_a_stale_support_contact_snapshot_sends_nothing(self):
+        """QA review of #1257 @53428d0: the export and its parts can be fresh while the embedded
+        gmail_contacts_90d snapshot is not."""
+        write_proof(self.proof, [])
+        doc = json.loads(Path(self.proof).read_text())
+        for bad in ({**doc["gmail_contacts_90d"], "generated_at": _ago(5)},
+                    {k: v for k, v in doc["gmail_contacts_90d"].items() if k != "generated_at"}, [1, 2]):
+            with self.subTest(bad):
+                Path(self.proof).write_text(json.dumps({**doc, "gmail_contacts_90d": bad}))
+                fake = Fake()
+                rep = verify_notify.run(FakeAdmin([user_req("k1", 59)]), ledger_path=self.path, mode="apply",
+                                        runner=fake, wrapper="/w", proof_path=self.proof, sweep=False,
+                                        since_hours=None, affiliation_path=self.aff)
+                self.assertIn("gmail_contacts_90d", rep.halted)
+                self.assertEqual(fake.payloads, [])
 
     def test_paying_users_first_and_the_cap_counts_reminders(self):
         paying = os.path.join(self.tmp, "paying.json")

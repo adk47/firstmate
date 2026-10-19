@@ -855,6 +855,58 @@ def sent_today(db: sqlite3.Connection, *, campaign: str, day: str, kind: str = "
                           "AND status IN ('attempted','sent')", (campaign, kind, day)).fetchone()[0])
 
 
+def messages_today(db: sqlite3.Connection, *, campaign: str, day: str) -> int:
+    """Every message of `campaign` claimed on `day` (initial notes AND follow-ups, attempted or
+    sent): the run's daily budget is what is left of the cap after these, so a same-day retry
+    can never send another full cap (QA review of hydra#1257 @53428d0)."""
+    return int(db.execute("SELECT COUNT(*) FROM verify_messages WHERE campaign=? AND day=? "
+                          "AND status IN ('attempted','sent')", (campaign, day)).fetchone()[0])
+
+
+PROVISIONAL_KIND = "provisional_paid"
+
+
+def _decider_approved(db: sqlite3.Connection, request_ids: list[str], *, kind: str | None) -> set[str]:
+    """The ids the credit decider approved and the server confirmed (decisions joined to an
+    'approve' -> 'approved' outcome of the same run); `kind` narrows to one evidence kind."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(decisions)")}
+    if not request_ids or "evidence_kind" not in cols:
+        return set()
+    out: set[str] = set()
+    for i in range(0, len(request_ids), 500):
+        part = request_ids[i:i + 500]
+        q = ("SELECT DISTINCT d.request_id FROM decisions d JOIN decision_outcomes o ON o.request_id = d.request_id "
+             "AND o.run_id = d.run_id WHERE d.decision = 'approve' AND o.action = 'approve' AND o.outcome = 'approved' "
+             + ("AND d.evidence_kind = ? " if kind else "")
+             + f"AND d.request_id IN ({','.join('?' * len(part))})")
+        out |= {str(r) for (r,) in db.execute(q, ((kind,) if kind else ()) + tuple(part))}
+    return out
+
+
+def provisional_ids(db: sqlite3.Connection, request_ids: list[str]) -> set[str]:
+    """Credits the decider approved as a PAID PROVISIONAL approval (Fable ruling 4)."""
+    return _decider_approved(db, request_ids, kind=PROVISIONAL_KIND)
+
+
+def v1_eligible(db: sqlite3.Connection, request_ids: list[str]) -> dict[str, Any]:
+    """Whether a note over `request_ids` may use the no-deadline, no-removal v1 copy. Checked
+    by the send gate itself (QA review of hydra#1257 @53428d0), so a direct or misrouted caller
+    cannot turn an ordinary credit's note into v1: every credit must be a server-confirmed
+    decider approval, and at least one a paid provisional approval. (A user's other decider
+    approvals ride in the same note: one note per user, and v1 is the milder copy.)"""
+    ids = list(dict.fromkeys(request_ids))
+    if not ids:
+        return {"eligible": False, "reason": "no credits"}
+    approved = _decider_approved(db, ids, kind=None)
+    missing = [r for r in ids if r not in approved]
+    if missing:
+        return {"eligible": False, "reason": f"{len(missing)} credit(s) are not server-confirmed decider approvals",
+                "not_decider_approved": missing[:20]}
+    if not provisional_ids(db, ids):
+        return {"eligible": False, "reason": "no credit in this note is a paid provisional approval"}
+    return {"eligible": True}
+
+
 # -- CLI (called by scripts/intercom-verify-request.sh) -----------------------
 
 def _ids(s: str) -> list[str]:
@@ -917,6 +969,8 @@ def _main(argv: list[str] | None = None) -> int:
     mr = sub.add_parser("mark-replied", help="the user replied to a note: hold its removal for a human")
     mr.add_argument("--message-id", required=True)
     mr.add_argument("--replied-at", default="", help="UTC time of the latest user reply (YYYY-MM-DDTHH:MM:SSZ)")
+    ve = sub.add_parser("v1-eligible", help="may a note over these credits use the v1 (no-deadline) copy?")
+    ve.add_argument("--request-ids", required=True)
     c = sub.add_parser("set-conversation")
     c.add_argument("--message-id", required=True)
     c.add_argument("--conversation-id", required=True)
@@ -959,6 +1013,8 @@ def _main(argv: list[str] | None = None) -> int:
     elif a.op == "mark-tagged":
         mark_tagged(db, message_id=a.message_id, conversation_id=a.conversation_id, attachments=a.attachments)
         out = {"result": "ok"}
+    elif a.op == "v1-eligible":
+        out = v1_eligible(db, _ids(a.request_ids))
     elif a.op == "mark-replied":
         out = {"result": mark_replied(db, message_id=a.message_id, replied_at=a.replied_at)}
     else:

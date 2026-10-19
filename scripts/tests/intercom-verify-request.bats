@@ -507,9 +507,23 @@ rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
 
 # Fable ruling 4 as amended (firstmate 073): a PAID PROVISIONAL approval gets the no-threat v1
 # note: no date, no removal language, no follow-ups, and its ledger row is never removal-due.
+# decider_approved <request_id> <evidence_kind>: a server-confirmed decider approval in the ledger.
+decider_approved() {
+  python3 - "$INTERCOM_VERIFY_TEST_LEDGER" "$1" "$2" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute("CREATE TABLE IF NOT EXISTS decisions (run_id TEXT, request_id TEXT, decision TEXT, evidence_kind TEXT)")
+db.execute("CREATE TABLE IF NOT EXISTS decision_outcomes (run_id TEXT, request_id TEXT, action TEXT, outcome TEXT)")
+db.execute("INSERT INTO decisions VALUES ('run-1', ?, 'approve', ?)", (sys.argv[2], sys.argv[3]))
+db.execute("INSERT INTO decision_outcomes VALUES ('run-1', ?, 'approve', 'approved')", (sys.argv[2],))
+db.commit()
+PY
+}
+
 @test "paid provisional approval: --copy v1 sends the no-threat note, never removal-due, no follow-ups" {
   grep -qx 'readonly LIVE_V1_COPY_APPROVED=1' "$REAL_SCRIPT"
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  decider_approved r1 provisional_paid
   run -0 send --copy v1
   [[ "$output" == "POSTED email message=1001 credits=1"* ]]
   body="$(msg .body | plain)"
@@ -521,6 +535,24 @@ rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
   [ "$(sql "select count(*) from verify_messages where message_id='1001' and kind='initial'")" = "1" ]
   run -1 send --copy v1 --kind reminder-14 --parent-message-id 1001
   [ "$(posts)" -eq 1 ]
+}
+
+# QA review of #1257 @53428d0: the gate itself proves v1 applies; no caller can pick it.
+@test "--copy v1 is refused for an ordinary credit: not provisional, or not a decider approval at all" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  run -1 send --copy v1
+  [[ "$output" == *"applies only to a paid provisional approval"*"not server-confirmed decider approvals"* ]]
+  decider_approved r1 catalog_confirmed
+  run -1 send --copy v1
+  [[ "$output" == *"no credit in this note is a paid provisional approval"* ]]
+  [ "$(posts)" -eq 0 ]
+  [ -z "$(sql 'select * from verify_messages')" ]
+  # A user's other decider approval may ride in a provisional credit's v1 note (one note per user).
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star" "r2:Mixing:Song B:Big Star"
+  decider_approved r2 provisional_paid
+  run -0 send --copy v1
+  [[ "$output" == "POSTED email message="*" credits=2"* ]]
+  [ "$(sql "select coalesce(removal_day,'NULL') from verify_messages where kind='initial'")" = "NULL" ]
 }
 
 @test "PAST credits: the no-threat ask has no deadline and no removal language" {

@@ -597,7 +597,8 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
     ts = parse_ts(data.get("generated_at"))
     if ts is None:
         return None, malformed
-    contacts = proof_parts.support_contacts(data)
+    contacts = proof_parts.support_contacts(data, now=now, max_age_h=PROOF_MAX_AGE.total_seconds() / 3600,
+                                            max_skew_h=PAYING_USERS_MAX_SKEW.total_seconds() / 3600)
     if contacts is None:
         return None, f"{path} has no readable {SUPPORT_CONTACTS_KEY} list (anyone may have emailed support@)"
     users: set[int] = set()

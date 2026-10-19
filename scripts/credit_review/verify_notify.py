@@ -112,6 +112,8 @@ class Report:
     docs_users: int = 0
     docs_checked: int = 0
     proof_on_file: int = 0
+    mixed_v1_users: int = 0            # users whose one note is v1 because ANY credit is paid provisional
+    already_today: int = 0             # messages the ledger already holds for today (counted against the cap)
     halted: str = ""
     failures: list[str] = field(default_factory=list)
     refusals: list[str] = field(default_factory=list)
@@ -133,6 +135,11 @@ class Report:
         head = f"{title} (dry run, nothing sent)" if mode != "apply" else title
         parts = [f"{head}: {self.sent_notes} note(s) sent covering {self.sent_credits} provisionally approved credit(s)"
                  if mode == "apply" else f"{head}: {self.users} account(s) would get a note"]
+        if self.already_today:
+            parts.append(f"{self.already_today} message(s) already sent today counted against the day's cap")
+        if self.mixed_v1_users:
+            parts.append(f"{self.mixed_v1_users} account(s) got one no-deadline note covering a paid provisional "
+                         "credit and other new credits (one note per user; no removal date)")
         if self.deferred_users:
             parts.append(f"{self.deferred_users} account(s) already had today's note (their credits go in tomorrow's)")
         if self.refused_users:
@@ -330,10 +337,10 @@ def load_proof_on_file(path: str | None = None, *, max_age_h: float = PROOF_MAX_
         proof_parts.check_entries(doc)
     except proof_parts.PartsError as exc:
         raise ProofFileError(f"the proof-on-file list {path}: {exc}") from exc
-    contacts = proof_parts.support_contacts(doc)
+    contacts = proof_parts.support_contacts(doc, now=now, max_age_h=max_age_h, max_skew_h=PROOF_MAX_SKEW_H)
     if contacts is None:
-        raise ProofFileError(f"the proof-on-file list {path} has no readable {proof_parts.SUPPORT_CONTACTS} list "
-                             "(anyone may have emailed support@)")
+        raise ProofFileError(f"the proof-on-file list {path} has no readable, fresh {proof_parts.SUPPORT_CONTACTS} "
+                             "snapshot (anyone may have emailed support@)")
     out = ProofOnFile(support_contacts=frozenset(str(u) for u in contacts))
     for e in doc["entries"]:
         rid = str(e.get("request_id") or "").strip() or None
@@ -654,13 +661,16 @@ def sweep_proofs(db: sqlite3.Connection, report: Report, *, days: int = 30, limi
 
 
 def send_followups(db: sqlite3.Connection, admin: admin_api.Admin, report: Report, *, campaign: str, day: str,
-                   documented: ProofOnFile, limit: int, pace_seconds: float, wrapper: str, runner: Runner) -> int:
+                   documented: ProofOnFile, verdicts: dict[str, dict[str, Any]], limit: int, pace_seconds: float,
+                   wrapper: str, runner: Runner) -> int:
     """Every follow-up the ledger says is due today: re-read the note's credits and
     send the gate's fixed follow-up for the ones still live, under the same per-credit
     documents rule as the note (screen_live): a credit with its own document on file or
     approved by a person is left out, and a user with a document under review waits.
-    A follow-up with nothing left to send is closed in the ledger; only follow-ups that
-    are sent count against `limit`."""
+    The org-affiliation gate applies to a follow-up exactly as to a note (QA review of
+    hydra#1257 @53428d0): an unchecked, partially checked or affiliated user gets no automatic
+    reminder; it waits (not closed) for the next run. A follow-up with nothing left to send is
+    closed in the ledger; only follow-ups that are sent count against `limit`."""
     attempted = 0
     for mid, kind, refs in verify_ledger.reminders_due(db, campaign=campaign, day=day):
         if attempted >= limit:
@@ -669,7 +679,7 @@ def send_followups(db: sqlite3.Connection, admin: admin_api.Admin, report: Repor
                   for r in refs if r.get("profile_id")]
         live, _ = reread(admin, wanted) if wanted else ({}, set())
         _, held = screen_live(live, documented, report)
-        if held:
+        if held or hold_affiliated(live, verdicts, report):
             continue
         ps = plan(live, report)
         if not ps:
@@ -743,37 +753,32 @@ def hold_recently_asked(db: sqlite3.Connection, payloads: list[dict[str, Any]], 
     return keep, held
 
 
-PROVISIONAL_KIND = "provisional_paid"
+PROVISIONAL_KIND = verify_ledger.PROVISIONAL_KIND
 
 
 def provisional_ids(db: sqlite3.Connection, request_ids: list[str]) -> set[str]:
     """Credits the decider approved as a PAID PROVISIONAL approval (Fable ruling 4): their note
     is the no-threat v1 copy (no date, no removal language) and they are never removal-due
-    (firstmate 073). Read from the decider ledger's decisions.evidence_kind."""
-    if not request_ids or "evidence_kind" not in _columns(db, "decisions"):
-        return set()
-    out: set[str] = set()
-    for i in range(0, len(request_ids), 500):
-        part = request_ids[i:i + 500]
-        q = (f"SELECT DISTINCT d.request_id FROM decisions d JOIN decision_outcomes o ON o.request_id = d.request_id "
-             f"AND o.run_id = d.run_id WHERE o.action = 'approve' AND o.outcome = 'approved' AND d.evidence_kind = ? "
-             f"AND d.request_id IN ({','.join('?' * len(part))})")
-        out |= {str(r) for (r,) in db.execute(q, (PROVISIONAL_KIND, *part))}
-    return out
+    (firstmate 073). Read from the decider ledger (verify_ledger.provisional_ids)."""
+    return verify_ledger.provisional_ids(db, request_ids)
 
 
-def split_provisional(payloads: list[dict[str, Any]], prov: set[str]) -> list[dict[str, Any]]:
-    """A user's provisional credits get their own v1 note (--copy v1); the rest keep the
-    windowed note. Two notes for one user: the gate's one-message-per-day cap defers the
-    second to the next run, nothing is dropped."""
+def provisional_copy(payloads: list[dict[str, Any]], prov: set[str], report: "Report | None" = None
+                     ) -> list[dict[str, Any]]:
+    """One note per user (the gate's 90-day re-ask lock refuses a second one, QA review of
+    hydra#1257 @53428d0): a user with ANY paid provisional credit gets the v1 note for all of
+    the credits in the batch. v1 is the milder copy (no date, no removal), and the captain's
+    standing order is no auto-removal, so a windowed-class credit riding in that note simply
+    has no removal date. The send gate re-checks this (verify_ledger.v1_eligible)."""
     out: list[dict[str, Any]] = []
     for p in payloads:
-        mine = [c for c in p["credits"] if c["request_id"] in prov]
-        rest = [c for c in p["credits"] if c["request_id"] not in prov]
-        if rest:
-            out.append({**p, "credits": rest})
-        if mine:
-            out.append({**p, "credits": mine, "extra": ["--copy", "v1"]})
+        ids = {c["request_id"] for c in p["credits"]}
+        if ids & prov:
+            if report is not None and ids - prov:
+                report.mixed_v1_users += 1
+            out.append({**p, "extra": ["--copy", "v1"]})
+        else:
+            out.append(p)
     return out
 
 
@@ -813,11 +818,15 @@ def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     db = verify_ledger.connect(ledger_path or verify_ledger.DEFAULT_PATH)
     try:
-        budget = max_users
+        # The day's cap counts what the ledger already holds for today (a same-day retry or a
+        # second invocation never gets a fresh cap), reminders included.
+        budget = max(max_users - verify_ledger.messages_today(db, campaign="verify-live", day=day), 0)
+        report.already_today = max_users - budget
         if mode == "apply":
             # Day-14 / day-25 reminders of WINDOWED notes count against the day's cap.
             budget -= send_followups(db, admin, report, campaign="verify-live", day=day, documented=documented,
-                                     limit=max_users, pace_seconds=0.0, wrapper=wrapper, runner=runner)
+                                     verdicts=verdicts, limit=budget, pace_seconds=0.0, wrapper=wrapper,
+                                     runner=runner)
         wanted = candidates(db, run_id=run_id, since_hours=since_hours)
         report.candidates = len(wanted)
         if wanted:
@@ -831,7 +840,7 @@ def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "
             payloads = plan(rows, report, dropped=dropped)
             payloads, waiting = hold_recently_asked(db, payloads, by_id, report, day=day)
             held += waiting
-            payloads = split_provisional(paid_first(payloads, paying), provisional_ids(db, list(by_id)))
+            payloads = provisional_copy(paid_first(payloads, paying), provisional_ids(db, list(by_id)), report)
             # Over the day's cap: the credits wait for tomorrow (kept in the ledger, so a
             # credit older than the candidate window is never silently dropped).
             for p in payloads[max(budget, 0):]:

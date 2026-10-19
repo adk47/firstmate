@@ -143,12 +143,19 @@ def check_entries(doc: dict[str, Any]) -> None:
                          "treated as a half-written export")
 
 
-def support_contacts(doc: dict[str, Any]) -> frozenset[int] | None:
-    """User ids that emailed support@ in the last 90 days, from ``gmail_contacts_90d`` (a
-    list, or {generated_at, source, user_ids: [...]} as the cs lane publishes it); None when
-    absent or malformed - a sender then sends to nobody (anyone may have emailed support@)."""
+def support_contacts(doc: dict[str, Any], *, now: datetime, max_age_h: float,
+                     max_skew_h: float) -> frozenset[int] | None:
+    """User ids that emailed support@ in the last 90 days, from ``gmail_contacts_90d``
+    ({generated_at, source, user_ids: [...]} as the cs lane publishes it). None - a sender then
+    sends to nobody (anyone may have emailed support@) - when it is absent, malformed, a bare
+    list with no stamp, or its OWN generated_at is unreadable, stale or in the future: the
+    export and its parts can be current while this embedded snapshot is not (QA review of
+    hydra#1257 @53428d0), and a user who wrote since the snapshot would be missing from it."""
     value = doc.get(SUPPORT_CONTACTS)
-    ids = value.get("user_ids") if isinstance(value, dict) else value
+    if not isinstance(value, dict) or part_problem(value, SUPPORT_CONTACTS, now=now, max_age_h=max_age_h,
+                                                   max_skew_h=max_skew_h):
+        return None
+    ids = value.get("user_ids")
     if not isinstance(ids, list):
         return None
     out: set[int] = set()

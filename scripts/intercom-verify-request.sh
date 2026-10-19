@@ -955,6 +955,14 @@ fi
 # ---------------------------------------------------------------------------------------
 # Claim in the ledger (idempotency + per-day cap), BEFORE the api-log and the POST.
 [ "$ACTION" = "post" ] || die "action '$ACTION' reached the send path; only a real send claims or posts. Nothing was claimed or sent."
+if [ "$KIND" = "initial" ] && [ "$COPY" = "v1" ]; then
+  # The no-deadline v1 copy only for a note the decider ledger proves is a paid provisional
+  # approval's (QA review of hydra#1257 @53428d0): every credit a server-confirmed decider
+  # approval, at least one of them provisional_paid. Checked HERE, so no caller can choose it.
+  V1="$(ledger v1-eligible --request-ids "$ALL_IDS")" || die "the ledger read failed; refusing to send without proof the v1 copy applies."
+  [ "$(printf '%s' "$V1" | "$JQ_BIN" -r '.eligible')" = "true" ] \
+    || refuse "the v1 (no-deadline) copy applies only to a paid provisional approval's note: $(printf '%s' "$V1" | "$JQ_BIN" -r '.reason')."
+fi
 if [ "$KIND" = "initial" ]; then
   REFS_FILE="$(mktemp)"
   trap 'rm -f "$REFS_FILE"' EXIT

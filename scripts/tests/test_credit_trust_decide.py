@@ -840,7 +840,14 @@ class NeverReAsk(Base):
             p, why = decide.proof_on_file(now=T.NOW)
             self.assertIsNone(p, bad)
             self.assertIn("gmail_contacts_90d", why)
-        self.assertEqual(decide.proof_parts.support_contacts({"gmail_contacts_90d": [1, "2"]}), frozenset({1, 2}))
+        sc = decide.proof_parts.support_contacts
+        kw = dict(now=T.NOW, max_age_h=3, max_skew_h=0.1)
+        fresh = (T.NOW - decide.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        stale = (T.NOW - decide.timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.assertEqual(sc({"gmail_contacts_90d": {"generated_at": fresh, "user_ids": [1, "2"]}}, **kw), frozenset({1, 2}))
+        # QA review of #1257 @53428d0: the embedded snapshot needs its OWN fresh stamp.
+        for bad in ([1, "2"], {"user_ids": [1]}, {"generated_at": stale, "user_ids": [1]}):
+            self.assertIsNone(sc({"gmail_contacts_90d": bad}, **kw), bad)
 
     def test_a_credit_is_asked_about_once_ever(self):
         row = req(uuid_of(140), uid=720, track="t1")
