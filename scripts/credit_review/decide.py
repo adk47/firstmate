@@ -815,6 +815,40 @@ def provisional_today_by_user(db: sqlite3.Connection, since: str) -> dict[int, i
         (PROVISIONAL_KIND, since))}
 
 
+def provisional_written_since(db: sqlite3.Connection, since: str) -> dict[int, int]:
+    """Paid provisional approvals per user whose approve WRITE was booked at or after `since`
+    (decision_outcomes.at: the time the PUT returned), by any run, whatever the server
+    answered except a deferral: the write-time count the per-user cap is enforced on."""
+    return {int(u): n for u, n in db.execute(
+        "SELECT d.user_id, COUNT(DISTINCT d.request_id) FROM decision_outcomes o JOIN decisions d "
+        "ON d.request_id = o.request_id AND d.run_id = o.run_id WHERE o.action = 'approve' AND o.at >= ? "
+        "AND o.outcome NOT LIKE 'deferred:%' AND o.outcome != 'shadow' AND d.evidence_kind = ? "
+        "AND d.user_id IS NOT NULL GROUP BY d.user_id", (since, PROVISIONAL_KIND))}
+
+
+def provisional_cap_at_write(db: sqlite3.Connection, res: "RunResult", ids: list[str], user_of: dict[str, int | None],
+                             provisional: set[str], send_at: datetime) -> list[str]:
+    """The approve ids that still fit PROVISIONAL_MAX_PER_USER_PER_DAY on the UTC day the batch
+    is actually written (call under write_lock, before each batch; QA review of hydra#1275
+    @7c1830a). The decision-time count uses the run's start; a run crossing midnight or two
+    overlapping runs could otherwise both pass it. Trimmed rows get
+    'deferred:provisional_user_cap' and are decided again on a later run."""
+    if not provisional & set(ids):
+        return ids
+    written = provisional_written_since(db, send_at.strftime("%Y-%m-%dT00:00:00Z"))
+    keep: list[str] = []
+    for rid in ids:
+        uid = user_of.get(rid)
+        if rid in provisional and uid is not None:
+            if written.get(uid, 0) >= PROVISIONAL_MAX_PER_USER_PER_DAY:
+                record_outcome(db, res.run_id, rid, "approve", "deferred:provisional_user_cap", send_at)
+                res.deferred += 1
+                continue
+            written[uid] = written.get(uid, 0) + 1
+        keep.append(rid)
+    return keep
+
+
 def order_rows(rows: list[dict[str, Any]], paying: frozenset[int] | None,
                now: datetime | None = None) -> list[dict[str, Any]]:
     """PAID > 24h, then PAID < 24h, then FREE; oldest-created first inside each (Fable
@@ -1293,9 +1327,16 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
                 k = out.split(":", 1)[1]
                 res.skipped_by_server[k] = res.skipped_by_server.get(k, 0) + 1
 
+    provisional = {d.request_id for d in decisions if d.decision == "approve" and d.evidence_kind == PROVISIONAL_KIND}
     with write_lock():
-        for i in range(0, len(approve_ids), BATCH):
-            write_ids("approve", APPROVED, approve_ids[i:i + BATCH])
+        # The per-user provisional cap is re-checked here, under the lock, against what is
+        # already WRITTEN on the UTC day of each batch (approvals booked by any run).
+        pending_ap = list(approve_ids)
+        while pending_ap:
+            chunk, pending_ap = pending_ap[:BATCH], pending_ap[BATCH:]
+            chunk = provisional_cap_at_write(db, res, chunk, user_of, provisional, clock())
+            if chunk:
+                write_ids("approve", APPROVED, chunk)
         # The daily ask cap is checked at the SUPPORT-write boundary, under the
         # shared write lock, on the UTC day each support batch is actually sent:
         # the clock is read immediately before every batch, and if the day has

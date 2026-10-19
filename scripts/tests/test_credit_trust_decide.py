@@ -689,6 +689,36 @@ class PaidUsersFirst(Base):
         got = sorted(x["decision"] for x in self.decisions().values() if x["request_id"] in {uuid_of(200 + i) for i in range(3)})
         self.assertEqual(got, ["approve", "approve", "defer"])
 
+    def test_the_provisional_cap_is_enforced_at_the_write_on_the_write_day(self):
+        """QA review of #1275 @7c1830a: rows decided before UTC midnight but written after it
+        count on the WRITE day, so a run after midnight cannot approve another full cap."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        yesterday = decide.utc(T.NOW - decide.timedelta(hours=4))   # 10-10 23:00Z, decided
+        written = decide.utc(T.NOW - decide.timedelta(hours=2))     # 10-11 01:00Z, written
+        decide.ensure_schema(self.db)
+        for i in range(2):
+            rid = uuid_of(230 + i)
+            self.db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, big_track, decision, "
+                            "reason, evidence_kind, mode) VALUES ('run-x', ?, ?, 900, 0, 'approve', 't', "
+                            "'provisional_paid', 'apply')", (yesterday, rid))
+            self.db.execute("INSERT INTO decision_outcomes (run_id, at, request_id, action, outcome) "
+                            "VALUES ('run-x', ?, ?, 'approve', 'approved')", (written, rid))
+        self.db.commit()
+        old = decide.PROVISIONAL_MAX_PER_USER_PER_DAY
+        decide.PROVISIONAL_MAX_PER_USER_PER_DAY = 2
+        try:
+            res, w = self.go([req(uuid_of(240 + i), uid=900, track="t3") for i in range(2)], {}, judge=judge)
+        finally:
+            decide.PROVISIONAL_MAX_PER_USER_PER_DAY = old
+        d = self.decisions()
+        self.assertEqual({d[uuid_of(240 + i)]["decision"] for i in range(2)}, {"approve"},
+                         "the decision-time count (run day, decided_at) saw none")
+        self.assertEqual([i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]], [],
+                         "the write-time count saw 2 already written today: nothing approved")
+        outs = {r[0] for r in self.db.execute("SELECT outcome FROM decision_outcomes WHERE run_id = ?", (res.run_id,))}
+        self.assertEqual(outs, {"deferred:provisional_user_cap"})
+
     def test_paying_status_never_changes_a_decision(self):
         """Except ruling 4 (paid NOT_FOUND provisional approval, tested above): with catalog
         evidence or a big track, paying status only changes the ORDER."""
