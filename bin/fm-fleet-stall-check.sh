@@ -41,7 +41,7 @@
 # WAITING IS NOT STALLED. A worker that is waiting on firstmate or on its own
 # pipeline is quiet by design, so every worker the rules above flag is read once
 # more, through bin/fm-crew-state.sh (bounded, and only for those candidates),
-# before it counts (inside what the captures left of a 26-second poll budget; a
+# before it counts (inside what the captures left of the poll budget; a
 # candidate whose state could not be read in time counts as flagged). A worker
 # that reads parked, paused, blocked, done, or failed
 # is excluded, and so is one whose newest status-log event declares
@@ -72,7 +72,23 @@
 #              the same value for refresh_grace_secs (default 900, one
 #              CLIProxyAPI auto-refresh interval), or the log shows a refresh
 #              failure for it within error_window_secs. One condition per
-#              account.
+#              account. This file-based rule applies only when no better-ccflare
+#              account store is present (below).
+#   ccflare    when better-ccflare owns refresh (its account store
+#              ~/.config/better-ccflare/better-ccflare.db exists), auth health is
+#              read from that store instead, read-only: an anthropic account
+#              that is not paused and either requires re-authentication or
+#              expires within expiry_window_secs, or no usable account at all
+#              (every one paused or needing re-authentication). The access-sync
+#              agent that copies ccflare's access tokens into the CLIProxyAPI
+#              inventory (log ~/Library/Logs/ccflare-access-sync.log, errors in
+#              the .err beside it) is a condition when its log has not moved
+#              for access_sync_stale_secs (default 600) or its newest run wrote
+#              an error. In this mode the claude-* inventory files (the
+#              sync's copies) and CLIProxyAPI's "credential refresh failed"
+#              lines for them are ignored: CLIProxyAPI never holds a refresh
+#              token ccflare has not rotated, so its invalid_grant warnings are
+#              expected noise. Other inventory files keep the file rule.
 #   errors     the gateway answered at least error_min (default 30) requests in
 #              the last error_window_secs (default 300) and error_rate_pct
 #              (default 50) percent or more of them were 5xx or 401; it clears
@@ -97,6 +113,9 @@
 #   FM_FLEET_STALL_EXPIRY_WINDOW_SECS (1800) FM_FLEET_STALL_REFRESH_GRACE_SECS (900)
 #   FM_FLEET_STALL_ERROR_WINDOW_SECS (300)   FM_FLEET_STALL_ERROR_MIN (30)
 #   FM_FLEET_STALL_ERROR_RATE_PCT (50)       FM_FLEET_STALL_CAPTURE_JOBS (16)
+#   FM_FLEET_STALL_CCFLARE_DB (~/.config/better-ccflare/better-ccflare.db; empty = file mode)
+#   FM_FLEET_STALL_ACCESS_SYNC_LOG (~/Library/Logs/ccflare-access-sync.log; empty = not watched)
+#   FM_FLEET_STALL_ACCESS_SYNC_STALE_SECS (600)
 #
 # Paging. FM_FLEET_STALL_PAGE_CMD is a shell command run with the page text as
 # both $1 and stdin, bounded at 20 seconds; point it at whatever reaches the
@@ -108,9 +127,17 @@
 # conditions, and the auth expiries in the window, stamped with its schema; a
 # record with another stamp is treated as no record at all.
 #
-# BOUNDED. Captures run FM_FLEET_STALL_CAPTURE_JOBS at a time and the whole
-# capture pass stops at 18 seconds, so the poll ends inside the watcher's own
-# FM_CHECK_TIMEOUT; a worker not captured in time is simply not counted.
+# BOUNDED. The whole poll - captures, current-state reads, and the verdict - is
+# budgeted at half the watcher's FM_CHECK_TIMEOUT, at most 15 seconds, so it ends
+# well inside it even on a loaded machine: the watcher runs every check one after
+# another, and a check that spends most of its timeout on every sweep is what
+# kept its beacon from advancing. Captures run FM_FLEET_STALL_CAPTURE_JOBS at a
+# time and stop at two thirds of the budget; a worker not captured in time is
+# simply not counted (it keeps its history, and the next poll may reach it). The
+# current-state reads get what the captures left, less a reserve for the verdict,
+# at most 4 seconds, and are skipped when under 2 seconds remain. The macOS
+# notification never waits, and a page command gets what is left of
+# FM_CHECK_TIMEOUT less a 3-second margin.
 #
 # Test seams: FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, FM_FLEET_STALL_NOW (frozen
 # clock), FM_FLEET_STALL_CREW_STATE_BIN (the current-state reader, default
@@ -139,9 +166,16 @@ ENV_FILE="$CONFIG_DIR/fleet-stall.env"
 CHECK_ID='fleet-stall'
 RECORD="$STATE/.fleet-stall.json"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
-CAPTURE_DEADLINE_SECS=18
-# The whole poll, captures and current-state reads together, ends inside this.
-POLL_BUDGET_SECS=26
+# The whole poll, captures and current-state reads together, ends inside this:
+# half the watcher's per-check timeout, at most 15 seconds.
+CHECK_TIMEOUT_SECS=${FM_CHECK_TIMEOUT:-30}
+case "$CHECK_TIMEOUT_SECS" in ''|*[!0-9]*) CHECK_TIMEOUT_SECS=30 ;; esac
+POLL_BUDGET_SECS=$((CHECK_TIMEOUT_SECS / 2))
+[ "$POLL_BUDGET_SECS" -le 15 ] || POLL_BUDGET_SECS=15
+[ "$POLL_BUDGET_SECS" -ge 3 ] || POLL_BUDGET_SECS=3
+CAPTURE_DEADLINE_SECS=$((POLL_BUDGET_SECS * 2 / 3))
+# Seconds kept back from the current-state reads for the verdict engine.
+ENGINE_RESERVE_SECS=2
 MAX_LINE=1500
 
 usage() {
@@ -333,9 +367,10 @@ crew_states() {
   local dir=$1 ids=$2 bin id bound
   bin=${FM_FLEET_STALL_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}
   [ -n "$ids" ] && [ -x "$bin" ] || return 0
-  # What the captures left of the poll budget, at most 12 seconds.
-  bound=$((POLL_BUDGET_SECS - SECONDS))
-  [ "$bound" -le 12 ] || bound=12
+  # What the captures left of the poll budget, less the verdict's reserve, at
+  # most 4 seconds.
+  bound=$((POLL_BUDGET_SECS - ENGINE_RESERVE_SECS - SECONDS))
+  [ "$bound" -le 4 ] || bound=4
   [ "$bound" -ge 2 ] || return 0
   for id in $ids; do
     (
@@ -347,19 +382,25 @@ crew_states() {
   wait 2>/dev/null || true
 }
 
+# The notification is fire-and-forget: it is detached so the poll never waits on
+# it.
 notify_macos() {  # <text>
   command -v osascript >/dev/null 2>&1 || return 0
-  fm_run_timed 10 osascript -e \
+  ( fm_run_timed 10 osascript -e \
     "display notification \"$(printf '%s' "$1" | tr -d '"\134' | cut -c1-200)\" with title \"Firstmate: fleet stalled\" sound name \"Submarine\"" \
-    >/dev/null 2>&1 || true
+    >/dev/null 2>&1 & ) || true
 }
 
 page() {  # <text>
-  local text=$1 cmd
+  local text=$1 cmd bound
   notify_macos "$text"
   cmd=$(conf FM_FLEET_STALL_PAGE_CMD '')
   [ -n "$cmd" ] || return 1
-  fm_run_timed 20 sh -c "$cmd" fm-fleet-stall "$text" <<< "$text" >/dev/null 2>&1
+  # What is left of the watcher's per-check timeout, less a 3-second margin.
+  bound=$((CHECK_TIMEOUT_SECS - 3 - SECONDS))
+  [ "$bound" -le 20 ] || bound=20
+  [ "$bound" -ge 2 ] || return 1
+  fm_run_timed "$bound" sh -c "$cmd" fm-fleet-stall "$text" <<< "$text" >/dev/null 2>&1
 }
 
 run_engine() {  # <action> <capture-dir>
@@ -381,6 +422,9 @@ run_engine() {  # <action> <capture-dir>
   FS_ERROR_WINDOW_SECS="$(conf_int FM_FLEET_STALL_ERROR_WINDOW_SECS 300)" \
   FS_ERROR_MIN="$(conf_int FM_FLEET_STALL_ERROR_MIN 30)" \
   FS_ERROR_RATE_PCT="$(conf_int FM_FLEET_STALL_ERROR_RATE_PCT 50)" \
+  FS_CCFLARE_DB="$(conf FM_FLEET_STALL_CCFLARE_DB "$HOME/.config/better-ccflare/better-ccflare.db")" \
+  FS_ACCESS_SYNC_LOG="$(conf FM_FLEET_STALL_ACCESS_SYNC_LOG "$HOME/Library/Logs/ccflare-access-sync.log")" \
+  FS_ACCESS_SYNC_STALE_SECS="$(conf_int FM_FLEET_STALL_ACCESS_SYNC_STALE_SECS 600)" \
   python3 - <<'PY'
 import datetime
 import glob
@@ -388,6 +432,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import time
 import urllib.error
 import urllib.request
@@ -552,6 +597,59 @@ GIN = re.compile(r"\[gin_logger\.go:\d+\]\s+(\d{3})\s+\|")
 REFRESH_FAIL = re.compile(r"credential refresh failed for \S+ \(([^)]+)\)")
 
 
+# Inventory files the ccflare access sync writes (claude-<ccflare name>.json).
+CCFLARE_PREFIX = "claude-"
+
+
+def probe_ccflare(db_path):
+    """Return {key: message} for the better-ccflare-owned auth conditions."""
+    out = {}
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True, timeout=2)
+        try:
+            rows = con.execute(
+                "SELECT name, expires_at, requires_reauth, paused FROM accounts"
+                " WHERE coalesce(provider, 'anthropic') = 'anthropic'").fetchall()
+        finally:
+            con.close()
+    except Exception as exc:
+        out["ccflare"] = "gateway account store %s cannot be read: %s" % (db_path, exc)
+        return out
+    usable = 0
+    for name, expires_at, reauth, paused in rows:
+        if paused:
+            continue
+        if reauth:
+            out["auth:" + name] = "gateway account %s needs re-authentication in better-ccflare" % name
+            continue
+        usable += 1
+        if not isinstance(expires_at, int) or expires_at <= 0:
+            continue
+        remaining = expires_at / 1000.0 - NOW
+        if remaining <= 0:
+            out["auth:" + name] = "gateway account %s expired %s ago in better-ccflare" % (name, fmt_age(-remaining))
+        elif remaining <= EXPIRY_WINDOW:
+            out["auth:" + name] = "gateway account %s expires in %s in better-ccflare" % (name, fmt_age(remaining))
+    if rows and usable == 0:
+        out["ccflare"] = "better-ccflare has no usable account: every one is paused or needs re-authentication"
+    log = E.get("FS_ACCESS_SYNC_LOG", "")
+    if log and os.path.isfile(log):
+        stale = ival("FS_ACCESS_SYNC_STALE_SECS")
+        log_mtime = os.path.getmtime(log)
+        err = os.path.splitext(log)[0] + ".err"
+        if NOW - log_mtime >= stale:
+            out["access-sync-stale"] = "ccflare access sync has not run for %s (log %s)" % (fmt_age(NOW - log_mtime), log)
+        elif os.path.isfile(err) and os.path.getsize(err) > 0 and os.path.getmtime(err) >= log_mtime - 5:
+            last = ""
+            text = tail_bytes(err, 4096) or ""
+            for line in reversed(text.splitlines()):
+                if line.strip():
+                    last = line.strip()[:200]
+                    break
+            out["access-sync-failed"] = "ccflare access sync's last run failed: %s" % (last or "see %s" % err)
+    return out
+
+
 def probe_proxy(rec):
     """Return {key: message} for the gateway conditions holding now."""
     out = {}
@@ -572,6 +670,11 @@ def probe_proxy(rec):
         return out
     if not answered:
         out["down"] = "gateway %s gives no answer" % E.get("FS_PROXY_URL", "")
+
+    # When better-ccflare owns refresh, its store is the auth truth and the
+    # inventory files are only access-token copies.
+    ccflare_db = E.get("FS_CCFLARE_DB", "")
+    ccflare = bool(ccflare_db) and os.path.isfile(ccflare_db)
 
     log = tail_bytes(E.get("FS_PROXY_LOG", "")) if E.get("FS_PROXY_LOG") else None
     total = errors = 0
@@ -596,7 +699,7 @@ def probe_proxy(rec):
                     errors += 1
                 continue
             r = REFRESH_FAIL.search(line)
-            if r:
+            if r and not (ccflare and os.path.basename(r.group(1)).startswith(CCFLARE_PREFIX)):
                 refresh_failed.add(os.path.basename(r.group(1)))
     prev_errors = "errors" in (rec.get("proxy") or {})
     rate = (100.0 * errors / total) if total else 0.0
@@ -610,9 +713,15 @@ def probe_proxy(rec):
 
     seen = rec.get("auth_seen") or {}
     now_seen = {}
+    if ccflare:
+        out.update(probe_ccflare(ccflare_db))
     if have_inventory:
         for path in sorted(glob.glob(os.path.join(auth_dir, "*.json"))):
             name = os.path.basename(path)
+            # The access sync owns the claude-* copies of ccflare's accounts;
+            # every other inventory file is still CLIProxyAPI's own.
+            if ccflare and name.startswith(CCFLARE_PREFIX):
+                continue
             try:
                 with open(path) as f:
                     data = json.load(f)
