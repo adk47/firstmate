@@ -17,6 +17,7 @@ import {
   buildReplyOutcomeLog,
   postSupervisionAlert,
   handleDroppedReply,
+  sendTextReply,
   resolveJevShadowQuestionsVersion,
   jevShadowRunnerConfig,
 } from "../src/channel.js";
@@ -1071,5 +1072,31 @@ describe("jevShadowRunnerConfig (MUS-3192: shadow call has its own timeout)", ()
       questionsVersion: "v2",
       agentInstructionsPath: "/x/SOUL.md",
     });
+  });
+});
+
+describe("sendTextReply (the sendText path hands a gate-dropped reply to a human)", () => {
+  const account = { accountId: "acct_1", botAdminId: "bot_1", defaultInboxId: "inbox_7" };
+  class DroppingClient extends MockIntercomClient {
+    async replyToConversation(p: never) {
+      await super.replyToConversation(p);
+      return { messageId: "", dropped: true as const };
+    }
+  }
+  it("reassigns the conversation and reports dropped, never a delivered id", async () => {
+    const client = new DroppingClient();
+    const errors: string[] = [];
+    const r = await sendTextReply({ client, account, conversationId: "conv_1", body: "x", log: { error: (m) => errors.push(m) } });
+    expect(client.calls.assignConversation).toEqual([{ conversationId: "conv_1", adminId: "bot_1", assigneeId: "inbox_7" }]);
+    expect(r.messageId).toBe("");
+    expect(r.meta).toEqual({ dropped: true, reason: "empty-after-sanitize" });
+    expect(errors.some((m) => m.startsWith("[intercom:ALERT]"))).toBe(true);
+  });
+  it("a delivered reply is not reassigned and carries its id", async () => {
+    const client = new MockIntercomClient();
+    const r = await sendTextReply({ client, account, conversationId: "conv_1", body: "hi" });
+    expect(client.calls.assignConversation ?? []).toEqual([]);
+    expect(r.messageId).not.toBe("");
+    expect(r.meta).toBeUndefined();
   });
 });

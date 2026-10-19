@@ -484,6 +484,30 @@ export async function handleDroppedReply(params: {
 }
 
 /**
+ * The sendText delivery step. A reply the help-link gate emptied was never
+ * posted: hand the conversation to a human like the flush path does, and
+ * return a dropped result instead of a delivered id.
+ */
+export async function sendTextReply(params: {
+  client: Pick<IntercomClient, "replyToConversation" | "assignConversation">;
+  account: { accountId: string; botAdminId: string; defaultInboxId?: string; fallbackSlackSupervisionChannel?: string };
+  conversationId: string;
+  body: string;
+  log?: { info?: (m: string) => void; error?: (m: string) => void };
+  fetchImpl?: typeof fetch;
+}): Promise<{ channel: "intercom"; messageId: string; conversationId: string; meta?: { dropped: true; reason: string }; timestamp?: number }> {
+  const { client, account, conversationId, body, log, fetchImpl } = params;
+  const reply = await client.replyToConversation({ conversationId, adminId: account.botAdminId, body });
+  if (!reply.dropped) {
+    return { channel: "intercom", messageId: reply.messageId, conversationId, timestamp: Date.now() };
+  }
+  const tag = `intercom:${account.accountId}`;
+  log?.error?.(`[intercom:ALERT] [${tag}] sendText dropped: emptied by help-link gate conv=${conversationId}`);
+  await handleDroppedReply({ client, account, conversationId, tag, log, fetchImpl });
+  return { channel: "intercom", messageId: "", conversationId, meta: { dropped: true, reason: "empty-after-sanitize" } };
+}
+
+/**
  * Decide whether a delivered reply payload is RUNTIME telemetry that must
  * never reach a support customer, and if so which signal identified it (for
  * the audit log). Returns null for genuine customer-facing content.
@@ -2187,23 +2211,15 @@ export const intercomPlugin = createChatChannelPlugin({
         const client = createIntercomClient(account.token, {
           error: (msg) => console.error(msg),
         });
-        const reply = await client.replyToConversation({
+        const sent = await sendTextReply({
+          client,
+          account,
           conversationId,
-          adminId: account.botAdminId,
           body: stripKnowledgeBase(stripConversationContext(text)),
+          log: { info: (m) => console.log(m), error: (m) => console.error(m) },
         });
-        if (reply.dropped) {
-          console.error(
-            `[intercom:ALERT] [intercom:${account.accountId}] sendText dropped: emptied by help-link gate conv=${conversationId}`,
-          );
-          return {
-            channel: "intercom" as const,
-            messageId: "",
-            conversationId,
-            meta: { dropped: true, reason: "empty-after-sanitize" },
-          };
-        }
-        const { messageId } = reply;
+        if (sent.meta) return sent;
+        const { messageId } = sent;
 
         // Track outbound message ID for self-reply filtering
         if (state) {
