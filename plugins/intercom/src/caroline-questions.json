@@ -37,14 +37,14 @@
       "analytics_data_complaint": "Ground the answer in profile, subscription, and analytics-status data; explain current state; file a follow-up only when evidence shows an account-specific issue.",
       "billing_cancel_refund": "Read subscription state, run the retention save hierarchy (50% offer, then free plan), cancel at period end when the customer insists; refunds stay a handoff packet.",
       "catalog_metadata_repair": "Use available profile/credit visibility and file a repair packet until catalog capture tools exist.",
-      "credit_verification": "Inspect pending UVN credits, ask for exact proof, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
+      "credit_verification": "Inspect pending UVN credits, ask for proof at most once and only if none was given before, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
       "founding_member": "Read founder status and mint only the customer-requested paid buy-back checkout link.",
       "login_email_verification": "Collect exact account-state facts and hand off until login/email tools are exposed.",
       "order_fulfillment": "Answer order status and correct the verified customer's own shipping address when the order is still editable.",
       "other": "None of the above intents match the customer's request.",
       "profile_claim": "Approve the customer's own pending profile claim when the muso gate says it is safe.",
       "profile_duplicates": "Self-serve only same-owner unclaimed duplicate consolidation; everything destructive or cross-owner goes to a packet.",
-      "remove_wrong_credits": "Remove mechanical wrong credits from a profile the customer owns, without touching production-side roles or wrong-merge cases."
+      "remove_wrong_credits": "Resolve which mechanical wrong credits a customer owns on their profile, then route: file the staff packet and additionally point an owner to the in-app removal. The agent never removes a credit itself."
     },
     "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation. Pick the single support intent that best matches the customer's request.",
     "type": "choice"

@@ -81,6 +81,15 @@ describe("createRemoveCreditsTool", () => {
     });
   });
 
+  it("parameter descriptions never instruct the agent to apply a removal", () => {
+    const { tool } = makeTool({ stdout: okStdout });
+    const props = (tool.parameters as any).properties;
+    const text = `${props.apply.description} ${props.intercomConvId.description}`;
+    expect(text).not.toMatch(/then call again with apply=true/i);
+    expect(text).not.toMatch(/REQUIRED when apply=true/i);
+    expect(text).toMatch(/refused/i);
+  });
+
   it("invokes bash with fixed argv shape (no --apply when omitted)", async () => {
     const { tool, calls } = makeTool({ stdout: okStdout });
     await tool.execute("tc-1", {

@@ -35,6 +35,29 @@ describe("support_action_router", () => {
     });
     expect(start.live_tools.write).toEqual(["credits_verify"]);
 
+    for (const state of ["read_ok", "missing_info"]) {
+      const out = await call({ intent: "credit_verification", state });
+      expect(out.next.outcome).not.toBe("ask_missing_info");
+      expect(out.next).toMatchObject({
+        outcome: "run_skill",
+        skill: "customer-credit-verification",
+      });
+      expect(out.next.instruction).toContain("ONLY if none was given before");
+      expect(out.next.instruction).toContain("needs-human credit-verify ticket");
+    }
+
+    // The emitted sequence must not hand off before corroboration: the proof
+    // step defers to the checks, and the handoff is only the final fallback.
+    const seq: string[] = start.sequence;
+    const proofIdx = seq.findIndex((s) => s.includes("ONLY if none was given before"));
+    const previewIdx = seq.findIndex((s) => s.includes("preview credits_verify"));
+    const handoffIdx = seq.findIndex((s) => /ticket|handoff/i.test(s));
+    expect(proofIdx).toBeGreaterThanOrEqual(0);
+    expect(seq[proofIdx]).toContain("continue with the skill's Step 3 checks");
+    expect(proofIdx).toBeLessThan(previewIdx);
+    expect(previewIdx).toBeLessThan(handoffIdx);
+    expect(handoffIdx).toBe(seq.length - 1);
+
     const preview = await call({ intent: "credit_verification", state: "preview_ok" });
     expect(preview.next).toMatchObject({
       outcome: "ask_confirmation",
@@ -145,6 +168,37 @@ describe("support_action_router", () => {
     // catalog read_ok now diagnoses a referenced credit before filing.
     const catalogReadOk = await call({ intent: "catalog_metadata_repair", state: "read_ok" });
     expect(catalogReadOk.next).toMatchObject({ outcome: "call_tool", tool: "profile_credits_status" });
+  });
+
+  it("never applies or announces a credit removal on remove_wrong_credits (agent previews and routes only)", () => {
+    const route = SUPPORT_ACTION_ROUTES.remove_wrong_credits;
+    expect(route.live_write_tools).not.toContain("remove_credits");
+    expect(route.live_read_tools).toContain("remove_credits");
+    expect(route.human_gated_writes).toContain("credit removal");
+    for (const [state, step] of Object.entries(route.steps)) {
+      expect(step.outcome, state).not.toBe("apply_tool");
+      expect(step.outcome, state).not.toBe("close");
+      expect(step.instruction, state).not.toMatch(/\b(were|was|been) removed\b|already gone|apply:\s*true/i);
+    }
+    const prose = JSON.stringify([route.goal, route.sequence, route.close_when]);
+    expect(prose).not.toMatch(/apply:\s*true|apply only after|returns ok with removals|\bRemove mechanical/i);
+  });
+
+  it("routes the remove_wrong_credits preview to a handoff, not an apply confirmation", async () => {
+    const out = await call({ intent: "remove_wrong_credits", state: "preview_ok" });
+    expect(out.next.outcome).toBe("handoff");
+  });
+
+  it("makes the credit-correction packet mandatory before any in-app instruction on remove_wrong_credits", async () => {
+    const out = await call({ intent: "remove_wrong_credits", state: "preview_ok" });
+    expect(out.next.action_type).toBe("credit-correction");
+    // the packet comes first and is not an alternative to the self-service hint
+    expect(out.next.instruction).toMatch(/file the credit-correction packet first/i);
+    expect(out.next.instruction).not.toMatch(/\bor file\b/i);
+    const seq = SUPPORT_ACTION_ROUTES.remove_wrong_credits.sequence.join(" | ");
+    expect(seq.indexOf("packet")).toBeGreaterThan(-1);
+    expect(seq.indexOf("packet")).toBeLessThan(seq.indexOf("in the app"));
+    expect(seq).not.toMatch(/\bor file\b/i);
   });
 
   it("keeps raw execution and broad admin surfaces denied in every route", async () => {

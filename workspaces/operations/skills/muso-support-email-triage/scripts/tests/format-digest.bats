@@ -623,7 +623,7 @@ STUB
   [ "$(printf '%s' "$row" | jq -r '.state.subject')" = "a" ]
   [ "$(printf '%s' "$row" | jq -r '.state_sha256')" != "null" ]
 
-  run bash "$repo_root/scripts/jev-shadow-report.sh" --shadow-dir "$JEV_SHADOW_DIR" --surface email-triage
+  run bash "$repo_root/scripts/jev-shadow-report.sh" --router-agreement --shadow-dir "$JEV_SHADOW_DIR" --surface email-triage
   [ "$status" -eq 0 ]
   if [[ "$output" != *"question: owner"* ]]; then
     echo "expected the owner question to be reported, got: $output" >&2

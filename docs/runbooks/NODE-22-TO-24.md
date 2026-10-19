@@ -33,6 +33,7 @@ CAP=/root/node24-preflight-$(date -u +%Y%m%dT%H%M%SZ).txt
   echo "## npm --version";                   npm --version
   echo "## npm ls -g --depth=0";             npm ls -g --depth=0
   echo "## dpkg -l nodejs";                  dpkg -l nodejs
+  echo "## nodejs Version (exact)";          dpkg-query -W -f='${Version}\n' nodejs
   echo "## apt-cache policy nodejs";          apt-cache policy nodejs
   echo "## apt holds";                       apt-mark showhold
   echo "## nodesource apt source (old repo, §8 re-adds it)"; head -50 /etc/apt/sources.list.d/nodesource.* 2>&1
@@ -46,7 +47,7 @@ CAP=/root/node24-preflight-$(date -u +%Y%m%dT%H%M%SZ).txt
 echo "$CAP"
 ```
 
-**The `dpkg -l nodejs` version in `$CAP` is the rollback pin** (format
+**The line under `## nodejs Version (exact)` in `$CAP` is the rollback pin** (format
 `22.x.y-1nodesource1`). Read it back now and keep it:
 `ROLLBACK_PIN=$(dpkg-query -W -f='${Version}' nodejs); echo "$ROLLBACK_PIN"`.
 If `apt holds` lists `nodejs`, run `apt-mark unhold nodejs` before §2.
@@ -253,12 +254,12 @@ Close the window: `systemctl start codex-canonical-refresh.timer; /opt/hydra/scr
 
 ```bash
 systemctl stop codex-token-refresh.timer codex-canonical-refresh.timer
-ROLLBACK_PIN=$(awk '/^[hi]i +nodejs /{print $3}' "$CAP"); echo "rolling back to $ROLLBACK_PIN"
+ROLLBACK_PIN=$(awk '/^## nodejs Version \(exact\)$/{getline; print; exit}' "$CAP"); echo "rolling back to $ROLLBACK_PIN"
 OLD_MAJOR=${ROLLBACK_PIN%%.*}
 test -n "$ROLLBACK_PIN" \
   && apt-mark unhold nodejs \
   && curl -fsSL "https://deb.nodesource.com/setup_${OLD_MAJOR}.x" | bash - \
-  && { apt-cache madison nodejs | grep -F "$ROLLBACK_PIN" || { echo "ROLLBACK ABORTED: $ROLLBACK_PIN not in node_${OLD_MAJOR}.x"; false; }; } \
+  && { apt-cache madison nodejs | awk -F'|' -v p="$ROLLBACK_PIN" '{gsub(/ /,"",$2)} $2==p{f=1} END{exit !f}' || { echo "ROLLBACK ABORTED: $ROLLBACK_PIN not in node_${OLD_MAJOR}.x"; false; }; } \
   && apt-get install -y --allow-downgrades "nodejs=$ROLLBACK_PIN" \
   && apt-mark hold nodejs \
   && [ "$(dpkg-query -W -f='${Version}' nodejs)" = "$ROLLBACK_PIN" ] \
@@ -284,13 +285,31 @@ Restart the §5.1 host-only units too if §1 found any. `$CAP` is the §1
 file; if the shell was lost, set it with `CAP=$(ls -t /root/node24-preflight-*.txt | head -1)`.
 `sqlite-vec` absent (`ERR_MODULE_NOT_FOUND` for the top-level `sqlite-vec` package only; a missing `sqlite-vec-linux-x64` is a failure) is legal (see §4) and the block tolerates only that; any other error, such as `ERR_DLOPEN_FAILED`, fails the block.
 
-## §9 The backstop (as it exists at `origin/main` `70deafc4`)
+## §9 The backstop (`scripts/deploy.sh` at `origin/main` `c7f239d8` — MUS-6361 / hydra#1192)
 
-`scripts/deploy.sh:431-445` (`install_openclaw`) fails the deploy loud **before**
-`npm install -g`: `node --version` missing → `:438` error; Node below
-`OPENCLAW_NODE_FLOOR` (`:33`, default `22.22.3`) → `:441-444` error pointing at
-`UPGRADE-2026.7.1.md`. It is a **floor only**: it has no upper bound and no
-24.16 floor, so it would accept Node 24.15.x or 25.x that the next openclaw
-rejects. The band widening is MUS-5087's second card and is not described here
-as existing behaviour. Until it merges, §2's assert is the only guard on the
-`>= 24.16.0 < 25` band.
+`install_openclaw()` (`scripts/deploy.sh:440`) fails the deploy loud **before**
+`npm install -g`, so a deploy can never replace a working runtime with one the host
+cannot boot:
+
+- `node --version` missing or unparseable → `:446-449`.
+- Node outside **both** accepted bands → `:450-455`. The bands are
+  `22.22.3 <= v < 23` (`OPENCLAW_NODE_FLOOR`, `:39`) and
+  `24.15.0 <= v < 25` (`OPENCLAW_NODE_24_FLOOR`, `:40`), documented at `:28-38`.
+  `23.x`, anything below `22.22.3`, and **anything `>= 25` are rejected** (`:453`):
+  hydra deploys on LTS majors only, even though openclaw's `engines` allow
+  `>= 25.9.0`.
+
+After §2 the host sits inside the 24 band and the gate passes. A §8 rollback to the
+recorded 22.x host also passes — which is why `OPENCLAW_NODE_FLOOR` must stay on 22
+(`:33-34`). Neither direction of this window can be blocked by the gate.
+
+**The gate does not enforce the 24.16 floor.** Its 24 floor is `24.15.0` — the
+`engines` floor of the *currently pinned* openclaw 2026.8.35. openclaw 2026.9.x needs
+`>= 24.16.0`, so **§2's `band OK` assert is still the only guard on 24.16.** Do not
+skip it and do not read this section as covering it.
+
+**Deploy state at the time of writing.** hydra#1192 merged 16 Oct 16:17Z and reaches
+node-8 with the next Deploy HYDRA. If the window runs before that deploy lands, the
+host's `scripts/deploy.sh` is still the previous floor-only check (`>= 22.22.3`, no
+upper bound), which accepts the post-swap host anyway. Either way §2's assert — not
+this gate — is what proves the band.

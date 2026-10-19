@@ -559,6 +559,23 @@ dispatch and at the write boundary. Why: from 05-18 to 10-11 the batch approved
 validator-DECLINED credits through an inverted rule (`approve_owning_track == 100`
 means the shortcut did NOT fire). Approvals are audited read-only by
 `scripts/credit-review.py` (see `docs/credit-verification/ai-credit-reviewer.md`).
+Credit REMOVALS are the mirror: core-backend #10310 refuses every agent/API token on the
+admin credit DELETE routes and on approved->unverified/rejected take-backs, and
+approved->user_verification_needed is illegal (the only exit deletes every role on the
+request). Retro take-backs are role-scoped and run from a named human's own session via
+`scripts/credit-retro.py` (`docs/credit-verification/credit-retro-r1.md`).
+The "we added your credit, please help us verify it" note to users goes ONLY through
+`scripts/intercom-verify-request.sh` (fixed copy, captain-approved, idempotent via the
+verify ledger); see `docs/credit-verification/verify-request-notes.md`.
+
+Every credit-trust AI call goes through `scripts/credit_trust/llm.py` (Codex on the
+subscription, tool-less via `scripts/lib/codex-judge-exec.sh` -> Jev), which writes
+an append-only `llm_calls` row with the prompt sha256. The only metered path is the
+opt-in OpenRouter fallback, capped by `credit_review/decide.py` `CappedJudge`.
+Never judge credits in an OpenClaw agent turn. codex-cli 0.156.1 has no headless
+web search (it routes search through Code Mode `exec`), so web evidence is fetched
+server-side and only verbatim-quoted passages count:
+`docs/credit-verification/credit-trust-llm.md`.
 
 ## Picking the right extension mechanism
 
