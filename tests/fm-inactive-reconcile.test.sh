@@ -470,6 +470,31 @@ test_pr_field_requires_recorded_pr_or_ready_signal_line() {
   pass "pr= requires the recorded PR or a ready-signal terminal line, whatever its stamp, and never a scout"
 }
 
+# The brief tells a worker to end its done: line with a `lesson:` clause, so a
+# CI-ready line carrying one still names its PR, while other trailing prose
+# keeps the line out of the ready-signal shape.
+test_pr_field_survives_trailing_lesson_clause() {
+  local id record lesson_key hedged_key
+  make_world pr-lesson; bind_secondmate local
+  write_child "$MATE" lesson 'done [at=1788576000]: PR https://example.test/owner/repo/pull/88 checks green lesson: forge retries need a fresh token'
+  write_child "$MATE" hedged 'done: PR https://example.test/owner/repo/pull/99 checks green, risk low'
+  for id in lesson hedged; do
+    awk '$0 !~ /^pr=/' "$MATE/state/$id.meta" > "$MATE/state/$id.meta.tmp"
+    mv "$MATE/state/$id.meta.tmp" "$MATE/state/$id.meta"
+  done
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  lesson_key=$(reported_outcome_key "$MATE" lesson 'done') || fail "lesson receipt key missing"
+  hedged_key=$(reported_outcome_key "$MATE" hedged 'done') || fail "hedged receipt key missing"
+  record=$(grep -lFx "outcome_key=$lesson_key" "$MATE/state/terminal-outcomes"/*.reported)
+  grep -Fxq 'pr=https://example.test/owner/repo/pull/88' "$record" \
+    || fail "a ready-signal line with a lesson clause lost its PR in the outcome record: $(cat "$record")"
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$lesson_key]: child lesson done: PR https://example.test/owner/repo/pull/88 checks green lesson: forge retries need a fresh token pr=https://example.test/owner/repo/pull/88 mode=no-mistakes yolo=off" \
+    || fail "a ready-signal line with a lesson clause did not carry its PR upstream: $(cat "$MAIN/state/mate.status")"
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$hedged_key]: child hedged done: PR https://example.test/owner/repo/pull/99 checks green, risk low mode=no-mistakes yolo=off" \
+    || fail "a line with other trailing prose was claimed as a ready signal: $(cat "$MAIN/state/mate.status")"
+  pass "a trailing lesson clause keeps the ready-signal PR, other trailing prose does not"
+}
+
 # If a terminal ledger line lands while the authoritative state read is in
 # flight, the ledger path remains the single owner on the next poll.
 test_terminal_line_during_state_read_yields_to_ledger_delivery() {
@@ -1049,6 +1074,7 @@ test_inactive_receipt_ignores_later_status_prose
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_pr_field_requires_recorded_pr_or_ready_signal_line
+test_pr_field_survives_trailing_lesson_clause
 test_terminal_line_during_state_read_yields_to_ledger_delivery
 test_terminal_line_after_inactive_delivery_is_not_reported_twice
 test_progress_after_inactive_delivery_starts_a_new_event
