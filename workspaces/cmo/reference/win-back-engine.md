@@ -8,4 +8,4 @@ Personalized 1:1 re-activation campaign to churned Pro subscribers.
 - Daily refresh cron appends new churns (append-only, never overwrites tracking columns).
 - Test batch (11 emails, Feb 26): 0 replies, 0 conversions. Small sample.
 - Nick reviews all drafts for brand consistency before sending.
-- Athena CAN be used here for enriching churned profiles (per Fede 2026-04-11).
+- Athena CAN be used here for enriching churned profiles (team rule 2026-04-11).
