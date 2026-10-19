@@ -18,6 +18,13 @@ PI_503='Error: 503 {"type":"error","error":{"type":"api_error","message":"auth_u
 make_home() {  # <name>
   local home="$TMP_ROOT/$1"
   mkdir -p "$home/state" "$home/config" "$home/caps" "$home/fakebin" "$home/auth/logs"
+  # The current-state reader answers from <home>/crew/<id>, else unknown.
+  cat > "$home/fakebin/fake-crew-state" <<SH
+#!/usr/bin/env bash
+if [ -f "$home/crew/\$1" ]; then cat "$home/crew/\$1"; else printf 'state: unknown · source: none · fixture\n'; fi
+SH
+  chmod +x "$home/fakebin/fake-crew-state"
+  mkdir -p "$home/crew"
   # No macOS banner from a test run; record that one was asked for instead.
   cat > "$home/fakebin/osascript" <<SH
 #!/usr/bin/env bash
@@ -34,13 +41,11 @@ worker() {
 }
 
 pi_pane() {  # <body-line> <footer-tokens>
-  # The tilde is literal pane text, not a path to expand.
-  # shellcheck disable=SC2088
   printf '%s\n' \
     ' working on the task' \
     "$1" \
     '────────────────────────────────' \
-    '~/orca/workspaces/x/fm-task (fm/task)' \
+    'orca/workspaces/x/fm-task (fm/task)' \
     "$2 R348M CH100.0% 43.7%/1.0M (auto)      (token-pool) claude"
 }
 
@@ -52,6 +57,7 @@ poll() {
   env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_CONFIG_OVERRIDE="$home/config" FM_FLEET_STALL_CAPTURE_DIR="$home/caps" \
     FM_FLEET_STALL_NOW="$now" FM_FLEET_STALL_PROXY_URL="http://127.0.0.1:9/" \
+    FM_FLEET_STALL_CREW_STATE_BIN="$home/fakebin/fake-crew-state" \
     FM_FLEET_STALL_PROXY_AUTH_DIR="$home/no-inventory" "$@" "$CHECK" check 2>&1
 }
 
@@ -232,6 +238,47 @@ test_stall_line_carries_the_gateway_cause_and_a_missing_page_command() {
   pass "the stall line carries the gateway cause and says when no page command is configured"
 }
 
+# 2026-10-18: three "no token movement 23m while busy" stalls, two of them
+# workers parked on a decision, while the gateway was fine; the line named an
+# account that had expired hours earlier as the likely cause.
+test_waiting_workers_are_not_stalled_and_old_auth_is_not_the_cause() {
+  local home out
+  home=$(make_home waiting)
+  mkdir -p "$home/auth"
+  auth_file "$home/auth/claude-old.json" 1970-01-01T00:05:00Z
+  for w in v1 t02 r1 s1 s2 s3; do
+    worker "$home" "$w" busy "$(pi_pane ' waiting' "↑1.0M ↓$w")"
+  done
+  # v1 is parked at a review gate; t02 declared a decision with a busy pane, so
+  # its current-state reader says working; r1's pipeline is running.
+  printf 'state: parked · source: run-step · awaiting_approval\n' > "$home/crew/v1"
+  printf 'state: working · source: pane · harness busy (pi-ext)\n' > "$home/crew/t02"
+  printf 'needs-decision [key=t02-scope]: which schema?\n' > "$home/state/t02.status"
+  printf 'state: working · source: run-step · running review\n' > "$home/crew/r1"
+  poll "$home" 1000 FM_FLEET_STALL_PROXY_AUTH_DIR="$home/auth" >/dev/null
+  out=$(poll "$home" 2400 FM_FLEET_STALL_PROXY_AUTH_DIR="$home/auth")
+  assert_contains "$out" "FLEET-STALL 3 of 6 live workers stalled" "the three really stalled workers did not open an episode"
+  assert_not_contains "$out" "v1 (" "a worker parked at a review gate was counted as stalled"
+  assert_not_contains "$out" "t02 (" "a worker that declared a decision was counted as stalled"
+  assert_not_contains "$out" "r1 (" "a worker waiting on its own running pipeline was counted as stalled"
+  assert_not_contains "$out" "likely cause" "an old expired account was named as the cause of stalls with no gateway error"
+  assert_contains "$(cat "$home/state/.fleet-stall.json")" "auth:claude-old" "the fixture's expired account was not observed at all"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_FLEET_STALL_NOW=2400 "$CHECK" status)
+  assert_contains "$out" "v1: quiet but waiting (current state parked), not counted" "status did not say why a parked worker was left out"
+  assert_contains "$out" "t02: quiet but waiting (declared needs-decision), not counted" "status did not say why a declared wait was left out"
+  # With all three waiting the episode ends, and a gateway error brings the
+  # cause back.
+  rm -f "$home/crew/s1"
+  printf 'paused [key=await-ci]: waiting on CI\n' > "$home/state/s1.status"
+  out=$(poll "$home" 2700 FM_FLEET_STALL_PROXY_AUTH_DIR="$home/auth")
+  assert_contains "$out" "FLEET-STALL recovered" "a worker declaring a pause did not leave the stalled set"
+  for w in g1 g2 g3; do worker "$home" "$w" idle "$(pi_pane "$PI_503" "↑2M ↓$w")"; done
+  poll "$home" 3000 FM_FLEET_STALL_PROXY_AUTH_DIR="$home/auth" >/dev/null
+  out=$(poll "$home" 3300 FM_FLEET_STALL_PROXY_AUTH_DIR="$home/auth")
+  assert_contains "$out" "likely cause: gateway auth claude-old expired" "a gateway error in the panes did not bring the gateway cause back"
+  pass "parked, declared-waiting, and pipeline-owned workers are not stalls, and gateway conditions are a cause only when panes show gateway errors"
+}
+
 test_status_and_arm() {
   local home out
   home=$(make_home arm)
@@ -282,5 +329,6 @@ test_prose_and_moving_panes_are_not_stalls
 test_busy_without_token_movement_is_a_stall
 test_gateway_probe_reports_auth_errors_and_down
 test_stall_line_carries_the_gateway_cause_and_a_missing_page_command
+test_waiting_workers_are_not_stalled_and_old_auth_is_not_the_cause
 test_status_and_arm
 test_live_capture_skips_gone_orca_terminals
