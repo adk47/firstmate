@@ -186,6 +186,28 @@ fixture() { jq -s '{items: .}' >"$STUB_FIXTURE"; }
   [ "$status" -ne 0 ]
 }
 
+@test "a muso --json enveloped body is screened exactly like the bare one" {
+  ad a1 null 2026-10-05T09:00:00Z | jq -s '{data: {items: ., totalCount: 1, limit: 200, offset: 0}}' >"$STUB_FIXTURE"
+  run "$SCRIPT" --dry-run
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^<<<AD_DATA_BEGIN' <<<"$output")" -eq 1 ]
+  [[ "$output" == *"a1"* ]]
+}
+
+@test "an enveloped body without items exits non-zero" {
+  echo '{"data":{"nope":1}}' >"$STUB_FIXTURE"
+  run "$SCRIPT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"poll response is not a pending-review list"* ]]
+}
+
+@test "a bare body without items exits non-zero with the shape error" {
+  echo '{"nope":1}' >"$STUB_FIXTURE"
+  run "$SCRIPT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"poll response is not a pending-review list"* ]]
+}
+
 @test "an empty queue exits zero with no packets" {
   echo '{"items":[],"totalCount":0}' >"$STUB_FIXTURE"
   run "$SCRIPT" --dry-run

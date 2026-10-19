@@ -86,8 +86,11 @@ def j($n): if . == null or . == {} then "not stated" else tojson | s($n) end;
 '
 
 # shellcheck disable=SC2086
-response="$($muso_read api GET '/admin/ads/pending-review?limit=200' --json)" \
+raw="$($muso_read api GET '/admin/ads/pending-review?limit=200' --json)" \
   || { log "poll failed"; exit 1; }
+# `muso --json` wraps the API body in {"data": …} (same assumption as scripts/dedup/lib/fetch-profile.sh:10-24). Accept both shapes.
+response="$(jq -c 'if type == "object" and has("data") and (.data | type == "object") then .data else . end' <<<"$raw")" \
+  || { log "poll response is not JSON"; exit 1; }
 jq -e 'type == "object" and (.items | type == "array")' >/dev/null 2>&1 <<<"$response" \
   || { log "poll response is not a pending-review list (bad body, error body or missing items)"; exit 1; }
 jq -r '"\(.totalCount // 0) \(.items | length)"' <<<"$response" | {
