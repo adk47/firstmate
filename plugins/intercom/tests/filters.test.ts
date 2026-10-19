@@ -591,6 +591,71 @@ describe("classifyEvent — attachments", () => {
     }
   });
 
+  it("forwards the opening message's image when Intercom has already appended bot/system parts (live shape, 2026-10-17)", () => {
+    // WHY: production `user.created` payloads arrive with bot parts already
+    // appended (attribute update, default assignment, ...), each with
+    // `attachments: []` and no body. Taking `.at(-1)` made that empty array
+    // win over `source.attachments`: 4 of 4 customer openers with an image
+    // on 2026-10-17 reached Caroline with no image ("I can't see the image").
+    const sysPart = (id: string, part_type: string, authorType: string) => ({
+      type: "conversation_part", id, part_type, body: null, created_at: 1711234001,
+      author: { type: authorType, id: "5763097" }, attachments: [],
+    });
+    const payload = baseUserCreated({
+      conversation_parts: {
+        conversation_parts: [
+          sysPart("p1", "conversation_attribute_updated_by_admin", "bot"),
+          sysPart("p2", "default_assignment", "bot"),
+          sysPart("p3", "assignment", "admin"),
+        ],
+      } as unknown as IntercomWebhookPayload["data"]["item"]["conversation_parts"],
+      source: {
+        body: "<p>hi here's my additional evidence</p>",
+        author: { type: "user", id: "u_initial", email: "i@example.com" },
+        attachments: [{
+          type: "upload",
+          name: "IMG_3118.png",
+          url: "https://downloads.intercomcdn.com/i/o/x/IMG_3118.png",
+          content_type: "image/png",
+        }],
+      } as IntercomWebhookPayload["data"]["item"]["source"],
+    });
+    const result = classifyEvent(payload);
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.body).toContain("additional evidence");
+      expect(result.attachments).toHaveLength(1);
+      expect(result.attachments?.[0].url).toContain("/IMG_3118.png");
+      expect(result.authorId).toBe("u_initial");
+      expect(result.authorType).toBe("user");
+    }
+  });
+
+  it("on user.replied, reads the latest CUSTOMER part even when a bot part follows it", () => {
+    const payload = baseUserCreated({
+      conversation_parts: {
+        conversation_parts: [
+          {
+            type: "conversation_part", id: "c1", part_type: "comment", body: "<p>here it is</p>", created_at: 1711234100,
+            author: { type: "lead", id: "lead_1" },
+            attachments: [{ type: "upload", name: "proof.png", url: "https://downloads.intercomcdn.com/i/o/x/proof.png", content_type: "image/png" }],
+          },
+          {
+            type: "conversation_part", id: "b1", part_type: "language_detection_details", body: null, created_at: 1711234101,
+            author: { type: "bot", id: "5763097" }, attachments: [],
+          },
+        ],
+      } as unknown as IntercomWebhookPayload["data"]["item"]["conversation_parts"],
+    });
+    const result = classifyEvent({ ...payload, topic: "conversation.user.replied" } as IntercomWebhookPayload);
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.body).toContain("here it is");
+      expect(result.attachments?.[0].url).toContain("/proof.png");
+      expect(result.authorId).toBe("lead_1");
+    }
+  });
+
   it("prefers lastPart.attachments over source.attachments when both are present (matches body fallback chain)", () => {
     // WHY: defends against accidental shape drift. If a future change ever
     // swaps the precedence, the part-level attachments (the customer's most

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import fcntl
 import importlib.util
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -18,6 +20,25 @@ sys.path.insert(0, str(SCRIPTS))
 spec = importlib.util.spec_from_file_location("uvn_under30_cron", SCRIPTS / "uvn-under30-cron.py")
 cron = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cron)
+
+from credit_review import decide  # noqa: E402
+
+# The cron fails closed without the credit-trust decider's ledger; every test
+# gets an empty one unless it writes doc_required markers into it.
+_LEDGER_DIR = tempfile.mkdtemp()
+cron.DECIDE_LEDGER_PATH = Path(_LEDGER_DIR) / "ledger.sqlite3"
+_db = sqlite3.connect(str(cron.DECIDE_LEDGER_PATH))
+decide.ensure_schema(_db)
+_db.close()
+
+
+def mark_doc_required(request_id):
+    db = sqlite3.connect(str(cron.DECIDE_LEDGER_PATH))
+    db.execute("INSERT INTO decisions (run_id, decided_at, request_id, big_track, decision, reason, mode,"
+               " doc_required) VALUES ('r', '2026-10-15T00:00:00Z', ?, 0, 'support', 'big track', 'apply', 1)",
+               (request_id,))
+    db.commit()
+    db.close()
 
 CR_ID = "11111111-1111-4111-8111-111111111111"
 CR_ID_2 = "22222222-2222-4222-8222-222222222222"
@@ -56,6 +77,9 @@ def credit(status="user_verification_needed", request_id=CR_ID, track="spotify-1
         "spotifyTrackId": track,
         "spotifyTrackTitle": f"Song {request_id[:2]}",
         "credits": ["Mixing"],
+        # Stored (server-side) popularity: core-backend's T12 guard reads it, and
+        # outside 1..29 it refuses uvn-under30's approval (band A).
+        "spotifyPopularity": 12,
         "verificationData": {"rule_risk_percent": {}},
     }
 
@@ -576,6 +600,56 @@ class CronOrchestrationTests(unittest.TestCase):
         update.assert_not_called()
         self.assertEqual(output.strip(), "NO_REPLY")
 
+    def test_deny_listed_user_row_is_never_approved(self):
+        denied = {CR_ID: {**credit(), "userId": 13373}}
+        rc, _, approve, _ = self.run_main(set(), [denied, denied, denied, denied])
+        self.assertEqual(rc, 0)
+        approve.assert_not_called()
+
+    def test_unreadable_deny_list_fails_closed_before_any_ticket(self):
+        with patch.object(cron, "DENY_POLICY_PATH", Path("/nonexistent/credit-trust-decide.json")):
+            rc, output, approve, update = self.run_main(set(), [{CR_ID: credit()}] * 4)
+        self.assertEqual(rc, 1)
+        self.assertIn("deny-list safety data is unavailable", output)
+        approve.assert_not_called()
+        update.assert_not_called()
+
+    def test_partial_profile_labels_a_deny_listed_row_as_excluded(self):
+        pending = {CR_ID: credit(), CR_ID_2: {**credit(request_id=CR_ID_2, track="spotify-2"), "userId": 13373}}
+        after = {CR_ID: credit("approved"), CR_ID_2: pending[CR_ID_2]}
+        rc, _, approve, update = self.run_main(
+            set(), [pending, pending, pending, after], ticket=task(ids=False), popularity={"spotify-2": 12},
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(approve.call_args.args[2], [CR_ID])
+        comment = update.call_args.args[2]
+        self.assertIn("excluded: deny-listed user", comment)
+        self.assertNotIn("popularity 12", comment)
+
+    def test_decider_doc_required_row_is_never_approved(self):
+        other = "55555555-5555-4555-8555-555555555555"
+        mark_doc_required(other)
+        rows = {other: credit(request_id=other)}
+        rc, _, approve, _ = self.run_main(set(), [rows] * 4, ticket=task(ids=False))
+        self.assertEqual(rc, 0)
+        approve.assert_not_called()
+
+    def test_the_cron_logs_in_as_its_own_admin_identity(self):
+        seen = []
+
+        def approve(run_id, task_id, ids):
+            seen.append(os.environ.get("MUSO_ADMIN_IDENTITY"))
+            return set(ids)
+        rows = {CR_ID: credit()}
+        self.run_main(set(), [rows, rows, rows, {CR_ID: credit("approved")}], approve_result=approve)
+        self.assertEqual(seen, ["uvn-cron"])
+
+    def test_editorial_row_is_never_approved(self):
+        rows = {CR_ID: {**credit(), "credits": ["Vocal Editing"]}}
+        rc, _, approve, _ = self.run_main(set(), [rows] * 4)
+        self.assertEqual(rc, 0)
+        approve.assert_not_called()
+
     def test_unresolved_partial_commit_keeps_ticket_open(self):
         rc, _, approve, update = self.run_main(
             set(),
@@ -990,6 +1064,24 @@ class ApprovalReadbackTests(unittest.TestCase):
         self.assertEqual(raised.exception.confirmed_ids, {CR_ID})
         self.assertEqual(mark_unresolved.call_count, 2)
         self.assertIn("attempt started", mark_unresolved.call_args_list[0].args[2])
+
+    def test_server_agent_guard_refusal_clears_the_blocker_and_approves_nothing(self):
+        # core-backend T12: HTTP 400 agent_cannot_approve_declined means nothing was
+        # written, so the attempt is resolved (not approved) and must not block the ticket.
+        response = {"http_status": 400, "body": {
+            "errorCode": "agent_cannot_approve_declined", "refusedRequestIds": [CR_ID],
+            "refused": [{"id": CR_ID, "band": "B_request_info", "reasons": ["proof_required"]}]}}
+        with (
+            patch.object(cron, "audit") as audit,
+            patch.object(cron, "admin_raw", return_value=response),
+            patch.object(cron, "verify_status", return_value=set()),
+            patch.object(cron, "mark_unresolved"),
+            patch.object(cron, "clear_unresolved") as clear_unresolved,
+        ):
+            confirmed = cron.approve_chunk("run-1", "ticket-1", [CR_ID])
+        self.assertEqual(confirmed, set())
+        clear_unresolved.assert_called_once_with("run-1", [CR_ID])
+        self.assertIn("approve_refused_by_server", [c.args[1] for c in audit.call_args_list])
 
     def test_exact_2xx_and_readback_clears_prior_unresolved_state(self):
         response = {

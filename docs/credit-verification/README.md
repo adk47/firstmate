@@ -36,6 +36,7 @@ Tier-0 is the load-bearing piece that moved the needle from 3.4% to a measured 2
 | Skill prose (drives the LLM) | [`workspaces/operations/skills/muso-ops-credit-verification/SKILL.md`](../../workspaces/operations/skills/muso-ops-credit-verification/SKILL.md) — see §B1.6 |
 | Tests | `scripts/tests/*.bats` in each skill's scripts dir |
 | AI credit reviewer + approval auditor (2026-10-11) | [`ai-credit-reviewer.md`](./ai-credit-reviewer.md): hourly read-only audit of every approval (trusted sources, identity, velocity, approver), model + web search behind a flag, pre-approval reviewer in shadow |
+| Supporting-document forensics, shadow (2026-10-15) | [`proof-forensics.md`](./proof-forensics.md): every proof from Intercom (and email once verify@ exists), matched by account, analysed in a no-network sandbox (provenance/C2PA, PDF revisions and signatures, overlays, OCR content checks, cross-account reuse) to a deterministic verdict; store only, no writes, no sends |
 | Batch fraud detector (spec) | [`fraud-detection-spec.md`](./fraud-detection-spec.md) — profile-level multi-factor detector that downgrades a backend approve to UVN (`CV_FRAUD_MODE` off/shadow/enforce; batch pipeline only) |
 | Live env | `/etc/openclaw/main.env` (sources `OPS_TIER0_ENABLED=1` etc.) |
 

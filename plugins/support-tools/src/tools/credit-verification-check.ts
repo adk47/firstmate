@@ -5,6 +5,7 @@ import type { MusoAdminClient } from "../muso-admin-client.js";
 import type { IntercomReader } from "../intercom-client.js";
 import { extractProfileIdFromUrl } from "./profile-lookup.js";
 import { deriveConvId } from "./dedupe-check.js";
+import { checkProofOnFile, DEFAULT_PROOF_ON_FILE_PATH, type ProofOnFileResult } from "./proof-on-file.js";
 
 // credit_verification_check — READ-ONLY lookup for a customer's credits that are
 // stuck in `user_verification_needed` (UVN). It anchors ownership to the
@@ -23,6 +24,31 @@ import { deriveConvId } from "./dedupe-check.js";
 const MAX_PROFILE_CANDIDATES = 5; // bound the owner-resolution search
 const MAX_UVN_CREDITS = 100;
 const MAX_STR_LEN = 300;
+// Step 2's proof ask carries this sentence verbatim (customer-credit-verification SKILL), so
+// an earlier ask in another conversation is detectable: "none = ask ONCE" must hold across
+// conversations, and an unanswered ask writes nothing to proof-on-file.
+export const PROOF_ASK_MARKER = "Any one of these works (a screenshot is fine):";
+export const PRIOR_ASK_WINDOW_MS = 60 * 24 * 60 * 60 * 1000;
+export const PRIOR_ASK_MAX_CONVERSATIONS = 10;
+// Asks sent before the marker existed carry no fixed sentence (firstmate 039). Until this
+// date (deploy + 60 days), a bot comment that names one of the customer's needs-proof track
+// titles, or carries the old Step 2 phrase, also counts as an earlier ask. After it, only
+// PROOF_ASK_MARKER counts.
+export const PRE_MARKER_WINDOW_END_MS = Date.parse("2026-12-17T00:00:00Z");
+export const PRE_MARKER_ASK_PHRASE = "screenshots are accepted for all of these";
+const MIN_TITLE_MARKER_LEN = 3;
+
+export function priorAskMarkers(uvnCredits: UvnCredit[], now: number): string[] {
+  const markers = [PROOF_ASK_MARKER];
+  if (now < PRE_MARKER_WINDOW_END_MS) {
+    markers.push(PRE_MARKER_ASK_PHRASE);
+    for (const c of uvnCredits) {
+      const title = c.track_title.replace(/\s+/g, " ").trim();
+      if (title.length >= MIN_TITLE_MARKER_LEN && !markers.includes(title)) markers.push(title);
+    }
+  }
+  return markers;
+}
 const UUID_PATTERN = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
 
 // ---- pure helpers -----------------------------------------------------------
@@ -101,6 +127,10 @@ export interface CreditRequestItem {
   spotifyTrackArtists?: Array<string | { name?: string }>;
   credits?: Array<string | { child?: string }>;
   metadata?: { isrc?: string | null };
+  // The submitting user (full row from GET /admin/credit-requests; `user` is its include).
+  // Used only to look the submitter up in proof-on-file, never surfaced.
+  userId?: number | string | null;
+  user?: { id?: number | string | null } | null;
 }
 
 export interface UvnCredit {
@@ -125,6 +155,20 @@ export interface Verdict {
   profile_id: string | null;
   uvn_credits: UvnCredit[];
   count: number;
+  // Credits in status `unverified`: submitted and waiting for OUR team's review.
+  // Different from UVN above (where the customer must send proof): the customer
+  // has nothing to do. null = not assessed (fail-closed verdict, or the lookup
+  // failed); never read null as zero. Since 2026-10-11 this queue holds
+  // thousands of credits, and reading only UVN told those customers "nothing
+  // is pending".
+  awaiting_review: { count: number; truncated: boolean } | null;
+  // Per-status counts for the verified owner's profile; a status whose lookup
+  // failed is null, not 0.
+  pending_by_status: { user_verification_needed: number; unverified: number | null } | null;
+  // Step 2's ask gate (firstmate 761): is proof already on file for this customer's
+  // needs-proof credits? on_file = never ask; none = ask ONCE; asked_before = already asked
+  // in another conversation, do NOT ask again; unknown = do NOT ask, route to a human. null = not assessed (no needs-proof credits, or a fail-closed verdict).
+  proof_on_file: ProofOnFileResult | null;
   notes: string[];
 }
 
@@ -136,6 +180,9 @@ export function failClosedVerdict(notes: string[] = []): Verdict {
     profile_id: null,
     uvn_credits: [],
     count: 0,
+    awaiting_review: null,
+    pending_by_status: null,
+    proof_on_file: null,
     notes: notes.map(sanitizeStr),
   };
 }
@@ -185,12 +232,15 @@ function extractTrackTitle(item: CreditRequestItem): string {
   return String(item.spotifyTrackTitle ?? "");
 }
 
-function extractRole(item: CreditRequestItem): string {
+export function creditRequestRoles(item: CreditRequestItem): string[] {
   const arr = Array.isArray(item.credits) ? item.credits : [];
-  const roles = arr
+  return arr
     .map((c) => (typeof c === "string" ? c : String((c as { child?: string })?.child ?? "")))
     .filter(Boolean);
-  return roles.join(", ");
+}
+
+function extractRole(item: CreditRequestItem): string {
+  return creditRequestRoles(item).join(", ");
 }
 
 export function toUvnCredit(item: CreditRequestItem): UvnCredit {
@@ -231,6 +281,13 @@ export interface CreditVerificationCheckDeps {
   // not a doctrine line, so the flow cannot run until explicitly enabled per the
   // rollout. Mirrors the personalization flag-off pattern (PR #416).
   enabled: boolean;
+  // credit-trust's merged proof-on-file export (default: the same file the take-back gate
+  // reads). Injected for tests.
+  proofOnFilePath?: string;
+  now?: () => number;
+  // The Intercom admin Caroline replies as; its earlier Step 2 asks are looked up by it.
+  // Empty = the lookup cannot run, so a "none" becomes "unknown" (no ask).
+  botAdminId?: string;
 }
 
 function resolveId(id: string | undefined, url: string | undefined): string | null {
@@ -243,6 +300,9 @@ export function createCreditVerificationCheckTool(
   deps: CreditVerificationCheckDeps,
 ): AgentTool<typeof Parameters, unknown> {
   const { adminClient, intercomReader, rateLimiter, sessionKey, intercomToken, enabled } = deps;
+  const proofOnFilePath = deps.proofOnFilePath ?? process.env.CREDIT_TRUST_PROOF_ON_FILE ?? DEFAULT_PROOF_ON_FILE_PATH;
+  const nowFn = deps.now ?? Date.now;
+  const botAdminId = deps.botAdminId ?? "";
 
   async function fetchProfileBody(profileId: string): Promise<ProfileBody | null> {
     const resp = await adminClient.get<{ data?: ProfileBody }>(
@@ -312,12 +372,26 @@ export function createCreditVerificationCheckTool(
     return Array.isArray(items) ? (items as CreditRequestItem[]) : null;
   }
 
+  // Credits waiting for OUR review (status `unverified`). Count only: the
+  // customer has nothing to act on, so no per-item list is surfaced. null on
+  // any failure or schema drift, so the caller never reports a failed lookup
+  // as "nothing pending".
+  async function fetchAwaitingReview(profileId: string): Promise<{ count: number; truncated: boolean } | null> {
+    const resp = await adminClient.get<{ data?: { items?: unknown[] } }>(
+      `/api/v3/admin/credit-requests?profilesIds=${encodeURIComponent(profileId)}&status=unverified&limit=${MAX_UVN_CREDITS + 1}`,
+    );
+    if (!resp.ok) return null;
+    const items = (resp.data as any)?.data?.items;
+    if (!Array.isArray(items)) return null;
+    return { count: Math.min(items.length, MAX_UVN_CREDITS), truncated: items.length > MAX_UVN_CREDITS };
+  }
+
   return {
     name: "credit_verification_check",
-    label: "Look up a customer's pending (user-verification-needed) credits (read-only)",
+    label: "Look up a customer's pending credits: needs-proof and awaiting-review (read-only)",
     description:
-      "Read-only lookup of the credits a customer has stuck in 'user verification needed'. Anchors ownership to the Intercom contact's real email (anti-spoof), confirms the requester owns the profile, and returns a PII-safe structured list of pending credits (claimed role, track, artist, ISRC) for the credit-verification flow. " +
-      "It NEVER approves, rejects, or writes anything — after verifying, ask the customer for proof and (when warranted) file a recommend-approve ticket via create_ticket for a human to execute the gated approval. " +
+      "Read-only lookup of the credits a customer has stuck in 'user verification needed'. Anchors ownership to the Intercom contact's real email (anti-spoof), confirms the requester owns the profile, and returns a PII-safe structured list of pending credits (claimed role, track, artist, ISRC) for the credit-verification flow, plus awaiting_review (credits waiting for OUR review, where the customer has nothing to do) and pending_by_status counts. Never tell a customer nothing is pending unless BOTH counts are 0. " +
+      "It NEVER approves, rejects, or writes anything — after verifying, ask for proof only when proof_on_file is 'none' (never when 'on_file', 'asked_before' or 'unknown') (see the customer-credit-verification skill) and (when warranted) file a recommend-approve ticket via create_ticket for a human to execute the gated approval. " +
       "Fails closed (owner_undetermined) when ownership cannot be verified. Rate limit: 10 calls / 60 min per session.",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
@@ -373,6 +447,50 @@ export function createCreditVerificationCheckTool(
         // impersonation_flag:false must not read as "identity cross-check
         // passed" when no requesterEmail was supplied to compare.
         if (!requester) notes.push("requester email not provided; no impersonation cross-check performed");
+        const awaiting_review = await fetchAwaitingReview(profileId);
+        if (awaiting_review === null) {
+          notes.push("the awaiting-review queue could not be read; do NOT tell the customer nothing is pending");
+        } else if (awaiting_review.count > 0) {
+          notes.push(
+            `${awaiting_review.truncated ? `more than ${awaiting_review.count}` : awaiting_review.count} credit(s) are awaiting our team's review: not missing, and the customer does not need to do anything for those right now`,
+          );
+        }
+        let proof_on_file: ProofOnFileResult | null = null;
+        if (uvn_credits.length > 0) {
+          const userIds = new Set<string>();
+          for (const it of items) {
+            const u = it.userId ?? it.user?.id;
+            if (u !== null && u !== undefined && String(u)) userIds.add(String(u));
+          }
+          const now = nowFn();
+          proof_on_file = checkProofOnFile(proofOnFilePath, userIds, uvn_credits.map((c) => c.cr_id), now);
+          if (proof_on_file.state === "none") {
+            const prior = botAdminId
+              ? await intercomReader.findBotMarkerInOtherConversations({
+                  conversationId: convId,
+                  token: intercomToken,
+                  botAdminId,
+                  markers: priorAskMarkers(uvn_credits, now),
+                  sinceUnix: Math.floor((now - PRIOR_ASK_WINDOW_MS) / 1000),
+                  limit: PRIOR_ASK_MAX_CONVERSATIONS,
+                })
+              : "unknown";
+            if (prior === "found") {
+              proof_on_file = { state: "asked_before", reason: "we already asked this customer for proof in another conversation in the last 60 days" };
+            } else if (prior !== "not_found") {
+              proof_on_file = { state: "unknown", reason: "earlier proof requests in this customer's other conversations could not be checked" };
+            }
+          }
+          if (proof_on_file.state === "on_file") {
+            notes.push("proof is on file for this customer: never ask for proof again; route the needs-proof credits (skill Steps 3-4)");
+          } else if (proof_on_file.state === "asked_before") {
+            notes.push("we already asked this customer for proof in another conversation: do NOT ask again; file a needs-human credit-verify ticket and tell the customer the team is reviewing it");
+          } else if (proof_on_file.state === "none") {
+            notes.push("no proof is on file for this customer: you may ask for proof ONCE, covering all needs-proof credits together (skill Step 2)");
+          } else {
+            notes.push(`proof-on-file could not be confirmed (${proof_on_file.reason}): do NOT ask for proof, and do NOT tell the customer nothing is needed; file a needs-human credit-verify ticket`);
+          }
+        }
         const verdict: Verdict = {
           verified_owner: true,
           owner_undetermined: false,
@@ -380,6 +498,12 @@ export function createCreditVerificationCheckTool(
           profile_id: profileId,
           uvn_credits,
           count: uvn_credits.length,
+          awaiting_review,
+          pending_by_status: {
+            user_verification_needed: uvn_credits.length,
+            unverified: awaiting_review === null ? null : awaiting_review.count,
+          },
+          proof_on_file,
           notes,
         };
         return textResult(JSON.stringify(verdict));

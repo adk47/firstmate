@@ -26,6 +26,8 @@ interface MockWorld {
   credits?: Record<string, Array<{ title: string; credits: string[]; releaseDate?: string }>>;
   // UVN items for the resolved profile
   uvnItems?: Array<{ spotifyTrackTitle?: string }>;
+  // `unverified` items (waiting for OUR review) for the resolved profile
+  unverifiedItems?: Array<{ spotifyTrackTitle?: string; credits?: string[] }>;
   failPaths?: RegExp[];
 }
 
@@ -47,6 +49,10 @@ function makeAdminClient(world: MockWorld): MusoAdminClient {
     m = path.match(/^\/api\/v3\/admin\/credit-requests\?profilesIds=([0-9a-fA-F-]+)&status=user_verification_needed&limit=\d+$/);
     if (m) {
       return { ok: true, status: 200, data: { data: { items: world.uvnItems ?? [] } } };
+    }
+    m = path.match(/^\/api\/v3\/admin\/credit-requests\?profilesIds=([0-9a-fA-F-]+)&status=unverified&limit=\d+$/);
+    if (m) {
+      return { ok: true, status: 200, data: { data: { items: world.unverifiedItems ?? [] } } };
     }
     m = path.match(/^\/api\/v3\/admin\/profile\/([0-9a-fA-F-]+)$/);
     if (m) {
@@ -561,5 +567,188 @@ describe("profile_credits_status — pure helpers", () => {
     };
     expect(supportActionFor({ ...base, anchor_verified: true }, "profile_claim")).toBe("route_selfserve_claim");
     expect(supportActionFor({ ...base, anchor_verified: false }, "profile_claim")).toBe("create_handoff_ticket");
+  });
+});
+
+// 2026-10-16: since the fraud bypass was switched off on 10-11, thousands of credits
+// sit in status `unverified` (waiting for OUR review). The tool read only
+// user_verification_needed, so Caroline told those customers "nothing is pending"
+// (PAID customer with 54 waiting was told 0).
+describe("profile_credits_status — credits awaiting our review (status unverified)", () => {
+  it("a referenced track waiting for our review → awaiting_review, answer_from_status, no proof ask", async () => {
+    const world: MockWorld = {
+      profiles: { [PROFILE_ID]: ownedProfile() },
+      searches: { "aasis beats": [] },
+      credits: { [PROFILE_ID]: [] },
+      unverifiedItems: [{ spotifyTrackTitle: "Ghost Song", credits: ["producer"] }],
+    };
+    const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID, track_title: "Ghost Song", credit_role: "Producer" });
+    expect(out.credit.state).toBe("awaiting_review");
+    expect(out.ask_classification).toBe("credit_awaiting_review");
+    expect(out.support_action).toBe("answer_from_status");
+    expect(out.handoff_packet).toBeUndefined();
+    expect(out.credit.awaiting_review).toEqual({ count: 1, truncated: false, referenced_track_awaiting_review: true });
+    expect(out.diagnosis).toMatch(/waiting for our team to review/i);
+    expect(out.diagnosis).toMatch(/not missing/i);
+    expect(out.diagnosis).toMatch(/1 credit\(s\) on this profile are awaiting our team's review/);
+  });
+
+  it("a queued request for the same track but a different role is not the referenced credit → credit_add", async () => {
+    const world: MockWorld = {
+      profiles: { [PROFILE_ID]: ownedProfile() },
+      searches: { "aasis beats": [] },
+      credits: { [PROFILE_ID]: [] },
+      unverifiedItems: [{ spotifyTrackTitle: "Ghost Song", credits: ["Songwriter"] }],
+    };
+    const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID, track_title: "Ghost Song", credit_role: "Producer" });
+    expect(out.credit.state).toBe("not_found");
+    expect(out.ask_classification).toBe("credit_add");
+    expect(out.support_action).toBe("create_handoff_ticket");
+    expect(out.credit.awaiting_review).toEqual({ count: 1, truncated: false, referenced_track_awaiting_review: false });
+    expect(out.handoff_packet.evidence.awaiting_review_count).toBe(1);
+  });
+
+  it("referenced credit awaiting review in a queue of more than 100: the diagnosis states a floor, never an exact 100", async () => {
+    const world: MockWorld = {
+      profiles: { [PROFILE_ID]: ownedProfile() },
+      searches: { "aasis beats": [] },
+      credits: { [PROFILE_ID]: [] },
+      unverifiedItems: [
+        { spotifyTrackTitle: "Ghost Song", credits: ["Producer"] },
+        ...Array.from({ length: 299 }, (_, i) => ({ spotifyTrackTitle: `T${i}`, credits: ["Producer"] })),
+      ],
+    };
+    const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID, track_title: "Ghost Song", credit_role: "Producer" });
+    expect(out.credit.state).toBe("awaiting_review");
+    expect(out.diagnosis).toMatch(/More than 100 credit\(s\) on this profile are awaiting our team's review/);
+    expect(out.diagnosis).not.toMatch(/(?<!than) 100 credit/);
+  });
+
+  it("a queued credit on a near-identical title is not the referenced credit → credit_add, never awaiting_review", async () => {
+    const world: MockWorld = {
+      profiles: { [PROFILE_ID]: ownedProfile() },
+      searches: { "aasis beats": [] },
+      credits: { [PROFILE_ID]: [] },
+      unverifiedItems: [{ spotifyTrackTitle: "Ghost Songs", credits: ["Producer"] }],
+    };
+    const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID, track_title: "Ghost Song", credit_role: "Producer" });
+    expect(out.credit.state).toBe("not_found");
+    expect(out.ask_classification).toBe("credit_add");
+    expect(out.credit.awaiting_review).toEqual({ count: 1, truncated: false, referenced_track_awaiting_review: false });
+  });
+
+  it("referenced credit not among the first 100 of a larger queue: unassessed, never a credit-add handoff", async () => {
+    const world: MockWorld = {
+      profiles: { [PROFILE_ID]: ownedProfile() },
+      searches: { "aasis beats": [] },
+      credits: { [PROFILE_ID]: [] },
+      unverifiedItems: [
+        ...Array.from({ length: 101 }, (_, i) => ({ spotifyTrackTitle: `T${i}`, credits: ["Producer"] })),
+        { spotifyTrackTitle: "Ghost Song", credits: ["Producer"] },
+      ],
+    };
+    const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID, track_title: "Ghost Song", credit_role: "Producer" });
+    expect(out.credit.state).toBe("not_checked");
+    expect(out.ask_classification).not.toBe("credit_add");
+    expect(out.support_action).not.toBe("create_handoff_ticket");
+    expect(out.handoff_packet).toBeUndefined();
+    expect(out.diagnosis).toMatch(/do not tell the customer it is missing/i);
+    expect(out.diagnosis).toMatch(/More than 100 credit\(s\) on this profile are awaiting our team's review/);
+    expect(out.notes.join(" ")).toMatch(/whether the referenced credit is among them was not assessed/);
+  });
+
+  it("no specific credit queried: the diagnosis still reports how many credits await review", async () => {
+    const world: MockWorld = {
+      profiles: { [PROFILE_ID]: ownedProfile() },
+      searches: { "aasis beats": [] },
+      unverifiedItems: Array.from({ length: 54 }, (_, i) => ({ spotifyTrackTitle: `T${i}` })),
+    };
+    const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID });
+    expect(out.credit.pending.count).toBe(0);
+    expect(out.credit.awaiting_review.count).toBe(54);
+    expect(out.diagnosis).toMatch(/54 credit\(s\) on this profile are awaiting our team's review/);
+  });
+
+  it("a failed awaiting-review read is reported as unknown, never as zero", async () => {
+    const world: MockWorld = {
+      profiles: { [PROFILE_ID]: ownedProfile() },
+      searches: { "aasis beats": [] },
+      unverifiedItems: [{ spotifyTrackTitle: "Ghost Song" }],
+      failPaths: [/status=unverified/],
+    };
+    const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID });
+    expect(out.found).toBe(true);
+    expect(out.credit.pending).toMatchObject({ count: 0 });
+    expect(out.credit.awaiting_review).toBeNull();
+    expect(out.diagnosis).not.toMatch(/awaiting/i);
+    expect(JSON.stringify(out.notes)).toMatch(/do NOT tell the customer nothing is pending/);
+  });
+
+  it("a failed awaiting-review read for a queried credit: unassessed, never a credit-add handoff", async () => {
+    const world: MockWorld = {
+      profiles: { [PROFILE_ID]: ownedProfile() },
+      searches: { "aasis beats": [] },
+      credits: { [PROFILE_ID]: [] },
+      failPaths: [/status=unverified/],
+    };
+    const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID, track_title: "Ghost Song", credit_role: "Producer" });
+    expect(out.credit.state).toBe("not_checked");
+    expect(out.credit.awaiting_review).toBeNull();
+    expect(out.ask_classification).not.toBe("credit_add");
+    expect(out.support_action).not.toBe("create_handoff_ticket");
+    expect(out.handoff_packet).toBeUndefined();
+    expect(out.diagnosis).not.toMatch(/credit-add/i);
+    expect(out.diagnosis).toMatch(/do not tell the customer it is missing/i);
+    expect(JSON.stringify(out.notes)).toMatch(/do NOT tell the customer nothing is pending/);
+  });
+
+  it("a failed pending-verification read does not hide the awaiting-review count", async () => {
+    const world: MockWorld = {
+      profiles: { [PROFILE_ID]: ownedProfile() },
+      searches: { "aasis beats": [] },
+      unverifiedItems: Array.from({ length: 49 }, (_, i) => ({ spotifyTrackTitle: `T${i}` })),
+      failPaths: [/status=user_verification_needed/],
+    };
+    const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID });
+    expect(out.credit.pending).toBeNull();
+    expect(out.credit.awaiting_review).toEqual({ count: 49, truncated: false, referenced_track_awaiting_review: false });
+    expect(out.diagnosis).toMatch(/49 credit\(s\) on this profile are awaiting our team's review/);
+    expect(out.notes.join(" ")).toContain("pending-verification queue unavailable");
+  });
+
+  it("both reads failing: neither count is reported and the customer is never told nothing is pending", async () => {
+    const world: MockWorld = {
+      profiles: { [PROFILE_ID]: ownedProfile() },
+      searches: { "aasis beats": [] },
+      failPaths: [/credit-requests/],
+    };
+    const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID });
+    expect(out.credit.pending).toBeNull();
+    expect(out.credit.awaiting_review).toBeNull();
+    expect(JSON.stringify(out.notes)).toMatch(/do NOT tell the customer nothing is pending/);
+  });
+
+  it("more than 100 awaiting review is reported as a floor, never an exact 100", async () => {
+    const world: MockWorld = {
+      profiles: { [PROFILE_ID]: ownedProfile() },
+      searches: { "aasis beats": [] },
+      unverifiedItems: Array.from({ length: 300 }, (_, i) => ({ spotifyTrackTitle: `T${i}` })),
+    };
+    const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID });
+    expect(out.credit.awaiting_review).toMatchObject({ count: 100, truncated: true });
+    expect(out.diagnosis).toMatch(/More than 100 credit\(s\) on this profile are awaiting our team's review/);
+    expect(out.diagnosis).not.toMatch(/(?<!than) 100 credit/);
+  });
+
+  it("a non-owner learns nothing about the review queue", async () => {
+    const world: MockWorld = {
+      profiles: { [PROFILE_ID]: { ...ownedProfile(), workspaces: [{ email: "someone-else@example.com", isClaimed: true }] } },
+      searches: { "aasis beats": [] },
+      unverifiedItems: [{ spotifyTrackTitle: "Ghost Song" }],
+    };
+    const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID });
+    expect(out.credit.pending).toBeNull();
+    expect(out.credit.awaiting_review).toBeNull();
+    expect(out.diagnosis).not.toMatch(/awaiting/i);
   });
 });

@@ -27,6 +27,7 @@ from lib.customer_outcome import (  # noqa: E402
 
 from uvn_under30_policy import (
     APPROVED,
+    DenyList,
     PolicyError,
     UVN,
     approved_ids_from_records,
@@ -34,6 +35,7 @@ from uvn_under30_policy import (
     every_scoped_request_approved,
     has_hard_reject_signal,
     live_popularity,
+    load_deny_list,
     load_fraud_ids,
     no_pending_rows_remaining,
     parse_ticket_scope,
@@ -45,6 +47,8 @@ from uvn_under30_policy import (
 
 LIST_ID = "901000600160"
 SERVICE_REQUESTER = "uvn-popularity-cron@hydra-ops"
+# muso-admin-api.sh MUSO_ADMIN_IDENTITY: this automation's own admin login.
+ADMIN_IDENTITY = "uvn-cron"
 CONDITIONAL_PATH = "/admin/credit-requests/conditional-status"
 MUSO_BIN = os.environ.get("MUSO_BIN", "/usr/local/bin/muso")
 ADMIN_SCRIPT = os.environ.get(
@@ -56,6 +60,15 @@ STATUS_VERIFY = os.environ.get(
     "/opt/hydra/workspaces/operations/skills/muso-ops-credit-verification/scripts/verify-credit-request-status.sh",
 )
 FRAUD_ROOT = Path(os.environ.get("UVN_FRAUD_ROOT", "/var/log/openclaw/credit-batch-runs"))
+# The proof-required / deny lists and editorial role terms the credit-trust
+# decider also reads, and the decider's ledger, whose doc_required marker
+# names the support requests that need documents: none of those rows is ever
+# approved here.
+DENY_POLICY_PATH = Path(os.environ.get(
+    "CREDIT_TRUST_DECIDE_POLICY",
+    Path(__file__).resolve().parents[1] / "policies" / "credit-trust-decide.json",
+))
+DECIDE_LEDGER_PATH = Path(os.environ.get("CREDIT_REVIEW_LEDGER", "/var/lib/hydra/credit-review/ledger.sqlite3"))
 FRAUD_ATTEMPT_PATH = Path(os.environ.get(
     "CV_FRAUD_ATTEMPT_PATH",
     "/var/log/muso-ops/fraud-uvn-attempts.jsonl",
@@ -371,6 +384,13 @@ def load_required_fraud_ids() -> set[str]:
         raise RunError(f"fraud safety data is unavailable: {exc}") from exc
 
 
+def load_required_deny_list():
+    try:
+        return load_deny_list(DENY_POLICY_PATH, DECIDE_LEDGER_PATH)
+    except PolicyError as exc:
+        raise RunError(f"deny-list safety data is unavailable: {exc}") from exc
+
+
 def list_profile_requests(profile_id: str) -> dict[str, dict[str, Any]]:
     rows: dict[str, dict[str, Any]] = {}
     for page in range(1, 101):
@@ -561,6 +581,15 @@ def approve_chunk(run_id: str, task_id: str, ids: list[str]) -> set[str]:
         raise ApprovalAttemptError(str(exc)) from exc
     status = response.get("http_status") if isinstance(response, dict) else None
     response_body = response.get("body") if isinstance(response, dict) else None
+    if (status == 400 and not confirmed and isinstance(response_body, dict)
+            and response_body.get("errorCode") == "agent_cannot_approve_declined"):
+        # The server wrote NOTHING and said so: the attempt is resolved (not
+        # approved). Clear the blocker, record why, and leave the rows held.
+        audit(run_id, "approve_refused_by_server", {
+            "ticket_id": task_id, "request_ids": ids,
+            "refused": response_body.get("refused"), "refused_request_ids": response_body.get("refusedRequestIds")})
+        clear_unresolved(run_id, ids)
+        return set()
     data = response_body.get("data") if isinstance(response_body, dict) else None
     updated = data.get("updatedIds") if isinstance(data, dict) else None
     exact_success = (
@@ -654,6 +683,7 @@ def render_pending_lines(
     rows: dict[str, dict[str, Any]],
     fraud_ids: set[str],
     live_by_track: dict[str, dict[str, Any]],
+    deny: DenyList,
 ) -> list[str]:
     """Header plus one line per row still in verification, for the human reviewer.
 
@@ -672,6 +702,8 @@ def render_pending_lines(
         track_id = row.get("spotifyTrackId")
         if request_id in fraud_ids:
             why = "excluded: fraud marker"
+        elif deny.blocks(row):
+            why = f"excluded: {deny.why(row)}"
         elif has_hard_reject_signal(row):
             why = "excluded: backend reject or hold signal"
         elif not isinstance(track_id, str) or not track_id:
@@ -924,6 +956,7 @@ def run_locked(run_id: str, *, mode: str, limit: int) -> int:
         # Validate the landed fraud truth floor before inspecting any ticket;
         # each approval chunk reloads it again at the write boundary.
         load_required_fraud_ids()
+        load_required_deny_list()
         # Shadow writes nothing, so the breaker must never blind the very data
         # a human needs in order to judge the reversals it reports.
         if mode == "apply":
@@ -1003,10 +1036,13 @@ def run_locked(run_id: str, *, mode: str, limit: int) -> int:
                 eligible = lookup_candidates(planned_chunk, current_scope, current_rows, current_fraud_ids)
                 live_by_track = measure_tracks(eligible)
                 measured_by_track.update(live_by_track)
+                current_deny = load_required_deny_list()
                 safe_chunk = [
                     request_id
                     for request_id, track_id in eligible
-                    if qualifies_for_approval(current_rows[request_id], live_by_track[track_id], current_fraud_ids)
+                    if qualifies_for_approval(
+                        current_rows[request_id], live_by_track[track_id], current_fraud_ids, current_deny
+                    )
                 ]
 
                 if not safe_chunk:
@@ -1045,6 +1081,7 @@ def run_locked(run_id: str, *, mode: str, limit: int) -> int:
 
             # Re-read the mutable ticket immediately before deciding resolution.
             current_fraud_ids, current_rows, _ = read_write_edge(task_id, profile_id, narrowing)
+            current_deny = load_required_deny_list()
             should_resolve = (
                 every_scoped_request_approved(scoped_ids, current_rows)
                 and no_pending_rows_remaining(profile_id, current_rows)
@@ -1064,7 +1101,7 @@ def run_locked(run_id: str, *, mode: str, limit: int) -> int:
                 ]
                 if not should_resolve:
                     pending_lines = render_pending_lines(
-                        profile_id, current_rows, current_fraud_ids, measured_by_track
+                        profile_id, current_rows, current_fraud_ids, measured_by_track, current_deny
                     )
                     if pending_lines:
                         lines.extend(pending_lines)
@@ -1201,6 +1238,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     run_id = f"uvn-under30-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{os.getpid()}"
     os.environ["OPS_RUN_ID"] = run_id
+    os.environ["MUSO_ADMIN_IDENTITY"] = ADMIN_IDENTITY
     # Host guard first: the write surfaces below exist only on node-8, and a
     # stray run elsewhere must refuse before it touches anything.
     hostname = socket.gethostname()
