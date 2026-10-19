@@ -35,7 +35,9 @@ jobs:
     runs-on: [self-hosted, hydra]
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v5
+        timeout-minutes: 10
         with:
           # Full history: Step 4a's baseline-aware skill-drift check resolves
           # `git show <.deployed-sha>:<path>`, and that baseline can lag main by
@@ -47,6 +49,8 @@ jobs:
           fetch-depth: 0
 
       - name: Check deploy notification path
+        timeout-minutes: 5
+        continue-on-error: true
         run: |
           # Deploy notifications go through `muso slack send --bot devops`
           # (scripts/lib/slack-notify.sh) — the same path the watchdogs use,
@@ -85,6 +89,7 @@ jobs:
         id: stale_check
         env:
           HYDRA_ALLOW_STALE_DEPLOY: ${{ vars.HYDRA_ALLOW_STALE_DEPLOY }}
+        timeout-minutes: 10
         run: |
           git fetch origin main --quiet
           TIP=$(git rev-parse origin/main)
@@ -100,6 +105,7 @@ jobs:
         # A dispatch run still lets a human scope it via the `target` input.
         id: detect
         if: steps.stale_check.outputs.proceed == 'true'
+        timeout-minutes: 5
         run: |
           TARGET="${{ github.event.inputs.target || 'all' }}"
           echo "target=$TARGET" >> $GITHUB_OUTPUT
@@ -116,6 +122,7 @@ jobs:
           # back a mutation THIS run started (never one a concurrent manual
           # deploy owns).
           HYDRA_DEPLOY_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+        timeout-minutes: 40
         run: |
           echo "::group::Running deploy script"
           TARGET="${{ steps.detect.outputs.target }}"
@@ -129,6 +136,12 @@ jobs:
 
       - name: Post to Slack — success
         if: success() && steps.stale_check.outputs.proceed == 'true'
+        timeout-minutes: 5
+        # Non-blocking by design: the shell `timeout` below bounds a hung
+        # notifier INSIDE the step so the `||` stays reachable and the step
+        # exits 0; continue-on-error is the backstop so a step-level kill can
+        # never flip failure() and page a deploy that actually succeeded.
+        continue-on-error: true
         run: |
           COMMIT_SHA="${{ github.sha }}"
           COMMIT_MSG=$(git log -1 --pretty=format:'%s')
@@ -145,11 +158,16 @@ jobs:
             "*Commit:* \`${COMMIT_SHA:0:7}\` — ${COMMIT_MSG}" \
             "*Author:* ${AUTHOR}" \
             "*Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')")
-          bash scripts/lib/deploy-notify.sh success "$MSG" \
+          timeout 240 bash scripts/lib/deploy-notify.sh success "$MSG" \
             || echo "::warning::Deploy succeeded but the Slack notification did not post."
 
       - name: Rollback on failure
+        id: rollback
         if: failure() && steps.stale_check.outputs.proceed == 'true'
+        timeout-minutes: 25
+        # continue-on-error only stops THIS step adding failure; the deploy
+        # step's failure keeps failure() true for "Page on failure" below.
+        continue-on-error: true
         run: |
           # deploy.sh Step 0 (drift check) and Step 4a (pre-flight) are
           # READ-ONLY and halt with exit 1 BEFORE any rsync when the server
@@ -170,15 +188,27 @@ jobs:
             || { echo "::error::deploy-rollback-gate.sh crashed (rc=$?); treating as no rollback"; DECISION="rollback=false"; }
           if [ "$DECISION" = "rollback=true" ]; then
             echo "::error::Deployment failed, initiating rollback"
-            ACTION="Rollback initiated"
+            # Written BEFORE rollback.sh: if it hangs and the step is killed,
+            # "Page on failure" can still report what was attempted.
+            echo "action=Rollback initiated" >> "$GITHUB_OUTPUT"
             if [ -f scripts/rollback.sh ]; then
               chmod +x scripts/rollback.sh
               ./scripts/rollback.sh || echo "Rollback script failed"
             fi
           else
             echo "::error::no rollback: deploy.sh halted before mutating node-8 (pre-flight/drift/pin), or the mutation marker belongs to another deploy (see the gate's stderr above)"
-            ACTION="No rollback (halted before mutation, or marker owned by another deploy)"
+            echo "action=No rollback (halted before mutation, or marker owned by another deploy)" >> "$GITHUB_OUTPUT"
           fi
+
+      # Its own step so the 25m rollback cap cannot kill the page: a hung
+      # rollback.sh leaves prod in an uncertain state and MUST still page.
+      - name: Page on failure
+        if: failure() && steps.stale_check.outputs.proceed == 'true'
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |
+          ACTION="${{ steps.rollback.outputs.action }}"
+          ACTION="${ACTION:-Rollback status UNKNOWN - the rollback handler timed out or was killed before it reported}"
           # deploy-notify.sh prepends REAL <@UID> mentions for Nick and Aaron
           # and RETURNS the true delivery status. The former payload hardcoded
           # the literal "<@aaron>" (Slack renders that as plain text and pings
@@ -193,5 +223,31 @@ jobs:
             "*Author:* ${{ github.actor }}" \
             "*Action:* $ACTION" \
             "*Run:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
-          bash scripts/lib/deploy-notify.sh critical "$MSG" \
+          timeout 240 bash scripts/lib/deploy-notify.sh critical "$MSG" \
             || echo "::error::Deploy FAILED and the Slack page did NOT post — nobody was notified. Check MUSO_SLACK_BOT_TOKEN_DEVOPS in /etc/openclaw/main.env and the devops bot's channel membership."
+
+      # A stalled `git fetch` in "Refuse stale deploys" hits its 10m cap and
+      # fails BEFORE writing `proceed`, so every proceed-gated step above is
+      # skipped. Nothing mutated node-8 (no rollback needed) but an unattended
+      # deploy still died. Keyed on "nothing was deployed" (proceed != 'true'),
+      # not on one step's outcome: a Checkout that hits its 10m cap skips
+      # stale_check entirely. A deliberate stale refusal succeeds with
+      # proceed=false, so failure() is false and it pages nothing. The workspace
+      # may hold no scripts/, so the notifier falls back to the server-owned
+      # copy under /opt/hydra, which needs no checkout.
+      - name: Page on pre-deploy failure
+        if: failure() && steps.stale_check.outputs.proceed != 'true'
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |
+          set +e
+          MSG=$(printf '%s\n%s\n%s\n%s\n%s' \
+            ":rotating_light: *HYDRA Deploy FAILED before deploying* (target: ${{ github.event.inputs.target || 'all' }})" \
+            "*Commit:* \`${{ github.sha }}\`" \
+            "*Author:* ${{ github.actor }}" \
+            "*Action:* No rollback needed - the deploy failed before any change to node-8 (checkout / stale-check stage)" \
+            "*Run:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+          NOTIFY=scripts/lib/deploy-notify.sh
+          [ -r "$NOTIFY" ] || NOTIFY=/opt/hydra/scripts/lib/deploy-notify.sh
+          timeout 240 bash "$NOTIFY" critical "$MSG" \
+            || echo "::error::Deploy FAILED before deploying and the Slack page did NOT post — nobody was notified."
