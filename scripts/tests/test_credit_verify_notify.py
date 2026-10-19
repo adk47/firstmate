@@ -1779,7 +1779,7 @@ class EnableGateTests(unittest.TestCase):
         self.path = os.path.join(self.tmp, "ledger.sqlite3")
         self.proof = os.path.join(self.tmp, "proof.json")
         self.aff = os.path.join(self.tmp, "aff.json")
-        write_affiliation({str(u): {"verdict": "none", "evidence": []} for u in range(40, 60)}, path=self.aff)
+        write_affiliation({str(u): {"verdict": "none", "coverage": "full", "evidence": []} for u in range(40, 60)}, path=self.aff)
 
     def go(self, rows, *, entries=(), contacts=(), fake=None, **kw):
         decisions_db(self.path, [dec(r["id"], pid=r["profileId"], track=r["trackId"]) for r in rows])
@@ -1842,6 +1842,23 @@ class EnableGateTests(unittest.TestCase):
         self.assertEqual([p["user"]["id"] for p in fake.payloads], ["49"])
         self.assertEqual((rep.recently_asked_users, rep.recently_asked_credits), (1, 1))
         self.assertEqual(self.deferred(), {"e1"})
+
+    def test_paid_provisional_credits_get_their_own_no_threat_v1_note(self):
+        """Fable ruling 4 as amended (firstmate 073): a provisional_paid credit's note is the v1
+        copy (no date, no removal); the same user's other credits keep the windowed note."""
+        rows = [user_req("g1", 54), user_req("g2", 54)]
+        decisions_db(self.path, [dec(r["id"], pid=r["profileId"], track=r["trackId"]) for r in rows])
+        db = sqlite3.connect(self.path)
+        db.execute("UPDATE decisions SET evidence_kind = 'provisional_paid' WHERE request_id = 'g2'")
+        db.execute("UPDATE decisions SET evidence_kind = 'catalog_confirmed' WHERE request_id = 'g1'")
+        db.commit(); db.close()
+        write_proof(self.proof, [])
+        fake = Fake()
+        verify_notify.run(FakeAdmin(rows), ledger_path=self.path, mode="apply", runner=fake, wrapper="/w",
+                          proof_path=self.proof, sweep=False, since_hours=None, affiliation_path=self.aff)
+        sent = [([c["request_id"] for c in p["credits"]], "--copy" in a and a[a.index("--copy") + 1])
+                for p, a in zip(fake.payloads, [x for x in fake.argv if x[1] == "send"])]
+        self.assertEqual(sent, [(["g1"], False), (["g2"], "v1")])
 
     def test_paying_users_first_and_the_cap_counts_reminders(self):
         paying = os.path.join(self.tmp, "paying.json")

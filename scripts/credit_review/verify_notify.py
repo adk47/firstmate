@@ -743,6 +743,40 @@ def hold_recently_asked(db: sqlite3.Connection, payloads: list[dict[str, Any]], 
     return keep, held
 
 
+PROVISIONAL_KIND = "provisional_paid"
+
+
+def provisional_ids(db: sqlite3.Connection, request_ids: list[str]) -> set[str]:
+    """Credits the decider approved as a PAID PROVISIONAL approval (Fable ruling 4): their note
+    is the no-threat v1 copy (no date, no removal language) and they are never removal-due
+    (firstmate 073). Read from the decider ledger's decisions.evidence_kind."""
+    if not request_ids or "evidence_kind" not in _columns(db, "decisions"):
+        return set()
+    out: set[str] = set()
+    for i in range(0, len(request_ids), 500):
+        part = request_ids[i:i + 500]
+        q = (f"SELECT DISTINCT d.request_id FROM decisions d JOIN decision_outcomes o ON o.request_id = d.request_id "
+             f"AND o.run_id = d.run_id WHERE o.action = 'approve' AND o.outcome = 'approved' AND d.evidence_kind = ? "
+             f"AND d.request_id IN ({','.join('?' * len(part))})")
+        out |= {str(r) for (r,) in db.execute(q, (PROVISIONAL_KIND, *part))}
+    return out
+
+
+def split_provisional(payloads: list[dict[str, Any]], prov: set[str]) -> list[dict[str, Any]]:
+    """A user's provisional credits get their own v1 note (--copy v1); the rest keep the
+    windowed note. Two notes for one user: the gate's one-message-per-day cap defers the
+    second to the next run, nothing is dropped."""
+    out: list[dict[str, Any]] = []
+    for p in payloads:
+        mine = [c for c in p["credits"] if c["request_id"] in prov]
+        rest = [c for c in p["credits"] if c["request_id"] not in prov]
+        if rest:
+            out.append({**p, "credits": rest})
+        if mine:
+            out.append({**p, "credits": mine, "extra": ["--copy", "v1"]})
+    return out
+
+
 def paid_first(payloads: list[dict[str, Any]], paying: frozenset[int] | None) -> list[dict[str, Any]]:
     """Paying users' notes first (stable: oldest credit first within each group)."""
     if paying is None:
@@ -797,7 +831,7 @@ def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "
             payloads = plan(rows, report, dropped=dropped)
             payloads, waiting = hold_recently_asked(db, payloads, by_id, report, day=day)
             held += waiting
-            payloads = paid_first(payloads, paying)
+            payloads = split_provisional(paid_first(payloads, paying), provisional_ids(db, list(by_id)))
             # Over the day's cap: the credits wait for tomorrow (kept in the ledger, so a
             # credit older than the candidate window is never silently dropped).
             for p in payloads[max(budget, 0):]:

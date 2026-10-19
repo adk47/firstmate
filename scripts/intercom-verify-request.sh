@@ -110,6 +110,12 @@ readonly TESTABLE=0
 #   LIVE_WINDOWED_COPY_APPROVED  verify-live (new credits): the windowed copy, the only one sent.
 #   RETRO_COPY_APPROVED          the retro-past no-threat ask.
 readonly LIVE_WINDOWED_COPY_APPROVED=1
+#   LIVE_V1_COPY_APPROVED        verify-live, PAID PROVISIONAL approvals only (decider evidence_kind
+#                                provisional_paid): Fable's no-deadline v1 copy, no date, no removal
+#                                language, no follow-ups (Fable ruling 4 as amended, firstmate 073:
+#                                never auto-removed; day-30 Ops review list instead). Sent only when
+#                                the caller passes --copy v1 (verify_notify does, for those credits).
+readonly LIVE_V1_COPY_APPROVED=1
 readonly RETRO_COPY_APPROVED=0
 #   REMOVAL_COPY_APPROVED        the removal notice (and its one-time backfill).
 #   TAKEBACK_COPY_APPROVED       the take-back notice (credit-retro apply/notify, #1237/#1242).
@@ -129,6 +135,7 @@ readonly PROOF_TAG="credit-proof"
 readonly CAPTAIN_UID="U7RP6HKUZ"
 readonly APPROVAL_REF_LIVE="captain U7RP6HKUZ 2026-10-15 22:12Z: \"i want AI live now - we have too many credits to approve and to get supporting data for - let users know where there was a credit given and that it needs support (trust yet verify approach)\""
 readonly APPROVAL_REF_LIVE_WINDOWED="$APPROVAL_REF_LIVE; 2026-10-15 23:40Z: \"if no valid verification comes it should be removed\" (kept for new provisional approvals at 2026-10-16 00:35Z); copy = Fable copy-review-fable-2026-10-17 pack 1 (GO with edits); enable = Fable decision-verify-notify-enable-2026-10-17 (firstmate 051, 2026-10-17 23:15Z: enable Monday 2026-10-20 under its 7 conditions)"
+readonly APPROVAL_REF_LIVE_V1="$APPROVAL_REF_LIVE; paid provisional approvals: Fable credit-backlog-1019 ruling 4 as amended by firstmate 073 (2026-10-19 14:58Z: provisional approve + doc request, NO day-30 auto-removal, no removal language; captain rule 10-15: deletes must confirm removal at Spotify/Tidal or prove a different profile)"
 readonly APPROVAL_REF_TAKEBACK="captain via firstmate 012, 2026-10-16: every take-back sends the user a short, polite message saying which credit and role, why (who the public credits name, with the link), and how to dispute it by replying with a document."
 readonly APPROVAL_REF_REMOVAL="firstmate 2026-10-16 15:14Z, captain-driven: owners of credits WE removed must be told which credit and role, why, and how to dispute by replying with a document (support measured 35 owners never told). Fraud removals stay silent by captain order (firstmate 2026-10-16 15:48Z)."
 readonly APPROVAL_REF_PAST="captain U7RP6HKUZ 2026-10-15 23:35Z: \"im referring to before when nick made changes and did a trust verify flow and now we have a lotnof credits to verify with documents and give people 30 days to send something in for the ones missing documents\"; 2026-10-16 00:35Z: \"how many credits were approved without documentstion i dont want to lose users unless its obvious fraud feom tbe past\""
@@ -343,8 +350,12 @@ case "$CAMPAIGN" in
   verify-live)
     MAX_CREDITS=200; MAX_LISTED=25
     case "$COPY_ARG" in ""|v1|windowed) ;; *) refuse "--copy must be v1 or windowed (got '$COPY_ARG')." ;; esac
-    if [ "$ACTION" = "post" ]; then
-      [ -z "$COPY_ARG" ] || refuse "--copy is preview-only; a real send always uses the windowed copy."
+    if [ "$ACTION" = "post" ] && [ "$COPY_ARG" = "v1" ] && [ "$KIND" = "initial" ]; then
+      # Paid provisional approvals (firstmate 073): the no-threat v1 note, never removal-due.
+      [ "$LIVE_V1_COPY_APPROVED" = "1" ] || refuse "the verify-live v1 copy is not approved for sending (LIVE_V1_COPY_APPROVED=0)."
+      COPY="v1"
+    elif [ "$ACTION" = "post" ]; then
+      [ -z "$COPY_ARG" ] || refuse "--copy windowed is implied for a real send; --copy v1 is for a paid provisional approval's initial note only."
       COPY="windowed"
     elif [ "$KIND" != "initial" ]; then
       [ "$COPY_ARG" != "v1" ] || refuse "the v1 copy names no date and has no follow-ups; preview follow-ups with --copy windowed."
@@ -352,7 +363,7 @@ case "$CAMPAIGN" in
     else
       COPY="${COPY_ARG:-windowed}"
     fi
-    if [ "$COPY" = "windowed" ]; then APPROVAL_REF="$APPROVAL_REF_LIVE_WINDOWED"; else APPROVAL_REF="$APPROVAL_REF_LIVE"; fi
+    if [ "$COPY" = "windowed" ]; then APPROVAL_REF="$APPROVAL_REF_LIVE_WINDOWED"; else APPROVAL_REF="$APPROVAL_REF_LIVE_V1"; fi
     ;;
   retro-past)
     MAX_CREDITS=1000; MAX_LISTED=100; COPY="past"; APPROVAL_REF="$APPROVAL_REF_PAST"

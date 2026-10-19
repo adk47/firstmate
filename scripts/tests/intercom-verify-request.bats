@@ -499,10 +499,28 @@ rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
   [[ "$output" == *"retro-past copy is not approved for sending yet"* ]]
   run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --validate
   [[ "$output" == "VALID verify-live initial email credits=1 copy=windowed" ]]
-  run -1 send --copy v1
-  [[ "$output" == *"--copy is preview-only"* ]]
+  run -1 send --copy windowed
+  [[ "$output" == *"--copy windowed is implied"* ]]
   [ "$(calls)" -eq 0 ]
   [ ! -f "$INTERCOM_VERIFY_TEST_LEDGER" ] || [ -z "$(sql 'select * from verify_messages')" ]
+}
+
+# Fable ruling 4 as amended (firstmate 073): a PAID PROVISIONAL approval gets the no-threat v1
+# note: no date, no removal language, no follow-ups, and its ledger row is never removal-due.
+@test "paid provisional approval: --copy v1 sends the no-threat note, never removal-due, no follow-ups" {
+  grep -qx 'readonly LIVE_V1_COPY_APPROVED=1' "$REAL_SCRIPT"
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  run -0 send --copy v1
+  [[ "$output" == "POSTED email message=1001 credits=1"* ]]
+  body="$(msg .body | plain)"
+  [[ "$body" == *"Nothing changes while we check"* ]]
+  [[ "$body" != *"removed"* ]]
+  [[ "$body" != *"30 days"* ]]
+  [ "$(sql "select coalesce(removal_day,'NULL')||'|'||coalesce(due_day,'NULL') from verify_messages where message_id='1001'")" = "NULL|NULL" ]
+  [[ "$(sql "select approval_ref from verify_messages where message_id='1001'")" == *"firstmate 073"* ]]
+  [ "$(sql "select count(*) from verify_messages where message_id='1001' and kind='initial'")" = "1" ]
+  run -1 send --copy v1 --kind reminder-14 --parent-message-id 1001
+  [ "$(posts)" -eq 1 ]
 }
 
 @test "PAST credits: the no-threat ask has no deadline and no removal language" {
