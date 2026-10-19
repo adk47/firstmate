@@ -658,6 +658,25 @@ class PaidUsersFirst(Base):
         self.assertEqual(asked, [uuid_of(211)])
         self.assertTrue(self.decisions()[uuid_of(210)]["reason"].startswith(decide.ASK_CAP_DEFER))
 
+    def test_unconfirmed_provisional_approvals_go_to_the_ops_review_list_never_removal(self):
+        """Ruling 4 as amended (firstmate 073): no day-30 auto-removal. After 30 days without
+        a document the row is LISTED for Ops review (still live); a documented one is not."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        self.go([req(uuid_of(220), uid=900, track="t3"), req(uuid_of(221), uid=900, track="t3")], {}, judge=judge)
+        d = self.decisions()[uuid_of(220)]
+        self.assertIn("never auto-removed", d["reason"])
+        self.assertNotIn("removed on day", d["reason"])
+        self.assertEqual(decide.provisional_review(self.db, None, now=T.NOW), [], "not before day 30")
+        later = T.NOW + decide.timedelta(days=31)
+        listed = decide.provisional_review(self.db, None, now=later)
+        self.assertEqual(sorted(r["request_id"] for r in listed), [uuid_of(220), uuid_of(221)])
+        self.assertTrue(all(r["flag"] == "provisional_unconfirmed_30d" for r in listed))
+        self.proof([{"user_id": 900, "request_id": uuid_of(221), "kind": "pending_doc", "source": "intercom", "ref": "c"}])
+        proof, _ = decide.proof_on_file(now=T.NOW)
+        self.assertEqual([r["request_id"] for r in decide.provisional_review(self.db, proof, now=later)], [],
+                         "a document on file for the user covers both")
+
     def test_paid_provisional_approvals_are_capped_per_user_per_day(self):
         self.paying("2026-10-11T02:30:00Z", ids=(900,))
         judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))

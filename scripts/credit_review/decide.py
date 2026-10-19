@@ -1177,7 +1177,10 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     # web check found nothing against the claim (NOT_FOUND: no contradiction, no red flag,
     # no validator conflict, no editorial-role rule; each of those returned before the web
     # check) is provisionally approved instead of asked. The user gets the verify note
-    # (credit live + a document request, removed on day 30 without one). Capped at
+    # (credit live + a no-threat document request). Amendment (firstmate 073, captain rule
+    # 10-15: deletes must confirm removal at Spotify/Tidal or prove a different profile; no new
+    # lowering classes): NO day-30 auto-removal; unconfirmed after 30 days the row goes to the
+    # Ops review list (provisional_review), still live. Capped at
     # PROVISIONAL_MAX_PER_USER_PER_DAY per user per UTC day. Free users stay on the ask path.
     req_by_id = {str(r.get("id")): r for r in batch}
     prov_today = provisional_today_by_user(db, now.strftime("%Y-%m-%dT00:00:00Z"))
@@ -1190,9 +1193,9 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
                  "today; next UTC day")
             continue
         d.evidence_kind = PROVISIONAL_KIND
-        _set(d, "approve", "trust yet verify (Fable ruling 4): paid user, small/medium track, nothing contradicts "
-             "the claim and no red flag; provisional approval with a document request, removed on day 30 "
-             "without a valid document")
+        _set(d, "approve", "trust yet verify (Fable ruling 4, amended firstmate 073): paid user, small/medium track, "
+             "nothing contradicts the claim and no red flag; provisional approval with a no-threat document "
+             "request; never auto-removed: unconfirmed after 30 days it goes to the Ops review list (still live)")
         if d.user_id is not None:
             prov_today[d.user_id] = prov_today.get(d.user_id, 0) + 1
 
@@ -1376,3 +1379,34 @@ def revert(db: sqlite3.Connection, run_id: str, *, apply: bool, writer: Writer |
 
 def as_json(d: Decision) -> dict[str, Any]:
     return asdict(d)
+
+
+PROVISIONAL_REVIEW_DAYS = 30
+
+
+def provisional_review(db: sqlite3.Connection, proof: "ProofOnFile | None", *, now: datetime | None = None,
+                       days: int = PROVISIONAL_REVIEW_DAYS) -> list[dict[str, Any]]:
+    """The Ops review list (Fable ruling 4 as amended, firstmate 073): paid provisional
+    approvals the server confirmed at least `days` ago with no document on file for the
+    credit or its user. Read-only; the credits stay live. Removal, if ever, follows the
+    normal proof rule with notice and reason, never this list. Proof status unknown =
+    everyone is listed (a reviewer decides, nothing is removed)."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = utc(now - timedelta(days=days))
+    rows = db.execute(
+        "SELECT d.request_id, d.user_id, d.profile_id, d.track_id, d.track_title, d.claimed_roles, o.at "
+        "FROM decision_outcomes o JOIN decisions d ON d.request_id = o.request_id AND d.run_id = o.run_id "
+        "WHERE o.action = 'approve' AND o.outcome = 'approved' AND d.evidence_kind = ? AND o.at <= ? "
+        "ORDER BY o.at", (PROVISIONAL_KIND, cutoff)).fetchall()
+    out = []
+    for rid, uid, pid, tid, title, roles, at in rows:
+        class _D:
+            pass
+        probe = _D(); probe.user_id = uid; probe.request_id = str(rid)
+        if proof is not None and proof.covers(probe):
+            continue
+        out.append({"request_id": rid, "user_id": uid, "profile_id": pid, "track_id": tid, "track_title": title,
+                    "claimed_roles": roles, "approved_at": at, "flag": "provisional_unconfirmed_30d",
+                    "action": "Ops review: still live; any removal follows the normal proof rule with notice + reason"})
+    return out
+
