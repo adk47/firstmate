@@ -744,7 +744,7 @@ def hold_recently_asked(db: sqlite3.Connection, payloads: list[dict[str, Any]], 
     keep: list[dict[str, Any]] = []
     held: list[tuple[str, str, str]] = []
     for p in payloads:
-        if verify_ledger.asked_within(db, user_key=p["user"]["email"], day=day):
+        if verify_ledger.asked_within(db, user_key=p["user"]["email"], day=day, user_id=str(p["user"].get("id") or "")):
             report.recently_asked_users += 1
             report.recently_asked_credits += len(p["credits"])
             held += [_ref(rows_by_id[c["request_id"]]) for c in p["credits"] if c["request_id"] in rows_by_id]

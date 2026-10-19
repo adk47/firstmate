@@ -499,7 +499,7 @@ fi
 CONTACT_ID="" DUE_DAY="" REMOVAL_DAY=""
 if [ "$ACTION" = "post" ]; then
   if [ "$KIND" = "initial" ]; then
-    peek="$(ledger pending --campaign "$CAMPAIGN" --user-key "$EMAIL" --day "$DAY" --request-ids "$(ids_csv "$INPUT")")" \
+    peek="$(ledger pending --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" --request-ids "$(ids_csv "$INPUT")")" \
       || die "the ledger read failed; refusing to send without the idempotency record."
     pending="$(printf '%s' "$peek" | "$JQ_BIN" -c '.request_ids')"
     if [ "$pending" = "[]" ]; then
@@ -862,7 +862,7 @@ case "$ACTION" in
     # takeback-notice: credit-retro validates every notice BEFORE it executes the removal, so
     # --validate says whether today's send would be deferred by the one-message-per-day cap.
     if [ "$CAMPAIGN" = "takeback-notice" ] && [ -r "$LEDGER_HELPER" ] && [ -f "$LEDGER" ]; then
-      vpeek="$(ledger pending --campaign "$CAMPAIGN" --user-key "$EMAIL" --day "$DAY" --request-ids "$ALL_IDS")" \
+      vpeek="$(ledger pending --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" --request-ids "$ALL_IDS")" \
         || die "the ledger read failed."
       if [ "$(printf '%s' "$vpeek" | "$JQ_BIN" -r '.daily_cap')" = "true" ]; then
         printf 'DEFERRED daily-cap credits=%s (this user already had a message on %s UTC)\n' "$N" "$DAY"; exit 3
@@ -967,7 +967,7 @@ if [ "$KIND" = "initial" ]; then
   REFS_FILE="$(mktemp)"
   trap 'rm -f "$REFS_FILE"' EXIT
   printf '%s' "$INPUT" | "$JQ_BIN" -c '[.credits[] | {request_id, profile_id, track_id}]' > "$REFS_FILE"
-  CLAIM="$(ledger claim --campaign "$CAMPAIGN" --user-key "$EMAIL" --day "$DAY" --request-ids "$ALL_IDS" \
+  CLAIM="$(ledger claim --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" --request-ids "$ALL_IDS" \
     --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF" \
     --contact-id "$CONTACT_ID" --refs-file "$REFS_FILE" ${WINDOWED_FLAG:+"$WINDOWED_FLAG"})" \
     || die "the ledger claim failed; refusing to send without the idempotency record."

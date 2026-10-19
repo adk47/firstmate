@@ -361,7 +361,7 @@ sent|1001" ]
 @test "the per-day cap is per user: another account the same day is not deferred" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -0 send
-  jq '.user.email = "someone@else.com" | .credits[0].request_id = "r9"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json"
+  jq '.user.email = "someone@else.com" | .user.id = "43" | .credits[0].request_id = "r9"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json"
   STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"someone@else.com"}]}' \
     run -0 "$SCRIPT" send --credits-file "$TEST_TMPDIR/c2.json" --approved-by U7RP6HKUZ
   [ "$(posts)" -eq 2 ]
@@ -661,7 +661,7 @@ PY
     --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == *"no follow-ups"* ]]
   # Another user sent proof on a new-credit note: they are never asked about past credits.
-  jq '.user.email = "bob@example.com" | .credits[0].request_id = "n1"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/b.json"
+  jq '.user.email = "bob@example.com" | .user.id = "44" | .credits[0].request_id = "n1"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/b.json"
   STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com"}]}' \
     INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$GATE" send --credits-file "$TEST_TMPDIR/b.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1002 credits=1" ]]
