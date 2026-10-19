@@ -1417,20 +1417,39 @@ def provisional_review(db: sqlite3.Connection, proof: "ProofOnFile | None", *, n
     everyone is listed (a reviewer decides, nothing is removed)."""
     now = now or datetime.now(timezone.utc)
     cutoff = utc(now - timedelta(days=days))
-    rows = db.execute(
+    rows = [(*r, "provisional_unconfirmed_30d") for r in db.execute(
         "SELECT d.request_id, d.user_id, d.profile_id, d.track_id, d.track_title, d.claimed_roles, o.at "
         "FROM decision_outcomes o JOIN decisions d ON d.request_id = o.request_id AND d.run_id = o.run_id "
         "WHERE o.action = 'approve' AND o.outcome = 'approved' AND d.evidence_kind = ? AND o.at <= ? "
-        "ORDER BY o.at", (PROVISIONAL_KIND, cutoff)).fetchall()
+        "ORDER BY o.at", (PROVISIONAL_KIND, cutoff))]
+    # A user's other decider approvals that rode in that provisional credit's no-deadline v1
+    # note (one note per user, #1257) have no removal date either: listed the same way.
+    seen = {str(r[0]) for r in rows}
+    riders: set[str] = set()
+    try:
+        for (ids,) in db.execute("SELECT request_ids_json FROM verify_messages WHERE campaign = 'verify-live' "
+                                 "AND kind = 'initial' AND status = 'sent' AND removal_day IS NULL AND created_at <= ?",
+                                 (cutoff,)):
+            riders |= {str(x) for x in json.loads(ids or "[]")} - seen
+    except sqlite3.OperationalError:
+        riders = set()   # no verify ledger in this database: no v1 notes to read
+    for rid in sorted(riders):
+        r = db.execute(
+            "SELECT d.request_id, d.user_id, d.profile_id, d.track_id, d.track_title, d.claimed_roles, o.at "
+            "FROM decision_outcomes o JOIN decisions d ON d.request_id = o.request_id AND d.run_id = o.run_id "
+            "WHERE o.action = 'approve' AND o.outcome = 'approved' AND d.request_id = ? ORDER BY o.at LIMIT 1",
+            (rid,)).fetchone()
+        if r:
+            rows.append((*r, "v1_note_unconfirmed_30d"))
     out = []
-    for rid, uid, pid, tid, title, roles, at in rows:
+    for rid, uid, pid, tid, title, roles, at, flag in rows:
         class _D:
             pass
         probe = _D(); probe.user_id = uid; probe.request_id = str(rid)
         if proof is not None and proof.covers(probe):
             continue
         out.append({"request_id": rid, "user_id": uid, "profile_id": pid, "track_id": tid, "track_title": title,
-                    "claimed_roles": roles, "approved_at": at, "flag": "provisional_unconfirmed_30d",
+                    "claimed_roles": roles, "approved_at": at, "flag": flag,
                     "action": "Ops review: still live; any removal follows the normal proof rule with notice + reason"})
     return out
 

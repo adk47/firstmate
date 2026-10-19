@@ -672,6 +672,25 @@ class PaidUsersFirst(Base):
         listed = decide.provisional_review(self.db, None, now=later)
         self.assertEqual(sorted(r["request_id"] for r in listed), [uuid_of(220), uuid_of(221)])
         self.assertTrue(all(r["flag"] == "provisional_unconfirmed_30d" for r in listed))
+        # A user's other decider approval that rode in the same no-deadline v1 note (#1257, one
+        # note per user) is listed too: it has no removal date either.
+        from credit_review import verify_ledger
+        self.db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, big_track, decision, reason, "
+                        "evidence_kind, mode) VALUES ('run-y', ?, ?, 900, 0, 'approve', 't', 'catalog_confirmed', 'apply')",
+                        (decide.utc(T.NOW), uuid_of(222)))
+        self.db.execute("INSERT INTO decision_outcomes (run_id, at, request_id, action, outcome) "
+                        "VALUES ('run-y', ?, ?, 'approve', 'approved')", (decide.utc(T.NOW), uuid_of(222)))
+        self.db.executescript(verify_ledger.SCHEMA)
+        self.db.row_factory = sqlite3.Row
+        c = verify_ledger.claim(self.db, user_key="u900@example.com", day="2026-10-11",
+                                request_ids=[uuid_of(220), uuid_of(222)], message_type="email",
+                                approved_by="U7RP6HKUZ", approval_ref="ref", now=T.NOW)
+        verify_ledger.finalize(self.db, message_row=c["message_row"], status="sent", message_id="1")
+        self.db.execute("UPDATE verify_messages SET created_at = ?", (decide.utc(T.NOW),))
+        listed = decide.provisional_review(self.db, None, now=later)
+        self.assertEqual(sorted((r["request_id"], r["flag"]) for r in listed),
+                         sorted([(uuid_of(220), "provisional_unconfirmed_30d"), (uuid_of(221), "provisional_unconfirmed_30d"),
+                                 (uuid_of(222), "v1_note_unconfirmed_30d")]))
         self.proof([{"user_id": 900, "request_id": uuid_of(221), "kind": "pending_doc", "source": "intercom", "ref": "c"}])
         proof, _ = decide.proof_on_file(now=T.NOW)
         self.assertEqual([r["request_id"] for r in decide.provisional_review(self.db, proof, now=later)], [],
