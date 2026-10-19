@@ -9,6 +9,7 @@ Run:
 
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import json
 import os
 import shutil
@@ -35,7 +36,8 @@ def proof_doc(entries=(), generated_at=None, age_h=0.0):
     consistent with entries (the shape the exporter writes)."""
     gen = generated_at or (datetime.now(timezone.utc) - timedelta(hours=age_h)).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {"generated_at": gen,
-            "sources": [{"name": n, "generated_at": gen, "count": 0} for n in ("core", "cs-systemic intercom+gmail")],
+            "sources": [{"name": "core", "generated_at": gen, "count": 0}]
+            + [{"name": n, "generated_at": gen, "stale": False, "count": 0} for n in ("cs-intercom", "cs-gmail")],
             "users": len({str(e["user_id"]) for e in entries}), "entries": list(entries)}
 
 
@@ -990,7 +992,7 @@ class WaveTests(unittest.TestCase):
         d["sources"][0]["generated_at"] = (datetime.now(timezone.utc) + timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
         Path(future_part).write_text(json.dumps(d))
         for path, why in ((os.path.join(self.tmp, "absent.json"), "missing"), (stale, "3.5h old"),
-                          (future, "in the future"), (future_part, "part 'core' has no fresh generated_at")):
+                          (future, "in the future"), (future_part, "part 'core' is dated 24.0h in the future")):
             fake = Fake()
             rep = verify_notify.run_wave(FakeAdmin([req("r1")]), wave_path=self.wave, ledger_path=self.path,
                                          mode="apply", pace_seconds=0, runner=fake, wrapper="/w", proof_path=path)
@@ -1006,15 +1008,17 @@ class WaveTests(unittest.TestCase):
         rep = verify_notify.run_wave(FakeAdmin([req("r1")]), wave_path=self.wave, ledger_path=self.path,
                                      mode="apply", pace_seconds=0, runner=Fake(), wrapper="/w", proof_path=part)
         self.assertIn("stale or missing part(s): gmail", rep.render("apply"))
-        # The LIVE export's shape (node-8, 2026-10-17): part ids "core" and "cs-systemic
-        # intercom+gmail", extra fields (detail, age_hours), entry sources "intercom" /
-        # "core.verifications.netverify". It is accepted; the same file with the part renamed
-        # (e.g. to "intercom") is UNKNOWN and sends nothing.
+        # The LIVE export's shape (cs lane, firstmate 032): parts "core" (no stale key: its
+        # generated_at is its freshness), "cs-intercom" and "cs-gmail", extra fields (detail,
+        # coverage), entry sources "intercom" / "core.verifications.netverify". It is
+        # accepted; the same file with the Intercom part renamed (e.g. to "intercom") is
+        # UNKNOWN and sends nothing.
         live = {"generated_at": gen,
                 "sources": [{"name": "core", "generated_at": gen, "count": 2,
                              "detail": {"verifications": 1, "admin_approvals": 1}},
-                            {"name": "cs-systemic intercom+gmail", "generated_at": gen, "age_hours": 0.8,
-                             "stale": False, "count": 1}],
+                            {"name": "cs-intercom", "generated_at": gen, "stale": False, "count": 1,
+                             "coverage": "Intercom conversations 2021-01 onward"},
+                            {"name": "cs-gmail", "generated_at": gen, "stale": False, "count": 0}],
                 "users": 2,
                 "entries": [{"user_id": 900, "request_id": None, "kind": "pending_doc", "source": "intercom",
                              "ref": "c1"},
@@ -1029,7 +1033,30 @@ class WaveTests(unittest.TestCase):
         rep = verify_notify.run_wave(FakeAdmin([req("r1")]), wave_path=self.wave, ledger_path=self.path,
                                      mode="apply", pace_seconds=0, runner=fake, wrapper="/w", proof_path=part)
         self.assertEqual(fake.argv, [])
-        self.assertIn("lacks required part(s): cs-systemic intercom+gmail", rep.render("apply"))
+        self.assertIn("part 'cs-intercom' is missing", rep.render("apply"))
+        # The legacy merged label is read as the Intercom part only: it never vouches for Gmail.
+        legacy = json.loads(json.dumps(live))
+        legacy["sources"] = [legacy["sources"][0], {**legacy["sources"][1], "name": "cs-systemic intercom+gmail"}]
+        Path(part).write_text(json.dumps(legacy))
+        with self.assertRaisesRegex(verify_notify.ProofFileError, "part 'cs-gmail' is missing"):
+            verify_notify.load_proof_on_file(part)
+        legacy["sources"].append(live["sources"][2])
+        Path(part).write_text(json.dumps(legacy))
+        self.assertEqual(sorted(verify_notify.load_proof_on_file(part)), ["900", "901"])
+        # Only that exact legacy label: any other cs-systemic* name is not the Intercom part.
+        for name in ("cs-systemic", "cs-systemic gmail", "cs-systemic intercom+gmail v2"):
+            other = json.loads(json.dumps(live))
+            other["sources"][1]["name"] = name
+            Path(part).write_text(json.dumps(other))
+            with self.assertRaisesRegex(verify_notify.ProofFileError, "part 'cs-intercom' is missing"):
+                verify_notify.load_proof_on_file(part)
+        # Any truthy stale/missing flag makes a part unusable, not only the boolean true.
+        for flag in ({"stale": "true"}, {"stale": 1}, {"missing": "yes"}):
+            flagged = json.loads(json.dumps(live))
+            flagged["sources"][1].update(flag)
+            Path(part).write_text(json.dumps(flagged))
+            with self.assertRaisesRegex(verify_notify.ProofFileError, "part 'cs-intercom' is marked"):
+                verify_notify.load_proof_on_file(part)
         # F1: a half-written export (header only: no sources, or an empty list, or a required
         # part absent, or users not matching entries) is never authoritative.
         half = [{"generated_at": gen, "entries": []},
@@ -1053,6 +1080,35 @@ class WaveTests(unittest.TestCase):
         rep = verify_notify.run(FakeAdmin([req("r1")]), ledger_path=self.path, mode="apply", runner=fake, wrapper="/w",
                                 proof_path=os.path.join(self.tmp, "absent.json"))
         self.assertEqual((fake.argv, rep.failed), ([], True))
+
+    def test_gmail_part_unusable_asks_nobody(self):
+        """cs-gmail missing, stale or old: anyone may have emailed a document to support@
+        after any snapshot of who wrote in, so the list is UNKNOWN for everyone: zero asks,
+        non-zero exit, in both campaigns. A contact list in the export does not narrow it."""
+        decisions_db(self.path, [dec("r1"), dec("r2", track="t2")])
+        wave_file(self.wave, [("HOLD", "r1", "42", PID, "t1", "Mixing", 10, 0, "2026-09-02")])
+        other = req("r2", track="t2", email="sam@example.com", name="Sam Roe")
+        other["user"]["id"] = "43"
+        gen = _ago(0)
+        proof = os.path.join(self.tmp, "proof.json")
+        for gmail in ([], [{"name": "cs-gmail", "generated_at": gen, "stale": True}],
+                      [{"name": "cs-gmail", "generated_at": _ago(5), "stale": False}]):
+            d = proof_doc(generated_at=gen)
+            d["sources"] = d["sources"][:2] + gmail
+            Path(proof).write_text(json.dumps({**d, "gmail_contacts_90d": {
+                "generated_at": gen, "source": "gmail support@ inbox, 90 days", "user_ids": [42]}}))
+            for mode in ("dry-run", "apply"):
+                fake = Fake()
+                rep = verify_notify.run(FakeAdmin([req("r1"), other]), ledger_path=self.path,
+                                        mode=mode, runner=fake, wrapper="/w", proof_path=proof, sweep=False)
+                self.assertEqual((fake.argv, rep.failed), ([], True), gmail)
+                self.assertIn("part 'cs-gmail'", rep.render(mode))
+                fake = Fake()
+                rep = verify_notify.run_wave(FakeAdmin([req("r1")]), wave_path=self.wave, ledger_path=self.path,
+                                             mode=mode, pace_seconds=0, runner=fake, wrapper="/w", proof_path=proof)
+                self.assertEqual((fake.argv, rep.failed), ([], True), gmail)
+            with self.assertRaisesRegex(verify_notify.ProofFileError, "part 'cs-gmail'"):
+                verify_notify.load_proof_on_file(proof)
 
     def test_new_credits_documents_rule_is_per_credit(self):
         decisions_db(self.path, [dec("r1"), dec("r2", track="t2"), dec("r3", track="t3")])
@@ -1166,6 +1222,27 @@ class WaveTests(unittest.TestCase):
         write_proof(proof, [{"user_id": 42, "request_id": "r1", "kind": "pending_doc", "source": "core", "ref": "x"}])
         rows, held = verify_notify.removal_due(db, admin, verify_notify.load_proof_on_file(proof), day="2026-11-02")
         self.assertEqual(([r["request_id"] for r in rows], held), (["r3"], []))
+
+    def test_a_whole_user_document_holds_every_credit_past_its_removal_day(self):
+        """firstmate 042: a document emailed to support@ is a user-level entry (no
+        request id); that user never hits a per-credit removal day."""
+        db = verify_ledger.connect(self.path)
+        self.addCleanup(db.close)
+        c = verify_ledger.claim(db, user_key="jane@example.com", day="2026-10-01", request_ids=["r1", "r2"],
+                                message_type="email", approved_by=CAPTAIN_UID, approval_ref="ref", windowed=True,
+                                refs=[{"request_id": f"r{i}", "profile_id": PID, "track_id": f"t{i}"} for i in (1, 2)])
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="500")
+        admin = FakeAdmin([req("r1", track="t1"), req("r2", track="t2")])
+        proof = os.path.join(self.tmp, "proof.json")
+        write_proof(proof, [{"user_id": 42, "request_id": None, "kind": "pending_doc", "source": "gmail", "ref": "g"}])
+        rows, held = verify_notify.removal_due(db, admin, verify_notify.load_proof_on_file(proof), day="2026-11-02")
+        self.assertEqual(rows, [])
+        self.assertEqual(sorted(r["request_id"] for r in held), ["r1", "r2"])
+        self.assertTrue(all(r["reason"] == verify_ledger.HELD_AWAITING_REVIEW for r in held))
+        # A whole-user identity check is no reason to hold (only a document under review is).
+        write_proof(proof, [{"user_id": 42, "request_id": None, "kind": "approved_doc", "source": "core", "ref": "n"}])
+        rows, held = verify_notify.removal_due(db, admin, verify_notify.load_proof_on_file(proof), day="2026-11-02")
+        self.assertEqual(sorted(r["request_id"] for r in rows), ["r1", "r2"])
 
     def test_the_removal_export_lists_credits_held_by_a_user_reply_separately(self):
         db = verify_ledger.connect(self.path)
@@ -1597,6 +1674,21 @@ class WiringTests(unittest.TestCase):
         log = Path(self.env["STUB_LOG"]).read_text()
         self.assertEqual(sum(1 for ln in log.splitlines() if ln.endswith("/messages")), 1)
         self.assertNotIn("conversations/search", log, "a removal notice is not an ask: no document check")
+
+class TestLogIsolation(unittest.TestCase):
+    def test_tests_and_their_subprocesses_never_log_to_the_production_run_log(self):
+        """firstmate 056: PR Validation runs on node-8; a halt line from a test must not reach
+        /var/lib/hydra/credit-review/run.log."""
+        from credit_review import runner
+        self.assertEqual(runner.LOG_PATH, credit_test_env.LOG_PATH)
+        self.assertFalse(os.path.realpath(runner.LOG_PATH).startswith("/var/lib/"))
+        res = subprocess.run([sys.executable, str(ROOT / "scripts" / "credit-review.py"), "verify-notify",
+                              "--removal-due", os.path.join(credit_test_env._dir, "due.jsonl"),
+                              "--proof-on-file", os.path.join(credit_test_env._dir, "absent.json")],
+                             capture_output=True, text=True, timeout=60, check=False)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("absent.json is missing", Path(credit_test_env.LOG_PATH).read_text())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

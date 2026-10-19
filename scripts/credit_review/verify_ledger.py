@@ -158,6 +158,10 @@ CREATE INDEX IF NOT EXISTS verify_messages_msg ON verify_messages(message_id);
 CREATE INDEX IF NOT EXISTS verify_messages_parent ON verify_messages(parent_row, kind);
 """
 TABLES = ("verify_messages", "verify_proof_reviews", "verify_requests")
+# The verify_messages columns credit-retro's take-back / wave reader depends on
+# (credit_retro.waves.already_engaged). Pinned here, next to the writer's schema, and
+# checked against it by scripts/tests/test_verify_ledger_contract.py.
+READER_COLUMNS = frozenset({"request_ids_json", "proof_tagged_at", "user_key", "campaign", "status", "kind"})
 
 
 def utcnow() -> datetime:
@@ -839,6 +843,8 @@ def _main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="verify-request ledger ops (JSON on stdout)")
     p.add_argument("--db", default=DEFAULT_PATH)
     sub = p.add_subparsers(dest="op", required=True)
+    sub.add_parser("migrate", help="create or upgrade the verify tables in this ledger (idempotent; "
+                                   "touches no other table); scripts/deploy.sh runs it every deploy")
     for name in ("claim", "refuse"):
         s = sub.add_parser(name)
         s.add_argument("--campaign", default="verify-live", choices=CAMPAIGNS)
@@ -894,7 +900,11 @@ def _main(argv: list[str] | None = None) -> int:
     c.add_argument("--conversation-id", required=True)
     a = p.parse_args(argv)
     db = connect(a.db)
-    if a.op in ("claim", "refuse"):
+    if a.op == "migrate":
+        # connect() already created/upgraded every verify table; report what is there now.
+        out = {"result": "ok", "tables": {t: sorted(str(r[1]) for r in db.execute(f"PRAGMA table_info({t})"))
+                                          for t in TABLES}}
+    elif a.op in ("claim", "refuse"):
         refs = json.loads(Path(a.refs_file).read_text()) if a.refs_file else None
         kw = dict(user_key=a.user_key, day=a.day, request_ids=_ids(a.request_ids), message_type=a.message_type,
                   approved_by=a.approved_by, approval_ref=a.approval_ref, campaign=a.campaign)

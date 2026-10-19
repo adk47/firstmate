@@ -71,11 +71,11 @@ const Parameters = Type.Object({
   ),
   apply: Type.Optional(Type.Boolean({
     default: false,
-    description: "false = dry-run preview (default), true = real apply. Always call once without apply first, show the customer what would happen, get explicit confirmation, then call again with apply=true.",
+    description: "false = dry-run preview (default). Always leave this false: apply=true is refused for agent tokens (core-backend#10310), so a removal is never applied from here. Show the preview, then hand off.",
   })),
   intercomConvId: Type.Optional(Type.String({
     minLength: 1,
-    description: "Intercom conversation ID. REQUIRED when apply=true (cross-checks the customer's email against Intercom's stored author.email — closes the message-text injection vector). Strongly recommended on dry-run too: the same cross-check runs whenever conv-id is present.",
+    description: "Intercom conversation ID. Cross-checks the customer's email against Intercom's stored author.email — closes the message-text injection vector). Strongly recommended on dry-run too: the same cross-check runs whenever conv-id is present.",
   })),
 });
 
@@ -106,7 +106,7 @@ export function createRemoveCreditsTool(deps: ToolDeps): AgentTool<typeof Parame
     description:
       "Remove one or more mis-attributed credits from a profile the customer owns. " +
       "Refuses if the requester's email doesn't match the profile's claimed owner. " +
-      "Always call with apply=false first to preview, get explicit customer confirmation, then call again with apply=true. " +
+      "Agent use is preview-only: call with apply=false to resolve the exact tracks and roles. apply=true is refused for agent tokens (core-backend#10310); owners remove credits in the app, or staff review a packet. " +
       "Caps: 50 tracks per call, 100 per customer per day (enforced inside the wrapper). " +
       "Tool-level rate limit: 10 calls per 60 minutes per session.",
     parameters: Parameters,

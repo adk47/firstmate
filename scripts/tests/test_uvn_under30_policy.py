@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import gzip
 import json
 import sqlite3
@@ -95,6 +96,19 @@ def row(**overrides):
 def spotify(popularity="missing"):
     track = {} if popularity == "missing" else {"popularity": popularity}
     return {"found": True, "track": track}
+
+
+class ServerBandAMirrorTests(unittest.TestCase):
+    """uvn-under30 never sends a row core-backend's T12 guard would refuse it."""
+
+    def test_rows_outside_server_band_a_do_not_qualify(self):
+        self.assertTrue(qualifies_for_approval(row(), spotify(1), set(), NO_DENY))
+        for override in ({"spotifyPopularity": 0}, {"spotifyPopularity": 45}, {"spotifyPopularity": None},
+                         {"metadata": {"source": "client"}},
+                         {"metadata": {"proofRequest": {"at": "2026-10-10T00:00:00Z"}}},
+                         {"verificationData": {"rule_risk_percent": {}, "band_hint": "B"}},
+                         {"verificationData": {"rule_risk_percent": {}, "total_risk_percent": 100}}):
+            self.assertFalse(qualifies_for_approval(row(**override), spotify(1), set(), NO_DENY), override)
 
 
 class TicketScopeTests(unittest.TestCase):

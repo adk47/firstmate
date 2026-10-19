@@ -36,9 +36,11 @@ The gate also reads the LIVE exclusion sources, loaded fresh by every plan and a
 of the above: proof on file (credit-trust ``proof-on-file.json``), proof-tagged notes in
 Caroline's send ledger and the committed doc-submitted manifest. Last, only for a row that
 passed everything else and would be removed: org affiliation (credit-trust
-``org-affiliation.json``): no verdict skips the row, and an affiliated user is human
-review + a polite contact, never automatic. If a source cannot be read or is stale,
-nothing is removed that run.
+``org-affiliation.json``, schema org-affiliation/v1): absent or held users skip the row, a
+user whose coverage is not ``full`` skips it too, a file older than 2 h removes nothing,
+and an affiliated user is human review + a polite contact, never automatic. If a source
+cannot be read or is stale, nothing is removed that run (which proof-on-file parts must be
+usable: credit_review/proof_parts.py).
 
 A row that fails any gate is SKIPPED with the reason, recorded, and left for
 the verify waves. Nothing is retried around a gate.
@@ -66,6 +68,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -74,6 +77,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from credit_review import proof_parts
 from credit_review.evidence import CONTRADICTED, classify_roles
 from credit_review.roles import ONE_PERSON_FAMILIES, family_of, is_trusted_source, names_match
 
@@ -117,6 +121,18 @@ DSP_SOURCES = {"spotify": "Spotify", "tidal": "Tidal"}
 DSP_HOSTS = {"open.spotify.com": "spotify", "listen.tidal.com": "tidal"}  # evidence URL host -> its source
 
 
+# Caroline's gate (intercom-verify-request.sh, campaign takeback-notice) refuses any other link,
+# and a refusal in notice_preflight withholds that user's whole set: check the same rule at plan time.
+_PUBLIC_LINK = re.compile(r"^https://[A-Za-z0-9.-]+(/\S*)?$")
+_INTERNAL_LINK = re.compile(r"^https://([A-Za-z0-9-]+\.)*(muso\.ai|clickup\.com|slack\.com|intercom\.io|github\.com|"
+                            r"gitlab\.com)(/|$)", re.IGNORECASE)  # DNS hosts are case-insensitive
+
+
+def public_link(url: str) -> bool:
+    """A public https link of at most 300 characters, never an internal or Muso surface."""
+    return len(url) <= 300 and bool(_PUBLIC_LINK.match(url)) and not _INTERNAL_LINK.match(url)
+
+
 def evidence_verified(row: dict[str, Any]) -> bool:
     """True when the row carries checked evidence for ITS OWN role: a public page of this
     track/release naming the other person in this role (``public_page``), or a current
@@ -129,6 +145,10 @@ def evidence_verified(row: dict[str, Any]) -> bool:
     note = str(ev.get("note") or "").lower()
     if not (ev.get("verified") in EVIDENCE_KINDS and names and all(n and n.lower() in note for n in names)
             and url == row.get("evidence_url") and url.startswith("https://")):
+        return False
+    # an optional corroborating page (e.g. a press article): cited next to the evidence, never instead of it
+    corr = ev.get("corroboration")
+    if corr is not None and not (isinstance(corr, str) and public_link(corr) and corr != url):
         return False
     if ev.get("verified") == "trusted_dsp_only":
         sources = set(ev.get("sources") or [])
@@ -223,10 +243,11 @@ PROOF_ON_FILE = os.environ.get("CREDIT_RETRO_PROOF_ON_FILE", "/var/lib/credit-tr
 ORG_AFFILIATION = os.environ.get("CREDIT_RETRO_ORG_AFFILIATION", "/var/lib/credit-trust/org-affiliation.json")
 PROOF_MAX_AGE = timedelta(hours=3)
 CLOCK_SKEW = timedelta(minutes=5)  # a generated_at later than now + this is not "fresh", it is wrong
-PROOF_KINDS = frozenset({"approved_doc", "pending_doc", "human_approved_after_doc"})
 AFFILIATION_VERDICTS = frozenset({"none", "claimed_unverified", "contributor", "verified_org",
                                   "authenticated_domain"})
 AFFILIATED = frozenset({"contributor", "verified_org", "authenticated_domain"})
+AFFILIATION_SCHEMA = "org-affiliation/v1"
+AFFILIATION_MAX_AGE = timedelta(hours=2)  # export README consumer rule: older than 2 h = UNKNOWN for everyone
 
 
 @dataclass
@@ -242,57 +263,70 @@ class Exclusions:
     doc_users: set[str] = field(default_factory=set)
     human_approved: set[str] = field(default_factory=set)
     affiliation: dict[str, dict[str, Any]] = field(default_factory=dict)
+    affiliation_held: dict[str, str] = field(default_factory=dict)
 
 
-def require_fresh(generated_at: Any, now: datetime) -> None:
-    """Raise ValueError unless ``generated_at`` is a timezone-aware time at most PROOF_MAX_AGE
+def require_fresh(generated_at: Any, now: datetime, max_age: timedelta = PROOF_MAX_AGE) -> None:
+    """Raise ValueError unless ``generated_at`` is a timezone-aware time at most ``max_age``
     before ``now`` and no more than CLOCK_SKEW after it (a future stamp would otherwise stay
     "fresh" indefinitely while the data under it goes stale)."""
     generated = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
     if generated.tzinfo is None:
         raise ValueError(f"generated_at {generated_at} has no timezone")
-    if now - generated > PROOF_MAX_AGE:
-        raise ValueError(f"generated_at {generated_at} is older than {PROOF_MAX_AGE}")
+    if now - generated > max_age:
+        raise ValueError(f"generated_at {generated_at} is older than {max_age}")
     if generated - now > CLOCK_SKEW:
         raise ValueError(f"generated_at {generated_at} is in the future (more than {CLOCK_SKEW} ahead)")
 
 
 def _read_proof_on_file(path: str, now: datetime) -> tuple[dict[str, str], dict[str, str]]:
+    """(proof by request, proof by whole user). Which parts must be usable, and that a
+    half-written export (a malformed entry, or ``users`` not the distinct user ids in
+    entries[]) is refused whole, is credit_review.proof_parts (shared with the verify notes).
+    Each part's freshness comes from its OWN generated_at; core carries no ``stale`` key, so
+    requiring ``stale: false`` on every source would refuse every run (cs lane, firstmate 032)."""
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
     require_fresh(doc["generated_at"], now)
-    stale = [str(src.get("name") or src.get("source") or i) for i, src in enumerate(doc["sources"])
-             if src.get("stale") is not False]
-    if stale:
-        raise ValueError(f"stale sources: {', '.join(stale)}")
+    proof_parts.check(doc, now=now, max_age_h=PROOF_MAX_AGE.total_seconds() / 3600,
+                      max_skew_h=CLOCK_SKEW.total_seconds() / 3600)
+    proof_parts.check_entries(doc)
     by_request: dict[str, str] = {}
     by_user: dict[str, str] = {}
     for e in doc["entries"]:
-        if e["kind"] not in PROOF_KINDS:
-            raise ValueError(f"unknown proof kind {e['kind']!r}")
-        if e.get("request_id"):
-            by_request[str(e["request_id"])] = e["kind"]
+        if (e.get("request_id") or "").strip():
+            by_request[e["request_id"].strip()] = e["kind"]
         else:
-            by_user[str(e["user_id"])] = e["kind"]
+            by_user[str(e["user_id"]).strip()] = e["kind"]
     return by_request, by_user
 
 
-def _read_affiliation(path: str) -> dict[str, dict[str, Any]]:
+def _read_affiliation(path: str, now: datetime) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """(user_id -> {verdict, coverage, evidence}, user_id -> held reason) from the credit-trust
+    export, schema ``org-affiliation/v1`` (H-DevOps scripts/credit-trust-exports/org-affiliation).
+    Consumer rule there: a file older than 2 h is UNKNOWN for everyone, so it raises (nothing is
+    removed that run); a user absent from ``users`` or present in ``held`` is UNKNOWN = held."""
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
-    if not isinstance(doc, dict):
-        raise ValueError("not a user_id -> verdict object")
-    for uid, v in doc.items():
+    if not isinstance(doc, dict) or doc.get("schema") != AFFILIATION_SCHEMA:
+        raise ValueError(f"not an {AFFILIATION_SCHEMA} export")
+    require_fresh(doc["generated_at"], now, AFFILIATION_MAX_AGE)
+    users, held = doc["users"], doc.get("held") or {}
+    if not isinstance(users, dict) or not isinstance(held, dict):
+        raise ValueError("users / held are not objects")
+    for uid, v in users.items():
         if not isinstance(v, dict) or v.get("verdict") not in AFFILIATION_VERDICTS:
             raise ValueError(f"user {uid}: no valid verdict")
-    return {str(uid): v for uid, v in doc.items()}
+    return ({str(uid): v for uid, v in users.items()},
+            {str(uid): str((v or {}).get("reason") if isinstance(v, dict) else v) for uid, v in held.items()})
 
 
 def load_exclusions(*, proof_on_file: str = PROOF_ON_FILE, org_affiliation: str = ORG_AFFILIATION,
                     verify_db: str | None, doc_submitted: str | Path | None = None,
                     now: datetime | None = None) -> Exclusions:
     """Read every live exclusion source now. Never raises: a source that cannot be read (or
-    proof-on-file older than 3h / with a stale source) makes ``unavailable`` the skip reason."""
+    proof-on-file older than 3h / with a required part unusable) makes ``unavailable`` the skip
+    reason."""
     from . import waves  # noqa: PLC0415
     now = now or datetime.now(timezone.utc)
     try:
@@ -304,12 +338,12 @@ def load_exclusions(*, proof_on_file: str = PROOF_ON_FILE, org_affiliation: str 
     except (SystemExit, OSError, ValueError, KeyError, TypeError, AttributeError, sqlite3.Error) as exc:
         return Exclusions("proof_source_unavailable", str(exc))
     try:
-        affiliation = _read_affiliation(org_affiliation)
-    except (OSError, ValueError, TypeError) as exc:
+        affiliation, affiliation_held = _read_affiliation(org_affiliation, now)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         return Exclusions("affiliation_source_unavailable", str(exc))
     tagged_requests, tagged_accounts, _ = engaged
     return Exclusions(None, "", proof_requests, proof_users, tagged_requests, tagged_accounts,
-                      doc_users, human_approved, affiliation)
+                      doc_users, human_approved, affiliation, affiliation_held)
 
 
 def _excluded_live(excl: Exclusions, row: dict[str, Any], before: dict[str, Any]) -> str | None:
@@ -331,13 +365,22 @@ def _excluded_live(excl: Exclusions, row: dict[str, Any], before: dict[str, Any]
 
 
 def _affiliation_hold(excl: Exclusions, row: dict[str, Any], before: dict[str, Any]) -> str | None:
-    """For a row that passed every other gate: no verdict, or an affiliated user (human review +
-    a polite contact, never automatic), holds it."""
-    aff = excl.affiliation.get(str(row["user_id"]))
+    """For a row that passed every other gate: no verdict (absent from the export, or held by it),
+    an affiliated user (human review + a polite contact, never automatic), or a verdict not
+    checked on full coverage (``affiliation_partial``) holds it. A per-row removal is allowed
+    only on ``coverage: full`` with ``none`` or ``claimed_unverified``."""
+    uid = str(row["user_id"])
+    if uid in excl.affiliation_held:
+        before["affiliation"] = {"held": excl.affiliation_held[uid]}
+        return "affiliation_unknown"
+    aff = excl.affiliation.get(uid)
     if aff is None:
         return "affiliation_unknown"
-    before["affiliation"] = {"verdict": aff["verdict"], "evidence": aff.get("evidence") or []}
-    return "org_affiliated" if aff["verdict"] in AFFILIATED else None
+    before["affiliation"] = {"verdict": aff["verdict"], "coverage": aff.get("coverage"),
+                             "evidence": aff.get("evidence") or []}
+    if aff["verdict"] in AFFILIATED:
+        return "org_affiliated"
+    return None if aff.get("coverage") == "full" else "affiliation_partial"
 
 
 # -- gate --------------------------------------------------------------------
@@ -485,7 +528,9 @@ def evidence_line(r: dict[str, Any]) -> str:
     resting on the Spotify/Tidal credit alone says so (``evidence_class=dsp_track_level``):
     the #10597 stage body has no per-pair field for it."""
     dsp = ", evidence_class=dsp_track_level" if r["evidence"]["verified"] == "trusted_dsp_only" else ""
-    return f"[{r['profile_id'][:8]}/{r['track_id'][:8]}/{r['role']}] ({evidence_label(r)}{dsp}) {r['evidence_url']}"
+    corr = r["evidence"].get("corroboration")
+    corr = f", corroboration={corr}" if corr else ""
+    return f"[{r['profile_id'][:8]}/{r['track_id'][:8]}/{r['role']}] ({evidence_label(r)}{dsp}{corr}) {r['evidence_url']}"
 
 
 def chunk_for_reasons(rows: list[dict[str, Any]], head: str, limit: int = REASON_MAX) -> list[list[dict[str, Any]]]:
@@ -690,9 +735,11 @@ def notice_preflight(api: ReadApi, sender, rows: list[dict[str, Any]],
     """Before any execute: every user who may lose a role must be reachable through
     Caroline's gate with the fixed take-back notice, TODAY. Returns (user_id -> account,
     user_id -> skip reason for users whose roles are not removed this run: the gate would
-    defer their notice, or none of their requests still belongs to them). Any other refusal
-    refuses the whole run (captain via firstmate 012/014: never remove without the message
-    going out)."""
+    defer their notice, the gate refused that user's notice (``notice_refused: <gate reason>``,
+    e.g. its leak check on a title; firstmate 041: only that user's set is withheld), or none of
+    their requests still belongs to them). A gate that cannot run at all, an unreadable
+    request or an account with no email refuses the whole run (captain via firstmate
+    012/014: never remove without the message going out)."""
     from . import notice  # noqa: PLC0415
     accounts: dict[str, dict[str, Any]] = {}
     held: dict[str, str] = {}
@@ -715,8 +762,11 @@ def notice_preflight(api: ReadApi, sender, rows: list[dict[str, Any]],
         if verdict == "deferred":
             held[uid] = "notice_would_defer"
             log(f"notice would defer for user {uid} ({msg}): their roles wait for a later run")
+        elif verdict == "refused":
+            held[uid] = f"notice_refused: {' '.join(str(msg).split())[:200]}"
+            log(f"notice refused by the send gate for user {uid} ({msg}): their whole set is withheld")
         elif verdict != "valid":
-            problems.append(f"user {uid}: notice refused by the send gate: {msg}")
+            problems.append(f"user {uid}: the send gate could not check the notice ({verdict}): {msg}")
     if problems:
         raise SystemExit("take-back notices cannot be sent, so nothing is removed:\n  " + "\n  ".join(problems))
     log(f"notice preflight: {sum(1 for u in accounts if u not in held)} users reachable today "
@@ -798,6 +848,7 @@ class ExecSet:
     unknown: list[dict[str, Any]] = field(default_factory=list)   # spendable pairs that are no row of the plan
     consumed: list[dict[str, Any]] = field(default_factory=list)  # manifest rows of pairs consumed outside the tool
     withheld: str = ""                                             # why the WHOLE set is not executed
+    detail: str = ""                                               # e.g. the send gate's refusal text
 
 
 def _exec_sets(api: ReadApi, approvals: list[str], planned: Index, manifest_rows: Index) -> list[ExecSet]:
@@ -867,7 +918,7 @@ def apply(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, pla
                                       + [r for es in sets for r in es.consumed], log)
     for es in sets:
         if not es.withheld and es.user_id in held:
-            es.withheld = held[es.user_id]
+            es.withheld, _, es.detail = held[es.user_id].partition(": ")
     run_id = ledger.start_run(kind="apply", actor=api.actor, manifest=manifest, parent_run=plan_run, argv=argv)
 
     def bump(key: str, n: int = 1) -> None:
@@ -895,7 +946,8 @@ def _withhold(ledger: Ledger, run_id: str, actor: str, es: ExecSet, reasons: dic
         why = reasons.get(r["row_id"]) or (es.withheld if not reasons else "with_set")
         ledger.event(run_id, actor, **_common(r), action="gate", outcome="withheld", before=befores.get(r["row_id"]),
                      evidence_url=r["evidence_url"], approval_ref=approval_ref(r, es.approval_id),
-                     reason=why if why == es.withheld else f"{why} (set withheld: {es.withheld})")
+                     reason=(why if why == es.withheld else f"{why} (set withheld: {es.withheld})")
+                     + (f": {es.detail}" if es.detail else ""))
         bump(f"withheld:{why}")
     for p in es.unknown:
         ledger.event(run_id, actor, row_id=_pair_row_id(p), user_id=es.user_id or None, profile_id=p["profileId"],

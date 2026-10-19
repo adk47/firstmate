@@ -16,6 +16,7 @@ import os
 import urllib.error
 import urllib.request
 
+from ..slack_token import resolve_secret
 from .config import DEVOPS_CHANNEL, SALES_ALERTS_CHANNEL
 
 _OPENCLAW_CONFIG = "/root/.openclaw-main/openclaw.json"
@@ -32,7 +33,7 @@ def _load_token(bot: str) -> str:
     with open(path) as f:
         c = json.load(f)
     accts = c.get("channels", {}).get("slack", {}).get("accounts", {})
-    token = accts.get(bot, {}).get("botToken", "")
+    token = resolve_secret(accts.get(bot, {}).get("botToken", ""))
     if not token:
         raise RuntimeError(
             f"No Slack bot token for '{bot}' in {path}. "

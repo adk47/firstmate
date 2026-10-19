@@ -89,6 +89,11 @@ them, "we'll check it, usually within a few days", never decide.
   `/opt/hydra/workspaces/operations/api-logs/`.
 - To re-open a refused or stuck (`attempted`) request, delete its `verify_requests` row.
   The next run offers it again.
+- Schema: every deploy runs `verify_ledger.py --db /var/lib/hydra/credit-review/ledger.sqlite3
+  migrate` (Step 5a, warn-only), which creates or upgrades only the `verify_*` tables in the
+  ledger it shares with the decider. credit-retro's take-back gate reads `verify_messages`
+  (columns pinned as `verify_ledger.READER_COLUMNS`); `scripts/tests/test_verify_ledger_contract.py`
+  keeps the writer and that reader in agreement.
 
 ## Never ask someone who already sent documents
 
@@ -101,11 +106,27 @@ rule silently, so for them the documents rule is per CREDIT:
    the decider uses; owner the credit-system lane, refreshed hourly; entries
    `{user_id, request_id|null, kind}`, kinds `approved_doc`, `pending_doc`,
    `human_approved_after_doc`). The list is authoritative only when it is complete: a
-   non-empty `sources[]` naming every required part (`core` and `cs-systemic intercom+gmail`, the exact part ids the live exporter writes; a renamed part sends nothing until `PROOF_REQUIRED_SOURCES` follows it), each fresh and neither `stale` nor `missing`, and
+   non-empty `sources[]` with every required part usable (`scripts/credit_review/proof_parts.py`,
+   shared with the take-back gate and, in TypeScript, Caroline's support tool
+   `plugins/support-tools/src/tools/proof-on-file.ts`; one fixture file,
+   `scripts/tests/fixtures/proof-parts-contract.json`, pins both): `core`, `cs-intercom` (only the exact legacy label
+   `cs-systemic intercom+gmail` is read as Intercom, and as Intercom only) and `cs-gmail`
+   (documents emailed to support@), each present once, not flagged `stale`/`missing` (any
+   truthy value) and carrying its OWN fresh timezone-aware `generated_at`; no other
+   part flagged stale or missing; and
    `users` equal to the distinct user ids in `entries[]`, and every entry well-formed (a
    malformed row is never skipped: it refuses the whole file). A missing, unreadable, older-than-3h,
    future-dated (beyond 6 minutes of clock skew, file or any part) or half-written export makes the run send **zero** asks and exit non-zero, in both
    campaigns (`--proof-on-file FILE` overrides the path).
+   - **Gmail (`cs-gmail`):** while it is missing or stale nobody is asked, reminded or
+     made removal-due: a snapshot of who emailed support@ cannot cover mail sent after it,
+     so no contact list narrows the hold. The live export does carry `gmail_contacts_90d`
+     (`{generated_at, source, user_ids[]}`); every reader accepts a file with it and
+     deliberately ignores it.
+   - **The decider does not follow this rule yet:** `decide.py` only refuses a part with a
+     truthy `stale`/`missing` flag; it neither requires `cs-gmail` nor checks each part's own
+     `generated_at`. It must import `proof_parts` (credit-trust-llm-t01 owns that switch);
+     until it does it lacks the `cs-gmail` rule.
    - **Past credits (`retro-past`):** a `user_id` listed with ANY entry is never asked, and
      their credits are closed as `skipped`.
    - **New credits (`verify-live`, the note and its day-14/day-25 reminders):** a credit with
@@ -234,7 +255,7 @@ notes.
 ## Take-back notices (`--campaign takeback-notice`)
 
 - **Caller:** `scripts/credit_retro/notice.py` (`credit-retro.py apply` / `notify`, #1237/#1242), when a proven take-back of a past credit executes. The gate only renders, checks and sends.
-- **Copy:** fixed, verbatim from `docs/credit-verification/retro-drafts/takeback-notice.md`; a bats test diffs the gate's rendering against `notice.render`. Which credit and role, who the public credits name (only the names in the recorded evidence), the source label (`public credits page`, `Spotify credits`, `Tidal credits` or `Spotify and Tidal credits`) and a public https link, and how to dispute with one document. One line per title + artist + role, up to 25 listed. No date, no follow-ups.
+- **Copy:** fixed, verbatim from `docs/credit-verification/retro-drafts/takeback-notice.md`; a bats test diffs the gate's rendering against `notice.render`. Which credit and role, who the public credits name (only the names in the recorded evidence), the source label (`public credits page`, `Spotify credits`, `Tidal credits` or `Spotify and Tidal credits`) and a public https link (plus an optional `corroboration_url`, cited as "; also named in …" and refused unless it is a public https link of at most 300 characters other than the evidence link), and how to dispute with one document. One line per title + artist + role, up to 25 listed. No date, no follow-ups.
 - **Lock:** `TAKEBACK_COPY_APPROVED=0` until Fable's copy GO and the captain's approval. While locked, `--validate` refuses (exit 1, so `credit-retro apply` removes nothing) and only `--dry-run` renders the copy. Unlocked, `--validate` exits 3 when the user already had a message from this gate that UTC day (one message per user per day across all campaigns).
 - **Removal notice vs take-back notice:** `takeback-notice` is sent by the take-back run itself, at removal time. `removal-notice` is for removals made some other way (staff deletes, with a reason per credit, incl. the backfill). The two are keyed differently (credit request id vs removal event id), so the ledger does not dedupe across them: a `removal-notice` events file must leave out removals that `credit-retro` made, since their owners already got a take-back notice. A take-back notice is not an ask, so an earlier `verify-live` or `retro-past` note about the same request never blocks it; only its own `takeback-notice` rows do.
 

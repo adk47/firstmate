@@ -97,6 +97,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import admin as admin_api
+from . import proof_parts
 from .evidence import (BIG_ARTIST_POPULARITY, BIG_TRACK_POPULARITY, Evidence, EvidenceBuilder,
                        EvidenceIncomplete, parse_ts)
 from .judge import JudgeResult
@@ -104,6 +105,7 @@ from .policy import AUTOMATION_REGISTRY as REGISTRY
 from .policy import DECIDE_POLICY as POLICY
 from .policy import (WEB_CONFIRM_MIN_CONFIDENCE, WEB_CONFIRM_MIN_DOMAINS, WEB_CONTRADICT_MIN_CONFIDENCE,
                      doc_required_ids, facts_of, validator_conflict, validator_rejected_rules)
+from .policy import server_approval_refusal
 from .roles import ONE_PERSON_FAMILIES, editorial_terms, family_of, is_editorial
 from .runner import log
 
@@ -157,6 +159,7 @@ EDITORIAL_MID_POPULARITY = 30
 EDITORIAL_VELOCITY_WEIGHT = 2
 HIGH_VELOCITY_24H = 50
 HIGH_VELOCITY_7D = 150
+
 
 
 @dataclass
@@ -535,18 +538,63 @@ class ProofOnFile:
     request_ids: frozenset[str]
     approved_refs: dict[str, str] = field(default_factory=dict)  # request id -> ref of an APPROVED proof
 
+    # Users who emailed support@ in the last 90 days (top-level gmail_contacts_90d):
+    # firstmate 041 - always held for a human, never asked, whatever the Gmail scan found.
+    support_contacts: frozenset[int] = frozenset()
+
     def covers(self, d: "Decision") -> bool:
         return d.user_id in self.user_ids or d.request_id.lower() in self.request_ids
+
+    def contacted_support(self, d: "Decision") -> bool:
+        return d.user_id is not None and d.user_id in self.support_contacts
+
+
+SUPPORT_CONTACTS_KEY = "gmail_contacts_90d"
+
+
+def support_contacts_of(value: Any) -> frozenset[int] | None:
+    """User ids from gmail_contacts_90d - a list, or {generated_at, source, user_ids: [...]}
+    as the cs lane publishes it; None when absent or malformed (the caller then treats
+    proof status as UNKNOWN: nobody is asked)."""
+    ids = value.get("user_ids") if isinstance(value, dict) else value
+    if not isinstance(ids, list):
+        return None
+    out: set[int] = set()
+    for u in ids:
+        if isinstance(u, bool):
+            return None
+        try:
+            out.add(int(str(u).strip()))
+        except ValueError:
+            return None
+    return frozenset(out)
+
+
+def muso_user_id(value: Any) -> int | None:
+    """An entry's user id as the integer Muso id (proof_parts accepts "111" and 111 as
+    the same user), or None when it is not one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    return int(text) if text.isdigit() else None
 
 
 def proof_on_file(path: Path | None = None, now: datetime | None = None
                   ) -> tuple[ProofOnFile | None, str | None]:
     """(proof, None) from the hourly proof-on-file export
     {generated_at, sources: [{name, generated_at, count, stale?, missing?}],
-    users, entries: [{user_id, request_id | null, kind, source, ref}]}, or
-    (None, why) when proof status is UNKNOWN: missing, unreadable, malformed,
-    older than 3h, dated in the future, or any source flagged missing/stale (a
-    user whose proof sits only in that source would be asked again)."""
+    users, entries: [{user_id, request_id | null, kind, source, ref}],
+    gmail_contacts_90d}, or (None, why) when proof status is UNKNOWN.
+
+    Completeness is THE shared rule, credit_review.proof_parts (the verify notes,
+    the take-back gate and Caroline's support tool read it the same way): core,
+    cs-intercom and cs-gmail all present, unflagged and fresh by their own stamps,
+    no other part flagged, entries well-formed and ``users`` consistent. On top of
+    it the decider is stricter, never looser: the export's own stamp must be fresh,
+    every user id must be a Muso (integer) id, and the support@ contact list must be
+    readable (firstmate 041: those users are held, never asked)."""
     path = Path(path or PROOF_ON_FILE)
     now = now or datetime.now(timezone.utc)
     try:
@@ -558,30 +606,33 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
     malformed = f"{path} is malformed (want generated_at, sources[], users, entries[])"
     if not isinstance(data, dict):
         return None, malformed
-    ts, sources, entries = parse_ts(data.get("generated_at")), data.get("sources"), data.get("entries")
-    users_n = data.get("users")
-    if (ts is None or not isinstance(sources, list) or not isinstance(entries, list)
-            or not isinstance(users_n, int) or isinstance(users_n, bool)
-            or not all(isinstance(s, dict) and isinstance(s.get("name"), str) for s in sources)):
+    try:
+        proof_parts.check(data, now=now, max_age_h=PROOF_MAX_AGE.total_seconds() / 3600,
+                          max_skew_h=PAYING_USERS_MAX_SKEW.total_seconds() / 3600)
+        proof_parts.check_entries(data)
+    except proof_parts.PartsError as exc:
+        return None, f"{path} is not authoritative: {exc}"[:200]
+    ts = parse_ts(data.get("generated_at"))
+    if ts is None:
         return None, malformed
-    incomplete = [f"{s['name']} is {'missing' if s.get('missing') else 'stale'}"
-                  for s in sources if s.get("missing") or s.get("stale")]
-    if incomplete:
-        return None, f"{path} is incomplete (source {', '.join(incomplete)})"[:200]
+    contacts = support_contacts_of(data.get(SUPPORT_CONTACTS_KEY))
+    if contacts is None:
+        return None, f"{path} has no readable {SUPPORT_CONTACTS_KEY} list (anyone may have emailed support@)"
     users: set[int] = set()
     requests: set[str] = set()
     approved: dict[str, str] = {}
-    for e in entries:
-        uid = e.get("user_id") if isinstance(e, dict) else None
-        rid = e.get("request_id") if isinstance(e, dict) else None
-        if (not isinstance(uid, int) or isinstance(uid, bool) or e.get("kind") not in PROOF_KINDS
-                or not (rid is None or isinstance(rid, str))):
-            return None, malformed
+    for e in data["entries"]:
+        uid = muso_user_id(e["user_id"])
+        if uid is None:
+            return None, f"{path} has a user_id that is not a Muso user id: {e['user_id']!r}"[:200]
+        rid = e.get("request_id")
         if rid is not None:
             try:
                 rid = str(uuid.UUID(rid))
             except ValueError:
-                return None, malformed
+                # Not a credit request id: it can name no request, but its user is
+                # still covered below (whole-user), so nobody is asked by mistake.
+                rid = rid.strip().lower()
             requests.add(rid)
             if e.get("kind") in APPROVED_PROOF_KINDS and str(e.get("ref") or "").strip():
                 approved.setdefault(rid, f"{e.get('source') or 'proof'}:{str(e['ref']).strip()}")
@@ -590,7 +641,7 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
         return None, f"{path} is stale (generated {utc(ts)})"
     if ts - now > PAYING_USERS_MAX_SKEW:
         return None, f"{path} is dated in the future ({utc(ts)})"
-    return ProofOnFile(frozenset(users), frozenset(requests), approved), None
+    return ProofOnFile(frozenset(users), frozenset(requests), approved, support_contacts=contacts), None
 
 
 def proof_status_transition(db: sqlite3.Connection, mode: str, proof_why: str | None) -> str | None:
@@ -653,6 +704,10 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
     for d in support:
         if proof.covers(d):
             _set(d, "hold", "proof on file: human review (a document is already on file; never ask again)")
+            res.held_proof += 1
+        elif proof.contacted_support(d):
+            _set(d, "hold", "emailed support@ in the last 90 days: human review, never asked "
+                 "(when in doubt, don't send)")
             res.held_proof += 1
         elif d.request_id in asked:
             _set(d, "hold", "support already requested for this credit once: never re-ask; human review")
@@ -868,8 +923,19 @@ def status_readback(script: str | None = None) -> Readback:
     return read
 
 
+def refused_by_agent_guard(body: Any, chunk: list[str]) -> dict[str, str]:
+    """{request id: reasons} when the answer is core-backend's
+    agent_cannot_approve_declined refusal (nothing written), else {}."""
+    if not isinstance(body, dict) or body.get("errorCode") != "agent_cannot_approve_declined":
+        return {}
+    ids = {str(i) for i in body.get("refusedRequestIds") or []} & set(chunk)
+    reasons = {str(r.get("id")): ",".join(str(x) for x in r.get("reasons") or [])
+               for r in body.get("refused") or [] if isinstance(r, dict)}
+    return {i: reasons.get(i, "refused") for i in ids}
+
+
 def write_chunk(writer: Writer, readback: Readback, status: str, chunk: list[str],
-                expected: str) -> tuple[dict[str, str], str | None]:
+                expected: str, _retry: bool = False) -> tuple[dict[str, str], str | None]:
     """Per-row outcomes of one conditional PUT, and the write error if any. A
     failed or timed-out PUT may still have committed rows, so the outcome of a
     failed chunk comes from the server's updatedIds and a status readback; a
@@ -879,6 +945,17 @@ def write_chunk(writer: Writer, readback: Readback, status: str, chunk: list[str
     except (admin_api.AdminError, subprocess.TimeoutExpired, ValueError) as exc:
         err = str(exc)
         body = getattr(exc, "body", None)
+        refused = refused_by_agent_guard(body, chunk)
+        if refused and not _retry:
+            # The server wrote NOTHING and named the rows it refuses: record those
+            # as skipped with its reasons and send the rest of the batch once more.
+            outs = {rid: f"skipped:agent_cannot_approve_declined:{why}"[:200] for rid, why in refused.items()}
+            rest = [i for i in chunk if i not in refused]
+            if not rest:
+                return outs, None
+            more, err2 = write_chunk(writer, readback, status, rest, expected, _retry=True)
+            outs.update(more)
+            return outs, err2
         data = body.get("data") if isinstance(body, dict) and isinstance(body.get("data"), dict) else body
         committed = {str(i) for i in (data.get("updatedIds") or [])} & set(chunk) if isinstance(data, dict) else set()
         rest = [i for i in chunk if i not in committed]
@@ -1082,6 +1159,27 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             else:
                 _set(d, "hold", "documentation required for this credit and no approved proof is on file for it: "
                      "never approved without a recorded proof id; human review")
+
+    # Approvals core-backend would refuse are never sent (T12 agent guard): a
+    # stored popularity outside 1..59 / client-sourced metadata needs documents
+    # (support, like any big track); a server proof requirement needs the
+    # claimant's proof (support); anything else goes to a human.
+    req_of = {str(r.get("id")): r for r in batch}
+    for d in decisions:
+        if d.decision != "approve" or d.request_id not in req_of:
+            continue
+        refusal = server_approval_refusal(req_of[d.request_id])
+        if not refusal:
+            continue
+        why = ",".join(refusal)
+        # firstmate 036: a stored popularity of 0 is NOT evidence of a big track
+        # (it is just unattributed), so those rows go to a human, never a proof ask.
+        if "popularity_unattributable" not in refusal and (
+                refusal[0] == "proof_required"
+                or set(refusal) <= {"popularity_unknown", "big_track", "client_sourced_metadata"}):
+            _set(d, "support", f"server approval guard would refuse ({why}): documentation required")
+        else:
+            _set(d, "hold", f"server approval guard would refuse ({why}): human review")
 
     # Daily per-user approval cap.
     counts = approvals_today_by_user(db, now.strftime("%Y-%m-%dT00:00:00Z"))

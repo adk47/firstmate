@@ -9,6 +9,7 @@ faked (fixtures shared with test_credit_review.py). Run:
 
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import dataclasses
 from datetime import timedelta
 import json
@@ -40,6 +41,9 @@ PROFILES["art-nopop"] = {"name": "No Pop Artist", "rawProfiles": []}
 
 
 def req(rid, *, uid=500, pid=T.PID_GOOD, track="small", roles=("Mixing",), vd_rules=None, errors=None, **kw):
+    # The row's own stored spotifyPopularity follows the catalog track, as on prod
+    # (core-backend's agent guard reads the STORED value).
+    kw.setdefault("pop", (TRACKS.get(track) or {}).get("popularity", 20))
     r = T.request(rid, pid=pid, track=track, roles=roles, status="unverified", approved=False, risk=40, **kw)
     r["userId"] = uid
     r["verificationData"]["rule_risk_percent"] = dict(vd_rules or {})
@@ -125,13 +129,16 @@ class Base(unittest.TestCase):
         decide.WRITE_LOCK = self._lock
         decide.PAYING_USERS_FILE, decide.log, decide.PROOF_ON_FILE = self._paying, self._log, self._proof
 
-    def proof(self, entries=(), generated_at="2026-10-11T02:12:00Z", sources=None):
+    def proof(self, entries=(), generated_at="2026-10-11T02:12:00Z", sources=None, contacts=()):
         """The proof-on-file export as the producer lane writes it."""
         entries = list(entries)
         decide.PROOF_ON_FILE.write_text(json.dumps({
             "generated_at": generated_at,
+            "gmail_contacts_90d": {"generated_at": generated_at, "source": "test", "user_ids": list(contacts)},
             "sources": sources if sources is not None else [
-                {"name": "core_proofs", "generated_at": generated_at, "count": len(entries)}],
+                {"name": "core", "generated_at": generated_at, "count": len(entries)},
+                {"name": "cs-intercom", "generated_at": generated_at, "stale": False, "count": 0},
+                {"name": "cs-gmail", "generated_at": generated_at, "stale": False, "count": 0}],
             "users": len({e["user_id"] for e in entries}), "entries": entries}))
 
     def go(self, rows, raws=None, judge=None, mode="apply", skip=None, policy=POLICY, admin_requests=(),
@@ -763,7 +770,7 @@ class NeverReAsk(Base):
 
     def test_unknown_proof_status_sends_no_support_request_at_all(self):
         rows = [req(uuid_of(120), track="t1"), req(uuid_of(121))]
-        cases = {"missing": None, "stale": "2026-10-10T23:00:00Z", "malformed": "{}"}
+        cases = {"missing": None, "old": "2026-10-10T23:00:00Z", "not authoritative": "{}"}  # word the logged reason carries
         for why, content in cases.items():
             if content is None:
                 decide.PROOF_ON_FILE.unlink(missing_ok=True)
@@ -788,19 +795,52 @@ class NeverReAsk(Base):
         self.assertIsNone(decide.proof_on_file(now=T.NOW)[0])
 
     def test_a_missing_or_stale_source_makes_proof_status_unknown(self):
-        """A user whose proof sits only in the missing source is absent from
-        entries: asking them now would re-ask for documents already given."""
-        sources = {"missing": {"name": "gmail", "count": 0, "missing": True},
-                   "stale": {"name": "intercom", "generated_at": "2026-10-10T00:00:00Z", "count": 0, "stale": True}}
-        for n, (why, src) in enumerate(sources.items()):
-            self.proof(sources=[{"name": "core_proofs", "count": 0}, src])
+        """A user whose proof sits only in an unusable part is absent from entries:
+        asking them now would re-ask for documents already given. The rule is the
+        shared credit_review.proof_parts (all three parts required, for everyone)."""
+        g = "2026-10-11T02:12:00Z"
+        core, inter, gmail = ({"name": "core", "generated_at": g}, {"name": "cs-intercom", "generated_at": g},
+                              {"name": "cs-gmail", "generated_at": g})
+        cases = {
+            "part 'cs-gmail' is missing": [core, inter],
+            "part 'cs-gmail' is marked missing": [core, inter, {"name": "cs-gmail", "missing": True}],
+            "part 'cs-intercom' is marked stale": [core, {**inter, "stale": True}, gmail],
+            "part 'core' is": [{"name": "core", "generated_at": "2026-10-10T00:00:00Z"}, inter, gmail],
+            "stale or missing part(s): x-part": [core, inter, gmail, {"name": "x-part", "missing": True}],
+        }
+        for n, (why, srcs) in enumerate(cases.items()):
+            self.proof(sources=srcs)
             res, w = self.go([req(uuid_of(130 + n), uid=760 + n, track="t1")], self.RAWS)
             self.assertEqual(self.support_writes(w), [], why)
             d = self.decisions()[uuid_of(130 + n)]
             self.assertEqual(d["decision"], "defer", why)
             self.assertTrue(d["reason"].startswith("proof_status_unknown"), why)
-            self.assertIn(f"{src['name']} is {why}", d["reason"])
+            self.assertIn(why, d["reason"])
             self.assertEqual(res.deferred_proof_unknown, 1, why)
+
+    def test_support_contacts_are_held_never_asked(self):
+        """firstmate 041: everyone who emailed support@ in the last 90 days is held for
+        a human, even with no document found; everyone else may be asked."""
+        self.proof(contacts=[781])
+        res, w = self.go([req(uuid_of(160), uid=781, track="t1"), req(uuid_of(161), uid=782, track="t1")], self.RAWS)
+        d = self.decisions()
+        self.assertEqual(d[uuid_of(160)]["decision"], "hold")
+        self.assertIn("emailed support@", d[uuid_of(160)]["reason"])
+        self.assertEqual(self.support_writes(w), [uuid_of(161)])
+
+    def test_a_missing_or_malformed_contact_list_asks_nobody(self):
+        for bad in (None, {"user_ids": "x"}, [True], ["abc"]):
+            self.proof()
+            doc = json.loads(decide.PROOF_ON_FILE.read_text())
+            if bad is None:
+                doc.pop("gmail_contacts_90d")
+            else:
+                doc["gmail_contacts_90d"] = bad
+            decide.PROOF_ON_FILE.write_text(json.dumps(doc))
+            p, why = decide.proof_on_file(now=T.NOW)
+            self.assertIsNone(p, bad)
+            self.assertIn("gmail_contacts_90d", why)
+        self.assertEqual(decide.support_contacts_of([1, "2"]), frozenset({1, 2}))
 
     def test_a_credit_is_asked_about_once_ever(self):
         row = req(uuid_of(140), uid=720, track="t1")
@@ -1047,6 +1087,68 @@ class Cli(unittest.TestCase):
         self.assertNotIn(15, p.deny_user_ids, "no named-user rules: the fixture user is caught by the score")
         self.assertIn("94ad2ad2-0be9-4b8e-94a6-dc85eb100310", p.deny_profile_ids)
         self.assertTrue(p.editorial_role_terms)
+
+
+class ServerAgentGuardMirror(Base):
+    """Approvals core-backend's T12 agent guard would refuse are never sent, and
+    a refusal of some rows never rejects the rest of the batch (firstmate 036)."""
+
+    RAWS = {"small": [T.raw("Real Engineer", "mixer")]}
+
+    def test_stored_popularity_zero_goes_to_a_human_not_an_ask(self):
+        res, w = self.go([req(uuid_of(300), pop=0)], self.RAWS)
+        d = self.decisions()[uuid_of(300)]
+        self.assertEqual(d["decision"], "hold")
+        self.assertIn("popularity_unattributable", d["reason"])
+        self.assertEqual(w.calls, [])
+
+    def test_stored_big_popularity_or_client_metadata_or_proof_marker_asks_for_documents(self):
+        rows = [req(uuid_of(301), pop=70), req(uuid_of(302)), req(uuid_of(303))]
+        rows[1]["metadata"]["source"] = "client"
+        rows[2]["metadata"]["proofRequest"] = {"at": "2026-10-10T00:00:00Z"}
+        self.proof([])
+        res, w = self.go(rows, self.RAWS)
+        d = self.decisions()
+        for i in (301, 302, 303):
+            self.assertEqual(d[uuid_of(i)]["decision"], "support", i)
+            self.assertIn("server approval guard would refuse", d[uuid_of(i)]["reason"])
+        self.assertEqual([c for c in w.calls if c["status"] == decide.APPROVED], [])
+
+    def test_validator_approved_row_is_not_scoped(self):
+        r = req(uuid_of(304), pop=0)
+        r["verificationData"]["is_approved"] = True
+        res, w = self.go([r], self.RAWS)
+        self.assertEqual(self.decisions()[uuid_of(304)]["decision"], "approve")
+
+    def test_a_refusal_of_some_rows_never_rejects_the_rest_of_the_batch(self):
+        refused = uuid_of(311)
+        calls = []
+
+        def writer(status, ids, expected):
+            calls.append(list(ids))
+            if refused in ids:
+                raise decide.WriteFailed("PUT HTTP 400", {
+                    "result": "error", "code": 400, "errorCode": "agent_cannot_approve_declined",
+                    "refusedRequestIds": [refused],
+                    "refused": [{"id": refused, "band": "B_request_info", "reasons": ["popularity_unattributable"]}]})
+            return {"data": {"updatedIds": list(ids)}}
+        outs, err = decide.write_chunk(writer, lambda st, ids: set(), decide.APPROVED,
+                                       [uuid_of(310), refused, uuid_of(312)], decide.UNVERIFIED)
+        self.assertIsNone(err)
+        self.assertEqual(outs[uuid_of(310)], decide.APPROVED)
+        self.assertEqual(outs[uuid_of(312)], decide.APPROVED)
+        self.assertEqual(outs[refused], "skipped:agent_cannot_approve_declined:popularity_unattributable")
+        self.assertEqual(calls, [[uuid_of(310), refused, uuid_of(312)], [uuid_of(310), uuid_of(312)]])
+
+    def test_a_second_refusal_is_not_retried_again(self):
+        def writer(status, ids, expected):
+            raise decide.WriteFailed("PUT HTTP 400", {"errorCode": "agent_cannot_approve_declined",
+                                                       "refusedRequestIds": [ids[0]], "refused": []})
+        outs, err = decide.write_chunk(writer, lambda st, ids: set(), decide.APPROVED,
+                                       [uuid_of(320), uuid_of(321)], decide.UNVERIFIED)
+        self.assertTrue(outs[uuid_of(320)].startswith("skipped:agent_cannot_approve_declined"))
+        self.assertTrue(outs[uuid_of(321)].startswith("error:"), "one retry only; then it is an error")
+        self.assertIsNotNone(err)
 
 
 if __name__ == "__main__":
