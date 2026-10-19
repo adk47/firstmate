@@ -963,14 +963,15 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
   [ "$(sql "select last_reply_at from verify_messages where message_id='1001'")" = "$(jq -nr '1760100000|todate')" ]
 }
 
-tbcredits() { # <file> <id|role|title|artist|names(;)|url|source>...
+tbcredits() { # <file> <id|role|title|artist|names(;)|url|source[|corroboration_url]>...
   local f="$1"; shift
   local items="[]" spec
   for spec in "$@"; do
-    IFS='|' read -r rid role title artist names url src <<<"$spec"
-    items="$(jq -c --arg r "$rid" --arg ro "$role" --arg t "$title" --arg a "$artist" --arg n "$names" --arg u "$url" --arg s "$src" \
+    IFS='|' read -r rid role title artist names url src corr <<<"$spec"
+    items="$(jq -c --arg r "$rid" --arg ro "$role" --arg t "$title" --arg a "$artist" --arg n "$names" --arg u "$url" --arg s "$src" --arg c "$corr" \
       '. + [{request_id:$r, profile_id:"p1", track_id:("t-" + $r), role:$ro, track_title:$t, artist_name:$a,
-             other_names:($n | split(";") | map(select(length > 0))), evidence_url:$u, evidence_source:$s}]' <<<"$items")"
+             other_names:($n | split(";") | map(select(length > 0))), evidence_url:$u, evidence_source:$s}
+             + (if $c == "" then {} else {corroboration_url:$c} end)]' <<<"$items")"
   done
   jq -n --argjson c "$items" '{campaign:"takeback-notice", user:{email:"Jane.Doe@Example.com", id:"42", first_name:"Jane"}, credits:$c}' > "$f"
 }
@@ -1020,6 +1021,31 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   run -0 "$LOCKED" send --campaign takeback-notice --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [ "$(rendered .subject)" = "About 2 of your credits on Muso" ]
   tb_parity
+}
+
+@test "takeback-notice (Fable v3): a corroborating article is cited next to the DSP credit, identical in the gate and credit-retro" {
+  local art="https://stereobeso.com/2026/08/26/santiago-cruz-cardellino-4-vasos-1-florero/"
+  tbcredits "$TEST_TMPDIR/c.json" "q1|Mixing|4 Vasos y 1 Florero|Santiago Cruz|Nacho Sotelo|https://listen.tidal.com/track/527926451|Tidal credits|$art"
+  run -0 "$LOCKED" send --campaign takeback-notice --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  tb_parity
+  [[ "$(rendered .body | plain)" == *"name Nacho Sotelo for Mixing (Tidal credits: https://listen.tidal.com/track/527926451; also named in $art), so we have removed"* ]]
+  [[ "$(rendered .body | plain)" != *"public credits page: $art"* ]]
+  tbcredits "$TEST_TMPDIR/c.json" \
+    "q1|Mixing|4 Vasos y 1 Florero|Santiago Cruz|Nacho Sotelo|https://listen.tidal.com/track/527926451|Tidal credits|$art" \
+    "q2|Mixing|Luna|Manuel Medrano|Josh Gudwin|https://www.qobuz.com/es-es/album/perfecto-manuel-medrano/leug1b3nhldwb|public credits page"
+  run -0 "$LOCKED" send --campaign takeback-notice --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  tb_parity
+  [[ "$(rendered .body | plain)" == *"Mixing on \"4 Vasos y 1 Florero\" by Santiago Cruz: Nacho Sotelo (Tidal credits: https://listen.tidal.com/track/527926451; also named in $art)"* ]]
+  [[ "$(rendered .body | plain)" == *"Josh Gudwin (public credits page: https://www.qobuz.com/es-es/album/perfecto-manuel-medrano/leug1b3nhldwb)"* ]]
+  # a corroboration link is checked like the evidence link
+  sed 's/^readonly TAKEBACK_COPY_APPROVED=0$/readonly TAKEBACK_COPY_APPROVED=1/' "$LOCKED" > "$TEST_TMPDIR/tb.sh"; chmod +x "$TEST_TMPDIR/tb.sh"
+  local bad
+  for bad in "http://stereobeso.com/x" "https://app.muso.ai/x" "https://APP.Muso.AI/x" "https://listen.tidal.com/track/527926451"; do
+    tbcredits "$TEST_TMPDIR/c.json" "q1|Mixing|Song A|Big Star|X|https://listen.tidal.com/track/527926451|Tidal credits|$bad"
+    run -1 "$TEST_TMPDIR/tb.sh" send --campaign takeback-notice --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --validate
+    [[ "$output" == *"corroboration_url that is not a public https link"* ]]
+  done
+  [ "$(calls)" -eq 0 ]
 }
 
 @test "takeback-notice: send-locked as committed; refuses missing names, an unlisted source or an internal link; no follow-ups" {

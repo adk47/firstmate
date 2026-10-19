@@ -1,8 +1,9 @@
 """The org-affiliation verdicts every automatic user-facing step reads (RULE-org-affiliation,
 data/credit-trust-system-fable-a1/org-affiliation-check-2026-10-16.md).
 
-One reader for /var/lib/credit-trust/org-affiliation.json, shared by the take-back gate
-(credit_retro.takeback) and the verify notes (credit_review.verify_notify). The producer is
+The reader of /var/lib/credit-trust/org-affiliation.json for the verify notes
+(credit_review.verify_notify); the take-back gate (credit_retro.takeback) applies the same
+consumer rule with its own reader (#1258). The producer is
 cmux-credit-system-lane (schema ``org-affiliation/v1``, firstmate 054)::
 
     {"schema": "org-affiliation/v1", "generated_at": "<tz-aware ISO>", ...,
@@ -19,8 +20,9 @@ accepts ``claimed_unverified``); otherwise a human looks and uses the polite-con
 for full coverage of the users it is about to act on by writing their ids to
 ``/var/lib/credit-trust/inputs/org-affiliation-priority-<lane>.json`` (``write_priority``).
 
-The legacy flat shape ``{user_id: {verdict, evidence}}`` (pre-v1, tests) is still read; its
-entries have no coverage and no stamp, so it is accepted only without either check.
+The legacy flat shape ``{user_id: {verdict, evidence}}`` (pre-v1) carries no coverage and no
+generation time, so it can never show it is current or complete: it is refused like any other
+untrustworthy file (QA review of hydra#1257 @53428d0: an old flat file must not authorize sends).
 """
 
 from __future__ import annotations
@@ -59,11 +61,9 @@ def read(path: str | None = None, *, now: datetime | None = None) -> dict[str, d
         doc = json.load(fh)
     if not isinstance(doc, dict):
         raise ValueError("not a JSON object")
-    if "schema" not in doc:  # legacy flat shape
-        for uid, v in doc.items():
-            if not isinstance(v, dict) or v.get("verdict") not in VERDICTS:
-                raise ValueError(f"user {uid}: no valid verdict")
-        return {str(uid).strip(): {**v, "coverage": FULL} for uid, v in doc.items()}
+    if "schema" not in doc:
+        raise ValueError(f"no schema: the legacy flat shape has no coverage and no generated_at, so it is "
+                         f"never trusted (want {SCHEMA})")
     if doc.get("schema") != SCHEMA:
         raise ValueError(f"schema {doc.get('schema')!r} is not {SCHEMA}")
     gen = _ts(doc.get("generated_at"))

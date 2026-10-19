@@ -9,6 +9,7 @@ faked (fixtures shared with test_credit_review.py). Run:
 
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import dataclasses
 from datetime import timedelta
 import json

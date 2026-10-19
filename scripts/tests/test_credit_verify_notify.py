@@ -9,6 +9,7 @@ Run:
 
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import json
 import os
 import shutil
@@ -54,9 +55,17 @@ AFFILIATION_FILE = os.path.join(_PROOF_DIR, "org-affiliation.json")
 TEST_USERS = ("42", "43", "44", "7", "77")
 
 
+def affiliation_v1(verdicts, *, age_h=0.0):
+    """org-affiliation/v1 around {uid: {verdict, evidence}} (full coverage unless an entry says
+    otherwise); a flat file is refused (affiliation.read)."""
+    gen = (datetime.now(timezone.utc) - timedelta(hours=age_h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"schema": "org-affiliation/v1", "generated_at": gen,
+            "users": {u: {"coverage": "full", **v} for u, v in verdicts.items()}, "held": {}}
+
+
 def write_affiliation(verdicts=None, path=AFFILIATION_FILE):
-    Path(path).write_text(json.dumps(verdicts if verdicts is not None
-                                     else {u: {"verdict": "none", "evidence": []} for u in TEST_USERS}))
+    Path(path).write_text(json.dumps(affiliation_v1(verdicts if verdicts is not None
+                                                    else {u: {"verdict": "none", "evidence": []} for u in TEST_USERS})))
 
 
 write_affiliation()
@@ -1881,6 +1890,21 @@ class EnableGateTests(unittest.TestCase):
         self.assertEqual(sent, [("50", ["f0"]), ("52", ["f2"])], "the reminder first, then the paying user")
         self.assertEqual(rep.reminders_sent, 1)
         self.assertEqual(self.deferred(), {"f1", "f3"}, "over the cap: kept for tomorrow")
+
+
+class TestLogIsolation(unittest.TestCase):
+    def test_tests_and_their_subprocesses_never_log_to_the_production_run_log(self):
+        """firstmate 056: PR Validation runs on node-8; a halt line from a test must not reach
+        /var/lib/hydra/credit-review/run.log."""
+        from credit_review import runner
+        self.assertEqual(runner.LOG_PATH, credit_test_env.LOG_PATH)
+        self.assertFalse(os.path.realpath(runner.LOG_PATH).startswith("/var/lib/"))
+        res = subprocess.run([sys.executable, str(ROOT / "scripts" / "credit-review.py"), "verify-notify",
+                              "--removal-due", os.path.join(credit_test_env._dir, "due.jsonl"),
+                              "--proof-on-file", os.path.join(credit_test_env._dir, "absent.json")],
+                             capture_output=True, text=True, timeout=60, check=False)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("absent.json is missing", Path(credit_test_env.LOG_PATH).read_text())
 
 
 if __name__ == "__main__":

@@ -415,6 +415,7 @@ INPUT="$("$JQ_BIN" -c '
                               received: ((.received // "") | clean | ascii_downcase),
                               other_names: [(.other_names // [])[] | clean | select(length > 0)],
                               evidence_source: ((.evidence_source // "") | clean),
+                              corroboration_url: ((.corroboration_url // "") | clean),
                               profile_id: ((.profile_id // "") | clean), track_id: ((.track_id // "") | clean) } ] }' "$CREDITS_FILE")"
 
 EMAIL="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.email')"
@@ -460,6 +461,8 @@ if [ "$CAMPAIGN" = "takeback-notice" ]; then
   [ "$bads" -eq 0 ] || refuse "$bads credit(s) carry an evidence_source outside the fixed list (public credits page, Spotify credits, Tidal credits, Spotify and Tidal credits)."
   badu="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[].evidence_url | select((test("^https://[A-Za-z0-9.-]+(/[^[:space:]]*)?$") | not) or (length > 300) or test("^https://([A-Za-z0-9-]+\\.)*(muso\\.ai|clickup\\.com|slack\\.com|intercom\\.io|github\\.com|gitlab\\.com)(/|$)"))] | length')"
   [ "$badu" -eq 0 ] || refuse "$badu credit(s) need an evidence_url: a public https link of at most 300 characters, never an internal or Muso surface."
+  badc="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select(.corroboration_url != "" and ((.corroboration_url | test("^https://[A-Za-z0-9.-]+(/[^[:space:]]*)?$") | not) or (.corroboration_url | length) > 300 or .corroboration_url == .evidence_url or (.corroboration_url | test("^https://([A-Za-z0-9-]+\\.)*(muso\\.ai|clickup\\.com|slack\\.com|intercom\\.io|github\\.com|gitlab\\.com)(/|$)"; "i"))))] | length')"
+  [ "$badc" -eq 0 ] || refuse "$badc credit(s) carry a corroboration_url that is not a public https link of at most 300 characters distinct from the evidence_url."
 fi
 dups="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[].request_id] | length - (unique | length)')"
 [ "$dups" -eq 0 ] || refuse "credits repeats a request_id; each credit request appears once."
@@ -752,6 +755,7 @@ def removal_sentence:
   end;
 # Take-back notice, verbatim from docs/credit-verification/retro-drafts/takeback-notice.md.
 def tb_names: .other_names | if length <= 1 then (.[0] // "another person") else (.[0:-1] | join(", ")) + " and " + .[-1] end;
+def tb_cite: "\(.evidence_source): \(.evidence_url)" + (if (.corroboration_url // "") != "" then "; also named in \(.corroboration_url)" else "" end);
 def takeback_notice($fn; $c0; $maxl):
   (reduce $c0[] as $x ([]; if any(.[]; (.track_title | ascii_downcase) == ($x.track_title | ascii_downcase)
        and (.artist_name | ascii_downcase) == ($x.artist_name | ascii_downcase) and (.role | ascii_downcase) == ($x.role | ascii_downcase))
@@ -762,13 +766,13 @@ def takeback_notice($fn; $c0; $maxl):
       $c[0] as $x
       | { subject: "About your \($x.role) credit on \"\($x.track_title)\"",
           segs: [ {p: "Hi \($fn),"},
-                  {p: "I'm Caroline from Muso support. The public credits for \"\($x.track_title)\" by \($x.artist_name) name \($x | tb_names) for \($x.role) (\($x.evidence_source): \($x.evidence_url)), so we have removed the \($x.role) credit from your profile."},
+                  {p: "I'm Caroline from Muso support. The public credits for \"\($x.track_title)\" by \($x.artist_name) name \($x | tb_names) for \($x.role) (\($x | tb_cite)), so we have removed the \($x.role) credit from your profile."},
                   {p: $dispute}, {p: "Thank you,"}, {p: "Caroline"}, {p: "Muso Support"} ] }
     else
       { subject: "About \($n) of your credits on Muso",
         segs: [ {p: "Hi \($fn),"},
                 {p: "I'm Caroline from Muso support. The public credits name someone else for these roles, so we have removed them from your profile:"},
-                {ul: ([ $c[0:$maxl][] | "\(.role) on \"\(.track_title)\" by \(.artist_name): \(tb_names) (\(.evidence_source): \(.evidence_url))" ]
+                {ul: ([ $c[0:$maxl][] | "\(.role) on \"\(.track_title)\" by \(.artist_name): \(tb_names) (\(tb_cite))" ]
                       + (if $n > $maxl then ["and \($n - $maxl) more"] else [] end))},
                 {p: $dispute}, {p: "Thank you,"}, {p: "Caroline"}, {p: "Muso Support"} ] }
     end;
