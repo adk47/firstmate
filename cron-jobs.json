@@ -1423,6 +1423,68 @@
         "accountId": "operations",
         "bestEffort": false
       }
+    },
+    {
+      "id": "5bef065c-1c0a-5fa8-a74f-fc34afb487dc",
+      "agentId": "operations",
+      "createdAtMs": 1792112400000,
+      "updatedAtMs": 1792112400000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": true,
+      "name": "credit-verify-proof-intercom",
+      "description": "Supporting-document forensics, SHADOW (H3; captain's first principle 2026-10-15: proof by email or Intercom, fraud-checked before it counts). Every 30 min: classifies Intercom conversations whose attachment cache changed in the last 2 days (one read-only Intercom GET each) and analyses each new customer attachment of a proof conversation (a file sent after a teammate/bot asked for documentation) in a sandboxed systemd transient unit with no network: file sniff, image provenance/C2PA/AI-generator markers, PDF revisions/fonts/overlays/signatures, OCR content checks, cross-account reuse. Writes only /var/lib/hydra-credit-verify/proof.sqlite (signals with cited regions, hashes, verdicts; no document text). Changes no credit, sends nothing. Kill switch: /etc/hydra/credit-verify.disabled. Docs: docs/credit-verification/proof-forensics.md.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "5,35 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-proof.py",
+          "intercom",
+          "--days",
+          "2",
+          "--max-files",
+          "300"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 1700
+      }
+    },
+    {
+      "id": "b08cbb96-e5b4-59d6-95b1-a4cbddac9022",
+      "agentId": "operations",
+      "createdAtMs": 1792112400000,
+      "updatedAtMs": 1792112400000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": false,
+      "name": "credit-verify-proof-email",
+      "description": "DISABLED until the inbound verification address (verify@) exists - credit-trust V2 ticket. Supporting-document forensics for the EMAIL channel, SHADOW (E-IN). Every 10 min: reads raw messages delivered to /var/lib/hydra-credit-verify/inbound-email/new. A message counts only if the trusted receiving MTA authenticated the sender (dmarc=pass or aligned dkim=pass) and the address is the confirmed email of exactly one Muso user (GET /admin/user); its attachments get the same sandboxed forensics as Intercom files (source=email). Spoofed or unknown senders are filed under rejected/ with the reason; nothing is attached or sent.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/10 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-proof.py",
+          "email"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 540
+      }
     }
   ]
 }
