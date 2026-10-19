@@ -49,7 +49,8 @@ def main():
     bot_ids = set()
     tokens = {}
     for acct in accounts:
-        token = config.get("channels", {}).get("slack", {}).get("accounts", {}).get(acct, {}).get("botToken", "")
+        from lib.slack_token import resolve_secret
+        token = resolve_secret(config.get("channels", {}).get("slack", {}).get("accounts", {}).get(acct, {}).get("botToken", ""))
         if not token:
             continue
         tokens[acct] = token

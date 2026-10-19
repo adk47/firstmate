@@ -114,6 +114,41 @@ fixture() { jq -s '{items: .}' >"$STUB_FIXTURE"; }
   if grep -q 'purple' <<<"$output"; then return 1; fi
 }
 
+# The describe stub echoes the URL it was handed, so these tests see WHICH image was picked.
+url_stub() {
+  cat >"$AD_SCREENING_DESCRIBE" <<'S'
+#!/usr/bin/env bash
+echo "described:$1"
+S
+}
+
+@test "media[0].url beats a placeholder primaryMediaUrl (MUS-12319)" {
+  url_stub
+  ad a1 null 2026-10-05T09:00:00Z \
+    | jq '.primaryMediaUrl="https://cdn.example/placeholders/amp-cover-placeholder.png" | .media=[{url:"https://cdn.example/media/real.png"}]' | fixture
+  run "$SCRIPT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"described:https://cdn.example/media/real.png"* ]]
+  [[ "$output" != *"placeholder"* ]]
+}
+
+@test "ad with only primaryMediaUrl still describes it" {
+  url_stub
+  ad a1 null 2026-10-05T09:00:00Z | fixture
+  run "$SCRIPT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"described:https://cdn.example/a.png"* ]]
+}
+
+@test "ad with no media at all says it could not be described" {
+  url_stub
+  ad a1 null 2026-10-05T09:00:00Z | jq 'del(.primaryMediaUrl)' | fixture
+  run "$SCRIPT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"creative could not be described"* ]]
+  [[ "$output" != *"described:"* ]]
+}
+
 @test "absent budget and schedule render 'not stated'" {
   ad a1 null 2026-10-05T09:00:00Z | jq 'del(.campaign.budget, .campaign.schedule)' | fixture
   run "$SCRIPT" --dry-run
@@ -184,6 +219,28 @@ fixture() { jq -s '{items: .}' >"$STUB_FIXTURE"; }
   echo '{"data":[]}' >"$STUB_FIXTURE"
   run "$SCRIPT" --dry-run
   [ "$status" -ne 0 ]
+}
+
+@test "a muso --json enveloped body is screened exactly like the bare one" {
+  ad a1 null 2026-10-05T09:00:00Z | jq -s '{data: {items: ., totalCount: 1, limit: 200, offset: 0}}' >"$STUB_FIXTURE"
+  run "$SCRIPT" --dry-run
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^<<<AD_DATA_BEGIN' <<<"$output")" -eq 1 ]
+  [[ "$output" == *"a1"* ]]
+}
+
+@test "an enveloped body without items exits non-zero" {
+  echo '{"data":{"nope":1}}' >"$STUB_FIXTURE"
+  run "$SCRIPT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"poll response is not a pending-review list"* ]]
+}
+
+@test "a bare body without items exits non-zero with the shape error" {
+  echo '{"nope":1}' >"$STUB_FIXTURE"
+  run "$SCRIPT" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"poll response is not a pending-review list"* ]]
 }
 
 @test "an empty queue exits zero with no packets" {

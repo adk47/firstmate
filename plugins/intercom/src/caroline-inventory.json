@@ -115,13 +115,11 @@
     },
     {
       "action_type_on_handoff": "credit-correction",
-      "description": "Remove mechanical wrong credits from a profile the customer owns, without touching production-side roles or wrong-merge cases.",
+      "description": "Resolve which mechanical wrong credits a customer owns on their profile, then route: file the staff packet and additionally point an owner to the in-app removal. The agent never removes a credit itself.",
       "first_read_tool": "profile_status",
-      "handoff_when": "unmerge-shaped cluster, owner mismatch, unclaimed/multi-owner profile, production-side role refusal, or repeated ambiguity",
+      "handoff_when": "staff removal requested, unmerge-shaped cluster, owner mismatch, unclaimed/multi-owner profile, production-side role refusal, or repeated ambiguity",
       "intent": "remove_wrong_credits",
-      "write_tools": [
-        "remove_credits"
-      ]
+      "write_tools": []
     }
   ],
   "no_reply": [

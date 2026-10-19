@@ -87,5 +87,6 @@
   ],
   "max_rows_per_run": 500,
   "max_approvals_per_user_per_day": 200,
-  "big_track_popularity": 60
+  "big_track_popularity": 60,
+  "max_ask_users_per_day": 100
 }

@@ -6,6 +6,9 @@ import type { HttpClient } from "./http.js";
 // in workspaces/support/skills/customer-credit-removal/scripts/remove-credits.sh
 // (Intercom-Version 2.10, ?display_as=plaintext, .source.author.email).
 const INTERCOM_API_BASE = process.env.MUSOAI_INTERCOM_API_BASE ?? "https://api.intercom.io";
+// Retrieve-conversation returns at most the 500 most recent parts, and its total_count
+// counts the returned parts, so a full page cannot prove the history is complete.
+const INTERCOM_MAX_PARTS = 500;
 
 export interface IntercomReader {
   // Returns the author email lowercased, or null on ANY unverifiable path
@@ -25,11 +28,26 @@ export interface IntercomReader {
   // the part's provenance (author == the actor's contact, recent)
   // server-side regardless.
   getLatestCustomerPart(conversationId: string, token: string): Promise<{ id: string; snippet: string } | null>;
+
+  // Did the bot admin post a comment containing any of `markers` (case-insensitive,
+  // whitespace-normalized) in one of this conversation's contact's OTHER conversations
+  // updated after `sinceUnix`? "unknown" on ANY unverifiable
+  // path (lookup failure, no single contact, more than `limit` conversations, a truncated
+  // or 500-part-capped part list); the caller MUST NOT read "unknown" as "not_found".
+  findBotMarkerInOtherConversations(params: {
+    conversationId: string;
+    token: string;
+    botAdminId: string;
+    markers: string[];
+    sinceUnix: number;
+    limit: number;
+  }): Promise<"found" | "not_found" | "unknown">;
 }
 
 // intercomAuthor is the structured author on a conversation source/part.
 interface intercomAuthor {
   type?: string;
+  id?: string | number;
   email?: string;
 }
 interface intercomPart {
@@ -42,7 +60,16 @@ interface intercomPart {
 interface intercomConversation {
   source?: { id?: string; created_at?: number; body?: string; author?: intercomAuthor };
   created_at?: number;
-  conversation_parts?: { conversation_parts?: intercomPart[] };
+  conversation_parts?: { conversation_parts?: intercomPart[]; total_count?: number };
+  contacts?: { contacts?: Array<{ id?: string }> };
+}
+interface intercomSearchPage {
+  conversations?: Array<{ id?: string | number }>;
+  total_count?: number;
+}
+
+function normalizedText(body: string | undefined): string {
+  return (body ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 // snippetOf reduces a message body (plaintext via display_as=plaintext, but
@@ -60,16 +87,16 @@ function isContactAuthor(a: intercomAuthor | undefined): boolean {
 }
 
 export function createIntercomReader(http: HttpClient): IntercomReader {
+  const headersFor = (token: string) => ({
+    Authorization: `Bearer ${token}`,
+    Accept: "application/json",
+    "Intercom-Version": "2.10",
+  });
+
   async function getConversation(conversationId: string, token: string): Promise<intercomConversation | null> {
     if (!conversationId || !token) return null;
     const url = `${INTERCOM_API_BASE}/conversations/${encodeURIComponent(conversationId)}?display_as=plaintext`;
-    const resp = await http.get<intercomConversation>(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-        "Intercom-Version": "2.10",
-      },
-    });
+    const resp = await http.get<intercomConversation>(url, { headers: headersFor(token) });
     return resp.ok ? resp.data : null;
   }
 
@@ -106,6 +133,53 @@ export function createIntercomReader(http: HttpClient): IntercomReader {
         consider(p.id, p.created_at, p.author, p.body, p.part_type);
       }
       return best;
+    },
+
+    async findBotMarkerInOtherConversations({ conversationId, token, botAdminId, markers, sinceUnix, limit }) {
+      const needles = (Array.isArray(markers) ? markers : []).map(normalizedText).filter(Boolean);
+      if (!conversationId || !token || !botAdminId || needles.length === 0 || limit < 1) return "unknown";
+      const hasNeedle = (body: string | undefined) => {
+        const text = normalizedText(body);
+        return needles.some((n) => text.includes(n));
+      };
+      const current = await getConversation(conversationId, token);
+      const contactIds = (current?.contacts?.contacts ?? []).map((c) => String(c?.id ?? "")).filter(Boolean);
+      if (contactIds.length !== 1) return "unknown";
+      const search = await http.post<intercomSearchPage>(`${INTERCOM_API_BASE}/conversations/search`, {
+        headers: headersFor(token),
+        body: {
+          query: {
+            operator: "AND",
+            value: [
+              { field: "contact_ids", operator: "=", value: contactIds[0] },
+              { field: "id", operator: "!=", value: conversationId },
+              { field: "updated_at", operator: ">", value: Math.floor(sinceUnix) },
+            ],
+          },
+          pagination: { per_page: limit },
+        },
+      });
+      if (!search.ok) return "unknown";
+      const rows = search.data?.conversations;
+      const total = search.data?.total_count;
+      if (!Array.isArray(rows) || typeof total !== "number" || total > rows.length || rows.length > limit) return "unknown";
+      let incomplete = false;
+      for (const row of rows) {
+        const id = String(row?.id ?? "");
+        if (!id) return "unknown";
+        if (id === conversationId) continue;
+        const conv = await getConversation(id, token);
+        const parts = conv?.conversation_parts?.conversation_parts;
+        const partsTotal = conv?.conversation_parts?.total_count;
+        if (!conv || !Array.isArray(parts) || parts.length >= INTERCOM_MAX_PARTS || (typeof partsTotal === "number" && partsTotal > parts.length)) {
+          incomplete = true;
+          continue;
+        }
+        const byBot = (a: intercomAuthor | undefined) => a?.type === "admin" && String(a.id ?? "") === botAdminId;
+        if (byBot(conv.source?.author) && hasNeedle(conv.source?.body)) return "found";
+        if (parts.some((p) => p.part_type === "comment" && byBot(p.author) && hasNeedle(p.body))) return "found";
+      }
+      return incomplete ? "unknown" : "not_found";
     },
   };
 }
