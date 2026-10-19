@@ -378,11 +378,15 @@ export interface ContactConversationsPage {
 }
 
 export interface IntercomClient {
+  // `dropped: true` means the wrapper deliberately posted nothing (the
+  // help-link gate emptied the body). Callers MUST branch on `dropped`,
+  // never on an empty messageId: RealIntercomClient also returns
+  // messageId "" when Intercom's response carries no part.
   replyToConversation(params: {
     conversationId: string;
     adminId: string;
     body: string;
-  }): Promise<{ messageId: string }>;
+  }): Promise<{ messageId: string; dropped?: true }>;
 
   assignConversation(params: {
     conversationId: string;

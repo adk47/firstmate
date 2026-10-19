@@ -592,7 +592,7 @@ export class SanitizingIntercomClient implements IntercomClient {
     conversationId: string;
     adminId: string;
     body: string;
-  }): Promise<{ messageId: string }> {
+  }): Promise<{ messageId: string; dropped?: true }> {
     const emailPass = sanitizeOutboundBody(params.body);
     if (emailPass.redactions.length > 0) {
       // Dedupe for the audit line so a single markdown-linked email
@@ -678,7 +678,7 @@ export class SanitizingIntercomClient implements IntercomClient {
       } catch {
         try { console.error(msg); } catch { /* noop */ }
       }
-      return { messageId: "" };
+      return { messageId: "", dropped: true };
     }
     return this.inner.replyToConversation({ ...params, body: refPass.body });
   }

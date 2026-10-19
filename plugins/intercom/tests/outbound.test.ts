@@ -992,8 +992,16 @@ describe("SanitizingIntercomClient help-centre link gate", () => {
     const res = await client.replyToConversation({ conversationId: "c1", adminId: "a1", body });
     expect(inner.calls.replyToConversation).toHaveLength(0);
     expect(res.messageId).toBe("");
+    expect(res.dropped).toBe(true);
     // Ops alert on the [intercom:ALERT] prefix (channel.ts); nothing else pages a dropped reply.
     expect(errors.some((m) => m.startsWith("[intercom:ALERT] [intercom:empty-after-sanitize] conv=c1 posting nothing"))).toBe(true);
+  });
+  it("leaves dropped undefined for a delivered reply", async () => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner, { error: () => {} } as any, () => manifest as any);
+    const res = await client.replyToConversation({ conversationId: "c1", adminId: "a1", body: "Hello there." });
+    expect(inner.calls.replyToConversation).toHaveLength(1);
+    expect(res.dropped).toBeUndefined();
   });
   it("strips an invented link and logs internally only", async () => {
     const errors: string[] = [];

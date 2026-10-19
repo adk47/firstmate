@@ -14,6 +14,7 @@ import {
   orderBatch,
   mergeBatchMedia,
   classifyRuntimeNoticePayload,
+  buildReplyOutcomeLog,
   resolveJevShadowQuestionsVersion,
   jevShadowRunnerConfig,
 } from "../src/channel.js";
@@ -268,6 +269,29 @@ describe("joinDeliveryChunks", () => {
     const reply = "Hi Nitin – I've flagged this for review.";
     const joined = joinDeliveryChunks([notice, reply]);
     expect(stripModelFallbackNotice(joined)).toBe(reply);
+  });
+});
+
+describe("buildReplyOutcomeLog (a gate-dropped reply must not log as `replied`)", () => {
+  const base = { tag: "intercom:acct_1", conversationId: "conv_1", chunks: 2 };
+  it("logs a delivered reply at info, unchanged", () => {
+    expect(buildReplyOutcomeLog({ ...base, reply: { messageId: "part_9" } })).toEqual({
+      level: "info",
+      delivered: true,
+      line: "[intercom:acct_1] replied conv=conv_1 partId=part_9 chunks=2",
+    });
+  });
+  it("still logs `replied` when Intercom returned no part id — that is not a drop", () => {
+    const o = buildReplyOutcomeLog({ ...base, reply: { messageId: "" } });
+    expect(o.delivered).toBe(true);
+    expect(o.line).toContain("partId=<none>");
+  });
+  it("alerts at error and never says `replied` when the gate dropped the reply", () => {
+    const o = buildReplyOutcomeLog({ ...base, reply: { messageId: "", dropped: true } });
+    expect(o.delivered).toBe(false);
+    expect(o.level).toBe("error");
+    expect(o.line).toMatch(/^\[intercom:ALERT\] \[intercom:acct_1\] reply dropped by help-link gate/);
+    expect(o.line).not.toContain("replied");
   });
 });
 

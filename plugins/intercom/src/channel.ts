@@ -382,6 +382,34 @@ export function joinDeliveryChunks(chunks: string[]): string {
 }
 
 /**
+ * A reply the help-link gate emptied was never posted. `dropped` is the only
+ * reliable signal — messageId "" also happens when Intercom returns no part —
+ * so logging `replied partId=<none>` for both makes a dropped reply
+ * indistinguishable from a delivered one. The delivered line stays exactly as
+ * it was; this only adds the dropped case.
+ */
+export function buildReplyOutcomeLog(params: {
+  tag: string;
+  conversationId: string;
+  chunks: number;
+  reply: { messageId: string; dropped?: true };
+}): { level: "info" | "error"; line: string; delivered: boolean } {
+  const { tag, conversationId, chunks, reply } = params;
+  if (reply.dropped) {
+    return {
+      level: "error",
+      delivered: false,
+      line: `[intercom:ALERT] [${tag}] reply dropped by help-link gate — customer got no answer conv=${conversationId} chunks=${chunks}`,
+    };
+  }
+  return {
+    level: "info",
+    delivered: true,
+    line: `[${tag}] replied conv=${conversationId} partId=${reply.messageId || "<none>"} chunks=${chunks}`,
+  };
+}
+
+/**
  * Decide whether a delivered reply payload is RUNTIME telemetry that must
  * never reach a support customer, and if so which signal identified it (for
  * the audit log). Returns null for genuine customer-facing content.
@@ -1565,16 +1593,42 @@ export const intercomPlugin = createChatChannelPlugin({
                 );
               } else {
                 try {
-                  const { messageId } = await client.replyToConversation({
+                  const reply = await client.replyToConversation({
                     conversationId: result.conversationId,
                     adminId: account.botAdminId,
                     body: guard.body,
                   });
-                  trackOutboundMessageId(messageId, state.outboundMessageIds);
-                  state.updatedAt = new Date().toISOString();
-                  log?.info?.(
-                    `[${tag}] replied conv=${result.conversationId} partId=${messageId || "<none>"} chunks=${bufferedChunks.length}`,
-                  );
+                  const outcome = buildReplyOutcomeLog({
+                    tag,
+                    conversationId: result.conversationId,
+                    chunks: bufferedChunks.length,
+                    reply,
+                  });
+                  if (outcome.delivered) {
+                    trackOutboundMessageId(reply.messageId, state.outboundMessageIds);
+                    state.updatedAt = new Date().toISOString();
+                    log?.info?.(outcome.line);
+                  } else {
+                    log?.error?.(outcome.line);
+                    // Nothing outside this plugin greps [intercom:ALERT] yet, so the
+                    // supervision webhook is the only live human alarm — the same one
+                    // the reasoning-leak escalate path uses above. No reassignment:
+                    // whether a dropped reply should change inbox ownership is a
+                    // product call, tracked separately.
+                    if (account.fallbackSlackSupervisionChannel) {
+                      try {
+                        await fetch(account.fallbackSlackSupervisionChannel, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            text: `:warning: Caroline's reply was emptied by the help-link gate and nothing was posted (conv ${result.conversationId}). The customer has no answer — please follow up.`,
+                          }),
+                        });
+                      } catch (err) {
+                        log?.error?.(`[${tag}] dropped-reply Slack notify failed conv=${result.conversationId}: ${err}`);
+                      }
+                    }
+                  }
                 } catch (err) {
                   // Customer-facing delivery failure: grep-able alert prefix
                   // so ops can wire Slack/Sentry on `[intercom:ALERT]`.
@@ -2080,11 +2134,23 @@ export const intercomPlugin = createChatChannelPlugin({
         const client = createIntercomClient(account.token, {
           error: (msg) => console.error(msg),
         });
-        const { messageId } = await client.replyToConversation({
+        const reply = await client.replyToConversation({
           conversationId,
           adminId: account.botAdminId,
           body: stripKnowledgeBase(stripConversationContext(text)),
         });
+        if (reply.dropped) {
+          console.error(
+            `[intercom:ALERT] [intercom:${account.accountId}] sendText dropped: emptied by help-link gate conv=${conversationId}`,
+          );
+          return {
+            channel: "intercom" as const,
+            messageId: "",
+            conversationId,
+            meta: { dropped: true, reason: "empty-after-sanitize" },
+          };
+        }
+        const { messageId } = reply;
 
         // Track outbound message ID for self-reply filtering
         if (state) {
