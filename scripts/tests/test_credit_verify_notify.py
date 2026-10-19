@@ -52,7 +52,17 @@ os.environ["CREDIT_PROOF_ON_FILE"] = PROOF_FILE
 # Org-affiliation verdicts (RULE-org-affiliation): every test account is "none" unless a test
 # brings its own; without a file the run sends nothing.
 AFFILIATION_FILE = os.path.join(_PROOF_DIR, "org-affiliation.json")
-TEST_USERS = ("42", "43", "44", "7", "77")
+# One Muso user id per test account: the per-user locks key on the user id as well as the
+# email (QA review of #1257 @21f2de0), so two accounts must not share one.
+TEST_ACCOUNTS = {"jane@example.com": "42", "bob@example.com": "43", "b@example.com": "44", "c@example.com": "7",
+                 "gone@example.com": "77", "paid@example.com": "78", "sam@example.com": "79", "u500@example.com": "500"}
+
+
+def _uid_of(email):
+    return TEST_ACCOUNTS.get((email or "jane@example.com").lower(), "42")
+
+
+TEST_USERS = ("42", "43", "44", "7", "77", "78", "79", "500")
 
 
 def affiliation_v1(verdicts, *, age_h=0.0):
@@ -84,7 +94,8 @@ def req(rid, *, pid=PID, status="approved", email="jane@example.com", name="Jane
         artist="Big Star", roles=("Mixing",), created="2026-10-15T20:00:00Z", track="t1"):
     return {"id": rid, "profileId": pid, "trackId": track, "status": status, "spotifyTrackTitle": title,
             "spotifyTrackArtists": [{"id": "a", "name": artist}], "credits": list(roles), "createdAt": created,
-            "user": {"id": "42", "fullName": name, "email": email} if email else None}
+            "user": {"id": _uid_of(email), "fullName": name, "email": email} if email else None}
+
 
 
 class FakeAdmin:
@@ -1899,6 +1910,32 @@ class EnableGateTests(unittest.TestCase):
                       for p, a in zip(fake.payloads, [x for x in fake.argv if x[1] == "send"]))
         self.assertEqual(sent, [(["g1", "g2"], "v1"), (["g3"], False)])
         self.assertEqual(rep.mixed_v1_users, 1)
+
+    def test_the_90_day_lock_follows_the_user_not_the_email(self):
+        """QA review of #1257 @21f2de0: an account that changes its email is still the same
+        user: the lock and the daily cap key on the Muso user id too, including notes written
+        before account_id existed (via the decider's user id for the credits they covered)."""
+        db = verify_ledger.connect(self.path)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        last_week = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+        c = verify_ledger.claim(db, user_key="old@example.com", day=last_week, request_ids=["m1"], message_type="email",
+                                approved_by=CAPTAIN_UID, approval_ref="ref", user_id="61")
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="900")
+        self.assertTrue(verify_ledger.asked_within(db, user_key="new@example.com", day=today, user_id="61"))
+        self.assertFalse(verify_ledger.asked_within(db, user_key="new@example.com", day=today, user_id="62"))
+        again = verify_ledger.claim(db, user_key="new@example.com", day=today, request_ids=["m2"], message_type="email",
+                                    approved_by=CAPTAIN_UID, approval_ref="ref", user_id="61")
+        self.assertEqual(again["result"], "recently_asked")
+        # A legacy row (no account_id): the decider's user id for its credit identifies the user.
+        db.execute("UPDATE verify_messages SET account_id = NULL")
+        db.close()
+        decisions_db(self.path, [dec("m1")])   # decider user_id 42 for m1
+        db = verify_ledger.connect(self.path)
+        try:
+            self.assertTrue(verify_ledger.asked_within(db, user_key="other@example.com", day=today, user_id="42"))
+            self.assertTrue(verify_ledger.capped(db, user_key="other@example.com", day=last_week, user_id="42"))
+        finally:
+            db.close()
 
     def test_the_days_cap_counts_what_the_ledger_already_sent_today(self):
         """QA review of #1257 @53428d0: a same-day retry or second invocation never gets a fresh cap."""

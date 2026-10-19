@@ -2649,6 +2649,148 @@ EOF
     return 0
 }
 
+# Admin list bounds (firstmate 066-070, incident 2026-10-19 05:38-05:50Z): an ad-hoc
+# count script paged GET /admin/credit-requests?status=approved&limit=500&page=1..800 as the
+# shared operations identity; core's list is OFFSET-paged, so deep pages are O(offset) and
+# site p99 went 0.28 -> 0.98s. Bulk questions go to Trino (or a profile/track-filtered read).
+# For the credit-request list endpoints, every identity through this wrapper:
+#   - limit above ADMIN_LIST_MAX_LIMIT (200) without profilesIds/trackId is refused;
+#   - an offset ((page-1)*limit) above ADMIN_LIST_MAX_OFFSET (20000) without a filter is refused;
+#   - list calls are paced to at most ADMIN_LIST_MAX_PER_SEC (2) per second per identity
+#     (= core's planned 120/min agent budget), across processes, via a per-identity state file.
+# The query is read the way core reads it (qs + parseInt): percent- and '+'-decoded, route
+# case-insensitive with repeated/trailing slashes collapsed, leading zeros and trailing junk
+# ignored like parseInt. A duplicated or bracketed limit/page/profilesIds/trackId (qs turns it
+# into an array or object) is refused as ambiguous. Pacing fails CLOSED: if its state cannot be
+# locked, read or written, the call is refused (QA + Fable on hydra#1270).
+ADMIN_LIST_MAX_LIMIT="${ADMIN_LIST_MAX_LIMIT:-200}"
+ADMIN_LIST_MAX_OFFSET="${ADMIN_LIST_MAX_OFFSET:-20000}"
+ADMIN_LIST_MAX_PER_SEC="${ADMIN_LIST_MAX_PER_SEC:-2}"
+ADMIN_LIST_LOCK_TRIES="${ADMIN_LIST_LOCK_TRIES:-100}"  # x 0.3s before a busy pacing lock refuses
+
+admin_list_urldecode() { # percent- and '+'-decode, backslashes kept literal
+    local s="${1//\\/\\\\}"
+    s="${s//+/ }"
+    printf '%b' "${s//%/\\x}"
+}
+
+# parseInt as core applies it: optional leading whitespace and sign, then digits; anything
+# after is ignored. Prints the integer, "NaN", or "HUGE" (more than 9 digits).
+admin_list_parseint() {
+    local v="$1" sign="" digits
+    v="${v#"${v%%[![:space:]]*}"}"
+    case "$v" in -*) sign="-"; v="${v#-}" ;; +*) v="${v#+}" ;; esac
+    digits="${v%%[!0-9]*}"
+    [[ -n "$digits" ]] || { printf 'NaN'; return 0; }
+    digits="${digits#"${digits%%[!0]*}"}"
+    [[ -n "$digits" ]] || digits=0
+    (( ${#digits} > 9 )) && { printf 'HUGE'; return 0; }
+    printf '%s%s' "$sign" "$digits"
+}
+
+admin_list_refuse() { echo "muso-admin-api: refusing ${ADMIN_LIST_METHOD:-GET} $1: $2" >&2; return 2; }
+
+enforce_admin_list_bounds() {
+    local method="$1" path="$2" upper
+    upper="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    # HEAD is a read too, and core serves it through the GET list handler (same
+    # unfiltered OFFSET query, body discarded), so it is bounded and paced like GET.
+    [[ "$upper" == "GET" || "$upper" == "HEAD" ]] || return 0
+    local ADMIN_LIST_METHOD="$upper"
+    local raw_route="${path%%\?*}" query="" route
+    [[ "$path" == *\?* ]] && query="${path#*\?}"
+    query="${query%%#*}"
+    route="$(admin_list_urldecode "$raw_route" | tr '[:upper:]' '[:lower:]')"
+    while [[ "$route" == *//* ]]; do route="${route//\/\//\/}"; done
+    route="${route%/}"
+    case "$route" in
+        */admin/credit-requests|*/admin/credit-requests/profiles) ;;
+        *) return 0 ;;
+    esac
+    local kv key val name limit_raw="" page_raw="" profiles="" track="" seen=" "
+    local IFS='&'
+    for kv in $query; do
+        [[ -n "$kv" ]] || continue
+        key="$(admin_list_urldecode "${kv%%=*}")"
+        if [[ "$kv" == *=* ]]; then val="$(admin_list_urldecode "${kv#*=}")"; else val=""; fi
+        for name in limit page profilesIds trackId; do
+            if [[ "$key" == "$name" ]]; then
+                [[ "$seen" == *" $name "* ]] && { unset IFS; admin_list_refuse "$route" "'$name' appears more than once (ambiguous)"; return 2; }
+                seen="$seen$name "
+                case "$name" in
+                    limit) limit_raw="$val" ;; page) page_raw="$val" ;;
+                    profilesIds) profiles="$val" ;; trackId) track="$val" ;;
+                esac
+            elif [[ "$key" == "${name}["* || "$key" == "${name}."* ]]; then
+                unset IFS; admin_list_refuse "$route" "'$key' (bracket/dot form of '$name' is ambiguous)"; return 2
+            fi
+        done
+    done
+    unset IFS
+    local limit page filtered=0
+    limit="$(admin_list_parseint "$limit_raw")"
+    page="$(admin_list_parseint "$page_raw")"
+    [[ "$limit" == "HUGE" ]] && { admin_list_refuse "$route" "limit is out of range"; return 2; }
+    [[ "$limit" == "NaN" || "$limit" == "0" ]] && limit=10
+    (( limit < 0 )) && { admin_list_refuse "$route" "negative limit"; return 2; }
+    [[ "$page" == "HUGE" ]] && { admin_list_refuse "$route" "page is out of range"; return 2; }
+    [[ "$page" == "NaN" ]] && page=1
+    (( page < 1 )) && page=1
+    profiles="${profiles//[[:space:],]/}"; track="${track//[[:space:]]/}"
+    # Only the plain list applies profilesIds/trackId (core list.js). /profiles ignores both
+    # and always runs the unfiltered grouped query, so it is never "filtered" (QA r2).
+    if [[ "$route" == */admin/credit-requests ]] && [[ -n "$profiles" || -n "$track" ]]; then
+        filtered=1
+    fi
+    if (( ! filtered )) && (( limit > ADMIN_LIST_MAX_LIMIT )); then
+        admin_list_refuse "$route" "limit=$limit and no profilesIds/trackId (max $ADMIN_LIST_MAX_LIMIT). For a bulk count or export use Trino, not the admin list API."; return 2
+    fi
+    if (( ! filtered )) && (( (page - 1) * limit > ADMIN_LIST_MAX_OFFSET )); then
+        admin_list_refuse "$route" "page=$page (offset $(( (page - 1) * limit )) > $ADMIN_LIST_MAX_OFFSET) with no profilesIds/trackId: deep unfiltered paging is O(offset) on core. Use an updatedAt window, a filter, or Trino."; return 2
+    fi
+    admin_list_pace
+}
+
+# At most ADMIN_LIST_MAX_PER_SEC list calls per second per identity, across processes.
+# Fails CLOSED: any state/lock error refuses the call (rc 2).
+admin_list_pace() {
+    local ident="${MUSO_ADMIN_IDENTITY:-default}" state lockdir now sec cnt waited=0 rc=0
+    state="${MUSO_OPS_STATE_DIR}/admin-list-pace.${ident//[^A-Za-z0-9_.-]/_}"
+    lockdir="$state.lockdir"
+    mkdir -p "$MUSO_OPS_STATE_DIR" 2>/dev/null && [[ -w "$MUSO_OPS_STATE_DIR" ]] || {
+        echo "muso-admin-api: refusing list call: pacing state dir $MUSO_OPS_STATE_DIR is not writable" >&2; return 2; }
+    # mkdir is atomic everywhere (no flock on macOS). A lock older than 60s is stale.
+    until mkdir "$lockdir" 2>/dev/null; do
+        if [[ -d "$lockdir" ]] && [[ -n "$(find "$lockdir" -maxdepth 0 -mmin +1 2>/dev/null)" ]]; then
+            rmdir "$lockdir" 2>/dev/null; continue
+        fi
+        (( waited++ >= ADMIN_LIST_LOCK_TRIES )) && { echo "muso-admin-api: refusing list call: pacing lock $lockdir is busy" >&2; return 2; }
+        sleep 0.3
+    done
+    while :; do
+        now="$(date +%s)"
+        if [[ -e "$state" ]]; then
+            if ! read -r sec cnt < "$state" 2>/dev/null; then sec=""; fi
+            [[ "$sec" =~ ^[0-9]+$ && "$cnt" =~ ^[0-9]+$ ]] || {
+                if [[ -s "$state" ]]; then
+                    echo "muso-admin-api: refusing list call: pacing state $state is unreadable or corrupt" >&2
+                    rmdir "$lockdir" 2>/dev/null; return 2
+                fi
+                sec=0; cnt=0; }
+        else
+            sec=0; cnt=0
+        fi
+        if [[ "$sec" == "$now" ]] && (( cnt >= ADMIN_LIST_MAX_PER_SEC )); then sleep 0.3; continue; fi
+        if [[ "$sec" == "$now" ]]; then cnt=$((cnt + 1)); else cnt=1; fi
+        if ! { printf '%s %s\n' "$now" "$cnt" > "$state.tmp" && mv -f "$state.tmp" "$state"; } 2>/dev/null; then
+            echo "muso-admin-api: refusing list call: pacing state $state cannot be written" >&2; rc=2
+        fi
+        break
+    done
+    rmdir "$lockdir" 2>/dev/null
+    return $rc
+}
+
 cmd_call() {
     check_env
     local method="${1:?Usage: call <METHOD> <path> [json-body]}"
@@ -2673,6 +2815,12 @@ EOF
             return 2
             ;;
     esac
+
+    # Admin list bounds (incident 2026-10-19): refuse unfiltered big/deep credit-request
+    # list pulls and pace list calls per identity. Reads only; never touches writes.
+    if ! enforce_admin_list_bounds "$method" "$path"; then
+        return 2
+    fi
 
     # Codex model-health gate (incident 2026-06-08). Refuse WRITES while the fleet is
     # silently degraded onto a weak fallback model the agent can't perceive; READS pass
