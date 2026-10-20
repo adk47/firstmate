@@ -107,14 +107,19 @@ readonly TESTABLE=0
 # SEND LOCKS (T06: "copy pack = captain approval before anything is sent"). Each flips to 1
 # only in a PR that carries Fable's copy GO and the captain's approval of the exact rendered
 # copy. While 0 the copy renders (--dry-run) but never posts.
-#   LIVE_WINDOWED_COPY_APPROVED  verify-live (new credits): the windowed copy, the only one sent.
+#   LIVE_WINDOWED_COPY_APPROVED  verify-live: the windowed copy (a reply-by date and "will be removed").
+#                                LOCKED (firstmate 090, 2026-10-19 23:27Z: the captain dropped
+#                                auto-removal, Fable ruling 4 as amended: NO message may say a credit
+#                                will be removed). Its follow-ups (day-14/25 reminders, after-rejection)
+#                                follow only a windowed note, so none can be sent either. Kept for
+#                                --dry-run previews only; the no-removal-language test fails if any
+#                                sendable message carries removal or deadline wording.
 #   RETRO_COPY_APPROVED          the retro-past no-threat ask.
-readonly LIVE_WINDOWED_COPY_APPROVED=1
-#   LIVE_V1_COPY_APPROVED        verify-live, PAID PROVISIONAL approvals only (decider evidence_kind
-#                                provisional_paid): Fable's no-deadline v1 copy, no date, no removal
-#                                language, no follow-ups (Fable ruling 4 as amended, firstmate 073:
-#                                never auto-removed; day-30 Ops review list instead). Sent only when
-#                                the caller passes --copy v1 (verify_notify does, for those credits).
+readonly LIVE_WINDOWED_COPY_APPROVED=0
+#   LIVE_V1_COPY_APPROVED        verify-live: Fable's no-deadline v1 copy, the ONLY copy a new credit's
+#                                note is sent with (firstmate 090): no date, no removal language, no
+#                                follow-ups, never removal-due. Only for a note whose every credit is
+#                                a server-confirmed decider approval (verify_ledger v1-eligible).
 readonly LIVE_V1_COPY_APPROVED=1
 readonly RETRO_COPY_APPROVED=0
 #   REMOVAL_COPY_APPROVED        the removal notice (and its one-time backfill).
@@ -350,18 +355,20 @@ case "$CAMPAIGN" in
   verify-live)
     MAX_CREDITS=200; MAX_LISTED=25
     case "$COPY_ARG" in ""|v1|windowed) ;; *) refuse "--copy must be v1 or windowed (got '$COPY_ARG')." ;; esac
-    if [ "$ACTION" = "post" ] && [ "$COPY_ARG" = "v1" ] && [ "$KIND" = "initial" ]; then
-      # Paid provisional approvals (firstmate 073): the no-threat v1 note, never removal-due.
+    if [ "$ACTION" = "post" ] && [ "$KIND" = "initial" ] && [ "$COPY_ARG" != "windowed" ]; then
+      # firstmate 090: every new credit's note is the no-threat v1 note, never removal-due.
       [ "$LIVE_V1_COPY_APPROVED" = "1" ] || refuse "the verify-live v1 copy is not approved for sending (LIVE_V1_COPY_APPROVED=0)."
       COPY="v1"
     elif [ "$ACTION" = "post" ]; then
-      [ -z "$COPY_ARG" ] || refuse "--copy windowed is implied for a real send; --copy v1 is for a paid provisional approval's initial note only."
+      [ "$LIVE_WINDOWED_COPY_APPROVED" = "1" ] \
+        || refuse "no verify-live message may name a deadline or say a credit will be removed (firstmate 090: the captain dropped auto-removal). The windowed note and its follow-ups are send-locked (LIVE_WINDOWED_COPY_APPROVED=0); a new credit's note is the v1 copy."
+      [ "$KIND" != "initial" ] || [ "$COPY_ARG" = "windowed" ] || refuse "internal: unexpected copy '$COPY_ARG'."
       COPY="windowed"
     elif [ "$KIND" != "initial" ]; then
       [ "$COPY_ARG" != "v1" ] || refuse "the v1 copy names no date and has no follow-ups; preview follow-ups with --copy windowed."
       COPY="windowed"
     else
-      COPY="${COPY_ARG:-windowed}"
+      COPY="${COPY_ARG:-v1}"   # a preview shows what is sent: v1 (firstmate 090)
     fi
     if [ "$COPY" = "windowed" ]; then APPROVAL_REF="$APPROVAL_REF_LIVE_WINDOWED"; else APPROVAL_REF="$APPROVAL_REF_LIVE_V1"; fi
     ;;
@@ -481,9 +488,6 @@ day_label() { "$PY_BIN" -I -c 'import datetime,sys; d=datetime.date.fromisoforma
 # the removal date; firstmate decision 2026-10-16 on review finding v1-copy-never-removal-due):
 # the v1 "nothing changes while we check" copy is preview-only, so a note that promised no
 # date can never reach a new credit.
-if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "verify-live" ] && [ "$LIVE_WINDOWED_COPY_APPROVED" != "1" ]; then
-  refuse "the verify-live windowed copy is not approved for sending yet (LIVE_WINDOWED_COPY_APPROVED=0). New provisional approvals only ever get the windowed note (30 days and the removal date); it needs Fable's copy GO and the captain's approval, landed in a PR that flips the lock. --dry-run renders it (--copy windowed); v1 is preview-only."
-fi
 if { [ "$ACTION" = "post" ] || [ "$ACTION" = "validate" ]; } && [ "$CAMPAIGN" = "takeback-notice" ] && [ "$TAKEBACK_COPY_APPROVED" != "1" ]; then
   refuse "the takeback-notice copy is not approved for sending yet (TAKEBACK_COPY_APPROVED=0). It needs Fable's copy GO and the captain's approval, landed in a PR that flips the lock; --dry-run renders it."
 fi
@@ -961,7 +965,7 @@ if [ "$KIND" = "initial" ] && [ "$COPY" = "v1" ]; then
   # approval, at least one of them provisional_paid. Checked HERE, so no caller can choose it.
   V1="$(ledger v1-eligible --request-ids "$ALL_IDS")" || die "the ledger read failed; refusing to send without proof the v1 copy applies."
   [ "$(printf '%s' "$V1" | "$JQ_BIN" -r '.eligible')" = "true" ] \
-    || refuse "the v1 (no-deadline) copy applies only to a paid provisional approval's note: $(printf '%s' "$V1" | "$JQ_BIN" -r '.reason')."
+    || refuse "a verify-live note goes only to credits the decider approved and the server confirmed: $(printf '%s' "$V1" | "$JQ_BIN" -r '.reason')."
 fi
 if [ "$KIND" = "initial" ]; then
   REFS_FILE="$(mktemp)"

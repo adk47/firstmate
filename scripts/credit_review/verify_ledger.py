@@ -915,11 +915,10 @@ def provisional_ids(db: sqlite3.Connection, request_ids: list[str]) -> set[str]:
 
 
 def v1_eligible(db: sqlite3.Connection, request_ids: list[str]) -> dict[str, Any]:
-    """Whether a note over `request_ids` may use the no-deadline, no-removal v1 copy. Checked
-    by the send gate itself (QA review of hydra#1257 @53428d0), so a direct or misrouted caller
-    cannot turn an ordinary credit's note into v1: every credit must be a server-confirmed
-    decider approval, and at least one a paid provisional approval. (A user's other decider
-    approvals ride in the same note: one note per user, and v1 is the milder copy.)"""
+    """Whether a verify-live note over `request_ids` may be sent (the v1 copy, the only one sent
+    since firstmate 090). Checked by the send gate itself (QA review of hydra#1257 @53428d0), so
+    a direct or misrouted caller cannot send a "we added your credit" note for a credit the
+    decider never approved: every credit must be a server-confirmed decider approval."""
     ids = list(dict.fromkeys(request_ids))
     if not ids:
         return {"eligible": False, "reason": "no credits"}
@@ -928,8 +927,6 @@ def v1_eligible(db: sqlite3.Connection, request_ids: list[str]) -> dict[str, Any
     if missing:
         return {"eligible": False, "reason": f"{len(missing)} credit(s) are not server-confirmed decider approvals",
                 "not_decider_approved": missing[:20]}
-    if not provisional_ids(db, ids):
-        return {"eligible": False, "reason": "no credit in this note is a paid provisional approval"}
     return {"eligible": True}
 
 
