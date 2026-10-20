@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import replace
 from typing import Any
 
 from credit_review.roles import family_of, fold, names_match
 
 from . import ocr
-from .signals import INFO, MISMATCH, POSITIVE, SOFT, ClaimContext, Evidence, Extracted, Signal
+from .signals import HARD, INFO, MISMATCH, POSITIVE, SOFT, ClaimContext, Evidence, Extracted, Signal
 
 TOOL = "credit_verify.content"
 
@@ -44,6 +45,14 @@ KINDS = (
 )
 DOCUMENT_KINDS = ("split_sheet", "contract", "invoice", "letter_of_direction")
 PUBLIC_KINDS = ("pro_portal", "catalog_page")
+# Documents of record: what they state IS the claim, so AI-generated pixels or
+# repeated regions on them are a forgery signal (Fable stage-2 sample 2026-10-20).
+RECORD_KINDS = DOCUMENT_KINDS + ("distributor_portal", "dsp_for_artists")
+AI_SOURCE = frozenset({"c2pa_ai_source", "iptc_ai_source_type"})
+# A text inconsistency on the image itself: a key field edited or pasted.
+# Only this turns repeated regions into doubt. The other edit signals are
+# PDF-only and never sit next to a copy_move (an image-only signal).
+TEXT_EDITS = frozenset({"ela_outlier_on_key_field"})
 
 # F3c: anchor words an authentic screenshot of each portal shows.
 PORTALS = {
@@ -487,3 +496,30 @@ def analyze(ext: Extracted, ctx: ClaimContext, path: str) -> tuple[list[Signal],
                                           f"{'this artist' if scope == 'artist' else 'this track'}'s total streams."),
                                   evidence=ev(raw)))
     return sig, ents
+
+
+def kind_adjusted(signals: list[Signal], kind: str | None) -> list[Signal]:
+    """Fable's stage-2 sample (2026-10-20) found both FORGED calls and every
+    copy-move doubt it opened were wrong on images that are not documents of
+    record. Applied once the content checks know the kind:
+      - AI-generation metadata (C2PA / IPTC trainedAlgorithmicMedia) is HARD only
+        on a document of record (RECORD_KINDS). On artwork, a cover, a photo or
+        an unplaced screenshot it says how the pixels were made, not that a
+        credit is fabricated: SOFT (never a pass, never a forgery on its own).
+      - copy_move_region on such an image is noise (UI chrome, repeated list
+        rows, a photo of a monitor) unless the image also shows a text edit
+        (TEXT_EDITS): INFO. On a document of record it stays SOFT.
+    Every other signal is unchanged."""
+    if kind in RECORD_KINDS:
+        return signals
+    edited = any(s.name in TEXT_EDITS for s in signals)
+    out = []
+    for s in signals:
+        if s.name in AI_SOURCE and s.severity == HARD:
+            s = replace(s, severity=SOFT, reason="AI-generation metadata on an image that is not a document of "
+                        "record (artwork, cover, photo): it shows how the pixels were made, not who made the credit.")
+        elif s.name == "copy_move_region" and s.severity == SOFT and not edited:
+            s = replace(s, severity=INFO, reason="Repeated regions on a screenshot or photo of a screen "
+                        "(interface, list rows) with no edited text: not evidence of tampering.")
+        out.append(s)
+    return out

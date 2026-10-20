@@ -42,11 +42,14 @@ Per held request and claimed role (Fable's table; shadow outcome only):
                 forensic doubt), T2 (60-79: needs a second independent
                 anchor, i.e. a trusted-source credit on the same release, a
                 cited web page or a footprint of 3 or more; that is decider
-                evidence, added by the go-live wiring), T3 (>= 80)
+                evidence, added by the go-live wiring), T3 (>= 80); also an
+                image that would be GENUINE but for its AI-generation
+                metadata (genuine_but_ai), never auto-approved
   approve       T0/T1 (< 60), a GENUINE or VERIFIED document and no
                 contradiction
-  review        no approving document, and one is SUSPECT on forensic grounds
-                (provenance, edits, reuse): a human looks
+  review        no approving document, and one that covers the track or is a
+                document of record is SUSPECT on forensic grounds
+                (provenance, edits, reuse; not AI-source alone): a human looks
   need_more     best document PLAUSIBLE or INCONSISTENT, or SUSPECT only
                 because it does not cover the claim (another song, role or
                 artist, or nothing ties it to the track): the gap is named
@@ -86,7 +89,7 @@ from typing import Any, Callable, Iterable
 from credit_retro.takeback import _read_affiliation
 from credit_review.decide import muso_user_id
 
-from . import FORENSICS_VERSION
+from . import FORENSICS_VERSION, content
 from .intercom import ORIGINAL, contact_hash
 from .pipeline import MultiRunner, ProofResult, _multi_sandbox, extract_against, finalize_against
 from .sandbox import MAX_BYTES
@@ -148,8 +151,84 @@ def forensic_doubt(d: dict[str, Any]) -> bool:
     """A SUSPECT document whose soft signals are about the document itself
     (provenance, edits, reuse), not about what it covers. H3 also says
     SUSPECT when nothing ties the document to the track (no soft signal at
-    all): that is a coverage gap."""
-    return d["verdict"] == "SUSPECT" and bool(set(d.get("soft") or []) - COVERAGE_GAPS - UNCHECKABLE)
+    all): that is a coverage gap. It counts for a claim only when the
+    document covers the track or is a document of record: an edited
+    screenshot of something else is a named gap, not doubt about this claim."""
+    if d.get("track_listed") is not True and d.get("kind") not in content.RECORD_KINDS:
+        return False
+    return d["verdict"] == "SUSPECT" and bool(set(d.get("soft") or []) - COVERAGE_GAPS - UNCHECKABLE
+                                              - content.AI_SOURCE)
+
+
+GENUINE_CEILING = frozenset({"claimed_role_not_expressible", "claimed_role_not_listed", "claim_text_not_rendered"})
+
+
+def genuine_but_ai(d: dict[str, Any]) -> bool:
+    """An image that would be GENUINE without its AI-generation metadata: it
+    names the verified claimant in the role on the track and its only soft
+    signals are AI-source."""
+    soft, sig = set(d.get("soft") or []), set(d.get("signals") or [])
+    return (d["verdict"] == "SUSPECT" and d.get("track_listed") is True and bool(soft)
+            and soft <= content.AI_SOURCE and "claimant_named" in sig and not sig & GENUINE_CEILING)
+
+
+KIND_LABEL = {"split_sheet": "split sheet", "contract": "contract", "invoice": "invoice",
+              "letter_of_direction": "letter of direction", "pro_portal": "PRO registration",
+              "distributor_portal": "distributor screenshot", "dsp_for_artists": "streaming-dashboard screenshot",
+              "daw_session": "session screenshot", "catalog_page": "credits page"}
+
+
+def _doc(d: dict[str, Any]) -> str:
+    """'the split sheet you sent (Intercom conversation …41214, file 2)': kind and
+    where it came from, never its content."""
+    ref = str(d.get("source_ref") or "")
+    parts = ref.split(":")
+    where = ""
+    if len(parts) == 3:
+        file = str(int(parts[2]) + 1) if parts[2].isdigit() else parts[2]
+        where = f" (Intercom conversation …{parts[1][-5:]}, file {file})"
+    return f"the {KIND_LABEL.get(d.get('kind') or '', 'file')} you sent{where}"
+
+
+def gap_reason(r: "Request", role: str, best: dict[str, Any], results: list[dict[str, Any]]) -> str:
+    """The concrete gap for a need_more, so an ask is never a generic re-ask
+    (Fable sample 2026-10-20, change 3): which document was read, what it
+    covers (titles from the catalog, never text from the document) and what is
+    missing for THIS track and role. Titles and roles come from the request."""
+    title = f"“{r.title}”" if r.title else "this track"
+    soft = set(best.get("soft") or [])
+    sig = set(best.get("signals") or []) | soft
+    want = f"a document that names {title} and your {role} credit"
+    doc = _doc(best)
+    doc = doc[0].upper() + doc[1:]
+    if soft & UNCHECKABLE:
+        return f"{doc} could not be read (file type or size); for {title} we need {want}."
+    if "isrc_other_recording" in sig:
+        return f"{doc} carries the ISRC of a different recording than {title}; " \
+               f"for {title} we need {want}."
+    covers = [t for t in (best.get("lists") or []) if t and t != r.title][:2]
+    if best.get("track_listed") is True:
+        if best.get("named") is False:
+            return f"{doc} names {title} but does not show your name; we need " \
+                   f"a document for {title} that shows you as {role}."
+        if "claimed_role_not_listed" in sig:
+            return f"{doc} names {title} but not the role you claimed ({role}); we " \
+                   f"need a document that shows your {role} credit on it."
+        if "claimed_role_not_expressible" in sig:
+            return f"{doc} names {title} but can't show the role you claimed ({role}); we " \
+                   f"need a document that shows your {role} credit on it."
+        if "split_shares_do_not_add_up" in sig:
+            return f"{doc} names {title} but its split shares do not add up to 100%; we " \
+                   f"need a corrected document that shows your {role} credit on it."
+        if "claim_text_not_rendered" in sig:
+            return f"{doc} names {title} only in text the rendered page does not show; we " \
+                   f"need a document for {title} that visibly shows you as {role}."
+        return f"{doc} names {title} but cannot on its own confirm your {role} credit on it; " \
+               f"we need a document for {title} that shows you as {role}."
+    if covers:
+        shown = " and ".join(f"“{t}”" for t in covers)
+        return f"{doc} covers {shown}, not {title}; for {title} we need {want}."
+    return f"{doc} does not name {title} or its ISRC; for {title} we need {want}."
 RANK = {"VERIFIED": 7, "GENUINE": 6, "PLAUSIBLE": 5, "INCONSISTENT": 4, "SUSPECT": 3,
         "CLEAN_UNLINKED": 2, "UNDETERMINED": 1, "FORGED_LIKELY": 0}
 APPROVING = ("VERIFIED", "GENUINE")
@@ -514,13 +593,16 @@ def judge(r: Request, role: str, results: list[dict[str, Any]], *, org: str | No
                                     "credit on the same release, a cited web page, or a footprint of 3 or more): "
                                     "decider evidence, added at go-live", best, results)
         return Outcome("human", f"{v} document, but {t} stays human", best, results)
+    ai = next((d for d in results if genuine_but_ai(d)), None)
+    if ai:
+        return Outcome("human", "an image with AI-generation metadata otherwise names you in the role on this "
+                                f"track ({ai.get('source_ref')}): a human confirms; never auto-approved", ai, results)
     doubt = [d for d in results if forensic_doubt(d)]
     if doubt:
         return Outcome("review", "a document on file has forensic doubts (SUSPECT): a human looks", doubt[0],
                        results)
     if v in ("PLAUSIBLE", "INCONSISTENT", "SUSPECT"):
-        gap = "; ".join(best.get("reasons") or [])[:300] or v
-        return Outcome("need_more", f"{v}: {gap}", best, results)
+        return Outcome("need_more", gap_reason(r, role, best, results)[:400], best, results)
     return Outcome("undetermined", f"best document {v}", best, results)
 
 
@@ -535,15 +617,16 @@ def held_account(db: sqlite3.Connection, user_id: int) -> str | None:
     """The document behind an earlier reject_hold for the account ("" when
     unknown), or None when it has none."""
     row = db.execute("SELECT source_ref FROM stage2_shadow WHERE user_id=? AND outcome='reject_hold' "
-                     "ORDER BY id DESC LIMIT 1", (user_id,)).fetchone()
+                     "AND analyzer_version=? ORDER BY id DESC LIMIT 1", (user_id, FORENSICS_VERSION)).fetchone()
     return None if row is None else (row[0] or "")
 
 
 def judged(db: sqlite3.Connection, request_id: str) -> bool:
     """True once a run judged the request without an undetermined role, or
-    after MAX_ATTEMPTS runs (the last one stands)."""
-    runs = db.execute("SELECT SUM(outcome = 'undetermined') FROM stage2_shadow WHERE request_id=? GROUP BY run_id",
-                      (request_id,)).fetchall()
+    after MAX_ATTEMPTS runs (the last one stands), under the CURRENT analyzer
+    version: a new FORENSICS_VERSION re-judges every request."""
+    runs = db.execute("SELECT SUM(outcome = 'undetermined') FROM stage2_shadow WHERE request_id=? "
+                      "AND analyzer_version=? GROUP BY run_id", (request_id, FORENSICS_VERSION)).fetchall()
     return any(u == 0 for (u,) in runs) or len(runs) >= MAX_ATTEMPTS
 
 
@@ -590,6 +673,7 @@ def run(store: ProofStore, *, fetch: Fetch, trino: Trino = trino_query, runner: 
         os.chmod(tmp, 0o700)
         ctxs = contexts_for(mine)
         per_claim: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        lists: dict[str, set[str]] = defaultdict(set)    # proof -> held titles it lists (catalog titles)
         unfetched = partial = None
         try:
             docs, errs, failures, answered = documents(convs.get(uid, []), fetch, tmp, dl, cache_root)
@@ -611,12 +695,21 @@ def run(store: ProofStore, *, fetch: Fetch, trino: Trino = trino_query, runner: 
                 for c, ctx_results in zip(group, res):
                     for pr in ctx_results:
                         v, reasons, sig = claim_verdict(pr, c)
+                        names = {x.name for x in sig}
                         per_claim[pr.request_id].append({
                             "verdict": v, "proof_id": pr.proof_id, "source_ref": d.source_ref,
                             "kind": pr.kind, "track_listed": pr.track_listed, "reasons": reasons[:4],
-                            "soft": sorted({x.name for x in sig if x.severity == SOFT})})
+                            "soft": sorted({x.name for x in sig if x.severity == SOFT}),
+                            "signals": sorted(names),
+                            "named": (True if names & {"claimant_named", "claimant_named_unverified"} else
+                                      False if "claimant_not_named" in names else None)})
+                        if pr.track_listed is True and c.track_title:
+                            lists[pr.proof_id].add(c.track_title)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+        for ds in per_claim.values():
+            for d in ds:
+                d["lists"] = sorted(lists.get(d["proof_id"], ()))
         checked = {rid for c in ctxs for rid in c.request_ids}
         forged = next((d["source_ref"] for ds in per_claim.values() for d in ds if d["verdict"] == FORGED_LIKELY),
                       None) or held_account(db, uid)
@@ -668,7 +761,8 @@ def sample(db: sqlite3.Connection, n: int = 50, seed: int = 1019) -> list[sqlite
     import random
     db.row_factory = sqlite3.Row
     rows = db.execute("SELECT s.* FROM stage2_shadow s JOIN (SELECT request_id, role, MAX(id) id FROM stage2_shadow "
-                      "GROUP BY request_id, role) l USING(id)").fetchall()
+                      "WHERE analyzer_version=? GROUP BY request_id, role) l USING(id)",
+                      (FORENSICS_VERSION,)).fetchall()
     rng = random.Random(seed)
     by: dict[str, list[sqlite3.Row]] = defaultdict(list)
     for r in rows:
@@ -690,21 +784,22 @@ def sample_markdown(rows: Iterable[sqlite3.Row]) -> str:
     lines = ["# Stage 2 shadow: verdict sample for Fable", "",
              "One row per request and claimed role. Check each against the document (Intercom conversation and "
              "file below) and mark agree / disagree. A false `approve` is the failure that blocks go-live.", "",
-             "| # | request | user | paid | role | track tier | outcome | best verdict | document | reason | agree? |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| # | request | user | paid | role | track tier | outcome | best verdict | document | reason | analyzer "
+             "| agree? |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for i, r in enumerate(rows, 1):
         ref = r["source_ref"] or ""
         lines.append(f"| {i} | `{r['request_id']}` | {r['user_id']} | {'yes' if r['paid'] == 1 else 'no'} | "
                      f"{r['role']} | {r['tier']} (pop {r['popularity']}) | **{r['outcome']}** | "
                      f"{r['verdict'] or '-'} | {r['doc_kind'] or '-'} `{ref}` | "
-                     f"{(r['reason'] or '').replace('|', '/')[:160]} | |")
+                     f"{(r['reason'] or '').replace('|', '/')[:400]} | {r['analyzer_version'] or '-'} | |")
     return "\n".join(lines) + "\n"
 
 
 def summary(db: sqlite3.Connection) -> dict[str, Any]:
     rows = db.execute("SELECT s.outcome, s.paid, COUNT(*) FROM stage2_shadow s JOIN (SELECT request_id, role, "
-                      "MAX(id) id FROM stage2_shadow GROUP BY request_id, role) l USING(id) "
-                      "GROUP BY 1, 2").fetchall()
+                      "MAX(id) id FROM stage2_shadow WHERE analyzer_version=? GROUP BY request_id, role) l USING(id) "
+                      "GROUP BY 1, 2", (FORENSICS_VERSION,)).fetchall()
     out: dict[str, Any] = defaultdict(lambda: {"paid": 0, "free": 0})
     for outcome, paid, n in rows:
         out[outcome]["paid" if paid == 1 else "free"] += n

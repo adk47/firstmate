@@ -19,4 +19,4 @@ A check that cannot run (tool missing, timeout, unparseable file) emits an
 GENUINE.
 """
 
-FORENSICS_VERSION = "pf-1"
+FORENSICS_VERSION = "pf-2"   # pf-2: kind-aware AI-source and copy-move (Fable sample 2026-10-20)

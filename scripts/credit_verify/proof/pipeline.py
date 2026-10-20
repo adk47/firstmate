@@ -126,6 +126,7 @@ def finalize(store: ProofStore, path: str, raw: dict[str, Any], *, contact_h: st
         import hashlib
         with open(path, "rb") as fh:
             proof_id = hashlib.sha256(fh.read()).hexdigest()
+    signals = content.kind_adjusted(signals, raw.get("kind"))
     names = {s.name for s in signals}
     named = (True if names & {"claimant_named", "claimant_named_unverified"} else
              False if "claimant_not_named" in names else None)

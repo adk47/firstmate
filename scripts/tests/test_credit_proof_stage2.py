@@ -472,14 +472,27 @@ class RunTests(unittest.TestCase):
         stage2.ensure_schema(self.store.db)
         self.store.db.execute(
             "INSERT INTO stage2_shadow (run_id, judged_at, request_id, role, user_id, outcome, reason, source_ref,"
-            " documents, detail_json) VALUES ('old', '2026-10-18T00:00:00Z', 'ffffffff-0000-0000-0000-000000000009',"
-            " 'Songwriter', 7, 'reject_hold', 'forged', 'intercom:2150000:0', 1, '[]')")
+            " documents, detail_json, analyzer_version) VALUES ('old', '2026-10-18T00:00:00Z',"
+            " 'ffffffff-0000-0000-0000-000000000009', 'Songwriter', 7, 'reject_hold', 'forged',"
+            " 'intercom:2150000:0', 1, '[]', ?)", (stage2.FORENSICS_VERSION,))
         self.store.db.commit()
         self.go()
         outcome, reason = self.store.db.execute("SELECT outcome, reason FROM stage2_shadow WHERE request_id=?",
                                                 (RA,)).fetchone()
         self.assertEqual((outcome, reason), ("human", "account hold: a document on file for this account is "
                                                       "likely forged (intercom:2150000:0)"))
+
+    def test_a_reject_hold_from_an_older_analyzer_neither_holds_the_account_nor_blocks_a_rejudge(self):
+        stage2.ensure_schema(self.store.db)
+        self.store.db.execute(
+            "INSERT INTO stage2_shadow (run_id, judged_at, request_id, role, user_id, outcome, reason, source_ref,"
+            " documents, detail_json, analyzer_version) VALUES ('old', '2026-10-18T00:00:00Z', ?, 'Songwriter', 7,"
+            " 'reject_hold', 'forged', 'intercom:2150000:0', 1, '[]', 'pf-1')", (RA,))
+        self.store.db.commit()
+        self.go()
+        outcome = self.store.db.execute("SELECT outcome FROM stage2_shadow WHERE request_id=? AND analyzer_version=?",
+                                        (RA, stage2.FORENSICS_VERSION)).fetchone()
+        self.assertEqual(tuple(outcome), ("approve",))
 
     def test_undetermined_is_judged_again_up_to_three_runs(self):
         broken = lambda p, d, c, cs: {"fatal": "sandbox tooling broke"}   # noqa: E731
@@ -660,6 +673,180 @@ class InputTests(unittest.TestCase):
     def test_download_refuses_plain_http(self):
         with self.assertRaises(ValueError):
             stage2.download("http://x/1", "/dev/null")
+
+
+class FableSample1020Tests(unittest.TestCase):
+    """Fable's stage-2 sample (2026-10-20): both FORGED calls and every
+    copy-move doubt it opened were wrong on images that are not documents of
+    record; need_more must name the gap."""
+
+    def sig(self, name, sev):
+        from credit_verify.proof.signals import Signal
+        return Signal("F3a" if "ai" in name else "F3b", name, sev)
+
+    def test_ai_source_is_soft_on_artwork_and_hard_on_a_document_of_record(self):
+        from credit_verify.proof import content
+        from credit_verify.proof.signals import HARD, SOFT
+        for kind in ("unknown", "catalog_page", "daw_session", None):
+            got = content.kind_adjusted([self.sig("c2pa_ai_source", HARD), self.sig("iptc_ai_source_type", HARD)], kind)
+            self.assertEqual({s.severity for s in got}, {SOFT}, kind)
+            self.assertNotEqual(verdict.decide(got, ctx("T", "t", RA))[0], verdict.FORGED_LIKELY)
+        for kind in ("invoice", "contract", "split_sheet", "distributor_portal", "dsp_for_artists"):
+            got = content.kind_adjusted([self.sig("c2pa_ai_source", HARD)], kind)
+            self.assertEqual(got[0].severity, HARD, kind)
+            self.assertEqual(verdict.decide(got, ctx("T", "t", RA))[0], verdict.FORGED_LIKELY)
+
+    def test_a_liner_note_with_writer_affiliations_and_ai_metadata_is_not_forged(self):
+        from credit_verify.proof import content
+        from credit_verify.proof.signals import HARD, SOFT
+        kind = content.classify_kind("Full House\nWritten by Ann Alpha (BMI), Bob Beta (ASCAP)\n"
+                                     "Produced by Ann Alpha (BMI)")
+        self.assertEqual(kind, "pro_portal")
+        got = content.kind_adjusted([self.sig("c2pa_ai_source", HARD)], kind)
+        self.assertEqual(got[0].severity, SOFT)
+        self.assertNotEqual(verdict.decide(got, ctx("T", "t", RA))[0], verdict.FORGED_LIKELY)
+
+    def test_a_content_mismatch_next_to_noise_copy_move_is_not_forged(self):
+        from credit_verify.proof import content
+        from credit_verify.proof.signals import INFO, MISMATCH, POSITIVE
+        sig = [Signal("F5a", "title_matches_claim", POSITIVE), Signal("F5a", "isrc_other_recording", MISMATCH),
+               self.sig("copy_move_region", SOFT)]
+        got = content.kind_adjusted(sig, "catalog_page")
+        self.assertEqual(got[2].severity, INFO)
+        self.assertEqual(verdict.decide(got, ctx("T", "t", RA))[0], verdict.INCONSISTENT)
+        on_record = content.kind_adjusted(sig, "invoice")
+        self.assertEqual(verdict.decide(on_record, ctx("T", "t", RA))[0], verdict.FORGED_LIKELY)
+
+    def test_copy_move_is_noise_on_a_screenshot_unless_text_was_edited(self):
+        from credit_verify.proof import content
+        from credit_verify.proof.signals import INFO, SOFT
+        self.assertEqual(content.kind_adjusted([self.sig("copy_move_region", SOFT)], "unknown")[0].severity, INFO)
+        edited = content.kind_adjusted([self.sig("copy_move_region", SOFT), self.sig("ela_outlier_on_key_field", SOFT)],
+                                       "unknown")
+        self.assertEqual(edited[0].severity, SOFT)
+        self.assertEqual(content.kind_adjusted([self.sig("copy_move_region", SOFT)], "invoice")[0].severity, SOFT)
+
+    def r(self, title="Full House", pop=30):
+        return stage2.Request(request_id=RA, user_id=7, status="unverified", roles=["Producer"], title=title,
+                              artists=[], popularity=pop, track_id="t", isrc=None, release_date=None,
+                              created_at="", names=["A"])
+
+    def doc(self, **kw):
+        d = {"verdict": "SUSPECT", "proof_id": "p1", "source_ref": "intercom:215476447551214:2", "kind": "unknown",
+             "reasons": ["nothing in the document ties it to this track"], "soft": [], "track_listed": False,
+             "named": None, "signals": [], "lists": []}
+        d.update(kw)
+        return d
+
+    def test_an_ai_image_that_otherwise_ties_goes_to_a_human_never_approve(self):
+        d = self.doc(soft=["c2pa_ai_source"], track_listed=True, named=True,
+                     signals=["c2pa_ai_source", "claimant_named", "title_matches_claim"])
+        o = stage2.judge(self.r(), "Producer", [d], org=None, readable=1)
+        self.assertEqual(o.outcome, "human")
+        self.assertIn("never auto-approved", o.reason)
+        # without the tie it is a named gap, not forensic doubt
+        o = stage2.judge(self.r(), "Producer", [self.doc(soft=["c2pa_ai_source"], signals=["c2pa_ai_source"])],
+                         org=None, readable=1)
+        self.assertEqual(o.outcome, "need_more")
+
+    def test_an_ai_made_cover_naming_the_track_and_claimant_follows_its_text_to_the_role_gap(self):
+        from credit_verify.proof import content
+        from credit_verify.proof.signals import HARD, INFO, POSITIVE
+        raw = [self.sig("c2pa_ai_source", HARD), Signal("F5a", "title_matches_claim", POSITIVE),
+               Signal("F5b", "claimant_named", POSITIVE), Signal("F5b", "claimed_role_not_expressible", INFO,
+                                                                 reason="The document can't show the role you claimed.")]
+        for kind in ("unknown", "catalog_page"):
+            sig = content.kind_adjusted(raw, kind)
+            v, reasons = verdict.decide(sig, ctx("Full House", "t", RA, role="Producer"))
+            d = self.doc(kind=kind, verdict=v, reasons=reasons, track_listed=True, named=True,
+                         soft=sorted(s.name for s in sig if s.severity == SOFT),
+                         signals=sorted(s.name for s in sig))
+            o = stage2.judge(self.r(), "Producer", [d], org=None, readable=1)
+            self.assertEqual(o.outcome, "need_more", kind)
+            self.assertIn("can't show the role you claimed (Producer)", o.reason)
+        unverified = self.doc(soft=["c2pa_ai_source"], track_listed=True, named=True,
+                              signals=["c2pa_ai_source", "claimant_named_unverified", "title_matches_claim"])
+        self.assertEqual(stage2.judge(self.r(), "Producer", [unverified], org=None, readable=1).outcome, "need_more")
+        inconsistent = self.doc(verdict="INCONSISTENT", soft=["c2pa_ai_source"], track_listed=True, named=True,
+                                signals=["c2pa_ai_source", "claimant_named", "split_shares_do_not_add_up"])
+        self.assertEqual(stage2.judge(self.r(), "Producer", [inconsistent], org=None, readable=1).outcome,
+                         "need_more")
+
+    def test_need_more_names_the_document_what_it_covers_and_the_gap(self):
+        o = stage2.judge(self.r(), "Producer", [self.doc(kind="catalog_page", lists=["On The Way Up"])], org=None,
+                         readable=1)
+        self.assertEqual(o.outcome, "need_more")
+        self.assertEqual(o.reason, "The credits page you sent (Intercom conversation …51214, file 3) covers "
+                                   "“On The Way Up”, not “Full House”; for “Full House” we need a document that "
+                                   "names “Full House” and your Producer credit.")
+        o = stage2.judge(self.r(), "Producer", [self.doc(kind="invoice", verdict="INCONSISTENT", track_listed=True,
+                                                         named=False, reasons=["Your name doesn't appear"])],
+                         org=None, readable=1)
+        self.assertIn("names “Full House” but does not show your name", o.reason)
+        o = stage2.judge(self.r(), "Producer", [self.doc(soft=["reject_unaccepted_type"])], org=None, readable=1)
+        self.assertIn("could not be read", o.reason)
+        o = stage2.judge(self.r(), "Producer", [self.doc(verdict="INCONSISTENT", signals=["isrc_other_recording"],
+                                                         reasons=["The ISRC in your document is for a different "
+                                                                  "recording."])], org=None, readable=1)
+        self.assertIn("ISRC of a different recording", o.reason)
+        # a credits page naming the title and the claimant, but with another recording's ISRC: the ask
+        # names the ISRC conflict, not the role
+        o = stage2.judge(self.r(), "Producer", [self.doc(kind="catalog_page", verdict="INCONSISTENT",
+                                                         track_listed=True, named=True,
+                                                         signals=["claimant_named", "isrc_other_recording",
+                                                                  "title_matches_claim"])], org=None, readable=1)
+        self.assertEqual(o.outcome, "need_more")
+        self.assertIn("carries the ISRC of a different recording than “Full House”", o.reason)
+        self.assertNotIn("confirm your Producer credit", o.reason)
+        o = stage2.judge(self.r(), "Producer", [self.doc()], org=None, readable=1)
+        self.assertIn("does not name “Full House” or its ISRC", o.reason)
+        o = stage2.judge(self.r(), "Producer", [self.doc(source_ref="intercom:215476447551214:3.png")], org=None,
+                         readable=1)
+        self.assertIn("file 3.png)", o.reason)
+
+    def test_an_invoice_naming_the_claimant_and_track_but_not_the_role_names_the_role_gap(self):
+        plausible = self.doc(kind="invoice", verdict="PLAUSIBLE", track_listed=True, named=True,
+                             reasons=["The document can't show the role you claimed.", "title_matches_claim",
+                                      "claimant_named"],
+                             signals=["claimant_named", "claimed_role_not_expressible", "title_matches_claim"])
+        o = stage2.judge(self.r(), "Producer", [plausible], org=None, readable=1)
+        self.assertEqual(o.outcome, "need_more")
+        self.assertIn("can't show the role you claimed (Producer)", o.reason)
+        self.assertNotIn("your name", o.reason)
+        listed = self.doc(kind="invoice", track_listed=True, named=True, soft=["claimed_role_not_listed"],
+                          signals=["claimant_named", "claimed_role_not_listed", "title_matches_claim"])
+        o = stage2.judge(self.r(), "Producer", [listed], org=None, readable=1)
+        self.assertEqual(o.outcome, "need_more")
+        self.assertIn("not the role you claimed (Producer)", o.reason)
+        shares = self.doc(kind="split_sheet", verdict="INCONSISTENT", track_listed=True, named=True,
+                          signals=["claimant_named", "split_shares_do_not_add_up", "title_matches_claim"])
+        o = stage2.judge(self.r(), "Producer", [shares], org=None, readable=1)
+        self.assertIn("split shares do not add up", o.reason)
+        hidden = self.doc(kind="contract", verdict="PLAUSIBLE", track_listed=True, named=True,
+                          signals=["claim_text_not_rendered", "claimant_named", "title_matches_claim"])
+        o = stage2.judge(self.r(), "Producer", [hidden], org=None, readable=1)
+        self.assertIn("rendered page does not show", o.reason)
+
+    def test_forensic_doubt_counts_only_on_a_document_that_covers_the_track_or_of_record(self):
+        edited = self.doc(soft=["editor_software_on_screenshot"])
+        self.assertEqual(stage2.judge(self.r(), "Producer", [edited], org=None, readable=1).outcome, "need_more")
+        covering = self.doc(soft=["editor_software_on_screenshot"], track_listed=True)
+        self.assertEqual(stage2.judge(self.r(), "Producer", [covering], org=None, readable=1).outcome, "review")
+        invoice = self.doc(kind="invoice", soft=["online_editor_producer"])
+        self.assertEqual(stage2.judge(self.r(), "Producer", [invoice], org=None, readable=1).outcome, "review")
+
+    def test_the_sample_and_summary_read_only_the_current_analyzer(self):
+        db = sqlite3.connect(":memory:")
+        stage2.ensure_schema(db)
+        for i, (outcome, version) in enumerate((("reject_hold", "pf-1"), ("need_more", FORENSICS_VERSION))):
+            db.execute("INSERT INTO stage2_shadow (run_id, judged_at, request_id, role, user_id, outcome, reason,"
+                       " documents, detail_json, analyzer_version) VALUES (?, '', ?, 'Producer', 7, ?, ?, 1, '[]', ?)",
+                       (f"r{i}", f"req-{i}", outcome, "x" * 380, version))
+        rows = stage2.sample(db)
+        self.assertEqual([r["outcome"] for r in rows], ["need_more"])
+        md = stage2.sample_markdown(rows)
+        self.assertIn("x" * 380 + f" | {FORENSICS_VERSION} |", md)
+        self.assertEqual(stage2.summary(db), {"need_more": {"paid": 0, "free": 1}})
 
 
 if __name__ == "__main__":

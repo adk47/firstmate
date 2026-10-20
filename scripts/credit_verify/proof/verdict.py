@@ -37,8 +37,9 @@ Combinations that make soft signals hard:
     with a content mismatch (F5) -> FORGED_LIKELY;
   * a key field in a unique font family (F4b) together with a key-field edit
     after creation (F4a) -> FORGED_LIKELY;
-  * pixel-level paste evidence (F3b) together with a content mismatch (F5)
-    -> FORGED_LIKELY;
+  * pixel-level paste evidence (F3b, only at SOFT: content.kind_adjusted
+    lowers copy_move to INFO off documents of record) together with a
+    content mismatch (F5) -> FORGED_LIKELY;
   * a dashboard that doesn't show the track's artist (F5e soft) together
     with an image editor on the screenshot (F3a soft) -> FORGED_LIKELY.
 """
@@ -64,13 +65,14 @@ COMBOS = (
 
 def decide(signals: list[Signal], ctx: ClaimContext) -> tuple[str, list[str]]:
     names = {s.name for s in signals}
+    combo = {s.name for s in signals if s.name != "copy_move_region" or s.severity == SOFT}
     sev = {s.severity for s in signals}
     hard = [s for s in signals if s.severity == HARD]
     if hard:
         return FORGED_LIKELY, [f"{s.check} {s.name}" for s in hard]
     for left, right, why in COMBOS:
-        has_left = bool(names & left)
-        has_right = (MISMATCH in sev) if right == "MISMATCH" else bool(names & right)
+        has_left = bool(combo & left)
+        has_right = (MISMATCH in sev) if right == "MISMATCH" else bool(combo & right)
         if has_left and has_right:
             return FORGED_LIKELY, [why]
     mism = [s for s in signals if s.severity == MISMATCH]
