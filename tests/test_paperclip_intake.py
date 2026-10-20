@@ -337,6 +337,15 @@ class FileTests(Base):
         self.file("deploy failed")
         self.assertEqual(len(self.api.issues), 2)
 
+    def test_non_hex_suffix_or_prefixed_token_is_not_bumped(self):
+        fp = pi.fingerprint("deploy failed", "deploy")
+        for n, desc in enumerate((f"fp:{fp}g\nOccurrences: 1", f"otherfp:{fp}\nOccurrences: 1"), 9):
+            self.api.issues[f"iss-{n}"] = {"id": f"iss-{n}", "title": "other", "status": "todo",
+                                           "description": desc}
+        self.api.search_hook = lambda qs: [{"id": f"iss-{n}", "type": "issue", "title": "o"} for n in (9, 10)]
+        self.file("deploy failed")
+        self.assertEqual(len(self.api.issues), 3, "lookalike tokens must not be bumped")
+
     def test_comment_and_document_hits_are_ignored(self):
         fp = pi.fingerprint("deploy failed", "deploy")
         self.api.issues["iss-9"] = {"id": "iss-9", "title": "x", "status": "todo",

@@ -198,8 +198,9 @@ class Client:
 
 
 def has_token(description, fp):
-    """Exact `fp:<hash>` token. Not a prefix, not a substring of a longer hash."""
-    return re.search(rf"(?<![0-9a-f])fp:{fp}(?![0-9a-f])", description or "") is not None
+    """Exact whitespace-delimited `fp:<hash>` token: not a prefix of a longer
+    token, not a suffix of `otherfp:<hash>`."""
+    return re.search(rf"(?<!\S)fp:{fp}(?!\S)", description or "") is not None
 
 
 def waiting_cards(client):
