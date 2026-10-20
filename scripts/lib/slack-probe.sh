@@ -34,7 +34,15 @@ if not expected:
     print("fail"); sys.exit(1)
 try:
     with open(status_path) as f:
-        rows = json.load(f)["channelAccounts"]["slack"]
+        doc = json.load(f)
+except ValueError as e:
+    print(f"BAD: channels status output is not JSON (empty or undecodable: {type(e).__name__})")
+    print("fail"); sys.exit(1)
+except Exception as e:
+    print(f"BAD: channels status output is not the expected JSON ({type(e).__name__})")
+    print("fail"); sys.exit(1)
+try:
+    rows = doc["channelAccounts"]["slack"]
     got = {r["accountId"]: r for r in rows}
 except Exception as e:
     print(f"BAD: channels status output is not the expected JSON ({type(e).__name__})")
@@ -57,12 +65,37 @@ PYEOF
 
 # slack_probe_run <openclaw-main.json> — runs the live probe (30s cap) into a
 # temp file, classifies it, prints the verdict lines. Same return as above.
+# A run whose output is empty or not JSON at all (the CLI could not reach a
+# gateway that is still in main-session restart recovery: "Opening handshake has
+# timed out", an empty answer) is NOT a SecretRef verdict, so it is retried up to
+# SLACK_PROBE_ATTEMPTS (default 6) times, SLACK_PROBE_WAIT_SECS (default 20)
+# apart. Any run that returns parseable JSON is final at once, pass or fail: a
+# dropped botToken (botTokenSource != "config"), a failed probe, or JSON without
+# the slack rows is never retried away. If no attempt ever returns JSON, the last
+# verdict ("not JSON") stands and the gate fails as before.
+# Why: on 2026-10-20 the gate failed both deploys (04:01Z and 14:06Z) and forced
+# rollbacks while the gateway was still recovering from the restart; the same
+# probe passed on every account minutes later, with nothing changed.
 slack_probe_run() {
-  local config="$1" tmp rc
+  local config="$1" tmp rc out attempt
+  local attempts="${SLACK_PROBE_ATTEMPTS:-6}" wait_s="${SLACK_PROBE_WAIT_SECS:-20}"
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=6
+  [[ "$wait_s" =~ ^[0-9]+$ ]] || wait_s=20
   tmp=$(mktemp)
-  timeout 30 openclaw --profile main channels status --channel slack --probe --json >"$tmp" 2>/dev/null || true
-  rc=0
-  slack_probe_verdict "$config" "$tmp" || rc=$?
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    : >"$tmp"
+    timeout 30 openclaw --profile main channels status --channel slack --probe --json >"$tmp" 2>/dev/null || true
+    rc=0
+    out=$(slack_probe_verdict "$config" "$tmp") || rc=$?
+    if [ "$rc" -eq 0 ] || ! printf '%s' "$out" | grep -qF 'BAD: channels status output is not JSON (empty or undecodable:'; then
+      break
+    fi
+    if [ "$attempt" -lt "$attempts" ]; then
+      echo "slack-probe: attempt $attempt/$attempts got no channels-status JSON (gateway still starting?) — retrying in ${wait_s}s" >&2
+      sleep "$wait_s"
+    fi
+  done
   rm -f "$tmp"
+  printf '%s\n' "$out"
   return "$rc"
 }

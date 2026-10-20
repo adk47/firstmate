@@ -83,3 +83,70 @@ status() { # status <ceo-src> <ceo-ok> <cto-src> <cto-ok>
     [[ "$output" == *"fail_check"* ]]
     [[ "$output" != *"warn_check"* ]]
 }
+
+# ── slack_probe_run retries only a run that returned no JSON (2026-10-20) ──
+fake_openclaw() { # fake_openclaw <answer-file-1> [<answer-file-2> ...]: one answer per call, last one repeats
+    mkdir -p "$D/bin"; : > "$D/calls"
+    local i=1 f
+    for f in "$@"; do cp "$f" "$D/answer.$i"; i=$((i + 1)); done
+    cat > "$D/bin/openclaw" <<'STUB'
+#!/usr/bin/env bash
+n=$(( $(wc -l < "$D_DIR/calls") + 1 )); echo x >> "$D_DIR/calls"
+f="$D_DIR/answer.$n"; [ -f "$f" ] || f=$(ls "$D_DIR"/answer.* | sort -t. -k2 -n | tail -1)
+cat "$f"
+STUB
+    chmod +x "$D/bin/openclaw"
+    export PATH="$D/bin:$PATH" D_DIR="$D" SLACK_PROBE_WAIT_SECS=0
+}
+
+@test "a gateway still restarting (no JSON) is retried until the probe answers, then passes" {
+    echo 'Error: Opening handshake has timed out' > "$D/junk"
+    status config true config true; cp "$D/st.json" "$D/good"
+    fake_openclaw "$D/junk" "$D/junk" "$D/good"
+    run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 0 ]; [ "${lines[-1]}" = "pass" ]
+    [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 3 ]
+}
+
+@test "MUTATION CONTROL: a real SecretRef failure (valid JSON, BAD row) is final at once, never retried" {
+    status config true none true; cp "$D/st.json" "$D/bad"
+    fake_openclaw "$D/bad"
+    run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 1 ]; [[ "$output" == *"BAD: cto: botTokenSource=none"* ]]
+    [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 1 ]
+}
+
+@test "no JSON on every attempt still fails after the attempt budget" {
+    echo 'Error: Opening handshake has timed out' > "$D/junk"
+    fake_openclaw "$D/junk"
+    SLACK_PROBE_ATTEMPTS=3 run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 1 ]; [[ "$output" == *"not JSON (empty or undecodable"* ]]
+    [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 3 ]
+}
+
+@test "empty probe output is retried" {
+    : > "$D/empty"
+    status config true config true; cp "$D/st.json" "$D/good"
+    fake_openclaw "$D/empty" "$D/good"
+    run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 0 ]; [ "${lines[-1]}" = "pass" ]
+    [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 2 ]
+}
+
+@test "JSON without channelAccounts.slack is final at once, never retried" {
+    echo '{"channelAccounts":{}}' > "$D/noslack"
+    status config true config true; cp "$D/st.json" "$D/good"
+    fake_openclaw "$D/noslack" "$D/good"
+    run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 1 ]; [[ "$output" == *"not the expected JSON (KeyError)"* ]]
+    [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 1 ]
+}
+
+@test "a JSON error answer is final at once, never retried" {
+    echo '{"error":"x"}' > "$D/err"
+    status config true config true; cp "$D/st.json" "$D/good"
+    fake_openclaw "$D/err" "$D/good"
+    run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 1 ]; [[ "$output" == *"not the expected JSON"* ]]
+    [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 1 ]
+}
