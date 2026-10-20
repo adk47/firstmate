@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS verify_messages (
   kind TEXT NOT NULL,                -- initial | reminder-14 | reminder-25 | after-rejection
   parent_row INTEGER,                -- follow-ups: verify_messages.id of the initial note
   user_key TEXT NOT NULL,            -- lower-cased account email (never printed)
+  account_id TEXT,                   -- the Muso user id: the per-user locks key on it too (an email can change)
   day TEXT NOT NULL,                 -- UTC YYYY-MM-DD the per-day cap counts on
   due_day TEXT,                      -- windowed notes: last day of the 30-day window
   removal_day TEXT,                  -- windowed notes: the removal date the note named
@@ -243,22 +244,61 @@ def blocked_ids(db: sqlite3.Connection, request_ids: list[str], campaign: str = 
     return out
 
 
-def capped(db: sqlite3.Connection, *, user_key: str, day: str) -> bool:
+def _same_user(db: sqlite3.Connection, user_key: str, user_id: str = "") -> tuple[str, tuple[Any, ...]]:
+    """SQL condition (on verify_messages m) + params for "a message to THIS user": the same
+    account email, OR the same Muso user id - stored on the row (account_id), or, for rows
+    written before account_id existed, the user the decider recorded for any credit the note
+    covered. An account whose email changed is still the same user (QA review of hydra#1257
+    @21f2de0: the 90-day lock must not reset on an address change)."""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return "m.user_key = ?", (user_key,)
+    cond, params = "m.user_key = ? OR m.account_id = ?", [user_key, uid]
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='decisions'").fetchone() and \
+            "user_id" in {r[1] for r in db.execute("PRAGMA table_info(decisions)")}:
+        cond += (" OR (m.account_id IS NULL AND EXISTS (SELECT 1 FROM json_each(m.request_ids_json) j "
+                 "JOIN decisions d ON d.request_id = j.value WHERE CAST(d.user_id AS TEXT) = ?))")
+        params.append(uid)
+    return f"({cond})", tuple(params)
+
+
+def capped(db: sqlite3.Connection, *, user_key: str, day: str, user_id: str = "") -> bool:
     """True when this user already has a message (attempted or sent) on this UTC day, any campaign."""
-    return db.execute("SELECT 1 FROM verify_messages WHERE user_key=? AND day=? AND status IN ('attempted','sent') "
-                      "LIMIT 1", (user_key, day)).fetchone() is not None
+    cond, params = _same_user(db, user_key, user_id)
+    return db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day=? AND m.status IN ('attempted','sent') "
+                      "LIMIT 1", (*params, day)).fetchone() is not None
 
 
-def past_user_done(db: sqlite3.Connection, user_key: str) -> str:
+ASK_CAMPAIGNS = ("verify-live", "retro-past")  # campaigns that ASK the user for something
+REASK_LOCK_DAYS = 90
+
+
+def asked_within(db: sqlite3.Connection, *, user_key: str, day: str, days: int = REASK_LOCK_DAYS,
+                 user_id: str = "") -> bool:
+    """True when this user got an initial ASK (verify-live or retro-past, attempted or sent)
+    in the last `days` days: the shared per-user re-ask lock (Fable 2026-10-17, decision
+    verify-notify-enable precondition 4). Follow-ups of that note are not new asks."""
+    try:
+        since = _plus(day, -days)
+    except ValueError:
+        since = ""  # an unreadable day: any earlier ask counts (stricter, never looser)
+    cond, params = _same_user(db, user_key, user_id)
+    q = (f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.kind='initial' AND m.status IN ('attempted','sent') "
+         f"AND m.campaign IN ({','.join('?' * len(ASK_CAMPAIGNS))}) AND m.day > ? LIMIT 1")
+    return db.execute(q, (*params, *ASK_CAMPAIGNS, since)).fetchone() is not None
+
+
+def past_user_done(db: sqlite3.Connection, user_key: str, user_id: str = "") -> str:
     """retro-past: why this user must not get a past-credit ask ('' when they may).
     One message per user, ever (a note from ANY campaign counts: no repeats across
     waves); and never re-ask someone who already sent proof (a credit-proof reply on
     any note, any campaign)."""
-    if db.execute("SELECT 1 FROM verify_messages WHERE user_key=? AND kind='initial' "
-                  "AND status IN ('attempted','sent') LIMIT 1", (user_key,)).fetchone():
+    cond, params = _same_user(db, user_key, user_id)
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.kind='initial' "
+                  "AND m.status IN ('attempted','sent') LIMIT 1", params).fetchone():
         return "already_asked"
-    if db.execute("SELECT 1 FROM verify_messages WHERE user_key=? AND proof_tagged_at IS NOT NULL LIMIT 1",
-                  (user_key,)).fetchone():
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.proof_tagged_at IS NOT NULL LIMIT 1",
+                  params).fetchone():
         return "proof_received"
     return ""
 
@@ -266,7 +306,7 @@ def past_user_done(db: sqlite3.Connection, user_key: str) -> str:
 def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[str], message_type: str,
           approved_by: str, approval_ref: str, contact_id: str = "", campaign: str = "verify-live",
           refs: list[dict[str, Any]] | None = None, windowed: bool = False, now: datetime | None = None,
-          enforce_cap: bool = True) -> dict[str, Any]:
+          enforce_cap: bool = True, user_id: str = "") -> dict[str, Any]:
     """Atomically claim an initial note. One transaction (BEGIN IMMEDIATE) so two
     concurrent runs cannot both claim the same user-day or request id."""
     _check(campaign)
@@ -281,21 +321,27 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
             db.execute("COMMIT")
             return {"result": "already_notified", "request_ids": []}
         if campaign == "retro-past" and enforce_cap:
-            why = past_user_done(db, user_key)
+            why = past_user_done(db, user_key, user_id)
             if why:
                 _skip(db, campaign, fresh, ts)
                 db.execute("COMMIT")
                 return {"result": "user_done", "reason": why, "request_ids": fresh}
-        if enforce_cap and capped(db, user_key=user_key, day=day):
+        if enforce_cap and capped(db, user_key=user_key, day=day, user_id=user_id):
             db.execute("COMMIT")
             return {"result": "daily_cap", "request_ids": fresh}
+        if campaign == "verify-live" and enforce_cap and asked_within(db, user_key=user_key, day=day, user_id=user_id):
+            # One note per user per 90 days across the ask campaigns: the credits wait
+            # (nothing is closed) until the lock lapses or a human acts.
+            db.execute("COMMIT")
+            return {"result": "recently_asked", "request_ids": fresh}
         keep = [r for r in (refs or []) if str(r.get("request_id")) in set(fresh)]
         due, removal = window(day) if windowed else (None, None)
         cur = db.execute(
-            "INSERT INTO verify_messages (campaign, kind, user_key, day, due_day, removal_day, status, message_type, "
-            "contact_id, request_ids_json, refs_json, n_credits, approved_by, approval_ref, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (campaign, "initial", user_key, day, due, removal, "attempted", message_type, contact_id or None,
+            "INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, due_day, removal_day, status, "
+            "message_type, contact_id, request_ids_json, refs_json, n_credits, approved_by, approval_ref, created_at, "
+            "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (campaign, "initial", user_key, str(user_id or "").strip() or None, day, due, removal, "attempted",
+             message_type, contact_id or None,
              json.dumps(fresh), json.dumps(keep) if keep else None, len(fresh), approved_by, approval_ref, ts, ts))
         row = int(cur.lastrowid)
         for rid in fresh:
@@ -327,7 +373,8 @@ def reminder_state(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
     if parent is None:
         return {"result": "no_parent"}
     info = {"parent_row": int(parent["id"]), "campaign": parent["campaign"], "user_key": parent["user_key"],
-            "contact_id": parent["contact_id"], "due_day": parent["due_day"], "removal_day": parent["removal_day"],
+            "contact_id": parent["contact_id"], "account_id": parent["account_id"], "due_day": parent["due_day"],
+            "removal_day": parent["removal_day"],
             "windowed": parent["removal_day"] is not None, "request_ids": json.loads(parent["request_ids_json"]),
             "message_type": parent["message_type"]}
     if not info["windowed"]:
@@ -425,7 +472,7 @@ def claim_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
         if not keep:
             db.execute("COMMIT")
             return {**st, "result": "no_credits"}
-        if capped(db, user_key=user_key, day=day):
+        if capped(db, user_key=user_key, day=day, user_id=st.get("account_id") or ""):
             db.execute("COMMIT")
             return {**st, "result": "daily_cap"}
         priors = db.execute("SELECT attempts, request_ids_json FROM verify_messages WHERE parent_row=? AND kind=? "
@@ -434,10 +481,11 @@ def claim_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
             priors = [p for p in priors if set(json.loads(p["request_ids_json"])) & set(keep)]
         attempts = 1 + max([int(p["attempts"]) for p in priors[:1 if kind != AFTER_REJECTION else None]] or [0])
         cur = db.execute(
-            "INSERT INTO verify_messages (campaign, kind, parent_row, user_key, day, due_day, removal_day, status, "
-            "message_type, contact_id, request_ids_json, n_credits, approved_by, approval_ref, attempts, created_at, "
-            "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (st["campaign"], kind, st["parent_row"], user_key, day, st["due_day"], st["removal_day"], "attempted",
+            "INSERT INTO verify_messages (campaign, kind, parent_row, user_key, account_id, day, due_day, removal_day, "
+            "status, message_type, contact_id, request_ids_json, n_credits, approved_by, approval_ref, attempts, "
+            "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (st["campaign"], kind, st["parent_row"], user_key, st.get("account_id"), day, st["due_day"],
+             st["removal_day"], "attempted",
              st["message_type"], st["contact_id"], json.dumps(keep), len(keep), approved_by, approval_ref, attempts,
              ts, ts))
         db.execute("COMMIT")
@@ -833,6 +881,55 @@ def sent_today(db: sqlite3.Connection, *, campaign: str, day: str, kind: str = "
                           "AND status IN ('attempted','sent')", (campaign, kind, day)).fetchone()[0])
 
 
+def messages_today(db: sqlite3.Connection, *, campaign: str, day: str) -> int:
+    """Every message of `campaign` claimed on `day` (initial notes AND follow-ups, attempted or
+    sent): the run's daily budget is what is left of the cap after these, so a same-day retry
+    can never send another full cap (QA review of hydra#1257 @53428d0)."""
+    return int(db.execute("SELECT COUNT(*) FROM verify_messages WHERE campaign=? AND day=? "
+                          "AND status IN ('attempted','sent')", (campaign, day)).fetchone()[0])
+
+
+PROVISIONAL_KIND = "provisional_paid"
+
+
+def _decider_approved(db: sqlite3.Connection, request_ids: list[str], *, kind: str | None) -> set[str]:
+    """The ids the credit decider approved and the server confirmed (decisions joined to an
+    'approve' -> 'approved' outcome of the same run); `kind` narrows to one evidence kind."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(decisions)")}
+    if not request_ids or "evidence_kind" not in cols:
+        return set()
+    out: set[str] = set()
+    for i in range(0, len(request_ids), 500):
+        part = request_ids[i:i + 500]
+        q = ("SELECT DISTINCT d.request_id FROM decisions d JOIN decision_outcomes o ON o.request_id = d.request_id "
+             "AND o.run_id = d.run_id WHERE d.decision = 'approve' AND o.action = 'approve' AND o.outcome = 'approved' "
+             + ("AND d.evidence_kind = ? " if kind else "")
+             + f"AND d.request_id IN ({','.join('?' * len(part))})")
+        out |= {str(r) for (r,) in db.execute(q, ((kind,) if kind else ()) + tuple(part))}
+    return out
+
+
+def provisional_ids(db: sqlite3.Connection, request_ids: list[str]) -> set[str]:
+    """Credits the decider approved as a PAID PROVISIONAL approval (Fable ruling 4)."""
+    return _decider_approved(db, request_ids, kind=PROVISIONAL_KIND)
+
+
+def v1_eligible(db: sqlite3.Connection, request_ids: list[str]) -> dict[str, Any]:
+    """Whether a verify-live note over `request_ids` may be sent (the v1 copy, the only one sent
+    since firstmate 090). Checked by the send gate itself (QA review of hydra#1257 @53428d0), so
+    a direct or misrouted caller cannot send a "we added your credit" note for a credit the
+    decider never approved: every credit must be a server-confirmed decider approval."""
+    ids = list(dict.fromkeys(request_ids))
+    if not ids:
+        return {"eligible": False, "reason": "no credits"}
+    approved = _decider_approved(db, ids, kind=None)
+    missing = [r for r in ids if r not in approved]
+    if missing:
+        return {"eligible": False, "reason": f"{len(missing)} credit(s) are not server-confirmed decider approvals",
+                "not_decider_approved": missing[:20]}
+    return {"eligible": True}
+
+
 # -- CLI (called by scripts/intercom-verify-request.sh) -----------------------
 
 def _ids(s: str) -> list[str]:
@@ -858,6 +955,7 @@ def _main(argv: list[str] | None = None) -> int:
         s.add_argument("--refs-file", default="", help="JSON [{request_id, profile_id, track_id}]")
         s.add_argument("--windowed", action="store_true", help="the note names a 30-day window and a removal date")
         s.add_argument("--reason", default="")
+        s.add_argument("--user-id", default="", help="the Muso user id (the per-user locks key on it too)")
     cr = sub.add_parser("claim-reminder")
     cr.add_argument("--parent-message-id", required=True)
     cr.add_argument("--kind", required=True, choices=KINDS[1:])
@@ -879,6 +977,7 @@ def _main(argv: list[str] | None = None) -> int:
     pn.add_argument("--request-ids", required=True)
     pn.add_argument("--user-key", default="")
     pn.add_argument("--day", default="")
+    pn.add_argument("--user-id", default="")
     sk = sub.add_parser("skip", help="close request ids as skipped (never announced)")
     sk.add_argument("--campaign", required=True, choices=CAMPAIGNS)
     sk.add_argument("--request-ids", required=True)
@@ -895,6 +994,8 @@ def _main(argv: list[str] | None = None) -> int:
     mr = sub.add_parser("mark-replied", help="the user replied to a note: hold its removal for a human")
     mr.add_argument("--message-id", required=True)
     mr.add_argument("--replied-at", default="", help="UTC time of the latest user reply (YYYY-MM-DDTHH:MM:SSZ)")
+    ve = sub.add_parser("v1-eligible", help="may a note over these credits use the v1 (no-deadline) copy?")
+    ve.add_argument("--request-ids", required=True)
     c = sub.add_parser("set-conversation")
     c.add_argument("--message-id", required=True)
     c.add_argument("--conversation-id", required=True)
@@ -909,7 +1010,7 @@ def _main(argv: list[str] | None = None) -> int:
         kw = dict(user_key=a.user_key, day=a.day, request_ids=_ids(a.request_ids), message_type=a.message_type,
                   approved_by=a.approved_by, approval_ref=a.approval_ref, campaign=a.campaign)
         if a.op == "claim":
-            out = claim(db, contact_id=a.contact_id, refs=refs, windowed=a.windowed, **kw)
+            out = claim(db, contact_id=a.contact_id, refs=refs, windowed=a.windowed, user_id=a.user_id, **kw)
         else:
             out = refuse(db, reason=a.reason, **kw)
     elif a.op == "claim-reminder":
@@ -924,9 +1025,9 @@ def _main(argv: list[str] | None = None) -> int:
         blocked = blocked_ids(db, ids, a.campaign)
         out = {"request_ids": [r for r in dict.fromkeys(ids) if r not in blocked]}
         if a.user_key and a.day:
-            out["daily_cap"] = capped(db, user_key=a.user_key, day=a.day)
+            out["daily_cap"] = capped(db, user_key=a.user_key, day=a.day, user_id=a.user_id)
         if a.user_key and a.campaign == "retro-past":
-            out["user_done"] = past_user_done(db, a.user_key)
+            out["user_done"] = past_user_done(db, a.user_key, a.user_id)
     elif a.op == "skip":
         out = {"skipped": skip_requests(db, campaign=a.campaign, request_ids=_ids(a.request_ids))}
     elif a.op == "reminder-state":
@@ -937,6 +1038,8 @@ def _main(argv: list[str] | None = None) -> int:
     elif a.op == "mark-tagged":
         mark_tagged(db, message_id=a.message_id, conversation_id=a.conversation_id, attachments=a.attachments)
         out = {"result": "ok"}
+    elif a.op == "v1-eligible":
+        out = v1_eligible(db, _ids(a.request_ids))
     elif a.op == "mark-replied":
         out = {"result": mark_replied(db, message_id=a.message_id, replied_at=a.replied_at)}
     else:

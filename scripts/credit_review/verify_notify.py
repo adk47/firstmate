@@ -49,7 +49,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from . import admin as admin_api
-from . import proof_parts, verify_ledger
+from . import affiliation, proof_parts, verify_ledger
 from .roles import family_of
 
 WRAPPER = os.environ.get("CREDIT_VERIFY_NOTIFY_WRAPPER", "/opt/hydra/scripts/intercom-verify-request.sh")
@@ -88,6 +88,14 @@ class Report:
     skipped: int = 0
     deferred_users: int = 0
     pending_doc_users: int = 0
+    support_contact_users: int = 0
+    support_contact_credits: int = 0
+    documented_users: int = 0          # proof on file (any source) for another credit / whole user
+    documented_credits: int = 0
+    affiliation_held: list[str] = field(default_factory=list)   # "user <id>: <reason>" for a human
+    recently_asked_users: int = 0
+    recently_asked_credits: int = 0
+    paying_unknown: str = ""
     pending_doc_credits: int = 0
     refused_users: int = 0
     failed_users: int = 0
@@ -104,6 +112,9 @@ class Report:
     docs_users: int = 0
     docs_checked: int = 0
     proof_on_file: int = 0
+    mixed_v1_users: int = 0            # users whose one note is v1 because ANY credit is paid provisional
+    already_today: int = 0             # messages the ledger already holds for today (counted against the cap)
+    paying_hold: str = ""              # paying status unknown and the cap would have to choose: nothing sent
     halted: str = ""
     failures: list[str] = field(default_factory=list)
     refusals: list[str] = field(default_factory=list)
@@ -117,12 +128,24 @@ class Report:
             return (f"{title}: NO asks sent this run: {self.halted}. Nothing was sent "
                     "(missing or stale proof-on-file list: when in doubt, no ask goes out).")
         # Deferred accounts alone are not news: they recur every run until tomorrow's note.
+        # Held-for-human users are news too (once a day): a human must see them.
         if not (self.sent_notes or self.refused_users or self.failed_users or self.reminders_sent
-                or self.proof_tagged or self.proof_failed or self.extension_requests) and mode == "apply":
+                or self.proof_tagged or self.proof_failed or self.extension_requests
+                or self.affiliation_held or self.documented_users or self.support_contact_users
+                or self.paying_hold) and mode == "apply":
             return "NO_REPLY"
         head = f"{title} (dry run, nothing sent)" if mode != "apply" else title
         parts = [f"{head}: {self.sent_notes} note(s) sent covering {self.sent_credits} provisionally approved credit(s)"
                  if mode == "apply" else f"{head}: {self.users} account(s) would get a note"]
+        if self.paying_hold:
+            parts.append(self.paying_hold)
+        elif self.paying_unknown:
+            parts.append(f"paying status unknown ({self.paying_unknown}); every note fit under the cap, so order did not matter")
+        if self.already_today:
+            parts.append(f"{self.already_today} message(s) already sent today counted against the day's cap")
+        if self.mixed_v1_users:
+            parts.append(f"{self.mixed_v1_users} account(s) got one no-deadline note covering a paid provisional "
+                         "credit and other new credits (one note per user; no removal date)")
         if self.deferred_users:
             parts.append(f"{self.deferred_users} account(s) already had today's note (their credits go in tomorrow's)")
         if self.refused_users:
@@ -134,6 +157,18 @@ class Report:
         if self.pending_doc_users:
             parts.append(f"{self.pending_doc_users} account(s) ({self.pending_doc_credits} credit(s)) waiting while a "
                          "document they sent for another credit is reviewed (asked once, after the review)")
+        if self.documented_users:
+            parts.append(f"{self.documented_users} account(s) ({self.documented_credits} credit(s)) held for a human: "
+                         "documents already on file for them (never asked)")
+        if self.affiliation_held:
+            parts.append(f"{len(self.affiliation_held)} account(s) held for a human (org affiliation unknown or "
+                         "affiliated; polite-contact variant): " + "; ".join(self.affiliation_held[:5]))
+        if self.recently_asked_users:
+            parts.append(f"{self.recently_asked_users} account(s) ({self.recently_asked_credits} credit(s)) waiting: "
+                         "asked in the last 90 days")
+        if self.support_contact_users:
+            parts.append(f"{self.support_contact_users} account(s) ({self.support_contact_credits} credit(s)) held for a "
+                         "human: emailed support@ in the last 90 days (no note)")
         if self.human_approved:
             parts.append(f"{self.human_approved} approved by a person (not asked again)")
         if self.docs_checked:
@@ -253,7 +288,18 @@ class ProofFileError(RuntimeError):
     pass
 
 
-ProofOnFile = dict[str, list[tuple[Optional[str], str]]]
+class ProofOnFile(dict[str, list[tuple[Optional[str], str]]]):
+    """Documents on file per user id, plus who emailed support@ in the last 90 days
+    (``support_contacts``, user ids as strings): those users get no note while listed -
+    held for a human (firstmate 050, the decider's rule)."""
+
+    def __init__(self, *args: Any, support_contacts: frozenset[str] = frozenset(), **kw: Any):
+        super().__init__(*args, **kw)
+        self.support_contacts = support_contacts
+
+
+def is_support_contact(documented: dict[str, Any], uid: str) -> bool:
+    return bool(uid) and uid in getattr(documented, "support_contacts", frozenset())
 
 
 def load_proof_on_file(path: str | None = None, *, max_age_h: float = PROOF_MAX_AGE_H,
@@ -297,7 +343,11 @@ def load_proof_on_file(path: str | None = None, *, max_age_h: float = PROOF_MAX_
         proof_parts.check_entries(doc)
     except proof_parts.PartsError as exc:
         raise ProofFileError(f"the proof-on-file list {path}: {exc}") from exc
-    out: ProofOnFile = {}
+    contacts = proof_parts.support_contacts(doc, now=now, max_age_h=max_age_h, max_skew_h=PROOF_MAX_SKEW_H)
+    if contacts is None:
+        raise ProofFileError(f"the proof-on-file list {path} has no readable, fresh {proof_parts.SUPPORT_CONTACTS} "
+                             "snapshot (anyone may have emailed support@)")
+    out = ProofOnFile(support_contacts=frozenset(str(u) for u in contacts))
     for e in doc["entries"]:
         rid = str(e.get("request_id") or "").strip() or None
         out.setdefault(str(e["user_id"]).strip(), []).append((rid, e["kind"]))
@@ -316,6 +366,13 @@ def drop_documented(rows: dict[str, dict[str, Any]], documented: ProofOnFile, re
     for rid in gone:
         del rows[rid]
     report.proof_on_file += len(gone)
+    # Emailed support@ in the last 90 days: no note, held for a human. Not closed (the
+    # credit is offered again once the user is off the list or a human has ruled).
+    held = {rid: _user_id(req) for rid, req in rows.items() if is_support_contact(documented, _user_id(req))}
+    for rid in held:
+        del rows[rid]
+    report.support_contact_users += len(set(held.values()))
+    report.support_contact_credits += len(held)
     return gone
 
 
@@ -325,14 +382,12 @@ def screen_live(rows: dict[str, dict[str, Any]], documented: ProofOnFile,
     silently. In place, per account user; returns (ids to close, credits to hold back):
       - a credit with its own proof-on-file entry (any kind) or approved by a person is not
         asked about; its id is returned so the caller can close it;
-      - if credits are left to ask about and the user has a pending_doc entry (on another
-        credit, or a whole-user one), the whole user waits: every row of theirs is removed,
-        nothing of theirs is closed, and the credits to ask about are returned as
-        (request_id, profile_id, track_id) for the ledger's deferred_pending_doc rows, so
-        they are offered again on every run (one batched ask once that document is
-        reviewed).
-    approved_doc / human_approved_after_doc entries on other credits, or whole-user
-    identity documents, are no reason to skip or wait."""
+      - if credits are left to ask about and the user emailed support@ in the last 90 days
+        (firstmate 050) or has ANY proof-on-file entry (another credit, a whole-user
+        document of any kind, any source: Fable 2026-10-17 precondition 1), the user gets
+        no note: those credits are returned as (request_id, profile_id, track_id) for the
+        ledger's deferred rows, so they are offered again on every run and a human sees
+        them (a pending_doc keeps its old meaning: one batched ask once it is reviewed)."""
     own = _documented_ids(documented)
     by_user: dict[str, list[str]] = {}
     for rid, req in rows.items():
@@ -343,13 +398,27 @@ def screen_live(rows: dict[str, dict[str, Any]], documented: ProofOnFile,
         documented_here = [rid for rid in rids if rid in own]
         by_person = [rid for rid in rids if rid not in own and human_approved(rows[rid])]
         ask = [rid for rid in rids if rid not in own and rid not in by_person]
-        if ask and any(kind == "pending_doc" for _, kind in documented.get(uid, [])):
-            report.pending_doc_users += 1
-            report.pending_doc_credits += len(ask)
-            held += [(rid, str(rows[rid].get("profileId") or ""), str(rows[rid].get("trackId") or "")) for rid in ask]
-            for rid in rids:
-                del rows[rid]
-            continue
+        if ask and is_support_contact(documented, uid):
+            # firstmate 050: emailed support@ in the last 90 days - no note, held for a
+            # human; the credits to ask about are not closed, so they are offered again.
+            report.support_contact_users += 1
+            report.support_contact_credits += len(ask)
+        elif ask and documented.get(uid):
+            # Fable 2026-10-17 (verify-notify enable, precondition 1): a user with proof on
+            # file from ANY source (Intercom, support@, core) is never notified. A document
+            # under review keeps the old meaning (asked once, after the review); any other
+            # entry is held for a human. Nothing is closed: the credits are offered again.
+            if any(kind == "pending_doc" for _, kind in documented[uid]):
+                report.pending_doc_users += 1
+                report.pending_doc_credits += len(ask)
+            else:
+                report.documented_users += 1
+                report.documented_credits += len(ask)
+        else:
+            ask = []
+        held += [(rid, str(rows[rid].get("profileId") or ""), str(rows[rid].get("trackId") or "")) for rid in ask]
+        for rid in ask:
+            del rows[rid]
         for rid in documented_here + by_person:
             del rows[rid]
         report.proof_on_file += len(documented_here)
@@ -384,7 +453,8 @@ def removal_due(db: sqlite3.Connection, admin: admin_api.Admin, documented: Proo
     # Proof is matched by USER as well as by credit (firstmate 042): a user with a
     # whole-user document waiting for review (e.g. emailed to support@, no request id)
     # never reaches a per-credit removal day - their credits are held for a human.
-    waiting = {rid for rid, req in live.items() if _user_pending_doc(documented, _user_id(req))}
+    waiting = {rid for rid, req in live.items()
+               if _user_pending_doc(documented, _user_id(req)) or is_support_contact(documented, _user_id(req))}
     for r in due:
         if r["request_id"] in waiting:
             r["reason"] = verify_ledger.HELD_AWAITING_REVIEW
@@ -597,13 +667,16 @@ def sweep_proofs(db: sqlite3.Connection, report: Report, *, days: int = 30, limi
 
 
 def send_followups(db: sqlite3.Connection, admin: admin_api.Admin, report: Report, *, campaign: str, day: str,
-                   documented: ProofOnFile, limit: int, pace_seconds: float, wrapper: str, runner: Runner) -> None:
+                   documented: ProofOnFile, verdicts: dict[str, dict[str, Any]], limit: int, pace_seconds: float,
+                   wrapper: str, runner: Runner) -> int:
     """Every follow-up the ledger says is due today: re-read the note's credits and
     send the gate's fixed follow-up for the ones still live, under the same per-credit
     documents rule as the note (screen_live): a credit with its own document on file or
     approved by a person is left out, and a user with a document under review waits.
-    A follow-up with nothing left to send is closed in the ledger; only follow-ups that
-    are sent count against `limit`."""
+    The org-affiliation gate applies to a follow-up exactly as to a note (QA review of
+    hydra#1257 @53428d0): an unchecked, partially checked or affiliated user gets no automatic
+    reminder; it waits (not closed) for the next run. A follow-up with nothing left to send is
+    closed in the ledger; only follow-ups that are sent count against `limit`."""
     attempted = 0
     for mid, kind, refs in verify_ledger.reminders_due(db, campaign=campaign, day=day):
         if attempted >= limit:
@@ -612,7 +685,7 @@ def send_followups(db: sqlite3.Connection, admin: admin_api.Admin, report: Repor
                   for r in refs if r.get("profile_id")]
         live, _ = reread(admin, wanted) if wanted else ({}, set())
         _, held = screen_live(live, documented, report)
-        if held:
+        if held or hold_affiliated(live, verdicts, report):
             continue
         ps = plan(live, report)
         if not ps:
@@ -625,40 +698,171 @@ def send_followups(db: sqlite3.Connection, admin: admin_api.Admin, report: Repor
             p["extra"] = ["--kind", kind, "--parent-message-id", mid]
         send_all(ps, report, mode="apply", wrapper=wrapper, runner=runner,
                  extra=["--campaign", campaign], pace_seconds=pace_seconds, reminder=True)
+    return attempted
+
+
+AFFILIATION_LANE = "credit-trust-llm-t01"
+
+
+def write_affiliation_priority(db: sqlite3.Connection, *, directory: str | None = None) -> tuple[str, int]:
+    """Ask the org-affiliation producer for a FULL check of everyone the next verify-notify
+    run may write to: the account users of every candidate credit (decider-approved and not
+    yet notified, plus held-back ones), from the decider's decisions.user_id. Called after
+    every decider apply run, so the hourly producer has them well before 09:00 Rome.
+    Returns (path, number of users)."""
+    rids = [rid for rid, _, _ in candidates(db, since_hours=None)]
+    uids: set[int] = set()
+    for i in range(0, len(rids), 500):
+        part = rids[i:i + 500]
+        q = f"SELECT DISTINCT user_id FROM decisions WHERE user_id IS NOT NULL AND request_id IN ({','.join('?' * len(part))})"
+        uids |= {int(u) for (u,) in db.execute(q, part)}
+    path = affiliation.write_priority(AFFILIATION_LANE, uids, directory=directory,
+                                      source="credit-trust-llm-t01: verify-notify candidates (decider-approved, not yet noted)")
+    return path, len(uids)
+
+
+def _ref(req: dict[str, Any]) -> tuple[str, str, str]:
+    return (str(req.get("id")), str(req.get("profileId") or ""), str(req.get("trackId") or ""))
+
+
+def hold_affiliated(rows: dict[str, dict[str, Any]], verdicts: dict[str, dict[str, Any]],
+                    report: Report) -> list[tuple[str, str, str]]:
+    """RULE-org-affiliation: a user with no verdict, or a contributor / verified_org /
+    authenticated_domain one, gets no automatic note; listed for a human (polite-contact
+    variant). In place; returns the held credits (offered again, nothing closed)."""
+    held: list[tuple[str, str, str]] = []
+    why_by_user: dict[str, str] = {}
+    for rid in list(rows):
+        uid = _user_id(rows[rid])
+        why = affiliation.hold_reason(verdicts, uid)
+        if why:
+            held.append(_ref(rows.pop(rid)))
+            why_by_user[uid] = why
+    report.affiliation_held += [f"user {u}: {w}" for u, w in sorted(why_by_user.items())]
+    return held
+
+
+def hold_recently_asked(db: sqlite3.Connection, payloads: list[dict[str, Any]], rows_by_id: dict[str, dict[str, Any]],
+                        report: Report, *, day: str) -> tuple[list[dict[str, Any]], list[tuple[str, str, str]]]:
+    """One note per user per 90 days across verify-live and retro-past (the ledger's
+    asked_within; the claim enforces it again at the write). Returns (payloads to send,
+    credits that wait)."""
+    keep: list[dict[str, Any]] = []
+    held: list[tuple[str, str, str]] = []
+    for p in payloads:
+        if verify_ledger.asked_within(db, user_key=p["user"]["email"], day=day, user_id=str(p["user"].get("id") or "")):
+            report.recently_asked_users += 1
+            report.recently_asked_credits += len(p["credits"])
+            held += [_ref(rows_by_id[c["request_id"]]) for c in p["credits"] if c["request_id"] in rows_by_id]
+        else:
+            keep.append(p)
+    return keep, held
+
+
+PROVISIONAL_KIND = verify_ledger.PROVISIONAL_KIND
+
+
+def provisional_ids(db: sqlite3.Connection, request_ids: list[str]) -> set[str]:
+    """Credits the decider approved as a PAID PROVISIONAL approval (Fable ruling 4): their note
+    is the no-threat v1 copy (no date, no removal language) and they are never removal-due
+    (firstmate 073). Read from the decider ledger (verify_ledger.provisional_ids)."""
+    return verify_ledger.provisional_ids(db, request_ids)
+
+
+def provisional_copy(payloads: list[dict[str, Any]], prov: set[str], report: "Report | None" = None
+                     ) -> list[dict[str, Any]]:
+    """Every note is the no-threat v1 copy (firstmate 090, 2026-10-19 23:27Z: the captain dropped
+    auto-removal; NO message may say a credit will be removed or name a deadline). One note per
+    user (the 90-day re-ask lock). `prov` only feeds the report: users whose note includes a paid
+    provisional credit alongside other new credits."""
+    out: list[dict[str, Any]] = []
+    for p in payloads:
+        ids = {c["request_id"] for c in p["credits"]}
+        if report is not None and ids & prov and ids - prov:
+            report.mixed_v1_users += 1
+        out.append({**p, "extra": ["--copy", "v1"]})
+    return out
+
+
+def paid_first(payloads: list[dict[str, Any]], paying: frozenset[int] | None) -> list[dict[str, Any]]:
+    """Paying users' notes first (stable: oldest credit first within each group)."""
+    if paying is None:
+        return payloads
+    def is_paying(p: dict[str, Any]) -> bool:
+        uid = str(p["user"].get("id") or "")
+        return uid.isdigit() and int(uid) in paying
+    return sorted(payloads, key=lambda p: not is_paying(p))
 
 
 def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "apply", run_id: str | None = None,
         since_hours: int | None = 168, max_users: int = 150, proof_path: str | None = None,
-        sweep: bool = True, wrapper: str = WRAPPER, runner: Runner = _run) -> Report:
-    """The whole step. The decider may call this at the end of its run with its run_id."""
+        sweep: bool = True, wrapper: str = WRAPPER, runner: Runner = _run,
+        affiliation_path: str | None = None) -> Report:
+    """The whole step, once a day (09:00 Europe/Rome). `max_users` is the day's cap on
+    messages, reminders included (they go first: the note promised them). Gates, in order:
+    proof on file from any source, the support@ 90-day contacts, org affiliation, the shared
+    90-day re-ask lock; then paying users first. Any gate source that cannot be read halts
+    the run: nothing is sent."""
     report = Report()
     try:
         documented = load_proof_on_file(proof_path)
     except ProofFileError as exc:
         report.halted = str(exc)
         return report
+    try:
+        verdicts = affiliation.read(affiliation_path)
+    except (OSError, ValueError) as exc:
+        report.halted = f"the org-affiliation verdicts cannot be read ({exc}); nothing is sent"[:300]
+        return report
+    from .decide import paying_users  # noqa: PLC0415 (decide imports nothing from here)
+    paying, why_paying = paying_users()
+    report.paying_unknown = why_paying or ""
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     db = verify_ledger.connect(ledger_path or verify_ledger.DEFAULT_PATH)
     try:
+        # The day's cap counts what the ledger already holds for today (a same-day retry or a
+        # second invocation never gets a fresh cap), reminders included.
+        budget = max(max_users - verify_ledger.messages_today(db, campaign="verify-live", day=day), 0)
+        report.already_today = max_users - budget
+        if mode == "apply":
+            # Day-14 / day-25 reminders of WINDOWED notes count against the day's cap.
+            budget -= send_followups(db, admin, report, campaign="verify-live", day=day, documented=documented,
+                                     verdicts=verdicts, limit=budget, pace_seconds=0.0, wrapper=wrapper,
+                                     runner=runner)
         wanted = candidates(db, run_id=run_id, since_hours=since_hours)
         report.candidates = len(wanted)
         if wanted:
             was_held = {rid for rid, _, _ in verify_ledger.deferred(db, campaign="verify-live")}
             rows, missing = reread(admin, wanted)
             report.not_approved_now = len(missing)
+            by_id = dict(rows)
             dropped, held = screen_live(rows, documented, report)
+            held += hold_affiliated(rows, verdicts, report)
             dropped += sorted(missing & was_held)
-            payloads = plan(rows, report, dropped=dropped)[:max_users]
+            payloads = plan(rows, report, dropped=dropped)
+            payloads, waiting = hold_recently_asked(db, payloads, by_id, report, day=day)
+            held += waiting
+            payloads = provisional_copy(paid_first(payloads, paying), provisional_ids(db, list(by_id)), report)
+            # Paying status unknown (QA review of hydra#1257 @3b5fea9): when today's cap would
+            # have to choose who goes first, nothing is sent, so a paying user is never pushed
+            # behind older free accounts. Every credit waits for tomorrow (kept, not closed).
+            if paying is None and len(payloads) > max(budget, 0):
+                report.paying_hold = (f"paying status unknown ({why_paying}) and {len(payloads)} note(s) exceed today's "
+                                      f"cap of {max(budget, 0)}: nothing sent, so paying users are never put behind")
+                for p in payloads:
+                    held += [_ref(by_id[c["request_id"]]) for c in p["credits"] if c["request_id"] in by_id]
+                payloads = []
+            # Over the day's cap: the credits wait for tomorrow (kept in the ledger, so a
+            # credit older than the candidate window is never silently dropped).
+            for p in payloads[max(budget, 0):]:
+                held += [_ref(by_id[c["request_id"]]) for c in p["credits"] if c["request_id"] in by_id]
+            payloads = payloads[:max(budget, 0)]
             if mode == "apply" and dropped:
                 verify_ledger.skip_requests(db, campaign="verify-live", request_ids=dropped)
             if mode == "apply" and held:
                 verify_ledger.defer(db, campaign="verify-live", refs=held)
             report.users = len(payloads)
             send_all(payloads, report, mode=mode, wrapper=wrapper, runner=runner)
-        if mode == "apply":
-            # Day-14 / day-25 reminders of WINDOWED notes (an unwindowed v1 note has none).
-            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            send_followups(db, admin, report, campaign="verify-live", day=day, documented=documented,
-                           limit=max_users, pace_seconds=0.0, wrapper=wrapper, runner=runner)
         if sweep and mode == "apply":
             sweep_proofs(db, report, days=45, wrapper=wrapper, runner=runner)
         if mode == "apply":

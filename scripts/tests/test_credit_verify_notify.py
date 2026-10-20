@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import json
+import re
 import os
 import shutil
 import sqlite3
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -31,22 +33,56 @@ _PROOF_DIR = tempfile.mkdtemp(prefix="proof-on-file-")
 PROOF_FILE = os.path.join(_PROOF_DIR, "proof-on-file.json")
 
 
-def proof_doc(entries=(), generated_at=None, age_h=0.0):
+def proof_doc(entries=(), generated_at=None, age_h=0.0, contacts=()):
     """A complete proof-on-file export: every required part present and fresh, users count
     consistent with entries (the shape the exporter writes)."""
     gen = generated_at or (datetime.now(timezone.utc) - timedelta(hours=age_h)).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {"generated_at": gen,
             "sources": [{"name": "core", "generated_at": gen, "count": 0}]
             + [{"name": n, "generated_at": gen, "stale": False, "count": 0} for n in ("cs-intercom", "cs-gmail")],
-            "users": len({str(e["user_id"]) for e in entries}), "entries": list(entries)}
+            "users": len({str(e["user_id"]) for e in entries}), "entries": list(entries),
+            "gmail_contacts_90d": {"generated_at": gen, "source": "test", "user_ids": list(contacts)}}
 
 
-def write_proof(path=PROOF_FILE, entries=(), age_h=0.0):
-    Path(path).write_text(json.dumps(proof_doc(entries, age_h=age_h)))
+def write_proof(path=PROOF_FILE, entries=(), age_h=0.0, contacts=()):
+    Path(path).write_text(json.dumps(proof_doc(entries, age_h=age_h, contacts=contacts)))
 
 
 write_proof()
 os.environ["CREDIT_PROOF_ON_FILE"] = PROOF_FILE
+# Org-affiliation verdicts (RULE-org-affiliation): every test account is "none" unless a test
+# brings its own; without a file the run sends nothing.
+AFFILIATION_FILE = os.path.join(_PROOF_DIR, "org-affiliation.json")
+# One Muso user id per test account: the per-user locks key on the user id as well as the
+# email (QA review of #1257 @21f2de0), so two accounts must not share one.
+TEST_ACCOUNTS = {"jane@example.com": "42", "bob@example.com": "43", "b@example.com": "44", "c@example.com": "7",
+                 "gone@example.com": "77", "paid@example.com": "78", "sam@example.com": "79", "u500@example.com": "500"}
+
+
+def _uid_of(email):
+    return TEST_ACCOUNTS.get((email or "jane@example.com").lower(), "42")
+
+
+TEST_USERS = ("42", "43", "44", "7", "77", "78", "79", "500")
+
+
+def affiliation_v1(verdicts, *, age_h=0.0):
+    """org-affiliation/v1 around {uid: {verdict, evidence}} (full coverage unless an entry says
+    otherwise); a flat file is refused (affiliation.read)."""
+    gen = (datetime.now(timezone.utc) - timedelta(hours=age_h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"schema": "org-affiliation/v1", "generated_at": gen,
+            "users": {u: {"coverage": "full", **v} for u, v in verdicts.items()}, "held": {}}
+
+
+def write_affiliation(verdicts=None, path=AFFILIATION_FILE):
+    Path(path).write_text(json.dumps(affiliation_v1(verdicts if verdicts is not None
+                                                    else {u: {"verdict": "none", "evidence": []} for u in TEST_USERS})))
+
+
+write_affiliation()
+os.environ["CREDIT_RETRO_ORG_AFFILIATION"] = AFFILIATION_FILE
+# Paying status: unknown in tests unless a test brings a file (oldest first).
+os.environ.setdefault("CREDIT_TRUST_PAYING_USERS_FILE", os.path.join(_PROOF_DIR, "paying-users.json"))
 
 from credit_review import verify_ledger, verify_notify  # noqa: E402
 from credit_review.verify_notify import CAPTAIN_UID, ContractError, Report  # noqa: E402
@@ -59,7 +95,8 @@ def req(rid, *, pid=PID, status="approved", email="jane@example.com", name="Jane
         artist="Big Star", roles=("Mixing",), created="2026-10-15T20:00:00Z", track="t1"):
     return {"id": rid, "profileId": pid, "trackId": track, "status": status, "spotifyTrackTitle": title,
             "spotifyTrackArtists": [{"id": "a", "name": artist}], "credits": list(roles), "createdAt": created,
-            "user": {"id": "42", "fullName": name, "email": email} if email else None}
+            "user": {"id": _uid_of(email), "fullName": name, "email": email} if email else None}
+
 
 
 class FakeAdmin:
@@ -148,6 +185,24 @@ def _ago(hours):
     return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# firstmate 090: no outgoing message may name a deadline or say a credit will be removed.
+REMOVAL_LANGUAGE = re.compile(r"will be removed|be removed from your profile|removed from your profile (after|on|that)"
+                              r"|reply[^.]{0,80}\bby (january|february|march|april|may|june|july|august|september|"
+                              r"october|november|december|\d)|\b30 days\b|deadline|last reminder", re.I)
+
+
+def posted_bodies(stub_log):
+    """The JSON payloads the curl stub received on POST /messages (subject + HTML body)."""
+    p = Path(stub_log + ".bodies")
+    return [json.loads(ln) for ln in p.read_text().splitlines() if ln.strip()] if p.exists() else []
+
+
+def assert_no_removal_language(tc, api_log_or_text):
+    text = api_log_or_text if isinstance(api_log_or_text, str) else json.dumps(api_log_or_text)
+    m = REMOVAL_LANGUAGE.search(text)
+    tc.assertIsNone(m, f"removal/deadline language in an outgoing message: {m.group(0) if m else ''!r}")
+
+
 class Fake:
     """Records gate invocations; answers like the real gate."""
 
@@ -194,10 +249,13 @@ class LedgerTests(unittest.TestCase):
         verify_ledger.finalize(self.db, message_row=c["message_row"], status="sent", message_id="9")
         d = verify_ledger.claim(self.db, user_key="a@x.com", day="2026-10-15", request_ids=["r1", "r2"], **self.kw)
         self.assertEqual(d, {"result": "daily_cap", "request_ids": ["r2"]})
-        # Deferred ids carry no row, so tomorrow they are claimed.
+        # Deferred ids carry no row; the shared 90-day re-ask lock (Fable 2026-10-17) keeps
+        # them waiting after the day too, and they are claimed once the lock lapses.
         self.assertEqual(verify_ledger.blocked_ids(self.db, ["r2"]), set())
         n = verify_ledger.claim(self.db, user_key="a@x.com", day="2026-10-16", request_ids=["r1", "r2"], **self.kw)
-        self.assertEqual((n["result"], n["request_ids"]), ("claimed", ["r2"]))
+        self.assertEqual((n["result"], n["request_ids"]), ("recently_asked", ["r2"]))
+        n = verify_ledger.claim(self.db, user_key="a@x.com", day="2027-01-13", request_ids=["r1", "r2"], **self.kw)
+        self.assertEqual((n["result"], n["request_ids"]), ("claimed", ["r2"]), "day 90 after the note: the lock lapsed")
 
     def test_an_attempt_with_unknown_outcome_blocks_a_resend(self):
         c = verify_ledger.claim(self.db, user_key="a@x.com", day="2026-10-15", request_ids=["r1"], **self.kw)
@@ -732,7 +790,7 @@ class RunTests(unittest.TestCase):
             self.assertFalse(any("@" in x for x in a), "the account email must not be on argv")
             self.assertFalse(os.path.exists(a[a.index("--credits-file") + 1]), "temp payload file is removed")
         self.assertEqual((rep.sent_notes, rep.sent_credits), (2, 3))
-        self.assertEqual(rep.render("apply"), "VERIFY NOTES: 2 note(s) sent covering 3 provisionally approved credit(s).")
+        self.assertTrue(rep.render("apply").startswith("VERIFY NOTES: 2 note(s) sent covering 3 provisionally approved credit(s)."))
 
     def test_dry_run_only_validates(self):
         decisions_db(self.path, [dec("r1")])
@@ -813,7 +871,7 @@ class RunTests(unittest.TestCase):
         verify_ledger.record_proof_review(db, message_id="500", request_ids=["r1"], outcome="rejected", reviewer="x",
                                           reason="other_role")
         fake, rep = Fake(), Report()
-        verify_notify.send_followups(db, FakeAdmin([req("r1", track="t1"), req("r2", track="t2")]), rep,
+        verify_notify.send_followups(db, FakeAdmin([req("r1", track="t1"), req("r2", track="t2")]), rep, verdicts=verify_notify.affiliation.read(AFFILIATION_FILE),
                                      campaign="verify-live", day="2026-10-20",
                                      documented=verify_notify.load_proof_on_file(PROOF_FILE), limit=150,
                                      pace_seconds=0, wrapper="/w", runner=fake)
@@ -1023,7 +1081,8 @@ class WaveTests(unittest.TestCase):
                 "entries": [{"user_id": 900, "request_id": None, "kind": "pending_doc", "source": "intercom",
                              "ref": "c1"},
                             {"user_id": 901, "request_id": None, "kind": "approved_doc",
-                             "source": "core.verifications.netverify", "ref": "v1"}]}
+                             "source": "core.verifications.netverify", "ref": "v1"}],
+                "gmail_contacts_90d": {"generated_at": gen, "source": "support@ inbound, 90 days", "user_ids": [902]}}
         Path(part).write_text(json.dumps(live))
         self.assertEqual(set(verify_notify.load_proof_on_file(part)), {"900", "901"})
         renamed = json.loads(json.dumps(live))
@@ -1110,7 +1169,7 @@ class WaveTests(unittest.TestCase):
             with self.assertRaisesRegex(verify_notify.ProofFileError, "part 'cs-gmail'"):
                 verify_notify.load_proof_on_file(proof)
 
-    def test_new_credits_documents_rule_is_per_credit(self):
+    def test_new_credits_any_proof_on_file_holds_the_user(self):
         decisions_db(self.path, [dec("r1"), dec("r2", track="t2"), dec("r3", track="t3")])
         proof = os.path.join(self.tmp, "proof.json")
         write_proof(proof, [{"user_id": 42, "request_id": "r1", "kind": "approved_doc", "source": "core", "ref": "x"},
@@ -1122,11 +1181,17 @@ class WaveTests(unittest.TestCase):
         fake = Fake()
         rep = verify_notify.run(FakeAdmin([req("r1"), req("r2", track="t2"), human]), ledger_path=self.path,
                                 mode="apply", runner=fake, wrapper="/w", proof_path=proof, sweep=False)
-        self.assertEqual([[c["request_id"] for c in p["credits"]] for p in fake.payloads], [["r2"]])
-        self.assertEqual((rep.proof_on_file, rep.human_approved, rep.pending_doc_users), (1, 1, 0))
+        # Fable 2026-10-17 precondition 1: proof on file from ANY source means no note at all.
+        # The credit with its own document and the human-approved one are closed; r2 waits
+        # for a human (held, not closed).
+        self.assertEqual(fake.payloads, [])
+        self.assertEqual((rep.proof_on_file, rep.human_approved, rep.pending_doc_users, rep.documented_users,
+                          rep.documented_credits), (1, 1, 0, 1, 1))
+        self.assertIn("held for a human: documents already on file", rep.render("apply"))
         db = verify_ledger.connect(self.path)
         self.addCleanup(db.close)
         self.assertEqual(verify_ledger.blocked_ids(db, ["r1", "r2", "r3"]), {"r1", "r3"})
+        self.assertEqual(verify_ledger.deferred(db), [("r2", PID, "t2")])
 
     def test_a_pending_document_on_another_credit_defers_the_user_then_one_ask_after_review(self):
         decisions_db(self.path, [dec("r1"), dec("r2", track="t2"), dec("r3", pid=PID2)])
@@ -1179,7 +1244,7 @@ class WaveTests(unittest.TestCase):
         proof = os.path.join(self.tmp, "proof.json")
         write_proof(proof, entries)
         fake, rep = Fake(), Report()
-        verify_notify.send_followups(db, FakeAdmin(rows), rep, campaign="verify-live", day="2026-10-15",
+        verify_notify.send_followups(db, FakeAdmin(rows), rep, verdicts=verify_notify.affiliation.read(AFFILIATION_FILE), campaign="verify-live", day="2026-10-15",
                                      documented=verify_notify.load_proof_on_file(proof), limit=150, pace_seconds=0,
                                      wrapper="/w", runner=fake)
         self.assertEqual([[c["request_id"] for c in p["credits"]] for p in fake.payloads], [["ok"]])
@@ -1306,7 +1371,7 @@ class WaveTests(unittest.TestCase):
                                 wrapper="/w", proof_path=proof, sweep=False)
         self.assertEqual((fake.payloads, rep.proof_on_file, rep.pending_doc_users), ([], 1, 0))
 
-    def test_reminders_follow_the_same_per_credit_documents_rule(self):
+    def test_reminders_follow_the_same_documents_rule(self):
         db = verify_ledger.connect(self.path)
         self.addCleanup(db.close)
         c = windowed_note(db)
@@ -1319,14 +1384,18 @@ class WaveTests(unittest.TestCase):
             if human:
                 admin.rows[1]["metadata"] = {"approval": {"isAgent": False}}
             fake, rep = Fake(), Report()
-            verify_notify.send_followups(db, admin, rep, campaign="verify-live", day="2026-10-15",
+            verify_notify.send_followups(db, admin, rep, verdicts=verify_notify.affiliation.read(AFFILIATION_FILE), campaign="verify-live", day="2026-10-15",
                                          documented=verify_notify.load_proof_on_file(proof), limit=10,
                                          pace_seconds=0, wrapper="/w", runner=fake)
             return fake, rep
-        fake, rep = remind([{"user_id": 42, "request_id": "r1", "kind": "approved_doc", "source": "c", "ref": "x"}])
-        self.assertEqual([[c["request_id"] for c in p["credits"]] for p in fake.payloads], [["r2"]])
+        fake, rep = remind([])
+        self.assertEqual([[c["request_id"] for c in p["credits"]] for p in fake.payloads], [["r1", "r2"]])
         a = fake.argv[0]
         self.assertEqual((a[a.index("--kind") + 1], a[a.index("--parent-message-id") + 1]), ("reminder-14", "500"))
+        # A document on file for one credit holds the user's reminder for a human (any proof:
+        # never notified again automatically).
+        fake, rep = remind([{"user_id": 42, "request_id": "r1", "kind": "approved_doc", "source": "c", "ref": "x"}])
+        self.assertEqual((fake.argv, rep.documented_users), ([], 1))
         fake, rep = remind([{"user_id": 42, "request_id": "other", "kind": "pending_doc", "source": "c", "ref": "x"}])
         self.assertEqual((fake.argv, rep.pending_doc_users), ([], 1))
         fake, rep = remind([{"user_id": 42, "request_id": "r1", "kind": "approved_doc", "source": "c", "ref": "x"}],
@@ -1455,6 +1524,7 @@ case "$method ${url#https://api.intercom.io}" in
     if [ -n "${STUB_REJECT:-}" ] && [ -f "$STUB_REJECT" ]; then
       rm -f "$STUB_REJECT"; printf '{"type":"error.list","errors":[{"code":"rate_limit_exceeded"}]}'; exit 0
     fi
+    printf '%s\n' "$payload" >> "$STUB_LOG.bodies"
     n=$(( $(cat "$STUB_N" 2>/dev/null || echo 500) + 1 )); echo "$n" > "$STUB_N"
     printf '{"type":"admin_message","id":"%s","message_type":"email","conversation_id":null}' "$n" ;;
   "POST /conversations/search") printf '{"conversations":[]}' ;;
@@ -1476,7 +1546,7 @@ class WiringTests(unittest.TestCase):
         self.assertIn("\nreadonly TESTABLE=0\n", src)
         (t / "gate.sh").write_text(src.replace("\nreadonly TESTABLE=0\n", "\nreadonly TESTABLE=1\n"))
         self.assertIn("\nreadonly RETRO_COPY_APPROVED=0\n", src)
-        self.assertIn("\nreadonly LIVE_WINDOWED_COPY_APPROVED=0\n", src)
+        self.assertIn("\nreadonly LIVE_WINDOWED_COPY_APPROVED=0\n", src)  # firstmate 090: no removal language
         unlocked = (src.replace("\nreadonly TESTABLE=0\n", "\nreadonly TESTABLE=1\n")
                     .replace("\nreadonly RETRO_COPY_APPROVED=0\n", "\nreadonly RETRO_COPY_APPROVED=1\n"))
         (t / "gate-retro.sh").write_text(unlocked)
@@ -1524,6 +1594,27 @@ class WiringTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_a_mixed_user_gets_one_v1_note_through_the_real_gate(self):
+        """QA review of #1257 @53428d0, through the real gate and ledger (not Fake): a provisional
+        credit and an ordinary decider approval of one user go out as ONE v1 note with no
+        removal date; nothing is refused and nothing waits 90 days."""
+        decisions_db(self.path, [dec("r1"), dec("r2", track="t2")])
+        db = sqlite3.connect(self.path)
+        db.execute("UPDATE decisions SET evidence_kind = 'catalog_confirmed' WHERE request_id = 'r1'")
+        db.execute("UPDATE decisions SET evidence_kind = 'provisional_paid' WHERE request_id = 'r2'")
+        db.commit(); db.close()
+        admin = FakeAdmin([req("r1"), req("r2", title="Other Song", track="t2")])
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper=os.path.join(self.tmp, "gate-windowed.sh"))
+        self.assertEqual((rep.sent_notes, rep.sent_credits, rep.refused_users, rep.mixed_v1_users), (1, 2, 0, 1), rep)
+        db = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(db.execute("SELECT COUNT(*), MAX(removal_day) FROM verify_messages WHERE kind='initial'")
+                             .fetchone(), (1, None))
+        finally:
+            db.close()
+        for b in posted_bodies(self.env["STUB_LOG"]):
+            assert_no_removal_language(self, b["subject"] + " " + b["body"])
+
     def test_past_wave_end_to_end_locked_then_one_message_never_removed(self):
         wave = os.path.join(self.tmp, "wave.csv")
         wave_file(wave, [("HOLD", "r1", "1", PID, "t1", "Mixing", 10, 0, "2026-09-02"),
@@ -1550,7 +1641,10 @@ class WiringTests(unittest.TestCase):
         posts = [ln for ln in Path(self.env["STUB_LOG"]).read_text().splitlines() if ln.endswith("/messages")]
         self.assertEqual(len(posts), 1)
 
-    def test_new_credit_windowed_notes_end_to_end_reminders_then_removal_due(self):
+    def test_new_credit_notes_end_to_end_no_reminders_never_removal_due(self):
+        """firstmate 090: the note is v1 (no date), so no day-14/25 reminder ever goes out and
+        the credit is never removal-due, however long it waits (the committed gate, which
+        also has the windowed lock unlocked here, still sends v1 from the driver)."""
         decisions_db(self.path, [dec("r1")])
         admin = FakeAdmin([req("r1", track="t1")])
         gate = os.path.join(self.tmp, "gate-windowed.sh")
@@ -1575,17 +1669,20 @@ class WiringTests(unittest.TestCase):
             return verify_notify.run(admin, ledger_path=self.path, mode="apply", since_hours=None, wrapper=gate,
                                      sweep=False, proof_path=proof)
         self.assertEqual(tick("2026-10-16").sent_notes, 1)
-        self.assertEqual(tick("2026-10-30").reminders_sent, 1)
-        self.assertEqual(tick("2026-11-10").reminders_sent, 1)
-        self.assertEqual(tick("2026-11-14").removal_due, 0)
-        self.assertEqual(tick("2026-11-15").removal_due, 0, "the reply-by date itself is still in time")
-        self.assertEqual(tick("2026-11-16").removal_due, 1)
+        self.assertEqual(tick("2026-10-30").reminders_sent, 0)
+        self.assertEqual(tick("2026-11-10").reminders_sent, 0)
+        self.assertEqual(tick("2026-11-16").removal_due, 0)
+        self.assertEqual(tick("2027-01-16").removal_due, 0)
         db = sqlite3.connect(self.path)
         try:
             rows = db.execute("SELECT kind, removal_day FROM verify_messages WHERE status='sent' ORDER BY id").fetchall()
         finally:
             db.close()
-        self.assertEqual(rows, [("initial", "2026-11-16"), ("reminder-14", "2026-11-16"), ("reminder-25", "2026-11-16")])
+        self.assertEqual(rows, [("initial", None)])
+        bodies = posted_bodies(self.env["STUB_LOG"])
+        self.assertEqual(len(bodies), 1)
+        for b in bodies:
+            assert_no_removal_language(self, b["subject"] + " " + b["body"])
 
     def test_a_held_back_credit_older_than_the_window_is_asked_exactly_once_after_the_review(self):
         decisions_db(self.path, [dec("r1", at=_ago(1))])
@@ -1644,15 +1741,40 @@ class WiringTests(unittest.TestCase):
         finally:
             db.close()
 
-    def test_as_committed_no_new_credit_note_is_ever_sent(self):
-        decisions_db(self.path, [dec("r1")])
-        admin = FakeAdmin([req("r1", track="t1")])
+    def test_as_committed_every_note_is_the_no_threat_v1_copy(self):
+        """firstmate 090 (2026-10-19 23:27Z): the captain dropped auto-removal, so the committed
+        gate sends every new credit's note as v1 (no date, no removal language), records no
+        removal date, and refuses the windowed copy and every follow-up."""
+        decisions_db(self.path, [dec("r1"), dec("r2", track="t2")])
+        admin = FakeAdmin([req("r1", track="t1"), req("r2", title="Other Song", track="t2")])
         os.environ["INTERCOM_VERIFY_TEST_DAY"] = "2026-10-16"
-        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper=os.path.join(self.tmp, "gate.sh"),
-                                sweep=False)
-        self.assertEqual((rep.sent_notes, rep.refused_users), (0, 1))
-        self.assertIn("windowed copy is not approved", rep.render("apply"))
-        self.assertFalse(Path(self.env["STUB_LOG"]).exists())
+        gate = os.path.join(self.tmp, "gate.sh")
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper=gate, sweep=False)
+        self.assertEqual((rep.sent_notes, rep.sent_credits, rep.refused_users), (1, 2, 0), rep)
+        db = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(db.execute("SELECT removal_day, due_day FROM verify_messages WHERE kind='initial'").fetchall(),
+                             [(None, None)])
+            mid = db.execute("SELECT message_id FROM verify_messages WHERE kind='initial'").fetchone()[0]
+        finally:
+            db.close()
+        bodies = posted_bodies(self.env["STUB_LOG"])
+        self.assertEqual(len(bodies), 1)
+        self.assertIn("Nothing changes while we check", bodies[0]["body"])
+        for b in bodies:
+            assert_no_removal_language(self, b["subject"] + " " + b["body"])
+        cf = os.path.join(self.tmp, "c.json")
+        Path(cf).write_text(json.dumps({"user": {"email": "jane@example.com", "id": "42", "first_name": "Jane"},
+                                        "credits": [{"request_id": "r1", "role": "Mixing", "track_title": "Song",
+                                                     "artist_name": "Big Star"}]}))
+        for extra in (["--copy", "windowed"], ["--kind", "reminder-14", "--parent-message-id", str(mid)],
+                      ["--kind", "after-rejection", "--parent-message-id", str(mid)]):
+            with self.subTest(extra):
+                res = subprocess.run([gate, "send", "--credits-file", cf, "--approved-by", CAPTAIN_UID, *extra],
+                                     capture_output=True, text=True, timeout=60, check=False)
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        posts = [ln for ln in Path(self.env["STUB_LOG"]).read_text().splitlines() if ln.endswith("/messages")]
+        self.assertEqual(len(posts), 1, "only the v1 note went out")
 
     def test_removal_notice_end_to_end_once_per_event_locked_until_approved(self):
         events = os.path.join(self.tmp, "events.jsonl")
@@ -1674,6 +1796,288 @@ class WiringTests(unittest.TestCase):
         log = Path(self.env["STUB_LOG"]).read_text()
         self.assertEqual(sum(1 for ln in log.splitlines() if ln.endswith("/messages")), 1)
         self.assertNotIn("conversations/search", log, "a removal notice is not an ask: no document check")
+
+def user_req(rid, uid, *, pid=PID, track=None, created="2026-10-15T20:00:00Z"):
+    r = req(rid, pid=pid, email=f"u{uid}@example.com", track=track or f"t-{rid}", created=created)
+    r["user"]["id"] = str(uid)
+    return r
+
+
+class AffiliationV1Tests(unittest.TestCase):
+    """org-affiliation/v1 (cmux-credit-system-lane, firstmate 054): absent, held, a partial
+    check or a file older than 2h = UNKNOWN = held."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.path = os.path.join(self.tmp, "aff.json")
+
+    def write(self, users=None, held=None, age_h=0.1, schema="org-affiliation/v1"):
+        gen = (datetime.now(timezone.utc) - timedelta(hours=age_h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        Path(self.path).write_text(json.dumps({"schema": schema, "generated_at": gen, "users": users or {},
+                                               "held": held or {}}))
+
+    def test_per_user_rule(self):
+        from credit_review import affiliation
+        self.write({"1": {"verdict": "none", "coverage": "full", "evidence": []},
+                    "2": {"verdict": "none", "coverage": "labels_only", "evidence": []},
+                    "3": {"verdict": "contributor", "coverage": "full", "evidence": []},
+                    "4": {"verdict": "claimed_unverified", "coverage": "full", "evidence": []}},
+                   held={"5": {"reason": "catalog read failed"}})
+        v = affiliation.read(self.path)
+        got = {u: affiliation.hold_reason(v, u) for u in ("1", "2", "3", "4", "5", "6")}
+        self.assertEqual(got, {"1": None, "2": "affiliation_partial_check", "3": "org_affiliated",
+                               "4": "affiliation_claimed_unverified", "5": "affiliation_held",
+                               "6": "affiliation_unknown"})
+        # claimed_unverified allows only a trusted-contradicted removal (producer README, firstmate 055).
+        self.assertIsNone(affiliation.hold_reason(v, "4", affiliation.ACTION_TRUSTED_REMOVAL))
+        self.assertEqual(affiliation.hold_reason(v, "3", affiliation.ACTION_TRUSTED_REMOVAL), "org_affiliated")
+
+    def test_an_untrustworthy_file_is_unknown_for_everyone(self):
+        from credit_review import affiliation
+        for kw in ({"age_h": 2.5}, {"age_h": -1}, {"schema": "org-affiliation/v2"},
+                   {"users": {"1": {"verdict": "maybe", "coverage": "full"}}}):
+            with self.subTest(kw):
+                self.write(**kw)
+                with self.assertRaises(ValueError):
+                    affiliation.read(self.path)
+
+    def test_a_legacy_flat_file_is_never_trusted(self):
+        """QA review of #1257 @53428d0: the pre-v1 flat shape has no coverage and no stamp, so an
+        old one could authorize sends forever."""
+        from credit_review import affiliation
+        Path(self.path).write_text(json.dumps({"1": {"verdict": "none", "evidence": []}}))
+        with self.assertRaises(ValueError):
+            affiliation.read(self.path)
+
+    def test_the_decider_asks_for_a_full_check_of_the_next_recipients(self):
+        led = os.path.join(self.tmp, "ledger.sqlite3")
+        decisions_db(led, [dec("p1"), dec("p2", outcome="error:x")])
+        db = verify_ledger.connect(led)
+        try:
+            path, n = verify_notify.write_affiliation_priority(db, directory=self.tmp)
+        finally:
+            db.close()
+        self.assertEqual((n, json.loads(Path(path).read_text())["user_ids"]), (1, [42]))
+        self.assertTrue(path.endswith("org-affiliation-priority-credit-trust-llm-t01.json"))
+
+    def test_priority_file_is_written_atomically(self):
+        from credit_review import affiliation
+        out = affiliation.write_priority("lane-x", [5, "3", "x", 5], source="t", directory=self.tmp)
+        doc = json.loads(Path(out).read_text())
+        self.assertEqual((os.path.basename(out), doc["user_ids"], doc["source"]),
+                         ("org-affiliation-priority-lane-x.json", [3, 5], "t"))
+
+
+class EnableGateTests(unittest.TestCase):
+    """Fable 2026-10-17, decision-verify-notify-enable: the gates before the first live send."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.path = os.path.join(self.tmp, "ledger.sqlite3")
+        self.proof = os.path.join(self.tmp, "proof.json")
+        self.aff = os.path.join(self.tmp, "aff.json")
+        write_affiliation({str(u): {"verdict": "none", "coverage": "full", "evidence": []} for u in range(40, 60)}, path=self.aff)
+
+    def go(self, rows, *, entries=(), contacts=(), fake=None, **kw):
+        decisions_db(self.path, [dec(r["id"], pid=r["profileId"], track=r["trackId"]) for r in rows])
+        write_proof(self.proof, entries, contacts=contacts)
+        fake = fake or Fake()
+        kw.setdefault("affiliation_path", self.aff)
+        rep = verify_notify.run(FakeAdmin(rows), ledger_path=self.path, mode="apply", runner=fake, wrapper="/w",
+                                proof_path=self.proof, sweep=False, since_hours=None, **kw)
+        return rep, fake
+
+    def deferred(self):
+        db = verify_ledger.connect(self.path)
+        try:
+            return {rid for rid, _, _ in verify_ledger.deferred(db)}
+        finally:
+            db.close()
+
+    def test_a_support_at_only_contact_gets_no_note_and_is_held(self):
+        """Precondition 1: the 90-day support@ list is read; a user who only emailed
+        support@ (no proof-on-file entry at all) is never notified."""
+        rep, fake = self.go([user_req("a1", 41), user_req("a2", 42)], contacts=[41])
+        self.assertEqual([p["user"]["id"] for p in fake.payloads], ["42"])
+        self.assertEqual((rep.support_contact_users, rep.support_contact_credits), (1, 1))
+        self.assertEqual(self.deferred(), {"a1"}, "held, not closed")
+        self.assertIn("emailed support@ in the last 90 days", rep.render("apply"))
+
+    def test_intercom_proof_of_any_kind_means_no_note(self):
+        for kind in ("pending_doc", "approved_doc", "human_approved_after_doc"):
+            with self.subTest(kind):
+                if os.path.exists(self.path):
+                    os.unlink(self.path)
+                rep, fake = self.go([user_req("b1", 43)],
+                                    entries=[{"user_id": 43, "request_id": None, "kind": kind, "source": "intercom",
+                                              "ref": "conv-1"}])
+                self.assertEqual(fake.payloads, [], kind)
+                self.assertEqual(self.deferred(), {"b1"})
+
+    def test_affiliation_unknown_or_affiliated_is_listed_for_a_human(self):
+        write_affiliation({"44": {"verdict": "contributor", "evidence": []},
+                           "45": {"verdict": "none", "evidence": []}}, path=self.aff)
+        rep, fake = self.go([user_req("c1", 44), user_req("c2", 45), user_req("c3", 46)])
+        self.assertEqual([p["user"]["id"] for p in fake.payloads], ["45"])
+        self.assertEqual(rep.affiliation_held, ["user 44: org_affiliated", "user 46: affiliation_unknown"])
+        self.assertEqual(self.deferred(), {"c1", "c3"})
+        self.assertIn("org affiliation unknown or affiliated", rep.render("apply"))
+
+    def test_no_affiliation_file_sends_nothing(self):
+        rep, fake = self.go([user_req("d1", 47)], affiliation_path=os.path.join(self.tmp, "absent.json"))
+        self.assertEqual(fake.argv, [])
+        self.assertIn("org-affiliation", rep.halted)
+
+    def test_an_ask_in_either_campaign_within_90_days_locks_the_user(self):
+        db = verify_ledger.connect(self.path)
+        day = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+        c = verify_ledger.claim(db, user_key="u48@example.com", day=day, request_ids=["old"], message_type="email",
+                                approved_by=CAPTAIN_UID, approval_ref="ref", campaign="retro-past")
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="1")
+        db.close()
+        rep, fake = self.go([user_req("e1", 48), user_req("e2", 49)])
+        self.assertEqual([p["user"]["id"] for p in fake.payloads], ["49"])
+        self.assertEqual((rep.recently_asked_users, rep.recently_asked_credits), (1, 1))
+        self.assertEqual(self.deferred(), {"e1"})
+
+    def test_a_mixed_user_gets_one_v1_note_covering_every_credit(self):
+        """QA review of #1257 @53428d0: two notes for one user could never both be delivered
+        (the 90-day re-ask lock refuses the second), so a user with ANY provisional_paid credit
+        gets ONE note, the v1 copy (no date, no removal), for all of them."""
+        rows = [user_req("g1", 54), user_req("g2", 54), user_req("g3", 55)]
+        decisions_db(self.path, [dec(r["id"], pid=r["profileId"], track=r["trackId"]) for r in rows])
+        db = sqlite3.connect(self.path)
+        db.execute("UPDATE decisions SET evidence_kind = 'provisional_paid' WHERE request_id = 'g2'")
+        db.execute("UPDATE decisions SET evidence_kind = 'catalog_confirmed' WHERE request_id IN ('g1', 'g3')")
+        db.commit(); db.close()
+        write_proof(self.proof, [])
+        fake = Fake()
+        rep = verify_notify.run(FakeAdmin(rows), ledger_path=self.path, mode="apply", runner=fake, wrapper="/w",
+                                proof_path=self.proof, sweep=False, since_hours=None, affiliation_path=self.aff)
+        sent = sorted((sorted(c["request_id"] for c in p["credits"]), "--copy" in a and a[a.index("--copy") + 1])
+                      for p, a in zip(fake.payloads, [x for x in fake.argv if x[1] == "send"]))
+        self.assertEqual(sent, [(["g1", "g2"], "v1"), (["g3"], "v1")], "firstmate 090: every note is v1")
+        self.assertEqual(rep.mixed_v1_users, 1)
+
+    def test_the_90_day_lock_follows_the_user_not_the_email(self):
+        """QA review of #1257 @21f2de0: an account that changes its email is still the same
+        user: the lock and the daily cap key on the Muso user id too, including notes written
+        before account_id existed (via the decider's user id for the credits they covered)."""
+        db = verify_ledger.connect(self.path)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        last_week = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+        c = verify_ledger.claim(db, user_key="old@example.com", day=last_week, request_ids=["m1"], message_type="email",
+                                approved_by=CAPTAIN_UID, approval_ref="ref", user_id="61")
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="900")
+        self.assertTrue(verify_ledger.asked_within(db, user_key="new@example.com", day=today, user_id="61"))
+        self.assertFalse(verify_ledger.asked_within(db, user_key="new@example.com", day=today, user_id="62"))
+        again = verify_ledger.claim(db, user_key="new@example.com", day=today, request_ids=["m2"], message_type="email",
+                                    approved_by=CAPTAIN_UID, approval_ref="ref", user_id="61")
+        self.assertEqual(again["result"], "recently_asked")
+        # A legacy row (no account_id): the decider's user id for its credit identifies the user.
+        db.execute("UPDATE verify_messages SET account_id = NULL")
+        db.close()
+        decisions_db(self.path, [dec("m1")])   # decider user_id 42 for m1
+        db = verify_ledger.connect(self.path)
+        try:
+            self.assertTrue(verify_ledger.asked_within(db, user_key="other@example.com", day=today, user_id="42"))
+            self.assertTrue(verify_ledger.capped(db, user_key="other@example.com", day=last_week, user_id="42"))
+        finally:
+            db.close()
+
+    def test_unknown_paying_status_never_lets_the_cap_choose(self):
+        """QA review of #1257 @3b5fea9: with no readable paying-users export, a run whose notes
+        exceed the cap sends nothing (all wait, reported); one that fits under the cap sends."""
+        missing = Path(os.path.join(self.tmp, "absent-paying.json"))
+        rows = [user_req("w1", 51), user_req("w2", 52), user_req("w3", 53)]
+        with unittest.mock.patch("credit_review.decide.PAYING_USERS_FILE", missing):
+            rep, fake = self.go(rows, max_users=2)
+        self.assertEqual(fake.payloads, [])
+        self.assertIn("paying status unknown", rep.render("apply"))
+        self.assertEqual(self.deferred(), {"w1", "w2", "w3"}, "kept for tomorrow, never closed")
+        with unittest.mock.patch("credit_review.decide.PAYING_USERS_FILE", missing):
+            rep, fake = self.go(rows, max_users=10)
+        self.assertEqual(len(fake.payloads), 3)
+        self.assertIn("every note fit under the cap", rep.render("apply"))
+
+    def test_the_days_cap_counts_what_the_ledger_already_sent_today(self):
+        """QA review of #1257 @53428d0: a same-day retry or second invocation never gets a fresh cap."""
+        db = verify_ledger.connect(self.path)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        for i, who in enumerate(("u90@example.com", "u91@example.com")):
+            c = verify_ledger.claim(db, user_key=who, day=today, request_ids=[f"z{i}"], message_type="email",
+                                    approved_by=CAPTAIN_UID, approval_ref="ref", windowed=True)
+            verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=str(800 + i))
+        db.close()
+        paying = os.path.join(self.tmp, "paying.json")
+        Path(paying).write_text(json.dumps({"generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                            "source": "t", "definition": "t", "counts_by_basis": {}, "count": 1,
+                                            "ids": [56]}))
+        with unittest.mock.patch("credit_review.decide.PAYING_USERS_FILE", Path(paying)):
+            rep, fake = self.go([user_req("h1", 56), user_req("h2", 57), user_req("h3", 58)], max_users=3)
+            self.assertEqual(len(fake.payloads), 1)
+            self.assertEqual(rep.already_today, 2)
+            self.assertEqual(len(self.deferred()), 2, "the rest wait for tomorrow")
+            rep2, fake2 = self.go([user_req("h1", 56), user_req("h2", 57), user_req("h3", 58)], max_users=2)
+        self.assertEqual(fake2.payloads, [], "cap already used up today")
+
+    def test_reminders_pass_the_affiliation_gate_too(self):
+        """QA review of #1257 @53428d0: a day-14 reminder is a user message like the note itself."""
+        db = verify_ledger.connect(self.path)
+        day = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
+        c = verify_ledger.claim(db, user_key="u50@example.com", day=day, request_ids=["f0"], message_type="email",
+                                approved_by=CAPTAIN_UID, approval_ref="ref", windowed=True,
+                                refs=[{"request_id": "f0", "profile_id": PID, "track_id": "t-f0"}])
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="700")
+        db.close()
+        write_affiliation({"50": {"verdict": "contributor", "evidence": []}}, path=self.aff)
+        rep, fake = self.go([user_req("f0", 50)])
+        self.assertEqual((rep.reminders_sent, fake.payloads), (0, []))
+        self.assertTrue(any(h.startswith("user 50: org_affiliated") for h in rep.affiliation_held), rep.affiliation_held)
+        write_affiliation({"50": {"verdict": "none", "evidence": []}}, path=self.aff)
+        rep, fake = self.go([user_req("f0", 50)])
+        self.assertEqual(rep.reminders_sent, 1, "not closed: it goes out once the user is cleared")
+
+    def test_a_stale_support_contact_snapshot_sends_nothing(self):
+        """QA review of #1257 @53428d0: the export and its parts can be fresh while the embedded
+        gmail_contacts_90d snapshot is not."""
+        write_proof(self.proof, [])
+        doc = json.loads(Path(self.proof).read_text())
+        for bad in ({**doc["gmail_contacts_90d"], "generated_at": _ago(5)},
+                    {k: v for k, v in doc["gmail_contacts_90d"].items() if k != "generated_at"}, [1, 2]):
+            with self.subTest(bad):
+                Path(self.proof).write_text(json.dumps({**doc, "gmail_contacts_90d": bad}))
+                fake = Fake()
+                rep = verify_notify.run(FakeAdmin([user_req("k1", 59)]), ledger_path=self.path, mode="apply",
+                                        runner=fake, wrapper="/w", proof_path=self.proof, sweep=False,
+                                        since_hours=None, affiliation_path=self.aff)
+                self.assertIn("gmail_contacts_90d", rep.halted)
+                self.assertEqual(fake.payloads, [])
+
+    def test_paying_users_first_and_the_cap_counts_reminders(self):
+        paying = os.path.join(self.tmp, "paying.json")
+        Path(paying).write_text(json.dumps({"generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                            "source": "t", "definition": "t", "counts_by_basis": {}, "count": 1,
+                                            "ids": [52]}))
+        db = verify_ledger.connect(self.path)
+        day = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
+        c = verify_ledger.claim(db, user_key="u50@example.com", day=day, request_ids=["f0"], message_type="email",
+                                approved_by=CAPTAIN_UID, approval_ref="ref", windowed=True,
+                                refs=[{"request_id": "f0", "profile_id": PID, "track_id": "t-f0"}])
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="700")
+        db.close()
+        rows = [user_req("f1", 51, created="2026-10-14T00:00:00Z"), user_req("f2", 52, created="2026-10-15T00:00:00Z"),
+                user_req("f3", 53, created="2026-10-13T00:00:00Z"), user_req("f0", 50)]
+        with unittest.mock.patch.dict(os.environ, {}), \
+                unittest.mock.patch("credit_review.decide.PAYING_USERS_FILE", Path(paying)):
+            rep, fake = self.go(rows, max_users=2)
+        sent = [(p["user"]["id"], [c["request_id"] for c in p["credits"]]) for p in fake.payloads]
+        self.assertEqual(sent, [("50", ["f0"]), ("52", ["f2"])], "the reminder first, then the paying user")
+        self.assertEqual(rep.reminders_sent, 1)
+        self.assertEqual(self.deferred(), {"f1", "f3"}, "over the cap: kept for tomorrow")
+
 
 class TestLogIsolation(unittest.TestCase):
     def test_tests_and_their_subprocesses_never_log_to_the_production_run_log(self):
