@@ -113,6 +113,40 @@ Host tools in use on node-8: PyMuPDF, Pillow, OpenCV, numpy, tesseract (eng), po
 
 **Follow-up:** re-judging earlier unnamed rows when a named owner uploads the same document is a verifier V2 follow-up.
 
+## Stage 2: approve from the proof on file (SHADOW)
+
+This follows Fable's stage-2 design (2026-10-17) and backlog ruling 2 (2026-10-19). The decider holds every row whose user already sent documents (`proof on file: human review`) and never asks those users again. Stage 2 reads those documents and records what the decider **would** do. It runs in shadow only and writes only the `stage2_shadow` table in the proof store. It changes no credit and sends nothing. Going live is the decider's job (credit-trust-llm-t01), and only after Fable's 50-row sample shows at least 95% agreement and 0 false GENUINE.
+
+Cron `credit-verify-proof-stage2` runs hourly at :20 and takes up to 40 users per run. Each run goes through these steps:
+
+1. **Select:** read the decider ledger (`/var/lib/hydra/credit-review/ledger.sqlite3`, read-only). Take each request whose latest apply decision is a `proof on file` hold. Paid users come first, then the oldest decision. A request already in `stage2_shadow` is not judged again, except one whose run came out `undetermined`, which is judged again on later runs, up to 3 runs; the last one stands.
+2. **Claim context:** run one Trino `SELECT` per 300 ids against `postgresql_core` and `postgresql_catalog`, with `query_max_execution_time` set. It reads the request's status, claimed roles, track title, artists, ISRC, release date, popularity, the account's names and the profile name. The admin API is never used here, because firstmate 033 ruled out bulk paging of prod admin APIs. A request that is no longer `unverified` or `user_verification_needed` is skipped.
+3. **Documents:** take the user's Intercom conversations from the proof-on-file export, up to 8, most recent first. Each conversation costs one read-only GET, which also gives the Intercom contact, so reuse matching lines up with the Intercom shadow rows. The cached originals are used when the edge plugin has them. Otherwise the customer's own attachments are downloaded (https only) into a 0700 temp dir under `/dev/shm`, which is deleted after the user. At most 24 files are taken per user. Documents are matched by **account**, through the export's user id (`"111"` and `111` are the same user), never by what the text claims. Gmail-only proof cannot be read here, so it comes out `no_document`. A user whose conversation GETs or downloads failed, and of whom no document was read, gets an `undetermined` row per request and role (`documents could not be fetched (<first error>)`), so it is tried again on the next runs, up to 3. That counts only when Intercom answered in the same run: when every conversation GET attempted in the run raised (none succeeded or came back not found), the run is treated as an Intercom outage, writes no `stage2_shadow` rows, logs `INTERCOM UNAVAILABLE: no rows written` and exits non-zero. Rows are held back only until the first GET answers, then committed user by user, so a run cut short keeps what it judged. A user with some failed fetches but some documents read gets `undetermined` (`some documents could not be fetched (<first error>)`) for every outcome except `reject_hold`, so all the documents are judged on a later run; a `reject_hold` from the documents read stands and holds the account.
+4. **Check:** each file runs **once** in the sandbox per claimant-name set against every held track of that user, up to 60 tracks (`pipeline.analyze_against`). A request's names are the account's names plus that request's own profile name, so a document crediting one of the account's profiles never names another. The file forensics run once, the content cross-checks run once per track, and every request and role is finalized exactly as a single-track analysis would be: reuse, verdict, store. A sandbox answer without per-track checks is UNDETERMINED, never a pass. A document that does not list a track (`track_listed` not true) is never FORGED_LIKELY for that track because an edit signal meets what fits another claim of the account: another recording's ISRC (`isrc_other_recording`), another artist's dashboard (`dsp_artist_not_track_artist`) or another profile's name (`claimant_not_named`). For that claim those are coverage gaps. Track-independent signals still make it FORGED_LIKELY there: hard signals (C2PA AI source, text edited after signing, reuse) and an edit together with a mismatch that does not depend on the claim (`split_shares_do_not_add_up`). A document that lists the track keeps its verdict, so a sheet whose title was edited to the claimed track but kept another ISRC stays FORGED_LIKELY.
+5. **Judge:** Fable's table decides each request and claimed role from every document's verdict for it:
+
+| Outcome | When |
+|---|---|
+| `reject_hold` | any document is FORGED_LIKELY for it |
+| `approve` | T0/T1 (popularity 1–59), a GENUINE or VERIFIED document, so the claimant is named in the claimed role on this track, and no contradiction |
+| `human` | a GENUINE/VERIFIED document, but: the account is on hold, because a document on file for it is FORGED_LIKELY for another of its claims, in this run or an earlier one (`account hold: …`); the popularity is 0 or unknown (unattributed: firstmate 036, [`credit-trust-decide.md`](./credit-trust-decide.md)); the account is org-affiliated or its affiliation is unknown (`org-affiliation.json` under the org-affiliation/v1 consumer rules: a missing, malformed or over-2h-old export, an account absent from `users` or listed in `held`, or one not checked on full coverage); another document on file that covers this track is INCONSISTENT or has forensic doubt (named in the reason); the track is T2, which needs a second independent anchor (a trusted-source credit on the same release, a cited web page, or a footprint of 3 or more), decider evidence that the go-live wiring adds; or the track is T3 |
+| `review` | the best document is SUSPECT on forensic grounds |
+| `need_more` | the best document is PLAUSIBLE or INCONSISTENT, or is SUSPECT only because it doesn't cover the claim (`track_not_named`, `claimed_role_not_listed`, `dsp_artist_not_track_artist`). The gap is named. |
+| `no_document` | nothing readable on file |
+| `undetermined` | documents were read but every check was UNDETERMINED, or some or all could not be fetched (judged again next run, up to 3 runs) |
+
+A SUSPECT document never carries an approval on its own. A document for a different song never blocks an approval: on that track it is INCONSISTENT or not listed by construction. The trusted-source one-person-role contradiction stays the decider's catalog check at go-live.
+
+Each `stage2_shadow` row records `analyzer_version` (the forensics version behind its verdicts), and its `detail_json` lists every document's verdict and `track_listed` for the claim.
+
+```bash
+python3 /opt/hydra/scripts/credit-proof.py stage2 --max-users 40      # what the cron runs
+python3 /opt/hydra/scripts/credit-proof.py stage2-sample --n 50        # Fable's stratified sample (markdown)
+python3 /opt/hydra/scripts/credit-proof.py stage2-sample --summary     # outcome counts, paid / free
+```
+
+The sample takes the latest verdict per request and role, with approvals first, because a false approval is the failure that blocks go-live. Tests: `python3 scripts/tests/test_credit_proof_stage2.py`.
+
 ## Calibration (90-day Intercom replay, 2026-10-15)
 
 `credit-proof.py --store /tmp/… intercom --days 90 --max-files 5000` on node-8. Results and the calibration changes are in the PR body. In summary:

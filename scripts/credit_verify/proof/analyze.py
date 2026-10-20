@@ -10,6 +10,7 @@ happen in the parent (pipeline.py).
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import os
 import sys
@@ -21,14 +22,24 @@ from .sandbox import MAX_BYTES
 from .sniff import sniff
 
 
-def extract(path: str, declared: str | None, ctx: ClaimContext) -> dict[str, Any]:
+def extract(path: str, declared: str | None, ctx: ClaimContext,
+            contexts: list[ClaimContext] | None = None) -> dict[str, Any]:
     with open(path, "rb") as fh:
-        return extract_bytes(fh.read(MAX_BYTES + 1), path, declared, ctx)
+        return extract_bytes(fh.read(MAX_BYTES + 1), path, declared, ctx, contexts)
 
 
-def extract_bytes(data: bytes, path: str, declared: str | None, ctx: ClaimContext) -> dict[str, Any]:
+def extract_bytes(data: bytes, path: str, declared: str | None, ctx: ClaimContext,
+                  contexts: list[ClaimContext] | None = None) -> dict[str, Any]:
     """`path` is only the label cited as evidence (and its extension the
-    declared type hint); the bytes are `data`."""
+    declared type hint); the bytes are `data`.
+
+    With `contexts` (stage 2: one document checked against several claimed
+    tracks of the same account), the file forensics run ONCE and the content
+    cross-checks run once per context: the top-level `signals` then carry the
+    file forensics only and `per_context[i]` carries context i's content
+    signals, kind, track_listed and entities. `ctx` supplies the claimant
+    names for the PDF checks and must name the same account as every
+    context."""
     out: dict[str, Any] = {"version": FORENSICS_VERSION, "bytes": len(data), "sha256": fingerprint.sha256(data)}
     signals: list[Signal] = []
     if len(data) > MAX_BYTES:
@@ -65,8 +76,19 @@ def extract_bytes(data: bytes, path: str, declared: str | None, ctx: ClaimContex
         except Exception as exc:  # noqa: BLE001
             signals.append(Signal("F2", "phash_unavailable", ERROR, value=f"{type(exc).__name__}: {exc}"[:160],
                                   evidence=Evidence(file=path, tool="credit_verify.fingerprint")))
-    s3, ents = content.analyze(ext, ctx, path)
-    signals += s3
+    per_context: list[dict[str, Any]] | None = None
+    if contexts:
+        per_context = []
+        for c in contexts:
+            e = copy.deepcopy(ext)
+            sc, ec = content.analyze(e, c, path)
+            per_context.append({"signals": [x.as_dict() for x in sc], "kind": e.kind,
+                                "track_listed": e.track_listed, "entities": ec})
+        first = per_context[0]
+        ext.kind, ext.track_listed, ents = first["kind"], first["track_listed"], first["entities"]
+    else:
+        s3, ents = content.analyze(ext, ctx, path)
+        signals += s3
     sh = fingerprint.shingles(ext.text)
     out.update(
         signals=[s.as_dict() for s in signals],
@@ -80,6 +102,8 @@ def extract_bytes(data: bytes, path: str, declared: str | None, ctx: ClaimContex
         facts={k: v for k, v in facts.items() if k in ("pages", "incremental_updates", "signatures", "text_layer",
                                                       "camera", "width", "height", "producer")},
     )
+    if per_context is not None:
+        out["per_context"] = per_context
     return out
 
 
@@ -92,8 +116,10 @@ def main() -> int:
     answer = os.fdopen(os.dup(1), "w")
     os.dup2(2, 1)
     try:
+        contexts = req.get("contexts")
         res = extract_bytes(base64.b64decode(req["data"]), req["path"], req.get("declared"),
-                            ClaimContext.from_dict(req.get("context")))
+                            ClaimContext.from_dict(req.get("context")),
+                            [ClaimContext.from_dict(c) for c in contexts] if contexts else None)
     except Exception as exc:  # noqa: BLE001 - one bad file must yield a recorded error, not a traceback
         res = {"version": FORENSICS_VERSION, "fatal": f"{type(exc).__name__}: {exc}"[:300]}
     json.dump(res, answer, default=str)

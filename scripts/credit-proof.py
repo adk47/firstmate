@@ -10,6 +10,11 @@ Subcommands:
                 node-8 (one read-only Intercom GET per conversation).
   email         Analyse attachments mailed to the inbound verification address
                 (Maildir; dark until the address exists).
+  stage2        SHADOW stage 2: judge the documents already on file for the
+                decider's "proof on file" holds and record what the decider
+                would do (stage2_shadow table). Changes nothing.
+  stage2-sample Print a stratified sample of stage-2 shadow verdicts (markdown)
+                for Fable's review, or --summary for the outcome counts.
 
 Writes only its own store (/var/lib/hydra-credit-verify/proof.sqlite): no
 credit request is changed and nothing is sent. Kill switch:
@@ -88,6 +93,38 @@ def cmd_email(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stage2(args: argparse.Namespace) -> int:
+    from credit_verify.proof import intercom, stage2
+    from credit_verify.proof.store import ProofStore
+    if _guard("stage-2 shadow"):
+        return 0
+    tok = intercom.intercom_token()
+    if not tok:
+        log("no MUSOAI_INTERCOM_TOKEN: cannot read the documents on file")
+        print("NO_REPLY")
+        return 1
+    stats = stage2.run(ProofStore(args.store), fetch=intercom.make_fetch(tok), max_users=args.max_users,
+                       workers=args.workers, log=log)
+    log("stage2 " + json.dumps({k: stats[k] for k in ("run_id", "held_unjudged", "users", "rows", "documents",
+                                                       "skipped_not_held", "retry_users", "outcomes")}))
+    for e in stats["errors"][:10]:
+        log(f"stage2 error: {e}")
+    print("NO_REPLY")
+    return 1 if stats["intercom_unavailable"] else 0
+
+
+def cmd_stage2_sample(args: argparse.Namespace) -> int:
+    from credit_verify.proof import stage2
+    from credit_verify.proof.store import ProofStore
+    store = ProofStore(args.store)
+    stage2.ensure_schema(store.db)
+    if args.summary:
+        print(json.dumps(stage2.summary(store.db), indent=1))
+    else:
+        print(stage2.sample_markdown(stage2.sample(store.db, n=args.n)), end="")
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--store", default=None, help="proof store (default /var/lib/hydra-credit-verify/proof.sqlite)")
@@ -106,6 +143,14 @@ def parser() -> argparse.ArgumentParser:
     pe = sub.add_parser("email", help="analyse attachments mailed to the inbound verification address")
     pe.add_argument("--maildir", default=None)
     pe.set_defaults(fn=cmd_email)
+    ps = sub.add_parser("stage2", help="SHADOW: judge documents on file for the decider's proof-on-file holds")
+    ps.add_argument("--max-users", type=int, default=60)
+    ps.add_argument("--workers", type=int, default=3, help="sandboxed analyses in parallel")
+    ps.set_defaults(fn=cmd_stage2)
+    pss = sub.add_parser("stage2-sample", help="stratified sample (markdown) or --summary of stage-2 shadow verdicts")
+    pss.add_argument("--n", type=int, default=50)
+    pss.add_argument("--summary", action="store_true")
+    pss.set_defaults(fn=cmd_stage2_sample)
     return p
 
 

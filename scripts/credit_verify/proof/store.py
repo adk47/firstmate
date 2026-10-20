@@ -170,29 +170,33 @@ class ProofStore:
     def _prior(self) -> list[Fingerprint]:
         with self.lock:
             rows = self.db.execute("SELECT * FROM fingerprints").fetchall()
-        out = []
-        for r in rows:
-            out.append(Fingerprint(proof_id=r["proof_id"], contact_h=r["contact_h"] or "", kind=r["kind"] or "",
-                                   mime=r["mime"] or "", phash=int(r["phash"], 16) if r["phash"] else None,
-                                   minhash=json.loads(r["minhash_json"] or "[]"), n_shingles=r["n_shingles"] or 0,
-                                   entities=json.loads(r["entities_json"] or "{}"),
-                                   track_key=r["track_key"] or None,
-                                   role_families=[x for x in (r["role_families"] or "").split(",") if x],
-                                   claimant_named=None if r["claimant_named"] is None else bool(r["claimant_named"]),
-                                   track_listed=None if r["track_listed"] is None else bool(r["track_listed"]),
-                                   name_h=r["matched_name_hash"],
-                                   name_verified=None if r["name_verified"] is None else bool(r["name_verified"])))
-        return out
+        return [_fingerprint(r) for r in rows]
 
-    def reuse_signals(self, fp: Fingerprint, path: str, linked: bool = False) -> list[Signal]:
+    def remember(self, prior: list[Fingerprint], fp: Fingerprint) -> None:
+        """Bring a _prior() list in step with record(fp): the stored row
+        replaces any earlier one under the same key and moves last, as
+        INSERT OR REPLACE does."""
+        with self.lock:
+            row = self.db.execute("SELECT * FROM fingerprints WHERE proof_id=? AND contact_h=? AND track_key=?",
+                                  (fp.proof_id, fp.contact_h, fp.track_key or "")).fetchone()
+        if row is None:
+            return
+        new = _fingerprint(row)
+        prior[:] = [p for p in prior if (p.proof_id, p.contact_h, p.track_key)
+                    != (new.proof_id, new.contact_h, new.track_key)] + [new]
+
+    def reuse_signals(self, fp: Fingerprint, path: str, linked: bool = False,
+                      prior: list[Fingerprint] | None = None) -> list[Signal]:
         """Compare with every earlier proof from ANY account (removed and
         fraud requests included: the store never deletes). Matches are
         grouped by the other account, which yields at most one reuse signal
-        (cross_account) however many tracks it used the document for."""
+        (cross_account) however many tracks it used the document for.
+        `prior`: the stored fingerprints already loaded (_prior()), kept in
+        step with record() by the caller."""
         out: list[Signal] = []
         families: set[str] = set()
         accounts: dict[str, dict[str, Any]] = {}
-        for other in self._prior():
+        for other in (self._prior() if prior is None else prior):
             if other.proof_id == fp.proof_id and other.contact_h == fp.contact_h and other.track_key == fp.track_key:
                 continue          # this very proof (re-analysis)
             same_contact = bool(fp.contact_h) and other.contact_h == fp.contact_h
@@ -244,6 +248,19 @@ class ProofStore:
                 seen.add(s.name)
                 uniq.append(s)
         return uniq
+
+
+def _fingerprint(r: sqlite3.Row) -> Fingerprint:
+    return Fingerprint(proof_id=r["proof_id"], contact_h=r["contact_h"] or "", kind=r["kind"] or "",
+                       mime=r["mime"] or "", phash=int(r["phash"], 16) if r["phash"] else None,
+                       minhash=json.loads(r["minhash_json"] or "[]"), n_shingles=r["n_shingles"] or 0,
+                       entities=json.loads(r["entities_json"] or "{}"),
+                       track_key=r["track_key"] or None,
+                       role_families=[x for x in (r["role_families"] or "").split(",") if x],
+                       claimant_named=None if r["claimant_named"] is None else bool(r["claimant_named"]),
+                       track_listed=None if r["track_listed"] is None else bool(r["track_listed"]),
+                       name_h=r["matched_name_hash"],
+                       name_verified=None if r["name_verified"] is None else bool(r["name_verified"]))
 
 
 def cross_account(fp: Fingerprint, hows: set[str], tracks: set[str], linked: bool, ev: Evidence,
