@@ -44,6 +44,14 @@ Quote the identifier in your reply. Do not file the same problem twice by hand.
 
 ## How cards are handled (not your job)
 
-STAGED, INACTIVE: the pre-check and escalate crons ship `enabled: false` until the intake key is placed on node-8, so none of the following runs yet. Once they are enabled, Clio's triage wakes only when an untriaged intake card is waiting (zero-token
-pre-check every 15 minutes). A card still untriaged 30 minutes after it was filed is reassigned to the
-pilot agent with the `intake-escalated` label.
+No cron configuration ships with this skill. Today a filed card is a `todo` issue that stays there until a
+human or an agent picks it up: there is no automatic triage wake and no 30-minute escalation. The intake
+path is manual (`file` / `waiting` / `escalations`).
+
+The three jobs that will automate it, 39 `paperclip-intake-triage`, 40 `paperclip-intake-precheck` and
+41 `paperclip-intake-escalate`, land `enabled: false` separately in MUS-15117 (it needs adk47's approval on
+`cron-jobs.json`). Enabling them additionally needs the intake key on node-8 (MUS-10493 / MUS-3494).
+
+Once they are enabled, Clio's triage will wake only when an untriaged intake card is waiting (zero-token
+pre-check every 15 minutes), and a card still untriaged 30 minutes after it was filed will be reassigned to
+the pilot agent with the `intake-escalated` label.

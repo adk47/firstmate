@@ -51,7 +51,7 @@ INTAKE_MARKER = "Source: hydra-intake"
 ESCALATED_LABEL = "intake-escalated"
 CLOSED = ("done", "cancelled")
 HTTP_TIMEOUT = 20
-MAX_PAGES = 5  # the search API refuses offset > 200 (limit 50), so 250 hits is its ceiling per query
+MAX_PAGES = 5  # the search API refuses offset > 200 (limit 50): 250 hits is its ceiling, and search_issues raises rather than return a truncated list
 
 # ---- fingerprint (port of plugins/tracker/src/fingerprint.ts) ---------------
 # Order matters: most specific first. A URL contains digits and a UUID contains
@@ -146,7 +146,8 @@ class Client:
         return self._company
 
     def search_issues(self, q, status=None, limit=50):
-        """Every issue hit for `q`, paged: a short page is the last one (the API caps a query at MAX_PAGES pages)."""
+        """Every issue hit for `q`, paged: a short page is the last one. If all MAX_PAGES pages come back
+        full the list is provably incomplete, so raise: a dedupe read that silently misses a twin files a duplicate."""
         hits = []
         for page in range(MAX_PAGES):
             params = {"q": q, "scope": "issues", "limit": str(limit), "offset": str(page * limit)}
@@ -156,15 +157,18 @@ class Client:
             raw = res.get("results", [])
             hits += [r for r in raw if r.get("type") == "issue"]
             if len(raw) < limit:
-                break
-        return hits
+                return hits
+        raise ApiError(f"search for {q!r} returned the {MAX_PAGES * limit}-hit ceiling; result is incomplete")
 
     def list_issues(self, status, q, limit=100):
-        """Every issue with `status` matching `q`, paged until a short page. The list endpoint has no
+        """Every issue with `status` (any status when None) matching `q`, paged until a short page. The list endpoint has no
         250-hit ceiling (the search one does), so the waiting queue is never cut off."""
         rows, offset = [], 0
         while True:
-            params = urllib.parse.urlencode({"status": status, "q": q, "limit": str(limit), "offset": str(offset)})
+            params = {"q": q, "limit": str(limit), "offset": str(offset)}
+            if status:
+                params["status"] = status
+            params = urllib.parse.urlencode(params)
             page = self.call("GET", f"/api/companies/{self.company}/issues?{params}")
             rows += page
             if len(page) < limit:
@@ -316,8 +320,8 @@ def cmd_waiting(client, args):
 
 def cmd_escalations(client, args):
     label = client.label_id(ESCALATED_LABEL)
-    n = sum(1 for hit in client.search_issues("hydra-intake")
-            if label in (client.issue(hit["id"]).get("labelIds") or []))
+    n = sum(1 for card in client.list_issues(None, "hydra-intake")
+            if label in (client.issue(card["id"]).get("labelIds") or []))
     return {"escalated": n}
 
 

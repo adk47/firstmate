@@ -519,12 +519,26 @@ class BeyondSearchCeilingTests(Base):
         self.assertEqual([c["title"] for c in json.loads(out)["waiting"]], ["brand new problem"])
 
 
-class SearchCapTests(Base):
-    def test_a_query_with_more_hits_than_the_api_pages_returns_the_first_250_and_does_not_raise(self):
+class SearchCeilingFailsLoudTests(Base):
+    def test_search_raises_when_every_page_is_full_because_the_result_is_provably_incomplete(self):
+        # A silently-truncated dedupe read would miss a twin and file a duplicate.
         for n in range(260):
             self.api.issues[f"iss-{n}"] = {"id": f"iss-{n}", "title": f"hydra-intake {n}", "status": "todo"}
         client = pi.Client(self.env)
-        self.assertEqual(len(client.search_issues("hydra-intake")), 250)
+        with self.assertRaises(pi.ApiError) as ctx:
+            client.search_issues("hydra-intake")
+        self.assertIn("hydra-intake", str(ctx.exception))
+        self.assertIn(str(pi.MAX_PAGES * 50), str(ctx.exception))
+
+    def test_escalations_counts_a_labelled_card_past_the_250_hit_ceiling(self):
+        for n in range(260):
+            self.api.issues[f"old-{n}"] = {"id": f"old-{n}", "title": f"old {n}", "status": "todo",
+                                           "labelIds": [], "description": f"{pi.INTAKE_MARKER}\nfp:{n:016x}"}
+        self.api.labels["lab-1"] = {"id": "lab-1", "name": pi.ESCALATED_LABEL}
+        self.api.issues["old-259"]["labelIds"] = ["lab-1"]
+        rc, out, _ = self.run_cli("escalations")
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out)["escalated"], 1)
 
 
 class EscalateTests(Base):
