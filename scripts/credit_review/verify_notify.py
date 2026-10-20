@@ -114,6 +114,7 @@ class Report:
     proof_on_file: int = 0
     mixed_v1_users: int = 0            # users whose one note is v1 because ANY credit is paid provisional
     already_today: int = 0             # messages the ledger already holds for today (counted against the cap)
+    paying_hold: str = ""              # paying status unknown and the cap would have to choose: nothing sent
     halted: str = ""
     failures: list[str] = field(default_factory=list)
     refusals: list[str] = field(default_factory=list)
@@ -130,11 +131,16 @@ class Report:
         # Held-for-human users are news too (once a day): a human must see them.
         if not (self.sent_notes or self.refused_users or self.failed_users or self.reminders_sent
                 or self.proof_tagged or self.proof_failed or self.extension_requests
-                or self.affiliation_held or self.documented_users or self.support_contact_users) and mode == "apply":
+                or self.affiliation_held or self.documented_users or self.support_contact_users
+                or self.paying_hold) and mode == "apply":
             return "NO_REPLY"
         head = f"{title} (dry run, nothing sent)" if mode != "apply" else title
         parts = [f"{head}: {self.sent_notes} note(s) sent covering {self.sent_credits} provisionally approved credit(s)"
                  if mode == "apply" else f"{head}: {self.users} account(s) would get a note"]
+        if self.paying_hold:
+            parts.append(self.paying_hold)
+        elif self.paying_unknown:
+            parts.append(f"paying status unknown ({self.paying_unknown}); every note fit under the cap, so order did not matter")
         if self.already_today:
             parts.append(f"{self.already_today} message(s) already sent today counted against the day's cap")
         if self.mixed_v1_users:
@@ -837,6 +843,15 @@ def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "
             payloads, waiting = hold_recently_asked(db, payloads, by_id, report, day=day)
             held += waiting
             payloads = provisional_copy(paid_first(payloads, paying), provisional_ids(db, list(by_id)), report)
+            # Paying status unknown (QA review of hydra#1257 @3b5fea9): when today's cap would
+            # have to choose who goes first, nothing is sent, so a paying user is never pushed
+            # behind older free accounts. Every credit waits for tomorrow (kept, not closed).
+            if paying is None and len(payloads) > max(budget, 0):
+                report.paying_hold = (f"paying status unknown ({why_paying}) and {len(payloads)} note(s) exceed today's "
+                                      f"cap of {max(budget, 0)}: nothing sent, so paying users are never put behind")
+                for p in payloads:
+                    held += [_ref(by_id[c["request_id"]]) for c in p["credits"] if c["request_id"] in by_id]
+                payloads = []
             # Over the day's cap: the credits wait for tomorrow (kept in the ledger, so a
             # credit older than the candidate window is never silently dropped).
             for p in payloads[max(budget, 0):]:
