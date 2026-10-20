@@ -220,8 +220,39 @@ function logJudgeOutcome(
   );
 }
 
+// Text the customer did not write as a request to us: a forwarded message, the
+// quoted thread under an email reply, and boilerplate footers (confidentiality /
+// copyright notices). Content rules must not fire on it. Measured 2026-10-17..19:
+// legal_threat fired on a forwarded news email ("Supreme Court") and on an email
+// signature disclaimer ("Unauthorized usage will result in IMMEDIATE legal
+// action. If you have received this e-mail in error..."), each handing a normal
+// chat to a human (convs 215476442859313, 215476464961922).
+const NOT_CUSTOMER_WORDS: RegExp[] = [
+  /-{3,}\s*Forwarded message\s*-{3,}/i,
+  /\bBegin forwarded message:/i,
+  /-{3,}\s*Original Message\s*-{3,}/i,
+  /(?:^|\n)(?:[ \t]|<[^>\n]*>)*From:[^\n]*\n(?:[^\n]*\n){0,2}(?:[ \t]|<[^>\n]*>)*(?:Sent|Date):/i,
+  /(?:^|\n)[ \t]*On (?=Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|\d)[^\n]{0,120}?(?:\b\d{4}\b|\b\d{1,2}:\d{2}\b|\b\d{1,2}\s?[AP]\.?M\b)[^\n]{0,120}?\bwrote:/i,
+  /(?:^|\n)[ \t]*El (?=lun|mar|mi[eé]|jue|vie|s[aá]b|dom|\d)[^\n]{0,120}?(?:\b\d{4}\b|\b\d{1,2}:\d{2}\b|\b\d{1,2}\s?[ap]\.?\s?m\b)[^\n]{0,120}?\bescribi[oó]:/i,
+  /\bCONFIDENTIALITY NOTICE\b/i,
+  /\b(?:(?:this|the) (?:e-?mail|message|communication)(?: and (?:its|any) [a-z ]{0,30})?|(?:its|the) contents) (?:is|are) protected by (?:the )?(?:United States |U\.S\. |international )?copyright laws?\b/i,
+  /\b(?:this|the) (?:e-?mail|message)(?: and any (?:files|attachments)[^.]{0,40})? (?:is|are|may be|contains?|may contain) (?:confidential|privileged|proprietary)\b/i,
+  /\bintended (?:only|solely) for the (?:use of the )?(?:named )?(?:addressee|recipient|individual)/i,
+  /\bif you (?:have )?received this (?:e-?mail|message|communication) in error\b/i,
+];
+
+export function customerWords(message: string): string {
+  const text = message.replace(/<\/?(?:p|div|br|blockquote)\b[^>]*>/gi, "\n");
+  let cut = text.length;
+  for (const re of NOT_CUSTOMER_WORDS) {
+    const m = re.exec(text);
+    if (m && m.index < cut) cut = m.index;
+  }
+  return text.slice(0, cut);
+}
+
 function checkRules(message: string): { reason: string; actionType: RiskActionType; matched: string } | null {
-  const text = message.replace(/[\u2018\u2019\u02BC]/g, "'");
+  const text = customerWords(message).replace(/[\u2018\u2019\u02BC]/g, "'");
   for (const rule of RISK_RULES) {
     for (const p of rule.patterns) {
       if (p.test(text)) {
