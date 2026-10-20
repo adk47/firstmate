@@ -5,13 +5,13 @@
 # matched marker so a new pattern can be added to the guard.
 #
 # SOURCE OF TRUTH: plugins/intercom/src/sanitize-reasoning-leak.ts (PR #421). The
-# patterns below MIRROR its INTERNAL (16) + META_STRONG (6) arrays VERBATIM. We do
+# patterns below MIRROR its INTERNAL (19) + META_STRONG (6) arrays VERBATIM. We do
 # NOT mirror META_WEAK (it only fires in combination in the guard; context-free it
 # is too noisy). Apostrophes are written as [\x27\x{2019}] (Oniguruma) so no literal
 # quote appears in this single-quoted jq program (see feedback_apostrophe_in_jq_heredoc).
 # DRIFT WARNING: re-sync when that TS file's INTERNAL/META_STRONG arrays change.
 # The scan-shipped-leaks.bats "drift sentinel" asserts this count matches the file.
-# MIRRORED_MARKER_COUNT=22
+# MIRRORED_MARKER_COUNT=25
 set -euo pipefail
 
 : "${WORKDIR:?WORKDIR required}"
@@ -44,6 +44,9 @@ jq -c --arg admin "$CAROLINE_BOT_ADMIN_ID" '
     {n:"sla-placeholder",         re:"<\\s*sla\\s*>",                                                                               f:"i"},
     {n:"lets-check-rules",        re:"\\blet[\\x27\\x{2019}]?s\\s+(?:double[- ]?)?check\\b[^.\\n]{0,40}\\b(?:rules|forbidden|words|if there)\\b", f:"i"},
     {n:"rules-on-how-to",         re:"\\bthe rules?\\s+on how to\\b",                                                               f:"i"},
+    {n:"runtime-no-final-summary", re:"\\bno final summary was produced\\b",                                                      f:"i"},
+    {n:"runtime-did-not-repeat",  re:"\\bI did not repeat any completed actions\\b",                                              f:"i"},
+    {n:"runtime-tool-run-finished", re:"\\bthe tool run finished\\b",                                                             f:"i"},
     {n:"looking-at-history",      re:"\\blooking at the (?:previous|prior|earlier)\\s+(?:history|conversation|context|thread|messages?|exchange)\\b", f:"i"},
     {n:"in-pronoun-artist-name",  re:"\\bin (?:her|his|their)\\s+(?:artist|stage|legal|real|professional)\\s+name\\b",            f:"i"},
     {n:"ill-compose-toned-reply", re:"\\bi(?:[\\x27\\x{2019}]?ll|\\s+will)\\s+(?:send|craft|write|draft|compose|put together)\\s+(?:a|an|the)\\s+(?:(?:warm|friendly|brief|short|polite|professional|reassuring|quick|nice|casual|kind|gentle|personal)[,\\s/]+)+(?:response|reply|message|note|answer)\\b", f:"i"},

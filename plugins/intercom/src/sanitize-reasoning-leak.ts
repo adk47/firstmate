@@ -97,6 +97,13 @@ const INTERNAL: { name: string; re: RegExp }[] = [
   { name: "sla-placeholder", re: /<\s*sla\s*>/i },
   { name: "lets-check-rules", re: /\blet['’]?s\s+(?:double[- ]?)?check\b[^.\n]{0,40}\b(?:rules|forbidden|words|if there)\b/i },
   { name: "rules-on-how-to", re: /\bthe rules?\s+on how to\b/i },
+  // openclaw runtime fallbacks: the embedded agent emits these as the reply
+  // when a tool run ends without a final message. They are status lines for an
+  // operator, never an answer: sent verbatim, 3 times, to a paying customer who
+  // was asking for a human (conv 215476114324633, 2026-10-19 13:35-13:39Z).
+  { name: "runtime-no-final-summary", re: /\bno final summary was produced\b/i },
+  { name: "runtime-did-not-repeat", re: /\bI did not repeat any completed actions\b/i },
+  { name: "runtime-tool-run-finished", re: /\bthe tool run finished\b/i },
 ];
 
 // STRONG meta markers: phrasings unlikely in a genuine reply; presence alone

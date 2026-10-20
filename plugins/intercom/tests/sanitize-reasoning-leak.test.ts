@@ -219,3 +219,17 @@ describe("sanitizeReasoningLeak — defensive", () => {
     expect(["escalate", "pass"]).toContain(out.action);
   });
 });
+
+describe("openclaw runtime fallback lines", () => {
+  // Leaked verbatim to a paying customer 3 times (conv 215476114324633, 2026-10-19).
+  it("escalates the 'no final summary' fallback instead of sending it", () => {
+    const r = sanitizeReasoningLeak("The tool run finished, but no final summary was produced. I did not repeat any completed actions.");
+    expect(r.action).toBe("escalate");
+    expect(r.reason).toBe("internal-monologue");
+    expect(r.matchedMarkers).toEqual(expect.arrayContaining(["runtime-no-final-summary"]));
+  });
+  it("does not touch a normal reply that mentions a summary", () => {
+    const r = sanitizeReasoningLeak("Here's a quick summary of your credits: 12 are verified and 3 are waiting for review.");
+    expect(r.action).toBe("pass");
+  });
+});
