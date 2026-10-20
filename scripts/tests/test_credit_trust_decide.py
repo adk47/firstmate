@@ -618,7 +618,129 @@ class PaidUsersFirst(Base):
         self.assertIsNone(paying)
         self.assertIn("count == len(ids)", why)
 
+    def test_tiers_paid_over_24h_then_paid_under_24h_then_free_oldest_first(self):
+        """Fable ruling 6 (credit-backlog-1019). NOW is 10-11 03:00Z."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900, 901))
+        rows = [req(uuid_of(180), uid=501, created="2026-10-01T00:00:00Z"),          # free, oldest
+                req(uuid_of(181), uid=900, created="2026-10-10T20:00:00Z"),          # paid < 24h
+                req(uuid_of(182), uid=901, created="2026-10-09T00:00:00Z"),          # paid > 24h
+                req(uuid_of(183), uid=900, created="2026-10-08T00:00:00Z")]          # paid > 24h, older
+        self.assertEqual([r["id"] for r in decide.order_rows(rows, frozenset({900, 901}), T.NOW)],
+                         [uuid_of(183), uuid_of(182), uuid_of(181), uuid_of(180)])
+        self.assertEqual([r["id"] for r in decide.order_rows(rows, None, T.NOW)],
+                         [uuid_of(180), uuid_of(183), uuid_of(182), uuid_of(181)], "unknown paying = oldest first")
+
+    def test_paid_not_found_small_track_is_provisionally_approved_free_is_asked(self):
+        """Fable ruling 4: trust yet verify for PAID users (small/medium, NOT_FOUND, nothing
+        against the claim); free users stay on the ask path; big tracks stay strict."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        rows = [req(uuid_of(190), uid=900, track="t3"), req(uuid_of(191), uid=501, track="t3"),
+                req(uuid_of(192), uid=900, track="t2")]
+        res, w = self.go(rows, {}, judge=judge)
+        d = self.decisions()
+        self.assertEqual((d[uuid_of(190)]["decision"], d[uuid_of(190)]["evidence_kind"], d[uuid_of(190)]["web_verdict"]),
+                         ("approve", "provisional_paid", "NOT_FOUND"))
+        self.assertIn("trust yet verify", d[uuid_of(190)]["reason"])
+        self.assertEqual(d[uuid_of(191)]["decision"], "support", "free user: asked")
+        self.assertEqual(d[uuid_of(192)]["decision"], "support", "big track (pop 70): proof required")
+        self.assertIn(uuid_of(190), [i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]])
+
+    def test_the_daily_ask_cap_admits_paid_users_first(self):
+        """Ruling 1 + 6: with room for one user, the paid user is asked, the older free one waits."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        self.proof([])
+        rows = [req(uuid_of(210), uid=501, track="t1", created="2026-10-01T00:00:00Z"),
+                req(uuid_of(211), uid=900, track="t1", created="2026-10-09T00:00:00Z")]
+        res, w = self.go(rows, {"t1": [T.raw("Real Engineer", "mixer")]},
+                         policy=dataclasses.replace(POLICY, max_ask_users_per_day=1))
+        asked = [i for c in w.calls if c["status"] == decide.UVN for i in c["ids"]]
+        self.assertEqual(asked, [uuid_of(211)])
+        self.assertTrue(self.decisions()[uuid_of(210)]["reason"].startswith(decide.ASK_CAP_DEFER))
+
+    def test_unconfirmed_provisional_approvals_go_to_the_ops_review_list_never_removal(self):
+        """Ruling 4 as amended (firstmate 073): no day-30 auto-removal. After 30 days without
+        a document the row is LISTED for Ops review (still live); a documented one is not."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        self.go([req(uuid_of(220), uid=900, track="t3"), req(uuid_of(221), uid=900, track="t3")], {}, judge=judge)
+        d = self.decisions()[uuid_of(220)]
+        self.assertIn("never auto-removed", d["reason"])
+        self.assertNotIn("removed on day", d["reason"])
+        self.assertEqual(decide.provisional_review(self.db, None, now=T.NOW), [], "not before day 30")
+        later = T.NOW + decide.timedelta(days=31)
+        listed = decide.provisional_review(self.db, None, now=later)
+        self.assertEqual(sorted(r["request_id"] for r in listed), [uuid_of(220), uuid_of(221)])
+        self.assertTrue(all(r["flag"] == "provisional_unconfirmed_30d" for r in listed))
+        # A user's other decider approval that rode in the same no-deadline v1 note (#1257, one
+        # note per user) is listed too: it has no removal date either.
+        from credit_review import verify_ledger
+        self.db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, big_track, decision, reason, "
+                        "evidence_kind, mode) VALUES ('run-y', ?, ?, 900, 0, 'approve', 't', 'catalog_confirmed', 'apply')",
+                        (decide.utc(T.NOW), uuid_of(222)))
+        self.db.execute("INSERT INTO decision_outcomes (run_id, at, request_id, action, outcome) "
+                        "VALUES ('run-y', ?, ?, 'approve', 'approved')", (decide.utc(T.NOW), uuid_of(222)))
+        self.db.executescript(verify_ledger.SCHEMA)
+        self.db.row_factory = sqlite3.Row
+        c = verify_ledger.claim(self.db, user_key="u900@example.com", day="2026-10-11",
+                                request_ids=[uuid_of(220), uuid_of(222)], message_type="email",
+                                approved_by="U7RP6HKUZ", approval_ref="ref", now=T.NOW)
+        verify_ledger.finalize(self.db, message_row=c["message_row"], status="sent", message_id="1")
+        self.db.execute("UPDATE verify_messages SET created_at = ?", (decide.utc(T.NOW),))
+        listed = decide.provisional_review(self.db, None, now=later)
+        self.assertEqual(sorted((r["request_id"], r["flag"]) for r in listed),
+                         sorted([(uuid_of(220), "provisional_unconfirmed_30d"), (uuid_of(221), "provisional_unconfirmed_30d"),
+                                 (uuid_of(222), "v1_note_unconfirmed_30d")]))
+        self.proof([{"user_id": 900, "request_id": uuid_of(221), "kind": "pending_doc", "source": "intercom", "ref": "c"}])
+        proof, _ = decide.proof_on_file(now=T.NOW)
+        self.assertEqual([r["request_id"] for r in decide.provisional_review(self.db, proof, now=later)], [],
+                         "a document on file for the user covers both")
+
+    def test_paid_provisional_approvals_are_capped_per_user_per_day(self):
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        old = decide.PROVISIONAL_MAX_PER_USER_PER_DAY
+        decide.PROVISIONAL_MAX_PER_USER_PER_DAY = 2
+        try:
+            res, _ = self.go([req(uuid_of(200 + i), uid=900, track="t3") for i in range(3)], {}, judge=judge)
+        finally:
+            decide.PROVISIONAL_MAX_PER_USER_PER_DAY = old
+        got = sorted(x["decision"] for x in self.decisions().values() if x["request_id"] in {uuid_of(200 + i) for i in range(3)})
+        self.assertEqual(got, ["approve", "approve", "defer"])
+
+    def test_the_provisional_cap_is_enforced_at_the_write_on_the_write_day(self):
+        """QA review of #1275 @7c1830a: rows decided before UTC midnight but written after it
+        count on the WRITE day, so a run after midnight cannot approve another full cap."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        yesterday = decide.utc(T.NOW - decide.timedelta(hours=4))   # 10-10 23:00Z, decided
+        written = decide.utc(T.NOW - decide.timedelta(hours=2))     # 10-11 01:00Z, written
+        decide.ensure_schema(self.db)
+        for i in range(2):
+            rid = uuid_of(230 + i)
+            self.db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, big_track, decision, "
+                            "reason, evidence_kind, mode) VALUES ('run-x', ?, ?, 900, 0, 'approve', 't', "
+                            "'provisional_paid', 'apply')", (yesterday, rid))
+            self.db.execute("INSERT INTO decision_outcomes (run_id, at, request_id, action, outcome) "
+                            "VALUES ('run-x', ?, ?, 'approve', 'approved')", (written, rid))
+        self.db.commit()
+        old = decide.PROVISIONAL_MAX_PER_USER_PER_DAY
+        decide.PROVISIONAL_MAX_PER_USER_PER_DAY = 2
+        try:
+            res, w = self.go([req(uuid_of(240 + i), uid=900, track="t3") for i in range(2)], {}, judge=judge)
+        finally:
+            decide.PROVISIONAL_MAX_PER_USER_PER_DAY = old
+        d = self.decisions()
+        self.assertEqual({d[uuid_of(240 + i)]["decision"] for i in range(2)}, {"approve"},
+                         "the decision-time count (run day, decided_at) saw none")
+        self.assertEqual([i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]], [],
+                         "the write-time count saw 2 already written today: nothing approved")
+        outs = {r[0] for r in self.db.execute("SELECT outcome FROM decision_outcomes WHERE run_id = ?", (res.run_id,))}
+        self.assertEqual(outs, {"deferred:provisional_user_cap"})
+
     def test_paying_status_never_changes_a_decision(self):
+        """Except ruling 4 (paid NOT_FOUND provisional approval, tested above): with catalog
+        evidence or a big track, paying status only changes the ORDER."""
         res_a, _ = self.go(self.rows(), self.RAWS, mode="shadow")
         self.paying("2026-10-11T02:30:00Z")
         res_b, _ = self.go(self.rows(), self.RAWS, mode="shadow")
@@ -762,7 +884,8 @@ class NeverReAsk(Base):
         self.assertEqual(res2.deferred_ask_cap, 1)
 
     def test_policy_ask_cap_defaults_and_validates(self):
-        self.assertEqual(decide.Policy.load().max_ask_users_per_day, 100)
+        # Fable ruling 1 (credit-backlog-1019): 100 -> 400 users/day after the 48h go-live cap.
+        self.assertEqual(decide.Policy.load().max_ask_users_per_day, 400)
         with self.assertRaises(ValueError):
             decide._nonneg_int(-1, "max_ask_users_per_day")
         with self.assertRaises(ValueError):

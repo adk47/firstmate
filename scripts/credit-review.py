@@ -327,6 +327,18 @@ def cmd_decide(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_provisional_review(args: argparse.Namespace) -> int:
+    """Fable ruling 4 as amended (firstmate 073): no day-30 auto-removal; unconfirmed paid
+    provisional approvals are listed for Ops (JSON lines), still live. Never writes."""
+    from credit_review import decide
+    proof, why = decide.proof_on_file()
+    if why:
+        log(f"provisional-review: proof-on-file unknown ({why}); every eligible row is listed")
+    for row in decide.provisional_review(Ledger(args.ledger).db, proof, days=args.days):
+        print(json.dumps(row, ensure_ascii=False, default=str))
+    return 0
+
+
 def cmd_explain(args: argparse.Namespace) -> int:
     from credit_review import decide
     print(json.dumps(decide.explain(Ledger(args.ledger).db, args.request_id), indent=1, ensure_ascii=False, default=str))
@@ -565,6 +577,11 @@ def parser() -> argparse.ArgumentParser:
     ex = sub.add_parser("explain", help="every decision + server outcome for one credit request")
     ex.add_argument("request_id")
     ex.set_defaults(fn=cmd_explain)
+
+    pr = sub.add_parser("provisional-review",
+                        help="Ops review list: paid provisional approvals unconfirmed after N days (read-only)")
+    pr.add_argument("--days", type=int, default=30)
+    pr.set_defaults(fn=cmd_provisional_review)
 
     xd = sub.add_parser("export-decisions", help="decisions as JSON lines (board / digest)")
     xd.add_argument("--since", required=True, help="ISO time, e.g. 2026-10-15T00:00:00Z")

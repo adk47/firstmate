@@ -773,13 +773,73 @@ def paying_users(path: Path | None = None, now: datetime | None = None) -> tuple
     return frozenset(ids), None
 
 
-def order_rows(rows: list[dict[str, Any]], paying: frozenset[int] | None) -> list[dict[str, Any]]:
-    """Oldest-created first; with a known paying set, paying users' rows first."""
+PAID_SLA = timedelta(hours=24)
+
+
+def paid_tier(user_id: Any, created_at: Any, paying: frozenset[int] | None, now: datetime) -> int:
+    """Fable ruling 6 (credit-backlog-1019): 0 = paid and older than 24h, 1 = paid within
+    24h, 2 = free (or paying status unknown)."""
+    if paying is None or user_id not in paying:
+        return 2
+    ts = parse_ts(created_at)
+    return 0 if ts is None or now - ts > PAID_SLA else 1
+
+
+PROVISIONAL_KIND = "provisional_paid"
+PROVISIONAL_MAX_PER_USER_PER_DAY = 20
+
+
+def provisional_today_by_user(db: sqlite3.Connection, since: str) -> dict[int, int]:
+    """Paid provisional approvals per user since `since` (apply mode, server-confirmed or
+    attempted: every approve decision of that kind counts against the cap)."""
+    return {int(u): n for u, n in db.execute(
+        "SELECT user_id, COUNT(*) FROM decisions WHERE mode = 'apply' AND decision = 'approve' "
+        "AND evidence_kind = ? AND decided_at >= ? AND user_id IS NOT NULL GROUP BY user_id",
+        (PROVISIONAL_KIND, since))}
+
+
+def provisional_written_since(db: sqlite3.Connection, since: str) -> dict[int, int]:
+    """Paid provisional approvals per user whose approve WRITE was booked at or after `since`
+    (decision_outcomes.at: the time the PUT returned), by any run, whatever the server
+    answered except a deferral: the write-time count the per-user cap is enforced on."""
+    return {int(u): n for u, n in db.execute(
+        "SELECT d.user_id, COUNT(DISTINCT d.request_id) FROM decision_outcomes o JOIN decisions d "
+        "ON d.request_id = o.request_id AND d.run_id = o.run_id WHERE o.action = 'approve' AND o.at >= ? "
+        "AND o.outcome NOT LIKE 'deferred:%' AND o.outcome != 'shadow' AND d.evidence_kind = ? "
+        "AND d.user_id IS NOT NULL GROUP BY d.user_id", (since, PROVISIONAL_KIND))}
+
+
+def provisional_cap_at_write(db: sqlite3.Connection, res: "RunResult", ids: list[str], user_of: dict[str, int | None],
+                             provisional: set[str], send_at: datetime) -> list[str]:
+    """The approve ids that still fit PROVISIONAL_MAX_PER_USER_PER_DAY on the UTC day the batch
+    is actually written (call under write_lock, before each batch; QA review of hydra#1275
+    @7c1830a). The decision-time count uses the run's start; a run crossing midnight or two
+    overlapping runs could otherwise both pass it. Trimmed rows get
+    'deferred:provisional_user_cap' and are decided again on a later run."""
+    if not provisional & set(ids):
+        return ids
+    written = provisional_written_since(db, send_at.strftime("%Y-%m-%dT00:00:00Z"))
+    keep: list[str] = []
+    for rid in ids:
+        uid = user_of.get(rid)
+        if rid in provisional and uid is not None:
+            if written.get(uid, 0) >= PROVISIONAL_MAX_PER_USER_PER_DAY:
+                record_outcome(db, res.run_id, rid, "approve", "deferred:provisional_user_cap", send_at)
+                res.deferred += 1
+                continue
+            written[uid] = written.get(uid, 0) + 1
+        keep.append(rid)
+    return keep
+
+
+def order_rows(rows: list[dict[str, Any]], paying: frozenset[int] | None,
+               now: datetime | None = None) -> list[dict[str, Any]]:
+    """PAID > 24h, then PAID < 24h, then FREE; oldest-created first inside each (Fable
+    ruling 6). Paying status unknown = everyone oldest-first."""
+    now = now or datetime.now(timezone.utc)
     def created(r: dict[str, Any]) -> str:
         return str(r.get("createdAt") or "")
-    if paying is None:
-        return sorted(rows, key=created)
-    return sorted(rows, key=lambda r: (r.get("userId") not in paying, created(r)))
+    return sorted(rows, key=lambda r: (paid_tier(r.get("userId"), r.get("createdAt"), paying, now), created(r)))
 
 
 def _set(d: Decision, decision: str, reason: str, *, doc_required: bool | None = None) -> Decision:
@@ -1072,7 +1132,7 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     proof, proof_why = proof_on_file(now=now)
     if proof_why:
         log(f"decide: proof-on-file status unknown ({proof_why}); no support request is written this run")
-    batch = order_rows(rows if rows is not None else held_rows(admin, skip), paying)[:policy.max_rows_per_run]
+    batch = order_rows(rows if rows is not None else held_rows(admin, skip), paying, now)[:policy.max_rows_per_run]
     builder = EvidenceBuilder(admin, now=now)
     decisions: list[Decision] = []
     needs_web: list[tuple[dict[str, Any], Evidence, int]] = []
@@ -1128,6 +1188,37 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             if n >= CATALOG_404_MAX_DEFERS:
                 _set(d, "support", f"catalog_unreadable: the admin catalog still answers 404 after {n} deferred runs; "
                      "a human checks the catalog and the claim (never approved or denied on a 404)")
+
+    # Fable ruling 4 (credit-backlog-1019, firstmate 072): trust yet verify for PAID users.
+    # A small/medium track (big tracks never reach here: pre_model asks for proof) whose
+    # web check found nothing against the claim (NOT_FOUND: no contradiction, no red flag,
+    # no validator conflict, no editorial-role rule; each of those returned before the web
+    # check) is provisionally approved instead of asked. The user gets the verify note
+    # (credit live + a no-threat document request). Amendment (firstmate 073, captain rule
+    # 10-15: deletes must confirm removal at Spotify/Tidal or prove a different profile; no new
+    # lowering classes): NO day-30 auto-removal; unconfirmed after 30 days the row goes to the
+    # Ops review list (provisional_review), still live. Capped at
+    # PROVISIONAL_MAX_PER_USER_PER_DAY per user per UTC day. Free users stay on the ask path.
+    req_by_id = {str(r.get("id")): r for r in batch}
+    prov_today = provisional_today_by_user(db, now.strftime("%Y-%m-%dT00:00:00Z"))
+    for d in decisions:
+        if not (d.decision == "support" and d.web_verdict == "NOT_FOUND" and d.paid_priority
+                and not d.big_track and d.conflict is None and not d.n1):
+            continue
+        if d.user_id is not None and prov_today.get(d.user_id, 0) >= PROVISIONAL_MAX_PER_USER_PER_DAY:
+            _set(d, "defer", f"paid provisional approvals for this user reached {PROVISIONAL_MAX_PER_USER_PER_DAY} "
+                 "today; next UTC day")
+            continue
+        d.evidence_kind = PROVISIONAL_KIND
+        _set(d, "approve", "trust yet verify (Fable ruling 4, amended firstmate 073): paid user, small/medium track, "
+             "nothing contradicts the claim and no red flag; provisional approval with a no-threat document "
+             "request; never auto-removed: unconfirmed after 30 days it goes to the Ops review list (still live)")
+        if d.user_id is not None:
+            prov_today[d.user_id] = prov_today.get(d.user_id, 0) + 1
+
+    # Ruling 6 also orders the asks: paid > 24h first, so the daily cap admits them first.
+    decisions.sort(key=lambda d: (paid_tier(d.user_id, (req_by_id.get(d.request_id) or {}).get("createdAt"),
+                                            paying, now), str((req_by_id.get(d.request_id) or {}).get("createdAt") or "")))
 
     needs_proof = doc_required_ids(db)
     for d in decisions:
@@ -1219,9 +1310,16 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
                 k = out.split(":", 1)[1]
                 res.skipped_by_server[k] = res.skipped_by_server.get(k, 0) + 1
 
+    provisional = {d.request_id for d in decisions if d.decision == "approve" and d.evidence_kind == PROVISIONAL_KIND}
     with write_lock():
-        for i in range(0, len(approve_ids), BATCH):
-            write_ids("approve", APPROVED, approve_ids[i:i + BATCH])
+        # The per-user provisional cap is re-checked here, under the lock, against what is
+        # already WRITTEN on the UTC day of each batch (approvals booked by any run).
+        pending_ap = list(approve_ids)
+        while pending_ap:
+            chunk, pending_ap = pending_ap[:BATCH], pending_ap[BATCH:]
+            chunk = provisional_cap_at_write(db, res, chunk, user_of, provisional, clock())
+            if chunk:
+                write_ids("approve", APPROVED, chunk)
         # The daily ask cap is checked at the SUPPORT-write boundary, under the
         # shared write lock, on the UTC day each support batch is actually sent:
         # the clock is read immediately before every batch, and if the day has
@@ -1305,3 +1403,53 @@ def revert(db: sqlite3.Connection, run_id: str, *, apply: bool, writer: Writer |
 
 def as_json(d: Decision) -> dict[str, Any]:
     return asdict(d)
+
+
+PROVISIONAL_REVIEW_DAYS = 30
+
+
+def provisional_review(db: sqlite3.Connection, proof: "ProofOnFile | None", *, now: datetime | None = None,
+                       days: int = PROVISIONAL_REVIEW_DAYS) -> list[dict[str, Any]]:
+    """The Ops review list (Fable ruling 4 as amended, firstmate 073): paid provisional
+    approvals the server confirmed at least `days` ago with no document on file for the
+    credit or its user. Read-only; the credits stay live. Removal, if ever, follows the
+    normal proof rule with notice and reason, never this list. Proof status unknown =
+    everyone is listed (a reviewer decides, nothing is removed)."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = utc(now - timedelta(days=days))
+    rows = [(*r, "provisional_unconfirmed_30d") for r in db.execute(
+        "SELECT d.request_id, d.user_id, d.profile_id, d.track_id, d.track_title, d.claimed_roles, o.at "
+        "FROM decision_outcomes o JOIN decisions d ON d.request_id = o.request_id AND d.run_id = o.run_id "
+        "WHERE o.action = 'approve' AND o.outcome = 'approved' AND d.evidence_kind = ? AND o.at <= ? "
+        "ORDER BY o.at", (PROVISIONAL_KIND, cutoff))]
+    # A user's other decider approvals that rode in that provisional credit's no-deadline v1
+    # note (one note per user, #1257) have no removal date either: listed the same way.
+    seen = {str(r[0]) for r in rows}
+    riders: set[str] = set()
+    try:
+        for (ids,) in db.execute("SELECT request_ids_json FROM verify_messages WHERE campaign = 'verify-live' "
+                                 "AND kind = 'initial' AND status = 'sent' AND removal_day IS NULL AND created_at <= ?",
+                                 (cutoff,)):
+            riders |= {str(x) for x in json.loads(ids or "[]")} - seen
+    except sqlite3.OperationalError:
+        riders = set()   # no verify ledger in this database: no v1 notes to read
+    for rid in sorted(riders):
+        r = db.execute(
+            "SELECT d.request_id, d.user_id, d.profile_id, d.track_id, d.track_title, d.claimed_roles, o.at "
+            "FROM decision_outcomes o JOIN decisions d ON d.request_id = o.request_id AND d.run_id = o.run_id "
+            "WHERE o.action = 'approve' AND o.outcome = 'approved' AND d.request_id = ? ORDER BY o.at LIMIT 1",
+            (rid,)).fetchone()
+        if r:
+            rows.append((*r, "v1_note_unconfirmed_30d"))
+    out = []
+    for rid, uid, pid, tid, title, roles, at, flag in rows:
+        class _D:
+            pass
+        probe = _D(); probe.user_id = uid; probe.request_id = str(rid)
+        if proof is not None and proof.covers(probe):
+            continue
+        out.append({"request_id": rid, "user_id": uid, "profile_id": pid, "track_id": tid, "track_title": title,
+                    "claimed_roles": roles, "approved_at": at, "flag": flag,
+                    "action": "Ops review: still live; any removal follows the normal proof rule with notice + reason"})
+    return out
+
