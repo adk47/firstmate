@@ -421,6 +421,24 @@ class PrecheckTests(Base):
         self.assertEqual(self.wakes, ["job-1"])
         self.assertEqual(json.loads(out)["waiting"], 2)
 
+    def test_overlapping_prechecks_wake_once(self):
+        # Two cron ticks racing on one waiting card must not both launch triage:
+        # the state read, the wake and the state write are one critical section.
+        self.file("deploy failed")
+
+        def slow_wake(job):
+            time.sleep(0.4)
+            self.wakes.append(job)
+        pi.wake_job = slow_wake  # Base.setUp's cleanup restores the real one
+        threads = [threading.Thread(target=pi.main, args=(["precheck", "--wake-job", "job-1"],),
+                                    kwargs={"env": self.env}) for _ in range(2)]
+        with contextlib.redirect_stdout(io.StringIO()):
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(self.wakes, ["job-1"])
+
     def test_triaged_cards_do_not_wake(self):
         self.file("deploy failed")
         next(iter(self.api.issues.values()))["status"] = "in_progress"

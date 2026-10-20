@@ -31,6 +31,7 @@ Env (all optional):
 Exit codes: 0 ok · 1 API/IO failure · 2 usage or refused input
 """
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -265,22 +266,27 @@ def _woken_ids(state):
 def cmd_precheck(client, args, env):
     waiting = waiting_cards(client)
     state = env.get("PAPERCLIP_INTAKE_STATE", DEFAULT_STATE)
-    if not waiting:
-        # Queue drained: forget the last wake so the next card is never held back by it.
-        try:
-            os.remove(state)
-        except OSError:
-            pass
-        return None
-    ids = {c["id"] for c in waiting}
-    last, seen = _woken_ids(state)
-    # 0 <= : a ts ahead of the clock (stepped backward) must not hold the wake back.
-    if ids <= seen and 0 <= time.time() - last < args.rewake_minutes * 60:
-        return {"waiting": len(waiting), "woke": False, "reason": "recently woken"}
-    wake_job(args.wake_job)
-    with open(state, "w", encoding="utf-8") as fh:
-        json.dump({"ts": time.time(), "ids": sorted(ids)}, fh)
-    return {"waiting": len(waiting), "woke": True}
+    # Interprocess lock around state read, decision, wake and state write: two
+    # overlapping ticks must not both pass the suppression check and wake Clio twice.
+    # A sibling lock file, never removed, so the state file can still be deleted below.
+    with open(state + ".lock", "w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not waiting:
+            # Queue drained: forget the last wake so the next card is never held back by it.
+            try:
+                os.remove(state)
+            except OSError:
+                pass
+            return None
+        ids = {c["id"] for c in waiting}
+        last, seen = _woken_ids(state)
+        # 0 <= : a ts ahead of the clock (stepped backward) must not hold the wake back.
+        if ids <= seen and 0 <= time.time() - last < args.rewake_minutes * 60:
+            return {"waiting": len(waiting), "woke": False, "reason": "recently woken"}
+        wake_job(args.wake_job)
+        with open(state, "w", encoding="utf-8") as fh:
+            json.dump({"ts": time.time(), "ids": sorted(ids)}, fh)
+        return {"waiting": len(waiting), "woke": True}
 
 
 def _age_minutes(card):
