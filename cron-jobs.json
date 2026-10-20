@@ -1518,6 +1518,38 @@
         "cwd": "/opt/hydra",
         "timeoutSeconds": 3300
       }
+    },
+    {
+      "id": "7d0b6e7f-62c2-5201-b075-1f942621cee2",
+      "agentId": "operations",
+      "name": "credit-digest-dm-0800-ny",
+      "description": "Credit gate #7 (Fable data/captain-calls-fable-d5/credit-gate-1019.md; firstmate 081, DM host (a)): at 08:00 New York the Ops SOUL fetches the credit-trust board's Block Kit digest of yesterday's Ops-agent credit decisions (GET /api/digest/slack, H-DevOps #4242; board agent token from /etc/hydra/credit-trust-board.env, Vault secret/k8s/monitoring/credit-trust-board agent_token) and DMs it to Jan (U038BM16T7W) as the operations bot: counters vs caps, exceptions by class, and a button to the board where veto/confirm happen (core decides). Read-only on the board. While the board has no ledger (503 waiting_for_data) nothing is sent, never an empty digest. Once per New York day (state /var/lib/hydra/credit-digest-dm). Kill switch /etc/hydra/credit-digest-dm.disabled. Prints NO_REPLY when quiet; one line + exit 1 when a due digest could not be delivered.",
+      "enabled": true,
+      "createdAtMs": 1792432800000,
+      "updatedAtMs": 1792432800000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 8 * * *",
+        "tz": "America/New_York"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "bash",
+          "/opt/hydra/scripts/credit-digest-dm.sh"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 120
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
+      }
     }
   ]
 }
