@@ -624,3 +624,66 @@ describe("assessRisk judge observability logging ([intercom:judge])", () => {
     expect(line).toBe("[intercom:judge] conv=conv1 outcome=skipped reason=rule_escalated");
   });
 });
+
+describe("content rules ignore forwarded, quoted and boilerplate text", () => {
+  it("a signature disclaimer threatening 'legal action' does not fire legal_threat", async () => {
+    const msg = "It's owned by my brother and I. We're the artists, producers and writers on these releases.\n\nThis email and its contents are protected by United States Copyright laws. Unauthorized usage will result In IMMEDIATE legal action. If you have received this e-mail in error, please delete it.";
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.reason).not.toBe("legal_threat");
+  });
+  it("a forwarded news email mentioning a court does not fire", async () => {
+    const msg = "---------- Forwarded message ---------\nFrom: Twitter\nSubject: he will make it the law of the land if Supreme Court overturns it";
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.reason).not.toBe("legal_threat");
+  });
+  it("text quoted under an email reply is ignored", async () => {
+    const msg = "Thanks, that works.\n\nOn Mon, Oct 19, 2026 at 2:55 PM support wrote:\n> we can't help with a lawsuit here";
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.reason).not.toBe("legal_threat");
+  });
+  it("text quoted under an HTML email reply is ignored", async () => {
+    const msg = "<p>Thanks, that works.</p><p>On Mon, Oct 19, 2026 at 2:55 PM support wrote:</p><blockquote>we can't help with a lawsuit here</blockquote>";
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.reason).not.toBe("legal_threat");
+  });
+  it("text quoted under a Gmail HTML reply is ignored", async () => {
+    const msg = '<div dir="ltr">Thanks!</div><br><div class="gmail_quote"><div dir="ltr" class="gmail_attr">On Mon, Oct 19, 2026 at 2:55 PM Muso Support &lt;support@muso.ai&gt; wrote:<br></div><blockquote class="gmail_quote">we can\'t help with a lawsuit here</blockquote></div>';
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.reason).not.toBe("legal_threat");
+  });
+  it("text quoted under a Spanish email reply is ignored", async () => {
+    const msg = "Gracias.\n\nEl lun, 19 oct 2026 a las 14:55, Muso Support (<support@muso.ai>) escribió:\n> we can't help with a lawsuit here";
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.reason).not.toBe("legal_threat");
+  });
+  it("a customer's own 'On ... you wrote:' sentence is not an attribution", async () => {
+    const msg = "On the refund email you wrote: we will fix it. It's still broken and I'm getting a lawyer.";
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.reason).toBe("legal_threat");
+  });
+  it("a dateless 'On Oct 3 ... wrote:' line in the customer's text is not an attribution", async () => {
+    const msg = "Your refund email was wrong.\nOn Oct 3 your support team wrote: no refund. I'm getting a lawyer.";
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.reason).toBe("legal_threat");
+  });
+  it("a customer's own copyright claim does not cut the threat after it", async () => {
+    const msg = "My song is protected by United States copyright law and I will sue you if you keep showing it.";
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.reason).toBe("legal_threat");
+  });
+  it("text quoted under an Outlook reply header is ignored", async () => {
+    const msg = "<p>Thanks, that works.</p><p><b>From:</b> Muso Support &lt;support@muso.ai&gt;<br><b>Sent:</b> Monday, October 19, 2026 2:55 PM<br><b>To:</b> me<br><b>Subject:</b> RE: credits</p><p>we can't help with a lawsuit here</p>";
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.reason).not.toBe("legal_threat");
+  });
+  it("text under an Outlook Original Message separator is ignored", async () => {
+    const msg = "Thanks, that works.\n\n-----Original Message-----\nwe can't help with a lawsuit here";
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.reason).not.toBe("legal_threat");
+  });
+  it("a real threat before a disclaimer still fires", async () => {
+    const msg = "If this isn't fixed by Friday I'm getting a lawyer.\n\nCONFIDENTIALITY NOTICE: this message is intended only for the named recipient.";
+    const r = await assessRisk(msg, [], baseState, noJudge);
+    expect(r.reason).toBe("legal_threat");
+  });
+});

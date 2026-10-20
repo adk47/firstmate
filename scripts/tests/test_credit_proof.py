@@ -1512,13 +1512,15 @@ class CronContractTests(unittest.TestCase):
     def test_proof_crons_are_shadow_commands_and_email_is_dark(self):
         jobs = json.loads((Path(__file__).resolve().parents[2] / "cron-jobs.json").read_text())["jobs"]
         mine = {j["name"]: j for j in jobs if "credit-proof.py" in " ".join(j.get("payload", {}).get("argv", []))}
-        self.assertEqual(set(mine), {"credit-verify-proof-intercom", "credit-verify-proof-email"})
+        self.assertEqual(set(mine), {"credit-verify-proof-intercom", "credit-verify-proof-email",
+                                     "credit-verify-proof-stage2"})
         for j in mine.values():
             self.assertEqual(j["payload"]["kind"], "command")
             self.assertEqual(j["delivery"], {"mode": "none"})
             self.assertTrue(all(isinstance(a, str) and a for a in j["payload"]["argv"]))
         self.assertEqual(mine["credit-verify-proof-intercom"]["payload"]["argv"][2], "intercom")
         self.assertFalse(mine["credit-verify-proof-email"]["enabled"])
+        self.assertEqual(mine["credit-verify-proof-stage2"]["payload"]["argv"][2], "stage2")
 
 
 class CliTests(unittest.TestCase):
@@ -1538,6 +1540,25 @@ class CliTests(unittest.TestCase):
             with mock.patch("credit_verify.proof.intercom.intercom_token", side_effect=AssertionError("no reads")), \
                     redirect_stdout(buf):
                 rc = cli.main(["--store", str(Path(d) / "s.sqlite"), "intercom"])
+        self.assertEqual((rc, buf.getvalue().strip()), (0, "NO_REPLY"))
+
+    def test_kill_switch_stops_stage2_before_any_read(self):
+        import importlib.util
+        import io as _io
+        from contextlib import redirect_stdout
+        spec = importlib.util.spec_from_file_location("credit_proof_cli2",
+                                                      Path(__file__).resolve().parents[1] / "credit-proof.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        with tempfile.TemporaryDirectory() as d:
+            ks = Path(d) / "off"
+            ks.write_text("")
+            cli.KILL_SWITCH = str(ks)
+            buf = _io.StringIO()
+            with mock.patch("credit_verify.proof.stage2.run", side_effect=AssertionError("no reads")), \
+                    mock.patch("credit_verify.proof.intercom.intercom_token", side_effect=AssertionError("no reads")), \
+                    redirect_stdout(buf):
+                rc = cli.main(["--store", str(Path(d) / "s.sqlite"), "stage2"])
         self.assertEqual((rc, buf.getvalue().strip()), (0, "NO_REPLY"))
 
 

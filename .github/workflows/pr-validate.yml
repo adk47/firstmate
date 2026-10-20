@@ -1723,6 +1723,9 @@ jobs:
           # Supporting-document forensics (scripts/credit_verify/proof). Synthetic
           # forgeries built in-test; uses the runner's PyMuPDF/Pillow/OpenCV/tesseract.
           python3 scripts/tests/test_credit_proof.py
+          # Stage 2 SHADOW (judge documents on file for the decider's proof-on-file
+          # holds): ledger, Trino, Intercom and downloads faked; writes only stage2_shadow.
+          python3 scripts/tests/test_credit_proof_stage2.py
 
   plugin-tests:
     name: Plugin tests (vitest)

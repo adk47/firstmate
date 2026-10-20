@@ -99,7 +99,10 @@ def systemd_argv(python: str) -> list[str]:
     return argv + [python, "-I", "-c", code]
 
 
-def run(path: str, declared: str | None, context: dict[str, Any]) -> dict[str, Any]:
+def run(path: str, declared: str | None, context: dict[str, Any],
+        contexts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """`contexts`: check the one file against several claim contexts in a
+    single sandboxed run (analyze.extract_bytes, `per_context`)."""
     try:
         with open(path, "rb") as fh:
             data = fh.read(MAX_BYTES + 1)
@@ -107,7 +110,8 @@ def run(path: str, declared: str | None, context: dict[str, Any]) -> dict[str, A
         raise SandboxError(f"file unreadable: {type(exc).__name__}") from exc
     # `path` is only the label the child cites as evidence; it reads `data`.
     req = json.dumps({"path": os.path.abspath(path), "data": base64.b64encode(data).decode("ascii"),
-                      "declared": declared, "context": context})
+                      "declared": declared, "context": context,
+                      **({"contexts": contexts} if contexts else {})})
     m = mode()
     with tempfile.TemporaryDirectory(prefix="cvproof-") as tmp:
         if m == "systemd":

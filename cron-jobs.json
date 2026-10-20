@@ -1487,94 +1487,34 @@
       }
     },
     {
-      "agentId": "clio",
-      "enabled": false,
-      "createdAtMs": 1791552000000,
-      "updatedAtMs": 1791552000000,
+      "id": "1b9a3f26-bc83-537f-8aff-f7c04201e2dd",
+      "agentId": "operations",
+      "createdAtMs": 1792368000000,
+      "updatedAtMs": 1792368000000,
       "sessionTarget": "isolated",
       "wakeMode": "now",
       "delivery": {
         "mode": "none"
       },
-      "id": "9b584fc2-be23-4e23-81c3-0494eb004b5c",
-      "name": "paperclip-intake-triage",
-      "description": "Clio's triage of Paperclip intake cards. DISABLED on purpose: it is fired only by paperclip-intake-precheck via `openclaw cron run` (a forced fire that works on a disabled job), so an empty queue never spends an agent turn on main or on the ChatGPT subscription.",
+      "enabled": true,
+      "name": "credit-verify-proof-stage2",
+      "description": "Decider stage 2, SHADOW (Fable backlog ruling 2, 2026-10-19: approve from the proof on file, shadow first; live only after Fable's 50-row sample agrees >= 95% with 0 false GENUINE). Hourly: takes up to 40 users whose credit requests the decider holds as 'proof on file' (paid first, oldest first), reads their request/track/names from Trino (read-only SELECTs with a query time limit; never the admin API), fetches the documents in their Intercom proof conversations (one read-only Intercom GET per conversation, then the cached originals, else the customer's own attachments into a private temp dir, deleted after; a run where every GET fails is an Intercom outage: no rows written, non-zero exit), runs the H3 sandboxed forensics once per file against every held track, and records what the decider WOULD do per request and role (approve / reject_hold / human / review / need_more / no_document / undetermined) in the stage2_shadow table of /var/lib/hydra-credit-verify/proof.sqlite. Changes no credit, sends nothing. Kill switch: /etc/hydra/credit-verify.disabled. Sample for Fable: credit-proof.py stage2-sample. Docs: docs/credit-verification/proof-forensics.md.",
       "schedule": {
         "kind": "cron",
-        "expr": "0 0 29 2 *",
-        "tz": "UTC"
-      },
-      "payload": {
-        "kind": "agentTurn",
-        "message": "Triage Paperclip intake cards. List the waiting ones with `python3 /opt/hydra/scripts/paperclip-intake.py waiting`. For each: read the card through the Paperclip API (key file /etc/paperclip/secrets/hydra-intake, read at call time), merge twins (same problem, different fp:) by commenting on the older card and closing the newer as a duplicate, set a priority, and assign it to the agent who can act on it. Never assign a card to a human. If nothing is waiting, reply NO_REPLY.",
-        "timeoutSeconds": 300,
-        "model": "openai/gpt-6-sol",
-        "fallbacks": [
-          "openrouter/openai/gpt-6-luna",
-          "openrouter/anthropic/claude-haiku-5.5"
-        ]
-      }
-    },
-    {
-      "agentId": "clio",
-      "enabled": false,
-      "createdAtMs": 1791552000000,
-      "updatedAtMs": 1791552000000,
-      "sessionTarget": "isolated",
-      "wakeMode": "now",
-      "delivery": {
-        "mode": "none"
-      },
-      "id": "d23afb0f-1cf8-46a2-be2e-f3b72a0275a8",
-      "name": "paperclip-intake-precheck",
-      "description": "DISABLED until /etc/paperclip/secrets/hydra-intake is placed on node-8 (staged, inactive). ZERO-TOKEN pre-check (Wait-sweeper pattern). A plain script, no agentTurn: asks Paperclip for untriaged intake cards and fires paperclip-intake-triage ONLY when one is waiting; prints nothing on an empty queue. Every 15 min: the 30-minute escalation fallback needs at most 15 minutes of slack, and a poll is one local HTTP GET.",
-      "schedule": {
-        "kind": "cron",
-        "expr": "*/15 * * * *",
+        "expr": "20 * * * *",
         "tz": "UTC"
       },
       "payload": {
         "kind": "command",
         "argv": [
           "python3",
-          "/opt/hydra/scripts/paperclip-intake.py",
-          "precheck",
-          "--wake-job",
-          "9b584fc2-be23-4e23-81c3-0494eb004b5c"
+          "/opt/hydra/scripts/credit-proof.py",
+          "stage2",
+          "--max-users",
+          "40"
         ],
         "cwd": "/opt/hydra",
-        "timeoutSeconds": 120
-      }
-    },
-    {
-      "agentId": "clio",
-      "enabled": false,
-      "createdAtMs": 1791552000000,
-      "updatedAtMs": 1791552000000,
-      "sessionTarget": "isolated",
-      "wakeMode": "now",
-      "delivery": {
-        "mode": "none"
-      },
-      "id": "2db95923-f7b9-4fb3-bf0c-26ee4768b635",
-      "name": "paperclip-intake-escalate",
-      "description": "DISABLED until /etc/paperclip/secrets/hydra-intake is placed on node-8 (staged, inactive). Zero-token 30-minute fallback for the node-8 pilot: an intake card still untouched after 30 minutes is reassigned to the pilot agent (Scout (OpenClaw), id 43599bf0-6d53-48a2-a8d0-a78a23f41f9a on the node-8 instance; the id, because a rename would silently break a fallback that only fails when a card ages) with label intake-escalated. The pilot report counts those (`paperclip-intake.py escalations`). After the full move the target becomes the CEO / Chief of staff: change --to-agent.",
-      "schedule": {
-        "kind": "cron",
-        "expr": "7,22,37,52 * * * *",
-        "tz": "UTC"
-      },
-      "payload": {
-        "kind": "command",
-        "argv": [
-          "python3",
-          "/opt/hydra/scripts/paperclip-intake.py",
-          "escalate",
-          "--to-agent",
-          "43599bf0-6d53-48a2-a8d0-a78a23f41f9a"
-        ],
-        "cwd": "/opt/hydra",
-        "timeoutSeconds": 120
+        "timeoutSeconds": 3300
       }
     }
   ]
