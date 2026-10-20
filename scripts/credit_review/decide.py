@@ -715,7 +715,12 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
     for d in support:
         if d.decision != "support":
             continue
-        if d.user_id is None or (d.user_id not in asked_today and d.user_id not in admitted):
+        if d.user_id is None:
+            # No account on the row: nobody to ask, whatever the cap (it was mislabelled as
+            # the cap being reached).
+            _set(d, "defer", "no account user id on the request: nobody to ask; decided again when it has one")
+            continue
+        if d.user_id not in asked_today and d.user_id not in admitted:
             _set(d, "defer", ASK_CAP_DEFER + f"{max_ask_users_per_day} users/day already reached; "
                  "this row goes out on a later day")
             res.deferred_ask_cap += 1
@@ -847,6 +852,11 @@ def _set(d: Decision, decision: str, reason: str, *, doc_required: bool | None =
     (only web NOT_FOUND: nothing was found against an ordinary claim)."""
     d.decision, d.reason = decision, reason
     d.doc_required = decision == "support" if doc_required is None else doc_required
+    if decision != "approve" and d.evidence_kind == PROVISIONAL_KIND:
+        # A later guard (server approval guard, proof on file, the caps) overrode the paid
+        # provisional approval: the ledger must not record a provisional kind on an ask or a
+        # hold (the board and reports read decisions.evidence_kind).
+        d.evidence_kind = None
     return d
 
 

@@ -646,6 +646,44 @@ class PaidUsersFirst(Base):
         self.assertEqual(d[uuid_of(192)]["decision"], "support", "big track (pop 70): proof required")
         self.assertIn(uuid_of(190), [i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]])
 
+    def test_the_web_check_cap_always_admits_paid_rows_first(self):
+        """firstmate 099 (Fable ruling 6, paid first): with room for ONE web check, the newer
+        paid row is checked and the older free row waits for the next run."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        rows = [req(uuid_of(250), uid=501, track="t3", created="2026-10-01T00:00:00Z"),
+                req(uuid_of(251), uid=900, track="t3", created="2026-10-10T00:00:00Z")]
+        self.go(rows, {}, judge=judge, max_model_calls=1)
+        d = self.decisions()
+        self.assertEqual(d[uuid_of(251)]["web_verdict"], "NOT_FOUND", "paid row web-checked")
+        self.assertEqual((d[uuid_of(250)]["decision"], d[uuid_of(250)]["reason"]),
+                         ("defer", "web-check cap for this run reached; next run"))
+
+    def test_a_row_with_no_user_is_not_labelled_as_the_ask_cap(self):
+        """firstmate 099: a row with no account user id is deferred as such, not as 'daily ask
+        cap reached' (which misreported the cap at 122/400)."""
+        self.proof([])
+        row = req(uuid_of(260), track="t1")
+        row["userId"] = None
+        row.pop("user", None)
+        res, w = self.go([row], {"t1": [T.raw("Real Engineer", "mixer")]})
+        d = self.decisions()[uuid_of(260)]
+        self.assertEqual(d["decision"], "defer")
+        self.assertNotIn("ask cap", d["reason"])
+        self.assertEqual(res.deferred_ask_cap, 0)
+
+    def test_an_overridden_provisional_approval_keeps_no_provisional_kind(self):
+        """firstmate 099 ledger hygiene: when a later guard turns ruling 4's approval into an ask
+        or a hold, decisions.evidence_kind must not still say provisional_paid."""
+        d = decide.Decision(request_id="x", profile_id=None, user_id=1, track_id=None, track_title="", claimed_roles=[],
+                            popularity=10, big_track=False, decision="approve", reason="r")
+        d.evidence_kind = decide.PROVISIONAL_KIND
+        decide._set(d, "support", "server approval guard would refuse (proof_required): documentation required")
+        self.assertIsNone(d.evidence_kind)
+        d.evidence_kind = "catalog_confirmed"
+        decide._set(d, "hold", "x")
+        self.assertEqual(d.evidence_kind, "catalog_confirmed", "only the provisional kind is cleared")
+
     def test_the_daily_ask_cap_admits_paid_users_first(self):
         """Ruling 1 + 6: with room for one user, the paid user is asked, the older free one waits."""
         self.paying("2026-10-11T02:30:00Z", ids=(900,))
