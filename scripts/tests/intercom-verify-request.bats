@@ -116,7 +116,16 @@ credits() {
   jq -n --arg fn "$fn" --argjson c "$items" \
     '{user:{email:"Jane.Doe@Example.com", id:"42", first_name:$fn}, credits:$c}' > "$f"
 }
-send() { "$SCRIPT" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ "$@"; }
+# firstmate 090: the committed gate sends every verify-live note as v1 (no date, no removal).
+# SCRIPT has the windowed lock flipped; most legacy tests below exercise that (send-locked)
+# path explicitly with --copy windowed, so its ledger/idempotency/follow-up machinery stays
+# covered. A caller --copy later on the line wins. Never added for another campaign.
+send() {
+  local a w=1
+  for a in "$@"; do case "$a" in --campaign) w=0 ;; esac; done
+  if [ "$w" = 1 ]; then "$SCRIPT" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --copy windowed "$@"
+  else "$SCRIPT" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ "$@"; fi
+}
 posts() { if [ -f "$CURL_STUB_LOG" ]; then grep -c "^POST https://api.intercom.io/messages$" "$CURL_STUB_LOG" || true; else echo 0; fi; }
 calls() { if [ -f "$CURL_STUB_LOG" ]; then wc -l < "$CURL_STUB_LOG" | tr -d ' '; else echo 0; fi; }
 msg() { jq -r "$1" "$CURL_STUB_MESSAGE"; }
@@ -160,9 +169,9 @@ plain() { python3 -c 'import html,re,sys; print(html.unescape(re.sub(r"</p>|</li
 
 @test "--approved-by is required, must be a Slack id, and must be the captain" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
-  run -1 "$SCRIPT" send --credits-file "$TEST_TMPDIR/c.json"
-  run -1 "$SCRIPT" send --credits-file "$TEST_TMPDIR/c.json" --approved-by god_mode
-  run -1 "$SCRIPT" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U038BM16T7W
+  run -1 "$SCRIPT" send --copy windowed --credits-file "$TEST_TMPDIR/c.json"
+  run -1 "$SCRIPT" send --copy windowed --credits-file "$TEST_TMPDIR/c.json" --approved-by god_mode
+  run -1 "$SCRIPT" send --copy windowed --credits-file "$TEST_TMPDIR/c.json" --approved-by U038BM16T7W
   [[ "$output" == *"Only the captain (U7RP6HKUZ)"* ]]
   [ "$(calls)" -eq 0 ]
 }
@@ -363,7 +372,7 @@ sent|1001" ]
   run -0 send
   jq '.user.email = "someone@else.com" | .user.id = "43" | .credits[0].request_id = "r9"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json"
   STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"someone@else.com"}]}' \
-    run -0 "$SCRIPT" send --credits-file "$TEST_TMPDIR/c2.json" --approved-by U7RP6HKUZ
+    run -0 "$SCRIPT" send --copy windowed --credits-file "$TEST_TMPDIR/c2.json" --approved-by U7RP6HKUZ
   [ "$(posts)" -eq 2 ]
 }
 
@@ -487,22 +496,71 @@ rcredits() { # like credits, with role_families taken from a 5th field
 }
 rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
 
-@test "as committed: verify-live windowed is unlocked (Fable 2026-10-17 enable), retro-past stays send-locked" {
+@test "as committed (firstmate 090): every verify-live note is v1; the windowed note and every follow-up are send-locked" {
   rcredits "$TEST_TMPDIR/c.json" Jane "r1:Producer:Song A:Big Star:producer"
-  grep -qx 'readonly LIVE_WINDOWED_COPY_APPROVED=1' "$REAL_SCRIPT"
+  grep -qx 'readonly LIVE_WINDOWED_COPY_APPROVED=0' "$REAL_SCRIPT"
+  grep -qx 'readonly LIVE_V1_COPY_APPROVED=1' "$REAL_SCRIPT"
   grep -qx 'readonly RETRO_COPY_APPROVED=0' "$REAL_SCRIPT"
   grep -qx 'readonly REMOVAL_COPY_APPROVED=0' "$REAL_SCRIPT"
-  grep -q 'decision-verify-notify-enable-2026-10-17' "$REAL_SCRIPT"
   run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --campaign retro-past --validate
   [[ "$output" == "VALID retro-past initial email credits=1 copy=past" ]]
   run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --campaign retro-past
   [[ "$output" == *"retro-past copy is not approved for sending yet"* ]]
   run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --validate
-  [[ "$output" == "VALID verify-live initial email credits=1 copy=windowed" ]]
-  run -1 send --copy windowed
-  [[ "$output" == *"--copy windowed is implied"* ]]
+  [[ "$output" == "VALID verify-live initial email credits=1 copy=v1" ]]
+  run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --copy windowed
+  [[ "$output" == *"no verify-live message may name a deadline or say a credit will be removed"* ]]
+  for k in reminder-14 reminder-25 after-rejection; do
+    run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --kind "$k" --parent-message-id 1001
+    [[ "$output" == *"no verify-live message may name a deadline"* ]]
+  done
   [ "$(calls)" -eq 0 ]
   [ ! -f "$INTERCOM_VERIFY_TEST_LEDGER" ] || [ -z "$(sql 'select * from verify_messages')" ]
+  # A decider-approved credit: the committed gate sends the v1 note, with no removal date.
+  decider_approved r1 catalog_confirmed
+  run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message=1001 credits=1"* ]]
+  [[ "$(msg .body | plain)" == *"Nothing changes while we check"* ]]
+  no_removal_language "$(msg .subject) $(msg .body | plain)"
+  [ "$(sql "select coalesce(removal_day,'NULL')||'|'||coalesce(due_day,'NULL') from verify_messages where message_id='1001'")" = "NULL|NULL" ]
+}
+
+# firstmate 090: NO outgoing message may name a deadline or say a credit will be removed.
+no_removal_language() {
+  if printf '%s' "$1" | grep -qiE 'will be removed|be removed from your profile|removed from your profile (after|on|that)|reply[^.]{0,80} by ([A-Z][a-z]+ [0-9]|[0-9])|30 days|deadline|last reminder'; then
+    echo "removal/deadline language: $(printf '%s' "$1" | grep -oiE 'will be removed|be removed from your profile|removed from your profile (after|on|that)|30 days|deadline|last reminder' | head -1)" >&2
+    return 1
+  fi
+}
+
+@test "no sendable message carries removal or deadline language (every campaign, every variant)" {
+  # The detector itself: the locked windowed copy is exactly what it must catch.
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --copy windowed
+  ! no_removal_language "$(rendered .subject) $(rendered .body | plain)" 2>/dev/null
+  # verify-live as committed: single and multi.
+  for n in 1 2; do
+    if [ "$n" = 1 ]; then credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+    else credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star" "r2:Producer:Song B:Big Star"; fi
+    run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+    [[ "$output" == *"copy=v1"* ]]
+    no_removal_language "$(rendered .subject) $(rendered .body | plain)"
+  done
+  # Every other campaign, rendered with its lock flipped (what it would send once approved).
+  sed -e 's/^readonly RETRO_COPY_APPROVED=0$/readonly RETRO_COPY_APPROVED=1/' \
+      -e 's/^readonly REMOVAL_COPY_APPROVED=0$/readonly REMOVAL_COPY_APPROVED=1/' \
+      -e 's/^readonly TAKEBACK_COPY_APPROVED=0$/readonly TAKEBACK_COPY_APPROVED=1/' "$LOCKED" > "$TEST_TMPDIR/all-on.sh"
+  chmod +x "$TEST_TMPDIR/all-on.sh"
+  rcredits "$TEST_TMPDIR/c.json" Jane "r1:Producer:Song A:Big Star:producer" "r2:Mixing:Song B:Big Star:mix_master"
+  run -0 "$TEST_TMPDIR/all-on.sh" send --campaign retro-past --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  no_removal_language "$(rendered .subject) $(rendered .body | plain)"
+  rmcredits "$TEST_TMPDIR/c.json" "e1|Mixing|Song A|Big Star|duplicate|" "e2|Producer|Song B|Other|policy|||org_on_person"
+  run -0 "$TEST_TMPDIR/all-on.sh" send --campaign removal-notice --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  no_removal_language "$(rendered .subject) $(rendered .body | plain)"
+  tbcredits "$TEST_TMPDIR/c.json" "q1|Mixing|Song A|Big Star|X|https://listen.tidal.com/track/527926451|Tidal credits"
+  run -0 "$TEST_TMPDIR/all-on.sh" send --campaign takeback-notice --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  no_removal_language "$(rendered .subject) $(rendered .body | plain)"
+  [ "$(posts)" -eq 0 ]
 }
 
 # Fable ruling 4 as amended (firstmate 073): a PAID PROVISIONAL approval gets the no-threat v1
@@ -538,19 +596,17 @@ PY
 }
 
 # QA review of #1257 @53428d0: the gate itself proves v1 applies; no caller can pick it.
-@test "--copy v1 is refused for an ordinary credit: not provisional, or not a decider approval at all" {
+@test "a verify-live note goes only to server-confirmed decider approvals (checked by the gate)" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
-  run -1 send --copy v1
-  [[ "$output" == *"applies only to a paid provisional approval"*"not server-confirmed decider approvals"* ]]
-  decider_approved r1 catalog_confirmed
-  run -1 send --copy v1
-  [[ "$output" == *"no credit in this note is a paid provisional approval"* ]]
+  run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"goes only to credits the decider approved"*"not server-confirmed decider approvals"* ]]
   [ "$(posts)" -eq 0 ]
   [ -z "$(sql 'select * from verify_messages')" ]
-  # A user's other decider approval may ride in a provisional credit's v1 note (one note per user).
+  # An ordinary (catalog-confirmed) approval and a paid provisional one both get the v1 note.
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star" "r2:Mixing:Song B:Big Star"
+  decider_approved r1 catalog_confirmed
   decider_approved r2 provisional_paid
-  run -0 send --copy v1
+  run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message="*" credits=2"* ]]
   [ "$(sql "select coalesce(removal_day,'NULL') from verify_messages where kind='initial'")" = "NULL" ]
 }
@@ -612,11 +668,11 @@ PY
 @test "NEW credits, windowed: reminders not before day 14, once each, only the note's user, stopped by a proof reply" {
   unlocked_gate windowed
   credits "$TEST_TMPDIR/c.json" Jane "r1:Producer:Song A:Big Star"
-  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$GATE" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$GATE" send --copy windowed --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1001 credits=1" ]]
   [[ "$(msg .body | plain)" == *"by November 15, it will be removed from your profile that day"* ]]
   [ "$(sql "select due_day, removal_day from verify_messages where message_id='1001'")" = "2026-11-15|2026-11-16" ]
-  rem() { "$GATE" send --kind "$1" --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
+  rem() { "$GATE" send --copy windowed --kind "$1" --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
   INTERCOM_VERIFY_TEST_DAY=2026-10-29 run -3 rem reminder-14
   [[ "$output" == "NOT DUE reminder-14 message=1001" ]]
   INTERCOM_VERIFY_TEST_DAY=2026-10-30 run -0 rem reminder-14
@@ -626,7 +682,7 @@ PY
   INTERCOM_VERIFY_TEST_DAY=2026-10-31 run -0 rem reminder-14
   [[ "$output" == "SKIPPED reminder-14-done message=1001" ]]
   jq '.user.email = "someone@else.com"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/o.json"
-  INTERCOM_VERIFY_TEST_DAY=2026-11-10 run -1 "$GATE" send --kind reminder-25 --parent-message-id 1001 \
+  INTERCOM_VERIFY_TEST_DAY=2026-11-10 run -1 "$GATE" send --copy windowed --kind reminder-25 --parent-message-id 1001 \
     --credits-file "$TEST_TMPDIR/o.json" --approved-by U7RP6HKUZ
   [[ "$output" == *"went to a different account"* ]]
   STUB_CONVERSATION='{"id":"777","source":{"id":"1002"},"conversation_parts":{"conversation_parts":[{"author":{"type":"user","id":"6650aa01"},"attachments":[{"name":"split.pdf"}]}]}}' \
@@ -663,7 +719,7 @@ PY
   # Another user sent proof on a new-credit note: they are never asked about past credits.
   jq '.user.email = "bob@example.com" | .user.id = "44" | .credits[0].request_id = "n1"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/b.json"
   STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com"}]}' \
-    INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$GATE" send --credits-file "$TEST_TMPDIR/b.json" --approved-by U7RP6HKUZ
+    INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$GATE" send --copy windowed --credits-file "$TEST_TMPDIR/b.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1002 credits=1" ]]
   STUB_CONVERSATION='{"id":"777","source":{"id":"1002"},"conversation_parts":{"conversation_parts":[{"author":{"type":"user","id":"u2"},"attachments":[{"name":"split.pdf"}]}]}}' \
     run -0 "$GATE" tag-proof --message-id 1002
@@ -680,7 +736,7 @@ PY
   rcredits "$TEST_TMPDIR/r.json" Jane "r9:Producer:Song Z:Big Star:producer"
   run -0 "$GATE" send --campaign retro-past --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
-  run -3 "$GATE" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  run -3 "$GATE" send --copy windowed --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "DEFERRED daily-cap credits=1"* ]]
   [ "$(posts)" -eq 1 ]
 }
@@ -896,7 +952,7 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send
   [[ "$output" == "POSTED email message=1001 credits=1" ]]
   INTERCOM_VERIFY_TEST_DAY=2026-10-20 run -0 "$SCRIPT" tag-proof --message-id 1001
-  ar() { "$SCRIPT" send --kind after-rejection --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
+  ar() { "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
   INTERCOM_VERIFY_TEST_DAY=2026-11-12 run -3 ar
   [[ "$output" == "NOT DUE after-rejection message=1001" ]]
   run -0 python3 "$HYDRA_REPO/scripts/credit-review.py" --ledger "$INTERCOM_VERIFY_TEST_LEDGER" verify-notify \
@@ -911,7 +967,7 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
   [[ "$body" != *"haven't received"* ]]
   [[ "$body" != *"split.pdf"* ]]
   [ "$(sql "select due_day, removal_day from verify_messages where message_id='1002'")" = "2026-11-19|2026-11-20" ]
-  INTERCOM_VERIFY_TEST_DAY=2026-11-13 run -0 "$SCRIPT" send --kind reminder-25 --parent-message-id 1001 \
+  INTERCOM_VERIFY_TEST_DAY=2026-11-13 run -0 "$SCRIPT" send --copy windowed --kind reminder-25 --parent-message-id 1001 \
     --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "SKIPPED reminder-25-done message=1001" ]]
   INTERCOM_VERIFY_TEST_DAY=2026-11-14 run -0 ar
@@ -924,11 +980,11 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
   run -1 send --kind after-rejection --parent-message-id 1 --dry-run
   [[ "$output" == *"do not say what was received"* ]]
   jq '.credits[0].reason = "looks fake" | .credits[0].received = "document"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/bad.json"
-  run -1 "$SCRIPT" send --kind after-rejection --parent-message-id 1 --credits-file "$TEST_TMPDIR/bad.json" \
+  run -1 "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1 --credits-file "$TEST_TMPDIR/bad.json" \
     --approved-by U7RP6HKUZ --dry-run
   [[ "$output" == *"lack a rejection reason from the fixed list (doesnt_name_you, other_track, other_role, unreadable, not_a_document)"* ]]
   jq '.credits[0].reason = "unreadable" | .credits[0].received = "document"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/r.json"
-  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$SCRIPT" send --kind after-rejection --parent-message-id 1 \
+  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1 \
     --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$(rendered .body | plain)" == *"because we couldn't read it."* ]]
   # Unlocked as committed (Fable 2026-10-17): without a sent note in the ledger it is still refused.
@@ -951,7 +1007,7 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
   run -2 rev --reason not_a_document
   [[ "$output" == *"no document was received on this note"* ]]
   run -0 rev
-  ar() { "$SCRIPT" send --kind after-rejection --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
+  ar() { "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
   INTERCOM_VERIFY_TEST_DAY=2026-11-12 run -0 ar
   [[ "$output" == "POSTED after-rejection email message=1002 credits=1" ]]
   [ "$(msg .subject)" = 'About your Mixing credit on "Song A"' ]
@@ -964,7 +1020,7 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
   jq -n '{user:{email:"jane@example.com", id:"42", first_name:"Jane"}, credits:[
     {request_id:"r1", role:"Mixing", track_title:"Song A", artist_name:"Big Star", received:"document", reason:"other_role"},
     {request_id:"r2", role:"Producer", track_title:"Song B", artist_name:"Big Star", received:"reply"}]}' > "$TEST_TMPDIR/m.json"
-  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$SCRIPT" send --kind after-rejection --parent-message-id 1 \
+  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1 \
     --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
   body="$(rendered .body | plain)"
   [[ "$body" == *"thanks for sending your documents. They didn't confirm these credits:"* ]]
@@ -973,7 +1029,7 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
   [[ "$body" == *'Producer on "Song B" by Big Star'* ]]
   [[ "$body" == *"If you have something else, such as a split sheet"* ]]
   jq '.credits |= map(.received = "reply" | del(.reason))' "$TEST_TMPDIR/m.json" > "$TEST_TMPDIR/m2.json"
-  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$SCRIPT" send --kind after-rejection --parent-message-id 1 \
+  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1 \
     --credits-file "$TEST_TMPDIR/m2.json" --approved-by U7RP6HKUZ --dry-run
   body="$(rendered .body | plain)"
   [[ "$body" == *"thanks for your reply. We still need a document that shows each of these 2 credits:"* ]]

@@ -765,20 +765,16 @@ def provisional_ids(db: sqlite3.Connection, request_ids: list[str]) -> set[str]:
 
 def provisional_copy(payloads: list[dict[str, Any]], prov: set[str], report: "Report | None" = None
                      ) -> list[dict[str, Any]]:
-    """One note per user (the gate's 90-day re-ask lock refuses a second one, QA review of
-    hydra#1257 @53428d0): a user with ANY paid provisional credit gets the v1 note for all of
-    the credits in the batch. v1 is the milder copy (no date, no removal), and the captain's
-    standing order is no auto-removal, so a windowed-class credit riding in that note simply
-    has no removal date. The send gate re-checks this (verify_ledger.v1_eligible)."""
+    """Every note is the no-threat v1 copy (firstmate 090, 2026-10-19 23:27Z: the captain dropped
+    auto-removal; NO message may say a credit will be removed or name a deadline). One note per
+    user (the 90-day re-ask lock). `prov` only feeds the report: users whose note includes a paid
+    provisional credit alongside other new credits."""
     out: list[dict[str, Any]] = []
     for p in payloads:
         ids = {c["request_id"] for c in p["credits"]}
-        if ids & prov:
-            if report is not None and ids - prov:
-                report.mixed_v1_users += 1
-            out.append({**p, "extra": ["--copy", "v1"]})
-        else:
-            out.append(p)
+        if report is not None and ids & prov and ids - prov:
+            report.mixed_v1_users += 1
+        out.append({**p, "extra": ["--copy", "v1"]})
     return out
 
 

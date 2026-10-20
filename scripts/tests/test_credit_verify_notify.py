@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import json
+import re
 import os
 import shutil
 import sqlite3
@@ -182,6 +183,24 @@ def dec(rid, outcome="approved", pid=PID, run="run-1", at="2026-10-15T22:30:00Z"
 
 def _ago(hours):
     return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# firstmate 090: no outgoing message may name a deadline or say a credit will be removed.
+REMOVAL_LANGUAGE = re.compile(r"will be removed|be removed from your profile|removed from your profile (after|on|that)"
+                              r"|reply[^.]{0,80}\bby (january|february|march|april|may|june|july|august|september|"
+                              r"october|november|december|\d)|\b30 days\b|deadline|last reminder", re.I)
+
+
+def posted_bodies(stub_log):
+    """The JSON payloads the curl stub received on POST /messages (subject + HTML body)."""
+    p = Path(stub_log + ".bodies")
+    return [json.loads(ln) for ln in p.read_text().splitlines() if ln.strip()] if p.exists() else []
+
+
+def assert_no_removal_language(tc, api_log_or_text):
+    text = api_log_or_text if isinstance(api_log_or_text, str) else json.dumps(api_log_or_text)
+    m = REMOVAL_LANGUAGE.search(text)
+    tc.assertIsNone(m, f"removal/deadline language in an outgoing message: {m.group(0) if m else ''!r}")
 
 
 class Fake:
@@ -1505,6 +1524,7 @@ case "$method ${url#https://api.intercom.io}" in
     if [ -n "${STUB_REJECT:-}" ] && [ -f "$STUB_REJECT" ]; then
       rm -f "$STUB_REJECT"; printf '{"type":"error.list","errors":[{"code":"rate_limit_exceeded"}]}'; exit 0
     fi
+    printf '%s\n' "$payload" >> "$STUB_LOG.bodies"
     n=$(( $(cat "$STUB_N" 2>/dev/null || echo 500) + 1 )); echo "$n" > "$STUB_N"
     printf '{"type":"admin_message","id":"%s","message_type":"email","conversation_id":null}' "$n" ;;
   "POST /conversations/search") printf '{"conversations":[]}' ;;
@@ -1526,7 +1546,7 @@ class WiringTests(unittest.TestCase):
         self.assertIn("\nreadonly TESTABLE=0\n", src)
         (t / "gate.sh").write_text(src.replace("\nreadonly TESTABLE=0\n", "\nreadonly TESTABLE=1\n"))
         self.assertIn("\nreadonly RETRO_COPY_APPROVED=0\n", src)
-        self.assertIn("\nreadonly LIVE_WINDOWED_COPY_APPROVED=1\n", src)  # Fable 2026-10-17 enable
+        self.assertIn("\nreadonly LIVE_WINDOWED_COPY_APPROVED=0\n", src)  # firstmate 090: no removal language
         unlocked = (src.replace("\nreadonly TESTABLE=0\n", "\nreadonly TESTABLE=1\n")
                     .replace("\nreadonly RETRO_COPY_APPROVED=0\n", "\nreadonly RETRO_COPY_APPROVED=1\n"))
         (t / "gate-retro.sh").write_text(unlocked)
@@ -1592,8 +1612,8 @@ class WiringTests(unittest.TestCase):
                              .fetchone(), (1, None))
         finally:
             db.close()
-        body = json.loads(next(Path(self.env["INTERCOM_VERIFY_TEST_LOG_DIR"]).glob("*.json")).read_text())
-        self.assertNotIn("removed", json.dumps(body))
+        for b in posted_bodies(self.env["STUB_LOG"]):
+            assert_no_removal_language(self, b["subject"] + " " + b["body"])
 
     def test_past_wave_end_to_end_locked_then_one_message_never_removed(self):
         wave = os.path.join(self.tmp, "wave.csv")
@@ -1621,7 +1641,10 @@ class WiringTests(unittest.TestCase):
         posts = [ln for ln in Path(self.env["STUB_LOG"]).read_text().splitlines() if ln.endswith("/messages")]
         self.assertEqual(len(posts), 1)
 
-    def test_new_credit_windowed_notes_end_to_end_reminders_then_removal_due(self):
+    def test_new_credit_notes_end_to_end_no_reminders_never_removal_due(self):
+        """firstmate 090: the note is v1 (no date), so no day-14/25 reminder ever goes out and
+        the credit is never removal-due, however long it waits (the committed gate, which
+        also has the windowed lock unlocked here, still sends v1 from the driver)."""
         decisions_db(self.path, [dec("r1")])
         admin = FakeAdmin([req("r1", track="t1")])
         gate = os.path.join(self.tmp, "gate-windowed.sh")
@@ -1646,17 +1669,20 @@ class WiringTests(unittest.TestCase):
             return verify_notify.run(admin, ledger_path=self.path, mode="apply", since_hours=None, wrapper=gate,
                                      sweep=False, proof_path=proof)
         self.assertEqual(tick("2026-10-16").sent_notes, 1)
-        self.assertEqual(tick("2026-10-30").reminders_sent, 1)
-        self.assertEqual(tick("2026-11-10").reminders_sent, 1)
-        self.assertEqual(tick("2026-11-14").removal_due, 0)
-        self.assertEqual(tick("2026-11-15").removal_due, 0, "the reply-by date itself is still in time")
-        self.assertEqual(tick("2026-11-16").removal_due, 1)
+        self.assertEqual(tick("2026-10-30").reminders_sent, 0)
+        self.assertEqual(tick("2026-11-10").reminders_sent, 0)
+        self.assertEqual(tick("2026-11-16").removal_due, 0)
+        self.assertEqual(tick("2027-01-16").removal_due, 0)
         db = sqlite3.connect(self.path)
         try:
             rows = db.execute("SELECT kind, removal_day FROM verify_messages WHERE status='sent' ORDER BY id").fetchall()
         finally:
             db.close()
-        self.assertEqual(rows, [("initial", "2026-11-16"), ("reminder-14", "2026-11-16"), ("reminder-25", "2026-11-16")])
+        self.assertEqual(rows, [("initial", None)])
+        bodies = posted_bodies(self.env["STUB_LOG"])
+        self.assertEqual(len(bodies), 1)
+        for b in bodies:
+            assert_no_removal_language(self, b["subject"] + " " + b["body"])
 
     def test_a_held_back_credit_older_than_the_window_is_asked_exactly_once_after_the_review(self):
         decisions_db(self.path, [dec("r1", at=_ago(1))])
@@ -1715,16 +1741,40 @@ class WiringTests(unittest.TestCase):
         finally:
             db.close()
 
-    def test_as_committed_the_windowed_note_is_not_send_locked(self):
-        """Fable 2026-10-17 (decision-verify-notify-enable): the lock flips in this PR, so the
-        committed gate no longer refuses a verify-live note."""
-        decisions_db(self.path, [dec("r1")])
-        admin = FakeAdmin([req("r1", track="t1")])
+    def test_as_committed_every_note_is_the_no_threat_v1_copy(self):
+        """firstmate 090 (2026-10-19 23:27Z): the captain dropped auto-removal, so the committed
+        gate sends every new credit's note as v1 (no date, no removal language), records no
+        removal date, and refuses the windowed copy and every follow-up."""
+        decisions_db(self.path, [dec("r1"), dec("r2", track="t2")])
+        admin = FakeAdmin([req("r1", track="t1"), req("r2", title="Other Song", track="t2")])
         os.environ["INTERCOM_VERIFY_TEST_DAY"] = "2026-10-16"
-        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper=os.path.join(self.tmp, "gate.sh"),
-                                sweep=False)
-        self.assertEqual(rep.refused_users, 0)
-        self.assertNotIn("windowed copy is not approved", rep.render("apply"))
+        gate = os.path.join(self.tmp, "gate.sh")
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper=gate, sweep=False)
+        self.assertEqual((rep.sent_notes, rep.sent_credits, rep.refused_users), (1, 2, 0), rep)
+        db = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(db.execute("SELECT removal_day, due_day FROM verify_messages WHERE kind='initial'").fetchall(),
+                             [(None, None)])
+            mid = db.execute("SELECT message_id FROM verify_messages WHERE kind='initial'").fetchone()[0]
+        finally:
+            db.close()
+        bodies = posted_bodies(self.env["STUB_LOG"])
+        self.assertEqual(len(bodies), 1)
+        self.assertIn("Nothing changes while we check", bodies[0]["body"])
+        for b in bodies:
+            assert_no_removal_language(self, b["subject"] + " " + b["body"])
+        cf = os.path.join(self.tmp, "c.json")
+        Path(cf).write_text(json.dumps({"user": {"email": "jane@example.com", "id": "42", "first_name": "Jane"},
+                                        "credits": [{"request_id": "r1", "role": "Mixing", "track_title": "Song",
+                                                     "artist_name": "Big Star"}]}))
+        for extra in (["--copy", "windowed"], ["--kind", "reminder-14", "--parent-message-id", str(mid)],
+                      ["--kind", "after-rejection", "--parent-message-id", str(mid)]):
+            with self.subTest(extra):
+                res = subprocess.run([gate, "send", "--credits-file", cf, "--approved-by", CAPTAIN_UID, *extra],
+                                     capture_output=True, text=True, timeout=60, check=False)
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        posts = [ln for ln in Path(self.env["STUB_LOG"]).read_text().splitlines() if ln.endswith("/messages")]
+        self.assertEqual(len(posts), 1, "only the v1 note went out")
 
     def test_removal_notice_end_to_end_once_per_event_locked_until_approved(self):
         events = os.path.join(self.tmp, "events.jsonl")
@@ -1908,7 +1958,7 @@ class EnableGateTests(unittest.TestCase):
                                 proof_path=self.proof, sweep=False, since_hours=None, affiliation_path=self.aff)
         sent = sorted((sorted(c["request_id"] for c in p["credits"]), "--copy" in a and a[a.index("--copy") + 1])
                       for p, a in zip(fake.payloads, [x for x in fake.argv if x[1] == "send"]))
-        self.assertEqual(sent, [(["g1", "g2"], "v1"), (["g3"], False)])
+        self.assertEqual(sent, [(["g1", "g2"], "v1"), (["g3"], "v1")], "firstmate 090: every note is v1")
         self.assertEqual(rep.mixed_v1_users, 1)
 
     def test_the_90_day_lock_follows_the_user_not_the_email(self):

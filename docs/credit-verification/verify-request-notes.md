@@ -1,5 +1,7 @@
 # Trust yet verify: the "please help us verify it" note
 
+> **firstmate 090 (2026-10-19 23:27Z): every verify-live note is the no-threat `v1` copy.** The captain dropped auto-removal (Fable ruling 4 as amended), so no message may name a deadline or say a credit will be removed. The gate sends `v1` for every new credit's note, but only when every credit is a server-confirmed decider approval (`verify_ledger v1-eligible`). The note records no `due_day` and no `removal_day`, so nothing is ever removal-due. `LIVE_WINDOWED_COPY_APPROVED=0` send-locks the windowed note and all of its follow-ups (day-14/25 reminders, after-rejection). The windowed rows in this document describe that locked path, kept for `--dry-run` previews only. The bats test "no sendable message carries removal or deadline language" fails if any sendable message, in any campaign, names a deadline or a removal. Unconfirmed credits go to the day-30 Ops review list (`credit-review.py provisional-review`, #1275); they are never removed automatically.
+
 Captain, 2026-10-15 22:12Z (verbatim): "i want AI live now - we have too many credits to
 approve and to get supporting data for - let users know where there was a credit given and
 that it needs support (trust yet verify approach)". Also: "gaming caroline means from
