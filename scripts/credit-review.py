@@ -410,14 +410,23 @@ def cmd_verify_notify(args: argparse.Namespace) -> int:
               f"awaiting review, a user reply, or a rejection not yet explained to the user), written to {held_path} (never removed by this export). Nothing was "
               "removed; the removal step re-checks each one.")
         return 0
-    if VERIFY_NOTIFY_KILL_SWITCH.exists():
+    if args.check_recipients and args.mode != "dry-run":
+        print("--check-recipients is for --mode dry-run only.")
+        return 2
+    # The kill switch stops SENDS. A dry run sends nothing and writes nothing, so it still runs
+    # under the switch (QA @052f737: the pre-enable --check-recipients dry run must not
+    # silently check zero recipients while the switch is set).
+    if VERIFY_NOTIFY_KILL_SWITCH.exists() and args.mode == "apply":
         log(f"verify-notify kill switch present at {VERIFY_NOTIFY_KILL_SWITCH}; nothing sent")
         print("NO_REPLY")
         return 0
+    if VERIFY_NOTIFY_KILL_SWITCH.exists():
+        log(f"verify-notify kill switch present at {VERIFY_NOTIFY_KILL_SWITCH}; dry run only (read only)")
     try:
         report = verify_notify.run(admin_api.AdminClient(), ledger_path=args.ledger, mode=args.mode,
                                    run_id=args.run, since_hours=args.since_hours, max_users=args.max_users,
-                                   proof_path=args.proof_on_file, sweep=not args.no_proof_sweep)
+                                   proof_path=args.proof_on_file, sweep=not args.no_proof_sweep,
+                                   check_recipients=args.check_recipients)
     except verify_notify.ContractError as exc:
         log(f"verify-notify contract error: {exc}")
         print(f"Verify notes could not run: {exc}. Nothing was sent.")
@@ -599,6 +608,9 @@ def parser() -> argparse.ArgumentParser:
     vn.add_argument("--since-hours", type=int, default=168, help="decisions newer than this (when decided_at exists)")
     vn.add_argument("--max-users", type=int, default=150, help="accounts messaged per run")
     vn.add_argument("--no-proof-sweep", action="store_true", help="skip tagging proof replies")
+    vn.add_argument("--check-recipients", action="store_true",
+                    help="dry-run only: run the real gate's read-only recipient check (Intercom contact search + "
+                         "external_id) for every note instead of input validation alone")
     vn.add_argument("--proof-on-file", default=None, metavar="FILE",
                     help="documents-on-file exclusion list (default /var/lib/credit-trust/proof-on-file.json); "
                          "missing or older than 3h = no asks this run")

@@ -81,10 +81,10 @@ set -euo pipefail
 #   intercom-verify-request.sh send --credits-file FILE --approved-by <SlackUID> \
 #       [--campaign verify-live|retro-past|removal-notice|takeback-notice] [--kind initial|reminder-14|reminder-25|after-rejection \
 #        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only)] \
-#       [--dry-run|--validate|--doc-check]
+#       [--dry-run|--validate|--doc-check|--check-recipient]
 #   intercom-verify-request.sh tag-proof --message-id <id> [--dry-run]
 #
-# FILE is JSON: {"user": {"email": "...", "id": "<muso user id>", "first_name": "..."},
+# FILE is JSON: {"user": {"email": "...", "id": "<muso user id>", "auth_id": "<auth0 sub>", "first_name": "..."},
 #                "credits": [{"request_id": "...", "role": "...", "track_title": "...",
 #                             "artist_name": "...", "role_families": ["producer", ...],
 #                             "profile_id": "...", "track_id": "..."}, ...]}
@@ -96,6 +96,15 @@ set -euo pipefail
 # --doc-check (retro-past initial notes only) resolves the recipient and checks whether they
 # already sent documents in Intercom (read only: prints DOCS <why> | NO_DOCS, writes nothing,
 # sends nothing) for audits. It never reaches the claim or the POST.
+#
+# --check-recipient (initial notes) runs every check a real send runs up to the claim: input,
+# render + leak check, the Intercom recipient (exactly one user with the account email, its
+# external_id the account's), the v1 eligibility read; prints RECIPIENT OK <copy> credits=N
+# or refuses. Read only: no ledger write, nothing sent. A dry run that skips this cannot see a
+# recipient refusal (2026-10-20 07:00Z: all 21 first notes refused at the external_id check).
+#
+# user.auth_id: Intercom's external_id for a Muso user is the account's Auth0 subject without
+# its "auth0|" prefix (a UUID), not the numeric user id; the driver passes it (users.auth0userid).
 #
 # Exit codes: 0 posted / tagged / nothing new to send · 1 refusal · 2 usage/environment
 #             error · 3 deferred (already messaged today; follow-up not due; no proof yet) ·
@@ -214,6 +223,7 @@ while [ $# -gt 0 ]; do
       shift 2 ;;
     --dry-run)  ACTION="dry-run"; shift ;;
     --doc-check) ACTION="doc-check"; shift ;;
+    --check-recipient) ACTION="check-recipient"; shift ;;
     --validate) ACTION="validate"; shift ;;
     -h|--help)  usage; exit 0 ;;
     *) usage; die "unknown argument '$1'" ;;
@@ -225,7 +235,7 @@ done
 for b in "$JQ_BIN" "$PY_BIN"; do
   [ -x "$b" ] || die "$b is missing or not executable; it is a required dependency."
 done
-if [ "$ACTION" = "post" ] || [ "$ACTION" = "doc-check" ] || [ "$MODE" = "tag-proof" ]; then
+if [ "$ACTION" = "post" ] || [ "$ACTION" = "doc-check" ] || [ "$ACTION" = "check-recipient" ] || [ "$MODE" = "tag-proof" ]; then
   [ -n "${MUSOAI_INTERCOM_TOKEN:-}" ] || die "MUSOAI_INTERCOM_TOKEN is not set. The gateway exports it from /etc/openclaw/main.env; on a shell: set -a; . /etc/openclaw/main.env; set +a"
   for b in "$CURL_BIN" "$TIMEOUT_BIN"; do
     [ -x "$b" ] || die "$b is missing or not executable; it is a required dependency."
@@ -263,7 +273,8 @@ new_log_file() { # <kind> <target>
 if [ "$MODE" = "tag-proof" ]; then
   [ -z "$CREDITS_FILE$APPROVED_BY$PARENT_ID$COPY_ARG" ] && [ "$CAMPAIGN_SET$KIND_SET" = "00" ] \
     || refuse "tag-proof takes only --message-id; it sends nothing to the user."
-  [ "$ACTION" != "validate" ] && [ "$ACTION" != "doc-check" ] || refuse "--validate and --doc-check apply to send only."
+  [ "$ACTION" != "validate" ] && [ "$ACTION" != "doc-check" ] && [ "$ACTION" != "check-recipient" ] \
+    || refuse "--validate, --doc-check and --check-recipient apply to send only."
   printf '%s' "$MESSAGE_ID" | grep -qE '^[0-9]{1,24}$' \
     || refuse "--message-id must be the numeric Intercom message id of a verify note (got '${MESSAGE_ID:-<empty>}')."
   ROW="$(ledger message --message-id "$MESSAGE_ID")"
@@ -388,6 +399,8 @@ case "$CAMPAIGN" in
     ;;
   *) refuse "--campaign must be verify-live, retro-past, removal-notice or takeback-notice (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
 esac
+[ "$ACTION" != "check-recipient" ] || { [ "$CAMPAIGN" = "verify-live" ] && [ "$KIND" = "initial" ]; } \
+  || refuse "--check-recipient applies to a verify-live initial note only (it must never reach a path that writes)."
 [ "$ACTION" != "doc-check" ] || [ "$CAMPAIGN" = "retro-past" ] \
   || refuse "--doc-check applies to --campaign retro-past only: a removal notice is not an ask, and a new credit's note is never skipped for an Intercom attachment."
 readonly APPROVAL_REF MAX_CREDITS MAX_LISTED COPY
@@ -413,6 +426,7 @@ INPUT="$("$JQ_BIN" -c '
   def clean: tostring | gsub("[[:cntrl:]]"; " ") | gsub("\\s+"; " ") | sub("^ "; "") | sub(" $"; "");
   { user: { email: ((.user.email // "") | clean | ascii_downcase),
             id: ((.user.id // "") | clean),
+            auth_id: ((.user.auth_id // "") | clean | sub("^auth0\\|"; "")),
             first_name: ((.user.first_name // "") | clean) },
     credits: [ .credits[] | { request_id: ((.request_id // "") | clean), role: ((.role // "") | clean),
                               track_title: ((.track_title // "") | clean), artist_name: ((.artist_name // "") | clean),
@@ -427,10 +441,13 @@ INPUT="$("$JQ_BIN" -c '
 
 EMAIL="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.email')"
 USER_ID="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.id')"
+AUTH_ID="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.auth_id')"
 printf '%s' "$EMAIL" | grep -qE '^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$' \
   || refuse "user.email must be the credit request's account email (got an invalid value)."
 [ -z "$USER_ID" ] || printf '%s' "$USER_ID" | grep -qE '^[A-Za-z0-9-]{1,64}$' \
   || refuse "user.id must be the Muso user id (letters, digits, dashes)."
+[ -z "$AUTH_ID" ] || printf '%s' "$AUTH_ID" | grep -qE '^[A-Za-z0-9._-]{1,128}$' \
+  || refuse "user.auth_id must be the account's Auth0 subject (letters, digits, dot, dash, underscore)."
 N="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.credits | length')"
 [ "$N" -ge 1 ] || refuse "credits is empty; there is nothing to ask the user to verify."
 [ "$N" -le "$MAX_CREDITS" ] || refuse "credits has $N entries; at most $MAX_CREDITS per $CAMPAIGN note."
@@ -895,7 +912,21 @@ if [ "$KIND" = "initial" ]; then
   [ "$n_users" -eq 1 ] || record_refusal "the account email matches $n_users Intercom users (need exactly 1); not sending."
   CONTACT_ID="$(printf '%s' "$users" | "$JQ_BIN" -r '.[0].id')"
   EXT_ID="$(printf '%s' "$users" | "$JQ_BIN" -r '.[0].external_id // empty')"
-  if [ -n "$USER_ID" ] && [ -n "$EXT_ID" ] && [ "$EXT_ID" != "$USER_ID" ]; then
+  # external_id names THIS account when it is the numeric user id or the account's Auth0
+  # subject (with or without the "auth0|" prefix). Anything else is another account, and a
+  # contact with no external_id cannot be matched to any account at all (QA @052f737).
+  [ -n "$EXT_ID" ] \
+    || record_refusal "the Intercom user for this email has no external_id, so it cannot be matched to this Muso account; not sending."
+  # An account-specific note needs the account named (QA @3112769): with neither user.id nor
+  # user.auth_id, any external_id would pass. The one exception is removal-notice, whose
+  # recipient is the profile's single CLAIMED WORKSPACE email (credit_review.verify_notify.
+  # profile_owner): that campaign has no Muso user id to compare, by construction.
+  if [ -z "$USER_ID" ] && [ -z "$AUTH_ID" ] && [ "$CAMPAIGN" != "removal-notice" ]; then
+    record_refusal "the note names no Muso account (neither user.id nor user.auth_id), so the Intercom contact cannot be verified as its owner; not sending."
+  fi
+  if { [ -n "$USER_ID" ] || [ -n "$AUTH_ID" ]; } \
+     && [ "$EXT_ID" != "$USER_ID" ] \
+     && { [ -z "$AUTH_ID" ] || { [ "$EXT_ID" != "$AUTH_ID" ] && [ "$EXT_ID" != "auth0|$AUTH_ID" ]; }; }; then
     record_refusal "the Intercom user for this email belongs to a different Muso account (external_id mismatch); not sending."
   fi
 fi
@@ -958,7 +989,8 @@ fi
 
 # ---------------------------------------------------------------------------------------
 # Claim in the ledger (idempotency + per-day cap), BEFORE the api-log and the POST.
-[ "$ACTION" = "post" ] || die "action '$ACTION' reached the send path; only a real send claims or posts. Nothing was claimed or sent."
+{ [ "$ACTION" = "post" ] || [ "$ACTION" = "check-recipient" ]; } \
+  || die "action '$ACTION' reached the send path; only a real send claims or posts. Nothing was claimed or sent."
 if [ "$KIND" = "initial" ] && [ "$COPY" = "v1" ]; then
   # The no-deadline v1 copy only for a note the decider ledger proves is a paid provisional
   # approval's (QA review of hydra#1257 @53428d0): every credit a server-confirmed decider
@@ -967,6 +999,10 @@ if [ "$KIND" = "initial" ] && [ "$COPY" = "v1" ]; then
   [ "$(printf '%s' "$V1" | "$JQ_BIN" -r '.eligible')" = "true" ] \
     || refuse "a verify-live note goes only to credits the decider approved and the server confirmed: $(printf '%s' "$V1" | "$JQ_BIN" -r '.reason')."
 fi
+if [ "$ACTION" = "check-recipient" ]; then
+  printf 'RECIPIENT OK %s %s copy=%s credits=%s\n' "$CAMPAIGN" "$KIND" "$COPY" "$N"; exit 0
+fi
+[ "$ACTION" = "post" ] || die "internal: '$ACTION' past the recipient check."
 if [ "$KIND" = "initial" ]; then
   REFS_FILE="$(mktemp)"
   trap 'rm -f "$REFS_FILE"' EXIT

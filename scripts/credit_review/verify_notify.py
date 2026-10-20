@@ -46,7 +46,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from . import admin as admin_api
 from . import affiliation, proof_parts, verify_ledger
@@ -115,6 +115,8 @@ class Report:
     mixed_v1_users: int = 0            # users whose one note is v1 because ANY credit is paid provisional
     already_today: int = 0             # messages the ledger already holds for today (counted against the cap)
     paying_hold: str = ""              # paying status unknown and the cap would have to choose: nothing sent
+    no_auth_users: int = 0             # no Auth0 subject on the account: Intercom identity unverifiable, held
+    recipient_ok: int = 0              # dry run with --check-recipients: the real gate accepted the recipient
     halted: str = ""
     failures: list[str] = field(default_factory=list)
     refusals: list[str] = field(default_factory=list)
@@ -132,11 +134,16 @@ class Report:
         if not (self.sent_notes or self.refused_users or self.failed_users or self.reminders_sent
                 or self.proof_tagged or self.proof_failed or self.extension_requests
                 or self.affiliation_held or self.documented_users or self.support_contact_users
-                or self.paying_hold) and mode == "apply":
+                or self.paying_hold or self.no_auth_users) and mode == "apply":
             return "NO_REPLY"
         head = f"{title} (dry run, nothing sent)" if mode != "apply" else title
         parts = [f"{head}: {self.sent_notes} note(s) sent covering {self.sent_credits} provisionally approved credit(s)"
                  if mode == "apply" else f"{head}: {self.users} account(s) would get a note"]
+        if self.no_auth_users:
+            parts.append(f"{self.no_auth_users} account(s) held: no Auth0 subject on the account, so the Intercom "
+                         "recipient cannot be matched to it")
+        if self.recipient_ok:
+            parts.append(f"{self.recipient_ok} recipient(s) accepted by the real gate (read only)")
         if self.paying_hold:
             parts.append(self.paying_hold)
         elif self.paying_unknown:
@@ -573,7 +580,8 @@ def _first_line(text: str) -> str:
 
 def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
              wrapper: str = WRAPPER, runner: Runner = _run, extra: list[str] | None = None,
-             pace_seconds: float = 0.0, preview_dir: str | None = None, reminder: bool = False) -> None:
+             pace_seconds: float = 0.0, preview_dir: str | None = None, reminder: bool = False,
+             check_recipients: bool = False) -> None:
     for i, p in enumerate(payloads):
         if i and pace_seconds and mode == "apply":
             time.sleep(pace_seconds)
@@ -584,7 +592,7 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
             argv = [wrapper, "send", "--credits-file", path, "--approved-by", CAPTAIN_UID]
             argv += (extra or []) + (p.get("extra") or [])
             if mode != "apply":
-                argv.append("--dry-run" if preview_dir else "--validate")
+                argv.append("--dry-run" if preview_dir else ("--check-recipient" if check_recipients else "--validate"))
             res = runner(argv)
         finally:
             os.unlink(path)
@@ -594,7 +602,9 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
             with os.fdopen(fdp, "w", encoding="utf-8") as fh:
                 fh.write(res.stdout)
         out, err = _first_line(res.stdout), _first_line(res.stderr)
-        if res.returncode == 0 and out.startswith("POSTED") and reminder:
+        if res.returncode == 0 and out.startswith("RECIPIENT OK"):
+            report.recipient_ok += 1
+        elif res.returncode == 0 and out.startswith("POSTED") and reminder:
             report.reminders_sent += 1
         elif res.returncode == 0 and out.startswith("POSTED"):
             report.sent_notes += 1
@@ -784,6 +794,58 @@ def provisional_copy(payloads: list[dict[str, Any]], prov: set[str], report: "Re
     return out
 
 
+class AuthLookupError(RuntimeError):
+    pass
+
+
+AUTH_LOOKUP_CMD = os.environ.get("CREDIT_VERIFY_AUTH_LOOKUP_CMD", "/opt/hydra/scripts/trino-query.sh")
+
+
+def account_auth_ids(user_ids: Iterable[Any]) -> dict[str, str]:
+    """{muso user id: Auth0 subject} from the core replica (users.auth0userid, Trino; never
+    admin paging). Intercom's external_id for a Muso user is that subject without "auth0|"
+    (2026-10-20 07:00Z: comparing it with the numeric id refused all 21 first notes). Users
+    without a subject are absent. Raises AuthLookupError when the replica cannot be read."""
+    import csv as _csv
+    ids = sorted({int(str(u)) for u in user_ids if str(u).strip().isdigit()})
+    out: dict[str, str] = {}
+    for i in range(0, len(ids), 500):
+        sql = ("SELECT CAST(id AS varchar), auth0userid FROM postgresql_core.public.users WHERE id IN ("
+               + ",".join(str(u) for u in ids[i:i + 500]) + ")")
+        try:
+            p = subprocess.run([AUTH_LOOKUP_CMD], input=sql, capture_output=True, text=True, timeout=300, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise AuthLookupError(f"{type(exc).__name__}: {exc}"[:200]) from None
+        if p.returncode != 0:
+            raise AuthLookupError(f"rc={p.returncode}: {p.stderr.strip()[-200:]}")
+        for row in _csv.reader(ln for ln in p.stdout.splitlines() if ln.startswith('"')):
+            if len(row) == 2 and row[0].isdigit() and row[1].strip():
+                out[row[0]] = row[1].strip()
+    return out
+
+
+AUTH_LOOKUP: Callable[[Iterable[Any]], dict[str, str]] = account_auth_ids
+
+
+def attach_auth_ids(payloads: list[dict[str, Any]], report: "Report",
+                    lookup: Callable[[Iterable[Any]], dict[str, str]] | None = None
+                    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(payloads with user.auth_id set, payloads held because the account has no Auth0
+    subject). AuthLookupError propagates: the caller sends nothing."""
+    if not payloads:
+        return payloads, []
+    found = (lookup or AUTH_LOOKUP)([p["user"].get("id") for p in payloads])
+    keep, held = [], []
+    for p in payloads:
+        sub = found.get(str(p["user"].get("id") or ""))
+        if sub:
+            keep.append({**p, "user": {**p["user"], "auth_id": sub}})
+        else:
+            held.append(p)
+    report.no_auth_users += len(held)
+    return keep, held
+
+
 def paid_first(payloads: list[dict[str, Any]], paying: frozenset[int] | None) -> list[dict[str, Any]]:
     """Paying users' notes first (stable: oldest credit first within each group)."""
     if paying is None:
@@ -797,7 +859,8 @@ def paid_first(payloads: list[dict[str, Any]], paying: frozenset[int] | None) ->
 def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "apply", run_id: str | None = None,
         since_hours: int | None = 168, max_users: int = 150, proof_path: str | None = None,
         sweep: bool = True, wrapper: str = WRAPPER, runner: Runner = _run,
-        affiliation_path: str | None = None) -> Report:
+        affiliation_path: str | None = None, check_recipients: bool = False,
+        auth_lookup: Callable[[Iterable[Any]], dict[str, str]] | None = None) -> Report:
     """The whole step, once a day (09:00 Europe/Rome). `max_users` is the day's cap on
     messages, reminders included (they go first: the note promised them). Gates, in order:
     proof on file from any source, the support@ 90-day contacts, org affiliation, the shared
@@ -852,6 +915,18 @@ def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "
                 for p in payloads:
                     held += [_ref(by_id[c["request_id"]]) for c in p["credits"] if c["request_id"] in by_id]
                 payloads = []
+            # The Intercom recipient is matched to the account by its Auth0 subject (the
+            # contact's external_id). No subject = cannot verify the recipient: held, never
+            # handed to the gate (whose refusal would close the credits for good).
+            try:
+                payloads, no_auth = attach_auth_ids(payloads, report, auth_lookup)
+            except AuthLookupError as exc:
+                report.halted = f"the account Auth0 subjects cannot be read from the replica ({exc}); nothing is sent"[:300]
+                for p in payloads:
+                    held += [_ref(by_id[c["request_id"]]) for c in p["credits"] if c["request_id"] in by_id]
+                payloads, no_auth = [], []
+            for p in no_auth:
+                held += [_ref(by_id[c["request_id"]]) for c in p["credits"] if c["request_id"] in by_id]
             # Over the day's cap: the credits wait for tomorrow (kept in the ledger, so a
             # credit older than the candidate window is never silently dropped).
             for p in payloads[max(budget, 0):]:
@@ -862,7 +937,7 @@ def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "
             if mode == "apply" and held:
                 verify_ledger.defer(db, campaign="verify-live", refs=held)
             report.users = len(payloads)
-            send_all(payloads, report, mode=mode, wrapper=wrapper, runner=runner)
+            send_all(payloads, report, mode=mode, wrapper=wrapper, runner=runner, check_recipients=check_recipients)
         if sweep and mode == "apply":
             sweep_proofs(db, report, days=45, wrapper=wrapper, runner=runner)
         if mode == "apply":
@@ -1018,6 +1093,13 @@ def run_wave(admin: admin_api.Admin, *, wave_path: str, ledger_path: str | None 
                 # Not announceable (no account email / title / artist): close them so these
                 # users never take a slot of the per-run budget again.
                 report.skipped_not_live += verify_ledger.skip_requests(db, campaign=CAMPAIGN_RETRO, request_ids=dropped)
+            # Same recipient identity rule as the new-credit notes: Intercom's external_id is the
+            # account's Auth0 subject. No subject = not sent this run (nothing closed).
+            try:
+                payloads, _ = attach_auth_ids(payloads, report)
+            except AuthLookupError as exc:
+                report.halted = f"the account Auth0 subjects cannot be read from the replica ({exc}); nothing is sent"[:300]
+                payloads = []
             report.users = len(payloads)
             if audit_docs and mode != "apply":
                 audit_documents(payloads, report, path=audit_docs, campaign=CAMPAIGN_RETRO, wrapper=wrapper,

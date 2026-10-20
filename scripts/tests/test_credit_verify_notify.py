@@ -85,6 +85,9 @@ os.environ["CREDIT_RETRO_ORG_AFFILIATION"] = AFFILIATION_FILE
 os.environ.setdefault("CREDIT_TRUST_PAYING_USERS_FILE", os.path.join(_PROOF_DIR, "paying-users.json"))
 
 from credit_review import verify_ledger, verify_notify  # noqa: E402
+
+# The replica is never read in tests: every test account's Auth0 subject is "auth-<id>".
+verify_notify.AUTH_LOOKUP = lambda ids: {str(u): "auth0|test-subject" for u in ids if str(u)}
 from credit_review.verify_notify import CAPTAIN_UID, ContractError, Report  # noqa: E402
 
 PID = "11111111-2222-3333-4444-555555555555"
@@ -1519,7 +1522,7 @@ echo "$method $url" >> "$STUB_LOG"
 case "$method ${url#https://api.intercom.io}" in
   "POST /contacts/search")
     e="$(printf '%s' "$payload" | jq -r .query.value)"
-    printf '{"data":[{"id":"c%s","role":"user","email":"%s"}]}' "${#e}" "$e" ;;
+    printf '{"data":[{"id":"c%s","role":"user","email":"%s","external_id":"test-subject"}]}' "${#e}" "$e" ;;
   "POST /messages")
     if [ -n "${STUB_REJECT:-}" ] && [ -f "$STUB_REJECT" ]; then
       rm -f "$STUB_REJECT"; printf '{"type":"error.list","errors":[{"code":"rate_limit_exceeded"}]}'; exit 0
@@ -1987,6 +1990,36 @@ class EnableGateTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_the_recipient_auth0_subject_is_passed_and_a_missing_one_holds_the_note(self):
+        """2026-10-20 07:00Z: the gate matches Intercom's external_id against the account's Auth0
+        subject. A user without one is held (deferred, never handed to the gate, whose refusal
+        would close the credits); an unreadable replica halts the run with nothing sent."""
+        rows = [user_req("a1", 45), user_req("a2", 46)]
+        rep, fake = self.go(rows, auth_lookup=lambda ids: {"45": "auth0|abc-45"})
+        self.assertEqual([(p["user"]["id"], p["user"].get("auth_id")) for p in fake.payloads], [("45", "auth0|abc-45")])
+        self.assertEqual(rep.no_auth_users, 1)
+        self.assertIn("a2", self.deferred())
+        self.assertIn("no Auth0 subject", rep.render("apply"))
+
+        def down(ids):
+            raise verify_notify.AuthLookupError("rc=2: trino down")
+        rep, fake = self.go([user_req("a3", 47)], auth_lookup=down)
+        self.assertEqual(fake.payloads, [])
+        self.assertIn("Auth0 subjects cannot be read", rep.halted)
+        self.assertTrue(rep.failed)
+        self.assertIn("a3", self.deferred())
+
+    def test_a_dry_run_can_use_the_real_recipient_check(self):
+        rows = [user_req("b1", 48)]
+        decisions_db(self.path, [dec(r["id"], pid=r["profileId"], track=r["trackId"]) for r in rows])
+        write_proof(self.proof, [])
+        fake = Fake()
+        verify_notify.run(FakeAdmin(rows), ledger_path=self.path, mode="dry-run", runner=fake, wrapper="/w",
+                          proof_path=self.proof, sweep=False, since_hours=None, affiliation_path=self.aff,
+                          check_recipients=True)
+        self.assertIn("--check-recipient", fake.argv[0])
+        self.assertNotIn("--validate", fake.argv[0])
+
     def test_unknown_paying_status_never_lets_the_cap_choose(self):
         """QA review of #1257 @3b5fea9: with no readable paying-users export, a run whose notes
         exceed the cap sends nothing (all wait, reported); one that fits under the cap sends."""
@@ -2077,6 +2110,25 @@ class EnableGateTests(unittest.TestCase):
         self.assertEqual(sent, [("50", ["f0"]), ("52", ["f2"])], "the reminder first, then the paying user")
         self.assertEqual(rep.reminders_sent, 1)
         self.assertEqual(self.deferred(), {"f1", "f3"}, "over the cap: kept for tomorrow")
+
+
+class TestKillSwitchCli(unittest.TestCase):
+    def test_the_kill_switch_stops_apply_but_not_a_read_only_dry_run(self):
+        """QA @052f737: the pre-enable --check-recipients dry run runs under the send switch."""
+        switch = os.path.join(credit_test_env._dir, "verify-notify.disabled")
+        Path(switch).write_text("x")
+        env = {**os.environ, "CREDIT_VERIFY_NOTIFY_KILL_SWITCH": switch}
+        absent = os.path.join(credit_test_env._dir, "absent-proof.json")
+        base = [sys.executable, str(ROOT / "scripts" / "credit-review.py"), "verify-notify", "--proof-on-file", absent]
+        res = subprocess.run(base + ["--mode", "apply"], capture_output=True, text=True, timeout=60, env=env, check=False)
+        self.assertEqual((res.returncode, res.stdout.strip()), (0, "NO_REPLY"))
+        res = subprocess.run(base + ["--mode", "dry-run", "--check-recipients"], capture_output=True, text=True,
+                             timeout=60, env=env, check=False)
+        self.assertNotEqual(res.stdout.strip(), "NO_REPLY", "the dry run went past the switch")
+        self.assertIn("absent-proof.json", res.stdout + res.stderr + Path(credit_test_env.LOG_PATH).read_text())
+        res = subprocess.run(base + ["--mode", "apply", "--check-recipients"], capture_output=True, text=True,
+                             timeout=60, env=env, check=False)
+        self.assertEqual(res.returncode, 2)
 
 
 class TestLogIsolation(unittest.TestCase):

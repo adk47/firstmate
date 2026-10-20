@@ -288,6 +288,68 @@ plain() { python3 -c 'import html,re,sys; print(html.unescape(re.sub(r"</p>|</li
   [ "$(posts)" -eq 0 ]
 }
 
+# 2026-10-20 07:00Z incident: on prod, Intercom's external_id is the account's Auth0 subject
+# (a UUID, without "auth0|"), never the numeric user id, so every first note was refused.
+@test "recipient: an external_id that is the account's Auth0 subject is this account; any other UUID is not" {
+  U='"external_id":"ab36d71d-c5d1-4b94-aeb4-45de3fbd47a1"'
+  auth() { jq --arg a "$1" '.user.auth_id = $a' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"; }
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"; auth "auth0|ab36d71d-c5d1-4b94-aeb4-45de3fbd47a1"
+  STUB_CONTACTS="{\"type\":\"list\",\"data\":[{\"id\":\"u1\",\"role\":\"user\",\"email\":\"jane.doe@example.com\",$U}]}" run -0 send
+  [[ "$output" == "POSTED email message=1001 credits=1"* ]]
+  # the subject without its prefix matches too
+  credits "$TEST_TMPDIR/c.json" Jane "r2:Mixing:Song B:Big Star"; auth "ab36d71d-c5d1-4b94-aeb4-45de3fbd47a1"
+  STUB_CONTACTS="{\"type\":\"list\",\"data\":[{\"id\":\"u1\",\"role\":\"user\",\"email\":\"jane.doe@example.com\",$U}]}" \
+    INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -3 send
+  [[ "$output" == *"recently-asked"* ]]   # same account, so the 90-day lock (not a refusal) holds it
+  # another account's subject, or no subject at all: refused
+  # (other days: the one-message-per-day cap is checked before the recipient)
+  credits "$TEST_TMPDIR/c.json" Jane "r3:Mixing:Song C:Big Star"; auth "11111111-2222-3333-4444-555555555555"
+  STUB_CONTACTS="{\"type\":\"list\",\"data\":[{\"id\":\"u1\",\"role\":\"user\",\"email\":\"jane.doe@example.com\",$U}]}" \
+    INTERCOM_VERIFY_TEST_DAY=2026-10-17 run -1 send
+  [[ "$output" == *"external_id mismatch"* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "r4:Mixing:Song D:Big Star"
+  STUB_CONTACTS="{\"type\":\"list\",\"data\":[{\"id\":\"u1\",\"role\":\"user\",\"email\":\"jane.doe@example.com\",$U}]}" \
+    INTERCOM_VERIFY_TEST_DAY=2026-10-18 run -1 send
+  [[ "$output" == *"external_id mismatch"* ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "recipient: a contact with no external_id is refused (identity unverifiable), even with an Auth0 subject" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  jq '.user.auth_id = "auth0|ab36d71d"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u1","role":"user","email":"jane.doe@example.com"}]}' run -1 send
+  [[ "$output" == *"has no external_id"* ]]
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u1","role":"user","email":"jane.doe@example.com","external_id":""}]}' \
+    run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == *"has no external_id"* ]]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "recipient: a note that names no account (no user.id, no user.auth_id) is refused, send and check alike" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  jq 'del(.user.id)' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
+  run -1 send
+  [[ "$output" == *"names no Muso account"* ]]
+  run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == *"names no Muso account"* ]]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "--check-recipient: the real recipient check, read only (no ledger row, nothing posted)" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  decider_approved r1 catalog_confirmed
+  run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == "RECIPIENT OK verify-live initial copy=v1 credits=1" ]]
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u1","role":"user","email":"jane.doe@example.com","external_id":"999"}]}' \
+    run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == *"external_id mismatch"* ]]
+  [ "$(posts)" -eq 0 ]
+  [ -z "$(sql 'select * from verify_messages')" ]
+  [ -z "$(sql 'select * from verify_requests')" ]
+  run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient --campaign retro-past
+  [[ "$output" == *"--check-recipient applies to a verify-live initial note only"* ]]
+}
+
 # --- api-log before, response verified after -----------------------------------------
 
 @test "the api-log entry exists BEFORE the POST and names the captain's approval, not the email" {
@@ -371,7 +433,7 @@ sent|1001" ]
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -0 send
   jq '.user.email = "someone@else.com" | .user.id = "43" | .credits[0].request_id = "r9"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json"
-  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"someone@else.com"}]}' \
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"someone@else.com","external_id":"43"}]}' \
     run -0 "$SCRIPT" send --copy windowed --credits-file "$TEST_TMPDIR/c2.json" --approved-by U7RP6HKUZ
   [ "$(posts)" -eq 2 ]
 }
@@ -722,13 +784,13 @@ PY
   [[ "$output" == *"no follow-ups"* ]]
   # Another user sent proof on a new-credit note: they are never asked about past credits.
   jq '.user.email = "bob@example.com" | .user.id = "44" | .credits[0].request_id = "n1"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/b.json"
-  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com"}]}' \
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com","external_id":"44"}]}' \
     INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$GATE" send --copy windowed --credits-file "$TEST_TMPDIR/b.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1002 credits=1" ]]
   STUB_CONVERSATION='{"id":"777","source":{"id":"1002"},"conversation_parts":{"conversation_parts":[{"author":{"type":"user","id":"u2"},"attachments":[{"name":"split.pdf"}]}]}}' \
     run -0 "$GATE" tag-proof --message-id 1002
   jq '.credits[0].request_id = "p9"' "$TEST_TMPDIR/b.json" > "$TEST_TMPDIR/b2.json"
-  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com"}]}' \
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com","external_id":"44"}]}' \
     INTERCOM_VERIFY_TEST_DAY=2026-10-21 run -0 past "$TEST_TMPDIR/b2.json"
   # Any earlier note (any campaign) already ends the past ask; the proof reply would too.
   [[ "$output" == "SKIPPED already_asked credits=1" ]]
