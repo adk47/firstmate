@@ -790,7 +790,7 @@ class RunTests(unittest.TestCase):
             self.assertFalse(any("@" in x for x in a), "the account email must not be on argv")
             self.assertFalse(os.path.exists(a[a.index("--credits-file") + 1]), "temp payload file is removed")
         self.assertEqual((rep.sent_notes, rep.sent_credits), (2, 3))
-        self.assertEqual(rep.render("apply"), "VERIFY NOTES: 2 note(s) sent covering 3 provisionally approved credit(s).")
+        self.assertTrue(rep.render("apply").startswith("VERIFY NOTES: 2 note(s) sent covering 3 provisionally approved credit(s)."))
 
     def test_dry_run_only_validates(self):
         decisions_db(self.path, [dec("r1")])
@@ -1987,6 +1987,21 @@ class EnableGateTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_unknown_paying_status_never_lets_the_cap_choose(self):
+        """QA review of #1257 @3b5fea9: with no readable paying-users export, a run whose notes
+        exceed the cap sends nothing (all wait, reported); one that fits under the cap sends."""
+        missing = Path(os.path.join(self.tmp, "absent-paying.json"))
+        rows = [user_req("w1", 51), user_req("w2", 52), user_req("w3", 53)]
+        with unittest.mock.patch("credit_review.decide.PAYING_USERS_FILE", missing):
+            rep, fake = self.go(rows, max_users=2)
+        self.assertEqual(fake.payloads, [])
+        self.assertIn("paying status unknown", rep.render("apply"))
+        self.assertEqual(self.deferred(), {"w1", "w2", "w3"}, "kept for tomorrow, never closed")
+        with unittest.mock.patch("credit_review.decide.PAYING_USERS_FILE", missing):
+            rep, fake = self.go(rows, max_users=10)
+        self.assertEqual(len(fake.payloads), 3)
+        self.assertIn("every note fit under the cap", rep.render("apply"))
+
     def test_the_days_cap_counts_what_the_ledger_already_sent_today(self):
         """QA review of #1257 @53428d0: a same-day retry or second invocation never gets a fresh cap."""
         db = verify_ledger.connect(self.path)
@@ -1996,11 +2011,16 @@ class EnableGateTests(unittest.TestCase):
                                     approved_by=CAPTAIN_UID, approval_ref="ref", windowed=True)
             verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=str(800 + i))
         db.close()
-        rep, fake = self.go([user_req("h1", 56), user_req("h2", 57), user_req("h3", 58)], max_users=3)
-        self.assertEqual(len(fake.payloads), 1)
-        self.assertEqual(rep.already_today, 2)
-        self.assertEqual(len(self.deferred()), 2, "the rest wait for tomorrow")
-        rep2, fake2 = self.go([user_req("h1", 56), user_req("h2", 57), user_req("h3", 58)], max_users=2)
+        paying = os.path.join(self.tmp, "paying.json")
+        Path(paying).write_text(json.dumps({"generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                            "source": "t", "definition": "t", "counts_by_basis": {}, "count": 1,
+                                            "ids": [56]}))
+        with unittest.mock.patch("credit_review.decide.PAYING_USERS_FILE", Path(paying)):
+            rep, fake = self.go([user_req("h1", 56), user_req("h2", 57), user_req("h3", 58)], max_users=3)
+            self.assertEqual(len(fake.payloads), 1)
+            self.assertEqual(rep.already_today, 2)
+            self.assertEqual(len(self.deferred()), 2, "the rest wait for tomorrow")
+            rep2, fake2 = self.go([user_req("h1", 56), user_req("h2", 57), user_req("h3", 58)], max_users=2)
         self.assertEqual(fake2.payloads, [], "cap already used up today")
 
     def test_reminders_pass_the_affiliation_gate_too(self):
