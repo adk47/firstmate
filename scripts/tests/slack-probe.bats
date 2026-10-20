@@ -46,13 +46,22 @@ status() { # status <ceo-src> <ceo-ok> <cto-src> <cto-ok>
     [ "$status" -eq 1 ]; [[ "$output" == *"BAD: newbot: missing"* ]]
 }
 
-@test "non-JSON and empty status output fail" {
-    echo 'gateway not reachable' > "$D/st.json"
-    run slack_probe_verdict "$D/cfg.json" "$D/st.json"
-    [ "$status" -eq 1 ]
+@test "empty status file is unreachable (2), not a resolution failure" {
     : > "$D/st.json"
     run slack_probe_verdict "$D/cfg.json" "$D/st.json"
-    [ "$status" -eq 1 ]
+    [ "$status" -eq 2 ]; [ "${lines[-1]}" = "unreachable" ]
+}
+
+@test "non-JSON garbage is unreachable (2)" {
+    echo 'gateway not reachable' > "$D/st.json"
+    run slack_probe_verdict "$D/cfg.json" "$D/st.json"
+    [ "$status" -eq 2 ]; [ "${lines[-1]}" = "unreachable" ]
+}
+
+@test "botTokenSource=env stays a hard fail (1)" {
+    status config true env true
+    run slack_probe_verdict "$D/cfg.json" "$D/st.json"
+    [ "$status" -eq 1 ]; [ "${lines[-1]}" = "fail" ]
 }
 
 @test "config with zero slack accounts fails rather than passing vacuously" {
@@ -70,18 +79,38 @@ status() { # status <ceo-src> <ceo-ok> <cto-src> <cto-ok>
 
 @test "real head config: every account id is covered by the check" {
     run slack_probe_verdict "${BATS_TEST_DIRNAME}/../../openclaw-main.json" /dev/null
-    [ "$status" -eq 1 ]
+    [ "$status" -eq 2 ]
     [[ "$output" != *"cannot read slack accounts"* ]]
 }
 
-# ── wiring: the gate must be HARD in smoke-test.sh (Step 7 → deploy fail → rollback) ──
+# ── dispatch: rc 0 pass / rc 1 fail / rc 2 warn (never a pass) ──
 
-@test "smoke-test.sh runs slack_probe_run against the deployed main config and hard-fails" {
-    S="${BATS_TEST_DIRNAME}/../smoke-test.sh"
-    grep -q 'slack_probe_run /opt/hydra/openclaw-main.json' "$S"
-    run grep -A5 'slack_probe_run /opt/hydra/openclaw-main.json' "$S"
-    [[ "$output" == *"fail_check"* ]]
-    [[ "$output" != *"warn_check"* ]]
+gate_with_rc() { # gate_with_rc <rc>
+    pass_check() { echo "PASS:$*"; }
+    warn_check() { echo "WARN:$*"; }
+    fail_check() { echo "FAIL:$*"; }
+    eval "slack_probe_run() { echo 'attempt 1: timeout after 30s'; return $1; }"
+    slack_probe_gate /x
+}
+
+@test "gate: rc0 -> pass_check" {
+    run gate_with_rc 0; [[ "${lines[0]}" == PASS:* ]]
+}
+
+@test "gate: rc1 -> fail_check (hard, rollback path), never warn" {
+    run gate_with_rc 1; [[ "${lines[0]}" == FAIL:* ]]; [[ "$output" != *WARN:* ]]
+}
+
+@test "gate: rc2 -> warn_check naming the cause and that resolution was NOT verified" {
+    run gate_with_rc 2
+    [[ "${lines[0]}" == WARN:* ]]
+    [[ "$output" == *"NOT verified"* ]]; [[ "$output" == *"timeout after 30s"* ]]
+}
+
+# ── wiring: smoke-test.sh must go through the three-arm gate ──
+
+@test "smoke-test.sh calls slack_probe_gate against the deployed main config" {
+    grep -q 'slack_probe_gate /opt/hydra/openclaw-main.json' "${BATS_TEST_DIRNAME}/../smoke-test.sh"
 }
 
 # ── slack_probe_run retries only a run that returned no JSON (2026-10-20) ──
@@ -116,12 +145,21 @@ STUB
     [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 1 ]
 }
 
-@test "no JSON on every attempt still fails after the attempt budget" {
+@test "no JSON on every attempt is unreachable (2) after the budget, one cause line per attempt" {
     echo 'Error: Opening handshake has timed out' > "$D/junk"
     fake_openclaw "$D/junk"
     SLACK_PROBE_ATTEMPTS=3 run slack_probe_run "$D/cfg.json"
-    [ "$status" -eq 1 ]; [[ "$output" == *"not JSON (empty or undecodable"* ]]
+    [ "$status" -eq 2 ]; [ "${lines[-1]}" = "unreachable" ]
+    [[ "$output" == *"attempt 1: non-JSON (39 bytes)"* ]]; [[ "$output" == *"attempt 3:"* ]]
     [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 3 ]
+}
+
+@test "stderr never leaks into the parsed stdout" {
+    status config true config true; cp "$D/st.json" "$D/good"
+    fake_openclaw "$D/good"
+    printf '#!/usr/bin/env bash\necho "Config warnings: x" >&2\ncat "%s"\n' "$D/good" > "$D/bin/openclaw"
+    run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 0 ]; [ "${lines[-1]}" = "pass" ]
 }
 
 @test "empty probe output is retried" {
