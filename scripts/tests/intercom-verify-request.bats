@@ -537,7 +537,11 @@ no_removal_language() {
   # The detector itself: the locked windowed copy is exactly what it must catch.
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --copy windowed
-  ! no_removal_language "$(rendered .subject) $(rendered .body | plain)" 2>/dev/null
+  # (bats exempts a `! cmd` from errexit, so the negative check must fail explicitly: QA @5f6d406)
+  if no_removal_language "$(rendered .subject) $(rendered .body | plain)" 2>/dev/null; then
+    echo "the detector missed the windowed copy's removal/deadline wording" >&2
+    false
+  fi
   # verify-live as committed: single and multi.
   for n in 1 2; do
     if [ "$n" = 1 ]; then credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
