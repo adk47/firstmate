@@ -17,7 +17,8 @@ Dedupe key (ported from hydra#1002 plugins/tracker/src/fingerprint.ts, spec 4):
 The card carries `fp:<hash>` in its description; a search hit is bumped ONLY if
 the exact token is present (search is relevance-ranked, a near-match comes
 back, and bumping the wrong card hides a real problem). Concurrent filers can
-both miss and both create: accepted, triage merges the twin, no locking.
+both miss and both create: accepted, triage merges the twin. Filers on one host
+are serialised per fingerprint by a lock file, so counter bumps never overlap.
 
 The API key is read from a FILE at call time, never from the environment: an
 env-file change needs a gateway restart (~25 min cold start) and this script
@@ -218,11 +219,21 @@ def waiting_cards(client):
 
 # ---- subcommands -------------------------------------------------------------
 
-def cmd_file(client, args):
+def cmd_file(client, args, env):
     if SECRET_RE.search(f"{args.title}\n{args.body}"):
         raise SystemExit("refused: title/body looks like it contains a secret; remove it and refile")
     component = args.component or args.agent
     fp = fingerprint(args.title, component)
+    # One filer per fingerprint at a time on this host: the counter bump is a
+    # read-modify-write, and two overlapping bumps would count two filings as one.
+    # Sibling lock file, never removed (same pattern as cmd_precheck).
+    state = env.get("PAPERCLIP_INTAKE_STATE", DEFAULT_STATE)
+    with open(f"{state}.file-{fp}.lock", "w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _file_locked(client, args, component, fp)
+
+
+def _file_locked(client, args, component, fp):
     for hit in client.search_issues(f"fp:{fp}"):
         card = client.issue(hit["id"])
         if card.get("status") in CLOSED or not has_token(card.get("description"), fp):
@@ -356,7 +367,7 @@ def main(argv=None, env=None):
     try:
         client = Client(env)
         if args.cmd == "file":
-            result = cmd_file(client, args)
+            result = cmd_file(client, args, env)
         elif args.cmd == "precheck":
             result = cmd_precheck(client, args, env)
         elif args.cmd == "escalate":

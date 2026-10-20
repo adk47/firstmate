@@ -282,6 +282,28 @@ class FileTests(Base):
     def _occurrences(self):
         return int(re.search(r"Occurrences: (\d+)", next(iter(self.api.issues.values()))["description"]).group(1))
 
+    def test_concurrent_refiles_of_one_card_each_count(self):
+        # Two agents refiling the same existing problem must not both read
+        # "Occurrences: 1" and both write 2: three filings are three occurrences.
+        self.file("deploy failed")
+        real = pi.Client.comment
+
+        def slow_comment(client, *a, **kw):
+            time.sleep(0.3)  # widen the read-modify-write window
+            return real(client, *a, **kw)
+        pi.Client.comment = slow_comment
+        self.addCleanup(setattr, pi.Client, "comment", real)
+        threads = [threading.Thread(target=pi.main, args=(
+            ["file", "--agent", f"a{i}", "--component", "deploy", "--title", "deploy failed",
+             "--body", "again"],), kwargs={"env": self.env}) for i in range(2)]
+        with contextlib.redirect_stdout(io.StringIO()):
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(len(self.api.issues), 1)
+        self.assertEqual(self._occurrences(), 3)
+
     def test_failed_comment_leaves_the_counter_alone_so_a_retry_counts_once(self):
         self.file("deploy failed")
         self.api.fail_once.append(("POST", "/comments"))
