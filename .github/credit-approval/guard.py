@@ -27,7 +27,7 @@ prod measurement is the captain's call at review.
 
 The credit-approval paths are NOT listed here. They are the patterns inside the
 `# >>> credit-approval` / `# <<< credit-approval` block of CODEOWNERS,
-read from BOTH the base and the head commit, so a PR cannot dodge the guard by
+read from the base commit, the base branch's current tip AND the head, so a PR cannot dodge the guard by
 deleting patterns from the block (the base copy still applies) and a PR that adds
 a pattern is checked against it immediately. Shared files that cannot be gated
 whole (a route table) use `#content-match <path> <regex>` lines in the block:
@@ -418,19 +418,24 @@ def run(args: argparse.Namespace) -> int:
     pr, _ = gh.call("GET", f"/pulls/{args.pr}")
     base_sha, head_sha = pr["base"]["sha"], pr["head"]["sha"]
     git("fetch", "--no-tags", "--quiet", "origin", base_sha, head_sha)
+    # The PR's base.sha is the base tip when the PR was last synced, so for a PR
+    # opened before the guard landed it has no credit block (and its head has
+    # none either). Also read the CURRENT tip of the base branch: it is the live
+    # policy, and without it every pre-existing PR failed "no block found".
+    git("fetch", "--no-tags", "--quiet", "origin", f"refs/heads/{pr['base']['ref']}")
+    base_tip = git("rev-parse", "FETCH_HEAD").strip()
+    policy_shas = [base_sha, base_tip, head_sha]
     merge_base = git("merge-base", base_sha, head_sha).strip()
     # --no-renames: a rename shows as delete(old) + add(new), so moving a
     # protected file to an unprotected name still trips the guard.
     files = [f for f in git("diff", "--no-renames", "--name-only", f"{merge_base}...{head_sha}").splitlines() if f]
-    patterns = sorted(
-        set(parse_block(codeowners_at(base_sha))) | set(parse_block(codeowners_at(head_sha)))
-    )
+    texts = [codeowners_at(sha) for sha in policy_shas]
+    patterns = sorted({p for t in texts for p in parse_block(t)})
     if args.codeowners_file:  # local testing: also apply a working-tree block
         patterns = sorted(set(patterns) | set(parse_block(open(args.codeowners_file).read())))
     if not patterns:
-        print(f"::error::no '{BLOCK_BEGIN}' block found in CODEOWNERS at base or head")
+        print(f"::error::no '{BLOCK_BEGIN}' block found in CODEOWNERS at base, base tip or head")
         return 1
-    texts = [codeowners_at(base_sha), codeowners_at(head_sha)]
     if args.codeowners_file:
         texts.append(open(args.codeowners_file).read())
     rules = sorted({r for t in texts for r in parse_content_rules(t)})
