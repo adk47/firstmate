@@ -397,7 +397,8 @@ def audit_unanswered(config):
     tokens = {}
     acct_to_bot = {}
     for acct in accounts:
-        token = config.get("channels", {}).get("slack", {}).get("accounts", {}).get(acct, {}).get("botToken", "")
+        from lib.slack_token import resolve_secret
+        token = resolve_secret(config.get("channels", {}).get("slack", {}).get("accounts", {}).get(acct, {}).get("botToken", ""))
         if not token:
             continue
         tokens[acct] = token
@@ -740,7 +741,8 @@ def main():
         return
 
     # Post to Slack
-    devops_token = config.get("channels", {}).get("slack", {}).get("accounts", {}).get("devops", {}).get("botToken", "")
+    from lib.slack_token import resolve_secret
+    devops_token = resolve_secret(config.get("channels", {}).get("slack", {}).get("accounts", {}).get("devops", {}).get("botToken", ""))
     if devops_token:
         if slack_post(devops_token, SLACK_CHANNEL, digest):
             print("Posted to #clio_devops")

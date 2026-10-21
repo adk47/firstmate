@@ -67,7 +67,9 @@ Do not proactively reach out about pending credits.
   (`{ verified_owner, owner_undetermined, impersonation_flag, profile_id,
   uvn_credits: [{ cr_id, role, track_title, artist, isrc }], count,
   awaiting_review: { count, truncated } | null,
-  pending_by_status: { user_verification_needed, unverified } | null, notes }`).
+  pending_by_status: { user_verification_needed, unverified } | null,
+  proof_on_file: { state, reason } | null, notes }`; `proof_on_file` is the Step 2
+  ask gate).
   `awaiting_review` counts credits waiting for OUR team's review (status
   `unverified`): the customer has nothing to do for those. `null` means the tool
   could not check, never zero.
@@ -138,47 +140,59 @@ profile, the tool resolves the one they own from their verified email.
 
 **Never ask for proof the customer has already given (captain's standing order,
 2026-10-16: "make sure you aren't asking for things from users that already
-submitted documents and we approved").** Muso has no separate proof store, so check
-only what you can actually see:
+submitted documents and we approved").** Decide with what you can actually see:
 
+- **`proof_on_file` from `credit_verification_check`.** It reads the proof-on-file
+  export (documents we hold from any channel, plus earlier Intercom proof):
+  - `on_file`: they sent proof before. Do **not** ask.
+  - `none`: every proof part is fresh and none lists them. You may ask once.
+  - `asked_before`: you already asked them in another conversation. Do **not** ask
+    again: file a **needs-human** `credit-verify` ticket (reason `"proof already
+    requested in an earlier conversation"`) and tell them the team is reviewing it.
+    Until 2026-12-17T00:00:00Z (60 days after the marker sentence below shipped), an
+    earlier ask of yours also counts when it names one of these pending track titles or
+    says "screenshots are accepted for all of these" (asks from before the marker); after
+    that date only the marker sentence counts.
+  - `unknown` (or missing): the check could not complete. Do **not** ask, and do not
+    tell them nothing is needed either.
+  Never say you checked earlier conversations yourself.
 - **This conversation.** Proof the customer attaches, links, or forwards here is a
   submission: route it via Step 3 (which files the ticket). Do not ask for it again.
-- **The prior-chat summary in your context** (`prior support chats: N (most recent:
-  ...)`). You see only the count and the most recent chat's title/snippet and date,
-  never any chat's messages or attachments, so you can never rule out proof sent in
-  one of them. Never say you checked earlier conversations' contents.
-  `prior support chats: 0` means the lookup ran and found none. **No such line at
-  all means unknown** (the lookup failed, timed out, or didn't run), never "no prior
-  chats".
 - **The customer's own statement** that they already sent proof, or that the team
   already received or approved it.
 - **An existing `credit-verify` ticket**, which you only learn about when
   `create_ticket` returns `updated_existing: true`.
 
-If the customer says proof was sent before this conversation, or your context shows
-`prior support chats: N` with N of 1 or more (whatever the most recent title says –
-proof could be in that chat or an older one you can't see), or shows no `prior
-support chats` line at all, do **not** ask: take their word, and still run Step 3's checks that need
+`prior support chats` in your context is NOT a proof signal: never skip or make the
+ask because of it.
+
+If `proof_on_file` is `on_file`, or the customer says proof was sent before this
+conversation, do **not** ask: take their word, and still run Step 3's checks that need
 nothing from the customer on whatever is visible or stated – case 1 (contradiction /
 credit-theft routing) and case 2 (catalog corroboration, approving via
 `credits_verify` when it applies). Skipping the ask is the only change. If those
 checks don't resolve it, or nothing can be checked, file a **needs-human**
-`credit-verify` ticket (Step 4, `proof.kind:"none"`) whose `reason` states the actual basis –
-`"customer says proof already sent"` when they said so, or `"prior support chats
-exist; earlier proof cannot be ruled out"` when only the prior-chat line is the
-basis, or `"prior-chat history unavailable; earlier proof cannot be ruled out"`
-when the line is missing – the dedupe appends to the open ticket if there is one – and only then
-tell them it is with the team and there is nothing more they need to send. When in
-doubt, don't ask.
+`credit-verify` ticket (Step 4, `proof.kind:"none"`) whose `reason` states the actual
+basis – `"proof on file"` or `"customer says proof already sent"` – the dedupe appends
+to the open ticket if there is one – and only then tell them it is with the team and
+there is nothing more they need to send.
+
+If `proof_on_file` is `unknown` or missing: do **not** ask, run the same Step 3 checks,
+then file a **needs-human** `credit-verify` ticket with reason `"proof-on-file
+unavailable; a person decides whether to ask"`. Tell the customer the team is
+reviewing it and will reply here. Never tell them there is nothing they need to do:
+these credits are waiting on proof. When in doubt, don't ask.
 
 Ask at most once per customer, in one message covering all their pending credits
 together, never one message per credit, and never a second proof request for the
 same credits.
 
-Otherwise (only when your context shows `prior support chats: 0` and nothing in this
-conversation or from the customer says proof was given), plainly list the pending
+Otherwise (only when `proof_on_file` is `none`, you have not asked in this
+conversation, and nothing here or from the customer says proof was given), plainly list the pending
 tracks + claimed roles. Then ask for proof, and
-**tell the customer what they can send** (screenshots are accepted for all of these):
+**tell the customer what they can send**. Introduce the list with this exact sentence,
+word for word (it is how a later conversation knows you already asked):
+`Any one of these works (a screenshot is fine):`
 
 - **A public link where the credit is listed** – Tidal, Genius, Jaxsta, Discogs,
   AllMusic, ASCAP, or BMI.
@@ -223,8 +237,8 @@ skill.
    `credit-verify` ticket carrying the links / referencing the attachments. Do
    **not** grade the proof or recommend approve on it.
 4. **Insufficient / no proof** → if the customer sent anything, or you already asked
-   once, or Step 2's no-ask rule applies (proof said to be sent, or any prior support
-   chats), do **not** ask: file a **needs-human** `credit-verify` ticket with what was
+   once, or Step 2's no-ask rule applies (proof on file or said to be sent, or
+   `proof_on_file` unknown or asked_before), do **not** ask: file a **needs-human** `credit-verify` ticket with what was
    given and tell the customer it is with the team. Only when none of that holds do
    you make the single Step 2 ask. Keep the case open, never reject.
 

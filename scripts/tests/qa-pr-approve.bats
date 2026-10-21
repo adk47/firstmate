@@ -20,6 +20,7 @@ setup() {
   # report" (external repo / pre-feature head), which must keep passing — every
   # pre-Guard-8 test in this file exercises exactly that path.
   export QA_REBASE_STATE_DIR="$TEST_TMPDIR/ri"
+  export QA_GUARD_WAIT_SECS=0   # Guard 3d settle-wait off by default; its tests opt in
   export STUB_CALLS="$TEST_TMPDIR/gh-calls"
   : > "$STUB_CALLS"
 
@@ -62,7 +63,24 @@ _jqflt() { local p=""; for a in "$@"; do [ "$p" = "--jq" ] && { printf '%s' "$a"
 sub="$1"; shift || true
 case "$sub" in
   api)
-    if printf '%s\n' "$@" | grep -qE '^repos/[^/]+/[^/]+/compare/'; then
+    if printf '%s\n' "$@" | grep -qE '^repos/[^/]+/[^/]+/contents/\.github/workflows/credit-approval-guard\.yaml'; then
+      # Guard 3d: does the repo have the guard workflow? STUB_GUARD_WF:
+      # absent (default, models 404) | present | error (non-404 failure).
+      case "${STUB_GUARD_WF:-absent}" in
+        present) echo "wfsha0" ;;
+        error)   echo "HTTP 502: Bad Gateway" >&2; exit 1 ;;
+        *)       echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+      esac
+    elif printf '%s\n' "$@" | grep -qE '^repos/[^/]+/[^/]+/commits/[^/]+/check-runs'; then
+      # Guard 3d: serve the API shape, run the script's real filter.
+      _runs='{"check_runs":[{"status":"completed","conclusion":"success","started_at":"2026-01-01T00:00:00Z"}]}'
+      # STUB_GUARD_RUNS_JSON_AFTER models a run that settles: served from the
+      # 2nd check-runs read onward (the first read still sees STUB_GUARD_RUNS_JSON).
+      _n=$(( $(cat "$STUB_CALLS.guardreads" 2>/dev/null || echo 0) + 1 )); echo "$_n" > "$STUB_CALLS.guardreads"
+      _src="${STUB_GUARD_RUNS_JSON:-$_runs}"
+      [ "$_n" -ge 2 ] && [ -n "${STUB_GUARD_RUNS_JSON_AFTER:-}" ] && _src="$STUB_GUARD_RUNS_JSON_AFTER"
+      printf '%s' "$_src" | jq -r "$(_jqflt "$@")"
+    elif printf '%s\n' "$@" | grep -qE '^repos/[^/]+/[^/]+/compare/'; then
       # Guard 14 asks whether the base moved FORWARD or was rewritten.
       # STUB_BASE_MOVE="" models GitHub not answering.
       printf '%s' "${STUB_BASE_MOVE-ahead}"
@@ -138,6 +156,13 @@ case "$sub" in
         elif printf '%s ' "$@" | grep -q 'baseRefOid'; then
           # Guard 14's base-OID read. STUB_BASE_OID="" models an unreadable answer.
           printf '%s' "${STUB_BASE_OID-basetip0}"
+        elif printf '%s ' "$@" | grep -q -- '--json labels'; then
+          # Guard 3d. Serve the API shape and run the script's real filter.
+          # STUB_LABELS: space-separated label names (default none).
+          # STUB_LABELS_FAIL=1 models an unreadable answer (gh error, no output).
+          if [ "${STUB_LABELS_FAIL:-0}" = 1 ]; then exit 1; fi
+          jq -nc --arg l "${STUB_LABELS:-}" '{labels: ($l | split(" ") | map(select(length > 0) | {name: .}))}' \
+            | jq -r "$(_jqflt "$@")"
         elif printf '%s ' "$@" | grep -qE 'author|baseRefName'; then
           # Guard 3 + Guard 4b share ONE `--json author,baseRefName` call whose
           # --jq filter emits two lines. Serve the API SHAPE and run the
@@ -168,6 +193,7 @@ case "$sub" in
         fi ;;
       review)
         echo "approve" >> "$STUB_CALLS"
+        printf '%s\n' "$*" >> "$STUB_CALLS.review-args"   # the body the script sent
         # prove the audit log already exists at approve time (log-before-write)
         [ -f "${QA_PR_APPROVE_LOG_DIR}/$(date -u +%F).jsonl" ] && echo "log-present-at-approve" >> "$STUB_CALLS"
         # WHICH sha GitHub would attach this approval to. `gh pr review
@@ -211,6 +237,147 @@ logfile() { echo "$QA_PR_APPROVE_LOG_DIR/$(date -u +%F).jsonl"; }
   STUB_ME="adk47" STUB_AUTHOR="adk47" run "$SCRIPT" core-backend 123 "$NICK"
   [ "$status" -eq 4 ]
   [ ! -s "$STUB_CALLS" ] || ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3d: credit-approval-change label → exit 15, never approves" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_LABELS="bug credit-approval-change" run "$SCRIPT" hydra 123 "$NICK"
+  [ "$status" -eq 15 ]
+  [[ "$output" == *"credit-approval-change"* ]]
+  [ ! -s "$STUB_CALLS" ] || ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3d: other labels only → still approves" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_LABELS="bug credit-approval" run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard3d: unreadable labels → exit 15 (fail closed), never approves" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_LABELS_FAIL=1 run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 15 ]
+  [[ "$output" == *"fail closed"* ]]
+  [ ! -s "$STUB_CALLS" ] || ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3d: repo has the guard + head check green → approves" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=present run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard3d: repo has the guard + head check FAILED (unlabelled) → exit 15, never approves" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=present \
+    STUB_GUARD_RUNS_JSON='{"check_runs":[{"status":"completed","conclusion":"success","started_at":"2026-01-01T00:00:00Z"},{"status":"completed","conclusion":"failure","started_at":"2026-01-02T00:00:00Z"}]}' \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 15 ]
+  [[ "$output" == *"completed/failure"* ]]
+  [ ! -s "$STUB_CALLS" ] || ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3d: repo has the guard + check still running → exit 15 (label timing cannot open a window)" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=present \
+    STUB_GUARD_RUNS_JSON='{"check_runs":[{"status":"in_progress","conclusion":null,"started_at":"2026-01-02T00:00:00Z"}]}' \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 15 ]
+  [ ! -s "$STUB_CALLS" ] || ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3d: check still running when the GO review lands, settles green inside the wait → approves (MUS-14914)" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=present QA_GUARD_WAIT_SECS=5 QA_GUARD_POLL_SECS=1 \
+    STUB_GUARD_RUNS_JSON='{"check_runs":[{"status":"completed","conclusion":"success","started_at":"2026-01-01T00:00:00Z"},{"status":"in_progress","conclusion":null,"started_at":"2026-01-02T00:00:00Z"}]}' \
+    STUB_GUARD_RUNS_JSON_AFTER='{"check_runs":[{"status":"completed","conclusion":"success","started_at":"2026-01-01T00:00:00Z"},{"status":"completed","conclusion":"success","started_at":"2026-01-02T00:00:00Z"}]}' \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^approve$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "guard3d: check still running, settles FAILED inside the wait → exit 15, never approves" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=present QA_GUARD_WAIT_SECS=5 QA_GUARD_POLL_SECS=1 \
+    STUB_GUARD_RUNS_JSON='{"check_runs":[{"status":"queued","conclusion":null,"started_at":"2026-01-02T00:00:00Z"}]}' \
+    STUB_GUARD_RUNS_JSON_AFTER='{"check_runs":[{"status":"completed","conclusion":"failure","started_at":"2026-01-02T00:00:00Z"}]}' \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 15 ]
+  [[ "$output" == *"completed/failure"* ]]
+  [ ! -s "$STUB_CALLS" ] || ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3d: check never settles within the wait → exit 15 (the wait is bounded)" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=present QA_GUARD_WAIT_SECS=2 QA_GUARD_POLL_SECS=1 \
+    STUB_GUARD_RUNS_JSON='{"check_runs":[{"status":"in_progress","conclusion":null,"started_at":"2026-01-02T00:00:00Z"}]}' \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 15 ]
+  [[ "$output" == *"in_progress"* ]]
+}
+
+@test "guard3d: poll interval 0 / non-numeric cannot make the wait unbounded → exit 15" {
+  for poll in 0 abc -3; do
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=present QA_GUARD_WAIT_SECS=1 QA_GUARD_POLL_SECS=$poll       STUB_GUARD_RUNS_JSON='{"check_runs":[{"status":"in_progress","conclusion":null,"started_at":"2026-01-02T00:00:00Z"}]}'       run timeout 20 "$SCRIPT" core-backend 123 "$NICK"
+    [ "$status" -eq 15 ]
+  done
+}
+
+@test "guard3d: poll interval 00 / 08 (zero or invalid octal) cannot hang or abort the wait → exit 15" {
+  for poll in 00 000 08; do
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=present QA_GUARD_WAIT_SECS=1 QA_GUARD_POLL_SECS=$poll \
+      STUB_GUARD_RUNS_JSON='{"check_runs":[{"status":"in_progress","conclusion":null,"started_at":"2026-01-02T00:00:00Z"}]}' \
+      run timeout 20 "$SCRIPT" core-backend 123 "$NICK"
+    [ "$status" -eq 15 ]
+    [[ "$output" == *"in_progress"* ]]
+  done
+}
+
+@test "guard3d: leading-zero 08 poll under a larger budget reaches arithmetic without aborting → exit 15 (needs the 10# coercion)" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=present QA_GUARD_WAIT_SECS=9 QA_GUARD_POLL_SECS=08 \
+    STUB_GUARD_RUNS_JSON='{"check_runs":[{"id":1,"status":"in_progress","conclusion":null,"started_at":"2026-01-02T00:00:00Z"}]}' \
+    run timeout 30 "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 15 ]
+  [[ "$output" == *"in_progress"* ]]
+}
+
+@test "guard3d: leading-zero 08 wait budget does not abort the wait → exit 15 (needs the 10# coercion)" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=present QA_GUARD_WAIT_SECS=08 QA_GUARD_POLL_SECS=1 \
+    STUB_GUARD_RUNS_JSON='{"check_runs":[{"id":1,"status":"in_progress","conclusion":null,"started_at":"2026-01-02T00:00:00Z"}]}' \
+    run timeout 30 "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 15 ]
+  [[ "$output" == *"in_progress"* ]]
+}
+
+@test "guard3d: newest run (highest id) queued with null started_at is judged, not the older success → exit 15" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=present QA_GUARD_WAIT_SECS=5 QA_GUARD_POLL_SECS=1 \
+    STUB_GUARD_RUNS_JSON='{"check_runs":[{"id":100,"status":"completed","conclusion":"success","started_at":"2026-01-01T00:00:00Z"},{"id":200,"status":"queued","conclusion":null,"started_at":null}]}' \
+    STUB_GUARD_RUNS_JSON_AFTER='{"check_runs":[{"id":100,"status":"completed","conclusion":"success","started_at":"2026-01-01T00:00:00Z"},{"id":200,"status":"completed","conclusion":"failure","started_at":"2026-01-02T00:00:00Z"}]}' \
+    run timeout 20 "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 15 ]
+  [[ "$output" == *"completed/failure"* ]]
+  [ ! -s "$STUB_CALLS" ] || ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard3d: poll interval larger than the wait is clamped to the remaining budget → exit 15 in ~wait" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=present QA_GUARD_WAIT_SECS=2 QA_GUARD_POLL_SECS=999999 \
+    STUB_GUARD_RUNS_JSON='{"check_runs":[{"status":"in_progress","conclusion":null,"started_at":"2026-01-02T00:00:00Z"}]}' \
+    run timeout 20 "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 15 ]
+  [[ "$output" == *"in_progress"* ]]
+}
+
+@test "guard3d: repo has the guard + no check run yet → exit 15" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=present STUB_GUARD_RUNS_JSON='{"check_runs":[]}' \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 15 ]
+  [[ "$output" == *"'missing'"* ]]
+}
+
+@test "guard3d: workflow probe fails with a non-404 error → exit 15 (fail closed)" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_GUARD_WF=error run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 15 ]
+  [[ "$output" == *"fail closed"* ]]
+}
+
+@test "approval marker is appended even to a caller-supplied body" {
+  STUB_ME="adk47" STUB_AUTHOR="nsollazzo" run "$SCRIPT" core-backend 123 "$NICK" "Approved by QA after code review."
+  [ "$status" -eq 0 ]
+  grep -q 'Approved by QA after code review.' "$STUB_CALLS.review-args"
+  grep -q 'qa-pr-approve: automated, not a captain review' "$STUB_CALLS.review-args"
 }
 
 @test "non-Muso-AI repo → exit 3, no approval, no log" {

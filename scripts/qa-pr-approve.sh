@@ -49,9 +49,15 @@ set -euo pipefail
 #             11 sensitive-path-blocked | 12 author-policy-blocked
 #             13 blast-radius-critical-or-unverified (Guard 9; only reachable
 #                when QA_BLAST_RADIUS_GATE=1, which is NOT the default)
+#             15 credit-approval-change (Guard 3d: PR labelled
+#                `credit-approval-change`, or the repo's credit-approval-guard
+#                check on the head is not completed/success, or either is
+#                unreadable)
 #
 # Env (mainly for tests): QA_GH override the identity shim (GH overrides the gh
 # binary inside it);
+# QA_GUARD_WAIT_SECS / QA_GUARD_POLL_SECS bound the Guard 3d wait for an in-flight
+# credit-approval-guard run (default 180 / 5);
 # QA_APPROVAL_POLICY override the policy file; QA_PR_APPROVE_LOG_DIR override log
 # dir; QA_REBASE_STATE_DIR override the rebase-integrity report dir (Guard 8);
 # QA_REBASE_REQUIRED_REPOS space-separated short names whose CI must have
@@ -184,6 +190,15 @@ repo_arg="$1"
 pr="$2"
 requester="$3"
 body="${4:-🤖 Approved by Muso QA Bot (automated review): CI is green and there are no blocking findings. A human still performs the merge.}"
+# Non-optional machine marker on EVERY approval, including a caller-supplied
+# body. This wrapper approves as the host account, which is also the captain's
+# login, and the `credit-approval-guard` check (.github/credit-approval/guard.py,
+# BOT_REVIEW_MARKERS) ignores APPROVED reviews carrying this marker, so a bot
+# approval can never stand in for the captain's. Do not make it optional.
+QA_APPROVAL_MARKER="<!-- qa-pr-approve: automated, not a captain review -->"
+body="$body
+
+$QA_APPROVAL_MARKER"
 
 # --- Guard 2: Muso-AI repos only -------------------------------------------
 if [[ "$repo_arg" == */* ]]; then
@@ -319,6 +334,66 @@ case "$deny_hit" in
   null)        : ;;
   *)           die 12 "PR #$pr is authored by '$author', who is in the policy's author_deny list — refusing to approve. A human must review it." ;;
 esac
+
+# --- Guard 3d: never approve a credit-approval change -----------------------
+# The `credit-approval-guard` check (.github/credit-approval/guard.py in IDP,
+# core-backend and hydra) makes the CAPTAIN's approval of the head commit
+# mandatory on any PR touching a credit-approval path, and labels such PRs
+# `credit-approval-change`. This wrapper approves as the host account, which IS
+# the captain's login (adk47) wherever the App is not in use — so a bot APPROVED
+# review would be indistinguishable from the captain's and would satisfy that
+# gate with no captain ever looking (QA finding on hydra#1139, 2026-10-16). The
+# bot therefore never approves these PRs: it may still post its GO/NO-GO verdict
+# as a COMMENT review, and the captain approves (or, for adk47-authored PRs,
+# firstmate admin-merges on Fable GO + QA GO). Fail closed: an unreadable label
+# set refuses, because "could not tell" must not read as "not a credit change".
+credit_label="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" --json labels --jq '[.labels[]?.name] | index("credit-approval-change") | tostring' 2>/dev/null || true)"
+case "$credit_label" in
+  null) : ;;
+  ''|*[!0-9]*) die 15 "could not read the labels of $owner/$repo#$pr to rule out a credit-approval change — refusing to approve (fail closed)." ;;
+  *)    die 15 "$owner/$repo#$pr carries 'credit-approval-change': the captain must approve credit-approval changes himself, and this bot approves as the captain's login — refusing. Post the verdict as a comment review instead." ;;
+esac
+# The label alone is not enough: it lands only after the guard job runs, and a
+# failed label write is possible. So in a repo that HAS the guard workflow (on
+# the PR's base), also require the guard's own check run on the current head to
+# be completed/success. It is green only for a PR that touches no credit path,
+# or one the captain already approved; pending, failed or missing all refuse.
+# A repo without the workflow (404) relies on the label only. Anything else
+# unreadable refuses (fail closed).
+guard_wf="$("$QA_GH" --repo "$owner/$repo" api "repos/$owner/$repo/contents/.github/workflows/credit-approval-guard.yaml?ref=${base_ref}" --jq .sha 2>&1)" && guard_wf_rc=0 || guard_wf_rc=$?
+if [ "$guard_wf_rc" -eq 0 ] && [ -n "$guard_wf" ]; then
+  guard_head="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
+  [ -n "$guard_head" ] || die 15 "could not read the head of $owner/$repo#$pr to check credit-approval-guard — refusing to approve (fail closed)."
+  # MUS-14914: the QA GO review is itself a `pull_request_review` event, and that
+  # event starts a fresh credit-approval-guard run on the same head (and cancels
+  # the earlier one via the workflow's concurrency group). This script runs ~10 s
+  # after the GO, so it used to read that run as queued/in_progress and refuse
+  # every time: the bot could never approve a hydra PR. A run that is still
+  # queued/in_progress is therefore waited out (bounded, default 180 s) and judged
+  # on its settled result. Only completed/success passes; failure, timeout or a
+  # run that never settles still refuses, so no window opens.
+  guard_wait="${QA_GUARD_WAIT_SECS:-180}"; guard_poll="${QA_GUARD_POLL_SECS:-5}"; guard_waited=0
+  # A poll of 0 (or junk) would never advance guard_waited and the loop would spin forever.
+  case "$guard_wait" in ''|*[!0-9]*) guard_wait=180 ;; esac
+  case "$guard_poll" in ''|*[!0-9]*) guard_poll=5 ;; esac
+  guard_wait=$((10#$guard_wait)); guard_poll=$((10#$guard_poll))
+  [ "$guard_poll" -gt 0 ] || guard_poll=5
+  while :; do
+    guard_run="$("$QA_GH" --repo "$owner/$repo" api "repos/$owner/$repo/commits/$guard_head/check-runs?check_name=credit-approval-guard&per_page=100" \
+      --jq '[.check_runs[]?] | sort_by(.id) | last | if . == null then "missing" else "\(.status)/\(.conclusion // "")" end' 2>/dev/null || echo ERR)"
+    case "$guard_run" in queued/*|in_progress/*|pending/*|waiting/*|requested/*) ;; *) break ;; esac
+    [ "$guard_waited" -lt "$guard_wait" ] || break
+    guard_step=$((guard_wait - guard_waited))
+    if [ "$guard_poll" -lt "$guard_step" ]; then guard_step="$guard_poll"; fi
+    sleep "$guard_step"; guard_waited=$((guard_waited + guard_step))
+  done
+  [ "$guard_run" = "completed/success" ] \
+    || die 15 "credit-approval-guard on $owner/$repo#$pr @ ${guard_head:0:7} is '$guard_run', not completed/success — it may be a credit-approval change still awaiting the captain (or the guard has not run yet); refusing. Re-run once the check is green."
+elif printf '%s' "$guard_wf" | grep -q 'HTTP 404'; then
+  :
+else
+  die 15 "could not tell whether $owner/$repo has the credit-approval-guard workflow on '${base_ref}' — refusing to approve (fail closed)."
+fi
 
 # --- Guard 4b: scoped requesters must satisfy EVERY scope condition ---------
 # Stage B of the allowlist. A requester listed in SCOPED_APPROVERS must match one

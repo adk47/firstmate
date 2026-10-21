@@ -97,6 +97,11 @@ happens, and verifies what Intercom actually created.
   go through the `cs-stale-drain` skill and abuse tagging/closing through
   `muso-abuse-block`; any other close, assignment, tag or snooze is a human's action in
   the inbox, not a hand-typed curl.
+- The trust-yet-verify note ("We added your credit ... Please help us verify it") and its
+  `credit-proof` tag are a separate, cron-driven path:
+  `/opt/hydra/scripts/intercom-verify-request.sh`, run by `credit-review.py verify-notify`
+  (fixed copy, captain-approved, one note per user per day). Never send that note or tag
+  a proof reply by hand; see `docs/credit-verification/verify-request-notes.md`.
 
 ## Reply Identity (MANDATORY for customer-facing writes)
 
