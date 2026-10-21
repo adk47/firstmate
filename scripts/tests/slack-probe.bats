@@ -133,20 +133,76 @@ STUB
     [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 2 ]
 }
 
-@test "JSON without channelAccounts.slack is final at once, never retried" {
+@test "JSON without Slack rows yet (gateway still registering Slack) is retried until rows appear" {
     echo '{"channelAccounts":{}}' > "$D/noslack"
+    echo '{"channelAccounts":{"slack":[]}}' > "$D/emptyslack"
     status config true config true; cp "$D/st.json" "$D/good"
-    fake_openclaw "$D/noslack" "$D/good"
+    fake_openclaw "$D/noslack" "$D/emptyslack" "$D/good"
+    run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 0 ]; [ "${lines[-1]}" = "pass" ]
+    [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 3 ]
+}
+
+@test "JSON that never gets Slack rows still fails after the attempt budget" {
+    echo '{"error":"x"}' > "$D/err"
+    fake_openclaw "$D/err"
+    SLACK_PROBE_ATTEMPTS=3 run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 1 ]; [[ "$output" == *"no Slack accounts yet"* ]]
+    [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 3 ]
+}
+
+@test "MUTATION CONTROL: a malformed Slack row is final at once, never retried" {
+    echo '{"channelAccounts":{"slack":[{"botTokenSource":"config"}]}}' > "$D/badrow"
+    fake_openclaw "$D/badrow"
     run slack_probe_run "$D/cfg.json"
     [ "$status" -eq 1 ]; [[ "$output" == *"not the expected JSON (KeyError)"* ]]
     [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 1 ]
 }
 
-@test "a JSON error answer is final at once, never retried" {
-    echo '{"error":"x"}' > "$D/err"
+@test "18:36Z replay: 4 no-JSON answers, then JSON with no slack key, then rows -> passes" {
+    echo 'Error: Opening handshake has timed out' > "$D/junk"
+    echo '{"channelAccounts":{"telegram":[]}}' > "$D/noslackkey"
     status config true config true; cp "$D/st.json" "$D/good"
-    fake_openclaw "$D/err" "$D/good"
+    fake_openclaw "$D/junk" "$D/junk" "$D/junk" "$D/junk" "$D/noslackkey" "$D/good"
+    unset SLACK_PROBE_ATTEMPTS
     run slack_probe_run "$D/cfg.json"
-    [ "$status" -eq 1 ]; [[ "$output" == *"not the expected JSON"* ]]
+    [ "$status" -eq 0 ]; [ "${lines[-1]}" = "pass" ]
+    [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 6 ]
+}
+
+@test "default attempt budget is 12 when SLACK_PROBE_ATTEMPTS is unset" {
+    echo '{"channelAccounts":{}}' > "$D/noslack"
+    fake_openclaw "$D/noslack"
+    unset SLACK_PROBE_ATTEMPTS
+    run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 1 ]; [[ "$output" == *"no Slack accounts yet"* ]]
+    [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 12 ]
+}
+
+@test "MUTATION CONTROL: probe.ok=false row is final at once, never retried" {
+    status config true config false; cp "$D/st.json" "$D/bad"
+    status config true config true; cp "$D/st.json" "$D/good"
+    fake_openclaw "$D/bad" "$D/good"
+    run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 1 ]; [[ "$output" == *"BAD: cto: botTokenSource=config probe.ok=False"* ]]
     [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 1 ]
+}
+
+@test "MUTATION CONTROL: rows present but an account missing is final at once, never retried" {
+    echo '{"channelAccounts":{"slack":[{"accountId":"ceo","botTokenSource":"config","probe":{"ok":true}}]}}' > "$D/partial"
+    status config true config true; cp "$D/st.json" "$D/good"
+    fake_openclaw "$D/partial" "$D/good"
+    run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 1 ]; [[ "$output" == *"BAD: cto: missing"* ]]
+    [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 1 ]
+}
+
+@test "MUTATION CONTROL: dropped token on a later attempt (after no-rows answers) is final" {
+    echo '{"channelAccounts":{"slack":[]}}' > "$D/emptyslack"
+    status config true none true; cp "$D/st.json" "$D/bad"
+    status config true config true; cp "$D/st.json" "$D/good"
+    fake_openclaw "$D/emptyslack" "$D/bad" "$D/good"
+    run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 1 ]; [[ "$output" == *"BAD: cto: botTokenSource=none"* ]]
+    [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 2 ]
 }
