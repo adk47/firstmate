@@ -1437,6 +1437,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_intake_watchdog
+      - name: Run paperclip-intake tests
+        # scripts/paperclip-intake.py is how agents file Paperclip cards: the
+        # fingerprint port (hydra#1002), exact-token dedupe, the zero-token
+        # pre-check that decides whether Clio's triage is woken, and the
+        # 30-minute escalation. Local-only fake API; stdlib unittest, by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_paperclip_intake
       - name: Run store-only cron guard tests
         # scripts/lib/detect-store-only-crons.py is the deploy gate that HALTS if
         # the live SQLite cron store holds a recurring cron absent from
