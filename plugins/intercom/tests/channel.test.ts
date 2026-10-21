@@ -417,6 +417,16 @@ describe("buildAgentRawBody", () => {
     expect(out).toContain("[CUSTOMER_MESSAGE]\nhi");
   });
 
+  it("surfaces a pasted-link preview card's URL in the agent raw body", () => {
+    const u = "https://muso.ai/profile/b8ea4676-da77-45fe-ba43-e1a828648f40";
+    const card = `<div class="intercom-container"><a class="intercom-h2b-button" target="_blank" href="${u}">muso.ai  </a><a href="${u}" target="_blank" class="intercom-content-link"></a></div>`;
+    const message = `<p>Hello Caroline,</p>${card}<p>That's my main artist link.</p>`;
+    for (const out of [buildAgentRawBody(message, {}), buildAgentRawBody(message, { accountEmail: "x@y.com" })]) {
+      const customerSection = out.split("[CUSTOMER_MESSAGE]").at(-1) ?? "";
+      expect(customerSection.replace(/<[^>]*>/g, "")).toContain(u);
+    }
+  });
+
   it("omits unset fields", () => {
     const out = buildAgentRawBody("hi", { accountEmail: "x@y.com" });
     expect(out).not.toContain("muso profile");

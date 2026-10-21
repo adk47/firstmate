@@ -297,6 +297,46 @@ function isCustomerAuthored(type: string | undefined): boolean {
   return type === "user" || type === "lead" || type === "contact";
 }
 
+/**
+ * Rewrite every http(s) anchor so its TARGET is visible text.
+ *
+ * Intercom renders a pasted URL as a preview card:
+ *   <a class="intercom-h2b-button" href="https://muso.ai/profile/…">muso.ai</a>
+ *   <a class="intercom-content-link" href="https://muso.ai/profile/…"></a>
+ * Everything downstream keeps only anchor text, so Caroline read "muso.ai" and
+ * asked for the link the customer had just sent — twice in one thread
+ * (conv 215476479847680, 2026-10-20). Measured in the edge support sessions:
+ * customer messages reduced to a bare "muso.ai" in 29 sessions 10-16..10-20.
+ *
+ * - text is the URL, or a shortened form of it (host, host/path…) → the URL
+ * - empty anchor → the URL
+ * - descriptive text ("my profile") → "my profile (URL)"
+ * - the same URL again in one message → not repeated
+ * - mailto:, tel:, relative links → text unchanged
+ *
+ * Applied only where the agent's text is built (channel.ts buildAgentRawBody).
+ * classifyEvent keeps `body` exactly as Intercom sent it: handler.ts matches the
+ * current message against live conversation parts by tag-stripped body, and
+ * attachment extraction reads the raw HTML.
+ */
+export function surfaceLinkTargets(html: string): string {
+  if (!html || !/<a\b/i.test(html)) return html;
+  const seen = new Set<string>();
+  const bare = (u: string) => u.replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/[\s/…\.]+$/u, "");
+  return html.replace(
+    /<a\b[^>]*?\bhref\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi,
+    (_m: string, _q: string, href: string, inner: string) => {
+      const url = href.replace(/&amp;/g, "&").trim();
+      const text = inner.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim();
+      if (!/^https?:\/\//i.test(url)) return inner;
+      const shortened = text.length === 0 || bare(url).toLowerCase().startsWith(bare(text).toLowerCase());
+      if (seen.has(url)) return shortened ? "" : text;
+      seen.add(url);
+      return shortened ? ` ${url} ` : `${text} (${url})`;
+    },
+  );
+}
+
 export function classifyEvent(
   payload: IntercomWebhookPayload,
   log: FilterLog = defaultFilterLog,

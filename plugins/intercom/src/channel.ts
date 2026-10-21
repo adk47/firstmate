@@ -16,6 +16,7 @@ import {
   IntercomAssignmentConflictError,
 } from "./outbound.js";
 import { sanitizeReasoningLeak } from "./sanitize-reasoning-leak.js";
+import { surfaceLinkTargets } from "./filters.js";
 import { initStateStore, loadSessions, saveSessions } from "./state-store.js";
 import {
   buildEscalationSlackMessage,
@@ -1065,7 +1066,7 @@ export function buildAgentRawBody(
   unreadable?: UnreadableAttachment[],
   jevBlock?: string | null,
 ): string {
-  const sanitized = sanitizeCustomerMessage(message);
+  const sanitized = sanitizeCustomerMessage(surfaceLinkTargets(message));
   const kbBlock = renderKnowledgeBaseBlock(kbSnippets ?? []);
   const attachmentBlock = renderAttachmentStatusBlock(unreadable ?? []);
   const lines: string[] = enrichment ? buildEnrichmentLines(enrichment) : [];

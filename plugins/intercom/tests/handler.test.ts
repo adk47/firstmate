@@ -838,6 +838,29 @@ describe("handler — flag on (assessRisk path)", () => {
     expect(out!.userTurnCount).toBe(2);
   });
 
+  it("turn count: a pasted-link preview card continuing the customer's burst is the same turn", async () => {
+    const u = "https://muso.ai/profile/b8ea4676-da77-45fe-ba43-e1a828648f40";
+    const card = `<p>Hi</p><a class="intercom-h2b-button" href="${u}">muso.ai </a><a class="intercom-content-link" href="${u}"></a>`;
+    const client = new MockIntercomClient();
+    client.getConversation = async (params) => {
+      client.calls.getConversation.push(params);
+      return {
+        type: "conversation" as const, id: "conv1", title: null, created_at: 0, updated_at: 0, open: true, state: "open" as const,
+        admin_assignee_id: null,
+        source: { body: "I want to add credits", author: { type: "user", id: "u1" } },
+        conversation_parts: { conversation_parts: [
+          { id: "p1", part_type: "comment", body: card, author: { type: "user", id: "u1" } },
+        ] },
+      } as any;
+    };
+    const { state: out } = await handleWebhookEvent(
+      makeUserPayload(card), { ...makeState(), userTurnCount: 1, userExchangeCount: 1 }, "bot", client,
+      { riskAssessment: { enabled: true } },
+    );
+    expect(out!.userExchangeCount).toBe(1);
+    expect(out!.userTurnCount).toBe(2);
+  });
+
   it("turn count: a customer message after a reply is a new turn; no live data still counts", async () => {
     const client = new MockIntercomClient();
     client.getConversation = async (params) => {
@@ -1212,6 +1235,37 @@ describe("handler — Jev pre-turn router", () => {
 
     await handleWebhookEvent(
       makeUserPayload("hi, need help"), state, "bot", client,
+      { jev: { enabled: true, bands: JEV_BANDS }, runJev },
+    );
+
+    expect(runJev).toHaveBeenCalledTimes(1);
+    expect(runJev.mock.calls[0][0].recentParts).toEqual([]);
+  });
+
+  it("does not double-count a first-turn pasted-link preview card as history", async () => {
+    const u = "https://muso.ai/profile/b8ea4676-da77-45fe-ba43-e1a828648f40";
+    const card = `<p>Hi</p><a class="intercom-h2b-button" href="${u}">muso.ai </a><a class="intercom-content-link" href="${u}"></a>`;
+    const state = makeState();
+    const client = new MockIntercomClient();
+    client.getConversation = async (params) => {
+      client.calls.getConversation.push(params);
+      return {
+        type: "conversation" as const,
+        id: params.conversationId,
+        title: null,
+        created_at: 0,
+        updated_at: 0,
+        open: true,
+        state: "open" as const,
+        assignee: { type: "bot" as const, id: "bot" },
+        source: { body: card, author: { type: "user", id: "u1" } },
+        conversation_parts: { conversation_parts: [] },
+      } as any;
+    };
+    const runJev = vi.fn(async () => jevResult({ resolution_path: { type: "choice", choice: "caroline_tool", probabilities: { caroline_tool: 0.8 } } }));
+
+    await handleWebhookEvent(
+      makeUserPayload(card), state, "bot", client,
       { jev: { enabled: true, bands: JEV_BANDS }, runJev },
     );
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, extractImageAttachments, extractDocumentAttachments, IMAGE_MIME_ALLOWLIST, CANDIDATE_IMAGE_MIME_ALLOWLIST } from "../src/filters.js";
+import { classifyEvent, surfaceLinkTargets, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, extractImageAttachments, extractDocumentAttachments, IMAGE_MIME_ALLOWLIST, CANDIDATE_IMAGE_MIME_ALLOWLIST } from "../src/filters.js";
 import type { IntercomWebhookPayload, IntercomPartAttachment } from "../src/types.js";
 import userCreated from "./fixtures/conversation-user-created.json";
 import userReplied from "./fixtures/conversation-user-replied.json";
@@ -938,3 +938,42 @@ describe("extractImageAttachments — HEIC/HEIF candidates and counted drops", (
     expect(drops[0]).toContain("image/tiff:1");
   });
 });
+
+describe("surfaceLinkTargets", () => {
+  const card = (u: string) =>
+    `<div class="intercom-container"><a class="intercom-h2b-button" target="_blank" href="${u}">muso.ai  </a><a href="${u}" target="_blank" class="intercom-content-link"></a></div>`;
+  const strip = (h: string) => h.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+
+  it("a pasted-link preview card shows its URL once (measured 2026-10-20)", () => {
+    const u = "https://muso.ai/profile/155931ce-2ada-4b43-90da-64acb35f4b7b";
+    const out = strip(surfaceLinkTargets(`<p>Hello Caroline,</p>${card(u)}<p>That's my main artist link.</p>`));
+    expect(out).toContain(u);
+    expect(out.split(u).length - 1).toBe(1);
+    expect(out).not.toMatch(/muso\.ai\s+That/);
+  });
+  it("descriptive link text keeps the text and adds the URL", () => {
+    const u = "https://open.spotify.com/track/abc";
+    expect(strip(surfaceLinkTargets(`<a href="${u}">my song</a>`))).toBe(`my song (${u})`);
+  });
+  it("text that already is the URL is not duplicated", () => {
+    const u = "https://muso.ai/profile/x";
+    expect(strip(surfaceLinkTargets(`<a href="${u}">${u}</a>`))).toBe(u);
+  });
+  it("mailto and relative links keep only their text", () => {
+    expect(strip(surfaceLinkTargets(`<a href="mailto:a@b.co">email me</a> <a href="/x">here</a>`))).toBe("email me here");
+  });
+  it("decodes &amp; in hrefs", () => {
+    expect(strip(surfaceLinkTargets(`<a href="https://x.co/?a=1&amp;b=2"></a>`))).toBe("https://x.co/?a=1&b=2");
+  });
+  it("classifyEvent keeps the body exactly as Intercom sent it", () => {
+    const u = "https://muso.ai/profile/b8ea4676-da77-45fe-ba43-e1a828648f40";
+    const payload = JSON.parse(JSON.stringify(userReplied)) as IntercomWebhookPayload;
+    const body = `<p></p>${card(u)}<p>The data was split by the label.</p>`;
+    const item = payload.data.item;
+    item.conversation_parts = { conversation_parts: [{ id: "p1", part_type: "comment", body, author: { id: "u1", type: "user" }, attachments: [] } as never] } as never;
+    const r = classifyEvent(payload);
+    expect(r.kind).toBe("customer_message");
+    if (r.kind === "customer_message") expect(r.body).toBe(body);
+  });
+});
+
