@@ -792,6 +792,10 @@ def paid_tier(user_id: Any, created_at: Any, paying: frozenset[int] | None, now:
 
 PROVISIONAL_KIND = "provisional_paid"
 PROVISIONAL_MAX_PER_USER_PER_DAY = 20
+# Fable review-audit-1021 / firstmate 125: the paid provisional approve arm is OFF while this file
+# exists (hold / support / defer arms keep running). Undo: rm the file.
+PROVISIONAL_PAID_SWITCH = Path(os.environ.get("CREDIT_TRUST_PROVISIONAL_PAID_DISABLED",
+                                              "/etc/hydra/credit-trust-decide-provisional-paid.disabled"))
 
 
 def provisional_today_by_user(db: sqlite3.Connection, since: str) -> dict[int, int]:
@@ -1211,7 +1215,10 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     # PROVISIONAL_MAX_PER_USER_PER_DAY per user per UTC day. Free users stay on the ask path.
     req_by_id = {str(r.get("id")): r for r in batch}
     prov_today = provisional_today_by_user(db, now.strftime("%Y-%m-%dT00:00:00Z"))
+    provisional_paid_off = PROVISIONAL_PAID_SWITCH.exists()
     for d in decisions:
+        if provisional_paid_off:
+            break
         if not (d.decision == "support" and d.web_verdict == "NOT_FOUND" and d.paid_priority
                 and not d.big_track and d.conflict is None and not d.n1):
             continue

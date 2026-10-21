@@ -120,6 +120,10 @@ class Base(unittest.TestCase):
         self._paying, self._log, self._proof = decide.PAYING_USERS_FILE, decide.log, decide.PROOF_ON_FILE
         decide.PAYING_USERS_FILE = Path(self.tmp) / "paying-users.json"
         decide.PROOF_ON_FILE = Path(self.tmp) / "proof-on-file.json"
+        # firstmate 125: the host's switch file must never leak into a test run (node-8 CI).
+        self._prov_switch = decide.PROVISIONAL_PAID_SWITCH
+        decide.PROVISIONAL_PAID_SWITCH = Path(self.tmp) / "provisional-paid.disabled"
+        self.addCleanup(setattr, decide, "PROVISIONAL_PAID_SWITCH", self._prov_switch)
         self.proof()
         self.logged = []
         decide.log = self.logged.append
@@ -645,6 +649,18 @@ class PaidUsersFirst(Base):
         self.assertEqual(d[uuid_of(191)]["decision"], "support", "free user: asked")
         self.assertEqual(d[uuid_of(192)]["decision"], "support", "big track (pop 70): proof required")
         self.assertIn(uuid_of(190), [i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]])
+
+    def test_the_provisional_paid_switch_turns_only_that_arm_off(self):
+        """firstmate 125 / Fable review-audit-1021: with the switch file present the paid
+        NOT_FOUND row is NOT provisionally approved; it stays on the support (ask) path."""
+        decide.PROVISIONAL_PAID_SWITCH.write_text("off")
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        res, w = self.go([req(uuid_of(193), uid=900, track="t3")], {}, judge=judge)
+        d = self.decisions()[uuid_of(193)]
+        self.assertEqual(d["decision"], "support")
+        self.assertNotEqual(d["evidence_kind"], decide.PROVISIONAL_KIND)
+        self.assertNotIn(uuid_of(193), [i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]])
 
     def test_the_web_check_cap_always_admits_paid_rows_first(self):
         """firstmate 099 (Fable ruling 6, paid first): with room for ONE web check, the newer
