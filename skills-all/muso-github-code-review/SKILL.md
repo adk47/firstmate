@@ -314,9 +314,22 @@ diff is not the problem. Fail-closed in the direction of "blocking but honest".
 **When to use it — any INFRASTRUCTURAL reason review is impossible**, not just
 the diff cap: a failed/degraded bundle (every case under "Check the bundle's
 integrity flags FIRST"), a 403/404 that hides the PR, an unreadable file list,
-a thread list that cannot be completed, and a GitHub API rate limit (quota
-exhausted) that blocks the bundle or the CI lookup. The rate-limit case uses the
-fixed wording `CANNOT REVIEW: GitHub API rate limit blocked the review bundle`.
+a thread list that cannot be completed, and a GitHub 403 that blocks the bundle
+or the CI lookup. **Never assume a 403 is an empty quota** (MUS-11176): read the
+bucket **as the same identity the failed call used** (through `qa-gh.sh`, never
+bare `gh`, which may be a different account), then pipe the failing `gh` error text through the classifier and use its
+output verbatim as the reason:
+
+```bash
+OWNER_REPO="Muso-AI/hydra"   # the repo the failed call targeted
+read -r rem rst < <(bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER_REPO" api rate_limit --jq '.resources.core | "\(.remaining) \(.reset)"')
+QA_GH_RATELIMIT_REMAINING=$rem QA_GH_RATELIMIT_RESET=$rst \
+  bash /opt/hydra/scripts/lib/qa-gh-error-class.sh "<failing gh error text>"
+```
+
+It tells a primary hourly quota (`API rate limit exceeded`) from a secondary
+burst limit and from a plain permission 403, and prints the remaining count and
+reset time. Exit 1 means it is not a 403; keep your own concrete reason.
 If you could read the change and chose to block it, that is NO-GO. If you could
 not read the change, that is CANNOT REVIEW. **Never mix them in one verdict**,
 and never dress a tool failure up as a finding to make the verdict look normal.
