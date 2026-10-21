@@ -1692,6 +1692,9 @@ is_tier2_endpoint() {
     method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
     # Strip any query string before matching (mirror is_bulk_destructive_op).
     path="${path%%\?*}"
+    # One trailing slash is the same route (the claim-verify pace gate accepts
+    # /verify/), so it must not step around the approval requirement.
+    [[ "$path" == */ && "$path" != "/" ]] && path="${path%/}"
     [[ -f "$TIER2_ENDPOINTS_PATH" ]] || return 1
     # A ":param" segment matches EXACTLY ONE path segment, so
     # "DELETE /admin/user/:id" gates "/admin/user/123" but NOT the sub-resource
@@ -1775,11 +1778,13 @@ is_tier2_godmode_requester() {
 is_godmode_approval_required_endpoint() {
     local method="$1" path="$2"
     path="${path%%\?*}"
+    # One trailing slash is the same route as is_tier2_endpoint treats it.
+    [[ "$path" == */ && "$path" != "/" ]] && path="${path%/}"
     local method_uc; method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
     local restore_extglob=0
     shopt -q extglob || { shopt -s extglob; restore_extglob=1; }
     local rc=1 entry em ep
-    for entry in "DELETE /admin/user/+([!/])" "DELETE /admin/track/+([!/])" "POST /admin/subscription"; do
+    for entry in "DELETE /admin/user/+([!/])" "DELETE /admin/track/+([!/])" "POST /admin/subscription" "POST /admin/claiming/+([!/])/verify"; do
         em="${entry%% *}"; ep="${entry#* }"
         # shellcheck disable=SC2053  # RHS unquoted so the extglob pattern is active.
         if [[ "$method_uc" == "$em" && "$path" == $ep ]]; then
@@ -1788,6 +1793,69 @@ is_godmode_approval_required_endpoint() {
     done
     (( restore_extglob )) && shopt -u extglob
     return "$rc"
+}
+
+# --- Claim-verify pace gate (2026-10-11) ---
+# POST /admin/claiming/:id/verify makes the claimant the verified owner of a
+# profile. Since 09-01, 2,424 claim verifies went out at a 0.44 s median gap (a
+# loop, not per-claim review). Besides the tier-2 approval this endpoint now
+# needs, at most one claim verify per CLAIM_VERIFY_MIN_INTERVAL seconds goes out
+# host-wide. The state file is shared with scripts/muso-prewrite-hook.sh, so the
+# muso CLI and this wrapper draw on one budget. Skipped in dry-run (no write).
+# Pinned, no env override (an env-chosen path would hand each caller a fresh stamp
+# and defeat the host-wide budget). Same literal as scripts/muso-prewrite-hook.sh.
+CLAIM_VERIFY_LAST="/var/lib/hydra/claim-verify.last"
+enforce_claim_verify_pace_gate() {
+    local method="$1" path="${2%%\?*}"
+    local method_uc
+    method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    [[ "$method_uc" == "POST" ]] || return 0
+    [[ "$path" =~ ^/admin/claiming/[^/]+/verify/?$ ]] || return 0
+    if is_dry_run_mode; then
+        return 0
+    fi
+    local state="$CLAIM_VERIFY_LAST"
+    local min="${CLAIM_VERIFY_MIN_INTERVAL:-20}"
+    [[ "$min" =~ ^[0-9]+$ ]] && (( min >= 20 )) || min=20
+    if ! mkdir -p "$(dirname "$state")" 2>/dev/null || ! { exec 7>>"$state.lock"; } 2>/dev/null; then
+        echo "MUSO_CLAIM_VERIFY_PACE_UNAVAILABLE: cannot open $state — refusing the claim verify (fail closed)." >&2
+        return 1
+    fi
+    # The lock makes the gate host-wide; without flock, refuse (fail closed).
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "MUSO_CLAIM_VERIFY_PACE_UNAVAILABLE: flock is unavailable, so concurrent claim verifies cannot be serialized — refusing the claim verify." >&2
+        return 1
+    fi
+    if ! flock -w 5 7; then
+        echo "MUSO_CLAIM_VERIFY_PACE_UNAVAILABLE: pace lock busy — refusing the claim verify." >&2
+        return 1
+    fi
+    local now last
+    now="$(date +%s)"
+    # Absent file = first use. An existing stamp that is empty, truncated or unreadable
+    # must not read as "long ago": refuse until a root operator clears it.
+    last=0
+    if [ -e "$state" ]; then
+        if ! last="$(cat "$state" 2>/dev/null)" || [[ ! "$last" =~ ^(0|[1-9][0-9]{0,14})$ ]]; then
+            echo "MUSO_CLAIM_VERIFY_PACE_UNAVAILABLE: the claim-verify timestamp in $state is unreadable or malformed — refusing the claim verify (fail closed). Clear $state as root." >&2
+            return 1
+        fi
+    fi
+    # A future stamp (clock stepped back) must not reset to 0 and pass: refuse.
+    if (( last > now )); then
+        echo "MUSO_CLAIM_VERIFY_PACE_UNAVAILABLE: the claim-verify timestamp in $state is $((last - now))s in the future (host clock may have stepped backward) — refusing the claim verify (fail closed). Check the host clock, then clear $state as root." >&2
+        return 1
+    fi
+    if (( now - last < min )); then
+        echo "MUSO_CLAIM_VERIFY_TOO_FAST: claim verifies are limited to one per ${min}s host-wide (last $((now - last))s ago). Review each claim individually before verifying it; do not retry in a loop." >&2
+        return 1
+    fi
+    # The stamp is the next caller's gate: an unrecorded verify is refused.
+    if ! { printf '%s\n' "$now" > "$state"; } 2>/dev/null; then
+        echo "MUSO_CLAIM_VERIFY_PACE_UNAVAILABLE: cannot record the claim-verify timestamp at $state — refusing the claim verify." >&2
+        return 1
+    fi
+    return 0
 }
 
 enforce_tier2_approval_gate() {
@@ -2850,6 +2918,11 @@ EOF
 
     # Tier-2 approval gate (incident 2026-04-29). Skipped in dry-run mode.
     if ! enforce_tier2_approval_gate "$method" "$path"; then
+        return 1
+    fi
+
+    # Claim-verify pace gate (2026-10-11): one claim verify per 20s host-wide.
+    if ! enforce_claim_verify_pace_gate "$method" "$path"; then
         return 1
     fi
 

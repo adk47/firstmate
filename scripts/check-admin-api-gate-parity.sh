@@ -70,6 +70,8 @@ WORKSPACE_COPY="${ADMIN_API_WORKSPACE:-$REPO_ROOT/workspaces/operations/skills/m
 # exactly the kind of drift this gate exists to catch, so we fail closed
 # below rather than silently shrinking the list.
 FUNCTIONS=(
+    # Added 2026-10-11: the claim-verify pace gate ships in both copies.
+    enforce_claim_verify_pace_gate
     is_bulk_destructive_op
     count_recent_destructive_ops
     enforce_bulk_destructive_gate
@@ -299,7 +301,7 @@ REGION_NAMES=(
     "approval-evidence flag parsing"
 )
 REGION_PATTERNS=(
-    '^(BULK_DESTRUCTIVE_[A-Z_]+|TIER2_APPROVERS_PATH)='
+    '^(BULK_DESTRUCTIVE_[A-Z_]+|TIER2_APPROVERS_PATH|CLAIM_VERIFY_LAST)='
     'STRUCTURAL:gate-call-block'
     'STRUCTURAL:parser-arms'
 )

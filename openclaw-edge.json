@@ -501,7 +501,7 @@
         "enabled": true,
         "config": {
           "creditVerificationEnabled": true,
-          "profilesClaimSelfEnabled": true,
+          "profilesClaimSelfEnabled": false,
           "creditsVerifyEnabled": true,
           "profilesConsolidateEnabled": true,
           "foundingBuybackEnabled": true,
