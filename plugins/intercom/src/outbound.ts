@@ -156,6 +156,8 @@ export class MockIntercomClient implements IntercomClient {
     conversationId: string;
     adminId: string;
     body: string;
+    // "note" = internal note, visible only to admins. Absent = "comment" (customer-facing).
+    messageType?: "comment" | "note";
   }): Promise<{ messageId: string }> {
     this.calls.replyToConversation.push(params);
     this.messageCounter++;
@@ -267,6 +269,8 @@ export class RealIntercomClient implements IntercomClient {
     conversationId: string;
     adminId: string;
     body: string;
+    // "note" = internal note, visible only to admins. Absent = "comment" (customer-facing).
+    messageType?: "comment" | "note";
   }): Promise<{ messageId: string }> {
     // Retry transient failures (429 / 5xx) with capped exponential backoff +
     // jitter so a single rate-limit or server blip doesn't silently drop the
@@ -282,13 +286,15 @@ export class RealIntercomClient implements IntercomClient {
     conversationId: string;
     adminId: string;
     body: string;
+    // "note" = internal note, visible only to admins. Absent = "comment" (customer-facing).
+    messageType?: "comment" | "note";
   }): Promise<{ messageId: string }> {
     const url = `${this.baseUrl}/conversations/${params.conversationId}/reply`;
     const response = await fetch(url, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify({
-        message_type: "comment",
+        message_type: params.messageType ?? "comment",
         type: "admin",
         admin_id: params.adminId,
         body: params.body,
@@ -592,6 +598,8 @@ export class SanitizingIntercomClient implements IntercomClient {
     conversationId: string;
     adminId: string;
     body: string;
+    // "note" = internal note, visible only to admins. Absent = "comment" (customer-facing).
+    messageType?: "comment" | "note";
   }): Promise<{ messageId: string; dropped?: true }> {
     const emailPass = sanitizeOutboundBody(params.body);
     if (emailPass.redactions.length > 0) {

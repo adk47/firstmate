@@ -386,6 +386,8 @@ export interface IntercomClient {
     conversationId: string;
     adminId: string;
     body: string;
+    // "note" = internal note, visible only to admins. Absent = "comment" (customer-facing).
+    messageType?: "comment" | "note";
   }): Promise<{ messageId: string; dropped?: true }>;
 
   assignConversation(params: {

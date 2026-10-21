@@ -12,6 +12,7 @@ import type {
 import { RateLimitError } from "./outbound.js";
 import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply } from "./filters.js";
 import { checkEscalation, assessRisk, type AssessRiskDeps } from "./escalation.js";
+import { restrictionFor } from "./restricted-accounts.js";
 import { updateKnownFacts } from "./extractors.js";
 import { shouldEnrich, type VerifiedIdentity } from "./enrichment.js";
 import {
@@ -206,6 +207,10 @@ export type HandlerAction =
   | { action: "dispatch_to_agent"; conversationId: string; body: string; authorId: string; attachments?: ImageAttachmentRef[]; documents?: DocumentAttachmentRef[]; unsupportedAttachments?: UnsupportedAttachmentRef[] }
   | { action: "escalate"; conversationId: string; assessment: RiskAssessment; body: string }
   | { action: "escalate_legacy"; conversationId: string; category: string; matchedPattern: string; body: string }
+  // A listed fraud-pull contact (restricted-accounts.ts): never reaches the agent and gets no
+  // customer-facing message. `note` is posted as an internal note; reassign: false keeps the
+  // conversation with the human admin who already holds it.
+  | { action: "restricted_hold"; conversationId: string; category: string; note: string; body: string; reassign: boolean }
   | { action: "state_updated"; conversationId: string; description: string }
   | { action: "filtered"; conversationId: string; reason: string }
   | { action: "ignored"; reason: string }
@@ -330,6 +335,8 @@ export async function handleWebhookEvent(
         handleImplicitReopen(state, botAdminId);
       }
 
+      const restriction = restrictionFor(classified.authorId);
+
       // Populated by the live check below (Finding 2) — feeds
       // buildRecentPartsFromLiveConversation ahead of assessRisk/runJev.
       let liveConversationParts: IntercomConversationPart[] | undefined;
@@ -390,7 +397,9 @@ export async function handleWebhookEvent(
               state.currentAssigneeId = adminAssigneeId;
               state.currentAssigneeType = "admin";
               state.updatedAt = new Date().toISOString();
-              return {
+              // A restricted contact still gets the hold below (alert + note), but
+              // with reassign: false so the human keeps the conversation.
+              if (!restriction) return {
                 result: {
                   action: "filtered",
                   conversationId: classified.conversationId,
@@ -440,6 +449,32 @@ export async function handleWebhookEvent(
           }
           // Fall through to cached state
         }
+      }
+
+      if (restriction) {
+        // reassign only when no human admin holds it. The holder comes from the live check
+        // when it succeeded, else from cached state (a failed lookup must not move a
+        // human-held conversation to the default inbox).
+        const humanHolds =
+          !!state?.currentAssigneeId &&
+          state.currentAssigneeType === "admin" &&
+          state.currentAssigneeId !== botAdminId;
+        // Caroline stays out of this conversation until a human hands it back.
+        if (state) {
+          state.handoffMode = "human_takeover";
+          state.updatedAt = new Date().toISOString();
+        }
+        return {
+          result: {
+            action: "restricted_hold",
+            conversationId: classified.conversationId,
+            category: restriction.category,
+            note: restriction.note,
+            body: classified.body,
+            reassign: !humanHolds,
+          },
+          state,
+        };
       }
 
       // Update pinned facts from the customer message.

@@ -21,6 +21,7 @@ import { initStateStore, loadSessions, saveSessions } from "./state-store.js";
 import {
   buildEscalationSlackMessage,
   buildEscalationSlackMessageMinimal,
+  type EscalationSummary,
 } from "./slack.js";
 import {
   detectSilentDispatch,
@@ -1852,6 +1853,29 @@ export const intercomPlugin = createChatChannelPlugin({
 
                   const state = getOrCreateSession(account.accountId, conversationId, account.workspaceId);
                   const client = createIntercomClient(account.token, log);
+                  const postSupervisionAlert = async (summary: EscalationSummary): Promise<void> => {
+                    if (!account.fallbackSlackSupervisionChannel) return;
+                    let slackPayload;
+                    try {
+                      const conversation = await client.getConversation({ conversationId: summary.conversationId });
+                      slackPayload = buildEscalationSlackMessage(summary, conversation, account, state);
+                    } catch (err) {
+                      log?.warn?.(`[${tag}] Slack enrichment fetch failed conv=${summary.conversationId}: ${err} — posting minimal`);
+                      slackPayload = buildEscalationSlackMessageMinimal(summary, account);
+                    }
+                    try {
+                      const res = await fetch(account.fallbackSlackSupervisionChannel, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(slackPayload),
+                      });
+                      if (!res.ok) {
+                        log?.error?.(`[${tag}] Slack escalation notification rejected: ${res.status} conv=${summary.conversationId}`);
+                      }
+                    } catch (err) {
+                      log?.error?.(`[${tag}] Slack escalation notification failed: ${err}`);
+                    }
+                  };
                   const jevLog = log ? { warn: (m: string) => log.warn(m) } : undefined;
                   // Fresh per webhook request — this is what makes the "no
                   // second request" memoization correct (see jev-router.ts's
@@ -2092,6 +2116,42 @@ export const intercomPlugin = createChatChannelPlugin({
                       `[${tag}] ESCALATED conv=${result.conversationId} ` +
                       `source=${result.assessment.source} reason=${result.assessment.reason}`,
                     );
+                  } else if (result.action === "restricted_hold") {
+                    // Listed fraud-pull contact: no customer-facing message (even a generic
+                    // acknowledgement is a promise we must not make), no agent dispatch.
+                    // 1. Internal note: visible in Intercom to whoever holds it, even if Slack fails.
+                    try {
+                      await client.replyToConversation({
+                        conversationId: result.conversationId,
+                        adminId: account.botAdminId,
+                        body: result.note,
+                        messageType: "note",
+                      });
+                    } catch (err) {
+                      log?.error?.(`[${tag}] restricted hold note failed conv=${result.conversationId}: ${err}`);
+                    }
+                    // 2. Hand to the human team unless a human admin already holds it.
+                    if (result.reassign) {
+                      try {
+                        await client.assignConversation({
+                          conversationId: result.conversationId,
+                          adminId: account.botAdminId,
+                          assigneeId: account.defaultInboxId || "0",
+                        });
+                      } catch (err) {
+                        log?.error?.(`[${tag}] restricted hold reassignment failed conv=${result.conversationId}: ${err}`);
+                      }
+                    }
+                    // 3. Slack alert (same supervision channel as escalations).
+                    await postSupervisionAlert({
+                      conversationId: result.conversationId,
+                      category: result.category,
+                      matchedPattern: result.note,
+                      body: result.body,
+                    });
+                    log?.warn?.(
+                      `[${tag}] RESTRICTED_HOLD conv=${result.conversationId} category=${result.category} reassign=${result.reassign}`,
+                    );
                   } else if (result.action === "escalate_legacy") {
                     // Legacy path — runs whenever riskAssessment.enabled is false.
                     // Delete once that flag is true on all profiles and one week of
@@ -2115,31 +2175,12 @@ export const intercomPlugin = createChatChannelPlugin({
                     } catch (err) {
                       log?.error?.(`[${tag}] reassignment failed conv=${result.conversationId}: ${err}`);
                     }
-                    if (account.fallbackSlackSupervisionChannel) {
-                      const escalationSummary = {
-                        conversationId: result.conversationId,
-                        category: result.category,
-                        matchedPattern: result.matchedPattern,
-                        body: result.body,
-                      };
-                      let slackPayload;
-                      try {
-                        const conversation = await client.getConversation({ conversationId: result.conversationId });
-                        slackPayload = buildEscalationSlackMessage(escalationSummary, conversation, account, state);
-                      } catch (err) {
-                        log?.warn?.(`[${tag}] Slack enrichment fetch failed conv=${result.conversationId}: ${err} — posting minimal`);
-                        slackPayload = buildEscalationSlackMessageMinimal(escalationSummary, account);
-                      }
-                      try {
-                        await fetch(account.fallbackSlackSupervisionChannel, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify(slackPayload),
-                        });
-                      } catch (err) {
-                        log?.error?.(`[${tag}] Slack escalation notification failed: ${err}`);
-                      }
-                    }
+                    await postSupervisionAlert({
+                      conversationId: result.conversationId,
+                      category: result.category,
+                      matchedPattern: result.matchedPattern,
+                      body: result.body,
+                    });
                     log?.warn?.(
                       `[${tag}] ESCALATED (legacy) conv=${result.conversationId} ` +
                       `category=${result.category} pattern=${result.matchedPattern}`,
