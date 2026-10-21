@@ -39,7 +39,7 @@ pr_removes() { git -C "$REPO" rm -q "$@" && git -C "$REPO" commit -q -m pr; }
   [[ "$output" == *"PR: removed.txt"* ]]
 }
 
-@test "unrelated server state: warning verdict, rc 0, owner named, deploy gate still authoritative" {
+@test "unrelated server state: warning verdict, rc 0, owner named, delta mode keeps the paths" {
   pr_removes removed.txt
   run attribute_deletions "*deleting   payout-report.csv" "$REPO" main
   [ "$status" -eq 0 ]
@@ -47,7 +47,15 @@ pr_removes() { git -C "$REPO" rm -q "$@" && git -C "$REPO" commit -q -m pr; }
   [[ "$output" != *"::error::"* ]]
   [[ "$output" == *"OTHER: payout-report.csv"* ]]
   [[ "$output" == *"Nick"* ]]
-  [[ "$output" == *"NOT safe to deploy"* ]]
+  # MUS-8090: a merge-triggered deploy is delta mode — it never reaches Step 4a
+  # and never deletes a path outside its delta. The warning must say so, and
+  # must not send the author to an RSYNC_EXCLUDES entry for a path delta mode
+  # already leaves alone (an exclude would suppress legitimate transfers).
+  [[ "$output" == *"delta"* && "$output" == *"will not delete"* ]]
+  [[ "$output" == *"HYDRA_FULL_SYNC=1"* ]]
+  [[ "$output" != *"NOT safe to deploy"* ]]
+  [[ "$output" != *"halts the real deploy on ANY"* ]]
+  [[ "$output" != *"add an --exclude line"* ]]
   [[ "$output" == *"(a) Real data"* && "$output" == *"(b) Runtime state"* && "$output" == *"(c) Actual garbage"* ]]
 }
 
