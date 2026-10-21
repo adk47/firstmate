@@ -1999,7 +1999,7 @@ class EnableGateTests(unittest.TestCase):
         self.assertEqual([(p["user"]["id"], p["user"].get("auth_id")) for p in fake.payloads], [("45", "auth0|abc-45")])
         self.assertEqual(rep.no_auth_users, 1)
         self.assertIn("a2", self.deferred())
-        self.assertIn("no Auth0 subject", rep.render("apply"))
+        self.assertIn("no professionalId / Auth0 subject", rep.render("apply"))
 
         def down(ids):
             raise verify_notify.AuthLookupError("rc=2: trino down")
@@ -2008,6 +2008,18 @@ class EnableGateTests(unittest.TestCase):
         self.assertIn("Auth0 subjects cannot be read", rep.halted)
         self.assertTrue(rep.failed)
         self.assertIn("a3", self.deferred())
+
+    def test_the_intercom_identity_is_read_from_neptuneprofessionalid(self):
+        """firstmate 118: Intercom's external_id is the account's professionalId
+        (users.neptuneprofessionalid), for accounts with and without an Auth0 subject."""
+        fake = os.path.join(self.tmp, "trino.sh")
+        Path(fake).write_text('#!/bin/sh\ncat > "$0.sql"\nprintf \'"45","8c0d-uuid"\\n"46",""\\n\'\n')
+        os.chmod(fake, 0o755)
+        with unittest.mock.patch.object(verify_notify, "AUTH_LOOKUP_CMD", fake):
+            got = verify_notify.account_auth_ids([45, 46])
+        sql = Path(fake + ".sql").read_text()
+        self.assertIn("neptuneprofessionalid", sql)
+        self.assertEqual(got, {"45": "8c0d-uuid"}, "an account with no identity is absent (held)")
 
     def test_a_dry_run_can_use_the_real_recipient_check(self):
         rows = [user_req("b1", 48)]

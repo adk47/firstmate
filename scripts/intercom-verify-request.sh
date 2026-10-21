@@ -912,21 +912,21 @@ if [ "$KIND" = "initial" ]; then
   [ "$n_users" -eq 1 ] || record_refusal "the account email matches $n_users Intercom users (need exactly 1); not sending."
   CONTACT_ID="$(printf '%s' "$users" | "$JQ_BIN" -r '.[0].id')"
   EXT_ID="$(printf '%s' "$users" | "$JQ_BIN" -r '.[0].external_id // empty')"
-  # external_id names THIS account when it is the numeric user id or the account's Auth0
-  # subject (with or without the "auth0|" prefix). Anything else is another account, and a
-  # contact with no external_id cannot be matched to any account at all (QA @052f737).
+  # external_id names THIS account only when it is the account's professionalId (Intercom
+  # identity; users.neptuneprofessionalid, the UUID every client identifies with) or the Auth0
+  # subject, with or without "auth0|" (the same UUID for Auth0 accounts). Never the bare numeric
+  # user id (firstmate 118/120): no client identifies with it. A contact with no external_id
+  # cannot be matched to any account at all (QA @052f737).
   [ -n "$EXT_ID" ] \
     || record_refusal "the Intercom user for this email has no external_id, so it cannot be matched to this Muso account; not sending."
-  # An account-specific note needs the account named (QA @3112769): with neither user.id nor
-  # user.auth_id, any external_id would pass. The one exception is removal-notice, whose
-  # recipient is the profile's single CLAIMED WORKSPACE email (credit_review.verify_notify.
-  # profile_owner): that campaign has no Muso user id to compare, by construction.
-  if [ -z "$USER_ID" ] && [ -z "$AUTH_ID" ] && [ "$CAMPAIGN" != "removal-notice" ]; then
-    record_refusal "the note names no Muso account (neither user.id nor user.auth_id), so the Intercom contact cannot be verified as its owner; not sending."
+  # An account-specific note needs the account's Intercom identity (QA @3112769): without
+  # user.auth_id nothing can be compared. The one exception is removal-notice, whose recipient
+  # is the profile's single CLAIMED WORKSPACE email (credit_review.verify_notify.profile_owner):
+  # that campaign has no account identity to compare, by construction.
+  if [ -z "$AUTH_ID" ] && [ "$CAMPAIGN" != "removal-notice" ]; then
+    record_refusal "the note carries no account Intercom identity (user.auth_id: professionalId or Auth0 subject), so the Intercom contact cannot be verified as its owner; not sending."
   fi
-  if { [ -n "$USER_ID" ] || [ -n "$AUTH_ID" ]; } \
-     && [ "$EXT_ID" != "$USER_ID" ] \
-     && { [ -z "$AUTH_ID" ] || { [ "$EXT_ID" != "$AUTH_ID" ] && [ "$EXT_ID" != "auth0|$AUTH_ID" ]; }; }; then
+  if [ -n "$AUTH_ID" ] && [ "$EXT_ID" != "$AUTH_ID" ] && [ "$EXT_ID" != "auth0|$AUTH_ID" ]; then
     record_refusal "the Intercom user for this email belongs to a different Muso account (external_id mismatch); not sending."
   fi
 fi

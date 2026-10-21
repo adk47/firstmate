@@ -115,7 +115,7 @@ class Report:
     mixed_v1_users: int = 0            # users whose one note is v1 because ANY credit is paid provisional
     already_today: int = 0             # messages the ledger already holds for today (counted against the cap)
     paying_hold: str = ""              # paying status unknown and the cap would have to choose: nothing sent
-    no_auth_users: int = 0             # no Auth0 subject on the account: Intercom identity unverifiable, held
+    no_auth_users: int = 0             # no Intercom identity (professionalId / Auth0 subject) on the account: held
     recipient_ok: int = 0              # dry run with --check-recipients: the real gate accepted the recipient
     halted: str = ""
     failures: list[str] = field(default_factory=list)
@@ -140,7 +140,7 @@ class Report:
         parts = [f"{head}: {self.sent_notes} note(s) sent covering {self.sent_credits} provisionally approved credit(s)"
                  if mode == "apply" else f"{head}: {self.users} account(s) would get a note"]
         if self.no_auth_users:
-            parts.append(f"{self.no_auth_users} account(s) held: no Auth0 subject on the account, so the Intercom "
+            parts.append(f"{self.no_auth_users} account(s) held: no professionalId / Auth0 subject on the account, so the Intercom "
                          "recipient cannot be matched to it")
         if self.recipient_ok:
             parts.append(f"{self.recipient_ok} recipient(s) accepted by the real gate (read only)")
@@ -802,15 +802,22 @@ AUTH_LOOKUP_CMD = os.environ.get("CREDIT_VERIFY_AUTH_LOOKUP_CMD", "/opt/hydra/sc
 
 
 def account_auth_ids(user_ids: Iterable[Any]) -> dict[str, str]:
-    """{muso user id: Auth0 subject} from the core replica (users.auth0userid, Trino; never
-    admin paging). Intercom's external_id for a Muso user is that subject without "auth0|"
-    (2026-10-20 07:00Z: comparing it with the numeric id refused all 21 first notes). Users
-    without a subject are absent. Raises AuthLookupError when the replica cannot be read."""
+    """{muso user id: the account's Intercom identity} from the core replica (Trino; never admin
+    paging). Every client identifies the Intercom user as the account's ``professionalId``
+    (web-credits/web-credits-next ``user_id: userUUID`` = jwt professionalId; iOS and Flutter
+    ``loginIdentifiedUser(professionalId)``), which core reads from ``users.neptuneProfessionalId``.
+    So that UUID is the contact's external_id. Proven 2026-10-20 (firstmate 118, read-only):
+    20/20 sampled accounts WITHOUT an Auth0 subject and 9/9 comparable accounts WITH one had
+    external_id == neptuneprofessionalid; for Auth0 accounts the subject (minus "auth0|") is the
+    same UUID (10/10), and all 390,910 users have one. Falls back to the Auth0 subject only if
+    the column is empty. Users with neither are absent. Raises AuthLookupError when the replica
+    cannot be read."""
     import csv as _csv
     ids = sorted({int(str(u)) for u in user_ids if str(u).strip().isdigit()})
     out: dict[str, str] = {}
     for i in range(0, len(ids), 500):
-        sql = ("SELECT CAST(id AS varchar), auth0userid FROM postgresql_core.public.users WHERE id IN ("
+        sql = ("SELECT CAST(id AS varchar), coalesce(CAST(neptuneprofessionalid AS varchar), auth0userid) "
+               "FROM postgresql_core.public.users WHERE id IN ("
                + ",".join(str(u) for u in ids[i:i + 500]) + ")")
         try:
             p = subprocess.run([AUTH_LOOKUP_CMD], input=sql, capture_output=True, text=True, timeout=300, check=False)

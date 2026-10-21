@@ -730,6 +730,12 @@ def account_of(api: ReadApi, rows: list[dict[str, Any]]) -> tuple[dict[str, Any]
     return None, reason
 
 
+def _auth_ids(user_ids: list[str]) -> dict[str, str]:
+    """{user id: Intercom identity} via the verify-notify lookup (Trino, users.neptuneprofessionalid)."""
+    from credit_review import verify_notify  # noqa: PLC0415
+    return verify_notify.account_auth_ids(user_ids)
+
+
 def notice_preflight(api: ReadApi, sender, rows: list[dict[str, Any]],
                      log: Callable[[str], None] = print) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
     """Before any execute: every user who may lose a role must be reachable through
@@ -744,7 +750,17 @@ def notice_preflight(api: ReadApi, sender, rows: list[dict[str, Any]],
     accounts: dict[str, dict[str, Any]] = {}
     held: dict[str, str] = {}
     problems = []
-    for uid, rs in notice.by_user(rows).items():
+    grouped = notice.by_user(rows)
+    # The send gate matches the Intercom contact's external_id to the account's Intercom
+    # identity (users.neptuneprofessionalid, firstmate 118/120; never the numeric id), so every
+    # notice carries user.auth_id. An unreadable lookup refuses the run (never remove without
+    # the message going out); an account with no identity is held, not removed.
+    try:
+        auth_ids = _auth_ids(list(grouped))
+    except Exception as exc:  # noqa: BLE001 - any lookup failure means the notice cannot be matched
+        raise SystemExit(f"take-back notices cannot be sent, so nothing is removed: the account Intercom identity "
+                         f"lookup failed ({type(exc).__name__}: {exc})"[:400])
+    for uid, rs in grouped.items():
         try:
             acct, why = account_of(api, rs)
         except ApiError as exc:
@@ -756,6 +772,12 @@ def notice_preflight(api: ReadApi, sender, rows: list[dict[str, Any]],
             continue
         if not acct["email"]:
             problems.append(f"user {uid}: no account email on the request")
+            continue
+        acct["auth_id"] = auth_ids.get(str(uid), "")
+        if not acct["auth_id"]:
+            held[uid] = "no_intercom_identity"
+            log(f"user {uid} has no professionalId / Auth0 subject: the notice cannot be matched to their "
+                "Intercom contact, so nothing of theirs is removed")
             continue
         accounts[uid] = acct
         verdict, msg = sender.validate(notice.credits_file(acct, [notice.notice_credit(r) for r in rs]))

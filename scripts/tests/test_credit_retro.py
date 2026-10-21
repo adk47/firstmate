@@ -26,6 +26,12 @@ from credit_retro import notice, takeback, waves  # noqa: E402
 from credit_retro.api import ApiError, SessionApi, check_session_claims, header_value  # noqa: E402
 from credit_retro.ledger import Ledger  # noqa: E402
 
+# firstmate 118/120: every take-back notice carries the account's Intercom identity
+# (users.neptuneprofessionalid via Trino). Tests use a deterministic fake; the real lookup and
+# its failure modes are tested in IntercomIdentityTests.
+_REAL_AUTH_IDS = takeback._auth_ids
+takeback._auth_ids = lambda ids: {str(u): f"pro-{u}" for u in ids}
+
 MANIFEST_DIR = Path(__file__).resolve().parents[1] / "credit_retro" / "manifests"
 CLI = Path(__file__).resolve().parents[1] / "credit-retro.py"
 
@@ -1470,7 +1476,7 @@ class EvidenceAndNoticeTests(unittest.TestCase):
         self.assertEqual(counts, {"removed": 1, "notice_sent": 1})
         payload = api.sender.sent[0]
         self.assertEqual(payload["campaign"], "takeback-notice")
-        self.assertEqual(payload["user"], {"email": "rk@example.com", "id": UID, "first_name": "Rishi"})
+        self.assertEqual(payload["user"], {"email": "rk@example.com", "id": UID, "auth_id": f"pro-{UID}", "first_name": "Rishi"})
         c = payload["credits"][0]
         self.assertEqual((c["role"], c["other_names"], c["evidence_url"]), ("Mixing", ["Eli WTF"], "https://www.qobuz.com/x"))
         subject, body = notice.render("Rishi", payload["credits"])
@@ -1985,6 +1991,53 @@ class LiveExclusionTests(unittest.TestCase):
         self.assertEqual(counts2, {"would_remove": 1})
         self.assertIn("affiliation=claimed_unverified", self.out[-1])
         self.assertEqual(takeback.report(self.ledger, plan2)["needs_human_review"], [])
+
+
+class IntercomIdentityTests(unittest.TestCase):
+    """QA #1298 @05a7cac: the take-back notice must carry user.auth_id, or the gate refuses it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def rows(self):
+        return takeback.load_manifest(write_manifest(self.dir, [row()]))
+
+    def test_the_notice_payload_carries_the_professional_id(self):
+        sender = FakeSender()
+        accounts, held = takeback.notice_preflight(FakeApi(), sender, self.rows(), log=lambda _m: None)
+        self.assertEqual(held, {})
+        self.assertTrue(sender.validated)
+        uid = sender.validated[0]["user"]["id"]
+        self.assertEqual(sender.validated[0]["user"]["auth_id"], f"pro-{uid}")
+
+    def test_an_account_with_no_identity_is_held_not_removed(self):
+        orig = takeback._auth_ids
+        takeback._auth_ids = lambda ids: {}
+        self.addCleanup(setattr, takeback, "_auth_ids", orig)
+        sender = FakeSender()
+        accounts, held = takeback.notice_preflight(FakeApi(), sender, self.rows(), log=lambda _m: None)
+        self.assertEqual(set(held.values()), {"no_intercom_identity"})
+        self.assertEqual(sender.validated, [], "nothing is validated or sent without an identity")
+
+    def test_an_unreadable_identity_lookup_refuses_the_whole_run(self):
+        orig = takeback._auth_ids
+
+        def boom(ids):
+            raise RuntimeError("trino down")
+        takeback._auth_ids = boom
+        self.addCleanup(setattr, takeback, "_auth_ids", orig)
+        with self.assertRaises(SystemExit) as cm:
+            takeback.notice_preflight(FakeApi(), FakeSender(), self.rows(), log=lambda _m: None)
+        self.assertIn("nothing is removed", str(cm.exception))
+
+    def test_the_real_lookup_reads_neptuneprofessionalid(self):
+        from unittest import mock
+        from credit_review import verify_notify
+        with mock.patch.object(verify_notify, "account_auth_ids", return_value={"7": "uuid-7"}) as m:
+            self.assertEqual(_REAL_AUTH_IDS(["7"]), {"7": "uuid-7"})
+        m.assert_called_once_with(["7"])
 
 
 class ManifestTests(unittest.TestCase):

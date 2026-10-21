@@ -121,6 +121,7 @@ def render(first_name: str | None, credits: list[dict[str, Any]]) -> tuple[str, 
 def credits_file(user: dict[str, Any], credits: list[dict[str, Any]]) -> dict[str, Any]:
     return {"campaign": CAMPAIGN,
             "user": {"email": user.get("email"), "id": str(user.get("id") or ""),
+                     "auth_id": str(user.get("auth_id") or ""),   # the gate matches external_id to this
                      "first_name": user.get("first_name")},
             "credits": credits}
 

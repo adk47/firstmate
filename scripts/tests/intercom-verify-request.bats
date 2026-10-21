@@ -65,7 +65,7 @@ case "$method $path" in
   "POST /contacts/search")
     if [ -n "${STUB_CONTACTS:-}" ]; then printf '%s' "$STUB_CONTACTS"; exit 0; fi
     email="$(printf '%s' "$payload" | jq -r '.query.value')"
-    printf '{"type":"list","data":[{"type":"contact","id":"6650aa01","role":"user","email":"%s","external_id":"42"}],"total_count":1}' "$email" ;;
+    printf '{"type":"list","data":[{"type":"contact","id":"6650aa01","role":"user","email":"%s","external_id":"pro-42"}],"total_count":1}' "$email" ;;
   "POST /messages")
     printf '%s' "$payload" > "$CURL_STUB_MESSAGE"
     find "$INTERCOM_VERIFY_TEST_LOG_DIR" -type f -name '*.json' | wc -l | tr -d ' ' > "$CURL_STUB_LOGS_AT_POST"
@@ -114,7 +114,7 @@ credits() {
       '. + [{request_id:$r, role:$ro, track_title:$t, artist_name:$a}]' <<<"$items")"
   done
   jq -n --arg fn "$fn" --argjson c "$items" \
-    '{user:{email:"Jane.Doe@Example.com", id:"42", first_name:$fn}, credits:$c}' > "$f"
+    '{user:{email:"Jane.Doe@Example.com", id:"42", auth_id:"pro-42", first_name:$fn}, credits:$c}' > "$f"
 }
 # firstmate 090: the committed gate sends every verify-live note as v1 (no date, no removal).
 # SCRIPT has the windowed lock flipped; most legacy tests below exercise that (send-locked)
@@ -325,13 +325,22 @@ plain() { python3 -c 'import html,re,sys; print(html.unescape(re.sub(r"</p>|</li
   [ "$(posts)" -eq 0 ]
 }
 
-@test "recipient: a note that names no account (no user.id, no user.auth_id) is refused, send and check alike" {
+@test "recipient: a note with no account Intercom identity (user.auth_id) is refused, send and check alike" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
-  jq 'del(.user.id)' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
+  jq 'del(.user.auth_id)' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
   run -1 send
-  [[ "$output" == *"names no Muso account"* ]]
+  [[ "$output" == *"no account Intercom identity"* ]]
   run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
-  [[ "$output" == *"names no Muso account"* ]]
+  [[ "$output" == *"no account Intercom identity"* ]]
+  [ "$(posts)" -eq 0 ]
+}
+
+# firstmate 118/120: Intercom's external_id is the account's professionalId (users.neptuneprofessionalid);
+# the bare numeric user id is never accepted, even when it equals user.id.
+@test "recipient: a bare numeric external_id is refused even when it equals the user id" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u1","role":"user","email":"jane.doe@example.com","external_id":"42"}]}' run -1 send
+  [[ "$output" == *"external_id mismatch"* ]]
   [ "$(posts)" -eq 0 ]
 }
 
@@ -432,8 +441,8 @@ sent|1001" ]
 @test "the per-day cap is per user: another account the same day is not deferred" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -0 send
-  jq '.user.email = "someone@else.com" | .user.id = "43" | .credits[0].request_id = "r9"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json"
-  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"someone@else.com","external_id":"43"}]}' \
+  jq '.user.email = "someone@else.com" | .user.id = "43" | .user.auth_id = "pro-43" | .credits[0].request_id = "r9"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json"
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"someone@else.com","external_id":"pro-43"}]}' \
     run -0 "$SCRIPT" send --copy windowed --credits-file "$TEST_TMPDIR/c2.json" --approved-by U7RP6HKUZ
   [ "$(posts)" -eq 2 ]
 }
@@ -554,7 +563,7 @@ rcredits() { # like credits, with role_families taken from a 5th field
     items="$(jq -c --arg r "$rid" --arg ro "$role" --arg t "$title" --arg a "$artist" --arg fa "$fam" \
       '. + [{request_id:$r, role:$ro, track_title:$t, artist_name:$a, role_families:($fa|split("+")), profile_id:"p1", track_id:"t1"}]' <<<"$items")"
   done
-  jq -n --arg fn "$fn" --argjson c "$items" '{user:{email:"Jane.Doe@Example.com", id:"42", first_name:$fn}, credits:$c}' > "$f"
+  jq -n --arg fn "$fn" --argjson c "$items" '{user:{email:"Jane.Doe@Example.com", id:"42", auth_id:"pro-42", first_name:$fn}, credits:$c}' > "$f"
 }
 rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
 
@@ -783,14 +792,14 @@ PY
     --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == *"no follow-ups"* ]]
   # Another user sent proof on a new-credit note: they are never asked about past credits.
-  jq '.user.email = "bob@example.com" | .user.id = "44" | .credits[0].request_id = "n1"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/b.json"
-  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com","external_id":"44"}]}' \
+  jq '.user.email = "bob@example.com" | .user.id = "44" | .user.auth_id = "pro-44" | .credits[0].request_id = "n1"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/b.json"
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com","external_id":"pro-44"}]}' \
     INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$GATE" send --copy windowed --credits-file "$TEST_TMPDIR/b.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1002 credits=1" ]]
   STUB_CONVERSATION='{"id":"777","source":{"id":"1002"},"conversation_parts":{"conversation_parts":[{"author":{"type":"user","id":"u2"},"attachments":[{"name":"split.pdf"}]}]}}' \
     run -0 "$GATE" tag-proof --message-id 1002
   jq '.credits[0].request_id = "p9"' "$TEST_TMPDIR/b.json" > "$TEST_TMPDIR/b2.json"
-  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com","external_id":"44"}]}' \
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com","external_id":"pro-44"}]}' \
     INTERCOM_VERIFY_TEST_DAY=2026-10-21 run -0 past "$TEST_TMPDIR/b2.json"
   # Any earlier note (any campaign) already ends the past ask; the proof reply would too.
   [[ "$output" == "SKIPPED already_asked credits=1" ]]
@@ -910,7 +919,7 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
       --arg s "${src-}" --arg p "${pol-}" \
       '. + [{request_id:$r, role:$ro, track_title:$t, artist_name:$a, reason:$re, evidence_url:$u, source_label:$s, policy_reason:$p}]' <<<"$items")"
   done
-  jq -n --argjson c "$items" '{user:{email:"Jane.Doe@Example.com", id:"42", first_name:"Jane"}, credits:$c}' > "$f"
+  jq -n --argjson c "$items" '{user:{email:"Jane.Doe@Example.com", id:"42", auth_id:"pro-42", first_name:"Jane"}, credits:$c}' > "$f"
 }
 
 @test "removal notice: which credit, why, the public evidence link, how to dispute; send-locked as committed" {
@@ -1083,7 +1092,7 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
 }
 
 @test "after-rejection multi: credits with a document get their reason, reply-only ones the still-need ask" {
-  jq -n '{user:{email:"jane@example.com", id:"42", first_name:"Jane"}, credits:[
+  jq -n '{user:{email:"jane@example.com", id:"42", auth_id:"pro-42", first_name:"Jane"}, credits:[
     {request_id:"r1", role:"Mixing", track_title:"Song A", artist_name:"Big Star", received:"document", reason:"other_role"},
     {request_id:"r2", role:"Producer", track_title:"Song B", artist_name:"Big Star", received:"reply"}]}' > "$TEST_TMPDIR/m.json"
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1 \
@@ -1127,7 +1136,7 @@ tbcredits() { # <file> <id|role|title|artist|names(;)|url|source[|corroboration_
              other_names:($n | split(";") | map(select(length > 0))), evidence_url:$u, evidence_source:$s}
              + (if $c == "" then {} else {corroboration_url:$c} end)]' <<<"$items")"
   done
-  jq -n --argjson c "$items" '{campaign:"takeback-notice", user:{email:"Jane.Doe@Example.com", id:"42", first_name:"Jane"}, credits:$c}' > "$f"
+  jq -n --argjson c "$items" '{campaign:"takeback-notice", user:{email:"Jane.Doe@Example.com", id:"42", auth_id:"pro-42", first_name:"Jane"}, credits:$c}' > "$f"
 }
 
 # The gate renders the take-back notice credit-retro previews (scripts/credit_retro/notice.py,
@@ -1261,4 +1270,32 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   INTERCOM_VERIFY_TEST_DAY=2026-10-21 run -0 "$TEST_TMPDIR/tb.sh" send --campaign takeback-notice --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "SKIPPED already-notified credits=1" ]]
   [ "$(posts)" -eq 2 ]
+}
+
+# QA #1298 @05a7cac: the REAL take-back producer (credit_retro.notice.credits_file, fed the
+# auth_id credit_retro.takeback.notice_preflight looks up) passes the real gate's recipient
+# check; the same payload without the identity is refused.
+@test "takeback-notice: the producer's own payload (with auth_id) passes the recipient check; without it, refused" {
+  for with in yes no; do
+    # Distinct credits: a refusal is terminal in the gate's ledger for its credits.
+    if [ "$with" = yes ]; then n=q1; else n=q2; fi
+    tbcredits "$TEST_TMPDIR/c.json" "$n|Mixing|Song A|Big Star|Serban Ghenea|https://tidal.com/browse/track/1|Tidal credits"
+    (cd "$HYDRA_REPO/scripts" && WITH="$with" python3 -c '
+import json, os, sys
+from credit_retro import notice
+src = json.load(open(sys.argv[1]))
+user = {"id": 42, "email": "Jane.Doe@Example.com", "first_name": "Jane"}
+if os.environ["WITH"] == "yes":
+    user["auth_id"] = "pro-42"
+json.dump(notice.credits_file(user, src["credits"]), open(sys.argv[2], "w"))' "$TEST_TMPDIR/c.json" "$TEST_TMPDIR/p-$with.json")
+  done
+  # --check-recipient is verify-live only, so use the real send path with the copy unlocked
+  # (the stubbed Intercom only records the post).
+  sed -e 's/^readonly TAKEBACK_COPY_APPROVED=0$/readonly TAKEBACK_COPY_APPROVED=1/' "$LOCKED" > "$TEST_TMPDIR/tb-on.sh"
+  chmod +x "$TEST_TMPDIR/tb-on.sh"
+  run -1 "$TEST_TMPDIR/tb-on.sh" send --campaign takeback-notice --credits-file "$TEST_TMPDIR/p-no.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"no account Intercom identity"* ]]
+  [ "$(posts)" -eq 0 ]
+  run -0 "$TEST_TMPDIR/tb-on.sh" send --campaign takeback-notice --credits-file "$TEST_TMPDIR/p-yes.json" --approved-by U7RP6HKUZ
+  [ "$(posts)" -eq 1 ]
 }
