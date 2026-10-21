@@ -973,6 +973,59 @@ STUB
   [[ "$output" == *"restored from quarantine"* ]]
 }
 
+# MUS-16672: the systemd timer runs with LANG=C.UTF-8 (systemctl show-environment
+# on node-8), under which GNU find quotes paths as U+2018/U+2019 instead of
+# ASCII '. The benign-stderr allowlist matched only the ASCII form, so every
+# enumeration was "unusable" and the fail-closed gate held ALL 2,080 candidates
+# (115.7 GB) on the 19 Oct live run. A hand-run from an ssh shell (LANG unset)
+# never saw it. This stub quotes by locale exactly as GNU find does.
+mk_locale_find() {  # <complaint-body> <exit-code>: find that complains about the proc scan
+  REAL_FIND="$(command -v find)"; export REAL_FIND
+  FIND_BODY="$1"; export FIND_BODY
+  FIND_RC="$2"; export FIND_RC
+  cat > "$TEST_TMPDIR/bin/find" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$*" == *"$SWEEP_PROC_DIR"* ]]; then
+  "$REAL_FIND" "$@"
+  case "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" in
+    *UTF-8*|*utf8*) lq=$'\xe2\x80\x98'; rq=$'\xe2\x80\x99' ;;
+    *) lq="'"; rq="'" ;;
+  esac
+  echo "find: ${lq}$SWEEP_PROC_DIR/${FIND_BODY%%|*}${rq}: ${FIND_BODY#*|}" >&2
+  exit "$FIND_RC"
+fi
+exec "$REAL_FIND" "$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/find"
+}
+
+@test "a benign /proc complaint quoted in a UTF-8 locale still leaves the snapshot usable (--apply sweeps)" {
+  find . -maxdepth 0 -ignore_readdir_race -printf '' >/dev/null 2>&1 \
+    || skip "requires GNU find (the production path); CI is node-8"
+  mkclone "$TEST_TMPDIR/repos/utf8-ok"
+  age_tree 20 "$TEST_TMPDIR/repos/utf8-ok"
+  mk_locale_find "1/net|Invalid argument" 1
+  LANG=C.UTF-8 run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/find"; hash -r
+  [ "$status" -eq 0 ]
+  [ ! -e "$TEST_TMPDIR/repos/utf8-ok" ]
+  [[ "$output" != *"live process holds the tree open"* ]]
+  [[ "$output" == *"in-use=0"* ]]
+}
+
+@test "a non-benign /proc complaint still holds under a UTF-8 locale (fail-closed kept)" {
+  find . -maxdepth 0 -ignore_readdir_race -printf '' >/dev/null 2>&1 \
+    || skip "requires GNU find (the production path); CI is node-8"
+  mkclone "$TEST_TMPDIR/repos/utf8-bad"
+  age_tree 20 "$TEST_TMPDIR/repos/utf8-bad"
+  mk_locale_find "1/fd|Permission denied" 1
+  LANG=C.UTF-8 run "$SWEEP" --apply
+  rm -f "$TEST_TMPDIR/bin/find"; hash -r
+  [ "$status" -eq 0 ]
+  [ -d "$TEST_TMPDIR/repos/utf8-bad" ]
+  [[ "$output" == *"live process holds the tree open"* ]]
+}
+
 @test "an unreadable proc tree holds candidates (cannot prove absence of writers)" {
   mkclone "$TEST_TMPDIR/repos/noproc"
   age_tree 20 "$TEST_TMPDIR/repos/noproc"
