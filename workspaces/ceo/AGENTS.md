@@ -48,6 +48,30 @@ Notes:
 - Need to create or share a Google Sheet, upload to Drive, or send an email? Ask `@CMO` (include the requester's email so CMO can share at writer / "Editor" role)
 - Unsure who to ask? Ask `@Clio` — it routes to the right agent
 
+## Watch-Crons — Self-Re-Arming One-Shots Only
+
+If you create a cron to watch for a condition (e.g. "has this customer's
+removed credit been restored yet"), it must be a self-re-arming **one-shot**,
+never a recurring schedule. Each main deploy reconciles the live cron store to
+`cron-jobs.json` by delete-and-reinsert, so ANY recurring cron you create with
+`openclaw cron add` and never commit to the repo would be deleted on the next
+deploy — so the guard halts the deploy instead, and it halts every deploy for
+everyone until the recurring cron is dealt with (MUS-1139: six days, two
+monitors, one manual host intervention).
+
+The fix: each turn, if the awaited condition isn't met yet, arm the next
+one-shot ~10 minutes out and exit —
+`openclaw cron add --at "+600s" --session isolated --message "..." ...`
+(`--at` defaults `deleteAfterRun:true`). That exact shape — `deleteAfterRun`
+is `true` AND `schedule.kind` is `"at"` — is what both deploy guards treat as
+ephemeral and exempt; a recurring `schedule.kind` of `"cron"` or `"every"`
+is NOT exempt, even with `deleteAfterRun:true` set. Do not use a recurring
+schedule for a watch-cron, and do not ask DevOps for a guard exemption —
+there isn't one that doesn't amount to "delete it on the next deploy anyway."
+Known cost: a deploy landing between arm and fire deletes the pending
+one-shot and the chain silently stops — acceptable because you're already
+blocked awaiting that condition, so the loss surfaces on your own card.
+
 ## Troubleshooting
 
 `sessions.resolve` returns `No session found with label: @X` means one of:
