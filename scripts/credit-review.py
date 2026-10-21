@@ -131,6 +131,13 @@ def make_judge(args: argparse.Namespace, notes: list[str] | None = None) -> Judg
     """
     if getattr(args, "no_model", False):
         return None
+    if args.cmd in ("audit", "review") and not MODEL_ENABLE_FILE.exists():
+        # The operator's switch for the scheduled read-only judges covers EVERY
+        # provider: with the file absent the audit and shadow review are
+        # catalog-only, Codex included (QA on hydra#1279). decide keeps its own
+        # Codex path; its OpenRouter fallback is still gated below.
+        log(f"model judge disabled ({MODEL_ENABLE_FILE} absent): catalog-only run")
+        return None
     if getattr(args, "provider", "openrouter") == "codex":
         # $0 first: Codex on fetched sources; the OpenRouter judge (with every
         # guard below) is only the fallback when nothing could be fetched or

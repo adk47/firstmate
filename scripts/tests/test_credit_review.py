@@ -1257,6 +1257,22 @@ class ModelGateTests(unittest.TestCase):
     def args(self, *extra):
         return self.cli.parser().parse_args(["audit", *extra])
 
+    def test_codex_provider_is_off_without_enable_file_for_audit_and_review(self):
+        # QA on hydra#1279: --provider codex must not bypass the operator's switch.
+        self.cli.codex_judge = lambda *a, **k: self.fail("codex judge must not be built")
+        self.cli.account_balance_usd = lambda: self.fail("balance must not even be read")
+        self.assertIsNone(self.cli.make_judge(self.args("--provider", "codex")))
+        review = self.cli.parser().parse_args(["review", "--phase", "shadow", "--provider", "codex"])
+        self.assertIsNone(self.cli.make_judge(review))
+
+    def test_codex_provider_runs_with_enable_file(self):
+        self.cli.MODEL_ENABLE_FILE.write_text("")
+        built = []
+        self.cli.codex_judge = lambda args, fallback=None, **k: built.append(fallback) or "codex-judge"
+        self.cli.account_balance_usd = lambda: 50.0
+        self.assertEqual(self.cli.make_judge(self.args("--provider", "codex")), "codex-judge")
+        self.assertIsNotNone(built[0])          # the capped OpenRouter judge is the fallback
+
     def test_off_without_enable_file(self):
         self.cli.account_balance_usd = lambda: self.fail("balance must not even be read")
         self.assertIsNone(self.cli.make_judge(self.args()))
