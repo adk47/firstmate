@@ -970,7 +970,9 @@ STUB
   [ -d "$TEST_TMPDIR/repos/held-open" ]
   [ -f "$TEST_TMPDIR/repos/held-open/f.txt" ]
   [[ "$output" == *"live process holds the tree open"* ]]
-  [[ "$output" == *"restored from quarantine"* ]]
+  # The holder predates the sweep, so the pre-rename snapshot (usable under any
+  # locale since LC_ALL=C on the enumeration) holds it before quarantine; the
+  # post-quarantine restore path is covered by the safe-delete suite.
 }
 
 # MUS-16672: the systemd timer runs with LANG=C.UTF-8 (systemctl show-environment
