@@ -52,6 +52,12 @@ def req(rid, *, uid=500, pid=T.PID_GOOD, track="small", roles=("Mixing",), vd_ru
     return r
 
 
+def anchored(r):
+    """E1 (Fable review-audit-1021): a positive anchor for the paid provisional arm."""
+    r["verificationData"]["is_approved"] = True
+    return r
+
+
 def uuid_of(n):
     return f"00000000-0000-4000-8000-{n:012d}"
 
@@ -639,7 +645,7 @@ class PaidUsersFirst(Base):
         against the claim); free users stay on the ask path; big tracks stay strict."""
         self.paying("2026-10-11T02:30:00Z", ids=(900,))
         judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
-        rows = [req(uuid_of(190), uid=900, track="t3"), req(uuid_of(191), uid=501, track="t3"),
+        rows = [anchored(req(uuid_of(190), uid=900, track="t3")), req(uuid_of(191), uid=501, track="t3"),
                 req(uuid_of(192), uid=900, track="t2")]
         res, w = self.go(rows, {}, judge=judge)
         d = self.decisions()
@@ -656,11 +662,69 @@ class PaidUsersFirst(Base):
         decide.PROVISIONAL_PAID_SWITCH.write_text("off")
         self.paying("2026-10-11T02:30:00Z", ids=(900,))
         judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
-        res, w = self.go([req(uuid_of(193), uid=900, track="t3")], {}, judge=judge)
+        res, w = self.go([anchored(req(uuid_of(193), uid=900, track="t3"))], {}, judge=judge)
         d = self.decisions()[uuid_of(193)]
         self.assertEqual(d["decision"], "support")
         self.assertNotEqual(d["evidence_kind"], decide.PROVISIONAL_KIND)
         self.assertNotIn(uuid_of(193), [i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]])
+
+    # ---- E1 (Fable review-audit-1021) ----
+    def test_e1_paid_and_nothing_contradicts_is_not_an_anchor(self):
+        """The 7 'unverifiable' of the audit: validator declined, catalog UNVERIFIABLE -> no approve."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        res, w = self.go([req(uuid_of(300), uid=900, track="t3")], {}, judge=judge)
+        d = self.decisions()[uuid_of(300)]
+        self.assertEqual(d["decision"], "support")
+        self.assertIn("no positive anchor", d["reason"])
+        self.assertEqual([i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]], [])
+
+    def test_e1_prodgxm_others_only_plus_type_beat_web_is_never_approved(self):
+        """ProdGxm fixture: Producer credited to the artist only (OTHERS_ONLY) and the web finds
+        nothing for the claimant ('type beat' seller) -> stage 2, never approved, even with the
+        validator's approval as an anchor."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        row = anchored(req(uuid_of(301), uid=900, track="t3", roles=("Producer",)))
+        res, w = self.go([row], {"t3": [T.raw("comehelpglo", "producer")]}, judge=judge)
+        d = self.decisions()[uuid_of(301)]
+        self.assertNotEqual(d["decision"], "approve")
+        self.assertNotEqual(d["evidence_kind"], decide.PROVISIONAL_KIND)
+        self.assertEqual([i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]], [])
+
+    def test_e1_pixlpxl_catalog_confirmed_role_is_approved_with_the_citation(self):
+        """pixlpxl fixture: one claimed role CONFIRMED by the catalog (the Atmos mix), the other
+        unverifiable, web NOT_FOUND -> provisional approval citing the confirmed role."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        res, w = self.go([req(uuid_of(303), uid=900, track="t3", roles=("Mixing", "Mastering"))],
+                         {"t3": [T.raw("Real Engineer", "mixer")]}, judge=judge)
+        d = self.decisions()[uuid_of(303)]
+        self.assertEqual((d["decision"], d["evidence_kind"]), ("approve", decide.PROVISIONAL_KIND), d["reason"])
+        self.assertIn("catalog confirms Mixing", d["reason"])
+        d0 = decide.Decision(request_id="x", profile_id="p", user_id=900, track_id="t", track_title="V",
+                             claimed_roles="Immersive Mixing,Mastering", popularity=20, big_track=False,
+                             decision="support", reason="")
+        d0.catalog = "Immersive Mixing=CONFIRMED,Mastering=UNVERIFIABLE"
+        proof = decide.ProofOnFile(frozenset(), frozenset())
+        self.assertEqual(decide.provisional_anchor(d0, {"verificationData": {"is_approved": False}}, proof),
+                         "catalog confirms Immersive Mixing")
+        d0.catalog = "Immersive Mixing=CONFIRMED,Composer=OTHERS_ONLY"
+        self.assertTrue(decide.provisional_anchor(d0, {}, proof).startswith("no:the catalog credits Composer"))
+        self.assertTrue(decide.provisional_anchor(d0, {}, None).startswith("no:the catalog credits"))
+        d0.catalog = "Immersive Mixing=CONFIRMED"
+        self.assertTrue(decide.provisional_anchor(d0, {}, None).startswith("no:proof on file"))
+        self.assertTrue(decide.provisional_anchor(d0, {}, decide.ProofOnFile(frozenset({900}), frozenset())).startswith(
+            "no:proof on file"))
+
+    def test_e1_a_user_with_proof_on_file_goes_to_the_verifier_not_provisional(self):
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        self.proof([{"user_id": 900, "request_id": None, "kind": "pending_doc", "source": "cs-intercom", "ref": "c1"}])
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        res, w = self.go([anchored(req(uuid_of(302), uid=900, track="t3"))], {}, judge=judge)
+        d = self.decisions()[uuid_of(302)]
+        self.assertNotEqual(d["evidence_kind"], decide.PROVISIONAL_KIND)
+        self.assertEqual([i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]], [])
 
     def test_the_web_check_cap_always_admits_paid_rows_first(self):
         """firstmate 099 (Fable ruling 6, paid first): with room for ONE web check, the newer
@@ -717,7 +781,8 @@ class PaidUsersFirst(Base):
         a document the row is LISTED for Ops review (still live); a documented one is not."""
         self.paying("2026-10-11T02:30:00Z", ids=(900,))
         judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
-        self.go([req(uuid_of(220), uid=900, track="t3"), req(uuid_of(221), uid=900, track="t3")], {}, judge=judge)
+        self.go([anchored(req(uuid_of(220), uid=900, track="t3")), anchored(req(uuid_of(221), uid=900, track="t3"))],
+                {}, judge=judge)
         d = self.decisions()[uuid_of(220)]
         self.assertIn("never auto-removed", d["reason"])
         self.assertNotIn("removed on day", d["reason"])
@@ -756,7 +821,7 @@ class PaidUsersFirst(Base):
         old = decide.PROVISIONAL_MAX_PER_USER_PER_DAY
         decide.PROVISIONAL_MAX_PER_USER_PER_DAY = 2
         try:
-            res, _ = self.go([req(uuid_of(200 + i), uid=900, track="t3") for i in range(3)], {}, judge=judge)
+            res, _ = self.go([anchored(req(uuid_of(200 + i), uid=900, track="t3")) for i in range(3)], {}, judge=judge)
         finally:
             decide.PROVISIONAL_MAX_PER_USER_PER_DAY = old
         got = sorted(x["decision"] for x in self.decisions().values() if x["request_id"] in {uuid_of(200 + i) for i in range(3)})
@@ -781,7 +846,7 @@ class PaidUsersFirst(Base):
         old = decide.PROVISIONAL_MAX_PER_USER_PER_DAY
         decide.PROVISIONAL_MAX_PER_USER_PER_DAY = 2
         try:
-            res, w = self.go([req(uuid_of(240 + i), uid=900, track="t3") for i in range(2)], {}, judge=judge)
+            res, w = self.go([anchored(req(uuid_of(240 + i), uid=900, track="t3")) for i in range(2)], {}, judge=judge)
         finally:
             decide.PROVISIONAL_MAX_PER_USER_PER_DAY = old
         d = self.decisions()

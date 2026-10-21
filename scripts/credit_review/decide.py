@@ -798,6 +798,35 @@ PROVISIONAL_PAID_SWITCH = Path(os.environ.get("CREDIT_TRUST_PROVISIONAL_PAID_DIS
                                               "/etc/hydra/credit-trust-decide-provisional-paid.disabled"))
 
 
+def catalog_verdicts(summary: str) -> dict[str, str]:
+    """{claimed role: catalog verdict} from Decision.catalog ("Role=VERDICT,Role=VERDICT")."""
+    out: dict[str, str] = {}
+    for part in (summary or "").split(","):
+        role, sep, verdict = part.rpartition("=")
+        if sep and role.strip():
+            out[role.strip()] = verdict.strip()
+    return out
+
+
+def provisional_anchor(d: "Decision", row: dict[str, Any], proof: "ProofOnFile | None") -> str:
+    """E1 (Fable review-audit-1021): the positive anchor that lets the paid provisional arm fire,
+    or "no:<why>". The catalog verdicts are the deterministic evidence summary."""
+    verdicts = catalog_verdicts(d.catalog)
+    others = sorted(r for r, v in verdicts.items() if v == "OTHERS_ONLY")
+    if others:
+        return (f"no:the catalog credits {', '.join(others)} to other people only (a contradiction signal): "
+                "stage 2 web/doc check, never a provisional approval")
+    if proof is None or proof.covers(d):
+        return ("no:proof on file (or proof status unknown): the verifier reviews it; never a provisional approval")
+    vd = row.get("verificationData") if isinstance(row.get("verificationData"), dict) else {}
+    if vd.get("is_approved") is True:
+        return "validator approved"
+    confirmed = sorted(r for r, v in verdicts.items() if v == "CONFIRMED")
+    if confirmed:
+        return f"catalog confirms {', '.join(confirmed)}"
+    return "no:no positive anchor (the validator declined and the catalog confirms no claimed role)"
+
+
 def provisional_today_by_user(db: sqlite3.Connection, since: str) -> dict[int, int]:
     """Paid provisional approvals per user since `since` (apply mode, server-confirmed or
     attempted: every approve decision of that kind counts against the cap)."""
@@ -1213,6 +1242,13 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     # lowering classes): NO day-30 auto-removal; unconfirmed after 30 days the row goes to the
     # Ops review list (provisional_review), still live. Capped at
     # PROVISIONAL_MAX_PER_USER_PER_DAY per user per UTC day. Free users stay on the ask path.
+    #
+    # E1 (Fable review-audit-1021): "paid + nothing contradicts" is not evidence. The arm fires
+    # only with a POSITIVE anchor - the validator approved the row, or the catalog CONFIRMS at
+    # least one claimed role (cited in the reason) - and never when the catalog credits any
+    # claimed role to other people only (OTHERS_ONLY = a contradiction signal: stage 2 web/doc),
+    # nor for a user with proof on file (that goes to the verifier, never to a provisional
+    # approval). Measured 10-20/21: 230 approvals, all validator-declined, 128 OTHERS_ONLY.
     req_by_id = {str(r.get("id")): r for r in batch}
     prov_today = provisional_today_by_user(db, now.strftime("%Y-%m-%dT00:00:00Z"))
     provisional_paid_off = PROVISIONAL_PAID_SWITCH.exists()
@@ -1222,14 +1258,18 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         if not (d.decision == "support" and d.web_verdict == "NOT_FOUND" and d.paid_priority
                 and not d.big_track and d.conflict is None and not d.n1):
             continue
+        anchor = provisional_anchor(d, req_by_id.get(d.request_id) or {}, proof)
+        if anchor.startswith("no:"):
+            d.reason = (d.reason + "; " if d.reason else "") + f"not provisionally approved: {anchor[3:]}"
+            continue
         if d.user_id is not None and prov_today.get(d.user_id, 0) >= PROVISIONAL_MAX_PER_USER_PER_DAY:
             _set(d, "defer", f"paid provisional approvals for this user reached {PROVISIONAL_MAX_PER_USER_PER_DAY} "
                  "today; next UTC day")
             continue
         d.evidence_kind = PROVISIONAL_KIND
-        _set(d, "approve", "trust yet verify (Fable ruling 4, amended firstmate 073): paid user, small/medium track, "
-             "nothing contradicts the claim and no red flag; provisional approval with a no-threat document "
-             "request; never auto-removed: unconfirmed after 30 days it goes to the Ops review list (still live)")
+        _set(d, "approve", f"trust yet verify (Fable ruling 4 + E1 review-audit-1021): paid user, small/medium track, "
+             f"{anchor}, no claimed role credited to others only, no red flag; provisional approval with a no-threat "
+             "document request; never auto-removed: unconfirmed after 30 days it goes to the Ops review list (still live)")
         if d.user_id is not None:
             prov_today[d.user_id] = prov_today.get(d.user_id, 0) + 1
 
