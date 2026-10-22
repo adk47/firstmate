@@ -119,9 +119,13 @@ def render(first_name: str | None, credits: list[dict[str, Any]]) -> tuple[str, 
 
 
 def credits_file(user: dict[str, Any], credits: list[dict[str, Any]]) -> dict[str, Any]:
+    """The gate's credits file. The recipient is matched by user.professional_id (the account's
+    users.neptuneProfessionalId, Intercom's external_id) and user.auth_id (its Auth0 subject),
+    like every other driver (firstmate 090)."""
     return {"campaign": CAMPAIGN,
             "user": {"email": user.get("email"), "id": str(user.get("id") or ""),
-                     "auth_id": str(user.get("auth_id") or ""),   # the gate matches external_id to this
+                     "professional_id": str(user.get("professional_id") or ""),
+                     "auth_id": str(user.get("auth_id") or ""),
                      "first_name": user.get("first_name")},
             "credits": credits}
 

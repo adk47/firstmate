@@ -47,6 +47,7 @@ setup() {
   export CURL_STUB_MESSAGE="$TEST_TMPDIR/message-payload.json"
   export CURL_STUB_LOGS_AT_POST="$TEST_TMPDIR/logs-at-post"
   export CURL_STUB_COUNTER="$TEST_TMPDIR/msg-counter"
+  export CURL_STUB_REPLY="$TEST_TMPDIR/reply-payload.json"
   cat > "$STUB_DIR/curl" <<'STUB'
 #!/usr/bin/env bash
 payload="" url="" method="GET"
@@ -65,7 +66,7 @@ case "$method $path" in
   "POST /contacts/search")
     if [ -n "${STUB_CONTACTS:-}" ]; then printf '%s' "$STUB_CONTACTS"; exit 0; fi
     email="$(printf '%s' "$payload" | jq -r '.query.value')"
-    printf '{"type":"list","data":[{"type":"contact","id":"6650aa01","role":"user","email":"%s","external_id":"pro-42"}],"total_count":1}' "$email" ;;
+    printf '{"type":"list","data":[{"type":"contact","id":"6650aa01","role":"user","email":"%s","external_id":"%s"}],"total_count":1}' "$email" "${STUB_EXT_ID:-9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64}" ;;
   "POST /messages")
     printf '%s' "$payload" > "$CURL_STUB_MESSAGE"
     find "$INTERCOM_VERIFY_TEST_LOG_DIR" -type f -name '*.json' | wc -l | tr -d ' ' > "$CURL_STUB_LOGS_AT_POST"
@@ -81,6 +82,12 @@ case "$method $path" in
       [ -n "${STUB_CONTACT_CONVS:-}" ] || printf '{"type":"conversation.list","conversations":[],"pages":{}}'
       exit 0
     fi
+    if printf '%s' "$payload" | jq -e '[(.query.value // [])[]? | .field?] | any(. == "state")' >/dev/null 2>&1; then
+      # The open-conversation lookup for in-thread delivery (none unless a test says so).
+      if [ -n "${STUB_OPEN_CONVS:-}" ]; then printf '%s' "$STUB_OPEN_CONVS"; exit 0; fi
+      printf '{"type":"conversation.list","conversations":[],"total_count":0}'
+      exit 0
+    fi
     if [ -n "${STUB_CONV_SEARCH:-}" ]; then printf '%s' "$STUB_CONV_SEARCH"; exit 0; fi
     printf '{"type":"conversation.list","conversations":[{"id":"777"}]}' ;;
   "GET /conversations/777?display_as=plaintext")
@@ -93,6 +100,13 @@ case "$method $path" in
     printf '{"type":"tag","id":"10","name":"credit-proof"}' ;;
   "POST /conversations/777/tags")
     printf '{"type":"tag","id":"9","name":"credit-proof"}' ;;
+  "GET /contacts/"*)
+    if [ -n "${STUB_CONTACT_GET:-}" ]; then printf '%s' "$STUB_CONTACT_GET"; exit 0; fi
+    printf '{"type":"error.list","errors":[{"code":"not_found"}]}' ;;
+  "POST /conversations/777/reply")
+    printf '%s' "$payload" > "$CURL_STUB_REPLY"
+    if [ -n "${STUB_REPLY_RESPONSE:-}" ]; then printf '%s' "$STUB_REPLY_RESPONSE"; exit 0; fi
+    printf '{"type":"conversation","id":"777","conversation_parts":{"conversation_parts":[{"id":"87000","part_type":"comment","author":{"type":"user","id":"6650aa01"}},{"id":"88001","part_type":"comment","author":{"type":"admin","id":"5763097"}}]}}' ;;
   *) printf '{"type":"error.list","errors":[{"code":"not_found"}]}' ;;
 esac
 STUB
@@ -114,7 +128,7 @@ credits() {
       '. + [{request_id:$r, role:$ro, track_title:$t, artist_name:$a}]' <<<"$items")"
   done
   jq -n --arg fn "$fn" --argjson c "$items" \
-    '{user:{email:"Jane.Doe@Example.com", id:"42", auth_id:"pro-42", first_name:$fn}, credits:$c}' > "$f"
+    '{user:{email:"Jane.Doe@Example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:$fn}, credits:$c}' > "$f"
 }
 # firstmate 090: the committed gate sends every verify-live note as v1 (no date, no removal).
 # SCRIPT has the windowed lock flipped; most legacy tests below exercise that (send-locked)
@@ -127,6 +141,7 @@ send() {
   else "$SCRIPT" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ "$@"; fi
 }
 posts() { if [ -f "$CURL_STUB_LOG" ]; then grep -c "^POST https://api.intercom.io/messages$" "$CURL_STUB_LOG" || true; else echo 0; fi; }
+replies() { if [ -f "$CURL_STUB_LOG" ]; then grep -c "^POST https://api.intercom.io/conversations/[0-9]*/reply$" "$CURL_STUB_LOG" || true; else echo 0; fi; }
 calls() { if [ -f "$CURL_STUB_LOG" ]; then wc -l < "$CURL_STUB_LOG" | tr -d ' '; else echo 0; fi; }
 msg() { jq -r "$1" "$CURL_STUB_MESSAGE"; }
 sql() { python3 -c 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); [print("|".join("" if v is None else str(v) for v in r)) for r in db.execute(sys.argv[2])]' "$INTERCOM_VERIFY_TEST_LEDGER" "$1"; }
@@ -281,6 +296,76 @@ plain() { python3 -c 'import html,re,sys; print(html.unescape(re.sub(r"</p>|</li
   [ "$(sql "select count(*) from verify_requests where status='refused'")" -eq 3 ]
 }
 
+# Firstmate 090: Intercom's external_id is users.neptuneProfessionalId (user.professional_id);
+# the Auth0 subject (user.auth_id, with or without auth0|) also names the account; the bare
+# numeric user id does not.
+LEGACY_PRO="0c9e7b3a-5d2f-4a18-9e6b-3f1d8c2a7b54"
+OTHER_PRO="0c4e7a2b-1f3d-4b6a-9e8c-7d5a3b1f0e92"
+
+@test "recipient (professional id): the account's professional id or Auth0 subject is this account; the numeric id, an empty or another account's id is not" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  jq --arg p "$LEGACY_PRO" '.user.professional_id = $p' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
+  for ext in "$LEGACY_PRO" "9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64" "auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"; do
+    rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+    STUB_EXT_ID="$ext" INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send
+    [[ "$output" == "POSTED email message="* ]] || { echo "external_id $ext was not accepted: $output"; return 1; }
+  done
+  for ext in "42" "$OTHER_PRO"; do
+    rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+    STUB_EXT_ID="$ext" run -1 send
+    [[ "$output" == *"external_id mismatch"* ]] || { echo "external_id $ext was accepted: $output"; return 1; }
+  done
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u1","role":"user","email":"jane.doe@example.com","external_id":""}]}' run -1 send
+  [[ "$output" == *"has no external_id, so it cannot be matched to this Muso account"* ]]
+  jq '.user.professional_id = "not a pro id!"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
+  run -1 send --validate
+  [[ "$output" == *"user.professional_id must be the account's users.neptuneProfessionalId"* ]]
+  jq '.user |= del(.professional_id) | .user.auth_id = "not a subject!"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
+  run -1 send --validate
+  [[ "$output" == *"user.auth_id must be the account's Auth0 subject"* ]]
+}
+
+@test "recipient (professional id): a legacy account with no Auth0 subject is matched by its professional id for uvn-status and the status notes" {
+  for camp in uvn-status status-doc-received status-team-review; do
+    rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+    credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+    jq --arg p "$LEGACY_PRO" '.user |= (del(.auth_id) | .professional_id = $p)' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
+    STUB_EXT_ID="$LEGACY_PRO" run -0 "$LOCKED" send --campaign "$camp" --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    [[ "$output" == "POSTED email message="* ]] || { echo "$camp: $output"; return 1; }
+    [ "$(msg .to.id)" = "6650aa01" ]
+  done
+}
+
+@test "recipient (firstmate 091): of several Intercom users with the email, the one whose external_id is this account is the recipient" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  two() { printf '{"type":"list","data":[{"id":"u1","role":"user","email":"jane.doe@example.com","external_id":"%s"},{"id":"u2","role":"user","email":"jane.doe@example.com","external_id":"%s"},{"id":"l1","role":"lead","email":"jane.doe@example.com","external_id":"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"}]}' "$1" "$2"; }
+  STUB_CONTACTS="$(two "$OTHER_PRO" "9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64")" INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send
+  [[ "$output" == "POSTED email message="* ]]
+  [ "$(msg .to.id)" = "u2" ]
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  STUB_CONTACTS="$(two "$OTHER_PRO" "42")" run -1 send
+  [[ "$output" == *"matches 2 Intercom users"* ]]
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  STUB_CONTACTS="$(two "9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64" "auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64")" run -1 send
+  [[ "$output" == *"matches 2 Intercom users"* ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "recipient: an Intercom user with no external_id is refused, recorded for a terminal campaign, held for a re-check campaign" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u1","role":"user","email":"jane.doe@example.com"}]}' run -1 send
+  [[ "$output" == *"the Intercom user for this email has no external_id, so it cannot be matched to this Muso account"* ]]
+  [ "$(sql "select status from verify_requests where request_id='r1'")" = "refused" ]
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u1","role":"user","email":"jane.doe@example.com","external_id":""}]}' \
+    run -1 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"has no external_id"* ]]
+  [ "$(sql "select campaign || ':' || refusals from verify_refusal_holds")" = "status-doc-received:1" ]
+  [ "$(sql "select count(*) from verify_requests where request_id='s1'")" = "0" ]
+  [ "$(posts)" -eq 0 ]
+}
+
 @test "recipient: an Intercom user that belongs to a different Muso account is refused" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   STUB_CONTACTS='{"type":"list","data":[{"id":"u1","role":"user","email":"jane.doe@example.com","external_id":"999"}]}' run -1 send
@@ -325,9 +410,9 @@ plain() { python3 -c 'import html,re,sys; print(html.unescape(re.sub(r"</p>|</li
   [ "$(posts)" -eq 0 ]
 }
 
-@test "recipient: a note with no account Intercom identity (user.auth_id) is refused, send and check alike" {
+@test "recipient: a note with no account Intercom identity (user.professional_id / user.auth_id; a bare user.id is not enough) is refused, send and check alike" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
-  jq 'del(.user.auth_id)' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
+  jq 'del(.user.professional_id, .user.auth_id)' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
   run -1 send
   [[ "$output" == *"no account Intercom identity"* ]]
   run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
@@ -441,8 +526,8 @@ sent|1001" ]
 @test "the per-day cap is per user: another account the same day is not deferred" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -0 send
-  jq '.user.email = "someone@else.com" | .user.id = "43" | .user.auth_id = "pro-43" | .credits[0].request_id = "r9"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json"
-  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"someone@else.com","external_id":"pro-43"}]}' \
+  jq '.user.email = "someone@else.com" | .user.id = "43" | .credits[0].request_id = "r9"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json"
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"someone@else.com","external_id":"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"}]}' \
     run -0 "$SCRIPT" send --copy windowed --credits-file "$TEST_TMPDIR/c2.json" --approved-by U7RP6HKUZ
   [ "$(posts)" -eq 2 ]
 }
@@ -563,7 +648,7 @@ rcredits() { # like credits, with role_families taken from a 5th field
     items="$(jq -c --arg r "$rid" --arg ro "$role" --arg t "$title" --arg a "$artist" --arg fa "$fam" \
       '. + [{request_id:$r, role:$ro, track_title:$t, artist_name:$a, role_families:($fa|split("+")), profile_id:"p1", track_id:"t1"}]' <<<"$items")"
   done
-  jq -n --arg fn "$fn" --argjson c "$items" '{user:{email:"Jane.Doe@Example.com", id:"42", auth_id:"pro-42", first_name:$fn}, credits:$c}' > "$f"
+  jq -n --arg fn "$fn" --argjson c "$items" '{user:{email:"Jane.Doe@Example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:$fn}, credits:$c}' > "$f"
 }
 rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
 
@@ -792,14 +877,14 @@ PY
     --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == *"no follow-ups"* ]]
   # Another user sent proof on a new-credit note: they are never asked about past credits.
-  jq '.user.email = "bob@example.com" | .user.id = "44" | .user.auth_id = "pro-44" | .credits[0].request_id = "n1"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/b.json"
-  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com","external_id":"pro-44"}]}' \
+  jq '.user.email = "bob@example.com" | .user.id = "44" | .credits[0].request_id = "n1"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/b.json"
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com","external_id":"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"}]}' \
     INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$GATE" send --copy windowed --credits-file "$TEST_TMPDIR/b.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1002 credits=1" ]]
   STUB_CONVERSATION='{"id":"777","source":{"id":"1002"},"conversation_parts":{"conversation_parts":[{"author":{"type":"user","id":"u2"},"attachments":[{"name":"split.pdf"}]}]}}' \
     run -0 "$GATE" tag-proof --message-id 1002
   jq '.credits[0].request_id = "p9"' "$TEST_TMPDIR/b.json" > "$TEST_TMPDIR/b2.json"
-  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com","external_id":"pro-44"}]}' \
+  STUB_CONTACTS='{"type":"list","data":[{"id":"u2","role":"user","email":"bob@example.com","external_id":"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"}]}' \
     INTERCOM_VERIFY_TEST_DAY=2026-10-21 run -0 past "$TEST_TMPDIR/b2.json"
   # Any earlier note (any campaign) already ends the past ask; the proof reply would too.
   [[ "$output" == "SKIPPED already_asked credits=1" ]]
@@ -819,7 +904,7 @@ PY
 @test "unknown campaigns and kinds are refused" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -1 send --campaign everything
-  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice or takeback-notice"* ]]
+  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed or email-changed-dup"* ]]
   run -1 send --kind final-notice --parent-message-id 1
   [[ "$output" == *"--kind must be initial, reminder-14, reminder-25 or after-rejection"* ]]
 }
@@ -919,7 +1004,7 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
       --arg s "${src-}" --arg p "${pol-}" \
       '. + [{request_id:$r, role:$ro, track_title:$t, artist_name:$a, reason:$re, evidence_url:$u, source_label:$s, policy_reason:$p}]' <<<"$items")"
   done
-  jq -n --argjson c "$items" '{user:{email:"Jane.Doe@Example.com", id:"42", auth_id:"pro-42", first_name:"Jane"}, credits:$c}' > "$f"
+  jq -n --argjson c "$items" '{user:{email:"Jane.Doe@Example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:"Jane"}, credits:$c}' > "$f"
 }
 
 @test "removal notice: which credit, why, the public evidence link, how to dispute; send-locked as committed" {
@@ -1092,7 +1177,7 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
 }
 
 @test "after-rejection multi: credits with a document get their reason, reply-only ones the still-need ask" {
-  jq -n '{user:{email:"jane@example.com", id:"42", auth_id:"pro-42", first_name:"Jane"}, credits:[
+  jq -n '{user:{email:"jane@example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:"Jane"}, credits:[
     {request_id:"r1", role:"Mixing", track_title:"Song A", artist_name:"Big Star", received:"document", reason:"other_role"},
     {request_id:"r2", role:"Producer", track_title:"Song B", artist_name:"Big Star", received:"reply"}]}' > "$TEST_TMPDIR/m.json"
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1 \
@@ -1136,7 +1221,7 @@ tbcredits() { # <file> <id|role|title|artist|names(;)|url|source[|corroboration_
              other_names:($n | split(";") | map(select(length > 0))), evidence_url:$u, evidence_source:$s}
              + (if $c == "" then {} else {corroboration_url:$c} end)]' <<<"$items")"
   done
-  jq -n --argjson c "$items" '{campaign:"takeback-notice", user:{email:"Jane.Doe@Example.com", id:"42", auth_id:"pro-42", first_name:"Jane"}, credits:$c}' > "$f"
+  jq -n --argjson c "$items" '{campaign:"takeback-notice", user:{email:"Jane.Doe@Example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:"Jane"}, credits:$c}' > "$f"
 }
 
 # The gate renders the take-back notice credit-retro previews (scripts/credit_retro/notice.py,
@@ -1272,10 +1357,481 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   [ "$(posts)" -eq 2 ]
 }
 
+# ---- uvn-status (ops takeover section 2 class 2, firstmate 060) ---------------------------
+
+@test "uvn-status: one request renders the approved copy with the ask-once marker sentence" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .subject)" = "Your Muso credit request: one thing we still need" ]
+  body="$(rendered .body | plain)"
+  [[ "$body" == *'Hi Jane, a quick status update on your credit request for "Song A" by Big Star: it'"'"'s waiting on one thing from you, something that shows your Mixing credit.'* ]]
+  [[ "$body" == *"Any one of these works (a screenshot is fine):"* ]]
+  [[ "$body" == *"You'll see the credit on your profile as soon as it's approved, and we'll let you know here if anything else is needed."* ]]
+  for bad in "removed" "deadline" "days" "fraud"; do [[ "$body" != *"$bad"* ]]; done
+}
+
+@test "uvn-status: several requests list 3 titles then 'and N more'; no follow-ups" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:A:X" "u2:Mixing:B:X" "u3:Mixing:C:X" "u4:Mixing:D:X" "u5:Mixing:E:X"
+  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .subject)" = "Your Muso credit requests: one thing we still need" ]
+  [[ "$(rendered .body | plain)" == *'credit requests for "A", "B" and "C" (and 2 more): they'"'"'re waiting on one thing from you, something that shows your role on each.'* ]]
+  run -1 "$LOCKED" send --campaign uvn-status --kind reminder-14 --parent-message-id 1 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"uvn-status has no follow-ups"* ]]
+}
+
+@test "uvn-status: approved as committed; posts once per user, ever" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message=1001 credits=1" ]]
+  credits "$TEST_TMPDIR/c.json" Jane "u2:Mixing:Song B:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-10-18 run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED already_sent credits=1" ]]
+  credits "$TEST_TMPDIR/c.json" Jane "u3:Mixing:Song C:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-30 run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED already_sent credits=1" ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "uvn-status: an ask from verify-live within 90 days defers as recently-asked (not messaged_7d), nothing closed" {
+  day_ago() { python3 -c 'import datetime as d, sys; print((d.datetime.now(d.timezone.utc).date() - d.timedelta(days=int(sys.argv[1]))).isoformat())' "$1"; }
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY="$(day_ago 30)" run -0 send
+  [[ "$output" == "POSTED"* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song B:Big Star"
+  INTERCOM_VERIFY_TEST_DAY="$(day_ago 0)" run -3 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED recently-asked credits=1 (this user got an ask in the last 90 days"* ]]
+  [ "$(posts)" -eq 1 ]
+  [ -z "$(sql "select * from verify_requests where request_id = 'u1'")" ]
+}
+
+@test "uvn-status: a user who attached a document in Intercom is skipped and closed" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  STUB_CONTACT_CONVS='{"conversations":[{"id":"5","source":{"author":{"type":"user"},"attachments":[{"name":"split.pdf"}]},"tags":{"tags":[]}}],"pages":{}}' \
+    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED docs_submitted credits=1"* ]]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "uvn-status: any admin or Caroline reply to them in 7 days defers (not closed); a failed read sends nothing" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  now=$(date -u +%s)
+  STUB_CONVERSATION="{\"type\":\"conversation\",\"id\":\"777\",\"source\":{\"author\":{\"type\":\"user\"}},\"conversation_parts\":{\"conversation_parts\":[{\"part_type\":\"comment\",\"author\":{\"type\":\"admin\",\"id\":\"5763097\"},\"body\":\"hi\",\"created_at\":$now}]}}" \
+    run -3 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED messaged_7d"*"replied to them"* ]]
+  STUB_CONV_SEARCH="{\"conversations\":[{\"id\":\"9\",\"created_at\":$now,\"source\":{\"author\":{\"type\":\"admin\"}}}],\"total_count\":1}" \
+    run -3 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED messaged_7d"*"started a conversation"* ]]
+  STUB_CONV_SEARCH='{"type":"error.list"}' run -4 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$(posts)" -eq 0 ]
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED"* ]]
+}
+
+@test "withdrawal-confirm: the approved fixed text with role + title, one request per message, sent once" {
+  credits "$TEST_TMPDIR/c.json" Jane "w1:Mastering:Nowhere Fast:Somebody"
+  run -0 "$LOCKED" send --campaign withdrawal-confirm --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .subject)" = 'Your Muso credit request for "Nowhere Fast"' ]
+  [ "$(rendered .body | plain)" = 'Hi! We'"'"'ve withdrawn your credit request for Mastering on "Nowhere Fast", as you asked. Nothing else changes on your profile. If you need anything else, just reply here.' ]
+  run -0 "$LOCKED" send --campaign withdrawal-confirm --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED"* ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-10-20 run -0 "$LOCKED" send --campaign withdrawal-confirm --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED already-notified credits=1" ]]
+  [ "$(posts)" -eq 1 ]
+  credits "$TEST_TMPDIR/c.json" Jane "w2:Mixing:A:X" "w3:Mixing:B:X"
+  run -1 "$LOCKED" send --campaign withdrawal-confirm --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"at most 1 per withdrawal-confirm note"* ]]
+  run -1 "$LOCKED" send --campaign withdrawal-confirm --kind reminder-14 --parent-message-id 1 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+}
+
+@test "uvn-status: a conversation we opened more than 7 days ago does not defer, even if the user replied since" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  old=$(( $(date -u +%s) - 40*86400 ))
+  STUB_CONV_SEARCH="{\"conversations\":[{\"id\":\"777\",\"created_at\":$old,\"source\":{\"author\":{\"type\":\"admin\"}}}],\"total_count\":1}" \
+  STUB_CONVERSATION="{\"type\":\"conversation\",\"id\":\"777\",\"source\":{\"author\":{\"type\":\"admin\"}},\"conversation_parts\":{\"conversation_parts\":[{\"part_type\":\"comment\",\"author\":{\"type\":\"user\",\"id\":\"6650aa01\"},\"body\":\"thanks\",\"created_at\":$(date -u +%s)}]}}" \
+    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+# ---- in-thread delivery (firstmate 063) ----------------------------------------------------
+
+thread() { # <contacts-json-array> [extra conversation fields]
+  printf '{"type":"conversation","id":"777","state":"closed","source":{"author":{"type":"user","id":"6650aa01"}},"contacts":{"type":"contact.list","contacts":%s}%s,"conversation_parts":{"conversation_parts":[]}}' "$1" "${2:-}"
+}
+
+@test "in-thread: a conversation that is not this user's own is refused and recorded; nothing is posted" {
+  credits "$TEST_TMPDIR/c.json" Jane "w1:Mastering:Nowhere Fast:Somebody"
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"someone-else"}]')" \
+    run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"not this user's own conversation"* ]]
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"},{"type":"contact","id":"someone-else"}]')" \
+    run -0 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED already-notified credits=1" ]]
+  [ "$(sql "SELECT status, message_type FROM verify_messages")" = "refused|comment" ]
+  [ "$(replies)" -eq 0 ]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "in-thread: a conversation assigned to a human, or tagged do-not-message, is refused; nothing is posted" {
+  credits "$TEST_TMPDIR/c.json" Jane "w1:Mastering:Nowhere Fast:Somebody"
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"admin_assignee_id":10206197')" \
+    run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"assigned to a human"* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "w2:Mastering:Other:Somebody"
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"tags":{"tags":[{"name":"Instagram"}]}')" \
+    run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"'instagram' tag"* ]]
+  [ "$(replies)" -eq 0 ]
+  [ "$(posts)" -eq 0 ]
+  run -1 "$LOCKED" send --campaign retro-past --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"applies to uvn-status, withdrawal-confirm, the status notes and email-changed only"* ]]
+  run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation abc --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+}
+
+@test "in-thread: posts the note as a Caroline comment into the thread (even a closed one) and records it once" {
+  credits "$TEST_TMPDIR/c.json" Jane "w1:Mastering:Nowhere Fast:Somebody"
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"admin_assignee_id":5763097')" \
+    run -0 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "POSTED comment conversation=777 message=88001 credits=1" ]
+  [ "$(jq -r '.message_type + "|" + .type + "|" + (.admin_id|tostring) + "|" + (has("subject")|tostring)' "$CURL_STUB_REPLY")" = "comment|admin|5763097|false" ]
+  [ "$(jq -r .body "$CURL_STUB_REPLY" | plain)" = 'Hi! We'"'"'ve withdrawn your credit request for Mastering on "Nowhere Fast", as you asked. Nothing else changes on your profile. If you need anything else, just reply here.' ]
+  [ "$(sql "SELECT campaign, status, message_type, message_id, conversation_id, contact_id FROM verify_messages")" = "withdrawal-confirm|sent|comment|88001|777|6650aa01" ]
+  INTERCOM_VERIFY_TEST_DAY=2026-10-20 STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
+    run -0 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "SKIPPED already-notified credits=1" ]
+  [ "$(replies)" -eq 1 ]
+  [ "$(posts)" -eq 0 ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_messages")" = "1" ]
+}
+
+@test "in-thread: a reply Intercom does not show as Caroline's comment is not POSTED and stays claimed" {
+  credits "$TEST_TMPDIR/c.json" Jane "w1:Mastering:Nowhere Fast:Somebody"
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
+  STUB_REPLY_RESPONSE='{"type":"conversation","id":"777","conversation_parts":{"conversation_parts":[{"id":"88001","part_type":"note","author":{"type":"admin","id":"5763097"}}]}}' \
+    run -4 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"POST NOT VERIFIED"* ]]
+  [ "$(sql "SELECT status FROM verify_messages")" = "attempted" ]
+}
+
+@test "uvn-status: goes into the user's most recently updated open conversation; tag-proof counts only what follows the note" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  now=$(date -u +%s)
+  STUB_OPEN_CONVS="{\"conversations\":[{\"id\":\"555\",\"state\":\"open\",\"updated_at\":$((now - 3*86400))},{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":2}" \
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
+    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "POSTED comment conversation=777 message=88001 credits=1" ]
+  [ "$(posts)" -eq 0 ]
+  [[ "$(jq -r .body "$CURL_STUB_REPLY" | plain)" == *"a quick status update on your credit request"* ]]
+  before='{"id":"87000","part_type":"comment","author":{"type":"user","id":"6650aa01"},"attachments":[{"name":"old.pdf"}]},{"id":"88001","part_type":"comment","author":{"type":"admin","id":"5763097"}}'
+  STUB_CONVERSATION="{\"type\":\"conversation\",\"id\":\"777\",\"source\":{\"id\":\"1\"},\"conversation_parts\":{\"conversation_parts\":[$before]}}" \
+    run -3 "$LOCKED" tag-proof --message-id 88001
+  [[ "$output" == "NO PROOF YET message=88001 conversation=777" ]]
+  STUB_CONVERSATION="{\"type\":\"conversation\",\"id\":\"777\",\"source\":{\"id\":\"1\"},\"conversation_parts\":{\"conversation_parts\":[$before,{\"id\":\"89000\",\"part_type\":\"comment\",\"author\":{\"type\":\"user\",\"id\":\"6650aa01\"},\"created_at\":$now,\"attachments\":[{\"name\":\"split.pdf\"}]}]}}" \
+    run -0 "$LOCKED" tag-proof --message-id 88001
+  [[ "$output" == *"TAGGED credit-proof conversation=777 message=88001 attachments=1"* ]]
+}
+
+@test "uvn-status: a picked conversation that fails a check is dropped and the note goes by email, never refused" {
+  now=$(date -u +%s)
+  open="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":1}"
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"admin_assignee_id":10206197')" \
+    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="*" credits=1" ]]
+  [ "$(sql "SELECT campaign, status, message_type FROM verify_messages")" = "uvn-status|sent|email" ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_messages WHERE status='refused'")" = "0" ]
+  [ "$(replies)" -eq 0 ]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "uvn-status: a picked conversation of someone else, or one that cannot be read, falls back to email" {
+  now=$(date -u +%s)
+  open="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":1}"
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"someone-else"}]')" \
+    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+  INTERCOM_VERIFY_TEST_LEDGER="$TEST_TMPDIR/l2.sqlite3" STUB_CONV_SEARCH='{"conversations":[],"total_count":0}' \
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION='{"type":"error.list"}' \
+    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+  [ "$(sql "SELECT COUNT(*) FROM verify_messages WHERE status='refused'")" = "0" ]
+  [ "$(replies)" -eq 0 ]
+  [ "$(posts)" -eq 2 ]
+}
+
+@test "uvn-status: a failed open-conversation lookup sends nothing and claims nothing; the next run tries again" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  STUB_OPEN_CONVS='{"type":"error.list"}' \
+    run -4 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"OPEN-CONVERSATION LOOKUP NOT VERIFIED"* ]]
+  [ "$(posts)" -eq 0 ]
+  [ "$(replies)" -eq 0 ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_messages")" = "0" ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_requests")" = "0" ]
+  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+}
+
+# ---- status notes + email-changed (firstmate 068-073) ------------------------------------
+
+@test "status-doc-received --copy queued: the approved alternative wording (firstmate 092); no other campaign takes it" {
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked - no need to send anything else.' ]
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X" "s2:Mixing:B:X" "s3:Mixing:C:X" "s4:Mixing:D:X" "s5:Mixing:E:X"
+  run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A", "B" and "C" and 2 more: we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked - no need to send anything else.' ]
+  run -1 "$LOCKED" send --campaign status-team-review --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"--copy applies to verify-live (v1|windowed), status-doc-received (queued) and status-team-review (no-ask) only"* ]]
+  run -1 "$LOCKED" send --campaign status-doc-received --copy windowed --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "status-team-review --copy no-ask: Copy B0 = the approved text without the proof sentence; only status-team-review takes it" {
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  run -0 "$LOCKED" send --campaign status-team-review --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": they'"'"'re with our team for review. Nothing else is needed from you right now.' ]
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X" "s2:Mixing:B:X" "s3:Mixing:C:X" "s4:Mixing:D:X"
+  run -0 "$LOCKED" send --campaign status-team-review --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A", "B" and "C" and 1 more: they'"'"'re with our team for review. Nothing else is needed from you right now.' ]
+  run -1 "$LOCKED" send --campaign status-doc-received --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  run -1 "$LOCKED" send --campaign uvn-status --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  run -0 "$LOCKED" send --campaign status-team-review --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+  [[ "$(msg .body | plain)" != *"split sheet"* ]]
+  [[ "$(sql "SELECT approval_ref FROM verify_messages")" == *"pending-status-1021"* ]]
+}
+
+@test "status-doc-received --copy queued: a send records the firstmate 092 approval in the ledger and the api-log" {
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+  [[ "$(msg .body | plain)" == *"it's in our review queue"* ]]
+  [[ "$(sql "SELECT approval_ref FROM verify_messages")" == *"(--copy queued) approved by firstmate 092"* ]]
+  [[ "$(jq -r .approval_ref "$(find "$INTERCOM_VERIFY_TEST_LOG_DIR" -name '*.json' | head -1)")" == *"approved by firstmate 092"* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "s9:Mixing:B:X"
+  INTERCOM_VERIFY_TEST_LEDGER="$TEST_TMPDIR/l2.sqlite3" run -0 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT approval_ref FROM verify_messages").fetchone()[0])' "$TEST_TMPDIR/l2.sqlite3")" != *"firstmate 092"* ]]
+}
+
+@test "status-doc-received / status-team-review: the approved texts, 3 titles then 'and N more', never an ask" {
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  run -0 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent us, and our team is reviewing it. Nothing else is needed from you right now, and you'"'"'ll see each credit on your profile as soon as it'"'"'s approved.' ]
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X" "s2:Mixing:B:X" "s3:Mixing:C:X" "s4:Mixing:D:X"
+  run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A", "B" and "C" and 1 more: they'"'"'re with our team for review. Nothing else is needed from you right now. If you have something that shows your role on these specific tracks (for example a credit listing link or a split sheet), you can reply with it and it helps us confirm them faster.' ]
+}
+
+@test "status notes: a user who sent documents still gets one (it is about their documents); once per user, ever" {
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  STUB_CONTACT_CONVS='{"conversations":[{"id":"5","source":{"author":{"type":"user"},"attachments":[{"name":"split.pdf"}]},"tags":{"tags":[]}}],"pages":{}}' \
+    run -0 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED"* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "s2:Mixing:B:X"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-30 run -0 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED already_sent credits=1" ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "email-changed: threaded only, the approved text, the recipient is the ticket thread's own contact linked to the account" {
+  jq -n '{user:{email:"jane.doe@example.com", id:"42", auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"}, credits:[{request_id:"email-change-869abc"}]}' > "$TEST_TMPDIR/e.json"
+  run -1 "$LOCKED" send --campaign email-changed --credits-file "$TEST_TMPDIR/e.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"threaded reply only"* ]]
+  run -0 "$LOCKED" send --campaign email-changed-dup --conversation 777 --credits-file "$TEST_TMPDIR/e.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = 'Done - your sign-in email has been updated to the new address you gave us. Please sign in again with it. The extra account created with that address has been set aside, so you can keep using your original account.' ]
+  # the requester wrote from the old address; Intercom knows no user for the new one
+  export STUB_CONTACTS='{"type":"list","data":[],"total_count":0}'
+  export STUB_CONVERSATION="$(thread '[{"type":"contact","id":"oldaddr01"}]')"
+  export STUB_CONTACT_GET='{"type":"contact","id":"oldaddr01","role":"user","email":"jane.old@example.com","external_id":"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"}'
+  run -0 "$LOCKED" send --campaign email-changed --conversation 777 --credits-file "$TEST_TMPDIR/e.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment conversation=777"* ]]
+  [ "$(jq -r .body "$CURL_STUB_REPLY" | plain)" = 'Done - your sign-in email has been updated to the new address you gave us. Please sign in again with it.' ]
+  [ "$(grep -c '^POST https://api.intercom.io/contacts/search$' "$CURL_STUB_LOG" || true)" -eq 0 ]
+  [ "$(sql "SELECT campaign, status, contact_id, conversation_id FROM verify_messages")" = "email-changed|sent|oldaddr01|777" ]
+  run -0 "$LOCKED" send --campaign email-changed --conversation 777 --credits-file "$TEST_TMPDIR/e.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED already-notified credits=1" ]]
+  [ "$(replies)" -eq 1 ]
+}
+
+expire_holds() { python3 -c 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute("UPDATE verify_refusal_holds SET next_recheck_at=?", ("2000-01-01T00:00:00Z",)); db.commit()' "$INTERCOM_VERIFY_TEST_LEDGER"; }
+ticket() { jq -n --arg t "$1" '{user:{email:"jane.doe@example.com", id:"42", auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"}, credits:[{request_id:("email-change-" + $t)}]}' > "$TEST_TMPDIR/e.json"; }
+
+@test "email-changed: two contacts, a lead, or another account's contact are refused; the user is held 7 days for a re-check" {
+  ticket t2c
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"oldaddr01"},{"type":"contact","id":"other02"}]')" \
+  STUB_CONTACT_GET='{"type":"contact","id":"oldaddr01","role":"user","external_id":"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"}' \
+    run -1 "$LOCKED" send --campaign email-changed --conversation 777 --credits-file "$TEST_TMPDIR/e.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"has 2 contacts (need exactly 1"* ]]
+  # the hold is the user's: another ticket within the 7 days is not looked at
+  ticket tlead
+  n_calls="$(calls)"
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"oldaddr01"}]')" \
+  STUB_CONTACT_GET='{"type":"contact","id":"oldaddr01","role":"lead","external_id":"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"}' \
+    run -3 "$LOCKED" send --campaign email-changed --conversation 777 --credits-file "$TEST_TMPDIR/e.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED refused-recheck credits=1 (refused before; re-check after "* ]]
+  [ "$(calls)" -eq "$n_calls" ]
+  expire_holds
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"oldaddr01"}]')" \
+  STUB_CONTACT_GET='{"type":"contact","id":"oldaddr01","role":"lead","external_id":"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"}' \
+    run -1 "$LOCKED" send --campaign email-changed --conversation 777 --credits-file "$TEST_TMPDIR/e.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"is not an Intercom user"* ]]
+  ticket tother
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"stranger1"}]')" \
+  STUB_CONTACT_GET='{"type":"contact","id":"stranger1","role":"user","external_id":"0c4e7a2b-1f3d-4b6a-9e8c-7d5a3b1f0e92"}' \
+    run -1 "$LOCKED" send --campaign email-changed-dup --conversation 777 --credits-file "$TEST_TMPDIR/e.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"not linked to this Muso account"* ]]
+  [ "$(replies)" -eq 0 ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_messages")" = "0" ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_requests")" = "0" ]
+  [ "$(sql "SELECT campaign || ':' || refusals || ':' || user_id FROM verify_refusal_holds ORDER BY campaign" | tr '\n' ' ')" = "email-changed:2:42 email-changed-dup:1:42 " ]
+  # after the hold a fixed thread is sent, and the send clears the user's hold
+  expire_holds
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"stranger1"}]')" \
+  STUB_CONTACT_GET='{"type":"contact","id":"stranger1","role":"user","external_id":"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"}' \
+    run -0 "$LOCKED" send --campaign email-changed-dup --conversation 777 --credits-file "$TEST_TMPDIR/e.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment conversation=777"* ]]
+  [ "$(replies)" -eq 1 ]
+  [ "$(sql "SELECT campaign FROM verify_refusal_holds")" = "email-changed" ]
+}
+
+@test "status notes: a refused explicit conversation holds the user for a re-check, counted again after the hold, cleared by a send" {
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"someone-else"}]')" \
+    run -1 "$LOCKED" send --campaign status-team-review --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"not this user's own conversation"* ]]
+  [ "$(sql "SELECT COUNT(*) FROM verify_messages")" = "0" ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_requests")" = "0" ]
+  [ "$(sql "SELECT refusals FROM verify_refusal_holds")" = "1" ]
+  credits "$TEST_TMPDIR/c.json" Jane "s2:Mixing:B:X"
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
+    run -3 "$LOCKED" send --campaign status-team-review --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED refused-recheck credits=1"* ]]
+  [ "$(replies)" -eq 0 ]
+  expire_holds
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"someone-else"}]')" \
+    run -1 "$LOCKED" send --campaign status-team-review --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$(sql "SELECT refusals FROM verify_refusal_holds")" = "2" ]
+  expire_holds
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
+    run -0 "$LOCKED" send --campaign status-team-review --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "POSTED comment conversation=777 message=88001 credits=1" ]
+  [ "$(sql "SELECT campaign, status FROM verify_messages")" = "status-team-review|sent" ]
+  [ "$(sql "SELECT COUNT(*) FROM verify_refusal_holds")" = "0" ]
+}
+
+@test "status notes: a user flagged after three refusals is skipped by the gate, whatever requests" {
+  credits "$TEST_TMPDIR/c.json" Jane "s7:Mixing:A:X"
+  python3 -c 'import sqlite3,sys; sys.path.insert(0, sys.argv[2]); from credit_review import verify_ledger as v; db=v.connect(sys.argv[1]); db.execute("INSERT INTO verify_refusal_holds (campaign,user_key,user_id,refusals,reason,next_recheck_at,flagged_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", ("status-doc-received","jane.doe@example.com","42",3,"x","2000-01-01T00:00:00Z","2026-10-20T00:00:00Z","2026-10-20T00:00:00Z"))' "$INTERCOM_VERIFY_TEST_LEDGER" "$HYDRA_REPO/scripts"
+  run -0 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED refused-flagged credits=1"* ]]
+  [ "$(posts)" -eq 0 ]
+  [ "$(replies)" -eq 0 ]
+}
+
+# ---- in-thread legacy-id match (firstmate 089) -------------------------------------------
+
+LEGACY_EXT="4f0b6d2e-8a1c-4e7f-b3d9-2c5a7e9f1b03"
+legacy() { # <file> <jq object merged into .user>: an account with no Auth0 subject
+  jq ".user |= (del(.auth_id) + $2)" "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
+@test "legacy-id: --thread-contact reads the thread's contact only (no send, no ledger)" {
+  credits "$TEST_TMPDIR/c.json" Jane "w1:Mastering:Nowhere Fast:Somebody"
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
+  STUB_CONTACT_GET="{\"type\":\"contact\",\"id\":\"6650aa01\",\"role\":\"user\",\"external_id\":\"$LEGACY_EXT\"}" \
+    run -0 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --thread-contact
+  [ "$output" = "THREAD_CONTACT {\"contacts\":1,\"role\":\"user\",\"external_id\":\"$LEGACY_EXT\"}" ]
+  [ "$(posts)" -eq 0 ]
+  [ "$(replies)" -eq 0 ]
+  [ ! -f "$INTERCOM_VERIFY_TEST_LEDGER" ] || [ "$(sql "SELECT COUNT(*) FROM verify_messages")" = "0" ]
+  run -1 "$LOCKED" send --campaign uvn-status --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --thread-contact
+  [[ "$output" == *"--thread-contact applies to withdrawal-confirm and email-changed only"* ]]
+}
+
+@test "legacy-id: withdrawal-confirm in-thread for an account with no Auth0 subject and an unmapped external_id is sent and recorded" {
+  credits "$TEST_TMPDIR/c.json" Jane "w1:Mastering:Nowhere Fast:Somebody"
+  legacy "$TEST_TMPDIR/c.json" "{thread_external_id: \"$LEGACY_EXT\", ext_other_account: false}"
+  STUB_EXT_ID="$LEGACY_EXT" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
+    run -0 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "POSTED comment conversation=777 message=88001 credits=1" ]
+  [ "$(sql "SELECT status, reason FROM verify_messages")" = "sent|in-thread-legacy-id contact=6650aa01 external_id=$LEGACY_EXT" ]
+  [ "$(jq -r .recipient_match "$(find "$INTERCOM_VERIFY_TEST_LOG_DIR" -name '*.json' | head -1)")" = "in-thread-legacy-id contact=6650aa01 external_id=$LEGACY_EXT" ]
+  # never by email: the same account without a conversation is refused
+  credits "$TEST_TMPDIR/c.json" Jane "w2:Mastering:Other:Somebody"
+  legacy "$TEST_TMPDIR/c.json" "{thread_external_id: \"$LEGACY_EXT\", ext_other_account: false}"
+  INTERCOM_VERIFY_TEST_LEDGER="$TEST_TMPDIR/l2.sqlite3" STUB_EXT_ID="$LEGACY_EXT" \
+    run -1 "$LOCKED" send --campaign withdrawal-confirm --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"external_id mismatch"* ]]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "legacy-id: a contact with no external_id is refused, never matched by email" {
+  credits "$TEST_TMPDIR/c.json" Jane "w1:Mastering:A:X"
+  legacy "$TEST_TMPDIR/c.json" '{thread_external_id: "", ext_other_account: false}'
+  STUB_CONTACTS='{"type":"list","data":[{"id":"6650aa01","role":"user","email":"jane.doe@example.com"}]}' \
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
+    run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"the Intercom user for this email has no external_id, so it cannot be matched to this Muso account"* ]]
+  jq -n '{user:{email:"jane.doe@example.com", id:"42", thread_external_id:"", ext_other_account:false},
+    credits:[{request_id:"email-change-noext"}]}' > "$TEST_TMPDIR/e.json"
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"oldaddr01"}]')" \
+  STUB_CONTACT_GET='{"type":"contact","id":"oldaddr01","role":"user","email":"jane.doe@example.com"}' \
+    run -1 "$LOCKED" send --campaign email-changed --conversation 777 --credits-file "$TEST_TMPDIR/e.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"has no external_id, so it cannot be matched to this Muso account"* ]]
+  [ "$(replies)" -eq 0 ]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "legacy-id: a role inbox, another Muso account, an unchecked external_id or a second contact is refused" {
+  t="$(thread '[{"type":"contact","id":"6650aa01"}]')"
+  credits "$TEST_TMPDIR/c.json" Jane "w1:Mastering:A:X"
+  legacy "$TEST_TMPDIR/c.json" "{email: \"info+label@example.com\", thread_external_id: \"$LEGACY_EXT\", ext_other_account: false}"
+  STUB_EXT_ID="$LEGACY_EXT" STUB_CONVERSATION="$t" \
+    run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"shared or role inbox (info@)"* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "w2:Mastering:B:X"
+  legacy "$TEST_TMPDIR/c.json" "{thread_external_id: \"$LEGACY_EXT\", ext_other_account: true}"
+  STUB_EXT_ID="$LEGACY_EXT" STUB_CONVERSATION="$t" \
+    run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"belongs to a different Muso account"* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "w3:Mastering:C:X"
+  legacy "$TEST_TMPDIR/c.json" "{}"
+  STUB_EXT_ID="$LEGACY_EXT" STUB_CONVERSATION="$t" \
+    run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"was not checked against the Muso accounts"* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "w4:Mastering:D:X"
+  legacy "$TEST_TMPDIR/c.json" "{thread_external_id: \"$LEGACY_EXT\", ext_other_account: false}"
+  STUB_EXT_ID="$LEGACY_EXT" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"},{"type":"contact","id":"other02"}]')" \
+    run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"not this user's own conversation"* ]]
+  [ "$(replies)" -eq 0 ]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "legacy-id: email-changed answers a legacy account in its ticket thread; uvn-status never takes the legacy path" {
+  jq -n --arg e "$LEGACY_EXT" '{user:{email:"jane.doe@example.com", id:"42", thread_external_id:$e, ext_other_account:false},
+    credits:[{request_id:"email-change-leg1"}]}' > "$TEST_TMPDIR/e.json"
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"oldaddr01"}]')" \
+  STUB_CONTACT_GET="{\"type\":\"contact\",\"id\":\"oldaddr01\",\"role\":\"user\",\"email\":\"Jane.Doe@Example.com \",\"external_id\":\"$LEGACY_EXT\"}" \
+    run -0 "$LOCKED" send --campaign email-changed --conversation 777 --credits-file "$TEST_TMPDIR/e.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment conversation=777"* ]]
+  [ "$(sql "SELECT reason FROM verify_messages")" = "in-thread-legacy-id contact=oldaddr01 external_id=$LEGACY_EXT" ]
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  legacy "$TEST_TMPDIR/c.json" "{thread_external_id: \"$LEGACY_EXT\", ext_other_account: false}"
+  INTERCOM_VERIFY_TEST_LEDGER="$TEST_TMPDIR/l2.sqlite3" STUB_EXT_ID="$LEGACY_EXT" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
+    run -1 "$LOCKED" send --campaign uvn-status --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"external_id mismatch"* ]]
+  [ "$(replies)" -eq 1 ]
+}
+
 # QA #1298 @05a7cac: the REAL take-back producer (credit_retro.notice.credits_file, fed the
 # auth_id credit_retro.takeback.notice_preflight looks up) passes the real gate's recipient
 # check; the same payload without the identity is refused.
-@test "takeback-notice: the producer's own payload (with auth_id) passes the recipient check; without it, refused" {
+@test "takeback-notice: the producer's own payload (with the professional id) passes the recipient check; without it, refused" {
   for with in yes no; do
     # Distinct credits: a refusal is terminal in the gate's ledger for its credits.
     if [ "$with" = yes ]; then n=q1; else n=q2; fi
@@ -1286,7 +1842,7 @@ from credit_retro import notice
 src = json.load(open(sys.argv[1]))
 user = {"id": 42, "email": "Jane.Doe@Example.com", "first_name": "Jane"}
 if os.environ["WITH"] == "yes":
-    user["auth_id"] = "pro-42"
+    user["professional_id"] = "9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"
 json.dump(notice.credits_file(user, src["credits"]), open(sys.argv[2], "w"))' "$TEST_TMPDIR/c.json" "$TEST_TMPDIR/p-$with.json")
   done
   # --check-recipient is verify-live only, so use the real send path with the copy unlocked

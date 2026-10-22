@@ -240,7 +240,11 @@ message going out.
 - **Before the execute:** `apply` resolves each affected user's account from a
   credit request that still belongs to that user (request `userId` and account id). A user
   with no such request has their whole set withheld (`user_mismatch` or `request_not_found`):
-  nothing of theirs is removed and nobody is messaged. It then validates that user's notice through Caroline's gate
+  nothing of theirs is removed and nobody is messaged. The notice is addressed like every
+  other gate campaign, by the account's `users.neptuneProfessionalId` (and Auth0 subject),
+  read from the replica (`verify-request-notes.md` → The gate): a user without one has
+  their set withheld (`no_professional_id`), and an unreadable replica refuses the whole run.
+  It then validates that user's notice through Caroline's gate
   (`intercom-verify-request.sh send --campaign takeback-notice --validate`).
   - If the gate would defer it today (exit 3: one message per user per UTC day), that
     user's set is withheld this run (`notice_would_defer`). It stays approved and goes on a

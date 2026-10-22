@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify-request ledger: which users were asked to support which credits.
 
-Two captain-approved campaigns send through ONE path,
+The approved campaigns (CAMPAIGNS; only ASK_CAMPAIGNS count as "already asked") send through ONE path,
 scripts/intercom-verify-request.sh, and that gate records every send here, in
 the same SQLite file as the decider's ``decisions`` table
 (/var/lib/hydra/credit-review/ledger.sqlite3):
@@ -27,12 +27,18 @@ the same SQLite file as the decider's ``decisions`` table
   removal-notice  owners of credits WE removed (non-self, non-fraud) are told which
                credit, why, and how to dispute. Not an ask: never removal-due, no
                follow-ups; idempotent per removal event id.
+  takeback-notice  the notice of a proven take-back (credit_retro/notice.py). Not an ask.
+  uvn-status   one status + reminder per user whose requests wait on them
+               (user_verification_needed), ever; an ask (credit_review/uvn_status.py).
+  withdrawal-confirm  confirms a requester-withdrawn request, once per request. Not an ask.
+  Details: docs/credit-verification/verify-request-notes.md.
 
 Guarantees:
   - a request id gets a campaign's initial note AT MOST once;
   - each reminder kind is sent AT MOST once per note, and an after-rejection note
     names a credit AT MOST once (windowed notes only);
-  - retro-past: one message per user, ever, and none to a user with a proof reply;
+  - retro-past and uvn-status: one message per user, ever, and none to a user with a proof
+    reply (uvn-status also none within 7 days of another note);
   - a user gets AT MOST one message per UTC day across every campaign and kind;
   - the claim is written BEFORE the POST, so a crash or timeout after the POST can
     never produce a second message: an ``attempted`` row blocks a resend until a
@@ -41,7 +47,7 @@ Guarantees:
 
 Statuses:
   attempted  claimed, POST in flight or outcome unknown (blocks resend)
-  sent       Intercom confirmed an admin_message (terminal)
+  sent       Intercom confirmed an admin_message, or (in-thread) a Caroline comment part (terminal)
   rejected   Intercom answered an error; nothing was delivered (retryable)
   refused    the gate refused (no unique Intercom user, leak check, ...) (terminal)
   skipped    verify_requests: a wave row the server no longer has approved, so it is
@@ -85,7 +91,25 @@ DEFAULT_PATH = os.environ.get("CREDIT_REVIEW_LEDGER", "/var/lib/hydra/credit-rev
 MAX_ATTEMPTS = 3
 BLOCKING = ("attempted", "sent", "refused", "skipped")
 DEFERRED = "deferred_pending_doc"
-CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice")
+CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "uvn-status", "withdrawal-confirm",
+             "status-doc-received", "status-team-review", "email-changed", "email-changed-dup")
+# Once-per-user status campaigns: one message per user ever (per campaign), never within 7 days
+# of another note from this gate. Only uvn-status is an ask (and also stops after a proof reply).
+STATUS_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review")
+# Notices: only their own rows block them (they are not asks and never close one).
+NOTICE_CAMPAIGNS = ("takeback-notice", "withdrawal-confirm", "status-doc-received", "status-team-review",
+                    "email-changed", "email-changed-dup")
+# Campaigns whose gate refusals are re-checkable (firstmate 076, 082, 083): a refusal holds the
+# USER (campaign, user_key or user_id) in verify_refusal_holds for RECHECK_DAYS (the runner and the gate skip
+# them until next_recheck_at, whatever requests are listed); a later send clears it; after
+# MAX_REFUSALS refusals it is posted once to #cs_priority for a human and the user is blocked.
+RECHECKABLE_REFUSALS = ("status-doc-received", "status-team-review", "email-changed", "email-changed-dup")
+RECHECK_DAYS = 7
+MAX_REFUSALS = 3
+# The campaigns that ASK the user for something. Only these count as "already asked";
+# notices and confirmations (removal-notice, takeback-notice, withdrawal-confirm) never close
+# a user's asks (firstmate 063/064).
+ASK_CAMPAIGNS = ("verify-live", "retro-past", "uvn-status")
 AFTER_REJECTION = "after-rejection"
 KINDS = ("initial", "reminder-14", "reminder-25", AFTER_REJECTION)
 # Days after a WINDOWED note at which each reminder becomes due.
@@ -109,9 +133,9 @@ CREATE TABLE IF NOT EXISTS verify_messages (
   due_day TEXT,                      -- windowed notes: last day of the 30-day window
   removal_day TEXT,                  -- windowed notes: the removal date the note named
   status TEXT NOT NULL,              -- attempted | sent | rejected | refused
-  message_type TEXT NOT NULL,        -- email (Intercom POST /messages)
+  message_type TEXT NOT NULL,        -- email (POST /messages) | comment (in-thread reply)
   contact_id TEXT,                   -- Intercom contact the note went to
-  message_id TEXT,                   -- Intercom admin_message id
+  message_id TEXT,                   -- Intercom admin_message id (in-thread: the conversation part id)
   conversation_id TEXT,
   request_ids_json TEXT NOT NULL,
   refs_json TEXT,                    -- [{request_id, profile_id, track_id}] for re-reads
@@ -152,13 +176,24 @@ CREATE TABLE IF NOT EXISTS verify_requests (
   deferred_at TEXT,                  -- deferred_pending_doc: when first held back
   PRIMARY KEY (campaign, request_id)
 );
+CREATE TABLE IF NOT EXISTS verify_refusal_holds (
+  campaign TEXT NOT NULL,            -- a RECHECKABLE_REFUSALS campaign
+  user_key TEXT NOT NULL,            -- lower-cased account email (never printed)
+  user_id TEXT,                      -- the Muso account id (the only id the human flag shows)
+  refusals INTEGER NOT NULL DEFAULT 0,  -- refusals since the last send
+  reason TEXT,                       -- the gate's latest reason
+  next_recheck_at TEXT NOT NULL,     -- the user is skipped until this time
+  flagged_at TEXT,                   -- posted to #cs_priority after MAX_REFUSALS: blocked from then on
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (campaign, user_key)
+);
 """
 INDEXES = """
 CREATE INDEX IF NOT EXISTS verify_messages_user_day ON verify_messages(user_key, day);
 CREATE INDEX IF NOT EXISTS verify_messages_msg ON verify_messages(message_id);
 CREATE INDEX IF NOT EXISTS verify_messages_parent ON verify_messages(parent_row, kind);
 """
-TABLES = ("verify_messages", "verify_proof_reviews", "verify_requests")
+TABLES = ("verify_messages", "verify_proof_reviews", "verify_requests", "verify_refusal_holds")
 # The verify_messages columns credit-retro's take-back / wave reader depends on
 # (credit_retro.waves.already_engaged). Pinned here, next to the writer's schema, and
 # checked against it by scripts/tests/test_verify_ledger_contract.py.
@@ -225,13 +260,16 @@ def window(day: str) -> tuple[str, str]:
 
 def blocked_ids(db: sqlite3.Connection, request_ids: list[str], campaign: str = "verify-live") -> set[str]:
     """Request ids that must not get this campaign's initial note: already noted,
-    refused or skipped in this campaign, or already asked about in ANY campaign
-    (never re-ask the same credit, no repeats across waves). takeback-notice is not an
-    ask but the user's notice that the credit was removed, so only its own rows block it."""
+    refused or skipped in this campaign, or already asked about in any ASK campaign
+    (never re-ask the same credit, no repeats across waves). takeback-notice and
+    withdrawal-confirm are not asks but notices about that very request, so only their own
+    rows block them."""
     out: set[str] = set()
+    asks = ",".join("?" * len(ASK_CAMPAIGNS))
     for rid in request_ids:
-        other = None if campaign == "takeback-notice" else db.execute("SELECT 1 FROM verify_requests WHERE request_id=? AND campaign<>? "
-                           "AND status IN ('attempted','sent') LIMIT 1", (rid, campaign)).fetchone()
+        other = None if campaign in NOTICE_CAMPAIGNS else db.execute(
+            f"SELECT 1 FROM verify_requests WHERE request_id=? AND campaign<>? AND campaign IN ({asks}) "
+            "AND status IN ('attempted','sent') LIMIT 1", (rid, campaign, *ASK_CAMPAIGNS)).fetchone()
         if other is not None:
             out.add(rid)
             continue
@@ -242,6 +280,29 @@ def blocked_ids(db: sqlite3.Connection, request_ids: list[str], campaign: str = 
         if r["status"] in BLOCKING or (r["status"] == "rejected" and int(r["attempts"]) >= MAX_ATTEMPTS):
             out.add(rid)
     return out
+
+
+def _hold_of(user_key: str, user_id: str = "") -> tuple[str, tuple[Any, ...]]:
+    """SQL condition + params for "this user's refusal hold": the same account email OR the same
+    Muso user id, so an email change neither frees a held user nor resets the refusal count."""
+    uid = str(user_id or "").strip()
+    return ("(user_key = ? OR user_id = ?)", (user_key, uid)) if uid else ("user_key = ?", (user_key,))
+
+
+def refusal_hold(db: sqlite3.Connection, campaign: str, user_key: str, now: datetime | None = None,
+                 user_id: str = "") -> dict[str, Any]:
+    """This user's re-check state in a RECHECKABLE_REFUSALS campaign: {} (free),
+    {"flagged": True} (refused MAX_REFUSALS times and flagged: blocked) or
+    {"until": next_recheck_at} (held after a refusal). "This user" is _hold_of."""
+    if campaign not in RECHECKABLE_REFUSALS or not (user_key or str(user_id or "").strip()):
+        return {}
+    cond, params = _hold_of(user_key, user_id)
+    rows = db.execute(f"SELECT next_recheck_at, flagged_at FROM verify_refusal_holds WHERE campaign=? AND {cond}",
+                      (campaign, *params)).fetchall()
+    if any(r["flagged_at"] for r in rows):
+        return {"flagged": True}
+    until = max((str(r["next_recheck_at"]) for r in rows), default="")
+    return {"until": until} if until > stamp(now) else {}
 
 
 def _same_user(db: sqlite3.Connection, user_key: str, user_id: str = "") -> tuple[str, tuple[Any, ...]]:
@@ -269,13 +330,12 @@ def capped(db: sqlite3.Connection, *, user_key: str, day: str, user_id: str = ""
                       "LIMIT 1", (*params, day)).fetchone() is not None
 
 
-ASK_CAMPAIGNS = ("verify-live", "retro-past")  # campaigns that ASK the user for something
 REASK_LOCK_DAYS = 90
 
 
 def asked_within(db: sqlite3.Connection, *, user_key: str, day: str, days: int = REASK_LOCK_DAYS,
                  user_id: str = "") -> bool:
-    """True when this user got an initial ASK (verify-live or retro-past, attempted or sent)
+    """True when this user got an initial ASK (any ASK_CAMPAIGNS note, attempted or sent)
     in the last `days` days: the shared per-user re-ask lock (Fable 2026-10-17, decision
     verify-notify-enable precondition 4). Follow-ups of that note are not new asks."""
     try:
@@ -290,17 +350,50 @@ def asked_within(db: sqlite3.Connection, *, user_key: str, day: str, days: int =
 
 def past_user_done(db: sqlite3.Connection, user_key: str, user_id: str = "") -> str:
     """retro-past: why this user must not get a past-credit ask ('' when they may).
-    One message per user, ever (a note from ANY campaign counts: no repeats across
-    waves); and never re-ask someone who already sent proof (a credit-proof reply on
-    any note, any campaign)."""
+    One ask per user, ever (an ask from any ASK campaign counts: no repeats across
+    waves; a notice or confirmation does not); and never re-ask someone who already sent
+    proof (a credit-proof reply on any note, any campaign)."""
     cond, params = _same_user(db, user_key, user_id)
-    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.kind='initial' "
-                  "AND m.status IN ('attempted','sent') LIMIT 1", params).fetchone():
+    asks = ",".join("?" * len(ASK_CAMPAIGNS))
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.kind='initial' AND m.campaign IN ({asks}) "
+                  "AND m.status IN ('attempted','sent') LIMIT 1", (*params, *ASK_CAMPAIGNS)).fetchone():
         return "already_asked"
     if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.proof_tagged_at IS NOT NULL LIMIT 1",
                   params).fetchone():
         return "proof_received"
     return ""
+
+
+def uvn_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None = None,
+                  campaign: str = "uvn-status", user_id: str = "") -> str:
+    """A STATUS_CAMPAIGNS note: why this user must not get it ('' when they may). One per user,
+    ever, per campaign; never within 7 days of any note from this gate (messaged_7d, a deferral);
+    uvn-status (an ask) also never after a proof reply, and never within 90 days of an ask from
+    any ask campaign (the shared one-ask lock: recently_asked, a deferral, nothing closed).
+    "This user" is _same_user: an email change is the same user."""
+    cond, params = _same_user(db, user_key, user_id)
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.campaign=? AND m.kind='initial' "
+                  "AND m.status IN ('attempted','sent') LIMIT 1", (*params, campaign)).fetchone():
+        return "already_sent"
+    if campaign == "uvn-status" and db.execute(
+            f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.proof_tagged_at IS NOT NULL LIMIT 1",
+            params).fetchone():
+        return "proof_received"
+    since = ((now or utcnow()) - timedelta(days=7)).strftime("%Y-%m-%d")
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day>=? AND m.status IN ('attempted','sent') "
+                  "LIMIT 1", (*params, since)).fetchone():
+        return "messaged_7d"
+    # uvn-status is an ask: the shared one-ask-per-user-per-90-days lock across the ask
+    # campaigns applies (QA @59645fb; doc rule 'One ask per user per 90 days'). A deferral,
+    # like messaged_7d: nothing is closed, the user is offered again once the lock lapses.
+    if campaign == "uvn-status" and asked_within(db, user_key=user_key,
+                                                 day=(now or utcnow()).strftime("%Y-%m-%d"), user_id=user_id):
+        return "recently_asked"
+    return ""
+
+
+# uvn_user_done reasons that only DEFER the user (nothing closed, offered again later).
+DEFER_REASONS = ("messaged_7d", "recently_asked")
 
 
 def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[str], message_type: str,
@@ -320,6 +413,19 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
         if not fresh:
             db.execute("COMMIT")
             return {"result": "already_notified", "request_ids": []}
+        hold = refusal_hold(db, campaign, user_key, now, user_id) if enforce_cap else {}
+        if hold:
+            db.execute("COMMIT")
+            return {"result": "refusal_hold", "request_ids": fresh, **hold}
+        if campaign in STATUS_CAMPAIGNS and enforce_cap:
+            why = uvn_user_done(db, user_key, now=now, campaign=campaign, user_id=user_id)
+            if why in DEFER_REASONS:
+                db.execute("COMMIT")
+                return {"result": "recent", "reason": why, "request_ids": fresh}
+            if why:
+                _skip(db, campaign, fresh, ts)
+                db.execute("COMMIT")
+                return {"result": "user_done", "reason": why, "request_ids": fresh}
         if campaign == "retro-past" and enforce_cap:
             why = past_user_done(db, user_key, user_id)
             if why:
@@ -350,6 +456,9 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
                 "VALUES (?,?,?,?,?,?) ON CONFLICT(campaign, request_id) DO UPDATE SET message_row=excluded.message_row, "
                 "status='attempted', attempts=verify_requests.attempts+1, updated_at=excluded.updated_at",
                 (campaign, rid, row, "attempted", 1, ts))
+        cond, params = _hold_of(user_key, user_id)
+        db.execute(f"DELETE FROM verify_refusal_holds WHERE campaign=? AND {cond} AND flagged_at IS NULL",
+                   (campaign, *params))
         db.execute("COMMIT")
         return {"result": "claimed", "message_row": row, "request_ids": fresh, "due_day": due, "removal_day": removal}
     except Exception:
@@ -516,15 +625,68 @@ def finalize(db: sqlite3.Connection, *, message_row: int, status: str, message_i
 
 def refuse(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[str], message_type: str,
            approved_by: str, approval_ref: str, reason: str, campaign: str = "verify-live",
-           now: datetime | None = None) -> dict[str, Any]:
+           now: datetime | None = None, user_id: str = "") -> dict[str, Any]:
     """Record a gate refusal so the driver does not re-offer the same rows every
     run. Terminal: a human re-opens it. Does not use the user's daily message, and
-    a refused note named no date, so it is never removal-due."""
+    a refused note named no date, so it is never removal-due. RECHECKABLE_REFUSALS are
+    not terminal: see recheck_refusal."""
+    _check(campaign)
+    if campaign in RECHECKABLE_REFUSALS:
+        return recheck_refusal(db, campaign=campaign, user_key=user_key, reason=reason, user_id=user_id, now=now)
     c = claim(db, user_key=user_key, day=day, request_ids=request_ids, message_type=message_type,
               approved_by=approved_by, approval_ref=approval_ref, campaign=campaign, now=now, enforce_cap=False)
     if c["result"] == "claimed":
         finalize(db, message_row=c["message_row"], status="refused", reason=reason, now=now)
     return c
+
+
+def recheck_refusal(db: sqlite3.Connection, *, campaign: str, user_key: str, reason: str,
+                    user_id: str = "", now: datetime | None = None) -> dict[str, Any]:
+    """A re-checkable refusal: hold the user for RECHECK_DAYS and count the refusal (a
+    refusal during a hold, or of a flagged user, changes nothing). A user whose email changed
+    keeps the hold row of their Muso user id (_hold_of): the count carries on, it never resets."""
+    ts = stamp(now)
+    nxt = stamp((now or utcnow()) + timedelta(days=RECHECK_DAYS))
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        cond, params = _hold_of(user_key, user_id)
+        old = db.execute(f"SELECT user_key FROM verify_refusal_holds WHERE campaign=? AND {cond} "
+                         "ORDER BY user_key = ? DESC, refusals DESC LIMIT 1", (campaign, *params, user_key)).fetchone()
+        user_key = str(old["user_key"]) if old is not None else user_key
+        db.execute(
+            "INSERT INTO verify_refusal_holds (campaign, user_key, user_id, refusals, reason, next_recheck_at, updated_at) "
+            "VALUES (?,?,?,1,?,?,?) ON CONFLICT(campaign, user_key) DO UPDATE SET "
+            "refusals=verify_refusal_holds.refusals+1, reason=excluded.reason, next_recheck_at=excluded.next_recheck_at, "
+            "user_id=COALESCE(excluded.user_id, verify_refusal_holds.user_id), updated_at=excluded.updated_at "
+            "WHERE verify_refusal_holds.flagged_at IS NULL AND verify_refusal_holds.next_recheck_at <= excluded.updated_at",
+            (campaign, user_key, user_id or None, reason[:500], nxt, ts))
+        r = db.execute("SELECT refusals, next_recheck_at FROM verify_refusal_holds WHERE campaign=? AND user_key=?",
+                       (campaign, user_key)).fetchone()
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+    return {"result": "refused_recheck", "refusals": int(r["refusals"]), "next_recheck_at": str(r["next_recheck_at"])}
+
+
+def refusals_to_flag(db: sqlite3.Connection, campaigns: list[str] | tuple[str, ...]) -> list[dict[str, Any]]:
+    """Users refused MAX_REFUSALS times and not flagged yet, one entry per (campaign, user):
+    {campaign, user_key, user_id, reason, refusals}."""
+    camps = [c for c in campaigns if c in RECHECKABLE_REFUSALS]
+    if not camps:
+        return []
+    return [{"campaign": str(r["campaign"]), "user_key": str(r["user_key"]), "user_id": str(r["user_id"] or ""),
+             "reason": str(r["reason"] or ""), "refusals": int(r["refusals"])}
+            for r in db.execute(f"SELECT campaign, user_key, user_id, reason, refusals FROM verify_refusal_holds "
+                                f"WHERE refusals>=? AND flagged_at IS NULL AND campaign IN ({','.join('?' * len(camps))}) "
+                                f"ORDER BY campaign, user_id", (MAX_REFUSALS, *camps)).fetchall()]
+
+
+def mark_flagged(db: sqlite3.Connection, *, campaign: str, user_key: str, now: datetime | None = None) -> int:
+    """A flagged user: blocked in this campaign from now on (flagged_at recorded)."""
+    ts = stamp(now)
+    return db.execute("UPDATE verify_refusal_holds SET flagged_at=?, updated_at=? WHERE campaign=? AND user_key=? "
+                      "AND flagged_at IS NULL", (ts, ts, campaign, user_key)).rowcount
 
 
 def _skip(db: sqlite3.Connection, campaign: str, request_ids: list[str], ts: str) -> int:
@@ -955,7 +1117,8 @@ def _main(argv: list[str] | None = None) -> int:
         s.add_argument("--refs-file", default="", help="JSON [{request_id, profile_id, track_id}]")
         s.add_argument("--windowed", action="store_true", help="the note names a 30-day window and a removal date")
         s.add_argument("--reason", default="")
-        s.add_argument("--user-id", default="", help="the Muso user id (the per-user locks key on it too)")
+        s.add_argument("--user-id", default="",
+                       help="the Muso account id (the per-user locks key on it too; re-checkable refusals)")
     cr = sub.add_parser("claim-reminder")
     cr.add_argument("--parent-message-id", required=True)
     cr.add_argument("--kind", required=True, choices=KINDS[1:])
@@ -1012,7 +1175,7 @@ def _main(argv: list[str] | None = None) -> int:
         if a.op == "claim":
             out = claim(db, contact_id=a.contact_id, refs=refs, windowed=a.windowed, user_id=a.user_id, **kw)
         else:
-            out = refuse(db, reason=a.reason, **kw)
+            out = refuse(db, reason=a.reason, user_id=a.user_id, **kw)
     elif a.op == "claim-reminder":
         out = claim_reminder(db, parent_message_id=a.parent_message_id, kind=a.kind, user_key=a.user_key, day=a.day,
                              request_ids=_ids(a.request_ids), approved_by=a.approved_by, approval_ref=a.approval_ref)
@@ -1023,11 +1186,17 @@ def _main(argv: list[str] | None = None) -> int:
     elif a.op == "pending":
         ids = _ids(a.request_ids)
         blocked = blocked_ids(db, ids, a.campaign)
-        out = {"request_ids": [r for r in dict.fromkeys(ids) if r not in blocked]}
+        out = {"request_ids": [r for r in dict.fromkeys(ids) if r not in blocked],
+               "hold": refusal_hold(db, a.campaign, a.user_key, user_id=a.user_id)}
         if a.user_key and a.day:
             out["daily_cap"] = capped(db, user_key=a.user_key, day=a.day, user_id=a.user_id)
         if a.user_key and a.campaign == "retro-past":
             out["user_done"] = past_user_done(db, a.user_key, a.user_id)
+        if a.user_key and a.campaign in STATUS_CAMPAIGNS:
+            why = uvn_user_done(db, a.user_key, campaign=a.campaign, user_id=a.user_id)
+            out["user_done"] = "" if why in DEFER_REASONS else why
+            out["recent"] = why in DEFER_REASONS
+            out["recent_why"] = why if why in DEFER_REASONS else ""
     elif a.op == "skip":
         out = {"skipped": skip_requests(db, campaign=a.campaign, request_ids=_ids(a.request_ids))}
     elif a.op == "reminder-state":

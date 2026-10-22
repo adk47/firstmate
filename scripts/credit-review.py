@@ -37,6 +37,24 @@ Subcommands:
            Same gate (--campaign retro-past, send-locked until its copy is
            approved). --unverified FILE writes the past credits with no
            documents 30+ days after the ask (they stay; flagged for the board).
+  uvn-status
+           Ops takeover section 2 class 2 (firstmate 060): one status + reminder
+           message per user to requesters whose credit requests wait on them
+           (user_verification_needed), from credit-trust-llm-t01's list, through
+           the gate's uvn-status campaign. Re-checks proof-on-file, the replica
+           (still waiting), Intercom (documents / messaged in 7 days) and the
+           ledger before each send. --segment paid|free, --max-users (canary 3),
+           at most 400 per UTC day. Same kill switch as verify-notify. Goes
+           in the user's most recent open conversation (14 days) if any, else email.
+           --campaign status-doc-received|status-team-review sends the no-ask
+           status notes instead (rules: verify-request-notes.md).
+  withdrawal-confirm
+           Firstmate 061: confirm requester-withdrawn credit requests through the
+           gate's withdrawal-confirm campaign. --request-ids id[:conversation],...
+           (with a conversation: in that thread; without: email). Same kill switch.
+  email-changed
+           Firstmate 073: the threaded "sign-in email updated" reply in the
+           ticket's own conversation, once per ticket, through the same gate.
   removal-notice
            Tell owners of credits WE removed (non-self; fraud removals are
            silent by captain order) which credit and role, why, and how to
@@ -81,6 +99,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from credit_review import admin as admin_api  # noqa: E402
 from credit_review import evaluate  # noqa: E402
 from credit_review import verify_ledger  # noqa: E402
+from credit_review import uvn_status  # noqa: E402
+from credit_review import withdrawal_confirm  # noqa: E402
 from credit_review import verify_notify  # noqa: E402
 from credit_review.evidence import EvidenceBuilder, parse_ts  # noqa: E402
 from credit_review.judge import DEFAULT_MIN_BALANCE_USD, Judge, account_balance_usd  # noqa: E402
@@ -480,6 +500,64 @@ def cmd_verify_notify(args: argparse.Namespace) -> int:
     return 1 if report.failed else 0
 
 
+def cmd_uvn_status(args: argparse.Namespace) -> int:
+    if VERIFY_NOTIFY_KILL_SWITCH.exists():
+        log(f"verify-notify kill switch present at {VERIFY_NOTIFY_KILL_SWITCH}; nothing sent")
+        print("NO_REPLY")
+        return 0
+    if args.preview:
+        Path(args.preview).mkdir(mode=0o700, parents=True, exist_ok=True)
+    if args.wording and (args.campaign, args.wording) not in (("status-doc-received", "queued"),
+                                                             ("status-team-review", "no-ask")):
+        print("--wording queued applies to status-doc-received, --wording no-ask to status-team-review", file=sys.stderr)
+        return 2
+    report = uvn_status.run(list_path=args.list, segment=args.segment, mode=args.mode, max_users=args.max_users,
+                            campaign=args.campaign, wording=args.wording or "",
+                            ledger_path=args.ledger, proof_path=args.proof_on_file, preview_dir=args.preview)
+    log("uvn-status " + json.dumps({k: v for k, v in vars(report).items() if not isinstance(v, (list, dict))}))
+    print(uvn_status.render(report, args.mode, args.segment))
+    return 1 if report.failed else 0
+
+
+def cmd_withdrawal_confirm(args: argparse.Namespace) -> int:
+    if VERIFY_NOTIFY_KILL_SWITCH.exists():
+        log(f"verify-notify kill switch present at {VERIFY_NOTIFY_KILL_SWITCH}; nothing sent")
+        print("NO_REPLY")
+        return 0
+    report, refused, held, deferred = withdrawal_confirm.run([x for x in args.request_ids.split(",") if x.strip()],
+                                                             mode=args.mode)
+    verb = "sent" if args.mode == "apply" else "would send"
+    held_lines = [f"{rid}: held, no professional id on the account" for rid in held]
+    held_lines += [f"{rid}: deferred, daily cap: retry tomorrow" for rid in deferred]
+    detail = refused + held_lines + report.refusals + report.failures
+    print(f"WITHDRAWAL CONFIRM: {verb} {report.sent_notes if args.mode == 'apply' else report.users}, "
+          f"skipped {report.skipped}, deferred {report.deferred_users}, refused {report.refused_users + len(refused)}, "
+          f"held (no professional id) {report.no_professional_id}, "
+          f"failed {report.failed_users}" + ("; " + "; ".join(detail)[:600] if detail else ""))
+    if report.failed or refused or report.refused_users:
+        return 1
+    return 3 if held or deferred else 0
+
+
+def cmd_email_changed(args: argparse.Namespace) -> int:
+    if VERIFY_NOTIFY_KILL_SWITCH.exists():
+        log(f"verify-notify kill switch present at {VERIFY_NOTIFY_KILL_SWITCH}; nothing sent")
+        print("NO_REPLY")
+        return 0
+    report, refused = withdrawal_confirm.email_changed(user_id=args.user_id, conversation=args.conversation,
+                                                       ticket=args.ticket, dup=args.dup, mode=args.mode)
+    verb = "sent" if args.mode == "apply" else "would send"
+    print(f"EMAIL CHANGED ({'dup' if args.dup else 'plain'}): {verb} {report.sent_notes if args.mode == 'apply' else (0 if refused else 1)}, "
+          f"skipped {report.skipped}, deferred {report.deferred_users}, refused {report.refused_users + len(refused)}, "
+          f"failed {report.failed_users}"
+          + (f", flagged {report.flagged}" if report.flagged else "")
+          + ("; " + "; ".join(refused + report.refusals + report.failures + report.flag_failures)[:600]
+             if refused or report.refusals or report.failures or report.flag_failures else ""))
+    if report.failed or refused or report.refused_users:
+        return 1
+    return 3 if report.deferred_users else 0
+
+
 def cmd_verify_wave(args: argparse.Namespace) -> int:
     if VERIFY_NOTIFY_KILL_SWITCH.exists():
         log(f"verify-notify kill switch present at {VERIFY_NOTIFY_KILL_SWITCH}; nothing sent")
@@ -681,6 +759,40 @@ def parser() -> argparse.ArgumentParser:
                     help="write the new credits past the reply-by date their note named, with no proof (JSON lines), "
                          "and the ones held for a human (awaiting review, user reply, unexplained rejection) to FILE.held, and exit")
     vn.set_defaults(fn=cmd_verify_notify)
+
+    us = sub.add_parser("uvn-status", help="UVN status + reminder: one message per waiting requester (firstmate 060)")
+    us.add_argument("--list", required=True, help="credit-trust-llm-t01's uvn-reminder-list.json (<= 30 h old)")
+    us.add_argument("--segment", choices=["paid", "free"], required=True)
+    us.add_argument("--campaign", choices=list(uvn_status.CAMPAIGNS), default="uvn-status",
+                    help="uvn-status (the ask, t01's uvn-reminder list) or a no-ask status note: "
+                         "status-doc-received (status-A list) / status-team-review (status-B list)")
+    us.add_argument("--wording", choices=["queued", "no-ask"], default=None,
+                    help="queued: status-doc-received's 'in our review queue' wording (firstmate 092); "
+                         "no-ask: status-team-review's Copy B0, without the proof sentence (firstmate 106)")
+    us.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
+    us.add_argument("--max-users", type=int, default=50, help="messages this run (canary: 3)")
+    us.add_argument("--preview", default=None, help="dry-run: write each rendered note to this dir (0700)")
+    us.add_argument("--proof-on-file", default=None, metavar="FILE")
+    us.set_defaults(fn=cmd_uvn_status)
+
+    wc = sub.add_parser("withdrawal-confirm", help="confirm requester-withdrawn credit requests (firstmate 061)",
+                        description="Exit status: 0 = every requested confirmation was sent or already sent; "
+                                    "3 = at least one is held or deferred (listed by request id with the "
+                                    "reason: no professional id on the account, or the daily cap); "
+                                    "1 = a refusal or failure.")
+    wc.add_argument("--request-ids", required=True,
+                    help="comma-separated id[:conversation] items (verified withdrawals only); with a conversation "
+                         "the note is a reply in that Intercom conversation, without one it goes by email")
+    wc.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
+    wc.set_defaults(fn=cmd_withdrawal_confirm)
+
+    ec = sub.add_parser("email-changed", help="threaded 'sign-in email updated' reply (firstmate 073)")
+    ec.add_argument("--user-id", type=int, required=True)
+    ec.add_argument("--conversation", required=True, help="the requester's own Intercom conversation id")
+    ec.add_argument("--ticket", required=True, help="ticket key (once per ticket)")
+    ec.add_argument("--dup", action="store_true", help="variant: the extra account was set aside")
+    ec.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
+    ec.set_defaults(fn=cmd_email_changed)
 
     vw = sub.add_parser("verify-wave", help="retro 30-day documentation waves (initial notes, reminders, proof sweep)")
     vw.add_argument("--wave-file", default=None, help="CSV: credit_request_id,user_id,profile_id[,track_id,tier,pop_now,paid,claim_date]")

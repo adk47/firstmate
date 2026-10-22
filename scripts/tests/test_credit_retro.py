@@ -25,12 +25,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from credit_retro import notice, takeback, waves  # noqa: E402
 from credit_retro.api import ApiError, SessionApi, check_session_claims, header_value  # noqa: E402
 from credit_retro.ledger import Ledger  # noqa: E402
+from credit_review import verify_notify  # noqa: E402
 
-# firstmate 118/120: every take-back notice carries the account's Intercom identity
-# (users.neptuneprofessionalid via Trino). Tests use a deterministic fake; the real lookup and
-# its failure modes are tested in IntercomIdentityTests.
-_REAL_AUTH_IDS = takeback._auth_ids
-takeback._auth_ids = lambda ids: {str(u): f"pro-{u}" for u in ids}
+# The replica is never read in tests: every test account's professional id is "test-pro" (the
+# same stub test_credit_verify_notify uses, so the two modules can share one process).
+verify_notify.IDENTITY_LOOKUP = lambda ids: {str(u): {"professional_id": "test-pro", "auth_id": ""} for u in ids}
+
 
 MANIFEST_DIR = Path(__file__).resolve().parents[1] / "credit_retro" / "manifests"
 CLI = Path(__file__).resolve().parents[1] / "credit-retro.py"
@@ -1476,7 +1476,9 @@ class EvidenceAndNoticeTests(unittest.TestCase):
         self.assertEqual(counts, {"removed": 1, "notice_sent": 1})
         payload = api.sender.sent[0]
         self.assertEqual(payload["campaign"], "takeback-notice")
-        self.assertEqual(payload["user"], {"email": "rk@example.com", "id": UID, "auth_id": f"pro-{UID}", "first_name": "Rishi"})
+        self.assertEqual(payload["user"], {"email": "rk@example.com", "id": UID, "first_name": "Rishi",
+                                           "professional_id": "test-pro", "auth_id": ""})
+        self.assertEqual(api.sender.validated[0]["user"]["professional_id"], "test-pro")
         c = payload["credits"][0]
         self.assertEqual((c["role"], c["other_names"], c["evidence_url"]), ("Mixing", ["Eli WTF"], "https://www.qobuz.com/x"))
         subject, body = notice.render("Rishi", payload["credits"])
@@ -1489,6 +1491,29 @@ class EvidenceAndNoticeTests(unittest.TestCase):
         self.assertEqual([e["outcome"] for e in notified], ["sent"])
         self.assertEqual(json.loads(notified[0]["after_json"])["approved_by"], "U0TESTAPPR")
         self.assertNotIn("rk@example.com", json.dumps([dict(e) for e in self.ledger.events(apply_id)]))
+
+    def test_a_user_without_a_professional_id_is_withheld_and_an_unreadable_replica_removes_nothing(self):
+        saved = verify_notify.IDENTITY_LOOKUP
+        try:
+            verify_notify.IDENTITY_LOOKUP = lambda ids: {str(u): {"professional_id": "", "auth_id": ""} for u in ids}
+            api, manifest, rows, plan_id = self.plan_for([row()])
+            apply_id, counts = takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN,
+                                              argv=[], pause_s=0, approvals=api.approve(), sender=api.sender,
+                                              log=self.out.append)
+            self.assertNotIn("removed", counts)
+            self.assertEqual((api.sender.validated, api.sender.sent), ([], []))
+            self.assertFalse(any(w[1].endswith("/execute") for w in api.writes))
+            self.assertEqual([w["reason"] for w in takeback.report(self.ledger, apply_id)["withheld"]],
+                             ["no_professional_id"])
+
+            def down(ids):
+                raise RuntimeError("trino down")
+            verify_notify.IDENTITY_LOOKUP = down
+            with self.assertRaises(SystemExit) as cm:
+                takeback.notice_preflight(api, api.sender, rows, log=self.out.append)
+            self.assertIn("professional ids cannot be read", str(cm.exception))
+        finally:
+            verify_notify.IDENTITY_LOOKUP = saved
 
     def test_deferred_notice_is_retried_once_by_notify(self):
         api, manifest, rows, plan_id = self.plan_for([row()])
@@ -2009,35 +2034,37 @@ class IntercomIdentityTests(unittest.TestCase):
         accounts, held = takeback.notice_preflight(FakeApi(), sender, self.rows(), log=lambda _m: None)
         self.assertEqual(held, {})
         self.assertTrue(sender.validated)
-        uid = sender.validated[0]["user"]["id"]
-        self.assertEqual(sender.validated[0]["user"]["auth_id"], f"pro-{uid}")
+        self.assertEqual(sender.validated[0]["user"]["professional_id"], "test-pro")
 
     def test_an_account_with_no_identity_is_held_not_removed(self):
-        orig = takeback._auth_ids
-        takeback._auth_ids = lambda ids: {}
-        self.addCleanup(setattr, takeback, "_auth_ids", orig)
+        orig = verify_notify.IDENTITY_LOOKUP
+        verify_notify.IDENTITY_LOOKUP = lambda ids: {str(u): {"professional_id": "", "auth_id": ""} for u in ids}
+        self.addCleanup(setattr, verify_notify, "IDENTITY_LOOKUP", orig)
         sender = FakeSender()
         accounts, held = takeback.notice_preflight(FakeApi(), sender, self.rows(), log=lambda _m: None)
-        self.assertEqual(set(held.values()), {"no_intercom_identity"})
+        self.assertEqual(set(held.values()), {"no_professional_id"})
         self.assertEqual(sender.validated, [], "nothing is validated or sent without an identity")
 
     def test_an_unreadable_identity_lookup_refuses_the_whole_run(self):
-        orig = takeback._auth_ids
+        orig = verify_notify.IDENTITY_LOOKUP
 
         def boom(ids):
             raise RuntimeError("trino down")
-        takeback._auth_ids = boom
-        self.addCleanup(setattr, takeback, "_auth_ids", orig)
+        verify_notify.IDENTITY_LOOKUP = boom
+        self.addCleanup(setattr, verify_notify, "IDENTITY_LOOKUP", orig)
         with self.assertRaises(SystemExit) as cm:
             takeback.notice_preflight(FakeApi(), FakeSender(), self.rows(), log=lambda _m: None)
         self.assertIn("nothing is removed", str(cm.exception))
 
     def test_the_real_lookup_reads_neptuneprofessionalid(self):
-        from unittest import mock
-        from credit_review import verify_notify
-        with mock.patch.object(verify_notify, "account_auth_ids", return_value={"7": "uuid-7"}) as m:
-            self.assertEqual(_REAL_AUTH_IDS(["7"]), {"7": "uuid-7"})
-        m.assert_called_once_with(["7"])
+        seen = []
+
+        def q(sql):
+            seen.append(sql)
+            return [["7", "uuid-7", None]]
+        self.assertEqual(verify_notify.account_identities(["7"], query=q),
+                         {"7": {"professional_id": "uuid-7", "auth_id": ""}})
+        self.assertIn("neptuneprofessionalid", seen[0])
 
 
 class ManifestTests(unittest.TestCase):

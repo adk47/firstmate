@@ -55,6 +55,28 @@ A copy of the `intercom-ops-write.sh` gate for `POST /messages`:
   "Ticket to Ride" is refused on purpose: fail closed.
 - The recipient is the one Intercom user whose email equals the account email. Zero users,
   a lead only, several users, or an `external_id` naming another Muso user is a refusal.
+  **The primary key is `users.neptuneProfessionalId`** (firstmate 090). It is the JWT
+  `professionalId` the web app boots Intercom with (web-credits `plugins/intercom.plugin.ts` and
+  `core/helpers.ts` `getUserData`), so it is what Intercom stores as the contact's
+  `external_id`: never null, unique, and equal to the Auth0 subject for Auth0 accounts (all but
+  7). Legacy accounts with no Auth0 subject (about 32%) are matched by it too. The credits file
+  carries it as `user.professional_id`, plus the Auth0 subject as `user.auth_id` when there is
+  one (firstmate 083). An `external_id` names this account when it is `professional_id`, or
+  `auth_id` with or without `auth0|`; the bare numeric user id does NOT (refused as another
+  account). A note that carries no account Intercom identity (neither `user.professional_id`
+  nor `user.auth_id`; a bare `user.id` is not enough, #1298 / firstmate 120) is refused, except
+  removal-notice (its recipient is the profile's claimed workspace email). Every driver reads both from the replica (Trino, read only; `send_all` does it for
+  the verify-notify drivers (the verify-live run does it before the day's cap, so a held user's
+  credits are deferred, not dropped) and `audit_documents` for the read-only `--doc-check` audit; the
+  credit-retro take-back preflight and `notify` do it for the take-back notice, and withhold a
+  user without one as `no_professional_id`) and holds a user with no professional id (report
+  `no_professional_id`, never handed to the gate); nobody is held for a missing Auth0 subject.
+  When the account email matches several Intercom users, the ONE whose `external_id` is this
+  account is the recipient; none or several of them is refused as before (firstmate 091).
+  A contact with no `external_id` at all is refused on every path, the in-thread legacy-id
+  match included: "the Intercom user for this email has no external_id, so it cannot be matched
+  to this Muso account" (firstmate 085, 090; re-checkable for the status notes and email-changed,
+  terminal for the other campaigns).
 - The ledger (`credit_review/verify_ledger.py`, tables `verify_messages` and
   `verify_requests`) is claimed BEFORE the api-log and the POST:
   - each request id is notified at most once;
@@ -65,10 +87,12 @@ A copy of the `intercom-ops-write.sh` gate for `POST /messages`:
   - only an Intercom `error.list` (`rejected`, nothing delivered) is retried, at most 3
     times;
   - refusals are terminal (`refused`, with the reason).
-- The response must be an `admin_message` of the requested type with a numeric id.
+- The response must be an `admin_message` of the requested type with a numeric id (an
+  in-thread note is checked as a Caroline comment instead; see In-thread delivery below).
 
 `tag-proof --message-id <id>` acts only on a note this gate sent. The conversation's
-`source.id` must be that note. Only parts authored by the contact we wrote to count, and
+`source.id` must be that note (an in-thread note must be a Caroline part of the conversation,
+and only parts after it count). Only parts authored by the contact we wrote to count, and
 the reply text is never extracted. ANY such reply (text or attachment) records the latest
 reply's time on that message (`last_reply_at`; `REPLY RECORDED` for each newer reply) and
 `extension_requested_at` on the note once: the user may be asking for
@@ -84,6 +108,55 @@ document step (T07) picks tagged conversations up later.
 Caroline's guidance for replies to these notes lives in
 `workspaces/support/reference/credits-and-profiles.md` ("Credits Added on Trust"): thank
 them, "we'll check it, usually within a few days", never decide.
+
+**Rebase notes (2026-10-21).** This branch replaces some blocks from main (#1295, #1298) on
+purpose. `AuthLookupError`, `account_auth_ids` (its
+`coalesce(neptuneprofessionalid, auth0userid)` fallback into one `user.auth_id`), `AUTH_LOOKUP`,
+`attach_auth_ids`, `Report.no_auth_users` and the `auth_lookup=` parameter of `verify_notify.run`
+are replaced by `account_identities`, `IDENTITY_LOOKUP`, `attach_identities` and
+`Report.no_professional_id`. These read `users.neptuneprofessionalid` and `auth0userid` as two
+separate columns and pass them as `user.professional_id` and `user.auth_id` (firstmate 090, 118,
+120). `run_wave`'s pre-send `attach_auth_ids` call moves into `send_all`, and `audit_documents`
+does the same lookup for the read-only `--doc-check` audit. The refusals #1295 and #1298 added are
+all kept: a note with no account identity, a bare numeric `external_id`, an empty `external_id`,
+and the take-back identity hold (`no_professional_id`, where an unreadable replica means no run).
+`CREDIT_VERIFY_AUTH_LOOKUP_CMD` (`verify_notify.AUTH_LOOKUP_CMD`) still overrides the command the
+identity lookup runs (default `/opt/hydra/scripts/trino-query.sh`).
+
+The other files the rebase check flags replace main's lines on purpose too:
+
+- `credit_retro/takeback.py`: `_auth_ids` becomes `account_identities` (the same
+  `verify_notify` lookup), and the hold reason `no_intercom_identity` becomes
+  `no_professional_id`. An unreadable replica still refuses the whole run. The removed-notice
+  path now also needs a professional id.
+- `credit_review/verify_ledger.py`: `ASK_CAMPAIGNS` gains `uvn-status`. The `takeback-notice`-only
+  exemption becomes `NOTICE_CAMPAIGNS`. Only an ask counts as "already asked" (firstmate
+  063/064); before, any note did.
+- `intercom-verify-request.sh`: the fixed `email` message type becomes email or in-thread
+  comment. The campaign list and `--copy` list grow. The tag-proof check also accepts a thread
+  that holds our note as a Caroline part. The `user.auth_id` comparison becomes `ext_is_account`
+  (professional id, or Auth0 subject with or without `auth0|`). The no-identity and empty-`external_id`
+  refusals are kept. Several Intercom users on one email are still refused, unless exactly one
+  of them has this account's `external_id`.
+- Tests (`intercom-verify-request.bats`, `test_credit_retro.py`, `test_credit_verify_notify.py`):
+  fixtures move from `auth_id:"pro-42"` to `professional_id`. The `account_auth_ids`,
+  `AuthLookupError` and `no_auth_users` tests become identity tests of the same refusals and holds.
+- The "dropped" commits (e69c0bdb..ff55d231) are the pre-rebase head of this branch. Their
+  content was re-applied as 40f97bb2 and the commits after it. The only lines missing from the
+  current tree are earlier versions of code that later commits rewrote. Checked against the old
+  head ff55d231 (QA @3258c41): the weekly refusal re-check and third-refusal flag (f1301bf2) are
+  still wired (`uvn_status.run` and `withdrawal_confirm.run` call `verify_notify.flag_refusals`
+  for `RECHECKABLE_REFUSALS`; `MAX_REFUSALS = 3`), and its four tests are still in
+  `test_uvn_status.py`. Every test in ff55d231's `test_uvn_status.py`, `test_credit_retro.py`,
+  `test_credit_verify_notify.py` and `intercom-verify-request.bats` is still present, except four
+  Python tests and two bats tests that main itself removed in 32f2b7bd (the verify-live enable PR).
+- A user with one complete and one blank-field pending request is now held whole (`incomplete`),
+  so their one uvn-status note never leaves out the blank request (QA @4688346).
+- A uvn-status user with a pending request the list does not carry yet is held (`unlisted`) until
+  a rebuilt list names it, so the one note never leaves out a request opened after the list was
+  built (QA @3258c41). The same rule (`uvn_status.plan`) runs again on the fresh replica read
+  right before each send, so a request opened or blanked between the batch and the send holds
+  the user too (QA @1f59d68).
 
 ## Operate
 
@@ -154,7 +227,7 @@ rule silently, so for them the documents rule is per CREDIT:
 2. **Human approvals.** A request whose `metadata.approval.isAgent` is false was approved by
    a person. We cannot tell which of those saw documents, so none is asked about (initial
    notes and reminders).
-3. **Intercom check at send time** (in the gate, **past credits only**). If any conversation
+3. **Intercom check at send time** (in the gate, **past credits and `uvn-status` only**). If any conversation
    of the recipient holds a document the USER attached (in a reply, or in a conversation
    they opened), or is tagged `credit-proof`, the note is skipped and its credits are
    closed. Email replies land in Intercom, so this covers both channels. A contact with
@@ -162,9 +235,12 @@ rule silently, so for them the documents rule is per CREDIT:
    nothing. `--doc-check` runs this check read-only for `--campaign retro-past` and never
    claims or sends; it is refused for any other campaign or kind. A new credit's note is
    never skipped for a generic Intercom attachment or a long conversation history.
-4. **No repeats.** A credit asked about in any campaign is never asked about again. A past
-   ask goes at most once per user, ever (any earlier note counts), and messages are always
-   batched per user.
+4. **No repeats.** A credit asked about in any ask campaign is never asked about again. A
+   past ask goes at most once per user, ever (any earlier ask counts), and messages are
+   always batched per user. Only the ASK campaigns count as "already asked": `verify-live`,
+   `retro-past` and `uvn-status`. A notice or confirmation (`withdrawal-confirm`,
+   `takeback-notice`, `removal-notice`, and merge outcomes, which are not in this ledger)
+   never closes a user's asks (firstmate 063/064).
 
 Before/after counts on node-8, read-only: `credit-review.py verify-wave --mode dry-run
 --wave-file W --max-users 1000 --audit-docs /tmp/audit.csv`. The report gives the counts for
@@ -265,6 +341,51 @@ notes.
 - **Lock:** `TAKEBACK_COPY_APPROVED=0` until Fable's copy GO and the captain's approval. While locked, `--validate` refuses (exit 1, so `credit-retro apply` removes nothing) and only `--dry-run` renders the copy. Unlocked, `--validate` exits 3 when the user already had a message from this gate that UTC day (one message per user per day across all campaigns).
 - **Removal notice vs take-back notice:** `takeback-notice` is sent by the take-back run itself, at removal time. `removal-notice` is for removals made some other way (staff deletes, with a reason per credit, incl. the backfill). The two are keyed differently (credit request id vs removal event id), so the ledger does not dedupe across them: a `removal-notice` events file must leave out removals that `credit-retro` made, since their owners already got a take-back notice. A take-back notice is not an ask, so an earlier `verify-live` or `retro-past` note about the same request never blocks it; only its own `takeback-notice` rows do.
 
+## UVN status reminders (`--campaign uvn-status`) and withdrawal confirmations (`--campaign withdrawal-confirm`)
+
+**Authority.** The captain's standing order, 2026-10-19 17:24Z, verbatim: "are you properly communicating to everybody that's making credit request and also are you figuring out how to do profile merges that are being requested by Caroline as well make sure that you have all of the operation functions that Jan performs under your watch. I still want the guard up, but I want you to do everything based off of the research that you do and also your communications with the actual users." Under it, firstmate approved the uvn-status copy (inbox 060) and the withdrawal-confirm template (inbox 061), and confirmed both on 2026-10-19 (inbox 064). Every note of either campaign records that order and approval as its `approval_ref`.
+
+- **uvn-status** (Fable ops-takeover section 2 class 2; copy approved by firstmate 2026-10-19 21:07Z): one status + reminder per user whose credit requests wait on them (`user_verification_needed`), ever. It is an ask.
+  - **Driver:** `credit-review.py uvn-status --list <newest dated uvn-reminder-list.json from credit-trust-llm-t01> --segment paid|free --mode apply --max-users N`. Canary: `--max-users 3`. At most 400 per UTC day. Same kill switch as verify-notify.
+  - **Budget:** users the ledger already answers for (listed requests noted or closed, already sent, proof received, messaged in 7 days, asked in the last 90 days by any ask campaign) are dropped before the per-run budget is spent, so repeated runs keep reaching new users. A real run closes the ones done for good, no longer waiting, or without an account email. The 7-day and the 90-day one-ask lock are deferrals: nothing is closed and the user is offered again once they lapse (the run reports them as "deferred (messaged in the last 7 days or today)" and "deferred (asked in the last 90 days)"). Users the gate defers for a recent message in Intercom do not use the budget either: the run keeps going past them, at most 5 gate calls per budgeted user. For the status notes (below), a gate refusal does not use the budget either; it counts toward the same 5-calls-per-user cap and follows the 7-day re-check / 3-strikes rule. The hold is found by the account email OR the Muso user id, so an email change neither frees the user early nor resets the strike count. A pending request with a blank title, artist or role is never shown and never closes the user (`incomplete`): the whole user is held, even when their other requests are complete (their one note must cover every request), and re-checked on the next run, once the field is filled in. A request still waiting on them that the list does not carry (opened after the list was built) holds the user the same way (`unlisted`, not closed) until a rebuilt list names it; a request the note would never ask about (approval path, already on the profile) does not.
+  - **Re-checked before each send:** the list is at most 30 h old (re-run `build.py` the morning of a send day); the strict proof-on-file rule (any entry = no ask; UNKNOWN = nothing sent); the request is still UVN on the replica (Trino, never admin paging), and the `incomplete` / `unlisted` holds are applied again on that same read; in the gate, documents attached or tagged in Intercom = skip, any admin or Caroline message in 7 days = defer (a conversation we opened counts only when it was opened in those 7 days), the ledger (one per user ever, 7 days, one message per user per day, and the one-ask-per-user-per-90-days lock across verify-live, retro-past and uvn-status: a deferral, nothing closed, the gate answers `DEFERRED recently-asked`).
+  - **No second ask** (Fable via firstmate 094, narrowed by firstmate 102): the replica re-check leaves out a request whose `verificationData.duplicate_of` is set (already on the profile, firstmate 086) or that the approval path can actually admit (it sends one v1 note): ALL of validator-approved (`is_approved`), `total_risk_percent` < 30, track popularity 1..59, for a one-person role no trusted source crediting it to someone else (`rule_risk_percent.review_role_credited_to_other_at_trusted_source` 0 or absent), and no server proof reason (`policy.server_proof_reasons`, the mirror of core's agent-approval guard) other than a band-hint-only stamp. A missing or unreadable field never leaves a request out. The run reports `already_on_profile` / `approval_path` (no ledger row: they leave the list once approved) and `low_risk_asked` (validator-approved, risk < 30, but the server needs proof: asked as normal); the note names only the remaining requests, and a user with nothing left to ask about is not messaged.
+  - **Delivery:** in the user's most recently updated OPEN conversation of the last 14 days when there is one, otherwise email (see in-thread delivery below). A conversation the gate picked that fails a check (another contact, a human assignee, a do-not-message tag, unreadable) is dropped and the note goes by email: nothing is refused and the ask stays open (firstmate 066). A failed or unverified lookup of the open conversations sends nothing and claims nothing; the next run tries again (firstmate 071).
+  - **Copy:** up to 3 titles, then "and N more". The list sentence is Caroline's Step 2 ask marker, so her ask-once guard counts this note as an ask.
+- **withdrawal-confirm** (firstmate 2026-10-19 21:21Z): the fixed "We've withdrawn your credit request for {role} on "{title}", as you asked" note. Role and title come from the request row. Not an ask: it never closes a user's asks.
+  - **Sent only for a requester withdrawal:** the row is `rejected` with `metadata.withdrawal.by = requester`.
+  - **Once per request:** enforced by the ledger.
+  - **Command:** `credit-review.py withdrawal-confirm --request-ids <id>[:<conversation>],... --mode apply`. An id with a conversation is answered in that conversation; a bare id goes by email. Same kill switch as verify-notify.
+  - **Exit status** (firstmate 088): 0 = every requested confirmation was sent or already sent; 3 = at least one is held or deferred (a confirmation not sent is a promise we did not keep, so it must be visible: the report lists each such request id with its reason, `<id>: held, no professional id on the account` or `<id>: deferred, daily cap: retry tomorrow`); 1 = a refusal or failure.
+- **In-thread delivery** (firstmate 063): `intercom-verify-request.sh send --conversation <id>` (uvn-status, withdrawal-confirm, the status notes and email-changed). For an explicitly passed conversation, the gate reads it (an unreadable one sends nothing and claims nothing) and refuses (nothing sent; recorded; for the status notes and email-changed as a 7-day re-check hold) unless its one contact is the Intercom user resolved from the account email (for email-changed, the contact linked to the account id), it is not assigned to a human, and it carries no do-not-message tag (`abuse-block` or a social/SMS channel tag). A closed or snoozed conversation is fine: the reply reopens it. It then posts a Caroline comment (`POST /conversations/{id}/reply`, admin 5763097, the rendered HTML, no subject), checks that the answer's last part is that comment, and records it like an email note (message id = the part id, plus the conversation id). `tag-proof` accepts such a note and counts only the user's parts after it.
+
+## In-thread legacy-id match (firstmate 089)
+
+Many legacy accounts have no Auth0 subject (`users.auth0userid` empty, about 32% of accounts), and their Intercom `external_id` is a UUID we cannot map. It stays as a backstop to the professional-id match (firstmate 090). For **in-thread replies only** (withdrawal-confirm with a conversation, email-changed, email-changed-dup; never uvn-status, the status notes, verify-live, retro-past, removal/takeback or any email or bulk send), when the thread contact's (non-empty) `external_id` matches neither the professional id nor the Auth0 subject, the gate still answers in the user's own conversation when ALL hold:
+
+- the conversation has exactly one contact, an Intercom user;
+- that contact's email is the Muso account email (case-insensitive, trimmed);
+- the email is not a shared or role inbox: its local part (before `@`, lower-cased, without a `+tag`) is not one of info, support, help, admin, contact, hello, office, team, booking, bookings, management, mgmt, music, label, records, publishing, accounts, billing, sales, marketing, press, media, studio, noreply, no-reply, mail, enquiries, inquiries (otherwise refused: "shared or role inbox");
+- the contact's `external_id` is not another Muso account. The driver asks the gate for it (read only: `send ... --conversation <id> --thread-contact` prints `THREAD_CONTACT {"contacts", "role", "external_id"}`), checks it with one replica read (`users` where the id, the professional id, the Auth0 subject, or `auth0|` + it equals the external_id) and passes `user.thread_external_id` and `user.ext_other_account` (true/false). A missing field (also when the external_id cannot be checked), or one for another external_id, refuses the legacy path. A gate refusal of the pre-flight read is reported as a refusal with the gate's reason; only a failed Intercom read reports "could not be read". An empty external_id is refused, never matched this way.
+
+Such a send is recorded with reason `in-thread-legacy-id contact=<id> external_id=<ext>` in the ledger and as `recipient_match` in the api-log.
+
+## No-ask status notes and email-change replies (firstmate 068-073, captain standing order 2026-10-19 17:24Z)
+
+- **`status-doc-received`** (credit-trust-llm-t01 list `status-A-doc-under-review-*.json`) and **`status-team-review`** (list `status-B-with-our-team-*.json`): one status note per user, ever, with the approved fixed texts (copy file `copy-doc-received-team-review-1020.md`).
+  - **Not asks:** no proof-on-file exclusion (these users are exactly the ones with documents or requests with us), outside the 400/day ask cap (a 1,000/day sanity bound), and they never close an ask.
+  - **Shared rules:** same 7-day Intercom check and in-thread-or-email delivery as uvn-status.
+  - **Replica re-check** (firstmate 076): the listed requests must still be pending (`user_verification_needed`, `unverified` or `processing`, not deleted); uvn-status keeps `user_verification_needed` only. A status-note user with none left is counted as `not_pending` and never closed in the ledger.
+  - **Budget:** a gate refusal does not use the run budget (like a deferral) and counts toward the cap of 5 gate calls per budgeted user.
+  - **Refusals are re-checked, three strikes, per user** (firstmate 076, 082, 083): a gate refusal of a status note or an email-changed reply holds the USER in that campaign (`verify_refusal_holds`, keyed by campaign and account email and found by that email OR the Muso user id, so an email change keeps the hold and its count: reason, refusal count, `next_recheck_at` = now + 7 days), whatever requests are listed or still pending. The runner skips the user until then (reported as "refused, re-check after <date>") and the gate answers `DEFERRED refused-recheck` (exit 3). A later send clears it; another refusal adds one and holds it 7 more days. After the third refusal (21 days) the run posts it once to #cs_priority for a human (Muso user id, campaign, reason; no email; `scripts/lib/slack-notify.sh`, operations bot) and records `flagged_at`: the user is blocked in that campaign (the gate answers `SKIPPED refused-flagged`). A failed post leaves it un-flagged (retried next run) and the run exits non-zero.
+  - **Command:** `credit-review.py uvn-status --campaign status-doc-received|status-team-review --list <newest list> --segment paid|free --mode apply --max-users N`.
+  - **Queued wording** (firstmate 092): `status-doc-received` has an approved alternative, `--wording queued` (gate `--copy queued`, recorded with its own approval ref naming firstmate 092): "Hi {name}, a quick update on your credit request(s) for {titles}: we have the document you sent, and it's in our review queue. We'll message you here as soon as it's checked - no need to send anything else." (same 3-titles-then-"and N more" rule and request/requests). The default "reviewing" wording stays. No dates.
+  - **No-ask team-review wording, Copy B0** (firstmate 106, credit-trust-llm-t01 key pending-status-1021): `status-team-review` has an approved alternative, `--wording no-ask` (gate `--copy no-ask`, recorded with its own approval ref naming pending-status-1021 / firstmate 106): "Hi {name}, a quick update on your credit request(s) for {titles}: they're with our team for review. Nothing else is needed from you right now." (Copy B without its optional proof sentence; same 3-titles-then-"and N more" rule, request/requests and sign-off). The default Copy B stays. `--wording queued` applies only to status-doc-received and `--wording no-ask` only to status-team-review; any other pairing is refused by `credit-review.py`, the driver and the gate.
+  - **Held for now** (firstmate 092): status A/B sends are HELD until the stage-2 proof checker is live (then they go with the default wording); if it is not live by the agreed deadline, status A goes with the queued wording.
+- **`email-changed` / `email-changed-dup`**: "Done - your sign-in email has been updated ..." (dup adds the extra-account line), as a threaded reply only, once per ticket.
+  - **Recipient** (firstmate 076): taken from the ticket's own conversation (`--conversation`), not the account email: it must have exactly one contact, an Intercom user (`role` user) whose `external_id` is the account's professional id or Auth0 subject (`user.auth_id`, with or without `auth0|`), or the in-thread legacy-id match (firstmate 089). Two contacts, a lead, no `external_id` or another account's `external_id` is refused. The usual human-assignee and do-not-message-tag checks still apply.
+  - **Command:** `credit-review.py email-changed --user-id N --conversation C --ticket KEY [--dup] --mode apply`. It prints sent, skipped, deferred, refused and failed, and exits 3 when the gate deferred the reply (for example the user already had a note from this gate that day).
+
 ## Removal notices (`--campaign removal-notice`)
 
 Firstmate, 2026-10-16 15:14Z (captain-driven). Support measured that 35 owners of credits
@@ -308,7 +429,8 @@ can restore the credit. Each line states the reason first, then the action (Fabl
 - **Gap for core:** 1,072 admin removals carry no actor. The feed cannot tell those apart
   from self-removals until core records the actor.
 
-Tests: `scripts/tests/intercom-verify-request.bats`, `scripts/tests/test_credit_verify_notify.py`.
+Tests: `scripts/tests/intercom-verify-request.bats`, `scripts/tests/test_credit_verify_notify.py`,
+`scripts/tests/test_uvn_status.py`.
 
 ## Enable gates (Fable decision 2026-10-17, `decision-verify-notify-enable-2026-10-17.md`)
 
@@ -321,7 +443,7 @@ daily line.
 | Proof on file from any source (Intercom, support@ Gmail, core): no note at all | `/var/lib/credit-trust/proof-on-file.json`, through `credit_review.proof_parts` | no sends |
 | Emailed support@ in the last 90 days | the same file's `gmail_contacts_90d` (`proof_parts.support_contacts`, the decider's reader) | no sends |
 | Org affiliation (RULE-org-affiliation, schema `org-affiliation/v1` from cmux-credit-system-lane): a note needs verdict `none` with coverage `full`; no verdict, `held`, `labels_only`, `claimed_unverified` (automatic only for trusted-contradicted removals) or `contributor` / `verified_org` / `authenticated_domain` = human | `/var/lib/credit-trust/org-affiliation.json` (`credit_review.affiliation`, shared with the take-back gate); older than 2h or dated in the future = unknown for everyone | no sends |
-| One ask per user per 90 days across verify-live and retro-past | verify ledger (`verify_ledger.asked_within`, checked in the run and again at the claim) | n/a |
+| One ask per user per 90 days across the ask campaigns (verify-live, retro-past, uvn-status) | verify ledger (`verify_ledger.asked_within`, checked in the run and again at the claim) | n/a |
 
 Cadence: once a day at 09:00 Europe/Rome, paying users first, at most 200 messages a day for
 the first week (then 500), reminders included and sent first. Removal, expiry and the

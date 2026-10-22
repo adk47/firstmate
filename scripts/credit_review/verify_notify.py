@@ -46,7 +46,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Optional
 
 from . import admin as admin_api
 from . import affiliation, proof_parts, verify_ledger
@@ -112,18 +112,21 @@ class Report:
     docs_users: int = 0
     docs_checked: int = 0
     proof_on_file: int = 0
+    no_professional_id: int = 0        # no professional id on the account: Intercom identity unverifiable, held
+    flagged: int = 0
     mixed_v1_users: int = 0            # users whose one note is v1 because ANY credit is paid provisional
     already_today: int = 0             # messages the ledger already holds for today (counted against the cap)
     paying_hold: str = ""              # paying status unknown and the cap would have to choose: nothing sent
-    no_auth_users: int = 0             # no Intercom identity (professionalId / Auth0 subject) on the account: held
     recipient_ok: int = 0              # dry run with --check-recipients: the real gate accepted the recipient
+    validated: int = 0                 # dry run: the gate validated (or rendered) the note it would send
     halted: str = ""
     failures: list[str] = field(default_factory=list)
     refusals: list[str] = field(default_factory=list)
+    flag_failures: list[str] = field(default_factory=list)
 
     @property
     def failed(self) -> bool:
-        return bool(self.failed_users or self.proof_failed or self.halted)
+        return bool(self.failed_users or self.proof_failed or self.halted or self.flag_failures)
 
     def render(self, mode: str, title: str = "VERIFY NOTES") -> str:
         if self.halted:
@@ -134,14 +137,14 @@ class Report:
         if not (self.sent_notes or self.refused_users or self.failed_users or self.reminders_sent
                 or self.proof_tagged or self.proof_failed or self.extension_requests
                 or self.affiliation_held or self.documented_users or self.support_contact_users
-                or self.paying_hold or self.no_auth_users) and mode == "apply":
+                or self.paying_hold or self.no_professional_id) and mode == "apply":
             return "NO_REPLY"
         head = f"{title} (dry run, nothing sent)" if mode != "apply" else title
         parts = [f"{head}: {self.sent_notes} note(s) sent covering {self.sent_credits} provisionally approved credit(s)"
                  if mode == "apply" else f"{head}: {self.users} account(s) would get a note"]
-        if self.no_auth_users:
-            parts.append(f"{self.no_auth_users} account(s) held: no professionalId / Auth0 subject on the account, so the Intercom "
-                         "recipient cannot be matched to it")
+        if self.no_professional_id:
+            parts.append(f"{self.no_professional_id} account(s) held: no professional id on the account, so the "
+                         "Intercom recipient cannot be matched to it")
         if self.recipient_ok:
             parts.append(f"{self.recipient_ok} recipient(s) accepted by the real gate (read only)")
         if self.paying_hold:
@@ -568,6 +571,22 @@ def plan(rows: dict[str, dict[str, Any]], report: Report,
 
 
 Runner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
+Query = Callable[[str], list[list[str]]]
+TRINO = "/opt/hydra/scripts/trino-query.sh"
+# Kept from #1295/#1298: the identity lookup's Trino command can be overridden (tests, a
+# different replica wrapper). Default: the same trino-query.sh.
+AUTH_LOOKUP_CMD = os.environ.get("CREDIT_VERIFY_AUTH_LOOKUP_CMD", TRINO)
+
+
+def trino(sql: str, cmd: str | None = None) -> list[list[str]]:
+    """Read-only query against the core replica (Trino)."""
+    import csv
+    import io
+    p = subprocess.run([cmd or TRINO], input=sql, capture_output=True, text=True, timeout=900, check=False)
+    if p.returncode:
+        raise RuntimeError(f"trino failed: {p.stderr[-300:]}")
+    lines = [ln for ln in p.stdout.splitlines() if ln.startswith('"')]
+    return list(csv.reader(io.StringIO("\n".join(lines))))
 
 
 def _run(argv: list[str]) -> "subprocess.CompletedProcess[str]":
@@ -582,6 +601,12 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
              wrapper: str = WRAPPER, runner: Runner = _run, extra: list[str] | None = None,
              pace_seconds: float = 0.0, preview_dir: str | None = None, reminder: bool = False,
              check_recipients: bool = False) -> None:
+    if mode == "apply" or check_recipients:
+        try:
+            payloads, _ = attach_identities(payloads, report)
+        except Exception as exc:  # noqa: BLE001 - an unreadable replica sends nothing
+            report.halted = f"the accounts' professional ids cannot be read from the replica ({exc}); nothing is sent"[:300]
+            return
     for i, p in enumerate(payloads):
         if i and pace_seconds and mode == "apply":
             time.sleep(pace_seconds)
@@ -604,6 +629,8 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
         out, err = _first_line(res.stdout), _first_line(res.stderr)
         if res.returncode == 0 and out.startswith("RECIPIENT OK"):
             report.recipient_ok += 1
+        elif res.returncode == 0 and mode != "apply" and out.startswith(("VALID ", "DRY-RUN ")):
+            report.validated += 1
         elif res.returncode == 0 and out.startswith("POSTED") and reminder:
             report.reminders_sent += 1
         elif res.returncode == 0 and out.startswith("POSTED"):
@@ -624,16 +651,130 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
             report.failures.append(f"rc={res.returncode} {err or out}"[:200])
 
 
+AUTH_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+PRO_ID_RE = re.compile(r"^[A-Za-z0-9._|-]{1,128}$")
+
+
+def professional_id(raw: Any) -> str:
+    """users.neptuneprofessionalid, the id the web app boots Intercom with (its contact
+    external_id, firstmate 090): the gate's user.professional_id; '' when missing or malformed."""
+    v = str(raw or "").strip()
+    return v if PRO_ID_RE.fullmatch(v) else ""
+
+
+def account_identities(user_ids: list[Any], query: Query | None = None) -> dict[str, dict[str, str]]:
+    """{muso user id: {professional_id, auth_id}} from the core replica (Trino, read only)."""
+    ids = sorted({int(u) for u in user_ids if str(u).isdigit()})
+    out: dict[str, dict[str, str]] = {}
+    for i in range(0, len(ids), 500):
+        chunk = ",".join(str(u) for u in ids[i:i + 500])
+        for uid, pro, auth in (query or (lambda q: trino(q, AUTH_LOOKUP_CMD)))(
+                "SELECT CAST(id AS varchar), neptuneprofessionalid, auth0userid FROM postgresql_core.public.users "
+                f"WHERE id IN ({chunk})"):
+            out[str(uid)] = {"professional_id": professional_id(pro), "auth_id": auth_subject(auth)}
+    return out
+
+
+IDENTITY_LOOKUP: Callable[[list[Any]], dict[str, dict[str, str]]] = account_identities
+
+
+def attach_identities(payloads: list[dict[str, Any]], report: Report
+                      ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(payloads, held): each payload naming a Muso user (user.id) without user.professional_id
+    gets the account's professional id and Auth0 subject from the replica; one without a
+    professional id is held (report.no_professional_id), never handed to the gate. Payloads
+    naming no user (a removal notice's profile owner) pass unchanged. A replica read error
+    propagates: the caller sends nothing."""
+    need = {id(p) for p in payloads if str(p["user"].get("id") or "") and "professional_id" not in p["user"]}
+    if not need:
+        return payloads, []
+    found = IDENTITY_LOOKUP([p["user"]["id"] for p in payloads if id(p) in need])
+    out: list[dict[str, Any]] = []
+    held: list[dict[str, Any]] = []
+    for p in payloads:
+        if id(p) in need:
+            ident = found.get(str(p["user"]["id"])) or {}
+            if not ident.get("professional_id"):
+                report.no_professional_id += 1
+                held.append(p)
+                continue
+            p = {**p, "user": {**p["user"], "professional_id": ident["professional_id"],
+                               "auth_id": ident.get("auth_id", "")}}
+        out.append(p)
+    return out, held
+
+
+def auth_subject(raw: Any) -> str:
+    """The account's Auth0 subject (core users.auth0userid without its auth0| prefix), the
+    gate's user.auth_id; '' when missing or malformed (the driver holds that user)."""
+    v = re.sub(r"^auth0\|", "", str(raw or "").strip())
+    return v if AUTH_ID_RE.fullmatch(v) else ""
+
+
+SLACK_LIB = os.environ.get("CREDIT_REVIEW_SLACK_LIB",
+                           os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "slack-notify.sh"))
+CS_PRIORITY_CHANNEL = "C0BBTAVP44X"  # #cs_priority (only the operations bot is a member)
+Poster = Callable[[str], bool]
+_EMAIL_RE = re.compile(r"[^\s@<>]+@[^\s@<>]+")
+
+
+def post_cs_priority(text: str) -> bool:
+    """One plain-text post to #cs_priority through scripts/lib/slack-notify.sh (operations bot).
+    True only when Slack confirmed it."""
+    fd, path = tempfile.mkstemp(prefix="credit-review-flag-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"channel": CS_PRIORITY_CHANNEL, "text": text}, fh)
+        p = subprocess.run(["bash", "-c", 'source "$1" && slack_notify_payload_file_status "$2"', "slack-flag", SLACK_LIB, path],
+                           capture_output=True, text=True, timeout=120, check=False,
+                           env={**os.environ, "SLACK_NOTIFY_BOT": "operations",
+                                "SLACK_NOTIFY_REQUESTER": "credit-review@hydra-ops"})
+        return p.returncode == 0
+    finally:
+        os.unlink(path)
+
+
+def flag_refusals(report: Report, *, ledger_path: str, campaigns: list[str] | tuple[str, ...],
+                  post: Poster = post_cs_priority, now: datetime | None = None) -> None:
+    """Post each re-checkable refusal refused MAX_REFUSALS times to #cs_priority once (Muso user
+    id, campaign, reason; never the email) and block it. A failed post leaves it un-flagged
+    (retried next run) and is a run failure."""
+    db = verify_ledger.connect(ledger_path)
+    try:
+        for e in verify_ledger.refusals_to_flag(db, campaigns):
+            reason = _EMAIL_RE.sub("<email>", e["reason"])[:300]
+            text = (f"Caroline's gate refused the {e['campaign']} note for Muso user {e['user_id'] or '(unknown id)'} "
+                    f"{e['refusals']} times, {verify_ledger.RECHECK_DAYS} days apart; it is no longer retried and "
+                    f"needs a human. Last reason: {reason}")
+            if post(text):
+                verify_ledger.mark_flagged(db, campaign=e["campaign"], user_key=e["user_key"], now=now)
+                report.flagged += 1
+            else:
+                report.flag_failures.append(f"#cs_priority post failed for user {e['user_id']} ({e['campaign']})")
+    finally:
+        db.close()
+
+
 def audit_documents(payloads: list[dict[str, Any]], report: Report, *, path: str, campaign: str,
                     wrapper: str = WRAPPER, runner: Runner = _run) -> None:
     """Read-only: ask the gate (--doc-check) whether each account already sent
-    documents. Writes user_id,credits,result (no email) to `path` (0600)."""
+    documents. Writes user_id,credits,result (no email) to `path` (0600). The recipient is
+    matched like a send (attach_identities): an account without a professional id is held."""
     import csv
+    try:
+        found, _ = attach_identities(payloads, report)
+    except Exception as exc:  # noqa: BLE001 - an unreadable replica checks nothing
+        report.halted = f"the accounts' professional ids cannot be read from the replica ({exc}); nothing was checked"[:300]
+        return
+    kept = {str(p["user"].get("id") or "") for p in found}
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(["user_id", "credits", "result"])
         for p in payloads:
+            if str(p["user"].get("id") or "") not in kept:
+                w.writerow([p["user"].get("id") or "", len(p["credits"]), "held: no professional id on the account"])
+        for p in found:
             tfd, tmp = tempfile.mkstemp(prefix="verify-doc-check-", suffix=".json")
             try:
                 with os.fdopen(tfd, "w", encoding="utf-8") as tf:
@@ -794,65 +935,6 @@ def provisional_copy(payloads: list[dict[str, Any]], prov: set[str], report: "Re
     return out
 
 
-class AuthLookupError(RuntimeError):
-    pass
-
-
-AUTH_LOOKUP_CMD = os.environ.get("CREDIT_VERIFY_AUTH_LOOKUP_CMD", "/opt/hydra/scripts/trino-query.sh")
-
-
-def account_auth_ids(user_ids: Iterable[Any]) -> dict[str, str]:
-    """{muso user id: the account's Intercom identity} from the core replica (Trino; never admin
-    paging). Every client identifies the Intercom user as the account's ``professionalId``
-    (web-credits/web-credits-next ``user_id: userUUID`` = jwt professionalId; iOS and Flutter
-    ``loginIdentifiedUser(professionalId)``), which core reads from ``users.neptuneProfessionalId``.
-    So that UUID is the contact's external_id. Proven 2026-10-20 (firstmate 118, read-only):
-    20/20 sampled accounts WITHOUT an Auth0 subject and 9/9 comparable accounts WITH one had
-    external_id == neptuneprofessionalid; for Auth0 accounts the subject (minus "auth0|") is the
-    same UUID (10/10), and all 390,910 users have one. Falls back to the Auth0 subject only if
-    the column is empty. Users with neither are absent. Raises AuthLookupError when the replica
-    cannot be read."""
-    import csv as _csv
-    ids = sorted({int(str(u)) for u in user_ids if str(u).strip().isdigit()})
-    out: dict[str, str] = {}
-    for i in range(0, len(ids), 500):
-        sql = ("SELECT CAST(id AS varchar), coalesce(CAST(neptuneprofessionalid AS varchar), auth0userid) "
-               "FROM postgresql_core.public.users WHERE id IN ("
-               + ",".join(str(u) for u in ids[i:i + 500]) + ")")
-        try:
-            p = subprocess.run([AUTH_LOOKUP_CMD], input=sql, capture_output=True, text=True, timeout=300, check=False)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise AuthLookupError(f"{type(exc).__name__}: {exc}"[:200]) from None
-        if p.returncode != 0:
-            raise AuthLookupError(f"rc={p.returncode}: {p.stderr.strip()[-200:]}")
-        for row in _csv.reader(ln for ln in p.stdout.splitlines() if ln.startswith('"')):
-            if len(row) == 2 and row[0].isdigit() and row[1].strip():
-                out[row[0]] = row[1].strip()
-    return out
-
-
-AUTH_LOOKUP: Callable[[Iterable[Any]], dict[str, str]] = account_auth_ids
-
-
-def attach_auth_ids(payloads: list[dict[str, Any]], report: "Report",
-                    lookup: Callable[[Iterable[Any]], dict[str, str]] | None = None
-                    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """(payloads with user.auth_id set, payloads held because the account has no Auth0
-    subject). AuthLookupError propagates: the caller sends nothing."""
-    if not payloads:
-        return payloads, []
-    found = (lookup or AUTH_LOOKUP)([p["user"].get("id") for p in payloads])
-    keep, held = [], []
-    for p in payloads:
-        sub = found.get(str(p["user"].get("id") or ""))
-        if sub:
-            keep.append({**p, "user": {**p["user"], "auth_id": sub}})
-        else:
-            held.append(p)
-    report.no_auth_users += len(held)
-    return keep, held
-
-
 def paid_first(payloads: list[dict[str, Any]], paying: frozenset[int] | None) -> list[dict[str, Any]]:
     """Paying users' notes first (stable: oldest credit first within each group)."""
     if paying is None:
@@ -866,8 +948,7 @@ def paid_first(payloads: list[dict[str, Any]], paying: frozenset[int] | None) ->
 def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "apply", run_id: str | None = None,
         since_hours: int | None = 168, max_users: int = 150, proof_path: str | None = None,
         sweep: bool = True, wrapper: str = WRAPPER, runner: Runner = _run,
-        affiliation_path: str | None = None, check_recipients: bool = False,
-        auth_lookup: Callable[[Iterable[Any]], dict[str, str]] | None = None) -> Report:
+        affiliation_path: str | None = None, check_recipients: bool = False) -> Report:
     """The whole step, once a day (09:00 Europe/Rome). `max_users` is the day's cap on
     messages, reminders included (they go first: the note promised them). Gates, in order:
     proof on file from any source, the support@ 90-day contacts, org affiliation, the shared
@@ -922,17 +1003,17 @@ def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "
                 for p in payloads:
                     held += [_ref(by_id[c["request_id"]]) for c in p["credits"] if c["request_id"] in by_id]
                 payloads = []
-            # The Intercom recipient is matched to the account by its Auth0 subject (the
-            # contact's external_id). No subject = cannot verify the recipient: held, never
-            # handed to the gate (whose refusal would close the credits for good).
+            # The Intercom recipient is matched to the account by its professional id or Auth0
+            # subject (the contact's external_id). Neither = cannot verify the recipient: held,
+            # never handed to the gate (whose refusal would close the credits for good).
             try:
-                payloads, no_auth = attach_auth_ids(payloads, report, auth_lookup)
-            except AuthLookupError as exc:
-                report.halted = f"the account Auth0 subjects cannot be read from the replica ({exc}); nothing is sent"[:300]
+                payloads, no_id = attach_identities(payloads, report)
+            except Exception as exc:  # noqa: BLE001 - an unreadable replica sends nothing
+                report.halted = f"the accounts' professional ids cannot be read from the replica ({exc}); nothing is sent"[:300]
                 for p in payloads:
                     held += [_ref(by_id[c["request_id"]]) for c in p["credits"] if c["request_id"] in by_id]
-                payloads, no_auth = [], []
-            for p in no_auth:
+                payloads, no_id = [], []
+            for p in no_id:
                 held += [_ref(by_id[c["request_id"]]) for c in p["credits"] if c["request_id"] in by_id]
             # Over the day's cap: the credits wait for tomorrow (kept in the ledger, so a
             # credit older than the candidate window is never silently dropped).
@@ -1100,13 +1181,6 @@ def run_wave(admin: admin_api.Admin, *, wave_path: str, ledger_path: str | None 
                 # Not announceable (no account email / title / artist): close them so these
                 # users never take a slot of the per-run budget again.
                 report.skipped_not_live += verify_ledger.skip_requests(db, campaign=CAMPAIGN_RETRO, request_ids=dropped)
-            # Same recipient identity rule as the new-credit notes: Intercom's external_id is the
-            # account's Auth0 subject. No subject = not sent this run (nothing closed).
-            try:
-                payloads, _ = attach_auth_ids(payloads, report)
-            except AuthLookupError as exc:
-                report.halted = f"the account Auth0 subjects cannot be read from the replica ({exc}); nothing is sent"[:300]
-                payloads = []
             report.users = len(payloads)
             if audit_docs and mode != "apply":
                 audit_documents(payloads, report, path=audit_docs, campaign=CAMPAIGN_RETRO, wrapper=wrapper,

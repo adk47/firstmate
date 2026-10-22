@@ -8,7 +8,7 @@ export PATH
 set -euo pipefail
 
 # intercom-verify-request.sh: the ONLY path that asks a user to help verify credits we have
-# added to their profile. Two campaigns, each approved by the captain in his own words:
+# added to their profile. Its campaigns, each approved in the words recorded below:
 #
 #   verify-live (default): NEW provisional approvals by the decider. 2026-10-15 22:12Z: "i
 #       want AI live now - we have too many credits to approve and to get supporting data for
@@ -43,6 +43,9 @@ set -euo pipefail
 #       (TAKEBACK_COPY_APPROVED) until Fable's GO; while locked --validate refuses too, so
 #       credit-retro never removes a credit whose notice cannot go out. Unlocked, --validate
 #       reports the per-day cap (exit 3).
+#   uvn-status / withdrawal-confirm: approved under the captain's 2026-10-19 standing order
+#       (UVN_STATUS_COPY_APPROVED, WITHDRAWAL_COPY_APPROVED below; in-thread delivery below).
+#       docs/credit-verification/verify-request-notes.md owns the details.
 # --dry-run renders every version, so the copy can be reviewed before it ships.
 #
 # It is a copy of the deterministic gate in intercom-ops-write.sh, for an admin-initiated
@@ -65,8 +68,8 @@ set -euo pipefail
 #     POST, so a timeout can never produce a second message. Only a note that NAMED a
 #     removal date can ever be removal-due (the ledger records it);
 #   - the api-log entry is written BEFORE the POST, and the response is checked AFTER it
-#     (type admin_message, the requested message_type), so "POSTED" can never describe a
-#     message that did not land as intended.
+#     (type admin_message, the requested message_type; in-thread: a Caroline comment part),
+#     so "POSTED" can never describe a message that did not land as intended.
 #
 # tag-proof: when the user replies to a note WITH ATTACHMENTS, the conversation is tagged
 # `credit-proof` for the Ops document step (and no further follow-up goes out). ANY reply by
@@ -79,12 +82,29 @@ set -euo pipefail
 #
 # Usage:
 #   intercom-verify-request.sh send --credits-file FILE --approved-by <SlackUID> \
-#       [--campaign verify-live|retro-past|removal-notice|takeback-notice] [--kind initial|reminder-14|reminder-25|after-rejection \
-#        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only)] \
-#       [--dry-run|--validate|--doc-check|--check-recipient]
+#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup] [--kind initial|reminder-14|reminder-25|after-rejection \
+#        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued (status-doc-received) | no-ask (status-team-review)] \
+#       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, email-changed)] [--dry-run|--validate|--doc-check|--check-recipient]
 #   intercom-verify-request.sh tag-proof --message-id <id> [--dry-run]
 #
-# FILE is JSON: {"user": {"email": "...", "id": "<muso user id>", "auth_id": "<auth0 sub>", "first_name": "..."},
+# In-thread delivery (firstmate 063): uvn-status and withdrawal-confirm reply IN the user's
+# existing conversation when there is one, otherwise they go by email. --conversation <id>
+# names it (withdrawal-confirm); uvn-status picks the contact's most recently updated OPEN
+# conversation of the last 14 days on its own. The conversation must have exactly one contact,
+# the one resolved from the account email, must not be assigned to a human and must carry no
+# do-not-message tag (an explicit --conversation that fails is refused and recorded; a picked
+# one that fails is dropped and the note goes by email); the note is then a Caroline comment
+# (POST /conversations/{id}/reply),
+# verified as such, and recorded in the ledger like an email note (message id = the part id).
+# email-changed / email-changed-dup take their recipient from the ticket's own conversation
+# instead of the account email: exactly one contact, an Intercom user whose external_id is the
+# account (its professional id or Auth0 subject, see Recipient). Refusals of the status notes and
+# email-changed are re-checkable per user (firstmate 082, 083): the user is held for 7 days (a
+# send in that time exits 3 DEFERRED refused-recheck), cleared by a later send, flagged to
+# #cs_priority and blocked (SKIPPED refused-flagged) after the third refusal.
+#
+# FILE is JSON: {"user": {"email": "...", "id": "<muso user id>", "professional_id": "<users.neptuneProfessionalId>",
+#                         "auth_id": "<auth0 subject>", "first_name": "..."},
 #                "credits": [{"request_id": "...", "role": "...", "track_title": "...",
 #                             "artist_name": "...", "role_families": ["producer", ...],
 #                             "profile_id": "...", "track_id": "..."}, ...]}
@@ -103,8 +123,9 @@ set -euo pipefail
 # or refuses. Read only: no ledger write, nothing sent. A dry run that skips this cannot see a
 # recipient refusal (2026-10-20 07:00Z: all 21 first notes refused at the external_id check).
 #
-# user.auth_id: Intercom's external_id for a Muso user is the account's Auth0 subject without
-# its "auth0|" prefix (a UUID), not the numeric user id; the driver passes it (users.auth0userid).
+# user.professional_id / user.auth_id: Intercom's external_id for a Muso user is the account's
+# professional id (users.neptuneProfessionalId) or its Auth0 subject (users.auth0userid, with or
+# without its "auth0|" prefix), never the numeric user id; the driver passes both.
 #
 # Exit codes: 0 posted / tagged / nothing new to send · 1 refusal · 2 usage/environment
 #             error · 3 deferred (already messaged today; follow-up not due; no proof yet) ·
@@ -135,6 +156,22 @@ readonly RETRO_COPY_APPROVED=0
 #   TAKEBACK_COPY_APPROVED       the take-back notice (credit-retro apply/notify, #1237/#1242).
 readonly REMOVAL_COPY_APPROVED=0
 readonly TAKEBACK_COPY_APPROVED=0
+#   UVN_STATUS_COPY_APPROVED     the uvn-status reminder (ops takeover section 2 class 2): APPROVED by
+#       firstmate 2026-10-19 21:07Z (inbox 060, confirmed in 064) under the captain's standing order
+#       2026-10-19 17:24Z (APPROVAL_REF_STANDING_ORDER below, verbatim), copy =
+#       copy-uvn-status-reminder-1019 section A with firstmate's closing-line edit.
+readonly UVN_STATUS_COPY_APPROVED=1
+#   WITHDRAWAL_COPY_APPROVED     withdrawal-confirm: APPROVED by firstmate 2026-10-19 21:21Z (inbox
+#       061, confirmed in 064) under the same standing order; fixed text, role + title from the
+#       request row only.
+readonly WITHDRAWAL_COPY_APPROVED=1
+#   STATUS_NOTES_COPY_APPROVED   status-doc-received (firstmate 071) and status-team-review (firstmate
+#       070, verbatim): no-ask status notes for requesters whose requests are with us. APPROVED by
+#       firstmate under the 2026-10-19 standing order. Never an ask; never close an ask.
+readonly STATUS_NOTES_COPY_APPROVED=1
+#   EMAIL_CHANGE_COPY_APPROVED   email-changed / email-changed-dup (firstmate 073): a threaded reply
+#       into the requester's own conversation, once per ticket. APPROVED under the same order.
+readonly EMAIL_CHANGE_COPY_APPROVED=1
 
 # PINNED. Caroline (skills-all/muso-intercom/SKILL.md, Reply Identity), same literal and
 # same variable name as intercom-ops-write.sh so check-intercom-reply-identity.sh keys on it.
@@ -151,11 +188,21 @@ readonly APPROVAL_REF_LIVE="captain U7RP6HKUZ 2026-10-15 22:12Z: \"i want AI liv
 readonly APPROVAL_REF_LIVE_WINDOWED="$APPROVAL_REF_LIVE; 2026-10-15 23:40Z: \"if no valid verification comes it should be removed\" (kept for new provisional approvals at 2026-10-16 00:35Z); copy = Fable copy-review-fable-2026-10-17 pack 1 (GO with edits); enable = Fable decision-verify-notify-enable-2026-10-17 (firstmate 051, 2026-10-17 23:15Z: enable Monday 2026-10-20 under its 7 conditions)"
 readonly APPROVAL_REF_LIVE_V1="$APPROVAL_REF_LIVE; paid provisional approvals: Fable credit-backlog-1019 ruling 4 as amended by firstmate 073 (2026-10-19 14:58Z: provisional approve + doc request, NO day-30 auto-removal, no removal language; captain rule 10-15: deletes must confirm removal at Spotify/Tidal or prove a different profile)"
 readonly APPROVAL_REF_TAKEBACK="captain via firstmate 012, 2026-10-16: every take-back sends the user a short, polite message saying which credit and role, why (who the public credits name, with the link), and how to dispute it by replying with a document."
+readonly APPROVAL_REF_STANDING_ORDER="captain U7RP6HKUZ standing order 2026-10-19 17:24Z: \"are you properly communicating to everybody that's making credit request and also are you figuring out how to do profile merges that are being requested by Caroline as well make sure that you have all of the operation functions that Jan performs under your watch. I still want the guard up, but I want you to do everything based off of the research that you do and also your communications with the actual users.\""
+readonly APPROVAL_REF_UVN="$APPROVAL_REF_STANDING_ORDER; copy approved by firstmate under it 2026-10-19 21:07Z (inbox 060, confirmed in 064): copy-uvn-status-reminder-1019 section A with the closing-line edit"
+readonly APPROVAL_REF_WITHDRAWAL="$APPROVAL_REF_STANDING_ORDER; withdrawal-confirm copy approved by firstmate under it 2026-10-19 21:21Z (inbox 061, confirmed in 064), sent only for a request the requester withdrew (metadata.withdrawal.by = requester)"
+readonly APPROVAL_REF_STATUS="$APPROVAL_REF_STANDING_ORDER; status notes approved by firstmate under it 2026-10-20 (inbox 070: team-review verbatim; 071: doc-received as credit-trust-llm-t01 drafted it). Not asks."
+readonly APPROVAL_REF_STATUS_QUEUED="$APPROVAL_REF_STATUS The 'in our review queue' doc-received wording (--copy queued) approved by firstmate 092."
+readonly APPROVAL_REF_STATUS_NOASK="$APPROVAL_REF_STATUS The no-ask team-review wording B0 (--copy no-ask: Copy B without its optional proof sentence) approved by firstmate 2026-10-21 (credit-trust-llm-t01 key pending-status-1021, relayed in inbox 106)."
+readonly APPROVAL_REF_EMAIL_CHANGE="$APPROVAL_REF_STANDING_ORDER; email-changed templates approved by firstmate under it 2026-10-20 00:55Z (inbox 073): a threaded reply into the requester's own conversation, once per ticket, no customer-typed content."
 readonly APPROVAL_REF_REMOVAL="firstmate 2026-10-16 15:14Z, captain-driven: owners of credits WE removed must be told which credit and role, why, and how to dispute by replying with a document (support measured 35 owners never told). Fraud removals stay silent by captain order (firstmate 2026-10-16 15:48Z)."
 readonly APPROVAL_REF_PAST="captain U7RP6HKUZ 2026-10-15 23:35Z: \"im referring to before when nick made changes and did a trust verify flow and now we have a lotnof credits to verify with documents and give people 30 days to send something in for the ones missing documents\"; 2026-10-16 00:35Z: \"how many credits were approved without documentstion i dont want to lose users unless its obvious fraud feom tbe past\""
 # Caroline's outbound sanitizer word list, IDENTICAL to intercom-ops-write.sh's
 # SANITIZER_WORDS (which CI compares to plugins/intercom/src/sanitize-tool-leak.ts);
 # scripts/tests/intercom-verify-request.bats fails if the two lines ever differ.
+# Conversation tags that mean "do not auto-message here" (same set as resolve-notify.py and
+# resolution-matcher.py); an in-thread note is never posted into a conversation carrying one.
+readonly BLOCKED_CONV_TAGS="abuse-block instagram facebook twitter x whatsapp messenger tiktok sms"
 readonly SANITIZER_WORDS="profile_status|profile_lookup|credits_search|create_ticket|subscription_status|remove_credits|dedupe_check|credit_verification_check|profiles_claim_self|credits_verify|profiles_consolidate|order_lookup|order_address_update|founding_status|founding_buyback_link|support_action_router|memory_search|memory_get|profile_analytics_status|profile_credits_status|profile_claim_status|retention_offer_check|retention_offer_apply|cancel_subscription|billing_status|track_analytics_status|analytics_refresh_request|analytics_recheck|subscription_cancel|refund_policy_check|refund_create|catalog_status|track_lookup|metadata_capture_request|artwork_refresh_request|catalog_recheck|user_status|resend_verification|email_delivery_status|login_recovery_packet|profile_change_packet|profile_merge_check|account_merge_preflight|email_change_preflight|profile_removal_preflight|ticket|tool failed|error fetching|unable to look up|the system says|my system|there was an issue with|ClickUp|openclaw|HYDRA|platform-data-processing"
 
 die()    { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
@@ -202,14 +249,16 @@ case "$MODE" in
   *) usage; die "unknown subcommand '$MODE' (send | tag-proof). This wrapper only sends the fixed verify notes and tags proof replies; it never replies, decides, approves, rejects or removes anything." ;;
 esac
 
-# Email through Intercom (POST /messages, message_type email) is the only channel: Intercom
-# delivers it to the user's inbox and the reply lands in the same conversation.
-CREDITS_FILE="" APPROVED_BY="" MESSAGE_ID="" ACTION="post"
-readonly MESSAGE_TYPE="email" REQ_TYPE="email" EXPECT_TYPE="email"
+# Email through Intercom (POST /messages, message_type email): Intercom delivers it to the
+# user's inbox and the reply lands in the same conversation. The one other channel is a
+# Caroline comment in the user's own conversation (in-thread delivery, above).
+CREDITS_FILE="" APPROVED_BY="" MESSAGE_ID="" ACTION="post" THREAD="" THREAD_AUTO=0
+MESSAGE_TYPE="email"
+readonly REQ_TYPE="email" EXPECT_TYPE="email"
 CAMPAIGN="verify-live" KIND="initial" PARENT_ID="" CAMPAIGN_SET=0 KIND_SET=0 COPY_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --credits-file|--approved-by|--message-id|--campaign|--kind|--parent-message-id|--copy)
+    --credits-file|--approved-by|--message-id|--campaign|--kind|--parent-message-id|--copy|--conversation)
       [ $# -ge 2 ] || { usage; die "$1 needs a value"; }
       case "$1" in
         --credits-file)      CREDITS_FILE="$2" ;;
@@ -219,10 +268,12 @@ while [ $# -gt 0 ]; do
         --kind)              KIND="$2"; KIND_SET=1 ;;
         --parent-message-id) PARENT_ID="$2" ;;
         --copy)              COPY_ARG="$2" ;;
+        --conversation)      THREAD="$2" ;;
       esac
       shift 2 ;;
     --dry-run)  ACTION="dry-run"; shift ;;
     --doc-check) ACTION="doc-check"; shift ;;
+    --thread-contact) ACTION="thread-contact"; shift ;;
     --check-recipient) ACTION="check-recipient"; shift ;;
     --validate) ACTION="validate"; shift ;;
     -h|--help)  usage; exit 0 ;;
@@ -235,7 +286,8 @@ done
 for b in "$JQ_BIN" "$PY_BIN"; do
   [ -x "$b" ] || die "$b is missing or not executable; it is a required dependency."
 done
-if [ "$ACTION" = "post" ] || [ "$ACTION" = "doc-check" ] || [ "$ACTION" = "check-recipient" ] || [ "$MODE" = "tag-proof" ]; then
+if [ "$ACTION" = "post" ] || [ "$ACTION" = "doc-check" ] || [ "$ACTION" = "thread-contact" ] || [ "$ACTION" = "check-recipient" ] \
+   || [ "$MODE" = "tag-proof" ]; then
   [ -n "${MUSOAI_INTERCOM_TOKEN:-}" ] || die "MUSOAI_INTERCOM_TOKEN is not set. The gateway exports it from /etc/openclaw/main.env; on a shell: set -a; . /etc/openclaw/main.env; set +a"
   for b in "$CURL_BIN" "$TIMEOUT_BIN"; do
     [ -x "$b" ] || die "$b is missing or not executable; it is a required dependency."
@@ -271,10 +323,11 @@ new_log_file() { # <kind> <target>
 # =======================================================================================
 # tag-proof
 if [ "$MODE" = "tag-proof" ]; then
-  [ -z "$CREDITS_FILE$APPROVED_BY$PARENT_ID$COPY_ARG" ] && [ "$CAMPAIGN_SET$KIND_SET" = "00" ] \
+  [ -z "$CREDITS_FILE$APPROVED_BY$PARENT_ID$COPY_ARG$THREAD" ] && [ "$CAMPAIGN_SET$KIND_SET" = "00" ] \
     || refuse "tag-proof takes only --message-id; it sends nothing to the user."
-  [ "$ACTION" != "validate" ] && [ "$ACTION" != "doc-check" ] && [ "$ACTION" != "check-recipient" ] \
-    || refuse "--validate, --doc-check and --check-recipient apply to send only."
+  [ "$ACTION" != "validate" ] && [ "$ACTION" != "doc-check" ] && [ "$ACTION" != "thread-contact" ] \
+    && [ "$ACTION" != "check-recipient" ] \
+    || refuse "--validate, --doc-check, --thread-contact and --check-recipient apply to send only."
   printf '%s' "$MESSAGE_ID" | grep -qE '^[0-9]{1,24}$' \
     || refuse "--message-id must be the numeric Intercom message id of a verify note (got '${MESSAGE_ID:-<empty>}')."
   ROW="$(ledger message --message-id "$MESSAGE_ID")"
@@ -297,9 +350,18 @@ if [ "$MODE" = "tag-proof" ]; then
   fi
   convo="$(api GET "/conversations/$CONV?display_as=plaintext")" \
     || { printf 'READ FAILED for conversation %s:\n%s\n' "$CONV" "$convo" >&2; exit 4; }
-  # The conversation must be the one our note started, and must include our contact.
+  # The conversation must be the one our note started, or (in-thread delivery) hold our note
+  # as a Caroline part. Only parts AFTER the note count below.
   src="$(printf '%s' "$convo" | "$JQ_BIN" -r '.source.id // empty' 2>/dev/null || true)"
-  [ "$src" = "$MESSAGE_ID" ] || refuse "conversation $CONV was not started by verify note $MESSAGE_ID (source '${src:-<none>}'); not tagging it."
+  if [ "$src" = "$MESSAGE_ID" ]; then
+    FROM=0
+  else
+    FROM="$(printf '%s' "$convo" | "$JQ_BIN" -r --arg m "$MESSAGE_ID" --arg a "$INTERCOM_ADMIN_ID" \
+      '(.conversation_parts.conversation_parts // []) as $p | ([$p[] | .id | tostring] | index($m)) as $i
+       | if $i != null and ($p[$i].author.type // "") == "admin" and (($p[$i].author.id // "") | tostring) == $a then $i + 1 else empty end' 2>/dev/null || true)"
+    [ -n "$FROM" ] || refuse "conversation $CONV was not started by verify note $MESSAGE_ID and does not hold it as a Caroline part (source '${src:-<none>}'); not tagging it."
+  fi
+  convo="$(printf '%s' "$convo" | "$JQ_BIN" -c --argjson from "$FROM" '.conversation_parts.conversation_parts = ((.conversation_parts.conversation_parts // [])[$from:])')"
   # ANY reply authored by the contact we wrote to (text or attachment; only the author is
   # looked at, never the text) holds the note's removal for a human: the user may be asking
   # for more time. The latest reply's own time is recorded per message, so a reply after an
@@ -397,12 +459,66 @@ case "$CAMPAIGN" in
     MAX_CREDITS=1000; MAX_LISTED=25; COPY="takeback"; APPROVAL_REF="$APPROVAL_REF_TAKEBACK"
     [ "$KIND" = "initial" ] || refuse "takeback-notice has no follow-ups."
     ;;
-  *) refuse "--campaign must be verify-live, retro-past, removal-notice or takeback-notice (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
+  uvn-status)
+    # A status + reminder for credit requests waiting on the user (user_verification_needed):
+    # one message per user, ever; never to a user who sent documents; never within 7 days of
+    # another message. Up to 3 titles in the copy, then "and N more".
+    MAX_CREDITS=1000; MAX_LISTED=3; COPY="uvn"; APPROVAL_REF="$APPROVAL_REF_UVN"
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live."
+    [ "$KIND" = "initial" ] || refuse "uvn-status has no follow-ups: one message per user, ever."
+    ;;
+  withdrawal-confirm)
+    # Confirms a credit request the requester asked us to withdraw: one request per message,
+    # role + title from the request row. Not an ask; no follow-ups.
+    MAX_CREDITS=1; MAX_LISTED=1; COPY="withdrawal"; APPROVAL_REF="$APPROVAL_REF_WITHDRAWAL"
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live."
+    [ "$KIND" = "initial" ] || refuse "withdrawal-confirm has no follow-ups."
+    ;;
+  status-doc-received|status-team-review)
+    # No-ask status notes (firstmate 070/071): one per user, ever; up to 3 titles.
+    MAX_CREDITS=1000; MAX_LISTED=3; APPROVAL_REF="$APPROVAL_REF_STATUS"
+    if [ "$CAMPAIGN" = "status-doc-received" ]; then COPY="docrecv"; else COPY="teamreview"; fi
+    # Approved alternative wordings: status-doc-received --copy queued (firstmate 092);
+    # status-team-review --copy no-ask = Copy B0 (pending-status-1021, firstmate 106).
+    case "$CAMPAIGN:$COPY_ARG" in
+      *:) ;;
+      status-doc-received:queued) COPY="docrecvq"; APPROVAL_REF="$APPROVAL_REF_STATUS_QUEUED" ;;
+      status-team-review:no-ask) COPY="teamreviewb0"; APPROVAL_REF="$APPROVAL_REF_STATUS_NOASK" ;;
+      *) refuse "--copy applies to verify-live (v1|windowed), status-doc-received (queued) and status-team-review (no-ask) only." ;;
+    esac
+    [ "$KIND" = "initial" ] || refuse "$CAMPAIGN has no follow-ups: one message per user, ever."
+    ;;
+  email-changed|email-changed-dup)
+    # A threaded reply that an account's sign-in email change is done (firstmate 073). The one
+    # "credit" entry carries only the ticket key (request_id) used for once-per-ticket.
+    MAX_CREDITS=1; MAX_LISTED=1; APPROVAL_REF="$APPROVAL_REF_EMAIL_CHANGE"
+    if [ "$CAMPAIGN" = "email-changed" ]; then COPY="emailchg"; else COPY="emailchgdup"; fi
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live."
+    [ "$KIND" = "initial" ] || refuse "$CAMPAIGN has no follow-ups."
+    ;;
+  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed or email-changed-dup (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
 esac
 [ "$ACTION" != "check-recipient" ] || { [ "$CAMPAIGN" = "verify-live" ] && [ "$KIND" = "initial" ]; } \
   || refuse "--check-recipient applies to a verify-live initial note only (it must never reach a path that writes)."
 [ "$ACTION" != "doc-check" ] || [ "$CAMPAIGN" = "retro-past" ] \
   || refuse "--doc-check applies to --campaign retro-past only: a removal notice is not an ask, and a new credit's note is never skipped for an Intercom attachment."
+if [ -n "$THREAD" ]; then
+  case "$CAMPAIGN" in
+    uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup) ;;
+    *) refuse "--conversation (in-thread delivery) applies to uvn-status, withdrawal-confirm, the status notes and email-changed only." ;;
+  esac
+  printf '%s' "$THREAD" | grep -qE '^[0-9]{1,24}$' \
+    || refuse "--conversation must be the numeric Intercom conversation id (got '$THREAD')."
+  MESSAGE_TYPE="comment"
+fi
+if [ "$ACTION" = "thread-contact" ]; then
+  case "$CAMPAIGN" in
+    withdrawal-confirm|email-changed|email-changed-dup) ;;
+    *) refuse "--thread-contact applies to withdrawal-confirm and email-changed only." ;;
+  esac
+  [ -n "$THREAD" ] || refuse "--thread-contact needs --conversation <id>."
+  [ "$KIND" = "initial" ] || refuse "--thread-contact applies to an initial note."
+fi
 readonly APPROVAL_REF MAX_CREDITS MAX_LISTED COPY
 WINDOWED_FLAG=""; [ "$COPY" != "windowed" ] || [ "$KIND" != "initial" ] || WINDOWED_FLAG="--windowed"
 if [ "$KIND" = "initial" ]; then
@@ -427,6 +543,9 @@ INPUT="$("$JQ_BIN" -c '
   { user: { email: ((.user.email // "") | clean | ascii_downcase),
             id: ((.user.id // "") | clean),
             auth_id: ((.user.auth_id // "") | clean | sub("^auth0\\|"; "")),
+            professional_id: ((.user.professional_id // "") | clean),
+            ext_other_account: (.user.ext_other_account | if type == "boolean" then . else null end),
+            thread_external_id: ((.user.thread_external_id // "") | clean),
             first_name: ((.user.first_name // "") | clean) },
     credits: [ .credits[] | { request_id: ((.request_id // "") | clean), role: ((.role // "") | clean),
                               track_title: ((.track_title // "") | clean), artist_name: ((.artist_name // "") | clean),
@@ -446,11 +565,37 @@ printf '%s' "$EMAIL" | grep -qE '^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$' \
   || refuse "user.email must be the credit request's account email (got an invalid value)."
 [ -z "$USER_ID" ] || printf '%s' "$USER_ID" | grep -qE '^[A-Za-z0-9-]{1,64}$' \
   || refuse "user.id must be the Muso user id (letters, digits, dashes)."
+AUTH_ID="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.auth_id')"
 [ -z "$AUTH_ID" ] || printf '%s' "$AUTH_ID" | grep -qE '^[A-Za-z0-9._-]{1,128}$' \
-  || refuse "user.auth_id must be the account's Auth0 subject (letters, digits, dot, dash, underscore)."
+  || refuse "user.auth_id must be the account's Auth0 subject (letters, digits, dot, underscore, dash)."
+PRO_ID="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.professional_id')"
+[ -z "$PRO_ID" ] || printf '%s' "$PRO_ID" | grep -qE '^[A-Za-z0-9._|-]{1,128}$' \
+  || refuse "user.professional_id must be the account's users.neptuneProfessionalId (letters, digits, dot, underscore, dash, |)."
+EXT_OTHER="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.ext_other_account | if . == null then "" else tostring end')"
+THREAD_EXT="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.thread_external_id')"
+# An Intercom contact's external_id names THIS account when it is the account's
+# professional id (users.neptuneProfessionalId, what the web app boots Intercom with;
+# firstmate 090) or its Auth0 subject (with or without its auth0| prefix). Anything else,
+# including the bare numeric user id, is another account.
+ext_is_account() {
+  [ -n "$1" ] || return 1
+  { [ -n "$PRO_ID" ] && [ "$1" = "$PRO_ID" ]; } \
+    || { [ -n "$AUTH_ID" ] && { [ "$1" = "$AUTH_ID" ] || [ "$1" = "auth0|$AUTH_ID" ]; }; }
+}
+readonly NO_EXT_ID_WHY="the Intercom user for this email has no external_id, so it cannot be matched to this Muso account; not sending."
 N="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.credits | length')"
 [ "$N" -ge 1 ] || refuse "credits is empty; there is nothing to ask the user to verify."
 [ "$N" -le "$MAX_CREDITS" ] || refuse "credits has $N entries; at most $MAX_CREDITS per $CAMPAIGN note."
+case "$CAMPAIGN" in
+  email-changed|email-changed-dup)
+    [ -n "$THREAD" ] || refuse "$CAMPAIGN is a threaded reply only: --conversation <id> (the requester's own conversation) is required."
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.credits[0].request_id | test("^[A-Za-z0-9-]{1,64}$")' >/dev/null \
+      || refuse "$CAMPAIGN needs one entry whose request_id is the ticket key (letters, digits, dashes)."
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.user.id | test("^[0-9]{1,12}$")' >/dev/null \
+      || refuse "$CAMPAIGN needs user.id, the Muso account id the conversation must belong to."
+    # Placeholders so the shared shape checks below pass; the copy never reads them.
+    INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c '.credits[0] += {role: "-", track_title: "-", artist_name: "-"}')" ;;
+esac
 bad="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select((.request_id | test("^[A-Za-z0-9-]{1,64}$") | not)
   or (.role|length) == 0 or (.role|length) > 120 or (.track_title|length) == 0 or (.track_title|length) > 200
   or (.artist_name|length) == 0 or (.artist_name|length) > 200
@@ -511,6 +656,18 @@ fi
 if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "removal-notice" ] && [ "$REMOVAL_COPY_APPROVED" != "1" ]; then
   refuse "the removal-notice copy is not approved for sending yet (REMOVAL_COPY_APPROVED=0). It needs Fable's copy GO, landed in a PR that flips the lock, and firstmate's approval of the backfill list; --dry-run renders exactly what would be sent."
 fi
+if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "withdrawal-confirm" ] && [ "$WITHDRAWAL_COPY_APPROVED" != "1" ]; then
+  refuse "the withdrawal-confirm copy is not approved for sending (WITHDRAWAL_COPY_APPROVED=0)."
+fi
+if [ "$ACTION" = "post" ] && { [ "$CAMPAIGN" = "status-doc-received" ] || [ "$CAMPAIGN" = "status-team-review" ]; } && [ "$STATUS_NOTES_COPY_APPROVED" != "1" ]; then
+  refuse "the status-note copy is not approved for sending (STATUS_NOTES_COPY_APPROVED=0)."
+fi
+if [ "$ACTION" = "post" ] && { [ "$CAMPAIGN" = "email-changed" ] || [ "$CAMPAIGN" = "email-changed-dup" ]; } && [ "$EMAIL_CHANGE_COPY_APPROVED" != "1" ]; then
+  refuse "the email-changed copy is not approved for sending (EMAIL_CHANGE_COPY_APPROVED=0)."
+fi
+if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "uvn-status" ] && [ "$UVN_STATUS_COPY_APPROVED" != "1" ]; then
+  refuse "the uvn-status copy is not approved for sending (UVN_STATUS_COPY_APPROVED=0)."
+fi
 if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "retro-past" ] && [ "$RETRO_COPY_APPROVED" != "1" ]; then
   refuse "the retro-past copy is not approved for sending yet (RETRO_COPY_APPROVED=0). It needs Fable's copy GO and the captain's approval of the rendered notes, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
 fi
@@ -526,6 +683,13 @@ if [ "$ACTION" = "post" ]; then
     if [ "$pending" = "[]" ]; then
       printf 'SKIPPED already-notified credits=%s\n' "$N"; exit 0
     fi
+    if [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.hold.flagged // false')" = "true" ]; then
+      printf 'SKIPPED refused-flagged credits=%s (refused %s times; with a human)\n' "$N" "3"; exit 0
+    fi
+    held_until="$(printf '%s' "$peek" | "$JQ_BIN" -r '.hold.until // empty')"
+    if [ -n "$held_until" ]; then
+      printf 'DEFERRED refused-recheck credits=%s (refused before; re-check after %s)\n' "$N" "${held_until%%T*}"; exit 3
+    fi
     done_why="$(printf '%s' "$peek" | "$JQ_BIN" -r '.user_done // empty')"
     if [ -n "$done_why" ]; then
       # retro-past: one message per user ever, none after a proof reply. Close the rows so
@@ -533,6 +697,13 @@ if [ "$ACTION" = "post" ]; then
       ledger skip --campaign "$CAMPAIGN" --request-ids "$(printf '%s' "$pending" | "$JQ_BIN" -r 'join(",")')" >/dev/null \
         || die "the ledger write failed."
       printf 'SKIPPED %s credits=%s\n' "$done_why" "$(printf '%s' "$pending" | "$JQ_BIN" -r 'length')"; exit 0
+    fi
+    if [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.recent // false')" = "true" ]; then
+      if [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.recent_why // empty')" = "recently_asked" ]; then
+        printf 'DEFERRED recently-asked credits=%s (this user got an ask in the last 90 days; the credits wait)\n' \
+          "$(printf '%s' "$pending" | "$JQ_BIN" -r 'length')"; exit 3
+      fi
+      printf 'DEFERRED messaged_7d credits=%s (a note from this gate in the last 7 days)\n' "$(printf '%s' "$pending" | "$JQ_BIN" -r 'length')"; exit 3
     fi
     if [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.daily_cap')" = "true" ]; then
       printf 'DEFERRED daily-cap credits=%s (this user already had a verify message on %s UTC; they go in the next one)\n' \
@@ -797,6 +968,51 @@ def takeback_notice($fn; $c0; $maxl):
                       + (if $n > $maxl then ["and \($n - $maxl) more"] else [] end))},
                 {p: $dispute}, {p: "Thank you,"}, {p: "Caroline"}, {p: "Muso Support"} ] }
     end;
+# uvn-status (copy-uvn-status-reminder-1019 section A, firstmate 060 closing-line edit).
+# The list sentence is Caroline's Step 2 ask marker, word for word, so her ask-once guard
+# sees this note as an ask.
+def uvn_list: [ "A public link where the credit is listed: Tidal, Genius, Jaxsta, Discogs, AllMusic, ASCAP or BMI.",
+                "Documentation of the work: a project or session file, a message with the artist, a contract or split sheet, or anything else that shows you worked on it." ];
+def uvn_status($fn; $c; $maxl):
+  ($c | length) as $n
+  | if $n == 1 then
+      $c[0] as $x
+      | { subject: "Your Muso credit request: one thing we still need",
+          segs: ([ {p: "Hi \($fn), a quick status update on your credit request for \"\($x.track_title)\" by \($x.artist_name): it's waiting on one thing from you, something that shows your \($x.role) credit."},
+                  {p: "Any one of these works (a screenshot is fine):"}, {ul: uvn_list},
+                  {p: "Just reply to this message with it. Nothing else is needed from you. You'll see the credit on your profile as soon as it's approved, and we'll let you know here if anything else is needed."} ] + sig) }
+    else
+      ([ $c[0:$maxl][] | "\"\(.track_title)\"" ]) as $t
+      | { subject: "Your Muso credit requests: one thing we still need",
+          segs: ([ {p: "Hi \($fn), a quick status update on your credit requests for \($t | andjoin)\(if $n > $maxl then " (and \($n - $maxl) more)" else "" end): they're waiting on one thing from you, something that shows your role on each."},
+                  {p: "Any one of these works (a screenshot is fine):"}, {ul: uvn_list},
+                  {p: "Just reply to this message with it. Nothing else is needed from you. You'll see each credit on your profile as soon as it's approved, and we'll let you know here if anything else is needed."} ] + sig) }
+    end;
+# withdrawal-confirm (firstmate 061, verbatim; subject added for the email channel).
+def withdrawal_confirm($c):
+  $c[0] as $x
+  | { subject: "Your Muso credit request for \"\($x.track_title)\"",
+      segs: [ {p: "Hi! We've withdrawn your credit request for \($x.role) on \"\($x.track_title)\", as you asked. Nothing else changes on your profile. If you need anything else, just reply here."} ] };
+# Status notes (firstmate 070 verbatim; 071 as credit-trust-llm-t01 drafted). Not asks.
+def req_s($n): if $n == 1 then "request" else "requests" end;
+def titles($c; $maxl): ([ $c[0:$maxl][] | "\"\(.track_title)\"" ] | andjoin) + (if ($c|length) > $maxl then " and \(($c|length) - $maxl) more" else "" end);
+def status_doc_received($fn; $c; $maxl):
+  { subject: "Your Muso credit \(req_s($c|length)): an update",
+    segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): we have the document you sent us, and our team is reviewing it. Nothing else is needed from you right now, and you'll see each credit on your profile as soon as it's approved."} ] };
+def status_doc_queued($fn; $c; $maxl):
+  { subject: "Your Muso credit \(req_s($c|length)): an update",
+    segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): we have the document you sent, and it's in our review queue. We'll message you here as soon as it's checked - no need to send anything else."} ] };
+def status_team_review($fn; $c; $maxl):
+  { subject: "Your Muso credit \(req_s($c|length)): an update",
+    segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): they're with our team for review. Nothing else is needed from you right now. If you have something that shows your role on these specific tracks (for example a credit listing link or a split sheet), you can reply with it and it helps us confirm them faster."} ] };
+def status_team_review_noask($fn; $c; $maxl):
+  { subject: "Your Muso credit \(req_s($c|length)): an update",
+    segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): they're with our team for review. Nothing else is needed from you right now."} ] };
+# email-changed (firstmate 073, verbatim). A threaded reply; the subject is never shown.
+def email_changed($dup):
+  { subject: "Your Muso sign-in email",
+    segs: [ {p: ("Done - your sign-in email has been updated to the new address you gave us. Please sign in again with it."
+                 + (if $dup then " The extra account created with that address has been set aside, so you can keep using your original account." else "" end))} ] };
 def removal_notice($fn; $c; $maxl):
   ($c | length) as $n
   | "If you think this is a mistake, reply to this message with a document that names you for the role: a split sheet, a label or distributor statement, a PRO or MLC registration, a studio or session invoice, or liner notes or an official release page (PDF, PNG or JPG). We'll review it and can restore the credit." as $dispute
@@ -812,7 +1028,15 @@ def removal_notice($fn; $c; $maxl):
     end;
 (.user.first_name | split(" ")[0] // "") as $fn0
 | (if ($fn0 | test("^\\p{L}[\\p{L}'.-]{0,39}$")) then $fn0 else "there" end) as $fn
-| (if $copy == "takeback" then takeback_notice($fn; .credits; $maxl)
+| (if $copy == "docrecv" then status_doc_received($fn; .credits; $maxl)
+   elif $copy == "docrecvq" then status_doc_queued($fn; .credits; $maxl)
+   elif $copy == "teamreview" then status_team_review($fn; .credits; $maxl)
+   elif $copy == "teamreviewb0" then status_team_review_noask($fn; .credits; $maxl)
+   elif $copy == "emailchg" then email_changed(false)
+   elif $copy == "emailchgdup" then email_changed(true)
+   elif $copy == "withdrawal" then withdrawal_confirm(.credits)
+   elif $copy == "uvn" then uvn_status($fn; .credits; $maxl)
+   elif $copy == "takeback" then takeback_notice($fn; .credits; $maxl)
    elif $copy == "removal" then removal_notice($fn; .credits; $maxl)
    elif $copy == "past" then
      past_initial($fn; .credits; $maxl)
@@ -856,7 +1080,8 @@ record_refusal() {
   if [ "$ACTION" = "post" ]; then
     if [ "$KIND" = "initial" ]; then
       ledger refuse --campaign "$CAMPAIGN" --user-key "$EMAIL" --day "$DAY" --request-ids "$ALL_IDS" \
-        --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF" --reason "$1" >/dev/null
+        --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF" --reason "$1" \
+        --user-id "$USER_ID" >/dev/null
     else
       c="$(ledger claim-reminder --parent-message-id "$PARENT_ID" --kind "$KIND" --user-key "$EMAIL" --day "$DAY" \
         --request-ids "$ALL_IDS" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF")"
@@ -873,6 +1098,11 @@ leak="$(leak_reason "$RENDERED")"
 [ -z "$leak" ] || record_refusal "the rendered note contains $leak (from a track title, artist or role). Customers never see internal surfaces; this note is not sent and the credits are recorded as refused for a human to look at."
 
 payload() { # <rendered-json> <contact-id>
+  if [ -n "$THREAD" ]; then
+    printf '%s' "$1" | "$JQ_BIN" -c --arg admin "$INTERCOM_ADMIN_ID" \
+      '{message_type: "comment", type: "admin", admin_id: $admin, body: .html}'
+    return
+  fi
   printf '%s' "$1" | "$JQ_BIN" -c --arg mt "$REQ_TYPE" --arg admin "$INTERCOM_ADMIN_ID" --arg to "$2" \
     '{message_type: $mt, template: "personal", from: {type: "admin", id: $admin}, to: {type: "user", id: $to}, body: .html}
      + {subject: .subject}'
@@ -891,7 +1121,7 @@ case "$ACTION" in
     fi
     printf 'VALID %s %s %s credits=%s%s\n' "$CAMPAIGN" "$KIND" "$MESSAGE_TYPE" "$N" " copy=$COPY"; exit 0 ;;
   dry-run)
-    printf 'DRY-RUN %s %s %s credits=%s%s\n' "$CAMPAIGN" "$KIND" "$MESSAGE_TYPE" "$N" " copy=$COPY"
+    printf 'DRY-RUN %s %s %s credits=%s%s%s\n' "$CAMPAIGN" "$KIND" "$MESSAGE_TYPE" "$N" " copy=$COPY" "${THREAD:+ conversation=$THREAD}"
     payload "$RENDERED" "<resolved from the account email at send time>" | "$JQ_BIN" .
     exit 0 ;;
 esac
@@ -899,34 +1129,112 @@ esac
 
 # ---------------------------------------------------------------------------------------
 # Recipient. An initial note goes to exactly one Intercom USER whose email is the account
-# email: a lead, zero matches, several matches, or a contact whose external_id names a
-# different Muso user is a refusal; we never guess who a note about someone's credits goes
+# email and whose external_id is this account (ext_is_account: its professional id, firstmate
+# 090). When several users share the email, the one whose external_id is this account is it
+# (firstmate 091). A lead, zero matches, several (with none or several of them this account),
+# a contact with no external_id, or one whose external_id names a different Muso user is a
+# refusal; we never guess who a note about someone's credits goes
 # to. A reminder goes to the contact its note went to (checked against the ledger above).
-if [ "$KIND" = "initial" ]; then
+# email-changed / email-changed-dup are the exception (firstmate 076): no email search; the
+# recipient is the ticket conversation's single contact, an Intercom user whose external_id is
+# this account (ext_is_account). Their account email only keys the ledger.
+# In-thread legacy-id match (firstmate 089; withdrawal-confirm and email-changed in-thread
+# replies ONLY): a legacy account (no Auth0 subject, or an external_id we cannot map) is still
+# answered in its own conversation when that conversation's one user contact has the account
+# email, the email is not a shared or role inbox, and the driver checked on the replica that the
+# contact's external_id is not another Muso account (user.ext_other_account=false for
+# user.thread_external_id). Recorded with reason in-thread-legacy-id.
+readonly ROLE_INBOXES="info support help admin contact hello office team booking bookings management mgmt music label records publishing accounts billing sales marketing press media studio noreply no-reply mail enquiries inquiries"
+LEGACY_MATCH=""
+legacy_why() { # <contact-json> <external_id> -> prints why the legacy match does not hold ('' when it does)
+  local cemail lp
+  cemail="$(printf '%s' "$1" | "$JQ_BIN" -r '(.email // "") | ascii_downcase | gsub("^\\s+|\\s+$"; "")')"
+  if [ -z "$cemail" ] || [ "$cemail" != "$EMAIL" ]; then echo "the contact's email is not the Muso account email"; return 0; fi
+  lp="${EMAIL%%@*}"; lp="${lp%%+*}"
+  case " $ROLE_INBOXES " in *" $lp "*) echo "the account email is a shared or role inbox ($lp@)"; return 0 ;; esac
+  if [ -z "$EXT_OTHER" ] || [ "$THREAD_EXT" != "$2" ]; then
+    echo "the contact's external_id was not checked against the Muso accounts (user.ext_other_account missing, or for another external_id)"; return 0
+  fi
+  [ "$EXT_OTHER" = "false" ] || echo "the contact's external_id belongs to a different Muso account"
+}
+# read_thread_contact: THREAD_CONTACTS (JSON array of the conversation's contact ids) and
+# THREAD_CONTACT_JSON (that contact, when there is exactly one). A failed read exits 4.
+read_thread_contact() {
+  local tconv cid
+  tconv="$(api GET "/conversations/$THREAD?display_as=plaintext")" \
+    || { printf 'CONVERSATION READ FAILED (curl); nothing was sent or claimed:\n%s\n' "$tconv" >&2; exit 4; }
+  printf '%s' "$tconv" | "$JQ_BIN" -e --arg t "$THREAD" '(.type // "") == "conversation" and ((.id // "") | tostring) == $t' >/dev/null 2>&1 \
+    || { printf 'CONVERSATION NOT VERIFIED; nothing was sent or claimed:\n%s\n' "${tconv:0:300}" >&2; exit 4; }
+  THREAD_CONTACTS="$(printf '%s' "$tconv" | "$JQ_BIN" -c '[(.contacts.contacts // [])[] | (.id // "") | tostring]')"
+  THREAD_CONTACT_JSON=""
+  [ "$(printf '%s' "$THREAD_CONTACTS" | "$JQ_BIN" -r 'length')" -eq 1 ] || return 0
+  cid="$(printf '%s' "$THREAD_CONTACTS" | "$JQ_BIN" -r '.[0]')"
+  printf '%s' "$cid" | grep -qE '^[A-Za-z0-9]{1,40}$' || { echo "CONTACT NOT VERIFIED: contact id is missing or malformed; nothing was sent" >&2; exit 4; }
+  THREAD_CONTACT_JSON="$(api GET "/contacts/$cid")" \
+    || { printf 'CONTACT READ FAILED (curl); nothing was sent or claimed:\n%s\n' "$THREAD_CONTACT_JSON" >&2; exit 4; }
+  printf '%s' "$THREAD_CONTACT_JSON" | "$JQ_BIN" -e --arg c "$cid" '(.type // "") == "contact" and ((.id // "") | tostring) == $c' >/dev/null 2>&1 \
+    || { printf 'CONTACT NOT VERIFIED; nothing was sent or claimed:\n%s\n' "${THREAD_CONTACT_JSON:0:300}" >&2; exit 4; }
+}
+if [ "$ACTION" = "thread-contact" ]; then
+  # Read only: what the driver needs to check the thread contact's external_id on the replica.
+  read_thread_contact
+  printf 'THREAD_CONTACT %s\n' "$("$JQ_BIN" -nc --argjson ids "$THREAD_CONTACTS" --arg c "$THREAD_CONTACT_JSON" '
+    ($c | if . == "" then {} else fromjson end) as $x
+    | {contacts: ($ids | length), role: ($x.role // ""), external_id: (($x.external_id // "") | tostring)}')"
+  exit 0
+fi
+if [ "$KIND" = "initial" ] && { [ "$CAMPAIGN" = "email-changed" ] || [ "$CAMPAIGN" = "email-changed-dup" ]; }; then
+  # The ticket's own conversation names the recipient: they may not have signed in with the
+  # new address yet, and on a dup the new address's contact is the extra account's.
+  read_thread_contact
+  n_tc="$(printf '%s' "$THREAD_CONTACTS" | "$JQ_BIN" -r 'length')"
+  [ "$n_tc" -eq 1 ] || record_refusal "conversation $THREAD has $n_tc contacts (need exactly 1, the account's own Intercom user); not sending."
+  CONTACT_ID="$(printf '%s' "$THREAD_CONTACTS" | "$JQ_BIN" -r '.[0]')"
+  tc="$THREAD_CONTACT_JSON"
+  [ "$(printf '%s' "$tc" | "$JQ_BIN" -r '.role // ""')" = "user" ] \
+    || record_refusal "conversation $THREAD's contact is not an Intercom user (a lead or visitor); not sending."
+  t_ext="$(printf '%s' "$tc" | "$JQ_BIN" -r '(.external_id // "") | tostring')"
+  [ -n "$t_ext" ] || record_refusal "$NO_EXT_ID_WHY"
+  if ! ext_is_account "$t_ext"; then
+    why="$(legacy_why "$tc" "$t_ext")"
+    [ -z "$why" ] || record_refusal "conversation $THREAD's contact is not linked to this Muso account (external_id is not the account's professional id or Auth0 subject), and the in-thread legacy-id match does not hold: $why; not sending."
+    LEGACY_MATCH="contact=$CONTACT_ID external_id=$t_ext"
+  fi
+elif [ "$KIND" = "initial" ]; then
   search="$(printf '%s' "$EMAIL" | "$JQ_BIN" -Rc '{query: {field: "email", operator: "=", value: .}}' | api POST /contacts/search)" \
     || { printf 'CONTACT LOOKUP FAILED (curl); nothing was sent or claimed:\n%s\n' "$search" >&2; exit 4; }
   printf '%s' "$search" | "$JQ_BIN" -e '(.data|type) == "array"' >/dev/null 2>&1 \
     || { printf 'CONTACT LOOKUP NOT VERIFIED (no data[]); nothing was sent or claimed:\n%s\n' "$search" >&2; exit 4; }
   users="$(printf '%s' "$search" | "$JQ_BIN" -c --arg e "$EMAIL" '[.data[] | select(.role == "user" and ((.email // "") | ascii_downcase) == $e)]')"
   n_users="$(printf '%s' "$users" | "$JQ_BIN" -r 'length')"
-  [ "$n_users" -eq 1 ] || record_refusal "the account email matches $n_users Intercom users (need exactly 1); not sending."
+  if [ "$n_users" -ge 2 ] && { [ -n "$PRO_ID" ] || [ -n "$AUTH_ID" ]; }; then
+    # Several Intercom users share the email (firstmate 091): the ONE whose external_id is this
+    # account is the recipient; none or more than one is a refusal.
+    users="$(printf '%s' "$users" | "$JQ_BIN" -c --arg p "$PRO_ID" --arg a "$AUTH_ID" '
+      [.[] | ((.external_id // "") | tostring) as $x
+       | select($x != "" and (($p != "" and $x == $p) or ($a != "" and ($x == $a or $x == ("auth0|" + $a)))))]')"
+    [ "$(printf '%s' "$users" | "$JQ_BIN" -r 'length')" -eq 1 ] \
+      || record_refusal "the account email matches $n_users Intercom users (need exactly 1, or exactly one whose external_id is this account); not sending."
+  else
+    [ "$n_users" -eq 1 ] || record_refusal "the account email matches $n_users Intercom users (need exactly 1); not sending."
+  fi
   CONTACT_ID="$(printf '%s' "$users" | "$JQ_BIN" -r '.[0].id')"
   EXT_ID="$(printf '%s' "$users" | "$JQ_BIN" -r '.[0].external_id // empty')"
-  # external_id names THIS account only when it is the account's professionalId (Intercom
-  # identity; users.neptuneprofessionalid, the UUID every client identifies with) or the Auth0
-  # subject, with or without "auth0|" (the same UUID for Auth0 accounts). Never the bare numeric
-  # user id (firstmate 118/120): no client identifies with it. A contact with no external_id
-  # cannot be matched to any account at all (QA @052f737).
-  [ -n "$EXT_ID" ] \
-    || record_refusal "the Intercom user for this email has no external_id, so it cannot be matched to this Muso account; not sending."
-  # An account-specific note needs the account's Intercom identity (QA @3112769): without
-  # user.auth_id nothing can be compared. The one exception is removal-notice, whose recipient
-  # is the profile's single CLAIMED WORKSPACE email (credit_review.verify_notify.profile_owner):
-  # that campaign has no account identity to compare, by construction.
-  if [ -z "$AUTH_ID" ] && [ "$CAMPAIGN" != "removal-notice" ]; then
-    record_refusal "the note carries no account Intercom identity (user.auth_id: professionalId or Auth0 subject), so the Intercom contact cannot be verified as its owner; not sending."
+  [ -n "$EXT_ID" ] || record_refusal "$NO_EXT_ID_WHY"
+  # An account-specific note needs the account named (QA @3112769): with no
+  # user.professional_id or user.auth_id, any external_id would pass. The one exception is
+  # removal-notice, whose recipient is the profile's single CLAIMED WORKSPACE email
+  # (credit_review.verify_notify.profile_owner): that campaign has no Muso user id to compare.
+  # #1298 (firstmate 120): the account's Intercom IDENTITY is required, a bare numeric user.id
+  # is not enough (no client identifies with it).
+  if [ -z "$PRO_ID" ] && [ -z "$AUTH_ID" ] && [ "$CAMPAIGN" != "removal-notice" ]; then
+    record_refusal "the note carries no account Intercom identity (user.professional_id or user.auth_id: professionalId or Auth0 subject), so the Intercom contact cannot be verified as its owner; not sending."
   fi
-  if [ -n "$AUTH_ID" ] && [ "$EXT_ID" != "$AUTH_ID" ] && [ "$EXT_ID" != "auth0|$AUTH_ID" ]; then
+  if [ "$CAMPAIGN" = "withdrawal-confirm" ] && [ -n "$THREAD" ] && ! ext_is_account "$EXT_ID"; then
+    why="$(legacy_why "$(printf '%s' "$users" | "$JQ_BIN" -c '.[0]')" "$EXT_ID")"
+    [ -z "$why" ] || record_refusal "the Intercom user for this email is not linked to this Muso account by its professional id or Auth0 subject, and the in-thread legacy-id match does not hold: $why; not sending."
+    LEGACY_MATCH="contact=$CONTACT_ID external_id=$EXT_ID"
+  elif { [ -n "$USER_ID" ] || [ -n "$PRO_ID" ] || [ -n "$AUTH_ID" ]; } && ! ext_is_account "$EXT_ID"; then
     record_refusal "the Intercom user for this email belongs to a different Muso account (external_id mismatch); not sending."
   fi
 fi
@@ -975,6 +1283,103 @@ docs_submitted() { # <contact-id> -> prints the reason when documents exist; exi
     [ -n "$after" ] || return 0
   done
 }
+# uvn-status: never within 7 days of any message from us. The ledger covers this gate; this
+# covers everything else in Intercom (Caroline, an admin, an outbound message): any of the
+# contact's conversations updated in the last 7 days whose opening message (sent in those 7
+# days) or any part in those 7 days was written by an admin or bot. A failed read sends
+# nothing; a truncated one counts as "messaged".
+recently_messaged() { # <contact-id> -> prints the reason when we wrote to them in 7 days; exit 4 on a failed read
+  local contact="$1" since body ids n cid convo
+  since=$(( $(date -u +%s) - 7*86400 ))
+  body="$(printf '%s' "$contact" | "$JQ_BIN" -Rc --argjson since "$since" \
+    '{query: {operator: "AND", value: [{field: "contact_ids", operator: "=", value: .}, {field: "updated_at", operator: ">", value: $since}]}, pagination: {per_page: 50}}' \
+    | api POST /conversations/search)" || { printf 'RECENT-CONTACT CHECK FAILED (curl); nothing was sent or claimed:\n%s\n' "$body" >&2; exit 4; }
+  printf '%s' "$body" | "$JQ_BIN" -e '(.conversations|type) == "array" and ((.total_count // 0) | type) == "number"' >/dev/null 2>&1 \
+    || { printf 'RECENT-CONTACT CHECK NOT VERIFIED; nothing was sent or claimed:\n%s\n' "$body" >&2; exit 4; }
+  n="$(printf '%s' "$body" | "$JQ_BIN" -r '.total_count // (.conversations | length)')"
+  [ "$n" -le 50 ] || { echo "more than 50 conversations in 7 days (counted as messaged)"; return 0; }
+  if printf '%s' "$body" | "$JQ_BIN" -e --argjson since "$since" '[.conversations[] | select(((.source.author.type // "") | IN("admin","bot","team")) and ((.created_at // 0) > $since))] | length > 0' >/dev/null; then
+    echo "we started a conversation with them in the last 7 days"; return 0
+  fi
+  ids="$(printf '%s' "$body" | "$JQ_BIN" -r '.conversations[].id | tostring')"
+  for cid in $ids; do
+    printf '%s' "$cid" | grep -qE '^[0-9]{1,24}$' || { echo "RECENT-CONTACT CHECK NOT VERIFIED: conversation id '$cid' is not numeric" >&2; exit 4; }
+    convo="$(api GET "/conversations/$cid?display_as=plaintext")" \
+      || { printf 'RECENT-CONTACT CHECK FAILED (curl) on conversation %s; nothing was sent or claimed\n' "$cid" >&2; exit 4; }
+    printf '%s' "$convo" | "$JQ_BIN" -e '(.type // "") == "conversation"' >/dev/null 2>&1 \
+      || { printf 'RECENT-CONTACT CHECK NOT VERIFIED on conversation %s; nothing was sent or claimed\n' "$cid" >&2; exit 4; }
+    if printf '%s' "$convo" | "$JQ_BIN" -e --argjson since "$since" '[(.conversation_parts.conversation_parts // [])[] | select(((.author.type // "") | IN("admin","bot","team")) and (.part_type // "") != "note" and ((.created_at // 0) > $since) and ((.body // "") != ""))] | length > 0' >/dev/null; then
+      echo "we replied to them in the last 7 days"; return 0
+    fi
+  done
+  return 0
+}
+case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
+if [ "$STATUSLIKE" = "1" ] && [ "$ACTION" = "post" ]; then
+  # uvn-status asks for something, so a user who already sent documents is skipped; the
+  # status notes are exactly for users with documents or requests with us, so they are not.
+  if [ "$CAMPAIGN" = "uvn-status" ]; then
+    DOCS_WHY="$(docs_submitted "$CONTACT_ID")"
+    if [ -n "$DOCS_WHY" ]; then
+      ledger skip --campaign "$CAMPAIGN" --request-ids "$ALL_IDS" >/dev/null || die "the ledger write failed."
+      printf 'SKIPPED docs_submitted credits=%s (%s)\n' "$N" "$DOCS_WHY"; exit 0
+    fi
+  fi
+  RECENT_WHY="$(recently_messaged "$CONTACT_ID")"
+  if [ -n "$RECENT_WHY" ]; then
+    # Not closed: the user may get this note once the 7 days have passed.
+    printf 'DEFERRED messaged_7d credits=%s (%s)\n' "$N" "$RECENT_WHY"; exit 3
+  fi
+  # In-thread when the user has a conversation going: their most recently updated OPEN
+  # conversation of the last 14 days. None: email. A failed lookup sends nothing.
+  if [ -z "$THREAD" ]; then
+    since14=$(( $(date -u +%s) - 14*86400 ))
+    open="$(printf '%s' "$CONTACT_ID" | "$JQ_BIN" -Rc --argjson since "$since14" \
+      '{query: {operator: "AND", value: [{field: "contact_ids", operator: "=", value: .}, {field: "state", operator: "=", value: "open"}, {field: "updated_at", operator: ">", value: $since}]}, pagination: {per_page: 50}}' \
+      | api POST /conversations/search)" || { printf 'OPEN-CONVERSATION LOOKUP FAILED (curl); nothing was sent or claimed:\n%s\n' "$open" >&2; exit 4; }
+    printf '%s' "$open" | "$JQ_BIN" -e '(.conversations|type) == "array"' >/dev/null 2>&1 \
+      || { printf 'OPEN-CONVERSATION LOOKUP NOT VERIFIED; nothing was sent or claimed:\n%s\n' "$open" >&2; exit 4; }
+    THREAD="$(printf '%s' "$open" | "$JQ_BIN" -r --argjson since "$since14" \
+      '[.conversations[] | select((.state // "") == "open" and ((.updated_at // 0) > $since))] | max_by(.updated_at) | .id // empty | tostring')"
+    if [ -n "$THREAD" ]; then
+      printf '%s' "$THREAD" | grep -qE '^[0-9]{1,24}$' || { echo "OPEN-CONVERSATION LOOKUP NOT VERIFIED: conversation id '$THREAD' is not numeric" >&2; exit 4; }
+      THREAD_AUTO=1; MESSAGE_TYPE="comment"
+    fi
+  fi
+fi
+# In-thread delivery: only into this user's own conversation, never one a person is handling
+# or one tagged do-not-message. An explicit --conversation that fails is a recorded refusal
+# (nothing sent); a conversation the gate picked itself that fails is dropped and the note
+# goes by email, so the ask stays open and is delivered.
+thread_check() { # sets THREAD_WHY (empty when $THREAD can carry the note) and THREAD_UNREAD
+  local tconv assignee btag
+  THREAD_WHY="" THREAD_UNREAD=0
+  if ! tconv="$(api GET "/conversations/$THREAD?display_as=plaintext")" \
+     || ! printf '%s' "$tconv" | "$JQ_BIN" -e --arg t "$THREAD" '(.type // "") == "conversation" and ((.id // "") | tostring) == $t' >/dev/null 2>&1; then
+    THREAD_UNREAD=1; THREAD_WHY="conversation $THREAD could not be read: ${tconv:0:300}"; return 0
+  fi
+  if [ "$(printf '%s' "$tconv" | "$JQ_BIN" -r '[(.contacts.contacts // [])[] | (.id // "") | tostring] | join(",")')" != "$CONTACT_ID" ]; then
+    THREAD_WHY="conversation $THREAD is not this user's own conversation (its contacts are not exactly the Intercom user of the account email); not sending."; return 0
+  fi
+  assignee="$(printf '%s' "$tconv" | "$JQ_BIN" -r '.admin_assignee_id // empty | tostring')"
+  if [ -n "$assignee" ] && [ "$assignee" != "0" ] && [ "$assignee" != "$INTERCOM_ADMIN_ID" ]; then
+    THREAD_WHY="conversation $THREAD is assigned to a human (admin $assignee), who is handling this user; not sending."; return 0
+  fi
+  btag="$(printf '%s' "$tconv" | "$JQ_BIN" -r --arg b "$BLOCKED_CONV_TAGS" '($b | split(" ")) as $bl | [(.tags.tags // [])[] | (.name // "") | ascii_downcase | select(IN($bl[]))] | .[0] // empty')"
+  [ -z "$btag" ] || THREAD_WHY="conversation $THREAD carries the '$btag' tag (do not auto-message); not sending."
+}
+if [ -n "$THREAD" ] && [ "$ACTION" = "post" ]; then
+  thread_check
+  if [ -n "$THREAD_WHY" ]; then
+    if [ "$THREAD_AUTO" = "1" ]; then
+      THREAD=""; MESSAGE_TYPE="email"
+    elif [ "$THREAD_UNREAD" = "1" ]; then
+      printf 'THREAD CHECK NOT VERIFIED; nothing was sent or claimed: %s\n' "$THREAD_WHY" >&2; exit 4
+    else
+      record_refusal "$THREAD_WHY"
+    fi
+  fi
+fi
 if [ "$CAMPAIGN" = "retro-past" ]; then
   DOCS_WHY="$(docs_submitted "$CONTACT_ID")"
   if [ "$ACTION" = "doc-check" ]; then
@@ -1016,12 +1421,16 @@ else
     --request-ids "$ALL_IDS" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF")" \
     || die "the ledger claim failed; refusing to send without the idempotency record."
 fi
-case "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.result')" in
+case "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r 'if .result == "recent" and .reason == "recently_asked" then .reason else .result end')" in
   claimed) ;;
   already_notified)
     printf 'SKIPPED already-notified credits=%s\n' "$N"; exit 0 ;;
   user_done)
     printf 'SKIPPED %s credits=%s\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.reason')" "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')"; exit 0 ;;
+  recent)
+    printf 'DEFERRED messaged_7d credits=%s (a note from this gate in the last 7 days)\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')"; exit 3 ;;
+  refusal_hold)
+    printf 'DEFERRED refused-recheck credits=%s (refused before; held for a re-check or a human)\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')"; exit 3 ;;
   daily_cap)
     printf 'DEFERRED daily-cap credits=%s (this user already had a verify message on %s UTC; they go in the next one)\n' \
       "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')" "$DAY"; exit 3 ;;
@@ -1050,20 +1459,23 @@ BODY_SHA="$(printf '%s' "$PAYLOAD" | "$JQ_BIN" -r '.body' | "$PY_BIN" -I -c 'imp
 # ---------------------------------------------------------------------------------------
 # Log BEFORE the write, then POST, then verify.
 LOG_FILE="$(new_log_file verify-request "$CONTACT_ID")"
-"$JQ_BIN" -nc --arg target "user:$CONTACT_ID" --arg mt "$MESSAGE_TYPE" --arg appr "$APPROVED_BY" \
+"$JQ_BIN" -nc --arg target "user:$CONTACT_ID" --arg mt "$MESSAGE_TYPE" --arg appr "$APPROVED_BY" --arg thread "$THREAD" \
   --arg ref "$APPROVAL_REF" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg sha "$BODY_SHA" \
   --arg campaign "$CAMPAIGN" --arg kind "$KIND" --arg parent "$PARENT_ID" --arg due "$DUE_DAY" \
-  --arg copy "$COPY" --arg removal "$REMOVAL_DAY" \
+  --arg copy "$COPY" --arg removal "$REMOVAL_DAY" --arg legacy "$LEGACY_MATCH" \
   --argjson ids "$(printf '%s' "$CLAIMED_INPUT" | "$JQ_BIN" -c '[.credits[].request_id]')" --arg row "$ROW_ID" \
   '{agent:"operations", action:"intercom_verify_request", campaign:$campaign, kind:$kind,
     parent_message:(if $parent == "" then null else $parent end), due_day:(if $due == "" then null else $due end),
     copy:$copy, removal_day:(if $removal == "" then null else $removal end),
-    target:$target, message_type:$mt, request_ids:$ids, ledger_row:($row|tonumber), approved_by:$appr,
+    target:$target, conversation:(if $thread == "" then null else $thread end),
+    message_type:$mt, request_ids:$ids, ledger_row:($row|tonumber), approved_by:$appr,
     approval_ref:$ref, body_sha256:$sha, timestamp:$ts,
+    recipient_match:(if $legacy == "" then "id" else "in-thread-legacy-id " + $legacy end),
     authorization:"captain approved this verify-request campaign (fixed copy); see approval_ref"}' > "$LOG_FILE"
 
+if [ -n "$THREAD" ]; then POST_PATH="/conversations/$THREAD/reply"; else POST_PATH="/messages"; fi
 set +e
-RESPONSE="$(printf '%s' "$PAYLOAD" | api POST /messages)"
+RESPONSE="$(printf '%s' "$PAYLOAD" | api POST "$POST_PATH")"
 rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then
@@ -1073,23 +1485,40 @@ if [ "$rc" -ne 0 ]; then
   exit 4
 fi
 R_TYPE="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '.type // empty' 2>/dev/null || true)"
-R_MT="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '.message_type // empty' 2>/dev/null || true)"
-R_ID="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '.id // empty | tostring' 2>/dev/null || true)"
-R_CONV="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '.conversation_id // empty | tostring' 2>/dev/null || true)"
+if [ -n "$THREAD" ]; then
+  # Intercom answers a reply with the whole conversation; the part just created is the last one.
+  R_CONV="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '.id // empty | tostring' 2>/dev/null || true)"
+  R_ID="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '(.conversation_parts.conversation_parts // [])[-1].id // empty | tostring' 2>/dev/null || true)"
+  R_PART="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '(.conversation_parts.conversation_parts // [])[-1] | "\(.part_type // "")/\(.author.type // "")/\(.author.id // "")"' 2>/dev/null || true)"
+else
+  R_MT="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '.message_type // empty' 2>/dev/null || true)"
+  R_ID="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '.id // empty | tostring' 2>/dev/null || true)"
+  R_CONV="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '.conversation_id // empty | tostring' 2>/dev/null || true)"
+fi
 if [ "$R_TYPE" = "error.list" ]; then
   ledger finalize --message-row "$ROW_ID" --status rejected --reason "intercom error: $(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '[.errors[]?.code] | join(",")' 2>/dev/null)" --api-log "$LOG_FILE" >/dev/null
   printf 'POST REJECTED by Intercom (nothing delivered; retried on a later run). Logged at %s. Response:\n%s\n' "$LOG_FILE" "$RESPONSE" >&2
   exit 4
 fi
-if [ "$R_TYPE" != "admin_message" ] || [ "$R_MT" != "$EXPECT_TYPE" ] || ! printf '%s' "$R_ID" | grep -qE '^[0-9]+$'; then
+if [ -n "$THREAD" ]; then
+  if [ "$R_TYPE" != "conversation" ] || [ "$R_CONV" != "$THREAD" ] || [ "$R_PART" != "comment/admin/$INTERCOM_ADMIN_ID" ] \
+     || ! printf '%s' "$R_ID" | grep -qE '^[0-9]+$'; then
+    ledger finalize --message-row "$ROW_ID" --status attempted --reason "unverified reply type=${R_TYPE:-none} part=${R_PART:-none}" --api-log "$LOG_FILE" >/dev/null || true
+    printf 'POST NOT VERIFIED: expected a Caroline comment in conversation %s, Intercom answered type "%s" last part "%s". Logged at %s; left CLAIMED. Response:\n%s\n' \
+      "$THREAD" "${R_TYPE:-<none>}" "${R_PART:-<none>}" "$LOG_FILE" "$RESPONSE" >&2
+    exit 4
+  fi
+elif [ "$R_TYPE" != "admin_message" ] || [ "$R_MT" != "$EXPECT_TYPE" ] || ! printf '%s' "$R_ID" | grep -qE '^[0-9]+$'; then
   ledger finalize --message-row "$ROW_ID" --status attempted --reason "unverified response type=${R_TYPE:-none} message_type=${R_MT:-none}" --api-log "$LOG_FILE" >/dev/null || true
   printf 'POST NOT VERIFIED: expected an admin_message of type "%s", Intercom answered type "%s" message_type "%s". Logged at %s; left CLAIMED. Response:\n%s\n' \
     "$EXPECT_TYPE" "${R_TYPE:-<none>}" "${R_MT:-<none>}" "$LOG_FILE" "$RESPONSE" >&2
   exit 4
 fi
 ledger finalize --message-row "$ROW_ID" --status sent --message-id "$R_ID" --conversation-id "$R_CONV" \
-  --body-sha256 "$BODY_SHA" --api-log "$LOG_FILE" >/dev/null
-if [ "$KIND" = "initial" ]; then
+  --body-sha256 "$BODY_SHA" --api-log "$LOG_FILE" ${LEGACY_MATCH:+--reason "in-thread-legacy-id $LEGACY_MATCH"} >/dev/null
+if [ -n "$THREAD" ]; then
+  printf 'POSTED %s conversation=%s message=%s credits=%s\n' "$MESSAGE_TYPE" "$THREAD" "$R_ID" "$NC"
+elif [ "$KIND" = "initial" ]; then
   printf 'POSTED %s message=%s credits=%s\n' "$MESSAGE_TYPE" "$R_ID" "$NC"
 else
   printf 'POSTED %s %s message=%s credits=%s\n' "$KIND" "$MESSAGE_TYPE" "$R_ID" "$NC"

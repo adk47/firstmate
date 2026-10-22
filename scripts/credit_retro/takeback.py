@@ -730,10 +730,11 @@ def account_of(api: ReadApi, rows: list[dict[str, Any]]) -> tuple[dict[str, Any]
     return None, reason
 
 
-def _auth_ids(user_ids: list[str]) -> dict[str, str]:
-    """{user id: Intercom identity} via the verify-notify lookup (Trino, users.neptuneprofessionalid)."""
-    from credit_review import verify_notify  # noqa: PLC0415
-    return verify_notify.account_auth_ids(user_ids)
+def account_identities(uids: list[str]) -> dict[str, dict[str, str]]:
+    """{user id: {professional_id, auth_id}} from the core replica (read only), the take-back
+    notice's recipient key (firstmate 090: Intercom's external_id is users.neptuneProfessionalId)."""
+    from credit_review import verify_notify  # noqa: PLC0415 - sibling package
+    return verify_notify.IDENTITY_LOOKUP(uids)
 
 
 def notice_preflight(api: ReadApi, sender, rows: list[dict[str, Any]],
@@ -742,25 +743,22 @@ def notice_preflight(api: ReadApi, sender, rows: list[dict[str, Any]],
     Caroline's gate with the fixed take-back notice, TODAY. Returns (user_id -> account,
     user_id -> skip reason for users whose roles are not removed this run: the gate would
     defer their notice, the gate refused that user's notice (``notice_refused: <gate reason>``,
-    e.g. its leak check on a title; firstmate 041: only that user's set is withheld), or none of
-    their requests still belongs to them). A gate that cannot run at all, an unreadable
-    request or an account with no email refuses the whole run (captain via firstmate
-    012/014: never remove without the message going out)."""
+    e.g. its leak check on a title; firstmate 041: only that user's set is withheld), the
+    account has no professional id to address the notice by (``no_professional_id``;
+    firstmate 090), or none of their requests still belongs to them). A gate that cannot run
+    at all, an unreadable request or replica, or an account with no email refuses the whole
+    run (captain via firstmate 012/014: never remove without the message going out)."""
     from . import notice  # noqa: PLC0415
     accounts: dict[str, dict[str, Any]] = {}
     held: dict[str, str] = {}
     problems = []
-    grouped = notice.by_user(rows)
-    # The send gate matches the Intercom contact's external_id to the account's Intercom
-    # identity (users.neptuneprofessionalid, firstmate 118/120; never the numeric id), so every
-    # notice carries user.auth_id. An unreadable lookup refuses the run (never remove without
-    # the message going out); an account with no identity is held, not removed.
+    users = notice.by_user(rows)
     try:
-        auth_ids = _auth_ids(list(grouped))
-    except Exception as exc:  # noqa: BLE001 - any lookup failure means the notice cannot be matched
-        raise SystemExit(f"take-back notices cannot be sent, so nothing is removed: the account Intercom identity "
-                         f"lookup failed ({type(exc).__name__}: {exc})"[:400])
-    for uid, rs in grouped.items():
+        idents = account_identities(list(users)) if users else {}
+    except Exception as exc:  # noqa: BLE001 - an unreadable replica removes nothing
+        raise SystemExit(f"take-back notices cannot be addressed (the accounts' professional ids cannot be read "
+                         f"from the replica: {exc}), so nothing is removed") from exc
+    for uid, rs in users.items():
         try:
             acct, why = account_of(api, rs)
         except ApiError as exc:
@@ -773,12 +771,13 @@ def notice_preflight(api: ReadApi, sender, rows: list[dict[str, Any]],
         if not acct["email"]:
             problems.append(f"user {uid}: no account email on the request")
             continue
-        acct["auth_id"] = auth_ids.get(str(uid), "")
-        if not acct["auth_id"]:
-            held[uid] = "no_intercom_identity"
-            log(f"user {uid} has no professionalId / Auth0 subject: the notice cannot be matched to their "
-                "Intercom contact, so nothing of theirs is removed")
+        ident = idents.get(uid) or {}
+        if not ident.get("professional_id"):
+            held[uid] = "no_professional_id"
+            log(f"no professional id on user {uid}'s account (the notice cannot be addressed): nothing of theirs "
+                "is removed")
             continue
+        acct = {**acct, "professional_id": ident["professional_id"], "auth_id": ident.get("auth_id", "")}
         accounts[uid] = acct
         verdict, msg = sender.validate(notice.credits_file(acct, [notice.notice_credit(r) for r in rs]))
         if verdict == "deferred":
@@ -1107,9 +1106,12 @@ def notify(api: ReadApi, ledger: Ledger, apply_run: str, rows: list[dict[str, An
     by_id = {r["row_id"]: r for r in rows}
     removed = [by_id[rid] for rid in unnotified_row_ids(ledger, apply_run) if rid in by_id]
     accounts = {}
-    for uid, rs in notice.by_user(removed).items():
-        if (acct := account_of(api, rs)[0]) is not None and acct["email"]:
-            accounts[uid] = acct
+    users = notice.by_user(removed)
+    idents = account_identities(list(users)) if users else {}
+    for uid, rs in users.items():
+        ident = idents.get(uid) or {}
+        if (acct := account_of(api, rs)[0]) is not None and acct["email"] and ident.get("professional_id"):
+            accounts[uid] = {**acct, "professional_id": ident["professional_id"], "auth_id": ident.get("auth_id", "")}
     counts = send_notices(ledger, apply_run, api.actor, sender, rows, accounts, log)
     require_notified(ledger, apply_run)
     return counts

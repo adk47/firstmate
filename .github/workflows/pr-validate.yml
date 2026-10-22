@@ -1714,6 +1714,9 @@ jobs:
           # (kind, outcome), 7-day outcome age, first-run seed, at most one per ticket ever.
           # Network faked. Stdlib only.
           python3 scripts/tests/test_merge_outcome_notify.py
+          # uvn-status reminder runner + withdrawal-confirm (credit_review/uvn_status.py,
+          # withdrawal_confirm.py): gate and Trino faked. Stdlib only.
+          python3 scripts/tests/test_uvn_status.py
           # credit-trust band table mirror (scripts/credit_trust): byte-identical to IDP's
           # common/credit_trust_bands.json at the pinned sha. Stdlib only.
           python3 scripts/tests/test_credit_trust_bands.py

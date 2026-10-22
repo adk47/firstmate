@@ -84,10 +84,15 @@ os.environ["CREDIT_RETRO_ORG_AFFILIATION"] = AFFILIATION_FILE
 # Paying status: unknown in tests unless a test brings a file (oldest first).
 os.environ.setdefault("CREDIT_TRUST_PAYING_USERS_FILE", os.path.join(_PROOF_DIR, "paying-users.json"))
 
-from credit_review import verify_ledger, verify_notify  # noqa: E402
+from credit_review import affiliation, verify_ledger, verify_notify  # noqa: E402
 
-# The replica is never read in tests: every test account's Auth0 subject is "auth-<id>".
-verify_notify.AUTH_LOOKUP = lambda ids: {str(u): "auth0|test-subject" for u in ids if str(u)}
+# The env vars above are read at import time; another test module in the same process (e.g.
+# test_credit_retro via credit_retro.takeback) may have imported these first, so pin them too.
+verify_notify.PROOF_ON_FILE = PROOF_FILE
+affiliation.PATH = AFFILIATION_FILE
+
+# The replica is never read in tests: every test account's professional id is "test-pro".
+verify_notify.IDENTITY_LOOKUP = lambda ids: {str(u): {"professional_id": "test-pro", "auth_id": ""} for u in ids}
 from credit_review.verify_notify import CAPTAIN_UID, ContractError, Report  # noqa: E402
 
 PID = "11111111-2222-3333-4444-555555555555"
@@ -1522,7 +1527,7 @@ echo "$method $url" >> "$STUB_LOG"
 case "$method ${url#https://api.intercom.io}" in
   "POST /contacts/search")
     e="$(printf '%s' "$payload" | jq -r .query.value)"
-    printf '{"data":[{"id":"c%s","role":"user","email":"%s","external_id":"test-subject"}]}' "${#e}" "$e" ;;
+    printf '{"data":[{"id":"c%s","role":"user","email":"%s","external_id":"%s"}]}' "${#e}" "$e" "${STUB_EXT_ID:-test-pro}" ;;
   "POST /messages")
     if [ -n "${STUB_REJECT:-}" ] && [ -f "$STUB_REJECT" ]; then
       rm -f "$STUB_REJECT"; printf '{"type":"error.list","errors":[{"code":"rate_limit_exceeded"}]}'; exit 0
@@ -1990,36 +1995,56 @@ class EnableGateTests(unittest.TestCase):
         finally:
             db.close()
 
-    def test_the_recipient_auth0_subject_is_passed_and_a_missing_one_holds_the_note(self):
-        """2026-10-20 07:00Z: the gate matches Intercom's external_id against the account's Auth0
-        subject. A user without one is held (deferred, never handed to the gate, whose refusal
-        would close the credits); an unreadable replica halts the run with nothing sent."""
-        rows = [user_req("a1", 45), user_req("a2", 46)]
-        rep, fake = self.go(rows, auth_lookup=lambda ids: {"45": "auth0|abc-45"})
-        self.assertEqual([(p["user"]["id"], p["user"].get("auth_id")) for p in fake.payloads], [("45", "auth0|abc-45")])
-        self.assertEqual(rep.no_auth_users, 1)
-        self.assertIn("a2", self.deferred())
-        self.assertIn("no professionalId / Auth0 subject", rep.render("apply"))
+    def test_the_recipient_professional_id_is_passed_and_a_missing_one_holds_the_note(self):
+        """The gate matches Intercom's external_id against the account's professional id or Auth0
+        subject. A user without a professional id is held (deferred, never handed to the gate,
+        whose refusal would close the credits); an unreadable replica halts the run with nothing
+        sent."""
+        saved = verify_notify.IDENTITY_LOOKUP
+        try:
+            verify_notify.IDENTITY_LOOKUP = lambda ids: {"45": {"professional_id": "pro-45", "auth_id": "abc-45"}}
+            rows = [user_req("a1", 45), user_req("a2", 46)]
+            rep, fake = self.go(rows)
+            self.assertEqual([(p["user"]["id"], p["user"].get("professional_id"), p["user"].get("auth_id"))
+                              for p in fake.payloads], [("45", "pro-45", "abc-45")])
+            self.assertEqual(rep.no_professional_id, 1)
+            self.assertIn("a2", self.deferred())
+            self.assertIn("no professional id", rep.render("apply"))
 
-        def down(ids):
-            raise verify_notify.AuthLookupError("rc=2: trino down")
-        rep, fake = self.go([user_req("a3", 47)], auth_lookup=down)
-        self.assertEqual(fake.payloads, [])
-        self.assertIn("Auth0 subjects cannot be read", rep.halted)
-        self.assertTrue(rep.failed)
-        self.assertIn("a3", self.deferred())
+            def down(ids):
+                raise RuntimeError("rc=2: trino down")
+            verify_notify.IDENTITY_LOOKUP = down
+            rep, fake = self.go([user_req("a3", 47)])
+            self.assertEqual(fake.payloads, [])
+            self.assertIn("professional ids cannot be read", rep.halted)
+            self.assertTrue(rep.failed)
+            self.assertIn("a3", self.deferred())
+        finally:
+            verify_notify.IDENTITY_LOOKUP = saved
 
     def test_the_intercom_identity_is_read_from_neptuneprofessionalid(self):
         """firstmate 118: Intercom's external_id is the account's professionalId
         (users.neptuneprofessionalid), for accounts with and without an Auth0 subject."""
+        seen = []
+
+        def q(sql):
+            seen.append(sql)
+            return [["45", "8c0d-uuid", "auth0|8c0d-uuid"], ["46", None, None]]
+        got = verify_notify.account_identities([45, 46], query=q)
+        self.assertIn("neptuneprofessionalid", seen[0])
+        self.assertEqual(got["45"]["professional_id"], "8c0d-uuid")
+        self.assertEqual(got["46"]["professional_id"], "", "an account with no identity has none (held by the driver)")
+
+    def test_the_identity_lookup_honours_the_lookup_command_override(self):
+        """Kept from #1295/#1298: CREDIT_VERIFY_AUTH_LOOKUP_CMD (AUTH_LOOKUP_CMD) still names the
+        command the identity lookup runs."""
         fake = os.path.join(self.tmp, "trino.sh")
-        Path(fake).write_text('#!/bin/sh\ncat > "$0.sql"\nprintf \'"45","8c0d-uuid"\\n"46",""\\n\'\n')
+        Path(fake).write_text('#!/bin/sh\ncat > "$0.sql"\nprintf \'"45","8c0d-uuid",""\\n\'\n')
         os.chmod(fake, 0o755)
         with unittest.mock.patch.object(verify_notify, "AUTH_LOOKUP_CMD", fake):
-            got = verify_notify.account_auth_ids([45, 46])
-        sql = Path(fake + ".sql").read_text()
-        self.assertIn("neptuneprofessionalid", sql)
-        self.assertEqual(got, {"45": "8c0d-uuid"}, "an account with no identity is absent (held)")
+            got = verify_notify.account_identities([45])
+        self.assertIn("neptuneprofessionalid", Path(fake + ".sql").read_text())
+        self.assertEqual(got["45"]["professional_id"], "8c0d-uuid")
 
     def test_a_dry_run_can_use_the_real_recipient_check(self):
         rows = [user_req("b1", 48)]
