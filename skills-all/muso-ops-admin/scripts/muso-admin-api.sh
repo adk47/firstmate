@@ -1353,6 +1353,51 @@ write_bulk_destructive_audit() {
     return 0
 }
 
+# Removals: whole-track deletion (a Catalog/IDP tombstone of the track and EVERY served credit on
+# it) and credit removal from a profile. God-mode self-approve NEVER covers these (firstmate 122,
+# incident 2026-10-20 14:05Z: a bare "hide track from public" was self-approved into two track
+# DELETEs). Core refuses agent removals anyway (403 credit_removal_agent_refused); refusing here
+# stops the attempt itself. A removal needs a recorded reason (DSP-removal or different-profile
+# proof + a label check) and goes through the guarded named-human path, not this wrapper's
+# self-approve. A ":param" segment matches exactly one path segment.
+is_removal_endpoint() {
+    local method="$1" path="$2"
+    path="${path%%\?*}"
+    path="${path%/}"
+    local method_uc; method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    [[ "$method_uc" == "DELETE" ]] || return 1
+    local restore_extglob=0
+    shopt -q extglob || { shopt -s extglob; restore_extglob=1; }
+    local rc=1 ep
+    for ep in "/admin/track/+([!/])" "/admin/track/+([!/])/profile/+([!/])/credits"; do
+        # shellcheck disable=SC2053  # RHS unquoted so the extglob pattern is active.
+        if [[ "$path" == $ep ]]; then rc=0; break; fi
+    done
+    (( restore_extglob )) && shopt -u extglob
+    return "$rc"
+}
+
+refuse_removal_self_approve() {
+    cat >&2 <<EOM
+MUSO_REMOVAL_NO_SELF_APPROVE: ${1} ${2} is a removal (whole-track tombstone, or a credit removed from a profile). God-mode self-approve never covers removals, and core refuses agent removals (credit_removal_agent_refused). Do not retry through another wrapper or identity.
+Instead: read the track back and tell the requester what removal would do (the track + its N credits). Ask for the reason if none is recorded (DSP-removal proof or different-profile proof, plus a label check). "Hide" is not a removal: there is no track hide/unlist in core. A recorded removal goes to a named human from their own login.
+EOM
+}
+
+# Removal gate (QA #1299 @a3bc2731, firstmate 122): a removal never goes out through this
+# wrapper, whatever the requester, the bulk count or the approval flags. The refusal sits
+# BEFORE the tier-2 and bulk gates because neither reaches a lone credit removal below the
+# bulk threshold. Core refuses agent removals anyway (credit_removal_agent_refused); this
+# stops the attempt itself. Dry-run still shows the call (no write).
+enforce_removal_gate() {
+    local method="$1" path="$2"
+    is_removal_endpoint "$method" "$path" || return 0
+    is_dry_run_mode && return 0
+    refuse_removal_self_approve "$method" "$path"
+    return 1
+}
+
+
 enforce_bulk_destructive_gate() {
     local method="$1" path="$2"
     is_bulk_destructive_op "$method" "$path" || return 0
@@ -1377,6 +1422,10 @@ enforce_bulk_destructive_gate() {
         # god-mode list is unchanged and still needs a real second approver, so
         # the blast-radius cap stands for the whole rest of the org.
         if is_tier2_godmode_requester "${REQUESTER_EMAIL:-}"; then
+            if is_removal_endpoint "$method" "$path"; then
+                refuse_removal_self_approve "$method" "$path"
+                return 1
+            fi
             if [[ -z "$APPROVAL_MSG_ID" ]]; then
                 cat >&2 <<EOF
 MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_MSG_REQUIRED: ${count} destructive DELETE(s) in the last ${BULK_DESTRUCTIVE_WINDOW_SECS}s have reached the bulk threshold (${BULK_DESTRUCTIVE_THRESHOLD}).
@@ -1842,6 +1891,11 @@ EOF
     # Credit reject gate (incident 2026-07-22). Rejection is never autonomous —
     # requires --confirmed-by + --approval-msg-id. Runs even in dry-run.
     if ! enforce_credit_reject_gate "$method" "$path" "$body"; then
+        return 1
+    fi
+
+    # Removal gate (firstmate 122): removals never go out through this wrapper.
+    if ! enforce_removal_gate "$method" "$path"; then
         return 1
     fi
 

@@ -168,8 +168,10 @@ asked is on the approver list and enumerated the targets, their own request is
 the decision (see the two cases below).
 
 **Scope:** the `DELETE` verb (e.g. `DELETE /admin/track/:id/analytics-sources`,
-`DELETE /admin/track/:id/profile/:pid/credits`, `DELETE /admin/profile/:id/member`).
+`DELETE /admin/profile/:id/member`).
 `DELETE /admin/profile/:id/cache` is exempt (regenerable). POSTs are NOT counted.
+
+**Removals are outside this whole section.** `DELETE /admin/track/:id`, the whole-track tombstone, and `DELETE /admin/track/:id/profile/:pid/credits`, the credit removal, are never self-approved by anyone. The wrapper refuses them with `MUSO_REMOVAL_NO_SELF_APPROVE`, and core refuses agent removals (`credit_removal_agent_refused`). Follow `muso-ops-tracks` → **Removal Requests**: ask for the reason, post the handoff, a named human executes it from their own login, and you read back afterwards.
 
 **Tier 1 clears this gate alone** (policy 2026-08-26). On the operations agent,
 a `--requester` on the god-mode allowlist self-approves by passing

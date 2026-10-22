@@ -84,10 +84,10 @@ teardown() {
     [[ "$output" == *"MUSO_TIER2_APPROVAL_REQUIRED"* ]]
 }
 
-@test "DELETE /admin/track/<id> is now tier-2 gated" {
+@test "DELETE /admin/track/<id> is refused (the removal gate runs before the tier-2 gate)" {
     run bash "$SCRIPT" call DELETE /admin/track/t1
     [ "$status" -eq 1 ]
-    [[ "$output" == *"MUSO_TIER2_APPROVAL_REQUIRED"* ]]
+    [[ "$output" == *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
 }
 
 @test "POST /admin/subscription (VIP create) is now tier-2 gated" {
@@ -112,9 +112,10 @@ teardown() {
     [[ "$output" != *"MUSO_TIER2_APPROVAL"* ]]
 }
 
-@test "DELETE /admin/track/<id>/profile/<pid>/credits (remove_credits path) is NOT tier-2 gated" {
+@test "DELETE /admin/track/<id>/profile/<pid>/credits (remove_credits path) is NOT tier-2 gated (the removal gate refuses it instead)" {
     run bash "$SCRIPT" call DELETE /admin/track/t1/profile/p1/credits
     [[ "$output" != *"MUSO_TIER2_APPROVAL"* ]]
+    [[ "$output" == *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
 }
 
 @test "DELETE /admin/track/<id>/analytics-sources (sub-resource) is NOT tier-2 gated" {
@@ -181,4 +182,50 @@ teardown() {
     run bash "$SCRIPT" --requester nick@muso.ai call POST /admin/subscription '{"userId":"u1"}'
     [ "$status" -eq 1 ]
     [[ "$output" == *"MUSO_TIER2_GODMODE_APPROVAL_MSG_REQUIRED"* ]]
+}
+
+# --- Removals never self-approve (firstmate 122, incident 2026-10-20 14:05Z) ---
+@test "god-mode admin is REFUSED on a whole-track DELETE even WITH --approval-msg-id (removal)" {
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1792504998.731149 \
+        call DELETE /admin/track/2631b04d-3dc2-40dd-8a69-b1cad202d9d3
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
+    [[ "$output" == *"no track hide/unlist"* ]]
+    if [ -f "$TIER2_AUDIT_PATH" ]; then
+        if grep -q '"bypass":"god_mode_self_approve"' "$TIER2_AUDIT_PATH"; then false; fi
+    fi
+}
+
+@test "god-mode user-delete with --approval-msg-id is unchanged (not a removal)" {
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1777474838.796239 call DELETE /admin/user/123
+    [[ "$output" != *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
+}
+
+# QA #1299 @a3bc2731: below the bulk threshold (0 prior DELETEs) a god-mode credit removal used
+# to reach core. The removal gate now refuses it before any gate, any audit row and any request.
+@test "removal gate: a god-mode credit removal BELOW the bulk threshold is refused before any request" {
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1792504998.731149 \
+        call DELETE /admin/track/t1/profile/p1/credits
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
+    [[ "$output" != *"127.0.0.1"* ]]
+    if [ -f "$TIER2_AUDIT_PATH" ]; then
+        if grep -q '"bypass":"god_mode_self_approve"' "$TIER2_AUDIT_PATH"; then false; fi
+    fi
+}
+
+@test "removal gate: any requester, with or without --confirmed-by, is refused for both removal routes" {
+    for path in /admin/track/t1 /admin/track/t1/profile/p1/credits /admin/track/t1/profile/p1/credits/; do
+        run bash "$SCRIPT" --requester someone@muso.ai --confirmed-by aaron --approval-msg-id 1777474838.796239 \
+            call DELETE "$path"
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
+    done
+}
+
+@test "removal gate: dry-run still shows the call; other track DELETEs are untouched" {
+    run env OPS_DRY_RUN=1 bash "$SCRIPT" call DELETE /admin/track/t1/profile/p1/credits
+    [[ "$output" != *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
+    run bash "$SCRIPT" call DELETE /admin/track/t1/analytics-sources '{"x":1}'
+    [[ "$output" != *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
 }

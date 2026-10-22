@@ -51,7 +51,7 @@ teardown() {
 }
 
 del() {
-    run --separate-stderr env CURL_STUB_MODE="$1" bash "$SCRIPT" --requester jan@muso.ai call DELETE "${2:-/admin/track/abc}"
+    run --separate-stderr env CURL_STUB_MODE="$1" bash "$SCRIPT" --requester jan@muso.ai call DELETE "${2:-/admin/profile/abc/member}"
 }
 
 @test "200 DELETE writes one outcome=ok row keyed to the counter row" {
@@ -59,7 +59,7 @@ del() {
     [ "$status" -eq 0 ]
     [ "$(wc -l < "$BULK_DESTRUCTIVE_RESULTS_PATH")" -eq 1 ]
     jq -e '.outcome == "ok" and .http_status == 200 and .method == "DELETE"
-           and .path == "/admin/track/abc" and .requester == "jan@muso.ai" and (.ts | length > 0)' \
+           and .path == "/admin/profile/abc/member" and .requester == "jan@muso.ai" and (.ts | length > 0)' \
         "$BULK_DESTRUCTIVE_RESULTS_PATH" >/dev/null
     # correlation: the (epoch, path) pair equals the pre-call row's
     [ "$(jq -c '[.epoch,.path]' "$BULK_DESTRUCTIVE_PATH")" = "$(jq -c '[.epoch,.path]' "$BULK_DESTRUCTIVE_RESULTS_PATH")" ]
@@ -77,9 +77,9 @@ del() {
 }
 
 @test "13-Oct trio: two ok and one failure are distinguishable without a prod read" {
-    del ok /admin/track/a
-    del ok /admin/track/b
-    del http_500 /admin/track/c
+    del ok /admin/profile/a/member
+    del ok /admin/profile/b/member
+    del http_500 /admin/profile/c/member
     [ "$(jq -s '[.[]|select(.outcome=="ok")]|length' "$BULK_DESTRUCTIVE_RESULTS_PATH")" -eq 2 ]
     [ "$(jq -s '[.[]|select(.outcome!="ok")]|length' "$BULK_DESTRUCTIVE_RESULTS_PATH")" -eq 1 ]
     [ "$(wc -l < "$BULK_DESTRUCTIVE_PATH")" -eq 3 ]
@@ -116,14 +116,14 @@ del() {
 #!/usr/bin/env bash
 printf '{"errors":[{"message":"bad creds"}]}\n401'
 STUB
-    run --separate-stderr bash "$SCRIPT" --requester jan@muso.ai call DELETE /admin/track/abc
+    run --separate-stderr bash "$SCRIPT" --requester jan@muso.ai call DELETE /admin/profile/abc/member
     [ "$status" -ne 0 ]
     [ "$(wc -l < "$BULK_DESTRUCTIVE_RESULTS_PATH")" -eq 1 ]
-    jq -e '.outcome == "not_sent" and .http_status == null and .path == "/admin/track/abc"' "$BULK_DESTRUCTIVE_RESULTS_PATH"
+    jq -e '.outcome == "not_sent" and .http_status == null and .path == "/admin/profile/abc/member"' "$BULK_DESTRUCTIVE_RESULTS_PATH"
 }
 
 @test "dry-run writes neither a counter row nor an outcome row" {
-    run --separate-stderr env OPS_DRY_RUN=1 bash "$SCRIPT" --requester jan@muso.ai call DELETE /admin/track/abc
+    run --separate-stderr env OPS_DRY_RUN=1 bash "$SCRIPT" --requester jan@muso.ai call DELETE /admin/profile/abc/member
     [ "$status" -eq 0 ]
     [ ! -e "$BULK_DESTRUCTIVE_PATH" ]
     [ ! -e "$BULK_DESTRUCTIVE_RESULTS_PATH" ]

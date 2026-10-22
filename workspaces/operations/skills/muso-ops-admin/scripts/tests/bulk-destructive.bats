@@ -199,6 +199,21 @@ seed_destructive_ops() {
     grep -q '"count_at_trip":3' "$BULK_DESTRUCTIVE_AUDIT_PATH"
 }
 
+@test "bulk gate: god-mode self-approve never covers a credit removal (firstmate 122)" {
+    seed_destructive_ops 3
+    # Precondition: jan is NOT in this harness's approver file (setup() seeds
+    # aaron only), so passing here proves self-approval reads the GOD-MODE list
+    # and not tier2-approvers.txt. Asserted via run/status because a bare
+    # `! grep` is a no-op under bats' set -e unless it is the last line, and
+    # `grep -v` would pass on any non-matching line.
+    run grep -q jan "$TIER2_APPROVERS_PATH"
+    [ "$status" -ne 0 ]
+    run bash "$SCRIPT" --requester jan@muso.ai --approval-msg-id 1779999999.002222 --approval-author-id U038BM16T7W \
+        call DELETE /admin/track/abc/profile/p1/credits
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"MUSO_REMOVAL_NO_SELF_APPROVE"* ]]
+}
+
 @test "god-mode requester (aaron) self-approves the bulk gate with his own msg-id" {
     seed_destructive_ops 3
     run bash "$SCRIPT" --requester aaron@muso.ai --approval-msg-id 1779999999.004444 --approval-author-id U7RP6HKUZ \
