@@ -2073,12 +2073,13 @@ PY
 }
 
 @test "digest: the timer is keyed to the IANA zone, never a fixed UTC offset" {
-  grep -q '^OnCalendar=\*-\*-\* 08:00:00 America/New_York$' "$HYDRA_REPO/scripts/install-aux-units.sh"
-  # Scoped to the digest timer's own heredoc: other timers legitimately use UTC.
+  # Both greps are scoped to the digest timer's own heredoc: the ClickUp digest
+  # timer carries the identical OnCalendar line, so a whole-file grep is vacuous.
   # `if grep; then false; fi` because a bare `! grep` is exempt from set -e.
   local timer
   timer="$(sed -n '/^cat > .*hydra-release-digest.timer << RELDIGESTTMR$/,/^RELDIGESTTMR$/p' "$HYDRA_REPO/scripts/install-aux-units.sh")"
   [ -n "$timer" ]
+  printf '%s\n' "$timer" | grep -q '^OnCalendar=\*-\*-\* 08:00:00 America/New_York$'
   if printf '%s\n' "$timer" | grep -E '^OnCalendar=.*(UTC|[+-][0-9]{2}:?[0-9]{2}|EDT|EST)'; then false; fi
   grep -q '^  hydra-release-digest.service$' "$HYDRA_REPO/scripts/install-aux-units.sh"
 }
