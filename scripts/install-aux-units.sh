@@ -138,6 +138,13 @@
 #     safe: only tickets where the customer was told post-merge are
 #     closed; the rest stay open for notify-merged-customers.py.
 #
+#   merge-outcome-notify.timer / .service
+#     Every 15 min. Runs scripts/merge-outcome-notify.py --apply: one fixed
+#     in-thread Caroline message per merge ticket the merge executor tagged
+#     merge-outcome:* (at most once per ticket ever, outcomes up to 7 days
+#     old, first run seeds older outcomes silently). State in
+#     /var/lib/merge-outcome-notify; MERGE_OUTCOME_MAX=25 per run.
+#
 #   /etc/cron.d/stale-ticket-watchdog
 #     Schedules scripts/stale-ticket-watchdog.sh daily to post a
 #     digest of overdue hydra-action-request ClickUp tickets to
@@ -379,6 +386,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/overdue-verification-notifier.py missing"
 [[ -f "$HYDRA_ROOT/scripts/resolve-notify.py" ]] \
   || fail "$HYDRA_ROOT/scripts/resolve-notify.py missing"
+[[ -f "$HYDRA_ROOT/scripts/merge-outcome-notify.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/merge-outcome-notify.py missing"
 [[ -f "$HYDRA_ROOT/scripts/resolution-matcher.py" ]] \
   || fail "$HYDRA_ROOT/scripts/resolution-matcher.py missing"
 [[ -f "$HYDRA_ROOT/scripts/caroline-behavior-digest.py" ]] \
@@ -809,6 +818,57 @@ rn=resolve-notify.timer
 systemctl enable "$rn" >/dev/null 2>&1 || log "WARN: could not enable $rn"
 systemctl start "$rn" >/dev/null 2>&1 || log "WARN: could not start $rn"
 log "  $rn: $(systemctl is-active "$rn" 2>/dev/null || echo unknown)"
+
+# ─── Merge-outcome notifier (every 15 min) ─────────────────────
+# Tells a customer, in their own Intercom thread, how their profile-merge /
+# unmerge-request / track-merge ticket ended, once the merge executor tags it
+# merge-outcome:{merged,needs-evidence,not-merged} (+ merge-outcome-at:<date>).
+# Fixed copy only, at most one message per ticket ever (attempted/sent state,
+# single-attempt POST, run lock), outcomes older than 7 days are left for a
+# human, and the first run seeds outcomes older than 24h without sending; every
+# such ticket is posted once to #cs_priority (operations bot). Same
+# conversation gates as resolve-notify (email match, no human assignee, no human
+# admin last, no blocked tag). CLICKUP_API_KEY and MUSOAI_INTERCOM_TOKEN come
+# from main.env. See scripts/merge-outcome-notify.py.
+install -d -m 755 /var/lib/merge-outcome-notify
+# Keep conflicts create_ticket (edge gateway, root) could not flag in ClickUp; this
+# notifier posts each to #cs_priority once (MERGE_KEEP_CONFLICT_SPOOL default).
+install -d -m 700 /var/lib/hydra/merge-intake/keep-conflict-unflagged
+cat > /etc/systemd/system/merge-outcome-notify.service << MERGEOUTCOMESVC
+[Unit]
+Description=Tell customers the outcome of their merge request (fixed in-thread message)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# node-8 SIGTERMs any Type=oneshot unit with no explicit start timeout.
+TimeoutStartSec=600
+Environment=MERGE_OUTCOME_MAX=25
+Environment=MERGE_OUTCOME_STATE=/var/lib/merge-outcome-notify/notified.json
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/merge-outcome-notify.py --apply
+MERGEOUTCOMESVC
+
+cat > /etc/systemd/system/merge-outcome-notify.timer << MERGEOUTCOMETMR
+[Unit]
+Description=Every 15 min — tell customers the outcome of their merge request
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=60
+Unit=merge-outcome-notify.service
+
+[Install]
+WantedBy=timers.target
+MERGEOUTCOMETMR
+
+systemctl daemon-reload
+mon=merge-outcome-notify.timer
+systemctl enable "$mon" >/dev/null 2>&1 || log "WARN: could not enable $mon"
+systemctl start "$mon" >/dev/null 2>&1 || log "WARN: could not start $mon"
+log "  $mon: $(systemctl is-active "$mon" 2>/dev/null || echo unknown)"
 
 # ─── Resolution matcher (daily 12:00 UTC) ─────────────────────
 # The RESOLUTION counterpart to the systemic-data-issue REPORT: that report pages
@@ -3215,6 +3275,7 @@ AUX_ONFAILURE_UNITS=(
   intercom-intake-watchdog.service
   intercom-legal-unanswered-watchdog.service
   intercom-rights-holder-watchdog.service
+  merge-outcome-notify.service
   overdue-verification-notifier.service
   qa-approval-retry.service
   qa-review-reconcile.service

@@ -70,6 +70,7 @@ export interface ProfileBody {
 export interface BuildVerdictInput {
   trustedAuthorEmail: string | null;
   requesterEmail?: string | null;
+  survivorProfileId?: string;
   survivor: ProfileBody;
   survivorCreditTitles?: string[];
   // body === null means the requested duplicate could not be loaded — it is
@@ -84,6 +85,9 @@ export interface BuildVerdictInput {
 export interface DuplicateVerdict {
   profile_id: string;
   claim_state: "unclaimed" | "claimed_same_owner" | "claimed_different_user" | "unresolved";
+  // How many claimed workspaces the duplicate has; claimed_same_owner with more than
+  // one means someone else has also claimed it.
+  claimed_workspace_count: number;
   credit_count: number;
   shared_external_id: "none" | "weak";
   // The distinct PLATFORMS whose external id overlapped survivor↔duplicate
@@ -105,6 +109,9 @@ export interface Verdict {
   owner_undetermined: boolean;
   impersonation_flag: boolean;
   owns_survivor: boolean;
+  // The survivor profile id these facts were checked against, so a consumer can
+  // bind owns_survivor to one profile. Absent on a fail-closed verdict.
+  survivor_profile_id?: string;
   survivor_claimed_workspace_count: number;
   // false when there are zero duplicates to assess OR any requested duplicate
   // could not be loaded — an incomplete/empty run must never read as clean evidence.
@@ -185,6 +192,7 @@ export function buildVerdict(input: BuildVerdictInput): Verdict {
       return {
         profile_id: d.profileId,
         claim_state: "unresolved" as const,
+        claimed_workspace_count: 0,
         credit_count: 0,
         shared_external_id: "none" as const,
         matched_external_id_sources: [],
@@ -228,6 +236,7 @@ export function buildVerdict(input: BuildVerdictInput): Verdict {
     return {
       profile_id: d.profileId,
       claim_state,
+      claimed_workspace_count: dupClaimed.length,
       credit_count: Number(d.body.creditCount ?? 0),
       shared_external_id,
       matched_external_id_sources,
@@ -249,6 +258,7 @@ export function buildVerdict(input: BuildVerdictInput): Verdict {
     owner_undetermined,
     impersonation_flag,
     owns_survivor,
+    ...(input.survivorProfileId ? { survivor_profile_id: input.survivorProfileId } : {}),
     survivor_claimed_workspace_count,
     all_duplicates_resolved,
     cluster_size_check: "not_performed",
@@ -286,6 +296,36 @@ export interface DedupeCheckDeps {
   rateLimiter: RateLimiter;
   sessionKey: string;
   intercomToken: string;
+  // Shared with create_ticket (one instance in index.ts): the only source of
+  // merge_intake.requester_owns.
+  verdictStore?: DedupeVerdictStore;
+}
+
+const VERDICT_TTL_MS = 2 * 60 * 60_000;
+
+/** Verdicts dedupe_check itself computed, per (conversation, survivor, sorted duplicates); 2h TTL, in memory. */
+export class DedupeVerdictStore {
+  private entries = new Map<string, { verdict: Verdict; atMs: number }>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  private key(convId: string, survivorId: string, duplicateIds: string[]): string {
+    const dups = [...new Set(duplicateIds.map((d) => d.trim().toLowerCase()))].sort();
+    return `${convId}|${survivorId.trim().toLowerCase()}|${dups.join(",")}`;
+  }
+
+  put(convId: string, survivorId: string, duplicateIds: string[], verdict: Verdict): void {
+    const nowMs = this.now();
+    for (const [k, e] of this.entries) if (nowMs - e.atMs > VERDICT_TTL_MS) this.entries.delete(k);
+    this.entries.set(this.key(convId, survivorId, duplicateIds), { verdict, atMs: nowMs });
+  }
+
+  get(convId: string | null, survivorId: string | null, duplicateIds: string[]): Verdict | null {
+    if (!convId || !survivorId || duplicateIds.length === 0) return null;
+    const e = this.entries.get(this.key(convId, survivorId, duplicateIds));
+    if (!e || this.now() - e.atMs > VERDICT_TTL_MS) return null;
+    return e.verdict;
+  }
 }
 
 function resolveId(id: string | undefined, url: string | undefined): string | null {
@@ -295,7 +335,7 @@ function resolveId(id: string | undefined, url: string | undefined): string | nu
 }
 
 export function createDedupeCheckTool(deps: DedupeCheckDeps): AgentTool<typeof Parameters, unknown> {
-  const { adminClient, intercomReader, rateLimiter, sessionKey, intercomToken } = deps;
+  const { adminClient, intercomReader, rateLimiter, sessionKey, intercomToken, verdictStore } = deps;
 
   async function fetchProfileBody(profileId: string): Promise<ProfileBody | null> {
     const resp = await adminClient.get<{ data?: ProfileBody }>(`/api/v3/admin/profile/${encodeURIComponent(profileId)}`);
@@ -377,11 +417,13 @@ export function createDedupeCheckTool(deps: DedupeCheckDeps): AgentTool<typeof P
         const verdict = buildVerdict({
           trustedAuthorEmail,
           requesterEmail: params.requesterEmail,
+          survivorProfileId: survivorId,
           survivor: survivorBody,
           survivorCreditTitles,
           duplicates,
           verified_at: new Date().toISOString(),
         });
+        verdictStore?.put(convId, survivorId, dupIds, verdict);
         return textResult(JSON.stringify(verdict));
       } catch {
         // Any unexpected failure must fail CLOSED, never throw and never pass.

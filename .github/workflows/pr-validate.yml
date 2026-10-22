@@ -1710,6 +1710,10 @@ jobs:
           # Caroline's send ledger: writer (verify_ledger) and take-back reader agree on
           # verify_messages, and `verify_ledger.py migrate` (run by deploy.sh) creates it. Stdlib only.
           python3 scripts/tests/test_verify_ledger_contract.py
+          # Merge-outcome notifier (scripts/merge-outcome-notify.py): fixed in-thread copy per
+          # (kind, outcome), 7-day outcome age, first-run seed, at most one per ticket ever.
+          # Network faked. Stdlib only.
+          python3 scripts/tests/test_merge_outcome_notify.py
           # credit-trust band table mirror (scripts/credit_trust): byte-identical to IDP's
           # common/credit_trust_bands.json at the pinned sha. Stdlib only.
           python3 scripts/tests/test_credit_trust_bands.py

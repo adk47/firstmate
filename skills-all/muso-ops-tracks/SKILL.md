@@ -184,6 +184,8 @@ mistakes, both avoidable here:
 
 ### Merge Tracks
 
+**Merge keep conflicts — HOLD.** Do not execute a merge / unmerge / track-merge ticket tagged `merge-keep-conflict`, nor one whose OPEN sibling (named by a `merge-keep-conflict-with:<id>` tag on either ticket) still carries it: Caroline filed two requests in one conversation that keep different profiles / tracks. A human reconciles them with the customer, closes the ticket they reject and removes `merge-keep-conflict` from the one they keep; a closed sibling never holds. Nor one tagged `merge-intake-stale`: a follow-up's merge targets could not be written to its description, so the description is incomplete; a human removes the tag once it is fixed. Same rule as `scripts/lib/merge_keep_conflict.py`, which every merge sweep uses.
+
 ⚠️ Tier 2+ only.
 
 Pre-merge: compare both tracks (credits, analytics links, popularity).

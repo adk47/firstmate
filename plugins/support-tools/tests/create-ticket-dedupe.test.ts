@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createCreateTicketTool } from "../src/tools/create-ticket.js";
 import { SessionTicketRegistry } from "../src/session-ticket-registry.js";
 import type { HttpClient } from "../src/http.js";
@@ -261,6 +264,597 @@ describe("create_ticket dedupe", () => {
     });
     expect(result.submitted).toBe(true);
     expect(vi.mocked(get).mock.calls).toHaveLength(0);
+  });
+
+  it("files a second unmerge from another conversation as its own ticket, never appended to the open one", async () => {
+    const get = vi.fn(async () => ({
+      ok: true,
+      data: { tasks: [
+        { id: "open_unmerge", status: { status: "to do" }, date_created: String(Date.now() - 1000), custom_fields: [{ id: "ef", value: "u@example.com" }] },
+      ] } as any,
+    }));
+    const deps = makeDeps({ http: makeHttp({ get }) });
+    const tool = createCreateTicketTool(deps);
+    const result = await run(tool, {
+      actionType: "unmerge-request", customerEmail: "u@example.com", customerProfileId: "prof_1",
+      summary: "separate profile C",
+      details: { merged_profile_urls: ["https://credits.muso.ai/profile/ccc"] },
+      conversationSummary: "wrong merge",
+    });
+    expect(result).toMatchObject({ submitted: true, ticket_id: "task_1" });
+    expect(result.updated_existing).toBeUndefined();
+    expect(vi.mocked(deps.http.post).mock.calls.some(([u]) => COMMENT_URL_RE.test(u as string))).toBe(false);
+  });
+
+  it("still appends a same-conversation unmerge follow-up to its ticket", async () => {
+    // ClickUp keeps the filed description, so the follow-up can rewrite its merge_intake.
+    let description: string | undefined;
+    const deps = makeDeps({ http: makeHttp({
+      post: vi.fn(async (url: string, o: any) => {
+        if (COMMENT_URL_RE.test(url)) return { ok: true, data: { id: "comment_1" } as any };
+        description = o.body.markdown_description;
+        return { ok: true, data: { id: "task_1" } as any };
+      }),
+      get: vi.fn(async (url: string) => url.includes("include_markdown_description=true")
+        ? { ok: true, data: { markdown_description: description } as any }
+        : { ok: true, data: { tasks: [], status: { status: "to do", type: "open" } } as any }),
+    }) });
+    const tool = createCreateTicketTool(deps);
+    const params = {
+      actionType: "unmerge-request", customerEmail: "u@example.com", customerProfileId: "prof_1",
+      summary: "separate profile B",
+      details: { merged_profile_urls: ["https://credits.muso.ai/profile/bbb"] },
+      conversationSummary: "wrong merge",
+    };
+    expect(await run(tool, params, "c1")).toMatchObject({ submitted: true, ticket_id: "task_1" });
+    const second = await run(tool, { ...params, summary: "one more detail" }, "c2");
+    expect(second).toMatchObject({ submitted: true, ticket_id: "task_1", updated_existing: true });
+  });
+
+  it("files a second, DIFFERENT unmerge in the same conversation as its own ticket", async () => {
+    const deps = makeDeps();
+    const tool = createCreateTicketTool(deps);
+    const base = {
+      actionType: "unmerge-request", customerEmail: "u@example.com", customerProfileId: "prof_1",
+      conversationSummary: "wrong merges",
+    };
+    const first = await run(tool, { ...base, summary: "separate profile B",
+      details: { merged_profile_urls: ["https://credits.muso.ai/profile/bbb"] } }, "c1");
+    expect(first).toMatchObject({ submitted: true });
+    const second = await run(tool, { ...base, summary: "also separate profile C",
+      details: { merged_profile_urls: ["https://credits.muso.ai/profile/ccc"] } }, "c2");
+    expect(second.submitted).toBe(true);
+    expect(second.updated_existing).toBeUndefined();
+    const taskPosts = vi.mocked(deps.http.post).mock.calls.filter(([u]) => TASK_URL_RE.test(u as string));
+    expect(taskPosts).toHaveLength(2);
+    expect(vi.mocked(deps.http.post).mock.calls.some(([u]) => COMMENT_URL_RE.test(u as string))).toBe(false);
+  });
+
+  describe("merge follow-ups widen the open ticket's merge_intake", () => {
+    const B = "https://credits.muso.ai/profile/bbb";
+    const C = "https://credits.muso.ai/profile/ccc";
+    const base = {
+      actionType: "unmerge-request", customerEmail: "u@example.com", customerProfileId: "prof_1",
+      conversationSummary: "wrong merge",
+    };
+    const intakeOf = (markdown: string) => {
+      const block = markdown.split("---ACTION-REQUEST---\n")[1].split("\n---END-ACTION-REQUEST---")[0];
+      return JSON.parse(block).details.merge_intake;
+    };
+    // ClickUp as the tool sees it: each filed task keeps its description, which a GET with
+    // include_markdown_description returns and a PUT markdown_content replaces.
+    function liveClickup(opts: { putOk?: boolean; tagOk?: (tag: string, attempt: number, id: string) => boolean;
+                                 createOk?: (n: number) => boolean; getOk?: (id: string) => boolean;
+                                 deleteOk?: boolean } = {}) {
+      const attempts = new Map<string, number>();
+      const closed = new Set<string>();
+      const descriptions = new Map<string, string>();
+      const tags = new Map<string, string[]>();
+      const comments = new Map<string, string[]>();
+      let n = 0;
+      const http = makeHttp({
+        post: vi.fn(async (url: string, o: any) => {
+          const tagged = url.match(/\/task\/([^/]+)\/tag\/([^/]+)$/);
+          if (tagged) {
+            const tag = decodeURIComponent(tagged[2]);
+            const attempt = (attempts.get(url) ?? 0) + 1;
+            attempts.set(url, attempt);
+            if (opts.tagOk && !opts.tagOk(tag, attempt, tagged[1])) return { ok: false, error: "API error", status: 500 } as any;
+            tags.set(tagged[1], [...(tags.get(tagged[1]) ?? []), decodeURIComponent(tagged[2])]);
+            return { ok: true, data: {} as any };
+          }
+          const commented = url.match(COMMENT_URL_RE);
+          if (commented) {
+            comments.set(commented[1], [...(comments.get(commented[1]) ?? []), o.body.comment_text]);
+            return { ok: true, data: { id: "comment_1" } as any };
+          }
+          if (opts.createOk && !opts.createOk(n + 1)) return { ok: false, error: "API error", status: 429 } as any;
+          const id = `task_${++n}`;
+          descriptions.set(id, o.body.markdown_description);
+          tags.set(id, [...(o.body.tags ?? [])]);
+          return { ok: true, data: { id } as any };
+        }),
+        delete: vi.fn(async (url: string) => {
+          if (opts.deleteOk === false) return { ok: false, error: "API error", status: 500 } as any;
+          const [, id, tag] = url.match(/\/task\/([^/]+)\/tag\/([^/]+)$/)!;
+          tags.set(id, (tags.get(id) ?? []).filter((t) => t !== decodeURIComponent(tag)));
+          return { ok: true, data: {} as any };
+        }),
+        get: vi.fn(async (url: string) => {
+          const id = url.split("/task/")[1]?.split("?")[0];
+          if (id && opts.getOk && !opts.getOk(id)) return { ok: false, error: "API error", status: 429 } as any;
+          if (url.includes("include_markdown_description=true")) {
+            return { ok: true, data: { id, markdown_description: descriptions.get(id) } as any };
+          }
+          return { ok: true, data: { id, tags: (tags.get(id) ?? []).map((name) => ({ name })),
+            status: closed.has(id) ? { status: "closed", type: "closed" } : { status: "to do", type: "open" } } as any };
+        }),
+        put: vi.fn(async (url: string, o: any) => {
+          if (opts.putOk === false) return { ok: false, error: "API error", status: 500 } as any;
+          descriptions.set(url.split("/task/")[1], o.body.markdown_content);
+          return { ok: true, data: {} as any };
+        }),
+      });
+      return { http, descriptions, tags, comments, closed };
+    }
+
+    it("appends an overlapping follow-up and rewrites the description's intake to the union", async () => {
+      const { http, descriptions } = liveClickup();
+      const deps = makeDeps({ http });
+      const tool = createCreateTicketTool(deps);
+      await run(tool, { ...base, summary: "separate B", details: { merged_profile_urls: [B] } }, "c1");
+      const second = await run(tool, { ...base, summary: "and C too", details: { merged_profile_urls: [B, C] } }, "c2");
+      expect(second).toMatchObject({ submitted: true, ticket_id: "task_1", updated_existing: true });
+      expect(second.merge_intake_update_failed).toBeUndefined();
+      const posts = vi.mocked(http.post).mock.calls;
+      expect(posts.filter(([u]) => TASK_URL_RE.test(u as string))).toHaveLength(1);
+      expect(posts.filter(([u]) => COMMENT_URL_RE.test(u as string))).toHaveLength(1);
+      expect(vi.mocked(http.put).mock.calls.map(([u]) => u)).toEqual(["https://api.clickup.com/api/v2/task/task_1"]);
+      const markdown = descriptions.get("task_1")!;
+      expect(markdown).toContain("**Request:** separate B");
+      expect(intakeOf(markdown)).toMatchObject({ kind: "unmerge-request", keep: "prof_1", others: [B, C], complete: true });
+
+      const third = await run(tool, { ...base, summary: "C detail", details: { merged_profile_urls: [C] } }, "c3");
+      expect(third).toMatchObject({ ticket_id: "task_1", updated_existing: true });
+      expect(intakeOf(descriptions.get("task_1")!).others).toEqual([B, C]);
+    });
+
+    it("replaces only the ACTION-REQUEST block, keeping a human's edits to the description", async () => {
+      const { http, descriptions } = liveClickup();
+      const tool = createCreateTicketTool(makeDeps({ http }));
+      await run(tool, { ...base, summary: "separate B", details: { merged_profile_urls: [B] } }, "c1");
+      const edited = `**Ops note:** customer prefers email, called 10-20.\n\n${descriptions.get("task_1")!}\n\nReviewed by Sam.`;
+      descriptions.set("task_1", edited);
+      await run(tool, { ...base, summary: "and C too", details: { merged_profile_urls: [B, C] } }, "c2");
+      const after = descriptions.get("task_1")!;
+      const [beforeBlock, afterBlock] = [edited.split("---ACTION-REQUEST---\n"), after.split("---ACTION-REQUEST---\n")];
+      expect(afterBlock[0]).toBe(beforeBlock[0]);
+      expect(after.split("\n---END-ACTION-REQUEST---")[1]).toBe(edited.split("\n---END-ACTION-REQUEST---")[1]);
+      expect(intakeOf(after).others).toEqual([B, C]);
+      expect(JSON.parse(afterBlock[1].split("\n---END-ACTION-REQUEST---")[0]).details.merged_profile_urls).toEqual([B]);
+    });
+
+    it("holds the ticket merge-intake-stale and spools it once when the intake cannot be widened", async () => {
+      for (const setup of ["put-fails", "block-missing", "tag-fails"] as const) {
+        const dir = mkdtempSync(join(tmpdir(), "intake-stale-spool-"));
+        const { http, descriptions, tags } = liveClickup({ putOk: setup === "block-missing",
+          tagOk: (tag) => setup !== "tag-fails" || tag !== "merge-intake-stale" });
+        const tool = createCreateTicketTool(makeDeps({ http, keepConflictSpoolDir: dir }));
+        await run(tool, { ...base, summary: "separate B", details: { merged_profile_urls: [B] } }, "c1");
+        if (setup === "block-missing") descriptions.set("task_1", "## rewritten by a human, no action block");
+        const second = await run(tool, { ...base, summary: "and C too", details: { merged_profile_urls: [B, C] } }, "c2");
+        expect(second).toMatchObject({ submitted: false, reason: "merge_intake_not_updated", ticket_id: "task_1" });
+        expect(second.hint).toContain("Human Handoff");
+        if (setup === "block-missing") {
+          expect(http.put).not.toHaveBeenCalled();
+          expect(descriptions.get("task_1")).toBe("## rewritten by a human, no action block");
+        } else {
+          expect(http.put).toHaveBeenCalledTimes(2);
+          // The executor's view is unchanged: the canonical intake still names only B.
+          expect(intakeOf(descriptions.get("task_1")!).others).toEqual([B]);
+        }
+        const held = setup !== "tag-fails";
+        expect((tags.get("task_1") ?? []).includes("merge-intake-stale")).toBe(held);
+        const files = readdirSync(dir);
+        expect(files).toHaveLength(1);
+        expect(JSON.parse(readFileSync(join(dir, files[0]), "utf8")))
+          .toMatchObject({ ticket_ids: ["task_1"], intake_unwritten: true, held });
+      }
+    });
+
+    it("widens the intake when the description write lands on its retry", async () => {
+      const live = liveClickup();
+      const put = live.http.put;
+      let puts = 0;
+      live.http.put = vi.fn(async (url: string, o: any) =>
+        (++puts === 1 ? { ok: false, error: "API error", status: 429 } as any : put(url, o)));
+      const dir = mkdtempSync(join(tmpdir(), "intake-stale-spool-"));
+      const tool = createCreateTicketTool(makeDeps({ http: live.http, keepConflictSpoolDir: dir }));
+      await run(tool, { ...base, summary: "separate B", details: { merged_profile_urls: [B] } }, "c1");
+      const second = await run(tool, { ...base, summary: "and C too", details: { merged_profile_urls: [B, C] } }, "c2");
+      expect(second).toMatchObject({ submitted: true, ticket_id: "task_1", updated_existing: true });
+      expect(intakeOf(live.descriptions.get("task_1")!).others).toEqual([B, C]);
+      expect(live.tags.get("task_1") ?? []).not.toContain("merge-intake-stale");
+      expect(readdirSync(dir)).toEqual([]);
+    });
+
+    it("routes a follow-up to the ticket whose targets it names, and a target-less one to the newest", async () => {
+      const { http } = liveClickup();
+      const tool = createCreateTicketTool(makeDeps({ http }));
+      await run(tool, { ...base, summary: "separate B", details: { merged_profile_urls: [B] } }, "c1");
+      await run(tool, { ...base, summary: "separate C", details: { merged_profile_urls: [C] } }, "c2");
+      expect(await run(tool, { ...base, summary: "one more thing", details: { suspect_artist_names: ["DJ X"] } }, "c3"))
+        .toMatchObject({ ticket_id: "task_2", updated_existing: true });
+      expect(await run(tool, { ...base, summary: "B detail", details: { merged_profile_urls: [B] } }, "c4"))
+        .toMatchObject({ ticket_id: "task_1", updated_existing: true });
+      expect(vi.mocked(http.post).mock.calls.filter(([u]) => TASK_URL_RE.test(u as string))).toHaveLength(2);
+    });
+
+    it("parses a description ClickUp round-tripped (escaped underscores, inserted blank lines)", async () => {
+      const { http, descriptions } = liveClickup();
+      const tool = createCreateTicketTool(makeDeps({ http }));
+      await run(tool, { ...base, summary: "separate B", details: { merged_profile_urls: [B] } }, "c1");
+      const roundTripped = descriptions.get("task_1")!.replace(/_/g, "\\_").replace(/\n/g, "\n\n");
+      expect(() => JSON.parse(roundTripped.split("---ACTION-REQUEST---")[1].split("---END-ACTION-REQUEST---")[0]))
+        .toThrow();
+      descriptions.set("task_1", roundTripped);
+      const second = await run(tool, { ...base, summary: "and C too", details: { merged_profile_urls: [B, C] } }, "c2");
+      expect(second).toMatchObject({ ticket_id: "task_1", updated_existing: true });
+      expect(second.merge_intake_update_failed).toBeUndefined();
+      const after = descriptions.get("task_1")!;
+      expect(after.split("---ACTION-REQUEST---")[0]).toBe(roundTripped.split("---ACTION-REQUEST---")[0]);
+      const block = JSON.parse(after.split("---ACTION-REQUEST---")[1].split("---END-ACTION-REQUEST---")[0]);
+      expect(block).toMatchObject({ action_type: "unmerge-request", customer_email: "u@example.com",
+        details: { merged_profile_urls: [B], merge_intake: { keep: "prof_1", others: [B, C] } } });
+    });
+
+    describe("a request keeping something different is never unioned: both tickets are held", () => {
+      const A = "https://credits.muso.ai/profile/aaa";
+      const merge = { actionType: "profile-merge", customerEmail: "u@example.com", customerProfileId: "prof_1",
+        conversationSummary: "dup profiles" };
+      const isFollowUp = (text: string) => text.includes("---ACTION-REQUEST-UPDATE---");
+      const conflictTags = (tags: Map<string, string[]>, id: string) =>
+        (tags.get(id) ?? []).filter((t) => t.startsWith("merge-keep-conflict")).sort();
+      const spoolDir = () => mkdtempSync(join(tmpdir(), "keep-conflict-spool-"));
+      const unlimited = { check: () => ({ allowed: true }) } as unknown as RateLimiter;
+
+      it("files its own ticket, tags both merge-keep-conflict naming the sibling, and comments on each", async () => {
+        const { http, descriptions, tags, comments } = liveClickup();
+        const tool = createCreateTicketTool(makeDeps({ http }));
+        await run(tool, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+        const swapped = await run(tool, { ...merge, summary: "actually keep B",
+          details: { main_profile_url: B, duplicate_profile_urls: [A] } }, "c2");
+        expect(swapped).toMatchObject({ submitted: true, ticket_id: "task_2" });
+        expect(swapped.updated_existing).toBeUndefined();
+        expect(swapped.merge_keep_conflict_flag_failed).toBeUndefined();
+        expect(vi.mocked(http.post).mock.calls.filter(([u]) => TASK_URL_RE.test(u as string))).toHaveLength(2);
+        expect(http.put).not.toHaveBeenCalled();
+        expect(intakeOf(descriptions.get("task_1")!)).toMatchObject({ keep: A, others: [B] });
+        expect(conflictTags(tags, "task_1")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_2"]);
+        expect(conflictTags(tags, "task_2")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_1"]);
+        expect(comments.get("task_1")).toHaveLength(1);
+        expect(comments.get("task_1")![0]).toContain("https://app.clickup.com/t/task_2");
+        expect(comments.get("task_1")![0]).toContain("close the ticket you reject and remove merge-keep-conflict from the one you keep");
+        expect(comments.get("task_2")![0]).toContain("https://app.clickup.com/t/task_1");
+        expect([...comments.values()].flat().some(isFollowUp)).toBe(false);
+
+        const sameKeep = await run(tool, { ...merge, summary: "and C", details: { main_profile_url: B,
+          duplicate_profile_urls: [A, C] } }, "c3");
+        expect(sameKeep).toMatchObject({ ticket_id: "task_2", updated_existing: true });
+        expect(conflictTags(tags, "task_2")).toHaveLength(2);
+      });
+
+      it("a failed create rolls back only the hold it added, never an existing one", async () => {
+        const { http, tags } = liveClickup({ createOk: (n) => n !== 2 && n !== 3 });
+        const tool = createCreateTicketTool(makeDeps({ http }));
+        await run(tool, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+        const failed = await run(tool, { ...merge, summary: "keep B", details: { main_profile_url: B, duplicate_profile_urls: [A] } }, "c2");
+        expect(failed).toMatchObject({ submitted: false, reason: "queue_busy" });
+        expect(conflictTags(tags, "task_1")).toEqual([]);
+
+        const { http: http2, tags: tags2 } = liveClickup({ createOk: (n) => n !== 3 });
+        const tool2 = createCreateTicketTool(makeDeps({ rateLimiter: unlimited, http: http2 }));
+        await run(tool2, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+        await run(tool2, { ...merge, summary: "keep B", details: { main_profile_url: B, duplicate_profile_urls: [A] } }, "c2");
+        expect(conflictTags(tags2, "task_1")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_2"]);
+        const third = await run(tool2, { ...merge, summary: "keep C",
+          details: { main_profile_url: C, duplicate_profile_urls: [A] } }, "c3");
+        expect(third).toMatchObject({ submitted: false, reason: "queue_busy" });
+        expect(conflictTags(tags2, "task_1")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_2"]);
+        expect(conflictTags(tags2, "task_2")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_1"]);
+        expect(http2.delete).not.toHaveBeenCalled();
+      });
+
+      it("flip-back after a reconcile: a closed same-keep ticket does not hide an open conflicting one", async () => {
+        const { http, tags, closed } = liveClickup();
+        const tool = createCreateTicketTool(makeDeps({ rateLimiter: unlimited, http }));
+        await run(tool, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+        await run(tool, { ...merge, summary: "keep B", details: { main_profile_url: B, duplicate_profile_urls: [A] } }, "c2");
+        closed.add("task_1");
+        tags.set("task_2", (tags.get("task_2") ?? []).filter((t) => t !== "merge-keep-conflict"));
+        const before = vi.mocked(http.post).mock.calls.length;
+        const flipped = await run(tool, { ...merge, summary: "keep A after all",
+          details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c3");
+        expect(flipped).toMatchObject({ submitted: true, ticket_id: "task_3" });
+        expect(flipped.updated_existing).toBeUndefined();
+        expect(conflictTags(tags, "task_3")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_2"]);
+        expect(conflictTags(tags, "task_2")).toEqual(
+          ["merge-keep-conflict", "merge-keep-conflict-with:task_1", "merge-keep-conflict-with:task_3"]);
+        expect(vi.mocked(http.post).mock.calls.slice(before).some(([u]) => (u as string).includes("/task/task_1/tag/")))
+          .toBe(false);
+      });
+
+      it("a conflict ticket whose state cannot be read is still tagged, and left held if the create fails", async () => {
+        const { http, tags } = liveClickup({ getOk: (id) => id !== "task_1" });
+        const tool = createCreateTicketTool(makeDeps({ rateLimiter: unlimited, http }));
+        await run(tool, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+        const swapped = await run(tool, { ...merge, summary: "keep B", details: { main_profile_url: B, duplicate_profile_urls: [A] } }, "c2");
+        expect(swapped).toMatchObject({ submitted: true, ticket_id: "task_2" });
+        expect(conflictTags(tags, "task_1")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_2"]);
+
+        const dir = spoolDir();
+        const failing = liveClickup({ getOk: (id) => id !== "task_1", createOk: (n) => n !== 2 });
+        const tool2 = createCreateTicketTool(makeDeps({ rateLimiter: unlimited, http: failing.http,
+          keepConflictSpoolDir: dir }));
+        await run(tool2, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+        expect(await run(tool2, { ...merge, summary: "keep B", details: { main_profile_url: B, duplicate_profile_urls: [A] } }, "c2"))
+          .toMatchObject({ submitted: false, reason: "keep_conflict_unflagged", ticket_ids: ["task_1"] });
+        expect(conflictTags(failing.tags, "task_1")).toEqual(["merge-keep-conflict"]);
+        expect(failing.http.delete).not.toHaveBeenCalled();
+        const files = readdirSync(dir);
+        expect(files).toHaveLength(1);
+        expect(JSON.parse(readFileSync(join(dir, files[0]), "utf8"))).toMatchObject({ left_held: ["task_1"] });
+      });
+
+      it("two-conflict rollback: an unreadable ticket stays held and a stranded readable one is spooled with it", async () => {
+        const D = "https://credits.muso.ai/profile/ddd";
+        const dir = spoolDir();
+        let unreadable = false;
+        const { http, tags } = liveClickup({ getOk: (id) => !(unreadable && id === "task_1"), createOk: (n) => n !== 3,
+          deleteOk: false });
+        const tool = createCreateTicketTool(makeDeps({ rateLimiter: unlimited, http, keepConflictSpoolDir: dir }));
+        await run(tool, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+        await run(tool, { ...merge, summary: "keep C", details: { main_profile_url: C, duplicate_profile_urls: [D] } }, "c2");
+        unreadable = true;
+        const third = await run(tool, { ...merge, summary: "keep B",
+          details: { main_profile_url: B, duplicate_profile_urls: [A, C] } }, "c3");
+        expect(third).toMatchObject({ submitted: false, reason: "keep_conflict_unflagged" });
+        expect([...third.ticket_ids].sort()).toEqual(["task_1", "task_2"]);
+        expect(conflictTags(tags, "task_1")).toEqual(["merge-keep-conflict"]);
+        expect(conflictTags(tags, "task_2")).toEqual(["merge-keep-conflict"]);
+        const files = readdirSync(dir);
+        expect(files).toHaveLength(1);
+        const record = JSON.parse(readFileSync(join(dir, files[0]), "utf8"));
+        expect([...record.ticket_ids].sort()).toEqual(["task_1", "task_2"]);
+        expect([...record.left_held].sort()).toEqual(["task_1", "task_2"]);
+      });
+
+      it("a rollback that cannot land after a failed create is spooled (keep_conflict_unflagged)", async () => {
+        const dir = spoolDir();
+        const { http, tags } = liveClickup({ createOk: (n) => n !== 2, deleteOk: false });
+        const tool = createCreateTicketTool(makeDeps({ rateLimiter: unlimited, http, keepConflictSpoolDir: dir }));
+        await run(tool, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+        const swapped = await run(tool, { ...merge, summary: "keep B", details: { main_profile_url: B, duplicate_profile_urls: [A] } }, "c2");
+        expect(swapped).toMatchObject({ submitted: false, reason: "keep_conflict_unflagged", ticket_ids: ["task_1"] });
+        expect(conflictTags(tags, "task_1")).toEqual(["merge-keep-conflict"]);
+        const files = readdirSync(dir);
+        expect(files).toHaveLength(1);
+        const record = JSON.parse(readFileSync(join(dir, files[0]), "utf8"));
+        expect(record).toMatchObject({ ticket_ids: ["task_1"], left_held: ["task_1"] });
+      });
+
+      it("an unreadable conflict ticket that cannot be tagged files nothing (keep_conflict_unflagged)", async () => {
+        const dir = spoolDir();
+        const { http } = liveClickup({ getOk: (id) => id !== "task_1", tagOk: (tag) => tag !== "merge-keep-conflict" });
+        const tool = createCreateTicketTool(makeDeps({ http, keepConflictSpoolDir: dir }));
+        await run(tool, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+        const swapped = await run(tool, { ...merge, summary: "keep B", details: { main_profile_url: B, duplicate_profile_urls: [A] } }, "c2");
+        expect(swapped).toMatchObject({ submitted: false, reason: "keep_conflict_unflagged", ticket_ids: ["task_1"] });
+        expect(vi.mocked(http.post).mock.calls.filter(([u]) => TASK_URL_RE.test(u as string))).toHaveLength(1);
+        expect(readdirSync(dir)).toHaveLength(1);
+      });
+
+      it("an appended follow-up whose widened intake conflicts with another open ticket holds both", async () => {
+        const track = { actionType: "track-merge", customerEmail: "u@example.com", conversationSummary: "dup tracks" };
+        const { http, tags, comments } = liveClickup();
+        const tool = createCreateTicketTool(makeDeps({ http }));
+        await run(tool, { ...track, summary: "T2 into T1",
+          details: { track_merge_pairs: [{ master: "t1", duplicates: ["t2"] }] } }, "c1");
+        const k = await run(tool, { ...track, summary: "T4 into T3",
+          details: { track_merge_pairs: [{ master: "t3", duplicates: ["t4"] }] } }, "c2");
+        expect(k).toMatchObject({ submitted: true, ticket_id: "task_2" });
+        expect(conflictTags(tags, "task_2")).toEqual([]);
+        const widened = await run(tool, { ...track, summary: "also T3 into T1",
+          details: { track_merge_pairs: [{ master: "t1", duplicates: ["t2", "t3"] }] } }, "c3");
+        expect(widened).toMatchObject({ submitted: true, ticket_id: "task_1", updated_existing: true });
+        expect(widened.merge_keep_conflict_flag_failed).toBeUndefined();
+        expect(vi.mocked(http.post).mock.calls.filter(([u]) => TASK_URL_RE.test(u as string))).toHaveLength(2);
+        expect(conflictTags(tags, "task_1")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_2"]);
+        expect(conflictTags(tags, "task_2")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_1"]);
+        expect(comments.get("task_2")!.some((c) => c.includes("https://app.clickup.com/t/task_1"))).toBe(true);
+        expect(comments.get("task_1")!.some((c) => c.includes("https://app.clickup.com/t/task_2"))).toBe(true);
+      });
+
+      describe("a follow-up whose widened intake conflicts but cannot be held widens nothing", () => {
+        const track = { actionType: "track-merge", customerEmail: "u@example.com", conversationSummary: "dup tracks" };
+        const T1 = { track_merge_pairs: [{ master: "t1", duplicates: ["t2"] }] };
+        const T3 = { track_merge_pairs: [{ master: "t3", duplicates: ["t4"] }] };
+        const widen = { track_merge_pairs: [{ master: "t1", duplicates: ["t2", "t3"] }] };
+
+        async function widenWith(opts: Parameters<typeof liveClickup>[0]) {
+          const dir = spoolDir();
+          let failing = false;
+          const live = liveClickup({ ...opts,
+            tagOk: (tag, attempt, id) => !failing || !opts?.tagOk || opts.tagOk(tag, attempt, id),
+            putOk: undefined });
+          const put = vi.mocked(live.http.put).getMockImplementation()!;
+          vi.mocked(live.http.put).mockImplementation(async (url: string, o: any) =>
+            (failing && opts?.putOk === false ? { ok: false, error: "API error", status: 500 } as any : put(url, o)));
+          const tool = createCreateTicketTool(makeDeps({ http: live.http, keepConflictSpoolDir: dir,
+            sessionKey: "agent:support:intercom:direct:conv88" }));
+          await run(tool, { ...track, summary: "T2 into T1", details: T1 }, "c1");
+          await run(tool, { ...track, summary: "T4 into T3", details: T3 }, "c2");
+          const before = live.descriptions.get("task_1");
+          failing = true;
+          const result = await run(tool, { ...track, summary: "also T3 into T1", details: widen }, "c3");
+          const files = readdirSync(dir);
+          expect(files).toHaveLength(1);
+          const record = JSON.parse(readFileSync(join(dir, files[0]), "utf8"));
+          expect(result).toMatchObject({ submitted: false, reason: "keep_conflict_unflagged", action_type: "track-merge",
+            ticket_ids: ["task_1", "task_2"] });
+          expect(result.updated_existing).toBeUndefined();
+          // The executor works task_1 from its description: it still names only T2.
+          expect(live.descriptions.get("task_1")).toBe(before);
+          expect(record).toMatchObject({ ticket_ids: ["task_1", "task_2"], conversation_id: "conv88" });
+          expect(record.appended).toBeUndefined();
+          return { ...live, record };
+        }
+
+        it("no hold lands: spooled with nothing left held", async () => {
+          const { tags, comments, record } = await widenWith({ tagOk: (tag) => tag !== "merge-keep-conflict" });
+          expect(comments.get("task_1")!.some((c) => c.includes("---ACTION-REQUEST-UPDATE---"))).toBe(true);
+          expect(conflictTags(tags, "task_1").includes("merge-keep-conflict")).toBe(false);
+          expect(conflictTags(tags, "task_2").includes("merge-keep-conflict")).toBe(false);
+          expect(record.left_held).toBeUndefined();
+        });
+
+        it("a one-sided hold: the sibling that was tagged is spooled as left held", async () => {
+          const { tags, record } = await widenWith({ tagOk: (tag, _attempt, id) => id !== "task_1" });
+          expect(conflictTags(tags, "task_1")).toEqual([]);
+          expect(conflictTags(tags, "task_2")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_1"]);
+          expect(record.left_held).toEqual(["task_2"]);
+        });
+
+        it("both held but the intake cannot be written: both are spooled as left held", async () => {
+          const { tags, record } = await widenWith({ putOk: false });
+          expect(conflictTags(tags, "task_1")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_2"]);
+          expect(conflictTags(tags, "task_2")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_1"]);
+          expect(record.left_held).toEqual(["task_1", "task_2"]);
+        });
+      });
+
+      it("a pre-tag whose rollback fails after a later tag fails is spooled as left held", async () => {
+        const D = "https://credits.muso.ai/profile/ddd";
+        const dir = spoolDir();
+        let failing = false;
+        let first: string | undefined;
+        // The first conflict's pre-tag lands; the second one's never does.
+        const { http, tags } = liveClickup({ deleteOk: false, tagOk: (tag, _attempt, id) => {
+          if (!failing || tag !== "merge-keep-conflict") return true;
+          first ??= id;
+          return id === first;
+        } });
+        const tool = createCreateTicketTool(makeDeps({ rateLimiter: unlimited, http, keepConflictSpoolDir: dir }));
+        await run(tool, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+        await run(tool, { ...merge, summary: "keep C", details: { main_profile_url: C, duplicate_profile_urls: [D] } }, "c2");
+        failing = true;
+        const third = await run(tool, { ...merge, summary: "keep B",
+          details: { main_profile_url: B, duplicate_profile_urls: [A, C] } }, "c3");
+        expect(third).toMatchObject({ submitted: false, reason: "keep_conflict_unflagged" });
+        expect(vi.mocked(http.post).mock.calls.filter(([u]) => TASK_URL_RE.test(u as string))).toHaveLength(2);
+        const other = first === "task_1" ? "task_2" : "task_1";
+        expect(conflictTags(tags, first!)).toEqual(["merge-keep-conflict"]);
+        expect(conflictTags(tags, other)).toEqual([]);
+        const files = readdirSync(dir);
+        expect(files).toHaveLength(1);
+        const record = JSON.parse(readFileSync(join(dir, files[0]), "utf8"));
+        expect([...record.ticket_ids].sort()).toEqual(["task_1", "task_2"]);
+        expect(record.left_held).toEqual([first]);
+      });
+
+      it("retries a failed tag write once and still holds the pair", async () => {
+        const { http, tags } = liveClickup({ tagOk: (_tag, attempt) => attempt > 1 });
+        const tool = createCreateTicketTool(makeDeps({ http }));
+        await run(tool, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+        const swapped = await run(tool, { ...merge, summary: "keep B", details: { main_profile_url: B, duplicate_profile_urls: [A] } }, "c2");
+        expect(swapped).toMatchObject({ submitted: true, ticket_id: "task_2" });
+        expect(swapped.merge_keep_conflict_flag_failed).toBeUndefined();
+        expect(conflictTags(tags, "task_1")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_2"]);
+      });
+
+      it("files nothing when the open ticket cannot be tagged twice, and spools one record for #cs_priority", async () => {
+        const dir = spoolDir();
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+          const { http, tags } = liveClickup({ tagOk: (tag) => tag !== "merge-keep-conflict" });
+          const tool = createCreateTicketTool(makeDeps({ http, keepConflictSpoolDir: dir,
+            sessionKey: "agent:support:intercom:direct:conv77" }));
+          await run(tool, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+          const swapped = await run(tool, { ...merge, summary: "keep C",
+            details: { main_profile_url: C, duplicate_profile_urls: [A] } }, "c2");
+          expect(swapped).toMatchObject({ submitted: false, reason: "keep_conflict_unflagged",
+            action_type: "profile-merge", ticket_ids: ["task_1"] });
+          expect(vi.mocked(http.post).mock.calls.filter(([u]) => TASK_URL_RE.test(u as string))).toHaveLength(1);
+          expect(vi.mocked(http.post).mock.calls.filter(([u]) => (u as string).endsWith("/tag/merge-keep-conflict")))
+            .toHaveLength(2);
+          expect(conflictTags(tags, "task_1")).toEqual([]);
+          const files = readdirSync(dir);
+          expect(files).toHaveLength(1);
+          const record = JSON.parse(readFileSync(join(dir, files[0]), "utf8"));
+          expect(record).toMatchObject({ ticket_ids: ["task_1"], conversation_id: "conv77", action_type: "profile-merge" });
+          expect(JSON.stringify(record)).not.toContain("keep C");
+          expect(errors).not.toHaveBeenCalled();
+        } finally {
+          errors.mockRestore();
+        }
+      });
+
+      it("logs one loud line when the spool cannot be written, and still files nothing", async () => {
+        const blocker = join(spoolDir(), "a-file");
+        writeFileSync(blocker, "x");
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+          const { http } = liveClickup({ tagOk: (tag) => tag !== "merge-keep-conflict" });
+          const tool = createCreateTicketTool(makeDeps({ http, keepConflictSpoolDir: join(blocker, "spool") }));
+          await run(tool, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+          const swapped = await run(tool, { ...merge, summary: "keep C",
+            details: { main_profile_url: C, duplicate_profile_urls: [A] } }, "c2");
+          expect(swapped).toMatchObject({ submitted: false, reason: "keep_conflict_unflagged" });
+          expect(errors).toHaveBeenCalledTimes(1);
+          expect(String(errors.mock.calls[0][0])).toContain("could NOT be held in ClickUp NOR spooled");
+        } finally {
+          errors.mockRestore();
+        }
+      });
+
+      it("reports a sibling-tag failure loudly while both tickets stay held", async () => {
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+          const { http, tags } = liveClickup({ tagOk: (tag) => !tag.startsWith("merge-keep-conflict-with:") });
+          const tool = createCreateTicketTool(makeDeps({ http }));
+          await run(tool, { ...merge, summary: "keep A", details: { main_profile_url: A, duplicate_profile_urls: [B] } }, "c1");
+          const swapped = await run(tool, { ...merge, summary: "keep C",
+            details: { main_profile_url: C, duplicate_profile_urls: [A] } }, "c2");
+          expect(swapped).toMatchObject({ submitted: true, ticket_id: "task_2", merge_keep_conflict_flag_failed: true });
+          expect(conflictTags(tags, "task_1")).toEqual(["merge-keep-conflict"]);
+          expect(conflictTags(tags, "task_2")).toEqual(["merge-keep-conflict", "merge-keep-conflict-with:task_1"]);
+          expect(errors).toHaveBeenCalledTimes(1);
+          expect(String(errors.mock.calls[0][0])).toContain("pairing incomplete");
+        } finally {
+          errors.mockRestore();
+        }
+      });
+
+      it("track-merge compares every pair: a reversed second pair is held, a consistent new pair is unioned", async () => {
+        const track = { actionType: "track-merge", customerEmail: "u@example.com", conversationSummary: "dup tracks" };
+        const pairs = (...ps: Array<[string, string]>) => ({ track_merge_pairs: ps.map(([master, dup]) => ({ master, duplicates: [dup] })) });
+        const { http, descriptions, tags } = liveClickup();
+        const tool = createCreateTicketTool(makeDeps({ http }));
+        await run(tool, { ...track, summary: "T1<-T2, T3<-T4", details: pairs(["t1", "t2"], ["t3", "t4"]) }, "c1");
+        const reversed = await run(tool, { ...track, summary: "keep T4 instead",
+          details: pairs(["t1", "t2"], ["t4", "t3"]) }, "c2");
+        expect(reversed).toMatchObject({ submitted: true, ticket_id: "task_2" });
+        expect(reversed.updated_existing).toBeUndefined();
+        expect(conflictTags(tags, "task_1")).toContain("merge-keep-conflict");
+        expect(conflictTags(tags, "task_2")).toContain("merge-keep-conflict");
+        expect(intakeOf(descriptions.get("task_1")!).pairs).toEqual([{ keep: "t1", others: ["t2"] }, { keep: "t3", others: ["t4"] }]);
+
+        const consistent = await run(tool, { ...track, summary: "T3<-T5 too", details: pairs(["t3", "t5"]) }, "c3");
+        expect(consistent).toMatchObject({ ticket_id: "task_1", updated_existing: true });
+        expect(intakeOf(descriptions.get("task_1")!).pairs)
+          .toEqual([{ keep: "t1", others: ["t2"] }, { keep: "t3", others: ["t4", "t5"] }]);
+      });
+    });
   });
 
   describe("rights_holder cross-conversation dedupe", () => {

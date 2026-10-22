@@ -357,3 +357,135 @@ PYEOF
   [ "$status" -eq 0 ]
   [ "$output" = "ok" ]
 }
+
+@test "merge-outcome tagged ticket: deferred only when the approved merge-outcome-notify has told or will tell the customer" {
+  script=$(mktemp)
+  state="$BATS_TEST_TMPDIR/merge-outcome-state.json"
+  cat > "$script" <<PYEOF
+import sys, types, json, os, datetime as dt
+os.environ['MERGE_OUTCOME_STATE'] = '$state'
+from importlib import util
+spec = util.spec_from_file_location('n', '$NOTIFY')
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+calls = []
+def fake_http(method, url, headers, body=None, timeout=30):
+    calls.append(url)
+    return 200, {}
+mod.http = fake_http
+tags = {'v': []}
+mod.get_ticket = lambda tid, key: {
+    'id': tid,
+    'tags': [{'name': t} for t in ['hydra-action-request', 'action:profile-merge'] + tags['v']],
+    'description': '''**Conversation:** https://app.intercom.com/a/inbox/x/inbox/conversation/900
+---ACTION-REQUEST---
+{"customer_email": "x@y.com", "customer_profile_id": "abc"}
+---END-ACTION-REQUEST---''',
+    'date_updated': '1716000000000',
+}
+n = {'i': 0}
+def conv(email, tok):
+    n['i'] += 1
+    return {'id': 'CONV-%d' % n['i'], 'updated_at': 1}
+mod.find_intercom_conv = conv
+mod.check_admin_replied_since = lambda conv_id, merge_at, tok: False
+mod.comment_and_close_ticket = lambda *a, **k: calls.append('closed')
+
+args = types.SimpleNamespace(apply=True)
+env = {'CLICKUP_API_KEY': 'k', 'MUSOAI_INTERCOM_TOKEN': 't', 'ADMIN_ID': mod.CAROLINE_ADMIN_ID}
+day = lambda ago: (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=ago)).strftime('%Y-%m-%d')
+
+def legacy_sends(approved, ticket_tags, tid=None):
+    calls.clear()
+    tags['v'] = ticket_tags
+    mod._merge_outcome_notify().MERGE_OUTCOME_COPY_APPROVED = approved
+    mod.process(tid or 'T%d' % n['i'], args, env)
+    sent = bool([c for c in calls if c.endswith('/reply')]) and 'closed' in calls
+    assert sent or calls == [], calls
+    return sent
+
+fresh = ['merge-outcome:merged', 'merge-outcome-at:' + day(1)]
+assert legacy_sends(False, fresh)
+assert not legacy_sends(True, fresh)
+assert not legacy_sends(True, ['merge-outcome:merged', 'merge-outcome-notified'])
+assert legacy_sends(True, ['merge-outcome:merged'])
+assert legacy_sends(True, ['merge-outcome:merged', 'merge-outcome-at:' + day(8)])
+assert legacy_sends(True, ['merge-outcome:merged', 'merge-outcome-at:not-a-date'])
+assert legacy_sends(True, ['merge-outcome:merged', 'merge-outcome-at:' + day(1), 'merge-outcome-at:' + day(2)])
+assert legacy_sends(True, fresh + ['merge-outcome-notifier-skipped'])
+open('$state', 'w').write(json.dumps({'tickets': {'SEEDED-1': 'seeded', 'SENT-1': 'sent'}}))
+assert legacy_sends(True, fresh, 'SEEDED-1')
+assert not legacy_sends(True, ['merge-outcome:merged', 'merge-outcome-at:' + day(9)], 'SENT-1')
+assert not legacy_sends(True, fresh, 'OTHER-1')
+# An unrelated merge on the same profile routes the ticket here, but THIS request was not merged:
+# a needs-evidence, not-merged or ambiguous outcome never gets 'merge complete', fresh, stale,
+# undated, approved or not.
+for approved in (True, False):
+    for outcome in (['merge-outcome:not-merged'], ['merge-outcome:needs-evidence'],
+                    ['merge-outcome:merged', 'merge-outcome:not-merged']):
+        for at in ([], ['merge-outcome-at:' + day(8)], ['merge-outcome-at:' + day(1)]):
+            assert not legacy_sends(approved, outcome + at + ['merge-outcome-notifier-skipped']), (approved, outcome, at)
+            assert not legacy_sends(approved, outcome + at), (approved, outcome, at)
+print('ok')
+PYEOF
+  run python3 "$script"
+  rm -f "$script"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx "ok"
+}
+
+@test "while merge-outcome-notify is unapproved, posting on a merge-outcome tagged ticket also adds merge-outcome-notified (best effort); untagged tickets get no such tag" {
+  script=$(mktemp)
+  cat > "$script" <<PYEOF
+import types
+from importlib import util
+spec = util.spec_from_file_location('n', '$NOTIFY')
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+calls = []
+fail_tag = {'on': False}
+def fake_http(method, url, headers, body=None, timeout=30):
+    calls.append((method, url))
+    if '/tag/merge-outcome-notified' in url and fail_tag['on']:
+        return 500, {'err': 'boom'}
+    return 200, {}
+mod.http = fake_http
+def ticket(tags):
+    return lambda tid, key: {
+        'tags': [{'name': t} for t in tags],
+        'description': '''---ACTION-REQUEST---
+{"customer_email": "x@y.com", "customer_profile_id": "abc"}
+---END-ACTION-REQUEST---''',
+        'date_updated': '1716000000000',
+    }
+n = {'i': 0}
+def conv(email, tok):
+    n['i'] += 1
+    return {'id': 'CONV-%d' % n['i'], 'updated_at': 1}
+mod.find_intercom_conv = conv
+mod.check_admin_replied_since = lambda conv_id, merge_at, tok: False
+args = types.SimpleNamespace(apply=True)
+env = {'CLICKUP_API_KEY': 'k', 'MUSOAI_INTERCOM_TOKEN': 't', 'ADMIN_ID': mod.CAROLINE_ADMIN_ID}
+mod._merge_outcome_notify().MERGE_OUTCOME_COPY_APPROVED = False
+tagged = lambda: [u for m, u in calls if u.endswith('/task/T%s/tag/merge-outcome-notified' % n['t'])]
+replied = lambda: [u for m, u in calls if u.endswith('/reply')]
+resolved = lambda: [u for m, u in calls if m == 'PUT']
+
+n['t'] = '1'; mod.get_ticket = ticket(['merge-outcome:merged'])
+mod.process('T1', args, env)
+assert len(replied()) == 1 and len(tagged()) == 1 and len(resolved()) == 1, calls
+
+calls.clear(); n['t'] = '2'; fail_tag['on'] = True
+mod.process('T2', args, env)
+assert len(replied()) == 1 and len(tagged()) == 1 and len(resolved()) == 1, calls
+
+calls.clear(); n['t'] = '3'; fail_tag['on'] = False; mod.get_ticket = ticket([])
+mod.process('T3', args, env)
+assert len(replied()) == 1 and not [u for m, u in calls if 'merge-outcome-notified' in u] and len(resolved()) == 1, calls
+print('ok')
+PYEOF
+  run python3 "$script"
+  rm -f "$script"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx "ok"
+}

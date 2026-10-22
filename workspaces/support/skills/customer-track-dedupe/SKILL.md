@@ -71,4 +71,8 @@ For a single merge you may instead use the flat shape
 - Confirm you've **filed the request for the team** to review and action. Do **not** say
   "done" / "merged" – you didn't merge anything.
 - Set **no timeline** ("the team will take it from here").
+- `create_ticket` adds `details.merge_intake` (the track pairs as given) and a
+  `merge-kind:track-merge` tag for the executor; you don't write those.
+- A follow-up that reverses or moves a pair (a different track to keep) is filed separately
+  and both tickets are tagged `merge-keep-conflict`: A merge ticket tagged `merge-keep-conflict`, or whose OPEN sibling (named by a `merge-keep-conflict-with:<id>` tag) still is, is held: neither ticket of the pair is worked or messaged (by the executor or any sweep). A human reconciles the two with the customer, closes the ticket they reject and removes `merge-keep-conflict` from the one they keep; a closed sibling never holds.
 - Never echo raw internal ids; keep it to the track names the customer used.

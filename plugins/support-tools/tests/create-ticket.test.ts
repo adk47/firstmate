@@ -40,7 +40,7 @@ describe("createCreateTicketTool", () => {
     const fields = body.custom_fields as { id: string; value: string }[];
     expect(fields).toContainEqual({ id: "field_uuid_1", value: "prof_123" });
     expect(body.priority).toBe(2);
-    expect(body.tags).toEqual(["hydra-action-request", "tier-2", "action:profile-merge", "team:catalog"]);
+    expect(body.tags).toEqual(["hydra-action-request", "tier-2", "action:profile-merge", "team:catalog", "merge-kind:profile-merge"]);
   });
 
   it("marks the ticket-success signal (for the intercom handoff-claim guard) on a fresh successful file", async () => {
@@ -166,7 +166,7 @@ describe("createCreateTicketTool", () => {
     });
     const body = vi.mocked(mockClient.post).mock.calls[0][1].body as Record<string, unknown>;
     expect(body.priority).toBe(2);
-    expect(body.tags).toEqual(["hydra-action-request", "tier-2", "action:track-merge", "team:catalog"]);
+    expect(body.tags).toEqual(["hydra-action-request", "tier-2", "action:track-merge", "team:catalog", "merge-kind:track-merge"]);
     expect(body.assignees).toBeUndefined();
     const parsed = JSON.parse((result.content[0] as { text: string }).text);
     expect(parsed).toEqual({ submitted: true, ticket_id: "task_tm1", sla: "5 business days", action_type: "track-merge", tier: 2 });

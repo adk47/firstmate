@@ -486,6 +486,7 @@ describe("dedupe_check tool — fail-closed orchestration", () => {
     const tool = createDedupeCheckTool(makeDeps({ adminClient }));
     const out = await run(tool, { survivorProfileId: "s", duplicateProfileIds: ["d"], requesterEmail: "owner@example.com" });
     expect(out.verified).toBe(true);
+    expect(out.survivor_profile_id).toBe("s");
     expect(out.duplicates[0].claim_state).toBe("unclaimed");
     expect(JSON.stringify(out)).not.toMatch(/merge.?approved|safe.?to.?merge|high.?confidence/i);
   });

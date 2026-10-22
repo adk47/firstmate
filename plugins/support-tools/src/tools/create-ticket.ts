@@ -1,8 +1,11 @@
+import { randomUUID } from "node:crypto";
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
 import type { HttpClient } from "../http.js";
 import type { RateLimiter } from "../rate-limiter.js";
-import type { SessionTicketRegistry } from "../session-ticket-registry.js";
+import type { MergeTicketEntry, SessionTicketRegistry } from "../session-ticket-registry.js";
 import {
   GROWTH_ACTIONS,
   TIER_SLAS,
@@ -19,9 +22,14 @@ import {
   musoProfileUrl,
   intercomDeeplink,
 } from "./ticket-format.js";
-import { deriveConvId } from "./dedupe-check.js";
+import { deriveConvId, type DedupeVerdictStore } from "./dedupe-check.js";
 import { markTicketFiled, markTicketId } from "../ticket-success-signal.js";
 import { validateProdigiAddress } from "../order-address.js";
+import {
+  INTAKE_STALE_TAG, KEEP_CONFLICT_TAG, KEEP_CONFLICT_WITH, MERGE_KINDS, mergeIntakeOf, mergeIntakesOverlap, mergeTargets,
+  sameMergeKeep, unionMergeIntake,
+  withActionRequestIntake, withMergeIntake, type MergeIntake,
+} from "./merge-intake.js";
 
 const Parameters = Type.Object({
   actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, credit-verify, profile-claim, support-general, analytics-followup, order-fulfillment, profile-merge, track-merge, unmerge-request, bulk-credit-change, profile-update, billing-issue, subscription-refund, data-deletion, dispute, data-export" }),
@@ -39,9 +47,13 @@ type Params = Static<typeof Parameters>;
 // a typo on one branch doesn't slip through; consumers can rely on `reason`
 // to differentiate failure modes.
 export type CreateTicketResult =
-  | { submitted: true; ticket_id: string; sla: string; action_type: string; tier: number }
-  | { submitted: true; updated_existing: true; ticket_id: string; sla: string; action_type: string; tier: number }
+  | { submitted: true; ticket_id: string; sla: string; action_type: string; tier: number;
+      merge_keep_conflict_flag_failed?: true }
+  | { submitted: true; updated_existing: true; ticket_id: string; sla: string; action_type: string; tier: number;
+      merge_keep_conflict_flag_failed?: true }
   | { submitted: false; reason: "rate_limited" }
+  | { submitted: false; reason: "merge_intake_not_updated"; action_type: string; ticket_id: string; hint: string }
+  | { submitted: false; reason: "keep_conflict_unflagged"; action_type: string; ticket_ids: string[]; hint: string }
   | { submitted: false; reason: "queue_busy" }
   | {
       submitted: false;
@@ -59,6 +71,28 @@ export type CreateTicketResult =
 
 function ticketResult(r: CreateTicketResult): AgentToolResult<unknown> {
   return textResult(JSON.stringify(r));
+}
+
+// The open merge ticket a new request of the same kind belongs to: one that keeps the same
+// profile / track and shares a ref with it (a request naming no targets: the newest with the
+// same keep). Overlapping tickets that keep something else are a DIFFERENT request.
+function matchMergeTicket(entries: Array<MergeTicketEntry<MergeIntake>>, intake: MergeIntake):
+    { hit: MergeTicketEntry<MergeIntake> | null; conflicts: Array<MergeTicketEntry<MergeIntake>> } {
+  if (mergeTargets(intake).length === 0) {
+    return { hit: entries.find((e) => sameMergeKeep(e.payload, intake)) ?? null, conflicts: [] };
+  }
+  const overlapping = entries.filter((e) => mergeIntakesOverlap(e.payload, intake));
+  return { hit: overlapping.find((e) => sameMergeKeep(e.payload, intake)) ?? null,
+           conflicts: overlapping.filter((e) => !sameMergeKeep(e.payload, intake)) };
+}
+
+function keepConflictComment(actionType: string, siblingId: string): string {
+  const what = actionType === "track-merge" ? "tracks" : "profiles";
+  return `**Merge keep conflict** (${actionType}): this conversation also has ticket `
+    + `https://app.clickup.com/t/${siblingId}, a merge request that keeps different ${what}. `
+    + `Both tickets are held (tag ${KEEP_CONFLICT_TAG}): do not work either one until a human `
+    + `reconciles them with the customer: close the ticket you reject and remove `
+    + `${KEEP_CONFLICT_TAG} from the one you keep.`;
 }
 
 // Tier-2 actions that MUTATE a specific profile and are genuinely unactionable
@@ -146,6 +180,9 @@ interface ToolDeps {
   // existing callers/tests that pass only sessionId still typecheck.
   sessionKey?: string;
   profileMergeAssigneeId?: number;
+  // dedupe_check's own verdicts (shared instance from index.ts): the only source of
+  // merge_intake.requester_owns. Absent = every side "unknown".
+  verdictStore?: DedupeVerdictStore;
   // Shared across sessions (instantiated once in index.ts, like rateLimiter)
   // so repeat calls within a conversation find the earlier ticket. Required:
   // a per-tool-instance registry would silently defeat the dedupe.
@@ -159,6 +196,9 @@ interface ToolDeps {
   intercomWorkspaceId?: string;
   clickupMusoUrlFieldId?: string;
   clickupTeamFieldId?: string;
+  // Where a keep conflict that could not be flagged in ClickUp is spooled for
+  // scripts/merge-outcome-notify.py (main) to post to #cs_priority. Unset = no spool.
+  keepConflictSpoolDir?: string;
 }
 
 interface ClickupTaskSummary {
@@ -190,7 +230,8 @@ function isOpenStatus(s?: { status?: string; type?: string }): boolean {
 
 export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
   const { http, rateLimiter, clickupApiKey, clickupListId, clickupProfileIdFieldId, clickupUserEmailFieldId, sessionId, sessionKey, profileMergeAssigneeId } = deps;
-  const { clickupIntercomLinkFieldId, intercomWorkspaceId, clickupMusoUrlFieldId, clickupTeamFieldId, sessionTickets } = deps;
+  const { clickupIntercomLinkFieldId, intercomWorkspaceId, clickupMusoUrlFieldId, clickupTeamFieldId, sessionTickets, verdictStore,
+    keepConflictSpoolDir } = deps;
 
   // Restart-proof fallback for the dedupe. Deliberately WIDER than the
   // session registry: it matches any open <7d ticket for the same customer
@@ -252,9 +293,117 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
     return typeof value === "string" && value.trim().toLowerCase() === customerEmail.toLowerCase();
   }
 
+  // One ClickUp write, retried once. False when neither attempt landed.
+  async function postTwice(url: string, body: unknown): Promise<boolean> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await http.post(url, { headers: { Authorization: clickupApiKey }, body }).catch(() => null);
+      if (res?.ok) return true;
+    }
+    return false;
+  }
+  const tagUrl = (id: string, name: string) =>
+    `https://api.clickup.com/api/v2/task/${id}/tag/${encodeURIComponent(name)}`;
+
+  async function untagTwice(id: string, name: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await http.delete?.(tagUrl(id, name), { headers: { Authorization: clickupApiKey } }).catch(() => null);
+      if (res?.ok) return true;
+    }
+    return false;
+  }
+
+  // A keep conflict ClickUp could not hold: one record (ids only, no customer text) for
+  // scripts/merge-outcome-notify.py on main to post to #cs_priority.
+  async function spoolUnflagged(record: Record<string, unknown>): Promise<boolean> {
+    if (!keepConflictSpoolDir) return false;
+    try {
+      await mkdir(keepConflictSpoolDir, { recursive: true });
+      const name = `${Date.now()}-${randomUUID()}`;
+      const tmp = join(keepConflictSpoolDir, `.${name}.tmp`);
+      await writeFile(tmp, JSON.stringify(record));
+      await rename(tmp, join(keepConflictSpoolDir, `${name}.json`));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Widen an open merge ticket's merge_intake in its LIVE description (only the
+  // ---ACTION-REQUEST--- block changes), read and written again once. False when it could not be written.
+  async function writeMergeIntake(ticketId: string, intake: MergeIntake): Promise<boolean> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const live = await http.get<{ markdown_description?: unknown }>(
+        `https://api.clickup.com/api/v2/task/${ticketId}?include_markdown_description=true`,
+        { headers: { Authorization: clickupApiKey } },
+      ).catch(() => null);
+      const markdown = live?.ok ? live.data?.markdown_description : undefined;
+      const next = typeof markdown === "string" ? withActionRequestIntake(markdown, intake) : null;
+      if (!next) continue;
+      const put = await http.put(
+        `https://api.clickup.com/api/v2/task/${ticketId}`,
+        { headers: { Authorization: clickupApiKey }, body: { markdown_content: next } },
+      ).catch(() => null);
+      if (put?.ok) return true;
+    }
+    return false;
+  }
+
   // Registry entries can outlive the ticket they point at (ops closes it
   // mid-conversation). Re-check before appending; fail-open on API errors so
   // a transient 5xx doesn't spawn a duplicate.
+  // An overlapping ticket that keeps something different, as ClickUp has it now: open, and
+  // already held by merge-keep-conflict (null = unreadable: open; tagged, but never untagged).
+  async function conflictState(ticketId: string): Promise<{ open: boolean; held: boolean | null; tags: string[] }> {
+    try {
+      const res = await http.get<ClickupTaskSummary>(
+        `https://api.clickup.com/api/v2/task/${ticketId}`,
+        { headers: { Authorization: clickupApiKey } },
+      );
+      if (!res?.ok || !res.data) return { open: true, held: null, tags: [] };
+      const names = (res.data.tags ?? []).map((t) => String(t.name ?? "").toLowerCase());
+      return { open: isOpenStatus(res.data.status), held: names.includes(KEEP_CONFLICT_TAG), tags: names };
+    } catch {
+      return { open: true, held: null, tags: [] };
+    }
+  }
+
+  // Hold two open tickets as a keep-conflict pair: each tagged merge-keep-conflict and
+  // merge-keep-conflict-with:<other>, and a comment on each naming the other (each write
+  // retried once). held: both merge-keep-conflict tags landed; complete: every write did;
+  // tagged: the tickets whose merge-keep-conflict tag landed.
+  async function holdPair(actionType: string, a: string, b: string):
+    Promise<{ held: boolean; complete: boolean; tagged: string[] }> {
+    const comment = (on: string, sibling: string) => postTwice(`https://api.clickup.com/api/v2/task/${on}/comment`,
+      { comment_text: keepConflictComment(actionType, sibling), notify_all: false });
+    const ok = await Promise.all([
+      postTwice(tagUrl(a, KEEP_CONFLICT_TAG), {}), postTwice(tagUrl(b, KEEP_CONFLICT_TAG), {}),
+      postTwice(tagUrl(a, `${KEEP_CONFLICT_WITH}${b}`), {}), postTwice(tagUrl(b, `${KEEP_CONFLICT_WITH}${a}`), {}),
+      comment(a, b), comment(b, a),
+    ]);
+    return { held: ok[0] && ok[1], complete: !ok.includes(false), tagged: [a, b].filter((_, i) => ok[i]) };
+  }
+
+  // A keep conflict that could not be held in ClickUp: nothing was filed. Spool it for
+  // #cs_priority (main notifier) and tell Caroline to hand off. leftHeld: tickets this call
+  // tagged merge-keep-conflict and did not (or could not) release, left held for a human to check.
+  async function unflagged(actionType: string, ticketIds: string[], convId: string | null | undefined,
+                           leftHeld: string[] = []): Promise<AgentToolResult<unknown>> {
+    const spooled = await spoolUnflagged({ ticket_ids: ticketIds, conversation_id: convId ?? null,
+      action_type: actionType, ...(leftHeld.length ? { left_held: leftHeld } : {}),
+      at: new Date().toISOString() });
+    if (!spooled) {
+      console.error(`[support-tools] ALERT create_ticket keep conflict with ${ticketIds.join(", ")} `
+        + `(conversation ${convId ?? "?"}) could NOT be held in ClickUp NOR spooled for #cs_priority; `
+        + "the merge request was not filed" + (leftHeld.length ? ` and ${leftHeld.join(", ")} stay held` : ""));
+    }
+    return ticketResult({ submitted: false, reason: "keep_conflict_unflagged", action_type: actionType,
+      ticket_ids: ticketIds,
+      hint: "This merge request keeps a different profile or track than an open ticket in this conversation, "
+        + "and it could not be held for review, so it was NOT filed."
+        + " Do not tell the customer the team was alerted and give no timing; hand the conversation to a human "
+        + "through the Human Handoff route." });
+  }
+
   async function isTicketStillOpen(ticketId: string): Promise<boolean> {
     try {
       const res = await http.get<ClickupTaskSummary>(
@@ -349,6 +498,28 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         }
       }
 
+      // Unmerge capture gate (Fable ops-takeover §4 step 1): the executor reverses a
+      // `profile_merges` row, so it needs what should come back out (the kept side is
+      // customerProfileId, required by PROFILE_ANCHOR_REQUIRED below).
+      if (params.actionType === "unmerge-request") {
+        const d = details ?? {};
+        // A customer asking to undo a merge names the profile to separate; the
+        // credit-removal skill's wrong-merge detection (capability B) names the suspect
+        // artist(s) instead, and the executor finds the merge row from profile_merges.
+        const merged = (Array.isArray(d.merged_profile_urls) ? d.merged_profile_urls : [d.merged_profile_url])
+          .some((u) => typeof u === "string" && u.trim().length > 0)
+          || (Array.isArray(d.suspect_artist_names) && d.suspect_artist_names.some((n) => typeof n === "string" && n.trim()));
+        if (!merged) {
+          return ticketResult({
+            submitted: false,
+            reason: "capture_incomplete",
+            action_type: "unmerge-request",
+            missing: ["details.merged_profile_urls[] (or details.suspect_artist_names[])"],
+            hint: "Unmerge tickets need what should be separated out again: each profile that was merged into the customer's profile (name or URL as they gave it), or for a suspected wrong merge the suspect artist name(s). Ask for it before retrying.",
+          });
+        }
+      }
+
       // Profile-mutating tier-2 actions can't be actioned without knowing WHICH
       // profile. Require customerProfileId for them (light gate — tier-1 stays
       // ungated so Caroline can always file). Runs before the rate-limit check
@@ -389,6 +560,11 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         };
       }
 
+      // Normalized merge intake for the executor (ids, server-verified ownership per
+      // side, the customer's own claim); replaces any agent-supplied merge_intake.
+      details = withMergeIntake(params.actionType, params.customerProfileId, details,
+        (keep, others) => verdictStore?.get(deriveConvId(sessionKey), keep, others) ?? null);
+
       const contentParams = {
         summary: params.summary, actionType: params.actionType, tier,
         customerEmail: customerEmail, customerProfileId: params.customerProfileId,
@@ -398,15 +574,29 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       // --- Dedupe: same conversation + same action type → append, don't re-file.
       // (Live 2026-06-10 audit: customers adding one detail produced up to 5
       // duplicate tickets per conversation — see jurakez1/jenarobinson10.)
-      let existingId = sessionTickets.get(sessionId, params.actionType, customerEmail);
+      // Merge kinds match per ticket: a request keeping the same profile / track and sharing a
+      // ref with an open ticket appends to it and widens that ticket's merge_intake to the
+      // union (the executor works from the description); any other files its own ticket, and
+      // one that overlaps a ticket keeping something else is held with it (merge-keep-conflict).
+      const mergeIntake = MERGE_KINDS.has(params.actionType) ? mergeIntakeOf(details) : null;
+      const mergeMatch = mergeIntake
+        ? matchMergeTicket(sessionTickets.merges<MergeIntake>(sessionId, params.actionType, customerEmail),
+                           mergeIntake)
+        : null;
+      let mergeHit = mergeMatch?.hit ?? null;
+      let existingId = mergeIntake ? mergeHit?.ticketId ?? null
+        : sessionTickets.get(sessionId, params.actionType, customerEmail);
       if (existingId && !(await isTicketStillOpen(existingId))) {
-        sessionTickets.invalidate(sessionId, params.actionType, customerEmail);
+        if (mergeIntake) sessionTickets.invalidateMerge(sessionId, params.actionType, customerEmail, existingId);
+        else sessionTickets.invalidate(sessionId, params.actionType, customerEmail);
         existingId = null;
+        mergeHit = null;
       }
-      // Cross-conversation fallback. Skipped for profile-merge AND track-merge:
-      // the merged-ticket sweep auto-closes those keyed on the ORIGINAL
-      // description's ids, so appending a DIFFERENT merge request (a distinct
-      // track/profile set) cross-conversation could be closed unexecuted. Also
+      // Cross-conversation fallback. Skipped for every merge kind (profile-merge,
+      // unmerge-request, track-merge): those are worked and closed keyed on the
+      // ORIGINAL description's ids (merge_intake), so appending a DIFFERENT merge
+      // request (a distinct track/profile set) cross-conversation could be closed
+      // unexecuted. Also
       // skipped for rights_holder: the lookup keys on (actionType, email) only,
       // never on content, so a label/publisher/PRO/law firm mailing about a
       // SECOND matter would be appended to the first matter's open record and
@@ -414,7 +604,7 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       // opens its own record (in-session follow-ups above still append). The
       // lookup GET is metered in its own bucket so a retry-looping session can't
       // hammer ClickUp search.
-      if (!existingId && params.actionType !== "profile-merge" && params.actionType !== "track-merge"
+      if (!existingId && !MERGE_KINDS.has(params.actionType)
           && params.details?.escalation_reason !== "rights_holder"
           && isUsableDedupeEmail(customerEmail)
           && rateLimiter.check(sessionId, "create_ticket_lookup", 60, 10).allowed) {
@@ -434,7 +624,60 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
           },
         );
         if (comment?.ok) {
-          sessionTickets.record(sessionId, params.actionType, customerEmail, existingId);
+          let appendConflictFlagFailed = false;
+          if (mergeIntake && mergeHit) {
+            const intake = unionMergeIntake(mergeHit.payload, mergeIntake);
+            // The executor works the ticket from its description's merge_intake, so a follow-up
+            // only counts as appended once that intake names the new targets too. Every keep
+            // conflict the widened intake creates is held BEFORE the intake is widened, so a
+            // widened ticket that is not held never exists.
+            const others = sessionTickets.merges<MergeIntake>(sessionId, params.actionType, customerEmail)
+              .filter((e) => e.ticketId !== existingId);
+            const pairIds: string[] = [];
+            const tagged = new Set<string>();
+            let unheld = false;
+            for (const c of matchMergeTicket(others, intake).conflicts) {
+              const state = await conflictState(c.ticketId);
+              if (!state.open) {
+                sessionTickets.invalidateMerge(sessionId, params.actionType, customerEmail, c.ticketId);
+                continue;
+              }
+              if (state.held && state.tags.includes(`${KEEP_CONFLICT_WITH}${existingId}`.toLowerCase())) continue;
+              pairIds.push(c.ticketId);
+              const hold = await holdPair(params.actionType, existingId, c.ticketId);
+              hold.tagged.forEach((id) => tagged.add(id));
+              if (!hold.held) unheld = true;
+              else if (!hold.complete) {
+                appendConflictFlagFailed = true;
+                console.error(`[support-tools] ALERT create_ticket ${KEEP_CONFLICT_TAG} pairing incomplete: widened `
+                  + `ticket ${existingId} and ${c.ticketId} are held but not every sibling tag / comment landed`);
+              }
+            }
+            // A hold that did not land (or one this call placed for an intake it then could not
+            // write) leaves the intake as it was and names every tag it did place for a human.
+            const unfiled = () => unflagged(params.actionType, [existingId, ...pairIds], deriveConvId(sessionKey),
+              [...tagged]);
+            if (unheld) return unfiled();
+            if (!(await writeMergeIntake(existingId, intake))) {
+              if (tagged.size) return unfiled();
+              const held = await postTwice(tagUrl(existingId, INTAKE_STALE_TAG), {});
+              const spooled = await spoolUnflagged({ ticket_ids: [existingId], intake_unwritten: true, held,
+                conversation_id: deriveConvId(sessionKey) ?? null, action_type: params.actionType,
+                at: new Date().toISOString() });
+              if (!spooled) {
+                console.error(`[support-tools] ALERT create_ticket merge_intake union not written to ${existingId} `
+                  + `(${held ? `held: ${INTAKE_STALE_TAG}` : "NOT held"}) and could NOT be spooled for #cs_priority`);
+              }
+              return ticketResult({ submitted: false, reason: "merge_intake_not_updated",
+                action_type: params.actionType, ticket_id: existingId,
+                hint: "The new profile or track could not be added to the open merge ticket, so it would not be "
+                  + "processed. Do not re-file and do not tell the customer it was added; give no timing. Hand the "
+                  + "conversation to a human through the Human Handoff route." });
+            }
+            sessionTickets.recordMerge<MergeIntake>(sessionId, params.actionType, customerEmail, existingId, intake);
+          } else if (!mergeIntake) {
+            sessionTickets.record(sessionId, params.actionType, customerEmail, existingId);
+          }
           // Signal the intercom false-handoff-claim guard that a ticket really landed
           // for this conversation, so an "I've flagged this for the team" reply is
           // allowed through instead of being rewritten to the honest fallback.
@@ -464,7 +707,9 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
               if (!bumped?.ok) console.warn(`[support-tools] create_ticket priority bump failed for ${existingId}`);
             }
           }
-          return ticketResult({ submitted: true, updated_existing: true, ticket_id: existingId, sla, action_type: params.actionType, tier });
+          return ticketResult({ submitted: true, updated_existing: true, ticket_id: existingId, sla,
+            action_type: params.actionType, tier,
+            ...(appendConflictFlagFailed ? { merge_keep_conflict_flag_failed: true as const } : {}) });
         }
         // Comment failed — fall through to creating a fresh ticket (today's
         // status quo); losing the update entirely would be worse than a dup.
@@ -506,6 +751,9 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       const customerName =
         typeof params.details?.customer_name === "string" ? params.details.customer_name : undefined;
       const tags = buildTicketTags({ actionType: params.actionType, tier, details });
+      // Merge-type tickets: the executor's queue filter (details.merge_intake holds the record).
+      // Added here, not in ticket-format.ts, which is a byte-identical twin of the intercom plugin's.
+      if (MERGE_KINDS.has(params.actionType)) tags.push(`merge-kind:${params.actionType}`);
       if (hasAutomationReadyUvnScope(params.actionType, params.customerProfileId, details)) {
         tags.push("automation:uvn-under30");
       }
@@ -524,16 +772,64 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         body.assignees = [profileMergeAssigneeId];
       }
 
+      // A keep conflict is held BEFORE the new ticket exists: each open ticket it conflicts
+      // with gets merge-keep-conflict (retried once), and the new ticket is created already
+      // carrying merge-keep-conflict + merge-keep-conflict-with:<each>. If an open ticket
+      // cannot be tagged, nothing is filed: the record is spooled for #cs_priority instead.
+      // Only tags this call adds to a ticket it read as unheld are ever rolled back: a ticket
+      // already held, or one whose state could not be read, keeps its hold (spooled for a human
+      // to check). A ticket whose rollback cannot land is spooled as left held, the same way.
+      const conflictIds: string[] = [];
+      const alreadyHeld = new Set<string>();
+      const unreadable = new Set<string>();
+      for (const c of mergeMatch?.conflicts ?? []) {
+        const state = await conflictState(c.ticketId);
+        if (!state.open) {
+          sessionTickets.invalidateMerge(sessionId, params.actionType, customerEmail, c.ticketId);
+          continue;
+        }
+        conflictIds.push(c.ticketId);
+        if (state.held === true) alreadyHeld.add(c.ticketId);
+        if (state.held === null) unreadable.add(c.ticketId);
+      }
+      // leftHeld: tickets this call tagged and leaves held (state unreadable, or rollback failed).
+      const leftHeld: string[] = [];
+      const preTagged: string[] = [];
+      const rollBack = async () => {
+        for (const id of preTagged) {
+          if (!(await untagTwice(id, KEEP_CONFLICT_TAG))) leftHeld.push(id);
+        }
+      };
+      for (const id of conflictIds) {
+        if (alreadyHeld.has(id)) continue;
+        if (!(await postTwice(tagUrl(id, KEEP_CONFLICT_TAG), {}))) {
+          await rollBack();
+          return unflagged(params.actionType, conflictIds, convId, leftHeld);
+        }
+        if (unreadable.has(id)) leftHeld.push(id);
+        else preTagged.push(id);
+      }
+      if (conflictIds.length) {
+        body.tags = [...tags, KEEP_CONFLICT_TAG, ...conflictIds.map((id) => `${KEEP_CONFLICT_WITH}${id}`)];
+      }
+
       const result = await http.post<{ id: string }>(
         `https://api.clickup.com/api/v2/list/${clickupListId}/task`,
         { headers: { Authorization: clickupApiKey }, body },
       );
 
       if (!result.ok) {
+        await rollBack();
+        if (leftHeld.length) return unflagged(params.actionType, conflictIds, convId, leftHeld);
         return ticketResult({ submitted: false, reason: "queue_busy" });
       }
 
-      sessionTickets.record(sessionId, params.actionType, customerEmail, result.data.id);
+      if (mergeIntake) {
+        sessionTickets.recordMerge<MergeIntake>(sessionId, params.actionType, customerEmail, result.data.id,
+          mergeIntake);
+      } else {
+        sessionTickets.record(sessionId, params.actionType, customerEmail, result.data.id);
+      }
       // Signal the intercom false-handoff-claim guard that a ticket really landed for
       // this conversation (mirrors the follow-up-append path above).
       markTicketFiled(convId);
@@ -541,7 +837,20 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
       // for the Intercom deeplink), so the guard's reference-id check can tell a
       // real quoted id from one this conversation never filed.
       markTicketId(convId, result.data.id);
-      return ticketResult({ submitted: true, ticket_id: result.data.id, sla, action_type: params.actionType, tier });
+      let conflictFlagFailed = false;
+      for (const id of conflictIds) {
+        const comment = (on: string, sibling: string) => postTwice(`https://api.clickup.com/api/v2/task/${on}/comment`,
+          { comment_text: keepConflictComment(params.actionType, sibling), notify_all: false });
+        const ok = await Promise.all([postTwice(tagUrl(id, `${KEEP_CONFLICT_WITH}${result.data.id}`), {}),
+          comment(id, result.data.id), comment(result.data.id, id)]);
+        if (ok.includes(false)) conflictFlagFailed = true;
+      }
+      if (conflictFlagFailed) {
+        console.error(`[support-tools] ALERT create_ticket ${KEEP_CONFLICT_TAG} pairing incomplete: ticket ${result.data.id} `
+          + `and ${conflictIds.join(", ")} are held but not every sibling tag / comment landed`);
+      }
+      return ticketResult({ submitted: true, ticket_id: result.data.id, sla, action_type: params.actionType, tier,
+        ...(conflictFlagFailed ? { merge_keep_conflict_flag_failed: true as const } : {}) });
     },
   };
 }

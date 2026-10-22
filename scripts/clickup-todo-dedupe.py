@@ -23,6 +23,8 @@ So this sweeper only auto-moves what is provably redundant:
            deliberately excludes `intercom-auto-handoff` tickets from that
            lookup, so a real ticket sharing an action tag with an older
            auto-handoff was let through ON PURPOSE and is not a duplicate.
+           For merge actions only the same merge request counts and a
+           keep-conflict ticket never does (see merge_duplicate_of).
 
   Tier B — a bare `intercom-auto-handoff` escalation ticket on a conversation
            that already carries a real (non-handoff) action ticket.
@@ -53,6 +55,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.intercom_link import conv_id_of  # noqa: E402
+from lib import merge_keep_conflict as mkc  # noqa: E402
 
 CLICKUP_API = "https://api.clickup.com/api/v2"
 DEFAULT_LIST_ID = "901000600160"  # User Requests (support board)
@@ -85,21 +88,34 @@ DEFAULT_MAX_MOVES = 10
 # create_ticket's dedupe", so it may only fire where that dedupe could have
 # fired. Past the window the second ticket is intended, not an escape.
 TIER_A_MAX_GAP_MS = 7 * 24 * 60 * 60 * 1000
-# ...but NOT for the merge actions. create-ticket.ts:365 skips lookupOpenTicket
-# entirely for profile-merge and track-merge (a merged-ticket sweep auto-closes
+# ...but NOT for the merge actions. create-ticket.ts skips lookupOpenTicket
+# entirely for profile-merge, unmerge-request and track-merge (MERGE_KINDS in
+# plugins/support-tools/src/tools/merge-intake.ts; a merged-ticket sweep auto-closes
 # those keyed on the ORIGINAL description's ids, so folding a DIFFERENT merge
 # request into one could close it unexecuted). Their only dedupe is the
 # in-memory SessionTicketRegistry, whose TTL_MS is 24h
 # (session-ticket-registry.ts:1). So a second merge request in the same
 # conversation more than 24h later is a ticket the producer created ON PURPOSE,
 # and burying it loses distinct merge work.
-MERGE_ACTIONS = frozenset({"profile-merge", "track-merge"})
+MERGE_ACTIONS = frozenset({"profile-merge", "unmerge-request", "track-merge"})
 TIER_A_MERGE_GAP_MS = 24 * 60 * 60 * 1000
 
 
 def tier_a_window_ms(atype):
     """The producer's dedupe reach for this action type, in ms."""
     return TIER_A_MERGE_GAP_MS if atype in MERGE_ACTIONS else TIER_A_MAX_GAP_MS
+
+
+def merge_duplicate_of(prev, cur):
+    """For merge actions create_ticket files a SECOND ticket in one conversation on purpose
+    when the request names other profiles / tracks, or keeps something different (a keep
+    conflict, tagged merge-keep-conflict / merge-keep-conflict-with:*). Only a ticket that
+    is create_ticket's same request (scripts/lib/merge_keep_conflict.py) escaped its dedupe.
+    A ticket without a merge_intake is never provably the same request, so it is kept."""
+    if any(t.startswith(mkc.KEEP_CONFLICT_TAG) for x in (prev, cur) for t in mkc.tag_names(x)):
+        return False
+    a, b = mkc.merge_intake_of(prev.get("description") or ""), mkc.merge_intake_of(cur.get("description") or "")
+    return a is not None and b is not None and mkc.same_merge_request(a, b)
 MAX_PAGES = 40
 AUDIT_REQUESTER = "clickup-todo-dedupe@hydra-ops"
 AUDIT_ACTION = "clickup_todo_dedupe"
@@ -249,8 +265,18 @@ def classify(tasks):
             # window). A gap wider than the window breaks the chain and starts a
             # new canonical — that ticket is an intended new request, not an
             # escape, so it is kept and reported rather than moved.
-            keeper = same[0]
             window = tier_a_window_ms(atype)
+            if atype in MERGE_ACTIONS:
+                keeper_of = {}
+                for i, cur in enumerate(same):
+                    prev = next((p for p in reversed(same[:i]) if created(cur) - created(p) <= window
+                                 and merge_duplicate_of(p, cur)), None)
+                    keeper_of[cur["id"]] = cur if prev is None else keeper_of[prev["id"]]
+                    if prev is not None:
+                        here.append({"task": cur, "keep": keeper_of[cur["id"]], "tier": "A", "conv": conv})
+                        moved_ids.add(cur["id"])
+                continue
+            keeper = same[0]
             for prev, cur in zip(same, same[1:]):
                 if created(cur) - created(prev) > window:
                     keeper = cur
