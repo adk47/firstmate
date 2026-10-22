@@ -21,6 +21,9 @@
 #   MUSO_BIN                    muso binary (default: muso, else /usr/local/bin/muso)
 #   AD_SCREENING_CALLER         requester prefix (default: screener; [A-Za-z0-9._-]+)
 #   AD_SCREENING_DISABLED_FILE  kill switch (default /etc/hydra/ad-screening.disabled)
+#   MUSO_AD_SCREENING_ENV       target env for the PUT; wins over MUSO_ENV
+#   MUSO_ENV                    target env when no override is set; one of the two is
+#                               REQUIRED — the muso CLI defaults to dev, so never defaulted here
 #   Auth is the ambient MUSO_ADMIN_EMAIL/MUSO_ADMIN_PASSWORD from the gateway env.
 #
 # Exit codes:
@@ -70,6 +73,9 @@ payload="$3"
 caller="${AD_SCREENING_CALLER:-screener}"
 [[ "$caller" =~ ^[A-Za-z0-9._-]+$ ]] || die "refused — AD_SCREENING_CALLER must match [A-Za-z0-9._-]+"
 
+env_target="${MUSO_AD_SCREENING_ENV:-${MUSO_ENV:-}}"
+[ -n "$env_target" ] || die "refused — MUSO_ENV unset, refusing to default to dev"
+
 [ -f "$payload" ] || die "refused — payload file not found: $payload"
 command -v python3 >/dev/null 2>&1 || die "refused — python3 required to validate the payload"
 # shellcheck disable=SC2086  # ALLOWED_KEYS is a fixed word list
@@ -84,4 +90,4 @@ except (ValueError, OSError):
 sys.exit(0 if isinstance(doc, dict) and set(doc) <= allowed else 1)
 PY
 
-exec "$MUSO_BIN" api PUT "/admin/ads/${ad_id}/screening" --data "@${payload}" --requester "${caller}@hydra-ad-screening"
+exec "$MUSO_BIN" api PUT "/admin/ads/${ad_id}/screening" --data "@${payload}" --requester "${caller}@hydra-ad-screening" --env "$env_target"
