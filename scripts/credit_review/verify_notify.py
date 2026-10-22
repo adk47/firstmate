@@ -239,6 +239,10 @@ def _decider_approvals(db: sqlite3.Connection, *, run_id: str | None, since_hour
          "ON d.request_id = o.request_id AND d.run_id = o.run_id "
          "WHERE o.action = 'approve' AND o.outcome = 'approved'")
     args: list[Any] = []
+    if "evidence_kind" in dcols:
+        # Fable 10-22 09:30Z: a score approval anchored on a trusted-source credit is band A: no
+        # provisional window, no verify note.
+        q += " AND coalesce(d.evidence_kind, '') != 'validator_low_risk_trusted'"
     if run_id:
         q += " AND o.run_id = ?"
         args.append(run_id)

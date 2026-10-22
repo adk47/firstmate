@@ -250,6 +250,172 @@ def ask_time(row: dict[str, Any]) -> str:
 
 ENGAGED_PREFIX = "proof path: engaged user"
 
+# Fable ruling addendum 2026-10-22 09:30Z (firstmate 141; the band-B ruling file): the only
+# anchor is a TRUSTED-source credit naming the claimant (anchor_kind "trusted": band A, no
+# provisional window, no note). Otherwise the row stands on the validator's own low-risk verdict
+# (anchor_kind "none": PROVISIONAL with the verify note) - UNLESS that verdict came from
+# approve_credit_exists, whose path 1 (the claimant's own live Muso credit on this track) is a
+# duplicate-detection signal, never evidence: such a row passed only because a Muso credit
+# lifted it, so it is held for stage 2. An earlier Muso credit is never an anchor. Unreadable
+# evidence = held. ``muso_earlier`` is never written.
+NO_ANCHOR_PREFIX = "no independent anchor"
+TRUSTED_EVIDENCE_KIND = "validator_low_risk_trusted"
+APPROVE_RULE_ORDER = ("approve_owning_track", "approve_credit_exists", "approve_common_collaborator")
+
+
+def validator_approving_rule(row: dict[str, Any]) -> str | None:
+    """The IDP auto-approve rule that short-circuited the validator (first approve_* in the
+    validator's order with risk < 30), or None (a weighted score)."""
+    vd = row.get("verificationData") if isinstance(row.get("verificationData"), dict) else {}
+    rules = vd.get("rule_risk_percent") if isinstance(vd.get("rule_risk_percent"), dict) else {}
+    for name in APPROVE_RULE_ORDER:
+        v = rules.get(name)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v < 30:
+            return name
+    return None
+
+
+def classify_anchor(row: dict[str, Any], trusted_confirmed: set[str]) -> tuple[str | None, str | None]:
+    """(anchor_kind, None) for an admitted row - "trusted" or "none" - or (None, why held)."""
+    roles = [str(r).strip() for r in (row.get("credits") or []) if str(r).strip()]
+    if not roles:
+        # QA @23e75a95: a row with no claimed role has nothing to anchor or judge.
+        return None, f"{NO_ANCHOR_PREFIX}: the request names no role: stage 2"
+    if all(r.lower() in trusted_confirmed for r in roles):
+        return "trusted", None
+    if validator_approving_rule(row) == "approve_credit_exists":
+        missing = [r for r in roles if r.lower() not in trusted_confirmed]
+        return None, (f"{NO_ANCHOR_PREFIX}: the validator approved it only via the claimant's own Muso credit "
+                      f"(approve_credit_exists: a duplicate signal, never evidence) and no trusted source names the "
+                      f"claimant for {', '.join(missing)}: stage 2")
+    return "none", None
+
+
+Anchors = Callable[[list[dict[str, Any]]], dict[str, "tuple[str | None, str | None]"]]
+
+# Fable 10-22 09:30Z item 4 (placement: executor, firstmate 143): the version-fan-out shape. A
+# "such" request is one whose claimant already held their OWN live Muso credit on that track with
+# the same role BEFORE the request (created >= ANCHOR_MARGIN earlier; every request also writes its
+# own Muso credit in the same second, which is not the shape). >= FANOUT_MIN such requests by one
+# user created in the last 7 days -> every such row is held this run as a velocity-class review
+# hold, never a reject. Unreadable -> held.
+ANCHOR_MARGIN = timedelta(hours=1)
+FANOUT_MIN = 3
+FANOUT_WINDOW = timedelta(days=7)
+FANOUT_MAX_READS_PER_USER = 60
+FANOUT_PREFIX = "same_anchor_requests_7d"
+
+
+def own_earlier_credit(request: dict[str, Any], raw_credits: list[dict[str, Any]]) -> bool:
+    """The claimant held their own live Muso credit on this track, same role, before the request."""
+    from .evidence import parse_ts
+    pid = str(request.get("profileId") or "").lower()
+    req_at = parse_ts(request.get("createdAt"))
+    roles = {str(r).strip().lower() for r in (request.get("credits") or []) if str(r).strip()}
+    if req_at is None or not roles:
+        return False
+    for raw in raw_credits:
+        prof = raw.get("profile") if isinstance(raw.get("profile"), dict) else {}
+        if str(prof.get("source") or "").lower() != "muso":
+            continue
+        if str(prof.get("id") or "").lower().removeprefix("muso:") != pid:
+            continue
+        if str(raw.get("credit") or "").strip().lower() not in roles:
+            continue
+        at = parse_ts(raw.get("createdAt"))
+        if at is not None and at < req_at - ANCHOR_MARGIN:
+            return True
+    return False
+
+
+Fanout = Callable[[list[dict[str, Any]]], "dict[int, set[str] | None]"]
+
+
+def live_fanout(admin: admin_api.Admin, now: datetime, sleep: Callable[[float], None] | None = None) -> Fanout:
+    """{user id: ids of their 'such' requests created in the last 7 days | None (unreadable)} for
+    the users of the given rows. Read-only: the core replica (Trino) for the user's 7-day
+    requests, then each track's raw credits (cached per track)."""
+    import time as _t
+    sleep = sleep or _t.sleep
+
+    def fetch(rows: list[dict[str, Any]]) -> dict[int, set[str] | None]:
+        users = sorted({r["userId"] for r in rows if isinstance(r.get("userId"), int)})
+        if not users:
+            return {}
+        since = (now - FANOUT_WINDOW).strftime("%Y-%m-%d %H:%M:%S")
+        sql = ("SELECT CAST(id AS varchar), CAST(userid AS varchar), CAST(profileid AS varchar), CAST(trackid AS varchar), "
+               "CAST(credits AS varchar), to_iso8601(createdat) FROM postgresql_core.public.credit_requests "
+               f"WHERE deletedat IS NULL AND userid IN ({','.join(str(u) for u in users)}) "
+               f"AND createdat > TIMESTAMP '{since}' ORDER BY createdat")
+        p = subprocess.run([TRINO], input=sql, capture_output=True, text=True, timeout=600, check=False)
+        if p.returncode != 0:
+            return {u: None for u in users}
+        by_user: dict[int, list[dict[str, Any]]] = {u: [] for u in users}
+        for rid, uid, pid, tid, creds, created in csv.reader(io.StringIO("\n".join(
+                ln for ln in p.stdout.splitlines() if ln.startswith('"')))):
+            inner = creds.strip()[1:-1] if creds.strip().startswith("{") else creds
+            roles = [x.strip() for x in next(csv.reader([inner]), []) if x.strip()] if inner else []
+            by_user.setdefault(int(uid), []).append({"id": rid, "profileId": pid, "trackId": tid, "credits": roles,
+                                                     "createdAt": created})
+        admitted = {str(r.get("id")) for r in rows}
+        raw_cache: dict[str, list[dict[str, Any]]] = {}
+        out: dict[int, set[str] | None] = {}
+        for uid, reqs in by_user.items():
+            # Admitted rows first (their own verdict is what matters), then the rest until the bar.
+            reqs.sort(key=lambda q: q["id"] not in admitted)
+            such: set[str] = set()
+            reads, unreadable = 0, False
+            for q in reqs:
+                if len(such) >= FANOUT_MIN and q["id"] not in admitted:
+                    break
+                tid = q["trackId"]
+                if tid not in raw_cache:
+                    if reads >= FANOUT_MAX_READS_PER_USER:
+                        unreadable = True
+                        break
+                    reads += 1
+                    sleep(0.2)
+                    try:
+                        raw_cache[tid] = admin_api.track_raw_credits(admin, tid)
+                    except admin_api.AdminError:
+                        unreadable = True
+                        break
+                if own_earlier_credit(q, raw_cache[tid]):
+                    such.add(q["id"])
+            out[uid] = None if unreadable and len(such) < FANOUT_MIN else such
+        return out
+    return fetch
+
+
+def live_anchors(admin: admin_api.Admin, sleep: Callable[[float], None] | None = None) -> Anchors:
+    """Read-only: the decider's trusted-catalog role verdicts for each row (raw credits +
+    claimant profile). Any read failure = held."""
+    import time as _t
+    sleep = sleep or _t.sleep
+
+    def fetch(rows: list[dict[str, Any]]) -> dict[str, tuple[str | None, str | None]]:
+        from .evidence import CONFIRMED, EvidenceBuilder, EvidenceIncomplete
+        builder = EvidenceBuilder(admin)
+        out: dict[str, tuple[str | None, str | None]] = {}
+        for n, r in enumerate(rows):
+            rid = str(r.get("id"))
+            if n:
+                sleep(0.3)
+            try:
+                ev = builder.build(r)
+            except (admin_api.AdminError, EvidenceIncomplete) as exc:
+                out[rid] = (None, f"{NO_ANCHOR_PREFIX}: evidence unreadable ({str(exc)[:80]})")
+                continue
+            if ev.errors:
+                # QA @1dd5d112: a partial read (claimant profile, track, velocity) can still name a
+                # CONFIRMED role from a fallback name; incomplete evidence is never an anchor.
+                out[rid] = (None, f"{NO_ANCHOR_PREFIX}: evidence incomplete ({'; '.join(ev.errors)[:100]})")
+                continue
+            confirmed = {e.claimed_role.strip().lower() for e in ev.roles if e.status == CONFIRMED}
+            out[rid] = classify_anchor(r, confirmed)
+        return out
+    return fetch
+
 
 Engaged = Callable[[dict[str, Any]], "str | None"]
 
@@ -432,7 +598,7 @@ def written_today(db, day_start: str) -> tuple[dict[int, int], dict[str, int], i
     rows = db.execute(
         "SELECT d.user_id, d.profile_id FROM decision_outcomes o JOIN decisions d ON d.request_id = o.request_id "
         "AND d.run_id = o.run_id WHERE o.action = 'approve' AND o.outcome = 'approved' AND o.at >= ? "
-        "AND d.evidence_kind = ?", (day_start, EVIDENCE_KIND)).fetchall()
+        "AND d.evidence_kind IN (?, ?)", (day_start, EVIDENCE_KIND, TRUSTED_EVIDENCE_KIND)).fetchall()
     users: dict[int, int] = {}
     profiles: dict[str, int] = {}
     for uid, pid in rows:
@@ -472,6 +638,9 @@ class ScoreResult:
     paid_first: int = 0
     audit_sampled: int = 0
     engaged_excluded: int = 0
+    no_anchor: int = 0
+    fanout_held: int = 0
+    anchor_kinds: dict = field(default_factory=dict)
     read_exhausted: bool = False
     audit_failed: bool = False
     paused_mid_run: bool = False
@@ -488,6 +657,9 @@ class ScoreResult:
                 + (", ".join(f"{k} {v}" for k, v in top) or "none")
                 + (f"; {self.audit_sampled} in the audit sample" if self.audit_sampled else "")
                 + f"; {self.engaged_excluded} excluded as engaged claimants (stage 2)"
+                + f"; {self.no_anchor} held without an independent anchor (stage 2)"
+                + f"; {self.fanout_held} held by {FANOUT_PREFIX} (velocity-class)"
+                + (f"; approved by anchor_kind {dict(sorted(self.anchor_kinds.items()))}" if self.anchor_kinds else "")
                 + ("; READS INCOMPLETE (HTTP 429 or scan cap)" if self.read_exhausted else "")
                 + ("; AUDIT SAMPLE NOT FILED: PAUSED" if self.audit_failed else "")
                 + (f"; server skipped {self.skipped_by_server}" if self.skipped_by_server else "")
@@ -503,7 +675,8 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
         candidates: Candidates | None = None, writer: decide.Writer | None = None,
         readback: decide.Readback | None = None, now: datetime | None = None,
         sleep: Callable[[float], None] | None = None,
-        conversations: Callable[[dict[int, str]], dict[int, "bool | None"]] | None = None) -> ScoreResult:
+        conversations: Callable[[dict[int, str]], dict[int, "bool | None"]] | None = None,
+        anchors: Anchors | None = None, fanout: Fanout | None = None) -> ScoreResult:
     if mode not in ("shadow", "apply"):
         raise ValueError("mode must be shadow or apply")
     decide.ensure_schema(db)
@@ -543,6 +716,10 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
     # loop) applies it to every row.
     survivors = [r for r in rows.values() if why_not(r, sp, policy) is None]
     engaged = engagement_checker(survivors, now, conversations)
+    # Fable 10-22 09:30Z: every admitted row is classified (trusted / none) or held (read-only).
+    admitted = [r for r in survivors if why_not(r, sp, policy, engaged) is None]
+    anchor_of = (anchors or live_anchors(admin, sleep))(admitted) if admitted else {}
+    fan_of = (fanout or live_fanout(admin, now, sleep))(admitted) if admitted else {}
     day_start = now.strftime("%Y-%m-%dT00:00:00Z")
     today = decide.approvals_today_by_user(db, day_start)
     by_user, by_profile, fleet = written_today(db, day_start)
@@ -559,6 +736,21 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
         why = why_not(r, sp, policy, engaged)
         if why and why.startswith(ENGAGED_PREFIX):
             res.engaged_excluded += 1
+        kind = None
+        if why is None and isinstance(r.get("userId"), int):
+            such = fan_of.get(r["userId"], set())
+            if such is None:
+                why = f"{FANOUT_PREFIX} unreadable: velocity-class hold (not a reject)"
+                res.fanout_held += 1
+            elif len(such) >= FANOUT_MIN and str(r.get("id")) in such:
+                why = (f"{FANOUT_PREFIX}={len(such)} >= {FANOUT_MIN} (requests on the claimant's own earlier Muso "
+                       "credits within 7 days): velocity-class review hold, not a reject")
+                res.fanout_held += 1
+        if why is None:
+            kind, held = anchor_of.get(str(r.get("id")), (None, f"{NO_ANCHOR_PREFIX}: not classified"))
+            if held:
+                why = held
+                res.no_anchor += 1
         if why is None and len(approve) >= sp.max_per_run:
             why = f"per-run pace of {sp.max_per_run} reached: next run"
             res.capped += 1
@@ -575,8 +767,11 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
             why = f"fleet reached {sp.fleet_per_day} score approvals today"
             res.capped += 1
         if why is None:
-            d.evidence_kind = EVIDENCE_KIND
-            decide._set(d, "approve", f"score approval (captain 2026-10-20 'approve low risk credits'): the validator "
+            d.evidence_kind = TRUSTED_EVIDENCE_KIND if kind == "trusted" else EVIDENCE_KIND
+            res.anchor_kinds[kind] = res.anchor_kinds.get(kind, 0) + 1
+            decide._set(d, "approve", f"score approval anchor_kind={kind} "
+                                      f"({'trusted-source credit: band A, no provisional window' if kind == 'trusted' else 'provisional band B, verify note'}; "
+                                      f"captain 2026-10-20 'approve low risk credits'): the validator "
                                       f"approved it at total risk {r['verificationData']['total_risk_percent']:g} < "
                                       f"{sp.max_total_risk:g}; no conflict, no reject rule, server guard clear, "
                                       f"popularity {d.popularity}, no org role, not on a hold list")
@@ -700,9 +895,9 @@ def write_audit_sample(db, res: "ScoreResult", now: datetime, since: str | None 
             q, args = "o.at >= ?", (since,)
         rows = db.execute("SELECT d.request_id, d.user_id, d.profile_id, d.track_title, d.claimed_roles, d.popularity, "
                           "d.run_id, o.at FROM decisions d JOIN decision_outcomes o ON o.request_id = d.request_id AND "
-                          "o.run_id = d.run_id WHERE " + q + " AND d.evidence_kind = ? AND d.mode = 'apply' AND "
+                          "o.run_id = d.run_id WHERE " + q + " AND d.evidence_kind IN (?, ?) AND d.mode = 'apply' AND "
                           "o.action = 'approve' AND o.outcome = 'approved' AND d.reason LIKE '%[audit sample]'",
-                          (*args, EVIDENCE_KIND)).fetchall()
+                          (*args, EVIDENCE_KIND, TRUSTED_EVIDENCE_KIND)).fetchall()
         if not rows:
             return True
         AUDIT_DIR.mkdir(parents=True, exist_ok=True)

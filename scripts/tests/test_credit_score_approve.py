@@ -95,7 +95,7 @@ class ScoreApprove(unittest.TestCase):
                         {"name": "cs-gmail", "generated_at": at, "stale": False, "count": 0}],
             "users": len({e["user_id"] for e in entries}), "entries": entries}))
 
-    def go(self, rows, *, mode="apply", sp=None, pol=None, convo=None, admin=None):
+    def go(self, rows, *, mode="apply", sp=None, pol=None, convo=None, admin=None, anchors=None, fanout=None):
         sp = sp or sa.ScorePolicy(enabled=True)
         w = Writer()
         cands = lambda risk, limit: [(r["id"], r["profileId"], float(r["verificationData"]["total_risk_percent"]),
@@ -107,7 +107,9 @@ class ScoreApprove(unittest.TestCase):
             self.convo_asked.update(users)
             return {u: (convo or {}).get(u, False) for u in users}
         res = sa.run(admin or FakeAdmin(rows), self.db, mode=mode, policy=pol or policy(), sp=sp, candidates=cands, writer=w,
-                     readback=lambda status, ids: set(), now=NOW, sleep=lambda _s: None, conversations=conversations)
+                     readback=lambda status, ids: set(), now=NOW, sleep=lambda _s: None, conversations=conversations,
+                     anchors=anchors or (lambda rs: {str(r["id"]): ("none", None) for r in rs}),
+                     fanout=fanout or (lambda rs: {}))
         return res, w
 
     def decisions(self):
@@ -154,7 +156,8 @@ class ScoreApprove(unittest.TestCase):
         w = Writer()
         res = sa.run(Limited(rows), self.db, mode="apply", policy=policy(), sp=sa.ScorePolicy(enabled=True),
                      candidates=cands, writer=w, readback=lambda s, i: set(), now=NOW, sleep=slept.append,
-                     conversations=lambda users: {u: False for u in users})
+                     conversations=lambda users: {u: False for u in users},
+                     anchors=lambda rs: {str(r["id"]): ("none", None) for r in rs}, fanout=lambda rs: {})
         self.assertEqual([i for c in w.calls for i in c[1]], ["a"])
         self.assertIn("HTTP 429", res.note)
         self.assertNotIn("b", self.decisions(), "an unread row is not decided")
@@ -494,6 +497,138 @@ class ScoreApprove(unittest.TestCase):
         res, w = self.go(rows, sp=sa.ScorePolicy(enabled=True, max_profiles_per_run=150, max_per_run=1))
         self.assertEqual([i for c in w.calls for i in c[1]], ["paid"])
 
+
+    # ---- Fable 10-22 09:30Z: anchors are trusted or none; own Muso credits never count ----
+    def creds(self, **rules):
+        return dict({"approve_owning_track": 100, "approve_credit_exists": 100, "approve_common_collaborator": 100}, **rules)
+
+    def test_trusted_roles_make_anchor_kind_trusted(self):
+        r = row("t", band="B", roles=("Producer", "Mixing"), rules=self.creds(approve_credit_exists=0))
+        self.assertEqual(sa.classify_anchor(r, {"producer", "mixing"}), ("trusted", None))
+
+    def test_an_own_muso_credit_is_never_an_anchor(self):
+        """82d6f002 (same second), a577a774 / 8120b80f / 0531dfa2 (written later) AND the earlier-Muso
+        rows (3617d070 Conductor 2023): if approve_credit_exists approved it and no trusted source
+        names the claimant, the row is held, whatever the Muso credit's date."""
+        for rid, roles in (("82d6f002", ("Mastering",)), ("a577a774", ("Mastering",)), ("0531dfa2", ("Composer", "Producer")),
+                           ("3617d070", ("Conductor",))):
+            r = row(rid, band="B", roles=roles, rules=self.creds(approve_credit_exists=0))
+            kind, held = sa.classify_anchor(r, set())
+            self.assertIsNone(kind, rid)
+            self.assertIn("duplicate signal, never evidence", held)
+        r = row("part", band="B", roles=("Composer", "Producer"), rules=self.creds(approve_credit_exists=0))
+        self.assertIn("for Producer", sa.classify_anchor(r, {"composer"})[1], "every role needs a trusted credit")
+
+    def test_a_validator_approval_on_its_own_is_provisional_none(self):
+        for rules in (self.creds(approve_common_collaborator=0), self.creds(), self.creds(approve_owning_track=0)):
+            r = row("own", band="B", roles=("Bass",), rules=rules)
+            self.assertEqual(sa.classify_anchor(r, set()), ("none", None))
+
+    def test_no_claimed_role_is_held(self):
+        """QA @23e75a95: empty roles must not bypass the anchor gate."""
+        for roles in ((), ("",), (" ",)):
+            kind, held = sa.classify_anchor(row("empty", band="B", roles=roles), set())
+            self.assertIsNone(kind)
+            self.assertIn("names no role", held)
+
+    def test_anchor_kind_is_recorded_and_held_rows_counted(self):
+        rows = [row("tr", band="B", meta=self.STAMP), row("no", band="B", pid="p2", meta=self.STAMP),
+                row("held", band="B", pid="p3", meta=self.STAMP)]
+        res, w = self.go(rows, sp=self.phase1(), anchors=lambda rs: {
+            "tr": ("trusted", None), "no": ("none", None), "held": (None, "no independent anchor: ...")})
+        self.assertEqual(sorted(i for c in w.calls for i in c[1]), ["no", "tr"])
+        d = self.decisions()
+        self.assertEqual((d["tr"]["evidence_kind"], d["no"]["evidence_kind"]),
+                         (sa.TRUSTED_EVIDENCE_KIND, sa.EVIDENCE_KIND))
+        self.assertIn("anchor_kind=trusted", d["tr"]["reason"])
+        self.assertIn("anchor_kind=none", d["no"]["reason"])
+        self.assertNotIn("muso_earlier", " ".join(x["reason"] for x in d.values()))
+        self.assertEqual(res.no_anchor, 1)
+        self.assertIn("anchor_kind {'none': 1, 'trusted': 1}", res.line())
+
+    def test_trusted_approvals_get_no_verify_note_and_count_toward_caps(self):
+        self.go([row("tr", band="B", meta=self.STAMP), row("no", band="B", pid="p2", meta=self.STAMP)],
+                sp=self.phase1(), anchors=lambda rs: {"tr": ("trusted", None), "no": ("none", None)})
+        from credit_review import verify_ledger
+        self.db.executescript(verify_ledger.SCHEMA)
+        self.assertEqual([c[0] for c in verify_notify.candidates(self.db, since_hours=None)], ["no"])
+        users, profiles, fleet = sa.written_today(self.db, "2026-10-20T00:00:00Z")
+        self.assertEqual(fleet, 2, "both kinds count toward the caps")
+
+    def test_the_live_fetcher_uses_trusted_roles_only(self):
+        from unittest import mock
+        from credit_review import evidence
+        r = row("live", band="B", roles=("Mastering", "Bass"), rules=self.creds(approve_credit_exists=0))
+        ev = mock.Mock(roles=[evidence.RoleEvidence("Mastering", "master", evidence.CONFIRMED),
+                              evidence.RoleEvidence("Bass", "performer", evidence.UNVERIFIABLE)], errors=[])
+        with mock.patch.object(evidence.EvidenceBuilder, "build", return_value=ev):
+            out = sa.live_anchors(object(), sleep=lambda _s: None)([r])
+        self.assertIsNone(out["live"][0])
+        self.assertIn("for Bass", out["live"][1])
+
+    def test_incomplete_evidence_is_never_trusted(self):
+        """QA @1dd5d112: a failed claimant-profile read can still yield CONFIRMED from a fallback name."""
+        from unittest import mock
+        from credit_review import evidence
+        r = row("partial", band="B", roles=("Mastering",))
+        ev = mock.Mock(roles=[evidence.RoleEvidence("Mastering", "master", evidence.CONFIRMED)],
+                       errors=["claimant profile p1 unreadable: HTTP 503"])
+        with mock.patch.object(evidence.EvidenceBuilder, "build", return_value=ev):
+            out = sa.live_anchors(object(), sleep=lambda _s: None)([r])
+        self.assertEqual(out["partial"][0], None)
+        self.assertIn("evidence incomplete", out["partial"][1])
+
+    # ---- same_anchor_requests_7d (Fable 10-22 09:30Z item 4; firstmate 143) ----
+    def own(self, role, at, pid="p1"):
+        return {"profile": {"source": "muso", "id": pid}, "credit": role, "createdAt": at}
+
+    def test_own_earlier_credit_shape(self):
+        q = {"profileId": "p1", "credits": ["Mastering"], "createdAt": "2026-10-14T10:00:00Z"}
+        self.assertTrue(sa.own_earlier_credit(q, [self.own("mastering", "2026-05-21T00:00:00")]))
+        self.assertFalse(sa.own_earlier_credit(q, [self.own("mastering", "2026-10-14T10:00:00")]), "the request's own write")
+        self.assertFalse(sa.own_earlier_credit(q, [self.own("mastering", "2026-05-21T00:00:00", pid="p9")]))
+        self.assertFalse(sa.own_earlier_credit(q, [self.own("producer", "2026-05-21T00:00:00")]))
+
+    def test_117111_four_mastering_rows_are_held_as_velocity_not_rejected(self):
+        rows = [row(f"m{i}", uid=117111, pid=f"pm{i}") for i in range(4)] + [row("other", uid=500, pid="po")]
+        res, w = self.go(rows, fanout=lambda rs: {117111: {"m0", "m1", "m2", "m3"}, 500: {"other"}})
+        self.assertEqual([i for c in w.calls for i in c[1]], ["other"], "1 such request (< 3) is not held")
+        d = self.decisions()
+        for i in range(4):
+            self.assertIn("same_anchor_requests_7d=4 >= 3", d[f"m{i}"]["reason"])
+            self.assertNotEqual(d[f"m{i}"]["decision"], "reject")
+        self.assertEqual(res.fanout_held, 4)
+        self.assertIn("4 held by same_anchor_requests_7d", res.line())
+
+    def test_only_the_such_rows_are_held_and_unreadable_holds(self):
+        rows = [row("such", uid=601, pid="a"), row("plain", uid=601, pid="b"), row("unk", uid=602, pid="c")]
+        res, w = self.go(rows, fanout=lambda rs: {601: {"such", "x1", "x2"}, 602: None})
+        self.assertEqual([i for c in w.calls for i in c[1]], ["plain"])
+        self.assertIn("unreadable", self.decisions()["unk"]["reason"])
+
+    def test_the_live_fanout_counts_from_the_replica_and_raw_credits(self):
+        from unittest import mock
+        rows = [row("r1", uid=117111, pid="p1")]
+        out = ('"r1","117111","p1","t1","{Mastering}","2026-10-14T10:00:00Z"\n'
+               '"r2","117111","p1","t2","{Mastering}","2026-10-14T10:05:00Z"\n'
+               '"r3","117111","p1","t3","{Mastering,Engineer}","2026-10-14T10:10:00Z"\n'
+               '"r4","117111","p1","t4","{Mastering}","2026-10-15T09:00:00Z"\n')
+        raws = {"t1": [self.own("mastering", "2026-05-21T00:00:00")], "t2": [self.own("mastering", "2025-05-28T00:00:00")],
+                "t3": [self.own("engineer", "2026-05-21T00:00:00")], "t4": [self.own("mastering", "2026-10-15T09:00:00")]}
+        with mock.patch.object(sa.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=out)), \
+                mock.patch.object(sa.admin_api, "track_raw_credits", side_effect=lambda a, t: raws[t]):
+            got = sa.live_fanout(object(), NOW, sleep=lambda _s: None)(rows)
+        self.assertEqual(got, {117111: {"r1", "r2", "r3"}}, "r4's only Muso credit is its own same-time write")
+        with mock.patch.object(sa.subprocess, "run", return_value=mock.Mock(returncode=1, stdout="")):
+            self.assertEqual(sa.live_fanout(object(), NOW, sleep=lambda _s: None)(rows), {117111: None})
+
+    def test_an_unreadable_anchor_holds_the_row(self):
+        class Boom:
+            def get(self, *a, **k):
+                raise sa.admin_api.AdminError("HTTP 503")
+        out = sa.live_anchors(Boom(), sleep=lambda _s: None)([row("x", band="B", meta=self.STAMP)])
+        self.assertIsNone(out["x"][0])
+        self.assertIn("evidence unreadable", out["x"][1])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
