@@ -80,8 +80,8 @@
 # intermediates -- release.sh already derives the changelog range from the last
 # tag, so nothing would be dropped. Not done here; no repo needs it yet.
 #
-# auth is enabled=0 for the same reason mobile is: its upstream does not yet
-# produce the signal this detector needs. `deploy-auth.yaml` posted zero
+# auth was enabled=0 because its upstream did not produce the signal this
+# detector needs. `deploy-auth.yaml` posted zero
 # `H-DevOps / deploy` statuses as of 2026-08-27 (measured on each of its last
 # five main commits), so there is nothing that authoritatively says which sha
 # reached production.
@@ -94,8 +94,17 @@
 # disabled until the writer exists lets the detector treat an unresolved
 # rollout as the anomaly it is.
 #
-# Flip to 1 when https://github.com/Muso-AI/H-DevOps/pull/2799 merges; the
-# context is already correct, so that is the only change needed.
+# The signal now EXISTS (measured 2026-10-13: `H-DevOps / deploy` = success on
+# 10 of the last 30 main commits, written by deploy-auth.yaml), and the old
+# "flip when H-DevOps#2799 merges" note was wrong -- the writer is live while
+# that PR is still open. auth stays enabled=0 only until its checkpoint is
+# seeded: /var/lib/hydra-release/announced/auth still holds 6f7c07df from
+# 2026-08-27, so enabling it first would post seven weeks of history. Seed it
+# on node-8 with `release-watch.sh --repo=auth --bootstrap=<sha live now>`,
+# then flip this row to 1.
+#
+# ads-manager (promote.muso.ai) is the same story: the signal is live (25 of
+# the last 30 main commits) and the row is silent until its --bootstrap runs.
 #
 # Mobile is enabled=0 because neither H-DevOps prod lane reaches users:
 # iOS stops at TestFlight and Android uploads to Play track alpha as a
@@ -108,6 +117,7 @@ hydra|Muso-AI/hydra|1|🛠️|hydra (agent ops)|hydra|-|deploy.yml|daily|https:/
 web-credits-next|Muso-AI/web-credits-next|1|🌐|muso.ai web|status|H-DevOps / deploy|deploy-to-ovh.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/rollback.md|main
 core-backend|Muso-AI/core-backend|1|⚙️|muso platform (backend)|status|H-DevOps / deploy|deploy-to-ovh.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/rollback.md|master
 auth|Muso-AI/auth|0|🔐|muso auth (login.muso.ai)|status|H-DevOps / deploy|trigger-deploy.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/rollback.md|main
+ads-manager|Muso-AI/ads-manager|0|📣|promote.muso.ai (Ads Manager)|status|H-DevOps / deploy|trigger-deploy.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/rollback.md|main
 ios-app|Muso-AI/ios-app|0|📱|muso iOS|store|-|dispatch-build.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/mobile-native-cicd.md|main
 android-app|Muso-AI/android-app|0|🤖|muso Android|store|-|dispatch-build.yaml|per-deploy|https://github.com/Muso-AI/H-DevOps/blob/main/docs/runbooks/mobile-native-cicd.md|main
 '

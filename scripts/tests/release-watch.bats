@@ -85,7 +85,7 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 _build_script_tree() {
   mkdir -p "$TEST_TMPDIR/scripts/lib"
   cp "$HYDRA_REPO/scripts/release-watch.sh" "$HYDRA_REPO/scripts/release.sh" \
-     "$TEST_TMPDIR/scripts/"
+     "$HYDRA_REPO/scripts/release-digest.sh" "$TEST_TMPDIR/scripts/"
   cp "$HYDRA_REPO/scripts/lib/release-announce.sh" \
      "$HYDRA_REPO/scripts/lib/release_blockkit.py" \
      "$HYDRA_REPO/scripts/lib/slack-notify.sh" "$TEST_TMPDIR/scripts/lib/"
@@ -1958,4 +1958,172 @@ JSON
   run "$SCRIPT" --repo=auth --no-highlights
   [ "$status" -ne 0 ]
   [[ "$output" != *"not re-paged"* ]]
+}
+
+
+# ─── release-digest.sh: the 08:00 America/New_York roll-up ──────────────────
+# NOW is fixed so the 24 h window is deterministic: 22 Oct 2026 12:00Z is
+# 08:00 EDT. gh is replaced by a releases-only stub (the suite's main stub
+# models sha statuses, not release listings).
+
+DIGEST_NOW="2026-10-22T12:00:00Z"
+
+_digest_gh_stub() {
+  cat > "$STUBBIN/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_GH_ARGV"
+[ -n "$STUB_GH_FAIL" ] && { echo "gh: could not reach github.com" >&2; exit 1; }
+filter=""; prev=""
+for a in "$@"; do [ "$prev" = "--jq" ] && filter="$a"; prev="$a"; done
+case "$2" in
+  repos/*/releases*)
+    f="$TEST_TMPDIR/releases-$(printf '%s' "$2" | sed 's#repos/Muso-AI/\([^/]*\)/releases.*#\1#').json"
+    [ -f "$f" ] || { echo '[]' | jq -c "$filter"; exit 0; }
+    jq -c "$filter" "$f"; exit 0 ;;
+esac
+exit 0
+STUB
+  chmod +x "$STUBBIN/gh"
+}
+
+# _rel <repo-slug> <tag> <iso-published-at> <body>
+_rel() {
+  local f="$TEST_TMPDIR/releases-$1.json"
+  [ -f "$f" ] || echo '[]' > "$f"
+  jq --arg t "$2" --arg p "$3" --arg b "$4" \
+    '. + [{tag_name:$t, html_url:("https://github.com/x/"+$t), published_at:$p, body:$b, draft:false, prerelease:false}]' \
+    "$f" > "$f.new" && mv "$f.new" "$f"
+}
+
+_digest() { DIGEST_NOW="${DIGEST_NOW_OVERRIDE:-$DIGEST_NOW}" run bash "$TEST_TMPDIR/scripts/release-digest.sh" "$@"; }
+_posted_text() { jq -r '[.[] | (.text.text? // (.elements[]?.text))] | join("\n")' "$TEST_TMPDIR/posted.json"; }
+
+@test "digest: only releases in [now-24h, now) appear; the lower bound is inclusive" {
+  _digest_gh_stub
+  _rel core-backend v-in-23h  "2026-10-21T13:00:00Z" $'### Fixes\n\n- fix: in the window'
+  _rel core-backend v-edge    "2026-10-21T12:00:00Z" $'### Fixes\n\n- fix: exactly 24h old'
+  _rel core-backend v-old     "2026-10-21T11:59:59Z" $'### Fixes\n\n- fix: too old'
+  _rel core-backend v-now     "2026-10-22T12:00:00Z" $'### Fixes\n\n- fix: published at now'
+  _digest
+  [ "$status" -eq 0 ]
+  t="$(_posted_text)"
+  [[ "$t" == *"in the window"* ]]
+  [[ "$t" == *"exactly 24h old"* ]]
+  [[ "$t" != *"too old"* ]]
+  [[ "$t" != *"published at now"* ]]
+}
+
+@test "digest: one section per project, quiet projects omitted, bullets de-duplicated" {
+  _digest_gh_stub
+  _rel core-backend v1 "2026-10-22T01:00:00Z" $'### Fixes\n\n- fix: same line (#7)'
+  _rel core-backend v2 "2026-10-22T02:00:00Z" $'### Fixes\n\n- fix: same line (#7)\n- fix: other line'
+  _rel web-credits-next w1 "2026-10-22T03:00:00Z" $'### Features\n\n- feat: web thing'
+  _digest
+  [ "$status" -eq 0 ]
+  t="$(_posted_text)"
+  [[ "$t" == *"muso platform (backend)* — 2 releases"* ]]
+  [[ "$t" == *"muso.ai web* — 1 release"* ]]
+  [[ "$t" != *"hydra (agent ops)"* ]]
+  [ "$(grep -c 'same line' <<<"$t")" -eq 1 ]
+  [[ "$t" == *"<https://github.com/Muso-AI/core-backend/pull/7|#7>"* ]]
+  grep -q 'C0TESTREL' "$STUB_MUSO_ARGV"
+}
+
+@test "digest: stored highlights replace the commit-log bullets" {
+  _digest_gh_stub
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/highlights"
+  _rel web-credits-next w1 "2026-10-22T03:00:00Z" $'### Features\n\n- feat: raw commit words'
+  printf 'credits show up right after a claim\n' > "$HYDRA_RELEASE_STATE_DIR/highlights/web-credits-next-w1.txt"
+  _digest
+  t="$(_posted_text)"
+  [[ "$t" == *"credits show up right after a claim"* ]]
+  [[ "$t" != *"raw commit words"* ]]
+}
+
+@test "digest: an empty day posts ONE quiet line, never a crash and never silence" {
+  _digest_gh_stub
+  _digest
+  [ "$status" -eq 0 ]
+  [ -s "$TEST_TMPDIR/posted.json" ]
+  [[ "$(_posted_text)" == *"No releases in the last 24 h."* ]]
+  [ "$(jq '[.[] | select(.type=="section")] | length' "$TEST_TMPDIR/posted.json")" -eq 0 ]
+}
+
+@test "digest: headed with the New York date, in EDT and in EST" {
+  _digest_gh_stub
+  _digest
+  [[ "$(jq -r '.[0].text.text' "$TEST_TMPDIR/posted.json")" == "Last 24h in production · Thu 22 Oct 2026" ]]
+  # 13:00Z on 5 Nov is 08:00 EST (the clocks went back on 1 Nov): same local date.
+  DIGEST_NOW_OVERRIDE="2026-11-05T13:00:00Z" _digest
+  [[ "$(jq -r '.[0].text.text' "$TEST_TMPDIR/posted.json")" == "Last 24h in production · Thu 5 Nov 2026" ]]
+}
+
+@test "digest: 08:00 America/New_York is 12:00Z in EDT and 13:00Z in EST" {
+  run python3 - "$HYDRA_REPO/scripts/lib" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1])
+from datetime import date
+import release_blockkit as b
+for d, hh in ((date(2026,10,22),12), (date(2026,11,5),13), (date(2026,3,7),13), (date(2026,3,9),12)):
+    got = b.digest_slot_utc(d)
+    assert got.hour == hh and got.minute == 0, (d, got)
+    assert b.digest_local_date(got) == d
+print("ok")
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "digest: the timer is keyed to the IANA zone, never a fixed UTC offset" {
+  grep -q '^OnCalendar=\*-\*-\* 08:00:00 America/New_York$' "$HYDRA_REPO/scripts/install-aux-units.sh"
+  ! grep -E 'OnCalendar=.*(UTC|[+-][0-9]{2}:?[0-9]{2}|EDT|EST)' "$HYDRA_REPO/scripts/install-aux-units.sh"
+  grep -q '^  hydra-release-digest.service$' "$HYDRA_REPO/scripts/install-aux-units.sh"
+}
+
+@test "digest: posts once per New York day; a re-run is a no-op" {
+  _digest_gh_stub
+  _digest
+  [ "$status" -eq 0 ]
+  : > "$STUB_MUSO_ARGV"
+  _digest
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already posted"* ]]
+  [ ! -s "$STUB_MUSO_ARGV" ]
+}
+
+@test "digest: an unreachable GitHub fails loud, posts nothing, records nothing" {
+  _digest_gh_stub
+  export STUB_GH_FAIL=1
+  _digest
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot list releases"* ]]
+  [ ! -e "$TEST_TMPDIR/posted.json" ]
+  [ ! -e "$HYDRA_RELEASE_STATE_DIR/digest/last-posted" ]
+}
+
+@test "digest: a failed Slack post is not recorded, so the next run retries" {
+  _digest_gh_stub
+  export STUB_MUSO_FAIL=1
+  _digest
+  [ "$status" -ne 0 ]
+  [ ! -e "$HYDRA_RELEASE_STATE_DIR/digest/last-posted" ]
+}
+
+@test "digest: --dry-run prints the payload and posts and records nothing" {
+  _digest_gh_stub
+  _rel core-backend v1 "2026-10-22T01:00:00Z" $'### Fixes\n\n- fix: dry thing'
+  _digest --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dry thing"* ]]
+  [ ! -s "$STUB_MUSO_ARGV" ]
+  [ ! -e "$HYDRA_RELEASE_STATE_DIR/digest/last-posted" ]
+}
+
+@test "digest: ads-manager is a table row, silent until its checkpoint is seeded; auth stays silent too" {
+  . "$HYDRA_REPO/scripts/lib/release-repos.sh"
+  [ "$(release_repo_field ads-manager repo)" = "Muso-AI/ads-manager" ]
+  [ "$(release_repo_field ads-manager branch)" = "main" ]
+  [ "$(release_repo_field ads-manager sender)" = "trigger-deploy.yaml" ]
+  [ "$(release_repo_field ads-manager deploy_st)" = "H-DevOps / deploy" ]
+  [ "$(release_repo_field ads-manager cadence)" = "per-deploy" ]
+  [ "$(release_repo_field ads-manager enabled)" = "0" ]
+  [ "$(release_repo_field auth enabled)" = "0" ]
 }

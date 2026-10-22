@@ -23,6 +23,8 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 # Slack limits: header plain_text 150, section text 3000. The section cap
 # is held well under the hard limit so an overflow footer always fits.
@@ -139,6 +141,116 @@ def read_lines(path):
         # truthy before cleaning and empty after, and an empty-but-present
         # highlights list would suppress the deterministic fallback.
         return [c for c in (l.strip().lstrip("-• ").strip() for l in fh) if c]
+
+
+# ── Daily digest ───────────────────────────────────────────────────
+# `release_blockkit.py --digest <in.json> <out.json>` renders the 08:00
+# America/New_York roll-up of the last 24 h of releases, one section per
+# project. It reuses the helpers above (escape, notes parser, PR linkify,
+# clamp) so there is ONE renderer for #releases. The zone is the IANA name,
+# never a fixed UTC offset: Miami is EDT until the first Sunday of November
+# and EST after, so a hardcoded offset is a bug that lands in November.
+DIGEST_TZ = ZoneInfo("America/New_York")
+DIGEST_WINDOW = timedelta(hours=24)
+# Sections that never read as "what shipped" to the company.
+DIGEST_SKIP_SECTIONS = {"Chores", "Docs"}
+
+
+def parse_ts(text):
+    """Parse an ISO-8601 instant (GitHub's trailing Z included) to aware UTC."""
+    dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        raise ValueError("timestamp has no offset: %r" % text)
+    return dt.astimezone(timezone.utc)
+
+
+def digest_window(now):
+    """[now-24h, now) as aware UTC datetimes."""
+    now = now.astimezone(timezone.utc)
+    return now - DIGEST_WINDOW, now
+
+
+def digest_local_date(now):
+    """The America/New_York calendar date the digest is filed under."""
+    return now.astimezone(DIGEST_TZ).date()
+
+
+def digest_slot_utc(day):
+    """The UTC instant of 08:00 America/New_York on the given date."""
+    return datetime(day.year, day.month, day.day, 8, 0, tzinfo=DIGEST_TZ).astimezone(timezone.utc)
+
+
+def digest_bullets(release):
+    """Plain-language highlights when stored, else the commit-log bullets."""
+    hl = [h for h in release.get("highlights") or [] if h.strip()]
+    if hl:
+        return hl
+    out = []
+    for title, bullets in parse_notes(release.get("body") or ""):
+        if title not in DIGEST_SKIP_SECTIONS:
+            out.extend(bullets)
+    return out
+
+
+def build_digest(data):
+    """Return the Slack payload for a digest input document."""
+    now = parse_ts(data["now"])
+    start, end = digest_window(now)
+    label = digest_local_date(now).strftime("%a %-d %b %Y")
+    blocks = [{
+        "type": "header",
+        "text": {"type": "plain_text", "text": "Last 24h in production · %s" % label, "emoji": True},
+    }]
+    total = 0
+    for proj in data.get("projects", []):
+        rels = []
+        for r in proj.get("releases", []):
+            if r.get("draft") or r.get("prerelease"):
+                continue
+            when = parse_ts(r["published_at"])
+            if start <= when < end:
+                rels.append((when, r))
+        if not rels:
+            continue
+        rels.sort(key=lambda x: x[0])
+        total += len(rels)
+        seen, bullets = set(), []
+        for _, r in rels:
+            for b in digest_bullets(r):
+                key = re.sub(r"\W+", " ", b).strip().lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    bullets.append(linkify_prs(mrkdwn_escape(b), proj.get("repo", "")))
+        links = " · ".join("<%s|%s>" % (r["url"], mrkdwn_escape(r["tag"])) for _, r in rels)
+        head = "*%s %s* — %d release%s\n" % (
+            proj.get("emoji", ""), mrkdwn_escape(proj["display"]), len(rels), "" if len(rels) == 1 else "s")
+        body = clamp_bullets(bullets, head) if bullets else head.rstrip("\n")
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": links}]})
+    if total == 0:
+        # One quiet line, still posted: silence would be indistinguishable
+        # from a broken timer.
+        blocks.append({"type": "context", "elements": [
+            {"type": "mrkdwn", "text": "No releases in the last 24 h."}]})
+    payload = {
+        "text": "Last 24h in production · %s — %d release%s" % (label, total, "" if total == 1 else "s"),
+        "unfurl_links": False,
+        "unfurl_media": False,
+        "blocks": blocks,
+    }
+    if data.get("channel"):
+        payload["channel"] = data["channel"]
+    return payload
+
+
+def digest_main(argv):
+    if argv[0] == "--digest-date":
+        print(digest_local_date(parse_ts(argv[1])).isoformat())
+        return
+    with open(argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+    with open(argv[2], "w", encoding="utf-8") as fh:
+        json.dump(build_digest(data), fh, ensure_ascii=False)
 
 
 def main():
@@ -279,4 +391,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] in ("--digest", "--digest-date"):
+        digest_main(sys.argv[1:])
+    else:
+        main()
