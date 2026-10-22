@@ -1317,7 +1317,15 @@ class CronContractTests(unittest.TestCase):
             self.assertTrue(all(isinstance(a, str) and a for a in argv), "cron argv must not contain empty strings")
             # verify-notify writes no credit-request status either: it sends the
             # captain-approved verify note through intercom-verify-request.sh.
-            self.assertIn(argv[2], ("audit", "review", "digest", "metrics", "decide", "verify-notify", "verify-wave", "removal-notice"))
+            self.assertIn(argv[2], ("audit", "review", "digest", "metrics", "decide", "verify-notify", "verify-wave",
+                                    "removal-notice", "score-approve"))
+            if argv[2] == "score-approve":
+                # The second writing subcommand: only as the registered, captain-approved
+                # credit-trust-score-approve automation (captain 2026-10-20 "approve low risk credits").
+                reg = json.loads((Path(__file__).resolve().parents[2] / "policies"
+                                  / "credit-approval-automation.json").read_text())["automations"]["credit-trust-score-approve"]
+                self.assertIn(j["name"], reg["cron_names"])
+                self.assertTrue(reg["approved"] is True and reg["approved_by"] and reg["approval_ref"])
             if argv[2] == "decide":
                 # The one writing subcommand: only as the registered, captain-approved
                 # credit-trust-decide automation (policies/credit-approval-automation.json).

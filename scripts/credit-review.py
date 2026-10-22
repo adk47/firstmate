@@ -346,6 +346,43 @@ def cmd_provisional_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_score_approve(args: argparse.Namespace) -> int:
+    """Captain 2026-10-20 ~11:30Z "approve low risk credits": execute the validator's own
+    approve verdict (total risk < 30) on held user_verification_needed rows, every guard intact
+    (credit_review/score_approve.py)."""
+    from credit_review import decide, score_approve
+    if args.pause or args.resume:
+        if args.pause:
+            score_approve.PAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            score_approve.PAUSE_FILE.write_text(f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ} {args.pause}\n")
+            log(f"score-approve PAUSED: {args.pause}")
+            print(f"score-approve paused: {args.pause}. Every run is shadow until --resume.")
+        else:
+            score_approve.PAUSE_FILE.unlink(missing_ok=True)
+            log("score-approve resumed")
+            print("score-approve resumed.")
+        return 0
+    if score_approve.KILL_SWITCH.exists() or decide.KILL_SWITCH.exists():
+        log("score-approve: kill switch present; nothing decided")
+        print("NO_REPLY")
+        return 0
+    os.environ["MUSO_ADMIN_IDENTITY"] = decide.ADMIN_IDENTITY
+    policy = decide.Policy.load()
+    sp = score_approve.ScorePolicy.load()
+    if args.max_per_run is not None:
+        sp.max_per_run = min(sp.max_per_run, args.max_per_run)
+    ledger = Ledger(args.ledger)
+    res = score_approve.run(admin_api.AdminClient(), ledger.db, mode=args.mode, policy=policy, sp=sp)
+    log(res.line())
+    # QA @6c2a51b4 (2): reads cut short by core's rate limit are a failure, never a quiet no-op.
+    if res.mode == "apply" and not (res.approved or res.write_errors or res.skipped_by_server
+                                    or res.read_exhausted or res.paused_mid_run or res.audit_failed):
+        print("NO_REPLY")
+    else:
+        print(res.line())
+    return 1 if (res.write_errors or res.read_exhausted or res.audit_failed) else 0
+
+
 def cmd_explain(args: argparse.Namespace) -> int:
     from credit_review import decide
     print(json.dumps(decide.explain(Ledger(args.ledger).db, args.request_id), indent=1, ensure_ascii=False, default=str))
@@ -589,6 +626,15 @@ def parser() -> argparse.ArgumentParser:
                     help="shared per-UTC-day cap on metered model spend (audit + decide; captain: $25/day)")
     model_flags(dc)
     dc.set_defaults(fn=cmd_decide, provider="codex", max_model_calls=120, budget_usd=2.0)
+
+    sa = sub.add_parser("score-approve", help="execute the validator's approve verdict on held low-risk rows "
+                                            "(captain 2026-10-20; credit-trust-score-approve)")
+    sa.add_argument("--mode", choices=["shadow", "apply"], default="shadow")
+    sa.add_argument("--max-per-run", type=int, default=None, help="lower the policy's per-run pace")
+    sa.add_argument("--pause", default=None, metavar="REASON",
+                    help="stop every write now (Fable condition 10: audit precision < 95 %%), e.g. the audit id")
+    sa.add_argument("--resume", action="store_true", help="lift a --pause (after Fable's review)")
+    sa.set_defaults(fn=cmd_score_approve)
 
     ex = sub.add_parser("explain", help="every decision + server outcome for one credit request")
     ex.add_argument("request_id")

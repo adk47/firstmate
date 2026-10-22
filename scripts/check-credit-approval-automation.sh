@@ -41,6 +41,7 @@ FLOOR_ENTRYPOINTS=(
   "verify-credit-batch-mvp.lobster"
   "uvn-under30-cron.py"
   "credit-review.py decide"
+  "credit-review.py score-approve"
 )
 # Approve-capable helpers that must never be called from a cron at all. They
 # are agent/manual tools; scheduling one is always a violation.
