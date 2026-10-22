@@ -96,7 +96,7 @@
     "max_popularity": 60,
     "max_per_run": 100,
     "candidate_limit": 2000,
-    "admit_band_b": false,
+    "admit_band_b": true,
     "per_user_per_day": 20,
     "per_profile_per_day": 50,
     "fleet_per_day": 2000,
