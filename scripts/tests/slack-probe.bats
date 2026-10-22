@@ -244,3 +244,21 @@ STUB
     [ "$status" -eq 1 ]; [[ "$output" == *"BAD: cto: botTokenSource=none"* ]]
     [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 2 ]
 }
+
+@test "MIXED SEQUENCE: no Slack rows, then the gateway goes unreachable -> hard fail (1), never a warn" {
+    echo '{"error":"x"}' > "$D/noslack"
+    echo 'Error: Opening handshake has timed out' > "$D/junk"
+    fake_openclaw "$D/noslack" "$D/junk"
+    SLACK_PROBE_ATTEMPTS=2 run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 1 ]; [ "${lines[-1]}" = "fail" ]
+    [[ "$output" == *"no Slack accounts yet"* ]]; [[ "$output" == *"attempt 2: non-JSON"* ]]
+    [ "$(wc -l < "$D/calls" | tr -d ' ')" -eq 2 ]
+}
+
+@test "MIXED SEQUENCE: unreachable, then no Slack rows -> hard fail (1) too (the verdict is order-independent)" {
+    echo '{"error":"x"}' > "$D/noslack"
+    echo 'Error: Opening handshake has timed out' > "$D/junk"
+    fake_openclaw "$D/junk" "$D/noslack"
+    SLACK_PROBE_ATTEMPTS=2 run slack_probe_run "$D/cfg.json"
+    [ "$status" -eq 1 ]; [ "${lines[-1]}" = "fail" ]
+}

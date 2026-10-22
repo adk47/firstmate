@@ -86,15 +86,19 @@ PYEOF
 # registers: #1301). Any run that returns Slack ROWS is final at once, pass or
 # fail: a dropped botToken, a failed probe, a malformed row or a missing account
 # is never retried away. If every attempt was unreachable, prints one cause line
-# per attempt then "unreachable" and returns 2; if the gateway only ever answered
-# "no Slack rows yet", the last verdict stands and the gate fails as before.
+# per attempt then "unreachable" and returns 2. A parseable answer that is not a
+# pass is never downgraded by a later attempt: "no Slack rows yet" is the only
+# non-pass that can be followed by another attempt, so if any attempt answered it
+# and the final ones were unreachable, the cause lines are printed, that verdict
+# is reprinted and the gate returns 1 (hard fail, rollback). The verdict is
+# therefore independent of the order of the answers.
 # Stderr goes to its own file (NEVER 2>&1: openclaw prints "Config warnings:" there,
 # PR #228).
 # Why: on 2026-10-20 the gate failed both deploys (04:01Z and 14:06Z) and forced
 # rollbacks while the gateway was still recovering from the restart; the same
 # probe passed on every account minutes later, with nothing changed.
 slack_probe_run() {
-  local config="$1" tmp err rc vrc out attempt bytes causes=""
+  local config="$1" tmp err rc vrc out attempt bytes causes="" bad_out=""
   local attempts="${SLACK_PROBE_ATTEMPTS:-12}" wait_s="${SLACK_PROBE_WAIT_SECS:-20}"
   [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=12
   [[ "$wait_s" =~ ^[0-9]+$ ]] || wait_s=20
@@ -114,8 +118,14 @@ slack_probe_run() {
       else
         causes+="attempt $attempt: non-JSON ($bytes bytes)"$'\n'
       fi
-    elif [ "$vrc" -eq 0 ] || ! grep -qF 'BAD: channels status has no Slack accounts yet' <<<"$out"; then
-      break
+    else
+      # A parseable answer that is not a pass is a verdict about the deployed
+      # config, not a transport problem: keep it so a later unreachable attempt
+      # can never downgrade the gate to a warn (#1292 review).
+      if [ "$vrc" -ne 0 ]; then bad_out="$out"; fi
+      if [ "$vrc" -eq 0 ] || ! grep -qF 'BAD: channels status has no Slack accounts yet' <<<"$out"; then
+        break
+      fi
     fi
     if [ "$attempt" -lt "$attempts" ]; then
       echo "slack-probe: attempt $attempt/$attempts got no Slack rows yet (gateway still starting?) — retrying in ${wait_s}s" >&2
@@ -125,6 +135,10 @@ slack_probe_run() {
   rm -f "$tmp" "$err"
   if [ "$vrc" -eq 2 ]; then
     printf '%s' "$causes"
+    if [ -n "$bad_out" ]; then
+      printf '%s\n' "$bad_out"
+      return 1
+    fi
   fi
   printf '%s\n' "$out"
   return "$vrc"
