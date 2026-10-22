@@ -152,6 +152,8 @@ def read_lines(path):
 # and EST after, so a hardcoded offset is a bug that lands in November.
 DIGEST_TZ = ZoneInfo("America/New_York")
 DIGEST_WINDOW = timedelta(hours=24)
+# Slack caps a context element's text at 2000 characters.
+CONTEXT_MAX = 2000
 # Sections that never read as "what shipped" to the company.
 DIGEST_SKIP_SECTIONS = {"Chores", "Docs"}
 
@@ -192,6 +194,19 @@ def digest_bullets(release):
     return out
 
 
+def clamp_links(links, limit=CONTEXT_MAX):
+    """Join release links with ' · ', keeping the text inside Slack's context cap."""
+    out, used = [], 0
+    for i, link in enumerate(links):
+        more = "…+%d more" % (len(links) - i)
+        if used + len(link) + 3 + len(more) > limit:
+            out.append(more)
+            break
+        out.append(link)
+        used += len(link) + 3
+    return " · ".join(out)
+
+
 def build_digest(data):
     """Return the Slack payload for a digest input document."""
     now = parse_ts(data["now"])
@@ -221,7 +236,7 @@ def build_digest(data):
                 if key and key not in seen:
                     seen.add(key)
                     bullets.append(linkify_prs(mrkdwn_escape(b), proj.get("repo", "")))
-        links = " · ".join("<%s|%s>" % (r["url"], mrkdwn_escape(r["tag"])) for _, r in rels)
+        links = clamp_links(["<%s|%s>" % (r["url"], mrkdwn_escape(r["tag"])) for _, r in rels])
         head = "*%s %s* — %d release%s\n" % (
             proj.get("emoji", ""), mrkdwn_escape(proj["display"]), len(rels), "" if len(rels) == 1 else "s")
         body = clamp_bullets(bullets, head) if bullets else head.rstrip("\n")

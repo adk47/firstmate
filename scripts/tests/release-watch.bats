@@ -2074,7 +2074,12 @@ PY
 
 @test "digest: the timer is keyed to the IANA zone, never a fixed UTC offset" {
   grep -q '^OnCalendar=\*-\*-\* 08:00:00 America/New_York$' "$HYDRA_REPO/scripts/install-aux-units.sh"
-  ! grep -E 'OnCalendar=.*(UTC|[+-][0-9]{2}:?[0-9]{2}|EDT|EST)' "$HYDRA_REPO/scripts/install-aux-units.sh"
+  # Scoped to the digest timer's own heredoc: other timers legitimately use UTC.
+  # `if grep; then false; fi` because a bare `! grep` is exempt from set -e.
+  local timer
+  timer="$(sed -n '/^cat > .*hydra-release-digest.timer << RELDIGESTTMR$/,/^RELDIGESTTMR$/p' "$HYDRA_REPO/scripts/install-aux-units.sh")"
+  [ -n "$timer" ]
+  if printf '%s\n' "$timer" | grep -E '^OnCalendar=.*(UTC|[+-][0-9]{2}:?[0-9]{2}|EDT|EST)'; then false; fi
   grep -q '^  hydra-release-digest.service$' "$HYDRA_REPO/scripts/install-aux-units.sh"
 }
 
@@ -2126,4 +2131,43 @@ PY
   [ "$(release_repo_field ads-manager cadence)" = "per-deploy" ]
   [ "$(release_repo_field ads-manager enabled)" = "0" ]
   [ "$(release_repo_field auth enabled)" = "0" ]
+}
+
+@test "digest: real-size release history (>128 KB per repo) still posts: no single jq argv string over the Linux cap" {
+  _digest_gh_stub
+  # Linux caps ONE argv string at 128 KB (MAX_ARG_STRLEN); macOS has no cap, so
+  # model it: a jq wrapper that refuses an oversize argument like node-8 does.
+  local realjq; realjq="$(command -v jq)"
+  cat > "$STUBBIN/jq" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\${#a}" -gt 131072 ]; then echo "jq: Argument list too long" >&2; exit 126; fi
+done
+exec "$realjq" "\$@"
+STUB
+  chmod +x "$STUBBIN/jq"
+  local body; body="$(head -c 3000 /dev/zero | tr '\0' 'x')"
+  local r i
+  for r in hydra web-credits-next core-backend; do
+    for i in $(seq 1 100); do
+      _rel "$r" "v$i" "2026-10-$(printf '%02d' $((i % 20 + 1)))T12:00:00Z" "$body"
+    done
+    _rel "$r" "vnew" "2026-10-22T03:00:00Z" $'### Features\n\n- feat: shipped-in-'"$r"
+  done
+  _digest
+  [ "$status" -eq 0 ]
+  _posted_text | grep -q "shipped-in-hydra"
+  _posted_text | grep -q "shipped-in-core-backend"
+}
+
+@test "digest: a very busy day keeps the links line inside Slack's 2000-char context cap" {
+  _digest_gh_stub
+  local i
+  for i in $(seq 1 60); do
+    _rel hydra "v2026.10.22-build-number-$i" "2026-10-22T0$((i % 9)):00:00Z" $'### Features\n\n- feat: change '"$i"
+  done
+  _digest
+  [ "$status" -eq 0 ]
+  jq -e '[.[] | select(.type=="context") | .elements[].text | length] | max <= 2000' "$TEST_TMPDIR/posted.json"
+  _posted_text | grep -q "more"
 }

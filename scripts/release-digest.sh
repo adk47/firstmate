@@ -81,30 +81,49 @@ trap 'rm -rf "$WORK"' EXIT
 # One JSON document: every enabled repo with its releases. A repo whose
 # listing fails aborts the run -- a digest that says "no releases" because
 # GitHub was unreachable would be a false statement.
-projects='[]'
+#
+# Release listings (bodies included) run to hundreds of KB, and Linux caps a
+# SINGLE argv string at 128 KB (MAX_ARG_STRLEN): everything below moves
+# through files and stdin, never through jq --argjson.
+projects_files=()
+n=0
 while IFS= read -r key; do
   repo="$(release_repo_field "$key" repo)"
   emoji="$(release_repo_field "$key" emoji)"
   display="$(release_repo_field "$key" display)"
-  rels="$(gh api "repos/$repo/releases?per_page=100" \
-    --jq '[.[] | {tag: .tag_name, url: .html_url, published_at: .published_at, body: (.body // ""), draft: .draft, prerelease: .prerelease}]')" \
-    || die "cannot list releases for $repo"
-  jq -e 'type == "array"' <<<"$rels" >/dev/null 2>&1 || die "unexpected release listing for $repo"
+  rels="$WORK/rels-$n.json"
+  gh api "repos/$repo/releases?per_page=100" \
+    --jq '[.[] | {tag: .tag_name, url: .html_url, published_at: .published_at, body: (.body // ""), draft: .draft, prerelease: .prerelease}]' \
+    > "$rels" || die "cannot list releases for $repo"
+  jq -e 'type == "array"' "$rels" >/dev/null 2>&1 || die "unexpected release listing for $repo"
   # Attach the stored plain-language highlights, when release-watch kept them.
-  withhl='[]'
+  hl_files=()
   while IFS= read -r tag; do
     hlf="$HIGHLIGHTS_DIR/${key}-${tag}.txt"
-    hl='[]'
-    [[ -r "$hlf" ]] && hl="$(jq -Rn '[inputs | select(length > 0)]' < "$hlf")"
-    withhl="$(jq -c --arg t "$tag" --argjson h "$hl" --argjson all "$rels" \
-      '. + [($all[] | select(.tag == $t) | . + {highlights: $h})]' <<<"$withhl")"
-  done < <(jq -r '.[].tag' <<<"$rels")
-  projects="$(jq -c --arg k "$key" --arg r "$repo" --arg e "$emoji" --arg d "$display" --argjson rel "$withhl" \
-    '. + [{key: $k, repo: $r, emoji: $e, display: $d, releases: $rel}]' <<<"$projects")"
+    [[ -r "$hlf" ]] || continue
+    one="$WORK/hl-$n-${#hl_files[@]}.json"
+    jq -Rn --arg t "$tag" '{($t): [inputs | select(length > 0)]}' < "$hlf" > "$one"
+    hl_files+=("$one")
+  done < <(jq -r '.[].tag' "$rels")
+  if ((${#hl_files[@]})); then
+    jq -s 'add' "${hl_files[@]}" > "$WORK/hl-$n.json"
+  else
+    echo '{}' > "$WORK/hl-$n.json"
+  fi
+  jq -c --arg k "$key" --arg r "$repo" --arg e "$emoji" --arg d "$display" --slurpfile h "$WORK/hl-$n.json" \
+    '{key: $k, repo: $r, emoji: $e, display: $d,
+      releases: [.[] | . + {highlights: ($h[0][.tag] // [])}]}' "$rels" > "$WORK/project-$n.json"
+  projects_files+=("$WORK/project-$n.json")
+  n=$((n + 1))
 done < <(release_repo_keys --enabled-only)
 
-jq -n --arg now "$NOW" --arg ch "${RELEASES_SLACK_CHANNEL:-}" --argjson p "$projects" \
-  '{now: $now, channel: $ch, projects: $p}' > "$WORK/in.json"
+if ((${#projects_files[@]})); then
+  jq -s --arg now "$NOW" --arg ch "${RELEASES_SLACK_CHANNEL:-}" \
+    '{now: $now, channel: $ch, projects: .}' "${projects_files[@]}" > "$WORK/in.json"
+else
+  jq -n --arg now "$NOW" --arg ch "${RELEASES_SLACK_CHANNEL:-}" \
+    '{now: $now, channel: $ch, projects: []}' > "$WORK/in.json"
+fi
 python3 "$BLOCKKIT" --digest "$WORK/in.json" "$WORK/payload.json" || die "render failed"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
