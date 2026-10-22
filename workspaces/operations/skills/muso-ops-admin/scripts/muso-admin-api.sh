@@ -1234,6 +1234,50 @@ is_credit_trust_decide_approval() {
     ' >/dev/null 2>&1
 }
 
+# Standing authorization for credit-trust-score-approve (credit-review.py
+# score-approve --mode apply; captain 2026-10-20 ~11:30Z "approve low risk
+# credits"; Fable rulings ruling-score-approve-band-b-2026-10-20.md and steer 31,
+# 2026-10-22). Its OWN requester, env flag and registry row, never the
+# decider's. It executes the IDP validator's own APPROVE verdict, so its rows wait in
+# user_verification_needed (the decider branch above refuses that expected
+# status on purpose). core-backend binds the grant to X-Credit-Automation-Id
+# credit-trust-score-approve on the decider's account (agentApprovalGuard
+# AUTOMATION_APPROVAL_SCOPES) and re-checks every row; this branch only lets the
+# exact conditional batch shape past the browser-evidence gate.
+is_credit_trust_score_approval() {
+    local method="$1" path="$2" body="$3"
+    [[ "${CREDIT_TRUST_SCORE_APPROVE:-0}" == "1" ]] || return 1
+    [[ "${REQUESTER_EMAIL:-}" == "credit-trust-score-approve@hydra-ops" ]] || return 1
+    [[ "$method" == "PUT" ]] || return 1
+    [[ "$path" == "/admin/credit-requests/conditional-status" ]] || return 1
+    jq -e '.automations["credit-trust-score-approve"]
+           | .approved == true
+             and ((.approved_by // "") | tostring | length > 0)
+             and ((.approval_ref // "") | tostring | length > 0)' \
+        "$CREDIT_APPROVAL_REGISTRY" >/dev/null 2>&1 || {
+        echo "credit_approve_gate: credit-trust-score-approve is not approved in $CREDIT_APPROVAL_REGISTRY - refusing" >&2
+        return 1
+    }
+    printf '%s' "$body" | jq -e '
+        type == "object"
+        and ((keys | sort) == ["expectedStatus", "requestIds", "status"])
+        and .status == "approved"
+        and (.expectedStatus == "user_verification_needed" or .expectedStatus == "unverified")
+        and (
+            .requestIds as $ids
+            | ($ids | type) == "array"
+            and ($ids | length) > 0
+            and ($ids | length) <= 50
+            and all($ids[];
+                type == "string"
+                and length == 36
+                and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+            )
+            and (($ids | map(ascii_downcase) | unique | length) == ($ids | length))
+        )
+    ' >/dev/null 2>&1
+}
+
 enforce_credit_approve_gate() {
     local method="$1" path="$2" body="$3"
 
@@ -1270,6 +1314,9 @@ enforce_credit_approve_gate() {
         return 0
     fi
     if is_credit_trust_decide_approval "$method" "$path" "$body"; then
+        return 0
+    fi
+    if is_credit_trust_score_approval "$method" "$path" "$body"; then
         return 0
     fi
 
@@ -3109,6 +3156,10 @@ EOF
     # own calls ever carry it.
     if [[ "${CREDIT_TRUST_DECIDE:-0}" == "1" && "$REQUESTER_EMAIL" == "credit-trust-decide@hydra-ops" ]]; then
         curl_args+=(-H "X-Credit-Automation-Id: credit-trust-decide")
+    fi
+    # Same contract for score-approve: its own id on the same decider account.
+    if [[ "${CREDIT_TRUST_SCORE_APPROVE:-0}" == "1" && "$REQUESTER_EMAIL" == "credit-trust-score-approve@hydra-ops" ]]; then
+        curl_args+=(-H "X-Credit-Automation-Id: credit-trust-score-approve")
     fi
 
     # Actor headers (audit trail — approver + Slack ts of the in-thread approval);

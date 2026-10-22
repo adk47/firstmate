@@ -1276,6 +1276,30 @@ class AdminIdentity(unittest.TestCase):
         self.assertEqual((identity, flag), ("credit-decider", "1"))
         self.assertIn("--requester credit-trust-decide@hydra-ops", argv)
 
+    def test_score_approve_writes_with_its_own_requester_and_flag_never_the_deciders(self):
+        """2026-10-22 18:25Z: score-approve PUT user_verification_needed rows as the decider and
+        the wrapper's decider branch (unverified only) sent all 31 to the browser-evidence gate."""
+        from credit_review import score_approve as sa
+        tmp = Path(tempfile.mkdtemp())
+        script, seen = tmp / "wrapper.sh", tmp / "seen"
+        script.write_text(f'#!/usr/bin/env bash\nprintf "%s %s %s %s\\n" "$MUSO_ADMIN_IDENTITY" "$CREDIT_TRUST_DECIDE" '
+                          f'"$CREDIT_TRUST_SCORE_APPROVE" "$*" > {seen}\n'
+                          'echo \'{"http_status":200,"body":{"data":{"updatedIds":["a"]}}}\'\n')
+        old = {k: os.environ.pop(k, None) for k in ("MUSO_ADMIN_IDENTITY", "CREDIT_TRUST_DECIDE")}
+        os.environ["CREDIT_TRUST_DECIDE"] = "1"  # an inherited decider flag must not leak into score-approve
+        try:
+            decide.admin_writer(str(script), requester=sa.REQUESTER,
+                                automation_flag="CREDIT_TRUST_SCORE_APPROVE")("approved", ["a"], "user_verification_needed")
+        finally:
+            os.environ.pop("CREDIT_TRUST_DECIDE", None)
+            for k, v in old.items():
+                if v is not None:
+                    os.environ[k] = v
+        identity, decide_flag, score_flag, argv = seen.read_text().split(" ", 3)
+        self.assertEqual((identity, decide_flag, score_flag), ("credit-decider", "0", "1"))
+        self.assertIn("--requester credit-trust-score-approve@hydra-ops", argv)
+        self.assertIn('"expectedStatus":"user_verification_needed"', argv)
+
 
 class PartialWrites(Base):
     def test_failed_put_records_what_the_server_committed(self):

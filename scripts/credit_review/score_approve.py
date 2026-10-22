@@ -65,6 +65,7 @@ AUDIT_DIR = Path(os.environ.get("CREDIT_TRUST_SCORE_APPROVE_AUDIT_DIR", "/var/li
 ONE_PERSON_RULE = "review_role_credited_to_other_at_trusted_source"
 STAMPS_RULING = "data/credit-trust-system-fable-a1/ruling-band-hint-stamps-2026-10-20.md"
 BAND_HINT_ONLY = ["validator_band_hint"]         # Fable 15:40Z (1): this stamp alone is not an open ask
+REQUESTER = "credit-trust-score-approve@hydra-ops"  # muso-admin-api.sh is_credit_trust_score_approval
 HELD_STATUSES = (decide.UNVERIFIED, decide.UVN)  # Fable 15:40Z: selection = unverified + UVN
 READ_EXHAUSTED = "core rate-limited the reads (HTTP 429 after backoff); the rest next run"
 # QA @f88ed225 (1): the per-run candidate_limit must be applied AFTER paid-first ordering, so
@@ -815,7 +816,7 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
             decide.record_outcome(db, res.run_id, rid, "approve", "skipped:audit_unwritable", now)
         write_audit_sample_failed(res, now, exc)
         return res
-    writer = writer or decide.admin_writer()
+    writer = writer or decide.admin_writer(requester=REQUESTER, automation_flag="CREDIT_TRUST_SCORE_APPROVE")
     readback = readback or decide.status_readback()
     groups = [(st, [rid for rid in ids if status_of[rid] == st]) for st in HELD_STATUSES]
     who = {d.request_id: d for d in approve}
