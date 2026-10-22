@@ -965,15 +965,20 @@ class WriteFailed(admin_api.AdminError):
         self.body = body
 
 
-def admin_writer(script: str | None = None) -> Writer:
-    """PUT conditional-status through muso-admin-api.sh as the decider."""
+def admin_writer(script: str | None = None, requester: str = REQUESTER,
+                 automation_flag: str = "CREDIT_TRUST_DECIDE") -> Writer:
+    """PUT conditional-status through muso-admin-api.sh on the decider's admin login. The
+    requester + env flag pick the wrapper's standing authorization and the
+    X-Credit-Automation-Id core binds the grant to (decider by default; score-approve passes
+    its own)."""
     script = script or os.environ.get("CREDIT_REVIEW_ADMIN_SCRIPT", admin_api.DEFAULT_ADMIN_SCRIPT)
+    flags = {"CREDIT_TRUST_DECIDE": "0", "CREDIT_TRUST_SCORE_APPROVE": "0", automation_flag: "1"}
 
     def write(status: str, ids: list[str], expected: str) -> dict[str, Any]:
         body = json.dumps({"requestIds": ids, "status": status, "expectedStatus": expected},
                           separators=(",", ":"), sort_keys=True)
-        env = {**os.environ, "CREDIT_TRUST_DECIDE": "1", "MUSO_ADMIN_IDENTITY": ADMIN_IDENTITY}
-        proc = subprocess.run(["bash", script, "--requester", REQUESTER, "call", "PUT", CONDITIONAL_PATH, body],
+        env = {**os.environ, **flags, "MUSO_ADMIN_IDENTITY": ADMIN_IDENTITY}
+        proc = subprocess.run(["bash", script, "--requester", requester, "call", "PUT", CONDITIONAL_PATH, body],
                               capture_output=True, text=True, timeout=300, check=False, env=env)
         if proc.returncode != 0:
             raise admin_api.AdminError(f"PUT failed rc={proc.returncode}: {proc.stderr.strip()[:300]}")

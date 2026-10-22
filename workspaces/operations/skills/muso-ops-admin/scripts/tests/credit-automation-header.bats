@@ -23,7 +23,7 @@ setup() {
     export CODEX_HEALTH_LIB="$TEST_ROOT/codex-health.sh"
     printf '%s\n' 'codex_health_gate() { return 0; }' > "$CODEX_HEALTH_LIB"
     printf '%s\ndummy-token\n' "$(date +%s)" > "$ADMIN_TOKEN_CACHE_PATH"
-    unset CREDIT_TRUST_DECIDE UVN_POPULARITY_CRON REQUESTER_EMAIL
+    unset CREDIT_TRUST_DECIDE CREDIT_TRUST_SCORE_APPROVE UVN_POPULARITY_CRON REQUESTER_EMAIL
 
     mkdir -p "$TEST_ROOT/bin"
     export CURL_ARGV="$TEST_ROOT/curl.argv"
@@ -84,5 +84,36 @@ header_count() {
 
     conditional_put 1 ""
     [ "$status" -eq 0 ]
+    [ "$(header_count)" -eq 0 ]
+}
+
+score_put() {
+    # $1 = CREDIT_TRUST_SCORE_APPROVE value, $2 = requester
+    run --separate-stderr env CREDIT_TRUST_SCORE_APPROVE="$1" \
+        bash "$SCRIPT" --requester "$2" call PUT /admin/credit-requests/conditional-status "$BODY"
+}
+
+score_header_count() {
+    grep -cx "X-Credit-Automation-Id: credit-trust-score-approve" "$CURL_ARGV" || true
+}
+
+@test "score-approve's call carries its own X-Credit-Automation-Id, never the decider's" {
+    score_put 1 "credit-trust-score-approve@hydra-ops"
+    [ "$status" -eq 0 ]
+    [ "$(score_header_count)" -eq 1 ]
+    [ "$(header_count)" -eq 0 ]
+    grep -qx "Requester: credit-trust-score-approve@hydra-ops" "$CURL_ARGV"
+}
+
+@test "the score-approve header needs both its flag and its requester" {
+    score_put 0 "credit-trust-score-approve@hydra-ops"
+    [ "$status" -eq 0 ]
+    [ "$(score_header_count)" -eq 0 ]
+    score_put 1 "credit-trust-decide@hydra-ops"
+    [ "$status" -eq 0 ]
+    [ "$(score_header_count)" -eq 0 ]
+    conditional_put 1 "credit-trust-score-approve@hydra-ops"
+    [ "$status" -eq 0 ]
+    [ "$(score_header_count)" -eq 0 ]
     [ "$(header_count)" -eq 0 ]
 }
