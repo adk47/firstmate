@@ -66,13 +66,14 @@ def payloads(request_ids: list[str], query: Query = trino) -> tuple[list[dict[st
     rows = query(
         "SELECT CAST(cr.id AS varchar), cr.status, json_extract_scalar(cr.metadata, '$.withdrawal.by'), "
         "spotifytracktitle, json_format(CAST(spotifytrackartists AS json)), "
-        "array_join(CAST(credits AS array(varchar)), ', '), CAST(u.id AS varchar), lower(u.email), u.firstname, "
+        "credits, CAST(u.id AS varchar), lower(u.email), u.firstname, "
         "u.neptuneprofessionalid, u.auth0userid "
         "FROM postgresql_core.public.credit_requests cr JOIN postgresql_core.public.users u ON u.id = cr.userid "
         f"WHERE CAST(cr.id AS varchar) IN ({quoted})")
     found, out, refused, held = set(), [], [], []
-    for rid, status, by, title, artists, roles, uid, email, first, pro, auth in rows:
+    for rid, status, by, title, artists, raw_roles, uid, email, first, pro, auth in rows:
         found.add(rid)
+        roles = verify_notify.pg_text_array(raw_roles)  # a Postgres text[] literal on the replica
         if status != "rejected" or by != "requester":
             refused.append(f"{rid}: not a requester withdrawal (status {status}, withdrawal.by {by or '-'})")
             continue

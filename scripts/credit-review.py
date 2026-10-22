@@ -44,17 +44,20 @@ Subcommands:
            the gate's uvn-status campaign. Re-checks proof-on-file, the replica
            (still waiting), Intercom (documents / messaged in 7 days) and the
            ledger before each send. --segment paid|free, --max-users (canary 3),
-           at most 400 per UTC day. Same kill switch as verify-notify. Goes
+           at most 400 per UTC day. Kill switch:
+           /etc/hydra/credit-ops-notes.disabled (not verify-notify's). Goes
            in the user's most recent open conversation (14 days) if any, else email.
            --campaign status-doc-received|status-team-review sends the no-ask
            status notes instead (rules: verify-request-notes.md).
   withdrawal-confirm
            Firstmate 061: confirm requester-withdrawn credit requests through the
            gate's withdrawal-confirm campaign. --request-ids id[:conversation],...
-           (with a conversation: in that thread; without: email). Same kill switch.
+           (with a conversation: in that thread; without: email). Kill switch:
+           /etc/hydra/credit-ops-notes.disabled.
   email-changed
            Firstmate 073: the threaded "sign-in email updated" reply in the
            ticket's own conversation, once per ticket, through the same gate.
+           Kill switch: /etc/hydra/credit-ops-notes.disabled.
   removal-notice
            Tell owners of credits WE removed (non-self; fraud removals are
            silent by captain order) which credit and role, why, and how to
@@ -115,6 +118,10 @@ KILL_SWITCH = Path(os.environ.get("CREDIT_REVIEW_KILL_SWITCH", "/etc/hydra/credi
 # overwrites; the low-balance guard below still applies once it is on.
 VERIFY_NOTIFY_KILL_SWITCH = Path(os.environ.get("CREDIT_VERIFY_NOTIFY_KILL_SWITCH",
                                                 "/etc/hydra/credit-verify-notify.disabled"))
+# uvn-status (and the status notes), withdrawal-confirm and email-changed have their own switch
+# (firstmate 117): verify-live's switch never stops them, and this one never stops verify-live.
+CREDIT_OPS_NOTES_KILL_SWITCH = Path(os.environ.get("CREDIT_OPS_NOTES_KILL_SWITCH",
+                                                   "/etc/hydra/credit-ops-notes.disabled"))
 MODEL_ENABLE_FILE = Path(os.environ.get("CREDIT_REVIEW_MODEL_ENABLE_FILE", "/etc/hydra/credit-review-model.enabled"))
 
 
@@ -501,8 +508,8 @@ def cmd_verify_notify(args: argparse.Namespace) -> int:
 
 
 def cmd_uvn_status(args: argparse.Namespace) -> int:
-    if VERIFY_NOTIFY_KILL_SWITCH.exists():
-        log(f"verify-notify kill switch present at {VERIFY_NOTIFY_KILL_SWITCH}; nothing sent")
+    if CREDIT_OPS_NOTES_KILL_SWITCH.exists():
+        log(f"credit-ops-notes kill switch present at {CREDIT_OPS_NOTES_KILL_SWITCH}; nothing sent")
         print("NO_REPLY")
         return 0
     if args.preview:
@@ -520,8 +527,8 @@ def cmd_uvn_status(args: argparse.Namespace) -> int:
 
 
 def cmd_withdrawal_confirm(args: argparse.Namespace) -> int:
-    if VERIFY_NOTIFY_KILL_SWITCH.exists():
-        log(f"verify-notify kill switch present at {VERIFY_NOTIFY_KILL_SWITCH}; nothing sent")
+    if CREDIT_OPS_NOTES_KILL_SWITCH.exists():
+        log(f"credit-ops-notes kill switch present at {CREDIT_OPS_NOTES_KILL_SWITCH}; nothing sent")
         print("NO_REPLY")
         return 0
     report, refused, held, deferred = withdrawal_confirm.run([x for x in args.request_ids.split(",") if x.strip()],
@@ -540,8 +547,8 @@ def cmd_withdrawal_confirm(args: argparse.Namespace) -> int:
 
 
 def cmd_email_changed(args: argparse.Namespace) -> int:
-    if VERIFY_NOTIFY_KILL_SWITCH.exists():
-        log(f"verify-notify kill switch present at {VERIFY_NOTIFY_KILL_SWITCH}; nothing sent")
+    if CREDIT_OPS_NOTES_KILL_SWITCH.exists():
+        log(f"credit-ops-notes kill switch present at {CREDIT_OPS_NOTES_KILL_SWITCH}; nothing sent")
         print("NO_REPLY")
         return 0
     report, refused = withdrawal_confirm.email_changed(user_id=args.user_id, conversation=args.conversation,
@@ -771,7 +778,7 @@ def parser() -> argparse.ArgumentParser:
                          "no-ask: status-team-review's Copy B0, without the proof sentence (firstmate 106)")
     us.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
     us.add_argument("--max-users", type=int, default=50, help="messages this run (canary: 3)")
-    us.add_argument("--preview", default=None, help="dry-run: write each rendered note to this dir (0700)")
+    us.add_argument("--preview", default=None, help="dry-run: write each user's rendered note to this dir as <user id>.txt (0700)")
     us.add_argument("--proof-on-file", default=None, metavar="FILE")
     us.set_defaults(fn=cmd_uvn_status)
 

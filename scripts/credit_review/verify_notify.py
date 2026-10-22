@@ -622,7 +622,8 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
         finally:
             os.unlink(path)
         if preview_dir and mode != "apply" and res.returncode == 0:
-            out_path = os.path.join(preview_dir, f"{i + 1:05d}.txt")
+            uid = re.sub(r"[^A-Za-z0-9-]", "", str(p["user"].get("id") or ""))[:64]
+            out_path = os.path.join(preview_dir, f"{uid or f'{i + 1:05d}'}.txt")
             fdp = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fdp, "w", encoding="utf-8") as fh:
                 fh.write(res.stdout)
@@ -653,6 +654,47 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
 
 AUTH_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 PRO_ID_RE = re.compile(r"^[A-Za-z0-9._|-]{1,128}$")
+
+
+_odd_array_logged = False
+
+
+def pg_text_array(raw: Any) -> str:
+    """credit_requests.credits as Trino returns it: a Postgres text[] LITERAL in a varchar
+    (e.g. '{"Record Label"}' or '{Mixing,"Mastering Engineer"}'; Trino cannot CAST it to
+    array(varchar)). Returns the roles joined with ', ' ('' when NULL or empty). Any other
+    shape is '' too (the request is then incomplete and its user held, never sent on a
+    surprise shape), logged once per process."""
+    global _odd_array_logged
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    if not (s.startswith("{") and s.endswith("}")):
+        if not _odd_array_logged:
+            _odd_array_logged = True
+            from .runner import log
+            log(f"credit_requests.credits is not a Postgres text[] literal ({s[:60]!r}); "
+                "its request is held as incomplete")
+        return ""
+    body, out, cur, quoted, esc, had = s[1:-1], [], [], False, False, False
+    for ch in body:
+        if esc:
+            cur.append(ch)
+            esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == '"':
+            quoted = not quoted
+            had = True
+        elif ch == "," and not quoted:
+            out.append("".join(cur))
+            cur, had = [], False
+        else:
+            cur.append(ch)
+    if cur or had or out:
+        out.append("".join(cur))
+    vals = [v.strip() for v in out]
+    return ", ".join(v for v in vals if v and v.upper() != "NULL")
 
 
 def professional_id(raw: Any) -> str:

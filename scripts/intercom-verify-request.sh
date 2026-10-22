@@ -782,7 +782,12 @@ RENDER_JQ=""
 IFS= read -r -d '' RENDER_JQ <<'JQ' || true
 def esc: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\""; "&quot;") | gsub("'"; "&#39;");
 def andjoin: if length <= 1 then (.[0] // "") else (.[0:-1] | join(", ")) + " and " + .[-1] end;
-def line: "\(.role) on \"\(.track_title)\" by \(.artist_name)";
+# A title that already carries its own quote marks at both ends is shown as it is.
+def qt: if test("^[\"“”„«»'‘’‚].*[\"“”„«»'‘’‚]$") then . else "\"" + . + "\"" end;
+# "Mixing, Mastering" -> "Mixing and Mastering credits"; one role stays "Mixing credit".
+def role_credits: [ split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0) ] as $r
+  | if ($r | length) > 1 then "\($r | andjoin) credits" else "\(.) credit" end;
+def line: "\(.role) on \(.track_title | qt) by \(.artist_name)";
 def listed($c; $maxl): [ $c[0:$maxl][] | line ] + (if ($c|length) > $maxl then ["and \(($c|length) - $maxl) more"] else [] end);
 def sig: [ {p: "Thank you,"}, {p: "Caroline, Muso Support"} ];
 def docs: {
@@ -849,8 +854,8 @@ def live_initial($fn; $c; $maxl; $windowed; $due):
      end) as $p3
   | if $n == 1 then
       $c[0] as $x
-      | { subject: "We added your \($x.role) credit on \"\($x.track_title)\". Please help us verify it",
-          segs: [ {p: "Hi \($fn), good news: your \($x.role) credit on \"\($x.track_title)\" by \($x.artist_name) is now live on your Muso profile. We add credits on trust and then verify them, so please help us confirm this one."},
+      | { subject: "We added your \($x.role) credit on \($x.track_title | qt). Please help us verify it",
+          segs: [ {p: "Hi \($fn), good news: your \($x.role) credit on \($x.track_title | qt) by \($x.artist_name) is now live on your Muso profile. We add credits on trust and then verify them, so please help us confirm this one."},
                   {p: $p2}, {p: $p3},
                   {p: "Thanks for helping us keep credits accurate."}, {p: "Caroline, Muso Support"} ] }
     else
@@ -863,8 +868,8 @@ def live_initial($fn; $c; $maxl; $windowed; $due):
 def follow_intro($fn; $c; $maxl):
   ($c | length) as $n
   | if $n == 1 then
-      { subject: "Following up on your \($c[0].role) credit for \"\($c[0].track_title)\"",
-        segs: [ {p: "Hi \($fn), a quick follow-up on your \($c[0].role) credit for \"\($c[0].track_title)\" (\($c[0].artist_name)). We haven't received a document yet."} ] }
+      { subject: "Following up on your \($c[0].role) credit for \($c[0].track_title | qt)",
+        segs: [ {p: "Hi \($fn), a quick follow-up on your \($c[0].role) credit for \($c[0].track_title | qt) (\($c[0].artist_name)). We haven't received a document yet."} ] }
     else
       { subject: "Following up on \($n) of your credits on Muso",
         segs: [ {p: "Hi \($fn), a quick follow-up on the \($n) credits from my earlier note (list below). We haven't received a document yet."},
@@ -885,12 +890,12 @@ def after_rejection($fn; $c; $maxl; $due):
      else "If you have one, such as a split sheet, a label or publisher statement or a session invoice, reply to this message with it by \($due)." end) as $ask
   | if $n == 1 and ($d|length) == 1 then
       $c[0] as $x
-      | { subject: "About the document for your \($x.role) credit on \"\($x.track_title)\"",
-          segs: ([ {p: "Hi \($fn), thanks for sending your document. It didn't confirm your \($x.role) credit on \"\($x.track_title)\" by \($x.artist_name) because \($x | rejection_text). \($ask)"} ] + sig) }
+      | { subject: "About the document for your \($x.role) credit on \($x.track_title | qt)",
+          segs: ([ {p: "Hi \($fn), thanks for sending your document. It didn't confirm your \($x.role) credit on \($x.track_title | qt) by \($x.artist_name) because \($x | rejection_text). \($ask)"} ] + sig) }
     elif $n == 1 then
       $c[0] as $x
-      | { subject: "About your \($x.role) credit on \"\($x.track_title)\"",
-          segs: ([ {p: "Hi \($fn), thanks for your reply. We still need a document that shows your \($x.role) credit on \"\($x.track_title)\" by \($x.artist_name). \($ask)"} ] + sig) }
+      | { subject: "About your \($x.role) credit on \($x.track_title | qt)",
+          segs: ([ {p: "Hi \($fn), thanks for your reply. We still need a document that shows your \($x.role) credit on \($x.track_title | qt) by \($x.artist_name). \($ask)"} ] + sig) }
     elif ($r|length) == 0 then
       { subject: "About the documents for \($n) of your credits on Muso",
         segs: ([ {p: "Hi \($fn), thanks for sending your documents. They didn't confirm these \($n) credits:"},
@@ -914,8 +919,8 @@ def past_initial($fn; $c; $maxl):
   | (["mix_master","producer","writer","engineer","musician","studio_org","anr","other"] - (["mix_master","producer","writer","engineer","musician","studio_org","anr","other"] - [$c[].role_families[]])) as $fams
   | docs as $D
   | (if $n == 1 then
-       { subject: "Quick check on your \($c[0].role) credit for \"\($c[0].track_title)\" (\($c[0].artist_name))",
-         segs: [ {p: "Hi \($fn), I'm Caroline from Muso support. We're doing a routine review of credits that were approved automatically, and one of yours came up: your \($c[0].role) credit on \"\($c[0].track_title)\" by \($c[0].artist_name)."},
+       { subject: "Quick check on your \($c[0].role) credit for \($c[0].track_title | qt) (\($c[0].artist_name))",
+         segs: [ {p: "Hi \($fn), I'm Caroline from Muso support. We're doing a routine review of credits that were approved automatically, and one of yours came up: your \($c[0].role) credit on \($c[0].track_title | qt) by \($c[0].artist_name)."},
                  {p: "Nothing has changed on your profile; the credit is still visible. We'd just like one document that shows your role on this recording."} ] }
      else
        { subject: "Quick check on \($n) of your credits on Muso",
@@ -939,11 +944,11 @@ def policy_text: {
 # your..." reads as a verdict on the person.
 def removal_sentence:
   if .reason == "misattributed" then
-    "The public credit data for \"\(.track_title)\" by \(.artist_name) lists a different person for \(.role) (\(.source_label)\(if .evidence_url != "" then ": \(.evidence_url)" else "" end)), so we've removed the \(.role) credit from your profile."
+    "The public credit data for \(.track_title | qt) by \(.artist_name) lists a different person for \(.role) (\(.source_label)\(if .evidence_url != "" then ": \(.evidence_url)" else "" end)), so we've removed the \(.role) credit from your profile."
   elif .reason == "duplicate" then
-    "Your \(.role) credit on \"\(.track_title)\" by \(.artist_name) duplicated a credit that is still on your profile, so we've removed the duplicate."
+    "Your \(.role) credit on \(.track_title | qt) by \(.artist_name) duplicated a credit that is still on your profile, so we've removed the duplicate."
   else
-    "Your \(.role) credit on \"\(.track_title)\" by \(.artist_name) did not meet our credit guidelines (\(policy_text)), so we've removed it from your profile."
+    "Your \(.role) credit on \(.track_title | qt) by \(.artist_name) did not meet our credit guidelines (\(policy_text)), so we've removed it from your profile."
   end;
 # Take-back notice, verbatim from docs/credit-verification/retro-drafts/takeback-notice.md.
 def tb_names: .other_names | if length <= 1 then (.[0] // "another person") else (.[0:-1] | join(", ")) + " and " + .[-1] end;
@@ -956,15 +961,15 @@ def takeback_notice($fn; $c0; $maxl):
   | "If you did this work, reply to this message with one document that shows it, for example an invoice, a work order, or an email from the artist, label or studio that names the track and your role. If the document checks out, we will put the credit back. Your other credits are not affected." as $dispute
   | if $n == 1 then
       $c[0] as $x
-      | { subject: "About your \($x.role) credit on \"\($x.track_title)\"",
+      | { subject: "About your \($x.role) credit on \($x.track_title | qt)",
           segs: [ {p: "Hi \($fn),"},
-                  {p: "I'm Caroline from Muso support. The public credits for \"\($x.track_title)\" by \($x.artist_name) name \($x | tb_names) for \($x.role) (\($x | tb_cite)), so we have removed the \($x.role) credit from your profile."},
+                  {p: "I'm Caroline from Muso support. The public credits for \($x.track_title | qt) by \($x.artist_name) name \($x | tb_names) for \($x.role) (\($x | tb_cite)), so we have removed the \($x.role) credit from your profile."},
                   {p: $dispute}, {p: "Thank you,"}, {p: "Caroline"}, {p: "Muso Support"} ] }
     else
       { subject: "About \($n) of your credits on Muso",
         segs: [ {p: "Hi \($fn),"},
                 {p: "I'm Caroline from Muso support. The public credits name someone else for these roles, so we have removed them from your profile:"},
-                {ul: ([ $c[0:$maxl][] | "\(.role) on \"\(.track_title)\" by \(.artist_name): \(tb_names) (\(tb_cite))" ]
+                {ul: ([ $c[0:$maxl][] | "\(.role) on \(.track_title | qt) by \(.artist_name): \(tb_names) (\(tb_cite))" ]
                       + (if $n > $maxl then ["and \($n - $maxl) more"] else [] end))},
                 {p: $dispute}, {p: "Thank you,"}, {p: "Caroline"}, {p: "Muso Support"} ] }
     end;
@@ -978,11 +983,11 @@ def uvn_status($fn; $c; $maxl):
   | if $n == 1 then
       $c[0] as $x
       | { subject: "Your Muso credit request: one thing we still need",
-          segs: ([ {p: "Hi \($fn), a quick status update on your credit request for \"\($x.track_title)\" by \($x.artist_name): it's waiting on one thing from you, something that shows your \($x.role) credit."},
+          segs: ([ {p: "Hi \($fn), a quick status update on your credit request for \($x.track_title | qt) by \($x.artist_name): it's waiting on one thing from you, something that shows your \($x.role | role_credits)."},
                   {p: "Any one of these works (a screenshot is fine):"}, {ul: uvn_list},
                   {p: "Just reply to this message with it. Nothing else is needed from you. You'll see the credit on your profile as soon as it's approved, and we'll let you know here if anything else is needed."} ] + sig) }
     else
-      ([ $c[0:$maxl][] | "\"\(.track_title)\"" ]) as $t
+      ([ $c[0:$maxl][] | "\(.track_title | qt)" ]) as $t
       | { subject: "Your Muso credit requests: one thing we still need",
           segs: ([ {p: "Hi \($fn), a quick status update on your credit requests for \($t | andjoin)\(if $n > $maxl then " (and \($n - $maxl) more)" else "" end): they're waiting on one thing from you, something that shows your role on each."},
                   {p: "Any one of these works (a screenshot is fine):"}, {ul: uvn_list},
@@ -991,11 +996,11 @@ def uvn_status($fn; $c; $maxl):
 # withdrawal-confirm (firstmate 061, verbatim; subject added for the email channel).
 def withdrawal_confirm($c):
   $c[0] as $x
-  | { subject: "Your Muso credit request for \"\($x.track_title)\"",
-      segs: [ {p: "Hi! We've withdrawn your credit request for \($x.role) on \"\($x.track_title)\", as you asked. Nothing else changes on your profile. If you need anything else, just reply here."} ] };
+  | { subject: "Your Muso credit request for \($x.track_title | qt)",
+      segs: [ {p: "Hi! We've withdrawn your credit request for \($x.role) on \($x.track_title | qt), as you asked. Nothing else changes on your profile. If you need anything else, just reply here."} ] };
 # Status notes (firstmate 070 verbatim; 071 as credit-trust-llm-t01 drafted). Not asks.
 def req_s($n): if $n == 1 then "request" else "requests" end;
-def titles($c; $maxl): ([ $c[0:$maxl][] | "\"\(.track_title)\"" ] | andjoin) + (if ($c|length) > $maxl then " and \(($c|length) - $maxl) more" else "" end);
+def titles($c; $maxl): ([ $c[0:$maxl][] | "\(.track_title | qt)" ] | andjoin) + (if ($c|length) > $maxl then " and \(($c|length) - $maxl) more" else "" end);
 def status_doc_received($fn; $c; $maxl):
   { subject: "Your Muso credit \(req_s($c|length)): an update",
     segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): we have the document you sent us, and our team is reviewing it. Nothing else is needed from you right now, and you'll see each credit on your profile as soon as it's approved."} ] };
@@ -1018,7 +1023,7 @@ def removal_notice($fn; $c; $maxl):
   | "If you think this is a mistake, reply to this message with a document that names you for the role: a split sheet, a label or distributor statement, a PRO or MLC registration, a studio or session invoice, or liner notes or an official release page (PDF, PNG or JPG). We'll review it and can restore the credit." as $dispute
   | if $n == 1 then
       $c[0] as $x
-      | { subject: "An update about your \($x.role) credit on \"\($x.track_title)\"",
+      | { subject: "An update about your \($x.role) credit on \($x.track_title | qt)",
           segs: ([ {p: "Hi \($fn), I'm Caroline from Muso support. \($x | removal_sentence)"}, {p: $dispute} ] + sig) }
     else
       { subject: "An update about \($n) credits on your Muso profile",

@@ -231,13 +231,16 @@ def uvn_requests(user_ids: list[int], query: Query = trino,
     reqs: dict[int, list[dict[str, Any]]] = {}
     for i in range(0, len(user_ids), 500):
         chunk = user_ids[i:i + 500]
-        for rid, uid, pid, tid, title, artists, credits, pop, *extra in query(
+        for rid, uid, pid, tid, title, artists, raw_credits, pop, *extra in query(
                 "SELECT CAST(id AS varchar), userid, CAST(profileid AS varchar), CAST(trackid AS varchar), "
                 "spotifytracktitle, json_format(CAST(spotifytrackartists AS json)), "
-                "array_join(CAST(credits AS array(varchar)), ', '), spotifypopularity, "
+                "credits, spotifypopularity, "
                 "json_format(CAST(verificationdata AS json)), json_format(CAST(metadata AS json)) "
                 "FROM postgresql_core.public.credit_requests "
                 f"WHERE status IN ({in_statuses}) AND deletedat IS NULL AND userid IN ({_ids(chunk)})"):
+            # credits is a Postgres text[] literal in a varchar on the replica (2026-10-22: the
+            # former CAST(credits AS array(varchar)) fails on Trino, so every live query broke).
+            credits = verify_notify.pg_text_array(raw_credits)
             try:
                 artist = next((a.get("name") for a in json.loads(artists or "[]") if isinstance(a, dict) and a.get("name")), "")
             except ValueError:

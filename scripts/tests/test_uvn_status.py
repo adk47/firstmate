@@ -197,7 +197,7 @@ def replica(users, status=None, requests=None, no_auth=(), no_pro=(), verificati
                     for u in sorted(ids & set(users))]
         wanted = set(re.findall(r"'([a-z_]+)'", re.search(r"status IN \(([^)]*)\)", sql).group(1)))
         return [[rid, str(u), "p", "t", rows.get(rid, {}).get("title", f"Song {rid}"), '[{"name":"Art"}]',
-                 rows.get(rid, {}).get("role", "Mixing"),
+                 rows.get(rid, {}).get("role", "{Mixing}"),
                  rows.get(rid, {}).get("pop", "5"), json.dumps(verification.get(rid, {})),
                  json.dumps(rows.get(rid, {}).get("metadata", {}))]
                 for u in sorted(ids & set(users)) if status.get(u, "user_verification_needed") in wanted
@@ -221,8 +221,8 @@ class UvnStatusTests(unittest.TestCase):
         self.write_list()
         self.q = query({
             "users": [["1", "a@x.com", "Ann", pro(1), auth(1)], ["4", "d@x.com", "Dee", pro(4), auth(4)]],
-            "requests": [["r1", "1", "p1", "t1", "Low", '[{"name":"Art"}]', "Mixing", "10"],
-                         ["r2", "1", "p1", "t2", "High", '[{"name":"Art"}]', "Mixing, Mastering", "80"]],
+            "requests": [["r1", "1", "p1", "t1", "Low", '[{"name":"Art"}]', "{Mixing}", "10"],
+                         ["r2", "1", "p1", "t2", "High", '[{"name":"Art"}]', "{Mixing,Mastering}", "80"]],
         })
 
     def write_list(self, age_h=2):
@@ -684,6 +684,24 @@ class UvnStatusTests(unittest.TestCase):
         self.assertEqual(gate.calls, [])
         self.assertGreater(rep.over_daily_max, 0)
 
+    def test_dry_run_preview_writes_one_file_per_user_named_by_user_id(self):
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in (1, 2, 3)]
+        self.write_list()
+
+        class Renders(FakeGate):
+            def __call__(self, argv):
+                super().__call__(argv)
+                uid = self.calls[-1][1]["user"]["id"]
+                return subprocess.CompletedProcess(argv, 0, f"DRY-RUN uvn-status initial email credits=1\nnote for {uid}\n", "")
+        prev = self.dir / "preview"
+        prev.mkdir()
+        rep, gate = self.run_(mode="dry-run", gate=Renders(), query=replica((1, 2, 3)), preview_dir=str(prev))
+        self.assertTrue(all("--dry-run" in a for a, _ in gate.calls))
+        self.assertEqual(sorted(os.listdir(prev)), ["1.txt", "2.txt", "3.txt"])
+        self.assertEqual([(prev / f"{u}.txt").read_text().splitlines()[1] for u in (1, 2, 3)],
+                         ["note for 1", "note for 2", "note for 3"])
+        self.assertEqual(rep.validated, 3)
+
     def test_dry_run_validates_without_sending(self):
         _, gate = self.run_(mode="dry-run")
         self.assertIn("--validate", gate.calls[0][0])
@@ -1045,6 +1063,46 @@ class UvnLedgerTests(unittest.TestCase):
             self.assertEqual((r["result"], r.get("reason")), ("user_done", "already_asked"))
 
 
+class ReplicaShapeTests(unittest.TestCase):
+    def test_uvn_requests_parses_the_credits_literal_and_never_casts_it(self):
+        seen = []
+
+        def q(sql):
+            seen.append(sql)
+            return [["r1", "7", "p", "t", "Song", '[{"name":"Art"}]', '{"Record Label"}', "12", "{}", "{}"],
+                    ["r2", "7", "p", "t", "Other", '[{"name":"Art"}]', '{Mixing,Mastering}', "40", "{}", "{}"]]
+        got = uvn_status.uvn_requests([7], q)
+        self.assertNotIn("array(varchar)", seen[0])
+        self.assertEqual(sorted(r["role"] for r in got[7]), ["Mixing, Mastering", "Record Label"])
+        self.assertFalse(any(r["_incomplete"] for r in got[7]))
+
+    def test_pg_text_array(self):
+        f = verify_notify.pg_text_array
+        self.assertEqual(f('{"Record Label"}'), "Record Label")
+        self.assertEqual(f('{Mixing,"Mastering Engineer"}'), "Mixing, Mastering Engineer")
+        self.assertEqual(f("{}"), "")
+        self.assertEqual(f(None), "")
+        self.assertEqual(f('{"Mixing, Mastering",NULL,""}'), "Mixing, Mastering")
+        self.assertEqual(f('{"say \\"hi\\""}'), 'say "hi"')
+
+    def test_any_other_shape_is_no_role_holds_the_user_and_is_logged_once(self):
+        from credit_review import runner
+        logged = []
+        saved_log, saved_flag = runner.log, verify_notify._odd_array_logged
+        runner.log, verify_notify._odd_array_logged = logged.append, False
+        try:
+            for odd in ("Mixing, Mastering", '["Mixing"]', "{Mixing"):
+                self.assertEqual(verify_notify.pg_text_array(odd), "")
+            got = uvn_status.uvn_requests([7], lambda sql: [
+                ["r1", "7", "p", "t", "Song", '[{"name":"Art"}]', '["Mixing"]', "12", "{}", "{}"]])
+        finally:
+            runner.log, verify_notify._odd_array_logged = saved_log, saved_flag
+        self.assertEqual(len(logged), 1)
+        self.assertIn("not a Postgres text[] literal", logged[0])
+        self.assertEqual((got[7][0]["role"], got[7][0]["_incomplete"]), ("", True))
+        self.assertEqual(uvn_status.plan({"r1"}, got[7], True), ("incomplete_fields", []))
+
+
 class WithdrawalConfirmTests(unittest.TestCase):
     RID = "a9f8e7c0-8183-47e2-8f9e-f27338192f48"
     OTHER = "0499ded8-7d04-4335-8aeb-02350d53b784"
@@ -1054,8 +1112,8 @@ class WithdrawalConfirmTests(unittest.TestCase):
         self.ledger = str(Path(tempfile.mkdtemp(prefix="wc-")) / "ledger.sqlite3")
 
     def test_only_requester_withdrawals_are_confirmed_with_role_and_title_from_the_row(self):
-        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "Mastering", "12609", "a@x.com", "Ann", pro(12609), auth(12609)],
-                [self.OTHER, "rejected", None, "obsessed", "[]", "Mixing", "104906", "b@x.com", "", pro(104906), auth(104906)]]
+        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "{Mastering}", "12609", "a@x.com", "Ann", pro(12609), auth(12609)],
+                [self.OTHER, "rejected", None, "obsessed", "[]", "{Mixing}", "104906", "b@x.com", "", pro(104906), auth(104906)]]
         gate = FakeGate()
         rep, refused, _, _ = withdrawal_confirm.run([self.RID, self.OTHER], mode="apply", query=lambda sql: rows,
                                               runner=gate, wrapper="/gate")
@@ -1067,9 +1125,28 @@ class WithdrawalConfirmTests(unittest.TestCase):
         self.assertEqual(rep.sent_notes, 1)
         self.assertTrue(any("not a requester withdrawal" in r for r in refused))
 
+    def test_the_replica_credits_literal_is_parsed_and_never_cast_in_sql(self):
+        """2026-10-22 prod: credit_requests.credits reaches Trino as a Postgres text[] literal in
+        a varchar; CAST(credits AS array(varchar)) failed every live query."""
+        seen = []
+        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', '{Mixing,"Mastering Engineer"}',
+                 "12609", "a@x.com", "Ann", pro(12609), auth(12609)]]
+
+        def q(sql):
+            seen.append(sql)
+            return rows
+        gate = FakeGate()
+        withdrawal_confirm.run([self.RID], mode="apply", query=q, runner=gate, wrapper="/gate")
+        self.assertNotIn("array(varchar)", seen[0])
+        self.assertEqual(gate.calls[0][1]["credits"][0]["role"], "Mixing, Mastering Engineer")
+        rows[0][5] = "Mixing, Mastering Engineer"  # not a text[] literal: no role, never sent
+        gate = FakeGate()
+        _, refused, _, _ = withdrawal_confirm.run([self.RID], mode="apply", query=q, runner=gate, wrapper="/gate")
+        self.assertEqual((gate.calls, refused), ([], [f"{self.RID}: no title, role or account email"]))
+
     def test_a_request_with_a_conversation_is_answered_in_that_thread(self):
-        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "Mastering", "12609", "a@x.com", "Ann", pro(12609), auth(12609)],
-                [self.OTHER, "rejected", "requester", "obsessed", "[]", "Mixing", "104906", "b@x.com", "", pro(104906), auth(104906)]]
+        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "{Mastering}", "12609", "a@x.com", "Ann", pro(12609), auth(12609)],
+                [self.OTHER, "rejected", "requester", "obsessed", "[]", "{Mixing}", "104906", "b@x.com", "", pro(104906), auth(104906)]]
         gate = FakeGate()
         withdrawal_confirm.run([f"{self.RID}:215476464925099", self.OTHER], mode="apply", query=lambda sql: rows,
                                runner=gate, wrapper="/gate")
@@ -1081,16 +1158,60 @@ class WithdrawalConfirmTests(unittest.TestCase):
         self.assertEqual(len(gate.calls), 2)
         self.assertTrue(refused)
 
-    def test_the_kill_switch_stops_withdrawal_confirm(self):
+    OPS_COMMANDS = (["uvn-status", "--list", "/nonexistent/list.json", "--segment", "paid", "--mode", "apply"],
+                    ["withdrawal-confirm", "--request-ids", RID, "--mode", "apply"],
+                    ["email-changed", "--user-id", "42", "--conversation", "777", "--ticket", "t1", "--mode", "apply"])
+
+    def test_the_ops_notes_kill_switch_stops_uvn_status_withdrawal_confirm_and_email_changed(self):
         with tempfile.TemporaryDirectory() as d:
-            ks = Path(d) / "credit-verify-notify.disabled"
+            ks = Path(d) / "credit-ops-notes.disabled"
             ks.write_text("")
-            env = {**os.environ, "CREDIT_VERIFY_NOTIFY_KILL_SWITCH": str(ks),
-                   "CREDIT_VERIFY_NOTIFY_WRAPPER": str(Path(d) / "no-gate")}
-            p = subprocess.run([sys.executable, str(ROOT / "scripts" / "credit-review.py"), "withdrawal-confirm",
-                                "--request-ids", self.RID, "--mode", "apply"],
-                               capture_output=True, text=True, env=env, timeout=60, check=False)
-        self.assertEqual((p.returncode, p.stdout.strip()), (0, "NO_REPLY"), p.stderr)
+            env = {**os.environ, "CREDIT_OPS_NOTES_KILL_SWITCH": str(ks),
+                   "CREDIT_VERIFY_NOTIFY_KILL_SWITCH": str(Path(d) / "absent"),
+                   "CREDIT_VERIFY_NOTIFY_WRAPPER": str(Path(d) / "no-gate"),
+                   "CREDIT_REVIEW_LOG": str(Path(d) / "run.log")}
+            for argv in self.OPS_COMMANDS:
+                p = subprocess.run([sys.executable, str(ROOT / "scripts" / "credit-review.py"), *argv],
+                                   capture_output=True, text=True, env=env, timeout=60, check=False)
+                self.assertEqual((p.returncode, p.stdout.strip()), (0, "NO_REPLY"), (argv[0], p.stderr))
+
+    def test_only_the_ops_notes_switch_stops_them_never_the_verify_notify_one(self):
+        import contextlib
+        import importlib.util
+        import io
+        spec = importlib.util.spec_from_file_location("credit_review_cli_ks", ROOT / "scripts" / "credit-review.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        ran = []
+        saved = (cli.uvn_status.run, cli.withdrawal_confirm.run, cli.withdrawal_confirm.email_changed)
+        cli.uvn_status.run = lambda **kw: ran.append("uvn-status") or uvn_status.UvnReport()
+        cli.withdrawal_confirm.run = lambda ids, **kw: ran.append("withdrawal-confirm") or (verify_notify.Report(), [], [], [])
+        cli.withdrawal_confirm.email_changed = lambda **kw: ran.append("email-changed") or (verify_notify.Report(), [])
+
+        def outputs():
+            outs = []
+            for argv in self.OPS_COMMANDS:
+                args = cli.parser().parse_args(argv)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    args.fn(args)
+                outs.append(out.getvalue().strip())
+            return outs
+
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                on, off = Path(d) / "present.disabled", Path(d) / "absent.disabled"
+                on.write_text("")
+                cli.VERIFY_NOTIFY_KILL_SWITCH, cli.CREDIT_OPS_NOTES_KILL_SWITCH = on, off
+                outs = outputs()
+                self.assertEqual(ran, ["uvn-status", "withdrawal-confirm", "email-changed"])
+                self.assertNotIn("NO_REPLY", outs)
+                ran.clear()
+                cli.VERIFY_NOTIFY_KILL_SWITCH, cli.CREDIT_OPS_NOTES_KILL_SWITCH = off, on
+                self.assertEqual(outputs(), ["NO_REPLY"] * 3)
+                self.assertEqual(ran, [])
+        finally:
+            cli.uvn_status.run, cli.withdrawal_confirm.run, cli.withdrawal_confirm.email_changed = saved
 
     def test_email_changed_is_a_threaded_reply_for_the_account(self):
         gate = FakeGate(out="POSTED comment conversation=215476442050417 message=1 credits=1")
@@ -1131,7 +1252,7 @@ class WithdrawalConfirmTests(unittest.TestCase):
                         ledger_path=self.ledger, post=Poster(ok=False), **kw)
 
         with tempfile.TemporaryDirectory() as d:
-            cli.VERIFY_NOTIFY_KILL_SWITCH = Path(d) / "absent"
+            cli.CREDIT_OPS_NOTES_KILL_SWITCH = Path(d) / "absent"
             cli.withdrawal_confirm.email_changed = fake
             try:
                 args = cli.parser().parse_args(["email-changed", "--user-id", "42", "--conversation", "777",
@@ -1170,9 +1291,9 @@ class WithdrawalConfirmTests(unittest.TestCase):
 
     def test_withdrawal_passes_the_professional_id_and_holds_only_accounts_without_one(self):
         legacy_pro = "0c9e7b3a-5d2f-4a18-9e6b-3f1d8c2a7b54"
-        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "Mastering", "12609", "a@x.com", "Ann", pro(12609), auth(12609)],
-                [self.OTHER, "rejected", "requester", "obsessed", "[]", "Mixing", "104906", "b@x.com", "", legacy_pro, None],
-                [self.THIRD, "rejected", "requester", "x", "[]", "Mixing", "5", "c@x.com", "", None, None]]
+        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "{Mastering}", "12609", "a@x.com", "Ann", pro(12609), auth(12609)],
+                [self.OTHER, "rejected", "requester", "obsessed", "[]", "{Mixing}", "104906", "b@x.com", "", legacy_pro, None],
+                [self.THIRD, "rejected", "requester", "x", "[]", "{Mixing}", "5", "c@x.com", "", None, None]]
         gate = FakeGate()
         rep, refused, held, _ = withdrawal_confirm.run([self.RID, self.OTHER, self.THIRD], mode="apply",
                                                        query=lambda sql: rows, runner=gate, wrapper="/gate")
@@ -1181,7 +1302,7 @@ class WithdrawalConfirmTests(unittest.TestCase):
         self.assertEqual((rep.no_professional_id, refused, held), (1, [], [self.THIRD]))
 
     def test_thread_pre_flight_reports_the_gates_refusal_and_read_failures_apart(self):
-        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "Mastering", "12609", "a@x.com", "Ann", pro(12609), auth(12609)]]
+        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "{Mastering}", "12609", "a@x.com", "Ann", pro(12609), auth(12609)]]
 
         class Gate(FakeGate):
             def __init__(self, rc, err):
@@ -1212,7 +1333,7 @@ class WithdrawalConfirmTests(unittest.TestCase):
     def test_in_thread_legacy_id_match_is_not_held_and_checks_the_thread_external_id_on_the_replica(self):
         legacy = "4f0b6d2e-8a1c-4e7f-b3d9-2c5a7e9f1b03"
         legacy_pro = "0c9e7b3a-5d2f-4a18-9e6b-3f1d8c2a7b54"
-        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "Mastering", "12609", "a@x.com", "Ann", legacy_pro, None]]
+        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "{Mastering}", "12609", "a@x.com", "Ann", legacy_pro, None]]
 
         def replica_with(owners):
             def q(sql):
@@ -1259,7 +1380,7 @@ class WithdrawalConfirmTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("credit_review_cli_wd", ROOT / "scripts" / "credit-review.py")
         cli = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cli)
-        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "Mastering", "12609", "a@x.com", "Ann", pro(12609), auth(12609)]]
+        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "{Mastering}", "12609", "a@x.com", "Ann", pro(12609), auth(12609)]]
         real = withdrawal_confirm.run
         gate = FakeGate(rc=3, out="DEFERRED daily-cap credits=1 (this user already had a verify message)")
 
@@ -1267,7 +1388,7 @@ class WithdrawalConfirmTests(unittest.TestCase):
             return real(ids, query=lambda sql: rows, runner=gate, wrapper="/gate", **kw)
 
         with tempfile.TemporaryDirectory() as d:
-            cli.VERIFY_NOTIFY_KILL_SWITCH = Path(d) / "absent"
+            cli.CREDIT_OPS_NOTES_KILL_SWITCH = Path(d) / "absent"
             cli.withdrawal_confirm.run = fake
             try:
                 args = cli.parser().parse_args(["withdrawal-confirm", "--request-ids", f"{self.RID}:215476464925099",
@@ -1288,8 +1409,8 @@ class WithdrawalConfirmTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("credit_review_cli_wc", ROOT / "scripts" / "credit-review.py")
         cli = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cli)
-        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "Mastering", "12609", "a@x.com", "Ann", None, None],
-                [self.OTHER, "rejected", "requester", "obsessed", "[]", "Mixing", "104906", "b@x.com", "", pro(104906), auth(104906)]]
+        rows = [[self.RID, "rejected", "requester", "Nowhere Fast", '[{"name":"Art"}]', "{Mastering}", "12609", "a@x.com", "Ann", None, None],
+                [self.OTHER, "rejected", "requester", "obsessed", "[]", "{Mixing}", "104906", "b@x.com", "", pro(104906), auth(104906)]]
         real = withdrawal_confirm.run
         gate = FakeGate()
 
@@ -1297,7 +1418,7 @@ class WithdrawalConfirmTests(unittest.TestCase):
             return real(ids, query=lambda sql: rows, runner=gate, wrapper="/gate", **kw)
 
         with tempfile.TemporaryDirectory() as d:
-            cli.VERIFY_NOTIFY_KILL_SWITCH = Path(d) / "absent"
+            cli.CREDIT_OPS_NOTES_KILL_SWITCH = Path(d) / "absent"
             cli.withdrawal_confirm.run = fake
             try:
                 args = cli.parser().parse_args(["withdrawal-confirm", "--request-ids", f"{self.RID},{self.OTHER}",

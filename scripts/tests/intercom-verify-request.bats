@@ -1271,6 +1271,19 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   tb_parity
 }
 
+@test "takeback-notice: a title with its own quote marks is not wrapped again, the same in the gate and credit-retro" {
+  tbcredits "$TEST_TMPDIR/c.json" "q1|Mixing|„glücklich“|Big Star|Serban Ghenea|https://tidal.com/browse/track/1|Tidal credits"
+  run -0 "$LOCKED" send --campaign takeback-notice --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .subject)" = 'About your Mixing credit on „glücklich“' ]
+  tb_parity
+  tbcredits "$TEST_TMPDIR/c.json" \
+    "q1|Mixing|„glücklich“|Big Star|Serban Ghenea|https://tidal.com/browse/track/1|Tidal credits" \
+    "q2|Mixing|\"Song\"|Big Star|Serban Ghenea|https://tidal.com/browse/track/2|Tidal credits"
+  run -0 "$LOCKED" send --campaign takeback-notice --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  tb_parity
+  [[ "$(rendered .body | plain)" == *'Mixing on "Song" by Big Star:'* ]]
+}
+
 @test "takeback-notice (Fable v3): a corroborating article is cited next to the DSP credit, identical in the gate and credit-retro" {
   local art="https://stereobeso.com/2026/08/26/santiago-cruz-cardellino-4-vasos-1-florero/"
   tbcredits "$TEST_TMPDIR/c.json" "q1|Mixing|4 Vasos y 1 Florero|Santiago Cruz|Nacho Sotelo|https://listen.tidal.com/track/527926451|Tidal credits|$art"
@@ -1368,6 +1381,34 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   [[ "$body" == *"Any one of these works (a screenshot is fine):"* ]]
   [[ "$body" == *"You'll see the credit on your profile as soon as it's approved, and we'll let you know here if anything else is needed."* ]]
   for bad in "removed" "deadline" "days" "fraud"; do [[ "$body" != *"$bad"* ]]; done
+}
+
+@test "uvn-status (firstmate 118 c): one role is 'your Mixing credit'; several roles are joined with ', ' and ' and ', plural" {
+  local roles want
+  for pair in "Mixing|your Mixing credit." "Mixing, Mastering|your Mixing and Mastering credits." \
+              "Mixing, Mastering, Recording Engineer|your Mixing, Mastering and Recording Engineer credits."; do
+    roles="${pair%%|*}" want="${pair#*|}"
+    credits "$TEST_TMPDIR/c.json" Jane "u1:$roles:Song A:Big Star"
+    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+    [[ "$(rendered .body | plain)" == *'Hi Jane, a quick status update on your credit request for "Song A" by Big Star: it'"'"'s waiting on one thing from you, something that shows '"$want"* ]]
+  done
+}
+
+@test "titles (firstmate 118 b): a title with its own quote marks is never wrapped in ours again, in every rendering" {
+  credits "$TEST_TMPDIR/c.json" Jane 'u1:Mixing:„glücklich“:Big Star'
+  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'your credit request for „glücklich“ by Big Star:'* ]]
+  credits "$TEST_TMPDIR/c.json" Jane 'w1:Mixing:"Song":Big Star'
+  run -0 "$LOCKED" send --campaign withdrawal-confirm --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .subject)" = 'Your Muso credit request for "Song"' ]
+  [[ "$(rendered .body | plain)" == *'for Mixing on "Song", as you asked.'* ]]
+  credits "$TEST_TMPDIR/c.json" Jane 's1:Mixing:„glücklich“:X' 's2:Mixing:"Song":X' 's3:Mixing:Plain:X'
+  run -0 "$LOCKED" send --campaign status-team-review --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'your credit requests for „glücklich“, "Song" and "Plain": they'* ]]
+  credits "$TEST_TMPDIR/c.json" Jane 'u1:Mixing:„glücklich“:X' 'u2:Mixing:"Song":X'
+  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'your credit requests for „glücklich“ and "Song": they'* ]]
+  [[ "$(rendered .body | plain)" != *'""'* ]]
 }
 
 @test "uvn-status: several requests list 3 titles then 'and N more'; no follow-ups" {

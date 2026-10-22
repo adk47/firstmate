@@ -41,12 +41,13 @@ DEFAULT_SCRIPT = "/opt/hydra/scripts/intercom-verify-request.sh"
 MAX_LISTED = 25
 _ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
 
-SUBJECT_ONE = 'About your {role} credit on "{track_title}"'
+SUBJECT_ONE = 'About your {role} credit on {track_title}'
 SUBJECT_MANY = "About {n} of your credits on Muso"
-INTRO_ONE = ('The public credits for "{track_title}" by {artist_name} name {other_names} for {role} '
+INTRO_ONE = ('The public credits for {track_title} by {artist_name} name {other_names} for {role} '
              "({cite}), so we have removed the {role} credit from your profile.")
 INTRO_MANY = "The public credits name someone else for these roles, so we have removed them from your profile:"
-LINE = '- {role} on "{track_title}" by {artist_name}: {other_names} ({cite})'
+LINE = '- {role} on {track_title} by {artist_name}: {other_names} ({cite})'
+QUOTE_MARKS = "\"“”„«»'‘’‚"
 BODY = """Hi {first_name},
 
 I'm Caroline from Muso support. {intro}
@@ -58,6 +59,13 @@ Thank you,
 Caroline
 Muso Support
 """
+
+
+def quoted(title: str) -> str:
+    """The title in quotes, unless it already starts and ends with its own quote marks (the gate's qt)."""
+    if len(title) >= 2 and title[0] in QUOTE_MARKS and title[-1] in QUOTE_MARKS:
+        return title
+    return f'"{title}"'
 
 
 def _names(c: dict[str, Any]) -> str:
@@ -103,14 +111,14 @@ def render(first_name: str | None, credits: list[dict[str, Any]]) -> tuple[str, 
     shown = credits[:MAX_LISTED]
     if len(credits) == 1:
         c = credits[0]
-        subject = SUBJECT_ONE.format(**c)
-        intro = INTRO_ONE.format(role=c["role"], track_title=c["track_title"], artist_name=c["artist_name"],
+        subject = SUBJECT_ONE.format(**{**c, "track_title": quoted(c["track_title"])})
+        intro = INTRO_ONE.format(role=c["role"], track_title=quoted(c["track_title"]), artist_name=c["artist_name"],
                                  other_names=_names(c), cite=cite(c))
         lines = ""
     else:
         subject = SUBJECT_MANY.format(n=len(credits))
         intro = INTRO_MANY
-        lines = "\n".join(LINE.format(role=c["role"], track_title=c["track_title"], artist_name=c["artist_name"],
+        lines = "\n".join(LINE.format(role=c["role"], track_title=quoted(c["track_title"]), artist_name=c["artist_name"],
                                       other_names=_names(c), cite=cite(c))
                           for c in shown) + "\n"
         if len(credits) > len(shown):
