@@ -95,11 +95,10 @@ sends() { cat "$T/slack.n" 2>/dev/null || echo 0; }
   "$SCRIPT" --run
   out="$(cat "$T/slack.1.txt")"
   for s in "<@U7RP6HKUZ>" "Acme Records" "Hear it first" "New single out Friday" "purple album cover" \
-    'USD 500/day × 30 days = USD 15000' "awareness" "reject" "87%" "adult" "https://promote.muso.ai/portal/admin/review"; do
+    'USD 500/day × 30 days = USD 15000' "awareness" "reject" "87%" "adult" "https://promote.muso.ai/portal/admin/review?ad=101"; do
     [[ "$out" == *"$s"* ]] || { echo "missing: $s"; echo "$out"; return 1; }
   done
   [[ "$out" != *"@aaron"* ]]
-  [[ "$out" != *"?ad="* ]]
   # reason line is the advertiser-facing text stored by the PUT: the brief repeats it
   [[ "$out" == *"adult content"* ]]
 }
@@ -193,7 +192,7 @@ blocks() { cat "$T/slack.${1:-1}.blocks.json"; }
   blocks | jq -e '.[1].text.type=="plain_text" and .[1].accessory.type=="image" and (.[1].accessory.alt_text|length>0)'
   blocks | jq -e '.[2].fields|length==4 and (.[0].text|test("Spend: USD 500/day")) and (.[1].text=="Goal: awareness") and (.[2].text=="Advertiser account: Acme")'
   blocks | jq -e '.[3].elements[0].text|test("✅|⛔|👀") and test("reject") and test("87%")'
-  blocks | jq -e '.[5].elements[0] | .type=="button" and .url=="https://promote.muso.ai/portal/admin/review" and .text.type=="plain_text"'
+  blocks | jq -e '.[5].elements[0] | .type=="button" and .url=="https://promote.muso.ai/portal/admin/review?ad=101" and .text.type=="plain_text"'
   blocks | jq -e --arg m "$MENTION" '[.[]|select(.type=="section")|.text|select(.type=="mrkdwn")|.text]|map(select(test($m)))|length==1'
   blocks | jq -e '.[4].type=="section"'   # the mention sits directly above the actions block
   [[ "$(cat "$T/slack.1.txt")" == *"$MENTION"* ]]
@@ -249,4 +248,11 @@ blocks() { cat "$T/slack.${1:-1}.blocks.json"; }
   [ ! -e "$T/slack.2.blocks.json" ] && [ ! -e "$T/slack.4.blocks.json" ]
   grep -q "$MENTION" "$T/slack.2.txt"
   [ "$(wc -l <"$T/put.ids")" -eq 2 ]
+}
+
+@test "deep link: ?ad= only for an all-digit id, otherwise the bare review url (MUS-12304)" {
+  ad 'x7?y=1' | fixture; answers reject 0.87 weak adult
+  "$SCRIPT" --run
+  [[ "$(cat "$T/slack.1.txt")" == *"Decide here: https://promote.muso.ai/portal/admin/review" ]]
+  blocks | jq -e '.[5].elements[0].url=="https://promote.muso.ai/portal/admin/review"'
 }
