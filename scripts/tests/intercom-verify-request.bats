@@ -1620,10 +1620,10 @@ thread() { # <contacts-json-array> [extra conversation fields]
 @test "status-doc-received --copy queued: the approved alternative wording (firstmate 092); no other campaign takes it" {
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
   run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked - no need to send anything else.' ]
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked - no need to send anything else.'$'\n''Muso Support' ]
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X" "s2:Mixing:B:X" "s3:Mixing:C:X" "s4:Mixing:D:X" "s5:Mixing:E:X"
   run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A", "B" and "C" and 2 more: we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked - no need to send anything else.' ]
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A", "B" and "C" and 2 more: we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked - no need to send anything else.'$'\n''Muso Support' ]
   run -1 "$LOCKED" send --campaign status-team-review --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$output" == *"--copy applies to verify-live (v1|windowed), status-doc-received (queued) and status-team-review (no-ask) only"* ]]
   run -1 "$LOCKED" send --campaign status-doc-received --copy windowed --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
@@ -1633,10 +1633,10 @@ thread() { # <contacts-json-array> [extra conversation fields]
 @test "status-team-review --copy no-ask: Copy B0 = the approved text without the proof sentence; only status-team-review takes it" {
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
   run -0 "$LOCKED" send --campaign status-team-review --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": they'"'"'re with our team for review. Nothing else is needed from you right now.' ]
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": they'"'"'re with our team for review. Nothing else is needed from you right now.'$'\n''Muso Support' ]
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X" "s2:Mixing:B:X" "s3:Mixing:C:X" "s4:Mixing:D:X"
   run -0 "$LOCKED" send --campaign status-team-review --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A", "B" and "C" and 1 more: they'"'"'re with our team for review. Nothing else is needed from you right now.' ]
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A", "B" and "C" and 1 more: they'"'"'re with our team for review. Nothing else is needed from you right now.'$'\n''Muso Support' ]
   run -1 "$LOCKED" send --campaign status-doc-received --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   run -1 "$LOCKED" send --campaign uvn-status --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
@@ -1661,10 +1661,47 @@ thread() { # <contacts-json-array> [extra conversation fields]
 @test "status-doc-received / status-team-review: the approved texts, 3 titles then 'and N more', never an ask" {
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
   run -0 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent us, and our team is reviewing it. Nothing else is needed from you right now, and you'"'"'ll see each credit on your profile as soon as it'"'"'s approved.' ]
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent us, and our team is reviewing it. Nothing else is needed from you right now, and you'"'"'ll see each credit on your profile as soon as it'"'"'s approved.'$'\n''Muso Support' ]
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X" "s2:Mixing:B:X" "s3:Mixing:C:X" "s4:Mixing:D:X"
   run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A", "B" and "C" and 1 more: they'"'"'re with our team for review. Nothing else is needed from you right now. If you have something that shows your role on these specific tracks (for example a credit listing link or a split sheet), you can reply with it and it helps us confirm them faster.' ]
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A", "B" and "C" and 1 more: they'"'"'re with our team for review. Nothing else is needed from you right now. If you have something that shows your role on these specific tracks (for example a credit listing link or a split sheet), you can reply with it and it helps us confirm them faster.'$'\n''Muso Support' ]
+}
+
+@test "status notes: email carries the approved 'Muso Support' sign-off; an in-thread reply does not" {
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  for args in "status-doc-received" "status-doc-received --copy queued" "status-team-review" "status-team-review --copy no-ask"; do
+    # shellcheck disable=SC2086
+    run -0 "$LOCKED" send --campaign $args --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+    [[ "$(rendered .body)" == *"<p>Muso Support</p>" ]]
+  done
+  run -0 "$LOCKED" send --campaign status-team-review --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+  [[ "$(msg .body)" == *"<p>Muso Support</p>" ]]
+  credits "$TEST_TMPDIR/c.json" Jane "s2:Mixing:B:X"
+  INTERCOM_VERIFY_TEST_LEDGER="$TEST_TMPDIR/l2.sqlite3" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
+    run -0 "$LOCKED" send --campaign status-doc-received --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment conversation=777"* ]]
+  [[ "$(jq -r .body "$CURL_STUB_REPLY")" != *"Muso Support"* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "s3:Mixing:C:X"
+  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body)" != *"<p>Muso Support</p>"* ]]
+}
+
+@test "status notes: a conversation the gate picks itself gets the unsigned reply; one it drops falls back to a signed email" {
+  now=$(date -u +%s)
+  open="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":1}"
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
+    run -0 "$LOCKED" send --campaign status-team-review --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment conversation=777"* ]]
+  [ "$(jq -r .body "$CURL_STUB_REPLY" | plain)" = 'Hi Jane, a quick update on your credit request for "A": they'"'"'re with our team for review. Nothing else is needed from you right now.' ]
+  [ "$(posts)" -eq 0 ]
+  credits "$TEST_TMPDIR/c.json" Jane "s2:Mixing:B:X"
+  INTERCOM_VERIFY_TEST_LEDGER="$TEST_TMPDIR/l2.sqlite3" \
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"admin_assignee_id":10206197')" \
+    run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+  [ "$(msg .body | plain)" = 'Hi Jane, a quick update on your credit request for "B": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked - no need to send anything else.'$'\n''Muso Support' ]
 }
 
 @test "status notes: a user who sent documents still gets one (it is about their documents); once per user, ever" {

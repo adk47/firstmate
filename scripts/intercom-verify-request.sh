@@ -1048,6 +1048,10 @@ def removal_notice($fn; $c; $maxl):
    elif $kind == "after-rejection" then after_rejection($fn; .credits; $maxl; $due)
    elif $kind == "initial" then live_initial($fn; .credits; $maxl; $copy == "windowed"; $due)
    else live_followup($fn; .credits; $maxl; $kind; $due) end)
+# Status notes carry the approved "Muso Support" sign-off on email only (the handoff copy, firstmate
+# 092/103/106); an in-thread reply sits under Caroline's own name in the conversation and stays unsigned.
+| (if ($copy | IN("docrecv", "docrecvq", "teamreview", "teamreviewb0")) and $mtype == "email"
+   then .segs += [ {p: "Muso Support"} ] else . end)
 | { subject: .subject,
     text: ([ .segs[] | if has("ul") then (.ul | map("- " + .) | join("\n")) else .p end ] | join("\n\n")),
     html: ([ .segs[] | if has("ul") then "<ul>" + ([.ul[] | "<li>" + esc + "</li>"] | join("")) + "</ul>" else "<p>" + (.p | esc) + "</p>" end ] | join("")) }
@@ -1055,7 +1059,7 @@ JQ
 readonly RENDER_JQ
 render() { # <input-json> -> {subject, text, html}
   printf '%s' "$1" | "$JQ_BIN" -c --argjson maxl "$MAX_LISTED" --arg copy "$COPY" --arg kind "$KIND" \
-    --arg due "$DUE_LABEL" --argjson rt "$REJECTION_TEXT" "$RENDER_JQ"
+    --arg due "$DUE_LABEL" --argjson rt "$REJECTION_TEXT" --arg mtype "$MESSAGE_TYPE" "$RENDER_JQ"
 }
 
 # leak_reason <rendered-json>: empty when clean. Same patterns as a customer-facing
