@@ -610,6 +610,45 @@ class ScoreApprove(unittest.TestCase):
             "SELECT request_id FROM decisions WHERE run_id = ?", (res.run_id,))}
         self.assertEqual(latest, {"r0", "r1", "r2", "r3"} - first)
 
+    def test_held_paid_rows_cool_down_so_the_budget_reaches_free_rows(self):
+        """Firstmate 171: a held row is re-read at most every 6 h; paid still first among due rows."""
+        rows = [row("paid1", uid=900, pid="pa1", approved=False), row("paid2", uid=900, pid="pa2", approved=False),
+                row("free1", uid=701, pid="fr1", approved=False), row("free2", uid=702, pid="fr2", approved=False)]
+        sp = sa.ScorePolicy(enabled=True, max_profiles_per_run=2)
+        read = []
+        for _ in range(3):
+            res, _w = self.go(rows, sp=sp)
+            read.append({r[0] for r in self.db.execute("SELECT request_id FROM decisions WHERE run_id = ?", (res.run_id,))})
+        self.assertEqual(read[0], {"paid1", "paid2"}, "paid first")
+        self.assertEqual(read[1], {"free1", "free2"}, "held paid rows cool down; the spare budget reaches free rows")
+        self.assertEqual(read[2], {"paid1", "paid2"}, "all cooling: paid first again")
+
+    def test_an_unknown_engagement_source_is_retried_next_run_not_cooled(self):
+        """QA @1340: Intercom status unknown (and a stale proof export) hold the row this run only."""
+        rows = [row("paid1", uid=900, pid="pa1"), row("free1", uid=701, pid="fr1", approved=False)]
+        sp = sa.ScorePolicy(enabled=True, max_profiles_per_run=1)
+        res, _w = self.go(rows, sp=sp, convo={900: None})
+        d = self.decisions()
+        self.assertIn("Intercom conversation status unknown", d["paid1"]["reason"])
+        res2, w2 = self.go(rows, sp=sp)          # Intercom back
+        latest = {r[0] for r in self.db.execute("SELECT request_id FROM decisions WHERE run_id = ?", (res2.run_id,))}
+        self.assertEqual(latest, {"paid1"}, "the paid row is re-read at once, not cooled behind the free row")
+        self.assertEqual([i for c in w2.calls for i in c[1]], ["paid1"])
+
+    def test_a_transient_hold_is_not_cooled_down(self):
+        decide.ensure_schema(self.db)
+        for rid, dec, why in (("t1", "hold", "score approval not now: evidence unreadable (HTTP 503)"),
+                              ("t2", "hold", "score approval not now: proof path: engaged user (proof on file unknown: "
+                                             "export older than 3h): stage 2"),
+                              ("t3", "hold", "score approval not now: proof path: engaged user (Intercom conversation "
+                                             "status unknown): stage 2"),
+                              ("d1", "hold", "score approval not now: organization / label / publisher / studio role"),
+                              ("a1", "approve", "score approval anchor_kind=trusted")):
+            self.db.execute("INSERT INTO decisions (run_id, decided_at, request_id, profile_id, decision, reason, mode, "
+                            "big_track, claimed_roles) VALUES ('score-x', ?, ?, 'p', ?, ?, 'apply', 0, 'Bass')",
+                            (NOW.strftime("%Y-%m-%dT%H:%M:%SZ"), rid, dec, why))
+        self.assertEqual(sa.recently_held(self.db, NOW), {"d1"})
+
     def test_trusted_approvals_get_no_verify_note_and_count_toward_caps(self):
         self.go([row("tr", band="B", meta=self.STAMP), row("no", band="B", pid="p2", meta=self.STAMP)],
                 sp=self.phase1(), anchors=lambda rs: {"tr": ("trusted", None), "no": ("none", None)})

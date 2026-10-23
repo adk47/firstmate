@@ -176,6 +176,29 @@ def replica_candidates(max_risk: float, limit: int, bands: tuple[str, ...] = ("A
     return out
 
 
+REREAD_COOLDOWN_H = 6
+# A hold whose cause can clear by itself on the next run (an unreadable source, a pace or cap)
+# is never put behind the cooldown.
+TRANSIENT_HOLD = ("unreadable", "incomplete", "next run", "retried", "rate-limited", "reached", "pace", "PAUSED",
+                  # QA @1340: an engagement source that could not be read (stale/missing proof-on-file
+                  # export, Intercom lookup down) is retried next run, never cooled.
+                  "proof on file unknown", "conversation status unknown")
+
+
+def recently_held(db, now: datetime, hours: int = REREAD_COOLDOWN_H) -> set[str]:
+    """Request ids (lower) this executor HELD within ``hours`` for a durable reason (firstmate 171:
+    a held row is re-read at most every 6 h, so the spare read budget walks the rest of the list)."""
+    since = (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        rows = db.execute(
+            "SELECT d.request_id, d.decision, d.reason FROM decisions d JOIN (SELECT request_id, MAX(id) id FROM decisions "
+            "WHERE run_id LIKE 'score-%' AND decided_at >= ? GROUP BY request_id) l ON l.id = d.id", (since,)).fetchall()
+    except Exception:  # an unreadable ledger only loses the cooldown, never a guard
+        return set()
+    return {str(rid).lower() for rid, dec, why in rows
+            if dec != "approve" and not any(t in (why or "") for t in TRANSIENT_HOLD)}
+
+
 def last_decided(db, now: datetime, days: int = 7) -> dict[str, str]:
     """{request id (lower): the latest decided_at of this executor's runs in the last ``days``}."""
     since = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -756,7 +779,12 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
     # paid-first order, rows this executor decided least recently go first, so the budget walks
     # the whole list across runs; never-decided rows first.
     seen = last_decided(db, now)
-    wanted = sorted(wanted, key=lambda c: (not (paying is not None and len(c) > 4 and c[4] in paying),
+    # Firstmate 171: a row HELD within the last REREAD_COOLDOWN_H hours for a durable reason goes
+    # behind every row that is due (paid still first among the due rows), so the spare budget reaches
+    # the free tier instead of re-reading the same held paid rows every other run.
+    cooling = recently_held(db, now)
+    wanted = sorted(wanted, key=lambda c: (str(c[0]).lower() in cooling,
+                                           not (paying is not None and len(c) > 4 and c[4] in paying),
                                            seen.get(str(c[0]).lower(), ""), c[2] > 0))
     wanted = wanted[:sp.candidate_limit]
     notes: list[str] = []
