@@ -1338,6 +1338,9 @@ test_forced_secondmate_child_close_failure_still_refuses() {
 test_orca_close_failure_refuses_even_under_force() {
   local dir orca_free id=orca-strand rc
   dir=$(make_case orca-close-failure)
+  # The shared fixture installs a fake orca for the fork's Orca cases; this case
+  # needs a search path with no orca at all.
+  rm -f "$dir/fakebin/orca"
   orca_free=$(fm_test_base_path_sans "$PATH" orca)
   ! PATH="$dir/fakebin:$orca_free" command -v orca >/dev/null 2>&1 \
     || fail "the orca-free search path still resolved orca"

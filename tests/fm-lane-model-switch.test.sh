@@ -45,6 +45,13 @@ case "${1:-}${2:-}" in
     n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
     echo "$n" > "$count_file"
     file="$FM_ORCA_SCREENS/$n.json"
+    # A settled lane keeps showing its last screen: the submit path's extra
+    # composer reads (one before typing, one after) see that screen again
+    # rather than an error. Only a case that queued no screen at all errors.
+    while [ ! -f "$file" ] && [ "$n" -gt 1 ]; do
+      n=$((n - 1))
+      file="$FM_ORCA_SCREENS/$n.json"
+    done
     if [ ! -f "$file" ]; then
       printf '{"ok":false,"error":{"message":"no queued screen %s"}}\n' "$n"
       exit 2

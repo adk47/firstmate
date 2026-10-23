@@ -47,7 +47,13 @@ case "$1 ${2:-}" in
     ;;
   "server --session")
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
-      "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
+      # A cancelled launch must take its delay with it, or the orphaned sleep
+      # outlives the test holding its output open.
+      "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY" &
+      delay_pid=$!
+      trap 'kill "$delay_pid" 2>/dev/null; exit 143' TERM INT
+      wait "$delay_pid"
+      trap - TERM INT
     fi
     printf '%s\n' running > "$state/$session"
     ;;
@@ -265,7 +271,9 @@ exec "$FM_FAKE_HERDR_REAL_SLEEP" "$@"
 SH
   chmod +x "$FAKEBIN/sleep"
   : > "$FAKE_LOG"
-  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_SERVER_DELAY=30 \
+  # The fake server must stay down for longer than the 300 fast polls take on
+  # a loaded host, or provisioning sees it running and never times out.
+  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_SERVER_DELAY=300 \
     run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "timed-out provision must fail"
   assert_present "$TRIPWIRES/$name.fleet-state.json" \
