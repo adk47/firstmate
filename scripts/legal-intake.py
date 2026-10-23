@@ -140,7 +140,7 @@ def page_text(alias, cls, h0, ids, row):
     ack = ("auto-ack sent" if row.get("acked") else ("no ack (legal: captain)" if cls == "legal_threat" else "no ack yet"))
     muso = ", ".join(i for i in ids[:6]) or "none linked"
     return (f"{mention}  :rotating_light: *{alias} inbound: {label}*\n"
-            f"From: {esc(f'{name} <{addr}>' if name else addr)[:120]}\nSubject: {esc(h0.get('subject', ''))[:140]}\n"
+            f"From: {esc(f'{name[:60]} <{addr}>' if name else addr)}\nSubject: {esc(h0.get('subject', ''))[:140]}\n"
             f"Muso ids: {esc(muso)} · on removal register: {'yes' if row.get('on_register') else 'NO'} · {ack}\n"
             f"Gmail thread `{row['thread']}` (cs-systemic intake; this mailbox does NOT reach Intercom)")
 

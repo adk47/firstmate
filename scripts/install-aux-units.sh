@@ -615,6 +615,7 @@ if [[ -f "$LEGAL_INTAKE_DEST" ]] \
   cp -a "$LEGAL_INTAKE_DEST" "$legal_intake_bak"
   log "  legal-intake: kept pre-git original as $legal_intake_bak"
 fi
+mkdir -p "$(dirname "$LEGAL_INTAKE_DEST")"   # rebuilt node-8: set -e must not abort the units below
 install -m 0755 "$HYDRA_ROOT/scripts/legal-intake.py" "$LEGAL_INTAKE_DEST"
 log "  legal-intake: installed $LEGAL_INTAKE_DEST"
 # --- END legal-intake-install ---

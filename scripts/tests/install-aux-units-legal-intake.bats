@@ -68,3 +68,10 @@ _baks() { compgen -G "$DEST.pre-git-*" | wc -l | tr -d ' '; }
   grep -q 'scripts/legal-intake.py" \]\] \\$' "$INSTALLER"
   grep -q 'legal-intake.py missing or not executable' "$INSTALLER"
 }
+
+@test "a missing /root/fmc1-intake dir is created instead of aborting the installer" {
+  rmdir "$TEST_TMPDIR/fmc1-intake"
+  run _run_block
+  [ "$status" -eq 0 ]
+  cmp "$HYDRA_REPO/scripts/legal-intake.py" "$DEST"
+}

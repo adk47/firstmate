@@ -124,6 +124,10 @@ class Page(unittest.TestCase):
     def test_page_shows_bare_address_when_no_display_name(self):
         self.assertIn("From: demandage@gmail.com\n", self.render("demandage@gmail.com"))
 
+    def test_long_display_name_never_pushes_address_off_the_page(self):
+        t = self.render("X" * 300 + " <david@demandage.com>")
+        self.assertIn("&lt;david@demandage.com&gt;", t)
+
     def test_page_mentions_jan_only(self):
         t = self.render("David E Sarabia <david@demandage.com>")
         self.assertIn("<@U038BM16T7W>", t)
