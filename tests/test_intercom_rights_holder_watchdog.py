@@ -264,5 +264,29 @@ class MaintenanceGuard(unittest.TestCase):
         self.assertEqual(len(self.ran), 1)
 
 
+class ShippedListsCatchDspTakedowns(unittest.TestCase):
+    """The committed data files, through the real loaders + matchers (firstmate 961)."""
+
+    def setUp(self):
+        os.environ.pop("RIGHTS_HOLDER_DOMAINS_FILE", None)
+        os.environ.pop("RIGHTS_HOLDER_KEYWORDS_FILE", None)
+        self.domains, self.keywords = wd.load_domains(), wd.load_keywords()
+
+    def test_dsp_distributor_and_label_senders_page(self):
+        for addr in ("noreply@spotify.com", "legal@tidal.com", "copyright@distrokid.com",
+                     "x@mail.tunecore.com", "ops@ninjatune.net", "copyright@dittomusic.com",
+                     "x@repostnetwork.com"):
+            self.assertIsNotNone(wd.match_domain(addr, self.domains), addr)
+
+    def test_lookalikes_and_apple_do_not_page(self):
+        for addr in ("x@notspotify.com", "x@spotify.com.evil.io", "no_reply@email.apple.com", "x@apple.com"):
+            self.assertIsNone(wd.match_domain(addr, self.domains), addr)
+
+    def test_takedown_wording_pages_but_a_credit_fix_does_not(self):
+        self.assertIsNotNone(wd.match_keyword("Release update", "your track was taken down", self.keywords))
+        self.assertIsNotNone(wd.match_keyword("Hi", "it was removed from Spotify in 2021", self.keywords))
+        self.assertIsNone(wd.match_keyword("Hi", "please remove the wrong credit from my profile", self.keywords))
+
+
 if __name__ == "__main__":
     unittest.main()

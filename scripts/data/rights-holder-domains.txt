@@ -1,4 +1,4 @@
-# Sender domains that mean "rights-holder / label / publisher / PRO / legal".
+# Sender domains that mean "rights-holder / label / publisher / PRO / DSP / distributor / legal".
 # One per line, `#` comments. Read by scripts/intercom-rights-holder-watchdog.py;
 # override the file with RIGHTS_HOLDER_DOMAINS_FILE.
 #
@@ -23,3 +23,28 @@ prs.org
 jasrac.or.jp
 gema.de
 sacem.fr
+# DSPs, distributors and labels that send takedown notices (firstmate 961, 2026-10-22). Measured on support@
+# over 90 d: 0 mails from any of these except ninjatune.net (1, a real takedown), so they add no noise.
+# apple.com is deliberately ABSENT: 33 App Store mails in 90 d would page constantly.
+spotify.com
+tidal.com
+distrokid.com
+tunecore.com
+cdbaby.com
+believe.com
+believedigital.com
+theorchard.com
+ingrooves.com
+awal.com
+unitedmasters.com
+fuga.com
+symphonicdistribution.com
+onerpm.com
+ditto.fm
+dittomusic.com
+routenote.com
+amuse.io
+vydia.com
+repost.network
+repostnetwork.com
+ninjatune.net

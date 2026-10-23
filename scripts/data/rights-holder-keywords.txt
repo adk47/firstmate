@@ -24,3 +24,7 @@ within 24 hours
 至急
 訂正
 削除
+# DSP takedown wording (firstmate 961): a rights-holder telling us a release was pulled from the stores.
+taken down
+content removal
+re:\bremoved from (spotify|tidal|apple music|all stores|the stores|stores|all dsps|dsps)\b
