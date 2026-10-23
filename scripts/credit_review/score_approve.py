@@ -176,6 +176,17 @@ def replica_candidates(max_risk: float, limit: int, bands: tuple[str, ...] = ("A
     return out
 
 
+def last_decided(db, now: datetime, days: int = 7) -> dict[str, str]:
+    """{request id (lower): the latest decided_at of this executor's runs in the last ``days``}."""
+    since = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        return {str(rid).lower(): at for rid, at in db.execute(
+            "SELECT request_id, MAX(decided_at) FROM decisions WHERE run_id LIKE 'score-%' AND decided_at >= ? "
+            "GROUP BY request_id", (since,))}
+    except Exception:  # an unreadable ledger only loses the rotation, never a guard
+        return {}
+
+
 def reread(admin: admin_api.Admin, wanted: list[tuple[str, str, float]], *, max_profiles: int = 150,
            pace_s: float = 1.0, sleep: Callable[[float], None] | None = None,
            note: list[str] | None = None) -> dict[str, dict[str, Any]]:
@@ -740,7 +751,13 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
     # QA @6c2a51b4: the per-run read budget (max_profiles_per_run) must be spent paid-first, or
     # 150 older free profiles crowd out a paid one. Stable sort: paid, then risk 0, then the
     # replica's own order (oldest first within a risk).
-    wanted = sorted(wanted, key=lambda c: (not (paying is not None and len(c) > 4 and c[4] in paying), c[2] > 0))
+    # 2026-10-23 (35 runs 00:55-09:25Z, 0 approvals): the budget re-read the SAME 150 profiles every
+    # run (all held for durable reasons) and never reached the rest of the candidates. Within the
+    # paid-first order, rows this executor decided least recently go first, so the budget walks
+    # the whole list across runs; never-decided rows first.
+    seen = last_decided(db, now)
+    wanted = sorted(wanted, key=lambda c: (not (paying is not None and len(c) > 4 and c[4] in paying),
+                                           seen.get(str(c[0]).lower(), ""), c[2] > 0))
     wanted = wanted[:sp.candidate_limit]
     notes: list[str] = []
     rows = reread(admin, wanted, max_profiles=sp.max_profiles_per_run, sleep=sleep, note=notes) if wanted else {}

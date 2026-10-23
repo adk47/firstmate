@@ -593,6 +593,19 @@ class ScoreApprove(unittest.TestCase):
         self.assertIn("velocity could not be read", d["unread"]["reason"])
         self.assertEqual(sorted(seen), ["at_24h", "at_7d", "below", "unread"], "read only for editorial rows")
 
+    def test_the_read_budget_rotates_to_rows_not_decided_recently(self):
+        """2026-10-23: 35 runs re-read the same 150 profiles. With a budget of 2 profiles, the second
+        run must read the two it has not decided yet, not the first two again."""
+        rows = [row(f"r{i}", uid=700 + i, pid=f"rot{i}", approved=False) for i in range(4)]
+        sp = sa.ScorePolicy(enabled=True, max_profiles_per_run=2)
+        self.go(rows, sp=sp)
+        first = set(self.decisions())
+        self.assertEqual(len(first), 2)
+        res, w = self.go(rows, sp=sp)
+        latest = {r[0] for r in self.db.execute(
+            "SELECT request_id FROM decisions WHERE run_id = ?", (res.run_id,))}
+        self.assertEqual(latest, {"r0", "r1", "r2", "r3"} - first)
+
     def test_trusted_approvals_get_no_verify_note_and_count_toward_caps(self):
         self.go([row("tr", band="B", meta=self.STAMP), row("no", band="B", pid="p2", meta=self.STAMP)],
                 sp=self.phase1(), anchors=lambda rs: {"tr": ("trusted", None), "no": ("none", None)})
