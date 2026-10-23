@@ -503,7 +503,7 @@
           "creditVerificationEnabled": true,
           "profilesClaimSelfEnabled": false,
           "creditsVerifyEnabled": true,
-          "profilesConsolidateEnabled": true,
+          "profilesConsolidateEnabled": false,
           "foundingBuybackEnabled": true,
           "retentionOfferEnabled": true,
           "cancelSubscriptionEnabled": true,

@@ -60,8 +60,12 @@ probability. Treat it as a strong hint, not a verdict:
   diagnosis (already visible, pending verification, awaiting our review, wrong profile, or
   genuinely absent).
 - "Remove these tracks" + owns the profile + specific tracks + mechanical -> `customer-credit-removal` (previews and routes; it never removes a credit).
-- Duplicate / merge profiles -> `dedupe_check` first, then `profiles_consolidate` (self-serve) or a
-  merge ticket.
+- Duplicate / merge profiles -> `dedupe_check` first (security routing as before); then, captain rule
+  2026-10-23: a merge happens only when EVERY profile has a processed claim made through the claiming
+  process, is verified, and is in the user's workspace. Self-serve merging is off until the gated
+  merge tool lands, so file a profile-merge `create_ticket` and reply: claim each profile through the
+  app first, then ask us to merge (finish verification and add each to your workspace). Never promise
+  the merge or a date.
 - Credits stuck in verification -> `credit_verification_check`, then `credits_verify` or a
   recommend-approve ticket.
 - Profile claim / "where is my claim" / claim rejected -> `profile_claim_status` first (it finds the
