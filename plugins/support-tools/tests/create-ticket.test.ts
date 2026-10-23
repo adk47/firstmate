@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createCreateTicketTool, teamOptionFor } from "../src/tools/create-ticket.js";
-import { intercomDeeplink } from "../src/tools/ticket-format.js";
+import { intercomDeeplink, TIER_MAP } from "../src/tools/ticket-format.js";
 import { SessionTicketRegistry } from "../src/session-ticket-registry.js";
 import type { HttpClient } from "../src/http.js";
 import { RateLimiter } from "../src/rate-limiter.js";
@@ -25,6 +25,37 @@ describe("createCreateTicketTool", () => {
       action_type: "credit-claim",
       tier: 1,
     });
+  });
+
+  it("offers only supported action types and keeps merge/credit-claim tickets out of Other TO DO", async () => {
+    const cases: { actionType: string; details?: Record<string, unknown>; customerProfileId?: string; separate: boolean }[] = [
+      { actionType: "credit-claim", separate: true },
+      { actionType: "profile-merge", customerProfileId: "prof_main", details: { main_profile_url: "https://credits.muso.ai/profile/main", duplicate_profile_urls: ["https://credits.muso.ai/profile/dup"] }, separate: true },
+      { actionType: "track-merge", details: { master_track: "Track A", duplicate_tracks: ["Track B"] }, separate: true },
+      { actionType: "credit-correction", separate: false },
+      { actionType: "credit-verify", separate: false },
+      { actionType: "profile-claim", separate: false },
+    ];
+    const separateTags = new Set(["action:credit-claim", "action:profile-merge", "action:track-merge"]);
+    const schemaTool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_schema" });
+    expect((schemaTool.parameters.properties.actionType as { enum: string[] }).enum).toEqual(Object.keys(TIER_MAP));
+    for (const item of cases) {
+      vi.mocked(mockClient.post).mockClear().mockResolvedValue({ ok: true, data: { id: "task_routed" } });
+      const tool = createCreateTicketTool({ http: mockClient, rateLimiter: new RateLimiter(), sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: `session_${item.actionType}` });
+      const result = await tool.execute("call_1", { actionType: item.actionType, customerEmail: "user@example.com", customerProfileId: item.customerProfileId, summary: "Customer request", details: item.details, conversationSummary: "Customer asked for help." });
+      expect(JSON.parse((result.content[0] as { text: string }).text).submitted).toBe(true);
+      const body = vi.mocked(mockClient.post).mock.calls[0][1].body as { tags: string[]; status: string };
+      expect(body.status).toBe("to do");
+      expect(body.tags).toContain(`action:${item.actionType}`);
+      expect(body.tags.some((tag) => separateTags.has(tag))).toBe(item.separate);
+    }
+  });
+
+  it("refuses an unsupported action type before filing an unrouteable ticket", async () => {
+    const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_unknown" });
+    const result = await tool.execute("call_1", { actionType: "credit-claims", customerEmail: "user@example.com", summary: "Add my credit", conversationSummary: "Customer wants a missing credit added." });
+    expect(JSON.parse((result.content[0] as { text: string }).text)).toMatchObject({ submitted: false, reason: "invalid_action_type" });
+    expect(mockClient.post).not.toHaveBeenCalled();
   });
 
   it("includes profile ID custom field when provided", async () => {

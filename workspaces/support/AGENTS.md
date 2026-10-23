@@ -70,6 +70,12 @@ probability. Treat it as a strong hint, not a verdict:
   `order_address_update`. Refund -> run the `refund-retention` skill first.
 - Anything out of envelope (unclaimed, multi-owner, cross-owner, role-based, or a non-customer-fixable
   refusal) -> `create_ticket`.
+- When filing, set `actionType` to the customer's specific requested action: `credit-claim` for adding
+  a missing credit, `profile-merge` or `track-merge` for a merge. These action tags place the ticket
+  in the separate Merges + Credit Claims TO DO view. `credit-correction`, `credit-verify`, and
+  `profile-claim` stay in Other TO DO. Do not use `support-general` as a substitute for a specific
+  action; the ClickUp views filter on action tags, not the ticket title. If `create_ticket`
+  returns `invalid_action_type`, choose a supported action type and retry before claiming a ticket was filed.
 
 ## Hard lines
 

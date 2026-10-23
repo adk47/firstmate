@@ -32,7 +32,10 @@ import {
 } from "./merge-intake.js";
 
 const Parameters = Type.Object({
-  actionType: Type.String({ description: "Type of action request. One of: credit-claim, credit-correction, credit-verify, profile-claim, support-general, analytics-followup, order-fulfillment, profile-merge, track-merge, unmerge-request, bulk-credit-change, profile-update, billing-issue, subscription-refund, data-deletion, dispute, data-export" }),
+  actionType: Type.String({
+    enum: Object.keys(TIER_MAP),
+    description: "Choose the specific requested action: credit-claim for adding a credit, profile-merge or track-merge for merges. Use credit-correction or credit-verify for those distinct requests; use support-general only when no specific action applies. ClickUp views route by the resulting action tag.",
+  }),
   customerEmail: Type.String({ description: "Customer's email address" }),
   summary: Type.String({ description: "Plain English description of what the customer is requesting" }),
   titleGist: Type.Optional(Type.String({ description: "Short, concrete gist for the ticket title (max 60 chars), e.g. 'Recurring charges since Jan, no account found'. Falls back to the summary when omitted." })),
@@ -55,6 +58,7 @@ export type CreateTicketResult =
   | { submitted: false; reason: "merge_intake_not_updated"; action_type: string; ticket_id: string; hint: string }
   | { submitted: false; reason: "keep_conflict_unflagged"; action_type: string; ticket_ids: string[]; hint: string }
   | { submitted: false; reason: "queue_busy" }
+  | { submitted: false; reason: "invalid_action_type"; hint: string }
   | {
       submitted: false;
       reason: "profile_merge_capture_incomplete";
@@ -536,8 +540,12 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         }
       }
 
-      if (!(params.actionType in TIER_MAP)) {
-        console.warn(`[support-tools] Unknown actionType "${params.actionType}", defaulting to tier 1`);
+      if (!Object.prototype.hasOwnProperty.call(TIER_MAP, params.actionType)) {
+        return ticketResult({
+          submitted: false,
+          reason: "invalid_action_type",
+          hint: "Choose a supported actionType. Use credit-claim for adding credits, profile-merge or track-merge for merges; do not use support-general for these requests.",
+        });
       }
 
       const tier = getTierForAction(params.actionType);
