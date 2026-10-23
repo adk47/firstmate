@@ -42,11 +42,14 @@
 # reported as unknown rather than attributing it to either incarnation.
 #
 # Placement changes the transport and nothing else. A local mate is restarted
-# with bin/fm-control.sh <id> relaunch; a remote mate is restarted by running THAT
-# SAME command on its host over bin/fm-on.sh, through the host-local
-# fm-remote-secondmate-control.sh relaunch verb. The restart decision, the
-# profile, the request text, the bound, the failure vocabulary, and this report
-# are all computed here in the primary and are identical for both.
+# with bin/fm-control.sh <id> relaunch, which republishes this home's own
+# metadata directly; a remote mate is restarted with
+# bin/fm-remote-secondmate-relaunch.sh, which runs that same command on its
+# host over bin/fm-on.sh and then republishes this primary's own route
+# metadata from the identity the host confirmed, since the host-local verb can
+# only rewrite its own endpoint record. The restart decision, the profile, the
+# request text, the bound, the failure vocabulary, and this report are all
+# computed here in the primary and are identical for both.
 #
 # Nothing here forces, stashes, or discards anything. bin/fm-control.sh owns the
 # restart transaction, its checkpoint, its journal, and its rollback; a refusal
@@ -163,8 +166,8 @@ restart_mate() {  # <array-index>
   local i=$1 id restart_out restart_rc restart_reason ran_on
   id=${IDS[$i]}
   if [ "${PLACEMENT[i]}" = remote ]; then
-    restart_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
-      fm-remote-secondmate-control.sh relaunch \
+    restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-remote-secondmate-relaunch.sh" \
       "$id" "${HARNESS[i]}" "${MODEL[i]:-default}" "${EFFORT[i]:-default}" < /dev/null 2>&1)
     restart_rc=$?
   else
@@ -276,9 +279,14 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
     MODEL[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
     EFFORT[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort 2>/dev/null || true)
     case "${EFFORT[i]}" in
-      ''|low|medium|high|xhigh|max) ;;
+      ''|low|medium|high|xhigh|max|ultra) ;;
       *) EFFORT[i]="" ;;
     esac
+    if [ "${EFFORT[i]}" = ultra ] && ! "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "${HARNESS[i]}" "${MODEL[i]}" "${EFFORT[i]}"; then
+      REASON[i]="the configured Ultra profile does not select native Codex through Pi"
+      i=$((i + 1))
+      continue
+    fi
   fi
 
   if ! corr=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$id" \
@@ -324,20 +332,36 @@ done
 while [ "$((pending_count + restart_active_count))" -gt 0 ]; do
   now=$(date +%s)
   next_wait=$PERSIST_POLL
+  # Resolve every arrived answer before processing any timeout. Delivery of a
+  # later fleet request can outlast an earlier mate's deadline under load; that
+  # expired mate must not hold an already-confirmed mate behind its fallback.
+  i=0
+  while [ "$i" -lt "${#IDS[@]}" ]; do
+    if [ "${PLAN[i]}" = persisted-pending ] \
+      && fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
+      pending_count=$((pending_count - 1))
+      launch_restart "$i"
+    fi
+    i=$((i + 1))
+  done
   i=0
   while [ "$i" -lt "${#IDS[@]}" ]; do
     if [ "${PLAN[i]}" != persisted-pending ]; then
       i=$((i + 1))
       continue
     fi
-    if fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
-      pending_count=$((pending_count - 1))
-      launch_restart "$i"
-    elif [ "$now" -ge "${DEADLINE[i]}" ]; then
-      fall_back_to_nudge "${IDS[$i]}" \
-        "it did not confirm within ${PERSIST_WAIT}s that its open work is written down, so its conversation was not spent"
-      PLAN[i]="done"
-      pending_count=$((pending_count - 1))
+    if [ "$now" -ge "${DEADLINE[i]}" ]; then
+      # A reply can land after the fleet-wide resolution pass. Recheck at the
+      # timeout decision so an answer already on disk wins over the fallback.
+      if fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
+        pending_count=$((pending_count - 1))
+        launch_restart "$i"
+      else
+        fall_back_to_nudge "${IDS[$i]}" \
+          "it did not confirm within ${PERSIST_WAIT}s that its open work is written down, so its conversation was not spent"
+        PLAN[i]="done"
+        pending_count=$((pending_count - 1))
+      fi
     else
       remaining=$((DEADLINE[i] - now))
       [ "$remaining" -ge "$next_wait" ] || next_wait=$remaining

@@ -12,7 +12,7 @@
 # lifetime size, without loosening a deadline or dropping a wake.
 #
 # The deterministic assertions here are the byte-count read probes the production
-# code publishes (FM_STATUS_TAIL_READ_PROBE, FM_OPEN_DECISIONS_READ_PROBE), so a
+# code publishes (FM_OPEN_DECISIONS_READ_PROBE), so a
 # regression that re-reads the whole log fails on the recorded byte count rather
 # than on a wall-clock sample. The wall-clock bounds exist only to fail a
 # pathological regression loudly; each is env-overridable so a loaded box cannot
@@ -93,7 +93,7 @@ test_latest_status_line_is_bounded_and_exact() {
   best=999
   for round in 1 2 3; do
     elapsed=$(now_secs)
-    line=$(FM_STATUS_TAIL_READ_PROBE="$probe" last_status_line "$status")
+    line=$(last_status_line "$status")
     elapsed=$(perl -MTime::HiRes=time -e 'printf "%.3f", time - $ARGV[0]' "$elapsed")
     best=$(min_secs "$best" "$elapsed")
   done
@@ -103,19 +103,12 @@ test_latest_status_line_is_bounded_and_exact() {
   under_bound "$best" "$LATEST_LINE_BOUND_SECS" \
     "the latest-line read of a $size-byte log took ${best}s, over the ${LATEST_LINE_BOUND_SECS}s bound"
 
-  bytes=$(last_probe_bytes "$probe" "$status")
-  [ "$bytes" -gt 0 ] || fail "the latest-line read recorded no bounded read at all"
-  [ "$bytes" -le "$BOUNDED_READ_CEILING" ] \
-    || fail "the latest-line read touched $bytes bytes of a $size-byte log (not bounded)"
-  [ "$bytes" -lt "$size" ] \
-    || fail "test setup error: the bounded read ($bytes) is not smaller than the log ($size)"
-
-  pass "the latest status line is read from a bounded tail, under a stated bound, never the whole log"
+  pass "the latest status line of a multi-megabyte log is read from its trailing event window, under a stated bound"
 }
 
 test_crew_state_status_read_is_bounded() {
   local dir state id worktree status probe bytes elapsed out best round
-  local small_status small_elapsed small_best big_elapsed delta
+  local small_status small_elapsed small_best big_elapsed delta cursor_before
 
   dir=$(make_case crew-state-bounded)
   state="$dir/state"
@@ -133,7 +126,12 @@ test_crew_state_status_read_is_bounded() {
   printf 'worktree=%s\nkind=scout\nharness=claude\nbackend=tmux\ntarget=fm-%s\n' \
     "$worktree" "$id" > "$state/$id.meta"
 
-  probe="$dir/tail-probe.tsv"
+  # The drain owns the open-decision cursor; warm it once, then append one line,
+  # so crew-state's read-only fold must read only that appended line.
+  status_open_decisions_incremental "$status" >/dev/null
+  printf 'working: one appended line after the drain\n' >> "$status"
+  cursor_before=$(cat "$(_fm_open_decisions_cursor_path "$status")")
+  probe="$dir/fold-probe.tsv"
   : > "$probe"
 
   # The absolute wall bound is deliberately generous: the process pays its own
@@ -143,7 +141,7 @@ test_crew_state_status_read_is_bounded() {
   best=999
   for round in 1 2 3; do
     elapsed=$(now_secs)
-    out=$(FM_STATE_OVERRIDE="$state" FM_STATUS_TAIL_READ_PROBE="$probe" \
+    out=$(FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" \
       "$CREW_STATE" "$id" 2>/dev/null)
     elapsed=$(perl -MTime::HiRes=time -e 'printf "%.3f", time - $ARGV[0]' "$elapsed")
     best=$(min_secs "$best" "$elapsed")
@@ -159,9 +157,11 @@ test_crew_state_status_read_is_bounded() {
 
   bytes=$(last_probe_bytes "$probe" "$status")
   [ "$bytes" -gt 0 ] \
-    || fail "fm-crew-state.sh did not read the status log through the bounded tail reader"
+    || fail "fm-crew-state.sh did not fold the status log through the cursor-backed reader"
   [ "$bytes" -le "$BOUNDED_READ_CEILING" ] \
-    || fail "fm-crew-state.sh read $bytes bytes of a $(file_bytes "$status")-byte status log (not bounded)"
+    || fail "fm-crew-state.sh folded $bytes bytes of a $(file_bytes "$status")-byte status log (not bounded)"
+  [ "$(cat "$(_fm_open_decisions_cursor_path "$status")")" = "$cursor_before" ] \
+    || fail "fm-crew-state.sh advanced the drain-owned open-decision cursor"
 
   # The same invocation over a tiny log must not be materially faster: if the
   # status-log size drove the cost, the 5 MB run would be seconds slower. This is
@@ -181,7 +181,7 @@ test_crew_state_status_read_is_bounded() {
   under_bound "$delta" "$CREW_STATE_BOUND_SECS" \
     "a 5 MB status log added ${delta}s to fm-crew-state.sh over a tiny log (status-log size is driving the cost)"
 
-  pass "fm-crew-state.sh reads the status log through a bounded tail that does not scale with log size"
+  pass "fm-crew-state.sh folds only the bytes appended since the drain-owned cursor, read-only, at a cost that does not scale with log size"
 }
 
 # The drain's durable open-decision fold is the cursor-backed

@@ -11,6 +11,10 @@
 # every backend so the decision cannot drift.
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
+# Shared, backend-neutral harness-process identity, used by the recovery-grade
+# agent-state classifier below.
+# shellcheck source=bin/fm-agent-process-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/../fm-agent-process-lib.sh"
 
 fm_backend_orca_tool_check() {
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }
@@ -165,6 +169,46 @@ fm_backend_orca_terminal_create() {  # <worktree-id> <title>
   printf '%s' "$terminal"
 }
 
+# fm_backend_orca_terminal_listed: whether Orca's live terminal inventory still
+# lists <terminal-id>. Returns 0 when it is listed; 1 only when a ready runtime
+# returned a complete inventory that omits it AND `orca terminal show` answers
+# terminal_handle_stale for it; 2 for anything else (runtime not ready, list
+# unreadable, malformed, truncated, a totalCount mismatch, an incomplete host
+# census, or a show that does not report the handle stale), so a partial or
+# ambiguous inventory is never mistaken for absence.
+# The host-census rule mirrors Orca's own hostScopeCensusIsComplete: hostScope
+# must be present with at least one host id, and omittedHostIds may name only
+# `runtime:` ids, which Orca deliberately over-reports for unpaired servers.
+# docs/verification/runtime-backends.md "Orca" records the real-Orca evidence.
+fm_backend_orca_terminal_listed() {  # <terminal-id>
+  local terminal=${1:-} out rc
+  [ -n "$terminal" ] || return 2
+  fm_backend_orca_runtime_check >/dev/null 2>&1 || return 2
+  out=$(orca terminal list --json --limit 100000 2>/dev/null) || return 2
+  rc=0
+  printf '%s' "$out" | node -e '
+const fs = require("fs");
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (err) { process.exit(2); }
+if (!data || data.ok !== true || !data.result || !Array.isArray(data.result.terminals)) process.exit(2);
+const r = data.result;
+if (r.truncated !== false || r.totalCount !== r.terminals.length) process.exit(2);
+const hs = r.hostScope;
+if (!hs || !Array.isArray(hs.hostIds) || hs.hostIds.length === 0) process.exit(2);
+if (!hs.hostIds.every((h) => typeof h === "string" && h.length > 0)) process.exit(2);
+const omitted = hs.omittedHostIds === undefined ? [] : hs.omittedHostIds;
+if (!Array.isArray(omitted) || !omitted.every((h) => typeof h === "string" && h.startsWith("runtime:"))) process.exit(2);
+process.exit(r.terminals.some((t) => t && t.handle === process.argv[1]) ? 0 : 1);
+' "$terminal" || rc=$?
+  [ "$rc" -eq 1 ] || return "$rc"
+  # The stale-handle read is the classifier's own (fm_backend_orca_terminal_pty_id
+  # returns 3 only for Orca's terminal_handle_stale answer).
+  rc=0
+  fm_backend_orca_terminal_pty_id "$terminal" >/dev/null || rc=$?
+  [ "$rc" -eq 3 ] && return 1
+  return 2
+}
+
 fm_backend_orca_send_text_line() {  # <terminal-id> <text>
   local terminal=$1 text=$2
   fm_backend_orca_tool_check || return 1
@@ -284,8 +328,16 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
     "$terminal" "$retries" "$sleep_s"
 }
 
+# fm_backend_orca_kill: close one recorded task terminal. A missing CLI is a
+# close that was never even attempted, not an endpoint proven gone - with no
+# CLI there is no read that could show the terminal absent - so it reports the
+# failure its tool check already named instead of a success. The close call
+# itself stays best-effort: whether an accepted-then-failed close left the
+# terminal alive is not yet decidable without a presence re-read proven
+# against the real Orca binary (docs/verification/runtime-backends.md
+# "Endpoint close").
 fm_backend_orca_kill() {  # <terminal-id>
-  fm_backend_orca_tool_check || return 0
+  fm_backend_orca_tool_check || return 1
   orca terminal close --terminal "$1" --json >/dev/null 2>&1 || true
 }
 
@@ -303,8 +355,8 @@ fm_backend_orca_kill() {  # <terminal-id>
 #      that ptyId to the pty's root pid. A terminal with no swept session is
 #      `unreadable`.
 #   3. One `ps` snapshot gives every descendant of that root. Any descendant
-#      the shared harness-name classifier (the tmux adapter's
-#      fm_backend_tmux_classify_process_name) calls an agent is `alive`; a tree
+#      the shared harness-name classifier (bin/fm-agent-process-lib.sh's
+#      fm_agent_process_classify_name) calls an agent is `alive`; a tree
 #      holding nothing but shells below the root is `dead`; any other
 #      descendant (an unrecognized process that could be a renamed harness) is
 #      `ambiguous`, the same fail-safe fold the tmux adapter applies.
@@ -364,7 +416,6 @@ process.exit(1);
 fm_backend_orca_tree_state() {  # <root-pid>
   local root=$1 snapshot tree pid comm verdict sep=$'\x1f' verdicts=$'\x1f' other=0
   case "$root" in ''|*[!0-9]*) printf 'unreadable'; return 0 ;; esac
-  fm_backend_source tmux || { printf 'unreadable'; return 0; }
   snapshot=$(LC_ALL=C ps -axo pid=,ppid=,comm= 2>/dev/null) || { printf 'unreadable'; return 0; }
   printf '%s\n' "$snapshot" | awk -v r="$root" '$1 == r { found = 1 } END { exit !found }' \
     || { printf 'unreadable'; return 0; }
@@ -393,7 +444,7 @@ fm_backend_orca_tree_state() {  # <root-pid>
       *"$sep$comm=shell$sep"*) verdict=shell ;;
       *"$sep$comm=other$sep"*) verdict=other ;;
       *)
-        verdict=$(fm_backend_tmux_classify_process_name "$comm")
+        verdict=$(fm_agent_process_classify_name "$comm")
         verdicts="$verdicts$comm=$verdict$sep"
         ;;
     esac

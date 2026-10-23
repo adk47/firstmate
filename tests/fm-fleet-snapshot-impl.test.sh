@@ -79,13 +79,26 @@ case "${1:-} ${2:-}" in
       cat "$F/runs"
     fi
     ;;
+  "axi ")
+    # The bare identity overview fm-crew-state.sh selects a branch's run from,
+    # built from the same ledger the plain listing serves.
+    total=$(grep -c . "$F/runs")
+    printf 'count: %s of %s total\nruns[%s]{id,branch,status,head,pr}:\n' "$total" "$total" "$total"
+    i=0
+    while read -r st br sha _ _ pr; do
+      [ -n "$st" ] || continue
+      i=$((i + 1))
+      case "$br" in fm/run-branch) id=r1 ;; fm/old-run) id=r0 ;; *) id=r-$i ;; esac
+      printf '  "%s",%s,%s,%s,"%s"\n' "$id" "$br" "$st" "$sha" "${pr:-}"
+    done < "$F/runs"
+    ;;
   "axi status")
     head=$(git rev-parse HEAD 2>/dev/null)
     branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null)
     if [ "$branch" = fm/run-branch ]; then
       printf 'run:\n  id: r1\n  branch: %s\n  head: %s\n  status: completed\n  outcome: checks-passed\n' "$branch" "$head"
     elif [ "$branch" = fm/old-run ]; then
-      printf 'run:\n  id: r0\n  branch: %s\n  head: %s\n  status: cancelled\n  outcome: cancelled\n' "$branch" "$head"
+      printf 'run:\n  id: r0\n  branch: %s\n  head: %s\n  status: completed\n  outcome: failed\n' "$branch" "$head"
     else
       printf 'run:\n  id: r9\n  branch: fm/other\n  head: 0000000\n  status: running\n'
     fi
@@ -119,6 +132,9 @@ chmod +x "$FAKEBIN/orca" "$FAKEBIN/no-mistakes" "$FAKEBIN/tmux"
 
 REPO="$TMP_ROOT/repo"
 fm_git_init_commit "$REPO" >/dev/null 2>&1
+# A remote-tracking ref holds the shared base, so a ship's done claim passes the
+# named-head reachability gate (bin/fm-dod-lib.sh) on both passes.
+git -C "$REPO" update-ref refs/remotes/origin/main "$(git -C "$REPO" rev-parse HEAD)"
 add_worktree() {  # <name> <branch> -> echoes path
   local wt="$TMP_ROOT/wt-$1"
   git -C "$REPO" worktree add --quiet -b "$2" "$wt" >/dev/null 2>&1
@@ -204,8 +220,8 @@ printf 'completed fm/run-branch %s 2026-10-15 10:00 https://github.com/example/r
   > "$FAKE/runs"
 printf 'failed fm/elsewhere %s 2026-10-14 09:00\n' "$RUN_SHA" >> "$FAKE/runs"
 # Older than the owner's bounded listing (FM_CREW_STATE_RUNS_LIMIT=2 below), so
-# only the delegated owner's fresh `axi status` read finds this branch's run.
-printf 'cancelled fm/old-run %s 2026-09-01 08:00\n' "$(git -C "$WT_OLD" rev-parse --short HEAD)" >> "$FAKE/runs"
+# only the delegated owner's fresh no-mistakes reads find this branch's failed run.
+printf 'failed fm/old-run %s 2026-09-01 08:00\n' "$(git -C "$WT_OLD" rev-parse --short HEAD)" >> "$FAKE/runs"
 
 # Generous read bounds: a parity reference that times out on a loaded host
 # would compare a bound, not a classification.
@@ -234,7 +250,7 @@ test_parity_json_and_home_summary() {
   # The fixture must really exercise the paths it claims, or parity is vacuous.
   local states
   states=$(jq -r '.tasks[] | "\(.id)=\(.current_state.state)/\(.current_state.source)"' "$TMP_ROOT/python--json.json")
-  for want in busy=working/pane idle=done/status-log keyed=paused/status-log \
+  for want in busy=working/pane idle=done/status-log keyed=parked/status-log \
     malformed=unknown/pane stalegen=unknown/pane untrusted=unknown/pane norecord=unknown/pane \
     resolvedonly=unknown/none gone=unknown/none shipgone=unknown/none detached=done/status-log \
     wtgone=unknown/none notarget=unknown/none \
@@ -257,8 +273,9 @@ test_runs_ledger_cached_per_repo() {
   snapshot python --json >/dev/null 2>&1 || fail "second cached snapshot failed"
   n=$(grep -c '^no-mistakes runs' "$FAKE/calls")
   [ "$n" = 1 ] || fail "the runs listing should be read once per repo inside the cache window, read $n times"
-  # run, oldrun, idle, and shipgone sit on branches; each snapshot reads each fresh.
-  a=$(grep -c '^no-mistakes axi status' "$FAKE/calls")
+  # run, oldrun, idle, and shipgone sit on branches; each snapshot reads each
+  # fresh. A selected run's follow-up `axi status --run <id>` read is not counted.
+  a=$(grep -cx 'no-mistakes axi status' "$FAKE/calls")
   [ "$a" = 8 ] || fail "every ship branch needs its own fresh axi status read per snapshot, saw $a"
   : > "$FAKE/calls"
   snapshot python --json FM_SNAPSHOT_RUNS_CACHE_SECS=0 >/dev/null 2>&1 || fail "uncached snapshot failed"

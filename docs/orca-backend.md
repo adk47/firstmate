@@ -36,13 +36,13 @@ The normal isolation and unlanded-work refusal rules still apply.
 backend=orca
 window=fm-<id>
 terminal=<orca terminal handle>
-orca_worktree_id=<orca worktree id>
+orca_worktree_id=<orca repo id>::<absolute worktree path>
 worktree=<absolute Orca worktree path>
 ```
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
-`orca_worktree_id=` holds whatever `orca worktree create` returned, either a plain token or the `<repo id>::<absolute worktree path>` composite that Orca 1.4.197 emits, and `bin/fm-backend.sh` validates both shapes (see [runtime-backends.md](verification/runtime-backends.md) "Orca").
+Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the worktree path, and cleanup validation requires both halves rather than treating the value as a simple name.
 
 ## Current lifecycle and safety
 
@@ -61,7 +61,7 @@ The recovery-grade agent state that `fm-control.sh exit` needs comes from the pa
 Orca keeps a terminal's `agentIdentity` and agent title after the agent exits back to the shell, so those fields never prove a stop.
 `orca terminal show` names the terminal's pty, Orca's own host process sweep (`orca diagnostics memory`) names that pty's root pid, and the shared harness-name classifier reads every process below it: a harness is `alive`, only shells is `dead`, anything else is `ambiguous`, and Orca's stale-handle answer is `missing` (`bin/backends/orca.sh` owns the mechanics).
 In-place `relaunch` stays refused on Orca until a replacement launch into the same terminal is proven.
-When Orca reports a task's terminal gone (`missing`, as after an Orca or host restart), `bin/fm-spawn.sh <id> --relaunch` launches the replacement in a new terminal in the task's recorded Orca worktree and republishes the record with it; a live or shell-only terminal still refuses.
+When Orca reports a task's terminal gone (`missing`, as after an Orca or host restart) and a complete host-wide `orca terminal list` no longer lists it, `bin/fm-spawn.sh <id> --relaunch` launches the replacement in a new terminal in the task's recorded Orca worktree and republishes the record with it; a live or shell-only terminal, or an incomplete inventory, still refuses ([`docs/agent-control.md`](agent-control.md) owns the absence proof).
 
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
@@ -70,6 +70,8 @@ Before release, cleanup resolves the recorded Orca worktree id and verifies its 
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.
+A close the CLI never attempted, because `orca` is not on the path, stops cleanup with the metadata intact even under `--force`: removing those records would leave nothing on disk naming a terminal that may still be live.
+Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/runtime-backends.md) "Endpoint close" owns what this arm can and cannot prove about its own close.
 
 ## Active limits
 

@@ -4,8 +4,8 @@
 # A treehouse pool can return a clean detached worktree whose origin/main was
 # advanced after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin/main tip or stops when origin is
-# unreachable.
+# starts the worker from the fetched origin tip, launches a clean origin-less
+# pool as-is, or stops when a configured origin is unusable.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -59,6 +59,41 @@ run_spawn() {
     "$id" "$PROJECT_DIR" "$@"
 }
 
+test_remote_seeded_home_spawns_from_treehouse_pool() {
+  local rec id out status lock
+  id='pool-remote-seeded-r13'
+  rec=$(make_case remote-seeded "$id")
+  read_case_record "$rec"
+  cat > "$HOME_DIR/.fm-secondmate-parent" <<'REC'
+schema=fm-secondmate-parent.v1
+route=remote
+parent_host=parent-machine
+REC
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" \
+    "a remote-seeded secondmate home should allocate and launch from its Treehouse pool"$'\n'"$out"
+  assert_contains "$out" "spawned $id" \
+    "the remote-seeded spawn did not report success"
+  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
+    "the remote-seeded spawn did not publish its allocated pool worktree"
+  lock=$(FM_HOME="$HOME_DIR" bash -c '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$PROJECT_DIR") \
+    || fail "the launched remote-seeded home could not resolve its Treehouse project lock"
+  case "$lock" in
+    "$HOME_DIR/state/"*) ;;
+    *) fail "the remote-seeded spawn anchored its lock outside its local root: $lock" ;;
+  esac
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# remote-seeded Treehouse spawn command\n'
+    printf '$ FM_HOME=%s bin/fm-spawn.sh %s %s --scout\n%s\nexit=%s\n' \
+      "$HOME_DIR" "$id" "$PROJECT_DIR" "$out" "$status"
+    printf 'published worktree=%s\nresolved project lock=%s\n' "$POOL_DIR" "$lock"
+  fi
+  pass "a remote-seeded secondmate home allocates and launches from its Treehouse pool"
+}
+
 test_linked_spawning_home_rejects_primary_before_refresh() {
   local rec id out status returned primary spawning before_reflog
   for returned in primary primary-alias spawning scout; do
@@ -109,11 +144,14 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
         || fail "spawn did not refresh the genuine scout copy"
     else
       [ "$status" -ne 0 ] || fail "linked spawning home accepted $returned as a disposable copy"
-      if [ "$returned" = spawning ]; then
-        assert_contains "$out" "did not enter a worktree" "spawn accepted its own spawning directory"
-      else
-        assert_contains "$out" "did not yield an isolated worktree" "spawn did not explain its isolation refusal"
-      fi
+      # None of these is an isolated copy, so the worktree poll never adopts one
+      # and the wait runs out instead: the spawning directory fails the poll's
+      # own project comparison, and the repository primary (named directly or
+      # through a symlink) fails the isolation screen the poll shares with the
+      # guard. The refusal names the last path the pane reported.
+      assert_contains "$out" "did not enter an isolated worktree" \
+        "spawn did not explain its isolation refusal"
+      assert_contains "$out" "last seen" "refusal did not name the path the pane reported"
       [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
       [ ! -e "$primary/.git/FETCH_HEAD" ] || fail "refused spawn fetched before proving isolation"
     fi
@@ -175,6 +213,154 @@ test_non_main_default_branch_refreshes_before_branching() {
   [ "$branch_head" = "$current" ] || fail "spawn did not refresh to current origin/$DEFAULT_BRANCH"
   [ "$branch_head" != "$INITIAL_SHA" ] || fail "fixture did not prove origin/$DEFAULT_BRANCH advanced past the pool base"
   pass "a stale pooled worktree resolves and refreshes a non-main default branch"
+}
+
+make_originless_case() {  # <name> <id>
+  local name=$1 id=$2 case_dir home project pool fakebin initial
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|main"
+}
+
+test_originless_pool_launches_without_a_freshness_fetch() {
+  local rec id out status before
+  id='pool-originless-r6'
+  rec=$(make_originless_case originless "$id")
+  read_case_record "$rec"
+  ! git -C "$POOL_DIR" remote get-url origin >/dev/null 2>&1 \
+    || fail "fixture unexpectedly configured an origin remote"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should launch a local-only pooled worktree with no origin"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "spawn did not report success for the origin-less pool"
+  assert_not_contains "$out" "could not fetch origin" \
+    "spawn attempted a freshness fetch against a nonexistent origin"
+  [ ! -e "$POOL_DIR/.git/FETCH_HEAD" ] || fail "spawn fetched against a pooled worktree with no origin"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD on an origin-less pooled worktree that had nothing to refresh against"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed origin-less launch: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "an origin-less pooled worktree launches as-is, skipping the freshness gate"
+}
+
+test_originless_dirty_pool_refuses_without_discarding_work() {
+  local rec id out status before
+  id='pool-originless-dirty-r1'
+  rec=$(make_originless_case originless-dirty "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a dirty origin-less pooled worktree"
+  assert_contains "$out" "is not clean" \
+    "spawn did not clearly refuse a dirty origin-less pooled worktree"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a dirty origin-less pooled worktree"
+  assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
+    "spawn discarded local work from an origin-less pool"
+  pass "a dirty origin-less pooled worktree is refused without discarding its local work"
+}
+
+test_origin_config_without_url_refuses_pool() {
+  local rec id out status before
+  id='pool-origin-without-url-r1'
+  rec=$(make_originless_case origin-without-url "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an origin configuration with no URL"
+  assert_contains "$out" "could not fetch origin" \
+    "spawn did not refuse an origin configuration with no URL as unusable"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after finding an unusable origin configuration"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an origin configuration without a URL refuses the pooled worktree"
+}
+
+test_empty_origin_config_section_refuses_pool() {
+  local rec id out status before config
+  id='pool-empty-origin-section-r1'
+  rec=$(make_originless_case empty-origin-section "$id")
+  read_case_record "$rec"
+  config=$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-path config)
+  printf '\n[remote "origin"]\n' >> "$config"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an empty origin configuration section"
+  assert_contains "$out" "could not fetch origin" \
+    "spawn did not refuse an empty origin configuration section as unusable"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after finding an empty origin configuration section"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an empty origin configuration section refuses the pooled worktree"
+}
+
+test_empty_only_included_origin_config_section_launches_pool() {
+  local rec id out status before config included
+  id='pool-empty-only-included-origin-section-r1'
+  rec=$(make_originless_case empty-only-included-origin-section "$id")
+  read_case_record "$rec"
+  config=$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-path config)
+  included=$(dirname "$config")/empty-origin.inc
+  printf '[remote "origin"]\n' > "$included"
+  git -C "$POOL_DIR" config include.path "$(basename "$included")"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should proceed when an included empty origin section is not enumerable"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "spawn did not report success for the undetectable included section"
+  assert_not_contains "$out" "could not fetch origin" \
+    "spawn treated an undetectable included empty section as a configured origin"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD despite treating the included empty section as origin-less"
+  pass "an empty-only included origin section documents the accepted detection boundary"
+}
+
+test_inactive_conditional_origin_include_launches_pool() {
+  local rec id out status before config included
+  id='pool-inactive-origin-include-r1'
+  rec=$(make_originless_case inactive-origin-include "$id")
+  read_case_record "$rec"
+  config=$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-path config)
+  included=$(dirname "$config")/inactive-origin.inc
+  printf '[fm-test]\n\tmarker = true\n[remote "origin"]\n' > "$included"
+  git -C "$POOL_DIR" config 'includeIf.gitdir:/never/matches/this/worktree/.path' "$included"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should ignore an inactive conditional origin include"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "spawn did not report success with an inactive origin include"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD despite having no effective origin"
+  pass "an inactive conditional origin include leaves the pooled worktree origin-less"
 }
 
 test_unreachable_origin_refuses_stale_pool_base() {
@@ -350,6 +536,7 @@ test_stale_submodule_pin_explains_itself() {
   rec=$(make_submodule_case stale-pin "$id")
   read_submodule_case "$rec"
   strand_submodule_pin_via_spawn 'pool-stale-pin-seed-r7'
+  git -C "$POOL_DIR" remote remove origin
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   before_sub=$(git -C "$POOL_DIR/ui" rev-parse HEAD)
 
@@ -375,7 +562,7 @@ test_stale_submodule_pin_explains_itself() {
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed stale-pin refusal: %s\n' "$(printf '%s\n' "$out" | grep 'submodule' | head -n 1)"
   fi
-  pass "two consecutive spawns across a moved submodule pin end in a refusal naming both pins and no remedy"
+  pass "an origin-less pool with a stale submodule pin refuses while naming both pins and no remedy"
 }
 
 test_unpushed_submodule_commit_is_still_uncommitted_work() {
@@ -489,13 +676,223 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
 }
 
+# Re-lay a case's pooled worktree as a managed Treehouse slot: <pool>/<slot>/<repo>
+# with the pool's state file beside the slot, which is the shape fm-spawn claims
+# for its task. Rewrites POOL_DIR to the relocated checkout.
+lay_out_as_pool_slot() {
+  local slot_root="$CASE_DIR/slots"
+  mkdir -p "$slot_root/1"
+  git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot_root/1/project" \
+    > "$slot_root/treehouse-state.json"
+  POOL_DIR="$slot_root/1/project"
+  SLOT_CLAIM="$slot_root/1/.fm-slot-owner"
+}
+
+# The spawn side of the slot-owner claim that bin/fm-teardown.sh later reads:
+# a launched task's claim names it, a slot that cannot be claimed refuses before
+# anything is published, and an abort while the allocation lock is still held
+# leaves no claim naming a task with no record.
+test_pool_slot_claim_follows_the_spawn_outcome() {
+  local rec id out status before
+
+  id='pool-slot-claim-r1'
+  rec=$(make_case slot-claim "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn from a Treehouse slot should launch"$'\n'"$out"
+  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
+    "spawn did not publish the relocated slot as its worktree"
+  [ -f "$SLOT_CLAIM" ] || fail "spawn left its Treehouse slot unclaimed: $out"
+  grep -Fxq -- "task=$id" "$SLOT_CLAIM" \
+    || fail "the slot claim does not name the spawned task: $(cat "$SLOT_CLAIM")"
+  grep -Fxq -- "home=$HOME_DIR" "$SLOT_CLAIM" \
+    || fail "the slot claim does not name the spawning home: $(cat "$SLOT_CLAIM")"
+
+  id='pool-slot-unclaimable-r1'
+  rec=$(make_case slot-unclaimable "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  mkdir -p "$SLOT_CLAIM"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot it could not claim"
+  assert_contains "$out" "could not claim Treehouse pool slot" \
+    "spawn did not name the unclaimable slot as the reason"
+  [ -d "$SLOT_CLAIM" ] || fail "spawn replaced the directory blocking its slot claim"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for an unclaimable slot"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the slot's HEAD after failing to claim it"
+
+  id='pool-slot-claim-aborted-r1'
+  rec=$(make_originless_case slot-claim-aborted "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  git -C "$POOL_DIR" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an unusable origin on the slot"
+  assert_contains "$out" "could not fetch origin" \
+    "the aborted spawn did not refuse on its unusable origin"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the aborted spawn published task metadata"
+  [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
+    || fail "the aborted spawn left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM")"
+  pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
+}
+
+publish_feature_branch() { # <branch>
+  git -C "$CASE_DIR/publisher" checkout --quiet -b "$1"
+  printf 'only on %s\n' "$1" > "$CASE_DIR/publisher/feature-only.txt"
+  git -C "$CASE_DIR/publisher" add feature-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm feature
+  git -C "$CASE_DIR/publisher" push --quiet origin "$1"
+}
+
+brief_with_base() { # <id> <base> [<intent>]
+  fm_test_spawn_brief "$HOME_DIR" "$1" ${3:+"$3"}
+  printf '\n# Setup\nYou are in a disposable git worktree of project, at a detached HEAD on a clean copy of its base branch.\nBase branch: %s\n' "$2" >> "$HOME_DIR/data/$1/brief.md"
+}
+
+test_named_base_branch_starts_from_that_branch() {
+  local rec id out status kind
+  for kind in ship scout; do
+    id="pool-named-base-$kind-r1"
+    rec=$(make_case "named-base-$kind" "$id")
+    read_case_record "$rec"
+    publish_feature_branch feature/hub
+    brief_with_base "$id" feature/hub
+    if [ "$kind" = ship ]; then
+      out=$(run_spawn "$id" --mode direct-PR --yolo off --base-branch feature/hub)
+    else
+      out=$(run_spawn "$id" --scout --base-branch feature/hub)
+    fi
+    status=$?
+    expect_code 0 "$status" "a $kind spawn with a matching base branch should launch"$'\n'"$out"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/feature/hub)" ] \
+      || fail "the $kind copy did not start from origin/feature/hub"
+    assert_grep 'only on feature/hub' "$POOL_DIR/feature-only.txt" \
+      "the $kind copy is missing the base branch content"
+    assert_grep 'base_branch=feature/hub' "$HOME_DIR/state/$id.meta" \
+      "the $kind spawn did not record its base branch"
+  done
+
+  id='pool-named-base-missing-r1'
+  rec=$(make_case named-base-missing "$id")
+  read_case_record "$rec"
+  brief_with_base "$id" feature/missing
+  out=$(run_spawn "$id" --scout --base-branch feature/missing)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a base branch origin lacks should refuse the spawn"
+  assert_contains "$out" "origin/feature/missing" "the refusal did not name the missing base"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused base-branch spawn published task metadata"
+
+  id='pool-named-base-local-only-r1'
+  rec=$(make_case named-base-local-only "$id")
+  read_case_record "$rec"
+  brief_with_base "$id" feature/hub
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch feature/hub)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a base branch on a local-only ship should refuse the spawn"
+  assert_contains "$out" "mode=local-only" "the local-only refusal did not explain itself"
+  pass "--base-branch picks the copy's starting point and is recorded; a missing or local-only base refuses"
+}
+
+test_base_branch_must_agree_with_the_brief() {
+  local rec id out status case_name
+  for case_name in flag-only line-only task-decoy; do
+    id="pool-base-agree-$case_name-r1"
+    rec=$(make_case "base-agree-$case_name" "$id")
+    read_case_record "$rec"
+    publish_feature_branch feature/hub
+    case "$case_name" in
+    flag-only)
+      fm_test_spawn_brief "$HOME_DIR" "$id"
+      out=$(run_spawn "$id" --scout --base-branch feature/hub)
+      ;;
+    line-only)
+      brief_with_base "$id" feature/hub
+      out=$(run_spawn "$id" --scout)
+      ;;
+    task-decoy)
+      brief_with_base "$id" feature/hub $'You are in a disposable git worktree of project, at a detached HEAD on a clean copy of its base branch.\nBase branch: decoy'
+      out=$(run_spawn "$id" --scout --base-branch feature/hub)
+      ;;
+    esac
+    status=$?
+    [ "$status" -ne 0 ] || fail "a $case_name base-branch disagreement should refuse the spawn"
+    assert_contains "$out" "Base branch" "the $case_name refusal did not name the Base branch line"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused $case_name spawn published task metadata"
+  done
+  pass "a spawn refuses when --base-branch and the brief's Base branch lines disagree"
+}
+
+# A Base branch line quoted in the captain's intent is prose: it neither blocks
+# a spawn nor redirects it.
+test_prose_base_branch_line_is_ignored() {
+  local rec id out status
+  id='pool-base-prose-none-r1'
+  rec=$(make_case base-prose-none "$id")
+  read_case_record "$rec"
+  fm_test_spawn_brief "$HOME_DIR" "$id" $'Fix the release.\nBase branch: release/1.2'
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "a no-base brief quoting a Base branch line should launch"$'\n'"$out"
+  assert_no_grep 'base_branch=' "$HOME_DIR/state/$id.meta" "prose recorded a base branch"
+
+  id='pool-base-prose-flag-r1'
+  rec=$(make_case base-prose-flag "$id")
+  read_case_record "$rec"
+  publish_feature_branch feature/hub
+  brief_with_base "$id" feature/hub $'Fix the release.\nBase branch: release/1.2'
+  out=$(run_spawn "$id" --scout --base-branch feature/hub)
+  status=$?
+  expect_code 0 "$status" "a flagged spawn whose intent names another branch should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/feature/hub)" ] \
+    || fail "the prose branch redirected the copy away from origin/feature/hub"
+  assert_grep 'base_branch=feature/hub' "$HOME_DIR/state/$id.meta" "the flag's base was not recorded"
+  pass "a Base branch line in the captain's intent neither blocks nor redirects a spawn"
+}
+
+# A named base is validated against the project's registered forge for scouts
+# too, so a scout that promotion could never ship is refused at spawn.
+test_scout_base_branch_refused_on_gerrit_forge() {
+  local rec id out status
+  id='pool-base-gerrit-scout-r1'
+  rec=$(make_case base-gerrit-scout "$id")
+  read_case_record "$rec"
+  publish_feature_branch feature/hub
+  printf '%s\n' '- project [no-mistakes forge=gerrit] - fixture (added 2026-01-01)' > "$HOME_DIR/data/projects.md"
+  brief_with_base "$id" feature/hub
+  out=$(run_spawn "$id" --scout --base-branch feature/hub)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a based scout on a forge=gerrit project should refuse the spawn"
+  assert_contains "$out" "forge=gerrit" "the gerrit refusal did not explain itself"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused gerrit scout spawn published task metadata"
+  pass "a based scout on a forge=gerrit project is refused at spawn"
+}
+
+test_remote_seeded_home_spawns_from_treehouse_pool
+test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
+test_named_base_branch_starts_from_that_branch
+test_base_branch_must_agree_with_the_brief
+test_prose_base_branch_line_is_ignored
+test_scout_base_branch_refused_on_gerrit_forge
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_originless_pool_launches_without_a_freshness_fetch
+test_originless_dirty_pool_refuses_without_discarding_work
+test_origin_config_without_url_refuses_pool
+test_empty_origin_config_section_refuses_pool
+test_empty_only_included_origin_config_section_launches_pool
+test_inactive_conditional_origin_include_launches_pool
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work

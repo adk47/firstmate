@@ -169,7 +169,7 @@ orca_task_home() {  # <dir> -> echoes home
   printf '# brief\n' > "$home/data/t1/brief.md"
   fm_write_meta "$home/state/t1.meta" "window=fm-t1" "endpoint_task_id=t1" \
     "worktree=$wt" "project=$wt" "harness=pi" "kind=ship" "mode=no-mistakes" "yolo=off" \
-    "backend=orca" "orca_worktree_id=wt-1" "terminal=term-1"
+    "backend=orca" "orca_worktree_id=wt-1::$wt" "terminal=term-1"
   printf '%s\n' "$home"
 }
 
