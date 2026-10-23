@@ -186,6 +186,15 @@ The other files the rebase check flags replace main's lines on purpose too:
   (columns pinned as `verify_ledger.READER_COLUMNS`); `scripts/tests/test_verify_ledger_contract.py`
   keeps the writer and that reader in agreement.
 
+## Band A gets no note (Fable ruling 2026-10-22 23:10Z on firstmate 095)
+
+Core stamps every automation approval `provisional` with a `proofDueAt`, band A included. The sender keys on `metadata.approval.anchor_kind`, not on the provisional flag:
+- **`anchor_kind = trusted` (band A):** no document ask; the user gets only core's standard "approved" notice. `verify_notify.screen_live` closes the row in the verify ledger, so it is never offered again, never reminded and never removal-due. The run report counts these as "band-A approval(s) on a trusted anchor".
+- **Any other value (band B):** the verify note as before.
+- **The decider-side filter stays as a second guard:** `decisions.evidence_kind = validator_low_risk_trusted` never becomes a candidate.
+
+Owners: cmux-credit-system-lane pins `anchor_kind` in core, credit-trust-llm-t01 owns the L7 expiry skip, and the board keys its countdown on `anchor_kind`.
+
 ## Never ask someone who already sent documents
 
 Captain standing order (verbatim): "make sure you arent asking for things from users that

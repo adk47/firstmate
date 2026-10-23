@@ -790,6 +790,34 @@ class RunTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
+    def test_band_a_row_gets_no_verify_note_and_never_expires(self):
+        """Fable 2026-10-22 23:10Z (firstmate 095): core stamps every automation approval
+        provisional; a trusted-anchor (band A) one gets NO document ask, is closed in the ledger
+        so it is never offered again, and so is never reminded or removal-due."""
+        decisions_db(self.path, [dec("r1"), dec("r2")])
+        band_a = req("r1")
+        band_a["metadata"] = {"approval": {"via": "score-approve", "isAgent": True, "provisional": True,
+                                           "proofDueAt": "2026-11-21T00:00:00Z", "anchor_kind": "trusted"}}
+        band_b = req("r2")
+        band_b["metadata"] = {"approval": {"via": "score-approve", "isAgent": True, "provisional": True,
+                                           "proofDueAt": "2026-11-21T00:00:00Z", "anchor_kind": "none"}}
+        fake = Fake()
+        rep = verify_notify.run(FakeAdmin([band_a, band_b]), ledger_path=self.path, mode="apply", runner=fake,
+                                wrapper="/w")
+        self.assertEqual([c["request_id"] for p in fake.payloads for c in p["credits"]], ["r2"])
+        self.assertEqual(rep.trusted_anchor, 1)
+        db = verify_ledger.connect(self.path)
+        self.addCleanup(db.close)
+        self.assertEqual(verify_ledger.blocked_ids(db, ["r1"]), {"r1"})        # closed: never offered again
+        for day in ("2026-12-01", "2027-06-01"):
+            self.assertNotIn("r1", {str(x.get("request_id")) for x in
+                                    verify_ledger.removal_due(db, day=day) if isinstance(x, dict)})
+        self.assertNotIn("r1", [rid for rid, _, _ in verify_notify.candidates(db)])
+        self.assertTrue(verify_notify.trusted_anchor({"metadata": {"approval": {"anchor_kind": "trusted"}}}))
+        self.assertFalse(verify_notify.trusted_anchor({"metadata": {"approval": {"anchorKind": "Trusted"}}}))
+        self.assertFalse(verify_notify.trusted_anchor({"metadata": {"approval": {"anchor_kind": "Trusted"}}}))
+        self.assertFalse(verify_notify.trusted_anchor({"metadata": {"approval": {"provisional": True}}}))
+
     def test_apply_calls_the_gate_once_per_account_with_the_captains_approval(self):
         decisions_db(self.path, [dec("r1"), dec("r2"), dec("r3", pid=PID2)])
         admin = FakeAdmin([req("r1"), req("r2"), req("r3", pid=PID2, email="bob@example.com")])

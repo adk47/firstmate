@@ -109,6 +109,7 @@ class Report:
     held_for_human: int = 0
     unverified: int = 0
     human_approved: int = 0
+    trusted_anchor: int = 0            # band-A automation approvals (anchor_kind=trusted): no note, never removal-due
     docs_users: int = 0
     docs_checked: int = 0
     proof_on_file: int = 0
@@ -181,6 +182,8 @@ class Report:
                          "human: emailed support@ in the last 90 days (no note)")
         if self.human_approved:
             parts.append(f"{self.human_approved} approved by a person (not asked again)")
+        if self.trusted_anchor:
+            parts.append(f"{self.trusted_anchor} band-A approval(s) on a trusted anchor (no document ask; core's approved notice only)")
         if self.docs_checked:
             parts.append(f"documents already sent by {self.docs_users} of {self.docs_checked} account(s) checked (not asked)")
         if self.no_account:
@@ -394,8 +397,9 @@ def screen_live(rows: dict[str, dict[str, Any]], documented: ProofOnFile,
                 report: Report) -> tuple[list[str], list[tuple[str, str, str]]]:
     """NEW credits: the documents rule is per credit, and nothing escapes the 30-day rule
     silently. In place, per account user; returns (ids to close, credits to hold back):
-      - a credit with its own proof-on-file entry (any kind) or approved by a person is not
-        asked about; its id is returned so the caller can close it;
+      - a credit with its own proof-on-file entry (any kind), approved by a person, or a
+        band-A automation approval (metadata.approval.anchor_kind = trusted, Fable 10-22
+        23:10Z) is not asked about; its id is returned so the caller can close it;
       - if credits are left to ask about and the user emailed support@ in the last 90 days
         (firstmate 050) or has ANY proof-on-file entry (another credit, a whole-user
         document of any kind, any source: Fable 2026-10-17 precondition 1), the user gets
@@ -411,7 +415,8 @@ def screen_live(rows: dict[str, dict[str, Any]], documented: ProofOnFile,
     for uid, rids in by_user.items():
         documented_here = [rid for rid in rids if rid in own]
         by_person = [rid for rid in rids if rid not in own and human_approved(rows[rid])]
-        ask = [rid for rid in rids if rid not in own and rid not in by_person]
+        band_a = [rid for rid in rids if rid not in own and rid not in by_person and trusted_anchor(rows[rid])]
+        ask = [rid for rid in rids if rid not in own and rid not in by_person and rid not in band_a]
         if ask and is_support_contact(documented, uid):
             # firstmate 050: emailed support@ in the last 90 days - no note, held for a
             # human; the credits to ask about are not closed, so they are offered again.
@@ -433,11 +438,12 @@ def screen_live(rows: dict[str, dict[str, Any]], documented: ProofOnFile,
         held += [(rid, str(rows[rid].get("profileId") or ""), str(rows[rid].get("trackId") or "")) for rid in ask]
         for rid in ask:
             del rows[rid]
-        for rid in documented_here + by_person:
+        for rid in documented_here + by_person + band_a:
             del rows[rid]
         report.proof_on_file += len(documented_here)
         report.human_approved += len(by_person)
-        closed += documented_here + by_person
+        report.trusted_anchor += len(band_a)
+        closed += documented_here + by_person + band_a
     return closed, held
 
 
@@ -490,6 +496,17 @@ def human_approved(req: dict[str, Any]) -> bool:
     meta = req.get("metadata") if isinstance(req.get("metadata"), dict) else {}
     appr = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
     return appr.get("isAgent") is False
+
+
+def trusted_anchor(req: dict[str, Any]) -> bool:
+    """A band-A automation approval: core's metadata.approval.anchor_kind is "trusted" (the
+    server-computed band; Fable ruling 2026-10-22 23:10Z on firstmate 095). Core stamps every
+    automation approval provisional, but a trusted-anchor one gets NO document ask, only core's
+    standard "approved" notice, and is never removal-due: the note is keyed on anchor_kind,
+    never on the provisional flag."""
+    meta = req.get("metadata") if isinstance(req.get("metadata"), dict) else {}
+    appr = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+    return appr.get("anchor_kind") == "trusted"
 
 
 def drop_human_approved(rows: dict[str, dict[str, Any]], report: Report) -> list[str]:
