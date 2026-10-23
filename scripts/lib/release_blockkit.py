@@ -297,6 +297,13 @@ def digest_main(argv):
     if argv[0] == "--digest-slot-date":
         print(digest_local_date(digest_slot_for(parse_ts(argv[1]))).isoformat())
         return
+    if argv[0] == "--digest-window-start":
+        # The window start as an ISO-Z instant, so the shell never repeats the
+        # slot arithmetic: argv = [flag, now, since?].
+        since = digest_since(argv[2]) if len(argv) > 2 and argv[2] else None
+        start = digest_window(parse_ts(argv[1]), since)[0]
+        print(start.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        return
     if argv[0] == "--digest-since":
         # Exit 1 on a value the renderer would reject, so the shell can warn
         # and fall back instead of bricking the digest on a corrupt state file.
@@ -449,7 +456,7 @@ def main():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("--digest", "--digest-slot-date", "--digest-since"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("--digest", "--digest-slot-date", "--digest-since", "--digest-window-start"):
         digest_main(sys.argv[1:])
     else:
         main()

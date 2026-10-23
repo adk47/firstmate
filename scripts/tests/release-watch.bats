@@ -1979,7 +1979,13 @@ case "$2" in
   repos/*/releases*)
     f="$TEST_TMPDIR/releases-$(printf '%s' "$2" | sed 's#repos/Muso-AI/\([^/]*\)/releases.*#\1#').json"
     [ -f "$f" ] || { echo '[]' | jq -c "$filter"; exit 0; }
-    jq -c "$filter" "$f"; exit 0 ;;
+    # Serve ONE page, like GitHub: a stub that returned the whole fixture
+    # would let a missing page loop pass. STUB_GH_IGNORE_PAGE=1 models an API
+    # that ignores `page` (every request returns page 1).
+    per="$(sed -n 's/.*per_page=\([0-9][0-9]*\).*/\1/p' <<<"$2")"; per="${per:-30}"
+    page="$(sed -n 's/.*[?&]page=\([0-9][0-9]*\).*/\1/p' <<<"$2")"; page="${page:-1}"
+    [ -n "$STUB_GH_IGNORE_PAGE" ] && page=1
+    jq -c --argjson per "$per" --argjson page "$page" ".[(\$page-1)*\$per : \$page*\$per] | $filter" "$f"; exit 0 ;;
 esac
 exit 0
 STUB
@@ -2299,6 +2305,8 @@ STUB
       _rel "$r" "v$i" "2026-10-$(printf '%02d' $((i % 20 + 1)))T12:00:00Z" "$body"
     done
     _rel "$r" "vnew" "2026-10-22T03:00:00Z" $'### Features\n\n- feat: shipped-in-'"$r"
+    # GitHub lists newest first; the listing is paged now, so the order matters.
+    jq '[.[-1]] + .[:-1]' "$TEST_TMPDIR/releases-$r.json" > "$TEST_TMPDIR/x.json" && mv "$TEST_TMPDIR/x.json" "$TEST_TMPDIR/releases-$r.json"
   done
   _digest
   [ "$status" -eq 0 ]
@@ -2316,4 +2324,64 @@ STUB
   [ "$status" -eq 0 ]
   jq -e '[.[] | select(.type=="context") | .elements[].text | length] | max <= 2000' "$TEST_TMPDIR/posted.json"
   _posted_text | grep -q "more"
+}
+
+# ─── release-digest.sh: paging the release listing (MUS-17745 round 4) ──────
+# One per_page=100 page reaches back only ~14 days for core-backend, so a
+# catch-up window longer than that must page until it reaches the window start.
+
+# _rels_desc <repo-slug> <count> <newest-iso> : <count> releases, one hour apart,
+# newest first (the order GitHub lists them), tags r001..
+_rels_desc() {
+  jq -n --argjson n "$2" --arg newest "$3" \
+    '[range(0; $n) | {tag_name: ("r" + (. + 1 | tostring | ("000" + .)[-3:])),
+       html_url: "https://github.com/x/r", draft: false, prerelease: false,
+       published_at: (($newest | fromdateiso8601) - (. * 3600) | todate),
+       body: ("### Fixes\n\n- fix: change " + (. + 1 | tostring))}]' > "$TEST_TMPDIR/releases-$1.json"
+}
+
+@test "digest: a window with more than 100 releases pages on, so the oldest in-window release is reported" {
+  _digest_gh_stub
+  _watermark 2026-10-08
+  _rels_desc core-backend 120 "2026-10-21T10:00:00Z"
+  _digest
+  [ "$status" -eq 0 ]
+  grep -q 'page=2' "$STUB_GH_ARGV"
+  [[ "$(_posted_text)" == *"muso platform (backend)* — 120 releases"* ]]
+  [ "$(_recorded)" = "2026-10-22" ]
+}
+
+@test "digest: a punctual run costs exactly one releases request per enabled repo" {
+  _digest_gh_stub
+  # A FULL page 1 that reaches past the window start: only the min(published_at)
+  # stop keeps this at one request (a short page would stop it on its own).
+  _rels_desc core-backend 100 "2026-10-22T10:00:00Z"
+  _digest
+  [ "$status" -eq 0 ]
+  # hydra, web-credits-next, core-backend, auth: the four enabled rows.
+  [ "$(grep -c 'releases?' "$STUB_GH_ARGV")" -eq 4 ]
+}
+
+@test "digest: a release repeated across the page boundary is reported once" {
+  _digest_gh_stub
+  _watermark 2026-10-08
+  _rels_desc core-backend 100 "2026-10-21T10:00:00Z"
+  # A release published mid-walk pushes the boundary item onto page 2 as well.
+  jq '. + [.[99]]' "$TEST_TMPDIR/releases-core-backend.json" > "$TEST_TMPDIR/x.json" && mv "$TEST_TMPDIR/x.json" "$TEST_TMPDIR/releases-core-backend.json"
+  _digest
+  [ "$status" -eq 0 ]
+  grep -q 'page=2' "$STUB_GH_ARGV"
+  [[ "$(_posted_text)" == *"muso platform (backend)* — 100 releases"* ]]
+}
+
+@test "digest: a listing that never reaches the window start dies: nothing posted, watermark untouched" {
+  _digest_gh_stub
+  _watermark 2026-10-08
+  _rels_desc core-backend 100 "2026-10-21T10:00:00Z"
+  export STUB_GH_IGNORE_PAGE=1
+  DIGEST_PAGE_MAX=2 _digest
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"did not reach the window start in 2 pages"* ]]
+  [ ! -e "$TEST_TMPDIR/posted.json" ]
+  [ "$(_recorded)" = "2026-10-08" ]
 }
