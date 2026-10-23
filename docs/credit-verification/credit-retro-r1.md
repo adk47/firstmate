@@ -20,7 +20,8 @@ Part A covers the older loose paths in `report.md`). Captain, 2026-10-15:
 
 ## What it does (firstmate decision 001, 2026-10-15T23:09Z, "A + X")
 
-**A. The take-back is role-scoped.** It removes ONLY the proven one-person roles: each is one
+**A. The take-back is role-scoped.** It removes ONLY the proven one-person roles (one profile
+also has a published-roster exception: see "Published-roster take-back: Big Boy only"): each is one
 (profile, track, role) pair of an approval set, spent by core-backend #10638
 `POST /admin/credit-removals/:id/execute` through `removeTrackProfileCredits` (the same removal
 as `DELETE /admin/track/:trackId/profile/:profileId/credits {credits:[role]}`). It never moves
@@ -60,16 +61,16 @@ reference and the URL; the set's `reason` on the server carries every pair's URL
 |---|---|
 | user 15 is excluded | `excluded_user` |
 | The row is not marked `excluded` in the manifest (14 rows: 5 for alias risk, live-edition mismatch or press that may name the claimant; 9 because their users (119347, 178113, 178851, 260893, 1392361, 1403656) sent documents in Intercom, and a human must check none covers the credit before any removal, captain 013) | `excluded_row` |
-| **Live exclusion sources, read fresh by every `plan` and `apply` (firstmate 020).** Proof on file in credit-trust `proof-on-file.json` (an entry with a `request_id` matches that request, one without matches every row of the user) | `proof_on_file:<kind>` |
+| **Live exclusion sources, read fresh by every `plan` and `apply` (firstmate 020).** Proof on file in credit-trust `proof-on-file.json` (an entry with a `request_id` matches that request, one without matches every row of the user). Only a Big Boy row can be cleared, by a named human's board answer (see "Published-roster take-back") | `proof_on_file:<kind>` |
 | No proof-tagged note in Caroline's send ledger covers the request or the request's account | `proof_tagged` |
 | The user is not in `manifests/doc-submitted-r1.json` and the request is not one a human approved there | `doc_submitted`, `human_approved_after_doc` |
-| The row carries checked evidence for ITS OWN role (`evidence.verified` = `public_page`: a page of this track/release naming the other person in this role, or `trusted_dsp_only`: a CURRENT Spotify or Tidal credit on this recording naming them, with `evidence.sources` only `spotify`/`tidal` and the URL on `open.spotify.com` or `listen.tidal.com`, the URL's own source among `evidence.sources`; never Jaxsta or MLC alone). `evidence.url` is the cited `evidence_url`, and every name in `evidence.names` is quoted in the recorded `evidence.note` (only those names are cited to the user). An optional `evidence.corroboration` (e.g. a press article) must be a link Caroline's gate accepts (public https, at most 300 characters, never a Muso or internal surface: `verify-request-notes.md` → Take-back notices) other than `evidence.url`, checked here at plan time so a bad link shows up as `evidence_unverified` before approval instead of getting that user's set withheld as `notice_refused` at apply (firstmate 041); it is cited next to the evidence, never instead of it (`takeback-notice.md`). 10 rows pass this and are not excluded (users 197122, 161128, 182594, 150514; checked 2026-10-16, row 8999a707 re-checked 2026-10-18) | `evidence_unverified` |
+| The row carries checked evidence for ITS OWN role (`evidence.verified` = `public_page`: a page of this track/release naming the other person in this role, `published_roster` (Big Boy only, see below), or `trusted_dsp_only`: a CURRENT Spotify or Tidal credit on this recording naming them, with `evidence.sources` only `spotify`/`tidal` and the URL on `open.spotify.com` or `listen.tidal.com`, the URL's own source among `evidence.sources`; never Jaxsta or MLC alone). `evidence.url` is the cited `evidence_url`, and every name in `evidence.names` is quoted in the recorded `evidence.note` (only those names are cited to the user). An optional `evidence.corroboration` (e.g. a press article) must be a link Caroline's gate accepts (public https, at most 300 characters, never a Muso or internal surface: `verify-request-notes.md` → Take-back notices) other than `evidence.url`, checked here at plan time so a bad link shows up as `evidence_unverified` before approval instead of getting that user's set withheld as `notice_refused` at apply (firstmate 041); it is cited next to the evidence, never instead of it (`takeback-notice.md`). 10 rows pass this and are not excluded (users 197122, 161128, 182594, 150514; checked 2026-10-16, row 8999a707 re-checked 2026-10-18) | `evidence_unverified` |
 | The request still exists, is `approved`, has the same user/profile/track, and still lists the role | `request_not_found`, `request_not_approved:*`, `user_mismatch`, `role_not_on_request` |
 | The claimant is not one of the track's own artists (by profile id or by name) | `claimant_is_track_artist` |
 | The claimant still holds the role (a live muso credit) | `claimant_credit_already_gone` |
-| Spotify/Tidal/MLC/Jaxsta credit the role to someone else and NOT to the claimant. The claimant is matched by raw-profile link, name, known-as names or legal name (`credit_review.evidence.classify_roles`) | `not_contradicted_live:CONFIRMED` / `:UNVERIFIABLE` |
+| Spotify/Tidal/MLC/Jaxsta credit the role to someone else and NOT to the claimant. The claimant is matched by raw-profile link, name, known-as names or legal name (`credit_review.evidence.classify_roles`). Big Boy's rows also pass on `OTHERS_ONLY` for a `published_roster` row, and are refused while a trusted source credits him on the track's engineering team (see "Published-roster take-back") | `not_contradicted_live:CONFIRMED` / `:UNVERIFIABLE`, `claimant_on_engineering_team` |
 | A person named in the checked evidence (`evidence.names`) is still among those trusted holders | `evidence_holder_changed` |
-| `trusted_dsp_only` only: a named person is still a live holder in EVERY cited source (Spotify/Tidal; the notice names each one and links the URL's), not only in Jaxsta/MLC or in just one of them | `dsp_holder_vanished` |
+| `trusted_dsp_only` and `published_roster` only: a named person is still a live holder in EVERY cited source (Spotify/Tidal; the notice names each one and links the URL's), not only in Jaxsta/MLC or in just one of them | `dsp_holder_vanished` |
 | **Last, only for a row that passed every gate above and would be removed (firstmate 021).** Org affiliation (credit-trust `org-affiliation.json`, captain 2026-10-16 ~18:36Z: "make sure these guys you remove credits or ban are not part of any major label or publisher too"): `contributor`, `verified_org` or `authenticated_domain` is human review + a polite contact, never automatic; `claimed_unverified` and `none` are allowed only with `coverage: full` and shown in the plan's `affiliation=` column; a user with no verdict is skipped, and so is one whose coverage is not `full`. A row that failed an earlier gate keeps that reason and is never in `needs_human_review` | `org_affiliated` (listed under `needs_human_review` by `plan` and `report`), `affiliation_unknown`, `affiliation_partial` |
 | The user's take-back notice would go out today and Caroline's gate accepts it (see the notice section) | `notice_would_defer`, `notice_refused` |
 
@@ -77,7 +78,9 @@ Any skip is recorded with its reason and is never retried around. Those roles jo
 verify waves.
 
 The gate also records, without skipping, whether the role is the claimant's last live
-credit on the track (`last_credit_on_track` in the row's before state). `plan` counts those
+credit on the track (`last_credit_on_track` in the row's before state). The other roles the
+same run removes from that profile and track count as gone (Main Attraction and Believer each
+lose Mixing and Engineer together). `plan` counts those
 as `would_remove_last_credit_on_track` and marks the row "(last credit on track)";
 `report` lists the removed ones under `last_credit_on_track`.
 
@@ -203,7 +206,7 @@ python3 $S apply --plan <plan_run> --approval <id1> [--approval <id2>] --notice-
   - #10638 execute spends every approved pair of a set at once and cannot pick a subset,
     while the notice, the daily cap and every exclusion are per user. One user per set means
     one user's problem never blocks or forces another's removal.
-  - `sourceRef` names the plan run, the manifest sha256 and the user.
+  - `sourceRef` names the plan run, the manifest file and its sha256, and the user.
   - A row resting on the Spotify/Tidal credit alone carries `evidence_class=dsp_track_level`
     in its evidence line, so the board can tell it apart from a public credits page.
   - Fable: an approval alone is never enough; the evidence must be attached. The stage body
@@ -329,6 +332,77 @@ a user who sends a document after a deferred day keeps the role.
   profile, `coverage: full`). On 2026-10-18 it holds the four take-back users
   (150514, 161128, 182594, 197122).
 - Every skip is in the ledger with its reason; no email is written there.
+
+### Published-roster take-back: Big Boy only (captain 2026-10-22 20:40Z, firstmate 047/048)
+
+The captain's "big boy go" (Fable's `big-boy-audit-1022.md`, ruling step b) covers ONE profile,
+`576e3c2d` (user 1387162), and adds one evidence class for it, `published_roster`.
+
+- **The role may be multi-person** (Engineer, Assistant Engineer). It is removed only when a LIVE
+  Spotify/Tidal credit lists the track's holders of that role family and the claimant is not among
+  them: live verdict `OTHERS_ONLY` (or `CONTRADICTED`).
+- **The allowlist is `takeback.ROSTER_CLAIMANTS`, the pair (profile `576e3c2d`, user 1387162).**
+  The same profile under another user's request, and every other profile, stays one-person-only,
+  and `load_manifest` refuses a multi-person row without it.
+- **His whole engineering team is checked (firstmate 051).** The gate also reads the track's
+  unfiltered raw credits. If any trusted source credits him in ANY engineering family (engineer,
+  assistant, mix, master, immersive mix/master, remaster), by name or raw-profile link, the row is
+  refused as `claimant_on_engineering_team`. For example, Tidal listing him as Mixing Engineer keeps
+  his Engineer row. This applies to EVERY row of the allowlisted pair, his one-person
+  `trusted_dsp_only` Mixing rows included (firstmate 055): if Tidal later lists him as Recording or
+  Mastering Engineer on Main Attraction, its Mixing row is held too, though Chris Godbey still holds
+  Mixing.
+- **Never touched:** a role no trusted source publishes (`UNVERIFIABLE`), or one a trusted source
+  credits to the claimant (`CONFIRMED`). The absence of a credit is not a contradiction.
+- **Notice and stage body:** it reads like `trusted_dsp_only` (the DSP label and the DSP track URL,
+  with the public page Fable cited as `corroboration`). The stage evidence line says
+  `evidence_class=published_roster`.
+- **The approval set states its basis (firstmate 052).** For roster rows the set's `reason` begins
+  with `takeback.ROSTER_BASIS` (captain 2026-10-22 "big boy go": a live Spotify/Tidal credit lists
+  the engineering holders, and the claimant is not among them nor on any engineering-family role of
+  the track). A set that also holds one-person rows states both bases. Each row's ledger
+  `approval_ref` cites its own `decision`, which a roster row must carry.
+- **Manifest:** `manifests/takeback-bigboy-r1.jsonl`, batch 1: 8 role lines on 6 requests. `plan`,
+  `stage`, `apply`, `notice-preview` and `notify` take it with `--manifest` (the default is
+  `takeback-r1.jsonl`).
+  - 2 Mixing contradicted by Tidal.
+  - 5 Engineer and 1 Assistant Engineer where Spotify/Tidal publish other holders.
+  - The audit's other contradicted roles that no trusted source publishes are not in it.
+
+**Proof on file, cleared only by a named human's answer on the credit-trust board (captain 013,
+firstmate 048/051).** A document on file blocks the row. A manifest row carries only a POINTER,
+`proof_check = {"notice_id": ..., "ask_id": "proof"}`. `load_manifest` refuses a row that carries
+`proof_cleared` or any other clearance field, or a `proof_check` naming any ask other than `proof`
+(a notice's veto ask never clears a document): an agent can write the manifest, so it never holds
+the answer.
+- Only a row of the allowlisted pair (`ROSTER_CLAIMANTS`) can be cleared, one-person rows such as
+  Big Boy's two `trusted_dsp_only` Mixing rows included (firstmate 053). Every row of any other
+  profile or user with a proof-on-file entry stays `proof_on_file:<kind>`, whatever the manifest
+  says.
+- `plan` and the `apply` re-check read `GET /api/notices` from the board
+  (`credit_retro/board.py`). They send the agent token `CREDIT_TRUST_BOARD_AGENT_TOKEN` from
+  `/etc/hydra/credit-trust-board.env` in the `X-Credit-Trust-Token` header, never in the URL. The
+  host resolves as in `credit-digest-dm.sh`: `credit-trust-board.monitoring.svc.cluster.local:3000`,
+  through kube-dns when the host resolver does not know it. Overrides: `CREDIT_RETRO_BOARD_ENV`,
+  `_HOST`, `_PORT`, `_IP`, `CREDIT_RETRO_KUBE_DNS`.
+- The row clears only when all of these hold:
+  - the notice exists and is open (a closed, expired or not-open notice clears nothing: the board
+    refuses new answers on it, so a later `yes` could not block again);
+  - the LATEST answer to the ask (answers are append-only) is `no`, meaning the document covers
+    none of the credits;
+  - that answer is by a reviewer in `takeback.PROOF_REVIEWERS` (`jan@muso.ai` only);
+  - the notice body names the row as `` `<request_id>:<role>` `` (the full request id and the role,
+    in backticks, verbatim). The notice lists every row it clears, so a later manifest cannot
+    reuse it for a row Jan never saw;
+  - the notice body quotes EVERY live proof-on-file entry for the request and the user as
+    `<source>:<ref>:<kind>` (e.g. `intercom:255336:human_approved_after_doc`). A changed entry
+    (another kind or source) or a new one blocks again.
+- **Fail closed.** A missing token, a read error or a non-200 answer holds the row, with the error
+  in `before["proof_check_error"]`. A notice that does not clear it gives the reason in
+  `before["proof_not_cleared"]`. A cleared row records
+  `before["proof_cleared"] = {notice_id, ask_id, by, at, choice, refs}`.
+- Big Boy has one entry, Intercom 255336 (2024-07-23, before every claim). The notice is not posted
+  yet, so the manifest carries no `proof_check`, and every row stays held until it does.
 
 ## Ledger
 
