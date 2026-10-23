@@ -22,7 +22,7 @@ ack-start.txt), from support@ via gog, English, never for legal_threat / spam / 
   thread beyond its label.
 - Exit 2 if a mailbox cannot be read (a check that cannot complete must not look clean).
 """
-import json, os, re, sys, time, base64, html, subprocess, datetime, email.utils, urllib.request
+import hashlib, json, os, re, sys, time, base64, html, subprocess, datetime, email.utils, urllib.request
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
@@ -34,7 +34,7 @@ ACK_START = f"{HOME}/ack-start.txt"   # epoch ms; only threads whose FIRST messa
 PAGE_START = f"{HOME}/page-start.txt"  # epoch ms; only threads whose FIRST message is after it page #cs_priority
 PAGE_CLASSES = ("dmca_takedown", "legal_threat", "privacy_erasure", "security")
 SLACK_CHANNEL = "C0BBTAVP44X"  # #cs_priority (same channel + bot as the hydra rights-holder watchdog)
-SLACK_MENTIONS = ("U0AL36NADEY", "U038BM16T7W")  # Nick, Jan
+SLACK_MENTIONS = ("U038BM16T7W",)  # Jan (owns legal intake; Nick removed 2026-10-23, MUS-18475)
 # DSP / distributor / label senders (firstmate 961): a takedown from these is a rights-holder takedown even if the
 # wording misses the keyword rules. Boundary match on the sender's domain.
 DSP_SENDER = re.compile(r"@(?:[\w-]+\.)*(spotify\.com|tidal\.com|apple\.com|distrokid\.com|tunecore\.com|cdbaby\.com|believe\.com|"
@@ -119,23 +119,38 @@ def esc(s):
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+REPLY_PREFIX = re.compile(r"^\s*(?:re|fwd?|aw|tr)\s*:\s*", re.I)
+
+
+def notice_key(cls, subject, ids):
+    """Same notice sent from several addresses: class + normalised subject + linked Muso ids.
+    A hash, never the subject (the ledger holds no message content)."""
+    subj = subject or ""
+    while REPLY_PREFIX.match(subj):
+        subj = REPLY_PREFIX.sub("", subj, count=1)
+    subj = " ".join(subj.split()).lower()
+    return hashlib.sha256(f"{cls}|{subj}|{','.join(ids)}".encode()).hexdigest()[:16]
+
+
 def page_text(alias, cls, h0, ids, row):
     name, addr = email.utils.parseaddr(h0.get("from", ""))
-    dom = addr.split("@")[-1] if "@" in addr else "?"
     mention = " ".join(f"<@{m}>" for m in SLACK_MENTIONS)
     label = {"dmca_takedown": "Takedown / copyright", "legal_threat": "LEGAL threat (no auto-ack; captain)",
              "privacy_erasure": "Privacy / GDPR erasure", "security": "Security report"}[cls]
     ack = ("auto-ack sent" if row.get("acked") else ("no ack (legal: captain)" if cls == "legal_threat" else "no ack yet"))
     muso = ", ".join(i for i in ids[:6]) or "none linked"
     return (f"{mention}  :rotating_light: *{alias} inbound: {label}*\n"
-            f"From: {esc(name)[:60]} (@{esc(dom)[:60]})\nSubject: {esc(h0.get('subject', ''))[:140]}\n"
+            f"From: {esc(f'{name} <{addr}>' if name else addr)[:120]}\nSubject: {esc(h0.get('subject', ''))[:140]}\n"
             f"Muso ids: {esc(muso)} · on removal register: {'yes' if row.get('on_register') else 'NO'} · {ack}\n"
             f"Gmail thread `{row['thread']}` (cs-systemic intake; this mailbox does NOT reach Intercom)")
 
 
-def post_page(token, text_):
+def post_page(token, text_, thread_ts=None):
+    payload = {"channel": SLACK_CHANNEL, "text": text_, "unfurl_links": False}
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
     req = urllib.request.Request("https://slack.com/api/chat.postMessage",
-                                 data=json.dumps({"channel": SLACK_CHANNEL, "text": text_, "unfurl_links": False}).encode(),
+                                 data=json.dumps(payload).encode(),
                                  headers={"Authorization": "Bearer " + token, "Content-Type": "application/json; charset=utf-8"})
     r = json.load(urllib.request.urlopen(req, timeout=30))
     return r.get("ts") if r.get("ok") else ""
@@ -209,7 +224,8 @@ def main():
                 # One ack + one page per REQUEST, not per thread: the same sender writing to notices@ AND legal@
                 # (notices@ is also auto-forwarded to aaron@) or sending twice within 3 days is one request.
                 # 2026-10-23: a DMCA sender got 4 identical acks + 4 pages before this key existed.
-                sender_addr = email.utils.parseaddr(h0.get("from", ""))[1].lower()
+                name2, sender_raw = email.utils.parseaddr(h0.get("from", ""))
+                sender_addr = sender_raw.lower()
                 req_key = f"{sender_addr}|{cls}"
                 fm = int(msgs[0].get("internalDate", 0))
                 sibling = next((r for k, r in ledger.items() if k != key and r.get("req_key") == req_key
@@ -220,6 +236,26 @@ def main():
                         row["acked"] = True; row["ack_ref"] = "dup-of:" + str(sibling.get("ack_ref"))
                     if sibling.get("paged") and not row.get("paged"):
                         row["paged"] = "dup-of:" + str(sibling.get("paged"))
+                # Second arm: the SAME notice from a different address (2026-10-23: david@demandage.com and
+                # demandage@gmail.com, 36 s apart, same four profiles). Needs linked Muso ids: without them
+                # two senders with the same subject are two unrelated takedowns.
+                nkey = notice_key(cls, h0.get("subject", ""), ids)
+                row["notice_key"] = nkey
+                nsib = None
+                if ids and not row.get("paged"):
+                    nsib = next((r for k, r in ledger.items() if k != key and r.get("notice_key") == nkey
+                                 and abs(int(r.get("first_msg") or 0) - fm) < 3 * 86400000
+                                 and r.get("paged") and not str(r.get("paged")).startswith("dup-of:")), None)
+                if nsib is not None:
+                    row["paged"] = "dup-of:" + str(nsib["paged"])
+                    if do_page and stok:
+                        note = (f"Same notice, second sender: {esc(f'{name2} <{sender_addr}>' if name2 else sender_addr)[:120]}\n"
+                                f"Gmail thread `{tid}` (no new action needed; paged above)")
+                        try:
+                            if not post_page(stok, note, thread_ts=nsib["paged"]):
+                                raise RuntimeError("slack refused")
+                        except Exception:
+                            print(f"WARN: threaded same-notice note failed {alias.split('@')[0]} {tid}; notice already paged")
                 if do_ack and not row.get("acked") and cls in ACK and ack_start and int(msgs[0].get("internalDate", 0)) > ack_start:
                     frm = h0.get("from", "")
                     to = (re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+", frm) or [""])[0]

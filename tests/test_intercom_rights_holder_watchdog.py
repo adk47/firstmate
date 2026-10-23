@@ -158,6 +158,13 @@ class Render(unittest.TestCase):
                        f"https://app.intercom.com/a/inbox/dwjzhcge/inbox/conversation/{SONY_ID}"):
             self.assertIn(needle, t)
 
+    def test_default_mentions_page_jan_only(self):
+        ids = [s for s in wd.DEFAULT_MENTION_IDS.split(",") if s.strip()]
+        conv = make_conv()
+        t = wd.render_alert(conv, wd.classify(conv, DOMAINS, KEYWORDS), ("none", None), ids, "dwjzhcge")
+        self.assertIn("<@U038BM16T7W>", t)
+        self.assertNotIn("<@U0AL36NADEY>", t)
+
     def test_no_ticket_is_bold(self):
         self.assertIn("*NO TICKET FILED*", self.render(ticket=("none", None)))
 
