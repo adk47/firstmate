@@ -1998,7 +1998,7 @@ _rel() {
 _digest() { DIGEST_NOW="${DIGEST_NOW_OVERRIDE:-$DIGEST_NOW}" run bash "$TEST_TMPDIR/scripts/release-digest.sh" "$@"; }
 _posted_text() { jq -r '[.[] | (.text.text? // (.elements[]?.text))] | join("\n")' "$TEST_TMPDIR/posted.json"; }
 
-@test "digest: only releases in [now-24h, now) appear; the lower bound is inclusive" {
+@test "digest: only releases in [previous 08:00 slot, now) appear; the lower bound is inclusive" {
   _digest_gh_stub
   _rel core-backend v-in-23h  "2026-10-21T13:00:00Z" $'### Fixes\n\n- fix: in the window'
   _rel core-backend v-edge    "2026-10-21T12:00:00Z" $'### Fixes\n\n- fix: exactly 24h old'
@@ -2070,6 +2070,27 @@ for d, hh in ((date(2026,10,22),12), (date(2026,11,5),13), (date(2026,3,7),13), 
 print("ok")
 PY
   [ "$status" -eq 0 ]
+}
+
+@test "digest: fall back (25 h between fires): a release in the extra hour is still in a digest" {
+  _digest_gh_stub
+  # 31 Oct 08:00 EDT = 12:00Z; 1 Nov 08:00 EST = 13:00Z. now-24h would start at 31 Oct 13:00Z and drop 12:30Z.
+  _rel core-backend v-extra-hour "2026-10-31T12:30:00Z" $'### Fixes\n\n- fix: published in the 25th hour'
+  DIGEST_NOW_OVERRIDE="2026-11-01T13:00:00Z" _digest
+  [ "$status" -eq 0 ]
+  [[ "$(_posted_text)" == *"published in the 25th hour"* ]]
+}
+
+@test "digest: spring forward (23 h between fires): a release is reported once, not twice" {
+  _digest_gh_stub
+  # 13 Mar 08:00 EST = 13:00Z; 14 Mar 08:00 EDT = 12:00Z. now-24h would start at 13 Mar 12:00Z and repeat 12:30Z.
+  _rel core-backend v-already-sent "2027-03-13T12:30:00Z" $'### Fixes\n\n- fix: already in the 13 Mar digest'
+  _rel core-backend v-new "2027-03-13T13:30:00Z" $'### Fixes\n\n- fix: new since the 13 Mar digest'
+  DIGEST_NOW_OVERRIDE="2027-03-14T12:00:00Z" _digest
+  [ "$status" -eq 0 ]
+  t="$(_posted_text)"
+  [[ "$t" != *"already in the 13 Mar digest"* ]]
+  [ "$(grep -c 'new since the 13 Mar digest' <<<"$t")" -eq 1 ]
 }
 
 @test "digest: the timer is keyed to the IANA zone, never a fixed UTC offset" {

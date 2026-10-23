@@ -151,7 +151,6 @@ def read_lines(path):
 # never a fixed UTC offset: Miami is EDT until the first Sunday of November
 # and EST after, so a hardcoded offset is a bug that lands in November.
 DIGEST_TZ = ZoneInfo("America/New_York")
-DIGEST_WINDOW = timedelta(hours=24)
 # Slack caps a context element's text at 2000 characters.
 CONTEXT_MAX = 2000
 # Sections that never read as "what shipped" to the company.
@@ -166,12 +165,6 @@ def parse_ts(text):
     return dt.astimezone(timezone.utc)
 
 
-def digest_window(now):
-    """[now-24h, now) as aware UTC datetimes."""
-    now = now.astimezone(timezone.utc)
-    return now - DIGEST_WINDOW, now
-
-
 def digest_local_date(now):
     """The America/New_York calendar date the digest is filed under."""
     return now.astimezone(DIGEST_TZ).date()
@@ -180,6 +173,16 @@ def digest_local_date(now):
 def digest_slot_utc(day):
     """The UTC instant of 08:00 America/New_York on the given date."""
     return datetime(day.year, day.month, day.day, 8, 0, tzinfo=DIGEST_TZ).astimezone(timezone.utc)
+
+
+def digest_window(now):
+    """[previous 08:00 America/New_York slot, now) as aware UTC datetimes.
+
+    Not now-24h: consecutive fires are 25 h apart on the fall-back day and
+    23 h apart on the spring-forward day, so a fixed 24 h window drops or
+    repeats an hour of releases on those two days."""
+    now = now.astimezone(timezone.utc)
+    return digest_slot_utc(digest_local_date(now) - timedelta(days=1)), now
 
 
 def digest_bullets(release):
