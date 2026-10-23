@@ -16,13 +16,21 @@ set -euo pipefail
 # indistinguishable from a broken timer. Idempotent: one post per New York
 # calendar day, recorded only after Slack confirmed it.
 #
+# The window is [last posted slot, the most recent 08:00 slot <= now): the
+# upper bound is the SCHEDULED slot, never the wall clock, so a Persistent=true
+# catch-up before 08:00 or a late run neither drops nor repeats releases. The
+# lower bound is the slot in digest/last-posted, so a multi-day outage is
+# reported in one window. A corrupt state value warns and falls back to the
+# previous slot (never dies: a bad state file must not brick the digest).
+# --dry-run reads that watermark so the preview is honest, and writes nothing.
+#
 # Usage:
 #   ./scripts/release-digest.sh            # post today's digest
 #   ./scripts/release-digest.sh --dry-run  # print the payload, post and
 #                                          # record nothing
 #
 # Exit codes:
-#   0  posted, already posted today, or dry run
+#   0  posted, already posted for this slot, or dry run
 #   1  a real failure (bad config, unreachable GitHub, failed post)
 #
 # Env knobs:
@@ -64,14 +72,24 @@ for c in gh jq python3 flock; do
 done
 
 NOW="${DIGEST_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-TODAY="$(python3 "$BLOCKKIT" --digest-date "$NOW")" || die "cannot read DIGEST_NOW '$NOW'"
+SLOT="$(python3 "$BLOCKKIT" --digest-slot-date "$NOW")" || die "cannot read DIGEST_NOW '$NOW'"
 
 mkdir -p "$STATE_ROOT" "$DIGEST_STATE_DIR" "$HIGHLIGHTS_DIR"
 exec 9>"$LOCK_FILE"
 flock -n 9 || { log "another digest run holds the lock — skipping."; exit 0; }
 
-if [[ "$DRY_RUN" -eq 0 && "$(cat "$DIGEST_STATE_DIR/last-posted" 2>/dev/null || true)" == "$TODAY" ]]; then
-  log "digest for $TODAY already posted — nothing to do."
+# The watermark: the New York date of the last slot a digest was posted for.
+SINCE="$(cat "$DIGEST_STATE_DIR/last-posted" 2>/dev/null || true)"
+SINCE="${SINCE//[[:space:]]/}"
+if [[ -n "$SINCE" ]] && { ! [[ "$SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || ! python3 "$BLOCKKIT" --digest-since "$SINCE"; }; then
+  log "WARNING: digest/last-posted holds '$SINCE', not a date — falling back to the previous slot."
+  SINCE=""
+fi
+
+# ISO dates compare lexicographically: stored >= SLOT also covers clock skew
+# or a restored-from-backup value, which must not re-post or window backwards.
+if [[ "$DRY_RUN" -eq 0 && -n "$SINCE" && ! "$SINCE" < "$SLOT" ]]; then
+  log "digest for $SLOT already posted — nothing to do."
   exit 0
 fi
 
@@ -118,11 +136,11 @@ while IFS= read -r key; do
 done < <(release_repo_keys --enabled-only)
 
 if ((${#projects_files[@]})); then
-  jq -s --arg now "$NOW" --arg ch "${RELEASES_SLACK_CHANNEL:-}" \
-    '{now: $now, channel: $ch, projects: .}' "${projects_files[@]}" > "$WORK/in.json"
+  jq -s --arg now "$NOW" --arg ch "${RELEASES_SLACK_CHANNEL:-}" --arg since "$SINCE" \
+    '{now: $now, since: $since, channel: $ch, projects: .}' "${projects_files[@]}" > "$WORK/in.json"
 else
-  jq -n --arg now "$NOW" --arg ch "${RELEASES_SLACK_CHANNEL:-}" \
-    '{now: $now, channel: $ch, projects: []}' > "$WORK/in.json"
+  jq -n --arg now "$NOW" --arg ch "${RELEASES_SLACK_CHANNEL:-}" --arg since "$SINCE" \
+    '{now: $now, since: $since, channel: $ch, projects: []}' > "$WORK/in.json"
 fi
 python3 "$BLOCKKIT" --digest "$WORK/in.json" "$WORK/payload.json" || die "render failed"
 
@@ -132,5 +150,5 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 release_announce_post "$WORK/payload.json" || die "Slack did not confirm the digest post"
-printf '%s\n' "$TODAY" > "$DIGEST_STATE_DIR/last-posted"
-log "posted digest for $TODAY."
+printf '%s\n' "$SLOT" > "$DIGEST_STATE_DIR/last-posted"
+log "posted digest for $SLOT."

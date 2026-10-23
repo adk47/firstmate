@@ -175,14 +175,37 @@ def digest_slot_utc(day):
     return datetime(day.year, day.month, day.day, 8, 0, tzinfo=DIGEST_TZ).astimezone(timezone.utc)
 
 
-def digest_window(now):
-    """[previous 08:00 America/New_York slot, now) as aware UTC datetimes.
-
-    Not now-24h: consecutive fires are 25 h apart on the fall-back day and
-    23 h apart on the spring-forward day, so a fixed 24 h window drops or
-    repeats an hour of releases on those two days."""
+def digest_slot_for(now):
+    """The most recent 08:00 America/New_York slot at or before `now`."""
     now = now.astimezone(timezone.utc)
-    return digest_slot_utc(digest_local_date(now) - timedelta(days=1)), now
+    day = digest_local_date(now)
+    slot = digest_slot_utc(day)
+    return slot if slot <= now else digest_slot_utc(day - timedelta(days=1))
+
+
+def digest_since(value):
+    """The window start a stored watermark names: an ISO date (the NY date of
+    the last posted slot) or an ISO-8601 instant. Raises ValueError otherwise."""
+    value = value.strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return digest_slot_utc(datetime.strptime(value, "%Y-%m-%d").date())
+    return parse_ts(value)
+
+
+def digest_window(now, since=None):
+    """[since or the previous slot, the most recent slot <= now) as aware UTC.
+
+    The upper bound is the SCHEDULED slot, never `now`: a Persistent catch-up
+    at 07:00 or a delayed run at 09:30 must report the window the punctual
+    08:00 run would have reported, or the hour between the run and the slot
+    lands in no digest (early) or in two digests (late). The previous slot is
+    slot arithmetic, not end - 24 h: consecutive fires are 25 h apart on the
+    fall-back day and 23 h apart on the spring-forward day. `since` is the
+    last posted slot, so a multi-day outage is reported in one window."""
+    end = digest_slot_for(now)
+    prev = digest_slot_utc(digest_local_date(end) - timedelta(days=1))
+    start = since if (since is not None and since < end) else prev
+    return start, end
 
 
 def digest_bullets(release):
@@ -213,11 +236,20 @@ def clamp_links(links, limit=CONTEXT_MAX):
 def build_digest(data):
     """Return the Slack payload for a digest input document."""
     now = parse_ts(data["now"])
-    start, end = digest_window(now)
-    label = digest_local_date(now).strftime("%a %-d %b %Y")
+    since = digest_since(data["since"]) if data.get("since") else None
+    start, end = digest_window(now, since)
+    label = digest_local_date(end).strftime("%a %-d %b %Y")
+    # More than one slot (an outage or a missed timer) must not claim 24 h.
+    multi = start < digest_slot_utc(digest_local_date(end) - timedelta(days=1))
+    if multi:
+        title = "Releases since %s · %s" % (digest_local_date(start).strftime("%a %-d %b %Y"), label)
+        quiet = "No releases since %s." % digest_local_date(start).strftime("%a %-d %b %Y")
+    else:
+        title = "Last 24h in production · %s" % label
+        quiet = "No releases in the last 24 h."
     blocks = [{
         "type": "header",
-        "text": {"type": "plain_text", "text": "Last 24h in production · %s" % label, "emoji": True},
+        "text": {"type": "plain_text", "text": title, "emoji": True},
     }]
     total = 0
     for proj in data.get("projects", []):
@@ -249,9 +281,9 @@ def build_digest(data):
         # One quiet line, still posted: silence would be indistinguishable
         # from a broken timer.
         blocks.append({"type": "context", "elements": [
-            {"type": "mrkdwn", "text": "No releases in the last 24 h."}]})
+            {"type": "mrkdwn", "text": quiet}]})
     payload = {
-        "text": "Last 24h in production · %s — %d release%s" % (label, total, "" if total == 1 else "s"),
+        "text": "%s — %d release%s" % (title, total, "" if total == 1 else "s"),
         "unfurl_links": False,
         "unfurl_media": False,
         "blocks": blocks,
@@ -262,8 +294,16 @@ def build_digest(data):
 
 
 def digest_main(argv):
-    if argv[0] == "--digest-date":
-        print(digest_local_date(parse_ts(argv[1])).isoformat())
+    if argv[0] == "--digest-slot-date":
+        print(digest_local_date(digest_slot_for(parse_ts(argv[1]))).isoformat())
+        return
+    if argv[0] == "--digest-since":
+        # Exit 1 on a value the renderer would reject, so the shell can warn
+        # and fall back instead of bricking the digest on a corrupt state file.
+        try:
+            digest_since(argv[1])
+        except ValueError:
+            sys.exit(1)
         return
     with open(argv[1], encoding="utf-8") as fh:
         data = json.load(fh)
@@ -409,7 +449,7 @@ def main():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("--digest", "--digest-date"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("--digest", "--digest-slot-date", "--digest-since"):
         digest_main(sys.argv[1:])
     else:
         main()
