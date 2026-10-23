@@ -93,9 +93,6 @@ if [[ "$DRY_RUN" -eq 0 && -n "$SINCE" && ! "$SINCE" < "$SLOT" ]]; then
   exit 0
 fi
 
-# The window start, from the renderer's own arithmetic and the SAME sanitised
-# $SINCE that goes into in.json, so the fetch and the render agree.
-WSTART="$(python3 "$BLOCKKIT" --digest-window-start "$NOW" "$SINCE")" || die "cannot compute the window start"
 DIGEST_PAGE_MAX="${DIGEST_PAGE_MAX:-50}"
 
 WORK="$(mktemp -d)"
@@ -115,14 +112,16 @@ while IFS= read -r key; do
   emoji="$(release_repo_field "$key" emoji)"
   display="$(release_repo_field "$key" display)"
   rels="$WORK/rels-$n.json"
-  # Page until the listing reaches the window start. The listing is
-  # created_at-descending and published_at is treated as monotone with it, so
-  # the oldest published_at fetched so far bounds everything still unfetched.
-  # One page reaches back only ~14 days for core-backend, so a catch-up window
-  # longer than that needs page 2+; a punctual run still costs one page.
-  # Stop on a short page (end of history) or once min(published_at) < WSTART.
-  # Never truncate: tripping DIGEST_PAGE_MAX dies, so nothing posts and the
-  # watermark stays, and the next run retries the full window.
+  # Page to the END of the listing. It is ordered by neither published_at nor
+  # created_at: position tracks the tag string, so page 1 proves nothing about
+  # page 2. Live: `gh api 'repos/Muso-AI/core-backend/releases?per_page=100&page=1'`
+  # has min published_at 2026-10-09T10:12:28Z while page 2 holds later ones.
+  # A time margin would bound nothing (a tag outside the v2026.* scheme sorts
+  # last on the day it is published), and the renderer, not the fetch, decides
+  # the window, so over-fetching is safe and under-fetching is the only failure.
+  # Stop on a short page only. Never truncate: tripping DIGEST_PAGE_MAX dies, so
+  # nothing posts and the watermark stays. When any repo's walk routinely passes
+  # ~10 pages, revisit this design.
   page=1
   page_files=()
   while :; do
@@ -133,10 +132,8 @@ while IFS= read -r key; do
     jq -e 'type == "array"' "$pf" >/dev/null 2>&1 || die "unexpected release listing for $repo"
     page_files+=("$pf")
     [[ "$(jq 'length' "$pf")" -lt 100 ]] && break
-    oldest="$(jq -rs '[.[][].published_at // empty] | min // ""' "${page_files[@]}")"
-    [[ -n "$oldest" && "$oldest" < "$WSTART" ]] && break
     page=$((page + 1))
-    ((page <= DIGEST_PAGE_MAX)) || die "release listing for $repo did not reach the window start in $DIGEST_PAGE_MAX pages"
+    ((page <= DIGEST_PAGE_MAX)) || die "release listing for $repo exceeded DIGEST_PAGE_MAX=$DIGEST_PAGE_MAX pages; nothing posted"
   done
   # A release published mid-walk pushes the page-1 boundary item onto page 2.
   jq -s 'add | unique_by(.tag)' "${page_files[@]}" > "$rels"

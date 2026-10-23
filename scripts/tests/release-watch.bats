@@ -2351,15 +2351,36 @@ _rels_desc() {
   [ "$(_recorded)" = "2026-10-22" ]
 }
 
-@test "digest: a punctual run costs exactly one releases request per enabled repo" {
+@test "digest: the early stop is gone: in-window releases on page 2 are reported though page 1 reaches past the window start" {
   _digest_gh_stub
-  # A FULL page 1 that reaches past the window start: only the min(published_at)
-  # stop keeps this at one request (a short page would stop it on its own).
+  # The bot's shape (round 5): a FULL page 1 whose min(published_at) is before
+  # the window start, and in-window releases on page 2. The listing is
+  # tag-ordered, not time-ordered, so page 1 proves nothing about page 2.
+  _rels_desc core-backend 100 "2026-10-22T10:00:00Z"
+  _rel core-backend r-late-1 "2026-10-22T06:00:00Z" $'### Fixes\n\n- fix: late page-2 release'
+  _rel core-backend r-late-2 "2026-10-21T20:00:00Z" $'### Fixes\n\n- fix: second page-2 release'
+  _digest
+  [ "$status" -eq 0 ]
+  grep -q 'page=2' "$STUB_GH_ARGV"
+  [[ "$(_posted_text)" == *"late page-2 release"* ]]
+  [[ "$(_posted_text)" == *"second page-2 release"* ]]
+}
+
+@test "digest: the releases request cost is ceil(n/100) per enabled repo, not one" {
+  _digest_gh_stub
+  # 99 releases: a short page ends the walk, so 4 enabled repos = 4 requests.
+  _rels_desc core-backend 99 "2026-10-22T10:00:00Z"
+  _digest
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'releases?' "$STUB_GH_ARGV")" -eq 4 ]
+  # 100 releases: a full page cannot prove history ended, so it costs one more.
+  : > "$STUB_GH_ARGV"
+  rm -f "$HYDRA_RELEASE_STATE_DIR/digest/last-posted"   # run 1 recorded the slot
   _rels_desc core-backend 100 "2026-10-22T10:00:00Z"
   _digest
   [ "$status" -eq 0 ]
-  # hydra, web-credits-next, core-backend, auth: the four enabled rows.
-  [ "$(grep -c 'releases?' "$STUB_GH_ARGV")" -eq 4 ]
+  [ "$(grep -c 'repos/Muso-AI/core-backend/releases?.*page=2' "$STUB_GH_ARGV")" -eq 1 ]
+  [ "$(grep -c 'releases?' "$STUB_GH_ARGV")" -eq 5 ]
 }
 
 @test "digest: a release repeated across the page boundary is reported once" {
@@ -2374,14 +2395,14 @@ _rels_desc() {
   [[ "$(_posted_text)" == *"muso platform (backend)* — 100 releases"* ]]
 }
 
-@test "digest: a listing that never reaches the window start dies: nothing posted, watermark untouched" {
+@test "digest: a listing that never ends dies: nothing posted, watermark untouched" {
   _digest_gh_stub
   _watermark 2026-10-08
   _rels_desc core-backend 100 "2026-10-21T10:00:00Z"
   export STUB_GH_IGNORE_PAGE=1
   DIGEST_PAGE_MAX=2 _digest
   [ "$status" -ne 0 ]
-  [[ "$output" == *"did not reach the window start in 2 pages"* ]]
+  [[ "$output" == *"exceeded DIGEST_PAGE_MAX=2 pages"* ]]
   [ ! -e "$TEST_TMPDIR/posted.json" ]
   [ "$(_recorded)" = "2026-10-08" ]
 }
