@@ -177,6 +177,15 @@
 #     from EnvironmentFile (a 644 cron.d line would expose it) and the
 #     service is in AUX_ONFAILURE_UNITS so a failing run pages.
 #
+#   /root/fmc1-intake/intake.py
+#     The legal@ mailbox intake (DMCA / takedown notices -> #cs_priority page),
+#     installed from scripts/legal-intake.py. It is NOT a unit: a 15-min cron on
+#     node-1 SSHes in as root and runs this exact path, so we install to the path
+#     the cron already calls (no cutover, no node-1 change). The first deploy
+#     that finds a different file keeps it once as intake.py.pre-git-<UTC ts>;
+#     later deploys overwrite drift without a second backup. State paths in the
+#     script are absolute, so nothing moves.
+#
 #   /etc/tmpfiles.d/tmp.conf
 #     /tmp age policy keyed on mtime only (`D /tmp 1777 root root mM:24h`),
 #     installed verbatim from scripts/aux-units/tmp.conf. Codifies the
@@ -368,6 +377,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/intercom-legal-unanswered-watchdog.py" ]] \
   || fail "$HYDRA_ROOT/scripts/intercom-legal-unanswered-watchdog.py missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/legal-intake.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/legal-intake.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/lib/ensure-mercury-token.sh" ]] \
@@ -591,6 +602,22 @@ wd=intercom-rights-holder-watchdog.timer
 systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
+# ─── legal@ intake script (scripts/legal-intake.py -> /root/fmc1-intake/intake.py) ──
+# --- BEGIN legal-intake-install ---
+# Scheduled by node-1 cron over SSH, so this is a file install, not a unit.
+# LEGAL_INTAKE_DEST is a test seam (scripts/tests/install-aux-units-legal-intake.bats).
+LEGAL_INTAKE_DEST="${LEGAL_INTAKE_DEST:-/root/fmc1-intake/intake.py}"
+if [[ -f "$LEGAL_INTAKE_DEST" ]] \
+   && ! cmp -s "$HYDRA_ROOT/scripts/legal-intake.py" "$LEGAL_INTAKE_DEST" \
+   && ! compgen -G "$LEGAL_INTAKE_DEST.pre-git-*" >/dev/null; then
+  legal_intake_bak="$LEGAL_INTAKE_DEST.pre-git-$(date -u +%Y%m%dT%H%M%SZ)"
+  cp -a "$LEGAL_INTAKE_DEST" "$legal_intake_bak"
+  log "  legal-intake: kept pre-git original as $legal_intake_bak"
+fi
+install -m 0755 "$HYDRA_ROOT/scripts/legal-intake.py" "$LEGAL_INTAKE_DEST"
+log "  legal-intake: installed $LEGAL_INTAKE_DEST"
+# --- END legal-intake-install ---
 
 # ─── Intercom legal / privacy request unanswered-by-a-human watchdog ───────
 # Hourly. Pages #cs_priority (Jan) when a GDPR / erasure / legal / cease-and-desist
