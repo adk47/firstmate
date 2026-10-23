@@ -41,7 +41,8 @@
     "review_high_risk_profile_score",
     "review_editing_role_without_trusted_credit",
     "review_big_track_weak_footprint",
-    "review_big_track_without_trusted_credit"
+    "review_big_track_without_trusted_credit",
+    "review_role_cardinality"
   ],
   "trusted_shortcut_rules": [
     "approve_owning_track",
@@ -80,7 +81,8 @@
       "review_high_risk_profile_score",
       "review_big_track_weak_footprint",
       "review_editing_role_without_trusted_credit",
-      "review_big_track_without_trusted_credit"
+      "review_big_track_without_trusted_credit",
+      "review_role_cardinality"
     ],
     "editing_burst_rules": [
       "review_hourly_velocity_profile",
@@ -112,6 +114,7 @@
       "review_org_role_without_outside_source": "An organization role (studio, label, publisher) was claimed for a profile that exists only on Muso, with no outside source.",
       "review_editing_role_without_trusted_credit": "An editing role was claimed on a mid-size or popular track with no trusted source naming the claimant as an editor there.",
       "review_big_track_without_trusted_credit": "A popular track was claimed with no trusted source crediting the claimant in this role on the track.",
+      "review_role_cardinality": "More people already hold this role on the recording than one recording normally has (for example a second mixer), and no trusted source credits the claimant in it.",
       "review_high_velocity_profile": "Too many claims on popular tracks were approved for this profile in the last 24 hours.",
       "review_hourly_velocity_profile": "Too many claims were approved for this profile in the last hour.",
       "review_held_submitter": "The submitting account is on the credit hold list.",
