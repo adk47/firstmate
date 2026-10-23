@@ -44,11 +44,13 @@ import os
 import subprocess
 import uuid
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import admin as admin_api
+from .roles import is_editorial
 from . import decide
 from .policy import (server_approval_refusal, server_proof_reasons, validator_conflict,
                      validator_rejected_rules)
@@ -388,6 +390,35 @@ def live_fanout(admin: admin_api.Admin, now: datetime, sleep: Callable[[float], 
     return fetch
 
 
+EditorialVelocity = Callable[[list[dict[str, Any]]], "dict[str, Any]"]
+
+
+def live_editorial_velocity(admin: admin_api.Admin, sleep: Callable[[float], None] | None = None) -> EditorialVelocity:
+    """Read-only: the claimant profile's request velocity (the decider's own EvidenceBuilder
+    ProfileSignals, 24 h / 7 d across statuses) for editorial-role rows only. {request id:
+    ProfileSignals, or None when unreadable (held)}. QA @d0f07f55: parity with the decider's
+    editorial-velocity hold."""
+    import time as _t
+    sleep = sleep or _t.sleep
+
+    def fetch(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        from .evidence import EvidenceBuilder
+        builder = EvidenceBuilder(admin)
+        out: dict[str, Any] = {}
+        for n, r in enumerate(rows):
+            if n:
+                sleep(0.3)
+            try:
+                sig = builder.profile_signals(str(r.get("profileId") or ""), {})
+                builder.ensure_velocity(sig)
+            except admin_api.AdminError:
+                out[str(r.get("id"))] = None
+                continue
+            out[str(r.get("id"))] = None if getattr(sig, "velocity_error", None) else sig
+        return out
+    return fetch
+
+
 def live_anchors(admin: admin_api.Admin, sleep: Callable[[float], None] | None = None) -> Anchors:
     """Read-only: the decider's trusted-catalog role verdicts for each row (raw credits +
     claimant profile). Any read failure = held."""
@@ -640,6 +671,7 @@ class ScoreResult:
     audit_sampled: int = 0
     engaged_excluded: int = 0
     no_anchor: int = 0
+    editorial_held: int = 0
     fanout_held: int = 0
     anchor_kinds: dict = field(default_factory=dict)
     read_exhausted: bool = False
@@ -659,6 +691,8 @@ class ScoreResult:
                 + (f"; {self.audit_sampled} in the audit sample" if self.audit_sampled else "")
                 + f"; {self.engaged_excluded} excluded as engaged claimants (stage 2)"
                 + f"; {self.no_anchor} held without an independent anchor (stage 2)"
+                + (f"; {self.editorial_held} editorial-role rows held (trusted anchor under pop "
+                   f"{decide.EDITORIAL_MID_POPULARITY} only)" if self.editorial_held else "")
                 + f"; {self.fanout_held} held by {FANOUT_PREFIX} (velocity-class)"
                 + (f"; approved by anchor_kind {dict(sorted(self.anchor_kinds.items()))}" if self.anchor_kinds else "")
                 + ("; READS INCOMPLETE (HTTP 429 or scan cap)" if self.read_exhausted else "")
@@ -677,7 +711,8 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
         readback: decide.Readback | None = None, now: datetime | None = None,
         sleep: Callable[[float], None] | None = None,
         conversations: Callable[[dict[int, str]], dict[int, "bool | None"]] | None = None,
-        anchors: Anchors | None = None, fanout: Fanout | None = None) -> ScoreResult:
+        anchors: Anchors | None = None, fanout: Fanout | None = None,
+        editorial_velocity: EditorialVelocity | None = None) -> ScoreResult:
     if mode not in ("shadow", "apply"):
         raise ValueError("mode must be shadow or apply")
     decide.ensure_schema(db)
@@ -721,6 +756,10 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
     admitted = [r for r in survivors if why_not(r, sp, policy, engaged) is None]
     anchor_of = (anchors or live_anchors(admin, sleep))(admitted) if admitted else {}
     fan_of = (fanout or live_fanout(admin, now, sleep))(admitted) if admitted else {}
+    editorial_rows = [r for r in admitted
+                      if any(is_editorial(str(x), policy.editorial_role_terms) for x in (r.get("credits") or []))]
+    vel_of = ((editorial_velocity or live_editorial_velocity(admin, sleep))(editorial_rows)
+              if editorial_rows else {})
     day_start = now.strftime("%Y-%m-%dT00:00:00Z")
     today = decide.approvals_today_by_user(db, day_start)
     by_user, by_profile, fleet = written_today(db, day_start)
@@ -752,6 +791,34 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
             if held:
                 why = held
                 res.no_anchor += 1
+        if why is None:
+            # The decider's editorial rule (captain 2026-10-15: editing/editorial roles are high risk):
+            # only a trusted source naming this profile in the role approves one, and only under pop 30;
+            # never the validator's verdict alone. 2026-10-22 22:40Z: 3 Producer+Editorial rows were
+            # score-approved on the validator alone before this rule existed here.
+            editorial = [x for x in (r.get("credits") or []) if is_editorial(str(x), policy.editorial_role_terms)]
+            if editorial:
+                pop = d.popularity if isinstance(d.popularity, int) else None
+                if pop is None or pop >= decide.EDITORIAL_MID_POPULARITY:
+                    why = (f"editorial role ({', '.join(editorial)}) on a track at pop >= "
+                           f"{decide.EDITORIAL_MID_POPULARITY} (or unknown): documentation required")
+                elif kind != "trusted":
+                    why = (f"editorial role ({', '.join(editorial)}): only a trusted source naming this profile in "
+                           "the role approves it, never the validator's verdict alone: proof path")
+                else:
+                    # The decider's editorial-velocity hold (pre_model): editorial weighs double against
+                    # the 24 h / 7 d velocity thresholds. Velocity unreadable = held.
+                    sig = vel_of.get(str(r.get("id")))
+                    if sig is None:
+                        why = (f"editorial role ({', '.join(editorial)}): the claimant's request velocity could "
+                               "not be read this run: held, retried")
+                    else:
+                        velocity = decide.editorial_velocity(SimpleNamespace(profile=sig))
+                        if velocity:
+                            why = (f"editorial role ({', '.join(editorial)}): high velocity, editorial weighs "
+                                   f"double ({velocity})")
+                if why:
+                    res.editorial_held += 1
         if why is None and len(approve) >= sp.max_per_run:
             why = f"per-run pace of {sp.max_per_run} reached: next run"
             res.capped += 1

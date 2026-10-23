@@ -184,7 +184,13 @@ def decisions_db(path, rows, *, schema=DECIDER_SCHEMA):
     db.close()
 
 
-def dec(rid, outcome="approved", pid=PID, run="run-1", at="2026-10-15T22:30:00Z", track="t1", action="approve"):
+# A RELATIVE default: verify_notify.run() looks back since_hours=168 from the real clock, so a fixed
+# date made every run-level test fail once it was 7 days old (2026-10-22 22:30Z, all branches).
+RECENT = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def dec(rid, outcome="approved", pid=PID, run="run-1", at=None, track="t1", action="approve"):
+    at = at or RECENT
     return {"request_id": rid, "profile_id": pid, "outcome": outcome, "action": action, "run_id": run, "at": at,
             "track_id": track}
 

@@ -6,6 +6,8 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+import dataclasses
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -95,7 +97,8 @@ class ScoreApprove(unittest.TestCase):
                         {"name": "cs-gmail", "generated_at": at, "stale": False, "count": 0}],
             "users": len({e["user_id"] for e in entries}), "entries": entries}))
 
-    def go(self, rows, *, mode="apply", sp=None, pol=None, convo=None, admin=None, anchors=None, fanout=None):
+    def go(self, rows, *, mode="apply", sp=None, pol=None, convo=None, admin=None, anchors=None, fanout=None,
+           editorial_velocity=None):
         sp = sp or sa.ScorePolicy(enabled=True)
         w = Writer()
         cands = lambda risk, limit: [(r["id"], r["profileId"], float(r["verificationData"]["total_risk_percent"]),
@@ -109,7 +112,8 @@ class ScoreApprove(unittest.TestCase):
         res = sa.run(admin or FakeAdmin(rows), self.db, mode=mode, policy=pol or policy(), sp=sp, candidates=cands, writer=w,
                      readback=lambda status, ids: set(), now=NOW, sleep=lambda _s: None, conversations=conversations,
                      anchors=anchors or (lambda rs: {str(r["id"]): ("none", None) for r in rs}),
-                     fanout=fanout or (lambda rs: {}))
+                     fanout=fanout or (lambda rs: {}),
+                     editorial_velocity=editorial_velocity or (lambda rs: {}))
         return res, w
 
     def decisions(self):
@@ -545,6 +549,49 @@ class ScoreApprove(unittest.TestCase):
         self.assertNotIn("muso_earlier", " ".join(x["reason"] for x in d.values()))
         self.assertEqual(res.no_anchor, 1)
         self.assertIn("anchor_kind {'none': 1, 'trusted': 1}", res.line())
+
+    def test_editorial_roles_need_a_trusted_anchor_under_pop_30(self):
+        """2026-10-22 22:40Z prod: Producer+Editorial rows approved on the validator alone. The
+        decider's editorial rule now binds score-approve too."""
+        rows = [row("ed_none", uid=601, pid="pa", roles=("Producer", "Editorial"), pop=16),
+                row("ed_trusted", uid=602, pid="pb", roles=("Producer", "Editorial"), pop=16),
+                row("ed_big", uid=603, pid="pc", roles=("Vocal Editing",), pop=30),
+                row("plain", uid=604, pid="pd", roles=("Producer",), pop=16)]
+        terms = tuple(json.loads(Path(__file__).resolve().parents[2].joinpath(
+            "policies/credit-trust-decide.json").read_text())["editorial_role_terms"])
+        pol = dataclasses.replace(policy(), editorial_role_terms=terms)
+        calm = SimpleNamespace(requests_24h=1, requests_7d=1)
+        res, w = self.go(rows, sp=self.phase1(), pol=pol, anchors=lambda rs: {
+            "ed_none": ("none", None), "ed_trusted": ("trusted", None), "ed_big": ("trusted", None),
+            "plain": ("none", None)}, editorial_velocity=lambda rs: {str(r["id"]): calm for r in rs})
+        self.assertEqual(sorted(i for c in w.calls for i in c[1]), ["ed_trusted", "plain"])
+        d = self.decisions()
+        self.assertIn("never the validator's verdict alone", d["ed_none"]["reason"])
+        self.assertIn("pop >= 30", d["ed_big"]["reason"])
+        self.assertEqual(res.editorial_held, 2)
+        self.assertIn("2 editorial-role rows held", res.line())
+
+    def test_a_trusted_editorial_claim_still_gets_the_deciders_velocity_hold(self):
+        """QA @d0f07f55: editorial weighs double against 50/24 h and 150/7 d (decide.editorial_velocity)."""
+        terms = tuple(json.loads(Path(__file__).resolve().parents[2].joinpath(
+            "policies/credit-trust-decide.json").read_text())["editorial_role_terms"])
+        pol = dataclasses.replace(policy(), editorial_role_terms=terms)
+        rows = [row("at_24h", uid=631, pid="sa", roles=("Editorial",), pop=16),
+                row("at_7d", uid=632, pid="sb", roles=("Editorial",), pop=16),
+                row("below", uid=633, pid="sc", roles=("Editorial",), pop=16),
+                row("unread", uid=634, pid="sd", roles=("Editorial",), pop=16)]
+        vel = {"at_24h": SimpleNamespace(requests_24h=25, requests_7d=25),
+               "at_7d": SimpleNamespace(requests_24h=0, requests_7d=75),
+               "below": SimpleNamespace(requests_24h=24, requests_7d=74), "unread": None}
+        seen = []
+        res, w = self.go(rows, sp=self.phase1(), pol=pol, anchors=lambda rs: {str(r["id"]): ("trusted", None) for r in rs},
+                         editorial_velocity=lambda rs: seen.extend(str(r["id"]) for r in rs) or vel)
+        self.assertEqual([i for c in w.calls for i in c[1]], ["below"])
+        d = self.decisions()
+        self.assertIn("high velocity, editorial weighs double (25/24h, 25/7d (x2))", d["at_24h"]["reason"])
+        self.assertIn("(0/24h, 75/7d (x2))", d["at_7d"]["reason"])
+        self.assertIn("velocity could not be read", d["unread"]["reason"])
+        self.assertEqual(sorted(seen), ["at_24h", "at_7d", "below", "unread"], "read only for editorial rows")
 
     def test_trusted_approvals_get_no_verify_note_and_count_toward_caps(self):
         self.go([row("tr", band="B", meta=self.STAMP), row("no", band="B", pid="p2", meta=self.STAMP)],
