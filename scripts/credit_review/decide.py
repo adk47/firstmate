@@ -184,8 +184,15 @@ class Policy:
             raise ValueError(f"{path}: deny_user_ids must be a list of integer user ids")
         if not isinstance(profiles, list) or not all(isinstance(p, str) and p.strip() for p in profiles):
             raise ValueError(f"{path}: deny_profile_ids must be a list of profile id strings")
-        return cls(deny_user_ids=set(users),
-                   deny_profile_ids={p.strip().lower() for p in profiles},
+        # Firstmate 154: the fraud watchlist (policies/fraud-watchlist.json, beside this file) is held by
+        # every approval path too. Required next to the deployed policy; optional beside a test policy.
+        from . import watchlist as watchlist_mod
+        # QA @1339: requiredness follows the RESOLVED policy location, never whether a path was passed:
+        # an explicit load of the deployed policy must fail closed on a missing watchlist too.
+        wl = watchlist_mod.load(path.with_name("fraud-watchlist.json"),
+                                required=path.resolve().parent == watchlist_mod.DEFAULT.resolve().parent)
+        return cls(deny_user_ids=set(users) | set(wl.user_ids),
+                   deny_profile_ids={p.strip().lower() for p in profiles} | set(wl.profile_ids),
                    editorial_role_terms=editorial_terms(d.get("editorial_role_terms")),
                    max_rows_per_run=int(d.get("max_rows_per_run") or 500),
                    max_approvals_per_user_per_day=int(d.get("max_approvals_per_user_per_day") or 200),

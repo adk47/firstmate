@@ -346,6 +346,16 @@ def load_deny_list(path: Path, ledger_path: Path) -> DenyList:
         terms = editorial_terms(data.get("editorial_role_terms"))
     except ValueError as exc:
         raise PolicyError(f"deny list {path}: {exc}") from exc
+    # Firstmate 154: the fraud watchlist beside the policy file is denied here too (shared loader;
+    # malformed = fatal; missing = fatal next to the repo's own policies/ dir).
+    from credit_review import watchlist as watchlist_mod
+    try:
+        wl = watchlist_mod.load(Path(path).with_name("fraud-watchlist.json"),
+                                required=Path(path).resolve().parent == watchlist_mod.DEFAULT.parent)
+    except ValueError as exc:
+        raise PolicyError(str(exc)) from exc
+    users = list(dict.fromkeys(list(users) + sorted(wl.user_ids)))
+    profiles = list(dict.fromkeys(profiles + [_normalize_uuid(x, "watchlist profile id") for x in sorted(wl.profile_ids)]))
     return DenyList(users, profiles, terms, load_doc_required_ids(ledger_path))
 
 
