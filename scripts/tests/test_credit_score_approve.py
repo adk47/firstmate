@@ -213,7 +213,9 @@ class ScoreApprove(unittest.TestCase):
     def test_one_person_roles_need_the_trusted_source_check_at_zero(self):
         rows = [row("mix-ok", roles=("Mixing",), rules={sa.ONE_PERSON_RULE: 0}),
                 row("mix-absent", roles=("Mixing",), pid="p2"),
-                row("master-hit", roles=("Mastering",), pid="p3", rules={sa.ONE_PERSON_RULE: 5})]
+                row("master-hit", roles=("Mastering",), pid="p3", rules={sa.ONE_PERSON_RULE: 5}),
+                row("remix-hit", roles=("Remixer",), pid="p4", rules={sa.ONE_PERSON_RULE: 5}),
+                row("remix-absent", roles=("Remixer",), pid="p5")]
         res, w = self.go(rows)
         self.assertEqual([i for c in w.calls for i in c[1]], ["mix-ok"])
 
@@ -250,6 +252,8 @@ class ScoreApprove(unittest.TestCase):
         self.assertLess(abs(rate - 0.05), 0.02, "5 % after week 1")
         rate = sum(sa.audit_sampled(f"r{i}", ["Mixing"], "2026-11-01") for i in range(2000)) / 2000
         self.assertLess(abs(rate - 0.10), 0.03, "one-person roles stay at 10 %")
+        rate = sum(sa.audit_sampled(f"r{i}", ["Remixer"], "2026-11-01") for i in range(2000)) / 2000
+        self.assertLess(abs(rate - 0.10), 0.03, "a remix is a one-person role too")
 
     # ---- Fable 15:40Z band-hint stamp ruling ----
     STAMP = {"proofRequest": {"at": "2026-10-20T01:43:56Z", "noticeSentAt": "2026-10-20T01:43:57Z",

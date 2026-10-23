@@ -526,7 +526,7 @@ def _andjoin(xs: list[str]) -> str:
 
 
 # roles.family_of -> the gate's document-list family (retro-past copy).
-DOC_FAMILY = {"mix": "mix_master", "master": "mix_master", "immersive_mix": "mix_master",
+DOC_FAMILY = {"mix": "mix_master", "remix": "mix_master", "master": "mix_master", "immersive_mix": "mix_master",
               "immersive_master": "mix_master", "remaster": "mix_master", "producer": "producer",
               "exec_producer": "producer", "writer": "writer", "engineer": "engineer", "assistant": "engineer",
               "performer": "musician", "programming": "musician", "arranger": "musician"}

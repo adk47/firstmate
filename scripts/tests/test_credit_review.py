@@ -163,6 +163,9 @@ class RoleTests(unittest.TestCase):
             "Co-Producer": "producer", "Executive Producer": "exec_producer", "Composer": "writer",
             "composerlyricist": "writer", "Lyricist": "writer", "A&R": "anr", "Recorder": "engineer",
             "recording engineer": "engineer", "primary artist": "artist", "publisher": "org", "label": "org",
+            "Remixer": "remix", "Re-Mixer": "remix", "re-mix": "remix", "remix": "remix",
+            "Remixed By": "remix", "Dolby Atmos Remix": "remix", "Assistant Remixer": "remix",
+            "premix engineer": "mix",
         }
         for role, fam in cases.items():
             self.assertEqual(family_of(role), fam, role)
@@ -187,6 +190,25 @@ class ClassifyTests(unittest.TestCase):
         # Muso-sourced rows are never evidence; another person's mastering is a contradiction.
         self.assertEqual(out["Mastering"], CONTRADICTED)
         self.assertEqual(out["Arranger"], UNVERIFIABLE)
+
+    def test_a_remixer_and_the_mix_engineer_never_contradict_each_other(self):
+        # verifier-core-b1 parity: " remixer " contains "mix", so a trusted
+        # "Remixer: DJ X" credit used to CONTRADICT the real mix engineer's
+        # Mixing claim (a hard one-person anchor), and the reverse.
+        out = {r.claimed_role: r.status for r in classify_roles(
+            ["Mixing"], [raw("DJ X", "remixer", "spotify")], ["stillfloo"], set())}
+        self.assertEqual(out["Mixing"], UNVERIFIABLE)
+        out = {r.claimed_role: r.status for r in classify_roles(
+            ["Remixer"], [raw("Serban Ghenea", "mixing engineer", "tidal")], ["stillfloo"], set())}
+        self.assertEqual(out["Remixer"], UNVERIFIABLE)
+        # Remix is still a one-person family: another trusted remixer
+        # contradicts a Remixer claim, as when it mapped to mix.
+        out = {r.claimed_role: r.status for r in classify_roles(
+            ["Remixer"], [raw("DJ X", "remixer", "spotify")], ["stillfloo"], set())}
+        self.assertEqual(out["Remixer"], CONTRADICTED)
+        out = {r.claimed_role: r.status for r in classify_roles(
+            ["Remixer"], [raw("stillfloo", "Remixer", "spotify")], ["stillfloo"], set())}
+        self.assertEqual(out["Remixer"], CONFIRMED)
 
     def test_confirmed_by_name_and_by_raw_profile_link(self):
         raws = [raw("R. Engineer", "mixer", "tidal", rid="zzz"), raw("Other", "mastering engineer", "jaxsta", rid="T9")]
@@ -904,6 +926,15 @@ class ClaimantDomainHardeningTests(unittest.TestCase):
 
 
 class VelocityRegressionTests(unittest.TestCase):
+    def test_remixer_claims_count_toward_the_one_person_share(self):
+        reqs = [request(f"m{i}", pid=PID_BAD, track=f"m{i}", pop=0, roles=("Remixer",), artists=(f"Artist {i}",))
+                for i in range(3)]
+        tracks = {f"m{i}": track(20) for i in range(3)} | {"t3": track(10)}
+        target = request("tgt", pid=PID_BAD, track="t3", roles=("Producer",), status="unverified")
+        admin = FakeAdmin(reqs + [target], {"t3": []}, PROFILES, tracks)
+        ev = EvidenceBuilder(admin, now=NOW).build(target)
+        self.assertAlmostEqual(ev.profile.one_person_share_7d, 3 / 4)
+
     def test_big_share_samples_the_whole_week_evenly(self):
         reqs = [request(f"e{i}", pid=PID_BAD, track=f"z{i}", pop=0, roles=("Mixing",), artists=(f"Artist {i}",),
                         created=(NOW - timedelta(hours=150 - i)).isoformat().replace("+00:00", "Z"))

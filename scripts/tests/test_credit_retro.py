@@ -1797,6 +1797,9 @@ class PublishedRosterTests(unittest.TestCase):
         # a one-person evidence class never opens a multi-person role
         with self.assertRaises(ValueError):
             takeback.load_manifest(write_manifest(self.dir, [row(row_id=f"{RID}:Engineer", role="Engineer")]))
+        # a remix is a one-person role, taken back like a mix
+        self.assertEqual(len(takeback.load_manifest(write_manifest(
+            self.dir, [row(row_id=f"{RID}:Remixer", role="Remixer")]))), 1)
 
     def test_manifest_carries_only_a_board_pointer(self):
         ok = write_manifest(self.dir, [self.roster_row(proof_check=self.POINTER)])
@@ -1890,6 +1893,12 @@ class PublishedRosterTests(unittest.TestCase):
         api.profile = {"name": "Rishi Krishnan", "rawProfiles": [{"source": "spotify", "id": "sp-rk"}]}
         api.raws.append(raw("spotify", "R. K.", "Assistant Recording Engineer", "sp-rk"))
         self.assertEqual(takeback.gate(api, self.roster_row(), OPEN).reason, "claimant_on_engineering_team")
+        # a trusted Remixer credit still names him on the team
+        api = self.api()
+        api.raws.append(raw("spotify", "Rishi Krishnan", "Remixer", "sp-rm"))
+        res = takeback.gate(api, self.roster_row(), OPEN)
+        self.assertEqual(res.reason, "claimant_on_engineering_team")
+        self.assertEqual([h["role"] for h in res.before["claimant_on_engineering_team"]], ["Remixer"])
         # a non-engineering credit (he wrote the song) or an untrusted source does not refuse the row
         api = self.api()
         api.raws += [raw("tidal", "Rishi Krishnan", "Composer", "td12"), raw("discogs", "Rishi Krishnan", "Mixer", "dg")]

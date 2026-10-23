@@ -496,6 +496,9 @@ class UvnStatusTests(unittest.TestCase):
             "one-person role credited elsewhere": cls(dict(admit, rule_risk_percent={
                 "review_role_credited_to_other_at_trusted_source": 1})),
             "one-person role with no rule scores": cls({"is_approved": True, "total_risk_percent": 12}),
+            "remix credited elsewhere": cls(dict(admit, rule_risk_percent={
+                "review_role_credited_to_other_at_trusted_source": 1}), role="Remixer"),
+            "remix with no rule scores": cls({"is_approved": True, "total_risk_percent": 12}, role="Remixer"),
             "profile risk (server needs proof)": cls(dict(admit, profile_risk_level="high")),
             "band hint plus another proof reason": cls(dict(admit, band_hint="C", profile_risk_level="critical")),
             "proof requested": cls(admit, meta={"proofRequest": {}}),

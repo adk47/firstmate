@@ -65,7 +65,7 @@ CONTRADICTION_VERDICTS = {"CONTRADICTED_one", "CONTRADICTED_multi"}
 DOC_SUBMITTED = Path(__file__).resolve().parent / "manifests" / "doc-submitted-r1.json"
 
 GROUP_BY_FAMILY = {
-    "mix": "mixing-mastering", "master": "mixing-mastering", "immersive_mix": "mixing-mastering",
+    "mix": "mixing-mastering", "remix": "mixing-mastering", "master": "mixing-mastering", "immersive_mix": "mixing-mastering",
     "immersive_master": "mixing-mastering", "remaster": "mixing-mastering",
     "writer": "writer-composer",
     "producer": "producer", "exec_producer": "producer",

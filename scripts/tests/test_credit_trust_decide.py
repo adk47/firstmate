@@ -345,6 +345,8 @@ class Decisions(Base):
         self.assertEqual(res.n1, 1)
         res2, _ = self.go([req(uuid_of(13))], {"small": [T.raw("Serban Ghenea", "mixing engineer")]})
         self.assertEqual(self.decisions()[uuid_of(13)]["n1"], 1)
+        self.go([req(uuid_of(15), uid=650, roles=("Remixer",))], {"small": [T.raw("DJ X", "remixer")]})
+        self.assertEqual(self.decisions()[uuid_of(15)]["n1"], 1)
 
     def test_model_outage_defers_instead_of_asking_users(self):
         res, w = self.go([req(uuid_of(14), track="t3")], judge=FakeJudge(JudgeResult(ok=False, error="codex: quota")))

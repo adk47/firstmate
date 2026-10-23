@@ -102,7 +102,7 @@ ROLE_WORDS = re.compile(
     r"|(?P<engineer>(?:recording\s+)?engineers?|engineered\s+by|recorded\s+by)"
     r"|(?P<arranger>arrangers?|arranged\s+by)"
     r"|(?P<programming>programmers?|programming|programmed\s+by))\b", re.I)
-ROLE_COMPARED_AS = {"immersive_mix": "mix", "immersive_master": "master", "remaster": "master"}
+ROLE_COMPARED_AS = {"remix": "mix", "immersive_mix": "mix", "immersive_master": "master", "remaster": "master"}
 DETECTABLE_ROLES = frozenset(ROLE_WORDS.groupindex)
 NO_MATCH = "whole document, no match found"
 

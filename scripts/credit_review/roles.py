@@ -14,7 +14,13 @@ import unicodedata
 # Families where a track normally has exactly ONE credited person. A trusted
 # source naming someone else (and not the claimant) is a contradiction. This
 # matches IDP #1686's review_role_credited_to_other_at_trusted_source scope.
-ONE_PERSON_FAMILIES = frozenset({"mix", "master", "immersive_mix", "immersive_master", "remaster"})
+# "remix" is one of them, but its own family: a remixer and the mix engineer
+# do different jobs, so a trusted "Remixer: DJ X" never contradicts a "Mixing"
+# claim (or the reverse); another trusted remixer still contradicts a Remixer
+# claim, and every one-person guard treats a Remixer claim as it did a mix.
+# Parity with core-backend's roleFamilies.js (verifier-core-b1): same remix
+# rule (a word-start "re[- ]?mix", checked first) and same test vectors.
+ONE_PERSON_FAMILIES = frozenset({"mix", "remix", "master", "immersive_mix", "immersive_master", "remaster"})
 
 # Families that are not personal credits at all (an organisation or a
 # rights holder), so they are never compared with a person's claim.
@@ -59,6 +65,11 @@ def family_of(role: str) -> str:
     r = " " + re.sub(r"[^a-z&]+", " ", (role or "").lower()).strip() + " "
     if not r.strip():
         return "other"
+    # First, before the assistant, immersive and mix checks: " remixer "
+    # contains "mix", an "Atmos Remix" and an "Assistant Remixer" are still
+    # remixes. Word start, so "premix" stays a mix.
+    if re.search(r" re ?mix", r):
+        return "remix"
     if "assistant" in r or "asst" in r:
         return "assistant"
     if "immersive" in r or "atmos" in r or "spatial" in r:

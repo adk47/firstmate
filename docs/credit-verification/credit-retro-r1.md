@@ -346,7 +346,7 @@ The captain's "big boy go" (Fable's `big-boy-audit-1022.md`, ruling step b) cove
   and `load_manifest` refuses a multi-person row without it.
 - **His whole engineering team is checked (firstmate 051).** The gate also reads the track's
   unfiltered raw credits. If any trusted source credits him in ANY engineering family (engineer,
-  assistant, mix, master, immersive mix/master, remaster), by name or raw-profile link, the row is
+  assistant, mix, remix, master, immersive mix/master, remaster), by name or raw-profile link, the row is
   refused as `claimant_on_engineering_team`. For example, Tidal listing him as Mixing Engineer keeps
   his Engineer row. This applies to EVERY row of the allowlisted pair, his one-person
   `trusted_dsp_only` Mixing rows included (firstmate 055): if Tidal later lists him as Recording or
