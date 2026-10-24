@@ -1349,7 +1349,7 @@ class CronContractTests(unittest.TestCase):
             # verify-notify writes no credit-request status either: it sends the
             # captain-approved verify note through intercom-verify-request.sh.
             self.assertIn(argv[2], ("audit", "review", "digest", "metrics", "decide", "verify-notify", "verify-wave",
-                                    "removal-notice", "score-approve"))
+                                    "removal-notice", "score-approve", "removal-audit", "provisional-tracker"))
             if argv[2] == "score-approve":
                 # The second writing subcommand: only as the registered, captain-approved
                 # credit-trust-score-approve automation (captain 2026-10-20 "approve low risk credits").

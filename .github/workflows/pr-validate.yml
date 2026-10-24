@@ -1733,6 +1733,9 @@ jobs:
           # Stage 2 SHADOW (judge documents on file for the decider's proof-on-file
           # holds): ledger, Trino, Intercom and downloads faked; writes only stage2_shadow.
           python3 scripts/tests/test_credit_proof_stage2.py
+          # Provisional-credit tracker / day-7 route / backup_ask_undelivered (captain 2026-10-23
+          # 20:03Z-20:07Z; Fable backup-threshold-ruling-1023.md section 6). Trino faked, stdlib only.
+          python3 scripts/tests/test_provisional_tracker.py
           # Fraud watchlist (policies/fraud-watchlist.json, firstmate 154): loads, is held by the
           # decider, score-approve and uvn-under30 deny lists, malformed = fatal, no clear-text PII.
           python3 scripts/tests/test_fraud_watchlist.py

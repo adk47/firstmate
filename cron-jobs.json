@@ -1589,6 +1589,42 @@
         "accountId": "operations",
         "bestEffort": false
       }
+    },
+    {
+      "id": "9a3c6e21-4b7d-5f10-8e92-6c1d3b0a5f47",
+      "agentId": "operations",
+      "name": "credit-provisional-tracker-0600",
+      "description": "Captain 2026-10-23 20:03Z/20:04Z/20:07Z ('approve but give them [7 days]... keep track of these somewhere to remove if not backed up'), Fable backup-threshold-ruling-1023.md section 6; owner credit-trust-llm-t01. Daily read-only tracker of every PROVISIONAL credit (core metadata.approval.provisional): backup clock = 7 days from the first DELIVERED ask (hydra verify ledger), documents on file, due / due soon / no ask yet, the day-7 route (docs -> plain approve; else live Spotify+Tidal check, else the removal gate; this job never writes), core proofDueAt mismatches, and watchdog class backup_ask_undelivered (provisional, no delivered ask after 48 h). Full JSON for the board at /var/lib/hydra/credit-review/provisional-tracker/latest.json.",
+      "enabled": true,
+      "createdAtMs": 1792792800000,
+      "updatedAtMs": 1792792800000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 6 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "provisional-tracker",
+          "--out",
+          "/var/lib/hydra/credit-review/provisional-tracker/latest.json",
+          "--post-board"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 600
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
+      }
     }
   ]
 }
