@@ -37,9 +37,15 @@ refusal (21 days) is posted once to #cs_priority for a human (Muso user id, camp
 no email) and the user is not picked again; a failed post leaves it un-flagged and fails the
 run (firstmate 082, 083). The hold follows the Muso user id across an email change.
 
-A pending request with a blank title, artist or role is never shown and never closes the user:
-the whole user (even with other complete requests) is held, reported `incomplete` and re-checked
-next run. Likewise for uvn-status, a user with a request still waiting on them that the list does
+A pending request with a blank title, artist or role, or a field the gate would refuse (role over
+120 characters, title or artist over 200, a malformed profile or track id), is never shown: it is
+left out of the note and the rest of the user's note is sent (firstmate 166, 2026-10-23: "hold the bad
+row, send the rest"; one bad row used to refuse the whole note). The left-out request stays pending
+in core and is reviewed like any other; it is counted in `rows_held` once the note is sent (or, on
+a dry run, validated). The note is one per user, ever, so this campaign does not ask about it again:
+a later run that still lists the user records it as skipped in the ledger (firstmate 169). A user
+whose every request is such a row is held, reported `incomplete`, not closed, and re-checked next
+run. Likewise for uvn-status, a user with a request still waiting on them that the list does
 not carry (opened after the list was built) is held, reported `unlisted` and not closed, until a
 rebuilt list names it. Both holds are applied when the batch is built and again on the fresh
 replica read right before each send (`plan`).
@@ -64,6 +70,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -110,6 +117,7 @@ class UvnReport(verify_notify.Report):
     low_risk_asked: int = 0
     outcome_unknown: int = 0
     incomplete: int = 0
+    rows_held: int = 0                 # requests left out of a note sent or validated (blank or gate-refused field)
     unlisted: int = 0
     recently_asked: int = 0
     by_reason: dict[str, int] = field(default_factory=dict)
@@ -222,11 +230,36 @@ def _row_class(roles: str, pop: Any, vd_raw: Any, meta_raw: Any) -> str:
                       "roles": [r.strip() for r in (roles or "").split(",") if r.strip()]})
 
 
+ID_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+
+
+CNTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _gate_clean(s: str) -> str:
+    """The gate's `clean`: control characters become spaces, whitespace runs collapse, ends trimmed."""
+    return re.sub(r"\s+", " ", CNTRL_RE.sub(" ", s)).strip(" ")
+
+
+def _row_incomplete(title: str, artist: str, role: str, pid: str, tid: str) -> bool:
+    """True when the gate would refuse this credit (intercom-verify-request.sh shape checks, on the
+    values after its `clean`): a blank title, artist or role, role > 120, title or artist > 200
+    characters, or a non-empty profile / track id that is not letters, digits and dashes."""
+    title, artist, role, pid, tid = (_gate_clean(x) for x in (title, artist, role, pid, tid))
+    if not (title and artist and role):
+        return True
+    if len(role) > 120 or len(title) > 200 or len(artist) > 200:
+        return True
+    return any(x and not ID_RE.match(x) for x in (pid, tid))
+
+
 def uvn_requests(user_ids: list[int], query: Query = trino,
                  statuses: tuple[str, ...] = PENDING_STATUSES[CAMPAIGN]) -> dict[int, list[dict[str, Any]]]:
     """Requests in `statuses` (default: still UVN) by user id, most popular first, from the core replica.
-    Each carries `_no_ask` (its ask_class) and `_incomplete`: True when its title, artist or role is
-    blank (never shown to the user, and never a reason to close the user: re-checked next run)."""
+    Each carries `_no_ask` (its ask_class) and `_incomplete` (_row_incomplete): True when the gate would
+    refuse the row (a blank title, artist or role, a field over the gate's length caps, or a malformed
+    profile or track id). Such a row is left out of the note, never shown; a user with nothing else
+    to show is held and re-checked next run."""
     in_statuses = ", ".join(f"'{s}'" for s in statuses)
     reqs: dict[int, list[dict[str, Any]]] = {}
     for i in range(0, len(user_ids), 500):
@@ -249,7 +282,8 @@ def uvn_requests(user_ids: list[int], query: Query = trino,
                 "request_id": rid, "profile_id": pid or "", "track_id": tid or "",
                 "track_title": (title or "").strip(), "artist_name": (artist or "").strip(),
                 "role": (credits or "").strip(),
-                "_incomplete": not ((title or "").strip() and (artist or "").strip() and (credits or "").strip()),
+                "_incomplete": _row_incomplete((title or "").strip(), (artist or "").strip(), (credits or "").strip(),
+                                               pid or "", tid or ""),
                 "_pop": int(pop) if str(pop).isdigit() else -1,
                 "_no_ask": _row_class(credits, pop, *(list(extra) + [None, None])[:2])})
     for rows in reqs.values():
@@ -266,22 +300,32 @@ def plan(listed: set[str], pending: list[dict[str, Any]], is_ask: bool) -> tuple
     """What one user's note may say, from their `listed` request ids and their `pending` replica
     rows: ("", the credits to show) or (a hold reason in HOLDS / "nothing_to_ask", []). Applied when
     the batch is built AND again on a fresh replica read right before the send, so a request opened
-    or blanked in between holds the user instead of being left out of their one-ever note."""
+    in between holds the user instead of being left out of their one-ever note, and a request blanked
+    in between is left out of it."""
     rows = [r for r in pending if not listed or r["request_id"] in listed]
     # A request waiting on them that the list does not carry yet (opened after the list was
     # built) holds the user: their one-ever note must not leave it out.
     if is_ask and listed and any(r["request_id"] not in listed and r["_no_ask"] not in NO_ASK for r in pending):
         return "unlisted_request", []
-    # Any blank request holds the whole user: sending the rest now would use their one-ever
-    # note, and the repaired request would never get its reminder.
-    if any(r["_incomplete"] for r in rows):
-        return "incomplete_fields", []
     if is_ask:
         asked = [r for r in rows if r["_no_ask"] not in NO_ASK]
         if rows and not asked:
             return "nothing_to_ask", []
         rows = asked
+    # A blank or gate-refused request is left out (never shown; it stays pending in core and is
+    # reviewed like any other); the rest of the note goes (firstmate 166). Only a user with
+    # nothing showable is held.
+    if rows and all(r["_incomplete"] for r in rows):
+        return "incomplete_fields", []
+    rows = [r for r in rows if not r["_incomplete"]]
     return "", [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows]
+
+
+def left_out(listed: set[str], pending: list[dict[str, Any]], is_ask: bool) -> int:
+    """How many of the user's listed `pending` rows plan() leaves out as unshowable (for an ask,
+    only the rows it would otherwise ask about)."""
+    return sum(1 for r in pending if r["_incomplete"] and (not listed or r["request_id"] in listed)
+               and not (is_ask and r["_no_ask"] in NO_ASK))
 
 
 def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int = 50,
@@ -335,12 +379,12 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
         setattr(report, HOLDS[why], getattr(report, HOLDS[why]) + 1)
         report.note(why)
 
-    def next_batch(want: int) -> list[tuple[set[str], dict[str, Any]]]:
-        """Up to `want` (listed request ids, sendable payload) pairs from the candidates after
-        `pos`, dropping (and on a real run closing) the users the ledger or the replica already
-        answers for."""
+    def next_batch(want: int) -> list[tuple[set[str], dict[str, Any], int]]:
+        """Up to `want` (listed request ids, sendable payload, rows left out) triples from the
+        candidates after `pos`, dropping (and on a real run closing) the users the ledger or the
+        replica already answers for."""
         nonlocal pos
-        batch: list[tuple[set[str], dict[str, Any]]] = []
+        batch: list[tuple[set[str], dict[str, Any], int]] = []
         db = verify_ledger.connect(path)
         try:
             def close(u: dict[str, Any]) -> None:
@@ -422,7 +466,8 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
                     batch.append((listed, {"user": {"email": acct["email"], "id": str(uid),
                                                     "professional_id": acct["professional_id"],
                                                     "auth_id": acct["auth_id"],
-                                                    "first_name": acct.get("first_name", "")}, "credits": live}))
+                                                    "first_name": acct.get("first_name", "")}, "credits": live},
+                                  left_out(listed, pending, is_ask)))
         finally:
             db.close()
         return batch
@@ -464,7 +509,7 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
             batch = next_batch(want)
             if not batch:
                 break
-            for i, (listed, p) in enumerate(batch):
+            for i, (listed, p, dropped) in enumerate(batch):
                 allowed, left = room()
                 if allowed <= 0:
                     report.over_daily_max += len(batch) - i
@@ -487,11 +532,12 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
                     # Re-plan on a fresh replica read right before this user's send (QA: a request
                     # approved, withdrawn, opened or blanked while earlier users were being
                     # messaged must neither get a 'waiting on you' note nor be left out of it).
-                    why, live = plan(listed, uvn_requests([uid], query, PENDING_STATUSES[campaign]).get(uid, []),
-                                     is_ask)
+                    fresh = uvn_requests([uid], query, PENDING_STATUSES[campaign]).get(uid, [])
+                    why, live = plan(listed, fresh, is_ask)
                     if why in HOLDS:
                         held(why)
                         continue
+                    dropped = left_out(listed, fresh, is_ask)
                     if not live:
                         if is_ask:
                             report.no_longer_uvn += 1
@@ -510,6 +556,9 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
                 reached = (report.sent_notes if mode == "apply" else report.validated + report.recipient_ok) - before
                 report.users += reached
                 counted += reached
+                if reached and dropped:
+                    report.rows_held += dropped
+                    report.note("rows_left_out")
                 if mode == "apply":
                     unknown = max(0, left - remaining_cap() - reached)
                     report.outcome_unknown += unknown
@@ -547,8 +596,10 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
                      ("request(s) not asked about: already on the profile (duplicate)", report.already_on_profile),
                      ("no request still pending (not closed)", report.not_pending),
                      ("no account email", report.no_email),
-                     ("held: a pending request has no title, artist or role yet (re-checked next run, "
-                      "not closed)", report.incomplete),
+                     ("held: every pending request has a blank or unshowable title, artist or role "
+                      "(re-checked next run, not closed)", report.incomplete),
+                     ("request(s) left out of a note (blank or unshowable field; still pending in core and "
+                      "reviewed, not asked about again by this campaign)", report.rows_held),
                      ("held: a request waiting on them is not on the list yet (re-run build.py; not closed)",
                       report.unlisted),
                      ("account(s) held: no professional id on the account, so the Intercom recipient cannot "

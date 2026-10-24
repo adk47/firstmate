@@ -784,7 +784,7 @@ class UvnStatusTests(unittest.TestCase):
         rep, _ = self.run_(gate=gate, query=replica((1,), rows={"r1": {"title": "  "}}))
         self.assertEqual(gate.calls, [])
         self.assertEqual((rep.incomplete, rep.no_longer_uvn, rep.already_handled), (1, 0, 0))
-        self.assertIn("no title, artist or role yet", uvn_status.render(rep, "apply", "paid"))
+        self.assertIn("blank or unshowable title, artist or role", uvn_status.render(rep, "apply", "paid"))
         db = verify_ledger.connect(self.ledger)
         self.assertEqual(verify_ledger.blocked_ids(db, ["r1"], "uvn-status"), set())
         db.close()
@@ -793,22 +793,85 @@ class UvnStatusTests(unittest.TestCase):
                          [("1", ["Song r1"])])
         self.assertEqual(rep.sent_notes, 1)
 
-    def test_a_user_with_one_complete_and_one_blank_title_request_is_held_until_both_can_be_shown(self):
-        # QA: sending the complete one now would use the user's one-ever note, and the repaired
-        # request would then never get its reminder.
+    def test_a_blank_or_unshowable_request_is_left_out_and_the_rest_of_the_note_goes(self):
+        """firstmate 166 (2026-10-23): hold the bad row, send the rest. One bad row used to make the
+        gate refuse the whole note; the left-out request stays pending in core."""
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1", "r2", "r3"]}]
+        self.write_list()
+        gate = LedgerGate(self.ledger)
+        rows = {"r2": {"title": ""}, "r3": {"title": "x" * 201}}
+        rep, _ = self.run_(gate=gate, query=replica((1,), requests={1: ["r1", "r2", "r3"]}, rows=rows))
+        self.assertEqual([[c["request_id"] for c in p["credits"]] for _, p in gate.calls], [["r1"]])
+        self.assertEqual((rep.incomplete, rep.rows_held, rep.sent_notes), (0, 2, 1))
+        self.assertIn("2 request(s) left out of a note", uvn_status.render(rep, "apply", "paid"))
+        db = verify_ledger.connect(self.ledger)
+        self.assertEqual(verify_ledger.blocked_ids(db, ["r2", "r3"], "uvn-status"), set())   # still open
+        db.close()
+        # firstmate 169: one note per user, ever. A later run records the left-out requests as
+        # skipped in this campaign's ledger and sends nothing more.
+        rep, _ = self.run_(gate=gate, query=replica((1,), requests={1: ["r1", "r2", "r3"]}, rows=rows))
+        self.assertEqual(len(gate.calls), 1)
+        self.assertEqual((rep.sent_notes, rep.rows_held, rep.by_reason.get("already_sent")), (0, 0, 1))
+        db = verify_ledger.connect(self.ledger)
+        self.assertEqual(verify_ledger.blocked_ids(db, ["r2", "r3"], "uvn-status"), {"r2", "r3"})
+        db.close()
+
+    def test_a_dry_run_counts_the_requests_it_would_leave_out(self):
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1", "r2"]}]
+        self.write_list()
+        gate = FakeGate(out="VALID uvn-status initial email credits=1 copy=default")
+        rep, _ = self.run_(mode="dry-run", gate=gate,
+                           query=replica((1,), requests={1: ["r1", "r2"]}, rows={"r2": {"title": ""}}))
+        self.assertEqual([[c["request_id"] for c in p["credits"]] for _, p in gate.calls], [["r1"]])
+        self.assertEqual((rep.validated, rep.rows_held, rep.incomplete), (1, 1, 0))
+        self.assertIn("1 request(s) left out of a note", uvn_status.render(rep, "dry-run", "paid"))
+
+    def test_left_out_requests_are_not_counted_when_the_gate_does_not_send(self):
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1", "r2"]}]
+        self.write_list()
+        q = replica((1,), requests={1: ["r1", "r2"]}, rows={"r2": {"title": ""}})
+        for gate in (RecentGate({"1"}), RefusingGate({"1"}), FakeGate(out="SKIPPED already-notified credits=1")):
+            rep, _ = self.run_(gate=gate, query=q)
+            self.assertEqual(len(gate.calls), 1, type(gate).__name__)
+            self.assertEqual((rep.sent_notes, rep.rows_held), (0, 0), type(gate).__name__)
+            self.assertNotIn("left out of a note", uvn_status.render(rep, "apply", "paid"))
+
+    def test_gate_shape_caps_mark_a_row_unshowable(self):
+        f = uvn_status._row_incomplete
+        self.assertFalse(f("Song", "Art", "Mixing", "p-1", "t-1"))
+        for args in (("", "Art", "Mixing", "", ""), ("Song", "Art", "x" * 121, "", ""), ("x" * 201, "Art", "Mixing", "", ""),
+                     ("Song", "x" * 201, "Mixing", "", ""), ("Song", "Art", "Mixing", "bad id!", ""),
+                     ("Song", "Art", "Mixing", "", "t/1")):
+            self.assertTrue(f(*args), args)
+
+    def test_the_caps_are_measured_after_the_gates_clean_step(self):
+        f = uvn_status._row_incomplete
+        self.assertFalse(f("a  " * 66 + "abc", "Art", "Mixing", "", ""))   # 201 raw, 135 once collapsed
+        self.assertFalse(f("Song\t\n", "Art", "Mixing", "\x00p-1", ""))
+        self.assertTrue(f("\x00\x07", "Art", "Mixing", "", ""))           # blank once cleaned
+        self.assertTrue(f("Song", "Art", "\x1b", "", ""))
+
+    def test_a_user_whose_only_askable_request_is_unshowable_is_held_as_incomplete(self):
         self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1", "r2"]}]
         self.write_list()
         gate = LedgerGate(self.ledger)
-        rep, _ = self.run_(gate=gate, query=replica((1,), requests={1: ["r1", "r2"]}, rows={"r2": {"title": ""}}))
+        rep, _ = self.run_(gate=gate, query=replica((1,), requests={1: ["r1", "r2"]}, rows={"r2": {"title": ""}},
+                                                    verification={"r1": {"duplicate_of": "cr-9"}}))
         self.assertEqual(gate.calls, [])
-        self.assertEqual((rep.incomplete, rep.sent_notes, rep.no_longer_uvn), (1, 0, 0))
+        self.assertEqual((rep.incomplete, rep.rows_held, rep.no_longer_uvn), (1, 0, 0))
+        self.assertIn("1 held: every pending request has a blank or unshowable", uvn_status.render(rep, "apply", "paid"))
         db = verify_ledger.connect(self.ledger)
         self.assertEqual(verify_ledger.blocked_ids(db, ["r1", "r2"], "uvn-status"), set())
         db.close()
-        rep, _ = self.run_(gate=gate, query=replica((1,), requests={1: ["r1", "r2"]}))
-        self.assertEqual([sorted(c["track_title"] for c in p["credits"]) for _, p in gate.calls],
-                         [["Song r1", "Song r2"]])
-        self.assertEqual(rep.sent_notes, 1)
+
+    def test_a_no_ask_request_that_is_blank_is_not_counted_as_left_out(self):
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1", "r2"]}]
+        self.write_list()
+        gate = LedgerGate(self.ledger)
+        rep, _ = self.run_(gate=gate, query=replica((1,), requests={1: ["r1", "r2"]}, rows={"r2": {"title": ""}},
+                                                    verification={"r2": {"duplicate_of": "cr-9"}}))
+        self.assertEqual([[c["request_id"] for c in p["credits"]] for _, p in gate.calls], [["r1"]])
+        self.assertEqual((rep.sent_notes, rep.rows_held, rep.incomplete), (1, 0, 0))
 
     def test_a_request_opened_after_the_list_was_built_holds_the_user_until_the_list_names_it(self):
         # QA @3258c41: the list names r1 (A); the user then opened r2 (B). Sending about A alone
@@ -890,7 +953,7 @@ class UvnStatusTests(unittest.TestCase):
         self.assertTrue(rep.halted)
         self.assertIn("STOPPED after 1 sent", uvn_status.render(rep, "apply", "paid"))
 
-    def test_a_listed_request_blanked_between_the_batch_and_the_send_holds_the_user(self):
+    def test_a_listed_request_blanked_between_the_batch_and_the_send_is_left_out(self):
         self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1", "r2"]}]
         self.write_list()
         rows = {"r1": {"title": "Song r1"}}
@@ -898,8 +961,36 @@ class UvnStatusTests(unittest.TestCase):
                                              requests={1: ["r1", "r2"]}, rows=rows)
         gate = LedgerGate(self.ledger)
         rep, _ = self.run_(gate=gate, query=q)
+        self.assertEqual([[c["request_id"] for c in p["credits"]] for _, p in gate.calls], [["r1"]])
+        self.assertEqual((rep.incomplete, rep.rows_held, rep.sent_notes), (0, 1, 1))
+
+    def test_the_only_askable_request_blanked_before_the_send_holds_the_user_as_incomplete(self):
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1", "r2"]}]
+        self.write_list()
+        rows = {"r1": {"title": "Song r1"}}
+        q, reads = self._changes_after_the_batch(lambda: rows.update({"r2": {"title": ""}}),
+                                                 requests={1: ["r1", "r2"]}, rows=rows,
+                                                 verification={"r1": {"duplicate_of": "cr-9"}})
+        gate = LedgerGate(self.ledger)
+        rep, _ = self.run_(gate=gate, query=q)
+        self.assertEqual(len(reads), 2)
         self.assertEqual(gate.calls, [])
-        self.assertEqual((rep.incomplete, rep.sent_notes, rep.no_longer_uvn), (1, 0, 0))
+        self.assertEqual((rep.incomplete, rep.no_longer_uvn, rep.sent_notes), (1, 0, 0))
+
+    def test_pg_text_array_odd_shape_leaves_the_request_out_and_sends_the_rest(self):
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1", "r2"]}]
+        self.write_list()
+        gate = LedgerGate(self.ledger)
+        from credit_review import runner
+        saved_log, saved_flag = runner.log, verify_notify._odd_array_logged
+        runner.log, verify_notify._odd_array_logged = [].append, False
+        try:
+            rep, _ = self.run_(gate=gate, query=replica((1,), requests={1: ["r1", "r2"]},
+                                                        rows={"r2": {"role": "[Mixing]"}}))
+        finally:
+            runner.log, verify_notify._odd_array_logged = saved_log, saved_flag
+        self.assertEqual([[c["request_id"] for c in p["credits"]] for _, p in gate.calls], [["r1"]])
+        self.assertEqual((rep.sent_notes, rep.rows_held, rep.incomplete), (1, 1, 0))
 
     def test_an_unlisted_request_we_would_never_ask_about_does_not_hold_the_user(self):
         self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1"]}]
