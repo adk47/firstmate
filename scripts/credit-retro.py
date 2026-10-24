@@ -186,6 +186,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "approval-status":
             print(json.dumps(read_api(args).get(f"/admin/credit-removals/{args.id}"), indent=1, sort_keys=True))
         elif args.cmd == "apply":
+            # before the login prompt: no live Spotify+Tidal gate, no removal (firstmate 104/105/106)
+            from credit_review import dsp_gate  # noqa: PLC0415
+            dsp_gate.require("take-back apply (credit removal)")
             manifest = str(Path(args.manifest).resolve())
             api = session_api(args)
             run_id, _ = takeback.apply(api, ledger, takeback.load_manifest(manifest), manifest=manifest,

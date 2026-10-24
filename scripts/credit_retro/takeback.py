@@ -84,9 +84,14 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from credit_review import proof_parts
+from credit_review import dsp_gate, proof_parts
 from credit_review.evidence import CONTRADICTED, OTHERS_ONLY, classify_roles
-from credit_review.roles import ONE_PERSON_FAMILIES, family_of, is_trusted_source, names_match
+from credit_review.roles import (
+    ONE_PERSON_FAMILIES,
+    family_of,
+    is_trusted_source,
+    names_match,
+)
 
 from . import board
 from .api import STAGE_PATH, ApiError, ReadApi
@@ -1095,6 +1100,9 @@ def apply(api, ledger: Ledger, rows: list[dict[str, Any]], *, manifest: str, pla
     A pair consumed with no removal of this manifest's apply runs (executed outside the tool) is
     resolved by a live read and announced when gone."""
     from .ledger import sha256_file  # noqa: PLC0415
+    # Captain 2026-10-23 (firstmate 104/105/106): no removal without a live Spotify AND Tidal check
+    # in the same run. Refused before anything is read, staged, announced or written.
+    dsp_gate.require("take-back apply (credit removal)")
     check_plan(ledger, plan_run, manifest)
     if excl.unavailable:
         raise SystemExit(f"{excl.unavailable}: {excl.detail}; nothing is removed this run (firstmate 020)")

@@ -46,6 +46,16 @@ not go out with the removal. `--login` prompts for the email and password and st
 
 ## The live gate (re-run per row immediately before each write)
 
+**Live Spotify + Tidal rule (captain 2026-10-23 11:50Z/11:53Z/11:59Z, firstmate 104/105/106).** No
+credit is hidden or removed on Muso until a live check IN THE SAME RUN shows, on BOTH Spotify and
+Tidal (every Tidal country agreeing; UNKNOWN never counts), that the track can't be played (greyed
+out or unavailable; the page may still exist) or that the person's credit in that role family is
+gone from the track. The gate below reads the stored raw-credit layer, which is not that check, so
+`apply` refuses with `live_dsp_gate_required` (before the login prompt, and before anything is read,
+staged, announced or written) until core-backend's removal gate (#10765/#10767) is live and wired
+in (`scripts/credit_review/dsp_gate.py`). `plan`, `stage`, `readback` and `revert` (a restore) are
+unchanged. Rows that would have been removed stay visible, held for Ops (the Jan board).
+
 Each row is one (request, role) from `scripts/credit_retro/manifests/takeback-r1.jsonl`:
 40 roles, 40 requests, 21 users. A role is in the take-back only when the web check read
 THAT role's credit. 8 Mixing/Mastering roles whose only web check was about a different

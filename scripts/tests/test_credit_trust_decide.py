@@ -18,6 +18,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import warnings
 from pathlib import Path
 
@@ -428,7 +429,15 @@ class Decisions(Base):
             self.db.execute("DELETE FROM decision_outcomes")
         self.assertEqual(decide.revert(self.db, res.run_id, apply=False)["approved_ids"], [uuid_of(26)])
         w = Writer(self.db)
-        out = decide.revert(self.db, res.run_id, apply=True, writer=w)
+        # captain 2026-10-23 (firstmate 104/105/106): approved -> unverified hides the credit, so
+        # without the live Spotify+Tidal gate it is refused and nothing is written ...
+        with mock.patch.object(decide.dsp_gate, "WIRED", False), self.assertRaises(SystemExit) as cm:
+            decide.revert(self.db, res.run_id, apply=True, writer=w)
+        self.assertIn("live_dsp_gate_required", str(cm.exception.code))
+        self.assertEqual(w.calls, [])
+        # ... and the write mechanics stay as they were once the gate is wired
+        with mock.patch.object(decide.dsp_gate, "WIRED", True):
+            out = decide.revert(self.db, res.run_id, apply=True, writer=w)
         self.assertEqual(w.calls[0]["status"], "unverified")
         self.assertEqual(w.calls[0]["expected"], "approved")
         self.assertEqual(out["results"][uuid_of(26)], "unverified")

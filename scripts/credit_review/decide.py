@@ -97,15 +97,28 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import admin as admin_api
-from . import proof_parts
-from .evidence import (BIG_ARTIST_POPULARITY, BIG_TRACK_POPULARITY, Evidence, EvidenceBuilder,
-                       EvidenceIncomplete, parse_ts)
+from . import dsp_gate, proof_parts
+from .evidence import (
+    BIG_ARTIST_POPULARITY,
+    BIG_TRACK_POPULARITY,
+    Evidence,
+    EvidenceBuilder,
+    EvidenceIncomplete,
+    parse_ts,
+)
 from .judge import JudgeResult
 from .policy import AUTOMATION_REGISTRY as REGISTRY
 from .policy import DECIDE_POLICY as POLICY
-from .policy import (WEB_CONFIRM_MIN_CONFIDENCE, WEB_CONFIRM_MIN_DOMAINS, WEB_CONTRADICT_MIN_CONFIDENCE,
-                     doc_required_ids, facts_of, validator_conflict, validator_rejected_rules)
-from .policy import server_approval_refusal
+from .policy import (
+    WEB_CONFIRM_MIN_CONFIDENCE,
+    WEB_CONFIRM_MIN_DOMAINS,
+    WEB_CONTRADICT_MIN_CONFIDENCE,
+    doc_required_ids,
+    facts_of,
+    server_approval_refusal,
+    validator_conflict,
+    validator_rejected_rules,
+)
 from .roles import ONE_PERSON_FAMILIES, editorial_terms, family_of, is_editorial
 from .runner import log
 
@@ -1461,6 +1474,9 @@ def revert(db: sqlite3.Connection, run_id: str, *, apply: bool, writer: Writer |
     out: dict[str, Any] = {"run_id": run_id, "approved_ids": ids, "applied": False}
     if not apply or not ids:
         return out
+    # approved -> unverified hides the credit: the captain's live Spotify+Tidal rule (2026-10-23,
+    # firstmate 104/105/106) applies before any write.
+    dsp_gate.require("decider revert (approved -> unverified hides the credit)")
     writer = writer or admin_writer()
     readback = readback or status_readback()
     results: dict[str, str] = {}

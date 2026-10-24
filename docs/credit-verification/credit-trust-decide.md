@@ -200,6 +200,14 @@ only a **named human** take an approved credit back (firstmate decision 023, `re
 From the agent token, `revert --apply` is therefore refused per profile, and that is reported. The id
 list is what a human (Jan, Nick, Aaron) takes back in the admin UI.
 
+**Live Spotify + Tidal rule (captain 2026-10-23, firstmate 104/105/106).** `approved → unverified`
+hides the credit, and nothing is hidden or removed on Muso until a live check in the same run shows,
+on BOTH Spotify and Tidal (every Tidal country agreeing; UNKNOWN never counts), that the track can't
+be played or the person's credit in that role family is gone. That check is core-backend's removal
+gate (#10765/#10767), not live yet, so `revert --apply` now refuses with `live_dsp_gate_required`
+before any write (`scripts/credit_review/dsp_gate.py`). The listing (`revert --run` without `--apply`)
+is unchanged. The credits stay visible, held for Ops.
+
 **Kill switches.**
 - `/etc/hydra/credit-trust-decide.disabled`: nothing is decided.
 - `/etc/hydra/credit-review.disabled`: stops this and the audit.
