@@ -649,6 +649,147 @@ class ScoreApprove(unittest.TestCase):
                             (NOW.strftime("%Y-%m-%dT%H:%M:%SZ"), rid, dec, why))
         self.assertEqual(sa.recently_held(self.db, NOW), {"d1"})
 
+    def test_the_reread_stops_at_its_time_budget(self):
+        """18:40Z/18:55Z 2026-10-23: 500 profiles per run hit the cron's 900 s timeout; the read phase now
+        stops at its deadline and the rest waits for the next run."""
+        rows = [row(f"tb{i}", uid=800 + i, pid=f"tbp{i}") for i in range(5)]
+        ticks = iter(range(100))
+        notes = []
+        got = sa.reread(FakeAdmin(rows), [(r["id"], r["profileId"], 0.0, r["status"]) for r in rows],
+                        max_profiles=500, sleep=lambda _s: None, note=notes, deadline=2, clock=lambda: next(ticks))
+        self.assertEqual(len(got), 2)
+        self.assertIn("time budget", notes[0])
+
+    def test_anchors_past_the_deadline_are_a_transient_hold(self):
+        from unittest import mock
+        from credit_review import evidence
+        r1, r2 = row("an1", pid="anp1"), row("an2", pid="anp2")
+        ev = mock.Mock(roles=[evidence.RoleEvidence("Producer", "producer", evidence.CONFIRMED)], errors=[])
+        ticks = iter([0, 99, 99])
+        with mock.patch.object(evidence.EvidenceBuilder, "build", return_value=ev):
+            out = sa.live_anchors(object(), sleep=lambda _s: None, deadline=10, clock=lambda: next(ticks))([r1, r2])
+        self.assertEqual(out["an1"][0], "trusted")
+        self.assertIn("time budget", out["an2"][1])
+        self.assertTrue(any(t in out["an2"][1] for t in sa.TRANSIENT_HOLD), "never cooled")
+
+    def test_fanout_past_its_deadline_is_unreadable_and_transient(self):
+        """QA @1347: the fan-out phase is bounded too; past the deadline every user reads None."""
+        from unittest import mock
+        r = row("fo1", uid=901, pid="fop1")
+        with mock.patch.object(sa.subprocess, "run") as run:
+            out = sa.live_fanout(object(), NOW, sleep=lambda _s: None, deadline=10, clock=lambda: 99)([r])
+        run.assert_not_called()
+        self.assertEqual(out, {901: None})
+        with mock.patch.object(sa.subprocess, "run", side_effect=sa.subprocess.TimeoutExpired("trino", 5)):
+            out = sa.live_fanout(object(), NOW, sleep=lambda _s: None, deadline=100, clock=lambda: 0)([r])
+        self.assertEqual(out, {901: None})
+        self.assertTrue(any(t in "same_anchor_requests_7d unreadable" for t in sa.TRANSIENT_HOLD))
+
+    def test_a_fanout_deadline_after_the_bar_is_met_still_holds_unchecked_admitted_rows(self):
+        """QA @1347: 4 admitted rows, the bar (3) met by the first three, the deadline before the 4th read."""
+        from unittest import mock
+        rows = [row(f"r{i}", uid=901, pid=f"fp{i}") for i in range(1, 5)]
+        trino = "\n".join(f'"r{i}","901","fp{i}","t-r{i}","{{Producer}}","2026-10-2{i}T00:00:00Z"' for i in range(1, 5))
+        ticks = iter([0, 0, 0, 0, 99, 99, 99])
+        with mock.patch.object(sa.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=trino)), \
+                mock.patch.object(sa.admin_api, "track_raw_credits", return_value=[]), \
+                mock.patch.object(sa, "own_earlier_credit", return_value=True):
+            out = sa.live_fanout(object(), NOW, sleep=lambda _s: None, deadline=10, clock=lambda: next(ticks))(rows)
+        self.assertIsNone(out[901], "never a partial set that lets r4 through unchecked")
+
+    def test_a_write_batch_starts_only_if_its_worst_case_ends_inside_the_run_budget(self):
+        """QA @1347 23:48Z: a batch near the deadline is never started (the cron would kill it mid-PUT)."""
+        from unittest import mock
+        clock = [0.0]
+        rows = [row("w1", uid=970, pid="w1"), row("w2", uid=971, pid="w2")]
+
+        class SlowWriter(Writer):
+            def __call__(self, status, ids, expected):
+                clock[0] = sa.RUN_BUDGET_S - sa.WRITE_BATCH_WORST_S + 1   # the first batch ran long
+                return super().__call__(status, ids, expected)
+        w = SlowWriter()
+        cands = lambda risk, limit: [(r["id"], r["profileId"], 0.0, r["status"], r["userId"]) for r in rows]
+        with mock.patch("time.monotonic", side_effect=lambda: clock[0]), mock.patch.object(decide, "BATCH", 1):
+            res = sa.run(FakeAdmin(rows), self.db, mode="apply", policy=policy(), sp=sa.ScorePolicy(enabled=True),
+                         candidates=cands, writer=w, readback=lambda st, i: set(), now=NOW, sleep=lambda _s: None,
+                         conversations=lambda users: {u: False for u in users},
+                         anchors=lambda rs: {str(r["id"]): ("none", None) for r in rs},
+                         fanout=lambda rs: {}, editorial_velocity=lambda rs: {})
+        self.assertEqual(len(w.calls), 1, "the second batch is not started")
+        out = dict(self.db.execute("SELECT request_id, outcome FROM decision_outcomes WHERE run_id=?", (res.run_id,)))
+        self.assertEqual(sorted(out.values()), ["approved", "skipped:time_budget"])
+        self.assertIn("write budget", res.note)
+        self.assertLessEqual(sa.FANOUT_BUDGET_S + sa.WRITE_BATCH_WORST_S, sa.RUN_BUDGET_S)
+        self.assertLess(sa.RUN_BUDGET_S, 900)
+
+    def test_a_busy_write_lock_near_the_deadline_skips_the_writes_never_waits_past_the_budget(self):
+        """QA @1347 00:02Z: the lock wait is bounded by what is left of the run budget."""
+        import fcntl
+        from unittest import mock
+        clock = [0.0]
+        rows = [row("lk1", uid=980, pid="lk1")]
+        cands = lambda risk, limit: [(r["id"], r["profileId"], 0.0, r["status"], r["userId"]) for r in rows]
+
+        def anchors(rs):
+            clock[0] = sa.RUN_BUDGET_S - sa.WRITE_BATCH_WORST_S + 1   # the live phases ran long
+            return {str(r["id"]): ("none", None) for r in rs}
+        w, slept = Writer(), []
+        with open(decide.WRITE_LOCK, "a+") as peer:
+            fcntl.flock(peer.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)   # a peer holds the lock
+            with mock.patch("time.monotonic", side_effect=lambda: clock[0]), \
+                    mock.patch("time.sleep", side_effect=lambda d: (slept.append(d), clock.__setitem__(0, clock[0] + d))):
+                res = sa.run(FakeAdmin(rows), self.db, mode="apply", policy=policy(), sp=sa.ScorePolicy(enabled=True),
+                             candidates=cands, writer=w, readback=lambda st, i: set(), now=NOW, sleep=lambda _s: None,
+                             conversations=lambda users: {u: False for u in users}, anchors=anchors,
+                             fanout=lambda rs: {}, editorial_velocity=lambda rs: {})
+        self.assertEqual(w.calls, [])
+        out = [o for (o,) in self.db.execute("SELECT outcome FROM decision_outcomes WHERE run_id=?", (res.run_id,))]
+        self.assertEqual(out, ["skipped:write_lock_busy"])
+        self.assertIn("write lock busy", res.note)
+        self.assertLessEqual(sum(slept), 1, "no wait past the write budget")
+
+    def test_live_phases_run_in_deadline_order(self):
+        """QA @1347: editorial velocity runs before fan-out, and each live phase gets a later deadline than the
+        one before it, so a fan-out that uses its budget can never starve editorial velocity."""
+        from unittest import mock
+        order, deadlines = [], {}
+
+        def factory(name):
+            def make(*a, deadline=None, **k):
+                deadlines[name] = deadline
+                return lambda rs: order.append(name) or {}
+            return make
+        self.assertLess(sa.ANCHOR_BUDGET_S, sa.EDITORIAL_BUDGET_S)
+        self.assertLess(sa.EDITORIAL_BUDGET_S, sa.FANOUT_BUDGET_S)
+        r = row("ed1", uid=960, pid="ed", roles=("Producer", "Editorial"))
+        terms = tuple(json.loads(Path(__file__).resolve().parents[2].joinpath(
+            "policies/credit-trust-decide.json").read_text())["editorial_role_terms"])
+        pol = dataclasses.replace(policy(), editorial_role_terms=terms)
+        with mock.patch.object(sa, "live_anchors", factory("anchors")), \
+                mock.patch.object(sa, "live_editorial_velocity", factory("editorial")), \
+                mock.patch.object(sa, "live_fanout", factory("fanout")), \
+                mock.patch("time.monotonic", return_value=1000.0):
+            w = Writer()
+            sa.run(FakeAdmin([r]), self.db, mode="shadow", policy=pol, sp=sa.ScorePolicy(enabled=True),
+                   candidates=lambda risk, limit: [(r["id"], r["profileId"], 0.0, r["status"], r["userId"])],
+                   writer=w, readback=lambda s, i: set(), now=NOW, sleep=lambda _s: None,
+                   conversations=lambda users: {u: False for u in users})
+        self.assertEqual(order, ["anchors", "editorial", "fanout"])
+        self.assertEqual(deadlines, {"anchors": 1000.0 + sa.ANCHOR_BUDGET_S,
+                                     "editorial": 1000.0 + sa.EDITORIAL_BUDGET_S,
+                                     "fanout": 1000.0 + sa.FANOUT_BUDGET_S})
+
+    def test_the_candidate_query_has_its_own_budget(self):
+        from unittest import mock
+        with mock.patch.object(sa.subprocess, "run", side_effect=sa.subprocess.TimeoutExpired("trino", 240)) as run:
+            with self.assertRaises(sa.admin_api.AdminError):
+                sa.replica_candidates(30, 10, timeout_s=sa.CANDIDATES_BUDGET_S)
+        self.assertEqual(run.call_args.kwargs["timeout"], sa.CANDIDATES_BUDGET_S)
+        self.assertLess(sa.CANDIDATES_BUDGET_S, sa.READ_BUDGET_S)
+        self.assertLess(sa.READ_BUDGET_S, sa.ANCHOR_BUDGET_S)
+        self.assertLess(sa.ANCHOR_BUDGET_S, sa.FANOUT_BUDGET_S)
+        self.assertLessEqual(sa.FANOUT_BUDGET_S, 900 - 120, "room for caps + writes under the 900 s cron")
+
     def test_trusted_approvals_get_no_verify_note_and_count_toward_caps(self):
         self.go([row("tr", band="B", meta=self.STAMP), row("no", band="B", pid="p2", meta=self.STAMP)],
                 sp=self.phase1(), anchors=lambda rs: {"tr": ("trusted", None), "no": ("none", None)})

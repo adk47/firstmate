@@ -142,7 +142,8 @@ Candidates = Callable[[float, int], list[tuple]]   # (request id, profile id, ri
 
 
 def replica_candidates(max_risk: float, limit: int, bands: tuple[str, ...] = ("A",),
-                       band_hint_stamp_ok: bool = False) -> list[tuple[str, str, float, str, int | None]]:
+                       band_hint_stamp_ok: bool = False,
+                       timeout_s: int = 600) -> list[tuple[str, str, float, str, int | None]]:
     """(request id, profile id, total risk, status, user id) of held validator-approved low-risk rows
     (unverified or user_verification_needed), from the core replica (Trino; never admin
     paging). Risk ascending, oldest first. With ``band_hint_stamp_ok`` (phase 1, Fable 15:40Z
@@ -163,7 +164,10 @@ def replica_candidates(max_risk: float, limit: int, bands: tuple[str, ...] = ("A
            f"AND coalesce(json_extract_scalar(verificationdata, '$.band_hint'), 'A') IN ({','.join(repr(b) for b in bands)}) "
            "AND " + stamp +
            f"ORDER BY r ASC, createdat ASC LIMIT {int(limit)}")
-    p = subprocess.run([TRINO], input=sql, capture_output=True, text=True, timeout=600, check=False)
+    try:
+        p = subprocess.run([TRINO], input=sql, capture_output=True, text=True, timeout=timeout_s, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise admin_api.AdminError(f"replica candidate query exceeded its {timeout_s}s budget") from exc
     if p.returncode != 0:
         raise admin_api.AdminError(f"replica candidate query failed rc={p.returncode}: {p.stderr.strip()[-200:]}")
     out = []
@@ -210,9 +214,29 @@ def last_decided(db, now: datetime, days: int = 7) -> dict[str, str]:
         return {}
 
 
+# 2026-10-23 18:40Z/18:55Z: with 500 profiles per run (#1345) two runs hit the cron's 900 s timeout
+# and wrote nothing. Every live phase now has a wall-clock budget; work past it waits for the next
+# run (a transient hold, never cooled), so a run always finishes and writes what it decided.
+# All measured from the RUN START (QA @1347: candidate selection counts too), against the cron's 900 s.
+CANDIDATES_BUDGET_S = 240  # the replica candidate query (Trino timeout)
+READ_BUDGET_S = 420        # reread: the profile-filtered list reads
+ANCHOR_BUDGET_S = 540      # live anchors
+EDITORIAL_BUDGET_S = 600   # editorial velocity: runs right after anchors, BEFORE fan-out (QA @1347: run after
+                           # fan-out, its deadline had always passed and every editorial row was held)
+FANOUT_BUDGET_S = 720      # live fan-out (Trino + per-track raw reads); ~180 s left for caps + writes
+# QA @1347 (23:48Z): the writes are bounded too. Every batch has a worst case of two conditional PUTs (core's
+# refusal re-send) plus two readbacks; a batch starts only if that worst case still ends by RUN_BUDGET_S, else
+# the rest is recorded skipped:time_budget (transient, next run). Prod PUTs of 50 rows take ~4 s (20:46Z).
+RUN_BUDGET_S = 870         # 30 s under the 900 s cron timeout
+WRITE_PUT_TIMEOUT_S = 45
+WRITE_READBACK_TIMEOUT_S = 20
+WRITE_BATCH_WORST_S = 2 * (WRITE_PUT_TIMEOUT_S + WRITE_READBACK_TIMEOUT_S)   # 130: 720 + 130 <= 870
+
+
 def reread(admin: admin_api.Admin, wanted: list[tuple[str, str, float]], *, max_profiles: int = 150,
            pace_s: float = 1.0, sleep: Callable[[float], None] | None = None,
-           note: list[str] | None = None) -> dict[str, dict[str, Any]]:
+           note: list[str] | None = None, deadline: float | None = None,
+           clock: Callable[[], float] | None = None) -> dict[str, dict[str, Any]]:
     """The live rows, by profile-filtered admin reads (filtered, so never a deep scan), in the
     candidates' order. Core allows an agent identity 120 list calls a minute, shared with the
     decider (agentAdminListRateLimit), so reads are paced, at most ``max_profiles`` profiles a
@@ -226,10 +250,15 @@ def reread(admin: admin_api.Admin, wanted: list[tuple[str, str, float]], *, max_
         status = c[3] if len(c) > 3 and c[3] in HELD_STATUSES else decide.UVN
         by_profile.setdefault((pid, status), set()).add(rid)
     rows: dict[str, dict[str, Any]] = {}
+    clock = clock or _t.monotonic
     for n, ((pid, status), ids) in enumerate(by_profile.items()):
         if n >= max_profiles:
             if note is not None:
                 note.append(f"read {max_profiles} profiles (run budget); the rest next run")
+            break
+        if deadline is not None and clock() >= deadline:
+            if note is not None:
+                note.append(f"read {n} profiles (time budget {READ_BUDGET_S}s); the rest next run")
             break
         items = None
         for attempt in range(3):
@@ -368,7 +397,8 @@ def own_earlier_credit(request: dict[str, Any], raw_credits: list[dict[str, Any]
 Fanout = Callable[[list[dict[str, Any]]], "dict[int, set[str] | None]"]
 
 
-def live_fanout(admin: admin_api.Admin, now: datetime, sleep: Callable[[float], None] | None = None) -> Fanout:
+def live_fanout(admin: admin_api.Admin, now: datetime, sleep: Callable[[float], None] | None = None,
+                deadline: float | None = None, clock: Callable[[], float] | None = None) -> Fanout:
     """{user id: ids of their 'such' requests created in the last 7 days | None (unreadable)} for
     the users of the given rows. Read-only: the core replica (Trino) for the user's 7-day
     requests, then each track's raw credits (cached per track)."""
@@ -384,7 +414,16 @@ def live_fanout(admin: admin_api.Admin, now: datetime, sleep: Callable[[float], 
                "CAST(credits AS varchar), to_iso8601(createdat) FROM postgresql_core.public.credit_requests "
                f"WHERE deletedat IS NULL AND userid IN ({','.join(str(u) for u in users)}) "
                f"AND createdat > TIMESTAMP '{since}' ORDER BY createdat")
-        p = subprocess.run([TRINO], input=sql, capture_output=True, text=True, timeout=600, check=False)
+        now_fn = clock or _t.monotonic
+        # QA @1347: bounded by the run's fan-out deadline; past it every user reads None (= held as
+        # 'unreadable', a transient hold, retried next run, never cooled).
+        left = 600 if deadline is None else int(deadline - now_fn())
+        if left < 5:
+            return {u: None for u in users}
+        try:
+            p = subprocess.run([TRINO], input=sql, capture_output=True, text=True, timeout=min(600, left), check=False)
+        except subprocess.TimeoutExpired:
+            return {u: None for u in users}
         if p.returncode != 0:
             return {u: None for u in users}
         by_user: dict[int, list[dict[str, Any]]] = {u: [] for u in users}
@@ -402,11 +441,15 @@ def live_fanout(admin: admin_api.Admin, now: datetime, sleep: Callable[[float], 
             reqs.sort(key=lambda q: q["id"] not in admitted)
             such: set[str] = set()
             reads, unreadable = 0, False
+            checked: set[str] = set()
             for q in reqs:
                 if len(such) >= FANOUT_MIN and q["id"] not in admitted:
                     break
                 tid = q["trackId"]
                 if tid not in raw_cache:
+                    if deadline is not None and now_fn() >= deadline:
+                        unreadable = True
+                        break
                     if reads >= FANOUT_MAX_READS_PER_USER:
                         unreadable = True
                         break
@@ -417,9 +460,14 @@ def live_fanout(admin: admin_api.Admin, now: datetime, sleep: Callable[[float], 
                     except admin_api.AdminError:
                         unreadable = True
                         break
+                checked.add(q["id"])
                 if own_earlier_credit(q, raw_cache[tid]):
                     such.add(q["id"])
-            out[uid] = None if unreadable and len(such) < FANOUT_MIN else such
+            # QA @1347: an incomplete scan never fails open. If any ADMITTED request of this user was not
+            # checked (deadline, read cap or a read error), the user reads None (held, transient), even
+            # when the bar was already met by others: an unchecked admitted row would otherwise pass.
+            unchecked_admitted = any(q["id"] in admitted and q["id"] not in checked for q in reqs)
+            out[uid] = None if unreadable and (len(such) < FANOUT_MIN or unchecked_admitted) else such
         return out
     return fetch
 
@@ -427,7 +475,9 @@ def live_fanout(admin: admin_api.Admin, now: datetime, sleep: Callable[[float], 
 EditorialVelocity = Callable[[list[dict[str, Any]]], "dict[str, Any]"]
 
 
-def live_editorial_velocity(admin: admin_api.Admin, sleep: Callable[[float], None] | None = None) -> EditorialVelocity:
+def live_editorial_velocity(admin: admin_api.Admin, sleep: Callable[[float], None] | None = None,
+                            deadline: float | None = None,
+                            clock: Callable[[], float] | None = None) -> EditorialVelocity:
     """Read-only: the claimant profile's request velocity (the decider's own EvidenceBuilder
     ProfileSignals, 24 h / 7 d across statuses) for editorial-role rows only. {request id:
     ProfileSignals, or None when unreadable (held)}. QA @d0f07f55: parity with the decider's
@@ -439,7 +489,11 @@ def live_editorial_velocity(admin: admin_api.Admin, sleep: Callable[[float], Non
         from .evidence import EvidenceBuilder
         builder = EvidenceBuilder(admin)
         out: dict[str, Any] = {}
+        now_fn = clock or _t.monotonic
         for n, r in enumerate(rows):
+            if deadline is not None and now_fn() >= deadline:
+                out[str(r.get("id"))] = None          # held "could not be read ... retried" (transient)
+                continue
             if n:
                 sleep(0.3)
             try:
@@ -453,7 +507,8 @@ def live_editorial_velocity(admin: admin_api.Admin, sleep: Callable[[float], Non
     return fetch
 
 
-def live_anchors(admin: admin_api.Admin, sleep: Callable[[float], None] | None = None) -> Anchors:
+def live_anchors(admin: admin_api.Admin, sleep: Callable[[float], None] | None = None,
+                 deadline: float | None = None, clock: Callable[[], float] | None = None) -> Anchors:
     """Read-only: the decider's trusted-catalog role verdicts for each row (raw credits +
     claimant profile). Any read failure = held."""
     import time as _t
@@ -463,8 +518,12 @@ def live_anchors(admin: admin_api.Admin, sleep: Callable[[float], None] | None =
         from .evidence import CONFIRMED, EvidenceBuilder, EvidenceIncomplete
         builder = EvidenceBuilder(admin)
         out: dict[str, tuple[str | None, str | None]] = {}
+        now_fn = clock or _t.monotonic
         for n, r in enumerate(rows):
             rid = str(r.get("id"))
+            if deadline is not None and now_fn() >= deadline:
+                out[rid] = (None, f"{NO_ANCHOR_PREFIX}: not classified this run (time budget); next run")
+                continue
             if n:
                 sleep(0.3)
             try:
@@ -752,6 +811,8 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
     decide.ensure_schema(db)
     now = now or datetime.now(timezone.utc)
     res = ScoreResult(run_id="score-" + now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6], mode=mode)
+    import time as _time
+    t0 = _time.monotonic()
     why_paused = paused()
     if mode == "apply" and why_paused:
         res.mode, mode, res.note = "shadow", "shadow", f"PAUSED ({why_paused[:160]}): ran as shadow, nothing written"
@@ -763,7 +824,8 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
             res.mode, mode, res.note = "shadow", "shadow", "APPLY REFUSED (score_approve.enabled is not true): shadow"
     bands = ("A", "B") if sp.admit_band_b else ("A",)
     wanted = (candidates(sp.max_total_risk, SCAN_CAP) if candidates
-              else replica_candidates(sp.max_total_risk, SCAN_CAP, bands, band_hint_stamp_ok=sp.admit_band_b))
+              else replica_candidates(sp.max_total_risk, SCAN_CAP, bands, band_hint_stamp_ok=sp.admit_band_b,
+                                 timeout_s=CANDIDATES_BUDGET_S))
     if len(wanted) >= SCAN_CAP:
         res.candidates, res.read_exhausted = len(wanted), True
         res.note = (res.note + "; " if res.note else "") + SCAN_CAPPED
@@ -788,7 +850,8 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
                                            seen.get(str(c[0]).lower(), ""), c[2] > 0))
     wanted = wanted[:sp.candidate_limit]
     notes: list[str] = []
-    rows = reread(admin, wanted, max_profiles=sp.max_profiles_per_run, sleep=sleep, note=notes) if wanted else {}
+    rows = reread(admin, wanted, max_profiles=sp.max_profiles_per_run, sleep=sleep, note=notes,
+                  deadline=t0 + READ_BUDGET_S) if wanted else {}
     if notes:
         res.note = "; ".join([res.note] + notes if res.note else notes)
     res.read_exhausted = READ_EXHAUSTED in notes
@@ -799,12 +862,14 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
     engaged = engagement_checker(survivors, now, conversations)
     # Fable 10-22 09:30Z: every admitted row is classified (trusted / none) or held (read-only).
     admitted = [r for r in survivors if why_not(r, sp, policy, engaged) is None]
-    anchor_of = (anchors or live_anchors(admin, sleep))(admitted) if admitted else {}
-    fan_of = (fanout or live_fanout(admin, now, sleep))(admitted) if admitted else {}
+    # Phase order = deadline order (anchors 540 s, editorial velocity 600 s, fan-out 720 s), so every phase
+    # starts before its own deadline unless the one before it overran (then its rows read None: held, transient).
+    anchor_of = (anchors or live_anchors(admin, sleep, deadline=t0 + ANCHOR_BUDGET_S))(admitted) if admitted else {}
     editorial_rows = [r for r in admitted
                       if any(is_editorial(str(x), policy.editorial_role_terms) for x in (r.get("credits") or []))]
-    vel_of = ((editorial_velocity or live_editorial_velocity(admin, sleep))(editorial_rows)
+    vel_of = ((editorial_velocity or live_editorial_velocity(admin, sleep, deadline=t0 + EDITORIAL_BUDGET_S))(editorial_rows)
               if editorial_rows else {})
+    fan_of = (fanout or live_fanout(admin, now, sleep, deadline=t0 + FANOUT_BUDGET_S))(admitted) if admitted else {}
     day_start = now.strftime("%Y-%m-%dT00:00:00Z")
     today = decide.approvals_today_by_user(db, day_start)
     by_user, by_profile, fleet = written_today(db, day_start)
@@ -928,23 +993,43 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
             decide.record_outcome(db, res.run_id, rid, "approve", "skipped:audit_unwritable", now)
         write_audit_sample_failed(res, now, exc)
         return res
-    writer = writer or decide.admin_writer(requester=REQUESTER, automation_flag="CREDIT_TRUST_SCORE_APPROVE")
-    readback = readback or decide.status_readback()
+    writer = writer or decide.admin_writer(requester=REQUESTER, automation_flag="CREDIT_TRUST_SCORE_APPROVE",
+                                           timeout_s=WRITE_PUT_TIMEOUT_S)
+    readback = readback or decide.status_readback(timeout_s=WRITE_READBACK_TIMEOUT_S)
     groups = [(st, [rid for rid in ids if status_of[rid] == st]) for st in HELD_STATUSES]
     who = {d.request_id: d for d in approve}
-    with decide.write_lock():
+    try:
+        _write_batches(db, res, now, policy, sp, ids, groups, who, writer, readback, paused, day_start, t0, _time)
+    except decide.WriteLockBusy:
+        # QA @1347 00:02Z: the lock wait is inside the run budget. A peer holding the lock past the last moment
+        # a batch can still finish = nothing written this run (transient, next run), never a cron kill.
+        for rid in ids:
+            decide.record_outcome(db, res.run_id, rid, "approve", "skipped:write_lock_busy", datetime.now(timezone.utc))
+        res.note = (res.note + "; " if res.note else "") + "write lock busy until the write budget ran out; the rest next run"
+    return res
+
+
+def _write_batches(db, res, now, policy, sp, ids, groups, who, writer, readback, paused, day_start, t0, _time) -> None:
+    lock_wait = max(0.0, t0 + RUN_BUDGET_S - WRITE_BATCH_WORST_S - _time.monotonic())
+    with decide.write_lock(wait_s=lock_wait):
         for st, chunk in ((st, g[i:i + decide.BATCH]) for st, g in groups for i in range(0, len(g), decide.BATCH)):
             # QA @6c2a51b4 (4): an audit pause stops the run between batches, not just at start.
             why_paused = paused()
-            if why_paused:
+            out_of_time = _time.monotonic() + WRITE_BATCH_WORST_S > t0 + RUN_BUDGET_S
+            if why_paused or out_of_time:
                 for st2, g in groups:
                     for rid in g:
                         if not db.execute("SELECT 1 FROM decision_outcomes WHERE run_id=? AND request_id=?",
                                           (res.run_id, rid)).fetchone():
-                            decide.record_outcome(db, res.run_id, rid, "approve", "skipped:paused",
+                            decide.record_outcome(db, res.run_id, rid, "approve",
+                                                  "skipped:paused" if why_paused else "skipped:time_budget",
                                                   datetime.now(timezone.utc))
-                res.paused_mid_run = True
-                res.note = (res.note + "; " if res.note else "") + f"PAUSED mid-run ({why_paused[:120]}): rest not written"
+                if why_paused:
+                    res.paused_mid_run = True
+                    res.note = (res.note + "; " if res.note else "") + f"PAUSED mid-run ({why_paused[:120]}): rest not written"
+                else:
+                    res.note = (res.note + "; " if res.note else "") + (
+                        f"write budget: no batch can finish by {RUN_BUDGET_S}s; the rest next run")
                 break
             # QA @6c2a51b4 (1): caps re-read from COMMITTED outcomes (every run, every process)
             # under the lock, so two overlapping runs cannot both pass a cap.
@@ -991,7 +1076,7 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
             if not write_audit_sample(db, res, now):
                 res.note = (res.note + "; " if res.note else "") + "audit filing failed: rest not written"
                 break
-    return res
+    return
 
 
 def write_audit_sample(db, res: "ScoreResult", now: datetime, since: str | None = None) -> bool:
