@@ -230,7 +230,8 @@ rule_tmp_reaper() {
   kb_total=$((kb_total + $(kv "$delegate_out" reclaimed_kib)))
   # A byte-budget stop keeps the next entry, so the totals may sit just under
   # the cap: record it as R4 does.
-  if [[ "$delegate_out" == *"budget_hit=bytes"* && -z "$cap_hit" ]]; then cap_hit="bytes"; fi
+  # Anchored on the summary line: deleted-path lines can contain '='.
+  if grep -qE '^tmp-reaper: done .* budget_hit=bytes$' <<<"$delegate_out" && [ -z "$cap_hit" ]; then cap_hit="bytes"; fi
 }
 
 rule_clone_sweep() {

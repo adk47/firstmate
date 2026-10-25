@@ -243,6 +243,26 @@ slack_fixture() {
   [ ! -s "$DELEG_LOG" ]
 }
 
+@test "R1 is bounded by MAX_BYTES: the byte budget reaches the real tmp-reaper, the run stops, cap-hit=bytes" {
+  local i ts d
+  ts=$(date -u -d "10 hours ago" +%Y%m%d%H%M 2>/dev/null || date -u -v-10H +%Y%m%d%H%M)
+  for i in $(seq 1 20); do
+    d="$TEST_TMPDIR/tmproot/core-backend-$i-review-abc$(printf %03d "$i")"
+    mkdir -p "$d"; head -c 65536 /dev/zero > "$d/blob"
+    TZ=UTC touch -t "$ts" "$d"
+  done
+  : > "$TEST_TMPDIR/mounts"; export SAFE_DELETE_MOUNTS_FILE="$TEST_TMPDIR/mounts"
+  export CLEAN_MY_LINUX_TMP_REAPER="$HYDRA_REPO/scripts/tmp-reaper.sh"
+  # 100 KiB budget, ~68 KiB per entry: one entry fits, the second would cross it.
+  export CLEAN_MY_LINUX_MAX_BYTES=102400 CLEAN_MY_LINUX_SKIP_SWEEP=0
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ "$(find "$TEST_TMPDIR/tmproot" -mindepth 1 -maxdepth 1 | wc -l)" -ge 18 ]
+  [ "$(find "$TEST_TMPDIR/tmproot" -mindepth 1 -maxdepth 1 | wc -l)" -le 19 ]
+  [[ "$output" == *"cap-hit=bytes"* ]]
+  [ ! -s "$DELEG_LOG" ]
+}
+
 @test "MAX_BYTES stops the run mid-table, exits 0, reports cap-hit=bytes" {
   export STUB_REAPER_OUT="tmp-reaper: done reaped=1 skipped_busy=0 reclaimed_kib=2048 failures=0"
   export CLEAN_MY_LINUX_MAX_BYTES=2097152 CLEAN_MY_LINUX_SKIP_SWEEP=0
