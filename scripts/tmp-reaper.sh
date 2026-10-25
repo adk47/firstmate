@@ -22,8 +22,19 @@
 # Exit 2 on anything else.
 #
 # Env:
-#   TMP_REAPER_ROOT     default /tmp
-#   TMP_REAPER_DIR_RE   test hook only (the unit never sets it)
+#   TMP_REAPER_ROOT         default /tmp
+#   TMP_REAPER_DIR_RE       test hook only (the unit never sets it)
+#   TMP_REAPER_MAX_ENTRIES  optional budget: delete at most this many entries
+#   TMP_REAPER_MAX_KIB      optional budget: never delete an entry that would
+#                           take the KiB reclaimed past this
+#     Both default EMPTY = unbounded (0 means a zero budget, not "off"); anything
+#     else than empty or a non-negative integer exits 2. The hourly unit
+#     (hydra-tmp-reaper.service) sets neither, so standalone behaviour is
+#     unchanged. clean-my-linux.sh sets both to its run's REMAINING budget. Both
+#     bounds are exact: hitting one stops the walk, keeps the rest and is
+#     reported as budget_hit=<entries|bytes> on the summary line; it is not a
+#     failure. An entry larger than the whole remaining KiB budget is kept, never
+#     starved: the hourly unit, which has no budget, takes it.
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -42,6 +53,14 @@ DEFAULT_DIR_RE='^[a-z0-9-]+-[0-9]+(-review)?-[A-Za-z0-9]{6}$'
 DIR_RE="${TMP_REAPER_DIR_RE:-$DEFAULT_DIR_RE}"
 SHORT_MIN=180
 LONG_MIN=1440
+MAX_ENTRIES="${TMP_REAPER_MAX_ENTRIES-}"
+MAX_KIB="${TMP_REAPER_MAX_KIB-}"
+for v in MAX_ENTRIES MAX_KIB; do
+  case "${!v}" in
+    *[!0-9]*) echo "tmp-reaper.sh: TMP_REAPER_$v must be empty or a non-negative integer, got '${!v}'" >&2; exit 2 ;;
+  esac
+  [ -n "${!v}" ] && printf -v "$v" '%d' "$((10#${!v}))"  # "08" is invalid octal in $(( ))
+done
 
 if ! command -v lsof >/dev/null 2>&1; then
   echo "tmp-reaper.sh: lsof missing; refusing to delete without an open-handle check" >&2
@@ -69,10 +88,12 @@ reaped=0
 total_kib=0
 skipped_busy=0
 failures=0
+budget_hit=""
 
 reap() {
   local path="$1" kib
   local rc=0
+  [ -n "$budget_hit" ] && return 0
   has_open_handles "$path" || rc=$?
   if [ "$rc" -eq 0 ]; then
     skipped_busy=$((skipped_busy + 1))
@@ -82,6 +103,18 @@ reap() {
     failures=$((failures + 1))
     echo "tmp-reaper: WARN lsof failed, keeping $path" >&2
     return 0
+  fi
+  if [ -n "$MAX_ENTRIES" ] && [ "$reaped" -ge "$MAX_ENTRIES" ]; then
+    budget_hit="entries"; return 0
+  fi
+  if [ -n "$MAX_KIB" ]; then
+    # Pre-delete size, so an entry that would cross the budget is kept (same
+    # rule as clean-my-linux R4). safe_delete_path du's it again: accepted,
+    # candidates are only allow-listed scratch we are about to delete.
+    kib=$(du -sk -- "$path" 2>/dev/null | awk '{print $1}' || true)
+    if [ $((total_kib + ${kib:-0})) -gt "$MAX_KIB" ]; then
+      budget_hit="bytes"; return 0
+    fi
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
     kib=$(du -sk -- "$path" 2>/dev/null | awk '{print $1}' || true)
@@ -107,6 +140,7 @@ while IFS= read -r -d '' path; do
   if [ -d "$path" ] && [[ "$name" =~ $DIR_RE ]]; then
     reap "$path"
   fi
+  [ -n "$budget_hit" ] && break
 done < <(find "$ROOT" -mindepth 1 -maxdepth 1 -type d -mmin +"$SHORT_MIN" -print0)
 
 while IFS= read -r -d '' path; do
@@ -114,12 +148,14 @@ while IFS= read -r -d '' path; do
   case "$name" in
     pr-review-*.json|qa-pr-*|qa-alerts.*) reap "$path" ;;
   esac
+  [ -n "$budget_hit" ] && break
 done < <(find "$ROOT" -mindepth 1 -maxdepth 1 \( -type f -o -type d \) -mmin +"$SHORT_MIN" -print0)
 
 while IFS= read -r -d '' path; do
   name="${path##*/}"
   [[ "$name" =~ ^tmp\.[A-Za-z0-9]{6}$ ]] && reap "$path"
+  [ -n "$budget_hit" ] && break
 done < <(find "$ROOT" -mindepth 1 -maxdepth 1 \( -type f -o -type d \) -mmin +"$LONG_MIN" -print0)
 
-echo "tmp-reaper: done reaped=$reaped skipped_busy=$skipped_busy reclaimed_kib=$total_kib failures=$failures"
+echo "tmp-reaper: done reaped=$reaped skipped_busy=$skipped_busy reclaimed_kib=$total_kib failures=$failures budget_hit=$budget_hit"
 [ "$failures" -eq 0 ]

@@ -29,14 +29,13 @@
 #   * df early-stop: used% on DF_PATH is read before each rule; once it is
 #     <= TARGET_USED_PCT the run stops and records target-reached-after=<rule>.
 #   * per-run caps: MAX_ENTRIES (top-level entries, not files) and MAX_BYTES.
-#     They bound only THIS script's own deletions (R4, checked per entry) and
-#     gate whether the NEXT rule starts. They are not a budget handed to a
-#     delegate: each delegate runs to completion under its own policy and is
-#     checked after it, so one delegate can take the run past either cap. The
-#     run then stops and reports cap-hit=<which> with the OVERSHOT totals, exit
-#     0. Capping tmp-reaper here would only defer the same deletions: it has its
-#     own hourly unit (install-aux-units.sh, hydra-tmp-reaper.service, no flag =
-#     --apply). A bound on reaper deletions belongs in tmp-reaper's own policy.
+#     They bound R1 (tmp-reaper) and R4 (bak) EXACTLY, and gate whether the NEXT
+#     rule starts: R1 is handed the run's remaining budget
+#     (TMP_REAPER_MAX_ENTRIES / TMP_REAPER_MAX_KIB) and stops at it; R4 checks
+#     per entry. R2 (clone-sweep) and R3 (codex-prune) still run to completion
+#     under their own policy, so a run can finish above a cap by at most one R2
+#     or one R3 pass. The run then stops and reports cap-hit=<which> with the
+#     overshot totals, exit 0.
 #   * the apply gate: --apply is explicit; the default is a dry-run, and the
 #     mode is propagated to every delegate.
 #   * flock, the host guard, the structural root guard, ONE Slack report.
@@ -220,9 +219,18 @@ run_delegate() {
 
 rule_tmp_reaper() {
   local flag="--dry-run"; [ "$APPLY" -eq 1 ] && flag="--apply"
-  TMP_REAPER_ROOT="$TMP_ROOT" run_delegate tmp-reaper "$TMP_REAPER" "$flag"
+  # Hand over the REMAINING budget (clamped at 0; the pre-rule check_caps means
+  # it is never <= 0 here, but never pass a negative).
+  local left_entries=$((MAX_ENTRIES - entries_total)) left_kib=$((MAX_BYTES / 1024 - kb_total))
+  [ "$left_entries" -lt 0 ] && left_entries=0
+  [ "$left_kib" -lt 0 ] && left_kib=0
+  TMP_REAPER_ROOT="$TMP_ROOT" TMP_REAPER_MAX_ENTRIES="$left_entries" TMP_REAPER_MAX_KIB="$left_kib" \
+    run_delegate tmp-reaper "$TMP_REAPER" "$flag"
   entries_total=$((entries_total + $(kv "$delegate_out" reaped)))
   kb_total=$((kb_total + $(kv "$delegate_out" reclaimed_kib)))
+  # A byte-budget stop keeps the next entry, so the totals may sit just under
+  # the cap: record it as R4 does.
+  if [[ "$delegate_out" == *"budget_hit=bytes"* && -z "$cap_hit" ]]; then cap_hit="bytes"; fi
 }
 
 rule_clone_sweep() {

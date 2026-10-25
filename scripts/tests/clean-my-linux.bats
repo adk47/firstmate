@@ -224,17 +224,23 @@ slack_fixture() {
   grep -q 'cap-hit=entries' "$TEST_TMPDIR/last-text"
 }
 
-@test "a delegate may overshoot MAX_ENTRIES: the overshoot is reported, not clamped, and no later rule runs" {
-  export STUB_REAPER_OUT="tmp-reaper: done reaped=5000 skipped_busy=0 reclaimed_kib=10 failures=0"
+@test "R1 is bounded by MAX_ENTRIES: a backlog far above the cap deletes exactly MAX_ENTRIES, the run stops" {
+  # The REAL tmp-reaper, not the stub: the cap must hold where the delegate deletes.
+  local i ts
+  ts=$(date -u -d "10 hours ago" +%Y%m%d%H%M 2>/dev/null || date -u -v-10H +%Y%m%d%H%M)
+  for i in $(seq 1 20); do
+    mkdir -p "$TEST_TMPDIR/tmproot/core-backend-$i-review-abc$(printf %03d "$i")"
+    TZ=UTC touch -t "$ts" "$TEST_TMPDIR/tmproot/core-backend-$i-review-abc$(printf %03d "$i")"
+  done
+  : > "$TEST_TMPDIR/mounts"; export SAFE_DELETE_MOUNTS_FILE="$TEST_TMPDIR/mounts"
+  export CLEAN_MY_LINUX_TMP_REAPER="$HYDRA_REPO/scripts/tmp-reaper.sh"
   export CLEAN_MY_LINUX_MAX_ENTRIES=5 CLEAN_MY_LINUX_SKIP_SWEEP=0
-  slack_fixture
   run bash "$WC" --apply
   [ "$status" -eq 0 ]
-  [ "$(cut -d' ' -f1 "$DELEG_LOG")" = "REAPER" ]
-  [ "$(wc -l < "$DELEG_LOG")" -eq 1 ]
+  [ "$(find "$TEST_TMPDIR/tmproot" -mindepth 1 -maxdepth 1 | wc -l)" -eq 15 ]
   [[ "$output" == *"cap-hit=entries"* ]]
-  [[ "$output" == *"entries=5000"* ]]
-  grep -q 'cap-hit=entries' "$TEST_TMPDIR/last-text"
+  [[ "$output" == *"entries=5 "* ]]
+  [ ! -s "$DELEG_LOG" ]
 }
 
 @test "MAX_BYTES stops the run mid-table, exits 0, reports cap-hit=bytes" {

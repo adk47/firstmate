@@ -189,3 +189,56 @@ setup() {
   [ "$status" -eq 2 ]
   [ -d "$TMP_REAPER_ROOT/core-backend-22-review-BADFLG" ]
 }
+
+# ── budget (TMP_REAPER_MAX_ENTRIES / TMP_REAPER_MAX_KIB, MUS-19332) ──────────
+
+@test "TMP_REAPER_MAX_ENTRIES=k with N>k eligible dirs deletes exactly k, keeps N-k, budget_hit=entries" {
+  local i
+  for i in 1 2 3 4 5 6 7 8; do mk "core-backend-$i-review-abc12$i" 5; done
+  TMP_REAPER_MAX_ENTRIES=3 run "$REAPER"
+  [ "$status" -eq 0 ]
+  [ "$(find "$TMP_REAPER_ROOT" -mindepth 1 -maxdepth 1 | wc -l)" -eq 5 ]
+  [[ "$output" == *"reaped=3 "* ]]
+  [[ "$output" == *"budget_hit=entries"* ]]
+}
+
+@test "no budget env set: every eligible entry is deleted (the hourly unit is unchanged)" {
+  local i
+  for i in 1 2 3 4 5 6 7 8; do mk "core-backend-$i-review-abc12$i" 5; done
+  run "$REAPER"
+  [ "$status" -eq 0 ]
+  [ "$(find "$TMP_REAPER_ROOT" -mindepth 1 -maxdepth 1 | wc -l)" -eq 0 ]
+  [[ "$output" == *"reaped=8 "* ]]
+  [[ "$output" != *"budget_hit=entries"* && "$output" != *"budget_hit=bytes"* ]]
+}
+
+@test "TMP_REAPER_MAX_ENTRIES=0 is a zero budget, not 'off': nothing is deleted" {
+  mk core-backend-1-review-abc121 5
+  TMP_REAPER_MAX_ENTRIES=0 run "$REAPER"
+  [ "$status" -eq 0 ]
+  [ -d "$TMP_REAPER_ROOT/core-backend-1-review-abc121" ]
+  [[ "$output" == *"budget_hit=entries"* ]]
+}
+
+@test "TMP_REAPER_MAX_KIB keeps an entry that would cross the budget, budget_hit=bytes" {
+  mk core-backend-1-review-abc121 5
+  # inside repo/: a file added at the top level would refresh the idle mtime
+  head -c 65536 /dev/zero > "$TMP_REAPER_ROOT/core-backend-1-review-abc121/repo/big"
+  local big
+  big=$(du -sk "$TMP_REAPER_ROOT/core-backend-1-review-abc121" | awk '{print $1}')
+  TMP_REAPER_MAX_KIB=$((big - 1)) run "$REAPER"
+  [ "$status" -eq 0 ]
+  [ -d "$TMP_REAPER_ROOT/core-backend-1-review-abc121" ]
+  [[ "$output" == *"budget_hit=bytes"* ]]
+  TMP_REAPER_MAX_KIB=$big run "$REAPER"
+  [ ! -e "$TMP_REAPER_ROOT/core-backend-1-review-abc121" ]
+}
+
+@test "a non-numeric budget exits 2 and deletes nothing" {
+  mk core-backend-1-review-abc121 5
+  TMP_REAPER_MAX_ENTRIES=lots run "$REAPER"
+  [ "$status" -eq 2 ]
+  TMP_REAPER_MAX_KIB=-1 run "$REAPER"
+  [ "$status" -eq 2 ]
+  [ -d "$TMP_REAPER_ROOT/core-backend-1-review-abc121" ]
+}
