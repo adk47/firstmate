@@ -36,9 +36,14 @@ reaps everything that sweep could. Regression test:
   `df` fails closed to 100%.
 - **Per-run caps.** `CLEAN_MY_LINUX_MAX_ENTRIES` (25000, top-level entries, not
   files) and `CLEAN_MY_LINUX_MAX_BYTES` (150 GiB). Reaching either stops the run,
-  records `cap-hit=entries|bytes`, exits 0. R4 is checked per entry. A delegate
-  is checked after it returns, from its own summary line, so one delegate can
-  overshoot a cap by its own (already bounded) work.
+  records `cap-hit=entries|bytes`, exits 0. The caps bound this script's own
+  deletions (R4, checked per entry) and gate whether the next rule starts; they
+  are not a budget handed to a delegate. A delegate is checked after it returns,
+  from its own summary line, so one delegate can overshoot a cap; the overshot
+  totals are reported as-is, never clamped. tmp-reaper is not capped from here
+  because it also runs from its own hourly unit (`hydra-tmp-reaper.service`, no
+  flag = `--apply`), so a cap on this path would only defer the same deletions;
+  a bound on reaper deletions belongs in tmp-reaper's own policy.
 - **Exit contract.** 0 normal (including cap-hit / target-reached); 1 structural
   refusal or delegate exit 1; 2 usage or delegate exit 2. The FIRST non-zero
   delegate rc is propagated after the summary and Slack post; later rules still run.

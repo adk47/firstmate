@@ -224,6 +224,19 @@ slack_fixture() {
   grep -q 'cap-hit=entries' "$TEST_TMPDIR/last-text"
 }
 
+@test "a delegate may overshoot MAX_ENTRIES: the overshoot is reported, not clamped, and no later rule runs" {
+  export STUB_REAPER_OUT="tmp-reaper: done reaped=5000 skipped_busy=0 reclaimed_kib=10 failures=0"
+  export CLEAN_MY_LINUX_MAX_ENTRIES=5 CLEAN_MY_LINUX_SKIP_SWEEP=0
+  slack_fixture
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1 "$DELEG_LOG")" = "REAPER" ]
+  [ "$(wc -l < "$DELEG_LOG")" -eq 1 ]
+  [[ "$output" == *"cap-hit=entries"* ]]
+  [[ "$output" == *"entries=5000"* ]]
+  grep -q 'cap-hit=entries' "$TEST_TMPDIR/last-text"
+}
+
 @test "MAX_BYTES stops the run mid-table, exits 0, reports cap-hit=bytes" {
   export STUB_REAPER_OUT="tmp-reaper: done reaped=1 skipped_busy=0 reclaimed_kib=2048 failures=0"
   export CLEAN_MY_LINUX_MAX_BYTES=2097152 CLEAN_MY_LINUX_SKIP_SWEEP=0
@@ -374,6 +387,21 @@ slack_fixture() {
   export CLEAN_MY_LINUX_TMP_ROOT="/"
   run bash "$WC"
   [ "$status" -eq 1 ]
+}
+
+@test "tmp root spelled as root ('//', '///', '/.') → exit 1; a legit trailing slash still runs" {
+  local spelling
+  for spelling in "//" "///" "/."; do
+    : > "$DELEG_LOG"
+    CLEAN_MY_LINUX_TMP_ROOT="$spelling" run bash "$WC" --apply
+    [ "$status" -eq 1 ] || { echo "spelling '$spelling' got status $status: $output"; return 1; }
+    [ ! -s "$DELEG_LOG" ]
+  done
+  mkdir -p "$TEST_TMPDIR/tmproot-slash"
+  : > "$DELEG_LOG"
+  CLEAN_MY_LINUX_TMP_ROOT="$TEST_TMPDIR/tmproot-slash/" run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  grep -q REAPER "$DELEG_LOG"
 }
 # ──────────────────────────────────────────────────────────────
 # .bak / .orig category

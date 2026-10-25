@@ -29,9 +29,14 @@
 #   * df early-stop: used% on DF_PATH is read before each rule; once it is
 #     <= TARGET_USED_PCT the run stops and records target-reached-after=<rule>.
 #   * per-run caps: MAX_ENTRIES (top-level entries, not files) and MAX_BYTES.
-#     Either one reached => stop the run, cap-hit=<which>, exit 0. R4 is
-#     checked per entry; a delegate runs to completion and is checked after it
-#     (its own policy bounds it), so a cap can be overshot by one delegate.
+#     They bound only THIS script's own deletions (R4, checked per entry) and
+#     gate whether the NEXT rule starts. They are not a budget handed to a
+#     delegate: each delegate runs to completion under its own policy and is
+#     checked after it, so one delegate can take the run past either cap. The
+#     run then stops and reports cap-hit=<which> with the OVERSHOT totals, exit
+#     0. Capping tmp-reaper here would only defer the same deletions: it has its
+#     own hourly unit (install-aux-units.sh, hydra-tmp-reaper.service, no flag =
+#     --apply). A bound on reaper deletions belongs in tmp-reaper's own policy.
 #   * the apply gate: --apply is explicit; the default is a dry-run, and the
 #     mode is propagated to every delegate.
 #   * flock, the host guard, the structural root guard, ONE Slack report.
@@ -166,10 +171,13 @@ check_caps() {
 # Structural guard: refuse to run against a tmp root we didn't audit.
 # ──────────────────────────────────────────────────────────────
 guard_tmp_root() {
+  # Strip ALL trailing slashes before the root check, so "//" reads as "/".
+  while [ "$TMP_ROOT" != "/" ] && [ "${TMP_ROOT%/}" != "$TMP_ROOT" ]; do
+    TMP_ROOT="${TMP_ROOT%/}"
+  done
   if [ -z "$TMP_ROOT" ] || [ "$TMP_ROOT" = "/" ]; then
     log "FATAL: refusing to run with TMP_ROOT='$TMP_ROOT'"; exit 1
   fi
-  TMP_ROOT="${TMP_ROOT%/}"
   if [ -L "$TMP_ROOT" ]; then
     log "FATAL: TMP_ROOT is a symlink: $TMP_ROOT"; exit 1
   fi
@@ -178,6 +186,9 @@ guard_tmp_root() {
   fi
   local rp
   rp="$(realpath -- "$TMP_ROOT" 2>/dev/null)" || { log "FATAL: realpath failed for $TMP_ROOT"; exit 1; }
+  if [ "$rp" = "/" ]; then
+    log "FATAL: TMP_ROOT resolves to the filesystem root: $TMP_ROOT"; exit 1
+  fi
   if [ "$rp" != "$TMP_ROOT" ]; then
     log "FATAL: TMP_ROOT resolves elsewhere ($TMP_ROOT -> $rp)"; exit 1
   fi
