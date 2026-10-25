@@ -542,3 +542,9 @@ STUB
     "$HYDRA_REPO/scripts/install-aux-units.sh" | grep '^ExecStart=')"
   [[ "$line" == *"/scripts/clean-my-linux.sh --apply" ]]
 }
+
+@test "retired weekly-cleanup.sh is rsync-excluded so the Step 4a pre-flight does not halt on its deletion" {
+  [ ! -e "$HYDRA_REPO/scripts/weekly-cleanup.sh" ]
+  sed -n '/^RSYNC_EXCLUDES=(/,/^)$/p' "$HYDRA_REPO/scripts/deploy.sh" \
+    | grep -qFx -- "  --exclude='scripts/weekly-cleanup.sh'"
+}
