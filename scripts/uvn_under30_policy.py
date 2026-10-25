@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
-from credit_review.policy import doc_required_ids
+from credit_review.policy import doc_required_ids, server_band_a_refusal
 from credit_review.roles import editorial_terms, is_editorial
 
 
@@ -346,6 +346,16 @@ def load_deny_list(path: Path, ledger_path: Path) -> DenyList:
         terms = editorial_terms(data.get("editorial_role_terms"))
     except ValueError as exc:
         raise PolicyError(f"deny list {path}: {exc}") from exc
+    # Firstmate 154: the fraud watchlist beside the policy file is denied here too (shared loader;
+    # malformed = fatal; missing = fatal next to the repo's own policies/ dir).
+    from credit_review import watchlist as watchlist_mod
+    try:
+        wl = watchlist_mod.load(Path(path).with_name("fraud-watchlist.json"),
+                                required=Path(path).resolve().parent == watchlist_mod.DEFAULT.parent)
+    except ValueError as exc:
+        raise PolicyError(str(exc)) from exc
+    users = list(dict.fromkeys(list(users) + sorted(wl.user_ids)))
+    profiles = list(dict.fromkeys(profiles + [_normalize_uuid(x, "watchlist profile id") for x in sorted(wl.profile_ids)]))
     return DenyList(users, profiles, terms, load_doc_required_ids(ledger_path))
 
 
@@ -361,6 +371,11 @@ def qualifies_for_approval(
     if deny.blocks(credit_request):
         return False
     if has_hard_reject_signal(credit_request):
+        return False
+    # core-backend's T12 agent guard refuses this automation anything outside band A
+    # (stored popularity 1..29, no claimant-proof requirement, ...); one refused row
+    # rejects the whole batch, so such rows are never sent (left for the reviewer).
+    if server_band_a_refusal(credit_request):
         return False
     if not credit_request.get("spotifyTrackId"):
         return False

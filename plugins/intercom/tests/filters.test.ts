@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, extractImageAttachments, extractDocumentAttachments, IMAGE_MIME_ALLOWLIST, CANDIDATE_IMAGE_MIME_ALLOWLIST } from "../src/filters.js";
+import { classifyEvent, surfaceLinkTargets, createEventIdSet, isEventProcessed, trackEventId, isSelfReply, extractImageAttachments, extractDocumentAttachments, IMAGE_MIME_ALLOWLIST, CANDIDATE_IMAGE_MIME_ALLOWLIST } from "../src/filters.js";
 import type { IntercomWebhookPayload, IntercomPartAttachment } from "../src/types.js";
 import userCreated from "./fixtures/conversation-user-created.json";
 import userReplied from "./fixtures/conversation-user-replied.json";
@@ -591,6 +591,71 @@ describe("classifyEvent — attachments", () => {
     }
   });
 
+  it("forwards the opening message's image when Intercom has already appended bot/system parts (live shape, 2026-10-17)", () => {
+    // WHY: production `user.created` payloads arrive with bot parts already
+    // appended (attribute update, default assignment, ...), each with
+    // `attachments: []` and no body. Taking `.at(-1)` made that empty array
+    // win over `source.attachments`: 4 of 4 customer openers with an image
+    // on 2026-10-17 reached Caroline with no image ("I can't see the image").
+    const sysPart = (id: string, part_type: string, authorType: string) => ({
+      type: "conversation_part", id, part_type, body: null, created_at: 1711234001,
+      author: { type: authorType, id: "5763097" }, attachments: [],
+    });
+    const payload = baseUserCreated({
+      conversation_parts: {
+        conversation_parts: [
+          sysPart("p1", "conversation_attribute_updated_by_admin", "bot"),
+          sysPart("p2", "default_assignment", "bot"),
+          sysPart("p3", "assignment", "admin"),
+        ],
+      } as unknown as IntercomWebhookPayload["data"]["item"]["conversation_parts"],
+      source: {
+        body: "<p>hi here's my additional evidence</p>",
+        author: { type: "user", id: "u_initial", email: "i@example.com" },
+        attachments: [{
+          type: "upload",
+          name: "IMG_3118.png",
+          url: "https://downloads.intercomcdn.com/i/o/x/IMG_3118.png",
+          content_type: "image/png",
+        }],
+      } as IntercomWebhookPayload["data"]["item"]["source"],
+    });
+    const result = classifyEvent(payload);
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.body).toContain("additional evidence");
+      expect(result.attachments).toHaveLength(1);
+      expect(result.attachments?.[0].url).toContain("/IMG_3118.png");
+      expect(result.authorId).toBe("u_initial");
+      expect(result.authorType).toBe("user");
+    }
+  });
+
+  it("on user.replied, reads the latest CUSTOMER part even when a bot part follows it", () => {
+    const payload = baseUserCreated({
+      conversation_parts: {
+        conversation_parts: [
+          {
+            type: "conversation_part", id: "c1", part_type: "comment", body: "<p>here it is</p>", created_at: 1711234100,
+            author: { type: "lead", id: "lead_1" },
+            attachments: [{ type: "upload", name: "proof.png", url: "https://downloads.intercomcdn.com/i/o/x/proof.png", content_type: "image/png" }],
+          },
+          {
+            type: "conversation_part", id: "b1", part_type: "language_detection_details", body: null, created_at: 1711234101,
+            author: { type: "bot", id: "5763097" }, attachments: [],
+          },
+        ],
+      } as unknown as IntercomWebhookPayload["data"]["item"]["conversation_parts"],
+    });
+    const result = classifyEvent({ ...payload, topic: "conversation.user.replied" } as IntercomWebhookPayload);
+    expect(result.kind).toBe("customer_message");
+    if (result.kind === "customer_message") {
+      expect(result.body).toContain("here it is");
+      expect(result.attachments?.[0].url).toContain("/proof.png");
+      expect(result.authorId).toBe("lead_1");
+    }
+  });
+
   it("prefers lastPart.attachments over source.attachments when both are present (matches body fallback chain)", () => {
     // WHY: defends against accidental shape drift. If a future change ever
     // swaps the precedence, the part-level attachments (the customer's most
@@ -873,3 +938,42 @@ describe("extractImageAttachments — HEIC/HEIF candidates and counted drops", (
     expect(drops[0]).toContain("image/tiff:1");
   });
 });
+
+describe("surfaceLinkTargets", () => {
+  const card = (u: string) =>
+    `<div class="intercom-container"><a class="intercom-h2b-button" target="_blank" href="${u}">muso.ai  </a><a href="${u}" target="_blank" class="intercom-content-link"></a></div>`;
+  const strip = (h: string) => h.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+
+  it("a pasted-link preview card shows its URL once (measured 2026-10-20)", () => {
+    const u = "https://muso.ai/profile/155931ce-2ada-4b43-90da-64acb35f4b7b";
+    const out = strip(surfaceLinkTargets(`<p>Hello Caroline,</p>${card(u)}<p>That's my main artist link.</p>`));
+    expect(out).toContain(u);
+    expect(out.split(u).length - 1).toBe(1);
+    expect(out).not.toMatch(/muso\.ai\s+That/);
+  });
+  it("descriptive link text keeps the text and adds the URL", () => {
+    const u = "https://open.spotify.com/track/abc";
+    expect(strip(surfaceLinkTargets(`<a href="${u}">my song</a>`))).toBe(`my song (${u})`);
+  });
+  it("text that already is the URL is not duplicated", () => {
+    const u = "https://muso.ai/profile/x";
+    expect(strip(surfaceLinkTargets(`<a href="${u}">${u}</a>`))).toBe(u);
+  });
+  it("mailto and relative links keep only their text", () => {
+    expect(strip(surfaceLinkTargets(`<a href="mailto:a@b.co">email me</a> <a href="/x">here</a>`))).toBe("email me here");
+  });
+  it("decodes &amp; in hrefs", () => {
+    expect(strip(surfaceLinkTargets(`<a href="https://x.co/?a=1&amp;b=2"></a>`))).toBe("https://x.co/?a=1&b=2");
+  });
+  it("classifyEvent keeps the body exactly as Intercom sent it", () => {
+    const u = "https://muso.ai/profile/b8ea4676-da77-45fe-ba43-e1a828648f40";
+    const payload = JSON.parse(JSON.stringify(userReplied)) as IntercomWebhookPayload;
+    const body = `<p></p>${card(u)}<p>The data was split by the label.</p>`;
+    const item = payload.data.item;
+    item.conversation_parts = { conversation_parts: [{ id: "p1", part_type: "comment", body, author: { id: "u1", type: "user" }, attachments: [] } as never] } as never;
+    const r = classifyEvent(payload);
+    expect(r.kind).toBe("customer_message");
+    if (r.kind === "customer_message") expect(r.body).toBe(body);
+  });
+});
+

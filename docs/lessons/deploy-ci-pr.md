@@ -91,6 +91,56 @@ These are the known false-red signatures. Diagnose read-only, confirm it is not 
 
 **The QA auto-review is async and scope-guarded.** `qa-autoreview.yml` fires on the "PR Validation" `workflow_run` completing, then guards to non-draft, base `main`, and **any author who has a Slack-UID mapping in `scripts/lib/qa-author-slack-uid.sh`** (it was hardcoded to `nsollazzo` until 2026-07-10; an author with no mapping is the only one skipped, and that skip posts `qa-review=failure`). It dispatches a gateway agent that reviews, then approves through `scripts/qa-pr-approve.sh` on a GO. The wrapper decides whether CI blocks: advisory checks alert and do not withhold. The dispatched agent finishes a few minutes after its trigger.
 
+**A tier-only NO-GO re-reviews itself (2026-10-20).** Adding a label or editing the PR body does not re-run "PR Validation", so a NO-GO whose only finding was `tier missing` used to sit until someone dispatched QA by hand. Six PRs stalled on this in one day. `qa-tier-recheck.yml` (`pull_request_target`, main's copy, no PR code checked out) re-dispatches the same auto-review on exactly two events:
+- one of the labels `tier:0`..`tier:3` is added;
+- a body edit adds the first complete `Tier: N, because ...` line (line-anchored, case-sensitive; prose that merely mentions `tier:` does not count).
+
+Either event re-dispatches ONLY when the head's newest `qa-review` status is `failure` (a NO-GO). A tier label added at PR creation (no verdict yet) or on a GO head does nothing, because the normal auto-review covers those heads. If the statuses lookup itself fails, the gate warns and dispatches anyway: a duplicate review is cheaper than a tier fix nobody reviews, and the dispatcher dedups in-flight runs. The workflow sets no `run-name`, on purpose: most of its runs stop at the gate, and a run named in the dispatcher's `qa <repo>#<pr> @ <sha> (...)` dedup shape would make a concurrent auto-review refuse itself as a duplicate and lose the review. Without it, the worst case is a duplicate review. There is no workflow-level `concurrency`: a later non-matching edit would cancel the matching run.
+
+Accepted residual: a tier fix made while a review is mid-flight (no verdict status on the head yet) is not re-dispatched, and the stale `tier missing` NO-GO that review then posts stands. The next push, removing and re-adding the tier label, or a hand dispatch (`scripts/qa-dispatch-pr-review.sh`) covers it. `qa-review-reconcile` does not: it counts that NO-GO as a verdict and only acts on heads with none.
+
+Other repos fire QA from their own `qa-autoreview-trigger.yml`, which also handles their normal `opened`/`synchronize`/`reopened`/`ready_for_review` reviews and a base-retarget `edited`. Those must keep dispatching exactly as before, so the gate passes them through at `go=true` and judges only the two tier events. The gate filters on its own, so a job `if:` that already lets every non-`edited` action through cannot leak other labels or title edits:
+1. Add `labeled` (and `edited`, where missing) to `types`, and add `statuses: read` to `permissions`.
+2. Extend the job `if:` with `(github.event.action == 'labeled' && contains(fromJSON('["tier:0","tier:1","tier:2","tier:3"]'), github.event.label.name)) || (github.event.action == 'edited' && github.event.changes.body != null)`, alongside any existing clauses. If an existing clause is `github.event.action != 'edited'`, change it to `github.event.action != 'edited' && github.event.action != 'labeled'`.
+3. Put this `Tier re-review gate` step in front of the dispatch, and run the dispatch only `if: steps.gate.outputs.go == 'true'`. A retarget edit and every non-tier action get `go=true`. A `labeled` event gets `go=true` only for an exact `tier:0`..`tier:3` label, and a body edit only when it adds the first complete Tier line; both then also need the head's newest `qa-review` to be `failure` (a status-API error dispatches anyway with a warning). Any other label or edit gets `go=false`. Never interpolate the label or either body into the script; pass them through `env`:
+
+```yaml
+      - name: Tier re-review gate
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          RETARGET: ${{ github.event.changes.base != null }}
+          BODY_EDIT: ${{ github.event.changes.body != null }}
+          OLD_BODY: ${{ github.event.changes.body.from }}
+          NEW_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          verdict() { echo "go=$1" >> "$GITHUB_OUTPUT"; exit 0; }
+          tier_line() { grep -qE '^[[:space:]]*Tier: [0-3], because' <<<"$1"; }
+          case "$ACTION" in
+            labeled)
+              case "$LABEL" in tier:[0-3]) ;; *) verdict false ;; esac ;;
+            edited)
+              [ "$RETARGET" != true ] || verdict true
+              [ "$BODY_EDIT" = true ] || verdict false
+              if ! tier_line "$NEW_BODY" || tier_line "$OLD_BODY"; then verdict false; fi ;;
+            *) verdict true ;;
+          esac
+          if ! states="$(gh api --paginate "repos/${REPO}/commits/${HEAD_SHA}/statuses?per_page=100" \
+                --jq '.[] | select(.context == "qa-review") | .state')"; then
+            echo "::warning::could not read qa-review statuses; dispatching anyway"
+            verdict true
+          fi
+          newest="${states%%$'\n'*}"
+          [ "$newest" = failure ] && verdict true || verdict false
+```
+
+Use the here-string (`grep ... <<<"$BODY"`), not `printf | grep`: under `pipefail`, `grep -q` exits on the first match and a long body can kill the `printf` with SIGPIPE.
+
 **"Green but COMMENTED, not APPROVED" is usually the mid-CI race, not a stuck bot.** If the agent reviews while any check is still pending, it records the GO verdict (sets the `qa-review` commit status green) but skips the formal APPROVED review, leaving the PR green-but-`REVIEW_REQUIRED`. The APPROVED typically lands ~1 min after CI goes fully green. Wait ~5 min past CI-green before concluding it's stuck. The reliable signal is the `qa-review` commit status on your PR head, which lands a beat before `reviewDecision` flips.
 
 **Edit the PR title BEFORE the push that changes the file mix — a title fixed afterwards leaves a permanent red `pr-title` row that voids the bot's approval for that head.** `pr-title-check.yml:32` reads `${{ github.event.pull_request.title }}`, i.e. the title at EVENT time, so pushing first and renaming seconds later evaluates the old type and files a FAILURE row that sits beside the later SUCCESS forever. Worked example, hydra#1130 @`58f13539d` (2026-10-12): `docs(devops-set-env)` FAILURE next to `chore(devops-set-env)` SUCCESS four seconds apart; the bot posted a prose GO and withheld the APPROVED review, and the PR stayed `REVIEW_REQUIRED` for three days. Guard 6 of `qa-pr-approve.sh` counts every row on the head rather than the latest run per check name (MUS-4348 / hydra#1115 is the fix, awaiting sign-off), so until that lands the PR is green to GitHub and red to the bot at the same time.

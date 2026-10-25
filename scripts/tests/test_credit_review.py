@@ -7,6 +7,7 @@ Stdlib unittest, no network: the admin API and the model are faked. Run:
 
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import json
 import sys
 import tempfile
@@ -162,6 +163,9 @@ class RoleTests(unittest.TestCase):
             "Co-Producer": "producer", "Executive Producer": "exec_producer", "Composer": "writer",
             "composerlyricist": "writer", "Lyricist": "writer", "A&R": "anr", "Recorder": "engineer",
             "recording engineer": "engineer", "primary artist": "artist", "publisher": "org", "label": "org",
+            "Remixer": "remix", "Re-Mixer": "remix", "re-mix": "remix", "remix": "remix",
+            "Remixed By": "remix", "Dolby Atmos Remix": "remix", "Assistant Remixer": "remix",
+            "premix engineer": "mix",
         }
         for role, fam in cases.items():
             self.assertEqual(family_of(role), fam, role)
@@ -186,6 +190,25 @@ class ClassifyTests(unittest.TestCase):
         # Muso-sourced rows are never evidence; another person's mastering is a contradiction.
         self.assertEqual(out["Mastering"], CONTRADICTED)
         self.assertEqual(out["Arranger"], UNVERIFIABLE)
+
+    def test_a_remixer_and_the_mix_engineer_never_contradict_each_other(self):
+        # verifier-core-b1 parity: " remixer " contains "mix", so a trusted
+        # "Remixer: DJ X" credit used to CONTRADICT the real mix engineer's
+        # Mixing claim (a hard one-person anchor), and the reverse.
+        out = {r.claimed_role: r.status for r in classify_roles(
+            ["Mixing"], [raw("DJ X", "remixer", "spotify")], ["stillfloo"], set())}
+        self.assertEqual(out["Mixing"], UNVERIFIABLE)
+        out = {r.claimed_role: r.status for r in classify_roles(
+            ["Remixer"], [raw("Serban Ghenea", "mixing engineer", "tidal")], ["stillfloo"], set())}
+        self.assertEqual(out["Remixer"], UNVERIFIABLE)
+        # Remix is still a one-person family: another trusted remixer
+        # contradicts a Remixer claim, as when it mapped to mix.
+        out = {r.claimed_role: r.status for r in classify_roles(
+            ["Remixer"], [raw("DJ X", "remixer", "spotify")], ["stillfloo"], set())}
+        self.assertEqual(out["Remixer"], CONTRADICTED)
+        out = {r.claimed_role: r.status for r in classify_roles(
+            ["Remixer"], [raw("stillfloo", "Remixer", "spotify")], ["stillfloo"], set())}
+        self.assertEqual(out["Remixer"], CONFIRMED)
 
     def test_confirmed_by_name_and_by_raw_profile_link(self):
         raws = [raw("R. Engineer", "mixer", "tidal", rid="zzz"), raw("Other", "mastering engineer", "jaxsta", rid="T9")]
@@ -903,6 +926,15 @@ class ClaimantDomainHardeningTests(unittest.TestCase):
 
 
 class VelocityRegressionTests(unittest.TestCase):
+    def test_remixer_claims_count_toward_the_one_person_share(self):
+        reqs = [request(f"m{i}", pid=PID_BAD, track=f"m{i}", pop=0, roles=("Remixer",), artists=(f"Artist {i}",))
+                for i in range(3)]
+        tracks = {f"m{i}": track(20) for i in range(3)} | {"t3": track(10)}
+        target = request("tgt", pid=PID_BAD, track="t3", roles=("Producer",), status="unverified")
+        admin = FakeAdmin(reqs + [target], {"t3": []}, PROFILES, tracks)
+        ev = EvidenceBuilder(admin, now=NOW).build(target)
+        self.assertAlmostEqual(ev.profile.one_person_share_7d, 3 / 4)
+
     def test_big_share_samples_the_whole_week_evenly(self):
         reqs = [request(f"e{i}", pid=PID_BAD, track=f"z{i}", pop=0, roles=("Mixing",), artists=(f"Artist {i}",),
                         created=(NOW - timedelta(hours=150 - i)).isoformat().replace("+00:00", "Z"))
@@ -1256,6 +1288,22 @@ class ModelGateTests(unittest.TestCase):
     def args(self, *extra):
         return self.cli.parser().parse_args(["audit", *extra])
 
+    def test_codex_provider_is_off_without_enable_file_for_audit_and_review(self):
+        # QA on hydra#1279: --provider codex must not bypass the operator's switch.
+        self.cli.codex_judge = lambda *a, **k: self.fail("codex judge must not be built")
+        self.cli.account_balance_usd = lambda: self.fail("balance must not even be read")
+        self.assertIsNone(self.cli.make_judge(self.args("--provider", "codex")))
+        review = self.cli.parser().parse_args(["review", "--phase", "shadow", "--provider", "codex"])
+        self.assertIsNone(self.cli.make_judge(review))
+
+    def test_codex_provider_runs_with_enable_file(self):
+        self.cli.MODEL_ENABLE_FILE.write_text("")
+        built = []
+        self.cli.codex_judge = lambda args, fallback=None, **k: built.append(fallback) or "codex-judge"
+        self.cli.account_balance_usd = lambda: 50.0
+        self.assertEqual(self.cli.make_judge(self.args("--provider", "codex")), "codex-judge")
+        self.assertIsNotNone(built[0])          # the capped OpenRouter judge is the fallback
+
     def test_off_without_enable_file(self):
         self.cli.account_balance_usd = lambda: self.fail("balance must not even be read")
         self.assertIsNone(self.cli.make_judge(self.args()))
@@ -1298,7 +1346,17 @@ class CronContractTests(unittest.TestCase):
             argv = j["payload"]["argv"]
             self.assertEqual(j["payload"]["kind"], "command")
             self.assertTrue(all(isinstance(a, str) and a for a in argv), "cron argv must not contain empty strings")
-            self.assertIn(argv[2], ("audit", "review", "digest", "metrics", "decide"))
+            # verify-notify writes no credit-request status either: it sends the
+            # captain-approved verify note through intercom-verify-request.sh.
+            self.assertIn(argv[2], ("audit", "review", "digest", "metrics", "decide", "verify-notify", "verify-wave",
+                                    "removal-notice", "score-approve", "removal-audit", "provisional-tracker"))
+            if argv[2] == "score-approve":
+                # The second writing subcommand: only as the registered, captain-approved
+                # credit-trust-score-approve automation (captain 2026-10-20 "approve low risk credits").
+                reg = json.loads((Path(__file__).resolve().parents[2] / "policies"
+                                  / "credit-approval-automation.json").read_text())["automations"]["credit-trust-score-approve"]
+                self.assertIn(j["name"], reg["cron_names"])
+                self.assertTrue(reg["approved"] is True and reg["approved_by"] and reg["approval_ref"])
             if argv[2] == "decide":
                 # The one writing subcommand: only as the registered, captain-approved
                 # credit-trust-decide automation (policies/credit-approval-automation.json).

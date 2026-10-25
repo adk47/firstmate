@@ -107,6 +107,20 @@ differently:
   (`asserted_direction`, `asserted_same_person`, sanitized `customer_note`). These are
   the customer's words, not facts.
 
+`create_ticket` adds a normalized `details.merge_intake` record for the merge executor
+(both profile ids, who owns each side as far as the `dedupe_check` you ran in this
+conversation proves it, and the customer's own claim from `merge_judgment_inputs`) and a
+`merge-kind:profile-merge` tag. You do not write `merge_intake` yourself: anything you put
+there is replaced. Ownership comes only from `dedupe_check`'s own result for the same
+main + duplicate profiles in this conversation (kept for 2 hours), never from the
+`dedupe_verdict` you pass; without that result every side is recorded as "unknown" and the
+executor has to re-verify ownership before it can act. Still pass `dedupe_verdict` and
+`merge_judgment_inputs` for the team.
+
+A second merge request in the same conversation that keeps a DIFFERENT main profile than
+an open one it overlaps is filed separately and both are tagged `merge-keep-conflict`
+(see action-request, "Merge kinds"). A merge ticket tagged `merge-keep-conflict`, or whose OPEN sibling (named by a `merge-keep-conflict-with:<id>` tag) still is, is held: neither ticket of the pair is worked or messaged (by the executor or any sweep). A human reconciles the two with the customer, closes the ticket they reject and removes `merge-keep-conflict` from the one they keep; a closed sibling never holds. On `keep_conflict_unflagged` the request could not be held for review: do not re-file; hand off to a human, no alert or timing claims.
+
 Include this literal two-tier banner so Operations trusts each block correctly:
 
 > **Two-tier evidence.** `dedupe_verdict` = **server-verified facts** (admin GET +

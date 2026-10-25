@@ -23,6 +23,73 @@
 # exactly that reason.
 set -euo pipefail
 
+# --- Claim-verify pace gate (2026-10-11) -------------------------------------
+# A profile claim verify (POST .../claiming/<id>/verify) makes the claimant the
+# verified owner of that profile. Forensics 2026-10-11: since 09-01, 2,424 claim
+# verifies went through muso-cli at a 0.44 s median gap. That is a script loop,
+# not a human reading each claim, and it is how impostor claims (e.g. the
+# stillfloo profile, approved 3m55s after filing on an Instagram link) get
+# through. muso-cli treats a claim verify as a plain write, and this hook cannot
+# see its approval flags, so the hook enforces PACE instead: at most one claim
+# verify per CLAIM_VERIFY_MIN_INTERVAL seconds, host-wide, across every muso
+# caller. A human reviewing claims one by one never hits it; a loop always does.
+# Hardcoded on purpose (no env knob), like the rest of this hook: the caller
+# controls its env. The state file is shared with muso-admin-api.sh's gate.
+CLAIM_VERIFY_MIN_INTERVAL=20
+CLAIM_VERIFY_LAST="/var/lib/hydra/claim-verify.last"
+
+claim_verify_pace_gate() {
+  local method="$1" path="${2%%\?*}"
+  [ "$method" = "POST" ] || return 0
+  [[ "$path" =~ (^|/)claiming/[^/]+/verify/?$ ]] || return 0
+  local dir now last
+  dir="$(dirname "$CLAIM_VERIFY_LAST")"
+  if ! mkdir -p "$dir" 2>/dev/null || ! { exec 7>>"$CLAIM_VERIFY_LAST.lock"; } 2>/dev/null; then
+    echo "REFUSED (muso-prewrite-hook): cannot open the claim-verify pace state under $dir; refusing the claim verify (fail closed)." >&2
+    return 1
+  fi
+  # The lock is what makes the gate host-wide: without it two concurrent
+  # verifies can read the same old timestamp and both pass. No flock, no verify.
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "REFUSED (muso-prewrite-hook): flock is unavailable, so the claim-verify pace gate cannot serialize callers; refusing the claim verify (fail closed)." >&2
+    return 1
+  fi
+  if ! flock -w 5 7; then
+    echo "REFUSED (muso-prewrite-hook): claim-verify pace lock busy; refusing the claim verify." >&2
+    return 1
+  fi
+  now="$(date +%s)"
+  # Absent file = first use. An existing stamp that is empty, truncated or unreadable
+  # must not read as "long ago": refuse until a root operator clears it.
+  last=0
+  if [ -e "$CLAIM_VERIFY_LAST" ]; then
+    if ! last="$(cat "$CLAIM_VERIFY_LAST" 2>/dev/null)" || [[ ! "$last" =~ ^(0|[1-9][0-9]{0,14})$ ]]; then
+      echo "REFUSED (muso-prewrite-hook): the claim-verify timestamp in $CLAIM_VERIFY_LAST is unreadable or malformed; refusing the claim verify (fail closed). Clear $CLAIM_VERIFY_LAST as root." >&2
+      return 1
+    fi
+  fi
+  # A stamp in the future (clock stepped back) is not "long ago": resetting it to 0
+  # would let the next verify through inside the budget. Refuse until it elapses.
+  if (( last > now )); then
+    echo "REFUSED (muso-prewrite-hook): the claim-verify timestamp in $CLAIM_VERIFY_LAST is $((last - now))s in the future (host clock may have stepped backward); refusing the claim verify (fail closed). Check the host clock, then clear $CLAIM_VERIFY_LAST as root." >&2
+    return 1
+  fi
+  if (( now - last < CLAIM_VERIFY_MIN_INTERVAL )); then
+    echo "REFUSED (muso-prewrite-hook): claim verifies are limited to one per ${CLAIM_VERIFY_MIN_INTERVAL}s host-wide (last one $((now - last))s ago). Verifying a claim makes someone the owner of a profile: review each claim individually (identity evidence, competing claims, popularity) before verifying it. Do not retry in a loop." >&2
+    return 1
+  fi
+  # The stamp IS the gate for the next caller: if it cannot be written, refuse.
+  if ! { printf '%s\n' "$now" > "$CLAIM_VERIFY_LAST"; } 2>/dev/null; then
+    echo "REFUSED (muso-prewrite-hook): cannot record the claim-verify timestamp at $CLAIM_VERIFY_LAST; refusing the claim verify (fail closed)." >&2
+    return 1
+  fi
+  return 0
+}
+
+if ! claim_verify_pace_gate "$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')" "${2:-}"; then
+  exit 3
+fi
+
 # Slack sends are the alerting path, not admin-API writes: the codex-health
 # gate below guards state-changing core/stripe writes, and blocking Slack
 # during a codex outage would suppress the very page about that outage

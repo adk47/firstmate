@@ -1,0 +1,77 @@
+name: credit-approval-guard
+
+# Guardrail on the credit-approval system (captain, 2026-10-11). Nobody is
+# blocked from changing it; every change must be visible and captain-reviewed.
+# A PR touching any path in the `# >>> credit-approval` block of
+# CODEOWNERS (repo root) is labelled `credit-approval-change` and this check FAILS
+# until (a) the PR body has a `## Credit approval impact` section (what changes
+# + a before/after measurement on prod data) and (b) @adk47 has APPROVED the
+# current head commit. Logic + rationale: .github/credit-approval/guard.py.
+# Make the `credit-approval-guard` check REQUIRED in branch protection, or it
+# only warns.
+#
+# Trust model: the guard script always runs from the BASE BRANCH TIP, never from
+# the PR, so a PR cannot neuter it by editing guard.py. `pull_request_target`
+# also takes this workflow file from the base branch. The PR's files are only
+# read as data (git diff / git show) - never executed - which is what makes
+# pull_request_target safe here. `pull_request_review` (re-runs the check when
+# the captain approves or a review is dismissed) takes the workflow file from
+# the PR; editing this file is itself a credit-approval change, so the
+# base-side run still fails it.
+#
+# `edited` re-runs the check after the PR body is fixed.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: credit-approval-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  credit-approval-guard:
+    # Same self-hosted hydra runner as pr-validate.yml:
+    # git + bash + python3 (stdlib only), no Docker.
+    runs-on: [self-hosted, hydra]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Load the guard from the base branch tip
+        # The CURRENT tip of the base branch, not the event's base.sha: base.sha
+        # is the tip when the PR was last synced, so on a PR opened before the
+        # guard landed it has no guard.py and the old fallback would run the
+        # PR's own copy (on pull_request_review the checkout is the PR's merge
+        # ref). The tip is the live, merged policy.
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet origin "refs/heads/$BASE_REF"
+          tip="$(git rev-parse FETCH_HEAD)"
+          if git show "$tip:.github/credit-approval/guard.py" > "$RUNNER_TEMP/guard.py" 2>/dev/null; then
+            echo "guard.py loaded from $BASE_REF tip $tip"
+          else
+            # Bootstrap only: the base branch has no guard yet (the PR that introduces it).
+            echo "::warning::$BASE_REF has no guard.py yet; using the checked-out copy"
+            cp .github/credit-approval/guard.py "$RUNNER_TEMP/guard.py"
+          fi
+
+      - name: Self-test the guard
+        run: python3 "$RUNNER_TEMP/guard.py" --self-test
+
+      - name: Check credit-approval paths, impact section and captain approval
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CAPTAIN_LOGIN: adk47
+        run: python3 "$RUNNER_TEMP/guard.py" --repo "${{ github.repository }}" --pr "${{ github.event.pull_request.number }}"

@@ -962,3 +962,111 @@ describe("RealIntercomClient.replyToConversation retry wiring", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("SanitizingIntercomClient help-centre link gate", () => {
+  const GOOD = "https://help.muso.ai/en/articles/1111111-claim";
+  const manifest = { articles: { "1111111": { slug: "claim", title: "Claim", url: GOOD } } };
+  const send = async (body: string, loader: () => any, errors: string[] = []) => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner, { error: (m) => errors.push(m) }, loader);
+    await client.replyToConversation({ conversationId: "c1", adminId: "a1", body });
+    return inner.calls.replyToConversation[0].body;
+  };
+
+  it("delivers a manifest-valid citation unchanged", async () => {
+    const body = `Answer.\nMore detail here: ${GOOD}`;
+    expect(await send(body, () => manifest)).toBe(body);
+  });
+  it("does not log a valid citation as an error", async () => {
+    const errors: string[] = [];
+    await send(`Answer.\nMore detail here: ${GOOD}`, () => manifest, errors);
+    expect(errors).toEqual([]);
+  });
+  it.each([
+    ["unlisted citation only", "More detail here: https://help.muso.ai/en/articles/9-fake", () => manifest],
+    ["valid citation, manifest unavailable", `More detail here: ${GOOD}`, () => null],
+  ])("posts nothing when the gate leaves an empty reply: %s", async (_n, body, loader) => {
+    const inner = new MockIntercomClient();
+    const errors: string[] = [];
+    const client = new SanitizingIntercomClient(inner, { error: (m: string) => { errors.push(m); } }, loader as any);
+    const res = await client.replyToConversation({ conversationId: "c1", adminId: "a1", body });
+    expect(inner.calls.replyToConversation).toHaveLength(0);
+    expect(res.messageId).toBe("");
+    expect(res.dropped).toBe(true);
+    // Ops alert on the [intercom:ALERT] prefix (channel.ts); nothing else pages a dropped reply.
+    expect(errors.some((m) => m.startsWith("[intercom:ALERT] [intercom:empty-after-sanitize] conv=c1 posting nothing"))).toBe(true);
+  });
+  it.each([
+    ["unlisted citation only", "More detail here: https://help.muso.ai/en/articles/9-fake", () => manifest],
+    ["valid citation, manifest unavailable", `More detail here: ${GOOD}`, () => null],
+  ])("does not close when the gate empties a close note: %s", async (_n, body, loader) => {
+    const inner = new MockIntercomClient();
+    const errors: string[] = [];
+    const client = new SanitizingIntercomClient(inner, { error: (m: string) => { errors.push(m); } }, loader as any);
+    await client.closeConversation({ conversationId: "c1", adminId: "a1", body });
+    expect(inner.calls.closeConversation).toHaveLength(0);
+    expect(errors).toContain("[intercom:ALERT] [intercom:empty-after-sanitize] conv=c1 close suppressed — note emptied by help-link gate, conversation left open for a human");
+  });
+  it("leaves dropped undefined for a delivered reply", async () => {
+    const inner = new MockIntercomClient();
+    const client = new SanitizingIntercomClient(inner, { error: () => {} } as any, () => manifest as any);
+    const res = await client.replyToConversation({ conversationId: "c1", adminId: "a1", body: "Hello there." });
+    expect(inner.calls.replyToConversation).toHaveLength(1);
+    expect(res.dropped).toBeUndefined();
+  });
+  it("strips an invented link and logs internally only", async () => {
+    const errors: string[] = [];
+    const out = await send("Answer.\nMore detail here: https://help.muso.ai/en/articles/99-x", () => manifest, errors);
+    expect(out).toBe("Answer.");
+    expect(errors.join()).toContain("[intercom:help-link]");
+  });
+  it("strips an invented link written with an explicit :443 port", async () => {
+    const out = await send("Answer.\nMore detail here: https://help.muso.ai:443/en/articles/9999999-invented", () => manifest);
+    expect(out).toBe("Answer.");
+  });
+  it("strips an invented link whose anchor href carries a tab inside the path", async () => {
+    const out = await send('Answer.\n<a href="https://help.muso.ai/en/ar\tticles/9999999-invented">guide</a>', () => manifest);
+    expect(out).toBe("Answer.");
+  });
+  it("strips a line-split invented link that sits next to a valid citation", async () => {
+    const valid = `More detail here: ${GOOD}`;
+    const out = await send(`Answer.\n${valid}\n<a href="https://help.muso.ai/en/ar\narticles/9999999-invented">x</a>`, () => manifest);
+    expect(out).not.toContain("9999999");
+    expect(out).toContain(valid);
+  });
+  it.each([
+    ["scheme-less LF split", "See help.muso.ai/en/ar\nticles/9999999-invented for details"],
+    ["3-part LF split", "See https://help.muso.ai/en/\nar\nticles/9999999-invented ok"],
+    ["CRLF split", "See https://help.muso.ai/en/ar\r\nticles/9999999-invented"],
+    ["raw tab", "See https://help.muso.ai/en/art\ticles/9999999-invented"],
+    ["&NewLine; entity", '<a href="https://help.muso.ai/en/ar&NewLine;ticles/9999999-invented">x</a>'],
+    ["%09", "See https://help.muso.ai/en/ar%09ticles/9999999-invented"],
+    ["%0a", "See https://help.muso.ai/en/ar%0aticles/9999999-invented"],
+  ])("variant table through the client: %s never reaches the customer", async (_n, tail) => {
+    const out = await send(`Answer.\n${tail}`, () => manifest);
+    expect(out).not.toContain("9999999");
+    expect(out).toContain("Answer.");
+  });
+  it("strips an invented link written with a percent-encoded path", async () => {
+    const out = await send("Answer.\nMore detail here: https://help.muso.ai/en/%61rticles/9999999-invented", () => manifest);
+    expect(out).toBe("Answer.");
+  });
+  it("strips an invented link whose host is HTML-entity encoded in an anchor and logs it", async () => {
+    const errors: string[] = [];
+    const out = await send('Answer.\n<a href="https://help&#46;muso.ai/en/articles/9999999-invented">guide</a>', () => manifest, errors);
+    expect(out).not.toContain("9999999");
+    expect(out).toContain("Answer.");
+    expect(errors.join()).toContain("[intercom:help-link]");
+  });
+  it("fails closed when the manifest is unavailable, customer sees no trace", async () => {
+    const errors: string[] = [];
+    const out = await send(`Answer.\nMore detail here: ${GOOD}`, () => null, errors);
+    expect(out).toBe("Answer.");
+    expect(errors.join()).toContain("manifest=unavailable");
+  });
+  it("never loads the manifest for a reply with no article URL", async () => {
+    let loads = 0;
+    await send("Plain, see help.muso.ai.", () => { loads++; return null; });
+    expect(loads).toBe(0);
+  });
+});

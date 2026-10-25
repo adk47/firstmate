@@ -371,3 +371,43 @@ SDK
   [ "$status" -ne 0 ]
   [[ "$output" == *"store persisted <unparseable> jobs, expected 2"* ]]
 }
+
+# D2 (MUS-13135): the POSTSYNC heredoc is a CHILD bash under `set -euo
+# pipefail`. `fail` reads $REPORT_ONLY and `notify_slack` reads $SLACK_WEBHOOK;
+# if the parent's export line omits them, the child prints FATAL and then dies
+# on "REPORT_ONLY: unbound variable" BEFORE it can page Slack (2026-10-17).
+@test "POSTSYNC child: a fail() reaches notify_slack, not an unbound REPORT_ONLY" {
+  # Mirror the parent: shipped bytes of the vars, the functions and the export lines.
+  fn() { grep -E "^$1\(\) \{" "$DEPLOY_SH"; }
+  export_line=$(grep -E '^export HYDRA_ROOT TARGET' "$DEPLOY_SH")
+  [ -n "$export_line" ]
+  cat > "$TEST_TMPDIR/bin/curl" <<'STUB'
+#!/bin/bash
+echo "CURL_CALLED $*" >> "$TEST_TMPDIR/curl.log"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/curl"
+
+  parent="$TEST_TMPDIR/parent.sh"
+  {
+    echo 'HYDRA_ROOT=/x TARGET=all DEPLOY_PATH=/x HYDRA_LOCAL=/x REPORT_ONLY=0'
+    echo 'SLACK_WEBHOOK=https://hooks.invalid/x'
+    fn log; fn fail; fn notify_slack; fn needs_target
+    echo "$export_line"
+    echo 'export -f fail log notify_slack needs_target'
+    echo "bash <<'CHILD'"
+    echo 'set -euo pipefail'
+    echo 'fail "cron SQLite import: store persisted <unparseable> jobs, expected 40"'
+    echo 'CHILD'
+  } > "$parent"
+  # notify_slack is multi-line; the grep above only lifts its first line.
+  awk '/^notify_slack\(\) \{/{f=1} f{print} f&&/^}/{exit}' "$DEPLOY_SH" > "$TEST_TMPDIR/ns.sh"
+  sed -i.bak '/^notify_slack() {/d' "$parent"
+  sed -i.bak "/^needs_target/r $TEST_TMPDIR/ns.sh" "$parent"
+
+  run bash "$parent"
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FATAL: cron SQLite import"* ]]
+  [[ "$output" != *"unbound variable"* ]]
+  grep -q CURL_CALLED "$TEST_TMPDIR/curl.log"
+}

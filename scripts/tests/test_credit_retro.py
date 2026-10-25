@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -18,12 +19,28 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
+
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from credit_retro import notice, takeback, waves  # noqa: E402
-from credit_retro.api import ApiError, SessionApi, check_session_claims, header_value  # noqa: E402
+from credit_review import dsp_gate  # noqa: E402
+
+from credit_retro.api import (  # noqa: E402
+    ApiError,
+    SessionApi,
+    check_session_claims,
+    header_value,
+)
 from credit_retro.ledger import Ledger  # noqa: E402
+from credit_review import verify_notify  # noqa: E402
+
+# The replica is never read in tests: every test account's professional id is "test-pro" (the
+# same stub test_credit_verify_notify uses, so the two modules can share one process).
+verify_notify.IDENTITY_LOOKUP = lambda ids: {str(u): {"professional_id": "test-pro", "auth_id": ""} for u in ids}
+
 
 MANIFEST_DIR = Path(__file__).resolve().parents[1] / "credit_retro" / "manifests"
 CLI = Path(__file__).resolve().parents[1] / "credit-retro.py"
@@ -178,22 +195,37 @@ def write_manifest(tmp: Path, rows) -> str:
     return str(p)
 
 
+def affiliation_v1(users, held=None, age=timedelta(0)):
+    """An org-affiliation/v1 export (H-DevOps credit-trust-exports/org-affiliation)."""
+    return {"schema": "org-affiliation/v1",
+            "generated_at": (datetime.now(timezone.utc) - age).isoformat().replace("+00:00", "Z"),
+            "registry_version": "test", "sources": {}, "counts": {},
+            "users": {u: dict({"coverage": "full"}, **v) for u, v in users.items()}, "held": held or {}}
+
+
 def live_sources(tmp: Path, *, proof_entries=(), age=timedelta(0), stale_source=False, affiliation=None,
-                 tagged=(), affiliation_file=True):
+                 tagged=(), affiliation_file=True, sources=None, extra=None, notice_reader=None):
     """Write the live exclusion sources (credit-trust proof-on-file + org-affiliation, Caroline's
-    send ledger) and load them through the real loader."""
+    send ledger) and load them through the real loader. The proof file has the live export's
+    shape (firstmate 032): `core` carries NO stale key (its freshness is its generated_at),
+    `cs-intercom` and `cs-gmail` carry stale flags. The credit-trust board is never reached:
+    ``notice_reader`` stands in for it (default: unreachable)."""
     tmp.mkdir(parents=True, exist_ok=True)
     proof = tmp / "proof-on-file.json"
+    stamp = (datetime.now(timezone.utc) - age).isoformat().replace("+00:00", "Z")
     proof.write_text(json.dumps({
-        "generated_at": (datetime.now(timezone.utc) - age).isoformat().replace("+00:00", "Z"),
-        "sources": [{"name": "intercom", "stale": stale_source, "age_hours": 0.5},
-                    {"name": "verifications", "stale": False, "age_hours": 0.2}],
-        "entries": list(proof_entries)}))
+        "generated_at": stamp,
+        "sources": sources if sources is not None else [
+            {"name": "core", "generated_at": stamp, "count": 3, "detail": {"verifications": 3}},
+            {"name": "cs-intercom", "generated_at": stamp, "stale": stale_source, "count": 1},
+            {"name": "cs-gmail", "generated_at": stamp, "stale": False, "count": 0}],
+        "entries": list(proof_entries), "users": len({str(e["user_id"]) for e in proof_entries}),
+        **(extra or {})}))
     aff = tmp / "org-affiliation.json"
     if affiliation_file:
-        aff.write_text(json.dumps(affiliation if affiliation is not None else
-                                  {UID: {"verdict": "none", "evidence": []},
-                                   "161128": {"verdict": "none", "evidence": []}}))
+        aff.write_text(json.dumps(affiliation_v1(affiliation if affiliation is not None else
+                                                 {UID: {"verdict": "none", "evidence": []},
+                                                  "161128": {"verdict": "none", "evidence": []}})))
     db_path = tmp / "verify.sqlite3"
     db = sqlite3.connect(db_path)
     db.execute("CREATE TABLE IF NOT EXISTS verify_messages (campaign TEXT, kind TEXT, status TEXT, user_key TEXT, "
@@ -201,11 +233,29 @@ def live_sources(tmp: Path, *, proof_entries=(), age=timedelta(0), stale_source=
     db.executemany("INSERT INTO verify_messages VALUES (?,?,?,?,?,?)", tagged)
     db.commit()
     db.close()
-    return takeback.load_exclusions(proof_on_file=str(proof), org_affiliation=str(aff), verify_db=str(db_path))
+    return takeback.load_exclusions(proof_on_file=str(proof), org_affiliation=str(aff), verify_db=str(db_path),
+                                    notice_reader=notice_reader or _board_unreachable)
+
+
+def _board_unreachable():
+    raise takeback.board.BoardError("board unreachable (tests never reach it)")
 
 
 _LIVE_DIR = tempfile.TemporaryDirectory()
 OPEN = live_sources(Path(_LIVE_DIR.name))
+
+
+class ExecutorMechanicsTestCase(unittest.TestCase):
+    """Exercises the take-back executor's mechanics (gates, notices, reconcile, revert) BEHIND the
+    captain's live Spotify+Tidal rule (2026-10-23, firstmate 104/105/106), with the gate wired for
+    this class only. The rule itself (apply refuses while core's removal gate is not wired) is
+    LiveDspGateRuleTests."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.addClassCleanup(setattr, dsp_gate, "WIRED", dsp_gate.WIRED)
+        dsp_gate.WIRED = True
 
 
 class GateTests(unittest.TestCase):
@@ -282,7 +332,7 @@ class GateTests(unittest.TestCase):
                 takeback.load_manifest(path)
 
 
-class FlowTests(unittest.TestCase):
+class FlowTests(ExecutorMechanicsTestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
@@ -365,6 +415,19 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(rep["counts"], {"withheld_sets": 1, "withheld:pair_not_in_plan": 1})
         self.assertEqual(rep["withheld"], [{"row_id": f"pair:{PID}/{TID}/mixing", "user_id": None,
                                             "reason": "pair_not_in_plan", "approval": "credit-removal-approval ap-1"}])
+
+    def test_cli_apply_exits_3_when_the_send_gate_refuses_the_notice(self):
+        api = FakeApi()
+        plan_id, _ = takeback.plan(api, self.ledger, self.rows, manifest=self.manifest, excl=OPEN, argv=[], log=self.log)
+        api.approve()
+        api.sender = FakeSender(verdict="refused")
+        rc, err = cli_apply(api, self.dir / "state", self.manifest, plan_id)
+        self.assertEqual((rc, api.writes, api.sender.sent), (3, [], []))
+        self.assertIn("WITHHELD", err)
+        apply_id = self.ledger.child_runs(plan_id, "apply")[0]["run_id"]
+        rep = takeback.report(self.ledger, apply_id)
+        self.assertEqual([e["row_id"] for e in rep["withheld"]], [f"{RID}:Mixing"])
+        self.assertTrue(rep["withheld"][0]["reason"].startswith("notice_refused"))
 
     def test_last_credit_on_track_is_recorded(self):
         api = FakeApi()
@@ -1032,7 +1095,7 @@ class AskSelectionTests(unittest.TestCase):
         self.assertEqual(index["waves"]["W-01"]["not_sendable"], 1)
 
 
-class ApprovalTests(unittest.TestCase):
+class ApprovalTests(ExecutorMechanicsTestCase):
     """Core-backend #10597: stage once, Nick/Jan approve once, apply only what was approved."""
 
     def setUp(self):
@@ -1164,7 +1227,7 @@ class ApprovalTests(unittest.TestCase):
             w.write("DELETE", f"/admin/track/{TID}/profile/{PID}/credits", {})
 
 
-class ExecuteRaceTests(unittest.TestCase):
+class ExecuteRaceTests(ExecutorMechanicsTestCase):
     """A set changes on the board while apply runs, or is executed outside the tool."""
 
     def setUp(self):
@@ -1297,7 +1360,7 @@ class ExecuteRaceTests(unittest.TestCase):
         self.assertEqual(takeback.report(self.ledger, apply_id)["removed"], 1)
 
 
-class EvidenceAndNoticeTests(unittest.TestCase):
+class EvidenceAndNoticeTests(ExecutorMechanicsTestCase):
     """Firstmate 012: evidence for the row's own role; every take-back tells its user."""
 
     def setUp(self):
@@ -1363,13 +1426,76 @@ class EvidenceAndNoticeTests(unittest.TestCase):
 
     def test_no_removal_when_the_notice_cannot_be_sent(self):
         api, manifest, rows, plan_id = self.plan_for([row()])
+        # the gate cannot run at all (missing, usage/environment, hung): nothing is removed for anyone
         with self.assertRaises(SystemExit):
             takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN, argv=[], pause_s=0,
-                           approvals=api.approve(), sender=FakeSender(verdict="refused"), log=self.out.append)
+                           approvals=api.approve(), sender=FakeSender(verdict="unavailable"), log=self.out.append)
         with self.assertRaises(SystemExit):
             takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN, argv=[], pause_s=0,
                            approvals=api.approve(), sender=None, log=self.out.append)
         self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
+
+    def test_a_refused_notice_withholds_only_that_users_set(self):
+        # firstmate 041 (option A): the gate refuses user A's notice (its leak check on a title with
+        # "#1234"); only A's set is withheld (notice_refused, exit 3), user B's set goes with its notice
+        pid_b, uid_b, rid_b = "55555555-5555-4555-8555-555555555555", "161128", "r2"
+        rows_in = [row(track_title="Song #1234"), row(row_id=f"{rid_b}:Mixing", request_id=rid_b, user_id=uid_b,
+                                                     profile_id=pid_b)]
+        manifest = write_manifest(self.dir, rows_in)
+        rows = takeback.load_manifest(manifest)
+        api = FakeApi()
+        api.raws.append(raw("muso", "Bea B", "mixing", pid_b))
+        req_b = dict(api.request, id=rid_b, userId=int(uid_b), profileId=pid_b,
+                     user={"id": int(uid_b), "email": "b@example.com", "fullName": "Bea B"})
+        sets: dict[str, dict] = {}
+        get, write = api.get, api.write
+
+        def multi_get(path, params=None):
+            if path == "/admin/credit-requests":
+                mine = [r for r in (api.request, req_b) if r["profileId"] in str((params or {}).get("profilesIds"))]
+                return {"items": mine if (params or {}).get("page", 1) == 1 else []}
+            if path.startswith("/admin/credit-removals/"):
+                return sets[path.rsplit("/", 1)[-1]]
+            return get(path, params)
+
+        def multi_write(method, path, body, headers=None):
+            if path == "/admin/credit-removals":
+                write(method, path, body, headers)
+                sid = f"ap-{len(sets) + 1}"
+                sets[sid] = dict(api.approval, id=sid, status="approved")
+                for p in sets[sid]["pairs"]:
+                    p["decision"] = "approved"
+                return 201, {"result": "ok", "data": {"id": sid}}
+            if path.endswith("/execute"):
+                api.writes.append((method, path, body, headers))
+                api.approval = sets[path.split("/")[-2]]
+                return 200, {"result": "ok", "data": api.execute()}
+            return write(method, path, body, headers)
+        api.get, api.write = multi_get, multi_write
+
+        class OneRefused(FakeSender):
+            def validate(self, payload):
+                self.validated.append(payload)
+                if payload["user"]["email"] == "rk@example.com":
+                    return "refused", "REFUSED: the rendered note contains an issue link, issue number or Slack mention"
+                return "valid", "VALID"
+        sender = OneRefused()
+        plan_id, counts = takeback.plan(api, self.ledger, rows, manifest=manifest, excl=OPEN, argv=[], log=self.out.append)
+        self.assertEqual(counts["would_remove"], 2)
+        _, staged = takeback.stage(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, argv=[],
+                                   log=self.out.append)
+        apply_id, counts = takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN,
+                                          argv=[], pause_s=0, approvals=staged["approval_ids"], sender=sender,
+                                          log=self.out.append)
+        self.assertEqual(counts, {"withheld:notice_refused": 1, "withheld_sets": 1, "removed": 1, "notice_sent": 1})
+        executed = [w[1] for w in api.writes if w[1].endswith("/execute")]
+        self.assertEqual(len(executed), 1)
+        self.assertEqual([p["user"]["email"] for p in sender.sent], ["b@example.com"])
+        self.assertTrue(any(r["credit"] == "mixing" and r["profile"]["id"] == PID for r in api.raws))  # A keeps it
+        self.assertFalse(any(r["credit"] == "mixing" and r["profile"]["id"] == pid_b for r in api.raws))
+        withheld = takeback.report(self.ledger, apply_id)["withheld"]
+        self.assertEqual([(w["user_id"], w["reason"].split(":")[0]) for w in withheld], [(UID, "notice_refused")])
+        self.assertIn("issue link", withheld[0]["reason"])
 
     def test_notice_sent_after_removal_with_who_why_and_how_to_dispute(self):
         api, manifest, rows, plan_id = self.plan_for([row()])
@@ -1379,7 +1505,9 @@ class EvidenceAndNoticeTests(unittest.TestCase):
         self.assertEqual(counts, {"removed": 1, "notice_sent": 1})
         payload = api.sender.sent[0]
         self.assertEqual(payload["campaign"], "takeback-notice")
-        self.assertEqual(payload["user"], {"email": "rk@example.com", "id": UID, "first_name": "Rishi"})
+        self.assertEqual(payload["user"], {"email": "rk@example.com", "id": UID, "first_name": "Rishi",
+                                           "professional_id": "test-pro", "auth_id": ""})
+        self.assertEqual(api.sender.validated[0]["user"]["professional_id"], "test-pro")
         c = payload["credits"][0]
         self.assertEqual((c["role"], c["other_names"], c["evidence_url"]), ("Mixing", ["Eli WTF"], "https://www.qobuz.com/x"))
         subject, body = notice.render("Rishi", payload["credits"])
@@ -1392,6 +1520,29 @@ class EvidenceAndNoticeTests(unittest.TestCase):
         self.assertEqual([e["outcome"] for e in notified], ["sent"])
         self.assertEqual(json.loads(notified[0]["after_json"])["approved_by"], "U0TESTAPPR")
         self.assertNotIn("rk@example.com", json.dumps([dict(e) for e in self.ledger.events(apply_id)]))
+
+    def test_a_user_without_a_professional_id_is_withheld_and_an_unreadable_replica_removes_nothing(self):
+        saved = verify_notify.IDENTITY_LOOKUP
+        try:
+            verify_notify.IDENTITY_LOOKUP = lambda ids: {str(u): {"professional_id": "", "auth_id": ""} for u in ids}
+            api, manifest, rows, plan_id = self.plan_for([row()])
+            apply_id, counts = takeback.apply(api, self.ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN,
+                                              argv=[], pause_s=0, approvals=api.approve(), sender=api.sender,
+                                              log=self.out.append)
+            self.assertNotIn("removed", counts)
+            self.assertEqual((api.sender.validated, api.sender.sent), ([], []))
+            self.assertFalse(any(w[1].endswith("/execute") for w in api.writes))
+            self.assertEqual([w["reason"] for w in takeback.report(self.ledger, apply_id)["withheld"]],
+                             ["no_professional_id"])
+
+            def down(ids):
+                raise RuntimeError("trino down")
+            verify_notify.IDENTITY_LOOKUP = down
+            with self.assertRaises(SystemExit) as cm:
+                takeback.notice_preflight(api, api.sender, rows, log=self.out.append)
+            self.assertIn("professional ids cannot be read", str(cm.exception))
+        finally:
+            verify_notify.IDENTITY_LOOKUP = saved
 
     def test_deferred_notice_is_retried_once_by_notify(self):
         api, manifest, rows, plan_id = self.plan_for([row()])
@@ -1472,7 +1623,8 @@ class EvidenceAndNoticeTests(unittest.TestCase):
             env = dict(os.environ)
             try:
                 for code, verdict, outcome in (("0", "valid", "sent"), ("3", "deferred", "deferred"),
-                                               ("1", "refused", "failed"), ("sleep", "refused", "failed")):
+                                               ("1", "refused", "failed"), ("2", "unavailable", "failed"),
+                                               ("4", "unavailable", "failed"), ("sleep", "unavailable", "failed")):
                     os.environ["CODE"] = code
                     self.assertEqual(sender.validate(payload)[0], verdict, code)
                     self.assertEqual(sender.send(payload)[0], outcome, code)
@@ -1499,6 +1651,28 @@ class EvidenceAndNoticeTests(unittest.TestCase):
         self.assertIn("If the document checks out, we will put the credit back. Your other credits are not "
                       "affected.", body)
         self.assertNotIn("\u2014", body)
+
+    def test_corroborating_article_is_never_called_a_credits_page(self):
+        # Fable v3 (8999a707): the removal rests on the Tidal credit; the press article only corroborates
+        art = "https://stereobeso.com/2026/08/26/santiago-cruz-cardellino-4-vasos-1-florero/"
+        tidal = "https://listen.tidal.com/track/527926451"
+        ev = {"verified": "trusted_dsp_only", "url": tidal, "names": ["Nacho Sotelo"], "sources": ["tidal"],
+              "note": "Tidal credits Nacho Sotelo (mixing engineer)", "corroboration": art}
+        r = row(evidence_url=tidal, evidence=ev, track_title="4 Vasos y 1 Florero", artist="Santiago Cruz")
+        self.assertTrue(takeback.evidence_verified(r))
+        line = takeback.evidence_line(r)
+        self.assertIn("(Tidal credits, evidence_class=dsp_track_level, corroboration=" + art + ") " + tidal, line)
+        _, body = notice.render("Rishi", [notice.notice_credit(r)])
+        self.assertIn(f"name Nacho Sotelo for Mixing (Tidal credits: {tidal}; also named in {art})", body)
+        _, body = notice.render("Rishi", [notice.notice_credit(r), notice.notice_credit(row())])
+        self.assertIn(f'- Mixing on "4 Vasos y 1 Florero" by Santiago Cruz: Nacho Sotelo (Tidal credits: {tidal}; '
+                      f"also named in {art})", body)
+        self.assertNotIn("public credits page: " + art, body)
+        # the gate's link rule, applied at plan time: a bad link is evidence_unverified before approval
+        # instead of getting the user's set withheld as notice_refused at apply (firstmate 041)
+        for bad in ("http://stereobeso.com/x", tidal, 7, "https://app.muso.ai/x", "https://APP.Muso.AI/x", "https://x.slack.com/a",
+                    "https://stereobeso.com/" + "x" * 300, "https://stereobeso.com/a b"):
+            self.assertFalse(takeback.evidence_verified(dict(r, evidence=dict(ev, corroboration=bad))), bad)
 
     def test_two_requests_for_the_same_credit_are_one_line(self):
         # Fable: user 161128 has two request ids for "Autentica" by Manuel Medrano (Mixing)
@@ -1571,7 +1745,406 @@ class EvidenceAndNoticeTests(unittest.TestCase):
         self.assertIn("About 2 of your credits", out[0]["subject"])
 
 
-class LiveExclusionTests(unittest.TestCase):
+class PublishedRosterTests(ExecutorMechanicsTestCase):
+    """Captain 2026-10-22 20:40Z (Big Boy, firstmate 047/048/051): a multi-person role is taken back
+    only for the allowlisted profile AND user, only when a live trusted source publishes that role
+    family's holders without him and no trusted source names him anywhere on the track's engineering
+    team; never on an unverifiable role. A document on file blocks until a named human answered
+    `no` on the credit-trust board notice the row points to."""
+
+    BIGBOY = ("576e3c2d-752e-4df3-bada-dc78bccab971", "1387162")
+    ENTRY = {"user_id": int(UID), "request_id": None, "kind": "human_approved_after_doc", "source": "intercom",
+             "ref": "255336"}
+    POINTER = {"notice_id": "ntc-1", "ask_id": "proof"}
+    DECISION = "captain 2026-10-22 20:40Z 'big boy go' (firstmate 047/048)"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self._orig = takeback.ROSTER_CLAIMANTS
+        takeback.ROSTER_CLAIMANTS = frozenset({(PID, UID)})
+
+    def tearDown(self):
+        takeback.ROSTER_CLAIMANTS = self._orig
+        self.tmp.cleanup()
+
+    def roster_row(self, **over):
+        ev = {"verified": "published_roster", "url": "https://listen.tidal.com/track/9", "names": ["Al Geno"],
+              "sources": ["tidal"], "note": "Tidal credits Al Geno (Engineer)",
+              "corroboration": "https://www.qobuz.com/us-en/album/x"}
+        return row(**{"row_id": f"{RID}:Engineer", "role": "Engineer", "evidence_url": ev["url"], "evidence": ev,
+                      "decision": self.DECISION, **over})
+
+    def api(self):
+        api = FakeApi()
+        api.request["credits"] = ["Mixing", "Engineer"]
+        api.raws = [raw("tidal", "Al Geno", "engineer", "td9"), raw("muso", "Rishi Krishnan", "engineer", PID),
+                    raw("muso", "Rishi Krishnan", "mixing", PID)]
+        return api
+
+    @staticmethod
+    def notice(answers, body=f"Proof on file for user 197122: intercom:255336:human_approved_after_doc. "
+                             f"Does it cover any of these credits? `{RID}:Engineer`"):
+        return {"id": "ntc-1", "title": "proof check", "body": body, "from": "credit-retro", "closed": None,
+                "expired": False, "open": True, "answers": {"proof": answers}}
+
+    def board(self, *notices, entries=None, name="p"):
+        """Live sources whose board serves ``notices``; records every read."""
+        self.reads = 0
+
+        def reader():
+            self.reads += 1
+            return list(notices)
+        return live_sources(self.dir / name, proof_entries=entries or [self.ENTRY], notice_reader=reader)
+
+    def held(self, api, r, excl, kind="human_approved_after_doc"):
+        res = takeback.gate(api, r, excl)
+        self.assertEqual(res.reason, f"proof_on_file:{kind}")
+        self.assertNotIn("proof_cleared", res.before)
+        return res
+
+    def test_roster_row_needs_the_allowlisted_profile_and_user(self):
+        r = self.roster_row()
+        self.assertTrue(takeback.evidence_verified(r))
+        manifest = write_manifest(self.dir, [r])
+        self.assertEqual(len(takeback.load_manifest(manifest)), 1)
+        for pair in ({("someone-else", UID)}, {(PID, "999")}):
+            takeback.ROSTER_CLAIMANTS = frozenset(pair)
+            self.assertFalse(takeback.evidence_verified(r), pair)
+            with self.assertRaises(ValueError):
+                takeback.load_manifest(manifest)
+        takeback.ROSTER_CLAIMANTS = frozenset({(PID, UID)})
+        # the allowlisted profile under another user's credit request is not a roster row
+        with self.assertRaises(ValueError):
+            takeback.load_manifest(write_manifest(self.dir, [self.roster_row(user_id="999")]))
+        # a one-person evidence class never opens a multi-person role
+        with self.assertRaises(ValueError):
+            takeback.load_manifest(write_manifest(self.dir, [row(row_id=f"{RID}:Engineer", role="Engineer")]))
+        # a remix is a one-person role, taken back like a mix
+        self.assertEqual(len(takeback.load_manifest(write_manifest(
+            self.dir, [row(row_id=f"{RID}:Remixer", role="Remixer")]))), 1)
+
+    def test_manifest_carries_only_a_board_pointer(self):
+        ok = write_manifest(self.dir, [self.roster_row(proof_check=self.POINTER)])
+        self.assertEqual(takeback.load_manifest(ok)[0]["proof_check"], self.POINTER)
+        self.assertEqual(len(takeback.load_manifest(write_manifest(
+            self.dir, [self.roster_row(proof_check={"notice_id": None, "ask_id": "proof"})]))), 1)
+        cleared = {"by": "jan@muso.ai", "refs": ["255336"], "at": "2026-10-23T10:00:00Z"}
+        for bad in ({"proof_cleared": cleared}, {"proof_check": {**self.POINTER, "by": "jan@muso.ai"}},
+                    {"proof_check": {"notice_id": "ntc-1"}}, {"proof_check": {"notice_id": "", "ask_id": "proof"}},
+                    {"proof_check": "ntc-1"}, {"proof_check": {**self.POINTER, "ask_id": "veto"}},
+                    {"decision": ""}):
+            with self.assertRaises(ValueError, msg=bad):
+                takeback.load_manifest(write_manifest(self.dir, [self.roster_row(**bad)]))
+
+    def test_only_the_proof_ask_clears(self):
+        """A notice may carry a veto ask too: Jan's "no, don't veto" never clears a document on file."""
+        api = self.api()
+        jan_no = {"choice": "no", "note": None, "by": "jan@muso.ai", "at": "2026-10-23T10:00:00Z"}
+        both = {**self.notice([]), "answers": {"proof": [], "veto": [jan_no]}}
+        res = self.held(api, self.roster_row(proof_check={**self.POINTER, "ask_id": "veto"}), self.board(both))
+        self.assertEqual(self.reads, 0)
+        res = self.held(api, self.roster_row(proof_check=self.POINTER), self.board(both, name="q"))
+        self.assertIn("unanswered", res.before["proof_not_cleared"])
+
+    def test_a_closed_expired_or_not_open_notice_clears_nothing(self):
+        api = self.api()
+        jan_no = [{"choice": "no", "note": None, "by": "jan@muso.ai", "at": "2026-10-23T10:00:00Z"}]
+        r = self.roster_row(proof_check=self.POINTER)
+        self.assertTrue(takeback.gate(api, r, self.board(self.notice(jan_no))).ok)
+        closed = {"at": "2026-10-23T12:00:00Z", "reason": "wrong body", "by": "operator"}
+        for name, state in {"closed": {"closed": closed, "open": False}, "expired": {"expired": True, "open": False},
+                            "not open": {"open": False}, "no state": {"open": None}}.items():
+            res = self.held(api, r, self.board({**self.notice(jan_no), **state}, name=name))
+            self.assertIn("closed, expired or not open", res.before["proof_not_cleared"], name)
+
+    def test_stage_states_the_basis_of_each_row(self):
+        api = self.api()
+        api.raws += [raw("tidal", "Eli WTF", "mixer", "td1"), raw("spotify", "Eli WTF", "mixing engineer", "sp1")]
+        ledger = Ledger(self.dir / "state")
+        self.addCleanup(ledger.close)
+        for name, rows in {"mixed": [row(), self.roster_row()], "roster": [self.roster_row()]}.items():
+            manifest = str(self.dir / f"takeback-{name}.jsonl")
+            Path(manifest).write_text("".join(json.dumps(r) + "\n" for r in rows))
+            rows = takeback.load_manifest(manifest)
+            plan_id, _ = takeback.plan(api, ledger, rows, manifest=manifest, excl=OPEN, argv=[], log=lambda *_: None)
+            api.writes.clear()
+            stage_id, out = takeback.stage(api, ledger, rows, manifest=manifest, plan_run=plan_id, argv=[],
+                                           log=lambda *_: None)
+            self.assertEqual(out["counts"], {"staged": len(rows), "sets": 1}, name)
+            body = api.writes[0][2]
+            self.assertIn(f"manifest takeback-{name}.jsonl sha256 ", body["sourceRef"])
+            self.assertIn(takeback.ROSTER_BASIS, body["reason"])
+            refs = {e["row_id"]: e["approval_ref"] for e in ledger.events(stage_id, "stage")}
+            self.assertTrue(refs[f"{RID}:Engineer"].startswith(f"{self.DECISION} | "))
+            self.assertNotIn(takeback.DECISION_REF, refs[f"{RID}:Engineer"])
+            if name == "mixed":
+                self.assertTrue(body["reason"].startswith(takeback.ONE_PERSON_BASIS))
+                self.assertIn(takeback.DECISION_REF, refs[f"{RID}:Mixing"])
+            else:
+                self.assertTrue(body["reason"].startswith(takeback.ROSTER_BASIS))
+                self.assertNotIn(takeback.DECISION_REF, body["reason"])
+
+    def test_others_only_passes_for_a_roster_row_and_unverifiable_never(self):
+        api = self.api()
+        res = takeback.gate(api, self.roster_row(), OPEN)
+        self.assertTrue(res.ok, res.reason)
+        self.assertEqual(takeback.evidence_line(self.roster_row()).split(") ")[0].split("(")[1],
+                         "Tidal credits, evidence_class=published_roster, corroboration=https://www.qobuz.com/us-en/album/x")
+        # nobody published for the role: unverifiable, never removed
+        api.raws = [x for x in api.raws if x["profile"]["source"] == "muso"]
+        self.assertEqual(takeback.gate(api, self.roster_row(), OPEN).reason, "not_contradicted_live:UNVERIFIABLE")
+        # the trusted source credits the claimant too: confirmed, kept
+        api = self.api()
+        api.raws.append(raw("tidal", "Rishi Krishnan", "engineer", "td10"))
+        self.assertEqual(takeback.gate(api, self.roster_row(), OPEN).reason, "not_contradicted_live:CONFIRMED")
+        # the cited holder vanished from the live roster
+        api = self.api()
+        api.raws[0] = raw("tidal", "Somebody New", "engineer", "td9")
+        self.assertEqual(takeback.gate(api, self.roster_row(), OPEN).reason, "evidence_holder_changed")
+
+    def test_claimant_anywhere_on_the_engineering_team_is_refused(self):
+        # Tidal credits him as Mixing Engineer: his Engineer row stays, though no one names him an Engineer
+        api = self.api()
+        api.raws.append(raw("tidal", "Rishi Krishnan", "Mixing Engineer", "td11"))
+        res = takeback.gate(api, self.roster_row(), OPEN)
+        self.assertEqual(res.reason, "claimant_on_engineering_team")
+        self.assertEqual(res.before["claimant_on_engineering_team"],
+                         [{"source": "tidal", "id": "td11", "name": "Rishi Krishnan", "role": "Mixing Engineer"}])
+        # matched by his linked raw profile under another name, as an assistant
+        api = self.api()
+        api.profile = {"name": "Rishi Krishnan", "rawProfiles": [{"source": "spotify", "id": "sp-rk"}]}
+        api.raws.append(raw("spotify", "R. K.", "Assistant Recording Engineer", "sp-rk"))
+        self.assertEqual(takeback.gate(api, self.roster_row(), OPEN).reason, "claimant_on_engineering_team")
+        # a trusted Remixer credit still names him on the team
+        api = self.api()
+        api.raws.append(raw("spotify", "Rishi Krishnan", "Remixer", "sp-rm"))
+        res = takeback.gate(api, self.roster_row(), OPEN)
+        self.assertEqual(res.reason, "claimant_on_engineering_team")
+        self.assertEqual([h["role"] for h in res.before["claimant_on_engineering_team"]], ["Remixer"])
+        # a non-engineering credit (he wrote the song) or an untrusted source does not refuse the row
+        api = self.api()
+        api.raws += [raw("tidal", "Rishi Krishnan", "Composer", "td12"), raw("discogs", "Rishi Krishnan", "Mixer", "dg")]
+        self.assertTrue(takeback.gate(api, self.roster_row(), OPEN).ok)
+
+    def test_engineering_team_check_covers_the_pairs_one_person_rows(self):
+        """Main Attraction (firstmate 055): Chris Godbey still holds Mixing, but Tidal now credits him as
+        Recording or Mastering Engineer on the track, so his Mixing row is held, not removed."""
+        ev = {"verified": "trusted_dsp_only", "url": "https://listen.tidal.com/track/1", "names": ["Eli WTF"],
+              "sources": ["tidal"], "note": "Tidal credits Eli WTF (Mixing)"}
+        mixing = row(evidence_url=ev["url"], evidence=ev)
+        self.assertTrue(takeback.gate(FakeApi(), mixing, OPEN).ok)
+        for role in ("Recording Engineer", "Mastering Engineer"):
+            api = FakeApi()
+            api.raws.append(raw("tidal", "Rishi Krishnan", role, "td20"))
+            res = takeback.gate(api, mixing, OPEN)
+            self.assertEqual(res.reason, "claimant_on_engineering_team", role)
+            self.assertEqual([h["role"] for h in res.before["claimant_on_engineering_team"]], [role])
+            # a row outside the allowlisted pair keeps the one-person rule alone
+            takeback.ROSTER_CLAIMANTS = frozenset({("someone-else", UID)})
+            self.assertTrue(takeback.gate(api, mixing, OPEN).ok, role)
+            takeback.ROSTER_CLAIMANTS = frozenset({(PID, UID)})
+
+    def test_proof_on_file_clears_only_on_jans_no_on_the_board(self):
+        api = self.api()
+        jan_no = {"choice": "no", "note": None, "by": "jan@muso.ai", "at": "2026-10-23T10:00:00Z"}
+        r = self.roster_row(proof_check=self.POINTER)
+        excl = self.board(self.notice([jan_no]))
+        res = takeback.gate(api, r, excl)
+        self.assertTrue(res.ok, res.reason)
+        self.assertEqual(res.before["proof_cleared"],
+                         {"notice_id": "ntc-1", "ask_id": "proof", "by": "jan@muso.ai", "at": "2026-10-23T10:00:00Z",
+                          "choice": "no", "refs": [["intercom", "255336", "human_approved_after_doc"]]})
+        # no pointer, or a pointer to a notice not posted yet: held, the board is not even read
+        self.held(api, self.roster_row(), excl)
+        self.held(api, self.roster_row(proof_check={"notice_id": None, "ask_id": "proof"}), excl)
+        self.assertEqual(self.reads, 1)
+        cases = {
+            "yes": [{**jan_no, "choice": "yes"}],
+            "unanswered": [],
+            "other email": [{**jan_no, "by": "nick@muso.ai"}],
+            "the agent": [{**jan_no, "by": "credit-retro-exec"}],
+            "yes after no": [jan_no, {**jan_no, "choice": "yes", "at": "2026-10-23T11:00:00Z"}],
+        }
+        for label, answers in cases.items():
+            res = self.held(api, r, self.board(self.notice(answers), name=label))
+            self.assertIn("proof_not_cleared", res.before, label)
+        # the notice does not quote the entry (only the ref, or another one), or is not on the board
+        for label, notices in {"bare ref": [self.notice([jan_no], body=f"Does Intercom 255336 cover `{RID}:Engineer`?")],
+                               "other ref": [self.notice([jan_no], body=f"`{RID}:Engineer` intercom:255337:human_approved_after_doc")],
+                               "missing": [{**self.notice([jan_no]), "id": "ntc-2"}]}.items():
+            self.held(api, r, self.board(*notices, name=label))
+        # board unreachable (or answering garbage): held, with the error recorded
+        res = self.held(api, r, live_sources(self.dir / "down", proof_entries=[self.ENTRY]))
+        self.assertIn("unreachable", res.before["proof_check_error"])
+        bad = live_sources(self.dir / "bad", proof_entries=[self.ENTRY], notice_reader=lambda: {"notices": "x"})
+        self.assertIn("proof_check_error", self.held(api, r, bad).before)
+
+    def test_a_changed_or_new_entry_blocks_again(self):
+        api = self.api()
+        jan_no = [{"choice": "no", "note": None, "by": "jan@muso.ai", "at": "2026-10-23T10:00:00Z"}]
+        r = self.roster_row(proof_check=self.POINTER)
+        self.assertTrue(takeback.gate(api, r, self.board(self.notice(jan_no))).ok)
+        # same conversation, the entry's kind changed
+        self.held(api, r, self.board(self.notice(jan_no), entries=[{**self.ENTRY, "kind": "approved_doc"}], name="k"),
+                  kind="approved_doc")
+        # same ref from another source
+        self.held(api, r, self.board(self.notice(jan_no), entries=[{**self.ENTRY, "source": "gmail"}], name="s"))
+        # a new document, user-wide or on this request
+        for name, extra in (("u", {**self.ENTRY, "ref": "300001"}), ("r", {**self.ENTRY, "request_id": RID, "ref": "300002"})):
+            self.held(api, r, self.board(self.notice(jan_no), entries=[self.ENTRY, extra], name=name),
+                      kind="human_approved_after_doc")
+
+    def test_clearance_is_only_for_named_rows_of_the_allowlisted_pair(self):
+        jan_no = [{"choice": "no", "note": None, "by": "jan@muso.ai", "at": "2026-10-23T10:00:00Z"}]
+        both = (f"intercom:255336:human_approved_after_doc. Does it cover any of: `{RID}:Mixing`, "
+                f"`{RID}:Engineer`?")
+        # firstmate 053: a one-person row of the allowlisted pair clears too, when the notice names it
+        res = takeback.gate(FakeApi(), row(proof_check=self.POINTER), self.board(self.notice(jan_no, body=both)))
+        self.assertTrue(res.ok, res.reason)
+        self.assertEqual(res.before["proof_cleared"]["by"], "jan@muso.ai")
+        res = takeback.gate(self.api(), self.roster_row(proof_check=self.POINTER),
+                            self.board(self.notice(jan_no, body=both), name="both"))
+        self.assertTrue(res.ok, res.reason)
+        # the notice names only the Mixing row: the Engineer row (same request, another role) stays held
+        mixing_only = f"intercom:255336:human_approved_after_doc. Does it cover `{RID}:Mixing`?"
+        res = self.held(self.api(), self.roster_row(proof_check=self.POINTER),
+                        self.board(self.notice(jan_no, body=mixing_only), name="mix"))
+        self.assertIn("does not name", res.before["proof_not_cleared"])
+        # a later row of the same user, under the same notice, that the notice never named stays held
+        other = "55555555-5555-4555-8555-555555555555"
+        res = self.held(self.api(), self.roster_row(request_id=other, row_id=f"{other}:Engineer",
+                                                    proof_check=self.POINTER),
+                        self.board(self.notice(jan_no, body=both), name="later"))
+        self.assertIn("does not name", res.before["proof_not_cleared"])
+        # a row of another profile or another user (the board answers for user 197122's entry)
+        for name, (pid, uid) in {"pid": ("someone-else", UID), "uid": (PID, "999")}.items():
+            takeback.ROSTER_CLAIMANTS = frozenset({(pid, uid)})
+            for r in (row(proof_check=self.POINTER), self.roster_row(proof_check=self.POINTER)):
+                self.held(self.api(), r, self.board(self.notice(jan_no, body=both), name=name))
+            self.assertEqual(self.reads, 0)
+
+    def test_last_credit_counts_the_roles_removed_in_the_same_run(self):
+        """Main Attraction / Believer: his Mixing and Engineer roles go together; with nothing else on the
+        track, each is reported as his last credit there, at plan and at the apply re-check."""
+        api = self.api()
+        api.raws += [raw("tidal", "Eli WTF", "mixer", "td1"), raw("spotify", "Eli WTF", "mixing engineer", "sp1")]
+        ledger = Ledger(self.dir / "state")
+        self.addCleanup(ledger.close)
+        manifest = write_manifest(self.dir, [row(), self.roster_row()])
+        rows = takeback.load_manifest(manifest)
+        plan_id, counts = takeback.plan(api, ledger, rows, manifest=manifest, excl=OPEN, argv=[], log=lambda *_: None)
+        self.assertEqual(counts, {"would_remove": 2, "would_remove_last_credit_on_track": 2})
+        pairs = [{"id": str(n), "profileId": PID, "trackId": TID, "role": role, "decision": "approved",
+                  "consumedAt": None} for n, role in enumerate(("mixing", "engineer"), 1)]
+        apply_id, _ = takeback.apply(api, ledger, rows, manifest=manifest, plan_run=plan_id, excl=OPEN, argv=[],
+                                     pause_s=0, approvals=api.approve(pairs), sender=api.sender, log=lambda *_: None)
+        self.assertEqual(sorted(takeback.report(ledger, apply_id)["last_credit_on_track"]),
+                         [f"{RID}:Engineer", f"{RID}:Mixing"])
+        # another credit of his survives on the track: neither is the last
+        api = self.api()
+        api.raws += [raw("tidal", "Eli WTF", "mixer", "td1"), raw("muso", "Rishi Krishnan", "producer", PID)]
+        _, counts = takeback.plan(api, ledger, rows, manifest=manifest, excl=OPEN, argv=[], log=lambda *_: None)
+        self.assertEqual(counts, {"would_remove": 2})
+        # only one of the two passes: the other is still his, so the passing one is not the last
+        api = self.api()
+        _, counts = takeback.plan(api, ledger, rows, manifest=manifest, excl=OPEN, argv=[], log=lambda *_: None)
+        self.assertEqual(counts, {"would_remove": 1, "skip:not_contradicted_live:UNVERIFIABLE": 1})
+
+    def test_bigboy_manifest(self):
+        takeback.ROSTER_CLAIMANTS = self._orig  # the real allowlist
+        self.assertEqual(self._orig, frozenset({self.BIGBOY}))
+        rows = takeback.load_manifest(MANIFEST_DIR / "takeback-bigboy-r1.jsonl")
+        self.assertEqual(len(rows), 8)
+        self.assertEqual({(r["profile_id"], r["user_id"]) for r in rows}, {self.BIGBOY})
+        self.assertTrue(all(takeback.evidence_verified(r) for r in rows))
+        self.assertEqual(sorted(r["evidence"]["verified"] for r in rows),
+                         ["published_roster"] * 6 + ["trusted_dsp_only"] * 2)
+        for r in rows:
+            for n in r["evidence"]["names"]:
+                self.assertIn(n.lower(), r["evidence"]["note"].lower(), r["row_id"])
+        # his whole set fits one approval set, every citation untruncated, both bases stated
+        self.assertEqual(len(takeback.chunk_for_reasons(rows, takeback.stage_head(rows))), 1)
+        # Intercom 255336 is on file and Jan has not answered yet (the notice is not posted): even a board
+        # that would clear it clears no row of this manifest
+        entry = {**self.ENTRY, "user_id": int(self.BIGBOY[1])}
+        answer = [{"choice": "no", "note": None, "by": "jan@muso.ai", "at": "2026-10-23T10:00:00Z"}]
+        named = "intercom:255336:human_approved_after_doc " + " ".join(f"`{r['request_id']}:{r['role']}`" for r in rows)
+        excl = self.board(self.notice(answer, body=named), entries=[entry])
+        for r in rows:
+            self.held(FakeApi(), r, excl)
+        self.assertEqual(self.reads, 0)
+        # once the manifest points at a notice naming all 8 rows and Jan answers no, every one of them clears,
+        # the 2 one-person Mixing rows included (firstmate 053)
+        for r in rows:
+            before: dict = {}
+            self.assertTrue(takeback.proof_cleared(excl, {**r, "proof_check": self.POINTER}, before), r["row_id"])
+
+
+class BoardClientTests(unittest.TestCase):
+    """credit_retro.board reads GET /api/notices with the agent token in the header only (a local server
+    stands in for the in-cluster board; the address is pinned the way the env overrides allow)."""
+
+    def setUp(self):
+        import http.server  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+        from unittest import mock  # noqa: PLC0415
+        self.seen: list[tuple[str, dict]] = []
+        self.status, self.payload = 200, {"head": {}, "notices": [{"id": "ntc-1", "answers": {}}]}
+        test = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                test.seen.append((self.path, dict(self.headers)))
+                body = json.dumps(test.payload).encode()
+                self.send_response(test.status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_):
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env_file = Path(self.tmp.name) / "credit-trust-board.env"
+        self.env_file.write_text("OTHER=1\nCREDIT_TRUST_BOARD_AGENT_TOKEN=s3cret\n")
+        patch = mock.patch.dict(os.environ, {"CREDIT_RETRO_BOARD_ENV": str(self.env_file),
+                                             "CREDIT_RETRO_BOARD_IP": "127.0.0.1",
+                                             "CREDIT_RETRO_BOARD_PORT": str(self.server.server_address[1])})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.tmp.cleanup()
+
+    def test_reads_notices_with_the_token_in_the_header(self):
+        self.assertEqual(takeback.board.notices(), [{"id": "ntc-1", "answers": {}}])
+        path, headers = self.seen[0]
+        self.assertEqual(path, "/api/notices")
+        self.assertEqual(headers.get("X-Credit-Trust-Token"), "s3cret")
+        self.assertTrue(headers.get("Host", "").startswith("credit-trust-board.monitoring.svc.cluster.local:"))
+
+    def test_fails_closed(self):
+        self.status = 401
+        with self.assertRaisesRegex(takeback.board.BoardError, "HTTP 401"):
+            takeback.board.notices()
+        self.status, self.payload = 200, {"error": "x"}
+        with self.assertRaises(takeback.board.BoardError):
+            takeback.board.notices()
+        self.env_file.write_text("CREDIT_TRUST_BOARD_AGENT_TOKEN=\n")
+        with self.assertRaisesRegex(takeback.board.BoardError, "empty or missing"):
+            takeback.board.notices()
+        self.env_file.unlink()
+        with self.assertRaisesRegex(takeback.board.BoardError, "not readable"):
+            takeback.board.notices()
+        self.assertEqual(len(self.seen), 2)  # no request goes out without a token
+
+
+class LiveExclusionTests(ExecutorMechanicsTestCase):
     """Firstmate 020: plan and apply read the live exclusion sources every run."""
 
     def setUp(self):
@@ -1621,6 +2194,32 @@ class LiveExclusionTests(unittest.TestCase):
         self.assertEqual(api.sender.sent, [])
         events = json.dumps([dict(e) for e in self.ledger.db.execute("SELECT * FROM events")])
         self.assertNotIn("rk@example.com", events)
+
+    def test_send_ledger_without_verify_messages_removes_nothing(self):
+        # Fable v3 contract: a ledger holding only the decider's tables (every deploy now creates
+        # verify_messages, so its absence means that deploy step failed). "Cannot check proof" is
+        # never "no proof".
+        api = FakeApi()
+        plan_id, _ = self.plan(api, OPEN)
+        d = self.dir / "decider-only"
+        live_sources(d)
+        (d / "verify.sqlite3").unlink()
+        db = sqlite3.connect(d / "verify.sqlite3")
+        for t in ("decision_outcomes", "decisions", "evidence_retry", "rereview_queue", "reviews", "state"):
+            db.execute(f"CREATE TABLE {t} (id INTEGER PRIMARY KEY)")
+        db.commit()
+        db.close()
+        excl = takeback.load_exclusions(proof_on_file=str(d / "proof-on-file.json"),
+                                        org_affiliation=str(d / "org-affiliation.json"),
+                                        verify_db=str(d / "verify.sqlite3"))
+        self.assertEqual(excl.unavailable, "proof_source_unavailable")
+        _, counts = self.plan(api, excl)
+        self.assertEqual(counts, {"skip:proof_source_unavailable": 1})
+        self.assertNotIn("would_remove", counts)
+        with self.assertRaises(SystemExit):
+            self.apply(api, plan_id, excl)
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
+        self.assertEqual(api.sender.sent, [])
 
     def test_doc_submitted_users_and_human_approved_requests_are_skipped(self):
         api = FakeApi()
@@ -1677,6 +2276,96 @@ class LiveExclusionTests(unittest.TestCase):
                                   log=self.out.append)
         self.assertEqual(counts, {"skip:affiliation_unknown": 1, "skip:evidence_unverified": 1})
 
+    def test_live_part_names_core_without_stale_key_is_usable(self):
+        # firstmate 032 (c): core has no `stale` key; requiring stale:false on every source
+        # skipped every run. Its own fresh generated_at is what makes it usable.
+        self.assertIsNone(OPEN.unavailable, OPEN.detail)
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat().replace("+00:00", "Z")
+        gmail = {"name": "cs-gmail", "generated_at": now, "stale": False}
+        legacy = live_sources(self.dir / "legacy", sources=[
+            {"name": "core", "generated_at": now}, {"name": "cs-systemic intercom+gmail", "generated_at": now,
+                                                      "stale": False}, gmail])
+        self.assertIsNone(legacy.unavailable, legacy.detail)
+        self.assertEqual(takeback.gate(FakeApi(), row(), legacy).ok, True)
+        for name, srcs in (("core-old", [{"name": "core", "generated_at": old},
+                                         {"name": "cs-intercom", "generated_at": now, "stale": False}, gmail]),
+                           ("core-unstamped", [{"name": "core"}, {"name": "cs-intercom", "generated_at": now,
+                                                                   "stale": False}, gmail]),
+                           ("no-intercom", [{"name": "core", "generated_at": now}, gmail]),
+                           ("intercom-stale", [{"name": "core", "generated_at": now},
+                                               {"name": "cs-intercom", "generated_at": now, "stale": True}, gmail])):
+            excl = live_sources(self.dir / name, sources=srcs)
+            self.assertEqual(excl.unavailable, "proof_source_unavailable", name)
+        for name in ("cs-systemic", "cs-systemic gmail"):
+            excl = live_sources(self.dir / name, sources=[{"name": "core", "generated_at": now},
+                                                          {"name": name, "generated_at": now, "stale": False}, gmail])
+            self.assertEqual(excl.unavailable, "proof_source_unavailable", name)
+            self.assertIn("part 'cs-intercom' is missing", excl.detail)
+        truthy = live_sources(self.dir / "truthy", sources=[
+            {"name": "core", "generated_at": now}, {"name": "cs-intercom", "generated_at": now, "stale": "true"},
+            gmail])
+        self.assertEqual(truthy.unavailable, "proof_source_unavailable")
+
+    def test_gmail_part_unusable_removes_nobody(self):
+        # cs-gmail missing, stale or old: anyone may have emailed a document to support@
+        # after any snapshot of who wrote in, so the whole export is UNKNOWN and nothing is
+        # removed (a contact list, even a fresh one, does not narrow the hold).
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat().replace("+00:00", "Z")
+        base = [{"name": "core", "generated_at": now}, {"name": "cs-intercom", "generated_at": now, "stale": False}]
+        api = FakeApi()
+        listed = {"gmail_contacts_90d": {"generated_at": now, "source": "gmail support@ inbox, 90 days",
+                                         "user_ids": [5]}}
+        for name, gmail in (("gmail-missing", []),
+                            ("gmail-stale", [{"name": "cs-gmail", "generated_at": now, "stale": True}]),
+                            ("gmail-old", [{"name": "cs-gmail", "generated_at": old, "stale": False}])):
+            excl = live_sources(self.dir / name, sources=base + gmail, extra=listed)
+            self.assertEqual(excl.unavailable, "proof_source_unavailable", name)
+            self.assertIn("part 'cs-gmail'", excl.detail)
+            self.assertEqual(takeback.gate(api, row(), excl).reason, "proof_source_unavailable")
+        _, counts = self.plan(api, live_sources(self.dir / "pl", sources=base, extra=listed))
+        self.assertEqual(counts, {"skip:proof_source_unavailable": 1})
+
+    def test_live_gmail_contacts_object_is_accepted_and_unused(self):
+        # firstmate 037: the live export carries gmail_contacts_90d as an object; a file with
+        # it is not malformed, and it never narrows a cs-gmail hold.
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        live = {"gmail_contacts_90d": {"generated_at": now, "source": "cs-gmail support@ scan, 90 days",
+                                       "user_ids": [34135, 161128]}}
+        api = FakeApi()
+        fresh = live_sources(self.dir / "fresh", extra=live)
+        self.assertIsNone(fresh.unavailable, fresh.detail)
+        self.assertEqual(self.plan(api, fresh)[1], {"would_remove": 1})
+        stale = live_sources(self.dir / "stale", extra=live, sources=[
+            {"name": "core", "generated_at": now}, {"name": "cs-intercom", "generated_at": now, "stale": False},
+            {"name": "cs-gmail", "generated_at": now, "stale": True}])
+        self.assertEqual(stale.unavailable, "proof_source_unavailable")
+        self.assertEqual(self.plan(api, stale)[1], {"skip:proof_source_unavailable": 1})
+
+    def test_half_written_proof_export_removes_nothing(self):
+        # firstmate 038: the take-back gate refuses a half-written export exactly like the
+        # verify notes: users not the distinct user ids, or any malformed entry.
+        api = FakeApi()
+        plan_id, _ = self.plan(api, OPEN)
+        other = {"user_id": 999, "request_id": None, "kind": "approved_doc", "source": "verifications", "ref": "v 1"}
+        cases = {
+            "users-mismatch": dict(proof_entries=[other], extra={"users": 2}),
+            "users-missing": dict(proof_entries=[other], extra={"users": None}),
+            "not-an-object": dict(proof_entries=[other], extra={"entries": [other, 42]}),
+            "no-user-id": dict(proof_entries=[{**other, "user_id": None}]),
+            "bad-request-id": dict(proof_entries=[{**other, "request_id": 5}]),
+            "unknown-kind": dict(proof_entries=[{**other, "kind": "maybe_doc"}]),
+        }
+        for name, kw in cases.items():
+            excl = live_sources(self.dir / name, **kw)
+            self.assertEqual(excl.unavailable, "proof_source_unavailable", name)
+            self.assertEqual(self.plan(api, excl)[1], {"skip:proof_source_unavailable": 1}, name)
+            with self.assertRaises(SystemExit):
+                self.apply(api, plan_id, excl)
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
+        self.assertEqual(api.sender.sent, [])
+
     def test_malformed_proof_file_is_unavailable_not_a_crash(self):
         bad = self.dir / "bad"
         bad.mkdir()
@@ -1691,6 +2380,53 @@ class LiveExclusionTests(unittest.TestCase):
             malformed = live_sources(self.dir / "aff", affiliation={UID: {"verdict": verdict, "evidence": []}})
             self.assertEqual(malformed.unavailable, "affiliation_source_unavailable")
 
+    def test_org_affiliation_v1_consumer_rule(self):
+        # H-DevOps credit-trust-exports/org-affiliation README: absent, held, or a file older
+        # than 2 h = UNKNOWN = held; per-row removal allowed on none / claimed_unverified
+        api = FakeApi()
+        plan_id, _ = self.plan(api, OPEN)
+        d = self.dir / "v1"
+        d.mkdir()
+
+        def excl(doc):
+            live_sources(d)  # proof-on-file, send ledger
+            (d / "org-affiliation.json").write_text(json.dumps(doc))
+            return takeback.load_exclusions(proof_on_file=str(d / "proof-on-file.json"),
+                                            org_affiliation=str(d / "org-affiliation.json"),
+                                            verify_db=str(d / "verify.sqlite3"))
+        held = excl(affiliation_v1({UID: {"verdict": "none", "evidence": []}},
+                                   held={UID: {"reason": "catalog_unread"}}))
+        self.assertEqual(self.plan(api, held)[1], {"skip:affiliation_unknown": 1})
+        self.assertEqual(self.apply(api, plan_id, held)[1], {"withheld:affiliation_unknown": 1, "withheld_sets": 1})
+        absent = excl(affiliation_v1({"161128": {"verdict": "none", "evidence": []}}))
+        self.assertEqual(self.plan(api, absent)[1], {"skip:affiliation_unknown": 1})
+        for bad in (affiliation_v1({UID: {"verdict": "none", "evidence": []}}, age=timedelta(hours=2, minutes=1)),
+                    affiliation_v1({UID: {"verdict": "none", "evidence": []}}, age=-timedelta(hours=1)),
+                    {UID: {"verdict": "none", "evidence": []}},                           # the pre-v1 flat shape
+                    dict(affiliation_v1({}), schema="org-affiliation/v2"),
+                    dict(affiliation_v1({}), held=["x"]),
+                    dict(affiliation_v1({}), users={UID: "none"})):
+            e = excl(bad)
+            self.assertEqual(e.unavailable, "affiliation_source_unavailable", bad)
+            with self.assertRaises(SystemExit):
+                self.apply(api, plan_id, e)
+        # a verdict not checked on full coverage is not proof of no affiliation: the user is held
+        for partial in ({"verdict": "none", "coverage": "labels_only", "evidence": []},
+                        {"verdict": "claimed_unverified", "coverage": "labels_only", "evidence": []}):
+            e = excl(affiliation_v1({UID: partial}))
+            self.assertEqual(self.plan(api, e)[1], {"skip:affiliation_partial": 1}, partial)
+            self.assertEqual(self.apply(api, plan_id, e)[1],
+                             {"withheld:affiliation_partial": 1, "withheld_sets": 1}, partial)
+        no_coverage = affiliation_v1({UID: {"verdict": "none", "evidence": []}})
+        del no_coverage["users"][UID]["coverage"]
+        self.assertEqual(self.plan(api, excl(no_coverage))[1], {"skip:affiliation_partial": 1})
+        self.assertFalse([w for w in api.writes if w[1].endswith("/execute")])
+        self.assertEqual(api.sender.sent, [])
+        # a fresh export with verdict none on full coverage lets the per-row removal go
+        ok = excl(affiliation_v1({UID: {"verdict": "none", "coverage": "full", "evidence": []}},
+                                 age=timedelta(hours=1, minutes=59)))
+        self.assertEqual(self.plan(api, ok)[1], {"would_remove": 1})
+
     def test_affiliated_user_is_skipped_and_listed_for_human_review(self):
         api = FakeApi()
         evidence = [{"org": "Sony Music Publishing", "source": "pro-registry"}]
@@ -1701,12 +2437,62 @@ class LiveExclusionTests(unittest.TestCase):
         rep = takeback.report(self.ledger, plan_id)
         self.assertEqual(rep["needs_human_review"], [{"row_id": f"{RID}:Mixing", "user_id": UID, "role": "Mixing",
                                                       "track_id": TID, "affiliation": {"verdict": "verified_org",
+                                                                                       "coverage": "full",
                                                                                        "evidence": evidence}}])
         claimed = live_sources(self.dir / "c", affiliation={UID: {"verdict": "claimed_unverified", "evidence": []}})
         plan2, counts2 = self.plan(api, claimed)
         self.assertEqual(counts2, {"would_remove": 1})
         self.assertIn("affiliation=claimed_unverified", self.out[-1])
         self.assertEqual(takeback.report(self.ledger, plan2)["needs_human_review"], [])
+
+
+class IntercomIdentityTests(unittest.TestCase):
+    """QA #1298 @05a7cac: the take-back notice must carry user.auth_id, or the gate refuses it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def rows(self):
+        return takeback.load_manifest(write_manifest(self.dir, [row()]))
+
+    def test_the_notice_payload_carries_the_professional_id(self):
+        sender = FakeSender()
+        accounts, held = takeback.notice_preflight(FakeApi(), sender, self.rows(), log=lambda _m: None)
+        self.assertEqual(held, {})
+        self.assertTrue(sender.validated)
+        self.assertEqual(sender.validated[0]["user"]["professional_id"], "test-pro")
+
+    def test_an_account_with_no_identity_is_held_not_removed(self):
+        orig = verify_notify.IDENTITY_LOOKUP
+        verify_notify.IDENTITY_LOOKUP = lambda ids: {str(u): {"professional_id": "", "auth_id": ""} for u in ids}
+        self.addCleanup(setattr, verify_notify, "IDENTITY_LOOKUP", orig)
+        sender = FakeSender()
+        accounts, held = takeback.notice_preflight(FakeApi(), sender, self.rows(), log=lambda _m: None)
+        self.assertEqual(set(held.values()), {"no_professional_id"})
+        self.assertEqual(sender.validated, [], "nothing is validated or sent without an identity")
+
+    def test_an_unreadable_identity_lookup_refuses_the_whole_run(self):
+        orig = verify_notify.IDENTITY_LOOKUP
+
+        def boom(ids):
+            raise RuntimeError("trino down")
+        verify_notify.IDENTITY_LOOKUP = boom
+        self.addCleanup(setattr, verify_notify, "IDENTITY_LOOKUP", orig)
+        with self.assertRaises(SystemExit) as cm:
+            takeback.notice_preflight(FakeApi(), FakeSender(), self.rows(), log=lambda _m: None)
+        self.assertIn("nothing is removed", str(cm.exception))
+
+    def test_the_real_lookup_reads_neptuneprofessionalid(self):
+        seen = []
+
+        def q(sql):
+            seen.append(sql)
+            return [["7", "uuid-7", None]]
+        self.assertEqual(verify_notify.account_identities(["7"], query=q),
+                         {"7": {"professional_id": "uuid-7", "auth_id": ""}})
+        self.assertIn("neptuneprofessionalid", seen[0])
 
 
 class ManifestTests(unittest.TestCase):
@@ -1730,6 +2516,11 @@ class ManifestTests(unittest.TestCase):
             for name in (r.get("evidence") or {}).get("names") or []:
                 self.assertIn(name.lower(), r["evidence"]["note"].lower(), r["row_id"])
         verified = [r for r in rows if takeback.evidence_verified(r)]
+        # Fable v3: 8999a707 rests on the Tidal credit; the press article is corroboration only
+        by_id = {r["row_id"][:8]: r for r in rows}
+        self.assertEqual((by_id["8999a707"]["evidence"]["verified"], by_id["8999a707"]["evidence_url"]),
+                         ("trusted_dsp_only", "https://listen.tidal.com/track/527926451"))
+        self.assertTrue(by_id["8999a707"]["evidence"]["corroboration"].startswith("https://stereobeso.com/"))
         # 5 excluded by review (alias risk / live edition / press naming the claimant) and 9 more
         # because their users sent documents in Intercom (captain 013); the rest stay unverified
         # and can never pass the gate
@@ -1786,6 +2577,52 @@ class ManifestTests(unittest.TestCase):
             for x in h["roles"]:
                 self.assertNotIn(f"{h['request_id']}:{x['role']}", proven)
         self.assertEqual(sum(len(h["roles"]) for h in population if h.get("takeback_residual")), 138)
+
+
+
+class LiveDspGateRuleTests(unittest.TestCase):
+    """Captain 2026-10-23 (firstmate 104/105/106): nothing is hidden or removed without a live
+    Spotify AND Tidal check in the same run. Core's removal gate is not live, so the executors
+    refuse before reading, staging, announcing or writing anything."""
+
+    def setUp(self):
+        self.addCleanup(setattr, dsp_gate, "WIRED", dsp_gate.WIRED)
+        dsp_gate.WIRED = False
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def test_takeback_apply_refuses_before_any_read_or_write(self):
+        class Untouchable:
+            def __getattr__(self, name):
+                raise AssertionError(f"apply touched the API ({name}) before the live DSP rule")
+        ledger = takeback.Ledger(self.dir / "state")
+        with self.assertRaises(dsp_gate.LiveDspGateRequired) as cm:
+            takeback.apply(Untouchable(), ledger, [], manifest=str(self.dir / "m.jsonl"), plan_run="p",
+                           argv=[], approvals=["ap-1"], excl=OPEN, sender=object(), pause_s=0,
+                           log=lambda *_: None)
+        self.assertIn("live_dsp_gate_required", str(cm.exception.code))
+        self.assertIn("Spotify AND Tidal", str(cm.exception.code))
+        self.assertEqual(ledger.child_runs("p", "apply"), [])
+
+    def test_decider_revert_lists_but_refuses_to_hide_and_writes_nothing(self):
+        from credit_review import decide  # noqa: PLC0415
+        db = sqlite3.connect(":memory:")
+        writes: list = []
+        with mock.patch.object(decide, "run_approvals", lambda _db, _run: ["r1", "r2"]):
+            dry = decide.revert(db, "run-1", apply=False)
+            self.assertEqual((dry["approved_ids"], dry["applied"]), (["r1", "r2"], False))
+            with self.assertRaises(dsp_gate.LiveDspGateRequired):
+                decide.revert(db, "run-1", apply=True, writer=lambda *a: writes.append(a),
+                              readback=lambda *a: writes.append(a))
+        self.assertEqual(writes, [])
+
+    def test_cli_apply_exits_non_zero_with_the_rule(self):
+        # refused before the login prompt and before the manifest is even read
+        api = FakeApi()
+        with self.assertRaises(SystemExit) as cm:
+            cli_apply(api, self.dir / "state", str(self.dir / "missing.jsonl"), "p")
+        self.assertIn("live_dsp_gate_required", str(cm.exception.code))
+        self.assertEqual(api.writes, [])
 
 
 if __name__ == "__main__":

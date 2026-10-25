@@ -12,11 +12,13 @@ ACCOUNT email, HTML-escapes the structured fields, runs the leak check and recor
 send in its ledger. This module only builds the structured credits file, renders the
 preview for review, and calls the tool. It never posts anything itself.
 
-``apply`` validates every notice through the tool (``--validate``) BEFORE the execute
-and refuses the whole run if any notice cannot be sent: no removal without its message. A
-user whose notice the tool would defer today (exit 3, one message per user per day) has
-their whole set withheld this run (``notice_would_defer``); it stays approved and is
-executed, with its notice, on a later day's run.
+``apply`` validates every notice through the tool (``--validate``) BEFORE the execute: no
+removal without its message. A user whose notice the tool would defer today (exit 3, one
+message per user per day) has their whole set withheld this run (``notice_would_defer``); it
+stays approved and is executed, with its notice, on a later day's run. A user whose notice
+the tool refuses (exit 1, e.g. its leak check) has their whole set withheld
+(``notice_refused``, firstmate 041) while every other user's set proceeds. A tool that
+cannot run at all refuses the whole run.
 
 The human who approved THIS copy and run is passed per run (``--notice-approved-by``); it is
 never defaulted and is recorded in the ledger with every notice.
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import string
 import subprocess
 import tempfile
 from collections import defaultdict
@@ -36,13 +39,15 @@ from .takeback import evidence_label
 CAMPAIGN = "takeback-notice"
 DEFAULT_SCRIPT = "/opt/hydra/scripts/intercom-verify-request.sh"
 MAX_LISTED = 25
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
 
-SUBJECT_ONE = 'About your {role} credit on "{track_title}"'
+SUBJECT_ONE = 'About your {role} credit on {track_title}'
 SUBJECT_MANY = "About {n} of your credits on Muso"
-INTRO_ONE = ('The public credits for "{track_title}" by {artist_name} name {other_names} for {role} '
-             "({source}: {url}), so we have removed the {role} credit from your profile.")
+INTRO_ONE = ('The public credits for {track_title} by {artist_name} name {other_names} for {role} '
+             "({cite}), so we have removed the {role} credit from your profile.")
 INTRO_MANY = "The public credits name someone else for these roles, so we have removed them from your profile:"
-LINE = '- {role} on "{track_title}" by {artist_name}: {other_names} ({source}: {url})'
+LINE = '- {role} on {track_title} by {artist_name}: {other_names} ({cite})'
+QUOTE_MARKS = "\"“”„«»'‘’‚"
 BODY = """Hi {first_name},
 
 I'm Caroline from Muso support. {intro}
@@ -56,11 +61,26 @@ Muso Support
 """
 
 
+def quoted(title: str) -> str:
+    """The title in quotes, unless it already starts and ends with its own quote marks (the gate's qt)."""
+    if len(title) >= 2 and title[0] in QUOTE_MARKS and title[-1] in QUOTE_MARKS:
+        return title
+    return f'"{title}"'
+
+
 def _names(c: dict[str, Any]) -> str:
     names = [n for n in c.get("other_names") or [] if n]
     if len(names) <= 1:
         return names[0] if names else "another person"
     return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def cite(c: dict[str, Any]) -> str:
+    """The evidence as the user reads it: ``<source>: <url>``, plus ``; also named in <page>``
+    when the row has a corroborating page (Fable v3: a press article is never called a
+    "public credits page"; the removal rests on the DSP credit, the article only corroborates)."""
+    out = f"{c['evidence_source']}: {c['evidence_url']}"
+    return out + (f"; also named in {c['corroboration_url']}" if c.get("corroboration_url") else "")
 
 
 def notice_credit(row: dict[str, Any]) -> dict[str, Any]:
@@ -70,14 +90,17 @@ def notice_credit(row: dict[str, Any]) -> dict[str, Any]:
     return {"request_id": row["request_id"], "profile_id": row["profile_id"], "track_id": row["track_id"],
             "role": row["role"], "track_title": row.get("track_title") or "", "artist_name": row.get("artist") or "",
             "other_names": list(ev["names"]),
-            "evidence_url": row["evidence_url"], "evidence_source": evidence_label(row)}
+            "evidence_url": row["evidence_url"], "evidence_source": evidence_label(row),
+            "corroboration_url": ev.get("corroboration") or ""}
 
 
 def lines_of(credits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One line per track title + artist + role: two requests for the same credit are one line."""
+    """One line per track title + artist + role: two requests for the same credit are one line.
+    Matching lowercases ASCII letters only (the send gate's jq ascii_downcase), so "Café" and
+    "CAFÉ" stay two lines here exactly as they do in the message that is sent."""
     seen: dict[tuple[str, str, str], dict[str, Any]] = {}
     for c in credits:
-        seen.setdefault((c["track_title"].casefold(), c["artist_name"].casefold(), c["role"].casefold()), c)
+        seen.setdefault(tuple(c[k].translate(_ASCII_LOWER) for k in ("track_title", "artist_name", "role")), c)
     return list(seen.values())
 
 
@@ -88,15 +111,15 @@ def render(first_name: str | None, credits: list[dict[str, Any]]) -> tuple[str, 
     shown = credits[:MAX_LISTED]
     if len(credits) == 1:
         c = credits[0]
-        subject = SUBJECT_ONE.format(**c)
-        intro = INTRO_ONE.format(role=c["role"], track_title=c["track_title"], artist_name=c["artist_name"],
-                                 other_names=_names(c), source=c["evidence_source"], url=c["evidence_url"])
+        subject = SUBJECT_ONE.format(**{**c, "track_title": quoted(c["track_title"])})
+        intro = INTRO_ONE.format(role=c["role"], track_title=quoted(c["track_title"]), artist_name=c["artist_name"],
+                                 other_names=_names(c), cite=cite(c))
         lines = ""
     else:
         subject = SUBJECT_MANY.format(n=len(credits))
         intro = INTRO_MANY
-        lines = "\n".join(LINE.format(role=c["role"], track_title=c["track_title"], artist_name=c["artist_name"],
-                                      source=c["evidence_source"], other_names=_names(c), url=c["evidence_url"])
+        lines = "\n".join(LINE.format(role=c["role"], track_title=quoted(c["track_title"]), artist_name=c["artist_name"],
+                                      other_names=_names(c), cite=cite(c))
                           for c in shown) + "\n"
         if len(credits) > len(shown):
             lines += f"- and {len(credits) - len(shown)} more\n"
@@ -104,8 +127,13 @@ def render(first_name: str | None, credits: list[dict[str, Any]]) -> tuple[str, 
 
 
 def credits_file(user: dict[str, Any], credits: list[dict[str, Any]]) -> dict[str, Any]:
+    """The gate's credits file. The recipient is matched by user.professional_id (the account's
+    users.neptuneProfessionalId, Intercom's external_id) and user.auth_id (its Auth0 subject),
+    like every other driver (firstmate 090)."""
     return {"campaign": CAMPAIGN,
             "user": {"email": user.get("email"), "id": str(user.get("id") or ""),
+                     "professional_id": str(user.get("professional_id") or ""),
+                     "auth_id": str(user.get("auth_id") or ""),
                      "first_name": user.get("first_name")},
             "credits": credits}
 
@@ -120,9 +148,10 @@ class Sender(Protocol):
 class ScriptSender:
     """Calls Caroline's gate. Exit codes (intercom-verify-request.sh): 0 posted, 1 refusal,
     2 usage/environment, 3 deferred (already messaged today), 4 post failed/unverified.
-    ``validate`` answers ``valid`` / ``deferred`` / ``refused``; ``send`` answers ``sent`` /
-    ``deferred`` / ``failed``. A hung or unrunnable call is a refusal / failure, never an
-    exception."""
+    ``validate`` answers ``valid`` / ``deferred`` / ``refused`` (exit 1: the gate refused THIS
+    notice, e.g. its leak check on a title) / ``unavailable`` (the gate could not run: missing,
+    usage/environment, hung); ``send`` answers ``sent`` / ``deferred`` / ``failed``. A hung or
+    unrunnable call is never an exception."""
 
     def __init__(self, script: str | None = None, *, approved_by: str, timeout: int = 120):
         if not approved_by:
@@ -150,7 +179,7 @@ class ScriptSender:
 
     def validate(self, payload: dict[str, Any]) -> tuple[str, str]:
         proc = self._run(payload, ["--validate"])
-        verdict = {0: "valid", 3: "deferred"}.get(proc.returncode, "refused")
+        verdict = {0: "valid", 1: "refused", 3: "deferred"}.get(proc.returncode, "unavailable")
         return verdict, (proc.stdout if verdict == "valid" else proc.stderr or proc.stdout).strip()[:300]
 
     def send(self, payload: dict[str, Any]) -> tuple[str, str]:

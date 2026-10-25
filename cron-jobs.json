@@ -457,7 +457,7 @@
       "id": "afc7d2bf-766f-4a39-aadc-1088c9a91d35",
       "agentId": "operations",
       "name": "credit-approval-auditor-hourly",
-      "description": "APPROVAL AUDITOR (captain 2026-10-11: 'need a monitor that closely watches credit approvals on our side to check if they should have been given ... with AI and internet searches'). Hourly at :45 it re-checks every credit request APPROVED in the last 90 minutes (or since the previous successful run, minus 15 minutes, if that is earlier - at most 24h back; an older gap is alerted as 'N minutes not audited'; approvals are recorded oldest first in chunks, no chunk or model batch starts past an 1800s deadline (a chunk starts only if the longest one so far still fits) so alerts are always printed, and an early stop alerts and resumes from the last finished chunk), by any path (validator, admin queue, any job). Catalog evidence (Spotify/Tidal/MLC/Jaxsta raw credits) runs for every approval. PHASE A (now): catalog-only - every approval is checked against the trusted sources and the identity/velocity/approver signals, no model calls. PHASE B (once the captain tops up OpenRouter, by creating /etc/hydra/credit-review-model.enabled on node-8): the model with web search (Discogs, AllMusic, label/liner notes, trade press; the claimant's own sites and profiles and user-generated platforms such as Instagram/SoundCloud/Bandcamp/Wix/Blogspot never count as evidence) runs for 100% of big tracks (catalog track popularity >= 60, any track artist >= 90, or either unknown) and a stable 10% sample of the rest, capped at $2 per run, skipped entirely while the shared OpenRouter balance is under the floor in the design doc (one 'CREDIT-AUDIT NOTE' per day says so), and $8 per UTC day (measured ~$7/day at full coverage on grok-4.3: ~47 big-track approvals/day + 10% of ~3,100 others, minus the ones the catalog already decides). Verdicts CONFIRMED / SUSPECT / CONTRADICTED / UNVERIFIABLE go to /var/lib/hydra/credit-review/ledger.sqlite3. Stdout (announced to #credit-verification) is one 'CREDIT-AUDIT ALERT:' line per CONTRADICTED big-track credit (also queued for human re-review) and per approver-identity problem (agent-hydra-main / admin_u / unknown approver, or a validator-declined row approved with no recorded approver), plus one per-profile burst alert naming the profile when one profile has >= 10 SUSPECT/CONTRADICTED or >= 20 approvals within 2h (re-alerted only when the profile has approvals newer than its last alert); a quiet run prints only NO_REPLY and posts nothing, logs go to /var/lib/hydra/credit-review/run.log, never stderr. READ-ONLY on credits: GETs only, never removes or changes a credit. Kill switch: /etc/hydra/credit-review.disabled. Design: docs/credit-verification/ai-credit-reviewer.md.",
+      "description": "APPROVAL AUDITOR (captain 2026-10-11: 'need a monitor that closely watches credit approvals on our side to check if they should have been given ... with AI and internet searches'). Hourly at :45 it re-checks every credit request APPROVED in the last 90 minutes (or since the previous successful run, minus 15 minutes, if that is earlier - at most 24h back; an older gap is alerted as 'N minutes not audited'; approvals are recorded oldest first in chunks, no chunk or model batch starts past an 1800s deadline (a chunk starts only if the longest one so far still fits) so alerts are always printed, and an early stop alerts and resumes from the last finished chunk), by any path (validator, admin queue, any job). Catalog evidence (Spotify/Tidal/MLC/Jaxsta raw credits) runs for every approval. PHASE A (now): catalog-only - every approval is checked against the trusted sources and the identity/velocity/approver signals, no model calls. PHASE B (once the captain tops up OpenRouter, by creating /etc/hydra/credit-review-model.enabled on node-8): the model with web search (Discogs, AllMusic, label/liner notes, trade press; the claimant's own sites and profiles and user-generated platforms such as Instagram/SoundCloud/Bandcamp/Wix/Blogspot never count as evidence) runs for 100% of big tracks (catalog track popularity >= 60, any track artist >= 90, or either unknown) and a stable 10% sample of the rest, capped at $2 per run, skipped entirely while the shared OpenRouter balance is under the floor in the design doc (one 'CREDIT-AUDIT NOTE' per day says so), and $8 per UTC day (measured ~$7/day at full coverage on grok-4.3: ~47 big-track approvals/day + 10% of ~3,100 others, minus the ones the catalog already decides). Verdicts CONFIRMED / SUSPECT / CONTRADICTED / UNVERIFIABLE go to /var/lib/hydra/credit-review/ledger.sqlite3. Stdout (announced to #credit-verification) is one 'CREDIT-AUDIT ALERT:' line per CONTRADICTED big-track credit (also queued for human re-review) and per approver-identity problem (agent-hydra-main / admin_u / unknown approver, or a validator-declined row approved with no recorded approver), plus one per-profile burst alert naming the profile when one profile has >= 10 SUSPECT/CONTRADICTED or >= 20 approvals within 2h (re-alerted only when the profile has approvals newer than its last alert); a quiet run prints only NO_REPLY and posts nothing, logs go to /var/lib/hydra/credit-review/run.log, never stderr. READ-ONLY on credits: GETs only, never removes or changes a credit. Kill switch: /etc/hydra/credit-review.disabled. Design: docs/credit-verification/ai-credit-reviewer.md. Provider (Fable unblock sweep 10-19 item 14): Codex on server-fetched sources first ($0, subscription); the OpenRouter grok judge runs only as the fallback (no fetched sources / Codex unavailable), inside this job's existing $ caps.",
       "enabled": true,
       "createdAtMs": 1791688394000,
       "updatedAtMs": 1791688394000,
@@ -482,6 +482,8 @@
           "2",
           "--daily-budget-usd",
           "8",
+          "--provider",
+          "codex",
           "--model",
           "x-ai/grok-4.3"
         ],
@@ -570,7 +572,7 @@
       "id": "8bed6d2b-ba2b-4475-924a-09f35126597e",
       "agentId": "operations",
       "name": "credit-review-shadow-4h",
-      "description": "PRE-APPROVAL AI REVIEWER, Phase 0 SHADOW: every 4h at :15 it reviews up to 20 HELD (status=unverified) credit requests plus 5 sampled recent approvals and records APPROVE-RECOMMENDED / NEEDS-HUMAN / REJECT-RECOMMENDED with cited evidence in the ledger ($1 per run cap, at most $6/day). No effect: no Slack output, never writes a credit-request status. Phase 1 (advise: cards to human approvers) and Phase 2 (auto-approve with trusted-source corroboration) are captain decisions; Phase 2 is not implemented. Catalog-only until /etc/hydra/credit-review-model.enabled exists; same OpenRouter balance floor as the auditor.",
+      "description": "PRE-APPROVAL AI REVIEWER, Phase 0 SHADOW: every 4h at :15 it reviews up to 20 HELD (status=unverified) credit requests plus 5 sampled recent approvals and records APPROVE-RECOMMENDED / NEEDS-HUMAN / REJECT-RECOMMENDED with cited evidence in the ledger ($1 per run cap, at most $6/day). No effect: no Slack output, never writes a credit-request status. Phase 1 (advise: cards to human approvers) and Phase 2 (auto-approve with trusted-source corroboration) are captain decisions; Phase 2 is not implemented. Catalog-only until /etc/hydra/credit-review-model.enabled exists; same OpenRouter balance floor as the auditor. Provider (Fable unblock sweep 10-19 item 14): Codex on server-fetched sources first ($0, subscription); the OpenRouter grok judge runs only as the fallback (no fetched sources / Codex unavailable), inside this job's existing $ caps.",
       "enabled": true,
       "createdAtMs": 1791688394000,
       "updatedAtMs": 1791688394000,
@@ -595,6 +597,8 @@
           "5",
           "--budget-usd",
           "1",
+          "--provider",
+          "codex",
           "--model",
           "x-ai/grok-4.3"
         ],
@@ -603,6 +607,86 @@
       },
       "delivery": {
         "mode": "none"
+      }
+    },
+    {
+      "id": "db04c6f2-cbe1-4cac-9de2-f2f4f1311364",
+      "agentId": "operations",
+      "name": "credit-trust-verify-notify-15m",
+      "description": "FIRSTMATE 090 (2026-10-19 23:27Z): EVERY note is the no-threat v1 copy (no date, no removal language, no follow-ups, never removal-due); the windowed copy and its reminders are send-locked (LIVE_WINDOWED_COPY_APPROVED=0) because the captain dropped auto-removal. TRUST YET VERIFY user notes for NEW provisional approvals (captain 2026-10-15 22:12Z, verbatim: \"i want AI live now - we have too many credits to approve and to get supporting data for - let users know where there was a credit given and that it needs support (trust yet verify approach)\"; 23:40Z: \"if no valid verification comes it should be removed\", kept for new credits on 2026-10-16 00:35Z). ENABLED per Fable's decision data/credit-trust-system-fable-a1/decision-verify-notify-enable-2026-10-17.md (firstmate 051: enable Monday 2026-10-20, not before; the PR carrying this line merges Monday after that morning's dry run). The name keeps its id; it now runs ONCE A DAY at 09:00 Europe/Rome, after the decider's overnight runs. It reads the decider ledger (decision_outcomes action='approve' AND outcome='approved'), re-reads each row from the admin API (GET only), keeps rows the server says are approved now, and sends ONE Intercom email per account through the gate scripts/intercom-verify-request.sh (Caroline pinned; Fable's reviewed verify-live copy, pack 1 of copy-review-fable-2026-10-17: one date, 'by {date} (30 days from today)', 'removed from your profile that day', restore line; day-14 and day-25 reminders, day 25 offers more time). NEVER NOTIFIED (held for a human, credits kept for later runs, never closed): a user with proof on file from ANY source (/var/lib/credit-trust/proof-on-file.json: Intercom, support@ Gmail, core), anyone in its gmail_contacts_90d list (emailed support@ in the last 90 days), a user whose org-affiliation verdict is missing or contributor/verified_org/authenticated_domain (/var/lib/credit-trust/org-affiliation.json, RULE-org-affiliation; no file = no notes), and a user asked in the last 90 days by verify-live or retro-past (shared re-ask lock, enforced again at the ledger claim). Paying users first; at most 200 messages a day for the first week, reminders included (they go first). One message per user per UTC day across campaigns; each credit notified once ever. A missing, >3h-old or incomplete proof-on-file list, a missing contact list or a missing affiliation file means zero sends and a non-zero exit. Removal, expiry and the retro-past wave stay disabled (RETRO_COPY_APPROVED=0, REMOVAL_COPY_APPROVED=0, no expiry job); `--removal-due FILE` is a manual export only. Held-for-human users are reported in the daily line. Kill switch: /etc/hydra/credit-verify-notify.disabled (or enabled=false here).",
+      "enabled": true,
+      "createdAtMs": 1792105200000,
+      "updatedAtMs": 1792278000000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "tz": "Europe/Rome"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "verify-notify",
+          "--mode",
+          "apply",
+          "--max-users",
+          "200"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 1200
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
+      }
+    },
+    {
+      "id": "1149da56-8726-4088-814f-9c1468fe37f1",
+      "agentId": "operations",
+      "name": "credit-past-verify-wave-15m",
+      "description": "PAST-CREDIT DOCUMENTATION ASK, genuine risk only. Captain 2026-10-15 23:35Z (verbatim): \"im referring to before when nick made changes and did a trust verify flow and now we have a lotnof credits to verify with documents and give people 30 days to send something in for the ones missing documents\"; narrowed 2026-10-16 00:35Z: \"how many credits were approved without documentstion i dont want to lose users unless its obvious fraud feom tbe past\" and 02:00Z: \"are you annoying people fornbackup that we shpuldnt be?\". Every 15 min at :11/:26/:41/:56 it reads the wave file /var/lib/hydra/credit-review/waves/retro-past.csv (the population, built from the retro review's risk tiers; credit_request_id,user_id,profile_id[,track_id,tier,pop_now,paid,claim_date]; NO_REPLY while absent), re-reads each row from the admin API (GET only) and announces only rows still approved, then sends ONE friendly Intercom email per user listing their credits (paid users first, big tracks first; at most 100 users per run and 600 per UTC day, 1s apart) through scripts/intercom-verify-request.sh --campaign retro-past: Caroline pinned, fixed role-specific copy with NO deadline and NO removal language, leak check, api-log and verify-ledger claim before the POST. At most one message per user, ever: no follow-up, and a user who already sent proof (a credit-proof reply on any note) is never asked. Replies with attachments are tagged credit-proof (tag only, no decision). Optional --exclude-users FILE leaves out accounts whose existing credits are handled elsewhere. Past credits are NEVER removed by this path: a non-response leaves the credit in place, and `credit-review.py verify-wave --unverified FILE` exports those as unverified for the board; proven fraud goes through its own take-back path. It never writes a credit-request status. SHIPPED enabled:false and the gate is send-locked (RETRO_COPY_APPROVED=0): enable after Fable's copy GO + the captain's approval land in the PR that flips the lock and the wave file is in place. Kill switch: /etc/hydra/credit-verify-notify.disabled. DOCUMENTS ALREADY ON FILE ARE NEVER ASKED FOR (captain standing order \"make sure you arent asking for things from users that already submitted documents and we approved. dont piss anyoen off\"): users on /var/lib/credit-trust/proof-on-file.json (any kind) are skipped, a missing or >3h-old list means zero asks that run and a non-zero exit, human-approved requests are never asked about, and the gate skips anyone whose Intercom conversations already hold a user-attached document or a credit-proof tag.",
+      "enabled": false,
+      "createdAtMs": 1792108800000,
+      "updatedAtMs": 1792108800000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "11,26,41,56 * * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "verify-wave",
+          "--mode",
+          "apply",
+          "--wave-file",
+          "/var/lib/hydra/credit-review/waves/retro-past.csv",
+          "--max-users",
+          "100",
+          "--daily-max-notes",
+          "600",
+          "--pace-seconds",
+          "1"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 1500
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
       }
     },
     {
@@ -1337,6 +1421,202 @@
         ],
         "cwd": "/opt/hydra",
         "timeoutSeconds": 1200
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
+      }
+    },
+    {
+      "id": "5bef065c-1c0a-5fa8-a74f-fc34afb487dc",
+      "agentId": "operations",
+      "createdAtMs": 1792112400000,
+      "updatedAtMs": 1792112400000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": true,
+      "name": "credit-verify-proof-intercom",
+      "description": "Supporting-document forensics, SHADOW (H3; captain's first principle 2026-10-15: proof by email or Intercom, fraud-checked before it counts). Every 30 min: classifies Intercom conversations whose attachment cache changed in the last 2 days (one read-only Intercom GET each) and analyses each new customer attachment of a proof conversation (a file sent after a teammate/bot asked for documentation) in a sandboxed systemd transient unit with no network: file sniff, image provenance/C2PA/AI-generator markers, PDF revisions/fonts/overlays/signatures, OCR content checks, cross-account reuse. Writes only /var/lib/hydra-credit-verify/proof.sqlite (signals with cited regions, hashes, verdicts; no document text). Changes no credit, sends nothing. Kill switch: /etc/hydra/credit-verify.disabled. Docs: docs/credit-verification/proof-forensics.md.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "5,35 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-proof.py",
+          "intercom",
+          "--days",
+          "2",
+          "--max-files",
+          "300"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 1700
+      }
+    },
+    {
+      "id": "b08cbb96-e5b4-59d6-95b1-a4cbddac9022",
+      "agentId": "operations",
+      "createdAtMs": 1792112400000,
+      "updatedAtMs": 1792112400000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": false,
+      "name": "credit-verify-proof-email",
+      "description": "DISABLED until the inbound verification address (verify@) exists - credit-trust V2 ticket. Supporting-document forensics for the EMAIL channel, SHADOW (E-IN). Every 10 min: reads raw messages delivered to /var/lib/hydra-credit-verify/inbound-email/new. A message counts only if the trusted receiving MTA authenticated the sender (dmarc=pass or aligned dkim=pass) and the address is the confirmed email of exactly one Muso user (GET /admin/user); its attachments get the same sandboxed forensics as Intercom files (source=email). Spoofed or unknown senders are filed under rejected/ with the reason; nothing is attached or sent.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/10 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-proof.py",
+          "email"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 540
+      }
+    },
+    {
+      "id": "1b9a3f26-bc83-537f-8aff-f7c04201e2dd",
+      "agentId": "operations",
+      "createdAtMs": 1792368000000,
+      "updatedAtMs": 1792368000000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": true,
+      "name": "credit-verify-proof-stage2",
+      "description": "Decider stage 2, SHADOW (Fable backlog ruling 2, 2026-10-19: approve from the proof on file, shadow first; live only after Fable's 50-row sample shows >= 95% agreement, 0 false GENUINE and 0 false FORGED (see docs)). Hourly: takes up to 40 users whose credit requests the decider holds as 'proof on file' (paid first, oldest first), reads their request/track/names from Trino (read-only SELECTs with a query time limit; never the admin API), fetches the documents in their Intercom proof conversations (one read-only Intercom GET per conversation, then the cached originals, else the customer's own attachments into a private temp dir, deleted after; a run where every GET fails is an Intercom outage: no rows written, non-zero exit), runs the H3 sandboxed forensics once per file against every held track, and records what the decider WOULD do per request and role (approve / reject_hold / human / review / need_more / no_document / undetermined) in the stage2_shadow table of /var/lib/hydra-credit-verify/proof.sqlite. Changes no credit, sends nothing. Kill switch: /etc/hydra/credit-verify.disabled. Sample for Fable: credit-proof.py stage2-sample. Docs: docs/credit-verification/proof-forensics.md.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "20 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-proof.py",
+          "stage2",
+          "--max-users",
+          "40"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 3300
+      }
+    },
+    {
+      "id": "7d0b6e7f-62c2-5201-b075-1f942621cee2",
+      "agentId": "operations",
+      "name": "credit-digest-dm-0800-ny",
+      "description": "Credit gate #7 (Fable data/captain-calls-fable-d5/credit-gate-1019.md; firstmate 081, DM host (a)): at 08:00 New York the Ops SOUL fetches the credit-trust board's Block Kit digest of yesterday's Ops-agent credit decisions (GET /api/digest/slack, H-DevOps #4242; board agent token from /etc/hydra/credit-trust-board.env, Vault secret/k8s/monitoring/credit-trust-board agent_token) and DMs it to Jan (U038BM16T7W) as the operations bot: counters vs caps, exceptions by class, and a button to the board where veto/confirm happen (core decides). Read-only on the board. While the board has no ledger (503 waiting_for_data) nothing is sent, never an empty digest. Once per New York day (state /var/lib/hydra/credit-digest-dm). Kill switch /etc/hydra/credit-digest-dm.disabled. Prints NO_REPLY when quiet; one line + exit 1 when a due digest could not be delivered.",
+      "enabled": true,
+      "createdAtMs": 1792432800000,
+      "updatedAtMs": 1792432800000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 8 * * *",
+        "tz": "America/New_York"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "bash",
+          "/opt/hydra/scripts/credit-digest-dm.sh"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 120
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
+      }
+    },
+    {
+      "id": "f5fc0ebe-8dc2-5414-8c75-5913ddedb278",
+      "agentId": "operations",
+      "name": "credit-trust-score-approve-15m",
+      "description": "Captain 2026-10-20 ~11:30Z 'approve low risk credits' (firstmate 110): credit-review.py score-approve --mode apply executes the validator's approve verdict on held user_verification_needed rows with total risk < 30, every other guard intact (scripts/credit_review/score_approve.py; registry credit-trust-score-approve). Risk 0 first, paid first, <= 100 per run, ledger before write, reversible per run. Runs at :10/:25/:40/:55 between decider runs. Kill switch /etc/hydra/credit-trust-score-approve.disabled. NO_REPLY when nothing was approved; one summary line otherwise; exit 1 on write errors.",
+      "enabled": true,
+      "createdAtMs": 1792103400000,
+      "updatedAtMs": 1792103400000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "10,25,40,55 * * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "score-approve",
+          "--mode",
+          "apply"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 900
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "C0APB2CMM7C",
+        "accountId": "operations",
+        "bestEffort": false
+      }
+    },
+    {
+      "id": "9a3c6e21-4b7d-5f10-8e92-6c1d3b0a5f47",
+      "agentId": "operations",
+      "name": "credit-provisional-tracker-0600",
+      "description": "Captain 2026-10-23 20:03Z/20:04Z/20:07Z ('approve but give them [7 days]... keep track of these somewhere to remove if not backed up'), Fable backup-threshold-ruling-1023.md section 6; owner credit-trust-llm-t01. Daily read-only tracker of every PROVISIONAL credit (core metadata.approval.provisional): backup clock = 7 days from the first DELIVERED ask (hydra verify ledger), documents on file, due / due soon / no ask yet, the day-7 route (docs -> plain approve; else live Spotify+Tidal check, else the removal gate; this job never writes), core proofDueAt mismatches, and watchdog class backup_ask_undelivered (provisional, no delivered ask after 48 h). Full JSON for the board at /var/lib/hydra/credit-review/provisional-tracker/latest.json.",
+      "enabled": true,
+      "createdAtMs": 1792792800000,
+      "updatedAtMs": 1792792800000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 6 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "provisional-tracker",
+          "--out",
+          "/var/lib/hydra/credit-review/provisional-tracker/latest.json",
+          "--post-board"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 600
       },
       "delivery": {
         "mode": "announce",

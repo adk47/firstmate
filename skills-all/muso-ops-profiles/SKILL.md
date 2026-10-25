@@ -109,6 +109,8 @@ WHERE rs.profileid = '<profile_id>'
 
 **Worked example (2026-07-23, Israel Anyanele):** dups `19250f2e…`/`76465024…` + survivor `e3d33a4d…` all claimed by the same workspace → reverted claimings 1592872/1592871 → merge accepted, survivor retained the claim via its own claiming 1592870.
 
+**Merge keep conflicts — HOLD.** Do not execute a merge / unmerge / track-merge ticket tagged `merge-keep-conflict`, nor one whose OPEN sibling (named by a `merge-keep-conflict-with:<id>` tag on either ticket) still carries it: Caroline filed two requests in one conversation that keep different profiles / tracks. A human reconciles them with the customer, closes the ticket they reject and removes `merge-keep-conflict` from the one they keep; a closed sibling never holds. Nor one tagged `merge-intake-stale`: a follow-up's merge targets could not be written to its description, so the description is incomplete; a human removes the tag once it is fixed. Same rule as `scripts/lib/merge_keep_conflict.py`, which every merge sweep uses.
+
 **Caroline dedupe tickets carry TWO clearly-separated blocks — trust them differently.**
 
 **`details.dedupe_verdict` — SERVER-VERIFIED FACTS. You MAY rely on these.** Every field

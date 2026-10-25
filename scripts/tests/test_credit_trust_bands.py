@@ -8,6 +8,7 @@ Set IDP_CHECKOUT=<industry-data-processing checkout> to also compare against the
 
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import hashlib
 import os
 import sys

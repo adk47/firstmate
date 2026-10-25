@@ -438,7 +438,12 @@ rmdir "$_probe_dir" 2>/dev/null || true
 proc_link_targets() {
   local l t
   if [ "$FIND_GNU" -eq 1 ]; then
-    find "$PROC_DIR" -ignore_readdir_race -mindepth 2 -maxdepth 3 \
+    # LC_ALL=C: proc_stderr_benign parses find's diagnostics, and GNU find
+    # quotes paths as U+2018/U+2019 under a UTF-8 locale. The systemd timer runs
+    # with LANG=C.UTF-8 (an ssh shell has it unset), so without this every
+    # enumeration was "unusable" and the gate held all 2,080 candidates on the
+    # 19 Oct live run (MUS-16672).
+    LC_ALL=C find "$PROC_DIR" -ignore_readdir_race -mindepth 2 -maxdepth 3 \
       \( -name cwd -o -path "$PROC_DIR/[0-9]*/fd/*" \) -printf '%l\n'
     return
   fi

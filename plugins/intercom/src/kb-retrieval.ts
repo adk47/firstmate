@@ -23,6 +23,7 @@
 
 import { getActiveMemorySearchManager } from "openclaw/plugin-sdk/memory-host-search";
 import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
+import { citationUrlForPath, isHelpCentrePath, loadHelpManifest, type HelpManifest } from "./help-manifest.js";
 import type { IntercomAccountConfig, IntercomSessionState, KbSnippet } from "./types.js";
 
 export type { KbSnippet };
@@ -90,22 +91,86 @@ export async function retrieveKbSnippets(
   }
 }
 
+/** Max help-centre hits in one block; curated reference hits keep the remaining slots. */
+export const HELP_CENTRE_MAX_SNIPPETS = 2;
+/** Over-fetch factor so 60 help-centre files cannot crowd every curated hit out of the raw top-K. */
+const KB_OVERFETCH = 4;
+/** Window growth per extra pass when the previous window held no curated hit. */
+const KB_WIDEN = 5;
+/** Safety bound on extra passes (5 -> 20, 100, 500, 2500 hits); the shared time box also applies. */
+const KB_MAX_WIDEN_PASSES = 4;
+
+/** Map a raw memory-search hit to a KbSnippet; citationUrl comes from the manifest, never from snippet text. */
+export function toKbSnippet(
+  r: { snippet: string; path?: string; score?: number },
+  manifest: HelpManifest | null,
+): KbSnippet {
+  const citationUrl = citationUrlForPath(r.path, manifest);
+  return { snippet: r.snippet, path: r.path, score: r.score, ...(citationUrl ? { citationUrl } : {}) };
+}
+
 /**
- * Render the injected `[KNOWLEDGE_BASE]` block. SNIPPET TEXT ONLY: never the path
- * or citation — SOUL forbids naming reference files to customers, and the
- * sanitizer bans filenames. Empty snippets -> empty string (no block).
+ * Reserve slots: curated hits keep priority, help-centre hits are capped. Asks
+ * the inner searcher for extra results (curated files can rank below many
+ * help-centre chunks), then keeps curated in rank order and fills the rest with
+ * at most HELP_CENTRE_MAX_SNIPPETS help-centre hits, total <= maxResults.
+ */
+export function withHelpCentreCap(inner: KbSearcher): KbSearcher {
+  return async (query, opts) => {
+    const fetchWindow = async (factor: number) => {
+      const asked = opts.maxResults * factor;
+      const all = await inner(query, { ...opts, maxResults: asked });
+      return { all, truncated: all.length >= asked };
+    };
+    let factor = KB_OVERFETCH;
+    let { all, truncated } = await fetchWindow(factor);
+    // Help-centre keeps at most HELP_CENTRE_MAX_SNIPPETS slots, so once this many
+    // curated hits are in hand more widening cannot change the output. The floor of 1
+    // preserves the old behaviour when maxResults <= HELP_CENTRE_MAX_SNIPPETS.
+    const curatedQuota = Math.max(1, opts.maxResults - HELP_CENTRE_MAX_SNIPPETS);
+    const curatedCount = () => all.filter((s) => !isHelpCentrePath(s.path)).length;
+    // A full window short of the curated quota may be hiding curated hits below many
+    // help-centre chunks: keep widening until the quota is met or the corpus is exhausted.
+    for (let pass = 0; pass < KB_MAX_WIDEN_PASSES && truncated && curatedCount() < curatedQuota; pass++) {
+      factor *= KB_WIDEN;
+      ({ all, truncated } = await fetchWindow(factor));
+    }
+    const curated = all.filter((s) => !isHelpCentrePath(s.path)).slice(0, opts.maxResults);
+    const help = all
+      .filter((s) => isHelpCentrePath(s.path))
+      .slice(0, Math.min(HELP_CENTRE_MAX_SNIPPETS, opts.maxResults - curated.length));
+    return [...curated, ...help];
+  };
+}
+
+/**
+ * Render the injected `[KNOWLEDGE_BASE]` block. Never the file path. The one
+ * identifier the customer may see is a help-centre article link, handed over as
+ * an explicit per-snippet field in a subordinate section. Empty snippets -> "".
  */
 export function renderKnowledgeBaseBlock(snippets: KbSnippet[]): string {
   if (!snippets || snippets.length === 0) return "";
-  const bullets = snippets
-    .map((s) => `- ${s.snippet.replace(/\s+/g, " ").trim()}`)
-    .filter((b) => b.length > 2);
+  const clean = (t: string) => t.replace(/\s+/g, " ").trim();
+  const isHelp = (s: KbSnippet) => isHelpCentrePath(s.path) || !!s.citationUrl;
+  const curated = snippets.filter((s) => !isHelp(s)).map((s) => `- ${clean(s.snippet)}`);
+  const help = snippets
+    .filter(isHelp)
+    .map((s) => `- ${clean(s.snippet)}${s.citationUrl ? ` [article link: ${s.citationUrl}]` : ""}`);
+  const bullets = [...curated, ...help].filter((b) => b.length > 2);
   if (bullets.length === 0) return "";
-  return [
-    "[KNOWLEDGE_BASE] (verified Muso facts -- ground your answer in these; never quote filenames or IDs to the customer)",
-    ...bullets,
-    "[/KNOWLEDGE_BASE]",
-  ].join("\n");
+  const lines = [
+    "[KNOWLEDGE_BASE] (verified Muso facts -- ground your answer in these; never quote filenames or IDs to the customer, except a help-centre article link given below)",
+    ...curated.filter((b) => b.length > 2),
+  ];
+  const helpBullets = help.filter((b) => b.length > 2);
+  if (helpBullets.length > 0) {
+    lines.push(
+      "Help-centre articles (supporting; the facts above win if they differ). If one clearly answers the question, you may close with one final line `More detail here: <article link>` using ONLY an article link shown here, exactly as written. Otherwise add no link:",
+      ...helpBullets,
+    );
+  }
+  lines.push("[/KNOWLEDGE_BASE]");
+  return lines.join("\n");
 }
 
 // Outbound regurgitation guard, mirroring stripConversationContext: a model that
@@ -154,7 +219,8 @@ export function buildKbRetrieveFn(
       maxResults: searchOpts.maxResults,
       minScore: searchOpts.minScore,
     });
-    return (results ?? []).map((r) => ({ snippet: r.snippet, path: r.path, score: r.score }));
+    const manifest = loadHelpManifest();
+    return (results ?? []).map((r) => toKbSnippet(r, manifest));
   };
 
   const retrieveOpts = {
@@ -164,6 +230,6 @@ export function buildKbRetrieveFn(
   };
 
   return async (state, message) => {
-    state.kbSnippets = await retrieveKbSnippets(message, searcher, retrieveOpts);
+    state.kbSnippets = await retrieveKbSnippets(message, withHelpCentreCap(searcher), retrieveOpts);
   };
 }

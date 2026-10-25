@@ -186,7 +186,8 @@ while :; do
         url: .url,
         status: .status.status,
         customer_profile_id: $ar.customer_profile_id,
-        customer_email: $ar.customer_email
+        customer_email: $ar.customer_email,
+        tags: [.tags[]?.name | ascii_downcase]
       }
     | select(.customer_profile_id != null and .customer_profile_id != "")
   ' >> "$tmp/tickets.jsonl"
@@ -201,6 +202,15 @@ done
 
 ticket_count=$(wc -l < "$tmp/tickets.jsonl" | tr -d ' ')
 echo "close-merged-tickets: pulled $ticket_count open profile-merge tickets" >&2
+
+# Merge keep conflicts: the shared hold rule (scripts/lib/merge_keep_conflict.py; a
+# ticket tagged merge-keep-conflict, or whose open sibling still is, is not worked here
+# until a human reconciles the pair; nor is one tagged merge-intake-stale until a human
+# removes the tag). Every ticket in this list is open.
+python3 "$DIR/../../lib/merge_keep_conflict.py" unheld < "$tmp/tickets.jsonl" > "$tmp/tickets.unheld.jsonl"
+held_count=$(( ticket_count - $(wc -l < "$tmp/tickets.unheld.jsonl" | tr -d ' ') ))
+mv "$tmp/tickets.unheld.jsonl" "$tmp/tickets.jsonl"
+echo "close-merged-tickets: $held_count held by a merge keep conflict (merge-keep-conflict)" >&2
 
 # 3. Pure matching
 bash "$DIR/match-stale-tickets.sh" "$tmp/merges.jsonl" "$tmp/tickets.jsonl" > "$tmp/matches.jsonl"

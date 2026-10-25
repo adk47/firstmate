@@ -21,15 +21,45 @@ setup() {
   # posted. STUB_POST_FAIL=1 models GitHub rejecting the write.
   # A GET is the status lookup behind the CANNOT REVIEW no-clobber guard:
   # it answers with STUB_STATUSES_JSON, or fails when STUB_LOOKUP_FAIL=1.
+  # POSTs that succeed are remembered (newest first) and served back by later
+  # GETs, like GitHub: the read-back after a write must see the row it wrote.
+  # STUB_POST_FAIL_TIMES=N fails the first N POSTs with STUB_POST_FAIL_MSG
+  # (default a 502); STUB_POST_SWALLOW=1 answers 2xx but stores nothing;
+  # STUB_READBACK_FAIL=1 fails only the GETs that follow a POST;
+  # STUB_READBACK_MISS_TIMES=N makes the first N of those GETs omit the posted rows
+  # (read-after-write lag). STUB_POST_FAIL_NOTICE is a line printed to stderr
+  # before a failing POST's error, like qa-gh.sh's kill-switch notice.
+  export STUB_POSTED="$TEST_TMPDIR/posted.json"; printf '[]' > "$STUB_POSTED"
+  export STUB_POST_COUNT="$TEST_TMPDIR/post-count"; printf '0' > "$STUB_POST_COUNT"
+  export STUB_MISS_COUNT="$TEST_TMPDIR/miss-count"; printf '0' > "$STUB_MISS_COUNT"
   cat > "$TEST_TMPDIR/qa-gh.sh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$QA_GH_LOG"
 case "$*" in
   *"--method POST"*) ;;
   *) [ -n "${STUB_LOOKUP_FAIL:-}" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }
-     printf '%s' "${STUB_STATUSES_JSON:-[]}"; exit 0 ;;
+     if [ -n "${STUB_READBACK_FAIL:-}" ] && [ "$(cat "$STUB_POST_COUNT")" != 0 ]; then
+       echo "HTTP 502: Bad Gateway" >&2; exit 1
+     fi
+     if [ "$(cat "$STUB_POST_COUNT")" != 0 ]; then
+       m=$(( $(cat "$STUB_MISS_COUNT") + 1 )); printf '%s' "$m" > "$STUB_MISS_COUNT"
+       [ "$m" -le "${STUB_READBACK_MISS_TIMES:-0}" ] && { printf '%s\n' "${STUB_STATUSES_JSON:-[]}"; exit 0; }
+     fi
+     jq -c --argjson base "${STUB_STATUSES_JSON:-[]}" '. + $base' "$STUB_POSTED"; exit 0 ;;
 esac
+n=$(( $(cat "$STUB_POST_COUNT") + 1 )); printf '%s' "$n" > "$STUB_POST_COUNT"
 [ -n "${STUB_POST_FAIL:-}" ] && { echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; }
+if [ "$n" -le "${STUB_POST_FAIL_TIMES:-0}" ]; then
+  [ -n "${STUB_POST_FAIL_NOTICE:-}" ] && echo "$STUB_POST_FAIL_NOTICE" >&2
+  echo "${STUB_POST_FAIL_MSG:-HTTP 502: Bad Gateway}" >&2; exit 1; fi
+[ -n "${STUB_POST_SWALLOW:-}" ] && exit 0
+st=""; ds=""
+while [ $# -gt 0 ]; do
+  case "$1" in -f) case "$2" in state=*) st="${2#state=}" ;; description=*) ds="${2#description=}" ;; esac; shift ;; esac
+  shift
+done
+jq -c --arg s "$st" --arg d "$ds" '[{context:"qa-review",state:$s,description:$d,created_at:"2026-10-20T00:00:00Z"}] + .' \
+  "$STUB_POSTED" > "$STUB_POSTED.n" && mv "$STUB_POSTED.n" "$STUB_POSTED"
 exit 0
 STUB
   chmod +x "$TEST_TMPDIR/qa-gh.sh"
@@ -270,4 +300,81 @@ CANNOT_ROW='{"context":"qa-review","state":"failure","description":"CANNOT REVIE
   [ "$status" -eq 0 ]
   grep -q -- '--method POST' "$QA_GH_LOG"
   grep -q 'state=failure' "$QA_GH_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# Transient retry + read-back (Fable QA eval 2026-10-20, F5)
+# ---------------------------------------------------------------------------
+
+@test "a transient 5xx is retried and the status lands" {
+  export QA_STATUS_BACKOFF_S=0 STUB_POST_FAIL_TIMES=2
+  run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO — 0 blocking findings"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c -- '--method POST' "$QA_GH_LOG")" -eq 3 ]
+  [[ "$output" == *"retrying"* ]]
+}
+
+@test "a 429 is retried too" {
+  export QA_STATUS_BACKOFF_S=0 STUB_POST_FAIL_TIMES=1 STUB_POST_FAIL_MSG="HTTP 429: rate limited"
+  run "$SCRIPT" Muso-AI/hydra "$SHA" pending "QA review queued"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c -- '--method POST' "$QA_GH_LOG")" -eq 2 ]
+}
+
+@test "a 4xx (app-pin 403) is never retried and exits 3 at once" {
+  export QA_STATUS_BACKOFF_S=0 STUB_POST_FAIL_TIMES=5 STUB_POST_FAIL_MSG="HTTP 403: Resource not accessible by integration"
+  run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO"
+  [ "$status" -eq 3 ]
+  [ "$(grep -c -- '--method POST' "$QA_GH_LOG")" -eq 1 ]
+  [[ "$output" == *"after 1 attempt(s)"* ]]
+}
+
+@test "transient failures on every attempt exit 3 after the attempt budget" {
+  export QA_STATUS_BACKOFF_S=0 QA_STATUS_ATTEMPTS=3 STUB_POST_FAIL_TIMES=9
+  run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO"
+  [ "$status" -eq 3 ]
+  [ "$(grep -c -- '--method POST' "$QA_GH_LOG")" -eq 3 ]
+}
+
+@test "a definite 4xx behind a qa-gh notice line is still never retried" {
+  export QA_STATUS_BACKOFF_S=0 STUB_POST_FAIL_TIMES=5 \
+    STUB_POST_FAIL_NOTICE="qa-gh: /var/lib/hydra/qa-gh-host-identity present — using the host gh identity (kill switch active)" \
+    STUB_POST_FAIL_MSG="gh: Resource not accessible by integration (HTTP 403)"
+  run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO"
+  [ "$status" -eq 3 ]
+  [ "$(grep -c -- '--method POST' "$QA_GH_LOG")" -eq 1 ]
+  [[ "$output" == *"after 1 attempt(s)"* ]]
+}
+
+@test "a 5xx behind a qa-gh notice line is still retried" {
+  export QA_STATUS_BACKOFF_S=0 STUB_POST_FAIL_TIMES=1 \
+    STUB_POST_FAIL_NOTICE="qa-gh: /var/lib/hydra/qa-gh-host-identity present — using the host gh identity (kill switch active)" \
+    STUB_POST_FAIL_MSG="gh: Bad Gateway (HTTP 502)"
+  run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c -- '--method POST' "$QA_GH_LOG")" -eq 2 ]
+}
+
+@test "a 2xx whose row the read-back cannot find exits 3 (status still missing)" {
+  export STUB_POST_SWALLOW=1 QA_STATUS_READBACK_DELAY_S=0
+  run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"read-back does not show it"* ]]
+  [ "$(grep -c -- '--method POST' "$QA_GH_LOG")" -eq 1 ]
+}
+
+@test "a read-back that lags once is re-read and succeeds, with no second POST" {
+  export STUB_READBACK_MISS_TIMES=1 QA_STATUS_READBACK_DELAY_S=0
+  run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c -- '--method POST' "$QA_GH_LOG")" -eq 1 ]
+  [ "$(grep -vc -- '--method POST' "$QA_GH_LOG")" -eq 2 ]
+}
+
+@test "an unreadable read-back after a 2xx is a warning, not a failure (no duplicate write)" {
+  export STUB_READBACK_FAIL=1
+  run "$SCRIPT" Muso-AI/hydra "$SHA" success "GO"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"could not read it back"* ]]
+  [ "$(grep -c -- '--method POST' "$QA_GH_LOG")" -eq 1 ]
 }

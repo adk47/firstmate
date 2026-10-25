@@ -6,14 +6,31 @@
 bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
-SCRIPT="$HYDRA_REPO/scripts/sync-from-server.sh"
-# Real git-tracked paths: --only refuses untracked ones. A skill rename is a one-line fix here.
+# Tracked paths --only will accept. They live in a per-test fixture repo, not the
+# shared checkout: CI runs the corpus `bats --jobs 8`, and the script resolves
+# HYDRA_ROOT from its own location and runs `git ls-files` there, so against the
+# real worktree this suite's pass/fail depended on every other suite (MUS-14415).
 readonly TRACKED_A=skills-all/babysit/SKILL.md TRACKED_B=skills-all/agent-bridge-request/SKILL.md
 
 setup() {
   TEST_TMPDIR="$(mktemp -d)"
   export TEST_TMPDIR RSYNC_CALLS="$TEST_TMPDIR/rsync.calls"
   : > "$RSYNC_CALLS"
+
+  # Private tempdir for the script's own mktemp -t, and a private git repo
+  # holding a copy of the script, so HYDRA_ROOT is this test's alone.
+  mkdir -p "$TEST_TMPDIR/tmp"; export TMPDIR="$TEST_TMPDIR/tmp"
+  FIXTURE="$TEST_TMPDIR/repo"
+  mkdir -p "$FIXTURE/scripts"
+  cp "$HYDRA_REPO/scripts/sync-from-server.sh" "$FIXTURE/scripts/"
+  SCRIPT="$FIXTURE/scripts/sync-from-server.sh"
+  local f
+  for f in "$TRACKED_A" "$TRACKED_B" workspaces/cmo/skills/accuracy-protocol/SKILL.md; do
+    mkdir -p "$FIXTURE/$(dirname "$f")"; echo "$f" > "$FIXTURE/$f"
+  done
+  git -C "$FIXTURE" init -q
+  git -C "$FIXTURE" add -A
+  git -C "$FIXTURE" -c user.email=t@t -c user.name=t commit -q -m fixture
 
   mkdir -p "$TEST_TMPDIR/bin"
   # rsync stub: record argv, emit a fake itemize transfer line so the script's

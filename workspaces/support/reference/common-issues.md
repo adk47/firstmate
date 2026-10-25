@@ -185,6 +185,8 @@ data-integrity issue.
 
 **Resolution path:**
 
+0. **Entry condition – how-to or complaint?** If the customer is asking **where** something is, **how** to switch it on, or **how** to find it (e.g. "where is the live counter," "how do I turn on Live updates") – a how-to, not a complaint that a number is wrong – or says the live counter is not moving, go to section 7b and do NOT file an analytics follow-up. A how-to is never answered with a data complaint. Only continue below when the customer says their data is wrong, missing or stale.
+
 1. Call `profile_status` with whatever profile signal the customer has provided – profile URL, UUID, name, or email from conversation context. Never echo the email back. Acknowledge what you see, e.g. *"I'm looking at your profile right now – latest credit is `<track>` from `<date>`, showing `<N>` credits on file."*
 
 2. Check the basics: analytics need an active Pro or Business plan with a seat assigned to the profile (see `faq.md`). If a subscription or seat is the issue, guide them to fix it in Settings.
@@ -238,6 +240,39 @@ This applies to every category, analytics included. Anywhere `create_ticket` is 
 - "this is being looked at"
 
 If the tool call did not succeed, do not say you escalated. Either retry the tool call or tell the customer the system could not file the ticket right now and ask them to try again in a few minutes. Never imply an escalation happened when it did not.
+
+---
+
+## 7b. "Where is the live counter / live updates?"
+
+**Customer says:** "How do I see the live counter?", "Where do I turn on Live updates?", "My number isn't moving," "I heard there's a live streams number."
+
+This is a how-to. Steps first. Do NOT call `create_ticket` and do NOT use `actionType: analytics-followup` unless the escalation condition at the end of this section holds, or step 1 outcome 3 applies (`support-general` only). Standing rules from section 7 apply: no apologies, no promised timing, no rewards or credits, never tell the customer to email an address. Never explain how the number is computed and never quote a refresh cadence. Describe it only as: *"Live estimate – projected in real time from the latest verified totals, and refined as new data syncs."*
+
+**Resolution path:**
+
+1. **Check eligibility with existing reads, do not guess:**
+   - `founding_status` → founder active / lapsed / never, plus since-year. This is the rollout-audience clause.
+   - `subscription_status` → is there an active Pro or Business subscription.
+   - `profile_analytics_status` → `analytics.entitled: true` means the profile is on their workspace with a seat. A deny `reason` of `no_active_seat` or `profile_not_in_workspace` fails this clause.
+
+   Sort the result into exactly one of three outcomes. A read that could not answer is NOT a "no". If one clause is a confirmed NO and another read is inconclusive, the confirmed NO wins (outcome 2).
+   1. **All three answered and good:** tell them they have it and give the steps.
+   2. **Any clause answered NO** (confirmed negative only): `founding_status` with `ok: true` and `founder_active: false` (lapsed or never); `subscription_status` with `ok: true` and no active Pro or Business plan; `profile_analytics_status` with `analytics.entitled: false` and a deny `reason` of `no_active_seat` or `profile_not_in_workspace`. The Display button is not drawn for them. Say it as a staged rollout: *"Live updates are rolling out in stages and aren't on every account yet."* No date, and do not say which stage is next. If the failing clause is the subscription or the seat, guide them to fix it in Settings as in section 7.
+   3. **Any read NOT conclusive:** `founding_status` or `subscription_status` returning `ok: false` (any `reason`, including `lookup_unavailable`, `owner_undetermined`, `rate_limited`, `ambiguous_workspace`), or `profile_analytics_status` returning `found: false` (`no_match`, `multiple_matches`, `lookup_unavailable`) or a `human_review` deny (`owner_undetermined`, `account_not_resolved`, `check_unavailable`). The eligibility question is unanswered. Do NOT say the Display button is not drawn and do NOT use the staged-rollout line, because the account may be eligible. Take the existing human-review path in SOUL.md (Analytics handling, the `human_review` row): reply *"I can't verify your account details right now, but our team can help – let me flag this for them and someone will be in touch soon."* and file `create_ticket` with `actionType: support-general` in the same turn (Rule 1). Give no steps for the Display button and no figures.
+      - **Exception, a plain how-to with no profile named:** if the only unanswered read is `profile_analytics_status` returning `found: false` with `reason: missing_input` (the customer gave no profile, as in "Where is the live counter?"), and the other two reads are good, this is not a handoff. Do not file a ticket. Give the web steps from step 2 without saying they have the feature, and add: *"If you don't see the Display button, send me the link to the profile you're viewing and I'll check."*
+
+2. **Web steps, and lead with "it's already on":** *"It's already on by default. Go to Analytics, open the Summary card, and select Display at the top right next to the period selector. You'll see a Live updates switch and a Number format choice."*
+
+3. **If the number does not move, walk the reasons in this order:**
+   1. Period is not Lifetime: *"The live number only runs on the Lifetime view. Set the period selector to Lifetime."*
+   2. Number format is Compact: *"Compact rounds to a short figure like 93.4B, so small movements don't show. Pick Full to see every digit move."*
+   3. Live updates was switched off in this browser: *"Switch Live updates back on. It's remembered per browser, so check the one you're using."*
+   4. The profile is not on their workspace: re-check the third eligibility clause.
+
+4. **In the iOS and Android apps there is no switch.** *"In the app there's nothing to turn on. It shows by itself on the Lifetime view of Analytics."* Never name an app version and never say "update your app".
+
+**Escalate only when all five hold:** (a) eligible on all three clauses, (b) Lifetime selected, (c) Live updates on, (d) Full format, and (e) the number is still static or clearly wrong. Anything short of all five is a how-to answer, not an escalation. In the iOS and Android apps there is no switch or format choice, so the app test is three conditions: (a) eligible on all three clauses, (b) the Lifetime view is open, and (e) the number is still static or clearly wrong. When the applicable conditions hold, file `create_ticket` with `actionType: analytics-followup` and continue at section 7 step 4 (the ticket and the one-time SLA quote) and its tone rules. Step 0 of section 7 does not apply to an escalation from 7b. If the reply uses escalation language, the `create_ticket` call happens in the same turn (Rule 1).
 
 ---
 

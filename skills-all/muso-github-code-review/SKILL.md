@@ -314,9 +314,22 @@ diff is not the problem. Fail-closed in the direction of "blocking but honest".
 **When to use it — any INFRASTRUCTURAL reason review is impossible**, not just
 the diff cap: a failed/degraded bundle (every case under "Check the bundle's
 integrity flags FIRST"), a 403/404 that hides the PR, an unreadable file list,
-a thread list that cannot be completed, and a GitHub API rate limit (quota
-exhausted) that blocks the bundle or the CI lookup. The rate-limit case uses the
-fixed wording `CANNOT REVIEW: GitHub API rate limit blocked the review bundle`.
+a thread list that cannot be completed, and a GitHub 403 that blocks the bundle
+or the CI lookup. **Never assume a 403 is an empty quota** (MUS-11176): read the
+bucket **as the same identity the failed call used** (through `qa-gh.sh`, never
+bare `gh`, which may be a different account), then pipe the failing `gh` error text through the classifier and use its
+output verbatim as the reason:
+
+```bash
+OWNER_REPO="Muso-AI/hydra"   # the repo the failed call targeted
+read -r rem rst < <(bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER_REPO" api rate_limit --jq '.resources.core | "\(.remaining) \(.reset)"')
+QA_GH_RATELIMIT_REMAINING=$rem QA_GH_RATELIMIT_RESET=$rst \
+  bash /opt/hydra/scripts/lib/qa-gh-error-class.sh "<failing gh error text>"
+```
+
+It tells a primary hourly quota (`API rate limit exceeded`) from a secondary
+burst limit and from a plain permission 403, and prints the remaining count and
+reset time. Exit 1 means it is not a 403; keep your own concrete reason.
 If you could read the change and chose to block it, that is NO-GO. If you could
 not read the change, that is CANNOT REVIEW. **Never mix them in one verdict**,
 and never dress a tool failure up as a finding to make the verdict look normal.
@@ -419,6 +432,35 @@ doctrine — be specific, cite `file:line`, and prefer real problems over style 
      *more* discriminating must keep the test proving it stays **stable** when the
      flagged content is unchanged. A digest that merely churns silently destroys the
      feature it protects.
+
+### Tier label (MUS-12064) — a blocking finding class (PR label tier, not the blast-radius tier)
+
+Every PR to a prod branch (`baseRefName` is `master` for core-backend, `main` for
+every other repo; a PR into `develop` is exempt) must carry exactly one `tier:0`, `tier:1`, `tier:2` or
+`tier:3` label and a `Tier: N, because ...` line in the body. Tiers: 0 = no user
+impact (tests, docs, alerts, dev-only config, code nothing calls yet, staff-only
+screens, and scripts or CI that cannot change what ships or runs in production); 1 = narrow, user-visible; 2 = broad but reversible; 3 = every
+login or every profile save. The bundle has no labels field, so read them with a GET
+through the shim, then read the body line and check the claim against the diff:
+
+```bash
+bash /opt/hydra/scripts/qa-gh.sh --repo "$OWNER/$REPO" api \
+  "repos/$OWNER/$REPO/issues/$PR/labels" --jq '.[].name'
+```
+
+If that read fails, the verdict is CANNOT REVIEW. Never skip the label half and judge
+from the body line alone.
+
+- **No tier label, or no `Tier: N, because ...` line:** NO-GO, reason `tier missing`.
+- **`tier:0` but the diff touches a path a user's request can reach** (an API route
+  or handler, a rendered page or component, a published API contract, a data
+  pipeline whose output is displayed, a prod manifest) **or a production
+  deployment, rollback or release-gate path** (a deploy or rollback script, a health
+  check or smoke gate, a workflow that publishes or promotes a release), even though
+  no request reaches it: it decides what users get served. NO-GO, reason
+  **`tier understated`**, naming the file that disproves the claim.
+- **Never lower a tier label yourself and never approve a lowering you did not agree
+  to.** Raising a tier is always allowed.
 
 ### Every 🔴 and 🟡 needs a failure scenario
 

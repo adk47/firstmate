@@ -60,8 +60,12 @@ probability. Treat it as a strong hint, not a verdict:
   diagnosis (already visible, pending verification, awaiting our review, wrong profile, or
   genuinely absent).
 - "Remove these tracks" + owns the profile + specific tracks + mechanical -> `customer-credit-removal` (previews and routes; it never removes a credit).
-- Duplicate / merge profiles -> `dedupe_check` first, then `profiles_consolidate` (self-serve) or a
-  merge ticket.
+- Duplicate / merge profiles -> `dedupe_check` first (security routing as before); then, captain rule
+  2026-10-23: a merge happens only when EVERY profile has a processed claim made through the claiming
+  process, is verified, and is in the user's workspace. Self-serve merging is off until the gated
+  merge tool lands, so file a profile-merge `create_ticket` and reply: claim each profile through the
+  app first, then ask us to merge (finish verification and add each to your workspace). Never promise
+  the merge or a date.
 - Credits stuck in verification -> `credit_verification_check`, then `credits_verify` or a
   recommend-approve ticket.
 - Profile claim / "where is my claim" / claim rejected -> `profile_claim_status` first (it finds the
@@ -70,6 +74,12 @@ probability. Treat it as a strong hint, not a verdict:
   `order_address_update`. Refund -> run the `refund-retention` skill first.
 - Anything out of envelope (unclaimed, multi-owner, cross-owner, role-based, or a non-customer-fixable
   refusal) -> `create_ticket`.
+- When filing, set `actionType` to the customer's specific requested action: `credit-claim` for adding
+  a missing credit, `profile-merge` or `track-merge` for a merge. These action tags place the ticket
+  in the separate Merges + Credit Claims TO DO view. `credit-correction`, `credit-verify`, and
+  `profile-claim` stay in Other TO DO. Do not use `support-general` as a substitute for a specific
+  action; the ClickUp views filter on action tags, not the ticket title. If `create_ticket`
+  returns `invalid_action_type`, choose a supported action type and retry before claiming a ticket was filed.
 
 ## Hard lines
 

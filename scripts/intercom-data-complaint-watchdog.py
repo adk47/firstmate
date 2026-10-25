@@ -314,9 +314,10 @@ def resolve_slack_token():
         # priority channel, and only the Ops bot is guaranteed a member there
         # (mirrors close-resolved-conversations.py). devops/clio are last-ditch
         # fallbacks so a page still goes out rather than silently dropping.
-        tok = (accts.get("operations", {}).get("botToken", "")
-               or accts.get("devops", {}).get("botToken", "")
-               or accts.get("clio", {}).get("botToken", ""))
+        from lib.slack_token import resolve_secret
+        tok = (resolve_secret(accts.get("operations", {}).get("botToken", ""))
+               or resolve_secret(accts.get("devops", {}).get("botToken", ""))
+               or resolve_secret(accts.get("clio", {}).get("botToken", "")))
         if tok:
             return tok
     return None

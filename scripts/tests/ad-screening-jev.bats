@@ -288,7 +288,7 @@ stored_and_sent() { echo "sent: $(grep -o -- '--model [^ ]*' "$T/jev.args") stor
   ad 101 | fixture; answers approve 0.9 strong ""
   run "$SCRIPT" --run
   printf '#!/usr/bin/env bash\necho "$@" >"%s/muso.args"\n' "$T" >"$T/muso"; chmod +x "$T/muso"
-  MUSO_BIN="$T/muso" AD_SCREENING_DISABLED_FILE="$T/none" run "$HYDRA_REPO/skills-all/muso-ad-screening/scripts/muso-ad-screening.sh" put 101 "$T/put.101.json"
+  MUSO_ENV=prod MUSO_BIN="$T/muso" AD_SCREENING_DISABLED_FILE="$T/none" run "$HYDRA_REPO/skills-all/muso-ad-screening/scripts/muso-ad-screening.sh" put 101 "$T/put.101.json"
   [ "$status" -eq 0 ]
   [[ "$(cat "$T/muso.args")" == "api PUT /admin/ads/101/screening"* ]]
 }

@@ -190,8 +190,9 @@ def resolve_slack_token():
         except (OSError, ValueError):
             continue
         accts = (cfg.get("channels", {}).get("slack", {}).get("accounts", {}))
-        tok = (accts.get("devops", {}).get("botToken", "")
-               or accts.get("clio", {}).get("botToken", ""))
+        from lib.slack_token import resolve_secret
+        tok = (resolve_secret(accts.get("devops", {}).get("botToken", ""))
+               or resolve_secret(accts.get("clio", {}).get("botToken", "")))
         if tok:
             return tok
     return None

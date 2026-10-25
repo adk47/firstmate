@@ -16,6 +16,9 @@ POST /admin/profiles/merge
 POST /admin/profiles/unmerge
 POST /admin/tracks/merge
 POST /admin/tracks/unmerge
+# Claim verify makes the claimant a profile's verified owner (2026-10-11:
+# 2,424 verifies at a 0.44 s median gap; impostor claims on popular artists).
+POST /admin/claiming/:id/verify
 
 # Destructive / account endpoints marked "⚠️ AARON ONLY" in
 # muso-ops-admin/SKILL.md but previously enforced by DOCTRINE ONLY — they

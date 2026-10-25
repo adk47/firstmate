@@ -186,6 +186,19 @@ The write is audited and echoes `>> PROD <<` on stderr — that's the expected
 environment notice, not an error. Exit 0 = applied; exit 5 = policy refused
 (the stderr `error.hint` names the missing artifact).
 
+**Pace limit (2026-10-11): at most ONE claim verify per 20 seconds, host-wide.**
+Verifying a claim makes the claimant the verified owner of the profile. Since
+09-01, 2,424 verifies went out at a 0.44 s median gap, which is a loop and not a
+review, and impostor claims got through that way. The muso prewrite hook and
+`muso-admin-api.sh` both refuse a verify inside 20 s of the previous one (muso
+exit 5, "claim verifies are limited to one per 20s"). That refusal means you
+are going too fast: review the next claim, do not retry or sleep-loop around
+it. Through `muso-admin-api.sh`, `POST /admin/claiming/:id/verify` is also a
+tier-2 endpoint: `--confirmed-by <approver>` + `--approval-msg-id <ts>`, and a
+god-mode requester still needs `--approval-msg-id`. Caroline's customer
+self-verify (`profiles_claim_self`) is OFF (`openclaw-edge.json`), so every
+claim reaches this human-reviewed queue.
+
 Post confirmation:
 ```
 ✅ Claim #12345 approved for John Producer.

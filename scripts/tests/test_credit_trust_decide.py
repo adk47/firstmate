@@ -9,13 +9,16 @@ faked (fixtures shared with test_credit_review.py). Run:
 
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import dataclasses
+from datetime import timedelta
 import json
 import os
 import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import warnings
 from pathlib import Path
 
@@ -39,11 +42,20 @@ PROFILES["art-nopop"] = {"name": "No Pop Artist", "rawProfiles": []}
 
 
 def req(rid, *, uid=500, pid=T.PID_GOOD, track="small", roles=("Mixing",), vd_rules=None, errors=None, **kw):
+    # The row's own stored spotifyPopularity follows the catalog track, as on prod
+    # (core-backend's agent guard reads the STORED value).
+    kw.setdefault("pop", (TRACKS.get(track) or {}).get("popularity", 20))
     r = T.request(rid, pid=pid, track=track, roles=roles, status="unverified", approved=False, risk=40, **kw)
     r["userId"] = uid
     r["verificationData"]["rule_risk_percent"] = dict(vd_rules or {})
     if errors:
         r["verificationData"]["rule_errors"] = errors
+    return r
+
+
+def anchored(r):
+    """E1 (Fable review-audit-1021): a positive anchor for the paid provisional arm."""
+    r["verificationData"]["is_approved"] = True
     return r
 
 
@@ -115,6 +127,10 @@ class Base(unittest.TestCase):
         self._paying, self._log, self._proof = decide.PAYING_USERS_FILE, decide.log, decide.PROOF_ON_FILE
         decide.PAYING_USERS_FILE = Path(self.tmp) / "paying-users.json"
         decide.PROOF_ON_FILE = Path(self.tmp) / "proof-on-file.json"
+        # firstmate 125: the host's switch file must never leak into a test run (node-8 CI).
+        self._prov_switch = decide.PROVISIONAL_PAID_SWITCH
+        decide.PROVISIONAL_PAID_SWITCH = Path(self.tmp) / "provisional-paid.disabled"
+        self.addCleanup(setattr, decide, "PROVISIONAL_PAID_SWITCH", self._prov_switch)
         self.proof()
         self.logged = []
         decide.log = self.logged.append
@@ -124,13 +140,16 @@ class Base(unittest.TestCase):
         decide.WRITE_LOCK = self._lock
         decide.PAYING_USERS_FILE, decide.log, decide.PROOF_ON_FILE = self._paying, self._log, self._proof
 
-    def proof(self, entries=(), generated_at="2026-10-11T02:12:00Z", sources=None):
+    def proof(self, entries=(), generated_at="2026-10-11T02:12:00Z", sources=None, contacts=()):
         """The proof-on-file export as the producer lane writes it."""
         entries = list(entries)
         decide.PROOF_ON_FILE.write_text(json.dumps({
             "generated_at": generated_at,
+            "gmail_contacts_90d": {"generated_at": generated_at, "source": "test", "user_ids": list(contacts)},
             "sources": sources if sources is not None else [
-                {"name": "core_proofs", "generated_at": generated_at, "count": len(entries)}],
+                {"name": "core", "generated_at": generated_at, "count": len(entries)},
+                {"name": "cs-intercom", "generated_at": generated_at, "stale": False, "count": 0},
+                {"name": "cs-gmail", "generated_at": generated_at, "stale": False, "count": 0}],
             "users": len({e["user_id"] for e in entries}), "entries": entries}))
 
     def go(self, rows, raws=None, judge=None, mode="apply", skip=None, policy=POLICY, admin_requests=(),
@@ -327,6 +346,8 @@ class Decisions(Base):
         self.assertEqual(res.n1, 1)
         res2, _ = self.go([req(uuid_of(13))], {"small": [T.raw("Serban Ghenea", "mixing engineer")]})
         self.assertEqual(self.decisions()[uuid_of(13)]["n1"], 1)
+        self.go([req(uuid_of(15), uid=650, roles=("Remixer",))], {"small": [T.raw("DJ X", "remixer")]})
+        self.assertEqual(self.decisions()[uuid_of(15)]["n1"], 1)
 
     def test_model_outage_defers_instead_of_asking_users(self):
         res, w = self.go([req(uuid_of(14), track="t3")], judge=FakeJudge(JudgeResult(ok=False, error="codex: quota")))
@@ -408,7 +429,15 @@ class Decisions(Base):
             self.db.execute("DELETE FROM decision_outcomes")
         self.assertEqual(decide.revert(self.db, res.run_id, apply=False)["approved_ids"], [uuid_of(26)])
         w = Writer(self.db)
-        out = decide.revert(self.db, res.run_id, apply=True, writer=w)
+        # captain 2026-10-23 (firstmate 104/105/106): approved -> unverified hides the credit, so
+        # without the live Spotify+Tidal gate it is refused and nothing is written ...
+        with mock.patch.object(decide.dsp_gate, "WIRED", False), self.assertRaises(SystemExit) as cm:
+            decide.revert(self.db, res.run_id, apply=True, writer=w)
+        self.assertIn("live_dsp_gate_required", str(cm.exception.code))
+        self.assertEqual(w.calls, [])
+        # ... and the write mechanics stay as they were once the gate is wired
+        with mock.patch.object(decide.dsp_gate, "WIRED", True):
+            out = decide.revert(self.db, res.run_id, apply=True, writer=w)
         self.assertEqual(w.calls[0]["status"], "unverified")
         self.assertEqual(w.calls[0]["expected"], "approved")
         self.assertEqual(out["results"][uuid_of(26)], "unverified")
@@ -610,7 +639,238 @@ class PaidUsersFirst(Base):
         self.assertIsNone(paying)
         self.assertIn("count == len(ids)", why)
 
+    def test_tiers_paid_over_24h_then_paid_under_24h_then_free_oldest_first(self):
+        """Fable ruling 6 (credit-backlog-1019). NOW is 10-11 03:00Z."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900, 901))
+        rows = [req(uuid_of(180), uid=501, created="2026-10-01T00:00:00Z"),          # free, oldest
+                req(uuid_of(181), uid=900, created="2026-10-10T20:00:00Z"),          # paid < 24h
+                req(uuid_of(182), uid=901, created="2026-10-09T00:00:00Z"),          # paid > 24h
+                req(uuid_of(183), uid=900, created="2026-10-08T00:00:00Z")]          # paid > 24h, older
+        self.assertEqual([r["id"] for r in decide.order_rows(rows, frozenset({900, 901}), T.NOW)],
+                         [uuid_of(183), uuid_of(182), uuid_of(181), uuid_of(180)])
+        self.assertEqual([r["id"] for r in decide.order_rows(rows, None, T.NOW)],
+                         [uuid_of(180), uuid_of(183), uuid_of(182), uuid_of(181)], "unknown paying = oldest first")
+
+    def test_paid_not_found_small_track_is_provisionally_approved_free_is_asked(self):
+        """Fable ruling 4: trust yet verify for PAID users (small/medium, NOT_FOUND, nothing
+        against the claim); free users stay on the ask path; big tracks stay strict."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        rows = [anchored(req(uuid_of(190), uid=900, track="t3")), req(uuid_of(191), uid=501, track="t3"),
+                req(uuid_of(192), uid=900, track="t2")]
+        res, w = self.go(rows, {}, judge=judge)
+        d = self.decisions()
+        self.assertEqual((d[uuid_of(190)]["decision"], d[uuid_of(190)]["evidence_kind"], d[uuid_of(190)]["web_verdict"]),
+                         ("approve", "provisional_paid", "NOT_FOUND"))
+        self.assertIn("trust yet verify", d[uuid_of(190)]["reason"])
+        self.assertEqual(d[uuid_of(191)]["decision"], "support", "free user: asked")
+        self.assertEqual(d[uuid_of(192)]["decision"], "support", "big track (pop 70): proof required")
+        self.assertIn(uuid_of(190), [i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]])
+
+    def test_the_provisional_paid_switch_turns_only_that_arm_off(self):
+        """firstmate 125 / Fable review-audit-1021: with the switch file present the paid
+        NOT_FOUND row is NOT provisionally approved; it stays on the support (ask) path."""
+        decide.PROVISIONAL_PAID_SWITCH.write_text("off")
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        res, w = self.go([anchored(req(uuid_of(193), uid=900, track="t3"))], {}, judge=judge)
+        d = self.decisions()[uuid_of(193)]
+        self.assertEqual(d["decision"], "support")
+        self.assertNotEqual(d["evidence_kind"], decide.PROVISIONAL_KIND)
+        self.assertNotIn(uuid_of(193), [i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]])
+
+    # ---- E1 (Fable review-audit-1021) ----
+    def test_e1_paid_and_nothing_contradicts_is_not_an_anchor(self):
+        """The 7 'unverifiable' of the audit: validator declined, catalog UNVERIFIABLE -> no approve."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        res, w = self.go([req(uuid_of(300), uid=900, track="t3")], {}, judge=judge)
+        d = self.decisions()[uuid_of(300)]
+        self.assertEqual(d["decision"], "support")
+        self.assertIn("no positive anchor", d["reason"])
+        self.assertEqual([i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]], [])
+
+    def test_e1_prodgxm_others_only_plus_type_beat_web_is_never_approved(self):
+        """ProdGxm fixture: Producer credited to the artist only (OTHERS_ONLY) and the web finds
+        nothing for the claimant ('type beat' seller) -> stage 2, never approved, even with the
+        validator's approval as an anchor."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        row = anchored(req(uuid_of(301), uid=900, track="t3", roles=("Producer",)))
+        res, w = self.go([row], {"t3": [T.raw("comehelpglo", "producer")]}, judge=judge)
+        d = self.decisions()[uuid_of(301)]
+        self.assertNotEqual(d["decision"], "approve")
+        self.assertNotEqual(d["evidence_kind"], decide.PROVISIONAL_KIND)
+        self.assertEqual([i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]], [])
+
+    def test_e1_pixlpxl_catalog_confirmed_role_is_approved_with_the_citation(self):
+        """pixlpxl fixture: one claimed role CONFIRMED by the catalog (the Atmos mix), the other
+        unverifiable, web NOT_FOUND -> provisional approval citing the confirmed role."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        res, w = self.go([req(uuid_of(303), uid=900, track="t3", roles=("Mixing", "Mastering"))],
+                         {"t3": [T.raw("Real Engineer", "mixer")]}, judge=judge)
+        d = self.decisions()[uuid_of(303)]
+        self.assertEqual((d["decision"], d["evidence_kind"]), ("approve", decide.PROVISIONAL_KIND), d["reason"])
+        self.assertIn("catalog confirms Mixing", d["reason"])
+        d0 = decide.Decision(request_id="x", profile_id="p", user_id=900, track_id="t", track_title="V",
+                             claimed_roles="Immersive Mixing,Mastering", popularity=20, big_track=False,
+                             decision="support", reason="")
+        d0.catalog = "Immersive Mixing=CONFIRMED,Mastering=UNVERIFIABLE"
+        proof = decide.ProofOnFile(frozenset(), frozenset())
+        self.assertEqual(decide.provisional_anchor(d0, {"verificationData": {"is_approved": False}}, proof),
+                         "catalog confirms Immersive Mixing")
+        d0.catalog = "Immersive Mixing=CONFIRMED,Composer=OTHERS_ONLY"
+        self.assertTrue(decide.provisional_anchor(d0, {}, proof).startswith("no:the catalog credits Composer"))
+        self.assertTrue(decide.provisional_anchor(d0, {}, None).startswith("no:the catalog credits"))
+        d0.catalog = "Immersive Mixing=CONFIRMED"
+        self.assertTrue(decide.provisional_anchor(d0, {}, None).startswith("no:proof on file"))
+        self.assertTrue(decide.provisional_anchor(d0, {}, decide.ProofOnFile(frozenset({900}), frozenset())).startswith(
+            "no:proof on file"))
+
+    def test_e1_a_user_with_proof_on_file_goes_to_the_verifier_not_provisional(self):
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        self.proof([{"user_id": 900, "request_id": None, "kind": "pending_doc", "source": "cs-intercom", "ref": "c1"}])
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        res, w = self.go([anchored(req(uuid_of(302), uid=900, track="t3"))], {}, judge=judge)
+        d = self.decisions()[uuid_of(302)]
+        self.assertNotEqual(d["evidence_kind"], decide.PROVISIONAL_KIND)
+        self.assertEqual([i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]], [])
+
+    def test_the_web_check_cap_always_admits_paid_rows_first(self):
+        """firstmate 099 (Fable ruling 6, paid first): with room for ONE web check, the newer
+        paid row is checked and the older free row waits for the next run."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        rows = [req(uuid_of(250), uid=501, track="t3", created="2026-10-01T00:00:00Z"),
+                req(uuid_of(251), uid=900, track="t3", created="2026-10-10T00:00:00Z")]
+        self.go(rows, {}, judge=judge, max_model_calls=1)
+        d = self.decisions()
+        self.assertEqual(d[uuid_of(251)]["web_verdict"], "NOT_FOUND", "paid row web-checked")
+        self.assertEqual((d[uuid_of(250)]["decision"], d[uuid_of(250)]["reason"]),
+                         ("defer", "web-check cap for this run reached; next run"))
+
+    def test_a_row_with_no_user_is_not_labelled_as_the_ask_cap(self):
+        """firstmate 099: a row with no account user id is deferred as such, not as 'daily ask
+        cap reached' (which misreported the cap at 122/400)."""
+        self.proof([])
+        row = req(uuid_of(260), track="t1")
+        row["userId"] = None
+        row.pop("user", None)
+        res, w = self.go([row], {"t1": [T.raw("Real Engineer", "mixer")]})
+        d = self.decisions()[uuid_of(260)]
+        self.assertEqual(d["decision"], "defer")
+        self.assertNotIn("ask cap", d["reason"])
+        self.assertEqual(res.deferred_ask_cap, 0)
+
+    def test_an_overridden_provisional_approval_keeps_no_provisional_kind(self):
+        """firstmate 099 ledger hygiene: when a later guard turns ruling 4's approval into an ask
+        or a hold, decisions.evidence_kind must not still say provisional_paid."""
+        d = decide.Decision(request_id="x", profile_id=None, user_id=1, track_id=None, track_title="", claimed_roles=[],
+                            popularity=10, big_track=False, decision="approve", reason="r")
+        d.evidence_kind = decide.PROVISIONAL_KIND
+        decide._set(d, "support", "server approval guard would refuse (proof_required): documentation required")
+        self.assertIsNone(d.evidence_kind)
+        d.evidence_kind = "catalog_confirmed"
+        decide._set(d, "hold", "x")
+        self.assertEqual(d.evidence_kind, "catalog_confirmed", "only the provisional kind is cleared")
+
+    def test_the_daily_ask_cap_admits_paid_users_first(self):
+        """Ruling 1 + 6: with room for one user, the paid user is asked, the older free one waits."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        self.proof([])
+        rows = [req(uuid_of(210), uid=501, track="t1", created="2026-10-01T00:00:00Z"),
+                req(uuid_of(211), uid=900, track="t1", created="2026-10-09T00:00:00Z")]
+        res, w = self.go(rows, {"t1": [T.raw("Real Engineer", "mixer")]},
+                         policy=dataclasses.replace(POLICY, max_ask_users_per_day=1))
+        asked = [i for c in w.calls if c["status"] == decide.UVN for i in c["ids"]]
+        self.assertEqual(asked, [uuid_of(211)])
+        self.assertTrue(self.decisions()[uuid_of(210)]["reason"].startswith(decide.ASK_CAP_DEFER))
+
+    def test_unconfirmed_provisional_approvals_go_to_the_ops_review_list_never_removal(self):
+        """Ruling 4 as amended (firstmate 073): no day-30 auto-removal. After 30 days without
+        a document the row is LISTED for Ops review (still live); a documented one is not."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        self.go([anchored(req(uuid_of(220), uid=900, track="t3")), anchored(req(uuid_of(221), uid=900, track="t3"))],
+                {}, judge=judge)
+        d = self.decisions()[uuid_of(220)]
+        self.assertIn("never auto-removed", d["reason"])
+        self.assertNotIn("removed on day", d["reason"])
+        self.assertEqual(decide.provisional_review(self.db, None, now=T.NOW), [], "not before day 30")
+        later = T.NOW + decide.timedelta(days=31)
+        listed = decide.provisional_review(self.db, None, now=later)
+        self.assertEqual(sorted(r["request_id"] for r in listed), [uuid_of(220), uuid_of(221)])
+        self.assertTrue(all(r["flag"] == "provisional_unconfirmed_30d" for r in listed))
+        # A user's other decider approval that rode in the same no-deadline v1 note (#1257, one
+        # note per user) is listed too: it has no removal date either.
+        from credit_review import verify_ledger
+        self.db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, big_track, decision, reason, "
+                        "evidence_kind, mode) VALUES ('run-y', ?, ?, 900, 0, 'approve', 't', 'catalog_confirmed', 'apply')",
+                        (decide.utc(T.NOW), uuid_of(222)))
+        self.db.execute("INSERT INTO decision_outcomes (run_id, at, request_id, action, outcome) "
+                        "VALUES ('run-y', ?, ?, 'approve', 'approved')", (decide.utc(T.NOW), uuid_of(222)))
+        self.db.executescript(verify_ledger.SCHEMA)
+        self.db.row_factory = sqlite3.Row
+        c = verify_ledger.claim(self.db, user_key="u900@example.com", day="2026-10-11",
+                                request_ids=[uuid_of(220), uuid_of(222)], message_type="email",
+                                approved_by="U7RP6HKUZ", approval_ref="ref", now=T.NOW)
+        verify_ledger.finalize(self.db, message_row=c["message_row"], status="sent", message_id="1")
+        self.db.execute("UPDATE verify_messages SET created_at = ?", (decide.utc(T.NOW),))
+        listed = decide.provisional_review(self.db, None, now=later)
+        self.assertEqual(sorted((r["request_id"], r["flag"]) for r in listed),
+                         sorted([(uuid_of(220), "provisional_unconfirmed_30d"), (uuid_of(221), "provisional_unconfirmed_30d"),
+                                 (uuid_of(222), "v1_note_unconfirmed_30d")]))
+        self.proof([{"user_id": 900, "request_id": uuid_of(221), "kind": "pending_doc", "source": "intercom", "ref": "c"}])
+        proof, _ = decide.proof_on_file(now=T.NOW)
+        self.assertEqual([r["request_id"] for r in decide.provisional_review(self.db, proof, now=later)], [],
+                         "a document on file for the user covers both")
+
+    def test_paid_provisional_approvals_are_capped_per_user_per_day(self):
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        old = decide.PROVISIONAL_MAX_PER_USER_PER_DAY
+        decide.PROVISIONAL_MAX_PER_USER_PER_DAY = 2
+        try:
+            res, _ = self.go([anchored(req(uuid_of(200 + i), uid=900, track="t3")) for i in range(3)], {}, judge=judge)
+        finally:
+            decide.PROVISIONAL_MAX_PER_USER_PER_DAY = old
+        got = sorted(x["decision"] for x in self.decisions().values() if x["request_id"] in {uuid_of(200 + i) for i in range(3)})
+        self.assertEqual(got, ["approve", "approve", "defer"])
+
+    def test_the_provisional_cap_is_enforced_at_the_write_on_the_write_day(self):
+        """QA review of #1275 @7c1830a: rows decided before UTC midnight but written after it
+        count on the WRITE day, so a run after midnight cannot approve another full cap."""
+        self.paying("2026-10-11T02:30:00Z", ids=(900,))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        yesterday = decide.utc(T.NOW - decide.timedelta(hours=4))   # 10-10 23:00Z, decided
+        written = decide.utc(T.NOW - decide.timedelta(hours=2))     # 10-11 01:00Z, written
+        decide.ensure_schema(self.db)
+        for i in range(2):
+            rid = uuid_of(230 + i)
+            self.db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, big_track, decision, "
+                            "reason, evidence_kind, mode) VALUES ('run-x', ?, ?, 900, 0, 'approve', 't', "
+                            "'provisional_paid', 'apply')", (yesterday, rid))
+            self.db.execute("INSERT INTO decision_outcomes (run_id, at, request_id, action, outcome) "
+                            "VALUES ('run-x', ?, ?, 'approve', 'approved')", (written, rid))
+        self.db.commit()
+        old = decide.PROVISIONAL_MAX_PER_USER_PER_DAY
+        decide.PROVISIONAL_MAX_PER_USER_PER_DAY = 2
+        try:
+            res, w = self.go([anchored(req(uuid_of(240 + i), uid=900, track="t3")) for i in range(2)], {}, judge=judge)
+        finally:
+            decide.PROVISIONAL_MAX_PER_USER_PER_DAY = old
+        d = self.decisions()
+        self.assertEqual({d[uuid_of(240 + i)]["decision"] for i in range(2)}, {"approve"},
+                         "the decision-time count (run day, decided_at) saw none")
+        self.assertEqual([i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]], [],
+                         "the write-time count saw 2 already written today: nothing approved")
+        outs = {r[0] for r in self.db.execute("SELECT outcome FROM decision_outcomes WHERE run_id = ?", (res.run_id,))}
+        self.assertEqual(outs, {"deferred:provisional_user_cap"})
+
     def test_paying_status_never_changes_a_decision(self):
+        """Except ruling 4 (paid NOT_FOUND provisional approval, tested above): with catalog
+        evidence or a big track, paying status only changes the ORDER."""
         res_a, _ = self.go(self.rows(), self.RAWS, mode="shadow")
         self.paying("2026-10-11T02:30:00Z")
         res_b, _ = self.go(self.rows(), self.RAWS, mode="shadow")
@@ -650,9 +910,120 @@ class NeverReAsk(Base):
         self.assertIn("4 before filters, 3 held for proof on file", res.line())
         self.assertIn("1 sent", res.line())
 
+    def test_daily_ask_cap_limits_distinct_users_and_keeps_a_users_batch_whole(self):
+        self.proof([])
+        policy = dataclasses.replace(POLICY, max_ask_users_per_day=2)
+        rows = [req(uuid_of(160), uid=801, track="t1"), req(uuid_of(161), uid=801, track="t9"),
+                req(uuid_of(162), uid=802, track="t1"), req(uuid_of(163), uid=803, track="t1")]
+        res, w = self.go(rows, self.RAWS, policy=policy)
+        self.assertEqual(sorted(self.support_writes(w)), sorted([uuid_of(160), uuid_of(161), uuid_of(162)]))
+        d = self.decisions()
+        self.assertEqual(d[uuid_of(163)]["decision"], "defer")
+        self.assertTrue(d[uuid_of(163)]["reason"].startswith(decide.ASK_CAP_DEFER))
+        self.assertEqual(res.deferred_ask_cap, 1)
+        self.assertIn("1 deferred by the daily ask cap", res.line())
+
+    def test_daily_ask_cap_counts_users_already_asked_today(self):
+        self.proof([])
+        policy = dataclasses.replace(POLICY, max_ask_users_per_day=1)
+        res, w = self.go([req(uuid_of(170), uid=811, track="t1")], self.RAWS, policy=policy)
+        self.assertEqual(self.support_writes(w), [uuid_of(170)])
+        res2, w2 = self.go([req(uuid_of(171), uid=812, track="t1")], self.RAWS, policy=policy)
+        self.assertEqual(self.support_writes(w2), [], "the day's one ask slot is already used")
+        self.assertEqual(res2.deferred_ask_cap, 1)
+
+    def test_ask_cap_is_rechecked_at_the_write_boundary_for_overlapping_runs(self):
+        # Run A decides against an empty day; before it reaches the write lock,
+        # an overlapping run B has already asked another user and used the day's
+        # only slot. Run A must defer at the write boundary (QA on #1251).
+        self.proof([])
+        policy = dataclasses.replace(POLICY, max_ask_users_per_day=1)
+        admin = T.FakeAdmin([], self.RAWS, PROFILES, TRACKS)
+
+        def run_b_sends_first():
+            b = decide.Decision(request_id=uuid_of(181), profile_id=T.PID_GOOD, user_id=822, track_id="t1",
+                                track_title="x", claimed_roles=["Mixing"], popularity=88, big_track=True,
+                                decision="support", reason="run B")
+            decide.record_decision(self.db, "run-B", "apply", b)
+            decide.record_outcome(self.db, "run-B", uuid_of(181), "support", decide.UVN, T.NOW)
+            return T.NOW
+        w = Writer(self.db)
+        res = decide.run(admin, self.db, None, mode="apply", policy=policy, writer=w, now=T.NOW,
+                         clock=run_b_sends_first, rows=[req(uuid_of(180), uid=821, track="t1")])
+        sent = [i for c in w.calls if c["status"] == decide.UVN for i in c["ids"]]
+        self.assertEqual(sent, [], "run B used the day's only slot; run A's ask is deferred at the write boundary")
+        self.assertEqual(res.deferred_ask_cap, 1)
+        outs = [o["outcome"] for o in decide.explain(self.db, uuid_of(180))[0]["outcomes"]]
+        self.assertEqual(outs, ["deferred:daily_ask_cap"])
+
+    def test_ask_cap_uses_the_send_day_not_the_run_start_day(self):
+        self.proof([], generated_at="2026-10-11T23:30:00Z")
+        policy = dataclasses.replace(POLICY, max_ask_users_per_day=1)
+        before = T.NOW.replace(hour=23, minute=45)
+        after = before + timedelta(minutes=20)        # crosses UTC midnight before the PUT
+        admin = T.FakeAdmin([], self.RAWS, PROFILES, TRACKS)
+        decide.run(admin, self.db, None, mode="apply", policy=policy, writer=Writer(self.db), now=before,
+                   clock=lambda: after, rows=[req(uuid_of(190), uid=831, track="t1")])
+        w2 = Writer(self.db)
+        res2 = decide.run(admin, self.db, None, mode="apply", policy=policy, writer=w2, now=after,
+                          rows=[req(uuid_of(191), uid=832, track="t1")])
+        self.assertEqual([i for c in w2.calls for i in c["ids"] if c["status"] == decide.UVN], [],
+                         "the first ask was recorded on the day it was SENT, so the cap holds")
+        self.assertEqual(res2.deferred_ask_cap, 1)
+
+    def test_ask_cap_day_is_read_at_the_support_write_not_before_approvals(self):
+        # QA on #1251 (2nd round): the lock is taken at 23:59, approval writes
+        # finish after midnight, then support is sent; it must count on the new day.
+        self.proof([], generated_at="2026-10-11T23:30:00Z")
+        policy = dataclasses.replace(POLICY, max_ask_users_per_day=1)
+        before = T.NOW.replace(hour=23, minute=59)
+        after = before + timedelta(minutes=3)
+        ticks = iter([before, before] + [after] * 20)   # approval PUT starts and ends before midnight
+        admin = T.FakeAdmin([], self.RAWS, PROFILES, TRACKS)
+        w = Writer(self.db)
+        res = decide.run(admin, self.db, None, mode="apply", policy=policy, writer=w, now=before,
+                         clock=lambda: next(ticks),
+                         rows=[req(uuid_of(200), uid=850), req(uuid_of(201), uid=851, track="t1")])
+        self.assertEqual((res.approved, res.support), (1, 1))
+        at = {o["outcome"]: o["at"] for o in decide.explain(self.db, uuid_of(201))[0]["outcomes"]}
+        self.assertEqual(at[decide.UVN], decide.utc(after))
+        w2 = Writer(self.db)
+        res2 = decide.run(admin, self.db, None, mode="apply", policy=policy, writer=w2, now=after,
+                          rows=[req(uuid_of(202), uid=852, track="t1")])
+        self.assertEqual([i for c in w2.calls for i in c["ids"] if c["status"] == decide.UVN], [])
+        self.assertEqual(res2.deferred_ask_cap, 1)
+
+    def test_a_support_put_in_flight_across_midnight_counts_on_the_later_day(self):
+        # QA on #1251 (3rd round): the PUT starts at 23:59:59 and returns after
+        # midnight; the asks must be booked to the new day.
+        self.proof([], generated_at="2026-10-11T23:30:00Z")
+        policy = dataclasses.replace(POLICY, max_ask_users_per_day=1)
+        pre = T.NOW.replace(hour=23, minute=59, second=59)
+        post = pre + timedelta(seconds=4)
+        ticks = iter([pre] + [post] * 20)       # cap check before the PUT, then the PUT returns
+        admin = T.FakeAdmin([], self.RAWS, PROFILES, TRACKS)
+        res = decide.run(admin, self.db, None, mode="apply", policy=policy, writer=Writer(self.db), now=pre,
+                         clock=lambda: next(ticks), rows=[req(uuid_of(210), uid=861, track="t1")])
+        self.assertEqual(res.support, 1)
+        at = {o["outcome"]: o["at"] for o in decide.explain(self.db, uuid_of(210))[0]["outcomes"]}
+        self.assertEqual(at[decide.UVN], decide.utc(post))
+        w2 = Writer(self.db)
+        res2 = decide.run(admin, self.db, None, mode="apply", policy=policy, writer=w2, now=post,
+                          rows=[req(uuid_of(211), uid=862, track="t1")])
+        self.assertEqual([i for c in w2.calls for i in c["ids"] if c["status"] == decide.UVN], [])
+        self.assertEqual(res2.deferred_ask_cap, 1)
+
+    def test_policy_ask_cap_defaults_and_validates(self):
+        # Fable ruling 1 (credit-backlog-1019): 100 -> 400 users/day after the 48h go-live cap.
+        self.assertEqual(decide.Policy.load().max_ask_users_per_day, 400)
+        with self.assertRaises(ValueError):
+            decide._nonneg_int(-1, "max_ask_users_per_day")
+        with self.assertRaises(ValueError):
+            decide._nonneg_int(True, "max_ask_users_per_day")
+
     def test_unknown_proof_status_sends_no_support_request_at_all(self):
         rows = [req(uuid_of(120), track="t1"), req(uuid_of(121))]
-        cases = {"missing": None, "stale": "2026-10-10T23:00:00Z", "malformed": "{}"}
+        cases = {"missing": None, "old": "2026-10-10T23:00:00Z", "not authoritative": "{}"}  # word the logged reason carries
         for why, content in cases.items():
             if content is None:
                 decide.PROOF_ON_FILE.unlink(missing_ok=True)
@@ -677,19 +1048,59 @@ class NeverReAsk(Base):
         self.assertIsNone(decide.proof_on_file(now=T.NOW)[0])
 
     def test_a_missing_or_stale_source_makes_proof_status_unknown(self):
-        """A user whose proof sits only in the missing source is absent from
-        entries: asking them now would re-ask for documents already given."""
-        sources = {"missing": {"name": "gmail", "count": 0, "missing": True},
-                   "stale": {"name": "intercom", "generated_at": "2026-10-10T00:00:00Z", "count": 0, "stale": True}}
-        for n, (why, src) in enumerate(sources.items()):
-            self.proof(sources=[{"name": "core_proofs", "count": 0}, src])
+        """A user whose proof sits only in an unusable part is absent from entries:
+        asking them now would re-ask for documents already given. The rule is the
+        shared credit_review.proof_parts (all three parts required, for everyone)."""
+        g = "2026-10-11T02:12:00Z"
+        core, inter, gmail = ({"name": "core", "generated_at": g}, {"name": "cs-intercom", "generated_at": g},
+                              {"name": "cs-gmail", "generated_at": g})
+        cases = {
+            "part 'cs-gmail' is missing": [core, inter],
+            "part 'cs-gmail' is marked missing": [core, inter, {"name": "cs-gmail", "missing": True}],
+            "part 'cs-intercom' is marked stale": [core, {**inter, "stale": True}, gmail],
+            "part 'core' is": [{"name": "core", "generated_at": "2026-10-10T00:00:00Z"}, inter, gmail],
+            "stale or missing part(s): x-part": [core, inter, gmail, {"name": "x-part", "missing": True}],
+        }
+        for n, (why, srcs) in enumerate(cases.items()):
+            self.proof(sources=srcs)
             res, w = self.go([req(uuid_of(130 + n), uid=760 + n, track="t1")], self.RAWS)
             self.assertEqual(self.support_writes(w), [], why)
             d = self.decisions()[uuid_of(130 + n)]
             self.assertEqual(d["decision"], "defer", why)
             self.assertTrue(d["reason"].startswith("proof_status_unknown"), why)
-            self.assertIn(f"{src['name']} is {why}", d["reason"])
+            self.assertIn(why, d["reason"])
             self.assertEqual(res.deferred_proof_unknown, 1, why)
+
+    def test_support_contacts_are_held_never_asked(self):
+        """firstmate 041: everyone who emailed support@ in the last 90 days is held for
+        a human, even with no document found; everyone else may be asked."""
+        self.proof(contacts=[781])
+        res, w = self.go([req(uuid_of(160), uid=781, track="t1"), req(uuid_of(161), uid=782, track="t1")], self.RAWS)
+        d = self.decisions()
+        self.assertEqual(d[uuid_of(160)]["decision"], "hold")
+        self.assertIn("emailed support@", d[uuid_of(160)]["reason"])
+        self.assertEqual(self.support_writes(w), [uuid_of(161)])
+
+    def test_a_missing_or_malformed_contact_list_asks_nobody(self):
+        for bad in (None, {"user_ids": "x"}, [True], ["abc"]):
+            self.proof()
+            doc = json.loads(decide.PROOF_ON_FILE.read_text())
+            if bad is None:
+                doc.pop("gmail_contacts_90d")
+            else:
+                doc["gmail_contacts_90d"] = bad
+            decide.PROOF_ON_FILE.write_text(json.dumps(doc))
+            p, why = decide.proof_on_file(now=T.NOW)
+            self.assertIsNone(p, bad)
+            self.assertIn("gmail_contacts_90d", why)
+        sc = decide.proof_parts.support_contacts
+        kw = dict(now=T.NOW, max_age_h=3, max_skew_h=0.1)
+        fresh = (T.NOW - decide.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        stale = (T.NOW - decide.timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.assertEqual(sc({"gmail_contacts_90d": {"generated_at": fresh, "user_ids": [1, "2"]}}, **kw), frozenset({1, 2}))
+        # QA review of #1257 @53428d0: the embedded snapshot needs its OWN fresh stamp.
+        for bad in ([1, "2"], {"user_ids": [1]}, {"generated_at": stale, "user_ids": [1]}):
+            self.assertIsNone(sc({"gmail_contacts_90d": bad}, **kw), bad)
 
     def test_a_credit_is_asked_about_once_ever(self):
         row = req(uuid_of(140), uid=720, track="t1")
@@ -876,6 +1287,30 @@ class AdminIdentity(unittest.TestCase):
         self.assertEqual((identity, flag), ("credit-decider", "1"))
         self.assertIn("--requester credit-trust-decide@hydra-ops", argv)
 
+    def test_score_approve_writes_with_its_own_requester_and_flag_never_the_deciders(self):
+        """2026-10-22 18:25Z: score-approve PUT user_verification_needed rows as the decider and
+        the wrapper's decider branch (unverified only) sent all 31 to the browser-evidence gate."""
+        from credit_review import score_approve as sa
+        tmp = Path(tempfile.mkdtemp())
+        script, seen = tmp / "wrapper.sh", tmp / "seen"
+        script.write_text(f'#!/usr/bin/env bash\nprintf "%s %s %s %s\\n" "$MUSO_ADMIN_IDENTITY" "$CREDIT_TRUST_DECIDE" '
+                          f'"$CREDIT_TRUST_SCORE_APPROVE" "$*" > {seen}\n'
+                          'echo \'{"http_status":200,"body":{"data":{"updatedIds":["a"]}}}\'\n')
+        old = {k: os.environ.pop(k, None) for k in ("MUSO_ADMIN_IDENTITY", "CREDIT_TRUST_DECIDE")}
+        os.environ["CREDIT_TRUST_DECIDE"] = "1"  # an inherited decider flag must not leak into score-approve
+        try:
+            decide.admin_writer(str(script), requester=sa.REQUESTER,
+                                automation_flag="CREDIT_TRUST_SCORE_APPROVE")("approved", ["a"], "user_verification_needed")
+        finally:
+            os.environ.pop("CREDIT_TRUST_DECIDE", None)
+            for k, v in old.items():
+                if v is not None:
+                    os.environ[k] = v
+        identity, decide_flag, score_flag, argv = seen.read_text().split(" ", 3)
+        self.assertEqual((identity, decide_flag, score_flag), ("credit-decider", "0", "1"))
+        self.assertIn("--requester credit-trust-score-approve@hydra-ops", argv)
+        self.assertIn('"expectedStatus":"user_verification_needed"', argv)
+
 
 class PartialWrites(Base):
     def test_failed_put_records_what_the_server_committed(self):
@@ -936,6 +1371,68 @@ class Cli(unittest.TestCase):
         self.assertNotIn(15, p.deny_user_ids, "no named-user rules: the fixture user is caught by the score")
         self.assertIn("94ad2ad2-0be9-4b8e-94a6-dc85eb100310", p.deny_profile_ids)
         self.assertTrue(p.editorial_role_terms)
+
+
+class ServerAgentGuardMirror(Base):
+    """Approvals core-backend's T12 agent guard would refuse are never sent, and
+    a refusal of some rows never rejects the rest of the batch (firstmate 036)."""
+
+    RAWS = {"small": [T.raw("Real Engineer", "mixer")]}
+
+    def test_stored_popularity_zero_goes_to_a_human_not_an_ask(self):
+        res, w = self.go([req(uuid_of(300), pop=0)], self.RAWS)
+        d = self.decisions()[uuid_of(300)]
+        self.assertEqual(d["decision"], "hold")
+        self.assertIn("popularity_unattributable", d["reason"])
+        self.assertEqual(w.calls, [])
+
+    def test_stored_big_popularity_or_client_metadata_or_proof_marker_asks_for_documents(self):
+        rows = [req(uuid_of(301), pop=70), req(uuid_of(302)), req(uuid_of(303))]
+        rows[1]["metadata"]["source"] = "client"
+        rows[2]["metadata"]["proofRequest"] = {"at": "2026-10-10T00:00:00Z"}
+        self.proof([])
+        res, w = self.go(rows, self.RAWS)
+        d = self.decisions()
+        for i in (301, 302, 303):
+            self.assertEqual(d[uuid_of(i)]["decision"], "support", i)
+            self.assertIn("server approval guard would refuse", d[uuid_of(i)]["reason"])
+        self.assertEqual([c for c in w.calls if c["status"] == decide.APPROVED], [])
+
+    def test_validator_approved_row_is_not_scoped(self):
+        r = req(uuid_of(304), pop=0)
+        r["verificationData"]["is_approved"] = True
+        res, w = self.go([r], self.RAWS)
+        self.assertEqual(self.decisions()[uuid_of(304)]["decision"], "approve")
+
+    def test_a_refusal_of_some_rows_never_rejects_the_rest_of_the_batch(self):
+        refused = uuid_of(311)
+        calls = []
+
+        def writer(status, ids, expected):
+            calls.append(list(ids))
+            if refused in ids:
+                raise decide.WriteFailed("PUT HTTP 400", {
+                    "result": "error", "code": 400, "errorCode": "agent_cannot_approve_declined",
+                    "refusedRequestIds": [refused],
+                    "refused": [{"id": refused, "band": "B_request_info", "reasons": ["popularity_unattributable"]}]})
+            return {"data": {"updatedIds": list(ids)}}
+        outs, err = decide.write_chunk(writer, lambda st, ids: set(), decide.APPROVED,
+                                       [uuid_of(310), refused, uuid_of(312)], decide.UNVERIFIED)
+        self.assertIsNone(err)
+        self.assertEqual(outs[uuid_of(310)], decide.APPROVED)
+        self.assertEqual(outs[uuid_of(312)], decide.APPROVED)
+        self.assertEqual(outs[refused], "skipped:agent_cannot_approve_declined:popularity_unattributable")
+        self.assertEqual(calls, [[uuid_of(310), refused, uuid_of(312)], [uuid_of(310), uuid_of(312)]])
+
+    def test_a_second_refusal_is_not_retried_again(self):
+        def writer(status, ids, expected):
+            raise decide.WriteFailed("PUT HTTP 400", {"errorCode": "agent_cannot_approve_declined",
+                                                       "refusedRequestIds": [ids[0]], "refused": []})
+        outs, err = decide.write_chunk(writer, lambda st, ids: set(), decide.APPROVED,
+                                       [uuid_of(320), uuid_of(321)], decide.UNVERIFIED)
+        self.assertTrue(outs[uuid_of(320)].startswith("skipped:agent_cannot_approve_declined"))
+        self.assertTrue(outs[uuid_of(321)].startswith("error:"), "one retry only; then it is an error")
+        self.assertIsNotNone(err)
 
 
 if __name__ == "__main__":

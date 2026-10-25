@@ -10,7 +10,8 @@ What this package does (firstmate decision 001, 2026-10-15 23:09Z, "A + X"):
 
 * TAKE-BACK, role-scoped: remove ONLY the one-person roles (Mixing / Mastering /
   Immersive / Remastering) that a trusted source credits to a different profile
-  AND a cited web lookup of THAT role confirmed. The agent stages one approval set
+  AND a cited web lookup of THAT role confirmed (one profile, ``takeback.ROSTER_CLAIMANTS``,
+  may also lose a published-roster multi-person role). The agent stages one approval set
   per user (core-backend #10597); Nick or Jan decides each pair; ``apply`` spends the
   approved pairs through #10638 ``POST /admin/credit-removals/:id/execute`` (the same
   removal as ``DELETE /admin/track/:trackId/profile/:profileId/credits``) and sends

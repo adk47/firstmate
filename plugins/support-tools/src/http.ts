@@ -6,6 +6,7 @@ export interface HttpClient {
   get<T = unknown>(url: string, opts: { headers?: Record<string, string> }): Promise<HttpResult<T>>;
   post<T = unknown>(url: string, opts: { headers?: Record<string, string>; body?: unknown }): Promise<HttpResult<T>>;
   put<T = unknown>(url: string, opts: { headers?: Record<string, string>; body?: unknown }): Promise<HttpResult<T>>;
+  delete?<T = unknown>(url: string, opts: { headers?: Record<string, string> }): Promise<HttpResult<T>>;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -49,6 +50,9 @@ export function createHttpClient(): HttpClient {
         headers,
         body: opts.body ? JSON.stringify(opts.body) : undefined,
       });
+    },
+    delete<T>(url: string, opts: { headers?: Record<string, string> }) {
+      return request<T>(url, { method: "DELETE", headers: opts.headers });
     },
     put<T>(url: string, opts: { headers?: Record<string, string>; body?: unknown }) {
       const headers = { "Content-Type": "application/json", ...opts.headers };

@@ -16,10 +16,12 @@ import {
   IntercomAssignmentConflictError,
 } from "./outbound.js";
 import { sanitizeReasoningLeak } from "./sanitize-reasoning-leak.js";
+import { surfaceLinkTargets } from "./filters.js";
 import { initStateStore, loadSessions, saveSessions } from "./state-store.js";
 import {
   buildEscalationSlackMessage,
   buildEscalationSlackMessageMinimal,
+  type EscalationSummary,
 } from "./slack.js";
 import {
   detectSilentDispatch,
@@ -48,7 +50,7 @@ import {
   type UnreadableReason,
 } from "./attachments.js";
 import path from "node:path";
-import type { IntercomSessionState, IntercomWebhookPayload, KnownFacts, IntercomAccountConfig, EnrichmentState, KbSnippet, ImageAttachmentRef, DocumentAttachmentRef, UnsupportedAttachmentRef } from "./types.js";
+import type { IntercomClient, IntercomSessionState, IntercomWebhookPayload, KnownFacts, IntercomAccountConfig, EnrichmentState, KbSnippet, ImageAttachmentRef, DocumentAttachmentRef, UnsupportedAttachmentRef } from "./types.js";
 import { DEFAULT_JUDGE_MIN_TURNS, DEFAULT_TURN_HARD_CAP, DEFAULT_JUDGE_MODEL, DEFAULT_DISPATCH_TIMEOUT_MS } from "./types.js";
 import { buildKbRetrieveFn, renderKnowledgeBaseBlock, stripKnowledgeBase } from "./kb-retrieval.js";
 import { DispatchQueue } from "./dispatch-queue.js";
@@ -379,6 +381,132 @@ export function joinDeliveryChunks(chunks: string[]): string {
   if (filtered.length === 0) return "";
   if (filtered.length === 1) return filtered[0];
   return filtered.join("\n\n");
+}
+
+/**
+ * A reply the help-link gate emptied was never posted. `dropped` is the only
+ * reliable signal — messageId "" also happens when Intercom returns no part —
+ * so logging `replied partId=<none>` for both makes a dropped reply
+ * indistinguishable from a delivered one. The delivered line stays exactly as
+ * it was; this only adds the dropped case.
+ */
+export function buildReplyOutcomeLog(params: {
+  tag: string;
+  conversationId: string;
+  chunks: number;
+  reply: { messageId: string; dropped?: true };
+}): { level: "info" | "error"; line: string; delivered: boolean } {
+  const { tag, conversationId, chunks, reply } = params;
+  if (reply.dropped) {
+    return {
+      level: "error",
+      delivered: false,
+      line: `[intercom:ALERT] [${tag}] reply dropped by help-link gate — customer got no answer conv=${conversationId} chunks=${chunks}`,
+    };
+  }
+  return {
+    level: "info",
+    delivered: true,
+    line: `[${tag}] replied conv=${conversationId} partId=${reply.messageId || "<none>"} chunks=${chunks}`,
+  };
+}
+
+/**
+ * Best-effort supervision webhook POST. Returns true only on a 2xx; a rejected
+ * or thrown POST is logged with the [intercom:ALERT] prefix and returns false.
+ * Never throws.
+ */
+export async function postSupervisionAlert(params: {
+  url: string;
+  text: string;
+  tag: string;
+  conversationId: string;
+  log?: { error?: (m: string) => void };
+  fetchImpl?: typeof fetch;
+}): Promise<boolean> {
+  const { url, text, tag, conversationId, log, fetchImpl = fetch } = params;
+  try {
+    const res = await fetchImpl(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) {
+      log?.error?.(`[intercom:ALERT] [${tag}] supervision notify rejected conv=${conversationId} status=${res.status}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    log?.error?.(`[intercom:ALERT] [${tag}] supervision notify failed conv=${conversationId} error=${err}`);
+    return false;
+  }
+}
+
+/**
+ * A reply the help-link gate emptied was never posted. Hand the conversation to
+ * a human (same steps as the reasoning-leak escalate path), then notify. Assign
+ * first: the durable state change must not depend on the webhook.
+ */
+export async function handleDroppedReply(params: {
+  client: Pick<IntercomClient, "assignConversation">;
+  account: { botAdminId: string; defaultInboxId?: string; fallbackSlackSupervisionChannel?: string };
+  conversationId: string;
+  tag: string;
+  log?: { info?: (m: string) => void; error?: (m: string) => void };
+  fetchImpl?: typeof fetch;
+}): Promise<{ handedOff: boolean; notified: boolean }> {
+  const { client, account, conversationId, tag, log, fetchImpl } = params;
+  let handedOff = false;
+  try {
+    await client.assignConversation({
+      conversationId,
+      adminId: account.botAdminId,
+      assigneeId: account.defaultInboxId || "0",
+    });
+    handedOff = true;
+    log?.info?.(`[${tag}] reassigned conv=${conversationId} to ${account.defaultInboxId || "Unassigned"} (reply dropped by help-link gate)`);
+  } catch (err) {
+    log?.error?.(`[intercom:ALERT] [${tag}] dropped-reply reassignment failed conv=${conversationId}: ${err}`);
+  }
+  let notified = false;
+  if (account.fallbackSlackSupervisionChannel) {
+    const text = handedOff
+      ? `:warning: Caroline's reply was emptied by the help-link gate and nothing was posted (conv ${conversationId}). The conversation was handed to a human \u2014 please follow up.`
+      : `:warning: Caroline's reply was emptied by the help-link gate and nothing was posted (conv ${conversationId}). The handoff failed, so the conversation is still bot-owned \u2014 please follow up.`;
+    notified = await postSupervisionAlert({
+      url: account.fallbackSlackSupervisionChannel,
+      text,
+      tag,
+      conversationId,
+      log,
+      fetchImpl,
+    });
+  }
+  return { handedOff, notified };
+}
+
+/**
+ * The sendText delivery step. A reply the help-link gate emptied was never
+ * posted: hand the conversation to a human like the flush path does, and
+ * return a dropped result instead of a delivered id.
+ */
+export async function sendTextReply(params: {
+  client: Pick<IntercomClient, "replyToConversation" | "assignConversation">;
+  account: { accountId: string; botAdminId: string; defaultInboxId?: string; fallbackSlackSupervisionChannel?: string };
+  conversationId: string;
+  body: string;
+  log?: { info?: (m: string) => void; error?: (m: string) => void };
+  fetchImpl?: typeof fetch;
+}): Promise<{ channel: "intercom"; messageId: string; conversationId: string; meta?: { dropped: true; reason: string }; timestamp?: number }> {
+  const { client, account, conversationId, body, log, fetchImpl } = params;
+  const reply = await client.replyToConversation({ conversationId, adminId: account.botAdminId, body });
+  if (!reply.dropped) {
+    return { channel: "intercom", messageId: reply.messageId, conversationId, timestamp: Date.now() };
+  }
+  const tag = `intercom:${account.accountId}`;
+  log?.error?.(`[intercom:ALERT] [${tag}] sendText dropped: emptied by help-link gate conv=${conversationId}`);
+  await handleDroppedReply({ client, account, conversationId, tag, log, fetchImpl });
+  return { channel: "intercom", messageId: "", conversationId, meta: { dropped: true, reason: "empty-after-sanitize" } };
 }
 
 /**
@@ -939,7 +1067,7 @@ export function buildAgentRawBody(
   unreadable?: UnreadableAttachment[],
   jevBlock?: string | null,
 ): string {
-  const sanitized = sanitizeCustomerMessage(message);
+  const sanitized = sanitizeCustomerMessage(surfaceLinkTargets(message));
   const kbBlock = renderKnowledgeBaseBlock(kbSnippets ?? []);
   const attachmentBlock = renderAttachmentStatusBlock(unreadable ?? []);
   const lines: string[] = enrichment ? buildEnrichmentLines(enrichment) : [];
@@ -1534,17 +1662,13 @@ export const intercomPlugin = createChatChannelPlugin({
                 log?.error?.(`[${tag}] reasoning-leak reassignment failed conv=${result.conversationId}: ${err}`);
               }
               if (account.fallbackSlackSupervisionChannel) {
-                try {
-                  await fetch(account.fallbackSlackSupervisionChannel, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      text: `:warning: Caroline suppressed a reply that leaked internal reasoning (conv ${result.conversationId}, reason=${guard.reason}). The conversation was handed to a human — please follow up.`,
-                    }),
-                  });
-                } catch (err) {
-                  log?.error?.(`[${tag}] reasoning-leak Slack notify failed conv=${result.conversationId}: ${err}`);
-                }
+                await postSupervisionAlert({
+                  url: account.fallbackSlackSupervisionChannel,
+                  text: `:warning: Caroline suppressed a reply that leaked internal reasoning (conv ${result.conversationId}, reason=${guard.reason}). The conversation was handed to a human \u2014 please follow up.`,
+                  tag,
+                  conversationId: result.conversationId,
+                  log,
+                });
               }
             } else {
               if (guard.action === "stripped") {
@@ -1565,16 +1689,25 @@ export const intercomPlugin = createChatChannelPlugin({
                 );
               } else {
                 try {
-                  const { messageId } = await client.replyToConversation({
+                  const reply = await client.replyToConversation({
                     conversationId: result.conversationId,
                     adminId: account.botAdminId,
                     body: guard.body,
                   });
-                  trackOutboundMessageId(messageId, state.outboundMessageIds);
-                  state.updatedAt = new Date().toISOString();
-                  log?.info?.(
-                    `[${tag}] replied conv=${result.conversationId} partId=${messageId || "<none>"} chunks=${bufferedChunks.length}`,
-                  );
+                  const outcome = buildReplyOutcomeLog({
+                    tag,
+                    conversationId: result.conversationId,
+                    chunks: bufferedChunks.length,
+                    reply,
+                  });
+                  if (outcome.delivered) {
+                    trackOutboundMessageId(reply.messageId, state.outboundMessageIds);
+                    state.updatedAt = new Date().toISOString();
+                    log?.info?.(outcome.line);
+                  } else {
+                    log?.error?.(outcome.line);
+                    await handleDroppedReply({ client, account, conversationId: result.conversationId, tag, log });
+                  }
                 } catch (err) {
                   // Customer-facing delivery failure: grep-able alert prefix
                   // so ops can wire Slack/Sentry on `[intercom:ALERT]`.
@@ -1720,6 +1853,29 @@ export const intercomPlugin = createChatChannelPlugin({
 
                   const state = getOrCreateSession(account.accountId, conversationId, account.workspaceId);
                   const client = createIntercomClient(account.token, log);
+                  const postSupervisionAlert = async (summary: EscalationSummary): Promise<void> => {
+                    if (!account.fallbackSlackSupervisionChannel) return;
+                    let slackPayload;
+                    try {
+                      const conversation = await client.getConversation({ conversationId: summary.conversationId });
+                      slackPayload = buildEscalationSlackMessage(summary, conversation, account, state);
+                    } catch (err) {
+                      log?.warn?.(`[${tag}] Slack enrichment fetch failed conv=${summary.conversationId}: ${err} — posting minimal`);
+                      slackPayload = buildEscalationSlackMessageMinimal(summary, account);
+                    }
+                    try {
+                      const res = await fetch(account.fallbackSlackSupervisionChannel, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(slackPayload),
+                      });
+                      if (!res.ok) {
+                        log?.error?.(`[${tag}] Slack escalation notification rejected: ${res.status} conv=${summary.conversationId}`);
+                      }
+                    } catch (err) {
+                      log?.error?.(`[${tag}] Slack escalation notification failed: ${err}`);
+                    }
+                  };
                   const jevLog = log ? { warn: (m: string) => log.warn(m) } : undefined;
                   // Fresh per webhook request — this is what makes the "no
                   // second request" memoization correct (see jev-router.ts's
@@ -1960,6 +2116,42 @@ export const intercomPlugin = createChatChannelPlugin({
                       `[${tag}] ESCALATED conv=${result.conversationId} ` +
                       `source=${result.assessment.source} reason=${result.assessment.reason}`,
                     );
+                  } else if (result.action === "restricted_hold") {
+                    // Listed fraud-pull contact: no customer-facing message (even a generic
+                    // acknowledgement is a promise we must not make), no agent dispatch.
+                    // 1. Internal note: visible in Intercom to whoever holds it, even if Slack fails.
+                    try {
+                      await client.replyToConversation({
+                        conversationId: result.conversationId,
+                        adminId: account.botAdminId,
+                        body: result.note,
+                        messageType: "note",
+                      });
+                    } catch (err) {
+                      log?.error?.(`[${tag}] restricted hold note failed conv=${result.conversationId}: ${err}`);
+                    }
+                    // 2. Hand to the human team unless a human admin already holds it.
+                    if (result.reassign) {
+                      try {
+                        await client.assignConversation({
+                          conversationId: result.conversationId,
+                          adminId: account.botAdminId,
+                          assigneeId: account.defaultInboxId || "0",
+                        });
+                      } catch (err) {
+                        log?.error?.(`[${tag}] restricted hold reassignment failed conv=${result.conversationId}: ${err}`);
+                      }
+                    }
+                    // 3. Slack alert (same supervision channel as escalations).
+                    await postSupervisionAlert({
+                      conversationId: result.conversationId,
+                      category: result.category,
+                      matchedPattern: result.note,
+                      body: result.body,
+                    });
+                    log?.warn?.(
+                      `[${tag}] RESTRICTED_HOLD conv=${result.conversationId} category=${result.category} reassign=${result.reassign}`,
+                    );
                   } else if (result.action === "escalate_legacy") {
                     // Legacy path — runs whenever riskAssessment.enabled is false.
                     // Delete once that flag is true on all profiles and one week of
@@ -1983,31 +2175,12 @@ export const intercomPlugin = createChatChannelPlugin({
                     } catch (err) {
                       log?.error?.(`[${tag}] reassignment failed conv=${result.conversationId}: ${err}`);
                     }
-                    if (account.fallbackSlackSupervisionChannel) {
-                      const escalationSummary = {
-                        conversationId: result.conversationId,
-                        category: result.category,
-                        matchedPattern: result.matchedPattern,
-                        body: result.body,
-                      };
-                      let slackPayload;
-                      try {
-                        const conversation = await client.getConversation({ conversationId: result.conversationId });
-                        slackPayload = buildEscalationSlackMessage(escalationSummary, conversation, account, state);
-                      } catch (err) {
-                        log?.warn?.(`[${tag}] Slack enrichment fetch failed conv=${result.conversationId}: ${err} — posting minimal`);
-                        slackPayload = buildEscalationSlackMessageMinimal(escalationSummary, account);
-                      }
-                      try {
-                        await fetch(account.fallbackSlackSupervisionChannel, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify(slackPayload),
-                        });
-                      } catch (err) {
-                        log?.error?.(`[${tag}] Slack escalation notification failed: ${err}`);
-                      }
-                    }
+                    await postSupervisionAlert({
+                      conversationId: result.conversationId,
+                      category: result.category,
+                      matchedPattern: result.matchedPattern,
+                      body: result.body,
+                    });
                     log?.warn?.(
                       `[${tag}] ESCALATED (legacy) conv=${result.conversationId} ` +
                       `category=${result.category} pattern=${result.matchedPattern}`,
@@ -2080,11 +2253,15 @@ export const intercomPlugin = createChatChannelPlugin({
         const client = createIntercomClient(account.token, {
           error: (msg) => console.error(msg),
         });
-        const { messageId } = await client.replyToConversation({
+        const sent = await sendTextReply({
+          client,
+          account,
           conversationId,
-          adminId: account.botAdminId,
           body: stripKnowledgeBase(stripConversationContext(text)),
+          log: { info: (m) => console.log(m), error: (m) => console.error(m) },
         });
+        if (sent.meta) return sent;
+        const { messageId } = sent;
 
         // Track outbound message ID for self-reply filtering
         if (state) {

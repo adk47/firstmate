@@ -677,6 +677,9 @@ is_tier2_endpoint() {
     method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
     # Strip any query string before matching (mirror is_bulk_destructive_op).
     path="${path%%\?*}"
+    # One trailing slash is the same route (the claim-verify pace gate accepts
+    # /verify/), so it must not step around the approval requirement.
+    [[ "$path" == */ && "$path" != "/" ]] && path="${path%/}"
     [[ -f "$TIER2_ENDPOINTS_PATH" ]] || return 1
     # Each line: "METHOD /path" with leading '#' for comments. A ":param"
     # segment in an entry matches EXACTLY ONE path segment, so
@@ -745,6 +748,69 @@ is_tier2_approver() {
         [[ "$handle_lc" == "$approver_lc" ]] && return 0
     done < "$TIER2_APPROVERS_PATH"
     return 1
+}
+
+# --- Claim-verify pace gate (2026-10-11) ---
+# POST /admin/claiming/:id/verify makes the claimant the verified owner of a
+# profile. Since 09-01, 2,424 claim verifies went out at a 0.44 s median gap (a
+# loop, not per-claim review). Besides the tier-2 approval this endpoint now
+# needs, at most one claim verify per CLAIM_VERIFY_MIN_INTERVAL seconds goes out
+# host-wide. The state file is shared with scripts/muso-prewrite-hook.sh, so the
+# muso CLI and this wrapper draw on one budget. Skipped in dry-run (no write).
+# Pinned, no env override (an env-chosen path would hand each caller a fresh stamp
+# and defeat the host-wide budget). Same literal as scripts/muso-prewrite-hook.sh.
+CLAIM_VERIFY_LAST="/var/lib/hydra/claim-verify.last"
+enforce_claim_verify_pace_gate() {
+    local method="$1" path="${2%%\?*}"
+    local method_uc
+    method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    [[ "$method_uc" == "POST" ]] || return 0
+    [[ "$path" =~ ^/admin/claiming/[^/]+/verify/?$ ]] || return 0
+    if is_dry_run_mode; then
+        return 0
+    fi
+    local state="$CLAIM_VERIFY_LAST"
+    local min="${CLAIM_VERIFY_MIN_INTERVAL:-20}"
+    [[ "$min" =~ ^[0-9]+$ ]] && (( min >= 20 )) || min=20
+    if ! mkdir -p "$(dirname "$state")" 2>/dev/null || ! { exec 7>>"$state.lock"; } 2>/dev/null; then
+        echo "MUSO_CLAIM_VERIFY_PACE_UNAVAILABLE: cannot open $state — refusing the claim verify (fail closed)." >&2
+        return 1
+    fi
+    # The lock makes the gate host-wide; without flock, refuse (fail closed).
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "MUSO_CLAIM_VERIFY_PACE_UNAVAILABLE: flock is unavailable, so concurrent claim verifies cannot be serialized — refusing the claim verify." >&2
+        return 1
+    fi
+    if ! flock -w 5 7; then
+        echo "MUSO_CLAIM_VERIFY_PACE_UNAVAILABLE: pace lock busy — refusing the claim verify." >&2
+        return 1
+    fi
+    local now last
+    now="$(date +%s)"
+    # Absent file = first use. An existing stamp that is empty, truncated or unreadable
+    # must not read as "long ago": refuse until a root operator clears it.
+    last=0
+    if [ -e "$state" ]; then
+        if ! last="$(cat "$state" 2>/dev/null)" || [[ ! "$last" =~ ^(0|[1-9][0-9]{0,14})$ ]]; then
+            echo "MUSO_CLAIM_VERIFY_PACE_UNAVAILABLE: the claim-verify timestamp in $state is unreadable or malformed — refusing the claim verify (fail closed). Clear $state as root." >&2
+            return 1
+        fi
+    fi
+    # A future stamp (clock stepped back) must not reset to 0 and pass: refuse.
+    if (( last > now )); then
+        echo "MUSO_CLAIM_VERIFY_PACE_UNAVAILABLE: the claim-verify timestamp in $state is $((last - now))s in the future (host clock may have stepped backward) — refusing the claim verify (fail closed). Check the host clock, then clear $state as root." >&2
+        return 1
+    fi
+    if (( now - last < min )); then
+        echo "MUSO_CLAIM_VERIFY_TOO_FAST: claim verifies are limited to one per ${min}s host-wide (last $((now - last))s ago). Review each claim individually before verifying it; do not retry in a loop." >&2
+        return 1
+    fi
+    # The stamp is the next caller's gate: an unrecorded verify is refused.
+    if ! { printf '%s\n' "$now" > "$state"; } 2>/dev/null; then
+        echo "MUSO_CLAIM_VERIFY_PACE_UNAVAILABLE: cannot record the claim-verify timestamp at $state — refusing the claim verify." >&2
+        return 1
+    fi
+    return 0
 }
 
 enforce_tier2_approval_gate() {
@@ -1287,6 +1353,51 @@ write_bulk_destructive_audit() {
     return 0
 }
 
+# Removals: whole-track deletion (a Catalog/IDP tombstone of the track and EVERY served credit on
+# it) and credit removal from a profile. God-mode self-approve NEVER covers these (firstmate 122,
+# incident 2026-10-20 14:05Z: a bare "hide track from public" was self-approved into two track
+# DELETEs). Core refuses agent removals anyway (403 credit_removal_agent_refused); refusing here
+# stops the attempt itself. A removal needs a recorded reason (DSP-removal or different-profile
+# proof + a label check) and goes through the guarded named-human path, not this wrapper's
+# self-approve. A ":param" segment matches exactly one path segment.
+is_removal_endpoint() {
+    local method="$1" path="$2"
+    path="${path%%\?*}"
+    path="${path%/}"
+    local method_uc; method_uc="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    [[ "$method_uc" == "DELETE" ]] || return 1
+    local restore_extglob=0
+    shopt -q extglob || { shopt -s extglob; restore_extglob=1; }
+    local rc=1 ep
+    for ep in "/admin/track/+([!/])" "/admin/track/+([!/])/profile/+([!/])/credits"; do
+        # shellcheck disable=SC2053  # RHS unquoted so the extglob pattern is active.
+        if [[ "$path" == $ep ]]; then rc=0; break; fi
+    done
+    (( restore_extglob )) && shopt -u extglob
+    return "$rc"
+}
+
+refuse_removal_self_approve() {
+    cat >&2 <<EOM
+MUSO_REMOVAL_NO_SELF_APPROVE: ${1} ${2} is a removal (whole-track tombstone, or a credit removed from a profile). God-mode self-approve never covers removals, and core refuses agent removals (credit_removal_agent_refused). Do not retry through another wrapper or identity.
+Instead: read the track back and tell the requester what removal would do (the track + its N credits). Ask for the reason if none is recorded (DSP-removal proof or different-profile proof, plus a label check). "Hide" is not a removal: there is no track hide/unlist in core. A recorded removal goes to a named human from their own login.
+EOM
+}
+
+# Removal gate (QA #1299 @a3bc2731, firstmate 122): a removal never goes out through this
+# wrapper, whatever the requester, the bulk count or the approval flags. The refusal sits
+# BEFORE the tier-2 and bulk gates because neither reaches a lone credit removal below the
+# bulk threshold. Core refuses agent removals anyway (credit_removal_agent_refused); this
+# stops the attempt itself. Dry-run still shows the call (no write).
+enforce_removal_gate() {
+    local method="$1" path="$2"
+    is_removal_endpoint "$method" "$path" || return 0
+    is_dry_run_mode && return 0
+    refuse_removal_self_approve "$method" "$path"
+    return 1
+}
+
+
 enforce_bulk_destructive_gate() {
     local method="$1" path="$2"
     is_bulk_destructive_op "$method" "$path" || return 0
@@ -1311,6 +1422,10 @@ enforce_bulk_destructive_gate() {
         # god-mode list is unchanged and still needs a real second approver, so
         # the blast-radius cap stands for the whole rest of the org.
         if is_tier2_godmode_requester "${REQUESTER_EMAIL:-}"; then
+            if is_removal_endpoint "$method" "$path"; then
+                refuse_removal_self_approve "$method" "$path"
+                return 1
+            fi
             if [[ -z "$APPROVAL_MSG_ID" ]]; then
                 cat >&2 <<EOF
 MUSO_BULK_DESTRUCTIVE_SELF_APPROVE_MSG_REQUIRED: ${count} destructive DELETE(s) in the last ${BULK_DESTRUCTIVE_WINDOW_SECS}s have reached the bulk threshold (${BULK_DESTRUCTIVE_THRESHOLD}).
@@ -1588,6 +1703,148 @@ EOF
     return 0
 }
 
+# Admin list bounds (firstmate 066-070, incident 2026-10-19 05:38-05:50Z): an ad-hoc
+# count script paged GET /admin/credit-requests?status=approved&limit=500&page=1..800 as the
+# shared operations identity; core's list is OFFSET-paged, so deep pages are O(offset) and
+# site p99 went 0.28 -> 0.98s. Bulk questions go to Trino (or a profile/track-filtered read).
+# For the credit-request list endpoints, every identity through this wrapper:
+#   - limit above ADMIN_LIST_MAX_LIMIT (200) without profilesIds/trackId is refused;
+#   - an offset ((page-1)*limit) above ADMIN_LIST_MAX_OFFSET (20000) without a filter is refused;
+#   - list calls are paced to at most ADMIN_LIST_MAX_PER_SEC (2) per second per identity
+#     (= core's planned 120/min agent budget), across processes, via a per-identity state file.
+# The query is read the way core reads it (qs + parseInt): percent- and '+'-decoded, route
+# case-insensitive with repeated/trailing slashes collapsed, leading zeros and trailing junk
+# ignored like parseInt. A duplicated or bracketed limit/page/profilesIds/trackId (qs turns it
+# into an array or object) is refused as ambiguous. Pacing fails CLOSED: if its state cannot be
+# locked, read or written, the call is refused (QA + Fable on hydra#1270).
+ADMIN_LIST_MAX_LIMIT="${ADMIN_LIST_MAX_LIMIT:-200}"
+ADMIN_LIST_MAX_OFFSET="${ADMIN_LIST_MAX_OFFSET:-20000}"
+ADMIN_LIST_MAX_PER_SEC="${ADMIN_LIST_MAX_PER_SEC:-2}"
+ADMIN_LIST_LOCK_TRIES="${ADMIN_LIST_LOCK_TRIES:-100}"  # x 0.3s before a busy pacing lock refuses
+
+admin_list_urldecode() { # percent- and '+'-decode, backslashes kept literal
+    local s="${1//\\/\\\\}"
+    s="${s//+/ }"
+    printf '%b' "${s//%/\\x}"
+}
+
+# parseInt as core applies it: optional leading whitespace and sign, then digits; anything
+# after is ignored. Prints the integer, "NaN", or "HUGE" (more than 9 digits).
+admin_list_parseint() {
+    local v="$1" sign="" digits
+    v="${v#"${v%%[![:space:]]*}"}"
+    case "$v" in -*) sign="-"; v="${v#-}" ;; +*) v="${v#+}" ;; esac
+    digits="${v%%[!0-9]*}"
+    [[ -n "$digits" ]] || { printf 'NaN'; return 0; }
+    digits="${digits#"${digits%%[!0]*}"}"
+    [[ -n "$digits" ]] || digits=0
+    (( ${#digits} > 9 )) && { printf 'HUGE'; return 0; }
+    printf '%s%s' "$sign" "$digits"
+}
+
+admin_list_refuse() { echo "muso-admin-api: refusing ${ADMIN_LIST_METHOD:-GET} $1: $2" >&2; return 2; }
+
+enforce_admin_list_bounds() {
+    local method="$1" path="$2" upper
+    upper="$(printf %s "$method" | tr '[:lower:]' '[:upper:]')"
+    # HEAD is a read too, and core serves it through the GET list handler (same
+    # unfiltered OFFSET query, body discarded), so it is bounded and paced like GET.
+    [[ "$upper" == "GET" || "$upper" == "HEAD" ]] || return 0
+    local ADMIN_LIST_METHOD="$upper"
+    local raw_route="${path%%\?*}" query="" route
+    [[ "$path" == *\?* ]] && query="${path#*\?}"
+    query="${query%%#*}"
+    route="$(admin_list_urldecode "$raw_route" | tr '[:upper:]' '[:lower:]')"
+    while [[ "$route" == *//* ]]; do route="${route//\/\//\/}"; done
+    route="${route%/}"
+    case "$route" in
+        */admin/credit-requests|*/admin/credit-requests/profiles) ;;
+        *) return 0 ;;
+    esac
+    local kv key val name limit_raw="" page_raw="" profiles="" track="" seen=" "
+    local IFS='&'
+    for kv in $query; do
+        [[ -n "$kv" ]] || continue
+        key="$(admin_list_urldecode "${kv%%=*}")"
+        if [[ "$kv" == *=* ]]; then val="$(admin_list_urldecode "${kv#*=}")"; else val=""; fi
+        for name in limit page profilesIds trackId; do
+            if [[ "$key" == "$name" ]]; then
+                [[ "$seen" == *" $name "* ]] && { unset IFS; admin_list_refuse "$route" "'$name' appears more than once (ambiguous)"; return 2; }
+                seen="$seen$name "
+                case "$name" in
+                    limit) limit_raw="$val" ;; page) page_raw="$val" ;;
+                    profilesIds) profiles="$val" ;; trackId) track="$val" ;;
+                esac
+            elif [[ "$key" == "${name}["* || "$key" == "${name}."* ]]; then
+                unset IFS; admin_list_refuse "$route" "'$key' (bracket/dot form of '$name' is ambiguous)"; return 2
+            fi
+        done
+    done
+    unset IFS
+    local limit page filtered=0
+    limit="$(admin_list_parseint "$limit_raw")"
+    page="$(admin_list_parseint "$page_raw")"
+    [[ "$limit" == "HUGE" ]] && { admin_list_refuse "$route" "limit is out of range"; return 2; }
+    [[ "$limit" == "NaN" || "$limit" == "0" ]] && limit=10
+    (( limit < 0 )) && { admin_list_refuse "$route" "negative limit"; return 2; }
+    [[ "$page" == "HUGE" ]] && { admin_list_refuse "$route" "page is out of range"; return 2; }
+    [[ "$page" == "NaN" ]] && page=1
+    (( page < 1 )) && page=1
+    profiles="${profiles//[[:space:],]/}"; track="${track//[[:space:]]/}"
+    # Only the plain list applies profilesIds/trackId (core list.js). /profiles ignores both
+    # and always runs the unfiltered grouped query, so it is never "filtered" (QA r2).
+    if [[ "$route" == */admin/credit-requests ]] && [[ -n "$profiles" || -n "$track" ]]; then
+        filtered=1
+    fi
+    if (( ! filtered )) && (( limit > ADMIN_LIST_MAX_LIMIT )); then
+        admin_list_refuse "$route" "limit=$limit and no profilesIds/trackId (max $ADMIN_LIST_MAX_LIMIT). For a bulk count or export use Trino, not the admin list API."; return 2
+    fi
+    if (( ! filtered )) && (( (page - 1) * limit > ADMIN_LIST_MAX_OFFSET )); then
+        admin_list_refuse "$route" "page=$page (offset $(( (page - 1) * limit )) > $ADMIN_LIST_MAX_OFFSET) with no profilesIds/trackId: deep unfiltered paging is O(offset) on core. Use an updatedAt window, a filter, or Trino."; return 2
+    fi
+    admin_list_pace
+}
+
+# At most ADMIN_LIST_MAX_PER_SEC list calls per second per identity, across processes.
+# Fails CLOSED: any state/lock error refuses the call (rc 2).
+admin_list_pace() {
+    local ident="${MUSO_ADMIN_IDENTITY:-default}" state lockdir now sec cnt waited=0 rc=0
+    state="${MUSO_OPS_STATE_DIR}/admin-list-pace.${ident//[^A-Za-z0-9_.-]/_}"
+    lockdir="$state.lockdir"
+    mkdir -p "$MUSO_OPS_STATE_DIR" 2>/dev/null && [[ -w "$MUSO_OPS_STATE_DIR" ]] || {
+        echo "muso-admin-api: refusing list call: pacing state dir $MUSO_OPS_STATE_DIR is not writable" >&2; return 2; }
+    # mkdir is atomic everywhere (no flock on macOS). A lock older than 60s is stale.
+    until mkdir "$lockdir" 2>/dev/null; do
+        if [[ -d "$lockdir" ]] && [[ -n "$(find "$lockdir" -maxdepth 0 -mmin +1 2>/dev/null)" ]]; then
+            rmdir "$lockdir" 2>/dev/null; continue
+        fi
+        (( waited++ >= ADMIN_LIST_LOCK_TRIES )) && { echo "muso-admin-api: refusing list call: pacing lock $lockdir is busy" >&2; return 2; }
+        sleep 0.3
+    done
+    while :; do
+        now="$(date +%s)"
+        if [[ -e "$state" ]]; then
+            if ! read -r sec cnt < "$state" 2>/dev/null; then sec=""; fi
+            [[ "$sec" =~ ^[0-9]+$ && "$cnt" =~ ^[0-9]+$ ]] || {
+                if [[ -s "$state" ]]; then
+                    echo "muso-admin-api: refusing list call: pacing state $state is unreadable or corrupt" >&2
+                    rmdir "$lockdir" 2>/dev/null; return 2
+                fi
+                sec=0; cnt=0; }
+        else
+            sec=0; cnt=0
+        fi
+        if [[ "$sec" == "$now" ]] && (( cnt >= ADMIN_LIST_MAX_PER_SEC )); then sleep 0.3; continue; fi
+        if [[ "$sec" == "$now" ]]; then cnt=$((cnt + 1)); else cnt=1; fi
+        if ! { printf '%s %s\n' "$now" "$cnt" > "$state.tmp" && mv -f "$state.tmp" "$state"; } 2>/dev/null; then
+            echo "muso-admin-api: refusing list call: pacing state $state cannot be written" >&2; rc=2
+        fi
+        break
+    done
+    rmdir "$lockdir" 2>/dev/null
+    return $rc
+}
+
 cmd_call() {
     check_env
     local method="${1:?Usage: call <METHOD> <path> [json-body]}"
@@ -1613,6 +1870,12 @@ EOF
             ;;
     esac
 
+    # Admin list bounds (incident 2026-10-19): refuse unfiltered big/deep credit-request
+    # list pulls and pace list calls per identity. Reads only; never touches writes.
+    if ! enforce_admin_list_bounds "$method" "$path"; then
+        return 2
+    fi
+
     # Codex model-health gate (incident 2026-06-08). Refuse WRITES while the fleet is
     # silently degraded onto a weak fallback model the agent can't perceive; READS pass
     # through. Runs first so a degraded model is stopped before any other gate logic.
@@ -1631,8 +1894,18 @@ EOF
         return 1
     fi
 
+    # Removal gate (firstmate 122): removals never go out through this wrapper.
+    if ! enforce_removal_gate "$method" "$path"; then
+        return 1
+    fi
+
     # Tier-2 approval gate (incident 2026-04-29). Skipped in dry-run mode.
     if ! enforce_tier2_approval_gate "$method" "$path"; then
+        return 1
+    fi
+
+    # Claim-verify pace gate (2026-10-11): one claim verify per 20s host-wide.
+    if ! enforce_claim_verify_pace_gate "$method" "$path"; then
         return 1
     fi
 

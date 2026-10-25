@@ -111,10 +111,13 @@ export QA_PR_APPROVE_LOG_DIR="$ALERT_LOG_DIR"
 # Cooldown stamp for the total-blackout page (see the block at the bottom).
 BLACKOUT_STAMP="${QA_APPROVAL_RETRY_BLACKOUT_STAMP:-/var/lib/hydra/qa-approval-retry/last-blackout-page}"
 TRUNCATION_STAMP="${QA_APPROVAL_RETRY_TRUNCATION_STAMP:-/var/lib/hydra/qa-approval-retry/last-truncation-page}"
-# Matches qa-review-reconcile.sh's PRLIST_LIMIT default. The largest swept repo
-# currently has 62 open PRs, so 300 is real headroom rather than a guess — but
-# the cap is still DETECTED below, because headroom is not a guarantee.
-PRLIST_LIMIT="${QA_APPROVAL_RETRY_PRLIST_LIMIT:-300}"
+# Matches qa-review-reconcile.sh's PRLIST_LIMIT default. Raised 300 -> 1000 on
+# 2026-10-20 (Fable QA eval, F2): Muso-AI/H-DevOps reached 330 open PRs and every
+# tick was truncated there, so withheld approvals on the repo with the slowest CI
+# were never re-asked. `gh pr list` pages internally (GraphQL, 100 per page) up to
+# --limit, so a higher cap costs a few GraphQL pages, not REST calls. The cap is
+# still DETECTED below, because headroom is not a guarantee.
+PRLIST_LIMIT="${QA_APPROVAL_RETRY_PRLIST_LIMIT:-1000}"
 BLACKOUT_PAGE_COOLDOWN="${QA_APPROVAL_RETRY_BLACKOUT_COOLDOWN:-3600}"
 RATE_FLOOR="${QA_APPROVAL_RETRY_RATE_FLOOR:-1000}"
 MAX_CALLS="${QA_APPROVAL_RETRY_MAX_CALLS:-600}"
@@ -151,8 +154,8 @@ esac
 # there the unsafe direction is a LIVE WRITE, not a missing page.)
 case "$PRLIST_LIMIT" in
   ''|*[!0-9]*|0)
-    log "WARN: QA_APPROVAL_RETRY_PRLIST_LIMIT='$PRLIST_LIMIT' is not a positive integer — falling back to 300. A bad value here would make the truncation comparison an integer error and silently disable the guard."
-    PRLIST_LIMIT=300 ;;
+    log "WARN: QA_APPROVAL_RETRY_PRLIST_LIMIT='$PRLIST_LIMIT' is not a positive integer — falling back to 1000. A bad value here would make the truncation comparison an integer error and silently disable the guard."
+    PRLIST_LIMIT=1000 ;;
 esac
 
 case "$BLACKOUT_PAGE_COOLDOWN" in

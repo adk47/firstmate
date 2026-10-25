@@ -87,5 +87,19 @@
   ],
   "max_rows_per_run": 500,
   "max_approvals_per_user_per_day": 200,
-  "big_track_popularity": 60
+  "big_track_popularity": 60,
+  "max_ask_users_per_day": 400,
+  "score_approve": {
+    "_doc": "credit-review.py score-approve (cron credit-trust-score-approve-15m): the validator's approve verdict executed on held user_verification_needed rows with total risk < max_total_risk (captain 2026-10-20 ~11:30Z 'approve low risk credits'). Every other guard stays: validator conflict / reject rule / server guard / big or unattributable track / org role / deny lists / per-user daily cap. max_total_risk <= 30 and max_popularity <= 60 are enforced in code. Fable band-B ruling 2026-10-20 (data/credit-trust-system-fable-a1/ruling-score-approve-band-b-2026-10-20.md): admit_band_b stays false until core's T12 twin admitting validator-approved band B is LIVE; caps 20/user, 50/profile, 2,000 fleet per day (code-enforced maxima).",
+    "enabled": true,
+    "max_total_risk": 30,
+    "max_popularity": 60,
+    "max_per_run": 100,
+    "candidate_limit": 5000,
+    "admit_band_b": true,
+    "per_user_per_day": 20,
+    "per_profile_per_day": 50,
+    "fleet_per_day": 2000,
+    "max_profiles_per_run": 500
+  }
 }

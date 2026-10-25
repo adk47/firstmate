@@ -32,17 +32,6 @@
         },
         "models": [
           {
-            "id": "gpt-5.5",
-            "name": "gpt-5.5",
-            "input": [
-              "text",
-              "image"
-            ],
-            "maxTokens": 128000,
-            "reasoning": true,
-            "contextWindow": 1050000
-          },
-          {
             "id": "gpt-5.6-sol",
             "name": "gpt-5.6-sol",
             "input": [
@@ -512,9 +501,9 @@
         "enabled": true,
         "config": {
           "creditVerificationEnabled": true,
-          "profilesClaimSelfEnabled": true,
+          "profilesClaimSelfEnabled": false,
           "creditsVerifyEnabled": true,
-          "profilesConsolidateEnabled": true,
+          "profilesConsolidateEnabled": false,
           "foundingBuybackEnabled": true,
           "retentionOfferEnabled": true,
           "cancelSubscriptionEnabled": true,

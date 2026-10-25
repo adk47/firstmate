@@ -23,7 +23,7 @@ setup() {
     # was inherited from /var/log/openclaw/credit-batch-runs.
     export OPS_RUNLOG_DIR="$TEST_ROOT/runlogs"
     mkdir -p "$OPS_RUNLOG_DIR"
-    unset REQUESTER_EMAIL UVN_POPULARITY_CRON CREDIT_TRUST_DECIDE CV_APPROVE_GATE_DISABLED EVIDENCE_EXCERPT \
+    unset REQUESTER_EMAIL UVN_POPULARITY_CRON CREDIT_TRUST_DECIDE CREDIT_TRUST_SCORE_APPROVE CV_APPROVE_GATE_DISABLED EVIDENCE_EXCERPT \
           CV_SESSION_LOG_OVERRIDE CV_SESSION_RUN_STARTED_TS
     export CV_REQUIRED_LOADS=2
     export CV_SESSION_MAX_AGE_MIN=10
@@ -261,6 +261,81 @@ decide_registry() {
     [ "$status" -eq 1 ]
     REQUESTER_EMAIL="uvn-popularity-cron@hydra-ops" run enforce_credit_approve_gate \
         PUT /admin/credit-requests/conditional-status "$valid"
+    [ "$status" -eq 1 ]
+}
+
+# --- credit-trust-score-approve (its own requester, flag and registry row) ---
+
+score_registry() {
+    # $1 = approved (true|false), $2 = approved_by; the decider row is approved in both cases
+    jq -n --argjson a "$1" --arg by "$2" '{automations:{
+        "credit-trust-decide":{approved:true, approved_by:"captain (Aaron)", approval_ref:"captain 2026-10-15"},
+        "credit-trust-score-approve":{approved:$a, approved_by:$by, approval_ref:"captain 2026-10-20 approve low risk credits"}}}' \
+        > "$TEST_ROOT/registry.json"
+    export CREDIT_APPROVAL_REGISTRY="$TEST_ROOT/registry.json"
+}
+
+SA_UVN='{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"user_verification_needed"}'
+SA_UNV='{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"unverified"}'
+
+@test "score-approve: exact conditional UVN- and unverified-to-approved batches are allowed when registered" {
+    score_registry true "Aaron Kaufman"
+    source_gate
+    REQUESTER_EMAIL="credit-trust-score-approve@hydra-ops" CREDIT_TRUST_SCORE_APPROVE=1 \
+        run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$SA_UVN"
+    [ "$status" -eq 0 ]
+    REQUESTER_EMAIL="credit-trust-score-approve@hydra-ops" CREDIT_TRUST_SCORE_APPROVE=1 \
+        run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$SA_UNV"
+    [ "$status" -eq 0 ]
+}
+
+@test "score-approve: its registry row not approved (or no approver, or no file) refuses" {
+    score_registry false "Aaron Kaufman"
+    source_gate
+    REQUESTER_EMAIL="credit-trust-score-approve@hydra-ops" CREDIT_TRUST_SCORE_APPROVE=1 \
+        run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$SA_UVN"
+    [ "$status" -eq 1 ]
+    score_registry true ""
+    REQUESTER_EMAIL="credit-trust-score-approve@hydra-ops" CREDIT_TRUST_SCORE_APPROVE=1 \
+        run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$SA_UVN"
+    [ "$status" -eq 1 ]
+    export CREDIT_APPROVAL_REGISTRY="$TEST_ROOT/missing.json"
+    REQUESTER_EMAIL="credit-trust-score-approve@hydra-ops" CREDIT_TRUST_SCORE_APPROVE=1 \
+        run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$SA_UVN"
+    [ "$status" -eq 1 ]
+}
+
+@test "score-approve: identities, flags and shapes are not interchangeable with the decider's" {
+    score_registry true "Aaron Kaufman"
+    source_gate
+    # the decider identity still may not move UVN rows
+    REQUESTER_EMAIL="credit-trust-decide@hydra-ops" CREDIT_TRUST_DECIDE=1 \
+        run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$SA_UVN"
+    [ "$status" -eq 1 ]
+    # the decider flag does not authorize the score-approve requester, nor the reverse
+    REQUESTER_EMAIL="credit-trust-score-approve@hydra-ops" CREDIT_TRUST_DECIDE=1 \
+        run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$SA_UVN"
+    [ "$status" -eq 1 ]
+    REQUESTER_EMAIL="credit-trust-decide@hydra-ops" CREDIT_TRUST_SCORE_APPROVE=1 \
+        run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$SA_UVN"
+    [ "$status" -eq 1 ]
+    export REQUESTER_EMAIL="credit-trust-score-approve@hydra-ops"
+    export CREDIT_TRUST_SCORE_APPROVE=1
+    run enforce_credit_approve_gate PUT /admin/credit-requests "$SA_UVN"
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status \
+        '{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"declined"}'
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status \
+        '{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"user_verification_needed","force":true}'
+    [ "$status" -eq 1 ]
+    run enforce_credit_approve_gate PATCH /admin/credit-requests/11111111-1111-4111-8111-111111111111 '{"status":"approved"}'
+    [ "$status" -eq 1 ]
+    local too_many
+    too_many=$(jq -nc '{requestIds:[range(51) | "11111111-1111-4111-8111-" + (("000000000000" + tostring)[-12:])],status:"approved",expectedStatus:"user_verification_needed"}')
+    run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$too_many"
+    [ "$status" -eq 1 ]
+    CREDIT_TRUST_SCORE_APPROVE=0 run enforce_credit_approve_gate PUT /admin/credit-requests/conditional-status "$SA_UVN"
     [ "$status" -eq 1 ]
 }
 

@@ -65,7 +65,7 @@ CONTRADICTION_VERDICTS = {"CONTRADICTED_one", "CONTRADICTED_multi"}
 DOC_SUBMITTED = Path(__file__).resolve().parent / "manifests" / "doc-submitted-r1.json"
 
 GROUP_BY_FAMILY = {
-    "mix": "mixing-mastering", "master": "mixing-mastering", "immersive_mix": "mixing-mastering",
+    "mix": "mixing-mastering", "remix": "mixing-mastering", "master": "mixing-mastering", "immersive_mix": "mixing-mastering",
     "immersive_master": "mixing-mastering", "remaster": "mixing-mastering",
     "writer": "writer-composer",
     "producer": "producer", "exec_producer": "producer",
@@ -273,7 +273,8 @@ def already_engaged(verify_db: str | None) -> tuple[set[str], set[str], set[str]
     db.row_factory = sqlite3.Row
     try:
         cols = {r["name"] for r in db.execute("PRAGMA table_info(verify_messages)")}
-        if not {"request_ids_json", "proof_tagged_at", "user_key", "campaign", "status", "kind"} <= cols:
+        from credit_review.verify_ledger import READER_COLUMNS  # noqa: PLC0415  (the writer's contract)
+        if not READER_COLUMNS <= cols:
             raise SystemExit(f"{verify_db}: verify_messages lacks the columns needed to avoid re-asking; refusing")
         proof_ids: set[str] = set()
         proof_users: set[str] = set()

@@ -12,7 +12,7 @@ import { createProfileAnalyticsStatusTool } from "./tools/profile-analytics-stat
 import { createOrderLookupTool } from "./tools/order-lookup.js";
 import { createRemoveCreditsTool, DEFAULT_REMOVE_CREDITS_SCRIPT } from "./tools/remove-credits.js";
 import { createOrderAddressUpdateTool, DEFAULT_UPDATE_ORDER_ADDRESS_SCRIPT } from "./tools/order-address-update.js";
-import { createDedupeCheckTool } from "./tools/dedupe-check.js";
+import { createDedupeCheckTool, DedupeVerdictStore } from "./tools/dedupe-check.js";
 import { createProfileCreditsStatusTool } from "./tools/profile-credits-status.js";
 import { createProfileClaimStatusTool } from "./tools/profile-claim-status.js";
 import { createCreditVerificationCheckTool } from "./tools/credit-verification-check.js";
@@ -112,6 +112,8 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
     // Shared across sessions (like rateLimiter) so repeat create_ticket calls
     // in one conversation append to the earlier ticket instead of duplicating.
     const sessionTickets = new SessionTicketRegistry();
+    // dedupe_check's own verdicts, read by create_ticket for merge_intake ownership.
+    const verdictStore = new DedupeVerdictStore();
 
     const companyFinderRunnerPath =
       pluginConfig.companyFinderRunnerPath ?? DEFAULT_COMPANY_FINDER_RUNNER;
@@ -198,6 +200,9 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
         sessionId: ctx.sessionId ?? "unknown",
         sessionKey: ctx.sessionKey ?? "unknown",
         profileMergeAssigneeId,
+        verdictStore,
+        keepConflictSpoolDir: pluginConfig.keepConflictSpoolDir ?? process.env.MERGE_KEEP_CONFLICT_SPOOL
+          ?? "/var/lib/hydra/merge-intake/keep-conflict-unflagged",
       });
     };
     api.registerTool(createTicketFactory, { name: "create_ticket" });
@@ -244,6 +249,7 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
         // NOT ctx.sessionId (an ephemeral UUID that never matches). See deriveConvId.
         sessionKey: ctx.sessionKey ?? "unknown",
         intercomToken,
+        verdictStore,
       });
     };
     api.registerTool(dedupeCheckFactory, { name: "dedupe_check" });
@@ -410,6 +416,9 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
       ) ?? process.env.CREDIT_VERIFICATION_ENABLED;
     const creditVerificationEnabled =
       creditVerificationRaw === true || creditVerificationRaw === 1 || creditVerificationRaw === "true" || creditVerificationRaw === "1";
+    const intercomBotAdminIdRaw = (api.config as any)?.channels?.intercom?.accounts?.default?.botAdminId;
+    const intercomBotAdminId =
+      typeof intercomBotAdminIdRaw === "string" || typeof intercomBotAdminIdRaw === "number" ? String(intercomBotAdminIdRaw) : "";
     const creditVerificationCheckFactory = (ctx: any) => {
       return createCreditVerificationCheckTool({
         adminClient: musoAdminClient,
@@ -420,6 +429,7 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
         sessionKey: ctx.sessionKey ?? "unknown",
         intercomToken,
         enabled: creditVerificationEnabled,
+        botAdminId: intercomBotAdminId,
       });
     };
     api.registerTool(creditVerificationCheckFactory, { name: "credit_verification_check" });

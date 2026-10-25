@@ -138,6 +138,13 @@ case "${1:-}" in
          printf '%s' "$STUB_BAD_JSON"; exit 0
        fi
        [ "${STUB_PRS_RC:-0}" = "0" ] || exit 1
+       # STUB_PRS_HONOR_LIMIT=1 models the real `gh pr list --limit N`: the
+       # first N (newest) PRs only, the overflow silently dropped.
+       if [ -n "${STUB_PRS_HONOR_LIMIT:-}" ]; then
+         _lim=""; _prev=""
+         for _a in "$@"; do [ "$_prev" = "--limit" ] && _lim="$_a"; _prev="$_a"; done
+         printf '%s' "${STUB_PRS_JSON:-[]}" | jq -c --argjson l "${_lim:-30}" '.[:$l]'; exit 0
+       fi
        printf '%s' "${STUB_PRS_JSON:-[]}" ;;
   api)
     case "${2:-}" in
@@ -230,6 +237,11 @@ case "${1:-}" in
           printf '%s' "$STUB_REVIEWS_MALFORMED"; exit 0
         fi
         [ "${STUB_REVIEWS_RC:-0}" = "0" ] || exit 1
+        # STUB_REVIEWS_ONLY_PR serves STUB_REVIEWS_JSON for ONE pr number and no
+        # reviews for every other PR.
+        if [ -n "${STUB_REVIEWS_ONLY_PR:-}" ]; then
+          case "${2:-}" in */pulls/"$STUB_REVIEWS_ONLY_PR"/reviews*) ;; *) printf '[]'; exit 0 ;; esac
+        fi
         # After the wrapper approves, the readback must SEE that approval — the
         # script reads back which sha it actually landed on. The approve stub
         # drops a marker; STUB_APPROVED_SHA models it landing on another head.
@@ -1564,12 +1576,36 @@ RED advisory check(s) NOT counted by Guard 6 — confirm before merging.'
   [ ! -f "$QA_APPROVAL_RETRY_BLACKOUT_STAMP" ]
 }
 
-@test "a malformed PR-list limit falls back to 300 rather than disabling the guard" {
+@test "a malformed PR-list limit falls back to 1000 rather than disabling the guard" {
   export QA_APPROVAL_RETRY_PRLIST_LIMIT="lots"
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   [[ "${lines[*]}" == *"is not a positive integer"* ]]
   [[ "${lines[*]}" == *"truncated_repos=0"* ]]
+}
+
+@test "default PR-list limit sweeps a 330-PR repo end to end: no truncation, and the OLDEST PR's withheld approval is re-asked (F2)" {
+  # Muso-AI/H-DevOps reached 330 open PRs. gh pr list returns newest first and
+  # drops everything past --limit, so under the old default (300) the 30 oldest
+  # PRs were never swept and every tick paged TRUNCATED instead.
+  unset QA_APPROVAL_RETRY_PRLIST_LIMIT
+  export STUB_REPOS="Muso-AI/H-DevOps" STUB_PRS_HONOR_LIMIT=1
+  # The 329 newer PRs are drafts so the tick stays fast (a draft is skipped
+  # before any call); only the oldest, #5000, is a real candidate.
+  STUB_PRS_JSON="$(jq -nc '[range(0;330) | {number:(5329-.), headRefOid:"abc123", author:{login:"azure-kirin"}, isDraft:(. != 329)}]')"
+  export STUB_PRS_JSON
+  export STUB_REVIEWS_ONLY_PR=5000
+  export STUB_REVIEWS_JSON='[{"user":{"login":"adk47"},"state":"COMMENTED","commit_id":"abc123","submitted_at":"2026-08-17T10:51:41Z","body":"**Verdict: GO**"}]'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "${lines[*]}" == *"truncated_repos=0"* ]]
+  [[ "${lines[*]}" != *"TRUNCATED PR LIST"* ]]
+  [[ "${lines[*]}" != *"CALL BUDGET"* ]]
+  run grep -c "TRUNCATED PR LIST" "$PAGE_CALLS"
+  [ "$output" = "0" ]
+  # The oldest PR (#5000, 330th in the listing) is the one re-asked, exactly once.
+  run cat "$APPROVE_CALLS"
+  [ "$output" = "Muso-AI/H-DevOps 5000 U03LP8YHLPK" ]
 }
 
 @test "a PARTIAL read failure is counted but never pages or fails the unit" {

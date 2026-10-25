@@ -200,6 +200,14 @@ only a **named human** take an approved credit back (firstmate decision 023, `re
 From the agent token, `revert --apply` is therefore refused per profile, and that is reported. The id
 list is what a human (Jan, Nick, Aaron) takes back in the admin UI.
 
+**Live Spotify + Tidal rule (captain 2026-10-23, firstmate 104/105/106).** `approved → unverified`
+hides the credit, and nothing is hidden or removed on Muso until a live check in the same run shows,
+on BOTH Spotify and Tidal (every Tidal country agreeing; UNKNOWN never counts), that the track can't
+be played or the person's credit in that role family is gone. That check is core-backend's removal
+gate (#10765/#10767), not live yet, so `revert --apply` now refuses with `live_dsp_gate_required`
+before any write (`scripts/credit_review/dsp_gate.py`). The listing (`revert --run` without `--apply`)
+is unchanged. The credits stay visible, held for Ops.
+
 **Kill switches.**
 - `/etc/hydra/credit-trust-decide.disabled`: nothing is decided.
 - `/etc/hydra/credit-review.disabled`: stops this and the audit.
@@ -218,3 +226,22 @@ ask are owned by other tickets:
 - removing the 403 blocks on credit requests and deletes: T04;
 - deletes that must prove removal from Spotify/Tidal or a different same-name profile, and fixing past
   approvals (retro execution, the HTML report): T05 / retro.
+
+**Daily ask cap.** At most `max_ask_users_per_day` distinct users (policy file; 100 for the first 48h of go-live, firstmate 031) get a support request per UTC day, counting users already asked that day. A user admitted under the cap gets all of their rows in that run as one batch; the rest are deferred with reason `daily ask cap:` and go out on a later day. The cap is re-checked under the shared credit-write lock immediately before each support batch, on the UTC day that batch is sent (after the approval writes); outcomes are booked at the time the PUT returned, so a request in flight across midnight counts on the later day, so overlapping runs or a run crossing midnight cannot exceed it (rows trimmed there get outcome `deferred:daily_ask_cap`, or `deferred:per_user_window` when another run asked that user meanwhile).
+
+**Server approval guard mirror (T12).** core-backend refuses an agent approval of a validator-declined row unless the row is inside the automation's scope, judged on the row as the server stores it (`spotifyPopularity`, `metadata`, `verificationData`). `credit_review.policy.server_approval_refusal` (decider, scope not-big-no-hold) and `server_band_a_refusal` (uvn-under30, scope band A) mirror that rule, so neither automation sends an approval the server will refuse:
+- a stored popularity of 0 is unattributed, not big: the row goes to a human, never a proof ask (firstmate 036);
+- a stored popularity >= 60, unknown, client-sourced metadata or a server proof requirement (validator hold, risk 100, band hint not A, high/critical profile risk, a `proofRequest` marker) gets a support request;
+- anything else the server would refuse is held for a human.
+If the server still answers `agent_cannot_approve_declined`, it wrote nothing: the decider records the refused rows as `skipped:agent_cannot_approve_declined:<reasons>` and sends the rest of the batch once more; uvn-under30 clears its unresolved-attempt blocker and leaves the rows held.
+
+
+**Support@ contacts are never asked (firstmate 041).** Every user in the export's top-level `gmail_contacts_90d` (a list, or `{generated_at, source, user_ids}`) emailed support@ in the last 90 days: their support rows are held for a human, never asked, even when no document was found. A missing or malformed list makes proof status UNKNOWN, so nobody is asked.
+
+**One proof-on-file rule.** The decider reads the export through `credit_review.proof_parts`, the same completeness rule as the verify notes, the take-back gate and Caroline's support tool (pinned by `scripts/tests/fixtures/proof-parts-contract.json`, which the decider now answers too): `core`, `cs-intercom` and `cs-gmail` must all be present, unflagged and fresh by their own stamps, no other part may be flagged, entries must be well-formed and `users` consistent; anything else is UNKNOWN and no proof request is sent. The decider is stricter on top, never looser: integer user ids only, and a readable `gmail_contacts_90d` list (its users are held, never asked).
+
+
+**Credit backlog rulings (Fable, data/captain-calls-fable-d5/credit-backlog-1019.md; firstmate 072).**
+- Order (ruling 6): every run sorts PAID with rows older than 24h, then PAID within 24h, then FREE, oldest-created first inside each (`order_rows`); decisions are re-sorted the same way before the ask cap, so the cap admits paid users first.
+- Ask cap (ruling 1): 400 distinct users per UTC day (`max_ask_users_per_day`), with the existing invariants: one batched ask per user per day, never a user with a document on file or a support@ contact, never re-ask.
+- Paid provisional approval (ruling 4): a PAID user's small/medium row whose web check is NOT_FOUND (so no contradiction, no red flag, no validator conflict, no editorial rule, not big) is approved with `evidence_kind = provisional_paid` instead of asked; the verify note then tells the user the credit is live and asks for a document, with no threat and no date. **Never auto-removed** (amendment, firstmate 073; captain rule 10-15: a delete must confirm removal at Spotify/Tidal or prove a different profile, no new lowering classes): after 30 days without a document the row goes to the Ops review list (`credit-review.py provisional-review`), still live; any later removal follows the normal proof rule with notice and reason. At most 20 per user per UTC day. Free users stay on the ask path; big tracks stay strict; core's T12 mirror and the documentation-required rule still apply after it.

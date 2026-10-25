@@ -11,8 +11,9 @@
 # causes (the author can fix those) and warns on the rest.
 #
 # WHAT STAYS AUTHORITATIVE. deploy.sh Step 4a (deletion-gate.sh, hydra#1117)
-# halts the real deploy on ANY pending deletion. This lib only changes what a
-# PR is blamed for; the warning says so, so nobody reads it as "safe to deploy".
+# halts a HYDRA_FULL_SYNC=1 deploy on ANY pending deletion; a merge-triggered
+# (delta-mode) deploy never reaches it and never deletes a path outside its
+# delta. This lib only changes what a PR is blamed for; the warning says so.
 #
 # ATTRIBUTION. Paths the PR removes = `git diff --no-renames --diff-filter=D`
 # against the base. --no-renames is deliberate: with rename detection on,
@@ -105,7 +106,7 @@ attribute_deletions() {
   fi
 
   if [[ -n "$other_lines" ]]; then
-    echo "::warning::/opt/hydra/ holds server state this PR did not cause; the deploy would delete it. Not blocking this PR — but NOT safe to deploy: deploy.sh Step 4a halts the real deploy on ANY pending deletion."
+    echo "::warning::/opt/hydra/ holds server state this PR did not cause. Not blocking this PR: the deploy this merge triggers runs in delta mode and will not delete these paths (they are outside the delta it applies). deploy.sh Step 4a only governs an explicit HYDRA_FULL_SYNC=1 deploy, which would delete them."
     echo
     echo "Unrelated server state (not caused by this PR's diff):"
     printf '%s' "$other_lines"
@@ -115,8 +116,7 @@ attribute_deletions() {
     echo "      → Pull it in: tracked file: scripts/sync-from-server.sh <target> --apply --only <path>;"
     echo "        a path the repo never tracked is NOT pulled by that script: scp it, review it (no secrets), git add <path>. Then commit"
     echo "  (b) Runtime state the server should own"
-    echo "      → Either commit a seed file under the path (auto-exclude will then kick in)"
-    echo "        OR add an --exclude line to RSYNC_EXCLUDES in scripts/deploy.sh"
+    echo "      → Commit a seed file under the path (auto-exclude will then kick in) if a full-sync deploy must keep it"
     echo "  (c) Actual garbage left on the server"
     echo "      → Clean it up on node-8"
     echo "Owner of the node-8 cleanup: Nick."

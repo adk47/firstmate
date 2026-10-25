@@ -1,0 +1,112 @@
+name: qa-tier-recheck
+
+# Re-review a hydra PR the moment its tier metadata is fixed (firstmate 2026-10-20:
+# six PRs stalled today on a tier-only QA NO-GO, because the review re-fires only
+# after "PR Validation", and adding a label or editing the body does not run it).
+#
+# Fires on exactly two events and nothing else:
+#   - labeled, when the new label is one of tier:0 .. tier:3;
+#   - edited, when the BODY changed and the edit ADDED a complete
+#     "Tier: N, because ..." line (the old body had none). Title edits, retargets
+#     and later body edits stay silent, so this cannot turn into a review per
+#     keystroke.
+# Either way it re-dispatches ONLY when the head already carries a QA NO-GO (the
+# newest qa-review status is `failure`). A tier label added at PR creation (no
+# verdict yet) or on a GO head does nothing: qa-autoreview reviews those heads.
+# Accepted residual (firstmate 082): a tier fix made while a review is mid-flight
+# (no verdict status on the head yet) is not re-dispatched, and the stale NO-GO
+# that review then posts stands. The next push, removing and re-adding the tier
+# label, or a hand dispatch covers it; qa-review-reconcile does not, because it
+# counts that NO-GO as a verdict.
+# It reuses the auto-review dispatcher unchanged: same author->Slack-UID mapping
+# (fail closed), same in-flight dedup, same review/approve guards. Nothing about
+# who may approve changes.
+#
+# pull_request_target, not pull_request: the workflow file and scripts come from
+# main, never from the PR branch, and no PR code is checked out or run. That is
+# the same trust boundary qa-autoreview.yml gets from workflow_run. The PR body is
+# untrusted text: it reaches the gate through env only, never the script source.
+
+# No run-name: most runs of this workflow end at the gate with go=false, so a
+# run here must never carry the `qa <repo>#<pr> @ <sha> (...)` shape that
+# scripts/qa-dispatch-pr-review.sh's in-flight dedup refuses against. A
+# qa-autoreview dispatched while this run is in flight therefore always proceeds;
+# the worst case is a duplicate review, never a lost one.
+
+on:
+  pull_request_target:
+    types: [labeled, edited]
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+  statuses: read
+
+jobs:
+  dispatch:
+    runs-on: [self-hosted, hydra-dispatch]
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.state == 'open' &&
+      (
+        (github.event.action == 'labeled' &&
+         contains(fromJSON('["tier:0","tier:1","tier:2","tier:3"]'), github.event.label.name)) ||
+        (github.event.action == 'edited' && github.event.changes.body != null)
+      )
+    steps:
+      - name: Tier re-review gate
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ACTION: ${{ github.event.action }}
+          OLD_BODY: ${{ github.event.changes.body.from }}
+          NEW_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          tier_line() { grep -qE '^[[:space:]]*Tier: [0-3], because' <<<"$1"; }
+          if [ "$ACTION" = edited ] && { ! tier_line "$NEW_BODY" || tier_line "$OLD_BODY"; }; then
+            echo "Body edit did not add a complete 'Tier: N, because' line - no re-review."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! states="$(gh api --paginate "repos/${REPO}/commits/${HEAD_SHA}/statuses?per_page=100" \
+                --jq '.[] | select(.context == "qa-review") | .state')"; then
+            echo "::warning::could not read qa-review statuses for ${HEAD_SHA:0:7}; dispatching anyway (the dispatcher dedups in-flight runs)."
+            echo "go=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          newest="${states%%$'\n'*}"
+          if [ "$newest" != failure ]; then
+            echo "Newest qa-review on ${HEAD_SHA:0:7} is '${newest:-none}', not a NO-GO - no re-review."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "go=true" >> "$GITHUB_OUTPUT"
+
+      - name: "Checkout main (main's dispatcher, not PR code)"
+        if: steps.gate.outputs.go == 'true'
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Dispatch a QA re-review of the current head
+        if: steps.gate.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+          if ! REQUESTER_UID="$(bash scripts/lib/qa-author-slack-uid.sh "$AUTHOR")"; then
+            echo "PR #${PR} author=${AUTHOR} has no Slack-UID mapping - no re-review (same rule as qa-autoreview)."
+            exit 0
+          fi
+          echo "Tier metadata fixed (${ACTION}) on a NO-GO head of PR #${PR}: dispatching a QA re-review of ${HEAD_SHA}"
+          bash scripts/qa-dispatch-pr-review.sh "$PR" "$HEAD_SHA" "$REPO" "$REQUESTER_UID"

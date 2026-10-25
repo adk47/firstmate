@@ -360,7 +360,11 @@ teardown() {
     [ "$env_after" = "$env_before" ]
   fi
   if [ -d "$real_shadow_dir" ]; then
-    new_files=$(find "$real_shadow_dir" -type f -newer "$marker" 2>/dev/null || true)
+    # Only this run's own surface file (jev-eval.jsonl + its .lock). The real
+    # dir is the LIVE production shadow log: on node-8 other surfaces' writers
+    # append to it at any moment, so watching the whole dir fails whenever a
+    # production row lands mid-run, which says nothing about this seam.
+    new_files=$(find "$real_shadow_dir" -type f -name 'jev-eval.jsonl*' -newer "$marker" 2>/dev/null || true)
     [ -z "$new_files" ]
   else
     [ ! -e "$real_shadow_dir" ]

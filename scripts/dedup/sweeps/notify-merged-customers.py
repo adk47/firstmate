@@ -42,6 +42,8 @@ Exit codes:
 """
 import argparse
 import datetime as dt
+import functools
+import importlib.util
 import json
 import os
 import sys
@@ -53,6 +55,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from lib.customer_outcome import outcome_tag, outcome_tags_of  # noqa: E402
 from lib.intercom_identity import resolve_admin_id  # noqa: E402
+from lib import merge_keep_conflict as mkc  # noqa: E402
 
 CLICKUP_API = os.environ.get("CLICKUP_API", "https://api.clickup.com/api/v2")
 INTERCOM_API = "https://api.intercom.io"
@@ -239,9 +242,89 @@ def comment_and_close_ticket(ticket_id, ticket, conv_id, clickup_key):
 _SEEN_CONVS = set()
 
 
+@functools.lru_cache(maxsize=None)
+def _merge_outcome_notify():
+    path = Path(__file__).resolve().parents[2] / "merge-outcome-notify.py"
+    spec = importlib.util.spec_from_file_location("merge_outcome_notify", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+def _merge_outcome_tagged(ticket):
+    return any(str(t.get("name", "")).lower().startswith("merge-outcome")
+               for t in (ticket.get("tags") or []))
+
+
+def merge_outcome_not_merged(ticket):
+    """True when the ticket carries a merge-outcome:* tag other than exactly merge-outcome:merged:
+    the executor recorded that THIS request was not merged (or the outcome is ambiguous), so a
+    'merge complete' note would be false even when an unrelated merge matched the profile."""
+    outcomes = {str(t.get("name", "")).strip().lower().split(":", 1)[1]
+                for t in (ticket.get("tags") or [])
+                if str(t.get("name", "")).strip().lower().startswith("merge-outcome:")}
+    return bool(outcomes) and outcomes != {"merged"}
+
+
+def merge_outcome_notifier_owns(ticket):
+    """True when merge-outcome-notify.py is unlocked and has told, or will tell, this ticket's customer."""
+    if not _merge_outcome_tagged(ticket):
+        return False
+    mon = _merge_outcome_notify()
+    return mon.MERGE_OUTCOME_COPY_APPROVED is True and mon.owns_outcome(ticket)
+
+
+def mark_merge_outcome_notified(ticket_id, ticket, clickup_key):
+    """Best effort: tell merge-outcome-notify.py this customer was already told."""
+    if not _merge_outcome_tagged(ticket):
+        return
+    try:
+        tag = _merge_outcome_notify().NOTIFIED_TAG
+        s, body = http("POST", f"{CLICKUP_API}/task/{ticket_id}/tag/{urllib.parse.quote(tag, safe='')}",
+                       {"Authorization": clickup_key})
+        if s not in (200, 201, 204):
+            raise RuntimeError(f"-> {s}: {body}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{ticket_id}] WARN: could not add the merge-outcome-notified tag: {str(exc)[:200]}",
+              file=sys.stderr)
+
+
+def keep_conflict_held(ticket, clickup_key):
+    """True while this ticket carries merge-keep-conflict or merge-intake-stale, or its OPEN
+    keep-conflict sibling (create_ticket tags both) still carries merge-keep-conflict
+    (scripts/lib/merge_keep_conflict.py). A closed sibling never holds; an unreadable one does."""
+    if mkc.held_by_own_tag(ticket):
+        return True
+    for sibling in sorted(mkc.siblings_named(ticket)):
+        try:
+            if mkc.sibling_holds(get_ticket(sibling, clickup_key)):
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+    return False
+
+
 def process(ticket_id, args, env):
     print(f"[{ticket_id}] start", file=sys.stderr)
     ticket = get_ticket(ticket_id, env["CLICKUP_API_KEY"])
+    if keep_conflict_held(ticket, env["CLICKUP_API_KEY"]):
+        print(f"[{ticket_id}] skip: merge-keep-conflict held (a human reconciles the pair first)",
+              file=sys.stderr)
+        return
+    # Only a merged outcome (or no merge-outcome tag at all) can get 'merge complete'. A
+    # needs-evidence, not-merged or ambiguous outcome never does, however old: merge-outcome-notify.py
+    # sends it or lists it in #cs_priority for a human reply.
+    if merge_outcome_not_merged(ticket):
+        print(f"[{ticket_id}] skip: merge-outcome is not merged (merge-outcome-notify.py or a human "
+              f"tells the customer)", file=sys.stderr)
+        return
+    # A ticket scripts/merge-outcome-notify.py has told or will tell (merge-outcome-notified,
+    # or a fresh merge-outcome-at date) gets no second message here. Every other merged
+    # ticket, including a stale or undated one, still gets this path's 'merge complete' note.
+    if merge_outcome_notifier_owns(ticket):
+        print(f"[{ticket_id}] skip: merge-outcome tagged (merge-outcome-notify.py owns it)",
+              file=sys.stderr)
+        return
     desc = ticket.get("description") or ticket.get("text_content") or ""
     ar = parse_action_request(desc)
     if not ar:
@@ -303,6 +386,7 @@ def process(ticket_id, args, env):
     # failure; a future ticket sharing this conv must NOT inherit a phantom
     # "already handled" state and silently close without messaging.
     _SEEN_CONVS.add(conv_id)
+    mark_merge_outcome_notified(ticket_id, ticket, env["CLICKUP_API_KEY"])
     comment_and_close_ticket(ticket_id, ticket, conv_id, env["CLICKUP_API_KEY"])
     print(f"[{ticket_id}] applied: replied + closed", file=sys.stderr)
 

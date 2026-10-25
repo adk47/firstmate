@@ -1,0 +1,998 @@
+{
+  "_doc": "FRAUD WATCHLIST, the single source of truth (captain 2026-10-22 20:15Z, firstmate 154). Every entry is HELD FOR REVIEW by every automatic approval path: never auto-rejected, never auto-removed. tier fraud = a confirmed or likely fraud actor (raises 'watchlisted actor is back'); tier review = held, no fraud label. Ids only in clear text; names and emails are sha256 of the normalized value (name: NFKD, ascii, lowercase, [a-z0-9] only; email: trimmed, lowercase). Append by PR; removing an entry needs Fable or a named admin. Built by data/credit-trust-llm-t01/fraud-watchlist-154/build_seed.py.",
+  "version": 1,
+  "entries": [
+    {
+      "tier": "review",
+      "user_ids": [
+        13373
+      ],
+      "profile_ids": [
+        "4122bbc0-a5c0-4363-8873-5c135b8c7bed"
+      ],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "be0702372c40a40e600d9f24680780b57e3540918968263ffc6010628c79cdf9"
+      ],
+      "email_sha256": [
+        "81dc1c3bf5fa752daba79f9a52d7d93142eb659c0b6493d8af4240209f2e2295"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        17600
+      ],
+      "profile_ids": [
+        "0c11deb5-0213-41c5-813a-eb0122207f20"
+      ],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "a68ef450c6b1daeca37e2c92a7e842c0ce961a2581649d0dd7ad98bec69a0a77"
+      ],
+      "email_sha256": [
+        "d0d11f2405e038723ddb51020eada876d1f2dc0e357b63d8807746e8baef5b14"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        22226
+      ],
+      "profile_ids": [],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "e15b5a994e4abbaf36f39627ac6c385474a7fd3c34acfbac381075e070fa7672"
+      ],
+      "email_sha256": [
+        "5739173d4128ac4e70c7892042a239f63bdb8d7c23aafd228fc0ecc1f8184451"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        22891
+      ],
+      "profile_ids": [
+        "db3a6c4e-2dc5-47bd-851e-c306b16adbcc"
+      ],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "f35b0ef46fa0e9907b4db34a01904583b597a022fb87b14ebc496a05d21f04b0"
+      ],
+      "email_sha256": [
+        "27946aaf6c10f107c7583c8f15352fe894ca6b1eea02dd1ee9eb482d01e24118"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        25291
+      ],
+      "profile_ids": [
+        "9c899461-ecf1-403c-888a-8608e00c2d5d",
+        "f1903fe3-b6ea-457a-b8e2-15f31161e9fe"
+      ],
+      "reason": "Fable re-review: LIKELY-FRAUD",
+      "evidence": "data/pull-rereview-fable-r1/verdicts.json",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "4277169d5d5ef81c4658d8f25fbca5242068c913a7eea76962f22c4aefec0882",
+        "61a84fd6a66c7aba9959c4f66bd2e1594015c6cd51dede3a86241ed9491562ee"
+      ],
+      "email_sha256": [
+        "8c28af3266981f022c8f863f01cee6e247ce0e5884888481104caaffefb25a2c"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        32731
+      ],
+      "profile_ids": [
+        "abf7cc10-98c2-46c9-8887-d8c8371279d2"
+      ],
+      "reason": "Fable re-review: UNCERTAIN",
+      "evidence": "data/pull-rereview-fable-r1/verdicts.json",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "4e8ab61581d49552d6b2129662b8dec145e63df5eb9151c4eeaecf298c1c7224"
+      ],
+      "email_sha256": [
+        "30f3b5be09072f118989836beeda5d22c402572ec96a33d80d0426e644a7a602"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        33086
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "95f9be4824b31e58686a0aaffca133fdea8ec31f30d814fdd3811a1794e16529"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        47513
+      ],
+      "profile_ids": [
+        "884e942b-ea73-493f-b44d-29d25ef54b51"
+      ],
+      "reason": "Fable re-review: LIKELY-FRAUD",
+      "evidence": "data/pull-rereview-fable-r1/verdicts.json",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "2b930319c88c9f7697c481539ad4fadeabdec5fb88a35ea6c9034b72e12ee25c"
+      ],
+      "email_sha256": [
+        "6cc90dbfac9c68c754cbdccd87102f91a9cbee62738ec5514f5d3931dc00e49f"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        58586
+      ],
+      "profile_ids": [
+        "6070469a-0422-483f-865b-a910e084b7af"
+      ],
+      "reason": "Fable re-review: FRAUD-CONFIRMED",
+      "evidence": "data/pull-rereview-fable-r1/verdicts.json",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "69a50ccc9b8077c3482aedf83a69545125e03dcd0c26df0252ad4d5f656e4f97"
+      ],
+      "email_sha256": [
+        "8c25a45a13fc97312a7d26caef49726ded7f46ed71c750c5717ecefe11a83e45"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        60223
+      ],
+      "profile_ids": [
+        "c59f4b09-aa50-4693-986b-379d2e78742b"
+      ],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "2b62942a672df08af9a88c17f6479acc4574ad53a603a9724fe7ffdb657c7ef1"
+      ],
+      "email_sha256": [
+        "1b1166c4c1c819bac397becd5b5909af336ef4d41b3d72011e46c2230e6ad845"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        74416
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "6dfd6e22c1a2b03ed3788de60da2fecc7e566acd09fae011d0322840fae06285"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        76346
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "ccb867d7ee81a8483dd968b5e9353dda7705960df1feefd1c4bb3630d8bc56a6"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        95012
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "f5db1ba44c29d904b3bf5c99b9355ccd072909b6d68f7e34264862f52f15e2df"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        95146
+      ],
+      "profile_ids": [
+        "6b6f6f23-63e5-4f9e-bd34-ff3477b06217"
+      ],
+      "reason": "Fable re-review: UNCERTAIN",
+      "evidence": "data/pull-rereview-fable-r1/verdicts.json",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "b363ae6e50f5a18186da83a6be26e591a01dc896f4b445a9dd8d58c4b9a626f0"
+      ],
+      "email_sha256": [
+        "3d8ae3dcd560dc50068921119ef414627e34d4cb450a903e594cd9c23cb974e0"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        98515
+      ],
+      "profile_ids": [
+        "0cfc48f0-52de-403a-81c5-173980605fb9"
+      ],
+      "reason": "Fable re-review: LIKELY-FRAUD",
+      "evidence": "data/pull-rereview-fable-r1/verdicts.json",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "a47304a4bea5220f890653eeb5000f1a36d2106ed946f395dceb1b5d1c40704d"
+      ],
+      "email_sha256": [
+        "5fc6d2d6a5f4d8f1e9b1c6eb8ea92a7128cad31ec51af87806964ae38d9ae224"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        109517
+      ],
+      "profile_ids": [
+        "2afaead7-9887-479d-9518-f97f89428c82"
+      ],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "3713e0191d72df04caec0b94e14075f846c60c2c1425202d32755b05c3261745"
+      ],
+      "email_sha256": [
+        "167d413b475a668156a3461c7144dfb6e4413e7ece76d5eb6c3c39029f37d5e1"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        109568
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "6ccf96efbde9c92af97ac578bb1b28bc149b6ee72ea4652a23234f0b1373fa8c"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        123407
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "c820d80c6a5bf475a0c9b9d60ecaec69add8e65fa662f98b3ca1672e3c148c6a"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        125858
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "522f876ce9219a64eeee7ae51e768e42f024861561a380d4275145f53f93f34c"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        140148
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "82f91585eaba587a8277ebd05b12732e0513d71c950b7c3c9a64a27ac5a4f534"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        141609
+      ],
+      "profile_ids": [],
+      "reason": "Fable re-review: UNCERTAIN",
+      "evidence": "data/pull-rereview-fable-r1/verdicts.json",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "2b7ca93616e124e18a0c53e3413b0d7fa35901e2e3109f23ff21514786a530a5"
+      ],
+      "email_sha256": [
+        "2bf38e64f5aa76917704383ac845741d3d1573cc7508cfc7a07179c2b28a7416"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        146003
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "18be6871e44455dc4c263095d39412b7457daee6dc84a85971e44b0762e83461"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        148127
+      ],
+      "profile_ids": [
+        "b38ffca3-b160-4cf3-9d55-61bbadef7c94"
+      ],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "8bf42ec98363b861428f94f84b97d6d8e7e3a42a67c673dd62cff60366c03c05"
+      ],
+      "email_sha256": [
+        "e212e6b3920391f5ea241115aeb916bcb6d8f3bd80a747f8ae4eca5bf930e5e5"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        150526
+      ],
+      "profile_ids": [
+        "465e1e71-cfc2-412d-944b-1cf2444a275b"
+      ],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "d52641d24fc27b2d3239eea0500edf473f2a414a5cdde4a8a90a77279830b3be"
+      ],
+      "email_sha256": [
+        "187edba171c8121a6a1d4ae575545db31b82a3fd4b00578ac315d1046ace5da1"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        162720
+      ],
+      "profile_ids": [],
+      "reason": "Fable re-review: FRAUD-CONFIRMED",
+      "evidence": "data/pull-rereview-fable-r1/verdicts.json",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "59e5ad2a03d2499749f7943c9dded0f303ad7542befef6d0aead8a7888587f66"
+      ],
+      "email_sha256": [
+        "bb48a51513b6b05783c91ee94d6ad7b3c658831ee43813a568aaff147a90eedd"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        168466
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "6f99df20ea3624ac5d6a6cd23f5e37d6f4f83c236883fef67dc019a17f7d8682"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        178113
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "09717c3ada85403bb2c5d699d1638cf334e0d0f92004b8fbaf5f8511ce3bd753"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        179366
+      ],
+      "profile_ids": [
+        "ef9dd681-d656-4e45-a645-e99aed91a1d3"
+      ],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "e9dee71d880a44be3b8e2e0f79ddc91e834a4ce3cb581cee13ad0daba373d0ff"
+      ],
+      "email_sha256": [
+        "8c6a0d03dc6223a7f78a529fbbeff2909c9111dd1a3a121cce262329adf81220"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        191928
+      ],
+      "profile_ids": [
+        "78154957-3c3b-44d3-8835-aecb7d0e3421"
+      ],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "b19ac8444161f9fa130d6cf015f6da9ffbf3df44e43eb0c851356c0ee3be8d9a"
+      ],
+      "email_sha256": [
+        "ff143057f0f220c3d442a70845ac7110ce29f44606e6ee0578ab22c9557523c6"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        195823
+      ],
+      "profile_ids": [],
+      "reason": "Fable re-review: LIKELY-FRAUD",
+      "evidence": "data/pull-rereview-fable-r1/verdicts.json",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "6e860de71e9ba8b6556b101e9d50f54b651a620cdd8dd01b34f90dc96e8b2f97"
+      ],
+      "email_sha256": [
+        "6e032debafb73299b5115a2b2508e90289513ff142032cfef94209ff71024199"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        199826
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "1a36752b40567f510a2a8a619320cb3a55efbf651f2623f6f5a03b6854cefc05"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        200538
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "8b9c58093f7714a39c581466fd2da77365fbe509f358efc4b7b397db5fa6cbc4"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        211861
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "6b1131fa6d974360b57a5c9cf54af7f2703104facc838875955ae35bffa361b0"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        219812
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "bc64ce0236ce468ca93efafdf2494205e58731b829a87c29bdbab563efdd5adb"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        223761
+      ],
+      "profile_ids": [
+        "ee3d0c6b-d27c-4bcb-974d-ac15fb1c9786"
+      ],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "eeb5669d50327a021544bb34088211bed3fbb4f842512a607f9c1824b9d88f8d"
+      ],
+      "email_sha256": [
+        "d50d8a19edc152e429243a578d90ecc18177f8b12958d299cdd348b3e4907154"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        229176
+      ],
+      "profile_ids": [
+        "3912b892-cb82-4ac3-9305-5a8b28e7e1b9"
+      ],
+      "reason": "Fable re-review: LIKELY-FRAUD",
+      "evidence": "data/pull-rereview-fable-r1/verdicts.json",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "6039974069bdb43a3f79ad53ec3cdf52952ef95c75e4a225fc58b61174c2b617"
+      ],
+      "email_sha256": [
+        "fa7891f4e3ef971645b2c7c020e9c9d3d6789703b49bc35354114eed5df3678e"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        246282
+      ],
+      "profile_ids": [
+        "2210d461-683e-4343-bf83-0e3792fed249"
+      ],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "096889c8c2ecb62e6f4256d4a4ec3602c6b96011af45d67a8e21b49026e7b20d"
+      ],
+      "email_sha256": [
+        "c445e8c09b65b8791c08398ed1cbe596f154a66f50138c92b7cdc7393f73d2c6"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        280359
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "038b185a3d0f990db14a68a9fa1859ac6b1cf6c57ca13668726146c55b2e51a2"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        285920
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "571e6630e7768a45b369187f467c0f50c395f13351559f17bf640bc709ada5a8"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        286911
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "b7fe39d15d16df9c0b0728a60e4e0df24bb246c1efc679d30ac4804e392d2064"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        293034
+      ],
+      "profile_ids": [],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "3f2a525c994c1fb2c389a9035e187484cad21aa9492702aa285bafcad1f19756"
+      ],
+      "email_sha256": [
+        "9f05a3f5d20b2e3be874ab19ddffb7ec4fc83b86e00806244b9df26f517135d4"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        299886
+      ],
+      "profile_ids": [],
+      "reason": "doc-fraud retro: HOLD tier",
+      "evidence": "data/credit-retro-hold-docfraud-f1/tiers.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "email_sha256": [
+        "5ad669d41d6d7f77bd0666b4ab0f2f9fa7ac0828e62c9dd362ce74d4e7fd3140"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        301754
+      ],
+      "profile_ids": [
+        "0c7622fd-5b51-4e52-8a9d-08a253644e8c",
+        "0ccd37ba-041f-439e-971b-0ba5da7b1d4c",
+        "0d1598b1-8d76-4a2e-a1a1-54131a2cbb75",
+        "19cd7a1a-27a2-433b-9c29-d40b7344ec4a",
+        "2b813b37-f85a-4610-b0c6-1d970a586667",
+        "3aa56594-7679-4daf-90e3-3a303f792f3a",
+        "5e89b144-2b59-4893-a86d-731501813a44",
+        "7d2f69b2-8264-4780-aa1d-e0ccb22a2f10",
+        "86a2ff54-3f4c-4809-b240-b88372af38c2",
+        "884a5c60-3d04-4265-a7c7-3c132a4c77cb",
+        "947a6b25-2013-476c-ac8c-5670cc110c9b",
+        "af021e13-f475-4f5e-8c25-3e3c8f859514",
+        "f79e19eb-182f-4e30-a6c6-95647855db3b"
+      ],
+      "reason": "Fable re-review: FRAUD-CONFIRMED",
+      "evidence": "data/pull-rereview-fable-r1/verdicts.json",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "06231692f4dd059df599fa19dbeab0812b65026a4166f837d751c02ab86ec649",
+        "0dcf5d6e3cfa144f1601c8645b3feb4b22b232cc1dc21fb1ab87b53b0bd651d7",
+        "28dd54addb41720a4a0c9e6fb3bb0d53e6738c155710081910df2ac7c2ea9da2",
+        "2dbbbfcedcc1834af63425a8bf58fddfce21bc950e55c0f9adc1f3e7c21825c3",
+        "3943d2fc6a41688d98354fbad74f2bebb3153d1bd310aece9d1b63305507fa5e",
+        "3c38aafb0579dafe18bb584dce2786ccaab6835245f2979af4bb7dd2b6b90775",
+        "4287c9dabf500a4af7e88667b075a23294ee790f35cfeacb7aa9536b045413e5",
+        "51d8952778e0b25f20910677edbe9ccb30bac0bd1d713d90d43ec4e0fde65274",
+        "85b7ed495acd796e3537017494318e6f375ebcf535c5f4a105336cf1388b5558",
+        "b4d6bd0f3e089e7b09a9a7e0b46778dc86a56a36657198e115bc3712bb5a5f00",
+        "c02f83f220b46733b96b8995e7ee4e4e28ef5ee287cedc297376dd0906c464d9",
+        "c8ee7de1de4e016a5d36f911a05edee0df02410db1c7ef47e7d0312cb538982f",
+        "c9fe7ca3dc19eed60cc9e61e46508e75e727b74edfb06f543e6b046f9b6410e5",
+        "cba0e414fc303977ae06bbe4b5de9e96ae261bc19fa5b665f975efbcc7a64efe",
+        "f265ef640241dc25315f879ddcddffc9bc9399f230f19ec5491915b0d6c59b17",
+        "fc59487712bbe89b488847b77b5744fb6b815b8fc65ef2ab18149958edb61464"
+      ],
+      "email_sha256": [
+        "88ab72e66490dd6ca1de3b1ebf6c09a244d55410037b0121158285df9dbd1df1"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        307585
+      ],
+      "profile_ids": [],
+      "reason": "Fable re-review: LIKELY-FRAUD",
+      "evidence": "data/pull-rereview-fable-r1/verdicts.json",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "cc9ccc17abc76b01d1eebd26a00d7948d7ca74117a9c98d181d0886450a9b8ce",
+        "ea9ed3ae6bc5f63adea22c45685e94ac7c7076aa4827469028def744720c3018",
+        "faea04a10a85b4156b80013b98280083ea69c31a1b9cea756ff94e088e51ae52"
+      ],
+      "email_sha256": [
+        "e56cfe0a6e7cab40e764b04dc0afda408610316779f08fbf6add51d61f64c332"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        332243
+      ],
+      "profile_ids": [
+        "ca96253a-45b5-4348-b132-43878a37efda"
+      ],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "f8c28cc250c80af02dd86567915b40bc7082ede22c4c3f12360937b24349517e"
+      ],
+      "email_sha256": [
+        "a2161a25cfabc58b431b54046a0fb80fbfa8905b967f640fd0c9c48e53e34417"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [
+        370639
+      ],
+      "profile_ids": [
+        "06ba6999-29c2-4026-9504-c661d457f836",
+        "0da5c04b-5e8e-4e74-a9da-abaf45164c9a",
+        "19aa794e-b82f-471f-a8a0-7f46d8bd26e7",
+        "3bf028bd-8109-4a5b-af94-fd9bfba96776",
+        "612c6155-9780-467d-9f66-c20607de2b1d",
+        "6b231cb1-5779-410e-b80f-7f5a699c3d71",
+        "81b78271-34fa-4e4e-8aa0-9f71483d0422",
+        "8ae4be6f-283e-43de-934f-f0bbdd94e350",
+        "b9fbf966-dbab-4a9b-b795-6f40596a47ed",
+        "e0d8f389-4b94-4477-a60b-2012e172ae05",
+        "ff783595-136f-43a8-b268-353958a7f905"
+      ],
+      "reason": "credit-authenticity audit: RE-VERIFY",
+      "evidence": "data/credit-authenticity-audit-a1/accounts_ranked_2026.csv",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "0133348a50889b5d519023cf87aa1e95e913a454b0a6615dda51c8511e68892f",
+        "093656ae340bfd039a0e19b988e80f7eb0cf5cc862bdb1be084f0346d4d410d3",
+        "09ff6190b43bf1688197925abbd662b92ac51742bf20f00938a3b418642c76e0",
+        "1e20c74b4b77510eb85860f8d8f20cd7e7c7a74891f6fc0216b9ae2153ead63a",
+        "28ba81224dac6f310bf63a51b3c1a64e984e848848a0ef8ea949de7a6ad23887",
+        "3161eec543eb7fd4db30f0fdcc54b1cc9f78a7ed8bcf665a355fd8fd5f25895a",
+        "4122ba0e85ed3ab5090fd4b319c6251ae94a3d6c383e86702e9b6164230fce97",
+        "85455bd04cabf8d25fecf3f89bc96c2aa7a251d6345e81ac3904a4fee56b2b0c",
+        "8f8992183d8bea0c847dfe97d64f03f21e2774a100fdb01292d808eb981c4e9a",
+        "92a47ee957ba57beae7541eeabc56c35dce450cdc164b6a9434e221d7771f12d",
+        "a8eea8941e51dd0ccd36ae9ade205a865661646f1b45b9ce78f5685c00839a5a",
+        "bbb33f8c1fe31eda3617eec1b11b77674b3fd815e9b37540006df9c380ec7e52"
+      ],
+      "email_sha256": [
+        "3f2bda3cb336cb76d3faa35ffea6c12f9872202236f0d2139e1a1ff235a6f8b2"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        1387162
+      ],
+      "profile_ids": [
+        "576e3c2d-752e-4df3-bada-dc78bccab971"
+      ],
+      "reason": "fraud-class audit: 0/50 confirmed, 7/50 contradicted; self-submitted engineering credits",
+      "evidence": "data/credit-trust-system-fable-a1/big-boy-audit-1022.md",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
+      "name_sha256": [
+        "e02bbc1ef9403e9db283cac9fb823c17c5af49072cd8ec4ed3d47c1e41f2df5e"
+      ],
+      "email_sha256": [
+        "c85eba5885bb1dcdf8e23eaf8c79f910802ab575b7d20fbc283309467e43fbb2"
+      ]
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "00b7e317-cdc5-497e-814a-7dd603466108"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "1e3a07ba-c4f2-402d-b18f-105be021588c"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "4bb04a1d-8bbd-47c6-a6d0-65d452e5764f"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "6753126e-4469-4b41-ace8-bbc189540062"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "76dd5f9e-504f-4cd9-a9c5-9b9a04df5838"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "8659ea02-3ca2-44df-82bc-e79353eb0c90"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "94ad2ad2-0be9-4b8e-94a6-dc85eb100310"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "9f367534-7acd-461d-b79e-0ee078287d76"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "a470db41-7db4-4292-8c55-6fec94979314"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "d0120af4-f7c5-4977-97c9-c21af56c7e52"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "d0f41887-7fb2-4031-9c83-fa06ff37e6c9"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "d1a2260e-b9c5-4c0a-b582-256d38ec7351"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "e19ba8ba-fe4a-40e3-a1a5-747ca30f11b6"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "review",
+      "user_ids": [],
+      "profile_ids": [
+        "ee990fd2-035b-41de-a762-b72a7f631272"
+      ],
+      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
+      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "added_at": "2026-10-23",
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    }
+  ]
+}

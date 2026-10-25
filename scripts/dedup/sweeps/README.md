@@ -58,7 +58,10 @@ on-demand "clean the queue" pass.
    `{mergeInto, profilesIds[], at}`.
 2. ClickUp: page through `list/$CLICKUP_LIST_ID/task?include_closed=false`,
    filter to tasks whose description has `action_type: "profile-merge"`,
-   parse `customer_profile_id` out of the action-request JSON block.
+   parse `customer_profile_id` out of the action-request JSON block. Tickets
+   held by a merge keep conflict (`merge-keep-conflict`) or tagged
+   `merge-intake-stale` (rule in `scripts/lib/merge_keep_conflict.py`) are
+   dropped before matching.
 3. Pure match (see `match-stale-tickets.sh`): a ticket is "stale" if its
    `customer_profile_id` equals either the `mergeInto` (survivor side) or
    appears in `profilesIds[]` (loser side) of any merge in the window.
@@ -108,6 +111,16 @@ customer-reply audit.
   same customer filed two tickets), only the first triggers a reply. The
   second still closes its ClickUp ticket with a "customer already told
   via earlier ticket" comment.
+- Skips a ticket held by a merge keep conflict (`merge-keep-conflict`) or
+  tagged `merge-intake-stale` (rule in `scripts/lib/merge_keep_conflict.py`)
+  with no message.
+- Skips, with no message, a ticket whose `merge-outcome:*` tag is anything but
+  exactly `merge-outcome:merged` (needs-evidence, not-merged, ambiguous): that
+  request was not merged, even if an unrelated merge matched its profile.
+- Defers to `scripts/merge-outcome-notify.py`: a `merge-outcome`-tagged ticket
+  that notifier has told or will still tell (`owns_outcome`) is skipped with
+  no message. After replying on a `merge-outcome`-tagged ticket, `--apply`
+  adds `merge-outcome-notified` so that notifier never sends a second one.
 - Runs an inline single-conv admin-reply audit (analogous to
   `check-customer-replied.py`'s multi-conv audit used by
   `close-merged-tickets.sh` — same intent, scoped to the picked conv).

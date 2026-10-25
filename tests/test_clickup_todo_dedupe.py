@@ -10,6 +10,7 @@ hand-run "same conversation link -> duplicate" rule wrongly moved to Waiting
 customer requests). If any of those start being auto-moved again, these fail.
 """
 import importlib.util
+import json
 import pathlib
 import tempfile
 import unittest
@@ -54,6 +55,17 @@ def task(tid, conv_id, action, created=1000, handoff=False, name=None,
             t["description"] = f"**Conversation:** {LINK.format(conv_id)}"
         else:
             t["custom_fields"].append({"id": FIELD, "value": LINK.format(conv_id)})
+    return t
+
+
+def with_intake(t, keep="p1", others=("b",)):
+    """Give a merge ticket create_ticket's merge_intake: only an intake can show two merge
+    tickets are the same request."""
+    intake = {"kind": t["tags"][0]["name"].split(":", 1)[1], "keep": keep, "others": list(others)}
+    if intake["kind"] == "track-merge":
+        intake["pairs"] = [{"keep": keep, "others": list(others)}]
+    t["description"] += ("\n---ACTION-REQUEST---\n" + json.dumps({"details": {"merge_intake": intake}})
+                         + "\n---END-ACTION-REQUEST---")
     return t
 
 
@@ -831,10 +843,10 @@ class TierAMatchesTheProducerKey(unittest.TestCase):
         # 869eradyz / 869erae4c, found on the live board 2026-08-28: identical
         # titles, action:profile-merge, same conversation, 37s apart, and the
         # SAME customer email. The email key must not lose this.
-        a = task("869eradyz", "215475689021596", "profile-merge", created=0,
-                 email="samantha@soundsofcrenshaw.com")
-        b = task("869erae4c", "215475689021596", "profile-merge", created=37_000,
-                 email="samantha@soundsofcrenshaw.com")
+        a = with_intake(task("869eradyz", "215475689021596", "profile-merge", created=0,
+                             email="samantha@soundsofcrenshaw.com"))
+        b = with_intake(task("869erae4c", "215475689021596", "profile-merge", created=37_000,
+                             email="samantha@soundsofcrenshaw.com"))
         moves, _digest, _ = m.classify([a, b])
         self.assertEqual(ids(moves), ["869erae4c"])
         self.assertEqual(moves[0]["keep"]["id"], "869eradyz")
@@ -916,17 +928,23 @@ class MergeActionsUseTheProducersShorterWindow(unittest.TestCase):
         moves, _digest, _ = m.classify([a, b])
         self.assertEqual(moves, [])
 
+    def test_a_second_unmerge_after_24h_is_not_a_duplicate(self):
+        a = task("first", "C1", "unmerge-request", created=0)
+        b = task("second", "C1", "unmerge-request", created=2 * self.DAY)
+        moves, _digest, _ = m.classify([a, b])
+        self.assertEqual(moves, [])
+
     def test_merges_inside_24h_still_dedupe(self):
-        for action in ("profile-merge", "track-merge"):
+        for action in ("profile-merge", "unmerge-request", "track-merge"):
             with self.subTest(action=action):
-                a = task("keep", "C1", action, created=0)
-                b = task("dup", "C1", action, created=12 * self.HOUR)
+                a = with_intake(task("keep", "C1", action, created=0))
+                b = with_intake(task("dup", "C1", action, created=12 * self.HOUR))
                 moves, _digest, _ = m.classify([a, b])
                 self.assertEqual(ids(moves), ["dup"])
 
     def test_the_24h_boundary_is_inclusive(self):
-        a = task("keep", "C1", "profile-merge", created=0)
-        b = task("dup", "C1", "profile-merge", created=self.DAY)
+        a = with_intake(task("keep", "C1", "profile-merge", created=0))
+        b = with_intake(task("dup", "C1", "profile-merge", created=self.DAY))
         moves, _digest, _ = m.classify([a, b])
         self.assertEqual(ids(moves), ["dup"])
 
@@ -941,17 +959,68 @@ class MergeActionsUseTheProducersShorterWindow(unittest.TestCase):
     def test_the_window_helper_matches_the_producer_per_action(self):
         self.assertEqual(m.tier_a_window_ms("profile-merge"), 24 * 60 * 60 * 1000)
         self.assertEqual(m.tier_a_window_ms("track-merge"), 24 * 60 * 60 * 1000)
+        self.assertEqual(m.tier_a_window_ms("unmerge-request"), 24 * 60 * 60 * 1000)
         self.assertEqual(m.tier_a_window_ms("credit-claim"), 7 * 24 * 60 * 60 * 1000)
         self.assertEqual(m.tier_a_window_ms("support-general"), 7 * 24 * 60 * 60 * 1000)
 
     def test_the_real_live_profile_merge_duplicate_still_dedupes(self):
         # 869eradyz / 869erae4c were 37 SECONDS apart, far inside 24h.
-        a = task("869eradyz", "215475689021596", "profile-merge", created=0,
-                 email="samantha@soundsofcrenshaw.com")
-        b = task("869erae4c", "215475689021596", "profile-merge", created=37_000,
-                 email="samantha@soundsofcrenshaw.com")
+        a = with_intake(task("869eradyz", "215475689021596", "profile-merge", created=0,
+                             email="samantha@soundsofcrenshaw.com"))
+        b = with_intake(task("869erae4c", "215475689021596", "profile-merge", created=37_000,
+                             email="samantha@soundsofcrenshaw.com"))
         moves, _digest, _ = m.classify([a, b])
         self.assertEqual(ids(moves), ["869erae4c"])
+
+
+
+
+class DeliberateSecondMergeTicketsAreNeverBuried(unittest.TestCase):
+    """create_ticket files a second merge ticket in one conversation ON PURPOSE when it names
+    other profiles / tracks, or keeps something different (a keep conflict, tagged
+    merge-keep-conflict). Only create_ticket's same request (shares a ref, same keep) escaped."""
+
+    @staticmethod
+    def merge(tid, created, keep, others, tags=()):
+        t = task(tid, "C1", "profile-merge", created=created)
+        intake = {"kind": "profile-merge", "keep": keep, "others": list(others)}
+        t["description"] = ("---ACTION-REQUEST---\n" + json.dumps({"details": {"merge_intake": intake}})
+                            + "\n---END-ACTION-REQUEST---")
+        t["tags"] += [{"name": n} for n in tags]
+        return t
+
+    def test_a_disjoint_merge_request_is_not_a_duplicate(self):
+        a = self.merge("first", 0, "p1", ["b"])
+        b = self.merge("second", 1000, "p1", ["c"])
+        moves, digest, _ = m.classify([a, b])
+        self.assertEqual(moves, [])
+        self.assertEqual(len(digest), 1)
+
+    def test_a_keep_conflict_pair_is_never_moved(self):
+        a = self.merge("first", 0, "a", ["b"], tags=("merge-keep-conflict", "merge-keep-conflict-with:second"))
+        b = self.merge("second", 1000, "b", ["a"], tags=("merge-keep-conflict", "merge-keep-conflict-with:first"))
+        self.assertEqual(m.classify([a, b])[0], [])
+        a2 = self.merge("first", 0, "a", ["b"])
+        b2 = self.merge("second", 1000, "a", ["b"], tags=("merge-keep-conflict-with:first",))
+        self.assertEqual(m.classify([a2, b2])[0], [])
+
+    def test_the_same_request_escaped_after_a_restart_still_dedupes(self):
+        a = self.merge("keep", 0, "p1", ["b"])
+        b = self.merge("dup", 1000, "p1", ["b", "c"])
+        moves, _, _ = m.classify([a, b])
+        self.assertEqual(ids(moves), ["dup"])
+        self.assertEqual(moves[0]["keep"]["id"], "keep")
+
+    def test_a_ticket_without_an_intake_is_never_moved(self):
+        # A pre-intake A<-B ticket and a new A<-C ticket in one conversation inside 24h: the
+        # missing intake is no evidence they are the same request, so C must not be buried.
+        legacy = task("legacy", "C1", "profile-merge", created=0)
+        new = self.merge("new", 1000, "p1", ["c"])
+        self.assertEqual(m.classify([legacy, new])[0], [])
+        self.assertEqual(m.classify([new, legacy])[0], [])
+        both_legacy = [task("x", "C1", "profile-merge", created=0),
+                       task("y", "C1", "profile-merge", created=1000)]
+        self.assertEqual(m.classify(both_legacy)[0], [])
 
 
 if __name__ == "__main__":

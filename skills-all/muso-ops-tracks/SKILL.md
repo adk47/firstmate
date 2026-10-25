@@ -43,6 +43,28 @@ Track lifecycle: search → investigate → modify → verify.
 
 ## Workflows
 
+### "Hide this track from public" / "delete this track" / "remove these credits": NEVER `DELETE /admin/track/:id`
+
+🛑 Incident of 2026-10-20 14:05Z: Jan's "hide track from public" (WE SMOKE `2631b04d`) was self-approved into two whole-track DELETEs. Core refused both, and nothing changed.
+
+**What exists:**
+- **There is no track hide/unlist in core.** No hidden or visibility flag, no endpoint. Checked in core-backend `src/apis/index.w.js` and `src/models`.
+- **`DELETE /admin/track/:id`** is a **whole-track Catalog/IDP tombstone**: the track AND every served credit on it, for every profile.
+- **`DELETE /admin/track/:id/profile/:pid/credits`** removes that profile's credits.
+- **Both are removals.** Core refuses agents on both (403 `credit_removal_agent_refused`). `muso-admin-api.sh` refuses them under god-mode self-approve (`MUSO_REMOVAL_NO_SELF_APPROVE`).
+- **Never retry them, and never through another wrapper or identity** (`muso api`, `--confirmed-by`, a different requester).
+
+**Reply rules (one message, then stop):**
+1. **A "hide" request:** read the track back and answer:
+   > I can't hide tracks yet. Removing it would delete the whole track "<title>" and its N credits (on M profiles) for everyone. What's the reason?
+
+   The only visibility-only option today is the web legal-hold list. It answers 410 to signed-out visitors only; signed-in users, the API and search still see the track. It is an H-DevOps env change, meant for legal notices. Mention it only when the reason is legal.
+2. **Any removal request without a recorded reason:** ask exactly one question, "What's the reason for removing it?", and do nothing else. A removal needs one of:
+   - **DSP-removal proof:** the track is gone from Spotify, Apple and the other DSPs;
+   - **different-profile proof:** the credit belongs to someone else;
+   - **plus a label check.**
+3. **With a recorded reason:** follow **Removal Requests** below. Post the handoff (targets + reason, with whole-track and credit removals named separately), and a named human executes it from their own login (or the credit-ops identity once it is live). Read back afterwards. Do not execute it yourself.
+
 ### Search Tracks
 
 ```bash
@@ -162,6 +184,8 @@ mistakes, both avoidable here:
 
 ### Merge Tracks
 
+**Merge keep conflicts — HOLD.** Do not execute a merge / unmerge / track-merge ticket tagged `merge-keep-conflict`, nor one whose OPEN sibling (named by a `merge-keep-conflict-with:<id>` tag on either ticket) still carries it: Caroline filed two requests in one conversation that keep different profiles / tracks. A human reconciles them with the customer, closes the ticket they reject and removes `merge-keep-conflict` from the one they keep; a closed sibling never holds. Nor one tagged `merge-intake-stale`: a follow-up's merge targets could not be written to its description, so the description is incomplete; a human removes the tag once it is fixed. Same rule as `scripts/lib/merge_keep_conflict.py`, which every merge sweep uses.
+
 ⚠️ Tier 2+ only.
 
 Pre-merge: compare both tracks (credits, analytics links, popularity).
@@ -272,63 +296,37 @@ bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-a
   '{"role":"producer"}'
 ```
 
-**Remove credit:**
-```bash
-bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-ops-admin/scripts/muso-admin-api.sh \
-  call DELETE "/admin/track/<track_id>/profile/<profile_id>/credits"
-```
+**Remove credit: agents never execute it.** `DELETE /admin/track/<track_id>/profile/<profile_id>/credits` is a removal. Core refuses agent identities (403 `credit_removal_agent_refused`), and `muso-admin-api.sh` refuses it under god-mode self-approve (`MUSO_REMOVAL_NO_SELF_APPROVE`). Use the handoff below.
 
-### Removal Requests ("remove these tracks from profile X")
+### Removal Requests ("remove these tracks from profile X", "delete this track")
 
-🛑 **Never use the bulk profile endpoint (`DELETE /admin/profile/:id/credits`) for
-removal requests.** It returns 200 but only routes raw-role-row deletes through the
-raw-ingestion queue; the **materialized credits users see are untouched**, so the
-tracks never disappear (2026-07 La Mano 1.9 / Matt Wright incident: two 200'd bulk
-batches, zero visible change after 24h). The displayed credits are NOT a live view
-over raw sources — tracks with zero remaining raw assertions keep displaying.
+**Agents prepare, a named human executes, and agents verify.** There is no agent execution path for any removal (2026-10-20 WE SMOKE incident; firstmate 121/122). A requester's message is **never** an approval for a removal, from anyone. That includes god-mode and Aaron/Jan/Nick, and it applies whether or not you cite their Slack ts.
 
-The effective lever is the per-track DELETE above, one (track, profile) pair per
-call. It edits the materialized credits directly and **overrides still-active
-external raw credits** (tidal/mlc/jaxsta) — the canonical procedure per
-`muso-clio/references/kt/2026-02-04_user-requests-pt-3.md` ("manually remove
-incorrect credits (overrides raw source)").
+1. **Reason first.** If no reason is recorded, ask the one question from the top section ("What's the reason for removing it?") and stop. A removal needs one of:
+   - DSP-removal proof (gone from Spotify/Apple/the other DSPs);
+   - different-profile proof (the credit belongs to someone else);
+   - plus a label check.
+2. **Resolve the exact targets, read-only.**
+   - Look each title up with `GET /admin/profile/<profile_id>/credits?keyword=...` and match on title AND artist. Generic titles collide; if more than one candidate matches, STOP and confirm the track id. Dedupe by track id, because offset pagination reorders.
+   - For a whole track, `GET /admin/track/<track_id>` gives the title, artists and popularity. Count the served credits and the profiles they sit on.
+3. **Post the handoff in the thread, then stop.** Include:
+   - the reason and its proof link;
+   - the exact list of targets, named by kind:
+     - **credit removal:** (track id, title, profile id) pairs, executed one pair per call;
+     - **whole track:** track id, title, and N credits on M profiles. This is a Catalog/IDP tombstone for every profile, not a profile edit;
+   - the named human who executes it from their **own interactive login** (core's `correctionPath`), or the credit-ops identity once it is live.
+4. **Read back after they report it done.** Report N/N, or name each pair that did not land; never report a removal you did not read back.
+   - **Credit removal:** the profile's credits list no longer shows each pair. This is a synchronous edit, so allow about 20 s. `creditCount` on `GET /admin/profile/:id` is a lagging cache, never the signal.
+   - **Whole track:** `GET /admin/track/<track_id>` shows it deleted (or 404s), every affected profile's credits list no longer shows it, and the public page `https://muso.ai/track/<track_id>` no longer serves it.
+5. **Follow-ups**, also executed by the human:
+   - Credit removals do not refresh Collaborators; run `muso-ops-collaborators`.
+   - If the wrong credits trace to a wrong-artist raw link, consider unlinking that raw profile so re-ingestion can't re-assert them. Read the mixed-raw warning in `muso-ops-profiles` → Unlink Raw Profile first.
 
-Playbook:
-
-1. Resolve each requested title to its track id via
-   `GET /admin/profile/<profile_id>/credits?keyword=...` — match on title AND
-   artist (generic titles like "Intro"/"Baby" collide). If more than one
-   candidate still matches, STOP and confirm the exact track id with the
-   requester — never guess. The list's offset pagination has unstable
-   ordering: dedupe fetched items by track id.
-2. Canary one delete, read back the credits **list** to confirm it vanished
-   (~20s — this is a synchronous edit to materialized rows, not an async
-   pipeline job; the up-to-24h lag note in `muso-ops-profiles` applies to
-   raw-unlink, not this). Then process the rest.
-3. More than 10 destructive DELETEs in 15 min trips the tier-2 gate
-   (`policy_refused`) — expected, and usually not a reason to stop. When the
-   person who asked is Aaron, Jan or Nick and they named the targets, **their
-   request message is the approval**: cite it and continue. On the operations
-   agent that means `--approval-msg-id <slack-ts>` **plus**
-   `--approval-author-id <Uxxxxxxxx>` (a Slack user id, not an email — the gate
-   refuses self-approval without it); off the operations agent, and on muso-cli
-   (`--approval-ref`), add `--confirmed-by <their handle>` instead. Only a vague request, or one from someone off that list, needs a
-   real approver's decision first. Either way, do NOT pace batches to slide
-   under the counter.
-4. Verify N/N via the credits list. `creditCount` on `GET /admin/profile/:id`
-   is a lagging cached stat — never use it as the landed/not-landed signal.
-
-Caveats: primary-artist credits are refused by the server unless `?force=true`
-(ops use only — double-check before forcing). A wrongly-deleted credit is
-recoverable via the Add credit POST above.
-
-If the wrong credits trace to a wrong-artist raw link, consider also unlinking
-that raw profile so re-ingestion can't re-assert them — but see the mixed-raw
-warning in `muso-ops-profiles` → Unlink Raw Profile first.
-
-Credit removals do **not** refresh the profile's Collaborators list — that table
-is derived separately and needs its own rebuild. Finish with
-`muso-ops-collaborators`.
+**Reference for the human executor**, not for agents:
+- **The bulk profile endpoint does nothing visible.** `DELETE /admin/profile/:id/credits` returns 200, but it only queues raw-row deletes; the materialized credits users see stay. This bit us with La Mano 1.9 and Matt Wright in 2026-07.
+- **The effective lever is the per-pair DELETE.** It edits materialized credits directly and overrides still-active external raw credits (tidal/mlc/jaxsta).
+- **Primary-artist credits need `?force=true`.**
+- **A wrong removal is recoverable** with the Add credit POST above.
 
 ### Trigger Capture
 

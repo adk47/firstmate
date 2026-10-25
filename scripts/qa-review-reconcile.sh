@@ -199,7 +199,8 @@ set -euo pipefail
 #   QA_RECONCILE_TICK_FAIL_THRESHOLD consecutive whole-tick (or whole-repo, or
 #                                     whole-repo-candidate-reads) read failures
 #                                     before paging (default 3)
-#   QA_RECONCILE_PRLIST_LIMIT        gh pr list --limit (default 300). If a
+#   QA_RECONCILE_PRLIST_LIMIT        gh pr list --limit (default 1000; was 300 until
+#                                     H-DevOps passed 330 open PRs, 2026-10-20). If a
 #                                     repo's listing returns exactly this many
 #                                     PRs, the list is treated as truncated:
 #                                     logged loudly, paged every tick it
@@ -249,7 +250,7 @@ TICK_FAIL_THRESHOLD="${QA_RECONCILE_TICK_FAIL_THRESHOLD:-3}"
 # block in lib/qa-reconcile.sh for why this is load-bearing rather than taste.
 READ_FAIL_ALERT_INTERVAL="${QA_RECONCILE_READ_FAIL_ALERT_INTERVAL:-21600}"
 GITHUB_STATUS_URL="${QA_RECONCILE_GITHUB_STATUS_URL:-https://www.githubstatus.com/api/v2/summary.json}"
-PRLIST_LIMIT="${QA_RECONCILE_PRLIST_LIMIT:-300}"
+PRLIST_LIMIT="${QA_RECONCILE_PRLIST_LIMIT:-1000}"
 DRY_RUN=0
 
 for arg in "$@"; do

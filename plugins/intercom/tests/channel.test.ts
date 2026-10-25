@@ -14,10 +14,15 @@ import {
   orderBatch,
   mergeBatchMedia,
   classifyRuntimeNoticePayload,
+  buildReplyOutcomeLog,
+  postSupervisionAlert,
+  handleDroppedReply,
+  sendTextReply,
   resolveJevShadowQuestionsVersion,
   jevShadowRunnerConfig,
 } from "../src/channel.js";
 import { decide, type JevActionsConfig, type JevAnswers, type JevBands } from "../src/jev-router.js";
+import { MockIntercomClient } from "../src/outbound.js";
 import { canAgentReply } from "../src/handoff.js";
 import { stripModelFallbackNotice } from "../src/sanitize-model-fallback.js";
 
@@ -271,6 +276,95 @@ describe("joinDeliveryChunks", () => {
   });
 });
 
+describe("buildReplyOutcomeLog (a gate-dropped reply must not log as `replied`)", () => {
+  const base = { tag: "intercom:acct_1", conversationId: "conv_1", chunks: 2 };
+  it("logs a delivered reply at info, unchanged", () => {
+    expect(buildReplyOutcomeLog({ ...base, reply: { messageId: "part_9" } })).toEqual({
+      level: "info",
+      delivered: true,
+      line: "[intercom:acct_1] replied conv=conv_1 partId=part_9 chunks=2",
+    });
+  });
+  it("still logs `replied` when Intercom returned no part id — that is not a drop", () => {
+    const o = buildReplyOutcomeLog({ ...base, reply: { messageId: "" } });
+    expect(o.delivered).toBe(true);
+    expect(o.line).toContain("partId=<none>");
+  });
+  it("alerts at error and never says `replied` when the gate dropped the reply", () => {
+    const o = buildReplyOutcomeLog({ ...base, reply: { messageId: "", dropped: true } });
+    expect(o.delivered).toBe(false);
+    expect(o.level).toBe("error");
+    expect(o.line).toMatch(/^\[intercom:ALERT\] \[intercom:acct_1\] reply dropped by help-link gate/);
+    expect(o.line).not.toContain("replied");
+  });
+});
+
+describe("postSupervisionAlert (a rejected webhook must be loud)", () => {
+  const base = { url: "https://hooks.example/x", text: "t", tag: "intercom:acct_1", conversationId: "conv_1" };
+  it("returns true on a 2xx", async () => {
+    const errors: string[] = [];
+    const ok = await postSupervisionAlert({ ...base, log: { error: (m) => errors.push(m) }, fetchImpl: (async () => new Response("ok", { status: 200 })) as never });
+    expect(ok).toBe(true);
+    expect(errors).toEqual([]);
+  });
+  it("returns false and alerts on a non-2xx", async () => {
+    const errors: string[] = [];
+    const ok = await postSupervisionAlert({ ...base, log: { error: (m) => errors.push(m) }, fetchImpl: (async () => new Response("no", { status: 500 })) as never });
+    expect(ok).toBe(false);
+    expect(errors).toEqual(["[intercom:ALERT] [intercom:acct_1] supervision notify rejected conv=conv_1 status=500"]);
+  });
+  it("returns false and alerts when the POST throws", async () => {
+    const errors: string[] = [];
+    const ok = await postSupervisionAlert({ ...base, log: { error: (m) => errors.push(m) }, fetchImpl: (async () => { throw new Error("boom"); }) as never });
+    expect(ok).toBe(false);
+    expect(errors[0]).toMatch(/^\[intercom:ALERT\] \[intercom:acct_1\] supervision notify failed conv=conv_1 error=.*boom/);
+  });
+});
+
+describe("handleDroppedReply (a dropped reply is handed to a human, durably)", () => {
+  const account = { botAdminId: "bot_1", defaultInboxId: "inbox_7", fallbackSlackSupervisionChannel: "https://hooks.example/x" };
+  const base = { conversationId: "conv_1", tag: "intercom:acct_1" };
+  const ok = (async () => new Response("ok", { status: 200 })) as never;
+  it("reassigns to the default inbox, then notifies", async () => {
+    const client = new MockIntercomClient();
+    const texts: string[] = [];
+    const r = await handleDroppedReply({ ...base, client, account, fetchImpl: (async (_u: string, init: { body: string }) => { texts.push(JSON.parse(init.body).text); return new Response("ok"); }) as never });
+    expect(client.calls.assignConversation).toEqual([{ conversationId: "conv_1", adminId: "bot_1", assigneeId: "inbox_7" }]);
+    expect(r).toEqual({ handedOff: true, notified: true });
+    expect(texts[0]).toContain("handed to a human");
+  });
+  it("falls back to assignee 0 when there is no default inbox", async () => {
+    const client = new MockIntercomClient();
+    await handleDroppedReply({ ...base, client, account: { ...account, defaultInboxId: "" }, fetchImpl: ok });
+    expect(client.calls.assignConversation[0].assigneeId).toBe("0");
+  });
+  it.each([
+    ["rejects", (async () => { throw new Error("down"); }) as never],
+    ["returns 500", (async () => new Response("x", { status: 500 })) as never],
+  ])("still reassigns when the webhook %s", async (_n, fetchImpl) => {
+    const client = new MockIntercomClient();
+    const r = await handleDroppedReply({ ...base, client, account, fetchImpl, log: { error: () => {} } });
+    expect(client.calls.assignConversation).toHaveLength(1);
+    expect(r).toEqual({ handedOff: true, notified: false });
+  });
+  it("never claims a handoff that failed", async () => {
+    const client = new MockIntercomClient();
+    client.assignConversation = async () => { throw new Error("nope"); };
+    const errors: string[] = [];
+    const texts: string[] = [];
+    const r = await handleDroppedReply({ ...base, client, account, log: { error: (m) => errors.push(m) }, fetchImpl: (async (_u: string, init: { body: string }) => { texts.push(JSON.parse(init.body).text); return new Response("ok"); }) as never });
+    expect(r).toEqual({ handedOff: false, notified: true });
+    expect(errors.some((m) => m.startsWith("[intercom:ALERT] [intercom:acct_1] dropped-reply reassignment failed conv=conv_1"))).toBe(true);
+    expect(texts[0]).toContain("still bot-owned");
+    expect(texts[0]).not.toContain("handed to a human");
+  });
+  it("skips the webhook when none is configured", async () => {
+    const client = new MockIntercomClient();
+    const r = await handleDroppedReply({ ...base, client, account: { ...account, fallbackSlackSupervisionChannel: undefined } });
+    expect(r).toEqual({ handedOff: true, notified: false });
+  });
+});
+
 describe("classifyRuntimeNoticePayload (deliver-callback drop decision)", () => {
   const LEAKED_71 =
     "\u26a0\ufe0f I couldn't reach the configured model backend openai/gpt-5.5. Fallback used openrouter/openai/gpt-5.4-mini, but it produced no visible reply.";
@@ -321,6 +415,16 @@ describe("buildAgentRawBody", () => {
     expect(out).toContain("account email: x@y.com");
     expect(out).toContain("muso profile: https://muso.ai/profile/abc12345");
     expect(out).toContain("[CUSTOMER_MESSAGE]\nhi");
+  });
+
+  it("surfaces a pasted-link preview card's URL in the agent raw body", () => {
+    const u = "https://muso.ai/profile/b8ea4676-da77-45fe-ba43-e1a828648f40";
+    const card = `<div class="intercom-container"><a class="intercom-h2b-button" target="_blank" href="${u}">muso.ai  </a><a href="${u}" target="_blank" class="intercom-content-link"></a></div>`;
+    const message = `<p>Hello Caroline,</p>${card}<p>That's my main artist link.</p>`;
+    for (const out of [buildAgentRawBody(message, {}), buildAgentRawBody(message, { accountEmail: "x@y.com" })]) {
+      const customerSection = out.split("[CUSTOMER_MESSAGE]").at(-1) ?? "";
+      expect(customerSection.replace(/<[^>]*>/g, "")).toContain(u);
+    }
   });
 
   it("omits unset fields", () => {
@@ -978,5 +1082,31 @@ describe("jevShadowRunnerConfig (MUS-3192: shadow call has its own timeout)", ()
       questionsVersion: "v2",
       agentInstructionsPath: "/x/SOUL.md",
     });
+  });
+});
+
+describe("sendTextReply (the sendText path hands a gate-dropped reply to a human)", () => {
+  const account = { accountId: "acct_1", botAdminId: "bot_1", defaultInboxId: "inbox_7" };
+  class DroppingClient extends MockIntercomClient {
+    async replyToConversation(p: never) {
+      await super.replyToConversation(p);
+      return { messageId: "", dropped: true as const };
+    }
+  }
+  it("reassigns the conversation and reports dropped, never a delivered id", async () => {
+    const client = new DroppingClient();
+    const errors: string[] = [];
+    const r = await sendTextReply({ client, account, conversationId: "conv_1", body: "x", log: { error: (m) => errors.push(m) } });
+    expect(client.calls.assignConversation).toEqual([{ conversationId: "conv_1", adminId: "bot_1", assigneeId: "inbox_7" }]);
+    expect(r.messageId).toBe("");
+    expect(r.meta).toEqual({ dropped: true, reason: "empty-after-sanitize" });
+    expect(errors.some((m) => m.startsWith("[intercom:ALERT]"))).toBe(true);
+  });
+  it("a delivered reply is not reassigned and carries its id", async () => {
+    const client = new MockIntercomClient();
+    const r = await sendTextReply({ client, account, conversationId: "conv_1", body: "hi" });
+    expect(client.calls.assignConversation ?? []).toEqual([]);
+    expect(r.messageId).not.toBe("");
+    expect(r.meta).toBeUndefined();
   });
 });

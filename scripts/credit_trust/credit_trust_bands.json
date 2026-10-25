@@ -14,7 +14,7 @@
   "bands": {
     "A": "auto-approve: the validator approved and the approval rests on trusted (non-muso) evidence: a trusted shortcut, or a score approval by a claimant with a trusted footprint",
     "B": "request info: held or declined on evidence the claimant can supply (a high profile-level risk, big track without a trusted credit, weak footprint, risk >= approve_threshold), or approved on muso-only evidence / a weak footprint (audit, never band A)",
-    "C": "Ops decision: held for a reason the claimant cannot answer (trusted contradiction, account flags, velocity except an editing burst, Ops tombstone, a duplicate request, an auto-reject rule, an evaluation error)",
+    "C": "Ops decision: held for a reason the claimant cannot answer (trusted contradiction, account flags, velocity except an editing burst, Ops tombstone, a request racing an in-flight writer of the same pair, an auto-reject rule, an evaluation error)",
     "D": "human only (never emitted by IDP): forged document on T2/T3, take-back on a paying account, T3 approvals, two escalations"
   },
   "band_c_rules": [
@@ -41,7 +41,8 @@
     "review_high_risk_profile_score",
     "review_editing_role_without_trusted_credit",
     "review_big_track_weak_footprint",
-    "review_big_track_without_trusted_credit"
+    "review_big_track_without_trusted_credit",
+    "review_role_cardinality"
   ],
   "trusted_shortcut_rules": [
     "approve_owning_track",
@@ -80,7 +81,8 @@
       "review_high_risk_profile_score",
       "review_big_track_weak_footprint",
       "review_editing_role_without_trusted_credit",
-      "review_big_track_without_trusted_credit"
+      "review_big_track_without_trusted_credit",
+      "review_role_cardinality"
     ],
     "editing_burst_rules": [
       "review_hourly_velocity_profile",
@@ -96,7 +98,7 @@
     "rule": "review_org_role_without_outside_source"
   },
   "dedupe": {
-    "_comment": "Studio claims fraud check 2026-10-16: a user request whose every (track, role) is already a live approved credit of the profile is a duplicate: no new approval (reported not approved under rule, band C, no proof ask), logged [CREDIT_DEDUPE]. A redelivery of the request that wrote the credit (it holds the request's hourly velocity slot) is not a duplicate.",
+    "_comment": "Studio claims fraud check 2026-10-16: a user request whose every (track, role) is already a live approved credit of the profile is a duplicate: it is reported APPROVED as a no-op (nothing written, no velocity slot, never a second credit), with rule at 0 and duplicate_of mapping each pair to the live raw credit id, logged [CREDIT_DEDUPE] (+24h fix-forward on IDP #1727: holding it left re-submissions of live credits 'unverified' for users). Only a request racing an in-flight writer of the same pair (credit not live yet) is HELD under rule (band C, no proof ask). A replay of the same request is recognised by request id (credit_request_approval) at any time.",
     "rule": "review_duplicate_of_approved_credit"
   },
   "hold_reasons": {
@@ -112,12 +114,13 @@
       "review_org_role_without_outside_source": "An organization role (studio, label, publisher) was claimed for a profile that exists only on Muso, with no outside source.",
       "review_editing_role_without_trusted_credit": "An editing role was claimed on a mid-size or popular track with no trusted source naming the claimant as an editor there.",
       "review_big_track_without_trusted_credit": "A popular track was claimed with no trusted source crediting the claimant in this role on the track.",
+      "review_role_cardinality": "More people already hold this role on the recording than one recording normally has (for example a second mixer), and no trusted source credits the claimant in it.",
       "review_high_velocity_profile": "Too many claims on popular tracks were approved for this profile in the last 24 hours.",
       "review_hourly_velocity_profile": "Too many claims were approved for this profile in the last hour.",
       "review_held_submitter": "The submitting account is on the credit hold list.",
       "review_high_risk_profile_score": "The claimant's overall profile risk score is high.",
       "review_operations_tombstone": "Muso Operations removed this credit earlier, so it cannot be re-added automatically.",
-      "review_duplicate_of_approved_credit": "Every credit in this request is already approved on this profile.",
+      "review_duplicate_of_approved_credit": "Another request for the same credit on this profile is already being processed.",
       "validation_error": "The claim could not be checked because of a processing error.",
       "_hold_on_error": "A required check could not be completed, so the claim is held.",
       "_no_signal": "No scoring check had enough data to score the claim.",
