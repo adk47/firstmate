@@ -876,6 +876,53 @@ test_no_run_busy_pane() {
   pass "no run + a busy semantic record reads working, attributed to its source"
 }
 
+# (f2) no run + the crew's own record says it is waiting in a blocking harness
+# dialog (the Pi extension's dialog-open, e.g. the /model picker) -> blocked via
+# pane, naming the dialog and the exit-and-respawn recovery, on either side of a
+# run; a closed dialog reads as its ordinary state again, and an untrusted
+# record's dialog event is never credited.
+test_no_run_blocking_dialog_reads_blocked() {
+  reset_fakes
+  local d; d=$(new_case dialog)
+  make_repo_on_branch "$d/wt" fm/feat-dlg
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dlg.meta" "window=fm:fm-feat-dlg" "worktree=$d/wt" "kind=ship" "harness=pi"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  printf 'working: implementing the fix\n' > "$d/state/feat-dlg.status"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-dlg)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-dlg idle --gen "$gen" \
+    --source pi-ext --event dialog-open --detail 'select: Select model'
+  local out; out=$(run_crew_state "$d" feat-dlg)
+  assert_contains "$out" "state: blocked" "an idle picker -> blocked"
+  assert_contains "$out" "source: pane" "the dialog verdict is a pane source"
+  assert_contains "$out" "select: Select model" "the verdict names the dialog kind and title"
+  assert_contains "$out" "exit and respawn" "the verdict names the documented recovery"
+  assert_not_contains "$out" "source: status-log" "a blocking dialog must not fall through to the log's working line"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-dlg busy --gen "$gen" \
+    --source pi-ext --event dialog-open --detail 'confirm: Proceed?'
+  out=$(run_crew_state "$d" feat-dlg)
+  assert_contains "$out" "state: blocked" "a dialog inside a run -> blocked, not working"
+  assert_contains "$out" "confirm: Proceed?" "the in-run verdict names its dialog"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-dlg idle --gen "$gen" \
+    --source pi-ext --event dialog-closed --detail 'select: Select model'
+  out=$(run_crew_state "$d" feat-dlg)
+  assert_not_contains "$out" "state: blocked" "a closed dialog is no longer blocked"
+  assert_contains "$out" "state: working" "a closed idle dialog falls through to the log as before"
+
+  # The same dialog event under a source the harness does not trust is not
+  # credited, exactly as the classifier itself would not credit the record.
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-dlg idle --gen "$gen" \
+    --source claude-hook --event dialog-open --detail 'select: Select model'
+  out=$(run_crew_state "$d" feat-dlg)
+  assert_not_contains "$out" "state: blocked" "an untrusted record's dialog event is never credited"
+  assert_contains "$out" "state: unknown" "an untrusted record stays unknown"
+  pass "a crew recorded as waiting in a blocking dialog reads blocked with the dialog and the exit-and-respawn recovery named, on either side of a run"
+}
+
 # A converted adapter must NOT read working from rendered footer text: the
 # redesign removed that dependency, so a pane painting "esc to interrupt" with
 # no semantic record is unknown, never working and never silently idle.
@@ -1940,6 +1987,7 @@ test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
+test_no_run_blocking_dialog_reads_blocked
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture

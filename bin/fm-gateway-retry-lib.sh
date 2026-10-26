@@ -24,11 +24,17 @@
 #
 # CLASSIFICATION IS AN EVENT GATE, and it takes TWO conditions, both required:
 #   1. the task's turn-lifecycle record says its last turn ended on an API
-#      error - `event=stop-failure`, which Claude Code's StopFailure hook writes
-#      through bin/fm-busy-event.sh into the record bin/fm-busy-lib.sh owns;
-#   2. the pane tail shows one of the transient gateway errors.
-# A turn that ended normally records `event=stop` and NEVER enters the ladder,
-# whatever is on its screen.
+#      error - `event=stop-failure`, which Claude Code's StopFailure hook and
+#      the per-task Pi extension (an assistant stopReason of "error" at settle)
+#      both write through bin/fm-busy-event.sh into the record
+#      bin/fm-busy-lib.sh owns;
+#   2. the failure that ended it is one of the transient gateway errors, read
+#      from the detail the same record carries when there is one - the Pi
+#      extension records the upstream error text itself, so a Pi crew is
+#      classified on its own words even when the pane has scrolled or wrapped -
+#      and from the pane tail otherwise (Claude's hook records no text).
+# A turn that ended normally records `event=stop` (Claude) or `agent-settled`
+# (Pi) and NEVER enters the ladder, whatever is on its screen.
 #
 # WHY THE EVENT AND NOT THE SCREEN. The pane alone cannot answer the question
 # this classifier is asking, because the question is about a TURN and a screen
@@ -118,7 +124,7 @@ FM_GATEWAY_BUSY_CLEAR_SECS_DEFAULT=600
 # the cause and asks for continuation rather than restatement, so the agent picks
 # up the step the gateway interrupted instead of re-planning the whole task.
 # shellcheck disable=SC2034 # Read by fm-watch.sh, not this lib.
-FM_GATEWAY_CONTINUE_TEXT='The inference gateway returned a temporary error and ended your last turn before it finished. This is firstmate keep-alive, not a new instruction: continue exactly where you left off, redo only the step the error interrupted, and do not restart the task or re-report work you already completed.'
+FM_GATEWAY_CONTINUE_TEXT='The inference gateway returned a temporary error (such as a 5xx or an upstream connection reset) and ended your last turn before it finished. This is firstmate keep-alive, not a new instruction: continue exactly where you left off, redo only the step the error interrupted, and do not restart the task or re-report work you already completed.'
 
 fm_gateway_retry_max() {
   local m=${FM_GATEWAY_RETRY_MAX:-$FM_GATEWAY_RETRY_MAX_DEFAULT}
@@ -220,17 +226,35 @@ fm_gateway_text_is_permanent() {  # <text>
     *'rate_limit'*) return 0 ;;
     *'invalid_request'*) return 0 ;;
     *'api error: 4'*) return 0 ;;
+    # Pi renders an upstream failure as `Error: <message>`, and the Anthropic
+    # SDK's message leads with the status and carries the typed error body, so
+    # a 4xx and its typed names are the same non-retryable class as above.
+    *'error: 400'*|*'error: 401'*|*'error: 403'*|*'error: 404'*|*'error: 413'*|*'error: 429'*) return 0 ;;
+    *'authentication_error'*|*'permission_error'*|*'not_found_error'*|*'request_too_large'*) return 0 ;;
+    *'no api key'*) return 0 ;;
   esac
   return 1
 }
 
-# 0 when the rendered pane tail shows a transient gateway failure worth
-# re-ringing for. The deny list is consulted over the whole text; the transient
-# match reads only the last ten non-blank lines, which is where a turn-ending
-# API error renders, immediately above the prompt and footer.
+# 0 when the rendered pane tail (or a recorded error detail) shows a transient
+# gateway failure worth re-ringing for. The deny list is consulted over the
+# whole text; the transient match reads only the last ten non-blank lines,
+# which is where a turn-ending API error renders, immediately above the prompt
+# and footer. A recorded detail is one line, so for it the two windows are the
+# same text.
 # This match alone is NOT the stall decision - fm_gateway_stalled_now gates it
 # behind the turn-end event, which is what tells a stalled crew from one that
 # merely printed these sentences.
+#
+# The shapes: Claude Code renders `API Error: <5xx> ...`; Pi renders
+# `Error: <message>` where the message is the Anthropic SDK's `<status> <body>`
+# for an HTTP failure or the transport's own text for a dropped connection -
+# the fleet's live census was `api_error read tcp ...: connection reset by
+# peer`. `error: 5xx` therefore covers both harnesses' status shapes, and the
+# transport phrases are the ones Pi's own retry policy names as transient
+# (pi-ai utils/retry.js) that this fleet has actually produced. A gateway that
+# is simply unreachable (connection refused) stays outside the class on
+# purpose: that is the genuine outage, and it should surface.
 fm_gateway_text_is_transient() {  # <pane-text>
   local text=${1-} t
   [ -n "$text" ] || return 1
@@ -238,29 +262,52 @@ fm_gateway_text_is_transient() {  # <pane-text>
   t=$(printf '%s\n' "$text" | grep -v '^[[:space:]]*$' | tail -n 10 \
     | tr '[:upper:]' '[:lower:]')
   case "$t" in
-    *'api error: 500'*|*'api error: 502'*|*'api error: 503'*|*'api error: 504'*|*'api error: 529'*) return 0 ;;
+    *'error: 500'*|*'error: 502'*|*'error: 503'*|*'error: 504'*|*'error: 529'*) return 0 ;;
+    *'overloaded_error'*|*'api_error'*) return 0 ;;
+    *'connection reset by peer'*|*'econnreset'*|*'socket hang up'*|*'other side closed'*) return 0 ;;
+    *'fetch failed'*|*'stream ended before'*|*'ended without a stop reason'*) return 0 ;;
   esac
   return 1
 }
 
 # 0 when the task's OWN turn-lifecycle record says its last turn ended on an API
-# error. Claude Code closes such a turn through StopFailure and never Stop;
-# bin/fm-spawn.sh wires that hook to `--event stop-failure` and bin/fm-busy-lib.sh
-# persists the event in the record it owns, so the distinction this classifier
-# needs is already recorded by the crew itself.
+# error. Claude Code closes such a turn through StopFailure and never Stop, and
+# Pi settles it with an assistant stopReason of "error"; bin/fm-spawn.sh wires
+# both to `--event stop-failure` and bin/fm-busy-lib.sh persists the event in
+# the record it owns, so the distinction this classifier needs is already
+# recorded by the crew itself.
 #
-# SCOPE, deliberately: `stop-failure` is written in exactly one place, the
-# `claude*` arm of bin/fm-spawn.sh's busy wiring. No other harness emits it, so
-# this ladder covers CLAUDE-harness agents only. A task whose record carries no
+# SCOPE, deliberately: `stop-failure` is written in exactly two places, the
+# `claude*` arm of bin/fm-spawn.sh's busy wiring and the per-task Pi extension
+# the `pi|pi-signed` arm writes. No other harness emits it, so this ladder
+# covers CLAUDE- and PI-harness agents only. A task whose record carries no
 # event, an event this does not name, or no readable record at all is NOT in the
 # ladder - the checks below are that refusal, written out rather than left to
 # fall through, because an agent whose turn end cannot be read must not be re-rung
-# on the strength of pane text alone.
+# on the strength of pane text alone. A Pi crew waiting in a blocking dialog
+# records `dialog-open`, which is not this event: the ladder's continue would
+# be typed into the dialog, so that crew is left to fm-crew-state.sh, which
+# names the dialog and the exit-and-respawn recovery.
 fm_gateway_turn_ended_on_api_error() {  # <state-dir> <scope>
   local rec event
   rec=$(fm_busy_record_read "$1" "$2") || return 1
   event=$(printf '%s' "$rec" | cut -d' ' -f3)
   [ "$event" = stop-failure ]
+}
+
+# 0 when the failure that ended the turn is transient. When the crew's own
+# record carries the error text (the Pi extension records it), that text is
+# the whole answer: it names exactly the failure that ended the turn, so a
+# permanent failure in the record is never rescued by an older transient
+# phrase that happens to sit on the screen. Only a record with no detail
+# (Claude's StopFailure hook carries none) is answered from the pane tail.
+fm_gateway_failure_is_transient() {  # <state-dir> <scope> <pane-text>
+  local detail
+  if detail=$(fm_busy_record_detail "$1" "$2"); then
+    fm_gateway_text_is_transient "$detail"
+    return $?
+  fi
+  fm_gateway_text_is_transient "${3-}"
 }
 
 # --- durable stall record ----------------------------------------------------
@@ -398,17 +445,18 @@ fm_gateway_stall_age() {  # <state-dir> <scope>
 
 # THE entry and exit decision for the re-ring ladder. <pane-text> is the rendered
 # tail the caller already read. BOTH conditions are required: the agent's own
-# record must say its last turn ended on an API error, and the tail must show
-# which error that was. Failing either is a recovered - or never stalled - agent,
+# record must say its last turn ended on an API error, and the tail or the
+# record's own detail must show which error that was. Failing either is a
+# recovered - or never stalled - agent,
 # whose record is dropped rather than re-ringing an agent that is working again
 # or was never stopped by the gateway at all. The exit is therefore the same
 # transition as the entry, read from the same event: a turn that ends normally
-# records `stop`, which drops the record on the next idle poll without waiting
-# for the old error to scroll off the screen.
+# records `stop` or `agent-settled`, which drops the record on the next idle
+# poll without waiting for the old error to scroll off the screen.
 fm_gateway_stalled_now() {  # <state-dir> <scope> <pane-text>
   local state=$1 scope=$2 pane=${3-}
   if fm_gateway_turn_ended_on_api_error "$state" "$scope" \
-    && fm_gateway_text_is_transient "$pane"; then
+    && fm_gateway_failure_is_transient "$state" "$scope" "$pane"; then
     fm_gateway_note_stall "$state" "$scope" || return 1
     return 0
   fi

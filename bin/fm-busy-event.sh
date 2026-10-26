@@ -14,9 +14,13 @@
 #       the old gen are rejected as stale from then on.
 #
 #   apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen)
-#         --source S --event E
+#         --source S --event E [--detail TEXT]
 #       Append one lifecycle event: validate the gen against the armed
 #       sidecar, advance seq under the lock, atomically replace the record.
+#       --detail attaches one bounded line of free text to THIS event in the
+#       detail sidecar bin/fm-busy-lib.sh owns (fm_busy_detail_bound sets the
+#       bound); an apply without --detail removes any earlier detail, so the
+#       sidecar never describes an event other than the current one.
 #       Adapter wiring passes the exact --gen embedded at arm time, so a
 #       hook that outlives its incarnation fails closed here. The legacy
 #       Claude fm-send --key Escape path (fm-interrupt) and firstmate recovery
@@ -38,7 +42,7 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
-  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
+  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E [--detail TEXT]
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
 See the header comment for the full contract.
 EOF
@@ -67,6 +71,7 @@ GEN=
 USE_CURRENT_GEN=0
 SOURCE=
 EVENT=
+DETAIL=
 if [ "$CMD" = apply ]; then
   NEW_STATE=${1:-}
   case "$NEW_STATE" in busy|idle|unknown) shift ;; *) usage ;; esac
@@ -82,6 +87,7 @@ while [ $# -gt 0 ]; do
     --current-gen) USE_CURRENT_GEN=1; shift ;;
     --source) SOURCE=${2:-}; shift 2 || usage ;;
     --event) EVENT=${2:-}; shift 2 || usage ;;
+    --detail) [ "$CMD" = apply ] || usage; DETAIL=$(fm_busy_detail_bound "${2-}"); shift 2 || usage ;;
     *) usage ;;
   esac
 done
@@ -93,6 +99,7 @@ fi
 
 REC=$(fm_busy_record_path "$STATE" "$ID")
 GEN_FILE=$(fm_busy_gen_path "$STATE" "$ID")
+DETAIL_FILE=$(fm_busy_detail_path "$STATE" "$ID")
 LOCK="$REC.lock"
 
 # Portable mtime in epoch seconds. macOS (BSD) stat uses `-f <fmt>`; Linux (GNU)
@@ -143,14 +150,31 @@ write_record() {  # <gen> <seq>
   mv -f "$tmp" "$REC"
 }
 
+# The detail sidecar follows the record under the same lock: written with the
+# event that carries one, removed by every event that does not, so it can
+# never describe a previous event. A failed detail write fails the apply
+# before the record moves, so a record never claims a detail that is absent.
+write_detail() {
+  local tmp
+  if [ -z "$DETAIL" ]; then
+    rm -f "$DETAIL_FILE" 2>/dev/null || true
+    return 0
+  fi
+  tmp="$DETAIL_FILE.tmp.$$"
+  printf '%s\n' "$DETAIL" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$DETAIL_FILE"
+}
+
 old_umask=$(umask)
 umask 077
 
 if [ "$CMD" = arm ]; then
   GEN="g$(date +%s).$$.$RANDOM"
   lock_acquire || exit 1
+  # A new incarnation's seeded event carries no detail, so a previous
+  # incarnation's sidecar must not be read against it.
   {
-    printf '%s\n' "$GEN" > "$GEN_FILE.tmp.$$" && mv -f "$GEN_FILE.tmp.$$" "$GEN_FILE" \
+    write_detail && printf '%s\n' "$GEN" > "$GEN_FILE.tmp.$$" && mv -f "$GEN_FILE.tmp.$$" "$GEN_FILE" \
       && write_record "$GEN" 1
   } || { lock_release; umask "$old_umask"; echo "error: arm failed for $ID" >&2; exit 1; }
   lock_release
@@ -174,7 +198,7 @@ fi
 lock_acquire || { umask "$old_umask"; exit 1; }
 CURRENT=$(fm_busy_current_gen "$STATE" "$ID") || {
   if [ "$CMD" = retire ] && [ ! -e "$GEN_FILE" ] && [ ! -L "$GEN_FILE" ]; then
-    rm -f "$REC" || {
+    rm -f "$REC" "$DETAIL_FILE" || {
       lock_release
       umask "$old_umask"
       echo "error: busy-state retirement failed for $ID" >&2
@@ -199,7 +223,7 @@ if [ "$GEN" != "$CURRENT" ]; then
   exit 1
 fi
 if [ "$CMD" = retire ]; then
-  rm -f "$GEN_FILE" "$REC" || {
+  rm -f "$GEN_FILE" "$REC" "$DETAIL_FILE" || {
     lock_release
     umask "$old_umask"
     echo "error: busy-state retirement failed for $ID" >&2
@@ -223,7 +247,7 @@ if [ -f "$REC" ]; then
       ;;
   esac
 fi
-write_record "$GEN" $((OLD_SEQ + 1)) || {
+write_detail && write_record "$GEN" $((OLD_SEQ + 1)) || {
   lock_release
   umask "$old_umask"
   echo "error: record write failed for $ID" >&2

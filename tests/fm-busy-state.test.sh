@@ -71,6 +71,49 @@ test_apply_current_gen_reset() {
   pass "firstmate-owned interrupt and recovery events bind to the current gen"
 }
 
+test_detail_follows_the_current_event_only() {
+  # A detail is attached to ONE event: written with it under the writer's lock,
+  # bounded to a single clean line, removed by the next event that carries
+  # none, invisible once the incarnation it belongs to is superseded, and gone
+  # with retire. It never changes classification.
+  local state gen out long
+  state=$(new_state_dir detail)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 idle --gen "$gen" --source pi-ext --event stop-failure \
+    --detail "$(printf 'api_error read tcp 10.0.0.103->160.79.104.10:443: connection reset by peer\nsecond line\ttab')" \
+    || fail "apply with --detail failed"
+  out=$(fm_busy_record_detail "$state" t1) || fail "the detail was not readable behind a valid record"
+  [ "$out" = 'api_error read tcp 10.0.0.103->160.79.104.10:443: connection reset by peer' ] \
+    || fail "the detail must be the first line with control characters dropped, got '$out'"
+  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  [ "$out" = "idle pi-ext" ] || fail "a detail must not change classification, got '$out'"
+
+  long=$(printf 'x%.0s' $(seq 1 400))
+  "$EV" apply "$state" t1 idle --gen "$gen" --source pi-ext --event dialog-open --detail "$long" \
+    || fail "apply with a long detail failed"
+  out=$(fm_busy_record_detail "$state" t1) || fail "the bounded detail was not readable"
+  [ "${#out}" -eq "$FM_BUSY_DETAIL_MAX_CHARS" ] \
+    || fail "a detail must be bounded to $FM_BUSY_DETAIL_MAX_CHARS characters, got ${#out}"
+
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start \
+    || fail "apply without --detail failed"
+  fm_busy_record_detail "$state" t1 >/dev/null \
+    && fail "a detail outlived the event it was attached to"
+  [ ! -f "$state/t1.busy-detail" ] || fail "an apply without --detail must remove the sidecar"
+
+  "$EV" apply "$state" t1 idle --gen "$gen" --source pi-ext --event stop-failure --detail 'fetch failed' \
+    || fail "second apply with --detail failed"
+  "$EV" arm "$state" t1 >/dev/null
+  fm_busy_record_detail "$state" t1 >/dev/null \
+    && fail "a superseded incarnation's detail was reported against the new one"
+  "$EV" retire "$state" t1 --current-gen || fail "retire failed"
+  [ ! -f "$state/t1.busy-detail" ] || fail "retire must remove the detail sidecar"
+  if "$EV" arm "$state" t2 >/dev/null && "$EV" retire "$state" t2 --current-gen --detail x 2>/dev/null; then
+    fail "--detail must be refused outside apply"
+  fi
+  pass "a detail is bounded, follows only the event that carried it, hides behind a superseded gen, and goes with retire"
+}
+
 test_apply_unarmed_refused() {
   local state
   state=$(new_state_dir apply-unarmed)
@@ -442,6 +485,7 @@ test_boolean_view_never_promotes_unknown() {
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
 test_apply_current_gen_reset
+test_detail_follows_the_current_event_only
 test_apply_unarmed_refused
 test_retire_serializes_and_rejects_stale_gen
 test_retire_missing_sidecar_is_idempotent
