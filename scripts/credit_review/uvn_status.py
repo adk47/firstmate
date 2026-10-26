@@ -125,6 +125,9 @@ PENDING_STATUSES = {
 # Rows in these statuses join a campaign only when stage 2 released them to it: uvn-status's
 # no_document users whose requests are still `unverified` (held with us; firstmate spec item 2).
 RELEASED_EXTRA_STATUSES = {"uvn-status": ("unverified",)}
+# Reviewed baseline: deploy overwrites - 2026-10-26 (verify-ask-wiring-h2, firstmate inbox 015): node-8's
+# paid-wave-runner-p2 hot-patch [key=p2-caps] (DAILY_MAX / STATUS_DAILY_MAX 20000, marked "reverts on next
+# deploy") is superseded; the email-only cap with in-app overflow is #1370 (--inapp-overflow).
 STATUS_DAILY_MAX = 1000  # sanity bound for the no-ask status notes
 LIST_MAX_AGE_H = 30
 DAILY_MAX = 400
