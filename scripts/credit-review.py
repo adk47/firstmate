@@ -120,6 +120,7 @@ from credit_review import intercom_reconcile  # noqa: E402
 from credit_review import verify_ledger  # noqa: E402
 from credit_review import uvn_status  # noqa: E402
 from credit_review import withdrawal_confirm  # noqa: E402
+from credit_review import claim_proof_ask  # noqa: E402
 from credit_review import verify_notify  # noqa: E402
 from credit_review.evidence import EvidenceBuilder, parse_ts  # noqa: E402
 from credit_review.judge import DEFAULT_MIN_BALANCE_USD, Judge, account_balance_usd  # noqa: E402
@@ -583,6 +584,32 @@ def cmd_uvn_status(args: argparse.Namespace) -> int:
     return 1 if report.failed else 0
 
 
+def cmd_claim_proof_ask(args: argparse.Namespace) -> int:
+    if CREDIT_OPS_NOTES_KILL_SWITCH.exists():
+        log(f"credit-ops-notes kill switch present at {CREDIT_OPS_NOTES_KILL_SWITCH}; nothing sent")
+        print("NO_REPLY")
+        return 0
+    if args.preview:
+        Path(args.preview).mkdir(mode=0o700, parents=True, exist_ok=True)
+    report = claim_proof_ask.run(list_path=args.list, segment=args.segment, mode=args.mode,
+                                 max_users=args.max_users, reminders=args.reminders, preview_dir=args.preview)
+    print(claim_proof_ask.render(report, args.mode, args.segment, reminders=args.reminders))
+    return 1 if report.failed else 0
+
+
+def cmd_claim_status(args: argparse.Namespace) -> int:
+    if CREDIT_OPS_NOTES_KILL_SWITCH.exists():
+        log(f"credit-ops-notes kill switch present at {CREDIT_OPS_NOTES_KILL_SWITCH}; nothing sent")
+        print("NO_REPLY")
+        return 0
+    if args.preview:
+        Path(args.preview).mkdir(mode=0o700, parents=True, exist_ok=True)
+    report = claim_proof_ask.run_status(list_path=args.list, segment=args.segment, mode=args.mode,
+                                        max_users=args.max_users, preview_dir=args.preview)
+    print(claim_proof_ask.render(report, args.mode, args.segment, status=True))
+    return 1 if report.failed else 0
+
+
 def cmd_intercom_reconcile(args: argparse.Namespace) -> int:
     if intercom_reconcile.KILL_SWITCH.exists():
         log(f"intercom-reconcile kill switch present at {intercom_reconcile.KILL_SWITCH}; nothing run")
@@ -903,6 +930,25 @@ def parser() -> argparse.ArgumentParser:
     us.add_argument("--exclude-users", default=None, metavar="FILE",
                     help="user ids (one per line) another lane messages today: left for a later run")
     us.set_defaults(fn=cmd_uvn_status)
+
+    cp = sub.add_parser("claim-proof-ask", help="dated code ask to band B/C claimants + its day-7 reminder "
+                                                "(steers-1830 #5; send-locked in the gate until Fable + firstmate)")
+    cp.add_argument("--list", required=True, help="claim-flow-fix-fable-c1's claim list (<= 30 h old, names the daily code check)")
+    cp.add_argument("--segment", choices=["paid", "free"], required=True)
+    cp.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
+    cp.add_argument("--max-users", type=int, default=20, help="messages this run (canary: 3)")
+    cp.add_argument("--reminders", action="store_true", help="send the due day-7 reminders instead of first asks")
+    cp.add_argument("--preview", default="", help="dry-run: write each rendered note to this dir (0700)")
+    cp.set_defaults(fn=cmd_claim_proof_ask)
+
+    cs = sub.add_parser("claim-status", help="no-ask status note to pending claimants who get no proof ask "
+                                             "(Fable 1023 ruling 3; send-locked in the gate until firstmate's GO)")
+    cs.add_argument("--list", required=True, help="the claim list (<= 30 h old); rows with audience 'status', or not B/C / no readable surface")
+    cs.add_argument("--segment", choices=["paid", "free"], required=True)
+    cs.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
+    cs.add_argument("--max-users", type=int, default=50, help="messages this run (canary: 3)")
+    cs.add_argument("--preview", default="", help="dry-run: write each rendered note to this dir (0700)")
+    cs.set_defaults(fn=cmd_claim_status)
 
     ir = sub.add_parser("intercom-reconcile", help="Fable ruling A: reconcile Intercom external_id for identity-refused "
                                                     "users (dry run by default; never messages)")

@@ -80,7 +80,9 @@ set -euo pipefail
 #     so "POSTED" can never describe a message that did not land as intended.
 #
 # tag-proof: when the user replies to a note WITH ATTACHMENTS, the conversation is tagged
-# `credit-proof` for the Ops document step (and no further follow-up goes out). ANY reply by
+# `credit-proof` for the Ops document step (and no further follow-up goes out); ANY reply to a
+# claim-proof-ask note (text only too) is tagged `claim-proof` instead, a separate queue for a
+# person, never credit proof, and a reminder-7 re-reads the note's conversation first. ANY reply by
 # the user (text or attachment) also records a hold on the note's removal for a human
 # (REPLY RECORDED), even on an already-tagged thread, which is never re-tagged (ALREADY TAGGED).
 # Nothing else happens: no reply, no decision, no credit change. The reply
@@ -90,9 +92,9 @@ set -euo pipefail
 #
 # Usage:
 #   intercom-verify-request.sh send --credits-file FILE --approved-by <SlackUID> \
-#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|gap-ask] [--kind initial|reminder-14|reminder-25|after-rejection \
+#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask] [--kind initial|reminder-14|reminder-25|after-rejection \
 #        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued (status-doc-received) | no-ask|count (status-team-review)] \
-#       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, email-changed, gap-ask)] [--dry-run|--validate|--doc-check|--check-recipient]
+#       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, claim-status, email-changed, gap-ask)] [--dry-run|--validate|--doc-check|--check-recipient]
 #   intercom-verify-request.sh tag-proof --message-id <id> [--dry-run]
 #
 # In-thread delivery (firstmate 063): uvn-status and withdrawal-confirm reply IN the user's
@@ -110,6 +112,22 @@ set -euo pipefail
 # email-changed are re-checkable per user (firstmate 082, 083): the user is held for 7 days (a
 # send in that time exits 3 DEFERRED refused-recheck), cleared by a later send, flagged to
 # #cs_priority and blocked (SKIPPED refused-flagged) after the third refusal.
+#
+# claim-proof-ask (steers-1830 #5, firstmate 125/126): a dated ask to the claimant of a pending
+# profile claim (bands B/C): add the claim's code to ONE platform bio by the close day; one note
+# per claim, ever, by email, plus ONE --kind reminder-7 (day 7, until the day before the close
+# day). The close day is always 14 days after the note (verify_ledger.claim_close_day). FILE then
+# carries "claim": {"profile_name", "profile_url", "code", "platform"} and ONE credits entry whose
+# request_id is the claim key "claim-<claiming.id>" and whose profile_id (required) is the
+# claimed profile's id (the other credit fields are not read).
+# platform is a key of the fixed list in CLAIM_SURFACES; nothing the claimant typed is shown.
+#
+# claim-status (Fable claims-documentation-readiness-1023 ruling 3): the no-ask status note to the
+# claimant of a pending claim who gets no proof ask (holds, organizations, no readable surface):
+# "it is with our team for review". One note per claim, ever, no follow-up; never to a claim that
+# has a claim-proof-ask note, never within 7 days of another note from this gate (the ledger's
+# claim_cross_check). In-thread when the user has an open conversation, else email. FILE is the
+# claim-proof-ask shape without code/platform (only claim.profile_name is rendered).
 #
 # FILE is JSON: {"user": {"email": "...", "id": "<muso user id>", "professional_id": "<users.neptuneProfessionalId>",
 #                         "auth_id": "<auth0 subject>", "first_name": "..."},
@@ -180,6 +198,15 @@ readonly STATUS_NOTES_COPY_APPROVED=1
 #   EMAIL_CHANGE_COPY_APPROVED   email-changed / email-changed-dup (firstmate 073): a threaded reply
 #       into the requester's own conversation, once per ticket. APPROVED under the same order.
 readonly EMAIL_CHANGE_COPY_APPROVED=1
+#   CLAIM_PROOF_ASK_COPY_APPROVED  claim-proof-ask (steers-1830 #5): the dated code ask + day-7 reminder.
+#       LOCKED until Fable approves the copy (copy-claim-proof-dated-ask-1022.md) and firstmate gives
+#       the GO; firstmate 126 allowed its close day in the copy (a plain day, no time or zone), and
+#       it never sends before claim-flow-fix-fable-c1's daily code check is named and running.
+readonly CLAIM_PROOF_ASK_COPY_APPROVED=0
+#   CLAIM_STATUS_COPY_APPROVED  claim-status: copy APPROVED by Fable (claims-documentation-readiness-1023
+#       ruling 3, verbatim); LOCKED until firstmate's GO after the 5-user dry run, flipped together
+#       with CLAIM_PROOF_ASK_COPY_APPROVED.
+readonly CLAIM_STATUS_COPY_APPROVED=0
 #   GAP_ASK_COPY_APPROVED        gap-ask: Fable's paragraph (last sentence per decision B, inbox 005; APPROVAL_REF_GAP_ASK). GO'd by
 #       Fable 2026-10-26 13:23Z under the captain's 12:40Z order ("Fable decides, do not ask him").
 readonly GAP_ASK_COPY_APPROVED=1
@@ -196,6 +223,7 @@ readonly PROD_LEDGER_HELPER="/opt/hydra/scripts/credit_review/verify_ledger.py"
 readonly PROD_STAGE2_HELPER="/opt/hydra/scripts/credit_review/stage2_verdicts.py"
 readonly PROD_PROOF_DB="/var/lib/hydra-credit-verify/proof.sqlite"
 readonly PROOF_TAG="credit-proof"
+readonly CLAIM_PROOF_TAG="claim-proof"
 # The ONLY approver of these campaigns, and where he approved each.
 readonly CAPTAIN_UID="U7RP6HKUZ"
 readonly APPROVAL_REF_LIVE="captain U7RP6HKUZ 2026-10-15 22:12Z: \"i want AI live now - we have too many credits to approve and to get supporting data for - let users know where there was a credit given and that it needs support (trust yet verify approach)\""
@@ -210,6 +238,16 @@ readonly APPROVAL_REF_STATUS_QUEUED="$APPROVAL_REF_STATUS The 'in our review que
 readonly APPROVAL_REF_STATUS_COUNT="$APPROVAL_REF_STANDING_ORDER; count-only status-team-review wording (--copy count) approved by firstmate 2026-10-26 16:58Z (verify-ask-wiring-h2 inbox 005, Fable decides under the captain's 12:40Z order; captain 16:05Z: \"everyone should be communicated or credits and profiles awarded\"), for a user whose requests cannot be listed (unshowable fields or more than 1,000). Not an ask."
 readonly APPROVAL_REF_STATUS_NOASK="$APPROVAL_REF_STATUS The no-ask team-review wording B0 (--copy no-ask: Copy B without its optional proof sentence) approved by firstmate 2026-10-21 (credit-trust-llm-t01 key pending-status-1021, relayed in inbox 106)."
 readonly APPROVAL_REF_EMAIL_CHANGE="$APPROVAL_REF_STANDING_ORDER; email-changed templates approved by firstmate under it 2026-10-20 00:55Z (inbox 073): a threaded reply into the requester's own conversation, once per ticket, no customer-typed content."
+readonly APPROVAL_REF_CLAIM_STATUS="Fable claims-documentation-readiness-1023 ruling 3 (2026-10-23 19:15Z): claim status note APPROVED as drafted, scope narrowed to pending claimants who get no proof ask within 7 days; captain 2026-10-26 16:05Z: everyone with a pending claim is approved or told its status; firstmate claim-lane-resume-c2 005: option A."
+readonly APPROVAL_REF_CLAIM_ASK="Fable program lead steers-1830 #5 (relayed by firstmate 125, 2026-10-22 19:43Z): dated proof ask for claim bands B/C, copy approved by Fable; firstmate 126 (2026-10-22 20:01Z): the close day is allowed for claim-proof-ask only, as a plain day; no send until claim-flow-fix-fable-c1's daily code check runs."
+# claim-proof-ask: the platform keys the binding resolver may name, and the ONLY words the note
+# uses for each ("add the code ... to your <surface>"). ONLY surfaces claim-flow-fix-fable-c1's
+# daily check can actually read (c1 2026-10-22, measured on the 112 paid claims): the Spotify
+# artist bio, a website (/.well-known/muso.txt or a muso-verify meta tag) and the YouTube channel
+# About section. Instagram (login wall), X/TikTok (no post-link endpoint yet) and anything else
+# are refused: "we check for it every day" must be true for the surface we name.
+CLAIM_SURFACES='{"spotify": "Spotify artist bio", "website": "website (as one line in a file at /.well-known/muso.txt, or in a meta tag named muso-verify)", "youtube": "YouTube channel About section"}'
+readonly CLAIM_SURFACES
 readonly APPROVAL_REF_GAP_ASK="captain U7RP6HKUZ 2026-10-26 12:40Z: Fable decides, do not ask him; ~13:00Z: \"credit and profile verifications nothing is waiting on us right? you are moving these forward and ball should be in users court if required otherwise they are approved? if not get on this\"; Fable ruling 2026-10-26 13:23Z (captain-asks-fable-r4 report section H, GO 2): 460 need_more -> dated gap ask, one per user per day, Fable-approved paragraph, no deadline, no removal words; last sentence swapped to \"Your request stays open while we look.\" (the asked rows are pending, not live) by Fable decision (B) relayed by firstmate 2026-10-26 16:58Z (verify-ask-wiring-h2 inbox 005)"
 readonly APPROVAL_REF_REMOVAL="firstmate 2026-10-16 15:14Z, captain-driven: owners of credits WE removed must be told which credit and role, why, and how to dispute by replying with a document (support measured 35 owners never told). Fraud removals stay silent by captain order (firstmate 2026-10-16 15:48Z)."
 readonly APPROVAL_REF_PAST="captain U7RP6HKUZ 2026-10-15 23:35Z: \"im referring to before when nick made changes and did a trust verify flow and now we have a lotnof credits to verify with documents and give people 30 days to send something in for the ones missing documents\"; 2026-10-16 00:35Z: \"how many credits were approved without documentstion i dont want to lose users unless its obvious fraud feom tbe past\""
@@ -355,12 +393,14 @@ if [ "$MODE" = "tag-proof" ]; then
   [ "$ROW" != "null" ] || refuse "message $MESSAGE_ID is not a sent verify note in the ledger; only conversations this wrapper started can be tagged."
   CONTACT_ID="$(printf '%s' "$ROW" | "$JQ_BIN" -r '.contact_id // empty')"
   [ -n "$CONTACT_ID" ] || refuse "message $MESSAGE_ID has no recorded contact; cannot tell the user's reply from anyone else's."
+  TAG="$PROOF_TAG"
+  case "$(printf '%s' "$ROW" | "$JQ_BIN" -r '.campaign // empty')" in claim-proof-ask|claim-status) TAG="$CLAIM_PROOF_TAG" ;; esac
   CONV="$(printf '%s' "$ROW" | "$JQ_BIN" -r '.conversation_id // empty')"
   if [ -z "$CONV" ]; then
     # No conversation id came back with the send: Intercom opens it when the user replies.
     found="$(printf '%s' "{\"query\":{\"field\":\"source.id\",\"operator\":\"=\",\"value\":\"$MESSAGE_ID\"}}" | api POST /conversations/search)" \
       || { printf 'LOOKUP FAILED for message %s:\n%s\n' "$MESSAGE_ID" "$found" >&2; exit 4; }
-    n="$(printf '%s' "$found" | "$JQ_BIN" -r '(.conversations // []) | length' 2>/dev/null || echo x)"
+    n="$(printf '%s' "$found" | "$JQ_BIN" -r 'if (.conversations | type) == "array" then (.conversations | length) else "x" end' 2>/dev/null || echo x)"
     case "$n" in
       0) printf 'NO REPLY YET message=%s\n' "$MESSAGE_ID"; exit 3 ;;
       1) CONV="$(printf '%s' "$found" | "$JQ_BIN" -r '.conversations[0].id')" ;;
@@ -371,6 +411,12 @@ if [ "$MODE" = "tag-proof" ]; then
   fi
   convo="$(api GET "/conversations/$CONV?display_as=plaintext")" \
     || { printf 'READ FAILED for conversation %s:\n%s\n' "$CONV" "$convo" >&2; exit 4; }
+  # A 2xx that is not a readable conversation (no id, or no conversation_parts list) proves
+  # nothing about replies: it must never read as "no reply" (exit 3), which would let a day-7
+  # reminder go to a claimant whose reply we could not see (QA on #1330). Fail closed.
+  printf '%s' "$convo" | "$JQ_BIN" -e '(type == "object") and ((.id // "") | tostring | length > 0)
+      and ((.conversation_parts | type) == "object") and ((.conversation_parts.conversation_parts | type) == "array")' >/dev/null 2>&1 \
+    || { printf 'READ NOT VERIFIED for conversation %s: the response has no id or no conversation_parts list:\n%s\n' "$CONV" "$(printf '%s' "$convo" | head -c 300)" >&2; exit 4; }
   # The conversation must be the one our note started, or (in-thread delivery) hold our note
   # as a Caroline part. Only parts AFTER the note count below.
   src="$(printf '%s' "$convo" | "$JQ_BIN" -r '.source.id // empty' 2>/dev/null || true)"
@@ -394,7 +440,11 @@ if [ "$MODE" = "tag-proof" ]; then
   if [ "${n_replies:-0}" -gt 0 ] && [ "$ACTION" != "dry-run" ]; then
     held="$(ledger mark-replied --message-id "$MESSAGE_ID" ${REPLIED_AT:+--replied-at "$REPLIED_AT"})" || die "the ledger write failed."
     if [ "$(printf '%s' "$held" | "$JQ_BIN" -r '.result')" = "recorded" ]; then
-      printf 'REPLY RECORDED message=%s conversation=%s (removal held for a human)\n' "$MESSAGE_ID" "$CONV"
+      if [ "$TAG" = "$CLAIM_PROOF_TAG" ]; then
+        printf 'REPLY RECORDED message=%s conversation=%s (no day-7 reminder; with a person)\n' "$MESSAGE_ID" "$CONV"
+      else
+        printf 'REPLY RECORDED message=%s conversation=%s (removal held for a human)\n' "$MESSAGE_ID" "$CONV"
+      fi
     fi
   fi
   if [ -n "$(printf '%s' "$ROW" | "$JQ_BIN" -r '.proof_tagged_at // empty')" ]; then
@@ -404,33 +454,36 @@ if [ "$MODE" = "tag-proof" ]; then
   # the part is never extracted: it is evidence for a reviewer, not input to this script.
   n_att="$(printf '%s' "$convo" | "$JQ_BIN" -r --arg c "$CONTACT_ID" \
     '[(.conversation_parts.conversation_parts // [])[] | select(.author.type == "user" and (.author.id|tostring) == $c) | (.attachments // [] | length)] | add // 0')"
-  # After a REJECTED review only attachments beyond the ones already reviewed count.
+  # After a REJECTED review only attachments beyond the ones already reviewed count. A claim
+  # note's reply goes to the claim-proof queue for a person whatever it carries, text included.
   BASELINE="$(printf '%s' "$ROW" | "$JQ_BIN" -r '.proof_attachments // 0')"
-  if [ "${n_att:-0}" -le "${BASELINE:-0}" ]; then
+  if [ "$TAG" = "$CLAIM_PROOF_TAG" ]; then
+    [ "${n_replies:-0}" -gt 0 ] || { printf 'NO PROOF YET message=%s conversation=%s\n' "$MESSAGE_ID" "$CONV"; exit 3; }
+  elif [ "${n_att:-0}" -le "${BASELINE:-0}" ]; then
     printf 'NO PROOF YET message=%s conversation=%s\n' "$MESSAGE_ID" "$CONV"; exit 3
   fi
   if [ "$ACTION" = "dry-run" ]; then
-    printf 'DRY-RUN tag %s conversation=%s attachments=%s\n' "$PROOF_TAG" "$CONV" "$n_att"; exit 0
+    printf 'DRY-RUN tag %s conversation=%s attachments=%s\n' "$TAG" "$CONV" "$n_att"; exit 0
   fi
   tags="$(api GET /tags)" || { printf 'READ FAILED for tags:\n%s\n' "$tags" >&2; exit 4; }
-  TAG_ID="$(printf '%s' "$tags" | "$JQ_BIN" -r --arg n "$PROOF_TAG" '[(.data // [])[] | select(((.name // "")|ascii_downcase) == $n) | .id][0] // empty')"
+  TAG_ID="$(printf '%s' "$tags" | "$JQ_BIN" -r --arg n "$TAG" '[(.data // [])[] | select(((.name // "")|ascii_downcase) == $n) | .id][0] // empty')"
   LOG_FILE="$(new_log_file tag "$CONV")"
-  "$JQ_BIN" -nc --arg target "conversation:$CONV" --arg mid "$MESSAGE_ID" --arg tag "$PROOF_TAG" \
+  "$JQ_BIN" -nc --arg target "conversation:$CONV" --arg mid "$MESSAGE_ID" --arg tag "$TAG" \
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg n "$n_att" \
-    '{agent:"operations", action:"intercom_tag_credit_proof", target:$target, verify_message:$mid, tag:$tag, attachments:($n|tonumber), timestamp:$ts, authorization:"verify-request proof routing: tag only, no reply, no decision"}' > "$LOG_FILE"
+    '{agent:"operations", action:("intercom_tag_" + ($tag | gsub("-"; "_"))), target:$target, verify_message:$mid, tag:$tag, attachments:($n|tonumber), timestamp:$ts, authorization:"verify-request proof routing: tag only, no reply, no decision"}' > "$LOG_FILE"
   if [ -z "$TAG_ID" ]; then
-    created="$(printf '{"name":"%s"}' "$PROOF_TAG" | api POST /tags)" || { printf 'TAG CREATE FAILED:\n%s\n' "$created" >&2; exit 4; }
+    created="$(printf '{"name":"%s"}' "$TAG" | api POST /tags)" || { printf 'TAG CREATE FAILED:\n%s\n' "$created" >&2; exit 4; }
     TAG_ID="$(printf '%s' "$created" | "$JQ_BIN" -r 'select(.type == "tag") | .id // empty' 2>/dev/null || true)"
     [ -n "$TAG_ID" ] || { printf 'TAG CREATE NOT VERIFIED:\n%s\n' "$created" >&2; exit 4; }
   fi
   resp="$("$JQ_BIN" -nc --arg id "$TAG_ID" --arg a "$INTERCOM_ADMIN_ID" '{id:$id, admin_id:$a}' | api POST "/conversations/$CONV/tags")" \
     || { printf 'TAG FAILED for conversation %s; logged at %s:\n%s\n' "$CONV" "$LOG_FILE" "$resp" >&2; exit 4; }
   got="$(printf '%s' "$resp" | "$JQ_BIN" -r 'select(.type == "tag") | .name // empty' 2>/dev/null || true)"
-  if [ "$(printf '%s' "$got" | tr '[:upper:]' '[:lower:]')" != "$PROOF_TAG" ]; then
+  if [ "$(printf '%s' "$got" | tr '[:upper:]' '[:lower:]')" != "$TAG" ]; then
     printf 'TAG NOT VERIFIED for conversation %s; logged at %s. Response:\n%s\n' "$CONV" "$LOG_FILE" "$resp" >&2; exit 4
   fi
   ledger mark-tagged --message-id "$MESSAGE_ID" --conversation-id "$CONV" --attachments "$n_att" >/dev/null
-  printf 'TAGGED %s conversation=%s message=%s attachments=%s\n' "$PROOF_TAG" "$CONV" "$MESSAGE_ID" "$n_att"
+  printf 'TAGGED %s conversation=%s message=%s attachments=%s\n' "$TAG" "$CONV" "$MESSAGE_ID" "$n_att"
   exit 0
 fi
 
@@ -439,9 +492,16 @@ fi
 [ -z "$MESSAGE_ID" ] || refuse "--message-id applies to tag-proof only."
 [ "$ACTION" != "doc-check" ] || [ "$KIND" = "initial" ] || refuse "--doc-check applies to an initial note."
 case "$KIND" in
-  initial|reminder-14|reminder-25|after-rejection) ;;
-  *) refuse "--kind must be initial, reminder-14, reminder-25 or after-rejection (got '$KIND')." ;;
+  initial|reminder-14|reminder-25|after-rejection|reminder-7) ;;
+  *) refuse "--kind must be initial, reminder-14, reminder-25, after-rejection or reminder-7 (got '$KIND')." ;;
 esac
+if [ "$CAMPAIGN" = "claim-proof-ask" ]; then
+  case "$KIND" in initial|reminder-7) ;; *) refuse "claim-proof-ask has one follow-up, --kind reminder-7." ;; esac
+elif [ "$KIND" = "reminder-7" ]; then
+  refuse "--kind reminder-7 applies to claim-proof-ask only."
+fi
+[ "$CAMPAIGN" != "claim-status" ] || [ "$KIND" = "initial" ] || refuse "claim-status has no follow-ups (one note per claim)."
+
 # COPY: which fixed text this message uses.
 #   verify-live  windowed (every real send) | v1 (preview only)
 #   retro-past   past           (no deadline, no removal language, no follow-up)
@@ -520,6 +580,18 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live."
     [ "$KIND" = "initial" ] || refuse "$CAMPAIGN has no follow-ups."
     ;;
+  claim-proof-ask)
+    # The dated claim ask (firstmate 125/126): one claim per message, by email only.
+    MAX_CREDITS=1; MAX_LISTED=1; APPROVAL_REF="$APPROVAL_REF_CLAIM_ASK"
+    if [ "$KIND" = "initial" ]; then COPY="claimask"; else COPY="claimask7"; fi
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live and the status notes."
+    [ -z "$THREAD" ] || refuse "claim-proof-ask goes by email only (the close day is in the subject line's note)."
+    ;;
+  claim-status)
+    # The claim status note (Fable 1023 ruling 3): one claim per message; in-thread or email.
+    MAX_CREDITS=1; MAX_LISTED=1; APPROVAL_REF="$APPROVAL_REF_CLAIM_STATUS"; COPY="claimstatus"
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live and the status notes."
+    ;;
   gap-ask)
     # Fable's gap ask for credits whose document on file does not cover them (stage-2
     # need_more). Once per credit; up to 3 track/role pairs, then "and N more".
@@ -527,7 +599,7 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live; gap-ask has one copy, Fable's paragraph."
     [ "$KIND" = "initial" ] || refuse "gap-ask has no follow-ups: no deadline, no reminders."
     ;;
-  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup or gap-ask (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
+  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status or gap-ask (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
 esac
 [ "$ACTION" != "check-recipient" ] || { [ "$CAMPAIGN" = "verify-live" ] && [ "$KIND" = "initial" ]; } \
   || refuse "--check-recipient applies to a verify-live initial note only (it must never reach a path that writes)."
@@ -535,8 +607,8 @@ esac
   || refuse "--doc-check applies to --campaign retro-past only: a removal notice is not an ask, and a new credit's note is never skipped for an Intercom attachment."
 if [ -n "$THREAD" ]; then
   case "$CAMPAIGN" in
-    uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|gap-ask) ;;
-    *) refuse "--conversation (in-thread delivery) applies to uvn-status, withdrawal-confirm, the status notes, email-changed and gap-ask only." ;;
+    uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-status|gap-ask) ;;
+    *) refuse "--conversation (in-thread delivery) applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed and gap-ask only." ;;
   esac
   printf '%s' "$THREAD" | grep -qE '^[0-9]{1,24}$' \
     || refuse "--conversation must be the numeric Intercom conversation id (got '$THREAD')."
@@ -579,6 +651,8 @@ INPUT="$("$JQ_BIN" -c '
             thread_external_id: ((.user.thread_external_id // "") | clean),
             pending_count: (.user.pending_count | if type == "number" and . == floor and . >= 0 and . <= 1000000 then . else null end),
             first_name: ((.user.first_name // "") | clean) },
+    claim: ((.claim // {}) | { profile_name: ((.profile_name // "") | clean), profile_url: ((.profile_url // "") | clean),
+                               code: ((.code // "") | clean), platform: ((.platform // "") | clean | ascii_downcase) }),
     credits: [ .credits[] | { request_id: ((.request_id // "") | clean), role: ((.role // "") | clean),
                               track_title: ((.track_title // "") | clean), artist_name: ((.artist_name // "") | clean),
                               role_families: ([(.role_families // [])[] | clean] | if length == 0 then ["other"] else . end),
@@ -627,6 +701,33 @@ case "$CAMPAIGN" in
       || refuse "$CAMPAIGN needs user.id, the Muso account id the conversation must belong to."
     # Placeholders so the shared shape checks below pass; the copy never reads them.
     INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c '.credits[0] += {role: "-", track_title: "-", artist_name: "-"}')" ;;
+  claim-status)
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.credits[0].request_id | test("^claim-[0-9]{1,19}$")' >/dev/null \
+      || refuse "claim-status needs one entry whose request_id is the claim key claim-<claiming.id>."
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.credits[0].profile_id | length > 0' >/dev/null \
+      || refuse "claim-status needs the entry's profile_id, the claimed profile's id."
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.user.id | test("^[0-9]{1,12}$")' >/dev/null \
+      || refuse "claim-status needs user.id, the claimant's Muso account id."
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.claim.profile_name | length > 0 and length <= 120' >/dev/null \
+      || refuse "claim.profile_name must be the claimed profile's catalog name (1 to 120 characters)."
+    INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c '.credits[0] += {role: "-", track_title: "-", artist_name: "-"}')" ;;
+  claim-proof-ask)
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.credits[0].request_id | test("^claim-[0-9]{1,19}$")' >/dev/null \
+      || refuse "claim-proof-ask needs one entry whose request_id is the claim key claim-<claiming.id>."
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.credits[0].profile_id | length > 0' >/dev/null \
+      || refuse "claim-proof-ask needs the entry's profile_id, the claimed profile's id (the daily code check's send log carries it)."
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.user.id | test("^[0-9]{1,12}$")' >/dev/null \
+      || refuse "claim-proof-ask needs user.id, the claimant's Muso account id."
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.claim.profile_name | length > 0 and length <= 120' >/dev/null \
+      || refuse "claim.profile_name must be the claimed profile's catalog name (1 to 120 characters)."
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.claim.profile_url | test("^https://(credits\\.)?muso\\.ai/[A-Za-z0-9/_.~%-]{1,200}$")' >/dev/null \
+      || refuse "claim.profile_url must be the profile's public https://muso.ai/ or https://credits.muso.ai/ link."
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.claim.code | test("^[A-Za-z0-9-]{4,32}$")' >/dev/null \
+      || refuse "claim.code must be the claim's bound-proof code (4 to 32 letters, digits or dashes)."
+    CLAIM_SURFACE="$(printf '%s' "$INPUT" | "$JQ_BIN" -r --argjson m "$CLAIM_SURFACES" '$m[.claim.platform] // empty')"
+    [ -n "$CLAIM_SURFACE" ] \
+      || refuse "claim.platform must be one of $(printf '%s' "$CLAIM_SURFACES" | "$JQ_BIN" -r 'keys_unsorted | join(", ")'): a surface the daily code check can read (never Instagram, X or TikTok)."
+    INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c --arg s "$CLAIM_SURFACE" '.claim.surface = $s | .credits[0] += {role: "-", track_title: "-", artist_name: "-"}')" ;;
 esac
 if [ "$COPY" = "teamreviewcount" ]; then
   # The count-only note shows no title, artist or role (they may be blank or unshowable: that is
@@ -706,6 +807,8 @@ keep_ids() { # <input-json> <ids-json-array>
 }
 add_days() { "$PY_BIN" -I -c 'import datetime,sys; print((datetime.date.fromisoformat(sys.argv[1]) + datetime.timedelta(days=int(sys.argv[2]))).isoformat())' "$1" "$2"; }
 day_label() { "$PY_BIN" -I -c 'import datetime,sys; d=datetime.date.fromisoformat(sys.argv[1]); print(f"{d:%B} {d.day}")' "$1"; }
+# claim-proof-ask only (Fable D38): the plain weekday and day, "Friday, November 7".
+claim_day_label() { "$PY_BIN" -I -c 'import datetime,sys; d=datetime.date.fromisoformat(sys.argv[1]); print(f"{d:%A}, {d:%B} {d.day}")' "$1"; }
 
 # ---------------------------------------------------------------------------------------
 # Send locks, checked before anything else on a real send so a locked campaign never even
@@ -728,6 +831,12 @@ if [ "$ACTION" = "post" ] && { [ "$CAMPAIGN" = "status-doc-received" ] || [ "$CA
 fi
 if [ "$ACTION" = "post" ] && { [ "$CAMPAIGN" = "email-changed" ] || [ "$CAMPAIGN" = "email-changed-dup" ]; } && [ "$EMAIL_CHANGE_COPY_APPROVED" != "1" ]; then
   refuse "the email-changed copy is not approved for sending (EMAIL_CHANGE_COPY_APPROVED=0)."
+fi
+if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "claim-proof-ask" ] && [ "$CLAIM_PROOF_ASK_COPY_APPROVED" != "1" ]; then
+  refuse "the claim-proof-ask copy is not approved for sending yet (CLAIM_PROOF_ASK_COPY_APPROVED=0). It needs Fable's copy approval and firstmate's GO, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
+fi
+if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "claim-status" ] && [ "$CLAIM_STATUS_COPY_APPROVED" != "1" ]; then
+  refuse "the claim-status copy is not approved for sending yet (CLAIM_STATUS_COPY_APPROVED=0). Fable approved the text; it waits for firstmate's GO after the 5-user dry run, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
 fi
 if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "uvn-status" ] && [ "$UVN_STATUS_COPY_APPROVED" != "1" ]; then
   refuse "the uvn-status copy is not approved for sending (UVN_STATUS_COPY_APPROVED=0)."
@@ -814,9 +923,27 @@ if [ "$COPY" = "windowed" ] && [ -z "$DUE_DAY" ]; then
   DUE_DAY="$(add_days "$DAY" 30)"
   REMOVAL_DAY="$(add_days "$DUE_DAY" 1)"
 fi
+# claim-proof-ask: the note names its close day, 14 days after it (a real send names the day
+# the ledger claim records); the reminder repeats the one its note recorded. A reminder preview
+# reads it from the ledger; with no sent note there it shows a day marked as a preview.
+CLAIM_PREVIEW_DAY=0
+if [ "$CAMPAIGN" = "claim-proof-ask" ] && [ -z "$DUE_DAY" ]; then
+  if [ "$KIND" = "initial" ]; then
+    DUE_DAY="$(add_days "$DAY" 14)"
+  elif [ -r "$LEDGER_HELPER" ] && [ -f "$LEDGER" ]; then
+    DUE_DAY="$(ledger message --message-id "$PARENT_ID" 2>/dev/null \
+      | "$JQ_BIN" -r 'select(type == "object" and .campaign == "claim-proof-ask") | .due_day // empty' 2>/dev/null || true)"
+  fi
+  [ -n "$DUE_DAY" ] || { DUE_DAY="$(add_days "$DAY" 7)"; CLAIM_PREVIEW_DAY=1; }
+fi
+due_label() { # <day>
+  if [ "$CAMPAIGN" != "claim-proof-ask" ]; then day_label "$1"
+  elif [ "$CLAIM_PREVIEW_DAY" = "1" ]; then printf '%s (preview date)\n' "$(claim_day_label "$1")"
+  else claim_day_label "$1"; fi
+}
 DUE_LABEL=""
 if [ -n "$DUE_DAY" ]; then
-  DUE_LABEL="$(day_label "$DUE_DAY")"
+  DUE_LABEL="$(due_label "$DUE_DAY")"
 fi
 # The reviewer's rejection reasons and the ONLY words an after-rejection note uses for them.
 REJECTION_TEXT=""
@@ -1085,6 +1212,25 @@ def status_team_review_count($fn; $n):
 def status_team_review_noask($fn; $c; $maxl):
   { subject: "Your Muso credit \(req_s($c|length)): an update",
     segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): they're with our team for review. Nothing else is needed from you right now."} ] };
+# claim-proof-ask (steers-1830 #5; Fable-approved D38 + paragraph 3 as amended in
+# claims-documentation-readiness-1023 ruling 1; send-locked until firstmate's GO): the dated code ask and its
+# day-7 reminder. Server facts only: catalog profile name and link, the claim's code, one fixed
+# surface phrase, the close day ($due, a plain day).
+def claim_ask($fn; $c):
+  { subject: "Confirming your claim on \($c.profile_name)",
+    segs: ([ {p: "Hi \($fn),"},
+             {p: "I'm Caroline from Muso support. You asked to claim \($c.profile_name) on Muso (\($c.profile_url)). To confirm it's you, please add the code \($c.code) to your \($c.surface) by \($due).\(if $c.platform == "spotify" then " Open Spotify for Artists, then Profile, then About, and put the code in your artist bio." else "" end) We check for it every day, and you can remove it once your claim is confirmed."},
+             {p: "If the code isn't there by \($due), the claim closes. You can reopen it any time from the profile."},
+             {p: "If adding the code isn't possible for you, reply to this message with paperwork that shows your name on one of \($c.profile_name)'s releases: a split sheet, a producer or mixing agreement, an invoice, a royalty or distributor statement, or a PRO registration. Attach it here; we never ask for ID to claim a profile."} ] + sig) };
+# claim-status (Fable claims-documentation-readiness-1023 ruling 3, verbatim): no ask, no promise of an outcome.
+def claim_status_note($fn; $c):
+  { subject: "Your claim on \($c.profile_name)",
+    segs: [ {p: "Hi \($fn), a quick update on your claim on \($c.profile_name): it is with our team for review. Nothing else is needed from you right now, and we will message you here as soon as it has been checked."} ] };
+def claim_ask_reminder($fn; $c):
+  { subject: "Your claim on \($c.profile_name)",
+    segs: ([ {p: "Hi \($fn),"},
+             {p: "A quick reminder about your claim on \($c.profile_name): we haven't found the code \($c.code) in your \($c.surface) yet. Add it by \($due) and our daily check will pick it up."},
+             {p: "After \($due) the claim closes, and you can reopen it any time."} ] + sig) };
 # email-changed (firstmate 073, verbatim). A threaded reply; the subject is never shown.
 def email_changed($dup):
   { subject: "Your Muso sign-in email",
@@ -1142,6 +1288,9 @@ def gap_ask($fn; $c; $maxl):
    elif $copy == "docrecvq" then status_doc_queued($fn; .credits; $maxl)
    elif $copy == "teamreview" then status_team_review($fn; .credits; $maxl)
    elif $copy == "teamreviewb0" then status_team_review_noask($fn; .credits; $maxl)
+   elif $copy == "claimask" then claim_ask($fn; .claim)
+   elif $copy == "claimask7" then claim_ask_reminder($fn; .claim)
+   elif $copy == "claimstatus" then claim_status_note($fn; .claim)
    elif $copy == "teamreviewcount" then status_team_review_count($fn; (.user.pending_count // (.credits | length)))
    elif $copy == "emailchg" then email_changed(false)
    elif $copy == "emailchgdup" then email_changed(true)
@@ -1159,6 +1308,7 @@ def gap_ask($fn; $c; $maxl):
 # 092/103/106); an in-thread reply sits under Caroline's own name in the conversation and stays unsigned.
 | (if ($copy | IN("docrecv", "docrecvq", "teamreview", "teamreviewb0", "teamreviewcount")) and $mtype == "email"
    then .segs += [ {p: "Muso Support"} ] else . end)
+| (if $copy == "claimstatus" and $mtype == "email" then .segs += sig else . end)
 | { subject: .subject,
     text: ([ .segs[] | if has("ul") then (.ul | map("- " + .) | join("\n")) else .p end ] | join("\n\n")),
     html: ([ .segs[] | if has("ul") then "<ul>" + ([.ul[] | "<li>" + esc + "</li>"] | join("")) + "</ul>" else "<p>" + (.p | esc) + "</p>" end ] | join("")) }
@@ -1435,7 +1585,11 @@ recently_messaged() { # <contact-id> -> prints the reason when we wrote to them 
   done
   return 0
 }
-case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review|gap-ask) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
+case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review|claim-status|gap-ask) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
+# A claim ask never crosses a person: any admin or Caroline reply to this user in the last 7
+# days defers the note AND its reminder (nothing closed; the next run looks again; a reminder
+# deferred past the day before the close day is never sent).
+[ "$CAMPAIGN" != "claim-proof-ask" ] || STATUSLIKE=1
 if [ "$STATUSLIKE" = "1" ] && [ "$ACTION" = "post" ]; then
   # gap-ask is never skipped for documents in Intercom: a document on file is why it is sent.
   if [ "$CAMPAIGN" = "gap-ask" ]; then
@@ -1467,7 +1621,8 @@ if [ "$STATUSLIKE" = "1" ] && [ "$ACTION" = "post" ]; then
   fi
   # In-thread when the user has a conversation going: their most recently updated OPEN
   # conversation of the last 14 days. None: email. A failed lookup sends nothing.
-  if [ -z "$THREAD" ]; then
+  # claim-proof-ask always goes by email.
+  if [ -z "$THREAD" ] && [ "$CAMPAIGN" != "claim-proof-ask" ]; then
     since14=$(( $(date -u +%s) - 14*86400 ))
     open="$(printf '%s' "$CONTACT_ID" | "$JQ_BIN" -Rc --argjson since "$since14" \
       '{query: {operator: "AND", value: [{field: "contact_ids", operator: "=", value: .}, {field: "state", operator: "=", value: "open"}, {field: "updated_at", operator: ">", value: $since}]}, pagination: {per_page: 50}}' \
@@ -1543,6 +1698,19 @@ if [ "$ACTION" = "check-recipient" ]; then
   printf 'RECIPIENT OK %s %s copy=%s credits=%s\n' "$CAMPAIGN" "$KIND" "$COPY" "$N"; exit 0
 fi
 [ "$ACTION" = "post" ] || die "internal: '$ACTION' past the recipient check."
+if [ "$KIND" = "reminder-7" ]; then
+  # The proof sweep may not have looked at the claim note lately: read its conversation now.
+  # Any reply from the claimant is recorded and tagged claim-proof, and the reminder is withheld.
+  set +e
+  REPLY_CHECK="$("${BASH_SOURCE[0]}" tag-proof --message-id "$PARENT_ID" 2>&1)"
+  rc=$?
+  set -e
+  case "$rc" in
+    0) printf 'SKIPPED claimant-replied message=%s (tagged %s; with a person)\n' "$PARENT_ID" "$CLAIM_PROOF_TAG"; exit 0 ;;
+    3) ;;
+    *) printf 'REPLY CHECK FAILED for message %s (rc=%s); nothing was sent or claimed:\n%s\n' "$PARENT_ID" "$rc" "$REPLY_CHECK" >&2; exit 4 ;;
+  esac
+fi
 if [ "$KIND" = "initial" ]; then
   REFS_FILE="$(mktemp)"
   trap 'rm -f "$REFS_FILE"' EXIT
@@ -1579,6 +1747,10 @@ case "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r 'if .result == "recent" and .reason 
   *) die "unexpected ledger answer: $CLAIM" ;;
 esac
 ROW_ID="$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.message_row')"
+if [ "$CAMPAIGN" = "claim-proof-ask" ] && [ "$KIND" = "initial" ]; then
+  DUE_DAY="$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.due_day // empty')"
+  DUE_LABEL="$(due_label "$DUE_DAY")"
+fi
 # Render again from exactly the claimed credits.
 CLAIMED_INPUT="$(keep_ids "$INPUT" "$(printf '%s' "$CLAIM" | "$JQ_BIN" -c '.request_ids')")"
 RENDERED="$(render "$CLAIMED_INPUT")"

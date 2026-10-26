@@ -100,9 +100,9 @@ case "$method $path" in
     if [ -n "${STUB_TAGS:-}" ]; then printf '%s' "$STUB_TAGS"; exit 0; fi
     printf '{"type":"list","data":[{"type":"tag","id":"9","name":"credit-proof"}]}' ;;
   "POST /tags")
-    printf '{"type":"tag","id":"10","name":"credit-proof"}' ;;
+    printf '{"type":"tag","id":"10","name":"%s"}' "$(printf '%s' "$payload" | jq -r '.name')" ;;
   "POST /conversations/777/tags")
-    printf '{"type":"tag","id":"9","name":"credit-proof"}' ;;
+    printf '{"type":"tag","id":"9","name":"%s"}' "${STUB_TAG_NAME:-credit-proof}" ;;
   "GET /contacts/"*)
     if [ -n "${STUB_CONTACT_GET:-}" ]; then printf '%s' "$STUB_CONTACT_GET"; exit 0; fi
     printf '{"type":"error.list","errors":[{"code":"not_found"}]}' ;;
@@ -636,6 +636,9 @@ unlocked_gate() { # derived copy with the send locks flipped: $1 = retro | windo
   case "$1" in
     retro)    e=(-e 's/^readonly RETRO_COPY_APPROVED=0$/readonly RETRO_COPY_APPROVED=1/') ;;
     windowed) e=(-e 's/^readonly LIVE_WINDOWED_COPY_APPROVED=0$/readonly LIVE_WINDOWED_COPY_APPROVED=1/') ;;
+    claim)    e=(-e 's/^readonly CLAIM_PROOF_ASK_COPY_APPROVED=0$/readonly CLAIM_PROOF_ASK_COPY_APPROVED=1/') ;;
+    claims)   e=(-e 's/^readonly CLAIM_PROOF_ASK_COPY_APPROVED=0$/readonly CLAIM_PROOF_ASK_COPY_APPROVED=1/'
+                 -e 's/^readonly CLAIM_STATUS_COPY_APPROVED=0$/readonly CLAIM_STATUS_COPY_APPROVED=1/') ;;
     both)     e=(-e 's/^readonly RETRO_COPY_APPROVED=0$/readonly RETRO_COPY_APPROVED=1/'
                  -e 's/^readonly LIVE_WINDOWED_COPY_APPROVED=0$/readonly LIVE_WINDOWED_COPY_APPROVED=1/') ;;
   esac
@@ -907,9 +910,9 @@ PY
 @test "unknown campaigns and kinds are refused" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -1 send --campaign everything
-  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup or gap-ask"* ]]
+  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status or gap-ask"* ]]
   run -1 send --kind final-notice --parent-message-id 1
-  [[ "$output" == *"--kind must be initial, reminder-14, reminder-25 or after-rejection"* ]]
+  [[ "$output" == *"--kind must be initial, reminder-14, reminder-25, after-rejection or reminder-7"* ]]
 }
 
 # --- never ask someone who already sent documents (captain standing order) ---------------
@@ -1718,7 +1721,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   [ "$(replies)" -eq 0 ]
   [ "$(posts)" -eq 0 ]
   run -1 "$LOCKED" send --campaign retro-past --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"applies to uvn-status, withdrawal-confirm, the status notes, email-changed and gap-ask only"* ]]
+  [[ "$output" == *"applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed and gap-ask only"* ]]
   run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation abc --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
 }
 
@@ -2124,4 +2127,317 @@ json.dump(notice.credits_file(user, src["credits"]), open(sys.argv[2], "w"))' "$
   [ "$(posts)" -eq 0 ]
   run -0 "$TEST_TMPDIR/tb-on.sh" send --campaign takeback-notice --credits-file "$TEST_TMPDIR/p-yes.json" --approved-by U7RP6HKUZ
   [ "$(posts)" -eq 1 ]
+}
+
+
+# --- claim-proof-ask (steers-1830 #5, firstmate 125/126) ---------------------------------
+
+# quiet_claim_conv <message id>: the claim note's own conversation, with no reply from anyone.
+quiet_claim_conv() {
+  printf '{"type":"conversation","id":"777","source":{"id":"%s","author":{"type":"admin","id":"5763097"}},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[]}}' "$1"
+}
+
+# claimfile <file> [jq edit]: one pending claim, server facts only.
+claimfile() {
+  jq -n '{user:{email:"Jane.Doe@Example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64",
+                auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:"Jane"},
+          claim:{profile_name:"Big Star", profile_url:"https://credits.muso.ai/profile/abc-123", code:"MUSO-7K2Q",
+                 platform:"spotify"},
+          credits:[{request_id:"claim-1606398", profile_id:"abc-123"}]}' | jq -c "${2:-.}" > "$1"
+}
+
+@test "claim-proof-ask: send-locked as committed; the dry run renders the approved draft with the close day" {
+  claimfile "$TEST_TMPDIR/c.json"
+  run -1 "$LOCKED" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"CLAIM_PROOF_ASK_COPY_APPROVED=0"* ]]
+  [ "$(calls)" -eq 0 ]
+  run -0 "$LOCKED" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "${lines[0]}" == "DRY-RUN claim-proof-ask initial email credits=1 copy=claimask" ]]
+  [ "$(rendered .subject)" = "Confirming your claim on Big Star" ]
+  [ "$(rendered .body | plain)" = "Hi Jane,
+I'm Caroline from Muso support. You asked to claim Big Star on Muso (https://credits.muso.ai/profile/abc-123). To confirm it's you, please add the code MUSO-7K2Q to your Spotify artist bio by Thursday, October 29. Open Spotify for Artists, then Profile, then About, and put the code in your artist bio. We check for it every day, and you can remove it once your claim is confirmed.
+If the code isn't there by Thursday, October 29, the claim closes. You can reopen it any time from the profile.
+If adding the code isn't possible for you, reply to this message with paperwork that shows your name on one of Big Star's releases: a split sheet, a producer or mixing agreement, an invoice, a royalty or distributor statement, or a PRO registration. Attach it here; we never ask for ID to claim a profile.
+Thank you,
+Caroline, Muso Support" ]
+}
+
+@test "claim-proof-ask: one note per claim, the close day recorded; one day-7 reminder before the close day" {
+  unlocked_gate claim
+  claimfile "$TEST_TMPDIR/c.json"
+  run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "POSTED email message=1001 credits=1" ]
+  [[ "$(msg .body | plain)" == *"to your Spotify artist bio by Thursday, October 29."* ]]
+  [ "$(sql "select campaign, kind, due_day, removal_day from verify_messages")" = "claim-proof-ask|initial|2026-10-29|" ]
+  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "SKIPPED already-notified credits=1" ]
+  rem() { "$GATE" send --campaign claim-proof-ask --kind reminder-7 --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
+  INTERCOM_VERIFY_TEST_DAY=2026-10-21 run -3 rem
+  [ "$output" = "NOT DUE reminder-7 message=1001" ]
+  STUB_CONVERSATION="$(quiet_claim_conv 1001)" INTERCOM_VERIFY_TEST_DAY=2026-10-22 run -0 rem
+  [ "$output" = "POSTED reminder-7 email message=1002 credits=1" ]
+  [ "$(msg .subject)" = "Your claim on Big Star" ]
+  [ "$(msg .body | plain)" = "Hi Jane,
+A quick reminder about your claim on Big Star: we haven't found the code MUSO-7K2Q in your Spotify artist bio yet. Add it by Thursday, October 29 and our daily check will pick it up.
+After Thursday, October 29 the claim closes, and you can reopen it any time.
+Thank you,
+Caroline, Muso Support" ]
+  INTERCOM_VERIFY_TEST_DAY=2026-10-23 run -0 rem
+  [ "$output" = "SKIPPED reminder-7-done message=1001" ]
+  [ "$(posts)" -eq 2 ]
+}
+
+@test "claim-proof-ask: no reminder on or after the close day, or once the claim is closed for it" {
+  unlocked_gate claim
+  claimfile "$TEST_TMPDIR/c.json"
+  run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  INTERCOM_VERIFY_TEST_DAY=2026-10-29 run -0 "$GATE" send --campaign claim-proof-ask --kind reminder-7 --parent-message-id 1001 \
+    --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "SKIPPED reminder-7-done message=1001" ]
+  # The driver closes a due reminder when the code was found or the claim was decided.
+  run -0 python3 -c 'import sys; sys.path.insert(0, sys.argv[2]); from credit_review import verify_ledger as v
+db=v.connect(sys.argv[1]); print(v.close_reminder(db, parent_message_id="1001", kind="reminder-7", day="2026-10-22", reason="code found"))' \
+    "$INTERCOM_VERIFY_TEST_LEDGER" "$HYDRA_REPO/scripts"
+  [ "$output" = "True" ]
+  INTERCOM_VERIFY_TEST_DAY=2026-10-23 run -0 "$GATE" send --campaign claim-proof-ask --kind reminder-7 --parent-message-id 1001 \
+    --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "SKIPPED reminder-7-done message=1001" ]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "claim-proof-ask: server facts only - bad key, code, link, platform or profile id refused; email only; its own follow-up only" {
+  unlocked_gate claim
+  for edit in '.credits[0].request_id = "1606398"' '.claim.code = "a b"' '.claim.profile_url = "https://evil.example/x"' \
+              '.claim.platform = "myspace"' '.claim.platform = "instagram"' '.claim.platform = "tiktok"' \
+              '.credits[0].profile_id = ""' '.credits[0].profile_id = "a b"' 'del(.credits[0].profile_id)' \
+              '.claim.profile_name = ""' '.user.id = ""'; do
+    claimfile "$TEST_TMPDIR/c.json" "$edit"
+    run -1 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  done
+  claimfile "$TEST_TMPDIR/c.json"
+  run -1 "$GATE" send --campaign claim-proof-ask --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"by email only"* ]]
+  run -1 "$GATE" send --campaign claim-proof-ask --kind reminder-14 --parent-message-id 1 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"one follow-up, --kind reminder-7"* ]]
+  credits "$TEST_TMPDIR/u.json" Jane "s1:Mixing:A:X"
+  run -1 "$GATE" send --campaign uvn-status --kind reminder-7 --parent-message-id 1 --credits-file "$TEST_TMPDIR/u.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"reminder-7 applies to claim-proof-ask only"* ]]
+  [ "$(calls)" -eq 0 ]
+  claimfile "$TEST_TMPDIR/c.json" '.claim.platform = "website"'
+  run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain | sed -n 2p)" = "I'm Caroline from Muso support. You asked to claim Big Star on Muso (https://credits.muso.ai/profile/abc-123). To confirm it's you, please add the code MUSO-7K2Q to your website (as one line in a file at /.well-known/muso.txt, or in a meta tag named muso-verify) by Thursday, October 29. We check for it every day, and you can remove it once your claim is confirmed." ]
+  claimfile "$TEST_TMPDIR/c.json" '.claim.platform = "youtube"'
+  run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain | sed -n 2p)" = "I'm Caroline from Muso support. You asked to claim Big Star on Muso (https://credits.muso.ai/profile/abc-123). To confirm it's you, please add the code MUSO-7K2Q to your YouTube channel About section by Thursday, October 29. We check for it every day, and you can remove it once your claim is confirmed." ]
+}
+
+@test "claim-proof-ask: a reminder dry run names the close day its note recorded, or a marked preview day; never a blank" {
+  unlocked_gate claim
+  claimfile "$TEST_TMPDIR/c.json"
+  INTERCOM_VERIFY_TEST_DAY=2026-10-24 run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$(sql "select due_day from verify_messages")" = "2026-11-07" ]
+  INTERCOM_VERIFY_TEST_DAY=2026-10-31 run -0 "$GATE" send --campaign claim-proof-ask --kind reminder-7 --parent-message-id 1001 \
+    --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain | sed -n 2,3p)" = "A quick reminder about your claim on Big Star: we haven't found the code MUSO-7K2Q in your Spotify artist bio yet. Add it by Saturday, November 7 and our daily check will pick it up.
+After Saturday, November 7 the claim closes, and you can reopen it any time." ]
+  run -0 "$LOCKED" send --campaign claim-proof-ask --kind reminder-7 --parent-message-id 999 \
+    --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *"Add it by Thursday, October 22 (preview date) and our daily check"* ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "claim-proof-ask: a person's reply in the last 7 days defers the reminder too; past its window it is never sent" {
+  unlocked_gate claim
+  claimfile "$TEST_TMPDIR/c.json"
+  run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  now=$(date -u +%s)
+  human="{\"type\":\"conversation\",\"id\":\"777\",\"source\":{\"author\":{\"type\":\"user\"}},\"conversation_parts\":{\"conversation_parts\":[{\"part_type\":\"comment\",\"author\":{\"type\":\"admin\",\"id\":\"1\"},\"body\":\"hi\",\"created_at\":$now}]}}"
+  rem() { "$GATE" send --campaign claim-proof-ask --kind reminder-7 --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
+  for d in 2026-10-22 2026-10-28; do
+    STUB_CONVERSATION="$human" INTERCOM_VERIFY_TEST_DAY=$d run -3 rem
+    [[ "$output" == "DEFERRED messaged_7d"*"replied to them"* ]]
+  done
+  INTERCOM_VERIFY_TEST_DAY=2026-10-29 run -0 rem
+  [ "$output" = "SKIPPED reminder-7-done message=1001" ]
+  [ "$(posts)" -eq 1 ]
+  [ "$(sql "select count(*) from verify_messages where kind='reminder-7'")" = "0" ]
+}
+
+# statusfile <file> [jq edit]: one pending claim for the claim-status note (no code, no platform).
+statusfile() {
+  jq -n '{user:{email:"Jane.Doe@Example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64",
+                auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:"Jane"},
+          claim:{profile_name:"Big Star"},
+          credits:[{request_id:"claim-1606399", profile_id:"abc-123"}]}' | jq -c "${2:-.}" > "$1"
+}
+
+@test "claim-status: send-locked as committed; the dry run renders Fable's approved note verbatim" {
+  statusfile "$TEST_TMPDIR/s.json"
+  run -1 "$LOCKED" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"CLAIM_STATUS_COPY_APPROVED=0"* ]]
+  [ "$(calls)" -eq 0 ]
+  run -0 "$LOCKED" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "${lines[0]}" == "DRY-RUN claim-status initial email credits=1 copy=claimstatus" ]]
+  [ "$(rendered .subject)" = "Your claim on Big Star" ]
+  [ "$(rendered .body | plain)" = "Hi Jane, a quick update on your claim on Big Star: it is with our team for review. Nothing else is needed from you right now, and we will message you here as soon as it has been checked.
+Thank you,
+Caroline, Muso Support" ]
+}
+
+@test "claim-status: server facts only - claim key, profile id, account id and profile name required; no follow-ups" {
+  unlocked_gate claims
+  statusfile "$TEST_TMPDIR/s.json" '.credits[0].request_id = "r1"'
+  run -1 "$GATE" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"claim key claim-<claiming.id>"* ]]
+  statusfile "$TEST_TMPDIR/s.json" '.credits[0].profile_id = ""'
+  run -1 "$GATE" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"profile_id"* ]]
+  statusfile "$TEST_TMPDIR/s.json" '.claim.profile_name = ""'
+  run -1 "$GATE" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"claim.profile_name"* ]]
+  statusfile "$TEST_TMPDIR/s.json"
+  run -1 "$GATE" send --campaign claim-status --kind reminder-7 --parent-message-id 1 --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"reminder-7 applies to claim-proof-ask only"* || "$output" == *"claim-status has no follow-ups"* ]]
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "claim-status: one note per claim ever; never to a claim that has a proof ask; never within 7 days of another claim note" {
+  unlocked_gate claims
+  statusfile "$TEST_TMPDIR/s.json"
+  run -0 "$GATE" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ
+  [ "$output" = "POSTED email message=1001 credits=1" ]
+  [ "$(sql "select campaign, kind, status from verify_messages")" = "claim-status|initial|sent" ]
+  INTERCOM_VERIFY_TEST_DAY=2026-11-30 run -0 "$GATE" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ
+  [ "$output" = "SKIPPED already-notified credits=1" ]
+  # a proof ask for ANOTHER claim of the same user waits 7 days after the status note
+  claimfile "$TEST_TMPDIR/c.json"
+  INTERCOM_VERIFY_TEST_DAY=2026-10-18 run -3 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"messaged_7d"* ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "claim-status: a claim that already has a proof ask never gets the status note (closed, not deferred)" {
+  unlocked_gate claims
+  claimfile "$TEST_TMPDIR/c.json"
+  run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  statusfile "$TEST_TMPDIR/s.json" '.credits[0].request_id = "claim-1606398"'
+  INTERCOM_VERIFY_TEST_DAY=2026-11-20 run -0 "$GATE" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"proof_ask_sent"* ]]
+  [ "$(posts)" -eq 1 ]
+  [ "$(sql "select status from verify_requests where campaign='claim-status'")" = "skipped" ]
+}
+
+@test "claim-status: a reply is tagged claim-proof (a person), never credit-proof" {
+  unlocked_gate claims
+  statusfile "$TEST_TMPDIR/s.json"
+  run -0 "$GATE" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ
+  run -0 "$GATE" tag-proof --message-id 1001 --dry-run
+  [ "$output" = "DRY-RUN tag claim-proof conversation=777 attachments=1" ]
+}
+
+@test "claim-proof-ask: a malformed-success conversation read is a failed reply check, never 'no reply' (QA on #1330)" {
+  unlocked_gate claim
+  claimfile "$TEST_TMPDIR/c.json"
+  run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  rem() { "$GATE" send --campaign claim-proof-ask --kind reminder-7 --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
+  for bad in '{"type":"conversation","id":"777","source":{"id":"1001"}}' \
+             '{"type":"conversation","id":"777","source":{"id":"1001"},"conversation_parts":{"total_count":0}}' \
+             '{"type":"conversation","source":{"id":"1001"},"conversation_parts":{"conversation_parts":[]}}'; do
+    STUB_CONVERSATION="$bad" INTERCOM_VERIFY_TEST_DAY=2026-10-22 run -4 rem
+    [[ "$output" == *"REPLY CHECK FAILED for message 1001"* ]]
+    [[ "$output" == *"READ NOT VERIFIED"* ]]
+  done
+  # not even an object: refused earlier (the recent-contact read), still fail-closed
+  STUB_CONVERSATION='[]' INTERCOM_VERIFY_TEST_DAY=2026-10-22 run -4 rem
+  [[ "$output" == *"nothing was sent or claimed"* ]]
+  [ "$(posts)" -eq 1 ]
+  [ "$(sql "select count(*) from verify_messages where kind='reminder-7'")" = "0" ]
+  # the well-formed empty conversation is the only "no reply": the reminder goes
+  STUB_CONVERSATION="$(quiet_claim_conv 1001)" INTERCOM_VERIFY_TEST_DAY=2026-10-22 run -0 rem
+  [ "$output" = "POSTED reminder-7 email message=1002 credits=1" ]
+}
+
+@test "claim-proof-ask: a reply with attachments is tagged claim-proof, never credit-proof" {
+  unlocked_gate claim
+  claimfile "$TEST_TMPDIR/c.json"
+  run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  run -0 "$GATE" tag-proof --message-id 1001 --dry-run
+  [ "$output" = "DRY-RUN tag claim-proof conversation=777 attachments=1" ]
+  STUB_TAG_NAME=claim-proof run -0 "$GATE" tag-proof --message-id 1001
+  [ "${lines[0]}" = "REPLY RECORDED message=1001 conversation=777 (no day-7 reminder; with a person)" ]
+  [ "${lines[1]}" = "TAGGED claim-proof conversation=777 message=1001 attachments=1" ]
+  grep -q '^POST https://api.intercom.io/tags$' "$CURL_STUB_LOG"
+  grep -qx '{"name":"claim-proof"}' "$CURL_STUB_PAYLOADS"
+  if grep -q '"credit-proof"' "$CURL_STUB_PAYLOADS"; then false; fi
+  [ "$(jq -r '.tag + " " + .action' "$(ls "$INTERCOM_VERIFY_TEST_LOG_DIR"/intercom-tag-*.json)")" = "claim-proof intercom_tag_claim_proof" ]
+  [ -n "$(sql "select proof_tagged_at from verify_messages where message_id='1001'")" ]
+}
+
+@test "claim-proof-ask: one message per user per day across campaigns" {
+  unlocked_gate claim
+  credits "$TEST_TMPDIR/u.json" Jane "s1:Mixing:A:X"
+  run -0 "$GATE" send --campaign status-team-review --copy no-ask --credits-file "$TEST_TMPDIR/u.json" --approved-by U7RP6HKUZ
+  claimfile "$TEST_TMPDIR/c.json"
+  run -3 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED"* ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "claim-proof-ask: once the claimant replies (text or attachment), the day-7 reminder is never sent" {
+  unlocked_gate claim
+  claimfile "$TEST_TMPDIR/c.json"
+  rem() { "$GATE" send --campaign claim-proof-ask --kind reminder-7 --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
+  run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  text_only='{"id":"777","source":{"id":"1001"},"conversation_parts":{"conversation_parts":[{"author":{"type":"user","id":"6650aa01"},"attachments":[],"created_at":1760600000}]}}'
+  STUB_TAG_NAME=claim-proof STUB_CONVERSATION="$text_only" run -0 "$GATE" tag-proof --message-id 1001
+  [ "${lines[0]}" = "REPLY RECORDED message=1001 conversation=777 (no day-7 reminder; with a person)" ]
+  [ "${lines[1]}" = "TAGGED claim-proof conversation=777 message=1001 attachments=0" ]
+  INTERCOM_VERIFY_TEST_DAY=2026-10-22 run -0 rem
+  [ "$output" = "SKIPPED proof-received message=1001" ]
+  [ "$(posts)" -eq 1 ]
+  claimfile "$TEST_TMPDIR/c.json" '.credits[0].request_id = "claim-1606399"'
+  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "POSTED email message=1002 credits=1" ]
+  STUB_TAG_NAME=claim-proof STUB_CONVERSATION='{"id":"777","source":{"id":"1002"},"conversation_parts":{"conversation_parts":[{"author":{"type":"user","id":"6650aa01"},"attachments":[{"name":"bio.png"}]}]}}' \
+    run -0 "$GATE" tag-proof --message-id 1002
+  [[ "$output" == *"TAGGED claim-proof conversation=777 message=1002 attachments=1" ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-10-23 run -0 "$GATE" send --campaign claim-proof-ask --kind reminder-7 --parent-message-id 1002 \
+    --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "SKIPPED proof-received message=1002" ]
+  [ "$(posts)" -eq 2 ]
+  [ "$(grep -c '^POST https://api.intercom.io/conversations/777/tags$' "$CURL_STUB_LOG")" -eq 2 ]
+  if grep -q '"credit-proof"' "$CURL_STUB_PAYLOADS"; then false; fi
+  # Neither reply is credit proof: the credit campaigns' proof state is untouched.
+  run -0 python3 -c 'import sys; sys.path.insert(0, sys.argv[2]); from credit_review import verify_ledger as v
+db=v.connect(sys.argv[1]); print(repr(v.past_user_done(db, "jane.doe@example.com", "42")), repr(v.uvn_user_done(db, "jane.doe@example.com", user_id="42")))' \
+    "$INTERCOM_VERIFY_TEST_LEDGER" "$HYDRA_REPO/scripts"
+  [[ "$output" != *"proof_received"* ]]
+}
+
+@test "claim-proof-ask: right before a reminder the gate reads the note's conversation; a fresh reply withholds it, a failed read sends nothing" {
+  unlocked_gate claim
+  claimfile "$TEST_TMPDIR/c.json"
+  run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  # No sweep has looked since: the ledger knows of no reply.
+  [ -z "$(sql "select proof_tagged_at from verify_messages where message_id='1001'")" ]
+  text_only='{"type":"conversation","id":"777","source":{"id":"1001","author":{"type":"admin","id":"5763097"}},"conversation_parts":{"conversation_parts":[{"part_type":"comment","author":{"type":"user","id":"6650aa01"},"attachments":[],"created_at":1760600000}]}}'
+  STUB_TAG_NAME=claim-proof STUB_CONVERSATION="$text_only" INTERCOM_VERIFY_TEST_DAY=2026-10-22 run -0 "$GATE" send \
+    --campaign claim-proof-ask --kind reminder-7 --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "SKIPPED claimant-replied message=1001 (tagged claim-proof; with a person)" ]
+  [ "$(posts)" -eq 1 ]
+  [ -n "$(sql "select proof_tagged_at from verify_messages where message_id='1001'")" ]
+  [ "$(sql "select count(*) from verify_messages where kind='reminder-7'")" = "0" ]
+  grep -q '^POST https://api.intercom.io/conversations/777/tags$' "$CURL_STUB_LOG"
+  # A second claim whose conversation cannot be read: nothing is sent or claimed.
+  claimfile "$TEST_TMPDIR/c.json" '.credits[0].request_id = "claim-1606399"'
+  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "POSTED email message=1002 credits=1" ]
+  run -0 python3 -c 'import sys; sys.path.insert(0, sys.argv[2]); from credit_review import verify_ledger as v
+v.set_conversation(v.connect(sys.argv[1]), message_id="1002", conversation_id="778")' "$INTERCOM_VERIFY_TEST_LEDGER" "$HYDRA_REPO/scripts"
+  STUB_CONVERSATION="$(quiet_claim_conv 1002)" INTERCOM_VERIFY_TEST_DAY=2026-10-23 run -4 "$GATE" send \
+    --campaign claim-proof-ask --kind reminder-7 --parent-message-id 1002 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "REPLY CHECK FAILED for message 1002"*"nothing was sent or claimed"* ]]
+  grep -q '^GET https://api.intercom.io/conversations/778?display_as=plaintext$' "$CURL_STUB_LOG"
+  [ "$(posts)" -eq 2 ]
+  [ "$(sql "select count(*) from verify_messages where kind='reminder-7'")" = "0" ]
 }

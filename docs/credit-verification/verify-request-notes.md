@@ -97,7 +97,8 @@ the reply text is never extracted. ANY such reply (text or attachment) records t
 reply's time on that message (`last_reply_at`; `REPLY RECORDED` for each newer reply) and
 `extension_requested_at` on the note once: the user may be asking for
 more time, so the note's credits are held from removal for a human, and the run summary
-says so. A reply carrying attachments also gets the `credit-proof` tag. A tagged thread is
+says so. A reply carrying attachments also gets the `credit-proof` tag (a claim-proof-ask note's
+reply gets `claim-proof` instead; see the claim proof ask section below). A tagged thread is
 never re-tagged (`ALREADY TAGGED`), but while its windowed note still has a credit no
 accepted review cleared (awaiting review, or rejected) the sweep keeps reading it and
 recording new replies, so a reply after an after-rejection note in any thread of the note
@@ -171,7 +172,7 @@ The other files the rebase check flags replace main's lines on purpose too:
   `credit-trust-verify-notify-15m`. It stops verify-live (`verify-notify`) and its waves only.
 - Ops notes kill switch (firstmate 117): `touch /etc/hydra/credit-ops-notes.disabled` (override:
   `CREDIT_OPS_NOTES_KILL_SWITCH`) stops `uvn-status` (and the status notes it sends),
-  `withdrawal-confirm` and `email-changed`: they print `NO_REPLY` and nothing runs. The
+  `withdrawal-confirm`, `email-changed`, `claim-proof-ask` and `claim-status`: they print `NO_REPLY` and nothing runs. The
   verify-notify switch does not stop them, and this one does not stop verify-live.
 - Replica shape: `credit_requests.credits` reaches Trino as a varchar holding a Postgres `text[]`
   literal (`{Mixing,"Mastering Engineer"}`), parsed in Python (`verify_notify.pg_text_array`;
@@ -430,6 +431,59 @@ Runbook: [intercom-identity-reconcile.md](intercom-identity-reconcile.md).
 - **`email-changed` / `email-changed-dup`**: "Done - your sign-in email has been updated ..." (dup adds the extra-account line), as a threaded reply only, once per ticket.
   - **Recipient** (firstmate 076): taken from the ticket's own conversation (`--conversation`), not the account email: it must have exactly one contact, an Intercom user (`role` user) whose `external_id` is the account's professional id or Auth0 subject (`user.auth_id`, with or without `auth0|`), or the in-thread legacy-id match (firstmate 089). Two contacts, a lead, no `external_id` or another account's `external_id` is refused. The usual human-assignee and do-not-message-tag checks still apply.
   - **Command:** `credit-review.py email-changed --user-id N --conversation C --ticket KEY [--dup] --mode apply`. It prints sent, skipped, deferred, refused and failed, and exits 3 when the gate deferred the reply (for example the user already had a note from this gate that day).
+
+## Dated claim proof ask (`--campaign claim-proof-ask`, steers-1830 #5, firstmate 125/126)
+
+This asks the claimant of a pending profile claim in band B or C to add the claim's bound-proof code to one platform bio by a close day. Each claim gets one note, and one day-7 reminder.
+
+**Status:** the campaign is **send-locked** (`CLAIM_PROOF_ASK_COPY_APPROVED=0`). The copy is Fable-approved (D38, `copy-ruling-claim-proof-ask-1022.md`), with paragraph 3 amended exactly as `claims-documentation-readiness-1023.md` ruling 1: "If adding the code isn't possible for you, reply to this message with paperwork that shows your name on one of {profile_name}'s releases: a split sheet, a producer or mixing agreement, an invoice, a royalty or distributor statement, or a PRO registration. Attach it here; we never ask for ID to claim a profile." The lock flips on firstmate's GO after the 5-user dry run, landed in a PR. `--dry-run` renders exactly what would be sent.
+
+**Copy**
+- **Server facts only:** the catalog profile name and its public muso.ai link, the claim's code, and one surface phrase from the gate's fixed `CLAIM_SURFACES` list.
+- **Readable surfaces only.** The phrase must name a surface claim-flow-fix-fable-c1's daily check can read, measured on 2026-10-22:
+  - `spotify` renders as "Spotify artist bio";
+  - `website` renders as "website (as one line in a file at /.well-known/muso.txt, or in a meta tag named muso-verify)";
+  - `youtube` renders as "YouTube channel About section".
+
+  Instagram (behind a login wall), X and TikTok (no post-link endpoint deployed yet) and anything else are refused. A claim with no readable surface waits for the documents path.
+- **Spotify only:** right after the ask sentence the note adds "Open Spotify for Artists, then Profile, then About, and put the code in your artist bio." Website and YouTube get no extra sentence (Fable D38).
+- **The close day:** the plain weekday and day ("Friday, November 7"), the same words in both places it appears, with no year, no time and no zone (Fable D38). firstmate 126 allowed a date for this campaign only, because it is the user's deadline, not a promise of when we act. Other campaigns keep their own date format.
+- **Sign-off:** "Thank you, / Caroline, Muso Support". Email only, never in-thread.
+
+**The close day.** It is always 14 days after the send (`verify_ledger.claim_close_day`); the list cannot set it. It is recorded as the note's `due_day`, and the reminder repeats the same day. The reminder is due from day 7 up to the day before the close day, at most once. The claim flow, not this gate, closes the claim on that day: the claim is ARCHIVED and can be reopened. A reminder dry run reads the close day from the ledger; with no sent note there it shows a day marked "(preview date)".
+
+**Ledger.** The key is `claim-<claiming.id>`, and only `claim-proof-ask`'s own rows block it. It never counts as a credit ask, so it does not trigger the 90-day lock. The one-message-per-user-per-UTC-day cap does apply across every campaign. An admin or Caroline reply to the user in the last 7 days defers the first note and the reminder alike; a reminder deferred to the close day is never sent.
+
+**Replies.** The daily proof sweep tags any claimant reply to the note, text only or with attachments, `claim-proof`: a queue of its own for a person, never `credit-proof`. Right before a reminder is sent, the gate reads the note's conversation itself (the sweep may not have looked lately): a reply there is recorded and tagged, and the reminder is withheld (`SKIPPED claimant-replied`); a failed read sends nothing. A tagged claim note is never credit proof: it does not close or skip retro-past or uvn-status asks. Once the claimant replies to the note at all (the claim-proof tag, or any recorded reply), the day-7 reminder is never sent: the driver closes it (`claimant replied`) and the reply waits for a person. The daily report counts claim replies and claim-proof tags apart from the credit ones.
+
+**Driver:** `credit-review.py claim-proof-ask --list <claim-flow-fix-fable-c1 list> --segment paid|free --mode dry-run|apply --max-users N [--reminders] [--preview DIR]` (`scripts/credit_review/claim_proof_ask.py`). It is stopped by `/etc/hydra/credit-ops-notes.disabled`.
+- **No send at all** unless the list names its daily code check (`daily_check.owner`) and that check ran in the last 30 hours (firstmate 126). The line "we check for it every day" must be true.
+- **Sent to:** bands B and C only, with a readable platform, never a claim whose code was already found. The claim must still be `pending` on the core replica and owned by the listed user.
+- **Held, not sent:** users who emailed support@ in the last 90 days are held for a person; an unreadable feed sends nothing. An account with no professional id is held too.
+- **Held, not sent:** a claim whose list entry has no well-formed `profile_id` (required: the send log carries it).
+- **Order:** one claim per user per run, paid first, at most 150 messages a day, first notes and reminders together. A claim already asked (a ledger row for its key that was attempted, sent, refused or skipped) is dropped before the run's budget is spent, so later runs reach new claims. `--reminders` honours `--segment` too.
+- **Send log:** after each apply run, the driver rewrites `/var/lib/hydra/credit-review/claim-proof-asked.jsonl` from the ledger (`CLAIM_PROOF_ASKED_EXPORT`; a full snapshot, replaced atomically). It holds one `{id, profileId, userId, askedAt, dateClose}` line per claim whose note was sent (`askedAt` is when the note was claimed and sent; later ledger updates never move it), and the daily code check reads it.
+- **`--reminders`** sends the due day-7 reminders. If the claim was decided, deleted, changed owner, had its code found or is no longer in band B/C on today's list (reclassified to A or D), the reminder is closed in the ledger and never sent. If the claim is not on today's list, the reminder waits. A 2xx conversation read with no id or no `conversation_parts` list is a failed reply check (exit 4, nothing sent), never "no reply".
+- **Audience routing:** a list row with `"audience": "status"` never gets the proof ask (it gets the claim status note below).
+
+## Claim status note (`--campaign claim-status`, Fable claims-documentation-readiness-1023 ruling 3)
+
+The no-ask note for a pending claimant who gets **no** proof ask: holds, organizations, claims with no surface the daily code check can read, and any row the list routes with `"audience": "status"` (e.g. A-48h claims). Fable's copy, verbatim:
+
+> Subject: Your claim on {profile_name}
+> Hi {first_name}, a quick update on your claim on {profile_name}: it is with our team for review. Nothing else is needed from you right now, and we will message you here as soon as it has been checked.
+> Thank you, / Caroline, Muso Support
+
+**Status:** send-locked (`CLAIM_STATUS_COPY_APPROVED=0`) until firstmate's GO after the 5-user dry run; it flips together with the proof ask's lock.
+
+- **Channel:** in-thread when the user has an open conversation from the last 14 days (unsigned, as the other status notes), otherwise email (with the sign-off).
+- **Ledger:** the key is `claim-<claiming.id>`; one note per claim, ever, with no follow-up. It is never sent to a claim that has a `claim-proof-ask` note: that claim is closed `proof_ask_sent`. It is never sent within 7 days (counted back from the send day) of another note from this gate to the same user (`messaged_7d`, deferred). The rule runs both ways: a proof ask waits 7 days after a claim-status note (`verify_ledger.claim_cross_check`). The one-message-per-user-per-UTC-day cap applies as everywhere.
+- **Replies** are tagged `claim-proof` (a person), never credit proof.
+- **Driver:** `credit-review.py claim-status --list <claim list> --segment paid|free --mode dry-run|apply --max-users N [--preview DIR]` (`claim_proof_ask.run_status`).
+  - The list must be at most 30 hours old. No daily code check is required: the note promises none.
+  - Without an explicit `audience`, a band-A or bandless row gets neither note (it is on the approval path).
+  - A claim whose code was found is skipped.
+  - The run uses the same replica, support@, email and professional-id checks as the ask: paid first, one claim per user per run, at most 400 notes a day.
 
 ## Removal notices (`--campaign removal-notice`)
 

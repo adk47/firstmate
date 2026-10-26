@@ -1,0 +1,386 @@
+"""claim-proof-ask runner (steers-1830 #5, firstmate 125/126). The gate is faked; its own
+behaviour (copy, locks, the close day, the day-7 reminder) is in intercom-verify-request.bats.
+Replica rows use the shapes Trino really returns (every column a string). No network."""
+from __future__ import annotations
+
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from credit_review import claim_proof_ask, verify_ledger  # noqa: E402
+from credit_retro import waves  # noqa: E402
+
+NOW = datetime(2026, 10, 24, 9, 0, tzinfo=timezone.utc)
+PRO = "9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"
+
+
+def iso(h: float) -> str:
+    return (NOW - timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def claim(cid: int, uid: int, **kw):
+    return {"claim_id": cid, "user_id": uid, "paid": True, "band": "B", "profile_name": "Big Star",
+            "profile_url": "https://credits.muso.ai/profile/abc", "code": "MUSO-7K2Q", "platform": "spotify", "profile_id": "abc",
+            "code_found": False, **kw}
+
+
+class FakeGate:
+    def __init__(self, out="POSTED email message=1 credits=1"):
+        self.calls, self.out = [], out
+
+    def __call__(self, argv):
+        self.calls.append((argv, json.loads(Path(argv[argv.index("--credits-file") + 1]).read_text())))
+        return subprocess.CompletedProcess(argv, 0, self.out, "")
+
+
+class LedgerGate(FakeGate):
+    """A gate that records each first note in the ledger as sent, as the real gate does."""
+    def __init__(self, ledger: str, day: str):
+        super().__init__()
+        self.ledger, self.day, self.n = ledger, day, 0
+
+    def __call__(self, argv):
+        res = super().__call__(argv)
+        p = self.calls[-1][1]
+        db = verify_ledger.connect(self.ledger)
+        c = verify_ledger.claim(db, campaign="claim-proof-ask", user_key=p["user"]["email"], day=self.day,
+                                request_ids=[p["credits"][0]["request_id"]], message_type="email",
+                                approved_by="U7RP6HKUZ", approval_ref="ref", user_id=p["user"]["id"])
+        self.n += 1
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=f"80{self.n}")
+        db.close()
+        return res
+
+
+def replica(states: dict[int, tuple[str, int]], users: dict[int, str] | None = None):
+    """Trino rows as strings: claiming(id, status, userid) and users(id, email, firstname, pro, auth0).
+    q.user_reads counts the account lookups."""
+    def q(sql):
+        if "public.claiming" in sql:
+            return [[str(c), s, str(u)] for c, (s, u) in states.items()]
+        q.user_reads += 1
+        return [[str(u), e, "Jane", PRO if e else "", ""] for u, e in (users or {}).items()]
+    q.user_reads = 0
+    return q
+
+
+class ClaimProofAskTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ledger = str(Path(self.tmp.name) / "l.sqlite3")
+        self.export = str(Path(self.tmp.name) / "asked.jsonl")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def lst(self, claims, *, gen=1, check_owner="claim-flow-fix-fable-c1", check_age=2):
+        p = Path(self.tmp.name) / "list.json"
+        doc = {"generated_at": iso(gen), "claims": claims}
+        if check_owner is not None:
+            doc["daily_check"] = {"owner": check_owner, "last_run_at": iso(check_age)}
+        p.write_text(json.dumps(doc))
+        return str(p)
+
+    def go(self, path, q, **kw):
+        gate = kw.pop("gate", FakeGate())
+        rep = claim_proof_ask.run(list_path=path, segment=kw.pop("segment", "paid"), mode=kw.pop("mode", "apply"),
+                                  max_users=kw.pop("max_users", 20), query=q, wrapper="/gate", runner=gate,
+                                  ledger_path=self.ledger, support_contacts=kw.pop("support", frozenset()),
+                                  now=kw.pop("now", NOW), export_path=self.export, **kw)
+        return rep, gate
+
+    def test_nothing_sends_without_a_named_recent_daily_code_check(self):
+        """firstmate 126: 'we check for it every day' must be true."""
+        q = replica({1: ("pending", 7)}, {7: "a@x.com"})
+        for kw in ({"check_owner": None}, {"check_owner": ""}, {"check_age": 31}):
+            rep, gate = self.go(self.lst([claim(1, 7)], **kw), q)
+            self.assertTrue(rep.halted, kw)
+            self.assertEqual(gate.calls, [])
+        rep, gate = self.go(self.lst([claim(1, 7)], gen=31), q)
+        self.assertIn("old", rep.halted)
+        self.assertEqual(gate.calls, [])
+
+    def test_one_claim_per_user_paid_first_bands_b_c_only_never_a_found_code(self):
+        claims = [claim(1, 7), claim(2, 7), claim(3, 8, band="A"), claim(4, 9, code_found=True),
+                  claim(5, 10, paid=False), claim(6, 11, band="c")]
+        q = replica({c: ("pending", u) for c, u in ((1, 7), (2, 7), (3, 8), (4, 9), (5, 10), (6, 11))},
+                    {7: "a@x.com", 8: "b@x.com", 9: "c@x.com", 10: "d@x.com", 11: "e@x.com"})
+        rep, gate = self.go(self.lst(claims), q)
+        sent = [p["credits"][0]["request_id"] for _, p in gate.calls]
+        self.assertEqual(sent, ["claim-1", "claim-6"])
+        self.assertEqual((rep.second_claim, rep.not_band, rep.code_found), (1, 1, 1))
+        argv, p = gate.calls[0]
+        self.assertEqual(argv[argv.index("--campaign") + 1], "claim-proof-ask")
+        self.assertEqual(p["claim"], {"profile_name": "Big Star", "profile_url": "https://credits.muso.ai/profile/abc",
+                                      "code": "MUSO-7K2Q", "platform": "spotify"})
+        self.assertEqual(p["credits"], [{"request_id": "claim-1", "profile_id": "abc"}])
+        self.assertEqual(p["user"]["professional_id"], PRO)
+
+    def test_only_surfaces_the_daily_check_can_read(self):
+        """c1 2026-10-22: Instagram is behind a login wall, X/TikTok need a post link: never named."""
+        claims = [claim(1, 7, platform="instagram"), claim(2, 8, platform="tiktok"), claim(3, 9, platform=""),
+                  claim(4, 10, platform="website"), claim(5, 11, platform="youtube")]
+        q = replica({c: ("pending", u) for c, u in ((1, 7), (2, 8), (3, 9), (4, 10), (5, 11))},
+                    {u: f"u{u}@x.com" for u in (7, 8, 9, 10, 11)})
+        rep, gate = self.go(self.lst(claims), q)
+        self.assertEqual([p["claim"]["platform"] for _, p in gate.calls], ["website", "youtube"])
+        self.assertEqual(rep.no_readable_surface, 3)
+
+    def test_apply_rewrites_the_send_log_the_daily_check_reads(self):
+        self._sent_note(1, 7, "a@x.com", "2026-10-24")
+        db = verify_ledger.connect(self.ledger)
+        asked = db.execute("SELECT created_at FROM verify_messages WHERE campaign='claim-proof-ask'").fetchone()[0]
+        q = replica({}, {})
+        self.go(self.lst([]), q)
+        got = [json.loads(line) for line in Path(self.export).read_text().splitlines()]
+        self.assertEqual(got, [{"id": 1, "profileId": "abc", "userId": "7", "askedAt": asked, "dateClose": "2026-11-07"}])
+        rep, _ = self.go(self.lst([]), q, mode="dry-run")
+        self.assertEqual(len(Path(self.export).read_text().splitlines()), 1)   # a dry run never rewrites it
+
+    def test_send_log_askedat_is_the_send_time_not_a_later_tag(self):
+        """The proof sweep tags a reply days later (updated_at moves): askedAt must not."""
+        self._sent_note(1, 7, "a@x.com", "2026-10-24")
+        db = verify_ledger.connect(self.ledger)
+        asked = db.execute("SELECT created_at FROM verify_messages WHERE campaign='claim-proof-ask'").fetchone()[0]
+        verify_ledger.mark_tagged(db, message_id="901", conversation_id="5", attachments=1, now=NOW + timedelta(days=3))
+        self.go(self.lst([]), replica({}, {}))
+        got = json.loads(Path(self.export).read_text())
+        self.assertEqual(got["askedAt"], asked)
+
+    def test_a_claim_without_a_well_formed_profile_id_is_held_never_sent(self):
+        claims = [claim(1, 7, profile_id=""), claim(2, 8, profile_id="a b"), claim(3, 9)]
+        claims[0].pop("profile_id")
+        q = replica({c: ("pending", u) for c, u in ((1, 7), (2, 8), (3, 9))}, {u: f"u{u}@x.com" for u in (7, 8, 9)})
+        rep, gate = self.go(self.lst(claims), q)
+        self.assertEqual([p["credits"] for _, p in gate.calls], [[{"request_id": "claim-3", "profile_id": "abc"}]])
+        self.assertEqual(rep.no_profile_id, 2)
+
+    def test_the_replica_decides_a_claim_no_longer_pending_or_of_another_owner_is_not_sent(self):
+        q = replica({1: ("processed", 7), 2: ("pending", 99)}, {7: "a@x.com", 8: "b@x.com"})
+        rep, gate = self.go(self.lst([claim(1, 7), claim(2, 8), claim(3, 8)]), q)
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.not_pending, 3)   # 3 is missing from the replica (deleted): not sent
+
+    def test_support_contacts_held_and_no_professional_id_held(self):
+        q = replica({1: ("pending", 7), 2: ("pending", 8)}, {7: "a@x.com", 8: ""})
+        rep, gate = self.go(self.lst([claim(1, 7), claim(2, 8)]), q, support=frozenset({"7"}))
+        self.assertEqual(gate.calls, [])
+        self.assertEqual((rep.support_hold, rep.no_email), (1, 1))
+
+    def test_daily_cap_and_run_size(self):
+        q = replica({c: ("pending", 100 + c) for c in range(1, 6)}, {100 + c: f"u{c}@x.com" for c in range(1, 6)})
+        rep, gate = self.go(self.lst([claim(c, 100 + c) for c in range(1, 6)]), q, max_users=3)
+        self.assertEqual(len(gate.calls), 3)
+        self.assertEqual(rep.over_daily_max, 2)
+
+    def test_a_later_run_reaches_new_claims_not_the_ones_already_asked(self):
+        """Canary of 3, then the next day's run: the already-asked claims never take its budget."""
+        claims = [claim(1, 7), claim(2, 7), claim(3, 8), claim(4, 9), claim(5, 10), claim(6, 11)]
+        q = replica({c["claim_id"]: ("pending", c["user_id"]) for c in claims},
+                    {u: f"u{u}@x.com" for u in (7, 8, 9, 10, 11)})
+        rep, gate = self.go(self.lst(claims), q, max_users=3, gate=LedgerGate(self.ledger, "2026-10-24"))
+        self.assertEqual([p["credits"][0]["request_id"] for _, p in gate.calls], ["claim-1", "claim-3", "claim-4"])
+        rep, gate = self.go(self.lst(claims, gen=1 - 24, check_age=2 - 24), q, max_users=3,
+                            gate=LedgerGate(self.ledger, "2026-10-25"), now=NOW + timedelta(days=1))
+        self.assertEqual([p["credits"][0]["request_id"] for _, p in gate.calls], ["claim-2", "claim-5", "claim-6"])
+        self.assertEqual((rep.already_asked, rep.second_claim, rep.over_daily_max), (3, 0, 0))
+
+    def test_reminders_honour_the_segment(self):
+        self._sent_note(1, 7, "u7@x.com", "2026-10-17")
+        self._sent_note(2, 8, "u8@x.com", "2026-10-17")
+        q = replica({1: ("pending", 7), 2: ("pending", 8)}, {7: "u7@x.com", 8: "u8@x.com"})
+        claims = [claim(1, 7), claim(2, 8, paid=False)]
+        for segment, want in (("paid", "claim-1"), ("free", "claim-2")):
+            rep, gate = self.go(self.lst(claims), q, reminders=True, segment=segment, mode="dry-run")
+            self.assertEqual([p["credits"][0]["request_id"] for _, p in gate.calls], [want], segment)
+
+    def test_a_claimant_who_replied_is_never_reminded_and_the_reminder_is_closed(self):
+        self._sent_note(1, 7, "u7@x.com", "2026-10-17")
+        self._sent_note(2, 8, "u8@x.com", "2026-10-17")
+        self._sent_note(3, 9, "u9@x.com", "2026-10-17")
+        db = verify_ledger.connect(self.ledger)
+        self.assertEqual(verify_ledger.mark_replied(db, message_id="901", replied_at="2026-10-18T10:00:00Z"), "recorded")
+        verify_ledger.mark_tagged(db, message_id="902", conversation_id="5", attachments=1)
+        for mid in ("901", "902"):
+            st = verify_ledger.reminder_state(db, parent_message_id=mid, kind="reminder-7", day="2026-10-24")
+            self.assertEqual(st["result"], "proof_received", mid)
+        self.assertEqual(verify_ledger.reminder_state(db, parent_message_id="903", kind="reminder-7",
+                                                      day="2026-10-24")["result"], "due")
+        q = replica({c: ("pending", u) for c, u in ((1, 7), (2, 8), (3, 9))}, {u: f"u{u}@x.com" for u in (7, 8, 9)})
+        rep, gate = self.go(self.lst([claim(1, 7), claim(2, 8), claim(3, 9)]), q, reminders=True)
+        self.assertEqual([p["credits"][0]["request_id"] for _, p in gate.calls], ["claim-3"])
+        self.assertEqual(rep.closed_reminders, 2)
+        closed = db.execute("SELECT reason FROM verify_messages WHERE kind='reminder-7' AND status='skipped'").fetchall()
+        self.assertEqual([r[0] for r in closed], ["claimant replied", "claimant replied"])
+        self.assertEqual(verify_ledger.reminder_state(db, parent_message_id="901", kind="reminder-7",
+                                                      day="2026-10-25")["result"], "done")
+
+    def _sent_note(self, cid: int, uid: int, email: str, day: str) -> None:
+        db = verify_ledger.connect(self.ledger)
+        c = verify_ledger.claim(db, campaign="claim-proof-ask", user_key=email, day=day, request_ids=[f"claim-{cid}"],
+                                message_type="email", approved_by="U7RP6HKUZ", approval_ref="ref", user_id=str(uid),
+                                refs=[{"request_id": f"claim-{cid}", "profile_id": "abc"}])
+        self.assertEqual(c["result"], "claimed")
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=f"90{cid}")
+
+    def test_reminders_send_only_while_pending_and_close_when_decided_or_code_found(self):
+        for cid, uid in ((1, 7), (2, 8), (3, 9), (4, 10)):
+            self._sent_note(cid, uid, f"u{uid}@x.com", "2026-10-17")
+        q = replica({1: ("pending", 7), 2: ("processed", 8), 3: ("pending", 9), 4: ("pending", 10)},
+                    {7: "u7@x.com", 9: "u9@x.com", 10: "u10@x.com"})
+        claims = [claim(1, 7), claim(3, 9, code_found=True)]   # claim 4 is not on today's list
+        rep, gate = self.go(self.lst(claims), q, reminders=True)
+        self.assertEqual(len(gate.calls), 1)
+        argv, p = gate.calls[0]
+        self.assertEqual(argv[argv.index("--kind") + 1], "reminder-7")
+        self.assertEqual(argv[argv.index("--parent-message-id") + 1], "901")
+        self.assertEqual(p["credits"][0]["request_id"], "claim-1")
+        self.assertEqual((rep.closed_reminders, rep.not_in_list), (2, 1))
+        db = verify_ledger.connect(self.ledger)
+        closed = db.execute("SELECT reason FROM verify_messages WHERE kind='reminder-7' AND status='skipped' "
+                            "ORDER BY reason").fetchall()
+        self.assertEqual([r[0] for r in closed], ["claim processed", "code found"])
+
+    def test_a_claim_reclassified_out_of_b_c_gets_no_reminder_and_the_reminder_is_closed(self):
+        """QA on #1330: asked while B, the claim is band A (approval path) or D (a person) by day 7."""
+        for cid, uid in ((1, 7), (2, 8), (3, 9)):
+            self._sent_note(cid, uid, f"u{uid}@x.com", "2026-10-17")
+        q = replica({1: ("pending", 7), 2: ("pending", 8), 3: ("pending", 9)},
+                    {7: "u7@x.com", 8: "u8@x.com", 9: "u9@x.com"})
+        claims = [claim(1, 7, band="A"), claim(2, 8, band="D"), claim(3, 9, band="C")]
+        rep, gate = self.go(self.lst(claims), q, reminders=True)
+        self.assertEqual([c[1]["credits"][0]["request_id"] for c in gate.calls], ["claim-3"])
+        self.assertEqual(rep.closed_reminders, 2)
+        db = verify_ledger.connect(self.ledger)
+        closed = db.execute("SELECT reason FROM verify_messages WHERE kind='reminder-7' AND status='skipped' "
+                            "ORDER BY reason").fetchall()
+        self.assertEqual([r[0] for r in closed], ["band A (not B/C)", "band D (not B/C)"])
+
+    def test_a_claim_rerouted_to_the_status_note_gets_no_proof_reminder(self):
+        """QA on #1366: asked while B (readable), today's list routes it audience 'status' (still B, readable)."""
+        self._sent_note(1, 7, "u7@x.com", "2026-10-17")
+        q = replica({1: ("pending", 7)}, {7: "u7@x.com"})
+        rep, gate = self.go(self.lst([claim(1, 7, band="B", audience="status")]), q, reminders=True)
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.closed_reminders, 1)
+        db = verify_ledger.connect(self.ledger)
+        self.assertEqual(db.execute("SELECT reason FROM verify_messages WHERE kind='reminder-7' AND status='skipped'").fetchone()[0],
+                         "routed to the claim-status note")
+
+    def test_reminders_share_the_daily_max_and_read_accounts_in_one_batch(self):
+        for cid, uid in ((1, 7), (2, 8), (3, 9)):
+            self._sent_note(cid, uid, f"u{uid}@x.com", "2026-10-17")
+        self._sent_note(4, 10, "u10@x.com", "2026-10-24")      # already one claim-proof-ask message today
+        q = replica({1: ("pending", 7), 2: ("pending", 8), 3: ("pending", 9)},
+                    {7: "u7@x.com", 8: "u8@x.com", 9: "u9@x.com"})
+        with mock.patch.object(claim_proof_ask, "CLAIM_DAILY_MAX", 3):
+            rep, gate = self.go(self.lst([claim(1, 7), claim(2, 8), claim(3, 9)]), q, reminders=True)
+        self.assertEqual([p["credits"][0]["request_id"] for _, p in gate.calls], ["claim-1", "claim-2"])
+        self.assertEqual(rep.over_daily_max, 1)
+        self.assertEqual(q.user_reads, 1)
+
+    def test_ledger_close_day_is_always_14_days_after_the_note(self):
+        db = verify_ledger.connect(self.ledger)
+        c = verify_ledger.claim(db, campaign="claim-proof-ask", user_key="a@x.com", day="2026-10-24",
+                                request_ids=["claim-1"], message_type="email", approved_by="U7RP6HKUZ",
+                                approval_ref="r", user_id="7")
+        self.assertEqual(c["due_day"], "2026-11-07")
+        self.assertEqual(db.execute("SELECT due_day FROM verify_messages WHERE id=?", (c["message_row"],)).fetchone()[0],
+                         "2026-11-07")
+
+    def test_a_tagged_claim_reply_is_never_credit_proof(self):
+        """claim-proof is its own queue: it never closes or skips a retro-past or uvn-status ask."""
+        self._sent_note(1, 7, "a@x.com", "2026-10-10")
+        db = verify_ledger.connect(self.ledger)
+        verify_ledger.mark_tagged(db, message_id="901", conversation_id="5", attachments=1)
+        self.assertEqual(verify_ledger.past_user_done(db, "a@x.com", "7"), "")
+        self.assertEqual(verify_ledger.uvn_user_done(db, "a@x.com", now=NOW, user_id="7"), "")
+        self.assertEqual(waves.already_engaged(self.ledger)[:2], (set(), set()))
+        c = verify_ledger.claim(db, campaign="status-team-review", user_key="b@x.com", day="2026-10-10", request_ids=["u1"],
+                                message_type="email", approved_by="U7RP6HKUZ", approval_ref="r", user_id="8")
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="902")
+        verify_ledger.mark_tagged(db, message_id="902", conversation_id="6", attachments=1)
+        self.assertEqual(verify_ledger.past_user_done(db, "b@x.com", "8"), "proof_received")
+
+    def test_a_claim_ask_is_not_an_ask_for_credits(self):
+        """Its rows block only itself: a claim note never counts as a credit ask (90-day lock)."""
+        self._sent_note(1, 7, "a@x.com", "2026-10-17")
+        db = verify_ledger.connect(self.ledger)
+        self.assertFalse(verify_ledger.asked_within(db, user_key="a@x.com", day="2026-10-24", user_id="7"))
+
+
+
+class ClaimStatusTests(unittest.TestCase):
+    """claim-status (Fable claims-documentation-readiness-1023 ruling 3): the no-ask note to every pending
+    claimant who gets no proof ask. Shares the ask tests' fixtures (not their tests)."""
+    setUp = ClaimProofAskTests.setUp
+    tearDown = ClaimProofAskTests.tearDown
+    lst = ClaimProofAskTests.lst
+    go = ClaimProofAskTests.go
+    _sent_note = ClaimProofAskTests._sent_note
+
+    def status(self, path, q, **kw):
+        gate = kw.pop("gate", FakeGate())
+        rep = claim_proof_ask.run_status(list_path=path, segment=kw.pop("segment", "paid"), mode=kw.pop("mode", "apply"),
+                                         max_users=kw.pop("max_users", 50), query=q, wrapper="/gate", runner=gate,
+                                         ledger_path=self.ledger, support_contacts=kw.pop("support", frozenset()),
+                                         now=kw.pop("now", NOW), **kw)
+        return rep, gate
+
+    def test_audience_holds_orgs_unreadable_and_explicit_status_rows_only(self):
+        claims = [claim(1, 1, band="D"),                        # hold -> status
+                  claim(2, 2, band="B", platform="instagram"),  # no readable surface -> status
+                  claim(3, 3, band="B"),                        # proof ask, not status
+                  claim(4, 4, band="A"),                        # approval path, neither
+                  claim(5, 5, band="B", audience="status"),     # A-48h routed explicitly
+                  claim(6, 6, band="D", code_found=True)]       # code found: neither
+        q = replica({i: ("pending", i) for i in range(1, 7)}, {i: f"u{i}@x.com" for i in range(1, 7)})
+        rep, gate = self.status(self.lst(claims), q)
+        sent = sorted(c[1]["credits"][0]["request_id"] for c in gate.calls)
+        self.assertEqual(sent, ["claim-1", "claim-2", "claim-5"])
+        self.assertTrue(all(c[0][c[0].index("--campaign") + 1] == "claim-status" for c in gate.calls))
+        self.assertEqual(gate.calls[0][1]["claim"], {"profile_name": "Big Star"})
+        self.assertEqual((rep.ask_audience, rep.code_found), (2, 1))
+
+    def test_the_ask_run_never_sends_the_proof_ask_to_a_status_row(self):
+        q = replica({1: ("pending", 1), 2: ("pending", 2)}, {1: "a@x.com", 2: "b@x.com"})
+        rep, gate = self.go(self.lst([claim(1, 1, audience="status"), claim(2, 2)]), q)
+        self.assertEqual([c[1]["credits"][0]["request_id"] for c in gate.calls], ["claim-2"])
+        self.assertEqual(rep.status_audience, 1)
+
+    def test_status_run_needs_a_fresh_list_but_not_the_daily_code_check(self):
+        q = replica({1: ("pending", 1)}, {1: "a@x.com"})
+        rep, gate = self.status(self.lst([claim(1, 1, band="D")], check_owner=None), q)
+        self.assertEqual(len(gate.calls), 1)
+        rep, gate = self.status(self.lst([claim(1, 1, band="D")], gen=40), q)
+        self.assertIn("old", rep.halted)
+        self.assertEqual(len(gate.calls), 0)
+
+    def test_a_claim_with_a_proof_ask_is_never_sent_the_status_note(self):
+        self._sent_note(1, 1, "a@x.com", "2026-10-20")      # claim-1 has a claim-proof-ask note
+        q = replica({1: ("pending", 1)}, {1: "a@x.com"})
+        rep, gate = self.status(self.lst([claim(1, 1, band="D")]), q)
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.ask_audience, 1)
+
+    def test_replica_support_one_per_user_and_segment(self):
+        claims = [claim(1, 1, band="D"), claim(2, 1, band="D"), claim(3, 3, band="D"), claim(4, 4, band="D"),
+                  claim(5, 5, band="D", paid=False)]
+        q = replica({1: ("pending", 1), 2: ("pending", 1), 3: ("processed", 3), 4: ("pending", 4), 5: ("pending", 5)},
+                    {1: "a@x.com", 4: "d@x.com", 5: "e@x.com"})
+        rep, gate = self.status(self.lst(claims), q, support=frozenset({"4"}))
+        self.assertEqual([c[1]["credits"][0]["request_id"] for c in gate.calls], ["claim-1"])
+        self.assertEqual((rep.second_claim, rep.not_pending, rep.support_hold), (1, 1, 1))
+
+
+if __name__ == "__main__":
+    unittest.main()

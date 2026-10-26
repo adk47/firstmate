@@ -273,14 +273,14 @@ def already_engaged(verify_db: str | None) -> tuple[set[str], set[str], set[str]
     db.row_factory = sqlite3.Row
     try:
         cols = {r["name"] for r in db.execute("PRAGMA table_info(verify_messages)")}
-        from credit_review.verify_ledger import READER_COLUMNS  # noqa: PLC0415  (the writer's contract)
+        from credit_review.verify_ledger import CLAIM_CAMPAIGNS, READER_COLUMNS  # noqa: PLC0415  (the writer's contract)
         if not READER_COLUMNS <= cols:
             raise SystemExit(f"{verify_db}: verify_messages lacks the columns needed to avoid re-asking; refusing")
         proof_ids: set[str] = set()
         proof_users: set[str] = set()
         asked_users: set[str] = set()
         for r in db.execute("SELECT * FROM verify_messages"):
-            if r["proof_tagged_at"]:
+            if r["proof_tagged_at"] and r["campaign"] not in CLAIM_CAMPAIGNS:
                 proof_ids.update(str(i) for i in json.loads(r["request_ids_json"] or "[]"))
                 proof_users.add(str(r["user_key"] or "").lower())
             if r["campaign"] == SEND_CAMPAIGN and r["kind"] == "initial" and r["status"] in ("sent", "attempted"):
