@@ -68,22 +68,29 @@ python3 scripts/credit-review.py intercom-reconcile --revert irc-<ts>-<hex> --mo
 
 ## Ruling B: the fraud lens (`fraud_lens.py`)
 
+Two lists, two meanings (Fable `ruling-watchlist-consistency-1026`, 10-26):
+`policies/fraud-watchlist.json` holds **approvals**: a watchlisted user's requests are never
+auto-approved, but the user is **messaged normally**, because "being on it must never block
+communication". `policies/fraud-lens-holds.json` holds **messages**. It is only for accounts we must
+not acknowledge at all: the 3 banned accounts (58586, 162720, 301754), the captain's 5, and 53136
+until `review_by` 2026-11-02. A captain-restored account is never listed there; a test pins this.
+
 - **Held** (never messaged, never closed, re-checked every run), when any of these is true:
-  - the user, their email, or a profile on an open request is on `policies/fraud-watchlist.json`
-    (`credit_review/watchlist.py`);
-  - the user is in `policies/fraud-lens-holds.json`, the named a1 / s1 / brief accounts. This file
-    is messaging only and does not affect approvals;
+  - the user is in `policies/fraud-lens-holds.json`. An entry stops applying after its `review_by`
+    date unless someone cites evidence and extends it;
   - velocity is above the s1 band over 90 days: more than 300 rows, or more than 10 rows at
     popularity >= 70, on one profile in one UTC day;
   - the user has **>= 10** open big-track single-signal rows: popularity >= 60 with
     `review_big_track_without_trusted_credit` / `review_big_track_weak_footprint`, or a lone
     `shortcut_source`.
+- **Watchlisted** (`policies/fraud-watchlist.json`: user, email, or a profile on an open request):
+  messaged as usual and reported (`watchlisted`; `fraud-lens` writes `watchlisted.txt`).
 - **Ask-only**: users with 1 to 9 such rows. `credit-review.py uvn-status` gives them only the
   `uvn-status` document ask, never `status-doc-received` (Copy A) or `status-team-review` (Copy B0).
 - The uvn-status runner loads the watchlist and the holds file at start. If either is missing or
   malformed, it sends nothing.
 - `credit-review.py fraud-lens --out DIR` builds the paid never-contacted population and writes
-  `never.txt`, `clean.txt`, `ask-only.txt`, `fraud-held.json` and `lens-summary.json`. It replaces
+  `never.txt`, `clean.txt`, `ask-only.txt`, `watchlisted.txt`, `fraud-held.json` and `lens-summary.json`. It replaces
   paid-wave-runner-p1's scratch pre-filter. Put the `ask-only.txt` users on the uvn-status list only.
 - Gap: an ask-only user whose requests are not `user_verification_needed` in core is not reachable by
   the uvn-status ask, whose replica check needs UVN rows. The runner reports them as `ask_only` on

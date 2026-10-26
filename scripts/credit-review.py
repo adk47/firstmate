@@ -618,6 +618,7 @@ def cmd_fraud_lens(args: argparse.Namespace) -> int:
     (d / "clean.txt").write_text("".join(f"{u}\n" for u in out["clean"]))
     (d / "ask-only.txt").write_text("".join(f"{u}\n" for u in out["ask_only"]))
     (d / "fraud-held.json").write_text(json.dumps(out["held"], indent=1))
+    (d / "watchlisted.txt").write_text("".join(f"{u}\n" for u in out["watchlisted_messageable"]))
     summ = {**counts, **out["counts"], "single_signal_hold_min": fraud_lens.SINGLE_SIGNAL_HOLD_MIN}
     (d / "lens-summary.json").write_text(json.dumps(summ, indent=1))
     print("FRAUD LENS: " + json.dumps(summ) + f" Files in {d} (ask-only.txt users go to the uvn-status list only).")

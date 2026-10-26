@@ -10,13 +10,16 @@ document ask. One implementation, used by:
 
 Verdict per user:
   held (never messaged, never closed: re-checked every run), when ANY of
-    1. watchlist: the user id, the account email, or a profile on any of their open requests is in
-       policies/fraud-watchlist.json (both tiers; credit_review/watchlist.py, missing = fatal), or the
-       user id is in policies/fraud-lens-holds.json (named a1 / s1 / brief accounts, messaging only);
+    1. the user id is in policies/fraud-lens-holds.json (messaging holds: banned accounts and the
+       captain's 5; Fable ruling-watchlist-consistency-1026 section 4; missing = fatal);
     2. velocity above the band (s1 levels, 90 days, one profile, one UTC day): more than VEL_ROWS
        rows (level B'), or more than VEL_BIG big-track rows, popularity >= VEL_BIG_POP (level C);
     3. big-track claim on a single signal on SINGLE_SIGNAL_HOLD_MIN (10) or more OPEN rows
        (Fable Ruling B.1; today 85599, 126307, 134346, 281827).
+  watch (never holds): the user id, the account email, or a profile on one of their open requests is in
+    policies/fraud-watchlist.json (credit_review/watchlist.py; missing = fatal). That file is the APPROVAL
+    hold (never auto-approved); "being on it must never block communication" (ruling section 2), so a
+    watchlisted user is messaged normally and only reported as watchlisted.
   ask_only: 1 to 9 such single-signal rows and not held (Fable Ruling B.2). They are released, but
     only to the uvn-status document ask: never Copy A (status-doc-received) or Copy B0
     (status-team-review), so nothing we send implies approval.
@@ -33,6 +36,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -55,15 +59,19 @@ OPEN = "deletedat IS NULL AND status NOT IN ('approved','rejected')"
 class Verdict:
     held: list[str] = field(default_factory=list)
     single_signal_rows: int = 0
+    watch: list[str] = field(default_factory=list)   # watchlist hits: reported, never a hold
 
     @property
     def ask_only(self) -> bool:
         return not self.held and self.single_signal_rows > 0
 
 
-def load_holds(path: Path | str | None = None) -> dict[int, str]:
+def load_holds(path: Path | str | None = None, *, today: date | None = None) -> dict[int, str]:
     """{user id: reason} from policies/fraud-lens-holds.json. Missing or malformed = ValueError:
-    a broken hold list must never read as "nobody is held"."""
+    a broken hold list must never read as "nobody is held". An entry whose review_by (YYYY-MM-DD) is
+    before `today` (UTC) no longer applies: it was held pending evidence and nobody extended it
+    (Fable ruling-watchlist-consistency-1026 section 4)."""
+    today = today or datetime.now(timezone.utc).date()
     p = Path(path) if path else HOLDS_DEFAULT
     if not p.exists():
         raise ValueError(f"fraud-lens holds missing: {p}")
@@ -81,6 +89,13 @@ def load_holds(path: Path | str | None = None) -> dict[int, str]:
         users = e.get("user_ids")
         if not isinstance(users, list) or not users or not all(isinstance(u, int) and not isinstance(u, bool) for u in users):
             raise ValueError(f"fraud-lens holds {p}: entry {i} needs a non-empty list of integer user_ids")
+        if "review_by" in e:
+            try:
+                review_by = date.fromisoformat(str(e["review_by"]))
+            except ValueError as exc:
+                raise ValueError(f"fraud-lens holds {p}: entry {i} review_by is not YYYY-MM-DD") from exc
+            if review_by < today:
+                continue
         for u in users:
             out.setdefault(u, str(e["reason"]))
     return out
@@ -114,10 +129,11 @@ def single_signal(pop: Any, verification_data: Any) -> bool:
     return vd.get("shortcut_source") not in (None, "")
 
 
-def verdict(*, watch: Iterable[str] = (), max_rows_day: int = 0, max_big_day: int = 0,
+def verdict(*, named: Iterable[str] = (), watch: Iterable[str] = (), max_rows_day: int = 0, max_big_day: int = 0,
             single_signal_rows: int = 0) -> Verdict:
-    """The pure rule (tested): see the module docstring."""
-    held = list(watch)
+    """The pure rule (tested): see the module docstring. `named` (messaging holds) holds; `watch`
+    (watchlist hits) never does."""
+    held = list(named)
     if max_rows_day > VEL_ROWS:
         held.append(f"velocity above band: {max_rows_day} rows on one profile in one UTC day (> {VEL_ROWS}, s1 level B')")
     if max_big_day > VEL_BIG:
@@ -126,7 +142,7 @@ def verdict(*, watch: Iterable[str] = (), max_rows_day: int = 0, max_big_day: in
     if single_signal_rows >= SINGLE_SIGNAL_HOLD_MIN:
         held.append(f"big-track claim on a single signal: {single_signal_rows} open row(s) pop>={BIG_POP} "
                     f"(>= {SINGLE_SIGNAL_HOLD_MIN})")
-    return Verdict(held=sorted(set(held)), single_signal_rows=single_signal_rows)
+    return Verdict(held=sorted(set(held)), single_signal_rows=single_signal_rows, watch=sorted(set(watch)))
 
 
 def _ids(xs: Iterable[int]) -> str:
@@ -143,6 +159,7 @@ class Lens:
     def __call__(self, user_ids: list[int]) -> dict[int, Verdict]:
         ids = sorted({int(u) for u in user_ids})
         watch: dict[int, list[str]] = {u: [] for u in ids}
+        named: dict[int, list[str]] = {u: [] for u in ids}
         rows_day: dict[int, int] = {}
         big_day: dict[int, int] = {}
         single: dict[int, int] = {}
@@ -150,7 +167,7 @@ class Lens:
             if u in self.wl.user_ids:
                 watch[u].append("watchlist " + ("fraud" if u in self.wl.fraud_user_ids else "review") + " user")
             if u in self.holds:
-                watch[u].append(f"fraud-lens hold: {self.holds[u]}")
+                named[u].append(f"fraud-lens hold: {self.holds[u]}")
         for i in range(0, len(ids), 400):
             chunk = _ids(ids[i:i + 400])
             if self.wl.email_sha256 or self.wl.email_domains:
@@ -177,7 +194,7 @@ class Lens:
                     "GROUP BY 1, 2, 3) GROUP BY 1"):
                 rows_day[int(uid)] = int(mx or 0)
                 big_day[int(uid)] = int(mxbig or 0)
-        return {u: verdict(watch=watch[u], max_rows_day=rows_day.get(u, 0), max_big_day=big_day.get(u, 0),
+        return {u: verdict(named=named[u], watch=watch[u], max_rows_day=rows_day.get(u, 0), max_big_day=big_day.get(u, 0),
                            single_signal_rows=single.get(u, 0)) for u in ids}
 
 
@@ -231,10 +248,13 @@ def split(user_ids: list[int], lens: LensFn) -> dict[str, Any]:
     held = [{"user_id": u, "reasons": verdicts[u].held} for u in sorted(verdicts) if verdicts[u].held]
     ask = sorted(u for u, v in verdicts.items() if v.ask_only)
     clean = sorted(u for u, v in verdicts.items() if not v.held and not v.ask_only)
+    watched = sorted(u for u, v in verdicts.items() if v.watch and not v.held)
     by: dict[str, int] = {}
     for h in held:
         for r in {r.split(":")[0] for r in h["reasons"]}:
             by[r] = by.get(r, 0) + 1
     return {"held": held, "ask_only": ask, "clean": clean,
+            "watchlisted_messageable": watched,
             "counts": {"users": len(verdicts), "fraud_held": len(held), "ask_only": len(ask), "clean": len(clean),
+                       "watchlisted_messageable": len(watched),
                        "held_by_reason": by}}

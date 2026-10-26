@@ -48,11 +48,17 @@ class ThresholdTests(unittest.TestCase):
         self.assertEqual(fraud_lens.verdict(max_big_day=10).held, [])
         self.assertIn("level C", fraud_lens.verdict(max_big_day=11).held[0])
 
-    def test_velocity_or_watchlist_hold_wins_over_ask_only(self):
-        v = fraud_lens.verdict(watch=["watchlist fraud user"], single_signal_rows=2)
+    def test_named_or_velocity_hold_wins_over_ask_only(self):
+        v = fraud_lens.verdict(named=["fraud-lens hold: banned"], single_signal_rows=2)
         self.assertTrue(v.held)
         self.assertFalse(v.ask_only)
         self.assertFalse(fraud_lens.verdict(max_rows_day=900, single_signal_rows=1).ask_only)
+
+    def test_a_watchlist_hit_never_holds(self):
+        """Fable ruling-watchlist-consistency-1026 section 2: the watchlist holds approvals, never a message."""
+        v = fraud_lens.verdict(watch=["watchlist fraud user"])
+        self.assertEqual((v.held, v.watch, v.ask_only), ([], ["watchlist fraud user"], False))
+        self.assertTrue(fraud_lens.verdict(watch=["watchlist fraud user"], single_signal_rows=2).ask_only)
 
     def test_single_signal_row_predicate(self):
         self.assertTrue(fraud_lens.single_signal("60", SINGLE))
@@ -101,13 +107,14 @@ class LensTests(unittest.TestCase):
         self.assertEqual((v[2].held, v[2].ask_only, v[2].single_signal_rows), ([], True, 3))
         self.assertEqual((v[3].held, v[3].ask_only), ([], False))
 
-    def test_watchlist_user_profile_and_named_hold_are_held(self):
+    def test_watchlist_user_and_profile_are_reported_not_held_named_hold_is_held(self):
         q = lens_replica({7: [(WPROFILE, 5, "{}")]})
-        v = self.lens(q, holds={8: "a1 audit PULL account"})([5, 7, 8, 9])
-        self.assertIn("watchlist fraud user", v[5].held)
-        self.assertTrue(any("profile" in r for r in v[7].held))
-        self.assertIn("fraud-lens hold: a1 audit PULL account", v[8].held)
-        self.assertEqual(v[9].held, [])
+        v = self.lens(q, holds={8: "banned"})([5, 7, 8, 9])
+        self.assertEqual((v[5].held, v[5].watch), ([], ["watchlist fraud user"]))
+        self.assertEqual(v[7].held, [])
+        self.assertTrue(any("profile" in r for r in v[7].watch))
+        self.assertIn("fraud-lens hold: banned", v[8].held)
+        self.assertEqual((v[9].held, v[9].watch), ([], []))
 
     def test_velocity_from_the_replica(self):
         v = self.lens(lens_replica({}, velocity={1: (313, 0), 2: (5, 44)}))([1, 2, 3])
@@ -116,29 +123,62 @@ class LensTests(unittest.TestCase):
 
     def test_split(self):
         q = lens_replica({1: [("p", 70, SINGLE)] * 12, 2: [("p", 70, SINGLE)]})
-        out = fraud_lens.split([1, 2, 3], self.lens(q))
-        self.assertEqual(([h["user_id"] for h in out["held"]], out["ask_only"], out["clean"]), ([1], [2], [3]))
+        out = fraud_lens.split([1, 2, 3, 5], self.lens(q))
+        self.assertEqual(([h["user_id"] for h in out["held"]], out["ask_only"], out["clean"]), ([1], [2], [3, 5]))
+        self.assertEqual(out["watchlisted_messageable"], [5])
 
 
 class HoldsFileTests(unittest.TestCase):
-    def test_repo_holds_file_loads_and_carries_the_named_accounts(self):
-        holds = fraud_lens.load_holds()
-        for u in (350590, 256637, 219737, 305363, 184149, 335445, 53136, 340552, 58586, 162720, 301754):
-            self.assertIn(u, holds)
+    # Fable ruling-watchlist-consistency-1026 sections 1 and 4. captain.md: 10-12 19:5xZ "restore each of
+    # their accounts ... credits removed until proven ... let the ones know" (all 15 a1 PULL), 10-12 21:0xZ
+    # "do this" (keep banned 58586, 162720, 301754 only; restore credits for 33718, 128308, 199411),
+    # 10-13 01:4xZ (33718 all credits back), 10-22 20:40Z "big boy go" (1387162: hold + proof ASK).
+    CAPTAIN_RESTORED_PULL = (195823, 25291, 98515, 229176, 307585, 95146, 32731, 141609, 47513,
+                             33718, 128308, 199411)
+    A1_HOLD_8 = (1387162, 75893, 299503, 335445, 1376456, 1393437, 216092, 100509)
+    MUST_BE_MESSAGEABLE = CAPTAIN_RESTORED_PULL + A1_HOLD_8 + (340552,)
+    BANNED = (58586, 162720, 301754)
+    CAPTAINS_5 = (350590, 256637, 219737, 305363, 184149)
 
-    def test_a1_pull_accounts_the_captain_restored_on_10_12_are_not_held(self):
-        """Fable NO-GO on hydra#1355 @a849bf81: only the FRAUD-CONFIRMED a1 PULL accounts (58586, 162720,
-        301754) are held; the 12 the captain restored on 2026-10-12 (pull-rereview-fable-r1), incl.
-        Seven Dunbar 33718, are not."""
-        holds = fraud_lens.load_holds()
-        for u in (33718, 128308, 199411):
-            self.assertNotIn(u, holds)
-        pull = [e for e in json.loads(fraud_lens.HOLDS_DEFAULT.read_text())["entries"] if "PULL" in e["reason"]]
-        self.assertEqual([sorted(e["user_ids"]) for e in pull], [[58586, 162720, 301754]])
-        # end to end: the deployed lens (repo watchlist + holds) does not hold 33718 on a clean replica
-        v = fraud_lens.default_lens(lens_replica({}))([33718, 58586])
-        self.assertEqual(v[33718].held, [])
-        self.assertTrue(v[58586].held)
+    def test_holds_file_is_exactly_the_ruling(self):
+        """Every id in the file, whatever its review_by: only the banned 3, the captain's 5 and 53136."""
+        doc = json.loads(fraud_lens.HOLDS_DEFAULT.read_text())
+        ids = {u for e in doc["entries"] for u in e["user_ids"]}
+        self.assertEqual(ids, set(self.BANNED + self.CAPTAINS_5 + (53136,)))
+        self.assertEqual([e.get("review_by") for e in doc["entries"] if 53136 in e["user_ids"]], ["2026-11-02"])
+
+    def test_no_captain_restored_or_hold_account_is_in_a_messaging_hold(self):
+        doc = json.loads(fraud_lens.HOLDS_DEFAULT.read_text())
+        ids = {u for e in doc["entries"] for u in e["user_ids"]}
+        self.assertEqual(ids & set(self.MUST_BE_MESSAGEABLE), set())
+        # end to end: the deployed lens (repo watchlist + holds) holds none of them on a clean replica,
+        # although most stay on the approval watchlist: the watchlist never blocks a message.
+        v = fraud_lens.default_lens(lens_replica({}))(list(self.MUST_BE_MESSAGEABLE) + list(self.BANNED))
+        self.assertEqual([u for u in self.MUST_BE_MESSAGEABLE if v[u].held], [])
+        self.assertTrue(all(v[u].held for u in self.BANNED))
+
+    def test_watchlist_tiers_follow_the_ruling(self):
+        wl = watchlist.load()
+        for u in self.BANNED + (195823, 25291, 98515, 229176, 307585, 1387162) + self.CAPTAINS_5:
+            self.assertIn(u, wl.fraud_user_ids, u)
+        for u in (47513, 95146, 32731, 141609):
+            self.assertIn(u, wl.user_ids, u)
+            self.assertNotIn(u, wl.fraud_user_ids, u)
+        for u in (33718, 128308, 199411, 75893, 299503, 335445, 1376456, 1393437, 216092, 100509, 340552):
+            self.assertNotIn(u, wl.user_ids, u)
+
+    def test_review_by_expires_an_entry(self):
+        from datetime import date
+        d = Path(tempfile.mkdtemp(prefix="holds-"))
+        p = d / "h.json"
+        p.write_text(json.dumps({"entries": [
+            {"reason": "a", "evidence": "e", "user_ids": [1]},
+            {"reason": "b", "evidence": "e", "user_ids": [2], "review_by": "2026-11-02"}]}))
+        self.assertEqual(set(fraud_lens.load_holds(p, today=date(2026, 11, 2))), {1, 2})
+        self.assertEqual(set(fraud_lens.load_holds(p, today=date(2026, 11, 3))), {1})
+        p.write_text(json.dumps({"entries": [{"reason": "b", "evidence": "e", "user_ids": [2], "review_by": "soon"}]}))
+        with self.assertRaises(ValueError):
+            fraud_lens.load_holds(p)
 
     def test_missing_or_malformed_holds_file_is_fatal(self):
         d = Path(tempfile.mkdtemp(prefix="holds-"))
@@ -231,6 +271,13 @@ class RunnerLensTests(unittest.TestCase):
             self.assertEqual(verify_ledger.blocked_ids(db, ["r2"], "uvn-status"), {"r2"})
         finally:
             db.close()
+
+    def test_watchlisted_user_is_messaged_and_counted(self):
+        lens = lambda ids: {u: fraud_lens.Verdict(watch=["watchlist fraud user"] if u == 2 else []) for u in ids}  # noqa: E731
+        rep, gate = self.run_(lens=lens)
+        self.assertIn("2", [p["user"]["id"] for _, p in gate.calls])
+        self.assertEqual((rep.fraud_held, rep.watchlisted), (0, 1))
+        self.assertIn("on the fraud watchlist", uvn_status.render(rep, "apply", "paid"))
 
     def test_a_user_the_lens_returns_no_verdict_for_is_held(self):
         rep, gate = self.run_(lens=lambda ids: {})

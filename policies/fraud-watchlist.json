@@ -131,15 +131,15 @@
       ]
     },
     {
-      "tier": "fraud",
+      "tier": "review",
       "user_ids": [
         47513
       ],
       "profile_ids": [
         "884e942b-ea73-493f-b44d-29d25ef54b51"
       ],
-      "reason": "Fable re-review: LIKELY-FRAUD",
-      "evidence": "data/pull-rereview-fable-r1/verdicts.json",
+      "reason": "Fable re-review: LIKELY-FRAUD on the flagged remaster rows only; tier review per Fable ruling-watchlist-consistency-1026 section 3",
+      "evidence": "data/pull-rereview-fable-r1/verdicts.json; data/pr-review-fable-r3/ruling-watchlist-consistency-1026.md section 3",
       "added_at": "2026-10-23",
       "added_by": "credit-trust-llm-t01 (firstmate 154 seed)",
       "name_sha256": [
@@ -993,6 +993,71 @@
       "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
       "added_at": "2026-10-23",
       "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        350590
+      ],
+      "reason": "s1 velocity-fraud verdict: review -> likely-fraud",
+      "evidence": "data/request-velocity-fraud-fable-s1/report.md section 4; data/pr-review-fable-r3/ruling-watchlist-consistency-1026.md section 3 (captain's 5)",
+      "added_at": "2026-10-26",
+      "added_by": "intercom-extid-reconcile-r1 (Fable ruling-watchlist-consistency-1026)",
+      "email_sha256": [
+        "d21c8c289e2b8defe9d34d2861d63a64ba167d92a058593fb95ed53d6a25eed4"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        184149
+      ],
+      "reason": "s1 velocity-fraud verdict: likely-fraud",
+      "evidence": "data/request-velocity-fraud-fable-s1/report.md section 4; data/pr-review-fable-r3/ruling-watchlist-consistency-1026.md section 3 (captain's 5)",
+      "added_at": "2026-10-26",
+      "added_by": "intercom-extid-reconcile-r1 (Fable ruling-watchlist-consistency-1026)",
+      "email_sha256": [
+        "9c60b217db76c8c7f634dbe4279bbd7933e7dc95b2a4a88e61eacaf95881bee3"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        256637
+      ],
+      "reason": "s1 velocity-fraud verdict: likely-fraud (new)",
+      "evidence": "data/request-velocity-fraud-fable-s1/report.md section 4; data/pr-review-fable-r3/ruling-watchlist-consistency-1026.md section 3 (captain's 5)",
+      "added_at": "2026-10-26",
+      "added_by": "intercom-extid-reconcile-r1 (Fable ruling-watchlist-consistency-1026)",
+      "email_sha256": [
+        "65e703a372b3f1b64237dff76daa0f8e9a5c8e50d8c6529844401d0ff714c6de"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        219737
+      ],
+      "reason": "s1 velocity-fraud verdict: padding / likely-fraud",
+      "evidence": "data/request-velocity-fraud-fable-s1/report.md section 4; data/pr-review-fable-r3/ruling-watchlist-consistency-1026.md section 3 (captain's 5)",
+      "added_at": "2026-10-26",
+      "added_by": "intercom-extid-reconcile-r1 (Fable ruling-watchlist-consistency-1026)",
+      "email_sha256": [
+        "ecda828e9f8ffe9ae84df3b719c08972f75fbafca9aba3a9e4dc1ba840f1560a"
+      ]
+    },
+    {
+      "tier": "fraud",
+      "user_ids": [
+        305363
+      ],
+      "reason": "s1 velocity-fraud verdict: likely-fraud (known), linked pair with 301754",
+      "evidence": "data/request-velocity-fraud-fable-s1/report.md section 4; data/pr-review-fable-r3/ruling-watchlist-consistency-1026.md section 3 (captain's 5)",
+      "added_at": "2026-10-26",
+      "added_by": "intercom-extid-reconcile-r1 (Fable ruling-watchlist-consistency-1026)",
+      "email_sha256": [
+        "7b4203e7e1489322af1fa85bdc1f01c56fc82b19406c05534a0e424d7d995e0c"
+      ]
     }
   ]
 }

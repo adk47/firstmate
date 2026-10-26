@@ -64,9 +64,11 @@ still needs proof for keeps its ask (reported low_risk_asked).
 Fraud lens (captain 2026-10-26 ~00:40Z; Fable ruling-intercom-external-id-1026 Ruling B; fraud_lens.py):
 the run loads the fraud watchlist (credit_review/watchlist.py, policies/fraud-watchlist.json) and the
 messaging holds (policies/fraud-lens-holds.json) when it starts; either missing or malformed = nothing
-sent (halted). Every picked user then goes through the lens before their note is built, in every
-campaign: a held user (watchlist / named hold, velocity above the band, or >= 10 open big-track
-single-signal rows) is reported fraud_held and never messaged or closed; a user with 1-9 such rows is
+sent (halted). Every listed user then goes through the lens before anything can close or message them,
+in every campaign: a held user (messaging hold, velocity above the band, or >= 10 open big-track
+single-signal rows) is reported fraud_held and never messaged or closed; a watchlisted user is messaged
+normally (the watchlist holds approvals, never communication: Fable ruling-watchlist-consistency-1026)
+and counted as watchlisted; a user with 1-9 such rows is
 released ONLY to the uvn-status document ask, never a status note (Copy A / B0), reported ask_only.
 
 Each status note has one approved alternative wording: status-doc-received wording="queued"
@@ -133,6 +135,7 @@ class UvnReport(verify_notify.Report):
     recently_asked: int = 0
     fraud_held: int = 0
     ask_only: int = 0
+    watchlisted: int = 0               # on the approval watchlist; messaged normally (reported, never a hold)
     by_reason: dict[str, int] = field(default_factory=dict)
 
     def note(self, why: str) -> None:
@@ -435,6 +438,9 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
                         report.ask_only += 1
                         report.note("big_track_ask_only")
                         continue
+                    if v.watch:
+                        report.watchlisted += 1
+                        report.note("watchlisted_messageable")
                     acct = accounts.get(int(u["user_id"])) or {}
                     if not acct.get("email"):
                         report.no_email += 1
@@ -633,6 +639,7 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
                       "single-signal rows; never messaged, not closed)", report.fraud_held),
                      ("held from this status note: big-track single-signal rows, so the uvn-status document "
                       "ask only (not closed)", report.ask_only),
+                     ("on the fraud watchlist (approvals held; considered for a message as usual)", report.watchlisted),
                      ("no request still pending (not closed)", report.not_pending),
                      ("no account email", report.no_email),
                      ("held: every pending request has a blank or unshowable title, artist or role "
