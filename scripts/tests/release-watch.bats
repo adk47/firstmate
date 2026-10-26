@@ -724,7 +724,7 @@ HOOK
   run "$SCRIPT" --repo=auth --no-highlights
   [ "$status" -ne 0 ]
   [[ "$output" == *"removed the local-only tag for the next retry"* ]]
-  local_tag="v$(date -u +%Y.%-m.%-d)"
+  local_tag="$(sed -n 's/.*Tagging \(v[0-9.]*\) (annotated).*/\1/p' <<<"$output" | head -1)"; [ -n "$local_tag" ]
   ! git -C "$HYDRA_RELEASE_STATE_DIR/repos/auth" rev-parse -q --verify "refs/tags/$local_tag" >/dev/null 2>&1
   ! git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$local_tag" >/dev/null 2>&1
   [ ! -s "$STUB_RELEASE_CREATE" ]
@@ -758,7 +758,7 @@ STUB
   run "$SCRIPT" --repo=auth --no-highlights
   [ "$status" -eq 0 ]
   [[ "$output" == *"origin has the matching tag"* ]]
-  tag="v$(date -u +%Y.%-m.%-d)"
+  tag="$(sed -n 's/.*Tagging \(v[0-9.]*\) (annotated).*/\1/p' <<<"$output" | head -1)"; [ -n "$tag" ]
   git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$tag" >/dev/null
   [ -s "$STUB_RELEASE_CREATE" ]
   grep -q "last_marker=$MID_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/auth"
@@ -788,7 +788,7 @@ STUB
   run "$SCRIPT" --repo=auth --no-highlights
   [ "$status" -ne 0 ]
   [[ "$output" == *"origin could not be checked"* ]]
-  tag="v$(date -u +%Y.%-m.%-d)"
+  tag="$(sed -n 's/.*Tagging \(v[0-9.]*\) (annotated).*/\1/p' <<<"$output" | head -1)"; [ -n "$tag" ]
   git -C "$HYDRA_RELEASE_STATE_DIR/repos/auth" rev-parse -q --verify "refs/tags/$tag" >/dev/null
   ! git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1
   [ ! -s "$STUB_RELEASE_CREATE" ]
