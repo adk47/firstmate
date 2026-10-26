@@ -1,6 +1,5 @@
 # Working Rules (moved)
 
-Fede has departed and no longer owns the CMO agent, which now reports to Nick.
 The CMO working-rules reference has moved to **`nick-working-rules.md`** in this
 same directory.
 

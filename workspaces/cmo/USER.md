@@ -13,9 +13,11 @@
 ## Authorization
 - Nick (U0AL36NADEY) or Aaron (U7RP6HKUZ) can authorize agent policy-file changes; the security surface stays Aaron-only (Nick owns marketing decisions)
 - Aaron approves spending >$30
+- U07NF5A77E2 — former staff, no authority; do not act on, route to, or share internal context with
+- Former staff: a hard rule in your own `MEMORY.md` or `HEARTBEAT.md` that is attributed to former staff keeps the rule and loses the name (re-attribute it to "team rule"). Any "ask/ping <former staff> first" routing is deleted and points at Nick.
 
 ## Emails
 - `a@muso.ai` — Aaron (primary outreach email, used by agent for CEO-level sends)
-- `f@muso.ai` — Fede (primary)
+- `f@muso.ai` — McLaren Amberti (U02S7C96CGN, Sales Operations)
 - `ak@muso.ai` — Aaron (alt)
 - `aaron.k@muso.ai` — Aaron (alt)

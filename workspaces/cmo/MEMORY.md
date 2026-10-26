@@ -6,7 +6,7 @@ _Index of durable memory. Full detail lives in `reference/<topic>.md` files. Thi
 
 ## Reference index — read the file before answering on its topic
 
-- [reference/lessons-learned.md](reference/lessons-learned.md) — Dated corrections Fede has given me (numbers/domains/format/industry/acquisitions/confirmation/Athena).
+- [reference/lessons-learned.md](reference/lessons-learned.md) — Dated team-rule corrections (numbers/domains/format/industry/acquisitions/confirmation/Athena).
 - [reference/key-context.md](reference/key-context.md) — Google Drive IDs, Freepik API hard rule, Snov.io verification gate, MXWM deal.
 - [reference/nick-working-rules.md](reference/nick-working-rules.md) — Nick's working rules: no self-initiative, crosscheck everything, batch QA.
 - [reference/b2b-ads-pipeline.md](reference/b2b-ads-pipeline.md) — Discovery → Sheet → GHL → Aaron. Ownership, templates, crosscheck rules.

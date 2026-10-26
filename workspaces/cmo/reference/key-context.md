@@ -6,7 +6,7 @@ Operational reference — things I use during normal sessions that are too detai
 
 - HYDRA shared folder: `1fG_pQ4hBJfHhoHXNUJTi_pmwJIxLFOg_` — https://drive.google.com/drive/folders/1fG_pQ4hBJfHhoHXNUJTi_pmwJIxLFOg_
 - CMO subfolder: `1GFqT8LwewQedb73thkvOmUkCNVwNPT5w` — https://drive.google.com/drive/folders/1GFqT8LwewQedb73thkvOmUkCNVwNPT5w
-- Drive access is via *a@muso.ai* OAuth token (f@muso.ai can't see these folders)
+- Drive access is via *a@muso.ai* OAuth token (McLaren's f@muso.ai can't see these folders)
 - HYDRA folder name: "Media Generation Temporary"
 - CMO folder name: "CMO" — default drop location for all generated assets
 
@@ -17,7 +17,7 @@ Operational reference — things I use during normal sessions that are too detai
 - Skills: `muso-freepik` (raw API ref), `mediagen-engine` (full production skill)
 - Research: `research/ai-media-generation-2026.md`
 - Color weight format: `{"color": "#hex", "weight": 0.0-1.0}` (API rejects integer weights)
-- ⚠️ *HARD RULE (Fede directive 2026-04-10):* EVERY image/video/audio generation request from CMO MUST go through Freepik API via mediagen-engine skill. NEVER use the built-in `image_generate` tool. No exceptions.
+- ⚠️ *HARD RULE (team rule 2026-04-10):* EVERY image/video/audio generation request from CMO MUST go through Freepik API via mediagen-engine skill. NEVER use the built-in `image_generate` tool. No exceptions.
 
 ## Snov.io Email Verification Gate (2026-04-11)
 
