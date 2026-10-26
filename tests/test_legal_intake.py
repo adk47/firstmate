@@ -99,15 +99,15 @@ class Harness(unittest.TestCase):
         li.post_page = fake_post
         self.addCleanup(lambda: [setattr(li, k, v) for k, v in self.saved.items()])
 
-    def run_intake(self, threads):
+    def run_intake(self, threads, args=("--page",), code=0):
         li.svc = lambda subject, scope: FakeGmail(threads)
-        argv, sys.argv = sys.argv, ["legal-intake.py", "--page"]
+        argv, sys.argv = sys.argv, ["legal-intake.py", *args]
         try:
             with self.assertRaises(SystemExit) as cm:
                 li.main()
         finally:
             sys.argv = argv
-        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(cm.exception.code, code)
         return json.load(open(li.LEDGER))
 
 
@@ -196,21 +196,58 @@ class Collapse(Harness):
             self.assertFalse(str(led[k]["paged"]).startswith("dup-of"))
         self.assertTrue(all(p["thread_ts"] is None for p in self.posts))
 
-    def test_failed_threaded_note_still_marks_dup_and_warns(self):
-        calls = []
-
+    def _post_failing_threads(self, top_level_ok=True):
+        """Slack fake: every threaded post raises; top-level posts succeed only if top_level_ok."""
         def post(token, text_, thread_ts=None):
-            calls.append(thread_ts)
-            if thread_ts:
+            self.posts.append({"text": text_, "thread_ts": thread_ts})
+            if thread_ts or not top_level_ok:
                 raise RuntimeError("slack down")
-            return "1761000001.000100"
+            return f"1761000{len(self.posts):03d}.000100"
         li.post_page = post
+
+    def test_failed_threaded_note_falls_back_to_a_full_page(self):
+        """MUS-20075 / hydra#1361 bot round 3: a failed note must never be ledgered as paged
+        (the note is the only actionable signal for a possibly-different rights holder), so the
+        thread gets a full top-level page instead of going permanently silent."""
+        self._post_failing_threads()
         import contextlib, io
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             led = self.run_intake(self.two_threads())
-        self.assertEqual(led["legal@muso.ai:b2"]["paged"], "dup-of:1761000001.000100")
-        self.assertIn("WARN:", out.getvalue())
+        paged = led["legal@muso.ai:b2"]["paged"]
+        self.assertFalse(str(paged).startswith("dup-of"))
+        self.assertRegex(paged, r"^\d+\.\d+$")
+        top = [p for p in self.posts if p["thread_ts"] is None]
+        self.assertEqual(len(top), 2)  # first page + the fallback page for b2
+        self.assertIn("demandage@gmail.com", top[1]["text"])
+        self.assertIn("<@U038BM16T7W>", top[1]["text"])
+        self.assertIn("PAGE NOTE FAILED", out.getvalue())
+
+    def test_all_posts_failing_leaves_paged_unset_and_retries_next_run(self):
+        """Nothing confirmed => exit 2, no `paged`; the next healthy run posts the note."""
+        self.run_intake({"a1": thread("David E Sarabia <david@demandage.com>")})
+        first_ts = json.load(open(li.LEDGER))["legal@muso.ai:a1"]["paged"]
+        self._post_failing_threads(top_level_ok=False)
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            led = self.run_intake(self.two_threads(), code=2)
+        self.assertNotIn("paged", led["legal@muso.ai:b2"])
+        li.post_page = lambda token, text_, thread_ts=None: (
+            self.posts.append({"text": text_, "thread_ts": thread_ts}) or "1761999999.000100")
+        self.posts.clear()
+        led = self.run_intake(self.two_threads())
+        self.assertEqual(led["legal@muso.ai:b2"]["paged"], "dup-of:" + first_ts)
+        self.assertEqual([p["thread_ts"] for p in self.posts], [first_ts])
+
+    def test_run_without_page_flag_does_not_poison_the_ledger(self):
+        """The dup-of marker may only be written from a confirmed note: a run with no --page
+        used to write it anyway, so every later paging run skipped the note."""
+        self.run_intake({"a1": thread("David E Sarabia <david@demandage.com>")})
+        first_ts = json.load(open(li.LEDGER))["legal@muso.ai:a1"]["paged"]
+        led = self.run_intake(self.two_threads(), args=())
+        self.assertNotIn("paged", led["legal@muso.ai:b2"])
+        led = self.run_intake(self.two_threads())
+        self.assertEqual(led["legal@muso.ai:b2"]["paged"], "dup-of:" + first_ts)
 
     def test_ledger_row_carries_no_subject_text(self):
         led = self.run_intake(self.two_threads())

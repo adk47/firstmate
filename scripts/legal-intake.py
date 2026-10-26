@@ -249,7 +249,7 @@ def main():
                                  and abs(int(r.get("first_msg") or 0) - fm) < 3 * 86400000
                                  and r.get("paged") and not str(r.get("paged")).startswith("dup-of:")), None)
                 if nsib is not None:
-                    row["paged"] = "dup-of:" + str(nsib["paged"])
+                    note_ts = ""
                     if do_page and stok:
                         mention = " ".join(f"<@{m}>" for m in SLACK_MENTIONS)
                         earlier = (nsib.get("req_key") or "|").rsplit("|", 1)[0] or "earlier sender"
@@ -261,10 +261,19 @@ def main():
                                 f"New: {esc(f'{name2[:60]} <{sender_addr}>' if name2 else sender_addr)} (thread `{tid}`)\n"
                                 f"Not paged again; nothing was auto-closed.")
                         try:
-                            if not post_page(stok, note, thread_ts=nsib["paged"]):
-                                raise RuntimeError("slack refused")
+                            note_ts = post_page(stok, note, thread_ts=nsib["paged"])
                         except Exception:
-                            print(f"WARN: threaded same-notice note failed {alias.split('@')[0]} {tid}; notice already paged")
+                            note_ts = ""
+                    if note_ts:
+                        row["paged"] = "dup-of:" + str(nsib["paged"])
+                    elif do_page and stok:
+                        # The note is the only actionable signal for a possibly-different rights holder
+                        # (MUS-20040), so a failed note is never ledgered as paged (MUS-20075): leaving
+                        # `paged` unset makes the page block below post a full top-level page for this
+                        # thread (which counts its own failure: the run exits 2 and the 15-min cron retries).
+                        # A post that landed but returned no ts can therefore page twice; for a legal
+                        # notice a duplicate is the right trade against silence.
+                        print(f"PAGE NOTE FAILED {alias.split('@')[0]} {tid}; falling back to a full page")
                 if do_ack and not row.get("acked") and cls in ACK and ack_start and int(msgs[0].get("internalDate", 0)) > ack_start:
                     frm = h0.get("from", "")
                     to = (re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+", frm) or [""])[0]
