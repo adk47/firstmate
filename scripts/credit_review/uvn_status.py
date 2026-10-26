@@ -91,6 +91,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -127,10 +128,22 @@ PENDING_STATUSES = {
 RELEASED_EXTRA_STATUSES = {"uvn-status": ("unverified",)}
 # Reviewed baseline: deploy overwrites - 2026-10-26 (verify-ask-wiring-h2, firstmate inbox 015): node-8's
 # paid-wave-runner-p2 hot-patch [key=p2-caps] (DAILY_MAX / STATUS_DAILY_MAX 20000, marked "reverts on next
-# deploy") is superseded; the email-only cap with in-app overflow is #1370 (--inapp-overflow).
-STATUS_DAILY_MAX = 1000  # sanity bound for the no-ask status notes
+# deploy") is superseded by the reviewed env caps below (CREDIT_STATUS_DAILY_MAX / CREDIT_UVN_DAILY_MAX).
+CAP_LIMIT = 100000
+
+
+def _cap_env(name: str, default: int) -> int:
+    """A daily cap from the environment (firstmate 014, [key=p2-caps]: the captain's 2026-10-26 "move fast" order
+    raised these for one night by a node-8 hot patch; this makes it a reviewed setting instead). A whole number
+    1..CAP_LIMIT overrides the default; anything else (unset, blank, malformed, zero, negative, too large) keeps the
+    default, so a typo can never remove the bound."""
+    raw = os.environ.get(name, "").strip()
+    return int(raw) if re.fullmatch(r"[0-9]{1,6}", raw) and 0 < int(raw) <= CAP_LIMIT else default
+
+
+STATUS_DAILY_MAX = _cap_env("CREDIT_STATUS_DAILY_MAX", 1000)  # sanity bound for the no-ask status notes
 LIST_MAX_AGE_H = 30
-DAILY_MAX = 400
+DAILY_MAX = _cap_env("CREDIT_UVN_DAILY_MAX", 400)  # the ask
 MAX_CALLS_PER_USER = 5
 Query = verify_notify.Query
 trino = verify_notify.trino
