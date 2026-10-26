@@ -318,8 +318,10 @@ class SameSenderDistinctClaims(Harness):
         del row["notice_key"]
         json.dump(first, open(li.LEDGER, "w"))
         self.acks.clear(); self.posts.clear()
-        led = self.go({"a1": thread("claims@labela.com"),
-                       "b2": thread("claims@labela.com", subject="Re: DMCA Notice", internal=FIRST_MSG + 36000)})
+        # List only b2: main() re-stamps notice_key on every row it visits, so a1 must stay
+        # unlisted (outside the run window, inside the 3-day dedupe window) to remain legacy.
+        led = self.go({"b2": thread("claims@labela.com", subject="Re: DMCA Notice", internal=FIRST_MSG + 36000)})
+        self.assertNotIn("notice_key", led["legal@muso.ai:a1"])
         self.assertEqual(self.acks, [])
         self.assertEqual(self.posts, [])
         self.assertTrue(led["legal@muso.ai:b2"]["ack_ref"].startswith("dup-of:"))
