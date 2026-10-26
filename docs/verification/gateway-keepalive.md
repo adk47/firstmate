@@ -93,3 +93,48 @@ The 48-occurrence row is the reason the deny list is checked before the transien
 
 The rendered text uses an em dash (`—`), not a hyphen.
 `tests/fm-gateway-keepalive.test.sh` quotes these strings verbatim, so a classifier rewritten against a hyphen fails there instead of silently never matching in production.
+
+## Pi: the turn end a gateway failure settles with, and what the /model picker raises
+
+Verified 2026-10-26 on Pi 1.4.0, macOS, against the per-task extension exactly as `bin/fm-spawn.sh` writes it (rendered from its own heredoc into an isolated `state/`).
+Refresh this section after a Pi upgrade that changes `message_end`, `agent_settled`, `ui_prompt_start`, or the model selector's rows; `FM_PI_MODEL_PICKER_LIVE_E2E=1 tests/fm-pi-model-picker-live-e2e.test.sh` is the command that refreshes the picker half.
+
+### An upstream 503 settles as `stop-failure` with Pi's own error text
+
+`pi -p --no-session -e <ext> "say hi"` went to the pooled gateway (Pi resolves the provider's base URL from its own model catalogue, so an `ANTHROPIC_BASE_URL` stub in the environment was not consulted), which answered a genuine 503.
+Pi retried on its own, then ended the run with an assistant `stopReason` of `error` and exited 1.
+The record afterwards:
+
+```
+v1 gen=g1793028859.96999.7909 seq=6 state=idle source=pi-ext event=stop-failure ts=1793028895
+```
+
+and the detail sidecar, bounded by the writer to 240 characters:
+
+```
+503 {"type":"error","error":{"type":"pool_exhausted","message":"All accounts are temporarily unavailable","next_available_at":null,"accounts":[{"name":"aaron-muso","reason":"requires_reauth","available_at":null},{"name":"nina-muso","reason"
+```
+
+`fm_gateway_stalled_now` on that record with an empty pane opened a stall record (`v1 first=1793028927 attempts=0 last=1793028927 notified=0`).
+Note the SDK message begins with the status and carries no `Error:` prefix; Pi adds that prefix only when it renders the message, which is why the classifier matches a recorded detail as `Error: <detail>`.
+
+### The built-in /model picker raises no extension dialog event
+
+Driven on a pseudo-terminal: `/model` then Enter, the picker left open, then Escape.
+While the picker was open the record was unchanged (`state=busy source=fm-spawn event=launch-brief`, the spawn seed): `ui_prompt_start` wraps only `ctx.ui.select|confirm|input|editor|custom` calls made by extensions (`core/extensions/runner.js` `wrapUIPromptContext`), and the model selector is an interactive-mode overlay (`showModelSelector`) outside that wrapper.
+The screen at that moment rendered all three rows the reader is written against, each on its own line:
+
+```
+Only showing models from configured providers. Use /login to add providers.
+  Model Name: TOKEN POOL · Claude Opus 5.5
+  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel
+```
+
+The hint row's keys are whatever Pi has bound (`keyDisplayText`), so the reader matches its connectives, not `Enter`, `Ctrl+S`, or `Escape`.
+`tests/fm-pi-model-picker-live-e2e.test.sh` output on this run:
+
+```
+ok - Pi 1.4.0: the built-in /model picker raises no hook dialog event and is recognised from its rendered rows
+```
+
+A `/model <spec>` whose spec matches no model opens this same picker pre-filtered with the spec (`showModelSelector(searchTerm)`), which is the shape a worker sent an in-place model switch for an unknown model is left in.
