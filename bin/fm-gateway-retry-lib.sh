@@ -301,10 +301,15 @@ fm_gateway_turn_ended_on_api_error() {  # <state-dir> <scope>
 # permanent failure in the record is never rescued by an older transient
 # phrase that happens to sit on the screen. Only a record with no detail
 # (Claude's StopFailure hook carries none) is answered from the pane tail.
+# The detail is matched exactly as Pi renders it - `Error: <message>` - so the
+# one set of rendered shapes above serves both the screen and the record;
+# verified live on Pi 1.4.0 against the pooled gateway, whose SDK message
+# begins `503 {"type":"error",...}` with no prefix of its own
+# (docs/verification/gateway-keepalive.md).
 fm_gateway_failure_is_transient() {  # <state-dir> <scope> <pane-text>
   local detail
   if detail=$(fm_busy_record_detail "$1" "$2"); then
-    fm_gateway_text_is_transient "$detail"
+    fm_gateway_text_is_transient "Error: $detail"
     return $?
   fi
   fm_gateway_text_is_transient "${3-}"

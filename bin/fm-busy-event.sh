@@ -247,12 +247,12 @@ if [ -f "$REC" ]; then
       ;;
   esac
 fi
-write_detail && write_record "$GEN" $((OLD_SEQ + 1)) || {
+if ! { write_detail && write_record "$GEN" $((OLD_SEQ + 1)); }; then
   lock_release
   umask "$old_umask"
   echo "error: record write failed for $ID" >&2
   exit 1
-}
+fi
 lock_release
 umask "$old_umask"
 exit 0
