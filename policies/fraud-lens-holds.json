@@ -4,8 +4,9 @@
   "entries": [
     {"reason": "brief watchlist (captain's 5)", "evidence": "paid-wave-runner-p1 report section 3; request-velocity-fraud-fable-s1 report section 4",
      "user_ids": [350590, 256637, 219737, 305363, 184149], "added_at": "2026-10-26", "added_by": "intercom-extid-reconcile-r1"},
-    {"reason": "a1 audit PULL account", "evidence": "credit-authenticity-audit-a1 report section 7",
-     "user_ids": [195823, 58586, 25291, 95146, 301754, 98515, 33718, 229176, 32731, 307585, 141609, 199411, 47513, 162720, 128308],
+    {"reason": "a1 audit PULL account, FRAUD-CONFIRMED on re-review", "evidence": "credit-authenticity-audit-a1 report section 7; pull-rereview-fable-r1 report (2026-10-12): of the 15 PULL accounts only 58586, 162720 and 301754 are FRAUD-CONFIRMED",
+     "note": "The captain restored the other 12 a1 PULL accounts on 2026-10-12 after pull-rereview-fable-r1 (incl. Seven Dunbar 33718, a documented engineer). They are NOT held here (Fable NO-GO on hydra#1355 @a849bf81).",
+     "user_ids": [58586, 162720, 301754],
      "added_at": "2026-10-26", "added_by": "intercom-extid-reconcile-r1"},
     {"reason": "a1 audit HOLD account", "evidence": "credit-authenticity-audit-a1 report section 7",
      "user_ids": [1387162, 75893, 299503, 335445, 1376456, 1393437, 216092, 100509], "added_at": "2026-10-26", "added_by": "intercom-extid-reconcile-r1"},

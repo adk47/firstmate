@@ -123,8 +123,22 @@ class LensTests(unittest.TestCase):
 class HoldsFileTests(unittest.TestCase):
     def test_repo_holds_file_loads_and_carries_the_named_accounts(self):
         holds = fraud_lens.load_holds()
-        for u in (350590, 256637, 219737, 305363, 184149, 335445, 53136, 340552, 128308):
+        for u in (350590, 256637, 219737, 305363, 184149, 335445, 53136, 340552, 58586, 162720, 301754):
             self.assertIn(u, holds)
+
+    def test_a1_pull_accounts_the_captain_restored_on_10_12_are_not_held(self):
+        """Fable NO-GO on hydra#1355 @a849bf81: only the FRAUD-CONFIRMED a1 PULL accounts (58586, 162720,
+        301754) are held; the 12 the captain restored on 2026-10-12 (pull-rereview-fable-r1), incl.
+        Seven Dunbar 33718, are not."""
+        holds = fraud_lens.load_holds()
+        for u in (33718, 128308, 199411):
+            self.assertNotIn(u, holds)
+        pull = [e for e in json.loads(fraud_lens.HOLDS_DEFAULT.read_text())["entries"] if "PULL" in e["reason"]]
+        self.assertEqual([sorted(e["user_ids"]) for e in pull], [[58586, 162720, 301754]])
+        # end to end: the deployed lens (repo watchlist + holds) does not hold 33718 on a clean replica
+        v = fraud_lens.default_lens(lens_replica({}))([33718, 58586])
+        self.assertEqual(v[33718].held, [])
+        self.assertTrue(v[58586].held)
 
     def test_missing_or_malformed_holds_file_is_fatal(self):
         d = Path(tempfile.mkdtemp(prefix="holds-"))
