@@ -709,6 +709,110 @@ _make_auth_daily() {
   grep -qF "v$(date -u +%Y.%-m.%-d)" "$STUB_RELEASE_CREATE"
 }
 
+@test "a rejected tag push leaves no local-only tag and the next tick recovers" {
+  _set_runs "$MID_SHA" "2026-08-27T11:55:00Z"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-27T11:00:00Z" "v2026.8.26"
+  export RELEASE_PUSH_RETRY_DELAYS="0 0"
+  cat > "$ORIGIN/hooks/pre-receive" <<'HOOK'
+#!/bin/sh
+echo 'remote: simulated tag rejection' >&2
+exit 1
+HOOK
+  chmod +x "$ORIGIN/hooks/pre-receive"
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"removed the local-only tag for the next retry"* ]]
+  local_tag="v$(date -u +%Y.%-m.%-d)"
+  ! git -C "$HYDRA_RELEASE_STATE_DIR/repos/auth" rev-parse -q --verify "refs/tags/$local_tag" >/dev/null 2>&1
+  ! git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$local_tag" >/dev/null 2>&1
+  [ ! -s "$STUB_RELEASE_CREATE" ]
+  grep -q "last_marker=$BASE_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/auth"
+
+  rm "$ORIGIN/hooks/pre-receive"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [ -s "$STUB_RELEASE_CREATE" ]
+  git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$local_tag" >/dev/null
+  grep -q "last_marker=$MID_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/auth"
+  [ -f "$TEST_TMPDIR/posted.json" ]
+}
+
+@test "a lost push acknowledgement does not delete a tag that reached origin" {
+  _set_runs "$MID_SHA" "2026-08-27T11:55:00Z"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-27T11:00:00Z" "v2026.8.26"
+  export REAL_GIT="$(command -v git)"
+  cat > "$STUBBIN/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == push && "$2" == origin && "$3" == v* && ! -f "$TEST_TMPDIR/push-ack-lost" ]]; then
+  "$REAL_GIT" "$@" || exit $?
+  touch "$TEST_TMPDIR/push-ack-lost"
+  exit 1
+fi
+exec "$REAL_GIT" "$@"
+STUB
+  chmod +x "$STUBBIN/git"
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"origin has the matching tag"* ]]
+  tag="v$(date -u +%Y.%-m.%-d)"
+  git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$tag" >/dev/null
+  [ -s "$STUB_RELEASE_CREATE" ]
+  grep -q "last_marker=$MID_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/auth"
+}
+
+@test "an indeterminate remote check recovers a local-only tag on the next tick" {
+  _set_runs "$MID_SHA" "2026-08-27T11:55:00Z"
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/announced"
+  _seed_state "$BASE_SHA" "2026-08-27T11:00:00Z" "v2026.8.26"
+  export RELEASE_PUSH_RETRY_DELAYS="0 0"
+  cat > "$ORIGIN/hooks/pre-receive" <<'HOOK'
+#!/bin/sh
+exit 1
+HOOK
+  chmod +x "$ORIGIN/hooks/pre-receive"
+  export REAL_GIT="$(command -v git)"
+  touch "$TEST_TMPDIR/remote-read-down"
+  cat > "$STUBBIN/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ " $* " == *" ls-remote --refs "* && -f "$TEST_TMPDIR/remote-read-down" ]]; then
+  exit 128
+fi
+exec "$REAL_GIT" "$@"
+STUB
+  chmod +x "$STUBBIN/git"
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"origin could not be checked"* ]]
+  tag="v$(date -u +%Y.%-m.%-d)"
+  git -C "$HYDRA_RELEASE_STATE_DIR/repos/auth" rev-parse -q --verify "refs/tags/$tag" >/dev/null
+  ! git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1
+  [ ! -s "$STUB_RELEASE_CREATE" ]
+
+  rm "$ORIGIN/hooks/pre-receive"
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"origin could not be checked"* ]]
+  git -C "$HYDRA_RELEASE_STATE_DIR/repos/auth" rev-parse -q --verify "refs/tags/$tag" >/dev/null
+
+  rm "$TEST_TMPDIR/remote-read-down"
+  run "$SCRIPT" --repo=auth --no-highlights --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"a live tick would remove it"* ]]
+  git -C "$HYDRA_RELEASE_STATE_DIR/repos/auth" rev-parse -q --verify "refs/tags/$tag" >/dev/null
+
+  run "$SCRIPT" --repo=auth --no-highlights
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"local-only tag"* ]]
+  [ -s "$STUB_RELEASE_CREATE" ]
+  git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$tag" >/dev/null
+  grep -q "last_marker=$MID_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/auth"
+}
+
 @test "a dispatch whose rollout is still in flight is not announced yet" {
   # The dispatch succeeded but H-DevOps has not recorded a rollout yet.
   # Must read as nothing to do, and must NOT be retired -- the grace window
