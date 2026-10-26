@@ -46,6 +46,14 @@ set -euo pipefail
 #   uvn-status / withdrawal-confirm: approved under the captain's 2026-10-19 standing order
 #       (UVN_STATUS_COPY_APPROVED, WITHDRAWAL_COPY_APPROVED below; in-thread delivery below).
 #       docs/credit-verification/verify-request-notes.md owns the details.
+#   gap-ask: the stage-2 gap ask (Fable 2026-10-26 13:23Z, GAP_ASK_COPY_APPROVED below): a user
+#       whose document on file does not cover a held credit (stage-2 verdict need_more) is told,
+#       in Fable's exact paragraph, what the document shows and which track and role it does not
+#       cover. No deadline, no removal words, no follow-ups. The gate reads the verdict itself
+#       (credit_review/stage2_verdicts.py over the proof store): every credit's latest verdict
+#       must be need_more FOR THIS ACCOUNT, and <doc summary> comes from that row, never from the
+#       caller. Once per credit; one message per user per day; none within 7 days of another note
+#       except a status-doc-received note (the gap ask is the follow-up that note promised).
 # --dry-run renders every version, so the copy can be reviewed before it ships.
 #
 # It is a copy of the deterministic gate in intercom-ops-write.sh, for an admin-initiated
@@ -82,9 +90,9 @@ set -euo pipefail
 #
 # Usage:
 #   intercom-verify-request.sh send --credits-file FILE --approved-by <SlackUID> \
-#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup] [--kind initial|reminder-14|reminder-25|after-rejection \
-#        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued (status-doc-received) | no-ask (status-team-review)] \
-#       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, email-changed)] [--dry-run|--validate|--doc-check|--check-recipient]
+#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|gap-ask] [--kind initial|reminder-14|reminder-25|after-rejection \
+#        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued (status-doc-received) | no-ask|count (status-team-review)] \
+#       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, email-changed, gap-ask)] [--dry-run|--validate|--doc-check|--check-recipient]
 #   intercom-verify-request.sh tag-proof --message-id <id> [--dry-run]
 #
 # In-thread delivery (firstmate 063): uvn-status and withdrawal-confirm reply IN the user's
@@ -172,6 +180,9 @@ readonly STATUS_NOTES_COPY_APPROVED=1
 #   EMAIL_CHANGE_COPY_APPROVED   email-changed / email-changed-dup (firstmate 073): a threaded reply
 #       into the requester's own conversation, once per ticket. APPROVED under the same order.
 readonly EMAIL_CHANGE_COPY_APPROVED=1
+#   GAP_ASK_COPY_APPROVED        gap-ask: Fable's paragraph (last sentence per decision B, inbox 005; APPROVAL_REF_GAP_ASK). GO'd by
+#       Fable 2026-10-26 13:23Z under the captain's 12:40Z order ("Fable decides, do not ask him").
+readonly GAP_ASK_COPY_APPROVED=1
 
 # PINNED. Caroline (skills-all/muso-intercom/SKILL.md, Reply Identity), same literal and
 # same variable name as intercom-ops-write.sh so check-intercom-reply-identity.sh keys on it.
@@ -181,6 +192,9 @@ readonly API_VERSION="2.11"
 readonly PROD_LOG_DIR="/opt/hydra/workspaces/operations/api-logs"
 readonly PROD_LEDGER="/var/lib/hydra/credit-review/ledger.sqlite3"
 readonly PROD_LEDGER_HELPER="/opt/hydra/scripts/credit_review/verify_ledger.py"
+# gap-ask reads the stage-2 verdicts (read-only) from the proof store through this helper.
+readonly PROD_STAGE2_HELPER="/opt/hydra/scripts/credit_review/stage2_verdicts.py"
+readonly PROD_PROOF_DB="/var/lib/hydra-credit-verify/proof.sqlite"
 readonly PROOF_TAG="credit-proof"
 # The ONLY approver of these campaigns, and where he approved each.
 readonly CAPTAIN_UID="U7RP6HKUZ"
@@ -193,8 +207,10 @@ readonly APPROVAL_REF_UVN="$APPROVAL_REF_STANDING_ORDER; copy approved by firstm
 readonly APPROVAL_REF_WITHDRAWAL="$APPROVAL_REF_STANDING_ORDER; withdrawal-confirm copy approved by firstmate under it 2026-10-19 21:21Z (inbox 061, confirmed in 064), sent only for a request the requester withdrew (metadata.withdrawal.by = requester)"
 readonly APPROVAL_REF_STATUS="$APPROVAL_REF_STANDING_ORDER; status notes approved by firstmate under it 2026-10-20 (inbox 070: team-review verbatim; 071: doc-received as credit-trust-llm-t01 drafted it). Not asks."
 readonly APPROVAL_REF_STATUS_QUEUED="$APPROVAL_REF_STATUS The 'in our review queue' doc-received wording (--copy queued) approved by firstmate 092."
+readonly APPROVAL_REF_STATUS_COUNT="$APPROVAL_REF_STANDING_ORDER; count-only status-team-review wording (--copy count) approved by firstmate 2026-10-26 16:58Z (verify-ask-wiring-h2 inbox 005, Fable decides under the captain's 12:40Z order; captain 16:05Z: \"everyone should be communicated or credits and profiles awarded\"), for a user whose requests cannot be listed (unshowable fields or more than 1,000). Not an ask."
 readonly APPROVAL_REF_STATUS_NOASK="$APPROVAL_REF_STATUS The no-ask team-review wording B0 (--copy no-ask: Copy B without its optional proof sentence) approved by firstmate 2026-10-21 (credit-trust-llm-t01 key pending-status-1021, relayed in inbox 106)."
 readonly APPROVAL_REF_EMAIL_CHANGE="$APPROVAL_REF_STANDING_ORDER; email-changed templates approved by firstmate under it 2026-10-20 00:55Z (inbox 073): a threaded reply into the requester's own conversation, once per ticket, no customer-typed content."
+readonly APPROVAL_REF_GAP_ASK="captain U7RP6HKUZ 2026-10-26 12:40Z: Fable decides, do not ask him; ~13:00Z: \"credit and profile verifications nothing is waiting on us right? you are moving these forward and ball should be in users court if required otherwise they are approved? if not get on this\"; Fable ruling 2026-10-26 13:23Z (captain-asks-fable-r4 report section H, GO 2): 460 need_more -> dated gap ask, one per user per day, Fable-approved paragraph, no deadline, no removal words; last sentence swapped to \"Your request stays open while we look.\" (the asked rows are pending, not live) by Fable decision (B) relayed by firstmate 2026-10-26 16:58Z (verify-ask-wiring-h2 inbox 005)"
 readonly APPROVAL_REF_REMOVAL="firstmate 2026-10-16 15:14Z, captain-driven: owners of credits WE removed must be told which credit and role, why, and how to dispute by replying with a document (support measured 35 owners never told). Fraud removals stay silent by captain order (firstmate 2026-10-16 15:48Z)."
 readonly APPROVAL_REF_PAST="captain U7RP6HKUZ 2026-10-15 23:35Z: \"im referring to before when nick made changes and did a trust verify flow and now we have a lotnof credits to verify with documents and give people 30 days to send something in for the ones missing documents\"; 2026-10-16 00:35Z: \"how many credits were approved without documentstion i dont want to lose users unless its obvious fraud feom tbe past\""
 # Caroline's outbound sanitizer word list, IDENTICAL to intercom-ops-write.sh's
@@ -212,12 +228,15 @@ refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 # Deployed copies reject EVERY override before anything else can run.
 if [ "$TESTABLE" != "1" ]; then
   for v in INTERCOM_VERIFY_TEST_LOG_DIR INTERCOM_VERIFY_TEST_CURL_BIN INTERCOM_VERIFY_TEST_TIMEOUT_BIN \
-           INTERCOM_VERIFY_TEST_LEDGER INTERCOM_VERIFY_TEST_LEDGER_HELPER INTERCOM_VERIFY_TEST_DAY; do
+           INTERCOM_VERIFY_TEST_LEDGER INTERCOM_VERIFY_TEST_LEDGER_HELPER INTERCOM_VERIFY_TEST_DAY \
+           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER; do
     [ -z "${!v:-}" ] || die "$v is not settable on a deployed copy of this script. The log, the ledger, the client and the clock are not parameters: a caller-selectable one is a send nobody can audit."
   done
   LOG_DIR="$PROD_LOG_DIR"
   LEDGER="$PROD_LEDGER"
   LEDGER_HELPER="$PROD_LEDGER_HELPER"
+  STAGE2_HELPER="$PROD_STAGE2_HELPER"
+  PROOF_DB="$PROD_PROOF_DB"
   CURL_BIN="/usr/bin/curl"
   JQ_BIN="/usr/bin/jq"
   TIMEOUT_BIN="/usr/bin/timeout"
@@ -227,13 +246,15 @@ else
   LOG_DIR="${INTERCOM_VERIFY_TEST_LOG_DIR:-$PROD_LOG_DIR}"
   LEDGER="${INTERCOM_VERIFY_TEST_LEDGER:-$PROD_LEDGER}"
   LEDGER_HELPER="${INTERCOM_VERIFY_TEST_LEDGER_HELPER:-$PROD_LEDGER_HELPER}"
+  STAGE2_HELPER="${INTERCOM_VERIFY_TEST_STAGE2_HELPER:-$PROD_STAGE2_HELPER}"
+  PROOF_DB="${INTERCOM_VERIFY_TEST_PROOF_DB:-$PROD_PROOF_DB}"
   CURL_BIN="${INTERCOM_VERIFY_TEST_CURL_BIN:-$(command -v curl || echo /usr/bin/curl)}"
   JQ_BIN="$(command -v jq || echo /usr/bin/jq)"
   TIMEOUT_BIN="${INTERCOM_VERIFY_TEST_TIMEOUT_BIN:-$(command -v timeout || command -v gtimeout || echo /usr/bin/timeout)}"
   PY_BIN="$(command -v python3 || echo /usr/bin/python3)"
   DAY="${INTERCOM_VERIFY_TEST_DAY:-$(date -u +%Y-%m-%d)}"
 fi
-readonly LOG_DIR LEDGER LEDGER_HELPER CURL_BIN JQ_BIN TIMEOUT_BIN PY_BIN DAY
+readonly LOG_DIR LEDGER LEDGER_HELPER STAGE2_HELPER PROOF_DB CURL_BIN JQ_BIN TIMEOUT_BIN PY_BIN DAY
 
 # ---------------------------------------------------------------------------------------
 # Arguments
@@ -484,7 +505,10 @@ case "$CAMPAIGN" in
       *:) ;;
       status-doc-received:queued) COPY="docrecvq"; APPROVAL_REF="$APPROVAL_REF_STATUS_QUEUED" ;;
       status-team-review:no-ask) COPY="teamreviewb0"; APPROVAL_REF="$APPROVAL_REF_STATUS_NOASK" ;;
-      *) refuse "--copy applies to verify-live (v1|windowed), status-doc-received (queued) and status-team-review (no-ask) only." ;;
+      # Count-only (firstmate inbox 005): no titles, so any request may be in it; the ledger
+      # records the ids given (the driver sends at most 1,000) and user.pending_count is the total.
+      status-team-review:count) COPY="teamreviewcount"; APPROVAL_REF="$APPROVAL_REF_STATUS_COUNT"; MAX_CREDITS=1000 ;;
+      *) refuse "--copy applies to verify-live (v1|windowed), status-doc-received (queued) and status-team-review (no-ask|count) only." ;;
     esac
     [ "$KIND" = "initial" ] || refuse "$CAMPAIGN has no follow-ups: one message per user, ever."
     ;;
@@ -496,7 +520,14 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live."
     [ "$KIND" = "initial" ] || refuse "$CAMPAIGN has no follow-ups."
     ;;
-  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed or email-changed-dup (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
+  gap-ask)
+    # Fable's gap ask for credits whose document on file does not cover them (stage-2
+    # need_more). Once per credit; up to 3 track/role pairs, then "and N more".
+    MAX_CREDITS=1000; MAX_LISTED=3; COPY="gap"; APPROVAL_REF="$APPROVAL_REF_GAP_ASK"
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live; gap-ask has one copy, Fable's paragraph."
+    [ "$KIND" = "initial" ] || refuse "gap-ask has no follow-ups: no deadline, no reminders."
+    ;;
+  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup or gap-ask (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
 esac
 [ "$ACTION" != "check-recipient" ] || { [ "$CAMPAIGN" = "verify-live" ] && [ "$KIND" = "initial" ]; } \
   || refuse "--check-recipient applies to a verify-live initial note only (it must never reach a path that writes)."
@@ -504,8 +535,8 @@ esac
   || refuse "--doc-check applies to --campaign retro-past only: a removal notice is not an ask, and a new credit's note is never skipped for an Intercom attachment."
 if [ -n "$THREAD" ]; then
   case "$CAMPAIGN" in
-    uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup) ;;
-    *) refuse "--conversation (in-thread delivery) applies to uvn-status, withdrawal-confirm, the status notes and email-changed only." ;;
+    uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|gap-ask) ;;
+    *) refuse "--conversation (in-thread delivery) applies to uvn-status, withdrawal-confirm, the status notes, email-changed and gap-ask only." ;;
   esac
   printf '%s' "$THREAD" | grep -qE '^[0-9]{1,24}$' \
     || refuse "--conversation must be the numeric Intercom conversation id (got '$THREAD')."
@@ -546,6 +577,7 @@ INPUT="$("$JQ_BIN" -c '
             professional_id: ((.user.professional_id // "") | clean),
             ext_other_account: (.user.ext_other_account | if type == "boolean" then . else null end),
             thread_external_id: ((.user.thread_external_id // "") | clean),
+            pending_count: (.user.pending_count | if type == "number" and . == floor and . >= 0 and . <= 1000000 then . else null end),
             first_name: ((.user.first_name // "") | clean) },
     credits: [ .credits[] | { request_id: ((.request_id // "") | clean), role: ((.role // "") | clean),
                               track_title: ((.track_title // "") | clean), artist_name: ((.artist_name // "") | clean),
@@ -596,6 +628,14 @@ case "$CAMPAIGN" in
     # Placeholders so the shared shape checks below pass; the copy never reads them.
     INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c '.credits[0] += {role: "-", track_title: "-", artist_name: "-"}')" ;;
 esac
+if [ "$COPY" = "teamreviewcount" ]; then
+  # The count-only note shows no title, artist or role (they may be blank or unshowable: that is
+  # why it is sent): placeholders for the shape checks; a malformed profile/track ref is dropped.
+  INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c '.credits |= map(. + {role: "-", track_title: "-", artist_name: "-"}
+    | (if (.profile_id | test("^[A-Za-z0-9-]{0,64}$")) then . else .profile_id = "" end)
+    | (if (.track_id | test("^[A-Za-z0-9-]{0,64}$")) then . else .track_id = "" end))
+    | .user.pending_count = ([(.user.pending_count // 0), (.credits | length)] | max)')"
+fi
 bad="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select((.request_id | test("^[A-Za-z0-9-]{1,64}$") | not)
   or (.role|length) == 0 or (.role|length) > 120 or (.track_title|length) == 0 or (.track_title|length) > 200
   or (.artist_name|length) == 0 or (.artist_name|length) > 200
@@ -635,6 +675,30 @@ if [ "$CAMPAIGN" = "takeback-notice" ]; then
 fi
 dups="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[].request_id] | length - (unique | length)')"
 [ "$dups" -eq 0 ] || refuse "credits repeats a request_id; each credit request appears once."
+if [ "$CAMPAIGN" = "gap-ask" ]; then
+  # The verdict is read HERE, from the proof store, never taken from the caller: every credit's
+  # latest stage-2 verdict (every claimed role) must be need_more for THIS account, the account
+  # must not be held, and <doc summary> is built from that verdict's best document (its kind and
+  # the catalog titles it lists; never text from the document).
+  printf '%s' "$USER_ID" | grep -qE '^[0-9]{1,12}$' \
+    || refuse "gap-ask needs user.id, the Muso account id the stage-2 verdicts must belong to."
+  [ -r "$STAGE2_HELPER" ] || die "stage-2 helper $STAGE2_HELPER is missing; refusing to send a gap ask without the verdict."
+  S2="$("$PY_BIN" -I "$STAGE2_HELPER" --db "$PROOF_DB" gap-credits --request-ids "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[].request_id] | join(",")')" --user-id "$USER_ID")" \
+    || die "the stage-2 verdict read failed; refusing to send a gap ask without it."
+  [ "$(printf '%s' "$S2" | "$JQ_BIN" -r '.eligible')" = "true" ] \
+    || refuse "gap-ask: $(printf '%s' "$S2" | "$JQ_BIN" -r '.reason'). The gap ask goes only to credits whose document on file stage 2 judged need_more."
+  # Every role the caller names must be one stage 2 judged for that credit.
+  badrole="$(printf '%s' "$INPUT" | "$JQ_BIN" -r --argjson s "$S2" '[.credits[] | . as $c | ($c.request_id | ascii_downcase) as $k
+    | ($s.credits[$k].roles // [] | map(ascii_downcase)) as $judged
+    | [$c.role | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0) | ascii_downcase] as $named
+    | select(($named | length) == 0 or ($named - $judged | length) > 0) | .request_id] | join(",")')"
+  [ -z "$badrole" ] || refuse "gap-ask: the role on $badrole is not one stage 2 judged for that credit; not sending."
+  INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c --argjson s "$S2" '
+    def clean: tostring | gsub("[[:cntrl:]]"; " ") | gsub("\\s+"; " ") | sub("^ "; "") | sub(" $"; "");
+    .credits |= map((.request_id | ascii_downcase) as $k | $s.credits[$k] as $v
+      | . + {doc_kind: ($v.doc_kind // ""), doc_proof: ($v.proof_id // ""),
+             doc_lists: [($v.lists // [])[] | clean | select(length > 0 and length <= 200)]})')"
+fi
 
 ids_csv() { printf '%s' "$1" | "$JQ_BIN" -r '[.credits[].request_id] | join(",")'; }
 keep_ids() { # <input-json> <ids-json-array>
@@ -667,6 +731,9 @@ if [ "$ACTION" = "post" ] && { [ "$CAMPAIGN" = "email-changed" ] || [ "$CAMPAIGN
 fi
 if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "uvn-status" ] && [ "$UVN_STATUS_COPY_APPROVED" != "1" ]; then
   refuse "the uvn-status copy is not approved for sending (UVN_STATUS_COPY_APPROVED=0)."
+fi
+if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "gap-ask" ] && [ "$GAP_ASK_COPY_APPROVED" != "1" ]; then
+  refuse "the gap-ask copy is not approved for sending (GAP_ASK_COPY_APPROVED=0)."
 fi
 if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "retro-past" ] && [ "$RETRO_COPY_APPROVED" != "1" ]; then
   refuse "the retro-past copy is not approved for sending yet (RETRO_COPY_APPROVED=0). It needs Fable's copy GO and the captain's approval of the rendered notes, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
@@ -1010,6 +1077,11 @@ def status_doc_queued($fn; $c; $maxl):
 def status_team_review($fn; $c; $maxl):
   { subject: "Your Muso credit \(req_s($c|length)): an update",
     segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): they're with our team for review. Nothing else is needed from you right now. If you have something that shows your role on these specific tracks (for example a credit listing link or a split sheet), you can reply with it and it helps us confirm them faster."} ] };
+# Count-only (firstmate inbox 005, verbatim; one request reads in the singular).
+def status_team_review_count($fn; $n):
+  { subject: "Your Muso credit \(req_s($n)): an update",
+    segs: [ {p: (if $n == 1 then "Hi \($fn), a quick update on your pending credit request: it is with our team for review. Nothing else is needed from you right now."
+                 else "Hi \($fn), a quick update on your \($n) pending credit requests: they are with our team for review. Nothing else is needed from you right now." end)} ] };
 def status_team_review_noask($fn; $c; $maxl):
   { subject: "Your Muso credit \(req_s($c|length)): an update",
     segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): they're with our team for review. Nothing else is needed from you right now."} ] };
@@ -1031,16 +1103,51 @@ def removal_notice($fn; $c; $maxl):
                  {ul: ([ $c[0:$maxl][] | removal_sentence ] + (if $n > $maxl then ["and \($n - $maxl) more"] else [] end))},
                  {p: $dispute} ] + sig) }
     end;
+# gap-ask (Fable 2026-10-26 13:23Z), the paragraph verbatim but for its last sentence (decision B,
+# firstmate inbox 005: "Your request stays open while we look.", accurate for a pending request);
+# <doc summary>, <track> and <role> are its only slots. <doc summary> is the stage-2 verdict's best document: its kind (a fixed label, a
+# plain "document" when stage 2 could not tell) and up to two OTHER held titles it names (catalog
+# titles, never document text). Several credits: up to 3 "<track> as <role>" pairs, then "and N more".
+def gap_label: {split_sheet: "split sheet", contract: "contract", invoice: "invoice",
+  letter_of_direction: "letter of direction", pro_portal: "PRO registration",
+  distributor_portal: "distributor screenshot", dsp_for_artists: "streaming-dashboard screenshot",
+  daw_session: "session screenshot", catalog_page: "credits page"}[.];
+def gap_plural: {split_sheet: "split sheets", contract: "contracts", invoice: "invoices",
+  letter_of_direction: "letters of direction", pro_portal: "PRO registrations",
+  distributor_portal: "distributor screenshots", dsp_for_artists: "streaming-dashboard screenshots",
+  daw_session: "session screenshots", catalog_page: "credits pages"}[.];
+def a_an: if test("^[aeiou]") then "an " + . else "a " + . end;
+def orjoin: if length <= 1 then (.[0] // "") else (.[0:-1] | join(", ")) + " or " + .[-1] end;
+def roles_as: [ split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0) ] | andjoin;
+def gap_summary($c):
+  ([ $c[].track_title | ascii_downcase ]) as $asked
+  | ([ $c[].doc_lists[] ] | unique | map(select(ascii_downcase as $t | ($asked | any(. == $t)) | not)) | .[0:2]) as $cov
+  | (if ($cov | length) > 0 then " for " + ($cov | map(qt) | andjoin) else "" end) as $for
+  | ([ $c[].doc_proof ] | unique) as $p | ([ $c[].doc_kind ] | unique) as $k
+  | if ($p | length) == 1 then ((($k[0] | gap_label) // "document") | a_an) + $for
+    elif ($k | length) == 1 and ($k[0] | gap_plural) != null then ($k[0] | gap_plural) + $for
+    else "documents" + $for end;
+def gap_ask($fn; $c; $maxl):
+  ($c | length) as $n
+  | ([ $c[0:$maxl][] | "\(.track_title | qt) as \(.role | roles_as)" ] | orjoin) as $pairs
+  | (if $n > $maxl then " (and \($n - $maxl) more of your credits)" else "" end) as $more
+  | { subject: (if $n == 1 then "About the document for your \($c[0].role) credit on \($c[0].track_title | qt)"
+               else "About the documents for \($n) of your credits on Muso" end),
+      segs: ([ {p: "Hi \($fn),"},
+               {p: "Thanks for sending your document - we have it on file. It shows \(gap_summary($c)) but does not cover \($pairs)\($more). If you have a tracklist, split sheet, contract, or a DSP/label page that names you on this track, reply with it and we will finish the check. Your request stays open while we look."} ]
+             + sig) };
 (.user.first_name | split(" ")[0] // "") as $fn0
 | (if ($fn0 | test("^\\p{L}[\\p{L}'.-]{0,39}$")) then $fn0 else "there" end) as $fn
 | (if $copy == "docrecv" then status_doc_received($fn; .credits; $maxl)
    elif $copy == "docrecvq" then status_doc_queued($fn; .credits; $maxl)
    elif $copy == "teamreview" then status_team_review($fn; .credits; $maxl)
    elif $copy == "teamreviewb0" then status_team_review_noask($fn; .credits; $maxl)
+   elif $copy == "teamreviewcount" then status_team_review_count($fn; (.user.pending_count // (.credits | length)))
    elif $copy == "emailchg" then email_changed(false)
    elif $copy == "emailchgdup" then email_changed(true)
    elif $copy == "withdrawal" then withdrawal_confirm(.credits)
    elif $copy == "uvn" then uvn_status($fn; .credits; $maxl)
+   elif $copy == "gap" then gap_ask($fn; .credits; $maxl)
    elif $copy == "takeback" then takeback_notice($fn; .credits; $maxl)
    elif $copy == "removal" then removal_notice($fn; .credits; $maxl)
    elif $copy == "past" then
@@ -1050,7 +1157,7 @@ def removal_notice($fn; $c; $maxl):
    else live_followup($fn; .credits; $maxl; $kind; $due) end)
 # Status notes carry the approved "Muso Support" sign-off on email only (the handoff copy, firstmate
 # 092/103/106); an in-thread reply sits under Caroline's own name in the conversation and stays unsigned.
-| (if ($copy | IN("docrecv", "docrecvq", "teamreview", "teamreviewb0")) and $mtype == "email"
+| (if ($copy | IN("docrecv", "docrecvq", "teamreview", "teamreviewb0", "teamreviewcount")) and $mtype == "email"
    then .segs += [ {p: "Muso Support"} ] else . end)
 | { subject: .subject,
     text: ([ .segs[] | if has("ul") then (.ul | map("- " + .) | join("\n")) else .p end ] | join("\n\n")),
@@ -1296,9 +1403,12 @@ docs_submitted() { # <contact-id> -> prints the reason when documents exist; exi
 # covers everything else in Intercom (Caroline, an admin, an outbound message): any of the
 # contact's conversations updated in the last 7 days whose opening message (sent in those 7
 # days) or any part in those 7 days was written by an admin or bot. A failed read sends
-# nothing; a truncated one counts as "messaged".
+# nothing; a truncated one counts as "messaged". gap-ask leaves out exactly the messages in
+# FOLLOWED_IDS (the user's status-doc-received notes of those 7 days, from the ledger: the gap
+# ask is the follow-up they promised); every other message from us still defers it.
+FOLLOWED_IDS="[]"
 recently_messaged() { # <contact-id> -> prints the reason when we wrote to them in 7 days; exit 4 on a failed read
-  local contact="$1" since body ids n cid convo
+  local contact="$1" since body ids n cid convo ex="$FOLLOWED_IDS"
   since=$(( $(date -u +%s) - 7*86400 ))
   body="$(printf '%s' "$contact" | "$JQ_BIN" -Rc --argjson since "$since" \
     '{query: {operator: "AND", value: [{field: "contact_ids", operator: "=", value: .}, {field: "updated_at", operator: ">", value: $since}]}, pagination: {per_page: 50}}' \
@@ -1307,7 +1417,8 @@ recently_messaged() { # <contact-id> -> prints the reason when we wrote to them 
     || { printf 'RECENT-CONTACT CHECK NOT VERIFIED; nothing was sent or claimed:\n%s\n' "$body" >&2; exit 4; }
   n="$(printf '%s' "$body" | "$JQ_BIN" -r '.total_count // (.conversations | length)')"
   [ "$n" -le 50 ] || { echo "more than 50 conversations in 7 days (counted as messaged)"; return 0; }
-  if printf '%s' "$body" | "$JQ_BIN" -e --argjson since "$since" '[.conversations[] | select(((.source.author.type // "") | IN("admin","bot","team")) and ((.created_at // 0) > $since))] | length > 0' >/dev/null; then
+  if printf '%s' "$body" | "$JQ_BIN" -e --argjson since "$since" --argjson ex "$ex" '[.conversations[] | select(((.source.author.type // "") | IN("admin","bot","team")) and ((.created_at // 0) > $since)
+       and (((.source.id // "") | tostring) as $s | $ex | any(. == $s) | not))] | length > 0' >/dev/null; then
     echo "we started a conversation with them in the last 7 days"; return 0
   fi
   ids="$(printf '%s' "$body" | "$JQ_BIN" -r '.conversations[].id | tostring')"
@@ -1317,17 +1428,32 @@ recently_messaged() { # <contact-id> -> prints the reason when we wrote to them 
       || { printf 'RECENT-CONTACT CHECK FAILED (curl) on conversation %s; nothing was sent or claimed\n' "$cid" >&2; exit 4; }
     printf '%s' "$convo" | "$JQ_BIN" -e '(.type // "") == "conversation"' >/dev/null 2>&1 \
       || { printf 'RECENT-CONTACT CHECK NOT VERIFIED on conversation %s; nothing was sent or claimed\n' "$cid" >&2; exit 4; }
-    if printf '%s' "$convo" | "$JQ_BIN" -e --argjson since "$since" '[(.conversation_parts.conversation_parts // [])[] | select(((.author.type // "") | IN("admin","bot","team")) and (.part_type // "") != "note" and ((.created_at // 0) > $since) and ((.body // "") != ""))] | length > 0' >/dev/null; then
+    if printf '%s' "$convo" | "$JQ_BIN" -e --argjson since "$since" --argjson ex "$ex" '[(.conversation_parts.conversation_parts // [])[] | select(((.author.type // "") | IN("admin","bot","team")) and (.part_type // "") != "note" and ((.created_at // 0) > $since) and ((.body // "") != "")
+       and (((.id // "") | tostring) as $p | $ex | any(. == $p) | not))] | length > 0' >/dev/null; then
       echo "we replied to them in the last 7 days"; return 0
     fi
   done
   return 0
 }
-case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
+case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review|gap-ask) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
 if [ "$STATUSLIKE" = "1" ] && [ "$ACTION" = "post" ]; then
+  # gap-ask is never skipped for documents in Intercom: a document on file is why it is sent.
+  if [ "$CAMPAIGN" = "gap-ask" ]; then
+    FOLLOWED_IDS="$(ledger followed-notes --user-key "$EMAIL" --user-id "$USER_ID" | "$JQ_BIN" -c '.message_ids')" \
+      || die "the ledger read failed; refusing to send without the idempotency record."
+  fi
   # uvn-status asks for something, so a user who already sent documents is skipped; the
   # status notes are exactly for users with documents or requests with us, so they are not.
-  if [ "$CAMPAIGN" = "uvn-status" ]; then
+  # Stage-2 no_document (Fable 2026-10-26 13:23Z GO 2): when the proof store says every credit
+  # of this note was judged and NOTHING readable is on file for it, for THIS account, the
+  # Intercom attachment scan is what stage 2 already read; the approved uvn-status copy goes.
+  # The verdict is read here, never taken from the caller; anything else keeps the scan.
+  S2_NODOC=0
+  if [ "$CAMPAIGN" = "uvn-status" ] && [ -r "$STAGE2_HELPER" ] && printf '%s' "$USER_ID" | grep -qE '^[0-9]{1,12}$'; then
+    s2n="$("$PY_BIN" -I "$STAGE2_HELPER" --db "$PROOF_DB" gap-credits --outcome no_document --request-ids "$ALL_IDS" --user-id "$USER_ID" 2>/dev/null || true)"
+    [ "$(printf '%s' "$s2n" | "$JQ_BIN" -r '.eligible // false' 2>/dev/null || echo false)" != "true" ] || S2_NODOC=1
+  fi
+  if [ "$CAMPAIGN" = "uvn-status" ] && [ "$S2_NODOC" != "1" ]; then
     DOCS_WHY="$(docs_submitted "$CONTACT_ID")"
     if [ -n "$DOCS_WHY" ]; then
       ledger skip --campaign "$CAMPAIGN" --request-ids "$ALL_IDS" >/dev/null || die "the ledger write failed."

@@ -570,7 +570,10 @@ verify ledger); see `docs/credit-verification/verify-request-notes.md`.
 Its identity gate (Intercom external_id = the account's professional id) is never loosened. Wrong
 or empty Intercom ids are fixed in the data, only by `credit-review.py intercom-reconcile`, which is
 audited and revertible. Every status note passes `credit_review/fraud_lens.py` first. See
-`docs/credit-verification/intercom-identity-reconcile.md`.
+`docs/credit-verification/intercom-identity-reconcile.md`. A document on file excludes a user
+from every ask until a stage-2 verdict releases the credit
+(`scripts/credit_review/stage2_verdicts.py`: need_more -> `gap-ask`, no_document -> `uvn-status`);
+the decider never asks those users itself.
 
 Every credit-trust AI call goes through `scripts/credit_trust/llm.py` (Codex on the
 subscription, tool-less via `scripts/lib/codex-judge-exec.sh` -> Jev), which writes

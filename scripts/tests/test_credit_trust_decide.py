@@ -107,6 +107,24 @@ class Writer:
                          "skipped": [{"id": i, "reason": r} for i, r in self.skip.items() if i in ids]}}
 
 
+# credit_verify/proof/stage2.py SCHEMA (the columns stage2_verdicts reads).
+STAGE2_SCHEMA = """CREATE TABLE stage2_shadow (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+  judged_at TEXT NOT NULL, request_id TEXT NOT NULL, role TEXT NOT NULL, user_id INTEGER, paid INTEGER,
+  popularity INTEGER, tier TEXT, outcome TEXT NOT NULL, reason TEXT NOT NULL, verdict TEXT, proof_id TEXT,
+  source_ref TEXT, doc_kind TEXT, documents INTEGER NOT NULL, detail_json TEXT NOT NULL, analyzer_version TEXT);"""
+
+
+def stage2_row(path, request_id, role, user_id, outcome, *, reason="r", version=None, doc_kind="contract"):
+    from credit_verify.proof import FORENSICS_VERSION
+    db = sqlite3.connect(path)
+    db.execute("INSERT INTO stage2_shadow (run_id, judged_at, request_id, role, user_id, paid, outcome, reason, "
+               "proof_id, doc_kind, documents, detail_json, analyzer_version) VALUES "
+               "('run','2026-10-26T12:00:00Z',?,?,?,1,?,?,'p1',?,1,'[]',?)",
+               (request_id, role, user_id, outcome, reason, doc_kind, version or FORENSICS_VERSION))
+    db.commit()
+    db.close()
+
+
 TERMS = decide.Policy.load().editorial_role_terms
 POLICY = decide.Policy(deny_user_ids={666}, deny_profile_ids=set(), editorial_role_terms=TERMS)
 
@@ -132,6 +150,13 @@ class Base(unittest.TestCase):
         decide.PROVISIONAL_PAID_SWITCH = Path(self.tmp) / "provisional-paid.disabled"
         self.addCleanup(setattr, decide, "PROVISIONAL_PAID_SWITCH", self._prov_switch)
         self.proof()
+        # The stage-2 verdict store (with_stage2): empty unless a test writes verdicts.
+        self._stage2 = decide.STAGE2_STORE
+        decide.STAGE2_STORE = Path(self.tmp) / "proof.sqlite"
+        self.addCleanup(setattr, decide, "STAGE2_STORE", self._stage2)
+        s2 = sqlite3.connect(decide.STAGE2_STORE)
+        s2.executescript(STAGE2_SCHEMA)
+        s2.close()
         self.logged = []
         decide.log = self.logged.append
 
@@ -909,6 +934,44 @@ class NeverReAsk(Base):
         self.assertEqual((res.support_candidates, res.held_proof, res.support, res.held), (4, 3, 1, 3))
         self.assertIn("4 before filters, 3 held for proof on file", res.line())
         self.assertIn("1 sent", res.line())
+
+    def test_stage2_hands_a_covered_request_to_the_gap_ask_never_to_a_support_write(self):
+        # Fable 2026-10-26 13:23Z GO 2: need_more -> gap-ask, no_document -> uvn-status. The request
+        # stays held (no Knock re-ask outside the verify ledger) and is labelled for the gate's ask;
+        # an approved proof naming the request, or any other verdict, keeps the plain hold.
+        self.proof([{"user_id": 701, "request_id": None, "kind": "human_approved_after_doc", "source": "intercom",
+                     "ref": "c1"},
+                    {"user_id": 702, "request_id": uuid_of(122), "kind": "approved_doc", "source": "core", "ref": ""},
+                    {"user_id": 703, "request_id": None, "kind": "pending_doc", "source": "intercom", "ref": "c3"},
+                    {"user_id": 704, "request_id": None, "kind": "pending_doc", "source": "intercom", "ref": "c4"}])
+        store = str(decide.STAGE2_STORE)
+        stage2_row(store, uuid_of(120), "Mixing", 701, "need_more")
+        stage2_row(store, uuid_of(121), "Mixing", 701, "no_document")
+        stage2_row(store, uuid_of(122), "Mixing", 702, "need_more")
+        stage2_row(store, uuid_of(123), "Mixing", 703, "review")
+        stage2_row(store, uuid_of(124), "Mixing", 704, "need_more", version="pf-0")   # stale analyzer
+        rows = [req(uuid_of(i), uid=u, track="t1") for i, u in ((120, 701), (121, 701), (122, 702), (123, 703),
+                                                                  (124, 704))]
+        res, w = self.go(rows, self.RAWS)
+        d = self.decisions()
+        self.assertEqual(self.support_writes(w), [], "no support write (Knock notice) for anyone with proof on file")
+        self.assertTrue(all(d[uuid_of(i)]["decision"] == "hold" for i in range(120, 125)))
+        self.assertIn("--campaign gap-ask", d[uuid_of(120)]["reason"])
+        self.assertIn("--campaign uvn-status", d[uuid_of(121)]["reason"])
+        for i in (120, 121):
+            self.assertTrue(d[uuid_of(i)]["reason"].startswith("proof on file"), "stage 2 still reads these as held")
+        for i in (122, 123, 124):
+            self.assertTrue(d[uuid_of(i)]["reason"].startswith("proof on file: human review"), i)
+        self.assertEqual((res.held_stage2_ask, res.held_proof), (2, 3))
+        self.assertIn("2 held for proof on file and handed to the stage-2 ask", res.line())
+
+    def test_an_unreadable_stage2_store_releases_nothing(self):
+        self.proof([{"user_id": 701, "request_id": None, "kind": "pending_doc", "source": "intercom", "ref": "c1"}])
+        decide.STAGE2_STORE.write_text("not sqlite")
+        res, w = self.go([req(uuid_of(130), uid=701, track="t1")], self.RAWS)
+        self.assertTrue(self.decisions()[uuid_of(130)]["reason"].startswith("proof on file: human review"))
+        self.assertEqual((res.held_stage2_ask, res.held_proof, self.support_writes(w)), (0, 1, []))
+        self.assertTrue(any("stage-2 verdicts unreadable" in m for m in self.logged))
 
     def test_daily_ask_cap_limits_distinct_users_and_keeps_a_users_batch_whole(self):
         self.proof([])

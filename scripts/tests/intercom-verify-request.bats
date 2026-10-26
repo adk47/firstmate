@@ -34,6 +34,9 @@ setup() {
   export INTERCOM_VERIFY_TEST_LEDGER="$TEST_TMPDIR/ledger.sqlite3"
   export INTERCOM_VERIFY_TEST_LEDGER_HELPER="$HYDRA_REPO/scripts/credit_review/verify_ledger.py"
   export INTERCOM_VERIFY_TEST_DAY="2026-10-15"
+  # gap-ask reads stage-2 verdicts from a proof store (stage2() below writes them).
+  export INTERCOM_VERIFY_TEST_PROOF_DB="$TEST_TMPDIR/proof.sqlite"
+  export INTERCOM_VERIFY_TEST_STAGE2_HELPER="$HYDRA_REPO/scripts/credit_review/stage2_verdicts.py"
   mkdir -p "$INTERCOM_VERIFY_TEST_LOG_DIR"
 
   # curl stub: answers like Intercom per (method, path). Every call is logged as
@@ -904,7 +907,7 @@ PY
 @test "unknown campaigns and kinds are refused" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -1 send --campaign everything
-  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed or email-changed-dup"* ]]
+  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup or gap-ask"* ]]
   run -1 send --kind final-notice --parent-message-id 1
   [[ "$output" == *"--kind must be initial, reminder-14, reminder-25 or after-rejection"* ]]
 }
@@ -1469,6 +1472,195 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   [[ "$output" == "POSTED"* ]]
 }
 
+# ---- gap-ask (Fable 2026-10-26 13:23Z: stage-2 need_more -> the gap ask) ------------------
+
+# stage2 <request_id> <role> <user_id> <outcome> [doc_kind] [proof_id] [lists-json]: one stage2_shadow row.
+stage2() {
+  python3 - "$INTERCOM_VERIFY_TEST_PROOF_DB" "$HYDRA_REPO" "$@" <<'PY'
+import json, re, sqlite3, sys
+db_path, repo, rid, role, uid, outcome = sys.argv[1:7]
+kind = sys.argv[7] if len(sys.argv) > 7 else "contract"
+proof = sys.argv[8] if len(sys.argv) > 8 else "p1"
+lists = json.loads(sys.argv[9]) if len(sys.argv) > 9 else []
+ver = re.search(r'^FORENSICS_VERSION\s*=\s*"([^"]+)"', open(f"{repo}/scripts/credit_verify/proof/__init__.py").read(), re.M).group(1)
+db = sqlite3.connect(db_path)
+db.execute("""CREATE TABLE IF NOT EXISTS stage2_shadow (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+  judged_at TEXT NOT NULL, request_id TEXT NOT NULL, role TEXT NOT NULL, user_id INTEGER, paid INTEGER,
+  popularity INTEGER, tier TEXT, outcome TEXT NOT NULL, reason TEXT NOT NULL, verdict TEXT, proof_id TEXT,
+  source_ref TEXT, doc_kind TEXT, documents INTEGER NOT NULL, detail_json TEXT NOT NULL, analyzer_version TEXT)""")
+db.execute("INSERT INTO stage2_shadow (run_id, judged_at, request_id, role, user_id, paid, outcome, reason, proof_id,"
+           " doc_kind, documents, detail_json, analyzer_version) VALUES ('run','2026-10-26T12:00:00Z',?,?,?,1,?,?,?,?,1,?,?)",
+           (rid, role, int(uid), outcome, "account hold: x" if outcome == "human" else "r", proof, kind,
+            json.dumps([{"proof_id": proof, "lists": lists}]), ver))
+db.commit()
+PY
+}
+GAP_PARA_1='Thanks for sending your document - we have it on file. It shows '
+GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label page that names you on this track, reply with it and we will finish the check. Your request stays open while we look.'
+
+@test "gap-ask: one credit renders Fable's paragraph verbatim, <doc summary> from the stage-2 row" {
+  grep -qx 'readonly GAP_ASK_COPY_APPROVED=1' "$REAL_SCRIPT"
+  stage2 g1 Mixing 42 need_more split_sheet p1 '["Other Song", "Song A"]'
+  credits "$TEST_TMPDIR/c.json" Jane "g1:Mixing:Song A:Big Star"
+  run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == "DRY-RUN gap-ask initial email credits=1 copy=gap"* ]]
+  [ "$(rendered .subject)" = 'About the document for your Mixing credit on "Song A"' ]
+  body="$(rendered .body | plain)"
+  [[ "$body" == "Hi Jane,"$'\n'"${GAP_PARA_1}"'a split sheet for "Other Song" but does not cover "Song A" as Mixing'"${GAP_PARA_2}"$'\n'"Thank you,"$'\n'"Caroline, Muso Support" ]]
+  no_removal_language "$(rendered .subject) $body"
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "gap-ask: several credits list 3 track/role pairs then 'and N more'; mixed or unknown documents read plainly" {
+  stage2 g1 Mixing 42 need_more contract p1
+  stage2 g2 Producer 42 need_more invoice p2
+  stage2 g3 Mixing 42 need_more contract p3
+  stage2 g4 Mixing 42 need_more contract p4
+  stage2 g4 Mastering 42 need_more contract p4
+  credits "$TEST_TMPDIR/c.json" Jane "g1:Mixing:A:X" "g2:Producer:B:X" "g3:Mixing:C:X" "g4:Mixing, Mastering:D:X"
+  run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .subject)" = 'About the documents for 4 of your credits on Muso' ]
+  [[ "$(rendered .body | plain)" == *"${GAP_PARA_1}"'documents but does not cover "A" as Mixing, "B" as Producer or "C" as Mixing (and 1 more of your credits)'"${GAP_PARA_2}"* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "g1:Mixing:A:X" "g3:Mixing:C:X"
+  run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'It shows contracts but does not cover "A" as Mixing or "C" as Mixing.'* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "g4:Mixing, Mastering:D:X"
+  run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'It shows a contract but does not cover "D" as Mixing and Mastering.'* ]]
+  stage2 g5 Engineer 42 need_more unknown p5
+  credits "$TEST_TMPDIR/c.json" Jane "g5:Engineer:E:X"
+  run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'It shows a document but does not cover "E" as Engineer.'* ]]
+}
+
+@test "gap-ask: only a need_more verdict for THIS account, on every role named, reaches the copy; the caller cannot supply it" {
+  stage2 g1 Mixing 42 need_more
+  stage2 g2 Mixing 42 review
+  stage2 g3 Mixing 77 need_more
+  credits "$TEST_TMPDIR/c.json" Jane "g2:Mixing:B:X"
+  run -1 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"g2 (review)"* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "g3:Mixing:C:X"
+  run -1 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"verdict is for another account"* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "g9:Mixing:Z:X"
+  run -1 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"g9 (no verdict)"* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "g1:Producer:A:X"
+  run -1 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"not one stage 2 judged"* ]]
+  # A caller-supplied summary is dropped by the normaliser: the store's (none listed) is shown.
+  credits "$TEST_TMPDIR/c.json" Jane "g1:Mixing:A:X"
+  jq '.credits[0] += {doc_kind: "split_sheet", doc_lists: ["Injected"]}' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/i.json"
+  run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/i.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'It shows a contract but does not cover "A" as Mixing.'* ]]
+  jq '.user.id = ""' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/n.json"
+  run -1 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"gap-ask needs user.id"* ]]
+  stage2 h1 Mixing 42 human
+  run -1 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"stage 2 holds this account"* ]]
+  INTERCOM_VERIFY_TEST_PROOF_DB="$TEST_TMPDIR/missing.sqlite" run -1 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"unreadable"* ]]
+  run -1 "$LOCKED" send --campaign gap-ask --kind reminder-14 --parent-message-id 1 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"gap-ask has no follow-ups"* ]]
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "gap-ask: posts once per credit, never skipped for documents in Intercom (they are why it is sent)" {
+  stage2 g1 Mixing 42 need_more split_sheet
+  credits "$TEST_TMPDIR/c.json" Jane "g1:Mixing:Song A:Big Star"
+  STUB_CONTACT_CONVS='{"conversations":[{"id":"5","source":{"author":{"type":"user"},"attachments":[{"name":"split.pdf"}]},"tags":{"tags":[{"name":"credit-proof"}]}}],"pages":{}}' \
+    run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message=1001 credits=1" ]]
+  [[ "$(msg .body | plain)" == *"a split sheet but does not cover"* ]]
+  [ "$(sql "select campaign, status, approval_ref like '%Fable ruling 2026-10-26 13:23Z%' from verify_messages")" = "gap-ask|sent|1" ]
+  INTERCOM_VERIFY_TEST_DAY=2026-11-30 run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED already-notified credits=1" ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "gap-ask: 7 days after any other note defers it, except the doc-received note it follows up (still one a day)" {
+  day_ago() { python3 -c 'import datetime as d, sys; print((d.datetime.now(d.timezone.utc).date() - d.timedelta(days=int(sys.argv[1]))).isoformat())' "$1"; }
+  stage2 g1 Mixing 42 need_more
+  credits "$TEST_TMPDIR/d.json" Jane "s1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY="$(day_ago 0)" run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/d.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message=1001 credits=1" ]]
+  credits "$TEST_TMPDIR/c.json" Jane "g1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY="$(day_ago 0)" run -3 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED daily-cap"* ]]
+  # Tomorrow: Intercom shows the doc-received note (message 1001) we sent: not a deferral.
+  now=$(date -u +%s)
+  STUB_CONV_SEARCH="{\"conversations\":[{\"id\":\"777\",\"created_at\":$now,\"source\":{\"id\":\"1001\",\"author\":{\"type\":\"admin\"}}}],\"total_count\":1}" \
+  INTERCOM_VERIFY_TEST_DAY="$(day_ago -1)" run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message=1002 credits=1" ]]
+  # Any OTHER message from us in 7 days still defers it.
+  stage2 g2 Mixing 42 need_more
+  credits "$TEST_TMPDIR/c.json" Jane "g2:Mixing:Song B:Big Star"
+  INTERCOM_VERIFY_TEST_DAY="$(day_ago -3)" run -3 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED messaged_7d"* ]]
+  [ "$(posts)" -eq 2 ]
+}
+
+@test "uvn-status + stage-2 no_document: the Intercom documents skip yields to the store's verdict for THIS account only" {
+  local docs='{"conversations":[{"id":"5","source":{"author":{"type":"user"},"attachments":[{"name":"split.pdf"}]},"tags":{"tags":[]}}],"pages":{}}'
+  stage2 n1 Mixing 42 no_document ""
+  stage2 n2 Mixing 42 need_more
+  stage2 n3 Mixing 77 no_document ""
+  # Not no_document for every credit, or another account's verdict: the scan stands (skipped, closed).
+  for spec in "n2:Mixing:B:X" "n3:Mixing:C:X" "n9:Mixing:Z:X"; do
+    credits "$TEST_TMPDIR/c.json" Jane "$spec"
+    STUB_CONTACT_CONVS="$docs" run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    [[ "$output" == "SKIPPED docs_submitted credits=1"* ]]
+  done
+  [ "$(posts)" -eq 0 ]
+  # Stage 2 judged it and found nothing readable: the approved uvn-status copy goes.
+  credits "$TEST_TMPDIR/c.json" Jane "n1:Mixing:Song A:Big Star"
+  STUB_CONTACT_CONVS="$docs" run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message=1001 credits=1" ]]
+  [[ "$(msg .body | plain)" == *"it's waiting on one thing from you, something that shows your Mixing credit."* ]]
+  # An unreadable store keeps the scan (another user, so the once-ever rule is not what stops it).
+  stage2 n4 Mixing 43 no_document ""
+  credits "$TEST_TMPDIR/c.json" Jane "n4:Mixing:Song D:Big Star"
+  jq '.user.email = "other@example.com" | .user.id = "43"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/o.json"
+  INTERCOM_VERIFY_TEST_PROOF_DB="$TEST_TMPDIR/missing.sqlite" STUB_CONTACT_CONVS="$docs" \
+    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/o.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED docs_submitted credits=1"* ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "gap-ask (decision B, inbox 005): the last sentence says the request stays open, never that a pending credit is live" {
+  stage2 g1 Mixing 42 need_more
+  credits "$TEST_TMPDIR/c.json" Jane "g1:Mixing:Song A:Big Star"
+  run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  body="$(rendered .body | plain)"
+  [[ "$body" == *"we will finish the check. Your request stays open while we look."$'\n'"Thank you,"* ]]
+  [[ "$body" != *"live"* ]]
+  ! grep -q "stays live while we look" "$REAL_SCRIPT"
+}
+
+@test "status-team-review --copy count (inbox 005): no titles, the total count, any request may be in it; signed on email only" {
+  # A user whose every request is unshowable (blank title, a role over 120 characters, a
+  # malformed track id) or who has more than the 1,000 a listed note takes is told, not held.
+  jq -n '{user:{email:"jane@example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:"Jane", pending_count:1342},
+          credits:[{request_id:"c1", role:"", track_title:"", artist_name:""},
+                   {request_id:"c2", role:("x" * 300), track_title:"T", artist_name:"A", track_id:"bad id!"}]}' > "$TEST_TMPDIR/c.json"
+  run -0 "$LOCKED" send --campaign status-team-review --copy count --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == "DRY-RUN status-team-review initial email credits=2 copy=teamreviewcount"* ]]
+  [ "$(rendered .subject)" = "Your Muso credit requests: an update" ]
+  [ "$(rendered .body | plain)" = "Hi Jane, a quick update on your 1342 pending credit requests: they are with our team for review. Nothing else is needed from you right now."$'\n'"Muso Support" ]
+  # Without pending_count the count is the credits given; one request reads in the singular.
+  jq -c '.user |= del(.pending_count) | .credits |= .[0:1]' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/one.json"
+  run -0 "$LOCKED" send --campaign status-team-review --copy count --credits-file "$TEST_TMPDIR/one.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "Hi Jane, a quick update on your pending credit request: it is with our team for review. Nothing else is needed from you right now."$'\n'"Muso Support" ]
+  # A real send: recorded once for its request ids, approval ref pinned; no other campaign takes it.
+  run -0 "$LOCKED" send --campaign status-team-review --copy count --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message=1001 credits=2" ]]
+  [ "$(sql "select approval_ref like '%count-only status-team-review wording%inbox 005%' from verify_messages")" = "1" ]
+  run -1 "$LOCKED" send --campaign status-doc-received --copy count --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(posts)" -eq 1 ]
+}
+
 @test "withdrawal-confirm: the approved fixed text with role + title, one request per message, sent once" {
   credits "$TEST_TMPDIR/c.json" Jane "w1:Mastering:Nowhere Fast:Somebody"
   run -0 "$LOCKED" send --campaign withdrawal-confirm --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
@@ -1526,7 +1718,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   [ "$(replies)" -eq 0 ]
   [ "$(posts)" -eq 0 ]
   run -1 "$LOCKED" send --campaign retro-past --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"applies to uvn-status, withdrawal-confirm, the status notes and email-changed only"* ]]
+  [[ "$output" == *"applies to uvn-status, withdrawal-confirm, the status notes, email-changed and gap-ask only"* ]]
   run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation abc --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
 }
 
@@ -1625,7 +1817,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A", "B" and "C" and 2 more: we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked - no need to send anything else.'$'\n''Muso Support' ]
   run -1 "$LOCKED" send --campaign status-team-review --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"--copy applies to verify-live (v1|windowed), status-doc-received (queued) and status-team-review (no-ask) only"* ]]
+  [[ "$output" == *"--copy applies to verify-live (v1|windowed), status-doc-received (queued) and status-team-review (no-ask|count) only"* ]]
   run -1 "$LOCKED" send --campaign status-doc-received --copy windowed --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [ "$(calls)" -eq 0 ]
 }

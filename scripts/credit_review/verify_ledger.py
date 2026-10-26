@@ -31,6 +31,12 @@ the same SQLite file as the decider's ``decisions`` table
   uvn-status   one status + reminder per user whose requests wait on them
                (user_verification_needed), ever; an ask (credit_review/uvn_status.py).
   withdrawal-confirm  confirms a requester-withdrawn request, once per request. Not an ask.
+  gap-ask      the stage-2 gap ask (Fable 2026-10-26 13:23Z): a user whose document on file
+               does not cover a held credit is told what it shows and what is missing. An ask,
+               once per credit, at most one message per user per day and none within 7 days of
+               another note (a status-doc-received note excepted: the gap ask is the follow-up it
+               promised). Not blocked by an earlier ask about the same credit, nor by a proof
+               reply: the user's earlier reply is what stage 2 judged.
   Details: docs/credit-verification/verify-request-notes.md.
 
 Guarantees:
@@ -92,7 +98,12 @@ MAX_ATTEMPTS = 3
 BLOCKING = ("attempted", "sent", "refused", "skipped")
 DEFERRED = "deferred_pending_doc"
 CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "uvn-status", "withdrawal-confirm",
-             "status-doc-received", "status-team-review", "email-changed", "email-changed-dup")
+             "status-doc-received", "status-team-review", "email-changed", "email-changed-dup", "gap-ask")
+GAP_ASK = "gap-ask"
+# The notes the gap ask may follow inside 7 days (one per day still holds): the doc-received
+# status note says "we have the document you sent ... we'll message you here as soon as it's
+# checked", and the gap ask is that message (firstmate, verify-ask-wiring-h2 inbox 003).
+GAP_ASK_FOLLOWS = ("status-doc-received",)
 # Once-per-user status campaigns: one message per user ever (per campaign), never within 7 days
 # of another note from this gate. Only uvn-status is an ask (and also stops after a proof reply).
 STATUS_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review")
@@ -109,7 +120,7 @@ MAX_REFUSALS = 3
 # The campaigns that ASK the user for something. Only these count as "already asked";
 # notices and confirmations (removal-notice, takeback-notice, withdrawal-confirm) never close
 # a user's asks (firstmate 063/064).
-ASK_CAMPAIGNS = ("verify-live", "retro-past", "uvn-status")
+ASK_CAMPAIGNS = ("verify-live", "retro-past", "uvn-status", GAP_ASK)
 AFTER_REJECTION = "after-rejection"
 KINDS = ("initial", "reminder-14", "reminder-25", AFTER_REJECTION)
 # Days after a WINDOWED note at which each reminder becomes due.
@@ -264,11 +275,12 @@ def blocked_ids(db: sqlite3.Connection, request_ids: list[str], campaign: str = 
     refused or skipped in this campaign, or already asked about in any ASK campaign
     (never re-ask the same credit, no repeats across waves). takeback-notice and
     withdrawal-confirm are not asks but notices about that very request, so only their own
-    rows block them."""
+    rows block them. gap-ask exists BECAUSE the credit was asked about and the reply did not
+    cover it, so it too is blocked only by its own rows."""
     out: set[str] = set()
     asks = ",".join("?" * len(ASK_CAMPAIGNS))
     for rid in request_ids:
-        other = None if campaign in NOTICE_CAMPAIGNS else db.execute(
+        other = None if campaign in NOTICE_CAMPAIGNS or campaign == GAP_ASK else db.execute(
             f"SELECT 1 FROM verify_requests WHERE request_id=? AND campaign<>? AND campaign IN ({asks}) "
             "AND status IN ('attempted','sent') LIMIT 1", (rid, campaign, *ASK_CAMPAIGNS)).fetchone()
         if other is not None:
@@ -397,6 +409,33 @@ def uvn_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None
 DEFER_REASONS = ("messaged_7d", "recently_asked")
 
 
+def gap_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None = None, user_id: str = "") -> str:
+    """gap-ask: why this user must not get one now ('' when they may). Only a deferral exists:
+    messaged_7d, any note from this gate in the last 7 days except a GAP_ASK_FOLLOWS note. The
+    per-credit once and the one-message-per-user-per-day cap are claim()'s."""
+    cond, params = _same_user(db, user_key, user_id)
+    since = ((now or utcnow()) - timedelta(days=7)).strftime("%Y-%m-%d")
+    follows = ",".join("?" * len(GAP_ASK_FOLLOWS))
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day>=? AND m.status IN ('attempted','sent') "
+                  f"AND m.campaign NOT IN ({follows}) LIMIT 1", (*params, since, *GAP_ASK_FOLLOWS)).fetchone():
+        return "messaged_7d"
+    return ""
+
+
+def followed_notes(db: sqlite3.Connection, user_key: str, *, now: datetime | None = None,
+                   user_id: str = "") -> dict[str, list[str]]:
+    """The GAP_ASK_FOLLOWS notes sent to this user in the last 7 days: their Intercom message ids
+    (in-thread: the part id) and conversation ids, so the gate's Intercom-side 7-day check can
+    leave exactly those messages out (every other message from us still defers)."""
+    cond, params = _same_user(db, user_key, user_id)
+    since = ((now or utcnow()) - timedelta(days=7)).strftime("%Y-%m-%d")
+    follows = ",".join("?" * len(GAP_ASK_FOLLOWS))
+    rows = db.execute(f"SELECT m.message_id, m.conversation_id FROM verify_messages m WHERE {cond} AND m.day>=? "
+                      f"AND m.status = 'sent' AND m.campaign IN ({follows})", (*params, since, *GAP_ASK_FOLLOWS)).fetchall()
+    return {"message_ids": sorted({str(r[0]) for r in rows if r[0]}),
+            "conversation_ids": sorted({str(r[1]) for r in rows if r[1]})}
+
+
 def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[str], message_type: str,
           approved_by: str, approval_ref: str, contact_id: str = "", campaign: str = "verify-live",
           refs: list[dict[str, Any]] | None = None, windowed: bool = False, now: datetime | None = None,
@@ -427,6 +466,11 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
                 _skip(db, campaign, fresh, ts)
                 db.execute("COMMIT")
                 return {"result": "user_done", "reason": why, "request_ids": fresh}
+        if campaign == GAP_ASK and enforce_cap:
+            why = gap_user_done(db, user_key, now=now, user_id=user_id)
+            if why:
+                db.execute("COMMIT")
+                return {"result": "recent", "reason": why, "request_ids": fresh}
         if campaign == "retro-past" and enforce_cap:
             why = past_user_done(db, user_key, user_id)
             if why:
@@ -1162,6 +1206,9 @@ def _main(argv: list[str] | None = None) -> int:
     mr.add_argument("--replied-at", default="", help="UTC time of the latest user reply (YYYY-MM-DDTHH:MM:SSZ)")
     ve = sub.add_parser("v1-eligible", help="may a note over these credits use the v1 (no-deadline) copy?")
     ve.add_argument("--request-ids", required=True)
+    fo = sub.add_parser("followed-notes", help="gap-ask: this user's status-doc-received notes of the last 7 days")
+    fo.add_argument("--user-key", required=True)
+    fo.add_argument("--user-id", default="")
     c = sub.add_parser("set-conversation")
     c.add_argument("--message-id", required=True)
     c.add_argument("--conversation-id", required=True)
@@ -1200,6 +1247,11 @@ def _main(argv: list[str] | None = None) -> int:
             out["user_done"] = "" if why in DEFER_REASONS else why
             out["recent"] = why in DEFER_REASONS
             out["recent_why"] = why if why in DEFER_REASONS else ""
+        if a.user_key and a.campaign == GAP_ASK:
+            why = gap_user_done(db, a.user_key, user_id=a.user_id)
+            out["user_done"], out["recent"], out["recent_why"] = "", bool(why), why
+    elif a.op == "followed-notes":
+        out = followed_notes(db, a.user_key, user_id=a.user_id)
     elif a.op == "skip":
         out = {"skipped": skip_requests(db, campaign=a.campaign, request_ids=_ids(a.request_ids))}
     elif a.op == "reminder-state":
