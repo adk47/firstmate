@@ -953,6 +953,12 @@ RSYNC_EXCLUDES=(
   # remove from node-8 manually anytime.
   --exclude='cliproxyapi.conf'
   --exclude='cliproxyapi.yaml'
+  # Retired weekly cleanup script (MUS-6053, PR #1205). clean-my-linux.sh
+  # replaces it and hydra-weekly-cleanup.service no longer invokes it, but the
+  # file may still exist on /opt/hydra/ until ops cleanup. Excluded so
+  # rsync --delete does not halt the Step 4a pre-flight; safe to remove from
+  # node-8 manually anytime.
+  --exclude='scripts/weekly-cleanup.sh'
   # CTO clone-hook guard files, GENERATED on the server by
   # scripts/lib/setup-cto-clone-hooks.sh (run at deploy time from
   # install-aux-units.sh). They live inside the rsync-managed tree but are

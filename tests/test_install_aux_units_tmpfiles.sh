@@ -75,7 +75,9 @@ out=$(STUB_RC=1 run_block "$R" "$D" 2>&1); rc=$?
 
 echo "case 6 (mutation): a source WITHOUT the mM: prefix is refused"
 R=$(mk_root 6); D="$T/etc6"; export STUB_LOG="$T/log6"; : > "$STUB_LOG"
-sed -i.orig 's/^D \/tmp 1777 root root mM:14d$/D \/tmp 1777 root root 14d/' "$R/scripts/aux-units/tmp.conf"
+# Mutate the line the installer's own predicate matches, not a hand-typed age, so
+# the sed cannot silently no-op when the age changes.
+sed -i.orig -E 's/^(D \/tmp 1777 root root )mM:([0-9]+[smhdw]?)$/\1\2/' "$R/scripts/aux-units/tmp.conf"
 cmp -s "$R/scripts/aux-units/tmp.conf" "$R/scripts/aux-units/tmp.conf.orig" && { bad "mutation did not apply"; } || {
   out=$(run_block "$R" "$D" 2>&1); rc=$?
   [[ $rc -ne 0 ]] && grep -q "mM:" <<<"$out" && ok "refused: $(grep -o 'must declare.*' <<<"$out" | head -1)" || bad "accepted a plain-age policy (rc=$rc)"
@@ -83,7 +85,9 @@ cmp -s "$R/scripts/aux-units/tmp.conf" "$R/scripts/aux-units/tmp.conf.orig" && {
 }
 
 echo "case 7: the shipped template itself passes the guard and carries the socket exclusions"
-grep -Eq '^D /tmp 1777 root root mM:14d$' "$REPO/scripts/aux-units/tmp.conf" && ok "D line mM:14d" || bad "template D line wrong"
+grep -Eq '^D /tmp 1777 root root mM:[0-9]+[smhdw]?$' "$REPO/scripts/aux-units/tmp.conf" && ok "D line is mtime-keyed (mM:<age>)" || bad "template D line not mtime-keyed"
+# The floor is asserted as a literal on purpose: changing it must be said out loud here.
+grep -Eq '^D /tmp 1777 root root mM:24h$' "$REPO/scripts/aux-units/tmp.conf" && ok "catch-all age is 24h" || bad "catch-all age is not 24h (update this assert if the floor changed on purpose)"
 for s in X11 ICE XIM font Test; do grep -q "^x /tmp/.$s-unix$" "$REPO/scripts/aux-units/tmp.conf" && ok "x /tmp/.$s-unix" || bad "missing exclusion .$s-unix"; done
 
 echo; echo "passed=$pass failed=$failn"
