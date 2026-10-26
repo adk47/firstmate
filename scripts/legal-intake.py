@@ -233,12 +233,12 @@ def main():
                 sender_addr = sender_raw.lower()
                 req_key = f"{sender_addr}|{cls}"
                 fm = int(msgs[0].get("internalDate", 0))
-                # A sibling is the same request only if it is the same notice: two rows that BOTH carry Muso
-                # ids with different notice_key are two distinct claims (QA bot, MUS-20138). A legacy sibling
-                # written before notice_key existed, or either side without ids, still collapses as before.
+                # A sibling is the same request only if it is the same notice (same notice_key). When identity
+                # is uncertain we page (MUS-20285): a row with a different key, or a legacy row written before
+                # notice_key existed, never suppresses a new claim; a duplicate beats a silent legal notice.
                 sibling = next((r for k, r in ledger.items() if k != key and r.get("req_key") == req_key
                                 and abs(int(r.get("first_msg") or 0) - fm) < 3 * 86400000
-                                and (r.get("notice_key") in (None, nkey) or not ids or not r.get("ids"))), None)
+                                and r.get("notice_key") == nkey), None)
                 row["req_key"] = req_key
                 if sibling is not None:
                     if sibling.get("acked") and not row.get("acked"):
