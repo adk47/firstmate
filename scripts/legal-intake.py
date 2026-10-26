@@ -251,8 +251,15 @@ def main():
                 if nsib is not None:
                     row["paged"] = "dup-of:" + str(nsib["paged"])
                     if do_page and stok:
-                        note = (f"Same notice, second sender: {esc(f'{name2} <{sender_addr}>' if name2 else sender_addr)[:120]}\n"
-                                f"Gmail thread `{tid}` (no new action needed; paged above)")
+                        mention = " ".join(f"<@{m}>" for m in SLACK_MENTIONS)
+                        earlier = (nsib.get("req_key") or "|").rsplit("|", 1)[0] or "earlier sender"
+                        # Same class + subject + ids can still be two rights holders: keep the second page
+                        # actionable (MUS-20040) instead of claiming nothing is needed.
+                        note = (f"{mention} Same subject + same Muso ids, different sender - confirm this is the same claim, "
+                                f"or handle it separately.\n"
+                                f"Earlier: {esc(earlier)} (thread `{nsib.get('thread')}`)\n"
+                                f"New: {esc(f'{name2[:60]} <{sender_addr}>' if name2 else sender_addr)} (thread `{tid}`)\n"
+                                f"Not paged again; nothing was auto-closed.")
                         try:
                             if not post_page(stok, note, thread_ts=nsib["paged"]):
                                 raise RuntimeError("slack refused")

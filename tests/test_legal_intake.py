@@ -7,7 +7,7 @@ address, and it tagged Nick although Jan owns legal intake. These tests lock:
 
   - the page shows the full sender address (angle brackets escaped), like the rights-holder page;
   - the page tags Jan only;
-  - the same notice from a second address is collapsed to a threaded, un-mentioned reply under
+  - the same notice from a second address is collapsed to a threaded reply (tagging Jan to confirm, MUS-20040) under
     the first page, ONLY when Muso ids link the two (no ids = two unrelated takedowns);
   - the ledger stores a hash of the subject, never the subject.
 
@@ -156,10 +156,36 @@ class Collapse(Harness):
         self.assertEqual(led["legal@muso.ai:b2"]["paged"], "dup-of:" + first_ts)
         note = self.posts[1]
         self.assertEqual(note["thread_ts"], first_ts)
-        self.assertNotIn("<@", note["text"])
+        self.assertIn("<@U038BM16T7W>", note["text"])  # MUS-20040: the note is actionable, Jan is told
+        self.assertNotIn("<@U0AL36NADEY>", note["text"])
         self.assertIn("demandage@gmail.com", note["text"])
+        self.assertIn("david@demandage.com", note["text"])
         self.assertIn("b2", note["text"])  # Gmail thread id
+        self.assertIn("a1", note["text"])
         self.assertIsNone(self.posts[0]["thread_ts"])
+
+    def test_collapse_note_is_actionable_for_a_different_rights_holder(self):
+        """MUS-20040 / hydra#1361 bot round 2: same class + subject + ids can still be two rights
+        holders. The collapse stays (no second top-level page) but the threaded note must tell Jan
+        to confirm, name both senders and both Gmail threads, and never say nothing is needed
+        ("or keep the second page actionable when identity is uncertain")."""
+        led = self.run_intake({
+            "a1": thread("Rights Holder A <claims@labela.com>"),
+            "b2": thread("Other Owner <legal@labelb.org>", body=BODY + "\nWe are a different company.",
+                         internal=FIRST_MSG + 36000)})
+        first_ts = led["legal@muso.ai:a1"]["paged"]
+        self.assertEqual(led["legal@muso.ai:b2"]["paged"], "dup-of:" + first_ts)
+        notes = [p for p in self.posts if p["thread_ts"]]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["thread_ts"], first_ts)
+        text = notes[0]["text"]
+        self.assertIn("<@U038BM16T7W>", text)
+        self.assertNotIn("<@U0AL36NADEY>", text)
+        self.assertIn("claims@labela.com", text)
+        self.assertIn("legal@labelb.org", text)
+        self.assertIn("a1", text)
+        self.assertIn("b2", text)
+        self.assertNotIn("no new action needed", text)
 
     def test_no_collapse_when_ids_empty(self):
         no_ids = "Please take down my song"
