@@ -373,6 +373,41 @@ class RunTests(unittest.TestCase):
         self.assertEqual(res.skipped, 1)
         self.assertIn("changed since it was classified", res.errors[0])
 
+    def test_every_write_condition_is_rechecked_right_before_each_write(self):
+        """QA @28ddcca: a condition that changes while earlier rows are written blocks the later write."""
+        _, approved = self.dry()
+        held = set()
+
+        def lens(ids):
+            return {u: fraud_lens.Verdict(held=["watchlist"] if u in held else []) for u in ids}
+
+        def meanwhile(cid, body):
+            if cid == "c1":
+                self.users[99] = {"email": "u4@x.com"}                         # another account takes u4's email
+                self.api.c["c88"] = contact("c88", "other@x.com", pro(2))      # pro(2) appears on another contact
+        self.api.on_put = meanwhile
+        res = self.run_(mode="apply", approved=approved, lens=lens)
+        self.assertEqual([c for c, _ in self.api.puts], ["c1"])
+        self.assertEqual((res.applied, res.skipped), (1, 2))
+        self.assertTrue(any("another Muso account holds this email (99)" in e for e in res.errors), res.errors)
+        self.assertTrue(any("already the external_id of another Intercom contact" in e for e in res.errors), res.errors)
+        # and a user the lens starts holding mid-run
+        self.setUp()
+        _, approved = self.dry()
+        self.api.on_put = lambda cid, body: held.add(4)
+        res = self.run_(mode="apply", approved=approved, lens=lens, classes=("A2",))
+        self.assertEqual([c for c, _ in self.api.puts], ["c2"])
+        self.assertTrue(any("fraud_hold" in e for e in res.errors), res.errors)
+
+    def test_an_email_shaped_external_id_never_reaches_the_artifacts(self):
+        self.api.c["c3"]["external_id"] = "somebody.private@gmail.com"
+        res, path = self.dry()
+        self.assertEqual(self.by_account(res)[3], ("A3", R.REFUSE_CS))
+        for f in (path, path.replace(".json", ".md"), path.replace(".json", "-cs.json")):
+            text = Path(f).read_text()
+            self.assertNotIn("@", text, f)
+        self.assertIn("<redacted sha256:", Path(path.replace(".json", "-cs.json")).read_text())
+
     def test_failed_write_is_recorded_and_lifts_no_hold(self):
         _, approved = self.dry()
         self.api.put_status = 409

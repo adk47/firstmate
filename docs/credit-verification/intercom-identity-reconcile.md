@@ -46,10 +46,11 @@ python3 scripts/credit-review.py intercom-reconcile --revert irc-<ts>-<hex> --mo
 - **Dry run** reads only. The ledger is opened read-only; Intercom and the replica are only searched.
   The `.md` file is the A1-A5 table to post before any write. The `-cs.json` file is the
   A3 / refused-A4 / A5 list for cs-systemic-issues-lane-c1: account ids, contact id, why. Nothing
-  here ever carries an email.
+  here ever carries an email; an `external_id` that is not id-shaped is shown as a short hash.
 - **Apply** writes only rows that were `fix` in the approved dry-run file and are still `fix` now, for
   the same contact and old id. For each one:
-  1. re-read the contact;
+  1. classify the account again from scratch (replica facts, paid, fraud lens, Intercom by email and
+     by professional id, i.e. every write condition) and require the same `fix`; then re-read the contact;
   2. write the `intercom_identity_fix` ledger row (old and new id, class, run id, `pending`);
   3. `PUT /contacts/{id}`;
   4. re-read to confirm (`applied` / `unverified` / `failed`).

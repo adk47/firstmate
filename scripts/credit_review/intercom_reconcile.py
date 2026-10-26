@@ -33,10 +33,12 @@ fraud lens does not hold the user (fraud_lens.py: such a user is fraud_hold, nev
 
 --mode dry-run (default) reads only: the ledger is opened read-only, Intercom and the replica are
 only read. It writes the table (account id, Intercom contact id, old external_id, class, decision,
-why; never an email) to --out.
+why; never an email: an external_id that is not id-shaped is shown as a short hash) to --out.
 --mode apply --approved <dry-run json>: only rows that were `fix` in that approved dry run AND are
-still `fix` now, for the same contact and old external_id. Before each write the contact is re-read
-(still a user with this email and this old external_id) and an intercom_identity_fix ledger row is
+still `fix` now, for the same contact and old external_id. Right before each write the account is
+classified again from scratch (replica facts, paid, fraud lens, Intercom by email and by professional
+id: every WRITE CONDITION) and must still be that same `fix`; the contact is re-read (still a user
+with this email and this old external_id) and an intercom_identity_fix ledger row is
 written (account, contact, old and new external_id, class, run id, status pending); then
 PUT /contacts/{id}; then the contact is re-read to confirm. FIRST_RUN_CAP (50) writes on the first
 apply run ever, --max-users after that. A confirmed fix lifts that account's 7-day identity refusal
@@ -553,6 +555,13 @@ def classify_all(*, ledger_path: str, query: Query, api: Api, lens: fraud_lens.L
         result.not_in_segment = sum(1 for u in pop if u not in accts or not accts[u].paid)
         accts = {u: a for u, a in accts.items() if a.paid}
     result.emails = {u: a.email for u, a in accts.items()}
+    return classify_accounts(accts, query=query, api=api, lens=lens, now=now)
+
+
+def classify_accounts(accts: dict[int, Account], *, query: Query, api: Api, lens: fraud_lens.LensFn,
+                      now: datetime) -> list[Row]:
+    """classify() for these accounts on FRESH reads: the lens, Intercom (by email and by professional
+    id) and the owners of every external_id seen."""
     verdicts = lens(sorted(accts)) if accts else {}
     contacts: dict[int, list[dict[str, Any]]] = {}
     pro_contacts: dict[int, list[dict[str, Any]]] = {}
@@ -565,6 +574,19 @@ def classify_all(*, ledger_path: str, query: Query, api: Api, lens: fraud_lens.L
     owners = ext_owners({ext_of(c) for cs in contacts.values() for c in cs}, query)
     return [classify(a, contacts[uid], owners, now=now, pro_contacts=pro_contacts[uid], verdict=verdicts.get(uid))
             for uid, a in sorted(accts.items())]
+
+
+def reclassify(r: Row, *, query: Query, api: Api, lens: fraud_lens.LensFn, now: datetime,
+               segment: str = "paid") -> Row | None:
+    """This account's row re-derived from scratch (replica facts, paid, lens, Intercom), for the check
+    right before its write (QA @28ddcca: a condition can change while earlier rows are written).
+    None when the account is gone or no longer in the segment."""
+    accts = account_facts([r.account_id], query)
+    a = accts.get(r.account_id)
+    if a is None or (segment == "paid" and not a.paid):
+        return None
+    a.sources = list(r.sources)
+    return classify_accounts({r.account_id: a}, query=query, api=api, lens=lens, now=now)[0]
 
 
 def _connect(path: str) -> sqlite3.Connection:
@@ -652,6 +674,14 @@ def run(*, mode: str = "dry-run", ledger_path: str | None = None, query: Query =
         for r in todo:
             if res.applied + res.unverified + res.failed >= res.cap:
                 res.over_cap += 1
+                continue
+            fresh = reclassify(r, query=query, api=api, lens=lens, now=now, segment=segment)
+            if fresh is None or (fresh.decision, fresh.contact_id, fresh.old_external_id, fresh.new_external_id) != \
+                    (FIX, r.contact_id, r.old_external_id, r.new_external_id):
+                res.skipped += 1
+                res.errors.append(f"{r.account_id}: no longer a fix right before the write ("
+                                  + (f"{fresh.cls} {fresh.decision}: {fresh.why}" if fresh else "not in the segment")
+                                  + "); not written")
                 continue
             _apply_one(db, api, r, res, now)
         db.execute("UPDATE intercom_identity_runs SET finished_at=?, summary_json=? WHERE run_id=?",
@@ -844,6 +874,14 @@ def summary(res: Result) -> dict[str, Any]:
             "halted": res.halted}
 
 
+def shown_ext(x: str) -> str:
+    """An external_id as the artifacts show it: an id-shaped value verbatim, anything else (e.g. an
+    email someone typed into Intercom) as a short hash, so no output ever carries an email (QA @28ddcca)."""
+    if not x or EXT_RE.match(x):
+        return x
+    return "<redacted sha256:" + hashlib.sha256(x.encode()).hexdigest()[:12] + ">"
+
+
 def write_outputs(res: Result, out_dir: str) -> list[str]:
     """<run>.json (every row, ids only), <run>.md (the A1-A5 table + rows) and <run>-cs.json (the rows
     for cs-systemic-issues-lane-c1: A3, refused A4, A5; account ids, never an email). Mode 0700 dir."""
@@ -852,6 +890,8 @@ def write_outputs(res: Result, out_dir: str) -> list[str]:
     rows = [asdict(r) for r in res.rows]
     for r in rows:
         r["class"] = r.pop("cls")
+        r["old_external_id"] = shown_ext(r["old_external_id"])
+        r["why"] = _scrub(r["why"])
     base = d / res.run_id
     Path(f"{base}.json").write_text(json.dumps({"run_id": res.run_id, "mode": res.mode, "summary": summary(res),
                                                 "rows": rows}, indent=1))
@@ -878,8 +918,8 @@ def render_markdown(res: Result) -> str:
     lines += ["", f"accounts {len(res.rows)}; not in segment {res.not_in_segment}", "",
               "| account | contact | old external_id | class | decision | why |", "|---|---|---|---|---|---|"]
     for r in res.rows:
-        lines.append(f"| {r.account_id} | {r.contact_id} | {r.old_external_id or '(empty)'} | {r.cls} | {r.decision} | "
-                     f"{r.why.replace('|', '/')} |")
+        lines.append(f"| {r.account_id} | {r.contact_id} | {shown_ext(r.old_external_id) or '(empty)'} | {r.cls} | {r.decision} | "
+                     f"{_scrub(r.why).replace('|', '/')} |")
     return "\n".join(lines) + "\n"
 
 
