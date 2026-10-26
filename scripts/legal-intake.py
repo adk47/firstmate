@@ -223,6 +223,9 @@ def main():
                             "first_msg": msgs[0].get("internalDate"), "last_msg": msgs[-1].get("internalDate"),
                             "ids": ids, "on_register": any(i.split(":")[1] in reg for i in ids),
                             "last_seen": time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime())})
+                # Both dedupe arms below need the notice identity (hash of class + normalised subject + ids).
+                nkey = notice_key(cls, h0.get("subject", ""), ids)
+                row["notice_key"] = nkey
                 # One ack + one page per REQUEST, not per thread: the same sender writing to notices@ AND legal@
                 # (notices@ is also auto-forwarded to aaron@) or sending twice within 3 days is one request.
                 # 2026-10-23: a DMCA sender got 4 identical acks + 4 pages before this key existed.
@@ -230,8 +233,12 @@ def main():
                 sender_addr = sender_raw.lower()
                 req_key = f"{sender_addr}|{cls}"
                 fm = int(msgs[0].get("internalDate", 0))
+                # A sibling is the same request only if it is the same notice: two rows that BOTH carry Muso
+                # ids with different notice_key are two distinct claims (QA bot, MUS-20138). A legacy sibling
+                # written before notice_key existed, or either side without ids, still collapses as before.
                 sibling = next((r for k, r in ledger.items() if k != key and r.get("req_key") == req_key
-                                and abs(int(r.get("first_msg") or 0) - fm) < 3 * 86400000), None)
+                                and abs(int(r.get("first_msg") or 0) - fm) < 3 * 86400000
+                                and (r.get("notice_key") in (None, nkey) or not ids or not r.get("ids"))), None)
                 row["req_key"] = req_key
                 if sibling is not None:
                     if sibling.get("acked") and not row.get("acked"):
@@ -241,8 +248,6 @@ def main():
                 # Second arm: the SAME notice from a different address (2026-10-23: david@demandage.com and
                 # demandage@gmail.com, 36 s apart, same four profiles). Needs linked Muso ids: without them
                 # two senders with the same subject are two unrelated takedowns.
-                nkey = notice_key(cls, h0.get("subject", ""), ids)
-                row["notice_key"] = nkey
                 nsib = None
                 if ids and not row.get("paged"):
                     nsib = next((r for k, r in ledger.items() if k != key and r.get("notice_key") == nkey

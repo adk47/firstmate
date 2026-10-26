@@ -256,6 +256,75 @@ class Collapse(Harness):
             self.assertNotIn("DMCA Notice", json.dumps(row))
 
 
+class SameSenderDistinctClaims(Harness):
+    """hydra#1361 bot round 4 / MUS-20138: the same-sender req_key arm let a second, DIFFERENT claim
+    from one sender inherit the first claim's acked/paged markers (no ack, no page). Two rows that
+    BOTH carry ids with different notice_key are distinct claims; legacy rows (no notice_key) and
+    id-less notices keep collapsing."""
+
+    def setUp(self):
+        super().setUp()
+        pathlib.Path(li.ACK_START).write_text("1")
+        self.acks = []
+
+        def fake_ack(to, subj, body):
+            self.acks.append(to)
+            return f"ack{len(self.acks)}"
+        saved_ack = li.send_ack
+        li.send_ack = fake_ack
+        self.addCleanup(lambda: setattr(li, "send_ack", saved_ack))
+
+    def body(self, *profiles):
+        return "Please remove: " + " ".join(f"https://muso.ai/profile/{p}-aaaa" for p in profiles)
+
+    def go(self, threads):
+        return self.run_intake(threads, args=("--page", "--ack"))
+
+    def test_distinct_same_sender_claims_each_get_ack_and_page(self):
+        day = 86400000
+        led = self.go({
+            "a1": thread("Rights Holder <claims@labela.com>", subject="DMCA Notice song one",
+                         body=self.body("11111111")),
+            "b2": thread("Rights Holder <claims@labela.com>", subject="DMCA Notice song two",
+                         body=self.body("22222222"), internal=FIRST_MSG + day)})
+        self.assertEqual(len(self.acks), 2)
+        self.assertEqual(len([p for p in self.posts if p["thread_ts"] is None]), 2)
+        for k in ("legal@muso.ai:a1", "legal@muso.ai:b2"):
+            self.assertFalse(str(led[k]["paged"]).startswith("dup-of"))
+            self.assertFalse(str(led[k]["ack_ref"]).startswith("dup-of"))
+
+    def test_same_sender_two_mailboxes_same_notice_still_one_ack_one_page(self):
+        led = self.go({"a1": thread("claims@labela.com"),
+                       "b2": thread("claims@labela.com", internal=FIRST_MSG + 36000)})
+        self.assertEqual(len(self.acks), 1)
+        self.assertEqual(len(self.posts), 1)
+        self.assertTrue(led["legal@muso.ai:b2"]["ack_ref"].startswith("dup-of:"))
+        self.assertTrue(led["legal@muso.ai:b2"]["paged"].startswith("dup-of:"))
+
+    def test_same_sender_no_ids_different_subject_still_collapses(self):
+        led = self.go({
+            "a1": thread("claims@labela.com", subject="DMCA Notice one", body="Please take down my song"),
+            "b2": thread("claims@labela.com", subject="DMCA Notice two", body="Please take down my track",
+                         internal=FIRST_MSG + 36000)})
+        self.assertEqual(len(self.acks), 1)
+        self.assertEqual(len(self.posts), 1)
+        self.assertTrue(led["legal@muso.ai:b2"]["paged"].startswith("dup-of:"))
+
+    def test_legacy_sibling_without_notice_key_still_collapses(self):
+        """The live ledger predates notice_key: right after deploy the sibling reads None and must
+        still suppress, or the first run would re-ack and re-page every real duplicate."""
+        first = self.go({"a1": thread("claims@labela.com")})
+        row = first["legal@muso.ai:a1"]
+        del row["notice_key"]
+        json.dump(first, open(li.LEDGER, "w"))
+        self.acks.clear(); self.posts.clear()
+        led = self.go({"a1": thread("claims@labela.com"),
+                       "b2": thread("claims@labela.com", subject="Re: DMCA Notice", internal=FIRST_MSG + 36000)})
+        self.assertEqual(self.acks, [])
+        self.assertEqual(self.posts, [])
+        self.assertTrue(led["legal@muso.ai:b2"]["ack_ref"].startswith("dup-of:"))
+
+
 class SendAckExecution(unittest.TestCase):
     """MUS-18508 QA-bot Critical: send_ack built a bash -c string, so a crafted inbound
     subject/sender (`$(...)`, backticks, quotes) could run host commands. It must pass an
