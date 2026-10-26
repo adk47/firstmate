@@ -58,7 +58,7 @@ python3 scripts/credit-review.py intercom-reconcile --revert irc-<ts>-<hex> --mo
   The first apply run ever writes at most 50; later runs are capped by `--max-users`. A confirmed
   fix lifts that account's live identity refusal hold (`verify_refusal_holds.next_recheck_at` ->
   now, recorded on the ledger row). The strike count and any cs flag stay. No other hold is touched.
-- **Revert** re-reads each contact, writes `reverting`, puts the old id back, re-reads, and restores
+- **Revert** (`--mode apply` takes the same lock as apply, so the two never overlap) re-reads each contact, writes `reverting`, puts the old id back, re-reads, and restores
   the lifted holds that nothing has touched since. A row a crashed revert left `reverting` is picked up again by the next revert. A contact whose
   external_id, email or role changed since the fix is `revert_refused` and is never overwritten. The
   fix row keeps a sha256 of the contact's email and role, never the email itself. **A1 caveat:** the old value is empty, and Intercom does not document clearing an
@@ -81,8 +81,8 @@ until `review_by` 2026-11-02. A captain-restored account is never listed there; 
   - velocity is above the s1 band over 90 days: more than 300 rows, or more than 10 rows at
     popularity >= 70, on one profile in one UTC day;
   - the user has **>= 10** open big-track single-signal rows: popularity >= 60 with
-    `review_big_track_without_trusted_credit` / `review_big_track_weak_footprint`, or a lone
-    `shortcut_source`.
+    `review_big_track_without_trusted_credit` / `review_big_track_weak_footprint`, or a
+    `shortcut_source` with no trusted corroboration in `verificationData.footprint`.
 - **Watchlisted** (`policies/fraud-watchlist.json`: user, email, or a profile on an open request):
   messaged as usual and reported (`watchlisted`; `fraud-lens` writes `watchlisted.txt`).
 - **Ask-only**: users with 1 to 9 such rows. `credit-review.py uvn-status` gives them only the

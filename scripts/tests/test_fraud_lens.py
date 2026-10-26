@@ -70,6 +70,28 @@ class ThresholdTests(unittest.TestCase):
         self.assertFalse(fraud_lens.single_signal("", SINGLE))
         self.assertFalse(fraud_lens.single_signal("90", "not json"))
 
+    def test_a_shortcut_with_trusted_corroboration_is_not_single_signal(self):
+        """QA @0df73a9: the shortcut must be the LONE support (live shape: verificationData.footprint)."""
+        def vd(**fp):
+            return json.dumps({"shortcut_source": "muso", "hold_reason_codes": [], "footprint": fp})
+        self.assertTrue(fraud_lens.single_signal("80", vd(trusted_role_family_credits=0,
+                                                          high_risk_role_trusted_on_track=None)))
+        self.assertTrue(fraud_lens.single_signal("80", vd()))
+        self.assertFalse(fraud_lens.single_signal("80", vd(trusted_role_family_credits=50)))
+        self.assertFalse(fraud_lens.single_signal("80", vd(trusted_role_family_credits=0,
+                                                           high_risk_role_trusted_on_track=True)))
+        # a single-signal HOLD CODE still counts whatever the footprint says (the validator found no trusted credit)
+        self.assertTrue(fraud_lens.single_signal("80", json.dumps({
+            "hold_reason_codes": ["review_big_track_without_trusted_credit"],
+            "footprint": {"trusted_role_family_credits": 50}})))
+        # ten corroborated shortcut rows hold nobody; ten lone ones do
+        corroborated = json.dumps({"shortcut_source": "muso", "footprint": {"trusted_role_family_credits": 50}})
+        lone = json.dumps({"shortcut_source": "muso", "footprint": {"trusted_role_family_credits": 0}})
+        wl = watchlist.Watchlist()
+        v = fraud_lens.Lens(lens_replica({1: [("p", 80, corroborated)] * 10, 2: [("p", 80, lone)] * 10}), wl, {})([1, 2])
+        self.assertEqual((v[1].held, v[1].ask_only), ([], False))
+        self.assertTrue(v[2].held)
+
 
 def lens_replica(rows_by_user, velocity=None, emails=None):
     """Answers the Lens's three queries for the ids the SQL names. rows_by_user[u] = [(profile, pop, vd)]."""

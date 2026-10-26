@@ -656,12 +656,9 @@ def run(*, mode: str = "dry-run", ledger_path: str | None = None, query: Query =
     if mode != "apply":
         res.cap = min(max_users, FIRST_RUN_CAP) if _prior_fixes(path) == 0 else max_users
         return res
-    lock = open(f"{path}.intercom-reconcile.lock", "a+")
-    try:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        lock.close()
-        res.halted = "another intercom-reconcile run is in progress; nothing written"
+    lock = _lock(path)
+    if lock is None:
+        res.halted = "another intercom-reconcile run (apply or revert) is in progress; nothing written"
         return res
     db = _connect(path)
     try:
@@ -769,6 +766,35 @@ def revert(target_run: str, *, mode: str = "dry-run", ledger_path: str | None = 
     now = now or verify_ledger.utcnow()
     path = ledger_path or verify_ledger.DEFAULT_PATH
     out = RevertResult(run_id=new_run_id("irc-revert", now), mode=mode)
+    if mode != "apply":
+        return _revert(target_run, out, mode=mode, path=path, api=api, now=now)
+    # The same lock as apply, for the whole revert (QA @0df73a9): an apply overlapping a revert could
+    # see a contact back on its old id, classify it fixable, and silently undo the rollback.
+    lock = _lock(path)
+    if lock is None:
+        out.halted = "another intercom-reconcile run (apply or revert) is in progress; nothing reverted"
+        return out
+    try:
+        return _revert(target_run, out, mode=mode, path=path, api=api, now=now)
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
+
+
+def _lock(path: str) -> Any:
+    """The intercom-reconcile run lock (apply and revert): an open file holding LOCK_EX, or None when
+    another run holds it."""
+    lock = open(f"{path}.intercom-reconcile.lock", "a+")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        return None
+    return lock
+
+
+def _revert(target_run: str, out: RevertResult, *, mode: str, path: str, api: Api | None,
+            now: datetime) -> RevertResult:
     if mode == "apply":
         db = _connect(path)
     else:

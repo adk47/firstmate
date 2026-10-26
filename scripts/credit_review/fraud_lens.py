@@ -26,7 +26,8 @@ Verdict per user:
 
 A single-signal row: an OPEN request (not approved / rejected, not deleted) with
 spotifyPopularity >= BIG_POP whose verificationData carries a hold code in SINGLE_SIGNAL_CODES (no
-trusted source: the claim is the only signal) or whose support is one shortcut_source.
+trusted source: the claim is the only signal) or whose ONLY support is a shortcut_source (the
+footprint shows no trusted role-family credit and the track is not trusted for the role).
 
 Read-only: it queries the core replica (Trino) and the verify ledger, and writes only the files
 named on the command line.
@@ -115,7 +116,7 @@ def _vd(raw: Any) -> Any:
 
 def single_signal(pop: Any, verification_data: Any) -> bool:
     """A big-track (popularity >= BIG_POP) row whose only support is the claim: a single-signal
-    hold code, or a lone shortcut_source. An unparseable verificationData is not single-signal
+    hold code, or a shortcut_source with no trusted corroboration. An unparseable verificationData is not single-signal
     here (the lens is a messaging hold; the approval bar is enforced elsewhere)."""
     p = str(pop if pop is not None else "").strip()
     if not p.lstrip("-").isdigit() or int(p) < BIG_POP:
@@ -126,7 +127,20 @@ def single_signal(pop: Any, verification_data: Any) -> bool:
     codes = vd.get("hold_reason_codes")
     if isinstance(codes, list) and any(c in SINGLE_SIGNAL_CODES for c in codes):
         return True
-    return vd.get("shortcut_source") not in (None, "")
+    # A shortcut counts only when it is the LONE support (QA @0df73a9): the validator's footprint
+    # shows no trusted corroboration (no trusted role-family credit, not trusted on this track).
+    return vd.get("shortcut_source") not in (None, "") and not trusted_support(vd)
+
+
+def trusted_support(vd: dict[str, Any]) -> bool:
+    """The validator recorded independent trusted support for the row (verificationData.footprint:
+    trusted_role_family_credits > 0, or high_risk_role_trusted_on_track true)."""
+    fp = vd.get("footprint")
+    if not isinstance(fp, dict):
+        return False
+    n = fp.get("trusted_role_family_credits")
+    return (isinstance(n, (int, float)) and not isinstance(n, bool) and n > 0) or \
+        fp.get("high_risk_role_trusted_on_track") is True
 
 
 def verdict(*, named: Iterable[str] = (), watch: Iterable[str] = (), max_rows_day: int = 0, max_big_day: int = 0,

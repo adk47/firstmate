@@ -478,6 +478,47 @@ class RunTests(unittest.TestCase):
         db.close()
         self.assertRegex(owner, r"^[0-9a-f]{64}$")      # hashed, never the email
 
+    def test_revert_and_apply_share_one_lock(self):
+        """QA @0df73a9: a revert never overlaps an apply (or another revert): whichever comes second
+        writes nothing."""
+        import fcntl
+        _, approved = self.dry()
+        res = self.run_(mode="apply", approved=approved, classes=("A2",))
+        puts = len(self.api.puts)
+        with open(f"{self.ledger}.intercom-reconcile.lock", "a+") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            rv = R.revert(res.run_id, mode="apply", ledger_path=self.ledger, api=self.api, now=NOW)
+            again = self.run_(mode="apply", approved=approved)
+        self.assertIn("in progress", rv.halted)
+        self.assertIn("in progress", again.halted)
+        self.assertEqual(len(self.api.puts), puts)
+        self.assertEqual(self.api.c["c2"]["external_id"], pro(2))
+        # the dry-run revert only reads: it takes no lock
+        with open(f"{self.ledger}.intercom-reconcile.lock", "a+") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(R.revert(res.run_id, ledger_path=self.ledger, api=self.api, now=NOW).halted, "")
+        # with the lock free, the revert goes through
+        rv = R.revert(res.run_id, mode="apply", ledger_path=self.ledger, api=self.api, now=NOW)
+        self.assertEqual((rv.halted, rv.reverted), ("", 2))
+
+    def test_the_lock_is_held_for_the_whole_revert(self):
+        import fcntl
+        _, approved = self.dry()
+        res = self.run_(mode="apply", approved=approved, classes=("A2",))
+        seen = []
+
+        def probe(cid, body):
+            with open(f"{self.ledger}.intercom-reconcile.lock", "a+") as fh:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    seen.append("free")
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    seen.append("held")
+        self.api.on_put = probe
+        R.revert(res.run_id, mode="apply", ledger_path=self.ledger, api=self.api, now=NOW)
+        self.assertEqual(seen, ["held", "held"])
+
     def test_a1_revert_that_intercom_will_not_clear_is_reported_for_a_human(self):
         _, approved = self.dry()
         self.api.keep_on_null = True
