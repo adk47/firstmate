@@ -16,6 +16,17 @@
 #
 #   v1 gen=<token> seq=<uint> state=<busy|idle|unknown> source=<token> event=<token> ts=<epoch>
 #
+# Detail sidecar: state/<id>.busy-detail - at most one bounded line of free
+# text an adapter attached to the CURRENT event with `--detail`, written and
+# removed by the same writer under the same lock as the record, so it never
+# outlives the event it describes: an apply without --detail removes it and
+# retire removes it. It is never a state signal - fm_busy_classify ignores
+# it - and is read only through fm_busy_record_detail, which answers only for
+# a record that reads valid. Today the Pi extension records the upstream
+# error text that ended a turn (event stop-failure) and the kind and title
+# of a blocking UI dialog (event dialog-open), so the keep-alive ladder and
+# fm-crew-state.sh can name WHICH failure or dialog without reading a screen.
+#
 # Gen sidecar: state/<id>.busy-gen - one token minted when the task's busy
 # wiring is armed (fm-spawn, or a documented recovery re-arm). Every event
 # must present the current gen; an event or record carrying any other gen is
@@ -28,7 +39,12 @@
 # per-harness trust table; a record whose source is not trusted for the
 # task's recorded harness classifies unknown, so one adapter's writer can
 # never classify another adapter):
-#   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
+#   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled,
+#                    plus stop-failure when the settled run ended on an
+#                    assistant stopReason of error, and dialog-open /
+#                    dialog-closed around a blocking ui_prompt such as the
+#                    /model picker; the state carried by a dialog event is
+#                    whichever side of the run the dialog opened on)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
@@ -156,6 +172,35 @@ fm_busy_record_path() {  # <state-dir> <id>
 
 fm_busy_gen_path() {  # <state-dir> <id>
   printf '%s/%s.busy-gen' "$1" "$2"
+}
+
+fm_busy_detail_path() {  # <state-dir> <id>
+  printf '%s/%s.busy-detail' "$1" "$2"
+}
+
+# fm_busy_detail_bound: the one bounding rule for a detail before it is
+# written: first line only, control characters dropped, at most
+# FM_BUSY_DETAIL_MAX_CHARS characters. Applied by the writer, so a reader never
+# sees more than this.
+FM_BUSY_DETAIL_MAX_CHARS=240
+fm_busy_detail_bound() {  # <text>
+  local t
+  t=$(printf '%s' "${1-}" | head -n 1 | tr -d '\000-\011\013-\037\177')
+  printf '%s' "${t:0:$FM_BUSY_DETAIL_MAX_CHARS}"
+}
+
+# fm_busy_record_detail: the detail attached to the CURRENT valid record, or
+# failure (printing nothing) when the record does not read valid or carries no
+# detail. Reading goes through fm_busy_record_read so a stale incarnation's
+# leftover sidecar can never be reported against a new one.
+fm_busy_record_detail() {  # <state-dir> <id>
+  local f line
+  fm_busy_record_read "$1" "$2" >/dev/null 2>&1 || return 1
+  f=$(fm_busy_detail_path "$1" "$2")
+  [ -f "$f" ] || return 1
+  IFS= read -r line < "$f" 2>/dev/null || line=
+  [ -n "$line" ] || return 1
+  printf '%s' "$line"
 }
 
 # fm_busy_token_valid: conservative token charset shared by gen, source, and
@@ -834,6 +879,30 @@ fm_busy_cursor_turn_state() {  # <transcript>
 fm_busy_grok_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
     | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
+}
+
+# fm_busy_pi_tail_model_picker: 0 when Pi's built-in /model picker is on the
+# rendered tail (stdin). This is a RENDERED read, kept deliberately narrow and
+# separate from classification: the picker is an interactive-mode overlay, not
+# an extension ui prompt, so the per-task extension's ui_prompt_start never
+# fires for it (verified live on Pi 1.4.0, docs/verification/gateway-keepalive.md)
+# and the screen is the only source. It is never a busy/idle signal - a crew
+# with the picker open is BLOCKED, whichever side of a run it opened on - and
+# fm-crew-state.sh is its only consumer. Three independent signals the picker
+# renders are read and any one carries the verdict, so no single vendor string
+# is load-bearing: the hint row's connectives (`to select ·` ... `to set as
+# default ·` ... `to cancel`, keybinding-agnostic because Pi substitutes the
+# bound keys), the `Model Name:` detail row, and the provider-scope hint
+# (`models from configured providers`). tests/fm-pi-model-picker-live-e2e.test.sh
+# is the live guard that fails naming the Pi version when none of them renders.
+fm_busy_pi_tail_model_picker() {
+  local t
+  t=$(grep -v '^[[:space:]]*$' | tail -24)
+  [ -n "$t" ] || return 1
+  printf '%s\n' "$t" | grep -qE 'to select · .* to set as default · .* to cancel' && return 0
+  printf '%s\n' "$t" | grep -qE '^[[:space:]]*Model Name: ' && return 0
+  printf '%s\n' "$t" | grep -qE 'models from configured providers' && return 0
+  return 1
 }
 
 # fm_busy_rovo_tail_busy: the Rovo-only temporary rendered-tail fallback.

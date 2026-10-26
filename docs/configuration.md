@@ -11,7 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, and explicitly installed content-addressed extension packages under `data/extensions/packages/`.
-`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, enabled extension working namespaces under `state/extensions/`, away-mode state, generated Relay artifacts, parent-side remote ledger copies under `state/secondmate-summary-cache/`, one-shot Bearings reconcile requests under `state/reconcile-notify/`, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, enabled extension working namespaces under `state/extensions/`, away-mode state, generated Relay artifacts, parent-side remote ledger copies under `state/secondmate-summary-cache/`, one-shot Bearings reconcile requests under `state/reconcile-notify/`, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), captain prompts captured mid-turn under `state/intake/` (`.pi/extensions/fm-captain-intake.ts`; the "Captain prompt intake" section below), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
 
@@ -33,6 +33,17 @@ The values it writes are `on` and `off`, each followed by one newline; an absent
 The `/calm` command replaces the file atomically before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence.
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
+
+## Captain prompt intake (config/captain-intake)
+
+On a Pi primary, pressing Enter while a turn is running is a Pi steer: the text is injected right after the current tool batch, so the step the model had planned next is displaced and a half-finished intake is abandoned or delayed.
+The optional local, gitignored `config/captain-intake` presence flag turns on the tracked `.pi/extensions/fm-captain-intake.ts` extension, which captures every captain prompt typed while a turn is running, records it verbatim under `state/intake/`, and re-delivers it as a Pi follow-up headed by one plain line naming the intake number and the time it was typed, so the current turn finishes untouched, the prompts are handled next in the order they were typed, and nothing typed is lost.
+With the flag absent the extension is inert and every prompt keeps Pi's native steer; it is read on every prompt, so the flag takes effect without a restart once the extension is loaded, while the extension itself loads only when Pi starts.
+A slash command, a bash-mode line, an explicit Alt+Enter follow-up, and a short whole-message interrupt such as `stop` or `cancel` keep their native lane; the extension's header owns the exact capture decision.
+A record moves between `state/intake/<seq>.prompt` (pending), `state/intake/handled/` (consumed by a run), and `state/intake/released/` (returned to the editor by an abort, so not re-sent); a record still pending at the next session start is re-sent into that session, and `/intake` lists them.
+The generated [Pi supervision protocol](supervision-protocols/pi.md) owns what main does with an intake message.
+`FM_INTAKE_RESEND_GRACE_MS` (default `1500`) bounds the settle-time grace before a record Pi accepted but never consumed is re-sent.
+This flag is a home-local presentation choice and is not inherited by secondmate homes.
 
 ## Pi supervision branch
 
@@ -1178,6 +1189,8 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls
 FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may sit before the watcher attempts doorbell delivery on an idle pane; also the minimum spacing between attempts
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
 FM_TASK_INBOX_LOCK_WAIT_SECS=15   # bounded wait for a task's inbox sequence lock and metadata lock before fm-send refuses the steer as undelivered
+FM_TASK_INBOX_CADENCE_SECS=3600   # how long a worker is expected to take to acknowledge a steering-inbox message
+FM_TASK_INBOX_OVERDUE_SECS=7200   # age past which an unacknowledged message surfaces once as a stale wake naming the fresh-task-id recovery, whatever the pane shows; defaults to twice the cadence (bin/fm-task-inbox-lib.sh owns the signal)
 FM_LOCK_REAP_INTERVAL=300     # seconds between the watcher's detached stale per-task lock sweeps (bin/fm-lock-reap.sh); each reap lands in state/.watch-triage.log; 0 disables
 FM_STALE_LOCK_REAP_SECS=60    # minimum pid-record age before a metadata or inbox lock whose holder is dead or whose pid was recycled may be reaped (bin/fm-wake-lib.sh fm_lock_reap_stale)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
@@ -1219,6 +1232,7 @@ FM_ARM_ATTACH_POLL=0.5  # seconds between checks while fm-watch-arm is attached 
 FM_OPENCODE_ARM_READY_TIMEOUT_MS=50000   # milliseconds the OpenCode primary watcher plugin waits for an arm attempt to report started, healthy, wake, or failure; stays above the arm restart stop-wait plus confirm budget; default 70000 on Windows for the MSYS confirm budget
 FM_PI_ARM_READY_TIMEOUT_MS=50000   # milliseconds the Pi watcher extension waits for a successor arm to report started or attached; stays above the arm restart stop-wait plus confirm budget; default 70000 on Windows for the MSYS confirm budget
 FM_PI_WAKE_FOLD_GRACE_MS=3000   # milliseconds after Pi's agent_settled before the Pi watcher extension treats a still-unconsumed main follow-up as dropped from Pi's queue and redelivers the closes folded under it; docs/watcher-continuity.md owns the fold contract
+FM_INTAKE_RESEND_GRACE_MS=1500  # milliseconds after Pi's agent_settled before the captain-intake extension re-sends a captured prompt Pi accepted but never consumed; the "Captain prompt intake" section owns the record contract
 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=1000   # milliseconds Pi/OpenCode wait for an unready successor arm to exit before abandoning retries
 FM_WATCH_REARM_RETRY_BASE_MS=250   # Pi/OpenCode adapter base delay for continuity restoration retries
 FM_WATCH_REARM_RETRY_MAX_MS=4000   # Pi/OpenCode adapter cap for exponential continuity retry delay

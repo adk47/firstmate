@@ -640,6 +640,32 @@ fi
 # unverified semantic state remains unknown.
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
+  # A crew whose own record says it is waiting in a blocking harness dialog
+  # (the Pi extension's dialog-open event, e.g. the /model picker) can read no
+  # steer until the dialog closes, whichever side of a run it opened on. Only
+  # Escape closes it, and the documented recovery for a backend that cannot
+  # deliver Escape (docs/agent-control.md) is exit plus a fresh spawn; nothing
+  # here claims to clear the dialog.
+  # Read only behind a trusted verdict, so an untrusted or stale record's
+  # event can never report a dialog the classifier itself would not credit.
+  case "${BUSY_VERDICT%% *}" in busy|idle) dialog_trusted=1 ;; *) dialog_trusted=0 ;; esac
+  if [ "$dialog_trusted" -eq 1 ] \
+    && busy_record=$(fm_busy_record_read "$STATE" "$ID" 2>/dev/null) \
+    && [ "$(printf '%s' "$busy_record" | cut -d' ' -f3)" = dialog-open ]; then
+    dialog_detail=$(fm_busy_record_detail "$STATE" "$ID" 2>/dev/null || printf 'unknown')
+    emit blocked pane "harness is waiting in a blocking dialog ($dialog_detail); it cannot read a steer until the dialog closes - recover with bin/fm-control.sh $ID interrupt where the backend can deliver Escape, otherwise exit and respawn a fresh task (stuck-crewmate-recovery)"
+  fi
+  # Pi's built-in /model picker is an overlay the extension cannot observe, so
+  # it is read from the rendered tail by bin/fm-busy-lib.sh's narrow multi-signal
+  # reader; a Pi crew showing it is blocked the same way, with the same recovery.
+  case "$HARNESS" in
+    pi|pi-signed)
+      if pi_tail=$(fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" 40 "$EXPECTED_LABEL" 2>/dev/null) \
+        && printf '%s\n' "$pi_tail" | fm_busy_pi_tail_model_picker; then
+        emit blocked pane "harness is showing its /model picker (select: Select model); it cannot read a steer until the picker closes - recover with bin/fm-control.sh $ID interrupt where the backend can deliver Escape, otherwise exit and respawn a fresh task (stuck-crewmate-recovery)"
+      fi
+      ;;
+  esac
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
