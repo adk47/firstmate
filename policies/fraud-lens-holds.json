@@ -1,0 +1,20 @@
+{
+  "purpose": "Messaging-only fraud-lens holds (credit_review/fraud_lens.py). A user listed here is never sent a credit status note or ask by credit-review.py uvn-status (held as fraud_held, never closed). These are the named accounts the paid-wave-runner-p1 lens held on 2026-10-26 that are NOT in policies/fraud-watchlist.json. This file does not touch any approval path: the approval holds stay in fraud-watchlist.json. Missing or malformed = fatal (the runner sends nothing).",
+  "source": "firstmate data/paid-wave-runner-p1/report.md section 3 rule 1; Fable ruling-intercom-external-id-1026.md Ruling B.1",
+  "entries": [
+    {"reason": "brief watchlist (captain's 5)", "evidence": "paid-wave-runner-p1 report section 3; request-velocity-fraud-fable-s1 report section 4",
+     "user_ids": [350590, 256637, 219737, 305363, 184149], "added_at": "2026-10-26", "added_by": "intercom-extid-reconcile-r1"},
+    {"reason": "a1 audit PULL account", "evidence": "credit-authenticity-audit-a1 report section 7",
+     "user_ids": [195823, 58586, 25291, 95146, 301754, 98515, 33718, 229176, 32731, 307585, 141609, 199411, 47513, 162720, 128308],
+     "added_at": "2026-10-26", "added_by": "intercom-extid-reconcile-r1"},
+    {"reason": "a1 audit HOLD account", "evidence": "credit-authenticity-audit-a1 report section 7",
+     "user_ids": [1387162, 75893, 299503, 335445, 1376456, 1393437, 216092, 100509], "added_at": "2026-10-26", "added_by": "intercom-extid-reconcile-r1"},
+    {"reason": "s1 likely-fraud verdict", "evidence": "request-velocity-fraud-fable-s1 report section 4",
+     "user_ids": [1387162, 58586, 301754, 305363, 307585, 25291, 98515, 350590, 184149, 256637, 219737],
+     "added_at": "2026-10-26", "added_by": "intercom-extid-reconcile-r1"},
+    {"reason": "band-C contradiction-dominant (17/25)", "evidence": "paid-wave-runner-p1 report section 3 rule 1",
+     "user_ids": [53136], "added_at": "2026-10-26", "added_by": "intercom-extid-reconcile-r1"},
+    {"reason": "linked to a1 HOLD 335445", "evidence": "paid-wave-runner-p1 report section 3 rule 1",
+     "user_ids": [340552], "added_at": "2026-10-26", "added_by": "intercom-extid-reconcile-r1"}
+  ]
+}

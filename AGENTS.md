@@ -567,6 +567,10 @@ request). Retro take-backs are role-scoped and run from a named human's own sess
 The "we added your credit, please help us verify it" note to users goes ONLY through
 `scripts/intercom-verify-request.sh` (fixed copy, captain-approved, idempotent via the
 verify ledger); see `docs/credit-verification/verify-request-notes.md`.
+Its identity gate (Intercom external_id = the account's professional id) is never loosened. Wrong
+or empty Intercom ids are fixed in the data, only by `credit-review.py intercom-reconcile`, which is
+audited and revertible. Every status note passes `credit_review/fraud_lens.py` first. See
+`docs/credit-verification/intercom-identity-reconcile.md`.
 
 Every credit-trust AI call goes through `scripts/credit_trust/llm.py` (Codex on the
 subscription, tool-less via `scripts/lib/codex-judge-exec.sh` -> Jev), which writes

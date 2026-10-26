@@ -49,6 +49,17 @@ Subcommands:
            in the user's most recent open conversation (14 days) if any, else email.
            --campaign status-doc-received|status-team-review sends the no-ask
            status notes instead (rules: verify-request-notes.md).
+  intercom-reconcile
+           Fable ruling-intercom-external-id-1026 Ruling A: for users the gate refused on
+           identity (external_id mismatch / empty / several contacts) classify the Intercom
+           contact A1-A5 and, for A1/A2/A4 rows meeting every write condition, set its
+           external_id to the account's professional id (ledger row with the old id first;
+           --revert <run_id>; 50 writes on the first run). Dry run by default; apply needs
+           --approved <dry-run json>. Never messages anyone. Kill switch:
+           /etc/hydra/intercom-identity-reconcile.disabled.
+  fraud-lens
+           Fable Ruling B: build the paid never-contacted population and split it into
+           fraud-held / ask-only (uvn-status only) / clean, before the census lists (read-only).
   withdrawal-confirm
            Firstmate 061: confirm requester-withdrawn credit requests through the
            gate's withdrawal-confirm campaign. --request-ids id[:conversation],...
@@ -101,6 +112,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from credit_review import admin as admin_api  # noqa: E402
 from credit_review import evaluate  # noqa: E402
+from credit_review import fraud_lens  # noqa: E402
+from credit_review import intercom_reconcile  # noqa: E402
 from credit_review import verify_ledger  # noqa: E402
 from credit_review import uvn_status  # noqa: E402
 from credit_review import withdrawal_confirm  # noqa: E402
@@ -556,6 +569,61 @@ def cmd_uvn_status(args: argparse.Namespace) -> int:
     return 1 if report.failed else 0
 
 
+def cmd_intercom_reconcile(args: argparse.Namespace) -> int:
+    if intercom_reconcile.KILL_SWITCH.exists():
+        log(f"intercom-reconcile kill switch present at {intercom_reconcile.KILL_SWITCH}; nothing run")
+        print("NO_REPLY")
+        return 0
+    if args.revert:
+        rv = intercom_reconcile.revert(args.revert, mode=args.mode, ledger_path=args.ledger)
+        log("intercom-reconcile revert " + json.dumps({k: v for k, v in vars(rv).items() if k != "rows"}))
+        if rv.halted:
+            print(f"INTERCOM RECONCILE REVERT: nothing done: {rv.halted}.")
+            return 1
+        if args.out:
+            Path(args.out).mkdir(mode=0o700, parents=True, exist_ok=True)
+            Path(args.out, f"{rv.run_id}.json").write_text(json.dumps(vars(rv), indent=1))
+        verb = "reverted" if args.mode == "apply" else "would revert"
+        print(f"INTERCOM RECONCILE REVERT ({args.mode}, run {rv.run_id}, of {args.revert}): {verb} {rv.reverted}, "
+              f"failed {rv.failed}, refused (changed since) {rv.refused}, refusal holds restored {rv.holds_restored}.")
+        return 1 if rv.failed else 0
+    classes = tuple(c.strip() for c in args.classes.split(",") if c.strip())
+    bad = [c for c in classes if c not in ("A1", "A2", "A4")]
+    if bad or not classes:
+        print(f"--classes takes A1, A2 and/or A4 (the only writable classes); got {args.classes!r}", file=sys.stderr)
+        return 2
+    res = intercom_reconcile.run(mode=args.mode, ledger_path=args.ledger, max_users=args.max_users,
+                                 approved=args.approved, classes=classes, segment=args.segment)
+    log("intercom-reconcile " + json.dumps(intercom_reconcile.summary(res)))
+    if not res.halted:
+        files = intercom_reconcile.write_outputs(res, args.out)
+        print(intercom_reconcile.render(res) + " Files: " + ", ".join(files))
+    else:
+        print(intercom_reconcile.render(res))
+    return 1 if res.halted or res.failed or res.unverified else 0
+
+
+def cmd_fraud_lens(args: argparse.Namespace) -> int:
+    query = verify_notify.trino
+    lens = fraud_lens.default_lens(query)
+    if args.users:
+        ids = [int(x) for x in Path(args.users).read_text().split() if x.strip().isdigit()]
+        counts: dict = {"input_users": len(ids)}
+    else:
+        ids, counts = fraud_lens.paid_never_contacted(query, args.ledger or verify_ledger.DEFAULT_PATH, since=args.since)
+    out = fraud_lens.split(ids, lens)
+    d = Path(args.out)
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (d / "never.txt").write_text("".join(f"{u}\n" for u in ids))
+    (d / "clean.txt").write_text("".join(f"{u}\n" for u in out["clean"]))
+    (d / "ask-only.txt").write_text("".join(f"{u}\n" for u in out["ask_only"]))
+    (d / "fraud-held.json").write_text(json.dumps(out["held"], indent=1))
+    summ = {**counts, **out["counts"], "single_signal_hold_min": fraud_lens.SINGLE_SIGNAL_HOLD_MIN}
+    (d / "lens-summary.json").write_text(json.dumps(summ, indent=1))
+    print("FRAUD LENS: " + json.dumps(summ) + f" Files in {d} (ask-only.txt users go to the uvn-status list only).")
+    return 0
+
+
 def cmd_withdrawal_confirm(args: argparse.Namespace) -> int:
     if CREDIT_OPS_NOTES_KILL_SWITCH.exists():
         log(f"credit-ops-notes kill switch present at {CREDIT_OPS_NOTES_KILL_SWITCH}; nothing sent")
@@ -811,6 +879,28 @@ def parser() -> argparse.ArgumentParser:
     us.add_argument("--preview", default=None, help="dry-run: write each user's rendered note to this dir as <user id>.txt (0700)")
     us.add_argument("--proof-on-file", default=None, metavar="FILE")
     us.set_defaults(fn=cmd_uvn_status)
+
+    ir = sub.add_parser("intercom-reconcile", help="Fable ruling A: reconcile Intercom external_id for identity-refused "
+                                                    "users (dry run by default; never messages)")
+    ir.add_argument("--segment", choices=["paid"], default="paid")
+    ir.add_argument("--mode", choices=["dry-run", "apply"], default="dry-run")
+    ir.add_argument("--max-users", type=int, default=intercom_reconcile.FIRST_RUN_CAP,
+                    help=f"writes this run (the first apply run ever is capped at {intercom_reconcile.FIRST_RUN_CAP})")
+    ir.add_argument("--approved", default=None, metavar="DRY_RUN_JSON",
+                    help="apply: the dry-run file firstmate approved; only its `fix` rows, still `fix` now, are written")
+    ir.add_argument("--classes", default="A1,A2,A4", help="apply: which writable classes to write (default A1,A2,A4)")
+    ir.add_argument("--revert", default=None, metavar="RUN_ID", help="restore the old external_id of every contact "
+                                                                    "that run changed (with --mode apply)")
+    ir.add_argument("--out", default="/var/lib/hydra/credit-review/intercom-reconcile",
+                    help="directory for the table, rows and cs list (0700; ids only, no emails)")
+    ir.set_defaults(fn=cmd_intercom_reconcile)
+
+    fl = sub.add_parser("fraud-lens", help="Fable ruling B: split the paid never-contacted population into "
+                                           "fraud-held / ask-only / clean (read-only)")
+    fl.add_argument("--users", default=None, help="user ids, one per line (default: build the paid never-contacted set)")
+    fl.add_argument("--since", default="2026-10-20", help="ledger `sent` rows since this date count as contacted")
+    fl.add_argument("--out", required=True, help="output directory (0700)")
+    fl.set_defaults(fn=cmd_fraud_lens)
 
     wc = sub.add_parser("withdrawal-confirm", help="confirm requester-withdrawn credit requests (firstmate 061)",
                         description="Exit status: 0 = every requested confirmation was sent or already sent; "
