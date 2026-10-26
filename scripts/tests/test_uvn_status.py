@@ -15,7 +15,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from credit_review import uvn_status, verify_ledger, verify_notify, withdrawal_confirm  # noqa: E402
+from credit_review import fraud_lens, uvn_status, verify_ledger, verify_notify, withdrawal_confirm  # noqa: E402
+
+# The fake replica below answers every non-users query with request rows, so the real fraud lens
+# (its own queries) is replaced here by one that holds nobody. The lens itself, and the runner's
+# use of it (fatal load, fraud_held, ask_only), are tested in test_fraud_lens.py.
+uvn_status.DEFAULT_LENS = lambda query, **kw: fraud_lens.null_lens
 
 NOW = datetime.now(timezone.utc).replace(microsecond=0)  # proof-on-file freshness is judged on the real clock
 FIXED = datetime(2026, 10, 20, 9, 0, tzinfo=timezone.utc)
