@@ -725,8 +725,8 @@ HOOK
   [ "$status" -ne 0 ]
   [[ "$output" == *"removed the local-only tag for the next retry"* ]]
   local_tag="$(sed -n 's/.*Tagging \(v[0-9.]*\) (annotated).*/\1/p' <<<"$output" | head -1)"; [ -n "$local_tag" ]
-  ! git -C "$HYDRA_RELEASE_STATE_DIR/repos/auth" rev-parse -q --verify "refs/tags/$local_tag" >/dev/null 2>&1
-  ! git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$local_tag" >/dev/null 2>&1
+  if git -C "$HYDRA_RELEASE_STATE_DIR/repos/auth" rev-parse -q --verify "refs/tags/$local_tag" >/dev/null 2>&1; then false; fi
+  if git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$local_tag" >/dev/null 2>&1; then false; fi
   [ ! -s "$STUB_RELEASE_CREATE" ]
   grep -q "last_marker=$BASE_SHA" "$HYDRA_RELEASE_STATE_DIR/announced/auth"
 
@@ -790,7 +790,7 @@ STUB
   [[ "$output" == *"origin could not be checked"* ]]
   tag="$(sed -n 's/.*Tagging \(v[0-9.]*\) (annotated).*/\1/p' <<<"$output" | head -1)"; [ -n "$tag" ]
   git -C "$HYDRA_RELEASE_STATE_DIR/repos/auth" rev-parse -q --verify "refs/tags/$tag" >/dev/null
-  ! git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1
+  if git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1; then false; fi
   [ ! -s "$STUB_RELEASE_CREATE" ]
 
   rm "$ORIGIN/hooks/pre-receive"
