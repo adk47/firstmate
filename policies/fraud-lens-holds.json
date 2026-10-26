@@ -1,0 +1,17 @@
+{
+  "purpose": "Messaging-only fraud-lens holds (credit_review/fraud_lens.py). A user listed here is never sent a credit status note or ask by credit-review.py uvn-status (held as fraud_held, never closed). This is ONLY for accounts we must not acknowledge at all; it is not the approval policy. Holding a user's credits for review (never auto-approved) is policies/fraud-watchlist.json, and being on the watchlist never blocks communication (Fable ruling-watchlist-consistency-1026 section 2). An entry with review_by (YYYY-MM-DD) stops applying after that UTC day unless someone cites evidence and extends it. Missing or malformed = fatal (the runner sends nothing).",
+  "source": "Fable ruling-watchlist-consistency-1026 section 4 (supersedes the 2026-10-26 paid-wave-runner-p1 scratch list)",
+  "entries": [
+    {"reason": "banned: a1 PULL account FRAUD-CONFIRMED on re-review; the captain kept them banned (no account to message)",
+     "evidence": "pull-rereview-fable-r1 report 2026-10-12; captain 2026-10-12 21:0xZ \"do this\" (keep banned 58586, 162720, 301754)",
+     "note": "The captain restored the other 12 a1 PULL accounts and all 8 a1 HOLD accounts are LIKELY-LEGIT or restored: none of them is held here; their credits stay held through policies/fraud-watchlist.json where Fable's ruling keeps them.",
+     "user_ids": [58586, 162720, 301754], "added_at": "2026-10-26", "added_by": "intercom-extid-reconcile-r1"},
+    {"reason": "captain's 5 (s1 velocity-fraud verdicts)",
+     "evidence": "request-velocity-fraud-fable-s1 report section 4: 350590 review -> likely-fraud, 184149 likely-fraud, 256637 likely-fraud (new), 219737 padding / likely-fraud, 305363 likely-fraud linked pair with 301754",
+     "user_ids": [350590, 256637, 219737, 305363, 184149], "added_at": "2026-10-26", "added_by": "intercom-extid-reconcile-r1"},
+    {"reason": "band-C contradiction-dominant (17/25)",
+     "evidence": "paid-wave-runner-p1 report section 3 rule 1; held until review_by, then dropped unless evidence is cited (Fable ruling-watchlist-consistency-1026 section 4)",
+     "review_by": "2026-11-02",
+     "user_ids": [53136], "added_at": "2026-10-26", "added_by": "intercom-extid-reconcile-r1"}
+  ]
+}

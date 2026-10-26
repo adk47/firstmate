@@ -23,6 +23,8 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 # Slack limits: header plain_text 150, section text 3000. The section cap
 # is held well under the hard limit so an overflow footer always fits.
@@ -139,6 +141,174 @@ def read_lines(path):
         # truthy before cleaning and empty after, and an empty-but-present
         # highlights list would suppress the deterministic fallback.
         return [c for c in (l.strip().lstrip("-• ").strip() for l in fh) if c]
+
+
+# ── Daily digest ───────────────────────────────────────────────────
+# `release_blockkit.py --digest <in.json> <out.json>` renders the 08:00
+# America/New_York roll-up of the last 24 h of releases, one section per
+# project. It reuses the helpers above (escape, notes parser, PR linkify,
+# clamp) so there is ONE renderer for #releases. The zone is the IANA name,
+# never a fixed UTC offset: Miami is EDT until the first Sunday of November
+# and EST after, so a hardcoded offset is a bug that lands in November.
+DIGEST_TZ = ZoneInfo("America/New_York")
+# Slack caps a context element's text at 2000 characters.
+CONTEXT_MAX = 2000
+# Sections that never read as "what shipped" to the company.
+DIGEST_SKIP_SECTIONS = {"Chores", "Docs"}
+
+
+def parse_ts(text):
+    """Parse an ISO-8601 instant (GitHub's trailing Z included) to aware UTC."""
+    dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        raise ValueError("timestamp has no offset: %r" % text)
+    return dt.astimezone(timezone.utc)
+
+
+def digest_local_date(now):
+    """The America/New_York calendar date the digest is filed under."""
+    return now.astimezone(DIGEST_TZ).date()
+
+
+def digest_slot_utc(day):
+    """The UTC instant of 08:00 America/New_York on the given date."""
+    return datetime(day.year, day.month, day.day, 8, 0, tzinfo=DIGEST_TZ).astimezone(timezone.utc)
+
+
+def digest_slot_for(now):
+    """The most recent 08:00 America/New_York slot at or before `now`."""
+    now = now.astimezone(timezone.utc)
+    day = digest_local_date(now)
+    slot = digest_slot_utc(day)
+    return slot if slot <= now else digest_slot_utc(day - timedelta(days=1))
+
+
+def digest_since(value):
+    """The window start a stored watermark names: an ISO date (the NY date of
+    the last posted slot) or an ISO-8601 instant. Raises ValueError otherwise."""
+    value = value.strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return digest_slot_utc(datetime.strptime(value, "%Y-%m-%d").date())
+    return parse_ts(value)
+
+
+def digest_window(now, since=None):
+    """[since or the previous slot, the most recent slot <= now) as aware UTC.
+
+    The upper bound is the SCHEDULED slot, never `now`: a Persistent catch-up
+    at 07:00 or a delayed run at 09:30 must report the window the punctual
+    08:00 run would have reported, or the hour between the run and the slot
+    lands in no digest (early) or in two digests (late). The previous slot is
+    slot arithmetic, not end - 24 h: consecutive fires are 25 h apart on the
+    fall-back day and 23 h apart on the spring-forward day. `since` is the
+    last posted slot, so a multi-day outage is reported in one window."""
+    end = digest_slot_for(now)
+    prev = digest_slot_utc(digest_local_date(end) - timedelta(days=1))
+    start = since if (since is not None and since < end) else prev
+    return start, end
+
+
+def digest_bullets(release):
+    """Plain-language highlights when stored, else the commit-log bullets."""
+    hl = [h for h in release.get("highlights") or [] if h.strip()]
+    if hl:
+        return hl
+    out = []
+    for title, bullets in parse_notes(release.get("body") or ""):
+        if title not in DIGEST_SKIP_SECTIONS:
+            out.extend(bullets)
+    return out
+
+
+def clamp_links(links, limit=CONTEXT_MAX):
+    """Join release links with ' · ', keeping the text inside Slack's context cap."""
+    out, used = [], 0
+    for i, link in enumerate(links):
+        more = "…+%d more" % (len(links) - i)
+        if used + len(link) + 3 + len(more) > limit:
+            out.append(more)
+            break
+        out.append(link)
+        used += len(link) + 3
+    return " · ".join(out)
+
+
+def build_digest(data):
+    """Return the Slack payload for a digest input document."""
+    now = parse_ts(data["now"])
+    since = digest_since(data["since"]) if data.get("since") else None
+    start, end = digest_window(now, since)
+    label = digest_local_date(end).strftime("%a %-d %b %Y")
+    # More than one slot (an outage or a missed timer) must not claim 24 h.
+    multi = start < digest_slot_utc(digest_local_date(end) - timedelta(days=1))
+    if multi:
+        title = "Releases since %s · %s" % (digest_local_date(start).strftime("%a %-d %b %Y"), label)
+        quiet = "No releases since %s." % digest_local_date(start).strftime("%a %-d %b %Y")
+    else:
+        title = "Last 24h in production · %s" % label
+        quiet = "No releases in the last 24 h."
+    blocks = [{
+        "type": "header",
+        "text": {"type": "plain_text", "text": title, "emoji": True},
+    }]
+    total = 0
+    for proj in data.get("projects", []):
+        rels = []
+        for r in proj.get("releases", []):
+            if r.get("draft") or r.get("prerelease"):
+                continue
+            when = parse_ts(r["published_at"])
+            if start <= when < end:
+                rels.append((when, r))
+        if not rels:
+            continue
+        rels.sort(key=lambda x: x[0])
+        total += len(rels)
+        seen, bullets = set(), []
+        for _, r in rels:
+            for b in digest_bullets(r):
+                key = re.sub(r"\W+", " ", b).strip().lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    bullets.append(linkify_prs(mrkdwn_escape(b), proj.get("repo", "")))
+        links = clamp_links(["<%s|%s>" % (r["url"], mrkdwn_escape(r["tag"])) for _, r in rels])
+        head = "*%s %s* — %d release%s\n" % (
+            proj.get("emoji", ""), mrkdwn_escape(proj["display"]), len(rels), "" if len(rels) == 1 else "s")
+        body = clamp_bullets(bullets, head) if bullets else head.rstrip("\n")
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": links}]})
+    if total == 0:
+        # One quiet line, still posted: silence would be indistinguishable
+        # from a broken timer.
+        blocks.append({"type": "context", "elements": [
+            {"type": "mrkdwn", "text": quiet}]})
+    payload = {
+        "text": "%s — %d release%s" % (title, total, "" if total == 1 else "s"),
+        "unfurl_links": False,
+        "unfurl_media": False,
+        "blocks": blocks,
+    }
+    if data.get("channel"):
+        payload["channel"] = data["channel"]
+    return payload
+
+
+def digest_main(argv):
+    if argv[0] == "--digest-slot-date":
+        print(digest_local_date(digest_slot_for(parse_ts(argv[1]))).isoformat())
+        return
+    if argv[0] == "--digest-since":
+        # Exit 1 on a value the renderer would reject, so the shell can warn
+        # and fall back instead of bricking the digest on a corrupt state file.
+        try:
+            digest_since(argv[1])
+        except ValueError:
+            sys.exit(1)
+        return
+    with open(argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+    with open(argv[2], "w", encoding="utf-8") as fh:
+        json.dump(build_digest(data), fh, ensure_ascii=False)
 
 
 def main():
@@ -279,4 +449,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] in ("--digest", "--digest-slot-date", "--digest-since"):
+        digest_main(sys.argv[1:])
+    else:
+        main()

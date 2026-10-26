@@ -367,6 +367,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/sentry-issue-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/sentry-issue-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/release-digest.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/release-digest.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/clickup-sla-digest.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/clickup-sla-digest.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh" ]] \
@@ -2454,6 +2456,44 @@ ensure_timer_armed() {
 
 ensure_timer_armed hydra-release-watch.timer
 
+# ─── Daily #releases digest (08:00 America/New_York) ──────────
+# Rolls up the last 24 h of releases, one section per project, via
+# scripts/release-digest.sh. OnCalendar carries the IANA zone, so the fire
+# time follows EDT/EST by itself (12:00 UTC until the first Sunday of
+# November, 13:00 UTC after). NEVER write a fixed UTC offset here.
+cat > /etc/systemd/system/hydra-release-digest.service << RELDIGESTSVC
+[Unit]
+Description=Hydra daily release digest (last 24h of releases, per project, in #releases)
+
+[Service]
+Type=oneshot
+ExecStart=$HYDRA_ROOT/scripts/release-digest.sh
+EnvironmentFile=-/etc/hydra/releases.env
+TimeoutStartSec=600
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=append:/var/log/hydra-release-digest.log
+StandardError=append:/var/log/hydra-release-digest.log
+RELDIGESTSVC
+
+cat > /etc/systemd/system/hydra-release-digest.timer << RELDIGESTTMR
+[Unit]
+Description=Post the daily release digest at 08:00 Miami time
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 America/New_York
+# Persistent: a node that was down at 08:00 posts on boot. The script is
+# idempotent per New York day, so a catch-up can never double-post.
+Persistent=true
+Unit=hydra-release-digest.service
+
+[Install]
+WantedBy=timers.target
+RELDIGESTTMR
+
+systemctl daemon-reload
+ensure_timer_armed hydra-release-digest.timer
+
 # ─── Daily self-improvement audit (08:00 UTC) ─────────────────
 # Was a hand-installed root crontab line (untracked, lost on node
 # rebuild). Now a tracked systemd timer. The script is synced into
@@ -3295,6 +3335,7 @@ AUX_ONFAILURE_UNITS=(
   hydra-jev-shadow-prune.service
   hydra-main-prune-restart.service
   hydra-peer-labels.service
+  hydra-release-digest.service
   hydra-release-watch.service
   hydra-release.service
   hydra-tmp-reaper.service

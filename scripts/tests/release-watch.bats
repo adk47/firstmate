@@ -85,7 +85,7 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 _build_script_tree() {
   mkdir -p "$TEST_TMPDIR/scripts/lib"
   cp "$HYDRA_REPO/scripts/release-watch.sh" "$HYDRA_REPO/scripts/release.sh" \
-     "$TEST_TMPDIR/scripts/"
+     "$HYDRA_REPO/scripts/release-digest.sh" "$TEST_TMPDIR/scripts/"
   cp "$HYDRA_REPO/scripts/lib/release-announce.sh" \
      "$HYDRA_REPO/scripts/lib/release_blockkit.py" \
      "$HYDRA_REPO/scripts/lib/slack-notify.sh" "$TEST_TMPDIR/scripts/lib/"
@@ -1958,4 +1958,451 @@ JSON
   run "$SCRIPT" --repo=auth --no-highlights
   [ "$status" -ne 0 ]
   [[ "$output" != *"not re-paged"* ]]
+}
+
+
+# ─── release-digest.sh: the 08:00 America/New_York roll-up ──────────────────
+# NOW is fixed so the 24 h window is deterministic: 22 Oct 2026 12:00Z is
+# 08:00 EDT. gh is replaced by a releases-only stub (the suite's main stub
+# models sha statuses, not release listings).
+
+DIGEST_NOW="2026-10-22T12:00:00Z"
+
+_digest_gh_stub() {
+  cat > "$STUBBIN/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_GH_ARGV"
+[ -n "$STUB_GH_FAIL" ] && { echo "gh: could not reach github.com" >&2; exit 1; }
+filter=""; prev=""
+for a in "$@"; do [ "$prev" = "--jq" ] && filter="$a"; prev="$a"; done
+case "$2" in
+  repos/*/releases*)
+    f="$TEST_TMPDIR/releases-$(printf '%s' "$2" | sed 's#repos/Muso-AI/\([^/]*\)/releases.*#\1#').json"
+    [ -f "$f" ] || { echo '[]' | jq -c "$filter"; exit 0; }
+    # Serve ONE page, like GitHub: a stub that returned the whole fixture
+    # would let a missing page loop pass. STUB_GH_IGNORE_PAGE=1 models an API
+    # that ignores `page` (every request returns page 1).
+    per="$(sed -n 's/.*per_page=\([0-9][0-9]*\).*/\1/p' <<<"$2")"; per="${per:-30}"
+    page="$(sed -n 's/.*[?&]page=\([0-9][0-9]*\).*/\1/p' <<<"$2")"; page="${page:-1}"
+    [ -n "$STUB_GH_IGNORE_PAGE" ] && page=1
+    jq -c --argjson per "$per" --argjson page "$page" ".[(\$page-1)*\$per : \$page*\$per] | $filter" "$f"; exit 0 ;;
+esac
+exit 0
+STUB
+  chmod +x "$STUBBIN/gh"
+}
+
+# _rel <repo-slug> <tag> <iso-published-at> <body>
+_rel() {
+  local f="$TEST_TMPDIR/releases-$1.json"
+  [ -f "$f" ] || echo '[]' > "$f"
+  jq --arg t "$2" --arg p "$3" --arg b "$4" \
+    '. + [{tag_name:$t, html_url:("https://github.com/x/"+$t), published_at:$p, body:$b, draft:false, prerelease:false}]' \
+    "$f" > "$f.new" && mv "$f.new" "$f"
+}
+
+_digest() { DIGEST_NOW="${DIGEST_NOW_OVERRIDE:-$DIGEST_NOW}" run bash "$TEST_TMPDIR/scripts/release-digest.sh" "$@"; }
+_posted_text() { jq -r '[.[] | (.text.text? // (.elements[]?.text))] | join("\n")' "$TEST_TMPDIR/posted.json"; }
+
+@test "digest: only releases in [previous 08:00 slot, now) appear; the lower bound is inclusive" {
+  _digest_gh_stub
+  _rel core-backend v-in-23h  "2026-10-21T13:00:00Z" $'### Fixes\n\n- fix: in the window'
+  _rel core-backend v-edge    "2026-10-21T12:00:00Z" $'### Fixes\n\n- fix: exactly 24h old'
+  _rel core-backend v-old     "2026-10-21T11:59:59Z" $'### Fixes\n\n- fix: too old'
+  _rel core-backend v-now     "2026-10-22T12:00:00Z" $'### Fixes\n\n- fix: published at now'
+  _digest
+  [ "$status" -eq 0 ]
+  t="$(_posted_text)"
+  [[ "$t" == *"in the window"* ]]
+  [[ "$t" == *"exactly 24h old"* ]]
+  [[ "$t" != *"too old"* ]]
+  [[ "$t" != *"published at now"* ]]
+}
+
+@test "digest: one section per project, quiet projects omitted, bullets de-duplicated" {
+  _digest_gh_stub
+  _rel core-backend v1 "2026-10-22T01:00:00Z" $'### Fixes\n\n- fix: same line (#7)'
+  _rel core-backend v2 "2026-10-22T02:00:00Z" $'### Fixes\n\n- fix: same line (#7)\n- fix: other line'
+  _rel web-credits-next w1 "2026-10-22T03:00:00Z" $'### Features\n\n- feat: web thing'
+  _digest
+  [ "$status" -eq 0 ]
+  t="$(_posted_text)"
+  [[ "$t" == *"muso platform (backend)* — 2 releases"* ]]
+  [[ "$t" == *"muso.ai web* — 1 release"* ]]
+  [[ "$t" != *"hydra (agent ops)"* ]]
+  [ "$(grep -c 'same line' <<<"$t")" -eq 1 ]
+  [[ "$t" == *"<https://github.com/Muso-AI/core-backend/pull/7|#7>"* ]]
+  grep -q 'C0TESTREL' "$STUB_MUSO_ARGV"
+}
+
+@test "digest: stored highlights replace the commit-log bullets" {
+  _digest_gh_stub
+  mkdir -p "$HYDRA_RELEASE_STATE_DIR/highlights"
+  _rel web-credits-next w1 "2026-10-22T03:00:00Z" $'### Features\n\n- feat: raw commit words'
+  printf 'credits show up right after a claim\n' > "$HYDRA_RELEASE_STATE_DIR/highlights/web-credits-next-w1.txt"
+  _digest
+  t="$(_posted_text)"
+  [[ "$t" == *"credits show up right after a claim"* ]]
+  [[ "$t" != *"raw commit words"* ]]
+}
+
+@test "digest: an empty day posts ONE quiet line, never a crash and never silence" {
+  _digest_gh_stub
+  _digest
+  [ "$status" -eq 0 ]
+  [ -s "$TEST_TMPDIR/posted.json" ]
+  [[ "$(_posted_text)" == *"No releases in the last 24 h."* ]]
+  [ "$(jq '[.[] | select(.type=="section")] | length' "$TEST_TMPDIR/posted.json")" -eq 0 ]
+}
+
+@test "digest: headed with the New York date, in EDT and in EST" {
+  _digest_gh_stub
+  _digest
+  [[ "$(jq -r '.[0].text.text' "$TEST_TMPDIR/posted.json")" == "Last 24h in production · Thu 22 Oct 2026" ]]
+  # 13:00Z on 5 Nov is 08:00 EST (the clocks went back on 1 Nov): same local date.
+  # Forget the 22 Oct watermark: this case is about the label, not a 14-day catch-up.
+  rm -f "$HYDRA_RELEASE_STATE_DIR/digest/last-posted"
+  DIGEST_NOW_OVERRIDE="2026-11-05T13:00:00Z" _digest
+  [[ "$(jq -r '.[0].text.text' "$TEST_TMPDIR/posted.json")" == "Last 24h in production · Thu 5 Nov 2026" ]]
+}
+
+@test "digest: 08:00 America/New_York is 12:00Z in EDT and 13:00Z in EST" {
+  run python3 - "$HYDRA_REPO/scripts/lib" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1])
+from datetime import date
+import release_blockkit as b
+for d, hh in ((date(2026,10,22),12), (date(2026,11,5),13), (date(2026,3,7),13), (date(2026,3,9),12)):
+    got = b.digest_slot_utc(d)
+    assert got.hour == hh and got.minute == 0, (d, got)
+    assert b.digest_local_date(got) == d
+print("ok")
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "digest: fall back (25 h between fires): a release in the extra hour is still in a digest" {
+  _digest_gh_stub
+  # 31 Oct 08:00 EDT = 12:00Z; 1 Nov 08:00 EST = 13:00Z. now-24h would start at 31 Oct 13:00Z and drop 12:30Z.
+  _rel core-backend v-extra-hour "2026-10-31T12:30:00Z" $'### Fixes\n\n- fix: published in the 25th hour'
+  DIGEST_NOW_OVERRIDE="2026-11-01T13:00:00Z" _digest
+  [ "$status" -eq 0 ]
+  [[ "$(_posted_text)" == *"published in the 25th hour"* ]]
+}
+
+@test "digest: spring forward (23 h between fires): a release is reported once, not twice" {
+  _digest_gh_stub
+  # 13 Mar 08:00 EST = 13:00Z; 14 Mar 08:00 EDT = 12:00Z. now-24h would start at 13 Mar 12:00Z and repeat 12:30Z.
+  _rel core-backend v-already-sent "2027-03-13T12:30:00Z" $'### Fixes\n\n- fix: already in the 13 Mar digest'
+  _rel core-backend v-new "2027-03-13T13:30:00Z" $'### Fixes\n\n- fix: new since the 13 Mar digest'
+  DIGEST_NOW_OVERRIDE="2027-03-14T12:00:00Z" _digest
+  [ "$status" -eq 0 ]
+  t="$(_posted_text)"
+  [[ "$t" != *"already in the 13 Mar digest"* ]]
+  [ "$(grep -c 'new since the 13 Mar digest' <<<"$t")" -eq 1 ]
+}
+
+_watermark() { mkdir -p "$HYDRA_RELEASE_STATE_DIR/digest"; printf '%s\n' "$1" > "$HYDRA_RELEASE_STATE_DIR/digest/last-posted"; }
+_recorded() { cat "$HYDRA_RELEASE_STATE_DIR/digest/last-posted"; }
+_count() { grep -c "$1" <<<"$(_posted_text)" || true; }
+
+@test "digest: a catch-up run before 08:00 reports the previous slot's window and records that slot, so no release is lost" {
+  _digest_gh_stub
+  _watermark 2026-11-01
+  _rel core-backend v-mon "2026-11-02T10:00:00Z" $'### Fixes\n\n- fix: monday thing'
+  _rel core-backend v-gap "2026-11-03T12:30:00Z" $'### Fixes\n\n- fix: tuesday seven thirty'
+  # Tue 3 Nov 07:00 EST: the Mon 08:00 slot is the latest one at or before now.
+  DIGEST_NOW_OVERRIDE="2026-11-03T12:00:00Z" _digest
+  [ "$status" -eq 0 ]
+  [[ "$(_posted_text)" == *"monday thing"* ]]
+  [[ "$(_posted_text)" != *"tuesday seven thirty"* ]]
+  [ "$(_recorded)" = "2026-11-02" ]
+  # The punctual run then reports Tue's window, which holds the 07:30 release.
+  DIGEST_NOW_OVERRIDE="2026-11-03T13:05:00Z" _digest
+  [ "$status" -eq 0 ]
+  [ "$(_count 'tuesday seven thirty')" -eq 1 ]
+  [ "$(_recorded)" = "2026-11-03" ]
+}
+
+@test "digest: a late run reports the slot's window, so a release after the slot is not counted twice" {
+  _digest_gh_stub
+  _watermark 2026-11-02
+  _rel core-backend v-after-slot "2026-11-03T13:30:00Z" $'### Fixes\n\n- fix: after the tuesday slot'
+  DIGEST_NOW_OVERRIDE="2026-11-03T14:30:00Z" _digest
+  [ "$status" -eq 0 ]
+  [[ "$(_posted_text)" != *"after the tuesday slot"* ]]
+  DIGEST_NOW_OVERRIDE="2026-11-04T13:00:00Z" _digest
+  [ "$status" -eq 0 ]
+  [ "$(_count 'after the tuesday slot')" -eq 1 ]
+}
+
+@test "digest: a multi-day outage is one window from the last posted slot, across the DST change, headed honestly" {
+  _digest_gh_stub
+  _watermark 2026-10-30
+  _rel core-backend v-oct31 "2026-10-31T10:00:00Z" $'### Fixes\n\n- fix: thing on 31 oct'
+  _rel core-backend v-nov1 "2026-11-01T10:00:00Z" $'### Fixes\n\n- fix: thing on 1 nov'
+  _rel core-backend v-nov2 "2026-11-02T10:00:00Z" $'### Fixes\n\n- fix: thing on 2 nov'
+  _rel core-backend v-before "2026-10-30T11:59:00Z" $'### Fixes\n\n- fix: already posted on 30 oct'
+  DIGEST_NOW_OVERRIDE="2026-11-03T13:00:00Z" _digest
+  [ "$status" -eq 0 ]
+  t="$(_posted_text)"
+  for w in "thing on 31 oct" "thing on 1 nov" "thing on 2 nov"; do [ "$(grep -c "$w" <<<"$t")" -eq 1 ]; done
+  [[ "$t" != *"already posted on 30 oct"* ]]
+  h="$(jq -r '.[0].text.text' "$TEST_TMPDIR/posted.json")"
+  [[ "$h" != *"Last 24h"* ]]
+  [[ "$h" == "Releases since Fri 30 Oct 2026 · Tue 3 Nov 2026" ]]
+}
+
+@test "digest: windows are contiguous slot to slot, across both DST changes and every kind of run time" {
+  run python3 - "$HYDRA_REPO/scripts/lib" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1])
+from datetime import datetime, timedelta
+import release_blockkit as b
+Z = lambda t: datetime.fromisoformat(t.replace("Z", "+00:00"))
+runs = ["2026-10-30T12:00:00Z", "2026-10-31T12:00:00Z",   # punctual EDT
+        "2026-11-01T11:00:00Z",                           # catch-up before the slot
+        "2026-11-01T13:00:00Z", "2026-11-02T14:30:00Z",   # punctual EST, then late
+        "2026-11-06T13:00:00Z",                           # 3-day gap
+        "2027-03-13T13:00:00Z", "2027-03-14T11:00:00Z", "2027-03-14T12:00:00Z", "2027-03-16T12:00:00Z"]
+last_end = None
+for r in runs:
+    now = Z(r)
+    start, end = b.digest_window(now, last_end)
+    assert b.digest_slot_utc(b.digest_local_date(end)) == end, (r, end)   # end is a slot instant
+    assert end <= now, (r, end)                                           # never reports the future
+    assert start < end, (r, start, end)                                   # half-open, non-empty
+    if last_end is not None and last_end < end:
+        assert start == last_end, (r, start, last_end)                    # contiguous with the last post
+    last_end = end if last_end is None else max(last_end, end)
+for now, hrs in (("2026-11-01T13:00:00Z", 25), ("2027-03-14T12:00:00Z", 23)):
+    s, e = b.digest_window(Z(now))
+    assert e - s == timedelta(hours=hrs), (now, e - s)
+print("ok")
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "digest: a corrupt last-posted warns, falls back to the previous slot, still posts, and records the slot" {
+  _digest_gh_stub
+  _watermark "not-a-date"
+  _rel core-backend v1 "2026-10-22T01:00:00Z" $'### Fixes\n\n- fix: inside the fallback window'
+  _digest
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING"* ]]
+  [[ "$(_posted_text)" == *"inside the fallback window"* ]]
+  [ "$(_recorded)" = "2026-10-22" ]
+  # A date-shaped but impossible value is corrupt too.
+  _watermark "2026-13-45"
+  rm -f "$TEST_TMPDIR/posted.json"
+  _digest
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING"* ]]
+  [ -s "$TEST_TMPDIR/posted.json" ]
+}
+
+@test "digest: a watermark at or after the slot is already posted: exit 0, no Slack call, state untouched" {
+  _digest_gh_stub
+  _watermark 2026-10-23
+  : > "$STUB_MUSO_ARGV"
+  _digest
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already posted"* ]]
+  [ ! -s "$STUB_MUSO_ARGV" ]
+  [ "$(_recorded)" = "2026-10-23" ]
+}
+
+@test "digest: --dry-run reads the watermark for an honest preview and leaves last-posted byte-identical" {
+  _digest_gh_stub
+  _watermark 2026-10-20
+  cp "$HYDRA_RELEASE_STATE_DIR/digest/last-posted" "$TEST_TMPDIR/lp.before"
+  _rel core-backend v-old "2026-10-21T13:00:00Z" $'### Fixes\n\n- fix: two slots back'
+  _digest --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"two slots back"* ]]
+  [[ "$output" == *"Releases since"* ]]
+  [ ! -s "$STUB_MUSO_ARGV" ]
+  cmp "$HYDRA_RELEASE_STATE_DIR/digest/last-posted" "$TEST_TMPDIR/lp.before"
+}
+
+@test "digest: the timer is keyed to the IANA zone, never a fixed UTC offset" {
+  # Both greps are scoped to the digest timer's own heredoc: the ClickUp digest
+  # timer carries the identical OnCalendar line, so a whole-file grep is vacuous.
+  # `if grep; then false; fi` because a bare `! grep` is exempt from set -e.
+  local timer
+  timer="$(sed -n '/^cat > .*hydra-release-digest.timer << RELDIGESTTMR$/,/^RELDIGESTTMR$/p' "$HYDRA_REPO/scripts/install-aux-units.sh")"
+  [ -n "$timer" ]
+  printf '%s\n' "$timer" | grep -q '^OnCalendar=\*-\*-\* 08:00:00 America/New_York$'
+  if printf '%s\n' "$timer" | grep -E '^OnCalendar=.*(UTC|[+-][0-9]{2}:?[0-9]{2}|EDT|EST)'; then false; fi
+  grep -q '^  hydra-release-digest.service$' "$HYDRA_REPO/scripts/install-aux-units.sh"
+}
+
+@test "digest: posts once per New York day; a re-run is a no-op" {
+  _digest_gh_stub
+  _digest
+  [ "$status" -eq 0 ]
+  : > "$STUB_MUSO_ARGV"
+  _digest
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already posted"* ]]
+  [ ! -s "$STUB_MUSO_ARGV" ]
+}
+
+@test "digest: an unreachable GitHub fails loud, posts nothing, records nothing" {
+  _digest_gh_stub
+  export STUB_GH_FAIL=1
+  _digest
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot list releases"* ]]
+  [ ! -e "$TEST_TMPDIR/posted.json" ]
+  [ ! -e "$HYDRA_RELEASE_STATE_DIR/digest/last-posted" ]
+}
+
+@test "digest: a failed Slack post is not recorded, so the next run retries" {
+  _digest_gh_stub
+  export STUB_MUSO_FAIL=1
+  _digest
+  [ "$status" -ne 0 ]
+  [ ! -e "$HYDRA_RELEASE_STATE_DIR/digest/last-posted" ]
+}
+
+@test "digest: --dry-run prints the payload and posts and records nothing" {
+  _digest_gh_stub
+  _rel core-backend v1 "2026-10-22T01:00:00Z" $'### Fixes\n\n- fix: dry thing'
+  _digest --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dry thing"* ]]
+  [ ! -s "$STUB_MUSO_ARGV" ]
+  [ ! -e "$HYDRA_RELEASE_STATE_DIR/digest/last-posted" ]
+}
+
+@test "digest: ads-manager is a table row, silent until its checkpoint is seeded; auth stays silent too" {
+  . "$HYDRA_REPO/scripts/lib/release-repos.sh"
+  [ "$(release_repo_field ads-manager repo)" = "Muso-AI/ads-manager" ]
+  [ "$(release_repo_field ads-manager branch)" = "main" ]
+  [ "$(release_repo_field ads-manager sender)" = "trigger-deploy.yaml" ]
+  [ "$(release_repo_field ads-manager deploy_st)" = "H-DevOps / deploy" ]
+  [ "$(release_repo_field ads-manager cadence)" = "per-deploy" ]
+  [ "$(release_repo_field ads-manager enabled)" = "0" ]
+  [ "$(release_repo_field auth enabled)" = "0" ]
+}
+
+@test "digest: real-size release history (>128 KB per repo) still posts: no single jq argv string over the Linux cap" {
+  _digest_gh_stub
+  # Linux caps ONE argv string at 128 KB (MAX_ARG_STRLEN); macOS has no cap, so
+  # model it: a jq wrapper that refuses an oversize argument like node-8 does.
+  local realjq; realjq="$(command -v jq)"
+  cat > "$STUBBIN/jq" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\${#a}" -gt 131072 ]; then echo "jq: Argument list too long" >&2; exit 126; fi
+done
+exec "$realjq" "\$@"
+STUB
+  chmod +x "$STUBBIN/jq"
+  local body; body="$(head -c 3000 /dev/zero | tr '\0' 'x')"
+  local r i
+  for r in hydra web-credits-next core-backend; do
+    for i in $(seq 1 100); do
+      _rel "$r" "v$i" "2026-10-$(printf '%02d' $((i % 20 + 1)))T12:00:00Z" "$body"
+    done
+    _rel "$r" "vnew" "2026-10-22T03:00:00Z" $'### Features\n\n- feat: shipped-in-'"$r"
+    # GitHub lists newest first; the listing is paged now, so the order matters.
+    jq '[.[-1]] + .[:-1]' "$TEST_TMPDIR/releases-$r.json" > "$TEST_TMPDIR/x.json" && mv "$TEST_TMPDIR/x.json" "$TEST_TMPDIR/releases-$r.json"
+  done
+  _digest
+  [ "$status" -eq 0 ]
+  _posted_text | grep -q "shipped-in-hydra"
+  _posted_text | grep -q "shipped-in-core-backend"
+}
+
+@test "digest: a very busy day keeps the links line inside Slack's 2000-char context cap" {
+  _digest_gh_stub
+  local i
+  for i in $(seq 1 60); do
+    _rel hydra "v2026.10.22-build-number-$i" "2026-10-22T0$((i % 9)):00:00Z" $'### Features\n\n- feat: change '"$i"
+  done
+  _digest
+  [ "$status" -eq 0 ]
+  jq -e '[.[] | select(.type=="context") | .elements[].text | length] | max <= 2000' "$TEST_TMPDIR/posted.json"
+  _posted_text | grep -q "more"
+}
+
+# ─── release-digest.sh: paging the release listing (MUS-17745 round 4) ──────
+# One per_page=100 page reaches back only ~14 days for core-backend, so a
+# catch-up window longer than that must page until it reaches the window start.
+
+# _rels_desc <repo-slug> <count> <newest-iso> : <count> releases, one hour apart,
+# newest first (the order GitHub lists them), tags r001..
+_rels_desc() {
+  jq -n --argjson n "$2" --arg newest "$3" \
+    '[range(0; $n) | {tag_name: ("r" + (. + 1 | tostring | ("000" + .)[-3:])),
+       html_url: "https://github.com/x/r", draft: false, prerelease: false,
+       published_at: (($newest | fromdateiso8601) - (. * 3600) | todate),
+       body: ("### Fixes\n\n- fix: change " + (. + 1 | tostring))}]' > "$TEST_TMPDIR/releases-$1.json"
+}
+
+@test "digest: a window with more than 100 releases pages on, so the oldest in-window release is reported" {
+  _digest_gh_stub
+  _watermark 2026-10-08
+  _rels_desc core-backend 120 "2026-10-21T10:00:00Z"
+  _digest
+  [ "$status" -eq 0 ]
+  grep -q 'page=2' "$STUB_GH_ARGV"
+  [[ "$(_posted_text)" == *"muso platform (backend)* — 120 releases"* ]]
+  [ "$(_recorded)" = "2026-10-22" ]
+}
+
+@test "digest: the early stop is gone: in-window releases on page 2 are reported though page 1 reaches past the window start" {
+  _digest_gh_stub
+  # The bot's shape (round 5): a FULL page 1 whose min(published_at) is before
+  # the window start, and in-window releases on page 2. The listing is
+  # tag-ordered, not time-ordered, so page 1 proves nothing about page 2.
+  _rels_desc core-backend 100 "2026-10-22T10:00:00Z"
+  _rel core-backend r-late-1 "2026-10-22T06:00:00Z" $'### Fixes\n\n- fix: late page-2 release'
+  _rel core-backend r-late-2 "2026-10-21T20:00:00Z" $'### Fixes\n\n- fix: second page-2 release'
+  _digest
+  [ "$status" -eq 0 ]
+  grep -q 'page=2' "$STUB_GH_ARGV"
+  [[ "$(_posted_text)" == *"late page-2 release"* ]]
+  [[ "$(_posted_text)" == *"second page-2 release"* ]]
+}
+
+@test "digest: the releases request cost is ceil(n/100) per enabled repo, not one" {
+  _digest_gh_stub
+  # 99 releases: a short page ends the walk, so 4 enabled repos = 4 requests.
+  _rels_desc core-backend 99 "2026-10-22T10:00:00Z"
+  _digest
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'releases?' "$STUB_GH_ARGV")" -eq 4 ]
+  # 100 releases: a full page cannot prove history ended, so it costs one more.
+  : > "$STUB_GH_ARGV"
+  rm -f "$HYDRA_RELEASE_STATE_DIR/digest/last-posted"   # run 1 recorded the slot
+  _rels_desc core-backend 100 "2026-10-22T10:00:00Z"
+  _digest
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'repos/Muso-AI/core-backend/releases?.*page=2' "$STUB_GH_ARGV")" -eq 1 ]
+  [ "$(grep -c 'releases?' "$STUB_GH_ARGV")" -eq 5 ]
+}
+
+@test "digest: a release repeated across the page boundary is reported once" {
+  _digest_gh_stub
+  _watermark 2026-10-08
+  _rels_desc core-backend 100 "2026-10-21T10:00:00Z"
+  # A release published mid-walk pushes the boundary item onto page 2 as well.
+  jq '. + [.[99]]' "$TEST_TMPDIR/releases-core-backend.json" > "$TEST_TMPDIR/x.json" && mv "$TEST_TMPDIR/x.json" "$TEST_TMPDIR/releases-core-backend.json"
+  _digest
+  [ "$status" -eq 0 ]
+  grep -q 'page=2' "$STUB_GH_ARGV"
+  [[ "$(_posted_text)" == *"muso platform (backend)* — 100 releases"* ]]
+}
+
+@test "digest: a listing that never ends dies: nothing posted, watermark untouched" {
+  _digest_gh_stub
+  _watermark 2026-10-08
+  _rels_desc core-backend 100 "2026-10-21T10:00:00Z"
+  export STUB_GH_IGNORE_PAGE=1
+  DIGEST_PAGE_MAX=2 _digest
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"exceeded DIGEST_PAGE_MAX=2 pages"* ]]
+  [ ! -e "$TEST_TMPDIR/posted.json" ]
+  [ "$(_recorded)" = "2026-10-08" ]
 }

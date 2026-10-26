@@ -398,6 +398,13 @@ Many legacy accounts have no Auth0 subject (`users.auth0userid` empty, about 32%
 
 Such a send is recorded with reason `in-thread-legacy-id contact=<id> external_id=<ext>` in the ledger and as `recipient_match` in the api-log.
 
+## Identity refusals and the fraud lens (Fable ruling-intercom-external-id-1026)
+
+The gate's external_id rule is never loosened. A refusal for an empty or orphan external_id is fixed in the DATA
+by `credit-review.py intercom-reconcile` (classes A1-A5, dry run first, ledger row before each write, `--revert`).
+`uvn-status` holds fraud-lens users and keeps big-track single-signal users on the document ask only.
+Runbook: [intercom-identity-reconcile.md](intercom-identity-reconcile.md).
+
 ## No-ask status notes and email-change replies (firstmate 068-073, captain standing order 2026-10-19 17:24Z)
 
 - **`status-doc-received`** (credit-trust-llm-t01 list `status-A-doc-under-review-*.json`) and **`status-team-review`** (list `status-B-with-our-team-*.json`): one status note per user, ever, with the approved fixed texts (copy file `copy-doc-received-team-review-1020.md`).

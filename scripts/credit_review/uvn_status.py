@@ -61,6 +61,16 @@ approval_path / already_on_profile (Fable via firstmate 094, narrowed by firstma
 phase-1 conditions: see approval_path_admits). A low-risk validator-approved request the server
 still needs proof for keeps its ask (reported low_risk_asked).
 
+Fraud lens (captain 2026-10-26 ~00:40Z; Fable ruling-intercom-external-id-1026 Ruling B; fraud_lens.py):
+the run loads the fraud watchlist (credit_review/watchlist.py, policies/fraud-watchlist.json) and the
+messaging holds (policies/fraud-lens-holds.json) when it starts; either missing or malformed = nothing
+sent (halted). Every listed user then goes through the lens before anything can close or message them,
+in every campaign: a held user (messaging hold, velocity above the band, or >= 10 open big-track
+single-signal rows) is reported fraud_held and never messaged or closed; a watchlisted user is messaged
+normally (the watchlist holds approvals, never communication: Fable ruling-watchlist-consistency-1026)
+and counted as watchlisted; a user with 1-9 such rows is
+released ONLY to the uvn-status document ask, never a status note (Copy A / B0), reported ask_only.
+
 Each status note has one approved alternative wording: status-doc-received wording="queued"
 (firstmate 092) passes --copy queued, status-team-review wording="no-ask" (Copy B0 without the
 proof sentence; firstmate 106, pending-status-1021) passes --copy no-ask to the gate.
@@ -76,7 +86,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from . import policy, verify_ledger, verify_notify
+from . import fraud_lens, policy, verify_ledger, verify_notify
 from .roles import ONE_PERSON_FAMILIES, family_of
 
 CAMPAIGN = "uvn-status"
@@ -99,6 +109,9 @@ DAILY_MAX = 400
 MAX_CALLS_PER_USER = 5
 Query = verify_notify.Query
 trino = verify_notify.trino
+# The deployed lens factory (fraud_lens.default_lens: watchlist + messaging holds, both required).
+# A run without an explicit `lens` builds it; a missing or malformed file halts the run.
+DEFAULT_LENS = fraud_lens.default_lens
 
 
 @dataclass
@@ -120,6 +133,9 @@ class UvnReport(verify_notify.Report):
     rows_held: int = 0                 # requests left out of a note sent or validated (blank or gate-refused field)
     unlisted: int = 0
     recently_asked: int = 0
+    fraud_held: int = 0
+    ask_only: int = 0
+    watchlisted: int = 0               # on the approval watchlist; messaged normally (reported, never a hold)
     by_reason: dict[str, int] = field(default_factory=dict)
 
     def note(self, why: str) -> None:
@@ -333,7 +349,8 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
         wrapper: str = verify_notify.WRAPPER, runner: verify_notify.Runner = verify_notify._run,
         now: datetime | None = None, preview_dir: str | None = None, pace_seconds: float = 1.0,
         campaign: str = CAMPAIGN, post: verify_notify.Poster = verify_notify.post_cs_priority,
-        wording: str = "") -> UvnReport:
+        wording: str = "", lens: fraud_lens.LensFn | None = None, watchlist_path: str | None = None,
+        holds_path: str | None = None) -> UvnReport:
     if campaign not in CAMPAIGNS:
         raise ValueError(f"unknown campaign {campaign!r}")
     if wording and (campaign, wording) not in (("status-doc-received", "queued"), ("status-team-review", "no-ask")):
@@ -344,6 +361,12 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
     if why:
         report.halted = why
         return report
+    if lens is None:
+        try:
+            lens = DEFAULT_LENS(query, watchlist_path=watchlist_path, holds_path=holds_path)
+        except ValueError as exc:
+            report.halted = f"fraud lens unavailable ({exc}); nothing sent"
+            return report
     documented: dict[str, Any] = {}
     if is_ask:
         try:
@@ -395,11 +418,29 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
             while pos < len(cands) and len(batch) < want:
                 chunk = cands[pos:pos + min(500, max(50, want - len(batch)))]
                 accounts = accounts_of([int(u["user_id"]) for u in chunk], query)
+                # The fraud lens runs FIRST, before any branch that can close a user's requests in the
+                # ledger: a held user is never closed, whatever else is true of them (QA @214ea86).
+                verdicts = lens([int(u["user_id"]) for u in chunk])
                 picked: list[tuple[dict[str, Any], dict[str, str]]] = []
                 for u in chunk:
                     if len(batch) + len(picked) >= want:
                         break
                     pos += 1
+                    v = verdicts.get(int(u["user_id"]))
+                    if v is None or v.held:
+                        # Never messaged, never closed: re-checked on every run.
+                        report.fraud_held += 1
+                        report.note("fraud_held")
+                        continue
+                    if v.ask_only and not is_ask:
+                        # Fable Ruling B.2: big-track single-signal rows get the document ask only,
+                        # never Copy A / B0 (nothing we send may imply approval). Not closed either.
+                        report.ask_only += 1
+                        report.note("big_track_ask_only")
+                        continue
+                    if v.watch:
+                        report.watchlisted += 1
+                        report.note("watchlisted_messageable")
                     acct = accounts.get(int(u["user_id"])) or {}
                     if not acct.get("email"):
                         report.no_email += 1
@@ -594,6 +635,11 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
                       "popularity 1-59, no proof needed)", report.approval_path),
                      ("request(s) asked although low risk (server needs proof)", report.low_risk_asked),
                      ("request(s) not asked about: already on the profile (duplicate)", report.already_on_profile),
+                     ("held by the fraud lens (watchlist, velocity above the band, or 10+ big-track "
+                      "single-signal rows; never messaged, not closed)", report.fraud_held),
+                     ("held from this status note: big-track single-signal rows, so the uvn-status document "
+                      "ask only (not closed)", report.ask_only),
+                     ("on the fraud watchlist (approvals held; considered for a message as usual)", report.watchlisted),
                      ("no request still pending (not closed)", report.not_pending),
                      ("no account email", report.no_email),
                      ("held: every pending request has a blank or unshowable title, artist or role "

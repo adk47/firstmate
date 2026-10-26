@@ -1748,6 +1748,14 @@ jobs:
           # Fraud watchlist (policies/fraud-watchlist.json, firstmate 154): loads, is held by the
           # decider, score-approve and uvn-under30 deny lists, malformed = fatal, no clear-text PII.
           python3 scripts/tests/test_fraud_watchlist.py
+          # Fraud lens on credit-status messaging (Fable ruling-intercom-external-id-1026 Ruling B):
+          # >= 10 big-track single-signal rows held, 1-9 ask-only (never Copy A/B0), watchlist +
+          # messaging holds required by the uvn-status runner. Trino and the gate faked. Stdlib only.
+          python3 scripts/tests/test_fraud_lens.py
+          # Intercom external_id reconcile (Ruling A): classifier A1-A5, write conditions, dry run
+          # writes nothing, ledger row before each write, first-run cap 50, --revert. Intercom and
+          # Trino faked. Stdlib only.
+          python3 scripts/tests/test_intercom_reconcile.py
 
   plugin-tests:
     name: Plugin tests (vitest)
