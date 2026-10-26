@@ -59,9 +59,11 @@ def send_ack(to, subject, body):
     f = f"{HOME}/ack-body-{os.getpid()}.txt"
     open(f, "w").write(body)
     try:
-        cmd = ("set -a; . /etc/openclaw/main.env; set +a; gog gmail send --account support@muso.ai --to " + json.dumps(to)
-               + " --subject " + json.dumps(subject) + " --body-file " + f + " --json")
-        out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=120).stdout
+        # Fixed shell text only; inbound-controlled values travel as argv, never inside a shell string.
+        argv = ["bash", "-c", 'set -a; . /etc/openclaw/main.env; set +a; exec gog "$@"', "gog",
+                "gmail", "send", "--account", "support@muso.ai", "--to", to,
+                "--subject", subject, "--body-file", f, "--json"]
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=120).stdout
         return (json.loads(out or "{}").get("messageId") or "")
     except Exception:
         return ""

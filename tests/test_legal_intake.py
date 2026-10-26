@@ -193,5 +193,40 @@ class Collapse(Harness):
             self.assertNotIn("DMCA Notice", json.dumps(row))
 
 
+class SendAckExecution(unittest.TestCase):
+    """MUS-18508 QA-bot Critical: send_ack built a bash -c string, so a crafted inbound
+    subject/sender (`$(...)`, backticks, quotes) could run host commands. It must pass an
+    argument vector: no shell string, attacker text only ever as separate argv elements."""
+
+    def _run(self, to, subject):
+        import subprocess
+        from unittest import mock
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen["argv"], seen["kw"] = argv, kw
+            return types.SimpleNamespace(stdout='{"messageId": "m1"}')
+
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch.object(li, "HOME", home), \
+                mock.patch.object(subprocess, "run", fake_run):
+            self.assertEqual(li.send_ack(to, subject, "body"), "m1")
+        return seen
+
+    def test_hostile_subject_and_address_are_argv_elements_not_shell_text(self):
+        subject = 'Re: $(touch /tmp/pwn) `id` "; rm -rf / #'
+        to = 'x@y.com" ; $(id) #'
+        seen = self._run(to, subject)
+        argv = seen["argv"]
+        self.assertIn(subject, argv)
+        self.assertIn(to, argv)
+        # the only shell text is a fixed constant: no attacker byte may appear in it
+        shell_text = [a for a in argv if a.startswith("set -a")]
+        self.assertEqual(len(shell_text), 1)
+        self.assertNotIn("touch", shell_text[0])
+        self.assertNotIn("$(id)", shell_text[0])
+        self.assertFalse(seen["kw"].get("shell"))
+
+
 if __name__ == "__main__":
     unittest.main()
