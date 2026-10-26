@@ -129,6 +129,19 @@ class Tracker(unittest.TestCase):
             self.assertEqual(set(u), {"user_id", "paid", "credits", "bucket", "earliest_due", "ask_delivered_at",
                                       "documents", "live_check", "reasons"})
 
+    def test_board_payload_carries_every_field_the_board_requires(self):
+        """The board refuses the WHOLE snapshot with 400 bad_snapshot when one required
+        field is missing (lib/provisional.mjs validateProvisionalSnapshot), so an omitted
+        key is a silent prod outage of the daily push, not a partial display. ``held_for_
+        documents`` was missing from 2026-10-24 to 2026-10-26 for exactly that reason."""
+        self.sent([R["c"]], "2026-10-22T09:00:00Z")
+        p = pt.board_payload(pt.run(fake([(R["c"], 7, approval())]), ledger=self.db,
+                                    proof_path=str(self.proof), now=NOW), NOW)
+        for key in ("as_of", "source", "window_days", "buckets", "held_for_documents", "users"):
+            self.assertIn(key, p, f"the board 400s without {key}")
+        self.assertIsNone(p["held_for_documents"],
+                          "core's held-for-documents class is not in this tracker's read: null (not reported), never 0")
+
     def test_post_board_reports_failures(self):
         import urllib.error
 
@@ -137,6 +150,21 @@ class Tracker(unittest.TestCase):
             raise urllib.error.HTTPError(req.full_url, 401, "no", {}, None)
         self.assertEqual(pt.post_board({"x": 1}, "tok", opener=deny), (False, "HTTP 401"))
         self.assertIsNone(pt.board_token("/nonexistent.env"))
+
+    def test_post_board_carries_the_board_s_refusal_line(self):
+        """A bare "HTTP 400" hid a one-word schema fix for two days; surface the board's message."""
+        import urllib.error
+
+        body = json.dumps({"error": "bad_snapshot",
+                           "message": "held_for_documents is required (a whole number, or null when not counted yet)"})
+
+        def refuse(req, timeout):
+            raise urllib.error.HTTPError(req.full_url, 400, "bad request", {},
+                                         io.BytesIO(body.encode()))
+        ok, why = pt.post_board({"x": 1}, "tok", opener=refuse)
+        self.assertFalse(ok)
+        self.assertIn("HTTP 400", why)
+        self.assertIn("held_for_documents is required", why)
 
     def test_a_non_authoritative_proof_export_is_an_error_never_a_due_list(self):
         """QA @1349: stale, a missing part, or a malformed entry must not read as 'no backup'."""
