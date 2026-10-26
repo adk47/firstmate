@@ -36,7 +36,7 @@ Part of the HYDRA agent hive standard health check. Proves CMO is alive.
 ## Outreach Engine Automations
 
 All outreach related crons post to `#sales-alerts` (`C0ARQ021M40`).
-**Never post outreach notifications to `#clio_x_fede`.** That is the old Clio channel, deprecated for sales.
+**Never post outreach notifications to the deprecated legacy Clio channel (`C0AHN078CSH`).** It is deprecated for sales.
 
 ### Reply Scanner (every 60 minutes)
 
@@ -108,7 +108,7 @@ All outreach related crons post to `#sales-alerts` (`C0ARQ021M40`).
 ## Win Back Engine Automations
 
 All winback related crons post to `#win-back-alerts` (`C0ARTH6U0S2`).
-**Never post winback notifications to `#clio_x_fede` or `#clio_analyst`.**
+**Never post winback notifications to the deprecated legacy Clio channel (`C0AHN078CSH`) or `#clio_analyst`.**
 
 ### Reply Scanner (3x daily)
 
@@ -166,8 +166,8 @@ All winback related crons post to `#win-back-alerts` (`C0ARTH6U0S2`).
 **Action**: `cmo-eod` skill generates a top-level header message with threaded updates covering: tech, Nick mentions, replies to Nick, channels, marketing systems, email, outreach and pipeline, ClickUp, other.
 **Posts**: to Nick's Slack DM (`D0AKT90NQJX`)
 
-**Note**: delivered to Nick's DM (reassigned from `#clio_x_fede`, Fede's old
-channel, during the Fede→Nick handover). The destination is set in one place —
+**Note**: delivered to Nick's DM (reassigned from the deprecated legacy Clio
+channel `C0AHN078CSH`). The destination is set in one place —
 `cron-jobs.json` (`cmo-eod-briefing` → `delivery.to`).
 
 **Rules**:
@@ -234,5 +234,5 @@ Update this table as crons come online.
 
 ## History
 
-- 2026-04-09: full rewrite during CMO rebuild. Channels migrated from `#clio_x_fede` / `#clio_analyst` to `#sales-alerts` / `#win-back-alerts` / `#company-finder`. Added winback QA, reporter, reply scanner crons. Marked status for each cron.
+- 2026-04-09: full rewrite during CMO rebuild. Channels migrated from the legacy Clio channel `C0AHN078CSH` / `#clio_analyst` to `#sales-alerts` / `#win-back-alerts` / `#company-finder`. Added winback QA, reporter, reply scanner crons. Marked status for each cron.
 - 2026-03-24: original "cutover from Clio complete" content (deprecated)

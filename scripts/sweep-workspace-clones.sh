@@ -55,11 +55,11 @@
 # swept roots must be the exact production paths unless the host guard is
 # waived.
 #
-# Invoked weekly with --apply by scripts/weekly-cleanup.sh
+# Invoked weekly with --apply by scripts/clean-my-linux.sh
 # (hydra-weekly-cleanup.timer, Mon 04:30 UTC); also human-runnable.
 # Posts a Block Kit summary to #clio_devops on apply runs.
 #
-# Exit contract (mirrors weekly-cleanup.sh):
+# Exit contract (mirrors clean-my-linux.sh):
 #   0  normal run — per-entry rm errors are counted + reported
 #   1  structural refusal (root missing/symlinked/suspicious)
 #   2  usage error / missing dependency
@@ -162,7 +162,7 @@ ERRORS_FILE="$(mktemp)"
 PAYLOAD_FILE="$(mktemp)"
 trap 'rm -f "$HELD_FILE" "$ERRORS_FILE" "$PAYLOAD_FILE"' EXIT
 
-# ── guards lifted from weekly-cleanup.sh (normalization hardened) ────
+# ── guards lifted from clean-my-linux.sh (normalization hardened) ────
 # Strip ALL trailing slashes ('' if the input was only slashes) so forms
 # like '//' cannot dodge the broad-root refusal below.
 normalize_root() {
@@ -1186,5 +1186,5 @@ log "Posting summary to ${SLACK_CHANNEL}."
 slack_notify_payload_file "$PAYLOAD_FILE"
 
 # Reported first, then surfaced: a partial enumeration must not read as a
-# clean sweep to systemd (weekly-cleanup.sh propagates this).
+# clean sweep to systemd (clean-my-linux.sh propagates this).
 [ "$enum_failed" -eq 0 ] || exit 1

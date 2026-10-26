@@ -7,10 +7,10 @@ Stdlib unittest, no network: the admin API is faked. Run:
 
 from __future__ import annotations
 
-import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import base64
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -19,11 +19,21 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
+
+import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from credit_retro import notice, takeback, waves  # noqa: E402
-from credit_retro.api import ApiError, SessionApi, check_session_claims, header_value  # noqa: E402
+from credit_review import dsp_gate  # noqa: E402
+
+from credit_retro.api import (  # noqa: E402
+    ApiError,
+    SessionApi,
+    check_session_claims,
+    header_value,
+)
 from credit_retro.ledger import Ledger  # noqa: E402
 from credit_review import verify_notify  # noqa: E402
 
@@ -235,6 +245,19 @@ _LIVE_DIR = tempfile.TemporaryDirectory()
 OPEN = live_sources(Path(_LIVE_DIR.name))
 
 
+class ExecutorMechanicsTestCase(unittest.TestCase):
+    """Exercises the take-back executor's mechanics (gates, notices, reconcile, revert) BEHIND the
+    captain's live Spotify+Tidal rule (2026-10-23, firstmate 104/105/106), with the gate wired for
+    this class only. The rule itself (apply refuses while core's removal gate is not wired) is
+    LiveDspGateRuleTests."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.addClassCleanup(setattr, dsp_gate, "WIRED", dsp_gate.WIRED)
+        dsp_gate.WIRED = True
+
+
 class GateTests(unittest.TestCase):
     def test_pass_when_trusted_sources_credit_someone_else(self):
         res = takeback.gate(FakeApi(), row(), OPEN)
@@ -309,7 +332,7 @@ class GateTests(unittest.TestCase):
                 takeback.load_manifest(path)
 
 
-class FlowTests(unittest.TestCase):
+class FlowTests(ExecutorMechanicsTestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
@@ -1072,7 +1095,7 @@ class AskSelectionTests(unittest.TestCase):
         self.assertEqual(index["waves"]["W-01"]["not_sendable"], 1)
 
 
-class ApprovalTests(unittest.TestCase):
+class ApprovalTests(ExecutorMechanicsTestCase):
     """Core-backend #10597: stage once, Nick/Jan approve once, apply only what was approved."""
 
     def setUp(self):
@@ -1204,7 +1227,7 @@ class ApprovalTests(unittest.TestCase):
             w.write("DELETE", f"/admin/track/{TID}/profile/{PID}/credits", {})
 
 
-class ExecuteRaceTests(unittest.TestCase):
+class ExecuteRaceTests(ExecutorMechanicsTestCase):
     """A set changes on the board while apply runs, or is executed outside the tool."""
 
     def setUp(self):
@@ -1337,7 +1360,7 @@ class ExecuteRaceTests(unittest.TestCase):
         self.assertEqual(takeback.report(self.ledger, apply_id)["removed"], 1)
 
 
-class EvidenceAndNoticeTests(unittest.TestCase):
+class EvidenceAndNoticeTests(ExecutorMechanicsTestCase):
     """Firstmate 012: evidence for the row's own role; every take-back tells its user."""
 
     def setUp(self):
@@ -1722,7 +1745,7 @@ class EvidenceAndNoticeTests(unittest.TestCase):
         self.assertIn("About 2 of your credits", out[0]["subject"])
 
 
-class PublishedRosterTests(unittest.TestCase):
+class PublishedRosterTests(ExecutorMechanicsTestCase):
     """Captain 2026-10-22 20:40Z (Big Boy, firstmate 047/048/051): a multi-person role is taken back
     only for the allowlisted profile AND user, only when a live trusted source publishes that role
     family's holders without him and no trusted source names him anywhere on the track's engineering
@@ -2121,7 +2144,7 @@ class BoardClientTests(unittest.TestCase):
         self.assertEqual(len(self.seen), 2)  # no request goes out without a token
 
 
-class LiveExclusionTests(unittest.TestCase):
+class LiveExclusionTests(ExecutorMechanicsTestCase):
     """Firstmate 020: plan and apply read the live exclusion sources every run."""
 
     def setUp(self):
@@ -2554,6 +2577,52 @@ class ManifestTests(unittest.TestCase):
             for x in h["roles"]:
                 self.assertNotIn(f"{h['request_id']}:{x['role']}", proven)
         self.assertEqual(sum(len(h["roles"]) for h in population if h.get("takeback_residual")), 138)
+
+
+
+class LiveDspGateRuleTests(unittest.TestCase):
+    """Captain 2026-10-23 (firstmate 104/105/106): nothing is hidden or removed without a live
+    Spotify AND Tidal check in the same run. Core's removal gate is not live, so the executors
+    refuse before reading, staging, announcing or writing anything."""
+
+    def setUp(self):
+        self.addCleanup(setattr, dsp_gate, "WIRED", dsp_gate.WIRED)
+        dsp_gate.WIRED = False
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def test_takeback_apply_refuses_before_any_read_or_write(self):
+        class Untouchable:
+            def __getattr__(self, name):
+                raise AssertionError(f"apply touched the API ({name}) before the live DSP rule")
+        ledger = takeback.Ledger(self.dir / "state")
+        with self.assertRaises(dsp_gate.LiveDspGateRequired) as cm:
+            takeback.apply(Untouchable(), ledger, [], manifest=str(self.dir / "m.jsonl"), plan_run="p",
+                           argv=[], approvals=["ap-1"], excl=OPEN, sender=object(), pause_s=0,
+                           log=lambda *_: None)
+        self.assertIn("live_dsp_gate_required", str(cm.exception.code))
+        self.assertIn("Spotify AND Tidal", str(cm.exception.code))
+        self.assertEqual(ledger.child_runs("p", "apply"), [])
+
+    def test_decider_revert_lists_but_refuses_to_hide_and_writes_nothing(self):
+        from credit_review import decide  # noqa: PLC0415
+        db = sqlite3.connect(":memory:")
+        writes: list = []
+        with mock.patch.object(decide, "run_approvals", lambda _db, _run: ["r1", "r2"]):
+            dry = decide.revert(db, "run-1", apply=False)
+            self.assertEqual((dry["approved_ids"], dry["applied"]), (["r1", "r2"], False))
+            with self.assertRaises(dsp_gate.LiveDspGateRequired):
+                decide.revert(db, "run-1", apply=True, writer=lambda *a: writes.append(a),
+                              readback=lambda *a: writes.append(a))
+        self.assertEqual(writes, [])
+
+    def test_cli_apply_exits_non_zero_with_the_rule(self):
+        # refused before the login prompt and before the manifest is even read
+        api = FakeApi()
+        with self.assertRaises(SystemExit) as cm:
+            cli_apply(api, self.dir / "state", str(self.dir / "missing.jsonl"), "p")
+        self.assertIn("live_dsp_gate_required", str(cm.exception.code))
+        self.assertEqual(api.writes, [])
 
 
 if __name__ == "__main__":

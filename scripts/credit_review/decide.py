@@ -97,15 +97,28 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import admin as admin_api
-from . import proof_parts
-from .evidence import (BIG_ARTIST_POPULARITY, BIG_TRACK_POPULARITY, Evidence, EvidenceBuilder,
-                       EvidenceIncomplete, parse_ts)
+from . import dsp_gate, proof_parts
+from .evidence import (
+    BIG_ARTIST_POPULARITY,
+    BIG_TRACK_POPULARITY,
+    Evidence,
+    EvidenceBuilder,
+    EvidenceIncomplete,
+    parse_ts,
+)
 from .judge import JudgeResult
 from .policy import AUTOMATION_REGISTRY as REGISTRY
 from .policy import DECIDE_POLICY as POLICY
-from .policy import (WEB_CONFIRM_MIN_CONFIDENCE, WEB_CONFIRM_MIN_DOMAINS, WEB_CONTRADICT_MIN_CONFIDENCE,
-                     doc_required_ids, facts_of, validator_conflict, validator_rejected_rules)
-from .policy import server_approval_refusal
+from .policy import (
+    WEB_CONFIRM_MIN_CONFIDENCE,
+    WEB_CONFIRM_MIN_DOMAINS,
+    WEB_CONTRADICT_MIN_CONFIDENCE,
+    doc_required_ids,
+    facts_of,
+    server_approval_refusal,
+    validator_conflict,
+    validator_rejected_rules,
+)
 from .roles import ONE_PERSON_FAMILIES, editorial_terms, family_of, is_editorial
 from .runner import log
 
@@ -973,7 +986,7 @@ class WriteFailed(admin_api.AdminError):
 
 
 def admin_writer(script: str | None = None, requester: str = REQUESTER,
-                 automation_flag: str = "CREDIT_TRUST_DECIDE") -> Writer:
+                 automation_flag: str = "CREDIT_TRUST_DECIDE", timeout_s: int = 300) -> Writer:
     """PUT conditional-status through muso-admin-api.sh on the decider's admin login. The
     requester + env flag pick the wrapper's standing authorization and the
     X-Credit-Automation-Id core binds the grant to (decider by default; score-approve passes
@@ -986,7 +999,7 @@ def admin_writer(script: str | None = None, requester: str = REQUESTER,
                           separators=(",", ":"), sort_keys=True)
         env = {**os.environ, **flags, "MUSO_ADMIN_IDENTITY": ADMIN_IDENTITY}
         proc = subprocess.run(["bash", script, "--requester", requester, "call", "PUT", CONDITIONAL_PATH, body],
-                              capture_output=True, text=True, timeout=300, check=False, env=env)
+                              capture_output=True, text=True, timeout=timeout_s, check=False, env=env)
         if proc.returncode != 0:
             raise admin_api.AdminError(f"PUT failed rc={proc.returncode}: {proc.stderr.strip()[:300]}")
         resp = json.loads(proc.stdout)
@@ -997,14 +1010,14 @@ def admin_writer(script: str | None = None, requester: str = REQUESTER,
     return write
 
 
-def status_readback(script: str | None = None) -> Readback:
+def status_readback(script: str | None = None, timeout_s: int = 120) -> Readback:
     """The ids (of those asked) whose status in Postgres IS ``status`` now, via
     the read-only Trino verifier uvn-under30 uses after every write."""
     script = script or STATUS_VERIFY
 
     def read(status: str, ids: list[str]) -> set[str]:
         proc = subprocess.run(["bash", script, "--expected", status, "--ids", ",".join(ids)],
-                              capture_output=True, text=True, timeout=120, check=False)
+                              capture_output=True, text=True, timeout=timeout_s, check=False)
         if proc.returncode not in (0, 1):
             raise admin_api.AdminError(f"status readback rc={proc.returncode}: {proc.stderr.strip()[:200]}")
         try:
@@ -1074,8 +1087,12 @@ def outcomes_of(body: dict[str, Any], ids: list[str], status: str) -> dict[str, 
     return {i: status if i in updated else f"skipped:{reasons.get(i, 'not_reported')}" for i in ids}
 
 
+class WriteLockBusy(admin_api.AdminError):
+    """The shared credit-write lock was not acquired within the wait (nothing was written)."""
+
+
 @contextmanager
-def write_lock(wait_s: int = 600):
+def write_lock(wait_s: float = 600):
     WRITE_LOCK.parent.mkdir(parents=True, exist_ok=True)
     with WRITE_LOCK.open("a+", encoding="utf-8") as fh:
         deadline = time.monotonic() + wait_s
@@ -1085,7 +1102,7 @@ def write_lock(wait_s: int = 600):
                 break
             except BlockingIOError:
                 if time.monotonic() > deadline:
-                    raise admin_api.AdminError("timed out waiting for the shared credit-write lock")
+                    raise WriteLockBusy("timed out waiting for the shared credit-write lock")
                 time.sleep(1)
         try:
             yield
@@ -1457,6 +1474,9 @@ def revert(db: sqlite3.Connection, run_id: str, *, apply: bool, writer: Writer |
     out: dict[str, Any] = {"run_id": run_id, "approved_ids": ids, "applied": False}
     if not apply or not ids:
         return out
+    # approved -> unverified hides the credit: the captain's live Spotify+Tidal rule (2026-10-23,
+    # firstmate 104/105/106) applies before any write.
+    dsp_gate.require("decider revert (approved -> unverified hides the credit)")
     writer = writer or admin_writer()
     readback = readback or status_readback()
     results: dict[str, str] = {}

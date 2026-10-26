@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS verify_messages (
   attempts INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  sent_at TEXT,                      -- immutable: the first time this note was finalized 'sent' (clocks start here)
   proof_tagged_at TEXT,              -- a reply with attachments was tagged credit-proof (awaiting review)
   proof_checked_at TEXT,             -- last proof sweep look (sweep rotates oldest-checked first)
   proof_attachments INTEGER NOT NULL DEFAULT 0,  -- user attachments counted when last tagged
@@ -614,8 +615,10 @@ def finalize(db: sqlite3.Connection, *, message_row: int, status: str, message_i
         db.execute(
             "UPDATE verify_messages SET status=?, message_id=COALESCE(NULLIF(?,''),message_id), "
             "conversation_id=COALESCE(NULLIF(?,''),conversation_id), reason=COALESCE(NULLIF(?,''),reason), "
-            "body_sha256=COALESCE(NULLIF(?,''),body_sha256), api_log=COALESCE(NULLIF(?,''),api_log), updated_at=? "
-            "WHERE id=?", (status, message_id, conversation_id, reason[:500], body_sha256, api_log, ts, message_row))
+            "body_sha256=COALESCE(NULLIF(?,''),body_sha256), api_log=COALESCE(NULLIF(?,''),api_log), updated_at=?, "
+            "sent_at=CASE WHEN ?='sent' THEN COALESCE(sent_at, ?) ELSE sent_at END "
+            "WHERE id=?", (status, message_id, conversation_id, reason[:500], body_sha256, api_log, ts, status, ts,
+                           message_row))
         db.execute("UPDATE verify_requests SET status=?, updated_at=? WHERE message_row=?", (status, ts, message_row))
         db.execute("COMMIT")
     except Exception:

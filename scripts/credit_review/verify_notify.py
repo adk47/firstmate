@@ -684,8 +684,8 @@ def pg_text_array(raw: Any) -> str:
     """credit_requests.credits as Trino returns it: a Postgres text[] LITERAL in a varchar
     (e.g. '{"Record Label"}' or '{Mixing,"Mastering Engineer"}'; Trino cannot CAST it to
     array(varchar)). Returns the roles joined with ', ' ('' when NULL or empty). Any other
-    shape is '' too (the request is then incomplete and its user held, never sent on a
-    surprise shape), logged once per process."""
+    shape is '' too (no role: the request is left out of the uvn-status note, its user held only
+    when nothing else is showable, and refused by withdrawal-confirm), logged once per process."""
     global _odd_array_logged
     s = str(raw or "").strip()
     if not s:
@@ -695,7 +695,7 @@ def pg_text_array(raw: Any) -> str:
             _odd_array_logged = True
             from .runner import log
             log(f"credit_requests.credits is not a Postgres text[] literal ({s[:60]!r}); "
-                "its request is held as incomplete")
+                "its request reads as having no role")
         return ""
     body, out, cur, quoted, esc, had = s[1:-1], [], [], False, False, False
     for ch in body:

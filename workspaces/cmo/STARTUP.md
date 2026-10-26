@@ -62,7 +62,7 @@ echo "docusign account: ${DOCUSIGN_ACCOUNT_ID:+set}"
 
 - [ ] `gog auth list` shows all 4 accounts:
     - a@muso.ai
-    - f@muso.ai
+    - f@muso.ai (McLaren Amberti, Sales Operations)
     - ak@muso.ai
     - aaron.k@muso.ai
 - [ ] For each account, run `gog gmail messages search "in:inbox" --account <email> --max 1` and confirm a result comes back
@@ -179,7 +179,7 @@ For each, post a test message "CMO wire up test, please ignore" then delete.
 ## Phase 9, Memory & Reference State
 
 - [ ] Read `MEMORY.md` and confirm no Clay references remain
-- [ ] Read `HEARTBEAT.md` and confirm all channels point to new destinations (not #clio_x_fede for sales)
+- [ ] Read `HEARTBEAT.md` and confirm all channels point to new destinations (not the deprecated legacy Clio channel `C0AHN078CSH` for sales)
 - [ ] Read `AGENTS.md` and confirm the 11 agent roster
 - [ ] Read `TOOLS.md` and confirm access levels match the current wiring
 

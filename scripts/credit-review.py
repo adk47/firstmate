@@ -373,6 +373,36 @@ def cmd_provisional_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_provisional_tracker(args: argparse.Namespace) -> int:
+    """Daily: every provisional credit's backup clock (7 days from the delivered ask), due/overdue,
+    the day-N route, and the backup_ask_undelivered watchdog (credit_review/provisional_tracker.py;
+    captain 2026-10-23 20:03Z/20:04Z/20:07Z, Fable backup-threshold-ruling-1023.md). Read-only."""
+    import sqlite3 as _sq
+    from credit_review import decide, provisional_tracker as pt
+    from credit_review import ledger as _ledger
+    db = _sq.connect(f"file:{args.ledger or _ledger.DEFAULT_PATH}?mode=ro", uri=True)
+    paying, _ = decide.paying_users(now=datetime.now(timezone.utc))
+    t = pt.run(ledger=db, proof_path=args.proof_on_file, paying=set(paying or ()), window_days=args.window_days)
+    if args.out:
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+        with open(args.out, "w", encoding="utf-8") as fh:
+            json.dump({"at": t.at, "window_days": t.window_days, "counts": t.counts(), "error": t.error,
+                       "findings": t.findings(), "rows": t.rows}, fh, indent=1, default=str)
+    lines = t.findings()
+    if args.post_board and not t.error:
+        tok = pt.board_token()
+        if not tok:
+            lines.append(f"board not updated: no INGEST_TOKEN in {pt.BOARD_ENV}")
+        else:
+            ok, why = pt.post_board(pt.board_payload(t, datetime.now(timezone.utc)), tok,
+                                    gate_token=pt.board_token(key="CREDIT_TRUST_BOARD_AGENT_TOKEN"))
+            if not ok:
+                lines.append(f"board not updated: ingest answered {why}")
+    log("provisional-tracker " + json.dumps({"counts": t.counts(), "error": t.error}))
+    print("\n".join(lines) if lines else "NO_REPLY")
+    return 1 if (t.error or t.undelivered()) else 0
+
+
 def cmd_score_approve(args: argparse.Namespace) -> int:
     """Captain 2026-10-20 ~11:30Z "approve low risk credits": execute the validator's own
     approve verdict (total risk < 30) on held user_verification_needed rows, every guard intact
@@ -827,6 +857,15 @@ def parser() -> argparse.ArgumentParser:
     rn.add_argument("--preview", default=None, help="dry-run: write each rendered note to this dir (0700)")
     rn.add_argument("--list", default=None, metavar="FILE", help="write the owner list (profile ids, counts, reasons; no emails)")
     rn.set_defaults(fn=cmd_removal_notice)
+
+    pt = sub.add_parser("provisional-tracker", help="daily: provisional credits' backup clock, due/overdue, "
+                                                    "day-N route, backup_ask_undelivered (read-only)")
+    pt.add_argument("--window-days", type=int, default=7)
+    pt.add_argument("--proof-on-file", default="/var/lib/credit-trust/proof-on-file.json")
+    pt.add_argument("--out", default=None, help="write the full tracker JSON here")
+    pt.add_argument("--post-board", action="store_true",
+                    help="POST the per-user list to the credit-trust board (/api/ingest/provisional)")
+    pt.set_defaults(fn=cmd_provisional_tracker)
 
     rs = sub.add_parser("rescore", help="re-apply the current policy to stored eval ledgers (no API or model calls)")
     rs.add_argument("ledgers", nargs="+")
