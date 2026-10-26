@@ -415,11 +415,26 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
             while pos < len(cands) and len(batch) < want:
                 chunk = cands[pos:pos + min(500, max(50, want - len(batch)))]
                 accounts = accounts_of([int(u["user_id"]) for u in chunk], query)
+                # The fraud lens runs FIRST, before any branch that can close a user's requests in the
+                # ledger: a held user is never closed, whatever else is true of them (QA @214ea86).
+                verdicts = lens([int(u["user_id"]) for u in chunk])
                 picked: list[tuple[dict[str, Any], dict[str, str]]] = []
                 for u in chunk:
                     if len(batch) + len(picked) >= want:
                         break
                     pos += 1
+                    v = verdicts.get(int(u["user_id"]))
+                    if v is None or v.held:
+                        # Never messaged, never closed: re-checked on every run.
+                        report.fraud_held += 1
+                        report.note("fraud_held")
+                        continue
+                    if v.ask_only and not is_ask:
+                        # Fable Ruling B.2: big-track single-signal rows get the document ask only,
+                        # never Copy A / B0 (nothing we send may imply approval). Not closed either.
+                        report.ask_only += 1
+                        report.note("big_track_ask_only")
+                        continue
                     acct = accounts.get(int(u["user_id"])) or {}
                     if not acct.get("email"):
                         report.no_email += 1
@@ -457,23 +472,6 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
                         close(u)
                         continue
                     picked.append((u, acct))
-                verdicts = lens([int(u["user_id"]) for u, _ in picked]) if picked else {}
-                kept: list[tuple[dict[str, Any], dict[str, str]]] = []
-                for u, acct in picked:
-                    v = verdicts.get(int(u["user_id"]))
-                    if v is None or v.held:
-                        # Never messaged, never closed: re-checked on every run.
-                        report.fraud_held += 1
-                        report.note("fraud_held")
-                        continue
-                    if v.ask_only and not is_ask:
-                        # Fable Ruling B.2: big-track single-signal rows get the document ask only,
-                        # never Copy A / B0 (nothing we send may imply approval).
-                        report.ask_only += 1
-                        report.note("big_track_ask_only")
-                        continue
-                    kept.append((u, acct))
-                picked = kept
                 reqs = (uvn_requests([int(u["user_id"]) for u, _ in picked], query, PENDING_STATUSES[campaign])
                         if picked else {})
                 for u, acct in picked:

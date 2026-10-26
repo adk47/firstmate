@@ -193,6 +193,31 @@ class RunnerLensTests(unittest.TestCase):
         self.assertIn("1", [p["user"]["id"] for _, p in gate.calls])
         self.assertEqual(rep.ask_only, 0)
 
+    def test_fraud_held_user_is_never_closed_even_on_a_closing_branch(self):
+        """QA @214ea86: the lens runs before no_email / done / no-longer-waiting can close the user."""
+        from credit_review import verify_ledger
+        gate = T.FakeGate()
+        rep = uvn_status.run(list_path=str(self.list), segment="paid", mode="apply", max_users=10,
+                             ledger_path=self.ledger, proof_path=str(self.proof), query=T.replica([1, 3]),  # 2: no email
+                             runner=gate, wrapper="/gate", now=T.NOW, pace_seconds=0, post=lambda text: True,
+                             lens=self.lens(held={2}))
+        self.assertEqual(rep.fraud_held, 1)
+        self.assertEqual(rep.no_email, 0)
+        db = verify_ledger.connect(self.ledger)
+        try:
+            self.assertEqual(verify_ledger.blocked_ids(db, ["r2"], "uvn-status"), set())
+        finally:
+            db.close()
+        # The same user, not held, takes the no_email branch and IS closed (the branch is real).
+        uvn_status.run(list_path=str(self.list), segment="paid", mode="apply", max_users=10, ledger_path=self.ledger,
+                       proof_path=str(self.proof), query=T.replica([1, 3]), runner=T.FakeGate(), wrapper="/gate",
+                       now=T.NOW, pace_seconds=0, post=lambda text: True, lens=self.lens())
+        db = verify_ledger.connect(self.ledger)
+        try:
+            self.assertEqual(verify_ledger.blocked_ids(db, ["r2"], "uvn-status"), {"r2"})
+        finally:
+            db.close()
+
     def test_a_user_the_lens_returns_no_verdict_for_is_held(self):
         rep, gate = self.run_(lens=lambda ids: {})
         self.assertEqual(gate.calls, [])

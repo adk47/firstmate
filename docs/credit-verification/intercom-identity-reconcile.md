@@ -58,8 +58,9 @@ python3 scripts/credit-review.py intercom-reconcile --revert irc-<ts>-<hex> --mo
   fix lifts that account's live identity refusal hold (`verify_refusal_holds.next_recheck_at` ->
   now, recorded on the ledger row). The strike count and any cs flag stay. No other hold is touched.
 - **Revert** re-reads each contact, writes `reverting`, puts the old id back, re-reads, and restores
-  the lifted holds that nothing has touched since. A contact changed by someone else since the fix is
-  `revert_refused`. **A1 caveat:** the old value is empty, and Intercom does not document clearing an
+  the lifted holds that nothing has touched since. A row a crashed revert left `reverting` is picked up again by the next revert. A contact whose
+  external_id, email or role changed since the fix is `revert_refused` and is never overwritten. The
+  fix row keeps a sha256 of the contact's email and role, never the email itself. **A1 caveat:** the old value is empty, and Intercom does not document clearing an
   external_id. The revert tries `null`, and if Intercom keeps the id the row is `revert_failed` for a human.
 - uvn-status refusals are terminal in the verify ledger (only the status notes have the 7-day hold).
   A fixed account whose only refusal was a uvn-status one is NOT re-opened by this job.

@@ -42,9 +42,11 @@ PUT /contacts/{id}; then the contact is re-read to confirm. FIRST_RUN_CAP (50) w
 apply run ever, --max-users after that. A confirmed fix lifts that account's 7-day identity refusal
 hold (verify_refusal_holds next_recheck_at -> now; the count and a cs flag are left alone), and the
 old value is kept on the ledger row.
---revert <run_id> [--mode apply]: for each row of that run, re-read the contact; when it still
-carries the new id, write `reverting` to the ledger, PUT the old external_id back, re-read and record
-reverted / revert_failed; then put the lifted refusal holds back. NOTE: an A1 row's old external_id
+--revert <run_id> [--mode apply]: for each row of that run (including one a crashed revert left
+`reverting`), re-read the contact; when it still carries the new id AND still has the email and role
+it had when fixed (hashed on the row as contact_owner), write `reverting` to the ledger, PUT the old
+external_id back, re-read and record reverted / revert_failed; then put the lifted refusal holds
+back. A contact whose id, email or role changed since the fix is revert_refused, never overwritten. NOTE: an A1 row's old external_id
 is empty, and Intercom does not document clearing an external_id: such a revert is attempted with
 null, confirmed by the re-read, and reported revert_failed for a human when Intercom keeps the id.
 Kill switch: /etc/hydra/intercom-identity-reconcile.disabled.
@@ -52,6 +54,7 @@ Kill switch: /etc/hydra/intercom-identity-reconcile.disabled.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -115,6 +118,7 @@ CREATE TABLE IF NOT EXISTS intercom_identity_fix (
   status TEXT NOT NULL,              -- pending | applied | unverified | failed | skipped | reverting | reverted | revert_failed | revert_refused
   error TEXT,
   holds_json TEXT,                   -- [{campaign, user_key, old_next_recheck_at, cleared_to}] lifted by this fix
+  contact_owner TEXT,                -- sha256 of the contact's lower-cased email + '|' + role when fixed (never the email)
   at TEXT NOT NULL,                  -- written BEFORE the Intercom write
   updated_at TEXT NOT NULL,
   reverted_at TEXT,
@@ -193,6 +197,12 @@ def get_contact(api: Api, contact_id: str) -> dict[str, Any]:
     if status != 200 or res.get("type") != "contact" or str(res.get("id")) != contact_id:
         raise RuntimeError(f"Intercom contact read failed (HTTP {status})")
     return res
+
+
+def owner_key(contact: dict[str, Any]) -> str:
+    """Who the contact is (its email and role), hashed: a revert refuses a contact that moved."""
+    email = str(contact.get("email") or "").strip().lower()
+    return hashlib.sha256(f"{email}|{contact.get('role') or ''}".encode()).hexdigest()
 
 
 def ext_of(contact: dict[str, Any]) -> str:
@@ -685,9 +695,9 @@ def _apply_one(db: sqlite3.Connection, api: Api, r: Row, res: Result, now: datet
     ts = stamp(now)
     # The ledger row (with the old id) BEFORE the write.
     fid = db.execute("INSERT INTO intercom_identity_fix (run_id, account_id, contact_id, old_external_id, new_external_id, "
-                     "class, status, at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                     "class, status, contact_owner, at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                      (res.run_id, str(r.account_id), r.contact_id, r.old_external_id, r.new_external_id, r.cls,
-                      "pending", ts, ts)).lastrowid
+                      "pending", owner_key(c), ts, ts)).lastrowid
     status, body = api("PUT", f"/contacts/{r.contact_id}", {"external_id": r.new_external_id})
     if status != 200:
         res.failed += 1
@@ -737,7 +747,7 @@ def revert(target_run: str, *, mode: str = "dry-run", ledger_path: str | None = 
     try:
         has = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='intercom_identity_fix'").fetchone()
         rows = db.execute("SELECT * FROM intercom_identity_fix WHERE run_id=? AND status IN "
-                          "('pending','applied','unverified','revert_failed') ORDER BY id",
+                          "('pending','applied','unverified','reverting','revert_failed') ORDER BY id",
                           (target_run,)).fetchall() if has else []
         if not rows:
             out.halted = f"run {target_run} has nothing to revert"
@@ -751,7 +761,8 @@ def revert(target_run: str, *, mode: str = "dry-run", ledger_path: str | None = 
             entry = {"account_id": str(r["account_id"]), "contact_id": str(r["contact_id"]), "old_external_id": old,
                      "class": str(r["class"])}
             try:
-                cur = ext_of(get_contact(api, str(r["contact_id"])))
+                now_c = get_contact(api, str(r["contact_id"]))
+                cur = ext_of(now_c)
             except RuntimeError as exc:
                 out.failed += 1
                 entry["result"] = f"contact unreadable: {exc}"
@@ -768,6 +779,13 @@ def revert(target_run: str, *, mode: str = "dry-run", ledger_path: str | None = 
                 entry["result"] = "the contact changed since the fix; not reverted"
                 if mode == "apply":
                     _mark(db, r["id"], "revert_refused", out.run_id, "external_id changed since the fix")
+            elif not r["contact_owner"] or owner_key(now_c) != r["contact_owner"]:
+                # QA @214ea86: the contact now has another email or role; the old (orphan / empty) id
+                # must not be written onto whoever it belongs to now.
+                out.refused += 1
+                entry["result"] = "the contact's email or role changed since the fix; not reverted"
+                if mode == "apply":
+                    _mark(db, r["id"], "revert_refused", out.run_id, "contact email or role changed since the fix")
             elif mode != "apply":
                 entry["result"] = "would restore the old external_id"
                 out.reverted += 1

@@ -411,6 +411,38 @@ class RunTests(unittest.TestCase):
         self.assertEqual((rv.reverted, rv.refused), (1, 1))
         self.assertEqual(self.api.c["c2"]["external_id"], "someone-else")
 
+    def test_interrupted_revert_is_recovered_by_a_retry(self):
+        """QA @214ea86: a crash after `reverting` is written must not strand the row."""
+        _, approved = self.dry()
+        res = self.run_(mode="apply", approved=approved, classes=("A2",))
+
+        def crash(cid, body):
+            raise ConnectionError("network died mid-revert")
+        self.api.on_put = crash
+        with self.assertRaises(ConnectionError):
+            R.revert(res.run_id, mode="apply", ledger_path=self.ledger, api=self.api, now=NOW)
+        db = sqlite3.connect(self.ledger)
+        self.assertIn("reverting", {r[0] for r in db.execute("SELECT status FROM intercom_identity_fix")})
+        db.close()
+        self.api.on_put = None
+        rv = R.revert(res.run_id, mode="apply", ledger_path=self.ledger, api=self.api, now=NOW)
+        self.assertEqual((rv.reverted, rv.failed, rv.holds_restored), (2, 0, 1))
+        self.assertEqual((self.api.c["c2"]["external_id"], self.api.c["c4"]["external_id"]), (orphan(2), orphan(4)))
+
+    def test_revert_refuses_a_contact_moved_to_another_email(self):
+        """QA @214ea86: same external_id, different owner: the old id is not written onto it."""
+        _, approved = self.dry()
+        res = self.run_(mode="apply", approved=approved, classes=("A2",))
+        self.api.c["c2"]["email"] = "somebody-else@x.com"
+        rv = R.revert(res.run_id, mode="apply", ledger_path=self.ledger, api=self.api, now=NOW)
+        self.assertEqual((rv.reverted, rv.refused), (1, 1))
+        self.assertEqual(self.api.c["c2"]["external_id"], pro(2))
+        self.assertEqual([c for c, b in self.api.puts if b["external_id"] == orphan(2)], [])
+        db = sqlite3.connect(self.ledger)
+        owner = db.execute("SELECT contact_owner FROM intercom_identity_fix WHERE contact_id='c2'").fetchone()[0]
+        db.close()
+        self.assertRegex(owner, r"^[0-9a-f]{64}$")      # hashed, never the email
+
     def test_a1_revert_that_intercom_will_not_clear_is_reported_for_a_human(self):
         _, approved = self.dry()
         self.api.keep_on_null = True
