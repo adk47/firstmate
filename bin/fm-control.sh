@@ -299,15 +299,6 @@ if [ -n "$(fm_meta_get "$META" remote_host)" ]; then
   die "task $ID is a remotely placed secondmate on $(fm_meta_get "$META" remote_host); its agent runs outside this home, so no lifecycle action here could verify that it interrupted, stopped, or came back. Drive its lifecycle on that host, and reconcile it through the secondmate recovery path rather than this plane"
 fi
 
-# A task the captain ordered left stopped (state/<id>.stopped, owned by
-# bin/fm-leave-stopped.sh) must not come back by reflex: the recovery playbook
-# that reaches `relaunch` is the same one a dead endpoint triggers, and the
-# marker exists precisely because the captain already answered that question.
-# interrupt and exit stay available - neither brings an agent back.
-if [ "$VERB" = relaunch ] && [ -e "$STATE/$ID.stopped" ]; then
-  die "task $ID is left stopped on the captain's order ($(sed -n 's/^reason=//p' "$STATE/$ID.stopped" 2>/dev/null | head -1)); relaunch is refused until 'bin/fm-leave-stopped.sh $ID clear' records that the order was lifted"
-fi
-
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET

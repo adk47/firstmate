@@ -5,7 +5,6 @@
 # Usage:
 #   fm-leave-stopped.sh <task-id> mark --reason "<captain's words>"
 #   fm-leave-stopped.sh <task-id> clear
-#   fm-leave-stopped.sh <task-id> show
 #   fm-leave-stopped.sh --help
 #
 # WHY. A worker that died (a trust prompt it could not answer, a crash to the
@@ -20,7 +19,7 @@
 #   schema=fm-leave-stopped.v1
 #   at=<UTC timestamp>
 #   reason=<text, one line>
-# `clear` removes it; `show` prints it, or "not marked" with exit 1.
+# `clear` removes it.
 #
 # WHAT THE MARKER MEANS DOWNSTREAM.
 #   - bin/fm-watch.sh skips the task's endpoint in its pane path entirely: no
@@ -28,8 +27,6 @@
 #     no declared-wait recheck, in normal and away mode alike. Its status log is
 #     still read by the signal path, because a line the task appends is a real
 #     state change.
-#   - bin/fm-control.sh refuses `relaunch` while the marker stands, so a stale
-#     recovery playbook cannot undo the captain's order by reflex; `clear` first.
 #   - Nothing else changes: the record, worktree, endpoint, and backlog item
 #     stay exactly as they were. This is not teardown, not exit, not a hold.
 #     bin/fm-teardown.sh removes the marker with the rest of the task's state.
@@ -38,11 +35,11 @@
 #   - A task id that is not an exact state/<id>.meta record in this home.
 #   - The supervision branch actor (bin/fm-lease-lib.sh's role partition):
 #     this is the captain's call relayed by main, never a branch judgment.
-#   - `mark` on a task whose authoritative current state reads as working with
-#     positive evidence (an active run step or busy pane, read through
-#     bin/fm-crew-state.sh): a working task is not stopped. Stop it first with
-#     bin/fm-control.sh <id> exit, or wait for it to finish.
 #   - A `--reason` that is empty or spans lines.
+# A working reading does not refuse `mark`: a dead or dropped-to-shell terminal
+# can keep a stale busy footer that bin/fm-crew-state.sh still reads as working,
+# and that is exactly the endpoint the captain ordered left alone. `mark` records
+# the marker anyway and prints a warning naming the current reading.
 #
 # It never relaunches, interrupts, exits, trusts, or otherwise drives the
 # worker, and it never touches a project.
@@ -65,7 +62,7 @@ esac
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
-# The authoritative current-state read behind the working refusal
+# The authoritative current-state read behind the working warning
 # (crew_absorb_class; FM_CREW_STATE_BIN is its documented seam).
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
@@ -103,21 +100,13 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$VERB" in
-  mark|clear|show) ;;
-  *) die "unknown verb '$VERB' (expected mark, clear, or show)" ;;
+  mark|clear) ;;
+  *) die "unknown verb '$VERB' (expected mark or clear)" ;;
 esac
 
 [ -f "$META" ] || die "no task '$ID' in $STATE (fm-leave-stopped resolves an exact task id only)"
 
 case "$VERB" in
-  show)
-    if [ -f "$MARKER" ]; then
-      cat "$MARKER"
-      exit 0
-    fi
-    echo "not marked: task $ID is not left stopped"
-    exit 1
-    ;;
   clear)
     fm_lease_forbid_branch "leave-stopped clear (fm-leave-stopped)"
     if [ ! -e "$MARKER" ]; then
@@ -137,9 +126,9 @@ case "$REASON" in
   *$'\n'*|*$'\r'*) die "--reason must be a single line" ;;
 esac
 
-current=$("$FM_CREW_STATE_BIN" "$ID" 2>/dev/null) || true
 if [ "$(crew_absorb_class "$ID")" = working ]; then
-  die "task $ID reads as working ($current); a working task is not stopped. Stop it first with bin/fm-control.sh $ID exit, or wait for it to finish, then mark it"
+  current=$("$FM_CREW_STATE_BIN" "$ID" 2>/dev/null) || true
+  echo "warning: task $ID currently reads as working ($current); recording the captain's order anyway - the marker only silences the watcher and never stops, kills, or relaunches the worker" >&2
 fi
 
 tmp=$(mktemp "$STATE/.$ID.stopped.XXXXXX") || die "could not create the marker"
@@ -149,4 +138,4 @@ tmp=$(mktemp "$STATE/.$ID.stopped.XXXXXX") || die "could not create the marker"
   printf 'reason=%s\n' "$REASON"
 } > "$tmp" || { rm -f "$tmp"; die "could not write the marker"; }
 mv -f "$tmp" "$MARKER" || { rm -f "$tmp"; die "could not publish state/$ID.stopped"; }
-echo "marked: task $ID is left stopped on the captain's order (state/$ID.stopped); its endpoint will not re-alarm and relaunch is refused until 'fm-leave-stopped.sh $ID clear'"
+echo "marked: task $ID is left stopped on the captain's order (state/$ID.stopped); its endpoint will not re-alarm until 'fm-leave-stopped.sh $ID clear'"

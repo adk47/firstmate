@@ -40,11 +40,14 @@
 #                          have passed since the last delivered escalation, when
 #                          one re-alarm fires (same reason, the ladder count
 #                          advanced, plus an "unchanged since last report"
-#                          backstop clause) and the quiet window restarts. Any
-#                          pane change - the terminal coming back, dying
-#                          differently, a new render - resets the ladder with the
-#                          hash, so a changed state is reported as a first sight
-#                          again. Unless afk is active. A pane whose own task
+#                          backstop clause) and the quiet window restarts. An
+#                          idle pane whose render changes - the terminal coming
+#                          back, dying differently, new output - resets the
+#                          ladder with the hash, as does a pane leaving the busy
+#                          state, so that change is reported as a first sight
+#                          again; a busy pane past FM_BUSY_TURN_MAX_SECS keeps
+#                          its ladder across render changes until it goes idle.
+#                          Unless afk is active. A pane whose own task
 #                          worktree was written during the quiet window is
 #                          deferred rather than escalated (wedge_defer_writing),
 #                          because files appearing there are liveness the pane and
@@ -872,9 +875,11 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # pane hash, a further timer expiry is an already-reported repeat and is absorbed
 # until FM_WEDGE_REALARM_SECS have passed since the last DELIVERED escalation
 # (the .wedge-alarmed-<key> marker's mtime); then one re-alarm fires and the
-# window restarts. The ladder itself resets wherever the pane hash does, so a
-# terminal that comes back, dies differently, or renders anything new is a fresh
-# first sight, never a suppressed repeat. Suppression is a watcher-level absorb
+# window restarts. The ladder resets when an idle pane's hash changes and when a
+# pane leaves the busy state, so a terminal that comes back, dies differently,
+# or renders anything new while idle is a fresh first sight, never a suppressed
+# repeat; a busy pane past FM_BUSY_TURN_MAX_SECS (busy_turn_bound_check) keeps
+# its ladder across render changes until it goes idle. Suppression is a watcher-level absorb
 # at zero token cost: the first report and the bounded ladder still reach the
 # supervisor, and nothing here ever interrupts, signals, or restarts the worker.
 FM_WEDGE_REALARM_SECS=${FM_WEDGE_REALARM_SECS:-86400}
