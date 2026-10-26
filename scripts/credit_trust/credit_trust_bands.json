@@ -42,7 +42,8 @@
     "review_editing_role_without_trusted_credit",
     "review_big_track_weak_footprint",
     "review_big_track_without_trusted_credit",
-    "review_role_cardinality"
+    "review_role_cardinality",
+    "review_hold_for_documents"
   ],
   "trusted_shortcut_rules": [
     "approve_owning_track",
@@ -82,7 +83,8 @@
       "review_big_track_weak_footprint",
       "review_editing_role_without_trusted_credit",
       "review_big_track_without_trusted_credit",
-      "review_role_cardinality"
+      "review_role_cardinality",
+      "review_hold_for_documents"
     ],
     "editing_burst_rules": [
       "review_hourly_velocity_profile",
@@ -119,6 +121,7 @@
       "review_hourly_velocity_profile": "Too many claims were approved for this profile in the last hour.",
       "review_held_submitter": "The submitting account is on the credit hold list.",
       "review_high_risk_profile_score": "The claimant's overall profile risk score is high.",
+      "review_hold_for_documents": "A large or high-risk batch: documents are needed before these credits can be approved.",
       "review_operations_tombstone": "Muso Operations removed this credit earlier, so it cannot be re-added automatically.",
       "review_duplicate_of_approved_credit": "Another request for the same credit on this profile is already being processed.",
       "validation_error": "The claim could not be checked because of a processing error.",
