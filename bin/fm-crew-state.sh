@@ -655,6 +655,17 @@ if [ "$KIND" != secondmate ]; then
     dialog_detail=$(fm_busy_record_detail "$STATE" "$ID" 2>/dev/null || printf 'unknown')
     emit blocked pane "harness is waiting in a blocking dialog ($dialog_detail); it cannot read a steer until the dialog closes - recover with bin/fm-control.sh $ID interrupt where the backend can deliver Escape, otherwise exit and respawn a fresh task (stuck-crewmate-recovery)"
   fi
+  # Pi's built-in /model picker is an overlay the extension cannot observe, so
+  # it is read from the rendered tail by bin/fm-busy-lib.sh's narrow multi-signal
+  # reader; a Pi crew showing it is blocked the same way, with the same recovery.
+  case "$HARNESS" in
+    pi|pi-signed)
+      if pi_tail=$(fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" 40 "$EXPECTED_LABEL" 2>/dev/null) \
+        && printf '%s\n' "$pi_tail" | fm_busy_pi_tail_model_picker; then
+        emit blocked pane "harness is showing its /model picker (select: Select model); it cannot read a steer until the picker closes - recover with bin/fm-control.sh $ID interrupt where the backend can deliver Escape, otherwise exit and respawn a fresh task (stuck-crewmate-recovery)"
+      fi
+      ;;
+  esac
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;

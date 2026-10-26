@@ -923,6 +923,47 @@ test_no_run_blocking_dialog_reads_blocked() {
   pass "a crew recorded as waiting in a blocking dialog reads blocked with the dialog and the exit-and-respawn recovery named, on either side of a run"
 }
 
+# (f3) Pi's built-in /model picker is an overlay the per-task extension cannot
+# observe, so a Pi crew showing it is read from the rendered tail: any one of
+# the picker's three independent rows carries the blocked verdict, an ordinary
+# idle pane carries none, and a non-Pi crew never reads it.
+test_pi_model_picker_on_screen_reads_blocked() {
+  reset_fakes
+  local d sig out
+  d=$(new_case picker)
+  make_repo_on_branch "$d/wt" fm/feat-pick
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pick.meta" "window=fm:fm-feat-pick" "worktree=$d/wt" "kind=ship" "harness=pi"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  printf 'working: implementing the fix\n' > "$d/state/feat-pick.status"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-pick)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-pick idle --gen "$gen" --source pi-ext --event agent-settled
+  # The three rows exactly as Pi 1.4.0 rendered them live (the hint row's keys
+  # are whatever Pi has bound, so the connectives are what is read).
+  for sig in \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    '  Model Name: TOKEN POOL · Claude Opus 5.5' \
+    'Only showing models from configured providers. Use /login to add providers.'; do
+    FM_FAKE_BUSY=1 FM_FAKE_BUSY_TEXT="$sig"
+    out=$(run_crew_state "$d" feat-pick)
+    assert_contains "$out" "state: blocked" "a picker row alone carries the verdict: $sig"
+    assert_contains "$out" "/model picker" "the verdict names the picker: $sig"
+    assert_contains "$out" "exit and respawn" "the verdict names the documented recovery"
+  done
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" feat-pick)
+  assert_not_contains "$out" "state: blocked" "an ordinary idle Pi pane is not a picker"
+  assert_contains "$out" "state: working" "an ordinary idle Pi pane falls through to the log"
+
+  fm_write_meta "$d/state/feat-pick.meta" "window=fm:fm-feat-pick" "worktree=$d/wt" "kind=ship" "harness=claude"
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-pick idle --gen "$gen" --source claude-hook --event stop
+  FM_FAKE_BUSY=1 FM_FAKE_BUSY_TEXT='  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel'
+  out=$(run_crew_state "$d" feat-pick)
+  assert_not_contains "$out" "state: blocked" "the picker read is scoped to the Pi harness"
+  pass "a Pi crew showing its /model picker reads blocked from any one of the picker's rows, with the recovery named, and only for Pi"
+}
+
 # A converted adapter must NOT read working from rendered footer text: the
 # redesign removed that dependency, so a pane painting "esc to interrupt" with
 # no semantic record is unknown, never working and never silently idle.
@@ -1988,6 +2029,7 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_blocking_dialog_reads_blocked
+test_pi_model_picker_on_screen_reads_blocked
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture

@@ -881,6 +881,30 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
+# fm_busy_pi_tail_model_picker: 0 when Pi's built-in /model picker is on the
+# rendered tail (stdin). This is a RENDERED read, kept deliberately narrow and
+# separate from classification: the picker is an interactive-mode overlay, not
+# an extension ui prompt, so the per-task extension's ui_prompt_start never
+# fires for it (verified live on Pi 1.4.0, docs/verification/gateway-keepalive.md)
+# and the screen is the only source. It is never a busy/idle signal - a crew
+# with the picker open is BLOCKED, whichever side of a run it opened on - and
+# fm-crew-state.sh is its only consumer. Three independent signals the picker
+# renders are read and any one carries the verdict, so no single vendor string
+# is load-bearing: the hint row's connectives (`to select ·` ... `to set as
+# default ·` ... `to cancel`, keybinding-agnostic because Pi substitutes the
+# bound keys), the `Model Name:` detail row, and the provider-scope hint
+# (`models from configured providers`). tests/fm-pi-model-picker-live-e2e.test.sh
+# is the live guard that fails naming the Pi version when none of them renders.
+fm_busy_pi_tail_model_picker() {
+  local t
+  t=$(grep -v '^[[:space:]]*$' | tail -24)
+  [ -n "$t" ] || return 1
+  printf '%s\n' "$t" | grep -qE 'to select · .* to set as default · .* to cancel' && return 0
+  printf '%s\n' "$t" | grep -qE '^[[:space:]]*Model Name: ' && return 0
+  printf '%s\n' "$t" | grep -qE 'models from configured providers' && return 0
+  return 1
+}
+
 # fm_busy_rovo_tail_busy: the Rovo-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Rovo's verified animated busy line
 # matches (the "Rovo is thinking..." text rendered while a turn is running,

@@ -366,6 +366,10 @@ test_a_wrapped_rendered_error_still_enters_the_ladder() {
 # SDK's `<status> <body>` for an HTTP failure, and pi-ai's own stream-drop text.
 PI_RESET='Error: api_error read tcp 10.0.0.103->160.79.104.10:443: connection reset by peer'
 PI_503='Error: 503 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
+# The pooled gateway's 503 exactly as Pi 1.4.0 recorded it live on 2026-10-26
+# (docs/verification/gateway-keepalive.md): the SDK message carries the status
+# and the body with no prefix of its own, bounded by the detail writer.
+PI_POOL_DETAIL='503 {"type":"error","error":{"type":"pool_exhausted","message":"All accounts are temporarily unavailable","next_available_at":null,"accounts":[{"name":"aaron-muso","reason":"requires_reauth","available_at":null},{"name":"nina-muso","reason"'
 PI_FETCH='Error: fetch failed'
 PI_STREAM='Error: Anthropic stream ended before message_stop'
 PI_401='Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}'
@@ -413,6 +417,11 @@ test_a_pi_crew_is_classified_on_its_own_recorded_error() {
   fm_gateway_stalled_now "$st" task-pi-reset "$quiet" \
     || fail "a Pi crew whose record names the connection reset did not enter the ladder when the pane no longer showed it"
   fm_gateway_stall_open "$st" task-pi-reset || fail "entering the ladder must open the durable record"
+
+  record_pi_error_turn_end "$st" task-pi-pool "$PI_POOL_DETAIL" \
+    || fail "could not record the live pooled-gateway 503"
+  fm_gateway_stalled_now "$st" task-pi-pool "$quiet" \
+    || fail "the pooled gateway's 503 as Pi records it (status first, no Error: prefix) did not enter the ladder"
 
   record_pi_error_turn_end "$st" task-pi-auth "${PI_401#Error: }" \
     || fail "could not record a Pi credential failure"

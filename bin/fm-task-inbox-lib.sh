@@ -28,6 +28,9 @@
 #   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
+#   <task>.inbox/.overdue      oldest-message name already surfaced as overdue
+#                              (the liveness signal below), so it is surfaced
+#                              once per message, not every poll
 #
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
@@ -56,8 +59,8 @@
 # loses a race to the deletion only finds its mv target gone. Replacing the
 # re-ring ladder's current oldest record must not restart that ladder: the
 # record that becomes oldest inherits the superseded one's mtime and its
-# .ring-state/.escalated bookkeeping, so a worker that never drains its ticks
-# still escalates.
+# .ring-state/.escalated/.overdue bookkeeping, so a worker that never drains
+# its ticks still escalates, and is not surfaced as overdue again per tick.
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
@@ -72,6 +75,18 @@
 # deduplication marker: normal polls surface a message once, while a crash or
 # marker failure may produce a rare duplicate rather than silently lose a wake.
 #
+# Overdue liveness signal (fm_task_inbox_overdue): the ladder above escalates
+# ONCE, on an idle pane, and then hands the message to recovery - so a worker
+# that reads busy, or whose single escalation was not acted on, can sit for
+# days with an unread instruction while the doorbell keeps ringing (three
+# lanes did, 2026-10-26). Independently of the ladder, an escalation-tracked
+# record left unacknowledged for longer than FM_TASK_INBOX_OVERDUE_SECS -
+# twice the expected acknowledgement cadence FM_TASK_INBOX_CADENCE_SECS by
+# default - is overdue whatever the pane shows, and the watcher surfaces it as
+# one stale wake naming the record, its age, and the recovery (a fresh task
+# id through stuck-crewmate-recovery). The .overdue marker makes it once per
+# message; the acknowledgement clears it with the rest of the bookkeeping.
+#
 # fm_task_inbox_ring requires bin/fm-backend.sh's dispatch (sourced below); the
 # other helpers are dependency-light. Sourced by bin/fm-send.sh, bin/fm-watch.sh,
 # and tests. No side effects on source beyond its sourced libraries.
@@ -81,6 +96,10 @@
 #   FM_TASK_INBOX_RING_MAX     default 3; delivery attempts before escalation
 #   FM_TASK_INBOX_LOCK_WAIT_SECS  default 15; bounded wait for the sequence and
 #                              metadata locks before a send is refused
+#   FM_TASK_INBOX_CADENCE_SECS  default 3600; how long a worker is expected to
+#                              take to acknowledge an instruction
+#   FM_TASK_INBOX_OVERDUE_SECS  default 2x the cadence; age past which an
+#                              unacknowledged instruction is surfaced as overdue
 
 _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Both dependencies are canonical lint roots in their own right. Keep them as
@@ -95,6 +114,19 @@ FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
 FM_TASK_INBOX_RING_MAX_DEFAULT=3
 FM_TASK_INBOX_LOCK_WAIT_DEFAULT=15
+FM_TASK_INBOX_CADENCE_DEFAULT=3600
+
+fm_task_inbox_cadence_secs() {
+  local c=${FM_TASK_INBOX_CADENCE_SECS:-$FM_TASK_INBOX_CADENCE_DEFAULT}
+  case "$c" in ''|*[!0-9]*|0) c=$FM_TASK_INBOX_CADENCE_DEFAULT ;; esac
+  printf '%s' "$c"
+}
+
+fm_task_inbox_overdue_secs() {
+  local o=${FM_TASK_INBOX_OVERDUE_SECS:-}
+  case "$o" in ''|*[!0-9]*|0) o=$(( $(fm_task_inbox_cadence_secs) * 2 )) ;; esac
+  printf '%s' "$o"
+}
 
 fm_task_inbox_grace_secs() {
   local g=${FM_TASK_INBOX_GRACE_SECS:-$FM_TASK_INBOX_GRACE_DEFAULT}
@@ -347,6 +379,9 @@ EOF
       if [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "${oldest##*/}" ]; then
         printf '%s\n' "${heir##*/}" > "$dir/.escalated" 2>/dev/null || true
       fi
+      if [ "$(cat "$dir/.overdue" 2>/dev/null || true)" = "${oldest##*/}" ]; then
+        printf '%s\n' "${heir##*/}" > "$dir/.overdue" 2>/dev/null || true
+      fi
     fi
     rm -f "$want" "$have" ${ref:+"$ref"}
   else
@@ -450,7 +485,7 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   local dir oldest base now grace max ladder rec_base count last
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
-    rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
+    rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.overdue" 2>/dev/null || true
     printf 'quiet'
     return 0
   fi
@@ -509,6 +544,35 @@ EOF
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   [ -d "$dir" ] || return 0
   if ! { printf '%s\t%s\t%s\n' "$base" "$((count + 1))" "$(date +%s)" > "$dir/.ring-state"; } 2>/dev/null; then
+    [ -d "$dir" ] || return 0
+    return 1
+  fi
+}
+
+# The overdue liveness decision for one task, independent of the ring ladder
+# and of the pane. Prints `<record-path> <age-secs>` and returns 0 when the
+# oldest escalation-tracked unhandled record has gone unacknowledged for
+# longer than fm_task_inbox_overdue_secs and has not been surfaced as overdue
+# yet; returns 1 otherwise (no record, not yet overdue, or already surfaced).
+# A marker naming a different record is stale bookkeeping from an earlier
+# message and does not suppress the current one.
+fm_task_inbox_overdue() {  # <state-dir> <task-id>
+  local dir oldest age
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2") || return 1
+  age=$(fm_path_age "$oldest")
+  [ "$age" -ge "$(fm_task_inbox_overdue_secs)" ] || return 1
+  [ "$(cat "$dir/.overdue" 2>/dev/null || true)" != "${oldest##*/}" ] || return 1
+  printf '%s %s' "$oldest" "$age"
+}
+
+# Mark the current oldest as surfaced overdue after its stale wake is durably
+# queued, with the same wake-before-marker ordering as escalation.
+fm_task_inbox_record_overdue() {  # <state-dir> <task-id> <record-path>
+  local dir
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  [ -d "$dir" ] || return 0
+  if ! { printf '%s\n' "${3##*/}" > "$dir/.overdue"; } 2>/dev/null; then
     [ -d "$dir" ] || return 0
     return 1
   fi

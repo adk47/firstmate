@@ -12,8 +12,9 @@ This is the authoritative contract for how firstmate keeps agents working across
 
 Claude Code reports an API-error turn end through `StopFailure`, not `Stop`, and it executes `StopFailure` hooks outside its REPL loop and discards their result.
 A `StopFailure` hook therefore has no way to block the stop or force a continuation, unlike the `Stop` hooks [`turnend-guard.md`](turnend-guard.md) describes.
+Pi settles such a turn with an assistant `stopReason` of `error` and, once its own bounded retry is exhausted, sits idle at its prompt the same way.
 The keep-alive is built on that fact rather than around it: the hook cannot resume the turn, but it can RECORD it, so an actor outside the session reads that record, confirms which error ended the turn, and delivers the nudge.
-[`verification/gateway-keepalive.md`](verification/gateway-keepalive.md) records the live evidence.
+[`verification/gateway-keepalive.md`](verification/gateway-keepalive.md) records the live evidence for both harnesses.
 
 ## What counts as a transient gateway stall
 
@@ -21,12 +22,15 @@ The signal is the agent's own **turn-lifecycle record**, not its screen.
 Two conditions are required, and a stall is declared only when both hold:
 
 1. The task's busy record says its last turn ended on an API error - `event=stop-failure`.
-   Claude Code closes such a turn through `StopFailure` and never `Stop`; `bin/fm-spawn.sh` wires that hook to `fm-busy-event.sh … --event stop-failure`, and `bin/fm-busy-lib.sh` owns the record it writes.
-2. The pane tail shows one of the transient gateway errors.
-   The match reads the last ten non-blank lines - a bounded footer window like the one the watcher's busy match reads, sized for where a turn-ending error renders - and matches only the harness's rendered `API Error: <5xx>` shape, never a bare word such as `overloaded`.
+   Claude Code closes such a turn through `StopFailure` and never `Stop`; `bin/fm-spawn.sh` wires that hook to `fm-busy-event.sh … --event stop-failure`.
+   The per-task Pi extension the same script writes records the same event when a run settles on an assistant `stopReason` of `error`, attaching Pi's own error text as the record's detail (`bin/fm-busy-lib.sh` owns the record and the detail sidecar).
+2. The failure that ended the turn is one of the transient gateway errors.
+   When the record carries a detail, that text is the whole answer, matched exactly as Pi renders it (`Error: <message>`): the crew named the failure itself, so an older transient phrase still on the screen can never rescue a permanent one, and the stall is seen even after the pane has wrapped, scrolled, or been covered by a taller footer.
+   A record with no detail (Claude's hook carries none) is answered from the pane tail: the last ten non-blank lines, a bounded footer window like the one the watcher's busy match reads, sized for where a turn-ending error renders.
+   The shapes are the harnesses' rendered ones - Claude Code's `API Error: <5xx>`, Pi's `Error: <status> <body>` from the Anthropic SDK and the transport phrases Pi's own retry policy names (`connection reset by peer`, `fetch failed`, `socket hang up`, a stream that ended early) - never a bare word such as `overloaded`.
 
-A turn that ended normally records `event=stop` and never enters the ladder, whatever is on its screen.
-That is also the exit: a crew that takes the continue and finishes its turn records `stop`, so its record is dropped on the next idle poll without waiting for the old error to scroll off.
+A turn that ended normally records `event=stop` (Claude) or `event=agent-settled` (Pi) and never enters the ladder, whatever is on its screen.
+That is also the exit: a crew that takes the continue and finishes its turn records that normal end, so its record is dropped on the next idle poll without waiting for the old error to scroll off.
 
 The second condition is not the detector on its own, and it is not asked to be.
 The question this classifier asks is about a TURN, and a screen holds no turns - it holds rows.
@@ -34,12 +38,17 @@ This repository's own docs, tests and classifier carry the rendered error text v
 The turn end is not inferred from the screen at all: the crew records it itself.
 The pane condition remains because the event says only THAT an API error ended the turn, never WHICH one - and some of those must never be retried (see the deny list below).
 
-### Scope: the claude harness only
+### Scope: the claude and pi harnesses
 
-`event=stop-failure` is written in exactly one place, the `claude*` arm of `bin/fm-spawn.sh`'s busy wiring.
-No other harness emits it, so this keep-alive covers claude-harness crewmates and scouts only.
+`event=stop-failure` is written in exactly two places, the `claude*` arm of `bin/fm-spawn.sh`'s busy wiring and the per-task Pi extension its `pi|pi-signed` arm writes.
+No other harness emits it, so this keep-alive covers claude- and pi-harness crewmates and scouts only.
 A task whose record carries no event, an event the classifier does not name, or no readable record at all is deliberately **not** in the ladder: it is left to ordinary triage rather than re-rung on the strength of pane text alone.
-That is the intended limit - the captain asked for claude workers, and the text patterns are Claude Code's own rendered shape - and it is a written-out refusal in `fm_gateway_turn_ended_on_api_error`, not a silent fall-through.
+That is a written-out refusal in `fm_gateway_turn_ended_on_api_error`, not a silent fall-through.
+
+A Pi crew waiting in a blocking dialog is outside the ladder on purpose.
+The extension records `dialog-open` with the dialog's kind and title around any blocking extension prompt (`ui_prompt_start`/`ui_prompt_end`), and Pi's built-in `/model` picker - an interactive-mode overlay the extension cannot observe - is read from its rendered rows by `bin/fm-busy-lib.sh`'s narrow multi-signal reader.
+In both cases `bin/fm-crew-state.sh` reports the crew as `blocked` naming the dialog, because a continue typed into a dialog can never be read: the recovery is `bin/fm-control.sh <id> interrupt` where the backend can deliver Escape, and otherwise exit and a fresh spawn ([`agent-control.md`](agent-control.md); Orca delivers no Escape).
+Nothing claims to clear the dialog.
 
 Re-ringing a healthy crew is not a harmless nudge - it spends the whole budget and stamps a false `paused [key=gateway-503]` on that crew's status log, which then routes a genuinely wedged pane onto the long declared-wait cadence instead of the wedge timer.
 
@@ -84,7 +93,11 @@ The ones worth knowing: `FM_GATEWAY_RETRY_MAX` (default 8 attempts), `FM_GATEWAY
 
 ## Regression coverage
 
-`tests/fm-gateway-keepalive.test.sh` covers the event gate against records written by its real writer - a recorded API-error turn end plus the matching text entering the ladder, a normal turn end quoting the same text staying out of it, a recorded API-error turn end with no matching text staying out, and an absent, unreadable or unknown-event record staying out, which pins the claude-harness-only scope; the text classifier against the exact rendered strings this fleet's transcripts contain, bare and above the idle composer and footer; the deny list beating a transient code inside a permanent failure and matching anywhere while the transient match stays bounded; a recovered agent whose scrollback still holds the old error and repository text naming the errors both staying out of the ladder; each bound independently; and the anchor stability that keeps a frequently polled stall from being absorbed forever.
+`tests/fm-gateway-keepalive.test.sh` covers the event gate against records written by its real writer - a recorded API-error turn end plus the matching text entering the ladder, a normal turn end quoting the same text staying out of it, a recorded API-error turn end with no matching text staying out, and an absent, unreadable or unknown-event record staying out, which pins the two-harness scope; the text classifier against the exact rendered strings this fleet's transcripts contain for both harnesses, bare and above each idle composer and footer; a Pi crew classified on its own recorded error text when the pane no longer shows it, a recorded credential failure staying out whatever is on screen, the pooled gateway's 503 exactly as Pi recorded it live, a normal Pi settle ending the ladder, and a crew recorded in a blocking dialog never being re-rung; the deny list beating a transient code inside a permanent failure and matching anywhere while the transient match stays bounded; a recovered agent whose scrollback still holds the old error and repository text naming the errors both staying out of the ladder; each bound independently; and the anchor stability that keeps a frequently polled stall from being absorbed forever.
+`tests/fm-busy-adapter-wiring.test.sh` drives the spawn-written Pi extension through an error-ended settle, a retried run, a user-role message, and dialogs opened on either side of a run, and pins that the Claude settings register the busy writer alone on `StopFailure`.
+`tests/fm-busy-state.test.sh` pins the detail sidecar's bound and that it follows only the event that carried it.
+`tests/fm-crew-state.test.sh` pins the `blocked` verdict for a recorded dialog and for each rendered row of the `/model` picker on its own, scoped to the Pi harness.
+`tests/fm-pi-model-picker-live-e2e.test.sh` (opt-in, `FM_PI_MODEL_PICKER_LIVE_E2E=1`) drives the installed Pi through a pseudo-terminal, proves the built-in picker raises no hook dialog event, and fails naming the Pi version when the picker's rows stop being recognised; refresh [`verification/gateway-keepalive.md`](verification/gateway-keepalive.md) from its output after a Pi upgrade.
 `tests/fm-watch-triage.test.sh` drives a real watcher over a stalled pane and asserts the continue instruction lands in the steering inbox as a fire-and-forget record without a wake, that a spent budget declares the external wait and stops re-ringing, that an ordinary steer already waiting when the stall began is neither rung nor counted by the inbox ladder while the stall record is open - through the re-ring and through the declared wait after the budget is spent - and is rung once the record drops, that a window whose pane cannot be captured is served on its live classification - a gone endpoint still has its unread steer escalated whatever its stale busy record says, while a live busy crew whose capture blipped is waited on - that the harness's own internal 503 retry keeps the record and still reaches a declared outage while a busy stretch reaching the threshold drops it so a later transient error starts a fresh ladder, and that a paused secondmate whose pane shows the error is re-surfaced as a paused mate and never re-rung.
 `tests/fm-busy-adapter-wiring.test.sh` pins that the spawn-written Claude settings register the busy writer alone on `StopFailure`.
 `tests/fm-teardown.test.sh` pins that a retired task leaves no stall record behind to poison the next task reusing its id.

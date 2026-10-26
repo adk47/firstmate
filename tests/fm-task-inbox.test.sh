@@ -101,7 +101,7 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_TASK_INBOX_GRACE_SECS=1 \
+    FM_TASK_INBOX_GRACE_SECS=1 FM_TASK_INBOX_OVERDUE_SECS=999999999 \
     env "$@" "$WATCH" > "$out" 2>/dev/null &
 }
 
@@ -360,6 +360,49 @@ test_ring_ladder_policy() {
   pass "inbox: the re-ring ladder paces by grace, escalates once, and resets on ack"
 }
 
+test_overdue_liveness_policy() {
+  local state rec out
+  state="$TMP_ROOT/overdue/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "do the thing")
+  # Within the bound (2x the cadence by default): not overdue.
+  inbox_lib "$state" fm_task_inbox_overdue "$state" t1 >/dev/null \
+    && fail "a fresh unhandled message must not be overdue"
+  [ "$(FM_TASK_INBOX_CADENCE_SECS=1800 inbox_lib "$state" fm_task_inbox_overdue_secs)" = 3600 ] \
+    || fail "the overdue bound must default to twice the cadence"
+  [ "$(FM_TASK_INBOX_OVERDUE_SECS=10 inbox_lib "$state" fm_task_inbox_overdue_secs)" = 10 ] \
+    || fail "an explicit overdue bound must win"
+  # Past the bound: overdue once, naming the record and its age.
+  age_path "$rec"
+  out=$(FM_TASK_INBOX_OVERDUE_SECS=60 inbox_lib "$state" fm_task_inbox_overdue "$state" t1) \
+    || fail "an aged unhandled message must be overdue"
+  [ "${out% *}" = "$rec" ] || fail "the overdue decision must name the record, got: $out"
+  [ "${out##* }" -ge 60 ] || fail "the overdue decision must carry the age, got: $out"
+  # Escalation state is irrelevant to it: an escalated message is still overdue.
+  inbox_lib "$state" fm_task_inbox_record_escalated "$state" t1 "$rec"
+  FM_TASK_INBOX_OVERDUE_SECS=60 inbox_lib "$state" fm_task_inbox_overdue "$state" t1 >/dev/null \
+    || fail "an escalated-but-unread message must still be overdue"
+  # Surfaced once: the marker silences it for this message only.
+  inbox_lib "$state" fm_task_inbox_record_overdue "$state" t1 "$rec"
+  FM_TASK_INBOX_OVERDUE_SECS=60 inbox_lib "$state" fm_task_inbox_overdue "$state" t1 >/dev/null \
+    && fail "an overdue message already surfaced must stay quiet"
+  # A fire-and-forget record is never overdue on its own.
+  mv "$rec" "$state/t1.inbox/handled/"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "carry on" fire-and-forget)
+  age_path "$rec"
+  FM_TASK_INBOX_OVERDUE_SECS=60 inbox_lib "$state" fm_task_inbox_overdue "$state" t1 >/dev/null \
+    && fail "a fire-and-forget record must never be overdue"
+  # The ack clears the marker with the rest of the bookkeeping, and the next
+  # message is judged on its own.
+  FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1 >/dev/null
+  [ ! -e "$state/t1.inbox/.overdue" ] || fail "an empty ladder must clear the overdue marker"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "next thing")
+  age_path "$rec"
+  out=$(FM_TASK_INBOX_OVERDUE_SECS=60 inbox_lib "$state" fm_task_inbox_overdue "$state" t1) \
+    || fail "the next aged message must be overdue on its own"
+  [ "${out% *}" = "$rec" ] || fail "the next overdue decision must name the new record, got: $out"
+  pass "inbox: an instruction unacknowledged past 2x the cadence is overdue once per message, whatever its ladder state"
+}
+
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
   local name=$1 dir
   dir="$TMP_ROOT/$name"
@@ -522,6 +565,41 @@ test_watcher_escalates_once_after_budget() {
   pass "watcher: a spent ring budget emits exactly one ordinary stale wake for recovery"
 }
 
+test_watcher_surfaces_overdue_once_even_on_a_busy_pane() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case overdue)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  printf 'some output\nBUSYTOKEN active\n' > "$dir/busy.capture"
+  # A busy pane: the ring ladder waits (test_watcher_waits_on_busy_pane), but
+  # the overdue bound does not care what the pane shows.
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/busy.capture" \
+    FM_BUSY_REGEX=BUSYTOKEN FM_TASK_INBOX_RING_MAX=99 FM_TASK_INBOX_OVERDUE_SECS=60
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "the watcher never surfaced an overdue instruction on a busy pane"; }
+  grep -qF 'unread firstmate instruction overdue' "$state/.wake-queue" \
+    || fail "the overdue signal should queue a stale wake naming the overdue instruction:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -qF "$rec" "$state/.wake-queue" || fail "the stale wake should name the record path:"$'\n'"$(cat "$state/.wake-queue")"
+  grep -qF 'respawn a fresh task id' "$state/.wake-queue" || fail "the stale wake should name the recovery:"$'\n'"$(cat "$state/.wake-queue")"
+  [ "$(cat "$state/t1.inbox/.overdue")" = "${rec##*/}" ] || fail "the overdue marker must name the surfaced record"
+  grep -qF 'stale:' "$out" || fail "the watcher should exit through the ordinary stale wake:"$'\n'"$(cat "$out")"
+  [ ! -s "$log" ] || fail "the overdue signal must not type a doorbell into a busy pane:"$'\n'"$(cat "$log")"
+  # Later polls of the same unread message are quiet: surfaced once, not every cycle.
+  : > "$out"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/busy.capture" \
+    FM_BUSY_REGEX=BUSYTOKEN FM_TASK_INBOX_RING_MAX=99 FM_TASK_INBOX_OVERDUE_SECS=60
+  pid=$!
+  sleep 4
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ "$(grep -cF 'unread firstmate instruction overdue' "$state/.wake-queue")" = 1 ] \
+    || fail "the overdue signal must surface exactly once per message:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "watcher: an instruction unacknowledged past the overdue bound surfaces once as a stale wake even on a busy pane, naming the recovery"
+}
+
 test_write_is_durable_and_exact
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
@@ -537,3 +615,5 @@ test_watcher_quiet_on_healthy_inbox
 test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
+test_overdue_liveness_policy
+test_watcher_surfaces_overdue_once_even_on_a_busy_pane
