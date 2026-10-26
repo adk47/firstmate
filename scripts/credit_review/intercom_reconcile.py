@@ -300,21 +300,26 @@ def population(ledger_path: str, query: Query) -> dict[int, list[str]]:
             rids = [str(r) for r in json.loads(rids_json) if RID_RE.match(str(r))]
         except ValueError:
             rids = []
+        email = key.strip().lower() if EMAIL_RE.match(key.strip().lower()) else ""
         if rids:
-            by_rids.append((rids, src))
-        elif EMAIL_RE.match(key.strip().lower()):
-            by_email.append((key.strip().lower(), src))
-    all_rids = sorted({r for rids, _ in by_rids for r in rids})
+            by_rids.append((rids, src, email))
+        elif email:
+            by_email.append((email, src))
+    all_rids = sorted({r for rids, _, _ in by_rids for r in rids})
     owner: dict[str, int] = {}
     for chunk in _chunks(all_rids, 400):
         for rid, uid in query("SELECT CAST(id AS varchar), CAST(userid AS varchar) FROM postgresql_core.public.credit_requests "
                               f"WHERE CAST(id AS varchar) IN ({_q(chunk)})"):
             if str(uid).isdigit():
                 owner[str(rid)] = int(uid)
-    for rids, src in by_rids:
+    for rids, src, email in by_rids:
         users = {owner[r] for r in rids if r in owner}
         if len(users) == 1:
             found.setdefault(users.pop(), set()).add(src)
+        elif email:
+            # QA @e9160e8: request ids that no longer resolve to one account fall back to the account
+            # email the gate searched Intercom with (taken only when exactly one account holds it).
+            by_email.append((email, src))
     emails = sorted({e for e, _ in by_email})
     holders: dict[str, set[int]] = {}
     for chunk in _chunks(emails, 200):
@@ -443,8 +448,12 @@ def classify(a: Account, contacts: list[dict[str, Any]], owners: dict[str, set[s
     email is the account email; `pro_contacts`: every contact whose external_id is the professional id."""
     row = Row(account_id=a.user_id, cls="", decision="", sources=list(a.sources), new_external_id=a.professional_id)
     kinds = {s.split(":", 1)[1] for s in a.sources if ":" in s}
-    if "action_forbidden" in kinds and not kinds & set(IDENTITY_KINDS):
+    if "action_forbidden" in kinds:
+        # A5 wins over any identity source (QA @e9160e8): Intercom refuses this contact, so it is never
+        # written, whatever else the ledger says about the account.
         row.cls, row.decision, row.why = "A5", HOLD_CS, "Intercom refuses this contact (action_forbidden); held for cs"
+        if kinds & set(IDENTITY_KINDS):
+            row.why += " (it was also refused on identity)"
         return row
     if not a.professional_id:
         row.cls, row.decision, row.why = "NONE", NO_PRO_ID, "the account has no professional id"

@@ -159,6 +159,13 @@ class ClassifierTests(unittest.TestCase):
         r = self.go(acct(sources=["status-team-review:action_forbidden"]), [contact("c1", "u1@x.com")])
         self.assertEqual((r.cls, r.decision), ("A5", R.HOLD_CS))
 
+    def test_a5_wins_over_an_identity_source(self):
+        """QA @e9160e8: mismatch + a later action_forbidden is held for cs, never written."""
+        for contacts in ([contact("c1", "u1@x.com")], [contact("c1", "u1@x.com", orphan(1))]):
+            r = self.go(acct(sources=["status-team-review:mismatch", "status-team-review:action_forbidden"]), contacts)
+            self.assertEqual((r.cls, r.decision), ("A5", R.HOLD_CS))
+            self.assertIn("also refused on identity", r.why)
+
     def test_no_intercom_user(self):
         r = self.go(acct(), [contact("l1", "u1@x.com", role="lead")])
         self.assertEqual((r.cls, r.decision), ("NONE", R.NO_CONTACT))
@@ -245,9 +252,10 @@ def seed(ledger, holds=(), refused=(), forbidden=()):
             verify_ledger.refuse(db, user_key=email, day="2026-10-25", request_ids=rids, message_type="email",
                                  approved_by="U7RP6HKUZ", approval_ref="ref", reason=reason, campaign="uvn-status",
                                  now=NOW - timedelta(days=1))
-        for uid, email in forbidden:
+        for uid, email, *camp in forbidden:
             c = verify_ledger.claim(db, user_key=email, day="2026-10-25", request_ids=[f"f{uid}"], message_type="email",
-                                    approved_by="U7RP6HKUZ", approval_ref="ref", campaign="status-team-review",
+                                    approved_by="U7RP6HKUZ", approval_ref="ref",
+                                    campaign=camp[0] if camp else "status-team-review",
                                     now=NOW - timedelta(days=1), user_id=str(uid))
             verify_ledger.finalize(db, message_row=c["message_row"], status="rejected", reason=FORBIDDEN)
     finally:
@@ -301,6 +309,26 @@ class RunTests(unittest.TestCase):
         cs = json.loads(Path(path.replace(".json", "-cs.json")).read_text())["rows"]
         self.assertEqual(sorted(r["account_id"] for r in cs), [3, 5])
         self.assertEqual(next(r for r in cs if r["account_id"] == 3)["other_account_ids"], ["9"])
+
+    def test_mixed_identity_and_forbidden_account_is_never_written(self):
+        seed(self.ledger, forbidden=[(2, "u2@x.com", "uvn-status")])   # u2 already holds a mismatch hold
+        res, approved = self.dry()
+        self.assertEqual(self.by_account(res)[2], ("A5", R.HOLD_CS))
+        self.run_(mode="apply", approved=approved)
+        self.assertNotIn("c2", [c for c, _ in self.api.puts])
+
+    def test_stale_request_ids_fall_back_to_the_unique_email_owner(self):
+        """QA @e9160e8: a row with no user id whose request ids no longer resolve is found by its email."""
+        self.users[6] = {"email": "u6@x.com"}
+        self.users[7] = {"email": "shared@x.com"}
+        self.users[8] = {"email": "shared@x.com"}
+        seed(self.ledger, refused=[("u6@x.com", ["gone-1"], MISMATCH), ("shared@x.com", ["gone-2"], MISMATCH)])
+        pop = R.population(self.ledger, self.world)
+        self.assertIn(6, pop)
+        self.assertEqual(pop[6], ["uvn-status:mismatch"])
+        self.assertNotIn(7, pop)                                # two accounts hold that email: not guessed
+        self.assertNotIn(8, pop)
+        self.assertIn(4, pop)                                   # request ids that resolve still win
 
     def test_apply_needs_the_approved_dry_run(self):
         res = self.run_(mode="apply")

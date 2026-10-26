@@ -19,7 +19,7 @@ One-time task, not a cron. Never messages anyone. Kill switch:
 | A2 | external_id is an orphan (no Muso account's professional id / Auth0 subject / users.id) | `fix` if every write condition holds, else it becomes A3 |
 | A3 | external_id (or any contact with this email) names another Muso account | `refuse_cs`: no write, no message, listed with both account ids |
 | A4 | 2+ users, none matching | A1/A2 per contact; exactly one can become the match: `fix`, else `refuse_cs` |
-| A5 | Intercom answered `action_forbidden` | `hold_cs` (no email from this job; the ruling left email-vs-cs to the owner) |
+| A5 | Intercom answered `action_forbidden` (even if the account was also refused on identity) | `hold_cs`, never written (no email from this job; the ruling left email-vs-cs to the owner) |
 | NONE / OK | no Intercom user / already matches | reported only |
 
 **Write conditions** apply to every write (A1, A2, A4), all must hold:
