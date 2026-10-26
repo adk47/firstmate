@@ -196,8 +196,15 @@ def board_payload(t: "Tracker", now: datetime, source: str = "hydra credit-revie
     counts = {b: 0 for b in BOARD_BUCKETS}
     for u in lst:
         counts[u["bucket"]] += 1
+    # ``held_for_documents`` is REQUIRED by the board (lib/provisional.mjs
+    # validateProvisionalSnapshot, a whole number or null): Fable §7's
+    # non-low-risk class, held for documents BEFORE any approval. It is core's
+    # user_verification_needed population, not the provisional set this tracker
+    # reads, so we cannot measure it — null means "not reported" on the board,
+    # never a structural 0. Omitting the key was a hard 400 (bad_snapshot) that
+    # failed the daily board push from 2026-10-24 until 2026-10-26.
     return {"as_of": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "source": source, "window_days": t.window_days,
-            "buckets": counts, "users": lst}
+            "buckets": counts, "held_for_documents": None, "users": lst}
 
 
 def post_board(payload: dict, token: str, url: str = BOARD_URL, opener=None,
@@ -214,9 +221,29 @@ def post_board(payload: dict, token: str, url: str = BOARD_URL, opener=None,
         with (opener or urllib.request.urlopen)(req, timeout=30) as resp:
             return 200 <= resp.status < 300, f"HTTP {resp.status}"
     except urllib.error.HTTPError as e:
-        return False, f"HTTP {e.code}"
+        # Carry the board's own refusal line: a bare "HTTP 400" sent us hunting
+        # through the board's source, while its body says exactly which field is
+        # wrong ("held_for_documents is required ...").
+        detail = ""
+        try:
+            detail = _refusal_detail(e.read(2048))
+        except Exception:  # noqa: BLE001 - a body we cannot read never hides the status
+            detail = ""
+        return False, f"HTTP {e.code}" + (f" {detail}" if detail else "")
     except Exception as e:  # noqa: BLE001 - a delivery failure is reported, never raised
         return False, type(e).__name__
+
+
+def _refusal_detail(raw: bytes) -> str:
+    """The board's `{"error", "message"}` refusal, as one short line for the cron summary."""
+    try:
+        body = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return raw.decode("utf-8", "replace").strip()[:200]
+    if not isinstance(body, dict):
+        return ""
+    parts = [str(body[k]) for k in ("error", "message") if body.get(k)]
+    return ": ".join(parts)[:300]
 
 
 def board_token(path: str = BOARD_ENV, key: str = "INGEST_TOKEN") -> str | None:
