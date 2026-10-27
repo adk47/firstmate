@@ -14,6 +14,7 @@ Stdlib unittest only.
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,8 +27,11 @@ spec = importlib.util.spec_from_file_location("ib_send", SEND)
 ib_send = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ib_send)
 
+NO_OV = {"add": {}, "remove": {}}
+OVR = ib_send.overrides
 FORBIDDEN = ["captain-legal", "captain-billing", "gate-uvn-status", "gate-team-review",
-             "gate-doc-received", "ledger-today", "claim-pending", "ambiguous-identity"]
+             "gate-doc-received", "ledger-today", "claim-pending", "ambiguous-identity",
+             "hold-read"]
 
 
 def row(cid, action, band="1-30d", paid=False, waiting=100):
@@ -41,33 +45,33 @@ class SelectRows(unittest.TestCase):
             with self.subTest(action=act):
                 rows = [row("1", act), row("2", "draft-merge")]
                 with self.assertRaises(ib_send.Refused) as cm:
-                    ib_send.select_rows(rows, "recent", {"1": "merge", "2": "merge"})
+                    ib_send.select_rows(rows, "recent", {"1": "merge", "2": "merge"}, NO_OV)
                 self.assertIn("not send-eligible", str(cm.exception))
                 self.assertIn(act, str(cm.exception))
 
     def test_tail_never_selects_forbidden_actions(self):
         rows = [row(str(i), a, band="gt30d") for i, a in enumerate(FORBIDDEN)]
         rows.append(row("ok", "draft-other", band="gt30d"))
-        self.assertEqual([r["id"] for r in ib_send.select_rows(rows, "tail", {})], ["ok"])
+        self.assertEqual([r["id"] for r in ib_send.select_rows(rows, "tail", {}, NO_OV)], ["ok"])
 
     def test_recent_needs_plan_and_known_lines_and_ids(self):
         rows = [row("1", "draft-merge")]
         with self.assertRaises(ib_send.Refused):
-            ib_send.select_rows(rows, "recent", {})
+            ib_send.select_rows(rows, "recent", {}, NO_OV)
         with self.assertRaises(ib_send.Refused):
-            ib_send.select_rows(rows, "recent", {"1": "invented-line"})
+            ib_send.select_rows(rows, "recent", {"1": "invented-line"}, NO_OV)
         with self.assertRaises(ib_send.Refused):
-            ib_send.select_rows(rows, "recent", {"999": "merge"})
+            ib_send.select_rows(rows, "recent", {"999": "merge"}, NO_OV)
 
     def test_recent_plan_refuses_tail_rows_and_tail_refuses_plan(self):
         with self.assertRaises(ib_send.Refused):
-            ib_send.select_rows([row("1", "draft-merge", band="gt30d")], "recent", {"1": "merge"})
+            ib_send.select_rows([row("1", "draft-merge", band="gt30d")], "recent", {"1": "merge"}, NO_OV)
         with self.assertRaises(ib_send.Refused):
-            ib_send.select_rows([row("1", "draft-merge", band="gt30d")], "tail", {"1": "merge"})
+            ib_send.select_rows([row("1", "draft-merge", band="gt30d")], "tail", {"1": "merge"}, NO_OV)
 
     def test_eligible_recent_plan_selected_paid_first(self):
         rows = [row("a", "draft-merge", waiting=1), row("b", "no-identity", paid=True, waiting=5)]
-        got = ib_send.select_rows(rows, "recent", {"a": "merge", "b": "generic"})
+        got = ib_send.select_rows(rows, "recent", {"a": "merge", "b": "generic"}, NO_OV)
         self.assertEqual([r["id"] for r in got], ["b", "a"])
 
     def test_sender_stays_locked(self):
@@ -80,12 +84,16 @@ class Cli(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.env = {k: v for k, v in os.environ.items() if k != "MUSOAI_INTERCOM_TOKEN"}
+        self.overrides = NO_OV
 
     def run_cli(self, rows, plan, *extra):
         tri = os.path.join(self.tmp.name, "t.jsonl")
         with open(tri, "w") as f:
             f.writelines(json.dumps(r) + "\n" for r in rows)
-        args = [sys.executable, SEND, tri, "--band", "recent"]
+        ov = os.path.join(self.tmp.name, "ov.json")
+        with open(ov, "w") as f:
+            json.dump(self.overrides, f)
+        args = [sys.executable, SEND, tri, "--band", "recent", "--overrides", ov]
         if plan is not None:
             pl = os.path.join(self.tmp.name, "plan.json")
             with open(pl, "w") as f:
@@ -110,9 +118,92 @@ class Cli(unittest.TestCase):
     def test_cli_recent_without_plan_refused(self):
         self.assertRefused(self.run_cli([row("1", "draft-merge")], None), "--plan")
 
+    def test_cli_refuses_planned_override_ids_dry_run_and_apply(self):
+        # Hand-read moves: an 'add' id the keywords called draft-other is now the captain's,
+        # and a 'remove' id (keyword misfire off the captain list) is hold-read. Both refused.
+        self.overrides = {"add": {"111": "privacy"}, "remove": {"222": "misfire"}}
+        for cid, want in (("111", "captain-privacy"), ("222", "hold-read")):
+            for mode in ((), ("--apply",)):
+                with self.subTest(id=cid, mode=mode):
+                    p = self.run_cli([row(cid, "draft-other")], {cid: "generic"}, *mode)
+                    self.assertRefused(p, "not send-eligible")
+                    self.assertIn(want, p.stderr)
+
+    def test_cli_missing_overrides_file_refused(self):
+        tri = os.path.join(self.tmp.name, "t.jsonl")
+        with open(tri, "w") as f:
+            f.write(json.dumps(row("1", "draft-merge")) + "\n")
+        pl = os.path.join(self.tmp.name, "plan.json")
+        with open(pl, "w") as f:
+            json.dump({"1": "merge"}, f)
+        p = subprocess.run([sys.executable, SEND, tri, "--band", "recent", "--plan", pl,
+                            "--overrides", os.path.join(self.tmp.name, "absent.json")],
+                           capture_output=True, text=True, env=self.env, timeout=30)
+        self.assertRefused(p, "cannot read captain overrides")
+
     def test_cli_apply_refused_while_locked(self):
         p = self.run_cli([row("1", "draft-merge")], {"1": "merge"}, "--apply")
         self.assertRefused(p, "COPY_APPROVED=0")
+
+
+class Overrides(unittest.TestCase):
+    """One loader for lists.py and send.py (Fable review @4a57414d)."""
+
+    def tmpdir(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        return d
+
+    def write(self, data):
+        p = os.path.join(self.tmpdir(), "ov.json")
+        with open(p, "w") as f:
+            f.write(data if isinstance(data, str) else json.dumps(data))
+        return p
+
+    def test_select_rows_applies_overrides(self):
+        ov = {"add": {"111": "billing"}, "remove": {"222": "x"}}
+        for cid in ("111", "222"):
+            with self.subTest(id=cid), self.assertRaises(ib_send.Refused) as cm:
+                ib_send.select_rows([row(cid, "draft-other")], "recent", {cid: "generic"}, ov)
+            self.assertIn("not send-eligible", str(cm.exception))
+        tail = [row("111", "draft-other", band="gt30d"), row("222", "draft-credit", band="gt30d"),
+                row("33", "draft-other", band="gt30d")]
+        self.assertEqual([r["id"] for r in ib_send.select_rows(tail, "tail", {}, ov)], ["33"])
+
+    def test_load_fails_closed(self):
+        for bad in ("not json", "[]", {"add": {"1x": "legal"}}, {"add": {"12": "refunds"}},
+                    {"add": {"12": "legal"}, "remove": {"12": "x"}}, {"add": []}):
+            with self.subTest(bad=bad), self.assertRaises(OVR.OverridesError):
+                OVR.load(self.write(bad))
+        with self.assertRaises(OVR.OverridesError):
+            OVR.load("/nonexistent/captain-overrides.json")
+
+    def test_repo_overrides_file_loads(self):
+        ov = OVR.load()
+        self.assertTrue(ov["add"] and ov["remove"])
+
+    def test_lists_captain_and_hold_agree(self):
+        spec2 = importlib.util.spec_from_file_location(
+            "ib_lists", os.path.join(ROOT, "scripts", "intercom-backlog", "lists.py"))
+        lists = importlib.util.module_from_spec(spec2)
+        spec2.loader.exec_module(lists)
+        tri = os.path.join(self.tmpdir(), "t.jsonl")
+        rows = [dict(row("111", "draft-other"), age_days=1), dict(row("222", "captain-billing"), age_days=2),
+                dict(row("33", "draft-credit"), age_days=3), dict(row("44", "captain-legal"), age_days=4),
+                dict(row("55", "gate-uvn-status"), age_days=5)]
+        with open(tri, "w") as f:
+            f.writelines(json.dumps(r) + "\n" for r in rows)
+        got = lists.load_rows(tri, {"add": {"111": "privacy"}, "remove": {"222": "misfire"}})
+        cap = "\n".join(lists.captain(got))
+        hold = "\n".join(lists.hold(got))
+        self.assertIn("| 111 | privacy", cap)
+        self.assertIn("| 44 | legal", cap)
+        self.assertNotIn("| 222 |", cap)
+        self.assertIn("### hold-read (1)", hold)
+        self.assertIn("### draft-credit (1)", hold)
+        held_ids = {x.split("(")[0] for ln in hold.splitlines() if ln.startswith("- **")
+                    for x in ln.split(": ", 1)[1].split(", ")}
+        self.assertEqual(held_ids, {"222", "33"})
 
 
 class SharedLedger(unittest.TestCase):

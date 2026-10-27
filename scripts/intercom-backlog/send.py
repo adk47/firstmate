@@ -40,6 +40,8 @@ import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from credit_review import verify_ledger  # noqa: E402  the shared message ledger
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import overrides  # noqa: E402  the ONE captain-overrides loader (lists.py uses it too)
 
 COPY_APPROVED = 0          # HELD: captain 23:30Z "no new customer copy"; flip only for wording approved later
 COPY_APPROVAL_REF = ""
@@ -165,15 +167,20 @@ def ledger_finalize(db, message_row, conversation_id, rc, stdout, stderr, body):
 
 
 def eligible(row):
-    """The ONE send-eligible test, for both bands: the row's triage action must be on the
-    allowlist (ACTION_LINE). Captain-legal/billing, gate-owned (p2's single sender),
-    ledger-today, claim-pending and ambiguous-identity rows are never this tool's to answer."""
+    """The ONE send-eligible test, for both bands: the row's action, AFTER the captain
+    overrides are applied (overrides.apply), must be on the allowlist (ACTION_LINE).
+    Captain-legal/billing/privacy (keyword or hand-read), hold-read (a hand-read misfire a
+    person must read), gate-owned (p2's single sender), ledger-today, claim-pending and
+    ambiguous-identity rows are never this tool's to answer."""
     return row.get("action") in ACTION_LINE
 
 
-def select_rows(rows, band, plan, ids=()):
+def select_rows(rows, band, plan, ov, ids=()):
     """Pure selection; raises Refused instead of silently dropping a planned row, so a plan that
-    names a forbidden conversation fails the whole run before anything is read or sent."""
+    names a forbidden conversation fails the whole run before anything is read or sent. The
+    captain overrides (ov, from overrides.load) are applied HERE, so no caller can select rows
+    without them."""
+    rows = overrides.apply(rows, ov)
     ids = set(ids)
     if band == "recent":
         if not plan:
@@ -217,12 +224,17 @@ def _main():
     ap.add_argument("--max", type=int, default=25)
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--close", action="store_true")
+    ap.add_argument("--overrides", default=overrides.DEFAULT_PATH)
     ap.add_argument("--plan", help="recent band: JSON {conversation_id: line_key} from reading each "
                     "conversation. Required for --band recent; only planned ids are sent.")
     a = ap.parse_args()
     plan = json.load(open(a.plan)) if a.plan else {}
     ids = set(filter(None, a.ids.split(",")))
-    rows = select_rows([json.loads(l) for l in open(a.triage)], a.band, plan, ids)
+    try:
+        ov = overrides.load(a.overrides)
+    except overrides.OverridesError as e:
+        raise Refused(str(e))
+    rows = select_rows([json.loads(l) for l in open(a.triage)], a.band, plan, ov, ids)
     if a.apply and COPY_APPROVED != 1:
         sys.exit("REFUSED: COPY_APPROVED=0. The copy needs Fable's D1 GO, landed in a PR that flips the lock.")
     if a.close and (CLOSE_APPROVED != 1 or a.band != "tail"):

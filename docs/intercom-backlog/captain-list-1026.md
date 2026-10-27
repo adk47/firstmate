@@ -1,14 +1,15 @@
 # Captain's list: money, legal and privacy conversations where the customer spoke last
 
-**Snapshot:** 2026-10-27 10:48Z census, regenerated after Fable's NO-GO on the PR.
+**Generated, not hand-edited:** `python3 scripts/intercom-backlog/lists.py <triage> captain`, run
+on the 2026-10-27 11:33Z census, through the hand-read overrides in
+`scripts/intercom-backlog/captain-overrides.json`. `overrides.py` is the one loader, and
+`send.py` uses the same file.
+- `add`: 1 privacy request and 2 plaque billing cases the keywords missed.
+- `remove`: 6 keyword misfires that are not money or legal. They are on the hold list under hold-read.
 
-**How it was built:** `lists.py captain` with the hand-read overrides in `captain-overrides.json`.
-- Removed: 6 keyword misfires, none of them money or legal.
-- Added: 1 privacy request and 2 plaque billing cases.
-
-**Columns:** ids only, no PII. paid = the user is a member of a team with an active or trialing
-subscription, read from `team_users` (not from credit requests). Legal and privacy are listed
-first, then recent before tail, then paid first.
+**Columns:** ids only, no PII. paid = member of a team with an active or trialing subscription
+(`team_users` x `subscriptions`). Legal and privacy are listed first, then recent before tail,
+then paid first.
 
 Annotated reading of the recent band: `report-1026.md` sections 3 and 6.
 
@@ -21,17 +22,17 @@ Annotated reading of the recent band: `report-1026.md` sections 3 and 6.
 | 215476336419274 | billing | 1-30d | 1 | paid | 5465657 |
 | 215476359577538 | billing | 1-30d | 6 | paid | 5465657 |
 | 215476481682087 | billing | 1-30d | 7 | paid | 5763097 |
-| 215472661480176 | billing | lt1d | 0 | - | 5465657 |
+| 215472661480176 | billing | lt1d | 1 | - | 5465657 |
 | 215476346408173 | billing | 1-30d | 3 | - | 5465657 |
 | 215471306255424 | billing | 1-30d | 5 | - | 5465657 |
 | 215476356274043 | billing | 1-30d | 7 | - | 5465657 |
 | 215476250947389 | billing | 1-30d | 20 | - | 5763097 |
 | 215476141235223 | billing | 1-30d | 27 | - | 5763097 |
 | 215475484640371 | billing | gt30d | 71 | paid | 5763097 |
-| 215475400403461 | billing | gt30d | 76 | paid | 5763097 |
+| 215475400403461 | billing | gt30d | 77 | paid | 5763097 |
 | 215475299570120 | billing | gt30d | 88 | paid | 5763097 |
 | 215475006762970 | billing | gt30d | 110 | paid | 5763097 |
-| 215474452813203 | billing | gt30d | 150 | paid | 5763097 |
+| 215474452813203 | billing | gt30d | 151 | paid | 5763097 |
 | 215474465844298 | billing | gt30d | 153 | paid | 5763097 |
 | 215474213100365 | billing | gt30d | 165 | paid | 5763097 |
 | 215474263885993 | billing | gt30d | 167 | paid | 5763097 |
@@ -131,7 +132,7 @@ Annotated reading of the recent band: `report-1026.md` sections 3 and 6.
 | 215473926452882 | billing | gt30d | 195 | - | 5763097 |
 | 215473902366770 | billing | gt30d | 196 | - | 5763097 |
 | 215473878165823 | billing | gt30d | 197 | - | 5763097 |
-| 215473878848691 | billing | gt30d | 197 | - | 5763097 |
+| 215473878848691 | billing | gt30d | 198 | - | 5763097 |
 | 215473876226390 | billing | gt30d | 198 | - | 5763097 |
 | 215473871361991 | billing | gt30d | 198 | - | 5763097 |
 | 215473866711749 | billing | gt30d | 199 | - | 5763097 |
@@ -148,4 +149,4 @@ Annotated reading of the recent band: `report-1026.md` sections 3 and 6.
 | 215473600385852 | billing | gt30d | 204 | - | 5763097 |
 | 215473691147602 | billing | gt30d | 204 | - | 5763097 |
 | 215473775985548 | billing | gt30d | 206 | - | 5763097 |
-| 215473770260301 | billing | gt30d | 206 | - | 5763097 |
+| 215473770260301 | billing | gt30d | 207 | - | 5763097 |

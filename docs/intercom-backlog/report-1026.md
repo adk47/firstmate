@@ -80,7 +80,7 @@ reply), 215476530302829 (SoundExchange auto-reply: close, reason auto-responder)
 
 Tail: 122 billing and 1 legal conversations over 30 days old. The full list is
 `docs/intercom-backlog/captain-list-1026.md`. It was regenerated on 10-27 10:48Z with these
-moves applied (`captain-overrides.json`), and with paid read from subscription membership
+moves applied (`scripts/intercom-backlog/captain-overrides.json`), and with paid read from subscription membership
 (section 8).
 
 ## 4. Copy for Fable's GO (needs-decision)
@@ -181,8 +181,8 @@ customer spoke last, 25 of them past 4 h. I read each one:
   definition). It no longer depends on credit-request rows. Live: 14,477 paid users. The
   regenerated captain list has 31 paid rows.
 - **Captain list.** The six moved-off ids are removed and the three hand-read additions are
-  applied, through `captain-overrides.json` + `lists.py captain`. That file is the source of
-  truth for future regenerations. Snapshot 10-27 10:48Z: 1,935 customer-last, 134 on the list.
+  applied, through `scripts/intercom-backlog/captain-overrides.json` + `lists.py captain`. That file is the source of
+  truth for future regenerations. Snapshot 10-27 10:48Z: 1,935 customer-last (superseded by the section 9 regeneration).
 - **Hold-list reconciliation** (the file stays unchanged, per Fable's tail ruling).
   cs-systemic-c3 silently closed 8 satisfied conversations under
   `[key=intercom-close-satisfied]`, recorded in node-8
@@ -210,6 +210,28 @@ customer spoke last, 25 of them past 4 h. I read each one:
     stage2_asks 20, paid_status_b0_gap 8).
   answered 0 / closed 0 by this lane.
 - The PR title is conventional-commit; the tier is 0 (read-only tools + a locked sender).
+
+## 9. Third review (@4a57414d): one overrides loader, lists regenerated
+
+- **One loader.** `scripts/intercom-backlog/overrides.py` is the only loader of
+  `captain-overrides.json`, which moved next to the scripts so it deploys with them.
+  - `add` ids become `captain-<topic>`.
+  - `remove` ids become `hold-read`: a hand-read misfire a person reads before any reply. It is
+    never send-eligible.
+  - `lists.py` applies it in every mode. `send.py` applies it inside `select_rows()`, so
+    `eligible()` always sees the overridden action and no caller can select rows without it.
+  - It fails closed: a missing or malformed file refuses the send run and stops the list run.
+- **Tests.** Refusal tests for a planned `add` id and a planned `remove` id, in dry-run and
+  apply; a missing-file refusal; malformed-file cases; captain and hold lists agreeing (0 shared
+  ids). 23 tests in all.
+- **The hand edit is replaced by regeneration.** Both lists were regenerated from the generator
+  on a fresh census (2026-10-27 11:33Z, 1,936 customer-last).
+  - Captain's list: 135 (131 billing, 3 legal, 1 privacy), including the hand-read additions.
+  - Hold list: 1,516, including 6 hold-read.
+  - The two lists share 0 ids.
+  - Counts for this snapshot: gate 271 (p2), ledger-today 14, claim-pending 6.
+  - The run used a PII-free projection of the triage (id, action, band, age, paid, assignee),
+    pulled off node-8. The full triage was shredded there.
 
 ## Outside the rules (log)
 
