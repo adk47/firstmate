@@ -27,8 +27,16 @@ DELTA_GIT_WINS_MARKER='Reviewed baseline: deploy overwrites'
 # Read the marker from the repo's HEAD blob ONLY. Never from the server's bytes:
 # an agent on node-8 must not be able to authorise its own overwrite. The marker
 # can only make git overwrite the server, never push server content to the fleet.
+#
+# Two statements, not one pipeline: deploy.sh runs under `set -o pipefail`, and in
+# `cat-file | grep -q` grep exits on the first match, so on a blob larger than the
+# pipe buffer (~64 KB) with the marker near the top cat-file dies of SIGPIPE (141)
+# and pipefail reports "no marker". That blocked the 2026-10-27 04:06Z deploy on
+# scripts/intercom-verify-request.sh (148 KB, marker at line 216).
 delta_head_has_git_wins_marker() {
-  git -C "$HYDRA_ROOT" cat-file -p "HEAD:$1" 2>/dev/null | grep -qF -- "$DELTA_GIT_WINS_MARKER"
+  local blob
+  blob=$(git -C "$HYDRA_ROOT" cat-file -p "HEAD:$1" 2>/dev/null) || return 1
+  grep -qF -- "$DELTA_GIT_WINS_MARKER" <<<"$blob"
 }
 
 _delta_hash() {

@@ -242,4 +242,6 @@ def analyze(data: bytes, path: str, mime: str, decoded: bytes | None = None) -> 
             seen.add(key)
             uniq.append(s)
     return uniq, {"camera": camera, "width": exif.get("width"), "height": exif.get("height"),
-                  "exiftool": bool(tool_fields)}
+                  "exiftool": bool(tool_fields), "exif_datetime": exif.get("DateTime"),
+                  "exif_datetime_original": exif.get("DateTimeOriginal"),
+                  "software": next((v[:120] for _, v in software_vals), None)}

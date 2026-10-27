@@ -61,6 +61,16 @@ approval_path / already_on_profile (Fable via firstmate 094, narrowed by firstma
 phase-1 conditions: see approval_path_admits). A low-risk validator-approved request the server
 still needs proof for keeps its ask (reported low_risk_asked).
 
+Stage-2 release (Fable 2026-10-26 13:23Z, GO 2; credit_review/stage2_verdicts.py): a user with a
+document on file is no longer skipped for the mere existence of that entry when stage 2 has
+judged every credit the note would ask about: `no_document` releases it to uvn-status (also a
+request still `unverified`, i.e. held with us, which stage 2 found nothing readable for), and
+`need_more` releases it to gap-ask (Fable's gap paragraph; the gate reads the verdict itself and
+fills <doc summary> from it). An approved proof that names the credit still excludes it, and a
+credit stage 2 has not judged (or judged anything else) still excludes the user: when in doubt,
+no ask. --from-stage2 builds the population live from the proof store instead of t01's list
+(gap-ask always does).
+
 Fraud lens (captain 2026-10-26 ~00:40Z; Fable ruling-intercom-external-id-1026 Ruling B; fraud_lens.py):
 the run loads the fraud watchlist (credit_review/watchlist.py, policies/fraud-watchlist.json) and the
 messaging holds (policies/fraud-lens-holds.json) when it starts; either missing or malformed = nothing
@@ -69,7 +79,8 @@ in every campaign: a held user (messaging hold, velocity above the band, or >= 1
 single-signal rows) is reported fraud_held and never messaged or closed; a watchlisted user is messaged
 normally (the watchlist holds approvals, never communication: Fable ruling-watchlist-consistency-1026)
 and counted as watchlisted; a user with 1-9 such rows is
-released ONLY to the uvn-status document ask, never a status note (Copy A / B0), reported ask_only.
+released ONLY to the uvn-status document ask, never a status note (Copy A / B0, the count-only
+note) nor the gap ask, reported ask_only.
 
 Each status note has one approved alternative wording: status-doc-received wording="queued"
 (firstmate 092) passes --copy queued, status-team-review wording="no-ask" (Copy B0 without the
@@ -80,21 +91,28 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from . import fraud_lens, policy, verify_ledger, verify_notify
+from . import fraud_lens, policy, stage2_verdicts, verify_ledger, verify_notify
 from .roles import ONE_PERSON_FAMILIES, family_of
 
+# The proof-on-file kinds that mean "we approved a document" (decide.APPROVED_PROOF_KINDS).
+APPROVED_PROOF_KINDS = frozenset({"approved_doc", "human_approved_after_doc"})
+
 CAMPAIGN = "uvn-status"
+GAP_ASK = verify_ledger.GAP_ASK
 # The no-ask status notes (firstmate 070/071) run through this same driver with the
 # credit-trust-llm-t01 lists status-A-doc-under-review (status-doc-received) and
 # status-B-with-our-team (status-team-review). They are NOT asks: no proof-on-file exclusion
 # (these users are the ones with documents or requests with us), no ask cap, never close an ask.
-CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review")
+CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", GAP_ASK)
+# The campaigns that ASK (documents-on-file exclusion, the ask cap, closing asks).
+ASKS = ("uvn-status", GAP_ASK)
 # The replica re-check per campaign (firstmate 076): uvn-status needs requests still waiting on
 # the user; the status notes need requests still pending with us. A status-note user with none
 # left is `not_pending`: counted, never closed in the ledger.
@@ -102,10 +120,30 @@ PENDING_STATUSES = {
     "uvn-status": ("user_verification_needed",),
     "status-doc-received": ("user_verification_needed", "unverified", "processing"),
     "status-team-review": ("user_verification_needed", "unverified", "processing"),
+    # gap-ask: the decider's held rows; only stage-2 need_more ones are ever kept (run()).
+    GAP_ASK: ("unverified", "user_verification_needed"),
 }
-STATUS_DAILY_MAX = 1000  # sanity bound for the no-ask status notes
+# Rows in these statuses join a campaign only when stage 2 released them to it: uvn-status's
+# no_document users whose requests are still `unverified` (held with us; firstmate spec item 2).
+RELEASED_EXTRA_STATUSES = {"uvn-status": ("unverified",)}
+# Reviewed baseline: deploy overwrites - 2026-10-26 (verify-ask-wiring-h2, firstmate inbox 015): node-8's
+# paid-wave-runner-p2 hot-patch [key=p2-caps] (DAILY_MAX / STATUS_DAILY_MAX 20000, marked "reverts on next
+# deploy") is superseded by the reviewed env caps below (CREDIT_STATUS_DAILY_MAX / CREDIT_UVN_DAILY_MAX).
+CAP_LIMIT = 100000
+
+
+def _cap_env(name: str, default: int) -> int:
+    """A daily cap from the environment (firstmate 014, [key=p2-caps]: the captain's 2026-10-26 "move fast" order
+    raised these for one night by a node-8 hot patch; this makes it a reviewed setting instead). A whole number
+    1..CAP_LIMIT overrides the default; anything else (unset, blank, malformed, zero, negative, too large) keeps the
+    default, so a typo can never remove the bound."""
+    raw = os.environ.get(name, "").strip()
+    return int(raw) if re.fullmatch(r"[0-9]{1,6}", raw) and 0 < int(raw) <= CAP_LIMIT else default
+
+
+STATUS_DAILY_MAX = _cap_env("CREDIT_STATUS_DAILY_MAX", 1000)  # sanity bound for the no-ask status notes
 LIST_MAX_AGE_H = 30
-DAILY_MAX = 400
+DAILY_MAX = _cap_env("CREDIT_UVN_DAILY_MAX", 400)  # the ask
 MAX_CALLS_PER_USER = 5
 Query = verify_notify.Query
 trino = verify_notify.trino
@@ -133,6 +171,10 @@ class UvnReport(verify_notify.Report):
     rows_held: int = 0                 # requests left out of a note sent or validated (blank or gate-refused field)
     unlisted: int = 0
     recently_asked: int = 0
+    excluded: int = 0                  # --exclude-users (another lane messages them today)
+    count_copy: int = 0                # status-team-review users sent the count-only note (not held)
+    stage2_released: int = 0           # documented users let through by a stage-2 verdict
+    campaign: str = ""
     fraud_held: int = 0
     ask_only: int = 0
     watchlisted: int = 0               # on the approval watchlist; messaged normally (reported, never a hold)
@@ -309,7 +351,83 @@ def uvn_requests(user_ids: list[int], query: Query = trino,
     return reqs
 
 
+def documents_block(documented: dict[str, Any], uid: str, ask_ids: list[str] | set[str], released: set[str]) -> bool:
+    """True when the proof-on-file export keeps this user from an ask about `ask_ids`. A user with
+    no entry is free. A user with entries is let through only when stage 2 released EVERY credit
+    asked about (`released`) and no APPROVED proof names one of them; an entry for a credit stage
+    2 did not release (or no credit at all) still excludes the user."""
+    entries = documented.get(str(uid)) or []
+    if not entries:
+        return False
+    ids = {str(r).strip().lower() for r in ask_ids if str(r).strip()}
+    if not ids or not ids <= released:
+        return True
+    return any(rid and rid.lower() in ids and kind in APPROVED_PROOF_KINDS for rid, kind in entries)
+
+
+def stage2_released(campaign: str, path: str | None = None, *, user_ids: list[int] | None = None) -> set[str]:
+    """Request ids stage 2 released to this campaign (empty for one it does not feed).
+    Stage2Error propagates: the caller decides whether that halts the run."""
+    outcome = stage2_verdicts.RELEASES.get(campaign)
+    if not outcome:
+        return set()
+    return stage2_verdicts.released(stage2_verdicts.load(path, user_ids=user_ids), outcome)
+
+
+def pending_rows(user_ids: list[int], campaign: str, released: set[str],
+                 query: Query = trino, *, with_released: bool = False) -> dict[int, list[dict[str, Any]]]:
+    """uvn_requests for the campaign, with the stage-2 release applied: gap-ask, and any run whose
+    population is stage 2's (`with_released`), keeps ONLY the released requests (an unjudged
+    request of the same user is never named: QA on #1364); with `with_released` uvn-status also
+    adds the released requests still `unverified`. A list-driven uvn-status run is bounded by
+    t01's list instead and never adds them (they would hold the user as unlisted)."""
+    reqs = uvn_requests(user_ids, query, PENDING_STATUSES[campaign])
+    if campaign == GAP_ASK or with_released:
+        reqs = {u: kept for u, rows in reqs.items()
+                if (kept := [r for r in rows if r["request_id"].lower() in released])}
+    extra = RELEASED_EXTRA_STATUSES.get(campaign)
+    if extra and released and with_released:
+        for u, rows in uvn_requests(user_ids, query, extra).items():
+            add = [r for r in rows if r["request_id"].lower() in released]
+            if add:
+                reqs.setdefault(u, []).extend(add)
+    return reqs
+
+
 HOLDS = {"unlisted_request": "unlisted", "incomplete_fields": "incomplete"}
+
+# Count-only status note (firstmate 2026-10-26 16:58Z, verify-ask-wiring-h2 inbox 005; captain
+# 16:05Z: "everyone should be communicated"): a status-team-review user whose requests cannot be
+# listed (every one blank or unshowable) or are more than the gate takes in one listed note gets
+# the count-only wording (gate --copy count) instead of a hold. It names no title, so nothing
+# unshowable is shown; N counts every request pending on the replica at send time; the ledger
+# records at most COUNT_MAX_IDS of their request ids.
+COUNT_COPY_CAMPAIGNS = ("status-team-review",)
+GATE_MAX_CREDITS = 1000
+COUNT_MAX_IDS = 1000
+
+
+def count_copy_of(campaign: str, listed: set[str], pending: list[dict[str, Any]], why: str,
+                  live: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]], bool, int]:
+    """(why, credits, count copy?, total pending) after plan(): the count-only note replaces the
+    `incomplete` hold and the over-cap refusal of a status-team-review note. Its N is EVERY
+    request the replica has pending for the user right now (`pending`, re-read before the send),
+    not only the ones the (up to 30 h old) list names: the note is one per user, ever, so it must
+    not understate (QA + Fable on b2afc8be). The listed requests come first in the ids recorded."""
+    if campaign in COUNT_COPY_CAMPAIGNS and (why == "incomplete_fields" or (not why and len(live) > GATE_MAX_CREDITS)):
+        ordered = sorted(pending, key=lambda r: bool(listed) and r["request_id"] not in listed)
+        rows = [{k: v for k, v in r.items() if not k.startswith("_")} for r in ordered]
+        return "", rows[:COUNT_MAX_IDS], True, len(rows)
+    return why, live, False, len(live)
+
+
+def note_payload(acct: dict[str, str], uid: int, credits: list[dict[str, Any]], as_count: bool,
+                 total: int) -> dict[str, Any]:
+    user = {"email": acct["email"], "id": str(uid), "professional_id": acct["professional_id"],
+            "auth_id": acct["auth_id"], "first_name": acct.get("first_name", "")}
+    if as_count:
+        return {"user": {**user, "pending_count": total}, "credits": credits, "extra": ["--copy", "count"]}
+    return {"user": user, "credits": credits}
 
 
 def plan(listed: set[str], pending: list[dict[str, Any]], is_ask: bool) -> tuple[str, list[dict[str, Any]]]:
@@ -344,23 +462,49 @@ def left_out(listed: set[str], pending: list[dict[str, Any]], is_ask: bool) -> i
                and not (is_ask and r["_no_ask"] in NO_ASK))
 
 
-def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int = 50,
+def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", max_users: int = 50,
         ledger_path: str | None = None, proof_path: str | None = None, query: Query = trino,
         wrapper: str = verify_notify.WRAPPER, runner: verify_notify.Runner = verify_notify._run,
         now: datetime | None = None, preview_dir: str | None = None, pace_seconds: float = 1.0,
         campaign: str = CAMPAIGN, post: verify_notify.Poster = verify_notify.post_cs_priority,
-        wording: str = "", lens: fraud_lens.LensFn | None = None, watchlist_path: str | None = None,
-        holds_path: str | None = None) -> UvnReport:
+        wording: str = "", from_stage2: bool = False, stage2_path: str | None = None,
+        exclude_users: set[str] | frozenset[str] = frozenset(), lens: fraud_lens.LensFn | None = None,
+        watchlist_path: str | None = None, holds_path: str | None = None) -> UvnReport:
     if campaign not in CAMPAIGNS:
         raise ValueError(f"unknown campaign {campaign!r}")
     if wording and (campaign, wording) not in (("status-doc-received", "queued"), ("status-team-review", "no-ask")):
         raise ValueError(f"wording {wording!r}: queued applies to status-doc-received, no-ask to status-team-review")
-    is_ask = campaign == "uvn-status"
-    report = UvnReport()
-    users, why = load_list(list_path, now=now)
-    if why:
-        report.halted = why
-        return report
+    if from_stage2 and campaign not in stage2_verdicts.RELEASES:
+        raise ValueError(f"--from-stage2 feeds {', '.join(stage2_verdicts.RELEASES)} only")
+    if campaign == GAP_ASK and not from_stage2:
+        raise ValueError("gap-ask reaches only users stage 2 judged: run it with from_stage2")
+    if not from_stage2 and not list_path:
+        raise ValueError("a list is required unless the population comes from stage 2")
+    is_ask = campaign in ASKS
+    report = UvnReport(campaign=campaign)
+    # Stage 2's release from the proof-on-file hold. From the list, an unreadable store releases
+    # nothing (the old rule stands); a stage-2 population cannot be built without it.
+    released: set[str] = set()
+    if campaign in stage2_verdicts.RELEASES:
+        try:
+            released = stage2_released(campaign, stage2_path)
+        except stage2_verdicts.Stage2Error as exc:
+            if from_stage2:
+                report.halted = str(exc)
+                return report
+            report.note("stage2_unreadable")
+    if from_stage2:
+        try:
+            users = stage2_verdicts.population(stage2_verdicts.RELEASES[campaign], path=stage2_path)
+        except stage2_verdicts.Stage2Error as exc:
+            report.halted = str(exc)
+            return report
+        users = [u for u in users if set(u["request_ids"]) <= released]
+    else:
+        users, why = load_list(list_path, now=now)
+        if why:
+            report.halted = why
+            return report
     if lens is None:
         try:
             lens = DEFAULT_LENS(query, watchlist_path=watchlist_path, holds_path=holds_path)
@@ -384,11 +528,17 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
     try:
         cands: list[dict[str, Any]] = []
         for u in offered:
-            if str(u.get("user_id")) in documented:
+            if str(u.get("user_id")) in exclude_users:
+                report.excluded += 1
+                report.note("excluded_today")
+                continue
+            listed = [str(r) for r in (u.get("request_ids") or [])]
+            if is_ask and documents_block(documented, str(u.get("user_id")), listed, released):
                 report.proof_on_file += 1
                 report.note("documents_on_file")
                 continue
-            listed = [str(r) for r in (u.get("request_ids") or [])]
+            if is_ask and documented.get(str(u.get("user_id"))):
+                report.stage2_released += 1
             if listed and verify_ledger.blocked_ids(db, listed, campaign) >= set(listed):
                 report.already_handled += 1
                 report.note("already_handled")
@@ -432,7 +582,7 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
                         report.fraud_held += 1
                         report.note("fraud_held")
                         continue
-                    if v.ask_only and not is_ask:
+                    if v.ask_only and campaign != CAMPAIGN:
                         # Fable Ruling B.2: big-track single-signal rows get the document ask only,
                         # never Copy A / B0 (nothing we send may imply approval). Not closed either.
                         report.ask_only += 1
@@ -462,8 +612,11 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
                         report.no_professional_id += 1
                         report.note("no_professional_id")
                         continue
-                    why = verify_ledger.uvn_user_done(db, acct["email"], now=now, campaign=campaign,
-                                                      user_id=str(u["user_id"]))
+                    if campaign == GAP_ASK:
+                        why = verify_ledger.gap_user_done(db, acct["email"], now=now, user_id=str(u["user_id"]))
+                    else:
+                        why = verify_ledger.uvn_user_done(db, acct["email"], now=now, campaign=campaign,
+                                                          user_id=str(u["user_id"]))
                     if why == "recently_asked":
                         report.recently_asked += 1
                         report.note(why)
@@ -478,13 +631,16 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
                         close(u)
                         continue
                     picked.append((u, acct))
-                reqs = (uvn_requests([int(u["user_id"]) for u, _ in picked], query, PENDING_STATUSES[campaign])
-                        if picked else {})
+                reqs = (pending_rows([int(u["user_id"]) for u, _ in picked], campaign, released, query,
+                                     with_released=from_stage2) if picked else {})
                 for u, acct in picked:
                     uid = int(u["user_id"])
-                    listed = {str(r) for r in (u.get("request_ids") or [])}
+                    # A stage-2 population names only the released requests; the note covers every
+                    # request the campaign may ask about (the release is checked on each before the send).
+                    listed = set() if from_stage2 else {str(r) for r in (u.get("request_ids") or [])}
                     pending = reqs.get(uid, [])
                     why, live = plan(listed, pending, is_ask)
+                    why, live, as_count, total = count_copy_of(campaign, listed, pending, why, live)
                     if why in HOLDS:
                         held(why)
                         continue
@@ -495,6 +651,10 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
                     if why:
                         report.note(why)
                         continue
+                    if live and is_ask and documents_block(documented, str(uid), [r["request_id"] for r in live], released):
+                        report.proof_on_file += 1
+                        report.note("documents_on_file")
+                        continue
                     if not live and not is_ask:
                         report.not_pending += 1
                         report.note("not_pending")
@@ -504,11 +664,11 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
                         report.note("no_longer_uvn")
                         close(u)
                         continue
-                    batch.append((listed, {"user": {"email": acct["email"], "id": str(uid),
-                                                    "professional_id": acct["professional_id"],
-                                                    "auth_id": acct["auth_id"],
-                                                    "first_name": acct.get("first_name", "")}, "credits": live},
-                                  left_out(listed, pending, is_ask)))
+                    if as_count:
+                        report.count_copy += 1
+                        report.note("count_copy")
+                    batch.append((listed, note_payload(acct, uid, live, as_count, total),
+                                  0 if as_count else left_out(listed, pending, is_ask)))
         finally:
             db.close()
         return batch
@@ -560,25 +720,34 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
                     # Re-read the strict proof-on-file list right before an ask (QA: proof that
                     # reached support@ or core while earlier users were being messaged is not
                     # in Intercom, so the gate would not see it). Unreadable = nothing more sent.
+                    mine = released
                     if is_ask:
                         try:
                             documented = verify_notify.load_proof_on_file(proof_path)
                         except verify_notify.ProofFileError as exc:
                             report.halted = str(exc)
                             break
-                        if str(uid) in documented:
+                        # The stage-2 release, re-read for this user right before the send (a
+                        # later run may have judged a credit again). Unreadable = no release.
+                        if documented.get(str(uid)) and campaign in stage2_verdicts.RELEASES:
+                            try:
+                                mine = stage2_released(campaign, stage2_path, user_ids=[uid])
+                            except stage2_verdicts.Stage2Error:
+                                mine = set()
+                        if documented.get(str(uid)) and not mine:
                             report.proof_on_file += 1
                             report.note("documents_on_file")
                             continue
                     # Re-plan on a fresh replica read right before this user's send (QA: a request
                     # approved, withdrawn, opened or blanked while earlier users were being
                     # messaged must neither get a 'waiting on you' note nor be left out of it).
-                    fresh = uvn_requests([uid], query, PENDING_STATUSES[campaign]).get(uid, [])
+                    fresh = pending_rows([uid], campaign, mine, query, with_released=from_stage2).get(uid, [])
                     why, live = plan(listed, fresh, is_ask)
+                    why, live, as_count, total = count_copy_of(campaign, listed, fresh, why, live)
                     if why in HOLDS:
                         held(why)
                         continue
-                    dropped = left_out(listed, fresh, is_ask)
+                    dropped = 0 if as_count else left_out(listed, fresh, is_ask)
                     if not live:
                         if is_ask:
                             report.no_longer_uvn += 1
@@ -586,7 +755,12 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
                             report.not_pending += 1
                         report.note("changed_before_send")
                         continue
-                    p = {**p, "credits": live}
+                    if is_ask and documents_block(documented, str(uid), [r["request_id"] for r in live], mine):
+                        report.proof_on_file += 1
+                        report.note("documents_on_file")
+                        continue
+                    acct = {k: p["user"].get(k, "") for k in ("email", "professional_id", "auth_id", "first_name")}
+                    p = note_payload(acct, uid, live, as_count, total)
                     if calls and pace_seconds:
                         time.sleep(pace_seconds)
                 before = report.sent_notes if mode == "apply" else report.validated + report.recipient_ok
@@ -623,12 +797,17 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
         if report.sent_notes:
             return f"UVN STATUS ({segment}): STOPPED after {report.sent_notes} sent, nothing more sent: {report.halted}."
         return f"UVN STATUS ({segment}): NOTHING sent: {report.halted}."
-    head = f"UVN STATUS ({segment}{', dry run' if mode != 'apply' else ''})"
+    name = "GAP ASK" if report.campaign == GAP_ASK else "UVN STATUS"
+    head = f"{name} ({segment}{', dry run' if mode != 'apply' else ''})"
     parts = [f"{head}: {report.listed} on the list for this segment, {report.users} messaged this run"
              if mode == "apply" else f"{head}: {report.listed} on the list, {report.users} would be messaged"]
     if mode == "apply":
         parts.append(f"{report.sent_notes} sent")
     for label, n in (("documents on file (not asked)", report.proof_on_file),
+                     ("with documents on file, let through by a stage-2 verdict", report.stage2_released),
+                     ("left out: another lane messages them today (--exclude-users)", report.excluded),
+                     ("told by the count-only note (requests unshowable or over 1,000, no titles named)",
+                      report.count_copy),
                      ("already handled (noted before, or documents received)", report.already_handled),
                      ("no longer waiting on them", report.no_longer_uvn),
                      ("request(s) not asked about: on the approval path (validator-approved, risk < 30, "

@@ -122,6 +122,7 @@ class CronOrchestrationTests(unittest.TestCase):
         prior_approvals=None,
         still_approved=None,
         unpatch_history=False,
+        gate=None,
     ):
         output = io.StringIO()
         ticket = ticket or task()
@@ -146,6 +147,10 @@ class CronOrchestrationTests(unittest.TestCase):
             patch.object(cron, "KILL_SWITCH_PATH", Path("/nonexistent/uvn-under30-cron.disabled")),
             patch.object(cron, "credit_write_lock", return_value=nullcontext()),
             patch.object(cron, "load_fraud_ids", return_value=fraud_ids),
+            # Steward 019: every approval passes the shared account gate. These tests are about the other
+            # rules, so it answers allow unless a test passes its own gate.
+            patch.object(cron.account_gate, "check",
+                         gate or (lambda uid, runner=None: cron.account_gate.GateResult(cron.account_gate.ALLOW))),
             (nullcontext() if unpatch_history
              else patch.object(cron, "load_recent_approvals", return_value=set(prior_approvals or set()))),
             patch.object(cron, "verify_status", **verify_kw) as verify,
@@ -165,6 +170,55 @@ class CronOrchestrationTests(unittest.TestCase):
         self.verify = verify
         self.audit = audit
         return rc, output.getvalue(), approve, update
+
+    def _gate(self, decisions, calls):
+        G = cron.account_gate
+
+        def check(uid, runner=None):
+            if not isinstance(uid, int):  # as the real check: no user id = unknown, the CLI is not called
+                return G.GateResult(G.UNKNOWN, ("no account user id on the request",))
+            calls.append(uid)
+            return G.GateResult(decisions.get(uid, G.UNKNOWN), ("gate says so",))
+        return check
+
+    def test_account_gate_hold_or_unknown_means_no_approval(self):
+        """Steward 019 / captain 23:30-23:40Z: the shared account gate decides before any approval.
+        Hold, unknown, or a row with no user id = skipped (stays held), never approved."""
+        G = cron.account_gate
+        for decision in (G.HOLD, G.UNKNOWN):
+            with self.subTest(decision=decision):
+                calls = []
+                row = {**credit(), "userId": 170378}
+                rc, output, approve, update = self.run_main(set(), [{CR_ID: row}] * 4,
+                                                            gate=self._gate({170378: decision}, calls))
+                self.assertEqual(rc, 0)
+                approve.assert_not_called()
+                self.assertEqual(set(calls), {170378})
+        calls = []
+        rc, output, approve, update = self.run_main(set(), [{CR_ID: credit()}] * 4,
+                                                    gate=self._gate({}, calls))
+        approve.assert_not_called()
+        self.assertEqual(calls, [], "no user id = held without calling the gate")
+
+    def test_account_gate_allow_approves_as_before(self):
+        G = cron.account_gate
+        calls = []
+        rows = [{CR_ID: {**credit(), "userId": 4242}}] * 3 + [{CR_ID: {**credit("approved"), "userId": 4242}}]
+        rc, output, approve, update = self.run_main(set(), rows, gate=self._gate({4242: G.ALLOW}, calls))
+        self.assertEqual(rc, 0)
+        approve.assert_called_once()
+        self.assertEqual(approve.call_args.args[2], [CR_ID])
+
+    def test_account_gate_filter_is_fail_closed_and_caches_per_account(self):
+        G = cron.account_gate
+        calls = []
+        gate = G.Cached(self._gate({1: G.ALLOW, 2: G.HOLD}, calls))
+        rows = {"a": {"userId": 1}, "b": {"userId": 2}, "c": {"userId": 1}, "d": {}, "e": {"userId": 3}}
+        keep, held = cron.account_gate_filter(list(rows), rows, gate)
+        self.assertEqual(keep, ["a", "c"])
+        self.assertEqual(sorted(held), ["b", "d", "e"])
+        self.assertIn("account gate hold", held["b"])
+        self.assertEqual(sorted(calls), [1, 2, 3], "one gate call per account; no call without a user id")
 
     def test_approves_exact_ticket_id_then_resolves_after_authoritative_state(self):
         rc, output, approve, update = self.run_main(
@@ -917,6 +971,8 @@ class SharedLockEntrypointTests(unittest.TestCase):
             env = dict(os.environ)
             env.update({
                 "UVN_SKIP_HOST_GUARD": "1",
+                # Never the host's real kill switch: CI runs on node-8, where /etc/hydra may hold it.
+                "UVN_KILL_SWITCH_PATH": str(tmp_path / "absent.disabled"),
                 "CV_CREDIT_WRITE_LOCK_PATH": str(lock_path),
                 "CV_CREDIT_WRITE_LOCK_WAIT_SECS": "1",
                 "MUSO_BIN": str(boundary_stub),
@@ -970,6 +1026,8 @@ class SharedLockEntrypointTests(unittest.TestCase):
             env = dict(os.environ)
             env.update({
                 "UVN_SKIP_HOST_GUARD": "1",
+                # Never the host's real kill switch: CI runs on node-8, where /etc/hydra may hold it.
+                "UVN_KILL_SWITCH_PATH": str(tmp_path / "absent.disabled"),
                 "CV_CREDIT_WRITE_LOCK_PATH": str(tmp_path / "credit-status-writes.lock"),
                 "CV_CREDIT_WRITE_LOCK_WAIT_SECS": "0",
                 "MUSO_BIN": str(boundary_stub),

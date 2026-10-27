@@ -100,6 +100,8 @@ class Report:
     refused_users: int = 0
     failed_users: int = 0
     proof_tagged: int = 0
+    claim_proof_tagged: int = 0        # claim-proof-ask replies (any reply) tagged claim-proof (a separate queue)
+    claim_replies: int = 0             # claimant replies to a claim-proof-ask note (its reminder withheld)
     proof_failed: int = 0
     reminders_sent: int = 0
     skipped_not_live: int = 0
@@ -137,6 +139,7 @@ class Report:
         # Held-for-human users are news too (once a day): a human must see them.
         if not (self.sent_notes or self.refused_users or self.failed_users or self.reminders_sent
                 or self.proof_tagged or self.proof_failed or self.extension_requests
+                or self.claim_proof_tagged or self.claim_replies
                 or self.affiliation_held or self.documented_users or self.support_contact_users
                 or self.paying_hold or self.no_professional_id) and mode == "apply":
             return "NO_REPLY"
@@ -203,6 +206,11 @@ class Report:
             parts.append(f"{self.unverified} past credit(s) with no documents 30+ days after the ask (flagged unverified; they stay)")
         if self.proof_tagged:
             parts.append(f"{self.proof_tagged} proof repl(ies) tagged credit-proof for review")
+        if self.claim_replies:
+            parts.append(f"{self.claim_replies} claimant repl(ies) to a claim-proof-ask note recorded: no day-7 "
+                         "reminder; with a person")
+        if self.claim_proof_tagged:
+            parts.append(f"{self.claim_proof_tagged} claim repl(ies) tagged claim-proof for a person")
         if self.failed_users or self.proof_failed:
             parts.append(f"FAILED: {self.failed_users} send(s), {self.proof_failed} proof tag(s): " + "; ".join(self.failures[:5]))
         return ". ".join(parts) + "."
@@ -634,7 +642,8 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
         fd, path = tempfile.mkstemp(prefix="verify-note-", suffix=".json")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump({"user": p["user"], "credits": p["credits"]}, fh, ensure_ascii=False)
+                json.dump({"user": p["user"], "credits": p["credits"], **({"claim": p["claim"]} if "claim" in p else {})},
+                          fh, ensure_ascii=False)
             argv = [wrapper, "send", "--credits-file", path, "--approved-by", CAPTAIN_UID]
             argv += (extra or []) + (p.get("extra") or [])
             if mode != "apply":
@@ -865,13 +874,20 @@ def audit_documents(payloads: list[dict[str, Any]], report: Report, *, path: str
 def sweep_proofs(db: sqlite3.Connection, report: Report, *, days: int = 30, limit: int = 100,
                  wrapper: str = WRAPPER, runner: Runner = _run) -> None:
     for mid in verify_ledger.awaiting_proof(db, days=days)[:limit]:
+        row = verify_ledger.message(db, mid)
+        claim = row is not None and row["campaign"] in verify_ledger.CLAIM_CAMPAIGNS
         res = runner([wrapper, "tag-proof", "--message-id", mid])
         verify_ledger.mark_checked(db, message_id=mid)
         lines = res.stdout.strip().splitlines()
         if any(ln.startswith("REPLY RECORDED") for ln in lines):
-            report.extension_requests += 1
+            if claim:
+                report.claim_replies += 1
+            else:
+                report.extension_requests += 1
         out = next((ln[:200] for ln in lines if not ln.startswith("REPLY RECORDED")), "")
-        if res.returncode == 0 and out.startswith("TAGGED"):
+        if res.returncode == 0 and out.startswith("TAGGED") and claim:
+            report.claim_proof_tagged += 1
+        elif res.returncode == 0 and out.startswith("TAGGED"):
             report.proof_tagged += 1
         elif res.returncode in (0, 3):
             continue

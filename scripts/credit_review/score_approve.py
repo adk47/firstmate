@@ -52,6 +52,7 @@ from typing import Any, Callable, Iterable
 from . import admin as admin_api
 from .roles import is_editorial
 from . import decide
+from . import account_gate as account_gate_mod
 from .policy import (server_approval_refusal, server_proof_reasons, validator_conflict,
                      validator_rejected_rules)
 from .roles import ONE_PERSON_FAMILIES, family_of
@@ -161,7 +162,7 @@ def replica_candidates(max_risk: float, limit: int, bands: tuple[str, ...] = ("A
            # Core's agent guard refuses an IDP band hint other than A and any row with a proof
            # request (policy.server_proof_reasons); reading those rows only spends the shared
            # 120/min list budget. The live re-read re-checks everything anyway.
-           f"AND coalesce(json_extract_scalar(verificationdata, '$.band_hint'), 'A') IN ({','.join(repr(b) for b in bands)}) "
+           f"AND json_extract_scalar(verificationdata, '$.band_hint') IN ({','.join(repr(b) for b in bands)}) "
            "AND " + stamp +
            f"ORDER BY r ASC, createdat ASC LIMIT {int(limit)}")
     try:
@@ -565,8 +566,15 @@ def admitted_refusal(row: dict[str, Any], sp: ScorePolicy, engaged: Engaged | No
         out.remove("proof_requested")
         if stamp_answered(row):
             out.append("proof_requested(answered)")
-    if hint not in (None, "A", "B"):
-        out.append(f"band_hint_{hint}")
+    # Reviewed baseline: deploy overwrites - 2026-10-27 (credit-refresh-t01b, firstmate 026): node-8 held a hand
+    # edit of this file (credit-trust-llm-t01's band_hint hot patch of 2026-10-24 00:52Z, the two lines below and
+    # in replica_candidates); main now carries the same two lines (from #1351) on top of #1386, so this file is
+    # the reviewed text and nothing node-8 had is lost.
+    # Mirror core exactly (agentApprovalGuard validatorApprovedLowRiskRefusal: band_hint must be "A" or
+    # "B"; absent = band_not_a_or_b). 2026-10-23 20:36Z: 95 of 100 PUTs were refused by core for rows whose
+    # re-validated verdict carries no band_hint, and each refusal used up the per-run pace.
+    if hint not in ("A", "B"):
+        out.append(f"band_hint_{hint if hint is not None else 'missing'}")
     if vd.get("proof_required") is True:
         out.append("proof_required_flag")
     return ["proof_required", *out] if out else []
@@ -756,6 +764,7 @@ class ScoreResult:
     mode: str
     candidates: int = 0
     reread: int = 0
+    account_held: int = 0
     approved: int = 0
     would_approve: int = 0
     held: dict[str, int] = field(default_factory=dict)
@@ -787,6 +796,7 @@ class ScoreResult:
                 + (f"; {self.editorial_held} editorial-role rows held (trusted anchor under pop "
                    f"{decide.EDITORIAL_MID_POPULARITY} only)" if self.editorial_held else "")
                 + f"; {self.fanout_held} held by {FANOUT_PREFIX} (velocity-class)"
+                + (f"; {self.account_held} held by the account gate" if self.account_held else "")
                 + (f"; approved by anchor_kind {dict(sorted(self.anchor_kinds.items()))}" if self.anchor_kinds else "")
                 + ("; READS INCOMPLETE (HTTP 429 or scan cap)" if self.read_exhausted else "")
                 + ("; AUDIT SAMPLE NOT FILED: PAUSED" if self.audit_failed else "")
@@ -805,12 +815,14 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
         sleep: Callable[[float], None] | None = None,
         conversations: Callable[[dict[int, str]], dict[int, "bool | None"]] | None = None,
         anchors: Anchors | None = None, fanout: Fanout | None = None,
-        editorial_velocity: EditorialVelocity | None = None) -> ScoreResult:
+        editorial_velocity: EditorialVelocity | None = None,
+        account_gate: Callable[[Any], "account_gate_mod.GateResult"] | None = None) -> ScoreResult:
     if mode not in ("shadow", "apply"):
         raise ValueError("mode must be shadow or apply")
     decide.ensure_schema(db)
     now = now or datetime.now(timezone.utc)
     res = ScoreResult(run_id="score-" + now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6], mode=mode)
+    gate = account_gate_mod.Cached(account_gate)
     import time as _time
     t0 = _time.monotonic()
     why_paused = paused()
@@ -944,6 +956,13 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
         if why is None and fleet >= sp.fleet_per_day:
             why = f"fleet reached {sp.fleet_per_day} score approvals today"
             res.capped += 1
+        if why is None:
+            # Captain 2026-10-26 23:30-23:40Z / steward 019: the shared account gate decides last; only an
+            # explicit allow approves (hold / unknown / any failure = skip, no approval).
+            g = gate(d.user_id)
+            if not g.allowed:
+                why = f"{g.why()}: no approval, proof ask"
+                res.account_held += 1
         if why is None:
             d.evidence_kind = TRUSTED_EVIDENCE_KIND if kind == "trusted" else EVIDENCE_KIND
             res.anchor_kinds[kind] = res.anchor_kinds.get(kind, 0) + 1

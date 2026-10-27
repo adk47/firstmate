@@ -31,6 +31,12 @@ the same SQLite file as the decider's ``decisions`` table
   uvn-status   one status + reminder per user whose requests wait on them
                (user_verification_needed), ever; an ask (credit_review/uvn_status.py).
   withdrawal-confirm  confirms a requester-withdrawn request, once per request. Not an ask.
+  gap-ask      the stage-2 gap ask (Fable 2026-10-26 13:23Z): a user whose document on file
+               does not cover a held credit is told what it shows and what is missing. An ask,
+               once per credit, at most one message per user per day and none within 7 days of
+               another note (a status-doc-received note excepted: the gap ask is the follow-up it
+               promised). Not blocked by an earlier ask about the same credit, nor by a proof
+               reply: the user's earlier reply is what stage 2 judged.
   Details: docs/credit-verification/verify-request-notes.md.
 
 Guarantees:
@@ -92,13 +98,35 @@ MAX_ATTEMPTS = 3
 BLOCKING = ("attempted", "sent", "refused", "skipped")
 DEFERRED = "deferred_pending_doc"
 CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "uvn-status", "withdrawal-confirm",
-             "status-doc-received", "status-team-review", "email-changed", "email-changed-dup")
+             "status-doc-received", "status-team-review", "email-changed", "email-changed-dup",
+             "claim-proof-ask", "claim-status", "gap-ask")
+# claim-proof-ask (steers-1830 #5, firstmate 125/126): a dated ask to the claimant of a pending
+# profile CLAIM (band B/C) to put the claim's bound-proof code in one platform bio. Its "request
+# id" is the claim key "claim-<claiming.id>", so only its own rows block it (claim ids never meet
+# credit request ids); one note per claim, ever, plus ONE day-7 reminder; the initial note
+# names the close day (due_day), the reminder repeats it. Its rows never count as a credit
+# ask or as credit proof: a reply with attachments is tagged claim-proof, not credit-proof.
+CLAIM_CAMPAIGN = "claim-proof-ask"
+CLAIM_REMINDER = "reminder-7"
+CLAIM_WINDOW_DAYS = 14          # the close day: always 14 days after the note
+# claim-status (Fable claims-documentation-readiness-1023 ruling 3): a no-ask status note to the
+# claimant of a pending claim who gets NO proof ask (holds, organizations, claims with no surface
+# the daily code check can read). Same claim key, one note per claim ever, no follow-up. Never
+# for a claim that has a claim-proof-ask note, and nobody gets the other claim note within 7 days
+# of one (claim_cross_check). Its replies are claim-proof (a person), never credit proof.
+CLAIM_STATUS_CAMPAIGN = "claim-status"
+CLAIM_CAMPAIGNS = (CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN)
+GAP_ASK = "gap-ask"
+# The notes the gap ask may follow inside 7 days (one per day still holds): the doc-received
+# status note says "we have the document you sent ... we'll message you here as soon as it's
+# checked", and the gap ask is that message (firstmate, verify-ask-wiring-h2 inbox 003).
+GAP_ASK_FOLLOWS = ("status-doc-received",)
 # Once-per-user status campaigns: one message per user ever (per campaign), never within 7 days
 # of another note from this gate. Only uvn-status is an ask (and also stops after a proof reply).
 STATUS_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review")
 # Notices: only their own rows block them (they are not asks and never close one).
 NOTICE_CAMPAIGNS = ("takeback-notice", "withdrawal-confirm", "status-doc-received", "status-team-review",
-                    "email-changed", "email-changed-dup")
+                    "email-changed", "email-changed-dup", CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN)
 # Campaigns whose gate refusals are re-checkable (firstmate 076, 082, 083): a refusal holds the
 # USER (campaign, user_key or user_id) in verify_refusal_holds for RECHECK_DAYS (the runner and the gate skip
 # them until next_recheck_at, whatever requests are listed); a later send clears it; after
@@ -109,11 +137,12 @@ MAX_REFUSALS = 3
 # The campaigns that ASK the user for something. Only these count as "already asked";
 # notices and confirmations (removal-notice, takeback-notice, withdrawal-confirm) never close
 # a user's asks (firstmate 063/064).
-ASK_CAMPAIGNS = ("verify-live", "retro-past", "uvn-status")
+ASK_CAMPAIGNS = ("verify-live", "retro-past", "uvn-status", GAP_ASK)
 AFTER_REJECTION = "after-rejection"
-KINDS = ("initial", "reminder-14", "reminder-25", AFTER_REJECTION)
-# Days after a WINDOWED note at which each reminder becomes due.
-REMINDER_DAYS = {"reminder-14": 14, "reminder-25": 25}
+KINDS = ("initial", "reminder-14", "reminder-25", AFTER_REJECTION, CLAIM_REMINDER)
+# Days after a WINDOWED note (reminder-14/25) or a claim-proof-ask note (reminder-7) at which each
+# reminder becomes due.
+REMINDER_DAYS = {"reminder-14": 14, "reminder-25": 25, CLAIM_REMINDER: 7}
 # The after-rejection note's reply-by date is never earlier than this many days after it is sent.
 AFTER_REJECTION_MIN_DAYS = 7
 # The reviewer's reason for a rejection: a fixed list, the only text the after-rejection note shows.
@@ -250,6 +279,11 @@ def _plus(day: str, n: int) -> str:
     return (date.fromisoformat(day) + timedelta(days=n)).isoformat()
 
 
+def claim_close_day(day: str) -> str:
+    """The close day a claim-proof-ask note sent on `day` names: CLAIM_WINDOW_DAYS after it."""
+    return _plus(day, CLAIM_WINDOW_DAYS)
+
+
 def window(day: str) -> tuple[str, str]:
     """(due_day, removal_day) of a windowed note sent on `day`. The note names ONE date
     (Fable copy review 2026-10-17): the reply-by date, 30 days after the note. A reply by
@@ -264,11 +298,12 @@ def blocked_ids(db: sqlite3.Connection, request_ids: list[str], campaign: str = 
     refused or skipped in this campaign, or already asked about in any ASK campaign
     (never re-ask the same credit, no repeats across waves). takeback-notice and
     withdrawal-confirm are not asks but notices about that very request, so only their own
-    rows block them."""
+    rows block them. gap-ask exists BECAUSE the credit was asked about and the reply did not
+    cover it, so it too is blocked only by its own rows."""
     out: set[str] = set()
     asks = ",".join("?" * len(ASK_CAMPAIGNS))
     for rid in request_ids:
-        other = None if campaign in NOTICE_CAMPAIGNS else db.execute(
+        other = None if campaign in NOTICE_CAMPAIGNS or campaign == GAP_ASK else db.execute(
             f"SELECT 1 FROM verify_requests WHERE request_id=? AND campaign<>? AND campaign IN ({asks}) "
             "AND status IN ('attempted','sent') LIMIT 1", (rid, campaign, *ASK_CAMPAIGNS)).fetchone()
         if other is not None:
@@ -353,14 +388,14 @@ def past_user_done(db: sqlite3.Connection, user_key: str, user_id: str = "") -> 
     """retro-past: why this user must not get a past-credit ask ('' when they may).
     One ask per user, ever (an ask from any ASK campaign counts: no repeats across
     waves; a notice or confirmation does not); and never re-ask someone who already sent
-    proof (a credit-proof reply on any note, any campaign)."""
+    proof (a credit-proof reply on any credit note; a reply to a claim note is not credit proof)."""
     cond, params = _same_user(db, user_key, user_id)
     asks = ",".join("?" * len(ASK_CAMPAIGNS))
     if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.kind='initial' AND m.campaign IN ({asks}) "
                   "AND m.status IN ('attempted','sent') LIMIT 1", (*params, *ASK_CAMPAIGNS)).fetchone():
         return "already_asked"
-    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.proof_tagged_at IS NOT NULL LIMIT 1",
-                  params).fetchone():
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.proof_tagged_at IS NOT NULL "
+                  "AND m.campaign NOT IN (?,?) LIMIT 1", (*params, *CLAIM_CAMPAIGNS)).fetchone():
         return "proof_received"
     return ""
 
@@ -377,8 +412,8 @@ def uvn_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None
                   "AND m.status IN ('attempted','sent') LIMIT 1", (*params, campaign)).fetchone():
         return "already_sent"
     if campaign == "uvn-status" and db.execute(
-            f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.proof_tagged_at IS NOT NULL LIMIT 1",
-            params).fetchone():
+            f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.proof_tagged_at IS NOT NULL AND m.campaign NOT IN (?,?) LIMIT 1",
+            (*params, *CLAIM_CAMPAIGNS)).fetchone():
         return "proof_received"
     since = ((now or utcnow()) - timedelta(days=7)).strftime("%Y-%m-%d")
     if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day>=? AND m.status IN ('attempted','sent') "
@@ -393,8 +428,63 @@ def uvn_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None
     return ""
 
 
+def claim_cross_check(db: sqlite3.Connection, campaign: str, request_ids: list[str], user_key: str, *,
+                      day: str, user_id: str = "") -> str:
+    """The two claim notes never cross ('' when this one may go). A claim-status note never goes
+    to a claim that has a claim-proof-ask note ('proof_ask_sent', closed: that claimant is told
+    there), and never within 7 days of any note from this gate to the user ('messaged_7d', a
+    deferral). A claim-proof-ask note waits 7 days after a claim-status note ('messaged_7d')."""
+    if campaign not in CLAIM_CAMPAIGNS:
+        return ""
+    cond, params = _same_user(db, user_key, user_id)
+    # The send day the gate claims for, not the wall clock: the 7 days are counted back from it.
+    since = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+    if campaign == CLAIM_STATUS_CAMPAIGN:
+        marks = ",".join("?" * len(request_ids))
+        if request_ids and db.execute(
+                f"SELECT 1 FROM verify_requests r JOIN verify_messages m ON m.id = r.message_row "
+                f"WHERE r.campaign=? AND r.request_id IN ({marks}) AND m.status IN ('attempted','sent') LIMIT 1",
+                (CLAIM_CAMPAIGN, *request_ids)).fetchone():
+            return "proof_ask_sent"
+        if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day>=? AND m.status IN ('attempted','sent') "
+                      "LIMIT 1", (*params, since)).fetchone():
+            return "messaged_7d"
+        return ""
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.campaign=? AND m.day>=? "
+                  "AND m.status IN ('attempted','sent') LIMIT 1", (*params, CLAIM_STATUS_CAMPAIGN, since)).fetchone():
+        return "messaged_7d"
+    return ""
+
+
 # uvn_user_done reasons that only DEFER the user (nothing closed, offered again later).
 DEFER_REASONS = ("messaged_7d", "recently_asked")
+
+
+def gap_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None = None, user_id: str = "") -> str:
+    """gap-ask: why this user must not get one now ('' when they may). Only a deferral exists:
+    messaged_7d, any note from this gate in the last 7 days except a GAP_ASK_FOLLOWS note. The
+    per-credit once and the one-message-per-user-per-day cap are claim()'s."""
+    cond, params = _same_user(db, user_key, user_id)
+    since = ((now or utcnow()) - timedelta(days=7)).strftime("%Y-%m-%d")
+    follows = ",".join("?" * len(GAP_ASK_FOLLOWS))
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day>=? AND m.status IN ('attempted','sent') "
+                  f"AND m.campaign NOT IN ({follows}) LIMIT 1", (*params, since, *GAP_ASK_FOLLOWS)).fetchone():
+        return "messaged_7d"
+    return ""
+
+
+def followed_notes(db: sqlite3.Connection, user_key: str, *, now: datetime | None = None,
+                   user_id: str = "") -> dict[str, list[str]]:
+    """The GAP_ASK_FOLLOWS notes sent to this user in the last 7 days: their Intercom message ids
+    (in-thread: the part id) and conversation ids, so the gate's Intercom-side 7-day check can
+    leave exactly those messages out (every other message from us still defers)."""
+    cond, params = _same_user(db, user_key, user_id)
+    since = ((now or utcnow()) - timedelta(days=7)).strftime("%Y-%m-%d")
+    follows = ",".join("?" * len(GAP_ASK_FOLLOWS))
+    rows = db.execute(f"SELECT m.message_id, m.conversation_id FROM verify_messages m WHERE {cond} AND m.day>=? "
+                      f"AND m.status = 'sent' AND m.campaign IN ({follows})", (*params, since, *GAP_ASK_FOLLOWS)).fetchall()
+    return {"message_ids": sorted({str(r[0]) for r in rows if r[0]}),
+            "conversation_ids": sorted({str(r[1]) for r in rows if r[1]})}
 
 
 def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[str], message_type: str,
@@ -402,7 +492,8 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
           refs: list[dict[str, Any]] | None = None, windowed: bool = False, now: datetime | None = None,
           enforce_cap: bool = True, user_id: str = "") -> dict[str, Any]:
     """Atomically claim an initial note. One transaction (BEGIN IMMEDIATE) so two
-    concurrent runs cannot both claim the same user-day or request id."""
+    concurrent runs cannot both claim the same user-day or request id. A claim-proof-ask note
+    records its close day (claim_close_day) as due_day."""
     _check(campaign)
     if windowed and campaign != "verify-live":
         raise ValueError("only verify-live (new provisional approvals) notes carry a removal date")
@@ -427,8 +518,22 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
                 _skip(db, campaign, fresh, ts)
                 db.execute("COMMIT")
                 return {"result": "user_done", "reason": why, "request_ids": fresh}
+        if campaign == GAP_ASK and enforce_cap:
+            why = gap_user_done(db, user_key, now=now, user_id=user_id)
+            if why:
+                db.execute("COMMIT")
+                return {"result": "recent", "reason": why, "request_ids": fresh}
         if campaign == "retro-past" and enforce_cap:
             why = past_user_done(db, user_key, user_id)
+            if why:
+                _skip(db, campaign, fresh, ts)
+                db.execute("COMMIT")
+                return {"result": "user_done", "reason": why, "request_ids": fresh}
+        if campaign in CLAIM_CAMPAIGNS and enforce_cap:
+            why = claim_cross_check(db, campaign, fresh, user_key, day=day, user_id=user_id)
+            if why in DEFER_REASONS:
+                db.execute("COMMIT")
+                return {"result": "recent", "reason": why, "request_ids": fresh}
             if why:
                 _skip(db, campaign, fresh, ts)
                 db.execute("COMMIT")
@@ -443,6 +548,8 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
             return {"result": "recently_asked", "request_ids": fresh}
         keep = [r for r in (refs or []) if str(r.get("request_id")) in set(fresh)]
         due, removal = window(day) if windowed else (None, None)
+        if campaign == CLAIM_CAMPAIGN:
+            due = claim_close_day(day)
         cur = db.execute(
             "INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, due_day, removal_day, status, "
             "message_type, contact_id, request_ids_json, refs_json, n_credits, approved_by, approval_ref, created_at, "
@@ -475,6 +582,11 @@ def reminder_state(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
       credit, for every rejected credit no after-rejection note has named yet (at most one
       per credit), with what was received (document | reply), the reasons and a reply-by
       date never earlier than AFTER_REJECTION_MIN_DAYS after `day` (removal the day after);
+      claim-proof-ask note: one reminder-7, from day 7 up to the day before its close day
+      (due_day), unless it was closed (close_reminder: code found, claim decided or
+      withdrawn); never once the claimant replied to the note (proof_received: a claim-proof
+      tag or any recorded reply; the reply waits for a person); any other kind of follow-up
+      is not_applicable;
       any other note (retro-past, preview-era v1): no follow-ups."""
     if kind not in KINDS[1:]:
         raise ValueError(f"unknown follow-up kind {kind!r}")
@@ -487,7 +599,22 @@ def reminder_state(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
             "removal_day": parent["removal_day"],
             "windowed": parent["removal_day"] is not None, "request_ids": json.loads(parent["request_ids_json"]),
             "message_type": parent["message_type"]}
-    if not info["windowed"]:
+    if parent["campaign"] == CLAIM_CAMPAIGN:
+        if kind != CLAIM_REMINDER:
+            return {"result": "not_applicable", **info}
+        prior = db.execute("SELECT status, attempts FROM verify_messages WHERE parent_row=? AND kind=? "
+                           "ORDER BY id DESC LIMIT 1", (parent["id"], kind)).fetchone()
+        if prior is not None and (prior["status"] in BLOCKING or int(prior["attempts"]) >= MAX_ATTEMPTS):
+            return {"result": "done", **info}
+        today = date.fromisoformat(day)
+        if today < date.fromisoformat(parent["day"]) + timedelta(days=REMINDER_DAYS[kind]):
+            return {"result": "not_due", **info}
+        if today >= date.fromisoformat(parent["due_day"]):
+            return {"result": "done", **info}
+        if parent["proof_tagged_at"] or parent["extension_requested_at"]:
+            return {"result": "proof_received", **info}
+        return {"result": "due", **info}
+    if kind == CLAIM_REMINDER or not info["windowed"]:
         return {"result": "not_applicable", **info}
     reviews = db.execute("SELECT request_id, outcome, reason, document FROM verify_proof_reviews WHERE family=?",
                          (parent["id"],)).fetchall()
@@ -541,13 +668,14 @@ def _told(db: sqlite3.Connection, family: int, *, finished: bool = False) -> dic
 def close_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str, day: str, reason: str,
                    now: datetime | None = None) -> bool:
     """Close follow-up `kind` of a note as `skipped` when nothing on it can be sent any
-    more, so reminders_due stops offering it. Only a due follow-up is closed; no message
+    more, so reminders_due stops offering it. Only a due follow-up is closed (or a claim
+    reminder the claimant's reply withheld); no message
     is sent and the daily cap is untouched. True when a row was written."""
     ts = stamp(now)
     db.execute("BEGIN IMMEDIATE")
     try:
         st = reminder_state(db, parent_message_id=parent_message_id, kind=kind, day=day)
-        if st["result"] != "due":
+        if st["result"] != "due" and not (st["result"] == "proof_received" and st.get("campaign") == CLAIM_CAMPAIGN):
             db.execute("COMMIT")
             return False
         db.execute(
@@ -683,6 +811,59 @@ def refusals_to_flag(db: sqlite3.Connection, campaigns: list[str] | tuple[str, .
             for r in db.execute(f"SELECT campaign, user_key, user_id, reason, refusals FROM verify_refusal_holds "
                                 f"WHERE refusals>=? AND flagged_at IS NULL AND campaign IN ({','.join('?' * len(camps))}) "
                                 f"ORDER BY campaign, user_id", (MAX_REFUSALS, *camps)).fetchall()]
+
+
+# The no-ask status notes ("... nothing else is needed from you right now"): the campaigns a
+# silent hold blocks.
+STATUS_NOTE_CAMPAIGNS = ("status-doc-received", "status-team-review")
+HOLD_REASON_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
+
+
+def hold_silent(db: sqlite3.Connection, *, user_ids: list[str], reason: str,
+                campaigns: tuple[str, ...] = STATUS_NOTE_CAMPAIGNS, now: datetime | None = None) -> dict[str, int]:
+    """Hold these Muso users from the status notes for good (Fable ruling 017, 2026-10-27: the 40 users
+    told 'nothing else is needed' while they owe proof get no such note again; the uvn-status ask is
+    NOT held, so they stay first in line for it). A flagged verify_refusal_holds row per campaign,
+    keyed user:<id> and matched by user_id (refusal_hold), so an email change does not free them:
+    the runner and the gate skip them (refused-flagged), a later send never clears it, and it is
+    never posted to #cs_priority (refusals_to_flag reads unflagged rows only). Idempotent: an
+    existing row is flagged with this reason. Returns {"held": rows written, "already": rows that
+    were flagged already}."""
+    if not HOLD_REASON_RE.match(reason):
+        raise ValueError(f"reason must be a short slug (got {reason!r})")
+    for c in campaigns:
+        if c not in RECHECKABLE_REFUSALS:
+            raise ValueError(f"{c!r} has no refusal hold")
+    ids = [str(u).strip() for u in user_ids if str(u).strip()]
+    bad = [u for u in ids if not u.isdigit()]
+    if bad:
+        raise ValueError(f"not Muso user ids: {bad[:3]}")
+    ts = stamp(now)
+    out = {"held": 0, "already": 0}
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        for c in campaigns:
+            for uid in dict.fromkeys(ids):
+                cond, params = _hold_of(f"user:{uid}", uid)
+                rows = db.execute(f"SELECT user_key, flagged_at FROM verify_refusal_holds WHERE campaign=? AND {cond}",
+                                  (c, *params)).fetchall()
+                if any(r["flagged_at"] for r in rows):
+                    out["already"] += 1
+                    continue
+                if rows:
+                    for r in rows:
+                        db.execute("UPDATE verify_refusal_holds SET flagged_at=?, reason=?, updated_at=? "
+                                   "WHERE campaign=? AND user_key=?", (ts, reason, ts, c, r["user_key"]))
+                else:
+                    db.execute("INSERT INTO verify_refusal_holds (campaign, user_key, user_id, refusals, reason, "
+                               "next_recheck_at, flagged_at, updated_at) VALUES (?,?,?,0,?,?,?,?)",
+                               (c, f"user:{uid}", uid, reason, "9999-12-31T00:00:00Z", ts, ts))
+                out["held"] += 1
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+    return out
 
 
 def mark_flagged(db: sqlite3.Connection, *, campaign: str, user_key: str, now: datetime | None = None) -> int:
@@ -851,7 +1032,8 @@ PROOF_OUTCOMES = ("accepted", "rejected")
 
 def mark_replied(db: sqlite3.Connection, *, message_id: str, replied_at: str = "",
                  now: datetime | None = None) -> str:
-    """The user replied to a windowed note or one of its follow-ups (any reply: the gate
+    """The user replied to a windowed note or one of its follow-ups, or to a claim-proof-ask
+    note (its day-7 reminder is then never sent) (any reply: the gate
     looks at the author only). `replied_at` is the latest user reply's own time (UTC
     YYYY-MM-DDTHH:MM:SSZ; now when the conversation gives none). Records it on that message
     when it is newer than the one already recorded, and extension_requested_at on the
@@ -863,8 +1045,8 @@ def mark_replied(db: sqlite3.Connection, *, message_id: str, replied_at: str = "
     root = _family(db, message_id)
     if root is None:
         return "no_message"
-    note = db.execute("SELECT removal_day FROM verify_messages WHERE id=?", (root,)).fetchone()
-    if note is None or note["removal_day"] is None:
+    note = db.execute("SELECT removal_day, campaign FROM verify_messages WHERE id=?", (root,)).fetchone()
+    if note is None or (note["removal_day"] is None and note["campaign"] != CLAIM_CAMPAIGN):
         return "not_applicable"
     msg = db.execute("SELECT id, last_reply_at FROM verify_messages WHERE message_id=? ORDER BY id DESC LIMIT 1",
                      (message_id,)).fetchone()
@@ -992,7 +1174,8 @@ def set_conversation(db: sqlite3.Connection, *, message_id: str, conversation_id
 
 def awaiting_proof(db: sqlite3.Connection, *, days: int = 45, now: datetime | None = None) -> list[str]:
     """Message ids of sent notes and follow-ups whose note family sent a message within
-    `days`: every one not yet tagged credit-proof, and a tagged one too while its windowed
+    `days`: every one not yet tagged (credit-proof; claim-proof for a claim-proof-ask or claim-status note,
+    which the gate tags apart from the credit queue), and a tagged one too while its windowed
     note still has a credit no accepted review cleared (awaiting review, or rejected), so a
     user reply in ANY thread of the family is recorded (tag-proof never re-tags it). Never-
     checked first, then least recently checked, so a capped sweep reaches every note in
@@ -1038,6 +1221,22 @@ def reminders_due(db: sqlite3.Connection, *, campaign: str, day: str) -> list[tu
                 break
             if kind == "reminder-25" and st["result"] in ("done", "proof_received"):
                 break
+    return out
+
+
+def claim_reminders_due(db: sqlite3.Connection, *, day: str) -> list[dict[str, Any]]:
+    """Every sent claim-proof-ask note whose reminder-7 is in its window on `day`, oldest first:
+    {message_id, user_key, account_id, request_ids, due_day, result}. result `due`: the caller
+    re-checks the claim (still pending, code not found) and sends, or closes the reminder with
+    close_reminder; `proof_received`: the claimant replied, so the caller closes it unsent."""
+    out: list[dict[str, Any]] = []
+    rows = db.execute("SELECT * FROM verify_messages WHERE campaign=? AND kind='initial' AND status='sent' "
+                      "AND message_id IS NOT NULL ORDER BY id", (CLAIM_CAMPAIGN,)).fetchall()
+    for r in rows:
+        st = reminder_state(db, parent_message_id=str(r["message_id"]), kind=CLAIM_REMINDER, day=day)
+        if st["result"] in ("due", "proof_received"):
+            out.append({"message_id": str(r["message_id"]), "user_key": r["user_key"], "account_id": r["account_id"],
+                        "request_ids": st["request_ids"], "due_day": r["due_day"], "result": st["result"]})
     return out
 
 
@@ -1162,6 +1361,12 @@ def _main(argv: list[str] | None = None) -> int:
     mr.add_argument("--replied-at", default="", help="UTC time of the latest user reply (YYYY-MM-DDTHH:MM:SSZ)")
     ve = sub.add_parser("v1-eligible", help="may a note over these credits use the v1 (no-deadline) copy?")
     ve.add_argument("--request-ids", required=True)
+    hs = sub.add_parser("hold-silent", help="hold Muso users from the status notes for good (flagged refusal hold)")
+    hs.add_argument("--user-ids-file", required=True, help="one Muso user id per line")
+    hs.add_argument("--reason", required=True, help="a short slug, e.g. owe-proof-told-nothing-needed")
+    fo = sub.add_parser("followed-notes", help="gap-ask: this user's status-doc-received notes of the last 7 days")
+    fo.add_argument("--user-key", required=True)
+    fo.add_argument("--user-id", default="")
     c = sub.add_parser("set-conversation")
     c.add_argument("--message-id", required=True)
     c.add_argument("--conversation-id", required=True)
@@ -1200,6 +1405,14 @@ def _main(argv: list[str] | None = None) -> int:
             out["user_done"] = "" if why in DEFER_REASONS else why
             out["recent"] = why in DEFER_REASONS
             out["recent_why"] = why if why in DEFER_REASONS else ""
+        if a.user_key and a.campaign == GAP_ASK:
+            why = gap_user_done(db, a.user_key, user_id=a.user_id)
+            out["user_done"], out["recent"], out["recent_why"] = "", bool(why), why
+    elif a.op == "hold-silent":
+        ids = [ln.split("#")[0].strip() for ln in Path(a.user_ids_file).read_text().splitlines()]
+        out = hold_silent(db, user_ids=[i for i in ids if i], reason=a.reason)
+    elif a.op == "followed-notes":
+        out = followed_notes(db, a.user_key, user_id=a.user_id)
     elif a.op == "skip":
         out = {"skipped": skip_requests(db, campaign=a.campaign, request_ids=_ids(a.request_ids))}
     elif a.op == "reminder-state":

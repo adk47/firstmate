@@ -22,6 +22,14 @@ from .sandbox import MAX_BYTES
 from .sniff import sniff
 
 
+# Doc-verify (credit_verify.docverify) asks for the document's text so its
+# extraction step can read it; nothing else does. Bounded: the model reads at
+# most this many characters, and the text never reaches a store.
+TEXT_CAP = 16_000
+FACT_KEYS = ("pages", "incremental_updates", "signatures", "text_layer", "camera", "width", "height", "producer",
+             "creator", "created", "modified", "exif_datetime", "exif_datetime_original", "software")
+
+
 def extract(path: str, declared: str | None, ctx: ClaimContext,
             contexts: list[ClaimContext] | None = None) -> dict[str, Any]:
     with open(path, "rb") as fh:
@@ -29,7 +37,7 @@ def extract(path: str, declared: str | None, ctx: ClaimContext,
 
 
 def extract_bytes(data: bytes, path: str, declared: str | None, ctx: ClaimContext,
-                  contexts: list[ClaimContext] | None = None) -> dict[str, Any]:
+                  contexts: list[ClaimContext] | None = None, want_text: bool = False) -> dict[str, Any]:
     """`path` is only the label cited as evidence (and its extension the
     declared type hint); the bytes are `data`.
 
@@ -99,11 +107,12 @@ def extract_bytes(data: bytes, path: str, declared: str | None, ctx: ClaimContex
         minhash=fingerprint.minhash(sh),
         n_shingles=len(sh),
         entities=ents,
-        facts={k: v for k, v in facts.items() if k in ("pages", "incremental_updates", "signatures", "text_layer",
-                                                      "camera", "width", "height", "producer")},
+        facts={k: v for k, v in facts.items() if k in FACT_KEYS},
     )
     if per_context is not None:
         out["per_context"] = per_context
+    if want_text:
+        out["doc_text"] = ext.text[:TEXT_CAP]
     return out
 
 
@@ -119,7 +128,8 @@ def main() -> int:
         contexts = req.get("contexts")
         res = extract_bytes(base64.b64decode(req["data"]), req["path"], req.get("declared"),
                             ClaimContext.from_dict(req.get("context")),
-                            [ClaimContext.from_dict(c) for c in contexts] if contexts else None)
+                            [ClaimContext.from_dict(c) for c in contexts] if contexts else None,
+                            want_text=bool(req.get("want_text")))
     except Exception as exc:  # noqa: BLE001 - one bad file must yield a recorded error, not a traceback
         res = {"version": FORENSICS_VERSION, "fatal": f"{type(exc).__name__}: {exc}"[:300]}
     json.dump(res, answer, default=str)

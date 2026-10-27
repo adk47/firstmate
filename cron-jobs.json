@@ -422,7 +422,7 @@
       "agentId": "operations",
       "name": "uvn-ticket-popularity-under30",
       "description": "ENABLED 2026-08-13 after Nick authorized the autonomous admin-write gate; PROFILE-SCOPED 2026-09-08 (#914); APPLY MODE + HOURLY from 2026-09-09 after a shadow period whose only settled decision matched the human. Runs at :30 every hour — hourly, not 4-hourly, because the point is to beat the humans' measured 2.2h median wait, which a 4h cadence cannot; :30 keeps it clear of the credit-verification batch at :00. A TO DO hydra-action-request/action:credit-verify ticket carrying the automation:uvn-under30 eligibility tag and a UUID profile is in scope (Caroline's recommendation does not gate enrollment — the cron's own policy is the gate); the cron resolves that profile's live user_verification_needed rows from the backend itself (exact ids in the ticket only narrow the scope), fetches authoritative live Spotify popularity, excludes fraud and backend hard-reject signals, atomically approves only rows still in user_verification_needed with popularity below 30, verifies every exact ID, never rejects, and resolves the ticket only when the profile has nothing left in verification; rows it cannot approve are listed on the ticket for the human reviewer. REVERSAL BREAKER: before writing anything it re-reads every request it approved in the last 14 days, and if more than UVN_MAX_REVERSALS of them are no longer approved it halts the run and asks for a human — a person undoing our approval is the one direct signal the sub-30 rule was wrong, and humans reversed 0 of 127 of their own approvals beforehand. It fails closed when that history cannot be read. --limit caps approvals per run, --mode shadow reverts to recording only, and /etc/hydra/uvn-under30-cron.disabled silences it. Plain-English summaries are announced to #credit-verification by the cron runner; policy mismatches are de-enrolled once and remain open for manual review without turning the run into a recurring command-failure alert.",
-      "enabled": true,
+      "enabled": false,
       "createdAtMs": 1786384653000,
       "updatedAtMs": 1786384653000,
       "schedule": {
@@ -1400,7 +1400,7 @@
       "agentId": "operations",
       "name": "credit-trust-decide-15m",
       "description": "TRUST-YET-VERIFY decider (captain 2026-10-15 ~22:12Z: 'i want AI live now ... trust yet verify approach'; wiring data/credit-trust-system-fable-a1/live-tonight.md Piece 1). Every 15 min, oldest held (unverified) rows first, <= 500 per run: provisional APPROVE only for non-big tracks with no validator conflict and one evidence kind (trusted catalog confirmation, a trusted footprint, or Codex on server-fetched sources with verified quotes on >= 2 independent domains, never crowd-edited MusicBrainz/Wikipedia alone; $0; editorial roles only on trusted catalog confirmation under pop 30), else REQUEST SUPPORT (user_verification_needed - Knock asks the user for proof). Big tracks and the fraud lists are never approved (no named-user rules); paying users' rows are decided first; support requests are never re-sent (proof on file -> hold, a credit asked once ever, one ask per user per 24h, none at all while the proof-on-file export is unknown); a model outage DEFERS rows instead of sending support requests. Every decision is in the decisions table of /var/lib/hydra/credit-review/ledger.sqlite3 before the write (credit-review.py explain <id>; revert --run <id>). Command-shaped: exit code = run status. Registered in policies/credit-approval-automation.json (credit-trust-decide). Kill switch /etc/hydra/credit-trust-decide.disabled.",
-      "enabled": true,
+      "enabled": false,
       "createdAtMs": 1792103400000,
       "updatedAtMs": 1792103400000,
       "schedule": {
@@ -1524,6 +1524,37 @@
       }
     },
     {
+      "id": "ba2972be-31ed-59a0-b0cc-b950bec9cf81",
+      "agentId": "operations",
+      "createdAtMs": 1792972800000,
+      "updatedAtMs": 1792972800000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": true,
+      "name": "credit-doc-verify",
+      "description": "Doc-verify, SHADOW (captain 2026-10-26 23:10Z: never take a returned document at face value; 23:30Z order: extraction, forensics and independent cross-checks only, no issuer emails, no customer copy, UNKNOWN never approves). Hourly at :50, after stage 2: every document H3 judged for a linked credit request since the first run's cutoff (up to 30 documents per run) is located (Intercom cache, else one read-only Intercom GET + the customer's attachment; sha256 must equal the proof id), its text and file dates read in the same no-network sandbox, its claims extracted by OpenRouter deepseek-v4.1-flash-1017 (tool-less, data_collection deny, $5/day cap), its forensics combined with the H3 verdict (file dates vs claimed dates, email screenshots weak, cross-account template reuse), and cross-checked independently: Spotify/Tidal trusted raw credits (one admin GET per track), MusicBrainz + Deezer by ISRC, the release label vs the claimed issuer, the sender domain vs the issuer's official domain found independently (MusicBrainz label / distributor-PRO table) + MX, the signatory on the issuer's official site. Records verified / contradicted / forged / unverifiable (+ stronger-proof code, account hold) with every step in /var/lib/hydra-credit-verify/doc-verify.sqlite. Changes no credit, sends nothing to anybody. Kill switch: /etc/hydra/credit-verify.disabled. Docs: docs/credit-verification/doc-verify.md.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "50 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-doc-verify.py",
+          "run",
+          "--max-docs",
+          "30"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 3000
+      }
+    },
+    {
       "id": "7d0b6e7f-62c2-5201-b075-1f942621cee2",
       "agentId": "operations",
       "name": "credit-digest-dm-0800-ny",
@@ -1560,7 +1591,7 @@
       "agentId": "operations",
       "name": "credit-trust-score-approve-15m",
       "description": "Captain 2026-10-20 ~11:30Z 'approve low risk credits' (firstmate 110): credit-review.py score-approve --mode apply executes the validator's approve verdict on held user_verification_needed rows with total risk < 30, every other guard intact (scripts/credit_review/score_approve.py; registry credit-trust-score-approve). Risk 0 first, paid first, <= 100 per run, ledger before write, reversible per run. Runs at :10/:25/:40/:55 between decider runs. Kill switch /etc/hydra/credit-trust-score-approve.disabled. NO_REPLY when nothing was approved; one summary line otherwise; exit 1 on write errors.",
-      "enabled": true,
+      "enabled": false,
       "createdAtMs": 1792103400000,
       "updatedAtMs": 1792103400000,
       "schedule": {

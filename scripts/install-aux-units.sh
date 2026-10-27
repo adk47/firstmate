@@ -1888,6 +1888,23 @@ cat > /etc/cron.d/openclaw-watchdog << CRONWATCHDOG
 CRONWATCHDOG
 chmod 644 /etc/cron.d/openclaw-watchdog
 
+# ─── Credit-status daily run (paid-wave-runner-p2) ─────────────
+# Every credit requester who was never told their status gets the approved status copy
+# (captain 2026-10-26 16:05Z "nothing sits silent"): paid only at 00:30Z (first claim on each UTC
+# day's caps), paid then free at 15:00Z. scripts/paid-status/daily.sh; runbook in its header.
+# Document asks run ONLY with ASKS=1 (captain 2026-10-27 01:0xZ: no proof ask until a returned
+# document can be accepted), so this cron sends status-only notes. Caps come from main.env
+# (CREDIT_STATUS_DAILY_MAX / CREDIT_UVN_DAILY_MAX, the email warm-up ceilings). Stop switch:
+# touch /etc/hydra/credit-ops-notes.disabled. Replaces the hand-installed 2026-10-26 file.
+cat > /etc/cron.d/hydra-paid-status << CRONPAIDSTATUS
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 0 * * * root MODE=apply EMAIL_ROUTE=1 SEGMENTS="paid" $HYDRA_ROOT/scripts/paid-status/daily.sh >> /var/lib/hydra/paid-status/daily.log 2>&1
+0 15 * * * root MODE=apply EMAIL_ROUTE=1 SEGMENTS="paid free" $HYDRA_ROOT/scripts/paid-status/daily.sh >> /var/lib/hydra/paid-status/daily.log 2>&1
+CRONPAIDSTATUS
+chmod 644 /etc/cron.d/hydra-paid-status
+install -d -m 700 /var/lib/hydra/paid-status
+
 # ─── Codex OAuth keepalive at 15-min cadence ──────────────────
 # PROACTIVE complement to the watchdog: openclaw-watchdog.sh pages REACTIVELY
 # (journal 401 signature, after the fleet is already on the mini fallback);
@@ -2812,11 +2829,19 @@ CHPRUNETMR
 systemctl daemon-reload
 
 chptmr=hydra-codex-home-prune.timer
-systemctl enable "$chptmr" >/dev/null 2>&1 || fail "could not enable $chptmr"
-systemctl start "$chptmr" >/dev/null 2>&1 || fail "could not start $chptmr"
-chpstate="$(systemctl is-active "$chptmr" 2>/dev/null || true)"
-[[ "$chpstate" == "active" ]] || fail "$chptmr is not active (state: ${chpstate:-unknown})"
-log "  $chptmr: $chpstate (fires daily 05:45 UTC)"
+# LEGAL HOLD (2026-10-27): while the hold file exists the timer stays disabled and stopped, and a
+# deploy does not re-arm it (codex-home-prune.sh also refuses --apply under the same file).
+chphold=/etc/hydra/codex-home-prune.hold   # canonical, same literal as codex-home-prune.sh; no env override
+if [[ -e "$chphold" ]]; then
+  systemctl disable --now "$chptmr" >/dev/null 2>&1 || log "WARN: could not disable $chptmr under the hold"
+  log "  $chptmr: HELD ($chphold exists; legal hold) -- not enabled"
+else
+  systemctl enable "$chptmr" >/dev/null 2>&1 || fail "could not enable $chptmr"
+  systemctl start "$chptmr" >/dev/null 2>&1 || fail "could not start $chptmr"
+  chpstate="$(systemctl is-active "$chptmr" 2>/dev/null || true)"
+  [[ "$chpstate" == "active" ]] || fail "$chptmr is not active (state: ${chpstate:-unknown})"
+  log "  $chptmr: $chpstate (fires daily 05:45 UTC)"
+fi
 
 # ─── Twice-weekly codex OAuth token refresh (Sun+Wed 04:00 UTC) ──
 # The DURABLE fix for the recurring ~10-day codex token lapse. hydra keeps the

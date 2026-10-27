@@ -880,6 +880,26 @@ class RunTests(unittest.TestCase):
         self.assertEqual(fake.argv, [["/w", "tag-proof", "--message-id", "100"]])
         self.assertEqual(rep.proof_tagged, 1)
 
+    def test_claim_proof_ask_replies_are_counted_apart_from_credit_proof(self):
+        db = verify_ledger.connect(self.path)
+        for i, campaign in enumerate(("claim-proof-ask", "claim-proof-ask", "verify-live")):
+            c = verify_ledger.claim(db, campaign=campaign, user_key=f"u{i}@x.com", day="2026-10-15",
+                                    request_ids=[f"claim-{i}" if campaign == "claim-proof-ask" else f"r{i}"],
+                                    message_type="email", approved_by=CAPTAIN_UID, approval_ref="ref")
+            verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=f"{100 + i}")
+        db.close()
+        fake = Fake({"100": (0, "TAGGED claim-proof conversation=5 message=100 attachments=1", ""),
+                     "101": (3, "REPLY RECORDED message=101 conversation=6 (no day-7 reminder; with a person)\n"
+                                "NO PROOF YET message=101 conversation=6", ""),
+                     "102": (0, "TAGGED credit-proof conversation=7 message=102 attachments=1", "")})
+        rep = verify_notify.run(FakeAdmin([]), ledger_path=self.path, mode="apply", runner=fake, wrapper="/w")
+        self.assertEqual((rep.proof_tagged, rep.extension_requests, rep.claim_proof_tagged, rep.claim_replies),
+                         (1, 0, 1, 1))
+        text = rep.render("apply")
+        self.assertIn("1 proof repl(ies) tagged credit-proof for review", text)
+        self.assertIn("1 claim repl(ies) tagged claim-proof for a person", text)
+        self.assertIn("1 claimant repl(ies) to a claim-proof-ask note recorded", text)
+
     def test_a_recorded_user_reply_is_reported_for_a_human(self):
         db = verify_ledger.connect(self.path)
         c = verify_ledger.claim(db, user_key="u@x.com", day="2026-10-15", request_ids=["r1"], message_type="email",

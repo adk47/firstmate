@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from credit_review import account_gate  # noqa: E402
 from lib.customer_outcome import (  # noqa: E402
     OUTCOME_COMPLETE,
     customer_outcome_of,
@@ -560,6 +561,24 @@ def clear_unresolved(run_id: str, ids: list[str]) -> None:
         write_unresolved_ids(run_id, current - set(ids), "cleared_after_exact_2xx_and_readback")
 
 
+def account_gate_filter(
+    request_ids: list[str],
+    rows: dict[str, dict[str, Any]],
+    gate: Any,
+) -> tuple[list[str], dict[str, str]]:
+    """(the ids whose account the gate ALLOWS, {held id: why}). Fail closed: no user id, hold,
+    unknown or a failed check is held. ``gate`` is account_gate.Cached (one call per account)."""
+    keep: list[str] = []
+    held: dict[str, str] = {}
+    for request_id in request_ids:
+        result = gate(rows.get(request_id, {}).get("userId"))
+        if result.allowed:
+            keep.append(request_id)
+        else:
+            held[request_id] = result.why()
+    return keep, held
+
+
 def approve_chunk(run_id: str, task_id: str, ids: list[str]) -> set[str]:
     body = {"requestIds": ids, "status": APPROVED, "expectedStatus": UVN}
     audit(run_id, "approve_planned", {"ticket_id": task_id, "request_ids": ids, "body": body})
@@ -931,6 +950,7 @@ def run_locked(run_id: str, *, mode: str, limit: int) -> int:
     changed = limit_reached = False
     failed_tickets: list[str] = []
     deadline = time.monotonic() + RUN_BUDGET_SECS
+    gate_cache = account_gate.Cached()  # one account-gate call per user per run
 
     def check_budget() -> None:
         if time.monotonic() > deadline:
@@ -1045,6 +1065,11 @@ def run_locked(run_id: str, *, mode: str, limit: int) -> int:
                     )
                 ]
 
+                # Captain 2026-10-26 23:30-23:40Z / steward 019: the shared account gate decides before any
+                # approval. Only an explicit allow passes; hold / unknown / any failure = skip (row stays held).
+                safe_chunk, gate_held = account_gate_filter(safe_chunk, current_rows, gate_cache)
+                if gate_held:
+                    audit(run_id, "account_gate_held", {"ticket_id": task_id, "held": gate_held})
                 if not safe_chunk:
                     continue
                 if mode == "shadow":

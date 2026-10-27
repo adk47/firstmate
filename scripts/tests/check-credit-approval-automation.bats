@@ -111,6 +111,8 @@ jq_edit() {
 }
 
 @test "FAILS when uvn-under30 is flipped to unapproved while its cron is enabled" {
+  # The fixture states "enabled" itself: the tracked cron may be switched off (captain order 2026-10-26).
+  jq_edit "$CRON_JOBS_FILE" '(.jobs[] | select(.name == "uvn-ticket-popularity-under30") | .enabled) = true'
   jq_edit "$CREDIT_APPROVAL_REGISTRY" '.automations["uvn-under30"].approved = false'
   run --separate-stderr "$SCRIPT"
   [ "$status" -eq 1 ]

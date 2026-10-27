@@ -21,13 +21,30 @@ NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
 
 
 def row(rid, *, uid=500, pid="p1", risk=0, approved=True, pop=20, roles=("Producer",), rules=None, status=decide.UVN,
-        created="2026-10-19T00:00:00Z", meta=None, band=None):
+        created="2026-10-19T00:00:00Z", meta=None, band="A"):
+    # Every validator verdict today carries band_hint; core refuses one without (band_not_a_or_b).
     vd = {"is_approved": approved, "total_risk_percent": risk, "rule_risk_percent": dict(rules or {})}
     if band is not None:
         vd["band_hint"] = band
     return {"id": rid, "profileId": pid, "userId": uid, "trackId": "t-" + rid, "status": status,
             "spotifyTrackTitle": "Song " + rid, "spotifyPopularity": pop, "credits": list(roles),
             "createdAt": created, "verificationData": vd, "metadata": dict(meta or {})}
+
+
+
+# Steward 019 / captain 2026-10-26: every approval calls the shared account gate first. These tests cover the
+# other rules, so the gate answers allow here; its own behaviour is pinned below and in test_credit_account_gate.py.
+from credit_review import account_gate as _gate  # noqa: E402
+from unittest import mock as _mock  # noqa: E402
+_ALLOW = _mock.patch.object(_gate, "check", lambda uid, runner=None: _gate.GateResult(_gate.ALLOW))
+
+
+def setUpModule():
+    _ALLOW.start()
+
+
+def tearDownModule():
+    _ALLOW.stop()
 
 
 class FakeAdmin:
@@ -98,7 +115,7 @@ class ScoreApprove(unittest.TestCase):
             "users": len({e["user_id"] for e in entries}), "entries": entries}))
 
     def go(self, rows, *, mode="apply", sp=None, pol=None, convo=None, admin=None, anchors=None, fanout=None,
-           editorial_velocity=None):
+           editorial_velocity=None, gate=None):
         sp = sp or sa.ScorePolicy(enabled=True)
         w = Writer()
         cands = lambda risk, limit: [(r["id"], r["profileId"], float(r["verificationData"]["total_risk_percent"]),
@@ -113,7 +130,7 @@ class ScoreApprove(unittest.TestCase):
                      readback=lambda status, ids: set(), now=NOW, sleep=lambda _s: None, conversations=conversations,
                      anchors=anchors or (lambda rs: {str(r["id"]): ("none", None) for r in rs}),
                      fanout=fanout or (lambda rs: {}),
-                     editorial_velocity=editorial_velocity or (lambda rs: {}))
+                     editorial_velocity=editorial_velocity or (lambda rs: {}), account_gate=gate)
         return res, w
 
     def decisions(self):
@@ -330,6 +347,25 @@ class ScoreApprove(unittest.TestCase):
         d = self.decisions()
         self.assertIn("proof_requested(answered)", d["replied"]["reason"])
         self.assertIn("proof_requested(answered)", d["attached"]["reason"])
+
+    def test_the_account_gate_decides_last_and_only_an_allow_approves(self):
+        """Steward 019: hold / unknown = skip (no approval); one gate call per account per run."""
+        rows = [row("g1", uid=901, pid="g1"), row("g2", uid=902, pid="g2"), row("g3", uid=903, pid="g3"),
+                row("g4", uid=903, pid="g4")]
+        asked = []
+
+        def gate(uid):
+            asked.append(uid)
+            return {901: _gate.GateResult(_gate.ALLOW), 902: _gate.GateResult(_gate.HOLD, ("count_90d 412 >= 250",)),
+                    903: _gate.GateResult(_gate.UNKNOWN, ("check could not run",))}[uid]
+        res, w = self.go(rows, gate=gate)
+        self.assertEqual([i for c in w.calls for i in c[1]], ["g1"])
+        d = self.decisions()
+        self.assertIn("account gate hold (count_90d 412 >= 250): no approval, proof ask", d["g2"]["reason"])
+        self.assertIn("account gate unknown", d["g3"]["reason"])
+        self.assertEqual(res.account_held, 3)
+        self.assertEqual(sorted(asked), [901, 902, 903], "one gate call per account per run")
+        self.assertIn("3 held by the account gate", res.line())
 
     def test_unverified_rows_are_in_scope_and_written_from_their_own_status(self):
         rows = [row("u", status=decide.UNVERIFIED), row("v", pid="p2")]
@@ -789,6 +825,12 @@ class ScoreApprove(unittest.TestCase):
         self.assertLess(sa.READ_BUDGET_S, sa.ANCHOR_BUDGET_S)
         self.assertLess(sa.ANCHOR_BUDGET_S, sa.FANOUT_BUDGET_S)
         self.assertLessEqual(sa.FANOUT_BUDGET_S, 900 - 120, "room for caps + writes under the 900 s cron")
+    def test_a_verdict_without_band_hint_is_held_like_core_refuses_it(self):
+        """2026-10-23 20:36Z: 95 of 100 PUTs refused by core (band_not_a_or_b) for verdicts with no band_hint."""
+        rows = [row("nob", uid=650, pid="nb1", band=None), row("okb", uid=651, pid="nb2", band="B")]
+        res, w = self.go(rows, sp=self.phase1())
+        self.assertEqual([i for c in w.calls for i in c[1]], ["okb"])
+        self.assertIn("band_hint_missing", self.decisions()["nob"]["reason"])
 
     def test_trusted_approvals_get_no_verify_note_and_count_toward_caps(self):
         self.go([row("tr", band="B", meta=self.STAMP), row("no", band="B", pid="p2", meta=self.STAMP)],

@@ -54,6 +54,8 @@ setup() {
   mkdir -p "$CH/sessions/2026/09"
   unset CODEX_SESSION_TTL_DAYS CODEX_VACUUM_MAX_USED_PCT
   export CODEX_PRUNE_BUSY_MS=200
+  export CODEX_PRUNE_TEST_ROOT="$TEST_TMPDIR/hold-root"   # hermetic hold root (CI host carries the real /etc hold)
+  HOLD="$CODEX_PRUNE_TEST_ROOT/etc/hydra/codex-home-prune.hold"; mkdir -p "$(dirname "$HOLD")"
   _chp_fake_df 50
   export PATH="$TEST_TMPDIR/bin:$PATH"
 }
@@ -288,4 +290,66 @@ SQ
   [ "$status" -eq 1 ]
   [[ "$output" == *"traversal failed"* ]]
   [[ "$output" == *"done."* ]]
+}
+
+@test "legal hold: with a hold file present --apply deletes nothing, logs HELD, exits 0" {
+  _chp_rollout "$CH/sessions/2026/09/rollout-old.jsonl" 40
+  _chp_db "$CH/logs_2.sqlite"
+  touch "$HOLD"
+  run "$PRUNE" --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"HELD"* ]]
+  [ -e "$CH/sessions/2026/09/rollout-old.jsonl" ]
+  [ "$(sqlite3 "$CH/logs_2.sqlite" 'select count(*) from logs')" -eq 5 ]
+}
+
+@test "legal hold: --dry-run still reports under the hold (nothing deleted)" {
+  _chp_rollout "$CH/sessions/2026/09/rollout-old.jsonl" 40
+  touch "$HOLD"
+  run "$PRUNE" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"would_free_bytes="* ]]
+  [ -e "$CH/sessions/2026/09/rollout-old.jsonl" ]
+}
+
+@test "legal hold: no hold file anywhere -> normal --apply" {
+  _chp_rollout "$CH/sessions/2026/09/rollout-old.jsonl" 40
+  run "$PRUNE" --apply
+  [ "$status" -eq 0 ]
+  [ ! -e "$CH/sessions/2026/09/rollout-old.jsonl" ]
+}
+
+@test "legal hold: the old override env cannot redirect or lift the hold" {
+  _chp_rollout "$CH/sessions/2026/09/rollout-old.jsonl" 40
+  touch "$HOLD"
+  CODEX_PRUNE_HOLD_FILE="$TEST_TMPDIR/nowhere" run "$PRUNE" --apply
+  [[ "$output" == *"HELD"* ]]
+  [ -e "$CH/sessions/2026/09/rollout-old.jsonl" ]
+  ! grep -q 'CODEX_PRUNE_HOLD_FILE:' "$PRUNE"
+  ! grep -q 'CODEX_PRUNE_HOLD_FILE' "$HYDRA_REPO/scripts/install-aux-units.sh"
+}
+
+@test "legal hold: every production caller sees the same canonical path (installer, generated unit, script)" {
+  grep -q '^CODEX_PRUNE_HOLD_FILE_CANONICAL=/etc/hydra/codex-home-prune.hold$' "$PRUNE"
+  grep -q '^chphold=/etc/hydra/codex-home-prune.hold ' "$HYDRA_REPO/scripts/install-aux-units.sh"
+  grep -q 'systemctl disable --now "$chptmr"' "$HYDRA_REPO/scripts/install-aux-units.sh"
+  # the generated unit passes no hold env, so it cannot diverge from the canonical file
+  ! sed -n '/CHPRUNESVC$/,/^CHPRUNESVC/p' "$HYDRA_REPO/scripts/install-aux-units.sh" | grep -q HOLD
+  # clean-my-linux R3 calls the same script without any hold env
+  ! grep -q HOLD "$HYDRA_REPO/scripts/clean-my-linux.sh"
+}
+
+@test "legal hold: CODEX_PRUNE_TEST_ROOT cannot redirect the hold for real codex homes under /root" {
+  # an empty test root plus a /root glob must fall back to the canonical /etc path
+  CODEX_HOME_GLOB="/root/.openclaw-nonexistent-*/agents/*/agent/codex-home" run "$PRUNE" --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CODEX_PRUNE_TEST_ROOT ignored"* ]]
+  if [ -e /etc/hydra/codex-home-prune.hold ]; then [[ "$output" == *"HELD: /etc/hydra/codex-home-prune.hold"* ]]; fi
+}
+
+@test "legal hold: no production caller sets CODEX_PRUNE_TEST_ROOT" {
+  ! grep -q CODEX_PRUNE_TEST_ROOT "$HYDRA_REPO/scripts/install-aux-units.sh"
+  ! grep -q CODEX_PRUNE_TEST_ROOT "$HYDRA_REPO/scripts/clean-my-linux.sh"
+  ! grep -q CODEX_PRUNE_TEST_ROOT "$HYDRA_REPO/scripts/lib/ensure-session-budget-headroom.sh"
+  ! sed -n '/CHPRUNESVC$/,/^CHPRUNESVC/p' "$HYDRA_REPO/scripts/install-aux-units.sh" | grep -q CODEX_PRUNE
 }

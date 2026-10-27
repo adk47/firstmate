@@ -49,6 +49,9 @@ Subcommands:
            in the user's most recent open conversation (14 days) if any, else email.
            --campaign status-doc-received|status-team-review sends the no-ask
            status notes instead (rules: verify-request-notes.md).
+           --from-stage2 builds the population from the stage-2 verdicts
+           (Fable 2026-10-26 13:23Z): uvn-status reaches no_document users,
+           --campaign gap-ask sends Fable's gap paragraph to need_more users.
   intercom-reconcile
            Fable ruling-intercom-external-id-1026 Ruling A: for users the gate refused on
            identity (external_id mismatch / empty / several contacts) classify the Intercom
@@ -117,6 +120,7 @@ from credit_review import intercom_reconcile  # noqa: E402
 from credit_review import verify_ledger  # noqa: E402
 from credit_review import uvn_status  # noqa: E402
 from credit_review import withdrawal_confirm  # noqa: E402
+from credit_review import claim_proof_ask  # noqa: E402
 from credit_review import verify_notify  # noqa: E402
 from credit_review.evidence import EvidenceBuilder, parse_ts  # noqa: E402
 from credit_review.judge import DEFAULT_MIN_BALANCE_USD, Judge, account_balance_usd  # noqa: E402
@@ -561,11 +565,48 @@ def cmd_uvn_status(args: argparse.Namespace) -> int:
                                                              ("status-team-review", "no-ask")):
         print("--wording queued applies to status-doc-received, --wording no-ask to status-team-review", file=sys.stderr)
         return 2
+    if args.campaign == "gap-ask" and not args.from_stage2:
+        print("gap-ask reaches only users stage 2 judged: add --from-stage2", file=sys.stderr)
+        return 2
+    if not args.from_stage2 and not args.list:
+        print("--list is required unless --from-stage2", file=sys.stderr)
+        return 2
+    exclude: set[str] = set()
+    if args.exclude_users:
+        exclude = {ln.strip() for ln in Path(args.exclude_users).read_text().splitlines()
+                   if ln.strip() and not ln.startswith("#")}
     report = uvn_status.run(list_path=args.list, segment=args.segment, mode=args.mode, max_users=args.max_users,
                             campaign=args.campaign, wording=args.wording or "",
-                            ledger_path=args.ledger, proof_path=args.proof_on_file, preview_dir=args.preview)
+                            ledger_path=args.ledger, proof_path=args.proof_on_file, preview_dir=args.preview,
+                            from_stage2=args.from_stage2, stage2_path=args.proof_store, exclude_users=exclude)
     log("uvn-status " + json.dumps({k: v for k, v in vars(report).items() if not isinstance(v, (list, dict))}))
     print(uvn_status.render(report, args.mode, args.segment))
+    return 1 if report.failed else 0
+
+
+def cmd_claim_proof_ask(args: argparse.Namespace) -> int:
+    if CREDIT_OPS_NOTES_KILL_SWITCH.exists():
+        log(f"credit-ops-notes kill switch present at {CREDIT_OPS_NOTES_KILL_SWITCH}; nothing sent")
+        print("NO_REPLY")
+        return 0
+    if args.preview:
+        Path(args.preview).mkdir(mode=0o700, parents=True, exist_ok=True)
+    report = claim_proof_ask.run(list_path=args.list, segment=args.segment, mode=args.mode,
+                                 max_users=args.max_users, reminders=args.reminders, preview_dir=args.preview)
+    print(claim_proof_ask.render(report, args.mode, args.segment, reminders=args.reminders))
+    return 1 if report.failed else 0
+
+
+def cmd_claim_status(args: argparse.Namespace) -> int:
+    if CREDIT_OPS_NOTES_KILL_SWITCH.exists():
+        log(f"credit-ops-notes kill switch present at {CREDIT_OPS_NOTES_KILL_SWITCH}; nothing sent")
+        print("NO_REPLY")
+        return 0
+    if args.preview:
+        Path(args.preview).mkdir(mode=0o700, parents=True, exist_ok=True)
+    report = claim_proof_ask.run_status(list_path=args.list, segment=args.segment, mode=args.mode,
+                                        max_users=args.max_users, preview_dir=args.preview)
+    print(claim_proof_ask.render(report, args.mode, args.segment, status=True))
     return 1 if report.failed else 0
 
 
@@ -867,11 +908,13 @@ def parser() -> argparse.ArgumentParser:
     vn.set_defaults(fn=cmd_verify_notify)
 
     us = sub.add_parser("uvn-status", help="UVN status + reminder: one message per waiting requester (firstmate 060)")
-    us.add_argument("--list", required=True, help="credit-trust-llm-t01's uvn-reminder-list.json (<= 30 h old)")
+    us.add_argument("--list", default=None, help="credit-trust-llm-t01's uvn-reminder-list.json (<= 30 h old); "
+                                                  "required unless --from-stage2")
     us.add_argument("--segment", choices=["paid", "free"], required=True)
     us.add_argument("--campaign", choices=list(uvn_status.CAMPAIGNS), default="uvn-status",
                     help="uvn-status (the ask, t01's uvn-reminder list) or a no-ask status note: "
-                         "status-doc-received (status-A list) / status-team-review (status-B list)")
+                         "status-doc-received (status-A list) / status-team-review (status-B list); "
+                         "gap-ask: Fable's gap ask for stage-2 need_more credits (with --from-stage2)")
     us.add_argument("--wording", choices=["queued", "no-ask"], default=None,
                     help="queued: status-doc-received's 'in our review queue' wording (firstmate 092); "
                          "no-ask: status-team-review's Copy B0, without the proof sentence (firstmate 106)")
@@ -879,7 +922,33 @@ def parser() -> argparse.ArgumentParser:
     us.add_argument("--max-users", type=int, default=50, help="messages this run (canary: 3)")
     us.add_argument("--preview", default=None, help="dry-run: write each user's rendered note to this dir as <user id>.txt (0700)")
     us.add_argument("--proof-on-file", default=None, metavar="FILE")
+    us.add_argument("--from-stage2", action="store_true",
+                    help="build the population live from the stage-2 verdicts (uvn-status: no_document; gap-ask: "
+                         "need_more) instead of a list")
+    us.add_argument("--proof-store", default=None, metavar="FILE",
+                    help="the stage-2 proof store (default /var/lib/hydra-credit-verify/proof.sqlite)")
+    us.add_argument("--exclude-users", default=None, metavar="FILE",
+                    help="user ids (one per line) another lane messages today: left for a later run")
     us.set_defaults(fn=cmd_uvn_status)
+
+    cp = sub.add_parser("claim-proof-ask", help="dated code ask to band B/C claimants + its day-7 reminder "
+                                                "(steers-1830 #5; send-locked in the gate until Fable + firstmate)")
+    cp.add_argument("--list", required=True, help="claim-flow-fix-fable-c1's claim list (<= 30 h old, names the daily code check)")
+    cp.add_argument("--segment", choices=["paid", "free"], required=True)
+    cp.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
+    cp.add_argument("--max-users", type=int, default=20, help="messages this run (canary: 3)")
+    cp.add_argument("--reminders", action="store_true", help="send the due day-7 reminders instead of first asks")
+    cp.add_argument("--preview", default="", help="dry-run: write each rendered note to this dir (0700)")
+    cp.set_defaults(fn=cmd_claim_proof_ask)
+
+    cs = sub.add_parser("claim-status", help="no-ask status note to pending claimants who get no proof ask "
+                                             "(Fable 1023 ruling 3; send-locked in the gate until firstmate's GO)")
+    cs.add_argument("--list", required=True, help="the claim list (<= 30 h old); rows with audience 'status', or not B/C / no readable surface")
+    cs.add_argument("--segment", choices=["paid", "free"], required=True)
+    cs.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
+    cs.add_argument("--max-users", type=int, default=50, help="messages this run (canary: 3)")
+    cs.add_argument("--preview", default="", help="dry-run: write each rendered note to this dir (0700)")
+    cs.set_defaults(fn=cmd_claim_status)
 
     ir = sub.add_parser("intercom-reconcile", help="Fable ruling A: reconcile Intercom external_id for identity-refused "
                                                     "users (dry run by default; never messages)")

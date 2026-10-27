@@ -1719,6 +1719,10 @@ jobs:
           # Caroline's send ledger: writer (verify_ledger) and take-back reader agree on
           # verify_messages, and `verify_ledger.py migrate` (run by deploy.sh) creates it. Stdlib only.
           python3 scripts/tests/test_verify_ledger_contract.py
+          # claim-proof-ask driver (credit_review/claim_proof_ask.py): daily-check gate,
+          # readable surfaces only, send-log export, segment/budget/reminder rules.
+          # The gate and Trino are faked. Stdlib only.
+          python3 scripts/tests/test_claim_proof_ask.py
           # Merge-outcome notifier (scripts/merge-outcome-notify.py): fixed in-thread copy per
           # (kind, outcome), 7-day outcome age, first-run seed, at most one per ticket ever.
           # Network faked. Stdlib only.
@@ -1726,6 +1730,17 @@ jobs:
           # uvn-status reminder runner + withdrawal-confirm (credit_review/uvn_status.py,
           # withdrawal_confirm.py): gate and Trino faked. Stdlib only.
           python3 scripts/tests/test_uvn_status.py
+          # paid-status daily credit-status run (scripts/paid-status): no document ask without ASKS=1 (captain 10-27).
+          python3 scripts/tests/test_paid_status_daily.py
+          python3 scripts/tests/test_paid_status_b0_gap.py
+          python3 scripts/tests/test_paid_status_email_route.py
+          python3 scripts/tests/test_paid_status_support7d.py
+          python3 scripts/tests/test_paid_status_classify.py
+          for f in scripts/paid-status/*.py; do python3 -m py_compile "$f"; done
+          # The stage-2 release from the proof-on-file hold (credit_review/stage2_verdicts.py):
+          # uvn-status for no_document, gap-ask for need_more, the gap-ask ledger rules. Stdlib only.
+          python3 scripts/tests/test_stage2_asks.py
+          python3 scripts/tests/test_uvn_status_caps.py
           # credit-trust band table mirror (scripts/credit_trust): byte-identical to IDP's
           # common/credit_trust_bands.json at the pinned sha. Stdlib only.
           python3 scripts/tests/test_credit_trust_bands.py
@@ -1742,6 +1757,9 @@ jobs:
           # Stage 2 SHADOW (judge documents on file for the decider's proof-on-file
           # holds): ledger, Trino, Intercom and downloads faked; writes only stage2_shadow.
           python3 scripts/tests/test_credit_proof_stage2.py
+          # Doc-verify SHADOW (never take a returned document at face value): extraction,
+          # forensics, independent cross-checks, gate. Model, network, DNS, Intercom faked.
+          python3 scripts/tests/test_doc_verify.py
           # Provisional-credit tracker / day-7 route / backup_ask_undelivered (captain 2026-10-23
           # 20:03Z-20:07Z; Fable backup-threshold-ruling-1023.md section 6). Trino faked, stdlib only.
           python3 scripts/tests/test_provisional_tracker.py

@@ -139,6 +139,9 @@ PAYING_USERS_MAX_AGE = timedelta(hours=3)
 PAYING_USERS_MAX_SKEW = timedelta(minutes=5)
 PROOF_ON_FILE = Path(os.environ.get("CREDIT_TRUST_PROOF_ON_FILE", "/var/lib/credit-trust/proof-on-file.json"))
 PROOF_MAX_AGE = timedelta(hours=3)
+# The proof store whose stage-2 verdicts release a proof-on-file hold to a user ask (with_stage2).
+STAGE2_STORE = Path(os.environ.get("CREDIT_PROOF_STORE", os.path.join(
+    os.environ.get("CREDIT_VERIFY_STATE_DIR", "/var/lib/hydra-credit-verify"), "proof.sqlite")))
 PROOF_KINDS = frozenset({"approved_doc", "pending_doc", "human_approved_after_doc"})
 APPROVED_PROOF_KINDS = frozenset({"approved_doc", "human_approved_after_doc"})
 PROOF_UNKNOWN_STATE = "proof_on_file_unknown"
@@ -561,9 +564,23 @@ class ProofOnFile:
     # Users who emailed support@ in the last 90 days (top-level gmail_contacts_90d):
     # firstmate 041 - always held for a human, never asked, whatever the Gmail scan found.
     support_contacts: frozenset[int] = frozenset()
+    # Request ids an APPROVED proof entry names (APPROVED_PROOF_KINDS, with or without a ref).
+    approved_requests: frozenset[str] = frozenset()
+    # Request ids stage 2 released to a user ask (stage2_verdicts: need_more -> gap-ask,
+    # no_document -> uvn-status; Fable 2026-10-26 13:23Z GO 2). Filled by with_stage2().
+    stage2_asks: dict[str, str] = field(default_factory=dict)  # request id -> campaign
 
     def covers(self, d: "Decision") -> bool:
         return d.user_id in self.user_ids or d.request_id.lower() in self.request_ids
+
+    def handed_to_ask(self, d: "Decision") -> str:
+        """The verify-gate campaign that asks this covered request's user ('' when none): stage 2
+        released it and no APPROVED proof names it. Mere entry existence is not a "never ask
+        again" any more for such a request, but the ask is never the decider's support write
+        (its Knock notice is a generic re-ask outside the verify ledger's one-per-day rule): it
+        stays held here and goes out through intercom-verify-request.sh."""
+        rid = d.request_id.lower()
+        return "" if rid in self.approved_requests else self.stage2_asks.get(rid, "")
 
     def contacted_support(self, d: "Decision") -> bool:
         return d.user_id is not None and d.user_id in self.support_contacts
@@ -624,6 +641,7 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
     users: set[int] = set()
     requests: set[str] = set()
     approved: dict[str, str] = {}
+    approved_ids: set[str] = set()
     for e in data["entries"]:
         uid = muso_user_id(e["user_id"])
         if uid is None:
@@ -637,6 +655,8 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
                 # still covered below (whole-user), so nobody is asked by mistake.
                 rid = rid.strip().lower()
             requests.add(rid)
+            if e.get("kind") in APPROVED_PROOF_KINDS:
+                approved_ids.add(rid)
             if e.get("kind") in APPROVED_PROOF_KINDS and str(e.get("ref") or "").strip():
                 approved.setdefault(rid, f"{e.get('source') or 'proof'}:{str(e['ref']).strip()}")
         users.add(uid)
@@ -644,7 +664,36 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
         return None, f"{path} is stale (generated {utc(ts)})"
     if ts - now > PAYING_USERS_MAX_SKEW:
         return None, f"{path} is dated in the future ({utc(ts)})"
-    return ProofOnFile(frozenset(users), frozenset(requests), approved, support_contacts=contacts), None
+    return ProofOnFile(frozenset(users), frozenset(requests), approved, support_contacts=contacts,
+                       approved_requests=frozenset(approved_ids)), None
+
+
+STAGE2_ASK_HOLD = "proof on file: stage 2 judged the document"
+
+
+def with_stage2(proof: ProofOnFile | None, path: str | None = None) -> ProofOnFile | None:
+    """`proof` with the stage-2 release (stage2_verdicts.RELEASES). An unreadable proof store
+    releases nothing: every covered request keeps the plain proof-on-file hold."""
+    if proof is None:
+        return None
+    from dataclasses import replace
+
+    from . import stage2_verdicts
+    try:
+        verdicts = stage2_verdicts.load(str(path or STAGE2_STORE))
+    except stage2_verdicts.Stage2Error as exc:
+        log(f"decide: stage-2 verdicts unreadable ({exc}); proof-on-file holds stay as they are")
+        return proof
+    asks: dict[str, str] = {}
+    for campaign, outcome in stage2_verdicts.RELEASES.items():
+        for rid in stage2_verdicts.released(verdicts, outcome):
+            asks.setdefault(rid, campaign)
+    return replace(proof, stage2_asks=asks)
+
+
+def stage2_outcome(campaign: str) -> str:
+    from . import stage2_verdicts
+    return stage2_verdicts.RELEASES.get(campaign, "")
 
 
 def proof_status_transition(db: sqlite3.Connection, mode: str, proof_why: str | None) -> str | None:
@@ -705,7 +754,11 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
     asked = asked_requests(db)
     recent = users_asked_since(db, utc(now - SUPPORT_WINDOW))
     for d in support:
-        if proof.covers(d):
+        if proof.covers(d) and (ask := proof.handed_to_ask(d)):
+            _set(d, "hold", f"{STAGE2_ASK_HOLD} ({stage2_outcome(ask)}): the user is asked through "
+                 f"intercom-verify-request.sh --campaign {ask}, never by a support write")
+            res.held_stage2_ask += 1
+        elif proof.covers(d):
             _set(d, "hold", "proof on file: human review (a document is already on file; never ask again)")
             res.held_proof += 1
         elif proof.contacted_support(d):
@@ -1128,6 +1181,7 @@ class RunResult:
     held: int = 0
     support_candidates: int = 0
     held_proof: int = 0
+    held_stage2_ask: int = 0
     held_reasked: int = 0
     deferred_window: int = 0
     deferred_ask_cap: int = 0
@@ -1149,7 +1203,10 @@ class RunResult:
                 f"{self.web_checked} web-checked ({self.model_calls - self.paid_calls} Codex calls at $0, {self.paid_calls} "
                 f"OpenRouter fallback ${self.spend_usd:.2f}{jev}; the rest had no free source to cite), "
                 f"{self.errors} evidence errors. Support asks: {self.support_candidates} before filters, "
-                f"{self.held_proof} held for proof on file, {self.held_reasked} held as already asked once, "
+                f"{self.held_proof} held for proof on file, "
+                + (f"{self.held_stage2_ask} held for proof on file and handed to the stage-2 ask (gap-ask / "
+                   "uvn-status), " if self.held_stage2_ask else "")
+                + f"{self.held_reasked} held as already asked once, "
                 f"{self.deferred_window} deferred for the per-user 24h window, {self.deferred_ask_cap} deferred by the "
                 f"daily ask cap, {self.deferred_proof_unknown} deferred "
                 f"(proof status unknown), {self.support} {'would be sent' if self.mode == 'shadow' else 'sent'}."
@@ -1204,6 +1261,7 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     proof, proof_why = proof_on_file(now=now)
     if proof_why:
         log(f"decide: proof-on-file status unknown ({proof_why}); no support request is written this run")
+    proof = with_stage2(proof)
     batch = order_rows(rows if rows is not None else held_rows(admin, skip), paying, now)[:policy.max_rows_per_run]
     builder = EvidenceBuilder(admin, now=now)
     decisions: list[Decision] = []

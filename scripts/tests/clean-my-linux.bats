@@ -320,6 +320,19 @@ slack_fixture() {
 # Delegates: missing / failing
 # ──────────────────────────────────────────────────────────────
 
+@test "legal hold: R3 through the REAL codex-home-prune.sh deletes nothing while a hold file exists" {
+  local ch="$TEST_TMPDIR/.openclaw-main/agents/qa/agent/codex-home"
+  mkdir -p "$ch/sessions"; echo x > "$ch/sessions/rollout-old.jsonl"
+  touch -t "$(date -d '40 days ago' +%Y%m%d%H%M.%S 2>/dev/null || date -v-40d +%Y%m%d%H%M.%S)" "$ch/sessions/rollout-old.jsonl"
+  mkdir -p "$TEST_TMPDIR/hold-root/etc/hydra"; touch "$TEST_TMPDIR/hold-root/etc/hydra/codex-home-prune.hold"
+  export CODEX_HOME_GLOB="$TEST_TMPDIR/.openclaw-main/agents/*/agent/codex-home"
+  export CODEX_PRUNE_TEST_ROOT="$TEST_TMPDIR/hold-root"
+  export CLEAN_MY_LINUX_CODEX_PRUNE="$HYDRA_REPO/scripts/codex-home-prune.sh"
+  run bash "$WC" --apply
+  [ -e "$ch/sessions/rollout-old.jsonl" ]
+  [[ "$output" == *"HELD"* ]]
+}
+
 @test "a MISSING codex-home-prune.sh is skipped, run still exits 0" {
   export CLEAN_MY_LINUX_CODEX_PRUNE="$TEST_TMPDIR/delegates/does-not-exist"
   run bash "$WC" --apply

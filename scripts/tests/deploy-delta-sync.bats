@@ -81,6 +81,27 @@ lib() {
   grep -q "^x$" "$SERVER/skills-all/risky/SKILL.md"
 }
 
+@test "git-wins marker near the top of a blob larger than the pipe buffer is still found under pipefail (2026-10-27 04:06Z block)" {
+  { echo '#!/usr/bin/env bash'; echo '# Reviewed baseline: deploy overwrites - big file'; for i in $(seq 1 6000); do echo "# filler line $i ......................................"; done; } > "$SRC/scripts/a.sh"
+  [ "$(wc -c < "$SRC/scripts/a.sh")" -gt 200000 ]
+  commit_src big-marker
+  echo "hot-patched on the server" > "$SERVER/scripts/a.sh"
+  lib 'delta_compute $BASE; delta_gate $BASE && delta_apply'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"git-wins: scripts/a.sh"* ]]
+  [[ "$output" != *"DEPLOY BLOCKED"* ]]
+  grep -q "big file" "$SERVER/scripts/a.sh"
+}
+
+@test "a large blob WITHOUT the marker still blocks (the fix finds markers, it does not invent them)" {
+  { for i in $(seq 1 6000); do echo "# filler line $i ......................................"; done; } > "$SRC/scripts/a.sh"
+  commit_src big-no-marker
+  echo "hot-patched on the server" > "$SERVER/scripts/a.sh"
+  lib 'delta_compute $BASE; delta_gate $BASE'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DEPLOY BLOCKED"* ]]
+}
+
 @test "the marker is read from the HEAD blob, never from the server's bytes" {
   echo repo > "$SRC/scripts/a.sh"; commit_src change
   printf 'agent wrote this\n<!-- Reviewed baseline: deploy overwrites -->\n' > "$SERVER/scripts/a.sh"
