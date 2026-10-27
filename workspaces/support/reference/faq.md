@@ -9,26 +9,25 @@ Visit app.muso.ai and sign up with your email. The Lite plan is free forever.
 ### How do I claim my profile?
 1. Search for your name at app.muso.ai
 2. When you find your profile, click "Claim"
-3. Follow the verification steps – you'll be asked to verify your identity via ID scan or social media login
-4. Once submitted, the team reviews your claim
+3. Add a link or two you control (your website, your streaming artist page, or a social account) and send the claim
+4. The profile shows "Claim Pending" until the claim is processed; you are notified in the app and by email when it is
 
 **If your claim was rejected:**
-- Check the rejection email for the specific reason
-- Common reasons: name mismatch between ID and profile, unrecognised social account, insufficient documentation
-- Resubmit with stronger documentation (government-issued ID is most reliable)
-- If you believe the rejection was in error, create a support ticket with category "Profile Claim – Rejected"
+- Check the rejection message for the specific reason
+- Claim again with a link you control that shows the profile is yours
+- If you believe the rejection was in error, reply in support chat with the profile link
 
-**If verification is stuck (no update after 5 business days):**
-- Create a support ticket with category "Profile Claim – Pending Review"
+**If your claim is still pending:**
+- Ask in support chat; Caroline looks up its real state (agent note: `profile_claim_status`; quote no timeframe)
 
 ### Can I merge duplicate profiles?
-Yes – our team handles profile merges directly. To get started, share the link to the profile you want to keep as your main, plus the link(s) to the duplicate(s). Caroline will open a merge request for you.
+Yes, once every profile involved is claimed by you. First claim each profile that is yours through the app, then share the link to the profile you want to keep as your main, plus the link(s) to the duplicate(s). Caroline will open a merge request for you.
 
 **What to expect:**
 - Credits from all profiles are combined into one
 - The profile you mark as "main" is kept; duplicates are merged into it
-- Claimed profiles, company or label profiles, subscription questions, and large catalogs need manual review before anything changes
-- You'll receive a confirmation once the merge is done
+- Company or label profiles, and profiles claimed by a different account, are not merged this way
+- You'll receive a message in your support conversation once the merge is done (agent note: no date; see common-issues.md section 3)
 
 ### How do I become an Album Admin?
 Verified artists can become Album Admins, giving them control over the credits displayed for their albums and tracks. You must first verify your artist profile.

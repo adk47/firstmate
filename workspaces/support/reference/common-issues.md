@@ -28,14 +28,10 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
 
 **Resolution path:**
 0. **Ground first**: call `profile_claim_status` with the profile URL, then branch on `own_claim_state`: `pending` with `route_selfserve_claim` → the `customer-profile-claim` skill can verify it now (take the returned `claim_id`); `rejected` → explain the returned reason and the resubmission path below; `processed` → the claim is already approved, this is an access question; `reverted` / `multiple` / any conflict or suspicion flag → file the `profile-claim` packet the tool suggests, never argue ownership. If it fails closed (identity unverified) continue below without asserting claim state.
-1. Ask: did they receive any email about the claim status?
-   - If rejected: check the rejection reason in the email. Common reasons: name mismatch, unrecognised social account, insufficient documentation. Ask them to resubmit with a government-issued ID.
-   - If no email at all: ask how long ago they submitted.
-2. If submitted less than 5 business days ago: let them know it's within normal review time and to wait.
-3. If more than 5 business days with no update:
-   - **Escalate:** Create a ticket with category "Profile Claim – Pending Review". Include: account email, profile URL they tried to claim, date of submission. SLA: 2 business days.
-4. If claim was rejected and resubmission also rejected:
-   - **Escalate:** Create a ticket with category "Profile Claim – Rejected". Include: account email, profile URL, documentation provided. SLA: 2 business days.
+1. **Pending:** tell them plainly the claim is pending, in the app's own words for that state ("We are verifying your claim and will notify you when it has been processed"). Quote no timeframe and never say a person will review it: claims are decided under written rules, not by a human review queue. If we already sent them a message asking for a code, the code goes exactly where that message says; never invent a code, a surface, or a check of your own.
+2. **Rejected:** explain the reason the tool returned. The claim form asks for a link or two they control (their own website, streaming artist page, or social account); claiming again with such a link is the resubmission path. There is no ID upload in the claim flow, so never ask for a government ID.
+3. **Stuck, contested, or anything the tool routes:** file the `profile-claim` packet it suggests (account email, profile URL, date of submission or rejection reason). `create_ticket` returns no timeframe for claims; quote none.
+4. Claim notifications from the app (the bell and the claim email) go out on their own; your reply in this conversation is separate from them.
 5. If the customer says the profile belongs to someone else they represent (a client, an artist on their roster), STOP – this is not a self-claim. Switch to row 2b below.
 
 ---
@@ -44,7 +40,7 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
 
 **Customer says:** "I manage this artist and need to claim their profile" / "The artist has no social media so they can't claim it" / "We have a contract that gives us the right to administer their catalog."
 
-This is an **on-behalf claim**, NOT a self-claim. The standard claim flow (the artist's own ID scan or social-media login) does not apply, and there is no self-service path for it. It always requires a manual admin review. `profile_claim_status` can still supply the facts for the packet (existing claims on the profile, conflicts), but on-behalf routing itself stays manual regardless of what it returns.
+This is an **on-behalf claim**, NOT a self-claim. The standard claim flow (the artist's own links) does not apply. It is decided by the claim lane on the organization path: the strongest proof is a confirmed Muso account email on the official domain of the label, management company or publisher shown on the artist's streaming page or website (no free-mail address). `profile_claim_status` can still supply the facts for the packet (existing claims on the profile, conflicts).
 
 **Resolution path:**
 1. NEVER tell the customer the artist must claim the profile themselves. If they have already explained the artist cannot complete self-claim (no social media, deceased, unreachable, contractual delegation), repeating the self-claim instructions is the single worst response – it is exactly what frustrated customers quote back at us.
@@ -52,8 +48,8 @@ This is an **on-behalf claim**, NOT a self-claim. The standard claim flow (the a
    - Publishing / rights-management / management contract naming the artist
    - A letter of authorization (LOA) from the artist or rights holder
    - The customer's own account email and the exact profile URL or name they need access to
-3. Create ONE ticket with `actionType: "profile-claim"` and put `"on_behalf": true`, the representative's relationship (manager / publisher / label), and the documentation summary in `details`. Set `details.escalation_reason: "on_behalf_claim_manual_review"` so the ticket is tagged for human review.
-4. Set the expectation honestly: this is a **manual review by our team with no fixed turnaround** – do NOT quote the standard profile-claim SLA. Say something like: "This kind of access needs a manual review on our side. I've sent the team everything you provided – they'll reach out if anything else is needed."
+3. Create ONE ticket with `actionType: "profile-claim"` and put `"on_behalf": true`, the representative's relationship (manager / publisher / label), the domain of their account email, and the documentation summary in `details`. Set `details.escalation_reason: "on_behalf_claim_manual_review"` (the tag name is historical; it routes the ticket to the claim lane's organization path, not to a person).
+4. Quote no timeframe and do not say it needs a manual review: `create_ticket` returns no timeframe for claims. Do not promise a reply here either: the claim decision reaches them as an app notification and email.
 5. On any follow-up about the same request, follow the SLA-breach rules (see SOUL.md "Repeat follow-ups") – do not file fresh tickets and do not re-promise turnarounds.
 
 ---
@@ -62,15 +58,19 @@ This is an **on-behalf claim**, NOT a self-claim. The standard claim flow (the a
 
 **Customer says:** "I show up twice / under different names. Can you merge them?"
 
-There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to "Settings > Profile > Merge Request" or any similar in-app flow – it does not exist. Profile merges are handled by the operations team via support ticket.
+There is **no self-service merge UI** in app.muso.ai yet. Do NOT direct customers to "Settings > Profile > Merge Request", "My profiles > Merge" or any similar in-app flow until this file says it is live. Merges are claim-first (captain rule 2026-10-23): a merge happens only when EVERY profile involved has a processed claim by this customer and is in their workspace.
 
 **Resolution path:**
 1. Ask the customer for the link to the profile they want to keep as their **main** profile (e.g., `https://credits.muso.ai/profile/<id>` or `https://app.muso.ai/profile/<id>`).
 2. Ask for the link(s) to the **duplicate** profile(s) to merge into the main.
-3. Once both are provided, create an action-request ticket with `actionType: "profile-merge"` (Tier 2). Include in `details`:
+3. Run `dedupe_check` (security routing first, as in `customer-profile-dedupe`), then answer from what it says about each profile:
+   - **Every profile already claimed by this customer** (`owns_survivor: true` and every duplicate `claim_state: "claimed_same_owner"`): nothing more is needed from them. Never tell them their claims need review or ask them to claim again.
+   - **A duplicate not claimed by them yet** (`claim_state: "unclaimed"`; check `profile_claim_status` for a pending or rejected claim of theirs): name exactly which one, and tell them to claim it through the app first, then ask us to merge (claim-first rule above).
+   - **`claimed_different_user`, `unresolved`, or a security flag:** never discuss the other account and promise no outcome; route it per `customer-profile-dedupe`.
+4. Create an action-request ticket with `actionType: "profile-merge"`. Include in `details`:
    - `main_profile_url` – the URL the customer wants kept
    - `duplicate_profile_urls` – array of duplicate profile URLs to merge in
-4. Set expectation: "Our team will review and merge typically within 5 business days. You'll get a confirmation once it's done."
+5. Promise no date: `create_ticket` returns no timeframe for merges. When the merge is done (or needs something from them), the result is posted as a reply in this conversation. Never say "I can merge them" or ask them to confirm a merge unless `profiles_consolidate` returned a successful preview this turn, and never say a merge is done unless a tool result says so.
 
 **Notes:**
 - Never share an internal team member's email or assign a specific reviewer by name – the operations team triages from the ticket queue.
@@ -99,7 +99,7 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
    - Ask: does the incorrect credit appear on Spotify, Apple Music, or their distributor in the same wrong form?
    - If **yes (external source)**: explain that Muso reflects what the source reports. They need to contact their distributor or that platform to correct the metadata. Once fixed at the source, Muso updates automatically.
    - If **no (Muso source or unsure)**: they can request a correction through their account. If that doesn't work, escalate.
-3. **Escalate:** Create a ticket with category "Credit Error – Muso Source" or "Credit Error – Source Discrepancy". Include: account email, track/album URL, the incorrect credit detail, what the correct credit should be. SLA: 2 business days.
+3. **Escalate:** Create a ticket with category "Credit Error – Muso Source" or "Credit Error – Source Discrepancy". Include: account email, track/album URL, the incorrect credit detail, what the correct credit should be. `create_ticket` returns no timeframe for credit requests; quote none.
 
 ---
 
@@ -135,7 +135,7 @@ There is **no self-service merge UI** in app.muso.ai. Do NOT direct customers to
    reads the pending queue (`credit.pending`, `pending_verification` state) and the
    awaiting-review queue (`credit.awaiting_review`, `awaiting_review` state) before
    you enter the proof flow. Awaiting-review credits need nothing from the customer.
-7. **Escalate:** If they've submitted documentation and the claim has been open more than 5 business days with no update, create a ticket with category "Credit Claim – Documentation Submitted". SLA: 2 business days.
+7. **Status first:** if they have already sent documentation, look up the real state with `credit_verification_check` / `profile_credits_status` and tell them what it says (on the profile, waiting for review, or exactly what is still missing). Never ask again for proof they already sent. If the state cannot be read, file `credit-verify` with the details; quote no timeframe.
 
 **Notes:**
 - **Before asking for more proof:** a credit sitting in `user_verification_needed` is

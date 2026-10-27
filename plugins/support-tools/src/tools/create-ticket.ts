@@ -9,6 +9,9 @@ import type { MergeTicketEntry, SessionTicketRegistry } from "../session-ticket-
 import {
   GROWTH_ACTIONS,
   TIER_SLAS,
+  customerSlaFor,
+  outcomeChannelFor,
+  type OutcomeChannel,
   TIER_TO_PRIORITY,
   TIER_MAP,
   getTierForAction,
@@ -50,10 +53,10 @@ type Params = Static<typeof Parameters>;
 // a typo on one branch doesn't slip through; consumers can rely on `reason`
 // to differentiate failure modes.
 export type CreateTicketResult =
-  | { submitted: true; ticket_id: string; sla: string; action_type: string; tier: number;
-      merge_keep_conflict_flag_failed?: true }
-  | { submitted: true; updated_existing: true; ticket_id: string; sla: string; action_type: string; tier: number;
-      merge_keep_conflict_flag_failed?: true }
+  | { submitted: true; ticket_id: string; sla: string | null; action_type: string; tier: number;
+      customer_timing?: string; merge_keep_conflict_flag_failed?: true }
+  | { submitted: true; updated_existing: true; ticket_id: string; sla: string | null; action_type: string; tier: number;
+      customer_timing?: string; merge_keep_conflict_flag_failed?: true }
   | { submitted: false; reason: "rate_limited" }
   | { submitted: false; reason: "merge_intake_not_updated"; action_type: string; ticket_id: string; hint: string }
   | { submitted: false; reason: "keep_conflict_unflagged"; action_type: string; ticket_ids: string[]; hint: string }
@@ -75,6 +78,22 @@ export type CreateTicketResult =
 
 function ticketResult(r: CreateTicketResult): AgentToolResult<unknown> {
   return textResult(JSON.stringify(r));
+}
+
+// What Caroline is told about timing on a successful file. `sla` is the timeframe she may
+// quote (once); for credit/claim/merge requests it is null and `customer_timing` says why,
+// so the internal tier SLA can never be read back to a customer as a promise.
+const NO_TIMEFRAME = "Quote no timeframe. This request is decided under written rules, not by a human review queue";
+export const NO_TIMEFRAME_NOTES: Record<OutcomeChannel, string> = {
+  conversation: `${NO_TIMEFRAME}; the outcome is posted as a reply in this conversation when it lands.`,
+  app_notification: `${NO_TIMEFRAME}; the claim decision reaches the customer as an app notification and email, ` +
+    "so do not promise a reply in this conversation.",
+  unspecified: `${NO_TIMEFRAME}; promise no channel or follow-up message for the outcome.`,
+};
+
+function customerTiming(actionType: string): { sla: string | null; customer_timing?: string } {
+  const sla = customerSlaFor(actionType);
+  return sla === null ? { sla, customer_timing: NO_TIMEFRAME_NOTES[outcomeChannelFor(actionType)] } : { sla };
 }
 
 // The open merge ticket a new request of the same kind belongs to: one that keeps the same
@@ -715,8 +734,8 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
               if (!bumped?.ok) console.warn(`[support-tools] create_ticket priority bump failed for ${existingId}`);
             }
           }
-          return ticketResult({ submitted: true, updated_existing: true, ticket_id: existingId, sla,
-            action_type: params.actionType, tier,
+          return ticketResult({ submitted: true, updated_existing: true, ticket_id: existingId,
+            ...customerTiming(params.actionType), action_type: params.actionType, tier,
             ...(appendConflictFlagFailed ? { merge_keep_conflict_flag_failed: true as const } : {}) });
         }
         // Comment failed — fall through to creating a fresh ticket (today's
@@ -857,7 +876,8 @@ export function createCreateTicketTool(deps: ToolDeps): AgentTool<typeof Paramet
         console.error(`[support-tools] ALERT create_ticket ${KEEP_CONFLICT_TAG} pairing incomplete: ticket ${result.data.id} `
           + `and ${conflictIds.join(", ")} are held but not every sibling tag / comment landed`);
       }
-      return ticketResult({ submitted: true, ticket_id: result.data.id, sla, action_type: params.actionType, tier,
+      return ticketResult({ submitted: true, ticket_id: result.data.id, ...customerTiming(params.actionType),
+        action_type: params.actionType, tier,
         ...(conflictFlagFailed ? { merge_keep_conflict_flag_failed: true as const } : {}) });
     },
   };

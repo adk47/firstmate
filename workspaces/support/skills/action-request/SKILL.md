@@ -77,16 +77,16 @@ Only a genuinely different request (different `actionType`) is guaranteed a new 
 
 | Action Type | Tier | SLA | Examples |
 |-------------|------|-----|---------|
-| `credit-claim` | 1 | 2 business days | "I produced this track, add my credit" |
-| `credit-correction` | 1 | 2 business days | "My role is listed wrong" |
-| `credit-verify` | 1 | 2 business days | A pending ("user verification needed") credit case from the `customer-credit-verification` skill – recommend-approve or needs-human handoff with the proof evidence. File via that skill's Step 4, not ad hoc. |
-| `profile-claim` | 1 | 2 business days | "I want to claim this profile" |
+| `credit-claim` | 1 | none (`sla: null`) | "I produced this track, add my credit" |
+| `credit-correction` | 1 | none (`sla: null`) | "My role is listed wrong" |
+| `credit-verify` | 1 | none (`sla: null`) | A pending ("user verification needed") credit case from the `customer-credit-verification` skill – recommend-approve or needs-human handoff with the proof evidence. File via that skill's Step 4, not ad hoc. |
+| `profile-claim` | 1 | none (`sla: null`) | "I want to claim this profile" |
 | `support-general` | 1 | 2 business days | General questions needing ops follow-up. **Also used for human-handoff bail-outs** – when the customer asks for a human, gets frustrated, or the conversation loops, file with `details.escalation_reason` (see "Human Handoff" section below). **Also used for ads/sponsorship sales leads** – when a customer wants to advertise WITH Muso (buy ad space, ad packages, in-feed ads, sponsorships), file as `support-general` and keep the customer's advertising wording (e.g. "ad packages", "advertising", "ad space") in the ticket summary and `details.interest` verbatim – a keyword sweep routes these tickets to the ads owner in Slack, and paraphrasing away the ad vocabulary breaks that routing. |
 | `order-fulfillment` | 1 | 2 business days | Plaque/poster order support: a Prodigi address-confirmation request, or a customer order/shipping/address-change question. Filed by the `order-fulfillment` skill – see its required `details` shape under "Order Fulfillment" below. |
-| `profile-merge` | 2 | 5 business days | "I have two profiles, combine them" (require `main_profile_url` and `duplicate_profile_urls[]` in `details` – no self-service merge UI exists, so URLs are the only way ops can act) |
-| `track-merge` | 2 | 5 business days | "Merge my duplicate tracks / combine these track pairs" (the same recording listed twice). Catalog data; capture `details.track_merge_pairs[{master, duplicates[]}]` (or `details.master_track` + `details.duplicate_tracks[]`). Caroline never executes the merge – filed by the `customer-track-dedupe` skill. |
-| `unmerge-request` | 2 | 5 business days | Caroline-flagged: customer asked to remove tracks, but most listed tracks share an artist not on the profile – likely a wrong merge. See "Unmerge Request" section below for required `details` shape. |
-| `bulk-credit-change` | 2 | 5 business days | "Update credits on multiple tracks" |
+| `profile-merge` | 2 | none (`sla: null`) | "I have two profiles, combine them" (require `main_profile_url` and `duplicate_profile_urls[]` in `details` – no self-service merge UI exists, so URLs are the only way ops can act) |
+| `track-merge` | 2 | none (`sla: null`) | "Merge my duplicate tracks / combine these track pairs" (the same recording listed twice). Catalog data; capture `details.track_merge_pairs[{master, duplicates[]}]` (or `details.master_track` + `details.duplicate_tracks[]`). Caroline never executes the merge – filed by the `customer-track-dedupe` skill. |
+| `unmerge-request` | 2 | none (`sla: null`) | Caroline-flagged: customer asked to remove tracks, but most listed tracks share an artist not on the profile – likely a wrong merge. See "Unmerge Request" section below for required `details` shape. |
+| `bulk-credit-change` | 2 | none (`sla: null`) | "Update credits on multiple tracks" |
 | `profile-update` | 2 | 5 business days | "Change my profile name/details" |
 | `subscription-refund` | 3 | 5-10 business days | "I want a refund" |
 | `data-deletion` | 3 | 10 business days | "Delete my account and data" |
@@ -269,8 +269,8 @@ If the refund-retention skill was not activated (edge case), set `retention_cont
 |-----------|--------|
 | Customer is authenticated (session token) | Include verified email and profile ID in ticket |
 | Customer is NOT authenticated | Accept for Tier 1 only; require auth for Tier 2-3 |
-| Action type maps to Tier 1 | Create ticket, use `sla` from structured response |
-| Action type maps to Tier 2 | Create ticket with priority:high, tell customer "5 business days" |
+| Action type maps to Tier 1 | Create ticket, use `sla` from structured response (none when it is null) |
+| Action type maps to Tier 2 | Create ticket with priority:high, use `sla` from structured response (none when it is null) |
 | Action type maps to Tier 3 | Create ticket with priority:urgent, tell customer "our leadership team will review" |
 | Customer has already submitted 2 action requests this session | Decline further: "I've submitted your requests. Our team will follow up on all of them." |
 | Customer has submitted 3+ action requests this hour | Decline: "You've submitted several requests recently. Please allow our team time to process them." |
@@ -286,7 +286,7 @@ Read `create_ticket`'s JSON response and choose the template:
 
 ### Submitted (`submitted: true`)
 
-Use `sla` verbatim from the response. **Never put `ticket_id` in a reply** – it is an internal id (see SOUL.md, Response Rules or Zero Internal Knowledge).
+Use `sla` verbatim from the response. **When `sla` is null** (credit, claim and merge kinds: decided under written rules, not by a human review queue) use the matching template below with the "within `<sla>`" clause and the "manual review" clause left out, quote no other timeframe, and promise only the channel `customer_timing` names. **Never put `ticket_id` in a reply** – it is an internal id (see SOUL.md, Response Rules or Zero Internal Knowledge).
 
 **Tier 1:** "I've flagged your request for our team. You'll hear back within `<sla>`. If you need to add anything, just reply here."
 
