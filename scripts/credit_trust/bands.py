@@ -21,8 +21,8 @@ BANDS_PATH = Path(__file__).with_name("credit_trust_bands.json")
 #: Path of the source file inside an industry-data-processing checkout.
 IDP_SOURCE_PATH = "common/credit_trust_bands.json"
 #: sha256 of the IDP file this copy was taken from, and the IDP main commit that carried it.
-IDP_SOURCE_SHA256 = "5943b8a86eccbadb05b6b4f53517fb1070918ce4317f79324b53d667cc902213"
-IDP_SOURCE_COMMIT = "af2b181c"  # industry-data-processing #1777 head (backup levels: review_hold_for_documents, band B)
+IDP_SOURCE_SHA256 = "3ef840363b3ad2388a9c01462818f3d8c0451bcbdb85c464479a1e249ff97e5d"
+IDP_SOURCE_COMMIT = "f2959e7"  # industry-data-processing fm/idp-account-unanchored-sum (review_account_unanchored_sum, band B, proof_required)
 
 BANDS_BYTES = BANDS_PATH.read_bytes()
 BANDS = json.loads(BANDS_BYTES)
