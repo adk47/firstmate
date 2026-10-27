@@ -202,11 +202,14 @@ readonly EMAIL_CHANGE_COPY_APPROVED=1
 #       LOCKED until Fable approves the copy (copy-claim-proof-dated-ask-1022.md) and firstmate gives
 #       the GO; firstmate 126 allowed its close day in the copy (a plain day, no time or zone), and
 #       it never sends before claim-flow-fix-fable-c1's daily code check is named and running.
-readonly CLAIM_PROOF_ASK_COPY_APPROVED=0
+#       UNLOCKED 2026-10-26 ~23:59Z: Fable (flows-verify-fable-v1) ruled SEND AS-IS under the captain's
+#       23:30Z proof rule (a paperwork reply goes to document checks + a person, never an auto-approval),
+#       relayed in firstmate 022. The daily code check runs on node-8 (/etc/cron.d/claim-proof-check-c2).
+readonly CLAIM_PROOF_ASK_COPY_APPROVED=1
 #   CLAIM_STATUS_COPY_APPROVED  claim-status: copy APPROVED by Fable (claims-documentation-readiness-1023
-#       ruling 3, verbatim); LOCKED until firstmate's GO after the 5-user dry run, flipped together
-#       with CLAIM_PROOF_ASK_COPY_APPROVED.
-readonly CLAIM_STATUS_COPY_APPROVED=0
+#       ruling 3, verbatim); UNLOCKED on firstmate's GO after the 5-user dry run on node-8 (2026-10-26,
+#       claim-lane-resume-c2).
+readonly CLAIM_STATUS_COPY_APPROVED=1
 #   GAP_ASK_COPY_APPROVED        gap-ask: Fable's paragraph (last sentence per decision B, inbox 005; APPROVAL_REF_GAP_ASK). GO'd by
 #       Fable 2026-10-26 13:23Z under the captain's 12:40Z order ("Fable decides, do not ask him").
 readonly GAP_ASK_COPY_APPROVED=1

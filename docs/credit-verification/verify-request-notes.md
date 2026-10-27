@@ -436,7 +436,7 @@ Runbook: [intercom-identity-reconcile.md](intercom-identity-reconcile.md).
 
 This asks the claimant of a pending profile claim in band B or C to add the claim's bound-proof code to one platform bio by a close day. Each claim gets one note, and one day-7 reminder.
 
-**Status:** the campaign is **send-locked** (`CLAIM_PROOF_ASK_COPY_APPROVED=0`). The copy is Fable-approved (D38, `copy-ruling-claim-proof-ask-1022.md`), with paragraph 3 amended exactly as `claims-documentation-readiness-1023.md` ruling 1: "If adding the code isn't possible for you, reply to this message with paperwork that shows your name on one of {profile_name}'s releases: a split sheet, a producer or mixing agreement, an invoice, a royalty or distributor statement, or a PRO registration. Attach it here; we never ask for ID to claim a profile." The lock flips on firstmate's GO after the 5-user dry run, landed in a PR. `--dry-run` renders exactly what would be sent.
+**Status:** the campaign is **unlocked** (`CLAIM_PROOF_ASK_COPY_APPROVED=1`, 2026-10-26): Fable ruled it SEND AS-IS under the captain's 23:30Z proof rule (firstmate 022). The copy is Fable-approved (D38, `copy-ruling-claim-proof-ask-1022.md`), with paragraph 3 amended exactly as `claims-documentation-readiness-1023.md` ruling 1: "If adding the code isn't possible for you, reply to this message with paperwork that shows your name on one of {profile_name}'s releases: a split sheet, a producer or mixing agreement, an invoice, a royalty or distributor statement, or a PRO registration. Attach it here; we never ask for ID to claim a profile." A paperwork reply goes to document checks and a person; it never auto-approves. `--dry-run` renders exactly what would be sent.
 
 **Copy**
 - **Server facts only:** the catalog profile name and its public muso.ai link, the claim's code, and one surface phrase from the gate's fixed `CLAIM_SURFACES` list.
@@ -474,7 +474,7 @@ The no-ask note for a pending claimant who gets **no** proof ask: holds, organiz
 > Hi {first_name}, a quick update on your claim on {profile_name}: it is with our team for review. Nothing else is needed from you right now, and we will message you here as soon as it has been checked.
 > Thank you, / Caroline, Muso Support
 
-**Status:** send-locked (`CLAIM_STATUS_COPY_APPROVED=0`) until firstmate's GO after the 5-user dry run; it flips together with the proof ask's lock.
+**Status:** unlocked (`CLAIM_STATUS_COPY_APPROVED=1`) on firstmate's GO after the 5-user dry run on node-8 (2026-10-26). The proof ask is unlocked too (`CLAIM_PROOF_ASK_COPY_APPROVED=1`): Fable ruled it SEND AS-IS under the captain's 23:30Z proof rule. A paperwork reply goes to document checks and a person; it never auto-approves.
 
 - **Channel:** in-thread when the user has an open conversation from the last 14 days (unsigned, as the other status notes), otherwise email (with the sign-off).
 - **Ledger:** the key is `claim-<claiming.id>`; one note per claim, ever, with no follow-up. It is never sent to a claim that has a `claim-proof-ask` note: that claim is closed `proof_ask_sent`. It is never sent within 7 days (counted back from the send day) of another note from this gate to the same user (`messaged_7d`, deferred). The rule runs both ways: a proof ask waits 7 days after a claim-status note (`verify_ledger.claim_cross_check`). The one-message-per-user-per-UTC-day cap applies as everywhere.

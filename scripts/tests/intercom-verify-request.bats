@@ -2146,11 +2146,9 @@ claimfile() {
           credits:[{request_id:"claim-1606398", profile_id:"abc-123"}]}' | jq -c "${2:-.}" > "$1"
 }
 
-@test "claim-proof-ask: send-locked as committed; the dry run renders the approved draft with the close day" {
+@test "claim-proof-ask: unlocked as committed (Fable: send as-is, firstmate 022); the dry run renders the approved draft with the close day" {
   claimfile "$TEST_TMPDIR/c.json"
-  run -1 "$LOCKED" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
-  [[ "$output" == *"CLAIM_PROOF_ASK_COPY_APPROVED=0"* ]]
-  [ "$(calls)" -eq 0 ]
+  grep -qx "readonly CLAIM_PROOF_ASK_COPY_APPROVED=1" "$REAL_SCRIPT"
   run -0 "$LOCKED" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "${lines[0]}" == "DRY-RUN claim-proof-ask initial email credits=1 copy=claimask" ]]
   [ "$(rendered .subject)" = "Confirming your claim on Big Star" ]
@@ -2271,11 +2269,10 @@ statusfile() {
           credits:[{request_id:"claim-1606399", profile_id:"abc-123"}]}' | jq -c "${2:-.}" > "$1"
 }
 
-@test "claim-status: send-locked as committed; the dry run renders Fable's approved note verbatim" {
+@test "claim-status: unlocked as committed (firstmate GO after the dry run); the dry run renders Fable's approved note verbatim" {
   statusfile "$TEST_TMPDIR/s.json"
-  run -1 "$LOCKED" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ
-  [[ "$output" == *"CLAIM_STATUS_COPY_APPROVED=0"* ]]
-  [ "$(calls)" -eq 0 ]
+  grep -qx "readonly CLAIM_STATUS_COPY_APPROVED=1" "$REAL_SCRIPT"
+  grep -qx "readonly CLAIM_PROOF_ASK_COPY_APPROVED=1" "$REAL_SCRIPT"   # Fable: send as-is (firstmate 022)
   run -0 "$LOCKED" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ --dry-run
   [[ "${lines[0]}" == "DRY-RUN claim-status initial email credits=1 copy=claimstatus" ]]
   [ "$(rendered .subject)" = "Your claim on Big Star" ]
