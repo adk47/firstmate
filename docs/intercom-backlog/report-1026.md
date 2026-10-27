@@ -131,6 +131,30 @@ answered and left OPEN.
 - **D6 no-identity (647):** send the generic line with no status, or run
   `credit-review.py intercom-reconcile` first (audited, revertible) so these get a real status.
 
+## 6. Update 23:50Z: 4h sentinel (inbox 004) and the sender dry run
+
+A fast census (`census.py --since-hours 30`) found 30 conversations under 24 h old where the
+customer spoke last, 25 of them past 4 h. I read each one:
+
+| route | conversations |
+|---|---|
+| p2's approved uvn-status / B0 (single sender: prioritise in-thread) | 215476552205621, 215476473466746, 215476347501620, 215476530361345 (paid), 215476471183648, 215475995330292, 215476459854106, 215476479847680, 215476449610220 (paid), 215476519350882 (paid), 215476433322735, 215476460756711 (paid, B0) |
+| merge line (plan `plans/recent-lt1d-2350Z.json`), waits on D1 | 215476525469637, 215476519342709, 215476518054751 |
+| claim dispute: two-claimant / same-name / ownership error. Goes to Fable (no rule answers it) | 215476452955137, 215476358271992, 215476452718609, 215476471489361 (claim under a new email) |
+| captain's list | 215476566208497 (trademark C&D), 215476540440008 (attorney-in-fact asks for profile access + merge), 215476553442968 (formal privacy request to remove profile + credits), 215476336419274 (paid: plaque shipment returned by DHL at customs), 215472661480176 (plaque address), 215475055007096 (credit proof reply: belongs to the stage-2 proof path, not billing) |
+| no approved line: Fable | 215476559782020 (paid: how to present TikTok creation data to labels), 215475769201909 (credits by album link, no account match) |
+| close with reason, waits on D4 | 215476565158904 ("claude.ai?", not a request), 215476559752621 (reply to our welcome email) |
+| pending claim (claim-status lock, D5) | 215476564520153 |
+
+**What the dry run taught (fixes already in `send.py`):**
+- The "no claim waiting, start a claim" line is harmful: in the recent band every no-pending-claim
+  claim message was a dispute. It is withdrawn; the tail maps those rows to the generic line.
+- Keyword topics cannot pick a reply. The recent band is now answered ONLY from a per-conversation
+  plan written by reading each thread (`--plan`, enforced); the tail uses the category mapping.
+- `users.firstname` often holds the full name, so the greeting uses its first word.
+- Copy edit for Fable: the merge line asks for profile links even when the user already sent them,
+  and repeats "reply here" with the closer.
+
 ## Outside the rules (log)
 
 None yet. No send and no close has been made.
