@@ -1721,6 +1721,12 @@ jobs:
           # uvn-status reminder runner + withdrawal-confirm (credit_review/uvn_status.py,
           # withdrawal_confirm.py): gate and Trino faked. Stdlib only.
           python3 scripts/tests/test_uvn_status.py
+          # paid-status daily credit-status run (scripts/paid-status): no document ask without ASKS=1 (captain 10-27).
+          python3 scripts/tests/test_paid_status_daily.py
+          python3 scripts/tests/test_paid_status_b0_gap.py
+          python3 scripts/tests/test_paid_status_email_route.py
+          python3 scripts/tests/test_paid_status_support7d.py
+          for f in scripts/paid-status/*.py; do python3 -m py_compile "$f"; done
           # The stage-2 release from the proof-on-file hold (credit_review/stage2_verdicts.py):
           # uvn-status for no_document, gap-ask for need_more, the gap-ask ledger rules. Stdlib only.
           python3 scripts/tests/test_stage2_asks.py

@@ -813,6 +813,59 @@ def refusals_to_flag(db: sqlite3.Connection, campaigns: list[str] | tuple[str, .
                                 f"ORDER BY campaign, user_id", (MAX_REFUSALS, *camps)).fetchall()]
 
 
+# The no-ask status notes ("... nothing else is needed from you right now"): the campaigns a
+# silent hold blocks.
+STATUS_NOTE_CAMPAIGNS = ("status-doc-received", "status-team-review")
+HOLD_REASON_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
+
+
+def hold_silent(db: sqlite3.Connection, *, user_ids: list[str], reason: str,
+                campaigns: tuple[str, ...] = STATUS_NOTE_CAMPAIGNS, now: datetime | None = None) -> dict[str, int]:
+    """Hold these Muso users from the status notes for good (Fable ruling 017, 2026-10-27: the 40 users
+    told 'nothing else is needed' while they owe proof get no such note again; the uvn-status ask is
+    NOT held, so they stay first in line for it). A flagged verify_refusal_holds row per campaign,
+    keyed user:<id> and matched by user_id (refusal_hold), so an email change does not free them:
+    the runner and the gate skip them (refused-flagged), a later send never clears it, and it is
+    never posted to #cs_priority (refusals_to_flag reads unflagged rows only). Idempotent: an
+    existing row is flagged with this reason. Returns {"held": rows written, "already": rows that
+    were flagged already}."""
+    if not HOLD_REASON_RE.match(reason):
+        raise ValueError(f"reason must be a short slug (got {reason!r})")
+    for c in campaigns:
+        if c not in RECHECKABLE_REFUSALS:
+            raise ValueError(f"{c!r} has no refusal hold")
+    ids = [str(u).strip() for u in user_ids if str(u).strip()]
+    bad = [u for u in ids if not u.isdigit()]
+    if bad:
+        raise ValueError(f"not Muso user ids: {bad[:3]}")
+    ts = stamp(now)
+    out = {"held": 0, "already": 0}
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        for c in campaigns:
+            for uid in dict.fromkeys(ids):
+                cond, params = _hold_of(f"user:{uid}", uid)
+                rows = db.execute(f"SELECT user_key, flagged_at FROM verify_refusal_holds WHERE campaign=? AND {cond}",
+                                  (c, *params)).fetchall()
+                if any(r["flagged_at"] for r in rows):
+                    out["already"] += 1
+                    continue
+                if rows:
+                    for r in rows:
+                        db.execute("UPDATE verify_refusal_holds SET flagged_at=?, reason=?, updated_at=? "
+                                   "WHERE campaign=? AND user_key=?", (ts, reason, ts, c, r["user_key"]))
+                else:
+                    db.execute("INSERT INTO verify_refusal_holds (campaign, user_key, user_id, refusals, reason, "
+                               "next_recheck_at, flagged_at, updated_at) VALUES (?,?,?,0,?,?,?,?)",
+                               (c, f"user:{uid}", uid, reason, "9999-12-31T00:00:00Z", ts, ts))
+                out["held"] += 1
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+    return out
+
+
 def mark_flagged(db: sqlite3.Connection, *, campaign: str, user_key: str, now: datetime | None = None) -> int:
     """A flagged user: blocked in this campaign from now on (flagged_at recorded)."""
     ts = stamp(now)
@@ -1308,6 +1361,9 @@ def _main(argv: list[str] | None = None) -> int:
     mr.add_argument("--replied-at", default="", help="UTC time of the latest user reply (YYYY-MM-DDTHH:MM:SSZ)")
     ve = sub.add_parser("v1-eligible", help="may a note over these credits use the v1 (no-deadline) copy?")
     ve.add_argument("--request-ids", required=True)
+    hs = sub.add_parser("hold-silent", help="hold Muso users from the status notes for good (flagged refusal hold)")
+    hs.add_argument("--user-ids-file", required=True, help="one Muso user id per line")
+    hs.add_argument("--reason", required=True, help="a short slug, e.g. owe-proof-told-nothing-needed")
     fo = sub.add_parser("followed-notes", help="gap-ask: this user's status-doc-received notes of the last 7 days")
     fo.add_argument("--user-key", required=True)
     fo.add_argument("--user-id", default="")
@@ -1352,6 +1408,9 @@ def _main(argv: list[str] | None = None) -> int:
         if a.user_key and a.campaign == GAP_ASK:
             why = gap_user_done(db, a.user_key, user_id=a.user_id)
             out["user_done"], out["recent"], out["recent_why"] = "", bool(why), why
+    elif a.op == "hold-silent":
+        ids = [ln.split("#")[0].strip() for ln in Path(a.user_ids_file).read_text().splitlines()]
+        out = hold_silent(db, user_ids=[i for i in ids if i], reason=a.reason)
     elif a.op == "followed-notes":
         out = followed_notes(db, a.user_key, user_id=a.user_id)
     elif a.op == "skip":

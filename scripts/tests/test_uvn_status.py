@@ -1041,6 +1041,40 @@ class UvnLedgerTests(unittest.TestCase):
             self.assertEqual(verify_ledger.uvn_user_done(db, "other@x.com", now=FIXED, campaign=campaign,
                                                          user_id="99"), "")
 
+    def test_hold_silent_blocks_the_status_notes_for_good_but_not_the_ask(self):
+        # Fable ruling 017 (2026-10-27): the 40 users told 'nothing else is needed' while they owe proof.
+        db = verify_ledger.connect(":memory:")
+        out = verify_ledger.hold_silent(db, user_ids=["42", "43"], reason="owe-proof-told-nothing-needed", now=FIXED)
+        self.assertEqual(out, {"held": 4, "already": 0})
+        later = FIXED + timedelta(days=400)
+        for campaign in verify_ledger.STATUS_NOTE_CAMPAIGNS:
+            self.assertEqual(verify_ledger.refusal_hold(db, campaign, "new@x.com", later, "42"), {"flagged": True})
+            c = verify_ledger.claim(db, campaign=campaign, user_key="new@x.com", day="2026-12-01", request_ids=["s1"],
+                                    message_type="email", approved_by="U7RP6HKUZ", approval_ref="ref", user_id="42",
+                                    now=later)
+            self.assertEqual(c["result"], "refusal_hold")
+        self.assertEqual(verify_ledger.refusal_hold(db, "uvn-status", "new@x.com", later, "42"), {})
+        self.assertEqual(verify_ledger.refusal_hold(db, "status-team-review", "x@x.com", later, "44"), {})
+        self.assertEqual(verify_ledger.refusals_to_flag(db, verify_ledger.RECHECKABLE_REFUSALS), [])
+        self.assertEqual(verify_ledger.hold_silent(db, user_ids=["42"], reason="owe-proof-told-nothing-needed"),
+                         {"held": 0, "already": 2})
+        reasons = {r[0] for r in db.execute("SELECT reason FROM verify_refusal_holds")}
+        self.assertEqual(reasons, {"owe-proof-told-nothing-needed"})
+        for bad in (dict(user_ids=["4a"], reason="ok-reason"), dict(user_ids=["1"], reason="Not A Slug"),
+                    dict(user_ids=["1"], reason="ok-reason", campaigns=("uvn-status",))):
+            with self.assertRaises(ValueError):
+                verify_ledger.hold_silent(db, **bad)
+
+    def test_hold_silent_flags_an_existing_refusal_hold_instead_of_adding_one(self):
+        db = verify_ledger.connect(":memory:")
+        verify_ledger.refuse(db, campaign="status-team-review", user_key="a@x.com", day="2026-10-20",
+                             request_ids=["s1"], message_type="email", approved_by="U7RP6HKUZ", approval_ref="ref",
+                             reason="no", user_id="42", now=FIXED)
+        verify_ledger.hold_silent(db, user_ids=["42"], reason="owe-proof-told-nothing-needed",
+                                  campaigns=("status-team-review",), now=FIXED)
+        rows = db.execute("SELECT user_key, reason, flagged_at IS NOT NULL FROM verify_refusal_holds").fetchall()
+        self.assertEqual([tuple(r) for r in rows], [("a@x.com", "owe-proof-told-nothing-needed", 1)])
+
     def test_a_refusal_hold_follows_the_user_id_across_an_email_change(self):
         db = verify_ledger.connect(":memory:")
         kw = dict(campaign="status-doc-received", request_ids=["s1"], message_type="email", approved_by="U7RP6HKUZ",

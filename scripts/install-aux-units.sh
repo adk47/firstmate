@@ -1860,6 +1860,23 @@ cat > /etc/cron.d/openclaw-watchdog << CRONWATCHDOG
 CRONWATCHDOG
 chmod 644 /etc/cron.d/openclaw-watchdog
 
+# ─── Credit-status daily run (paid-wave-runner-p2) ─────────────
+# Every credit requester who was never told their status gets the approved status copy
+# (captain 2026-10-26 16:05Z "nothing sits silent"): paid only at 00:30Z (first claim on each UTC
+# day's caps), paid then free at 15:00Z. scripts/paid-status/daily.sh; runbook in its header.
+# Document asks run ONLY with ASKS=1 (captain 2026-10-27 01:0xZ: no proof ask until a returned
+# document can be accepted), so this cron sends status-only notes. Caps come from main.env
+# (CREDIT_STATUS_DAILY_MAX / CREDIT_UVN_DAILY_MAX, the email warm-up ceilings). Stop switch:
+# touch /etc/hydra/credit-ops-notes.disabled. Replaces the hand-installed 2026-10-26 file.
+cat > /etc/cron.d/hydra-paid-status << CRONPAIDSTATUS
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 0 * * * root MODE=apply EMAIL_ROUTE=1 SEGMENTS="paid" $HYDRA_ROOT/scripts/paid-status/daily.sh >> /var/lib/hydra/paid-status/daily.log 2>&1
+0 15 * * * root MODE=apply EMAIL_ROUTE=1 SEGMENTS="paid free" $HYDRA_ROOT/scripts/paid-status/daily.sh >> /var/lib/hydra/paid-status/daily.log 2>&1
+CRONPAIDSTATUS
+chmod 644 /etc/cron.d/hydra-paid-status
+install -d -m 700 /var/lib/hydra/paid-status
+
 # ─── Codex OAuth keepalive at 15-min cadence ──────────────────
 # PROACTIVE complement to the watchdog: openclaw-watchdog.sh pages REACTIVELY
 # (journal 401 signature, after the fleet is already on the mini fallback);
