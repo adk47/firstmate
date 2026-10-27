@@ -25,6 +25,10 @@
 #     never touches a gateway process.
 #
 # Env:
+#   (legal hold)               /etc/hydra/codex-home-prune.hold, fixed path: when it exists --apply is
+#                              a logged no-op and the installer keeps the timer disabled.
+#   CODEX_PRUNE_TEST_ROOT      tests only: prefix for the hold path, ignored when CODEX_HOME_GLOB is
+#                              under /root (so it cannot lift the hold on real codex homes).
 #   CODEX_HOME_GLOB            default /root/.openclaw-*/agents/*/agent/codex-home
 #   CODEX_SESSION_TTL_DAYS     default 14; positive integer (files and log rows)
 #   CODEX_VACUUM_MAX_USED_PCT  default 80; VACUUM only when the codex-home filesystem is below this
@@ -46,6 +50,29 @@ case "${1:-}" in
   --apply) apply=1 ;;
   *) echo "codex-home-prune.sh: usage: $0 [--dry-run|--apply]" >&2; exit 2 ;;
 esac
+
+# LEGAL HOLD (2026-10-27, firstmate decision (a) on backlog legal-hold-retention): while the hold
+# file exists, --apply deletes NOTHING. It covers every caller: the daily timer, clean-my-linux's
+# R3 step and a hand run. Exit 0 so neither the timer nor the weekly cleanup pages; --dry-run still
+# reports what would be freed. Lift the hold = remove the file, on the legal-hold owner's word.
+# The path is CANONICAL (Fable/QA #1385): every production caller (generated unit, clean-my-linux
+# R3, ensure-session-budget-headroom, the installer) sees the same /etc file and none sets an env
+# for it. The only redirect is CODEX_PRUNE_TEST_ROOT, for the hermetic bats suite (CI runs on
+# node-8, which carries the real hold). It is honoured ONLY when CODEX_HOME_GLOB points outside
+# /root, so it can never lift the hold for the real codex homes (/root/.openclaw-*/...).
+CODEX_PRUNE_HOLD_FILE_CANONICAL=/etc/hydra/codex-home-prune.hold
+_hold="$CODEX_PRUNE_HOLD_FILE_CANONICAL"
+if [ -n "${CODEX_PRUNE_TEST_ROOT:-}" ]; then
+  case "$CODEX_HOME_GLOB" in
+    /root|/root/*|*/root/*|*..*) log_hold_note="CODEX_PRUNE_TEST_ROOT ignored: CODEX_HOME_GLOB may reach /root" ;;
+    *) _hold="$CODEX_PRUNE_TEST_ROOT$CODEX_PRUNE_HOLD_FILE_CANONICAL" ;;
+  esac
+fi
+[ -n "${log_hold_note:-}" ] && echo "codex-home-prune.sh: $log_hold_note"
+if [ "$apply" -eq 1 ] && [ -e "$_hold" ]; then
+  echo "codex-home-prune.sh: HELD: $_hold exists (legal hold) -- --apply refused, nothing deleted"
+  exit 0
+fi
 
 for v in CODEX_SESSION_TTL_DAYS CODEX_VACUUM_MAX_USED_PCT CODEX_PRUNE_BUSY_MS; do
   case "${!v}" in ''|*[!0-9]*) echo "codex-home-prune.sh: $v must be a non-negative integer (got: ${!v})" >&2; exit 5 ;; esac

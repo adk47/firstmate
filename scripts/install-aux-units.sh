@@ -2784,11 +2784,19 @@ CHPRUNETMR
 systemctl daemon-reload
 
 chptmr=hydra-codex-home-prune.timer
-systemctl enable "$chptmr" >/dev/null 2>&1 || fail "could not enable $chptmr"
-systemctl start "$chptmr" >/dev/null 2>&1 || fail "could not start $chptmr"
-chpstate="$(systemctl is-active "$chptmr" 2>/dev/null || true)"
-[[ "$chpstate" == "active" ]] || fail "$chptmr is not active (state: ${chpstate:-unknown})"
-log "  $chptmr: $chpstate (fires daily 05:45 UTC)"
+# LEGAL HOLD (2026-10-27): while the hold file exists the timer stays disabled and stopped, and a
+# deploy does not re-arm it (codex-home-prune.sh also refuses --apply under the same file).
+chphold=/etc/hydra/codex-home-prune.hold   # canonical, same literal as codex-home-prune.sh; no env override
+if [[ -e "$chphold" ]]; then
+  systemctl disable --now "$chptmr" >/dev/null 2>&1 || log "WARN: could not disable $chptmr under the hold"
+  log "  $chptmr: HELD ($chphold exists; legal hold) -- not enabled"
+else
+  systemctl enable "$chptmr" >/dev/null 2>&1 || fail "could not enable $chptmr"
+  systemctl start "$chptmr" >/dev/null 2>&1 || fail "could not start $chptmr"
+  chpstate="$(systemctl is-active "$chptmr" 2>/dev/null || true)"
+  [[ "$chpstate" == "active" ]] || fail "$chptmr is not active (state: ${chpstate:-unknown})"
+  log "  $chptmr: $chpstate (fires daily 05:45 UTC)"
+fi
 
 # ─── Twice-weekly codex OAuth token refresh (Sun+Wed 04:00 UTC) ──
 # The DURABLE fix for the recurring ~10-day codex token lapse. hydra keeps the
