@@ -554,3 +554,4 @@ ledger only), `credit-review.py decide` writes the account users of every verify
 candidate to `/var/lib/credit-trust/inputs/org-affiliation-priority-credit-trust-llm-t01.json`
 (`{"user_ids": [...]}`); the producer's next hourly run checks them with coverage `full`.
 
+<!-- Reviewed baseline: deploy overwrites - 2026-10-27 (claim-lane-resume-c2, firstmate 035): node-8 holds the #1377-era text of this file, copied outside a deploy at 00:36:52Z; main is the reviewed text (proof ask and gap ask locked, claim status on). -->
