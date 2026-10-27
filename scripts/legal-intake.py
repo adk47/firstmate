@@ -281,8 +281,8 @@ def main():
                         print(f"PAGE NOTE FAILED {alias.split('@')[0]} {tid}; falling back to a full page")
                 if do_ack and not row.get("acked") and cls in ACK and ack_start and int(msgs[0].get("internalDate", 0)) > ack_start:
                     frm = h0.get("from", "")
-                    to = (re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+", frm) or [""])[0]
-                    if to and not NO_ACK_FROM.search(frm):
+                    to = email.utils.parseaddr(frm)[1]
+                    if re.fullmatch(r"[\w.+-]+@[\w-]+\.[\w.]+", to) and not NO_ACK_FROM.search(to):
                         rec = datetime.datetime.utcfromtimestamp(int(msgs[0]["internalDate"]) / 1000)
                         due = (rec + datetime.timedelta(days=30)).strftime("%-d %B %Y")
                         links = ", ".join("https://muso.ai/" + i.replace(":", "/") + "…" for i in ids[:6])

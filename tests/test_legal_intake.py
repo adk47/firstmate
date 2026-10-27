@@ -340,6 +340,20 @@ class SameSenderDistinctClaims(Harness):
         self.assertFalse(led["legal@muso.ai:b2"]["ack_ref"].startswith("dup-of:"))
         self.assertFalse(str(led["legal@muso.ai:b2"]["paged"]).startswith("dup-of:"))
 
+    def test_ack_goes_to_the_parsed_from_address_not_one_in_the_display_name(self):
+        """hydra#1361 bot NO-GO @85b2ce9d9: the ack recipient came from a regex over the raw From
+        header, so an address inside a quoted display name won over the real sender."""
+        self.go({"a1": thread('"victim@example.org" <actual@lawfirm.com>')})
+        self.assertEqual(self.acks, ["actual@lawfirm.com"])
+
+    def test_no_ack_check_reads_the_parsed_address_not_the_display_name(self):
+        self.go({"a1": thread('"press@muso.ai" <actual@lawfirm.com>')})
+        self.assertEqual(self.acks, ["actual@lawfirm.com"])
+
+    def test_automated_sender_by_parsed_address_still_gets_no_ack(self):
+        self.go({"a1": thread("Label Notices <no-reply@labela.com>")})
+        self.assertEqual(self.acks, [])
+
 
 class SendAckExecution(unittest.TestCase):
     """MUS-18508 QA-bot Critical: send_ack built a bash -c string, so a crafted inbound
