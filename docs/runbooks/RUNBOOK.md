@@ -608,6 +608,28 @@ provider) and restart the gateway:
 ssh root@40.160.32.80 "docker restart hydra-sandbox"
 ```
 
+**GHL CRM API (CMO outreach, McLaren batches):**
+
+Every GHL call goes through `scripts/ghl.sh` (`ghl.sh [--account b2b|winback] [--all] [--data-file F] METHOD PATH [key=value ...]`),
+which sends the `muso-hydra-ghl/1.0 (+ops@muso.ai)` User-Agent and the `Version: 2021-07-28` header and keeps the bearer
+on curl's stdin. It reads `GHL_API_KEY` (b2b) or `GHL_WINBACK_API_KEY` (winback) from the **process env** — the gateway
+env (`/etc/openclaw/main.env`) that `gateway_exec` children inherit, not `~/.zshrc`, so an SSH shell has neither.
+
+| exit | meaning | next action |
+|---|---|---|
+| 0 | 2xx, body on stdout | — |
+| 1 | other non-2xx | read the body in the stderr line |
+| 2 | transport failure, curl/jq missing, bad usage (`--all` with POST) | check node-8 egress; fix the call |
+| 3 | key unset in this process | run through `gateway_exec`; or the var is missing from `/etc/openclaw/main.env` |
+| 4 | `--all` hit the 50-page cap | narrow the query |
+| 10 | 401, key rejected | DevOps re-sets the var in `/etc/openclaw/main.env` |
+| 11 | 403 with `1010` / `browser_signature_banned` | **Cloudflare client-signature block, NOT a key or account problem.** The caller sent a default library User-Agent (Python urllib is banned). Use `ghl.sh`, or set a real UA |
+| 12 | other 403 | the key lacks access to that location/scope |
+
+Detection: `/etc/cron.d/ghl-api-watchdog` runs `scripts/ghl-api-watchdog.sh` daily at 06:20 UTC and pages #clio_devops
+(one post per account per 20 h) with `GHL canary: <account> (<VAR>) → <ghl.sh stderr line>`. Verdict line in
+`/var/log/ghl-api-watchdog.log`, e.g. `clean: b2b ok, winback ok`. Rehearse with `--dry-run` (no post, no cooldown stamp).
+
 **Mercury Bank API token (Finance):**
 
 Symptom: `HTTP 401 {"errors":{"errorCode":"noTokenInDBButMaybeMalformed"}}` from
