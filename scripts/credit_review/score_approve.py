@@ -162,7 +162,7 @@ def replica_candidates(max_risk: float, limit: int, bands: tuple[str, ...] = ("A
            # Core's agent guard refuses an IDP band hint other than A and any row with a proof
            # request (policy.server_proof_reasons); reading those rows only spends the shared
            # 120/min list budget. The live re-read re-checks everything anyway.
-           f"AND coalesce(json_extract_scalar(verificationdata, '$.band_hint'), 'A') IN ({','.join(repr(b) for b in bands)}) "
+           f"AND json_extract_scalar(verificationdata, '$.band_hint') IN ({','.join(repr(b) for b in bands)}) "
            "AND " + stamp +
            f"ORDER BY r ASC, createdat ASC LIMIT {int(limit)}")
     try:
@@ -566,8 +566,15 @@ def admitted_refusal(row: dict[str, Any], sp: ScorePolicy, engaged: Engaged | No
         out.remove("proof_requested")
         if stamp_answered(row):
             out.append("proof_requested(answered)")
-    if hint not in (None, "A", "B"):
-        out.append(f"band_hint_{hint}")
+    # Reviewed baseline: deploy overwrites - 2026-10-27 (credit-refresh-t01b, firstmate 026): node-8 held a hand
+    # edit of this file (credit-trust-llm-t01's band_hint hot patch of 2026-10-24 00:52Z, the two lines below and
+    # in replica_candidates); main now carries the same two lines (from #1351) on top of #1386, so this file is
+    # the reviewed text and nothing node-8 had is lost.
+    # Mirror core exactly (agentApprovalGuard validatorApprovedLowRiskRefusal: band_hint must be "A" or
+    # "B"; absent = band_not_a_or_b). 2026-10-23 20:36Z: 95 of 100 PUTs were refused by core for rows whose
+    # re-validated verdict carries no band_hint, and each refusal used up the per-run pace.
+    if hint not in ("A", "B"):
+        out.append(f"band_hint_{hint if hint is not None else 'missing'}")
     if vd.get("proof_required") is True:
         out.append("proof_required_flag")
     return ["proof_required", *out] if out else []

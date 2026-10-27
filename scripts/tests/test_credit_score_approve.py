@@ -21,7 +21,8 @@ NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
 
 
 def row(rid, *, uid=500, pid="p1", risk=0, approved=True, pop=20, roles=("Producer",), rules=None, status=decide.UVN,
-        created="2026-10-19T00:00:00Z", meta=None, band=None):
+        created="2026-10-19T00:00:00Z", meta=None, band="A"):
+    # Every validator verdict today carries band_hint; core refuses one without (band_not_a_or_b).
     vd = {"is_approved": approved, "total_risk_percent": risk, "rule_risk_percent": dict(rules or {})}
     if band is not None:
         vd["band_hint"] = band
@@ -824,6 +825,12 @@ class ScoreApprove(unittest.TestCase):
         self.assertLess(sa.READ_BUDGET_S, sa.ANCHOR_BUDGET_S)
         self.assertLess(sa.ANCHOR_BUDGET_S, sa.FANOUT_BUDGET_S)
         self.assertLessEqual(sa.FANOUT_BUDGET_S, 900 - 120, "room for caps + writes under the 900 s cron")
+    def test_a_verdict_without_band_hint_is_held_like_core_refuses_it(self):
+        """2026-10-23 20:36Z: 95 of 100 PUTs refused by core (band_not_a_or_b) for verdicts with no band_hint."""
+        rows = [row("nob", uid=650, pid="nb1", band=None), row("okb", uid=651, pid="nb2", band="B")]
+        res, w = self.go(rows, sp=self.phase1())
+        self.assertEqual([i for c in w.calls for i in c[1]], ["okb"])
+        self.assertIn("band_hint_missing", self.decisions()["nob"]["reason"])
 
     def test_trusted_approvals_get_no_verify_note_and_count_toward_caps(self):
         self.go([row("tr", band="B", meta=self.STAMP), row("no", band="B", pid="p2", meta=self.STAMP)],
