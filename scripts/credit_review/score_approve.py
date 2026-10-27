@@ -52,6 +52,7 @@ from typing import Any, Callable, Iterable
 from . import admin as admin_api
 from .roles import is_editorial
 from . import decide
+from . import account_gate as account_gate_mod
 from .policy import (server_approval_refusal, server_proof_reasons, validator_conflict,
                      validator_rejected_rules)
 from .roles import ONE_PERSON_FAMILIES, family_of
@@ -756,6 +757,7 @@ class ScoreResult:
     mode: str
     candidates: int = 0
     reread: int = 0
+    account_held: int = 0
     approved: int = 0
     would_approve: int = 0
     held: dict[str, int] = field(default_factory=dict)
@@ -787,6 +789,7 @@ class ScoreResult:
                 + (f"; {self.editorial_held} editorial-role rows held (trusted anchor under pop "
                    f"{decide.EDITORIAL_MID_POPULARITY} only)" if self.editorial_held else "")
                 + f"; {self.fanout_held} held by {FANOUT_PREFIX} (velocity-class)"
+                + (f"; {self.account_held} held by the account gate" if self.account_held else "")
                 + (f"; approved by anchor_kind {dict(sorted(self.anchor_kinds.items()))}" if self.anchor_kinds else "")
                 + ("; READS INCOMPLETE (HTTP 429 or scan cap)" if self.read_exhausted else "")
                 + ("; AUDIT SAMPLE NOT FILED: PAUSED" if self.audit_failed else "")
@@ -805,12 +808,14 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
         sleep: Callable[[float], None] | None = None,
         conversations: Callable[[dict[int, str]], dict[int, "bool | None"]] | None = None,
         anchors: Anchors | None = None, fanout: Fanout | None = None,
-        editorial_velocity: EditorialVelocity | None = None) -> ScoreResult:
+        editorial_velocity: EditorialVelocity | None = None,
+        account_gate: Callable[[Any], "account_gate_mod.GateResult"] | None = None) -> ScoreResult:
     if mode not in ("shadow", "apply"):
         raise ValueError("mode must be shadow or apply")
     decide.ensure_schema(db)
     now = now or datetime.now(timezone.utc)
     res = ScoreResult(run_id="score-" + now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6], mode=mode)
+    gate = account_gate_mod.Cached(account_gate)
     import time as _time
     t0 = _time.monotonic()
     why_paused = paused()
@@ -944,6 +949,13 @@ def run(admin: admin_api.Admin, db, *, mode: str, policy: decide.Policy, sp: Sco
         if why is None and fleet >= sp.fleet_per_day:
             why = f"fleet reached {sp.fleet_per_day} score approvals today"
             res.capped += 1
+        if why is None:
+            # Captain 2026-10-26 23:30-23:40Z / steward 019: the shared account gate decides last; only an
+            # explicit allow approves (hold / unknown / any failure = skip, no approval).
+            g = gate(d.user_id)
+            if not g.allowed:
+                why = f"{g.why()}: no approval, proof ask"
+                res.account_held += 1
         if why is None:
             d.evidence_kind = TRUSTED_EVIDENCE_KIND if kind == "trusted" else EVIDENCE_KIND
             res.anchor_kinds[kind] = res.anchor_kinds.get(kind, 0) + 1
