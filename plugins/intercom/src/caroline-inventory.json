@@ -281,7 +281,7 @@
       "kind": "write",
       "name": "credits_verify",
       "requires": "same muso host auth + ctx-derived --actor-identity as #14; --intercom-conv-id is REQUIRED (it is the approval-ref).",
-      "resolves": "muso credits verify --actor-identity <verified-email> (APPROVAL-tier PUT: also --yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>) via…"
+      "resolves": "muso credits verify --actor-identity <verified-email> (APPROVAL-tier), the WRITE counterpart of credit_verification_check (#9)."
     },
     {
       "kind": "read",

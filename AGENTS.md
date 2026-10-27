@@ -559,6 +559,10 @@ dispatch and at the write boundary. Why: from 05-18 to 10-11 the batch approved
 validator-DECLINED credits through an inverted rule (`approve_owning_track == 100`
 means the shortcut did NOT fire). Approvals are audited read-only by
 `scripts/credit-review.py` (see `docs/credit-verification/ai-credit-reviewer.md`).
+Caroline (edge) approves nothing: `capability-approvers.txt` lists no approver and
+`credits_verify` / `profiles_consolidate` / `profiles_claim_self` stay off. Deploy refuses a
+source that lists one and strips `MUSO_CAPABILITY_APPROVER` from edge.env
+(`scripts/lib/ensure-no-service-approver.sh`; a 10-27 deploy re-opened it once).
 Credit REMOVALS are the mirror: core-backend #10310 refuses every agent/API token on the
 admin credit DELETE routes and on approved->unverified/rejected take-backs, and
 approved->user_verification_needed is illegal (the only exit deletes every role on the

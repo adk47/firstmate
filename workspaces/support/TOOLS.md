@@ -159,10 +159,9 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 
 ### 15. credits_verify
 
-- **Wraps**: `muso credits verify --actor-identity <verified-email>` (APPROVAL-tier PUT: also `--yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>`) via `workspaces/support/skills/customer-credit-verification/scripts/verify-credit.sh`. The WRITE counterpart of `credit_verification_check` (#9).
-- **Returns**: `{ok, mode, request_id, profile_id, status}` or `{ok:false, error}` (`route_to_human` when corroboration/ownership fails, `no_approver` if the approver env is unset, `disabled`).
-- **Auth**: same muso host auth + ctx-derived `--actor-identity` as #14; `--intercom-conv-id` is REQUIRED (it is the approval-ref). muso re-verifies ownership + deterministic catalog corroboration server-side and refuses without it; per-actor/day approval cap.
-- **When to use**: via the `customer-credit-verification` skill, AFTER the read-only check + the customer's proof, to approve their OWN corroborated pending credit. Preview then apply.
+- **Status: OFF.** `creditsVerifyEnabled: false` and no capability approver is installed (firstmate stop switch 2026-10-27; `scripts/lib/ensure-no-service-approver.sh`). Every call returns `{disabled:true}`: file a ticket instead.
+- **Wraps**: `muso credits verify --actor-identity <verified-email>` (APPROVAL-tier), the WRITE counterpart of `credit_verification_check` (#9). Return shape: the header of `workspaces/support/skills/customer-credit-verification/scripts/verify-credit.sh`.
+- **Auth**: same muso host auth + ctx-derived `--actor-identity` as #14; `--intercom-conv-id` is REQUIRED (it is the approval-ref).
 
 ### 16. profiles_consolidate
 

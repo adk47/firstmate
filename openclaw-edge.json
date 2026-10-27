@@ -502,7 +502,7 @@
         "config": {
           "creditVerificationEnabled": true,
           "profilesClaimSelfEnabled": false,
-          "creditsVerifyEnabled": true,
+          "creditsVerifyEnabled": false,
           "profilesConsolidateEnabled": false,
           "foundingBuybackEnabled": true,
           "retentionOfferEnabled": true,
