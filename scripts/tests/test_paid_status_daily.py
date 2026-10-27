@@ -35,9 +35,21 @@ STUBS = {
     """,
     "support7d.py": "import json, os; json.dump([], open(os.environ['PWR_DIR'] + '/support7d.json', 'w'))",
     "classify2.py": """
-        import json, sys
+        import json, os, sys
         out = sys.argv[sys.argv.index("--out-dir") + 1]
+        users = open(sys.argv[sys.argv.index("--users") + 1]).read().split()
+        open(os.environ["PWR_DIR"] + "/CLASSIFIED", "w").write(" ".join(users))
         json.dump([], open(out + "/dry-run-x.json", "w"))
+    """,
+    "core_notice.py": """
+        import json, os, sys
+        a = sys.argv
+        if os.environ.get("FAIL_CORE_NOTICE"):
+            sys.exit(2)
+        held = os.environ.get("CORE_NOTICE_HELD", "").split()
+        users = open(a[a.index("--users-file") + 1]).read().split()
+        open(a[a.index("--out") + 1], "w").write("".join(u + "\\n" for u in users if u in held))
+        print(json.dumps({"held": len(held)}))
     """,
     "build_lists.py": """
         import json, os
@@ -120,7 +132,8 @@ class DailyShTest(unittest.TestCase):
     def run_daily(self, **extra):
         env = {"PATH": os.environ["PATH"], "BIN": self.bin, "RUNNER": self.runner, "LEDGER": self.ledger,
                "MAIN_ENV": self.env_file, "KILL_SWITCH": os.path.join(self.t, "no-kill"), "STATE_ROOT": self.state,
-               "EXCLUDE_CS": self.excl, "HOLD_IDS": self.hold, "CALLS": self.calls, "MODE": "apply", "SEGMENTS": "paid", "EMAIL_ROUTE": "1"}
+               "EXCLUDE_CS": self.excl, "HOLD_IDS": self.hold,
+               "CORE_NOTICE": os.path.join(self.bin, "core_notice.py"), "CALLS": self.calls, "MODE": "apply", "SEGMENTS": "paid", "EMAIL_ROUTE": "1"}
         env.update(extra)
         p = subprocess.run(["bash", DAILY], env=env, capture_output=True, text=True, timeout=120)
         return p, open(self.calls).read().splitlines()
@@ -136,6 +149,21 @@ class DailyShTest(unittest.TestCase):
             if "--mode" in a and a[a.index("--mode") + 1] == mode:
                 out.append(a[a.index("--campaign") + 1])
         return out
+
+    def test_core_notice_within_7d_takes_a_user_out_before_classify(self):
+        # Fable sender map 2026-10-27 item 2: core told user 2 something lately -> never classified, never listed.
+        p, _ = self.run_daily(CORE_NOTICE_HELD="2")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(open(os.path.join(self.seg_dir(), "CLASSIFIED")).read().split(), ["1"])
+        self.assertIn("paid core_notice_within_7d held 1 of 2 candidates", p.stdout)
+
+    def test_unreadable_core_notice_skips_the_segment_and_fails_the_run(self):
+        p, calls = self.run_daily(FAIL_CORE_NOTICE="1")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("core notice check failed: segment skipped (fail closed)", p.stdout)
+        self.assertIn("STOPPED", p.stdout)
+        self.assertEqual(self.campaigns(calls), [])
+        self.assertFalse(os.path.exists(os.path.join(self.seg_dir(), "CLASSIFIED")))
 
     def test_without_asks_no_document_ask_is_sent_and_b0_gap_never_runs(self):
         p, calls = self.run_daily()

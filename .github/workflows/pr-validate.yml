@@ -1744,6 +1744,9 @@ jobs:
           python3 scripts/tests/test_paid_status_email_route.py
           python3 scripts/tests/test_paid_status_support7d.py
           python3 scripts/tests/test_paid_status_classify.py
+          # core's own notices hold a user from every hydra note (Fable sender map 10-27 item 2).
+          python3 scripts/tests/test_core_notice.py
+          python3 scripts/tests/test_verify_ledger_deferral.py
           for f in scripts/paid-status/*.py; do python3 -m py_compile "$f"; done
           # The stage-2 release from the proof-on-file hold (credit_review/stage2_verdicts.py):
           # uvn-status for no_document, gap-ask for need_more, the gap-ask ledger rules. Stdlib only.
