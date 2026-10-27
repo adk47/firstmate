@@ -6,6 +6,13 @@
 # `@ascap.com` and `@mail.ascap.com`, NOT `@notascap.com`. A trailing `.*`
 # stands for any TLD / second-level suffix (`sonymusic.*` = sonymusic.com,
 # sonymusic.co.jp, sonymusic.de ...).
+#
+# A leading `?` marks a CORROBORATION-REQUIRED (tier B) entry: the domain alone does not
+# page, the opening message must also carry a rights keyword (rights-holder-keywords.txt).
+# Without one the conversation is demoted to a no-mention digest line (reason
+# `tier-b:no-rights-keyword`). Entries WITHOUT `?` (tier A: labels, publishers, PROs) page on
+# the domain alone — do not add `?` to them (MUS-6566 Sony protection).
+# tunecore.com is deliberately ABSENT (Jan, 23 Oct): its mail still pages via the keyword arm.
 sonymusic.*
 sme.co.jp
 umusic.*
@@ -23,28 +30,27 @@ prs.org
 jasrac.or.jp
 gema.de
 sacem.fr
-# DSPs, distributors and labels that send takedown notices (firstmate 961, 2026-10-22). Measured on support@
+# Tier B: DSPs, distributors and labels that send takedown notices (firstmate 961, 2026-10-22). Measured on support@
 # over 90 d: 0 mails from any of these except ninjatune.net (1, a real takedown), so they add no noise.
 # apple.com is deliberately ABSENT: 33 App Store mails in 90 d would page constantly.
-spotify.com
-tidal.com
-distrokid.com
-tunecore.com
-cdbaby.com
-believe.com
-believedigital.com
-theorchard.com
-ingrooves.com
-awal.com
-unitedmasters.com
-fuga.com
-symphonicdistribution.com
-onerpm.com
-ditto.fm
-dittomusic.com
-routenote.com
-amuse.io
-vydia.com
-repost.network
-repostnetwork.com
-ninjatune.net
+?spotify.com
+?tidal.com
+?distrokid.com
+?cdbaby.com
+?believe.com
+?believedigital.com
+?theorchard.com
+?ingrooves.com
+?awal.com
+?unitedmasters.com
+?fuga.com
+?symphonicdistribution.com
+?onerpm.com
+?ditto.fm
+?dittomusic.com
+?routenote.com
+?amuse.io
+?vydia.com
+?repost.network
+?repostnetwork.com
+?ninjatune.net

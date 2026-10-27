@@ -1524,6 +1524,13 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_rights_holder_watchdog
+      - name: Run robot-mail predicate tests
+        # scripts/lib/robot_mail.py is the single demote-only predicate imported by the
+        # rights-holder and legal-unanswered watchdogs (MUS-18980). Targeted by name: an
+        # unwired test file never runs in this job.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_robot_mail
       - name: Run legal-unanswered watchdog tests
         # scripts/intercom-legal-unanswered-watchdog.py PAGES #cs_priority (Jan) when a
         # legal/privacy request has no HUMAN reply for 24h. These lock the watch set,

@@ -119,15 +119,35 @@ def _all_parts(detail):
                                                 .get("conversation_parts")) or [])
 
 
+def inbound_parts(detail):
+    """[(index, part, robot)] over the customer-authored parts only (index 0 is the opening
+    message). `robot` is the shared predicate (scripts/lib/robot_mail.py) evaluated ONCE per
+    part, the opening message together with its subject, so `matches()` and
+    `unanswered_episode()` can never disagree about whether a part is an auto-reply."""
+    out = []
+    for i, p in enumerate(_all_parts(detail)):
+        if (p.get("author") or {}).get("type") not in INBOUND:
+            continue
+        email = ((p.get("author") or {}).get("email") or "").strip().lower()
+        subj = _match_text(p.get("subject")) if i == 0 else ""
+        out.append((i, p, rh.robot_mail.is_robot_mail(subj, _match_text(p.get("body")), email)[0]))
+    return out
+
+
 def matches(detail, keywords):
     """The matched keyword, or None. Only customer-authored text is read: the subject when the
     customer opened the conversation, and every inbound message (opening one included), so a
-    request made in a later message is caught and our own outbound text never pages."""
-    src = detail.get("source") or {}
-    inbound = (src.get("author") or {}).get("type") in INBOUND
-    subject = _match_text(src.get("subject")) if inbound else ""
-    bodies = [_match_text(p.get("body")) for p in _all_parts(detail)
-              if (p.get("author") or {}).get("type") in INBOUND and p.get("body")]
+    request made in a later message is caught and our own outbound text never pages.
+
+    Robot mail is filtered PER PART (inbound_parts): an auto-reply cannot be a legal request,
+    and a robot in the set would be re-paged every REPAGE_H forever because nobody can "answer"
+    it. A robot opener does not hide a human's later request, and a robot part quoting a
+    keyword never pages on its own."""
+    parts = inbound_parts(detail)
+    subject = ""
+    if parts and parts[0][0] == 0 and not parts[0][2]:
+        subject = _match_text(parts[0][1].get("subject"))
+    bodies = [_match_text(p.get("body")) for _, p, robot in parts if p.get("body") and not robot]
     for body in [""] + bodies:
         rule = rh.match_keyword(subject, body, keywords)
         if rule:
@@ -138,15 +158,19 @@ def matches(detail, keywords):
 def unanswered_episode(detail, bot_admin_id):
     """(last_customer_ts, last_customer_part_id) when the customer's latest message has no
     HUMAN admin comment after it; None when a human replied after it (or there is no customer
-    message). Caroline (bot_admin_id) and notes never count as an answer."""
+    message). Caroline (bot_admin_id) and notes never count as an answer. Robot mail (an
+    auto-reply after a human answer) is not a customer message: it never starts or restarts an
+    episode, so the 24 h clock runs from the last HUMAN customer message."""
     last_cust = None
     last_human = 0
+    robot_at = {i: robot for i, _, robot in inbound_parts(detail)}
     for i, p in enumerate(_all_parts(detail)):
         a = p.get("author") or {}
         ts = int(p.get("created_at") or (detail.get("created_at") if i == 0 else 0) or 0)
         has_content = bool(p.get("body") or p.get("attachments"))
         if a.get("type") in INBOUND and has_content:
-            last_cust = (ts, str(p.get("id") or "source"))
+            if not robot_at[i]:
+                last_cust = (ts, str(p.get("id") or "source"))
         elif (a.get("type") == "admin" and str(a.get("id")) != str(bot_admin_id)
               and p.get("part_type", "comment") in ("comment", "assign_and_reopen", "open")
               and p.get("body")):
