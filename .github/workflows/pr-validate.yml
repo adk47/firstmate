@@ -1741,6 +1741,9 @@ jobs:
           # Stage 2 SHADOW (judge documents on file for the decider's proof-on-file
           # holds): ledger, Trino, Intercom and downloads faked; writes only stage2_shadow.
           python3 scripts/tests/test_credit_proof_stage2.py
+          # Doc-verify SHADOW (never take a returned document at face value): extraction,
+          # forensics, independent cross-checks, gate. Model, network, DNS, Intercom faked.
+          python3 scripts/tests/test_doc_verify.py
           # Provisional-credit tracker / day-7 route / backup_ask_undelivered (captain 2026-10-23
           # 20:03Z-20:07Z; Fable backup-threshold-ruling-1023.md section 6). Trino faked, stdlib only.
           python3 scripts/tests/test_provisional_tracker.py

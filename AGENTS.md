@@ -583,6 +583,11 @@ Never judge credits in an OpenClaw agent turn. codex-cli 0.156.1 has no headless
 web search (it routes search through Code Mode `exec`), so web evidence is fetched
 server-side and only verbatim-quoted passages count:
 `docs/credit-verification/credit-trust-llm.md`.
+Exception (captain 2026-10-26): doc-verify's claim extraction calls OpenRouter
+`deepseek/deepseek-v4.1-flash-1017` directly (tool-less, `data_collection: deny`, every call a
+`dv_llm_calls` row, daily cap). Doc-verify (shadow) checks what a returned document CLAIMS
+against sources the user does not control; UNKNOWN never approves:
+`docs/credit-verification/doc-verify.md`.
 
 ## Picking the right extension mechanism
 

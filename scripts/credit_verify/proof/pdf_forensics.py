@@ -262,6 +262,7 @@ def analyze(data: bytes, path: str, names: list[str] | None = None) -> tuple[lis
         sig.append(Signal("F4a", "pdf_producer", INFO, value={"producer": producer[:120], "creator": creator[:120]},
                           evidence=_ev(path)))
         cd, md = meta.get("creationDate") or "", meta.get("modDate") or ""
+        facts["created"], facts["modified"] = cd[:24], md[:24]
         if cd and md and cd[:16] != md[:16]:
             sig.append(Signal("F4a", "modified_after_creation_date", INFO, value={"created": cd[:16], "modified": md[:16]},
                               evidence=_ev(path)))
