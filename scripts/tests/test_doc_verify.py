@@ -236,6 +236,32 @@ class ExtractTests(unittest.TestCase):
             outcomes = [r[0] for r in store.db.execute("SELECT outcome FROM dv_llm_calls ORDER BY id")]
             self.assertEqual(outcomes, ["ok", "skipped", "error"])
 
+    def test_unusable_answer_is_retried_once_then_degrades(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            bad = {"choices": [{"message": {"content": "{not json"}, "finish_reason": "length"}],
+                   "usage": {"cost": 0.001}}
+            answers = [bad, or_response(GOOD_ANSWER)]
+            ex = Extractor(store, key="k", post=lambda *a: answers.pop(0)).extract("text", {}, "p")
+            self.assertTrue(ex.ok)
+            rows = store.db.execute("SELECT outcome, reason, cost_usd FROM dv_llm_calls ORDER BY id").fetchall()
+            self.assertEqual([r[0] for r in rows], ["error", "ok"])
+            self.assertIn("finish=length", rows[0][1])
+            self.assertAlmostEqual(sum(r[2] for r in rows), 0.0014)     # both attempts count against the cap
+            calls = []
+            ex = Extractor(store, key="k", post=lambda *a: (calls.append(1), bad)[1]).extract("text", {}, "q")
+            self.assertEqual((ex.ok, ex.degraded, ex.error, len(calls)), (False, True, "unusable model answer", 2))
+
+    def test_retry_respects_the_daily_cap(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            bad = {"choices": [{"message": {"content": "nope"}}], "usage": {"cost": 6.0}}
+            calls = []
+            ex = Extractor(store, key="k", post=lambda *a: (calls.append(1), bad)[1], daily_usd=5).extract("t", {}, "p")
+            self.assertEqual((ex.degraded, len(calls)), (True, 1))
+            self.assertEqual(store.db.execute("SELECT outcome FROM dv_llm_calls ORDER BY id DESC LIMIT 1").fetchone(),
+                             ("skipped",))
+
     def test_unusable_answer_is_an_error_not_a_pass(self):
         with tempfile.TemporaryDirectory() as td:
             store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
@@ -284,17 +310,55 @@ class ForensicsTests(unittest.TestCase):
         self.assertEqual(f["h3_c2pa_ai_source"], forensics.WEAK)
         self.assertEqual(f["template_reused"], forensics.SOFT)      # document of record
 
-    def test_read_h3_from_the_proof_store(self):
+    @staticmethod
+    def h3_store(verdict, signals, track_listed, at="2026-10-27T00:00:00Z", reasons=("r",)):
         ps = ProofStore(":memory:")
         ps.db.execute("INSERT INTO verdicts (proof_id, analyzer_version, contact_h, track_key, verdict, reasons_json, "
-                      "context_json, created_at, request_id) VALUES ('p', ?, 'c', 't', 'GENUINE', '[\"ok\"]', '{}', "
-                      "'2026-10-27T00:00:00Z', ?)", (FORENSICS_VERSION, KEY))
+                      "context_json, created_at, request_id) VALUES ('p', ?, 'c', 't', ?, ?, '{}', ?, ?)",
+                      (FORENSICS_VERSION, verdict, json.dumps(list(reasons)), at, KEY))
+        for check, name, sev in signals:
+            ps.db.execute("INSERT INTO forensics (proof_id, analyzer_version, check_id, name, severity, created_at, "
+                          "request_id) VALUES ('p', ?, ?, ?, ?, ?, ?)", (FORENSICS_VERSION, check, name, sev, at, KEY))
+        ps.db.execute("INSERT INTO fingerprints (proof_id, contact_h, kind, track_key, track_listed, created_at) "
+                      "VALUES ('p', 'c', 'contract', 't', ?, ?)", (track_listed, at))
+        return ps
+
+    def test_read_h3_from_the_proof_store(self):
+        ps = self.h3_store("GENUINE", [("F4a", "online_editor_producer", "soft")], 1)
+        # a row from another write (an older run) is not this verdict's signal set
         ps.db.execute("INSERT INTO forensics (proof_id, analyzer_version, check_id, name, severity, created_at, "
-                      "request_id) VALUES ('p', ?, 'F4a', 'online_editor_producer', 'soft', 'x', '')",
-                      (FORENSICS_VERSION,))
+                      "request_id) VALUES ('p', ?, 'F1', 'old_signal', 'soft', '2026-10-01T00:00:00Z', ?)",
+                      (FORENSICS_VERSION, KEY))
         h3 = forensics.read_h3(ps.db, "p", KEY)
-        self.assertEqual(h3.verdict, "GENUINE")
-        self.assertEqual(h3.names, {"online_editor_producer"})
+        self.assertEqual((h3.verdict, h3.names, h3.kind), ("GENUINE", {"online_editor_producer"}, "contract"))
+        self.assertIsNone(forensics.read_h3(ps.db, "p", "other#Mixing").verdict)
+
+    def test_forged_only_for_another_claim_reads_as_stage2_does(self):
+        # Backfill 2026-10-27: an edit/paste + claimant_not_named on a document that does not list the
+        # track is FORGED_LIKELY in raw H3 but a coverage gap in stage 2 (claim_verdict) -> SUSPECT.
+        for edit in (("F4a", "after_creation_key_field_edit", "soft"), ("F3b", "copy_move_region", "soft")):
+            ps = self.h3_store("FORGED_LIKELY", [edit, ("F5a", "track_not_named", "soft"),
+                                                 ("F5b", "claimant_not_named", "mismatch")], 0)
+            h3 = forensics.read_h3(ps.db, "p", KEY)
+            self.assertEqual(h3.verdict, "SUSPECT", edit)
+            self.assertNotIn("claimant_not_named", h3.names)
+            f = forensics.check(h3, Extraction(ok=True), {}, "application/pdf")
+            self.assertNotEqual(forensics.worst(f), forensics.HARD)
+            o = gate.decide(h3_verdict=h3.verdict, kind=h3.kind, ex=validate(GOOD_ANSWER), findings=f,
+                            checks=checks(xc_dsp=xc.UNKNOWN), account_held=False)
+            self.assertEqual((o.outcome, o.account_hold), (gate.UNVERIFIABLE, False))
+
+    def test_forged_that_lists_the_track_or_is_track_independent_stays_forged(self):
+        listed = self.h3_store("FORGED_LIKELY", [("F4a", "after_creation_key_field_edit", "soft"),
+                                                 ("F5b", "claimant_not_named", "mismatch")], 1)
+        self.assertEqual(forensics.read_h3(listed.db, "p", KEY).verdict, "FORGED_LIKELY")
+        hard = self.h3_store("FORGED_LIKELY", [("F3a", "ai_generator_software", "hard"),
+                                               ("F5b", "claimant_not_named", "mismatch")], 0)
+        self.assertEqual(forensics.read_h3(hard.db, "p", KEY).verdict, "FORGED_LIKELY")
+        reuse = self.h3_store("FORGED_LIKELY", [("F2", "reused_on_another_track", "hard")], 0)
+        h3 = forensics.read_h3(reuse.db, "p", KEY)
+        self.assertEqual(h3.verdict, "FORGED_LIKELY")
+        self.assertEqual(forensics.worst(forensics.check(h3, Extraction(ok=True), {}, None)), forensics.HARD)
 
 
 class CrossCheckTests(unittest.TestCase):

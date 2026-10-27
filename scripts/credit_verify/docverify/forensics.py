@@ -73,26 +73,44 @@ class H3:
 
 
 def read_h3(proof_db: sqlite3.Connection, proof_id: str, request_key: str) -> H3:
-    """The latest current-version H3 verdict for (proof, '<uuid>#<role>'), and
-    the signals recorded for it (plus the file-level rows)."""
-    row = proof_db.execute("SELECT verdict, reasons_json FROM verdicts WHERE proof_id=? AND request_id=? "
-                           "AND analyzer_version=? ORDER BY id DESC LIMIT 1",
+    """The H3 verdict for (proof, '<uuid>#<role>') AS STAGE 2 READS IT.
+
+    The latest current-version verdict row, with exactly the signals H3
+    recorded for that claim in the same write (store.record stamps the
+    verdict and its forensics rows with one created_at). Then stage 2's own
+    rule (stage2.claim_verdict, reused, not copied): a document that does not
+    list the track is never FORGED_LIKELY for it because of signals that only
+    say it fits another claim (another ISRC, artist or profile name); those
+    are coverage gaps. Reading the raw verdict instead called 3 of 89
+    backfill documents forged (and held their accounts) where stage 2 says
+    review (2026-10-27)."""
+    import json
+
+    from credit_verify.proof import stage2
+    from credit_verify.proof.pipeline import ProofResult
+    from credit_verify.proof.signals import ClaimContext, Signal
+    row = proof_db.execute("SELECT verdict, reasons_json, created_at, track_key FROM verdicts WHERE proof_id=? "
+                           "AND request_id=? AND analyzer_version=? ORDER BY id DESC LIMIT 1",
                            (proof_id, request_key, FORENSICS_VERSION)).fetchone()
     if row is None:
-        row = proof_db.execute("SELECT verdict, reasons_json FROM verdicts WHERE proof_id=? AND request_id=? "
-                               "ORDER BY id DESC LIMIT 1", (proof_id, request_key)).fetchone()
-    sigs = proof_db.execute("SELECT DISTINCT name, severity FROM forensics WHERE proof_id=? AND request_id IN (?, '') "
-                            "AND analyzer_version=?", (proof_id, request_key, FORENSICS_VERSION)).fetchall()
-    kind = proof_db.execute("SELECT kind FROM fingerprints WHERE proof_id=? LIMIT 1", (proof_id,)).fetchone()
-    import json
-    reasons: list[str] = []
-    if row and row[1]:
-        try:
-            reasons = list(json.loads(row[1]))[:6]
-        except ValueError:
-            reasons = []
-    return H3(verdict=row[0] if row else None, reasons=reasons,
-              signals=[{"name": n, "severity": s} for n, s in sigs], kind=kind[0] if kind else None)
+        return H3(verdict=None)
+    verdict, reasons_json, created_at, track_key = row
+    sigs = [Signal(check=c, name=n, severity=s, reason=r or "") for c, n, s, r in proof_db.execute(
+        "SELECT check_id, name, severity, reason FROM forensics WHERE proof_id=? AND request_id=? "
+        "AND analyzer_version=? AND created_at=?", (proof_id, request_key, FORENSICS_VERSION, created_at))]
+    fp = proof_db.execute("SELECT kind, track_listed FROM fingerprints WHERE proof_id=? AND track_key=? LIMIT 1",
+                          (proof_id, track_key or "")).fetchone() or \
+        proof_db.execute("SELECT kind, NULL FROM fingerprints WHERE proof_id=? LIMIT 1", (proof_id,)).fetchone()
+    kind, listed = (fp[0], None if fp[1] is None else bool(fp[1])) if fp else (None, None)
+    try:
+        reasons = [str(x) for x in json.loads(reasons_json or "[]")][:6]
+    except ValueError:
+        reasons = []
+    v, reasons, kept = stage2.claim_verdict(
+        ProofResult(proof_id, verdict, reasons, sigs, kind or "unknown", None, request_key, listed),
+        ClaimContext(request_ids=[request_key], track_title="(linked)"))
+    return H3(verdict=v, reasons=list(reasons)[:6], signals=[{"name": s.name, "severity": s.severity} for s in kept],
+              kind=kind)
 
 
 def file_date(facts: dict[str, Any]) -> date | None:

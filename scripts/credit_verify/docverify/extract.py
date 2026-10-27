@@ -36,6 +36,9 @@ MODEL = os.environ.get("CREDIT_DOC_VERIFY_MODEL", "deepseek/deepseek-v4.1-flash-
 URL = os.environ.get("CREDIT_DOC_VERIFY_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
 DAILY_USD = float(os.environ.get("CREDIT_DOC_VERIFY_DAILY_USD", "5"))
 TIMEOUT_S = int(os.environ.get("CREDIT_DOC_VERIFY_LLM_TIMEOUT_S", "90"))
+MAX_TOKENS = 8000             # headroom for long credit lists; the cause of the backfill's 6 unusable
+                              # answers was not measured, so finish_reason is now recorded per call
+UNUSABLE_RETRIES = 1
 
 ISSUER_TYPES = ("label", "distributor", "publisher", "studio", "pro", "management", "artist", "dsp", "other", "none")
 DOC_TYPES = ("split_sheet", "contract", "invoice", "letter", "email", "email_screenshot", "dashboard_screenshot",
@@ -293,31 +296,47 @@ class Extractor:
         if not key:
             self.store.llm_call({**row, "outcome": "skipped", "reason": "no OpenRouter key"})
             return fallback(text, "no OpenRouter key")
-        body = {"model": self.model, "messages": messages, "temperature": 0, "max_tokens": 4000,
+        body = {"model": self.model, "messages": messages, "temperature": 0, "max_tokens": MAX_TOKENS,
                 "response_format": {"type": "json_object"}, "usage": {"include": True},
                 "provider": {"data_collection": "deny"}}
-        t0 = time.monotonic()
-        try:
-            data = self.post(body, key, TIMEOUT_S)
-        except urllib.error.HTTPError as exc:
-            err = f"http {exc.code}"
-            data = None
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-            err = f"transport: {type(exc).__name__}"
-            data = None
-        latency = int((time.monotonic() - t0) * 1000)
-        if data is None:
-            self.store.llm_call({**row, "outcome": "error", "reason": err, "latency_ms": latency})
-            return fallback(text, err)
-        usage = data.get("usage") or {}
-        row.update(input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens"),
-                   cost_usd=usage.get("cost"), latency_ms=latency, model=data.get("model") or self.model)
-        try:
-            content = (((data.get("choices") or [{}])[0].get("message") or {}).get("content")) or ""
-            m = re.search(r"\{.*\}", content, re.S)
-            ex = validate(json.loads(m.group(0) if m else content))
-        except (ValueError, TypeError, AttributeError, IndexError) as exc:
-            self.store.llm_call({**row, "outcome": "error", "reason": f"unusable answer: {type(exc).__name__}"})
+        # One in-call retry on an unusable answer (backfill 2026-10-27: 6 of
+        # 82 answers did not parse). Every attempt is its own ledger row and
+        # counts against the daily cap; a transport/HTTP error is not retried
+        # here (the runner retries it on a later run).
+        for attempt in range(1 + UNUSABLE_RETRIES):
+            if attempt and self.store.spent_today_usd() >= self.daily_usd:
+                self.store.llm_call({**row, "outcome": "skipped", "reason": "daily cap reached before the retry"})
+                return fallback(text, "daily model spend cap reached")
+            att = dict(row)
+            t0 = time.monotonic()
+            try:
+                data = self.post(body, key, TIMEOUT_S)
+            except urllib.error.HTTPError as exc:
+                err = f"http {exc.code}"
+                data = None
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                err = f"transport: {type(exc).__name__}"
+                data = None
+            latency = int((time.monotonic() - t0) * 1000)
+            if data is None:
+                self.store.llm_call({**att, "outcome": "error", "reason": err, "latency_ms": latency})
+                return fallback(text, err)
+            usage = data.get("usage") or {}
+            choice = (data.get("choices") or [{}])[0] if isinstance(data.get("choices"), list) else {}
+            finish = choice.get("finish_reason") if isinstance(choice, dict) else None
+            att.update(input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens"),
+                       cost_usd=usage.get("cost"), latency_ms=latency, model=data.get("model") or self.model)
+            try:
+                content = ((choice.get("message") or {}).get("content")) or ""
+                m = re.search(r"\{.*\}", content, re.S)
+                ex = validate(json.loads(m.group(0) if m else content))
+            except (ValueError, TypeError, AttributeError, IndexError) as exc:
+                self.store.llm_call({**att, "outcome": "error",
+                                     "reason": f"unusable answer: {type(exc).__name__} (finish={finish})"})
+                continue
+            row = att
+            break
+        else:
             return fallback(text, "unusable model answer")
         ex.model = row["model"]
         self.store.llm_call({**row, "outcome": "ok"})
