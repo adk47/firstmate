@@ -4,10 +4,25 @@ on:
   pull_request:
     branches: [main]
 
-# Cancel a run superseded by a newer push to the same PR ref. Without this
-# every push stacks another full run on the 4 self-hosted runners (measured
-# 5 of 31 runs superseded, ~16% of pool minutes). A cancel only fires when a
-# newer run starts on this ref, so the current head always has a live run.
+# Cancel a run superseded by a newer push to the same PR ref. Without this every push
+# stacks another full run (measured 5 of 31 runs superseded, ~16 % of pool minutes). A
+# cancel only fires when a newer run starts on this ref, so the current head always has a
+# live run.
+#
+# 2026-10-27 — WHY THE CAP IS NOT HERE. Five overlapping PR validations took node-8
+# (24 cores, also running the PRODUCTION openclaw gateway, openclaw-edge, longhorn and
+# argocd) to run queue 68 / load 39 / 344k ctx switches/s / 10 % idle / CPU-pressure PSI
+# 52 %, and the timing-sensitive watchdog suites then failed on a DIFFERENT unrelated test
+# each attempt. A constant concurrency group is the WRONG instrument: GitHub has no
+# host-scope, a constant group throws away the supersede-cancel above, and its single
+# pending slot silently drops a third PR's run (workflow_dispatch cannot rescue that — a
+# dispatch of this workflow is not a pull_request event). The cap that matches the
+# resource is on the HOST, in the bats step: `scripts/bats-slot.sh` takes an exclusive
+# flock so at most ONE suite runs per box, waits up to 45 minutes, and fails LOUDLY
+# instead of ever running unslotted.
+#
+# ROLLBACK of the slot: drop the `scripts/bats-slot.sh ... --` prefix on the bats
+# invocation. Do that only with a node-8 hydra runner count of 1-2, or the pile-up returns.
 concurrency:
   group: pr-validate-${{ github.ref }}
   cancel-in-progress: true
@@ -1367,9 +1382,21 @@ jobs:
           # audit on node-8: corpus 1493 s serial -> 279 s at --jobs 8, identical
           # 6497-test name set). Slowest files go first so the long poles start at
           # once (merge-landing-watchdog 178 s, rollback 121 s, close-duplicate 82 s).
-          # --jobs 8 is the knee: 16 buys 33 s because merge-landing-watchdog is the
-          # floor. Do NOT add within-file parallelism: 423 s and 4 tests break.
-          # Rollback: drop `--jobs 8 --no-parallelize-within-files`.
+          # --jobs 8 was the throughput knee: 16 buys 33 s because merge-landing-watchdog
+          # is the floor. Do NOT add within-file parallelism: 423 s and 4 tests break.
+          #
+          # 2026-10-27: 8 -> 4. The knee was measured when this job was the only thing
+          # on the box; it is not. node-8 also runs the PRODUCTION openclaw gateway
+          # (7.2 GiB RSS, ~29 % CPU), openclaw-edge, longhorn-manager and argocd, and
+          # with the cross-PR cap above (one validation at a time) a SINGLE --jobs 8
+          # suite still measured load 30.4 / CPU-pressure PSI 24.9 % at 19:01Z with
+          # nothing else in flight. Under that pressure the watchdog suites miss their
+          # deadlines nondeterministically — the failure mode that blocked five PRs.
+          # Cost: the suite is bounded by corpus/4 ~ 373 s (merge-landing-watchdog's
+          # 178 s floor still dominates), against 279 s at 8 — ~90 s per PR, cheaper
+          # than an hour of red.
+          # Rollback: `--jobs 8 --no-parallelize-within-files` is still the throughput
+          # knee IF this job ever runs on a box that is not also serving production.
           slow="scripts/tests/merge-landing-watchdog.bats
           scripts/tests/rollback.bats
           scripts/tests/close-duplicate-conversations.bats
@@ -1384,8 +1411,13 @@ jobs:
           scripts/tests/qa-review-reconcile.bats"
           ordered=$( { for f in $slow; do grep -Fx -- "$f" <<<"$files" || true; done
                        grep -vFx -- "$slow" <<<"$files" || true; } )
+          # HOST-WIDE SLOT (2026-10-27 ruling): at most one bats suite per box. The
+          # flock is per host, not per runner service, so the several hydra runners on
+          # node-8 cannot each start a suite. Waiting is bounded (45 min) and a timeout is
+          # an ::error:: + non-zero exit — never a silent skip, never an unslotted run.
           # shellcheck disable=SC2086
-          bats --jobs 8 --no-parallelize-within-files $ordered
+          scripts/bats-slot.sh --lock /var/lock/hydra-bats.lock --timeout 2700 -- \
+            bats --jobs 4 --no-parallelize-within-files $ordered
 
   py-syntax:
     name: Python syntax check (py_compile)
