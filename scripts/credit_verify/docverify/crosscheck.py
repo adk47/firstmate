@@ -38,12 +38,13 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import datetime, timedelta, timezone
 import urllib.error
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
-from credit_review.evidence import CONFIRMED, CONTRADICTED, OTHERS_ONLY, classify_roles
+from credit_review.evidence import CONFIRMED, CONTRADICTED, classify_roles
 from credit_review.judge import domain_matches_name, registrable_domain
 from credit_review.roles import ONE_PERSON_FAMILIES, family_of, fold, names_match
 
@@ -172,18 +173,65 @@ def name_on_page(name: str, text: str) -> bool:
 
 
 # -- xc_dsp -------------------------------------------------------------------
-def dsp(raw_credits: list[dict[str, Any]] | None, role: str, names: list[str], err: str | None = None) -> Check:
+LIVE_DSPS = ("spotify", "tidal")
+FRESH_MAX_AGE_DAYS = 30
+
+
+def _ts(v: Any) -> datetime | None:
+    try:
+        t = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def live_contradiction(raw_credits: list[dict[str, Any]], family: str, names: list[str],
+                       fresh_since: str | None, now: datetime | None = None) -> tuple[bool, list[str]]:
+    """(contradicts, why-not). Fable [key=doc-verify-go-live] Q3, 2026-10-27: a credit is
+    contradicted only on a fresh capture of BOTH Spotify and Tidal requested by this run
+    (rows captured at or after `fresh_since`, and within 30 days), where each DSP credits
+    exactly one other person, the same one, in this one-person role and not the claimant.
+    Jaxsta, MLC or MusicBrainz alone never contradict. No requested capture (fresh_since
+    None) means it cannot be shown: UNKNOWN never holds anyone."""
+    now = now or datetime.now(timezone.utc)
+    why: list[str] = []
+    since = _ts(fresh_since) if fresh_since else None
+    if since is None:
+        why.append("no fresh Spotify+Tidal capture was requested by this run")
+    others: dict[str, set[str]] = {}
+    for dsp_name in LIVE_DSPS:
+        rows = [c for c in raw_credits if str((c.get("profile") or {}).get("source") or "").lower() == dsp_name
+                and family_of(str(c.get("credit") or "")) == family]
+        fresh = [c for c in rows if since and (_ts(c.get("updatedAt")) or since - timedelta(days=1)) >= since
+                 and now - (_ts(c.get("updatedAt")) or now) <= timedelta(days=FRESH_MAX_AGE_DAYS)]
+        if since and not fresh:
+            why.append(f"no fresh {dsp_name} capture for this role")
+        if any(any(names_match(str((c.get("profile") or {}).get("name") or ""), n) for n in names if n)
+               for c in (fresh or rows)):
+            why.append(f"{dsp_name} credits the claimant")
+        others[dsp_name] = {fold(str((c.get("profile") or {}).get("name") or "")) for c in (fresh or rows)} - {""}
+    sp, ti = others["spotify"], others["tidal"]
+    if len(sp) != 1 or len(ti) != 1 or sp != ti:
+        why.append(f"not exactly one other person on both DSPs (spotify {len(sp)}, tidal {len(ti)})")
+    return (not why), why
+
+
+def dsp(raw_credits: list[dict[str, Any]] | None, role: str, names: list[str], err: str | None = None,
+        fresh_since: str | None = None) -> Check:
     if raw_credits is None:
         return Check("xc_dsp", ERROR, {"error": err or "raw credits unavailable"})
     ev = classify_roles([role], raw_credits, names, set())[0]
     detail = {"family": ev.family, "status": ev.status, "for_claimant": ev.trusted_for_profile[:5],
               "for_others": ev.trusted_for_others[:5], "capture": "muso catalog raw credits (spotify/tidal/mlc/jaxsta)",
-              "captured_at": max((str(c.get("updatedAt") or "") for c in raw_credits), default=None) or None}
+              "captured_at": max((str(c.get("updatedAt") or "") for c in raw_credits), default=None) or None,
+              "fresh_since": fresh_since}
     if ev.status == CONFIRMED:
         return Check("xc_dsp", POSITIVE, detail)
     if ev.status == CONTRADICTED:
-        return Check("xc_dsp", CONTRADICTS, detail)
-    if ev.status == OTHERS_ONLY:
+        ok, why = live_contradiction(raw_credits, ev.family, names, fresh_since)
+        if ok:
+            return Check("xc_dsp", CONTRADICTS, detail)
+        detail.update(note="possible conflict, not a contradiction: " + "; ".join(why), dsp_conflict=True)
         return Check("xc_dsp", UNKNOWN, detail)
     return Check("xc_dsp", UNKNOWN, detail)
 

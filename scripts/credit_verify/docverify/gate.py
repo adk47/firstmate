@@ -24,8 +24,12 @@ model only extracted the claims; these rules decide.
                     2026-10-27: shadow reader). A consumer still applies its
                     own approve rule and the account-level band. A later
                     account hold supersedes it (store.supersede_verified)
-  unverifiable   everything else (UNKNOWN). Never an approval. `need` says
-                 which stronger proof would settle it.
+  unknown        our tooling could not decide: extraction did not run (model
+                 down, cap, document not located, sandbox failed), H3 missing or
+                 UNDETERMINED, Spotify/Tidal credits unreadable. Never asks, never
+                 approves, never holds; retried up to 3 runs (D3, Fable 2026-10-27).
+  unverifiable   everything else. Never an approval. `need` says which
+                 stronger proof would settle it.
 
 A weak finding (email screenshot, free-mail sender) never verifies on its
 own; it can stand next to an independent confirmation of the credit.
@@ -40,7 +44,12 @@ from . import crosscheck as xc
 from .extract import Extraction
 from .forensics import HARD, SOFT, Finding
 
-FORGED, CONTRADICTED, VERIFIED, UNVERIFIABLE = "forged", "contradicted", "verified", "unverifiable"
+FORGED, CONTRADICTED, VERIFIED, UNVERIFIABLE, UNKNOWN = \
+    "forged", "contradicted", "verified", "unverifiable", "unknown"
+# Extraction errors that are OUR tooling, not the document (D3): they make the outcome
+# `unknown`, which never asks the user, never approves and never holds; it is retried.
+TOOLING_ERRORS = ("document not located", "sandbox failed", "daily model spend cap", "no OpenRouter key",
+                  "http ", "transport:", "unusable model answer")
 APPROVING_H3 = ("GENUINE", "VERIFIED", "PLAUSIBLE")
 
 # Stronger-proof codes for `unverifiable` (machine codes; the copy is not
@@ -95,6 +104,15 @@ def decide(*, h3_verdict: str | None, kind: str | None, ex: Extraction, findings
         who = ", ".join(sorted({o.get("name", "") for o in d.detail.get("for_others") or []}))[:120]
         return Outcome(CONTRADICTED, f"Spotify/Tidal credit this {d.detail.get('family')} role on the track to "
                                      f"someone else ({who})", None, True, detail)
+    tooling = []
+    if (ex.degraded or not ex.ok) and str(ex.error or "").startswith(TOOLING_ERRORS):
+        tooling.append(f"extraction did not run ({ex.error})")
+    if h3_verdict in (None, "UNDETERMINED"):
+        tooling.append(f"H3 {h3_verdict or 'verdict missing'}")
+    if d and d.status == xc.ERROR and not any(c.status == xc.POSITIVE for c in checks if c.step == "xc_isrc"):
+        tooling.append(f"Spotify/Tidal credits unreadable ({d.detail.get('error')})")
+    if tooling:
+        return Outcome(UNKNOWN, "tooling: " + "; ".join(tooling)[:500], None, False, detail)
     need = need_for(ex, kind)
     if account_held:
         return Outcome(UNVERIFIABLE, "account hold: another document of this account was forged or contradicted",

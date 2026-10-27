@@ -27,6 +27,7 @@ from typing import Any
 
 from . import VERSION
 
+MAX_UNKNOWN = 3
 DEFAULT_PATH = os.environ.get("CREDIT_DOC_VERIFY_STORE", "/var/lib/hydra-credit-verify/doc-verify.sqlite")
 
 SCHEMA = """
@@ -142,11 +143,13 @@ class DocVerifyStore:
         return float(row[0] or 0)
 
     def done(self, proof_id: str, request_key: str) -> bool:
-        """True when this (proof, '<uuid>#<role>') already has an outcome under
-        the current VERSION."""
+        """True when this (proof, '<uuid>#<role>') has a decided outcome under the
+        current VERSION. An `unknown` (tooling) outcome is retried, up to
+        MAX_UNKNOWN runs; the last one then stands."""
         rid, _, role = request_key.partition("#")
-        return self.db.execute("SELECT 1 FROM dv_outcomes WHERE proof_id=? AND request_id=? AND role=? AND version=?"
-                               " LIMIT 1", (proof_id, rid, role, VERSION)).fetchone() is not None
+        rows = [r[0] for r in self.db.execute("SELECT outcome FROM dv_outcomes WHERE proof_id=? AND request_id=? "
+                                              "AND role=? AND version=?", (proof_id, rid, role, VERSION))]
+        return any(o != "unknown" for o in rows) or len(rows) >= MAX_UNKNOWN
 
     LATEST = ("SELECT o.* FROM dv_outcomes o JOIN (SELECT proof_id, request_id, role, MAX(id) id FROM dv_outcomes "
               "WHERE version=? GROUP BY proof_id, request_id, role) l USING(id)")

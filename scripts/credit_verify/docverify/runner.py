@@ -143,6 +143,9 @@ class Deps:
     fetch: Fetch | None = None
     dl: Download | None = None
     cache_root: str = CACHE_ROOT
+    # When this run requested a fresh Spotify+Tidal capture (IDP helpers.fresh_capture), the
+    # request time; None = no capture requested, so nothing can be `contradicted` (D5).
+    fresh_since: str | None = None
 
 
 @dataclass
@@ -196,7 +199,8 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
         if path and text.strip():
             ex = deps.extractor.extract(text, {"mime": mime, "kind": raw.get("kind"), "facts": facts}, proof_id)
         else:
-            ex = Extraction(ok=False, degraded=True, error="document not located" if not path else "no readable text")
+            ex = Extraction(ok=False, degraded=True, error="document not located" if not path else
+                            f"sandbox failed: {str(raw['fatal'])[:120]}" if raw.get("fatal") else "no readable text")
         store.step(run_id, proof_id, "extract", "ok" if ex.ok else "error", ex.as_dict())
         if not ex.ok and ex.error and ex.error.startswith(TRANSIENT) \
                 and extract_attempts(store, proof_id) < MAX_EXTRACT_ATTEMPTS:
@@ -232,7 +236,7 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                     except Exception as exc:  # noqa: BLE001
                         credits_cache[r.track_id] = (None, f"{type(exc).__name__}: {str(exc)[:120]}")
                 rc, err = credits_cache[r.track_id]
-                checks.append(xc.dsp(rc, role, r.names, err))
+                checks.append(xc.dsp(rc, role, r.names, err, deps.fresh_since))
                 rel = None
                 if r.isrc:
                     if r.isrc not in release_cache:

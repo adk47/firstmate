@@ -82,8 +82,8 @@ class FakeNet(xc.Net):
         raise urllib.error.HTTPError(url, 404, "nf", {}, None)
 
 
-def raw(name, role, source="tidal"):
-    return {"profile": {"name": name, "source": source, "id": name}, "credit": role, "updatedAt": "2026-10-20T00:00:00Z"}
+def raw(name, role, source="tidal", at="2026-10-20T00:00:00Z"):
+    return {"profile": {"name": name, "source": source, "id": name}, "credit": role, "updatedAt": at}
 
 
 class ExtractTests(unittest.TestCase):
@@ -365,11 +365,43 @@ class CrossCheckTests(unittest.TestCase):
     def test_dsp(self):
         self.assertEqual(xc.dsp([raw("Ann Alpha", "Mixing Engineer")], "Mixing", ["Ann Alpha"]).status, xc.POSITIVE)
         c = xc.dsp([raw("Bob Beta", "Mixer")], "Mixing", ["Ann Alpha"])
-        self.assertEqual(c.status, xc.CONTRADICTS)                  # one-person role, someone else
+        # D5: a stored capture never contradicts; it is a possible conflict, never a hold
+        self.assertEqual((c.status, c.detail.get("dsp_conflict")), (xc.UNKNOWN, True))
         self.assertEqual(xc.dsp([raw("Bob Beta", "Producer")], "Producer", ["Ann Alpha"]).status, xc.UNKNOWN)
         self.assertEqual(xc.dsp([raw("Ann Alpha", "Mixer", source="muso")], "Mixing", ["Ann Alpha"]).status,
                          xc.UNKNOWN)                                # Muso's own credits are not independent
         self.assertEqual(xc.dsp(None, "Mixing", ["Ann Alpha"], "boom").status, xc.ERROR)
+
+    def test_contradiction_needs_a_fresh_capture_of_both_dsps_and_one_other_person(self):
+        # Fable [key=doc-verify-go-live] Q3, 2026-10-27.
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        since = (now - timedelta(minutes=40)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        fresh = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        both = [raw("Bob Beta", "Mixer", "spotify", fresh), raw("Bob Beta", "Mixing Engineer", "tidal", fresh)]
+        self.assertEqual(xc.dsp(both, "Mixing", ["Ann Alpha"], fresh_since=since).status, xc.CONTRADICTS)
+        cases = {
+            "no capture requested": (both, None),
+            "stale rows only (79105: a 2025 capture)": ([raw("Bob Beta", "Mixer", "spotify", "2025-02-24T00:32:09Z"),
+                                                         raw("Bob Beta", "Mixer", "tidal", "2025-02-24T00:32:09Z")],
+                                                        since),
+            "Tidal only": ([raw("Bob Beta", "Mixer", "tidal", fresh)], since),
+            "Jaxsta alone": ([raw("Bob Beta", "Mixer", "jaxsta", fresh)], since),
+            "two mixers (145842)": ([raw("Bizzo", "Mixing Engineer", "spotify", fresh),
+                                     raw("Lucid", "Mixing Engineer", "spotify", fresh),
+                                     raw("Bizzo", "Mixer", "tidal", fresh)], since),
+            "different people per DSP": ([raw("Bob Beta", "Mixer", "spotify", fresh),
+                                          raw("Cy Gamma", "Mixer", "tidal", fresh)], since),
+        }
+        for why, (rows, fs) in cases.items():
+            c = xc.dsp(rows, "Mixing", ["Ann Alpha"], fresh_since=fs)
+            self.assertEqual(c.status, xc.UNKNOWN, why)
+            self.assertIn("possible conflict", c.detail["note"], why)
+        # end to end through the gate: a possible conflict is unverifiable, never contradicted or held
+        c = xc.dsp(cases["two mixers (145842)"][0], "Mixing", ["Ann Alpha"], fresh_since=since)
+        o = gate.decide(h3_verdict="SUSPECT", kind=None, ex=validate(GOOD_ANSWER), findings=[], checks=[c],
+                        account_held=False)
+        self.assertEqual((o.outcome, o.account_hold), (gate.UNVERIFIABLE, False))
 
     def test_domain(self):
         net = FakeNet()
@@ -450,14 +482,25 @@ class GateTests(unittest.TestCase):
 
     def test_unknown_never_approves(self):
         for kw in ({"xc_dsp": xc.UNKNOWN, "xc_isrc": xc.UNKNOWN},             # nothing confirms the credit
-                   {"xc_dsp": xc.ERROR},
                    {"xc_dsp": xc.POSITIVE, "xc_label": xc.SOFT},                # issuer is not the label
                    {"xc_dsp": xc.POSITIVE, "xc_domain": xc.SOFT}):
             self.assertEqual(self.decide(**kw).outcome, gate.UNVERIFIABLE, kw)
         self.assertEqual(self.decide(h3="SUSPECT", xc_dsp=xc.POSITIVE).outcome, gate.UNVERIFIABLE)
-        self.assertEqual(self.decide(h3=None, xc_dsp=xc.POSITIVE).outcome, gate.UNVERIFIABLE)
-        degraded = fallback("x", "transport: URLError")
-        self.assertEqual(self.decide(ex=degraded, xc_dsp=xc.POSITIVE).outcome, gate.UNVERIFIABLE)
+        # D3: our tooling failing is `unknown`: no ask (need None), no approval, no hold
+        for o in (self.decide(xc_dsp=xc.ERROR), self.decide(h3=None, xc_dsp=xc.POSITIVE),
+                  self.decide(h3="UNDETERMINED", xc_dsp=xc.POSITIVE),
+                  self.decide(ex=fallback("x", "transport: URLError"), xc_dsp=xc.POSITIVE),
+                  self.decide(ex=fallback("x", "daily model spend cap reached"), xc_dsp=xc.POSITIVE),
+                  self.decide(ex=fallback("x", "unusable model answer"), xc_dsp=xc.POSITIVE),
+                  self.decide(ex=fallback("", "sandbox failed: timeout"), xc_dsp=xc.POSITIVE),
+                  self.decide(ex=fallback("", "document not located"), xc_dsp=xc.POSITIVE)):
+            self.assertEqual((o.outcome, o.need, o.account_hold), (gate.UNKNOWN, None, False), o.reason)
+        # a genuinely unreadable document is the user's to fix: unverifiable with an ask
+        o = self.decide(ex=fallback("", "no readable text"), xc_dsp=xc.POSITIVE)
+        self.assertEqual((o.outcome, o.need), (gate.UNVERIFIABLE, gate.NEED_READABLE))
+        # tooling never masks real evidence: a forgery found is still forged
+        o = self.decide(h3=None, findings=[forensics.Finding("h3_forged", forensics.HARD)], xc_dsp=xc.ERROR)
+        self.assertEqual(o.outcome, gate.FORGED)
         soft = [forensics.Finding("file_predates_document", forensics.SOFT)]
         self.assertEqual(self.decide(findings=soft, xc_dsp=xc.POSITIVE).outcome, gate.UNVERIFIABLE)
 
@@ -673,8 +716,7 @@ class RunnerTests(unittest.TestCase):
         Path(self.cache, "12345", "notif_x", "0.pdf").write_bytes(b"changed after H3 judged it")
         stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
         self.assertEqual(self.sandbox_calls, [])
-        self.assertEqual(rows[0]["outcome"], gate.UNVERIFIABLE)
-        self.assertEqual(rows[0]["need"], gate.NEED_READABLE)
+        self.assertEqual((rows[0]["outcome"], rows[0]["need"]), (gate.UNKNOWN, None))   # never an ask
 
     def test_cache_path_cannot_escape_the_root(self):
         path, _, _ = runner.locate(["../../etc/passwd", "/etc/passwd"], "x", self.td.name, fetch=None, dl=None,
@@ -689,7 +731,16 @@ class RunnerTests(unittest.TestCase):
             stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
             self.assertEqual((stats.retry, rows), (1, []))
         stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
-        self.assertEqual(rows[0]["outcome"], gate.UNVERIFIABLE)       # degraded extraction never verifies
+        self.assertEqual((rows[0]["outcome"], rows[0]["need"]), (gate.UNKNOWN, None))   # never verifies, never asks
+
+    def test_unknown_is_retried_then_stands(self):
+        from credit_verify.docverify.store import MAX_UNKNOWN
+        Path(self.cache, "12345", "notif_x", "0.pdf").write_bytes(b"not the file H3 judged")
+        for n in range(1, MAX_UNKNOWN + 1):
+            stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+            self.assertEqual([r["outcome"] for r in rows], [gate.UNKNOWN], n)
+        stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+        self.assertEqual((stats.documents, rows), (0, []))                              # the last unknown stands
 
     def test_intercom_ref_by_attachment_index(self):
         data = b"another document"
