@@ -153,7 +153,7 @@ def main() -> int:
         if cls == "HOLD_OWES":
             counts["hold: owes proof (UVN rows), documented or asked in 90 days: no note"] += 1
             continue
-        target = uvn if cls == "UVN_ASK" else rs
+        target = [r for r in rs if r["status"] == "user_verification_needed"] if cls == "UVN_ASK" else rs
         many = len({r["title"] for r in target}) > 1
         subj, body = COPY[cls]
         first = (u.get("first") or "").strip() or "there"

@@ -37,5 +37,40 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(self.k([row("pending")], pending_doc=True), "A_DOC")
 
 
+class MainEndToEndTest(unittest.TestCase):
+    """classify2.main over a fake replica (10-27 13:00Z: the HOLD_OWES change shipped with a NameError on the
+    UVN_ASK path that only main() reached; daily.sh failed closed and nothing was sent)."""
+
+    def test_main_writes_every_class_and_holds_owe_proof_users(self):
+        import json, sys, tempfile
+        d = tempfile.mkdtemp()
+        proof = os.path.join(d, "pof.json"); paying = os.path.join(d, "paying.json")
+        json.dump({"entries": [{"user_id": 3, "kind": "human_approved_after_doc", "request_id": None},
+                               {"user_id": 4, "kind": "pending_doc", "request_id": None}]}, open(proof, "w"))
+        json.dump({"ids": [1, 2, 3, 4]}, open(paying, "w"))
+        open(os.path.join(d, "support-held-17.txt"), "w").write("")
+        users = os.path.join(d, "users.txt"); open(users, "w").write("user_id: 1\nuser_id: 2\nuser_id: 3\nuser_id: 4\n")
+        rows = {1: "user_verification_needed", 2: "unverified", 3: "user_verification_needed", 4: "unverified"}
+
+        def fake(sql):
+            if "credit_requests" in sql:
+                return [[f"r{u}", str(u), st, f"T{u}", "2026-10-01", "", "Art", "{Mixing}"] for u, st in rows.items()]
+            return [[str(u), "N", "true"] for u in rows]
+        saved = (c2.trino, c2.PROOF, c2.PAYING, sys.argv, os.environ.get("PWR_DIR"))
+        c2.trino, c2.PROOF, c2.PAYING = fake, proof, paying
+        sys.argv = ["classify2.py", "--users", users, "--out-dir", d]
+        os.environ["PWR_DIR"] = d
+        try:
+            self.assertEqual(c2.main(), 0)
+        finally:
+            c2.trino, c2.PROOF, c2.PAYING, sys.argv = saved[:4]
+            if saved[4] is None:
+                os.environ.pop("PWR_DIR", None)
+            else:
+                os.environ["PWR_DIR"] = saved[4]
+        out = json.load(open([os.path.join(d, f) for f in os.listdir(d) if f.startswith("dry-run-")][0]))
+        self.assertEqual({o["user_id"]: o["class"] for o in out}, {1: "UVN_ASK", 2: "B_TEAM", 4: "A_DOC"})  # 3 held
+
+
 if __name__ == "__main__":
     unittest.main()
