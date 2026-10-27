@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createCreateTicketTool } from "../src/tools/create-ticket.js";
+import { createCreateTicketTool, NO_TIMEFRAME_NOTES } from "../src/tools/create-ticket.js";
 import { SessionTicketRegistry } from "../src/session-ticket-registry.js";
 import type { HttpClient } from "../src/http.js";
 import { RateLimiter } from "../src/rate-limiter.js";
@@ -98,7 +98,8 @@ describe("create_ticket dedupe", () => {
       submitted: true,
       updated_existing: true,
       ticket_id: "task_1",
-      sla: "2 business days",
+      sla: null,
+      customer_timing: NO_TIMEFRAME_NOTES.unspecified,
       action_type: "credit-claim",
       tier: 1,
     });

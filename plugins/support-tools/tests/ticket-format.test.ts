@@ -8,6 +8,10 @@ import {
   slaDueDateMs,
   getTierForAction,
   TIER_SLAS,
+  TIER_MAP,
+  AGENT_LANE_ACTIONS,
+  customerSlaFor,
+  outcomeChannelFor,
 } from "../src/tools/ticket-format.js";
 
 // The exact extraction regex used by scripts/dedup/sweeps/close-merged-tickets.sh
@@ -266,6 +270,38 @@ describe("tier helpers", () => {
     expect(TIER_SLAS[1]).toBe("2 business days");
     expect(TIER_SLAS[2]).toBe("5 business days");
     expect(TIER_SLAS[3]).toBe("5-10 business days");
+  });
+});
+
+describe("customerSlaFor (no human-review timeframe on credit/claim/merge requests)", () => {
+  it("returns null for every credit, claim and merge kind, so Caroline has no date to quote", () => {
+    for (const a of ["credit-claim", "credit-correction", "credit-verify", "bulk-credit-change", "profile-claim",
+      "profile-merge", "track-merge", "unmerge-request"]) {
+      expect(customerSlaFor(a)).toBeNull();
+    }
+  });
+
+  it("every agent-lane kind is a real action type (a typo would silently re-enable the date)", () => {
+    for (const a of AGENT_LANE_ACTIONS) expect(Object.prototype.hasOwnProperty.call(TIER_MAP, a)).toBe(true);
+  });
+
+  it("bulk-credit-change gets no 5-business-day date (QA/Fable finding on #1378)", () => {
+    expect(customerSlaFor("bulk-credit-change")).toBeNull();
+  });
+
+  it("names the channel that really carries each outcome", () => {
+    for (const a of ["profile-merge", "track-merge", "unmerge-request"]) expect(outcomeChannelFor(a)).toBe("conversation");
+    expect(outcomeChannelFor("profile-claim")).toBe("app_notification");
+    for (const a of ["credit-claim", "credit-correction", "credit-verify", "bulk-credit-change"]) {
+      expect(outcomeChannelFor(a)).toBe("unspecified");
+    }
+  });
+
+  it("keeps the tier SLA for kinds a person still owns (billing, refunds, deletion)", () => {
+    expect(customerSlaFor("billing-issue")).toBe(TIER_SLAS[2]);
+    expect(customerSlaFor("subscription-refund")).toBe(TIER_SLAS[3]);
+    expect(customerSlaFor("data-deletion")).toBe(TIER_SLAS[3]);
+    expect(customerSlaFor("support-general")).toBe(TIER_SLAS[1]);
   });
 });
 

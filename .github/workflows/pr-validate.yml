@@ -682,6 +682,16 @@ jobs:
           bash scripts/check-refund-doctrine.sh
           echo "::endgroup::"
 
+      - name: Caroline claims/credits/merges doctrine eval (10 most common questions)
+        # The 2026-10-26 merge audit found 27/30 merge asks promised "within 5 business
+        # days" (0 merge tickets closed in 7 d) and claimed users told their claims need
+        # review. The reference files and the create_ticket SLA taught it; this gate keeps
+        # the corrected answers (and sla: null for these kinds) from regressing.
+        run: |
+          echo "::group::Caroline claims/credits/merges doctrine eval"
+          bash scripts/check-caroline-claims-doctrine.sh
+          echo "::endgroup::"
+
       - name: "Ops-skill safety-clause doctrine check (#1047 silent-deletion regression class)"
         # PR #1047 silently deleted 7 safety clauses from the customer-data-resolution
         # and subscription-refund-reconciliation @Ops skills and every CI gate stayed

@@ -37,6 +37,38 @@ export function getTierForAction(actionType: string): Tier {
   return TIER_MAP[actionType] ?? 1;
 }
 
+// Credit, claim and merge requests are decided by the agent lanes under written rules
+// (captain 2026-10-26 21:05Z: no human queues), not by a human review queue, so there is
+// no human-review turnaround to promise. The tier SLA stays INTERNAL (the ClickUp due date
+// and the overdue sweep still use it) but is never handed to Caroline to quote: the
+// 2026-10-26 merge audit found 27 of 30 merge asks told "within 5 business days" from this
+// field while 0 merge tickets closed in 7 days. The outcome reaches the customer as a reply
+// in their own Intercom conversation when it lands.
+export const AGENT_LANE_ACTIONS: ReadonlySet<string> = new Set([
+  "credit-claim", "credit-correction", "credit-verify", "bulk-credit-change", "profile-claim",
+  "profile-merge", "track-merge", "unmerge-request",
+]);
+
+// How the outcome of an agent-lane request reaches the customer, so Caroline never promises
+// a channel that does not carry it. Merge kinds: merge-outcome-notify posts the outcome as a
+// reply in the conversation the ticket was filed from. profile-claim: the claim decision is
+// an app notification (bell) + email from the claim flow, not a conversation reply. Credit
+// kinds: the credit appears on the profile or a status note is sent; no channel is promised.
+export type OutcomeChannel = "conversation" | "app_notification" | "unspecified";
+export function outcomeChannelFor(actionType: string): OutcomeChannel {
+  if (actionType === "profile-merge" || actionType === "track-merge" || actionType === "unmerge-request") {
+    return "conversation";
+  }
+  if (actionType === "profile-claim") return "app_notification";
+  return "unspecified";
+}
+
+// The timeframe Caroline may quote to the customer for this action type, or null when she
+// must quote none (AGENT_LANE_ACTIONS).
+export function customerSlaFor(actionType: string): string | null {
+  return AGENT_LANE_ACTIONS.has(actionType) ? null : TIER_SLAS[getTierForAction(actionType)];
+}
+
 // Growth owns account/billing/support; Catalog owns the catalog data
 // (credits, profiles, tracks, analytics, merges).
 export const GROWTH_ACTIONS = new Set([

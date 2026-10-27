@@ -319,14 +319,17 @@ SQ
   [ ! -e "$CH/sessions/2026/09/rollout-old.jsonl" ]
 }
 
+# Absence checks use `if <match>; then false; fi`, never `! <match>`: bash's errexit ignores a
+# `!`-negated command, so a `! grep` that is not the last line of a test can never fail it
+# (QA #1401). Six legal-hold absence checks below were silently unenforced that way.
 @test "legal hold: the old override env cannot redirect or lift the hold" {
   _chp_rollout "$CH/sessions/2026/09/rollout-old.jsonl" 40
   touch "$HOLD"
   CODEX_PRUNE_HOLD_FILE="$TEST_TMPDIR/nowhere" run "$PRUNE" --apply
   [[ "$output" == *"HELD"* ]]
   [ -e "$CH/sessions/2026/09/rollout-old.jsonl" ]
-  ! grep -q 'CODEX_PRUNE_HOLD_FILE:' "$PRUNE"
-  ! grep -q 'CODEX_PRUNE_HOLD_FILE' "$HYDRA_REPO/scripts/install-aux-units.sh"
+  if grep -q 'CODEX_PRUNE_HOLD_FILE:' "$PRUNE"; then false; fi
+  if grep -q 'CODEX_PRUNE_HOLD_FILE' "$HYDRA_REPO/scripts/install-aux-units.sh"; then false; fi
 }
 
 @test "legal hold: every production caller sees the same canonical path (installer, generated unit, script)" {
@@ -334,9 +337,13 @@ SQ
   grep -q '^chphold=/etc/hydra/codex-home-prune.hold ' "$HYDRA_REPO/scripts/install-aux-units.sh"
   grep -q 'systemctl disable --now "$chptmr"' "$HYDRA_REPO/scripts/install-aux-units.sh"
   # the generated unit passes no hold env, so it cannot diverge from the canonical file
-  ! sed -n '/CHPRUNESVC$/,/^CHPRUNESVC/p' "$HYDRA_REPO/scripts/install-aux-units.sh" | grep -q HOLD
-  # clean-my-linux R3 calls the same script without any hold env
-  ! grep -q HOLD "$HYDRA_REPO/scripts/clean-my-linux.sh"
+  if sed -n '/CHPRUNESVC$/,/^CHPRUNESVC/p' "$HYDRA_REPO/scripts/install-aux-units.sh" | grep -q HOLD; then false; fi
+  # clean-my-linux R3 calls the same script without any hold env: no codex hold-file
+  # plumbing anywhere in it, and the R3 delegate passes only the mode flag. (A bare
+  # `grep HOLD` matched R7's unrelated "runner-work: HOLD ..." messages from #1358.)
+  if grep -qE 'CODEX_PRUNE_HOLD|codex-home-prune\.hold|_HOLD_FILE' "$HYDRA_REPO/scripts/clean-my-linux.sh"; then false; fi
+  grep -qE '^[[:space:]]*run_delegate codex-prune "\$CODEX_PRUNE" "\$flag"[[:space:]]*$' "$HYDRA_REPO/scripts/clean-my-linux.sh"
+  if grep -E 'CODEX_PRUNE' "$HYDRA_REPO/scripts/clean-my-linux.sh" | grep -qiE 'hold'; then false; fi
 }
 
 @test "legal hold: CODEX_PRUNE_TEST_ROOT cannot redirect the hold for real codex homes under /root" {
@@ -348,8 +355,8 @@ SQ
 }
 
 @test "legal hold: no production caller sets CODEX_PRUNE_TEST_ROOT" {
-  ! grep -q CODEX_PRUNE_TEST_ROOT "$HYDRA_REPO/scripts/install-aux-units.sh"
-  ! grep -q CODEX_PRUNE_TEST_ROOT "$HYDRA_REPO/scripts/clean-my-linux.sh"
-  ! grep -q CODEX_PRUNE_TEST_ROOT "$HYDRA_REPO/scripts/lib/ensure-session-budget-headroom.sh"
-  ! sed -n '/CHPRUNESVC$/,/^CHPRUNESVC/p' "$HYDRA_REPO/scripts/install-aux-units.sh" | grep -q CODEX_PRUNE
+  if grep -q CODEX_PRUNE_TEST_ROOT "$HYDRA_REPO/scripts/install-aux-units.sh"; then false; fi
+  if grep -q CODEX_PRUNE_TEST_ROOT "$HYDRA_REPO/scripts/clean-my-linux.sh"; then false; fi
+  if grep -q CODEX_PRUNE_TEST_ROOT "$HYDRA_REPO/scripts/lib/ensure-session-budget-headroom.sh"; then false; fi
+  if sed -n '/CHPRUNESVC$/,/^CHPRUNESVC/p' "$HYDRA_REPO/scripts/install-aux-units.sh" | grep -q CODEX_PRUNE; then false; fi
 }

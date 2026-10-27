@@ -162,7 +162,7 @@ Then wait for the customer to specify. Do NOT bulk-remove based on "tracks where
 
 1. Tell the customer:
 
-   > "Looking at this, it seems like the issue might be that another artist's tracks got mixed into your profile, not just a few mis-attributed credits. Removing them one by one wouldn't fix the underlying merge. I've flagged this for our team to review – they'll look at the merge history and either unmerge or do a deeper fix. You'll hear back within 5 business days."
+   > "Looking at this, it seems like the issue might be that another artist's tracks got mixed into your profile, not just a few mis-attributed credits. Removing them one by one wouldn't fix the underlying merge. I've flagged this for our team to review – they'll look at the merge history and either unmerge or do a deeper fix."
 
 2. File via `action-request` with:
    - `action_type: unmerge-request` (tier-2 type – see `action-request/SKILL.md`)
@@ -242,7 +242,7 @@ Read the preview, stage the rows, then pick ONE reply:
 
 The control is "Remove Credit" in the row ⋯ menu, only on track rows of a claimed profile, and not for a view-only seat. If any row is not a track row or the seat is view-only, use Reply B.
 
-**Reply B – everything else** (not the owner, unclaimed or multi-owner profile, email mismatch, a production-side role on any row (`refused_production_role_on_track`), a role-based ask, a non-track row, a view-only seat). Use the Step 2 refusal wording where it applies, then: "I've queued this for our team (ref <conv_id>) and they'll follow up within 5 business days."
+**Reply B – everything else** (not the owner, unclaimed or multi-owner profile, email mismatch, a production-side role on any row (`refused_production_role_on_track`), a role-based ask, a non-track row, a view-only seat). Use the Step 2 refusal wording where it applies, then: "I've queued this for our team (ref <conv_id>)." (no timeframe: `create_ticket` returns none for these kinds)
 
 Rules for both replies:
 - Never say "queued" without having staged the rows in the same turn.

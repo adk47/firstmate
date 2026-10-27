@@ -160,7 +160,7 @@ Over 50 million songs streaming right now are missing the majority of songwriter
 
 Muso.AI uses a multi-layer validation approach:
 1. **Base Catalog**: Representation of what's on streaming services
-2. **Profile Verification**: Legal identity verification via ID card scan (third-party, privacy-preserving)
+2. **Profile Verification**: claim proof through links and pages the profile controls (see credits-and-profiles.md; there is no ID scan in the claim flow today)
 3. **Artist Verification**: Social media account login proving access to artist page
 4. **Album Admin System**: Verified artists control credits shown for their albums/tracks
 

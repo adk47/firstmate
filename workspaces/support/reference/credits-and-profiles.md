@@ -58,17 +58,18 @@ A credit links a profile to a track or album:
 ## Claiming and Verification
 
 ### Profile Claiming
-1. Request claim on a profile
-2. Provide verification (ID card scan or social media login)
-3. Admin review
-4. Claim approved or denied
+1. Open the profile and choose Claim (web: More options > Claim Profile)
+2. Add a link or two the claimant controls (website, streaming artist page, social account; Facebook and X can be connected directly) and send
+3. The profile shows "Claim Pending" while the claim is decided under written rules (no ID scan, no human queue); the claimant may get one message asking for proof, naming exactly where to put a one-time code
+4. Processed: the claimant is notified in the app (bell) and by email, and the profile joins their workspace
 
-This flow assumes the claimant IS the artist. When a manager, publisher, or label needs access on an artist's behalf (e.g. the artist has no social media), this self-claim flow does NOT apply – see `common-issues.md` row 2b (on-behalf claims, manual admin review).
+This flow assumes the claimant IS the artist. When a manager, publisher, or label needs access on an artist's behalf (e.g. the artist has no social media), this self-claim flow does NOT apply – see `common-issues.md` row 2b (on-behalf claims, organization path).
 
 ### Company and Label Profile Claims
-Company, label, studio, publisher, and management profiles are reviewed
-manually. Do not send the customer through the artist self-claim flow unless
-they are trying to claim their own artist profile.
+Company, label, studio, publisher, and management profiles are decided on the
+organization path (a confirmed account email on the organization's official
+domain is the strongest proof). Do not send the customer through the artist
+self-claim flow unless they are trying to claim their own artist profile.
 
 Collect the exact company or label profile link, the customer's Muso account
 email, their relationship to the company, and proof of authority such as a
@@ -78,7 +79,7 @@ artist profiles through that company, collect the artist profile links and the
 roster or authorization proof in the same ticket.
 
 ### Verification Types
-- **Profile Verification**: Legal identity verification via ID card scan (third-party, privacy-preserving)
+- **Profile claim proof**: a link the claimant controls; where more proof is needed, a one-time code placed on a page the profile already controls, a matching official-domain email, or a connected streaming-for-artists account. There is no ID scan in the claim flow today.
 - **Artist Verification**: Social media account login proving access to artist page
 - **Album Admin**: Verified artists control credits shown for their albums/tracks
 
@@ -102,7 +103,9 @@ registration, a studio or session invoice, or liner notes or an official
 release page that names them (PDF, PNG or JPG). The credit is already live. We
 add credits on trust and then verify them. The note gives 30 days with a
 reply-by date and says the credit will be removed after that day if we can't
-verify it (a valid document sent later can still restore it). Answer from what
+verify it (a valid document sent later can still restore it). That windowed
+note is no longer sent (auto-removal was dropped): notes sent now name no
+deadline and no removal, so never introduce one. Answer from what
 their note says, never move a date, and never promise a credit will be kept; if
 they need more time or are worried about a removal, say you'll make sure the
 team sees it and route it.
@@ -150,9 +153,10 @@ Combining duplicate profiles when the same person appears in different sources:
 
 For duplicate profile merge requests, collect every Muso profile link, which
 profile should remain as the main profile, and any naming context such as artist
-name versus legal name. Merges involving claimed profiles, company or label
-profiles, subscription questions, or large catalogs need manual review before
-credits and analytics are consolidated.
+name versus legal name. Merges are claim-first: every profile involved must be
+claimed by the requester and in their workspace; company or label profiles and
+profiles claimed by a different account are not merged this way. Flow and
+wording rules: `common-issues.md` section 3 (no dates).
 
 ---
 
