@@ -37,9 +37,9 @@ There is no write path. The helper refuses anything but reads.
 bash /opt/hydra/scripts/muso-stack-read.sh coverage
 ```
 
-Read `events_view_max_event_time` and `cutover_at`:
+Read `events_view_covered_to` and `cutover_at`:
 
-- The question's window ends **at or before** `events_view_max_event_time` → answer from
+- The question's window ends **at or before** `events_view_covered_to` → answer from
   our stack (Steps 1-3).
 - The window ends **after** it, or the user is not found here, and Amplitude is still
   live → also ask Amplitude via the `muso-amplitude` skill, and say which source answered
@@ -47,6 +47,11 @@ Read `events_view_max_event_time` and `cutover_at`:
   days usually come from Amplitude.
 - After the cutover (a `cutover_at` value) our stack is the source of truth; Amplitude is
   for spot checks only, and is gone after its downgrade.
+
+`events_view_covered_to` is the server-side upload high-water mark. Never use
+`max(event_time)` as coverage: event times are client clocks, and a few hundred history
+rows are dated in the 22nd century (`future_dated_rows_ignored`). Exclude
+`event_time > now()` from your own SQL aggregates too.
 
 Never present a number without its source (`our stack` / `Amplitude`) and window.
 

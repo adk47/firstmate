@@ -188,7 +188,7 @@ Capture:
 Our stack first (`muso-analytics` skill), Amplitude only for a window ours does not cover yet:
 
 ```bash
-# Is the window covered? (events_view_max_event_time / cutover_at)
+# Is the window covered? (events_view_covered_to / cutover_at)
 bash /opt/hydra/scripts/muso-stack-read.sh coverage
 # Find the user (Muso user id from step 1; the API does not search by email)
 bash /opt/hydra/scripts/muso-stack-read.sh router '/api/2/usersearch?user=USER_ID'
@@ -196,7 +196,7 @@ bash /opt/hydra/scripts/muso-stack-read.sh router '/api/2/usersearch?user=USER_I
 bash /opt/hydra/scripts/muso-stack-read.sh router '/api/2/useractivity?user=USER_ID&limit=1000'
 ```
 
-If the period since the subscription started ends after `events_view_max_event_time`, or the
+If the period since the subscription started ends after `events_view_covered_to`, or the
 user is not found, ALSO read Amplitude while it is live (`muso-amplitude` skill:
 `usersearch?user=USER_EMAIL`, then `useractivity?user=AMPLITUDE_ID&length=1000`) and name the
 source of each fact in the report.

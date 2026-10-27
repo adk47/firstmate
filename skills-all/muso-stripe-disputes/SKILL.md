@@ -106,7 +106,7 @@ SQL
 
 #### c) Product Engagement (`muso-analytics`; Amplitude as fallback)
 ```bash
-# Is the window covered by our stack? (events_view_max_event_time / cutover_at)
+# Is the window covered by our stack? (events_view_covered_to / cutover_at)
 bash /opt/hydra/scripts/muso-stack-read.sh coverage
 # Search user by Muso user id (the API does not search by email)
 bash /opt/hydra/scripts/muso-stack-read.sh router '/api/2/usersearch?user=USER_ID'
