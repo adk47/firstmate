@@ -1734,10 +1734,12 @@ jobs:
         # send-eligible allowlist refuses captain/legal/billing, gate-owned, ledger-today,
         # claim-pending and ambiguous-identity rows for the WHOLE run before the lock could be
         # flipped (hydra#1379). Every case stops at a refusal ahead of any network call and
-        # runs without MUSOAI_INTERCOM_TOKEN. Stdlib unittest, by name.
+        # runs without MUSOAI_INTERCOM_TOKEN. The tail-list tests are pure (no Trino, Intercom
+        # or ledger) and prove the uvn-status tail list is never offerable before lift L11.
+        # Stdlib unittest, by name.
         run: |
           set -euo pipefail
-          python3 -m unittest -v tests.test_intercom_backlog_send
+          python3 -m unittest -v tests.test_intercom_backlog_send tests.test_intercom_backlog_tail
       - name: Run paperclip-intake tests
         # scripts/paperclip-intake.py is how agents file Paperclip cards: the
         # fingerprint port (hydra#1002), exact-token dedupe, the zero-token

@@ -42,6 +42,9 @@ TOPICS = [
 ]
 TOPIC_RE = [(n, re.compile(p, re.I)) for n, p in TOPICS]
 TAG_RE = re.compile(r"<[^>]+>")
+# Bookkeeping tags that say nothing about the topic (Fable WS2 ruling R2: the `priority-demoted`
+# watchdog tag from hydra#1360 is neutral). They never feed topic_of.
+NEUTRAL_TAGS = frozenset({"priority-demoted", "tail-2026-10", "live-queue-owed-2026-10"})
 
 
 def search(token, body, attempts=5):
@@ -142,7 +145,7 @@ def main():
                 "band": band(age),
                 "admin_assignee_id": c.get("admin_assignee_id"),
                 "team_assignee_id": c.get("team_assignee_id"),
-                "topic": topic_of(text + " " + " ".join(tags)),
+                "topic": topic_of(text + " " + " ".join(t for t in tags if t not in NEUTRAL_TAGS)),
                 "tags": tags,
                 "contact_id": contacts[0].get("id") if contacts else None,
                 "external_id": contacts[0].get("external_id") if contacts else None,

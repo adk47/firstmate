@@ -233,6 +233,32 @@ customer spoke last, 25 of them past 4 h. I read each one:
   - The run used a PII-free projection of the triage (id, action, band, age, paid, assignee),
     pulled off node-8. The full triage was shredded there.
 
+## 10. WS2 e4: tail lists for the approved senders (Fable plan `[key=ws2-plan-1027]`, built under the freeze)
+
+`scripts/intercom-backlog/tail_lists.py` turns the > 30 d tail, tagged `tail-2026-10`, into
+input lists for the EXISTING campaign drivers. It uses cs-systemic-c3's classes
+(`data/cs-systemic-c3/inbound-plan-1027.md`) and covers credit / claim / merge topics only.
+It sends nothing and writes no status or ledger row; it writes JSON lists (0600).
+
+| class | when | output |
+|---|---|---|
+| A `status-doc-received` | pending unverified/processing rows with a document on file (strict proof-on-file rule) | driver list |
+| B `status-team-review` | pending unverified/processing rows, no document | driver list |
+| D `claim-status` | a pending claim | handoff ids for claim-lane-resume-c2 (it owns the claim list's profile facts) |
+| C `uvn-status` | only UVN rows | driver list with `skip` set (Fable R4: the ask waits for lift L11). The driver offers only `skip == null`, so nothing can go before a later list clears it. A test proves this against the real `uvn_status.load_list` |
+| M merge, X no-account, none, out-of-scope | no approved line / reconcile lane x2 | counted, held |
+
+- **One user, one class, oldest conversation first.**
+- **Overrides:** captain-* and hold-read rows are never classed (`overrides.py`).
+- **Proof file:** if the proof-on-file list cannot be read, no A or B list is written.
+- **At send time** (after the lift and after e1 clears the live set), the drivers re-check
+  everything: h2's 7-day core-marker gate, the shared ledger's one-message-per-user-per-day cap,
+  documents in Intercom, the fraud lens and the daily caps.
+- **Census:** R2 is applied. `priority-demoted` and the lane's bookkeeping tags are neutral.
+- **Tests:** `tests/test_intercom_backlog_tail.py` (9), run in PR Validation.
+- **Not run live yet:** the script needs the deploy to be present on node-8 (no copies outside a
+  deploy). The live dry count is the first run after the merge.
+
 ## Outside the rules (log)
 
 None yet. No send and no close has been made.
