@@ -12,7 +12,13 @@ import sys
 
 
 def main():
-    rows = [json.loads(l) for l in open(sys.argv[1])]
+    # Several triage files may be given as a comma list; a later file wins per conversation id.
+    merged = {}
+    for path in sys.argv[1].split(","):
+        for l in open(path):
+            r = json.loads(l)
+            merged[r["id"]] = r
+    rows = list(merged.values())
     mode = sys.argv[2]
     if mode == "captain":
         cap = [r for r in rows if r["action"].startswith("captain-")]
@@ -23,6 +29,23 @@ def main():
         for r in cap:
             print(f"| {r['id']} | {r['action'][8:]} | {r['band']} | {r['age_days']:.0f} | "
                   f"{'paid' if r['paid'] else '-'} | {r['admin_assignee_id'] or '-'} |")
+    elif mode == "hold":
+        # Everything that needs NEW wording (captain 23:30Z: no new customer copy): held for
+        # flows-verify-fable-v1. Gate rows (approved templates, p2 sends), ledger-today and the
+        # captain's list are routed elsewhere and are not repeated here.
+        routed = ("gate-", "captain-", "ledger-today")
+        hold = [r for r in rows if not r["action"].startswith(routed)]
+        by = collections.defaultdict(lambda: collections.defaultdict(list))
+        for r in sorted(hold, key=lambda r: (not r.get("paid"), r["waiting_since"])):
+            by[r["action"]][r["band"]].append(f"{r['id']}{'(paid)' if r.get('paid') else ''}")
+        print(f"Held: {len(hold)} conversations.\n")
+        for a in sorted(by):
+            n = sum(len(v) for v in by[a].values())
+            print(f"### {a} ({n})\n")
+            for b in ("lt1d", "1-30d", "gt30d"):
+                if by[a][b]:
+                    print(f"- **{b}** ({len(by[a][b])}): " + ", ".join(by[a][b]))
+            print()
     elif mode == "read":
         # Operator terminal only (prints the customer's first-message excerpt): never commit it.
         import time

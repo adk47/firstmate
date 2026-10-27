@@ -35,7 +35,7 @@ import tempfile
 import time
 import urllib.request
 
-COPY_APPROVED = 0          # Fable D1 GO ref goes here when flipped
+COPY_APPROVED = 0          # HELD: captain 23:30Z "no new customer copy"; flip only for wording approved later
 COPY_APPROVAL_REF = ""
 CLOSE_APPROVED = 0         # Fable D4
 APPROVER = "U7RP6HKUZ"     # the captain; the fleet's standing customer-reply approval

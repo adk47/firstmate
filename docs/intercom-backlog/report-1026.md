@@ -155,6 +155,18 @@ customer spoke last, 25 of them past 4 h. I read each one:
 - Copy edit for Fable: the merge line asks for profile links even when the user already sent them,
   and repeats "reply here" with the closer.
 
+## 7. Captain order 23:30Z (inbox 005): no new customer copy. This settles D1-D6
+
+- **D1:** the openers, closer and status lines in section 4 are NOT approved and will not be sent.
+  `send.py` stays locked (`COPY_APPROVED=0`). It is kept only as the delivery path for wording
+  that gets approved later.
+- **D4:** no bulk close of the > 30 d tail without approved wording.
+- **Held:** 1,525 conversations. The ids are in `hold-list-1027.md`, for flows-verify-fable-v1.
+- **Routed:** 188 gate rows go to paid-wave-runner-p2 (approved templates, single sender). 90 are
+  already messaged today. 138 money and legal rows are on the captain's list.
+- **No approved snippet library exists** (grep of the repo `workspaces/support`, `skills-all`,
+  `docs`, and of firstmate `data/`): Caroline's `reference/` files are knowledge, not fixed copy.
+
 ## Outside the rules (log)
 
 None yet. No send and no close has been made.
