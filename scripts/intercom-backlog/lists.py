@@ -21,8 +21,20 @@ def main():
     rows = list(merged.values())
     mode = sys.argv[2]
     if mode == "captain":
-        cap = [r for r in rows if r["action"].startswith("captain-")]
-        cap.sort(key=lambda r: (r["action"] != "captain-legal", r["band"] == "gt30d",
+        # Hand-read overrides (docs/intercom-backlog/captain-overrides.json), passed as JSON in
+        # CAPTAIN_OVERRIDES or as argv[3]: remove = keyword misfires, add = cases the keywords missed.
+        import os
+        ov_src = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("CAPTAIN_OVERRIDES", "")
+        ov = json.loads(open(ov_src).read() if ov_src and os.path.exists(ov_src) else (ov_src or "{}"))
+        remove, add = ov.get("remove", {}), ov.get("add", {})
+        for cid, topic in add.items():
+            if cid in merged:
+                merged[cid]["action"] = "captain-" + topic
+        cap = [r for r in merged.values() if r["action"].startswith("captain-") and r["id"] not in remove]
+        missing = sorted(set(add) - set(merged))
+        if missing:
+            print(f"<!-- override ids no longer customer-last (answered or closed): {', '.join(missing)} -->")
+        cap.sort(key=lambda r: (r["action"] not in ("captain-legal", "captain-privacy"), r["band"] == "gt30d",
                                 not r["paid"], r["age_days"]))
         print("| conversation | topic | band | waiting (d) | paid | admin assignee |")
         print("|---|---|---|---|---|---|")

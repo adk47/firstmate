@@ -71,13 +71,19 @@ def main():
                     uid_of.setdefault(k, set()).add(uid)
     uids = {u for s in uid_of.values() for u in s}
     cred = collections.defaultdict(lambda: {"pending": 0, "uvn": 0, "proof": 0, "approved": 0,
-                                            "rejected": 0, "paid": 0})
+                                            "rejected": 0})
+    paid_users = set()
     claims = collections.defaultdict(lambda: collections.Counter())
     for ch in chunks(uids):
         ids = ",".join(ch)
-        for uid, status, paid, proof, n in trino(
+        # Paid = member of a team with an active/trialing subscription (fraud_lens.PAID_TEAMS),
+        # read from membership, NOT from credit rows: a subscriber with no credit request is paid.
+        for (uid,) in trino(
+                "select distinct cast(tu.userid as varchar) from postgresql_core.public.team_users tu "
+                f"where tu.userid in ({ids}) and tu.teamid in {PAID}"):
+            paid_users.add(uid)
+        for uid, status, proof, n in trino(
                 "select cast(cr.userid as varchar), cr.status, "
-                f"cast(max(case when cr.workspaceid in {PAID} then 1 else 0 end) as varchar), "
                 "cast(sum(case when coalesce(json_extract_scalar(cr.metadata,'$.proofRequest.responseAt'),"
                 "json_extract_scalar(cr.metadata,'$.infoRequest.responseAt')) is not null then 1 else 0 end) as varchar), "
                 "cast(count(*) as varchar) from postgresql_core.public.credit_requests cr "
@@ -91,7 +97,6 @@ def main():
                     c["uvn"] += n
             elif status in ("approved", "rejected"):
                 c[status] += n
-            c["paid"] = max(c["paid"], int(paid))
         for uid, status, n in trino(
                 "select cast(userid as varchar), status, cast(count(*) as varchar) "
                 f"from postgresql_core.public.claiming where deletedat is null and userid in ({ids}) group by 1,2"):
@@ -134,7 +139,7 @@ def main():
                 act = "claim-pending"
             else:
                 act = "draft-" + t
-            r.update({"user_id": uid, "paid": bool(c and c["paid"]), "credits": c,
+            r.update({"user_id": uid, "paid": uid in paid_users, "credits": c,
                       "claims": dict(cl), "ledger_msgs": led_any.get(uid or "", 0), "action": act})
             out.write(json.dumps(r) + "\n")
             summary[(r["band"], act)] += 1

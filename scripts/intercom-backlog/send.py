@@ -99,7 +99,56 @@ def still_owed(c):
     return True, ""
 
 
+class Refused(Exception):
+    pass
+
+
+def eligible(row):
+    """The ONE send-eligible test, for both bands: the row's triage action must be on the
+    allowlist (ACTION_LINE). Captain-legal/billing, gate-owned (p2's single sender),
+    ledger-today, claim-pending and ambiguous-identity rows are never this tool's to answer."""
+    return row.get("action") in ACTION_LINE
+
+
+def select_rows(rows, band, plan, ids=()):
+    """Pure selection; raises Refused instead of silently dropping a planned row, so a plan that
+    names a forbidden conversation fails the whole run before anything is read or sent."""
+    ids = set(ids)
+    if band == "recent":
+        if not plan:
+            raise Refused("the recent band is answered from a per-conversation --plan (read each), "
+                          "never from the keyword topic.")
+        bad = {k: v for k, v in plan.items() if v not in LINES}
+        if bad:
+            raise Refused(f"plan names lines that do not exist: {bad}")
+        by_id = {r["id"]: r for r in rows}
+        missing = sorted(k for k in plan if k not in by_id)
+        if missing:
+            raise Refused(f"plan names conversations absent from the triage file: {missing}")
+        forbidden = sorted(f"{k}={by_id[k].get('action')}" for k in plan if not eligible(by_id[k]))
+        if forbidden:
+            raise Refused(f"plan names conversations whose action is not send-eligible: {forbidden}")
+        tail = sorted(k for k in plan if by_id[k].get("band") == "gt30d")
+        if tail:
+            raise Refused(f"plan names > 30 d conversations; use --band tail: {tail}")
+        out = [by_id[k] for k in plan]
+    else:
+        if plan:
+            raise Refused("--plan applies to the recent band only.")
+        out = [r for r in rows if eligible(r) and r.get("band") == "gt30d"]
+    out = [r for r in out if not ids or r["id"] in ids]
+    out.sort(key=lambda r: (not r.get("paid"), r["waiting_since"]))
+    return out
+
+
 def main():
+    try:
+        _main()
+    except Refused as e:
+        sys.exit(f"REFUSED: {e}")
+
+
+def _main():
     ap = argparse.ArgumentParser()
     ap.add_argument("triage")
     ap.add_argument("--band", choices=("recent", "tail"), required=True)
@@ -111,12 +160,8 @@ def main():
                     "conversation. Required for --band recent; only planned ids are sent.")
     a = ap.parse_args()
     plan = json.load(open(a.plan)) if a.plan else {}
-    if a.band == "recent" and not plan:
-        sys.exit("REFUSED: the recent band is answered from a per-conversation --plan (read each), "
-                 "never from the keyword topic.")
-    bad = {k: v for k, v in plan.items() if v not in LINES}
-    if bad:
-        sys.exit(f"REFUSED: plan names lines that do not exist: {bad}")
+    ids = set(filter(None, a.ids.split(",")))
+    rows = select_rows([json.loads(l) for l in open(a.triage)], a.band, plan, ids)
     if a.apply and COPY_APPROVED != 1:
         sys.exit("REFUSED: COPY_APPROVED=0. The copy needs Fable's D1 GO, landed in a PR that flips the lock.")
     if a.close and (CLOSE_APPROVED != 1 or a.band != "tail"):
@@ -124,14 +169,6 @@ def main():
     token = os.environ.get("MUSOAI_INTERCOM_TOKEN")
     if not token:
         sys.exit("MUSOAI_INTERCOM_TOKEN not set")
-    ids = set(filter(None, a.ids.split(",")))
-    rows = [json.loads(l) for l in open(a.triage)]
-    if a.band == "recent":
-        rows = [r for r in rows if r["id"] in plan and r["band"] != "gt30d"]
-    else:
-        rows = [r for r in rows if r["action"] in ACTION_LINE and r["band"] == "gt30d"]
-    rows = [r for r in rows if not ids or r["id"] in ids]
-    rows.sort(key=lambda r: (not r.get("paid"), r["waiting_since"]))
     today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
     db = sqlite3.connect(f"file:{LEDGER}?mode=ro", uri=True)
     led_today = {str(x) for (x,) in db.execute(
@@ -159,6 +196,8 @@ def main():
         if done >= a.max:
             break
         uid = r.get("user_id")
+        if not eligible(r):  # defence in depth: select_rows already refused these
+            raise Refused(f"{r['id']} action {r.get('action')} is not send-eligible")
         if r["id"] in sent_convs:
             skip("already answered by this lane"); continue
         if uid and (uid in led_today or uid in sent_today):

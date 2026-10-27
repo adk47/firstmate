@@ -79,7 +79,9 @@ reply), 215476530302829 (SoundExchange auto-reply: close, reason auto-responder)
 215476297067085 (dashboard vs export numbers), 215476540440008 (manager's merge request).
 
 Tail: 122 billing and 1 legal conversations over 30 days old. The full list is
-`docs/intercom-backlog/captain-list-1026.md` (ids, band, age, paid flag; no PII).
+`docs/intercom-backlog/captain-list-1026.md`. It was regenerated on 10-27 10:48Z with these
+moves applied (`captain-overrides.json`), and with paid read from subscription membership
+(section 8).
 
 ## 4. Copy for Fable's GO (needs-decision)
 
@@ -166,6 +168,31 @@ customer spoke last, 25 of them past 4 h. I read each one:
   already messaged today. 138 money and legal rows are on the captain's list.
 - **No approved snippet library exists** (grep of the repo `workspaces/support`, `skills-all`,
   `docs`, and of firstmate `data/`): Caroline's `reference/` files are knowledge, not fixed copy.
+
+## 8. Fable / QA NO-GO fixes (10-27)
+
+- **Allowlist on both bands.** `send.py` has one send-eligible test (`eligible()` = the action is
+  in `ACTION_LINE`). A `--plan` that names any other action refuses the WHOLE run: captain-*,
+  gate-*, ledger-today, claim-pending or ambiguous-identity. The same goes for an unknown id or a
+  > 30 d id. The send loop re-asserts it. CLI tests: `tests/test_intercom_backlog_send.py`, run
+  in PR Validation. The sender stays LOCKED.
+- **Paid status.** `triage.py` now sets paid when the user is a member of a team with an
+  active or trialing subscription (`team_users` x `subscriptions`, the `fraud_lens.PAID_TEAMS`
+  definition). It no longer depends on credit-request rows. Live: 14,477 paid users. The
+  regenerated captain list has 31 paid rows.
+- **Captain list.** The six moved-off ids are removed and the three hand-read additions are
+  applied, through `captain-overrides.json` + `lists.py captain`. That file is the source of
+  truth for future regenerations. Snapshot 10-27 10:48Z: 1,935 customer-last, 134 on the list.
+- **Hold-list reconciliation** (the file stays unchanged, per Fable's tail ruling).
+  cs-systemic-c3 silently closed 8 satisfied conversations under
+  `[key=intercom-close-satisfied]`, recorded in node-8
+  `/var/lib/intercom-backlog-i1/satisfied-close-ledger.jsonl`. 7 of the 8 are on
+  `hold-list-1027.md`: 215476450790625, 215476251752310, 215476226779842, 215476128957680,
+  215476122869736, 215476077780197, 215476111881772. The 8th, 215476472512950, was a
+  gate-team-review row, not held. c3's note says 8 of the 9 PASSes are held; by this file it is
+  7, because 215476472512950 is not in `hold-list-1027.md`. **Held now: 1,525 - 7 = 1,518.**
+  answered 0 / closed 0 by this lane.
+- The PR title is conventional-commit; the tier is 0 (read-only tools + a locked sender).
 
 ## Outside the rules (log)
 
