@@ -1,0 +1,41 @@
+"""scripts/paid-status/classify2.classify: never "nothing else is needed" (Copy A / Copy B0) to a user who still
+owes proof (captain 2026-10-27 12:55Z, item 5). On 10-27 the deployed copy's dry run listed 96 of 151 A/B users
+with user_verification_needed rows: B because of any proof-on-file entry (often a whole-user approval for OTHER
+credits) or an ask in 90 days, A because a document is on file. Stdlib only."""
+import importlib.util
+import os
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+spec = importlib.util.spec_from_file_location("classify2", os.path.join(HERE, "..", "paid-status", "classify2.py"))
+c2 = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(c2)
+CUT = "2026-07-29T00:00:00+00:00"
+
+
+def row(status, asked=""):
+    return {"id": "r", "status": status, "asked": asked}
+
+
+class ClassifyTest(unittest.TestCase):
+    def k(self, rs, documented=False, pending_doc=False):
+        return c2.classify(rs, documented=documented, pending_doc=pending_doc, cutoff=CUT)
+
+    def test_a_user_with_a_uvn_row_never_gets_a_or_b(self):
+        for documented, pending, asked in ((True, False, ""), (False, True, ""), (False, False, "2026-10-20"),
+                                           (True, True, "2026-10-20")):
+            got = self.k([row("unverified"), row("user_verification_needed", asked)], documented, pending)
+            self.assertEqual(got, "HOLD_OWES", (documented, pending, asked))
+
+    def test_an_undocumented_never_asked_uvn_user_is_the_ask(self):
+        self.assertEqual(self.k([row("user_verification_needed")]), "UVN_ASK")
+        self.assertEqual(self.k([row("user_verification_needed", "2026-01-01")]), "UVN_ASK")  # asked > 90 days ago
+
+    def test_users_owing_nothing_get_the_status_notes(self):
+        self.assertEqual(self.k([row("unverified"), row("processing")]), "B_TEAM")
+        self.assertEqual(self.k([row("unverified")], documented=True), "B_TEAM")
+        self.assertEqual(self.k([row("pending")], pending_doc=True), "A_DOC")
+
+
+if __name__ == "__main__":
+    unittest.main()

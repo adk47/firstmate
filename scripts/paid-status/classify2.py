@@ -8,11 +8,14 @@ every `user_id`/`userId`/`uid` number, or a first-column integer, is taken).
 
 Per user (read-only: core replica via Trino, /var/lib/credit-trust/proof-on-file.json):
   SKIP_SUPPORT  emailed support@ in the last 90 days            -> no note (held for a human)
-  A_DOC         a document of theirs awaits review                -> Copy A (approved, firstmate 103)
-  B_TEAM        documented for other credits, OR nothing is owed by
-                them (no UVN row: pending/processing/unverified = waiting on us), OR asked
-                in the last 90 days                               -> Copy B0 = Copy B WITHOUT the
+  Captain 2026-10-27 12:55Z (item 5): never "nothing else is needed" to anyone who still owes proof. A user with
+  ANY user_verification_needed row owes proof, so A_DOC and B_TEAM (both say no more is needed) are only for
+  users with NO such row:
+  A_DOC         no UVN row, and a document of theirs awaits review -> Copy A (approved, firstmate 103)
+  B_TEAM        no UVN row (pending/processing/unverified = waiting on us) -> Copy B0 = Copy B WITHOUT the
                                                                      optional proof line (no ask)
+  HOLD_OWES     UVN rows, and documented / a document pending / asked in 90 days: owes proof but must not be
+                asked again now -> no note (counted, not listed)
   UVN_ASK       undocumented, rows user_verification_needed, not
                 asked in 90 days                                  -> UVN reminder copy, section A
                                                                      (approved, firstmate 088)
@@ -83,6 +86,16 @@ def titles_of(rows: list[dict]) -> str:
     return s + (f" (and {more} more)" if more else "")
 
 
+def classify(rs: list[dict], *, documented: bool, pending_doc: bool, cutoff: str) -> str:
+    """The note class for a user's pending rows `rs` (module doc). A user with any user_verification_needed
+    row owes proof: never A_DOC / B_TEAM (they say nothing more is needed; captain 2026-10-27 12:55Z)."""
+    asked_90d = any(r["asked"] and r["asked"] >= cutoff for r in rs)
+    uvn = [r for r in rs if r["status"] == "user_verification_needed"]
+    if uvn:
+        return "HOLD_OWES" if (documented or pending_doc or asked_90d) else "UVN_ASK"
+    return "A_DOC" if pending_doc else "B_TEAM"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--users", required=True)
@@ -134,15 +147,12 @@ def main() -> int:
         if uid in support:
             counts["skip: emailed support in 90 days (human)"] += 1
             continue
-        documented = uid in pof_users or any(r["id"].lower() in pof_requests for r in rs)
-        asked_90d = any(r["asked"] and r["asked"] >= cutoff for r in rs)
-        uvn = [r for r in rs if r["status"] == "user_verification_needed"]
-        if uid in pending_doc_users or any(r["id"].lower() in pof_requests for r in rs):
-            cls = "A_DOC"
-        elif documented or not uvn or asked_90d:
-            cls = "B_TEAM"
-        else:
-            cls = "UVN_ASK"
+        cls = classify(rs, documented=uid in pof_users or any(r["id"].lower() in pof_requests for r in rs),
+                       pending_doc=uid in pending_doc_users or any(r["id"].lower() in pof_requests for r in rs),
+                       cutoff=cutoff)
+        if cls == "HOLD_OWES":
+            counts["hold: owes proof (UVN rows), documented or asked in 90 days: no note"] += 1
+            continue
         target = uvn if cls == "UVN_ASK" else rs
         many = len({r["title"] for r in target}) > 1
         subj, body = COPY[cls]
