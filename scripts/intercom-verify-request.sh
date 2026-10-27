@@ -205,14 +205,23 @@ readonly EMAIL_CHANGE_COPY_APPROVED=1
 #       UNLOCKED 2026-10-26 ~23:59Z: Fable (flows-verify-fable-v1) ruled SEND AS-IS under the captain's
 #       23:30Z proof rule (a paperwork reply goes to document checks + a person, never an auto-approval),
 #       relayed in firstmate 022. The daily code check runs on node-8 (/etc/cron.d/claim-proof-check-c2).
-readonly CLAIM_PROOF_ASK_COPY_APPROVED=1
+#       LOCKED AGAIN 2026-10-27 01:1xZ (captain): "The proof ask stays off. It offers paperwork and nothing
+#       can accept a valid ID yet." (01:0xZ: "Do not send a proof ask that offers paperwork until a returned
+#       document can be accepted. A file on record is not a read.")
+readonly CLAIM_PROOF_ASK_COPY_APPROVED=0
 #   CLAIM_STATUS_COPY_APPROVED  claim-status: copy APPROVED by Fable (claims-documentation-readiness-1023
 #       ruling 3, verbatim); UNLOCKED on firstmate's GO after the 5-user dry run on node-8 (2026-10-26,
 #       claim-lane-resume-c2).
 readonly CLAIM_STATUS_COPY_APPROVED=1
+#   Reviewed baseline: deploy overwrites - 2026-10-27 (claim-lane-resume-c2, firstmate 029): node-8 carries
+#       in-place edits of exactly these three locks ([key=c2-relock] 00:47Z/01:01Z, [key=docask-stop] 00:51Z,
+#       captain orders 00:5xZ / 01:0xZ / 01:1xZ); this blob sets the same values (status 1, proof ask 0,
+#       gap ask 0), so the deploy replaces the hot-patched file without changing behaviour.
 #   GAP_ASK_COPY_APPROVED        gap-ask: Fable's paragraph (last sentence per decision B, inbox 005; APPROVAL_REF_GAP_ASK). GO'd by
 #       Fable 2026-10-26 13:23Z under the captain's 12:40Z order ("Fable decides, do not ask him").
-readonly GAP_ASK_COPY_APPROVED=1
+#       LOCKED 2026-10-27 01:0xZ (captain): the gap ask asks for a document, and "a file on record is not a
+#       read": no ask that offers documents until a returned document can be accepted.
+readonly GAP_ASK_COPY_APPROVED=0
 
 # PINNED. Caroline (skills-all/muso-intercom/SKILL.md, Reply Identity), same literal and
 # same variable name as intercom-ops-write.sh so check-intercom-reply-identity.sh keys on it.

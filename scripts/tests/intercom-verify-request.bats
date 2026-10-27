@@ -637,6 +637,7 @@ unlocked_gate() { # derived copy with the send locks flipped: $1 = retro | windo
     retro)    e=(-e 's/^readonly RETRO_COPY_APPROVED=0$/readonly RETRO_COPY_APPROVED=1/') ;;
     windowed) e=(-e 's/^readonly LIVE_WINDOWED_COPY_APPROVED=0$/readonly LIVE_WINDOWED_COPY_APPROVED=1/') ;;
     claim)    e=(-e 's/^readonly CLAIM_PROOF_ASK_COPY_APPROVED=0$/readonly CLAIM_PROOF_ASK_COPY_APPROVED=1/') ;;
+    gap)      e=(-e 's/^readonly GAP_ASK_COPY_APPROVED=0$/readonly GAP_ASK_COPY_APPROVED=1/') ;;
     claims)   e=(-e 's/^readonly CLAIM_PROOF_ASK_COPY_APPROVED=0$/readonly CLAIM_PROOF_ASK_COPY_APPROVED=1/'
                  -e 's/^readonly CLAIM_STATUS_COPY_APPROVED=0$/readonly CLAIM_STATUS_COPY_APPROVED=1/') ;;
     both)     e=(-e 's/^readonly RETRO_COPY_APPROVED=0$/readonly RETRO_COPY_APPROVED=1/'
@@ -1502,7 +1503,7 @@ GAP_PARA_1='Thanks for sending your document - we have it on file. It shows '
 GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label page that names you on this track, reply with it and we will finish the check. Your request stays open while we look.'
 
 @test "gap-ask: one credit renders Fable's paragraph verbatim, <doc summary> from the stage-2 row" {
-  grep -qx 'readonly GAP_ASK_COPY_APPROVED=1' "$REAL_SCRIPT"
+  grep -qx 'readonly GAP_ASK_COPY_APPROVED=0' "$REAL_SCRIPT"   # locked as committed (captain 2026-10-27 01:0xZ)
   stage2 g1 Mixing 42 need_more split_sheet p1 '["Other Song", "Song A"]'
   credits "$TEST_TMPDIR/c.json" Jane "g1:Mixing:Song A:Big Star"
   run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
@@ -1571,36 +1572,38 @@ GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label pag
 }
 
 @test "gap-ask: posts once per credit, never skipped for documents in Intercom (they are why it is sent)" {
+  unlocked_gate gap   # the gap ask is send-locked as committed (captain 2026-10-27); this case tests its send path
   stage2 g1 Mixing 42 need_more split_sheet
   credits "$TEST_TMPDIR/c.json" Jane "g1:Mixing:Song A:Big Star"
   STUB_CONTACT_CONVS='{"conversations":[{"id":"5","source":{"author":{"type":"user"},"attachments":[{"name":"split.pdf"}]},"tags":{"tags":[{"name":"credit-proof"}]}}],"pages":{}}' \
-    run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -0 "$GATE" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1001 credits=1" ]]
   [[ "$(msg .body | plain)" == *"a split sheet but does not cover"* ]]
   [ "$(sql "select campaign, status, approval_ref like '%Fable ruling 2026-10-26 13:23Z%' from verify_messages")" = "gap-ask|sent|1" ]
-  INTERCOM_VERIFY_TEST_DAY=2026-11-30 run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  INTERCOM_VERIFY_TEST_DAY=2026-11-30 run -0 "$GATE" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "SKIPPED already-notified credits=1" ]]
   [ "$(posts)" -eq 1 ]
 }
 
 @test "gap-ask: 7 days after any other note defers it, except the doc-received note it follows up (still one a day)" {
+  unlocked_gate gap   # the gap ask is send-locked as committed (captain 2026-10-27); this case tests its send path
   day_ago() { python3 -c 'import datetime as d, sys; print((d.datetime.now(d.timezone.utc).date() - d.timedelta(days=int(sys.argv[1]))).isoformat())' "$1"; }
   stage2 g1 Mixing 42 need_more
   credits "$TEST_TMPDIR/d.json" Jane "s1:Mixing:Song A:Big Star"
   INTERCOM_VERIFY_TEST_DAY="$(day_ago 0)" run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/d.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1001 credits=1" ]]
   credits "$TEST_TMPDIR/c.json" Jane "g1:Mixing:Song A:Big Star"
-  INTERCOM_VERIFY_TEST_DAY="$(day_ago 0)" run -3 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  INTERCOM_VERIFY_TEST_DAY="$(day_ago 0)" run -3 "$GATE" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "DEFERRED daily-cap"* ]]
   # Tomorrow: Intercom shows the doc-received note (message 1001) we sent: not a deferral.
   now=$(date -u +%s)
   STUB_CONV_SEARCH="{\"conversations\":[{\"id\":\"777\",\"created_at\":$now,\"source\":{\"id\":\"1001\",\"author\":{\"type\":\"admin\"}}}],\"total_count\":1}" \
-  INTERCOM_VERIFY_TEST_DAY="$(day_ago -1)" run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  INTERCOM_VERIFY_TEST_DAY="$(day_ago -1)" run -0 "$GATE" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1002 credits=1" ]]
   # Any OTHER message from us in 7 days still defers it.
   stage2 g2 Mixing 42 need_more
   credits "$TEST_TMPDIR/c.json" Jane "g2:Mixing:Song B:Big Star"
-  INTERCOM_VERIFY_TEST_DAY="$(day_ago -3)" run -3 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  INTERCOM_VERIFY_TEST_DAY="$(day_ago -3)" run -3 "$GATE" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "DEFERRED messaged_7d"* ]]
   [ "$(posts)" -eq 2 ]
 }
@@ -2146,9 +2149,11 @@ claimfile() {
           credits:[{request_id:"claim-1606398", profile_id:"abc-123"}]}' | jq -c "${2:-.}" > "$1"
 }
 
-@test "claim-proof-ask: unlocked as committed (Fable: send as-is, firstmate 022); the dry run renders the approved draft with the close day" {
+@test "claim-proof-ask: send-locked as committed (captain 2026-10-27 01:1xZ); the dry run renders the approved draft with the close day" {
   claimfile "$TEST_TMPDIR/c.json"
-  grep -qx "readonly CLAIM_PROOF_ASK_COPY_APPROVED=1" "$REAL_SCRIPT"
+  run -1 "$LOCKED" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"CLAIM_PROOF_ASK_COPY_APPROVED=0"* ]]
+  [ "$(calls)" -eq 0 ]
   run -0 "$LOCKED" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "${lines[0]}" == "DRY-RUN claim-proof-ask initial email credits=1 copy=claimask" ]]
   [ "$(rendered .subject)" = "Confirming your claim on Big Star" ]
@@ -2272,7 +2277,7 @@ statusfile() {
 @test "claim-status: unlocked as committed (firstmate GO after the dry run); the dry run renders Fable's approved note verbatim" {
   statusfile "$TEST_TMPDIR/s.json"
   grep -qx "readonly CLAIM_STATUS_COPY_APPROVED=1" "$REAL_SCRIPT"
-  grep -qx "readonly CLAIM_PROOF_ASK_COPY_APPROVED=1" "$REAL_SCRIPT"   # Fable: send as-is (firstmate 022)
+  grep -qx "readonly CLAIM_PROOF_ASK_COPY_APPROVED=0" "$REAL_SCRIPT"   # locked again (captain 2026-10-27 01:1xZ)
   run -0 "$LOCKED" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ --dry-run
   [[ "${lines[0]}" == "DRY-RUN claim-status initial email credits=1 copy=claimstatus" ]]
   [ "$(rendered .subject)" = "Your claim on Big Star" ]
