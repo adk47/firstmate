@@ -115,6 +115,102 @@ class Classify(unittest.TestCase):
         self.assertEqual(wd.classify(c, DOMAINS, KEYWORDS)["rule"], "GDPR")
 
 
+class TierBAndRobotGate(unittest.TestCase):
+    DOM = ["sonymusic.*", "?spotify.com"]
+
+    def test_tier_b_domain_without_keyword_is_demoted_not_dropped(self):
+        c = make_conv(email="noreply@spotify.com", subject="Your weekly stats", body="numbers")
+        m = wd.classify(c, self.DOM, KEYWORDS)
+        self.assertEqual(m, {"kind": "demote", "rule": "?spotify.com",
+                             "reason": "tier-b:no-rights-keyword"})
+
+    def test_tier_b_domain_with_keyword_pages(self):
+        c = make_conv(email="legal@spotify.com", subject="DMCA notice", body="")
+        self.assertEqual(wd.classify(c, self.DOM, KEYWORDS)["kind"], "keyword")
+
+    def test_robot_body_demotes_even_a_tier_a_sender(self):
+        c = make_conv(subject="Automatic reply: GDPR", body="I am out of office until Monday")
+        m = wd.classify(c, self.DOM, KEYWORDS)
+        self.assertEqual((m["kind"], m["reason"]), ("demote", "robot:auto-reply-body"))
+
+    def test_mailer_daemon_dsn_quoting_a_takedown_is_demoted(self):
+        # Synthetic control: the DSN arm fires 0 of 5,691 conversations in the 90-day backtest.
+        c = make_conv(email="MAILER-DAEMON@mail.example.org", author_type="user",
+                      subject="Delivery Status Notification (Failure)",
+                      body="Your DMCA notice about the infringement could not be delivered")
+        m = wd.classify(c, self.DOM, KEYWORDS)
+        self.assertEqual((m["kind"], m["reason"]), ("demote", "robot:dsn+robot-sender"))
+
+    def test_human_forward_with_dsn_subject_still_pages(self):
+        c = make_conv(email="someone@gmail.com", subject="Fwd: Undeliverable: infringement claim",
+                      body="please see the DMCA below")
+        self.assertEqual(wd.classify(c, self.DOM, KEYWORDS)["kind"], "keyword")
+
+    def test_robot_with_no_match_is_none(self):
+        c = make_conv(email="a@gmail.com", subject="x", body="automatic reply")
+        self.assertIsNone(wd.classify(c, self.DOM, KEYWORDS))
+
+
+class DemoteOrdering(unittest.TestCase):
+    """Digest post lands BEFORE any marker; a failed post writes nothing and retries."""
+
+    def setUp(self):
+        self.calls, self.ledger, self.posts = [], {}, []
+        self.demoted = [(make_conv(cid=str(215476000000000 + i), email="noreply@spotify.com",
+                                   subject="Stats <!channel>"),
+                         {"kind": "demote", "rule": "?spotify.com",
+                          "reason": "tier-b:no-rights-keyword"}) for i in range(3)]
+
+    def run_one(self, post_ok=True, tag_ok=True):
+        def post(text):
+            self.calls.append("post")
+            self.posts.append(text)
+            if not post_ok:
+                raise RuntimeError("slack down")
+        def tag(cid):
+            self.calls.append("tag")
+            if not tag_ok:
+                raise RuntimeError("intercom down")
+        return wd.demote_all(self.demoted, post=post, tag=tag, ledger=self.ledger,
+                             save_ledger=lambda l: self.calls.append("ledger"),
+                             now=5000, workspace_id="w")
+
+    def test_one_batched_post_then_tags_then_ledger(self):
+        self.assertTrue(self.run_one())
+        self.assertEqual(self.calls, ["post"] + ["tag", "ledger"] * 3)
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.ledger["215476000000001"],
+                         {"ts": 5000, "reason": "tier-b:no-rights-keyword"})
+
+    def test_failed_post_writes_no_marker(self):
+        self.assertFalse(self.run_one(post_ok=False))
+        self.assertEqual(self.calls, ["post"])
+        self.assertEqual(self.ledger, {})
+
+    def test_failed_tag_still_writes_ledger(self):
+        self.assertTrue(self.run_one(tag_ok=False))
+        self.assertEqual(len(self.ledger), 3)
+
+    def test_digest_has_no_mention_and_carries_reason_domain_and_link(self):
+        text = wd.render_digest(self.demoted, "w")
+        self.assertNotIn("<@", text)
+        self.assertNotIn("<!channel>", text)
+        self.assertIn("tier-b:no-rights-keyword", text)
+        self.assertIn("spotify.com", text)
+        self.assertIn("215476000000000", text)
+
+    def test_demoted_ledger_row_is_handled_and_survives_retention_shape(self):
+        self.run_one()
+        self.assertTrue(wd.already_handled(make_conv(cid="215476000000000"), self.ledger))
+        self.assertTrue(wd.already_handled(make_conv(tags=["priority-demoted"]), {}))
+
+    def test_blocks_split_a_long_digest_into_sections_under_the_slack_cap(self):
+        text = "\n".join("x" * 230 for _ in range(25))
+        blocks = wd._blocks(text)
+        self.assertGreater(len(blocks), 1)
+        self.assertTrue(all(len(b["text"]["text"]) <= 3000 for b in blocks))
+
+
 class DataFiles(unittest.TestCase):
     def test_shipped_lists_load_and_cover_card_domains(self):
         doms = wd.load_list(wd.DEFAULT_DOMAINS_FILE)
@@ -281,9 +377,29 @@ class ShippedListsCatchDspTakedowns(unittest.TestCase):
 
     def test_dsp_distributor_and_label_senders_page(self):
         for addr in ("noreply@spotify.com", "legal@tidal.com", "copyright@distrokid.com",
-                     "x@mail.tunecore.com", "ops@ninjatune.net", "copyright@dittomusic.com",
-                     "x@repostnetwork.com"):
+                     "ops@ninjatune.net", "copyright@dittomusic.com", "x@repostnetwork.com"):
             self.assertIsNotNone(wd.match_domain(addr, self.domains), addr)
+
+    def test_tunecore_is_off_the_domain_list_but_a_takedown_still_pages(self):
+        # Jan's ask (23 Oct): tunecore.com mail must not page on the domain. It costs no
+        # coverage: a TuneCore mail that says "takedown" is caught by the keyword arm.
+        self.assertIsNone(wd.match_domain("x@mail.tunecore.com", self.domains))
+        quiet = make_conv(email="x@mail.tunecore.com", subject="Your release is live", body="Hi")
+        self.assertIsNone(wd.classify(quiet, self.domains, self.keywords))
+        hit = make_conv(email="x@mail.tunecore.com", subject="Notice",
+                        body="We will take down the track, takedown requested")
+        m = wd.classify(hit, self.domains, self.keywords)
+        self.assertEqual(m["kind"], "keyword")
+
+    def test_tier_a_stays_domain_only_and_tier_b_is_marked(self):
+        lines = wd.load_list(wd.DEFAULT_DOMAINS_FILE)
+        for tier_a in ("sonymusic.*", "umusic.*", "ascap.com", "sacem.fr"):
+            self.assertIn(tier_a, lines)  # no `?`: the MUS-6566 Sony protection
+        for tier_b in ("?spotify.com", "?ninjatune.net", "?distrokid.com"):
+            self.assertIn(tier_b, lines)
+        self.assertNotIn("tunecore.com", [l.lstrip("?") for l in lines])
+        sony = make_conv(email="a.b@sonymusic.com", subject="hello", body="hi")
+        self.assertEqual(wd.classify(sony, self.domains, self.keywords)["kind"], "domain")
 
     def test_lookalikes_and_apple_do_not_page(self):
         for addr in ("x@notspotify.com", "x@spotify.com.evil.io", "no_reply@email.apple.com", "x@apple.com"):

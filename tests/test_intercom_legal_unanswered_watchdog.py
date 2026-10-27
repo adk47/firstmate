@@ -79,6 +79,39 @@ class Episode(unittest.TestCase):
         self.assertIsNone(wd.unanswered_episode(d, BOT))
 
 
+class RobotParts(unittest.TestCase):
+    """Round 3 (MUS-18980): one per-part robot verdict feeds both matches() and
+    unanswered_episode(), so an auto-reply can neither page nor restart the clock."""
+    OOO = "I am out of office"
+
+    def test_auto_reply_after_a_human_answer_does_not_reopen_the_watch(self):
+        d = detail([part("p1", NOW - 90 * H, "user", body="GDPR erasure request"),
+                    part("p2", NOW - 80 * H, "admin", "999"),
+                    part("p3", NOW - 70 * H, "user", body=self.OOO)])
+        d["source"]["body"] = "hello"
+        self.assertIsNone(wd.unanswered_episode(d, BOT))
+
+    def test_auto_reply_on_an_unanswered_request_keeps_the_human_clock(self):
+        d = detail([part("p1", NOW - 90 * H, "user", body="GDPR erasure request"),
+                    part("p3", NOW - 70 * H, "user", body=self.OOO)])
+        d["source"]["body"] = "hello"
+        self.assertEqual(wd.unanswered_episode(d, BOT), (NOW - 90 * H, "p1"))
+        self.assertTrue(wd.should_page("c", wd.unanswered_episode(d, BOT), NOW, {}))
+
+    def test_subject_only_robot_opener_is_robot_in_both_consumers(self):
+        d = detail([part("p1", NOW - 90 * H, "user", body="Please delete my personal data, GDPR erasure")])
+        d["source"].update(subject="Undeliverable: hello", body="Thanks for your message",
+                           author={"type": "lead", "id": "u1", "email": "mailer-daemon@example.test"})
+        self.assertIsNotNone(wd.matches(d, wd.load_keywords()))
+        self.assertEqual(wd.unanswered_episode(d, BOT), (NOW - 90 * H, "p1"))
+        # the same opener alone is no customer message at all (red when the episode
+        # re-derives the verdict without the subject)
+        alone = detail([])
+        alone["source"].update(subject="Undeliverable: hello", body="Thanks for your message",
+                               author={"type": "lead", "id": "u1", "email": "mailer-daemon@example.test"})
+        self.assertIsNone(wd.unanswered_episode(alone, BOT))
+
+
 class Paging(unittest.TestCase):
     def test_threshold(self):
         self.assertFalse(wd.should_page("c", (NOW - 23 * H, "p"), NOW, {}))
@@ -105,6 +138,32 @@ class Keywords(unittest.TestCase):
                      "data deletion request", "Cease and desist", "Right to be forgotten",
                      "Article 17 request", "DMCA notice", "our legal team"):
             self.assertIsNotNone(wd.matches(self.conv(body=text), self.kw), text)
+
+    def test_robot_opening_message_never_joins_the_watch_set(self):
+        # Shared predicate (scripts/lib/robot_mail.py): an auto-reply that quotes a GDPR
+        # request cannot be answered by a human, so it would be re-paged every 48 h forever.
+        d = self.conv(subject="Automatic reply: GDPR erasure request",
+                      body="I am out of office. GDPR erasure request")
+        self.assertIsNone(wd.matches(d, self.kw))
+        human = self.conv(subject="GDPR erasure request", body="please erase my data")
+        self.assertIsNotNone(wd.matches(human, self.kw))
+
+    def _with_parts(self, d, *parts):
+        d["conversation_parts"] = {"conversation_parts": [
+            {"author": {"type": t}, "body": b} for t, b in parts]}
+        return d
+
+    def test_robot_opener_does_not_hide_a_later_human_request(self):
+        d = self._with_parts(
+            self.conv(subject="Automatic reply", body="I am out of office."),
+            ("lead", "Please delete my personal data, GDPR erasure request"))
+        self.assertIsNotNone(wd.matches(d, self.kw))
+
+    def test_robot_later_part_quoting_a_keyword_never_pages(self):
+        d = self._with_parts(
+            self.conv(subject="Hello", body="Thanks for the update"),
+            ("lead", "Automatic reply: out of office. GDPR erasure request quoted below"))
+        self.assertIsNone(wd.matches(d, self.kw))
 
     def test_misses(self):
         for text in ("my legal name is shown", "please delete this track credit", "I need my data to update"):

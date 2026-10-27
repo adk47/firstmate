@@ -152,6 +152,14 @@
 #     tickets sat unworked for weeks while the support agent kept
 #     re-promising the SLA).
 #
+#   /etc/cron.d/ghl-api-watchdog
+#     Schedules scripts/ghl-api-watchdog.sh daily (06:20 UTC, ahead of the CMO
+#     day and McLaren's afternoon batches) to page #clio_devops when the GHL
+#     CRM API stops answering 200 through scripts/ghl.sh: Cloudflare
+#     client-signature block (1010), a rejected key, or a missing key.
+#     System cron.d, not an openclaw cron, for the same reason as the Mercury
+#     watchdog (must fire when the gateway is down). MUS-20329.
+#
 #   /etc/cron.d/mercury-token-watchdog
 #     Schedules scripts/mercury-token-watchdog.sh daily to page
 #     #clio_devops when the Finance agent's read-only Mercury Bank API
@@ -385,6 +393,10 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/lib/ensure-mercury-token.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/lib/ensure-mercury-token.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/ghl-api-watchdog.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/ghl-api-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/ghl.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/ghl.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/caroline-rag-index-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/openclaw-edge-reindex-on-start.sh" ]] \
@@ -2192,6 +2204,18 @@ cat > /etc/cron.d/mercury-token-watchdog << MERCURYTOKENWD
 45 8 * * * root MUSO_BIN=/usr/local/bin/muso $HYDRA_ROOT/scripts/mercury-token-watchdog.sh >> /var/log/mercury-token-watchdog.log 2>&1
 MERCURYTOKENWD
 chmod 644 /etc/cron.d/mercury-token-watchdog
+
+# ─── GHL API watchdog daily ───────────────────────────────────
+# Canary through scripts/ghl.sh for the CMO's two GHL accounts (MUS-20329).
+# The keys are read from /etc/openclaw/main.env by the script itself (last-wins,
+# never sourced). PATH carries the compat dir because node-8's jq-1.7 lives
+# there and cron's default PATH lacks it; MUSO_BIN is absolute for slack-notify.sh.
+cat > /etc/cron.d/ghl-api-watchdog << GHLAPIWD
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+PATH=/usr/local/libexec/muso-devops-envset-compat:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+20 6 * * * root MUSO_BIN=/usr/local/bin/muso $HYDRA_ROOT/scripts/ghl-api-watchdog.sh >> /var/log/ghl-api-watchdog.log 2>&1
+GHLAPIWD
+chmod 644 /etc/cron.d/ghl-api-watchdog
 
 # ─── Ads-inquiry watchdog every 15 min ────────────────────────
 # Pings Aaron in #cs_priority (C0BBTAVP44X) when a hydra-action-request

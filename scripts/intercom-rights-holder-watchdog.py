@@ -9,8 +9,12 @@ structurally blind to it. The source here is Intercom itself.
 
 Every tick: read conversations UPDATED in the window (so an old thread touched today is
 scanned), and fire when
-  (a) the opening sender's domain is on the rights-holder list (boundary match), OR
-  (b) the subject/opening body carries a listed keyword.
+  (a) the opening sender's domain is on the rights-holder list (boundary match; a tier-B
+      `?` entry also needs a keyword), OR
+  (b) the subject/opening body carries a listed keyword,
+unless the message is robot mail (scripts/lib/robot_mail.py) or a tier-B domain with no
+keyword: those are DEMOTED — one batched no-mention digest post to the same channel, then
+Intercom tag `priority-demoted`, then a ledger row carrying the reason code.
 Both lists are DATA files (scripts/data/rights-holder-{domains,keywords}.txt, env
 override) — adding a label or a word is a config change, not a code change.
 
@@ -71,6 +75,7 @@ import urllib.request
 _HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 from lib.intercom_identity import resolve_admin_id  # noqa: E402
+from lib import robot_mail  # noqa: E402
 
 # Reuse the deterministic halves of the data-complaint watchdog (fetch, strip, escape,
 # deeplink, Slack token + post, ledger io). Its AI-clustering half is not touched.
@@ -87,6 +92,8 @@ DEFAULT_LEDGER = "/var/lib/intercom-rights-holder-watchdog/seen.json"
 DEFAULT_LOCKFILE = "/var/run/intercom-rights-holder-watchdog.lock"
 DEFAULT_CLICKUP_LIST = "901000600160"
 DEDUPE_TAG = "priority-pinged"
+DEMOTED_TAG = "priority-demoted"
+REASON_TIER_B = "tier-b:no-rights-keyword"
 LEDGER_RETENTION_S = 30 * 86400
 HOST = "ovh-node-8"
 
@@ -110,15 +117,17 @@ def load_keywords():
 # ── matchers ─────────────────────────────────────────────────────────────────
 def _domain_re(entry):
     """`sonymusic.*` -> any suffix; anything else is the exact domain. Both anchor
-    on a label boundary (start of host, or a `.`), never a bare substring."""
-    entry = entry.strip().lower()
+    on a label boundary (start of host, or a `.`), never a bare substring. A leading `?`
+    (tier B, corroboration required) is not part of the domain."""
+    entry = entry.strip().lower().lstrip("?")
     if entry.endswith(".*"):
         return re.compile(r"(?:^|\.)" + re.escape(entry[:-2]) + r"\.[a-z0-9.\-]+$")
     return re.compile(r"(?:^|\.)" + re.escape(entry) + r"$")
 
 
 def match_domain(email, entries):
-    """The first domain entry the sender's host matches, else None."""
+    """The first domain entry the sender's host matches, else None. The entry is returned
+    as listed, so a tier-B entry keeps its leading `?`."""
     host = (email or "").rpartition("@")[2].strip().lower()
     if not host or "@" not in (email or ""):
         return None
@@ -161,24 +170,47 @@ INBOUND_AUTHOR_TYPES = ("user", "lead", "contact")
 
 
 def classify(conv, domains, keywords):
-    """{'kind': 'domain'|'keyword', 'rule': <list entry>} or None. Domain wins."""
+    """{'kind': 'domain'|'keyword', 'rule': <list entry>} to PAGE, or
+    {'kind': 'demote', 'rule': <what matched>, 'reason': <code>} to digest without a mention,
+    or None. Domain wins. Never returns None for something it chose to demote: a None is a
+    silent drop.
+
+    A demoted conversation enters the ledger and is never re-evaluated, so a takedown that
+    only arrives in message 3 will not page. That gap is deliberate and ruled (MUS-18474):
+    `customer_text()` reads the opening message only, and the digest is the compensating
+    control."""
     # Only inbound: our own admin/bot outbound ("we reply within 24 hours") must never page.
     if ((conv.get("source") or {}).get("author") or {}).get("type") not in INBOUND_AUTHOR_TYPES:
         return None
     _, email = sender(conv)
-    d = match_domain(email, domains)
-    if d:
-        return {"kind": "domain", "rule": d}
     src = conv.get("source") or {}
     subject = base._strip_html(src.get("subject") or "")
-    k = match_keyword(subject, base.customer_text(conv), keywords)
+    body = base.customer_text(conv)
+    d = match_domain(email, domains)
+    k = match_keyword(subject, body, keywords)
+    robot, reason = robot_mail.is_robot_mail(subject, body, email)
+    if robot and (d or k):
+        return {"kind": "demote", "rule": d or k, "reason": reason}
+    if d and d.startswith("?"):
+        # Tier B (DSP / distributor): the domain alone is not a takedown.
+        if k:
+            return {"kind": "keyword", "rule": k}
+        return {"kind": "demote", "rule": d, "reason": REASON_TIER_B}
+    if d:
+        return {"kind": "domain", "rule": d}
     if k:
         return {"kind": "keyword", "rule": k}
     return None
 
 
 def already_handled(conv, ledger):
-    return DEDUPE_TAG in base.conv_tag_names(conv) or str(conv.get("id")) in ledger
+    tags = base.conv_tag_names(conv)
+    return DEDUPE_TAG in tags or DEMOTED_TAG in tags or str(conv.get("id")) in ledger
+
+
+def _ledger_ts(v):
+    """A ledger value is the page epoch, or {'ts', 'reason'} for a demoted conversation."""
+    return v.get("ts") if isinstance(v, dict) else v
 
 
 # ── ClickUp lookup (which ticket did Caroline file?) ─────────────────────────
@@ -288,6 +320,52 @@ def alert_one(conv, match, ticket, *, post, tag, ledger, save_ledger, now, menti
     return True
 
 
+# ── demotion: one batched digest, no mention ─────────────────────────────────
+def render_digest(demoted, workspace_id):
+    """Slack mrkdwn: one line per demoted conversation, NO mention. Same escaping rules as
+    render_alert; the link is rebuilt from the numeric id."""
+    esc = base.slack_escape
+    lines = [f":mute: *Demoted, not paged* ({len(demoted)}) — robot mail or a DSP/distributor "
+             f"address with no rights keyword. Read, nobody was pinged."]
+    for conv, m in demoted:
+        _, email = sender(conv)
+        domain = esc(email.rpartition("@")[2] or "unknown")
+        subject = esc(base._strip_html((conv.get("source") or {}).get("subject") or ""))[:80] \
+            or "(no subject)"
+        cid = str(conv.get("id") or "")
+        link = base.deeplink(workspace_id, cid) if re.fullmatch(r"[0-9]+", cid) else "(no link)"
+        lines.append(f"• <{link}|{esc(cid)}> · {domain} · {subject} · `{esc(m['reason'])}`")
+    return "\n".join(lines)
+
+
+def demote_all(demoted, *, post, tag, ledger, save_ledger, now, workspace_id):
+    """digest post -> tag `priority-demoted` -> ledger row carrying the reason code.
+    Returns True when the digest was confirmed posted (or there was nothing to demote).
+
+    Same discipline as alert_one(): a raising `post` aborts before ANY marker exists, so the
+    next tick retries. A raising `tag` is reported, the ledger row is still written."""
+    if not demoted:
+        return True
+    try:
+        post(render_digest(demoted, workspace_id))
+    except (urllib.error.URLError, RuntimeError, ValueError, OSError) as e:
+        print(f"ERROR: Slack digest post failed ({len(demoted)} demoted): {e}", file=sys.stderr)
+        return False
+    for conv, m in demoted:
+        cid = str(conv.get("id"))
+        try:
+            tag(cid)
+        except (urllib.error.URLError, RuntimeError, ValueError, OSError) as e:
+            print(f"WARN: digested {cid} but tagging failed (ledger still written): {e}",
+                  file=sys.stderr)
+        ledger[cid] = {"ts": now, "reason": m["reason"]}
+        try:
+            save_ledger(ledger)
+        except OSError as e:
+            print(f"WARN: could not write ledger for {cid}: {e}", file=sys.stderr)
+    return True
+
+
 # ── run ──────────────────────────────────────────────────────────────────────
 def run(args):
     token = os.environ.get("MUSOAI_INTERCOM_TOKEN")
@@ -325,13 +403,17 @@ def run(args):
                 "subject": base._strip_html((c.get("source") or {}).get("subject") or ""),
                 "matched": m, "already_handled": already_handled(c, ledger),
                 "deeplink": base.deeplink(workspace_id, str(c.get("id")))}, ensure_ascii=False))
+        n_demoted = sum(1 for _, m in hits if m["kind"] == "demote")
         print(f"dry-run: {len(convs)} convs in window → {len(hits)} match "
+              f"({len(hits) - n_demoted} page, {n_demoted} demoted) "
               f"(no Slack, no tag, no ledger)", file=sys.stderr)
         return 0
 
     fresh = [(c, m) for c, m in hits if not already_handled(c, ledger)]
-    print(f"{len(convs)} convs in window → {len(hits)} match, {len(fresh)} not yet paged",
-          file=sys.stderr)
+    to_page = [(c, m) for c, m in fresh if m["kind"] != "demote"]
+    demoted = [(c, m) for c, m in fresh if m["kind"] == "demote"]
+    print(f"{len(convs)} convs in window → {len(hits)} match, {len(to_page)} to page, "
+          f"{len(demoted)} to demote", file=sys.stderr)
     if not fresh:
         return 0
     slack_token = base.resolve_slack_token()
@@ -344,9 +426,9 @@ def run(args):
         "RIGHTS_HOLDER_MENTION_IDS", DEFAULT_MENTION_IDS).split(",") if s.strip()]
     now = int(time.time())
     ledger = {k: v for k, v in ledger.items()
-              if isinstance(v, (int, float)) and v >= now - LEDGER_RETENTION_S}
+              if isinstance(_ledger_ts(v), (int, float)) and _ledger_ts(v) >= now - LEDGER_RETENTION_S}
     failed = 0
-    for c, m in fresh:
+    for c, m in to_page:
         ok = alert_one(
             c, m, find_ticket(c),
             post=lambda text: base.slack_post(slack_token, channel, text[:200], _blocks(text)),
@@ -354,11 +436,27 @@ def run(args):
             ledger=ledger, save_ledger=lambda l: base.save_ledger(ledger_path, l),
             now=now, mention_ids=mention_ids, workspace_id=workspace_id)
         failed += 0 if ok else 1
+    if not demote_all(
+            demoted,
+            post=lambda text: base.slack_post(slack_token, channel, text[:200], _blocks(text)),
+            tag=lambda cid: intercom_tag(token, cid, DEMOTED_TAG),
+            ledger=ledger, save_ledger=lambda l: base.save_ledger(ledger_path, l),
+            now=now, workspace_id=workspace_id):
+        failed += 1
     return 2 if failed else 0
 
 
 def _blocks(text):
-    return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    """Section blocks of at most 2800 chars (Slack caps one at 3000), split on line breaks,
+    so a storm-day digest of ~20 lines is still ONE message."""
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        if cur and len(cur) + len(line) + 1 > 2800:
+            chunks.append(cur)
+            cur = ""
+        cur = f"{cur}\n{line}" if cur else line
+    chunks.append(cur)
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": c[:3000]}} for c in chunks]
 
 
 def _maintenance_active():

@@ -6,7 +6,7 @@ early-stop, the per-run caps, the apply gate, `flock`, and the single Slack
 report. The policies stay in focused scripts, each with its own bats suite. The
 script header is the authoritative reference; this page is the summary.
 
-## Rule table (run in this order, cheapest-safe first)
+## Rule table (run in this order, cheapest-safe first; R6 and R8 are unassigned)
 
 | # | rule | implementation | notes |
 |---|---|---|---|
@@ -15,6 +15,8 @@ script header is the authoritative reference; this page is the summary.
 | R3 | codex/openclaw home | `scripts/codex-home-prune.sh` | a missing script is `skipped`, never an error |
 | R4 | `.bak` / `.orig` > 30d | in-script | tight patterns (`*.bak`, `*.bak.*`, `*.bak-*`, `*.orig`), never `*.bak*` |
 | R5 | `apt autoremove --purge` + `autoclean` | in-script | at most once per 24h; watermark `/var/lib/hydra/clean-my-linux/apt.last` (not `/opt/hydra`: the deploy rsync overwrites it) |
+| R7 | actions-runner `_work` job dirs > 24h | in-script, `safe_delete_path` | candidates are `_work` children not starting `_` or `.`; a dir is kept if ANY file in its tree changed in the last 24h; the whole rule is refused while `_work/_temp` holds anything (job mid-flight); the same check is repeated AFTER each dir's quarantine rename (name private, restore reversible): a `_temp` marker aborts the rule (`partial`), a write inside the tree within 24h holds that dir; a failed candidate scan is `error`, never `ok`; `_tool`, `_actions`, `_update`, runner binaries, `.credentials*`, `.runner`, `_diag` are never candidates |
+| R9 | container layers, **gated** | in-script | last rule; runs only if used% is still **> 80** after everything above. Exactly `docker image prune -f` (dangling only) and `crictl rmi --prune`. Never `-a`, `docker system prune` or `--volumes`: a bats test pins the full argv and greps the script for the forbidden spellings. Dry-run invokes neither tool. A missing tool reports `unavailable`; a non-zero exit is a rule error in the Slack payload; both exit 0 |
 
 **Where the generic `/tmp` sweep went.** `/tmp` has two layers and neither is in
 this script: allow-listed scratch within hours, open-handle guarded, is R1
@@ -49,8 +51,8 @@ reaps everything that sweep could. Regression test:
 
 ## Never touch
 
-Anything outside the delegates' own allow-lists and R4's patterns; k8s/containerd
-state; journald; `/var/lib/hydra-release`; `/etc/tmpfiles.d/tmp.conf`;
+Anything outside the delegates' own allow-lists, R4's patterns and R7's job dirs; k8s/containerd
+state (R9 prunes only unused image layers, never containers or volumes); journald; `/var/lib/hydra-release`; `/etc/tmpfiles.d/tmp.conf`;
 `/opt/hydra/audit`; `jest_0`.
 
 ## Rollout and rollback

@@ -462,6 +462,25 @@ from the body line alone.
 - **Never lower a tier label yourself and never approve a lowering you did not agree
   to.** Raising a tier is always allowed.
 
+### Dark-gated (MUS-20231 / MUS-20220) — a blocking finding class
+
+A PR body with a `Dark: <flag_key>` line claims it ships **dark**: gated by a flag whose
+live prod value is `off` or `staff`, so it merges to prod without a human click. Such a
+review body must carry this line, and a GO without it is itself a defect:
+
+`Dark-gated: yes|no|unsure — <one sentence of evidence, with file:line>`
+
+- **yes** only when the flag's live prod value is shown to be `off`/`staff` (cite where you
+  read it, `file:line` or command; an unread, unreadable or `on` value is `unsure`/`no`) *and*
+  *every* user-visible surface the diff adds is unreachable while it is `off`/`staff`: no
+  route or page rendered outside the flag's reach, no new cron or scheduled job, no email,
+  push or webhook, no migration that changes what existing users already see, no new nav entry or link, and no default-on fallback when the flag is
+  missing or unreadable.
+- **no** or **unsure:** 🔴 NO-GO, naming the ungated surface at `file:line`. Never guess
+  what a user can reach.
+- No `Dark:` line: out of scope. Do not add the line and do not treat its absence as a
+  finding.
+
 ### Every 🔴 and 🟡 needs a failure scenario
 
 These eight lenses push toward flagging more; this is the counterweight. A finding is

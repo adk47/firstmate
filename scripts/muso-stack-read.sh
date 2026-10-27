@@ -203,6 +203,23 @@ cmd_router() {
 }
 
 # ── coverage ─────────────────────────────────────────────────────────────────
+# Analytics coverage. The high-water mark is max(server_upload_time): the server
+# (Amplitude, then the router) stamps it, so a broken client clock cannot move it.
+# max(event_time) is CLIENT time: 2026-10-23 the history held 536 web events dated
+# 2117/2165, which made a max(event_time) high-water mark claim every window covered.
+# Future-dated rows are counted so the skew stays visible, never used as coverage.
+analytics_coverage_sql() {
+  cat <<'SQL'
+SELECT
+  (SELECT toString(max(server_upload_time)) FROM product_events.events) AS events_view_covered_to,
+  (SELECT if(count() = 0, '- (not cut over: the view serves history only)', toString(max(cutover_at))) FROM product_events.cutover WHERE key = 'events') AS cutover_at,
+  (SELECT toString(max(server_upload_time)) FROM product_events.amplitude_events) AS history_covered_to,
+  (SELECT countIf(event_time > now() + INTERVAL 1 DAY) FROM product_events.events) AS future_dated_rows_ignored,
+  (SELECT count() FROM product_events.router_events) AS router_events_rows,
+  (SELECT toString(max(server_upload_time)) FROM product_events.router_events) AS router_covered_to
+SQL
+}
+
 # Email coverage per source x class. A class is LIVE on our stack only from its
 # first REAL send: a provider-accepted `sent` (send-gateway emits it only outside
 # shadow mode) or any provider-webhook row (mailgun / smtp2go exist only for real
@@ -231,12 +248,7 @@ cmd_coverage() {
   need_kubectl
   echo "# muso-stack-read coverage ($(date -u +%Y-%m-%dT%H:%MZ)); '-' = store not there yet"
   echo "## analytics (ClickHouse product_events; the router query API reads the events view)"
-  ch_run "SELECT
-      (SELECT toString(max(event_time)) FROM product_events.events) AS events_view_max_event_time,
-      (SELECT if(count() = 0, '- (not cut over: the view serves history only)', toString(max(cutover_at))) FROM product_events.cutover WHERE key = 'events') AS cutover_at,
-      (SELECT toString(max(event_time)) FROM product_events.amplitude_events) AS history_max_event_time,
-      (SELECT count() FROM product_events.router_events) AS router_events_rows,
-      (SELECT toString(max(event_time)) FROM product_events.router_events) AS router_max_event_time" \
+  ch_run "$(analytics_coverage_sql)" \
     || echo "analytics: UNREACHABLE"
   echo "## email history (ClickHouse messaging.email_events)"
   if [ "$(ch_run "SELECT count() FROM system.tables WHERE database = 'messaging' AND name = 'email_events'" 2>/dev/null | tail -1)" = "1" ]; then

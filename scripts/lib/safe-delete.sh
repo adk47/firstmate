@@ -14,7 +14,8 @@
 # Fail closed everywhere: a probe that errors is "held", never "free".
 # No side effects at source time beyond one rm --one-file-system probe.
 #
-# Seams (read at call time, for hermetic tests):
+# Seams (read at call time; tests use them, and so do production callers —
+# sweep-workspace-clones.sh and clean-my-linux.sh R7 set SAFE_DELETE_HANDLE_CHECK):
 #   SAFE_DELETE_MOUNTS_FILE        default /proc/self/mounts
 #   SAFE_DELETE_QUARANTINE_PREFIX  default .safe-delete-quarantine.
 #   SAFE_DELETE_HANDLE_CHECK       function used for the post-quarantine handle

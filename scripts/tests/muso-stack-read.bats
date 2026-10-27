@@ -145,6 +145,16 @@ STUB
   grep -q "FROM messaging.email_events" "$KUBECTL_CALLS"
 }
 
+# ── analytics coverage high-water mark ───────────────────────────────────────
+@test "analytics coverage uses server upload time, never client event_time, as covered_to" {
+  sql="$(bash -c ". '$S'; analytics_coverage_sql")"
+  [[ "$sql" == *"toString(max(server_upload_time)) FROM product_events.events) AS events_view_covered_to"* ]]
+  [[ "$sql" == *"future_dated_rows_ignored"* ]]
+  # no covered_to field may be computed from event_time
+  bad="$(printf '%s\n' "$sql" | grep -E 'covered_to' | grep 'event_time' || true)"
+  [ -z "$bad" ]
+}
+
 # ── router ───────────────────────────────────────────────────────────────────
 @test "router refuses an endpoint that is not rebuilt" {
   run "$S" router "/api/2/funnels?e=x"
