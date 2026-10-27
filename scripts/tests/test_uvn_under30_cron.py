@@ -917,6 +917,8 @@ class SharedLockEntrypointTests(unittest.TestCase):
             env = dict(os.environ)
             env.update({
                 "UVN_SKIP_HOST_GUARD": "1",
+                # Never the host's real kill switch: CI runs on node-8, where /etc/hydra may hold it.
+                "UVN_KILL_SWITCH_PATH": str(tmp_path / "absent.disabled"),
                 "CV_CREDIT_WRITE_LOCK_PATH": str(lock_path),
                 "CV_CREDIT_WRITE_LOCK_WAIT_SECS": "1",
                 "MUSO_BIN": str(boundary_stub),
@@ -970,6 +972,8 @@ class SharedLockEntrypointTests(unittest.TestCase):
             env = dict(os.environ)
             env.update({
                 "UVN_SKIP_HOST_GUARD": "1",
+                # Never the host's real kill switch: CI runs on node-8, where /etc/hydra may hold it.
+                "UVN_KILL_SWITCH_PATH": str(tmp_path / "absent.disabled"),
                 "CV_CREDIT_WRITE_LOCK_PATH": str(tmp_path / "credit-status-writes.lock"),
                 "CV_CREDIT_WRITE_LOCK_WAIT_SECS": "0",
                 "MUSO_BIN": str(boundary_stub),

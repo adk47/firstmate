@@ -15,10 +15,12 @@ cadence_matches() {
   printf '%s' "$1" | grep -qE -- "$CADENCE_SUFFIX"
 }
 
-@test "enabled UVN cron is a deterministic hourly command clear of the batch" {
+@test "UVN cron is a deterministic hourly command clear of the batch (enabled or switched off)" {
+  # enabled is a boolean either way; the cron may be switched off in the repo (captain order 2026-10-26
+  # 23:30Z) - the contract is its shape, which must stay exact whenever it is re-enabled.
   run jq -e --arg id "$JOB" '
     .jobs[] | select(.id == $id)
-    | .enabled == true
+    | (.enabled | type) == "boolean"
       and .agentId == "operations"
       and .schedule == {kind:"cron", expr:"30 * * * *", tz:"UTC"}
       and .payload.kind == "command"
