@@ -105,7 +105,14 @@ CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "
              "merge-claim-first",
              "reply-ref",   # [key=product-dispute-refs]: r5's approved reply set, reply_due answers only
              "refund-confirm",   # fable-copy-1103-d2/refund-confirm: a refund that ALREADY happened, told once per refund id
-             "uvn-new-rows")   # fable-copy-1101-r5/n1: a told user's owed rows no ask named (one message per row ever)
+             "uvn-new-rows",   # fable-copy-1101-r5/n1: a told user's owed rows no ask named (one message per row ever)
+             "backlog-reply")
+# backlog-reply (intercom-backlog-i1, hydra#1379; Fable review @092894d4): a reply in an Intercom
+# conversation where the customer spoke last, sent by scripts/intercom-backlog/send.py through
+# intercom-ops-write.sh. Its "request id" is "conv-<conversation id>" (one reply per conversation,
+# ever); it is a notice, not an ask, so only its own rows block it. It exists in THIS ledger so the
+# one-message-per-user-per-UTC-day cap (capped()) and the status campaigns' 7-day deferral see it.
+BACKLOG_REPLY = "backlog-reply"
 # claim-proof-ask (steers-1830 #5, firstmate 125/126): a dated ask to the claimant of a pending
 # profile CLAIM (band B/C) to put the claim's bound-proof code in one platform bio. Its "request
 # id" is the claim key "claim-<claiming.id>", so only its own rows block it (claim ids never meet
@@ -156,7 +163,7 @@ STATUS_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", C
 # Notices: only their own rows block them (they are not asks and never close one).
 NOTICE_CAMPAIGNS = ("takeback-notice", "withdrawal-confirm", "status-doc-received", "status-team-review",
                     "email-changed", "email-changed-dup", CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN, MERGE_PENDING, MERGE_CLAIM_FIRST,
-                    CLAIM_PENDING_CAMPAIGN, CREDIT_HOLD_CAMPAIGN, "reply-ref")
+                    CLAIM_PENDING_CAMPAIGN, CREDIT_HOLD_CAMPAIGN, "reply-ref", BACKLOG_REPLY)
 # Campaigns whose gate refusals are re-checkable (firstmate 076, 082, 083): a refusal holds the
 # USER (campaign, user_key or user_id) in verify_refusal_holds for RECHECK_DAYS (the runner and the gate skip
 # them until next_recheck_at, whatever requests are listed); a later send clears it; after

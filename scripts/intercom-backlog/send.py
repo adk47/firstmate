@@ -9,8 +9,10 @@ Safety, in order, re-checked per conversation right before each send:
      and ambiguous identities are never sent by this tool: other owners or the captain).
   3. Live Intercom read: the conversation is still open and the customer still spoke last
      (a teammate, Caroline or a campaign who answered since the census wins: skipped).
-  4. One message per user per UTC day across lanes: no verify-ledger row for the account
-     today, and no row in this tool's own sent log for the conversation or the account today.
+  4. One message per user per UTC day across lanes, in the SHARED verify ledger
+     (credit_review/verify_ledger.py, campaign backlog-reply, request id conv-<id>): the reply is
+     claimed atomically BEFORE the post (verify_ledger.claim: daily cap any campaign, one reply
+     per conversation ever) and finalized after it, so every campaign sees it the same day.
   5. The body is rendered from fixed text plus server facts only (first name from the core
      replica). Customer text is never copied into a reply.
   6. intercom-ops-write.sh --validate first, then the real post; its POSTED line is the proof.
@@ -24,6 +26,7 @@ Usage (node-8, root):
 import argparse
 import csv
 import datetime as dt
+import hashlib
 import io
 import json
 import os
@@ -35,13 +38,15 @@ import tempfile
 import time
 import urllib.request
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from credit_review import verify_ledger  # noqa: E402  the shared message ledger
+
 COPY_APPROVED = 0          # HELD: captain 23:30Z "no new customer copy"; flip only for wording approved later
 COPY_APPROVAL_REF = ""
 CLOSE_APPROVED = 0         # Fable D4
 APPROVER = "U7RP6HKUZ"     # the captain; the fleet's standing customer-reply approval
 OPS_WRITE = "/opt/hydra/scripts/intercom-ops-write.sh"
 LEDGER = "/var/lib/hydra/credit-review/ledger.sqlite3"
-SENT_LOG = "/var/lib/intercom-backlog-i1/sent.jsonl"
 API = "https://api.intercom.io"
 
 OPEN_RECENT = "Hi {name}, thanks for your patience with this."
@@ -101,6 +106,62 @@ def still_owed(c):
 
 class Refused(Exception):
     pass
+
+
+CAMPAIGN = verify_ledger.BACKLOG_REPLY
+
+
+def conv_key(conversation_id):
+    """The ledger 'request id' of a backlog reply: one reply per conversation, ever."""
+    return f"conv-{conversation_id}"
+
+
+def user_key_of(row, account_email):
+    """The ledger's user_key: the account email (what every campaign keys on), else the
+    conversation contact's email; lower-cased. '' = cannot be ledgered = never sent."""
+    return (account_email or row.get("email") or "").strip().lower()
+
+
+def ledger_ro(path):
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    db.row_factory = sqlite3.Row
+    return db
+
+
+def ledger_precheck(db, conversation_id, user_key, user_id, day):
+    """Read-only pre-check (dry runs and a cheap skip before the Intercom read). The claim
+    below is the authority; this only mirrors it. '' = may send."""
+    if verify_ledger.blocked_ids(db, [conv_key(conversation_id)], CAMPAIGN):
+        return "already answered (ledger)"
+    if verify_ledger.capped(db, user_key=user_key, day=day, user_id=user_id):
+        return "user messaged today (ledger)"
+    return ""
+
+
+def ledger_claim(db, conversation_id, user_key, user_id, day, contact_id=""):
+    return verify_ledger.claim(
+        db, user_key=user_key, day=day, request_ids=[conv_key(conversation_id)],
+        message_type="comment", approved_by=APPROVER, approval_ref=COPY_APPROVAL_REF or "unapproved",
+        contact_id=contact_id, campaign=CAMPAIGN, user_id=user_id)
+
+
+def ledger_finalize(db, message_row, conversation_id, rc, stdout, stderr, body):
+    """POSTED comment -> sent (with the part id). rc 4 means the post MAY have landed
+    (intercom-ops-write.sh: logged, response unverified): it stays 'attempted', which still
+    holds the user's day, so nothing re-sends. Any other failure -> rejected (frees the day)."""
+    m = re.match(r"POSTED comment conversation=\d+ part=(\S+)", stdout or "")
+    sha = hashlib.sha256(body.encode()).hexdigest()
+    if rc == 0 and m:
+        verify_ledger.finalize(db, message_row=message_row, status="sent", message_id=m.group(1),
+                               conversation_id=str(conversation_id), body_sha256=sha)
+    elif rc == 4:
+        verify_ledger.finalize(db, message_row=message_row, status="attempted",
+                               conversation_id=str(conversation_id), body_sha256=sha,
+                               reason=f"post unverified: {(stderr or '').strip()[:300]}")
+    else:
+        verify_ledger.finalize(db, message_row=message_row, status="rejected",
+                               conversation_id=str(conversation_id), body_sha256=sha,
+                               reason=f"rc={rc}: {(stderr or '').strip()[:300]}")
 
 
 def eligible(row):
@@ -170,22 +231,14 @@ def _main():
     if not token:
         sys.exit("MUSOAI_INTERCOM_TOKEN not set")
     today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
-    db = sqlite3.connect(f"file:{LEDGER}?mode=ro", uri=True)
-    led_today = {str(x) for (x,) in db.execute(
-        "select distinct account_id from verify_messages where day=? and status in ('sent','attempted')", (today,)) if x}
-    sent_convs, sent_today = set(), set()
-    if os.path.exists(SENT_LOG):
-        for l in open(SENT_LOG):
-            s = json.loads(l)
-            sent_convs.add(s["conversation"])
-            if s["day"] == today and s.get("user_id"):
-                sent_today.add(s["user_id"])
     uids = sorted({r["user_id"] for r in rows if r.get("user_id")})
-    names = {}
+    names, emails = {}, {}
     for i in range(0, len(uids), 150):
-        for uid, fn in trino("select cast(id as varchar), coalesce(firstname,'') from postgresql_core.public.users "
-                             f"where id in ({','.join(uids[i:i + 150])})"):
-            names[uid] = fn
+        for uid, fn, em in trino("select cast(id as varchar), coalesce(firstname,''), coalesce(email,'') "
+                                 f"from postgresql_core.public.users where id in ({','.join(uids[i:i + 150])})"):
+            names[uid], emails[uid] = fn, em
+    # Dry runs only READ the shared ledger; apply opens it read-write (claim + finalize).
+    db = verify_ledger.connect(LEDGER) if a.apply else ledger_ro(LEDGER)
     stats = {"sent": 0, "closed": 0, "skipped": {}, "dry": 0, "failed": 0}
 
     def skip(reason):
@@ -198,13 +251,15 @@ def _main():
         uid = r.get("user_id")
         if not eligible(r):  # defence in depth: select_rows already refused these
             raise Refused(f"{r['id']} action {r.get('action')} is not send-eligible")
-        if r["id"] in sent_convs:
-            skip("already answered by this lane"); continue
-        if uid and (uid in led_today or uid in sent_today):
-            skip("user messaged today"); continue
+        key = user_key_of(r, emails.get(uid or "", ""))
+        if not key:
+            skip("no email to key the shared ledger on"); continue
+        pre = ledger_precheck(db, r["id"], key, uid or "", today)
+        if pre:
+            skip(pre); continue
         try:
             ok, why = still_owed(get_conv(token, r["id"]))
-        except Exception as e:
+        except Exception:
             skip("intercom read failed"); continue
         if not ok:
             skip(why); continue
@@ -223,19 +278,20 @@ def _main():
             stats["dry"] += 1
             print(f"DRY {r['id']} {r['action']} {r['band']} :: {body}")
             os.unlink(bf); continue
+        # Claim BEFORE the post, atomically: the shared one-message-per-user-per-UTC-day cap and
+        # one reply per conversation are decided by verify_ledger.claim, the same code every
+        # campaign uses, so two lanes can never both message this user today.
+        c = ledger_claim(db, r["id"], key, uid or "", today, r.get("contact_id") or "")
+        if c["result"] != "claimed":
+            os.unlink(bf); skip(f"ledger: {c['result']}"); continue
         p = subprocess.run(base, capture_output=True, text=True)
         os.unlink(bf)
-        if p.returncode or not p.stdout.startswith("POSTED comment"):
+        posted = p.returncode == 0 and p.stdout.startswith("POSTED comment")
+        ledger_finalize(db, c["message_row"], r["id"], p.returncode, p.stdout, p.stderr, body)
+        if not posted:
             stats["failed"] += 1
             print(f"FAILED {r['id']}: rc={p.returncode} {p.stderr.strip()[:200]}"); continue
         stats["sent"] += 1
-        rec = {"conversation": r["id"], "user_id": uid, "day": today, "action": r["action"],
-               "band": r["band"], "posted": p.stdout.strip(), "approval_ref": COPY_APPROVAL_REF,
-               "at": dt.datetime.now(dt.timezone.utc).isoformat()}
-        fd = os.open(SENT_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "a") as f:
-            f.write(json.dumps(rec) + "\n")
-        sent_today.add(uid)
         print(p.stdout.strip())
         time.sleep(0.5)
     print(json.dumps(stats))

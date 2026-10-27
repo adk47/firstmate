@@ -115,5 +115,73 @@ class Cli(unittest.TestCase):
         self.assertRefused(p, "COPY_APPROVED=0")
 
 
+class SharedLedger(unittest.TestCase):
+    """Sends claim and finalize in the SHARED verify ledger (Fable review @092894d4), so the
+    one-message-per-user-per-UTC-day cap holds across this lane and every campaign."""
+    DAY = "2026-10-27"
+
+    def setUp(self):
+        self.db = ib_send.verify_ledger.connect(":memory:")
+
+    def other_campaign_sent(self, user_key="a@x.io", user_id="7", campaign="status-team-review"):
+        c = ib_send.verify_ledger.claim(self.db, user_key=user_key, day=self.DAY, request_ids=["r1"],
+                                        message_type="email", approved_by="U7RP6HKUZ",
+                                        approval_ref="t", campaign=campaign, user_id=user_id)
+        ib_send.verify_ledger.finalize(self.db, message_row=c["message_row"], status="sent")
+
+    def claim(self, conv="100", key="a@x.io", uid="7"):
+        return ib_send.ledger_claim(self.db, conv, key, uid, self.DAY)
+
+    def test_campaign_registered_as_notice(self):
+        v = ib_send.verify_ledger
+        self.assertIn(v.BACKLOG_REPLY, v.CAMPAIGNS)
+        self.assertIn(v.BACKLOG_REPLY, v.NOTICE_CAMPAIGNS)
+
+    def test_other_campaign_today_blocks_reply(self):
+        self.other_campaign_sent()
+        self.assertEqual(self.claim()["result"], "daily_cap")
+        self.assertIn("messaged today", ib_send.ledger_precheck(self.db, "100", "a@x.io", "7", self.DAY))
+
+    def test_same_user_by_account_id_after_email_change(self):
+        self.other_campaign_sent(user_key="old@x.io", user_id="7")
+        self.assertEqual(self.claim(key="new@x.io", uid="7")["result"], "daily_cap")
+
+    def test_reply_caps_the_day_for_every_other_campaign(self):
+        c = self.claim()
+        ib_send.ledger_finalize(self.db, c["message_row"], "100", 0,
+                                "POSTED comment conversation=100 part=555\n", "", "body")
+        self.assertTrue(ib_send.verify_ledger.capped(self.db, user_key="a@x.io", day=self.DAY, user_id="7"))
+        row = self.db.execute("SELECT campaign, status, message_id, conversation_id FROM verify_messages "
+                              "WHERE campaign='backlog-reply'").fetchone()
+        self.assertEqual(tuple(row), ("backlog-reply", "sent", "555", "100"))
+        # The status campaigns defer this user for 7 days (messaged_7d), as for any of our notes.
+        self.assertEqual(ib_send.verify_ledger.uvn_user_done(
+            self.db, "a@x.io", campaign="status-team-review", user_id="7",
+            now=ib_send.verify_ledger.datetime(2026, 10, 28, tzinfo=ib_send.verify_ledger.timezone.utc)),
+            "messaged_7d")
+
+    def test_one_reply_per_conversation_ever(self):
+        c = self.claim()
+        ib_send.ledger_finalize(self.db, c["message_row"], "100", 0,
+                                "POSTED comment conversation=100 part=1\n", "", "b")
+        self.assertEqual(ib_send.ledger_claim(self.db, "100", "a@x.io", "7", "2026-11-05")["result"],
+                         "already_notified")
+
+    def test_unverified_post_keeps_holding_the_day(self):
+        c = self.claim()
+        ib_send.ledger_finalize(self.db, c["message_row"], "100", 4, "", "POST NOT VERIFIED", "b")
+        self.assertTrue(ib_send.verify_ledger.capped(self.db, user_key="a@x.io", day=self.DAY, user_id="7"))
+
+    def test_failed_post_frees_the_day(self):
+        c = self.claim()
+        ib_send.ledger_finalize(self.db, c["message_row"], "100", 1, "", "REFUSED", "b")
+        self.assertFalse(ib_send.verify_ledger.capped(self.db, user_key="a@x.io", day=self.DAY, user_id="7"))
+
+    def test_no_email_means_no_key(self):
+        self.assertEqual(ib_send.user_key_of({"email": ""}, ""), "")
+        self.assertEqual(ib_send.user_key_of({"email": "C@X.io"}, ""), "c@x.io")
+        self.assertEqual(ib_send.user_key_of({"email": "c@x.io"}, "Acct@X.io"), "acct@x.io")
+
+
 if __name__ == "__main__":
     unittest.main()

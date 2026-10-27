@@ -190,7 +190,24 @@ customer spoke last, 25 of them past 4 h. I read each one:
   `hold-list-1027.md`: 215476450790625, 215476251752310, 215476226779842, 215476128957680,
   215476122869736, 215476077780197, 215476111881772. The 8th, 215476472512950, was a
   gate-team-review row, not held. c3's note says 8 of the 9 PASSes are held; by this file it is
-  7, because 215476472512950 is not in `hold-list-1027.md`. **Held now: 1,525 - 7 = 1,518.**
+  7, because 215476472512950 is not in `hold-list-1027.md`. Held: 1,525 - 7 = 1,518.
+- **Second review (@092894d4).**
+  - The 2 captain ids are off the hold list: 215476336419274 and 215476553442968. Captain list and
+    hold list now share 0 ids. **Open held: 1,525 - 2 - 7 = 1,516.**
+  - Sends now write the SHARED verify ledger. `verify_ledger.py` has a new notice campaign
+    `backlog-reply`, whose request id is `conv-<conversation id>`. `send.py` claims through
+    `verify_ledger.claim` BEFORE the post, which is the same code path every campaign and
+    `intercom-verify-request.sh` use, so the one-message-per-user-per-UTC-day cap (any campaign,
+    matched by email OR account id) and one-reply-per-conversation are decided atomically. It
+    finalizes after the post. Outcomes:
+    - POSTED: `sent`, with the part id.
+    - unverified post (ops-write rc 4): stays `attempted`, so it still holds the day.
+    - any other failure: `rejected`, which frees the day.
+  - A reply also defers the status campaigns 7 days for that user (`messaged_7d`), as any of our
+    notes does. The lane's private sent log is gone. A row with no email to key on is never sent.
+  - Tests: 17 in `tests/test_intercom_backlog_send.py`, 8 of them against a real in-memory
+    `verify_ledger`. The existing ledger suites still pass (verify_notify 112, claim_proof_ask 24,
+    stage2_asks 20, paid_status_b0_gap 8).
   answered 0 / closed 0 by this lane.
 - The PR title is conventional-commit; the tier is 0 (read-only tools + a locked sender).
 
