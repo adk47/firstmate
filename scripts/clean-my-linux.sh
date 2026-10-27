@@ -13,7 +13,7 @@
 #     stricter (daily, 24h, recursive); /etc/tmpfiles.d/tmp.conf is never touched here.
 # (Predecessor: weekly-cleanup.sh; see docs/designs/2026-10-09-clean-my-linux.md.)
 #
-# Rule table, run in this order (cheapest-safe first):
+# Rule table (R6 and R8 are unassigned; the labels follow MUS-6035), run in this order (cheapest-safe first):
 #   R1 tmp-reaper       scripts/tmp-reaper.sh           /tmp scratch allow-list
 #   R2 clone-sweep      scripts/sweep-workspace-clones.sh  agent + QA clone lanes
 #   R3 codex-prune      scripts/codex-home-prune.sh     codex/openclaw home
@@ -24,6 +24,29 @@
 #   R5 apt              in-script: apt-get autoremove --purge + autoclean,
 #                       at most once per 24h (watermark under STATE_DIR, NOT
 #                       /opt/hydra, which the deploy rsync overwrites).
+#   R7 runner-work      in-script: /opt/actions-runner/_work job directories
+#                       whose whole tree is older than 24h. Candidates are the
+#                       direct children of _work that do not start with "_" or
+#                       "." (so _tool, _temp, _actions, _update, _PipelineMapping
+#                       are never candidates); the runner binaries, .credentials*,
+#                       .runner and _diag live OUTSIDE _work and are never reached.
+#                       The whole rule is refused while _work/_temp holds anything
+#                       (a job is mid-flight) and each dir goes through
+#                       safe_delete_path (open-handle + mount guards). A hold runs
+#                       AFTER the quarantine rename, when the name is private and
+#                       a restore is reversible: _temp got a marker (rule aborts,
+#                       status "partial"), or something wrote in the tree inside
+#                       the window (that dir is held), or a process holds it open.
+#   R9 container-layers in-script, GATED: runs only if used% is still ABOVE
+#                       CONTAINER_GATE_PCT (80) after every rule above, so it is
+#                       the last rule. Exactly two commands, nothing else:
+#                         docker image prune -f      (dangling images only)
+#                         crictl rmi --prune
+#                       Never `-a`/`--all`, never `docker system prune`, never
+#                       `--volumes` (volumes are data): a re-pull storm during
+#                       disk pressure is its own incident, so this is the thing
+#                       that saves the box, never routine housekeeping.
+#                       Dry-run invokes neither tool.
 #
 # What only this script owns:
 #   * df early-stop: used% on DF_PATH is read before each rule; once it is
@@ -41,8 +64,8 @@
 #   * flock, the host guard, the structural root guard, ONE Slack report.
 #     The report is posted in dry-run too: that is how a first run is read.
 #
-# Never touched: anything outside the delegates' own allow-lists and BAK_ROOTS
-# patterns; k8s/containerd state, journald (capped by install-aux-units.sh),
+# Never touched: anything outside the delegates' own allow-lists, BAK_ROOTS
+# patterns and the R7 job-dir rule; k8s/containerd state, journald (capped by install-aux-units.sh),
 # /var/lib/hydra-release, /etc/tmpfiles.d/tmp.conf, /opt/hydra/audit.
 #
 # Rollback: stop the timer (systemctl disable --now hydra-weekly-cleanup.timer);
@@ -72,6 +95,8 @@
 #   CLEAN_MY_LINUX_BAK_AGE_DAYS      default 30
 #   CLEAN_MY_LINUX_STATE_DIR         default /var/lib/hydra/clean-my-linux
 #   CLEAN_MY_LINUX_SKIP_APT          1 = skip apt-get step
+#   CLEAN_MY_LINUX_RUNNER_WORK       default /opt/actions-runner/_work (R7; must be named _work)
+#   CLEAN_MY_LINUX_DOCKER_BIN / _CRICTL_BIN   default docker / crictl (R9; tests)
 #   CLEAN_MY_LINUX_SKIP_SWEEP        1 = skip R2 (the bats suite MUST stub or set it)
 #   CLEAN_MY_LINUX_TMP_REAPER / _SWEEP_SCRIPT / _CODEX_PRUNE   delegate paths (tests)
 #   CLEAN_MY_LINUX_SLACK_CHANNEL     default C0ADV2W76G4 (#clio_devops)
@@ -96,7 +121,13 @@ SKIP_HOST_GUARD="${CLEAN_MY_LINUX_SKIP_HOST_GUARD:-0}"
 TMP_REAPER="${CLEAN_MY_LINUX_TMP_REAPER:-$_CLEANUP_DIR/tmp-reaper.sh}"
 SWEEP_SCRIPT="${CLEAN_MY_LINUX_SWEEP_SCRIPT:-$_CLEANUP_DIR/sweep-workspace-clones.sh}"
 CODEX_PRUNE="${CLEAN_MY_LINUX_CODEX_PRUNE:-$_CLEANUP_DIR/codex-home-prune.sh}"
+RUNNER_WORK="${CLEAN_MY_LINUX_RUNNER_WORK:-/opt/actions-runner/_work}"
+DOCKER_BIN="${CLEAN_MY_LINUX_DOCKER_BIN:-docker}"
+CRICTL_BIN="${CLEAN_MY_LINUX_CRICTL_BIN:-crictl}"
 APT_WATERMARK_MIN=1440
+RUNNER_JOB_MIN=1440      # R7: a job dir is a candidate only if nothing in it changed for 24h
+CONTAINER_GATE_PCT=80    # R9: runs only when used% is strictly above this
+CONTAINER_TIMEOUT=900    # R9: a hung prune must not hold the single-run lock forever
 APPLY=0
 
 # slack-notify.sh reads this (target channel).
@@ -123,16 +154,19 @@ done
 
 # shellcheck source=lib/slack-notify.sh
 source "$_CLEANUP_DIR/lib/slack-notify.sh"
+# shellcheck source=lib/safe-delete.sh
+source "$_CLEANUP_DIR/lib/safe-delete.sh"
 
 command -v python3 >/dev/null 2>&1 || { log "ERROR: python3 required but not on PATH"; exit 2; }
 
-RULES=(tmp-reaper clone-sweep codex-prune bak apt)
+RULES=(tmp-reaper clone-sweep codex-prune bak apt runner-work container-layers)
 declare -A rule_status=()
 for _r in "${RULES[@]}"; do rule_status[$_r]="not-run"; done
 entries_total=0; kb_total=0
 cap_hit=""; target_reached=""
 child_rc=0   # FIRST non-zero delegate exit code; propagated at exit
 bak_deleted=0; bak_errors=0
+runner_deleted=0; runner_held=0; runner_errors=0
 
 ERRORS_FILE="$(mktemp)"
 PAYLOAD_FILE="$(mktemp)"
@@ -329,6 +363,168 @@ rule_apt() {
 }
 
 # ──────────────────────────────────────────────────────────────
+# R7: actions-runner job directories older than 24h
+# ──────────────────────────────────────────────────────────────
+# Post-quarantine hold for R7 (installed via SAFE_DELETE_HANDLE_CHECK, scoped to
+# rule_runner_work by a `local`). Same seam as sweep-workspace-clones.sh's
+# clone audit: the name is private by now so nothing new can enter the tree, and
+# the lib restores the original name on a hold. Returns 0 = held. Runs inside
+# the $( ) around safe_delete_path, so the reason goes out on stderr.
+# shellcheck disable=SC2329  # invoked by lib/safe-delete.sh via SAFE_DELETE_HANDLE_CHECK
+r7_post_quarantine_hold() {  # <quarantined-path>
+  local q="$1" hit
+  if ! hit="$(find "$RUNNER_WORK/_temp" -mindepth 1 -print -quit 2>/dev/null)" || [ -n "$hit" ]; then
+    echo "runner-work: HOLD job started mid-sweep (_temp not empty or unreadable)" >&2
+    return 0
+  fi
+  # rename(2) bumps ctime, not mtime, so these are still the pre-rename mtimes
+  if ! hit="$(find "$q" -xdev -mmin -"$RUNNER_JOB_MIN" -print -quit 2>/dev/null)" || [ -n "$hit" ]; then
+    echo "runner-work: HOLD tree modified inside the window (or unreadable)" >&2
+    return 0
+  fi
+  safe_delete_has_open_handle "$q"
+}
+
+# A refused restore leaves a .safe-delete-quarantine.* tree inside _work that
+# R7's own `! -name '.*'` filter can never reclaim: surface it, never leak it.
+# shellcheck disable=SC2329  # optional hook called by lib/safe-delete.sh
+safe_delete_on_restore_blocked() {  # <quarantined-path>
+  runner_errors=$((runner_errors + 1))
+  echo "runner-work: quarantine restore blocked (name retaken): LEFT QUARANTINED at $1, needs human review" >> "$ERRORS_FILE"
+}
+
+rule_runner_work() {
+  local root="$RUNNER_WORK" rp marker p kb freed recent err_file msg cand ferr rc=0 status="ok"
+  # Post-quarantine re-check (see r7_post_quarantine_hold); sweep-workspace-clones.sh has the other copy.
+  # shellcheck disable=SC2034  # read by lib/safe-delete.sh at call time
+  local SAFE_DELETE_HANDLE_CHECK=r7_post_quarantine_hold
+  if [ -L "$root" ] || [ ! -d "$root" ]; then
+    rule_status[runner-work]="skipped (runner work dir missing or a symlink)"
+    log "runner-work: $root missing or a symlink, skipped"
+    return 0
+  fi
+  rp="$(realpath -- "$root" 2>/dev/null)" || rp=""
+  if [ "$rp" != "${root%/}" ] || [ "$(basename -- "$rp")" != "_work" ]; then
+    rule_status[runner-work]="skipped (not a resolved _work dir)"
+    log "runner-work: $root is not a resolved path named _work, skipped"
+    return 0
+  fi
+  # _temp is empty while the runner is idle and holds step scripts / file
+  # commands during a job. Missing or unreadable means this is not the layout
+  # we audited: refuse rather than guess.
+  if [ ! -d "$root/_temp" ] || ! marker="$(find "$root/_temp" -mindepth 1 -print -quit 2>/dev/null)"; then
+    rule_status[runner-work]="skipped (cannot read _temp)"
+    log "runner-work: $root/_temp missing or unreadable, skipped"
+    return 0
+  fi
+  if [ -n "$marker" ]; then
+    rule_status[runner-work]="skipped (active job marker in _temp)"
+    log "runner-work: active job marker $marker, skipped"
+    return 0
+  fi
+  err_file="$(mktemp)"; cand="$(mktemp)"; ferr="$(mktemp)"
+  # Enumerate to a file so a find failure is seen (a process substitution hides it).
+  find "$root" -mindepth 1 -maxdepth 1 -xdev -type d ! -name '_*' ! -name '.*' \
+      -mmin +"$RUNNER_JOB_MIN" -print0 > "$cand" 2>"$ferr" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    runner_errors=$((runner_errors + 1))
+    echo "runner-work: candidate scan failed (exit $rc): $(head -c 300 "$ferr")" >> "$ERRORS_FILE"
+    status="error (candidate scan failed)"
+  fi
+  while IFS= read -r -d '' p; do
+    check_caps
+    [ -n "$cap_hit" ] && break
+    # The dir's own mtime does not move when a file deep inside changes, so
+    # ask for ANY entry (itself included) modified inside the window. A find
+    # error is not "old": keep it and count it.
+    if ! recent="$(find "$p" -xdev -mmin -"$RUNNER_JOB_MIN" -print -quit 2>/dev/null)"; then
+      runner_errors=$((runner_errors + 1))
+      echo "runner-work: cannot read $p, kept" >> "$ERRORS_FILE"
+      continue
+    fi
+    [ -n "$recent" ] && continue
+    kb="$(entry_kb "$p")"
+    if [ $(( (kb_total + kb) * 1024 )) -gt "$MAX_BYTES" ]; then
+      cap_hit="bytes"
+      break
+    fi
+    if [ "$APPLY" -eq 0 ]; then
+      if safe_delete_has_open_handle "$p"; then runner_held=$((runner_held + 1)); continue; fi
+      log "DRY-RUN: would delete $p (${kb} KB)"
+    else
+      if freed="$(safe_delete_path "$p" 2>"$err_file")"; then
+        kb="${freed:-$kb}"
+      else
+        msg="$(head -c 300 "$err_file")"
+        if [[ "$msg" == *"HOLD job started mid-sweep"* ]]; then
+          runner_held=$((runner_held + 1))
+          status="partial (job started mid-sweep, stopped after $runner_deleted)"
+          log "runner-work: ${msg:0:200}"
+          break
+        elif [[ "$msg" == *"HOLD tree modified"* ]]; then
+          runner_held=$((runner_held + 1))
+        elif [[ "$msg" == *"open handle"* || "$msg" == *"holds the tree open"* ]]; then
+          runner_held=$((runner_held + 1))
+        else
+          runner_errors=$((runner_errors + 1))
+          echo "runner-work: ${msg:0:200}" >> "$ERRORS_FILE"
+        fi
+        continue
+      fi
+    fi
+    runner_deleted=$((runner_deleted + 1))
+    entries_total=$((entries_total + 1)); kb_total=$((kb_total + kb))
+  done < "$cand"
+  /bin/rm -f "$err_file" "$cand" "$ferr"
+  rule_status[runner-work]="$status"
+}
+
+# ──────────────────────────────────────────────────────────────
+# R9: container layers, ONLY when the disk is still above the gate
+# ──────────────────────────────────────────────────────────────
+# One tool, one fixed argv. The argv is spelled out at each call site on purpose:
+# no variable, no flag list, so a future "-a" or "--volumes" is a visible diff
+# and fails the argv assertion in clean-my-linux.bats.
+rule_container_layers() {
+  local pct out rc parts=() failed=0 usable=0
+  pct="$(used_pct)"
+  if [ "$pct" -le "$CONTAINER_GATE_PCT" ]; then
+    rule_status[container-layers]="skipped (used ${pct}% <= ${CONTAINER_GATE_PCT}% gate)"
+    return 0
+  fi
+  if [ "$APPLY" -eq 0 ]; then
+    rule_status[container-layers]="skipped (dry-run)"
+    log "DRY-RUN: would run docker image prune -f and crictl rmi --prune (used ${pct}% > ${CONTAINER_GATE_PCT}%)"
+    return 0
+  fi
+  log "container-layers: used ${pct}% > ${CONTAINER_GATE_PCT}%, pruning dangling images"
+  if command -v "$DOCKER_BIN" >/dev/null 2>&1; then
+    usable=1; rc=0
+    out="$(timeout "$CONTAINER_TIMEOUT" "$DOCKER_BIN" image prune -f 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ]; then parts+=("docker ok"); else
+      failed=1; parts+=("docker exit $rc")
+      echo "docker image prune -f failed (exit $rc): ${out: -200}" >> "$ERRORS_FILE"
+    fi
+  else
+    parts+=("docker unavailable")
+  fi
+  if command -v "$CRICTL_BIN" >/dev/null 2>&1; then
+    usable=1; rc=0
+    out="$(timeout "$CONTAINER_TIMEOUT" "$CRICTL_BIN" rmi --prune 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ]; then parts+=("crictl ok"); else
+      failed=1; parts+=("crictl exit $rc")
+      echo "crictl rmi --prune failed (exit $rc): ${out: -200}" >> "$ERRORS_FILE"
+    fi
+  else
+    parts+=("crictl unavailable")
+  fi
+  local IFS=,
+  if [ "$usable" -eq 0 ]; then rule_status[container-layers]="unavailable (${parts[*]})"
+  elif [ "$failed" -eq 1 ]; then rule_status[container-layers]="failed (${parts[*]})"
+  else rule_status[container-layers]="ok (${parts[*]})"; fi
+}
+
+# ──────────────────────────────────────────────────────────────
 # Summary: stdout lines + Block Kit payload (one post per run)
 # ──────────────────────────────────────────────────────────────
 print_summary() {
@@ -336,6 +532,7 @@ print_summary() {
   log "mode=$MODE"
   for r in "${RULES[@]}"; do log "rule $r: ${rule_status[$r]}"; done
   log "bak: deleted=$bak_deleted errors=$bak_errors"
+  log "runner-work: deleted=$runner_deleted held=$runner_held errors=$runner_errors"
   [ -n "$target_reached" ] && log "target-reached-after=$target_reached (<= ${TARGET_USED_PCT}%)"
   [ -n "$cap_hit" ] && log "cap-hit=$cap_hit (entries=$entries_total kb=$kb_total)"
   log "TOTAL entries=$entries_total freed_kb=$kb_total"
@@ -432,6 +629,8 @@ for rule in "${RULES[@]}"; do
     codex-prune) rule_codex_prune ;;
     bak) rule_bak ;;
     apt) rule_apt ;;
+    runner-work) rule_runner_work ;;
+    container-layers) rule_container_layers ;;
   esac
   check_caps
   prev="$rule"

@@ -61,6 +61,14 @@ STUB
 [ -x /usr/bin/flock ] && exec /usr/bin/flock "$@"
 exit 0
 STUB
+  # docker / crictl record their full argv; exit code from $STUB_DOCKER_RC / $STUB_CRICTL_RC.
+  for n in docker crictl; do
+    cat > "$TEST_TMPDIR/bin/$n" <<STUB
+#!/bin/bash
+echo "$n \$*" >> "\$TEST_TMPDIR/container-calls.log"
+exit "\${STUB_${n^^}_RC:-0}"
+STUB
+  done
   chmod +x "$TEST_TMPDIR/bin/"*
   PATH="$TEST_TMPDIR/bin:$PATH"; export PATH
   echo 99 > "$TEST_TMPDIR/df-pct"
@@ -91,12 +99,25 @@ STUB
   # CRITICAL: the CI runner IS node-8. Delegates are stubbed above; this also
   # opts out of R2 by default so an unstubbed run can never sweep real roots.
   export CLEAN_MY_LINUX_SKIP_SWEEP=1
+  # R7 root: a fixture, never /opt/actions-runner. The guard in setup fails the
+  # suite if the knob ever points outside TEST_TMPDIR (this runner IS node-8).
+  export CLEAN_MY_LINUX_RUNNER_WORK="$TEST_TMPDIR/runner/_work"
+  # empty mount table: hermetic, and /proc/self/mounts does not exist on a dev Mac
+  export SAFE_DELETE_MOUNTS_FILE="$TEST_TMPDIR/mounts"; : > "$SAFE_DELETE_MOUNTS_FILE"
+  mkdir -p "$CLEAN_MY_LINUX_RUNNER_WORK/_temp" "$CLEAN_MY_LINUX_RUNNER_WORK/_tool"
+  case "$CLEAN_MY_LINUX_RUNNER_WORK" in "$TEST_TMPDIR"/*) ;; *) echo "runner root escapes the sandbox" >&2; return 1 ;; esac
+  case "$(command -v docker)" in "$TEST_TMPDIR"/bin/docker) ;; *) echo "docker is not the stub" >&2; return 1 ;; esac
+  case "$(command -v crictl)" in "$TEST_TMPDIR"/bin/crictl) ;; *) echo "crictl is not the stub" >&2; return 1 ;; esac
 }
 
 # /bin/rm + hash -r: the rm-failure test installs an rm stub in PATH.
 teardown() { /bin/rm -rf "$TEST_TMPDIR"; hash -r; }
 
 old() { touch -h -d "$1 days ago" -- "$2"; }
+hours_old() { find "$2" -exec touch -h -d "$1 hours ago" -- {} +; }  # whole tree: R7 reads the newest mtime inside
+
+# a runner job dir with one file in it, aged $2 hours
+job_dir() { mkdir -p "$CLEAN_MY_LINUX_RUNNER_WORK/$1"; echo x > "$CLEAN_MY_LINUX_RUNNER_WORK/$1/f"; hours_old "$2" "$CLEAN_MY_LINUX_RUNNER_WORK/$1"; }
 
 slack_fixture() {
   echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
@@ -614,4 +635,232 @@ STUB
   [ ! -e "$HYDRA_REPO/scripts/weekly-cleanup.sh" ]
   sed -n '/^RSYNC_EXCLUDES=(/,/^)$/p' "$HYDRA_REPO/scripts/deploy.sh" \
     | grep -qFx -- "  --exclude='scripts/weekly-cleanup.sh'"
+}
+
+# ──────────────────────────────────────────────────────────────
+# R7 runner-work: /opt/actions-runner/_work job dirs older than 24h
+# ──────────────────────────────────────────────────────────────
+
+@test "R7: a job dir at 25h is removed, at 23h is kept" {
+  job_dir old-job 25; job_dir fresh-job 23
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ ! -e "$CLEAN_MY_LINUX_RUNNER_WORK/old-job" ]
+  [ -e "$CLEAN_MY_LINUX_RUNNER_WORK/fresh-job/f" ]
+}
+
+@test "R7: a job dir whose own mtime is old but holds a file touched <24h ago is kept" {
+  job_dir busy 30
+  echo y > "$CLEAN_MY_LINUX_RUNNER_WORK/busy/new"; touch -d '1 hour ago' "$CLEAN_MY_LINUX_RUNNER_WORK/busy/new"
+  touch -d '30 hours ago' "$CLEAN_MY_LINUX_RUNNER_WORK/busy"
+  run bash "$WC" --apply
+  [ -e "$CLEAN_MY_LINUX_RUNNER_WORK/busy/new" ]
+}
+
+@test "R7: dry-run deletes nothing and says what it would" {
+  job_dir old-job 25
+  run bash "$WC"
+  [ "$status" -eq 0 ]
+  [ -e "$CLEAN_MY_LINUX_RUNNER_WORK/old-job/f" ]
+  [[ "$output" == *"DRY-RUN: would delete $CLEAN_MY_LINUX_RUNNER_WORK/old-job"* ]]
+}
+
+@test "R7: a job dir with an open handle survives" {
+  job_dir held-job 30
+  exec 8< "$CLEAN_MY_LINUX_RUNNER_WORK/held-job/f"
+  run bash "$WC" --apply
+  exec 8<&-
+  [ "$status" -eq 0 ]
+  [ -e "$CLEAN_MY_LINUX_RUNNER_WORK/held-job/f" ]
+}
+
+@test "R7: _tool, _temp, _actions, _update, dotfiles and credentials are never candidates at any age" {
+  local w="$CLEAN_MY_LINUX_RUNNER_WORK" n
+  for n in _tool _actions _PipelineMapping _update .credentials .runner _diag; do
+    mkdir -p "$w/$n"; echo x > "$w/$n/f"; hours_old 2000 "$w/$n"
+  done
+  echo x > "$w/_update.sh"; echo x > "$w/loose-file"; hours_old 2000 "$w/_update.sh"; hours_old 2000 "$w/loose-file"
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  for n in _tool _actions _PipelineMapping _update .credentials .runner _diag; do [ -e "$w/$n/f" ]; done
+  [ -e "$w/_update.sh" ]
+  [ -e "$w/loose-file" ]
+}
+
+@test "R7: refuses the whole rule when _temp shows an active job marker" {
+  job_dir old-job 30
+  touch "$CLEAN_MY_LINUX_RUNNER_WORK/_temp/_runner_file_commands"
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ -e "$CLEAN_MY_LINUX_RUNNER_WORK/old-job/f" ]
+  [[ "$output" == *"rule runner-work: skipped (active job"* ]]
+}
+
+@test "R7: a missing runner root is skipped, exit 0" {
+  export CLEAN_MY_LINUX_RUNNER_WORK="$TEST_TMPDIR/nonexistent/_work"
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rule runner-work: skipped"* ]]
+}
+
+@test "R7: a symlinked runner root is refused, nothing behind it is deleted" {
+  job_dir old-job 30
+  ln -s "$CLEAN_MY_LINUX_RUNNER_WORK" "$TEST_TMPDIR/link"
+  export CLEAN_MY_LINUX_RUNNER_WORK="$TEST_TMPDIR/link"
+  run bash "$WC" --apply
+  [ -e "$TEST_TMPDIR/runner/_work/old-job/f" ]
+  [[ "$output" == *"rule runner-work: skipped"* ]]
+}
+
+@test "R7: a refused removal (mountpoint inside) is an error in the payload, exit 0, the dir survives" {
+  slack_fixture
+  job_dir old-job 30
+  printf 'tmpfs %s/old-job tmpfs rw 0 0\n' "$CLEAN_MY_LINUX_RUNNER_WORK" > "$SAFE_DELETE_MOUNTS_FILE"
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ -e "$CLEAN_MY_LINUX_RUNNER_WORK/old-job/f" ]
+  grep -q 'errors=1' "$TEST_TMPDIR/last-text"
+}
+
+@test "R7: a failed top-level candidate scan is an error, never ok, and nothing is deleted" {
+  slack_fixture
+  job_dir old-job 30
+  local real_find; real_find="$(command -v find)"
+  cat > "$TEST_TMPDIR/bin/find" <<STUB
+#!/usr/bin/env bash
+# fail ONLY the top-level enumeration of the runner root; everything else is the real find
+case "\$*" in
+  *"-maxdepth 1"*"$CLEAN_MY_LINUX_RUNNER_WORK"*|*"$CLEAN_MY_LINUX_RUNNER_WORK"*"-maxdepth 1"*) echo "find: scan denied" >&2; exit 1 ;;
+esac
+exec "$real_find" "\$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/find"; hash -r
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ -e "$CLEAN_MY_LINUX_RUNNER_WORK/old-job/f" ]
+  [[ "$output" == *"rule runner-work: error (candidate scan failed)"* ]]
+  [[ "$output" != *"rule runner-work: ok"* ]]
+  grep -q 'errors=1' "$TEST_TMPDIR/last-text"
+}
+
+@test "R7: a job marker appearing after the idle check aborts the rule, restores the dir, status partial" {
+  slack_fixture
+  job_dir old-job 30
+  local real_du; real_du="$(command -v du)"
+  # du -skx runs inside safe_delete_path BEFORE the quarantine: the marker lands inside the window
+  cat > "$TEST_TMPDIR/bin/du" <<STUB
+#!/usr/bin/env bash
+mkdir -p "$CLEAN_MY_LINUX_RUNNER_WORK/_temp" && : > "$CLEAN_MY_LINUX_RUNNER_WORK/_temp/marker"
+exec "$real_du" "\$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/du"; hash -r
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ -e "$CLEAN_MY_LINUX_RUNNER_WORK/old-job/f" ]
+  [ -z "$(find "$CLEAN_MY_LINUX_RUNNER_WORK" -maxdepth 2 -name '.safe-delete-quarantine.*' -print -quit)" ]
+  [[ "$output" == *"HOLD job started mid-sweep"* ]]
+  [[ "$output" == *"rule runner-work: partial (job started mid-sweep"* ]]
+  [[ "$output" == *"runner-work: deleted=0 held=1 errors=0"* ]]
+}
+
+@test "R7: a write inside the tree during the sweep window holds that dir and the sweep continues" {
+  job_dir wr-job 30; job_dir other-job 30
+  local real_du; real_du="$(command -v du)"
+  # first du call = first candidate: touch a file inside it before quarantine
+  cat > "$TEST_TMPDIR/bin/du" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do [ -d "\$a" ] && [ ! -e "$TEST_TMPDIR/du-fired" ] && : > "$TEST_TMPDIR/du-fired" && echo n > "\$a/fresh"; done
+exec "$real_du" "\$@"
+STUB
+  chmod +x "$TEST_TMPDIR/bin/du"; hash -r
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"runner-work: deleted=1 held=1 errors=0"* ]]
+  [ -z "$(find "$CLEAN_MY_LINUX_RUNNER_WORK" -maxdepth 2 -name '.safe-delete-quarantine.*' -print -quit)" ]
+}
+
+@test "R7: MAX_ENTRIES caps the rule per entry" {
+  job_dir a 30; job_dir b 30; job_dir c 30
+  CLEAN_MY_LINUX_MAX_ENTRIES=2 run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ "$(find "$CLEAN_MY_LINUX_RUNNER_WORK" -mindepth 1 -maxdepth 1 -type d ! -name '_*' | wc -l)" -eq 1 ]
+}
+
+# ──────────────────────────────────────────────────────────────
+# R9 container-layers: dangling images only, ONLY above 80% used
+# ──────────────────────────────────────────────────────────────
+
+@test "R9: the table ends with container-layers, after runner-work" {
+  grep -qE '^RULES=\(.* apt runner-work container-layers\)$' "$WC"
+}
+
+@test "R9: used 79% after the other rules: docker and crictl are never invoked" {
+  echo 79 > "$TEST_TMPDIR/df-pct"
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ ! -e "$TEST_TMPDIR/container-calls.log" ]
+  [[ "$output" == *"rule container-layers: skipped"* ]]
+}
+
+@test "R9: used exactly 80% does not run (the gate is strictly above 80)" {
+  echo 80 > "$TEST_TMPDIR/df-pct"
+  run bash "$WC" --apply
+  [ ! -e "$TEST_TMPDIR/container-calls.log" ]
+}
+
+@test "R9: used 81% runs, and the recorded argv is EXACTLY image prune -f and rmi --prune" {
+  echo 81 > "$TEST_TMPDIR/df-pct"
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_TMPDIR/container-calls.log")" = $'docker image prune -f\ncrictl rmi --prune' ]
+}
+
+@test "R9: the rule is the LAST one: every other delegate ran before docker" {
+  export CLEAN_MY_LINUX_SKIP_SWEEP=0
+  echo 81 > "$TEST_TMPDIR/df-pct"
+  # if docker had already run, the CODEX delegate deleting its log would leave nothing to assert on
+  export STUB_CODEX_HOOK='/bin/rm -f "$TEST_TMPDIR/container-calls.log"'
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1 "$DELEG_LOG" | paste -sd, -)" = "REAPER,SWEEP,CODEX" ]
+  [ -s "$TEST_TMPDIR/container-calls.log" ]
+}
+
+@test "R9: the gate reads df AFTER the earlier rules (a rule that frees below 80 stops it)" {
+  echo 99 > "$TEST_TMPDIR/df-pct"
+  export STUB_CODEX_HOOK='echo 79 > "$TEST_TMPDIR/df-pct"'
+  run bash "$WC" --apply
+  [ ! -e "$TEST_TMPDIR/container-calls.log" ]
+}
+
+@test "R9: dry-run invokes neither docker nor crictl" {
+  echo 99 > "$TEST_TMPDIR/df-pct"
+  run bash "$WC"
+  [ "$status" -eq 0 ]
+  [ ! -e "$TEST_TMPDIR/container-calls.log" ]
+  [[ "$output" == *"DRY-RUN: would run docker image prune -f"* ]]
+}
+
+@test "R9: docker missing from PATH reports unavailable, exit 0, the run continues" {
+  echo 99 > "$TEST_TMPDIR/df-pct"
+  # a name that resolves nowhere, so a real /usr/bin/docker (node-8 IS the CI runner) can never be reached
+  export CLEAN_MY_LINUX_DOCKER_BIN=docker-absent-for-test
+  run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"unavailable"* ]]
+  [[ "$output" == *"TOTAL entries="* ]]
+  ! grep -q '^docker' "$TEST_TMPDIR/container-calls.log"
+}
+
+@test "R9: docker exiting non-zero is a rule error in the Slack payload, exit 0" {
+  slack_fixture
+  echo 99 > "$TEST_TMPDIR/df-pct"
+  STUB_DOCKER_RC=3 run bash "$WC" --apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rule container-layers: failed"* ]]
+  grep -q 'errors=1' "$TEST_TMPDIR/last-text"
+}
+
+@test "R9: the script never spells docker system prune, image prune -a/--all, or --volumes" {
+  ! grep -nE 'system[[:space:]]+prune|prune[^#]*(-a\b|--all)|--volumes' "$WC" | grep -vE '^[0-9]+:[[:space:]]*#'
 }
