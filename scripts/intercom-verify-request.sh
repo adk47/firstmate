@@ -233,6 +233,9 @@ readonly PROD_LEDGER="/var/lib/hydra/credit-review/ledger.sqlite3"
 readonly PROD_LEDGER_HELPER="/opt/hydra/scripts/credit_review/verify_ledger.py"
 # gap-ask reads the stage-2 verdicts (read-only) from the proof store through this helper.
 readonly PROD_STAGE2_HELPER="/opt/hydra/scripts/credit_review/stage2_verdicts.py"
+# Every real send first asks core whether IT told this user something lately (core_notice.py; Fable sender map
+# 2026-10-27 item 2): a core notice within 7 days or a status change today defers the note.
+readonly PROD_CORE_NOTICE_HELPER="/opt/hydra/scripts/credit_review/core_notice.py"
 readonly PROD_PROOF_DB="/var/lib/hydra-credit-verify/proof.sqlite"
 readonly PROOF_TAG="credit-proof"
 readonly CLAIM_PROOF_TAG="claim-proof"
@@ -279,13 +282,14 @@ refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 if [ "$TESTABLE" != "1" ]; then
   for v in INTERCOM_VERIFY_TEST_LOG_DIR INTERCOM_VERIFY_TEST_CURL_BIN INTERCOM_VERIFY_TEST_TIMEOUT_BIN \
            INTERCOM_VERIFY_TEST_LEDGER INTERCOM_VERIFY_TEST_LEDGER_HELPER INTERCOM_VERIFY_TEST_DAY \
-           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER; do
+           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER; do
     [ -z "${!v:-}" ] || die "$v is not settable on a deployed copy of this script. The log, the ledger, the client and the clock are not parameters: a caller-selectable one is a send nobody can audit."
   done
   LOG_DIR="$PROD_LOG_DIR"
   LEDGER="$PROD_LEDGER"
   LEDGER_HELPER="$PROD_LEDGER_HELPER"
   STAGE2_HELPER="$PROD_STAGE2_HELPER"
+  CORE_NOTICE_HELPER="$PROD_CORE_NOTICE_HELPER"
   PROOF_DB="$PROD_PROOF_DB"
   CURL_BIN="/usr/bin/curl"
   JQ_BIN="/usr/bin/jq"
@@ -297,6 +301,7 @@ else
   LEDGER="${INTERCOM_VERIFY_TEST_LEDGER:-$PROD_LEDGER}"
   LEDGER_HELPER="${INTERCOM_VERIFY_TEST_LEDGER_HELPER:-$PROD_LEDGER_HELPER}"
   STAGE2_HELPER="${INTERCOM_VERIFY_TEST_STAGE2_HELPER:-$PROD_STAGE2_HELPER}"
+  CORE_NOTICE_HELPER="${INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER:-$PROD_CORE_NOTICE_HELPER}"
   PROOF_DB="${INTERCOM_VERIFY_TEST_PROOF_DB:-$PROD_PROOF_DB}"
   CURL_BIN="${INTERCOM_VERIFY_TEST_CURL_BIN:-$(command -v curl || echo /usr/bin/curl)}"
   JQ_BIN="$(command -v jq || echo /usr/bin/jq)"
@@ -304,7 +309,7 @@ else
   PY_BIN="$(command -v python3 || echo /usr/bin/python3)"
   DAY="${INTERCOM_VERIFY_TEST_DAY:-$(date -u +%Y-%m-%d)}"
 fi
-readonly LOG_DIR LEDGER LEDGER_HELPER STAGE2_HELPER PROOF_DB CURL_BIN JQ_BIN TIMEOUT_BIN PY_BIN DAY
+readonly LOG_DIR LEDGER LEDGER_HELPER STAGE2_HELPER CORE_NOTICE_HELPER PROOF_DB CURL_BIN JQ_BIN TIMEOUT_BIN PY_BIN DAY
 
 # ---------------------------------------------------------------------------------------
 # Arguments
@@ -926,6 +931,32 @@ if [ "$ACTION" = "post" ]; then
     DUE_DAY="$(printf '%s' "$st" | "$JQ_BIN" -r '.due_day // empty')"
     REMOVAL_DAY="$(printf '%s' "$st" | "$JQ_BIN" -r '.removal_day // empty')"
   fi
+fi
+# Core's own notices (Fable sender map 2026-10-27 item 2, firstmate inbox 045): core told this user something
+# outside this ledger (approvedNotice / proofRequest / infoRequest within 7 days, a claim update within 7 days,
+# or a credit request changed today) -> no note now, from any campaign. A deferral (exit 3), logged in
+# verify_messages as status 'deferred': nothing is claimed, refused or closed, so the note is offered again
+# once the window passes. Unreadable, or nothing to check
+# (no user id and no valid email) -> nothing sent (exit 4), never "clear".
+if [ "$ACTION" = "post" ]; then
+  # By Muso user id; a note keyed only by email (removal notices) is checked for every account with that email.
+  if printf '%s' "$USER_ID" | grep -qE '^[0-9]{1,12}$'; then cn_who=(--user-id "$USER_ID"); else cn_who=(--email "$EMAIL"); fi
+  [ -r "$CORE_NOTICE_HELPER" ] || { echo "CORE NOTICE CHECK NOT POSSIBLE: $CORE_NOTICE_HELPER is missing; nothing was sent or claimed" >&2; exit 4; }
+  set +e
+  CN="$("$PY_BIN" -I "$CORE_NOTICE_HELPER" check "${cn_who[@]}" 2>/dev/null)"; cn_rc=$?
+  set -e
+  case "$cn_rc" in
+    0) ;;
+    3) cn_why="$(printf '%s' "$CN" | "$JQ_BIN" -r '(.reasons // []) | join("; ")' 2>/dev/null)"
+       # Logged in verify_messages as status 'deferred' (a log, never a lock: the note is offered again next run).
+       # A failed log changes nothing about the deferral (nothing was sent); it is reported, not swallowed.
+       ledger log-deferral --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" \
+         --request-ids "$(ids_csv "$INPUT")" --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" \
+         --approval-ref "$APPROVAL_REF" --reason core_notice_within_7d --detail "$cn_why" >/dev/null \
+         || echo "WARNING: the core_notice_within_7d deferral was not logged in the ledger" >&2
+       printf 'DEFERRED core_notice_within_7d credits=%s (%s)\n' "$N" "$cn_why"; exit 3 ;;
+    *) printf 'CORE NOTICE CHECK FAILED (rc=%s); nothing was sent or claimed: %s\n' "$cn_rc" "${CN:0:300}" >&2; exit 4 ;;
+  esac
 fi
 # Windowed copy names ONE date (Fable copy review 2026-10-17): the reply-by date, 30 days
 # after the note; replying by the end of that day is in time, and an unverified credit is

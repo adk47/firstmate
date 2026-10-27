@@ -26,6 +26,7 @@ BASE="$STATE_ROOT/$DAY"
 RUNNER="${RUNNER:-/opt/hydra/scripts/credit-review.py}"
 export LEDGER="${LEDGER:-/var/lib/hydra/credit-review/ledger.sqlite3}"
 KILL_SWITCH="${KILL_SWITCH:-/etc/hydra/credit-ops-notes.disabled}"
+CORE_NOTICE="${CORE_NOTICE:-/opt/hydra/scripts/credit_review/core_notice.py}"
 MAIN_ENV="${MAIN_ENV:-/etc/openclaw/main.env}"
 LOCK="$STATE_ROOT/daily.lock"
 install -d -m 700 "$STATE_ROOT"
@@ -122,7 +123,13 @@ cand = [r["user_id"] for r in s if not r["msg_hold"] and not r["lens_held"] and 
 open(f"{D}/cand.txt", "w").write("".join(f"{u}\n" for u in cand))
 print("support held", len(held), "candidates", len(cand))
 PY
-  python3 "$BIN/classify2.py" --users "$W/cand.txt" --out-dir "$W/cls" > classify.out || { log "$SEG classify failed"; FAILED=1; continue; }
+  # Core's own notices (Fable sender map 2026-10-27 item 2): core told a candidate something within 7 days, or
+  # changed a request today -> not a candidate this run (core_notice_within_7d). Unreadable: segment skipped.
+  python3 "$CORE_NOTICE" batch --users-file "$W/cand.txt" --out "$W/core-notice-held.txt" > core-notice.out \
+    || { log "$SEG core notice check failed: segment skipped (fail closed)"; FAILED=1; continue; }
+  grep -vxFf "$W/core-notice-held.txt" "$W/cand.txt" > "$W/cand-clear.txt" || true
+  log "$SEG core_notice_within_7d held $(grep -c . "$W/core-notice-held.txt") of $(grep -c . "$W/cand.txt") candidates"
+  python3 "$BIN/classify2.py" --users "$W/cand-clear.txt" --out-dir "$W/cls" > classify.out || { log "$SEG classify failed"; FAILED=1; continue; }
   python3 "$BIN/build_lists.py" > lists.out || { log "$SEG build_lists failed"; FAILED=1; continue; }
   log "$SEG lists: $(cat lists.out)"
   runner "$SEG" A status-doc-received --wording queued || break

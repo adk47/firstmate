@@ -37,6 +37,18 @@ setup() {
   # gap-ask reads stage-2 verdicts from a proof store (stage2() below writes them).
   export INTERCOM_VERIFY_TEST_PROOF_DB="$TEST_TMPDIR/proof.sqlite"
   export INTERCOM_VERIFY_TEST_STAGE2_HELPER="$HYDRA_REPO/scripts/credit_review/stage2_verdicts.py"
+  # core_notice.py stand-in (STUB_CORE_NOTICE=hold|fail changes its answer; its rules: test_core_notice.py).
+  cat > "$TEST_TMPDIR/core_notice.py" <<'PY'
+import json, os, sys
+open(os.path.join(os.path.dirname(__file__), "core-notice-args"), "w").write(" ".join(sys.argv[1:]))
+m = os.environ.get("STUB_CORE_NOTICE", "")
+if m == "hold":
+    print(json.dumps({"hold": True, "reason": "core_notice_within_7d", "reasons": ["approvedNotice within 7d"]})); sys.exit(3)
+if m == "fail":
+    print(json.dumps({"hold": None, "reasons": ["trino rc=2"]})); sys.exit(2)
+print(json.dumps({"hold": False, "reasons": []}))
+PY
+  export INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER="$TEST_TMPDIR/core_notice.py"
   mkdir -p "$INTERCOM_VERIFY_TEST_LOG_DIR"
 
   # curl stub: answers like Intercom per (method, path). Every call is logged as
@@ -1665,6 +1677,39 @@ GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label pag
   [ "$(sql "select approval_ref like '%count-only status-team-review wording%inbox 005%' from verify_messages")" = "1" ]
   run -1 "$LOCKED" send --campaign status-doc-received --copy count --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [ "$(posts)" -eq 1 ]
+}
+
+@test "core notice (Fable sender map item 2): a core notice within 7 days defers EVERY campaign; unreadable sends nothing" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  for camp in uvn-status status-team-review status-doc-received withdrawal-confirm; do
+    STUB_CORE_NOTICE=hold run -3 "$LOCKED" send --campaign "$camp" --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    [[ "$output" == "DEFERRED core_notice_within_7d credits=1 (approvedNotice within 7d)" ]]
+  done
+  STUB_CORE_NOTICE=hold run -3 send
+  [[ "$output" == "DEFERRED core_notice_within_7d"* ]]
+  STUB_CORE_NOTICE=fail run -4 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"CORE NOTICE CHECK FAILED (rc=2)"* ]]
+  # no Muso user id: checked by email instead; the stand-in records what it was asked
+  jq '.user.id = ""' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/n.json"
+  STUB_CORE_NOTICE=hold run -3 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  grep -q -- "--email" "$TEST_TMPDIR/core-notice-args"
+  STUB_CORE_NOTICE=fail run -4 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER="$TEST_TMPDIR/missing.py" run -4 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+  # every hold is LOGGED as 'deferred' (one per user, campaign and day: the email-path re-run added nothing),
+  # and nothing is claimed, refused or closed: no other status, no verify_requests row, no refusal hold
+  [ "$(sql "select campaign||'|'||status||'|'||reason from verify_messages order by id" | head -1)" = \
+    "uvn-status|deferred|core_notice_within_7d: approvedNotice within 7d" ]
+  [ "$(sql "select count(*) from verify_messages")" -eq 5 ]
+  [ "$(sql "select count(*) from verify_messages where status<>'deferred'")" -eq 0 ]
+  [ "$(sql "select count(*) from verify_requests")" -eq 0 ]
+  [ "$(sql "select count(*) from verify_refusal_holds")" -eq 0 ]
+  # a dry run never asks core
+  STUB_CORE_NOTICE=hold run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  # the logged deferrals are never a lock and never the day's message: once clear, the same user posts
+  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED"* ]]
+  [ "$(sql "select count(*) from verify_messages where status='sent'")" -eq 1 ]
 }
 
 @test "withdrawal-confirm: the approved fixed text with role + title, one request per message, sent once" {

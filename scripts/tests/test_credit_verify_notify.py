@@ -1615,6 +1615,8 @@ class WiringTests(unittest.TestCase):
         (t / "gate-windowed.sh").write_text(unlocked.replace("\nreadonly LIVE_WINDOWED_COPY_APPROVED=0\n",
                                                              "\nreadonly LIVE_WINDOWED_COPY_APPROVED=1\n"))
         (t / "curl").write_text(CURL_STUB)
+        # core_notice.py stand-in: core told nobody anything lately (its own rules: test_core_notice.py).
+        (t / "core_notice.py").write_text('import json; print(json.dumps({"hold": False, "reasons": []}))\n')
         (t / "gate-removal.sh").write_text(src.replace("\nreadonly TESTABLE=0\n", "\nreadonly TESTABLE=1\n")
                                            .replace("\nreadonly REMOVAL_COPY_APPROVED=0\n",
                                                     "\nreadonly REMOVAL_COPY_APPROVED=1\n"))
@@ -1627,6 +1629,7 @@ class WiringTests(unittest.TestCase):
             "INTERCOM_VERIFY_TEST_LEDGER_HELPER": str(ROOT / "scripts" / "credit_review" / "verify_ledger.py"),
             "INTERCOM_VERIFY_TEST_CURL_BIN": str(t / "curl"), "INTERCOM_VERIFY_TEST_DAY": "2026-10-15",
             "INTERCOM_VERIFY_TEST_TIMEOUT_BIN": shutil.which("timeout") or shutil.which("gtimeout"),
+            "INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER": str(t / "core_notice.py"),
         }
         self.saved = {k: os.environ.get(k) for k in self.env}
         os.environ.update(self.env)

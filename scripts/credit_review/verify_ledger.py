@@ -161,7 +161,7 @@ CREATE TABLE IF NOT EXISTS verify_messages (
   day TEXT NOT NULL,                 -- UTC YYYY-MM-DD the per-day cap counts on
   due_day TEXT,                      -- windowed notes: last day of the 30-day window
   removal_day TEXT,                  -- windowed notes: the removal date the note named
-  status TEXT NOT NULL,              -- attempted | sent | rejected | refused
+  status TEXT NOT NULL,              -- attempted | sent | rejected | refused | deferred (log_deferral: no message)
   message_type TEXT NOT NULL,        -- email (POST /messages) | comment (in-thread reply)
   contact_id TEXT,                   -- Intercom contact the note went to
   message_id TEXT,                   -- Intercom admin_message id (in-thread: the conversation part id)
@@ -728,6 +728,44 @@ def claim_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
              ts, ts))
         db.execute("COMMIT")
         return {**st, "result": "claimed", "message_row": int(cur.lastrowid), "request_ids": keep}
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+DEFERRAL_REASONS = ("core_notice_within_7d",)
+
+
+def log_deferral(db: sqlite3.Connection, *, campaign: str, user_key: str, day: str, request_ids: list[str],
+                 message_type: str, approved_by: str, approval_ref: str, reason: str, detail: str = "",
+                 user_id: str = "", now: datetime | None = None) -> dict[str, Any]:
+    """Record that the gate held a note back for an outside reason (core_notice_within_7d: core told the user
+    something within 7 days; Fable sender map 2026-10-27 item 2). A LOG, never a lock: status 'deferred' is not
+    'attempted'/'sent' (no cap, no idempotency, no 7-day gate), not 'refused'/'rejected' (not terminal, not a
+    never-delivered ask, no refusal hold or count), and no verify_requests row is written, so the note is offered
+    again next run. One row per user, campaign, day and reason (a re-run the same day adds nothing)."""
+    _check(campaign)
+    if reason not in DEFERRAL_REASONS:
+        raise ValueError(f"unknown deferral reason {reason!r}")
+    ts = stamp(now)
+    uid = str(user_id or "").strip() or None
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        cond = "(account_id = ? OR user_key = ?)" if uid else "user_key = ?"
+        params = (uid, user_key) if uid else (user_key,)
+        if db.execute(f"SELECT 1 FROM verify_messages WHERE {cond} AND campaign=? AND day=? AND status='deferred' "
+                      "AND reason LIKE ? LIMIT 1", (*params, campaign, day, reason + "%")).fetchone():
+            db.execute("COMMIT")
+            return {"result": "already_logged"}
+        ids = list(dict.fromkeys(request_ids))
+        cur = db.execute(
+            "INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, "
+            "request_ids_json, n_credits, approved_by, approval_ref, reason, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (campaign, "initial", user_key, uid, day, "deferred", message_type, json.dumps(ids), len(ids),
+             approved_by, approval_ref, (reason + (f": {detail}" if detail else ""))[:500], ts, ts))
+        db.execute("COMMIT")
+        return {"result": "logged", "message_row": int(cur.lastrowid)}
     except Exception:
         db.execute("ROLLBACK")
         raise
@@ -1321,6 +1359,17 @@ def _main(argv: list[str] | None = None) -> int:
         s.add_argument("--reason", default="")
         s.add_argument("--user-id", default="",
                        help="the Muso account id (the per-user locks key on it too; re-checkable refusals)")
+    ld = sub.add_parser("log-deferral", help="a note held back for an outside reason: logged, never a lock")
+    ld.add_argument("--campaign", required=True, choices=CAMPAIGNS)
+    ld.add_argument("--user-key", required=True)
+    ld.add_argument("--user-id", default="")
+    ld.add_argument("--day", required=True)
+    ld.add_argument("--request-ids", required=True)
+    ld.add_argument("--message-type", required=True)
+    ld.add_argument("--approved-by", required=True)
+    ld.add_argument("--approval-ref", required=True)
+    ld.add_argument("--reason", required=True, choices=DEFERRAL_REASONS)
+    ld.add_argument("--detail", default="")
     cr = sub.add_parser("claim-reminder")
     cr.add_argument("--parent-message-id", required=True)
     cr.add_argument("--kind", required=True, choices=KINDS[1:])
@@ -1384,6 +1433,10 @@ def _main(argv: list[str] | None = None) -> int:
             out = claim(db, contact_id=a.contact_id, refs=refs, windowed=a.windowed, user_id=a.user_id, **kw)
         else:
             out = refuse(db, reason=a.reason, user_id=a.user_id, **kw)
+    elif a.op == "log-deferral":
+        out = log_deferral(db, campaign=a.campaign, user_key=a.user_key, user_id=a.user_id, day=a.day,
+                           request_ids=_ids(a.request_ids), message_type=a.message_type, approved_by=a.approved_by,
+                           approval_ref=a.approval_ref, reason=a.reason, detail=a.detail)
     elif a.op == "claim-reminder":
         out = claim_reminder(db, parent_message_id=a.parent_message_id, kind=a.kind, user_key=a.user_key, day=a.day,
                              request_ids=_ids(a.request_ids), approved_by=a.approved_by, approval_ref=a.approval_ref)
