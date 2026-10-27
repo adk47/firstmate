@@ -23,6 +23,16 @@ def main():
         for r in cap:
             print(f"| {r['id']} | {r['action'][8:]} | {r['band']} | {r['age_days']:.0f} | "
                   f"{'paid' if r['paid'] else '-'} | {r['admin_assignee_id'] or '-'} |")
+    elif mode == "read":
+        # Operator terminal only (prints the customer's first-message excerpt): never commit it.
+        import time
+        now = time.time()
+        for r in sorted(rows, key=lambda r: r["waiting_since"]):
+            c = r.get("credits") or {}
+            print(f"{r['id']} {(now - r['waiting_since']) / 3600:6.1f}h {r['action']:18} "
+                  f"paid={int(bool(r.get('paid')))} assignee={r['admin_assignee_id']} "
+                  f"pend={c.get('pending', 0)} uvn={c.get('uvn', 0)} claims={r.get('claims')} "
+                  f"led={r.get('ledger_msgs')} | {r['excerpt'][:200]}")
     elif mode == "actions":
         c = collections.Counter((r["band"], r["action"]) for r in rows)
         bands = ["lt1d", "1-30d", "gt30d"]

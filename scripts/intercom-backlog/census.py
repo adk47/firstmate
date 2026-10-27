@@ -90,13 +90,15 @@ def mask(email):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--since-hours", type=float, default=0,
+                    help="only conversations updated in the last N hours (fast sentinel check)")
     a = ap.parse_args()
     token = os.environ.get("MUSOAI_INTERCOM_TOKEN")
     if not token:
         sys.exit("MUSOAI_INTERCOM_TOKEN not set (set -a; . /etc/openclaw/main.env; set +a)")
     now = int(time.time())
     os.makedirs(OUT_DIR, mode=0o700, exist_ok=True)
-    stamp = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = os.path.join(OUT_DIR, f"census-{stamp}.jsonl")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     out = os.fdopen(fd, "w")
@@ -104,8 +106,12 @@ def main():
     counts = {}
     after = None
     while True:
-        body = {"query": {"field": "state", "operator": "=", "value": "open"},
-                "pagination": {"per_page": 150}}
+        query = {"field": "state", "operator": "=", "value": "open"}
+        if a.since_hours:
+            query = {"operator": "AND", "value": [query, {
+                "field": "updated_at", "operator": ">",
+                "value": int(now - a.since_hours * 3600)}]}
+        body = {"query": query, "pagination": {"per_page": 150}}
         if after:
             body["pagination"]["starting_after"] = after
         data = search(token, body)
