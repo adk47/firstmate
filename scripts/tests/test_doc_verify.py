@@ -424,8 +424,18 @@ class CrossCheckTests(unittest.TestCase):
         self.assertEqual(c.status, xc.CONTRADICTS)
         self.assertIn("look-alike", c.detail["note"])
         self.assertEqual(xc.domain_check(net, "othermail.com", "Blue Fern", ["bluefern.com"], "x").status, xc.SOFT)
-        self.assertEqual(xc.domain_check(FakeNet(mx="nxdomain"), "bluefern.zz", "Blue Fern", [], "x").status,
+        self.assertEqual(xc.domain_check(FakeNet(mx="nxdomain"), "bluefern-ghost.com", "Blue Fern", [], "x").status,
                          xc.CONTRADICTS)
+        # Proof-loop lead 073: a TLD that does not exist is a misread address, never a fabricated one.
+        nx = FakeNet(mx="nxdomain")
+        c = xc.domain_check(nx, "michaelosbome.ora", "Michael Osborne", [], "x", 0.95)
+        self.assertEqual((c.status, c.detail.get("unreadable")), (xc.WEAK, True))
+        self.assertIn("'.ora' is not a top-level domain", c.detail["note"])
+        self.assertEqual(nx.calls, [])                                   # no DNS lookup is evidence here
+        for bad in ("bluefern.zz", "no-dot", "-bad-.com", "a..b.com"):
+            self.assertEqual(xc.domain_check(FakeNet(mx="nxdomain"), bad, "Blue Fern", [], "x").status, xc.WEAK, bad)
+        for good in ("michaelosborne.org", "label.co.uk", "studio.music", "xn--80ak6aa92e.com"):
+            self.assertIsNone(xc.readable_domain(good), good)
         self.assertEqual(xc.domain_check(net, "bluefern.com", "Blue Fern", [], "not found").status, xc.UNKNOWN)
         self.assertEqual(xc.domain_check(net, None, "Blue Fern", [], "x").status, xc.SKIPPED)
 
@@ -439,7 +449,7 @@ class CrossCheckTests(unittest.TestCase):
         net = FakeNet(mx="nxdomain")
         xc.domain_check(net, "mistyped.invalid", "Blue Fern", [], "x", 0.0)
         self.assertEqual(net.calls, [])                       # not even looked up
-        self.assertEqual(xc.domain_check(FakeNet(mx="nxdomain"), "mistyped.invalid", "Blue Fern", [], "x",
+        self.assertEqual(xc.domain_check(FakeNet(mx="nxdomain"), "mistyped-label.com", "Blue Fern", [], "x",
                                          0.6).status, xc.CONTRADICTS)
 
     def test_official_domains_never_from_the_document(self):
@@ -716,11 +726,38 @@ class GateTests(unittest.TestCase):
     def test_forged_and_contradicted_hold_the_account(self):
         o = self.decide(findings=[forensics.Finding("h3_forged", forensics.HARD)], xc_dsp=xc.POSITIVE)
         self.assertEqual((o.outcome, o.account_hold), (gate.FORGED, True))
-        o = self.decide(xc_dsp=xc.POSITIVE, xc_domain=xc.CONTRADICTS)
-        self.assertEqual(o.outcome, gate.FORGED)
+        # R-C6 (proof-loop lead 073): a fabricated sender forges only with confidence >= 0.8 + a second signal.
+        def dom(conf):
+            return xc.Check("xc_domain", xc.CONTRADICTS, {"sender_domain": "ghost-label.com", "confidence": conf,
+                                                          "note": "the sender's domain does not exist"})
+        base = [c for c in checks(xc_dsp=xc.POSITIVE) if c.step != "xc_domain"]
+        o = gate.decide(h3_verdict="INCONSISTENT", kind="contract", ex=self.good_ex, findings=[],
+                        checks=base + [dom(0.95)], account_held=False)
+        self.assertEqual((o.outcome, o.account_hold), (gate.FORGED, True))
         self.assertIn("fabricated sender", o.reason)
+        self.assertIn("second signal: H3 INCONSISTENT", o.reason)
+        o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=self.good_ex, findings=[],
+                        checks=base + [dom(0.95)], account_held=False)              # one signal only
+        self.assertEqual((o.outcome, o.account_hold), (gate.UNVERIFIABLE, False))   # not forged, not verified
+        self.assertEqual(o.detail["would_forge"]["why_not"], "no second signal (R-C6)")
+        self.assertIn("sender doubt", o.reason)
+        o = gate.decide(h3_verdict="INCONSISTENT", kind="contract", ex=self.good_ex, findings=[],
+                        checks=base + [dom(0.7)], account_held=False)               # below 0.8
+        self.assertEqual((o.outcome, o.account_hold), (gate.UNVERIFIABLE, False))
+        o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=self.good_ex,
+                        findings=[forensics.Finding("editor_software_on_screenshot", forensics.SOFT)],
+                        checks=base + [dom(0.9)], account_held=False)               # forensic doubt = second signal
+        self.assertEqual(o.outcome, gate.FORGED)
         o = self.decide(xc_dsp=xc.CONTRADICTS)
         self.assertEqual((o.outcome, o.account_hold), (gate.CONTRADICTED, True))
+
+    def test_an_unreadable_sender_address_asks_for_a_readable_copy(self):
+        unreadable = xc.Check("xc_domain", xc.WEAK, {"sender_domain": "michaelosbome.ora", "unreadable": True,
+                                                     "note": "sender address unreadable"})
+        base = [c for c in checks() if c.step != "xc_domain"]
+        o = gate.decide(h3_verdict="SUSPECT", kind="letter", ex=validate({**GOOD_ANSWER, "doc_type": "letter"}),
+                        findings=[], checks=base + [unreadable], account_held=False)
+        self.assertEqual((o.outcome, o.need, o.account_hold), (gate.UNVERIFIABLE, gate.NEED_READABLE, False))
 
     def test_account_hold_blocks_verification(self):
         o = self.decide(held=True, xc_dsp=xc.POSITIVE)
@@ -1306,7 +1343,7 @@ class ParallelReaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             code = ("import sys,time; sys.path.insert(0,%r); from credit_verify.docverify.pace import Pacer; "
                     "p=Pacer('mbtest',0.3,directory=%r); "
-                    "[ (p.wait(), print(repr(time.time()))) for _ in range(3) ]") % (
+                    "[ (p.wait(), print(repr(p._last))) for _ in range(3) ]") % (
                 str(Path(__file__).resolve().parents[1]), d)
             t0 = time.time()
             procs = [subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True) for _ in range(2)]

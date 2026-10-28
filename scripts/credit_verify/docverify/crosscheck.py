@@ -383,6 +383,32 @@ def official_domains(net: Net, issuer: str | None) -> tuple[list[str], str]:
 SENDER_MIN_CONFIDENCE = 0.6
 
 
+_TLDS: frozenset[str] | None = None
+_LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+
+
+def iana_tlds() -> frozenset[str]:
+    """The IANA root-zone TLDs (vendored snapshot iana_tlds.txt; data.iana.org/TLD/tlds-alpha-by-domain.txt)."""
+    global _TLDS
+    if _TLDS is None:
+        import os as _os
+        path = _os.path.join(_os.path.dirname(__file__), "iana_tlds.txt")
+        with open(path, encoding="ascii") as fh:
+            _TLDS = frozenset(ln.strip().lower() for ln in fh if ln.strip() and not ln.startswith("#"))
+    return _TLDS
+
+
+def readable_domain(dom: str) -> str | None:
+    """None when `dom` is a syntactically valid host name under a real top-level domain, else why not.
+    An OCR misread ('michaelosbome.ora' for michaelosborne.org) usually breaks the TLD (proof-loop lead 073)."""
+    labels = (dom or "").lower().strip(".").split(".")
+    if len(labels) < 2 or not all(_LABEL.match(x) for x in labels):
+        return f"'{dom}' is not a valid domain name"
+    if labels[-1] not in iana_tlds():
+        return f"'.{labels[-1]}' is not a top-level domain (likely a misread address)"
+    return None
+
+
 def domain_check(net: Net, sender_domain: str | None, issuer: str | None, official: list[str], how: str,
                  confidence: float = 1.0) -> Check:
     if not sender_domain:
@@ -390,6 +416,11 @@ def domain_check(net: Net, sender_domain: str | None, issuer: str | None, offici
     dom = registrable_domain(sender_domain)
     detail: dict[str, Any] = {"sender_domain": dom, "issuer": issuer, "official": official, "official_from": how,
                               "confidence": confidence}
+    bad = readable_domain(sender_domain.strip().lower()) or readable_domain(dom)   # the raw read, then the registrable
+    if bad:
+        # UNREADABLE, not fabricated: a non-existent TLD is a reading error, so no DNS lookup is evidence here.
+        detail.update(note=f"sender address unreadable: {bad}", unreadable=True)
+        return Check("xc_domain", WEAK, detail)
     if not confidence >= SENDER_MIN_CONFIDENCE:          # NaN fails this too
         detail["note"] = (f"sender read with confidence {confidence:.2f} (< {SENDER_MIN_CONFIDENCE}): "
                           "not evidence either way")
