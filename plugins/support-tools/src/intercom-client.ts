@@ -16,15 +16,6 @@ export interface IntercomReader {
   // MUST treat null as fail-closed (owner_undetermined) — never as verified.
   getAuthorEmail(conversationId: string, token: string): Promise<string | null>;
 
-  // The CUSTOMER's email for this conversation, never a teammate's. getAuthorEmail reads
-  // source.author, which is the ADMIN when our own outbound note opened the thread (19 of
-  // Caroline's 50 sampled credit/claim/merge conversations on 2026-10-27 returned
-  // operations@muso.ai, a staff account). This one answers the source author only when it is a
-  // contact (user/lead); otherwise the conversation's ONE contact, read with GET /contacts/{id}
-  // (role user/lead). Null on anything else: no contact, several contacts, no email, any error.
-  // Optional so existing fakes still type-check; a reader without it fails closed.
-  getCustomerEmail?(conversationId: string, token: string): Promise<string | null>;
-
   // Returns the CUSTOMER's most recent message in the conversation (the
   // initial source or any comment part authored by the contact — author.type
   // user/lead, never admin/bot) as {id, snippet}, or null on any unverifiable
@@ -153,23 +144,6 @@ export function createIntercomReader(http: HttpClient): IntercomReader {
         contactCreatedAt: num(resp.data.created_at),
         conversationCreatedAt: num(conv.created_at),
       };
-    },
-
-    async getCustomerEmail(conversationId, token) {
-      const conv = await getConversation(conversationId, token);
-      if (!conv) return null;
-      const author = conv.source?.author;
-      if (isContactAuthor(author)) {
-        return author?.email ? author.email.toLowerCase() : null;
-      }
-      const contacts = conv.contacts?.contacts ?? [];
-      if (contacts.length !== 1 || !contacts[0]?.id) return null;
-      const url = `${INTERCOM_API_BASE}/contacts/${encodeURIComponent(String(contacts[0].id))}`;
-      const resp = await http.get<{ role?: string; email?: string }>(url, { headers: headersFor(token) });
-      if (!resp.ok || !resp.data) return null;
-      const role = resp.data.role;
-      if (role !== "user" && role !== "lead") return null;
-      return resp.data.email ? resp.data.email.toLowerCase() : null;
     },
 
     async getLatestCustomerPart(conversationId, token) {

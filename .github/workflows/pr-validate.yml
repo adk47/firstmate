@@ -1991,10 +1991,6 @@ jobs:
           # Document intake (credit-proof.py file): files a conversation's documents into
           # proof_intake with the account + candidate requests; never judges. Intercom/Trino faked.
           python3 scripts/tests/test_proof_intake.py
-          # Caroline's real, safe actions (scripts/caroline_actions, caroline-operator-c1): approved lines
-          # only, every refusal, document intake, merge intake (never executes), handoff. Stdlib only;
-          # Trino, ledgers, the gate, the IDP list and Intercom are faked.
-          python3 scripts/tests/test_caroline_actions.py
           # Provisional-credit tracker / day-7 route / backup_ask_undelivered (captain 2026-10-23
           # 20:03Z-20:07Z; Fable backup-threshold-ruling-1023.md section 6). Trino faked, stdlib only.
           python3 scripts/tests/test_provisional_tracker.py

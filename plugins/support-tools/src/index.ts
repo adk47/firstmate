@@ -19,7 +19,6 @@ import { createCreditVerificationCheckTool } from "./tools/credit-verification-c
 import { createProfilesClaimSelfTool, DEFAULT_PROFILES_CLAIM_SELF_SCRIPT } from "./tools/profiles-claim-self.js";
 import { createCreditsVerifyTool, DEFAULT_CREDITS_VERIFY_SCRIPT } from "./tools/credits-verify.js";
 import { createProfilesConsolidateTool, DEFAULT_PROFILES_CONSOLIDATE_SCRIPT } from "./tools/profiles-consolidate.js";
-import { createCarolineActionTools, DEFAULT_CAROLINE_ACTIONS_SCRIPT } from "./tools/caroline-actions.js";
 import { createIntercomReader } from "./intercom-client.js";
 import { createFoundingStatusTool, createFoundingBuybackTool } from "./tools/founding-buyback.js";
 import {
@@ -543,34 +542,6 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
       });
     };
     api.registerTool(profilesConsolidateFactory, { name: "profiles_consolidate" });
-
-    // Caroline's real, safe actions (caroline-operator-c1): status lookup with approved wording only,
-    // document intake for the reader, merge-request intake (files, never executes), and the
-    // credit-trust board handoff. Every decision is in scripts/caroline-actions.py; nothing here
-    // approves, rejects, deletes, hides or sends. Dark-ship flag default OFF, same coercion as above.
-    const carolineActionsRaw =
-      [_entry.carolineActionsEnabled, _legacy.carolineActionsEnabled].find(
-        (v) => typeof v === "boolean" || typeof v === "string" || typeof v === "number",
-      ) ?? process.env.CAROLINE_ACTIONS_ENABLED;
-    const carolineActionsEnabled =
-      carolineActionsRaw === true || carolineActionsRaw === 1 || carolineActionsRaw === "true" || carolineActionsRaw === "1";
-    const carolineActionsScriptPath = pluginConfig.carolineActionsScriptPath ?? DEFAULT_CAROLINE_ACTIONS_SCRIPT;
-    const carolineActionTool = (ctx: any, name: string) => {
-      const tools = createCarolineActionTools({
-        scriptPath: carolineActionsScriptPath,
-        rateLimiter,
-        // Anti-spoof anchor: the trusted session KEY (carries the convId), see deriveConvId.
-        sessionKey: ctx.sessionKey ?? "unknown",
-        intercomReader,
-        intercomToken,
-        enabled: carolineActionsEnabled,
-        createTicket: () => createTicketFactory(ctx),
-      });
-      return tools.find((t) => t.name === name)!;
-    };
-    for (const name of ["credit_status_lookup", "document_intake", "merge_request_intake", "credit_trust_handoff"]) {
-      api.registerTool((ctx: any) => carolineActionTool(ctx, name), { name });
-    }
   },
 });
 

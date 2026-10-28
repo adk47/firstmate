@@ -54,29 +54,6 @@
       "needs": "actionType, customerEmail, summary, conversationSummary."
     },
     {
-      "name": "credit_status_lookup",
-      "answers": [
-        "where is my credit request / what is its status",
-        "where is my profile claim"
-      ],
-      "cannot_answer": [
-        "approve, reject or speed up a request (read-only)",
-        "give any status sentence when it returns reply_line null (owes proof, a core notice this week, a hold, unknown)"
-      ],
-      "needs": "the conversation's customer email (getCustomerEmail); exactly one confirmed Muso account; returns only approved wording."
-    },
-    {
-      "name": "credit_trust_handoff",
-      "answers": [
-        "this credit is not mine / was removed wrongly (dispute)",
-        "I want a person to decide"
-      ],
-      "cannot_answer": [
-        "decide the case or promise an outcome or a date"
-      ],
-      "needs": "the conversation's customer email; a reason from the fixed list."
-    },
-    {
       "name": "credit_verification_check",
       "answers": [
         "why are my submitted credits stuck / pending verification",
@@ -124,18 +101,6 @@
       "needs": "verified Intercom contact email; caps duplicates at 5 per call."
     },
     {
-      "name": "document_intake",
-      "answers": [
-        "I sent you my proof / split sheet / invoice / screenshot",
-        "here is the paperwork for my claim"
-      ],
-      "cannot_answer": [
-        "say whether the document is good enough (the document reader decides later)",
-        "approve the credit or claim"
-      ],
-      "needs": "the conversation's customer email; a customer attachment cached for this conversation."
-    },
-    {
       "name": "founding_buyback_link",
       "answers": [
         "how do I buy back into the founding member program"
@@ -157,17 +122,6 @@
         "reinstate or change founding status (read-only)"
       ],
       "needs": "verified Intercom contact email only."
-    },
-    {
-      "name": "merge_request_intake",
-      "answers": [
-        "please merge my duplicate profiles into this one"
-      ],
-      "cannot_answer": [
-        "merge the profiles (it never executes; execution is reserved)",
-        "promise when the merge will happen"
-      ],
-      "needs": "the conversation's customer email; the keep profile and each duplicate as credits.muso.ai links or ids."
     },
     {
       "name": "order_address_update",
