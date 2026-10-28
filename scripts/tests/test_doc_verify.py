@@ -16,8 +16,9 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import urllib.error
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -753,6 +754,266 @@ class RunnerTests(unittest.TestCase):
         path, ref, errs = runner.locate(["intercom:999:0"], pid, self.td.name, fetch=lambda c: conv, dl=dl,
                                         cache_root=self.cache)
         self.assertEqual((ref, Path(path).read_bytes()), ("intercom:999:0", data))
+
+
+class IntakeReq:
+    """A credit request as stage2.requests returns it, for D2."""
+    def __init__(self, rid=RID, uid=42, status="unverified", roles=("Mixing",)):
+        self.request_id, self.user_id, self.status, self.roles = rid, uid, status, list(roles)
+        self.track_id, self.isrc, self.names, self.title = "T1", "USAB12400001", ["Ann Alpha"], "Night Drive"
+        self.artists, self.release_date = ["Small Act"], None
+
+
+class IntakeD2Tests(unittest.TestCase):
+    """D2: the reader takes proof_intake filings directly (proof-loop lead 2026-10-27)."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        d = self.td.name
+        self.cache = os.path.join(d, "cache")
+        self.data = b"%PDF-1.4 a reply to core's more-details email"
+        self.sha = hashlib.sha256(self.data).hexdigest()
+        self.proof_path = os.path.join(d, "proof.sqlite")
+        ps = ProofStore(self.proof_path)
+        self.intake_id = ps.file_document(file_sha256=self.sha, user_id=42, conversation_id="777",
+                                          candidate_request_ids=[RID], received_at="2026-10-27T20:00:00Z",
+                                          matched_by="professional_id")
+        ps.close()
+        self.store = DocVerifyStore(os.path.join(d, "dv.sqlite"))
+        self.reqs = {RID: IntakeReq()}
+        self.fetches = []
+
+        def fetch(cid):
+            self.fetches.append(cid)
+            return {"source": {"author": {"type": "user"}},
+                    "conversation_parts": {"conversation_parts": [
+                        {"author": {"type": "user"}, "attachments": [
+                            {"url": "https://files/other.png", "name": "other.png"},
+                            {"url": "https://files/doc.pdf", "name": "doc.pdf"}]}]}}
+
+        def dl(url, dest):
+            Path(dest).write_bytes(self.data if url.endswith("doc.pdf") else b"another file")
+            return 1
+
+        def sandbox(path, declared, ctx, want_text=False):
+            return {"doc_text": "Blue Fern Records ... Ann Alpha mixed Night Drive", "mime": "application/pdf",
+                    "kind": "contract", "facts": {}}
+        self.h3 = {KEY: H3(verdict="GENUINE")}
+        self.h3_calls = []
+
+        def fake_shadow_h3(shadow, path, doc, requests, runner=None):
+            self.h3_calls.append((Path(path).read_bytes(), doc.intake_id, [r.request_id for r in requests]))
+            return self.h3
+        self._patch = unittest.mock.patch.object(runner.intake_read, "shadow_h3", fake_shadow_h3)
+        self._patch.start()
+        self.answer = GOOD_ANSWER
+        net = FakeNet(mb={"label": {"labels": [{"id": "L1", "name": "Blue Fern Records", "score": 100}]},
+                          "label/L1": {"relations": [{"type": "official homepage",
+                                                      "url": {"resource": "https://bluefern.com"}}]}},
+                      pages={"https://bluefern.com/about": "Dana Reyes, label manager"},
+                      deezer={"https://api.deezer.com/track/isrc:USAB12400001": {"album": {"id": 9}},
+                              "https://api.deezer.com/album/9": {"label": "Blue Fern Records"}})
+        self.deps = runner.Deps(
+            sandbox=sandbox, extractor=Extractor(self.store, key="k", post=lambda *a: or_response(self.answer)),
+            net=net, raw_credits=lambda tid: [raw("Ann Alpha", "Mixer")],
+            requests=lambda ids: {i: self.reqs[i] for i in ids if i in self.reqs}, cache_root=self.cache,
+            fetch=fetch, dl=dl, shadow_store=object())
+
+    def tearDown(self):
+        self._patch.stop()
+        self.td.cleanup()
+
+    def _run(self):
+        return runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+
+    def test_a_filed_document_is_read_by_sha_and_judged_against_its_open_request(self):
+        stats, rows = self._run()
+        self.assertEqual((stats.intake, stats.outcomes), (1, {"verified": 1}))
+        self.assertEqual(self.fetches, ["777"])
+        self.assertEqual(self.h3_calls, [(self.data, self.intake_id, [RID])])    # the bytes with the filed sha256
+        o = self.store.db.execute("SELECT intake_id, proof_id, request_id, role, user_id, h3_verdict, source_ref "
+                                  "FROM dv_outcomes").fetchone()
+        self.assertEqual(tuple(o), (self.intake_id, self.sha, RID, "Mixing", 42, "GENUINE", "intercom:777:1"))
+        stats, _ = self._run()                                                    # decided: not read again
+        self.assertEqual(stats.intake, 0)
+
+    def test_the_intake_path_never_writes_a_hold(self):
+        self.answer = {**GOOD_ANSWER, "sender": {"email": "dana@bluefern-records.co", "confidence": 0.9}}
+        stats, rows = self._run()
+        self.assertEqual(rows[0]["outcome"], gate.FORGED)
+        self.assertFalse(rows[0]["account_hold"])
+        self.assertEqual(self.store.held_users(), set())
+        detail = json.loads(self.store.db.execute("SELECT detail_json FROM dv_outcomes").fetchone()[0])
+        self.assertTrue(detail["would_hold"])
+
+    def test_no_h3_verdict_never_verifies(self):
+        self.h3 = {}
+        stats, rows = self._run()
+        self.assertNotEqual(rows[0]["outcome"], gate.VERIFIED)
+
+    def test_closed_or_foreign_requests_are_not_judged(self):
+        self.reqs = {RID: IntakeReq(status="approved")}
+        stats, rows = self._run()
+        self.assertEqual((stats.intake, rows, self.h3_calls), (1, [], []))
+        stats, _ = self._run()                                                    # closed: not looked at again
+        self.assertEqual(stats.intake, 0)
+        self.store.db.execute("DELETE FROM dv_steps")
+        self.reqs = {RID: IntakeReq(uid=99)}                                      # another account's request
+        stats, rows = self._run()
+        self.assertEqual(rows, [])
+
+    def test_a_document_not_found_in_its_conversation_is_retried_then_unknown(self):
+        self.deps.dl = lambda url, dest: Path(dest).write_bytes(b"not it") and 1
+        stats, rows = self._run()
+        self.assertEqual(rows[0]["outcome"], gate.UNKNOWN)
+        self.assertFalse(rows[0]["account_hold"])
+
+    def test_completion_is_per_claim_not_per_document(self):
+        # QA #1417: a verified claim does not end the retries of an unknown sibling.
+        self.reqs = {RID: IntakeReq(roles=("Mixing", "Producer"))}
+        self.h3 = {KEY: H3(verdict="GENUINE")}                  # no H3 verdict for the Producer claim -> unknown
+        stats, rows = self._run()
+        self.assertEqual(sorted((r["role"], r["outcome"]) for r in rows),
+                         [("Mixing", gate.VERIFIED), ("Producer", gate.UNKNOWN)])
+        for n in (2, 3):                                        # only the unknown claim is retried, MAX_UNKNOWN times
+            stats, rows = self._run()
+            self.assertEqual([(r["role"], r["outcome"]) for r in rows], [("Producer", gate.UNKNOWN)], n)
+        stats, rows = self._run()
+        self.assertEqual((stats.intake, rows), (0, []))          # settled: not even looked up
+
+    def test_more_than_sixty_claims_are_all_read_over_runs(self):
+        rids = [f"11111111-2222-3333-4444-{i:012d}" for i in range(70)]
+        self.reqs = {r: IntakeReq(rid=r) for r in rids}
+        db = sqlite3.connect(self.proof_path)
+        db.execute("UPDATE proof_intake SET candidate_request_ids_json=?", (json.dumps(rids),))
+        db.commit()
+        db.close()
+        self.h3 = {f"{r}#Mixing": H3(verdict="GENUINE") for r in rids}
+        _, rows1 = self._run()
+        _, rows2 = self._run()
+        self.assertEqual((len(rows1), len(rows2)), (runner.MAX_INTAKE_CLAIMS, 70 - runner.MAX_INTAKE_CLAIMS))
+        self.assertEqual({r["request_id"] for r in rows1 + rows2}, set(rids))
+
+    def test_a_candidate_added_after_a_run_is_read_next_run(self):
+        self._run()
+        rid2 = "11111111-2222-3333-4444-000000000002"
+        self.reqs[rid2] = IntakeReq(rid=rid2)
+        self.h3 = {**self.h3, f"{rid2}#Mixing": H3(verdict="GENUINE")}
+        ps = ProofStore(self.proof_path)
+        self.assertTrue(ps.add_candidates(42, self.sha, [RID, rid2]))
+        ps.close()
+        stats, rows = self._run()
+        self.assertEqual([r["request_id"] for r in rows], [rid2])   # only the new claim
+
+    def test_pairs_eval_runs_never_pick_up_intake(self):
+        stats, _ = runner.run(self.store, self.deps, proof_store=self.proof_path, pairs={})
+        self.assertEqual(stats.intake, 0)
+
+    def test_shadow_store_reads_h3_and_writes_nothing(self):
+        from credit_verify.docverify.intake_read import ShadowProofStore
+        sh = ShadowProofStore.open(self.proof_path)
+        self.assertEqual(sh._prior(), [])
+        sh.record(fp=None, verdict="GENUINE", request_id=KEY)
+        self.assertEqual(sh.recorded, [{"verdict": "GENUINE", "request_id": KEY}])
+        with self.assertRaises(sqlite3.OperationalError):
+            sh.db.execute("INSERT INTO verdicts (proof_id) VALUES ('x')")
+
+
+class ShadowH3RealTests(unittest.TestCase):
+    """D2's shadow H3 on a real PDF: H3 judges the claim, proof.sqlite is byte-identical after."""
+
+    def test_shadow_h3_judges_and_leaves_the_h3_store_untouched(self):
+        from credit_verify.proof import analyze, pdf_forensics
+        from credit_verify.proof.signals import ClaimContext
+        if not pdf_forensics.available():
+            self.skipTest("PyMuPDF required")
+        from credit_verify.docverify import intake_read
+        with tempfile.TemporaryDirectory() as d:
+            doc = pdf_forensics.pymupdf.open()
+            page = doc.new_page()
+            for i, line in enumerate(["SPLIT SHEET", "Song Title: Night Drive", "ISRC: USAB12400001",
+                                      "Artist: Small Act", "Mixing: Ann Alpha", "Signed 2024-03-01"]):
+                page.insert_text((72, 72 + 16 * i), line, fontname="helv", fontsize=11)
+            path = os.path.join(d, "sheet.pdf")
+            Path(path).write_bytes(doc.tobytes())
+            proof = os.path.join(d, "proof.sqlite")
+            ProofStore(proof).close()
+            before = hashlib.sha256(Path(proof).read_bytes()).hexdigest()
+            shadow = intake_read.ShadowProofStore.open(proof)
+            idoc = intake_read.IntakeDoc("42:x", 42, "x", "777", None, "c")
+
+            def runner_(p, dcl, c, cs):
+                return analyze.extract(p, dcl, ClaimContext.from_dict(c), [ClaimContext.from_dict(x) for x in cs])
+            out = intake_read.shadow_h3(shadow, path, idoc, [IntakeReq()], runner=runner_)
+            shadow.db.close()
+            self.assertEqual(set(out), {KEY})
+            self.assertIsNotNone(out[KEY].verdict)
+            self.assertEqual(hashlib.sha256(Path(proof).read_bytes()).hexdigest(), before)
+            self.assertEqual(len(shadow.recorded), 1)
+
+
+class LiveAnchorTests(unittest.TestCase):
+    def test_both_dsps_must_credit_the_claimant_on_a_fresh_capture(self):
+        now = datetime(2026, 10, 28, tzinfo=timezone.utc)
+        since = "2026-10-27T21:00:00Z"
+        fam = xc.family_of("Mixer")
+        fresh = [raw("Ann Alpha", "Mixer", "spotify", "2026-10-27T22:00:00Z"),
+                 raw("Ann Alpha", "Mixer", "tidal", "2026-10-27T22:05:00Z")]
+        self.assertEqual(xc.live_anchor(fresh, fam, ["Ann Alpha"], since, now), {"spotify": True, "tidal": True})
+        self.assertEqual(xc.live_anchor(fresh, fam, ["Ann Alpha"], None, now), {"spotify": False, "tidal": False})
+        stale = [raw("Ann Alpha", "Mixer", "spotify", "2026-10-01T00:00:00Z"), fresh[1]]       # captured before the run
+        self.assertEqual(xc.live_anchor(stale, fam, ["Ann Alpha"], since, now), {"spotify": False, "tidal": True})
+        other = [raw("Bob Beta", "Mixer", "spotify", "2026-10-27T22:00:00Z"), fresh[1]]        # credits someone else
+        self.assertFalse(xc.live_anchor(other, fam, ["Ann Alpha"], since, now)["spotify"])
+        mlc = [raw("Ann Alpha", "Mixer", "mlc", "2026-10-27T22:00:00Z"), fresh[1]]             # MLC never anchors
+        self.assertFalse(xc.live_anchor(mlc, fam, ["Ann Alpha"], since, now)["spotify"])
+        c = xc.dsp(fresh, "Mixing", ["Ann Alpha"], None, since)
+        self.assertEqual(c.detail["fresh_anchor"], {"spotify": True, "tidal": True})
+
+
+class TrayTests(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.store = DocVerifyStore(os.path.join(self.td.name, "dv.sqlite"))
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _out(self, pid, rid, outcome, need=None, uid=42, fresh=True, dsp="positive", anchor=("spotify", "tidal")):
+        self.store.outcome("r1", proof_id=pid, request_id=rid, role="Mixing", user_id=uid, source_ref="s",
+                           h3_verdict="GENUINE", outcome=outcome, reason="why", need=need, account_hold=False,
+                           detail={"issuer": {"name": "Blue Fern"}, "received_at": "2026-10-27T20:00:00Z"},
+                           intake_id=f"{uid}:{pid}")
+        self.store.step("r1", pid, "xc_dsp", dsp, {"fresh_since": "2026-10-27T21:00:00Z" if fresh else None,
+                                                   "fresh_anchor": {d: d in anchor for d in ("spotify", "tidal")}},
+                        f"{rid}#Mixing")
+
+    def test_trays_sort_by_outcome_and_anchor(self):
+        from credit_verify.docverify import tray
+        self._out("p1", "r-ok", "verified")
+        self._out("p2", "r-stale", "verified", fresh=False)
+        self._out("p3", "r-gate", "verified", uid=7)
+        self._out("p6", "r-tidal-only", "verified", anchor=("tidal",))          # QA #1417: one DSP is not enough
+        self._out("p7", "r-no-fresh-row", "verified", anchor=())                # fresh_since alone is not an anchor
+        for i in range(22):
+            self._out(f"f{i}", f"r-f{i}", "forged")
+        self._out("p4", "r-need", "unverifiable", need="distributor_dashboard_with_code")
+        self._out("p5", "r-unk", "unknown")
+        t = tray.build(self.store, gate=lambda uid: (uid == 42, f"account gate {'allow' if uid == 42 else 'hold'}"),
+                       tracks=lambda ids: {i: "Night Drive" for i in ids})
+        self.assertEqual([a["request_id"] for a in t.approve], ["r-ok"])
+        self.assertEqual(sorted(a["request_id"] for a in t.not_approvable),
+                         ["r-gate", "r-no-fresh-row", "r-stale", "r-tidal-only"])
+        self.assertIn("spotify", next(a for a in t.not_approvable if a["request_id"] == "r-tidal-only")["why"])
+        self.assertIn("same-run", next(a for a in t.not_approvable if a["request_id"] == "r-stale")["why"])
+        self.assertEqual([a["first_20_human"] for a in t.decline["forged"]].count(True), 20)
+        self.assertEqual(t.need, [{"user_id": 42, "request_id": "r-need", "need": "distributor_dashboard_with_code",
+                                   "track": "Night Drive", "role": "Mixing", "issuer": "Blue Fern",
+                                   "received_at": "2026-10-27T20:00:00Z"}])
+        self.assertEqual(t.retry, 1)
+        md = tray.markdown(t, 1, "2026-10-27T23:00:00Z")
+        self.assertIn("APPROVE 1", md)
+        self.assertIn("Nothing here has been written to core", md)
 
 
 class CronContractTests(unittest.TestCase):

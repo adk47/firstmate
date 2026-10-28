@@ -8,6 +8,12 @@ Subcommands:
   intercom      Analyse new customer attachments of proof conversations in the
                 Intercom attachment cache Caroline's edge plugin keeps on
                 node-8 (one read-only Intercom GET per conversation).
+  file          FILE ONLY (no judgement): record every attachment of a LIST of
+                conversations with the account it belongs to, the conversation
+                and the account's candidate credit requests. This is what catches
+                a document sent as a reply to our email (a new thread: no
+                in-thread ask) and conversations the edge cache never kept.
+                Dry run unless --apply.
   email         Analyse attachments mailed to the inbound verification address
                 (Maildir; dark until the address exists).
   stage2        SHADOW stage 2: judge the documents already on file for the
@@ -81,6 +87,39 @@ def cmd_intercom(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_file(args: argparse.Namespace) -> int:
+    from credit_verify.proof import intake
+    from credit_verify.proof.intercom import intercom_token, make_fetch
+    from credit_verify.proof.stage2 import held_rows
+    from credit_verify.proof.store import ProofStore
+    tok = intercom_token()
+    if not tok:
+        log("no MUSOAI_INTERCOM_TOKEN: cannot read the conversations")
+        print("NO_REPLY")
+        return 1
+    convs = intake.read_conversations(args.conversations)
+    open_rows: dict[int, list[dict]] = {}
+    if args.open_rows:
+        open_rows = intake.open_rows_json(args.open_rows)
+    held: dict[int, list[dict]] = {}
+    if args.held_from_ledger:
+        for h in held_rows():
+            held.setdefault(h.user_id, []).append({"request_id": h.request_id, "paid": h.paid,
+                                                  "decided_at": h.decided_at})
+    stats = intake.run(ProofStore.for_run(args.store, args.apply), conversations=convs, fetch=make_fetch(tok),
+                       lookup=intake.professional_lookup, open_rows=open_rows, held=held,
+                       export_path=args.proof_on_file or intake.PROOF_ON_FILE,
+                       cache_root=args.cache_root or intake.CACHE_ROOT, apply=args.apply,
+                       limit=args.limit, workers=args.workers, max_fetches=args.max_fetches,
+                       open_rows_fn=None if args.open_rows else intake.open_rows_trino, log=log)
+    log("file " + json.dumps({k: v for k, v in stats.items() if not isinstance(v, list)}))
+    if args.out:
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        (Path(args.out) / "proof-intake.json").write_text(json.dumps(stats, indent=1, default=str))
+    print("NO_REPLY")
+    return 0
+
+
 def cmd_email(args: argparse.Namespace) -> int:
     from credit_verify.proof import email_in
     from credit_verify.proof.store import ProofStore
@@ -125,6 +164,11 @@ def cmd_stage2_sample(args: argparse.Namespace) -> int:
     return 0
 
 
+def intake_max_fetches() -> int:
+    from credit_verify.proof.intake import MAX_FETCHES
+    return MAX_FETCHES
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--store", default=None, help="proof store (default /var/lib/hydra-credit-verify/proof.sqlite)")
@@ -140,6 +184,22 @@ def parser() -> argparse.ArgumentParser:
     pi.add_argument("--max-files", type=int, default=300)
     pi.add_argument("--out", default=None)
     pi.set_defaults(fn=cmd_intercom)
+    pf = sub.add_parser("file", help="FILE ONLY: record a conversation list's attachments with account + candidate requests")
+    pf.add_argument("--conversations", required=True, help="file of Intercom conversation ids (one per line)")
+    pf.add_argument("--apply", action="store_true", help="write the filings (default: count only, write nothing)")
+    pf.add_argument("--open-rows", default=None,
+                    help="JSON {user_id: [{request_id,status}]} of the accounts' open credit requests "
+                         "(default: one read-only Trino SELECT for the resolved accounts)")
+    pf.add_argument("--held-from-ledger", action="store_true",
+                    help="also treat the decider's current proof-on-file holds as candidate requests")
+    pf.add_argument("--proof-on-file", default=None, help="proof-on-file export (account fallback)")
+    pf.add_argument("--cache-root", default=None, help="Intercom attachment cache")
+    pf.add_argument("--limit", type=int, default=None, help="first N conversations only")
+    pf.add_argument("--workers", type=int, default=3)
+    pf.add_argument("--max-fetches", type=int, default=intake_max_fetches(),
+                    help="Intercom attachment downloads per run (conversations beyond it wait for the next run)")
+    pf.add_argument("--out", default=None)
+    pf.set_defaults(fn=cmd_file)
     pe = sub.add_parser("email", help="analyse attachments mailed to the inbound verification address")
     pe.add_argument("--maildir", default=None)
     pe.set_defaults(fn=cmd_email)

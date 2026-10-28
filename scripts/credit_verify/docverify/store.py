@@ -94,6 +94,11 @@ class DocVerifyStore:
         if fresh:
             os.chmod(self.path, 0o600)
         self.db.executescript(SCHEMA)
+        # D2 (2026-10-27): outcomes of documents filed in proof_intake are keyed by intake_id too.
+        if "intake_id" not in {r[1] for r in self.db.execute("PRAGMA table_info(dv_outcomes)")}:
+            self.db.execute("ALTER TABLE dv_outcomes ADD COLUMN intake_id TEXT")
+            self.db.commit()
+        self.db.execute("CREATE INDEX IF NOT EXISTS dv_out_intake ON dv_outcomes(intake_id)")
         self.lock = threading.Lock()
 
     # -- state ---------------------------------------------------------------
@@ -118,14 +123,15 @@ class DocVerifyStore:
 
     def outcome(self, run_id: str, *, proof_id: str, request_id: str, role: str, user_id: int | None,
                 source_ref: str | None, h3_verdict: str | None, outcome: str, reason: str, need: str | None,
-                account_hold: bool, detail: dict[str, Any]) -> None:
+                account_hold: bool, detail: dict[str, Any], intake_id: str | None = None) -> None:
         with self.lock, self.db:
             self.db.execute(
                 "INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id, source_ref, h3_verdict,"
-                " outcome, reason, need, account_hold, detail_json, version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " outcome, reason, need, account_hold, detail_json, version, intake_id)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run_id, utcnow(), proof_id, request_id, role, user_id, source_ref, h3_verdict, outcome,
                  reason[:600], need, int(account_hold), json.dumps(detail, default=str, ensure_ascii=False)[:20_000],
-                 VERSION))
+                 VERSION, intake_id))
 
     def llm_call(self, row: dict[str, Any]) -> None:
         with self.lock, self.db:
@@ -150,6 +156,35 @@ class DocVerifyStore:
         rows = [r[0] for r in self.db.execute("SELECT outcome FROM dv_outcomes WHERE proof_id=? AND request_id=? "
                                               "AND role=? AND version=?", (proof_id, rid, role, VERSION))]
         return any(o != "unknown" for o in rows) or len(rows) >= MAX_UNKNOWN
+
+    def intake_finished_keys(self, intake_id: str) -> set[str]:
+        """Claim keys '<request_id>#<role>' of one filing that need no more runs: a decided
+        outcome (anything but `unknown`), or MAX_UNKNOWN unknown outcomes. Per claim, never
+        per document (QA #1417): one verified claim does not end a sibling's retries."""
+        done: set[str] = set()
+        unknown: dict[str, int] = {}
+        for rid, role, outcome in self.db.execute(
+                "SELECT request_id, role, outcome FROM dv_outcomes WHERE intake_id=? AND version=?", (intake_id, VERSION)):
+            key = f"{rid}#{role}"
+            if outcome != "unknown":
+                done.add(key)
+            else:
+                unknown[key] = unknown.get(key, 0) + 1
+        return done | {k for k, n in unknown.items() if n >= MAX_UNKNOWN}
+
+    def intake_keys_recorded(self, intake_id: str) -> dict[str, Any] | None:
+        """The last run's {candidates, keys} for a filing (None before its first run)."""
+        row = self.db.execute("SELECT detail_json FROM dv_steps WHERE request_id=? AND step='intake_keys' AND version=? "
+                              "ORDER BY id DESC LIMIT 1", (f"intake:{intake_id}", VERSION)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def intake_settled(self, intake_id: str, candidates: list[str]) -> bool:
+        """No Trino needed: the last run saw exactly these candidate requests and every
+        claim key it found open is finished."""
+        rec = self.intake_keys_recorded(intake_id)
+        if rec is None or sorted(rec.get("candidates") or []) != sorted(candidates):
+            return False
+        return set(rec.get("keys") or []) <= self.intake_finished_keys(intake_id)
 
     LATEST = ("SELECT o.* FROM dv_outcomes o JOIN (SELECT proof_id, request_id, role, MAX(id) id FROM dv_outcomes "
               "WHERE version=? GROUP BY proof_id, request_id, role) l USING(id)")

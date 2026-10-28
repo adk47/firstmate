@@ -38,7 +38,7 @@ from credit_verify.proof.sandbox import MAX_BYTES, SandboxError
 
 from . import VERSION
 from . import crosscheck as xc
-from . import forensics, gate
+from . import forensics, gate, intake_read
 from .extract import MIN_CONFIDENCE, Extraction, Extractor, claimant_elsewhere, supports
 from .store import DocVerifyStore, utcnow
 
@@ -146,6 +146,10 @@ class Deps:
     # When this run requested a fresh Spotify+Tidal capture (IDP helpers.fresh_capture), the
     # request time; None = no capture requested, so nothing can be `contradicted` (D5).
     fresh_since: str | None = None
+    # D2: the H3 sandbox runner for documents filed in proof_intake (pipeline._multi_sandbox
+    # when None) and the H3 store read READ-ONLY for their reuse matching.
+    h3_runner: Any = None
+    shadow_store: Any = None
 
 
 @dataclass
@@ -155,12 +159,13 @@ class Stats:
     pairs: int = 0
     retry: int = 0
     superseded: int = 0
+    intake: int = 0
     outcomes: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {"run_id": self.run_id, "documents": self.documents, "pairs": self.pairs, "retry": self.retry,
-                "superseded": self.superseded,
+                "superseded": self.superseded, "intake": self.intake,
                 "outcomes": dict(self.outcomes), "errors": self.errors[:10]}
 
 
@@ -170,14 +175,21 @@ def extract_attempts(store: DocVerifyStore, proof_id: str) -> int:
 
 
 def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_id: str, keys: list[str],
-                    deps: Deps, run_id: str, stats: Stats, held: set[int]) -> list[dict[str, Any]]:
-    """All steps for one document and its claims; returns the outcome rows."""
+                    deps: Deps, run_id: str, stats: Stats, held: set[int],
+                    intake: intake_read.IntakeDoc | None = None) -> list[dict[str, Any]]:
+    """All steps for one document and its claims; returns the outcome rows. With `intake`
+    (D2) the document is a proof_intake filing: its bytes are found in its conversation by
+    sha256, H3 runs here in shadow, outcomes carry the intake_id, and no hold is written."""
     tmp = tempfile.mkdtemp(prefix="cvdocverify-", dir="/dev/shm" if os.path.isdir("/dev/shm") else None)
     os.chmod(tmp, 0o700)
     rows: list[dict[str, Any]] = []
     try:
-        path, ref, errs = locate(source_refs(proof_db, proof_id), proof_id, tmp, fetch=deps.fetch, dl=deps.dl,
-                                 cache_root=deps.cache_root)
+        if intake is not None:
+            path, ref, errs = intake_read.locate_intake(intake, tmp, fetch=deps.fetch, dl=deps.dl,
+                                                        cache_root=deps.cache_root)
+        else:
+            path, ref, errs = locate(source_refs(proof_db, proof_id), proof_id, tmp, fetch=deps.fetch, dl=deps.dl,
+                                     cache_root=deps.cache_root)
         store.step(run_id, proof_id, "locate", "ok" if path else "error", {"source_ref": ref, "errors": errs[:5]})
         if not path and any("Error" in e for e in errs) \
                 and store.db.execute("SELECT COUNT(*) FROM dv_steps WHERE proof_id=? AND step='locate' AND "
@@ -216,12 +228,24 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                                  else None, official)
         store.step(run_id, proof_id, "xc_domain", dom.status, dom.detail)
         store.step(run_id, proof_id, "xc_signatory", sig.status, sig.detail)
+        h3_map: dict[str, forensics.H3] = {}
+        if intake is not None and path:
+            mine = list({rid: reqs[rid] for rid in (k.split("#", 1)[0] for k in keys) if rid in reqs}.values())
+            try:
+                shadow = deps.shadow_store or intake_read.ShadowProofStore.open(PROOF_STORE)
+                h3_map = intake_read.shadow_h3(shadow, path, intake, mine, runner=deps.h3_runner)
+                store.step(run_id, proof_id, "h3_shadow", "ok", {"claims": {k: v.verdict for k, v in h3_map.items()}},
+                           f"intake:{intake.intake_id}")
+            except Exception as exc:  # noqa: BLE001 - no H3 verdict means `unknown`, never a pass
+                store.step(run_id, proof_id, "h3_shadow", "error", {"error": f"{type(exc).__name__}: {exc}"[:300]},
+                           f"intake:{intake.intake_id}")
         credits_cache: dict[str, tuple[list[dict[str, Any]] | None, str | None]] = {}
         release_cache: dict[str, xc.Release] = {}
         for key in keys:
             rid, _, role = key.partition("#")
             r = reqs.get(rid)
-            h3 = forensics.read_h3(proof_db, proof_id, key)
+            h3 = (h3_map.get(key) or forensics.H3(verdict=None)) if intake is not None \
+                else forensics.read_h3(proof_db, proof_id, key)
             findings = forensics.check(h3, ex, facts, mime)
             store.step(run_id, proof_id, "forensics", forensics.worst(findings) or "ok",
                        {"h3": h3.verdict, "h3_reasons": h3.reasons[:3], "findings": [f.as_dict() for f in findings]},
@@ -255,11 +279,17 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
             store.step(run_id, proof_id, "gate", o.outcome, {"reason": o.reason, "need": o.need,
                                                             "account_hold": o.account_hold,
                                                             "extracted_support": support}, key)
+            hold = o.account_hold and intake is None     # the intake path writes no hold (proof-loop lead)
             store.outcome(run_id, proof_id=proof_id, request_id=rid, role=role, user_id=uid, source_ref=ref,
                           h3_verdict=h3.verdict, outcome=o.outcome, reason=o.reason, need=o.need,
-                          account_hold=o.account_hold, detail={**o.detail, "issuer": ex.issuer,
-                                                               "signatory": ex.signatory, "sender": ex.sender})
-            if o.account_hold and uid:
+                          account_hold=hold, detail={**o.detail, "issuer": ex.issuer,
+                                                     "signatory": ex.signatory, "sender": ex.sender,
+                                                     **({"would_hold": True} if o.account_hold and not hold else {}),
+                                                     **({"received_at": intake.received_at,
+                                                         "conversation_id": intake.conversation_id}
+                                                        if intake is not None else {})},
+                          intake_id=intake.intake_id if intake is not None else None)
+            if hold and uid:
                 held.add(uid)
                 # A hold invalidates the account's earlier `verified` outcomes too,
                 # whether they came earlier in this run or in an earlier run.
@@ -268,22 +298,25 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
             stats.pairs += 1
             stats.outcomes[o.outcome] += 1
             rows.append({"proof_id": proof_id, "request_id": rid, "role": role, "user_id": uid, "h3": h3.verdict,
-                         "outcome": o.outcome, "reason": o.reason, "need": o.need, "account_hold": o.account_hold,
+                         "outcome": o.outcome, "reason": o.reason, "need": o.need, "account_hold": hold,
                          "checks": {c.step: c.status for c in checks},
                          "findings": [f.name for f in findings], "issuer": ex.issuer.get("name"),
                          "issuer_type": ex.issuer.get("type"), "sender_domain": ex.sender.get("domain"),
                          "signatory": ex.signatory.get("name"), "doc_type": ex.doc_type,
-                         "extract_ok": ex.ok, "extracted_support": bool(support)})
+                         "extract_ok": ex.ok, "extracted_support": bool(support),
+                         "intake_id": intake.intake_id if intake is not None else None})
         return rows
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, since: str | None = None,
-        max_docs: int = 30, pairs: dict[str, list[str]] | None = None,
+        max_docs: int = 30, pairs: dict[str, list[str]] | None = None, intake: bool | None = None,
         log: Callable[[str], None] = lambda m: None) -> tuple[Stats, list[dict[str, Any]]]:
     """One run. `pairs` (eval): verify exactly these documents and claims,
-    ignoring `since` and what is already done."""
+    ignoring `since` and what is already done. The cron (no `pairs`) then fills the rest of
+    `max_docs` with documents filed in proof_intake (D2) unless `intake` is False."""
+    intake_from_store = (pairs is None) if intake is None else intake
     run_id = f"dv-{utcnow()}-{uuid.uuid4().hex[:8]}"
     stats = Stats(run_id)
     proof_db = ro(proof_store)
@@ -304,9 +337,45 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
                 stats.errors.append(f"{proof_id[:12]}: {type(exc).__name__}: {str(exc)[:160]}")
                 store.step(run_id, proof_id, "run", "error", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"})
             log(f"document {proof_id[:12]}: {len(keys)} claims")
+        if intake_from_store:
+            room = max(0, max_docs - stats.documents)
+            for doc in intake_read.intake_docs(proof_db, store.intake_settled, room):
+                stats.documents += 1
+                stats.intake += 1
+                try:
+                    keys = intake_keys(doc, deps)        # every open claim, uncapped
+                    store.step(run_id, doc.sha, "intake_keys", "ok" if keys else "closed",
+                               {"candidates": sorted(doc.candidate_ids), "keys": keys}, f"intake:{doc.intake_id}")
+                    finished = store.intake_finished_keys(doc.intake_id)
+                    todo = [k for k in keys if k not in finished][:MAX_INTAKE_CLAIMS]
+                    if not todo:
+                        continue
+                    rows += verify_document(store, proof_db, doc.sha, todo, deps, run_id, stats, held, intake=doc)
+                except Exception as exc:  # noqa: BLE001 - one document must not stop the run
+                    stats.errors.append(f"intake {doc.intake_id[:16]}: {type(exc).__name__}: {str(exc)[:160]}")
+                    store.step(run_id, doc.sha, "run", "error", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"},
+                               f"intake:{doc.intake_id}")
+                log(f"intake {doc.intake_id[:16]}: {len(doc.candidate_ids)} candidate request(s)")
     finally:
         proof_db.close()
     return stats, rows
+
+
+def intake_keys(doc: intake_read.IntakeDoc, deps: Deps) -> list[str]:
+    """Claim keys '<request_id>#<role>' for a filed document's candidate requests that are
+    still open (unverified / user_verification_needed) and belong to the filing account."""
+    from credit_verify.proof.stage2 import HELD
+    reqs = deps.requests(doc.candidate_ids)
+    keys = []
+    for rid in doc.candidate_ids:
+        r = reqs.get(rid)
+        if r is None or r.status not in HELD or (r.user_id and r.user_id != doc.user_id):
+            continue
+        keys += [f"{rid}#{role}" for role in (r.roles or ["unknown"])]
+    return list(dict.fromkeys(keys))
+
+
+MAX_INTAKE_CLAIMS = 60          # unfinished claims per filed document per run (stage 2's MAX_TRACKS)
 
 
 def now_iso() -> str:

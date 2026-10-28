@@ -182,6 +182,33 @@ def eval_markdown(rows: list[dict], label: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def cmd_tray(args: argparse.Namespace) -> int:
+    """Jan's tray + h2's need queue from the reader's latest outcomes. Writes only the two
+    files under --out-dir; no status write, no hold, no message."""
+    from credit_review import account_gate
+    from credit_verify.docverify import tray as tray_mod
+    from credit_verify.docverify.store import DocVerifyStore, utcnow
+    from credit_verify.proof import stage2
+    store = DocVerifyStore(args.store)
+
+    def gate(uid: int) -> tuple[bool, str]:
+        g = account_gate.check(int(uid))
+        return g.allowed, g.why()
+
+    def tracks(ids: list[str]) -> dict[str, str]:
+        return {rid: r.title for rid, r in stage2.requests(ids).items()}
+    t = tray_mod.build(store, gate=gate, tracks=tracks)
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    md = out / f"jan-docs-dv-b{args.batch}.md"
+    md.write_text(tray_mod.markdown(t, args.batch, utcnow()))
+    (out / f"need-queue-b{args.batch}.json").write_text(json.dumps(t.need, indent=1, default=str))
+    log(f"tray b{args.batch}: approve {len(t.approve)}, not approvable {len(t.not_approvable)}, forged "
+        f"{len(t.decline['forged'])}, contradicted {len(t.decline['contradicted'])}, need {len(t.need)}, "
+        f"retry {t.retry} -> {md}")
+    return 0
+
+
 def cmd_summary(args: argparse.Namespace) -> int:
     from credit_verify.docverify import VERSION
     from credit_verify.docverify.store import DocVerifyStore
@@ -215,6 +242,10 @@ def parser() -> argparse.ArgumentParser:
     pe = sub.add_parser("eval", help="verify the manifest into a scratch store; markdown on stdout")
     pe.add_argument("--manifest", required=True)
     pe.set_defaults(fn=cmd_eval)
+    pt = sub.add_parser("tray", help="Jan's tray (jan-docs-dv-bN.md) + h2's need queue from the latest outcomes")
+    pt.add_argument("--batch", type=int, required=True)
+    pt.add_argument("--out-dir", required=True)
+    pt.set_defaults(fn=cmd_tray)
     pm = sub.add_parser("summary", help="outcome counts")
     pm.set_defaults(fn=cmd_summary)
     return p

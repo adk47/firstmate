@@ -185,6 +185,25 @@ def _ts(v: Any) -> datetime | None:
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
+def live_anchor(raw_credits: list[dict[str, Any]], family: str, names: list[str], fresh_since: str | None,
+                now: datetime | None = None) -> dict[str, bool]:
+    """{spotify, tidal}: does each DSP credit the claimant in this role family on a capture
+    taken at or after `fresh_since` (requested by this run) and within 30 days? The APPROVE
+    tray needs BOTH (proof-loop lead §1 DECIDE); stored, MLC or Jaxsta rows never count."""
+    now = now or datetime.now(timezone.utc)
+    since = _ts(fresh_since) if fresh_since else None
+    out = {}
+    for dsp_name in LIVE_DSPS:
+        out[dsp_name] = bool(since) and any(
+            str((c.get("profile") or {}).get("source") or "").lower() == dsp_name
+            and family_of(str(c.get("credit") or "")) == family
+            and (_ts(c.get("updatedAt")) or since - timedelta(days=1)) >= since
+            and now - (_ts(c.get("updatedAt")) or now) <= timedelta(days=FRESH_MAX_AGE_DAYS)
+            and any(names_match(str((c.get("profile") or {}).get("name") or ""), n) for n in names if n)
+            for c in raw_credits)
+    return out
+
+
 def live_contradiction(raw_credits: list[dict[str, Any]], family: str, names: list[str],
                        fresh_since: str | None, now: datetime | None = None) -> tuple[bool, list[str]]:
     """(contradicts, why-not). Fable [key=doc-verify-go-live] Q3, 2026-10-27: a credit is
@@ -224,7 +243,8 @@ def dsp(raw_credits: list[dict[str, Any]] | None, role: str, names: list[str], e
     detail = {"family": ev.family, "status": ev.status, "for_claimant": ev.trusted_for_profile[:5],
               "for_others": ev.trusted_for_others[:5], "capture": "muso catalog raw credits (spotify/tidal/mlc/jaxsta)",
               "captured_at": max((str(c.get("updatedAt") or "") for c in raw_credits), default=None) or None,
-              "fresh_since": fresh_since}
+              "fresh_since": fresh_since,
+              "fresh_anchor": live_anchor(raw_credits, ev.family, names, fresh_since)}
     if ev.status == CONFIRMED:
         return Check("xc_dsp", POSITIVE, detail)
     if ev.status == CONTRADICTED:
