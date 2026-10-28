@@ -572,6 +572,9 @@ Caroline (edge) approves nothing: `capability-approvers.txt` lists no approver a
 `credits_verify` / `profiles_consolidate` / `profiles_claim_self` stay off. Deploy refuses a
 source that lists one and strips `MUSO_CAPABILITY_APPROVER` from edge.env
 (`scripts/lib/ensure-no-service-approver.sh`; a 10-27 deploy re-opened it once).
+Her status/document/merge/handoff actions return only approved lines and never write core
+(`docs/credit-verification/caroline-actions.md`). Anchor identity with `getCustomerEmail`:
+`getAuthorEmail` returns the teammate on threads our own outbound note opened.
 Credit REMOVALS are the mirror: core-backend #10310 refuses every agent/API token on the
 admin credit DELETE routes and on approved->unverified/rejected take-backs, and
 approved->user_verification_needed is illegal (the only exit deletes every role on the

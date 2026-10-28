@@ -75,9 +75,15 @@ def cmd_intercom(args: argparse.Namespace) -> int:
         log("no MUSOAI_INTERCOM_TOKEN: cannot classify conversations")
         print("NO_REPLY")
         return 1
+    from caroline_actions import ledger as caroline_ledger
+    try:
+        intake = caroline_ledger.queued_docs(args.intake_ledger, days=args.intake_days)
+    except Exception as exc:  # noqa: BLE001 - an unreadable intake never stops the in-thread pass
+        log(f"caroline document intake unreadable ({type(exc).__name__}); in-thread proof conversations only")
+        intake = {}
     stats = intercom.run(ProofStore(args.store), days=args.days, fetch=intercom.make_fetch(tok),
-                         workers=args.workers, max_files=args.max_files)
-    log("intercom " + json.dumps({k: stats[k] for k in ("proof_conversations", "files_analysed",
+                         workers=args.workers, max_files=args.max_files, intake=intake)
+    log("intercom " + json.dumps({k: stats[k] for k in ("proof_conversations", "intake_conversations", "files_analysed",
                                                          "files_skipped_done", "classify_errors", "verdicts")}))
     if args.out:
         Path(args.out).mkdir(parents=True, exist_ok=True)
@@ -213,6 +219,10 @@ def parser() -> argparse.ArgumentParser:
     pi.add_argument("--workers", type=int, default=3)
     pi.add_argument("--max-files", type=int, default=300)
     pi.add_argument("--out", default=None)
+    pi.add_argument("--intake-ledger", default=os.environ.get("CAROLINE_ACTIONS_LEDGER",
+                                                              "/var/lib/hydra/caroline-actions/ledger.sqlite3"),
+                    help="Caroline's document intake queue (read-only; scripts/caroline_actions)")
+    pi.add_argument("--intake-days", type=int, default=30)
     pi.set_defaults(fn=cmd_intercom)
     pf = sub.add_parser("file", help="FILE ONLY: record a conversation list's attachments with account + candidate requests")
     pf.add_argument("--source", choices=("intercom", "gmail"), default="intercom",

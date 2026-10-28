@@ -149,15 +149,41 @@ def list_cache(root: str, since_epoch: float) -> dict[str, list[str]]:
     return out
 
 
+def intake_files(intake: dict[str, list[str]] | None, root: str) -> dict[str, list[str]]:
+    """Caroline's document intake (scripts/caroline_actions, doc-intake): files a customer sent that she
+    filed for the reader, whether or not anyone asked in that thread (a reply to core's "We require more
+    details" email opens a NEW thread, so the ask heuristic never sees it). Only original files that
+    still exist inside <root>/<conversation>/ are kept: the queue can never point the reader elsewhere."""
+    out: dict[str, list[str]] = {}
+    real_root = os.path.realpath(root)
+    for conv, paths in (intake or {}).items():
+        if not str(conv).isdigit():
+            continue
+        base = os.path.join(real_root, str(conv)) + os.sep
+        keep = []
+        for p in paths:
+            rp = os.path.realpath(p)
+            if rp.startswith(base) and ORIGINAL.match(os.path.basename(rp)) and os.path.isfile(rp):
+                keep.append(rp)
+        if keep:
+            out[str(conv)] = sorted(set(keep))
+    return out
+
+
 def run(store: ProofStore, *, days: int, fetch: Fetch, root: str = CACHE_ROOT, workers: int = 4,
-        max_files: int = 5000, runner: Runner = sandbox.run, now: float | None = None) -> dict[str, Any]:
+        max_files: int = 5000, runner: Runner = sandbox.run, now: float | None = None,
+        intake: dict[str, list[str]] | None = None) -> dict[str, Any]:
     """Classify cached conversations, analyse every original file of the
-    proof conversations not analysed yet by this FORENSICS_VERSION. Returns an
-    aggregate (counts only, conversation ids shortened to 5 digits)."""
+    proof conversations not analysed yet by this FORENSICS_VERSION, plus every
+    file Caroline filed through her document intake (`intake`: conversation id ->
+    cached paths). Returns an aggregate (counts only, conversation ids shortened
+    to 5 digits)."""
     now = now or time.time()
     cache = list_cache(root, now - days * 86400)
+    queued = intake_files(intake, root)
     stats: dict[str, Any] = {"conversations_cached": len(cache), "proof_conversations": 0, "classify_errors": 0,
                              "files_analysed": 0, "files_skipped_done": 0, "files_before_ask": 0,
+                             "intake_conversations": len(queued), "intake_files": sum(len(v) for v in queued.values()),
                              "verdicts": Counter(), "signals": Counter(),
                              "hard_examples": [], "reuse_examples": []}
     convs: list[Conversation] = []
@@ -171,13 +197,18 @@ def run(store: ProofStore, *, days: int, fetch: Fetch, root: str = CACHE_ROOT, w
         if doc is None:
             return None
         asked_at, ch = classify(conv, doc)
-        return Conversation(conv, asked_at, ch, sent_after(cache[conv], asked_at) if asked_at is not None else [])
+        files = sent_after(cache.get(conv, []), asked_at) if asked_at is not None else []
+        if conv in queued:
+            # Filed by Caroline: analysed whether or not this thread holds an ask.
+            return Conversation(conv, asked_at if asked_at is not None else 0.0, ch,
+                                sorted({os.path.realpath(x) for x in files} | set(queued[conv])))
+        return Conversation(conv, asked_at, ch, files)
 
     with ThreadPoolExecutor(max_workers=5) as pool:
-        for c in pool.map(cls, list(cache)):
+        for c in pool.map(cls, list(cache) + [k for k in queued if k not in cache]):
             if c and c.proof:
                 convs.append(c)
-                stats["files_before_ask"] += len(cache[c.conv_id]) - len(c.files)
+                stats["files_before_ask"] += max(0, len(cache.get(c.conv_id, [])) - len(c.files))
     stats["proof_conversations"] = len(convs)
     todo = []
     for c in convs:
@@ -205,7 +236,7 @@ def run(store: ProofStore, *, days: int, fetch: Fetch, root: str = CACHE_ROOT, w
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         for c, f, raw in pool.map(one, todo):
             [res] = finalize(store, f, raw, contact_h=c.contact_h, source="intercom",
-                             source_ref=f"{c.conv_id}/{os.path.relpath(f, os.path.join(root, c.conv_id))}", ctx=empty)
+                             source_ref=f"{c.conv_id}/{os.path.relpath(os.path.realpath(f), os.path.realpath(os.path.join(root, c.conv_id)))}", ctx=empty)
             stats["files_analysed"] += 1
             stats["verdicts"][res.verdict] += 1
             for s in res.signals:

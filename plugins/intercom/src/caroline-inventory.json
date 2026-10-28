@@ -267,6 +267,18 @@
     },
     {
       "kind": "read",
+      "name": "credit_status_lookup",
+      "requires": "the conversation's customer email (getCustomerEmail: the contact, never the teammate who opened the thread).",
+      "resolves": "read-only scripts/caroline-actions.py status (core replica, verify ledger, proof-on-file, account gate, IDP hold list)."
+    },
+    {
+      "kind": "write",
+      "name": "credit_trust_handoff",
+      "requires": "the conversation's customer email (getCustomerEmail), never a model argument.",
+      "resolves": "caroline-actions.py handoff, a WRITE to the board queue only: queues the case for the credit-trust board, once per conversation and reason per 7 days."
+    },
+    {
+      "kind": "read",
       "name": "credit_verification_check",
       "requires": "Muso admin JWT (MusoAdminClient, GET-only) + MUSOAI_INTERCOM_TOKEN (env).",
       "resolves": "read-only lookup of a customer's user_verification_needed (UVN) credits."
@@ -291,6 +303,12 @@
     },
     {
       "kind": "write",
+      "name": "document_intake",
+      "requires": "the conversation's customer email (getCustomerEmail), never a model argument.",
+      "resolves": "caroline-actions.py doc-intake, a WRITE to the reader's intake queue only: files this conversation's cached attachments into the document reader's intake with the user id and candidate request (or claim) ids."
+    },
+    {
+      "kind": "write",
       "name": "founding_buyback_link",
       "requires": "verified Intercom contact email only -- there is no target parameter, so the link can never be minted for another account.",
       "resolves": "muso founding buyback-checkout --email <verified-email> --requester <verified-email> --env prod --json (POST /admin/founding/buyback/checkout)."
@@ -300,6 +318,12 @@
       "name": "founding_status",
       "requires": "verified Intercom contact email only (deriveConvId -> getAuthorEmail); the CLI exact-matches the workspace email server-side and refuses ambiguity.",
       "resolves": "muso founding status --email <verified-email> --env prod --json (GET /admin/team; the founder envelope lives on the list items)."
+    },
+    {
+      "kind": "write",
+      "name": "merge_request_intake",
+      "requires": "the conversation's customer email (getCustomerEmail), never a model argument.",
+      "resolves": "caroline-actions.py merge-intake (ledger, once per request per 7 days), then create_ticket profile-merge."
     },
     {
       "kind": "write",
@@ -358,8 +382,8 @@
     {
       "kind": "write",
       "name": "remove_credits",
-      "requires": "The wrapper uses muso-admin-api.sh's JWT cache (same Muso admin JWT as the other admin-API tools).",
-      "resolves": "DELETE /api/v3/admin/track/{trackId}/profile/{profileId}/credits via the bash wrapper at workspaces/support/skills/customer-credit-removal/scripts/remove-credits.sh."
+      "requires": "muso-admin-api.sh's JWT cache; the agent never sees the token.",
+      "resolves": "DELETE /api/v3/admin/track/{trackId}/profile/{profileId}/credits via the bash wrapper workspaces/support/skills/customer-credit-removal/scripts/remove-credits.sh, the single source of truth for ownership, title…"
     },
     {
       "kind": "write",

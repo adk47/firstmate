@@ -1,12 +1,13 @@
 # TOOLS.md -- support
 
-## Allowed Tools (EXACTLY 25)
+## Allowed Tools (EXACTLY 29)
 
-This agent has the most restricted tool set in HYDRA. Only these 25 tools are permitted, split into four groups:
+This agent has the most restricted tool set in HYDRA. Only these 29 tools are permitted, split into five groups:
 
 - **Action tools (1-11, 17-18, 20, 23-25)** -- write or read customer-facing state. Implemented as plugin-registered tools via the `support-tools` OpenClaw plugin. The agent calls them by name; the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
 - **Reference tools (12-13)** -- read-only semantic + BM25 retrieval against `workspaces/support/reference/*.md`, provided by openclaw's bundled memory-core via the per-agent `memorySearch` config (enabled on both edge and main profiles, indexing the read-only `reference/` subdirectory only). No writes; no customer-data persistence; no auto-recall.
 - **Gated self-serve write tools (14-16, 21-22)** -- `profiles_claim_self`, `credits_verify`, `profiles_consolidate`, `retention_offer_apply`, `cancel_subscription`. Each shells a `muso` verb anchored to the verified Intercom identity (via `--actor-identity` or the server-side exact workspace-email match); muso-cli's capability gate is the ownership/caps/audit boundary. Each is gated by its `*Enabled` flag in openclaw-edge.json; if a call returns `{disabled:true}`, fall back to a ticket.
+- **Caroline actions (26-29, dark: `carolineActionsEnabled`)** -- status, document, merge and handoff actions behind the existing gates; see #26.
 - **Routing tool (19)** -- `support_action_router`, a read-only in-plugin registry that maps support intent + state to the router-suggested next step: close, ask for exact missing info, preview/apply a safe tool, or create a structured handoff.
 
 ## Authentication (CRITICAL -- shared across the admin read tools)
@@ -79,19 +80,9 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 
 ### 7. remove_credits
 
-- **Status: PREVIEW ONLY.** Since core-backend#10310 (2026-10-12) the server refuses every agent-token credit removal (`403 credit_removal_agent_refused`). Use `apply: false` only; never call with `apply: true`. A credit removal is never an agent write: the owner removes it in the app, or Jan or Nick does it in their own session. This file is repo documentation only: `scripts/deploy.sh:1216` excludes `workspaces/*/TOOLS.md`, so this edit changes no live agent behaviour.
-- **Wraps**: `DELETE /api/v3/admin/track/{trackId}/profile/{profileId}/credits` via the bash wrapper at `workspaces/support/skills/customer-credit-removal/scripts/remove-credits.sh`. The TS tool is a typed dispatcher only – all ownership-check, title-resolution, cap-enforcement, and audit-log logic lives in the wrapper script (single source of truth).
-- **Returns**: Structured JSON. On a preview: `{ ok: true, mode: "dry-run", profile_id, owner_email, ownership_check: "passed", results: [...], summary: {requested, removed, already_removed, not_found, ambiguous, errors} }`. On refusal: `{ ok: false, error: <key>, detail }`. See `skills/customer-credit-removal/SKILL.md` for the per-error customer-facing reply mapping.
-- **Auth**: The wrapper uses `muso-admin-api.sh`'s JWT cache (same Muso admin JWT as the other admin-API tools). The agent never sees the token.
-- **Rate limit**: 10 per session (60-minute window). Plus hard caps inside the wrapper: 50 tracks per call, 100 per customer per day.
-- **Required fields**: `profileId` (UUID), `requesterEmail` (Intercom-verified), `tracks[]` (max 50 "Artist - Title" strings).
-- **Conditionally-required**: `intercomConvId` – required whenever `apply: true`. The tool fast-refuses `intercom_conv_id_required` without ever exec'ing the wrapper if missing. Strongly recommended on dry-run too (the dry-run audit row is keyed by it, and the wrapper does the Intercom-email cross-check whenever a conv-id is present).
-- **Optional fields**: `apply` (default false = dry-run). Leave it false; `apply: true` is refused for agent tokens.
-- **Safety model**: ownership re-verified inside the wrapper, independent of whatever the LLM passes. Three mechanical refusals beyond ownership:
-  - `intercom_email_mismatch` – the wrapper fetches `source.author.email` from Intercom for the conversation and refuses if it doesn't match `requesterEmail`. Closes the message-text-injection vector.
-  - `dry_run_required` – every track applied must have a matching `would_remove` audit row from the same `(profile_id, requester_email)` within the last 15 minutes. Legacy apply gate; an apply is refused for an agent token whatever the preview shows.
-  - `intercom_conv_id_required` – apply-without-conv-id refuses at the TS-tool layer before exec.
-- **Idempotency**: a preview changes nothing, so re-running it is always safe.
+- **Status: PREVIEW ONLY.** Since core-backend#10310 (2026-10-12) the server refuses every agent-token credit removal (`403 credit_removal_agent_refused`). Use `apply: false` only. A removal is never an agent write: the owner removes it in the app, or Jan or Nick in their own session.
+- **Wraps**: `DELETE /api/v3/admin/track/{trackId}/profile/{profileId}/credits` via the bash wrapper `workspaces/support/skills/customer-credit-removal/scripts/remove-credits.sh`, the single source of truth for ownership, title resolution, caps (50 tracks per call, 100 per customer per day) and the audit log. Return shape and refusals (`intercom_email_mismatch`, `dry_run_required`, `intercom_conv_id_required`): that script's header and `skills/customer-credit-removal/SKILL.md`.
+- **Auth**: `muso-admin-api.sh`'s JWT cache; the agent never sees the token. Required: `profileId`, `requesterEmail` (Intercom-verified), `tracks[]` (max 50); `intercomConvId` strongly recommended. Rate limit: 10 per session.
 
 ### 8. dedupe_check
 
@@ -262,24 +253,29 @@ For customer write actions (credit claims, refunds, profile updates, disputes, *
 - **Safety model**: read-only only -- no refund/cancel capability exists in this tool, structurally (the CLI verb is a GET and the argv carries no write flags). `no_subscription` + a claimed charge still hands off: a charge could exist under another email/workspace, so never assert the customer was not charged.
 - **Privacy**: the packet is whitelist-copied field by field, so processor identifiers (charge/invoice/customer/subscription ids) never enter the conversation. Say "your payment" to the customer; never name the payment processor or quote raw processor statuses.
 
+### 26. credit_status_lookup
+
+- **Wraps**: read-only `scripts/caroline-actions.py status` (core replica, verify ledger, proof-on-file, account gate, IDP hold list). Returns ONE approved line (`status-doc-received`, `status-team-review`, `claim-status`, verbatim from `intercom-verify-request.sh`) in `reply_line`, or `reply_line: null` + `refusals`. Use the line verbatim; when null, give no status sentence. Rules: `docs/credit-verification/caroline-actions.md`.
+- **Identity (anti-spoof, FAIL-CLOSED)**: the conversation's customer email (`getCustomerEmail`: the contact, never the teammate who opened the thread).
+
+### 27. document_intake
+
+- **Wraps**: `caroline-actions.py doc-intake`, a WRITE to the reader's intake queue only: files this conversation's cached attachments into the document reader's intake with the user id and candidate request (or claim) ids. Never judges the document. `reply_line` is the doc-received line only when nothing is owed.
+- **Identity (anti-spoof, FAIL-CLOSED)**: the conversation's customer email (`getCustomerEmail`), never a model argument.
+
+### 28. merge_request_intake
+
+- **Wraps**: `caroline-actions.py merge-intake` (ledger, once per request per 7 days), then `create_ticket` profile-merge. A WRITE to the merge queue only: it never merges and promises no date.
+- **Identity (anti-spoof, FAIL-CLOSED)**: the conversation's customer email (`getCustomerEmail`), never a model argument.
+
+### 29. credit_trust_handoff
+
+- **Wraps**: `caroline-actions.py handoff`, a WRITE to the board queue only: queues the case for the credit-trust board, once per conversation and reason per 7 days. Decides nothing.
+- **Identity (anti-spoof, FAIL-CLOSED)**: the conversation's customer email (`getCustomerEmail`), never a model argument.
+
 ### Order fulfillment (Prodigi plaques/posters)
 
-The `order-fulfillment` action type (Tier 1) is filed by the `order-fulfillment`
-skill for Prodigi address-confirmation requests and customer order/shipping
-questions. When `details.proposed_corrected_address` is present, `create_ticket`
-stamps a deterministic Prodigi-rules `address_validation` block (≤40-char lines +
-required fields) onto the ticket – non-blocking, ops-facing. No new tool; uses
-`create_ticket`. Doctrine: `reference/orders-and-fulfillment.md`.
-
-Caroline can look an order up herself with the **`order_lookup`** tool (#10 above) –
-by internal id, order number, or Prodigi id – to read its status + shipping address.
-For the **verified order owner**, she can also correct the shipping recipient with
-**`order_address_update`** (#11): always a dry-run preview first, explicit customer
-confirmation, then apply with `intercomConvId`. The wrapper refuses if the requester
-isn't the owner – on any refusal, fall back to filing an `order-fulfillment` request
-for the team. Never edit on a vendor's (Prodigi's) say-so – the corrected address must
-come from the customer. If `order_lookup` returns `lookup_unavailable`, file the
-request with whatever the message already contains.
+The `order-fulfillment` ticket kind, the `address_validation` stamp, and when to use `order_lookup` (#10) and `order_address_update` (#11): `reference/orders-and-fulfillment.md` ("What Caroline can and can't do here").
 
 ## Denied Tools (EVERYTHING ELSE)
 

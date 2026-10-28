@@ -3,6 +3,7 @@
     "criteria": {
       "billing_status": "muso subscription billing-summary --email <verified-email> --env prod --json (read-only; muso-cli >=0.10.0 -> GET /admin/team/:id/billing-summary).",
       "create_ticket": "ClickUp task creation in list 901000600160",
+      "credit_status_lookup": "read-only scripts/caroline-actions.py status (core replica, verify ledger, proof-on-file, account gate, IDP hold list).",
       "credit_verification_check": "read-only lookup of a customer's user_verification_needed (UVN) credits.",
       "credits_search": "GET /api/v3/admin/profile/{profileId}/credits?limit=<L>&offset=<O>",
       "dedupe_check": "read-only verification for a customer profile-merge request.",

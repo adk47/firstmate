@@ -1474,6 +1474,47 @@ class IntercomChannelTests(Base):
         analysed = [run(failing_runner)["files_analysed"] for _ in range(store_mod.MAX_ATTEMPTS + 1)]
         self.assertEqual(analysed, [1] * store_mod.MAX_ATTEMPTS + [0])
 
+    def test_caroline_intake_files_are_analysed_with_no_ask_in_the_thread(self):
+        # A reply to core's "We require more details" email opens a NEW thread with no admin ask:
+        # the ask heuristic skips it, Caroline's document intake files it (caroline-operator-c1).
+        from credit_verify.proof import intercom
+        root = os.path.join(self.tmp.name, "ic")
+        d = os.path.join(root, "555", "notif_a")
+        os.makedirs(d)
+        f = Path(d, "1.png")
+        f.write_bytes(b"\x89PNG555")
+        Path(d, "1-p-1.png").write_bytes(b"render")
+        doc = {"source": {"body": "On Tue, Muso.AI wrote: We require more details", "author": {"type": "user"},
+                          "attachments": [{"name": "1.png"}]},
+               "contacts": {"contacts": [{"id": "c5"}]}, "conversation_parts": {"conversation_parts": []}}
+        none = intercom.run(self.store, days=3, fetch=lambda c: doc, root=root, runner=fake_runner)
+        self.assertEqual((none["proof_conversations"], none["files_analysed"]), (0, 0))
+        stats = intercom.run(self.store, days=3, fetch=lambda c: doc, root=root, runner=fake_runner,
+                             intake={"555": [str(f)]})
+        self.assertEqual((stats["intake_conversations"], stats["proof_conversations"], stats["files_analysed"]),
+                         (1, 1, 1))
+        refs = [r["source_ref"] for r in self.store.db.execute("SELECT source_ref FROM proofs")]
+        self.assertEqual(refs, ["555/notif_a/1.png"])
+        again = intercom.run(self.store, days=3, fetch=lambda c: doc, root=root, runner=fake_runner,
+                             intake={"555": [str(f)]})
+        self.assertEqual((again["files_analysed"], again["files_skipped_done"]), (0, 1))
+
+    def test_the_intake_queue_can_never_point_the_reader_outside_its_conversation(self):
+        from credit_verify.proof import intercom
+        root = os.path.join(self.tmp.name, "ic")
+        os.makedirs(os.path.join(root, "666", "notif_a"))
+        os.makedirs(os.path.join(root, "777", "notif_a"))
+        other = Path(root, "777", "notif_a", "1.png")
+        other.write_bytes(b"\x89PNG777")
+        outside = Path(self.tmp.name, "1.png")
+        outside.write_bytes(b"\x89PNGout")
+        render = Path(root, "666", "notif_a", "2-p-1.png")
+        render.write_bytes(b"render")
+        kept = intercom.intake_files({"666": [str(other), str(outside), str(render),
+                                              os.path.join(root, "666", "..", "777", "notif_a", "1.png")],
+                                      "../777": [str(other)], "888": [os.path.join(root, "888", "1.png")]}, root)
+        self.assertEqual(kept, {})
+
     def test_only_files_after_a_proof_ask_count_and_renders_are_skipped(self):
         from credit_verify.proof import intercom
         root = os.path.join(self.tmp.name, "ic")

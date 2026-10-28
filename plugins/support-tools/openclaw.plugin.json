@@ -28,7 +28,11 @@
       "cancel_subscription",
       "billing_status",
       "company_finder_prep",
-      "company_finder_finalize"
+      "company_finder_finalize",
+      "credit_status_lookup",
+      "document_intake",
+      "merge_request_intake",
+      "credit_trust_handoff"
     ]
   },
   "configSchema": {
@@ -66,6 +70,13 @@
       },
       "orderDetailsRequireIv": {
         "description": "order_lookup detail gate. Default (absent) and any value except false / \"false\" / 0 / \"0\" = ON: order_lookup returns {status, hold} only to every caller, because Intercom Identity Verification is off and a contact's email/external_id is browser-assertable. Set false ONLY after intercom-identity-fix-i2 ships and IV is enforced; then the full order goes to the order's own verified contact (owner anchor). Env fallback ORDER_DETAILS_REQUIRE_IV."
+      },
+      "carolineActionsEnabled": {
+        "description": "Dark-ship flag for Caroline's real, safe actions (credit_status_lookup, document_intake, merge_request_intake, credit_trust_handoff; caroline-operator-c1). Accepts true / \"true\" / \"1\" / 1; anything else (including absent) keeps all four disabled and returning a no-op sentinel. They never approve, reject, delete, hide or send; approved lines additionally need node-8's /etc/hydra/caroline-actions-lines.enabled. Same fail-closed runtime parse as creditVerificationEnabled."
+      },
+      "carolineActionsScriptPath": {
+        "type": "string",
+        "description": "Optional absolute override for scripts/caroline-actions.py."
       }
     }
   }
