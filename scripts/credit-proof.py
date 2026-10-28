@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from credit_review import admin as admin_api  # noqa: E402
 
+PAYING_USERS = os.environ.get("CREDIT_TRUST_PAYING_USERS", "/var/lib/credit-trust/paying-users.json")
 KILL_SWITCH = os.environ.get("CREDIT_VERIFY_KILL_SWITCH", "/etc/hydra/credit-verify.disabled")
 
 
@@ -150,6 +151,55 @@ def cmd_file(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_file_recent(args: argparse.Namespace) -> int:
+    """The hourly document intake (cron credit-verify-proof-file): everything customers sent since the
+    last run, Intercom + support@, into proof_intake only. Dry run unless --apply."""
+    from credit_verify.proof import email_in, gmail_intake, intake, recent
+    from credit_verify.proof.intercom import intercom_token, make_fetch
+    from credit_verify.proof.stage2 import held_rows
+    from credit_verify.proof.store import ProofStore
+    if _guard("document intake"):
+        return 0
+    tok = intercom_token()
+    if not tok:
+        log("no MUSOAI_INTERCOM_TOKEN: cannot read the conversations")
+        print("NO_REPLY")
+        return 1
+    store = ProofStore.for_run(args.store, args.apply)
+    held: dict[int, list[dict]] = {}
+    for h in held_rows():
+        held.setdefault(h.user_id, []).append({"request_id": h.request_id, "paid": h.paid, "decided_at": h.decided_at})
+    export = intake.export_users()
+    try:
+        paying = set(json.loads(Path(PAYING_USERS).read_text())["ids"])
+    except (OSError, ValueError, KeyError, TypeError):
+        paying = set()
+        log("paying users unreadable: conversations are filed in search order")
+    admin_lookup = email_in.admin_user_lookup(admin_api.AdminClient())
+    try:
+        res = recent.run(
+            state_path=args.state or recent.STATE, hours=args.hours, apply=args.apply,
+            conv_search=recent.intercom_search(tok),
+            gmail_search=None if args.no_gmail else recent.gog_search(),
+            order=lambda convs: recent.paid_first(convs, export, paying),
+            file_conversations=lambda ids: intake.run(
+                store, conversations=ids, fetch=make_fetch(tok), lookup=intake.professional_lookup, held=held,
+                apply=args.apply, max_fetches=args.max_fetches, open_rows_fn=intake.open_rows_trino, log=log),
+            file_messages=lambda ids: gmail_intake.run(
+                store, message_ids=ids, fetch=gmail_intake.gog_raw, lookup=admin_lookup,
+                open_rows=intake.open_rows_trino, apply=args.apply, log=log),
+            log=log)
+    except recent.Busy as exc:
+        log(str(exc))
+        print("NO_REPLY")
+        return 0
+    if args.out:
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        (Path(args.out) / "file-recent.json").write_text(json.dumps(res, indent=1, default=str))
+    print("NO_REPLY")
+    return 0
+
+
 def cmd_email(args: argparse.Namespace) -> int:
     from credit_verify.proof import email_in
     from credit_verify.proof.store import ProofStore
@@ -233,6 +283,14 @@ def parser() -> argparse.ArgumentParser:
                     help="Intercom attachment downloads per run (conversations beyond it wait for the next run)")
     pf.add_argument("--out", default=None)
     pf.set_defaults(fn=cmd_file)
+    pr2 = sub.add_parser("file-recent", help="hourly intake: documents sent since the last run (Intercom + support@)")
+    pr2.add_argument("--apply", action="store_true", help="write the filings and advance the window")
+    pr2.add_argument("--hours", type=float, default=2.0, help="first-run window (later runs start at the last run)")
+    pr2.add_argument("--max-fetches", type=int, default=60)
+    pr2.add_argument("--no-gmail", action="store_true", help="Intercom only")
+    pr2.add_argument("--state", default=None)
+    pr2.add_argument("--out", default=None)
+    pr2.set_defaults(fn=cmd_file_recent)
     pe = sub.add_parser("email", help="analyse attachments mailed to the inbound verification address")
     pe.add_argument("--maildir", default=None)
     pe.set_defaults(fn=cmd_email)

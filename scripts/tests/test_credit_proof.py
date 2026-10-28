@@ -1513,7 +1513,7 @@ class CronContractTests(unittest.TestCase):
         jobs = json.loads((Path(__file__).resolve().parents[2] / "cron-jobs.json").read_text())["jobs"]
         mine = {j["name"]: j for j in jobs if "credit-proof.py" in " ".join(j.get("payload", {}).get("argv", []))}
         self.assertEqual(set(mine), {"credit-verify-proof-intercom", "credit-verify-proof-email",
-                                     "credit-verify-proof-stage2"})
+                                     "credit-verify-proof-stage2", "credit-verify-proof-file"})
         for j in mine.values():
             self.assertEqual(j["payload"]["kind"], "command")
             self.assertEqual(j["delivery"], {"mode": "none"})
@@ -1521,6 +1521,14 @@ class CronContractTests(unittest.TestCase):
         self.assertEqual(mine["credit-verify-proof-intercom"]["payload"]["argv"][2], "intercom")
         self.assertFalse(mine["credit-verify-proof-email"]["enabled"])
         self.assertEqual(mine["credit-verify-proof-stage2"]["payload"]["argv"][2], "stage2")
+        # The document intake (proof-loop lead 068): file-only, off until the captain says so, and its
+        # module has no send, status-write or judging path.
+        f = mine["credit-verify-proof-file"]
+        self.assertEqual((f["payload"]["argv"][2], f["enabled"]), ("file-recent", False))
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "proof" / "recent.py").read_text()
+        for banned in ("send-gateway", "intercom-verify-request", "/admin/credit", "PATCH", "/reply", "record(",
+                       "verdict", "approve", "decline"):
+            self.assertNotIn(banned, src, banned)
 
 
 class CliTests(unittest.TestCase):

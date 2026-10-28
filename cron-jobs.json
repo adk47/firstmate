@@ -1464,6 +1464,38 @@
       }
     },
     {
+      "id": "76066263-89ce-568e-8805-a20644c235f5",
+      "agentId": "operations",
+      "createdAtMs": 1793232000000,
+      "updatedAtMs": 1793232000000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": false,
+      "name": "credit-verify-proof-file",
+      "description": "Document INTAKE, file only (proof-loop lead 2026-10-28 068; captain 12:1xZ: document intake belongs to the verification agents, never Caroline). Hourly at :15: every document a customer sent since the last run goes into proof_intake with the account and its open credit requests, and NOTHING else: no judgement, no send, no status write. Intercom: conversations updated since the last run (one read-only search, paged), customer attachments only (staff files excluded), paid accounts first, at most 60 attachment downloads per run (the rest is carried to the next run, never dropped). support@: messages with an attachment since the last run (read-only gog), authenticated sender (Google's own Authentication-Results, dmarc or aligned dkim pass) and a confirmed account only; forged-header tests pin it (captain 12:18Z item 2). The window advances only after a complete --apply run; one run at a time (lock). The doc-verify reader picks the filings up (shadow). Shipped enabled:false: enable on the captain's word. Kill switch: /etc/hydra/credit-verify.disabled.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "15 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-proof.py",
+          "file-recent",
+          "--apply",
+          "--max-fetches",
+          "60"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 3000
+      }
+    },
+    {
       "id": "b08cbb96-e5b4-59d6-95b1-a4cbddac9022",
       "agentId": "operations",
       "createdAtMs": 1792112400000,

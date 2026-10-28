@@ -528,5 +528,130 @@ class GmailIntakeTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.g.gog_raw(bad)
 
+
+class RecentIntakeTest(unittest.TestCase):
+    """credit-proof.py file-recent: the hourly intake (proof-loop lead 068)."""
+
+    def setUp(self) -> None:
+        from credit_verify.proof import recent
+        self.r = recent
+        self.tmp = tempfile.mkdtemp()
+        self.state = os.path.join(self.tmp, "state.json")
+        self.searches: list[dict] = []
+        self.filed: list[list[str]] = []
+        self.msgs_filed: list[list[str]] = []
+        self.pages = [{"conversations": [{"id": "c1"}, {"id": "c2"}], "pages": {"next": {"starting_after": "x"}}},
+                      {"conversations": [{"id": "c3"}], "pages": {}}]
+        self.deferred: list[str] = []
+
+    def _search(self, body):
+        self.searches.append(body)
+        return self.pages[len(self.searches) - 1] if len(self.searches) <= len(self.pages) else {"conversations": []}
+
+    def _run(self, apply=True, now=10_000.0, gmail=None, file_messages=None):
+        def fc(ids):
+            self.filed.append(ids)
+            return {"deferred_conversations": list(self.deferred)}
+
+        def fm(ids):
+            self.msgs_filed.append(ids)
+            return {"fetch_errors": []}
+        return self.r.run(state_path=self.state, hours=2, apply=apply, now=now, conv_search=self._search,
+                          gmail_search=gmail, file_conversations=fc, file_messages=file_messages or fm)
+
+    def test_first_run_files_the_last_hours_paged_and_advances_only_on_apply(self) -> None:
+        out = self._run(apply=False)
+        self.assertEqual(self.filed, [["c1", "c2", "c3"]])
+        self.assertEqual(self.searches[0]["query"], {"field": "updated_at", "operator": ">",
+                                                     "value": int(10_000 - 7200 - 600)})
+        self.assertEqual(self.searches[1]["pagination"]["starting_after"], "x")
+        self.assertFalse(os.path.exists(self.state))                       # a dry run never moves the window
+        self.assertFalse(out.get("window_advanced"))
+        self.searches.clear()
+        out = self._run(apply=True)
+        self.assertTrue(out["window_advanced"])
+        self.assertEqual(json.loads(Path(self.state).read_text())["since"], 10_000.0)
+
+    def test_the_next_run_starts_at_the_last_run_with_overlap(self) -> None:
+        self._run(apply=True, now=10_000.0)
+        self.searches.clear()
+        self.pages = [{"conversations": [], "pages": {}}]
+        self._run(apply=True, now=13_600.0)
+        self.assertEqual(self.searches[0]["query"]["value"], int(10_000 - 600))
+
+    def test_deferred_conversations_are_carried_never_dropped(self) -> None:
+        self.deferred = ["c3"]
+        self._run(apply=True, now=10_000.0)
+        self.assertEqual(json.loads(Path(self.state).read_text())["carry"], ["c3"])
+        self.deferred = []
+        self.searches.clear()
+        self.pages = [{"conversations": [{"id": "c9"}], "pages": {}}]
+        self._run(apply=True, now=13_600.0)
+        self.assertEqual(self.filed[-1], ["c3", "c9"])                       # the carried one first
+
+    def test_a_page_cap_or_a_failed_message_holds_the_window(self) -> None:
+        self.r.MAX_PAGES, old = 1, self.r.MAX_PAGES
+        try:
+            out = self._run(apply=True)
+        finally:
+            self.r.MAX_PAGES = old
+        self.assertEqual((out["complete"], out["window_advanced"]), (False, False))
+        self.searches.clear()
+        out = self._run(apply=True, gmail=lambda q, page: {"messages": [{"id": "m1"}]},
+                        file_messages=lambda ids: {"fetch_errors": ["m1: RuntimeError"]})
+        self.assertEqual((out["retry_messages"], out["window_advanced"]), (["m1"], False))
+
+    def test_a_failed_first_run_keeps_its_window_start(self) -> None:
+        # QA #1447: an incomplete FIRST run saved since=null; a run hours later then skipped the gap.
+        out = self._run(apply=True, now=10_000.0, gmail=lambda q, page: {"messages": [{"id": "m1"}]},
+                        file_messages=lambda ids: {"fetch_errors": ["m1: RuntimeError"]})
+        self.assertFalse(out["window_advanced"])
+        self.assertEqual(json.loads(Path(self.state).read_text())["since"], 10_000.0 - 7200)
+        self.searches.clear()
+        self.pages = [{"conversations": [], "pages": {}}]
+        self._run(apply=True, now=50_000.0)                                      # 11 h later
+        self.assertEqual(self.searches[0]["query"]["value"], int(10_000 - 7200 - 600))   # not 50_000 - 7200
+
+    def test_a_transient_intercom_error_holds_the_window_a_permanent_one_does_not(self) -> None:
+        def run_with(errors):
+            def fc(ids):
+                self.filed.append(ids)
+                return {"deferred_conversations": [], "errors": errors}
+            return self.r.run(state_path=self.state, hours=2, apply=True, now=10_000.0, conv_search=self._search,
+                              gmail_search=None, file_conversations=fc, file_messages=lambda ids: {})
+        out = run_with(["…12345#0: HTTPError"])                               # download failed: retry the range
+        self.assertEqual((out["window_advanced"], out["intercom_transient_errors"]), (False, ["…12345#0: HTTPError"]))
+        os.remove(self.state)
+        self.searches.clear()
+        out = run_with(["…12345#0: ValueError"])                              # over 25 MB: never retriable
+        self.assertTrue(out["window_advanced"])
+
+    def test_gmail_search_asks_for_attachments_since_the_window(self) -> None:
+        asked = []
+        self._run(apply=False, gmail=lambda q, page: asked.append(q) or {"messages": [{"id": "m1"}, {"id": "m2"}]})
+        self.assertEqual(asked, [f"has:attachment after:{int(10_000 - 7200 - 600)}"])
+        self.assertEqual(self.msgs_filed, [["m1", "m2"]])
+
+    def test_one_run_at_a_time(self) -> None:
+        fd = self.r.locked(self.state)
+        try:
+            with self.assertRaises(self.r.Busy):
+                self._run()
+        finally:
+            os.close(fd)
+
+    def test_paid_accounts_first(self) -> None:
+        self.assertEqual(self.r.paid_first(["a", "b", "c"], {"b": {7}, "c": {9}}, {7}), ["b", "a", "c"])
+
+    def test_the_cron_is_committed_file_only_and_off(self) -> None:
+        jobs = json.loads((Path(__file__).resolve().parents[2] / "cron-jobs.json").read_text())["jobs"]
+        job = next(j for j in jobs if j["name"] == "credit-verify-proof-file")
+        self.assertEqual(job["enabled"], False)                             # on the captain's word only
+        self.assertEqual(job["payload"]["argv"][:3], ["python3", "/opt/hydra/scripts/credit-proof.py", "file-recent"])
+        self.assertEqual(job["sessionTarget"], "isolated")
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "proof" / "recent.py").read_text()
+        for banned in ("send-gateway", "intercom-verify-request", "/admin/credit", "PUT", "PATCH", "/reply"):
+            self.assertNotIn(banned, src)
+
 if __name__ == "__main__":
     unittest.main()
