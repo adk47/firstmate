@@ -88,6 +88,10 @@ CREATE TABLE IF NOT EXISTS dv_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS dv_raw_credits (track_id TEXT PRIMARY KEY, at TEXT NOT NULL, items_json TEXT NOT NULL);
 -- D2: a filing's candidate requests and claim keys as the last run saw them, UNTRUNCATED (dv_steps
 -- detail is capped at 20,000 chars; a 40-request filing overflowed it and broke selection).
+-- Claim keys of a filing the document does not name (fan-out cut, > FANOUT candidate requests):
+-- recorded once, no pair row, finished.
+CREATE TABLE IF NOT EXISTS dv_intake_unmatched (intake_id TEXT NOT NULL, version TEXT NOT NULL, at TEXT NOT NULL,
+  keys_json TEXT NOT NULL, PRIMARY KEY (intake_id, version));
 CREATE TABLE IF NOT EXISTS dv_intake_keys (intake_id TEXT NOT NULL, version TEXT NOT NULL, at TEXT NOT NULL,
   candidates_json TEXT NOT NULL, keys_json TEXT NOT NULL, PRIMARY KEY (intake_id, version));
 """
@@ -177,16 +181,39 @@ class DocVerifyStore:
         """Claim keys '<request_id>#<role>' of one filing that need no more runs: a decided
         outcome (anything but `unknown`), or MAX_UNKNOWN unknown outcomes. Per claim, never
         per document (QA #1417): one verified claim does not end a sibling's retries."""
-        done: set[str] = set()
+        done: set[str] = set(self.intake_unmatched(intake_id))
         unknown: dict[str, int] = {}
-        for rid, role, outcome in self.db.execute(
-                "SELECT request_id, role, outcome FROM dv_outcomes WHERE intake_id=? AND version=?", (intake_id, VERSION)):
+        runs: dict[str, bool] = {}            # run -> did it decide anything for this document?
+        for rid, role, outcome, run in self.db.execute(
+                "SELECT request_id, role, outcome, run_id FROM dv_outcomes WHERE intake_id=? AND version=?",
+                (intake_id, VERSION)):
             key = f"{rid}#{role}"
+            runs[run] = runs.get(run, False) or outcome != "unknown"
             if outcome != "unknown":
                 done.add(key)
             else:
                 unknown[key] = unknown.get(key, 0) + 1
+        if sum(1 for decided in runs.values() if not decided) >= MAX_UNKNOWN:
+            # Per DOCUMENT (proof-loop lead 070): a document-level failure (H3 UNDETERMINED, an unreadable
+            # file) gave nothing but `unknown` in MAX_UNKNOWN runs - every claim is finished, so a
+            # 200-request account cannot re-read the document and its pairs again and again. Only keys
+            # ATTEMPTED at least once are finished: a candidate added later is read before it settles (QA #1448).
+            return done | set(unknown)
         return done | {k for k, n in unknown.items() if n >= MAX_UNKNOWN}
+
+    def record_intake_unmatched(self, intake_id: str, keys: list[str]) -> None:
+        with self.lock, self.db:
+            have = self.intake_unmatched(intake_id)
+            self.db.execute("INSERT OR REPLACE INTO dv_intake_unmatched (intake_id, version, at, keys_json) "
+                            "VALUES (?,?,?,?)", (intake_id, VERSION, utcnow(), json.dumps(sorted(set(have) | set(keys)))))
+
+    def intake_unmatched(self, intake_id: str) -> list[str]:
+        row = self.db.execute("SELECT keys_json FROM dv_intake_unmatched WHERE intake_id=? AND version=?",
+                              (intake_id, VERSION)).fetchone()
+        try:
+            return list(json.loads(row[0])) if row else []
+        except (TypeError, ValueError):
+            return []
 
     def record_intake_keys(self, intake_id: str, candidates: list[str], keys: list[str]) -> None:
         with self.lock, self.db:

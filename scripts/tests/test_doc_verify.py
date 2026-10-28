@@ -1137,6 +1137,71 @@ class IntakeD2Tests(unittest.TestCase):
         o = self.store.db.execute("SELECT source_ref, outcome FROM dv_outcomes").fetchone()
         self.assertEqual(tuple(o), ("gmail:18f00aa", gate.VERIFIED))
 
+    def test_a_document_that_only_gives_unknown_stops_after_three_runs_not_per_pair(self):
+        # Proof-loop lead 070: a 180-pair document with a document-level failure burned 3 rounds x 3 chunks.
+        rids = [f"11111111-2222-3333-4444-{i:012d}" for i in range(70)]
+        self.reqs = {r: IntakeReq(rid=r) for r in rids}
+        db = sqlite3.connect(self.proof_path)
+        db.execute("UPDATE proof_intake SET candidate_request_ids_json=?", (json.dumps(rids),))
+        db.commit()
+        db.close()
+        self.deps.dl = lambda url, dest: Path(dest).write_bytes(b"not it") and 1    # never the filed bytes
+        runs = 0
+        while runs < 10:
+            stats, rows = self._run()
+            if not rows:
+                break
+            runs += 1
+            self.assertEqual({r["outcome"] for r in rows}, {gate.UNKNOWN})
+        self.assertEqual(runs, 4)          # 3 all-unknown runs, then one try for the 10 never attempted; per pair: 6
+        self.assertTrue(self.store.intake_settled(self.intake_id, rids))
+
+    def test_a_candidate_added_after_the_document_cap_is_still_read(self):
+        # QA #1448: three unknown runs, then a new candidate request - it must be read, not settled unseen.
+        self.deps.dl = lambda url, dest: Path(dest).write_bytes(b"not it") and 1
+        for _ in range(3):
+            self._run()
+        self.assertTrue(self.store.intake_settled(self.intake_id, [RID]))
+        rid2 = "11111111-2222-3333-4444-000000000002"
+        self.reqs[rid2] = IntakeReq(rid=rid2)
+        ps = ProofStore(self.proof_path)
+        ps.add_candidates(42, self.sha, [RID, rid2])
+        ps.close()
+        stats, rows = self._run()
+        self.assertEqual([r["request_id"] for r in rows], [rid2])          # read once ...
+        self.assertEqual(rows[0]["outcome"], gate.UNKNOWN)
+        self.assertTrue(self.store.intake_settled(self.intake_id, [RID, rid2]))
+
+    def test_a_large_account_is_read_only_against_the_tracks_the_document_names(self):
+        # Proof-loop lead 070: a 217-candidate account fanned every document out to 217 x roles pairs.
+        others = [f"11111111-2222-3333-4444-{i:012d}" for i in range(1, 61)]
+        self.reqs = {RID: IntakeReq(), **{r: IntakeReq(rid=r) for r in others}}
+        for r in others:
+            self.reqs[r].title, self.reqs[r].isrc = f"Other Song {r[-3:]}", None
+        db = sqlite3.connect(self.proof_path)
+        db.execute("UPDATE proof_intake SET candidate_request_ids_json=?", (json.dumps([RID] + others),))
+        db.commit()
+        db.close()
+        stats, rows = self._run()
+        self.assertEqual([(r["request_id"], r["outcome"]) for r in rows], [(RID, gate.VERIFIED)])  # Night Drive only
+        self.assertEqual(len(self.store.intake_unmatched(self.intake_id)), 60)
+        fan = json.loads(self.store.db.execute("SELECT detail_json FROM dv_steps WHERE step='intake_fanout'").fetchone()[0])
+        self.assertEqual((fan["candidates"], fan["matched_keys"], fan["not_matched_keys"]), (61, 1, 60))
+        self.assertTrue(self.store.intake_settled(self.intake_id, [RID] + others))
+        stats, rows = self._run()
+        self.assertEqual((stats.intake, rows), (0, []))                              # settled, not re-read
+
+    def test_a_small_account_is_still_read_against_every_candidate(self):
+        others = [f"11111111-2222-3333-4444-{i:012d}" for i in range(1, 5)]
+        self.reqs = {RID: IntakeReq(), **{r: IntakeReq(rid=r) for r in others}}
+        db = sqlite3.connect(self.proof_path)
+        db.execute("UPDATE proof_intake SET candidate_request_ids_json=?", (json.dumps([RID] + others),))
+        db.commit()
+        db.close()
+        stats, rows = self._run()
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(self.store.intake_unmatched(self.intake_id), [])
+
     def test_pairs_eval_runs_never_pick_up_intake(self):
         stats, _ = runner.run(self.store, self.deps, proof_store=self.proof_path, pairs={})
         self.assertEqual(stats.intake, 0)

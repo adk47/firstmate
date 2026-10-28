@@ -223,6 +223,12 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
             stats.retry += 1
             return rows                       # judged again next run
         reqs = deps.requests([k.split("#", 1)[0] for k in keys])
+        if intake is not None:
+            if ex.ok:
+                keys = cut_fanout(store, run_id, proof_id, intake, keys, reqs, ex)
+            keys = keys[:MAX_INTAKE_CLAIMS]           # the per-run claim cap, applied after the cut
+            if not keys:
+                return rows
         # Document-level issuer checks (the issuer does not change per claim).
         issuer, itype = ex.issuer_name, ex.issuer.get("type")
         official, how = xc.official_domains(deps.net, issuer) if issuer else ([], "no issuer")
@@ -378,7 +384,7 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
                                {"candidates": len(doc.candidate_ids), "keys": len(keys), "first_keys": keys[:20]},
                                f"intake:{doc.intake_id}")
                     finished = store.intake_finished_keys(doc.intake_id)
-                    todo = [k for k in keys if k not in finished][:MAX_INTAKE_CLAIMS]
+                    todo = [k for k in keys if k not in finished]      # capped after the fan-out cut
                     if not todo:
                         continue
                     rows += verify_document(store, proof_db, doc.sha, todo, deps, run_id, stats, held, intake=doc)
@@ -390,6 +396,38 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
     finally:
         proof_db.close()
     return stats, rows
+
+
+FANOUT = 50     # candidate requests above which a filed document is read only against the tracks it names
+
+
+def named_by(ex: Any, r: Any) -> bool:
+    """Does the document name this request's track: the exact normalized title (featured artist
+    dropped, as `supports` reads it) in its tracks or credits, or the request's ISRC on it."""
+    from .extract import _title_key, norm_isrc
+    titles = {_title_key(t.get("title")) for t in ex.tracks if t.get("title")} | \
+        {_title_key(c.get("track")) for c in ex.credits if c.get("track")}
+    titles.discard("")
+    isrc = norm_isrc(getattr(r, "isrc", None))
+    return bool(_title_key(getattr(r, "title", "")) in titles or (isrc and isrc in set(ex.isrcs)))
+
+
+def cut_fanout(store: DocVerifyStore, run_id: str, proof_id: str, intake: intake_read.IntakeDoc,
+               keys: list[str], reqs: dict[str, Any], ex: Any) -> list[str]:
+    """Proof-loop lead 070: a filing of an account with more than FANOUT candidate requests is read only
+    against the requests whose track the document names. The rest are recorded ONCE as not matched (no
+    pair row) and count as finished. A document that names no track is read in full, as before."""
+    rids = {k.split("#", 1)[0] for k in keys}
+    if len(rids) <= FANOUT or not (ex.tracks or any(c.get("track") for c in ex.credits)):
+        return keys
+    keep = [k for k in keys if (r := reqs.get(k.split("#", 1)[0])) is not None and named_by(ex, r)]
+    rest = [k for k in keys if k not in keep]
+    if rest:
+        store.record_intake_unmatched(intake.intake_id, rest)
+    store.step(run_id, proof_id, "intake_fanout", "ok",
+               {"candidates": len(rids), "matched_keys": len(keep), "not_matched_keys": len(rest)},
+               f"intake:{intake.intake_id}")
+    return keep
 
 
 def intake_keys(doc: intake_read.IntakeDoc, deps: Deps) -> list[str]:
