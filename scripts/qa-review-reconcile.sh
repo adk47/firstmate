@@ -167,6 +167,10 @@ set -euo pipefail
 #   QA_RECONCILE_OPENCLAW            openclaw binary (default: openclaw)
 #   QA_RECONCILE_GH                  gh binary (default: gh)
 #   QA_RECONCILE_PROFILE             openclaw --profile (default: main)
+#   OPENCLAW_GATEWAY_URL             remote qa gateway (T9); also inherited by the
+#                                     dispatcher. Token: OPENCLAW_GATEWAY_TOKEN[_FILE]
+#   QA_RECONCILE_GATEWAY_PEERS_DNS   headless Service whose pod IPs are each listed
+#                                     for the suppressor set (+ _PORT, default 18789)
 #   QA_RECONCILE_GRACE_S             grace window seconds (default 1800)
 #   QA_RECONCILE_COOLDOWN_S          cooldown seconds (default 1800)
 #   QA_RECONCILE_MAX_ATTEMPTS        attempts cap per key (default 2). Bounds
@@ -490,7 +494,38 @@ fi
 # below rather than acted on immediately. cron_read_failed is tracked
 # separately only so the per-candidate log line can tell an operator "the
 # cron list command itself failed" apart from "the set was paginated".
-if cron_json="$("$OPENCLAW" --profile "$PROFILE" cron list --all --json 2>/dev/null)"; then
+# 2026-10-28 (node8-to-pods T9): with OPENCLAW_GATEWAY_URL set the reviews run on the
+# qa-review-gateway pods, and each replica holds its OWN cron store. A list through the
+# round-robin Service would show one replica's jobs and miss a review running on another,
+# so the suppressor would re-dispatch it. QA_RECONCILE_GATEWAY_PEERS_DNS names the
+# headless peers Service; every ready pod is listed and the sets are unioned. ANY peer
+# that fails to list makes the whole set unknown: a partial union must never read as
+# "job absent" (same rule as hasMore below). Unset URL = the local profile, unchanged.
+qar_list_cron_all() {
+  if [ -z "${OPENCLAW_GATEWAY_URL:-}" ]; then
+    "$OPENCLAW" --profile "$PROFILE" cron list --all --json 2>/dev/null
+    return
+  fi
+  local token="${OPENCLAW_GATEWAY_TOKEN:-}" peers="" ips ip url out merged='{"jobs":[],"hasMore":false}'
+  if [ -n "${OPENCLAW_GATEWAY_TOKEN_FILE:-}" ]; then
+    IFS= read -r token < "$OPENCLAW_GATEWAY_TOKEN_FILE" 2>/dev/null || token=""
+    token="${token%$'\r'}"
+  fi
+  [ -n "$token" ] || { log "READ-FAILURE: OPENCLAW_GATEWAY_URL set but no gateway token (OPENCLAW_GATEWAY_TOKEN / _FILE)." >&2; return 1; }
+  if [ -n "${QA_RECONCILE_GATEWAY_PEERS_DNS:-}" ]; then
+    ips="$("${QA_RECONCILE_GETENT:-getent}" ahostsv4 "$QA_RECONCILE_GATEWAY_PEERS_DNS" 2>/dev/null | awk '{print $1}' | sort -u)" || ips=""
+    [ -n "$ips" ] || { log "READ-FAILURE: peers DNS $QA_RECONCILE_GATEWAY_PEERS_DNS resolved to no address." >&2; return 1; }
+    for ip in $ips; do peers="$peers ws://${ip}:${QA_RECONCILE_GATEWAY_PEERS_PORT:-18789}"; done
+  else
+    peers="$OPENCLAW_GATEWAY_URL"
+  fi
+  for url in $peers; do
+    out="$(OPENCLAW_GATEWAY_URL="$url" OPENCLAW_GATEWAY_TOKEN="$token" "$OPENCLAW" cron list --all --json 2>/dev/null)" || return 1
+    merged="$(jq -c --argjson add "$out" '{jobs: (.jobs + ($add.jobs // [])), hasMore: (.hasMore or ($add.hasMore == true))}' <<< "$merged" 2>/dev/null)" || return 1
+  done
+  printf '%s\n' "$merged"
+}
+if cron_json="$(qar_list_cron_all)"; then
   cron_read_failed=0
 else
   cron_json=""

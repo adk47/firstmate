@@ -2569,3 +2569,109 @@ digest_now() {
   [[ "$output" != *"READ FAILURE DIGEST"* ]]
   [[ "$output" != *"TICK DIGEST"* ]]
 }
+
+# ─────────────────────────────────────────────────────────────────────────
+# node8-to-pods T9 (2026-10-28): remote qa-review-gateway pods. Each replica
+# holds its OWN cron store, so the suppressor set is the union over every
+# ready peer. A peer that fails to list makes the set UNKNOWN, never "absent".
+# ─────────────────────────────────────────────────────────────────────────
+
+t9_peer_stubs() {
+  # openclaw: answers per OPENCLAW_GATEWAY_URL from $STUB_PEER_DIR/<ip>.json,
+  # records each call's url / token / argv; a peer listed in STUB_PEER_FAIL fails.
+  export STUB_PEER_DIR="$TEST_TMPDIR/peers"; mkdir -p "$STUB_PEER_DIR"
+  export STUB_PEER_LOG="$TEST_TMPDIR/peer_calls"; : > "$STUB_PEER_LOG"
+  cat > "$STUBBIN/openclaw" <<'STUB'
+#!/usr/bin/env bash
+printf 'url=%s token=%s argv=%s\n' "${OPENCLAW_GATEWAY_URL:-}" "${OPENCLAW_GATEWAY_TOKEN:-}" "$*" >> "$STUB_PEER_LOG"
+ip="${OPENCLAW_GATEWAY_URL#ws://}"; ip="${ip%%:*}"
+case " ${STUB_PEER_FAIL:-} " in *" $ip "*) exit 1 ;; esac
+if [ -f "$STUB_PEER_DIR/$ip.json" ]; then cat "$STUB_PEER_DIR/$ip.json"; else echo '{"jobs":[]}'; fi
+STUB
+  chmod +x "$STUBBIN/openclaw"
+  cat > "$STUBBIN/getent" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = ahostsv4 ] && [ "$2" = "qa-review-gateway-peers.hydra-qa.svc.cluster.local" ] || exit 2
+for ip in ${STUB_PEER_IPS:-}; do printf '%s STREAM %s\n%s DGRAM\n' "$ip" "$2" "$ip"; done
+STUB
+  chmod +x "$STUBBIN/getent"
+  export OPENCLAW_GATEWAY_URL="ws://qa-review-gateway.hydra-qa.svc.cluster.local:18789"
+  export QA_RECONCILE_GATEWAY_PEERS_DNS="qa-review-gateway-peers.hydra-qa.svc.cluster.local"
+  printf 'peer-token-123\n' > "$TEST_TMPDIR/gw-token"
+  export OPENCLAW_GATEWAY_TOKEN_FILE="$TEST_TMPDIR/gw-token"
+  export STUB_PEER_IPS="10.42.0.11 10.42.0.12"
+}
+
+t9_candidate() {
+  seed_epoch_state "Muso-AI/core-backend"
+  T9_SHA="$1"
+  mk_pr_list "Muso-AI/core-backend" 16 "$T9_SHA" main false nsollazzo "2026-01-01T00:00:00Z"
+  mk_commit "Muso-AI/core-backend" "$T9_SHA" "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+}
+
+@test "T9 peers: a review RUNNING on the second replica only still suppresses (union across peers)" {
+  t9_candidate "shat9peer00000000000000000000000000001"
+  t9_peer_stubs
+  running_at_ms=$(( (QA_RECONCILE_NOW_EPOCH - 60) * 1000 ))
+  printf '{"jobs":[{"name":"qa-autoreview-pr-Muso-AI-core-backend-16","state":{"runningAtMs":%s}}]}\n' "$running_at_ms" > "$STUB_PEER_DIR/10.42.0.12.json"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ ! -s "$DISPATCH_CALLS" ]
+  # both pods listed, each by pod IP, with the file token in env and no --profile
+  [ "$(grep -c 'argv=cron list --all --json$' "$STUB_PEER_LOG")" -eq 2 ]
+  grep -q '^url=ws://10.42.0.11:18789 token=peer-token-123 ' "$STUB_PEER_LOG"
+  grep -q '^url=ws://10.42.0.12:18789 token=peer-token-123 ' "$STUB_PEER_LOG"
+  ! grep -q -- '--profile' "$STUB_PEER_LOG"
+}
+
+@test "T9 peers mutation: listing only the Service (no peers DNS) misses that review and re-dispatches" {
+  # Proves the test above is load-bearing: the round-robin Service lands on replica 1.
+  t9_candidate "shat9peer00000000000000000000000000002"
+  t9_peer_stubs
+  unset QA_RECONCILE_GATEWAY_PEERS_DNS
+  export OPENCLAW_GATEWAY_URL="ws://10.42.0.11:18789"
+  running_at_ms=$(( (QA_RECONCILE_NOW_EPOCH - 60) * 1000 ))
+  printf '{"jobs":[{"name":"qa-autoreview-pr-Muso-AI-core-backend-16","state":{"runningAtMs":%s}}]}\n' "$running_at_ms" > "$STUB_PEER_DIR/10.42.0.12.json"
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ -s "$DISPATCH_CALLS" ]
+}
+
+@test "T9 peers: ONE peer failing makes the set unknown -- no dispatch inside 2x grace, no attempt burned" {
+  t9_candidate "shat9peer00000000000000000000000000003"
+  t9_peer_stubs
+  export STUB_PEER_FAIL="10.42.0.12"
+  base_now="$(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s)"
+  QA_RECONCILE_NOW_EPOCH="$((base_now + 2700))"; export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ ! -s "$DISPATCH_CALLS" ]
+  [[ "$output" == *"READ-FAILURE: openclaw cron list"* ]]
+}
+
+@test "T9 peers: peers DNS resolving to nothing is a read failure, not an empty set" {
+  t9_candidate "shat9peer00000000000000000000000000004"
+  t9_peer_stubs
+  export STUB_PEER_IPS=""
+  base_now="$(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s)"
+  QA_RECONCILE_NOW_EPOCH="$((base_now + 2700))"; export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ ! -s "$DISPATCH_CALLS" ]
+  [[ "$output" == *"resolved to no address"* ]]
+}
+
+@test "T9 peers: a URL with no token is a read failure (never an unauthenticated empty list)" {
+  t9_candidate "shat9peer00000000000000000000000000005"
+  t9_peer_stubs
+  unset OPENCLAW_GATEWAY_TOKEN_FILE OPENCLAW_GATEWAY_TOKEN
+  base_now="$(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s)"
+  QA_RECONCILE_NOW_EPOCH="$((base_now + 2700))"; export QA_RECONCILE_NOW_EPOCH
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ ! -s "$DISPATCH_CALLS" ]
+  [ ! -s "$STUB_PEER_LOG" ]
+  [[ "$output" == *"no gateway token"* ]]
+}
