@@ -1957,6 +1957,8 @@ jobs:
           python3 scripts/tests/test_paid_status_email_route.py
           python3 scripts/tests/test_paid_status_support7d.py
           python3 scripts/tests/test_paid_status_classify.py
+          # proof-loop receipts from proof_intake (credit_review/receipts.py; R1 send-locked).
+          python3 scripts/tests/test_receipts.py
           # core's own notices hold a user from every hydra note (Fable sender map 10-27 item 2).
           python3 scripts/tests/test_core_notice.py
           python3 scripts/tests/test_verify_ledger_deferral.py

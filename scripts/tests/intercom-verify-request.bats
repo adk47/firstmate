@@ -1868,7 +1868,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A", "B" and "C" and 2 more: we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked - no need to send anything else.'$'\n''Muso Support' ]
   run -1 "$LOCKED" send --campaign status-team-review --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"--copy applies to verify-live (v1|windowed), status-doc-received (queued) and status-team-review (no-ask|count) only"* ]]
+  [[ "$output" == *"--copy applies to verify-live (v1|windowed), status-doc-received (queued|received) and status-team-review (no-ask|count) only"* ]]
   run -1 "$LOCKED" send --campaign status-doc-received --copy windowed --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [ "$(calls)" -eq 0 ]
 }
@@ -2487,4 +2487,21 @@ v.set_conversation(v.connect(sys.argv[1]), message_id="1002", conversation_id="7
   grep -q '^GET https://api.intercom.io/conversations/778?display_as=plaintext$' "$CURL_STUB_LOG"
   [ "$(posts)" -eq 2 ]
   [ "$(sql "select count(*) from verify_messages where kind='reminder-7'")" = "0" ]
+}
+
+@test "status-doc-received --copy received (card R1): send-locked as committed; renders the queued line without 'no need to send anything else'" {
+  grep -qx "readonly STATUS_RECEIVED_COPY_APPROVED=0" "$REAL_SCRIPT"
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  run -1 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"STATUS_RECEIVED_COPY_APPROVED=0"* ]]
+  [ "$(calls)" -eq 0 ]
+  run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "${lines[0]}" == "DRY-RUN status-doc-received initial email credits=1 copy=docrecvr" ]]
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked.'$'\n''Muso Support' ]
+  [[ "$output" != *"no need to send anything else"* ]]
+  run -1 "$LOCKED" send --campaign status-team-review --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  run -1 "$LOCKED" send --campaign uvn-status --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  # the approved queued line is unchanged and still sends
+  run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
 }

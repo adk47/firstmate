@@ -93,7 +93,7 @@ set -euo pipefail
 # Usage:
 #   intercom-verify-request.sh send --credits-file FILE --approved-by <SlackUID> \
 #       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask] [--kind initial|reminder-14|reminder-25|after-rejection \
-#        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued (status-doc-received) | no-ask|count (status-team-review)] \
+#        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued|received (status-doc-received) | no-ask|count (status-team-review)] \
 #       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, claim-status, email-changed, gap-ask)] [--dry-run|--validate|--doc-check|--check-recipient]
 #   intercom-verify-request.sh tag-proof --message-id <id> [--dry-run]
 #
@@ -195,6 +195,10 @@ readonly WITHDRAWAL_COPY_APPROVED=1
 #       070, verbatim): no-ask status notes for requesters whose requests are with us. APPROVED by
 #       firstmate under the 2026-10-19 standing order. Never an ask; never close an ask.
 readonly STATUS_NOTES_COPY_APPROVED=1
+#   STATUS_RECEIVED_COPY_APPROVED  status-doc-received --copy received (proof-loop captain card R1, verbatim: the
+#       approved "in our review queue" line without "no need to send anything else", so it is true for a user who
+#       still owes proof). LOCKED until the captain's yes on R1 lands in a PR that flips it.
+readonly STATUS_RECEIVED_COPY_APPROVED=0
 #   EMAIL_CHANGE_COPY_APPROVED   email-changed / email-changed-dup (firstmate 073): a threaded reply
 #       into the requester's own conversation, once per ticket. APPROVED under the same order.
 readonly EMAIL_CHANGE_COPY_APPROVED=1
@@ -250,6 +254,7 @@ readonly APPROVAL_REF_UVN="$APPROVAL_REF_STANDING_ORDER; copy approved by firstm
 readonly APPROVAL_REF_WITHDRAWAL="$APPROVAL_REF_STANDING_ORDER; withdrawal-confirm copy approved by firstmate under it 2026-10-19 21:21Z (inbox 061, confirmed in 064), sent only for a request the requester withdrew (metadata.withdrawal.by = requester)"
 readonly APPROVAL_REF_STATUS="$APPROVAL_REF_STANDING_ORDER; status notes approved by firstmate under it 2026-10-20 (inbox 070: team-review verbatim; 071: doc-received as credit-trust-llm-t01 drafted it). Not asks."
 readonly APPROVAL_REF_STATUS_QUEUED="$APPROVAL_REF_STATUS The 'in our review queue' doc-received wording (--copy queued) approved by firstmate 092."
+readonly APPROVAL_REF_STATUS_RECEIVED="$APPROVAL_REF_STATUS The receipt line R1 (--copy received: the queued line without 'no need to send anything else'), proof-loop-lead-fable-p1 captain card 2026-10-27 22:5xZ, sent only on the captain's yes."
 readonly APPROVAL_REF_STATUS_COUNT="$APPROVAL_REF_STANDING_ORDER; count-only status-team-review wording (--copy count) approved by firstmate 2026-10-26 16:58Z (verify-ask-wiring-h2 inbox 005, Fable decides under the captain's 12:40Z order; captain 16:05Z: \"everyone should be communicated or credits and profiles awarded\"), for a user whose requests cannot be listed (unshowable fields or more than 1,000). Not an ask."
 readonly APPROVAL_REF_STATUS_NOASK="$APPROVAL_REF_STATUS The no-ask team-review wording B0 (--copy no-ask: Copy B without its optional proof sentence) approved by firstmate 2026-10-21 (credit-trust-llm-t01 key pending-status-1021, relayed in inbox 106)."
 readonly APPROVAL_REF_EMAIL_CHANGE="$APPROVAL_REF_STANDING_ORDER; email-changed templates approved by firstmate under it 2026-10-20 00:55Z (inbox 073): a threaded reply into the requester's own conversation, once per ticket, no customer-typed content."
@@ -581,11 +586,13 @@ case "$CAMPAIGN" in
     case "$CAMPAIGN:$COPY_ARG" in
       *:) ;;
       status-doc-received:queued) COPY="docrecvq"; APPROVAL_REF="$APPROVAL_REF_STATUS_QUEUED" ;;
+      # Card R1 (proof loop): the receipt for a user who still owes proof; send-locked (STATUS_RECEIVED_COPY_APPROVED).
+      status-doc-received:received) COPY="docrecvr"; APPROVAL_REF="$APPROVAL_REF_STATUS_RECEIVED" ;;
       status-team-review:no-ask) COPY="teamreviewb0"; APPROVAL_REF="$APPROVAL_REF_STATUS_NOASK" ;;
       # Count-only (firstmate inbox 005): no titles, so any request may be in it; the ledger
       # records the ids given (the driver sends at most 1,000) and user.pending_count is the total.
       status-team-review:count) COPY="teamreviewcount"; APPROVAL_REF="$APPROVAL_REF_STATUS_COUNT"; MAX_CREDITS=1000 ;;
-      *) refuse "--copy applies to verify-live (v1|windowed), status-doc-received (queued) and status-team-review (no-ask|count) only." ;;
+      *) refuse "--copy applies to verify-live (v1|windowed), status-doc-received (queued|received) and status-team-review (no-ask|count) only." ;;
     esac
     [ "$KIND" = "initial" ] || refuse "$CAMPAIGN has no follow-ups: one message per user, ever."
     ;;
@@ -845,6 +852,9 @@ if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "withdrawal-confirm" ] && [ "$WITHD
 fi
 if [ "$ACTION" = "post" ] && { [ "$CAMPAIGN" = "status-doc-received" ] || [ "$CAMPAIGN" = "status-team-review" ]; } && [ "$STATUS_NOTES_COPY_APPROVED" != "1" ]; then
   refuse "the status-note copy is not approved for sending (STATUS_NOTES_COPY_APPROVED=0)."
+fi
+if [ "$ACTION" = "post" ] && [ "$COPY" = "docrecvr" ] && [ "$STATUS_RECEIVED_COPY_APPROVED" != "1" ]; then
+  refuse "the receipt line R1 (status-doc-received --copy received) is not approved for sending yet (STATUS_RECEIVED_COPY_APPROVED=0). It waits for the captain's yes, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
 fi
 if [ "$ACTION" = "post" ] && { [ "$CAMPAIGN" = "email-changed" ] || [ "$CAMPAIGN" = "email-changed-dup" ]; } && [ "$EMAIL_CHANGE_COPY_APPROVED" != "1" ]; then
   refuse "the email-changed copy is not approved for sending (EMAIL_CHANGE_COPY_APPROVED=0)."
@@ -1252,6 +1262,10 @@ def status_team_review_count($fn; $n):
   { subject: "Your Muso credit \(req_s($n)): an update",
     segs: [ {p: (if $n == 1 then "Hi \($fn), a quick update on your pending credit request: it is with our team for review. Nothing else is needed from you right now."
                  else "Hi \($fn), a quick update on your \($n) pending credit requests: they are with our team for review. Nothing else is needed from you right now." end)} ] };
+# Card R1 (proof loop, verbatim): the queued line without "no need to send anything else".
+def status_doc_received_r1($fn; $c; $maxl):
+  { subject: "Your Muso credit \(req_s($c|length)): an update",
+    segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): we have the document you sent, and it's in our review queue. We'll message you here as soon as it's checked."} ] };
 def status_team_review_noask($fn; $c; $maxl):
   { subject: "Your Muso credit \(req_s($c|length)): an update",
     segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): they're with our team for review. Nothing else is needed from you right now."} ] };
@@ -1329,6 +1343,7 @@ def gap_ask($fn; $c; $maxl):
 | (if ($fn0 | test("^\\p{L}[\\p{L}'.-]{0,39}$")) then $fn0 else "there" end) as $fn
 | (if $copy == "docrecv" then status_doc_received($fn; .credits; $maxl)
    elif $copy == "docrecvq" then status_doc_queued($fn; .credits; $maxl)
+   elif $copy == "docrecvr" then status_doc_received_r1($fn; .credits; $maxl)
    elif $copy == "teamreview" then status_team_review($fn; .credits; $maxl)
    elif $copy == "teamreviewb0" then status_team_review_noask($fn; .credits; $maxl)
    elif $copy == "claimask" then claim_ask($fn; .claim)
@@ -1349,7 +1364,7 @@ def gap_ask($fn; $c; $maxl):
    else live_followup($fn; .credits; $maxl; $kind; $due) end)
 # Status notes carry the approved "Muso Support" sign-off on email only (the handoff copy, firstmate
 # 092/103/106); an in-thread reply sits under Caroline's own name in the conversation and stays unsigned.
-| (if ($copy | IN("docrecv", "docrecvq", "teamreview", "teamreviewb0", "teamreviewcount")) and $mtype == "email"
+| (if ($copy | IN("docrecv", "docrecvq", "docrecvr", "teamreview", "teamreviewb0", "teamreviewcount")) and $mtype == "email"
    then .segs += [ {p: "Muso Support"} ] else . end)
 | (if $copy == "claimstatus" and $mtype == "email" then .segs += sig else . end)
 | { subject: .subject,
