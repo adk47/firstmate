@@ -25,7 +25,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
-from . import VERSION
+from . import CARRY, VERSION
 
 MAX_UNKNOWN = 3
 
@@ -120,6 +120,66 @@ class DocVerifyStore:
             self.db.commit()
         self.db.execute("CREATE INDEX IF NOT EXISTS dv_out_intake ON dv_outcomes(intake_id)")
         self.lock = threading.Lock()
+        if VERSION in CARRY:
+            prev, reread, steps = CARRY[VERSION]
+            self.carry_forward(prev, VERSION, reread, steps)
+
+    def carry_forward(self, prev: str, cur: str, reread: frozenset[str] | None,
+                      steps: tuple[str, ...] = ()) -> int:
+        """A VERSION bump (proof-loop lead 075): copy the rows of every document whose standing `prev`
+        outcomes include none of `reread` to `cur`, once, in one transaction (parallel readers open the
+        store together). Copies keep their run, time and order, so the latest row stays the latest, and
+        are marked detail.carried_from = {version, id}. A document whose `prev` run RAN one of `steps`
+        (a dv_steps row with a status other than skipped) is re-read too. Every other document has no
+        `cur` row and is re-read by the deployed reader. `reread=None` carries nothing (a full re-read).
+        Returns rows copied."""
+        key = f"carried:{prev}->{cur}"
+        doc = "coalesce(intake_id, proof_id)"
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                if self.db.execute("SELECT 1 FROM dv_state WHERE k=?", (key,)).fetchone():
+                    self.db.rollback()
+                    return 0
+                n = 0
+                if reread is not None:
+                    marks = ",".join("?" * len(reread)) or "''"
+                    smarks = ",".join("?" * len(steps)) or "''"
+                    keep = (f"version=? AND {doc} NOT IN (SELECT {doc} FROM dv_outcomes WHERE id IN "
+                            f"(SELECT MAX(id) FROM dv_outcomes WHERE version=? GROUP BY coalesce(intake_id, ''), "
+                            f"proof_id, request_id, role) AND outcome IN ({marks})) "
+                            f"AND proof_id NOT IN (SELECT proof_id FROM dv_steps WHERE version=? AND step IN ({smarks}) "
+                            f"AND status <> 'skipped')")
+                    args = [prev, prev, *sorted(reread), prev, *steps]
+                    n = self.db.execute(
+                        "INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id, source_ref, h3_verdict, "
+                        "outcome, reason, need, account_hold, detail_json, version, intake_id) "
+                        "SELECT run_id, at, proof_id, request_id, role, user_id, source_ref, h3_verdict, outcome, reason, "
+                        "need, account_hold, CASE WHEN json_valid(detail_json) THEN json_set(detail_json, '$.carried_from', "
+                        "json_object('version', version, 'id', id)) ELSE detail_json END, ?, intake_id "
+                        f"FROM dv_outcomes WHERE {keep} ORDER BY id", [cur, *args]).rowcount
+                    ids = "SELECT DISTINCT intake_id FROM dv_outcomes WHERE version=? AND intake_id IS NOT NULL"
+                    for table, cols in (("dv_intake_keys", "at, candidates_json, keys_json"),
+                                        ("dv_intake_unmatched", "at, keys_json")):
+                        self.db.execute(f"INSERT OR IGNORE INTO {table} (intake_id, version, {cols}) "
+                                        f"SELECT intake_id, ?, {cols} FROM {table} WHERE version=? AND intake_id IN "
+                                        f"({ids})", (cur, prev, cur))
+                self.db.execute("INSERT INTO dv_state (k, v) VALUES (?, ?)",
+                                (key, json.dumps({"at": utcnow(), "rows": n, "reread": sorted(reread or []),
+                                                  "reread_steps": list(steps)})))
+                self.db.commit()
+                return n
+            except BaseException:
+                self.db.rollback()
+                raise
+
+    def awaiting_reread(self) -> int:
+        """Documents with rows only under an older VERSION: read under a superseded rule, not yet re-read.
+        Their old outcomes stand in no tray (latest_outcomes reads the current VERSION only)."""
+        return self.db.execute(
+            "SELECT count(DISTINCT coalesce(intake_id, proof_id)) FROM dv_outcomes WHERE version<>? AND "
+            "coalesce(intake_id, proof_id) NOT IN (SELECT coalesce(intake_id, proof_id) FROM dv_outcomes WHERE version=?)",
+            (VERSION, VERSION)).fetchone()[0]
 
     # -- state ---------------------------------------------------------------
     def get_state(self, k: str) -> str | None:

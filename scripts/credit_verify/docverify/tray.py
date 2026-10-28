@@ -35,6 +35,7 @@ class Tray:
     decline: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: {"forged": [], "contradicted": []})
     need: list[dict[str, Any]] = field(default_factory=list)
     retry: int = 0
+    awaiting_reread: int = 0
 
 
 def _dsp_anchor(store: Any, proof_id: str, key: str) -> tuple[bool, str]:
@@ -60,7 +61,10 @@ def build(store: Any, *, gate: Gate, tracks: Tracks) -> Tray:
     titles = tracks(sorted({r["request_id"] for r in rows})) if rows else {}
     for r in rows:
         key = f"{r['request_id']}#{r['role']}"
-        detail = json.loads(r["detail_json"] or "{}")
+        try:
+            detail = json.loads(r["detail_json"] or "{}")
+        except ValueError:                      # a detail cut at 20k characters: the row still sorts
+            detail = {}
         base = {"user_id": r["user_id"], "request_id": r["request_id"], "role": r["role"],
                 "track": titles.get(r["request_id"]), "proof": r["proof_id"][:12], "intake_id": r["intake_id"],
                 "source_ref": r["source_ref"], "issuer": (detail.get("issuer") or {}).get("name"),
@@ -83,6 +87,7 @@ def build(store: Any, *, gate: Gate, tracks: Tracks) -> Tray:
                               "received_at": base["received_at"]})
         elif o == "unknown":
             tray.retry += 1
+    tray.awaiting_reread = store.awaiting_reread() if hasattr(store, "awaiting_reread") else 0
     return tray
 
 
@@ -127,4 +132,8 @@ def markdown(tray: Tray, batch: int, generated_at: str) -> str:
         counts[n["need"]] = counts.get(n["need"], 0) + 1
     out += [f"| `{k}` | {v} |" for k, v in sorted(counts.items())] or ["| - | 0 |"]
     out += ["", f"`unknown` (tooling, retried by the reader, never asked): {tray.retry}.", ""]
+    from . import VERSION
+    out += [f"Rule version `{VERSION}`. {tray.awaiting_reread} document(s) read under an older rule version await "
+            "the reader's re-read; their old outcomes (e.g. a `forged` from a misread sender address) are shadow "
+            "and appear in no section of this tray.", ""]
     return "\n".join(out)

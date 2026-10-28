@@ -1565,6 +1565,60 @@ class TrayTests(unittest.TestCase):
         md = tray.markdown(t, 1, "2026-10-27T23:00:00Z")
         self.assertIn("APPROVE 1", md)
         self.assertIn("Nothing here has been written to core", md)
+        self.assertIn("0 document(s) read under an older rule version", md)
+
+    def test_a_version_bump_carries_documents_the_rule_cannot_change_and_rereads_the_rest(self):
+        # Proof-loop lead 075: a rule change is a VERSION bump; the deployed reader re-reads, nobody hand-writes.
+        from credit_verify.docverify import tray
+        db = self.store.db
+
+        def old(pid, outcome, iid=None, n=1, detail="{}"):
+            for _ in range(n):
+                db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id, outcome, reason, "
+                           "account_hold, detail_json, version, intake_id) VALUES ('r0', '2026-10-28T14:00:00Z', ?, "
+                           "'rq', 'Mixing', 42, ?, 'x', 0, ?, 'dv-old', ?)", (pid, outcome, detail, iid))
+        old("pa", "unverifiable", "42:aa")
+        old("pb", "forged", "42:bb")                         # the misread-sender 'forged': re-read
+        old("pc", "unknown", "42:cc", n=3)                   # exhausted retries carry as exhausted
+        old("pd", "unverifiable", "42:dd")
+        old("pd", "verified", "42:dd")                       # the standing row is verified: re-read
+        old("pe", "unverifiable", "42:ee", detail="{not json")
+        db.execute("INSERT INTO dv_intake_keys VALUES ('42:aa', 'dv-old', 't', '[\"rq\"]', '[\"rq#Mixing\"]')")
+        db.execute("INSERT INTO dv_intake_keys VALUES ('42:bb', 'dv-old', 't', '[\"rq\"]', '[\"rq#Mixing\"]')")
+        db.commit()
+        # QA #1466: an unverifiable email whose sender check RAN (a low-confidence '.ora') is re-read, since
+        # dv-2 changes its need to readable_document; a document whose sender check was skipped carries.
+        old("pf", "unverifiable", "42:ff")
+        for pid, status in (("pf", "weak"), ("pa", "skipped")):
+            db.execute("INSERT INTO dv_steps (run_id, at, proof_id, request_id, step, status, detail_json, version) "
+                       "VALUES ('r0', 't', ?, '', 'xc_domain', ?, '{\"sender_domain\": \"michaelosbome.ora\"}', "
+                       "'dv-old')", (pid, status))
+        db.commit()
+        n = self.store.carry_forward("dv-old", VERSION, frozenset({"forged", "verified"}), ("xc_domain",))
+        self.assertEqual(n, 5)                                            # pa 1 + pc 3 + pe 1 (pf re-read)
+        cur = {(p, o) for p, o in db.execute("SELECT proof_id, outcome FROM dv_outcomes WHERE version=?",
+                                             (VERSION,))}
+        self.assertEqual(cur, {("pa", "unverifiable"), ("pc", "unknown"), ("pe", "unverifiable")})
+        marked = json.loads(db.execute("SELECT detail_json FROM dv_outcomes WHERE version=? AND proof_id='pa'",
+                                       (VERSION,)).fetchone()[0])
+        self.assertEqual(marked["carried_from"]["version"], "dv-old")
+        self.assertTrue(self.store.intake_settled("42:aa", ["rq"]))       # carried: no re-read, no Trino
+        self.assertFalse(self.store.intake_settled("42:bb", ["rq"]))      # re-read by the deployed reader
+        self.assertTrue(self.store.intake_settled("42:cc", ["rq"]) or self.store.intake_finished_keys("42:cc"))
+        self.assertFalse(self.store.intake_settled("42:ff", ["rq"]))      # its sender check ran: re-read
+        self.assertEqual(self.store.carry_forward("dv-old", VERSION, frozenset({"forged"})), 0)  # once
+        self.assertEqual(self.store.awaiting_reread(), 3)                 # pb, pd, pf
+        t = tray.build(self.store, gate=lambda uid: (True, "allow"), tracks=lambda ids: {})
+        self.assertEqual((t.decline["forged"], t.not_approvable, t.approve), ([], [], []))   # old rows: no section
+        self.assertIn("3 document(s) read under an older rule version", tray.markdown(t, 3, "now"))
+
+    def test_a_full_rule_change_carries_nothing(self):
+        self.store.db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, outcome, reason, "
+                              "account_hold, detail_json, version) VALUES ('r', 't', 'p', 'rq', 'Mixing', "
+                              "'unverifiable', 'x', 0, '{}', 'dv-full')")
+        self.store.db.commit()
+        self.assertEqual(self.store.carry_forward("dv-full", "dv-full-2", None), 0)
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM dv_outcomes WHERE version='dv-full-2'").fetchone()[0], 0)
 
 
 class NameIndexTests(unittest.TestCase):
