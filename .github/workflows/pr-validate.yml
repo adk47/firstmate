@@ -1754,6 +1754,15 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_robot_mail
+      - name: Run legal@ intake tests
+        # scripts/legal-intake.py PAGES #cs_priority (Jan) on DMCA / privacy / legal /
+        # security mail to notices@ + legal@. These lock the full sender address on the
+        # page, Jan-only mention, and the same-notice collapse (threaded note tagging Jan,
+        # only when Muso ids link the two threads; a failed note falls back to a full page). Google clients are stubbed,
+        # Gmail/Slack are fakes. Targeted by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_legal_intake
       - name: Run legal-unanswered watchdog tests
         # scripts/intercom-legal-unanswered-watchdog.py PAGES #cs_priority (Jan) when a
         # legal/privacy request has no HUMAN reply for 24h. These lock the watch set,

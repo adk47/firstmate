@@ -46,7 +46,7 @@ Env:
                                  (operations bot preferred: devops is NOT a member of
                                  #cs_priority and 404s channel_not_found)
   RIGHTS_HOLDER_CHANNEL          default C0BBTAVP44X (#cs_priority)
-  RIGHTS_HOLDER_MENTION_IDS      default U0AL36NADEY,U038BM16T7W (Nick, Jan)
+  RIGHTS_HOLDER_MENTION_IDS      default U038BM16T7W (Jan)
   RIGHTS_HOLDER_DOMAINS_FILE     default scripts/data/rights-holder-domains.txt
   RIGHTS_HOLDER_KEYWORDS_FILE    default scripts/data/rights-holder-keywords.txt
   RIGHTS_HOLDER_LEDGER_PATH      default /var/lib/intercom-rights-holder-watchdog/seen.json
@@ -87,7 +87,7 @@ _spec.loader.exec_module(base)
 DEFAULT_DOMAINS_FILE = str(_HERE / "data" / "rights-holder-domains.txt")
 DEFAULT_KEYWORDS_FILE = str(_HERE / "data" / "rights-holder-keywords.txt")
 DEFAULT_CHANNEL = "C0BBTAVP44X"  # #cs_priority
-DEFAULT_MENTION_IDS = "U0AL36NADEY,U038BM16T7W"  # Nick, Jan (scripts/intercom-ops-write.sh:67,79)
+DEFAULT_MENTION_IDS = "U038BM16T7W"  # Jan (scripts/intercom-ops-write.sh:67); Nick removed 2026-10-23, MUS-18475
 DEFAULT_LEDGER = "/var/lib/intercom-rights-holder-watchdog/seen.json"
 DEFAULT_LOCKFILE = "/var/run/intercom-rights-holder-watchdog.lock"
 DEFAULT_CLICKUP_LIST = "901000600160"
