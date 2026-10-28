@@ -124,14 +124,18 @@ def esc(s):
 REPLY_PREFIX = re.compile(r"^\s*(?:re|fwd?|aw|tr)\s*:\s*", re.I)
 
 
-def notice_key(cls, subject, ids):
-    """Same notice sent from several addresses: class + normalised subject + linked Muso ids.
-    A hash, never the subject (the ledger holds no message content)."""
+def notice_key(cls, subject, ids, body=""):
+    """Same notice sent from several addresses: class + normalised subject + linked Muso ids; with no
+    ids, also a fingerprint of the first message body (two ID-less claims under one generic subject
+    are two notices). A hash, never the subject or body (the ledger holds no message content)."""
     subj = subject or ""
     while REPLY_PREFIX.match(subj):
         subj = REPLY_PREFIX.sub("", subj, count=1)
     subj = " ".join(subj.split()).lower()
-    return hashlib.sha256(f"{cls}|{subj}|{','.join(ids)}".encode()).hexdigest()[:16]
+    raw = f"{cls}|{subj}|{','.join(ids)}"
+    if not ids:
+        raw += "|" + " ".join((body or "").split()).lower()
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 def page_text(alias, cls, h0, ids, row):
@@ -226,8 +230,9 @@ def main():
                 # Ledgered before any side effect: row is mutated in place, so a later failure (e.g. the label
                 # call) still persists the confirmed acked/paged markers instead of re-sending next run.
                 ledger[key] = row
-                # Both dedupe arms below need the notice identity (hash of class + normalised subject + ids).
-                nkey = notice_key(cls, h0.get("subject", ""), ids)
+                # Both dedupe arms below need the notice identity (hash of class + normalised subject + ids;
+                # ID-less notices also hash the FIRST message body, never `bodies`, which grows with replies).
+                nkey = notice_key(cls, h0.get("subject", ""), ids, text(msgs[0]["payload"]))
                 row["notice_key"] = nkey
                 # One ack + one page per REQUEST, not per thread: the same sender writing to notices@ AND legal@
                 # (notices@ is also auto-forwarded to aaron@) or sending twice within 3 days is one request.

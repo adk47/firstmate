@@ -312,6 +312,28 @@ class SameSenderDistinctClaims(Harness):
         self.assertTrue(led["legal@muso.ai:b2"]["ack_ref"].startswith("dup-of:"))
         self.assertTrue(led["legal@muso.ai:b2"]["paged"].startswith("dup-of:"))
 
+    def test_same_sender_no_ids_same_subject_different_bodies_each_get_ack_and_page(self):
+        """hydra#1361 bot NO-GO @1936d320d: two different ID-less claims under one generic subject
+        must not collapse; the body fingerprint in notice_key keeps them apart."""
+        led = self.go({
+            "a1": thread("claims@labela.com", subject="DMCA Notice", body="Please take down my song Alpha"),
+            "b2": thread("claims@labela.com", subject="DMCA Notice", body="Please take down my track Beta",
+                         internal=FIRST_MSG + 36000)})
+        self.assertEqual(len(self.acks), 2)
+        self.assertEqual(len([p for p in self.posts if p["thread_ts"] is None]), 2)
+        for k in ("legal@muso.ai:a1", "legal@muso.ai:b2"):
+            self.assertFalse(str(led[k]["paged"]).startswith("dup-of"))
+            self.assertFalse(str(led[k]["ack_ref"]).startswith("dup-of"))
+
+    def test_notice_key_unchanged_when_ids_present(self):
+        """With linked ids the key is the pre-fingerprint format, so the cross-sender arm and
+        existing ledger rows keep matching whatever the body says."""
+        import hashlib
+        old = hashlib.sha256("dmca_takedown|dmca notice|profile:abc".encode()).hexdigest()[:16]
+        a = li.notice_key("dmca_takedown", "DMCA Notice", ["profile:abc"], "x")
+        self.assertEqual(a, li.notice_key("dmca_takedown", "DMCA Notice", ["profile:abc"], "y"))
+        self.assertEqual(a, old)
+
     def test_same_sender_no_ids_different_subjects_each_get_ack_and_page(self):
         led = self.go({
             "a1": thread("claims@labela.com", subject="DMCA Notice one", body="Please take down my song"),
