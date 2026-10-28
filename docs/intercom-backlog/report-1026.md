@@ -259,6 +259,27 @@ It sends nothing and writes no status or ledger row; it writes JSON lists (0600)
 - **Not run live yet:** the script needs the deploy to be present on node-8 (no copies outside a
   deploy). The live dry count is the first run after the merge.
 
+## 11. The "242 support@ tickets" are 242 credit requests from 2 accounts (measured 10-28 ~01:50Z, read-only)
+
+The brief's "242 support@ credit-request tickets" is the decider's hold count, not a count of
+conversations. In the credit-review ledger (`decisions`, node-8), the reason "emailed support@ in
+the last 90 days: human review, never asked" covers **242 distinct requests from 2 accounts**:
+
+| account | requests held | first / last decision |
+|---|---|---|
+| 45773 | 235 | 10-22 06:15Z / 10-26 07:00Z |
+| 233984 | 7 | 10-17 23:30Z / 10-26 19:45Z |
+
+- **Where the hold comes from:** both accounts are in the proof-on-file `gmail_contacts_90d`
+  snapshot. That snapshot holds user ids only (797 of them), built by cs-systemic's
+  `gmail-proof.py` from support@ inbound mail. Neither account has a document entry in
+  proof-on-file.
+- **Message ids:** this lane never matched Gmail message ids, so it holds no message-id list.
+  The two account ids above are the whole match.
+- **Last decision:** no decision with this reason in the last 24 h; the last was 10-26 19:45Z.
+- **Handed to:** doc-verify-build-b1, via firstmate, to reconcile against
+  `/root/dv-backfill-1027/missed-gmail-msgs-1028.txt` (775 refs). Nothing was sent.
+
 ## Outside the rules (log)
 
 None yet. No send and no close has been made.
