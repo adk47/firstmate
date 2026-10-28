@@ -58,7 +58,8 @@ def real_deps(store, *, intercom_fetch: bool = True, strict_pacing: bool = False
     mb, ic, ad = (Pacer(n, 1.0, log=log, strict=strict_pacing) for n in ("musicbrainz", "intercom", "admin"))
     fetch = ic.paced(intercom.make_fetch(tok)) if tok else None
     return Deps(sandbox=sandbox.run, extractor=Extractor(store), net=xc.Net(mb_pacer=mb),
-                raw_credits=ad.paced(lambda tid: admin_api.track_raw_credits(admin, tid)),
+                raw_credits=lambda tid: store.cached_raw_credits(
+                    tid, ad.paced(lambda t: admin_api.track_raw_credits(admin, t))),
                 requests=lambda ids: stage2.requests(ids), fetch=fetch, dl=stage2.download,
                 people_graph=intel.trino_name_index(stage2.trino_query), gmail_raw=_gmail_raw())
 

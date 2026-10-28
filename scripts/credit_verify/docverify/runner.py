@@ -272,6 +272,9 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                         credits_cache[r.track_id] = (None, f"{type(exc).__name__}: {str(exc)[:120]}")
                 rc, err = credits_cache[r.track_id]
                 checks.append(xc.dsp(rc, role, r.names, err, deps.fresh_since))
+                # Ruling 057: the evidence says WHEN Muso's stored credits were read (a cache hit can be
+                # up to the TTL old). It is never a same-run read: only D5b's fresh capture sets fresh_since.
+                checks[-1].detail["raw_credits_read_at"] = store.raw_credits_read_at(r.track_id)
                 rel = None
                 if r.isrc:
                     if r.isrc not in release_cache:

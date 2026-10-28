@@ -28,6 +28,13 @@ from typing import Any
 from . import VERSION
 
 MAX_UNKNOWN = 3
+
+
+class RawCreditsLockError(RuntimeError):
+    """The cross-process raw-credits lock cannot be taken; the admin GET is not made."""
+
+
+RAW_CREDITS_TTL_S = float(os.environ.get("CREDIT_DOC_VERIFY_RAW_CREDITS_TTL_S", str(6 * 3600)))
 DEFAULT_PATH = os.environ.get("CREDIT_DOC_VERIFY_STORE", "/var/lib/hydra-credit-verify/doc-verify.sqlite")
 
 SCHEMA = """
@@ -76,6 +83,9 @@ CREATE TABLE IF NOT EXISTS dv_llm_calls (
   latency_ms INTEGER
 );
 CREATE TABLE IF NOT EXISTS dv_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+-- Muso's stored raw credits per track, shared by every reader process (one admin GET per track per
+-- TTL instead of one per document): an account's documents usually name the same tracks.
+CREATE TABLE IF NOT EXISTS dv_raw_credits (track_id TEXT PRIMARY KEY, at TEXT NOT NULL, items_json TEXT NOT NULL);
 -- D2: a filing's candidate requests and claim keys as the last run saw them, UNTRUNCATED (dv_steps
 -- detail is capped at 20,000 chars; a 40-request filing overflowed it and broke selection).
 CREATE TABLE IF NOT EXISTS dv_intake_keys (intake_id TEXT NOT NULL, version TEXT NOT NULL, at TEXT NOT NULL,
@@ -183,6 +193,77 @@ class DocVerifyStore:
             self.db.execute("INSERT OR REPLACE INTO dv_intake_keys (intake_id, version, at, candidates_json, keys_json) "
                             "VALUES (?,?,?,?,?)", (intake_id, VERSION, utcnow(), json.dumps(sorted(candidates)),
                                                    json.dumps(keys)))
+
+    def cached_raw_credits(self, track_id: str, fetch: Any, ttl_s: float = RAW_CREDITS_TTL_S,
+                           now: Any = None) -> list[dict[str, Any]]:
+        """`fetch(track_id)` through a cache shared by every reader process. A fetch that raises is
+        not cached (the next document asks again); only a list of items is stored. The items are
+        Muso's STORED capture either way - caching them changes no evidence class (a same-run
+        Spotify/Tidal read is D5b's fresh capture, never this)."""
+        import time as _t
+        t = _t.time() if now is None else now
+        hit = self._raw_credits_hit(track_id, t, ttl_s)
+        if hit is not None:
+            return hit
+        # A miss: take this track's cross-process lock, check again (another reader may have just
+        # fetched it), and only then fetch - one admin GET per track per TTL across all readers
+        # (QA #1440). The lock is a flock, released by the kernel if the process dies.
+        with self._track_lock(track_id):
+            hit = self._raw_credits_hit(track_id, t if now is not None else _t.time(), ttl_s)
+            if hit is not None:
+                return hit
+            return self._fetch_and_store(track_id, fetch, t)
+
+    def _raw_credits_hit(self, track_id: str, t: float, ttl_s: float) -> list[dict[str, Any]] | None:
+        row = self.db.execute("SELECT at, items_json FROM dv_raw_credits WHERE track_id=?", (track_id,)).fetchone()
+        if row:
+            try:
+                if t - float(row[0]) < ttl_s:
+                    return json.loads(row[1])
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    def _track_lock(self, track_id: str):
+        """An exclusive flock on one of 64 bucket files next to the store (bucket = sha256 of the
+        track id). FAILS CLOSED (QA #1440): a lock that cannot be taken raises RawCreditsLockError and
+        no fetch is made - the claim's xc_dsp records an error (`unknown`, retried), never an unlocked GET."""
+        import contextlib
+        import fcntl
+        import hashlib
+
+        @contextlib.contextmanager
+        def held():
+            d = os.path.join(os.path.dirname(os.path.abspath(self.path)), "raw-credits-locks")
+            try:
+                os.makedirs(d, mode=0o700, exist_ok=True)
+                fd = os.open(os.path.join(d, f"{int(hashlib.sha256(track_id.encode()).hexdigest()[:4], 16) % 64}.lock"),
+                             os.O_RDWR | os.O_CREAT, 0o600)
+            except OSError as exc:
+                raise RawCreditsLockError(f"raw-credits lock unusable under {d}: {type(exc).__name__}") from exc
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+        return held()
+
+    def _fetch_and_store(self, track_id: str, fetch: Any, t: float) -> list[dict[str, Any]]:
+        items = fetch(track_id)
+        if isinstance(items, list):
+            with self.lock, self.db:
+                self.db.execute("INSERT OR REPLACE INTO dv_raw_credits (track_id, at, items_json) VALUES (?,?,?)",
+                                (track_id, f"{t:.3f}", json.dumps(items, default=str)))
+        return items
+
+    def raw_credits_read_at(self, track_id: str) -> str | None:
+        """When the admin GET that produced this track's cached raw credits ran (UTC), or None."""
+        row = self.db.execute("SELECT at FROM dv_raw_credits WHERE track_id=?", (track_id,)).fetchone()
+        try:
+            return datetime.fromtimestamp(float(row[0]), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if row else None
+        except (TypeError, ValueError):
+            return None
 
     def intake_keys_recorded(self, intake_id: str) -> dict[str, Any] | None:
         """The last run's {candidates, keys} for a filing (None before its first run, or when

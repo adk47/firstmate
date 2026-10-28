@@ -1328,6 +1328,91 @@ class ParallelReaderTests(unittest.TestCase):
             self.assertEqual(cdv.run_workers(a, popen=lambda argv: self.fail("a worker was started")), 2)
 
 
+class RawCreditsCacheTests(unittest.TestCase):
+    """One admin GET per track per TTL, shared by every reader process (2026-10-28: admin GETs at 1/s
+    host-wide were 60% of reader time; an account's documents name the same tracks)."""
+
+    def test_one_fetch_per_track_across_documents_and_processes(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "dv.sqlite")
+            a, b = DocVerifyStore(path), DocVerifyStore(path)      # two reader processes, one store
+            calls = []
+
+            def fetch(tid):
+                calls.append(tid)
+                return [raw("Ann Alpha", "Mixer")]
+            self.assertEqual(a.cached_raw_credits("T1", fetch, now=1000.0), [raw("Ann Alpha", "Mixer")])
+            self.assertEqual(b.cached_raw_credits("T1", fetch, now=1500.0), [raw("Ann Alpha", "Mixer")])
+            self.assertEqual(calls, ["T1"])
+            b.cached_raw_credits("T1", fetch, ttl_s=600, now=1700.0)          # expired: asked again
+            self.assertEqual(calls, ["T1", "T1"])
+
+    def test_concurrent_readers_fetch_a_track_once(self):
+        # QA #1440: two readers missing the cache at the same moment both fetched. Four real processes,
+        # a slow fetch, one shared store: exactly one fetch.
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "dv.sqlite")
+            DocVerifyStore(path).db.close()
+            log = os.path.join(d, "fetches.log")
+            code = ("import sys,time; sys.path.insert(0,%r); from credit_verify.docverify.store import DocVerifyStore\n"
+                    "s=DocVerifyStore(%r)\n"
+                    "def f(t):\n open(%r,'a').write('x'); time.sleep(0.5); return [{'n': 1}]\n"
+                    "print(s.cached_raw_credits('T1', f))") % (str(Path(__file__).resolve().parents[1]), path, log)
+            procs = [subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True) for _ in range(4)]
+            outs = [p.communicate()[0].strip() for p in procs]
+            self.assertEqual(outs, ["[{'n': 1}]"] * 4)
+            self.assertEqual(Path(log).read_text(), "x")                      # one admin GET for four readers
+
+    def test_an_unusable_lock_fails_closed_while_the_cache_still_works(self):
+        # QA #1440: the lock path must not silently fall back to unlocked GETs.
+        from credit_verify.docverify.store import RawCreditsLockError
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        s = DocVerifyStore(os.path.join(td.name, "dv.sqlite"))
+        Path(td.name, "raw-credits-locks").write_text("not a directory")           # lock files cannot be made
+        calls = []
+        with self.assertRaises(RawCreditsLockError):
+            s.cached_raw_credits("T1", lambda t: calls.append(t) or [])
+        self.assertEqual(calls, [])                                                 # no unlocked admin GET
+        s.db.execute("INSERT INTO dv_raw_credits (track_id, at, items_json) VALUES ('T2', ?, '[]')",
+                     (f"{__import__('time').time():.3f}",))
+        s.db.commit()
+        self.assertEqual(s.cached_raw_credits("T2", lambda t: self.fail("hit")), [])   # cache hits need no lock
+
+    def test_a_failed_fetch_is_never_cached(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        s = DocVerifyStore(os.path.join(td.name, "dv.sqlite"))
+
+        def boom(tid):
+            raise RuntimeError("admin 502")
+        with self.assertRaises(RuntimeError):
+            s.cached_raw_credits("T2", boom)
+        self.assertIsNone(s.db.execute("SELECT 1 FROM dv_raw_credits WHERE track_id='T2'").fetchone())
+        self.assertEqual(s.cached_raw_credits("T2", lambda t: []), [])          # an empty list is a real answer
+
+    def test_a_cache_hit_records_when_the_credits_were_read_and_is_never_same_run(self):
+        # Ruling 057: the evidence carries the read time; a cached read never counts as a same-run anchor.
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        s = DocVerifyStore(os.path.join(td.name, "dv.sqlite"))
+        s.cached_raw_credits("T1", lambda t: [raw("Ann Alpha", "Mixer")], now=1793170000.0)
+        self.assertEqual(s.raw_credits_read_at("T1"), "2026-10-28T06:46:40Z")
+        self.assertIsNone(s.raw_credits_read_at("T9"))
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
+        self.assertIn('checks[-1].detail["raw_credits_read_at"] = store.raw_credits_read_at(r.track_id)', src)
+        c = xc.dsp(s.cached_raw_credits("T1", lambda t: self.fail("cached"), now=1793170001.0), "Mixing",
+                   ["Ann Alpha"], None, None)
+        self.assertEqual((c.status, c.detail["fresh_since"], c.detail["fresh_anchor"]),
+                         (xc.POSITIVE, None, {"spotify": False, "tidal": False}))
+
+    def test_the_cli_wires_the_cache_in_front_of_the_paced_admin_get(self):
+        src = (Path(__file__).resolve().parents[1] / "credit-doc-verify.py").read_text()
+        self.assertIn("raw_credits=lambda tid: store.cached_raw_credits(", src)
+        self.assertIn("ad.paced(lambda t: admin_api.track_raw_credits(admin, t))", src)
+
+
 class TrayTests(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
