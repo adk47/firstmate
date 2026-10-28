@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS dv_llm_calls (
   latency_ms INTEGER
 );
 CREATE TABLE IF NOT EXISTS dv_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+-- D2: a filing's candidate requests and claim keys as the last run saw them, UNTRUNCATED (dv_steps
+-- detail is capped at 20,000 chars; a 40-request filing overflowed it and broke selection).
+CREATE TABLE IF NOT EXISTS dv_intake_keys (intake_id TEXT NOT NULL, version TEXT NOT NULL, at TEXT NOT NULL,
+  candidates_json TEXT NOT NULL, keys_json TEXT NOT NULL, PRIMARY KEY (intake_id, version));
 """
 
 
@@ -174,11 +178,26 @@ class DocVerifyStore:
                 unknown[key] = unknown.get(key, 0) + 1
         return done | {k for k, n in unknown.items() if n >= MAX_UNKNOWN}
 
+    def record_intake_keys(self, intake_id: str, candidates: list[str], keys: list[str]) -> None:
+        with self.lock, self.db:
+            self.db.execute("INSERT OR REPLACE INTO dv_intake_keys (intake_id, version, at, candidates_json, keys_json) "
+                            "VALUES (?,?,?,?,?)", (intake_id, VERSION, utcnow(), json.dumps(sorted(candidates)),
+                                                   json.dumps(keys)))
+
     def intake_keys_recorded(self, intake_id: str) -> dict[str, Any] | None:
-        """The last run's {candidates, keys} for a filing (None before its first run)."""
-        row = self.db.execute("SELECT detail_json FROM dv_steps WHERE request_id=? AND step='intake_keys' AND version=? "
-                              "ORDER BY id DESC LIMIT 1", (f"intake:{intake_id}", VERSION)).fetchone()
-        return json.loads(row[0]) if row else None
+        """The last run's {candidates, keys} for a filing (None before its first run, or when
+        only an unreadable record exists: the filing is then simply read again). Never raises on
+        a stored value - selection must not stop on one filing."""
+        row = self.db.execute("SELECT candidates_json, keys_json FROM dv_intake_keys WHERE intake_id=? AND version=?",
+                              (intake_id, VERSION)).fetchone()
+        try:
+            if row:
+                return {"candidates": json.loads(row[0]), "keys": json.loads(row[1])}
+            old = self.db.execute("SELECT detail_json FROM dv_steps WHERE request_id=? AND step='intake_keys' "
+                                  "AND version=? ORDER BY id DESC LIMIT 1", (f"intake:{intake_id}", VERSION)).fetchone()
+            return json.loads(old[0]) if old else None
+        except (ValueError, TypeError):
+            return None
 
     def intake_settled(self, intake_id: str, candidates: list[str]) -> bool:
         """No Trino needed: the last run saw exactly these candidate requests and every

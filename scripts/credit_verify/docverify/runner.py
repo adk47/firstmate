@@ -369,8 +369,10 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
                 stats.intake += 1
                 try:
                     keys = intake_keys(doc, deps)        # every open claim, uncapped
+                    store.record_intake_keys(doc.intake_id, doc.candidate_ids, keys)
                     store.step(run_id, doc.sha, "intake_keys", "ok" if keys else "closed",
-                               {"candidates": sorted(doc.candidate_ids), "keys": keys}, f"intake:{doc.intake_id}")
+                               {"candidates": len(doc.candidate_ids), "keys": len(keys), "first_keys": keys[:20]},
+                               f"intake:{doc.intake_id}")
                     finished = store.intake_finished_keys(doc.intake_id)
                     todo = [k for k in keys if k not in finished][:MAX_INTAKE_CLAIMS]
                     if not todo:

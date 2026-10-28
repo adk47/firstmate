@@ -1093,6 +1093,30 @@ class IntakeD2Tests(unittest.TestCase):
         stats, rows = self._run()
         self.assertEqual([r["request_id"] for r in rows], [rid2])   # only the new claim
 
+    def test_a_filing_with_hundreds_of_claims_is_recorded_whole_and_never_breaks_selection(self):
+        # Prod 2026-10-28 07:40Z: a 40-request filing's key list overflowed dv_steps' 20,000-char detail
+        # cap; the truncated JSON raised inside selection and stopped the whole shard.
+        rids = [f"11111111-2222-3333-4444-{i:012d}" for i in range(300)]
+        self.reqs = {r: IntakeReq(rid=r, roles=("Mixing", "Mastering")) for r in rids}
+        db = sqlite3.connect(self.proof_path)
+        db.execute("UPDATE proof_intake SET candidate_request_ids_json=?", (json.dumps(rids),))
+        db.commit()
+        db.close()
+        self.h3 = {f"{r}#{role}": H3(verdict="GENUINE") for r in rids for role in ("Mixing", "Mastering")}
+        self._run()
+        rec = self.store.intake_keys_recorded(self.intake_id)
+        self.assertEqual((len(rec["candidates"]), len(rec["keys"])), (300, 600))       # whole, not truncated
+        # an old truncated step record alone is unreadable -> "not recorded", never an exception
+        self.store.db.execute("DELETE FROM dv_intake_keys")
+        self.store.db.execute("INSERT INTO dv_steps (run_id, at, proof_id, request_id, step, status, detail_json, version)"
+                              " VALUES ('r', '2026-10-28T07:40:00Z', 'p', ?, 'intake_keys', 'ok', ?, ?)",
+                              (f"intake:{self.intake_id}", '{"candidates": ["aaa", "bb', VERSION))
+        self.store.db.commit()
+        self.assertIsNone(self.store.intake_keys_recorded(self.intake_id))
+        self.assertFalse(self.store.intake_settled(self.intake_id, rids))
+        stats, _ = self._run()                                                         # selection runs on
+        self.assertEqual(stats.errors, [])
+
     def test_pairs_eval_runs_never_pick_up_intake(self):
         stats, _ = runner.run(self.store, self.deps, proof_store=self.proof_path, pairs={})
         self.assertEqual(stats.intake, 0)
