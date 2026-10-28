@@ -3,6 +3,7 @@ import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
 import type { RateLimiter } from "../rate-limiter.js";
 import type { MusoAdminClient } from "../muso-admin-client.js";
 import { expectedTaxIdLabels } from "../order-address.js";
+import { resolveOwnerAnchor, type OwnerAnchorDeps } from "../owner-anchor.js";
 
 const Parameters = Type.Object({
   order_ref: Type.String({
@@ -15,7 +16,10 @@ const Parameters = Type.Object({
 
 type Params = Static<typeof Parameters>;
 
-interface ToolDeps {
+interface ToolDeps extends OwnerAnchorDeps {
+  // Default TRUE (absent = true): {status, hold} only, for every caller, until Intercom Identity
+  // Verification is on. Only an explicit false enables the owner-anchored detail path.
+  orderDetailsRequireIv?: boolean;
   adminClient: MusoAdminClient;
   rateLimiter: RateLimiter;
   sessionId: string;
@@ -109,6 +113,11 @@ function holdDescriptor(
   };
 }
 
+/** ORDER_DETAILS_REQUIRE_IV parse, fail closed: only false / "false" / 0 / "0" turn the gate off. */
+export function orderDetailsRequireIvFrom(raw: unknown): boolean {
+  return !(raw === false || raw === 0 || raw === "false" || raw === "0");
+}
+
 export function createOrderLookupTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
   const { adminClient, rateLimiter, sessionId } = deps;
 
@@ -116,7 +125,7 @@ export function createOrderLookupTool(deps: ToolDeps): AgentTool<typeof Paramete
     name: "order_lookup",
     label: "Order Lookup",
     description:
-      "Read-only lookup of a plaque/poster order by its internal id, order number, or Prodigi order id. Returns the order status, the shipping address (Prodigi format), tracking, and an item summary — never payment details. When the order is on a fulfilment hold (NEEDS_TAX_ID / NEEDS_CONTACT_INFO) it also returns `hold`, naming what is still outstanding and what the destination calls its tax id. Use it for Prodigi address-confirmation requests and customer order/shipping questions (see the order-fulfillment skill).",
+      "Read-only lookup of a plaque/poster order by its internal id, order number, or Prodigi order id. Returns { status, hold } with owner_verified:false: the shipping address, phone, tracking and items are NOT available through Caroline until Intercom Identity Verification is on (then only to the order's own verified contact). Never read, guess or confirm an address or phone; a human confirms addresses. Never payment details. When the order is on a fulfilment hold (NEEDS_TAX_ID / NEEDS_CONTACT_INFO) it also returns `hold`, naming what is still outstanding and what the destination calls its tax id. Use it for Prodigi address-confirmation requests and customer order/shipping questions (see the order-fulfillment skill).",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
       try {
@@ -133,6 +142,30 @@ export function createOrderLookupTool(deps: ToolDeps): AgentTool<typeof Paramete
         }
 
         const order = unwrap(resp.data);
+        const taxIdEarly = taxIdMeta(order.taxId);
+        const addrEarly = ((order.shipment as Record<string, unknown> | null)?.address ?? null) as Record<string, unknown> | null;
+        const hold = holdDescriptor(order.status, addrEarly?.countryCode, taxIdEarly.present);
+
+        // Owner anchor (caroline-redteam-r1 EX-1): the address, phone, tracking and items go only to
+        // the order's own customer. No anchor, or a different person: status + hold only.
+        // ORDER_DETAILS_REQUIRE_IV (default on): no caller gets details while IV is off; Intercom is not read.
+        const ivGate = deps.orderDetailsRequireIv !== false;
+        const anchor = ivGate
+          ? ({ ok: false, reason: "identity_verification_off" } as const)
+          : await resolveOwnerAnchor(deps);
+        const owner = typeof order.customerEmail === "string" ? order.customerEmail.trim().toLowerCase() : "";
+        const ownerCheck = !anchor.ok ? anchor.reason : !owner ? "order_owner_unknown" : owner !== anchor.email ? "owner_mismatch" : null;
+        if (ownerCheck) {
+          return textResult(JSON.stringify({
+            found: true,
+            owner_verified: false,
+            reason: "owner_undetermined",
+            owner_check: ownerCheck,
+            note: "Not shown: address, phone, tracking and items are not available to Caroline here. Give no address, phone, tracking or item detail; route address questions to a human.",
+            order: { status: order.status ?? null, hold },
+          }));
+        }
+
         const shipment = (order.shipment ?? null) as Record<string, unknown> | null;
         const rawItems = Array.isArray(order.items) ? (order.items as Record<string, unknown>[]) : [];
         const taxId = taxIdMeta(order.taxId);
@@ -143,6 +176,7 @@ export function createOrderLookupTool(deps: ToolDeps): AgentTool<typeof Paramete
         // but payment data is dropped — it is never needed to fix a shipment.
         const out = {
           found: true,
+          owner_verified: true,
           order: {
             id: order.id ?? null,
             orderNumber: order.orderNumber ?? null,
@@ -169,7 +203,7 @@ export function createOrderLookupTool(deps: ToolDeps): AgentTool<typeof Paramete
             taxId,
             // Non-null only for a NEEDS_TAX_ID / NEEDS_CONTACT_INFO order: what the
             // order is still waiting on, and what its destination calls the id.
-            hold: holdDescriptor(order.status, address?.countryCode, taxId.present),
+            hold: holdDescriptor(order.status, address?.countryCode, taxId.present) ?? hold,
           },
         };
         return textResult(JSON.stringify(out));

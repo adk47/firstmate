@@ -3,6 +3,7 @@ import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
 import type { RateLimiter } from "../rate-limiter.js";
 import type { MusoAdminClient } from "../muso-admin-client.js";
 import { extractProfileIdFromUrl } from "./profile-lookup.js";
+import { resolveOwnerAnchor, type OwnerAnchorDeps } from "../owner-anchor.js";
 
 const Parameters = Type.Object({
   profile_id: Type.Optional(Type.String({ description: "Bare Muso profile UUID" })),
@@ -13,7 +14,7 @@ const Parameters = Type.Object({
 
 type Params = Static<typeof Parameters>;
 
-interface ToolDeps {
+interface ToolDeps extends OwnerAnchorDeps {
   adminClient: MusoAdminClient;
   rateLimiter: RateLimiter;
   sessionId: string;
@@ -77,7 +78,7 @@ export function createProfileStatusTool(deps: ToolDeps): AgentTool<typeof Parame
 
           profileId = String(results[0].id ?? "");
           const r = stripPii(results[0]);
-          return await fetchCreditsAndAssemble(adminClient, profileId, r);
+          return await fetchCreditsAndAssemble(deps, adminClient, profileId, r);
         }
 
         // Direct profileId path — fetch bare profile then credits.
@@ -87,10 +88,10 @@ export function createProfileStatusTool(deps: ToolDeps): AgentTool<typeof Parame
         if (direct.ok) {
           // Admin endpoint wraps in data.data
           const profileRow = stripPii((direct.data as any)?.data ?? direct.data ?? {});
-          return await fetchCreditsAndAssemble(adminClient, profileId, profileRow);
+          return await fetchCreditsAndAssemble(deps, adminClient, profileId, profileRow);
         }
         // Fallback: if bare-profile endpoint is unavailable, try credits alone.
-        return await fetchCreditsAndAssemble(adminClient, profileId, {});
+        return await fetchCreditsAndAssemble(deps, adminClient, profileId, {});
       } catch (_err) {
         return structuredFailure("lookup_unavailable");
       }
@@ -99,6 +100,7 @@ export function createProfileStatusTool(deps: ToolDeps): AgentTool<typeof Parame
 }
 
 async function fetchCreditsAndAssemble(
+  deps: OwnerAnchorDeps,
   adminClient: MusoAdminClient,
   profileId: string,
   profileRow: Record<string, unknown>,
@@ -130,19 +132,24 @@ async function fetchCreditsAndAssemble(
     .sort((a, b) => b.date.localeCompare(a.date))
     .slice(0, 3);
 
-  // Ownership-check fields for the customer-credit-removal skill's Step 2
-  // (PR #337 review item #5). Workspace emails here are the profile-owner's
-  // own emails (Caroline already sees the same email via Intercom contact),
-  // not third-party PII, so safe to expose. Each workspace is reduced to
-  // the two fields the skill actually reads.
+  // Ownership-check fields for the customer-credit-removal skill's Step 2. Workspace emails are
+  // NEVER returned (caroline-redteam-r1 EX-2: any profile id reached a stranger's email). Instead the
+  // tool compares them with this conversation's verified Intercom contact (owner anchor, fail closed)
+  // and returns only booleans. remove-credits.sh re-verifies ownership server-side regardless.
+  const anchor = await resolveOwnerAnchor(deps);
   const rawWorkspaces = Array.isArray(profileRow.workspaces) ? profileRow.workspaces : [];
   const workspaces = rawWorkspaces.map((w) => {
     const ws = w as Record<string, unknown>;
+    const email = String(ws.email ?? "").trim().toLowerCase();
     return {
-      email: String(ws.email ?? ""),
       isClaimed: Boolean(ws.isClaimed),
+      matchesVerifiedContact: anchor.ok && email !== "" && email === anchor.email,
     };
   });
+  const claimed = workspaces.filter((w) => w.isClaimed);
+  const ownerMatches: boolean | null = anchor.ok
+    ? claimed.length === 1 && claimed[0].matchesVerifiedContact
+    : null;
   const rawKnownAs = Array.isArray(profileRow.knownAsNames) ? profileRow.knownAsNames : [];
   const knownAsNames = rawKnownAs.map((n) => String(n));
 
@@ -163,6 +170,11 @@ async function fetchCreditsAndAssemble(
       })(),
       credits_count: Number(profileRow.creditCount ?? profileRow.creditsCount ?? 0),
       workspaces,
+      claimed_workspace_count: claimed.length,
+      // true = exactly one claimed workspace and it is this contact's; false = not theirs;
+      // null = the contact could not be verified (owner_check says why): treat as not theirs.
+      owner_matches_verified_contact: ownerMatches,
+      owner_check: anchor.ok ? "verified_contact" : anchor.reason,
       knownAsNames,
     },
     latest_credits: latest,

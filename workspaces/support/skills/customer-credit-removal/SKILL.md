@@ -115,8 +115,8 @@ When ownership fails, ALSO compute Step 3's unmerge-detection heuristic before f
 
 **Allow only if ALL three are true** (read directly from the `profile_status` response):
 - `profile.isClaimed == true`
-- Exactly ONE entry in `profile.workspaces[]` has `isClaimed == true`
-- That workspace's `email` matches `intercom_email` (case-insensitive)
+- `profile.claimed_workspace_count == 1`
+- `profile.owner_matches_verified_contact == true` (the tool compares the claimed workspace with this conversation's verified Intercom contact; it never shows you the email. `false` is the "Email mismatch" row below; `null` means the contact could not be verified, so route to human review)
 
 If the ownership signal looks ambiguous, call `remove_credits` with `apply: false` anyway – the wrapper script will return a structured refusal envelope (e.g. `owner_mismatch`, `profile_unclaimed`) that you can route deterministically using the refusal table at the bottom of this skill.
 
@@ -293,4 +293,4 @@ Never use the words "ticket," "ClickUp," "wrapper," "script," "API," "DELETE," o
 - Per-request cap: 50 tracks. Per-customer-per-day cap: 100 tracks. Both enforced inside the wrapper.
 - Audit log lives at `/var/log/openclaw/customer-credit-removal.jsonl` – one line per preview or refused attempt. Operations can grep this if a customer disputes.
 - Preview is read-only, so re-running it is always safe.
-- Field paths (`isClaimed`, `workspaces[].email`, etc.) are recon-confirmed against the live admin API as of 2026-05-25. See `reference_muso_admin_api_profile_fields.md` (operator memory) if they ever drift.
+- Field paths (`isClaimed`, `owner_matches_verified_contact`, etc.) are recon-confirmed against the live admin API as of 2026-05-25. See `reference_muso_admin_api_profile_fields.md` (operator memory) if they ever drift.

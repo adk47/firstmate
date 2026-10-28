@@ -13,7 +13,7 @@
       "profile_claim_status": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution, GET /api/v3/admin/profile/{id} for claim/ownership context, GET /api/v3/admin/claiming?profilesIds=<id>&limit=21 for the profile's claim requests…",
       "profile_credits_status": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution and the same-name duplicate-candidate scan, GET /api/v3/admin/profile/{id} for the resolved profile / each candidate / a stated target profile, GET…",
       "profile_lookup": "GET /api/v3/admin/profile/search?keyword=<q>",
-      "profile_status": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution, GET /api/v3/admin/profile/{id} for direct UUID, GET /api/v3/admin/profile/{id}/credits?limit=20&offset=0 for credits.",
+      "profile_status": "admin profile/search (resolution), profile/{id}, profile/{id}/credits?limit=20.",
       "retention_offer_check": "muso subscription retention-offer --email <verified-email> --env prod --json (read-only).",
       "subscription_status": "muso teams list --email <verified-email> --env prod --json (GET /admin/team), which returns each workspace's subscription ({plan, status, period, usersLimit}) inline.",
       "support_action_router": "a deterministic read-only registry inside support-tools."

@@ -71,6 +71,9 @@ describe("profile_status", () => {
       primary_role: "Producer",
       credits_count: 142,
       workspaces: [],
+      claimed_workspace_count: 0,
+      owner_matches_verified_contact: null,
+      owner_check: "no_conversation",
       knownAsNames: [],
     });
     // sorted by releaseDate desc: A (May 8), C (May 2), B (Apr 30)
@@ -111,15 +114,36 @@ describe("profile_status", () => {
         return { ok: true, status: 200, data: {} } as AdminClientResult<unknown>;
       }) as MusoAdminClient["get"],
     });
-    const tool = createProfileStatusTool(makeDeps({ adminClient }));
-    const out = await call(tool, { profile_id: "p9" });
+    const NOW = 1793116800;
+    const who = (o: Record<string, unknown> = {}) => ({ email: "owner@example.com", role: "user", externalId: "pro-1",
+      contactCreatedAt: NOW - 30 * 86400, conversationCreatedAt: NOW - 60, ...o });
+    const run = async (w: unknown, sessionKey = "agent:support:intercom:direct:215476000000002") => {
+      const tool = createProfileStatusTool(makeDeps({ adminClient, sessionKey, intercomToken: "tok", nowSeconds: () => NOW,
+        intercomReader: { getAuthorEmail: vi.fn(), getLatestCustomerPart: vi.fn(), getContactIdentity: vi.fn(async () => w) } as any }));
+      return call(tool, { profile_id: "p9" });
+    };
+    const out = await run(who());
     expect(out.found).toBe(true);
     expect(out.profile.isClaimed).toBe(true);
     expect(out.profile.knownAsNames).toEqual(["Achille G", "Achille"]);
     expect(out.profile.workspaces).toEqual([
-      { email: "owner@example.com", isClaimed: true },
-      { email: "other@example.com", isClaimed: false },
+      { isClaimed: true, matchesVerifiedContact: true },
+      { isClaimed: false, matchesVerifiedContact: false },
     ]);
+    expect(out.profile).toMatchObject({ claimed_workspace_count: 1, owner_matches_verified_contact: true, owner_check: "verified_contact" });
+    // caroline-redteam-r1 EX-2: no workspace email ever reaches the model, whoever asks.
+    for (const [w, key, match, check] of [
+      [who(), undefined, true, "verified_contact"],
+      [who({ email: "stranger@evil.test" }), undefined, false, "verified_contact"],
+      [who({ role: "lead" }), undefined, null, "contact_not_user"],
+      [who({ externalId: null }), undefined, null, "contact_no_external_id"],
+      [who({ contactCreatedAt: NOW - 100 }), undefined, null, "contact_too_new"],
+      [who(), "agent:support:slack:channel:C1", null, "no_conversation"],
+    ] as const) {
+      const o = await run(w, key);
+      expect(JSON.stringify(o)).not.toMatch(/owner@example\.com|other@example\.com/);
+      expect([o.profile.owner_matches_verified_contact, o.profile.owner_check]).toEqual([match, check]);
+    }
   });
 
   it("returns no_match when search returns empty data array", async () => {
