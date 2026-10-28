@@ -15,6 +15,7 @@ set -euo pipefail
 #   ./scripts/release.sh v2026.5.26.1 # hotfix-same-day override
 #   ./scripts/release.sh --no-edit    # skip $EDITOR review (CI-friendly)
 #   DRY_RUN=1 ./scripts/release.sh    # generate notes, skip tag/push/release
+#   RELEASE_PUSH_RETRY_DELAYS="2 5"   # delays before 2 tag-push retries
 #
 # Requires: gh CLI authenticated, clean working tree, on main.
 
@@ -407,11 +408,45 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 # ─── Tag + push + GH release ───────────────────────────────────────
+# Validate before creating a tag: invalid retry configuration must not leave
+# a partial local release behind.
+read -r -a push_delays <<< "${RELEASE_PUSH_RETRY_DELAYS:-2 5}"
+for push_delay in "${push_delays[@]}"; do
+  [[ "$push_delay" =~ ^[0-9]+$ ]] \
+    || die "RELEASE_PUSH_RETRY_DELAYS must contain non-negative integer seconds."
+done
 log "Tagging $VERSION (annotated)..."
 git tag -a "$VERSION" -m "$VERSION"
 
 log "Pushing tag to origin..."
-git push origin "$VERSION"
+# A rejected push used to leave the newly minted tag only in this checkout.
+# The watcher then saw "tag but no GitHub release" on every 5-minute tick and
+# refused to retry, even when GitHub had recovered. Check the remote after a
+# failure: a lost acknowledgement may mean the push actually landed. Only
+# remove this run's local tag when the remote positively says it is absent.
+for (( push_attempt=0; ; push_attempt++ )); do
+  if git push origin "$VERSION"; then
+    break
+  fi
+  if remote_ref="$(git ls-remote --refs --exit-code origin "refs/tags/$VERSION" 2>/dev/null)"; then
+    remote_oid="${remote_ref%%$'\t'*}"
+    local_oid="$(git rev-parse "refs/tags/$VERSION")"
+    [[ "$remote_oid" == "$local_oid" ]] \
+      || die "tag push failed and origin has a DIFFERENT $VERSION — keeping the local tag for investigation."
+    log "  Push reported failure, but origin has the matching tag; continuing."
+    break
+  else
+    remote_rc=$?
+    [[ "$remote_rc" -eq 2 ]] \
+      || die "tag push failed and origin could not be checked — keeping the local tag for investigation."
+  fi
+  if (( push_attempt >= ${#push_delays[@]} )); then
+    git tag -d "$VERSION" >/dev/null \
+      || die "tag push failed; origin is empty, but local tag cleanup failed."
+    die "tag push failed after $((push_attempt + 1)) attempts; origin is empty, so removed the local-only tag for the next retry."
+  fi
+  sleep "${push_delays[$push_attempt]}"
+done
 
 log "Creating GitHub release..."
 if ! gh release create "$VERSION" --title "$VERSION" --notes-file "$DRAFT_FILE"; then
