@@ -27,6 +27,9 @@ setup() {
   TEST_TMPDIR="$(mktemp -d)"; export TEST_TMPDIR
   mkdir -p "$TEST_TMPDIR/scripts" "$TEST_TMPDIR/shared-reference/reference"
   cp "$REPO/scripts/validate-shared-config.sh" "$TEST_TMPDIR/scripts/"
+  # The Caroline support-deny check (captain 2026-10-28) calls this lib relative to the script.
+  mkdir -p "$TEST_TMPDIR/scripts/lib"
+  cp "$REPO/scripts/lib/assert-support-deny.sh" "$TEST_TMPDIR/scripts/lib/"
   # The roster check reads a real file relative to the script; give it the real one.
   cp "$REPO/shared-reference/reference/slack-people.json" \
      "$TEST_TMPDIR/shared-reference/reference/slack-people.json"

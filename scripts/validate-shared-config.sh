@@ -292,6 +292,16 @@ print(json.dumps(c.get('session', {}).get('dmScope', '')))
 caroline_check "main.session.dmScope" '"per-channel-peer"' "$main_dmscope"
 
 # 11. slack-people.json roster invariants.
+# Caroline's tool split (captain 2026-10-28 12:1xZ / 12:3xZ): see scripts/lib/assert-support-deny.sh
+# (deploy.sh Step 1 also runs it on every deploy that targets edge, including `--target edge`).
+if deny_out=$(bash "$(dirname "${BASH_SOURCE[0]}")/lib/assert-support-deny.sh" \
+    "$(dirname "${BASH_SOURCE[0]}")/../openclaw-edge.json" 2>&1); then
+  echo "PASS  openclaw-edge.json: $deny_out"
+else
+  echo "FAIL  openclaw-edge.json: $deny_out"
+  FAILURES=$((FAILURES + 1))
+fi
+
 # `current` is the current-EMPLOYEE predicate: eight agent SOULs resolve sender
 # IDs through this file, and USER.md files now tell agents that `current: true`
 # IS the complete staff list. Two ways that silently breaks: a bot carrying

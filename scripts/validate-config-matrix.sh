@@ -250,7 +250,7 @@ for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
   #    Deliberate exceptions, "<config-basename>:<agentId>:<tool>". Each one
   #    ACCEPTS a restricted codex harness for that agent because the deny buys
   #    something worth more than the native surface. Kept inline rather than in
-  #    a side file: there are two, not three.
+  #    a side file.
   #      - openclaw-edge.json:support:exec -- Caroline must not have a shell
   #        (#408). Losing codex-native shell_tool/unified_exec with it is defense
   #        in depth. Be honest about the rest of the bill though: she ALSO loses
@@ -271,7 +271,12 @@ for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
   #        have it. The cost is real and unpriced elsewhere: operations is a
   #        codex agent and stays permanently restricted, losing skill_search,
   #        memories, image_generation and browser_use too.
-  HARNESS_DENY_EXCEPTIONS='["openclaw-edge.json:support:exec","openclaw-main.json:operations:web_search"]'
+  #      - openclaw-edge.json:support:<the 14 verification/merge tools> -- captain 2026-10-28 12:1xZ /
+  #        12:3xZ: Caroline hands off and holds no verification or merge capability. These are plugin
+  #        tools (support-tools), not codex-native ones, and `support` already runs the restricted
+  #        harness because of `exec` above, so they add no further native-surface cost. They are listed
+  #        here so a deploy keeps the live deny list (scripts/lib/assert-support-deny.sh).
+  HARNESS_DENY_EXCEPTIONS='["openclaw-edge.json:support:exec","openclaw-main.json:operations:web_search","openclaw-edge.json:support:credits_verify","openclaw-edge.json:support:credit_verification_check","openclaw-edge.json:support:profiles_claim_self","openclaw-edge.json:support:profiles_consolidate","openclaw-edge.json:support:profile_claim_status","openclaw-edge.json:support:profile_credits_status","openclaw-edge.json:support:dedupe_check","openclaw-edge.json:support:remove_credits","openclaw-edge.json:support:credit_status_lookup","openclaw-edge.json:support:document_intake","openclaw-edge.json:support:merge_request_intake","openclaw-edge.json:support:credit_trust_handoff","openclaw-edge.json:support:merge_intake","openclaw-edge.json:support:proof_on_file"]'
 
   #    REACH OF THIS GATE, stated honestly: openclaw classifies over
   #    explicitPolicies = [globalPolicy, globalProviderPolicy, agentPolicy,

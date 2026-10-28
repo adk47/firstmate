@@ -190,10 +190,20 @@ write_entries_profile() {
   [[ "$output" == *"<global>"* ]]
 }
 
-@test "check8: documented exception (edge:support:exec) PASSES" {
-  write_policy_profile '{"deny":["exec"]}' 'support' 'openclaw-edge.json'
+# Captain 2026-10-28 12:1xZ / 12:3xZ: support denies exec + the 14 verification/merge plugin tools.
+SUPPORT_DENY='["exec","credits_verify","credit_verification_check","profiles_claim_self","profiles_consolidate","profile_claim_status","profile_credits_status","dedupe_check","remove_credits","credit_status_lookup","document_intake","merge_request_intake","credit_trust_handoff","merge_intake","proof_on_file"]'
+
+@test "check8: documented exception (edge:support: exec + the 14 verification/merge tools) PASSES" {
+  write_policy_profile "{\"deny\":$SUPPORT_DENY}" 'support' 'openclaw-edge.json'
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 0 ]
+}
+
+@test "check8: support dropping a verification/merge deny is a STALE exception (red build, never a silent re-open)" {
+  write_policy_profile '{"deny":["exec"]}' 'support' 'openclaw-edge.json'
+  run "$SCRIPT" "$PROFILE"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'STALE EXCEPTION "openclaw-edge.json:support:dedupe_check"'* ]]
 }
 
 @test "check8: documented exception (main:operations:web_search) PASSES" {

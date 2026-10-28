@@ -2027,6 +2027,9 @@ fi
 if needs_target "edge"; then
   python3 -m json.tool "$HYDRA_ROOT/openclaw-edge.json" >/dev/null 2>&1 || fail "openclaw-edge.json is not valid JSON"
   log "  openclaw-edge.json is valid JSON."
+  # Caroline deny list (captain 2026-10-28 12:1xZ / 12:3xZ). Checked here, for EVERY deploy that
+  # targets edge, because the edge config sync below overwrites the live deny list with this file.
+  "$SCRIPT_DIR/lib/assert-support-deny.sh" "$HYDRA_ROOT/openclaw-edge.json" || fail "openclaw-edge.json: the Caroline support tools.deny is incomplete (named above); refusing to sync it over the live edge config"  # hydra-hook: reviewed-indirection reviewed-argv (repo script by path)
 fi
 # cron-jobs.json is loaded later by Step 5a's POSTSYNC (when targeting
 # main). Pre-validate the JSON here so a malformed cron file fails the
