@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from credit_verify.docverify import VERSION, crosscheck as xc, forensics, gate, runner  # noqa: E402
+from credit_verify.docverify import VERSION, crosscheck as xc, forensics, gate, intel, runner  # noqa: E402
 from credit_verify.docverify.extract import (Extraction, Extractor, claimant_elsewhere, fallback, norm_isrc,  # noqa: E402
                                              supports, validate)
 from credit_verify.docverify.forensics import H3  # noqa: E402
@@ -56,9 +56,14 @@ def or_response(obj, cost=0.0004):
 
 
 class FakeNet(xc.Net):
-    def __init__(self, *, mx="mx", mb=None, deezer=None, pages=None):
+    def __init__(self, *, mx="mx", mb=None, deezer=None, pages=None, txt=None, rdap=None):
         self._mx, self._mbmap, self._deezer, self._pages = mx, mb or {}, deezer or {}, pages or {}
+        self._txt, self._rdap = txt or {}, rdap or {}
         self.calls: list[str] = []
+
+    def txt(self, name):
+        self.calls.append(f"txt:{name}")
+        return self._txt.get(name, [])
 
     def mx(self, domain):
         self.calls.append(f"mx:{domain}")
@@ -72,6 +77,11 @@ class FakeNet(xc.Net):
 
     def json(self, url):
         self.calls.append(url)
+        if url.startswith("https://rdap.org/domain/"):
+            reg = self._rdap.get(url.rsplit("/", 1)[1])
+            if reg is None:
+                raise urllib.error.HTTPError(url, 404, "nf", {}, None)
+            return {"events": [{"eventAction": "registration", "eventDate": reg}]}
         if url in self._deezer:
             return self._deezer[url]
         return {"error": {"code": 800}}
@@ -469,6 +479,184 @@ def checks(**status):
             for k, v in status.items()]
 
 
+class IntelTests(unittest.TestCase):
+    """Captain 2026-10-27 21:5xZ: domain and person checks (shadow, nothing sent)."""
+
+    def test_typosquat(self):
+        off = ["bluefern.com"]
+        self.assertEqual(intel.typosquat("bluefem.com", off), "bluefern.com")          # 1 edit
+        self.assertEqual(intel.typosquat("bluefern-records.net", off), "bluefern.com")  # name embedded
+        self.assertIsNone(intel.typosquat("bluefern.com", off))
+        self.assertIsNone(intel.typosquat("mail.bluefern.com", off))                    # same site
+        self.assertIsNone(intel.typosquat("redrock.com", off))
+        self.assertIsNone(intel.typosquat("abc.com", ["abd.com"]))                      # too short to judge
+
+    def test_domain_intel_flags_and_clears(self):
+        now = datetime(2026, 10, 27, tzinfo=timezone.utc)
+        net = FakeNet(rdap={"newlabel.com": "2026-09-01T00:00:00Z", "bluefern.com": "2012-01-01T00:00:00Z",
+                            "bluefem.com": "2016-01-01T00:00:00Z"},
+                      txt={"bluefern.com": ["v=spf1 include:x ~all"], "_dmarc.bluefern.com": ["v=DMARC1; p=quarantine"]})
+        c = intel.domain_intel(net, "newlabel.com", [], "New Label", "label", [], now=now)
+        self.assertEqual(c.status, xc.SOFT)
+        self.assertIn("registered 56 days ago", c.detail["flags"][0])
+        c = intel.domain_intel(net, "bluefem.com", [], "Blue Fern", "label", ["bluefern.com"], now=now)
+        self.assertEqual(c.status, xc.SOFT)
+        self.assertIn("look-alike", c.detail["flags"][0])
+        c = intel.domain_intel(net, "gmail.com", [], "Blue Fern", "label", ["bluefern.com"], now=now)
+        self.assertEqual(c.status, xc.SOFT)                                   # company issuer on free-mail
+        self.assertEqual(intel.domain_intel(net, "gmail.com", [], "Ann Alpha", "artist", [], now=now).status,
+                         xc.UNKNOWN)                                          # a person on gmail is normal
+        c = intel.domain_intel(net, "bluefern.com", [], "Blue Fern", "label", ["bluefern.com"], now=now)
+        self.assertEqual((c.status, c.detail["domains"][0]["spf"], c.detail["domains"][0]["dmarc"]),
+                         (xc.POSITIVE, True, True))
+        self.assertEqual(intel.domain_intel(net, None, [], None, None, []).status, xc.SKIPPED)
+        c = intel.domain_intel(FakeNet(mx="nxdomain"), "ghost-label.io", [], "Ghost", "label", [], now=now)
+        self.assertEqual(c.status, xc.SOFT)
+        self.assertIn("does not exist", c.detail["flags"][0])
+
+    def test_people_exist_somewhere_or_are_flagged(self):
+        ex = validate({**GOOD_ANSWER, "credits": [
+            {"person": "Ann Alpha", "role": "Mixing", "confidence": 0.9},      # on the track's Tidal credits
+            {"person": "Bob Beta", "role": "Producer", "confidence": 0.9},     # in the Muso credits graph
+            {"person": "Cy Gamma", "role": "Writer", "confidence": 0.9},       # MusicBrainz exact
+            {"person": "Zed Nowhere", "role": "Writer", "confidence": 0.9},    # nowhere
+            {"person": "Lo Conf", "role": "Writer", "confidence": 0.3}]})      # never evidence
+        people = intel.people_of(ex)
+        self.assertEqual([p["name"] for p in people], ["Dana Reyes", "Ann Alpha", "Bob Beta", "Cy Gamma", "Zed Nowhere"])
+        net = FakeNet(mb={"artist": {"artists": [{"name": "Cy Gamma", "score": 100}]}},
+                      pages={"https://bluefern.com/team": "Dana Reyes"})
+        c = intel.people_check(net, people, graph=lambda names: {n for n in names if n == "bob beta"},
+                               track_credits=[raw("Ann Alpha", "Mixer")], issuer_site_names=["Dana Reyes"])
+        found = {r["name"]: r["found_in"] for r in c.detail["people"]}
+        self.assertEqual(found["Dana Reyes"], ["issuer_site"])
+        self.assertEqual(found["Ann Alpha"], ["track_spotify_tidal"])
+        self.assertEqual(found["Bob Beta"], ["muso_credits_graph"])
+        self.assertEqual(found["Cy Gamma"], ["musicbrainz"])
+        self.assertEqual((c.status, c.detail["found_nowhere"]), (xc.WEAK, ["Zed Nowhere"]))
+
+    def test_people_names_are_normalised_and_organisations_dropped(self):
+        self.assertEqual(intel.person_name("Kumar, Kurran"), "Kurran Kumar")              # PRO style
+        self.assertIsNone(intel.person_name("MEDIA SERVICES INTERNATIONAL"))
+        self.assertIsNone(intel.person_name("Famous Production SRL"))
+        self.assertIsNone(intel.person_name("Blue Fern Records"))
+        self.assertEqual(intel.person_name("Ann  Alpha"), "Ann Alpha")
+        self.assertIsNone(intel.person_name("Al"))                                         # too short to look up
+        ex = validate({**GOOD_ANSWER, "signatory": {"name": "Reyes, Dana", "confidence": 0.9},
+                       "credits": [{"person": "Dana Reyes", "role": "Writer", "confidence": 0.9},
+                                   {"person": "Ethos Music SRL", "role": "Publisher", "confidence": 0.9}]})
+        self.assertEqual([p["name"] for p in intel.people_of(ex)], ["Dana Reyes"])          # deduplicated
+
+    def test_people_check_never_blocks_verification(self):
+        o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=validate(GOOD_ANSWER), findings=[],
+                        checks=checks(xc_dsp=xc.POSITIVE, xc_people=xc.WEAK), account_held=False)
+        self.assertEqual(o.outcome, gate.VERIFIED)
+        o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=validate(GOOD_ANSWER), findings=[],
+                        checks=checks(xc_dsp=xc.POSITIVE, xc_domain_intel=xc.SOFT), account_held=False)
+        self.assertEqual(o.outcome, gate.UNVERIFIABLE)                       # domain doubt does block
+
+    def test_a_bystander_address_never_makes_the_issuer_look_like_free_mail(self):
+        # QA #1412: a label letter sent from bluefern.com that also shows the claimant's gmail.com.
+        now = datetime(2026, 10, 27, tzinfo=timezone.utc)
+        net = FakeNet(rdap={"bluefern.com": "2012-01-01T00:00:00Z"})
+        c = intel.domain_intel(net, "bluefern.com", ["gmail.com", "bluefern.com"], "Blue Fern", "label",
+                               ["bluefern.com"], now=now)
+        self.assertEqual((c.status, c.detail["flags"]), (xc.POSITIVE, []))
+        self.assertEqual({r["domain"]: r["role"] for r in c.detail["domains"]},
+                         {"gmail.com": "other address", "bluefern.com": "sender"})
+        o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=validate(GOOD_ANSWER), findings=[],
+                        checks=checks(xc_dsp=xc.POSITIVE, xc_domain_intel=c.status), account_held=False)
+        self.assertEqual(o.outcome, gate.VERIFIED)                         # the bystander did not block it
+        c = intel.domain_intel(net, "gmail.com", [], "Blue Fern", "label", ["bluefern.com"], now=now)
+        self.assertEqual(c.status, xc.SOFT)                                  # the SENDER on free-mail still flags
+
+    def test_a_low_confidence_sender_never_blocks_even_when_listed_on_the_page(self):
+        # QA #1412 second pass: sender misread as bluefem.com at 0.5, the same address in ex.emails.
+        now = datetime(2026, 10, 27, tzinfo=timezone.utc)
+        c = intel.domain_intel(FakeNet(), None, ["bluefem.com"], "Blue Fern", "label", ["bluefern.com"], now=now,
+                               uncertain=["bluefem.com"])
+        self.assertEqual(c.detail["flags"], [])
+        self.assertNotEqual(c.status, xc.SOFT)
+        self.assertTrue(c.detail["domains"][0]["role"].startswith("uncertain sender"))
+        self.assertEqual(c.detail["domains"][0]["imitates"], "bluefern.com")          # still recorded as evidence
+
+    def test_runner_path_low_confidence_lookalike_sender_does_not_block_verified(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        data = b"%PDF-1.4 low-confidence sender"
+        pid = hashlib.sha256(data).hexdigest()
+        cache = os.path.join(td.name, "cache")
+        os.makedirs(os.path.join(cache, "12345", "n"))
+        Path(cache, "12345", "n", "0.pdf").write_bytes(data)
+        proof_path = os.path.join(td.name, "proof.sqlite")
+        ps = ProofStore(proof_path)
+        ps.db.execute("INSERT INTO proofs (proof_id, first_seen, source, source_ref, contact_h, mime, bytes) VALUES "
+                      "(?, '2026-10-27T00:00:00Z', 'intercom', '12345/n/0.pdf', 'c', 'application/pdf', 1)", (pid,))
+        ps.db.execute("INSERT INTO verdicts (proof_id, analyzer_version, contact_h, track_key, verdict, reasons_json, "
+                      "context_json, created_at, request_id) VALUES (?, ?, 'c', 'T1', 'GENUINE', '[]', '{}', "
+                      "'2026-10-27T01:00:00Z', ?)", (pid, FORENSICS_VERSION, KEY))
+        ps.db.commit()
+        store = DocVerifyStore(os.path.join(td.name, "dv.sqlite"))
+        answer = {**GOOD_ANSWER, "sender": {"email": "dana@bluefem.com", "confidence": 0.5},
+                  "emails": ["dana@bluefem.com"]}
+        net = FakeNet(mb={"label": {"labels": [{"id": "L1", "name": "Blue Fern Records", "score": 100}]},
+                          "label/L1": {"relations": [{"type": "official homepage",
+                                                      "url": {"resource": "https://bluefern.com"}}]}},
+                      pages={"https://bluefern.com/about": "Dana Reyes, label manager"},
+                      deezer={"https://api.deezer.com/track/isrc:USAB12400001": {"album": {"id": 9}},
+                              "https://api.deezer.com/album/9": {"label": "Blue Fern Records"}})
+        deps = runner.Deps(sandbox=lambda *a, **k: {"doc_text": "Blue Fern Records ... Ann Alpha mixed Night Drive",
+                                                    "mime": "application/pdf", "kind": "contract", "facts": {}},
+                           extractor=Extractor(store, key="k", post=lambda *a: or_response(answer)), net=net,
+                           raw_credits=lambda tid: [raw("Ann Alpha", "Mixer")],
+                           requests=lambda ids: {i: Req() for i in ids}, cache_root=cache)
+        stats, rows = runner.run(store, deps, proof_store=proof_path, since="2026-10-27T00:00:00Z")
+        self.assertEqual(rows[0]["checks"]["xc_domain_intel"], xc.UNKNOWN)
+        self.assertEqual(rows[0]["outcome"], gate.VERIFIED)
+
+    def test_every_domain_is_checked_no_truncation(self):
+        # QA #1412: a look-alike in seventh place was silently skipped.
+        now = datetime(2026, 10, 27, tzinfo=timezone.utc)
+        others = [f"innocent{i}.com" for i in range(6)] + ["bluefem.com"] + [f"more{i}.org" for i in range(10)]
+        c = intel.domain_intel(FakeNet(), None, others, "Blue Fern", "label", ["bluefern.com"], now=now)
+        self.assertEqual(c.status, xc.SOFT)
+        self.assertTrue(any("bluefem.com: look-alike" in f for f in c.detail["flags"]))
+        self.assertEqual(len(c.detail["domains"]), 17)
+
+    def test_the_runner_passes_the_signatory_found_on_the_issuer_site(self):
+        # QA #1412: the issuer-site source was never wired; it now comes from xc_signatory's fetch.
+        c = intel.people_check(FakeNet(), [{"name": "Dana Reyes", "role": "signatory"}], graph=None,
+                               track_credits=[], issuer_site_names=["Dana  Reyes"], musicbrainz=False)
+        self.assertEqual((c.status, c.detail["people"][0]["found_in"]), (xc.POSITIVE, ["issuer_site"]))
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
+        self.assertIn('issuer_site_names=[ex.signatory.get("name")] if sig.status == xc.POSITIVE else []', src)
+
+    def test_the_sql_fold_matches_roles_fold(self):
+        # QA #1412: lower(name) kept accents/punctuation, so the WHERE rejected 'José López' before Python saw it.
+        import re
+        import unicodedata
+        from credit_review.roles import fold
+
+        def sql_fold(name):          # SQL_FOLD step by step: NFKD, drop marks (\p{M}), lower, non-alnum -> ' ', trim
+            t = "".join(ch for ch in unicodedata.normalize("NFKD", name) if not unicodedata.combining(ch))
+            return re.sub(r"[^0-9a-z]+", " ", t.lower()).strip()
+        self.assertIn("normalize(name, NFKD)", intel.SQL_FOLD)
+        self.assertIn("\\p{M}", intel.SQL_FOLD)
+        for n in ("José López", "O'Neil", "Beyoncé Knowles-Carter", "  Sinead O''Connor ", "Björk", "ﬁnn"):
+            self.assertEqual(sql_fold(n), fold(n), n)
+
+    def test_trino_name_index_reads_only_and_folds(self):
+        seen = []
+
+        def trino(sql):
+            seen.append(sql)
+            return '"bob beta"\n"ann  alpha"\n'
+        idx = intel.trino_name_index(trino)
+        self.assertEqual(idx(["bob beta", "ann alpha", "zed nowhere", "o'neil"]), {"bob beta", "ann alpha"})
+        self.assertTrue(seen[0].startswith("SELECT DISTINCT name FROM postgresql_catalog.public.catalog_profile WHERE "
+                                           + intel.SQL_FOLD + " IN ("))
+        self.assertIn("'o''neil'", seen[0])                                  # quoted, never injected
+
+
 class GateTests(unittest.TestCase):
     good_ex = validate(GOOD_ANSWER)
 
@@ -595,8 +783,8 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(stats.outcomes, {"verified": 1})
         self.assertEqual(self.sandbox_calls[0][1], True)
         steps = [r[0] for r in self.store.db.execute("SELECT step FROM dv_steps ORDER BY id")]
-        for s in ("locate", "text", "extract", "xc_domain", "xc_signatory", "forensics", "xc_dsp", "xc_isrc",
-                  "xc_label", "gate"):
+        for s in ("locate", "text", "extract", "xc_domain", "xc_signatory", "xc_domain_intel", "forensics", "xc_dsp",
+                  "xc_isrc", "xc_label", "gate", "xc_people"):
             self.assertIn(s, steps)
         o = self.store.db.execute("SELECT request_id, role, user_id, outcome, version FROM dv_outcomes").fetchone()
         self.assertEqual(o, (RID, "Mixing", 42, "verified", VERSION))

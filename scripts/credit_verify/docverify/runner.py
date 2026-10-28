@@ -38,7 +38,7 @@ from credit_verify.proof.sandbox import MAX_BYTES, SandboxError
 
 from . import VERSION
 from . import crosscheck as xc
-from . import forensics, gate, intake_read, pace
+from . import forensics, gate, intake_read, intel, pace
 from .extract import MIN_CONFIDENCE, Extraction, Extractor, claimant_elsewhere, supports
 from .store import DocVerifyStore, utcnow
 
@@ -151,6 +151,8 @@ class Deps:
     # when None) and the H3 store read READ-ONLY for their reuse matching.
     h3_runner: Any = None
     shadow_store: Any = None
+    # Muso credits graph name index for the people check (intel.trino_name_index); None = skipped.
+    people_graph: intel.NameIndex | None = None
 
 
 @dataclass
@@ -240,6 +242,13 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
             except Exception as exc:  # noqa: BLE001 - no H3 verdict means `unknown`, never a pass
                 store.step(run_id, proof_id, "h3_shadow", "error", {"error": f"{type(exc).__name__}: {exc}"[:300]},
                            f"intake:{intake.intake_id}")
+        # Captain 2026-10-27 21:5xZ: every domain on the document (registration age, look-alike,
+        # MX/SPF/DMARC, free-mail for a company). Soft doubt blocks `verified`; never forges.
+        sure = float(ex.sender.get("confidence") or 0.0) >= MIN_CONFIDENCE
+        dint = intel.domain_intel(deps.net, ex.sender.get("domain") if sure else None,
+                                  [e.rsplit("@", 1)[1] for e in ex.emails if "@" in e], issuer, itype, official,
+                                  uncertain=[] if sure else [ex.sender.get("domain")])
+        store.step(run_id, proof_id, "xc_domain_intel", dint.status, dint.detail)
         credits_cache: dict[str, tuple[list[dict[str, Any]] | None, str | None]] = {}
         release_cache: dict[str, xc.Release] = {}
         for key in keys:
@@ -251,7 +260,7 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
             store.step(run_id, proof_id, "forensics", forensics.worst(findings) or "ok",
                        {"h3": h3.verdict, "h3_reasons": h3.reasons[:3], "findings": [f.as_dict() for f in findings]},
                        key)
-            checks = [dom, sig]
+            checks = [dom, sig, dint]
             if r is None:
                 checks.append(xc.Check("xc_dsp", xc.ERROR, {"error": "request not found in core"}))
             else:
@@ -269,7 +278,7 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                     rel = release_cache[r.isrc]
                 checks.append(xc.isrc_check(rel, role, r.names))
                 checks.append(xc.label_check(issuer, itype, rel))
-            for c in checks[2:]:
+            for c in checks[3:]:
                 store.step(run_id, proof_id, c.step, c.status, c.detail, key)
             uid = r.user_id if r else None
             support = supports(ex, r.names, role, r.title, r.isrc) if r else None
@@ -306,6 +315,17 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                          "signatory": ex.signatory.get("name"), "doc_type": ex.doc_type,
                          "extract_ok": ex.ok, "extracted_support": bool(support),
                          "intake_id": intake.intake_id if intake is not None else None})
+        # Captain 2026-10-27 21:5xZ: does every person the document names exist (credits graph,
+        # the claimed tracks' Spotify/Tidal credits, MusicBrainz, the issuer's site)? A flag for
+        # a human, never an outcome: most collaborators have no public footprint.
+        track_credits = [c for rc, _ in credits_cache.values() for c in (rc or [])]
+        ppl = intel.people_check(deps.net, intel.people_of(ex), graph=deps.people_graph, track_credits=track_credits,
+                                 issuer_site_names=[ex.signatory.get("name")] if sig.status == xc.POSITIVE else [])
+        store.step(run_id, proof_id, "xc_people", ppl.status, ppl.detail)
+        for row in rows:
+            row["checks"]["xc_domain_intel"] = dint.status
+            row["checks"]["xc_people"] = ppl.status
+            row["people_nowhere"] = len(ppl.detail.get("found_nowhere") or [])
         return rows
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

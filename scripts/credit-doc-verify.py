@@ -44,6 +44,7 @@ def log(msg: str) -> None:
 def real_deps(store, *, intercom_fetch: bool = True, strict_pacing: bool = False):
     from credit_review import admin as admin_api
     from credit_verify.docverify import crosscheck as xc
+    from credit_verify.docverify import intel
     from credit_verify.docverify.extract import Extractor
     from credit_verify.docverify.runner import Deps
     from credit_verify.proof import intercom, sandbox, stage2
@@ -58,7 +59,8 @@ def real_deps(store, *, intercom_fetch: bool = True, strict_pacing: bool = False
     fetch = ic.paced(intercom.make_fetch(tok)) if tok else None
     return Deps(sandbox=sandbox.run, extractor=Extractor(store), net=xc.Net(mb_pacer=mb),
                 raw_credits=ad.paced(lambda tid: admin_api.track_raw_credits(admin, tid)),
-                requests=lambda ids: stage2.requests(ids), fetch=fetch, dl=stage2.download)
+                requests=lambda ids: stage2.requests(ids), fetch=fetch, dl=stage2.download,
+                people_graph=intel.trino_name_index(stage2.trino_query))
 
 
 def paying_users() -> frozenset[int] | None:

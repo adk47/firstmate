@@ -140,6 +140,21 @@ class Net:
         raw = body.decode("utf-8", "replace")
         return html_to_text(raw) if "html" in (ctype or "html") else raw
 
+    def txt(self, name: str) -> list[str] | None:
+        """TXT records of `name` ([] when none), or None when they could not be read."""
+        try:
+            import dns.exception
+            import dns.resolver
+        except ImportError:
+            return None
+        res = self._resolver or dns.resolver.Resolver()
+        try:
+            return [b"".join(r.strings).decode("utf-8", "replace") for r in res.resolve(name, "TXT", lifetime=8)]
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            return []
+        except (dns.exception.DNSException, OSError):
+            return None
+
     def mx(self, domain: str) -> str:
         """'mx' | 'no_mx' (domain exists, no MX) | 'nxdomain' | 'error'."""
         try:
