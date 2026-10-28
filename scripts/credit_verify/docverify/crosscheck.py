@@ -100,12 +100,14 @@ class Check:
 class Net:
     """The network seam (tests pass a fake)."""
 
-    def __init__(self, get: Callable[..., tuple[bytes, str]] | None = None, resolver: Any = None):
+    def __init__(self, get: Callable[..., tuple[bytes, str]] | None = None, resolver: Any = None,
+                 mb_pacer: Any = None):
         if get is None:
             from credit_trust.websearch import http_get
             get = http_get
         self._get = get
         self._resolver = resolver
+        self._mb_pacer = mb_pacer        # pace.Pacer: 1 req/s across every reader process on the host
 
     def json(self, url: str) -> Any:
         body, _ = self._get(url, accept="application/json")
@@ -117,6 +119,8 @@ class Net:
         from credit_trust.websearch import _MB_LAST, _MB_LOCK, MB_MIN_INTERVAL_S
         url = f"https://musicbrainz.org/ws/2/{path}?" + urllib.parse.urlencode({**params, "fmt": "json"})
         for attempt in range(3):
+            if self._mb_pacer is not None:
+                self._mb_pacer.wait()
             with _MB_LOCK:
                 wait = MB_MIN_INTERVAL_S - (time.monotonic() - _MB_LAST[0])
                 if _MB_LAST[0] and wait > 0:

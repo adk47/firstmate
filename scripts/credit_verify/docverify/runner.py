@@ -38,7 +38,7 @@ from credit_verify.proof.sandbox import MAX_BYTES, SandboxError
 
 from . import VERSION
 from . import crosscheck as xc
-from . import forensics, gate, intake_read
+from . import forensics, gate, intake_read, pace
 from .extract import MIN_CONFIDENCE, Extraction, Extractor, claimant_elsewhere, supports
 from .store import DocVerifyStore, utcnow
 
@@ -64,7 +64,8 @@ def sha256_file(path: str) -> str:
 
 
 # -- selection ------------------------------------------------------------------
-def candidates(proof_db: sqlite3.Connection, store: DocVerifyStore, since: str, limit: int) -> dict[str, list[str]]:
+def candidates(proof_db: sqlite3.Connection, store: DocVerifyStore, since: str, limit: int,
+               keep: Callable[[str], bool] | None = None) -> dict[str, list[str]]:
     """proof id -> its claim keys ('<uuid>#<role>') still to verify, oldest
     verdict first, at most `limit` documents."""
     rows = proof_db.execute(
@@ -73,7 +74,7 @@ def candidates(proof_db: sqlite3.Connection, store: DocVerifyStore, since: str, 
         (since, FORENSICS_VERSION)).fetchall()
     out: dict[str, list[str]] = {}
     for proof_id, key, _ in rows:
-        if store.done(proof_id, key):
+        if (keep is not None and not keep(proof_id)) or store.done(proof_id, key):
             continue
         if proof_id not in out and len(out) >= limit:
             continue
@@ -312,11 +313,15 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
 
 def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, since: str | None = None,
         max_docs: int = 30, pairs: dict[str, list[str]] | None = None, intake: bool | None = None,
+        shard: tuple[int, int] | None = None, paying: set[int] | frozenset[int] | None = None,
         log: Callable[[str], None] = lambda m: None) -> tuple[Stats, list[dict[str, Any]]]:
     """One run. `pairs` (eval): verify exactly these documents and claims,
     ignoring `since` and what is already done. The cron (no `pairs`) then fills the rest of
-    `max_docs` with documents filed in proof_intake (D2) unless `intake` is False."""
+    `max_docs` with documents filed in proof_intake (D2) unless `intake` is False.
+    `shard=(i, n)`: this run is worker i of n and takes only the documents whose sha256 falls in
+    its shard (pace.shard_of), so parallel workers never read the same document."""
     intake_from_store = (pairs is None) if intake is None else intake
+    keep = None if shard is None else (lambda pid: pace.shard_of(pid, shard[1]) == shard[0])
     run_id = f"dv-{utcnow()}-{uuid.uuid4().hex[:8]}"
     stats = Stats(run_id)
     proof_db = ro(proof_store)
@@ -324,7 +329,7 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
     try:
         if pairs is None:
             cutoff = since or store.set_state_once("since", utcnow())
-            pairs = candidates(proof_db, store, cutoff, max_docs)
+            pairs = candidates(proof_db, store, cutoff, max_docs, keep=keep)
             log(f"since {cutoff}: {len(pairs)} documents to verify")
         held = store.held_users()
         for uid in sorted(held):           # belt and braces: no held account keeps a standing `verified`
@@ -339,7 +344,7 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
             log(f"document {proof_id[:12]}: {len(keys)} claims")
         if intake_from_store:
             room = max(0, max_docs - stats.documents)
-            for doc in intake_read.intake_docs(proof_db, store.intake_settled, room):
+            for doc in intake_read.intake_docs(proof_db, store.intake_settled, room, keep=keep, paying=paying):
                 stats.documents += 1
                 stats.intake += 1
                 try:

@@ -34,26 +34,75 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 KILL_SWITCH = os.environ.get("CREDIT_VERIFY_KILL_SWITCH", "/etc/hydra/credit-verify.disabled")
+PAYING_USERS = os.environ.get("CREDIT_TRUST_PAYING_USERS", "/var/lib/credit-trust/paying-users.json")
 
 
 def log(msg: str) -> None:
     print(f"[credit-doc-verify] {msg}", file=sys.stderr)
 
 
-def real_deps(store, *, intercom_fetch: bool = True):
+def real_deps(store, *, intercom_fetch: bool = True, strict_pacing: bool = False):
     from credit_review import admin as admin_api
     from credit_verify.docverify import crosscheck as xc
     from credit_verify.docverify.extract import Extractor
     from credit_verify.docverify.runner import Deps
     from credit_verify.proof import intercom, sandbox, stage2
+    from credit_verify.docverify.pace import Pacer
     admin = admin_api.AdminClient()
     tok = intercom.intercom_token() if intercom_fetch else None
     if intercom_fetch and not tok:
         log("no MUSOAI_INTERCOM_TOKEN: only cached attachments can be verified this run")
-    return Deps(sandbox=sandbox.run, extractor=Extractor(store), net=xc.Net(),
-                raw_credits=lambda tid: admin_api.track_raw_credits(admin, tid),
-                requests=lambda ids: stage2.requests(ids), fetch=intercom.make_fetch(tok) if tok else None,
-                dl=stage2.download)
+    # 1 request/s per API across EVERY reader process on the host (run --workers N): MusicBrainz's
+    # own limit, and Intercom/admin GETs kept at the single-reader rate (proof-loop lead 2026-10-28).
+    mb, ic, ad = (Pacer(n, 1.0, log=log, strict=strict_pacing) for n in ("musicbrainz", "intercom", "admin"))
+    fetch = ic.paced(intercom.make_fetch(tok)) if tok else None
+    return Deps(sandbox=sandbox.run, extractor=Extractor(store), net=xc.Net(mb_pacer=mb),
+                raw_credits=ad.paced(lambda tid: admin_api.track_raw_credits(admin, tid)),
+                requests=lambda ids: stage2.requests(ids), fetch=fetch, dl=stage2.download)
+
+
+def paying_users() -> frozenset[int] | None:
+    """Paid accounts (paid first); None when the export is unreadable (then oldest first)."""
+    try:
+        return frozenset(int(u) for u in json.loads(Path(PAYING_USERS).read_text())["ids"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        log(f"paying users unreadable ({type(exc).__name__}): filings are read oldest first")
+        return None
+
+
+def budgets(max_docs: int, n: int) -> list[int]:
+    """`max_docs` split EXACTLY over n workers (QA #1433): the first max_docs % n get one more;
+    the total is never above max_docs, and a worker with 0 is not started."""
+    q, r = divmod(max(0, int(max_docs)), max(1, n))
+    return [q + (1 if i < r else 0) for i in range(n)]
+
+
+def worker_argv(args: argparse.Namespace, i: int, n: int, budget: int) -> list[str]:
+    argv = [sys.executable, os.path.abspath(__file__)]
+    if args.store:
+        argv += ["--store", args.store]
+    argv += ["--proof-store", args.proof_store, "run", "--max-docs", str(budget), "--shard", f"{i}/{n}"]
+    return argv + (["--since", args.since] if args.since else [])
+
+
+def run_workers(args: argparse.Namespace, popen=None) -> int:
+    """Start the workers and wait for all of them. ANY nonzero exit - including a negative one
+    (killed by a signal, e.g. the OOM killer) - fails the run (QA #1433)."""
+    import subprocess
+    from credit_verify.docverify.pace import usable
+    why = usable()
+    if why:
+        log(f"workers refused: the host-wide pace directory is unusable ({why}); parallel readers would "
+            "multiply the API rate. Fix it or run one reader.")
+        return 2
+    popen = popen or subprocess.Popen
+    plan = [(i, b) for i, b in enumerate(budgets(args.max_docs, args.workers)) if b > 0]
+    procs = [(i, popen(worker_argv(args, i, args.workers, b))) for i, b in plan]
+    rcs = {i: p.wait() for i, p in procs}
+    bad = {i: rc for i, rc in rcs.items() if rc != 0}
+    log(f"workers {args.workers}: started {len(plan)} (budgets {[b for _, b in plan]}), exit {rcs}"
+        + (f"; FAILED shards {sorted(bad)}" if bad else ""))
+    return 1 if bad else 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -63,10 +112,25 @@ def cmd_run(args: argparse.Namespace) -> int:
         log(f"kill switch present at {KILL_SWITCH}; no doc-verify")
         print("NO_REPLY")
         return 0
+    if args.workers > 1:
+        # N independent workers, each owning the documents of its sha256 shard: a document is never
+        # read by two workers; pacing (MusicBrainz, Intercom, admin) and the model's daily cap are
+        # shared through the host and the store.
+        rc = run_workers(args)
+        print("NO_REPLY")
+        return rc
+    shard = None
+    if args.shard:
+        i, _, n = args.shard.partition("/")
+        if not (i.isdigit() and n.isdigit() and 0 <= int(i) < int(n)):
+            log(f"bad --shard {args.shard!r} (want i/n with 0 <= i < n)")
+            return 2
+        shard = (int(i), int(n))
     store = DocVerifyStore(args.store)
-    stats, _ = runner.run(store, real_deps(store), proof_store=args.proof_store, since=args.since,
-                          max_docs=args.max_docs, log=log)
-    log("run " + json.dumps(stats.as_dict()))
+    stats, _ = runner.run(store, real_deps(store, strict_pacing=shard is not None), proof_store=args.proof_store,
+                          since=args.since,
+                          max_docs=args.max_docs, shard=shard, paying=paying_users(), log=log)
+    log("run " + json.dumps({**stats.as_dict(), "shard": args.shard}))
     print("NO_REPLY")
     return 0
 
@@ -230,6 +294,9 @@ def parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("run", help="verify documents judged since the cutoff (the cron)")
     pr.add_argument("--max-docs", type=int, default=30)
     pr.add_argument("--since", default=None, help="ISO time; overrides the stored cutoff for this run")
+    pr.add_argument("--workers", type=int, default=1,
+                    help="parallel readers, each on its own sha256 shard (paced and capped together)")
+    pr.add_argument("--shard", default=None, help="i/n: this process is worker i of n (set by --workers)")
     pr.set_defaults(fn=cmd_run)
     ps = sub.add_parser("eval-select", help="build the eval manifest (node-8)")
     ps.add_argument("--forged-users", default="121667,184339")

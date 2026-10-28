@@ -47,10 +47,12 @@ class IntakeDoc:
 
 
 def intake_docs(proof_db: sqlite3.Connection, settled: Callable[[str, list[str]], bool],
-                limit: int) -> list[IntakeDoc]:
+                limit: int, *, keep: Callable[[str], bool] | None = None,
+                paying: set[int] | frozenset[int] | None = None) -> list[IntakeDoc]:
     """Filed credit documents with candidate requests that are not settled yet (some claim
-    unfinished, or the candidates changed), oldest first. An older H3 store without the
-    table yields nothing."""
+    unfinished, or the candidates changed): PAID accounts first when `paying` is given (proof-loop
+    lead 2026-10-28), then oldest first. `keep(sha256)` restricts a parallel worker to its own
+    shard. An older H3 store without the table yields nothing."""
     try:
         rows = proof_db.execute(
             "SELECT intake_id, user_id, file_sha256, conversation_id, file_path, contact_h, "
@@ -58,10 +60,14 @@ def intake_docs(proof_db: sqlite3.Connection, settled: Callable[[str, list[str]]
             "WHERE subject = 'credit' AND candidate_request_ids_json != '[]' ORDER BY received_at, intake_id").fetchall()
     except sqlite3.OperationalError:
         return []
+    if paying:
+        rows = sorted(rows, key=lambda r: int(r[1]) not in paying)     # stable: oldest first within each
     out: list[IntakeDoc] = []
     for r in rows:
         if len(out) >= limit:
             break
+        if keep is not None and not keep(r[2]):
+            continue
         try:
             ids = [str(x) for x in json.loads(r[6] or "[]") if x]
         except ValueError:

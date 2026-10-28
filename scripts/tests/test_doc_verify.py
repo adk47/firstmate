@@ -971,6 +971,131 @@ class LiveAnchorTests(unittest.TestCase):
         self.assertEqual(c.detail["fresh_anchor"], {"spotify": True, "tidal": True})
 
 
+class ParallelReaderTests(unittest.TestCase):
+    """run --workers N (proof-loop lead 2026-10-28): shards never overlap; pacing is cross-process."""
+
+    def test_two_workers_never_take_the_same_document_and_together_take_all(self):
+        from credit_verify.docverify import intake_read, pace
+        with tempfile.TemporaryDirectory() as d:
+            ps = ProofStore(os.path.join(d, "proof.sqlite"))
+            shas = [hashlib.sha256(f"doc {i}".encode()).hexdigest() for i in range(40)]
+            for i, sha in enumerate(shas):
+                ps.file_document(file_sha256=sha, user_id=100 + i % 7, conversation_id=str(i),
+                                 candidate_request_ids=[RID], received_at=f"2026-10-27T{i % 24:02d}:00:00Z")
+            ps.file_document(file_sha256=shas[0], user_id=999, conversation_id="x", candidate_request_ids=[RID],
+                             received_at="2026-10-27T00:00:00Z")       # same bytes, second account
+            taken = []
+            for i in range(2):
+                docs = intake_read.intake_docs(ps.db, lambda *_: False, 1000,
+                                               keep=lambda pid, i=i: pace.shard_of(pid, 2) == i)
+                taken.append({x.sha for x in docs})
+            self.assertEqual(taken[0] & taken[1], set())
+            self.assertEqual(taken[0] | taken[1], set(shas))
+            self.assertTrue(all(len(t) > 5 for t in taken))               # both workers get work
+
+    def test_paid_accounts_come_first_then_oldest(self):
+        from credit_verify.docverify import intake_read
+        ps = ProofStore(":memory:")
+        for uid, at in ((1, "2026-10-01T00:00:00Z"), (2, "2026-10-20T00:00:00Z"), (3, "2026-10-10T00:00:00Z")):
+            ps.file_document(file_sha256=f"{uid:064x}", user_id=uid, conversation_id=str(uid),
+                             candidate_request_ids=[RID], received_at=at)
+        docs = intake_read.intake_docs(ps.db, lambda *_: False, 10, paying={2, 3})
+        self.assertEqual([x.user_id for x in docs], [3, 2, 1])
+        self.assertEqual([x.user_id for x in intake_read.intake_docs(ps.db, lambda *_: False, 10)], [1, 3, 2])
+
+    def test_the_pacer_spaces_calls_across_processes(self):
+        import subprocess
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            code = ("import sys,time; sys.path.insert(0,%r); from credit_verify.docverify.pace import Pacer; "
+                    "p=Pacer('mbtest',0.3,directory=%r); "
+                    "[ (p.wait(), print(repr(time.time()))) for _ in range(3) ]") % (
+                str(Path(__file__).resolve().parents[1]), d)
+            t0 = time.time()
+            procs = [subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True) for _ in range(2)]
+            stamps = sorted(float(x) for p in procs for x in p.communicate()[0].split())
+            self.assertEqual(len(stamps), 6)
+            gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+            self.assertGreaterEqual(min(gaps), 0.28, gaps)                # never two calls inside the interval
+            self.assertLess(time.time() - t0, 10)
+
+    def test_a_strict_pacer_in_several_processes_never_calls_unpaced(self):
+        # QA #1433: the fallback in N workers would be N calls/s; a parallel worker fails closed.
+        import subprocess
+        code = ("import sys; sys.path.insert(0,%r); from credit_verify.docverify.pace import Pacer, PaceError\n"
+                "p=Pacer('mb',1.0,directory='/dev/null/nope',strict=True)\n"
+                "try:\n p.wait(); print('CALLED')\nexcept PaceError: print('REFUSED')") % (
+            str(Path(__file__).resolve().parents[1]),)
+        procs = [subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True) for _ in range(3)]
+        self.assertEqual([p.communicate()[0].strip() for p in procs], ["REFUSED"] * 3)
+
+    def test_an_unusable_pace_dir_falls_back_to_in_process_pacing(self):
+        from credit_verify.docverify.pace import Pacer
+        said = []
+        p = Pacer("x", 0.0, directory="/dev/null/nope", log=said.append)
+        p.wait()
+        p.wait()
+        self.assertEqual(len(said), 1)
+
+    @staticmethod
+    def _cdv():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cdv", Path(__file__).resolve().parents[1] / "credit-doc-verify.py")
+        cdv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cdv)
+        return cdv
+
+    def test_the_budget_is_split_exactly_never_above_max_docs(self):
+        # QA #1433: ceil-per-worker let 4 workers read 8 documents on --max-docs 5.
+        cdv = self._cdv()
+        self.assertEqual(cdv.budgets(5, 4), [2, 1, 1, 1])
+        self.assertEqual(cdv.budgets(30, 4), [8, 8, 7, 7])
+        self.assertEqual(cdv.budgets(2, 4), [1, 1, 0, 0])
+        self.assertEqual(cdv.budgets(0, 3), [0, 0, 0])
+        for m in range(0, 40):
+            for n in range(1, 9):
+                self.assertEqual(sum(cdv.budgets(m, n)), m)
+
+    def _run_workers(self, cdv, rcs, max_docs=5, workers=4):
+        import argparse
+        started = []
+
+        class P:
+            def __init__(self, argv):
+                started.append(argv)
+                self.rc = rcs[len(started) - 1]
+
+            def wait(self):
+                return self.rc
+        a = argparse.Namespace(store=None, proof_store="/p.sqlite", max_docs=max_docs, since=None, workers=workers)
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.dict(os.environ, {}):
+            from credit_verify.docverify import pace
+            with unittest.mock.patch.object(pace, "PACE_DIR", d):
+                return cdv.run_workers(a, popen=P), started
+
+    def test_zero_budget_workers_are_not_started_and_argv_carries_the_shard(self):
+        cdv = self._cdv()
+        rc, started = self._run_workers(cdv, [0, 0, 0, 0], max_docs=2)
+        self.assertEqual(rc, 0)
+        self.assertEqual([a[a.index("--shard") + 1] for a in started], ["0/4", "1/4"])
+        self.assertEqual([a[a.index("--max-docs") + 1] for a in started], ["1", "1"])
+
+    def test_any_nonzero_worker_exit_fails_the_run_including_a_signal(self):
+        # QA #1433: max([0, 0, -9, 0]) == 0 reported a SIGKILLed shard as success.
+        cdv = self._cdv()
+        self.assertEqual(self._run_workers(cdv, [0, 0, -9, 0])[0], 1)
+        self.assertEqual(self._run_workers(cdv, [0, 3, 0, 0])[0], 1)
+        self.assertEqual(self._run_workers(cdv, [0, 0, 0, 0])[0], 0)
+
+    def test_workers_refuse_to_start_without_a_usable_pace_directory(self):
+        import argparse
+        cdv = self._cdv()
+        from credit_verify.docverify import pace
+        a = argparse.Namespace(store=None, proof_store="/p", max_docs=4, since=None, workers=4)
+        with unittest.mock.patch.object(pace, "PACE_DIR", "/dev/null/nope"):
+            self.assertEqual(cdv.run_workers(a, popen=lambda argv: self.fail("a worker was started")), 2)
+
+
 class TrayTests(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()

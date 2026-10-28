@@ -93,6 +93,8 @@ class DocVerifyStore:
         self.db = sqlite3.connect(self.path, timeout=60, check_same_thread=False)
         if fresh:
             os.chmod(self.path, 0o600)
+        if self.path != ":memory:":
+            self.db.execute("PRAGMA journal_mode=WAL")      # parallel readers (run --workers) write concurrently
         self.db.executescript(SCHEMA)
         # D2 (2026-10-27): outcomes of documents filed in proof_intake are keyed by intake_id too.
         if "intake_id" not in {r[1] for r in self.db.execute("PRAGMA table_info(dv_outcomes)")}:
