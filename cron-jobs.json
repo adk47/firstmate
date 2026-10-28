@@ -1656,42 +1656,6 @@
         "accountId": "operations",
         "bestEffort": false
       }
-    },
-    {
-      "id": "4eaec98d-732f-4fd8-b61b-6d6fd7c5c907",
-      "agentId": "devops",
-      "name": "prodigi-plaque-export-2026-10-16-to-28",
-      "description": "ONE-SHOT, self-deletes after its single run at 2026-10-28T00:02Z (deleteAfterRun:true + kind at = ephemeral under detect-store-only-crons): read-only Prodigi plaque-order report for 16-28 Oct 2026 (devops agent, requested by Clio; result in-band to agent:clio:main). Created live on the gateway 2026-10-27 ~20:59Z. Remove this entry after the run (the store row is gone then, so removing it trips no guard); until removed, a deploy would re-insert a past-due one-shot that fires once more.",
-      "enabled": true,
-      "deleteAfterRun": true,
-      "createdAtMs": 1793134742292,
-      "updatedAtMs": 1793134742292,
-      "schedule": {
-        "kind": "at",
-        "at": "2026-10-28T00:02:00.000Z"
-      },
-      "sessionTarget": "isolated",
-      "wakeMode": "now",
-      "payload": {
-        "kind": "agentTurn",
-        "message": "Complete the already-authorized read-only Prodigi plaque report now that the UTC window has closed. Run bash /opt/hydra/workspaces/devops/reports/prodigi/run_prodigi_plaque_orders_2026_10_16_to_28.sh. Inspect its summary output and the restricted JSON report metadata (never print financial amounts or customer data). Send Clio at agent:clio:main an in-band result with only final report path, extraction UTC, completeness counts (pages/list/detail/duplicates/missing/out-of-window/excluded non-plaque), or exact blocker if failed. No provider mutation, Slack post, or customer contact. Do not claim complete if the script fails.",
-        "timeoutSeconds": 600,
-        "model": "openai/gpt-6-sol",
-        "fallbacks": [
-          "openrouter/openai/gpt-6-luna",
-          "openrouter/anthropic/claude-haiku-5.5"
-        ],
-        "toolsAllow": [
-          "exec",
-          "process",
-          "read",
-          "sessions_send"
-        ]
-      },
-      "delivery": {
-        "mode": "none",
-        "channel": "last"
-      }
     }
   ]
 }

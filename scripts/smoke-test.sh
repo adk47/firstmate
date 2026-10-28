@@ -595,6 +595,14 @@ if needs_target "main"; then
   if [ ! -f /opt/hydra/cron-jobs.json ]; then
     fail_check "Main: /opt/hydra/cron-jobs.json missing — repo file did not deploy"
   else
+    # The repo must hold DURABLE jobs only. The gateway-side count below excludes
+    # ephemeral one-shots (deleteAfterRun:true + schedule.kind "at"), and such a job
+    # deletes itself after its run, so committing one makes this check fail on every
+    # deploy: hydra#1411 committed the Prodigi export one-shot, it ran and self-deleted
+    # at 2026-10-28T00:02Z, and deploy 40609006536 rolled back on "repo has 51,
+    # gateway loaded 50". A one-shot stays on the gateway (exempt from the store-only
+    # guard) and never enters cron-jobs.json; if one was committed, remove it after
+    # its run. scripts/tests/cron-payload-contract.bats enforces this in CI.
     EXPECTED_CRONS=$(jq '.jobs | length' /opt/hydra/cron-jobs.json 2>/dev/null || echo "?")
     # 2>/dev/null (NOT 2>&1): same reason as check_channel_health above —
     # openclaw 2026.4.27 emits `Config warnings:\n- plugins.entries.*` on
