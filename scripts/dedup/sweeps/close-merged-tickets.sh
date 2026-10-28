@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
-# Find ClickUp profile-merge tickets whose merge already executed (per
-# postgresql_core.public.action_log) and close them. Read-only by default;
-# pass --apply to actually post + close.
+# Find ClickUp profile-merge tickets whose merge already executed (per core's
+# merge ledger postgresql_core.public.profile_merges, status=verified) and close
+# them. Read-only by default; pass --apply to actually post + close.
+#
+# Why the ledger and not action_log (2026-10-26, profile-merge-ops-m1): action_log
+# records every POST /admin/profiles/merge, including the ones core REFUSED (409/400).
+# Reading it as "executed" closed tickets as customer-outcome:complete for merges
+# that never happened (e.g. survivor aadb51cb: Caroline's 2026-10-22 attempt was
+# refused 409, the ticket was closed "merge executed" and re-closed daily). Only a
+# verified profile_merges row (the catalog fold landed) counts as a merge.
 #
 # Env:
 #   MUSO_BIN           path to the muso CLI (default: muso)
@@ -107,21 +114,22 @@ clickup_curl() {
   rm -f "$body_file"
 }
 
-# 1. Recent merges from action_log → NDJSON rows {merge_into, profiles_ids, at}
-#    (aliases lowercase on purpose: Trino lowercases unquoted identifiers, so
-#    a camelCase alias would come back folded anyway).
+# 1. Verified merges from the core merge ledger → NDJSON rows {merge_into, profiles_ids, at}
+#    (one row per loser; aliases lowercase on purpose: Trino lowercases unquoted
+#    identifiers, so a camelCase alias would come back folded anyway). `at` is the
+#    moment the fold was verified, so the customer-reply audit below asks "was the
+#    customer told after the merge actually landed".
 merge_sql="
   SELECT
-    json_extract_scalar(requestdata, '\$.body.mergeInto') AS merge_into,
-    json_format(json_extract(requestdata, '\$.body.profilesIds')) AS profiles_ids,
-    CAST(createdat AS varchar) AS at
-  FROM postgresql_core.public.action_log
-  WHERE route = '/api/v3/admin/profiles/merge'
-    AND requestmethod = 'POST'
-    AND createdat > current_timestamp - interval '$days' day
+    CAST(survivor_profile_id AS varchar) AS merge_into,
+    json_format(CAST(ARRAY[CAST(loser_profile_id AS varchar)] AS json)) AS profiles_ids,
+    CAST(verified_at AS varchar) AS at
+  FROM postgresql_core.public.profile_merges
+  WHERE status = 'verified'
+    AND verified_at > current_timestamp - interval '$days' day
 "
 "$muso_bin" query --format json - <<<"$merge_sql" 2>"$tmp/merges.err" > "$tmp/merges.raw.jsonl" || {
-  echo "close-merged-tickets: trino action_log query failed: $(head -3 "$tmp/merges.err")" >&2
+  echo "close-merged-tickets: trino profile_merges query failed: $(head -3 "$tmp/merges.err")" >&2
   exit 4
 }
 
@@ -153,7 +161,7 @@ if parse_errors:
     # Exit non-zero so the bash wrapper aborts before doing ClickUp writes.
     # A chronic action_log shape drift would otherwise silently shrink each
     # nightly run and leave merged tickets open indefinitely.
-    sys.stderr.write(f"close-merged-tickets: {parse_errors} action_log rows had unparseable profilesIds; aborting\n")
+    sys.stderr.write(f"close-merged-tickets: {parse_errors} profile_merges rows had unparseable profilesIds; aborting\n")
     sys.exit(8)
 PY
 
@@ -187,6 +195,36 @@ while :; do
         status: .status.status,
         customer_profile_id: $ar.customer_profile_id,
         customer_email: $ar.customer_email,
+        # The profile the customer asked to KEEP (server-built merge_intake first, then the
+        # raw details fields); match-stale-tickets requires every named duplicate to have
+        # been merged into it. Falls back to customer_profile_id there.
+        keep_id: ([($ar.details.merge_intake.keep // empty), ($ar.details.main_profile_url // empty),
+                   ($ar.details.survivor_profile_url // empty), ($ar.details.kept_profile_url // empty),
+                   ($ar.details.main_profile_id // empty), ($ar.details.survivor_profile_id // empty)]
+                  # An explicitly named keep is never discarded: one with no readable
+                  # profile id becomes "unreadable:<ref>", and keeps that name different
+                  # profiles become "conflicting:<ids>". match-stale-tickets holds both
+                  # open (never the customer_profile_id fallback).
+                  | map(tostring | ascii_downcase | select(test("\\S"))
+                        | (capture("(?<u>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})").u
+                           // ("unreadable:" + .)))
+                  | if any(startswith("unreadable:")) then (map(select(startswith("unreadable:"))) | .[0])
+                    elif (unique | length) > 1 then "conflicting:" + (unique | join(","))
+                    else .[0] end),
+        # The duplicates the customer asked to fold in (server-built merge_intake first,
+        # then the raw details fields). A ticket naming duplicates closes only when
+        # EVERY one is a verified loser: a merge into the customer'"'"'s profile that left a
+        # named duplicate standing is not this request done.
+        dup_ids: ((($ar.details.merge_intake.others // []) + ($ar.details.duplicate_profile_ids // [])
+                   + ($ar.details.duplicate_profile_urls // []) + [($ar.details.duplicate_profile_id // empty)])
+                  # A named duplicate with no readable profile id is kept as an
+                  # "unreadable:<ref>" entry, never dropped: it can never match a ledger
+                  # loser, so the ticket stays open (it never closes on its other
+                  # duplicates, and never falls back to the customer_profile_id rule).
+                  | map(tostring | ascii_downcase | select(test("\\S"))
+                        | (capture("(?<u>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})").u
+                           // ("unreadable:" + .)))
+                  | unique),
         tags: [.tags[]?.name | ascii_downcase]
       }
     | select(.customer_profile_id != null and .customer_profile_id != "")
@@ -211,6 +249,10 @@ python3 "$DIR/../../lib/merge_keep_conflict.py" unheld < "$tmp/tickets.jsonl" > 
 held_count=$(( ticket_count - $(wc -l < "$tmp/tickets.unheld.jsonl" | tr -d ' ') ))
 mv "$tmp/tickets.unheld.jsonl" "$tmp/tickets.jsonl"
 echo "close-merged-tickets: $held_count held by a merge keep conflict (merge-keep-conflict)" >&2
+unreadable_count=$(jq -s '[.[] | select((.dup_ids // []) | any(startswith("unreadable:")))] | length' "$tmp/tickets.jsonl")
+echo "close-merged-tickets: $unreadable_count name a duplicate with no readable profile id (left open)" >&2
+keep_hold_count=$(jq -s '[.[] | select((.keep_id // "") | test("^(unreadable|conflicting):"))] | length' "$tmp/tickets.jsonl")
+echo "close-merged-tickets: $keep_hold_count name a keep profile that is unreadable or conflicting (left open)" >&2
 
 # 3. Pure matching
 bash "$DIR/match-stale-tickets.sh" "$tmp/merges.jsonl" "$tmp/tickets.jsonl" > "$tmp/matches.jsonl"

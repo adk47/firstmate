@@ -119,7 +119,7 @@ AUDITEOF
   [ "$status" -eq 0 ]
   # All tickets route to audit_error.
   echo "$output" | grep -q 'audit_error'
-  ! echo "$output" | grep -q 'no_admin_reply_after_merge'
+  if echo "$output" | grep -q 'no_admin_reply_after_merge'; then echo "unexpected match: no_admin_reply_after_merge" >&2; return 1; fi
 }
 
 @test "audit-routing: --skip-customer-reply-check copies all matches to to_close" {
@@ -136,5 +136,5 @@ AUDITEOF
   echo "$output" | grep -q '"task_id":"T_REPLIED"'
   echo "$output" | grep -q '"task_id":"T_NOTOLD"'
   echo "$output" | grep -q '"task_id":"T_ERR"'
-  ! echo "$output" | grep -q 'needs_human_reply_reason'
+  if echo "$output" | grep -q 'needs_human_reply_reason'; then echo "unexpected match: needs_human_reply_reason" >&2; return 1; fi
 }
