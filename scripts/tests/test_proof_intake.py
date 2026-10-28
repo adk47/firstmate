@@ -485,6 +485,14 @@ class GmailIntakeTest(unittest.TestCase):
         self.assertEqual((again["files_filed"], again["files_duplicate"], again["candidates_refreshed"]), (0, 1, 1))
         self.assertEqual(len(json.loads(self._rows()[0]["candidate_request_ids_json"])), 2)
 
+    def test_a_dry_run_counts_an_attachment_sent_twice_once(self) -> None:
+        # Prod 2026-10-28: the dry run said 1,521, --apply filed 1,174 - re-sent attachments were counted twice.
+        self.msgs["m6"] = gmail_raw()                                   # the same attachment as m1, sent again
+        dry = self._run(["m1", "m6"], apply=False)
+        self.assertEqual((dry["files_filed"], dry["files_duplicate"]), (1, 1))
+        real = self._run(["m1", "m6"], apply=True)
+        self.assertEqual((real["files_filed"], real["files_duplicate"]), (1, 1))      # dry run == apply
+
     def test_no_attachment_and_oversized_attachments_are_counted(self) -> None:
         big = b"%PDF-1.4" + b"0" * (self.g.MAX_ATTACHMENT_BYTES + 1)
         self.msgs["m5"] = gmail_raw(files=((big, "application/pdf", "huge.pdf"),))

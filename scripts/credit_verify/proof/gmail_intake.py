@@ -142,7 +142,8 @@ def run(store: ProofStore, *, message_ids: list[str], fetch: RawFetch, lookup: L
         matched.append((mid, msg, int(acct["id"]), why))
     rows = open_rows(sorted({u for _m, _g, u, _w in matched})) if matched else {}
     users: set[int] = set()
-    for mid, msg, uid, how in matched:
+    seen: set[tuple[int, str]] = set()     # (account, sha256) counted this run: a dry run writes nothing,
+    for mid, msg, uid, how in matched:      # so without this a re-sent attachment was counted twice
         users.add(uid)
         cands = [str(r["request_id"]) for r in rows.get(uid, [])]
         stats["files_too_large"] += oversized(msg)
@@ -153,6 +154,10 @@ def run(store: ProofStore, *, message_ids: list[str], fetch: RawFetch, lookup: L
         filed_here = 0
         for name, ctype, data in files:
             sha = hashlib.sha256(data).hexdigest()
+            if (uid, sha) in seen:
+                stats["files_duplicate"] += 1
+                continue
+            seen.add((uid, sha))
             if store.already_filed(uid, sha):
                 if (store.add_candidates(uid, sha, cands) if apply else store.missing_candidates(uid, sha, cands)):
                     stats["candidates_refreshed"] += 1
