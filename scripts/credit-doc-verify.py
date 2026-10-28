@@ -44,7 +44,7 @@ def log(msg: str) -> None:
 def real_deps(store, *, intercom_fetch: bool = True, strict_pacing: bool = False):
     from credit_review import admin as admin_api
     from credit_verify.docverify import crosscheck as xc
-    from credit_verify.docverify import intel
+    from credit_verify.docverify import name_index
     from credit_verify.docverify.extract import Extractor
     from credit_verify.docverify.runner import Deps
     from credit_verify.proof import intercom, sandbox, stage2
@@ -61,7 +61,8 @@ def real_deps(store, *, intercom_fetch: bool = True, strict_pacing: bool = False
                 raw_credits=lambda tid: store.cached_raw_credits(
                     tid, ad.paced(lambda t: admin_api.track_raw_credits(admin, t))),
                 requests=lambda ids: stage2.requests(ids), fetch=fetch, dl=stage2.download,
-                people_graph=intel.trino_name_index(stage2.trino_query), gmail_raw=_gmail_raw())
+                # The local name index (built from one Trino export per 6 h), never a scan per document.
+                people_graph=name_index.lazy(log=log), gmail_raw=_gmail_raw())
 
 
 def paying_users() -> frozenset[int] | None:

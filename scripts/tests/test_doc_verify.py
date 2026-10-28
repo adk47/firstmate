@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -1564,6 +1565,123 @@ class TrayTests(unittest.TestCase):
         md = tray.markdown(t, 1, "2026-10-27T23:00:00Z")
         self.assertIn("APPROVE 1", md)
         self.assertIn("Nothing here has been written to core", md)
+
+
+class NameIndexTests(unittest.TestCase):
+    """Proof-loop lead 075 (2): one export per 6 h, local look-ups; never a Trino scan per document."""
+
+    def setUp(self):
+        from credit_verify.docverify import name_index
+        self.ni = name_index
+        self.d = tempfile.mkdtemp()
+        self.path = os.path.join(self.d, "names.sqlite")
+        self.t = [1_000_000.0]
+        self.exports = 0
+        self.names = ['José López', 'O\'Neil', '"Quoted, Name"', 'Two\nLines', 'DAT BOY SOLO', '', '!!!']
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def export(self, dest, rows=None):
+        import csv as _csv
+        self.exports += 1
+        with open(dest, "w", newline="", encoding="utf-8") as fh:
+            w = _csv.writer(fh, quoting=_csv.QUOTE_ALL)
+            for n in (self.names if rows is None else rows):
+                w.writerow([n])
+
+    def ensure(self, **kw):
+        return self.ni.ensure(self.path, export=kw.pop("export", self.export),
+                              count=kw.pop("count", lambda: len(self.names)), now=lambda: self.t[0],
+                              sleep=lambda s: None, **kw)
+
+    def test_built_once_then_looked_up_locally_with_the_people_check_fold(self):
+        idx = self.ensure()
+        self.assertEqual(self.exports, 1)
+        from credit_review.roles import fold
+        want = [fold(x) for x in ("Jose Lopez", "o neil", "Quoted Name", "two lines", "Dat Boy Solo", "Nobody Here")]
+        self.assertEqual(idx(want), set(want[:5]))
+        self.t[0] += self.ni.TTL_S - 1
+        self.ensure()
+        self.assertEqual(self.exports, 1)                                     # inside the TTL: no Trino
+        self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), "0o600")
+        self.assertEqual([f for f in os.listdir(self.d) if ".csv-" in f or ".tmp-" in f], [])   # spool removed
+
+    def test_stale_index_is_rebuilt_by_one_process_and_a_failed_rebuild_keeps_it(self):
+        self.ensure()
+        self.t[0] += self.ni.TTL_S + 1
+        def boom(dest):
+            raise RuntimeError("trino rc=1: Query exceeded the maximum execution time limit")
+        idx = self.ensure(export=boom)
+        from credit_review.roles import fold
+        self.assertEqual(idx([fold("Dat Boy Solo")]), {fold("Dat Boy Solo")})   # the old file still serves
+        self.ensure()
+        self.assertEqual(self.exports, 2)                                     # rebuilt on the next run
+
+    def test_an_index_is_never_served_past_its_24h_maximum(self):
+        # QA #1467: a file just under 24 h old, a rebuild that fails (or takes time past the cutoff) -> not served.
+        from credit_review.roles import fold
+        self.ensure()
+        built = self.t[0]
+        self.t[0] = built + self.ni.STALE_MAX_S - 1
+
+        def slow_fail(dest):
+            self.t[0] = built + self.ni.STALE_MAX_S + 1                     # the export ran past the cutoff
+            raise RuntimeError("trino rc=1: Query exceeded the maximum execution time limit")
+        with self.assertRaises(self.ni.IndexUnavailable):
+            self.ensure(export=slow_fail)
+        # the same boundary while ANOTHER process holds the rebuild lock
+        import fcntl as _f
+        self.t[0] = built + self.ni.STALE_MAX_S - 1
+        fd = os.open(self.path + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        _f.flock(fd, _f.LOCK_EX)
+        try:
+            idx = self.ensure()                                               # still under 24 h: served
+            self.assertEqual(idx([fold("Dat Boy Solo")]), {fold("Dat Boy Solo")})
+            clock = iter([built + self.ni.STALE_MAX_S - 1, built + self.ni.STALE_MAX_S + 1])
+            with self.assertRaises(self.ni.IndexUnavailable):
+                self.ni.ensure(self.path, export=self.export, count=lambda: 7,
+                               now=lambda: next(clock, built + self.ni.STALE_MAX_S + 1), sleep=lambda s: None)
+        finally:
+            os.close(fd)
+        self.assertEqual(self.exports, 1)
+
+    def test_an_incomplete_export_never_replaces_the_index(self):
+        with self.assertRaises(self.ni.IndexUnavailable):
+            self.ensure(export=lambda dest: self.export(dest, rows=self.names[:2]))    # 2 rows of 7 counted
+        self.assertFalse(os.path.exists(self.path))
+        self.ensure()
+        self.t[0] += self.ni.TTL_S + 1
+        idx = self.ensure(export=lambda dest: self.export(dest, rows=self.names[:2]))
+        from credit_review.roles import fold
+        self.assertIn(fold("Dat Boy Solo"), idx([fold("Dat Boy Solo")]))      # the complete index stands
+
+    def test_no_usable_index_is_a_graph_error_never_a_pass(self):
+        look = self.ni.lazy(self.path, export=lambda dest: (_ for _ in ()).throw(RuntimeError("down")),
+                            count=lambda: 7)
+        with self.assertRaises(self.ni.IndexUnavailable):
+            look(["dat boy solo"])
+        c = intel.people_check(FakeNet(), [{"name": "Dat Boy Solo", "role": "artist"}], graph=look,
+                               track_credits=[], musicbrainz=False)
+        self.assertEqual(c.status, xc.ERROR)
+        self.assertTrue(c.detail["graph_error"])
+
+    def test_a_reader_waits_for_the_builder_when_there_is_no_index(self):
+        import fcntl as _f
+        fd = os.open(self.path + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        _f.flock(fd, _f.LOCK_EX)                                              # another process is building
+        try:
+            with self.assertRaises(self.ni.IndexUnavailable):
+                self.ni.ensure(self.path, export=self.export, count=lambda: 7, now=lambda: self.t[0],
+                               sleep=lambda s: self.t.__setitem__(0, self.t[0] + s), wait_s=30)
+            self.assertEqual(self.exports, 0)
+        finally:
+            os.close(fd)
+
+    def test_the_reader_uses_the_local_index_not_a_per_document_scan(self):
+        src = (Path(__file__).resolve().parents[1] / "credit-doc-verify.py").read_text()
+        self.assertIn("people_graph=name_index.lazy(", src)
+        self.assertNotIn("trino_name_index(", src)
 
 
 class CronContractTests(unittest.TestCase):
