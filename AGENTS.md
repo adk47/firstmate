@@ -601,6 +601,9 @@ Exception (captain 2026-10-26): doc-verify's claim extraction calls OpenRouter
 `dv_llm_calls` row, daily cap). Doc-verify (shadow) checks what a returned document CLAIMS
 against sources the user does not control; UNKNOWN never approves:
 `docs/credit-verification/doc-verify.md`.
+The DSP evidence verifier (shadow, `scripts/credit-dsp-verify.py`) is the same posture for credit requests: approve-verdicts
+only on a same-run Spotify AND Tidal by-id anchor; it runs as its own job, never in Caroline:
+`docs/credit-verification/dsp-evidence-verifier.md`.
 
 ## Picking the right extension mechanism
 
