@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # Guards for the qa-review-gateway pod profile and entrypoint (node8-to-pods T9).
-#   k8s/prod/qa-review-gateway/openclaw-qa.json — the `qa`-only gateway profile
-#   k8s/prod/qa-review-gateway/entrypoint.sh    — what each pod runs
+#   pods/qa-review-gateway/openclaw-qa.json — the `qa`-only gateway profile
+#   pods/qa-review-gateway/entrypoint.sh    — what each pod runs
 # The security posture asked for by security-arch-fable-s1 (2026-10-28 06:21Z) is
 # asserted here, each with a mutation proving the assertion is load-bearing:
 # no reused / literal gateway token, Control UI off, no chat-completions surface,
@@ -11,8 +11,8 @@
 bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
-PROFILE="$HYDRA_REPO/k8s/prod/qa-review-gateway/openclaw-qa.json"
-ENTRY="$HYDRA_REPO/k8s/prod/qa-review-gateway/entrypoint.sh"
+PROFILE="$HYDRA_REPO/pods/qa-review-gateway/openclaw-qa.json"
+ENTRY="$HYDRA_REPO/pods/qa-review-gateway/entrypoint.sh"
 MAIN="$HYDRA_REPO/openclaw-main.json"
 
 # assert_profile <file>: every posture rule; prints the first violation.
@@ -96,9 +96,48 @@ mutate() {  # mutate <jq-filter> → path of a mutated copy (asserting it differ
   [ ! -e "$HYDRA_REPO/openclaw-qa.json" ]
 }
 
+# 2026-10-28: hydra deploy 40722546980 failed because the profile sat at
+# k8s/prod/qa-review-gateway/openclaw-qa.json. deploy.sh runs `kubectl apply -f k8s/prod/<dir>/`
+# on every directory there, and kubectl reads every .yaml/.yml/.json inside it.
+k8s_prod_non_manifests() {  # <root>: print each .yaml/.yml/.json under k8s/prod/*/ lacking apiVersion+kind
+  python3 - "$1" <<'PY'
+import glob, json, sys, yaml
+root = sys.argv[1]
+for f in sorted(glob.glob(f"{root}/k8s/prod/*/*")):
+    if not f.endswith((".yaml", ".yml", ".json")):
+        continue
+    try:
+        docs = [json.load(open(f))] if f.endswith(".json") else [d for d in yaml.safe_load_all(open(f)) if d is not None]
+    except Exception as e:
+        print(f"{f}: unparseable ({e})"); continue
+    if not docs:
+        print(f"{f}: no document"); continue
+    for d in docs:
+        if not (isinstance(d, dict) and d.get("apiVersion") and d.get("kind")):
+            print(f"{f}: not a Kubernetes object (apiVersion/kind not set)"); break
+PY
+}
+
+@test "deploy safety: every .yaml/.yml/.json under k8s/prod/*/ is a Kubernetes object (deploy.sh kubectl-applies the whole dir)" {
+  run k8s_prod_non_manifests "$HYDRA_REPO"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ] || { echo "$output"; return 1; }
+  # the gateway profile and its entrypoint live outside the applied tree
+  [ ! -e "$HYDRA_REPO/k8s/prod/qa-review-gateway" ]
+}
+
+@test "deploy safety mutation: a profile json put back under k8s/prod/<dir>/ is caught" {
+  mkdir -p "$BATS_TEST_TMPDIR/r/k8s/prod/qa-review-gateway"
+  cp "$PROFILE" "$BATS_TEST_TMPDIR/r/k8s/prod/qa-review-gateway/"
+  printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: x}\n' > "$BATS_TEST_TMPDIR/r/k8s/prod/qa-review-gateway/ok.yaml"
+  run k8s_prod_non_manifests "$BATS_TEST_TMPDIR/r"
+  [[ "$output" == *"qa-review-gateway/openclaw-qa.json: not a Kubernetes object"* ]]
+  [[ "$output" != *"ok.yaml"* ]]
+}
+
 # ── entrypoint ──────────────────────────────────────────────────────────────
 entry_env() {
-  STUB="$BATS_TEST_TMPDIR/bin"; mkdir -p "$STUB" "$BATS_TEST_TMPDIR/hydra/scripts" "$BATS_TEST_TMPDIR/hydra/k8s/prod/qa-review-gateway"
+  STUB="$BATS_TEST_TMPDIR/bin"; mkdir -p "$STUB" "$BATS_TEST_TMPDIR/hydra/scripts" "$BATS_TEST_TMPDIR/hydra/pods/qa-review-gateway"
   export CALLS="$BATS_TEST_TMPDIR/calls"; : > "$CALLS"
   cat > "$STUB/openclaw" <<'S'
 #!/bin/bash
@@ -112,7 +151,7 @@ echo "codex-auth-secret $* state=$OPENCLAW_STATE_DIR" >> "$CALLS"
 exit "${STUB_IMPORT_RC:-0}"
 S
   chmod +x "$STUB/openclaw" "$BATS_TEST_TMPDIR/hydra/scripts/codex-auth-secret.sh"
-  cp "$PROFILE" "$BATS_TEST_TMPDIR/hydra/k8s/prod/qa-review-gateway/"
+  cp "$PROFILE" "$BATS_TEST_TMPDIR/hydra/pods/qa-review-gateway/"
   cp "$MAIN" "$BATS_TEST_TMPDIR/hydra/openclaw-main.json"
   echo '{}' > "$BATS_TEST_TMPDIR/auth.json"
   export PATH="$STUB:$PATH" HYDRA_ROOT="$BATS_TEST_TMPDIR/hydra" QA_CODEX_AUTH_FILE="$BATS_TEST_TMPDIR/auth.json"

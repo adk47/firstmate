@@ -9,7 +9,12 @@ This directory holds what each pod runs, so it ships with the hydra tree baked i
   minimum plugins (`codex`, `openrouter`), and **no token**: `OPENCLAW_GATEWAY_TOKEN` comes from
   the pod's own ESO-minted Secret.
   It sits here, not at the repo root, on purpose. `scripts/check-gateway-profile-parity.sh` treats
-  every root `openclaw-*.json` as a node-8 profile that `deploy.sh` must start.
+  every root `openclaw-*.json` as a node-8 profile that `deploy.sh` must start. It is NOT under
+  `k8s/prod/` either. `deploy.sh` runs `kubectl apply -f k8s/prod/<dir>/` for EVERY directory
+  there, using the directory name as the namespace, so a non-manifest `.json` there fails the
+  hydra deploy. Hydra deploy 40722546980 failed for exactly this reason (2026-10-28, #1439).
+  `scripts/tests/qa-review-gateway-profile.bats` asserts that every `.yaml`/`.yml`/`.json` under
+  `k8s/prod/*/` is a Kubernetes object.
   The `qa` agent block, `models`, `auth.order` and the default model must stay equal to
   `openclaw-main.json`; `scripts/tests/qa-review-gateway-profile.bats` fails on drift.
 - `entrypoint.sh` runs four steps in order: (1) refuse a short token or one of Caroline's
