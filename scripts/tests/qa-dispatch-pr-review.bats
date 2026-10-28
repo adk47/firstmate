@@ -548,3 +548,93 @@ AUTOREVIEW="$HYDRA_REPO/.github/workflows/qa-autoreview.yml"
 @test "dedup: qa-autoreview.yml grants actions: read at workflow level (gh run list 403s without it -> silent DEDUP-SKIPPED)" {
   awk '/^permissions:/{p=1;next} /^[^ #]/{p=0} p' "$AUTOREVIEW" | grep -qE '^  actions: read$'
 }
+
+# ── node8-to-pods T9 (2026-10-28): the remote qa-review-gateway target ─────────
+t9_env_recorder() {
+  # Wrap the stub so every openclaw call also records the gateway env it saw.
+  mv "$STUBBIN/openclaw" "$STUBBIN/openclaw.inner"
+  export STUB_ENV="$TEST_TMPDIR/env"; : > "$STUB_ENV"
+  cat > "$STUBBIN/openclaw" <<'STUB'
+#!/usr/bin/env bash
+printf 'url=%s token=%s port=%s\n' "${OPENCLAW_GATEWAY_URL:-}" "${OPENCLAW_GATEWAY_TOKEN:-}" "${OPENCLAW_GATEWAY_PORT:-}" >> "$STUB_ENV"
+exec "$(dirname "$0")/openclaw.inner" "$@"
+STUB
+  chmod +x "$STUBBIN/openclaw"
+}
+T9_URL="ws://qa-review-gateway.hydra-qa.svc.cluster.local:18789"
+
+@test "T9 default (URL unset): unchanged -- local --profile main on every call, no gateway env" {
+  t9_env_recorder
+  QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+  [ "$(grep -cx -- '--profile' "$STUB_ARGV")" -eq "$(wc -l < "$STUB_ENV" | tr -d ' ')" ]
+  ! grep -qv '^url= token=' "$STUB_ENV"
+  [[ "$output" == *"(local profile main)"* ]]
+}
+
+@test "T9 remote: URL + token file -> every call targets the pod with the token in ENV, never argv, no --profile" {
+  t9_env_recorder
+  printf 'tok-abc-123\n' > "$TEST_TMPDIR/tok"
+  OPENCLAW_GATEWAY_URL="$T9_URL" OPENCLAW_GATEWAY_TOKEN_FILE="$TEST_TMPDIR/tok" OPENCLAW_GATEWAY_PORT=9999 \
+    QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+  ! grep -qx -- '--profile' "$STUB_ARGV"
+  ! grep -q 'tok-abc-123' "$STUB_ARGV"
+  ! grep -qx -- '--token' "$STUB_ARGV"
+  [ "$(grep -c "^url=${T9_URL} token=tok-abc-123 port=\$" "$STUB_ENV")" -eq "$(wc -l < "$STUB_ENV" | tr -d ' ')" ]
+  grep -qx 'qa' "$STUB_ARGV"
+  grep -qx 'qa-autoreview-pr-Muso-AI-hydra-123' "$STUB_ARGV"
+  [[ "$output" == *"(remote ${T9_URL})"* ]]
+  [[ "$output" != *"tok-abc-123"* ]]
+}
+
+@test "T9 remote: OPENCLAW_GATEWAY_TOKEN in env works too" {
+  t9_env_recorder
+  OPENCLAW_GATEWAY_URL="$T9_URL" OPENCLAW_GATEWAY_TOKEN="tok-env" \
+    QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  grep -q "^url=${T9_URL} token=tok-env " "$STUB_ENV"
+}
+
+@test "T9 remote: URL without a token refuses (exit 2) BEFORE any openclaw call" {
+  OPENCLAW_GATEWAY_URL="$T9_URL" QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 2 ]
+  [ ! -s "$STUB_ARGV" ]
+  [[ "$output" == *"no token"* ]]
+}
+
+@test "T9 remote: unreadable token file / empty token file refuse (exit 2), no call" {
+  OPENCLAW_GATEWAY_URL="$T9_URL" OPENCLAW_GATEWAY_TOKEN_FILE="$TEST_TMPDIR/absent" \
+    QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 2 ]
+  : > "$TEST_TMPDIR/empty"
+  OPENCLAW_GATEWAY_URL="$T9_URL" OPENCLAW_GATEWAY_TOKEN_FILE="$TEST_TMPDIR/empty" \
+    QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 2 ]
+  [ ! -s "$STUB_ARGV" ]
+}
+
+@test "T9 remote: a malformed URL refuses (exit 2), no call" {
+  for bad in "http://x:1" "ws://" "ws://host/path?x=1" "ws://a b" "ws://-bad:1"; do
+    OPENCLAW_GATEWAY_URL="$bad" OPENCLAW_GATEWAY_TOKEN=t QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+    [ "$status" -eq 2 ] || { echo "accepted: $bad"; return 1; }
+  done
+  [ ! -s "$STUB_ARGV" ]
+}
+
+@test "T9 remote: a DNS failure to the pod Service is a transport failure -> exit 75 (not an attempt)" {
+  for sig in "getaddrinfo ENOTFOUND qa-review-gateway.hydra-qa.svc.cluster.local" "connect EHOSTUNREACH 10.43.1.2:18789" "getaddrinfo EAI_AGAIN x"; do
+    : > "$STUB_CALLS"
+    STUB_ADD_ERR="$sig" STUB_ADD_RC=1 OPENCLAW_GATEWAY_URL="$T9_URL" OPENCLAW_GATEWAY_TOKEN=t \
+      QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+    [ "$status" -eq 75 ] || { echo "rc=$status for: $sig"; return 1; }
+  done
+}
+
+@test "T9 remote: a gateway auth rejection keeps openclaw's rc (it reached the pod: a real attempt)" {
+  STUB_ADD_ERR="gateway closed (1008): unauthorized" STUB_ADD_RC=1 OPENCLAW_GATEWAY_URL="$T9_URL" OPENCLAW_GATEWAY_TOKEN=wrong \
+    QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 1 ]
+}

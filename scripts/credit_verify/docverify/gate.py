@@ -24,8 +24,12 @@ model only extracted the claims; these rules decide.
                     2026-10-27: shadow reader). A consumer still applies its
                     own approve rule and the account-level band. A later
                     account hold supersedes it (store.supersede_verified)
-  unverifiable   everything else (UNKNOWN). Never an approval. `need` says
-                 which stronger proof would settle it.
+  unknown        our tooling could not decide: extraction did not run (model
+                 down, cap, document not located, sandbox failed), H3 missing or
+                 UNDETERMINED, Spotify/Tidal credits unreadable. Never asks, never
+                 approves, never holds; retried up to 3 runs (D3, Fable 2026-10-27).
+  unverifiable   everything else. Never an approval. `need` says which
+                 stronger proof would settle it.
 
 A weak finding (email screenshot, free-mail sender) never verifies on its
 own; it can stand next to an independent confirmation of the credit.
@@ -40,7 +44,12 @@ from . import crosscheck as xc
 from .extract import Extraction
 from .forensics import HARD, SOFT, Finding
 
-FORGED, CONTRADICTED, VERIFIED, UNVERIFIABLE = "forged", "contradicted", "verified", "unverifiable"
+FORGED, CONTRADICTED, VERIFIED, UNVERIFIABLE, UNKNOWN = \
+    "forged", "contradicted", "verified", "unverifiable", "unknown"
+# Extraction errors that are OUR tooling, not the document (D3): they make the outcome
+# `unknown`, which never asks the user, never approves and never holds; it is retried.
+TOOLING_ERRORS = ("document not located", "sandbox failed", "daily model spend cap", "no OpenRouter key",
+                  "http ", "transport:", "unusable model answer")
 APPROVING_H3 = ("GENUINE", "VERIFIED", "PLAUSIBLE")
 
 # Stronger-proof codes for `unverifiable` (machine codes; the copy is not
@@ -77,6 +86,20 @@ def need_for(ex: Extraction, kind: str | None) -> str:
     return NEED_DASHBOARD
 
 
+FORGED_SENDER_CONFIDENCE = 0.8
+SECOND_SIGNAL_H3 = ("FORGED_LIKELY", "INCONSISTENT")
+
+
+def second_signals(h3_verdict: str | None, findings: list[Finding], checks: list[xc.Check]) -> list[str]:
+    """Independent signals that can confirm a fabricated sender (R-C6): forensic doubt on the file, H3
+    finding it forged or inconsistent, or a domain-intel flag (young domain, look-alike, free-mail)."""
+    out = [f"forensics {f.name}" for f in findings if f.severity in (HARD, SOFT)]
+    if h3_verdict in SECOND_SIGNAL_H3:
+        out.append(f"H3 {h3_verdict}")
+    out += [f"{c.step}" for c in checks if c.step == "xc_domain_intel" and c.status == xc.SOFT]
+    return out
+
+
 def decide(*, h3_verdict: str | None, kind: str | None, ex: Extraction, findings: list[Finding],
            checks: list[xc.Check], account_held: bool, extracted_support: dict[str, Any] | None = None,
            elsewhere: list[str] | None = None) -> Outcome:
@@ -87,15 +110,39 @@ def decide(*, h3_verdict: str | None, kind: str | None, ex: Extraction, findings
     if hard:
         return Outcome(FORGED, f"forensics: {', '.join(f.name for f in hard)}", None, True, detail)
     dom = steps.get("xc_domain")
+    fabricated = False
     if dom and dom.status == xc.CONTRADICTS:
-        return Outcome(FORGED, f"fabricated sender: {dom.detail.get('note')} ({dom.detail.get('sender_domain')})",
-                       None, True, detail)
+        # R-C6 (proof-loop lead 073): the sender domain alone forges only when it was read with confidence
+        # >= FORGED_SENDER_CONFIDENCE AND a second, independent signal agrees. Otherwise it is recorded for
+        # the watch and decides nothing.
+        second = second_signals(h3_verdict, findings, checks)
+        conf = dom.detail.get("confidence")
+        sure = isinstance(conf, (int, float)) and conf >= FORGED_SENDER_CONFIDENCE
+        if sure and second:
+            return Outcome(FORGED, f"fabricated sender: {dom.detail.get('note')} ({dom.detail.get('sender_domain')}); "
+                                   f"second signal: {', '.join(second)}", None, True, detail)
+        fabricated = True
+        detail["would_forge"] = {"sender": dom.detail.get("sender_domain"), "note": dom.detail.get("note"),
+                                 "confidence": conf, "second_signals": second,
+                                 "why_not": ("sender read below %.1f confidence" % FORGED_SENDER_CONFIDENCE)
+                                 if not sure else "no second signal (R-C6)"}
     d = steps.get("xc_dsp")
     if d and d.status == xc.CONTRADICTS:
         who = ", ".join(sorted({o.get("name", "") for o in d.detail.get("for_others") or []}))[:120]
         return Outcome(CONTRADICTED, f"Spotify/Tidal credit this {d.detail.get('family')} role on the track to "
                                      f"someone else ({who})", None, True, detail)
+    tooling = []
+    if (ex.degraded or not ex.ok) and str(ex.error or "").startswith(TOOLING_ERRORS):
+        tooling.append(f"extraction did not run ({ex.error})")
+    if h3_verdict in (None, "UNDETERMINED"):
+        tooling.append(f"H3 {h3_verdict or 'verdict missing'}")
+    if d and d.status == xc.ERROR and not any(c.status == xc.POSITIVE for c in checks if c.step == "xc_isrc"):
+        tooling.append(f"Spotify/Tidal credits unreadable ({d.detail.get('error')})")
+    if tooling:
+        return Outcome(UNKNOWN, "tooling: " + "; ".join(tooling)[:500], None, False, detail)
     need = need_for(ex, kind)
+    if dom and dom.detail.get("unreadable"):
+        need = NEED_READABLE                   # the sender address could not be read: ask for a clearer copy
     if account_held:
         return Outcome(UNVERIFIABLE, "account hold: another document of this account was forged or contradicted",
                        NEED_ACCOUNT, False, detail)
@@ -117,6 +164,9 @@ def decide(*, h3_verdict: str | None, kind: str | None, ex: Extraction, findings
     if elsewhere and not extracted_support and h3_verdict not in APPROVING_H3:
         blockers.insert(0, "the document credits the claimant on other tracks (" + ", ".join(
             f"“{t}”" for t in elsewhere) + "), not on this one")
+    if fabricated:                             # one signal: not a forgery, never a verification either
+        blockers.insert(0, f"sender doubt: {dom.detail.get('note')} ({dom.detail.get('sender_domain')}), "
+                           f"{detail['would_forge']['why_not']}")
     if blockers:
         return Outcome(UNVERIFIABLE, "; ".join(blockers)[:600], need, False, detail)
     how = f"H3 {h3_verdict}" if h3_verdict in APPROVING_H3 else \

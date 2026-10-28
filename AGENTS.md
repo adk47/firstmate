@@ -537,6 +537,15 @@ bug for a month, and is why the `muso-streams-lookup` skill (#592) + CMO anti-co
   refresh-lock use the profile-blind resolver under `--profile`). Re-verify on every openclaw
   bump. The repo already used this lever for cron (`deploy.sh` cron-store import).
 
+## PR CI runs in the cluster, not on node-8
+
+Since 2026-10-27 the repo-only PR Validation jobs run on `runs-on: ovh-hydra` (an in-cluster
+ARC pod: non-root `runner`, 2 CPU / 2Gi, no node-8 files or secrets). Only the deploy, the
+deploy pre-flight, the QA hand-off and the dispatch workflows stay on node-8 (header of
+`.github/workflows/pr-validate.yml`). A new CI tool goes in `scripts/ci/arc-toolchain.sh`;
+a test that truly needs node-8's host (real systemd, live `/opt/hydra`) is tagged
+`# bats test_tags=host-systemd` or belongs in a node-8 job, never silently skipped.
+
 ## node-8 `/dev/*`: never a destructive target
 
 - **NEVER make a `/dev/*` path the target of `rm`, `mv`, `cp`, `install`, `sed -i`
@@ -559,6 +568,10 @@ dispatch and at the write boundary. Why: from 05-18 to 10-11 the batch approved
 validator-DECLINED credits through an inverted rule (`approve_owning_track == 100`
 means the shortcut did NOT fire). Approvals are audited read-only by
 `scripts/credit-review.py` (see `docs/credit-verification/ai-credit-reviewer.md`).
+Caroline (edge) approves nothing: `capability-approvers.txt` lists no approver and
+`credits_verify` / `profiles_consolidate` / `profiles_claim_self` stay off. Deploy refuses a
+source that lists one and strips `MUSO_CAPABILITY_APPROVER` from edge.env
+(`scripts/lib/ensure-no-service-approver.sh`; a 10-27 deploy re-opened it once).
 Credit REMOVALS are the mirror: core-backend #10310 refuses every agent/API token on the
 admin credit DELETE routes and on approved->unverified/rejected take-backs, and
 approved->user_verification_needed is illegal (the only exit deletes every role on the

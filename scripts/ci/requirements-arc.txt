@@ -1,0 +1,9 @@
+# Wheels hydra's python suites import that the ARC runner image lacks. Pinned to what node-8
+# ran on 2026-10-27 (pip3 list there), so the forensics tests see the same libraries.
+# Installed by scripts/ci/arc-toolchain.sh python.
+pillow==12.1.1
+opencv-python-headless==4.13.0.92
+PyMuPDF==1.27.2.2
+numpy==2.4.3
+openpyxl==3.1.5
+dnspython==2.8.0

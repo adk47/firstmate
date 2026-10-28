@@ -502,11 +502,20 @@ edits `deploy.sh`, or adds a file the rsync gate rejects), that is a real 🔴/�
 the verdict must reflect it. The exemption is for pre-existing drift, not a blanket
 pass.
 
-**`rebaseIntegrity`:** `null` is repo-scoped — for **hydra** it means the
-analyzer's hand-off failed, so hold approval and say "re-run PR Validation";
-for every other repo it is genuine no-data (they don't publish this host-local
-report), so note it as context and move on. Guard 8 re-derives exactly this
-(exit 10). `CLEAN` → move on. `WARN` → prepend `⚠️ REBASE WARNING` to the Step 6 body, file one
+**`rebaseIntegrity`:** the bundle field is parsed where CI runs. On a QA gateway
+pod (T10) there is no CI host directory, so a `null` for **hydra** no longer
+means the hand-off failed — read the PR's hand-off comment before deciding:
+
+```bash
+/opt/hydra/scripts/qa-handoff-read.sh "$OWNER/$REPO" "$PR" rebase-integrity
+```
+
+CI publishes each head's reports as a hidden PR comment (marker
+`<!-- muso-qa-handoff v1 payload=… -->`, authored by `github-actions[bot]`). Use
+that report when present. `null` from BOTH sources is repo-scoped — for **hydra**
+it means the hand-off failed (say "re-run PR Validation" and hold approval); for
+every other repo it is genuine no-data (they don't publish this report), so note
+it as context and move on. Guard 8 re-derives exactly this (exit 10). `CLEAN` → move on. `WARN` → prepend `⚠️ REBASE WARNING` to the Step 6 body, file one
 🟡 finding starting `🟡 **Important — REBASE WARNING [<headRefOid[:7]>]**`;
 open = NO-GO. `ERROR` → say rebase unverified. **Relay the CI-computed
 signals verbatim — never re-derive them yourself from the diff**; the report
@@ -550,25 +559,33 @@ deletions in one file share a summary but never a digest), so **digest changed
 if any fails, so filing the 🟡 is always the safe fallback.
 
 Prior heads' digests are the one thing the bundle cannot serve — it reads only
-this head's report — so this cross-head glob is the sole sanctioned local read
-(the grep lists this head's own report too; ignore that one):
+this head's report. Ask the PR's hand-off comments for them (this is also the
+only version that works off node-8, since the old
+`grep /var/lib/hydra-qa/rebase-integrity/*.json` needs a file that only exists on
+the CI host):
 
 ```bash
-grep -l "<this head's warn_digest>" \
-  "/var/lib/hydra-qa/rebase-integrity/${OWNER}__${REPO}-pr-${PR}-"*.json
+/opt/hydra/scripts/qa-handoff-read.sh "$OWNER/$REPO" "$PR" rebase-integrity \
+  --digest "<this head's warn_digest>" --head "$HEAD"
 ```
+
+It prints the OTHER heads of this PR whose `WARN` report carries the identical
+digest, oldest first. If it fails (exit 1 = no such prior head, exit 3 = GitHub
+unreadable) there is no carry-forward — file the 🟡.
 
 ### Blast radius (advisory CI hand-off)
 
-PR Validation also runs `scripts/check-blast-radius.sh` and writes a per-head
-report on this host: what a wrong change would *reach*, which is the question
-diff size cannot answer. **The bundle does not carry this** — `muso gh
-review-bundle` has no `blastRadius` field — so it is the second sanctioned local
-read alongside the digest glob above:
+PR Validation also runs `scripts/check-blast-radius.sh` and publishes a per-head
+report: what a wrong change would *reach*, which is the question diff size
+cannot answer. **The bundle does not carry this** — `muso gh review-bundle` has no
+`blastRadius` field — so read it from the same PR hand-off comment (T10):
 
 ```bash
-cat "/var/lib/hydra-qa/blast-radius/${OWNER}__${REPO}-pr-${PR}-<pr.headRefOid>.json"
+/opt/hydra/scripts/qa-handoff-read.sh "$OWNER/$REPO" "$PR" blast-radius \
+  [--head <sha40>]      # default: this PR's headRefOid
 ```
+
+Exit 1 means no hand-off for that head, and the message says which case it is.
 
 - **Missing** → for **external repos** genuine no-data (the analyzer only runs in
   hydra's CI): note as context, review on the 8 lenses alone. For **hydra** the

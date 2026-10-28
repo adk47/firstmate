@@ -538,6 +538,33 @@ class UvnStatusTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.run_(campaign=campaign, wording="no-ask")
 
+    def test_received_wording_never_reaches_the_gate_on_a_real_run_while_locked(self):
+        # proof-loop card R1: send-locked in the gate. A real run halts before any gate call (a refusal of a
+        # status note would hold and COUNT against the user); a dry run passes --copy received through.
+        rep, gate = self.run_(campaign="status-doc-received", wording="received")
+        self.assertEqual(gate.calls, [])
+        self.assertIn("STATUS_RECEIVED_COPY_APPROVED=0", rep.halted)
+        rep, gate = self.run_(campaign="status-doc-received", wording="received", mode="dry-run")
+        argv = gate.calls[0][0]
+        self.assertEqual(argv[argv.index("--copy") + 1], "received")
+        # the gate script is the source of truth: unlocked there -> the real run goes
+        unlocked = self.dir / "gate-unlocked.sh"
+        unlocked.write_text("#!/bin/bash\nreadonly STATUS_RECEIVED_COPY_APPROVED=1\n")
+        gate = FakeGate()
+        rep = uvn_status.run(list_path=str(self.list), segment="paid", mode="apply", max_users=10,
+                             ledger_path=self.ledger, proof_path=str(self.proof), query=self.q, runner=gate,
+                             wrapper=str(unlocked), now=NOW, pace_seconds=0, campaign="status-doc-received",
+                             wording="received")
+        self.assertEqual(rep.halted, "")
+        self.assertTrue(gate.calls)
+        for campaign in ("uvn-status", "status-team-review"):
+            with self.assertRaises(ValueError):
+                self.run_(campaign=campaign, wording="received")
+        self.assertFalse(uvn_status.gate_lock_open(str(self.dir / "missing.sh"), "STATUS_RECEIVED_COPY_APPROVED"))
+        locked = self.dir / "gate-locked.sh"
+        locked.write_text("#!/bin/bash\nreadonly STATUS_RECEIVED_COPY_APPROVED=0\nreadonly OTHER_COPY_APPROVED=1\n")
+        self.assertFalse(uvn_status.gate_lock_open(str(locked), "STATUS_RECEIVED_COPY_APPROVED"))
+
     def test_the_doc_check_audit_matches_the_recipient_like_a_send(self):
         saved = verify_notify.IDENTITY_LOOKUP
         verify_notify.IDENTITY_LOOKUP = lambda ids: {"42": {"professional_id": "pro-42", "auth_id": ""}}

@@ -3133,7 +3133,15 @@ if needs_target "edge"; then
     grep -qE "^MUSO_NONINTERACTIVE=1$"  "$EDGE_ENV" || edge_missing+=("MUSO_NONINTERACTIVE=1")
     grep -qE "^MUSO_STATE_DIR=/var/log/muso-ops$" "$EDGE_ENV" || edge_missing+=("MUSO_STATE_DIR=/var/log/muso-ops")
     grep -qE "^MUSO_REQUESTER=.+"       "$EDGE_ENV" || edge_missing+=("MUSO_REQUESTER (e.g. caroline@muso.ai)")
-    grep -qE "^MUSO_CAPABILITY_APPROVER=.+" "$EDGE_ENV" || edge_missing+=("MUSO_CAPABILITY_APPROVER (required by profiles_consolidate)")
+    # MUSO_CAPABILITY_APPROVER is deliberately NOT required any more: Caroline's
+    # approval-tier writes (credits_verify, profiles_consolidate, profiles_claim_self)
+    # stay shut (captain 2026-10-26 23:30Z; firstmate stop switch 2026-10-27). The
+    # deploy REMOVES it from edge.env so no deploy can re-open them; the gateway
+    # restart below drops it from the running process.
+    if ! out=$(EDGE_ENV_FILE="$EDGE_ENV" "$DEPLOY_PATH/scripts/lib/ensure-no-service-approver.sh" --strip-edge-env 2>&1); then  # hydra-hook: reviewed-indirection (repo script by path)
+      fail "edge.env service-approver strip failed: $out"
+    fi
+    log "  $out"
     if (( ${#edge_missing[@]} > 0 )); then
       log "WARN: $EDGE_ENV is missing: ${edge_missing[*]}"
       log "WARN: Caroline's gated muso writes fail closed until these are added (the tools are dark-shipped OFF regardless)."
@@ -3217,16 +3225,34 @@ if needs_target "main"; then
     install -d -m 700 "$MUSO_CFG_DIR"
     install -m 600 "$MUSO_OPS_CFG/tier2-approvers.txt" "$MUSO_CFG_DIR/approvers.txt"
     install -m 600 "$MUSO_OPS_CFG/bulk-destructive-exclude.txt" "$MUSO_CFG_DIR/bulk-exclude.txt"
-    # Scoped capability-approver allowlist (muso-cli v0.6.1+): the autonomous
-    # service approver (caroline-autonomous) is valid ONLY for the capability
-    # verbs (credits verify / profiles consolidate / claim-self), never the
-    # global tier-2 approvers.txt above. Rendered separately so it can be absent
-    # without skipping the human approver render; if missing, those capability
+    # Scoped capability-approver allowlist (muso-cli v0.6.1+), read ONLY for the
+    # capability verbs (credits verify / profiles consolidate / claim-self), never
+    # the global tier-2 approvers.txt above. Rendered separately so it can be absent
+    # without skipping the human approver render; empty or missing, those capability
     # writes fail closed in muso-cli.
+    # The file must list NO approver (the service approver caroline-autonomous was
+    # removed by firstmate 2026-10-27 09:31Z and re-installed from the repo by the
+    # 13:16Z deploy). A source that lists one is refused BEFORE it is installed and
+    # fails the deploy; the installed copy is re-checked after. PR Validation runs
+    # the same --check-repo, so this should never fire.
     if [ -r "$MUSO_OPS_CFG/capability-approvers.txt" ]; then
+      if ! out=$("$DEPLOY_PATH/scripts/lib/ensure-no-service-approver.sh" --check-repo "$MUSO_OPS_CFG/capability-approvers.txt" 2>&1); then  # hydra-hook: reviewed-indirection reviewed-argv (repo script by path; the expansion is the file ARG)
+        fail "capability-approvers.txt lists an approver; refusing to install it (Caroline's approval-tier writes stay shut): $out"
+      fi
       install -m 600 "$MUSO_OPS_CFG/capability-approvers.txt" "$MUSO_CFG_DIR/capability-approvers.txt"
+      if ! out=$(CAP_APPROVERS_DEST="$MUSO_CFG_DIR/capability-approvers.txt" "$DEPLOY_PATH/scripts/lib/ensure-no-service-approver.sh" --verify-installed 2>&1); then  # hydra-hook: reviewed-indirection (repo script by path)
+        fail "installed capability-approvers.txt lists an approver: $out"
+      fi
+      log "  $out"
     else
+      # A missing source must never read as clean: a stale installed copy (e.g. the
+      # caroline-autonomous line a 10-27 deploy re-installed) would stay live. Verify
+      # the installed file and fail the deploy if it still lists an approver.
       log "WARN: $MUSO_OPS_CFG/capability-approvers.txt missing — Caroline's approval-tier capability writes (credits_verify, profiles_consolidate) fail closed until it is rendered."
+      if ! out=$(CAP_APPROVERS_DEST="$MUSO_CFG_DIR/capability-approvers.txt" "$DEPLOY_PATH/scripts/lib/ensure-no-service-approver.sh" --verify-installed 2>&1); then  # hydra-hook: reviewed-indirection (repo script by path)
+        fail "capability-approvers.txt source missing and the INSTALLED copy lists an approver: $out"
+      fi
+      log "  $out"
     fi
     printf '{\n  "prewrite_hook": "%s/scripts/muso-prewrite-hook.sh"\n}\n' "$DEPLOY_PATH" > "$MUSO_CFG_DIR/config.json"
     chmod 600 "$MUSO_CFG_DIR/config.json"

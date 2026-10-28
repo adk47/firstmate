@@ -281,7 +281,7 @@
       "kind": "write",
       "name": "credits_verify",
       "requires": "same muso host auth + ctx-derived --actor-identity as #14; --intercom-conv-id is REQUIRED (it is the approval-ref).",
-      "resolves": "muso credits verify --actor-identity <verified-email> (APPROVAL-tier PUT: also --yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>) via…"
+      "resolves": "muso credits verify --actor-identity <verified-email> (APPROVAL-tier), the WRITE counterpart of credit_verification_check (#9)."
     },
     {
       "kind": "read",
@@ -341,7 +341,7 @@
       "kind": "read",
       "name": "profile_status",
       "requires": "Muso admin JWT bearer (MusoAdminClient; GET-only, regex-allowlisted to the 3 profile endpoints).",
-      "resolves": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution, GET /api/v3/admin/profile/{id} for direct UUID, GET /api/v3/admin/profile/{id}/credits?limit=20&offset=0 for credits."
+      "resolves": "admin profile/search (resolution), profile/{id}, profile/{id}/credits?limit=20."
     },
     {
       "kind": "write",

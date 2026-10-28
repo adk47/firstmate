@@ -157,3 +157,17 @@ workspaces/finance/scripts/stripe-saas-weekly-report.py'
   [ "$status" -eq 0 ]
   [ "$output" = "0" ]
 }
+
+@test "cron-jobs.json holds no ephemeral one-shot (deleteAfterRun:true): it self-deletes, so the smoke count would fail every deploy" {
+  # hydra#1411 / deploy 40609006536 (2026-10-28): a committed deleteAfterRun one-shot
+  # ran, deleted itself, and the next deploy rolled back on "repo has 51, gateway
+  # loaded 50". One-shots live on the gateway only (detect-store-only-crons exempts
+  # them); cron_store_repo_count and the smoke test assume the repo carries none.
+  run jq -r '.jobs[] | select(.deleteAfterRun == true) | .name' "$CRON_JSON"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    echo "ephemeral one-shots committed to cron-jobs.json (remove them; keep one-shots on the gateway):" >&2
+    echo "$output" >&2
+    return 1
+  fi
+}

@@ -57,8 +57,8 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 
 ### 5. profile_status
 
-- **Bundles**: `GET /api/v3/admin/profile/search?keyword=<q>&limit=5` for resolution, `GET /api/v3/admin/profile/{id}` for direct UUID, `GET /api/v3/admin/profile/{id}/credits?limit=20&offset=0` for credits.
-- **Returns**: Structured JSON. On success: `{ found: true, profile: { id, name, verified, isClaimed, primary_role, credits_count, workspaces: [{email, isClaimed}], knownAsNames: [] }, latest_credits: [top 3 sorted by release_date desc], latest_credit_date }`. On failure: `{ found: false, reason: "no_match" | "multiple_matches" | "lookup_unavailable" | "missing_input" | "rate_limited", ... }`. The `isClaimed`, `workspaces`, and `knownAsNames` fields are used by the `customer-credit-removal` skill for Step-2 ownership pre-check; the bash wrapper independently re-verifies these as the security boundary.
+- **Bundles**: admin `profile/search` (resolution), `profile/{id}`, `profile/{id}/credits?limit=20`.
+- **Returns**: Structured JSON. On success: `{ found: true, profile: { id, name, verified, isClaimed, primary_role, credits_count, workspaces: [{isClaimed, matchesVerifiedContact}], claimed_workspace_count, owner_matches_verified_contact: true|false|null, owner_check, knownAsNames: [] }, latest_credits: [top 3 sorted by release_date desc], latest_credit_date }`. On failure: `{ found: false, reason: "no_match" | "multiple_matches" | "lookup_unavailable" | "missing_input" | "rate_limited", ... }`. No workspace email is returned, only booleans against the verified Intercom contact; `owner_matches_verified_contact: null` = contact unverified (`owner_check`), treat as not theirs. The removal wrapper re-verifies ownership.
 - **Auth**: Muso admin JWT bearer (MusoAdminClient; GET-only, regex-allowlisted to the 3 profile endpoints).
 - **Rate limit**: 10/min per session
 - **Parameters** (one of, precedence top-to-bottom): `profile_id` (UUID), `profile_url` (full credits.muso.ai URL), `email` (used for lookup, never echoed back), `name` (display name)
@@ -114,9 +114,10 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 ### 10. order_lookup
 
 - **Wraps**: `GET /api/v3/admin/orders/{ref}` via `MusoAdminClient` (GET-only, allowlisted). `ref` is any of: the internal order UUID (Prodigi merchantReference), the order number, or Prodigi's own order id – the backend resolves all three.
-- **Returns**: PII-scoped structured JSON. On success: `{ found: true, order: { id, orderNumber, prodigiOrderId, status, createdAt, items: [...], shipment: { address, phoneNumber, trackingNumber, trackingUrl }, taxId: { present, type }, hold } }`. On failure: `{ found: false, reason: "missing_input" | "not_found" | "rate_limited" | "lookup_unavailable" }`.
+- **Today: `{ owner_verified: false, owner_check, order: { status, hold } }` for EVERY caller** (Intercom Identity Verification is off). Give no address/phone/tracking/items; a human confirms addresses. Once IV is on: full order only to the order's own verified contact.
+- **Returns**: PII-scoped structured JSON. For the verified owner: `{ found: true, owner_verified: true, order: { id, orderNumber, prodigiOrderId, status, createdAt, items: [...], shipment: { address, phoneNumber, trackingNumber, trackingUrl }, taxId: { present, type }, hold } }`. On failure: `{ found: false, reason: "missing_input" | "not_found" | "rate_limited" | "lookup_unavailable" }`.
 - **`hold`**: non-null ONLY on `NEEDS_TAX_ID` / `NEEDS_CONTACT_INFO`, as `{ status, missing: ["taxId"|"phone"], taxIdLabel, countryCode }`. The admin API carries no hold reason, so this is DERIVED -- from the hold STATUS, never from `shipment.phoneNumber`, which is the Prodigi recipient's phone and is null on every held order (never sent to Prodigi) whatever we hold in `details.shipping.phone`. An empty `missing` means the reason is not visible here, so file a ticket rather than guess. `taxIdLabel` is the destination's own name for the id ("RFC or CURP", "CPF or CNPJ", "RNC").
-- **Scope**: surfaces the fulfilment-relevant fields ONLY. The shipping address + recipient phone ARE the working data (this tool exists to confirm/correct them for Prodigi). **Payment data is never returned.**
+- **Scope**: fulfilment fields only (address + phone, for the owner, to confirm/correct for Prodigi). **Never payment data.**
 - **Auth**: Muso admin JWT bearer (same client as the profile tools; GET-only, allowlisted to the single-order read path).
 - **Rate limit**: 10/min per session.
 - **Used by**: the `order-fulfillment` skill (vendor-lane Prodigi address requests + customer order/shipping questions). See `reference/orders-and-fulfillment.md`.
@@ -159,10 +160,9 @@ This is a stopgap -- the original design assumed `MUSO_CUSTOMER_API_KEY` for `/a
 
 ### 15. credits_verify
 
-- **Wraps**: `muso credits verify --actor-identity <verified-email>` (APPROVAL-tier PUT: also `--yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>`) via `workspaces/support/skills/customer-credit-verification/scripts/verify-credit.sh`. The WRITE counterpart of `credit_verification_check` (#9).
-- **Returns**: `{ok, mode, request_id, profile_id, status}` or `{ok:false, error}` (`route_to_human` when corroboration/ownership fails, `no_approver` if the approver env is unset, `disabled`).
-- **Auth**: same muso host auth + ctx-derived `--actor-identity` as #14; `--intercom-conv-id` is REQUIRED (it is the approval-ref). muso re-verifies ownership + deterministic catalog corroboration server-side and refuses without it; per-actor/day approval cap.
-- **When to use**: via the `customer-credit-verification` skill, AFTER the read-only check + the customer's proof, to approve their OWN corroborated pending credit. Preview then apply.
+- **Status: OFF.** `creditsVerifyEnabled: false` and no capability approver is installed (firstmate stop switch 2026-10-27; `scripts/lib/ensure-no-service-approver.sh`). Every call returns `{disabled:true}`: file a ticket instead.
+- **Wraps**: `muso credits verify --actor-identity <verified-email>` (APPROVAL-tier), the WRITE counterpart of `credit_verification_check` (#9). Return shape: the header of `workspaces/support/skills/customer-credit-verification/scripts/verify-credit.sh`.
+- **Auth**: same muso host auth + ctx-derived `--actor-identity` as #14; `--intercom-conv-id` is REQUIRED (it is the approval-ref).
 
 ### 16. profiles_consolidate
 
@@ -272,7 +272,8 @@ required fields) onto the ticket – non-blocking, ops-facing. No new tool; uses
 `create_ticket`. Doctrine: `reference/orders-and-fulfillment.md`.
 
 Caroline can look an order up herself with the **`order_lookup`** tool (#10 above) –
-by internal id, order number, or Prodigi id – to read its status + shipping address.
+by internal id, order number, or Prodigi id – for its status and hold only (#10: no
+address/phone/tracking until Intercom IV; never confirm one).
 For the **verified order owner**, she can also correct the shipping recipient with
 **`order_address_update`** (#11): always a dry-run preview first, explicit customer
 confirmation, then apply with `intercomConvId`. The wrapper refuses if the requester

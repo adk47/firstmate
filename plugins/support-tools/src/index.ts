@@ -9,7 +9,7 @@ import { createCreateTicketTool } from "./tools/create-ticket.js";
 import { createSubscriptionStatusTool } from "./tools/subscription-status.js";
 import { createProfileStatusTool } from "./tools/profile-status.js";
 import { createProfileAnalyticsStatusTool } from "./tools/profile-analytics-status.js";
-import { createOrderLookupTool } from "./tools/order-lookup.js";
+import { createOrderLookupTool, orderDetailsRequireIvFrom } from "./tools/order-lookup.js";
 import { createRemoveCreditsTool, DEFAULT_REMOVE_CREDITS_SCRIPT } from "./tools/remove-credits.js";
 import { createOrderAddressUpdateTool, DEFAULT_UPDATE_ORDER_ADDRESS_SCRIPT } from "./tools/order-address-update.js";
 import { createDedupeCheckTool, DedupeVerdictStore } from "./tools/dedupe-check.js";
@@ -149,10 +149,6 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
     };
     api.registerTool(creditsSearchFactory, { name: "credits_search" });
 
-    const profileStatusFactory = (ctx: any) => {
-      return createProfileStatusTool({ adminClient: musoAdminClient, rateLimiter, sessionId: ctx.sessionId ?? "unknown" });
-    };
-    api.registerTool(profileStatusFactory, { name: "profile_status" });
 
     // intercomToken / intercomReader are hoisted here (created further down for
     // dedupe_check et al.) because profile_analytics_status needs them too, and
@@ -164,6 +160,18 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
       console.warn("[support-tools] MUSOAI_INTERCOM_TOKEN not set; dedupe_check, credit_verification_check, and profile_analytics_status will fail closed (no ownership verification).");
     }
     const intercomReader = createIntercomReader(http);
+
+    const profileStatusFactory = (ctx: any) => {
+      return createProfileStatusTool({
+        adminClient: musoAdminClient,
+        rateLimiter,
+        sessionId: ctx.sessionId ?? "unknown",
+        sessionKey: ctx.sessionKey ?? "unknown",
+        intercomReader,
+        intercomToken,
+      });
+    };
+    api.registerTool(profileStatusFactory, { name: "profile_status" });
 
     const profileAnalyticsStatusFactory = (ctx: any) => {
       return createProfileAnalyticsStatusTool({
@@ -179,8 +187,25 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
     };
     api.registerTool(profileAnalyticsStatusFactory, { name: "profile_analytics_status" });
 
+    // ORDER_DETAILS_REQUIRE_IV (default TRUE, fail closed): while Intercom Identity Verification is off,
+    // a contact's email + external_id are browser-assertable, so order_lookup returns {status, hold} to
+    // EVERY caller. Only an explicit false / "false" / 0 / "0" opens the owner-anchored detail path, and
+    // that is set only once intercom-identity-fix-i2 ships and IV is enforced in the workspace.
+    const orderDetailsRequireIvRaw =
+      [_entry.orderDetailsRequireIv, _legacy.orderDetailsRequireIv].find(
+        (v) => typeof v === "boolean" || typeof v === "string" || typeof v === "number",
+      ) ?? process.env.ORDER_DETAILS_REQUIRE_IV;
+    const orderDetailsRequireIv = orderDetailsRequireIvFrom(orderDetailsRequireIvRaw);
     const orderLookupFactory = (ctx: any) => {
-      return createOrderLookupTool({ adminClient: musoAdminClient, rateLimiter, sessionId: ctx.sessionId ?? "unknown" });
+      return createOrderLookupTool({
+        orderDetailsRequireIv,
+        adminClient: musoAdminClient,
+        rateLimiter,
+        sessionId: ctx.sessionId ?? "unknown",
+        sessionKey: ctx.sessionKey ?? "unknown",
+        intercomReader,
+        intercomToken,
+      });
     };
     api.registerTool(orderLookupFactory, { name: "order_lookup" });
 

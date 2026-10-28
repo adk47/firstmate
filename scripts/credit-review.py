@@ -561,9 +561,8 @@ def cmd_uvn_status(args: argparse.Namespace) -> int:
         return 0
     if args.preview:
         Path(args.preview).mkdir(mode=0o700, parents=True, exist_ok=True)
-    if args.wording and (args.campaign, args.wording) not in (("status-doc-received", "queued"),
-                                                             ("status-team-review", "no-ask")):
-        print("--wording queued applies to status-doc-received, --wording no-ask to status-team-review", file=sys.stderr)
+    if args.wording and (args.campaign, args.wording) not in uvn_status.WORDINGS:
+        print("--wording queued|received applies to status-doc-received, --wording no-ask to status-team-review", file=sys.stderr)
         return 2
     if args.campaign == "gap-ask" and not args.from_stage2:
         print("gap-ask reaches only users stage 2 judged: add --from-stage2", file=sys.stderr)
@@ -915,8 +914,9 @@ def parser() -> argparse.ArgumentParser:
                     help="uvn-status (the ask, t01's uvn-reminder list) or a no-ask status note: "
                          "status-doc-received (status-A list) / status-team-review (status-B list); "
                          "gap-ask: Fable's gap ask for stage-2 need_more credits (with --from-stage2)")
-    us.add_argument("--wording", choices=["queued", "no-ask"], default=None,
+    us.add_argument("--wording", choices=["queued", "received", "no-ask"], default=None,
                     help="queued: status-doc-received's 'in our review queue' wording (firstmate 092); "
+                         "received: the receipt R1 for a user who still owes proof (send-locked in the gate); "
                          "no-ask: status-team-review's Copy B0, without the proof sentence (firstmate 106)")
     us.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
     us.add_argument("--max-users", type=int, default=50, help="messages this run (canary: 3)")

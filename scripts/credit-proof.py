@@ -8,6 +8,12 @@ Subcommands:
   intercom      Analyse new customer attachments of proof conversations in the
                 Intercom attachment cache Caroline's edge plugin keeps on
                 node-8 (one read-only Intercom GET per conversation).
+  file          FILE ONLY (no judgement): record every attachment of a LIST of
+                conversations with the account it belongs to, the conversation
+                and the account's candidate credit requests. This is what catches
+                a document sent as a reply to our email (a new thread: no
+                in-thread ask) and conversations the edge cache never kept.
+                Dry run unless --apply.
   email         Analyse attachments mailed to the inbound verification address
                 (Maildir; dark until the address exists).
   stage2        SHADOW stage 2: judge the documents already on file for the
@@ -33,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from credit_review import admin as admin_api  # noqa: E402
 
+PAYING_USERS = os.environ.get("CREDIT_TRUST_PAYING_USERS", "/var/lib/credit-trust/paying-users.json")
 KILL_SWITCH = os.environ.get("CREDIT_VERIFY_KILL_SWITCH", "/etc/hydra/credit-verify.disabled")
 
 
@@ -81,6 +88,118 @@ def cmd_intercom(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_file_gmail(args: argparse.Namespace) -> int:
+    """`file --source gmail`: support@ messages by id (read-only gog), same proof_intake contract."""
+    from credit_verify.proof import email_in, gmail_intake, intake
+    from credit_verify.proof.store import ProofStore
+    if not args.message_ids:
+        log("--source gmail needs --message-ids FILE")
+        print("NO_REPLY")
+        return 2
+    ids, bad = gmail_intake.read_message_ids(args.message_ids)
+    if bad:
+        log(f"{len(bad)} token(s) in {args.message_ids} are not Gmail message ids: {bad[:5]}")
+    ids = ids[: args.limit or None]
+    stats = gmail_intake.run(ProofStore.for_run(args.store, args.apply), message_ids=ids, fetch=gmail_intake.gog_raw,
+                             lookup=email_in.admin_user_lookup(admin_api.AdminClient()),
+                             open_rows=intake.open_rows_trino, apply=args.apply, log=log)
+    stats["not_message_ids"] = bad
+    log("file gmail " + json.dumps({k: (len(v) if isinstance(v, list) else v) for k, v in stats.items()}))
+    if args.out:
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        (Path(args.out) / "proof-intake-gmail.json").write_text(json.dumps(stats, indent=1, default=str))
+    print("NO_REPLY")
+    return 0
+
+
+def cmd_file(args: argparse.Namespace) -> int:
+    from credit_verify.proof import intake
+    if args.source == "gmail":
+        return cmd_file_gmail(args)
+    if not args.conversations:
+        log("--source intercom needs --conversations FILE")
+        print("NO_REPLY")
+        return 2
+    from credit_verify.proof.intercom import intercom_token, make_fetch
+    from credit_verify.proof.stage2 import held_rows
+    from credit_verify.proof.store import ProofStore
+    tok = intercom_token()
+    if not tok:
+        log("no MUSOAI_INTERCOM_TOKEN: cannot read the conversations")
+        print("NO_REPLY")
+        return 1
+    convs = intake.read_conversations(args.conversations)
+    open_rows: dict[int, list[dict]] = {}
+    if args.open_rows:
+        open_rows = intake.open_rows_json(args.open_rows)
+    held: dict[int, list[dict]] = {}
+    if args.held_from_ledger:
+        for h in held_rows():
+            held.setdefault(h.user_id, []).append({"request_id": h.request_id, "paid": h.paid,
+                                                  "decided_at": h.decided_at})
+    stats = intake.run(ProofStore.for_run(args.store, args.apply), conversations=convs, fetch=make_fetch(tok),
+                       lookup=intake.professional_lookup, open_rows=open_rows, held=held,
+                       export_path=args.proof_on_file or intake.PROOF_ON_FILE,
+                       cache_root=args.cache_root or intake.CACHE_ROOT, apply=args.apply,
+                       limit=args.limit, workers=args.workers, max_fetches=args.max_fetches,
+                       open_rows_fn=None if args.open_rows else intake.open_rows_trino, log=log)
+    log("file " + json.dumps({k: v for k, v in stats.items() if not isinstance(v, list)}))
+    if args.out:
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        (Path(args.out) / "proof-intake.json").write_text(json.dumps(stats, indent=1, default=str))
+    print("NO_REPLY")
+    return 0
+
+
+def cmd_file_recent(args: argparse.Namespace) -> int:
+    """The hourly document intake (cron credit-verify-proof-file): everything customers sent since the
+    last run, Intercom + support@, into proof_intake only. Dry run unless --apply."""
+    from credit_verify.proof import email_in, gmail_intake, intake, recent
+    from credit_verify.proof.intercom import intercom_token, make_fetch
+    from credit_verify.proof.stage2 import held_rows
+    from credit_verify.proof.store import ProofStore
+    if _guard("document intake"):
+        return 0
+    tok = intercom_token()
+    if not tok:
+        log("no MUSOAI_INTERCOM_TOKEN: cannot read the conversations")
+        print("NO_REPLY")
+        return 1
+    store = ProofStore.for_run(args.store, args.apply)
+    held: dict[int, list[dict]] = {}
+    for h in held_rows():
+        held.setdefault(h.user_id, []).append({"request_id": h.request_id, "paid": h.paid, "decided_at": h.decided_at})
+    export = intake.export_users()
+    try:
+        paying = set(json.loads(Path(PAYING_USERS).read_text())["ids"])
+    except (OSError, ValueError, KeyError, TypeError):
+        paying = set()
+        log("paying users unreadable: conversations are filed in search order")
+    admin_lookup = email_in.admin_user_lookup(admin_api.AdminClient())
+    try:
+        res = recent.run(
+            state_path=args.state or recent.STATE, hours=args.hours, apply=args.apply,
+            conv_search=recent.intercom_search(tok),
+            gmail_search=None if args.no_gmail else recent.gog_search(),
+            order=lambda convs: recent.paid_first(convs, export, paying),
+            file_conversations=lambda ids: intake.run(
+                store, conversations=ids, fetch=make_fetch(tok), lookup=intake.professional_lookup, held=held,
+                apply=args.apply, max_fetches=args.max_fetches, open_rows_fn=intake.open_rows_trino, log=log),
+            file_messages=lambda ids: gmail_intake.run(
+                store, message_ids=ids, fetch=gmail_intake.gog_raw, lookup=admin_lookup,
+                open_rows=intake.open_rows_trino, apply=args.apply, log=log),
+            log=log)
+    except recent.Busy as exc:
+        log(str(exc))
+        print("NO_REPLY")
+        return 0
+    if args.out:
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        (Path(args.out) / "file-recent.json").write_text(json.dumps(res, indent=1, default=str))
+    print("NO_REPLY")
+    return 0
+
+
 def cmd_email(args: argparse.Namespace) -> int:
     from credit_verify.proof import email_in
     from credit_verify.proof.store import ProofStore
@@ -125,6 +244,11 @@ def cmd_stage2_sample(args: argparse.Namespace) -> int:
     return 0
 
 
+def intake_max_fetches() -> int:
+    from credit_verify.proof.intake import MAX_FETCHES
+    return MAX_FETCHES
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--store", default=None, help="proof store (default /var/lib/hydra-credit-verify/proof.sqlite)")
@@ -140,6 +264,33 @@ def parser() -> argparse.ArgumentParser:
     pi.add_argument("--max-files", type=int, default=300)
     pi.add_argument("--out", default=None)
     pi.set_defaults(fn=cmd_intercom)
+    pf = sub.add_parser("file", help="FILE ONLY: record a conversation list's attachments with account + candidate requests")
+    pf.add_argument("--source", choices=("intercom", "gmail"), default="intercom",
+                    help="intercom: --conversations; gmail: support@ messages by --message-ids (read-only gog)")
+    pf.add_argument("--conversations", default=None, help="file of Intercom conversation ids (one per line)")
+    pf.add_argument("--message-ids", default=None, help="--source gmail: file of support@ Gmail message ids")
+    pf.add_argument("--apply", action="store_true", help="write the filings (default: count only, write nothing)")
+    pf.add_argument("--open-rows", default=None,
+                    help="JSON {user_id: [{request_id,status}]} of the accounts' open credit requests "
+                         "(default: one read-only Trino SELECT for the resolved accounts)")
+    pf.add_argument("--held-from-ledger", action="store_true",
+                    help="also treat the decider's current proof-on-file holds as candidate requests")
+    pf.add_argument("--proof-on-file", default=None, help="proof-on-file export (account fallback)")
+    pf.add_argument("--cache-root", default=None, help="Intercom attachment cache")
+    pf.add_argument("--limit", type=int, default=None, help="first N conversations only")
+    pf.add_argument("--workers", type=int, default=3)
+    pf.add_argument("--max-fetches", type=int, default=intake_max_fetches(),
+                    help="Intercom attachment downloads per run (conversations beyond it wait for the next run)")
+    pf.add_argument("--out", default=None)
+    pf.set_defaults(fn=cmd_file)
+    pr2 = sub.add_parser("file-recent", help="hourly intake: documents sent since the last run (Intercom + support@)")
+    pr2.add_argument("--apply", action="store_true", help="write the filings and advance the window")
+    pr2.add_argument("--hours", type=float, default=2.0, help="first-run window (later runs start at the last run)")
+    pr2.add_argument("--max-fetches", type=int, default=60)
+    pr2.add_argument("--no-gmail", action="store_true", help="Intercom only")
+    pr2.add_argument("--state", default=None)
+    pr2.add_argument("--out", default=None)
+    pr2.set_defaults(fn=cmd_file_recent)
     pe = sub.add_parser("email", help="analyse attachments mailed to the inbound verification address")
     pe.add_argument("--maildir", default=None)
     pe.set_defaults(fn=cmd_email)

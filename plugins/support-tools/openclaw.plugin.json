@@ -63,6 +63,9 @@
       "companyFinderDiagnosticsDir": {
         "type": "string",
         "description": "Durable directory for exact company-finder stage stdin/stdout/stderr/exit metadata."
+      },
+      "orderDetailsRequireIv": {
+        "description": "order_lookup detail gate. Default (absent) and any value except false / \"false\" / 0 / \"0\" = ON: order_lookup returns {status, hold} only to every caller, because Intercom Identity Verification is off and a contact's email/external_id is browser-assertable. Set false ONLY after intercom-identity-fix-i2 ships and IV is enforced; then the full order goes to the order's own verified contact (owner anchor). Env fallback ORDER_DETAILS_REQUIRE_IV."
       }
     }
   }

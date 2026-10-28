@@ -61,6 +61,12 @@ setup() {
 _jqflt() { local p=""; for a in "$@"; do [ "$p" = "--jq" ] && { printf '%s' "$a"; return; }; p="$a"; done; }
 
 sub="$1"; shift || true
+# The library calls the identity shim, which CONSUMES `--repo`; `gh api` itself
+# rejects it ("unknown flag: --repo"). A stub that tolerated the flag here would
+# hide a caller that bypassed the shim.
+if [ "$sub" = "--repo" ] && [ "${1:-}" = "api" ]; then
+  echo "unknown flag: --repo" >&2; exit 1
+fi
 case "$sub" in
   api)
     if printf '%s\n' "$@" | grep -qE '^repos/[^/]+/[^/]+/contents/\.github/workflows/credit-approval-guard\.yaml'; then
@@ -98,6 +104,14 @@ case "$sub" in
       else
         echo "${STUB_OPEN_BLOCKERS:-0}"                 # count of unresolved Critical/Important threads
       fi
+    elif printf '%s\n' "$@" | grep -qE '^repos/[^/]+/[^/]+/issues/[0-9]+/comments'; then
+      # T10: the off-disk QA hand-off channel (scripts/lib/qa-handoff.sh). Serves
+      # a RAW REST comments array (or an array of pages) and lets the library run
+      # its own jq, same doctrine as the rollup/threads arms above. Default `[]`
+      # = CI has published no hand-off, which is the pre-T10 world: every test
+      # written before this channel existed then exercises the on-disk fallback
+      # exactly as it did before. STUB_HANDOFF_JSON=<array> publishes one.
+      printf '%s' "${STUB_HANDOFF_JSON:-[]}"
     elif printf '%s\n' "$@" | grep -qE '^repos/[^/]+/[^/]+/pulls/[0-9]+/files\?per_page=100$'; then
       _args="$*"
       if printf '%s' "$_args" | grep -q -- '--paginate' \
@@ -1178,7 +1192,7 @@ NO_THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}
   STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
     run "$SCRIPT" hydra 625 "$NICK"
   [ "$status" -eq 10 ]
-  echo "$output" | grep -q 'no rebase-integrity report'
+  echo "$output" | grep -q 'no rebase-integrity hand-off'
   ! grep -q '^approve$' "$STUB_CALLS"
 }
 
@@ -2320,6 +2334,267 @@ br_report_raw() {  # <content> — raw bytes (malformed-JSON cases)
     run "$SCRIPT" core-backend 123 "$NICK"
   [ "$status" -eq 13 ]
   ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# ---------------------------------------------------------------------------
+# T10 — the off-disk hand-off: CI publishes the two reports as a hidden PR
+# comment (publisher: scripts/qa-handoff-publish.sh, reader:
+# scripts/lib/qa-handoff.sh) and Guards 8/9 read THEM, not /var/lib/hydra-qa.
+#
+# Why the suite must cover BOTH directions. The old tests proved the on-disk
+# path; if the GitHub channel were wired wrong (marker drift, author filter,
+# payload shape, base64/gzip) every guard would still silently fall back to the
+# file on node-8 and look green — and then refuse every approval the moment QA
+# runs from a pod with no such file. So each guard is executed against a fixture
+# PR WITH the artifact (must pass) and WITHOUT it (must refuse where a report is
+# required). The helpers below run the REAL publisher encoding, so a publisher/
+# consumer drift fails here instead of on a live PR whose only symptom is "QA
+# refuses to approve anything".
+# ---------------------------------------------------------------------------
+
+hf_ri() {  # <repo> <pr> <status> [digest] [head] → one rebase-integrity report
+  jq -nc --arg repo "$1" --argjson pr "$2" --arg s "$3" --arg d "${4:-}" \
+    --arg h "${5:-$HEAD_OID}" \
+    '{repo: $repo, pr: $pr, head_sha: $h, status: $s}
+     + (if $d == "" then {} else {warn_digest: $d} end)'
+}
+
+hf_br() {  # <repo> <pr> <tier> [status] [head] → one blast-radius report
+  jq -nc --arg repo "$1" --argjson pr "$2" --arg t "$3" --arg s "${4:-OK}" \
+    --arg h "${5:-$HEAD_OID}" \
+    '{repo: $repo, pr: $pr, head_sha: $h, status: $s, tier: $t,
+      signals: [{id: "gate-edit", severity: "critical"}]}'
+}
+
+hf_comment() {  # <repo> <pr> <reports-json> [head] [login] [id] → REST comment object
+  local repo="$1" pr="$2" reports="$3" head="${4:-$HEAD_OID}"
+  local login="${5:-github-actions[bot]}" id="${6:-9001}" payload b64
+  payload="$(jq -cn --arg repo "$repo" --argjson pr "$pr" --arg head "$head" \
+    --argjson reports "$reports" '
+      {version: 1, repo: $repo, pr: $pr, head_sha: $head,
+       generated_at: "2026-10-27T00:00:00Z", reports: $reports, missing: []}') "
+  b64="$(printf '%s' "$payload" | gzip -9 -n | base64 | tr -d '\n')"
+  jq -nc --arg b "<!-- muso-qa-handoff v1 payload=$b64 -->" --arg l "$login" --argjson i "$id" '
+    {id: $i, created_at: "2026-10-27T00:00:00Z", user: {login: $l}, body: $b}'
+}
+
+hf_pair() {  # <repo> <pr> <ri-json> <br-json> [head] [login] [id]
+  hf_comment "$1" "$2" \
+    "$(jq -cn --argjson a "$3" --argjson b "$4" \
+      '{"rebase-integrity": $a, "blast-radius": $b}')" \
+    "${5:-$HEAD_OID}" "${6:-github-actions[bot]}" "${7:-9001}"
+}
+
+# ── Guard 8 over the GitHub channel ────────────────────────────────────────
+
+@test "guard8 handoff: CLEAN report published on the PR, NO on-disk file → approves" {
+  c="$(hf_comment Muso-AI/core-backend 123 \
+    "$(jq -cn --argjson ri "$(hf_ri Muso-AI/core-backend 123 CLEAN)" '{"rebase-integrity": $ri}')")"
+  STUB_HANDOFF_JSON="$(jq -cn --argjson a "$c" '[$a]')" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 handoff: WARN + bot-filed marker thread resolved by a human → approves" {
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"aaronkaufman"},"comments":{"nodes":[{"body":"🟡 **Important — '"$MARKER"'** PR deletes recent main work","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  c="$(hf_comment Muso-AI/core-backend 123 \
+    "$(jq -cn --argjson ri "$(hf_ri Muso-AI/core-backend 123 WARN)" '{"rebase-integrity": $ri}')")"
+  STUB_HANDOFF_JSON="$(jq -cn --argjson a "$c" '[$a]')" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 handoff: WARN with no REBASE WARNING thread → exit 10 (the chain still bites)" {
+  c="$(hf_comment Muso-AI/core-backend 123 \
+    "$(jq -cn --argjson ri "$(hf_ri Muso-AI/core-backend 123 WARN)" '{"rebase-integrity": $ri}')")"
+  STUB_HANDOFF_JSON="$(jq -cn --argjson a "$c" '[$a]')" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$NO_THREADS" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 handoff: NO artifact anywhere on a REQUIRED repo → exit 10 (red when absent)" {
+  STUB_HANDOFF_JSON='[]' STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" hydra 625 "$NICK"
+  [ "$status" -eq 10 ]
+  echo "$output" | grep -q 'no rebase-integrity hand-off'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 handoff: a comment from an UNTRUSTED author does not count as CLEAN → exit 10" {
+  c="$(hf_comment Muso-AI/hydra 625 \
+    "$(jq -cn --argjson ri "$(hf_ri Muso-AI/hydra 625 CLEAN)" '{"rebase-integrity": $ri}')" \
+    "$HEAD_OID" "nsollazzo" 7)"
+  STUB_HANDOFF_JSON="$(jq -cn --argjson a "$c" '[$a]')" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" hydra 625 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 handoff: trusted WARN beats an untrusted CLEAN on the same head → exit 10" {
+  clean="$(hf_comment Muso-AI/hydra 625 \
+    "$(jq -cn --argjson ri "$(hf_ri Muso-AI/hydra 625 CLEAN)" '{"rebase-integrity": $ri}')" \
+    "$HEAD_OID" "nsollazzo" 7)"
+  warn="$(hf_comment Muso-AI/hydra 625 \
+    "$(jq -cn --argjson ri "$(hf_ri Muso-AI/hydra 625 WARN)" '{"rebase-integrity": $ri}')" \
+    "$HEAD_OID" "github-actions[bot]" 8)"
+  STUB_HANDOFF_JSON="$(jq -cn --argjson a "$clean" --argjson b "$warn" '[$a, $b]')" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$NO_THREADS" \
+    run "$SCRIPT" hydra 625 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 handoff: undecodable payload is DROPPED, not a crash → exit 10 on a required repo" {
+  STUB_HANDOFF_JSON='[{"id":1,"created_at":"2026-10-27T00:00:00Z","user":{"login":"github-actions[bot]"},"body":"<!-- muso-qa-handoff v1 payload=not-base64!! -->"}]' \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" hydra 625 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 handoff: interior fields disagreeing with the head → exit 10 (mis-file caught)" {
+  # Envelope says this head (so the guard selects it), the REPORT inside says
+  # another one — the cross-check must catch it rather than trusting the envelope.
+  other="1111111111111111111111111111111111111111"
+  payload="$(jq -cn --arg h "$HEAD_OID" --arg o "$other" '
+    {version: 1, repo: "Muso-AI/hydra", pr: 625, head_sha: $h,
+     generated_at: "2026-10-27T00:00:00Z", missing: [],
+     reports: {"rebase-integrity": {repo: "Muso-AI/hydra", pr: 625, head_sha: $o, status: "CLEAN"}}}')"
+  b64="$(printf '%s' "$payload" | gzip -9 -n | base64 | tr -d '\n')"
+  STUB_HANDOFF_JSON="$(jq -nc --arg b "<!-- muso-qa-handoff v1 payload=$b64 -->" '
+    [{id: 3, created_at: "2026-10-27T00:00:00Z", user: {login: "github-actions[bot]"}, body: $b}]')" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" hydra 625 "$NICK"
+  [ "$status" -eq 10 ]
+  echo "$output" | grep -q 'interior fields do not match'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 handoff: hand-off for ANOTHER pr number is not used → exit 10 on a required repo" {
+  payload="$(jq -cn --arg h "$HEAD_OID" '
+    {version: 1, repo: "Muso-AI/hydra", pr: 999, head_sha: $h,
+     generated_at: "2026-10-27T00:00:00Z", missing: [],
+     reports: {"rebase-integrity": {repo: "Muso-AI/hydra", pr: 999, head_sha: $h, status: "CLEAN"}}}')"
+  b64="$(printf '%s' "$payload" | gzip -9 -n | base64 | tr -d '\n')"
+  STUB_HANDOFF_JSON="$(jq -nc --arg b "<!-- muso-qa-handoff v1 payload=$b64 -->" '
+    [{id: 4, created_at: "2026-10-27T00:00:00Z", user: {login: "github-actions[bot]"}, body: $b}]')" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" hydra 625 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 handoff: unreadable GitHub falls back to the on-disk report (no spurious refusal)" {
+  ri_report CLEAN
+  STUB_HANDOFF_JSON='gh: Not Found (HTTP 404)' \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 handoff: QA_HANDOFF_GITHUB=0 pins the pre-T10 on-disk behaviour" {
+  ri_report CLEAN
+  c="$(hf_comment Muso-AI/core-backend 123 \
+    "$(jq -cn --argjson ri "$(hf_ri Muso-AI/core-backend 123 WARN)" '{"rebase-integrity": $ri}')")"
+  STUB_HANDOFF_JSON="$(jq -cn --argjson a "$c" '[$a]')" \
+    QA_HANDOFF_GITHUB=0 STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  # The GitHub hand-off says WARN; the disk says CLEAN and wins because the
+  # channel is disabled — break-glass must be able to reproduce the old world.
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 handoff carryover: prior head's acks live in the PR, no on-disk files at all" {
+  # The pods have no /var/lib/hydra-qa: the ONLY history is the PR's comments.
+  prior="2222222222222222222222222222222222222222"
+  digest="$(printf 'd%.0s' {1..64})"
+  THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+    {"isResolved":true,"resolvedBy":{"login":"aaronkaufman"},"comments":{"nodes":[{"body":"🟡 **Important — REBASE WARNING ['"${prior:0:7}"']** same finding","author":{"login":"adk47"}}]}}
+  ]}}}}}'
+  prior_reports="$(jq -cn \
+    --argjson ri "$(hf_ri Muso-AI/hydra 625 WARN "$digest" "$prior")" \
+    --argjson br "$(hf_br Muso-AI/hydra 625 LOW OK "$prior")" \
+    '{"rebase-integrity": $ri, "blast-radius": $br}')"
+  head_reports="$(jq -cn --argjson ri "$(hf_ri Muso-AI/hydra 625 WARN "$digest")" \
+    '{"rebase-integrity": $ri}')"
+  c1="$(hf_comment Muso-AI/hydra 625 "$prior_reports" "$prior" "github-actions[bot]" 11)"
+  c2="$(hf_comment Muso-AI/hydra 625 "$head_reports" "$HEAD_OID" "github-actions[bot]" 12)"
+  STUB_HANDOFF_JSON="$(jq -cn --argjson a "$c1" --argjson b "$c2" '[$a, $b]')" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$THREADS" \
+    run "$SCRIPT" hydra 625 "$NICK"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'carries forward the human ack'
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard8 handoff carryover: prior head in the PR with a DIFFERENT digest → exit 10" {
+  prior="3333333333333333333333333333333333333333"
+  prior_reports="$(jq -cn \
+    --argjson ri "$(hf_ri Muso-AI/hydra 625 WARN "$(printf 'e%.0s' {1..64})" "$prior")" \
+    '{"rebase-integrity": $ri}')"
+  head_reports="$(jq -cn \
+    --argjson ri "$(hf_ri Muso-AI/hydra 625 WARN "$(printf 'd%.0s' {1..64})")" \
+    '{"rebase-integrity": $ri}')"
+  c1="$(hf_comment Muso-AI/hydra 625 "$prior_reports" "$prior" "github-actions[bot]" 11)"
+  c2="$(hf_comment Muso-AI/hydra 625 "$head_reports" "$HEAD_OID" "github-actions[bot]" 12)"
+  STUB_HANDOFF_JSON="$(jq -cn --argjson a "$c1" --argjson b "$c2" '[$a, $b]')" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 STUB_THREADS_JSON="$NO_THREADS" \
+    run "$SCRIPT" hydra 625 "$NICK"
+  [ "$status" -eq 10 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+# ── Guard 9 over the GitHub channel ────────────────────────────────────────
+
+@test "guard9 handoff: enabled + LOW from the PR hand-off → approves" {
+  c="$(hf_pair Muso-AI/core-backend 123 \
+    "$(hf_ri Muso-AI/core-backend 123 CLEAN)" "$(hf_br Muso-AI/core-backend 123 LOW)")"
+  STUB_HANDOFF_JSON="$(jq -cn --argjson a "$c" '[$a]')" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9 handoff: enabled + CRITICAL from the PR hand-off → exit 13, names the signal" {
+  c="$(hf_pair Muso-AI/core-backend 123 \
+    "$(hf_ri Muso-AI/core-backend 123 CLEAN)" "$(hf_br Muso-AI/core-backend 123 CRITICAL)")"
+  STUB_HANDOFF_JSON="$(jq -cn --argjson a "$c" '[$a]')" \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 13 ]
+  echo "$output" | grep -q 'gate-edit'
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9 handoff: enabled + NO artifact anywhere on a REQUIRED repo → exit 13" {
+  STUB_HANDOFF_JSON='[]' \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    QA_BLAST_REQUIRED_REPOS="core-backend" \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 13 ]
+  ! grep -q '^approve$' "$STUB_CALLS"
+}
+
+@test "guard9 handoff: no GitHub hand-off but the on-disk LOW report exists → approves (fallback)" {
+  export QA_BLAST_STATE_DIR="$TEST_TMPDIR/br"
+  br_report LOW
+  STUB_HANDOFF_JSON='[]' \
+    STUB_ME="adk47" STUB_AUTHOR="nsollazzo" STUB_BAD_CHECKS=0 QA_BLAST_RADIUS_GATE=1 \
+    run "$SCRIPT" core-backend 123 "$NICK"
+  [ "$status" -eq 0 ]
+  grep -q '^approve$' "$STUB_CALLS"
 }
 
 # ── Guard 14: caller-asserted expected state, re-read AT the write ──────────

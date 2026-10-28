@@ -168,6 +168,41 @@ Every new head (rebase, merge-from-main) legitimately spawns a fresh thread for 
 same signal; re-ack it. This is not the bot looping — check the `[sha7]` tag before
 diagnosing a deadlock.
 
+**The QA hand-off report lives on the PR, not on node-8 (T10).** PR Validation's
+two advisory analyzers (`check-rebase-integrity.sh`, `check-blast-radius.sh`) used
+to hand their per-head verdict to `qa-pr-approve.sh` Guards 8/9 and to the review
+skill through a file under `/var/lib/hydra-qa`, i.e. through a directory that only
+exists on the CI host. That pinned QA review to the same box as CI: a QA gateway
+pod reading that path gets nothing, and every guard is fail-closed, so the failure
+mode is "QA refuses to approve anything" rather than a degraded review. The
+hand-off is now ALSO published as one hidden comment per head —
+`<!-- muso-qa-handoff v1 payload=<gzip+base64 JSON> -->`, authored by
+`github-actions[bot]`, one per head (`scripts/qa-handoff-publish.sh`) — and
+GitHub is the PRIMARY channel for every consumer:
+Guards 8/9, and the skill via `scripts/qa-handoff-read.sh <owner/repo> <pr>
+<rebase-integrity|blast-radius> [--head <sha>]`. Three consequences worth
+remembering (all load-bearing):
+- **Never add a new consumer that reads `/var/lib/hydra-qa` directly.** The
+  on-disk report still exists (the analyzers keep writing it, and the guards fall
+  back to it LOUDLY for heads validated before this shipped), but anything reading
+  it is host-bound again. Guard 8's ack carry-forward also needs PRIOR heads'
+  reports, which the PR comment now supplies for free — the old
+  `grep /var/lib/hydra-qa/rebase-integrity/*.json` glob cannot.
+- **A broken publisher fails CI, deliberately.** The analyzers' *findings* are
+  advisory, but the hand-off itself is an evidence pipeline: the publish step is
+  RED when it cannot run, because a green CI beside a hand-off it could not
+  withdraw would let Guard 6 vouch for a PREVIOUS run of the same head. So the
+  signal is a red `Node-8 hand-off` check naming the reason (unreadable comment
+  list, failed write), not a warning buried in a log.
+- **A hand-off never outlives its run.** The publisher DELETEs every earlier
+  hand-off for that head before posting, and each analyzer step clears this
+  head's on-disk report before it runs. Both halves matter on a persistent host
+  path: without them a re-run whose analysis now says ERROR — or whose analyzer
+  died before writing its sentinel — leaves the previous run's CLEAN readable,
+  and the rerun still looks green. Other heads' comments are never touched:
+  Guard 8's ack carry-forward needs them (that is also why the carry-forward
+  works at all off node-8 now).
+
 **QA verdicts race your replies/resolutions — judge by dispatch order, not arrival
 order.** The auto-review is dispatched when PR Validation completes and reads thread
 state minutes later; a NO-GO that lands after you resolved a thread often evaluated a

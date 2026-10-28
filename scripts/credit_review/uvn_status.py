@@ -85,6 +85,9 @@ note) nor the gap ask, reported ask_only.
 Each status note has one approved alternative wording: status-doc-received wording="queued"
 (firstmate 092) passes --copy queued, status-team-review wording="no-ask" (Copy B0 without the
 proof sentence; firstmate 106, pending-status-1021) passes --copy no-ask to the gate.
+status-doc-received wording="received" (proof-loop captain card R1: the queued line without "no need to
+send anything else", for a user who still owes proof) passes --copy received; it is send-locked in the gate
+(STATUS_RECEIVED_COPY_APPROVED), and a real run with it halts before any gate call while the lock is 0.
 """
 
 from __future__ import annotations
@@ -96,6 +99,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from . import fraud_lens, policy, stage2_verdicts, verify_ledger, verify_notify
@@ -143,6 +147,19 @@ def _cap_env(name: str, default: int) -> int:
 
 STATUS_DAILY_MAX = _cap_env("CREDIT_STATUS_DAILY_MAX", 1000)  # sanity bound for the no-ask status notes
 LIST_MAX_AGE_H = 30
+# (campaign, wording) pairs the gate takes as --copy; LOCKED_WORDINGS name the gate lock each one waits on.
+WORDINGS = (("status-doc-received", "queued"), ("status-doc-received", "received"), ("status-team-review", "no-ask"))
+LOCKED_WORDINGS = {"received": "STATUS_RECEIVED_COPY_APPROVED"}
+
+
+def gate_lock_open(wrapper: str, var: str) -> bool:
+    """True only when the gate script itself says `readonly <var>=1` (the gate is the single source of truth;
+    unreadable = locked)."""
+    try:
+        text = Path(wrapper).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return re.search(rf"^readonly {re.escape(var)}=1$", text, re.M) is not None
 DAILY_MAX = _cap_env("CREDIT_UVN_DAILY_MAX", 400)  # the ask
 MAX_CALLS_PER_USER = 5
 Query = verify_notify.Query
@@ -472,8 +489,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         watchlist_path: str | None = None, holds_path: str | None = None) -> UvnReport:
     if campaign not in CAMPAIGNS:
         raise ValueError(f"unknown campaign {campaign!r}")
-    if wording and (campaign, wording) not in (("status-doc-received", "queued"), ("status-team-review", "no-ask")):
-        raise ValueError(f"wording {wording!r}: queued applies to status-doc-received, no-ask to status-team-review")
+    if wording and (campaign, wording) not in WORDINGS:
+        raise ValueError(f"wording {wording!r}: queued|received apply to status-doc-received, no-ask to status-team-review")
     if from_stage2 and campaign not in stage2_verdicts.RELEASES:
         raise ValueError(f"--from-stage2 feeds {', '.join(stage2_verdicts.RELEASES)} only")
     if campaign == GAP_ASK and not from_stage2:
@@ -482,6 +499,12 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         raise ValueError("a list is required unless the population comes from stage 2")
     is_ask = campaign in ASKS
     report = UvnReport(campaign=campaign)
+    # A send-locked wording never reaches the gate on a real run: the gate would refuse every user, and a
+    # refusal of a status note holds and COUNTS (three = flagged for a human), for nothing the user did.
+    lock = LOCKED_WORDINGS.get(wording)
+    if lock and mode == "apply" and not gate_lock_open(wrapper, lock):
+        report.halted = f"--wording {wording} is send-locked in the gate ({lock}=0); nothing sent (dry-run renders it)"
+        return report
     # Stage 2's release from the proof-on-file hold. From the list, an unreadable store releases
     # nothing (the old rule stands); a stage-2 population cannot be built without it.
     released: set[str] = set()

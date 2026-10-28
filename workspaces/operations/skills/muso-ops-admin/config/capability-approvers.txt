@@ -10,12 +10,16 @@
 # lines ignored. A missing or empty file fails closed (every capability
 # approval-tier write is refused).
 #
-# caroline-autonomous is the synthetic, non-human service approver for
-# Caroline's autonomous approval-tier writes (set as MUSO_CAPABILITY_APPROVER
-# on the edge gateway). It is deliberately NOT a real person so the tier2-audit
-# trail distinguishes "Caroline auto-approved under standing policy" from a
-# human approval. The real authorization for these writes is muso-cli's
-# server-side ownership re-verify + per-actor day caps + (for credits)
-# deterministic catalog corroboration — not this handle.
-
-caroline-autonomous
+# THIS FILE HOLDS NO APPROVER, ON PURPOSE (captain order 2026-10-26 23:30Z: no
+# approval without a recorded decision; firstmate stop switch 2026-10-27).
+# It used to list `caroline-autonomous`, the synthetic service approver that let
+# Caroline (edge) approve her customers' credits (credits_verify), merge their
+# profiles (profiles_consolidate) and verify their claims (profiles_claim_self)
+# with no person in the loop. Firstmate removed it from node-8 at 09:31Z on
+# 2026-10-27 and the 13:16Z deploy put it back from this file. Empty, every
+# Caroline approval-tier write fails closed in muso-cli.
+#
+# Do not add an entry here. scripts/lib/ensure-no-service-approver.sh fails the
+# deploy (and PR Validation, scripts/tests/ensure-no-service-approver.bats) if
+# this file lists any approver. Re-opening a capability verb is a captain
+# decision recorded in policies/credit-approval-automation.json first.

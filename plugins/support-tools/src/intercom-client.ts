@@ -34,6 +34,12 @@ export interface IntercomReader {
   // updated after `sinceUnix`? "unknown" on ANY unverifiable
   // path (lookup failure, no single contact, more than `limit` conversations, a truncated
   // or 500-part-capped part list); the caller MUST NOT read "unknown" as "not_found".
+  // The conversation's ONE contact (Intercom contact record, never message text), with the facts the
+  // owner anchor's spoof screen needs. null on ANY unverifiable path: no single contact, API error, no
+  // email, or a contact-authored source whose email differs. Optional so older test stubs still compile;
+  // a reader without it anchors nothing (fail closed).
+  getContactIdentity?(conversationId: string, token: string): Promise<ContactIdentity | null>;
+
   findBotMarkerInOtherConversations(params: {
     conversationId: string;
     token: string;
@@ -42,6 +48,14 @@ export interface IntercomReader {
     sinceUnix: number;
     limit: number;
   }): Promise<"found" | "not_found" | "unknown">;
+}
+
+export interface ContactIdentity {
+  email: string;
+  role: string; // "user" | "lead" (anything else is refused by the reader)
+  externalId: string | null;
+  contactCreatedAt: number | null; // unix seconds
+  conversationCreatedAt: number | null;
 }
 
 // intercomAuthor is the structured author on a conversation source/part.
@@ -105,6 +119,31 @@ export function createIntercomReader(http: HttpClient): IntercomReader {
       const conv = await getConversation(conversationId, token);
       const email = conv?.source?.author?.email;
       return email ? email.toLowerCase() : null;
+    },
+
+    async getContactIdentity(conversationId, token) {
+      const conv = await getConversation(conversationId, token);
+      const contacts = conv?.contacts?.contacts ?? [];
+      if (!conv || contacts.length !== 1 || !contacts[0].id) return null;
+      const url = `${INTERCOM_API_BASE}/contacts/${encodeURIComponent(String(contacts[0].id))}`;
+      const resp = await http.get<{ role?: string; email?: string; external_id?: string | null; created_at?: number }>(
+        url, { headers: headersFor(token) });
+      if (!resp.ok || !resp.data) return null;
+      const role = resp.data.role ?? "";
+      if (role !== "user" && role !== "lead") return null;
+      const email = (resp.data.email ?? "").trim().toLowerCase();
+      if (!email) return null;
+      const author = conv.source?.author;
+      if (isContactAuthor(author) && author?.email && author.email.toLowerCase() !== email) return null;
+      const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+      const ext = resp.data.external_id;
+      return {
+        email,
+        role,
+        externalId: ext !== null && ext !== undefined && String(ext).trim() ? String(ext).trim() : null,
+        contactCreatedAt: num(resp.data.created_at),
+        conversationCreatedAt: num(conv.created_at),
+      };
     },
 
     async getLatestCustomerPart(conversationId, token) {

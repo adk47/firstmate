@@ -27,6 +27,8 @@ RUNNER="${RUNNER:-/opt/hydra/scripts/credit-review.py}"
 export LEDGER="${LEDGER:-/var/lib/hydra/credit-review/ledger.sqlite3}"
 KILL_SWITCH="${KILL_SWITCH:-/etc/hydra/credit-ops-notes.disabled}"
 CORE_NOTICE="${CORE_NOTICE:-/opt/hydra/scripts/credit_review/core_notice.py}"
+RECEIPTS_PY="${RECEIPTS_PY:-/opt/hydra/scripts/credit_review/receipts.py}"
+GATE_SCRIPT="${GATE_SCRIPT:-/opt/hydra/scripts/intercom-verify-request.sh}"
 MAIN_ENV="${MAIN_ENV:-/etc/openclaw/main.env}"
 LOCK="$STATE_ROOT/daily.lock"
 install -d -m 700 "$STATE_ROOT"
@@ -172,6 +174,30 @@ PY
     email email-lists-b0.json b0 || break
   fi
 done
+# Receipts (proof loop, [key=proof-loop-plan-1027] ACK): a NEW proof_intake row (b1's filer) triggers the
+# "we have your document" note, not the thread heuristic. receipts.py splits the users: owes nothing else ->
+# the approved queued line; still owes proof -> card R1 (--wording received), which runs only once the gate
+# itself says STATUS_RECEIVED_COPY_APPROVED=1 (until then the count waiting is logged; nothing is refused or
+# counted against anyone). Same exclusions as the segments; the gate's ledger, 7-day core-notice gate and one
+# message per user per day apply to every note. Skipped when the run already stopped.
+if [ "${FAILED:-0}" != 1 ] && [ "${RECEIPTS:-1}" = 1 ] && ! killed; then
+  W="$BASE/receipts"; install -d -m 700 "$W"; cd "$W" || exit 1
+  { cat "$EXCLUDE_CS"; [ -f "$HOLD_IDS" ] && cat "$HOLD_IDS"; } > exclude.txt
+  if python3 "$RECEIPTS_PY" --out-dir "$W" > receipts.out; then
+    log "receipts: $(cat receipts.out)"
+    cp receipts-queued.json list-RQ.json; cp receipts-received.json list-RR.json
+    for SEG in paid free; do
+      runner "$SEG" RQ status-doc-received --wording queued --exclude-users exclude.txt || break
+      if grep -qx 'readonly STATUS_RECEIVED_COPY_APPROVED=1' "$GATE_SCRIPT"; then
+        runner "$SEG" RR status-doc-received --wording received --exclude-users exclude.txt || break
+      else
+        log "receipts $SEG: R1 send-locked (STATUS_RECEIVED_COPY_APPROVED=0): $(python3 -c 'import json,sys; print(sum(1 for u in json.load(open(sys.argv[1]))["users"] if u["paid"] == (sys.argv[2] == "paid")))' list-RR.json "$SEG") owe proof and wait for R1"
+      fi
+    done
+  else
+    log "receipts list failed: $(cat receipts.out): stop (fail closed)"; FAILED=1
+  fi
+fi
 cd "$BASE" || exit 1
 sqlite3 -readonly "$LEDGER" \
   "select distinct account_id from verify_messages where day='$DAY' and status in ('sent','attempted') and account_id is not null order by 1" \

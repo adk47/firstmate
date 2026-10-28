@@ -201,7 +201,10 @@ back to Prodigi – say so in the request you file.
 ## What Caroline can and can't do here (today)
 
 - **Can – read**: look an order up with `order_lookup` (by internal id, order number,
-  or Prodigi id) to read its status + shipping address.
+  or Prodigi id). Today it returns only the status and any hold (what a held order is
+  waiting on) for every order: the address, phone, tracking and items stay hidden until
+  Intercom Identity Verification is on. Never read, guess or confirm an address, phone
+  or tracking link; a person on the team confirms addresses.
 - **Can – edit (gated, owner only)**: correct an order's shipping recipient with
   `order_address_update` – name, phone, address, and (for Mexico/customs) the
   recipient **tax id** (RFC/CURP) via `tax_id`. The wrapper verifies the requester is

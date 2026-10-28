@@ -27,6 +27,14 @@ from typing import Any
 
 from . import VERSION
 
+MAX_UNKNOWN = 3
+
+
+class RawCreditsLockError(RuntimeError):
+    """The cross-process raw-credits lock cannot be taken; the admin GET is not made."""
+
+
+RAW_CREDITS_TTL_S = float(os.environ.get("CREDIT_DOC_VERIFY_RAW_CREDITS_TTL_S", str(6 * 3600)))
 DEFAULT_PATH = os.environ.get("CREDIT_DOC_VERIFY_STORE", "/var/lib/hydra-credit-verify/doc-verify.sqlite")
 
 SCHEMA = """
@@ -75,6 +83,17 @@ CREATE TABLE IF NOT EXISTS dv_llm_calls (
   latency_ms INTEGER
 );
 CREATE TABLE IF NOT EXISTS dv_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+-- Muso's stored raw credits per track, shared by every reader process (one admin GET per track per
+-- TTL instead of one per document): an account's documents usually name the same tracks.
+CREATE TABLE IF NOT EXISTS dv_raw_credits (track_id TEXT PRIMARY KEY, at TEXT NOT NULL, items_json TEXT NOT NULL);
+-- D2: a filing's candidate requests and claim keys as the last run saw them, UNTRUNCATED (dv_steps
+-- detail is capped at 20,000 chars; a 40-request filing overflowed it and broke selection).
+-- Claim keys of a filing the document does not name (fan-out cut, > FANOUT candidate requests):
+-- recorded once, no pair row, finished.
+CREATE TABLE IF NOT EXISTS dv_intake_unmatched (intake_id TEXT NOT NULL, version TEXT NOT NULL, at TEXT NOT NULL,
+  keys_json TEXT NOT NULL, PRIMARY KEY (intake_id, version));
+CREATE TABLE IF NOT EXISTS dv_intake_keys (intake_id TEXT NOT NULL, version TEXT NOT NULL, at TEXT NOT NULL,
+  candidates_json TEXT NOT NULL, keys_json TEXT NOT NULL, PRIMARY KEY (intake_id, version));
 """
 
 
@@ -92,7 +111,14 @@ class DocVerifyStore:
         self.db = sqlite3.connect(self.path, timeout=60, check_same_thread=False)
         if fresh:
             os.chmod(self.path, 0o600)
+        if self.path != ":memory:":
+            self.db.execute("PRAGMA journal_mode=WAL")      # parallel readers (run --workers) write concurrently
         self.db.executescript(SCHEMA)
+        # D2 (2026-10-27): outcomes of documents filed in proof_intake are keyed by intake_id too.
+        if "intake_id" not in {r[1] for r in self.db.execute("PRAGMA table_info(dv_outcomes)")}:
+            self.db.execute("ALTER TABLE dv_outcomes ADD COLUMN intake_id TEXT")
+            self.db.commit()
+        self.db.execute("CREATE INDEX IF NOT EXISTS dv_out_intake ON dv_outcomes(intake_id)")
         self.lock = threading.Lock()
 
     # -- state ---------------------------------------------------------------
@@ -117,14 +143,15 @@ class DocVerifyStore:
 
     def outcome(self, run_id: str, *, proof_id: str, request_id: str, role: str, user_id: int | None,
                 source_ref: str | None, h3_verdict: str | None, outcome: str, reason: str, need: str | None,
-                account_hold: bool, detail: dict[str, Any]) -> None:
+                account_hold: bool, detail: dict[str, Any], intake_id: str | None = None) -> None:
         with self.lock, self.db:
             self.db.execute(
                 "INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id, source_ref, h3_verdict,"
-                " outcome, reason, need, account_hold, detail_json, version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " outcome, reason, need, account_hold, detail_json, version, intake_id)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run_id, utcnow(), proof_id, request_id, role, user_id, source_ref, h3_verdict, outcome,
                  reason[:600], need, int(account_hold), json.dumps(detail, default=str, ensure_ascii=False)[:20_000],
-                 VERSION))
+                 VERSION, intake_id))
 
     def llm_call(self, row: dict[str, Any]) -> None:
         with self.lock, self.db:
@@ -142,11 +169,151 @@ class DocVerifyStore:
         return float(row[0] or 0)
 
     def done(self, proof_id: str, request_key: str) -> bool:
-        """True when this (proof, '<uuid>#<role>') already has an outcome under
-        the current VERSION."""
+        """True when this (proof, '<uuid>#<role>') has a decided outcome under the
+        current VERSION. An `unknown` (tooling) outcome is retried, up to
+        MAX_UNKNOWN runs; the last one then stands."""
         rid, _, role = request_key.partition("#")
-        return self.db.execute("SELECT 1 FROM dv_outcomes WHERE proof_id=? AND request_id=? AND role=? AND version=?"
-                               " LIMIT 1", (proof_id, rid, role, VERSION)).fetchone() is not None
+        rows = [r[0] for r in self.db.execute("SELECT outcome FROM dv_outcomes WHERE proof_id=? AND request_id=? "
+                                              "AND role=? AND version=?", (proof_id, rid, role, VERSION))]
+        return any(o != "unknown" for o in rows) or len(rows) >= MAX_UNKNOWN
+
+    def intake_finished_keys(self, intake_id: str) -> set[str]:
+        """Claim keys '<request_id>#<role>' of one filing that need no more runs: a decided
+        outcome (anything but `unknown`), or MAX_UNKNOWN unknown outcomes. Per claim, never
+        per document (QA #1417): one verified claim does not end a sibling's retries."""
+        done: set[str] = set(self.intake_unmatched(intake_id))
+        unknown: dict[str, int] = {}
+        runs: dict[str, bool] = {}            # run -> did it decide anything for this document?
+        for rid, role, outcome, run in self.db.execute(
+                "SELECT request_id, role, outcome, run_id FROM dv_outcomes WHERE intake_id=? AND version=?",
+                (intake_id, VERSION)):
+            key = f"{rid}#{role}"
+            runs[run] = runs.get(run, False) or outcome != "unknown"
+            if outcome != "unknown":
+                done.add(key)
+            else:
+                unknown[key] = unknown.get(key, 0) + 1
+        if sum(1 for decided in runs.values() if not decided) >= MAX_UNKNOWN:
+            # Per DOCUMENT (proof-loop lead 070): a document-level failure (H3 UNDETERMINED, an unreadable
+            # file) gave nothing but `unknown` in MAX_UNKNOWN runs - every claim is finished, so a
+            # 200-request account cannot re-read the document and its pairs again and again. Only keys
+            # ATTEMPTED at least once are finished: a candidate added later is read before it settles (QA #1448).
+            return done | set(unknown)
+        return done | {k for k, n in unknown.items() if n >= MAX_UNKNOWN}
+
+    def record_intake_unmatched(self, intake_id: str, keys: list[str]) -> None:
+        with self.lock, self.db:
+            have = self.intake_unmatched(intake_id)
+            self.db.execute("INSERT OR REPLACE INTO dv_intake_unmatched (intake_id, version, at, keys_json) "
+                            "VALUES (?,?,?,?)", (intake_id, VERSION, utcnow(), json.dumps(sorted(set(have) | set(keys)))))
+
+    def intake_unmatched(self, intake_id: str) -> list[str]:
+        row = self.db.execute("SELECT keys_json FROM dv_intake_unmatched WHERE intake_id=? AND version=?",
+                              (intake_id, VERSION)).fetchone()
+        try:
+            return list(json.loads(row[0])) if row else []
+        except (TypeError, ValueError):
+            return []
+
+    def record_intake_keys(self, intake_id: str, candidates: list[str], keys: list[str]) -> None:
+        with self.lock, self.db:
+            self.db.execute("INSERT OR REPLACE INTO dv_intake_keys (intake_id, version, at, candidates_json, keys_json) "
+                            "VALUES (?,?,?,?,?)", (intake_id, VERSION, utcnow(), json.dumps(sorted(candidates)),
+                                                   json.dumps(keys)))
+
+    def cached_raw_credits(self, track_id: str, fetch: Any, ttl_s: float = RAW_CREDITS_TTL_S,
+                           now: Any = None) -> list[dict[str, Any]]:
+        """`fetch(track_id)` through a cache shared by every reader process. A fetch that raises is
+        not cached (the next document asks again); only a list of items is stored. The items are
+        Muso's STORED capture either way - caching them changes no evidence class (a same-run
+        Spotify/Tidal read is D5b's fresh capture, never this)."""
+        import time as _t
+        t = _t.time() if now is None else now
+        hit = self._raw_credits_hit(track_id, t, ttl_s)
+        if hit is not None:
+            return hit
+        # A miss: take this track's cross-process lock, check again (another reader may have just
+        # fetched it), and only then fetch - one admin GET per track per TTL across all readers
+        # (QA #1440). The lock is a flock, released by the kernel if the process dies.
+        with self._track_lock(track_id):
+            hit = self._raw_credits_hit(track_id, t if now is not None else _t.time(), ttl_s)
+            if hit is not None:
+                return hit
+            return self._fetch_and_store(track_id, fetch, t)
+
+    def _raw_credits_hit(self, track_id: str, t: float, ttl_s: float) -> list[dict[str, Any]] | None:
+        row = self.db.execute("SELECT at, items_json FROM dv_raw_credits WHERE track_id=?", (track_id,)).fetchone()
+        if row:
+            try:
+                if t - float(row[0]) < ttl_s:
+                    return json.loads(row[1])
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    def _track_lock(self, track_id: str):
+        """An exclusive flock on one of 64 bucket files next to the store (bucket = sha256 of the
+        track id). FAILS CLOSED (QA #1440): a lock that cannot be taken raises RawCreditsLockError and
+        no fetch is made - the claim's xc_dsp records an error (`unknown`, retried), never an unlocked GET."""
+        import contextlib
+        import fcntl
+        import hashlib
+
+        @contextlib.contextmanager
+        def held():
+            d = os.path.join(os.path.dirname(os.path.abspath(self.path)), "raw-credits-locks")
+            try:
+                os.makedirs(d, mode=0o700, exist_ok=True)
+                fd = os.open(os.path.join(d, f"{int(hashlib.sha256(track_id.encode()).hexdigest()[:4], 16) % 64}.lock"),
+                             os.O_RDWR | os.O_CREAT, 0o600)
+            except OSError as exc:
+                raise RawCreditsLockError(f"raw-credits lock unusable under {d}: {type(exc).__name__}") from exc
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+        return held()
+
+    def _fetch_and_store(self, track_id: str, fetch: Any, t: float) -> list[dict[str, Any]]:
+        items = fetch(track_id)
+        if isinstance(items, list):
+            with self.lock, self.db:
+                self.db.execute("INSERT OR REPLACE INTO dv_raw_credits (track_id, at, items_json) VALUES (?,?,?)",
+                                (track_id, f"{t:.3f}", json.dumps(items, default=str)))
+        return items
+
+    def raw_credits_read_at(self, track_id: str) -> str | None:
+        """When the admin GET that produced this track's cached raw credits ran (UTC), or None."""
+        row = self.db.execute("SELECT at FROM dv_raw_credits WHERE track_id=?", (track_id,)).fetchone()
+        try:
+            return datetime.fromtimestamp(float(row[0]), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if row else None
+        except (TypeError, ValueError):
+            return None
+
+    def intake_keys_recorded(self, intake_id: str) -> dict[str, Any] | None:
+        """The last run's {candidates, keys} for a filing (None before its first run, or when
+        only an unreadable record exists: the filing is then simply read again). Never raises on
+        a stored value - selection must not stop on one filing."""
+        row = self.db.execute("SELECT candidates_json, keys_json FROM dv_intake_keys WHERE intake_id=? AND version=?",
+                              (intake_id, VERSION)).fetchone()
+        try:
+            if row:
+                return {"candidates": json.loads(row[0]), "keys": json.loads(row[1])}
+            old = self.db.execute("SELECT detail_json FROM dv_steps WHERE request_id=? AND step='intake_keys' "
+                                  "AND version=? ORDER BY id DESC LIMIT 1", (f"intake:{intake_id}", VERSION)).fetchone()
+            return json.loads(old[0]) if old else None
+        except (ValueError, TypeError):
+            return None
+
+    def intake_settled(self, intake_id: str, candidates: list[str]) -> bool:
+        """No Trino needed: the last run saw exactly these candidate requests and every
+        claim key it found open is finished."""
+        rec = self.intake_keys_recorded(intake_id)
+        if rec is None or sorted(rec.get("candidates") or []) != sorted(candidates):
+            return False
+        return set(rec.get("keys") or []) <= self.intake_finished_keys(intake_id)
 
     LATEST = ("SELECT o.* FROM dv_outcomes o JOIN (SELECT proof_id, request_id, role, MAX(id) id FROM dv_outcomes "
               "WHERE version=? GROUP BY proof_id, request_id, role) l USING(id)")

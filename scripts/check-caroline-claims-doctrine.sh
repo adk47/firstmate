@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Doctrine eval for Caroline's ten most common claim / credit / merge / channel questions.
+# Doctrine eval for Caroline's most common claim / credit / merge / channel questions (Q1-Q11).
 #
 # Why: the 2026-10-26 merge audit (profile-merge-ops-m1) found 27 of 30 merge asks told
 # "within 5 business days" (a date nobody kept: 0 merge tickets closed in 7 days), users
@@ -41,7 +41,12 @@ for f in "$SOUL" "$AGENTS" "$TOOLS" "$CI" "$FAQ" "$CAP" "$PF" "$AR" "$CR" "$CV" 
 done
 
 fail=0
-_normalized() { tr '\n' ' ' < "$1" | tr -s '[:space:]' ' '; }
+# Lines carrying the barred-phrases marker (the one doctrine line that NAMES the phrases
+# Caroline must never say) are dropped before matching, so the rule can quote what it bans.
+# At most one such line per file is allowed (checked below), so the marker cannot be used
+# to smuggle a violation past the forbid list.
+BARRED_MARKER='<!-- barred-phrases -->'
+_normalized() { grep -vF -- "$BARRED_MARKER" "$1" | tr '\n' ' ' | tr -s '[:space:]' ' '; }
 _normalize_pat() { printf '%s' "$1" | tr '\n' ' ' | tr -s '[:space:]' ' '; }
 
 # The text is captured into a variable FIRST and grep reads it from a here-string, never
@@ -73,6 +78,20 @@ require() {
 forbid() {
   local file="$1" label="$2" pat="$3" rc=0
   _match i "$file" "$pat" || rc=$?
+  _forbid_report "$file" "$label" "$pat" "$rc"
+}
+
+# forbid_in <file> <already-normalized text> <label> <pattern>: the global loop normalizes
+# each file once and checks every barred phrase against that text (same here-string rule).
+forbid_in() {
+  local file="$1" text="$2" label="$3" pat rc=0
+  pat="$(_normalize_pat "$4")"
+  grep -qiF -- "$pat" <<<"$text" || rc=$?
+  _forbid_report "$file" "$label" "$4" "$rc"
+}
+
+_forbid_report() {
+  local file="$1" label="$2" pat="$3" rc="$4"
   if [ "$rc" -ne 1 ]; then
     echo "FAIL: ${file#"$ROOT"/}: $label" >&2
     echo "      must NO LONGER contain: \"$pat\"" >&2
@@ -164,11 +183,43 @@ for f in "$TF_SUPPORT" "$TF_INTERCOM"; do
   require "$f" "profile-claim outcome is an app notification" 'if (actionType === "profile-claim") return "app_notification";'
 done
 
+# --- Q11 "I sent my screenshots, did you get them?" (captain 2026-10-27 02:51Z) -------
+# 10-27 paid threads were told "I've passed your screenshots ... to our team" / "added to the
+# review already underway" with no proof_intake row behind it. A document is "received and in
+# the review queue" only when a tool returned may_say_document_passed_on: true (#1402/#1415).
+require "$CV" "Q11 document received only on a proof_intake row" "ONLY when a tool result in this turn returned \`may_say_document_passed_on: true\`"
+# The marker line is excluded from normal matching, so check it raw: exactly one line that
+# carries the marker AND names the barred phrases.
+if [ "$(grep -F -- "$BARRED_MARKER" "$CV" | grep -cF -- '"nothing else is needed", "no need to resend", "passed to our team"' || true)" != "1" ]; then
+  echo "FAIL: ${CV#"$ROOT"/}: Q11 the barred phrases must be named on the one barred-phrases marker line" >&2
+  fail=1
+fi
+require "$AGENTS" "Q11 pointer in the always-loaded contract" "\`may_say_document_passed_on: true\`"
+forbid "$CAP" "Q11 no 'we'll check it, usually within a few days'" "usually within a few days"
+forbid "$CI" "Q11 awaiting review is not 'nothing you need to do'" "nothing you need to do right now"
+forbid "$CV" "Q11 awaiting review is not 'nothing you need to do'" "there's nothing you need to do right now"
+forbid "$CV" "Q11 no team-handoff claim on proof" "say you've **passed it to the team for review**"
+
 # --- global: no human-review date promise anywhere in the support workspace ---------
 while IFS= read -r -d '' f; do
-  forbid "$f" "no 5-business-day merge/credit promise" "they'll follow up within 5 business days"
-  forbid "$f" "no 5-business-day merge/credit promise" "You'll hear back within 5 business days"
-  forbid "$f" "no 'claims need to be checked' to claimed users" "The claims need to be checked before anything can be combined"
+  t="$(_normalized "$f")" || { echo "FAIL: ${f#"$ROOT"/}: unreadable" >&2; fail=1; continue; }
+  n="$(grep -cF -- "$BARRED_MARKER" "$f" || true)"
+  if [ "${n:-0}" -gt 1 ]; then
+    echo "FAIL: ${f#"$ROOT"/}: more than one barred-phrases marker line ($n); only the one rule line may carry it" >&2
+    fail=1
+  fi
+  forbid_in "$f" "$t" "captain 02:51Z barred phrase" "nothing else is needed"
+  forbid_in "$f" "$t" "captain 02:51Z barred phrase" "no need to resend"
+  forbid_in "$f" "$t" "captain 02:51Z barred phrase" "passed to our team"
+  forbid_in "$f" "$t" "captain 02:51Z barred phrase" "passed it to our team"
+  forbid_in "$f" "$t" "captain 02:51Z barred phrase" "passed it to the team"
+  forbid_in "$f" "$t" "captain 02:51Z barred phrase" "passed your screenshots"
+  forbid_in "$f" "$t" "captain 02:51Z barred phrase" "review underway"
+  forbid_in "$f" "$t" "captain 02:51Z barred phrase" "review already underway"
+  forbid_in "$f" "$t" "captain 02:51Z barred phrase" "nothing more they need to send"
+  forbid_in "$f" "$t" "no 5-business-day merge/credit promise" "they'll follow up within 5 business days"
+  forbid_in "$f" "$t" "no 5-business-day merge/credit promise" "You'll hear back within 5 business days"
+  forbid_in "$f" "$t" "no 'claims need to be checked' to claimed users" "The claims need to be checked before anything can be combined"
 done < <(find "$WS" -name '*.md' -print0)
 
 if [ "$fail" -ne 0 ]; then
@@ -176,4 +227,4 @@ if [ "$fail" -ne 0 ]; then
   echo "Caroline claims/credits/merges doctrine drifted. See scripts/check-caroline-claims-doctrine.sh header." >&2
   exit 1
 fi
-echo "OK: Caroline claims/credits/merges doctrine (10 questions + create_ticket timing) intact."
+echo "OK: Caroline claims/credits/merges doctrine (11 questions + create_ticket timing) intact."

@@ -98,7 +98,18 @@ STUBS = {
                 sys.exit(4)
     """,
     "health_check.py": "print('{\"verdict\": \"healthy\"}')",
+    "receipts.py": """
+        import json, os, sys
+        if os.environ.get("FAIL_RECEIPTS"):
+            print('{"error": "proof_intake unreadable"}'); sys.exit(2)
+        out = sys.argv[sys.argv.index("--out-dir") + 1]
+        u = lambda i, paid: {"user_id": str(i), "paid": paid, "skip": None, "request_ids": [f"q{i}"], "first_received": "x"}
+        json.dump({"generated_at": "x", "users": [u(11, True), u(12, False)]}, open(out + "/receipts-queued.json", "w"))
+        json.dump({"generated_at": "x", "users": [u(21, True)]}, open(out + "/receipts-received.json", "w"))
+        print('{"counts": {"list_queued_paid": 1}}')
+    """,
 }
+RECEIPT_LISTS = ("list-RQ.json", "list-RR.json")
 RUNNER = """
     import os, sys
     with open(os.environ["CALLS"], "a") as fh:
@@ -125,6 +136,8 @@ class DailyShTest(unittest.TestCase):
         self.calls = os.path.join(self.t, "calls.txt"); open(self.calls, "w").write("")
         self.hold = os.path.join(self.t, "hold.txt"); open(self.hold, "w").write("4242\n")
         self.state = os.path.join(self.t, "state")
+        self.gate_script = os.path.join(self.t, "gate.sh")
+        open(self.gate_script, "w").write("readonly STATUS_RECEIVED_COPY_APPROVED=0\n")
 
     def tearDown(self):
         shutil.rmtree(self.t, ignore_errors=True)
@@ -133,7 +146,8 @@ class DailyShTest(unittest.TestCase):
         env = {"PATH": os.environ["PATH"], "BIN": self.bin, "RUNNER": self.runner, "LEDGER": self.ledger,
                "MAIN_ENV": self.env_file, "KILL_SWITCH": os.path.join(self.t, "no-kill"), "STATE_ROOT": self.state,
                "EXCLUDE_CS": self.excl, "HOLD_IDS": self.hold,
-               "CORE_NOTICE": os.path.join(self.bin, "core_notice.py"), "CALLS": self.calls, "MODE": "apply", "SEGMENTS": "paid", "EMAIL_ROUTE": "1"}
+               "CORE_NOTICE": os.path.join(self.bin, "core_notice.py"),
+               "RECEIPTS_PY": os.path.join(self.bin, "receipts.py"), "GATE_SCRIPT": self.gate_script, "CALLS": self.calls, "MODE": "apply", "SEGMENTS": "paid", "EMAIL_ROUTE": "1"}
         env.update(extra)
         p = subprocess.run(["bash", DAILY], env=env, capture_output=True, text=True, timeout=120)
         return p, open(self.calls).read().splitlines()
@@ -143,12 +157,59 @@ class DailyShTest(unittest.TestCase):
         return os.path.join(self.state, days[0], "paid")
 
     def campaigns(self, calls, mode="apply"):
+        """Campaigns of the segment pass (the receipts stage has its own helper, receipt_calls)."""
         out = []
         for c in calls:
             a = c.split()
+            if "--list" in a and a[a.index("--list") + 1] in RECEIPT_LISTS:
+                continue
             if "--mode" in a and a[a.index("--mode") + 1] == mode:
                 out.append(a[a.index("--campaign") + 1])
         return out
+
+    def receipt_calls(self, calls, mode="apply"):
+        out = []
+        for c in calls:
+            a = c.split()
+            if "--mode" in a and a[a.index("--mode") + 1] == mode and "--list" in a \
+                    and a[a.index("--list") + 1] in RECEIPT_LISTS:
+                out.append((a[a.index("--list") + 1], a[a.index("--segment") + 1], a[a.index("--wording") + 1],
+                            a[a.index("--exclude-users") + 1]))
+        return out
+
+    def test_receipts_send_the_approved_queued_line_and_wait_on_the_r1_lock(self):
+        # proof loop ACK: proof_intake -> queued receipts for users who owe nothing else, paid then free;
+        # R1 (owes proof) is send-locked in the gate: never run, the waiting count is logged.
+        p, calls = self.run_daily()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        got = self.receipt_calls(calls)
+        self.assertEqual([(l, s, w) for l, s, w, _ in got],
+                         [("list-RQ.json", "paid", "queued"), ("list-RQ.json", "free", "queued")])
+        self.assertTrue(all(x.endswith("exclude.txt") for *_, x in got))
+        self.assertIn("receipts paid: R1 send-locked (STATUS_RECEIVED_COPY_APPROVED=0): 1 owe proof", p.stdout)
+        day = sorted(d for d in os.listdir(self.state) if d[:2] == "20")[0]
+        excl = open(os.path.join(self.state, day, "receipts", "exclude.txt")).read().split()
+        self.assertEqual(excl, ["0", "4242"])   # the cs exclusion list + the hold ids
+
+    def test_receipts_r1_runs_once_the_gate_lock_is_open(self):
+        open(self.gate_script, "w").write("readonly STATUS_RECEIVED_COPY_APPROVED=1\n")
+        p, calls = self.run_daily()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn(("list-RR.json", "paid", "received"), [(l, s, w) for l, s, w, _ in self.receipt_calls(calls)])
+
+    def test_receipts_fail_closed_and_are_skipped_when_off_or_after_a_stop(self):
+        p, calls = self.run_daily(FAIL_RECEIPTS="1")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("receipts list failed", p.stdout)
+        self.assertIn("STOPPED", p.stdout)
+        self.assertEqual(self.receipt_calls(calls), [])
+        open(self.calls, "w").write("")
+        p, calls = self.run_daily(RECEIPTS="0")
+        self.assertEqual((p.returncode, self.receipt_calls(calls)), (0, []))
+        open(self.calls, "w").write("")
+        p, calls = self.run_daily(FAIL_CAMPAIGN="status-team-review")   # the segment pass stopped first
+        self.assertEqual(p.returncode, 1)
+        self.assertEqual(self.receipt_calls(calls), [])
 
     def test_core_notice_within_7d_takes_a_user_out_before_classify(self):
         # Fable sender map 2026-10-27 item 2: core told user 2 something lately -> never classified, never listed.

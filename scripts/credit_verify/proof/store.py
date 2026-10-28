@@ -69,6 +69,25 @@ CREATE TABLE IF NOT EXISTS fingerprints (
   created_at TEXT NOT NULL,
   PRIMARY KEY (proof_id, contact_h, track_key)
 );
+CREATE TABLE IF NOT EXISTS proof_intake (
+  intake_id TEXT PRIMARY KEY,          -- deterministic: <user_id>:<sha256 prefix>, so a re-file is the same row
+  user_id INTEGER NOT NULL,            -- the Muso account, matched by a VERIFIED handle, never a name
+  subject TEXT NOT NULL,               -- credit | claim (what the document is meant to prove)
+  candidate_request_ids_json TEXT NOT NULL DEFAULT '[]',   -- ['<credit request uuid>', ...]
+  conversation_id TEXT NOT NULL,       -- the Intercom conversation it arrived in
+  source TEXT NOT NULL,                -- intercom | email
+  file_sha256 TEXT NOT NULL,           -- the document's identity (its proof id)
+  file_path TEXT,                      -- where the bytes are on this host, NULL when only Intercom has them
+  mime TEXT, bytes INTEGER,
+  received_at TEXT NOT NULL,           -- when the customer sent it (UTC)
+  filed_by TEXT NOT NULL,              -- the writer: never a judge
+  matched_by TEXT,                     -- professional_id | proof_on_file (how the account was verified)
+  contact_h TEXT,                      -- hash of the Intercom contact id; no contact id, email or name is stored
+  detail_json TEXT,                    -- candidate request status/basis, per-file provenance
+  UNIQUE (user_id, file_sha256)        -- idempotent on (user, document): a re-file is not a second row
+);
+CREATE INDEX IF NOT EXISTS proof_intake_user ON proof_intake(user_id, conversation_id);
+CREATE INDEX IF NOT EXISTS proof_intake_sha ON proof_intake(file_sha256);
 CREATE TABLE IF NOT EXISTS verdicts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   proof_id TEXT NOT NULL,
@@ -120,7 +139,33 @@ class ProofStore:
             if column not in have:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
         self.db.executescript(INDEXES)
+        # `filed_documents` was a draft intake table (d2); `proof_intake` is the contract
+        # (proof-loop lead 2026-10-27). Dropped only while EMPTY, so no filing can be lost.
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='filed_documents'").fetchone() \
+                and self.db.execute("SELECT COUNT(*) FROM filed_documents").fetchone()[0] == 0:
+            self.db.execute("DROP TABLE filed_documents")
         self.db.commit()
+
+    readonly = False
+
+    @classmethod
+    def for_run(cls, path: str | None, apply: bool) -> "ProofStore":
+        """The store a `file` run uses. --apply opens it for writing (schema + migrations).
+        A dry run opens it READ-ONLY (mode=ro: no schema, no index, no migration, no drop) so a
+        count-only run cannot change the production database (QA #1417); a store that does not
+        exist yet is replaced by an in-memory one, so nothing is created on disk either."""
+        if apply:
+            return cls(path)
+        p = path or DEFAULT_PATH
+        if not os.path.exists(p):
+            return cls(":memory:")
+        self = cls.__new__(cls)
+        self.path = p
+        self.db = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=30, check_same_thread=False)
+        self.db.row_factory = sqlite3.Row
+        self.lock = threading.RLock()
+        self.readonly = True
+        return self
 
     def close(self) -> None:
         self.db.close()
@@ -166,6 +211,90 @@ class ProofStore:
                                 (fp.proof_id, FORENSICS_VERSION, fp.contact_h, fp.track_key or "", verdict,
                                  json.dumps(reasons), json.dumps(context), now, request_id))
             self.db.commit()
+
+    def known_proofs(self) -> set[str]:
+        """Every proof id the store already holds, from either intake path (H3 analysis or
+        this intake): a re-filed document is a duplicate, never a second analysis."""
+        with self.lock:
+            rows = self.db.execute("SELECT proof_id FROM proofs").fetchall()
+            intake = self.db.execute("SELECT file_sha256 FROM proof_intake").fetchall()
+        return {r[0] for r in rows} | {r[0] for r in intake}
+
+    def already_filed(self, user_id: int, file_sha256: str) -> bool:
+        """The intake's own idempotency key: (user, document)."""
+        with self.lock:
+            try:
+                return self.db.execute("SELECT 1 FROM proof_intake WHERE user_id=? AND file_sha256=?",
+                                       (int(user_id), file_sha256)).fetchone() is not None
+            except sqlite3.OperationalError:
+                if self.readonly:
+                    return False             # a read-only dry run over a store without the table yet
+                raise
+
+    def missing_candidates(self, user_id: int, file_sha256: str, request_ids: list[str]) -> list[str]:
+        """The request ids not yet candidates on the (user, document) filing."""
+        with self.lock:
+            try:
+                row = self.db.execute("SELECT candidate_request_ids_json FROM proof_intake WHERE user_id=? "
+                                      "AND file_sha256=?", (int(user_id), file_sha256)).fetchone()
+            except sqlite3.OperationalError:
+                if self.readonly:
+                    return []
+                raise
+        if row is None:
+            return []
+        try:
+            have = {str(x) for x in json.loads(row[0] or "[]")}
+        except ValueError:
+            have = set()
+        return [str(r) for r in dict.fromkeys(request_ids) if str(r) not in have]
+
+    def add_candidates(self, user_id: int, file_sha256: str, request_ids: list[str]) -> bool:
+        """Merge newly open candidate requests into an existing filing (union, never a
+        removal: a request that closed is skipped by the reader, not erased here). True
+        when the row changed."""
+        if self.readonly:
+            raise RuntimeError("read-only proof store: add_candidates needs --apply")
+        new = self.missing_candidates(user_id, file_sha256, request_ids)
+        if not new:
+            return False
+        with self.lock:
+            row = self.db.execute("SELECT candidate_request_ids_json FROM proof_intake WHERE user_id=? AND file_sha256=?",
+                                  (int(user_id), file_sha256)).fetchone()
+            try:
+                have = [str(x) for x in json.loads(row[0] or "[]")]
+            except ValueError:
+                have = []
+            self.db.execute("UPDATE proof_intake SET candidate_request_ids_json=? WHERE user_id=? AND file_sha256=?",
+                            (json.dumps(have + new), int(user_id), file_sha256))
+            self.db.commit()
+        return True
+
+    def file_document(self, *, file_sha256: str, user_id: int, conversation_id: str, subject: str = "credit",
+                      candidate_request_ids: list[str] | None = None, source: str = "intercom",
+                      file_path: str | None = None, received_at: str = "", filed_by: str = "credit-proof.py file",
+                      matched_by: str = "", contact_h: str = "", mime: str | None = None, nbytes: int = 0,
+                      detail: Any = None) -> str | None:
+        """Record a document the customer sent: the account, the subject, the candidate credit
+        requests, the conversation it arrived in and its sha256 - and NOTHING else. No
+        forensics row, no fingerprint, no verdict: judgement is H3's and doc-verify's. The
+        contract is the proof-loop lead's `proof_intake` row (one per file, idempotent on
+        (user_id, sha256), writers never judge). Returns the intake id, or None when the row
+        already existed."""
+        if self.readonly:
+            raise RuntimeError("read-only proof store: file_document needs --apply")
+        intake_id = f"{int(user_id)}:{file_sha256[:32]}"
+        with self.lock:
+            cur = self.db.execute(
+                "INSERT OR IGNORE INTO proof_intake (intake_id, user_id, subject, candidate_request_ids_json,"
+                " conversation_id, source, file_sha256, file_path, mime, bytes, received_at, filed_by,"
+                " matched_by, contact_h, detail_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (intake_id, int(user_id), subject,
+                 json.dumps([str(r) for r in (candidate_request_ids or [])]), str(conversation_id), source,
+                 file_sha256, file_path, mime, int(nbytes or 0), received_at or utcnow(), filed_by,
+                 matched_by, contact_h or "", json.dumps(detail, default=str)))
+            self.db.commit()
+            return intake_id if cur.rowcount > 0 else None
 
     def _prior(self) -> list[Fingerprint]:
         with self.lock:

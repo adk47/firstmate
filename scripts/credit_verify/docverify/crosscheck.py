@@ -38,12 +38,13 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import datetime, timedelta, timezone
 import urllib.error
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
-from credit_review.evidence import CONFIRMED, CONTRADICTED, OTHERS_ONLY, classify_roles
+from credit_review.evidence import CONFIRMED, CONTRADICTED, classify_roles
 from credit_review.judge import domain_matches_name, registrable_domain
 from credit_review.roles import ONE_PERSON_FAMILIES, family_of, fold, names_match
 
@@ -99,12 +100,14 @@ class Check:
 class Net:
     """The network seam (tests pass a fake)."""
 
-    def __init__(self, get: Callable[..., tuple[bytes, str]] | None = None, resolver: Any = None):
+    def __init__(self, get: Callable[..., tuple[bytes, str]] | None = None, resolver: Any = None,
+                 mb_pacer: Any = None):
         if get is None:
             from credit_trust.websearch import http_get
             get = http_get
         self._get = get
         self._resolver = resolver
+        self._mb_pacer = mb_pacer        # pace.Pacer: 1 req/s across every reader process on the host
 
     def json(self, url: str) -> Any:
         body, _ = self._get(url, accept="application/json")
@@ -116,6 +119,8 @@ class Net:
         from credit_trust.websearch import _MB_LAST, _MB_LOCK, MB_MIN_INTERVAL_S
         url = f"https://musicbrainz.org/ws/2/{path}?" + urllib.parse.urlencode({**params, "fmt": "json"})
         for attempt in range(3):
+            if self._mb_pacer is not None:
+                self._mb_pacer.wait()
             with _MB_LOCK:
                 wait = MB_MIN_INTERVAL_S - (time.monotonic() - _MB_LAST[0])
                 if _MB_LAST[0] and wait > 0:
@@ -134,6 +139,21 @@ class Net:
         body, ctype = self._get(url, accept="text/html")
         raw = body.decode("utf-8", "replace")
         return html_to_text(raw) if "html" in (ctype or "html") else raw
+
+    def txt(self, name: str) -> list[str] | None:
+        """TXT records of `name` ([] when none), or None when they could not be read."""
+        try:
+            import dns.exception
+            import dns.resolver
+        except ImportError:
+            return None
+        res = self._resolver or dns.resolver.Resolver()
+        try:
+            return [b"".join(r.strings).decode("utf-8", "replace") for r in res.resolve(name, "TXT", lifetime=8)]
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            return []
+        except (dns.exception.DNSException, OSError):
+            return None
 
     def mx(self, domain: str) -> str:
         """'mx' | 'no_mx' (domain exists, no MX) | 'nxdomain' | 'error'."""
@@ -172,18 +192,85 @@ def name_on_page(name: str, text: str) -> bool:
 
 
 # -- xc_dsp -------------------------------------------------------------------
-def dsp(raw_credits: list[dict[str, Any]] | None, role: str, names: list[str], err: str | None = None) -> Check:
+LIVE_DSPS = ("spotify", "tidal")
+FRESH_MAX_AGE_DAYS = 30
+
+
+def _ts(v: Any) -> datetime | None:
+    try:
+        t = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def live_anchor(raw_credits: list[dict[str, Any]], family: str, names: list[str], fresh_since: str | None,
+                now: datetime | None = None) -> dict[str, bool]:
+    """{spotify, tidal}: does each DSP credit the claimant in this role family on a capture
+    taken at or after `fresh_since` (requested by this run) and within 30 days? The APPROVE
+    tray needs BOTH (proof-loop lead §1 DECIDE); stored, MLC or Jaxsta rows never count."""
+    now = now or datetime.now(timezone.utc)
+    since = _ts(fresh_since) if fresh_since else None
+    out = {}
+    for dsp_name in LIVE_DSPS:
+        out[dsp_name] = bool(since) and any(
+            str((c.get("profile") or {}).get("source") or "").lower() == dsp_name
+            and family_of(str(c.get("credit") or "")) == family
+            and (_ts(c.get("updatedAt")) or since - timedelta(days=1)) >= since
+            and now - (_ts(c.get("updatedAt")) or now) <= timedelta(days=FRESH_MAX_AGE_DAYS)
+            and any(names_match(str((c.get("profile") or {}).get("name") or ""), n) for n in names if n)
+            for c in raw_credits)
+    return out
+
+
+def live_contradiction(raw_credits: list[dict[str, Any]], family: str, names: list[str],
+                       fresh_since: str | None, now: datetime | None = None) -> tuple[bool, list[str]]:
+    """(contradicts, why-not). Fable [key=doc-verify-go-live] Q3, 2026-10-27: a credit is
+    contradicted only on a fresh capture of BOTH Spotify and Tidal requested by this run
+    (rows captured at or after `fresh_since`, and within 30 days), where each DSP credits
+    exactly one other person, the same one, in this one-person role and not the claimant.
+    Jaxsta, MLC or MusicBrainz alone never contradict. No requested capture (fresh_since
+    None) means it cannot be shown: UNKNOWN never holds anyone."""
+    now = now or datetime.now(timezone.utc)
+    why: list[str] = []
+    since = _ts(fresh_since) if fresh_since else None
+    if since is None:
+        why.append("no fresh Spotify+Tidal capture was requested by this run")
+    others: dict[str, set[str]] = {}
+    for dsp_name in LIVE_DSPS:
+        rows = [c for c in raw_credits if str((c.get("profile") or {}).get("source") or "").lower() == dsp_name
+                and family_of(str(c.get("credit") or "")) == family]
+        fresh = [c for c in rows if since and (_ts(c.get("updatedAt")) or since - timedelta(days=1)) >= since
+                 and now - (_ts(c.get("updatedAt")) or now) <= timedelta(days=FRESH_MAX_AGE_DAYS)]
+        if since and not fresh:
+            why.append(f"no fresh {dsp_name} capture for this role")
+        if any(any(names_match(str((c.get("profile") or {}).get("name") or ""), n) for n in names if n)
+               for c in (fresh or rows)):
+            why.append(f"{dsp_name} credits the claimant")
+        others[dsp_name] = {fold(str((c.get("profile") or {}).get("name") or "")) for c in (fresh or rows)} - {""}
+    sp, ti = others["spotify"], others["tidal"]
+    if len(sp) != 1 or len(ti) != 1 or sp != ti:
+        why.append(f"not exactly one other person on both DSPs (spotify {len(sp)}, tidal {len(ti)})")
+    return (not why), why
+
+
+def dsp(raw_credits: list[dict[str, Any]] | None, role: str, names: list[str], err: str | None = None,
+        fresh_since: str | None = None) -> Check:
     if raw_credits is None:
         return Check("xc_dsp", ERROR, {"error": err or "raw credits unavailable"})
     ev = classify_roles([role], raw_credits, names, set())[0]
     detail = {"family": ev.family, "status": ev.status, "for_claimant": ev.trusted_for_profile[:5],
               "for_others": ev.trusted_for_others[:5], "capture": "muso catalog raw credits (spotify/tidal/mlc/jaxsta)",
-              "captured_at": max((str(c.get("updatedAt") or "") for c in raw_credits), default=None) or None}
+              "captured_at": max((str(c.get("updatedAt") or "") for c in raw_credits), default=None) or None,
+              "fresh_since": fresh_since,
+              "fresh_anchor": live_anchor(raw_credits, ev.family, names, fresh_since)}
     if ev.status == CONFIRMED:
         return Check("xc_dsp", POSITIVE, detail)
     if ev.status == CONTRADICTED:
-        return Check("xc_dsp", CONTRADICTS, detail)
-    if ev.status == OTHERS_ONLY:
+        ok, why = live_contradiction(raw_credits, ev.family, names, fresh_since)
+        if ok:
+            return Check("xc_dsp", CONTRADICTS, detail)
+        detail.update(note="possible conflict, not a contradiction: " + "; ".join(why), dsp_conflict=True)
         return Check("xc_dsp", UNKNOWN, detail)
     return Check("xc_dsp", UNKNOWN, detail)
 
@@ -296,6 +383,32 @@ def official_domains(net: Net, issuer: str | None) -> tuple[list[str], str]:
 SENDER_MIN_CONFIDENCE = 0.6
 
 
+_TLDS: frozenset[str] | None = None
+_LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+
+
+def iana_tlds() -> frozenset[str]:
+    """The IANA root-zone TLDs (vendored snapshot iana_tlds.txt; data.iana.org/TLD/tlds-alpha-by-domain.txt)."""
+    global _TLDS
+    if _TLDS is None:
+        import os as _os
+        path = _os.path.join(_os.path.dirname(__file__), "iana_tlds.txt")
+        with open(path, encoding="ascii") as fh:
+            _TLDS = frozenset(ln.strip().lower() for ln in fh if ln.strip() and not ln.startswith("#"))
+    return _TLDS
+
+
+def readable_domain(dom: str) -> str | None:
+    """None when `dom` is a syntactically valid host name under a real top-level domain, else why not.
+    An OCR misread ('michaelosbome.ora' for michaelosborne.org) usually breaks the TLD (proof-loop lead 073)."""
+    labels = (dom or "").lower().strip(".").split(".")
+    if len(labels) < 2 or not all(_LABEL.match(x) for x in labels):
+        return f"'{dom}' is not a valid domain name"
+    if labels[-1] not in iana_tlds():
+        return f"'.{labels[-1]}' is not a top-level domain (likely a misread address)"
+    return None
+
+
 def domain_check(net: Net, sender_domain: str | None, issuer: str | None, official: list[str], how: str,
                  confidence: float = 1.0) -> Check:
     if not sender_domain:
@@ -303,6 +416,11 @@ def domain_check(net: Net, sender_domain: str | None, issuer: str | None, offici
     dom = registrable_domain(sender_domain)
     detail: dict[str, Any] = {"sender_domain": dom, "issuer": issuer, "official": official, "official_from": how,
                               "confidence": confidence}
+    bad = readable_domain(sender_domain.strip().lower()) or readable_domain(dom)   # the raw read, then the registrable
+    if bad:
+        # UNREADABLE, not fabricated: a non-existent TLD is a reading error, so no DNS lookup is evidence here.
+        detail.update(note=f"sender address unreadable: {bad}", unreadable=True)
+        return Check("xc_domain", WEAK, detail)
     if not confidence >= SENDER_MIN_CONFIDENCE:          # NaN fails this too
         detail["note"] = (f"sender read with confidence {confidence:.2f} (< {SENDER_MIN_CONFIDENCE}): "
                           "not evidence either way")

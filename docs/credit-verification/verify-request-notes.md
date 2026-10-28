@@ -467,6 +467,14 @@ This asks the claimant of a pending profile claim in band B or C to add the clai
 - **`--reminders`** sends the due day-7 reminders. If the claim was decided, deleted, changed owner, had its code found or is no longer in band B/C on today's list (reclassified to A or D), the reminder is closed in the ledger and never sent. If the claim is not on today's list, the reminder waits. A 2xx conversation read with no id or no `conversation_parts` list is a failed reply check (exit 4, nothing sent), never "no reply".
 - **Audience routing:** a list row with `"audience": "status"` never gets the proof ask (it gets the claim status note below).
 
+## Receipts from the proof intake (proof loop ACK; `status-doc-received --copy queued|received`)
+
+- **Trigger:** a `proof_intake` row (b1's filer, one per user and document, in the stage-2 proof store), not the Intercom thread heuristic. `scripts/credit_review/receipts.py` (read-only) names the intake's candidate credit requests that are still pending and splits the users:
+  - users who owe nothing else go on `receipts-queued.json` and get the approved queued line;
+  - users who still owe proof (any `user_verification_needed` row) go on `receipts-received.json` and get card **R1**. R1 is the queued line without "no need to send anything else" (`--copy received`, `docrecvr`). It is **send-locked** by `STATUS_RECEIVED_COPY_APPROVED=0` until the captain's yes.
+- **Cron:** `scripts/paid-status/daily.sh` (node-8, 00:30Z / 15:00Z) runs the receipts stage after the segment pass, paid then free, with the segments' exclusions. R1 runs only when the gate itself says `STATUS_RECEIVED_COPY_APPROVED=1`; until then the run logs how many users wait.
+- **Runner guard:** `credit-review.py uvn-status --wording received` halts a real run before any gate call while the lock is 0. A refusal of a status note would otherwise hold and count against the user. Each note still passes the gate's ledger (one per user, ever), the 7-day core-notice gate and the one-message-per-user-per-day cap.
+
 ## Claim status note (`--campaign claim-status`, Fable claims-documentation-readiness-1023 ruling 3)
 
 The no-ask note for a pending claimant who gets **no** proof ask: holds, organizations, claims with no surface the daily code check can read, and any row the list routes with `"audience": "status"` (e.g. A-48h claims). Fable's copy, verbatim:

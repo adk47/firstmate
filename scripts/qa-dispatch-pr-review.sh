@@ -42,6 +42,10 @@ set -euo pipefail
 #   repo           ${QA_REVIEW_REPO:-Muso-AI/hydra}   (must be Muso-AI/<name>)
 #   requester-uid  $QA_REVIEW_REQUESTER_UID           (Slack UID; approve+DM) REQUIRED
 #   OPENCLAW       openclaw binary (default: openclaw)
+#   OPENCLAW_GATEWAY_URL         target a REMOTE qa gateway instead of node-8's local
+#                                `main` profile (see "Gateway target" below)
+#   OPENCLAW_GATEWAY_TOKEN       its token, or OPENCLAW_GATEWAY_TOKEN_FILE = a file
+#                                holding it. Required whenever the URL is set.
 # (No delivery-target override: the cron uses --no-deliver and the skill owns all
 # Slack delivery itself, so there is nothing for the cron to target.)
 # Exit codes: 0 dispatched | 2 usage/validation | 75 (EX_TEMPFAIL) the `cron add`
@@ -56,6 +60,46 @@ AGENT="qa"
 TIMEOUT_SECONDS="1200"
 
 die() { echo "qa-dispatch-pr-review: $2" >&2; exit "$1"; }
+
+# --- Gateway target (2026-10-28, node8-to-pods T9) ----------------------------
+# UNSET (the default, and the revert): node-8's local `main` gateway through
+# `--profile main`, tokenless as root. Byte-for-byte what this script always did.
+#
+# SET: OPENCLAW_GATEWAY_URL names the dedicated QA gateway pods
+# (H-DevOps k8s/prod/hydra-qa/, Service qa-review-gateway). The openclaw CLI honours
+# that variable natively, and then accepts ENV credentials only
+# (openclaw docs/gateway/remote.md: an env URL never falls back to a config token),
+# so a URL without a token cannot work. Refuse it here, before any call, instead
+# of letting `cron add` reach the pod, get rejected, and be charged as an attempt.
+# The token is read from OPENCLAW_GATEWAY_TOKEN_FILE when given (a mounted Secret),
+# and only ever travels in the environment: `--token` would put it on argv, where
+# `ps` on a shared runner host shows it to every user.
+# `--profile main` is dropped in remote mode. The pod runs its own `qa` profile, and
+# the local profile would only matter for its config token, which the CLI ignores
+# under an env URL anyway; on an ARC runner pod there is no ~/.openclaw-main at all.
+# There is deliberately NO fallback to the local gateway when the remote one is
+# unreachable: that would hide a broken pod behind node-8 (the thing T9 empties).
+# Transport failure exits 75 below, and the reconciler retries it.
+OPENCLAW_ARGS=(--profile "$PROFILE")
+GATEWAY_TARGET="local profile ${PROFILE}"
+if [ -n "${OPENCLAW_GATEWAY_URL:-}" ]; then
+  [[ "$OPENCLAW_GATEWAY_URL" =~ ^wss?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?/?$ ]] \
+    || die 2 "OPENCLAW_GATEWAY_URL must be ws(s)://<host>[:port], got '${OPENCLAW_GATEWAY_URL}'."
+  if [ -n "${OPENCLAW_GATEWAY_TOKEN_FILE:-}" ]; then
+    [ -f "$OPENCLAW_GATEWAY_TOKEN_FILE" ] && [ -r "$OPENCLAW_GATEWAY_TOKEN_FILE" ] \
+      || die 2 "OPENCLAW_GATEWAY_TOKEN_FILE '${OPENCLAW_GATEWAY_TOKEN_FILE}' is not a readable file."
+    IFS= read -r OPENCLAW_GATEWAY_TOKEN < "$OPENCLAW_GATEWAY_TOKEN_FILE" || true
+    OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN%$'\r'}"
+  fi
+  [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ] \
+    || die 2 "OPENCLAW_GATEWAY_URL is set but no token: set OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_TOKEN_FILE. The CLI ignores config tokens under an env URL, so the dispatch would be rejected by the gateway."
+  export OPENCLAW_GATEWAY_URL OPENCLAW_GATEWAY_TOKEN
+  # A port/state-dir override in the caller's env would steer the CLI elsewhere.
+  unset OPENCLAW_GATEWAY_PORT OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH OPENCLAW_PROFILE
+  OPENCLAW_ARGS=()
+  GATEWAY_TARGET="remote ${OPENCLAW_GATEWAY_URL}"
+fi
+# (bash 3.2 + set -u: an empty array must expand as ${a[@]+"${a[@]}"}.)
 
 # --- Arg validation: fail loud. A silent no-op dispatcher is worse than none
 #     (cf. dispatch-cv-batch.sh --help typo that fired 500 real writes). --------
@@ -157,11 +201,14 @@ EOF
 # fail the dispatch over cleanup.
 # --all: bare `cron list` HIDES disabled rows (scripts/lib/cron-store.sh:54-64),
 # so an idempotency check without it can miss a disabled leftover job.
-old_ids="$("$OPENCLAW" --profile "$PROFILE" cron list --all --json 2>/dev/null \
+# Remote mode: the Service round-robins, so this list (and the sweep's) sees ONE
+# replica's store. A pending job for this PR on another replica is not removed; it
+# fires within +5s anyway, and qa-pr-approve.sh pins the head sha it approves.
+old_ids="$("$OPENCLAW" ${OPENCLAW_ARGS[@]+"${OPENCLAW_ARGS[@]}"} cron list --all --json 2>/dev/null \
   | jq -r --arg n "$job_name" '.jobs[]? | select(.name==$n) | .id' 2>/dev/null || true)"
 while IFS= read -r id; do
   [ -n "$id" ] || continue
-  "$OPENCLAW" --profile "$PROFILE" cron rm "$id" >/dev/null 2>&1 || true
+  "$OPENCLAW" ${OPENCLAW_ARGS[@]+"${OPENCLAW_ARGS[@]}"} cron rm "$id" >/dev/null 2>&1 || true
 done <<< "$old_ids"
 
 # Sweep stale qa-autoreview-pr-* one-shots left behind by earlier runs. A failed run is
@@ -209,7 +256,7 @@ done <<< "$old_ids"
 # this build -- so the sweep is skipped entirely rather than acting on a partial
 # list. Best-effort throughout -- never fail dispatch over cleanup.
 stale_cutoff_ms=$(( ($(date -u +%s) - 1800) * 1000 ))
-cron_json="$("$OPENCLAW" --profile "$PROFILE" cron list --all --json 2>/dev/null || true)"
+cron_json="$("$OPENCLAW" ${OPENCLAW_ARGS[@]+"${OPENCLAW_ARGS[@]}"} cron list --all --json 2>/dev/null || true)"
 
 if echo "$cron_json" | jq -e '.hasMore == true' >/dev/null 2>&1; then
   echo "qa-dispatch-pr-review: stale sweep skipped -- cron list is paginated (hasMore=true), durable set unobtainable" >&2
@@ -236,7 +283,7 @@ else
   else
     while IFS= read -r id; do
       [ -n "$id" ] || continue
-      "$OPENCLAW" --profile "$PROFILE" cron rm "$id" >/dev/null 2>&1 || true
+      "$OPENCLAW" ${OPENCLAW_ARGS[@]+"${OPENCLAW_ARGS[@]}"} cron rm "$id" >/dev/null 2>&1 || true
     done <<< "$stale_ids"
 
     if never_run_names="$(echo "$cron_json" | jq -r '
@@ -270,12 +317,17 @@ PRE_GATEWAY_SIGNATURES=(
   "connect ETIMEDOUT"
   "socket hang up"
   "fetch failed"
+  # 2026-10-28 (T9): a remote gateway adds DNS and routing failures to the class.
+  "ENOTFOUND"
+  "EHOSTUNREACH"
+  "ENETUNREACH"
+  "EAI_AGAIN"
 )
 
 add_err="$(mktemp)"
 trap 'rm -f "$add_err"' EXIT
 add_rc=0
-"$OPENCLAW" --profile "$PROFILE" cron add \
+"$OPENCLAW" ${OPENCLAW_ARGS[@]+"${OPENCLAW_ARGS[@]}"} cron add \
   --name "$job_name" \
   --at "+5s" \
   --agent "$AGENT" \
@@ -297,4 +349,4 @@ if [ "$add_rc" -ne 0 ]; then
   exit "$add_rc"
 fi
 
-echo "qa-dispatch-pr-review: dispatched auto-review of ${REPO}#${pr} (${sha}) -> agent ${AGENT}."
+echo "qa-dispatch-pr-review: dispatched auto-review of ${REPO}#${pr} (${sha}) -> agent ${AGENT} (${GATEWAY_TARGET})."

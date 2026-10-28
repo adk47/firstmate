@@ -30,10 +30,16 @@ write_complete_env() {
     'MUSO_STATE_DIR=/var/log/muso-ops' > "$ENV_FILE"
 }
 
+# Cases tagged `host-systemd` drive the REAL systemd-run (that is what they test: systemd's
+# EnvironmentFile parsing, not a shell imitation of it), so they need a host whose PID 1 is
+# systemd. PR Validation runs them ONLY in its node-8 job (`bats --filter-tags host-systemd`)
+# and excludes them from the in-cluster ARC shards, whose pods have no systemd
+# (2026-10-27, PR CI off node-8). Every other case here stubs systemd-run and runs anywhere.
 run_check() {
   run bash -c 'source "$1"; muso_main_env_missing "$2"' _ "$LIB" "$ENV_FILE"
 }
 
+# bats test_tags=host-systemd
 @test "systemd quoting and last duplicate assignment produce a valid environment" {
   write_complete_env
 
@@ -43,6 +49,7 @@ run_check() {
   [ -z "$output" ]
 }
 
+# bats test_tags=host-systemd
 @test "an empty final assignment is reported as missing" {
   write_complete_env
   printf '%s\n' 'MUSO_DEV_ADMIN_PASSWORD=' >> "$ENV_FILE"
@@ -53,6 +60,7 @@ run_check() {
   [ "$output" = 'MUSO_DEV_ADMIN_PASSWORD' ]
 }
 
+# bats test_tags=host-systemd
 @test "invalid runtime values are reported with their required values" {
   write_complete_env
   printf '%s\n' \
@@ -77,6 +85,7 @@ run_check() {
   [ "$status" -eq 42 ]
 }
 
+# bats test_tags=host-systemd
 @test "report: complete env produces no output lines" {
   write_complete_env
 
@@ -86,6 +95,7 @@ run_check() {
   [ -z "$output" ]
 }
 
+# bats test_tags=host-systemd
 @test "report: missing vars produce actionable WARN lines" {
   write_complete_env
   printf '%s\n' 'MUSO_DEV_ADMIN_PASSWORD=' >> "$ENV_FILE"

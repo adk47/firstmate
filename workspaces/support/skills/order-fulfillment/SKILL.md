@@ -38,8 +38,10 @@ formats, the address field-mapping table, and the 40-character rule.
 ## Tools this skill uses
 
 - `order_lookup` – read-only: pull an order by its internal id, order number, or
-  Prodigi id. Returns status, the shipping address (Prodigi format), tracking, and an
-  item summary (no payment data). Already allowlisted.
+  Prodigi id. Today it returns only status and hold (address, phone, tracking and
+  items are withheld until Intercom Identity Verification is on). Once it is on,
+  the order's own verified contact gets the address (Prodigi format), tracking and
+  an item summary (never payment data). Already allowlisted.
 - `order_address_update` – gated WRITE: correct an order's shipping recipient (name,
   phone, address, and – for Mexico/customs – the recipient `tax_id` RFC/CURP) for the
   **verified order owner**. Always dry-run → confirm → apply. The wrapper refuses if the
@@ -96,6 +98,10 @@ If you genuinely can't tell, treat it as the customer lane.
      on the right order and to see what we have on record vs. what Prodigi is quoting.
      If `order_lookup` comes back `not_found` or `lookup_unavailable`, carry on with
      just what the message contains – don't block on it.
+     Today it returns only `status` and `hold` (`owner_verified: false`) for every
+     order: the address, phone, tracking and items are not available to you. Never
+     read, guess or confirm an address, phone or tracking; file the request and a
+     person on the team confirms the address.
 2. **Assess the address** against the rules in `reference/orders-and-fulfillment.md`:
    - every line must be **≤ 40 characters**;
    - it needs a real recipient **Name**, Address Line 1, Postcode, City, Country, and
@@ -119,9 +125,10 @@ confirmed address back to Prodigi.
 - **Status / "where is my plaque" / tracking** – answer from `reference/faq.md` and
   `reference/orders-and-fulfillment.md` where you can (e.g. how long printing +
   shipping takes). For the live status/tracking of a specific order, ask for the order
-  id and call `order_lookup` – you can read them the status and tracking link
-  directly. File an `order-fulfillment` request only if something looks wrong or the
-  lookup is unavailable.
+  id and call `order_lookup` – you can tell them the status (and what a held order
+  is waiting on). Tracking links are not available to you: when they want one, or
+  something looks wrong, or the lookup is unavailable, file an `order-fulfillment`
+  request.
 - **"I ordered a plaque and never heard anything" – CHECK THE STATUS BEFORE ANYTHING
   ELSE.** `order_lookup` returning `NEEDS_TAX_ID` or `NEEDS_CONTACT_INFO` means the
   order is paid and deliberately on hold because we are missing something customs or
