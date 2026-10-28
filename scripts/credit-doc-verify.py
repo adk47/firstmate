@@ -60,7 +60,7 @@ def real_deps(store, *, intercom_fetch: bool = True, strict_pacing: bool = False
     return Deps(sandbox=sandbox.run, extractor=Extractor(store), net=xc.Net(mb_pacer=mb),
                 raw_credits=ad.paced(lambda tid: admin_api.track_raw_credits(admin, tid)),
                 requests=lambda ids: stage2.requests(ids), fetch=fetch, dl=stage2.download,
-                people_graph=intel.trino_name_index(stage2.trino_query))
+                people_graph=intel.trino_name_index(stage2.trino_query), gmail_raw=_gmail_raw())
 
 
 def paying_users() -> frozenset[int] | None:
@@ -105,6 +105,11 @@ def run_workers(args: argparse.Namespace, popen=None) -> int:
     log(f"workers {args.workers}: started {len(plan)} (budgets {[b for _, b in plan]}), exit {rcs}"
         + (f"; FAILED shards {sorted(bad)}" if bad else ""))
     return 1 if bad else 0
+
+
+def _gmail_raw():
+    from credit_verify.proof.gmail_intake import gog_raw
+    return gog_raw
 
 
 def cmd_run(args: argparse.Namespace) -> int:

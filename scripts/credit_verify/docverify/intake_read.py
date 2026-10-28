@@ -109,11 +109,29 @@ def _sha(path: str) -> str:
 
 
 def locate_intake(doc: IntakeDoc, tmp: str, *, fetch: Callable[[str], Any] | None,
-                  dl: Callable[[str, str], int] | None, cache_root: str) -> tuple[str | None, str | None, list[str]]:
+                  dl: Callable[[str, str], int] | None, cache_root: str,
+                  gmail_raw: Callable[[str], bytes] | None = None) -> tuple[str | None, str | None, list[str]]:
     """(path, source_ref, errors): the filer's cache copy when its sha256 still matches,
-    else the conversation attachment whose bytes hash to the filed sha256."""
+    else the conversation attachment whose bytes hash to the filed sha256. A `gmail:<id>`
+    filing (support@ email) is re-read from Gmail and its attachment picked by sha256."""
     from credit_verify.proof.stage2 import customer_attachments
     errors: list[str] = []
+    if doc.conversation_id.startswith("gmail:"):
+        from credit_verify.proof.gmail_intake import message_attachment
+        mid = doc.conversation_id.split(":", 1)[1]
+        if gmail_raw is None:
+            return None, None, ["no Gmail reader configured"]
+        try:
+            hit = message_attachment(gmail_raw(mid), doc.sha)
+        except Exception as exc:  # noqa: BLE001 - recorded; the document is retried
+            return None, None, [f"gmail {mid[-6:]}: {type(exc).__name__}Error"]
+        if hit is None:
+            return None, None, ["no attachment in the message has the filed sha256"]
+        name, _ctype, data = hit
+        dest = os.path.join(tmp, re.sub(r"[^A-Za-z0-9._-]", "_", name)[-60:] or "attachment")
+        with open(dest, "wb") as fh:
+            fh.write(data)
+        return dest, doc.conversation_id, errors
     root = os.path.realpath(cache_root)
     if doc.file_path:
         p = os.path.realpath(doc.file_path)

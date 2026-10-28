@@ -1117,6 +1117,26 @@ class IntakeD2Tests(unittest.TestCase):
         stats, _ = self._run()                                                         # selection runs on
         self.assertEqual(stats.errors, [])
 
+    def test_an_emailed_document_is_read_from_gmail_by_sha(self):
+        from email.message import EmailMessage
+        m = EmailMessage()
+        m["From"] = "ann@example.com"
+        m.set_content("proof")
+        m.add_attachment(b"not it", maintype="image", subtype="png", filename="x.png")
+        m.add_attachment(self.data, maintype="application", subtype="pdf", filename="sheet.pdf")
+        raw = m.as_bytes()
+        db = sqlite3.connect(self.proof_path)
+        db.execute("UPDATE proof_intake SET conversation_id='gmail:18f00aa', source='email'")
+        db.commit()
+        db.close()
+        asked = []
+        self.deps.gmail_raw = lambda mid: asked.append(mid) or raw
+        stats, rows = self._run()
+        self.assertEqual((asked, self.fetches), (["18f00aa"], []))       # Gmail, never Intercom
+        self.assertEqual(self.h3_calls[0][0], self.data)
+        o = self.store.db.execute("SELECT source_ref, outcome FROM dv_outcomes").fetchone()
+        self.assertEqual(tuple(o), ("gmail:18f00aa", gate.VERIFIED))
+
     def test_pairs_eval_runs_never_pick_up_intake(self):
         stats, _ = runner.run(self.store, self.deps, proof_store=self.proof_path, pairs={})
         self.assertEqual(stats.intake, 0)

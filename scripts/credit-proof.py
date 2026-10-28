@@ -87,8 +87,38 @@ def cmd_intercom(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_file_gmail(args: argparse.Namespace) -> int:
+    """`file --source gmail`: support@ messages by id (read-only gog), same proof_intake contract."""
+    from credit_verify.proof import email_in, gmail_intake, intake
+    from credit_verify.proof.store import ProofStore
+    if not args.message_ids:
+        log("--source gmail needs --message-ids FILE")
+        print("NO_REPLY")
+        return 2
+    ids, bad = gmail_intake.read_message_ids(args.message_ids)
+    if bad:
+        log(f"{len(bad)} token(s) in {args.message_ids} are not Gmail message ids: {bad[:5]}")
+    ids = ids[: args.limit or None]
+    stats = gmail_intake.run(ProofStore.for_run(args.store, args.apply), message_ids=ids, fetch=gmail_intake.gog_raw,
+                             lookup=email_in.admin_user_lookup(admin_api.AdminClient()),
+                             open_rows=intake.open_rows_trino, apply=args.apply, log=log)
+    stats["not_message_ids"] = bad
+    log("file gmail " + json.dumps({k: (len(v) if isinstance(v, list) else v) for k, v in stats.items()}))
+    if args.out:
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        (Path(args.out) / "proof-intake-gmail.json").write_text(json.dumps(stats, indent=1, default=str))
+    print("NO_REPLY")
+    return 0
+
+
 def cmd_file(args: argparse.Namespace) -> int:
     from credit_verify.proof import intake
+    if args.source == "gmail":
+        return cmd_file_gmail(args)
+    if not args.conversations:
+        log("--source intercom needs --conversations FILE")
+        print("NO_REPLY")
+        return 2
     from credit_verify.proof.intercom import intercom_token, make_fetch
     from credit_verify.proof.stage2 import held_rows
     from credit_verify.proof.store import ProofStore
@@ -185,7 +215,10 @@ def parser() -> argparse.ArgumentParser:
     pi.add_argument("--out", default=None)
     pi.set_defaults(fn=cmd_intercom)
     pf = sub.add_parser("file", help="FILE ONLY: record a conversation list's attachments with account + candidate requests")
-    pf.add_argument("--conversations", required=True, help="file of Intercom conversation ids (one per line)")
+    pf.add_argument("--source", choices=("intercom", "gmail"), default="intercom",
+                    help="intercom: --conversations; gmail: support@ messages by --message-ids (read-only gog)")
+    pf.add_argument("--conversations", default=None, help="file of Intercom conversation ids (one per line)")
+    pf.add_argument("--message-ids", default=None, help="--source gmail: file of support@ Gmail message ids")
     pf.add_argument("--apply", action="store_true", help="write the filings (default: count only, write nothing)")
     pf.add_argument("--open-rows", default=None,
                     help="JSON {user_id: [{request_id,status}]} of the accounts' open credit requests "

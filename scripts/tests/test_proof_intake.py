@@ -406,5 +406,119 @@ class IntakeTest(unittest.TestCase):
         self.assertEqual(intake.read_conversations(p), ["111", "222", "333"])
 
 
+
+def gmail_raw(*, sender="ann@example.com", auth="mx.google.com; dkim=pass header.i=@example.com header.d=example.com",
+              files=((b"%PDF-1.4 emailed split sheet", "application/pdf", "split.pdf"),),
+              date="Tue, 14 Oct 2026 12:31:00 +0200") -> bytes:
+    from email.message import EmailMessage
+    m = EmailMessage()
+    m["From"] = f"Ann <{sender}>"
+    m["To"] = "support@muso.ai"
+    m["Date"] = date
+    m["Subject"] = "my credit"
+    if auth:
+        m["Authentication-Results"] = auth
+    m.set_content("here is my proof")
+    for data, ctype, name in files:
+        main, sub = ctype.split("/")
+        m.add_attachment(data, maintype=main, subtype=sub, filename=name)
+    return m.as_bytes()
+
+
+class GmailIntakeTest(unittest.TestCase):
+    """`credit-proof.py file --source gmail`: support@ documents, same proof_intake contract,
+    email_in's authenticated-sender + confirmed-account rules (proof-loop lead 032)."""
+
+    def setUp(self) -> None:
+        from credit_verify.proof import gmail_intake
+        self.g = gmail_intake
+        self.store = ProofStore(":memory:")
+        self.msgs = {"m1": gmail_raw(),
+                     "m2": gmail_raw(auth="evil.example; dkim=pass header.d=example.com"),          # untrusted hop
+                     "m3": gmail_raw(sender="bob@example.com"),
+                     "m4": gmail_raw(files=())}
+        self.accounts = {"ann@example.com": [{"id": 11, "email": "ann@example.com", "emailConfirmed": True}],
+                         "bob@example.com": [{"id": 12, "email": "bob@example.com", "emailConfirmed": False}]}
+        self.rows = {11: [{"request_id": "aaaaaaaa-0000-0000-0000-000000000001", "status": "unverified"}]}
+
+    def tearDown(self) -> None:
+        self.store.close()
+
+    def _fetch(self, mid):
+        if mid not in self.msgs:
+            raise RuntimeError("gog rc=1")
+        return self.msgs[mid]
+
+    def _run(self, ids, apply=True):
+        return self.g.run(self.store, message_ids=ids, fetch=self._fetch, lookup=lambda a: self.accounts.get(a, []),
+                          open_rows=lambda uids: {u: self.rows.get(u, []) for u in uids}, apply=apply)
+
+    def _rows(self):
+        return self.store.db.execute("SELECT * FROM proof_intake").fetchall()
+
+    def test_an_authenticated_confirmed_sender_is_filed_under_the_contract(self) -> None:
+        import hashlib
+        stats = self._run(["m1"])
+        (r,) = self._rows()
+        self.assertEqual((r["user_id"], r["source"], r["conversation_id"], r["file_path"], r["subject"]),
+                         (11, "email", "gmail:m1", None, "credit"))
+        self.assertEqual(r["file_sha256"], hashlib.sha256(b"%PDF-1.4 emailed split sheet").hexdigest())
+        self.assertEqual(json.loads(r["candidate_request_ids_json"]), ["aaaaaaaa-0000-0000-0000-000000000001"])
+        self.assertEqual(r["received_at"], "2026-10-14T10:31:00Z")                  # UTC, from the Date header
+        self.assertEqual(r["matched_by"], "authenticated_email")
+        self.assertEqual((stats["files_filed"], stats["with_candidate_requests"]), (1, 1))
+        for t in ("forensics", "verdicts", "fingerprints"):
+            self.assertEqual(self.store.db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0], 0, t)
+
+    def test_spoofable_unconfirmed_unknown_and_unreadable_messages_are_counted_never_filed(self) -> None:
+        stats = self._run(["m2", "m3", "m9"])
+        self.assertEqual(self._rows(), [])
+        self.assertEqual(stats["refused"], {"no_trusted_authentication_results": 1, "account_email_not_confirmed": 1})
+        self.assertEqual(stats["fetch_errors"], ["m9: RuntimeError"])
+
+    def test_dry_run_writes_nothing_and_rerun_is_idempotent_with_candidate_merge(self) -> None:
+        self.assertEqual(self._run(["m1"], apply=False)["files_filed"], 1)
+        self.assertEqual(self._rows(), [])
+        self._run(["m1"])
+        self.rows[11].append({"request_id": "aaaaaaaa-0000-0000-0000-000000000002", "status": "unverified"})
+        again = self._run(["m1"])
+        self.assertEqual((again["files_filed"], again["files_duplicate"], again["candidates_refreshed"]), (0, 1, 1))
+        self.assertEqual(len(json.loads(self._rows()[0]["candidate_request_ids_json"])), 2)
+
+    def test_no_attachment_and_oversized_attachments_are_counted(self) -> None:
+        big = b"%PDF-1.4" + b"0" * (self.g.MAX_ATTACHMENT_BYTES + 1)
+        self.msgs["m5"] = gmail_raw(files=((big, "application/pdf", "huge.pdf"),))
+        stats = self._run(["m4", "m5"])
+        self.assertEqual((stats["no_document_messages"], stats["files_too_large"]), (["m4", "m5"], 1))
+
+    def test_the_reader_finds_the_filed_attachment_by_sha(self) -> None:
+        import hashlib
+        sha = hashlib.sha256(b"%PDF-1.4 emailed split sheet").hexdigest()
+        self.assertEqual(self.g.message_attachment(self.msgs["m1"], sha)[2], b"%PDF-1.4 emailed split sheet")
+        self.assertIsNone(self.g.message_attachment(self.msgs["m1"], "0" * 64))
+
+    def test_a_gmail_dry_run_on_a_read_only_store_writes_nothing(self) -> None:
+        import hashlib
+        path = os.path.join(tempfile.mkdtemp(), "p.sqlite")
+        ProofStore(path).close()
+        before = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        ro = ProofStore.for_run(path, apply=False)
+        stats = self.g.run(ro, message_ids=["m1"], fetch=self._fetch, lookup=lambda a: self.accounts.get(a, []),
+                           open_rows=lambda uids: {u: self.rows.get(u, []) for u in uids}, apply=False)
+        ro.close()
+        self.assertEqual(stats["files_filed"], 1)
+        self.assertEqual(hashlib.sha256(Path(path).read_bytes()).hexdigest(), before)
+
+    def test_the_message_id_list_keeps_hex_ids_and_reports_the_rest(self) -> None:
+        p = os.path.join(tempfile.mkdtemp(), "ids.txt")
+        Path(p).write_text("199496a0433c8861\n19949c81b9b45d6b 199496a0433c8861 # dup\n../etc\n1995ec564cc9f87e\n")
+        self.assertEqual(self.g.read_message_ids(p),
+                         (["199496a0433c8861", "19949c81b9b45d6b", "1995ec564cc9f87e"], ["../etc"]))
+
+    def test_gog_ids_are_validated_before_any_subprocess(self) -> None:
+        for bad in ("", "../x", "a b", "m1;rm"):
+            with self.assertRaises(ValueError):
+                self.g.gog_raw(bad)
+
 if __name__ == "__main__":
     unittest.main()

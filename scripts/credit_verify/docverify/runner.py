@@ -153,6 +153,7 @@ class Deps:
     shadow_store: Any = None
     # Muso credits graph name index for the people check (intel.trino_name_index); None = skipped.
     people_graph: intel.NameIndex | None = None
+    gmail_raw: Any = None          # message id -> RFC 822 bytes (gmail_intake.gog_raw) for email filings
 
 
 @dataclass
@@ -189,7 +190,7 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
     try:
         if intake is not None:
             path, ref, errs = intake_read.locate_intake(intake, tmp, fetch=deps.fetch, dl=deps.dl,
-                                                        cache_root=deps.cache_root)
+                                                        cache_root=deps.cache_root, gmail_raw=deps.gmail_raw)
         else:
             path, ref, errs = locate(source_refs(proof_db, proof_id), proof_id, tmp, fetch=deps.fetch, dl=deps.dl,
                                      cache_root=deps.cache_root)
