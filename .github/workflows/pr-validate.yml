@@ -1886,6 +1886,10 @@ jobs:
           # credit-trust band table mirror (scripts/credit_trust): byte-identical to IDP's
           # common/credit_trust_bands.json at the pinned sha. Stdlib only.
           python3 scripts/tests/test_credit_trust_bands.py
+          # Proof-on-file feed (scripts/cs_proof_feed, node-8 cron.d hydra-cs-proof-feed):
+          # replica passthrough, ledger read-only, atomic install, gmail merge. Stdlib
+          # only; Trino is faked, ledger/target are temp files.
+          python3 scripts/tests/test_cs_proof_feed.py
           # Credit-trust model ladder + fetched-source evidence (scripts/credit_trust,
           # T01). Stdlib only; codex, Jev, OpenRouter and HTTP are faked, and the
           # bash helper is exercised only via --print-argv / census / quota gate.

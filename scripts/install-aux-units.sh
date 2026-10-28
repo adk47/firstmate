@@ -145,6 +145,14 @@
 #     old, first run seeds older outcomes silently). State in
 #     /var/lib/merge-outcome-notify; MERGE_OUTCOME_MAX=25 per run.
 #
+#   /etc/cron.d/hydra-cs-proof-feed
+#     Schedules scripts/cs-proof-feed.sh hourly at :21: refreshes the
+#     proof-on-file feed the credit-trust decider reads
+#     (/var/lib/credit-trust/inputs/cs-proofs.json) from Intercom, the
+#     support@ inbox and the read-only replica. Moved off the captain's Mac
+#     2026-10-26 (docs/runbooks/ops-to-ovh-inventory.md). Kill switch
+#     /etc/hydra/cs-proof-feed.disabled; logs journalctl -t hydra-cs-proof-feed.
+#
 #   /etc/cron.d/stale-ticket-watchdog
 #     Schedules scripts/stale-ticket-watchdog.sh daily to post a
 #     digest of overdue hydra-action-request ClickUp tickets to
@@ -370,6 +378,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/release-digest.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/clickup-sla-digest.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/clickup-sla-digest.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/cs-proof-feed.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/cs-proof-feed.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh" ]] \
@@ -2146,6 +2156,24 @@ cat > /etc/cron.d/stale-ticket-watchdog << STALETICKETWD
 30 8 * * * root USE_MUSO_CLI=1 MUSO_BIN=/usr/local/bin/muso $HYDRA_ROOT/scripts/stale-ticket-watchdog.sh >> /var/log/stale-ticket-watchdog.log 2>&1
 STALETICKETWD
 chmod 644 /etc/cron.d/stale-ticket-watchdog
+
+# ─── Proof-on-file feed for the credit-trust decider, hourly ───
+# Captain 2026-10-26 ~21:15Z: recurring credit ops run on OVH, not his Mac. This
+# was launchd ai.muso.fmc1.proof-hourly on the Mac, which pulled the Intercom
+# token out of Vault onto the laptop every hour; it now runs here with the token
+# from /etc/openclaw/main.env (sourced inside the script, so no secret is on this
+# 644 line). Read-only on Intercom, support@ (gog), the replica (Trino passthrough)
+# and the send ledger (sqlite mode=ro); its only write is the feed file and its
+# own state under /var/lib/hydra/cs-proof-feed. :21 keeps the cadence the decider
+# was tuned against. systemd-cat sends every line to journald (-> Loki).
+# Kill switch: touch /etc/hydra/cs-proof-feed.disabled.
+mkdir -p /var/lib/hydra/cs-proof-feed
+cat > /etc/cron.d/hydra-cs-proof-feed << CSPROOFFEED
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+21 * * * * root systemd-cat -t hydra-cs-proof-feed $HYDRA_ROOT/scripts/cs-proof-feed.sh
+CSPROOFFEED
+chmod 644 /etc/cron.d/hydra-cs-proof-feed
 
 # ─── Mercury token watchdog, daily ────────────────────────────
 # Pages #clio_devops (C0ADV2W76G4) when the Finance agent's read-only Mercury
