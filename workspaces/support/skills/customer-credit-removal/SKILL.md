@@ -103,7 +103,7 @@ If tracks list is missing or unclear, ask for it explicitly. Do NOT guess what t
 
 If `intercom_email` is missing from `[CONVERSATION_CONTEXT]` (the extractor sometimes fails on edge-case message shapes – see `plugins/intercom/src/extractors.ts`), do NOT proceed and do NOT ask the customer for their email – a self-declared email is exactly the verification gap this skill is built to avoid. Instead, file via `action-request` (`action_type: credit-correction`) with:
 
-> "Want to get this sorted for you – I've passed it to our team and they'll follow up shortly."
+> "Want to get this sorted for you – I've flagged this for our team."
 
 The verified email property of `intercom_email` is load-bearing for the entire skill. If Intercom didn't give us one, the safe path is human review.
 
@@ -273,7 +273,7 @@ Every refusal returned by `remove_credits` is a JSON object `{ok: false, error: 
 | `cap_exceeded_per_day` | "I've checked quite a lot for you today already – to be safe, let me flag the rest for our team to look at." | File `action-request` (`credit-correction`) with the leftover tracks |
 | `profile_lookup_failed` | "Hmm, having trouble loading that profile – could you share the URL again so I can double-check it?" | If repeats, file `action-request` |
 | `profile_unclaimed` | "I can't make changes to an unclaimed profile from here – I've flagged this for our team." | File `action-request`, action_type `credit-correction`, empty packet per Step 6 |
-| `no_claimed_workspace` | "I can't match this to a profile from here – I've passed it to our team to take a look." | Same as `profile_unclaimed` routing |
+| `no_claimed_workspace` | "I can't match this to a profile from here – I've flagged this for our team." | Same as `profile_unclaimed` routing |
 | `profile_multi_claimed` | "This profile has multiple owners – I'd like to have our team sort it out. Flagged for review." | File `action-request`, action_type `credit-correction`, empty packet per Step 6 (`unmerge-request` if Step 3 detection fires) |
 | `owner_mismatch` | "I'm not seeing this profile under your account. Could you double-check the URL?" | If customer insists, file `action-request`, action_type `credit-correction`, empty packet per Step 6 |
 | `intercom_conv_id_required` | Don't surface to customer – this is an internal contract bug. Retry the same call WITH `intercomConvId` from the conversation context | Log; if it repeats across retries, file `action-request` |

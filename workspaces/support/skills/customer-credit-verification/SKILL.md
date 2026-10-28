@@ -113,12 +113,11 @@ profile, the tool resolves the one they own from their verified email.
   Treat as identity-verification / security review; do not proceed on the typed
   email.
 - `awaiting_review.count > 0` → tell the customer plainly, with the number:
-  "N of your credits are waiting for our team to review – there's nothing you need
-  to do right now. Once they're reviewed, the approved ones will appear on your
-  profile." Do **not** ask for proof for these, do **not** promise a date, and do
+  "N of your credits are waiting for our team to review. Once they're reviewed,
+  the approved ones will appear on your profile." Do **not** ask for proof for these, do **not** promise a date, and do
   **not** say nothing is pending. (2026-10-16: this queue held ~5,500 credits for
   ~100 customers a day, and customers were wrongly told they had 0 pending.) If
-  `count > 0` too, cover both: the awaiting-review ones need nothing, the
+  `count > 0` too, cover both: the awaiting-review ones need no proof, the
   `uvn_credits` ones need proof (Step 2).
   If `awaiting_review.truncated` is true, the count is a floor: say "more than N"
   (e.g. "more than 100"), never the exact number.
@@ -174,14 +173,14 @@ credit-theft routing) and case 2 (catalog corroboration, approving via
 checks don't resolve it, or nothing can be checked, file a **needs-human**
 `credit-verify` ticket (Step 4, `proof.kind:"none"`) whose `reason` states the actual
 basis – `"proof on file"` or `"customer says proof already sent"` – the dedupe appends
-to the open ticket if there is one – and only then tell them it is with the team and
-there is nothing more they need to send.
+to the open ticket if there is one – and then reply per "Document received" below
+(none of its barred phrases).
 
 If `proof_on_file` is `unknown` or missing: do **not** ask, run the same Step 3 checks,
 then file a **needs-human** `credit-verify` ticket with reason `"proof-on-file
-unavailable; a person decides whether to ask"`. Tell the customer the team is
-reviewing it and will reply here. Never tell them there is nothing they need to do:
-these credits are waiting on proof. When in doubt, don't ask.
+unavailable; a person decides whether to ask"`. Reply per "Document received"
+below; never describe a review as underway, and never tell them there is nothing
+they need to do: these credits are waiting on proof. When in doubt, don't ask.
 
 Ask at most once per customer, in one message covering all their pending credits
 together, never one message per credit, and never a second proof request for the
@@ -214,7 +213,7 @@ skill.
    customer is only credited in a *different* role), do **NOT** recommend approve.
    Do not ask for stronger proof: file a **needs-human** `credit-verify` ticket with
    what was given, flagged as a possible credit-theft / contradicting-credit case, and
-   tell the customer it is with the team. Never approve over a contradicting credit.
+   reply per "Document received" below. Never approve over a contradicting credit.
 2. **Catalog corroboration.** Muso's **own catalog** (`credits_search` /
    `profile_status`) confirms **their** name in the **exact** claimed role on the
    track. This is the **only** approvable path, and it must rest on a check **you
@@ -239,7 +238,7 @@ skill.
 4. **Insufficient / no proof** → if the customer sent anything, or you already asked
    once, or Step 2's no-ask rule applies (proof on file or said to be sent, or
    `proof_on_file` unknown or asked_before), do **not** ask: file a **needs-human** `credit-verify` ticket with what was
-   given and tell the customer it is with the team. Only when none of that holds do
+   given and reply per "Document received" below. Only when none of that holds do
    you make the single Step 2 ask. Keep the case open, never reject.
 
 **One ask, ever:** never send a second proof request for the same credits. Anything
@@ -270,15 +269,24 @@ Include this literal banner so the human reviewer is not anchored by the evidenc
   path where saying so is true (a clean, owner-scoped completion). For EVERY other
   outcome you did **not** approve anything: never say "approved", "verified", "added", or
   "done", and never say "I've recommended approval" (it sets an expectation a human may
-  not honor) – say you've **passed it to the team for review**. A `route_to_human`,
+  not honor), and never claim a team handoff: reply per "Document received"
+  below. A `route_to_human`,
   `{disabled:true}`, or any non-success from `credits_verify` is NOT an approval – route it.
-- Never tell a customer their credit is **rejected** – you don't reject. Say you've
-  **filed it for the team** to review. (If a human already
-  rejected it, see Step 1 – acknowledge, don't deny.)
+- Never tell a customer their credit is **rejected** – you don't reject; reply per
+  "Document received" below. (If a human already rejected it, see Step 1 –
+  acknowledge, don't deny.)
 - **No approval timeline.** Never promise when (or whether) a credit will be
-  approved. When you file a ticket, DO relay the literal `sla` field that
-  `create_ticket` returns ("you'll hear back within <sla>") – that is the response
-  SLA mandated by your core doctrine, not an approval promise.
+  approved. `create_ticket` returns `sla: null` for `credit-verify`: quote no
+  timeframe and follow its `customer_timing`.
+- **Document received** (captain 2026-10-27 02:51Z):
+  <!-- barred-phrases --> in any credit or claim reply never say "nothing else is needed", "no need to resend", "passed to our team" (or that you passed their document or screenshots to the team), "review underway" / "added to the review already underway", or any number of business days.
+  - Say a document was received and is in the review queue ONLY when a tool result
+    in this turn returned `may_say_document_passed_on: true` (a `proof_intake` row
+    exists for it). If no tool returned that, never say the document was received
+    for review, passed on, or added to a review.
+  - Otherwise thank them for the file and report only what `credit_verification_check`
+    / `profile_credits_status` show (pending, waiting for review, or exactly what is
+    still missing), plus what `create_ticket`'s `customer_timing` allows.
 - Never echo raw cr_ids, internal fields, ISRCs, or any email back to the customer.
 - If routed to identity verification, ask them to confirm the email on their Muso
   account from the address they're writing in with.

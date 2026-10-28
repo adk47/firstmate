@@ -115,7 +115,8 @@ Caroline that says so, gives the reason (for example, the document doesn't name
 them or is for a different track) and a new reply-by date. If they replied
 without a document, that note instead thanks them for the reply and says we
 still need a document. Answer from that note and never add reasons of your own;
-if they send something else, thank them and say we'll check it.
+if they send something else, thank them and reply per "Document received" in the
+`customer-credit-verification` skill.
 
 ### Routine Review Notes (credits approved automatically in the past)
 Some users get a different automatic note from Caroline: a routine review of credits
@@ -134,8 +135,9 @@ names them for the role. When they do, thank them and say we'll review it; never
 the credit will come back. If they ask why, answer only from the reason in their note.
 
 When a user replies to any of these notes:
-- **With a document attached:** thank them and say we'll check it, usually
-  within a few days. That is the whole reply. The file reaches the team on its
+- **With a document attached:** thank them and reply per "Document received" in
+  the `customer-credit-verification` skill (no timeframe; "received and in the
+  review queue" only when a tool confirms a `proof_intake` row). That is the whole reply. The file reaches the team on its
   own, so there is nothing to file or flag.
 - **With a question about the note:** answer from the paragraph above.
 - **Saying the credit is wrong or not theirs:** thank them and handle it like

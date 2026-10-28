@@ -92,3 +92,37 @@ EOF
   run_gate
   [ "$status" -eq 2 ]
 }
+
+@test "CAN FAIL: a captain-barred phrase in a credit reply is caught (02:51Z: 'passed to our team')" {
+  printf '\nThanks! I have passed your screenshots to our team.\n' >> "$CI_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"captain 02:51Z barred phrase"* ]]
+}
+
+@test "CAN FAIL: 'nothing else is needed' and 'review already underway' are caught, case-insensitive" {
+  printf '\nNothing else is needed from you.\nI added it to the review ALREADY UNDERWAY.\n' >> "$CI_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"nothing else is needed"* ]]
+  [[ "$output" == *"review already underway"* ]]
+}
+
+@test "CAN FAIL: a second barred-phrases marker line cannot smuggle a violation past the forbid list" {
+  printf '\n<!-- barred-phrases --> No need to resend, it is with our team.\n<!-- barred-phrases --> again\n' >> "$CI_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"more than one barred-phrases marker line"* ]]
+}
+
+@test "CAN FAIL: dropping the proof_intake condition on 'document received' is caught" {
+  CV_MD="$FAKE/workspaces/support/skills/customer-credit-verification/SKILL.md"
+  python3 - "$CV_MD" <<'PY'
+import sys; p=sys.argv[1]; s=open(p).read()
+s=s.replace("ONLY when a tool result\n    in this turn returned `may_say_document_passed_on: true`", "whenever they send one")
+open(p,'w').write(s)
+PY
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q11 document received only on a proof_intake row"* ]]
+}
