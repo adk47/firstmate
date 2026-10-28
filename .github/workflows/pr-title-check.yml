@@ -20,7 +20,9 @@ on:
 
 jobs:
   pr-title:
-    runs-on: [self-hosted, hydra]
+    # 2026-10-27: the in-cluster `ovh-hydra` ARC fleet, off node-8 (see the note above
+    # `validate` in pr-validate.yml). git + grep only.
+    runs-on: ovh-hydra
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@v5

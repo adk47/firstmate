@@ -28,8 +28,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # WHERE EACH JOB RUNS (2026-10-27, captain: "what is the overloaded machine? can you find more
+  # resources in our pool to use"). Every job here used to run on node-8's hydra runner services
+  # — the host of the PRODUCTION openclaw gateways (Caroline), intercom-webhook, muso-mcp and
+  # cloudflared. Five overlapping PRs took node-8 to load 39 / run queue 68 (#1403) and queued a
+  # prod Deploy HYDRA 13+ min behind eight validations. Jobs that only read the repo now run on
+  # `ovh-hydra`, a repo-level ARC scale set in the cluster (H-DevOps
+  # https://github.com/Muso-AI/H-DevOps/pull/4516; 6 slots carved from the shared pool, never on
+  # ovh-node-8). Only jobs that must touch node-8's real state stay there, and they are small:
+  #   node8-handoff     writes /var/lib/hydra-qa/{rebase-integrity,blast-radius} for
+  #                     qa-pr-approve.sh (Guards 8/9 read them on node-8), and runs the live
+  #                     Trino Layer B through node-8's kubectl
+  #   deploy-preflight  dry-runs rsync against the live /opt/hydra, reads the live cron store
+  #                     and /etc/openclaw/<profile>.env
+  # A pod has none of node-8's tools and runs as the non-root `runner` user:
+  # scripts/ci/arc-toolchain.sh installs what each job needs (pinned to node-8's versions).
+  # It also has none of node-8's SECRETS (/etc/openclaw/*.env, /etc/hydra/*.env, the gog/gh
+  # logins), which is the point: a test that silently needed production credentials goes red
+  # here instead of quietly using them.
   validate:
-    runs-on: [self-hosted, hydra]
+    runs-on: ovh-hydra
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@v5
@@ -109,57 +127,6 @@ jobs:
           echo "  # resolve conflicts if any"
           echo "  git push --force-with-lease"
           exit 1
-
-      - name: Rebase integrity check (advisory — warns, never blocks)
-        # Companion to the staleness gate above: that gate forces a rebase when
-        # a PR is behind main AND overlaps files; THIS step inspects what a
-        # rebase actually PRODUCED — files reverted to pre-merge-base blobs,
-        # recently-merged lines erased or reintroduced, commits dropped across
-        # a force-push, duplicated patches. Signals surface as ::warning:: +
-        # step summary + a state file under /var/lib/hydra-qa/rebase-integrity
-        # that the QA auto-review (skill Step 3d) reads and qa-pr-approve.sh
-        # Guard 8 re-derives from. Advisory by design: the exit is swallowed so
-        # neither a signal nor an analyzer error can hard-fail CI — Guard 8 is
-        # the fail-closed consumer (WARN holds auto-approval until the REBASE
-        # WARNING thread is resolved — by the reviewing skill itself, once it
-        # has verified the deletions were intended and written that reasoning
-        # into the thread, per SKILL.md Step 3d.3, or by a human; ERROR — and,
-        # for hydra, a missing report — holds it outright).
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          REPO: ${{ github.repository }}
-        run: |
-          echo "::group::Rebase integrity check"
-          chmod +x scripts/check-rebase-integrity.sh
-          scripts/check-rebase-integrity.sh \
-            "${{ github.event.pull_request.number }}" \
-            "${{ github.event.pull_request.head.sha }}" \
-            || echo "::warning::rebase-integrity analyzer errored (exit $?) — rebase state UNVERIFIED for this head; QA auto-approval is held (Guard 8)"
-          echo "::endgroup::"
-
-      - name: Blast radius check (advisory — warns, never blocks)
-        # Answers the question diff size cannot: if this change is wrong, what
-        # breaks? The reviewing agent has NO clone (its workspace is not a git
-        # repo), so it cannot grep for the callers of a changed script — this
-        # runner can, and hands the result over through the filesystem, the same
-        # way the rebase-integrity step above does. The QA skill (Step 3e) reads
-        # the report to scale review depth; Guard 9 in qa-pr-approve.sh consumes
-        # it only when QA_BLAST_RADIUS_GATE=1, which is NOT yet the default.
-        # Advisory by design: the exit is swallowed so neither a signal nor an
-        # analyzer error can hard-fail CI.
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          REPO: ${{ github.repository }}
-        run: |
-          echo "::group::Blast radius check"
-          chmod +x scripts/check-blast-radius.sh
-          scripts/check-blast-radius.sh \
-            "${{ github.event.pull_request.number }}" \
-            "${{ github.event.pull_request.head.sha }}" \
-            || echo "::warning::blast-radius analyzer errored (exit $?) — impact UNVERIFIED for this head; the review proceeds on the 8 lenses alone"
-          echo "::endgroup::"
 
       - name: JSON Lint — validate gateway configs
         run: |
@@ -875,24 +842,6 @@ jobs:
           bash scripts/check-dead-infra-refs.sh
           echo "::endgroup::"
 
-      - name: Trino SQL staleness check — no stale SQL ships in skills-all/
-        # A sweep (behind PR #794) found 99 of 169 SQL statements in
-        # skills-all/ no longer compile against live Trino (schema drift:
-        # dropped/retyped columns, changed UNNEST alias arity, dead
-        # catalogs/tables) — five ops escalations trace back to this. Layer
-        # A is an offline grep for the historically top-recurring dead
-        # references (awsdatacatalog., raw_ids, profile_permissions,
-        # profile_v3_(lifetime|tracks)). Layer B compiles every extracted
-        # statement with a real `EXPLAIN (TYPE VALIDATE)` against the live
-        # cluster (self-hosted runners reach Trino via kubectl) and
-        # ratchets against .trino-sql-baseline.txt so pre-existing debt
-        # doesn't instantly redden every PR — only new regressions do.
-        # Scoped to files changed vs origin/main by default.
-        run: |
-          echo "::group::Trino SQL staleness check"
-          bash scripts/check-trino-sql.sh
-          echo "::endgroup::"
-
       - name: Egress allowlist check — no unauthorized additions
         run: |
           echo "::group::Checking egress allowlist changes"
@@ -918,6 +867,124 @@ jobs:
             echo "No egress allowlist changes — OK"
           fi
           echo "::endgroup::"
+
+  node8-handoff:
+    name: Node-8 hand-off (QA rebase-integrity + blast-radius, live Trino SQL, host-only bats)
+    # The node-8 HALF of what used to be one `validate` job (2026-10-27). These three steps need
+    # node-8 itself, so they cannot move to ovh-hydra with the rest:
+    #   - rebase-integrity and blast-radius hand their reports to the QA reviewer through
+    #     node-8's filesystem (/var/lib/hydra-qa), which qa-pr-approve.sh re-reads on node-8
+    #     (Guards 8 and 9). A pod's filesystem dies with the pod.
+    #   - the Trino SQL Layer B compiles statements against the live cluster through node-8's
+    #     kubectl.
+    #   - the few bats cases tagged `host-systemd` drive the REAL systemd-run (they test
+    #     systemd's EnvironmentFile parsing); a runner pod has no systemd. Found by running
+    #     the whole corpus in the ovh-ubuntu image as `runner` before the switch: 7,753 cases,
+    #     and these 5 (scripts/tests/muso-env-preflight.bats) were the only ones that needed
+    #     node-8. They are excluded from the ARC shards by the same tag.
+    # It is deliberately NOT folded into deploy-preflight: policies/qa-approval-policy.json
+    # exempts every check whose name STARTS WITH "Deploy pre-flight" from Guard 6, so the
+    # Trino gate would silently become advisory there. This name is not exempted.
+    # Cost on node-8: git + python3, no test suite — seconds, not the 8-process bats run.
+    runs-on: [self-hosted, hydra]
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Host preflight — /dev/null must be a char device
+        run: bash scripts/assert-host-devnull.sh
+
+      - name: Rebase integrity check (advisory — warns, never blocks)
+        # Companion to the staleness gate above: that gate forces a rebase when
+        # a PR is behind main AND overlaps files; THIS step inspects what a
+        # rebase actually PRODUCED — files reverted to pre-merge-base blobs,
+        # recently-merged lines erased or reintroduced, commits dropped across
+        # a force-push, duplicated patches. Signals surface as ::warning:: +
+        # step summary + a state file under /var/lib/hydra-qa/rebase-integrity
+        # that the QA auto-review (skill Step 3d) reads and qa-pr-approve.sh
+        # Guard 8 re-derives from. Advisory by design: the exit is swallowed so
+        # neither a signal nor an analyzer error can hard-fail CI — Guard 8 is
+        # the fail-closed consumer (WARN holds auto-approval until the REBASE
+        # WARNING thread is resolved — by the reviewing skill itself, once it
+        # has verified the deletions were intended and written that reasoning
+        # into the thread, per SKILL.md Step 3d.3, or by a human; ERROR — and,
+        # for hydra, a missing report — holds it outright).
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "::group::Rebase integrity check"
+          chmod +x scripts/check-rebase-integrity.sh
+          scripts/check-rebase-integrity.sh \
+            "${{ github.event.pull_request.number }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            || echo "::warning::rebase-integrity analyzer errored (exit $?) — rebase state UNVERIFIED for this head; QA auto-approval is held (Guard 8)"
+          echo "::endgroup::"
+
+      - name: Blast radius check (advisory — warns, never blocks)
+        # Answers the question diff size cannot: if this change is wrong, what
+        # breaks? The reviewing agent has NO clone (its workspace is not a git
+        # repo), so it cannot grep for the callers of a changed script — this
+        # runner can, and hands the result over through the filesystem, the same
+        # way the rebase-integrity step above does. The QA skill (Step 3e) reads
+        # the report to scale review depth; Guard 9 in qa-pr-approve.sh consumes
+        # it only when QA_BLAST_RADIUS_GATE=1, which is NOT yet the default.
+        # Advisory by design: the exit is swallowed so neither a signal nor an
+        # analyzer error can hard-fail CI.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "::group::Blast radius check"
+          chmod +x scripts/check-blast-radius.sh
+          scripts/check-blast-radius.sh \
+            "${{ github.event.pull_request.number }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            || echo "::warning::blast-radius analyzer errored (exit $?) — impact UNVERIFIED for this head; the review proceeds on the 8 lenses alone"
+          echo "::endgroup::"
+
+      - name: Trino SQL staleness check — no stale SQL ships in skills-all/
+        # A sweep (behind PR #794) found 99 of 169 SQL statements in
+        # skills-all/ no longer compile against live Trino (schema drift:
+        # dropped/retyped columns, changed UNNEST alias arity, dead
+        # catalogs/tables) — five ops escalations trace back to this. Layer
+        # A is an offline grep for the historically top-recurring dead
+        # references (awsdatacatalog., raw_ids, profile_permissions,
+        # profile_v3_(lifetime|tracks)). Layer B compiles every extracted
+        # statement with a real `EXPLAIN (TYPE VALIDATE)` against the live
+        # cluster (self-hosted runners reach Trino via kubectl) and
+        # ratchets against .trino-sql-baseline.txt so pre-existing debt
+        # doesn't instantly redden every PR — only new regressions do.
+        # Scoped to files changed vs origin/main by default.
+        run: |
+          echo "::group::Trino SQL staleness check"
+          bash scripts/check-trino-sql.sh
+          echo "::endgroup::"
+
+      - name: Host-only bats cases (tag host-systemd — need a real systemd PID 1)
+        run: |
+          set -euo pipefail
+          # Same discovery roots as the bats-tests job, but only the files that carry the tag.
+          files=$(grep -rlE '^# bats test_tags=.*\bhost-systemd\b' scripts skills-all workspaces \
+                    --include='*.bats' | sort || true)
+          want=$(grep -rhcE '^# bats test_tags=.*\bhost-systemd\b' $files /dev/null \
+                   | awk '{s+=$1} END {print s+0}')
+          if [ -z "$files" ] || [ "$want" -eq 0 ]; then
+            echo "::error::no host-systemd bats cases found — the tag moved or the files did; the ARC shards exclude this tag, so nothing would run them"
+            exit 1
+          fi
+          echo "Running $want host-systemd case(s) from:"; echo "$files" | sed 's/^/  /'
+          out=$(mktemp); trap 'rm -f "$out"' EXIT
+          # shellcheck disable=SC2086
+          bats --filter-tags host-systemd $files | tee "$out"
+          ran=$(grep -cE '^(ok|not ok) ' "$out" || true)
+          if [ "$ran" -ne "$want" ]; then
+            echo "::error::bats ran $ran host-systemd case(s), expected $want"
+            exit 1
+          fi
 
   deploy-preflight:
     name: Deploy pre-flight (rsync --delete dry-run vs /opt/hydra/)
@@ -1190,18 +1257,25 @@ jobs:
           echo "✓ All plugin env-var references resolve in /etc/openclaw/{shared,<profile>}.env"
 
   bats-tests:
-    name: Bats (scripts/ + ops-admin gates)
+    name: Bats (scripts/ + ops-admin gates) (${{ matrix.shard }}/2)
     # Added 2026-05-20 after PR #297: Clio caught a `set -u` regression in
     # find-dupes.sh --catalog that emitted "unbound variable" to stderr
     # while still exiting 0 — bats picked it up locally but the suite
     # never ran in CI, so the PR merged green. Wire it in here so future
     # PRs can't ship a regression the suite already covers.
     #
-    # Self-hosted hydra runner: matches the shellcheck job below (the
-    # ubuntu-latest GitHub-hosted assignment issue from 2026-04-24 is
-    # still present at org level).
-    runs-on: [self-hosted, hydra]
-    # CI runs ON node-8, as root, where /etc/hydra/jev.env holds the real Jev
+    # 2026-10-27: on the in-cluster `ovh-hydra` ARC fleet, off node-8 (see the note above
+    # `validate`), and SHARDED in two. A runner pod gets 1 CPU requested / 2 CPU limit, not
+    # node-8's 24 cores, so one job at `--jobs 8` would be ~4x oversubscribed and the
+    # timing-sensitive watchdog suites would miss deadlines nondeterministically — the very
+    # failure #1403 measured on node-8. Two shards at `--jobs 4` each split the files
+    # round-robin from the slowest-first list below, so each shard gets every other long pole.
+    runs-on: ovh-hydra
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    # Until 2026-10-27 this job ran ON node-8, as root, where /etc/hydra/jev.env holds the real Jev
     # key and /var/lib/hydra-jev/shadow is the PRODUCTION shadow log that the
     # Phase 3 decisions are made from. Any test that reaches a real jev.sh or a
     # default shadow path without overriding it would make a real API call
@@ -1209,11 +1283,12 @@ jobs:
     # found 181 fixture rows there, some with rc 0 from real calls, including
     # rows written by this job after #1013 merged. These defaults fence every
     # test in this job off at once; a test that needs a key or a dir still sets
-    # its own, which overrides these.
+    # its own, which overrides these. On ovh-hydra those files do not exist at all, so the
+    # fence is now belt-and-braces; it stays so a re-run on node-8 (rollback) is still safe.
     env:
       JEV_ENV_FILE: /dev/null
-      JEV_SHADOW_DIR: /tmp/hydra-ci-jev-shadow-${{ github.run_id }}-${{ github.job }}
-      JEV_EVAL_DIR: /tmp/hydra-ci-jev-eval-${{ github.run_id }}-${{ github.job }}
+      JEV_SHADOW_DIR: /tmp/hydra-ci-jev-shadow-${{ github.run_id }}-${{ github.job }}-${{ matrix.shard }}
+      JEV_EVAL_DIR: /tmp/hydra-ci-jev-eval-${{ github.run_id }}-${{ github.job }}-${{ matrix.shard }}
       MUSO_SLACK_ENV_FILE: /dev/null
     steps:
       - name: Checkout
@@ -1236,24 +1311,12 @@ jobs:
       - name: Host preflight — /dev/null must be a char device
         run: bash scripts/assert-host-devnull.sh
 
-      - name: Ensure bats + jq + sqlite3 installed
-        run: |
-          set -e
-          if ! command -v bats >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y bats
-          fi
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
-          # rollback.bats and deploy-plugin-pin-stops-gateway.bats build state-DB
-          # fixtures (pragma user_version) with the sqlite3 CLI; without it they die
-          # rc=127 before exercising the runtime-restore guard (MUS-5079).
-          if ! command -v sqlite3 >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y sqlite3
-          fi
-          bats --version
-          jq --version
-          sqlite3 --version
+      - name: Ensure bats + parallel + jq + sqlite3 + node installed
+        # scripts/ci/arc-toolchain.sh: bats, GNU parallel (`bats --jobs` refuses to run
+        # without it), sqlite3 (rollback.bats and deploy-plugin-pin-stops-gateway.bats build
+        # state-DB fixtures with it; without it they die rc=127 — MUS-5079), and node >= 22
+        # (the image's node 20 has no node:sqlite, which ~50 cases drive).
+        run: bash scripts/ci/arc-toolchain.sh bats
 
       - name: Run all bats suites under scripts/ + ops-admin gate tests
         # Discovers every *.bats file under scripts/ so a future
@@ -1376,8 +1439,7 @@ jobs:
             exit 0
           fi
           count=$(echo "$files" | wc -l | tr -d ' ')
-          echo "Running $count bats file(s):"
-          echo "$files" | sed 's/^/  /'
+          echo "Discovered $count bats file(s) across both shards."
           # Parallel across FILES, serial within a file (MUS-11315, from the MUS-7954
           # audit on node-8: corpus 1493 s serial -> 279 s at --jobs 8, identical
           # 6497-test name set). Slowest files go first so the long poles start at
@@ -1397,6 +1459,13 @@ jobs:
           # than an hour of red.
           # Rollback: `--jobs 8 --no-parallelize-within-files` is still the throughput
           # knee IF this job ever runs on a box that is not also serving production.
+          #
+          # 2026-10-27 (later, PR CI off node-8): this job now runs on the in-cluster
+          # `ovh-hydra` ARC fleet (2 CPU limit per pod, see the job header), so the corpus is
+          # split over two shards at --jobs 4 each. Measured in the ovh-ubuntu r8 image as
+          # `runner`, capped at 2 CPU / 2Gi: shard 1 3,664 cases in 489 s, shard 2 4,084 in
+          # 496 s. --jobs 4 also keeps pr-validate-node8-cap.bats' bound if a rollback puts
+          # this job back on node-8.
           slow="scripts/tests/merge-landing-watchdog.bats
           scripts/tests/rollback.bats
           scripts/tests/close-duplicate-conversations.bats
@@ -1411,13 +1480,30 @@ jobs:
           scripts/tests/qa-review-reconcile.bats"
           ordered=$( { for f in $slow; do grep -Fx -- "$f" <<<"$files" || true; done
                        grep -vFx -- "$slow" <<<"$files" || true; } )
+          # Round-robin over the slowest-first order, so each shard gets every other long
+          # pole. Every discovered file lands in exactly one shard; the count check below
+          # makes a dropped file a red job, not a silently shorter suite.
+          shard="${{ matrix.shard }}"
+          mine=$(awk -v n=2 -v i="$shard" 'NF && (NR - 1) % n == i - 1' <<<"$ordered")
+          other=$(awk -v n=2 -v i="$shard" 'NF && (NR - 1) % n != i - 1' <<<"$ordered")
+          total=$(( $(grep -c . <<<"$mine" || true) + $(grep -c . <<<"$other" || true) ))
+          if [ "$total" -ne "$count" ]; then
+            echo "::error::shard split covers $total of $count discovered bats files"
+            exit 1
+          fi
+          echo "Shard $shard/2 runs $(grep -c . <<<"$mine" || true) of $count file(s):"
+          echo "$mine" | sed 's/^/  /'
           # HOST-WIDE SLOT (2026-10-27 ruling): at most one bats suite per box. The
           # flock is per host, not per runner service, so the several hydra runners on
           # node-8 cannot each start a suite. Waiting is bounded (45 min) and a timeout is
           # an ::error:: + non-zero exit — never a silent skip, never an unslotted run.
+          # On an ovh-hydra pod the box IS the pod, so the slot is always free there; it
+          # stays so a rollback to node-8 keeps the cap without another edit.
+          # `host-systemd` cases drive the real systemd-run, which a pod does not have; they
+          # run in the node-8 job instead (node8-handoff), so each case still runs exactly once.
           # shellcheck disable=SC2086
           scripts/bats-slot.sh --lock /var/lock/hydra-bats.lock --timeout 2700 -- \
-            bats --jobs 4 --no-parallelize-within-files $ordered
+            bats --jobs 4 --no-parallelize-within-files --filter-tags '!host-systemd' $mine
 
   py-syntax:
     name: Python syntax check (py_compile)
@@ -1425,7 +1511,8 @@ jobs:
     # under scripts/, skills-all/, and workspaces/ but nothing in CI
     # catches a syntax typo before deploy. py_compile is ~5s and
     # surfaces typos / mis-paste / partial saves immediately.
-    runs-on: [self-hosted, hydra]
+    # 2026-10-27: ovh-hydra (stdlib python3 only; see the note above `validate`).
+    runs-on: ovh-hydra
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -1456,8 +1543,11 @@ jobs:
     # Stdlib unittest only (no pip, no network) — same bare python3 as
     # py-syntax. Target the module by name on purpose: a broad discover would
     # import the pytest-based tests/ outreach suite, which has no CI deps.
-    runs-on: [self-hosted, hydra]
-    # CI runs ON node-8, as root, where /etc/hydra/jev.env holds the real Jev
+    # 2026-10-27: ovh-hydra (see the note above `validate`). The forensics suites need
+    # PyMuPDF / OpenCV / Pillow / tesseract, which node-8 had installed by hand; the pod gets
+    # node-8's exact versions from scripts/ci/requirements-arc.txt.
+    runs-on: ovh-hydra
+    # Until 2026-10-27 this job ran ON node-8, as root, where /etc/hydra/jev.env holds the real Jev
     # key and /var/lib/hydra-jev/shadow is the PRODUCTION shadow log that the
     # Phase 3 decisions are made from. Any test that reaches a real jev.sh or a
     # default shadow path without overriding it would make a real API call
@@ -1475,6 +1565,15 @@ jobs:
         uses: actions/checkout@v5
       - name: Host preflight — /dev/null must be a char device
         run: bash scripts/assert-host-devnull.sh
+      # The wheels are ~100 MB (OpenCV, PyMuPDF, numpy); cache the downloaded wheels so a
+      # fresh pod does not refetch them from PyPI on every run. Keyed on the pin file.
+      - name: Cache pinned wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/hydra-ci/wheels
+          key: hydra-pip-${{ runner.os }}-${{ hashFiles('scripts/ci/requirements-arc.txt') }}
+      - name: Ensure tesseract + pinned python wheels installed
+        run: bash scripts/ci/arc-toolchain.sh python
       - name: Run watchdog behavioral tests
         run: |
           set -euo pipefail
@@ -1737,7 +1836,7 @@ jobs:
         # directly, same bare python3.
         run: |
           set -euo pipefail
-          # This job runs ON node-8: never let a test write the production
+          # Never let a test write the production (on node-8, the job's old home)
           # /var/lib/hydra/credit-review/run.log (firstmate 056). Each suite also
           # imports scripts/tests/credit_test_env.py, which forces its own temp log.
           export CREDIT_REVIEW_LOG="${RUNNER_TEMP:-/tmp}/credit-review-test-run.log"
@@ -1832,8 +1931,10 @@ jobs:
     # as a runtime entry, requiring compiled `dist/index.js`. Without
     # this CI check the failure only surfaces post-deploy when the
     # gateway can't load the plugin (incident PR #302).
-    runs-on: [self-hosted, hydra]
-    # CI runs ON node-8, as root, where /etc/hydra/jev.env holds the real Jev
+    # 2026-10-27: ovh-hydra (see the note above `validate`); node + pnpm come from
+    # scripts/ci/arc-toolchain.sh at node-8's versions.
+    runs-on: ovh-hydra
+    # Until 2026-10-27 this job ran ON node-8, as root, where /etc/hydra/jev.env holds the real Jev
     # key and /var/lib/hydra-jev/shadow is the PRODUCTION shadow log that the
     # Phase 3 decisions are made from. Any test that reaches a real jev.sh or a
     # default shadow path without overriding it would make a real API call
@@ -1851,23 +1952,11 @@ jobs:
         uses: actions/checkout@v5
       - name: Host preflight — /dev/null must be a char device
         run: bash scripts/assert-host-devnull.sh
-      - name: Ensure pnpm available
-        # The hydra runner doesn't have pnpm pre-installed (the gateway
-        # uses `openclaw plugins install` which handles deps internally,
-        # not pnpm). Install via npm if missing. node is present because
-        # the gateway runs on it.
-        run: |
-          set -e
-          if ! command -v node >/dev/null 2>&1; then
-            echo "::error::node not found on runner"
-            exit 1
-          fi
-          if ! command -v pnpm >/dev/null 2>&1; then
-            echo "pnpm not found — installing via npm…"
-            npm install -g pnpm@10
-          fi
-          pnpm --version
-          node --version
+      - name: Ensure node + pnpm available
+        # The runner image ships node 20 and no pnpm; the gateway on node-8 runs node 24 and
+        # this job used to borrow it. scripts/ci/arc-toolchain.sh installs node-8's node and
+        # pnpm versions into the runner's home and puts them on PATH for later steps.
+        run: bash scripts/ci/arc-toolchain.sh node
       - name: deploy install path matches CI (pnpm --frozen-lockfile)
         # Guards the #385 / Deploy HYDRA #217 class-of-bug: this CI job
         # installs plugins with `pnpm install --frozen-lockfile` (pinned,
@@ -2022,7 +2111,8 @@ jobs:
     # runner_id=0, runner_name="" — runner never assigned). Until that
     # org-level issue is resolved (Actions billing / runner pool), use
     # the self-hosted hydra-node8 runner the other jobs run on.
-    runs-on: [self-hosted, hydra]
+    # 2026-10-27: ovh-hydra, the in-cluster repo-level fleet (see the note above `validate`).
+    runs-on: ovh-hydra
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -2030,11 +2120,7 @@ jobs:
         run: bash scripts/assert-host-devnull.sh
 
       - name: Ensure shellcheck installed
-        run: |
-          if ! command -v shellcheck >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y shellcheck
-          fi
-          shellcheck --version | head -1
+        run: bash scripts/ci/arc-toolchain.sh lint
 
       - name: Run shellcheck on hydra bash infrastructure
         run: |

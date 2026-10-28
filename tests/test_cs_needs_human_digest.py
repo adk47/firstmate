@@ -26,6 +26,25 @@ d = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(d)
 
 
+# HERMETIC BY DEFAULT (2026-10-27). The main()-level tests that land a conversation in the
+# needs_human bucket fire the Jev shadow sample, whose build_state GETs the conversation from
+# the REAL api.intercom.io with the fixture token "t" — 401 every time, swallowed by the shadow's
+# never-raise boundary, so the suite stayed green while it made live calls (seen when PR
+# Validation moved off node-8 onto a clean runner). No test here may reach the network: a test
+# that wants a response patches urlopen itself (inner patches win), anything else fails fast.
+_NO_NETWORK = mock.patch.object(
+    d.urllib.request, "urlopen",
+    side_effect=OSError("network disabled in tests/test_cs_needs_human_digest.py"))
+
+
+def setUpModule():
+    _NO_NETWORK.start()
+
+
+def tearDownModule():
+    _NO_NETWORK.stop()
+
+
 def conv(cid="c1", email="alice@example.com", lar=200, lcr=100, url="", created_at=0,
          is_inbound=True):
     """Conversation shaped like fetch_open_convs output. Defaults = admin-last,
