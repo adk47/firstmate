@@ -758,6 +758,12 @@ class GateTests(unittest.TestCase):
         o = gate.decide(h3_verdict="SUSPECT", kind="letter", ex=validate({**GOOD_ANSWER, "doc_type": "letter"}),
                         findings=[], checks=base + [unreadable], account_held=False)
         self.assertEqual((o.outcome, o.need, o.account_hold), (gate.UNVERIFIABLE, gate.NEED_READABLE, False))
+        # QA #1452: an OTHERWISE verifiable document (H3 GENUINE, DSP positive) is not verified on a misread sender.
+        o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=self.good_ex, findings=[],
+                        checks=[c for c in checks(xc_dsp=xc.POSITIVE) if c.step != "xc_domain"] + [unreadable],
+                        account_held=False)
+        self.assertEqual((o.outcome, o.need), (gate.UNVERIFIABLE, gate.NEED_READABLE))
+        self.assertIn("sender address unreadable", o.reason)
 
     def test_account_hold_blocks_verification(self):
         o = self.decide(held=True, xc_dsp=xc.POSITIVE)
