@@ -354,6 +354,80 @@ class SameSenderDistinctClaims(Harness):
         self.go({"a1": thread("Label Notices <no-reply@labela.com>")})
         self.assertEqual(self.acks, [])
 
+    def three_siblings(self):
+        return {"a1": thread("claims@labela.com"),
+                "b2": thread("claims@labela.com", internal=FIRST_MSG + 36000),
+                "c3": thread("claims@labela.com", internal=FIRST_MSG + 72000)}
+
+    def test_label_failure_after_ack_and_page_does_not_resend(self):
+        """hydra#1361 bot NO-GO @25fd96a: the label call ran after the ack and the page but before the
+        row was ledgered, so a label failure lost the confirmed markers and every 15-min run re-sent both."""
+        class LabelFailsGmail(FakeGmail):
+            def create(self, **kw):
+                self._r = {"id": "L1"}
+                return self
+
+            def modify(self, **kw):
+                raise RuntimeError("label boom")
+        threads = {"a1": thread("claims@labela.com")}
+        li.svc = lambda subject, scope: LabelFailsGmail(threads)
+        args = ("--page", "--ack", "--label")
+
+        def run():
+            argv, sys.argv = sys.argv, ["legal-intake.py", *args]
+            try:
+                with self.assertRaises(SystemExit) as cm:
+                    import contextlib, io
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        li.main()
+            finally:
+                sys.argv = argv
+            self.assertEqual(cm.exception.code, 2)
+            return json.load(open(li.LEDGER))["legal@muso.ai:a1"]
+        row = run()
+        self.assertTrue(row["acked"])
+        self.assertRegex(row["paged"], r"^\d+\.\d+$")
+        self.assertEqual((len(self.acks), len(self.posts)), (1, 1))
+        run()
+        self.assertEqual((len(self.acks), len(self.posts)), (1, 1))
+
+    def test_sibling_pick_uses_the_confirmed_ack_not_the_first_match(self):
+        """hydra#1361 bot NO-GO @25fd96a: the first matching sibling was the only one consulted, so
+        a1's failed ack hid b2's confirmed one and c3 sent a second ack."""
+        results = iter([""])
+        ok = []
+
+        def flaky_ack(to, subj, body):
+            mid = next(results, None)
+            if mid is None:
+                mid = f"ack{len(ok) + 1}"
+                ok.append(mid)
+            return mid
+        li.send_ack = flaky_ack
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            led = self.run_intake(self.three_siblings(), args=("--page", "--ack"), code=2)
+        self.assertEqual(ok, ["ack1"])
+        self.assertEqual(led["legal@muso.ai:c3"]["ack_ref"], "dup-of:" + led["legal@muso.ai:b2"]["ack_ref"])
+
+    def test_sibling_pick_uses_the_confirmed_page_not_the_first_match(self):
+        """hydra#1361 bot NO-GO @25fd96a: a1's failed page hid b2's confirmed one, so c3 missed it
+        and posted a 'different sender' note for the same sender."""
+        calls = []
+
+        def flaky_page(token, text_, thread_ts=None):
+            calls.append(thread_ts)
+            if len(calls) == 1:
+                return ""
+            self.posts.append({"text": text_, "thread_ts": thread_ts})
+            return f"1761000{len(self.posts):03d}.000100"
+        li.post_page = flaky_page
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            led = self.run_intake(self.three_siblings(), args=("--page", "--ack"), code=2)
+        self.assertEqual([p["thread_ts"] for p in self.posts], [None])
+        self.assertEqual(led["legal@muso.ai:c3"]["paged"], "dup-of:" + led["legal@muso.ai:b2"]["paged"])
+
 
 class SendAckExecution(unittest.TestCase):
     """MUS-18508 QA-bot Critical: send_ack built a bash -c string, so a crafted inbound

@@ -223,6 +223,9 @@ def main():
                             "first_msg": msgs[0].get("internalDate"), "last_msg": msgs[-1].get("internalDate"),
                             "ids": ids, "on_register": any(i.split(":")[1] in reg for i in ids),
                             "last_seen": time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime())})
+                # Ledgered before any side effect: row is mutated in place, so a later failure (e.g. the label
+                # call) still persists the confirmed acked/paged markers instead of re-sending next run.
+                ledger[key] = row
                 # Both dedupe arms below need the notice identity (hash of class + normalised subject + ids).
                 nkey = notice_key(cls, h0.get("subject", ""), ids)
                 row["notice_key"] = nkey
@@ -236,15 +239,18 @@ def main():
                 # A sibling is the same request only if it is the same notice (same notice_key). When identity
                 # is uncertain we page (MUS-20285): a row with a different key, or a legacy row written before
                 # notice_key existed, never suppresses a new claim; a duplicate beats a silent legal notice.
-                sibling = next((r for k, r in ledger.items() if k != key and r.get("req_key") == req_key
-                                and abs(int(r.get("first_msg") or 0) - fm) < 3 * 86400000
-                                and r.get("notice_key") == nkey), None)
+                siblings = [r for k, r in ledger.items() if k != key and r.get("req_key") == req_key
+                            and abs(int(r.get("first_msg") or 0) - fm) < 3 * 86400000
+                            and r.get("notice_key") == nkey]
                 row["req_key"] = req_key
-                if sibling is not None:
-                    if sibling.get("acked") and not row.get("acked"):
-                        row["acked"] = True; row["ack_ref"] = "dup-of:" + str(sibling.get("ack_ref"))
-                    if sibling.get("paged") and not row.get("paged"):
-                        row["paged"] = "dup-of:" + str(sibling.get("paged"))
+                # Each decision inherits from a sibling holding the CONFIRMED marker, not just the first match
+                # (hydra#1361 bot NO-GO @25fd96a): a failed ack/page on an earlier sibling must not hide a later success.
+                ack_sib = next((r for r in siblings if r.get("acked")), None)
+                page_sib = next((r for r in siblings if r.get("paged")), None)
+                if ack_sib is not None and not row.get("acked"):
+                    row["acked"] = True; row["ack_ref"] = "dup-of:" + str(ack_sib.get("ack_ref"))
+                if page_sib is not None and not row.get("paged"):
+                    row["paged"] = "dup-of:" + str(page_sib.get("paged"))
                 # Second arm: the SAME notice from a different address (2026-10-23: david@demandage.com and
                 # demandage@gmail.com, 36 s apart, same four profiles). Needs linked Muso ids: without them
                 # two senders with the same subject are two unrelated takedowns.
@@ -317,7 +323,6 @@ def main():
                         want.append(ensure_label(g, "OpenClaw/unanswered", labels))
                     g.users().threads().modify(userId="me", id=tid, body={"addLabelIds": want}).execute()
                     row["labelled"] = True
-                ledger[key] = row
         except Exception as e:
             failed += 1
             print(f"ERROR {alias}: {str(e)[:160]}")
