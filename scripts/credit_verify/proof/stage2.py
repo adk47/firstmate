@@ -254,7 +254,8 @@ def held_rows(ledger_path: str = DECIDE_LEDGER) -> list[Held]:
     db = sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True, timeout=30)
     try:
         rows = db.execute(
-            "WITH last AS (SELECT request_id, MAX(id) id FROM decisions WHERE mode='apply' GROUP BY request_id) "
+            "WITH last AS (SELECT request_id, MAX(id) id FROM decisions WHERE mode IN ('apply', 'judge') "
+            "GROUP BY request_id) "
             "SELECT d.request_id, d.user_id, d.paid_priority, d.decided_at FROM decisions d JOIN last USING(id) "
             "WHERE d.decision='hold' AND d.reason LIKE 'proof on file%'").fetchall()
     finally:

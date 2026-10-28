@@ -882,5 +882,35 @@ class FableSample1020Tests(unittest.TestCase):
         self.assertEqual(stage2.summary(db), {"need_more": {"paid": 0, "free": 1}})
 
 
+class HeldRowsJudgeMode(unittest.TestCase):
+    """Fable [key=l11b], 2026-10-27: the decider runs judge-only (decide --mode judge: writes
+    nothing to core, ledger mode='judge'); stage 2 takes its "proof on file" holds from apply AND
+    judge decisions, the latest of either per request; shadow rows never count."""
+
+    def test_judge_holds_feed_stage2_and_shadow_never_does(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "ledger.sqlite3")
+            db = sqlite3.connect(path)
+            db.execute("CREATE TABLE decisions (id INTEGER PRIMARY KEY, run_id TEXT, decided_at TEXT, request_id TEXT,"
+                       " user_id INTEGER, paid_priority INTEGER, decision TEXT, reason TEXT, mode TEXT)")
+            held = "proof on file: human review (a document is already on file; never ask again)"
+            ids = [f"00000000-0000-0000-0000-00000000000{i}" for i in range(1, 6)]
+            rows = [(ids[0], "hold", held, "judge"),                  # judge hold -> counts
+                    (ids[1], "hold", held, "apply"),                  # apply hold -> counts
+                    (ids[2], "hold", held, "shadow"),                 # shadow hold -> never
+                    (ids[3], "hold", held, "apply"),                  # apply hold, then a later judge approve
+                    (ids[3], "approve", "x", "judge"),                #   -> the latest is not a hold
+                    (ids[4], "approve", "x", "apply"),                # apply approve, then a later judge hold
+                    (ids[4], "hold", held, "judge")]                  #   -> held
+            for i, (rid, dec, why, mode) in enumerate(rows):
+                db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, paid_priority, decision,"
+                           " reason, mode) VALUES ('r', ?, ?, 7, 1, ?, ?, ?)", (f"2026-10-27T0{i}:00:00Z", rid, dec,
+                                                                                  why, mode))
+            db.commit()
+            db.close()
+            got = {h.request_id for h in stage2.held_rows(path)}
+            self.assertEqual(got, {ids[0], ids[1], ids[4]})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

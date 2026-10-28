@@ -1256,8 +1256,8 @@ class RunResult:
     def line(self) -> str:
         sk = sum(self.skipped_by_server.values())
         skd = ", ".join(f"{k} {v}" for k, v in sorted(self.skipped_by_server.items()))
-        verb = "would approve" if self.mode == "shadow" else "approved (provisional)"
-        verb2 = "would request support" if self.mode == "shadow" else "support requested"
+        verb = "would approve" if self.mode in ("shadow", "judge") else "approved (provisional)"
+        verb2 = "would request support" if self.mode in ("shadow", "judge") else "support requested"
         jev = f", {self.jev_calls} Jev (Codex unavailable; support or defer only)" if self.jev_calls else ""
         return (f"credit-trust-decide {self.mode} run {self.run_id}: {self.scanned} held rows decided - "
                 f"{self.approved} {verb}, {self.support} {verb2}, {self.deferred} deferred, {self.held} held for a human, "
@@ -1271,7 +1271,7 @@ class RunResult:
                 + f"{self.held_reasked} held as already asked once, "
                 f"{self.deferred_window} deferred for the per-user 24h window, {self.deferred_ask_cap} deferred by the "
                 f"daily ask cap, {self.deferred_proof_unknown} deferred "
-                f"(proof status unknown), {self.support} {'would be sent' if self.mode == 'shadow' else 'sent'}."
+                f"(proof status unknown), {self.support} {'would be sent' if self.mode in ('shadow', 'judge') else 'sent'}."
                 + (f" {self.note}" if self.note else "")
                 + (f" WRITE ERRORS: {'; '.join(self.write_errors)[:400]}" if self.write_errors else ""))
 
@@ -1307,8 +1307,12 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         max_model_calls: int = 120,
         workers: int = 6, budget_s: int = 720, rows: list[dict[str, Any]] | None = None,
         clock: Callable[[], datetime] | None = None) -> RunResult:
-    if mode not in ("shadow", "apply"):
-        raise ValueError("mode must be shadow or apply")
+    # judge (Fable [key=l11b], 2026-10-27): exactly shadow - no approval PUT, no support/ask write,
+    # no provisional approval - but the ledger rows carry mode='judge' so stage 2 (which reads
+    # only apply and judge "proof on file" holds) gets input while the approve path stays off.
+    # No approval or ask reader counts a judge row: they select mode='apply'.
+    if mode not in ("shadow", "apply", "judge"):
+        raise ValueError("mode must be shadow, apply or judge")
     ensure_schema(db)
     # `clock` is the wall clock at the WRITE boundary (a run can cross UTC midnight
     # between deciding and sending); an injected `now` pins both for tests.
@@ -1492,7 +1496,7 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
 
     approve_ids = [d.request_id for d in decisions if d.decision == "approve"]
     support_ids = [d.request_id for d in decisions if d.decision == "support"]
-    if mode == "shadow":
+    if mode in ("shadow", "judge"):
         res.approved, res.support = len(approve_ids), len(support_ids)
         for rid in approve_ids + support_ids:
             record_outcome(db, res.run_id, rid, "approve" if rid in approve_ids else "support", "shadow", now)

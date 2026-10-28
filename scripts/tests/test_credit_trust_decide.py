@@ -450,6 +450,26 @@ class Decisions(Base):
         self.assertEqual((res.approved, w.calls), (1, []))
         self.assertIn("would approve", res.line())
 
+    def test_judge_mode_writes_nothing_and_records_judge_rows(self):
+        # Fable [key=l11b]: judge = shadow (no approval PUT, no ask, no provisional) with mode='judge'
+        # in the ledger, so stage 2 gets its "proof on file" holds while the approve path is off.
+        res, w = self.go([req(uuid_of(27), track="t3")], judge=FakeJudge(credible()), mode="judge")
+        self.assertEqual((res.mode, res.approved, w.calls), ("judge", 1, []))
+        self.assertIn("would approve", res.line())
+        self.assertNotIn("APPLY REFUSED", res.line())
+        modes = {r[0] for r in self.db.execute("SELECT mode FROM decisions")}
+        self.assertEqual(modes, {"judge"})
+        outs = {r[0] for r in self.db.execute("SELECT outcome FROM decision_outcomes")}
+        self.assertEqual(outs, {"shadow"})                      # nothing was written to core
+        self.assertEqual(decide.approvals_today_by_user(self.db, "2000-01-01T00:00:00Z"), {})
+
+    def test_judge_mode_never_writes_even_when_the_registry_is_approved_or_not(self):
+        for approved in (True, False):
+            decide.REGISTRY.write_text(json.dumps({"automations": {"credit-trust-decide": {
+                "approved": approved, "approved_by": "t", "approval_ref": "t"}}}))
+            res, w = self.go([req(uuid_of(28 + approved), track="t3")], judge=FakeJudge(credible()), mode="judge")
+            self.assertEqual((res.mode, w.calls), ("judge", []), approved)
+
     def test_ledger_is_append_only_and_revert_lists_the_run(self):
         res, _ = self.go([req(uuid_of(26), track="t3")], judge=FakeJudge(credible()))
         with self.assertRaises(sqlite3.DatabaseError):
@@ -920,6 +940,15 @@ class NeverReAsk(Base):
 
     def support_writes(self, w):
         return [i for c in w.calls if c["status"] == decide.UVN for i in c["ids"]]
+
+    def test_judge_mode_records_proof_on_file_holds_and_sends_no_ask(self):
+        self.proof([{"user_id": 701, "request_id": None, "kind": "pending_doc", "source": "intercom", "ref": "c1"}])
+        res, w = self.go([req(uuid_of(115), uid=701, track="t1"), req(uuid_of(116), uid=704, track="t1")],
+                         self.RAWS, mode="judge")
+        d = self.decisions()
+        self.assertEqual((d[uuid_of(115)]["decision"], d[uuid_of(115)]["mode"]), ("hold", "judge"))
+        self.assertTrue(d[uuid_of(115)]["reason"].startswith("proof on file: human review"))
+        self.assertEqual((w.calls, self.support_writes(w)), ([], []))     # the ask for 116 is only "would"
 
     def test_proof_on_file_holds_the_ask_but_never_blocks_an_approval(self):
         self.proof([{"user_id": 701, "request_id": None, "kind": "pending_doc", "source": "intercom", "ref": "c1"},

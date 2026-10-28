@@ -840,7 +840,8 @@ def parser() -> argparse.ArgumentParser:
     e.set_defaults(fn=cmd_eval)
 
     dc = sub.add_parser("decide", help="trust-yet-verify decisions on the held queue (credit-trust-decide)")
-    dc.add_argument("--mode", choices=["shadow", "apply"], default="shadow")
+    dc.add_argument("--mode", choices=["shadow", "apply", "judge"], default="shadow",
+                    help="judge: decide and record (ledger mode='judge', read by stage 2) but write nothing")
     dc.add_argument("--max-rows", type=int, default=None, help="held rows per run (default: policy, 500)")
     dc.add_argument("--workers", type=int, default=6)
     dc.add_argument("--budget-s", type=int, default=720, help="stop building evidence after this many seconds")

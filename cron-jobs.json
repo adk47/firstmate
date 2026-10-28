@@ -1417,7 +1417,7 @@
           "/opt/hydra/scripts/credit-review.py",
           "decide",
           "--mode",
-          "apply"
+          "judge"
         ],
         "cwd": "/opt/hydra",
         "timeoutSeconds": 1200
