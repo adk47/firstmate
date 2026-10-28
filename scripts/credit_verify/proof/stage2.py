@@ -78,6 +78,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 import urllib.request
 import uuid
 from collections import defaultdict
@@ -282,17 +283,38 @@ class Request:
 Trino = Callable[[str], str]
 
 
-def trino_query(sql: str) -> str:
+_TRINO_NOISE = re.compile(r"org\.jline|^WARNING: Unable to create a system terminal|^SET SESSION$|"
+                          r"^command terminated with exit code")
+TRINO_TIME_LIMIT = "exceeded the maximum execution time limit"
+TRINO_RETRY_WAIT_S = 5.0
+
+
+def trino_error(stderr: str) -> str:
+    """The Trino CLI's own failure line, without the kubectl/jline noise that used to fill the kept
+    300 characters (2026-10-28: every reader error read 'org.jline.utils.Log logr ... dumb terminal')."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip() and not _TRINO_NOISE.search(ln.strip())]
+    return " | ".join(lines)[-300:] or (stderr or "").strip()[-300:]
+
+
+def trino_query(sql: str, *, sleep: Callable[[float], None] = time.sleep, run: Any = subprocess.run) -> str:
     """Read-only SELECT through the repo's Trino wrapper, with a query time
-    limit; CSV on stdout."""
+    limit; CSV on stdout. Trino is shared with the stats and cube jobs: a query that hits the time
+    limit under their load is retried ONCE (2026-10-28: ~1 in 9 reader request look-ups timed out at
+    60 s that take 1.9 s on an idle coordinator). Any other failure raises at once."""
     if not sql.lstrip().upper().startswith("SELECT"):
         raise ValueError("stage 2 only runs SELECTs")
     stmt = f"SET SESSION query_max_execution_time = '{TRINO_TIMEOUT_S}s'; {sql}"
-    p = subprocess.run(["bash", TRINO], input=stmt, capture_output=True, text=True,
-                       timeout=TRINO_TIMEOUT_S + 60, check=False)
-    if p.returncode != 0:
-        raise RuntimeError(f"trino rc={p.returncode}: {p.stderr.strip()[-300:]}")
-    return p.stdout
+    for attempt in (1, 2):
+        p = run(["bash", TRINO], input=stmt, capture_output=True, text=True,
+                timeout=TRINO_TIMEOUT_S + 60, check=False)
+        if p.returncode == 0:
+            return p.stdout
+        err = trino_error(p.stderr)
+        if attempt == 1 and TRINO_TIME_LIMIT in err:
+            sleep(TRINO_RETRY_WAIT_S)
+            continue
+        raise RuntimeError(f"trino rc={p.returncode}: {err}")
+    raise AssertionError("unreachable")
 
 
 def _pg_array(v: str) -> list[str]:

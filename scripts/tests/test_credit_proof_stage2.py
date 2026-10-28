@@ -649,6 +649,39 @@ class InputTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             stage2.trino_query("DELETE FROM postgresql_core.public.credit_requests")
 
+    def test_trino_time_limit_is_retried_once_and_errors_keep_the_cause(self):
+        # 2026-10-28: ~1 in 9 reader request look-ups hit the 60 s limit under the shared coordinator's load,
+        # and the kept error tail was only kubectl/jline noise.
+        import subprocess as sp
+        noise = ("Oct 28, 2026 5:29:02 PM org.jline.utils.Log logr\nWARNING: Unable to create a system terminal, "
+                 "creating a dumb terminal (enable debug logging for more information)\nSET SESSION\n")
+        late = noise + "Query 2026_x failed: Query exceeded the maximum execution time limit of 60.00s\n\n" \
+                       "command terminated with exit code 1\n"
+        res = lambda rc, err="", out="": sp.CompletedProcess([], rc, out, err)   # noqa: E731
+        calls, slept = [], []
+
+        def run_seq(seq):
+            it = iter(seq)
+
+            def run(*a, **k):
+                calls.append(k["input"])
+                return next(it)
+            return run
+        out = stage2.trino_query("SELECT 1", sleep=slept.append, run=run_seq([res(1, late), res(0, out='"1"\n')]))
+        self.assertEqual((out, len(calls), slept), ('"1"\n', 2, [stage2.TRINO_RETRY_WAIT_S]))
+        calls.clear()
+        with self.assertRaises(RuntimeError) as cm:                      # twice: raise, with the real cause
+            stage2.trino_query("SELECT 1", sleep=slept.append, run=run_seq([res(1, late), res(1, late)]))
+        self.assertEqual(len(calls), 2)
+        self.assertIn("Query exceeded the maximum execution time limit of 60.00s", str(cm.exception))
+        self.assertNotIn("jline", str(cm.exception))
+        calls.clear()
+        with self.assertRaises(RuntimeError) as cm:                      # any other failure: no retry
+            stage2.trino_query("SELECT 1", sleep=slept.append,
+                               run=run_seq([res(1, noise + "Query y failed: line 1:8: Column 'z' cannot be resolved\n")]))
+        self.assertEqual(len(calls), 1)
+        self.assertIn("cannot be resolved", str(cm.exception))
+
     def test_postgres_arrays_and_names(self):
         self.assertEqual(stage2._pg_array('{Producer,"Mixing Engineer",Mastering}'),
                          ["Producer", "Mixing Engineer", "Mastering"])
