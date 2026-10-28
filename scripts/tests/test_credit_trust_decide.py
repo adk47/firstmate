@@ -111,7 +111,11 @@ class Writer:
 STAGE2_SCHEMA = """CREATE TABLE stage2_shadow (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
   judged_at TEXT NOT NULL, request_id TEXT NOT NULL, role TEXT NOT NULL, user_id INTEGER, paid INTEGER,
   popularity INTEGER, tier TEXT, outcome TEXT NOT NULL, reason TEXT NOT NULL, verdict TEXT, proof_id TEXT,
-  source_ref TEXT, doc_kind TEXT, documents INTEGER NOT NULL, detail_json TEXT NOT NULL, analyzer_version TEXT);"""
+  source_ref TEXT, doc_kind TEXT, documents INTEGER NOT NULL, detail_json TEXT NOT NULL, analyzer_version TEXT);
+CREATE TABLE proof_intake (intake_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, subject TEXT NOT NULL,
+  candidate_request_ids_json TEXT NOT NULL DEFAULT '[]', conversation_id TEXT NOT NULL, source TEXT NOT NULL,
+  file_sha256 TEXT NOT NULL, file_path TEXT, mime TEXT, bytes INTEGER, received_at TEXT NOT NULL,
+  filed_by TEXT NOT NULL, matched_by TEXT, contact_h TEXT, detail_json TEXT, UNIQUE (user_id, file_sha256));"""
 
 
 def stage2_row(path, request_id, role, user_id, outcome, *, reason="r", version=None, doc_kind="contract"):
@@ -934,6 +938,81 @@ class NeverReAsk(Base):
         self.assertEqual((res.support_candidates, res.held_proof, res.support, res.held), (4, 3, 1, 3))
         self.assertIn("4 before filters, 3 held for proof on file", res.line())
         self.assertIn("1 sent", res.line())
+
+    # [key=pof-user-scope] (proof-loop lead 2026-10-27 via firstmate 009): proof on file is scoped to the
+    # REQUEST. A whole-user entry covers only requests that existed when the proof arrived.
+    def at(self, minutes):
+        return (T.NOW + timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+
+    def test_a_whole_user_proof_covers_only_requests_that_existed_when_it_arrived(self):
+        self.proof([{"user_id": 801, "request_id": None, "kind": "pending_doc", "source": "intercom", "ref": "c1",
+                     "proof_at": self.at(-60)}])
+        older, newer = uuid_of(130), uuid_of(131)
+        rows = [req(older, uid=801, track="t1", created=self.at(-120)),
+                req(newer, uid=801, track="t1", created=self.at(-30))]
+        res, w = self.go(rows, self.RAWS)
+        d = self.decisions()
+        self.assertEqual(d[older]["decision"], "hold")
+        self.assertTrue(d[older]["reason"].startswith("proof on file: human review"))
+        self.assertEqual(self.support_writes(w), [newer], "a request created after the newest proof is not covered")
+
+    def test_anything_not_known_keeps_todays_whole_user_cover(self):
+        self.proof([{"user_id": 802, "request_id": None, "kind": "pending_doc", "source": "intercom", "ref": "c1"},
+                    {"user_id": 803, "request_id": None, "kind": "pending_doc", "source": "gmail", "ref": "m1",
+                     "proof_at": self.at(-60)},
+                    {"user_id": 803, "request_id": None, "kind": "pending_doc", "source": "intercom", "ref": "c2"},
+                    {"user_id": 804, "request_id": None, "kind": "pending_doc", "source": "gmail", "ref": "m2",
+                     "proof_at": self.at(-60)}])
+        rows = [req(uuid_of(132), uid=802, track="t1", created=self.at(-30)),       # undated entry
+                req(uuid_of(133), uid=803, track="t1", created=self.at(-30)),       # one dated + one undated
+                req(uuid_of(134), uid=804, track="t1")]                             # request without createdAt
+        rows[2].pop("createdAt")
+        res, w = self.go(rows, self.RAWS)
+        self.assertEqual(self.support_writes(w), [])
+        self.assertTrue(all(self.decisions()[uuid_of(i)]["decision"] == "hold" for i in (132, 133, 134)))
+
+    def test_request_scoped_entries_and_proof_intake_cover_only_their_requests(self):
+        self.proof([{"user_id": 805, "request_id": uuid_of(135), "kind": "pending_doc", "source": "intercom",
+                     "ref": "c1"}])
+        db = sqlite3.connect(decide.STAGE2_STORE)
+        db.execute("INSERT INTO proof_intake (intake_id, user_id, subject, candidate_request_ids_json, conversation_id,"
+                   " source, file_sha256, received_at, filed_by) VALUES ('806:x', 806, 'credit', ?, 'c9', 'intercom',"
+                   " 'x', ?, 'test')", (json.dumps([uuid_of(137).upper()]), self.at(-5)))
+        db.commit()
+        db.close()
+        rows = [req(uuid_of(i), uid=u, track="t1") for i, u in ((135, 805), (136, 805), (137, 806), (138, 806))]
+        res, w = self.go(rows, self.RAWS)
+        d = self.decisions()
+        self.assertEqual([d[uuid_of(i)]["decision"] for i in (135, 137)], ["hold", "hold"])
+        self.assertEqual(sorted(self.support_writes(w)), [uuid_of(136), uuid_of(138)],
+                         "the user's OTHER requests are not covered by a request-scoped entry or a filing")
+
+    def test_an_unreadable_proof_intake_keeps_whole_user_cover_and_says_so(self):
+        self.proof([{"user_id": 807, "request_id": uuid_of(139), "kind": "pending_doc", "source": "intercom",
+                     "ref": "c1"},
+                    {"user_id": 808, "request_id": None, "kind": "pending_doc", "source": "intercom", "ref": "c2",
+                     "proof_at": self.at(-60)}])
+        db = sqlite3.connect(decide.STAGE2_STORE)
+        db.execute("DROP TABLE proof_intake")
+        db.commit()
+        db.close()
+        rows = [req(uuid_of(140), uid=807, track="t1"), req(uuid_of(141), uid=808, track="t1", created=self.at(-30))]
+        res, w = self.go(rows, self.RAWS)
+        self.assertEqual(self.support_writes(w), [], "no scope without proof_intake: nobody newly asked")
+        self.assertTrue(any("proof_intake unreadable" in m for m in self.logged), self.logged)
+
+    def test_a_non_request_id_entry_is_whole_user(self):
+        self.proof([{"user_id": 809, "request_id": "legacy-ticket-12", "kind": "pending_doc", "source": "intercom",
+                     "ref": "c1", "proof_at": self.at(-60)}])
+        proof, why = decide.proof_on_file(now=T.NOW)
+        proof = decide.with_intake(proof)
+        self.assertIsNone(why)
+        self.assertIn(809, proof.user_level)
+        before = decide.Decision(request_id=uuid_of(142), profile_id="p", user_id=809, track_id="t", track_title="t",
+                                 claimed_roles=[], popularity=None, big_track=False, decision="", reason="",
+                                 request_created_at=self.at(-90))
+        after = dataclasses.replace(before, request_id=uuid_of(143), request_created_at=self.at(-10))
+        self.assertEqual((proof.covers(before), proof.covers(after)), (True, False))
 
     def test_stage2_hands_a_covered_request_to_the_gap_ask_never_to_a_support_write(self):
         # Fable 2026-10-26 13:23Z GO 2: need_more -> gap-ask, no_document -> uvn-status. The request

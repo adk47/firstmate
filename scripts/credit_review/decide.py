@@ -330,6 +330,7 @@ class Decision:
     prompt_sha256: str | None = None
     llm_call_id: int | None = None
     conflict: dict[str, Any] | None = None
+    request_created_at: str | None = None    # the credit request's createdAt (proof-on-file request scope)
 
 
 def record_decision(db: sqlite3.Connection, run_id: str, mode: str, d: Decision, at: datetime | None = None) -> None:
@@ -507,7 +508,7 @@ def base_decision(req: dict[str, Any], ev: Evidence) -> Decision:
     return Decision(request_id=ev.request_id, profile_id=ev.profile_id, user_id=int(uid) if isinstance(uid, int) else None,
                     track_id=ev.track_id, track_title=ev.track_title, claimed_roles=list(ev.claimed_roles),
                     popularity=ev.track_popularity, big_track=ev.big_track, decision="", reason="",
-                    catalog=ev.deterministic_summary())
+                    catalog=ev.deterministic_summary(), request_created_at=_created(req))
 
 
 def _defer_unreadable(d: Decision, ev: Evidence, reason: str) -> Decision:
@@ -569,9 +570,35 @@ class ProofOnFile:
     # Request ids stage 2 released to a user ask (stage2_verdicts: need_more -> gap-ask,
     # no_document -> uvn-status; Fable 2026-10-26 13:23Z GO 2). Filled by with_stage2().
     stage2_asks: dict[str, str] = field(default_factory=dict)  # request id -> campaign
+    # Request scope ([key=pof-user-scope], proof-loop lead 2026-10-27 via firstmate 009). Users with a
+    # WHOLE-USER entry (request_id null, or not a credit request id) -> the newest `proof_at` of those
+    # entries, or None when any of them carries no date. `user_ids` keeps its old meaning (every user
+    # with any entry) for the readers that still exclude whole users (score_approve).
+    user_level: dict[int, datetime | None] = field(default_factory=dict)
+    # Request ids a document filed in proof_intake names as a candidate (with_intake()).
+    intake_requests: frozenset[str] = frozenset()
+    # True only once proof_intake was read (with_intake): until then covers() stays whole-user.
+    scoped: bool = False
 
     def covers(self, d: "Decision") -> bool:
-        return d.user_id in self.user_ids or d.request_id.lower() in self.request_ids
+        """Is this credit request covered by a document on file (held for a human, never asked,
+        never provisionally approved)? Per REQUEST: a request-scoped entry or a proof_intake
+        candidate covers its request; a whole-user entry covers only requests that already
+        existed when that proof arrived (created at or before the user's newest `proof_at`).
+        Anything not known stays covered, exactly as before: an undated whole-user entry, a
+        request without createdAt, or a run that could not read proof_intake."""
+        rid = d.request_id.lower()
+        if rid in self.request_ids or rid in self.intake_requests:
+            return True
+        if d.user_id not in self.user_ids:
+            return False
+        if not self.scoped:
+            return True
+        if d.user_id not in self.user_level:
+            return False                 # only request-scoped entries: they cover their own requests
+        newest = self.user_level[d.user_id]
+        created = parse_ts(getattr(d, "request_created_at", None))
+        return newest is None or created is None or created <= newest
 
     def handed_to_ask(self, d: "Decision") -> str:
         """The verify-gate campaign that asks this covered request's user ('' when none): stage 2
@@ -642,30 +669,65 @@ def proof_on_file(path: Path | None = None, now: datetime | None = None
     requests: set[str] = set()
     approved: dict[str, str] = {}
     approved_ids: set[str] = set()
+    user_level: dict[int, datetime | None] = {}
     for e in data["entries"]:
         uid = muso_user_id(e["user_id"])
         if uid is None:
             return None, f"{path} has a user_id that is not a Muso user id: {e['user_id']!r}"[:200]
         rid = e.get("request_id")
+        whole_user = rid is None
         if rid is not None:
             try:
                 rid = str(uuid.UUID(rid))
             except ValueError:
-                # Not a credit request id: it can name no request, but its user is
-                # still covered below (whole-user), so nobody is asked by mistake.
+                # Not a credit request id: it can name no request, so it counts as a
+                # whole-user entry below, and nobody is asked by mistake.
                 rid = rid.strip().lower()
+                whole_user = True
             requests.add(rid)
             if e.get("kind") in APPROVED_PROOF_KINDS:
                 approved_ids.add(rid)
             if e.get("kind") in APPROVED_PROOF_KINDS and str(e.get("ref") or "").strip():
                 approved.setdefault(rid, f"{e.get('source') or 'proof'}:{str(e['ref']).strip()}")
+        if whole_user:
+            at = parse_ts(e.get("proof_at"))          # when the customer sent it; optional in the export
+            if at is None or (uid in user_level and user_level[uid] is None):
+                user_level[uid] = None                # one undated entry keeps the whole user covered
+            else:
+                user_level[uid] = max(at, user_level.get(uid) or at)
         users.add(uid)
     if now - ts > PROOF_MAX_AGE:
         return None, f"{path} is stale (generated {utc(ts)})"
     if ts - now > PAYING_USERS_MAX_SKEW:
         return None, f"{path} is dated in the future ({utc(ts)})"
     return ProofOnFile(frozenset(users), frozenset(requests), approved, support_contacts=contacts,
-                       approved_requests=frozenset(approved_ids)), None
+                       approved_requests=frozenset(approved_ids), user_level=user_level), None
+
+
+def with_intake(proof: ProofOnFile | None, path: str | None = None) -> ProofOnFile | None:
+    """`proof` scoped to the request ([key=pof-user-scope]): the candidate request ids of every
+    document filed in proof_intake become per-request cover, and covers() stops treating a
+    whole-user entry as cover for requests created after that user's newest proof. If the
+    proof store cannot be read the scope is NOT applied (whole-user cover, as before): a
+    filed document must never be missed because its table was unreadable."""
+    if proof is None:
+        return None
+    from dataclasses import replace
+    p = str(path or STAGE2_STORE)
+    try:
+        db = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=30)
+        try:
+            rows = db.execute("SELECT candidate_request_ids_json FROM proof_intake WHERE subject = 'credit'").fetchall()
+        finally:
+            db.close()
+        ids: set[str] = set()
+        for (raw,) in rows:
+            for rid in json.loads(raw or "[]"):
+                ids.add(str(rid).strip().lower())
+    except (sqlite3.Error, ValueError, TypeError) as exc:
+        log(f"decide: proof_intake unreadable ({exc}); proof-on-file stays whole-user this run")
+        return proof
+    return replace(proof, intake_requests=frozenset(ids), scoped=True)
 
 
 STAGE2_ASK_HOLD = "proof on file: stage 2 judged the document"
@@ -1220,7 +1282,12 @@ def request_decision(req: dict[str, Any]) -> Decision:
                     user_id=req.get("userId") if isinstance(req.get("userId"), int) else None,
                     track_id=str(req.get("trackId") or ""), track_title=str(req.get("spotifyTrackTitle") or ""),
                     claimed_roles=[str(c) for c in req.get("credits") or []], popularity=None, big_track=True,
-                    decision="", reason="")
+                    decision="", reason="", request_created_at=_created(req))
+
+
+def _created(req: dict[str, Any]) -> str | None:
+    v = req.get("createdAt")
+    return str(v) if v else None
 
 
 def held_rows(admin: admin_api.Admin, skip: set[str], page_size: int = 200, max_pages: int = 40) -> list[dict[str, Any]]:
@@ -1261,7 +1328,7 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     proof, proof_why = proof_on_file(now=now)
     if proof_why:
         log(f"decide: proof-on-file status unknown ({proof_why}); no support request is written this run")
-    proof = with_stage2(proof)
+    proof = with_intake(with_stage2(proof))
     batch = order_rows(rows if rows is not None else held_rows(admin, skip), paying, now)[:policy.max_rows_per_run]
     builder = EvidenceBuilder(admin, now=now)
     decisions: list[Decision] = []
@@ -1592,7 +1659,9 @@ def provisional_review(db: sqlite3.Connection, proof: "ProofOnFile | None", *, n
     for rid, uid, pid, tid, title, roles, at, flag in rows:
         class _D:
             pass
-        probe = _D(); probe.user_id = uid; probe.request_id = str(rid)
+        probe = _D()
+        probe.user_id = uid
+        probe.request_id = str(rid)
         if proof is not None and proof.covers(probe):
             continue
         out.append({"request_id": rid, "user_id": uid, "profile_id": pid, "track_id": tid, "track_title": title,
