@@ -870,11 +870,22 @@ jobs:
 
   node8-handoff:
     name: Node-8 hand-off (QA rebase-integrity + blast-radius, live Trino SQL, host-only bats)
+    # The QA hand-off is published as a hidden PR comment (T10), so the analyzers no longer HAVE
+    # to be on node-8 for Grounds 8/9 to read them — but this job still is the one that runs
+    # them, and it is cheap (git + python3, seconds). Moving them to ovh-hydra is a follow-up
+    # once both lanes have landed; until then the on-disk report they still write here is the
+    # transitional fallback for heads validated before T10.
+    # Needs `pull-requests: write` to post the hand-off comment. Without it the publish step
+    # 403s on every PR and Guards 8/9 silently stay on the on-disk fallback (green here, red the
+    # day QA moves to a pod).
+    permissions:
+      contents: read
+      pull-requests: write
     # The node-8 HALF of what used to be one `validate` job (2026-10-27). These three steps need
     # node-8 itself, so they cannot move to ovh-hydra with the rest:
-    #   - rebase-integrity and blast-radius hand their reports to the QA reviewer through
-    #     node-8's filesystem (/var/lib/hydra-qa), which qa-pr-approve.sh re-reads on node-8
-    #     (Guards 8 and 9). A pod's filesystem dies with the pod.
+    #   - rebase-integrity and blast-radius WRITE the transitional on-disk report under
+    #     node-8's /var/lib/hydra-qa that node-8's QA reviewer still reads (Guards 8/9 read the
+    #     PR comment first and fall back to this file). A pod's filesystem dies with the pod.
     #   - the Trino SQL Layer B compiles statements against the live cluster through node-8's
     #     kubectl.
     #   - the few bats cases tagged `host-systemd` drive the REAL systemd-run (they test
@@ -917,7 +928,25 @@ jobs:
         run: |
           echo "::group::Rebase integrity check"
           chmod +x scripts/check-rebase-integrity.sh
-          scripts/check-rebase-integrity.sh \
+          # T10: the report directory is resolved, not hardcoded. Here it is
+          # node-8's host-shared /var/lib/hydra-qa (the transitional on-disk
+          # consumers still read it); on a runner pod that path is root-owned, the
+          # analyzer's final write would fail, and NO hand-off would exist at all —
+          # the exact silent absence Guard 8 refuses on. qa_handoff_root() is the
+          # same resolver the publisher uses, so the two cannot disagree.
+          # shellcheck source=scripts/lib/qa-handoff.sh
+          . scripts/lib/qa-handoff.sh
+          root="$(qa_handoff_root)"
+          echo "QA_HANDOFF_ROOT=$root" >> "$GITHUB_ENV"
+          # Clear this head's report FIRST. /var/lib/hydra-qa is persistent: a
+          # killed analyzer (dies before even its early ERROR sentinel) would
+          # otherwise leave the PREVIOUS run's report for this exact head on
+          # disk, and the publisher would republish it as fresh evidence.
+          qa_handoff_clear_report "$root" rebase-integrity "$REPO" \
+            "${{ github.event.pull_request.number }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            || { echo "::error::could not remove the previous rebase-integrity report for this head — it would be republished as this run's evidence; refusing to analyse"; exit 1; }
+          RI_STATE_DIR="$root/rebase-integrity" scripts/check-rebase-integrity.sh \
             "${{ github.event.pull_request.number }}" \
             "${{ github.event.pull_request.head.sha }}" \
             || echo "::warning::rebase-integrity analyzer errored (exit $?) — rebase state UNVERIFIED for this head; QA auto-approval is held (Guard 8)"
@@ -940,11 +969,64 @@ jobs:
         run: |
           echo "::group::Blast radius check"
           chmod +x scripts/check-blast-radius.sh
-          scripts/check-blast-radius.sh \
+          # Same resolved hand-off dir as the rebase step above (T10) — see the
+          # comment there for why this is not a hardcoded /var/lib/hydra-qa.
+          # shellcheck source=scripts/lib/qa-handoff.sh
+          . scripts/lib/qa-handoff.sh
+          root="$(qa_handoff_root)"
+          echo "QA_HANDOFF_ROOT=$root" >> "$GITHUB_ENV"
+          # Clear this head's report FIRST. /var/lib/hydra-qa is persistent: a
+          # killed analyzer (dies before even its early ERROR sentinel) would
+          # otherwise leave the PREVIOUS run's report for this exact head on
+          # disk, and the publisher would republish it as fresh evidence.
+          qa_handoff_clear_report "$root" blast-radius "$REPO" \
+            "${{ github.event.pull_request.number }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            || { echo "::error::could not remove the previous blast-radius report for this head — it would be republished as this run's evidence; refusing to analyse"; exit 1; }
+          BR_STATE_DIR="$root/blast-radius" scripts/check-blast-radius.sh \
             "${{ github.event.pull_request.number }}" \
             "${{ github.event.pull_request.head.sha }}" \
             || echo "::warning::blast-radius analyzer errored (exit $?) — impact UNVERIFIED for this head; the review proceeds on the 8 lenses alone"
           echo "::endgroup::"
+
+      - name: Publish the QA hand-off comment (off-disk hand-off for the QA pods)
+        # T10. The hand-off used to be only a file under /var/lib/hydra-qa, i.e. a
+        # directory on THIS runner. qa-pr-approve.sh Guards 8/9 and the QA review
+        # skill read it, which pins QA review to the same box as CI and makes any
+        # pod-based review refuse every approval (they fail closed). This step
+        # re-publishes the same two reports as a hidden PR comment, which any
+        # process with repo read access can consume — so the hand-off no longer
+        # depends on where QA runs.
+        #
+        # NOT advisory, unlike the analyzers above — and that is the point. The
+        # analyzers' FINDINGS are advisory; the hand-off itself failing is an
+        # evidence-pipeline failure. A publish that cannot run leaves this head
+        # with either no hand-off (the publisher deletes first) or one it could
+        # not invalidate, and in the second case a green CI would let Guard 6
+        # vouch for evidence from an EARLIER run of the same head. Red here holds
+        # Guard 6 and blocks only the bot's approval; humans can still merge.
+        # (QA finding on the first review of this PR: a failed PATCH could leave a
+        # stale CLEAN hand-off and the rerun still finished green.)
+        #
+        # `always()` + `!cancelled()`: if an earlier step failed, the analyzers'
+        # ERROR sentinels are still worth publishing (they are what makes Guard 8
+        # say "unverified" instead of "missing"). A cancelled run publishes
+        # nothing, which is also correct — there is no verdict to hand over.
+        if: always() && !cancelled()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          chmod +x scripts/qa-handoff-publish.sh
+          # No --state-dir: the publisher resolves it with qa_handoff_root(),
+          # which honours QA_HANDOFF_ROOT (exported above by the analyzer steps)
+          # and otherwise resolves the SAME way they did. Passing a hardcoded
+          # host path here would reintroduce the divergence this ticket removes.
+          # No `|| echo`: see the comment above. A failure here must be RED.
+          scripts/qa-handoff-publish.sh \
+            "$REPO" \
+            "${{ github.event.pull_request.number }}" \
+            "${{ github.event.pull_request.head.sha }}"
 
       - name: Trino SQL staleness check — no stale SQL ships in skills-all/
         # A sweep (behind PR #794) found 99 of 169 SQL statements in

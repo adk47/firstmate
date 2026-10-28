@@ -59,15 +59,22 @@ set -euo pipefail
 # QA_GUARD_WAIT_SECS / QA_GUARD_POLL_SECS bound the Guard 3d wait for an in-flight
 # credit-approval-guard run (default 180 / 5);
 # QA_APPROVAL_POLICY override the policy file; QA_PR_APPROVE_LOG_DIR override log
-# dir; QA_REBASE_STATE_DIR override the rebase-integrity report dir (Guard 8);
+# dir; QA_REBASE_STATE_DIR override the rebase-integrity report dir (Guard 8's
+# ON-DISK FALLBACK — the primary channel is the PR hand-off comment, see below);
 # QA_REBASE_REQUIRED_REPOS space-separated short names whose CI must have
-# written a report (default "hydra") — missing report there refuses (Guard 8);
+# published a hand-off (default "hydra") — missing there refuses (Guard 8);
 # QA_BLAST_RADIUS_GATE=1 enables Guard 9 (default 0 = off, a pure no-op);
-# QA_BLAST_STATE_DIR override the blast-radius report dir (Guard 9).
+# QA_BLAST_STATE_DIR override the blast-radius report dir (same fallback);
+# QA_HANDOFF_GITHUB=0 disables the GitHub channel entirely (break-glass, and the
+# way a test pins the pre-T10 on-disk behaviour);
+# QA_HANDOFF_AUTHORS trusted hand-off comment authors (default github-actions —
+# see scripts/lib/qa-handoff.sh for why this is NOT the policy's bot_logins).
 
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/qa-policy.sh
 . "$_here/lib/qa-policy.sh"
+# shellcheck source=lib/qa-handoff.sh
+. "$_here/lib/qa-handoff.sh"
 # NOTE: there is deliberately no `GH=` here. Every call goes through $QA_GH, and
 # a live-looking $GH next to it would invite a call that silently bypasses the
 # identity shim, the kill switch, and the per-repo token scoping. To override the
@@ -722,12 +729,13 @@ open_blockers="$("$QA_GH" --repo "$owner/$repo" api graphql -f query="$gql" -f o
 [ "$open_blockers" = "0" ] || die 9 "$owner/$repo#$pr has unresolved Critical/Important review thread(s), or >100 threads to verify ($open_blockers) — refusing until they are addressed/resolved (or a human reviews)."
 
 # --- Guard 8: rebase-integrity warnings must be surfaced ---------------------
-# The advisory CI analyzer (scripts/check-rebase-integrity.sh, pr-validate.yml)
-# writes a per-head report under /var/lib/hydra-qa/rebase-integrity. The chain
+# The advisory CI analyzers (scripts/check-rebase-integrity.sh +
+# scripts/qa-handoff-publish.sh, pr-validate.yml) publish a per-head report as a
+# hidden PR comment (scripts/lib/qa-handoff.sh). The chain
 # "CI writes WARN → skill files a 🟡 REBASE WARNING thread → Guard 7 blocks
 # while it is unresolved" has exactly one prose link: the skill remembering to
 # file the finding. This guard closes it mechanically:
-#   missing report  → for repos whose CI writes reports (QA_REBASE_REQUIRED_REPOS,
+#   missing hand-off → for repos whose CI publishes one (QA_REBASE_REQUIRED_REPOS,
 #                     default: hydra) this is a FAILED HAND-OFF → refuse; for
 #                     external repos it is genuine no-data → pass
 #   CLEAN           → pass
@@ -750,10 +758,13 @@ open_blockers="$("$QA_GH" --repo "$owner/$repo" api graphql -f query="$gql" -f o
 # new head's checks pending, so Guard 6 covers the report-not-yet-written race.
 # Known limits (documented, accepted): the head can move between Guard 6's
 # rollup read and this guard's headRefOid read — the same push-mid-approval race
-# every guard in this file has; and the state dir lives on the CI host where
-# pr-validate executes PR-controlled code, so a hostile insider PR could forge
-# reports — same trust model as the self-hosted runner itself. The interior
-# field cross-check below catches accidental key mixups, not that adversary.
+# every guard in this file has; and the hand-off is produced by pr-validate,
+# which executes PR-controlled code, so a hostile INSIDER PR can publish a forged
+# hand-off for its own head. The author check narrows the channel to the
+# publisher identity; it is not a defence against the PR rewriting the publisher.
+# Same trust model as the self-hosted runner (and as the on-disk report this
+# replaced). The interior field cross-check below catches accidental key mixups,
+# not that adversary.
 RI_DIR="${QA_REBASE_STATE_DIR:-/var/lib/hydra-qa/rebase-integrity}"
 head_oid="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
 # 40-hex only: this value is spliced into a filesystem path and a jq program —
@@ -761,23 +772,48 @@ head_oid="$("$QA_GH" --repo "$owner/$repo" pr view "$pr" --repo "$owner/$repo" -
 # missing-file=pass.
 [[ "$head_oid" =~ ^[0-9a-f]{40}$ ]] || die 10 "could not read a valid headRefOid for $owner/$repo#$pr (got '$head_oid') — cannot verify rebase-integrity state; refusing (fail closed)."
 ri_file="$RI_DIR/${owner}__${repo}-pr-${pr}-${head_oid}.json"
-if [ ! -f "$ri_file" ]; then
+
+# WHERE THE REPORT COMES FROM (T10). GitHub is the PRIMARY channel: CI publishes
+# each head's reports as a hidden PR comment, which a QA gateway pod can read.
+# The on-disk report stays readable as a TRANSITIONAL fallback — a head validated
+# before this shipped has no comment, and refusing those would block every
+# in-flight PR until it pushed again (the staged-rollout trap the rebase-ack rule
+# documents below). Fallback use is LOUD on purpose: if the publisher silently
+# breaks, we must not discover it only when the pods land.
+qa_handoff_all=""
+if [ "${QA_HANDOFF_GITHUB:-1}" = "1" ]; then
+  # The shim CONSUMES --repo to scope the App token; `gh api` itself rejects that
+  # flag, which is why the prefix (not just the binary) is what the library takes.
+  # shellcheck disable=SC2034  # consumed by scripts/lib/qa-handoff.sh (sourced above)
+  QA_HANDOFF_GH=("$QA_GH" --repo "$owner/$repo")
+  qa_handoff_all="$(qa_handoff_payloads "$owner/$repo" "$pr")"
+fi
+ri_json="$(qa_handoff_report "$qa_handoff_all" "$owner/$repo" "$pr" rebase-integrity "$head_oid")"
+ri_src="the PR hand-off comment"
+if [ -z "$ri_json" ] && [ -f "$ri_file" ]; then
+  ri_json="$(cat "$ri_file")"
+  ri_src="the on-disk report $ri_file"
+  echo "qa-pr-approve: no GitHub rebase-integrity hand-off for $owner/$repo#$pr @ ${head_oid:0:7} — using $ri_file (transitional fallback)" >&2
+fi
+if [ -z "$ri_json" ]; then
   # A missing report must not read as clean where the analyzer is EXPECTED to
-  # have run: if the state hand-off failed (dir unwritable, analyzer died before
+  # have run: if the hand-off failed (publisher unwritable, analyzer died before
   # its ERROR sentinel), the only trace is this absence — pass here and the
   # fail-closed guarantee silently evaporates. Repos in the required list get
-  # refused; external repos (no analyzer in their CI) legitimately have no file.
+  # refused; external repos (no analyzer in their CI) legitimately have no
+  # hand-off. An unreadable GitHub is treated the same way: the on-disk fallback
+  # above already had its chance, so the next move is the refusal below.
   for ri_required in ${QA_REBASE_REQUIRED_REPOS:-hydra}; do
-    [ "$repo" = "$ri_required" ] && die 10 "no rebase-integrity report for $owner/$repo#$pr head ${head_oid:0:7} — the PR Validation analyzer should have written one (failed hand-off?); re-run CI or investigate $RI_DIR (fail closed)."
+    [ "$repo" = "$ri_required" ] && die 10 "no rebase-integrity hand-off for $owner/$repo#$pr head ${head_oid:0:7} — CI should have published one on the PR (failed hand-off?); re-run PR Validation (fail closed)."
   done
 else
-  # Interior fields must match the filename-derived key (catches key-format
-  # drift between analyzer and guard, and stale/mis-filed reports).
-  ri_key_ok="$(jq -r --arg repo "$owner/$repo" --arg pr "$pr" --arg head "$head_oid" \
+  # Interior fields must match the head we asked for (catches key-format drift
+  # between analyzer and guard, and a report republished under the wrong head).
+  ri_key_ok="$(printf '%s' "$ri_json" | jq -r --arg repo "$owner/$repo" --arg pr "$pr" --arg head "$head_oid" \
     'if (.repo == $repo) and ((.pr | tostring) == $pr) and (.head_sha == $head)
-     then "OK" else "MISMATCH" end' "$ri_file" 2>/dev/null || echo ERR)"
-  [ "$ri_key_ok" = "OK" ] || die 10 "rebase-integrity report $ri_file interior fields do not match its key ($ri_key_ok) — refusing (fail closed)."
-  ri_status="$(jq -r '.status // "ERROR"' "$ri_file" 2>/dev/null || echo ERROR)"
+     then "OK" else "MISMATCH" end' 2>/dev/null || echo ERR)"
+  [ "$ri_key_ok" = "OK" ] || die 10 "rebase-integrity report (from $ri_src) interior fields do not match its key ($ri_key_ok) — refusing (fail closed)."
+  ri_status="$(printf '%s' "$ri_json" | jq -r '.status // "ERROR"' 2>/dev/null || echo ERROR)"
   case "$ri_status" in
     CLEAN) : ;;
     WARN)
@@ -861,7 +897,7 @@ else
         # does for the current one. A carried-forward ack must clear exactly the
         # same bar as a freshly-filed one — carrying a weaker ack forward would
         # make this the cheapest way around the independence rule.
-        ri_digest="$(jq -r '.warn_digest // ""' "$ri_file" 2>/dev/null || echo "")"
+        ri_digest="$(printf '%s' "$ri_json" | jq -r '.warn_digest // ""' 2>/dev/null || echo "")"
         ri_carried=""
         if [[ "$ri_digest" =~ ^[0-9a-f]{64}$ ]]; then
           # "<OK|SKIP> <sha7>" per RESOLVED bot-filed marker thread of ANY head,
@@ -889,18 +925,31 @@ else
           else
             ri_ack_re='^(OK|SKIP) '
           fi
-          for ri_prior in "$RI_DIR/${owner}__${repo}-pr-${pr}-"*.json; do
-            [ -f "$ri_prior" ] || continue
-            ri_p_head="${ri_prior##*-pr-"${pr}"-}"; ri_p_head="${ri_p_head%.json}"
+          # Candidate PRIOR-head reports, one JSON object per line:
+          #   {"head":"<sha40>","report":{…}}
+          # GitHub hand-off comments for every other head of this PR, PLUS any
+          # on-disk report this host still holds (transitional — the pods have
+          # none). Same shape, so one loop grades both, and the legs below are
+          # unchanged from the on-disk-only version.
+          ri_candidates="$(
+            qa_handoff_prior "$qa_handoff_all" "$owner/$repo" "$pr" rebase-integrity "$head_oid"
+            for ri_prior in "$RI_DIR/${owner}__${repo}-pr-${pr}-"*.json; do
+              [ -f "$ri_prior" ] || continue
+              jq -c '{head: (.head_sha // ""), report: .}' "$ri_prior" 2>/dev/null || true
+            done
+          )"
+          while IFS= read -r ri_cand; do
+            [ -n "$ri_cand" ] || continue
+            ri_p_head="$(printf '%s' "$ri_cand" | jq -r '.head' 2>/dev/null || true)"
             [[ "$ri_p_head" =~ ^[0-9a-f]{40}$ ]] || continue
             [ "$ri_p_head" != "$head_oid" ] || continue
             printf '%s\n' "$ri_acked_sha7s" | grep -Eq -- "${ri_ack_re}${ri_p_head:0:7}\$" || continue
-            [ "$(jq -r --arg repo "$owner/$repo" --arg pr "$pr" --arg head "$ri_p_head" --arg d "$ri_digest" \
-                 'if (.repo == $repo) and ((.pr | tostring) == $pr) and (.head_sha == $head)
-                     and (.status == "WARN") and (.warn_digest == $d)
-                  then "OK" else "NO" end' "$ri_prior" 2>/dev/null || echo NO)" = "OK" ] || continue
+            [ "$(printf '%s' "$ri_cand" | jq -r --arg repo "$owner/$repo" --arg pr "$pr" --arg head "$ri_p_head" --arg d "$ri_digest" \
+                 'if (.report.repo == $repo) and ((.report.pr | tostring) == $pr) and (.report.head_sha == $head)
+                     and (.report.status == "WARN") and (.report.warn_digest == $d)
+                  then "OK" else "NO" end' 2>/dev/null || echo NO)" = "OK" ] || continue
             ri_carried="$ri_p_head"; break
-          done
+          done <<<"$ri_candidates"
         fi
         [ -n "$ri_carried" ] || die 10 "rebase-integrity report for ${head_oid:0:7} is WARN but no '$ri_marker' review thread exists — file the finding (muso-github-code-review Step 3d) before approving."
         echo "qa-pr-approve: REBASE WARNING for ${head_oid:0:7} carries forward the human ack on ${ri_carried:0:7} — identical warn_digest ${ri_digest:0:12}…"
@@ -927,8 +976,9 @@ else
 fi
 
 # --- Guard 9: blast radius (SHIPPED DISABLED — see below) --------------------
-# CI's check-blast-radius.sh writes a per-head report naming what a wrong change
-# would reach. When enabled, a CRITICAL tier holds auto-approval for a human.
+# CI's check-blast-radius.sh publishes a per-head report (via the same PR
+# hand-off comment Guard 8 reads) naming what a wrong change would reach. When
+# enabled, a CRITICAL tier holds auto-approval for a human.
 #
 # THIS SHIPS OFF (QA_BLAST_RADIUS_GATE unset/0 ⇒ this block is a pure no-op) and
 # is enabled in a follow-up once the code is on node-8. Enabling it in the PR
@@ -942,6 +992,15 @@ fi
 if [ "${QA_BLAST_RADIUS_GATE:-0}" = "1" ]; then
   br_dir="${QA_BLAST_STATE_DIR:-/var/lib/hydra-qa/blast-radius}"
   br_file="$br_dir/${owner}__${repo}-pr-${pr}-${head_oid}.json"
+  # Same channel as Guard 8 and for the same reason: the PR hand-off comment is
+  # readable from a QA gateway pod, the on-disk report only from the CI host.
+  br_json="$(qa_handoff_report "$qa_handoff_all" "$owner/$repo" "$pr" blast-radius "$head_oid")"
+  br_src="the PR hand-off comment"
+  if [ -z "$br_json" ] && [ -r "$br_file" ]; then
+    br_json="$(cat "$br_file")"
+    br_src="the on-disk report $br_file"
+    echo "qa-pr-approve: no GitHub blast-radius hand-off for $owner/$repo#$pr @ ${head_oid:0:7} — using $br_file (transitional fallback)" >&2
+  fi
   # Same repo-gating Guard 8 uses, and for the same reason: check-blast-radius.sh
   # runs only in hydra's pr-validate.yml, but this script approves every repo in
   # the external allowlist. Without this, flipping the flag would refuse EVERY
@@ -951,21 +1010,23 @@ if [ "${QA_BLAST_RADIUS_GATE:-0}" = "1" ]; then
   for _r in ${QA_BLAST_REQUIRED_REPOS:-hydra}; do
     [ "$_r" = "$repo" ] && br_required=1
   done
-  if [ ! -r "$br_file" ]; then
+  if [ -z "$br_json" ]; then
     if [ "$br_required" = 1 ]; then
-      die 13 "no blast-radius report for ${head_oid:0:7} ($br_file) — impact unverified; refusing to approve (fail closed). Re-run PR Validation."
+      die 13 "no blast-radius hand-off for $owner/$repo#$pr @ ${head_oid:0:7} (no PR hand-off comment, and no $br_file) — impact unverified; refusing to approve (fail closed). Re-run PR Validation."
     fi
-    echo "qa-pr-approve: no blast-radius report for $owner/$repo (no analyzer in that repo's CI) — Guard 9 passes on no-data."
+    echo "qa-pr-approve: no blast-radius hand-off for $owner/$repo (no analyzer in that repo's CI) — Guard 9 passes on no-data."
   else
-  # Cross-check the interior fields against the filename, exactly as Guard 8
-  # does — INCLUDING .repo. Both report kinds live under /var/lib/hydra-qa/ and
-  # share the ${owner}__${repo}-pr-${pr}-${sha} key, so .repo is precisely the
-  # field that catches a cross-repo mis-file.
-  br_json="$(jq -e --arg r "$owner/$repo" --arg h "$head_oid" --arg p "$pr" \
-    'select(.repo == $r and .head_sha == $h and ((.pr | tostring) == $p))' "$br_file" 2>/dev/null)" \
-    || die 13 "blast-radius report at $br_file does not describe $owner/$repo#$pr @ ${head_oid:0:7} (interior repo/head_sha/pr mismatch) — refusing to approve."
-  br_status="$(printf '%s' "$br_json" | jq -r '.status // "MISSING"')"
-  br_tier="$(printf '%s' "$br_json" | jq -r '.tier // "MISSING"')"
+  # Cross-check the interior fields against the head we asked for, exactly as
+  # Guard 8 does — INCLUDING .repo. Both report kinds share the
+  # ${owner}__${repo}-pr-${pr}-${sha} key, so .repo is precisely the field that
+  # catches a cross-repo mis-file.
+  br_key_ok="$(printf '%s' "$br_json" | jq -r --arg r "$owner/$repo" --arg h "$head_oid" --arg p "$pr" \
+    'if (.repo == $r) and (.head_sha == $h) and ((.pr | tostring) == $p) then "OK" else "MISMATCH" end' \
+    2>/dev/null || echo ERR)"
+  [ "$br_key_ok" = "OK" ] \
+    || die 13 "blast-radius report (from $br_src) does not describe $owner/$repo#$pr @ ${head_oid:0:7} ($br_key_ok) — refusing to approve (fail closed)."
+  br_status="$(printf '%s' "$br_json" | jq -r '.status // "MISSING"' 2>/dev/null || echo ERROR)"
+  br_tier="$(printf '%s' "$br_json" | jq -r '.tier // "MISSING"' 2>/dev/null || echo ERROR)"
   case "$br_status" in
     OK|CLEAN) ;;
     *) die 13 "blast-radius analysis for ${head_oid:0:7} is '$br_status' — impact unverified; refusing to approve (fail closed)." ;;
