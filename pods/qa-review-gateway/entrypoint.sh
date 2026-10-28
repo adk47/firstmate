@@ -29,7 +29,7 @@ set -euo pipefail
 
 HYDRA_ROOT="${HYDRA_ROOT:-/opt/hydra}"
 OPENCLAW="${OPENCLAW:-openclaw}"
-PROFILE_SRC="${QA_GATEWAY_PROFILE:-$HYDRA_ROOT/k8s/prod/qa-review-gateway/openclaw-qa.json}"
+PROFILE_SRC="${QA_GATEWAY_PROFILE:-$HYDRA_ROOT/pods/qa-review-gateway/openclaw-qa.json}"
 AUTH_FILE="${QA_CODEX_AUTH_FILE:-/var/run/qa-codex-auth/auth-profiles.store.json}"
 PORT="${QA_GATEWAY_PORT:-18789}"
 

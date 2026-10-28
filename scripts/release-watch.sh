@@ -1026,10 +1026,29 @@ process_repo() {
         || return 1
       return 0
     fi
-    warn "$key: tag $existing_tag exists on $sha but has NO GitHub release — release.sh pushed the tag and then failed."
-    warn "    This needs a human; the watcher will not tag over it. Recover with:"
-    warn "      gh release create $existing_tag --repo $repo --title $existing_tag --notes-file <notes>"
-    return 1
+    # A failed push can leave a local-only tag. release.sh keeps it when the
+    # remote check is indeterminate, so revisit that decision on the next tick
+    # instead of treating every local tag as half-published forever.
+    local remote_rc
+    if git -C "$dir" ls-remote --refs --exit-code origin "refs/tags/$existing_tag" >/dev/null 2>&1; then
+      warn "$key: tag $existing_tag exists on origin but has NO GitHub release — release.sh pushed the tag and then failed."
+      warn "    This needs a human; the watcher will not tag over it. Recover with:"
+      warn "      gh release create $existing_tag --repo $repo --title $existing_tag --notes-file <notes>"
+      return 1
+    else
+      remote_rc=$?
+      if [[ "$remote_rc" -ne 2 ]]; then
+        warn "$key: tag $existing_tag has no visible GitHub release, but origin could not be checked — keeping the local tag."
+        return 1
+      fi
+    fi
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      warn "$key: tag $existing_tag is local-only; a live tick would remove it and retry."
+      return 1
+    fi
+    git -C "$dir" tag -d "$existing_tag" >/dev/null \
+      || { warn "$key: could not remove confirmed local-only tag $existing_tag"; return 1; }
+    warn "$key: removed confirmed local-only tag $existing_tag; retrying the release."
   fi
 
   # Where does this release's changelog start? Prefer the previous tag so

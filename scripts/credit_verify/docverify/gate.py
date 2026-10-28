@@ -164,6 +164,8 @@ def decide(*, h3_verdict: str | None, kind: str | None, ex: Extraction, findings
     if elsewhere and not extracted_support and h3_verdict not in APPROVING_H3:
         blockers.insert(0, "the document credits the claimant on other tracks (" + ", ".join(
             f"“{t}”" for t in elsewhere) + "), not on this one")
+    if dom and dom.detail.get("unreadable"):   # a misread sender is never evidence FOR the document (QA #1452)
+        blockers.insert(0, f"sender address unreadable ({dom.detail.get('note')})")
     if fabricated:                             # one signal: not a forgery, never a verification either
         blockers.insert(0, f"sender doubt: {dom.detail.get('note')} ({dom.detail.get('sender_domain')}), "
                            f"{detail['would_forge']['why_not']}")
