@@ -87,7 +87,12 @@ now="${SLA_DIGEST_NOW:-$(date +%s)}"
 # readable without client-side truncation while staying well clear of the API cap.
 max_chars="${SLA_DIGEST_MAX_CHARS:-3500}"
 pagination_cap="${PAGINATION_CAP:-100}"
-top_n="${SLA_DIGEST_TOP_N:-10}"
+top_n="${SLA_DIGEST_TOP_N-10}"
+# Fail loud before anything is fetched or posted: a bad N would otherwise reach
+# jq --argjson and silently produce an empty reply.
+case "$top_n" in
+  ''|*[!0-9]*|0) echo "clickup-sla-digest: SLA_DIGEST_TOP_N must be a positive integer (got '$top_n')" >&2; exit 2 ;;
+esac
 view_url="${SLA_DIGEST_VIEW_URL:-https://app.clickup.com/2283334/v/li/901000600160}"
 [ -n "$api_key" ] || { echo "clickup-sla-digest: CLICKUP_API_KEY not set" >&2; exit 2; }
 
@@ -322,8 +327,9 @@ bucket_section() {  # bucket_section <key> <title> <count> <more-label>
   # esc neutralizes Slack control chars (& first) and flattens newlines so a
   # hostile/odd ticket title or status cannot break the <url|label> link or the
   # one-line layout.
-  local lines=()
-  while IFS= read -r ln; do lines+=("$ln"); done < <(jq -rs --arg k "$key" --argjson n "$top_n" \
+  local lines=() rendered
+  # Capture first: a jq failure inside `done < <(jq …)` would be swallowed.
+  rendered=$(jq -rs --arg k "$key" --argjson n "$top_n" \
     --arg title "$title" --argjson m "$count" '
     def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;") | gsub("[\\n\\r]+";" ");
     def line: "• <\(.url)|\(.name|esc)> — [\(.status|esc)]"
@@ -343,6 +349,7 @@ bucket_section() {  # bucket_section <key> <title> <count> <more-label>
             | "*Most overdue — \($g.s|esc):*", ($x | map(line)[])]
          else [] end)
     | .[]' "$tmp/due.jsonl")
+  while IFS= read -r ln; do lines+=("$ln"); done <<<"$rendered"
   label="${title} (${count})"
 
   # "+K more" counts every ticket not listed. SLA_DIGEST_MAX_CHARS is a hard

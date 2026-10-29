@@ -391,6 +391,17 @@ By status: to do 6 · waiting 2 · in progress 1
   ! printf '%s\n' "$tomorrow" | grep -q 'more'
 }
 
+@test "a non-integer or non-positive SLA_DIGEST_TOP_N fails loud and posts nothing" {
+  for bad in ten "" 0 -1 2.5; do
+    : > "$STUB_CALLS"
+    page_with "$(task t1 'Overdue one' "$(due_ms 2026-06-10)" open open)"
+    SLA_DIGEST_TOP_N="$bad" run bash "$DIGEST"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -qF 'SLA_DIGEST_TOP_N'
+    [ ! -s "$STUB_CALLS" ]
+  done
+}
+
 @test "SLA_DIGEST_VIEW_URL overrides the full-list link" {
   page_with "$(task t1 'Due today' "$(due_ms 2026-06-12)" open open)"
   SLA_DIGEST_VIEW_URL='https://example.test/v' run bash "$DIGEST" --dry-run
