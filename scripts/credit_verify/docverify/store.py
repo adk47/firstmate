@@ -87,6 +87,11 @@ CREATE TABLE IF NOT EXISTS dv_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 -- TTL reuses the answer instead of a second call. Untruncated; only answers that validated are stored.
 CREATE TABLE IF NOT EXISTS dv_extract_cache (prompt_sha256 TEXT PRIMARY KEY, at REAL NOT NULL, model TEXT NOT NULL,
   call_id INTEGER, answer_json TEXT NOT NULL);
+-- F9 challenge codes (challenge.py): one active code per request, issued when h2 sends the per-need ask.
+CREATE TABLE IF NOT EXISTS dv_challenges (id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL,
+  user_id INTEGER, code TEXT NOT NULL UNIQUE, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+  consumed_at TEXT, consumed_by TEXT);
+CREATE INDEX IF NOT EXISTS dv_challenges_request ON dv_challenges(request_id);
 -- Muso's stored raw credits per track, shared by every reader process (one admin GET per track per
 -- TTL instead of one per document): an account's documents usually name the same tracks.
 CREATE TABLE IF NOT EXISTS dv_raw_credits (track_id TEXT PRIMARY KEY, at TEXT NOT NULL, items_json TEXT NOT NULL);
@@ -271,6 +276,56 @@ class DocVerifyStore:
             self.db.execute("INSERT OR REPLACE INTO dv_extract_cache (prompt_sha256, at, model, call_id, answer_json) "
                             "VALUES (?,?,?,?,?)", (prompt_sha256, now, model, call_id,
                                                    json.dumps(answer, ensure_ascii=False, default=str)))
+
+    def issue_challenge(self, request_id: str, user_id: int | None, now: Any = None) -> dict[str, Any]:
+        """The request's active code (unexpired, unconsumed), or a new one. Never two active codes."""
+        from . import challenge
+        t = now or challenge.now_utc()
+        stamp = t.strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.db.execute("SELECT id, code, issued_at, expires_at FROM dv_challenges WHERE request_id=? AND "
+                                      "consumed_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 1",
+                                      (request_id, stamp)).fetchone()
+                if row:
+                    self.db.commit()
+                    return {"request_id": request_id, "id": row[0], "code": row[1], "issued_at": row[2],
+                            "expires_at": row[3], "new": False}
+                for _ in range(5):
+                    code = challenge.new_code()
+                    try:
+                        cur = self.db.execute("INSERT INTO dv_challenges (request_id, user_id, code, issued_at, expires_at) "
+                                              "VALUES (?,?,?,?,?)", (request_id, user_id, code, stamp,
+                                                                     challenge.expiry(t).strftime("%Y-%m-%dT%H:%M:%SZ")))
+                        break
+                    except sqlite3.IntegrityError:
+                        continue                      # a code already used, ever: draw again
+                else:
+                    raise RuntimeError("could not draw an unused challenge code")
+                self.db.commit()
+                return {"request_id": request_id, "id": cur.lastrowid, "code": code, "issued_at": stamp,
+                        "expires_at": challenge.expiry(t).strftime("%Y-%m-%dT%H:%M:%SZ"), "new": True}
+            except BaseException:
+                self.db.rollback()
+                raise
+
+    def challenges(self, request_id: str) -> list[dict[str, Any]]:
+        return [{"id": i, "user_id": u, "code": c, "issued_at": a, "expires_at": e, "consumed_at": k, "consumed_by": b}
+                for i, u, c, a, e, k, b in self.db.execute(
+                    "SELECT id, user_id, code, issued_at, expires_at, consumed_at, consumed_by FROM dv_challenges "
+                    "WHERE request_id=? "
+                    "ORDER BY id", (request_id,))]
+
+    def consume_challenge(self, challenge_id: int, by: str) -> bool:
+        """ATOMIC one-use claim (QA #1476): True when `by` holds the code after this call - it claimed it now, or it
+        had already claimed it (the same filing's other roles). False when another filing claimed it first, also
+        when two readers race (the conditional UPDATE lets exactly one win; the loser reads the winner back)."""
+        with self.lock, self.db:
+            self.db.execute("UPDATE dv_challenges SET consumed_at=?, consumed_by=? WHERE id=? AND consumed_at IS NULL",
+                            (utcnow(), by, challenge_id))
+            row = self.db.execute("SELECT consumed_by FROM dv_challenges WHERE id=?", (challenge_id,)).fetchone()
+        return bool(row) and row[0] == by
 
     # -- reads ---------------------------------------------------------------
     def spent_today_usd(self) -> float:

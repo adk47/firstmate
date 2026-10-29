@@ -39,7 +39,7 @@ from credit_verify.proof.sandbox import MAX_BYTES, SandboxError
 
 from . import VERSION
 from . import crosscheck as xc
-from . import artifacts, forensics, gate, intake_read, intel, pace
+from . import artifacts, challenge, forensics, gate, intake_read, intel, pace
 from .extract import MIN_CONFIDENCE, Extraction, Extractor, claimant_elsewhere, supports
 from .store import DocVerifyStore, utcnow
 
@@ -298,6 +298,18 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                     rel = release_cache[r.isrc]
                 checks.append(xc.isrc_check(rel, role, r.names))
                 checks.append(xc.label_check(issuer, itype, rel))
+                # F9: a code we issued with the per-need ask, shown in this document inside its window
+                chs = store.challenges(rid) if intake is not None else []
+                ch = challenge.check(text, chs, user_id=r.user_id,
+                                     received_at=intake.received_at if intake is not None else None,
+                                     consumer=f"intake:{intake.intake_id}" if intake is not None else None)
+                if ch is not None and ch.status == xc.POSITIVE and \
+                        not store.consume_challenge(ch.detail["challenge_id"], f"intake:{intake.intake_id}"):
+                    # another filing claimed this one-use code first (a concurrent reader): never F9 here
+                    ch = xc.Check("xc_challenge", xc.WEAK, {"why": ["the code was already used by another document"],
+                                                            "challenge_id": ch.detail["challenge_id"], "raced": True})
+                if ch is not None:
+                    checks.append(ch)
             for c in checks[3:]:
                 store.step(run_id, proof_id, c.step, c.status, c.detail, key)
             uid = r.user_id if r else None

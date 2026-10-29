@@ -1558,6 +1558,39 @@ class IntakeD2Tests(unittest.TestCase):
     def _run(self):
         return runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
 
+    def test_f9_a_dashboard_showing_our_code_confirms_the_credit(self):
+        # proof-loop lead 092/093: the code issued with the per-need ask, shown in the next document, = F9 anchor.
+        from datetime import datetime, timezone
+        ch = self.store.issue_challenge(RID, 42, now=datetime(2026, 10, 27, 12, tzinfo=timezone.utc))
+        self.assertEqual(self.store.issue_challenge(RID, 42, now=datetime(2026, 10, 27, 13, tzinfo=timezone.utc))["code"],
+                         ch["code"])                                   # one active code per request
+        spaced = " ".join(ch["code"][:4]) + "-" + ch["code"][4:]       # OCR splits it
+
+        def sandbox(path, declared, ctx, want_text=False):
+            return {"doc_text": f"DistroKid dashboard  Ann Alpha mixed Night Drive  code {spaced}",
+                    "mime": "image/png", "kind": "distributor_portal", "facts": {}}
+        self.deps.sandbox = sandbox
+        self.answer = {**GOOD_ANSWER, "doc_type": "dashboard_screenshot"}   # the extraction reads a dashboard
+        self.deps.raw_credits = lambda tid: []                         # no DSP anchor: only F9 can confirm
+        self.h3 = {KEY: H3(verdict="GENUINE")}
+        stats, rows = self._run()
+        steps = dict(self.store.db.execute("SELECT step, status FROM dv_steps WHERE step='xc_challenge'").fetchall())
+        self.assertEqual(steps, {"xc_challenge": xc.POSITIVE})
+        self.assertEqual([r["outcome"] for r in rows], [gate.VERIFIED])
+        self.assertIsNotNone(self.store.challenges(RID)[0]["consumed_at"])
+        detail = self.store.db.execute("SELECT detail_json FROM dv_steps WHERE step='xc_challenge'").fetchone()[0]
+        self.assertNotIn(ch["code"], detail)                           # the code itself is never logged
+
+    def test_f9_an_expired_or_missing_code_is_unverifiable_never_a_hold(self):
+        from datetime import datetime, timezone
+        self.store.issue_challenge(RID, 42, now=datetime(2026, 10, 10, tzinfo=timezone.utc))   # expired 10-17
+        self.deps.raw_credits = lambda tid: []
+        stats, rows = self._run()
+        st, det = self.store.db.execute("SELECT status, detail_json FROM dv_steps WHERE step='xc_challenge'").fetchone()
+        self.assertEqual(st, xc.WEAK)
+        self.assertIn("expired", det)
+        self.assertEqual([(r["outcome"], r["account_hold"]) for r in rows], [(gate.UNVERIFIABLE, False)])
+
     def test_a_filed_document_is_read_by_sha_and_judged_against_its_open_request(self):
         stats, rows = self._run()
         self.assertEqual((stats.intake, stats.outcomes), (1, {"verified": 1}))
@@ -2743,6 +2776,90 @@ class ArtifactTests(unittest.TestCase):
     def test_the_reader_records_the_artifact_kind(self):
         src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
         self.assertIn('store.step(run_id, proof_id, "artifact"', src)
+
+class ChallengeTests(unittest.TestCase):
+    def test_codes_and_windows(self):
+        from credit_verify.docverify import challenge
+        codes = {challenge.new_code() for _ in range(500)}
+        self.assertEqual(len(codes), 500)
+        self.assertTrue(all(challenge.well_formed(c) for c in codes))
+        self.assertFalse(any(set(c) & set("0O1IL2Z5S8B") for c in codes))   # no OCR-confusable pair
+        ch = [{"id": 1, "user_id": 7, "code": "ACDE3467", "issued_at": "2026-10-28T00:00:00Z",
+               "expires_at": "2026-11-04T00:00:00Z"}]
+        ok = challenge.check("Code: ACDE 3467", ch, user_id=7, received_at="2026-10-29T10:00:00Z")
+        self.assertEqual((ok.status, ok.detail["anchor_class"]), (xc.POSITIVE, "F9"))
+        for text, uid, at, why in (("ACDE3467", 8, "2026-10-29T10:00:00Z", "another account"),
+                                   ("ACDE3467", 7, "2026-10-27T10:00:00Z", "before the code"),
+                                   ("ACDE3467", 7, "2026-11-05T10:00:00Z", "expired"),
+                                   ("no code here", 7, "2026-10-29T10:00:00Z", "does not show the code")):
+            c = challenge.check(text, ch, user_id=uid, received_at=at)
+            self.assertEqual(c.status, xc.WEAK)
+            self.assertIn(why, " ".join(c.detail["why"]))
+        self.assertIsNone(challenge.check("x", [], user_id=7, received_at="2026-10-29T10:00:00Z"))
+        # QA #1476: one use. Consumed by filing A -> confirms A again (its other roles), never filing B
+        used = [{**ch[0], "consumed_at": "2026-10-29T10:05:00Z", "consumed_by": "intake:42:aaa"}]
+        again = challenge.check("ACDE3467", used, user_id=7, received_at="2026-10-29T10:00:00Z", consumer="intake:42:aaa")
+        self.assertEqual(again.status, xc.POSITIVE)
+        other = challenge.check("ACDE3467", used, user_id=7, received_at="2026-10-30T10:00:00Z", consumer="intake:42:bbb")
+        self.assertEqual(other.status, xc.WEAK)
+        self.assertIn("already used by another document", " ".join(other.detail["why"]))
+        self.assertEqual(challenge.check("ACDE3467", used, user_id=7, received_at="2026-10-30T10:00:00Z").status, xc.WEAK)
+
+    def test_a_consumed_code_never_confirms_a_second_filing_end_to_end(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            issued = store.issue_challenge(RID, 7)
+            (cid,) = [c["id"] for c in store.challenges(RID)]
+            store.consume_challenge(cid, "intake:7:first")
+            chs = store.challenges(RID)
+            self.assertEqual(chs[0]["consumed_by"], "intake:7:first")
+            from credit_verify.docverify import challenge
+            got = challenge.check(f"code {issued['code']}", chs, user_id=7, received_at=chs[0]["issued_at"],
+                                  consumer="intake:7:second")
+            self.assertEqual(got.status, xc.WEAK)
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
+        self.assertIn('consumer=f"intake:{intake.intake_id}"', src)
+
+    def test_the_gate_takes_f9_only_with_the_extracted_credit(self):
+        ex = validate({**GOOD_ANSWER, "doc_type": "dashboard_screenshot"})
+        f9 = xc.Check("xc_challenge", xc.POSITIVE, {"anchor_class": "F9"})
+        o = gate.decide(h3_verdict="GENUINE", kind="distributor_portal", ex=ex, findings=[], checks=[f9],
+                        account_held=False, extracted_support={"person": "Ann Alpha"})
+        self.assertEqual(o.outcome, gate.VERIFIED)
+        o = gate.decide(h3_verdict="GENUINE", kind="distributor_portal", ex=ex, findings=[], checks=[f9],
+                        account_held=False, extracted_support=None)
+        self.assertEqual(o.outcome, gate.UNVERIFIABLE)                  # a code alone confirms nothing
+        # QA #1476: F9 only on a dashboard. A contract/letter carrying the code is not F9 evidence
+        dash = validate({**GOOD_ANSWER, "doc_type": "dashboard_screenshot"})
+        o = gate.decide(h3_verdict="GENUINE", kind=None, ex=dash, findings=[], checks=[f9],
+                        account_held=False, extracted_support={"person": "Ann Alpha"})
+        self.assertEqual(o.outcome, gate.VERIFIED)                     # a dashboard screenshot + the code
+        for doc_type in ("letter", "contract", "email_screenshot", "other"):
+            ex2 = validate({**GOOD_ANSWER, "doc_type": doc_type})
+            o = gate.decide(h3_verdict="GENUINE", kind=None, ex=ex2, findings=[], checks=[f9],
+                            account_held=False, extracted_support={"person": "Ann Alpha"})
+            self.assertNotIn("xc_challenge", o.detail.get("confirmed") or [], doc_type)
+            self.assertFalse(gate.f9_anchor([f9], ex2, None), doc_type)
+        # QA #1476 14:10Z: H3's keyword `kind` is not dashboard proof - a contract naming DistroKid is still a contract
+        contract = validate({**GOOD_ANSWER, "doc_type": "contract"})
+        self.assertFalse(gate.f9_anchor([f9], contract, "distributor_portal"))
+        o = gate.decide(h3_verdict="GENUINE", kind="distributor_portal", ex=contract, findings=[], checks=[f9],
+                        account_held=False, extracted_support={"person": "Ann Alpha"})
+        self.assertNotEqual(o.outcome, gate.VERIFIED)
+
+    def test_a_code_raced_by_two_filings_confirms_only_the_winner(self):
+        # QA #1476 14:10Z: two readers both see the unconsumed code; exactly one filing may claim it.
+        with tempfile.TemporaryDirectory() as td:
+            a, b = (DocVerifyStore(os.path.join(td, "dv.sqlite")) for _ in range(2))      # two reader processes
+            a.issue_challenge(RID, 7)
+            (cid,) = [c["id"] for c in a.challenges(RID)]
+            self.assertTrue(a.consume_challenge(cid, "intake:7:first"))
+            self.assertFalse(b.consume_challenge(cid, "intake:7:second"))               # the loser learns it lost
+            self.assertTrue(a.consume_challenge(cid, "intake:7:first"))                 # the winner's other roles
+            self.assertEqual(b.challenges(RID)[0]["consumed_by"], "intake:7:first")
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
+        self.assertIn("not store.consume_challenge(", src)
+        self.assertIn('"raced": True', src)
 
 
 class CronContractTests(unittest.TestCase):

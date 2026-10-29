@@ -65,6 +65,15 @@ APPROVING_H3 = ("GENUINE", "VERIFIED", "PLAUSIBLE")
 # app or distributor dashboard (self-entered metadata) and an email/social screenshot cannot - a dashboard
 # only with our F9 code on it (xc_challenge POSITIVE).
 RECORD_DOC_TYPES = ("split_sheet", "contract", "invoice", "letter", "pro_registration", "receipt")
+# F9 is evidence only on the document it was made for (QA #1476): a live distributor/DSP dashboard screenshot, as the
+# EXTRACTION reads the document type. H3's `kind` is a keyword count (a contract naming DistroKid three times reads
+# `distributor_portal`), so it never makes a document a dashboard on its own.
+F9_DOC_TYPES = ("dashboard_screenshot",)
+
+
+def f9_anchor(checks: list[xc.Check], ex: Extraction, kind: str | None) -> bool:
+    return (any(c.step == "xc_challenge" and c.status == xc.POSITIVE for c in checks)
+            and getattr(ex, "doc_type", None) in F9_DOC_TYPES)
 RECORD_H3_KINDS = ("split_sheet", "contract", "invoice", "letter_of_direction", "pro_portal")
 
 # Stronger-proof codes for `unverifiable` (machine codes; the copy is not
@@ -316,6 +325,10 @@ def decide(*, h3_verdict: str | None, kind: str | None, ex: Extraction, findings
     soft = [f.name for f in findings if f.severity == SOFT]
     soft_xc = [c.step for c in checks if c.status == xc.SOFT]
     confirmed = [c.step for c in checks if c.step in ("xc_dsp", "xc_isrc") and c.status == xc.POSITIVE]
+    # F9 (proof-loop lead 092): a live dashboard showing the code we issued AND the claimant in this role on
+    # this track confirms the credit like a DSP anchor; the code alone (no extracted credit) confirms nothing.
+    if extracted_support and f9_anchor(checks, ex, kind):
+        confirmed.append("xc_challenge")
     blockers = []
     if ex.degraded or not ex.ok:
         blockers.append(f"claims not extracted ({ex.error or 'degraded'})")
@@ -332,7 +345,7 @@ def decide(*, h3_verdict: str | None, kind: str | None, ex: Extraction, findings
     # them is a cross-check of the document, never a substitute for it
     if not extracted_support:
         blockers.append("the document itself does not name the claimant in this role on this track")
-    f9 = any(c.step == "xc_challenge" and c.status == xc.POSITIVE for c in checks)
+    f9 = f9_anchor(checks, ex, kind)
     if not (ex.doc_type in RECORD_DOC_TYPES or kind in RECORD_H3_KINDS or f9):
         blockers.append(f"not a document of record ({ex.doc_type or 'unknown type'}): a catalog/DSP panel, an "
                         "app or dashboard screen, or an email/social screenshot cannot prove a credit by itself")

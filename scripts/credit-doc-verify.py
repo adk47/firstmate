@@ -429,6 +429,26 @@ def cmd_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_challenge(args: argparse.Namespace) -> int:
+    """F9: `issue` the request's challenge code (h2 calls it when it SENDS the need=distributor_dashboard_with_code
+    ask; an active code is returned again) or `show` its codes. Prints JSON. Writes only dv_challenges."""
+    from credit_verify.docverify.store import DocVerifyStore
+    from credit_verify.proof import stage2
+    store = DocVerifyStore(args.store)
+    if args.action == "show":
+        print(json.dumps(store.challenges(args.request), indent=1))
+        return 0
+    uid = args.user
+    if uid is None:
+        req = stage2.requests([args.request]).get(args.request)
+        if req is None:
+            log(f"challenge: request {args.request} not found in core; nothing issued")
+            return 2
+        uid = req.user_id
+    print(json.dumps(store.issue_challenge(args.request, uid)))
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     from credit_verify.docverify.runner import PROOF_STORE
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -475,6 +495,11 @@ def parser() -> argparse.ArgumentParser:
     pj.add_argument("--batch", type=int, required=True)
     pj.add_argument("--out-dir", required=True)
     pj.set_defaults(fn=cmd_junk_list)
+    pc = sub.add_parser("challenge", help="F9 challenge code for a request: issue (when the ask is sent) or show")
+    pc.add_argument("action", choices=("issue", "show"))
+    pc.add_argument("--request", required=True)
+    pc.add_argument("--user", type=int, help="the request's account (default: read from core)")
+    pc.set_defaults(fn=cmd_challenge)
     pt = sub.add_parser("tray", help="Jan's tray (jan-docs-dv-bN.md) + h2's need queue from the latest outcomes")
     pt.add_argument("--batch", type=int, required=True)
     pt.add_argument("--out-dir", required=True)
