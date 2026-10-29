@@ -2003,6 +2003,9 @@ jobs:
           python3 scripts/tests/test_credit_fable_executor.py
           python3 scripts/tests/test_credit_forged_tray.py
           python3 scripts/tests/test_credit_claim_executor.py
+          # C6 claim declines as code (claim_verify/decline_rules): d2's 17 as fixtures (14/3), the related-trio
+          # negative, every rail, and the tray round-tripped through the executor loader. Hermetic.
+          python3 scripts/tests/test_claim_decline_rules.py
           # Supporting-document forensics (scripts/credit_verify/proof). Synthetic
           # forgeries built in-test; uses the runner's PyMuPDF/Pillow/OpenCV/tesseract.
           python3 scripts/tests/test_credit_proof.py

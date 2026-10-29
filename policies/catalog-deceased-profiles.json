@@ -1,0 +1,7 @@
+{
+  "_doc": "Catalog FACT list for claim_verify/decline_rules.py (C6 deceased_self_claim): profiles of artists who have died, so a claim 'as self' on one is contradicted. A fact about the profile, never a decision about a claim; every entry names its public source. Append by PR. Retire when the catalog carries its own deceased flag (data lane, rules-for-code-1028 section 5).",
+  "version": 1,
+  "entries": [
+    {"profile_id": "2056a2df-156b-4a54-91d5-b59705bb9994", "name": "Nipsey Hussle", "died": "2019-03-31", "source": "https://en.wikipedia.org/wiki/Nipsey_Hussle"}
+  ]
+}
