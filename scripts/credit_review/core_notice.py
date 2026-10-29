@@ -10,7 +10,8 @@ first and holds the user when, on the core replica:
 
   - any ISO timestamp inside metadata.approvedNotice / proofRequest / infoRequest of any of the user's
     credit requests is within the last 7 days;
-  - any of the user's claims (claiming) was updated within the last 7 days;
+  - any of the user's claims (claiming) was updated within the last 7 days - a claim never touched since it was
+    filed (updatedat == createdat) is the user's own filing, not a notice, and does not count (p1 180);
   - any of the user's credit requests changed today (updatedat on the current UTC day).
 
 Reason: core_notice_within_7d. Read-only (Trino SELECTs). Timestamps are read in full, offset included, and
@@ -165,11 +166,13 @@ def reasons_by_user(user_ids: Iterable[int], *, query: Query = trino,
             for name, blob in (("approvedNotice", ap), ("proofRequest", pr), ("infoRequest", ir)):
                 within(u, f"{name} within 7d", blob, lambda t: t >= since)
             within(u, "credit request changed today", upd, lambda t: t.date() == today)
-        for uid, upd in _rows(query, 
-                "SELECT CAST(userid AS varchar), CAST(max(updatedat) AS varchar) FROM postgresql_core.public.claiming "
-                f"WHERE userid IN ({lst}) GROUP BY 1", 2):
+        # p1 180: a claim never touched since it was filed (updatedat == createdat) is the user's own filing, not
+        # something core told them - it never holds. Any later update (a decision, a code check) still does.
+        for uid, upd, created in _rows(query,
+                "SELECT CAST(userid AS varchar), CAST(updatedat AS varchar), CAST(createdat AS varchar) "
+                f"FROM postgresql_core.public.claiming WHERE userid IN ({lst}) AND updatedat >= current_timestamp - INTERVAL '8' DAY", 3):
             u = int(uid)
-            if u in out:
+            if u in out and not (upd and upd == created):
                 within(u, "claim updated within 7d", upd, lambda t: t >= since)
     return {u: sorted(set(w)) for u, w in out.items()}
 
