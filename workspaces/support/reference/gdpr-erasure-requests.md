@@ -39,18 +39,27 @@ Row #1 / Row #10 – not this flow.
 
 ## Resolution path
 
-1. Acknowledge plainly. Safe framing you MAY use: "Account data – your login, email and
-   personal details – can be deleted on request. Credit records on published works go
-   through a formal review on our side, and our team will send you a written response."
-2. File the handoff via the `action-request` skill with `actionType: data-deletion`
-   (Tier 3). In `summary`/`details`, note:
+1. **Approved acknowledgement** (first reply, same conversation, always; gdpr-ruling 2026-10-29 §2, verbatim with {date} = the day the request arrived):
+
+   <!-- approved: gdpr-ruling-for-jan §2 -->
+   > Thank you, we have your request to remove your personal data from Muso, received {date}. Here is how it works: we confirm that the page is about you, we take the page out of Muso search and public view, and you receive our written confirmation on this thread within one month of today. Account data, your login, email and personal details, is deleted on request. Credit records on published works go through a separate formal review and our written response will cover them.
+
+   If no profile link was given, add:
+   > So we act on the right pages, please reply with the link(s) to the Muso page(s) concerned.
+
+   If they write for someone else (privacy service, lawyer, manager), add:
+   > Because you are writing on behalf of someone else, please send us their written authorisation to act for them.
+2. File `create_ticket` with `actionType: data-deletion`. In `summary`/`details`, note:
    - that this is a GDPR / erasure request (quote their own wording),
-   - the date the request was received (the team's one-month statutory clock starts
-     then),
-   - exactly what they asked to have deleted (account only, credits, profile,
-     everything),
-   - any escalation trigger below that is present.
-3. Reply with the Tier 3 template from the skill and quote the returned SLA once.
+   - the date the request was received (the one-month clock starts then),
+   - the links they gave and exactly what they asked to have removed,
+   - any escalation trigger below, named FIRST in the summary.
+3. That is the whole reply. `create_ticket` returns no timeframe for this kind: never a
+   business-day number, never "deleted" or "we will delete", never the legal position,
+   never what data we hold, never the playbook letter. The written confirmation comes from
+   the process, not from you; never say a page was deleted or hidden.
+4. **"My profile was hidden, will it come back?"**: "No, once a page is hidden it stays
+   hidden; our written confirmation covers what was done." Then the handoff line.
 
 ## Escalation triggers – flag these loudly
 

@@ -15,14 +15,14 @@ describe("createCreateTicketTool", () => {
     vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_abc123" } });
     const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_abc" });
     const result = await tool.execute("call_1", { actionType: "credit-claim", customerEmail: "user@example.com", summary: "Customer wants Producer credit on Track X", conversationSummary: "Customer asked about missing credit." });
-    expect(mockClient.post).toHaveBeenCalledWith("https://api.clickup.com/api/v2/list/901000600160/task", { headers: { Authorization: "pk_test" }, body: expect.objectContaining({ name: "[credit-claim] Customer wants Producer credit on Track X — user@example.com", status: "to do", priority: 3, tags: ["hydra-action-request", "tier-1", "action:credit-claim", "team:catalog"], markdown_description: expect.stringContaining("---ACTION-REQUEST---"), custom_fields: [{ id: "field_uuid_2", value: "user@example.com" }] }) });
+    expect(mockClient.post).toHaveBeenCalledWith("https://api.clickup.com/api/v2/list/901000600160/task", { headers: { Authorization: "pk_test" }, body: expect.objectContaining({ name: "[credit-claim] Customer wants Producer credit on Track X — user@example.com", status: "to do", priority: 3, tags: ["hydra-action-request", "tier-1", "action:credit-claim", "team:catalog", "handoff:credit-status"], markdown_description: expect.stringContaining("---ACTION-REQUEST---"), custom_fields: [{ id: "field_uuid_2", value: "user@example.com" }] }) });
     const text = (result.content[0] as { type: "text"; text: string }).text;
     const parsed = JSON.parse(text);
     expect(parsed).toEqual({
       submitted: true,
       ticket_id: "task_abc123",
       sla: null,
-      customer_timing: NO_TIMEFRAME_NOTES.unspecified,
+      customer_timing: NO_TIMEFRAME_NOTES.conversation_email,
       action_type: "credit-claim",
       tier: 1,
     });
@@ -37,7 +37,7 @@ describe("createCreateTicketTool", () => {
     expect(parsed.customer_timing).toBe(NO_TIMEFRAME_NOTES.app_notification);
     expect(parsed.customer_timing).toContain("do not promise a reply in this conversation");
     expect(parsed.customer_timing).not.toMatch(/posted as a reply in this conversation/);
-    expect(JSON.stringify(parsed)).not.toMatch(/business days/);
+    expect(JSON.stringify(parsed)).not.toMatch(/[0-9] business day/);
   });
 
   it("quotes no timeframe for bulk-credit-change (a multi-track credit correction is an agent-lane request too)", async () => {
@@ -45,17 +45,18 @@ describe("createCreateTicketTool", () => {
     const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_bc" });
     const result = await tool.execute("call_bc", { actionType: "bulk-credit-change", customerEmail: "user@example.com", customerProfileId: "8aaa143c-0000-4000-8000-000000000001", summary: "Fix my role on 12 tracks", conversationSummary: "Customer lists 12 tracks with the wrong role." });
     const parsed = JSON.parse((result.content[0] as { text: string }).text);
-    expect(parsed).toMatchObject({ submitted: true, sla: null, customer_timing: NO_TIMEFRAME_NOTES.unspecified, action_type: "bulk-credit-change", tier: 2 });
-    expect(JSON.stringify(parsed)).not.toMatch(/business days/);
+    expect(parsed).toMatchObject({ submitted: true, sla: null, customer_timing: NO_TIMEFRAME_NOTES.conversation_email, action_type: "bulk-credit-change", tier: 2 });
+    expect(JSON.stringify(parsed)).not.toMatch(/[0-9] business day/);
   });
 
-  it("still quotes the tier SLA for a person-owned kind (billing-issue)", async () => {
+  it("quotes no timeframe for a person-owned kind either (billing-issue; caroline-instructions-1029 §2.9)", async () => {
     vi.mocked(mockClient.post).mockResolvedValue({ ok: true, data: { id: "task_bi1" } });
     const tool = createCreateTicketTool({ http: mockClient, rateLimiter: limiter, sessionTickets: new SessionTicketRegistry(), clickupApiKey: "pk_test", clickupListId: "901000600160", clickupProfileIdFieldId: "field_uuid_1", clickupUserEmailFieldId: "field_uuid_2", sessionId: "session_bi" });
     const result = await tool.execute("call_bi", { actionType: "billing-issue", customerEmail: "user@example.com", summary: "Double charged", conversationSummary: "Customer was charged twice." });
     const parsed = JSON.parse((result.content[0] as { text: string }).text);
-    expect(parsed.sla).toBe("5 business days");
-    expect(parsed.customer_timing).toBeUndefined();
+    expect(parsed.sla).toBeNull();
+    expect(parsed.customer_timing).toBe(NO_TIMEFRAME_NOTES.conversation_email);
+    expect(JSON.stringify(parsed)).not.toMatch(/[0-9] business day/);
   });
 
   it("offers only supported action types and keeps merge/credit-claim tickets out of Other TO DO", async () => {
@@ -102,7 +103,7 @@ describe("createCreateTicketTool", () => {
     const fields = body.custom_fields as { id: string; value: string }[];
     expect(fields).toContainEqual({ id: "field_uuid_1", value: "prof_123" });
     expect(body.priority).toBe(2);
-    expect(body.tags).toEqual(["hydra-action-request", "tier-2", "action:profile-merge", "team:catalog", "merge-kind:profile-merge"]);
+    expect(body.tags).toEqual(["hydra-action-request", "tier-2", "action:profile-merge", "team:catalog", "handoff:merge", "merge-kind:profile-merge"]);
   });
 
   it("marks the ticket-success signal (for the intercom handoff-claim guard) on a fresh successful file", async () => {
@@ -228,7 +229,7 @@ describe("createCreateTicketTool", () => {
     });
     const body = vi.mocked(mockClient.post).mock.calls[0][1].body as Record<string, unknown>;
     expect(body.priority).toBe(2);
-    expect(body.tags).toEqual(["hydra-action-request", "tier-2", "action:track-merge", "team:catalog", "merge-kind:track-merge"]);
+    expect(body.tags).toEqual(["hydra-action-request", "tier-2", "action:track-merge", "team:catalog", "handoff:merge", "merge-kind:track-merge"]);
     expect(body.assignees).toBeUndefined();
     const parsed = JSON.parse((result.content[0] as { text: string }).text);
     expect(parsed).toEqual({ submitted: true, ticket_id: "task_tm1", sla: null, customer_timing: NO_TIMEFRAME_NOTES.conversation, action_type: "track-merge", tier: 2 });
@@ -450,7 +451,8 @@ describe("createCreateTicketTool — structured returns", () => {
     expect(parsed).toEqual({
       submitted: true,
       ticket_id: "abc123",
-      sla: "2 business days",
+      sla: null,
+      customer_timing: NO_TIMEFRAME_NOTES.conversation_email,
       action_type: "analytics-followup",
       tier: 1,
     });

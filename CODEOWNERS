@@ -75,6 +75,7 @@ CODEOWNERS              @adk47
 **/muso-fraud-cases/                                    @adk47
 **/customer-credit-removal/                             @adk47
 **/customer-profile-claim/                              @adk47
+**/verification-handoff/                                @adk47
 # QA bot approve path: Guard 3d keeps the bot (which approves as adk47) off credit-approval PRs
 /scripts/qa-pr-approve.sh                               @adk47
 /scripts/tests/qa-pr-approve.bats                       @adk47

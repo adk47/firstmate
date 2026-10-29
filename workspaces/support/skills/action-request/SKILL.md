@@ -75,23 +75,23 @@ Only a genuinely different request (different `actionType`) is guaranteed a new 
 
 ## Action Types and Tiers
 
-| Action Type | Tier | SLA | Examples |
+| Action Type | Tier | Customer timeframe | Examples |
 |-------------|------|-----|---------|
 | `credit-claim` | 1 | none (`sla: null`) | "I produced this track, add my credit" |
 | `credit-correction` | 1 | none (`sla: null`) | "My role is listed wrong" |
-| `credit-verify` | 1 | none (`sla: null`) | A pending ("user verification needed") credit case from the `customer-credit-verification` skill – recommend-approve or needs-human handoff with the proof evidence. File via that skill's Step 4, not ad hoc. |
+| `credit-verify` | 1 | none (`sla: null`) | A credit status or document hand-off from the `verification-handoff` skill (`details.handoff: "credit-status"` or `"document"`). Caroline never looks the credit up and never approves it. |
 | `profile-claim` | 1 | none (`sla: null`) | "I want to claim this profile" |
-| `support-general` | 1 | 2 business days | General questions needing ops follow-up. **Also used for human-handoff bail-outs** – when the customer asks for a human, gets frustrated, or the conversation loops, file with `details.escalation_reason` (see "Human Handoff" section below). **Also used for ads/sponsorship sales leads** – when a customer wants to advertise WITH Muso (buy ad space, ad packages, in-feed ads, sponsorships), file as `support-general` and keep the customer's advertising wording (e.g. "ad packages", "advertising", "ad space") in the ticket summary and `details.interest` verbatim – a keyword sweep routes these tickets to the ads owner in Slack, and paraphrasing away the ad vocabulary breaks that routing. |
-| `order-fulfillment` | 1 | 2 business days | Plaque/poster order support: a Prodigi address-confirmation request, or a customer order/shipping/address-change question. Filed by the `order-fulfillment` skill – see its required `details` shape under "Order Fulfillment" below. |
+| `support-general` | 1 | none (`sla: null`) | General questions needing ops follow-up. **Also used for human-handoff bail-outs** – when the customer asks for a human, gets frustrated, or the conversation loops, file with `details.escalation_reason` (see "Human Handoff" section below). **Also used for ads/sponsorship sales leads** – when a customer wants to advertise WITH Muso (buy ad space, ad packages, in-feed ads, sponsorships), file as `support-general` and keep the customer's advertising wording (e.g. "ad packages", "advertising", "ad space") in the ticket summary and `details.interest` verbatim – a keyword sweep routes these tickets to the ads owner in Slack, and paraphrasing away the ad vocabulary breaks that routing. |
+| `order-fulfillment` | 1 | none (`sla: null`) | Plaque/poster order support: a Prodigi address-confirmation request, or a customer order/shipping/address-change question. Filed by the `order-fulfillment` skill – see its required `details` shape under "Order Fulfillment" below. |
 | `profile-merge` | 2 | none (`sla: null`) | "I have two profiles, combine them" (require `main_profile_url` and `duplicate_profile_urls[]` in `details` – no self-service merge UI exists, so URLs are the only way ops can act) |
-| `track-merge` | 2 | none (`sla: null`) | "Merge my duplicate tracks / combine these track pairs" (the same recording listed twice). Catalog data; capture `details.track_merge_pairs[{master, duplicates[]}]` (or `details.master_track` + `details.duplicate_tracks[]`). Caroline never executes the merge – filed by the `customer-track-dedupe` skill. |
+| `track-merge` | 2 | none (`sla: null`) | "Merge my duplicate tracks / combine these track pairs" (the same recording listed twice). Catalog data; capture `details.track_merge_pairs[{master, duplicates[]}]` (or `details.master_track` + `details.duplicate_tracks[]`). Caroline never executes the merge – filed by the `verification-handoff` skill (`details.handoff: "merge"`). |
 | `unmerge-request` | 2 | none (`sla: null`) | Caroline-flagged: customer asked to remove tracks, but most listed tracks share an artist not on the profile – likely a wrong merge. See "Unmerge Request" section below for required `details` shape. |
 | `bulk-credit-change` | 2 | none (`sla: null`) | "Update credits on multiple tracks" |
-| `profile-update` | 2 | 5 business days | "Change my profile name/details" |
-| `subscription-refund` | 3 | 5-10 business days | "I want a refund" |
-| `data-deletion` | 3 | 10 business days | "Delete my account and data" |
-| `dispute` | 3 | 10 business days | "I dispute this credit claim" |
-| `data-export` | 3 | 10 business days | "Export all my data" |
+| `profile-update` | 2 | none (`sla: null`) | "Change my profile name/details" |
+| `subscription-refund` | 3 | none (`sla: null`) | "I want a refund" |
+| `data-deletion` | 3 | none (`sla: null`) | "Delete my account and data" |
+| `dispute` | 3 | none (`sla: null`) | "I dispute this credit claim" |
+| `data-export` | 3 | none (`sla: null`) | "Export all my data" |
 
 ### Profile-Merge Required Fields (HARD GATE)
 
@@ -120,7 +120,7 @@ Example `details` block:
 
 ### Human Handoff (`support-general` with `escalation_reason`)
 
-When the customer-credit-removal skill (preview and route only; it never removes a credit) or any future skill decides to bail out and hand off to a teammate, file `support-general` with a `details.escalation_reason`:
+When any skill decides to bail out and hand off to a teammate, file `support-general` with a `details.escalation_reason`:
 
 | `escalation_reason` | Trigger | Notes |
 |---------------------|---------|-------|
@@ -138,68 +138,17 @@ Required `details` block:
 }
 ```
 
-Customer-facing reply: *"Sorry this has been frustrating – I've passed you over to one of our teammates, they'll pick this up shortly."*
+Customer-facing reply: *"Sorry this has been frustrating – I've passed you over to one of our teammates. You'll hear from us in this conversation and by email."*
 
 After filing, **stop the current skill flow.** Don't propose further fixes or ask more clarifying questions. The teammate will take over.
 
 ### Unmerge Request (`unmerge-request` only)
 
-Filed by the `customer-credit-removal` skill (preview and route only) when it detects that a customer's "remove these tracks" request looks like a wrong-merge case. Trigger: 10+ listed tracks share a single primary artist NOT on the profile's roster (i.e., not in `profile.name` or `profile.knownAsNames`), AND the profile owner has no production-side role on those tracks (see canonical role list below). Caroline does NOT execute the unmerge – Aaron approval is required (see `muso-ops-profiles/SKILL.md`). This ticket gives Aaron pre-fetched context so he can decide in seconds.
+Filed by the `verification-handoff` skill when a customer says another artist's tracks were mixed into their profile, or asks to undo a merge ("you merged my profile with someone else's, please separate them"). Caroline runs no check and no detection heuristic; the merge agent investigates. `details`: `handoff: "merge"`, the profile link (`customerProfileId`, required), any other profile link they name, and `customer_verbatim_request` (their words, unmodified). Production-side roles (Producer, Songwriter, Engineer, ...) on records where they are not the primary artist are normal; never suggest they are wrong.
 
-**Canonical production-side role list** (used by Caroline's unmerge-detection AND by the wrapper script's `refused_production_role_on_track` guard):
+### Credit Correction (`credit-correction` / `bulk-credit-change`, including "remove these credits")
 
-`Producer`, `Co-Producer`, `Songwriter`, `Composer`, `Lyricist`, `Mixing`, `Mixing Engineer`, `Mastering`, `Mastering Engineer`, `Engineer`, `Recording Engineer`, `Arranger`.
-
-The wrapper script enforces this list mechanically per row – if a customer asks to remove a track where their profile holds any of these roles, the script refuses with `refused_production_role_on_track` and Caroline routes to `action-request` (`credit-correction`) for ops review. The list is the same in both places by design; if you update one, update the other.
-
-**False-positive guardrail (do NOT file `unmerge-request` for these)**:
-- Producer / songwriter / engineer profiles where the profile owner's `credits[]` on most tracks is one of the production-side roles above. Producers and writers legitimately appear on records where they aren't the primary artist – that's the work they do. If you're tempted to file `unmerge-request` for a profile like this, stop and re-check the role distribution before escalating. This was the ticket 869ck6tv6 lesson.
-
-Required `details` block (everything Caroline can supply from `profile_status` + the conversation):
-
-```json
-"details": {
-  "suspect_artist_names": ["Don Pero"],
-  "suspect_track_count": 12,
-  "total_listed_count": 17,
-  "profile_name": "Achille G",
-  "profile_known_as": ["Achille G", "Achille"],
-  "customer_verbatim_request": "Hey, can you remove these tracks from my profile, they're not mine: ...",
-  "suggested_action": "investigate_as_unmerge"
-}
-```
-
-Fields:
-- `suspect_artist_names[]` – the artist(s) Caroline flagged as not belonging on the profile
-- `suspect_track_count` – how many of the listed tracks share that artist
-- `total_listed_count` – total tracks the customer asked about (the ratio matters)
-- `profile_name`, `profile_known_as[]` – what the profile is supposed to be (read from `profile.name` and `profile.knownAsNames` in the `profile_status` response)
-- `customer_verbatim_request` – the customer's words, unmodified
-- `suggested_action` – currently always `"investigate_as_unmerge"`; reserved for future enums
-
-**A customer who asks to undo a merge directly** ("you merged my profile with someone else's, please separate them") is the other way an `unmerge-request` is filed. Capture both sides: `customerProfileId` (the profile they keep; required) and `details.merged_profile_urls[]` (each profile, as name or URL, that should come back out), plus their own words under `details.merge_judgment_inputs.customer_note`. `create_ticket` refuses an unmerge that names neither `merged_profile_urls[]` nor `suspect_artist_names[]` (`capture_incomplete`): ask for whichever is missing. It adds `details.merge_intake` and a `merge-kind:unmerge-request` tag for the executor; you don't write those. Tell the customer you've filed it and the team will take it from here; no timeline.
-
-**Not supplied by Caroline** – fetched by ops at triage time:
-- `raw_profile_sources[]` – the upstream sources this profile pulls from. `profile_status` doesn't expose `rawProfiles[]`, so Caroline can't include it. Ops fetches it directly via the admin API when investigating (it's the load-bearing field for "which raw_profile brought the unwanted tracks in").
-
-### Credit Correction – removal (`credit-correction` from `customer-credit-removal`)
-
-Caroline never removes a credit. When `customer-credit-removal` routes a removal ask, the packet IS the staged request: it carries one row per preview result so a staff run can consume them directly. Removal packets file as `credit-correction`, which `TIER_MAP` puts at tier 1 with a 2-business-day SLA; a dedicated tier-2 `credit-removal-request` type is tracked in MUS-10728 and this section changes with it. Required `details` block:
-
-```json
-"details": {
-  "removal_rows": [
-    {"track_id": "<uuid>", "profile_id": "<uuid>", "label": "<artist, or 'Name (requester req)'>",
-     "track_title": "<title>", "roles": "Composer,Co-Producer", "ref": "Intercom <conv_id>"}
-  ],
-  "requester_email": "<intercom-verified>",
-  "preview_source": "remove_credits dry-run <ISO ts>"
-}
-```
-
-- One object per `results[]` row the preview resolved (`track_id` = `matched_track_id`, `track_title` = `matched_title`). A `would_remove` row has no roles: take `roles` from the Step 3 `credits_search` `credits[]` entries matched by title and artists (`creditRoles`), comma-joined, never invented; same-title tracks with different roles are flagged in `label`.
-- `ref` is a traceable origin: `Intercom <conv_id>`, a ClickUp id, or a Slack/Buzz ts.
-- The six row fields map, in order, to six tab-separated columns (`track_id`, `profile_id`, `label`, `track_title`, `roles`, `ref`; no header) that a staff run reads. If the preview resolved no rows (the wrapper refused first), file `removal_rows: []` plus the customer's verbatim request with each track named by title; otherwise do not file the packet without rows.
+Caroline never removes or changes a credit and never previews one. Filed by the `verification-handoff` skill with `details.handoff: "credit-status"`, the profile link, the track links or titles they listed, and their words. The verification agent does the rest.
 
 ### Order Fulfillment (`order-fulfillment` only)
 
@@ -269,9 +218,7 @@ If the refund-retention skill was not activated (edge case), set `retention_cont
 |-----------|--------|
 | Customer is authenticated (session token) | Include verified email and profile ID in ticket |
 | Customer is NOT authenticated | Accept for Tier 1 only; require auth for Tier 2-3 |
-| Action type maps to Tier 1 | Create ticket, use `sla` from structured response (none when it is null) |
-| Action type maps to Tier 2 | Create ticket with priority:high, use `sla` from structured response (none when it is null) |
-| Action type maps to Tier 3 | Create ticket with priority:urgent, tell customer "our leadership team will review" |
+| Any action type | Create ticket (priority derives from the tier). `sla` is always null: quote no timeframe |
 | Customer has already submitted 2 action requests this session | Decline further: "I've submitted your requests. Our team will follow up on all of them." |
 | Customer has submitted 3+ action requests this hour | Decline: "You've submitted several requests recently. Please allow our team time to process them." |
 | Unclear action type | Ask clarifying question before creating ticket |
@@ -286,26 +233,22 @@ Read `create_ticket`'s JSON response and choose the template:
 
 ### Submitted (`submitted: true`)
 
-Use `sla` verbatim from the response. **When `sla` is null** (credit, claim and merge kinds: decided under written rules, not by a human review queue) use the matching template below with the "within `<sla>`" clause and the "manual review" clause left out, quote no other timeframe, and promise only the channel `customer_timing` names. **Never put `ticket_id` in a reply** – it is an internal id (see SOUL.md, Response Rules or Zero Internal Knowledge).
+`sla` is always null (captain 2026-10-29): no day count, no business days, no "soon". Promise only the channel `customer_timing` names. Credit, claim, merge and removal kinds use the `verification-handoff` reply instead. **Never put `ticket_id` in a reply** – it is an internal id (see SOUL.md, Response Rules or Zero Internal Knowledge).
 
-**Tier 1:** "I've flagged your request for our team. You'll hear back within `<sla>`. If you need to add anything, just reply here."
-
-**Tier 2:** "I've escalated your request to our operations team. This type of request requires manual review – you'll hear back within `<sla>`. If you need to add anything, just reply here."
-
-**Tier 3:** "I've passed your request to our senior team for review. You can expect a response within `<sla>`. If you need to add anything, just reply here."
+**Every tier:** "I've flagged your request for our team. You'll hear from us in this conversation and by email. If you need to add anything, just reply here."
 
 ### Updated existing request (`submitted: true, updated_existing: true`)
 
 "I've added that to your existing request – the team will see the update."
 
-Do NOT re-quote the `sla` on an `updated_existing` response – the clock started when the ticket was first filed, and repeating the timeframe on every follow-up reads as a fresh promise.
+Never add a timeframe to an `updated_existing` response.
 
 ### Overdue follow-up (`updated_existing: true` and the original SLA has passed)
 
-"You're right that this has taken longer than it should – that's on us. I've raised the priority on your existing request so it's flagged for the team's overdue review. I won't quote you another timeframe I can't guarantee, but it is marked at the highest priority I can set."
+"You're right that this has taken longer than it should – that's on us. I've added that to your existing request. I won't quote you another timeframe I can't guarantee."
 
 ### Not submitted – rate limited (`submitted: false, reason: "rate_limited"`)
-"Looks like a request is already on the way to our team for you. You'll hear back soon."
+"Looks like a request is already on the way to our team for you. You'll hear from us in this conversation and by email."
 
 ### Not submitted – queue busy (`submitted: false, reason: "queue_busy"`)
 "Could you send that to me one more time? I want to make sure our team gets the full picture."
@@ -321,5 +264,5 @@ Do NOT re-quote the `sla` on an `updated_existing` response – the clock starte
 
 All failure cases are signalled via the structured JSON response – do not fall back to `support@muso.ai` or expose internal system names.
 
-- `{ submitted: false, reason: "rate_limited" }` – "Looks like a request is already on the way to our team for you. You'll hear back soon."
+- `{ submitted: false, reason: "rate_limited" }` – "Looks like a request is already on the way to our team for you. You'll hear from us in this conversation and by email."
 - `{ submitted: false, reason: "queue_busy" }` – "Could you send that to me one more time? I want to make sure our team gets the full picture."

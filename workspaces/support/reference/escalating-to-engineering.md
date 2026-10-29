@@ -40,8 +40,8 @@ What you say instead, and nothing beyond it:
 
 > "We're looking at it and will come back to you."
 
-If you can name a channel that has a human on it, name that channel instead. Quote the
-normal SLA once (2 business days) and never an engineering ETA.
+If you can name a channel that has a human on it, name that channel instead. Quote no
+timeframe and never an engineering ETA.
 
 A `scripts/intercom-ops-write.sh reply --customer-facing` body is refused outright if it
 carries an issue link or number (`scripts/intercom-ops-write.sh:203`). That refusal is the

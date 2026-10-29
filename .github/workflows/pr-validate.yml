@@ -1513,7 +1513,6 @@ jobs:
                        workspaces/operations/skills/muso-ops-credit-verification/scripts/tests/score-backend-signals.bats \
                        workspaces/operations/skills/muso-ops-fastlane/scripts/tests \
                        workspaces/support/skills/order-fulfillment/scripts/tests \
-                       workspaces/support/skills/customer-credit-removal/tests \
                        "${sa_dirs[@]}" \
                        -type f -name '*.bats' | sort)
           if [ -z "$files" ]; then

@@ -83,12 +83,14 @@ function ticketResult(r: CreateTicketResult): AgentToolResult<unknown> {
 // What Caroline is told about timing on a successful file. `sla` is the timeframe she may
 // quote (once); for credit/claim/merge requests it is null and `customer_timing` says why,
 // so the internal tier SLA can never be read back to a customer as a promise.
-const NO_TIMEFRAME = "Quote no timeframe. This request is decided under written rules, not by a human review queue";
+const NO_TIMEFRAME = "Quote no timeframe: no day count, no business days, no 'soon'";
 export const NO_TIMEFRAME_NOTES: Record<OutcomeChannel, string> = {
-  conversation: `${NO_TIMEFRAME}; the outcome is posted as a reply in this conversation when it lands.`,
-  app_notification: `${NO_TIMEFRAME}; the claim decision reaches the customer as an app notification and email, ` +
-    "so do not promise a reply in this conversation.",
-  unspecified: `${NO_TIMEFRAME}; promise no channel or follow-up message for the outcome.`,
+  conversation: `${NO_TIMEFRAME}. The outcome is posted as a reply in this conversation when it lands.`,
+  app_notification: `${NO_TIMEFRAME} (the only timing line allowed is "usually within a day once the step is done"). ` +
+    "The claim message reaches the customer in the app and by email, so do not promise a reply in this conversation.",
+  conversation_email: `${NO_TIMEFRAME}. Say only that they will hear in this conversation and by email.`,
+  erasure: `${NO_TIMEFRAME}. Use the GDPR acknowledgement (written confirmation on this thread within one month); ` +
+    "never say deleted.",
 };
 
 function customerTiming(actionType: string): { sla: string | null; customer_timing?: string } {

@@ -75,18 +75,34 @@ const closeStep = (instruction = "Reply with the result and close the loop. Do n
   instruction,
 });
 
-const creditProofStep: NextStep = {
-  outcome: "run_skill",
-  skill: "customer-credit-verification",
-  instruction: "Ask for proof ONLY if none was given before (customer-credit-verification skill Step 2 no-re-ask rule), once, in one message covering all pending credits. Otherwise do not ask: still run the skill's Step 3 contradiction and catalog-corroboration checks on what is visible or stated, and if they do not resolve it, file the needs-human credit-verify ticket and tell the customer it is with the team. Never approve from prose alone.",
-};
+// Captain 2026-10-28 12:1xZ / 12:3xZ: Caroline only hands off on credits, documents, claims,
+// removals and merges. These routes never name a look-up, preview or apply tool; every state is
+// the verification-handoff skill + ONE create_ticket of the route's kind (QA on #1451: the old
+// routes sent her to denied tools and removed skills before the only ticket was filed).
+const HANDOFF_INSTRUCTION =
+  "Run the verification-handoff skill: no look-up. File ONE create_ticket of this action type " +
+  "(details.handoff per the skill; customerProfileId from the profile link the customer gave), reply " +
+  "with the approved paragraph, then the handoff line. Never say you checked, filed, verified or merged.";
 
-// remove_wrong_credits never applies a removal: core-backend refuses agent-token
-// removals, so every post-preview state files the packet; the in-app instruction is additive.
-const removalRouteStep = (): NextStep => handoffStep(
-  "credit-correction",
-  "Show the resolved (track, roles) list. File the credit-correction packet first (every route, including self-service), then tell an owner how to remove the credits themselves in the app. Do not tell the customer any removal happened.",
-);
+const verificationHandoffRoute = (
+  label: string, goal: string, actionType: string, missing: string[], tags: string[],
+): RouteDefinition => {
+  const step: NextStep = { outcome: "run_skill", skill: "verification-handoff", tool: "create_ticket", action_type: actionType, instruction: HANDOFF_INSTRUCTION };
+  const ask: NextStep = { outcome: "ask_missing_info", instruction: `Ask only for the missing link(s): ${missing.join(", ")}. Then file the ${actionType} hand-off.` };
+  return {
+    label, availability: "live", goal,
+    live_read_tools: [], live_write_tools: [], live_handoff_tools: ["create_ticket"], planned_tools: [],
+    human_gated_writes: [],
+    sequence: ["Run the verification-handoff skill (no look-up of any kind).", `File ONE ${actionType} create_ticket with details.handoff.`, "Reply with the approved paragraph and the handoff line."],
+    close_when: ["The hand-off ticket is filed and the customer has the approved paragraph + handoff line"],
+    handoff_when: ["Always: this request is decided by the verification / merge agents"],
+    missing_info: missing, tags,
+    steps: {
+      new_request: step, read_ok: step, missing_info: ask, preview_ok: step, customer_confirmed: step,
+      applied_ok: step, tool_refused: step, tool_disabled: step, loop_detected: step,
+    },
+  };
+};
 
 // Billing-route failure handoff: intentionally NO action_type. The route
 // serves both refund and charge/billing-issue complaints and cannot see
@@ -135,117 +151,26 @@ export const SUPPORT_ACTION_ROUTES: Record<string, RouteDefinition> = {
       loop_detected: handoffStep("analytics-followup", "Stop repeating generic analytics copy; file a follow-up with the exact observed evidence and conversation summary."),
     },
   },
-  credit_verification: {
-    label: "Pending credit verification",
-    availability: "live",
-    goal: "Inspect pending UVN credits, ask for proof at most once and only if none was given before, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
-    live_read_tools: ["credit_verification_check", "profile_credits_status"],
-    live_write_tools: ["credits_verify"],
-    live_handoff_tools: ["create_ticket"],
-    planned_tools: [],
-    human_gated_writes: ["reject credit requests", "approve non-corroborated requests"],
-    sequence: [
-      "Use profile_credits_status first when it is unclear whether the credit already exists or is merely pending.",
-      "Run credit_verification_check.",
-      "Ask for proof once, in one message covering all pending credits, ONLY if none was given before (customer-credit-verification skill Step 2 no-re-ask rule); otherwise do not ask and continue with the skill's Step 3 checks and the steps below.",
-      "For catalog-corroborated owned requests, preview credits_verify with apply:false.",
-      "After customer confirmation, apply credits_verify with apply:true.",
-      "For every other case, create a credit-verify handoff packet.",
-    ],
-    close_when: ["credits_verify apply:true returns ok", "No pending UVN credits exist and the answer is explained"],
-    handoff_when: ["owner_undetermined, impersonation, shared profile, disabled, no approver, non-corroborated proof, or wrapper refusal"],
-    missing_info: ["Profile URL/name", "Track title and role", "Proof screenshot/link or catalog corroboration"],
-    tags: ["intent:credits", "bundle:credit-verification", "outcome:self-serve-or-handoff"],
-    steps: {
-      new_request: { outcome: "run_skill", skill: "customer-credit-verification", tool: "credit_verification_check", instruction: "Enter the credit verification skill and start with the read-only pending-credit check." },
-      read_ok: creditProofStep,
-      missing_info: creditProofStep,
-      preview_ok: { outcome: "ask_confirmation", tool: "credits_verify", instruction: "Tell the customer which credit would be verified and wait for explicit confirmation before apply:true." },
-      customer_confirmed: { outcome: "apply_tool", tool: "credits_verify", instruction: "Apply the already-previewed owned, catalog-corroborated credit verification." },
-      applied_ok: closeStep("Tell the customer the credit has been verified. Do not also create a ticket."),
-      tool_refused: handoffStep("credit-verify"),
-      tool_disabled: handoffStep("credit-verify"),
-      loop_detected: handoffStep("credit-verify"),
-    },
-  },
-  profile_claim: {
-    label: "Profile claim approval",
-    availability: "live",
-    goal: "Approve the customer's own pending profile claim when the muso gate says it is safe.",
-    live_read_tools: ["profile_status", "profile_credits_status", "profile_claim_status"],
-    live_write_tools: ["profiles_claim_self"],
-    live_handoff_tools: ["create_ticket"],
-    planned_tools: [],
-    human_gated_writes: ["cross-owner claim approval", "manual ownership override"],
-    sequence: ["Run profile_claim_status to discover the claim id, its state, and any competing claim.", "Self-serve only when it returns route_selfserve_claim with a claim id; any conflict or suspicion flag becomes a profile-claim packet.", "Preview profiles_claim_self with that claim id.", "Apply only after explicit confirmation.", "Hand off every refusal."],
-    close_when: ["profiles_claim_self apply:true returns ok or noop for an already-applied own claim"],
-    handoff_when: ["disabled, owner mismatch, ambiguous profile, shared ownership, competing claim, suspicion flags, or any route_to_human result"],
-    missing_info: ["Profile URL"],
-    tags: ["intent:profile-claim", "bundle:profile", "outcome:self-serve-or-handoff"],
-    steps: {
-      new_request: { outcome: "run_skill", skill: "customer-profile-claim", tool: "profile_claim_status", instruction: "Use the profile claim skill; read the claim state first with profile_claim_status." },
-      read_ok: { outcome: "call_tool", tool: "profiles_claim_self", instruction: "Preview the customer's own pending claim using the claim id profile_claim_status returned; only when it routed self-serve." },
-      missing_info: { outcome: "ask_missing_info", instruction: "Ask for the profile URL needed to read the claim state." },
-      preview_ok: { outcome: "ask_confirmation", tool: "profiles_claim_self", instruction: "Confirm the exact profile that will be claimed before apply:true." },
-      customer_confirmed: { outcome: "apply_tool", tool: "profiles_claim_self", instruction: "Apply the already-previewed own claim." },
-      applied_ok: closeStep("Tell the customer the claim is sorted. Do not create a duplicate handoff."),
-      tool_refused: handoffStep("profile-claim"),
-      tool_disabled: handoffStep("profile-claim"),
-      loop_detected: handoffStep("profile-claim"),
-    },
-  },
-  profile_duplicates: {
-    label: "Duplicate profile consolidation",
-    availability: "live",
-    goal: "Self-serve only same-owner unclaimed duplicate consolidation; everything destructive or cross-owner goes to a packet.",
-    live_read_tools: ["dedupe_check", "profile_status", "profile_credits_status"],
-    live_write_tools: ["profiles_consolidate"],
-    live_handoff_tools: ["create_ticket"],
-    planned_tools: [],
-    human_gated_writes: ["claimed duplicate merge", "cross-owner merge", "unmerge", "delete profile"],
-    sequence: ["Use profile_credits_status to surface same-name duplicate candidates when the customer cannot name the duplicate URLs yet.", "Run dedupe_check once the survivor and duplicate URLs are known.", "Preview profiles_consolidate only for owned survivor plus unclaimed same-name duplicates.", "Apply after confirmation.", "Hand off all other merges."],
-    close_when: ["profiles_consolidate apply:true returns ok"],
-    handoff_when: ["claimed duplicate, cross-owner signal, unmerge-shaped request, disabled, no approver, or ambiguity"],
-    missing_info: ["Survivor profile URL", "Duplicate profile URLs"],
-    tags: ["intent:profile-duplicates", "bundle:profile", "outcome:self-serve-or-handoff"],
-    steps: {
-      new_request: { outcome: "call_tool", tool: "dedupe_check", instruction: "Verify survivor ownership and duplicate claim state before any merge path." },
-      read_ok: { outcome: "call_tool", tool: "profiles_consolidate", instruction: "Preview only if the check shows an owned survivor and unclaimed same-name duplicates." },
-      missing_info: { outcome: "ask_missing_info", instruction: "Ask for the main profile URL plus duplicate profile URLs." },
-      preview_ok: { outcome: "ask_confirmation", tool: "profiles_consolidate", instruction: "Confirm the survivor and duplicate ids before apply:true." },
-      customer_confirmed: { outcome: "apply_tool", tool: "profiles_consolidate", instruction: "Apply the already-previewed same-owner consolidation." },
-      applied_ok: closeStep("Tell the customer the duplicate profiles were consolidated. Do not also file a merge ticket."),
-      tool_refused: handoffStep("profile-merge"),
-      tool_disabled: handoffStep("profile-merge"),
-      loop_detected: handoffStep("profile-merge"),
-    },
-  },
-  remove_wrong_credits: {
-    label: "Remove wrong credits from owned profile (preview and route only)",
-    availability: "live",
-    goal: "Resolve which mechanical wrong credits a customer owns on their profile, then route: file the staff packet and additionally point an owner to the in-app removal. The agent never removes a credit itself.",
-    live_read_tools: ["profile_status", "credits_search", "profile_credits_status", "remove_credits"],
-    live_write_tools: [],
-    live_handoff_tools: ["create_ticket"],
-    planned_tools: [],
-    human_gated_writes: ["credit removal", "unmerge", "role-based bulk removals", "production-side credit removals"],
-    sequence: ["Run the customer-credit-removal skill.", "Resolve ownership with profile_status.", "Dry-run remove_credits (apply:false only) to resolve the exact tracks.", "Show the resolved (track, roles) list.", "File the credit-correction packet (mandatory on every route).", "Then tell an owner how to remove the credits in the app."],
-    close_when: ["the customer has the resolved list and a filed packet (plus the in-app removal steps for an owner)"],
-    handoff_when: ["staff removal requested, unmerge-shaped cluster, owner mismatch, unclaimed/multi-owner profile, production-side role refusal, or repeated ambiguity"],
-    missing_info: ["Profile URL", "Specific track titles to remove"],
-    tags: ["intent:credit-removal", "bundle:credits", "outcome:self-serve-or-handoff"],
-    steps: {
-      new_request: { outcome: "run_skill", skill: "customer-credit-removal", tool: "profile_status", instruction: "Use the credit-removal skill; do the ownership pre-check first." },
-      read_ok: { outcome: "call_tool", tool: "remove_credits", instruction: "Run remove_credits apply:false to resolve the exact tracks. Preview only; the apply mode is not available to the agent." },
-      missing_info: { outcome: "ask_missing_info", instruction: "Ask for the profile URL and the exact track titles." },
-      preview_ok: removalRouteStep(),
-      customer_confirmed: removalRouteStep(),
-      applied_ok: removalRouteStep(),
-      tool_refused: handoffStep("credit-correction"),
-      tool_disabled: handoffStep("credit-correction"),
-      loop_detected: handoffStep("credit-correction"),
-    },
-  },
+  credit_verification: verificationHandoffRoute(
+    "Credit status, pending credit or proof (hand-off only)",
+    "Answer in approved wording and hand off to the verification agent; never look up, ask for proof or approve.",
+    "credit-verify", ["Profile URL", "Track title or link"],
+    ["intent:credits", "bundle:credit-verification", "outcome:handoff"]),
+  profile_claim: verificationHandoffRoute(
+    "Profile claim (hand-off only)",
+    "Answer in approved wording and hand off to the claim lane; never read, verify or approve a claim.",
+    "profile-claim", ["Profile URL"],
+    ["intent:profile-claim", "bundle:profile", "outcome:handoff"]),
+  profile_duplicates: verificationHandoffRoute(
+    "Duplicate profiles / merge (hand-off only)",
+    "Answer in approved wording and hand off to the merge agent; never check duplicates or merge.",
+    "profile-merge", ["Main profile URL", "Duplicate profile URLs"],
+    ["intent:profile-duplicates", "bundle:profile", "outcome:handoff"]),
+  remove_wrong_credits: verificationHandoffRoute(
+    "Wrong credits / removal request (hand-off only)",
+    "Answer with the approved removal paragraph and hand off; never preview, check or remove a credit.",
+    "credit-correction", ["Profile URL", "Specific track titles"],
+    ["intent:credit-removal", "bundle:credits", "outcome:handoff"]),
   order_fulfillment: {
     label: "Plaque or poster order fulfillment",
     availability: "live",
@@ -342,19 +267,19 @@ export const SUPPORT_ACTION_ROUTES: Record<string, RouteDefinition> = {
     label: "Missing tracks, artwork, or metadata repair",
     availability: "partial",
     goal: "Use available profile/credit visibility and file a repair packet until catalog capture tools exist.",
-    live_read_tools: ["profile_status", "credits_search", "profile_credits_status"],
+    live_read_tools: ["profile_status", "credits_search"],
     live_write_tools: [],
     live_handoff_tools: ["create_ticket"],
     planned_tools: ["catalog_status", "track_lookup", "metadata_capture_request", "artwork_refresh_request", "catalog_recheck"],
     human_gated_writes: ["manual catalog edits", "artist/label ownership disputes"],
-    sequence: ["Resolve the profile/track with profile_status or credits_search.", "When a specific credit is referenced, run profile_credits_status to check whether it already exists, sits on another profile, or is pending verification before filing.", "If the data is missing or wrong, file catalog/metadata repair with exact identifiers.", "Close when the current data answers the question."],
+    sequence: ["Resolve the profile/track with profile_status or credits_search.", "If the data is missing or wrong, file catalog/metadata repair with exact identifiers.", "Close when the current data answers the question."],
     close_when: ["The requested track/artwork/metadata is already visible or the customer only needed where to submit it"],
     handoff_when: ["Track/artwork/metadata is missing after lookup", "Ownership/dispute ambiguity", "Customer supplied enough identifiers for repair"],
     missing_info: ["Track URL/title", "Artist/profile URL", "ISRC/UPC when available", "Artwork screenshot/link when relevant"],
     tags: ["intent:catalog", "bundle:metadata", "outcome:handoff-until-tools-ship"],
     steps: {
       new_request: { outcome: "call_tool", tool: "profile_status", instruction: "Resolve the profile first; use credits_search when a specific track is involved." },
-      read_ok: { outcome: "call_tool", tool: "profile_credits_status", instruction: "When a specific credit/track is referenced, diagnose it before filing; on not_found or on_other_profile file the repair packet the tool suggests. Without a specific credit, file catalog-metadata directly." },
+      read_ok: handoffStep("catalog-metadata", "A question about a specific credit is a verification-handoff (no credit look-up). Otherwise file the catalog-metadata repair packet with the identifiers you have."),
       missing_info: { outcome: "ask_missing_info", instruction: "Ask for the exact track/profile identifier needed for a repair packet." },
       preview_ok: handoffStep("catalog-metadata"),
       customer_confirmed: handoffStep("catalog-metadata"),
@@ -394,22 +319,22 @@ export const SUPPORT_ACTION_ROUTES: Record<string, RouteDefinition> = {
     label: "Profile or account change intake",
     availability: "partial",
     goal: "Gather proof and run safe prechecks; destructive account/profile changes stay human-gated.",
-    live_read_tools: ["profile_lookup", "profile_status", "dedupe_check", "profile_claim_status"],
-    live_write_tools: ["profiles_consolidate"],
+    live_read_tools: ["profile_lookup", "profile_status"],
+    live_write_tools: [],
     live_handoff_tools: ["create_ticket"],
     planned_tools: ["profile_change_packet", "profile_merge_check", "account_merge_preflight", "email_change_preflight", "profile_removal_preflight"],
     human_gated_writes: ["account merge", "email change", "profile removal", "claimed-profile merge", "identity override"],
-    sequence: ["Use read/precheck tools to gather ownership evidence.", "Use profiles_consolidate only for the narrow own-unclaimed duplicate case.", "Hand off destructive or identity-sensitive changes with a complete packet."],
-    close_when: ["profiles_consolidate succeeds for the narrow duplicate-profile case", "The customer only needed public profile guidance"],
+    sequence: ["Resolve the profile with profile_lookup / profile_status.", "Duplicate or merge requests are a verification-handoff (profile-merge), never a merge.", "Hand off destructive or identity-sensitive changes with a complete packet."],
+    close_when: ["The customer only needed public profile guidance"],
     handoff_when: ["Email change, account merge, profile deletion/removal, identity proof mismatch, claimed duplicate, or any destructive request"],
     missing_info: ["Profile URLs", "Target email/name", "Proof of ownership", "Specific change requested"],
     tags: ["intent:account-profile-change", "bundle:profile", "outcome:packet-or-narrow-self-serve"],
     steps: {
-      new_request: { outcome: "call_tool", tool: "profile_status", instruction: "Resolve the relevant profile and gather ownership signals before deciding if this is a narrow self-serve duplicate case." },
+      new_request: { outcome: "call_tool", tool: "profile_status", instruction: "Resolve the relevant profile. A duplicate/merge ask is a verification-handoff (profile-merge)." },
       read_ok: handoffStep("profile-change"),
       missing_info: { outcome: "ask_missing_info", instruction: "Ask for the exact profile/account details and proof needed for a complete packet." },
-      preview_ok: { outcome: "ask_confirmation", tool: "profiles_consolidate", instruction: "Only for narrow same-owner unclaimed duplicates; otherwise hand off." },
-      customer_confirmed: { outcome: "apply_tool", tool: "profiles_consolidate", instruction: "Apply only an already-previewed same-owner unclaimed duplicate consolidation." },
+      preview_ok: handoffStep("profile-change"),
+      customer_confirmed: handoffStep("profile-change"),
       applied_ok: closeStep(),
       tool_refused: handoffStep("profile-change"),
       tool_disabled: handoffStep("profile-change"),

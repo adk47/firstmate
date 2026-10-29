@@ -49,24 +49,29 @@ export const AGENT_LANE_ACTIONS: ReadonlySet<string> = new Set([
   "profile-merge", "track-merge", "unmerge-request",
 ]);
 
-// How the outcome of an agent-lane request reaches the customer, so Caroline never promises
-// a channel that does not carry it. Merge kinds: merge-outcome-notify posts the outcome as a
-// reply in the conversation the ticket was filed from. profile-claim: the claim decision is
-// an app notification (bell) + email from the claim flow, not a conversation reply. Credit
-// kinds: the credit appears on the profile or a status note is sent; no channel is promised.
-export type OutcomeChannel = "conversation" | "app_notification" | "unspecified";
+// How the outcome of a request reaches the customer, so Caroline never promises a channel
+// that does not carry it (Fable caroline-instructions-1029 §2).
+//   conversation       merge kinds: merge-outcome-notify replies in the ticket's conversation.
+//   app_notification   profile-claim: the claim lane's message (in-app + email), not a reply here.
+//   conversation_email credit kinds and person-owned kinds: this conversation and email.
+//   erasure            data-deletion: the written confirmation on this thread within one month.
+export type OutcomeChannel = "conversation" | "app_notification" | "conversation_email" | "erasure";
 export function outcomeChannelFor(actionType: string): OutcomeChannel {
   if (actionType === "profile-merge" || actionType === "track-merge" || actionType === "unmerge-request") {
     return "conversation";
   }
   if (actionType === "profile-claim") return "app_notification";
-  return "unspecified";
+  if (actionType === "data-deletion") return "erasure";
+  return "conversation_email";
 }
 
-// The timeframe Caroline may quote to the customer for this action type, or null when she
-// must quote none (AGENT_LANE_ACTIONS).
-export function customerSlaFor(actionType: string): string | null {
-  return AGENT_LANE_ACTIONS.has(actionType) ? null : TIER_SLAS[getTierForAction(actionType)];
+// The timeframe Caroline may quote to the customer: none, for every kind. Fable
+// caroline-instructions-1029 §2.9/§3 (captain 2026-10-29): no day counts and no business
+// days on any reply ("5-10 business days", "2 business days", "within 5 business days" are
+// never said; a refund ack quoting "5-10 business days" was seen live 2026-10-28). The tier
+// SLA stays INTERNAL (ClickUp due date, overdue sweep, the Slack escalation line).
+export function customerSlaFor(_actionType: string): string | null {
+  return null;
 }
 
 // Growth owns account/billing/support; Catalog owns the catalog data
@@ -198,6 +203,29 @@ export function buildFollowupComment(params: TicketContentParams): string {
   ].join("\n");
 }
 
+// Hand-off tag (captain 2026-10-28 12:1xZ: Caroline only hands off). Every credit, claim
+// and merge ticket carries `handoff:<tag>`; the verification / merge agents pick their work
+// up by it. The tag is derived from the ticket kind, so it can never be missing; the only
+// choice Caroline makes is `details.handoff: "document"` when the customer sent proof. Any
+// other value she supplies is ignored (the kind's default wins), never passed through.
+export const HANDOFF_TAGS: Record<string, { default: string; allowed: readonly string[] }> = {
+  "credit-claim": { default: "credit-status", allowed: ["credit-status", "document"] },
+  "credit-correction": { default: "credit-status", allowed: ["credit-status", "document"] },
+  "credit-verify": { default: "credit-status", allowed: ["credit-status", "document"] },
+  "bulk-credit-change": { default: "credit-status", allowed: ["credit-status", "document"] },
+  "profile-claim": { default: "claim", allowed: ["claim", "document"] },
+  "profile-merge": { default: "merge", allowed: ["merge"] },
+  "track-merge": { default: "merge", allowed: ["merge"] },
+  "unmerge-request": { default: "merge", allowed: ["merge"] },
+};
+
+export function handoffTag(actionType: string, details?: Record<string, unknown>): string | null {
+  const rule = HANDOFF_TAGS[actionType];
+  if (!rule) return null;
+  const asked = typeof details?.handoff === "string" ? details.handoff.trim().toLowerCase() : "";
+  return `handoff:${rule.allowed.includes(asked) ? asked : rule.default}`;
+}
+
 export function buildTicketTags(params: {
   actionType: string;
   tier: Tier;
@@ -211,6 +239,8 @@ export function buildTicketTags(params: {
   ];
   const escTag = escalationTag(params.details);
   if (escTag) tags.push(escTag);
+  const hand = handoffTag(params.actionType, params.details);
+  if (hand) tags.push(hand);
   if (params.actionType === "analytics-followup") tags.push("analytics-followup");
   return tags;
 }

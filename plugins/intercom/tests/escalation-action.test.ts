@@ -92,9 +92,11 @@ describe("executeEscalation", () => {
       postSlack: async () => {},
       log: { info: () => {}, warn: () => {}, error: () => {} },
     });
-    expect(farewellBody).toContain("5-10 business days");
+    // The ticket's internal SLA never reaches the customer (caroline-instructions-1029 §2.9).
+    expect(farewellBody).not.toContain("5-10 business days");
+    expect(farewellBody).not.toMatch(/business day|shortly|soon/i);
     expect(farewellBody).toContain("T1");
-    expect(farewellBody).toContain("follow up here");
+    expect(farewellBody).toContain("in this conversation and by email");
     expect(farewellBody).not.toMatch(ANY_EMAIL);
   });
 
@@ -118,7 +120,8 @@ describe("executeEscalation", () => {
       log: { info: () => {}, warn: () => {}, error: () => {} },
     });
     expect(farewellBody).not.toContain("Reference");
-    expect(farewellBody).toContain("follow up here shortly");
+    expect(farewellBody).toContain("in this conversation and by email");
+    expect(farewellBody).not.toMatch(/shortly|soon|business day/i);
     expect(farewellBody).not.toMatch(ANY_EMAIL);
   });
 
@@ -142,7 +145,8 @@ describe("executeEscalation", () => {
       postSlack: async () => {},
       log: { info: () => {}, warn: () => {}, error: () => {} },
     });
-    expect(farewellBody).toContain("follow up here shortly");
+    expect(farewellBody).toContain("in this conversation and by email");
+    expect(farewellBody).not.toMatch(/shortly|soon|business day/i);
     expect(farewellBody).not.toContain("operations@muso.ai");
     expect(farewellBody).not.toMatch(ANY_EMAIL);
   });
@@ -287,7 +291,7 @@ describe("executeEscalation", () => {
   // the SLA from that assessment tells the customer "2 business days" about a
   // Tier 3 refund ticket that is actually due in 5-10 — a promise nothing in
   // ClickUp will keep.
-  it("quotes the reused ticket's own SLA, not one recomputed from the retry's assessment", async () => {
+  it("reuses the filed ticket on a retry and quotes no SLA in either farewell (was: the reused ticket's own SLA)", async () => {
     const state = makeState();
     const farewells: string[] = [];
     const deps = (a: RiskAssessment) => ({
@@ -316,8 +320,8 @@ describe("executeEscalation", () => {
     await executeEscalation(deps({ ...assessment, reason: "support", suggestedActionType: "support-general" }));
     expect(farewells).toHaveLength(2);
     expect(farewells[1]).toContain("T-REFUND");
-    expect(farewells[1]).toContain("5-10 business days");
-    expect(farewells[1]).not.toContain("2 business days");
+    // No SLA in either farewell, reused or not (caroline-instructions-1029 §2.9).
+    expect(farewells[1]).not.toMatch(/business day/);
   });
 
   it("files a ticket on retry when the first attempt never created one", async () => {

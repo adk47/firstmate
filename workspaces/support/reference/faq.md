@@ -8,26 +8,18 @@ Visit app.muso.ai and sign up with your email. The Lite plan is free forever.
 
 ### How do I claim my profile?
 1. Search for your name at app.muso.ai
-2. When you find your profile, click "Claim"
-3. Add a link or two you control (your website, your streaming artist page, or a social account) and send the claim
-4. The profile shows "Claim Pending" until the claim is processed; you are notified in the app and by email when it is
+2. When you find your profile, click "Claim" and send the claim
 
-**If your claim was rejected:**
-- Check the rejection message for the specific reason
-- Claim again with a link you control that shows the profile is yours
-- If you believe the rejection was in error, reply in support chat with the profile link
+<!-- approved: caroline-instructions-1029 §2.3 -->
+Claims are confirmed by something only the profile's owner can do, so nobody can claim a profile that isn't theirs. After you claim, you get a message telling you the one thing to do, for example placing a short code on a page you control, and once we see it the claim is approved automatically, usually within a day. If that isn't possible for you, the same message tells you what paperwork works instead. We never ask for ID.
 
-**If your claim is still pending:**
-- Ask in support chat; Caroline looks up its real state (agent note: `profile_claim_status`; quote no timeframe)
+(Agent note: Caroline never issues a code, never names a surface for one and never reads a claim's state; the claim lane sends that message. A claim that was closed: answer with the decline paragraph in `credits-and-profiles.md`, "A declined request". Anything about THEIR claim: `verification-handoff`.)
 
 ### Can I merge duplicate profiles?
-Yes, once every profile involved is claimed by you. First claim each profile that is yours through the app, then share the link to the profile you want to keep as your main, plus the link(s) to the duplicate(s). Caroline will open a merge request for you.
+<!-- approved: caroline-instructions-1029 §2.4 -->
+Merges work like this: claim every profile that is yours first (so we know they're all you), then tell me which one should be the main profile. The merge is done by our verification team and you get a message in this conversation when it's complete; credits from the duplicates move onto the main profile. Profiles claimed by someone else, and company or label profiles, are handled differently: I'll pass those on.
 
-**What to expect:**
-- Credits from all profiles are combined into one
-- The profile you mark as "main" is kept; duplicates are merged into it
-- Company or label profiles, and profiles claimed by a different account, are not merged this way
-- You'll receive a message in your support conversation once the merge is done (agent note: no date; see common-issues.md section 3)
+(Agent note: Caroline files the `profile-merge` hand-off ticket per `verification-handoff`; she never merges and never says "I will merge".)
 
 ### How do I become an Album Admin?
 Verified artists can become Album Admins, giving them control over the credits displayed for their albums and tracks. You must first verify your artist profile.
@@ -39,7 +31,7 @@ Log in at app.muso.ai and edit your profile page directly. If the profile name c
 Contact support with the claimed Muso profile link and the new email address. If you cannot access the old email, support may ask for additional ownership verification before updating account access.
 
 ### Can I delete my profile?
-Account and profile deletion requests are handled by our support team. Create a support ticket with category "Account – Deletion Request" and we will process your request.
+Use the GDPR acknowledgement in `gdpr-erasure-requests.md` ("Approved acknowledgement"), verbatim, and file `data-deletion`. Never a business-day number, never "deleted".
 
 ---
 
@@ -60,8 +52,7 @@ Account and profile deletion requests are handled by our support team. Create a 
 ### My credit is incorrect. How do I fix it?
 
 **If the credit was added through Muso.AI:**
-- Log in and request a correction through your account
-- Our team will review and update it
+- Ask in support chat; you'll hear in this conversation and by email
 
 **If the credit comes from an external source (Spotify, distributor, label):**
 - Muso reflects what those sources report – we can't override them directly
@@ -83,18 +74,10 @@ Credits come from multiple industry sources. A missing credit usually means one 
 Try adding it manually: on web via "Add Credits" in your profile's Summary panel, in the app via "Add Missing Credits" on the track or album. If you believe it should be automatically sourced and it's not appearing, create a support ticket with category "Missing Credit – Source Discrepancy."
 
 ### How long does credit verification take?
-Our team reviews submitted credits. Review times vary, so we don't promise a set
-time; the customer doesn't need to do anything while a credit is waiting for
-review. Claims flagged for additional verification ("user verification needed") wait on proof from
-the customer and have **no fixed timeline** – never promise one. For those, follow
-the `customer-credit-verification` flow: ask for proof (see common-issues row #5 for
-what to ask for) and file for the team when warranted.
+<!-- approved: caroline-instructions-1029 §2.1 -->
+Here is how credit requests work now: when you add a credit, we check it automatically against public credit sources. If we can confirm it, it goes live on your profile and you get an email. If we can't confirm it on our own, we message you, here and by email, and tell you exactly what would settle it. Documents that come from outside Muso are what we can use: a distributor or label statement, a split sheet, a contract, an invoice, a PRO registration. Where a document names a company, we may confirm it with that company directly. You hear the outcome in this conversation and on your request page.
 
-_(added 2026-08-26)_ A hold is usually NOT suspicion. Most `user_verification_needed`
-holds today are transient pipeline states (commonly the track still being captured)
-surfaced as if they were risk decisions (internal ref IDP #1537). Never tell a customer
-their credit was flagged or doubted, and if they have already sent proof once, do not
-ask again.
+(Agent note: no day count and no business days: "you'll hear in this conversation and by email". Caroline never asks for proof herself; for THEIR credit, `verification-handoff`. Never tell a customer their credit was flagged, held or doubted.)
 
 ### What credit roles are supported?
 We support all standard music industry roles: Artist, Featured Artist, Producer, Executive Producer, Co-Producer, Writer, Composer, Lyricist, Mixing Engineer, Mastering Engineer, Recording Engineer, A&R, Creative Director, and more.

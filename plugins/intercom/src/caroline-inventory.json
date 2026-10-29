@@ -24,9 +24,7 @@
       "first_read_tool": "profile_lookup",
       "handoff_when": "Email change, account merge, profile deletion/removal, identity proof mismatch, claimed duplicate, or any destructive request",
       "intent": "account_profile_change",
-      "write_tools": [
-        "profiles_consolidate"
-      ]
+      "write_tools": []
     },
     {
       "action_type_on_handoff": "analytics-followup",
@@ -57,13 +55,11 @@
     },
     {
       "action_type_on_handoff": "credit-verify",
-      "description": "Inspect pending UVN credits, ask for proof at most once and only if none was given before, approve only catalog-corroborated owned requests, otherwise hand off cleanly.",
-      "first_read_tool": "credit_verification_check",
-      "handoff_when": "owner_undetermined, impersonation, shared profile, disabled, no approver, non-corroborated proof, or wrapper refusal",
+      "description": "Answer in approved wording and hand off to the verification agent; never look up, ask for proof or approve.",
+      "first_read_tool": "",
+      "handoff_when": "Always: this request is decided by the verification / merge agents",
       "intent": "credit_verification",
-      "write_tools": [
-        "credits_verify"
-      ]
+      "write_tools": []
     },
     {
       "action_type_on_handoff": "founding-member",
@@ -95,29 +91,25 @@
     },
     {
       "action_type_on_handoff": "profile-claim",
-      "description": "Approve the customer's own pending profile claim when the muso gate says it is safe.",
-      "first_read_tool": "profile_status",
-      "handoff_when": "disabled, owner mismatch, ambiguous profile, shared ownership, competing claim, suspicion flags, or any route_to_human result",
+      "description": "Answer in approved wording and hand off to the claim lane; never read, verify or approve a claim.",
+      "first_read_tool": "",
+      "handoff_when": "Always: this request is decided by the verification / merge agents",
       "intent": "profile_claim",
-      "write_tools": [
-        "profiles_claim_self"
-      ]
+      "write_tools": []
     },
     {
       "action_type_on_handoff": "profile-merge",
-      "description": "Self-serve only same-owner unclaimed duplicate consolidation; everything destructive or cross-owner goes to a packet.",
-      "first_read_tool": "dedupe_check",
-      "handoff_when": "claimed duplicate, cross-owner signal, unmerge-shaped request, disabled, no approver, or ambiguity",
+      "description": "Answer in approved wording and hand off to the merge agent; never check duplicates or merge.",
+      "first_read_tool": "",
+      "handoff_when": "Always: this request is decided by the verification / merge agents",
       "intent": "profile_duplicates",
-      "write_tools": [
-        "profiles_consolidate"
-      ]
+      "write_tools": []
     },
     {
       "action_type_on_handoff": "credit-correction",
-      "description": "Resolve which mechanical wrong credits a customer owns on their profile, then route: file the staff packet and additionally point an owner to the in-app removal. The agent never removes a credit itself.",
-      "first_read_tool": "profile_status",
-      "handoff_when": "staff removal requested, unmerge-shaped cluster, owner mismatch, unclaimed/multi-owner profile, production-side role refusal, or repeated ambiguity",
+      "description": "Answer with the approved removal paragraph and hand off; never preview, check or remove a credit.",
+      "first_read_tool": "",
+      "handoff_when": "Always: this request is decided by the verification / merge agents",
       "intent": "remove_wrong_credits",
       "write_tools": []
     }
@@ -132,74 +124,6 @@
       "name": "action-request",
       "outcome": "When a customer requests a write action (credit change, refund, profile update, dispute), the CS agent creates a structured ClickUp task tagged hydra-action-request in list 901000600160.",
       "tools_used": []
-    },
-    {
-      "activates_when": "Preview which credits a customer wants off their own profile (read-only), then route them to remove it themselves in the app or file the packet; also detect mis-described unmerge requests and escalate them with audit context",
-      "name": "customer-credit-removal",
-      "outcome": "Two related customer requests, handled together:",
-      "tools_used": [
-        "profile_status",
-        "credits_search",
-        "create_ticket",
-        "remove_credits"
-      ]
-    },
-    {
-      "activates_when": "When a customer asks about credits they submitted that are stuck in \"user verification needed\", confirm ownership with the read-only credit_verification_check tool, ask the customer for proof, and route the outcome.",
-      "name": "customer-credit-verification",
-      "outcome": "A customer is asking about credits they submitted that are stuck in user_verification_needed (UVN) – the backend flagged the claim as needing proof.",
-      "tools_used": [
-        "credit_verification_check",
-        "profile_lookup",
-        "profile_status",
-        "credits_search",
-        "credits_verify",
-        "create_ticket"
-      ]
-    },
-    {
-      "activates_when": "Use when a verified customer asks to claim/verify their profile and a pending claim exists on it.",
-      "name": "customer-profile-claim",
-      "outcome": "When a customer asks to claim/verify a profile that is theirs and a pending claim already exists on it, you can approve that claim yourself instead of handing off.",
-      "tools_used": [
-        "profiles_claim_self",
-        "profile_claim_status",
-        "profile_status",
-        "credit_verification_check",
-        "dedupe_check",
-        "create_ticket"
-      ]
-    },
-    {
-      "activates_when": "Merge a customer's OWN duplicate profiles into the profile they own – the SAFE self-service merge case, gated by the muso capability gate. The gate corroborates identity server-side (same or near-same name, the customer's own verified/pending claim, empty dup, or shared tracks) and refuses…",
-      "name": "customer-profile-consolidate",
-      "outcome": "When a customer has duplicate profiles – their real (claimed) profile plus duplicates that fragment their credits – you can fold the duplicates into the profile they own.",
-      "tools_used": [
-        "dedupe_check",
-        "profiles_consolidate",
-        "create_ticket"
-      ]
-    },
-    {
-      "activates_when": "When a customer asks to merge/dedupe their duplicate Muso profiles, verify ownership with the read-only dedupe_check tool and file a high-signal profile-merge ticket for Operations.",
-      "name": "customer-profile-dedupe",
-      "outcome": "A customer says they have duplicate Muso profiles and wants them merged into one.",
-      "tools_used": [
-        "dedupe_check",
-        "profile_status",
-        "profile_lookup",
-        "create_ticket"
-      ]
-    },
-    {
-      "activates_when": "When a customer asks to merge/dedupe duplicate TRACKS (not profiles), capture which track to keep and which duplicate(s) to fold in, then file ONE high-signal track-merge ticket for the Catalog/Operations team.",
-      "name": "customer-track-dedupe",
-      "outcome": "A customer says the same recording appears as two (or more) tracks and wants the duplicates folded into one master.",
-      "tools_used": [
-        "credits_search",
-        "profile_status",
-        "create_ticket"
-      ]
     },
     {
       "activates_when": "Buy a milestone badge or plaque; verify profile and streams, then route pre-order corrections or existing-order issues.",
@@ -232,6 +156,12 @@
         "retention_offer_apply",
         "cancel_subscription"
       ]
+    },
+    {
+      "activates_when": "Hand-off only (captain 2026-10-28 12:1xZ). For ANY question about a credit (missing, wrong, pending, stuck, removal), a document or proof, a profile claim, or a profile/track merge, Caroline answers only from approved reference wording, files ONE create_ticket of the right kind (the ticket carries…",
+      "name": "verification-handoff",
+      "outcome": "Hand-off only (captain 2026-10-28 12:1xZ).",
+      "tools_used": []
     }
   ],
   "tools": [
@@ -266,10 +196,10 @@
       "resolves": "ClickUp task creation in list 901000600160"
     },
     {
-      "kind": "read",
+      "kind": "write",
       "name": "credit_verification_check",
-      "requires": "Muso admin JWT (MusoAdminClient, GET-only) + MUSOAI_INTERCOM_TOKEN (env).",
-      "resolves": "read-only lookup of a customer's user_verification_needed (UVN) credits."
+      "requires": "undocumented",
+      "resolves": "undocumented"
     },
     {
       "kind": "read",
@@ -280,14 +210,14 @@
     {
       "kind": "write",
       "name": "credits_verify",
-      "requires": "same muso host auth + ctx-derived --actor-identity as #14; --intercom-conv-id is REQUIRED (it is the approval-ref).",
-      "resolves": "muso credits verify --actor-identity <verified-email> (APPROVAL-tier), the WRITE counterpart of credit_verification_check (#9)."
+      "requires": "undocumented",
+      "resolves": "undocumented"
     },
     {
-      "kind": "read",
+      "kind": "write",
       "name": "dedupe_check",
-      "requires": "Muso admin JWT (same MusoAdminClient, GET-only) + MUSOAI_INTERCOM_TOKEN (read from env).",
-      "resolves": "read-only verification for a customer profile-merge request."
+      "requires": "undocumented",
+      "resolves": "undocumented"
     },
     {
       "kind": "write",
@@ -304,8 +234,8 @@
     {
       "kind": "write",
       "name": "order_address_update",
-      "requires": "the wrapper uses muso-admin-api.sh's JWT cache (same Muso admin auth as remove_credits).",
-      "resolves": "PUT /api/v3/admin/orders/{id} via the bash wrapper at workspaces/support/skills/order-fulfillment/scripts/update-order-address.sh (NOT MusoAdminClient – same wrapper-as-boundary model as remove_credits)."
+      "requires": "the wrapper uses muso-admin-api.sh's JWT cache (the same Muso admin auth).",
+      "resolves": "PUT /api/v3/admin/orders/{id} via the bash wrapper at workspaces/support/skills/order-fulfillment/scripts/update-order-address.sh (NOT MusoAdminClient; the wrapper is the boundary)."
     },
     {
       "kind": "read",
@@ -320,16 +250,16 @@
       "resolves": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution, GET /api/v3/admin/profile/{id} for direct UUID profile context, and GET /api/v3/admin/profile/{id}/analytics-status for the read-only analytics…"
     },
     {
-      "kind": "read",
+      "kind": "write",
       "name": "profile_claim_status",
-      "requires": "claim rows are PRIVATE (they carry the claiming team's email and the submitted proof links), so this tool anchors to the verified Intercom contact email (deriveConvId -> getAuthorEmail) and FAILS CLOSED -- no claim…",
-      "resolves": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution, GET /api/v3/admin/profile/{id} for claim/ownership context, GET /api/v3/admin/claiming?profilesIds=<id>&limit=21 for the profile's claim requests…"
+      "requires": "undocumented",
+      "resolves": "undocumented"
     },
     {
-      "kind": "read",
+      "kind": "write",
       "name": "profile_credits_status",
-      "requires": "the Intercom anchor (same deriveConvId -> getAuthorEmail as dedupe_check) is best-effort for the PUBLIC catalog facts -- an unverifiable anchor DEGRADES the ownership-derived fields to owner_undetermined instead of…",
-      "resolves": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution and the same-name duplicate-candidate scan, GET /api/v3/admin/profile/{id} for the resolved profile / each candidate / a stated target profile, GET…"
+      "requires": "undocumented",
+      "resolves": "undocumented"
     },
     {
       "kind": "read",
@@ -346,20 +276,20 @@
     {
       "kind": "write",
       "name": "profiles_claim_self",
-      "requires": "muso uses the host login (MUSO_ADMIN_*, MUSO_STATE_DIR); the --actor-identity is the ctx-derived verified Intercom author email (deriveConvId+getAuthorEmail), NEVER a model arg.",
-      "resolves": "muso profiles claim-self --actor-identity <verified-email> via the bash wrapper at workspaces/support/skills/customer-profile-claim/scripts/claim-self.sh (the muso capability gate is the ownership/caps/audit boundary…"
+      "requires": "undocumented",
+      "resolves": "undocumented"
     },
     {
       "kind": "write",
       "name": "profiles_consolidate",
-      "requires": "same muso host auth + ctx-derived --actor-identity as #14; --intercom-conv-id is REQUIRED (it is the approval-ref).",
-      "resolves": "muso profiles consolidate --actor-identity <verified-email> (APPROVAL-tier: --yes --confirmed-by <MUSO_CAPABILITY_APPROVER> --approval-ref <conv-id>) via…"
+      "requires": "undocumented",
+      "resolves": "undocumented"
     },
     {
       "kind": "write",
       "name": "remove_credits",
-      "requires": "The wrapper uses muso-admin-api.sh's JWT cache (same Muso admin JWT as the other admin-API tools).",
-      "resolves": "DELETE /api/v3/admin/track/{trackId}/profile/{profileId}/credits via the bash wrapper at workspaces/support/skills/customer-credit-removal/scripts/remove-credits.sh."
+      "requires": "undocumented",
+      "resolves": "undocumented"
     },
     {
       "kind": "write",

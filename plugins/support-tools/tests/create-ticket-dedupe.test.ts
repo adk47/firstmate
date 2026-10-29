@@ -99,7 +99,7 @@ describe("create_ticket dedupe", () => {
       updated_existing: true,
       ticket_id: "task_1",
       sla: null,
-      customer_timing: NO_TIMEFRAME_NOTES.unspecified,
+      customer_timing: NO_TIMEFRAME_NOTES.conversation_email,
       action_type: "credit-claim",
       tier: 1,
     });
