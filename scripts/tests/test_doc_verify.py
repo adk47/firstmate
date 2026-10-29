@@ -1184,6 +1184,83 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(outcomes[1], outcomes[2])
         self.assertTrue(outcomes[0])
 
+    def test_musicbrainz_lookups_are_cached_across_documents_and_runs(self):
+        # Fable 149: MusicBrainz 1/s host-wide bounds reading; the issuer-domain, ISRC and artist lookups repeat.
+        runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+        mb_first = [c for c in self.net.calls if c.startswith("mb:")]
+        self.assertTrue(any(c == "mb:label" for c in mb_first))                       # the issuer lookup ran once
+        self.store.db.execute("DELETE FROM dv_outcomes")
+        self.store.db.execute("DELETE FROM dv_steps")
+        self.store.db.commit()
+        self.net.calls.clear()
+        runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+        self.assertEqual([c for c in self.net.calls if c.startswith("mb:")], [])        # second read: all cached
+        self.assertEqual([c for c in self.net.calls if "deezer" in c], [])
+        kinds = {k for (k,) in self.store.db.execute("SELECT DISTINCT kind FROM dv_lookup_cache")}
+        self.assertTrue({"issuer_domains", "isrc_release"} <= kinds, kinds)
+
+    def test_a_lookup_with_an_error_is_never_cached_and_expired_rows_are_purged(self):
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            return ["x.com"], "musicbrainz error TimeoutError"
+        for _ in range(2):
+            self.store.cached_lookup("issuer_domains", "blue fern", lambda: list(fetch()),
+                                     ok=lambda v: not str(v[1]).startswith("musicbrainz error"))
+        self.assertEqual(len(calls), 2)                                                  # asked again: not cached
+        rel = xc.Release("USAB12400001", errors=["musicbrainz http 503"])
+        n = []
+        for _ in range(2):
+            self.store.cached_lookup("isrc_release", "USAB12400001", lambda: (n.append(1), rel.__dict__)[1],
+                                     ok=lambda v: not v.get("errors"))
+        self.assertEqual(len(n), 2)
+        self.store.cached_lookup("mb_artist", "ann alpha", lambda: {"artists": []}, now=1000.0)
+        self.store.cached_lookup("mb_artist", "bob beta", lambda: {"artists": []}, now=1000.0 + 24 * 3600 + 1)
+        self.assertEqual([k for (k,) in self.store.db.execute("SELECT key FROM dv_lookup_cache")], ["bob beta"])
+        with self.assertRaises(RuntimeError):                                            # a raise propagates
+            self.store.cached_lookup("mb_artist", "carl", lambda: (_ for _ in ()).throw(RuntimeError("down")))
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM dv_lookup_cache WHERE key='carl'").fetchone())
+
+    def test_the_people_check_uses_the_cached_artist_search(self):
+        from credit_verify.docverify import intel
+        asked = []
+        out = intel.people_check(self.net, [{"name": "Zed Nobody", "as": "signatory"}], graph=None, track_credits=[],
+                                 artist_search=lambda name: (asked.append(name), {"artists": []})[1])
+        self.assertEqual(asked, ["Zed Nobody"])
+        self.assertFalse(any(c == "mb:artist" for c in self.net.calls))
+        self.assertEqual(out.status, xc.WEAK)
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
+        self.assertIn("artist_search=lambda name: cached_artist(store, deps.net, name)", src)
+
+    def test_non_latin_names_never_share_a_cache_entry(self):
+        # QA #1499: xc.fold drops non-ASCII letters, so 张伟 and 李娜 both folded to '' and shared one entry.
+        self.assertEqual(xc.fold("张伟"), xc.fold("李娜"))                              # the old collision
+        self.assertNotEqual(runner.lookup_key("张伟"), runner.lookup_key("李娜"))
+        self.assertEqual(runner.lookup_key("  Blue  FERN Records "), runner.lookup_key("blue fern records"))
+        self.assertEqual(runner.lookup_key("\uff22\uff4c\uff55\uff45"), runner.lookup_key("blue"))     # NFKC fullwidth
+        asked = []
+        net = self.net
+        net.mb = lambda path, params: (asked.append(params["query"]), {"artists": [{"name": params["query"]}]})[1]
+        a = runner.cached_artist(self.store, net, "张伟")
+        b = runner.cached_artist(self.store, net, "李娜")
+        self.assertEqual(len(asked), 2)                                                  # two lookups, two answers
+        self.assertNotEqual(a, b)
+        runner.cached_artist(self.store, net, "张伟")
+        self.assertEqual(len(asked), 2)                                                  # the same name: cached
+        runner.cached_artist(self.store, net, "   ")
+        runner.cached_artist(self.store, net, "   ")
+        self.assertEqual(len(asked), 4)                                                  # an empty key: never cached
+        doms = []
+
+        def official(n, issuer):
+            doms.append(issuer)
+            return [issuer + ".com"], "musicbrainz label x"
+        with unittest.mock.patch.object(runner.xc, "official_domains", official):
+            self.assertEqual(runner.cached_official(self.store, net, "张伟唱片")[0], ["张伟唱片.com"])
+            self.assertEqual(runner.cached_official(self.store, net, "李娜唱片")[0], ["李娜唱片.com"])
+        self.assertEqual(doms, ["张伟唱片", "李娜唱片"])
+
     def test_since_cutoff_is_recorded_once_and_respected(self):
         db = sqlite3.connect(self.proof_path)
         db.execute("UPDATE verdicts SET created_at='2020-01-01T00:00:00Z'")

@@ -236,7 +236,7 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                 return rows
         # Document-level issuer checks (the issuer does not change per claim).
         issuer, itype = ex.issuer_name, ex.issuer.get("type")
-        official, how = xc.official_domains(deps.net, issuer) if issuer else ([], "no issuer")
+        official, how = cached_official(store, deps.net, issuer) if issuer else ([], "no issuer")
         dom = xc.domain_check(deps.net, ex.sender.get("domain"), issuer, official, how,
                               float(ex.sender.get("confidence") or 0.0))
         sig = xc.signatory_check(deps.net, ex.signatory.get("name") if ex.signatory.get("confidence", 0) >= MIN_CONFIDENCE
@@ -289,7 +289,7 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                 rel = None
                 if r.isrc:
                     if r.isrc not in release_cache:
-                        release_cache[r.isrc] = xc.release_facts(deps.net, r.isrc)
+                        release_cache[r.isrc] = cached_release(store, deps.net, r.isrc)
                     rel = release_cache[r.isrc]
                 checks.append(xc.isrc_check(rel, role, r.names))
                 checks.append(xc.label_check(issuer, itype, rel))
@@ -339,7 +339,8 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
         # a human, never an outcome: most collaborators have no public footprint.
         track_credits = [c for rc, _ in credits_cache.values() for c in (rc or [])]
         ppl = intel.people_check(deps.net, intel.people_of(ex), graph=deps.people_graph, track_credits=track_credits,
-                                 issuer_site_names=[ex.signatory.get("name")] if sig.status == xc.POSITIVE else [])
+                                 issuer_site_names=[ex.signatory.get("name")] if sig.status == xc.POSITIVE else [],
+                                 artist_search=lambda name: cached_artist(store, deps.net, name))
         store.step(run_id, proof_id, "xc_people", ppl.status, ppl.detail)
         for row in rows:
             row["checks"]["xc_domain_intel"] = dint.status
@@ -423,6 +424,43 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
 
 
 FANOUT = 50     # candidate requests above which a filed document is read only against the tracks it names
+
+
+def lookup_key(name: str | None) -> str:
+    """A LOSSLESS cache key for a name (QA #1499): NFKC, casefold, collapsed whitespace - every letter kept, so
+    non-Latin names never collide (xc.fold drops non-ASCII letters: 张伟 and 李娜 both fold to '')."""
+    import unicodedata
+    return " ".join(unicodedata.normalize("NFKC", str(name or "")).casefold().split())
+
+
+def cached_official(store: DocVerifyStore, net: Any, issuer: str) -> tuple[list[str], str]:
+    """xc.official_domains through the shared 24 h cache, keyed on the folded issuer; a MusicBrainz error is not
+    cached (Fable 149)."""
+    key = lookup_key(issuer)
+    if not key:
+        return xc.official_domains(net, issuer)          # nothing to key on: never cached
+    v = store.cached_lookup("issuer_domains", key, lambda: list(xc.official_domains(net, issuer)),
+                            ok=lambda v: not str(v[1]).startswith("musicbrainz error"))
+    return list(v[0]), str(v[1])
+
+
+def cached_artist(store: DocVerifyStore, net: Any, name: str) -> Any:
+    """MusicBrainz artist search through the shared 24 h cache, keyed losslessly on the name (never cached when
+    the key is empty)."""
+    fetch = lambda: net.mb("artist", {"query": f'artist:"{name[:80]}"', "limit": "3"})   # noqa: E731
+    key = lookup_key(name)
+    return store.cached_lookup("mb_artist", key, fetch) if key else fetch()
+
+
+def cached_release(store: DocVerifyStore, net: Any, isrc: str) -> xc.Release:
+    """xc.release_facts (MusicBrainz + Deezer) through the shared 24 h cache, keyed on the normalized ISRC; facts
+    that carry any source error are not cached (Fable 149)."""
+    from dataclasses import asdict
+
+    from .extract import norm_isrc
+    v = store.cached_lookup("isrc_release", norm_isrc(isrc) or isrc, lambda: asdict(xc.release_facts(net, isrc)),
+                            ok=lambda v: not v.get("errors"))
+    return xc.Release(**v)
 
 
 def named_by(ex: Any, r: Any, min_confidence: float | None = None) -> bool:

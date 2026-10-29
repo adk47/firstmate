@@ -197,7 +197,7 @@ def people_of(ex: Any) -> list[dict[str, str]]:
 
 def people_check(net: xc.Net, people: list[dict[str, str]], *, graph: NameIndex | None,
                  track_credits: list[dict[str, Any]] | None, issuer_site_names: Iterable[str] = (),
-                 musicbrainz: bool = True) -> xc.Check:
+                 musicbrainz: bool = True, artist_search: Any = None) -> xc.Check:
     """`issuer_site_names`: folded names xc_signatory found on the issuer's official site this run
     (the runner passes the signatory when xc_signatory is positive; no second fetch)."""
     on_site = {fold(n) for n in issuer_site_names if n}
@@ -223,7 +223,8 @@ def people_check(net: xc.Net, people: list[dict[str, str]], *, graph: NameIndex 
             found.append("issuer_site")
         if not found and musicbrainz:
             try:
-                data = net.mb("artist", {"query": f'artist:"{p["name"][:80]}"', "limit": "3"})
+                data = (artist_search(p["name"]) if artist_search is not None else
+                        net.mb("artist", {"query": f'artist:"{p["name"][:80]}"', "limit": "3"}))
                 if any(int(a.get("score") or 0) >= 100 and fold(a.get("name") or "") == fold(p["name"])
                        for a in data.get("artists") or []):
                     found.append("musicbrainz")

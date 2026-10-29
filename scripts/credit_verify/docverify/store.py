@@ -90,6 +90,8 @@ CREATE TABLE IF NOT EXISTS dv_extract_cache (prompt_sha256 TEXT PRIMARY KEY, at 
 -- Muso's stored raw credits per track, shared by every reader process (one admin GET per track per
 -- TTL instead of one per document): an account's documents usually name the same tracks.
 CREATE TABLE IF NOT EXISTS dv_raw_credits (track_id TEXT PRIMARY KEY, at TEXT NOT NULL, items_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS dv_lookup_cache (kind TEXT NOT NULL, key TEXT NOT NULL, at REAL NOT NULL, value_json TEXT NOT NULL,
+  PRIMARY KEY (kind, key));
 -- D2: a filing's candidate requests and claim keys as the last run saw them, UNTRUNCATED (dv_steps
 -- detail is capped at 20,000 chars; a 40-request filing overflowed it and broke selection).
 -- Claim keys of a filing the document does not name (fan-out cut, > FANOUT candidate requests):
@@ -329,6 +331,28 @@ class DocVerifyStore:
             self.db.execute("INSERT OR REPLACE INTO dv_intake_keys (intake_id, version, at, candidates_json, keys_json) "
                             "VALUES (?,?,?,?,?)", (intake_id, VERSION, utcnow(), json.dumps(sorted(candidates)),
                                                    json.dumps(keys)))
+
+    def cached_lookup(self, kind: str, key: str, fetch: Any, *, ok: Any = lambda v: True, ttl_s: float = 24 * 3600,
+                      now: Any = None) -> Any:
+        """A public lookup (MusicBrainz issuer domains, ISRC release facts, artist search) through a 24 h cache
+        shared by every reader (Fable 149: MusicBrainz 1/s host-wide is the reading bound). `fetch()` is called
+        on a miss; its value is stored only when `ok(value)` (an answer carrying an error is asked again next time).
+        A fetch that raises is never cached and propagates. Expired rows are deleted on write."""
+        import time as _t
+        t = _t.time() if now is None else now
+        row = self.db.execute("SELECT at, value_json FROM dv_lookup_cache WHERE kind=? AND key=?", (kind, key)).fetchone()
+        if row and t - float(row[0]) < ttl_s:
+            try:
+                return json.loads(row[1])
+            except ValueError:
+                pass
+        value = fetch()
+        if ok(value):
+            with self.lock, self.db:
+                self.db.execute("DELETE FROM dv_lookup_cache WHERE at < ?", (t - ttl_s,))
+                self.db.execute("INSERT OR REPLACE INTO dv_lookup_cache (kind, key, at, value_json) VALUES (?,?,?,?)",
+                                (kind, key, t, json.dumps(value, default=str)))
+        return value
 
     def cached_raw_credits(self, track_id: str, fetch: Any, ttl_s: float = RAW_CREDITS_TTL_S,
                            now: Any = None) -> list[dict[str, Any]]:
