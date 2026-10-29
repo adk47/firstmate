@@ -638,3 +638,43 @@ T9_URL="ws://qa-review-gateway.hydra-qa.svc.cluster.local:18789"
     QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 1 ]
 }
+
+# --- 2026-10-28 (hydra#1456, run 40787678249): one sha, many open PRs -------------------
+# Executes the SHIPPED jq filter from qa-autoreview.yml against the real shape of
+# GET /repos/Muso-AI/hydra/commits/497b7fcc/pulls (8 open PRs: 7 stacked on fm/ branches,
+# one on main). The old filter took the first open PR (#1409, base fm/...), skipped it as
+# "not main", and the gated PR #1456 was never reviewed.
+autoreview_pr_filter() {
+  python3 - "$AUTOREVIEW" <<'PY'
+import re, sys
+s = open(sys.argv[1]).read()
+m = re.search(r'commits/\$\{HEAD_SHA\}/pulls" \\\s*\n\s*--jq \'([^\']+)\'', s)
+if not m:
+    sys.exit("jq filter not found in qa-autoreview.yml")
+print(m.group(1))
+PY
+}
+STACK_PULLS='[
+ {"number":1409,"state":"open","base":{"ref":"fm/verify-ask-wiring-h2-comm-state"}},
+ {"number":1418,"state":"open","base":{"ref":"fm/verify-ask-wiring-h2-s1-sender"}},
+ {"number":1424,"state":"open","base":{"ref":"fm/verify-ask-wiring-h2-owing-proof"}},
+ {"number":1456,"state":"open","base":{"ref":"main"}},
+ {"number":1459,"state":"open","base":{"ref":"fm/verify-ask-wiring-h2-merge-pending"}},
+ {"number":1400,"state":"closed","base":{"ref":"main"}}]'
+
+@test "autoreview PR resolution: a sha shared by a stack resolves to the main-based PR (#1456), not the first (#1409)" {
+  f="$(autoreview_pr_filter)"
+  [ -n "$f" ]
+  [ "$(jq -r "$f | .number" <<< "$STACK_PULLS")" = "1456" ]
+}
+
+@test "autoreview PR resolution: no main-based PR -> first open PR (unchanged skip/pending path); closed main PR ignored; none -> empty" {
+  f="$(autoreview_pr_filter)"
+  [ "$(jq -r "$f | .number" <<< '[{"number":7,"state":"closed","base":{"ref":"main"}},{"number":8,"state":"open","base":{"ref":"fm/x"}},{"number":9,"state":"open","base":{"ref":"fm/y"}}]')" = "8" ]
+  [ -z "$(jq -r "$f" <<< '[{"number":7,"state":"closed","base":{"ref":"main"}}]')" ]
+  [ -z "$(jq -r "$f" <<< '[]')" ]
+}
+
+@test "autoreview PR resolution mutation: the old first-open-PR filter picks #1409 (the regression this guards)" {
+  [ "$(jq -r '[.[] | select(.state=="open")][0] // empty | .number' <<< "$STACK_PULLS")" = "1409" ]
+}

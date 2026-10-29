@@ -106,8 +106,14 @@ jobs:
           say_status pending "QA review queued for ${HEAD_SHA:0:7}"
 
           # Resolve the open PR that owns this commit.
+          # 2026-10-28 (hydra#1456, run 40787678249): ONE head sha can be the head of several
+          # open PRs at once. A stack whose layers point at the same commit, plus the main-based
+          # PR that carries it, had 8 PRs on 497b7fcc. Taking the first open PR picked #1409
+          # (base fm/...), which skipped as "not main", so the one PR QA gates never got a
+          # review. The main-based PR is the only one this workflow reviews, so it wins.
+          # Otherwise the first open PR keeps today's skip/pending behaviour.
           prjson="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" \
-            --jq '[.[] | select(.state=="open")][0] // empty')"
+            --jq '[.[] | select(.state=="open")] | ((map(select(.base.ref=="main")) + .)[0]) // empty')"
           if [ -z "$prjson" ]; then
             echo "No open PR for ${HEAD_SHA} — nothing to review."
             exit 0
