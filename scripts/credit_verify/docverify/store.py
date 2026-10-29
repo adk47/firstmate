@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS dv_llm_calls (
   at TEXT NOT NULL,
   proof_id TEXT,
   model TEXT,
-  outcome TEXT NOT NULL,                 -- ok | error | skipped
+  outcome TEXT NOT NULL,                 -- ok | error | skipped | cached (dv_extract_cache, no call)
   reason TEXT,
   prompt_sha256 TEXT,
   input_tokens INTEGER,
@@ -83,6 +83,10 @@ CREATE TABLE IF NOT EXISTS dv_llm_calls (
   latency_ms INTEGER
 );
 CREATE TABLE IF NOT EXISTS dv_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+-- The model's answer per exact prompt (extract.py): the same document text + facts asked again within the
+-- TTL reuses the answer instead of a second call. Untruncated; only answers that validated are stored.
+CREATE TABLE IF NOT EXISTS dv_extract_cache (prompt_sha256 TEXT PRIMARY KEY, at REAL NOT NULL, model TEXT NOT NULL,
+  call_id INTEGER, answer_json TEXT NOT NULL);
 -- Muso's stored raw credits per track, shared by every reader process (one admin GET per track per
 -- TTL instead of one per document): an account's documents usually name the same tracks.
 CREATE TABLE IF NOT EXISTS dv_raw_credits (track_id TEXT PRIMARY KEY, at TEXT NOT NULL, items_json TEXT NOT NULL);
@@ -236,13 +240,35 @@ class DocVerifyStore:
                  reason[:600], need, int(account_hold), json.dumps(detail, default=str, ensure_ascii=False)[:20_000],
                  VERSION, intake_id))
 
-    def llm_call(self, row: dict[str, Any]) -> None:
+    def llm_call(self, row: dict[str, Any]) -> int:
         with self.lock, self.db:
-            self.db.execute("INSERT INTO dv_llm_calls (at, proof_id, model, outcome, reason, prompt_sha256,"
-                            " input_tokens, output_tokens, cost_usd, latency_ms) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                            (utcnow(), row.get("proof_id"), row.get("model"), row["outcome"], row.get("reason"),
-                             row.get("prompt_sha256"), row.get("input_tokens"), row.get("output_tokens"),
-                             row.get("cost_usd"), row.get("latency_ms")))
+            cur = self.db.execute("INSERT INTO dv_llm_calls (at, proof_id, model, outcome, reason, prompt_sha256,"
+                                  " input_tokens, output_tokens, cost_usd, latency_ms) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                  (utcnow(), row.get("proof_id"), row.get("model"), row["outcome"], row.get("reason"),
+                                   row.get("prompt_sha256"), row.get("input_tokens"), row.get("output_tokens"),
+                                   row.get("cost_usd"), row.get("latency_ms")))
+            return int(cur.lastrowid)
+
+    def cached_answer(self, prompt_sha256: str, model: str, ttl_s: float, now: float) -> tuple[Any, int | None, float] | None:
+        """(answer, call id, age s) of a validated answer to this exact prompt by this model within `ttl_s`."""
+        row = self.db.execute("SELECT at, call_id, answer_json FROM dv_extract_cache WHERE prompt_sha256=? AND model=?",
+                              (prompt_sha256, model)).fetchone()
+        if not row or not (now - float(row[0])) < ttl_s:
+            return None
+        try:
+            return json.loads(row[2]), row[1], now - float(row[0])
+        except (TypeError, ValueError):
+            return None
+
+    def cache_answer(self, prompt_sha256: str, model: str, call_id: int, answer: Any, now: float,
+                     ttl_s: float = 24 * 3600) -> None:
+        """Store a validated extraction payload (extract.cache_payload, never the raw model answer) and delete
+        every row past its TTL, so nothing outlives the cache window (QA #1469)."""
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM dv_extract_cache WHERE at < ?", (now - ttl_s,))
+            self.db.execute("INSERT OR REPLACE INTO dv_extract_cache (prompt_sha256, at, model, call_id, answer_json) "
+                            "VALUES (?,?,?,?,?)", (prompt_sha256, now, model, call_id,
+                                                   json.dumps(answer, ensure_ascii=False, default=str)))
 
     # -- reads ---------------------------------------------------------------
     def spent_today_usd(self) -> float:

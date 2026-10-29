@@ -39,6 +39,11 @@ TIMEOUT_S = int(os.environ.get("CREDIT_DOC_VERIFY_LLM_TIMEOUT_S", "90"))
 MAX_TOKENS = 8000             # headroom for long credit lists; the cause of the backfill's 6 unusable
                               # answers was not measured, so finish_reason is now recorded per call
 UNUSABLE_RETRIES = 1
+# Same prompt (the document's text + facts, byte for byte) = same question: reuse the validated answer
+# for 24 h instead of asking again (proof-loop lead 079; 2026-10-28: 22% of good calls repeated a prompt
+# already answered within 1.3 h - 88 min of model wait, 26% of all). Keyed by the PROMPT sha256, so a
+# different text or facts for the same file is a new question. A failed answer is never cached.
+CACHE_TTL_S = 24 * 3600
 
 ISSUER_TYPES = ("label", "distributor", "publisher", "studio", "pro", "management", "artist", "dsp", "other", "none")
 DOC_TYPES = ("split_sheet", "contract", "invoice", "letter", "email", "email_screenshot", "dashboard_screenshot",
@@ -248,6 +253,21 @@ def claimant_elsewhere(ex: Extraction, names: list[str], title: str | None) -> l
     return list(dict.fromkeys(out))[:3]
 
 
+def cache_payload(ex: Extraction) -> dict[str, Any]:
+    """The exact fields `validate` reads, rebuilt from the already validated (bounded) extraction, so the cache holds
+    nothing else: no unknown key, no oversized string. validate(cache_payload(ex)) gives the same extraction."""
+    return {"doc_type": ex.doc_type,
+            "issuer": {k: ex.issuer.get(k) for k in ("name", "type", "confidence")},
+            "signatory": {k: ex.signatory.get(k) for k in ("name", "title", "confidence")},
+            "sender": {"email": ex.sender.get("email"), "confidence": ex.sender.get("confidence")},
+            "emails": list(ex.emails), "is_email": bool(ex.is_email),
+            "tracks": [{k: t.get(k) for k in ("title", "isrc", "confidence")} for t in ex.tracks],
+            "credits": [{k: c.get(k) for k in ("person", "role", "track", "share_percent", "confidence")}
+                        for c in ex.credits],
+            "dates": [{k: d.get(k) for k in ("what", "date", "confidence")} for d in ex.dates],
+            "amounts": [{k: a.get(k) for k in ("what", "amount", "currency", "confidence")} for a in ex.amounts]}
+
+
 def fallback(text: str, error: str) -> Extraction:
     """No model: emails and ISRCs only, confidence 0.5, degraded."""
     ex = Extraction(ok=False, degraded=True, error=error[:300])
@@ -289,6 +309,19 @@ class Extractor:
         messages = build_messages(text, meta)
         sha = hashlib.sha256(json.dumps(messages, sort_keys=True).encode()).hexdigest()
         row: dict[str, Any] = {"proof_id": proof_id, "model": self.model, "prompt_sha256": sha}
+        hit = self.store.cached_answer(sha, self.model, CACHE_TTL_S, time.time()) \
+            if hasattr(self.store, "cached_answer") else None
+        if hit is not None:
+            answer, call_id, age = hit
+            try:
+                ex = validate(answer)                     # the same validation as a live answer
+            except (ValueError, TypeError, AttributeError, IndexError):
+                ex = None
+            if ex is not None:
+                self.store.llm_call({**row, "outcome": "cached", "cost_usd": 0, "latency_ms": 0,
+                                     "reason": f"same prompt answered by call {call_id} {age / 60:.0f} min ago"})
+                ex.model = self.model
+                return ex
         if self.store.spent_today_usd() >= self.daily_usd:
             self.store.llm_call({**row, "outcome": "skipped", "reason": f"daily cap ${self.daily_usd:.2f} reached"})
             return fallback(text, "daily model spend cap reached")
@@ -324,14 +357,21 @@ class Extractor:
             usage = data.get("usage") or {}
             choice = (data.get("choices") or [{}])[0] if isinstance(data.get("choices"), list) else {}
             finish = choice.get("finish_reason") if isinstance(choice, dict) else None
+            # The provider-REPORTED model is kept apart from the audit label: the ledger row falls back to the
+            # configured model when the provider omits the field, but the cache below may only ever be filled
+            # on an explicit, exact report (QA #1469: a routed-elsewhere answer with no `model` field must
+            # not be replayed for 24 h as if the configured model had given it).
+            reported_model = data.get("model") if isinstance(data.get("model"), str) else None
             att.update(input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens"),
-                       cost_usd=usage.get("cost"), latency_ms=latency, model=data.get("model") or self.model)
+                       cost_usd=usage.get("cost"), latency_ms=latency, model=reported_model or self.model,
+                       _reported_model=reported_model)
             try:
                 content = ((choice.get("message") or {}).get("content")) or ""
                 m = re.search(r"\{.*\}", content, re.S)
-                ex = validate(json.loads(m.group(0) if m else content))
+                answer = json.loads(m.group(0) if m else content)
+                ex = validate(answer)
             except (ValueError, TypeError, AttributeError, IndexError) as exc:
-                self.store.llm_call({**att, "outcome": "error",
+                self.store.llm_call({**{k: v for k, v in att.items() if k != "_reported_model"}, "outcome": "error",
                                      "reason": f"unusable answer: {type(exc).__name__} (finish={finish})"})
                 continue
             row = att
@@ -339,5 +379,10 @@ class Extractor:
         else:
             return fallback(text, "unusable model answer")
         ex.model = row["model"]
-        self.store.llm_call({**row, "outcome": "ok"})
+        reported_model = row.pop("_reported_model", None)
+        call_id = self.store.llm_call({**row, "outcome": "ok"})
+        if hasattr(self.store, "cache_answer") and reported_model == self.model:
+            # only the validated, bounded extraction is cached - never the raw answer (QA #1469: a model that
+            # echoes `document_text` must not leave a private contract in the cache)
+            self.store.cache_answer(sha, self.model, call_id, cache_payload(ex), time.time(), CACHE_TTL_S)
         return ex

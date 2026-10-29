@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time as _time
 import unittest
 import unittest.mock
 import urllib.error
@@ -261,8 +262,108 @@ class ExtractTests(unittest.TestCase):
             self.assertIn("finish=length", rows[0][1])
             self.assertAlmostEqual(sum(r[2] for r in rows), 0.0014)     # both attempts count against the cap
             calls = []
-            ex = Extractor(store, key="k", post=lambda *a: (calls.append(1), bad)[1]).extract("text", {}, "q")
+            # another document (the first one's answer is now cached for its exact prompt)
+            ex = Extractor(store, key="k", post=lambda *a: (calls.append(1), bad)[1]).extract("other", {}, "q")
             self.assertEqual((ex.ok, ex.degraded, ex.error, len(calls)), (False, True, "unusable model answer", 2))
+
+    def test_the_same_prompt_reuses_the_validated_answer_for_24h(self):
+        # Proof-loop lead 079: 22% of good calls repeated a prompt answered < 1.3 h earlier.
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            calls = []
+            post = lambda *a: (calls.append(1), or_response(GOOD_ANSWER))[1]     # noqa: E731
+            first = Extractor(store, key="k", post=post).extract("doc text", {"mime": "application/pdf"}, "p1")
+            again = Extractor(store, key="k", post=post).extract("doc text", {"mime": "application/pdf"}, "p1b")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(again.as_dict(), first.as_dict())
+            rows = store.db.execute("SELECT outcome, cost_usd, prompt_sha256, reason FROM dv_llm_calls ORDER BY id").fetchall()
+            self.assertEqual([r[0] for r in rows], ["ok", "cached"])
+            self.assertEqual((rows[1][1], rows[1][2]), (0, rows[0][2]))
+            self.assertIn("same prompt answered by call", rows[1][3])
+            Extractor(store, key="k", post=post).extract("doc text", {"mime": "image/png"}, "p1")   # other facts
+            Extractor(store, key="k", post=post).extract("doc text 2", {"mime": "application/pdf"}, "p1")
+            self.assertEqual(len(calls), 3)                              # a different prompt is a new question
+            store.llm_call({"outcome": "ok", "cost_usd": 99.0})          # over the daily cap: a cached answer
+            ex = Extractor(store, key="k", post=lambda *a: self.fail("no call"), daily_usd=5).extract(
+                "doc text", {"mime": "application/pdf"}, "p1")          # costs nothing and is still served
+            self.assertTrue(ex.ok)
+            with unittest.mock.patch("credit_verify.docverify.extract.time.time", return_value=_time.time() + 24 * 3600 + 1):
+                Extractor(store, key="k", post=post, daily_usd=1000).extract("doc text", {"mime": "application/pdf"}, "p1")
+            self.assertEqual(len(calls), 4)                              # past 24 h: asked again
+            other = Extractor(store, key="k", model="another/model", post=post, daily_usd=1000)
+            other.extract("doc text", {"mime": "application/pdf"}, "p1")
+            self.assertEqual(len(calls), 5)                              # another model is never served this cache
+
+    def test_the_cache_holds_only_the_validated_extraction_and_purges_expired_rows(self):
+        # QA #1469: a model answer carrying an extra 50 KB `document_text` is cached WITHOUT it, bounded, and purged
+        # after the TTL - the cache never keeps document contents.
+        from credit_verify.docverify.extract import cache_payload
+        secret = "PRIVATE CONTRACT " * 3000                                     # ~51 KB
+        noisy = {**GOOD_ANSWER, "document_text": secret, "notes": {"raw": secret},
+                 "issuer": {**GOOD_ANSWER["issuer"], "extra": secret, "name": "Blue Fern Records" + "x" * 500},
+                 "credits": [{**GOOD_ANSWER["credits"][0], "comment": secret}]}
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            ex = Extractor(store, key="k", post=lambda *a: or_response(noisy)).extract("doc", {"mime": "x"}, "p1")
+            (blob,) = store.db.execute("SELECT answer_json FROM dv_extract_cache").fetchone()
+            self.assertNotIn("PRIVATE CONTRACT", blob)
+            self.assertLess(len(blob), 4000)
+            self.assertNotIn("document_text", json.loads(blob))
+            self.assertEqual(set(json.loads(blob)), {"doc_type", "issuer", "signatory", "sender", "emails", "is_email",
+                                                     "tracks", "credits", "dates", "amounts"})
+            again = Extractor(store, key="k", post=lambda *a: self.fail("no call")).extract("doc", {"mime": "x"}, "p1")
+            self.assertEqual(again.as_dict(), ex.as_dict())                       # served from the clean payload
+            self.assertEqual({**validate(cache_payload(ex)).as_dict(), "model": None},
+                             {**ex.as_dict(), "model": None})                        # the round trip is exact
+            # a later write purges every row past the TTL
+            store.cache_answer("other", "m", 1, cache_payload(ex), _time.time() + 24 * 3600 + 5)
+            self.assertEqual([r[0] for r in store.db.execute("SELECT prompt_sha256 FROM dv_extract_cache")], ["other"])
+
+    def test_an_answer_without_an_explicit_matching_model_is_never_cached(self):
+        # QA #1469: the ledger row may fall back to the configured model when the provider omits `model`, but the
+        # cache may only be filled on an explicit, exact report - an answer routed elsewhere (or unreported) must
+        # not be replayed for 24 h as the configured model's.
+        for label, resp in (("no model field", {k: v for k, v in or_response(GOOD_ANSWER).items() if k != "model"}),
+                            ("another model", {**or_response(GOOD_ANSWER), "model": "someone/else-9b"}),
+                            ("non-string model", {**or_response(GOOD_ANSWER), "model": {"id": "x"}})):
+            with self.subTest(label), tempfile.TemporaryDirectory() as td:
+                store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+                calls = []
+                post = lambda *a: (calls.append(1), resp)[1]                  # noqa: E731
+                first = Extractor(store, key="k", post=post).extract("doc text", {"mime": "application/pdf"}, "p1")
+                self.assertTrue(first.ok)
+                self.assertEqual(store.db.execute("SELECT count(*) FROM dv_extract_cache").fetchone()[0], 0, label)
+                Extractor(store, key="k", post=post).extract("doc text", {"mime": "application/pdf"}, "p2")
+                self.assertEqual(len(calls), 2, f"{label}: the second identical prompt must call the model again")
+                # the ledger still records the audit label (configured model as fallback, or the reported one)
+                models = [r[0] for r in store.db.execute("SELECT model FROM dv_llm_calls WHERE outcome = 'ok'")]
+                self.assertEqual(len(models), 2)
+                self.assertNotIn("_reported_model", json.dumps(models))
+        # control: the explicit exact report IS cached (one network call for two identical prompts)
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            calls = []
+            post = lambda *a: (calls.append(1), or_response(GOOD_ANSWER))[1]     # noqa: E731
+            Extractor(store, key="k", post=post).extract("doc text", {"mime": "application/pdf"}, "p1")
+            Extractor(store, key="k", post=post).extract("doc text", {"mime": "application/pdf"}, "p2")
+            self.assertEqual(len(calls), 1)
+
+    def test_a_failed_answer_is_never_cached(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            bad = {"choices": [{"message": {"content": "{not json"}, "finish_reason": "length"}], "usage": {}}
+            calls = []
+            for _ in range(2):
+                Extractor(store, key="k", post=lambda *a: (calls.append(1), bad)[1]).extract("t", {}, "p")
+            self.assertEqual(len(calls), 4)                              # 2 runs x (call + one retry)
+            self.assertEqual(store.db.execute("SELECT count(*) FROM dv_extract_cache").fetchone()[0], 0)
+            store.db.execute("INSERT INTO dv_extract_cache VALUES (?, ?, ?, 1, '{\"doc_type\": 7')",
+                             (store.db.execute("SELECT prompt_sha256 FROM dv_llm_calls LIMIT 1").fetchone()[0],
+                              _time.time(), "deepseek/deepseek-v4.1-flash-1017"))
+            store.db.commit()
+            ok = Extractor(store, key="k", post=lambda *a: (calls.append(1), or_response(GOOD_ANSWER))[1]).extract("t", {}, "p")
+            self.assertTrue(ok.ok)                                       # an unreadable cache row: asked live
+            self.assertEqual(len(calls), 5)
 
     def test_retry_respects_the_daily_cap(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1058,6 +1159,31 @@ class RunnerTests(unittest.TestCase):
         stats, _ = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
         self.assertEqual(stats.documents, 0)
 
+    def test_the_same_bytes_give_the_same_outcome_on_every_run(self):
+        # Fable 127 (6d004ade): the outcome flapped forged_positive/unverifiable across 4 runs because each run
+        # re-asked the model, and its self-reported date confidence moved 0.5 / 0.6 / 0.55 around a threshold.
+        # With the extraction cache the same bytes + facts get the SAME answer, so the SAME outcome, every run.
+        calls = []
+        confidences = iter([0.95, 0.4, 0.95, 0.4, 0.95, 0.4])
+
+        def post(*a):
+            calls.append(1)
+            c = next(confidences)
+            return or_response({**GOOD_ANSWER, "credits": [{**GOOD_ANSWER["credits"][0], "confidence": c}],
+                                "dates": [{"what": "signed", "date": "2027-11-18", "confidence": c}]})
+        self.deps.extractor = Extractor(self.store, key="k", post=post)
+        outcomes = []
+        for _ in range(3):
+            self.store.db.execute("DELETE FROM dv_outcomes")
+            self.store.db.execute("DELETE FROM dv_steps WHERE step != 'extract'")
+            self.store.db.commit()
+            _, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+            outcomes.append([(r["request_id"], r["role"], r["outcome"]) for r in rows])
+        self.assertEqual(len(calls), 1)                                          # one model call, two cache hits
+        self.assertEqual(outcomes[0], outcomes[1])
+        self.assertEqual(outcomes[1], outcomes[2])
+        self.assertTrue(outcomes[0])
+
     def test_since_cutoff_is_recorded_once_and_respected(self):
         db = sqlite3.connect(self.proof_path)
         db.execute("UPDATE verdicts SET created_at='2020-01-01T00:00:00Z'")
@@ -1551,6 +1677,7 @@ class IntakeD2Tests(unittest.TestCase):
             self.store.db.execute("DELETE FROM dv_outcomes")
             self.store.db.execute("DELETE FROM dv_steps")
             self.store.db.execute("DELETE FROM dv_intake_keys")
+            self.store.db.execute("DELETE FROM dv_extract_cache")      # the cache would (rightly) replay the 0.1 answer
             self.store.db.commit()
             self.answer = {**GOOD_ANSWER, "credits": [],
                            "tracks": [{"title": "Night Drive", "isrc": "USAB12400001", "confidence": conf}]}
