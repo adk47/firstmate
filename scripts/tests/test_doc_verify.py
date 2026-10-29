@@ -2534,6 +2534,47 @@ class TrayTests(unittest.TestCase):
                                  ("forensics", tuple(sorted(FRAUD_SIGNAL_FAMILY))))
         carried = {p for (p,) in db.execute("SELECT proof_id FROM dv_outcomes WHERE version=?", (VERSION,))}
         self.assertEqual(carried, {"pclean"})                            # the font edit is re-read
+
+    def test_a_template_match_that_does_not_name_the_claimant_is_unverifiable_never_forged(self):
+        # Fable 165 (df38bbd1): H3 now says SUSPECT with a SOFT template_match_another_account (was FORGED_LIKELY).
+        ex = validate({**GOOD_ANSWER, "doc_type": "contract", "credits": []})
+        sig = {"name": "template_match_another_account", "severity": "soft", "check": "F2", "value": {"template": True}}
+        fs = forensics.check(forensics.H3("SUSPECT", ["F2 template_match_another_account"], [sig], "contract"), ex, {},
+                             "application/pdf")
+        self.assertEqual([(f.name, f.severity) for f in fs], [("h3_template_match_another_account", "soft")])
+        o = gate.decide(h3_verdict="SUSPECT", kind="contract", ex=ex, findings=fs, checks=[], account_held=False,
+                        extracted_support=None)
+        self.assertEqual(o.outcome, gate.UNVERIFIABLE)
+        self.assertEqual(o.need, gate.NEED_COUNTERPARTY)          # a contract: the counter-signed / registered copy
+        self.assertIn("forensic doubt: h3_template_match_another_account", o.reason)
+        sigs = gate.fraud_signals(fs, [])
+        self.assertEqual([(x["id"], x["family"]) for x in sigs], [("h3_template_match_another_account", "template")])
+        self.assertIsNone(gate.positive_pair(sigs))                 # one template signal never makes a fraud pair
+
+    def test_dv4_rereads_every_forged_and_every_hard_f2_reuse_and_carries_the_rest(self):
+        # Fable 165 (df38bbd1): the F2 template rule can only change a document H3 called forged.
+        from credit_verify.docverify import CARRY, FRAUD_SIGNAL_FAMILY
+        self.assertEqual(VERSION, "dv-4")
+        self.assertEqual(FRAUD_SIGNAL_FAMILY["template_match_another_account"], "template")    # pairs only with an edit
+        prev, reread, steps, detail = CARRY["dv-4"]
+        self.assertEqual((prev, reread), ("dv-3", frozenset({"forged", "forged_positive"})))
+        db = self.store.db
+        rows = (("pforged", "forged", '{"h3_reasons": ["F2 reused_on_another_track"]}'),
+                ("ppos", "forged_positive", '{"findings": []}'),
+                ("preuse", "unverifiable", '{"h3_reasons": ["F2 reused_by_another_account_same_claim"]}'),
+                ("psoft", "unverifiable", '{"findings": [{"name": "h3_reused_by_another_account", "severity": "soft"}]}'),
+                ("pclean", "unverifiable", '{"findings": []}'))
+        for pid, outcome, det in rows:
+            db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, outcome, reason, account_hold, "
+                       "detail_json, version, intake_id) VALUES ('r', 't', ?, 'rq', 'Producer', ?, 'x', 0, '{}', 'dv-3', ?)",
+                       (pid, outcome, f"42:{pid}"))
+            db.execute("INSERT INTO dv_steps (run_id, at, proof_id, request_id, step, status, detail_json, version) "
+                       "VALUES ('r', 't', ?, 'rq#Producer', 'forensics', 'ok', ?, 'dv-3')", (pid, det))
+        db.execute("DELETE FROM dv_state WHERE k='carried:dv-3->dv-4'")     # the store's own open carried an empty store
+        db.commit()
+        self.store.carry_forward(prev, "dv-4", reread, steps, detail)
+        carried = {p for (p,) in db.execute("SELECT proof_id FROM dv_outcomes WHERE version='dv-4'")}
+        self.assertEqual(carried, {"psoft", "pclean"})         # a soft reuse / no reuse cannot change: carried
     def test_l11_watch_is_clean_only_after_24h_with_no_false_forged_and_d5b_live(self):
         from datetime import datetime, timezone
 

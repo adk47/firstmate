@@ -62,6 +62,13 @@ def shingles(text: str, k: int = 5) -> set[str]:
     return {" ".join(words[i:i + k]) for i in range(max(0, len(words) - k + 1))}
 
 
+def text_sha(text: str) -> str | None:
+    """EXACT normalized-text identity (Fable b1 on #1514): sha256 of the folded text with whitespace collapsed; None
+    when there is no text. MinHash is similarity, never equality."""
+    norm = " ".join(fold(text or "").split())
+    return hashlib.sha256(norm.encode()).hexdigest() if norm else None
+
+
 def minhash(sh: set[str]) -> list[int]:
     if not sh:
         return []
@@ -93,6 +100,7 @@ class Fingerprint:
     claimant_named: bool | None = None                           # F5b: submitter named in the document (None = not checked)
     track_listed: bool | None = None                             # F5a: submitter's track title/ISRC in it (None = not checked)
     name_h: str | None = None                                    # content.name_hash of the credited name matched
+    text_sha: str | None = None                                  # text_sha() of the extracted text (None = unknown)
     name_verified: bool | None = None                            # that name came from verified_names
 
     @property

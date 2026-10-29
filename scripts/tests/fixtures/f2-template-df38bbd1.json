@@ -1,0 +1,11 @@
+{
+  "about": "Fable 165 (2026-10-29): the dv-3 forged hold on df38bbd1 was a TEMPLATE match, not a passed-around document. Real fingerprint fields from node-8 (names are hashed counts only). same_document_text must be false for both matches; the claimant is not named, so F2 is a SOFT template_match_another_account, never reused_on_another_track/same_claim (hard).",
+  "this": {"proof": "df38bbd16a5b", "track_key": "e731904a-8ba8-49df-bf02-f80c4e126efc", "claimant_named": false, "kind": "contract",
+           "percent_sig": "25,25,50,50,50,100,100,200", "isrcs": [], "n_names": 25},
+  "others": [
+    {"proof": "8792517e4acf", "track_key": "94b0edaa-1323-4ccd-aa83-dda1354aa321", "claimant_named": true, "kind": "contract",
+     "percent_sig": "25,25,50,50,100,100,100,200", "isrcs": [], "shared_names": 15, "why_template": "different splits AND another track"},
+    {"proof": "c3b2ac2a02c3", "track_key": null, "claimant_named": null, "kind": "contract",
+     "percent_sig": "10,50,50,50,50,50,50,100,200", "isrcs": [], "shared_names": 16, "why_template": "different splits; no track on that side only"}
+  ]
+}

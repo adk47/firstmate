@@ -137,7 +137,7 @@ def finalize(store: ProofStore, path: str, raw: dict[str, Any], *, contact_h: st
                      n_shingles=raw.get("n_shingles") or 0, entities=raw.get("entities") or {},
                      track_key=ctx.track_key, role_families=sorted({family_of(r) for r in ctx.claimed_roles}),
                      track_listed=raw.get("track_listed"), claimant_named=named, name_h=who.get("name_h"),
-                     name_verified=who.get("verified_identity") if who else None)
+                     name_verified=who.get("verified_identity") if who else None, text_sha=raw.get("text_sha"))
     analysed = "entities" in raw and not raw.get("fatal")
     if not ctx.paired:
         signals.append(Signal("F5", "claim_context_mismatch", ERROR,

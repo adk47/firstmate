@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from credit_verify.proof import (analyze, content, fingerprint, image_forensics, image_meta, ocr,  # noqa: E402
                                  pdf_forensics, sandbox, verdict)
 from credit_verify.proof.pipeline import analyze_proof  # noqa: E402
-from credit_verify.proof.signals import ClaimContext, Extracted, Signal  # noqa: E402
+from credit_verify.proof.signals import ClaimContext, Evidence, Extracted, Signal  # noqa: E402
 from credit_verify.proof.sniff import sniff  # noqa: E402
 from credit_verify.proof.store import ProofStore  # noqa: E402
 
@@ -972,6 +972,87 @@ class ReuseTests(Base):
         self.assertEqual(next(s for s in res.signals if s.name == "reused_on_another_track").severity, "hard")
         self.assertEqual(res.verdict, verdict.FORGED_LIKELY)
 
+    SPLIT = ("SPLIT SHEET AND PRODUCER AGREEMENT\nThis agreement is made between Small Act and the parties below.\n"
+             "Writer: Pat Prod 50%\nWriter: Quinn Beat 50%\nProducer: Pat Prod 50%\nProducer: Quinn Beat 50%\n"
+             "Track 1: Blue Hour ISRC USEPA2400001\n"
+             + "\n".join(f"Clause {n}: the producers deliver the masters listed above and the shares in clause {n} "
+                         f"are final and bind every successor." for n in range(1, 21))
+             + "\nIn witness whereof the parties have signed this agreement on 2024-05-01.")
+
+    def test_a_true_reuse_stays_hard_same_text_same_splits_same_track(self):
+        # Fable 165: the SAME document (not byte-identical: re-saved) with the same splits on the same track, sent by
+        # an account it does not name, is still a passed-around document -> FORGED_LIKELY.
+        self.run_proof("pat.pdf", pdf_bytes(self.SPLIT, size=6, step=8), contact="pat",
+                       ctx=self.ep_ctx("Pat Prod", *self.EP_TRACKS[0]), ocr_texts=[self.SPLIT])
+        res = self.run_proof("mal.pdf", pdf_bytes(self.SPLIT, size=6.5, step=8), contact="mallory",
+                             ctx=self.ep_ctx("Mallory Thief", *self.EP_TRACKS[0]), ocr_texts=[self.SPLIT])
+        f2 = [(s.name, s.severity, s.value.get("how")) for s in res.signals if s.check == "F2"]
+        self.assertEqual(f2, [("reused_by_another_account_same_claim", "hard", ["same_text_and_entities"])])
+        self.assertEqual(res.verdict, verdict.FORGED_LIKELY)
+
+    def test_a_template_filled_in_with_other_splits_is_a_soft_template_match_not_forgery(self):
+        # Fable 165 (df38bbd1): the same contract text with DIFFERENT splits sent by an account it does not name is
+        # one template filled in twice - an evidence line (SOFT), never FORGED_LIKELY.
+        data = pdf_bytes(self.SPLIT, size=6, step=8)
+        self.run_proof("pat.pdf", data, contact="pat",
+                       ctx=self.ep_ctx("Pat Prod", *self.EP_TRACKS[0]), ocr_texts=[self.SPLIT])
+        other = self.SPLIT.replace("Writer: Pat Prod 50%\nWriter: Quinn Beat 50%", "Writer: Pat Prod 25%\nWriter: Quinn Beat 75%")
+        res = self.run_proof("mal.pdf", pdf_bytes(other, size=6, step=8), contact="mallory",
+                             ctx=self.ep_ctx("Mallory Thief", *self.EP_TRACKS[0]), ocr_texts=[other])
+        f2 = [(s.name, s.severity) for s in res.signals if s.check == "F2"]
+        self.assertEqual(f2, [("template_match_another_account", "soft")])
+        self.assertNotEqual(res.verdict, verdict.FORGED_LIKELY)
+        # Fable b1: near-identical text (one clause reworded: MinHash similar, not equal) with the same splits on the
+        # same track is still a template - only EXACT normalized text is the same document
+        near = self.SPLIT.replace("Clause 7: the producers deliver", "Clause 7: the producer delivers")
+        res = self.run_proof("near.pdf", pdf_bytes(near, size=6, step=8), contact="mallory4",
+                             ctx=self.ep_ctx("Mallory Thief", *self.EP_TRACKS[0]), ocr_texts=[near])
+        self.assertEqual([(s.name, s.severity, s.value.get("how")) for s in res.signals if s.check == "F2"],
+                         [("template_match_another_account", "soft", ["same_text_and_entities"])])
+        self.assertNotEqual(res.verdict, verdict.FORGED_LIKELY)
+        # the same splits on ANOTHER track is a template too
+        res = self.run_proof("mal2.pdf", pdf_bytes(self.SPLIT, size=6.5, step=8), contact="mallory2",
+                             ctx=self.ep_ctx("Mallory Thief", *self.EP_TRACKS[1]), ocr_texts=[self.SPLIT])
+        self.assertEqual([(s.name, s.severity) for s in res.signals if s.check == "F2"],
+                         [("template_match_another_account", "soft")])
+        # byte-identical (pat's very bytes) is always the same document, whatever the track (the existing hard rule)
+        res = self.run_proof("mal3.pdf", data, contact="mallory3", ctx=self.ep_ctx("Mallory Thief", *self.EP_TRACKS[1]),
+                             ocr_texts=[self.SPLIT])
+        self.assertEqual(next(s for s in res.signals if s.name == "reused_on_another_track").severity, "hard")
+        self.assertEqual(res.verdict, verdict.FORGED_LIKELY)
+
+    def test_the_df38bbd1_fixture_is_a_template_match(self):
+        import json as _json
+        from credit_verify.proof.fingerprint import Fingerprint
+        from credit_verify.proof.store import cross_account, same_document_text
+        fx = _json.loads((Path(__file__).resolve().parent / "fixtures" / "f2-template-df38bbd1.json").read_text())
+
+        def fp(d, names, text_sha=None):
+            return Fingerprint(proof_id=d["proof"], contact_h=d["proof"], kind=d["kind"], mime="application/pdf",
+                               phash=None, minhash=[], n_shingles=0, track_key=d["track_key"],
+                               entities={"percent_sig": d["percent_sig"], "isrcs": d["isrcs"], "name_hashes": names},
+                               claimant_named=d["claimant_named"], text_sha=text_sha)
+        this = fp(fx["this"], [f"n{i}" for i in range(fx["this"]["n_names"])])
+        ev = Evidence(file="x.pdf", tool="t")
+        for o in fx["others"]:
+            other = fp(o, [f"n{i}" for i in range(o["shared_names"])])
+            self.assertFalse(same_document_text(this, other), o["proof"])
+            sig = cross_account(this, {"same_text_and_entities"}, {o["track_key"] or ""}, True, ev,
+                                strict=same_document_text(this, other))
+            self.assertEqual([(s.name, s.severity) for s in sig], [("template_match_another_account", "soft")], o["proof"])
+            # what dv-3 wrote (the old, strict-blind rule): hard
+            old = cross_account(this, {"same_text_and_entities"}, {o["track_key"] or ""}, True, ev)
+            self.assertEqual({s.severity for s in old}, {"hard"})
+        # the true-reuse twin: the same EXACT text, splits and track is the same document; unknown or different text
+        # (a store row from before text_sha, or a near copy) never is
+        a = fp(fx["this"], ["n1"], text_sha="t" * 64)
+        self.assertTrue(same_document_text(a, fp({**fx["this"], "proof": "twin"}, ["n1"], text_sha="t" * 64)))
+        self.assertFalse(same_document_text(a, fp({**fx["this"], "proof": "old"}, ["n1"], text_sha=None)))
+        self.assertFalse(same_document_text(a, fp({**fx["this"], "proof": "near"}, ["n1"], text_sha="u" * 64)))
+        self.assertFalse(same_document_text(fp(fx["this"], ["n1"]), fp(fx["this"], ["n1"])))      # both unknown
+        self.assertEqual(fingerprint.text_sha("Split  Sheet\n50%"), fingerprint.text_sha("split sheet 50%"))
+        self.assertIsNone(fingerprint.text_sha("  "))
+
     def test_edited_near_copy_is_never_corroboration(self):
         terms = "\n".join(f"Term {n}: the producer delivers the masters listed above and the fees in clause {n} "
                           f"are paid on delivery." for n in range(1, 31))
@@ -1062,11 +1143,23 @@ INSERT INTO fingerprints (proof_id, contact_h, kind, mime, track_key, created_at
   VALUES ('p-old', 'old', 'pro_portal', 'image/png', 't-1', '2026-10-01T00:00:00Z');
 """)
             db.commit()
+            # the doc-verify reader opens proof.sqlite READ-ONLY, possibly before the writer migrated it: a row with
+            # no text_sha column reads as unknown, never an error
+            from credit_verify.proof.store import _fingerprint
+            mem = sqlite3.connect(":memory:")
+            db.backup(mem)                       # prod today: every earlier migration applied, but no text_sha yet
+            for col, typ in (("claimant_named", "INTEGER"), ("track_listed", "INTEGER"),
+                             ("matched_name_hash", "TEXT"), ("name_verified", "INTEGER")):
+                mem.execute(f"ALTER TABLE fingerprints ADD COLUMN {col} {typ}")
+            mem.row_factory = sqlite3.Row
+            self.assertIsNone(_fingerprint(mem.execute("SELECT * FROM fingerprints WHERE proof_id='p-old'").fetchone()
+                                           ).text_sha)
+            mem.close()
             db.close()
             store = ProofStore(path)
             try:
                 [old] = [f for f in store._prior() if f.proof_id == "p-old"]
-                self.assertEqual((old.name_h, old.claimant_named, old.kind), (None, None, "pro_portal"))
+                self.assertEqual((old.name_h, old.claimant_named, old.kind, old.text_sha), (None, None, "pro_portal", None))
                 path_png = os.path.join(d, "x.png")
                 Path(path_png).write_bytes(png_bytes() if Image else b"\x89PNG")
                 [res] = analyze_proof(store, path_png, contact_h="c", source="test", source_ref="x",

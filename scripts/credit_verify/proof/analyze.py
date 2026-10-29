@@ -105,6 +105,7 @@ def extract_bytes(data: bytes, path: str, declared: str | None, ctx: ClaimContex
         text_source=ext.text_source,
         phash=phash,
         minhash=fingerprint.minhash(sh),
+        text_sha=fingerprint.text_sha(ext.text),
         n_shingles=len(sh),
         entities=ents,
         facts={k: v for k, v in facts.items() if k in FACT_KEYS},
