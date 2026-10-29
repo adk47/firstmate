@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import credit_test_env  # noqa: F401 - first: test logs never reach the production run.log
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -74,8 +75,10 @@ class ReceiptsTest(unittest.TestCase):
     def test_lists_split_on_owing_proof_and_skip_what_cannot_be_named(self):
         res = self.build()
         q, r = res["lists"]["queued"], res["lists"]["received"]
-        self.assertEqual([(u["user_id"], u["paid"], u["request_ids"]) for u in q],
+        self.assertEqual([(u["user_id"], u["paid"], sorted(u["request_ids"])) for u in q],
                          [("1", True, ["r-a", "r-b"]), ("6", False, ["r-f"])])
+        # G3: the list names the conversation the (earliest) document was filed in, for the gate's contact check
+        self.assertEqual({u["user_id"]: u["filing_conversation"] for u in q + r}["1"], "777")
         self.assertEqual([(u["user_id"], u["request_ids"]) for u in r], [("2", ["r-c"]), ("7", ["r-g"]), ("8", ["r-h"])])
         self.assertTrue(all(u["skip"] is None for u in q + r))
         self.assertEqual(q[0]["first_received"], "2026-10-27T09:00:00Z")
@@ -90,6 +93,24 @@ class ReceiptsTest(unittest.TestCase):
         Path(self.holds).write_text('{"user_id": "6", "kind": "approval_hold"}\n')
         res = self.build()
         self.assertEqual([u["user_id"] for u in res["lists"]["received"]], ["2", "6", "7", "8"])
+
+    def test_a_stale_hold_list_lists_nothing(self):
+        # s1 guard G8: account_holds.jsonl older than 72 h -> stop (a stale list could miss a new hold)
+        old = __import__("time").time() - 73 * 3600
+        os.utime(self.holds, (old, old))
+        with self.assertRaises(receipts.ReceiptsError) as cm:
+            self.build()
+        self.assertIn("G8", str(cm.exception))
+
+    def test_a_future_dated_hold_list_lists_nothing(self):
+        # QA #1456: a future mtime must not read as fresh (its negative age never exceeds 72 h)
+        t = __import__("time").time()
+        os.utime(self.holds, (t + 3600, t + 3600))
+        with self.assertRaises(receipts.ReceiptsError) as cm:
+            self.build()
+        self.assertIn("future", str(cm.exception))
+        os.utime(self.holds, (t + 120, t + 120))     # within the 5-minute clock-skew slack: fine
+        self.build()
 
     def test_unreadable_inputs_list_nothing(self):
         for kw in ({"proof_store": str(self.d / "missing.sqlite")}, {"paying_path": str(self.d / "nope.json")},

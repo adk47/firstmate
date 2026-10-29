@@ -565,6 +565,14 @@ class UvnStatusTests(unittest.TestCase):
         locked.write_text("#!/bin/bash\nreadonly STATUS_RECEIVED_COPY_APPROVED=0\nreadonly OTHER_COPY_APPROVED=1\n")
         self.assertFalse(uvn_status.gate_lock_open(str(locked), "STATUS_RECEIVED_COPY_APPROVED"))
 
+    def test_the_lists_filing_conversation_reaches_the_gate_payload(self):
+        # s1 guard G3: R1 goes only to the contact that filed the document; the list names its conversation
+        self.users[0]["filing_conversation"] = "215476000000001"
+        self.write_list()
+        rep, gate = self.run_(campaign="status-doc-received", mode="dry-run")
+        self.assertEqual(gate.calls[0][1]["user"].get("filing_conversation"), "215476000000001")
+        self.assertNotIn("filing_conversation", gate.calls[-1][1]["user"]) if len(gate.calls) > 1 else None
+
     def test_the_doc_check_audit_matches_the_recipient_like_a_send(self):
         saved = verify_notify.IDENTITY_LOOKUP
         verify_notify.IDENTITY_LOOKUP = lambda ids: {"42": {"professional_id": "pro-42", "auth_id": ""}}

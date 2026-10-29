@@ -59,12 +59,12 @@ def intake_by_user(proof_store: str) -> tuple[dict[int, dict[str, Any]], Counter
     counts: Counter = Counter()
     try:
         db = sqlite3.connect(f"file:{proof_store}?mode=ro", uri=True)
-        rows = db.execute("SELECT user_id, subject, candidate_request_ids_json, received_at, matched_by "
-                          "FROM proof_intake").fetchall()
+        rows = db.execute("SELECT user_id, subject, candidate_request_ids_json, received_at, matched_by, conversation_id "
+                          "FROM proof_intake ORDER BY received_at").fetchall()
     except sqlite3.Error as exc:
         raise ReceiptsError(f"proof_intake unreadable: {exc}") from exc
     out: dict[int, dict[str, Any]] = {}
-    for uid, subject, cands, received, matched in rows:
+    for uid, subject, cands, received, matched, conv in rows:
         counts[f"intake_rows_{subject}"] += 1
         if subject != "credit":
             continue
@@ -80,7 +80,8 @@ def intake_by_user(proof_store: str) -> tuple[dict[int, dict[str, Any]], Counter
         if not isinstance(raw, list) or not all(isinstance(x, str) and x.strip() for x in raw):
             raise ReceiptsError(f"proof_intake row for user {uid}: candidate ids must be a JSON array of request ids")
         ids = [x.strip().lower() for x in raw]
-        u = out.setdefault(int(uid), {"request_ids": [], "first_received": str(received)})
+        u = out.setdefault(int(uid), {"request_ids": [], "first_received": str(received),
+                                      "filing_conversation": str(conv or "")})
         u["request_ids"] = list(dict.fromkeys(u["request_ids"] + ids))
         u["first_received"] = min(u["first_received"], str(received))
     return out, counts
@@ -102,10 +103,22 @@ def pending_rows(user_ids: list[int], query: Query) -> dict[int, dict[str, tuple
     return out
 
 
-def held_accounts(holds_path: str, ledger_path: str) -> set[int]:
-    """H1: accounts on fraud-lens's hold list or flagged account-hold by hold-silent. Unreadable = error."""
+HOLDS_MAX_AGE_H = 72
+HOLDS_FUTURE_SLACK_H = 5 / 60   # clock skew tolerated between the writer and this reader: 5 minutes
+
+
+def held_accounts(holds_path: str, ledger_path: str, now: datetime | None = None) -> set[int]:
+    """H1: accounts on fraud-lens's hold list or flagged account-hold by hold-silent. Unreadable, or a hold list
+    older than HOLDS_MAX_AGE_H (s1 guard G8: a stale list could miss a new hold), = error: nothing is listed."""
     held: set[int] = set()
     try:
+        age_h = ((now or datetime.now(timezone.utc)).timestamp() - os.path.getmtime(holds_path)) / 3600
+        if age_h > HOLDS_MAX_AGE_H:
+            raise ReceiptsError(f"G8: the account hold list is {age_h:.0f} h old (limit {HOLDS_MAX_AGE_H} h)")
+        if age_h < -HOLDS_FUTURE_SLACK_H:
+            # QA #1456: a FUTURE mtime has a negative age that never exceeds the limit, so a stale (or clock-skewed)
+            # list would read as fresh. Its age is unknowable: stop.
+            raise ReceiptsError(f"G8: the account hold list's mtime is {-age_h * 60:.0f} min in the future; its age is unknown")
         with open(holds_path, encoding="utf-8") as fh:
             for line in fh:
                 if line.strip():
@@ -148,7 +161,7 @@ def build(*, proof_store: str = PROOF_STORE, paying_path: str = PAYING, query: Q
             counts[f"owes_{why}"] += 1
         key = "received" if why else "queued"
         lists[key].append({"user_id": str(uid), "paid": uid in paying, "skip": None, "request_ids": note,
-                           "first_received": u["first_received"]})
+                           "first_received": u["first_received"], "filing_conversation": u["filing_conversation"]})
         counts[f"list_{key}_{'paid' if uid in paying else 'free'}"] += 1
     stamp = now.isoformat(timespec="seconds")
     for k in lists:

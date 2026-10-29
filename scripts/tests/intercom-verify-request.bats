@@ -23,11 +23,16 @@ setup() {
   # SCRIPT: the same with the verify-live windowed copy unlocked, i.e. the copy that sends
   # once Fable and the captain approve it; most behaviour below is about that send path.
   sed 's/^readonly TESTABLE=0$/readonly TESTABLE=1/' "$REAL_SCRIPT" > "$TEST_TMPDIR/locked.sh"
-  sed 's/^readonly LIVE_WINDOWED_COPY_APPROVED=0$/readonly LIVE_WINDOWED_COPY_APPROVED=1/' \
+  sed -e 's/^readonly LIVE_WINDOWED_COPY_APPROVED=0$/readonly LIVE_WINDOWED_COPY_APPROVED=1/' \
+      -e 's/^readonly UVN_STATUS_COPY_APPROVED=0$/readonly UVN_STATUS_COPY_APPROVED=1/' \
     "$TEST_TMPDIR/locked.sh" > "$TEST_TMPDIR/under-test.sh"
-  chmod +x "$TEST_TMPDIR/locked.sh" "$TEST_TMPDIR/under-test.sh"
+  # UVN: the committed behaviour with the uvn-status ask unlocked (send-locked since captain 2026-10-28 12:18Z);
+  # the uvn-status behaviour tests run against it, and one test pins that the committed copy refuses it.
+  sed 's/^readonly UVN_STATUS_COPY_APPROVED=0$/readonly UVN_STATUS_COPY_APPROVED=1/' "$TEST_TMPDIR/locked.sh" > "$TEST_TMPDIR/uvn.sh"
+  chmod +x "$TEST_TMPDIR/locked.sh" "$TEST_TMPDIR/under-test.sh" "$TEST_TMPDIR/uvn.sh"
   LOCKED="$TEST_TMPDIR/locked.sh"
   SCRIPT="$TEST_TMPDIR/under-test.sh"
+  UVN="$TEST_TMPDIR/uvn.sh"
 
   export MUSOAI_INTERCOM_TOKEN="test-token"
   export INTERCOM_VERIFY_TEST_LOG_DIR="$TEST_TMPDIR/api-logs"
@@ -346,7 +351,7 @@ OTHER_PRO="0c4e7a2b-1f3d-4b6a-9e8c-7d5a3b1f0e92"
     rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
     credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
     jq --arg p "$LEGACY_PRO" '.user |= (del(.auth_id) | .professional_id = $p)' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
-    STUB_EXT_ID="$LEGACY_PRO" run -0 "$LOCKED" send --campaign "$camp" --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    STUB_EXT_ID="$LEGACY_PRO" run -0 "$UVN" send --campaign "$camp" --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
     [[ "$output" == "POSTED email message="* ]] || { echo "$camp: $output"; return 1; }
     [ "$(msg .to.id)" = "6650aa01" ]
   done
@@ -650,6 +655,8 @@ unlocked_gate() { # derived copy with the send locks flipped: $1 = retro | windo
     windowed) e=(-e 's/^readonly LIVE_WINDOWED_COPY_APPROVED=0$/readonly LIVE_WINDOWED_COPY_APPROVED=1/') ;;
     claim)    e=(-e 's/^readonly CLAIM_PROOF_ASK_COPY_APPROVED=0$/readonly CLAIM_PROOF_ASK_COPY_APPROVED=1/') ;;
     gap)      e=(-e 's/^readonly GAP_ASK_COPY_APPROVED=0$/readonly GAP_ASK_COPY_APPROVED=1/') ;;
+    merge)    e=(-e 's/^readonly MERGE_PENDING_COPY_APPROVED=0$/readonly MERGE_PENDING_COPY_APPROVED=1/') ;;
+    received)  e=(-e 's/^readonly STATUS_RECEIVED_COPY_APPROVED=0$/readonly STATUS_RECEIVED_COPY_APPROVED=1/') ;;
     claims)   e=(-e 's/^readonly CLAIM_PROOF_ASK_COPY_APPROVED=0$/readonly CLAIM_PROOF_ASK_COPY_APPROVED=1/'
                  -e 's/^readonly CLAIM_STATUS_COPY_APPROVED=0$/readonly CLAIM_STATUS_COPY_APPROVED=1/') ;;
     both)     e=(-e 's/^readonly RETRO_COPY_APPROVED=0$/readonly RETRO_COPY_APPROVED=1/'
@@ -923,7 +930,7 @@ PY
 @test "unknown campaigns and kinds are refused" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -1 send --campaign everything
-  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status or gap-ask"* ]]
+  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask or merge-pending"* ]]
   run -1 send --kind final-notice --parent-message-id 1
   [[ "$output" == *"--kind must be initial, reminder-14, reminder-25, after-rejection or reminder-7"* ]]
 }
@@ -1393,7 +1400,7 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
 
 @test "uvn-status: one request renders the approved copy with the ask-once marker sentence" {
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
-  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [ "$(rendered .subject)" = "Your Muso credit request: one thing we still need" ]
   body="$(rendered .body | plain)"
   [[ "$body" == *'Hi Jane, a quick status update on your credit request for "Song A" by Big Star: it'"'"'s waiting on one thing from you, something that shows your Mixing credit.'* ]]
@@ -1408,14 +1415,14 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
               "Mixing, Mastering, Recording Engineer|your Mixing, Mastering and Recording Engineer credits."; do
     roles="${pair%%|*}" want="${pair#*|}"
     credits "$TEST_TMPDIR/c.json" Jane "u1:$roles:Song A:Big Star"
-    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
     [[ "$(rendered .body | plain)" == *'Hi Jane, a quick status update on your credit request for "Song A" by Big Star: it'"'"'s waiting on one thing from you, something that shows '"$want"* ]]
   done
 }
 
 @test "titles (firstmate 118 b): a title with its own quote marks is never wrapped in ours again, in every rendering" {
   credits "$TEST_TMPDIR/c.json" Jane 'u1:Mixing:„glücklich“:Big Star'
-  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$(rendered .body | plain)" == *'your credit request for „glücklich“ by Big Star:'* ]]
   credits "$TEST_TMPDIR/c.json" Jane 'w1:Mixing:"Song":Big Star'
   run -0 "$LOCKED" send --campaign withdrawal-confirm --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
@@ -1425,29 +1432,40 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   run -0 "$LOCKED" send --campaign status-team-review --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$(rendered .body | plain)" == *'your credit requests for „glücklich“, "Song" and "Plain": they'* ]]
   credits "$TEST_TMPDIR/c.json" Jane 'u1:Mixing:„glücklich“:X' 'u2:Mixing:"Song":X'
-  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$(rendered .body | plain)" == *'your credit requests for „glücklich“ and "Song": they'* ]]
   [[ "$(rendered .body | plain)" != *'""'* ]]
 }
 
 @test "uvn-status: several requests list 3 titles then 'and N more'; no follow-ups" {
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:A:X" "u2:Mixing:B:X" "u3:Mixing:C:X" "u4:Mixing:D:X" "u5:Mixing:E:X"
-  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [ "$(rendered .subject)" = "Your Muso credit requests: one thing we still need" ]
   [[ "$(rendered .body | plain)" == *'credit requests for "A", "B" and "C" (and 2 more): they'"'"'re waiting on one thing from you, something that shows your role on each.'* ]]
-  run -1 "$LOCKED" send --campaign uvn-status --kind reminder-14 --parent-message-id 1 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  run -1 "$UVN" send --campaign uvn-status --kind reminder-14 --parent-message-id 1 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$output" == *"uvn-status has no follow-ups"* ]]
 }
 
-@test "uvn-status: approved as committed; posts once per user, ever" {
+@test "uvn-status: SEND-LOCKED as committed (captain 2026-10-28 12:18Z: a proof ask cannot send via this lock)" {
+  grep -qx "readonly UVN_STATUS_COPY_APPROVED=0" "$REAL_SCRIPT"
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
-  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  run -1 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"UVN_STATUS_COPY_APPROVED=0"* ]]
+  [ "$(calls)" -eq 0 ]
+  [ ! -s "$INTERCOM_VERIFY_TEST_LEDGER" ] || [ -z "$(sql "select * from verify_messages")" ]
+  # the dry run still renders exactly what would be sent
+  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+}
+
+@test "uvn-status (unlocked copy): posts once per user, ever" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1001 credits=1" ]]
   credits "$TEST_TMPDIR/c.json" Jane "u2:Mixing:Song B:Big Star"
-  INTERCOM_VERIFY_TEST_DAY=2026-10-18 run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  INTERCOM_VERIFY_TEST_DAY=2026-10-18 run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "SKIPPED already_sent credits=1" ]]
   credits "$TEST_TMPDIR/c.json" Jane "u3:Mixing:Song C:Big Star"
-  INTERCOM_VERIFY_TEST_DAY=2026-11-30 run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  INTERCOM_VERIFY_TEST_DAY=2026-11-30 run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "SKIPPED already_sent credits=1" ]]
   [ "$(posts)" -eq 1 ]
 }
@@ -1458,7 +1476,7 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   INTERCOM_VERIFY_TEST_DAY="$(day_ago 30)" run -0 send
   [[ "$output" == "POSTED"* ]]
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song B:Big Star"
-  INTERCOM_VERIFY_TEST_DAY="$(day_ago 0)" run -3 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  INTERCOM_VERIFY_TEST_DAY="$(day_ago 0)" run -3 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "DEFERRED recently-asked credits=1 (this user got an ask in the last 90 days"* ]]
   [ "$(posts)" -eq 1 ]
   [ -z "$(sql "select * from verify_requests where request_id = 'u1'")" ]
@@ -1467,7 +1485,7 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
 @test "uvn-status: a user who attached a document in Intercom is skipped and closed" {
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
   STUB_CONTACT_CONVS='{"conversations":[{"id":"5","source":{"author":{"type":"user"},"attachments":[{"name":"split.pdf"}]},"tags":{"tags":[]}}],"pages":{}}' \
-    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "SKIPPED docs_submitted credits=1"* ]]
   [ "$(posts)" -eq 0 ]
 }
@@ -1476,15 +1494,15 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
   now=$(date -u +%s)
   STUB_CONVERSATION="{\"type\":\"conversation\",\"id\":\"777\",\"source\":{\"author\":{\"type\":\"user\"}},\"conversation_parts\":{\"conversation_parts\":[{\"part_type\":\"comment\",\"author\":{\"type\":\"admin\",\"id\":\"5763097\"},\"body\":\"hi\",\"created_at\":$now}]}}" \
-    run -3 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -3 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "DEFERRED messaged_7d"*"replied to them"* ]]
   STUB_CONV_SEARCH="{\"conversations\":[{\"id\":\"9\",\"created_at\":$now,\"source\":{\"author\":{\"type\":\"admin\"}}}],\"total_count\":1}" \
-    run -3 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -3 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "DEFERRED messaged_7d"*"started a conversation"* ]]
-  STUB_CONV_SEARCH='{"type":"error.list"}' run -4 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  STUB_CONV_SEARCH='{"type":"error.list"}' run -4 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [ "$(posts)" -eq 0 ]
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
-  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED"* ]]
 }
 
@@ -1628,13 +1646,13 @@ GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label pag
   # Not no_document for every credit, or another account's verdict: the scan stands (skipped, closed).
   for spec in "n2:Mixing:B:X" "n3:Mixing:C:X" "n9:Mixing:Z:X"; do
     credits "$TEST_TMPDIR/c.json" Jane "$spec"
-    STUB_CONTACT_CONVS="$docs" run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    STUB_CONTACT_CONVS="$docs" run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
     [[ "$output" == "SKIPPED docs_submitted credits=1"* ]]
   done
   [ "$(posts)" -eq 0 ]
   # Stage 2 judged it and found nothing readable: the approved uvn-status copy goes.
   credits "$TEST_TMPDIR/c.json" Jane "n1:Mixing:Song A:Big Star"
-  STUB_CONTACT_CONVS="$docs" run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  STUB_CONTACT_CONVS="$docs" run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message=1001 credits=1" ]]
   [[ "$(msg .body | plain)" == *"it's waiting on one thing from you, something that shows your Mixing credit."* ]]
   # An unreadable store keeps the scan (another user, so the once-ever rule is not what stops it).
@@ -1642,7 +1660,7 @@ GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label pag
   credits "$TEST_TMPDIR/c.json" Jane "n4:Mixing:Song D:Big Star"
   jq '.user.email = "other@example.com" | .user.id = "43"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/o.json"
   INTERCOM_VERIFY_TEST_PROOF_DB="$TEST_TMPDIR/missing.sqlite" STUB_CONTACT_CONVS="$docs" \
-    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/o.json" --approved-by U7RP6HKUZ
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/o.json" --approved-by U7RP6HKUZ
   [[ "$output" == "SKIPPED docs_submitted credits=1"* ]]
   [ "$(posts)" -eq 1 ]
 }
@@ -1682,19 +1700,19 @@ GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label pag
 @test "core notice (Fable sender map item 2): a core notice within 7 days defers EVERY campaign; unreadable sends nothing" {
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
   for camp in uvn-status status-team-review status-doc-received withdrawal-confirm; do
-    STUB_CORE_NOTICE=hold run -3 "$LOCKED" send --campaign "$camp" --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    STUB_CORE_NOTICE=hold run -3 "$UVN" send --campaign "$camp" --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
     [[ "$output" == "DEFERRED core_notice_within_7d credits=1 (approvedNotice within 7d)" ]]
   done
   STUB_CORE_NOTICE=hold run -3 send
   [[ "$output" == "DEFERRED core_notice_within_7d"* ]]
-  STUB_CORE_NOTICE=fail run -4 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  STUB_CORE_NOTICE=fail run -4 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == *"CORE NOTICE CHECK FAILED (rc=2)"* ]]
   # no Muso user id: checked by email instead; the stand-in records what it was asked
   jq '.user.id = ""' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/n.json"
-  STUB_CORE_NOTICE=hold run -3 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  STUB_CORE_NOTICE=hold run -3 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
   grep -q -- "--email" "$TEST_TMPDIR/core-notice-args"
-  STUB_CORE_NOTICE=fail run -4 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
-  INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER="$TEST_TMPDIR/missing.py" run -4 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  STUB_CORE_NOTICE=fail run -4 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER="$TEST_TMPDIR/missing.py" run -4 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
   # every hold is LOGGED as 'deferred' (one per user, campaign and day: the email-path re-run added nothing),
   # and nothing is claimed, refused or closed: no other status, no verify_requests row, no refusal hold
@@ -1705,9 +1723,9 @@ GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label pag
   [ "$(sql "select count(*) from verify_requests")" -eq 0 ]
   [ "$(sql "select count(*) from verify_refusal_holds")" -eq 0 ]
   # a dry run never asks core
-  STUB_CORE_NOTICE=hold run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  STUB_CORE_NOTICE=hold run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   # the logged deferrals are never a lock and never the day's message: once clear, the same user posts
-  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED"* ]]
   [ "$(sql "select count(*) from verify_messages where status='sent'")" -eq 1 ]
 }
@@ -1733,7 +1751,7 @@ GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label pag
   old=$(( $(date -u +%s) - 40*86400 ))
   STUB_CONV_SEARCH="{\"conversations\":[{\"id\":\"777\",\"created_at\":$old,\"source\":{\"author\":{\"type\":\"admin\"}}}],\"total_count\":1}" \
   STUB_CONVERSATION="{\"type\":\"conversation\",\"id\":\"777\",\"source\":{\"author\":{\"type\":\"admin\"}},\"conversation_parts\":{\"conversation_parts\":[{\"part_type\":\"comment\",\"author\":{\"type\":\"user\",\"id\":\"6650aa01\"},\"body\":\"thanks\",\"created_at\":$(date -u +%s)}]}}" \
-    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message="* ]]
   [ "$(posts)" -eq 1 ]
 }
@@ -1769,7 +1787,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   [ "$(replies)" -eq 0 ]
   [ "$(posts)" -eq 0 ]
   run -1 "$LOCKED" send --campaign retro-past --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed and gap-ask only"* ]]
+  [[ "$output" == *"applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed, gap-ask and merge-pending only"* ]]
   run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation abc --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
 }
 
@@ -1803,7 +1821,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   now=$(date -u +%s)
   STUB_OPEN_CONVS="{\"conversations\":[{\"id\":\"555\",\"state\":\"open\",\"updated_at\":$((now - 3*86400))},{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":2}" \
   STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
-    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [ "$output" = "POSTED comment conversation=777 message=88001 credits=1" ]
   [ "$(posts)" -eq 0 ]
   [[ "$(jq -r .body "$CURL_STUB_REPLY" | plain)" == *"a quick status update on your credit request"* ]]
@@ -1821,7 +1839,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   open="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":1}"
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
   STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"admin_assignee_id":10206197')" \
-    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message="*" credits=1" ]]
   [ "$(sql "SELECT campaign, status, message_type FROM verify_messages")" = "uvn-status|sent|email" ]
   [ "$(sql "SELECT COUNT(*) FROM verify_messages WHERE status='refused'")" = "0" ]
@@ -1834,11 +1852,11 @@ thread() { # <contacts-json-array> [extra conversation fields]
   open="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":1}"
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
   STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"someone-else"}]')" \
-    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message="* ]]
   INTERCOM_VERIFY_TEST_LEDGER="$TEST_TMPDIR/l2.sqlite3" STUB_CONV_SEARCH='{"conversations":[],"total_count":0}' \
   STUB_OPEN_CONVS="$open" STUB_CONVERSATION='{"type":"error.list"}' \
-    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message="* ]]
   [ "$(sql "SELECT COUNT(*) FROM verify_messages WHERE status='refused'")" = "0" ]
   [ "$(replies)" -eq 0 ]
@@ -1848,13 +1866,13 @@ thread() { # <contacts-json-array> [extra conversation fields]
 @test "uvn-status: a failed open-conversation lookup sends nothing and claims nothing; the next run tries again" {
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
   STUB_OPEN_CONVS='{"type":"error.list"}' \
-    run -4 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -4 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == *"OPEN-CONVERSATION LOOKUP NOT VERIFIED"* ]]
   [ "$(posts)" -eq 0 ]
   [ "$(replies)" -eq 0 ]
   [ "$(sql "SELECT COUNT(*) FROM verify_messages")" = "0" ]
   [ "$(sql "SELECT COUNT(*) FROM verify_requests")" = "0" ]
-  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message="* ]]
 }
 
@@ -1881,7 +1899,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   run -0 "$LOCKED" send --campaign status-team-review --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A", "B" and "C" and 1 more: they'"'"'re with our team for review. Nothing else is needed from you right now.'$'\n''Muso Support' ]
   run -1 "$LOCKED" send --campaign status-doc-received --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  run -1 "$LOCKED" send --campaign uvn-status --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  run -1 "$UVN" send --campaign uvn-status --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
   run -0 "$LOCKED" send --campaign status-team-review --copy no-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message="* ]]
@@ -1926,7 +1944,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   [[ "$output" == "POSTED comment conversation=777"* ]]
   [[ "$(jq -r .body "$CURL_STUB_REPLY")" != *"Muso Support"* ]]
   credits "$TEST_TMPDIR/c.json" Jane "s3:Mixing:C:X"
-  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$(rendered .body)" != *"<p>Muso Support</p>"* ]]
 }
 
@@ -2069,7 +2087,7 @@ legacy() { # <file> <jq object merged into .user>: an account with no Auth0 subj
   [ "$(posts)" -eq 0 ]
   [ "$(replies)" -eq 0 ]
   [ ! -f "$INTERCOM_VERIFY_TEST_LEDGER" ] || [ "$(sql "SELECT COUNT(*) FROM verify_messages")" = "0" ]
-  run -1 "$LOCKED" send --campaign uvn-status --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --thread-contact
+  run -1 "$UVN" send --campaign uvn-status --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --thread-contact
   [[ "$output" == *"--thread-contact applies to withdrawal-confirm and email-changed only"* ]]
 }
 
@@ -2144,7 +2162,7 @@ legacy() { # <file> <jq object merged into .user>: an account with no Auth0 subj
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
   legacy "$TEST_TMPDIR/c.json" "{thread_external_id: \"$LEGACY_EXT\", ext_other_account: false}"
   INTERCOM_VERIFY_TEST_LEDGER="$TEST_TMPDIR/l2.sqlite3" STUB_EXT_ID="$LEGACY_EXT" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
-    run -1 "$LOCKED" send --campaign uvn-status --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -1 "$UVN" send --campaign uvn-status --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == *"external_id mismatch"* ]]
   [ "$(replies)" -eq 1 ]
 }
@@ -2497,11 +2515,184 @@ v.set_conversation(v.connect(sys.argv[1]), message_id="1002", conversation_id="7
   [ "$(calls)" -eq 0 ]
   run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "${lines[0]}" == "DRY-RUN status-doc-received initial email credits=1 copy=docrecvr" ]]
-  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked.'$'\n''Muso Support' ]
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked.'$'\n''A screenshot of Muso itself doesn'"'"'t show where the credit is published, so it can'"'"'t be used as proof; a page or document from outside Muso that names you on the track is what we can check.'$'\n''Muso Support' ]
   [[ "$output" != *"no need to send anything else"* ]]
   run -1 "$LOCKED" send --campaign status-team-review --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   run -1 "$LOCKED" send --campaign uvn-status --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   # the approved queued line is unchanged and still sends
   run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+}
+
+# --- merge-pending (go-live-today line M1; LOCKED until the captain's own yes) -------------------------
+
+mergefile() {
+  jq -n '{user:{email:"Jane.Doe@Example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64",
+                auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:"Jane"},
+          merge:{profiles:["Big Star", "Big Star Music"]},
+          credits:[{request_id:"merge-6f1c2a9e-0000-4000-8000-000000000001"}]}' | jq -c "${2:-.}" > "$1"
+}
+
+@test "merge-pending: send-locked as committed; the dry run renders line M1 verbatim (email signed, in-thread unsigned)" {
+  grep -qx "readonly MERGE_PENDING_COPY_APPROVED=0" "$REAL_SCRIPT"
+  mergefile "$TEST_TMPDIR/m.json"
+  run -1 "$LOCKED" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"MERGE_PENDING_COPY_APPROVED=0"* ]]
+  [ "$(calls)" -eq 0 ]
+  run -0 "$LOCKED" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "${lines[0]}" == "DRY-RUN merge-pending initial email credits=1 copy=mergepending" ]]
+  [ "$(rendered .subject)" = "Your Muso merge request" ]
+  [ "$(rendered .body | plain)" = "Hi Jane, a quick update on your request to merge Big Star and Big Star Music: it's in our review queue, nothing has been changed yet, and we will message you here when it has been checked.
+Thank you,
+Caroline, Muso Support" ]
+  run -0 "$LOCKED" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run --conversation 777
+  [ "$(rendered .body | plain)" = "Hi Jane, a quick update on your request to merge Big Star and Big Star Music: it's in our review queue, nothing has been changed yet, and we will message you here when it has been checked." ]
+  [[ "$output" != *"Nothing else is needed"* ]]
+}
+
+@test "merge-pending: server facts only - merge key, account id, 1 to 4 profile names; no follow-ups" {
+  for edit in '.credits[0].request_id = "r1"' '.user.id = ""' '.merge.profiles = []' \
+              '.merge.profiles = ["a","b","c","d","e"]' '.merge = {}'; do
+    mergefile "$TEST_TMPDIR/m.json" "$edit"
+    run -1 "$LOCKED" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
+  done
+  mergefile "$TEST_TMPDIR/m.json"
+  run -1 "$LOCKED" send --campaign merge-pending --kind reminder-14 --parent-message-id 1 --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "merge-pending unlocked: one note per merge request ever; never within 7 days of another note" {
+  unlocked_gate merge
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  mergefile "$TEST_TMPDIR/m.json"
+  run -0 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+  [[ "$(sql "select campaign||'|'||status from verify_messages")" == "merge-pending|sent" ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-12-01 run -0 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [ "$output" = "SKIPPED already-notified credits=1" ]
+  mergefile "$TEST_TMPDIR/m2.json" '.credits[0].request_id = "merge-second"'
+  INTERCOM_VERIFY_TEST_DAY=2026-10-18 run -3 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m2.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"messaged_7d"* || "$output" == *"DEFERRED"* ]]
+}
+
+@test "go-live recipient guards (s1 9.2): G1 fresh contact defers; G4 staff address / non-user refused; G5 links and markup refused; G2 thread checks" {
+  unlocked_gate merge
+  OLD='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  # G1: a contact created less than 24 h ago defers (exit 3), nothing claimed
+  mergefile "$TEST_TMPDIR/m.json"
+  STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1760990000}' \
+    run -3 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED g1_contact_fresh"* ]]
+  # G1: a contact newer than the request it would be told about defers
+  mergefile "$TEST_TMPDIR/m.json" '.credits[0].created_at = "2023-01-01T00:00:00Z"'
+  STUB_CONTACT_GET="$OLD" run -3 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED g1_contact_newer_than_request"* ]]
+  # G1 (QA #1456): an offset ISO time is parsed, not dropped. The contact was created 2023-11-14T22:13:20Z.
+  # 2023-11-15T00:00:00+02:00 is 22:00Z, before the contact -> defer (read as UTC, or dropped, it would send)
+  for t in '"2023-11-15T00:00:00+02:00"' '"2023-11-15T00:00:00+0200"' '"2023-01-01T00:00:00+00:00"' '"2023-11-15T12:00:00+14:00"'; do
+    mergefile "$TEST_TMPDIR/m.json" ".credits[0].created_at = $t"
+    STUB_CONTACT_GET="$OLD" run -3 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+    [[ "$output" == "DEFERRED g1_contact_newer_than_request"* ]] || { echo "$t -> $output"; false; }
+  done
+  # ... and a supplied time that does not parse refuses, never reads as "no time given"
+  # a numeric epoch in seconds is used: 1690000000 is before this contact (1700000000) -> defer
+  mergefile "$TEST_TMPDIR/m.json" '.credits[0].created_at = 1690000000'
+  STUB_CONTACT_GET="$OLD" run -3 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED g1_contact_newer_than_request"* ]]
+  # (QA #1456, 2nd pass) epoch MILLISECONDS, a negative, a fraction: refused, never read as "no time given"
+  # (QA #1456, 3rd pass) an offset beyond +-14:59 (hours 00-14, minutes 00-59) is impossible: refused
+  for bad in '"next tuesday"' '"2023-13-45"' '"2023-01-01T00:00:00+5"' '"2023-02-30T00:00:00Z"' 1672531200000 -5 1690000000.5 \
+             '"2023-01-01T00:00:00-99:99"' '"2023-01-01T00:00:00+15:00"' '"2023-01-01T00:00:00+05:60"'; do
+    mergefile "$TEST_TMPDIR/m.json" ".credits[0].created_at = $bad"
+    STUB_CONTACT_GET="$OLD" run -1 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+    [[ "$output" == *"G1: a request creation time the caller supplied does not parse"* ]] || { echo "$bad -> $output"; false; }
+  done
+  # G1: an unreadable creation time refuses
+  mergefile "$TEST_TMPDIR/m.json"
+  STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user"}' run -1 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"G1"* ]]
+  # G4: a lead contact, or a staff address, is refused
+  STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"lead","created_at":1700000000}' run -1 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"G4"* ]]
+  mergefile "$TEST_TMPDIR/m.json" '.user.email = "ops@muso.ai"'
+  STUB_CONTACT_GET="$OLD" run -1 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"G4"* ]]
+  # G5: a link, an address or markup in an interpolated field is refused
+  for edit in '.merge.profiles = ["Big Star https://x.io"]' '.merge.profiles = ["a@b.co"]' '.merge.profiles = ["<b>X</b>"]' '.user.first_name = "www.evil"' \
+              '.merge.profiles = ["Big\nStar"]' '.user.first_name = "Ja\rne"' '.merge.profiles = ["Big\tStar"]' \
+              '.merge.profiles = [{"label":"https://evil.example"}]' '.merge.profiles = [["Big Star"]]' '.merge.profiles = [1999]' \
+              '.user.first_name = {"x":"Jane"}' '.credits[0].track_title = {"t":"www.evil.io"}' '.credits[0].track_title = 1999'; do
+    mergefile "$TEST_TMPDIR/m.json" "$edit"
+    STUB_CONTACT_GET="$OLD" run -1 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+    [[ "$output" == *"G5"* ]] || { echo "$edit -> $output"; false; }
+  done
+  # G2: in-thread, a conversation we opened is refused (the stub's 777 was opened by an admin)
+  mergefile "$TEST_TMPDIR/m.json"
+  STUB_CONTACT_GET="$OLD" run -1 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --conversation 777
+  [[ "$output" == *"G2"* ]] || [[ "$output" == *"conversation"* ]]
+  [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+  [ ! -s "$INTERCOM_VERIFY_TEST_LEDGER" ] || [ -z "$(sql "select * from verify_messages where status in ('sent','attempted','refused')")" ]
+  # G2 on an AUTO-picked thread: the user's open conversation 777 was opened by an admin -> not used, the note goes
+  # by email instead (never into an admin-opened thread)
+  STUB_CONTACT_GET="$OLD" STUB_OPEN_CONVS='{"type":"conversation.list","conversations":[{"id":"777","state":"open","updated_at":9999999999}]}' \
+    run -0 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+  [ "$(replies)" -eq 0 ]
+}
+
+@test "go-live guards never touch the already-live campaigns (status-team-review posts with the default stubs)" {
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+}
+
+@test "G3 (R1 only): the receipt goes only to the contact that filed the document; G2 also drops an auto-picked admin-opened thread" {
+  unlocked_gate received
+  OLD='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  # no filing conversation named -> refused, nothing claimed
+  STUB_CONTACT_GET="$OLD" run -1 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"G3"* ]]
+  # the filing conversation's contact is someone else -> refused
+  jq '.user.filing_conversation = "777"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/f.json"
+  STUB_CONTACT_GET="$OLD" STUB_CONVERSATION='{"type":"conversation","id":"777","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"someone-else"}]}}' \
+    run -1 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/f.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"G3"* ]]
+  [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+  # the filer is the recipient -> it posts (by email: no open conversation picked)
+  STUB_CONTACT_GET="$OLD" STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}' \
+    STUB_CONVERSATION='{"type":"conversation","id":"777","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}' \
+    run -0 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/f.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email"* ]]
+}
+
+@test "kill switch: /etc/hydra/<campaign>.disabled stops every real send of that campaign; the dry run still renders; removing it resumes" {
+  unlocked_gate merge
+  export INTERCOM_VERIFY_TEST_DISABLED_DIR="$TEST_TMPDIR/etc-hydra"; mkdir -p "$INTERCOM_VERIFY_TEST_DISABLED_DIR"
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  mergefile "$TEST_TMPDIR/m.json"
+  touch "$INTERCOM_VERIFY_TEST_DISABLED_DIR/merge-pending.disabled"
+  run -3 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "STOPPED merge-pending is disabled"* ]]
+  [ "$(calls)" -eq 0 ]
+  run -0 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
+  # another campaign is not stopped by it
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  run -0 "$GATE" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED"* ]]
+  rm "$INTERCOM_VERIFY_TEST_DISABLED_DIR/merge-pending.disabled"
+  INTERCOM_VERIFY_TEST_DAY=2026-10-30 run -0 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED"* ]]
+}
+
+@test "G1 (QA #1456): a negative offset is applied with its sign - 2023-11-14T18:00:00-05:00 is after the contact, so it sends" {
+  unlocked_gate merge
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  mergefile "$TEST_TMPDIR/m.json" '.credits[0].created_at = "2023-11-14T18:00:00-05:00"'
+  STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}' \
+    run -0 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email message="* ]]
 }

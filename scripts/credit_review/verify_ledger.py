@@ -99,7 +99,7 @@ BLOCKING = ("attempted", "sent", "refused", "skipped")
 DEFERRED = "deferred_pending_doc"
 CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "uvn-status", "withdrawal-confirm",
              "status-doc-received", "status-team-review", "email-changed", "email-changed-dup",
-             "claim-proof-ask", "claim-status", "gap-ask")
+             "claim-proof-ask", "claim-status", "gap-ask", "merge-pending")
 # claim-proof-ask (steers-1830 #5, firstmate 125/126): a dated ask to the claimant of a pending
 # profile CLAIM (band B/C) to put the claim's bound-proof code in one platform bio. Its "request
 # id" is the claim key "claim-<claiming.id>", so only its own rows block it (claim ids never meet
@@ -117,6 +117,10 @@ CLAIM_WINDOW_DAYS = 14          # the close day: always 14 days after the note
 CLAIM_STATUS_CAMPAIGN = "claim-status"
 CLAIM_CAMPAIGNS = (CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN)
 GAP_ASK = "gap-ask"
+# merge-pending (go-live-today line M1; send-locked until the captain's yes): a status note per merge request, key
+# "merge-<merge request id>". A notice (only its own rows block it: one note per merge request, ever), never an
+# ask, and never within 7 days of another note from this gate to the user (messaged_7d, a deferral).
+MERGE_PENDING = "merge-pending"
 # The notes the gap ask may follow inside 7 days (one per day still holds): the doc-received
 # status note says "we have the document you sent ... we'll message you here as soon as it's
 # checked", and the gap ask is that message (firstmate, verify-ask-wiring-h2 inbox 003).
@@ -126,7 +130,7 @@ GAP_ASK_FOLLOWS = ("status-doc-received",)
 STATUS_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review")
 # Notices: only their own rows block them (they are not asks and never close one).
 NOTICE_CAMPAIGNS = ("takeback-notice", "withdrawal-confirm", "status-doc-received", "status-team-review",
-                    "email-changed", "email-changed-dup", CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN)
+                    "email-changed", "email-changed-dup", CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN, MERGE_PENDING)
 # Campaigns whose gate refusals are re-checkable (firstmate 076, 082, 083): a refusal holds the
 # USER (campaign, user_key or user_id) in verify_refusal_holds for RECHECK_DAYS (the runner and the gate skip
 # them until next_recheck_at, whatever requests are listed); a later send clears it; after
@@ -523,6 +527,13 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
             if why:
                 db.execute("COMMIT")
                 return {"result": "recent", "reason": why, "request_ids": fresh}
+        if campaign == MERGE_PENDING and enforce_cap:
+            cond, params = _same_user(db, user_key, user_id)
+            since = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+            if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day>=? AND m.status IN ('attempted','sent') "
+                          "LIMIT 1", (*params, since)).fetchone():
+                db.execute("COMMIT")
+                return {"result": "recent", "reason": "messaged_7d", "request_ids": fresh}
         if campaign == "retro-past" and enforce_cap:
             why = past_user_done(db, user_key, user_id)
             if why:

@@ -438,6 +438,15 @@ def count_copy_of(campaign: str, listed: set[str], pending: list[dict[str, Any]]
     return why, live, False, len(live)
 
 
+def with_filing(payload: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
+    """Carry the list's filing_conversation (receipts.py: the proof_intake row's conversation) into the gate payload:
+    the gate's G3 check sends the R1 receipt only to the contact that filed the document."""
+    fc = str(src.get("filing_conversation") or "")
+    if fc:
+        payload["user"]["filing_conversation"] = fc
+    return payload
+
+
 def note_payload(acct: dict[str, str], uid: int, credits: list[dict[str, Any]], as_count: bool,
                  total: int) -> dict[str, Any]:
     user = {"email": acct["email"], "id": str(uid), "professional_id": acct["professional_id"],
@@ -690,7 +699,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     if as_count:
                         report.count_copy += 1
                         report.note("count_copy")
-                    batch.append((listed, note_payload(acct, uid, live, as_count, total),
+                    batch.append((listed, with_filing(note_payload(acct, uid, live, as_count, total), u),
                                   0 if as_count else left_out(listed, pending, is_ask)))
         finally:
             db.close()
@@ -783,7 +792,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         report.note("documents_on_file")
                         continue
                     acct = {k: p["user"].get(k, "") for k in ("email", "professional_id", "auth_id", "first_name")}
-                    p = note_payload(acct, uid, live, as_count, total)
+                    p = with_filing(note_payload(acct, uid, live, as_count, total), p["user"])
                     if calls and pace_seconds:
                         time.sleep(pace_seconds)
                 before = report.sent_notes if mode == "apply" else report.validated + report.recipient_ok
