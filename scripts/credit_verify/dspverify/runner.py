@@ -49,6 +49,7 @@ class Deps:
     watch_user_ids: frozenset[int] | None = None       # policies/fraud-watchlist.json; None = not read
     watch_profile_ids: frozenset[str] | None = None
     paying: frozenset[int] | None = None
+    select: "Select | None" = None
     # (user_id, org profile_id) -> True (a processed, live organization claim) | False | None (unknown).
     org_claim: Callable[[int | None, str], bool | None] = lambda uid, pid: None
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
@@ -75,14 +76,87 @@ def new_run_id(kind: str) -> str:
 
 
 # ── selection ──────────────────────────────────────────────────────────────────
-def pending_requests(admin: admin_api.Admin, max_pages: int = 20) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for page in range(1, max_pages + 1):
-        items = admin_api.list_requests(admin, status="unverified", limit=500, page=page)
-        rows += items
-        if len(items) < 500:
-            break
+OPEN_STATUSES = ("unverified", "user_verification_needed")
+# A tray run may also check rows already APPROVED (Fable validator-wrong-16: were they anchored?).
+# Shadow only: the verdict is evidence about the row, nothing is taken back.
+TRAY_STATUSES = OPEN_STATUSES + ("approved",)
+
+# (statuses, only request ids or None, max rows, paying user ids or None) -> [{"id", "profile_id",
+# "track_id"}] PAYING users' requests first, then oldest first (the ordering is applied BEFORE the limit,
+# so a paid request is never cut by a window full of free ones; QA @fba5057). Production:
+# a read-only Trino SELECT (trino_open_requests). The admin list is never paged unscoped: the wrapper
+# refuses limit > 200 without a profile/track filter (hydra #1270, the 10-19 deep-paging incident).
+Select = Callable[..., list[dict[str, str]]]
+
+
+def _scoped_reads(admin: admin_api.Admin, scopes: list[tuple[str, str]], statuses: tuple[str, ...],
+                  want: set[str], pages: int) -> dict[str, dict[str, Any]]:
+    """Admin list reads, each filtered by ONE track ("track", id) or ONE profile ("profile", id): the
+    wrapper refuses unscoped reads above limit 200 and core 500s on several profilesIds. A track
+    holds few requests, so a track read is preferred (a busy profile can hold thousands)."""
+    rows: dict[str, dict[str, Any]] = {}
+    for kind, sid in scopes:
+        for status in statuses:
+            for page in range(1, pages + 1):
+                kw = {"track_id": sid} if kind == "track" else {"profile_ids": [sid]}
+                items = admin_api.list_requests(admin, status=status, limit=200, page=page, **kw)
+                rows.update({str(r.get("id")).lower(): r for r in items if str(r.get("id")).lower() in want})
+                if len(items) < 200:
+                    break
+            else:
+                raise admin_api.AdminError(f"{status} list for {kind} {sid} still full after {pages} pages")
     return rows
+
+
+def pending_requests(admin: admin_api.Admin, select: "Select", statuses: tuple[str, ...],
+                     only: set[str] | None, limit: int, skip: set[str] | None = None,
+                     paying: frozenset[int] | None = None) -> list[dict[str, Any]]:
+    """Requests in `statuses`: ids from `select` (Trino), minus `skip`, at most `limit`; then the full
+    rows through scoped admin reads (one track per read, or one profile when the track is unknown).
+    The skip set is applied to the ids BEFORE the limit, and the selection window is widened by its
+    size, so requests already captured/verified can never starve the newer ones (QA @b1c4798)."""
+    skip = {str(x).lower() for x in (skip or set())}
+    picked = [p for p in select(statuses, only, limit + len(skip), paying)
+              if str(p["id"]).lower() not in skip][:limit]
+    want = {str(p["id"]).lower() for p in picked}
+    scopes = sorted({("track", str(p["track_id"])) if p.get("track_id") else ("profile", str(p["profile_id"]))
+                     for p in picked if p.get("track_id") or p.get("profile_id")})
+    return list(_scoped_reads(admin, scopes, statuses, want, 10).values())
+
+
+OPEN_SQL = ("SELECT cast(cr.id AS varchar), cast(cr.profileid AS varchar), cast(cr.trackid AS varchar)"
+            " FROM postgresql_core.public.credit_requests cr"
+            " WHERE cr.deletedat IS NULL AND cr.status IN ({statuses}){only} ORDER BY {paid}cr.createdat LIMIT {limit}")
+MAX_PAYING_IDS_IN_SQL = 20000
+
+
+def trino_open_requests(query: Callable[[str], str]) -> "Select":
+    import csv
+    import io
+    import re
+
+    def select(statuses: tuple[str, ...], only: set[str] | None, limit: int,
+               paying: frozenset[int] | None = None) -> list[dict[str, str]]:
+        st = ",".join(f"'{x}'" for x in statuses if re.fullmatch(r"[a-z_]+", x))
+        clause = ""
+        if only is not None:
+            ids = sorted(x for x in only if re.fullmatch(r"[0-9a-f-]{36}", x))
+            if not ids:
+                return []
+            clause = " AND cr.id IN (" + ",".join(f"uuid '{x}'" for x in ids) + ")"
+        paid = ""
+        ids_paying = sorted(int(u) for u in (paying or ()) if isinstance(u, int) and not isinstance(u, bool))
+        if ids_paying:
+            if len(ids_paying) > MAX_PAYING_IDS_IN_SQL:
+                raise ValueError(f"{len(ids_paying)} paying ids exceed the selector's {MAX_PAYING_IDS_IN_SQL}")
+            paid = "CASE WHEN cr.userid IN (" + ",".join(map(str, ids_paying)) + ") THEN 0 ELSE 1 END, "
+        out = query(OPEN_SQL.format(statuses=st, only=clause, limit=int(limit), paid=paid))
+        rows = []
+        for r in csv.reader(io.StringIO(out)):
+            if len(r) >= 2 and re.fullmatch(r"[0-9a-f-]{36}", r[0] or ""):
+                rows.append({"id": r[0], "profile_id": r[1], "track_id": r[2] if len(r) > 2 and r[2] else None})
+        return rows
+    return select
 
 
 def order(rows: list[dict[str, Any]], paying: frozenset[int] | None) -> list[dict[str, Any]]:
@@ -130,18 +204,23 @@ def _batches(items: list[Any], n: int) -> list[list[Any]]:
     return [items[i:i + n] for i in range(0, len(items), n)]
 
 
-def submit(store: Store, deps: Deps, *, max_requests: int = 300, max_pages: int = 20,
+def submit(store: Store, deps: Deps, *, max_requests: int = 300, max_pages: int = 20,  # noqa: ARG001
            only: set[str] | None = None) -> Stats:
     """`only`: restrict to these credit request ids (a tray's rows), still read from core as pending."""
     st = Stats(new_run_id("submit"), "submit")
     store.start_run(st.run_id, "submit")
     try:
-        rows = order(pending_requests(deps.admin, max_pages), deps.paying)
+        if deps.select is None:
+            raise RuntimeError("no request selector (Deps.select): the admin list is never paged unscoped")
+        statuses = TRAY_STATUSES if only is not None else ("unverified",)
         skip = store.requests_with_open_capture() | store.requests_verified_since(
             (deps.now() - REVERIFY_AFTER).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        limit = max_requests if only is None else min(max_requests, len(only))
+        rows = order(pending_requests(deps.admin, deps.select, statuses, only, limit, skip, deps.paying),
+                     deps.paying)
         if only is not None:
             rows = [r for r in rows if str(r.get("id")).lower() in only]
-        rows = [r for r in rows if str(r.get("id")) not in skip][:max_requests]
+        rows = [r for r in rows if str(r.get("id")).lower() not in {x.lower() for x in skip}][:max_requests]
         st.requests = len(rows)
         builder = EvidenceBuilder(deps.admin, now=deps.now())
         groups = groups_for(rows, builder)
@@ -159,6 +238,7 @@ def submit(store: Store, deps: Deps, *, max_requests: int = 300, max_pages: int 
         with ThreadPoolExecutor(4) as ex:
             for res in ex.map(one, _batches(keys, EXEC_BATCH)):
                 for k, a in res:
+                    a = {**a, "statuses": list(statuses)}
                     g = groups[k]
                     store.add_capture(st.run_id, k, g["user_id"], g["request_ids"], g["tracks"], a)
                     st.groups += 1
@@ -312,20 +392,13 @@ def capture_for_request(read_row: dict[str, Any], cap: dict[str, Any], req: dict
 
 
 def still_pending(admin: admin_api.Admin, cap: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """The capture's credit requests that are STILL unverified, re-read now (by profile)."""
-    pids = sorted({t["profile_id"] for t in json.loads(cap["tracks_json"])})
-    out: dict[str, dict[str, Any]] = {}
-    for i in range(0, len(pids), 20):
-        for page in range(1, 6):
-            items = admin_api.list_requests(admin, status="unverified", limit=500, page=page,
-                                            profile_ids=pids[i:i + 20])
-            out.update({str(r.get("id")): r for r in items})
-            if len(items) < 500:
-                break
-        else:
-            # Never read a truncated list as "decided meanwhile": the capture stays open.
-            raise admin_api.AdminError(f"unverified list for {len(pids[i:i + 20])} profiles still full after 5 pages")
-    return out
+    """The capture's credit requests in the statuses it was filed for (open only by default; a tray run
+    records approved too, so a request another lane decided meanwhile is not verified), re-read now
+    through one scoped read per track. Only the capture's own request ids count."""
+    want = {str(x).lower() for x in json.loads(cap["request_ids_json"])}
+    cap_statuses = tuple(json.loads(cap.get("submit_json") or "{}").get("statuses") or OPEN_STATUSES)
+    scopes = sorted({("track", t["track_id"]) for t in json.loads(cap["tracks_json"]) if t.get("track_id")})
+    return _scoped_reads(admin, scopes, cap_statuses, want, 5)
 
 
 def _waiting(read_row: dict[str, Any]) -> bool:

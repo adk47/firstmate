@@ -73,11 +73,13 @@ class AdminClient:
 
 
 def list_requests(admin: Admin, *, status: str, limit: int = 200, page: int = 1,
-                  profile_ids: list[str] | None = None) -> list[dict[str, Any]]:
+                  profile_ids: list[str] | None = None, track_id: str | None = None) -> list[dict[str, Any]]:
     """One page of credit requests. The endpoint returns updatedAt DESC."""
     params: dict[str, Any] = {"status": status, "limit": limit, "page": page}
     if profile_ids:
         params["profilesIds"] = ",".join(profile_ids)
+    if track_id:
+        params["trackId"] = track_id
     data = admin.get("/admin/credit-requests", params)
     items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(items, list):

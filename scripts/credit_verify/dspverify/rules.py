@@ -181,6 +181,12 @@ def _read_one(source: str, rd: Any, requested_at: datetime | None) -> SourceRead
     name_match = bool(rd.get("claimant_name_match"))
     if state == "NO_RECORDING" or reason == f"no_{source}_recording_on_track":
         return SourceRead(source, S_NO_RECORDING, f"no {source} recording on the catalog track", **base)
+    if reason.startswith("person_not_linked_on_") and not name_match:
+        # A catalog fact that no capture can change (no raw id on this DSP): never "pending" (junk-b1).
+        return SourceRead(source, S_NOT_LINKED, f"profile not linked on {source}", others, **base)
+    if state in ("NO_FRESH_CAPTURE", "CAPTURE_ERROR", "RECORDING_ABSENT"):
+        # Final: the window closed without a usable receipt (the helper still says WAITING then).
+        return SourceRead(source, S_UNKNOWN, f"capture {state.lower()}", **base)
     if state == "WAITING" or hv == "WAITING" or reason == "waiting_for_fresh_capture":
         return SourceRead(source, S_PENDING, "fresh capture requested, not back yet", **base)
     if state != "CAPTURED":

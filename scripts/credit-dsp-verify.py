@@ -54,7 +54,7 @@ def real_deps():
     from credit_review import watchlist
     from credit_review.decide import Policy, paying_users
     from credit_verify.dspverify import capture
-    from credit_verify.dspverify.runner import Deps, trino_org_claim
+    from credit_verify.dspverify.runner import Deps, trino_open_requests, trino_org_claim
     from credit_verify.proof.stage2 import trino_query
     pol = Policy.load()                    # deny lists + the fraud watchlist; missing/malformed = fatal
     wl = watchlist.load(required=True)     # the watchlist on its own, so its flag is recorded per row
@@ -65,7 +65,8 @@ def real_deps():
                 deny_user_ids=frozenset(pol.deny_user_ids), deny_profile_ids=frozenset(pol.deny_profile_ids),
                 watch_user_ids=frozenset(wl.user_ids),
                 watch_profile_ids=frozenset(str(x).lower() for x in wl.profile_ids),
-                paying=paying, org_claim=trino_org_claim(trino_query), log=log)
+                paying=paying, org_claim=trino_org_claim(trino_query),
+                select=trino_open_requests(trino_query), log=log)
 
 
 def cmd_submit(args: argparse.Namespace) -> int:
@@ -77,8 +78,11 @@ def cmd_submit(args: argparse.Namespace) -> int:
         return 0
     only = None
     if args.tray:
-        only = {str(r["request_id"]).lower() for r in runner.tray_rows(json.loads(Path(args.tray).read_text()))}
-        log(f"tray {args.tray}: {len(only)} approve rows")
+        # Every row of the tray, whatever its action: a reject tray is checked too (an anchored row
+        # is refused from a reject tray and goes to the approve path, Fable junk-b1).
+        tray = json.loads(Path(args.tray).read_text(encoding="utf-8"))
+        only = {str(r["request_id"]).lower() for r in tray.get("rows") or [] if isinstance(r, dict) and r.get("request_id")}
+        log(f"tray {args.tray}: {len(only)} rows")
     runner.submit(Store(args.store), real_deps(), max_requests=args.max_requests, only=only)
     print("NO_REPLY")
     return 0

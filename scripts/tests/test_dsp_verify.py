@@ -352,6 +352,17 @@ class WaitClasses(unittest.TestCase):
                                                     "tidal": NO_REC}}))
         self.assertEqual((v.reason_class, v.need), ("link_mismatch", "fix_profile_link"))
 
+    def test_window_closed_is_unknown_not_pending(self):
+        closed = {"state": "NO_FRESH_CAPTURE", "helper_verdict": "WAITING", "helper_reason": "waiting_for_fresh_capture"}
+        v = rules.verify(packet(sources={"Mixing": {"spotify": credited(), "tidal": closed}}))
+        self.assertEqual(v.reason_class, "single_dsp_anchor")
+        self.assertEqual(v.roles[0]["tidal"]["state"], rules.S_UNKNOWN)
+
+    def test_not_linked_is_never_pending(self):
+        waiting_unlinked = {"state": "WAITING", "helper_verdict": "UNKNOWN", "helper_reason": "person_not_linked_on_tidal"}
+        v = rules.verify(packet(sources={"Mixing": {"spotify": not_linked("spotify"), "tidal": waiting_unlinked}}))
+        self.assertEqual(v.reason_class, "person_not_linked")
+
     def test_pending(self):
         v = rules.verify(packet(sources={"Mixing": {"spotify": WAITING, "tidal": credited("tidal")}}))
         self.assertEqual((v.verdict, v.reason_class), (rules.WAIT, "capture_pending"))
@@ -402,6 +413,83 @@ class UnknownNeverApproves(unittest.TestCase):
                 self.assertIn((a, b), {("absent", "absent"), ("absent_other", "absent_other")})
 
 
+class Selection(unittest.TestCase):
+    def test_trino_selector_and_scoped_reads(self):
+        sql_seen = []
+
+        def query(sql):
+            sql_seen.append(sql)
+            return '"00000000-0000-0000-0000-000000000001","prof-1","trk-9"\n"bad","x"\n'
+        sel = runner.trino_open_requests(query)
+        self.assertEqual(sel(("unverified",), None, 10), [{"id": "00000000-0000-0000-0000-000000000001",
+                                                           "profile_id": "prof-1", "track_id": "trk-9"}])
+        self.assertIn("status IN ('unverified')", sql_seen[-1])
+        sel(runner.OPEN_STATUSES, {"00000000-0000-0000-0000-000000000001", "x; drop"}, 5)
+        self.assertIn("uuid '00000000-0000-0000-0000-000000000001'", sql_seen[-1])
+        self.assertNotIn("drop", sql_seen[-1])
+        self.assertEqual(sel(runner.OPEN_STATUSES, {"nope"}, 5), [])
+        # Every admin list read carries a profile filter (the wrapper refuses unscoped limit > 200).
+        admin = FakeAdmin([req(1), req(2)])
+        rows = runner.pending_requests(admin, fake_select(admin), ("unverified",), None, 10)
+        self.assertEqual(len(rows), 2)
+
+
+class NoStarvation(unittest.TestCase):
+    def test_skipped_requests_never_starve_newer_ones(self):
+        # QA @b1c4798: oldest-first LIMIT ran before the open-capture/recent-verdict skip.
+        tmp = tempfile.mkdtemp()
+        store = Store(os.path.join(tmp, "s.sqlite"))
+        reqs = []
+        for i in range(1, 10):
+            r = req(1)
+            r["id"] = f"00000000-0000-0000-0000-00000000000{i}"
+            r["trackId"], r["createdAt"] = f"trk-{i}", f"2026-10-0{i}T00:00:00Z"
+            reqs.append(r)
+        fa = FakeAdmin(reqs)
+        d = runner.Deps(admin=fa, select=fake_select(fa), capture=FakePod(),
+                        gate=lambda uid: account_gate.GateResult("allow", (), {"band": "green"}),
+                        paying=frozenset(), watch_user_ids=frozenset(), watch_profile_ids=frozenset(),
+                        now=lambda: datetime(2026, 10, 28, 3, 20, tzinfo=timezone.utc))
+        seen = set()
+        for _ in range(3):
+            st = runner.submit(store, d, max_requests=3)
+            self.assertEqual(st.requests, 3)
+            got = {x for c in store.open_captures() for x in json.loads(c["request_ids_json"])}
+            seen |= got
+        self.assertEqual(len(seen), 9)
+        self.assertEqual(runner.submit(store, d, max_requests=3).requests, 0)
+
+
+class PaidFirstBeforeLimit(unittest.TestCase):
+    def test_paid_request_beyond_the_window_is_selected_first(self):
+        # QA @fba5057: 4 free requests fill a window of 3; the newest request is a paying user's.
+        tmp = tempfile.mkdtemp()
+        store = Store(os.path.join(tmp, "s.sqlite"))
+        reqs = []
+        for i in range(1, 6):
+            r = req(1, uid=100 + i)
+            r["id"] = f"00000000-0000-0000-0000-00000000000{i}"
+            r["trackId"], r["createdAt"] = f"trk-{i}", f"2026-10-0{i}T00:00:00Z"
+            reqs.append(r)
+        fa = FakeAdmin(reqs)
+        d = runner.Deps(admin=fa, select=fake_select(fa), capture=FakePod(),
+                        gate=lambda uid: account_gate.GateResult("allow", (), {"band": "green"}),
+                        paying=frozenset({105}), watch_user_ids=frozenset(), watch_profile_ids=frozenset(),
+                        now=lambda: datetime(2026, 10, 28, 3, 20, tzinfo=timezone.utc))
+        runner.submit(store, d, max_requests=3)
+        got = {x for c in store.open_captures() for x in json.loads(c["request_ids_json"])}
+        self.assertIn(reqs[4]["id"], got)
+        self.assertEqual(len(got), 3)
+
+    def test_trino_selector_orders_paid_first_in_sql(self):
+        seen = []
+        sel = runner.trino_open_requests(lambda q: seen.append(q) or "")
+        sel(("unverified",), None, 10, frozenset({7, 3}))
+        self.assertIn("ORDER BY CASE WHEN cr.userid IN (3,7) THEN 0 ELSE 1 END, cr.createdat LIMIT 10", seen[-1])
+        sel(("unverified",), None, 10, None)
+        self.assertIn("ORDER BY cr.createdat LIMIT 10", seen[-1])
+
+
 class PodHelpers(unittest.TestCase):
     """Pure helpers of pod_driver.py (the pod-only parts need the IDP image)."""
 
@@ -436,14 +524,28 @@ class FakeAdmin:
     def get(self, path, params=None):
         self.paths.append(path)
         if path == "/admin/credit-requests":
+            assert params.get("profilesIds") or params.get("trackId"), "unscoped admin list read"
+            assert "," not in (params.get("profilesIds") or ""), "core answers 500 to several profilesIds"
             st, pids = params.get("status"), set((params.get("profilesIds") or "").split(",")) - {""}
-            items = [r for r in self.requests.values() if r["status"] == st and (not pids or r["profileId"] in pids)]
-            return {"items": items[(params["page"] - 1) * 500:params["page"] * 500]}
+            tid = params.get("trackId")
+            items = [r for r in self.requests.values() if r["status"] == st and (not pids or r["profileId"] in pids)
+                     and (not tid or r["trackId"] == tid)]
+            lim = params.get("limit", 200)
+            return {"items": items[(params["page"] - 1) * lim:params["page"] * lim]}
         if path.startswith("/admin/track/"):
             return {"popularity": 20, "artists": [], "label": "Indie Label"}
         if path.startswith("/admin/profile/"):
             return {"name": "Jane Mixer", "creditCount": 12, "type": "person"}
         raise AssertionError(path)
+
+
+def fake_select(admin):
+    def select(statuses, only, limit, paying=None):
+        rows = sorted((r for r in admin.requests.values() if r["status"] in statuses
+                       and (only is None or r["id"].lower() in only)),
+                      key=lambda r: (0 if paying and r["userId"] in paying else 1, r["createdAt"]))
+        return [{"id": r["id"], "profile_id": r["profileId"], "track_id": r["trackId"]} for r in rows][:limit]
+    return select
 
 
 class FakePod:
@@ -485,7 +587,7 @@ class RunnerAndStore(unittest.TestCase):
         self.store = Store(os.path.join(self.tmp, "dsp.sqlite"))
 
     def deps(self, admin, pod, gate_decision="allow"):
-        return runner.Deps(admin=admin, capture=pod,
+        return runner.Deps(admin=admin, select=fake_select(admin), capture=pod,
                            gate=lambda uid: account_gate.GateResult(gate_decision, (), {"band": "green"}),
                            deny_user_ids=frozenset(), deny_profile_ids=frozenset(), paying=frozenset({42}),
                            watch_user_ids=frozenset(), watch_profile_ids=frozenset(),
@@ -764,7 +866,7 @@ class TrayAnchors(unittest.TestCase):
             if t["track_id"] == good["trackId"]:
                 return {"spotify": credited(), "tidal": credited("tidal")}
             return {"spotify": credited(), "tidal": NO_REC}
-        d = runner.Deps(admin=admin, capture=FakePod(reading=reading),
+        d = runner.Deps(admin=admin, select=fake_select(admin), capture=FakePod(reading=reading),
                         gate=lambda uid: account_gate.GateResult("allow", (), {"band": "green"}),
                         paying=frozenset(), watch_user_ids=frozenset(), watch_profile_ids=frozenset(),
                         now=lambda: datetime(2026, 10, 28, 3, 20, tzinfo=timezone.utc))
@@ -810,6 +912,32 @@ class TrayAnchors(unittest.TestCase):
         r = subprocess.run([sys.executable, str(CLI), "anchors", "--tray", tpath], env=env, capture_output=True,
                            text=True, timeout=60)
         self.assertEqual(json.loads(r.stdout.splitlines()[0])["outcome"], "refused", r.stderr)
+
+    def test_tray_reads_user_verification_needed_rows(self):
+        # A junk/approve tray row is often UVN: tray mode reads every open status; the cron does not.
+        r = req(1, status="user_verification_needed")
+        fa = FakeAdmin([r])
+        d = runner.Deps(admin=fa, select=fake_select(fa), capture=FakePod(),
+                        gate=lambda uid: account_gate.GateResult("allow", (), {"band": "green"}),
+                        paying=frozenset(), watch_user_ids=frozenset(), watch_profile_ids=frozenset(),
+                        now=lambda: datetime(2026, 10, 28, 3, 20, tzinfo=timezone.utc))
+        self.assertEqual(runner.submit(self.store, d).requests, 0)
+        self.assertEqual(runner.submit(self.store, d, only={r["id"]}).requests, 1)
+        _, out = runner.verify(self.store, d)
+        self.assertEqual([v["verdict"] for v in out], [rules.APPROVE])
+
+    def test_tray_reads_approved_rows_cron_does_not(self):
+        # Fable validator-wrong-16: were already-approved rows anchored? Shadow evidence only.
+        r = req(1, status="approved")
+        fa = FakeAdmin([r])
+        d = runner.Deps(admin=fa, select=fake_select(fa), capture=FakePod(),
+                        gate=lambda uid: account_gate.GateResult("allow", (), {"band": "green"}),
+                        paying=frozenset(), watch_user_ids=frozenset(), watch_profile_ids=frozenset(),
+                        now=lambda: datetime(2026, 10, 28, 3, 20, tzinfo=timezone.utc))
+        self.assertEqual(runner.submit(self.store, d).requests, 0)
+        self.assertEqual(runner.submit(self.store, d, only={r["id"]}).requests, 1)
+        _, out = runner.verify(self.store, d)
+        self.assertEqual(len(out), 1)
 
     def test_reject_tray_builds_nothing(self):
         self.assertEqual(runner.tray_rows({"action": "reject", "rows": [{"request_id": "x"}]}), [])
