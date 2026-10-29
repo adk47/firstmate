@@ -66,7 +66,8 @@ BIG_POPULARITY = 60
 #: rules.md (e.g. R-C2(4): a one-person role credited to somebody else on a complete same-run DSP snapshot),
 #: which must come with its evidence text in the tray row.
 #: Tray row fields carried verbatim into the audit (doc-verify's jan-forged-bN.json contract).
-AUDIT_PASSTHROUGH = ("reason_code", "proof_id", "intake_id", "fraud_pair", "signal_ids", "outcome_ids", "subject")
+AUDIT_PASSTHROUGH = ("reason_code", "proof_id", "intake_id", "fraud_pair", "signal_ids", "outcome_ids", "subject",
+                     "contributors")   # contributors: every forged document behind one request (QA #1480)
 FABLE_RULE_RE = re.compile(r"^R-[A-Z0-9][A-Za-z0-9().-]{0,40}$")
 
 
