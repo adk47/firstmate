@@ -55,3 +55,13 @@ applied by `intercom_reconcile.presented_owners`). The intake's identity check
 - Conversation 215476605664499 and 215476606339737 are the same account (136029).
 - 3 lead-only threads carry an email no Muso account has; they stay unresolved (never by name).
 - The daily run is codified as the openclaw cron `intake-unresolved-proposals-daily` (07:20Z, read-only, delivery none). It starts with the deploy of this PR.
+
+## Ruling and fix (10-29 ~19:45Z)
+
+- **Ruling:** Fable `[key=intake-link-rule-1029]` accepts the presented profile as a second intake key,
+  only when unambiguous.
+- **Fix:** shipped separately as https://github.com/Muso-AI/hydra/pull/1512 (`intake.presented_resolver()`,
+  wired into the cron's `strict_identity`).
+- **Live dry check, nothing filed:** the 11 resolve. 215476444399022 (the real mismatch) and 215476608637040
+  (another account's reverted claim) stay in the tray.
+- **Next:** after the deploy, doc-verify-build-b1 re-files the resolvable rows through the normal filer. No hand links.
