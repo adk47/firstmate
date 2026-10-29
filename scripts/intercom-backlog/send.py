@@ -16,12 +16,18 @@ Safety, in order, re-checked per conversation right before each send:
   5. The body is rendered from fixed text plus server facts only (first name from the core
      replica). Customer text is never copied into a reply.
   6. intercom-ops-write.sh --validate first, then the real post; its POSTED line is the proof.
+Bucket mode (--band bucket --bucket NAME; captain 10-29 "is everyone waiting on us being answered?",
+docs/intercom-backlog/unanswered-1029.md): one topic bucket from buckets.py --out per run, answered with that
+bucket's line A-I between a fixed opener and closer. Each line is locked on its own (BUCKET_APPROVED, empty =
+every line locked) until the captain approves it (D2); only the nine self-serve buckets map to a line, so the
+money / legal / privacy / credit-owned / thanks / noise / "other" buckets can never be sent from here.
 Closing (--close) is a separate, OFF-by-default step, allowed only for the > 30 d tail, only
 after this run's own reply POSTED, and only while CLOSE_APPROVED is 1 (decision D4).
 
 Usage (node-8, root):
   set -a; . /etc/openclaw/main.env; set +a
   python3 send.py <triage.jsonl> --band recent|tail [--ids ID,ID] [--max N] [--apply] [--close]
+  python3 send.py <buckets-out.jsonl> --band bucket --bucket stats [--max N] [--apply]
 """
 import argparse
 import csv
@@ -61,6 +67,27 @@ LINES = {
     "removal": "We remove a credit once Spotify and Tidal no longer list you on that track. If a credit on your profile still looks wrong, reply here with the track and we will check it again.",
     "generic": "We are going through older messages one by one so that nobody is left without an answer.",
 }
+# ---- bucket mode (unanswered-1029 section 3; captain D2 approves each line on its own) --------------
+BUCKET_OPEN = "Hi {name}, sorry for the slow reply."
+BUCKET_CLOSER = "If you still need help, just reply here."
+BUCKET_LINES = {
+    "A": "What can we help you with? Tell us in a few words, and add the link to your Muso profile if it's about your profile.",
+    "B": "Analytics show for profiles on an active Pro or Business plan with a seat assigned to the profile. You can check both in Settings. If they're set and your numbers still look wrong, reply with your profile link and the platform.",
+    "C": "You can order a plaque on the Muso website at muso.ai/amp/promote/plaque (signed in), or in the Muso mobile app: open the Analytics tab and tap Plaque. If you already ordered, reply with your order ID and we'll look it up.",
+    "D": "You can see and change your plan in Settings in your account. Upgrades take effect right away.",
+    "E": "You can cancel in Settings. You keep access until the end of the billing period, and your credits and profile stay.",
+    "F": "Most answers are in our help center at help.muso.ai. If yours isn't there, reply with your question.",
+    "G": "You're talking with our support team here. Tell us what you still need and we'll pick it up from this thread.",
+    "H": "You can edit your profile on app.muso.ai. If the name can't be changed there, reply with your profile link and the name you want.",
+    "I": "Use 'Forgot password' on the login page, or sign in the way you signed up (Google or Apple). If that doesn't work, reply with the email you use for Muso.",
+}
+# buckets.py bucket -> line. Anything absent is never sent by bucket mode.
+BUCKET_LINE = {"no-detail": "A", "stats": "B", "plaque-order": "C", "subscription": "D", "billing-cancel": "E",
+               "howto": "F", "escalation": "G", "profile-edit": "H", "account-access": "I"}
+# line -> approval ref (the captain's words). EMPTY = every line locked; a PR adds one entry per approved line.
+BUCKET_APPROVED = {}
+NEVER_ACTIONS = ("captain-", overrides.HOLD_READ, "gate-", "claim-", "ledger-today")
+
 # triage action -> status line key. Anything absent here is never sent by this tool.
 ACTION_LINE = {
     "draft-credit": "credit-none",
@@ -74,10 +101,18 @@ ACTION_LINE = {
 }
 
 
-def render(row, first_name, line_key):
+def first_word(first_name):
     # core's firstname often carries the full name: greet with the first word only.
     word = (first_name or "").strip().split(" ")[0] if first_name else ""
-    name = word if re.fullmatch(r"[^\W\d_][\w'-]{0,30}", word or "") else "there"
+    return word if re.fullmatch(r"[^\W\d_][\w'-]{0,30}", word or "") else "there"
+
+
+def render_bucket(row, first_name):
+    return f"{BUCKET_OPEN.format(name=first_word(first_name))} {BUCKET_LINES[BUCKET_LINE[row['bucket']]]} {BUCKET_CLOSER}"
+
+
+def render(row, first_name, line_key):
+    name = first_word(first_name)
     opener = (OPEN_TAIL if row["band"] == "gt30d" else OPEN_RECENT).format(name=name)
     return f"{opener} {LINES[line_key]} {CLOSER}"
 
@@ -140,10 +175,11 @@ def ledger_precheck(db, conversation_id, user_key, user_id, day):
     return ""
 
 
-def ledger_claim(db, conversation_id, user_key, user_id, day, contact_id=""):
+def ledger_claim(db, conversation_id, user_key, user_id, day, contact_id="", approval_ref=""):
     return verify_ledger.claim(
         db, user_key=user_key, day=day, request_ids=[conv_key(conversation_id)],
-        message_type="comment", approved_by=APPROVER, approval_ref=COPY_APPROVAL_REF or "unapproved",
+        message_type="comment", approved_by=APPROVER,
+        approval_ref=approval_ref or COPY_APPROVAL_REF or "unapproved",
         contact_id=contact_id, campaign=CAMPAIGN, user_id=user_id)
 
 
@@ -175,14 +211,31 @@ def eligible(row):
     return row.get("action") in ACTION_LINE
 
 
-def select_rows(rows, band, plan, ov, ids=()):
+def bucket_eligible(row):
+    """Bucket mode's send-eligible test, after the captain overrides: the bucket maps to a line, and the
+    triage action is not the captain's, a hand-read hold, gate- or claim-owned, or already messaged today."""
+    act = str(row.get("action") or "")
+    return row.get("bucket") in BUCKET_LINE and not act.startswith(NEVER_ACTIONS)
+
+
+def row_ok(row, band):
+    return bucket_eligible(row) if band == "bucket" else eligible(row)
+
+
+def select_rows(rows, band, plan, ov, ids=(), bucket=None):
     """Pure selection; raises Refused instead of silently dropping a planned row, so a plan that
     names a forbidden conversation fails the whole run before anything is read or sent. The
     captain overrides (ov, from overrides.load) are applied HERE, so no caller can select rows
     without them."""
     rows = overrides.apply(rows, ov)
     ids = set(ids)
-    if band == "recent":
+    if band == "bucket":
+        if plan:
+            raise Refused("--plan applies to the recent band only.")
+        if bucket not in BUCKET_LINE:
+            raise Refused(f"bucket {bucket!r} has no line; bucket mode sends only {sorted(BUCKET_LINE)}.")
+        out = [r for r in rows if r.get("bucket") == bucket and bucket_eligible(r)]
+    elif band == "recent":
         if not plan:
             raise Refused("the recent band is answered from a per-conversation --plan (read each), "
                           "never from the keyword topic.")
@@ -219,7 +272,8 @@ def main():
 def _main():
     ap = argparse.ArgumentParser()
     ap.add_argument("triage")
-    ap.add_argument("--band", choices=("recent", "tail"), required=True)
+    ap.add_argument("--band", choices=("recent", "tail", "bucket"), required=True)
+    ap.add_argument("--bucket", help="bucket mode: the one buckets.py bucket this run answers")
     ap.add_argument("--ids", default="")
     ap.add_argument("--max", type=int, default=25)
     ap.add_argument("--apply", action="store_true")
@@ -234,8 +288,17 @@ def _main():
         ov = overrides.load(a.overrides)
     except overrides.OverridesError as e:
         raise Refused(str(e))
-    rows = select_rows([json.loads(l) for l in open(a.triage)], a.band, plan, ov, ids)
-    if a.apply and COPY_APPROVED != 1:
+    rows = select_rows([json.loads(l) for l in open(a.triage)], a.band, plan, ov, ids, bucket=a.bucket)
+    approval_ref = ""
+    if a.band == "bucket":
+        line = BUCKET_LINE[a.bucket]
+        approval_ref = BUCKET_APPROVED.get(line, "")
+        if a.apply and not approval_ref:
+            sys.exit(f"REFUSED: line {line} ({a.bucket}) is not approved (BUCKET_APPROVED has no entry). "
+                     "It needs the captain's yes, landed in a PR that adds the line's approval ref.")
+        if a.close:
+            sys.exit("REFUSED: bucket mode never closes.")
+    elif a.apply and COPY_APPROVED != 1:
         sys.exit("REFUSED: COPY_APPROVED=0. The copy needs Fable's D1 GO, landed in a PR that flips the lock.")
     if a.close and (CLOSE_APPROVED != 1 or a.band != "tail"):
         sys.exit("REFUSED: --close needs CLOSE_APPROVED=1 (Fable D4) and --band tail.")
@@ -261,7 +324,7 @@ def _main():
         if done >= a.max:
             break
         uid = r.get("user_id")
-        if not eligible(r):  # defence in depth: select_rows already refused these
+        if not row_ok(r, a.band):  # defence in depth: select_rows already refused these
             raise Refused(f"{r['id']} action {r.get('action')} is not send-eligible")
         key = user_key_of(r, emails.get(uid or "", ""))
         if not key:
@@ -275,7 +338,10 @@ def _main():
             skip("intercom read failed"); continue
         if not ok:
             skip(why); continue
-        body = render(r, names.get(uid or "", ""), plan.get(r["id"]) or ACTION_LINE[r["action"]])
+        if a.band == "bucket":
+            body = render_bucket(r, names.get(uid or "", ""))
+        else:
+            body = render(r, names.get(uid or "", ""), plan.get(r["id"]) or ACTION_LINE[r["action"]])
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt") as f:
             f.write(body)
             bf = f.name
@@ -288,12 +354,12 @@ def _main():
         done += 1
         if not a.apply:
             stats["dry"] += 1
-            print(f"DRY {r['id']} {r['action']} {r['band']} :: {body}")
+            print(f"DRY {r['id']} {r.get('bucket') or r['action']} {r['band']} :: {body}")
             os.unlink(bf); continue
         # Claim BEFORE the post, atomically: the shared one-message-per-user-per-UTC-day cap and
         # one reply per conversation are decided by verify_ledger.claim, the same code every
         # campaign uses, so two lanes can never both message this user today.
-        c = ledger_claim(db, r["id"], key, uid or "", today, r.get("contact_id") or "")
+        c = ledger_claim(db, r["id"], key, uid or "", today, r.get("contact_id") or "", approval_ref)
         if c["result"] != "claimed":
             os.unlink(bf); skip(f"ledger: {c['result']}"); continue
         p = subprocess.run(base, capture_output=True, text=True)

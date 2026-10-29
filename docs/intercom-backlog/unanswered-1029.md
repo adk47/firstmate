@@ -78,7 +78,7 @@ is "Hi there". Every line ends with the same closer: "If you still need help, ju
 |---|---|---|---|
 | A | no-detail (104) | "What can we help you with? Tell us in a few words, and add the link to your Muso profile if it's about your profile." | none needed |
 | B | stats (62) | "Analytics show for profiles on an active Pro or Business plan with a seat assigned to the profile. You can check both in Settings. If they're set and your numbers still look wrong, reply with your profile link and the platform." | FAQ "Why are my analytics not showing?" |
-| C | plaque-order (53) | "You can order a plaque in the Muso mobile app (iOS or Android): open the Analytics tab and tap Plaque. If you already ordered, reply with your order ID and we'll look it up." | FAQ "Where do I order a plaque?" + tracking |
+| C | plaque-order (53) | "You can order a plaque on the Muso website at muso.ai/amp/promote/plaque (signed in), or in the Muso mobile app: open the Analytics tab and tap Plaque. If you already ordered, reply with your order ID and we'll look it up." | firstmate 10-29 21:46Z: the web also orders (web-credits-next `amp/promote/plaque`, the URL the Encore 26 emails use; it is sign-in gated, so 404 when anonymous). FAQ "Where do I order a plaque?" is out of date on this |
 | D | subscription (37) | "You can see and change your plan in Settings in your account. Upgrades take effect right away." | FAQ "How do I upgrade my plan?" |
 | E | billing-cancel (36) | "You can cancel in Settings. You keep access until the end of the billing period, and your credits and profile stay." | FAQ "How do I cancel my subscription?" |
 | F | howto (24) | "Most answers are in our help center at help.muso.ai. If yours isn't there, reply with your question." | FAQ "Contact and Support" lists help.muso.ai as the knowledge base (it answered HTTP 200 at 21:5xZ) |
@@ -103,7 +103,7 @@ this lane; they go to the captain's list.
 |---|---|---|
 | 10-29 23:30 | this report | - |
 | 10-30 on D1 | silent close via the satisfied-close closer (c3's tool, shadow-logged, reversible by a reply), 50 first, then the rest after Fable's eye-check | 274 |
-| 10-30 on D2 | `send.py` gets a bucket-to-line map for approved lines only, in a PR with tests; the copy lock flips per approved line | - |
+| 10-30 on D2 | DONE 10-29: `send.py --band bucket --bucket <name>` maps the nine buckets to lines A-I (PR https://github.com/Muso-AI/hydra/pull/1379), each line locked on its own; a one-line PR adds each approved line's ref to `BUCKET_APPROVED` | - |
 | 10-30, after deploy | first 20 sends (paid, oldest), through the gated path (`intercom-ops-write.sh` + the shared ledger: one message per user per day, a live re-read of each thread before sending), to proof-loop-lead-fable-p1 for an outcome read | 20 |
 | 10-31 | on a clean read: paid first, then free, oldest first, ≤ 200 per day | about 440 |
 | 10-31 | i1 reads the "other" bucket (199) by hand and moves each conversation into a bucket or the captain list | 199 |
@@ -115,3 +115,10 @@ this lane; they go to the captain's list.
 - no reasons on declines;
 - no human sends;
 - money, legal and privacy go to the captain.
+
+## Update 10-29 ~22:1xZ
+
+- **D3:** decided. l1 takes the 351; the ids are in `handoff-l1-351.md` (same folder).
+- **D1 and D2:** with the captain.
+- **Sender:** the bucket-to-line map is built and locked (every line locked until approved). The data
+  feed is `buckets.py --out`, a 0600 file on node-8.

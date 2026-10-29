@@ -136,6 +136,8 @@ def main():
     ap.add_argument("triage")
     ap.add_argument("--min-hours", type=float, default=48)
     ap.add_argument("--fetch", action="store_true", help="bucket on the customer's last messages (Intercom GETs)")
+    ap.add_argument("--out", help="ALSO write the sender's input here (0600; carries user id and contact email "
+                                  "for the shared-ledger key, never text). stdout stays PII-free.")
     a = ap.parse_args()
     now = time.time()
     rows = []
@@ -151,15 +153,23 @@ def main():
         with ThreadPoolExecutor(max_workers=6) as ex:
             for cid, t in zip(todo, ex.map(lambda c: customer_text(token, c), todo)):
                 texts[cid] = t
+    full = None
+    if a.out:
+        full = os.fdopen(os.open(a.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w")
     for r in rows:
         hours = (now - r["waiting_since"]) / 3600
         got = texts.get(r["id"])
         last, t = got if got else (None, (r.get("subject") or "") + " " + (r.get("excerpt") or ""))
         b = "credit-owned-l1" if r["credit"] else bucket_of(t, last)
-        print(json.dumps({"id": r["id"], "bucket": b, "band": r["band"], "age_days": round(hours / 24, 1),
-                          "paid": bool(r.get("paid")), "waiting_since": r["waiting_since"],
-                          "topic": r.get("topic"), "action": r.get("action"),
-                          "assignee": r.get("admin_assignee_id")}))
+        slim = {"id": r["id"], "bucket": b, "band": r["band"], "age_days": round(hours / 24, 1),
+                "paid": bool(r.get("paid")), "waiting_since": r["waiting_since"],
+                "topic": r.get("topic"), "action": r.get("action"), "assignee": r.get("admin_assignee_id")}
+        print(json.dumps(slim))
+        if full:
+            full.write(json.dumps(dict(slim, user_id=r.get("user_id"), email=r.get("email") or "",
+                                       contact_id=r.get("contact_id"))) + "\n")
+    if full:
+        full.close()
 
 
 if __name__ == "__main__":

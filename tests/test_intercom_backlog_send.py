@@ -14,6 +14,7 @@ Stdlib unittest only.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -204,6 +205,73 @@ class Overrides(unittest.TestCase):
         held_ids = {x.split("(")[0] for ln in hold.splitlines() if ln.startswith("- **")
                     for x in ln.split(": ", 1)[1].split(", ")}
         self.assertEqual(held_ids, {"222", "33"})
+
+
+class BucketMode(unittest.TestCase):
+    """--band bucket (captain 10-29, unanswered-1029): nine self-serve buckets map to lines A-I, each line
+    locked on its own until the captain's yes lands in a PR."""
+
+    def brow(self, cid, bucket, action="draft-other", paid=False, waiting=100):
+        return {"id": cid, "bucket": bucket, "action": action, "band": "gt30d", "paid": paid,
+                "waiting_since": waiting, "user_id": None, "email": "x@y.io"}
+
+    def test_every_line_is_locked_until_approved(self):
+        self.assertEqual(ib_send.BUCKET_APPROVED, {})
+        self.assertEqual(set(ib_send.BUCKET_LINE.values()), set(ib_send.BUCKET_LINES))
+
+    def test_only_the_nine_buckets_map(self):
+        for b in ("credit-owned-l1", "credit-like", "merge-like", "removal-like", "other", "thanks-only",
+                  "social-noise", "auto-noise", "billing-money", "legal", "account-delete", "business",
+                  "account-email", "nope"):
+            with self.subTest(bucket=b), self.assertRaises(ib_send.Refused):
+                ib_send.select_rows([self.brow("1", b)], "bucket", {}, NO_OV, bucket=b)
+
+    def test_selects_one_bucket_paid_first_and_skips_owned_actions(self):
+        rows = [self.brow("1", "stats", waiting=1), self.brow("2", "stats", paid=True, waiting=9),
+                self.brow("3", "plaque-order"), self.brow("4", "stats", action="captain-billing"),
+                self.brow("5", "stats", action="gate-uvn-status"), self.brow("6", "stats", action="ledger-today")]
+        got = ib_send.select_rows(rows, "bucket", {}, NO_OV, bucket="stats")
+        self.assertEqual([r["id"] for r in got], ["2", "1"])
+
+    def test_captain_overrides_apply_in_bucket_mode(self):
+        rows = [self.brow("111", "stats"), self.brow("222", "stats"), self.brow("333", "stats")]
+        ov = {"add": {"111": "billing"}, "remove": {"222": "misfire"}}
+        self.assertEqual([r["id"] for r in ib_send.select_rows(rows, "bucket", {}, ov, bucket="stats")], ["333"])
+
+    def test_render_and_lines_pass_the_write_wrappers_sanitizer(self):
+        body = ib_send.render_bucket(self.brow("1", "plaque-order"), "Ann Marie")
+        self.assertTrue(body.startswith("Hi Ann, sorry for the slow reply. You can order a plaque"))
+        self.assertIn("muso.ai/amp/promote/plaque", body)
+        self.assertTrue(body.endswith("If you still need help, just reply here."))
+        self.assertTrue(ib_send.render_bucket(self.brow("1", "stats"), "").startswith("Hi there,"))
+        wrapper = open(os.path.join(ROOT, "scripts", "intercom-ops-write.sh")).read()
+        words = re.search(r'readonly SANITIZER_WORDS="([^"]+)"', wrapper).group(1)
+        leak = re.compile(r"(^|[^A-Za-z0-9_])(" + words + r")([^A-Za-z0-9_]|$)", re.I)
+        for k, line in ib_send.BUCKET_LINES.items():
+            text = " ".join([ib_send.BUCKET_OPEN, line, ib_send.BUCKET_CLOSER])
+            with self.subTest(line=k):
+                self.assertIsNone(leak.search(text))
+                self.assertNotRegex(text, r"github\.com/|#[0-9]{3,}|<@U|\u2014")
+                for promise in ("we fixed", "we updated", "has been processed", "we have updated"):
+                    self.assertNotIn(promise, text.lower())
+
+    def test_cli_bucket_apply_refused_while_line_locked(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        f = os.path.join(d, "b.jsonl")
+        with open(f, "w") as fh:
+            fh.write(json.dumps(self.brow("1", "stats")) + "\n")
+        ov = os.path.join(d, "ov.json")
+        with open(ov, "w") as fh:
+            json.dump(NO_OV, fh)
+        env = {k: v for k, v in os.environ.items() if k != "MUSOAI_INTERCOM_TOKEN"}
+        p = subprocess.run([sys.executable, SEND, f, "--band", "bucket", "--bucket", "stats", "--apply",
+                            "--overrides", ov], capture_output=True, text=True, env=env, timeout=30)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("line B (stats) is not approved", p.stderr)
+        p = subprocess.run([sys.executable, SEND, f, "--band", "bucket", "--bucket", "legal",
+                            "--overrides", ov], capture_output=True, text=True, env=env, timeout=30)
+        self.assertIn("has no line", p.stderr)
 
 
 class SharedLedger(unittest.TestCase):
