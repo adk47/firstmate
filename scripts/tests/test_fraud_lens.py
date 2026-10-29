@@ -15,6 +15,12 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "scripts" / "tests"))
 
 from credit_review import fraud_lens, uvn_status, watchlist  # noqa: E402
+
+# The gate script the runner reads its send locks from (uvn_status.CAMPAIGN_LOCKS): uvn-status unlocked as committed
+# (captain 2026-10-29 03:2xZ), so these tests exercise the runner's own rules, not the lock.
+import tempfile as _tf
+UNLOCKED_GATE = _tf.NamedTemporaryFile("w", suffix="-gate.sh", delete=False).name
+open(UNLOCKED_GATE, "w").write("readonly UVN_STATUS_COPY_APPROVED=1\nreadonly CREDIT_HOLD_STATUS_COPY_APPROVED=1\n")
 import test_uvn_status as T  # noqa: E402  (its fixtures: replica, FakeGate, proof, iso, NOW)
 
 SINGLE = json.dumps({"hold_reason_codes": ["review_big_track_without_trusted_credit"]})
@@ -236,7 +242,7 @@ class RunnerLensTests(unittest.TestCase):
         status = None if campaign == "uvn-status" else {u: "unverified" for u in (1, 2, 3)}
         rep = uvn_status.run(list_path=str(self.list), segment="paid", mode="apply", max_users=10,
                              ledger_path=self.ledger, proof_path=str(self.proof), query=T.replica([1, 2, 3], status=status),
-                             runner=gate, wrapper="/gate", now=T.NOW, pace_seconds=0, campaign=campaign,
+                             runner=gate, wrapper=UNLOCKED_GATE, now=T.NOW, pace_seconds=0, campaign=campaign,
                              post=lambda text: True, **kw)
         return rep, gate
 
@@ -275,7 +281,7 @@ class RunnerLensTests(unittest.TestCase):
         gate = T.FakeGate()
         rep = uvn_status.run(list_path=str(self.list), segment="paid", mode="apply", max_users=10,
                              ledger_path=self.ledger, proof_path=str(self.proof), query=T.replica([1, 3]),  # 2: no email
-                             runner=gate, wrapper="/gate", now=T.NOW, pace_seconds=0, post=lambda text: True,
+                             runner=gate, wrapper=UNLOCKED_GATE, now=T.NOW, pace_seconds=0, post=lambda text: True,
                              lens=self.lens(held={2}))
         self.assertEqual(rep.fraud_held, 1)
         self.assertEqual(rep.no_email, 0)
@@ -286,7 +292,7 @@ class RunnerLensTests(unittest.TestCase):
             db.close()
         # The same user, not held, takes the no_email branch and IS closed (the branch is real).
         uvn_status.run(list_path=str(self.list), segment="paid", mode="apply", max_users=10, ledger_path=self.ledger,
-                       proof_path=str(self.proof), query=T.replica([1, 3]), runner=T.FakeGate(), wrapper="/gate",
+                       proof_path=str(self.proof), query=T.replica([1, 3]), runner=T.FakeGate(), wrapper=UNLOCKED_GATE,
                        now=T.NOW, pace_seconds=0, post=lambda text: True, lens=self.lens())
         db = verify_ledger.connect(self.ledger)
         try:

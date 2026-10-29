@@ -18,6 +18,12 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "scripts" / "tests"))
 
 from credit_review import stage2_verdicts, uvn_status, verify_ledger  # noqa: E402
+
+# The gate script the runner reads its send locks from (uvn_status.CAMPAIGN_LOCKS): uvn-status unlocked as committed
+# (captain 2026-10-29 03:2xZ), so these tests exercise the runner's own rules, not the lock.
+import tempfile as _tf
+UNLOCKED_GATE = _tf.NamedTemporaryFile("w", suffix="-gate.sh", delete=False).name
+open(UNLOCKED_GATE, "w").write("readonly UVN_STATUS_COPY_APPROVED=1\nreadonly CREDIT_HOLD_STATUS_COPY_APPROVED=1\n")
 from credit_verify.proof import FORENSICS_VERSION  # noqa: E402
 from test_uvn_status import NOW, FakeGate, proof, replica  # noqa: E402
 
@@ -117,7 +123,7 @@ class RunnerTests(unittest.TestCase):
         gate = gate or FakeGate()
         rep = uvn_status.run(list_path=str(self.list) if not from_stage2 else None, segment=kw.pop("segment", "paid"),
                              mode=mode, max_users=10, ledger_path=self.ledger, proof_path=str(self.proof), query=q,
-                             runner=gate, wrapper="/gate", now=NOW, pace_seconds=0, campaign=campaign,
+                             runner=gate, wrapper=UNLOCKED_GATE, now=NOW, pace_seconds=0, campaign=campaign,
                              from_stage2=from_stage2, stage2_path=self.s.path, **kw)
         return rep, gate
 
@@ -248,7 +254,7 @@ class CountCopyTests(unittest.TestCase):
                                          "users": users}))
         gate = FakeGate()
         rep = uvn_status.run(list_path=str(self.list), segment="paid", mode="apply", max_users=10,
-                             ledger_path=self.ledger, query=q, runner=gate, wrapper="/gate", now=NOW, pace_seconds=0,
+                             ledger_path=self.ledger, query=q, runner=gate, wrapper=UNLOCKED_GATE, now=NOW, pace_seconds=0,
                              campaign=campaign, **kw)
         return rep, gate
 
@@ -305,7 +311,7 @@ class CountCopyTests(unittest.TestCase):
                                          "users": users}))
         gate = FakeGate()
         uvn_status.run(list_path=str(self.list), segment="paid", mode="dry-run", max_users=10, ledger_path=self.ledger,
-                       query=q, runner=gate, wrapper="/gate", now=NOW, pace_seconds=0, campaign="status-team-review")
+                       query=q, runner=gate, wrapper=UNLOCKED_GATE, now=NOW, pace_seconds=0, campaign="status-team-review")
         self.assertEqual(gate.calls[0][1]["user"]["pending_count"], 3)
 
     def test_other_campaigns_keep_the_hold(self):

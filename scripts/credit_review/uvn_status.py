@@ -114,7 +114,10 @@ GAP_ASK = verify_ledger.GAP_ASK
 # credit-trust-llm-t01 lists status-A-doc-under-review (status-doc-received) and
 # status-B-with-our-team (status-team-review). They are NOT asks: no proof-on-file exclusion
 # (these users are the ones with documents or requests with us), no ask cap, never close an ask.
-CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", GAP_ASK)
+# credit-hold-status (Fable S1, card L14a): the neutral owing-proof line. NOT an ask (it asks for nothing) and not
+# "nothing else is needed"; send-locked in the gate (CREDIT_HOLD_STATUS_COPY_APPROVED) until Fable's delegated yes.
+CREDIT_HOLD = "credit-hold-status"
+CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", GAP_ASK, CREDIT_HOLD)
 # The campaigns that ASK (documents-on-file exclusion, the ask cap, closing asks).
 ASKS = ("uvn-status", GAP_ASK)
 # The replica re-check per campaign (firstmate 076): uvn-status needs requests still waiting on
@@ -126,7 +129,22 @@ PENDING_STATUSES = {
     "status-team-review": ("user_verification_needed", "unverified", "processing"),
     # gap-ask: the decider's held rows; only stage-2 need_more ones are ever kept (run()).
     GAP_ASK: ("unverified", "user_verification_needed"),
+    # credit-hold-status: rows still waiting on the user's proof (UVN, or unverified under a review hold)
+    CREDIT_HOLD: ("user_verification_needed", "unverified"),
 }
+# A campaign the gate send-locks: a real run halts before any gate call while the gate script's own lock reads 0
+# (a status-note refusal would hold the user and count toward the three-refusal flag, for nothing they did).
+CAMPAIGN_LOCKS = {CREDIT_HOLD: "CREDIT_HOLD_STATUS_COPY_APPROVED", "uvn-status": "UVN_STATUS_COPY_APPROVED"}
+
+
+def campaign_lock_open(wrapper: str, var: str) -> bool:
+    """True only when the gate script itself says `readonly <var>=1` (unreadable = locked)."""
+    try:
+        with open(wrapper, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return False
+    return re.search(rf"^readonly {re.escape(var)}=1$", text, re.M) is not None
 # Rows in these statuses join a campaign only when stage 2 released them to it: uvn-status's
 # no_document users whose requests are still `unverified` (held with us; firstmate spec item 2).
 RELEASED_EXTRA_STATUSES = {"uvn-status": ("unverified",)}
@@ -513,6 +531,10 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
     lock = LOCKED_WORDINGS.get(wording)
     if lock and mode == "apply" and not gate_lock_open(wrapper, lock):
         report.halted = f"--wording {wording} is send-locked in the gate ({lock}=0); nothing sent (dry-run renders it)"
+        return report
+    lock = CAMPAIGN_LOCKS.get(campaign)
+    if lock and mode == "apply" and not campaign_lock_open(wrapper, lock):
+        report.halted = f"{campaign} is send-locked in the gate ({lock}=0); nothing sent (dry-run renders it)"
         return report
     # Stage 2's release from the proof-on-file hold. From the list, an unreadable store releases
     # nothing (the old rule stands); a stage-2 population cannot be built without it.

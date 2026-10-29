@@ -8,6 +8,7 @@ import { indexProofDoc, checkProofOnFile, resetProofOnFileCacheForTest } from ".
 import {
   createCreditVerificationCheckTool,
   PROOF_ASK_MARKER,
+  LEGACY_PROOF_ASK_MARKER,
   PRE_MARKER_ASK_PHRASE,
   PRE_MARKER_WINDOW_END_MS,
   priorAskMarkers,
@@ -207,7 +208,7 @@ describe("credit_verification_check: none = ask ONCE across conversations", () =
       conversationId: "c1",
       token: "tok",
       botAdminId: "botadmin",
-      markers: [PROOF_ASK_MARKER, PRE_MARKER_ASK_PHRASE, "Champagne"],
+      markers: [PROOF_ASK_MARKER, LEGACY_PROOF_ASK_MARKER, PRE_MARKER_ASK_PHRASE, "Champagne"],
       sinceUnix: Math.floor((NOW - 60 * 24 * H) / 1000),
       limit: 10,
     });
@@ -220,7 +221,8 @@ describe("credit_verification_check: none = ask ONCE across conversations", () =
     const r = reader("not_found");
     const out = await run(tool([item("req-z", 34135)], fileWith(shifted), { reader: r, now: later }));
     expect(out.proof_on_file.state).toBe("none");
-    expect((r.findBotMarkerInOtherConversations.mock.calls[0][0] as { markers: string[] }).markers).toEqual([PROOF_ASK_MARKER]);
+    // the old ask sentence keeps counting after the change: an earlier ask is still an ask (message-book-1029)
+    expect((r.findBotMarkerInOtherConversations.mock.calls[0][0] as { markers: string[] }).markers).toEqual([PROOF_ASK_MARKER, LEGACY_PROOF_ASK_MARKER]);
   });
   it("asked_before: an earlier ask in another conversation blocks a second one", async () => {
     const out = await run(tool([item("req-z", 34135)], fileWith(doc()), { reader: reader("found") }));
@@ -256,7 +258,7 @@ describe("IntercomReader.findBotMarkerInOtherConversations", () => {
     conversation_parts: { conversation_parts: parts, total_count: parts.length },
     ...extra,
   });
-  const botAsk = { part_type: "comment", author: { type: "admin", id: "botadmin" }, body: `Your pending credits: X.\n\nAny one of these works   (a screenshot is fine):\n- link` };
+  const botAsk = { part_type: "comment", author: { type: "admin", id: "botadmin" }, body: `Your pending credits: X.\n\nAny one of these works   (a link, photo or PDF is fine):\n- link` };
   function http(opts: { search?: unknown; searchOk?: boolean; convs?: Record<string, unknown> }) {
     const get = vi.fn(async (url: string) => {
       const id = decodeURIComponent(url.split("/conversations/")[1].split("?")[0]);

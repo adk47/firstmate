@@ -472,8 +472,19 @@ This asks the claimant of a pending profile claim in band B or C to add the clai
 - **Trigger:** a `proof_intake` row (b1's filer, one per user and document, in the stage-2 proof store), not the Intercom thread heuristic. `scripts/credit_review/receipts.py` (read-only) names the intake's candidate credit requests that are still pending and splits the users:
   - users who owe nothing else go on `receipts-queued.json` and get the approved queued line;
   - users who still owe proof (any `user_verification_needed` row) go on `receipts-received.json` and get card **R1**. R1 is the queued line without "no need to send anything else" (`--copy received`, `docrecvr`). It is **send-locked** by `STATUS_RECEIVED_COPY_APPROVED=0` until the captain's yes.
-- **Cron:** `scripts/paid-status/daily.sh` (node-8, 00:30Z / 15:00Z) runs the receipts stage after the segment pass, paid then free, with the segments' exclusions. R1 runs only when the gate itself says `STATUS_RECEIVED_COPY_APPROVED=1`; until then the run logs how many users wait.
+- **Cron:** `scripts/paid-status/daily.sh` (node-8, 00:30Z / 15:00Z) runs the receipts stage after the segment pass, paid then free, with the segments' exclusions. R1 runs only when the gate itself says `STATUS_RECEIVED_COPY_APPROVED=1` **and** `R1_DAILY=1` is set on the cron (not set: R1 goes out in hand-run batches first, proof-loop p1); until then the run logs how many users wait.
 - **Runner guard:** `credit-review.py uvn-status --wording received` halts a real run before any gate call while the lock is 0. A refusal of a status note would otherwise hold and count against the user. Each note still passes the gate's ledger (one per user, ever), the 7-day core-notice gate and the one-message-per-user-per-day cap.
+
+## Owing-proof lines (`--campaign credit-hold-status` / `claim-proof-pending`; Fable copy-owing-proof-1027 S1/S2, SEND-LOCKED until the captain's L14a/L14b)
+
+- **Who:** a requester who owes proof while no ask can go out. S1 (`credit-hold-status`) is for credit requests, and S2 (`claim-proof-pending`) is for a claim that needs proof. Every approved status wording says "nothing else is needed", which is false for these users, and the ask is off until a returned document can be accepted.
+- **Copy:** each line is one sentence, verbatim from Fable. It says the request waits on the user, and asks them to wait for our next message before sending anything. It has no date and no ask, and never says "nothing else is needed". On email, S1 is signed "Muso Support" and S2 is signed "Caroline, Muso Support". An in-thread reply is unsigned.
+- **Ledger:**
+  - S1 is a once-per-user status campaign (`STATUS_CAMPAIGNS`: one per user ever, never within 7 days of another note) and a notice. It is not an ask: it never closes or counts as an ask, and an ask on the same credit does not block it.
+  - S1 is NOT in `STATUS_NOTE_CAMPAIGNS`, so hold-silent does not stop it (Fable: S1 goes to held accounts too).
+  - S2 follows claim-status's rules (`claim_cross_check`): one note per claim, never to a claim with a `claim-proof-ask` note, never within 7 days of another note. A claim-proof-ask waits 7 days after S2, and a claim-status note never follows S2 on the same claim (`proof_pending_sent`, closed: it would say nothing else is needed).
+  - Replies to S2 are tagged claim-proof.
+- **Locks:** `CREDIT_HOLD_STATUS_COPY_APPROVED=0` and `CLAIM_PROOF_PENDING_COPY_APPROVED=0`. `--dry-run` renders exactly what would be sent. The audience build and the node-8 cron wiring follow in a separate PR.
 
 ## Claim status note (`--campaign claim-status`, Fable claims-documentation-readiness-1023 ruling 3)
 
@@ -506,7 +517,7 @@ can restore the credit. Each line states the reason first, then the action (Fabl
 - `misattributed`: "The public credit data for {track} by {artist} lists a different person
   for {role} ({source_label}: {url}), so we've removed the {role} credit from your
   profile." `source_label` is required and must be the real source (Spotify credits, Tidal
-  credits, Qobuz credits page, Apple Music credits, Discogs, AllMusic, MusicBrainz, Jaxsta).
+  credits, Qobuz credits page, Apple Music credits, Discogs, AllMusic, MusicBrainz; no Jaxsta in any user-facing copy, captain 2026-10-29 03:2xZ).
 - `duplicate`: the credit duplicated one still on the profile.
 - `policy` with a `policy_reason` from the fixed list (`artist_by_non_artist`,
   `org_on_person`, `label_role_without_release`, `duplicate_profile`).

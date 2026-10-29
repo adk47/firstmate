@@ -1285,7 +1285,7 @@ CAMPAIGN_REMOVAL = "removal-notice"
 REMOVAL_REASONS = ("misattributed", "duplicate", "policy")  # "verification" is manual_only (Fable 2026-10-17)
 POLICY_REASONS = ("artist_by_non_artist", "org_on_person", "label_role_without_release", "duplicate_profile")
 SOURCE_LABELS = ("Spotify credits", "Tidal credits", "Qobuz credits page", "Apple Music credits", "Discogs",
-                 "AllMusic", "MusicBrainz", "Jaxsta")
+                 "AllMusic", "MusicBrainz")   # no Jaxsta in user copy (captain 03:2xZ)
 SELF_ACTORS = frozenset({"self", "owner", "user"})
 # The gate's per-credit rules for a removal notice, applied per event here so one bad event
 # never refuses its owner's whole batch.

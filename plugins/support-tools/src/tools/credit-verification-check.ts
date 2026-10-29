@@ -27,7 +27,10 @@ const MAX_STR_LEN = 300;
 // Step 2's proof ask carries this sentence verbatim (customer-credit-verification SKILL), so
 // an earlier ask in another conversation is detectable: "none = ask ONCE" must hold across
 // conversations, and an unanswered ask writes nothing to proof-on-file.
-export const PROOF_ASK_MARKER = "Any one of these works (a screenshot is fine):";
+export const PROOF_ASK_MARKER = "Any one of these works (a link, photo or PDF is fine):";
+// The sentence every ask carried until 2026-10-29 (message-book-1029 B1 changed it, captain 03:2xZ "just go"). An
+// earlier ask is still an ask: both sentences always count, or a user asked before the change would be asked again.
+export const LEGACY_PROOF_ASK_MARKER = "Any one of these works (a screenshot is fine):";
 export const PRIOR_ASK_WINDOW_MS = 60 * 24 * 60 * 60 * 1000;
 export const PRIOR_ASK_MAX_CONVERSATIONS = 10;
 // Asks sent before the marker existed carry no fixed sentence (firstmate 039). Until this
@@ -39,7 +42,7 @@ export const PRE_MARKER_ASK_PHRASE = "screenshots are accepted for all of these"
 const MIN_TITLE_MARKER_LEN = 3;
 
 export function priorAskMarkers(uvnCredits: UvnCredit[], now: number): string[] {
-  const markers = [PROOF_ASK_MARKER];
+  const markers = [PROOF_ASK_MARKER, LEGACY_PROOF_ASK_MARKER];
   if (now < PRE_MARKER_WINDOW_END_MS) {
     markers.push(PRE_MARKER_ASK_PHRASE);
     for (const c of uvnCredits) {

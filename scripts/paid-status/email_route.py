@@ -100,20 +100,20 @@ def render_text(campaign, v):
         return (f"Your Muso credit {v['request_word']}: an update",
                 f"Hi {v['first_name']}, a quick update on your credit {v['request_word']} for {v['titles']}: they're with "
                 "our team for review. Nothing else is needed from you right now.\n\nMuso Support")
-    lst = ("Any one of these works (a screenshot is fine):\n\n- A public link where the credit is listed: Tidal, Genius, "
-           "Jaxsta, Discogs, AllMusic, ASCAP or BMI.\n- Documentation of the work: a project or session file, a message with "
+    lst = ("Any one of these works (a link, photo or PDF is fine):\n\n- A public link where the credit is listed: Tidal, Genius, "
+           "Discogs, AllMusic, ASCAP or BMI.\n- Documentation of the work: a project or session file, a message with "
            "the artist, a contract or split sheet, or anything else that shows you worked on it.")
     if v["single"]:
         head = (f"Hi {v['first_name']}, a quick status update on your credit request for {v['track_title']} by "
                 f"{v['artist_name']}: it's waiting on one thing from you, something that shows your {v['role_credits']}.")
-        see = "You'll see the credit on your profile"
+        see = "You will see the credit on your profile"
     else:
         head = (f"Hi {v['first_name']}, a quick status update on your credit requests for {v['titles']}: they're waiting "
                 "on one thing from you, something that shows your role on each.")
-        see = "You'll see each credit on your profile"
+        see = "You will see each credit on your profile"
     return (f"Your Muso credit request{'' if v['single'] else 's'}: one thing we still need",
-            f"{head}\n\n{lst}\n\nJust reply to this message with it. Nothing else is needed from you. {see} as soon as "
-            "it's approved, and we'll let you know here if anything else is needed.\n\nThank you,\n\nCaroline, Muso Support")
+            f"{head}\n\n{lst}\n\nJust reply to this message with it. {see} as soon as "
+            "it is approved, and we will let you know here if anything else is needed.\n\nThank you,\n\nCaroline, Muso Support")
 
 
 def leak_reason(subject, text):

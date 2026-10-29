@@ -188,8 +188,12 @@ if [ "${FAILED:-0}" != 1 ] && [ "${RECEIPTS:-1}" = 1 ] && ! killed; then
     cp receipts-queued.json list-RQ.json; cp receipts-received.json list-RR.json
     for SEG in paid free; do
       runner "$SEG" RQ status-doc-received --wording queued --exclude-users exclude.txt || break
-      if grep -qx 'readonly STATUS_RECEIVED_COPY_APPROVED=1' "$GATE_SCRIPT"; then
+      if grep -qx 'readonly STATUS_RECEIVED_COPY_APPROVED=1' "$GATE_SCRIPT" && [ "${R1_DAILY:-0}" = 1 ]; then
         runner "$SEG" RR status-doc-received --wording received --exclude-users exclude.txt || break
+      elif grep -qx 'readonly STATUS_RECEIVED_COPY_APPROVED=1' "$GATE_SCRIPT"; then
+        # R1 goes out in hand-run batches only (proof-loop-lead-fable-p1: batch 1 = the 2 signed users, batch 2
+        # only after those threads are read), never the whole list from this cron, until R1_DAILY=1 is set.
+        log "receipts $SEG: R1 unlocked but hand-batched (R1_DAILY=0): $(python3 -c 'import json,sys; print(sum(1 for u in json.load(open(sys.argv[1]))["users"] if u["paid"] == (sys.argv[2] == "paid")))' list-RR.json "$SEG") owe proof and wait for R1"
       else
         log "receipts $SEG: R1 send-locked (STATUS_RECEIVED_COPY_APPROVED=0): $(python3 -c 'import json,sys; print(sum(1 for u in json.load(open(sys.argv[1]))["users"] if u["paid"] == (sys.argv[2] == "paid")))' list-RR.json "$SEG") owe proof and wait for R1"
       fi

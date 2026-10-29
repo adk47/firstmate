@@ -237,9 +237,25 @@ class UvnStatusTests(unittest.TestCase):
         gate = kw.pop("gate", FakeGate())
         rep = uvn_status.run(list_path=str(self.list), segment=kw.pop("segment", "paid"), mode=kw.pop("mode", "apply"),
                              max_users=kw.pop("max_users", 10), ledger_path=self.ledger, proof_path=str(self.proof),
-                             query=kw.pop("query", self.q), runner=gate, wrapper="/gate", now=NOW,
-                             pace_seconds=0, **kw)
+                             query=kw.pop("query", self.q), runner=gate, wrapper=kw.pop("wrapper", self.gate_file()),
+                             now=NOW, pace_seconds=0, **kw)
         return rep, gate
+
+    def gate_file(self, uvn: int = 1) -> str:
+        """The gate script the runner reads its locks from: uvn-status unlocked (captain 03:2xZ) unless told."""
+        p = self.dir / f"gate-uvn{uvn}.sh"
+        p.write_text(f"readonly UVN_STATUS_COPY_APPROVED={uvn}\nreadonly CREDIT_HOLD_STATUS_COPY_APPROVED=0\n")
+        return str(p)
+
+    def test_uvn_status_never_reaches_the_gate_on_a_real_run_while_its_lock_is_0(self):
+        rep, gate = self.run_(wrapper=self.gate_file(0))
+        self.assertEqual(gate.calls, [])
+        self.assertIn("UVN_STATUS_COPY_APPROVED=0", rep.halted)
+        rep, gate = self.run_(wrapper=self.gate_file(0), mode="dry-run")
+        self.assertTrue(gate.calls)
+        rep, gate = self.run_()
+        self.assertEqual(rep.halted, "")
+        self.assertTrue(gate.calls)
 
     def test_canary_reaches_past_users_the_gate_defers_for_recent_contact(self):
         self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 8)]
@@ -572,6 +588,26 @@ class UvnStatusTests(unittest.TestCase):
         rep, gate = self.run_(campaign="status-doc-received", mode="dry-run")
         self.assertEqual(gate.calls[0][1]["user"].get("filing_conversation"), "215476000000001")
         self.assertNotIn("filing_conversation", gate.calls[-1][1]["user"]) if len(gate.calls) > 1 else None
+
+    def test_credit_hold_status_never_reaches_the_gate_on_a_real_run_while_locked(self):
+        # Fable S1 (card L14a): send-locked in the gate; a real run halts before any gate call, a dry run renders.
+        rep, gate = self.run_(campaign="credit-hold-status")
+        self.assertEqual(gate.calls, [])
+        self.assertIn("CREDIT_HOLD_STATUS_COPY_APPROVED=0", rep.halted)
+        rep, gate = self.run_(campaign="credit-hold-status", mode="dry-run")
+        argv = gate.calls[0][0]
+        self.assertEqual(argv[argv.index("--campaign") + 1], "credit-hold-status")
+        locked = self.dir / "gate-locked.sh"
+        locked.write_text("readonly CREDIT_HOLD_STATUS_COPY_APPROVED=0\nreadonly OTHER=1\n")
+        self.assertFalse(uvn_status.campaign_lock_open(str(locked), "CREDIT_HOLD_STATUS_COPY_APPROVED"))
+        unlocked = self.dir / "gate-unlocked.sh"
+        unlocked.write_text("readonly CREDIT_HOLD_STATUS_COPY_APPROVED=1\n")
+        gate = FakeGate()
+        rep = uvn_status.run(list_path=str(self.list), segment="paid", mode="apply", max_users=10,
+                             ledger_path=self.ledger, proof_path=str(self.proof), query=self.q, runner=gate,
+                             wrapper=str(unlocked), now=NOW, pace_seconds=0, campaign="credit-hold-status")
+        self.assertEqual(rep.halted, "")
+        self.assertTrue(gate.calls)
 
     def test_the_doc_check_audit_matches_the_recipient_like_a_send(self):
         saved = verify_notify.IDENTITY_LOOKUP

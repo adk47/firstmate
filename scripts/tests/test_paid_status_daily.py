@@ -191,9 +191,14 @@ class DailyShTest(unittest.TestCase):
         excl = open(os.path.join(self.state, day, "receipts", "exclude.txt")).read().split()
         self.assertEqual(excl, ["0", "4242"])   # the cs exclusion list + the hold ids
 
-    def test_receipts_r1_runs_once_the_gate_lock_is_open(self):
+    def test_receipts_r1_runs_once_the_gate_lock_is_open_and_r1_daily_is_set(self):
         open(self.gate_script, "w").write("readonly STATUS_RECEIVED_COPY_APPROVED=1\n")
+        # unlocked, but the cron never sends R1 to the whole list until R1_DAILY=1 (p1: hand-run batches first)
         p, calls = self.run_daily()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn("list-RR.json", [l for l, _s, _w, _ in self.receipt_calls(calls)])
+        self.assertIn("receipts paid: R1 unlocked but hand-batched (R1_DAILY=0): 1 owe proof", p.stdout)
+        p, calls = self.run_daily(R1_DAILY="1")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn(("list-RR.json", "paid", "received"), [(l, s, w) for l, s, w, _ in self.receipt_calls(calls)])
 

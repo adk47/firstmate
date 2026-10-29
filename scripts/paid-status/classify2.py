@@ -49,11 +49,12 @@ COPY = {
                "Nothing else is needed from you right now.\n\nMuso Support"),
     "UVN_ASK": ("Your Muso credit request{s}: one thing we still need",
                 "Hi {first}, a quick status update on your credit request{s} for {titles}: {it_s} waiting on one thing "
-                "from you, something that shows your {role_phrase}.\n\nAny one of these works (a screenshot is fine):\n"
-                "- A public link where the credit is listed: Tidal, Genius, Jaxsta, Discogs, AllMusic, ASCAP or BMI.\n"
+                "from you, something that shows your {role_phrase}.\n\nAny one of these works (a link, photo or PDF is fine):\n"
+                "- A public link where the credit is listed: Tidal, Genius, Discogs, AllMusic, ASCAP or BMI.\n"
                 "- Documentation of the work: a project or session file, a message with the artist, a contract or "
                 "split sheet, or anything else that shows you worked on it.\n\nJust reply to this message with it. "
-                "Nothing else is needed from you, and we'll message you here when {decided}.\n\nThank you,\nCaroline\n"
+                "You will see {each_credit} on your profile as soon as it is approved, and we will let you know here if "
+                "anything else is needed.\n\nThank you,\nCaroline\n"
                 "Muso Support"),
 }
 
@@ -166,6 +167,7 @@ def main() -> int:
             role_phrase = f'{r0["role"]} credit' if r0["role"] else "credit"
         fmt = {"first": first, "titles": titles, "s": "s" if many else "",
                "it_s": "they're" if many else "it's", "decided": "they're decided" if many else "it's decided",
+               "each_credit": "each credit" if many else "the credit",
                "role_phrase": role_phrase}
         out.append({"user_id": uid, "paid": uid in paying, "class": cls, "oldest_pending": rs[0]["created"][:10],
                     "n_pending": len(rs), "n_in_note": len(target), "request_ids": [r["id"] for r in target],

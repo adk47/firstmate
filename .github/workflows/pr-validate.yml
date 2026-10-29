@@ -1973,6 +1973,12 @@ jobs:
           python3 scripts/tests/test_verify_ledger_deferral.py
           # merge-pending (go-live line M1; send-locked): one note per merge request, 7-day defer.
           python3 scripts/tests/test_verify_ledger_merge_pending.py
+          # the send-time communication-state check (captain 18:2xZ; credit_review/comm_state.py).
+          python3 scripts/tests/test_comm_state.py
+          # Fable's two owing-proof lines (credit-hold-status / claim-proof-pending; send-locked until L14).
+          python3 scripts/tests/test_verify_ledger_owing_proof.py
+          # the S1 credit-hold-status audience (credit_review/owing_proof.py; the campaign stays send-locked).
+          python3 scripts/tests/test_owing_proof.py
           for f in scripts/paid-status/*.py; do python3 -m py_compile "$f"; done
           # The stage-2 release from the proof-on-file hold (credit_review/stage2_verdicts.py):
           # uvn-status for no_document, gap-ask for need_more, the gap-ask ledger rules. Stdlib only.

@@ -191,9 +191,9 @@ conversation, and nothing here or from the customer says proof was given), plain
 tracks + claimed roles. Then ask for proof, and
 **tell the customer what they can send**. Introduce the list with this exact sentence,
 word for word (it is how a later conversation knows you already asked):
-`Any one of these works (a screenshot is fine):`
+`Any one of these works (a link, photo or PDF is fine):`
 
-- **A public link where the credit is listed** – Tidal, Genius, Jaxsta, Discogs,
+- **A public link where the credit is listed** – Tidal, Genius, Discogs,
   AllMusic, ASCAP, or BMI.
 - **Documentation of the work** – a project/session file, communication with the
   artist, a contract or split sheet, or anything that shows they worked on it.
@@ -227,7 +227,7 @@ skill.
      `credit-verify` ticket carrying the catalog corroboration (and any links) as
      evidence; a human executes the gated approve.
 3. **Public link you cannot verify, or private proof.** You cannot open URLs – a
-   pasted Tidal/Genius/Jaxsta link is a *claim*, not evidence you verified. You **CAN
+   pasted Tidal/Genius link is a *claim*, not evidence you verified. You **CAN
    view screenshots, images, and PDFs** the customer attaches (SOUL Attachments
    doctrine: never tell a customer you can't see them) – engage with what they show;
    what you cannot do is **cross-check** them against an independent source. For all

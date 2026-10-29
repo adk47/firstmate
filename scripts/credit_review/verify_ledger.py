@@ -99,7 +99,7 @@ BLOCKING = ("attempted", "sent", "refused", "skipped")
 DEFERRED = "deferred_pending_doc"
 CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "uvn-status", "withdrawal-confirm",
              "status-doc-received", "status-team-review", "email-changed", "email-changed-dup",
-             "claim-proof-ask", "claim-status", "gap-ask", "merge-pending")
+             "claim-proof-ask", "claim-status", "gap-ask", "merge-pending", "credit-hold-status", "claim-proof-pending")
 # claim-proof-ask (steers-1830 #5, firstmate 125/126): a dated ask to the claimant of a pending
 # profile CLAIM (band B/C) to put the claim's bound-proof code in one platform bio. Its "request
 # id" is the claim key "claim-<claiming.id>", so only its own rows block it (claim ids never meet
@@ -115,7 +115,17 @@ CLAIM_WINDOW_DAYS = 14          # the close day: always 14 days after the note
 # for a claim that has a claim-proof-ask note, and nobody gets the other claim note within 7 days
 # of one (claim_cross_check). Its replies are claim-proof (a person), never credit proof.
 CLAIM_STATUS_CAMPAIGN = "claim-status"
-CLAIM_CAMPAIGNS = (CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN)
+# claim-proof-pending (Fable copy-owing-proof-1027 S2; send-locked until the captain's L14b): the neutral line
+# to a claimant whose claim needs proof while the claim ask is off. Same claim key and the same rules as
+# claim-status (claim_cross_check): one note per claim ever, never to a claim with a claim-proof-ask note,
+# never within 7 days of another note; a claim-proof-ask waits 7 days after it.
+CLAIM_PENDING_CAMPAIGN = "claim-proof-pending"
+CLAIM_CAMPAIGNS = (CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN, CLAIM_PENDING_CAMPAIGN)
+# credit-hold-status (Fable S1; send-locked until L14a): the neutral line to a credit requester who owes
+# proof while no ask can go out. A once-per-user status campaign (STATUS_CAMPAIGNS) and a notice: NOT an
+# ask (it asks for nothing), and NOT in STATUS_NOTE_CAMPAIGNS, so hold-silent (which stops the "nothing
+# else is needed" notes) does not stop it: Fable, "S1 goes to held accounts too".
+CREDIT_HOLD_CAMPAIGN = "credit-hold-status"
 GAP_ASK = "gap-ask"
 # merge-pending (go-live-today line M1; send-locked until the captain's yes): a status note per merge request, key
 # "merge-<merge request id>". A notice (only its own rows block it: one note per merge request, ever), never an
@@ -127,15 +137,17 @@ MERGE_PENDING = "merge-pending"
 GAP_ASK_FOLLOWS = ("status-doc-received",)
 # Once-per-user status campaigns: one message per user ever (per campaign), never within 7 days
 # of another note from this gate. Only uvn-status is an ask (and also stops after a proof reply).
-STATUS_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review")
+STATUS_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", CREDIT_HOLD_CAMPAIGN)
 # Notices: only their own rows block them (they are not asks and never close one).
 NOTICE_CAMPAIGNS = ("takeback-notice", "withdrawal-confirm", "status-doc-received", "status-team-review",
-                    "email-changed", "email-changed-dup", CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN, MERGE_PENDING)
+                    "email-changed", "email-changed-dup", CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN, MERGE_PENDING,
+                    CLAIM_PENDING_CAMPAIGN, CREDIT_HOLD_CAMPAIGN)
 # Campaigns whose gate refusals are re-checkable (firstmate 076, 082, 083): a refusal holds the
 # USER (campaign, user_key or user_id) in verify_refusal_holds for RECHECK_DAYS (the runner and the gate skip
 # them until next_recheck_at, whatever requests are listed); a later send clears it; after
 # MAX_REFUSALS refusals it is posted once to #cs_priority for a human and the user is blocked.
-RECHECKABLE_REFUSALS = ("status-doc-received", "status-team-review", "email-changed", "email-changed-dup")
+RECHECKABLE_REFUSALS = ("status-doc-received", "status-team-review", "email-changed", "email-changed-dup",
+                        CREDIT_HOLD_CAMPAIGN)
 RECHECK_DAYS = 7
 MAX_REFUSALS = 3
 # The campaigns that ASK the user for something. Only these count as "already asked";
@@ -297,6 +309,11 @@ def window(day: str) -> tuple[str, str]:
     return due, _plus(due, 1)
 
 
+def _marks(seq: tuple[str, ...] | list[str]) -> str:
+    """'?,?,...' for an IN list over `seq` (never a hard-coded count: the campaign tuples grow)."""
+    return ",".join("?" * len(seq))
+
+
 def blocked_ids(db: sqlite3.Connection, request_ids: list[str], campaign: str = "verify-live") -> set[str]:
     """Request ids that must not get this campaign's initial note: already noted,
     refused or skipped in this campaign, or already asked about in any ASK campaign
@@ -399,7 +416,7 @@ def past_user_done(db: sqlite3.Connection, user_key: str, user_id: str = "") -> 
                   "AND m.status IN ('attempted','sent') LIMIT 1", (*params, *ASK_CAMPAIGNS)).fetchone():
         return "already_asked"
     if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.proof_tagged_at IS NOT NULL "
-                  "AND m.campaign NOT IN (?,?) LIMIT 1", (*params, *CLAIM_CAMPAIGNS)).fetchone():
+                  f"AND m.campaign NOT IN ({_marks(CLAIM_CAMPAIGNS)}) LIMIT 1", (*params, *CLAIM_CAMPAIGNS)).fetchone():
         return "proof_received"
     return ""
 
@@ -416,7 +433,8 @@ def uvn_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None
                   "AND m.status IN ('attempted','sent') LIMIT 1", (*params, campaign)).fetchone():
         return "already_sent"
     if campaign == "uvn-status" and db.execute(
-            f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.proof_tagged_at IS NOT NULL AND m.campaign NOT IN (?,?) LIMIT 1",
+            f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.proof_tagged_at IS NOT NULL "
+            f"AND m.campaign NOT IN ({_marks(CLAIM_CAMPAIGNS)}) LIMIT 1",
             (*params, *CLAIM_CAMPAIGNS)).fetchone():
         return "proof_received"
     since = ((now or utcnow()) - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -434,28 +452,38 @@ def uvn_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None
 
 def claim_cross_check(db: sqlite3.Connection, campaign: str, request_ids: list[str], user_key: str, *,
                       day: str, user_id: str = "") -> str:
-    """The two claim notes never cross ('' when this one may go). A claim-status note never goes
-    to a claim that has a claim-proof-ask note ('proof_ask_sent', closed: that claimant is told
-    there), and never within 7 days of any note from this gate to the user ('messaged_7d', a
-    deferral). A claim-proof-ask note waits 7 days after a claim-status note ('messaged_7d')."""
+    """The claim notes never cross ('' when this one may go). A claim-status or claim-proof-pending
+    note never goes to a claim that has a claim-proof-ask note ('proof_ask_sent', closed: that
+    claimant is told there); a claim-status note never goes to a claim that has a claim-proof-pending
+    note ('proof_pending_sent', closed: it would say nothing else is needed after S2 said proof is);
+    and neither goes within 7 days of any note from this gate to the user ('messaged_7d', a deferral). A claim-proof-ask note waits 7 days after a claim-status or
+    claim-proof-pending note ('messaged_7d')."""
     if campaign not in CLAIM_CAMPAIGNS:
         return ""
     cond, params = _same_user(db, user_key, user_id)
     # The send day the gate claims for, not the wall clock: the 7 days are counted back from it.
     since = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
-    if campaign == CLAIM_STATUS_CAMPAIGN:
+    if campaign in (CLAIM_STATUS_CAMPAIGN, CLAIM_PENDING_CAMPAIGN):
         marks = ",".join("?" * len(request_ids))
-        if request_ids and db.execute(
+
+        def noted(by: str) -> bool:
+            return bool(request_ids) and db.execute(
                 f"SELECT 1 FROM verify_requests r JOIN verify_messages m ON m.id = r.message_row "
                 f"WHERE r.campaign=? AND r.request_id IN ({marks}) AND m.status IN ('attempted','sent') LIMIT 1",
-                (CLAIM_CAMPAIGN, *request_ids)).fetchone():
+                (by, *request_ids)).fetchone() is not None
+        if noted(CLAIM_CAMPAIGN):
             return "proof_ask_sent"
+        # QA on #1409: once S2 told the claimant proof is required, claim-status ("Nothing else is needed")
+        # never follows for that claim (closed, not deferred).
+        if campaign == CLAIM_STATUS_CAMPAIGN and noted(CLAIM_PENDING_CAMPAIGN):
+            return "proof_pending_sent"
         if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day>=? AND m.status IN ('attempted','sent') "
                       "LIMIT 1", (*params, since)).fetchone():
             return "messaged_7d"
         return ""
-    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.campaign=? AND m.day>=? "
-                  "AND m.status IN ('attempted','sent') LIMIT 1", (*params, CLAIM_STATUS_CAMPAIGN, since)).fetchone():
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.campaign IN (?,?) AND m.day>=? "
+                  "AND m.status IN ('attempted','sent') LIMIT 1",
+                  (*params, CLAIM_STATUS_CAMPAIGN, CLAIM_PENDING_CAMPAIGN, since)).fetchone():
         return "messaged_7d"
     return ""
 
@@ -744,7 +772,7 @@ def claim_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
         raise
 
 
-DEFERRAL_REASONS = ("core_notice_within_7d",)
+DEFERRAL_REASONS = ("core_notice_within_7d", "comm_state")
 
 
 def log_deferral(db: sqlite3.Connection, *, campaign: str, user_key: str, day: str, request_ids: list[str],

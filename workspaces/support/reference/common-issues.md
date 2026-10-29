@@ -115,7 +115,7 @@ There is **no self-service merge UI** in app.muso.ai yet. Do NOT direct customer
    have them list each track with their role on it so the team can match each
    piece of proof cleanly.
 2. Accepted forms of proof (screenshots are accepted for all of these):
-   - A public link where the credit is listed – Tidal, Genius, Jaxsta, Discogs,
+   - A public link where the credit is listed – Tidal, Genius, Discogs,
      AllMusic, ASCAP, or BMI
    - Documentation of the work – a project/session file, communication with the
      artist, a contract, session agreement, release form, or split sheet showing
