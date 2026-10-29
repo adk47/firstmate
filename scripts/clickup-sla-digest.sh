@@ -91,7 +91,7 @@ top_n="${SLA_DIGEST_TOP_N-10}"
 # Fail loud before anything is fetched or posted: a bad N would otherwise reach
 # jq --argjson and silently produce an empty reply.
 case "$top_n" in
-  ''|*[!0-9]*|0) echo "clickup-sla-digest: SLA_DIGEST_TOP_N must be a positive integer (got '$top_n')" >&2; exit 2 ;;
+  ''|*[!0-9]*|0*) echo "clickup-sla-digest: SLA_DIGEST_TOP_N must be a positive integer (got '$top_n')" >&2; exit 2 ;;
 esac
 view_url="${SLA_DIGEST_VIEW_URL:-https://app.clickup.com/2283334/v/li/901000600160}"
 [ -n "$api_key" ] || { echo "clickup-sla-digest: CLICKUP_API_KEY not set" >&2; exit 2; }

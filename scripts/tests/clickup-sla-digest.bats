@@ -384,15 +384,15 @@ By status: to do 6 · waiting 2 · in progress 1
   printf '%s\n' "$today" | grep -qF '*Due today (5):*'
   printf '%s\n' "$today" | grep -qF 'By status: to do 5'
   printf '%s\n' "$today" | grep -qF 'Today 1'
-  ! printf '%s\n' "$today" | grep -qF 'Today 3'
+  if printf '%s\n' "$today" | grep -qF 'Today 3'; then false; fi
   printf '%s\n' "$today" | grep -qF '+3 more — <https://app.clickup.com/2283334/v/li/901000600160|open the full list>'
   # a bucket that fits has no "+K more"
   tomorrow="$(printf '%s\n' "$output" | sed -n '/^=== THREAD: Due tomorrow/,$p')"
-  ! printf '%s\n' "$tomorrow" | grep -q 'more'
+  if printf '%s\n' "$tomorrow" | grep -q 'more'; then false; fi
 }
 
 @test "a non-integer or non-positive SLA_DIGEST_TOP_N fails loud and posts nothing" {
-  for bad in ten "" 0 -1 2.5; do
+  for bad in ten "" 0 00 05 -1 2.5; do
     : > "$STUB_CALLS"
     page_with "$(task t1 'Overdue one' "$(due_ms 2026-06-10)" open open)"
     SLA_DIGEST_TOP_N="$bad" run bash "$DIGEST"
