@@ -1578,6 +1578,8 @@ class IntakeD2Tests(unittest.TestCase):
         self.assertEqual(steps, {"xc_challenge": xc.POSITIVE})
         self.assertEqual([r["outcome"] for r in rows], [gate.VERIFIED])
         self.assertIsNotNone(self.store.challenges(RID)[0]["consumed_at"])
+        g = json.loads(self.store.db.execute("SELECT detail_json FROM dv_steps WHERE step='gate'").fetchone()[0])
+        self.assertTrue(g["f9"])                                        # recorded for the tray
         detail = self.store.db.execute("SELECT detail_json FROM dv_steps WHERE step='xc_challenge'").fetchone()[0]
         self.assertNotIn(ch["code"], detail)                           # the code itself is never logged
 
@@ -2200,6 +2202,29 @@ class TrayTests(unittest.TestCase):
         self.store.step("r1", pid, "xc_dsp", dsp, {"fresh_since": "2026-10-27T21:00:00Z" if fresh else None,
                                                    "fresh_anchor": {d: d in anchor for d in ("spotify", "tidal")}},
                         f"{rid}#Mixing")
+
+    def test_an_f9_code_with_the_credit_is_an_approve_grade_anchor(self):
+        from credit_verify.docverify import tray
+        self._out("p8", "r-f9", "verified", fresh=False)                 # no D5b capture
+        self.store.step("r1", "p8", "xc_challenge", "positive", {"anchor_class": "F9"}, "r-f9#Mixing")
+        self.store.step("r1", "p8", "gate", "verified", {"extracted_support": {"person": "Ann"}, "f9": True},
+                        "r-f9#Mixing")
+        self._out("p10", "r-f9-letter", "verified", fresh=False)          # QA #1476: the code on a non-dashboard
+        self.store.step("r1", "p10", "xc_challenge", "positive", {"anchor_class": "F9"}, "r-f9-letter#Mixing")
+        self.store.step("r1", "p10", "gate", "verified", {"extracted_support": {"person": "Ann"}, "f9": False},
+                        "r-f9-letter#Mixing")
+        self._out("p9", "r-code-only", "verified", fresh=False)
+        self.store.step("r1", "p9", "xc_challenge", "positive", {"anchor_class": "F9"}, "r-code-only#Mixing")
+        self.store.step("r1", "p9", "gate", "verified", {"extracted_support": None}, "r-code-only#Mixing")
+        t = tray.build(self.store, gate=lambda uid: (True, "allow"), tracks=lambda ids: {})
+        self.assertEqual([a["request_id"] for a in t.approve], ["r-f9"])
+        self.assertIn("F9", t.approve[0]["anchor"])
+        self.assertEqual(sorted(a["request_id"] for a in t.not_approvable), ["r-code-only", "r-f9-letter"])
+        ok, why = tray._f9_anchor(self.store, "p10", "r-f9-letter#Mixing")
+        self.assertEqual(ok, False)
+        self.assertIn("not on a distributor/DSP dashboard", why)
+        t = tray.build(self.store, gate=lambda uid: (False, "account gate hold"), tracks=lambda ids: {})
+        self.assertEqual(t.approve, [])                                   # the gate still decides
 
     def test_trays_sort_by_outcome_and_anchor(self):
         from credit_verify.docverify import tray

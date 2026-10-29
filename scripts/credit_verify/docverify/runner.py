@@ -324,7 +324,10 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                             elsewhere=elsewhere)
             store.step(run_id, proof_id, "gate", o.outcome, {"reason": o.reason, "need": o.need,
                                                             "account_hold": o.account_hold,
-                                                            "extracted_support": support}, key)
+                                                            "extracted_support": support,
+                                                            # QA #1476: F9 counted only on a dashboard
+                                                            "f9": gate.f9_anchor(checks, ex, h3.kind or raw.get("kind"))},
+                       key)
             hold = o.account_hold and intake is None     # the intake path writes no hold (proof-loop lead)
             store.outcome(run_id, proof_id=proof_id, request_id=rid, role=role, user_id=uid, source_ref=ref,
                           h3_verdict=h3.verdict, outcome=o.outcome, reason=o.reason, need=o.need,
