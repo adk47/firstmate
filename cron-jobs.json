@@ -1930,6 +1930,35 @@
         "channel": "slack",
         "to": "U0AL36NADEY"
       }
+    },
+    {
+      "id": "5d0c6f3e-4b7a-4f63-9d52-1c2a8e7b9f41",
+      "agentId": "operations",
+      "name": "intake-unresolved-proposals-daily",
+      "description": "READ-ONLY daily pass over the unmatched proof-document tray (/var/lib/hydra-credit-verify/intake-unresolved.jsonl): proposes, per conversation, the one account the document belongs to by VERIFIED EMAIL ONLY (never by name) and writes the proposals + a count line (new / linked / still unresolved) under /var/lib/intercom-backlog-i1/. Files nothing, writes no Intercom contact, no ledger row, no status, messages nobody. Standing duty of intercom-backlog-i1 (Fable verify-program-lead-fable-l1, 2026-10-29); the coded resolver applies proposals only after l1 rules the pattern.",
+      "enabled": true,
+      "createdAtMs": 1793300000000,
+      "updatedAtMs": 1793300000000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "20 7 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/intercom-backlog/intake_proposals.py",
+          "--quiet"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 900
+      },
+      "delivery": {
+        "mode": "none"
+      }
     }
   ]
 }
