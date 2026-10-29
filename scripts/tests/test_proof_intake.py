@@ -517,6 +517,74 @@ class GmailIntakeTest(unittest.TestCase):
         self.assertEqual(stats["files_filed"], 1)
         self.assertEqual(hashlib.sha256(Path(path).read_bytes()).hexdigest(), before)
 
+    # --- forged headers (captain 2026-10-28 12:18Z item 2: filing stays OFF unless these pass) ---------
+    def _raw_headers(self, headers: list[tuple[str, str]], files=((b"%PDF-1.4 x", "application/pdf", "x.pdf"),)):
+        """A message with EXACTLY these headers in this order (top = stamped last, as Gmail prepends)."""
+        from email.message import EmailMessage
+        m = EmailMessage()
+        for k, v in headers:
+            m[k] = v
+        m.set_content("proof")
+        for data, ctype, name in files:
+            main, sub = ctype.split("/")
+            m.add_attachment(data, maintype=main, subtype=sub, filename=name)
+        return m.as_bytes()
+
+    def _filed(self, raw: bytes):
+        self.msgs["mf"] = raw
+        stats = self._run(["mf"])
+        return stats, self._rows()
+
+    def test_forged_pass_header_injected_by_the_sender_is_ignored(self) -> None:
+        # Google prepends its own verdict; a sender-written 'mx.google.com; dkim=pass' sits BELOW it.
+        stats, rows = self._filed(self._raw_headers([
+            ("Authentication-Results", "mx.google.com; dkim=fail header.d=example.com; spf=fail; dmarc=fail"),
+            ("From", "Ann <ann@example.com>"),
+            ("Authentication-Results", "mx.google.com; dkim=pass header.d=example.com; dmarc=pass")]))
+        self.assertEqual((rows, stats["refused"]), ([], {"authentication_failed": 1}))
+
+    def test_arc_pass_alone_never_authenticates(self) -> None:
+        stats, rows = self._filed(self._raw_headers([
+            ("ARC-Authentication-Results", "i=1; mx.google.com; dkim=pass header.d=example.com; dmarc=pass"),
+            ("From", "ann@example.com")]))
+        self.assertEqual((rows, stats["refused"]), ([], {"no_trusted_authentication_results": 1}))
+
+    def test_forged_received_headers_are_never_read(self) -> None:
+        stats, rows = self._filed(self._raw_headers([
+            ("Received", "from mx.google.com (mx.google.com [209.85.220.41]) by bluefern.com"),
+            ("Received", "from trusted.bluefern.com by mail.bluefern.com; dkim=pass dmarc=pass"),
+            ("From", "ann@example.com")]))
+        self.assertEqual((rows, stats["refused"]), ([], {"no_trusted_authentication_results": 1}))
+
+    def test_two_from_addresses_are_refused(self) -> None:
+        # Raw bytes: Python's EmailMessage will not BUILD two From headers, but a sender can send them.
+        one = self._raw_headers([("Authentication-Results", "mx.google.com; dkim=pass header.d=example.com; dmarc=pass"),
+                                 ("From", "ann@example.com")])
+        two = one.replace(b"From: ann@example.com", b"From: ann@example.com\nFrom: victim@example.com", 1)
+        self.assertIn(b"From: victim@example.com", two)
+        stats, rows = self._filed(two)
+        self.assertEqual((rows, stats["refused"]), ([], {"missing_or_multiple_from": 1}))
+
+    def test_dkim_for_another_domain_does_not_authenticate_the_from(self) -> None:
+        # Signed by the attacker's own domain (pass), From claims the victim's: not aligned, no DMARC pass.
+        stats, rows = self._filed(self._raw_headers([
+            ("Authentication-Results", "mx.google.com; dkim=pass header.d=attacker.net; dmarc=fail"),
+            ("From", "ann@example.com")]))
+        self.assertEqual((rows, stats["refused"]), ([], {"authentication_failed": 1}))
+
+    def test_a_display_name_never_picks_the_account(self) -> None:
+        # The display name says Ann; the authenticated address is Bob's (unconfirmed account) -> refused.
+        stats, rows = self._filed(self._raw_headers([
+            ("Authentication-Results", "mx.google.com; dkim=pass header.d=example.com; dmarc=pass"),
+            ("From", '"ann@example.com" <bob@example.com>')]))
+        self.assertEqual((rows, stats["refused"]), ([], {"account_email_not_confirmed": 1}))
+
+    def test_a_lookalike_authserv_is_not_google(self) -> None:
+        stats, rows = self._filed(self._raw_headers([
+            ("Authentication-Results", "mx.google.com.attacker.net; dkim=pass header.d=example.com; dmarc=pass"),
+            ("From", "ann@example.com")]))
+        self.assertEqual((rows, stats["refused"]), ([], {"no_trusted_authentication_results": 1}))
+
     def test_the_message_id_list_keeps_hex_ids_and_reports_the_rest(self) -> None:
         p = os.path.join(tempfile.mkdtemp(), "ids.txt")
         Path(p).write_text("199496a0433c8861\n19949c81b9b45d6b 199496a0433c8861 # dup\n../etc\n1995ec564cc9f87e\n")
