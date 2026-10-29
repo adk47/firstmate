@@ -1721,6 +1721,7 @@ class TrayTests(unittest.TestCase):
         self.assertIn("APPROVE 1", md)
         self.assertIn("Nothing here has been written to core", md)
         self.assertIn("0 document(s) read under an older rule version", md)
+        self.assertIn("`verified` before dv-3 is the real-not-proof class", md)          # Fable 106
 
     def test_a_version_bump_carries_documents_the_rule_cannot_change_and_rereads_the_rest(self):
         # Proof-loop lead 075: a rule change is a VERSION bump; the deployed reader re-reads, nobody hand-writes.
@@ -1912,6 +1913,72 @@ class TrayTests(unittest.TestCase):
                                  ("forensics", tuple(sorted(FRAUD_SIGNAL_FAMILY))))
         carried = {p for (p,) in db.execute("SELECT proof_id FROM dv_outcomes WHERE version=?", (VERSION,))}
         self.assertEqual(carried, {"pclean"})                            # the font edit is re-read
+    def test_l11_watch_is_clean_only_after_24h_with_no_false_forged_and_d5b_live(self):
+        from datetime import datetime, timezone
+
+        from credit_verify.docverify import l11
+        since = "2026-10-29T04:00:00Z"
+
+        def out(pid, outcome, at, rid="rq"):
+            self.store.db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, outcome, reason, "
+                                  "account_hold, detail_json, version, intake_id) VALUES ('r', ?, ?, ?, 'Mixing', ?, 'x', 0, "
+                                  "'{}', ?, ?)", (at, pid, rid, outcome, VERSION, f"1:{pid}"))
+        out("aaaaaaaa11", "forged", "2026-10-29T04:30:00Z")
+        out("bbbbbbbb22", "forged_positive", "2026-10-29T05:10:00Z")
+        out("cccccccc33", "verified", "2026-10-29T05:20:00Z")
+        out("dddddddd44", "unverifiable", "2026-10-29T03:00:00Z")                 # before the deploy: not counted
+        self.store.db.commit()
+        late = datetime(2026, 10, 30, 5, 0, tzinfo=timezone.utc)
+        w = l11.watch(self.store, since=since, now=late, false_forged=set())
+        self.assertEqual((w["total"]["documents"], w["total"]["forged"], w["total"]["forged_positive"],
+                          w["total"]["verified"], w["total"]["verified_anchored"]), (3, 1, 1, 1, 0))
+        self.assertFalse(w["clean"])
+        self.assertIn("D5b not live", " ".join(w["not_clean_because"]))
+        self.assertEqual(w["per_hour"][0]["forged"], 1)
+        self.store.step("r", "cccccccc33", "xc_dsp", "positive",
+                        {"fresh_since": "2026-10-29T05:19:00Z", "fresh_anchor": {"spotify": True, "tidal": True}}, "rq#Mixing")
+        self.assertTrue(l11.watch(self.store, since=since, now=late, false_forged=set())["clean"])  # 25 h, 0, D5b
+        self.assertFalse(l11.watch(self.store, since=since, now=datetime(2026, 10, 29, 20, tzinfo=timezone.utc),
+                                   false_forged=set())["clean"])
+        # QA #1471 (d): no reviewed flag file = UNKNOWN, never clean
+        w = l11.watch(self.store, since=since, now=late)
+        self.assertFalse(w["clean"])
+        self.assertIn("false forged UNKNOWN", " ".join(w["not_clean_because"]))
+        flags = l11.parse_false_forged("false-forged: forged-aaaaaaaa  # Jan 10:00Z\nnoise\n"
+                                       "ruling: forged-eeeeeeee confirm\n")
+        self.assertEqual(flags, {"aaaaaaaa"})                                       # a confirm never counts
+        self.assertEqual(l11.parse_false_forged("ruling: forged-e9ec352a not\n"), {"e9ec352a"})
+        w = l11.watch(self.store, since=since, false_forged=flags, now=late)
+        self.assertEqual((w["total"]["false_forged"], w["clean"]), (1, False))
+        self.assertIn("false forged 1", l11.line(w))
+
+    def test_l11_watch_counts_documents_once_and_anchors_only_from_the_same_run(self):
+        from datetime import datetime, timezone
+
+        from credit_verify.docverify import l11
+        since, late = "2026-10-29T04:00:00Z", datetime(2026, 10, 30, 5, 0, tzinfo=timezone.utc)
+
+        def out(pid, outcome, rid, run="r2", intake="1:doc"):
+            self.store.db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, outcome, reason, "
+                                  "account_hold, detail_json, version, intake_id) VALUES (?, '2026-10-29T05:00:00Z', ?, "
+                                  "?, 'Mixing', ?, 'x', 0, '{}', ?, ?)", (run, pid, rid, outcome, VERSION, intake))
+        # (a)+(b) one document (one intake), two proofs: forged on the SECOND proof's claim, forged_positive on another
+        out("11111111aa", "unverifiable", "q1")
+        out("22222222bb", "forged", "q2")
+        out("22222222bb", "forged_positive", "q3")
+        # (c) a verified whose xc_dsp anchor was logged by an EARLIER run
+        out("33333333cc", "verified", "q4", run="r2", intake="1:other")
+        self.store.step("r1", "33333333cc", "xc_dsp", "positive",
+                        {"fresh_since": "2026-10-29T04:59:00Z", "fresh_anchor": {"spotify": True, "tidal": True}}, "q4#Mixing")
+        self.store.db.commit()
+        w = l11.watch(self.store, since=since, now=late, false_forged={"22222222"})
+        self.assertEqual((w["total"]["documents"], w["total"]["false_forged"]), (2, 1))   # the second proof, once
+        self.assertEqual(w["total"]["verified_anchored"], 0)                              # cross-run: not anchored
+        self.assertFalse(w["clean"])
+        self.store.step("r2", "33333333cc", "xc_dsp", "positive",
+                        {"fresh_since": "2026-10-29T04:59:00Z", "fresh_anchor": {"spotify": True, "tidal": True}}, "q4#Mixing")
+        self.store.db.commit()
+        self.assertEqual(l11.watch(self.store, since=since, now=late, false_forged=set())["total"]["verified_anchored"], 1)
 
     def test_a_full_rule_change_carries_nothing(self):
         self.store.db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, outcome, reason, "

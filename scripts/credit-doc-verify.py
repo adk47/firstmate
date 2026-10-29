@@ -255,6 +255,18 @@ def eval_markdown(rows: list[dict], label: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def cmd_l11_watch(args: argparse.Namespace) -> int:
+    """The L11 24 h clean-read counts since the dv-2 deploy (read-only). Prints one line; --json the detail."""
+    from credit_verify.docverify import l11
+    from credit_verify.docverify.store import DocVerifyStore
+    store = DocVerifyStore.read_only(args.store)       # a report: never writes
+    # no file = UNKNOWN (never clean); an empty reviewed file = known zero
+    flags = l11.parse_false_forged(Path(args.false_forged).read_text()) if args.false_forged else None
+    w = l11.watch(store, since=args.since, false_forged=flags)
+    print(json.dumps(w, indent=1, default=str) if args.json else l11.line(w))
+    return 0
+
+
 class ReadOnlyOutcomes:
     """latest_outcomes() of another doc-verify store (e.g. the 961-document backfill), opened read-only."""
 
@@ -366,6 +378,12 @@ def parser() -> argparse.ArgumentParser:
     pf.add_argument("--also-store", action="append", help="another doc-verify store, read-only, whose `forged` "
                                                            "rows are listed as short of positive (never executable)")
     pf.set_defaults(fn=cmd_forged_tray)
+    pl = sub.add_parser("l11-watch", help="L11 24 h clean-read counts since the dv-2 deploy (read-only)")
+    pl.add_argument("--since", required=True, help="UTC time of the deploy that carried dv-2, e.g. 2026-10-29T04:20:00Z")
+    pl.add_argument("--false-forged", help="the reviewed flag file: 'false-forged: <prefix>' or 'ruling: forged-<prefix> "
+                    "not' lines (e.g. trays/rulings-forged.txt). Without it false forged is UNKNOWN and never clean")
+    pl.add_argument("--json", action="store_true")
+    pl.set_defaults(fn=cmd_l11_watch)
     pt = sub.add_parser("tray", help="Jan's tray (jan-docs-dv-bN.md) + h2's need queue from the latest outcomes")
     pt.add_argument("--batch", type=int, required=True)
     pt.add_argument("--out-dir", required=True)

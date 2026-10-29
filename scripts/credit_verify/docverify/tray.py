@@ -304,4 +304,10 @@ def markdown(tray: Tray, batch: int, generated_at: str) -> str:
     out += [f"Rule version `{VERSION}`. {tray.awaiting_reread} document(s) read under an older rule version await "
             "the reader's re-read; their old outcomes (e.g. a `forged` from a misread sender address) are shadow "
             "and appear in no section of this tray.", ""]
+    if VERSION >= "dv-3":
+        out += ["**`verified` before dv-3 is the real-not-proof class** (verifier-eval-v1 blind labels, 2026-10-28: "
+                "116 of 140 dv-2 `verified` rows were documents that prove nothing - DSP/catalog panels, Muso UI, "
+                "dashboards, chats - passed on H3 PLAUSIBLE + the Spotify/Tidal cross-check). None of them is in this "
+                "tray; from dv-3 a `verified` needs the document itself to name the claimant in the role on the track "
+                "AND to be a document of record.", ""]
     return "\n".join(out)
