@@ -113,6 +113,11 @@ class Facts:
     metadata_source: str | None
     paid: bool
     profile_id: str | None = None
+    #: core `claiming` has a LIVE row (not deleted; any status, any profile type) for this submitter on this
+    #: request's profile (profileid or extraprofileids). None = unread = refused. Fable [key=batch0-wrong-action]
+    #: 2026-10-29 03:51Z (3): every close tray excludes such rows, and the executor refuses them as a code guard
+    #: (batch0 incident 880d34b3: a processed org claim = the label-credits APPROVE population).
+    owns_profile: bool | None = None
 
 
 def load_tray(path: str) -> Tray:
@@ -196,6 +201,8 @@ def refusal(row: TrayRow, facts: Facts | None, gate: account_gate.GateResult, ex
     pop = facts.popularity
     if facts.metadata_source == "client" or pop is None or not 1 <= pop < BIG_POPULARITY:
         return f"big_or_unknown_popularity:{pop}"
+    if facts.owns_profile is not False:
+        return "submitter_has_claim_on_profile" if facts.owns_profile else "profile_claim_unknown"
     if not gate.allowed:
         return f"account_gate_{gate.decision}"
     watch = gate.payload.get("watch") if isinstance(gate.payload, dict) else None
@@ -228,15 +235,20 @@ select cast(cr.id as varchar), cr.status, cast(cr.userid as varchar), cast(cr.sp
   coalesce(json_format(json_extract(cr.verificationdata, '$.rule_risk_percent')), '{{}}'),
   coalesce(json_extract_scalar(cr.metadata, '$.source'), ''),
   cast(cr.workspaceid in (select s.teamid from postgresql_core.public.subscriptions s
-                          where s.status in ('active','trialing')) as varchar)
+                          where s.status in ('active','trialing')) as varchar),
+  cast(exists (select 1 from postgresql_core.public.claiming c
+               where c.userid = cr.userid and c.deletedat is null
+                 and (lower(c.profileid) = lower(cast(cr.profileid as varchar))
+                      or strpos(lower(coalesce(c.extraprofileids, '')), lower(cast(cr.profileid as varchar))) > 0))
+       as varchar)
 from postgresql_core.public.credit_requests cr
 where lower(cast(cr.id as varchar)) in ({quoted})"""
     out = (run or _trino)(sql)
     facts: dict[str, Facts] = {}
     for rec in csv.reader(io.StringIO("\n".join(l for l in out.splitlines() if l.startswith('"')))):
-        if len(rec) != 9:
-            raise RuntimeError(f"trino row has {len(rec)} columns, expected 9")
-        rid, status, uid, pop, profile_id, deleted, rules_json, source, paid = rec
+        if len(rec) != 10:
+            raise RuntimeError(f"trino row has {len(rec)} columns, expected 10")
+        rid, status, uid, pop, profile_id, deleted, rules_json, source, paid, owns = rec
         try:
             rules_raw = json.loads(rules_json) if rules_json else {}
         except ValueError:
@@ -255,6 +267,7 @@ where lower(cast(cr.id as varchar)) in ({quoted})"""
             metadata_source=source or None,
             paid=paid == "true",
             profile_id=profile_id or None,
+            owns_profile={"true": True, "false": False}.get(owns),
         )
     return facts
 
@@ -421,6 +434,8 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
         between_batches: Callable[[list[tuple[str, int, str | None]], datetime], str | None] | None = None,
         lock_path: str = WRITE_LOCK,
         anchor_fn: Callable[[list[str]], dict[str, str]] = dsp_anchors,
+        readback_tries: int = 6, readback_wait_s: float = 5.0,
+        sleep: Callable[[float], None] = time.sleep,
         ) -> Result:
     """Execute (apply) or dry-run one tray. In apply mode EVERY batch re-reads its rows' facts and the account gate
     immediately before its PUT (no fact or gate answer outlives its batch, QA #1475), under one lock from the cap
@@ -513,11 +528,19 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                 data = body.get("data") if isinstance(body.get("data"), dict) else body
                 reported = ({str(x).lower() for x in (data.get("updatedIds") or [])}
                             if isinstance(data, dict) else set())
-                try:
-                    landed = {x.lower() for x in readback(CLOSE_STATUS, ids)}
-                except Exception as exc:  # noqa: BLE001
-                    res.stopped = (res.stopped + "; " if res.stopped else "") + f"read-back failed: {str(exc)[:200]}"
-                    landed = set()
+                # Read back until every id reads rejected or the retries run out: the Trino verifier can trail
+                # the primary by seconds (2026-10-29 03:50Z: 05fa5088 landed at :58.76 and read 'unverified'
+                # ~1 s later). Only ids still not rejected after the last read count as not moved.
+                landed: set[str] = set()
+                for attempt in range(readback_tries):
+                    try:
+                        landed |= {x.lower() for x in readback(CLOSE_STATUS, ids)}
+                    except Exception as exc:  # noqa: BLE001
+                        res.stopped = (res.stopped + "; " if res.stopped else "") + f"read-back failed: {str(exc)[:200]}"
+                        break
+                    if len(landed) >= len({i.lower() for i in ids}) or attempt + 1 == readback_tries:
+                        break
+                    sleep(readback_wait_s)
                 for r in chunk:
                     moved = r.request_id.lower() in landed
                     f = facts.get(r.request_id.lower())

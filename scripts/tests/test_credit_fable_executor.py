@@ -26,7 +26,7 @@ ALLOW = account_gate.GateResult("allow", ("no account-level signal",), {"decisio
 def facts(**over) -> fx.Facts:
     base = dict(status="unverified", user_id=42, popularity=30, deleted=False,
                 rules={"reject_publisher_label_credit": 100.0}, metadata_source="industry", paid=True,
-                profile_id="p1")
+                profile_id="p1", owns_profile=False)
     base.update(over)
     return fx.Facts(**base)
 
@@ -202,8 +202,9 @@ class RunTest(unittest.TestCase):
         def readback(status, ids):
             self.assertEqual(status, "rejected")
             return set(ids) if landed is None else set(ids) & landed
+        kw.setdefault("sleep", lambda s: None)          # read-back retries never sleep in tests
         return fx.run(tray, apply=apply, facts_fn=lambda ids: {i: fm[i] for i in ids if i in fm},
-                      gate_fn=lambda u: gate, writer=writer or write, readback=readback,
+                      gate_fn=lambda u: gate, writer=writer or write, readback=kw.pop("readback", readback),
                       audit_path=self.audit, registry_path=self.registry, kill_file=self.kill,
                       now=lambda: NOW, lock_path=str(self.tmp / "lock"), **kw)
 
@@ -280,6 +281,63 @@ class RunTest(unittest.TestCase):
         res = self.go(self.tray(n=150, cap=400), between_batches=lambda rows, since: "2 notes for user 42")
         self.assertEqual(len(self.calls), 1)
         self.assertIn("fan-out", res.stopped)
+
+
+class ProfileClaimGuardTest(unittest.TestCase):
+    """Batch0 incident 2026-10-29 (880d34b3): never reject a row whose submitter holds a processed claim on the
+    profile (Fable monitor 03:28Z: label-credits APPROVE population); unread = refused."""
+
+    def test_owned_profile_is_refused(self):
+        self.assertEqual(fx.refusal(row(), facts(owns_profile=True), ALLOW, "unverified"),
+                         "submitter_has_claim_on_profile")
+
+    def test_unread_ownership_is_refused(self):
+        self.assertEqual(fx.refusal(row(), facts(owns_profile=None), ALLOW, "unverified"), "profile_claim_unknown")
+
+    def test_not_owned_passes(self):
+        self.assertIsNone(fx.refusal(row(), facts(owns_profile=False), ALLOW, "unverified"))
+
+    def test_fetch_facts_reads_the_ownership_column(self):
+        line = ('"%s","unverified","42","30","p1","false","{}","industry","true","%s"')
+        for raw, want in (("true", True), ("false", False), ("", None)):
+            f = fx.fetch_facts([RID], run=lambda sql, raw=raw: line % (RID, raw))[RID.lower()]
+            self.assertIs(f.owns_profile, want)
+        with self.assertRaisesRegex(RuntimeError, "expected 10"):
+            fx.fetch_facts([RID], run=lambda sql: '"%s","unverified","42","30","p1","false","{}","industry","true"' % RID)
+
+    def test_sql_checks_processed_claims_on_the_profile(self):
+        seen = {}
+        fx.fetch_facts([RID], run=lambda sql: seen.setdefault("sql", sql) and "")
+        self.assertIn("postgresql_core.public.claiming", seen["sql"])
+        self.assertIn("c.userid = cr.userid", seen["sql"])
+        self.assertIn("c.deletedat is null", seen["sql"])
+        # ANY live claim (Fable batch0-wrong-action (3)): no status filter on the claim
+        sub = seen["sql"][seen["sql"].index("public.claiming"):]
+        self.assertNotIn("c.status", sub[:400])
+
+
+class ReadbackLagTest(RunTest):
+    """2026-10-29 03:50Z: the write landed but the first read-back trailed the primary by ~1 s."""
+
+    def test_a_lagging_readback_is_retried_not_reported_not_moved(self):
+        reads = {"n": 0}
+
+        def lagging(status, ids):
+            reads["n"] += 1
+            return set(ids) if reads["n"] >= 3 else set()
+        res = self.go(self.tray(n=2), readback=lagging, sleep=lambda s: None)
+        self.assertEqual((res.written, res.not_moved, res.stopped), (2, 0, ""))
+        self.assertEqual(reads["n"], 3)
+
+    def test_a_row_that_never_lands_is_still_not_moved_after_the_retries(self):
+        reads = {"n": 0}
+
+        def never(status, ids):
+            reads["n"] += 1
+            return set()
+        res = self.go(self.tray(n=1), readback=never, sleep=lambda s: None, readback_tries=4)
+        self.assertEqual((res.written, res.not_moved, reads["n"]), (0, 1, 4))
+        self.assertIn("not moved", res.stopped)
 
 
 class QaFixTest(RunTest):
