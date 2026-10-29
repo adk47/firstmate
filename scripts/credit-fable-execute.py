@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from credit_review import claim_executor as cx  # noqa: E402
 from credit_review import fable_executor as fx  # noqa: E402
 
 FANOUT_WAIT_S = int(os.environ.get("FABLE_DECIDER_FANOUT_WAIT_S", "90"))
@@ -59,6 +60,41 @@ def fanout_check(rows: list[tuple[str, int, str | None]], since: datetime) -> st
     return None
 
 
+def claim_fanout_check(rows: list[tuple[int, int]], since: datetime) -> str | None:
+    """profile_claim_rejected notes since the batch started, per user (send-gateway ledger, read-only). Core sends
+    one per rejected claim, so more notes than claims declined for a user, or any OTHER claim template to these
+    users in the window, is a surprise."""
+    time.sleep(FANOUT_WAIT_S)
+    per_user: dict[int, int] = {}
+    for _, u in rows:
+        per_user[u] = per_user.get(u, 0) + 1
+    sql = ("select user_id, template_key, count(*) from send.messages where template_key ilike '%claim%' "
+           f"and created_at >= '{since.strftime('%Y-%m-%dT%H:%M:%SZ')}' "
+           f"and user_id in ({','.join(repr(str(u)) for u in sorted(per_user))}) group by 1, 2;")
+    p = subprocess.run(shlex.split(MESSAGING_PG), input=sql, capture_output=True, text=True, timeout=120,
+                       check=False)
+    if p.returncode != 0:
+        return f"send ledger unreadable rc={p.returncode}: {p.stderr.strip()[:160]}"
+    over, other = {}, []
+    seen: dict[str, int] = {}
+    for line in p.stdout.splitlines():
+        parts = line.split("|")
+        if len(parts) != 3 or not parts[2].isdigit():
+            continue
+        uid, key, n = parts[0], parts[1], int(parts[2])
+        if key != "profile_claim_rejected":
+            other.append(f"{uid}:{key}")
+            continue
+        seen[uid] = n
+        if uid.isdigit() and n > per_user.get(int(uid), 0):
+            over[uid] = n
+    print(json.dumps({"fanout": {"since": since.isoformat(), "users": len(per_user), "rejected_notes": seen,
+                                 "over": over, "other_templates": other}}), file=sys.stderr)
+    if over or other:
+        return f"unexpected claim notes: over={over} other={other[:10]}"
+    return None
+
+
 def _positive(v: str) -> int:
     n = int(v)
     if n < 1:
@@ -79,6 +115,8 @@ def main() -> int:
     ap.add_argument("--run-id")
     ap.add_argument("--expected")
     ap.add_argument("--ids", help="comma-separated request ids")
+    ap.add_argument("--claims", action="store_true",
+                    help="the tray is a claim-decline tray (action reject_claim; Fable claim-route-zero)")
     a = ap.parse_args()
     if a.tray_opt:
         if a.tray and a.tray != a.tray_opt:
@@ -95,6 +133,16 @@ def main() -> int:
         return 0
     if not a.tray:
         ap.error("tray is required")
+    if a.claims:
+        try:
+            ctray = cx.load_claim_tray(a.tray)
+        except (cx.TrayError, OSError) as exc:
+            print(json.dumps({"tray": a.tray, "refused": str(exc)}))
+            return 2
+        cres = cx.run(ctray, apply=a.apply, limit=a.limit,
+                      after_batch=None if (a.no_fanout_check or not a.apply) else claim_fanout_check)
+        print(json.dumps({**cres.as_dict(), "tray_sha256": ctray.sha256, "daily_cap": ctray.daily_cap}))
+        return 1 if cres.stopped else 0
     try:
         tray = fx.load_tray(a.tray)
     except (fx.TrayError, OSError) as exc:

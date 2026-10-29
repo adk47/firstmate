@@ -1996,6 +1996,7 @@ jobs:
           # red mutant), daily cap, kill file, registry re-check, read-back, audit. Hermetic.
           python3 scripts/tests/test_credit_fable_executor.py
           python3 scripts/tests/test_credit_forged_tray.py
+          python3 scripts/tests/test_credit_claim_executor.py
           # Supporting-document forensics (scripts/credit_verify/proof). Synthetic
           # forgeries built in-test; uses the runner's PyMuPDF/Pillow/OpenCV/tesseract.
           python3 scripts/tests/test_credit_proof.py
