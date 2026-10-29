@@ -1688,6 +1688,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_close_resolved_conversations
+      - name: Run shared ClickUp client tests
+        # scripts/lib/clickup_client.py: 429 wait/retry, 80/min throttle, strict
+        # paging, and the four scanners never acting on a partial ClickUp scan
+        # (resolve-notify, merge-outcome-notify, clickup-todo-dedupe, the closer).
+        # urlopen/sleep/clock injected; same bare stdlib unittest, by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_clickup_client
       - name: Run customer-outcome contract tests
         # ClickUp workflow status is not customer-visible proof. These tests lock
         # the shared fail-closed outcome predicate and every automated writer's

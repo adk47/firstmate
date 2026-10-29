@@ -56,6 +56,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.intercom_link import conv_id_of  # noqa: E402
 from lib import merge_keep_conflict as mkc  # noqa: E402
+from lib import clickup_client  # noqa: E402
 
 CLICKUP_API = "https://api.clickup.com/api/v2"
 DEFAULT_LIST_ID = "901000600160"  # User Requests (support board)
@@ -146,26 +147,11 @@ def fetch_status(token, list_id, status):
     ClickUp has served the same task on two adjacent pages (observed
     2026-08-21: 1,458 rows / 1,457 unique ids), so counting rows over-reports.
     """
-    seen, out = set(), []
-    for page in range(MAX_PAGES):
-        q = urllib.parse.urlencode({
-            "page": page, "subtasks": "true", "include_closed": "false",
-        }) + "&statuses%5B%5D=" + urllib.parse.quote(status)
-        req = urllib.request.Request(f"{CLICKUP_API}/list/{list_id}/task?{q}",
-                                     headers={"Authorization": token})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            body = json.load(resp)
-        batch = body.get("tasks") or []
-        for t in batch:
-            if t["id"] not in seen:
-                seen.add(t["id"])
-                out.append(t)
-        if body.get("last_page") or not batch:
-            break
-    else:
-        sys.exit(f"paged {MAX_PAGES} times without reaching last_page — refusing to act "
-                 f"on a partial scan of '{status}'")
-    return out
+    try:
+        return clickup_client.shared(token, CLICKUP_API).list_tasks(
+            list_id, [("subtasks", "true"), ("include_closed", "false"), ("statuses[]", status)], MAX_PAGES)
+    except RuntimeError as e:  # incl. ClickUpRateLimited, bad page, too many pages
+        sys.exit(f"{e} — refusing to act on a partial scan of '{status}'")
 
 
 def action_type(task):

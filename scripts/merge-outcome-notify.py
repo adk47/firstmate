@@ -119,7 +119,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from lib import merge_keep_conflict as mkc  # noqa: E402
+from lib import clickup_client, merge_keep_conflict as mkc  # noqa: E402
 _spec = importlib.util.spec_from_file_location("resolve_notify", HERE / "resolve-notify.py")
 rn = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rn)  # type: ignore[union-attr]
@@ -400,32 +400,25 @@ def post_reply_once(conv_id: str, message: str, token: str) -> None:
 
 def fetch_merge_tasks(key: str, list_id: str) -> list[dict]:
     """Only the three merge action tags (server-side tag filter), open and closed."""
-    import urllib.parse
+    cu = clickup_client.shared(key, rn.CLICKUP_API)
     tasks, seen = [], set()
     for kind in KINDS:
-        for page in itertools.count():
-            q = urllib.parse.urlencode([("archived", "false"), ("include_closed", "true"), ("subtasks", "false"),
-                                        ("order_by", "created"), ("page", str(page)), ("tags[]", f"action:{kind}")])
-            s, body = rn.http("GET", f"{rn.CLICKUP_API}/list/{list_id}/task?{q}", {"Authorization": key})
-            if s != 200 or not isinstance(body, dict) or "tasks" not in body:
-                raise RuntimeError(f"clickup {kind} page {page} -> {s}")
-            for t in body["tasks"]:
-                if t.get("id") not in seen:
-                    seen.add(t.get("id"))
-                    tasks.append(t)
-            if not body["tasks"] or body.get("last_page"):
-                break
+        for t in cu.list_tasks(list_id, [("archived", "false"), ("include_closed", "true"), ("subtasks", "false"),
+                                         ("order_by", "created"), ("tags[]", f"action:{kind}")], rn.MAX_PAGES):
+            if t.get("id") not in seen:
+                seen.add(t.get("id"))
+                tasks.append(t)
     return tasks
 
 
 def add_tag(key: str, task_id: str, tag: str) -> None:
-    s, _ = rn.http("POST", f"{rn.CLICKUP_API}/task/{task_id}/tag/{tag}", {"Authorization": key}, body={})
+    s, _ = clickup_client.shared(key, rn.CLICKUP_API).request("POST", f"/task/{task_id}/tag/{tag}", body={})
     if s not in (200, 201, 204):
         raise RuntimeError(f"clickup tag {task_id} -> {s}")
 
 
 def remove_tag(key: str, task_id: str, tag: str) -> None:
-    s, _ = rn.http("DELETE", f"{rn.CLICKUP_API}/task/{task_id}/tag/{tag}", {"Authorization": key})
+    s, _ = clickup_client.shared(key, rn.CLICKUP_API).request("DELETE", f"/task/{task_id}/tag/{tag}")
     if s not in (200, 204):
         raise RuntimeError(f"clickup untag {task_id} -> {s}")
 

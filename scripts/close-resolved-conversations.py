@@ -86,6 +86,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib import clickup_client  # noqa: E402
 from lib.customer_outcome import customer_complete  # noqa: E402
 from lib.intercom_identity import resolve_admin_id  # noqa: E402
 from lib.jev_shadow import shadow_judge  # noqa: E402
@@ -232,7 +233,8 @@ def intercom_search(token, body):
 
 
 def clickup_get(url, key):
-    return _retry_json(urllib.request.Request(url, headers={"Authorization": key}))
+    _status, body = clickup_client.shared(key, CLICKUP_API).request("GET", url)
+    return body
 
 
 def _ticket_customer_complete(t):
@@ -324,7 +326,9 @@ def build_ticket_index(key, list_id):
         q = urllib.parse.urlencode({"archived": "false", "include_closed": "true",
                                     "subtasks": "false", "order_by": "updated", "page": str(page)})
         data = clickup_get(f"{CLICKUP_API}/list/{list_id}/task?{q}", key)
-        tasks = data.get("tasks", [])
+        tasks = data.get("tasks") if isinstance(data, dict) else None
+        if not isinstance(tasks, list):
+            raise RuntimeError(f"clickup list page {page}: no tasks list: {str(data)[:120]}")
         if not tasks:
             break
         for t in tasks:
@@ -362,6 +366,9 @@ def build_ticket_index(key, list_id):
         page += 1
         if data.get("last_page"):
             break
+    else:
+        raise RuntimeError(f"clickup list {list_id}: no last_page after 200 pages; "
+                           f"refusing a partial scan")
     return email_states, conv_states, notify_owed
 
 
