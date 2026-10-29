@@ -116,6 +116,11 @@ def second_signals(h3_verdict: str | None, findings: list[Finding], checks: list
 
 
 CLAIM_FIELDS = frozenset({"claimant_name", "isrc", "track", "role", "date"})
+# The only file_tamper signals a `template` signal pairs with (Fable 1029 01:56Z): an edit after creation or
+# signature, copy-move, ELA on a key field. Every other family (reuse, ai_generated, sender, impossible_content)
+# still pairs with template. A font change, an online editor or screenshot-editor metadata never does.
+TEMPLATE_TAMPER_PARTNERS = frozenset({"after_creation_key_field_edit", "signature_not_intact", "copy_move_region",
+                                      "ela_outlier_on_key_field"})
 STATEMENT_ISSUERS = ("distributor", "pro", "dsp")
 
 
@@ -213,6 +218,12 @@ def positive_pair(sigs: list[dict[str, Any]], fields: frozenset[str] | set[str] 
                 tamper = a if a["family"] == "file_tamper" else b
                 if not set(fields) & set(tamper.get("fields") or []):
                     continue
+                # A template family is 'same text, different entities': its entity blanks are exactly where a
+                # filler types, often in another font. A font change is therefore the expected shape of every
+                # honestly filled standard form (e9ec352a, e47c9af3, both ruled not): template pairs only with
+                # a real edit of the file (TEMPLATE_TAMPER_PARTNERS).
+                if tamper["id"].split("@")[0].removeprefix("h3_") not in TEMPLATE_TAMPER_PARTNERS:
+                    continue
             return a, b
     return None
 
@@ -234,7 +245,7 @@ def tooling_errors(ex: Extraction, h3_verdict: str | None, checks: list[xc.Check
 
 def decide(*, h3_verdict: str | None, kind: str | None, ex: Extraction, findings: list[Finding],
            checks: list[xc.Check], account_held: bool, extracted_support: dict[str, Any] | None = None,
-           elsewhere: list[str] | None = None) -> Outcome:
+           elsewhere: list[str] | None = None, covers: bool = False) -> Outcome:
     steps = xc.by_step(checks)
     detail = {"h3": h3_verdict, "findings": [f.as_dict() for f in findings],
               "checks": {c.step: c.status for c in checks}}
@@ -255,6 +266,14 @@ def decide(*, h3_verdict: str | None, kind: str | None, ex: Extraction, findings
         detail["claim_fields"] = sorted(fields)
         quoted = "; ".join(f"{e['family']}: {e['id']}" + (f" (fields {', '.join(e['fields'])})" if e.get("fields") else "")
                            for e in pair)
+        if not covers:
+            # A deny reaches ONLY a request the document is tied to (Fable 110, e9ec352a: a producer agreement for
+            # one track would have denied four other tracks it never names). For any other request of the
+            # account the positively forged document is a HOLD, never a deny.
+            detail["positive_document"] = True
+            return Outcome(FORGED, f"two independent fraud signals ({quoted}), but the document does not name this "
+                                   "request's track: a hold, never a deny"[:600], None, True, detail)
+        detail["covers"] = True
         return Outcome(FORGED_POSITIVE, f"two independent fraud signals ({quoted})"[:600], None, True, detail)
     hard = [f for f in findings if f.severity == HARD]
     if hard:

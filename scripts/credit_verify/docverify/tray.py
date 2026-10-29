@@ -110,7 +110,8 @@ def forged_tray(store: Any, *, intake_of: Callable[[str], dict[str, Any]], rulin
                                   "conversation": r["source_ref"], "fraud_signals": detail.get("fraud_signals") or [],
                                   "fraud_pair": detail.get("fraud_pair") or [],
                                   "claim_fields": detail.get("claim_fields") or [], "requests": []})
-        d["requests"].append({"request_id": r["request_id"], "role": r["role"], "outcome_id": r["id"]})
+        d["requests"].append({"request_id": r["request_id"], "role": r["role"], "outcome_id": r["id"],
+                              "covers": bool(detail.get("covers"))})
     deny = []
     # A confirm covers ONE document (proof-loop lead 088): a ruling id shared by two different documents
     # (an 8-hex prefix collision) is ambiguous and makes neither executable.
@@ -126,8 +127,10 @@ def forged_tray(store: Any, *, intake_of: Callable[[str], dict[str, Any]], rulin
         # its signals must be among the document's signals (QA #1470): never re-validated via another pair.
         pair_ok = len(pair) == 2 and all(e in sigs for e in pair) and \
             positive_pair(pair, d["claim_fields"] or CLAIM_FIELDS) is not None
+        # every request of the row must carry the coverage mark (rows written before the rule do not: fail closed)
+        covered = all(q.get("covers") for q in d["requests"])
         unique = len(proofs_of[d["ruling_id"]]) == 1
-        ok = ruling == "confirm" and pair_ok and unique
+        ok = ruling == "confirm" and pair_ok and unique and covered
         deny.append({**d, "subject": info.get("subject") or "credit", "received_at": info.get("received_at"),
                      # the executor's input: the exact two signal names and the outcome rows that stand
                      "signal_ids": [e["id"] for e in d["fraud_pair"]],
@@ -136,6 +139,8 @@ def forged_tray(store: Any, *, intake_of: Callable[[str], dict[str, Any]], rulin
                      "executable": ok,
                      "why_not": None if ok else
                      ("the stored signals no longer make a positive pair" if not pair_ok else
+                      "written before the coverage rule (the document must name each request's track): re-read first"
+                      if not covered else
                       "ruling id shared by another document: confirm per proof_id is ambiguous" if not unique else
                       "ruling 'not'" if ruling == "not" else "no Fable ruling yet")})
     short: dict[str, dict[str, Any]] = {}

@@ -1,0 +1,134 @@
+[
+ {
+  "proof_id": "e9ec352af30e15c776c4c7c9577f248209e6adaf2fab9d36567a48b5efbe8bff",
+  "ruling": "not (Fable 1029 01:35Z / 01:56Z)",
+  "dv3_outcome": "forged_positive",
+  "fraud_signals": [
+   {
+    "id": "h3_key_field_unique_font@p15:[216.0, 555.8, 333.0, 568.1]",
+    "family": "file_tamper",
+    "fields": [
+     "claimant_name"
+    ],
+    "page": 15,
+    "region": [
+     216.0,
+     555.8,
+     333.0,
+     568.1
+    ]
+   },
+   {
+    "id": "h3_key_field_unique_font@p18:[153.6, 78.3, 471.3, 90.6]",
+    "family": "file_tamper",
+    "fields": [
+     "claimant_name"
+    ],
+    "page": 18,
+    "region": [
+     153.6,
+     78.3,
+     471.3,
+     90.6
+    ]
+   },
+   {
+    "id": "template_reused",
+    "family": "template"
+   }
+  ],
+  "fraud_pair": [
+   {
+    "id": "h3_key_field_unique_font@p15:[216.0, 555.8, 333.0, 568.1]",
+    "family": "file_tamper",
+    "fields": [
+     "claimant_name"
+    ],
+    "page": 15,
+    "region": [
+     216.0,
+     555.8,
+     333.0,
+     568.1
+    ]
+   },
+   {
+    "id": "template_reused",
+    "family": "template"
+   }
+  ],
+  "claim_fields": [
+   "claimant_name",
+   "date",
+   "isrc",
+   "role",
+   "track"
+  ]
+ },
+ {
+  "proof_id": "e47c9af3b761ec70d1fd440c944c88edb03de16a6abcfd4cbaf642c935583377",
+  "ruling": "not (Fable 1029 01:35Z / 01:56Z)",
+  "dv3_outcome": "forged_positive",
+  "fraud_signals": [
+   {
+    "id": "h3_key_field_unique_font@p11:[36.8, 334.8, 175.7, 347.1]",
+    "family": "file_tamper",
+    "fields": [
+     "claimant_name"
+    ],
+    "page": 11,
+    "region": [
+     36.8,
+     334.8,
+     175.7,
+     347.1
+    ]
+   },
+   {
+    "id": "h3_key_field_unique_font@p11:[36.8, 456.3, 165.4, 468.7]",
+    "family": "file_tamper",
+    "fields": [
+     "claimant_name"
+    ],
+    "page": 11,
+    "region": [
+     36.8,
+     456.3,
+     165.4,
+     468.7
+    ]
+   },
+   {
+    "id": "template_reused",
+    "family": "template"
+   }
+  ],
+  "fraud_pair": [
+   {
+    "id": "h3_key_field_unique_font@p11:[36.8, 334.8, 175.7, 347.1]",
+    "family": "file_tamper",
+    "fields": [
+     "claimant_name"
+    ],
+    "page": 11,
+    "region": [
+     36.8,
+     334.8,
+     175.7,
+     347.1
+    ]
+   },
+   {
+    "id": "template_reused",
+    "family": "template"
+   }
+  ],
+  "claim_fields": [
+   "claimant_name",
+   "date",
+   "isrc",
+   "role",
+   "track"
+  ]
+ }
+]

@@ -56,6 +56,7 @@ TRUST_ROOTS_DIR = Path(__file__).resolve().parent / "trust_roots"
 
 KEY_TOKEN = re.compile(r"\b\d{1,3}(?:[.,]\d{1,2})?\s?%|\b[A-Z]{2}-?[A-Z0-9]{3}-?\d{2}-?\d{5}\b|\b\d{1,3}(?:,\d{3})+\b")
 _PERCENT = re.compile(r"\b\d{1,3}(?:[.,]\d{1,2})?\s?%")
+_CONTACT = re.compile(r"[^\s@]+@[^\s@]+\.[a-z]{2,}|https?://\S+|\bwww\.\S+", re.I)
 _ISRC = re.compile(r"\b[A-Z]{2}-?[A-Z0-9]{3}-?\d{2}-?\d{5}\b")
 
 
@@ -63,7 +64,12 @@ def key_field_class(text: str, names: list[str]) -> str | None:
     """WHICH key field a span is (Fable [key=fraud-deny-families]: a tamper signal counts for the
     fraud-deny pair only on a field that carries the claim). Recorded in the signal value; it changes
     no verdict. claimant_name > isrc > share_percent > amount."""
-    t = text or ""
+    full = text or ""
+    # An email address or a link is contact data, never a claim field - even when the claimant's name is inside
+    # it ('leftofficial03@gmail.com'): Google-Docs/Word renders keep a pasted address in its own font (e9ec352a).
+    # The contact tokens are removed FIRST and the rest of the span is classified (QA #1482: 'Jane Doe
+    # jane@example.com' is still the claimant's name); only a span with nothing else is 'contact'.
+    t = _CONTACT.sub(" ", full)
     if any(n and len(n) > 3 and n.lower() in t.lower() for n in names):
         return "claimant_name"
     if _ISRC.search(t):
@@ -72,6 +78,8 @@ def key_field_class(text: str, names: list[str]) -> str | None:
         return "share_percent"
     if KEY_TOKEN.search(t):
         return "amount"
+    if _CONTACT.search(full):
+        return "contact"
     return None
 
 

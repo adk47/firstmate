@@ -293,7 +293,11 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
             uid = r.user_id if r else None
             support = supports(ex, r.names, role, r.title, r.isrc) if r else None
             elsewhere = claimant_elsewhere(ex, r.names, r.title) if r else []
-            o = gate.decide(h3_verdict=h3.verdict, kind=h3.kind or raw.get("kind"), ex=ex, findings=findings,
+            # A deny reaches a request only when the document itself names its track/ISRC or its extracted credit
+            # supports it. The <= 5-candidate tie attributes a filing (asks, junk purge); it is never positive
+            # evidence that the document is about THIS track (Fable NO-GO #1482: e9ec352a is a 5-request filing).
+            covers = bool(r is not None and (named_by(ex, r, MIN_CONFIDENCE) or support is not None))
+            o = gate.decide(h3_verdict=h3.verdict, kind=h3.kind or raw.get("kind"), ex=ex, findings=findings, covers=covers,
                             checks=checks, account_held=uid in held if uid else False, extracted_support=support,
                             elsewhere=elsewhere)
             store.step(run_id, proof_id, "gate", o.outcome, {"reason": o.reason, "need": o.need,
@@ -416,15 +420,27 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
 FANOUT = 50     # candidate requests above which a filed document is read only against the tracks it names
 
 
-def named_by(ex: Any, r: Any) -> bool:
+def named_by(ex: Any, r: Any, min_confidence: float | None = None) -> bool:
     """Does the document name this request's track: the exact normalized title (featured artist
-    dropped, as `supports` reads it) in its tracks or credits, or the request's ISRC on it."""
+    dropped, as `supports` reads it) in its tracks or credits, or the request's ISRC on it.
+    `min_confidence`: only entries the extraction read at least that sure count (the fraud-deny tie, QA #1482:
+    a 0.1-confidence misread title must never tie a deny to a request). None = any (the fan-out cut)."""
     from .extract import _title_key, norm_isrc
-    titles = {_title_key(t.get("title")) for t in ex.tracks if t.get("title")} | \
-        {_title_key(c.get("track")) for c in ex.credits if c.get("track")}
+
+    def sure(e: dict[str, Any]) -> bool:
+        if min_confidence is None:
+            return True
+        try:
+            return float(e.get("confidence")) >= min_confidence
+        except (TypeError, ValueError):
+            return False
+    tracks = [t for t in ex.tracks if sure(t)]
+    titles = {_title_key(t.get("title")) for t in tracks if t.get("title")} | \
+        {_title_key(c.get("track")) for c in ex.credits if c.get("track") and sure(c)}
     titles.discard("")
     isrc = norm_isrc(getattr(r, "isrc", None))
-    return bool(_title_key(getattr(r, "title", "")) in titles or (isrc and isrc in set(ex.isrcs)))
+    isrcs = {norm_isrc(t.get("isrc")) for t in tracks if t.get("isrc")}
+    return bool(_title_key(getattr(r, "title", "")) in titles or (isrc and isrc in isrcs))
 
 
 def cut_fanout(store: DocVerifyStore, run_id: str, proof_id: str, intake: intake_read.IntakeDoc,
