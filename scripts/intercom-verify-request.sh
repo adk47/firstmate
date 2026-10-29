@@ -240,7 +240,15 @@ readonly EMAIL_CHANGE_COPY_APPROVED=1
 #       LOCKED AGAIN 2026-10-27 01:1xZ (captain): "The proof ask stays off. It offers paperwork and nothing
 #       can accept a valid ID yet." (01:0xZ: "Do not send a proof ask that offers paperwork until a returned
 #       document can be accepted. A file on record is not a read.")
-readonly CLAIM_PROOF_ASK_COPY_APPROVED=0
+#       UNLOCKED 2026-10-29 by Fable ruling [key=claim-code-ask-release] under the captain's 21:3xZ "proof conversations
+#       YES" (captain-1028-213x), 21:4xZ "yes approve all if Fable confirms" and 03:2xZ "move credits and profiles
+#       along" / "use fable and i take the recommendation of it just go": a returned code CAN be accepted (core
+#       #10762/#10763, the E1 verifier). Text = D38 as approved, paragraph 3 as on p1's captain card (L3, the
+#       paperwork paragraph, unchanged). Initial asks pass the go-live guards and comm_state (never to a claimant who
+#       replied, sent proof or was decided; one per claim ever; 7-day gate). Release: the train AFTER the E1 deploy is
+#       read end to end on a planted code; audience = bound-page person claimants only.
+#   Reviewed baseline: deploy overwrites - 2026-10-29 (verify-ask-wiring-h2): this blob sets CLAIM_PROOF_ASK_COPY_APPROVED=1.
+readonly CLAIM_PROOF_ASK_COPY_APPROVED=1
 #   CLAIM_STATUS_COPY_APPROVED  claim-status: copy APPROVED by Fable (claims-documentation-readiness-1023
 #       ruling 3, verbatim); UNLOCKED on firstmate's GO after the 5-user dry run on node-8 (2026-10-26,
 #       claim-lane-resume-c2).
@@ -1705,6 +1713,8 @@ printf '%s' "$CONTACT_ID" | grep -qE '^[A-Za-z0-9]{1,40}$' || { echo "CONTACT NO
 g1_now() { if [ "$TESTABLE" = "1" ] && [ -n "${INTERCOM_VERIFY_TEST_NOW:-}" ]; then printf '%s' "$INTERCOM_VERIFY_TEST_NOW"; else date -u +%s; fi; }
 GOLIVE=0
 case "$CAMPAIGN:$COPY" in merge-pending:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|uvn-status:*) GOLIVE=1 ;; esac
+# the claim code ask's FIRST message too ([key=claim-code-ask-release]); its day-7 reminder keeps its own rules
+[ "$CAMPAIGN:$KIND" = "claim-proof-ask:initial" ] && GOLIVE=1
 if [ "$GOLIVE" = "1" ] && [ "$ACTION" = "post" ]; then
   # G4: the recipient is the ACCOUNT behind the request, never a staff address.
   case "$EMAIL" in *@muso.ai|*.muso.ai) refuse "G4: the recipient email is a Muso staff address; nothing was sent or claimed." ;; esac

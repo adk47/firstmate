@@ -2236,11 +2236,17 @@ claimfile() {
           credits:[{request_id:"claim-1606398", profile_id:"abc-123"}]}' | jq -c "${2:-.}" > "$1"
 }
 
-@test "claim-proof-ask: send-locked as committed (captain 2026-10-27 01:1xZ); the dry run renders the approved draft with the close day" {
+@test "claim-proof-ask: UNLOCKED as committed (Fable [key=claim-code-ask-release]); the first ask is behind the go-live guards + comm_state; the dry run renders the approved draft with the close day" {
   claimfile "$TEST_TMPDIR/c.json"
-  run -1 "$LOCKED" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
-  [[ "$output" == *"CLAIM_PROOF_ASK_COPY_APPROVED=0"* ]]
-  [ "$(calls)" -eq 0 ]
+  grep -qx "readonly CLAIM_PROOF_ASK_COPY_APPROVED=1" "$REAL_SCRIPT"
+  # a claimant who replied / sent proof / was decided is held at send; a lead is refused (G4)
+  STUB_COMM_STATE=hold run -3 "$LOCKED" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "HELD comm_state"* ]]
+  grep -q -- "--campaign claim-proof-ask" "$TEST_TMPDIR/comm-state-args"
+  STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"lead","created_at":1700000000}' \
+    run -1 "$LOCKED" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"G4"* ]]
+  [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
   run -0 "$LOCKED" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "${lines[0]}" == "DRY-RUN claim-proof-ask initial email credits=1 copy=claimask" ]]
   [ "$(rendered .subject)" = "Confirming your claim on Big Star" ]
@@ -2364,7 +2370,7 @@ statusfile() {
 @test "claim-status: unlocked as committed (firstmate GO after the dry run); the dry run renders Fable's approved note verbatim" {
   statusfile "$TEST_TMPDIR/s.json"
   grep -qx "readonly CLAIM_STATUS_COPY_APPROVED=1" "$REAL_SCRIPT"
-  grep -qx "readonly CLAIM_PROOF_ASK_COPY_APPROVED=0" "$REAL_SCRIPT"   # locked again (captain 2026-10-27 01:1xZ)
+  grep -qx "readonly CLAIM_PROOF_ASK_COPY_APPROVED=1" "$REAL_SCRIPT"   # unlocked: Fable [key=claim-code-ask-release]
   run -0 "$LOCKED" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ --dry-run
   [[ "${lines[0]}" == "DRY-RUN claim-status initial email credits=1 copy=claimstatus" ]]
   [ "$(rendered .subject)" = "Your claim on Big Star" ]

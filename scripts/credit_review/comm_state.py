@@ -54,7 +54,7 @@ INTERCOM = "https://api.intercom.io"
 # The lines that must never reach someone who already sent proof or replied: the "wait for our message" notes and
 # the uvn-status proof ask (captain 03:2xZ: L14a retired, its audience gets the ask; p1 115 / l1 [key=l14a-retire-ask]:
 # sent only at state none / asked-with-no-reply).
-WAIT_LINES = ("credit-hold-status", "claim-proof-pending", "uvn-status")
+WAIT_LINES = ("credit-hold-status", "claim-proof-pending", "uvn-status", "claim-proof-ask")
 RECEIPT = "status-doc-received"
 # The "nothing else is needed" family (message-book-1029 A2/A3/C3/C4/D3; Fable [key=message-book-1029], captain 'just
 # go'): only ever to a user who owes NOTHING. Checked at send with one replica read + the ledger + the hold list.
