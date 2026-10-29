@@ -245,6 +245,8 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                               float(ex.sender.get("confidence") or 0.0))
         sig = xc.signatory_check(deps.net, ex.signatory.get("name") if ex.signatory.get("confidence", 0) >= MIN_CONFIDENCE
                                  else None, official)
+        archive = ArchiveCheck(store, deps.net, run_id, proof_id, ex)
+        dom = archive.domain(dom)
         store.step(run_id, proof_id, "xc_domain", dom.status, dom.detail)
         store.step(run_id, proof_id, "xc_signatory", sig.status, sig.detail)
         h3_map: dict[str, forensics.H3] = {}
@@ -264,6 +266,7 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
         dint = intel.domain_intel(deps.net, ex.sender.get("domain") if sure else None,
                                   [e.rsplit("@", 1)[1] for e in ex.emails if "@" in e], issuer, itype, official,
                                   uncertain=[] if sure else [ex.sender.get("domain")])
+        dint = archive.intel(dint, ex.sender.get("domain") if sure else None)
         store.step(run_id, proof_id, "xc_domain_intel", dint.status, dint.detail)
         credits_cache: dict[str, tuple[list[dict[str, Any]] | None, str | None]] = {}
         release_cache: dict[str, xc.Release] = {}
@@ -481,6 +484,73 @@ def cached_release(store: DocVerifyStore, net: Any, isrc: str) -> xc.Release:
     v = store.cached_lookup("isrc_release", norm_isrc(isrc) or isrc, lambda: asdict(xc.release_facts(net, isrc)),
                             ok=lambda v: not v.get("errors"))
     return xc.Release(**v)
+
+
+def document_date(ex: Any) -> Any:
+    """The document's own date: the earliest signed/issued/sent date read at >= 0.6 (None when there is none)."""
+    from datetime import date as _date
+    out = None
+    for d in getattr(ex, "dates", None) or []:
+        if d.get("what") in forensics.CLAIMED_DATE_KINDS and float(d.get("confidence") or 0) >= 0.6:
+            try:
+                v = _date.fromisoformat(str(d.get("date")))
+            except ValueError:
+                continue
+            out = v if out is None or v < out else out
+    return out
+
+
+class ArchiveCheck:
+    """Fable 140 (audit-25, 1372907): before a dead or young sender domain counts as a FABRICATED sender, the web
+    archive is asked for its first capture (paced, cached 24 h per domain). A capture from before the document's own
+    date makes it a lapsed / re-registered domain: xc_domain is WEAK (not contradicts), and the 'does not exist' /
+    'registered N days ago' intel flags of that domain are set aside (recorded as lapsed_flags). The first capture
+    is recorded in an `xc_domain_archive` step either way. No capture, no document date, or an archive error
+    leaves the checks exactly as they were."""
+
+    def __init__(self, store: DocVerifyStore, net: Any, run_id: str, proof_id: str, ex: Any):
+        self.store, self.net, self.run_id, self.proof_id = store, net, run_id, proof_id
+        self.doc_date = document_date(ex)
+        self.seen: dict[str, bool] = {}
+
+    def lapsed(self, domain: str | None) -> bool:
+        if not domain or self.doc_date is None or not hasattr(self.net, "first_capture"):
+            return False
+        if domain in self.seen:
+            return self.seen[domain]
+        try:
+            # cached per (domain, document date): the host-wide fallback answers 'archived before THIS date'
+            first = self.store.cached_first_capture(f"{domain}<{self.doc_date:%Y%m%d}",
+                                                    lambda _k: self.net.first_capture(domain, before=self.doc_date))
+            ok, err = xc.lapsed_domain(first, self.doc_date), None
+        except Exception as exc:  # noqa: BLE001 - an archive we cannot read never clears a sender
+            first, ok, err = None, False, f"{type(exc).__name__}: {str(exc)[:120]}"
+        self.store.step(self.run_id, self.proof_id, "xc_domain_archive", "lapsed" if ok else "error" if err else "ok",
+                        {"domain": domain, "first_capture": first, "document_date": self.doc_date.isoformat(),
+                         **({"error": err} if err else {})})
+        self.seen[domain] = ok
+        return ok
+
+    def domain(self, dom: xc.Check) -> xc.Check:
+        if dom.status != xc.CONTRADICTS or dom.detail.get("note") not in xc.DEAD_DOMAIN_NOTES:
+            return dom
+        if not self.lapsed(dom.detail.get("sender_domain")):
+            return dom
+        return xc.Check("xc_domain", xc.WEAK, {**dom.detail, "lapsed": True,
+                                                "note": "lapsed domain: archived before the document's date, "
+                                                        "not a fabricated sender"})
+
+    def intel(self, dint: xc.Check, sender: str | None) -> xc.Check:
+        from .intel import registrable_domain
+        flags = list(dint.detail.get("flags") or [])
+        snd = registrable_domain(sender) if sender else None
+        dead = [f for f in flags if snd and f.startswith(f"{snd}: ") and
+                (f.endswith(": does not exist") or " registered " in f and f.endswith(" days ago"))]
+        if not dead or not self.lapsed(snd):
+            return dint
+        rest = [f for f in flags if f not in dead]
+        detail = {**dint.detail, "flags": rest, "lapsed_flags": dead}
+        return xc.Check("xc_domain_intel", xc.SOFT if rest else xc.UNKNOWN, detail)
 
 
 def earlier_firm_dates(store: DocVerifyStore, proof_id: str) -> frozenset[tuple[str, str]]:

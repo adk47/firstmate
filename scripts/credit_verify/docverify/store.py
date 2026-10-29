@@ -97,6 +97,7 @@ CREATE INDEX IF NOT EXISTS dv_challenges_request ON dv_challenges(request_id);
 CREATE TABLE IF NOT EXISTS dv_raw_credits (track_id TEXT PRIMARY KEY, at TEXT NOT NULL, items_json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS dv_lookup_cache (kind TEXT NOT NULL, key TEXT NOT NULL, at REAL NOT NULL, value_json TEXT NOT NULL,
   PRIMARY KEY (kind, key));
+CREATE TABLE IF NOT EXISTS dv_archive_cache (domain TEXT PRIMARY KEY, at REAL NOT NULL, first_capture TEXT);
 -- D2: a filing's candidate requests and claim keys as the last run saw them, UNTRUNCATED (dv_steps
 -- detail is capped at 20,000 chars; a 40-request filing overflowed it and broke selection).
 -- Claim keys of a filing the document does not name (fan-out cut, > FANOUT candidate requests):
@@ -408,6 +409,20 @@ class DocVerifyStore:
                 self.db.execute("INSERT OR REPLACE INTO dv_lookup_cache (kind, key, at, value_json) VALUES (?,?,?,?)",
                                 (kind, key, t, json.dumps(value, default=str)))
         return value
+
+    def cached_first_capture(self, domain: str, fetch: Any, ttl_s: float = 24 * 3600, now: Any = None) -> str | None:
+        """The web archive's first capture of `domain` ('YYYYMMDDhhmmss', or None when it has none) through a
+        24 h cache shared by every reader (Fable 140). A fetch that raises is not cached and propagates."""
+        import time as _t
+        t = _t.time() if now is None else now
+        row = self.db.execute("SELECT at, first_capture FROM dv_archive_cache WHERE domain=?", (domain,)).fetchone()
+        if row and t - float(row[0]) < ttl_s:
+            return row[1]
+        first = fetch(domain)
+        with self.lock, self.db:
+            self.db.execute("INSERT OR REPLACE INTO dv_archive_cache (domain, at, first_capture) VALUES (?,?,?)",
+                            (domain, t, first))
+        return first
 
     def cached_raw_credits(self, track_id: str, fetch: Any, ttl_s: float = RAW_CREDITS_TTL_S,
                            now: Any = None) -> list[dict[str, Any]]:

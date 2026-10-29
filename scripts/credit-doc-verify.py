@@ -55,9 +55,10 @@ def real_deps(store, *, intercom_fetch: bool = True, strict_pacing: bool = False
         log("no MUSOAI_INTERCOM_TOKEN: only cached attachments can be verified this run")
     # 1 request/s per API across EVERY reader process on the host (run --workers N): MusicBrainz's
     # own limit, and Intercom/admin GETs kept at the single-reader rate (proof-loop lead 2026-10-28).
-    mb, ic, ad = (Pacer(n, 1.0, log=log, strict=strict_pacing) for n in ("musicbrainz", "intercom", "admin"))
+    mb, ic, ad, wb = (Pacer(n, 1.0, log=log, strict=strict_pacing)
+                      for n in ("musicbrainz", "intercom", "admin", "wayback"))
     fetch = ic.paced(intercom.make_fetch(tok)) if tok else None
-    return Deps(sandbox=sandbox.run, extractor=Extractor(store), net=xc.Net(mb_pacer=mb),
+    return Deps(sandbox=sandbox.run, extractor=Extractor(store), net=xc.Net(mb_pacer=mb, archive_pacer=wb),
                 raw_credits=lambda tid: store.cached_raw_credits(
                     tid, ad.paced(lambda t: admin_api.track_raw_credits(admin, t))),
                 requests=lambda ids: stage2.requests(ids), fetch=fetch, dl=stage2.download,

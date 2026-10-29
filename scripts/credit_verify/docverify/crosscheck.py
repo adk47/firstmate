@@ -101,16 +101,40 @@ class Net:
     """The network seam (tests pass a fake)."""
 
     def __init__(self, get: Callable[..., tuple[bytes, str]] | None = None, resolver: Any = None,
-                 mb_pacer: Any = None):
+                 mb_pacer: Any = None, archive_pacer: Any = None):
         if get is None:
             from credit_trust.websearch import http_get
             get = http_get
         self._get = get
         self._resolver = resolver
         self._mb_pacer = mb_pacer        # pace.Pacer: 1 req/s across every reader process on the host
+        self._archive_pacer = archive_pacer   # the web archive's CDX API, 1 req/s host-wide (Fable 140)
 
-    def json(self, url: str) -> Any:
-        body, _ = self._get(url, accept="application/json")
+    def first_capture(self, domain: str, before: Any = None) -> str | None:
+        """A Wayback Machine capture of `domain` ('YYYYMMDDhhmmss'), or None when it has none. The root URL's
+        earliest capture first (CDX folds `www.`; ~0.5 s). When that is missing or not before `before` (a date),
+        QA #1494: the host's OTHER pages count too - one host-wide query for ANY capture up to the day before
+        `before` (`matchType=host&to=`, 13-30 s on node-8; CDX sorts host results by URL, not time, so this
+        answers 'archived before', not 'earliest'). Raises on a network error or timeout (the caller treats
+        that as unknown, never as 'lapsed')."""
+        from datetime import timedelta
+        root = self._cdx({"url": domain, "output": "json", "fl": "timestamp", "limit": "1"})
+        if before is None or (root and root[:8] < before.strftime("%Y%m%d")):
+            return root
+        host = self._cdx({"url": domain, "matchType": "host", "to": (before - timedelta(days=1)).strftime("%Y%m%d"),
+                          "output": "json", "fl": "timestamp", "limit": "1"}, timeout=ARCHIVE_HOST_TIMEOUT_S)
+        return host or root
+
+    def _cdx(self, params: dict[str, str], timeout: int | None = None) -> str | None:
+        pacer = getattr(self, "_archive_pacer", None)
+        if pacer is not None:
+            pacer.wait()
+        rows = self.json("https://web.archive.org/cdx/search/cdx?" + urllib.parse.urlencode(params), timeout=timeout) or []
+        stamps = [r[0] for r in rows[1:] if r and str(r[0]).isdigit()]      # rows[0] is the header
+        return min(stamps) if stamps else None
+
+    def json(self, url: str, timeout: int | None = None) -> Any:
+        body, _ = self._get(url, accept="application/json", **({"timeout": timeout} if timeout else {}))
         return json.loads(body)
 
     def mb(self, path: str, params: dict[str, str]) -> Any:
@@ -407,6 +431,25 @@ def readable_domain(dom: str) -> str | None:
     if labels[-1] not in iana_tlds():
         return f"'.{labels[-1]}' is not a top-level domain (likely a misread address)"
     return None
+
+
+DEAD_DOMAIN_NOTES = ("the sender's domain does not exist",)
+
+
+ARCHIVE_HOST_TIMEOUT_S = 45     # the host-wide CDX query (QA #1494); a timeout is an archive error: no clearance
+
+
+def lapsed_domain(first_capture: str | None, document_date: Any) -> bool:
+    """Fable 140 (audit-25): a sender domain that does not resolve today, or was registered recently, is a LAPSED
+    or re-registered domain - never a fabricated sender - when the web archive captured it before the
+    document's own date."""
+    if not first_capture or document_date is None or len(first_capture) < 8:
+        return False
+    try:
+        cap = datetime.strptime(first_capture[:8], "%Y%m%d").date()
+    except ValueError:
+        return False
+    return cap < document_date
 
 
 def domain_check(net: Net, sender_domain: str | None, issuer: str | None, official: list[str], how: str,

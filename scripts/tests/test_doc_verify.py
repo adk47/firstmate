@@ -58,9 +58,9 @@ def or_response(obj, cost=0.0004):
 
 
 class FakeNet(xc.Net):
-    def __init__(self, *, mx="mx", mb=None, deezer=None, pages=None, txt=None, rdap=None):
+    def __init__(self, *, mx="mx", mb=None, deezer=None, pages=None, txt=None, rdap=None, archive=None):
         self._mx, self._mbmap, self._deezer, self._pages = mx, mb or {}, deezer or {}, pages or {}
-        self._txt, self._rdap = txt or {}, rdap or {}
+        self._txt, self._rdap, self._archive = txt or {}, rdap or {}, archive or {}
         self.calls: list[str] = []
 
     def txt(self, name):
@@ -77,13 +77,21 @@ class FakeNet(xc.Net):
             return self._mbmap[path]
         raise urllib.error.HTTPError("u", 404, "nf", {}, None)
 
-    def json(self, url):
+    def json(self, url, timeout=None):
         self.calls.append(url)
         if url.startswith("https://rdap.org/domain/"):
             reg = self._rdap.get(url.rsplit("/", 1)[1])
             if reg is None:
                 raise urllib.error.HTTPError(url, 404, "nf", {}, None)
             return {"events": [{"eventAction": "registration", "eventDate": reg}]}
+        if url.startswith("https://web.archive.org/cdx/search/cdx?"):
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(url).query).items()}
+            a = self._archive.get(q["url"])        # a root timestamp, or {"root": ts|None, "pages": [ts, ...]}
+            a = a if isinstance(a, dict) else {"root": a, "pages": []}
+            if q.get("matchType") == "host":       # any capture of the host, up to `to` (inclusive day)
+                ts = [t for t in [a["root"], *a["pages"]] if t and t[:8] <= q["to"]]
+                return [["timestamp"]] + ([[ts[0]]] if ts else [])
+            return [["timestamp"]] + ([[a["root"]]] if a["root"] else [])
         if url in self._deezer:
             return self._deezer[url]
         return {"error": {"code": 800}}
@@ -1351,6 +1359,78 @@ class RunnerTests(unittest.TestCase):
         stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
         self.assertEqual(rows[0]["outcome"], gate.FORGED)
         self.assertEqual(self.store.held_users(), {42})
+
+    def _dead_sender(self, archive):
+        self.answer = {**GOOD_ANSWER, "sender": {"email": "jahan@synapse-studio-rec.com", "confidence": 0.95}}
+        self.net._mx = {"synapse-studio-rec.com": "nxdomain"}
+        self.net._archive = archive
+        return runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+
+    def test_a_dead_sender_domain_with_no_archive_history_is_still_a_fabricated_sender(self):
+        stats, rows = self._dead_sender({})
+        self.assertEqual(rows[0]["outcome"], gate.FORGED)
+        st = self.store.db.execute("SELECT status, detail_json FROM dv_steps WHERE step='xc_domain_archive'").fetchone()
+        self.assertEqual((st[0], json.loads(st[1])["first_capture"]), ("ok", None))
+
+    def test_a_lapsed_sender_domain_archived_before_the_document_is_not_fabricated(self):
+        # Fable 140 (audit-25, 1372907): a 2017 invoice from a domain live 2016-2025, NXDOMAIN today (client hold).
+        stats, rows = self._dead_sender({"synapse-studio-rec.com": "20161114113642"})
+        self.assertNotEqual(rows[0]["outcome"], gate.FORGED)
+        self.assertFalse(rows[0]["account_hold"])
+        self.assertEqual(self.store.held_users(), set())
+        steps = {s: (st, json.loads(d)) for s, st, d in self.store.db.execute(
+            "SELECT step, status, detail_json FROM dv_steps WHERE step IN ('xc_domain', 'xc_domain_archive', "
+            "'xc_domain_intel')")}
+        self.assertEqual(steps["xc_domain_archive"][0], "lapsed")
+        self.assertEqual(steps["xc_domain_archive"][1]["first_capture"], "20161114113642")   # recorded in the step
+        self.assertEqual(steps["xc_domain_archive"][1]["document_date"], "2025-03-01")
+        self.assertEqual(steps["xc_domain"][0], xc.WEAK)
+        self.assertTrue(steps["xc_domain"][1]["lapsed"])
+        self.assertIn("synapse-studio-rec.com: does not exist", steps["xc_domain_intel"][1]["lapsed_flags"])
+        self.assertNotIn("synapse-studio-rec.com: does not exist", steps["xc_domain_intel"][1]["flags"])
+        # one CDX call per domain per 24 h, shared through the store
+        self.assertEqual(sum(1 for c in self.net.calls if "web.archive.org" in c), 1)
+        self.store.db.execute("DELETE FROM dv_outcomes")
+        self.store.db.execute("DELETE FROM dv_steps")
+        self.store.db.commit()
+        runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+        self.assertEqual(sum(1 for c in self.net.calls if "web.archive.org" in c), 1)        # cache hit
+
+    def test_an_archive_capture_after_the_document_date_does_not_clear_the_sender(self):
+        stats, rows = self._dead_sender({"synapse-studio-rec.com": "20260630000000"})       # first seen after 2025-03-01
+        self.assertEqual(rows[0]["outcome"], gate.FORGED)
+        self.assertFalse(xc.lapsed_domain("20260630000000", date(2025, 3, 1)))
+        self.assertTrue(xc.lapsed_domain("20161114113642", date(2017, 9, 13)))
+        self.assertFalse(xc.lapsed_domain("20161114113642", None))                             # no document date
+        self.assertFalse(xc.lapsed_domain(None, date(2017, 9, 13)))
+
+    def test_a_domain_archived_only_on_a_subpage_before_the_document_is_lapsed(self):
+        # QA #1494: CDX's default is an exact URL; a host whose ROOT was never captured before the document but whose
+        # /about page was is still a lapsed domain - one host-wide query, only when the root does not answer.
+        stats, rows = self._dead_sender({"synapse-studio-rec.com": {"root": None, "pages": ["20170102030405"]}})
+        self.assertNotEqual(rows[0]["outcome"], gate.FORGED)
+        st = self.store.db.execute("SELECT status, detail_json FROM dv_steps WHERE step='xc_domain_archive'").fetchone()
+        self.assertEqual((st[0], json.loads(st[1])["first_capture"]), ("lapsed", "20170102030405"))
+        cdx = [c for c in self.net.calls if "web.archive.org" in c]
+        self.assertEqual(len(cdx), 2)
+        self.assertNotIn("matchType", cdx[0])                                       # the fast root query first
+        self.assertIn("matchType=host", cdx[1])
+        self.assertIn("to=20250228", cdx[1])                                        # strictly before 2025-03-01
+
+    def test_a_subpage_captured_only_after_the_document_does_not_clear_the_sender(self):
+        stats, rows = self._dead_sender({"synapse-studio-rec.com": {"root": "20260630000000",
+                                                                    "pages": ["20260101000000"]}})
+        self.assertEqual(rows[0]["outcome"], gate.FORGED)
+
+    def test_an_unreadable_archive_never_clears_a_sender(self):
+        def boom(dom, **kw):
+            raise urllib.error.URLError("down")
+        self.net.first_capture = boom
+        stats, rows = self._dead_sender({"synapse-studio-rec.com": "20161114113642"})
+        self.assertEqual(rows[0]["outcome"], gate.FORGED)
+        st = self.store.db.execute("SELECT status FROM dv_steps WHERE step='xc_domain_archive'").fetchone()
+        self.assertEqual(st[0], "error")
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM dv_archive_cache").fetchone())   # errors never cached
 
     def test_low_confidence_sender_end_to_end_is_not_forged(self):
         self.answer = {**GOOD_ANSWER, "sender": {"email": "contact@mistyped.invalid", "confidence": 0.0}}
