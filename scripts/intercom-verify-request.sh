@@ -743,6 +743,8 @@ INPUT="$("$JQ_BIN" -c '
             id: ((.user.id // "") | clean),
             auth_id: ((.user.auth_id // "") | clean | sub("^auth0\\|"; "")),
             professional_id: ((.user.professional_id // "") | clean),
+            presented_ids: ((.user.presented_ids // []) | if type == "array" then . else [] end
+                            | [.[] | select(type == "string") | clean | select(test("^[A-Za-z0-9._|-]{1,128}$"))] | unique),
             ext_other_account: (.user.ext_other_account | if type == "boolean" then . else null end),
             thread_external_id: ((.user.thread_external_id // "") | clean),
             pending_count: (.user.pending_count | if type == "number" and . == floor and . >= 0 and . <= 1000000 then . else null end),
@@ -800,16 +802,34 @@ AUTH_ID="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.auth_id')"
 PRO_ID="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.professional_id')"
 [ -z "$PRO_ID" ] || printf '%s' "$PRO_ID" | grep -qE '^[A-Za-z0-9._|-]{1,128}$' \
   || refuse "user.professional_id must be the account's users.neptuneProfessionalId (letters, digits, dot, underscore, dash, |)."
+# r5 (Fable [key=x2-sample-1027]): the account's PRESENTED profile ids (its processed claims and
+# representation profile, each owned by exactly this account; credit_review.identity_resolver). The
+# mobile app logs into Intercom with the presented profile (core /v4/user B2), the web app with the
+# professional id, so one account can have two Intercom users. Only ever widens THIS account's own
+# contacts; the driver computes it on the replica, the gate never guesses it.
+PRESENTED_JSON="$(printf '%s' "$INPUT" | "$JQ_BIN" -c '.user.presented_ids')"
+# No silent truncation (QA @4e23bc6b): every id the driver resolved is honoured. An implausible count is a
+# loud refusal for a person, never a quiet partial match (the replica gives an account a handful at most).
+readonly MAX_PRESENTED_IDS=500
+[ "$(printf '%s' "$PRESENTED_JSON" | "$JQ_BIN" -r 'length')" -le "$MAX_PRESENTED_IDS" ] \
+  || refuse "user.presented_ids has more than $MAX_PRESENTED_IDS ids; refusing rather than matching a subset."
 EXT_OTHER="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.ext_other_account | if . == null then "" else tostring end')"
 THREAD_EXT="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.thread_external_id')"
 # An Intercom contact's external_id names THIS account when it is the account's
 # professional id (users.neptuneProfessionalId, what the web app boots Intercom with;
-# firstmate 090) or its Auth0 subject (with or without its auth0| prefix). Anything else,
-# including the bare numeric user id, is another account.
-ext_is_account() {
+# firstmate 090), its Auth0 subject (with or without its auth0| prefix), or one of its
+# presented profile ids (r5: what the mobile app logs in with). Anything else, including the
+# bare numeric user id, is another account.
+ext_is_canonical() {
   [ -n "$1" ] || return 1
   { [ -n "$PRO_ID" ] && [ "$1" = "$PRO_ID" ]; } \
     || { [ -n "$AUTH_ID" ] && { [ "$1" = "$AUTH_ID" ] || [ "$1" = "auth0|$AUTH_ID" ]; }; }
+}
+ext_is_account() {
+  [ -n "$1" ] || return 1
+  ext_is_canonical "$1" && return 0
+  [ -n "$PRO_ID$AUTH_ID" ] || return 1   # presented ids only ever widen an account that is named
+  printf '%s' "$PRESENTED_JSON" | "$JQ_BIN" -e --arg x "$1" 'any(.[]; . == $x)' >/dev/null 2>&1
 }
 readonly NO_EXT_ID_WHY="the Intercom user for this email has no external_id, so it cannot be matched to this Muso account; not sending."
 N="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.credits | length')"
@@ -1672,12 +1692,23 @@ elif [ "$KIND" = "initial" ]; then
   users="$(printf '%s' "$search" | "$JQ_BIN" -c --arg e "$EMAIL" '[.data[] | select(.role == "user" and ((.email // "") | ascii_downcase) == $e)]')"
   n_users="$(printf '%s' "$users" | "$JQ_BIN" -r 'length')"
   if [ "$n_users" -ge 2 ] && { [ -n "$PRO_ID" ] || [ -n "$AUTH_ID" ]; }; then
-    # Several Intercom users share the email (firstmate 091): the ONE whose external_id is this
-    # account is the recipient; none or more than one is a refusal.
-    users="$(printf '%s' "$users" | "$JQ_BIN" -c --arg p "$PRO_ID" --arg a "$AUTH_ID" '
+    # Several Intercom users share the email (firstmate 091): the ones whose external_id is this
+    # account are its contacts (r5: the web user carries the professional id, the mobile user a
+    # presented profile id). Exactly one is the recipient; two or more (web + mobile) send to the
+    # one with the professional id / Auth0 subject (an in-thread reply below goes to the thread's
+    # own contact when it is one of them). None, or several with no single canonical one, refuses.
+    users="$(printf '%s' "$users" | "$JQ_BIN" -c --arg p "$PRO_ID" --arg a "$AUTH_ID" --argjson pr "$PRESENTED_JSON" '
       [.[] | ((.external_id // "") | tostring) as $x
-       | select($x != "" and (($p != "" and $x == $p) or ($a != "" and ($x == $a or $x == ("auth0|" + $a)))))]')"
-    [ "$(printf '%s' "$users" | "$JQ_BIN" -r 'length')" -eq 1 ] \
+       | select($x != "" and (($p != "" and $x == $p) or ($a != "" and ($x == $a or $x == ("auth0|" + $a))) or any($pr[]; . == $x)))
+       | . + {canonical: (($p != "" and $x == $p) or ($a != "" and ($x == $a or $x == ("auth0|" + $a))))}]')"
+    n_acct="$(printf '%s' "$users" | "$JQ_BIN" -r 'length')"
+    ACCOUNT_CONTACTS="$(printf '%s' "$users" | "$JQ_BIN" -c '[.[].id | tostring]')"
+    if [ "$n_acct" -ge 2 ]; then
+      users="$(printf '%s' "$users" | "$JQ_BIN" -c '[.[] | select(.canonical)]')"
+      [ "$(printf '%s' "$users" | "$JQ_BIN" -r 'length')" -eq 1 ] \
+        || record_refusal "the account email matches $n_users Intercom users, $n_acct of them this account's, and not exactly one carries its professional id or Auth0 subject; not sending."
+    fi
+    [ "$n_acct" -ge 1 ] \
       || record_refusal "the account email matches $n_users Intercom users (need exactly 1, or exactly one whose external_id is this account); not sending."
   else
     [ "$n_users" -eq 1 ] || record_refusal "the account email matches $n_users Intercom users (need exactly 1); not sending."
@@ -1703,6 +1734,22 @@ elif [ "$KIND" = "initial" ]; then
   fi
 fi
 printf '%s' "$CONTACT_ID" | grep -qE '^[A-Za-z0-9]{1,40}$' || { echo "CONTACT NOT VERIFIED: contact id is missing or malformed; nothing was sent" >&2; exit 4; }
+# r5: every Intercom user of THIS account (web + mobile). The document scan, the 7-day check and
+# the open-conversation lookup read all of them, so a document or a message on the mobile user is
+# never missed. One contact unless the dual-contact branch above found more.
+[ -n "${ACCOUNT_CONTACTS:-}" ] || ACCOUNT_CONTACTS="$("$JQ_BIN" -nc --arg c "$CONTACT_ID" '[$c]')"
+printf '%s' "$ACCOUNT_CONTACTS" | "$JQ_BIN" -e 'type == "array" and length >= 1 and length <= 10 and all(.[]; test("^[A-Za-z0-9]{1,40}$"))' >/dev/null 2>&1 \
+  || { echo "CONTACT NOT VERIFIED: the account's Intercom contacts are malformed; nothing was sent" >&2; exit 4; }
+for_each_account_contact() { # <fn>: the first non-empty answer of <fn> over this account's contacts
+  # A failed read inside <fn> exits 4; errexit is not inherited by a command substitution, so the
+  # status is carried out explicitly (a failed read on ANY contact sends nothing).
+  local c w rc
+  for c in $(printf '%s' "$ACCOUNT_CONTACTS" | "$JQ_BIN" -r '.[]'); do
+    rc=0; w="$("$1" "$c")" || rc=$?
+    [ "$rc" -eq 0 ] || exit "$rc"
+    [ -z "$w" ] || { printf '%s\n' "$w"; return 0; }
+  done
+}
 
 # Go-live recipient guards (security-arch-fable-s1 section 9.2, BINDING per program-lead-fable-p2 inbox 075) for the
 # first-message cohorts: credit-hold-status, claim-proof-pending, merge-pending and the R1 receipt (docrecvr). Real
@@ -1738,8 +1785,12 @@ if [ "$GOLIVE" = "1" ] && [ "$ACTION" = "post" ]; then
     [ -n "${THREAD_CONTACTS:-}" ] || read_thread_contact
     [ "$(printf '%s' "$THREAD_CONTACTS" | "$JQ_BIN" -r 'length')" = "1" ] \
       || refuse "G2: conversation $THREAD has $(printf '%s' "$THREAD_CONTACTS" | "$JQ_BIN" -r 'length') contacts (need exactly 1); nothing was sent or claimed."
-    [ "$(printf '%s' "$THREAD_CONTACTS" | "$JQ_BIN" -r '.[0]')" = "$CONTACT_ID" ] \
+    # r5 (QA @4e23bc6b): the thread's contact must be ONE of this account's Intercom users (web or mobile,
+    # ACCOUNT_CONTACTS); the note then goes to that contact, so G3 and the ledger name it. Anything else refuses.
+    g2c="$(printf '%s' "$THREAD_CONTACTS" | "$JQ_BIN" -r '.[0]')"
+    printf '%s' "$ACCOUNT_CONTACTS" | "$JQ_BIN" -e --arg c "$g2c" 'any(.[]; . == $c)' >/dev/null 2>&1 \
       || refuse "G2: conversation $THREAD's contact is not the account's Intercom user; nothing was sent or claimed."
+    CONTACT_ID="$g2c"
     g2conv="$(api GET "/conversations/$THREAD?display_as=plaintext")" \
       || { printf 'CONVERSATION READ FAILED (curl); nothing was sent or claimed\n' >&2; exit 4; }
     printf '%s' "$g2conv" | "$JQ_BIN" -e '((.source.author.type // "") | IN("user", "lead", "contact"))' >/dev/null 2>&1 \
@@ -1907,13 +1958,13 @@ if [ "$STATUSLIKE" = "1" ] && [ "$ACTION" = "post" ]; then
     [ "$(printf '%s' "$s2n" | "$JQ_BIN" -r '.eligible // false' 2>/dev/null || echo false)" != "true" ] || S2_NODOC=1
   fi
   if [ "$CAMPAIGN" = "uvn-status" ] && [ "$S2_NODOC" != "1" ]; then
-    DOCS_WHY="$(docs_submitted "$CONTACT_ID")"
+    DOCS_WHY="$(for_each_account_contact docs_submitted)"
     if [ -n "$DOCS_WHY" ]; then
       ledger skip --campaign "$CAMPAIGN" --request-ids "$ALL_IDS" >/dev/null || die "the ledger write failed."
       printf 'SKIPPED docs_submitted credits=%s (%s)\n' "$N" "$DOCS_WHY"; exit 0
     fi
   fi
-  RECENT_WHY="$(recently_messaged "$CONTACT_ID")"
+  RECENT_WHY="$(for_each_account_contact recently_messaged)"
   if [ -n "$RECENT_WHY" ]; then
     # Not closed: the user may get this note once the 7 days have passed.
     printf 'DEFERRED messaged_7d credits=%s (%s)\n' "$N" "$RECENT_WHY"; exit 3
@@ -1923,13 +1974,18 @@ if [ "$STATUSLIKE" = "1" ] && [ "$ACTION" = "post" ]; then
   # claim-proof-ask always goes by email.
   if [ -z "$THREAD" ] && [ "$CAMPAIGN" != "claim-proof-ask" ]; then
     since14=$(( $(date -u +%s) - 14*86400 ))
-    open="$(printf '%s' "$CONTACT_ID" | "$JQ_BIN" -Rc --argjson since "$since14" \
-      '{query: {operator: "AND", value: [{field: "contact_ids", operator: "=", value: .}, {field: "state", operator: "=", value: "open"}, {field: "updated_at", operator: ">", value: $since}]}, pagination: {per_page: 50}}' \
-      | api POST /conversations/search)" || { printf 'OPEN-CONVERSATION LOOKUP FAILED (curl); nothing was sent or claimed:\n%s\n' "$open" >&2; exit 4; }
-    printf '%s' "$open" | "$JQ_BIN" -e '(.conversations|type) == "array"' >/dev/null 2>&1 \
-      || { printf 'OPEN-CONVERSATION LOOKUP NOT VERIFIED; nothing was sent or claimed:\n%s\n' "$open" >&2; exit 4; }
-    THREAD="$(printf '%s' "$open" | "$JQ_BIN" -r --argjson since "$since14" \
-      '[.conversations[] | select((.state // "") == "open" and ((.updated_at // 0) > $since))] | max_by(.updated_at) | .id // empty | tostring')"
+    # r5: across every Intercom user of this account (a mobile conversation is theirs too).
+    open_all="[]"
+    for oc in $(printf '%s' "$ACCOUNT_CONTACTS" | "$JQ_BIN" -r '.[]'); do
+      open="$(printf '%s' "$oc" | "$JQ_BIN" -Rc --argjson since "$since14" \
+        '{query: {operator: "AND", value: [{field: "contact_ids", operator: "=", value: .}, {field: "state", operator: "=", value: "open"}, {field: "updated_at", operator: ">", value: $since}]}, pagination: {per_page: 50}}' \
+        | api POST /conversations/search)" || { printf 'OPEN-CONVERSATION LOOKUP FAILED (curl); nothing was sent or claimed:\n%s\n' "$open" >&2; exit 4; }
+      printf '%s' "$open" | "$JQ_BIN" -e '(.conversations|type) == "array"' >/dev/null 2>&1 \
+        || { printf 'OPEN-CONVERSATION LOOKUP NOT VERIFIED; nothing was sent or claimed:\n%s\n' "$open" >&2; exit 4; }
+      open_all="$(printf '%s' "$open" | "$JQ_BIN" -c --argjson acc "$open_all" '$acc + .conversations')"
+    done
+    THREAD="$(printf '%s' "$open_all" | "$JQ_BIN" -r --argjson since "$since14" \
+      '[.[] | select((.state // "") == "open" and ((.updated_at // 0) > $since))] | max_by(.updated_at) | .id // empty | tostring')"
     if [ -n "$THREAD" ]; then
       printf '%s' "$THREAD" | grep -qE '^[0-9]{1,24}$' || { echo "OPEN-CONVERSATION LOOKUP NOT VERIFIED: conversation id '$THREAD' is not numeric" >&2; exit 4; }
       THREAD_AUTO=1; MESSAGE_TYPE="comment"
@@ -1947,9 +2003,15 @@ thread_check() { # sets THREAD_WHY (empty when $THREAD can carry the note) and T
      || ! printf '%s' "$tconv" | "$JQ_BIN" -e --arg t "$THREAD" '(.type // "") == "conversation" and ((.id // "") | tostring) == $t' >/dev/null 2>&1; then
     THREAD_UNREAD=1; THREAD_WHY="conversation $THREAD could not be read: ${tconv:0:300}"; return 0
   fi
-  if [ "$(printf '%s' "$tconv" | "$JQ_BIN" -r '[(.contacts.contacts // [])[] | (.id // "") | tostring] | join(",")')" != "$CONTACT_ID" ]; then
-    THREAD_WHY="conversation $THREAD is not this user's own conversation (its contacts are not exactly the Intercom user of the account email); not sending."; return 0
+  # r5: the thread's single contact must be ONE of this account's Intercom users (web or mobile);
+  # the note then goes to that contact (CONTACT_ID follows it, so the ledger names who got it).
+  tc_one="$(printf '%s' "$tconv" | "$JQ_BIN" -r --argjson acc "$ACCOUNT_CONTACTS" '
+    [(.contacts.contacts // [])[] | (.id // "") | tostring] as $c
+    | if ($c | length) == 1 and ($acc | index($c[0])) != null then $c[0] else "" end')"
+  if [ -z "$tc_one" ]; then
+    THREAD_WHY="conversation $THREAD is not this user's own conversation (its contacts are not exactly one Intercom user of this account); not sending."; return 0
   fi
+  THREAD_CONTACT_PICK="$tc_one"
   assignee="$(printf '%s' "$tconv" | "$JQ_BIN" -r '.admin_assignee_id // empty | tostring')"
   if [ -n "$assignee" ] && [ "$assignee" != "0" ] && [ "$assignee" != "$INTERCOM_ADMIN_ID" ]; then
     THREAD_WHY="conversation $THREAD is assigned to a human (admin $assignee), who is handling this user; not sending."; return 0
@@ -1960,8 +2022,12 @@ thread_check() { # sets THREAD_WHY (empty when $THREAD can carry the note) and T
   btag="$(printf '%s' "$tconv" | "$JQ_BIN" -r --arg b "$BLOCKED_CONV_TAGS" '($b | split(" ")) as $bl | [(.tags.tags // [])[] | (.name // "") | ascii_downcase | select(IN($bl[]))] | .[0] // empty')"
   [ -z "$btag" ] || THREAD_WHY="conversation $THREAD carries the '$btag' tag (do not auto-message); not sending."
 }
+THREAD_CONTACT_PICK=""
 if [ -n "$THREAD" ] && [ "$ACTION" = "post" ]; then
   thread_check
+  if [ -z "$THREAD_WHY" ] && [ -n "$THREAD_CONTACT_PICK" ]; then
+    CONTACT_ID="$THREAD_CONTACT_PICK"
+  fi
   if [ -n "$THREAD_WHY" ]; then
     if [ "$R1_THREAD" = "1" ]; then
       printf 'HELD r1_filing_thread credits=%s (%s); nothing was sent or claimed\n' "$N" "${THREAD_WHY:0:300}"; exit 3
@@ -1975,7 +2041,7 @@ if [ -n "$THREAD" ] && [ "$ACTION" = "post" ]; then
   fi
 fi
 if [ "$CAMPAIGN" = "retro-past" ]; then
-  DOCS_WHY="$(docs_submitted "$CONTACT_ID")"
+  DOCS_WHY="$(for_each_account_contact docs_submitted)"
   if [ "$ACTION" = "doc-check" ]; then
     if [ -n "$DOCS_WHY" ]; then printf 'DOCS %s\n' "$DOCS_WHY"; else printf 'NO_DOCS\n'; fi
     exit 0

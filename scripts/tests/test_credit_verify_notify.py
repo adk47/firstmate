@@ -85,6 +85,8 @@ os.environ["CREDIT_RETRO_ORG_AFFILIATION"] = AFFILIATION_FILE
 os.environ.setdefault("CREDIT_TRUST_PAYING_USERS_FILE", os.path.join(_PROOF_DIR, "paying-users.json"))
 
 from credit_review import affiliation, verify_ledger, verify_notify  # noqa: E402
+from credit_review import verify_notify as _vn_r5  # noqa: E402
+_vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come from the replica in tests
 
 # The env vars above are read at import time; another test module in the same process (e.g.
 # test_credit_retro via credit_retro.takeback) may have imported these first, so pin them too.
@@ -105,6 +107,56 @@ def req(rid, *, pid=PID, status="approved", email="jane@example.com", name="Jane
             "spotifyTrackArtists": [{"id": "a", "name": artist}], "credits": list(roles), "createdAt": created,
             "user": {"id": _uid_of(email), "fullName": name, "email": email} if email else None}
 
+
+
+class PresentedIdsTests(unittest.TestCase):
+    """r5 (Fable [key=x2-sample-1027]): every payload naming a Muso user carries user.presented_ids (the
+    account's own presented profiles: the mobile app's Intercom login id), whether or not the producer
+    already set the professional id. Additive: an unreadable lookup degrades to today's matcher."""
+
+    def setUp(self):
+        self.saved = (verify_notify.PRESENTED_LOOKUP, verify_notify.IDENTITY_LOOKUP)
+        verify_notify.IDENTITY_LOOKUP = lambda ids: {str(u): {"professional_id": f"pro-{u}", "auth_id": ""} for u in ids}
+
+    def tearDown(self):
+        verify_notify.PRESENTED_LOOKUP, verify_notify.IDENTITY_LOOKUP = self.saved
+
+    def pay(self, uid, **user):
+        return {"user": {"email": f"u{uid}@x.com", "id": str(uid), **user}, "credits": [{"request_id": f"r{uid}"}]}
+
+    def test_presented_ids_reach_every_payload_with_a_user(self):
+        seen = []
+        verify_notify.PRESENTED_LOOKUP = lambda ids: seen.append(list(ids)) or {"45": ["5d0c7c1a-8e2b-4f6d-9a3e-1b7c4d2e6f80", "bad id"], "46": []}
+        out, held = verify_notify.attach_identities(
+            [self.pay(45), self.pay(46, professional_id="pro-46"), {"user": {"email": "owner@x.com"}, "credits": []}], Report())
+        self.assertEqual(held, [])
+        self.assertEqual(out[0]["user"]["presented_ids"], ["5d0c7c1a-8e2b-4f6d-9a3e-1b7c4d2e6f80"], "a malformed id is dropped")
+        self.assertNotIn("presented_ids", out[1]["user"], "none found: the payload is unchanged")
+        self.assertNotIn("presented_ids", out[2]["user"], "no Muso user: nothing to look up")
+        self.assertEqual(seen, [["45", "46"]])
+
+    def test_an_unreadable_lookup_degrades_to_the_professional_id_only(self):
+        def down(ids):
+            raise RuntimeError("trino down")
+        verify_notify.PRESENTED_LOOKUP = down
+        out, held = verify_notify.attach_identities([self.pay(45)], Report())
+        self.assertEqual((out[0]["user"]["professional_id"], "presented_ids" in out[0]["user"], held), ("pro-45", False, []))
+
+    def test_the_real_lookup_uses_the_resolver(self):
+        seen = []
+
+        def q(sql):
+            seen.append(sql)
+            if "neptuneprofessionalid FROM postgresql_core.public.users WHERE id IN" in sql:
+                return [["45", "c-45", "pro-45"]]
+            if "public.claiming WHERE userid IN" in sql:
+                return [["45", "c-45"]]
+            if "public.claiming WHERE CAST(profileid AS varchar) IN" in sql:
+                return [["c-45", "45", "processed"]]
+            if "CAST(representationprofileid AS varchar) IN" in sql:
+                return [["45", "pro-45", None, "c-45"]]
+            raise AssertionError(sql)
+        self.assertEqual(verify_notify.account_presented_ids([45], query=q), {"45": ["c-45"]})
 
 
 class FakeAdmin:

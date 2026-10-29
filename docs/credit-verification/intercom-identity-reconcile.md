@@ -66,6 +66,39 @@ python3 scripts/credit-review.py intercom-reconcile --revert irc-<ts>-<hex> --mo
 - uvn-status refusals are terminal in the verify ledger (only the status notes have the 7-day hold).
   A fixed account whose only refusal was a uvn-status one is NOT re-opened by this job.
 
+## r5: the presented-profile resolver (Fable `[key=x2-sample-1027]`, 2026-10-27)
+
+Ruling A's A2 assumed an external_id that is no account's professional id is an orphan. It is not:
+core's `/v4/user` publishes the account's **presented** profile as `id` (core-backend
+`src/services/user/getUserProfile.js`, B2), and the mobile app logs into Intercom with that id
+(mobile `lib/app.dart` `setupUserInfo(userIdentifier: accDetails.id)`). The web app boots with the
+professional id. So a claimant on mobile has an Intercom user keyed on a claimed profile, often next to
+a web user keyed on the professional id. Census (intercom-id-reconcile-x2, firstmate
+`data/intercom-id-reconcile-x2/report.md`): of 143 "no account" conversations linked by verified email,
+127 carried a profile that account has a processed claim on or represents, 110 of the 113 user
+contacts were mobile-app contacts, and **86 of the 87 A2 fixes** of the paid dry run
+`irc-dry-20261027T225825Z-e1f1d2` were the account's own presented profile. Fable: "the data is not
+wrong, the MATCHER is". No `--mode apply` runs on A2 rows.
+
+`scripts/credit_review/identity_resolver.py` is the one rule. An external_id resolves to an account
+when it is the professional id, the Auth0 subject, a processed (not deleted) claim's profile or
+`users.representationprofileid` of **exactly one** account. 0 or more than 1 owner refuses, and a
+reverted claim by any other account refuses (that account's app may have logged in with it). A name is
+never an input. Wired into:
+- `verify_notify.attach_identities`: every payload naming a Muso user carries `user.presented_ids`
+  (additive: an unreadable lookup degrades to today's matcher, logged);
+- `intercom-verify-request.sh`: a presented id is this account's own identity, but only for a note
+  that also names the account (professional id / Auth0 subject). Web + mobile users of one account:
+  the email goes to the one with the professional id. An in-thread note goes to the thread's own
+  contact when it is one of them, and the ledger records that contact. The document scan, the 7-day
+  check and the open-conversation lookup read **all** of the account's users;
+- `intercom_reconcile`: an account's own presented profile is class `OK` ("never overwritten"), and a
+  profile another account claimed (or had a reverted claim on) is `A3`;
+- `paid-status/email_route.py`: the A3 check counts presented-profile owners.
+
+The proof_intake filer (hydra PR #1417) should call `identity_resolver.resolve` and record
+`matched_by = presented_profile`.
+
 ## Ruling B: the fraud lens (`fraud_lens.py`)
 
 Two lists, two meanings (Fable `ruling-watchlist-consistency-1026`, 10-26):

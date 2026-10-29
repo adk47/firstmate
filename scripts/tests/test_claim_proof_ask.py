@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from credit_review import claim_proof_ask, verify_ledger  # noqa: E402
+from credit_review import verify_notify as _vn_r5  # noqa: E402
+_vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come from the replica in tests
 from credit_retro import waves  # noqa: E402
 
 NOW = datetime(2026, 10, 24, 9, 0, tzinfo=timezone.utc)

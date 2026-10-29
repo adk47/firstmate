@@ -750,6 +750,42 @@ def account_identities(user_ids: list[Any], query: Query | None = None) -> dict[
 IDENTITY_LOOKUP: Callable[[list[Any]], dict[str, dict[str, str]]] = account_identities
 
 
+def account_presented_ids(user_ids: list[Any], query: Query | None = None) -> dict[str, list[str]]:
+    """{muso user id: [presented profile ids]} (r5, credit_review.identity_resolver): the account's
+    processed claims and representation profile that resolve to exactly that account. The mobile app
+    logs into Intercom with the presented profile, so these are also this account's Intercom identity."""
+    from . import identity_resolver  # noqa: PLC0415 - kept lazy, like the replica itself
+    return identity_resolver.presented_ids(user_ids, query or (lambda q: trino(q, AUTH_LOOKUP_CMD)))
+
+
+PRESENTED_LOOKUP: Callable[[list[Any]], dict[str, list[str]]] = account_presented_ids
+_presented_unread_logged = False
+
+
+def _with_presented(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each payload naming a Muso user gets user.presented_ids (only when it has any). Additive: the
+    gate only ever WIDENS the account's own Intercom contacts with them, so an unreadable lookup
+    leaves today's behaviour (professional id / Auth0 subject only), logged once."""
+    global _presented_unread_logged
+    uids = sorted({str(p["user"].get("id") or "") for p in payloads
+                   if str(p["user"].get("id") or "").isdigit() and "presented_ids" not in p["user"]})
+    if not uids:
+        return payloads
+    try:
+        found = PRESENTED_LOOKUP(uids) or {}
+    except Exception as exc:  # noqa: BLE001 - additive identity: degrade to today's matcher
+        if not _presented_unread_logged:
+            _presented_unread_logged = True
+            from .runner import log
+            log(f"presented profile ids unreadable ({str(exc)[:160]}); recipients matched by professional id only")
+        return payloads
+    out = []
+    for p in payloads:
+        ids = [x for x in (found.get(str(p["user"].get("id") or "")) or []) if PRO_ID_RE.fullmatch(str(x))]
+        out.append({**p, "user": {**p["user"], "presented_ids": ids}} if ids and "presented_ids" not in p["user"] else p)
+    return out
+
+
 def attach_identities(payloads: list[dict[str, Any]], report: Report
                       ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """(payloads, held): each payload naming a Muso user (user.id) without user.professional_id
@@ -759,7 +795,7 @@ def attach_identities(payloads: list[dict[str, Any]], report: Report
     propagates: the caller sends nothing."""
     need = {id(p) for p in payloads if str(p["user"].get("id") or "") and "professional_id" not in p["user"]}
     if not need:
-        return payloads, []
+        return _with_presented(payloads), []
     found = IDENTITY_LOOKUP([p["user"]["id"] for p in payloads if id(p) in need])
     out: list[dict[str, Any]] = []
     held: list[dict[str, Any]] = []
@@ -773,7 +809,7 @@ def attach_identities(payloads: list[dict[str, Any]], report: Report
             p = {**p, "user": {**p["user"], "professional_id": ident["professional_id"],
                                "auth_id": ident.get("auth_id", "")}}
         out.append(p)
-    return out, held
+    return _with_presented(out), held
 
 
 def auth_subject(raw: Any) -> str:

@@ -110,6 +110,9 @@ case "$method $path" in
   "POST /conversations/search")
     if [ "$(printf '%s' "$payload" | jq -r '.query.field')" = "contact_ids" ]; then
       # The document check: this contact's conversations (none unless a test says so).
+      # STUB_CONTACT_CONVS_<contact id> answers for that one contact only (r5 dual contacts).
+      per="STUB_CONTACT_CONVS_$(printf '%s' "$payload" | jq -r '.query.value' | tr -cd 'A-Za-z0-9')"
+      if [ -n "${!per:-}" ]; then printf '%s' "${!per}"; exit 0; fi
       printf '%s' "${STUB_CONTACT_CONVS:-}"
       [ -n "${STUB_CONTACT_CONVS:-}" ] || printf '{"type":"conversation.list","conversations":[],"pages":{}}'
       exit 0
@@ -2865,4 +2868,133 @@ Caroline, Muso Support" ]
   run -0 "$GATE" send --campaign claim-proof-pending --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ
   run -0 "$GATE" tag-proof --message-id 1001 --dry-run
   [ "$output" = "DRY-RUN tag claim-proof conversation=777 attachments=1" ]
+}
+
+# --- r5: the account's presented profile (Fable [key=x2-sample-1027]) -------------------------
+# The mobile app logs into Intercom with core /v4/user's id, the account's PRESENTED profile (a
+# processed claim or its representation profile), the web app with users.neptuneProfessionalId,
+# so one account can have two Intercom users. The driver hands the gate user.presented_ids
+# (credit_review.identity_resolver: each owned by exactly this account); the gate treats them as
+# this account's own identity, never as a name for an account on their own.
+PRESENTED="5d0c7c1a-8e2b-4f6d-9a3e-1b7c4d2e6f80"
+presented() { jq --argjson p "$1" '.user.presented_ids = $p' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"; }
+dual() { printf '{"type":"list","data":[{"id":"web1","role":"user","email":"jane.doe@example.com","external_id":"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"},{"id":"mob1","role":"user","email":"jane.doe@example.com","external_id":"%s"}]}' "$PRESENTED"; }
+mobile_only() { printf '{"type":"list","data":[{"id":"mob1","role":"user","email":"jane.doe@example.com","external_id":"%s"}]}' "$PRESENTED"; }
+
+@test "r5: a mobile-only Intercom user whose external_id is the account's presented profile is the recipient; without presented_ids it is still refused" {
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  STUB_CONTACTS="$(mobile_only)" run -1 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"external_id mismatch"* ]]
+  [ "$(posts)" -eq 0 ]
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  credits "$TEST_TMPDIR/c.json" Jane "s2:Mixing:B:X"; presented "[\"$PRESENTED\"]"
+  STUB_CONTACTS="$(mobile_only)" run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+  [ "$(msg .to.id)" = "mob1" ]
+  [ "$(sql "SELECT contact_id FROM verify_messages WHERE status='sent'")" = "mob1" ]
+}
+
+@test "r5: a presented id never names an account on its own (no professional id or Auth0 subject: refused, send and check alike)" {
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"; presented "[\"$PRESENTED\"]"
+  jq '.user.professional_id = "" | .user.auth_id = ""' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
+  STUB_CONTACTS="$(mobile_only)" run -1 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"no account Intercom identity"* || "$output" == *"external_id mismatch"* ]]
+  [ "$(posts)" -eq 0 ]
+  # A malformed presented id is dropped by the normaliser, never matched.
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  credits "$TEST_TMPDIR/c.json" Jane "s2:Mixing:B:X"; presented '["has space", 7, {"x":1}]'
+  STUB_CONTACTS='{"type":"list","data":[{"id":"mob1","role":"user","email":"jane.doe@example.com","external_id":"has space"}]}' \
+    run -1 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "r5: web + mobile users of one account: the email goes to the web user, and the document and 7-day checks read BOTH" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"; presented "[\"$PRESENTED\"]"
+  STUB_CONTACTS="$(dual)" run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+  [ "$(msg .to.id)" = "web1" ]
+  grep -q '"value":"web1"' "$CURL_STUB_PAYLOADS"
+  grep -q '"value":"mob1"' "$CURL_STUB_PAYLOADS"
+  # A document the user sent from the app (on the mobile user) skips the ask.
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  credits "$TEST_TMPDIR/c.json" Jane "u2:Mixing:Song B:Big Star"; presented "[\"$PRESENTED\"]"
+  STUB_CONTACTS="$(dual)" STUB_CONTACT_CONVS_mob1='{"conversations":[{"id":"6","source":{"author":{"type":"user"},"attachments":[{"name":"split.pdf"}]}}],"pages":{}}' \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED docs_submitted credits=1"* ]]
+  [ "$(posts)" -eq 1 ]
+  # A failed read on the second contact sends nothing.
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  credits "$TEST_TMPDIR/c.json" Jane "u3:Mixing:Song C:Big Star"; presented "[\"$PRESENTED\"]"
+  STUB_CONTACTS="$(dual)" STUB_CONTACT_CONVS_mob1='{"type":"error.list"}' \
+    run -4 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "r5: two users that BOTH carry this account's presented ids and neither the professional id are refused (no guess)" {
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"; presented "[\"$PRESENTED\", \"$OTHER_PRO\"]"
+  STUB_CONTACTS="$(printf '{"type":"list","data":[{"id":"m1","role":"user","email":"jane.doe@example.com","external_id":"%s"},{"id":"m2","role":"user","email":"jane.doe@example.com","external_id":"%s"}]}' "$PRESENTED" "$OTHER_PRO")" \
+    run -1 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"2 of them this account's, and not exactly one carries its professional id"* ]]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "r5: an in-thread status note goes into the mobile user's own conversation, and the ledger names that contact" {
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"; presented "[\"$PRESENTED\"]"
+  STUB_CONTACTS="$(dual)" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"mob1"}]')" \
+    run -0 "$LOCKED" send --campaign status-doc-received --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment conversation=777"* ]]
+  [ "$(sql "SELECT contact_id FROM verify_messages WHERE status='sent'")" = "mob1" ]
+  # Without the presented id, the mobile conversation is not this user's own: refused as before.
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  credits "$TEST_TMPDIR/c.json" Jane "s2:Mixing:B:X"
+  STUB_CONTACTS="$(dual)" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"mob1"}]')" \
+    run -1 "$LOCKED" send --campaign status-doc-received --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"not this user's own conversation"* ]]
+  [ "$(replies)" -eq 1 ]
+}
+
+@test "r5 (QA @4e23bc6b): GOLIVE in-thread on the MOBILE contact passes G2 (thread contact picked from the account's users before G2); G3 still binds the receipt" {
+  unlocked_gate merge
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  MOB='{"type":"contact","id":"mob1","role":"user","created_at":1700000000}'
+  UCONV='{"type":"conversation","id":"777","source":{"author":{"type":"user","id":"mob1"}},"contacts":{"type":"contact.list","contacts":[{"type":"contact","id":"mob1"}]},"conversation_parts":{"conversation_parts":[]}}'
+  mergefile "$TEST_TMPDIR/m.json" ".user.presented_ids = [\"$PRESENTED\"]"
+  STUB_CONTACTS="$(dual)" STUB_CONTACT_GET="$MOB" STUB_CONVERSATION="$UCONV" \
+    run -0 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --conversation 777
+  [[ "$output" == "POSTED comment conversation=777"* ]]
+  [ "$(sql "SELECT contact_id FROM verify_messages WHERE status='sent'")" = "mob1" ]
+  # without the presented id the mobile contact is not the account's: G2 refuses, nothing sent
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  mergefile "$TEST_TMPDIR/m.json" '.credits[0].request_id = "merge-other"'
+  STUB_CONTACTS="$(dual)" STUB_CONTACT_GET="$MOB" STUB_CONVERSATION="$UCONV" \
+    run -1 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --conversation 777
+  [[ "$output" == *"G2: conversation 777's contact is not the account's Intercom user"* ]]
+  [ "$(replies)" -eq 1 ]
+  # R1 receipt: the mobile contact filed the document in 777 -> it posts into 777 (G2 picks mob1, G3 agrees)
+  unlocked_gate received
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"; presented "[\"$PRESENTED\"]"
+  jq '.user.filing_conversation = "777"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/f.json"
+  STUB_CONTACTS="$(dual)" STUB_CONTACT_GET="$MOB" STUB_CONVERSATION="$UCONV" STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}' \
+    run -0 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/f.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment"* ]]
+  [ "$(replies)" -eq 2 ]
+}
+
+@test "r5 (QA @4e23bc6b): presented ids are never silently truncated - the 21st (sorted last) still matches; an implausible count refuses loudly" {
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  ids="$(jq -nc '[range(0;20) | "0000000\(.)-aaaa-4aaa-8aaa-000000000000"]')"
+  LAST="ffffffff-ffff-4fff-8fff-ffffffffffff"
+  presented "$(jq -nc --argjson a "$ids" --arg l "$LAST" '$a + [$l]')"
+  [ "$(jq '.user.presented_ids | length' "$TEST_TMPDIR/c.json")" -eq 21 ]
+  STUB_CONTACTS="$(printf '{"type":"list","data":[{"id":"mob1","role":"user","email":"jane.doe@example.com","external_id":"%s"}]}' "$LAST")" \
+    run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+  [ "$(msg .to.id)" = "mob1" ]
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  credits "$TEST_TMPDIR/c.json" Jane "s2:Mixing:B:X"
+  presented "$(jq -nc '[range(0;501) | "id-\(.)"]')"
+  run -1 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"more than 500 ids; refusing rather than matching a subset"* ]]
+  [ "$(posts)" -eq 1 ]
 }

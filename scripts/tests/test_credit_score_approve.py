@@ -16,6 +16,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "scripts" / "tests"))
 import credit_test_env  # noqa: E402,F401  (test log isolation)
 from credit_review import decide, score_approve as sa, verify_notify  # noqa: E402
+from credit_review import verify_notify as _vn_r5  # noqa: E402
+_vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come from the replica in tests
 
 NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
 

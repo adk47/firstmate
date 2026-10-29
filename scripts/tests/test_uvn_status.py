@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from credit_review import fraud_lens, uvn_status, verify_ledger, verify_notify, withdrawal_confirm  # noqa: E402
+from credit_review import verify_notify as _vn_r5  # noqa: E402
+_vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come from the replica in tests
 
 # The fake replica below answers every non-users query with request rows, so the real fraud lens
 # (its own queries) is replaced here by one that holds nobody. The lens itself, and the runner's

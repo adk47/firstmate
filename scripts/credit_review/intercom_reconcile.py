@@ -23,6 +23,10 @@ Classes (per Intercom user contact for the account email, then per account):
                                                                      ruling: no email from this job)
   plus NONE (no Intercom user for the email: reported), OK (already matches: the hold is stale,
   reported), and holds that are not identity cases.
+  r5 (Fable [key=x2-sample-1027]): an external_id that is the account's own PRESENTED profile (a
+  processed claim or its representation profile, credit_review.identity_resolver; what the mobile app
+  logs into Intercom with) is the account's identity, never an orphan: OK, never overwritten. A profile
+  another account claimed, or had a reverted claim on, names that account: A3.
 
 WRITE CONDITIONS (firstmate spec: every A1 / A2 / A4 write, not only A2): the account email is
 confirmed (users.emailconfirmed); the account is >= MIN_ACCOUNT_DAYS old; no other Muso account
@@ -226,6 +230,7 @@ class Account:
     other_holders: list[str] = field(default_factory=list)      # other users rows with this email
     admin_history: list[str] = field(default_factory=list)      # action_log admin create / email change to this email, another account
     sources: list[str] = field(default_factory=list)            # "<campaign>:<reason kind>"
+    presented_ids: list[str] = field(default_factory=list)      # r5: its own presented profile ids seen on contacts
 
     def is_account(self, ext: str) -> bool:
         """The gate's ext_is_account: the professional id or the Auth0 subject (with or without auth0|)."""
@@ -400,17 +405,55 @@ def ext_owners(exts: Iterable[str], query: Query) -> dict[str, set[str]]:
 
 # -- classifier (pure) -------------------------------------------------------------------------
 
-def contact_class(a: Account, ext: str, owners: dict[str, set[str]]) -> tuple[str, list[str]]:
-    """One Intercom contact against the account: (A1 | MATCH | A3 | OWN_LEGACY | UNCHECKABLE | A2, other ids)."""
+def presented_owners(exts: Iterable[str], query: Query) -> dict[str, set[str]]:
+    """r5 (Fable [key=x2-sample-1027]): {external_id: Muso user ids that own it as a PRESENTED profile}:
+    a processed claim or the representation profile (credit_review.identity_resolver). The mobile app
+    logs into Intercom with the presented profile, so such an id is an account's own, never an orphan.
+
+    ACTIVE ownership only (QA @5905288 on #1429): an account whose only tie to the profile is a
+    REVERTED claim does not present it any more, so a contact keyed on it is still that account's
+    mismatch (A2) and must be repairable. Reverted holders are returned separately by
+    `reverted_holders()` and used as CONFLICT evidence (they block an A2 write to someone else),
+    never as ownership."""
+    from . import identity_resolver  # noqa: PLC0415
+    vals = sorted({x for x in exts if x and EXT_RE.match(x)})
+    if not vals:
+        return {}
+    own, _rev = identity_resolver.facts(vals, query)
+    return {x: {str(u) for u, how in own.get(x, {}).items() if identity_resolver.PRESENTED_PROFILE in how}
+            for x in vals}
+
+
+def reverted_holders(exts: Iterable[str], query: Query) -> dict[str, set[str]]:
+    """{external_id: Muso user ids with a REVERTED claim on it}. Conflict evidence only: another
+    account's reverted claim means the id is not free to be written over, but it never makes the
+    id an account's own presented identity (QA @5905288)."""
+    from . import identity_resolver  # noqa: PLC0415
+    vals = sorted({x for x in exts if x and EXT_RE.match(x)})
+    if not vals:
+        return {}
+    _own, rev = identity_resolver.facts(vals, query)
+    return {x: {str(u) for u in rev.get(x, set())} for x in vals}
+
+
+def contact_class(a: Account, ext: str, owners: dict[str, set[str]],
+                  reverted: dict[str, set[str]] | None = None) -> tuple[str, list[str]]:
+    """One Intercom contact against the account: (A1 | MATCH | PRESENTED | A3 | OWN_LEGACY | UNCHECKABLE | A2,
+    other ids). PRESENTED (r5): the account's own presented profile (the mobile app's login id), never written.
+    `reverted` (QA @5905288): accounts holding a REVERTED claim on the id. Another account's reverted
+    claim is conflict evidence (A3, the id is not free); the account's OWN reverted claim is not
+    ownership, so the contact stays a repairable A2."""
     if not ext:
         return "A1", []
     if a.is_account(ext):
         return "MATCH", []
     if not EXT_RE.match(ext) or ext not in owners:
         return "UNCHECKABLE", []
-    others = sorted(owners[ext] - {str(a.user_id)})
+    others = sorted((owners[ext] | (reverted or {}).get(ext, set())) - {str(a.user_id)})
     if others:
         return "A3", others
+    if ext in a.presented_ids:
+        return "PRESENTED", []
     if owners[ext]:
         return "OWN_LEGACY", []   # e.g. the account's bare numeric id: not the gate's identity, not covered by the ruling
     return "A2", []
@@ -443,7 +486,8 @@ def write_blockers(a: Account, *, now: datetime, other_contact_accounts: list[st
 
 
 def classify(a: Account, contacts: list[dict[str, Any]], owners: dict[str, set[str]], *, now: datetime,
-             pro_contacts: list[dict[str, Any]] | None = None, verdict: fraud_lens.Verdict | None = None) -> Row:
+             pro_contacts: list[dict[str, Any]] | None = None, verdict: fraud_lens.Verdict | None = None,
+             reverted: dict[str, set[str]] | None = None) -> Row:
     """The ruling's A1-A5 table for one account. `contacts`: every Intercom contact (any role) whose
     email is the account email; `pro_contacts`: every contact whose external_id is the professional id."""
     row = Row(account_id=a.user_id, cls="", decision="", sources=list(a.sources), new_external_id=a.professional_id)
@@ -464,7 +508,7 @@ def classify(a: Account, contacts: list[dict[str, Any]], owners: dict[str, set[s
     other_accounts: list[str] = []
     per: list[tuple[dict[str, Any], str]] = []
     for c in mine:
-        cls, others = contact_class(a, ext_of(c), owners)
+        cls, others = contact_class(a, ext_of(c), owners, reverted)
         other_accounts += others
         if c.get("role") == "user":
             per.append((c, cls))
@@ -475,6 +519,28 @@ def classify(a: Account, contacts: list[dict[str, Any]], owners: dict[str, set[s
     if len(matches) == 1:
         row.cls, row.decision, row.why = "OK", ALREADY_OK, "the Intercom user already carries this account's id"
         row.contact_id = str(matches[0].get("id") or "")
+        return row
+    presented = [c for c, k in per if k == "PRESENTED"]
+    if presented and not matches:
+        # r5: the user's own mobile identity. Writing the professional id over it would break the
+        # app's identified session and re-split on the next login: never written. It is OK only when it
+        # is unambiguous (QA @f0d2f40): exactly one presented user, and no contact with this email names
+        # another account. Otherwise it is a refusal for cs, still never written, matching the send gate
+        # (which refuses several account users with no single canonical one).
+        row.contact_id = str(presented[0].get("id") or "")
+        if other_accounts:
+            row.other_account_ids = sorted(set(other_accounts))
+            row.cls, row.decision = "A3", REFUSE_CS
+            row.why = ("an Intercom user carries this account's presented profile id, but a contact with this email names "
+                       "another Muso account; never written")
+            return row
+        if len(presented) > 1:
+            row.cls, row.decision, row.contact_id = "A4", REFUSE_CS, ""
+            row.why = (f"{len(presented)} Intercom users carry this account's presented profile ids and none its "
+                       "professional id (no single recipient); never written")
+            return row
+        row.cls, row.decision = "OK", ALREADY_OK
+        row.why = "the Intercom user carries this account's presented profile id (the mobile app's login id); never overwritten"
         return row
     row.other_account_ids = sorted(set(other_accounts))
     if len(users) == 1:
@@ -504,7 +570,7 @@ def classify(a: Account, contacts: list[dict[str, Any]], owners: dict[str, set[s
         row.decision, row.why = REFUSE_CS, "malformed Intercom contact id"
         return row
     pro_elsewhere = any(str(c.get("id")) != row.contact_id for c in (pro_contacts or []))
-    uncheckable = sum(1 for c in mine if contact_class(a, ext_of(c), owners)[0] == "UNCHECKABLE")
+    uncheckable = sum(1 for c in mine if contact_class(a, ext_of(c), owners, reverted)[0] == "UNCHECKABLE")
     blockers = write_blockers(a, now=now, other_contact_accounts=other_accounts, pro_elsewhere=pro_elsewhere,
                               uncheckable=uncheckable)
     if verdict is None or verdict.held:
@@ -580,8 +646,20 @@ def classify_accounts(accts: dict[int, Account], *, query: Query, api: Api, lens
             continue
         contacts[uid] = search_contacts(api, "email", a.email)
         pro_contacts[uid] = search_contacts(api, "external_id", a.professional_id)
-    owners = ext_owners({ext_of(c) for cs in contacts.values() for c in cs}, query)
-    return [classify(a, contacts[uid], owners, now=now, pro_contacts=pro_contacts[uid], verdict=verdicts.get(uid))
+    exts = {ext_of(c) for cs in contacts.values() for c in cs}
+    owners = ext_owners(exts, query)
+    pres = presented_owners(exts, query)
+    for x, us in pres.items():
+        owners.setdefault(x, set()).update(us)
+    # Reverted claims are conflict evidence, never ownership (QA @5905288): they are kept apart
+    # from `owners` so an account's own reverted claim cannot turn its mismatched contact into OK.
+    reverted = reverted_holders(exts, query)
+    for x in reverted:
+        owners.setdefault(x, set())
+    for uid, a in accts.items():
+        a.presented_ids = sorted(x for x, us in pres.items() if us == {str(uid)})
+    return [classify(a, contacts[uid], owners, now=now, pro_contacts=pro_contacts[uid], verdict=verdicts.get(uid),
+                     reverted=reverted)
             for uid, a in sorted(accts.items())]
 
 

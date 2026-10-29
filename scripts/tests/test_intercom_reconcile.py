@@ -179,6 +179,97 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(r.decision, R.ALREADY_OK)
 
 
+class PresentedProfileTests(unittest.TestCase):
+    """r5 (Fable [key=x2-sample-1027], 2026-10-27 23:46Z): the mobile app logs into Intercom with the
+    account's PRESENTED profile (core /v4/user B2), so an external_id that is the account's own processed
+    claim or representation profile is its own identity, not an orphan. Census (intercom-id-reconcile-x2,
+    paid dry run irc-dry-20261027T225825Z-e1f1d2): 86 of the 87 "A2 fix" rows were exactly this; writing
+    the professional id over them would have broken the app's identified session."""
+
+    def go(self, a, contacts, owners, **kw):
+        return R.classify(a, contacts, owners, now=NOW, pro_contacts=[], verdict=CLEAN, **kw)
+
+    def test_own_presented_profile_is_ok_never_fixed(self):
+        a = acct(presented_ids=[orphan(1)])
+        r = self.go(a, [contact("m1", "u1@x.com", orphan(1))], owners={orphan(1): {"1"}})
+        self.assertEqual((r.cls, r.decision, r.contact_id), ("OK", R.ALREADY_OK, "m1"))
+        self.assertIn("presented profile", r.why)
+
+    def test_an_accounts_own_reverted_claim_is_not_ownership_so_the_contact_stays_a2(self):
+        # QA @5905288: account 1's only tie to the profile is a REVERTED claim; its Intercom contact
+        # keyed on that id is a repairable mismatch, not OK
+        a = acct()                                              # no presented_ids: the claim is reverted
+        r = self.go(a, [contact("m1", "u1@x.com", orphan(1))], owners={orphan(1): set()},
+                    reverted={orphan(1): {"1"}})
+        self.assertEqual((r.cls, r.decision), ("A2", R.FIX))
+
+    def test_another_accounts_reverted_claim_is_conflict_evidence_never_written_over(self):
+        a = acct()
+        r = self.go(a, [contact("m1", "u1@x.com", orphan(1))], owners={orphan(1): set()},
+                    reverted={orphan(1): {"9"}})
+        self.assertEqual(r.cls, "A3")
+
+    def test_the_same_id_without_the_presented_fact_is_still_an_a2_orphan(self):
+        r = self.go(acct(), [contact("m1", "u1@x.com", orphan(1))], owners={orphan(1): set()})
+        self.assertEqual((r.cls, r.decision), ("A2", R.FIX))
+
+    def test_web_and_mobile_users_of_one_account_are_ok(self):
+        a = acct(presented_ids=[orphan(1)])
+        r = self.go(a, [contact("w1", "u1@x.com", pro(1)), contact("m1", "u1@x.com", orphan(1))],
+                    owners={pro(1): {"1"}, orphan(1): {"1"}})
+        self.assertEqual((r.cls, r.decision, r.contact_id), ("OK", R.ALREADY_OK, "w1"))
+
+    def test_a_presented_contact_beside_an_empty_one_is_ok_and_writes_nothing(self):
+        a = acct(presented_ids=[orphan(1)])
+        r = self.go(a, [contact("m1", "u1@x.com", orphan(1)), contact("e1", "u1@x.com")], owners={orphan(1): {"1"}})
+        self.assertEqual(r.decision, R.ALREADY_OK)
+
+    def test_two_presented_only_users_are_refused_for_cs_never_written(self):
+        """QA @f0d2f40: the send gate refuses two account users with no canonical one, so the reconcile
+        must not report OK (and must not write either of them)."""
+        a = acct(presented_ids=[orphan(1), orphan(2)])
+        r = self.go(a, [contact("m1", "u1@x.com", orphan(1)), contact("m2", "u1@x.com", orphan(2))],
+                    owners={orphan(1): {"1"}, orphan(2): {"1"}})
+        self.assertEqual((r.cls, r.decision, r.contact_id), ("A4", R.REFUSE_CS, ""))
+        self.assertIn("2 Intercom users carry this account's presented profile ids", r.why)
+
+    def test_a_presented_user_beside_another_accounts_contact_surfaces_a3(self):
+        """QA @f0d2f40: a contact with this email keyed to another account is a conflict, not OK."""
+        a = acct(presented_ids=[orphan(1)])
+        for role in ("user", "lead"):
+            r = self.go(a, [contact("m1", "u1@x.com", orphan(1)), contact("x9", "u1@x.com", pro(9), role=role)],
+                        owners={orphan(1): {"1"}, pro(9): {"9"}})
+            self.assertEqual((r.cls, r.decision, r.other_account_ids), ("A3", R.REFUSE_CS, ["9"]), role)
+            self.assertIn("never written", r.why)
+
+    def test_a_profile_another_account_claimed_is_a3(self):
+        r = self.go(acct(), [contact("m1", "u1@x.com", orphan(1))], owners={orphan(1): {"9"}})
+        self.assertEqual((r.cls, r.decision, r.other_account_ids), ("A3", R.REFUSE_CS, ["9"]))
+
+
+class PresentedRunTests(unittest.TestCase):
+    """End to end on the fake replica: processed claim / representation -> OK; a profile another account
+    had a REVERTED claim on -> A3 (its app may have logged in with it); a pending claim confers nothing."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="irc-r5-"))
+        self.ledger = str(self.dir / "ledger.sqlite3")
+        users = {u: {"email": f"u{u}@x.com"} for u in (1, 2, 3, 4, 9)}
+        users[2]["rep"] = orphan(2)
+        self.world = World(users, claims=[(orphan(1), 1, "processed"), (orphan(3), 3, "processed"),
+                                          (orphan(3), 9, "reverted"), (orphan(4), 4, "pending")])
+        seed(self.ledger, holds=[(u, f"u{u}@x.com", MISMATCH) for u in (1, 2, 3, 4)])
+        self.api = FakeIntercom([contact(f"m{u}", f"u{u}@x.com", orphan(u)) for u in (1, 2, 3, 4)])
+
+    def test_classes(self):
+        res = R.run(ledger_path=self.ledger, query=self.world, api=self.api, now=NOW, lens=fraud_lens.null_lens)
+        got = {r.account_id: (r.cls, r.decision) for r in res.rows}
+        self.assertEqual(got, {1: ("OK", R.ALREADY_OK), 2: ("OK", R.ALREADY_OK), 3: ("A3", R.REFUSE_CS),
+                               4: ("A2", R.FIX)})
+        self.assertEqual(next(r for r in res.rows if r.account_id == 3).other_account_ids, ["9"])
+        self.assertEqual(self.api.puts, [])
+
+
 class FakeIntercom:
     """Contacts by id. `put_status` forces a PUT answer; `keep_on_null` ignores external_id=null."""
 
@@ -213,13 +304,21 @@ class FakeIntercom:
 class World:
     """A fake core replica: users {id: dict}; requests {request id: user id}; admin email changes."""
 
-    def __init__(self, users, requests=None, history=()):
+    def __init__(self, users, requests=None, history=(), claims=()):
         self.users, self.requests, self.history = users, requests or {}, list(history)
+        self.claims = list(claims)   # r5: (profile id, user id, status)
 
     def __call__(self, sql):
         def in_list(after):
             m = re.search(re.escape(after) + r" IN \(([^)]*)\)", sql)
             return [x.strip().strip("'") for x in m.group(1).split(",")] if m else []
+        if "public.claiming" in sql:   # r5 identity_resolver.facts
+            vals = set(in_list("CAST(profileid AS varchar)"))
+            return [[p, str(u), st] for p, u, st in self.claims if p in vals]
+        if "CAST(representationprofileid AS varchar) IN" in sql:   # r5 identity_resolver.facts
+            vals = set(in_list("neptuneprofessionalid"))
+            return [[str(u), d.get("pro", pro(u)), d.get("auth"), d.get("rep")] for u, d in sorted(self.users.items())
+                    if d.get("pro", pro(u)) in vals or (d.get("rep") and d["rep"] in vals)]
         if "public.credit_requests WHERE CAST(id AS varchar) IN" in sql:
             return [[rid, str(self.requests[rid])] for rid in in_list("CAST(id AS varchar)") if rid in self.requests]
         if "public.subscriptions" in sql:

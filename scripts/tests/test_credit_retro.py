@@ -27,6 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from credit_retro import notice, takeback, waves  # noqa: E402
 from credit_review import dsp_gate  # noqa: E402
+from credit_review import verify_notify as _vn_r5  # noqa: E402
+_vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come from the replica in tests
 
 from credit_retro.api import (  # noqa: E402
     ApiError,

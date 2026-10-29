@@ -28,6 +28,8 @@ sys.path.insert(0, str(HERE))
 
 import test_credit_review as T  # noqa: E402  (FakeAdmin, request(), raw(), PROFILES, TRACKS, NOW)
 from credit_review import decide  # noqa: E402
+from credit_review import verify_notify as _vn_r5  # noqa: E402
+_vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come from the replica in tests
 from credit_review.judge import JudgeResult  # noqa: E402
 from credit_review.ledger import Ledger  # noqa: E402
 

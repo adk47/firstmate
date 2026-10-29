@@ -22,6 +22,8 @@ cron = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cron)
 
 from credit_review import decide  # noqa: E402
+from credit_review import verify_notify as _vn_r5  # noqa: E402
+_vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come from the replica in tests
 
 # The cron fails closed without the credit-trust decider's ledger; every test
 # gets an empty one unless it writes doc_required markers into it.

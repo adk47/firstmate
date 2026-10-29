@@ -24,6 +24,8 @@ from credit_review import stage2_verdicts, uvn_status, verify_ledger  # noqa: E4
 import tempfile as _tf
 UNLOCKED_GATE = _tf.NamedTemporaryFile("w", suffix="-gate.sh", delete=False).name
 open(UNLOCKED_GATE, "w").write("readonly UVN_STATUS_COPY_APPROVED=1\nreadonly CREDIT_HOLD_STATUS_COPY_APPROVED=1\n")
+from credit_review import verify_notify as _vn_r5  # noqa: E402
+_vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come from the replica in tests
 from credit_verify.proof import FORENSICS_VERSION  # noqa: E402
 from test_uvn_status import NOW, FakeGate, proof, replica  # noqa: E402
 

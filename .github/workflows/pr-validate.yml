@@ -2032,6 +2032,10 @@ jobs:
           # writes nothing, ledger row before each write, first-run cap 50, --revert. Intercom and
           # Trino faked. Stdlib only.
           python3 scripts/tests/test_intercom_reconcile.py
+          # r5 presented-profile resolver (Fable [key=x2-sample-1027]): exactly one owner by
+          # professional id / Auth0 / processed claim / representation profile; reverted claims and
+          # ambiguity refuse; pinned on the x2 census shape (synthetic ids). Trino faked. Stdlib only.
+          python3 scripts/tests/test_identity_resolver.py
 
   plugin-tests:
     name: Plugin tests (vitest)

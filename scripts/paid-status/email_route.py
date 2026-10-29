@@ -29,7 +29,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, "/opt/hydra/scripts")
-from credit_review import uvn_status, verify_ledger, verify_notify  # noqa: E402
+from credit_review import identity_resolver, uvn_status, verify_ledger, verify_notify  # noqa: E402
 
 TRINO = "/opt/hydra/scripts/trino-query.sh"
 STACK = "/opt/hydra/scripts/muso-stack-read.sh"
@@ -320,15 +320,25 @@ def main():
             exts = {str(c.get("external_id")) for c in contacts if c.get("external_id")} - mine
             if exts:
                 key_ = tuple(sorted(exts))
-                if key_ not in ext_cache:
+                if (uid, key_) not in ext_cache:
                     lit = ",".join("'" + x.replace("'", "''") + "'" for x in key_)
-                    ext_cache[key_] = trino(
+                    ids = {r[0] for r in trino(
                         "select cast(id as varchar) from postgresql_core.public.users where neptuneprofessionalid in "
-                        f"({lit}) or auth0userid in ({lit}) or ('auth0|' || auth0userid) in ({lit}) or cast(id as varchar) in ({lit})")
-                others = {r[0] for r in ext_cache[key_]} - {str(uid)}
+                        f"({lit}) or auth0userid in ({lit}) or ('auth0|' || auth0userid) in ({lit}) or cast(id as varchar) in ({lit})")}
+                    # r5 (Fable [key=x2-sample-1027]): a presented profile (processed claim / representation,
+                    # what the mobile app logs into Intercom with) names its owner(s) too; a profile another
+                    # account had a reverted claim on names that account as well.
+                    own, rev = identity_resolver.facts(key_, trino)
+                    pres = {x: {str(u) for u, how in own.get(x, {}).items() if identity_resolver.PRESENTED_PROFILE in how}
+                            | {str(u) for u in rev.get(x, set())} for x in key_}
+                    ext_cache[(uid, key_)] = (ids | {u for us in pres.values() for u in us},
+                                              all(us == {str(uid)} for us in pres.values()))
+                owners, all_presented = ext_cache[(uid, key_)]
+                others = owners - {str(uid)}
                 if others:
                     done("exclude", "A3: an Intercom contact for this email names another live Muso account"); continue
-                row["intercom_class"] = "A2 orphan id" if len(contacts) == 1 else "A4 several contacts, none another account"
+                row["intercom_class"] = ("presented profile (mobile app identity)" if all_presented
+                                         else "A2 orphan id" if len(contacts) == 1 else "A4 several contacts, none another account")
             else:
                 row["intercom_class"] = "A1 empty id / no contact" if contacts else "no Intercom contact"
             rm = next((w for c in contacts for w in [recently_messaged(c["id"], since7)] if w), "")

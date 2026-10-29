@@ -21,6 +21,8 @@ from credit_review import fraud_lens, uvn_status, watchlist  # noqa: E402
 import tempfile as _tf
 UNLOCKED_GATE = _tf.NamedTemporaryFile("w", suffix="-gate.sh", delete=False).name
 open(UNLOCKED_GATE, "w").write("readonly UVN_STATUS_COPY_APPROVED=1\nreadonly CREDIT_HOLD_STATUS_COPY_APPROVED=1\n")
+from credit_review import verify_notify as _vn_r5  # noqa: E402
+_vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come from the replica in tests
 import test_uvn_status as T  # noqa: E402  (its fixtures: replica, FakeGate, proof, iso, NOW)
 
 SINGLE = json.dumps({"hold_reason_codes": ["review_big_track_without_trusted_credit"]})
