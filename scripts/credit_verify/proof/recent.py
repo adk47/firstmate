@@ -117,6 +117,27 @@ def locked(path: str):
     return fd
 
 
+def with_unresolved_tray(file_conversations: Callable[[list[str]], dict[str, Any]], path: str, apply: bool,
+                         source: str = "intercom") -> Callable[[list[str]], dict[str, Any]]:
+    """Wrap intake.run so its unresolved conversations are appended to the tray file INSIDE the pass - under
+    the lock and before the window is saved (QA #1481). A failed append raises out of `run`, so the cursor
+    does not advance and the next run sees the same conversations again (re-filing is idempotent)."""
+    def call(ids: list[str]) -> dict[str, Any]:
+        stats = file_conversations(ids)
+        items = list(stats.get("unresolved") or [])
+        if apply and items:
+            at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                for u in items:
+                    fh.write(json.dumps({"at": at, "source": source, **u}, default=str) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        return stats
+    return call
+
+
 def run(*, state_path: str, hours: float, apply: bool, now: float | None = None,
         conv_search: Search | None, gmail_search: GmailSearch | None,
         file_conversations: Callable[[list[str]], dict[str, Any]],
@@ -149,6 +170,8 @@ def run(*, state_path: str, hours: float, apply: bool, now: float | None = None,
                    messages=len(msgs), retry_messages=retry_msgs, intercom_transient_errors=transient[:5],
                    complete=c_ok and m_ok,
                    intercom={k: (len(v) if isinstance(v, list) else v) for k, v in cstats.items()},
+                   # the strict intake's unresolved conversations, kept whole for the tray (not just a count)
+                   unresolved=list(cstats.get("unresolved") or []),
                    gmail={k: (len(v) if isinstance(v, list) else v) for k, v in mstats.items()})
         if apply:
             # The window moves only when this run saw everything (no page cap hit) and no message

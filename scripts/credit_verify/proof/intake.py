@@ -39,6 +39,7 @@ import hashlib
 import os
 import re
 import tempfile
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -164,6 +165,87 @@ def professional_ids(fetch: Fetch, conv_id: str, doc: dict[str, Any] | None = No
     doc = doc if doc is not None else fetch(conv_id)
     contacts = (((doc or {}).get("contacts") or {}).get("contacts")) or [{}]
     return str((contacts[0] or {}).get("external_id") or "")
+
+
+CONTACT_MIN_AGE_S = 24 * 3600
+# Magic bytes of the file types a credit document arrives as; anything else is never filed by the cron.
+_MAGIC = ((b"%PDF-", "application/pdf"), (b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"),
+          (b"GIF87a", "image/gif"), (b"GIF89a", "image/gif"))
+
+
+def sniff(path: str) -> str | None:
+    """The file's real type from its first bytes (pdf, png, jpeg, gif, webp, heic/heif), else None."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(16)
+    except OSError:
+        return None
+    for magic, mime in _MAGIC:
+        if head.startswith(magic):
+            return mime
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head[4:8] == b"ftyp" and head[8:12] in (b"heic", b"heix", b"mif1", b"msf1", b"heim", b"heis", b"hevc"):
+        return "image/heic"
+    return None
+
+
+def email_hash(email: str | None) -> str:
+    return hashlib.sha256((email or "").strip().lower().encode("utf-8")).hexdigest() if email else ""
+
+
+def core_email_hash(user_id: int) -> str:
+    """sha256(lower(trim(users.email))) of the account, read-only via Trino; '' when unreadable or absent."""
+    sql = (f"SELECT lower(to_hex(sha256(to_utf8(lower(trim(email)))))) FROM postgresql_core.public.users "
+           f"WHERE id = {int(user_id)} AND email IS NOT NULL")
+    for ln in trino_query(sql).splitlines():
+        v = ln.strip().strip('"')
+        if re.fullmatch(r"[0-9a-f]{64}", v):
+            return v
+    return ""
+
+
+def strict_identity(*, contact_fetch: Callable[[str], dict[str, Any] | None], lookup: Lookup,
+                    email_of_account: Callable[[int], str] = core_email_hash,
+                    now: Callable[[], float] = time.time) -> Callable[[str, dict[str, Any]], tuple[int | None, str]]:
+    """The hourly intake's identity, fail-closed (Fable [key=intake-reenable], per security-arch): the thread has
+    EXACTLY ONE contact with role `user`; that contact has a non-empty external_id, is older than 24 h and has an
+    email; the external_id resolves to exactly one core account (users.neptuneprofessionalid) AND the account's
+    email hash equals the contact's. Anything else -> (None, 'unresolved: why'): filed for the tray, never guessed
+    - never by name, never by the email-joined export alone."""
+    def resolve(cid: str, doc: dict[str, Any]) -> tuple[int | None, str]:
+        refs = (((doc or {}).get("contacts") or {}).get("contacts")) or []
+        users = []
+        for ref in refs:
+            c = contact_fetch(str(ref.get("id") or "")) if ref.get("id") else None
+            if not c:
+                # an unreadable contact could be a second user: the exactly-one-user rule is not established
+                return None, "unresolved: a contact on the thread is unreadable"
+            if c.get("role") == "user":
+                users.append(c)
+        if len(users) != 1:
+            return None, f"unresolved: the thread has {len(users)} user contacts (exactly one required)"
+        c = users[0]
+        ext = str(c.get("external_id") or "").strip()
+        if not ext:
+            return None, "unresolved: the contact has no external_id"
+        try:
+            created = float(c.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created = 0.0
+        if not created or now() - created < CONTACT_MIN_AGE_S:
+            return None, "unresolved: the contact is younger than 24 h"
+        if not c.get("email"):
+            return None, "unresolved: the contact has no email"
+        ids = sorted(set(lookup([ext]).get(ext) or []))
+        if len(ids) != 1:
+            return None, ("unresolved: the external_id maps to several accounts" if ids else
+                          "unresolved: the external_id is not a Muso account")
+        acct = email_of_account(ids[0])
+        if not acct or acct != email_hash(c.get("email")):
+            return None, "unresolved: the contact's email does not match the account"
+        return ids[0], "external_id+email"
+    return resolve
 
 
 def resolve_account(pro_ids: Iterable[int], export_ids: Iterable[int]) -> tuple[int | None, str]:
@@ -363,6 +445,7 @@ def collect_files(conv_id: str, doc: dict[str, Any] | None, *, cache_root: str, 
             continue
         seen.add(sha)
         files.append({"sha": sha, "bytes": nn or n, "source_ref": f"intercom:{conv_id}:{i}", "path": None,
+                      "sniffed": sniff(dest),     # the real type, read now: the temp copy is deleted after the run
                       "received_at": _iso(a.get("_received_at")),
                       "mime": str(a.get("content_type") or _guess_mime(dest)), "from": "intercom"})
     return files, errors
@@ -391,6 +474,7 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
         dl: Download = _download, apply: bool = False, limit: int | None = None, workers: int = 3,
         subject: str = "credit", filed_by: str = "credit-proof.py file", max_fetches: int = MAX_FETCHES,
         open_rows_fn: Callable[[list[int]], dict[int, list[dict[str, Any]]]] | None = None,
+        identity: Callable[[str, dict[str, Any]], tuple[int | None, str]] | None = None,
         log: Callable[[str], None] = lambda m: None) -> dict[str, Any]:
     """File every document of `conversations`. `apply=False` counts only: nothing is
     written to the store (a document only Intercom holds is still downloaded to a private
@@ -411,7 +495,7 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
                              "cache_not_customer": 0,
                              "files_filed": 0, "files_duplicate": 0, "files_error": 0,
                              "users": 0, "with_candidate_requests": 0, "candidate_requests": 0,
-                             "errors": []}
+                             "errors": [], "unresolved": [], "files_rejected_type": 0}
     ids = [str(x) for x in conversations]
     docs: dict[str, dict[str, Any] | None] = {}
 
@@ -430,7 +514,7 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
     todo = ids[:limit] if limit else ids
     if open_rows_fn is not None:        # one SELECT for every account this run can resolve
         uids = [u for u in (resolve_account(resolved.get(exts.get(c) or "", []), export.get(c, ()))[0]
-                            for c in todo if docs.get(c) is not None) if u is not None]
+                            for c in todo if docs.get(c) is not None) if u is not None] if identity is None else []
         open_rows = {**open_rows_fn(uids), **open_rows} if uids else open_rows
     filed: set[tuple[int, str]] = set()     # (user, sha256) filed or counted this run
     budget = [max(0, int(max_fetches))]
@@ -442,7 +526,15 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
             if doc is None:
                 stats["unmatched_conversations"].append(cid)
                 continue
-            uid, how = resolve_account(resolved.get(exts.get(cid) or "", []), export.get(cid, ()))
+            if identity is not None:            # the strict, fail-closed identity of the hourly intake
+                try:
+                    uid, how = identity(cid, doc)
+                except Exception as exc:  # noqa: BLE001 - an identity we cannot read is unresolved, never a guess
+                    uid, how = None, f"unresolved: identity unreadable ({type(exc).__name__})"
+                if uid is not None and open_rows_fn is not None and uid not in open_rows:
+                    open_rows = {**open_rows, **open_rows_fn([uid])}
+            else:
+                uid, how = resolve_account(resolved.get(exts.get(cid) or "", []), export.get(cid, ()))
             before = budget[0]
             files, errs = collect_files(cid, doc, cache_root=cache_root, tmp=tmp, dl=dl, budget=budget, notes=stats)
             stats["fetches_used"] += before - budget[0]
@@ -454,9 +546,24 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
             if not files:
                 stats["no_document_conversations"].append(cid)
                 continue
+            if identity is not None:
+                ok = []
+                for f in files:
+                    real = f.get("sniffed") if "sniffed" in f else (sniff(f["path"]) if f.get("path") else None)
+                    if real is None:
+                        stats["files_rejected_type"] += 1         # not a pdf/image by its bytes: never filed
+                    else:
+                        ok.append(f)
+                files = ok
+                if not files:
+                    stats["no_document_conversations"].append(cid)
+                    continue
             if uid is None:
                 key = "ambiguous_conversations" if how.startswith("ambiguous") else "unmatched_conversations"
                 stats[key].append(cid)
+                if identity is not None:          # filed for the tray: the conversation, the why, the documents
+                    stats["unresolved"].append({"conversation_id": cid, "why": how, "files": [f["sha"] for f in files],
+                                                "received_at": [f.get("received_at") for f in files]})
                 log(f"…{cid[-5:]}: {how} ({len(files)} file(s))")
                 continue
             ch = contact_hash((((doc.get("contacts") or {}).get("contacts")) or [{}])[0].get("id"))

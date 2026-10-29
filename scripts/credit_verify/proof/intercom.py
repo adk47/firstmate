@@ -86,6 +86,28 @@ def make_fetch(token: str, timeout: int = 30) -> Fetch:
     return get
 
 
+def make_contact_fetch(token: str, timeout: int = 30) -> Callable[[str], dict[str, Any] | None]:
+    """GET /contacts/{id} (read-only): role, external_id, email, created_at for the strict intake identity."""
+    def get(contact_id: str) -> dict[str, Any] | None:
+        req = urllib.request.Request(f"{API}/contacts/{contact_id}", headers={
+            "Authorization": f"Bearer {token}", "Intercom-Version": "2.11", "Accept": "application/json"})
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return json.load(resp)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429:
+                    time.sleep(5 * (attempt + 1))
+                    continue
+                if exc.code == 404:
+                    return None
+                raise
+            except (urllib.error.URLError, TimeoutError, OSError):
+                time.sleep(2)
+        raise RuntimeError("intercom GET failed for a contact")
+    return get
+
+
 @dataclass
 class Conversation:
     conv_id: str

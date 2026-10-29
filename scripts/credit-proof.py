@@ -41,6 +41,9 @@ from credit_review import admin as admin_api  # noqa: E402
 
 PAYING_USERS = os.environ.get("CREDIT_TRUST_PAYING_USERS", "/var/lib/credit-trust/paying-users.json")
 KILL_SWITCH = os.environ.get("CREDIT_VERIFY_KILL_SWITCH", "/etc/hydra/credit-verify.disabled")
+# The hourly document intake's own kill file (Fable [key=intake-reenable]); the shared one above also stops it.
+INTAKE_KILL = os.environ.get("CREDIT_DOC_INTAKE_KILL", "/etc/hydra/credit-doc-intake.disabled")
+UNRESOLVED = os.environ.get("CREDIT_DOC_INTAKE_UNRESOLVED", "/var/lib/hydra-credit-verify/intake-unresolved.jsonl")
 
 
 def log(msg: str) -> None:
@@ -155,10 +158,15 @@ def cmd_file_recent(args: argparse.Namespace) -> int:
     """The hourly document intake (cron credit-verify-proof-file): everything customers sent since the
     last run, Intercom + support@, into proof_intake only. Dry run unless --apply."""
     from credit_verify.proof import email_in, gmail_intake, intake, recent
-    from credit_verify.proof.intercom import intercom_token, make_fetch
+    from credit_verify.docverify.pace import Pacer
+    from credit_verify.proof.intercom import intercom_token, make_contact_fetch, make_fetch
     from credit_verify.proof.stage2 import held_rows
     from credit_verify.proof.store import ProofStore
     if _guard("document intake"):
+        return 0
+    if Path(INTAKE_KILL).exists():
+        log(f"kill switch present at {INTAKE_KILL}; no document intake")
+        print("NO_REPLY")
         return 0
     tok = intercom_token()
     if not tok:
@@ -182,9 +190,14 @@ def cmd_file_recent(args: argparse.Namespace) -> int:
             conv_search=recent.intercom_search(tok),
             gmail_search=None if args.no_gmail else recent.gog_search(),
             order=lambda convs: recent.paid_first(convs, export, paying),
-            file_conversations=lambda ids: intake.run(
+            # unresolved conversations go to the tray inside the pass, before the window is saved (QA #1481)
+            file_conversations=recent.with_unresolved_tray(lambda ids: intake.run(
                 store, conversations=ids, fetch=make_fetch(tok), lookup=intake.professional_lookup, held=held,
-                apply=args.apply, max_fetches=args.max_fetches, open_rows_fn=intake.open_rows_trino, log=log),
+                apply=args.apply, max_fetches=args.max_fetches, open_rows_fn=intake.open_rows_trino,
+                filed_by="intake-cron", log=log,
+                # fail-closed identity: one user contact, external_id + email hash against core, > 24 h old
+                identity=intake.strict_identity(contact_fetch=Pacer("intercom", 1.0).paced(make_contact_fetch(tok)),
+                                                lookup=intake.professional_lookup)), UNRESOLVED, args.apply),
             file_messages=lambda ids: gmail_intake.run(
                 store, message_ids=ids, fetch=gmail_intake.gog_raw, lookup=admin_lookup,
                 open_rows=intake.open_rows_trino, apply=args.apply, log=log),
@@ -193,6 +206,11 @@ def cmd_file_recent(args: argparse.Namespace) -> int:
         log(str(exc))
         print("NO_REPLY")
         return 0
+    except OSError as exc:
+        # the unresolved tray could not be written: the window was NOT saved, the next run repeats it
+        log(f"intake ERROR: unresolved tray {UNRESOLVED} not written ({type(exc).__name__}: {exc}); window held")
+        print("NO_REPLY")
+        return 1
     if args.out:
         Path(args.out).mkdir(parents=True, exist_ok=True)
         (Path(args.out) / "file-recent.json").write_text(json.dumps(res, indent=1, default=str))

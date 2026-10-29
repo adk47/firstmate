@@ -1519,12 +1519,12 @@ class CronContractTests(unittest.TestCase):
             self.assertEqual(j["delivery"], {"mode": "none"})
             self.assertTrue(all(isinstance(a, str) and a for a in j["payload"]["argv"]))
         self.assertEqual(mine["credit-verify-proof-intercom"]["payload"]["argv"][2], "intercom")
-        self.assertFalse(mine["credit-verify-proof-email"]["enabled"])
+        self.assertFalse(mine["credit-verify-proof-email"]["enabled"])                  # support@ email stays dark
         self.assertEqual(mine["credit-verify-proof-stage2"]["payload"]["argv"][2], "stage2")
         # The document intake (proof-loop lead 068): file-only, off until the captain says so, and its
         # module has no send, status-write or judging path.
         f = mine["credit-verify-proof-file"]
-        self.assertEqual((f["payload"]["argv"][2], f["enabled"]), ("file-recent", False))
+        self.assertEqual((f["payload"]["argv"][2], f["enabled"]), ("file-recent", True))   # Fable [key=intake-reenable]
         src = (Path(__file__).resolve().parents[1] / "credit_verify" / "proof" / "recent.py").read_text()
         for banned in ("send-gateway", "intercom-verify-request", "/admin/credit", "PATCH", "/reply", "record(",
                        "verdict", "approve", "decline"):

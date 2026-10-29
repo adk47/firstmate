@@ -425,6 +425,95 @@ def gmail_raw(*, sender="ann@example.com", auth="mx.google.com; dkim=pass header
     return m.as_bytes()
 
 
+class StrictIdentityTest(IntakeTest):
+    """The hourly intake's fail-closed identity (Fable [key=intake-reenable], 2026-10-29)."""
+    NOW = 2_000_000_000.0
+
+    def setUp(self) -> None:
+        super().setUp()
+        old = self.NOW - 3 * 86400
+        self.contacts = {"c-111": {"role": "user", "external_id": "pro-a", "email": "Ann@Example.com", "created_at": old},
+                         "c-333": {"role": "user", "external_id": "pro-nobody", "email": "x@y.z", "created_at": old}}
+        self.acct = {11: intake.email_hash("ann@example.com")}
+
+    def _strict(self, convs, apply=True):
+        ident = intake.strict_identity(contact_fetch=lambda cid: self.contacts.get(cid), lookup=self._lookup,
+                                       email_of_account=lambda uid: self.acct.get(uid, ""), now=lambda: self.NOW)
+        return intake.run(self.store, conversations=convs, fetch=self._fetch, lookup=self._lookup, open_rows={},
+                          held={}, export_path=self.export, cache_root=self.cache, dl=self._dl, apply=apply,
+                          identity=ident, filed_by="intake-cron")
+
+    def test_one_user_contact_with_external_id_and_matching_email_is_filed(self) -> None:
+        stats = self._strict(["111"])
+        self.assertEqual((stats["files_filed"], stats["unresolved"]), (1, []))
+        row = self.store.db.execute("SELECT user_id, filed_by, matched_by FROM proof_intake").fetchone()
+        self.assertEqual(tuple(row), (11, "intake-cron", "external_id+email"))
+
+    def test_every_identity_doubt_is_unresolved_never_filed(self) -> None:
+        cases = {
+            "a lead, not a user": {"role": "lead"},
+            "no external_id": {"external_id": ""},
+            "younger than 24 h": {"created_at": self.NOW - 3600},
+            "no email": {"email": ""},
+            "email of another person": {"email": "someone@else.com"},
+        }
+        for why, patch in cases.items():
+            self.store.db.execute("DELETE FROM proof_intake")
+            self.contacts["c-111"] = {"role": "user", "external_id": "pro-a", "email": "ann@example.com",
+                                      "created_at": self.NOW - 3 * 86400, **patch}
+            stats = self._strict(["111"])
+            self.assertEqual(stats["files_filed"], 0, why)
+            self.assertEqual(len(stats["unresolved"]), 1, why)
+            self.assertTrue(stats["unresolved"][0]["why"].startswith("unresolved:"), why)
+            self.assertEqual(self.store.db.execute("SELECT count(*) FROM proof_intake").fetchone()[0], 0, why)
+
+    def test_a_thread_with_two_user_contacts_or_an_unknown_account_is_unresolved(self) -> None:
+        self.docs["111"]["contacts"]["contacts"].append({"id": "c-other", "external_id": "pro-b"})
+        self.contacts["c-other"] = {"role": "user", "external_id": "pro-b", "email": "b@b.com",
+                                    "created_at": self.NOW - 9 * 86400}
+        stats = self._strict(["111", "333", "222"])
+        whys = sorted(u["why"] for u in stats["unresolved"])
+        self.assertEqual(stats["files_filed"], 0)
+        self.assertTrue(any("2 user contacts" in w for w in whys), whys)
+        self.assertTrue(any("not a Muso account" in w for w in whys), whys)        # 333: pro-nobody
+        self.assertTrue(any("is unreadable" in w for w in whys), whys)              # 222: contact not readable
+
+    def test_one_user_plus_an_unreadable_contact_is_unresolved(self) -> None:
+        # QA #1481: the unreadable one could be a second user; never file to the readable one's account.
+        for ref in ({"id": "c-gone", "external_id": "pro-b"}, {"external_id": "pro-b"}):
+            self.store.db.execute("DELETE FROM proof_intake")
+            self.docs["111"]["contacts"]["contacts"] = [{"id": "c-111", "external_id": "pro-a"}, ref]
+            stats = self._strict(["111"])
+            self.assertEqual(stats["files_filed"], 0, ref)
+            self.assertEqual([u["why"] for u in stats["unresolved"]], ["unresolved: a contact on the thread is unreadable"])
+        self.docs["111"]["contacts"]["contacts"] = []
+        self.assertIn("0 user contacts", self._strict(["111"])["unresolved"][0]["why"])
+
+    def test_the_bytes_must_be_a_pdf_or_an_image(self) -> None:
+        self.payload["https://files/x.pdf"] = b"MZ\x90\x00 not a pdf at all"
+        for d in self.docs.values():
+            for part in d["conversation_parts"]["conversation_parts"]:
+                for a in part.get("attachments") or []:
+                    a["filesize"] = len(self.payload[a["url"]])
+        stats = self._strict(["111"])
+        self.assertEqual((stats["files_filed"], stats["files_rejected_type"]), (0, 1))
+        for head, mime in ((b"%PDF-1.7", "application/pdf"), (b"\x89PNG\r\n\x1a\n", "image/png"),
+                           (b"\xff\xd8\xff\xe0", "image/jpeg"), (b"RIFF\x00\x00\x00\x00WEBPVP8 ", "image/webp"),
+                           (b"\x00\x00\x00\x18ftypheic", "image/heic"), (b"PK\x03\x04", None)):
+            f = os.path.join(self.tmp, "sniff")
+            Path(f).write_bytes(head + b"x" * 8)
+            self.assertEqual(intake.sniff(f), mime, head)
+
+    def test_the_cron_files_only_and_honours_its_own_kill_file(self) -> None:
+        src = (Path(__file__).resolve().parents[1] / "credit-proof.py").read_text()
+        body = src[src.index("def cmd_file_recent("):src.index("def cmd_email(")]
+        for need in ("INTAKE_KILL", "identity=intake.strict_identity(", 'filed_by="intake-cron"', "UNRESOLVED"):
+            self.assertIn(need, body, need)
+        for banned in ("send-gateway", "intercom-verify-request", "/admin/credit", "PATCH", "set_status"):
+            self.assertNotIn(banned, body, banned)
+        self.assertIn('"/etc/hydra/credit-doc-intake.disabled"', src)
+
+
 class GmailIntakeTest(unittest.TestCase):
     """`credit-proof.py file --source gmail`: support@ documents, same proof_intake contract,
     email_in's authenticated-sender + confirmed-account rules (proof-loop lead 032)."""
@@ -627,6 +716,37 @@ class RecentIntakeTest(unittest.TestCase):
         return self.r.run(state_path=self.state, hours=2, apply=apply, now=now, conv_search=self._search,
                           gmail_search=gmail, file_conversations=fc, file_messages=file_messages or fm)
 
+    def test_an_unwritable_unresolved_tray_holds_the_window(self) -> None:
+        # QA #1481: the tray append happens inside the pass, before save_state; a failure leaves the cursor.
+        u = {"conversation_id": "c2", "why": "unresolved: the contact is younger than 24 h", "files": ["ab"]}
+
+        def fc(ids):
+            self.filed.append(ids)
+            return {"deferred_conversations": [], "unresolved": [u]}
+        bad = os.path.join(self.state + ".notadir", "x", "tray.jsonl")
+        Path(self.state + ".notadir").write_text("a file, so its child directory cannot exist")
+        with self.assertRaises(OSError):
+            self.r.run(state_path=self.state, hours=2, apply=True, now=10_000.0, conv_search=self._search,
+                       gmail_search=None, file_conversations=self.r.with_unresolved_tray(fc, bad, True),
+                       file_messages=lambda ids: {})
+        self.assertFalse(os.path.exists(self.state))                        # cursor never saved
+        good = os.path.join(os.path.dirname(self.state), "tray.jsonl")
+        self.searches.clear()                                                   # the same window again
+        out = self.r.run(state_path=self.state, hours=2, apply=True, now=10_000.0, conv_search=self._search,
+                         gmail_search=None, file_conversations=self.r.with_unresolved_tray(fc, good, True),
+                         file_messages=lambda ids: {})
+        self.assertTrue(out["window_advanced"])
+        line = json.loads(Path(good).read_text().splitlines()[0])
+        self.assertEqual((line["conversation_id"], line["source"]), ("c2", "intercom"))
+        self.assertEqual(os.stat(good).st_mode & 0o777, 0o600)
+        dry = os.path.join(os.path.dirname(self.state), "dry.jsonl")             # a dry run writes no tray
+        self.r.with_unresolved_tray(fc, dry, False)(["c2"])
+        self.assertFalse(os.path.exists(dry))
+        src = (Path(__file__).resolve().parents[1] / "credit-proof.py").read_text()
+        body = src[src.index("def cmd_file_recent("):src.index("def cmd_email(")]
+        self.assertIn("recent.with_unresolved_tray(", body)
+        self.assertNotIn('open(UNRESOLVED, "a"', body)                           # no append after the pass
+
     def test_first_run_files_the_last_hours_paged_and_advances_only_on_apply(self) -> None:
         out = self._run(apply=False)
         self.assertEqual(self.filed, [["c1", "c2", "c3"]])
@@ -711,10 +831,16 @@ class RecentIntakeTest(unittest.TestCase):
     def test_paid_accounts_first(self) -> None:
         self.assertEqual(self.r.paid_first(["a", "b", "c"], {"b": {7}, "c": {9}}, {7}), ["b", "a", "c"])
 
-    def test_the_cron_is_committed_file_only_and_off(self) -> None:
+    def test_the_cron_is_committed_file_only_and_on(self) -> None:
         jobs = json.loads((Path(__file__).resolve().parents[2] / "cron-jobs.json").read_text())["jobs"]
         job = next(j for j in jobs if j["name"] == "credit-verify-proof-file")
-        self.assertEqual(job["enabled"], False)                             # on the captain's word only
+        self.assertEqual(job["enabled"], True)                               # Fable [key=intake-reenable] 01:0xZ
+        self.assertIn("--apply", job["payload"]["argv"])
+        # captain 12:18Z item 2 + r5 NO-GO on #1481: support@ filing stays OFF in the cron until the forged-header
+        # tests (#1446) are merged; drop this pin only in the PR that lands after #1446.
+        self.assertIn("--no-gmail", job["payload"]["argv"])
+        email = next(j for j in jobs if j["name"] == "credit-verify-proof-email")
+        self.assertEqual(email["enabled"], False)                            # the support@ email cron stays dark
         self.assertEqual(job["payload"]["argv"][:3], ["python3", "/opt/hydra/scripts/credit-proof.py", "file-recent"])
         self.assertEqual(job["sessionTarget"], "isolated")
         src = (Path(__file__).resolve().parents[1] / "credit_verify" / "proof" / "recent.py").read_text()
