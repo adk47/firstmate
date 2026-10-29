@@ -312,6 +312,84 @@ def cmd_forged_tray(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_junk_list(args: argparse.Namespace) -> int:
+    """JUNK PROOF option C: per filed document its artifact kind -> purge list per user (SYS-001 apart) and the
+    requests whose every filed document is junk (decline proposal, standard line, no ask). Read-only;
+    writes the two files under --out-dir. The purge itself is ops-to-ovh-m1's feed change after Fable."""
+    from credit_verify.docverify import artifacts
+    from credit_verify.docverify.store import DEFAULT_PATH
+    path = args.store or DEFAULT_PATH
+    if not os.path.exists(path):
+        log(f"junk-list: no doc-verify store at {path}")
+        return 2
+    # a report: read-only, never creates, alters or carries the store (QA #1470)
+    store = argparse.Namespace(db=sqlite3.connect(f"file:{path}?mode=ro", uri=True))
+    pdb = sqlite3.connect(f"file:{args.proof_store}?mode=ro", uri=True)
+    latest: dict[tuple[str, str], dict] = {}
+    for pid, step, det in store.db.execute("SELECT proof_id, step, detail_json FROM dv_steps WHERE step IN "
+                                           "('artifact', 'extract', 'text') ORDER BY id"):
+        try:
+            latest[(pid, step)] = json.loads(det or "{}")
+        except ValueError:
+            continue
+    kinds = dict(pdb.execute("SELECT proof_id, kind FROM fingerprints"))
+    paid = paying_users() or frozenset()
+    rows = []
+    for iid, uid, sha, cands in pdb.execute("SELECT intake_id, user_id, file_sha256, candidate_request_ids_json "
+                                            "FROM proof_intake ORDER BY intake_id"):
+        try:
+            cand = [str(c) for c in json.loads(cands or "[]")]
+        except ValueError:
+            cand = []
+        art = latest.get((sha, "artifact"))
+        if art is not None:
+            kind, why, checked = art.get("artifact"), art.get("why"), bool(art.get("text_checked"))
+        elif (sha, "extract") in latest:
+            facts = (latest.get((sha, "text")) or {}).get("facts") or {}
+            kind, why = artifacts.classify(text=None, ex=latest[(sha, "extract")], facts=facts,
+                                           kind=kinds.get(sha) or (latest.get((sha, "text")) or {}).get("kind"))
+            checked = False
+        else:
+            kind, why, checked = None, "not read yet", False
+        rows.append({"intake_id": iid, "sha": sha, "user_id": uid, "paid": uid in paid, "candidates": cand, "artifact": kind,
+                     "why": why, "text_checked": checked, "read": (sha, "extract") in latest or art is not None})
+    from credit_verify.docverify.extract import _title_key
+    from credit_verify.proof import stage2
+    for r in rows:
+        ex = latest.get((r.pop("sha"), "extract")) or {}
+        r["named"] = sorted({_title_key(t.get("title")) for t in ex.get("tracks") or [] if t.get("title")} |
+                            {_title_key(c.get("track")) for c in ex.get("credits") or [] if c.get("track")})
+    junk_rids = sorted({rid for r in rows if r["artifact"] for rid in r["candidates"]})
+    reqs = stage2.requests(junk_rids) if junk_rids else {}
+    titles = {rid: _title_key(q.title) for rid, q in reqs.items()}
+    # read at report time: only requests open and not deleted NOW (stage2.requests skips deleted ones)
+    open_ids = {rid for rid, q in reqs.items() if str(q.status or "").lower() not in ("approved", "rejected")}
+    out = artifacts.junk_list(rows, titles, open_ids)
+    out["read"] = sum(1 for r in rows if r["read"])
+    d = Path(args.out_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"junk-proof-b{args.batch}.json").write_text(json.dumps(out, indent=1, default=str))
+    md = [f"# Junk proof (option C) b{args.batch}", "",
+          f"{out['documents']} filed documents, {out['read']} read; **{out['junk_documents']} junk** "
+          f"({', '.join(f'{k} {v}' for k, v in sorted(out['by_kind'].items())) or 'none'}); SYS-001 (Muso UI "
+          f"screenshots) {out['sys_001']}; {out['text_checked']} classified with the full text, the rest by the "
+          "stored-data rules (the reader records the full-text kind from now on).", "",
+          f"Decline proposal (standard line, no ask; EVERY document filed for the request is junk AND a junk "
+          f"document is tied to it - names its track, or its filing had <= {artifacts.SMALL_FILING} open requests): "
+          f"{len(out['decline_requests'])} requests; held (untied, left pending): {len(out['held_untied'])}.", "", "| user | paid | junk documents | kinds |", "|---|---|---|---|"]
+    md += [f"| {u['user_id']} | {'yes' if u['paid'] else 'no'} | {sum(u['counts'].values())} | "
+           f"{', '.join(f'{k} {v}' for k, v in sorted(u['counts'].items()))} |" for u in out["users"]]
+    # coverage (QA #1472): every filed document with its stated kind, junk or not, read or not
+    md += ["", f"## Every filed document ({len(out['document_rows'])})", "",
+           "| intake | user | kind | why | text checked | read |", "|---|---|---|---|---|---|"]
+    md += [f"| {r['intake_id']} | {r['user_id']} | {r['artifact'] or '-'} | {r['why'] or ''} | "
+           f"{'yes' if r['text_checked'] else 'no'} | {'yes' if r['read'] else 'no'} |" for r in out["document_rows"]]
+    (d / f"junk-proof-b{args.batch}.md").write_text("\n".join(md) + "\n")
+    log(f"junk proof b{args.batch}: {out['junk_documents']} junk of {out['read']} read; decline proposal "
+        f"{len(out['decline_requests'])} requests -> {d}")
+    return 0
+
+
 def cmd_tray(args: argparse.Namespace) -> int:
     """Jan's tray + h2's need queue from the reader's latest outcomes. Writes only the two
     files under --out-dir; no status write, no hold, no message."""
@@ -392,6 +470,11 @@ def parser() -> argparse.ArgumentParser:
                     "not' lines (e.g. trays/rulings-forged.txt). Without it false forged is UNKNOWN and never clean")
     pl.add_argument("--json", action="store_true")
     pl.set_defaults(fn=cmd_l11_watch)
+    pj = sub.add_parser("junk-list", help="JUNK PROOF option C: artifact kind per filed document -> purge list per "
+                                          "user + decline proposal (read-only; writes two files)")
+    pj.add_argument("--batch", type=int, required=True)
+    pj.add_argument("--out-dir", required=True)
+    pj.set_defaults(fn=cmd_junk_list)
     pt = sub.add_parser("tray", help="Jan's tray (jan-docs-dv-bN.md) + h2's need queue from the latest outcomes")
     pt.add_argument("--batch", type=int, required=True)
     pt.add_argument("--out-dir", required=True)

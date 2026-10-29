@@ -2309,6 +2309,162 @@ class NameIndexTests(unittest.TestCase):
         self.assertNotIn("trino_name_index(", src)
 
 
+class ArtifactTests(unittest.TestCase):
+    """JUNK PROOF option C (captain-1028-214x; Fable 083/086/088)."""
+
+    def c(self, text=None, kind=None, facts=None, **ex):
+        from credit_verify.docverify import artifacts
+        return artifacts.classify(text=text, ex=ex, facts=facts or {}, kind=kind)[0]
+
+    def test_each_artifact_kind_on_a_clear_marker(self):
+        muso = {"name": "Muso.AI", "type": "other", "confidence": 0.9}
+        self.assertEqual(self.c("credits.muso.ai  Verify your credits  Pending", doc_type="dashboard_screenshot",
+                                issuer=muso), "muso_ui_screenshot")
+        self.assertEqual(self.c(None, doc_type="credits_page", issuer=muso), "muso_ui_screenshot")      # stored data
+        # QA #1472: without text, `other` is never a screenshot (a Muso letter with credits on it)
+        tracks, credits = [{"title": "Night Drive"}], [{"person": "Ann Alpha", "role": "Mixer"}]
+        self.assertIsNone(self.c(None, doc_type="other", issuer=muso, tracks=tracks, credits=credits))
+        self.assertIsNone(self.c(None, doc_type="other", issuer=muso))
+        self.assertIsNone(self.c("", doc_type="other", issuer=muso))
+        self.assertEqual(self.c("app.muso.ai  Your profile  Pending verification", doc_type="other", issuer=muso),
+                         "muso_ui_screenshot")                                     # `other` with Muso UI text
+        # QA #1472 05:58Z: an explicit Muso screen type is SYS-001 whatever the OCR caught
+        for dt in ("credits_page", "dashboard_screenshot"):
+            self.assertEqual(self.c("Credits Pending", doc_type=dt, issuer=muso), "muso_ui_screenshot", dt)
+            self.assertEqual(self.c("Credits Pending", doc_type=dt, issuer=muso, credits=credits), "muso_ui_screenshot")
+        self.assertIsNone(self.c("Credits Pending", doc_type="other", issuer=muso))      # `other` still needs UI text
+        self.assertEqual(self.c("hi", doc_type="email_screenshot", is_email=True,
+                                sender={"email": "support@muso.ai", "domain": "muso.ai", "confidence": 0.9}), "own_email")
+        self.assertEqual(self.c("Receipt", doc_type="receipt", issuer=muso), "muso_receipt")
+        self.assertEqual(self.c("New Message  To  Subject  Draft saved", doc_type="email_screenshot", is_email=True,
+                                sender={}), "unsent_draft")
+        self.assertEqual(self.c("MP3 Lease  This license is granted to", doc_type="contract"), "lease_licence_template")
+        # QA #1472: a marketplace name alone is not a lease; a credited agreement is never junk
+        self.assertIsNone(self.c("Bought via BeatStars", doc_type="contract"))
+        self.assertIsNone(self.c("Producer agreement (BeatStars) - Non-Exclusive License, Jane Doe produced Night Drive",
+                                 doc_type="contract",
+                                 credits=[{"person": "Jane Doe", "role": "producer", "track": "Night Drive"}]))
+        self.assertEqual(self.c("Pro Tools Track Clip Event AudioSuite Options Setup Window", doc_type="other"),
+                         "daw_instrument_photo")
+
+    def test_anything_unclear_is_not_junk(self):
+        credits = [{"person": "Jane", "role": "mixing", "track": "Night Drive"}]
+        self.assertIsNone(self.c("Split sheet  Jane Doe 50%", doc_type="split_sheet", credits=credits))
+        self.assertIsNone(self.c("Pro Tools Track Clip Edit", doc_type="other", credits=credits))   # DAW with credits
+        self.assertIsNone(self.c(None, kind="daw_session", doc_type="other"))       # the H3 kind alone: never junk
+        # QA #1472: supporting prose that names a DAW and a track is a statement, never a DAW screen
+        self.assertIsNone(self.c("I, Jane Doe, confirm I produced the track Night Drive in Pro Tools for the artist.",
+                                 doc_type="other"))
+        self.assertIsNone(self.c("Pro Tools session: track mix edit", doc_type="other"))   # generic words only
+        self.assertIsNone(self.c("Mixed in Ableton Live with Serum and FabFilter plugins - I produced it",
+                                 doc_type="other"))                                     # tokens, but first person
+        self.assertEqual(self.c("Ableton Live 11 Arrangement Mixer Sends BPM 128 Automation", doc_type="other"),
+                         "daw_instrument_photo")                                        # real UI tokens
+        self.assertIsNone(self.c("Search results - Dropbox / MELLO / SESSION FILES / Pro Tools session.ptx track",
+                                 kind="daw_session", doc_type="dashboard_screenshot"))   # 090 #16: a file listing
+        self.assertIsNone(self.c("", facts={"camera": True}, doc_type="other", credits=credits))
+        # QA #1472: a photographed split sheet with sparse OCR is not gear
+        self.assertIsNone(self.c("Jane Doe — Mixing", facts={"camera": True}, doc_type="split_sheet"))
+        self.assertIsNone(self.c("", facts={"camera": True}, doc_type="other"))
+        self.assertIsNone(self.c(None, facts={"camera": True}, doc_type="other"))     # no text checked: not a photo
+        self.assertIsNone(self.c("Draft saved", doc_type="email_screenshot", is_email=True,
+                                 sender={"email": "lee@greenmount.com"}))              # a sender: a sent mail
+        self.assertIsNone(self.c("Spotify for Artists  Credits", doc_type="dashboard_screenshot",
+                                 issuer={"name": "Spotify"}))
+        self.assertIsNone(self.c("muso is a word in this letter", doc_type="letter"))
+        # QA #1472: a look-alike domain is not Muso
+        for dom in ("notmuso.ai", "muso.ai.evil.com", "musoai.com"):
+            self.assertIsNone(self.c("hi", doc_type="email_screenshot", is_email=True,
+                                     sender={"email": f"support@{dom}", "domain": dom, "confidence": 0.9}), dom)
+        self.assertEqual(self.c("hi", doc_type="email_screenshot", is_email=True,
+                                sender={"email": "a@mail.muso.ai", "domain": "mail.muso.ai", "confidence": 0.9}),
+                         "own_email")
+        # a third-party screen with Muso UI text but credits on it: not junk (issuer is not Muso)
+        self.assertIsNone(self.c("credits.muso.ai  verify your credits", doc_type="dashboard_screenshot",
+                                 issuer={"name": "DistroKid"}, credits=credits))
+
+    def test_a_muso_issued_screenshot_is_sys001_even_with_credits_on_it(self):
+        # Muso's own credits page always lists credits; they are Muso's record of the claim, not evidence of it.
+        credits = [{"person": "Jane", "role": "mixing", "track": "Night Drive"}]
+        self.assertEqual(self.c("Muso.AI Home Profile Credits Analytics", doc_type="credits_page",
+                                issuer={"name": "Muso.AI", "confidence": 0.9}, credits=credits), "muso_ui_screenshot")
+        # QA #1472 07:06Z: the Muso identity must be read SURE and EXACT
+        self.assertIsNone(self.c("Muso.AI Home Profile Credits Analytics", doc_type="credits_page",
+                                 issuer={"name": "Muso.AI", "confidence": 0.01}, credits=credits))   # unsure
+        for name in ("Muso Records", "Muso Music Publishing", "Musonic", "The Muso Collective"):
+            self.assertIsNone(self.c("Home Profile Credits", doc_type="credits_page",
+                                     issuer={"name": name, "confidence": 0.95}, credits=credits), name)
+        for name in ("Muso", "muso.ai", "MUSO.AI", "Muso  AI"):
+            self.assertEqual(self.c(None, doc_type="credits_page", issuer={"name": name, "confidence": 0.9}),
+                             "muso_ui_screenshot", name)
+        self.assertIsNone(self.c("hi", doc_type="email_screenshot", is_email=True,                   # unsure sender
+                                 sender={"email": "support@muso.ai", "domain": "muso.ai", "confidence": 0.2}))
+
+    def test_junk_list_declines_only_requests_whose_every_document_is_junk(self):
+        from credit_verify.docverify import artifacts
+        rows = [
+            {"intake_id": "1:a", "user_id": 1, "paid": True, "candidates": ["r1"], "artifact": "muso_ui_screenshot",
+             "why": "w", "text_checked": True},
+            {"intake_id": "1:b", "user_id": 1, "paid": True, "candidates": ["r2"], "artifact": "muso_ui_screenshot",
+             "why": "w", "text_checked": True},
+            {"intake_id": "1:c", "user_id": 1, "paid": True, "candidates": ["r2"], "artifact": None, "why": "not junk"},
+            {"intake_id": "2:a", "user_id": 2, "paid": False, "candidates": ["r3"], "artifact": "lease_licence_template",
+             "why": "w", "text_checked": False},
+        ]
+        out = artifacts.junk_list(rows)
+        self.assertEqual((out["junk_documents"], out["sys_001"]), (3, 2))
+        self.assertEqual(out["held_untied"], [])
+        self.assertEqual([u["user_id"] for u in out["users"]], [1, 2])                    # paid first
+        self.assertEqual(out["users"][0]["counts"], {"muso_ui_screenshot": 2})
+        self.assertEqual([d["request_id"] for d in out["decline_requests"]], ["r1", "r3"])   # r2 has a real document
+        self.assertTrue(out["decline_requests"][0]["sys_001_only"])
+        # QA #1472: the report lists EVERY filed document, junk or not, read or not
+        rows.append({"intake_id": "3:a", "user_id": 3, "paid": False, "candidates": ["r4"], "artifact": None,
+                     "why": "not read yet", "read": False})
+        out = artifacts.junk_list(rows)
+        got = {d["intake_id"]: d for d in out["document_rows"]}
+        self.assertEqual(sorted(got), ["1:a", "1:b", "1:c", "2:a", "3:a"])
+        self.assertEqual((got["1:c"]["artifact"], got["1:c"]["why"]), (None, "not junk"))
+        self.assertEqual((got["3:a"]["why"], got["3:a"]["read"], got["3:a"]["text_checked"]), ("not read yet", False, False))
+        self.assertTrue(got["1:a"]["text_checked"])
+
+    def test_a_request_closed_since_filing_is_never_proposed(self):
+        # QA #1472: the decline proposal reads the request's status at report time, not the persisted candidate row.
+        from credit_verify.docverify import artifacts
+        rows = [{"intake_id": "1:a", "user_id": 1, "paid": True, "candidates": ["r-open", "r-approved"],
+                 "artifact": "muso_ui_screenshot", "why": "w", "named": []}]
+        out = artifacts.junk_list(rows, {}, open_ids={"r-open"})
+        self.assertEqual([d["request_id"] for d in out["decline_requests"]], ["r-open"])
+        self.assertEqual(out["closed_since_filing"], ["r-approved"])
+        src = (Path(__file__).resolve().parents[1] / "credit-doc-verify.py").read_text()
+        body = src[src.index("def cmd_junk_list("):src.index("def cmd_tray(")]
+        self.assertIn("artifacts.junk_list(rows, titles, open_ids)", body)
+
+    def test_a_screenshot_never_declines_requests_it_is_not_tied_to(self):
+        # 10-28: one Muso roster screenshot from an account with 73 open requests made all 73 "decline-eligible".
+        from credit_verify.docverify import artifacts
+        many = [f"r{i}" for i in range(73)]
+        rows = [{"intake_id": "1:a", "user_id": 1, "paid": True, "candidates": many, "artifact": "muso_ui_screenshot",
+                 "why": "w", "named": ["night drive"]}]
+        out = artifacts.junk_list(rows, {"r0": "night drive", "r1": "other song"})
+        self.assertEqual([d["request_id"] for d in out["decline_requests"]], ["r0"])     # named by the document
+        self.assertEqual(out["decline_requests"][0]["link"], "the document names this track")
+        self.assertEqual(len(out["held_untied"]), 72)                                    # the rest stay pending
+        small = [{"intake_id": "2:a", "user_id": 2, "paid": True, "candidates": ["s1", "s2"], "artifact": "own_email",
+                  "why": "w", "named": []}]
+        self.assertEqual(len(artifacts.junk_list(small, {})["decline_requests"]), 2)    # a small filing: tied
+
+    def test_junk_list_opens_the_store_read_only(self):
+        src = (Path(__file__).resolve().parents[1] / "credit-doc-verify.py").read_text()
+        body = src[src.index("def cmd_junk_list("):src.index("def cmd_tray(")]
+        self.assertIn("mode=ro", body)
+        self.assertNotIn("DocVerifyStore(args.store)", body)
+
+    def test_the_reader_records_the_artifact_kind(self):
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
+        self.assertIn('store.step(run_id, proof_id, "artifact"', src)
+
+
 class CronContractTests(unittest.TestCase):
     def test_doc_verify_cron_is_a_shadow_command(self):
         jobs = json.loads((Path(__file__).resolve().parents[2] / "cron-jobs.json").read_text())["jobs"]

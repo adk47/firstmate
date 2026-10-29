@@ -38,7 +38,7 @@ from credit_verify.proof.sandbox import MAX_BYTES, SandboxError
 
 from . import VERSION
 from . import crosscheck as xc
-from . import forensics, gate, intake_read, intel, pace
+from . import artifacts, forensics, gate, intake_read, intel, pace
 from .extract import MIN_CONFIDENCE, Extraction, Extractor, claimant_elsewhere, supports
 from .store import DocVerifyStore, utcnow
 
@@ -218,6 +218,11 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
             ex = Extraction(ok=False, degraded=True, error="document not located" if not path else
                             f"sandbox failed: {str(raw['fatal'])[:120]}" if raw.get("fatal") else "no readable text")
         store.step(run_id, proof_id, "extract", "ok" if ex.ok else "error", ex.as_dict())
+        # JUNK PROOF option C (captain-1028-214x): what kind of artifact this is, with the full text; a record
+        # only - it decides no outcome here (artifacts.junk_list builds the purge / decline proposal).
+        art, why = artifacts.classify(text=text if path else None, ex=ex.as_dict(), facts=facts, kind=raw.get("kind"))
+        store.step(run_id, proof_id, "artifact", art or "none", {"artifact": art, "why": why,
+                                                                  "text_checked": bool(path and text.strip())})
         if not ex.ok and ex.error and ex.error.startswith(TRANSIENT) \
                 and extract_attempts(store, proof_id) < MAX_EXTRACT_ATTEMPTS:
             stats.retry += 1
