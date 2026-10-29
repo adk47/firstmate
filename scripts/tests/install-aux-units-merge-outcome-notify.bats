@@ -69,15 +69,15 @@ PY
     'EnvironmentFile=-/etc/openclaw/shared.env' 'EnvironmentFile=-/etc/openclaw/main.env')" ]
 }
 
-@test "the timer fires every 15 minutes, persistently, and drives the service" {
+@test "the timer fires every 15 minutes from :05, persistently, and drives the service" {
   on_calendar="$(grep '^OnCalendar=' <<< "$TMR" | cut -d= -f2-)"
-  [ "$on_calendar" = '*:0/15' ]
+  [ "$on_calendar" = '*:05/15' ]
   grep -qx 'Persistent=true' <<< "$TMR"
   grep -qx 'Unit=merge-outcome-notify.service' <<< "$TMR"
   if command -v systemd-analyze >/dev/null 2>&1; then
     run systemd-analyze calendar --iterations=2 "$on_calendar"
     [ "$status" -eq 0 ]
-    grep -q ':00:00\|:15:00\|:30:00\|:45:00' <<< "$output"
+    grep -q ':05:00\|:20:00\|:35:00\|:50:00' <<< "$output"
   fi
 }
 

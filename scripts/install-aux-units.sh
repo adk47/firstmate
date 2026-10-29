@@ -122,14 +122,14 @@
 #     a rebuild on detection (6h re-page cooldown).
 #
 #   clickup-sla-digest.timer / .service
-#     Daily 08:00 America/New_York. Posts overdue / due-today /
+#     Daily 08:10 America/New_York. Posts overdue / due-today /
 #     due-tomorrow open ClickUp support tickets (SLA due dates set
 #     at creation by the support-tools/intercom plugins) to
 #     #cs_chats via scripts/clickup-sla-digest.sh. Silent when all
 #     buckets are empty.
 #
 #   close-merged-tickets.timer / .service
-#     Daily 07:00 UTC. Runs scripts/dedup/sweeps/close-merged-tickets.sh
+#     Daily 07:12 UTC. Runs scripts/dedup/sweeps/close-merged-tickets.sh
 #     --apply to close ClickUp profile-merge tickets whose merge already
 #     executed (per action_log over Trino). Caroline files these tickets
 #     but never merges — Ops executes the tier-2 merge later, and without
@@ -754,11 +754,11 @@ cat > /etc/systemd/system/close-resolved-conversations.timer << CLOSERESTMR
 Description=Daily sync — close resolved-ticket conversations
 
 [Timer]
-OnBootSec=20min
-# Every 6h (was 24h): so close follows the resolve-notify "your request is done"
-# message within a window instead of up to a day later. The close is unchanged
-# (conservative: only we-spoke-last + resolved; shadow-logged; reversible).
-OnUnitActiveSec=6h
+# Same tick as resolve-notify (02/08/14/20:25 UTC). The service Requires+After
+# resolve-notify, so resolve-notify runs once, then the closer. The close is
+# unchanged (conservative: only we-spoke-last + resolved; shadow-logged; reversible).
+OnCalendar=*-*-* 02,08,14,20:25:00 UTC
+Persistent=true
 Unit=close-resolved-conversations.service
 
 [Install]
@@ -771,7 +771,7 @@ systemctl enable "$cr" >/dev/null 2>&1 || log "WARN: could not enable $cr"
 systemctl start "$cr" >/dev/null 2>&1 || log "WARN: could not start $cr"
 log "  $cr: $(systemctl is-active "$cr" 2>/dev/null || echo unknown)"
 
-# ─── Proactive overdue-verification customer notifier (09:00 UTC) ──
+# ─── Proactive overdue-verification customer notifier (09:12 UTC) ──
 # Sends ONE in-app Intercom note to a customer when their verification
 # ticket has passed SLA but nobody has worked it — the #1 weekly-digest
 # escalation ("delayed verification follow-ups"). Safety-first: seeds
@@ -802,7 +802,7 @@ cat > /etc/systemd/system/overdue-verification-notifier.timer << OVNOTIFYTMR
 Description=Daily — proactively notify customers of overdue verification tickets
 
 [Timer]
-OnCalendar=*-*-* 09:00:00 UTC
+OnCalendar=*-*-* 09:12:00 UTC
 Persistent=true
 RandomizedDelaySec=120
 Unit=overdue-verification-notifier.service
@@ -856,9 +856,8 @@ cat > /etc/systemd/system/resolve-notify.timer << RESNOTIFYTMR
 Description=Every 6h — notify customers their request is resolved
 
 [Timer]
-OnCalendar=*-*-* 02,08,14,20:00:00 UTC
+OnCalendar=*-*-* 02,08,14,20:25:00 UTC
 Persistent=true
-RandomizedDelaySec=120
 Unit=resolve-notify.service
 
 [Install]
@@ -907,7 +906,7 @@ cat > /etc/systemd/system/merge-outcome-notify.timer << MERGEOUTCOMETMR
 Description=Every 15 min — tell customers the outcome of their merge request
 
 [Timer]
-OnCalendar=*:0/15
+OnCalendar=*:05/15
 Persistent=true
 RandomizedDelaySec=60
 Unit=merge-outcome-notify.service
@@ -922,7 +921,7 @@ systemctl enable "$mon" >/dev/null 2>&1 || log "WARN: could not enable $mon"
 systemctl start "$mon" >/dev/null 2>&1 || log "WARN: could not start $mon"
 log "  $mon: $(systemctl is-active "$mon" 2>/dev/null || echo unknown)"
 
-# ─── Resolution matcher (daily 12:00 UTC) ─────────────────────
+# ─── Resolution matcher (daily 12:14 UTC) ─────────────────────
 # The RESOLUTION counterpart to the systemic-data-issue REPORT: that report pages
 # Aaron daily with the symptom ("N users hit the same data problem") but nothing
 # then watches for the fix or tells those users it landed. This closes that loop.
@@ -941,7 +940,7 @@ log "  $mon: $(systemctl is-active "$mon" 2>/dev/null || echo unknown)"
 # circuit breaker (<=MAX else abort+page), per-conversation dedupe, a fresh
 # pre-send conversation re-check (email cross-match + closed/snoozed/human-
 # assignee/human-reply/social-tag suppression), a per-run cap, and a reversible
-# shadow log. Runs at 12:00 UTC, after the 06:00 Europe/Rome report has refreshed
+# shadow log. Runs at 12:14 UTC, after the 06:00 Europe/Rome report has refreshed
 # the feed. MUSO_BIN is absolute because systemd's unit PATH does not reliably
 # include /usr/local/bin (the backtest queries action_log over Trino via the muso
 # CLI). See scripts/resolution-matcher.py.
@@ -964,7 +963,7 @@ cat > /etc/systemd/system/resolution-matcher.timer << RESMATCHTMR
 Description=Daily — close the loop on systemic data issues once their fix ships
 
 [Timer]
-OnCalendar=*-*-* 12:00:00 UTC
+OnCalendar=*-*-* 12:14:00 UTC
 Persistent=true
 RandomizedDelaySec=120
 Unit=resolution-matcher.service
@@ -989,7 +988,7 @@ log "  $rm_t: $(systemctl is-active "$rm_t" 2>/dev/null || echo unknown)"
 # tags, or replies to a conversation — its only side effect is that one
 # Slack post (`--post`; a bare run without it is a dry-run that prints to
 # stdout and posts nothing). Runs at 13:30 UTC, after resolution-matcher's
-# 12:00 UTC run has had a chance to claim its conversations first, so the
+# 12:14 UTC run has had a chance to claim its conversations first, so the
 # de-confliction read sees resolution-matcher's same-day state. See
 # scripts/cs-needs-human-digest.py.
 cat > /etc/systemd/system/cs-needs-human-digest.service << CSDIGESTSVC
@@ -1262,7 +1261,7 @@ cat > /etc/systemd/system/clickup-todo-dedupe.timer << CUDEDUPETMR
 Description=Hourly — ClickUp TO DO duplicate sweep
 
 [Timer]
-OnCalendar=hourly
+OnCalendar=*-*-* *:40:00
 Persistent=true
 RandomizedDelaySec=180
 Unit=clickup-todo-dedupe.service
@@ -1550,7 +1549,7 @@ if [[ ! -f /opt/hydra/workspaces/support/reference/app-pricing.md ]]; then
     || log "  WARN: app-pricing.md seed failed; timer will retry at 05:50 UTC"
 fi
 
-# ─── Daily ClickUp SLA digest (08:00 America/New_York) ────────
+# ─── Daily ClickUp SLA digest (08:10 America/New_York) ────────
 # Posts overdue / due-today / due-tomorrow open support tickets to
 # #cs_chats. Deterministic bash (no LLM, fires even with the gateway
 # down). CLICKUP_API_KEY comes from the same env files the
@@ -1577,12 +1576,12 @@ SLADIGESTSVC
 
 cat > /etc/systemd/system/clickup-sla-digest.timer << SLADIGESTTMR
 [Unit]
-Description=Daily ClickUp SLA digest at 08:00 America/New_York
+Description=Daily ClickUp SLA digest at 08:10 America/New_York
 
 [Timer]
 # systemd interprets the timezone qualifier and DST shifts itself.
-OnCalendar=*-*-* 08:00:00 America/New_York
-# If node-8 was down at 08:00, fire on next boot rather than skip the day.
+OnCalendar=*-*-* 08:10:00 America/New_York
+# If node-8 was down at 08:10, fire on next boot rather than skip the day.
 Persistent=true
 RandomizedDelaySec=30s
 Unit=clickup-sla-digest.service
@@ -1610,7 +1609,7 @@ log "  $sla: $(systemctl is-active "$sla" 2>/dev/null || echo unknown)"
 # Tokens (CLICKUP_API_KEY, MUSOAI_INTERCOM_TOKEN) come from the same env files
 # the SLA-digest unit uses. MUSO_BIN is pinned because the sweep queries the
 # action_log over Trino via the muso CLI (the other scheduled Trino job uses
-# trino-query.sh, not muso). 07:00 UTC is before the 08:30 stale-ticket and
+# trino-query.sh, not muso). 07:12 UTC is before the 08:30 stale-ticket and
 # America/New_York SLA digests, so those reflect the freshly-closed state.
 cat > /etc/systemd/system/close-merged-tickets.service << CLOSEMERGEDSVC
 [Unit]
@@ -1634,8 +1633,8 @@ cat > /etc/systemd/system/close-merged-tickets.timer << CLOSEMERGEDTMR
 Description=Daily sweep — close ClickUp tickets whose profile-merge already executed
 
 [Timer]
-OnCalendar=*-*-* 07:00:00 UTC
-# If node-8 was down at 07:00, fire on next boot rather than skip the day.
+OnCalendar=*-*-* 07:12:00 UTC
+# If node-8 was down at 07:12, fire on next boot rather than skip the day.
 Persistent=true
 RandomizedDelaySec=30s
 Unit=close-merged-tickets.service
