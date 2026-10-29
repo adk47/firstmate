@@ -20,7 +20,7 @@ import tempfile
 from typing import Any
 
 from . import ocr
-from .pdf_forensics import KEY_TOKEN
+from .pdf_forensics import KEY_TOKEN, key_field_class
 from .signals import ERROR, SOFT, Evidence, Extracted, Signal
 
 TOOL = "opencv"
@@ -135,7 +135,8 @@ def ela(jpeg: bytes, path: str, words: list[dict[str, Any]]) -> list[Signal]:
     for lv, w in key:
         z = (lv - mu) / sd
         if z >= ELA_Z:
-            out.append(Signal("F3b", "ela_outlier_on_key_field", SOFT, value={"z": round(z, 1)},
+            out.append(Signal("F3b", "ela_outlier_on_key_field", SOFT,
+                              value={"z": round(z, 1), "field": key_field_class(w["text"], [])},
                               evidence=Evidence(file=path, tool="pillow-ela", tool_version=f"q{ELA_QUALITY}",
                                                 region=w["box"])))
     return out[:3]

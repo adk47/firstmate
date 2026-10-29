@@ -1,0 +1,2535 @@
+{
+ "_doc": "dv-2 standing verified rows (node-8, 2026-10-28 23:4xZ) with verifier-eval-v1 blind labels; abstracted: no names, text or files. Regression: none labelled real_not_proof may verify.",
+ "rows": [
+  {
+   "proof": "a9303ef9db80",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "a9303ef9db80",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "dd0df61a4709",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "dd0df61a4709",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "143b5e6660da",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "1698e53631ba",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "d6915a0ea172",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "db5813d7401e",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "db5813d7401e",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "db5813d7401e",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "d615c3953d10",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b49ba91204e8",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "fe8c5eecf613",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "5694f6126542",
+   "label": "proves",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "5694f6126542",
+   "label": "proves",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "5694f6126542",
+   "label": "proves",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b66f9af667a1",
+   "label": "real_not_proof",
+   "doc_type": "other",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "skipped",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b66f9af667a1",
+   "label": "real_not_proof",
+   "doc_type": "other",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "skipped",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "bf37234cd13a",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "label",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "positive"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "52a8c38d5ceb",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7fd008b1e209",
+   "label": "real_not_proof",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "8facaaf6a37b",
+   "label": "proves",
+   "doc_type": "pro_registration",
+   "issuer_type": "pro",
+   "kind": "pro_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "ddedcdf7b7df",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "skipped",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "df35959cd043",
+   "label": "real_not_proof",
+   "doc_type": "other",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "skipped",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "634ed8b09bd2",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "634ed8b09bd2",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "634ed8b09bd2",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "634ed8b09bd2",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "634ed8b09bd2",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "634ed8b09bd2",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "634ed8b09bd2",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "634ed8b09bd2",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "634ed8b09bd2",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "634ed8b09bd2",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "634ed8b09bd2",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "634ed8b09bd2",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b5f6c7d11da4",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b5f6c7d11da4",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b5f6c7d11da4",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b5f6c7d11da4",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b5f6c7d11da4",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b5f6c7d11da4",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b5f6c7d11da4",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b5f6c7d11da4",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b5f6c7d11da4",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b5f6c7d11da4",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b5f6c7d11da4",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b5f6c7d11da4",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "b5f6c7d11da4",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "f157b2f2543e",
+   "label": "real_not_proof",
+   "doc_type": "other",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "f157b2f2543e",
+   "label": "real_not_proof",
+   "doc_type": "other",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "f157b2f2543e",
+   "label": "real_not_proof",
+   "doc_type": "other",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "f157b2f2543e",
+   "label": "real_not_proof",
+   "doc_type": "other",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "f157b2f2543e",
+   "label": "real_not_proof",
+   "doc_type": "other",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "f157b2f2543e",
+   "label": "real_not_proof",
+   "doc_type": "other",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "f157b2f2543e",
+   "label": "real_not_proof",
+   "doc_type": "other",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "f157b2f2543e",
+   "label": "real_not_proof",
+   "doc_type": "other",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "f157b2f2543e",
+   "label": "real_not_proof",
+   "doc_type": "other",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "f157b2f2543e",
+   "label": "real_not_proof",
+   "doc_type": "other",
+   "issuer_type": "other",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "1a1b1caa4751",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "1a1b1caa4751",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "1a1b1caa4751",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "other",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7ad8018343e8",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7ad8018343e8",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "7ad8018343e8",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "44dfc9eab9a6",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "44dfc9eab9a6",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "852d41c51cb8",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "852d41c51cb8",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "catalog_page",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "4130d64d5bb8",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "publisher",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "c152c65214b2",
+   "label": "real_not_proof",
+   "doc_type": "credits_page",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": true,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "04f9d7d953ad",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "04f9d7d953ad",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "10999a584a7d",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "10999a584a7d",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "6fbb5c089cf0",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "6fbb5c089cf0",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  },
+  {
+   "proof": "3045704828ee",
+   "label": "real_not_proof",
+   "doc_type": "email_screenshot",
+   "issuer_type": "none",
+   "kind": "distributor_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": [
+    [
+     "email_screenshot",
+     "weak"
+    ]
+   ]
+  },
+  {
+   "proof": "3045704828ee",
+   "label": "real_not_proof",
+   "doc_type": "email_screenshot",
+   "issuer_type": "none",
+   "kind": "distributor_portal",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": [
+    [
+     "email_screenshot",
+     "weak"
+    ]
+   ]
+  },
+  {
+   "proof": "441a439da1bd",
+   "label": "real_not_proof",
+   "doc_type": "dashboard_screenshot",
+   "issuer_type": "none",
+   "kind": "unknown",
+   "h3": "PLAUSIBLE",
+   "support": false,
+   "checks": {
+    "xc_domain": "skipped",
+    "xc_signatory": "skipped",
+    "xc_domain_intel": "skipped",
+    "xc_dsp": "positive",
+    "xc_isrc": "unknown",
+    "xc_label": "skipped"
+   },
+   "findings": []
+  }
+ ]
+}

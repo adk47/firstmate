@@ -102,6 +102,18 @@ def utcnow() -> str:
 
 
 class DocVerifyStore:
+    @classmethod
+    def read_only(cls, path: str | None = None) -> "DocVerifyStore":
+        """For reports (trays, lists, counts): mode=ro - never creates the file, runs no schema change, ALTER
+        or carry-forward (QA #1470). Any write raises sqlite3.OperationalError."""
+        self = cls.__new__(cls)
+        self.path = path or DEFAULT_PATH
+        if not os.path.exists(self.path):
+            raise FileNotFoundError(f"doc-verify store not found: {self.path}")
+        self.db = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=60, check_same_thread=False)
+        self.lock = threading.Lock()
+        return self
+
     def __init__(self, path: str | None = None):
         self.path = path or DEFAULT_PATH
         d = os.path.dirname(self.path)
@@ -121,18 +133,19 @@ class DocVerifyStore:
         self.db.execute("CREATE INDEX IF NOT EXISTS dv_out_intake ON dv_outcomes(intake_id)")
         self.lock = threading.Lock()
         if VERSION in CARRY:
-            prev, reread, steps = CARRY[VERSION]
-            self.carry_forward(prev, VERSION, reread, steps)
+            prev, reread, steps, *more = CARRY[VERSION]
+            self.carry_forward(prev, VERSION, reread, steps, *(more or [None]))
 
     def carry_forward(self, prev: str, cur: str, reread: frozenset[str] | None,
-                      steps: tuple[str, ...] = ()) -> int:
+                      steps: tuple[str, ...] = (), detail: tuple[str, tuple[str, ...]] | None = None) -> int:
         """A VERSION bump (proof-loop lead 075): copy the rows of every document whose standing `prev`
         outcomes include none of `reread` to `cur`, once, in one transaction (parallel readers open the
         store together). Copies keep their run, time and order, so the latest row stays the latest, and
         are marked detail.carried_from = {version, id}. A document whose `prev` run RAN one of `steps`
         (a dv_steps row with a status other than skipped) is re-read too. Every other document has no
-        `cur` row and is re-read by the deployed reader. `reread=None` carries nothing (a full re-read).
-        Returns rows copied."""
+        `cur` row and is re-read by the deployed reader. `detail=(step, names)`: a document whose `prev`
+        `step` row's detail contains any of `names` (as a JSON string, e.g. a forensic signal name) is
+        re-read too. `reread=None` carries nothing (a full re-read). Returns rows copied."""
         key = f"carried:{prev}->{cur}"
         doc = "coalesce(intake_id, proof_id)"
         with self.lock:
@@ -151,6 +164,15 @@ class DocVerifyStore:
                             f"AND proof_id NOT IN (SELECT proof_id FROM dv_steps WHERE version=? AND step IN ({smarks}) "
                             f"AND status <> 'skipped')")
                     args = [prev, prev, *sorted(reread), prev, *steps]
+                    if detail and detail[1]:
+                        likes = " OR ".join("instr(detail_json, ?) > 0" for _ in detail[1])
+                        # ANY earlier version's step: a carried document has only the steps of the version
+                        # that read it (dv-2 carried dv-1 documents without copying their steps)
+                        keep += (" AND proof_id NOT IN (SELECT proof_id FROM dv_steps WHERE version<>? AND step=? "
+                                 f"AND ({likes}))")
+                        # the bare name: a finding ("h3_<name>", "<name>") or an H3 reason ("F2 <name>");
+                        # a broader match only sends more documents back to the reader, never fewer
+                        args += [cur, detail[0], *detail[1]]
                     n = self.db.execute(
                         "INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id, source_ref, h3_verdict, "
                         "outcome, reason, need, account_hold, detail_json, version, intake_id) "
@@ -166,7 +188,8 @@ class DocVerifyStore:
                                         f"({ids})", (cur, prev, cur))
                 self.db.execute("INSERT INTO dv_state (k, v) VALUES (?, ?)",
                                 (key, json.dumps({"at": utcnow(), "rows": n, "reread": sorted(reread or []),
-                                                  "reread_steps": list(steps)})))
+                                                  "reread_steps": list(steps),
+                                                  "reread_detail": [detail[0], len(detail[1])] if detail else None})))
                 self.db.commit()
                 return n
             except BaseException:

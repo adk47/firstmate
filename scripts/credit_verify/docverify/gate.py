@@ -40,17 +40,32 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import re
+
+from . import FRAUD_SIGNAL_FAMILY
 from . import crosscheck as xc
 from .extract import Extraction
-from .forensics import HARD, SOFT, Finding
+from .forensics import HARD, INFO, SOFT, Finding
 
 FORGED, CONTRADICTED, VERIFIED, UNVERIFIABLE, UNKNOWN = \
     "forged", "contradicted", "verified", "unverifiable", "unknown"
+# FRAUD DENY (captain-1028-213x): two independent signal families agree. Evidence for a decline ONLY after
+# a Fable confirm on that document (tray `jan-forged-bN`, ruling `forged-<sha8>`); the reader never writes.
+FORGED_POSITIVE = "forged_positive"
+_REASON = re.compile(r"^F\w+ ([a-z0-9_]+)")
 # Extraction errors that are OUR tooling, not the document (D3): they make the outcome
 # `unknown`, which never asks the user, never approves and never holds; it is retried.
 TOOLING_ERRORS = ("document not located", "sandbox failed", "daily model spend cap", "no OpenRouter key",
                   "http ", "transport:", "unusable model answer")
 APPROVING_H3 = ("GENUINE", "VERIFIED", "PLAUSIBLE")
+# The DOCUMENT must prove the credit (verifier-eval-v1 blind labels, 2026-10-28 23:4xZ: all dv-2 `verified`
+# rows were documents that prove nothing - DSP/catalog panels, Muso UI, dashboards, chats - passed on H3
+# PLAUSIBLE + the Spotify/Tidal cross-check). Only a document of record can verify a credit by itself: a
+# registration, a split sheet, a contract, an invoice/receipt, a letter. A public catalog or DSP panel, an
+# app or distributor dashboard (self-entered metadata) and an email/social screenshot cannot - a dashboard
+# only with our F9 code on it (xc_challenge POSITIVE).
+RECORD_DOC_TYPES = ("split_sheet", "contract", "invoice", "letter", "pro_registration", "receipt")
+RECORD_H3_KINDS = ("split_sheet", "contract", "invoice", "letter_of_direction", "pro_portal")
 
 # Stronger-proof codes for `unverifiable` (machine codes; the copy is not
 # written here: captain 2026-10-26 23:30Z, no new customer copy).
@@ -100,12 +115,147 @@ def second_signals(h3_verdict: str | None, findings: list[Finding], checks: list
     return out
 
 
+CLAIM_FIELDS = frozenset({"claimant_name", "isrc", "track", "role", "date"})
+STATEMENT_ISSUERS = ("distributor", "pro", "dsp")
+
+
+def claim_fields(kind: str | None, ex: Extraction | None) -> frozenset[str]:
+    """The fields that carry the claim on THIS kind of document (Fable [key=fraud-deny-families]
+    addendum 21:45Z): claimant name / ISRC-track / role / date always; the SHARE on a split sheet (there
+    the share is the claim - a role at 0% is no credit); the AMOUNT on a royalty / distributor statement
+    (an edited amount on the only evidence of the credit). Never on a licence, contract or email."""
+    doc_type = getattr(ex, "doc_type", None)
+    issuer = (getattr(ex, "issuer", None) or {}).get("type") if ex is not None else None
+    out = set(CLAIM_FIELDS)
+    if kind == "split_sheet" or doc_type == "split_sheet":
+        out.add("share_percent")
+    statement = kind == "distributor_portal" or (doc_type in ("dashboard_screenshot", "receipt")
+                                                 and issuer in STATEMENT_ISSUERS)
+    if statement and doc_type not in ("email", "email_screenshot", "contract", "letter"):
+        out.add("amount")
+    return frozenset(out)
+
+
+def _located(f: Finding) -> dict[str, Any]:
+    d = f.detail if isinstance(f.detail, dict) else {}
+    out: dict[str, Any] = {}
+    v = d.get("value") if isinstance(d.get("value"), dict) else {}
+    fields = ([v["field"]] if v.get("field") else []) + list(v.get("fields") or [])
+    if fields:
+        out["fields"] = sorted(set(fields))
+    if d.get("page") is not None or v.get("page") is not None:
+        out["page"] = d.get("page") if d.get("page") is not None else v.get("page")
+    if d.get("region"):
+        out["region"] = d["region"]
+    return out
+
+
+def fraud_signals(findings: list[Finding], checks: list[xc.Check]) -> list[dict[str, Any]]:
+    """The fraud signals on this document (FRAUD_SIGNAL_FAMILY), each {id, family, and where it sits:
+    fields / page / region when the analyzer recorded them}: forensic findings (a SOFT or HARD finding,
+    or the INFO record of a hard H3 signal behind h3_forged), H3's own reasons when it says forged
+    (no location), and the sender (a fabricated address read >= FORGED_SENDER_CONFIDENCE, or a
+    domain-intel flag - one family, both are about the same address)."""
+    out: dict[str, dict[str, Any]] = {}
+
+    def add(sid: str, fam: str | None, loc: dict[str, Any]) -> None:
+        if fam and sid not in out:
+            out[sid] = {"id": sid, "family": fam, **loc}
+    for f in findings:
+        behind_forged = f.severity == INFO and isinstance(f.detail, dict) and \
+            str(f.detail.get("note", "")).startswith("hard H3 signal")
+        if f.severity in (HARD, SOFT) or behind_forged:
+            loc = _located(f)
+            key = f.name + (f"@p{loc.get('page')}:{loc.get('region')}" if loc.get("region") else "")
+            add(key if loc else f.name, FRAUD_SIGNAL_FAMILY.get(f.name.removeprefix("h3_")), loc)
+        if f.name == "h3_forged":
+            for r in (f.detail if isinstance(f.detail, list) else []):
+                m = _REASON.match(str(r))
+                if m and not any(e["id"].startswith(f"h3_{m.group(1)}") for e in out.values()):
+                    add(f"h3_{m.group(1)}", FRAUD_SIGNAL_FAMILY.get(m.group(1)), {})
+    for c in checks:
+        if c.step == "xc_domain" and c.status == xc.CONTRADICTS:
+            conf = c.detail.get("confidence")
+            if isinstance(conf, (int, float)) and conf >= FORGED_SENDER_CONFIDENCE:
+                add(f"xc_domain: {c.detail.get('note')} ({c.detail.get('sender_domain')})", "sender", {})
+        elif c.step == "xc_domain_intel" and c.status == xc.SOFT:
+            # only a flag on the SENDER's own domain (QA #1470): a look-alike CC / counterparty address on the
+            # document says nothing about who sent it. The flag is quoted.
+            senders = {str(r.get("domain") or "").lower() for r in c.detail.get("domains") or []
+                       if r.get("role") == "sender"}
+            for f in c.detail.get("flags") or []:
+                if str(f).split(":", 1)[0].strip().lower() in senders:
+                    add(f"xc_domain_intel: {str(f)[:120]}", "sender", {})
+    return sorted(out.values(), key=lambda e: (e["family"], e["id"]))
+
+
+def _overlap(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Two readings of the same edit: same page and intersecting regions (Fable: independence is by
+    family AND by region). Signals without a region (template, reuse, sender, generator) never overlap."""
+    ra, rb = a.get("region"), b.get("region")
+    if not ra or not rb or a.get("page") != b.get("page"):
+        return False
+    return not (ra[2] < rb[0] or rb[2] < ra[0] or ra[3] < rb[1] or rb[3] < ra[1])
+
+
+def positive_pair(sigs: list[dict[str, Any]], fields: frozenset[str] | set[str] | list[str] = CLAIM_FIELDS
+                  ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """The first pair that makes a document POSITIVELY forged (captain-1028-213x, Fable
+    [key=fraud-deny-families]): two signals of DIFFERENT families, not two readings of one edit, and
+    - for file_tamper + template - the tamper signal sits on a field that carries the claim
+    (`fields`, from claim_fields(kind, ex); a font change in a footer is not the second family)."""
+    for i, a in enumerate(sigs):
+        for b in sigs[i + 1:]:
+            if a["family"] == b["family"] or _overlap(a, b):
+                continue
+            fams = {a["family"], b["family"]}
+            if fams == {"file_tamper", "template"}:
+                tamper = a if a["family"] == "file_tamper" else b
+                if not set(fields) & set(tamper.get("fields") or []):
+                    continue
+            return a, b
+    return None
+
+
+def tooling_errors(ex: Extraction, h3_verdict: str | None, checks: list[xc.Check]) -> list[str]:
+    """Our own tooling failing (D3): the extraction did not run, H3 is missing or undetermined, or the
+    Spotify/Tidal credits could not be read (and no ISRC confirmed). Such a document is `unknown` - and
+    never `forged_positive`."""
+    d = xc.by_step(checks).get("xc_dsp")
+    out = []
+    if (ex.degraded or not ex.ok) and str(ex.error or "").startswith(TOOLING_ERRORS):
+        out.append(f"extraction did not run ({ex.error})")
+    if h3_verdict in (None, "UNDETERMINED"):
+        out.append(f"H3 {h3_verdict or 'verdict missing'}")
+    if d and d.status == xc.ERROR and not any(c.status == xc.POSITIVE for c in checks if c.step == "xc_isrc"):
+        out.append(f"Spotify/Tidal credits unreadable ({d.detail.get('error')})")
+    return out
+
+
 def decide(*, h3_verdict: str | None, kind: str | None, ex: Extraction, findings: list[Finding],
            checks: list[xc.Check], account_held: bool, extracted_support: dict[str, Any] | None = None,
            elsewhere: list[str] | None = None) -> Outcome:
     steps = xc.by_step(checks)
     detail = {"h3": h3_verdict, "findings": [f.as_dict() for f in findings],
               "checks": {c.step: c.status for c in checks}}
+    sigs = fraud_signals(findings, checks)
+    if sigs:
+        detail["fraud_signals"] = sigs
+    fields = claim_fields(kind, ex)
+    pair = positive_pair(sigs, fields)
+    pending = tooling_errors(ex, h3_verdict, checks)
+    if pair and pending:
+        # QA #1470: the captain's deny rule is POSITIVE-only. A pair read while our own tooling failed (no
+        # extraction, H3 missing/undetermined, credits unreadable) is not positive: recorded, and the document
+        # falls through to a hold (one hard signal) or `unknown` (retried), never forged_positive.
+        detail["would_forge_positive"] = {"pair": list(pair), "why_not": "tooling: " + "; ".join(pending)}
+        pair = None
+    if pair:
+        detail["fraud_pair"] = list(pair)
+        detail["claim_fields"] = sorted(fields)
+        quoted = "; ".join(f"{e['family']}: {e['id']}" + (f" (fields {', '.join(e['fields'])})" if e.get("fields") else "")
+                           for e in pair)
+        return Outcome(FORGED_POSITIVE, f"two independent fraud signals ({quoted})"[:600], None, True, detail)
     hard = [f for f in findings if f.severity == HARD]
     if hard:
         return Outcome(FORGED, f"forensics: {', '.join(f.name for f in hard)}", None, True, detail)
@@ -131,13 +281,7 @@ def decide(*, h3_verdict: str | None, kind: str | None, ex: Extraction, findings
         who = ", ".join(sorted({o.get("name", "") for o in d.detail.get("for_others") or []}))[:120]
         return Outcome(CONTRADICTED, f"Spotify/Tidal credit this {d.detail.get('family')} role on the track to "
                                      f"someone else ({who})", None, True, detail)
-    tooling = []
-    if (ex.degraded or not ex.ok) and str(ex.error or "").startswith(TOOLING_ERRORS):
-        tooling.append(f"extraction did not run ({ex.error})")
-    if h3_verdict in (None, "UNDETERMINED"):
-        tooling.append(f"H3 {h3_verdict or 'verdict missing'}")
-    if d and d.status == xc.ERROR and not any(c.status == xc.POSITIVE for c in checks if c.step == "xc_isrc"):
-        tooling.append(f"Spotify/Tidal credits unreadable ({d.detail.get('error')})")
+    tooling = tooling_errors(ex, h3_verdict, checks)
     if tooling:
         return Outcome(UNKNOWN, "tooling: " + "; ".join(tooling)[:500], None, False, detail)
     need = need_for(ex, kind)
@@ -161,6 +305,14 @@ def decide(*, h3_verdict: str | None, kind: str | None, ex: Extraction, findings
         blockers.append("cross-check doubt: " + ", ".join(soft_xc))
     if not confirmed:
         blockers.append("no independent source confirms the credit")
+    # the DOCUMENT must name the claimant in this role on this track - an independent source crediting
+    # them is a cross-check of the document, never a substitute for it
+    if not extracted_support:
+        blockers.append("the document itself does not name the claimant in this role on this track")
+    f9 = any(c.step == "xc_challenge" and c.status == xc.POSITIVE for c in checks)
+    if not (ex.doc_type in RECORD_DOC_TYPES or kind in RECORD_H3_KINDS or f9):
+        blockers.append(f"not a document of record ({ex.doc_type or 'unknown type'}): a catalog/DSP panel, an "
+                        "app or dashboard screen, or an email/social screenshot cannot prove a credit by itself")
     if elsewhere and not extracted_support and h3_verdict not in APPROVING_H3:
         blockers.insert(0, "the document credits the claimant on other tracks (" + ", ".join(
             f"“{t}”" for t in elsewhere) + "), not on this one")
@@ -171,7 +323,7 @@ def decide(*, h3_verdict: str | None, kind: str | None, ex: Extraction, findings
                            f"{detail['would_forge']['why_not']}")
     if blockers:
         return Outcome(UNVERIFIABLE, "; ".join(blockers)[:600], need, False, detail)
-    how = f"H3 {h3_verdict}" if h3_verdict in APPROVING_H3 else \
-        f"H3 {h3_verdict} (coverage only), extracted credit {extracted_support}"
+    how = (f"H3 {h3_verdict}" if h3_verdict in APPROVING_H3 else f"H3 {h3_verdict} (coverage only)") + \
+        f", the document names the claimant ({ex.doc_type})"
     return Outcome(VERIFIED, "independently confirmed by " + ", ".join(confirmed) + f"; {how}; "
                    "no forensic or cross-check doubt", None, False, detail)

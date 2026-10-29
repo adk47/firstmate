@@ -233,9 +233,9 @@ def eval_metrics(rows: list[dict], label: dict[str, str]) -> dict:
         out[lab] = {"documents": len(docs), "claims": len(mine), "outcomes": by}
     forged = [r for r in rows if label.get(r["proof_id"]) == "forged"]
     good = [r for r in rows if label.get(r["proof_id"]) == "good"]
-    out["forged_caught"] = sum(r["outcome"] in ("forged", "contradicted") for r in forged)
+    out["forged_caught"] = sum(r["outcome"] in ("forged", "forged_positive", "contradicted") for r in forged)
     out["forged_verified"] = sum(r["outcome"] == "verified" for r in forged)
-    out["good_false_decline"] = sum(r["outcome"] in ("forged", "contradicted") for r in good)
+    out["good_false_decline"] = sum(r["outcome"] in ("forged", "forged_positive", "contradicted") for r in good)
     out["good_verified"] = sum(r["outcome"] == "verified" for r in good)
     return out
 
@@ -253,6 +253,46 @@ def eval_markdown(rows: list[dict], label: dict[str, str]) -> str:
             c.get("xc_label", "-"), c.get("xc_domain", "-"), c.get("xc_signatory", "-"),
             ", ".join(r.get("findings") or []) or "-", (r.get("reason") or "")[:220])) + " |")
     return "\n".join(lines) + "\n"
+
+
+class ReadOnlyOutcomes:
+    """latest_outcomes() of another doc-verify store (e.g. the 961-document backfill), opened read-only."""
+
+    def __init__(self, path: str):
+        self.db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        self.db.row_factory = sqlite3.Row
+
+    def latest_outcomes(self) -> list:
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(dv_outcomes)")}
+        extra = "" if "intake_id" in cols else ", NULL AS intake_id"      # a store from before D2
+        return self.db.execute(f"SELECT o.*{extra} FROM dv_outcomes o JOIN (SELECT MAX(id) id FROM dv_outcomes "
+                               "GROUP BY proof_id, request_id, role) l USING(id)").fetchall()
+
+
+def cmd_forged_tray(args: argparse.Namespace) -> int:
+    """The fraud-deny tray. Reads the doc-verify store and proof_intake (read-only); writes two files."""
+    import sqlite3
+    from credit_verify.docverify import tray as tray_mod
+    from credit_verify.docverify.store import DocVerifyStore, utcnow
+    store = DocVerifyStore.read_only(args.store)       # a report: never writes (QA #1470)
+    pdb = sqlite3.connect(f"file:{args.proof_store}?mode=ro", uri=True)
+
+    def intake_of(iid: str) -> dict:
+        row = pdb.execute("SELECT subject, received_at FROM proof_intake WHERE intake_id=?", (iid,)).fetchone()
+        return {"subject": row[0], "received_at": row[1]} if row else {}
+    rulings = tray_mod.parse_rulings(Path(args.rulings).read_text()) if args.rulings else {}
+    also = [ReadOnlyOutcomes(p) for p in args.also_store or []]
+    rows, short = tray_mod.forged_tray(store, intake_of=intake_of, rulings=rulings, also=also)
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    md = out / f"jan-forged-b{args.batch}.md"
+    md.write_text(tray_mod.forged_markdown(rows, args.batch, utcnow(), short))
+    # The executor's input is the deny rows only; short-of-positive rows never enter it.
+    (out / f"jan-forged-b{args.batch}.json").write_text(json.dumps(rows, indent=1, default=str))
+    (out / f"jan-forged-b{args.batch}-short.json").write_text(json.dumps(short, indent=1, default=str))
+    log(f"forged tray b{args.batch}: {len(rows)} documents, {sum(r['executable'] for r in rows)} confirmed, "
+        f"{len(short)} short of positive -> {md}")
+    return 0
 
 
 def cmd_tray(args: argparse.Namespace) -> int:
@@ -318,6 +358,14 @@ def parser() -> argparse.ArgumentParser:
     pe = sub.add_parser("eval", help="verify the manifest into a scratch store; markdown on stdout")
     pe.add_argument("--manifest", required=True)
     pe.set_defaults(fn=cmd_eval)
+    pf = sub.add_parser("forged-tray", help="jan-forged-bN.md/.json: forged_positive documents for Fable's ruling "
+                                            "and t01b's executor (captain-1028-213x); writes only those two files")
+    pf.add_argument("--batch", type=int, required=True)
+    pf.add_argument("--out-dir", required=True)
+    pf.add_argument("--rulings", help="file with Fable's lines 'ruling: forged-<sha8> confirm|not'")
+    pf.add_argument("--also-store", action="append", help="another doc-verify store, read-only, whose `forged` "
+                                                           "rows are listed as short of positive (never executable)")
+    pf.set_defaults(fn=cmd_forged_tray)
     pt = sub.add_parser("tray", help="Jan's tray (jan-docs-dv-bN.md) + h2's need queue from the latest outcomes")
     pt.add_argument("--batch", type=int, required=True)
     pt.add_argument("--out-dir", required=True)

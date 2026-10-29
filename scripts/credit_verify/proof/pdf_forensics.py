@@ -55,6 +55,24 @@ BYTE_RANGE = re.compile(rb"/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]"
 TRUST_ROOTS_DIR = Path(__file__).resolve().parent / "trust_roots"
 
 KEY_TOKEN = re.compile(r"\b\d{1,3}(?:[.,]\d{1,2})?\s?%|\b[A-Z]{2}-?[A-Z0-9]{3}-?\d{2}-?\d{5}\b|\b\d{1,3}(?:,\d{3})+\b")
+_PERCENT = re.compile(r"\b\d{1,3}(?:[.,]\d{1,2})?\s?%")
+_ISRC = re.compile(r"\b[A-Z]{2}-?[A-Z0-9]{3}-?\d{2}-?\d{5}\b")
+
+
+def key_field_class(text: str, names: list[str]) -> str | None:
+    """WHICH key field a span is (Fable [key=fraud-deny-families]: a tamper signal counts for the
+    fraud-deny pair only on a field that carries the claim). Recorded in the signal value; it changes
+    no verdict. claimant_name > isrc > share_percent > amount."""
+    t = text or ""
+    if any(n and len(n) > 3 and n.lower() in t.lower() for n in names):
+        return "claimant_name"
+    if _ISRC.search(t):
+        return "isrc"
+    if _PERCENT.search(t):
+        return "share_percent"
+    if KEY_TOKEN.search(t):
+        return "amount"
+    return None
 
 
 def available() -> bool:
@@ -161,7 +179,8 @@ def _compare_revision(old: bytes, final_doc, path: str, names: list[str], label:
                           f"{'post_signature' if label == 'signature' else 'after_creation'}_"
                           f"{'key_field_edit' if key else 'text_edit'}",
                           sev, value={"page": i + 1, "words_added": n_add, "words_removed": n_rem,
-                                      "key_fields_changed": len(keys)},
+                                      "key_fields_changed": len(keys),
+                                      "fields": sorted({c for k in keys if (c := key_field_class(k, names))})},
                           reason=("The document was changed after it was signed." if label == "signature" and key
                                   else ""),
                           evidence=_ev(path, page=i + 1, region=region)))
@@ -367,7 +386,8 @@ def _fonts(page, path: str, i: int, names: list[str]) -> list[Signal]:
         is_key = bool(KEY_TOKEN.search(t)) or any(n and len(n) > 3 and n.lower() in t.lower() for n in names)
         if is_key and count.get(fam, 0) == 1 and len(count) >= 2:
             bb = s.get("bbox") or [0, 0, 0, 0]
-            out.append(Signal("F4b", "key_field_unique_font", SOFT, value={"font": (s.get("font") or "")[:60]},
+            out.append(Signal("F4b", "key_field_unique_font", SOFT, value={"font": (s.get("font") or "")[:60],
+                                                                           "field": key_field_class(t, names)},
                               evidence=_ev(path, page=i + 1, region=[round(v, 1) for v in bb])))
     return out[:5]
 

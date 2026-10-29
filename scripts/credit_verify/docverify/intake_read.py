@@ -30,7 +30,7 @@ from typing import Any, Callable
 
 from credit_verify.proof.store import ProofStore
 
-from .forensics import H3
+from .forensics import H3, signal_dict
 
 
 @dataclass
@@ -178,6 +178,6 @@ def shadow_h3(shadow: ShadowProofStore, path: str, doc: IntakeDoc, requests: lis
             for pr in per_claim:
                 v, reasons, sig = stage2.claim_verdict(pr, ctx)
                 out[pr.request_id] = H3(verdict=v, reasons=list(reasons)[:6],
-                                        signals=[{"name": s.name, "severity": s.severity} for s in sig],
+                                        signals=[signal_dict(s) for s in sig],
                                         kind=pr.kind)
     return out

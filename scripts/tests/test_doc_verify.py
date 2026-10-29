@@ -558,10 +558,10 @@ class IntelTests(unittest.TestCase):
         self.assertEqual([p["name"] for p in intel.people_of(ex)], ["Dana Reyes"])          # deduplicated
 
     def test_people_check_never_blocks_verification(self):
-        o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=validate(GOOD_ANSWER), findings=[],
+        o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=validate(GOOD_ANSWER), findings=[], extracted_support={"person": "Ann Alpha", "role": "mixing", "track": "Night Drive"},
                         checks=checks(xc_dsp=xc.POSITIVE, xc_people=xc.WEAK), account_held=False)
         self.assertEqual(o.outcome, gate.VERIFIED)
-        o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=validate(GOOD_ANSWER), findings=[],
+        o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=validate(GOOD_ANSWER), findings=[], extracted_support={"person": "Ann Alpha", "role": "mixing", "track": "Night Drive"},
                         checks=checks(xc_dsp=xc.POSITIVE, xc_domain_intel=xc.SOFT), account_held=False)
         self.assertEqual(o.outcome, gate.UNVERIFIABLE)                       # domain doubt does block
 
@@ -574,7 +574,7 @@ class IntelTests(unittest.TestCase):
         self.assertEqual((c.status, c.detail["flags"]), (xc.POSITIVE, []))
         self.assertEqual({r["domain"]: r["role"] for r in c.detail["domains"]},
                          {"gmail.com": "other address", "bluefern.com": "sender"})
-        o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=validate(GOOD_ANSWER), findings=[],
+        o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=validate(GOOD_ANSWER), findings=[], extracted_support={"person": "Ann Alpha", "role": "mixing", "track": "Night Drive"},
                         checks=checks(xc_dsp=xc.POSITIVE, xc_domain_intel=c.status), account_held=False)
         self.assertEqual(o.outcome, gate.VERIFIED)                         # the bystander did not block it
         c = intel.domain_intel(net, "gmail.com", [], "Blue Fern", "label", ["bluefern.com"], now=now)
@@ -671,13 +671,168 @@ class IntelTests(unittest.TestCase):
 class GateTests(unittest.TestCase):
     good_ex = validate(GOOD_ANSWER)
 
-    def decide(self, h3="GENUINE", ex=None, findings=(), held=False, **st):
+    def decide(self, h3="GENUINE", ex=None, findings=(), held=False, support=None, **st):
         return gate.decide(h3_verdict=h3, kind="contract", ex=ex or self.good_ex, findings=list(findings),
-                           checks=checks(**st), account_held=held)
+                           checks=checks(**st), account_held=held, extracted_support=support)
+
+    def test_the_labelled_dv2_verified_rows_never_verify_on_a_document_that_proves_nothing(self):
+        # verifier-eval-v1 blind labels (2026-10-28 23:4xZ): every dv-2 `verified` row was on a document that proves
+        # nothing (DSP/catalog panels, Muso UI, dashboards, chats) - passed on H3 PLAUSIBLE + the DSP cross-check.
+        fx = json.loads((Path(__file__).resolve().parent / "fixtures" / "dv2-verified-labelled-1028.json").read_text())
+        verified = {"real_not_proof": 0, "proves": 0}
+        for r in fx["rows"]:
+            ex = validate({**GOOD_ANSWER, "doc_type": r["doc_type"] or "other"})
+            cks = [xc.Check(k, v, {"note": "n", "sender_domain": None, "family": "mix", "for_others": []})
+                   for k, v in r["checks"].items()]
+            fs = [forensics.Finding(n, sev) for n, sev in r["findings"]]
+            o = gate.decide(h3_verdict=r["h3"], kind=r["kind"], ex=ex, findings=fs, checks=cks, account_held=False,
+                            extracted_support={"person": "x"} if r["support"] else None)
+            if o.outcome == gate.VERIFIED:
+                verified[r["label"]] += 1
+        self.assertGreaterEqual(len(fx["rows"]), 70)
+        self.assertEqual(verified["real_not_proof"], 0)          # the regression: no false verified
+        # Recall is knowingly lower (precision first): the labelled 'proves' rows are ASCAP registrations whose
+        # role codes the extractor does not match yet, and an album booklet typed `credits_page`.
+        self.assertEqual(verified["proves"], 0)
+
+    def test_forged_positive_needs_two_independent_signal_families(self):
+        # Captain 2026-10-28 21:3xZ FRAUD DENY (captain-1028-213x); Fable [key=fraud-deny-families].
+        F = forensics.Finding
+        on_name = {"check": "F4b", "value": {"field": "claimant_name"}, "page": 1, "region": [10, 10, 90, 20]}
+        o = self.decide(h3="SUSPECT", findings=[F("h3_key_field_unique_font", forensics.SOFT, on_name),
+                                               F("template_reused", forensics.SOFT)], xc_dsp=xc.POSITIVE)
+        self.assertEqual((o.outcome, o.account_hold), (gate.FORGED_POSITIVE, True))
+        self.assertEqual([(e["family"], e.get("fields")) for e in o.detail["fraud_pair"]],
+                         [("file_tamper", ["claimant_name"]), ("template", None)])
+        self.assertIn("fields claimant_name", o.reason)
+        # H3's hard signals behind h3_forged, with where they sit (two families, two regions)
+        o = self.decide(h3="FORGED_LIKELY", findings=[
+            F("h3_forged", forensics.HARD, ["F2 reused_on_another_track", "F3b copy_move_region"]),
+            F("h3_reused_on_another_track", forensics.INFO, {"note": "hard H3 signal behind h3_forged"}),
+            F("h3_copy_move_region", forensics.SOFT, {"page": 1, "region": [0, 0, 50, 50]})])
+        self.assertEqual(o.outcome, gate.FORGED_POSITIVE)
+        self.assertEqual(sorted(e["family"] for e in o.detail["fraud_pair"]), ["file_tamper", "reuse"])
+        # a fabricated sender read >= 0.8 is a family of its own
+        dom = xc.Check("xc_domain", xc.CONTRADICTS, {"sender_domain": "ghost-label.com", "confidence": 0.95,
+                                                     "note": "the sender's domain does not exist"})
+        o = gate.decide(h3_verdict="SUSPECT", kind="contract", ex=self.good_ex,
+                        findings=[F("h3_copy_move_region", forensics.SOFT)], checks=[dom], account_held=False)
+        self.assertEqual(o.outcome, gate.FORGED_POSITIVE)
+
+    def test_a_lookalike_cc_address_is_not_a_sender_signal(self):
+        # QA #1470: domain-intel flags on another address on the document never make the `sender` family.
+        F = forensics.Finding
+        tamper = [F("h3_copy_move_region", forensics.SOFT, {"page": 1, "region": [0, 0, 9, 9]})]
+        cc = xc.Check("xc_domain_intel", xc.SOFT, {"domains": [{"domain": "bluefern.com", "role": "sender"},
+                                                              {"domain": "bluefem.com", "role": "other address"}],
+                                                  "flags": ["bluefem.com: look-alike of the official bluefern.com "
+                                                            "(an address on the document)"]})
+        o = gate.decide(h3_verdict="SUSPECT", kind="contract", ex=self.good_ex, findings=tamper, checks=[cc],
+                        account_held=False)
+        self.assertNotEqual(o.outcome, gate.FORGED_POSITIVE)
+        snd = xc.Check("xc_domain_intel", xc.SOFT, {"domains": [{"domain": "bluefem.com", "role": "sender"}],
+                                                   "flags": ["bluefem.com: look-alike of the official bluefern.com"]})
+        o = gate.decide(h3_verdict="SUSPECT", kind="contract", ex=self.good_ex, findings=tamper, checks=[snd],
+                        account_held=False)
+        self.assertEqual(o.outcome, gate.FORGED_POSITIVE)
+        self.assertIn("bluefem.com: look-alike", next(e["id"] for e in o.detail["fraud_pair"] if e["family"] == "sender"))
+
+    def test_short_of_positive_is_never_forged_positive(self):
+        F = forensics.Finding
+        loc = lambda field, region, page=1: {"value": {"field": field}, "page": page, "region": region}   # noqa: E731
+        not_positive = [
+            [F("h3_key_field_unique_font", forensics.SOFT, loc("claimant_name", [1, 1, 9, 9]))],    # one signal
+            [F("template_reused", forensics.SOFT)],                                       # template alone (R-C5)
+            [F("h3_copy_move_region", forensics.SOFT), F("h3_editor_software_on_screenshot", forensics.SOFT)],
+            # co-writers send the same split sheet: soft reuse is not a fraud signal; neither is an embedded file
+            [F("h3_reused_by_another_account", forensics.SOFT), F("h3_copy_move_region", forensics.SOFT)],
+            [F("h3_reject_pdf_embedded_file", forensics.SOFT), F("h3_copy_move_region", forensics.SOFT)],
+            [F("email_screenshot", forensics.WEAK), F("h3_undetermined", forensics.WEAK)],
+            # Fable tightening (1): a font change on an amount / share / unknown field is not the second family
+            [F("h3_key_field_unique_font", forensics.SOFT, loc("amount", [1, 1, 9, 9])), F("template_reused", forensics.SOFT)],
+            [F("h3_key_field_unique_font", forensics.SOFT, loc("share_percent", [1, 1, 9, 9])),
+             F("template_reused", forensics.SOFT)],
+            [F("h3_key_field_unique_font", forensics.SOFT), F("template_reused", forensics.SOFT)],
+            [F("template_reused", forensics.INFO), F("h3_reused_on_another_track", forensics.SOFT)],   # INFO template
+        ]
+        for fs in not_positive:
+            o = self.decide(h3="SUSPECT", findings=fs, xc_dsp=xc.POSITIVE)
+            self.assertNotEqual(o.outcome, gate.FORGED_POSITIVE, [(f.name, f.detail) for f in fs])
+        # Fable tightening (2): two readings of the same edit (same page, overlapping regions) are one signal
+        same_edit = [F("h3_key_field_unique_font", forensics.SOFT, loc("claimant_name", [10, 10, 90, 20])),
+                     F("h3_after_creation_key_field_edit", forensics.SOFT, loc("claimant_name", [40, 12, 80, 18]))]
+        self.assertNotEqual(self.decide(h3="SUSPECT", findings=same_edit).outcome, gate.FORGED_POSITIVE)
+        # Fable addendum: the share is the claim on a split sheet; the amount on a royalty/distributor statement
+        share = [F("h3_key_field_unique_font", forensics.SOFT, loc("share_percent", [1, 1, 9, 9])),
+                 F("template_reused", forensics.SOFT)]
+        split = validate({**GOOD_ANSWER, "doc_type": "split_sheet"})
+        o = gate.decide(h3_verdict="SUSPECT", kind="split_sheet", ex=split, findings=share, checks=[], account_held=False)
+        self.assertEqual(o.outcome, gate.FORGED_POSITIVE)
+        self.assertIn("share_percent", o.detail["claim_fields"])
+        amount = [F("h3_key_field_unique_font", forensics.SOFT, loc("amount", [1, 1, 9, 9])),
+                  F("template_reused", forensics.SOFT)]
+        stmt = validate({**GOOD_ANSWER, "doc_type": "dashboard_screenshot"})
+        self.assertEqual(gate.decide(h3_verdict="SUSPECT", kind="distributor_portal", ex=stmt,
+                                     findings=amount, checks=[], account_held=False).outcome, gate.FORGED_POSITIVE)
+        self.assertNotEqual(gate.decide(h3_verdict="SUSPECT", kind="distributor_portal", ex=self.good_ex,
+                                        findings=amount, checks=[], account_held=False).outcome,
+                            gate.FORGED_POSITIVE)                      # read as a letter: not a statement
+        for kind, doc_type in (("contract", "contract"), ("split_sheet", "email"), (None, "email_screenshot")):
+            ex = validate({**GOOD_ANSWER, "doc_type": doc_type})              # a licence/contract/email: no
+            self.assertNotEqual(gate.decide(h3_verdict="SUSPECT", kind=kind, ex=ex, findings=amount, checks=[],
+                                            account_held=False).outcome, gate.FORGED_POSITIVE, (kind, doc_type))
+        self.assertNotEqual(gate.decide(h3_verdict="SUSPECT", kind="contract", ex=self.good_ex, findings=share,
+                                        checks=[], account_held=False).outcome, gate.FORGED_POSITIVE)
+        elsewhere = [F("h3_ela_outlier_on_key_field", forensics.SOFT, loc("isrc", [10, 10, 90, 20])),
+                     F("h3_ai_generator_software", forensics.SOFT)]                # different families
+        self.assertEqual(self.decide(h3="SUSPECT", findings=elsewhere).outcome, gate.FORGED_POSITIVE)
+        low = xc.Check("xc_domain", xc.CONTRADICTS, {"sender_domain": "ghost-label.com", "confidence": 0.7})
+        o = gate.decide(h3_verdict="SUSPECT", kind="contract", ex=self.good_ex,
+                        findings=[F("h3_copy_move_region", forensics.SOFT)], checks=[low], account_held=False)
+        self.assertNotEqual(o.outcome, gate.FORGED_POSITIVE)                  # a sender read below 0.8 is no signal
+        o = self.decide(h3="FORGED_LIKELY", findings=[F("h3_forged", forensics.HARD, ["F4b key_field_unique_font"])])
+        self.assertEqual(o.outcome, gate.FORGED)                               # one hard signal: a hold, never a deny
+
+    def test_a_tooling_failure_is_never_forged_positive(self):
+        # QA #1470: the deny rule is positive-only - a pair read while our tooling failed is unknown (or a hold).
+        F = forensics.Finding
+        on_name = {"value": {"field": "claimant_name"}, "page": 1, "region": [10, 10, 90, 20]}
+        pair = [F("h3_key_field_unique_font", forensics.SOFT, on_name), F("template_reused", forensics.SOFT)]
+        for kw in ({"ex": fallback("x", "transport: URLError")}, {"h3": None}, {"h3": "UNDETERMINED"},
+                   {"xc_dsp": xc.ERROR}):
+            st = {k: v for k, v in kw.items() if k.startswith("xc_")}
+            o = self.decide(h3=kw.get("h3", "SUSPECT"), ex=kw.get("ex"), findings=pair, **st)
+            self.assertEqual(o.outcome, gate.UNKNOWN, kw)
+            self.assertFalse(o.account_hold)
+            self.assertIn("tooling", o.detail["would_forge_positive"]["why_not"])
+        # one hard H3 signal + a tooling failure elsewhere: a hold (forged), still never positive
+        o = self.decide(h3="FORGED_LIKELY", findings=[F("h3_forged", forensics.HARD, ["F4b key_field_unique_font",
+                                                                                     "F2b template_family"])],
+                        xc_dsp=xc.ERROR)
+        self.assertEqual(o.outcome, gate.FORGED)
+
+    def test_h3_signals_keep_where_they_sit(self):
+        from credit_verify.proof.pdf_forensics import key_field_class
+        from credit_verify.proof.signals import Evidence, Signal
+        self.assertEqual([key_field_class(t, ["Jane Doe"]) for t in ("Jane Doe", "USAB12400001", "50 %", "1,000", "x")],
+                         ["claimant_name", "isrc", "share_percent", "amount", None])
+        s = Signal("F4b", "key_field_unique_font", "soft", value={"font": "Arial", "field": "isrc"},
+                   evidence=Evidence(file="/private/path.pdf", tool="pymupdf", page=2, region=[1, 2, 3, 4],
+                                     excerpt="personal"))
+        d = forensics.signal_dict(s)
+        self.assertEqual(d, {"name": "key_field_unique_font", "severity": "soft", "check": "F4b",
+                             "value": {"font": "Arial", "field": "isrc"}, "page": 2, "region": [1.0, 2.0, 3.0, 4.0]})
+        fs = forensics.check(forensics.H3("SUSPECT", [], [d], "contract"), self.good_ex, {}, "application/pdf")
+        f = next(x for x in fs if x.name == "h3_key_field_unique_font")
+        self.assertEqual((f.detail["page"], f.detail["value"]["field"]), (2, "isrc"))
 
     def test_verified_needs_everything(self):
-        o = self.decide(xc_dsp=xc.POSITIVE, xc_domain=xc.POSITIVE, xc_label=xc.POSITIVE)
+        o = self.decide(xc_dsp=xc.POSITIVE, xc_domain=xc.POSITIVE, xc_label=xc.POSITIVE, support={"person": "Ann Alpha", "role": "mixing", "track": "Night Drive"})
         self.assertEqual(o.outcome, gate.VERIFIED)
+        # verifier-eval-v1 23:4xZ: the DSP crediting them is no substitute for the DOCUMENT naming them
+        o = self.decide(xc_dsp=xc.POSITIVE, xc_domain=xc.POSITIVE, xc_label=xc.POSITIVE)
+        self.assertEqual(o.outcome, gate.UNVERIFIABLE)
+        self.assertIn("the document itself does not name the claimant", o.reason)
         self.assertFalse(o.account_hold)
 
     def test_unknown_never_approves(self):
@@ -722,7 +877,7 @@ class GateTests(unittest.TestCase):
         weak = [forensics.Finding("email_screenshot", forensics.WEAK)]
         o = self.decide(findings=weak, xc_dsp=xc.UNKNOWN, xc_domain=xc.WEAK)
         self.assertEqual(o.outcome, gate.UNVERIFIABLE)
-        self.assertEqual(self.decide(findings=weak, xc_isrc=xc.POSITIVE).outcome, gate.VERIFIED)
+        self.assertEqual(self.decide(findings=weak, xc_isrc=xc.POSITIVE, support={"person": "Ann Alpha", "role": "mixing", "track": "Night Drive"}).outcome, gate.VERIFIED)
 
     def test_forged_and_contradicted_hold_the_account(self):
         o = self.decide(findings=[forensics.Finding("h3_forged", forensics.HARD)], xc_dsp=xc.POSITIVE)
@@ -748,7 +903,7 @@ class GateTests(unittest.TestCase):
         o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=self.good_ex,
                         findings=[forensics.Finding("editor_software_on_screenshot", forensics.SOFT)],
                         checks=base + [dom(0.9)], account_held=False)               # forensic doubt = second signal
-        self.assertEqual(o.outcome, gate.FORGED)
+        self.assertEqual(o.outcome, gate.FORGED_POSITIVE)       # and two independent families: positive
         o = self.decide(xc_dsp=xc.CONTRADICTS)
         self.assertEqual((o.outcome, o.account_hold), (gate.CONTRADICTED, True))
 
@@ -1611,6 +1766,152 @@ class TrayTests(unittest.TestCase):
         t = tray.build(self.store, gate=lambda uid: (True, "allow"), tracks=lambda ids: {})
         self.assertEqual((t.decline["forged"], t.not_approvable, t.approve), ([], [], []))   # old rows: no section
         self.assertIn("3 document(s) read under an older rule version", tray.markdown(t, 3, "now"))
+
+    def test_the_dv2_carry_rereads_documents_with_any_fraud_signal(self):
+        # A carried document could never become forged_positive: every one with a fraud-family signal is re-read.
+        db = self.store.db
+        for pid, det in (("px", '{"findings": [{"name": "h3_key_field_unique_font", "severity": "soft"}]}'),
+                         ("py", '{"h3_reasons": ["F2 reused_by_another_account"], "findings": '
+                                '[{"name": "h3_reused_by_another_account", "severity": "soft"}]}')):
+            db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, outcome, reason, account_hold, "
+                       "detail_json, version, intake_id) VALUES ('r', 't', ?, 'rq', 'Mixing', 'unverifiable', 'x', 0, "
+                       "'{}', 'dv-old', ?)", (pid, f"42:{pid}"))
+            db.execute("INSERT INTO dv_steps (run_id, at, proof_id, request_id, step, status, detail_json, version) "
+                       "VALUES ('r', 't', ?, 'rq#Mixing', 'forensics', 'ok', ?, 'dv-old')", (pid, det))
+        db.commit()
+        from credit_verify.docverify import FRAUD_SIGNAL_FAMILY
+        self.store.carry_forward("dv-old", VERSION, frozenset({"forged", "verified"}), ("xc_domain",),
+                                 ("forensics", tuple(sorted(FRAUD_SIGNAL_FAMILY))))
+        carried = {p for (p,) in db.execute("SELECT proof_id FROM dv_outcomes WHERE version=?", (VERSION,))}
+        self.assertEqual(carried, {"py"})            # soft reuse alone is no signal: carries; the font edit: re-read
+
+    def test_reports_open_the_store_read_only(self):
+        # QA #1470: forged-tray never creates the store, alters it or runs the carry-forward.
+        import sqlite3 as _sq
+        missing = os.path.join(self.td.name, "absent.sqlite")
+        with self.assertRaises(FileNotFoundError):
+            DocVerifyStore.read_only(missing)
+        self.assertFalse(os.path.exists(missing))
+        ro = DocVerifyStore.read_only(os.path.join(self.td.name, "dv.sqlite"))
+        self.assertEqual(ro.latest_outcomes(), [])
+        with self.assertRaises(_sq.OperationalError):
+            ro.db.execute("INSERT INTO dv_state (k, v) VALUES ('x', 'y')")
+        src = (Path(__file__).resolve().parents[1] / "credit-doc-verify.py").read_text()
+        body = src[src.index("def cmd_forged_tray("):src.index("def cmd_tray(")]
+        self.assertIn("DocVerifyStore.read_only(", body)
+        self.assertNotIn("DocVerifyStore(args.store)", body)
+
+    def test_forged_tray_rows_are_executable_only_after_a_fable_confirm(self):
+        from credit_verify.docverify import tray
+        pair = [{"id": "h3_key_field_unique_font@p1:[1, 1, 9, 9]", "family": "file_tamper", "fields": ["claimant_name"],
+                 "page": 1, "region": [1, 1, 9, 9]}, {"id": "template_reused", "family": "template"}]
+        det = {"fraud_signals": pair, "fraud_pair": pair}
+        for rid in ("r1", "r2"):
+            self.store.outcome("run", proof_id="e9ec352af3aa", request_id=rid, role="Mixing", user_id=244090,
+                               source_ref="conv 9", h3_verdict="SUSPECT", outcome="forged_positive", reason="two",
+                               need=None, account_hold=False, detail=det, intake_id="244090:e9ec")
+        self.store.outcome("run", proof_id="0123456789ab", request_id="r3", role="Producer", user_id=7,
+                           source_ref="conv 8", h3_verdict="SUSPECT", outcome="forged_positive", reason="two",
+                           need=None, account_hold=False, detail=det, intake_id="7:0123")
+        self.store.outcome("run", proof_id="ffffffffffff", request_id="r4", role="Mixing", user_id=8,
+                           source_ref="c", h3_verdict="FORGED_LIKELY", outcome="forged", reason="one",
+                           need=None, account_hold=False, detail={}, intake_id="8:ffff")
+        stale = {"fraud_signals": pair[:1], "fraud_pair": pair}                 # a pair the rule no longer accepts
+        self.store.outcome("run", proof_id="abcdef0123ff", request_id="r5", role="Mixing", user_id=9,
+                           source_ref="c", h3_verdict="SUSPECT", outcome="forged_positive", reason="two",
+                           need=None, account_hold=False, detail=stale, intake_id="9:abcd")
+        backfill = DocVerifyStore(os.path.join(self.td.name, "backfill.sqlite"))
+        backfill.outcome("run", proof_id="160aafa5a459", request_id="r6", role="Mixing", user_id=1372907,
+                         source_ref="c", h3_verdict="INCONSISTENT", outcome="forged",
+                         reason="fabricated sender: the sender's domain does not exist (synapserecordingstudio.com)",
+                         need=None, account_hold=True, detail={})
+        rulings = tray.parse_rulings("ruling: forged-e9ec352a confirm\nnoise\nRULING: forged-01234567 not\n"
+                                     "ruling: forged-abcdef01 confirm\nruling: forged-160aafa5 confirm\n")
+        rows, short = tray.forged_tray(self.store, intake_of=lambda iid: {"subject": "credit", "received_at": "t"},
+                                       rulings=rulings, also=[backfill])
+        by = {r["ruling_id"]: r for r in rows}
+        self.assertEqual(sorted(by), ["forged-01234567", "forged-abcdef01", "forged-e9ec352a"])
+        ok = by["forged-e9ec352a"]
+        self.assertEqual((ok["executable"], ok["action"], ok["reason_code"], ok["watch"]),
+                         (True, "reject", "fraud_document", True))
+        self.assertEqual(sorted(q["request_id"] for q in ok["requests"]), ["r1", "r2"])
+        self.assertEqual(ok["signal_ids"], [pair[0]["id"], "template_reused"])           # the exact two signals
+        self.assertEqual(len(ok["outcome_ids"]), 2)
+        self.assertEqual(ok["proof_id"], "e9ec352af3aa")
+        self.assertEqual((by["forged-01234567"]["executable"], by["forged-01234567"]["why_not"]), (False, "ruling 'not'"))
+        self.assertFalse(by["forged-abcdef01"]["executable"])                  # confirmed, but the pair fails the rule
+        # QA #1470: a stale stored pair is never rescued by ANOTHER valid pair in the signals
+        amount = {"id": "h3_key_field_unique_font@p1:[1, 1, 9, 9]", "family": "file_tamper", "fields": ["amount"],
+                  "page": 1, "region": [1, 1, 9, 9]}
+        reuse = {"id": "h3_reused_on_another_track", "family": "reuse"}
+        stale2 = {"fraud_signals": [amount, {"id": "template_reused", "family": "template"}, reuse],
+                  "fraud_pair": [amount, {"id": "template_reused", "family": "template"}]}
+        self.store.outcome("run", proof_id="5ca1ab1e0000", request_id="r7", role="Mixing", user_id=11,
+                           source_ref="c", h3_verdict="SUSPECT", outcome="forged_positive", reason="two",
+                           need=None, account_hold=False, detail=stale2, intake_id="11:5ca1")
+        rows2, _ = tray.forged_tray(self.store, intake_of=lambda iid: {},
+                                    rulings=tray.parse_rulings("ruling: forged-5ca1ab1e confirm"))
+        r7 = next(r for r in rows2 if r["ruling_id"] == "forged-5ca1ab1e")
+        self.assertFalse(r7["executable"])
+        self.assertEqual(r7["why_not"], "the stored signals no longer make a positive pair")
+        self.assertEqual([r["ruling_id"] for r in short], ["forged-160aafa5", "forged-ffffffff"])
+        self.assertFalse(any(r["executable"] for r in short))                 # a confirm never makes a hold a deny
+        md = tray.forged_markdown(rows, 1, "now", short)
+        self.assertIn("ruling: forged-<sha8> ", md)
+        self.assertIn("field claimant_name; page 1; region [1, 1, 9, 9]", md)
+        self.assertIn("Short of positive — HOLD, never denied", md)
+        self.assertIn("synapserecordingstudio.com", md)
+        rows, _ = tray.forged_tray(self.store, intake_of=lambda iid: {}, rulings={})
+        self.assertFalse(any(r["executable"] for r in rows))
+        # QA #1470 Critical: only a complete standalone ruling line confirms
+        for text in ("Do NOT use ruling: forged-e9ec352a confirm", "> ruling: forged-e9ec352a confirm",
+                     "- ruling: forged-e9ec352a confirm", "note: ruling: forged-e9ec352a confirm",
+                     "ruling: forged-e9ec352a confirm (pending)", "ruling: forged-e9ec352a confirmed",
+                     "`ruling: forged-e9ec352a confirm`", "ruling: forged-e9ec352a confirm, unless",
+                     "    ruling: forged-e9ec352a confirm",                  # an indented (code-block) line
+                     "```\nruling: forged-e9ec352a confirm\n```",            # a fenced example (QA #1470)
+                     "~~~md\nruling: forged-e9ec352a confirm\n~~~",
+                     "```\nruling: forged-e9ec352a confirm"):                # an unclosed fence: still an example
+            self.assertEqual(tray.parse_rulings(text), {}, text)
+            rows, _ = tray.forged_tray(self.store, intake_of=lambda iid: {}, rulings=tray.parse_rulings(text))
+            self.assertFalse(any(r["executable"] for r in rows), text)
+        self.assertEqual(tray.parse_rulings("intro\nruling: forged-E9EC352A confirm  \nmore"),
+                         {"forged-e9ec352a": "confirm"})
+        self.assertEqual(tray.parse_rulings("ruling: forged-e9ec352a confirm\nruling: forged-e9ec352a not"),
+                         {"forged-e9ec352a": "not"})                     # the last line wins
+        self.assertEqual(tray.parse_rulings("```\nruling: forged-e9ec352a not\n```\nruling: forged-e9ec352a confirm\r\n"),
+                         {"forged-e9ec352a": "confirm"})                 # after the fence; a CRLF line counts
+        # proof-loop lead 088: a confirm is per proof_id - two documents sharing the 8-hex ruling id: neither runs
+        self.store.outcome("run", proof_id="e9ec352aZZZZ", request_id="r9", role="Mixing", user_id=244090,
+                           source_ref="c", h3_verdict="SUSPECT", outcome="forged_positive", reason="two",
+                           need=None, account_hold=False, detail=det, intake_id="244090:e9ecZZ")
+        rows, _ = tray.forged_tray(self.store, intake_of=lambda iid: {}, rulings=rulings)
+        clash = [r for r in rows if r["ruling_id"] == "forged-e9ec352a"]
+        self.assertEqual(len(clash), 2)
+        self.assertFalse(any(r["executable"] for r in clash))
+        self.assertIn("ambiguous", clash[0]["why_not"])
+        t = tray.build(self.store, gate=lambda uid: (True, "allow"), tracks=lambda ids: {})
+        self.assertEqual(len(t.fraud_deny), 6)
+        self.assertEqual([a["request_id"] for a in t.decline["forged"]], ["r4"])   # one signal: hold section
+        self.assertIn("FRAUD DENY (Fable confirm first) 5 documents", tray.markdown(t, 4, "now"))
+
+    def test_dv3_rereads_a_carried_document_whose_fraud_signal_sits_in_a_dv1_step(self):
+        # 2026-10-28: dv-2 deployed without #1470; its carry copied e47c9af3's outcome to dv-2 but its only
+        # forensics step is dv-1. dv-3 must still send it back to the reader.
+        db = self.store.db
+        for pid, det in (("pfont", '{"findings": [{"name": "h3_key_field_unique_font", "severity": "soft"}]}'),
+                         ("pclean", '{"findings": [{"name": "email_screenshot", "severity": "weak"}]}')):
+            db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, outcome, reason, account_hold, "
+                       "detail_json, version, intake_id) VALUES ('r', 't', ?, 'rq', 'Mixing', 'unverifiable', 'x', 0, "
+                       "'{\"carried_from\": {\"version\": \"dv-1\", \"id\": 1}}', 'dv-mid', ?)", (pid, f"42:{pid}"))
+            db.execute("INSERT INTO dv_steps (run_id, at, proof_id, request_id, step, status, detail_json, version) "
+                       "VALUES ('r', 't', ?, 'rq#Mixing', 'forensics', 'ok', ?, 'dv-old')", (pid, det))  # an OLDER step
+        db.commit()
+        from credit_verify.docverify import FRAUD_SIGNAL_FAMILY
+        self.store.carry_forward("dv-mid", VERSION, frozenset({"forged"}), (),
+                                 ("forensics", tuple(sorted(FRAUD_SIGNAL_FAMILY))))
+        carried = {p for (p,) in db.execute("SELECT proof_id FROM dv_outcomes WHERE version=?", (VERSION,))}
+        self.assertEqual(carried, {"pclean"})                            # the font edit is re-read
 
     def test_a_full_rule_change_carries_nothing(self):
         self.store.db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, outcome, reason, "

@@ -26,7 +26,7 @@ Design and operator view: docs/credit-verification/doc-verify.md.
 """
 
 # Bump when a rule change must re-verify documents; the deployed reader then re-reads them itself.
-VERSION = "dv-2"
+VERSION = "dv-3"
 # The bump's carry-forward (store.carry_forward, done once by the first reader that opens the store):
 # {new version: (previous version, outcomes that send a document back, steps that send it back)}.
 # A document carries (its rows copied, marked `carried_from`) only when NONE of its standing outcomes is
@@ -39,4 +39,38 @@ VERSION = "dv-2"
 # may change (QA #1466: an unverifiable email with a low-confidence '.ora' sender keeps the wrong need
 # otherwise) - and so is every standing forged or verified. A rule change that can alter ANY outcome
 # sets the outcome set to None: then nothing carries.
-CARRY = {"dv-2": ("dv-1", frozenset({"forged", "verified"}), ("xc_domain",))}
+# FRAUD DENY (captain 2026-10-28 21:3xZ, captain-1028-213x; Fable plan §d): `forged_positive` needs signals
+# from TWO of these independent families (gate.fraud_signals). Deliberately NOT signals: a SOFT
+# `reused_by_another_account` alone (co-writers send the same split sheet), `reject_pdf_embedded_file`
+# (an intake-safety rejection; e-signature PDFs carry attachments), H3's verdict by itself (it aggregates
+# these same signals - counting it would count one signal twice), coverage mismatches (track/role not on
+# the document) and a person found nowhere. `template` alone never qualifies (R-C5): it needs a second family.
+FRAUD_SIGNAL_FAMILY = {
+    # the file was edited or assembled
+    "reject_polyglot": "file_tamper", "xmp_edit_history_on_screenshot": "file_tamper",
+    "editor_software_on_screenshot": "file_tamper", "copy_move_region": "file_tamper",
+    "ela_outlier_on_key_field": "file_tamper", "online_editor_producer": "file_tamper",
+    "key_field_unique_font": "file_tamper", "signature_not_intact": "file_tamper",
+    "after_creation_key_field_edit": "file_tamper",
+    # made by a generator
+    "ai_generator_software": "ai_generated", "ai_generation_parameters": "ai_generated",
+    "ai_generation_workflow": "ai_generated", "c2pa_ai_source": "ai_generated", "iptc_ai_source_type": "ai_generated",
+    # the same file used for a competing claim
+    "reused_by_another_account_same_claim": "reuse", "reused_on_another_track": "reuse",
+    "impersonation_suspected": "reuse",
+    # the same template text with other entities on another account (R-C5: never alone)
+    "template_family": "template", "template_reused": "template",
+    # facts on the document that cannot be true
+    "iswc_check_digit_invalid": "impossible_content", "upc_check_digit_invalid": "impossible_content",
+    "document_date_future": "impossible_content", "file_predates_document": "impossible_content",
+}
+# dv-3 (2026-10-28 23:3xZ) = dv-2 + the FRAUD DENY rule (`forged_positive`). dv-2 was deployed alone at
+# 23:06Z (602d8b40) and its carry ran without the fraud-signal criterion, so 26 carried documents with a
+# fraud-family signal (2 with two families) were never re-read. dv-3's carry from dv-2 re-reads every
+# document with a fraud-family signal in a `forensics` step of ANY earlier version (carried documents only
+# have dv-1 steps) and every standing `forged` (it may now be positive); everything else carries - the
+# fraud rule cannot change a document with no fraud signal.
+CARRY = {"dv-2": ("dv-1", frozenset({"forged", "verified"}), ("xc_domain",)),
+         # dv-3 also tightens `verified` (the document itself must name the claimant, and be a document of
+         # record): every standing `verified` is re-read as well.
+         "dv-3": ("dv-2", frozenset({"forged", "verified"}), (), ("forensics", tuple(sorted(FRAUD_SIGNAL_FAMILY))))}

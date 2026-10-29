@@ -64,7 +64,7 @@ class H3:
     """What H3 recorded for the document and one claim."""
     verdict: str | None
     reasons: list[str] = field(default_factory=list)
-    signals: list[dict[str, str]] = field(default_factory=list)     # {name, severity}
+    signals: list[dict[str, Any]] = field(default_factory=list)     # {name, severity, check, value, page, region}
     kind: str | None = None
 
     @property
@@ -95,9 +95,19 @@ def read_h3(proof_db: sqlite3.Connection, proof_id: str, request_key: str) -> H3
     if row is None:
         return H3(verdict=None)
     verdict, reasons_json, created_at, track_key = row
-    sigs = [Signal(check=c, name=n, severity=s, reason=r or "") for c, n, s, r in proof_db.execute(
-        "SELECT check_id, name, severity, reason FROM forensics WHERE proof_id=? AND request_id=? "
-        "AND analyzer_version=? AND created_at=?", (proof_id, request_key, FORENSICS_VERSION, created_at))]
+    from credit_verify.proof.signals import Evidence
+    sigs = []
+    for c, n, s, r, vj, ej in proof_db.execute(
+            "SELECT check_id, name, severity, reason, value_json, evidence_json FROM forensics WHERE proof_id=? "
+            "AND request_id=? AND analyzer_version=? AND created_at=?",
+            (proof_id, request_key, FORENSICS_VERSION, created_at)):
+        try:
+            value = json.loads(vj) if vj else None
+            ev = json.loads(ej) if ej else {}
+        except ValueError:
+            value, ev = None, {}
+        evidence = Evidence(file="", tool="", page=ev.get("page"), region=ev.get("region")) if ev else None
+        sigs.append(Signal(check=c, name=n, severity=s, reason=r or "", value=value, evidence=evidence))
     fp = proof_db.execute("SELECT kind, track_listed FROM fingerprints WHERE proof_id=? AND track_key=? LIMIT 1",
                           (proof_id, track_key or "")).fetchone() or \
         proof_db.execute("SELECT kind, NULL FROM fingerprints WHERE proof_id=? LIMIT 1", (proof_id,)).fetchone()
@@ -109,8 +119,27 @@ def read_h3(proof_db: sqlite3.Connection, proof_id: str, request_key: str) -> H3
     v, reasons, kept = stage2.claim_verdict(
         ProofResult(proof_id, verdict, reasons, sigs, kind or "unknown", None, request_key, listed),
         ClaimContext(request_ids=[request_key], track_title="(linked)"))
-    return H3(verdict=v, reasons=list(reasons)[:6], signals=[{"name": s.name, "severity": s.severity} for s in kept],
-              kind=kind)
+    return H3(verdict=v, reasons=list(reasons)[:6], signals=[signal_dict(s) for s in kept], kind=kind)
+
+
+def signal_dict(s: Any) -> dict[str, Any]:
+    """An H3 signal as the reader keeps it: name and severity, plus WHERE it sits - check, value (e.g.
+    the key field class), page and region - so the fraud-deny pair can be checked by field and region
+    (Fable [key=fraud-deny-families]). No excerpt or file path is kept."""
+    ev = getattr(s, "evidence", None)
+    d: dict[str, Any] = {"name": s.name, "severity": s.severity, "check": getattr(s, "check", None)}
+    if isinstance(getattr(s, "value", None), dict):
+        d["value"] = {k: v for k, v in s.value.items() if k in ("field", "fields", "page", "font", "z", "matches")}
+    if ev is not None:
+        if getattr(ev, "page", None) is not None:
+            d["page"] = ev.page
+        if getattr(ev, "region", None):
+            d["region"] = [float(x) for x in ev.region][:4]
+    return d
+
+
+def where(s: dict[str, Any]) -> dict[str, Any]:
+    return {k: s[k] for k in ("check", "value", "page", "region") if s.get(k) not in (None, {}, [])}
 
 
 def file_date(facts: dict[str, Any]) -> date | None:
@@ -142,12 +171,16 @@ def check(h3: H3, ex: Extraction, facts: dict[str, Any], mime: str | None,
     elif h3.verdict == "UNDETERMINED":
         out.append(Finding("h3_undetermined", WEAK, h3.reasons[:3]))
     for s in h3.signals:
-        if s["severity"] == "hard" and h3.verdict != "FORGED_LIKELY":
+        if s["severity"] == "hard" and h3.verdict == "FORGED_LIKELY" and s["name"] not in COVERAGE:
+            # behind h3_forged: recorded (INFO, decides nothing by itself) WITH where it sits, for the
+            # fraud-deny pair (gate.fraud_signals)
+            out.append(Finding(f"h3_{s['name']}", INFO, {"note": "hard H3 signal behind h3_forged", **where(s)}))
+        elif s["severity"] == "hard" and h3.verdict != "FORGED_LIKELY":
             # H3 decided it is not forged FOR this claim (a coverage case);
             # a hard file signal is still doubt about the file.
-            out.append(Finding(f"h3_{s['name']}", SOFT, "hard H3 signal, not forged for this claim"))
+            out.append(Finding(f"h3_{s['name']}", SOFT, {"note": "hard H3 signal, not forged for this claim", **where(s)}))
         elif s["severity"] == "soft" and s["name"] not in COVERAGE | UNCHECKABLE | AI_SOURCE:
-            out.append(Finding(f"h3_{s['name']}", SOFT))
+            out.append(Finding(f"h3_{s['name']}", SOFT, where(s) or None))
         elif s["severity"] == "soft" and s["name"] in AI_SOURCE:
             out.append(Finding(f"h3_{s['name']}", WEAK, "AI-generation metadata on a non-record image"))
         elif s["name"] == "template_family":
