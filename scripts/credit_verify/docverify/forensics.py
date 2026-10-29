@@ -158,8 +158,15 @@ def file_date(facts: dict[str, Any]) -> date | None:
     return None
 
 
+TEXT_LAYER_SOURCES = ("pdf_text",)          # a date read from the file's own text, not from pixels
+OCR_DATE_MIN = 0.8
+
+
 def check(h3: H3, ex: Extraction, facts: dict[str, Any], mime: str | None,
-          today: date | None = None) -> list[Finding]:
+          today: date | None = None, text_source: str | None = None,
+          stable_dates: set[tuple[str, str]] | frozenset[tuple[str, str]] = frozenset()) -> list[Finding]:
+    """`text_source`: where the extracted text came from (sandbox: pdf_text | ocr). `stable_dates`: (what, date)
+    pairs an EARLIER read of the same document also extracted at >= OCR_DATE_MIN (the runner's re-read check)."""
     today = today or datetime.now(timezone.utc).date()
     out: list[Finding] = []
     kind = h3.kind or ""
@@ -195,11 +202,20 @@ def check(h3: H3, ex: Extraction, facts: dict[str, Any], mime: str | None,
             claimed = date.fromisoformat(d["date"])
         except ValueError:
             continue
+        # Fable 127 (6d004ade): a date is IMPOSSIBLE CONTENT only from a text layer (PDF text, an .eml), or
+        # from OCR at >= OCR_DATE_MIN that an earlier read of the same document also gave. An OCR date at
+        # 0.5-0.6 ('1/18/2026' read as 11/18) is a soft finding only - never half of a fraud-deny pair.
+        layer = text_source in TEXT_LAYER_SOURCES or mime == "message/rfc822"
+        firm = layer or (d["confidence"] >= OCR_DATE_MIN and (d["what"], d["date"]) in stable_dates)
+        suffix = "" if firm else "_unconfirmed"
+        how = {"source": "text_layer" if layer else "ocr", "confidence": d["confidence"],
+               **({} if firm else {"why": f"an OCR date below {OCR_DATE_MIN} or not the same on a re-read"})}
         if claimed > today + timedelta(days=1):
-            out.append(Finding("document_date_future", SOFT, {"claimed": d["date"], "what": d["what"]}))
+            out.append(Finding("document_date_future" + suffix, SOFT,
+                               {"claimed": d["date"], "what": d["what"], **how}))
         if made and made + timedelta(days=PREDATE_DAYS) < claimed:
-            out.append(Finding("file_predates_document", SOFT,
-                               {"file_created": made.isoformat(), "claimed": d["date"], "what": d["what"]}))
+            out.append(Finding("file_predates_document" + suffix, SOFT,
+                               {"file_created": made.isoformat(), "claimed": d["date"], "what": d["what"], **how}))
     # -- emails --------------------------------------------------------------
     if mime == "message/rfc822":
         out.append(Finding("eml_unverified", WEAK, "original .eml: DKIM not checked on node-8 yet (no dkimpy)"))

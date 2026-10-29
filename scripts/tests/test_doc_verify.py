@@ -397,9 +397,30 @@ class ForensicsTests(unittest.TestCase):
         self.assertIn("email_screenshot", [x.name for x in f])
         self.assertEqual(forensics.worst(f), forensics.WEAK)
 
+    def test_an_ocr_date_is_impossible_content_only_when_firm_and_stable(self):
+        # Fable 127 (6d004ade): '1/18/2026' OCR'd as 2026-11-18 at 0.5-0.6 flapped a positive across runs.
+        ex = lambda c: self.ex(dates=[{"what": "signed", "date": "2026-11-18", "confidence": c}])   # noqa: E731
+        facts, today = {"exif_datetime_original": "2026:02:15 08:03:54"}, date(2026, 10, 29)
+        for c, src, stable, firm in ((0.6, "ocr", {("signed", "2026-11-18")}, False),      # below 0.8
+                                     (0.9, "ocr", set(), False),                             # not stable on a re-read
+                                     (0.9, "ocr", {("signed", "2026-11-19")}, False),        # a re-read disagreed
+                                     (0.9, None, {("signed", "2026-11-18")}, True),          # unknown source, firm+stable
+                                     (0.9, "ocr", {("signed", "2026-11-18")}, True),
+                                     (0.6, "pdf_text", set(), True)):                        # a text layer
+            f = forensics.check(H3("GENUINE"), ex(c), facts, "image/png", today=today, text_source=src,
+                                stable_dates=stable)
+            names = {x.name for x in f}
+            want = {"document_date_future", "file_predates_document"}
+            self.assertEqual(names & (want | {n + "_unconfirmed" for n in want}),
+                             want if firm else {n + "_unconfirmed" for n in want}, (c, src, stable))
+            self.assertEqual(forensics.worst(f), forensics.SOFT)                 # still doubt: blocks verified
+        from credit_verify.docverify import FRAUD_SIGNAL_FAMILY
+        self.assertNotIn("document_date_future_unconfirmed", FRAUD_SIGNAL_FAMILY)   # never half of a pair
+
     def test_file_older_than_the_date_it_claims(self):
         f = forensics.check(H3("GENUINE"), self.ex(dates=[{"what": "signed", "date": "2025-06-01", "confidence": 0.9}]),
-                            {"created": "D:20240101120000+00'00'"}, "application/pdf", today=date(2026, 10, 26))
+                            {"created": "D:20240101120000+00'00'"}, "application/pdf", today=date(2026, 10, 26),
+                            text_source="pdf_text")
         names = {x.name: x.severity for x in f}
         self.assertEqual(names.get("file_predates_document"), forensics.SOFT)
         # a scan made after the signing date is normal
@@ -409,8 +430,9 @@ class ForensicsTests(unittest.TestCase):
 
     def test_future_date_and_exif_date(self):
         f = forensics.check(H3("GENUINE"), self.ex(dates=[{"what": "issued", "date": "2027-01-01", "confidence": 0.9}]),
-                            {"exif_datetime_original": "2026:01:02 10:00:00"}, "image/jpeg", today=date(2026, 10, 26))
-        self.assertEqual({x.name for x in f}, {"document_date_future", "file_predates_document"})
+                            {"exif_datetime_original": "2026:01:02 10:00:00"}, "image/jpeg", today=date(2026, 10, 26),
+                            text_source="ocr", stable_dates={("issued", "2027-01-01")})
+        self.assertEqual({x.name for x in f}, {"document_date_future", "file_predates_document"})   # OCR >= 0.8, stable
 
     def test_h3_signals_mapped(self):
         h3 = H3("SUSPECT", signals=[{"name": "online_editor_producer", "severity": "soft"},
@@ -810,7 +832,8 @@ class GateTests(unittest.TestCase):
         o = self.decide(h3="FORGED_LIKELY", findings=[
             F("h3_forged", forensics.HARD, ["F2 reused_on_another_track", "F3b copy_move_region"]),
             F("h3_reused_on_another_track", forensics.INFO, {"note": "hard H3 signal behind h3_forged"}),
-            F("h3_copy_move_region", forensics.SOFT, {"page": 1, "region": [0, 0, 50, 50]})])
+            F("h3_copy_move_region", forensics.SOFT, {"page": 1, "region": [0, 0, 50, 50],
+                                                      "value": {"fields": ["claimant_name"]}})])
         self.assertEqual(o.outcome, gate.FORGED_POSITIVE)
         self.assertEqual(sorted(e["family"] for e in o.detail["fraud_pair"]), ["file_tamper", "reuse"])
         # a fabricated sender read >= 0.8 is a family of its own
@@ -818,12 +841,18 @@ class GateTests(unittest.TestCase):
                                                      "note": "the sender's domain does not exist"})
         o = gate.decide(h3_verdict="SUSPECT", kind="contract", ex=self.good_ex,
                         findings=[F("h3_copy_move_region", forensics.SOFT)], checks=[dom], account_held=False, covers=True)
+        self.assertNotEqual(o.outcome, gate.FORGED_POSITIVE)      # Fable 127: an unlocated copy-move never pairs
+        located = F("h3_copy_move_region", forensics.SOFT, {"page": 1, "region": [0, 0, 9, 9],
+                                                            "value": {"fields": ["claimant_name"]}})
+        o = gate.decide(h3_verdict="SUSPECT", kind="contract", ex=self.good_ex,
+                        findings=[located], checks=[dom], account_held=False, covers=True)
         self.assertEqual(o.outcome, gate.FORGED_POSITIVE)
 
     def test_a_lookalike_cc_address_is_not_a_sender_signal(self):
         # QA #1470: domain-intel flags on another address on the document never make the `sender` family.
         F = forensics.Finding
-        tamper = [F("h3_copy_move_region", forensics.SOFT, {"page": 1, "region": [0, 0, 9, 9]})]
+        tamper = [F("h3_copy_move_region", forensics.SOFT, {"page": 1, "region": [0, 0, 9, 9],
+                                                            "value": {"fields": ["claimant_name"]}})]
         cc = xc.Check("xc_domain_intel", xc.SOFT, {"domains": [{"domain": "bluefern.com", "role": "sender"},
                                                               {"domain": "bluefem.com", "role": "other address"}],
                                                   "flags": ["bluefem.com: look-alike of the official bluefern.com "
@@ -954,10 +983,26 @@ class GateTests(unittest.TestCase):
                          ("impossible_content", "h3_document_date_future")):
             self.assertIsNotNone(gate.positive_pair([{"id": sid, "family": fam}, T]), fam)
 
+    def test_the_tamper_half_of_any_pair_sits_on_a_located_claim_field(self):
+        # Fable 127 (6d004ade): the copy-move was the iOS viewer's '9 of 9' page counter.
+        cm = {"id": "h3_copy_move_region@pNone:[93.0, 596.0, 433.0, 643.0]", "family": "file_tamper",
+              "region": [93.0, 596.0, 433.0, 643.0]}
+        date_ = {"id": "document_date_future", "family": "impossible_content"}
+        for other in (date_, {"id": "h3_reused_on_another_track", "family": "reuse"},
+                      {"id": "h3_c2pa_ai_source", "family": "ai_generated"},
+                      {"id": "xc_domain: lookalike (x.co)", "family": "sender"}):
+            self.assertIsNone(gate.positive_pair([cm, other]), other["family"])       # no field: never
+            self.assertIsNotNone(gate.positive_pair([{**cm, "fields": ["claimant_name"]}, other]), other["family"])
+            self.assertIsNone(gate.positive_pair([{**cm, "fields": ["contact"]}, other]), other["family"])
+        self.assertIsNotNone(gate.positive_pair([date_, {"id": "h3_reused_on_another_track", "family": "reuse"}]))
+        fx = json.loads((Path(__file__).parent / "fixtures" / "forged-positive-ruled-not-1029.json").read_text())
+        six = next(r for r in fx if r["proof_id"].startswith("6d004ade"))
+        self.assertIsNone(gate.positive_pair(six["fraud_signals"], six["claim_fields"]))
+
     def test_the_two_live_positives_ruled_not_are_not_positive(self):
         # Fable 1029: e9ec352a and e47c9af3, the only dv-3 forged_positive documents, were both ruled NOT forged.
         fx = json.loads((Path(__file__).parent / "fixtures" / "forged-positive-ruled-not-1029.json").read_text())
-        self.assertEqual(sorted(r["proof_id"][:8] for r in fx), ["e47c9af3", "e9ec352a"])
+        self.assertEqual(sorted(r["proof_id"][:8] for r in fx), ["6d004ade", "e47c9af3", "e9ec352a"])   # 0 of 3
         for r in fx:
             self.assertIsNotNone(r["fraud_pair"])                       # what dv-3 stored before the rule
             self.assertIsNone(gate.positive_pair(r["fraud_signals"], r["claim_fields"]), r["proof_id"][:8])
@@ -1070,7 +1115,8 @@ class GateTests(unittest.TestCase):
         o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=self.good_ex,
                         findings=[forensics.Finding("editor_software_on_screenshot", forensics.SOFT)],
                         checks=base + [dom(0.9)], account_held=False, covers=True)               # forensic doubt = second signal
-        self.assertEqual(o.outcome, gate.FORGED_POSITIVE)       # and two independent families: positive
+        # ... a FORGED hold (R-C6), but no longer positive: a document-level editor flag sits on no claim field
+        self.assertEqual((o.outcome, o.account_hold), (gate.FORGED, True))      # (Fable 127)
         o = self.decide(xc_dsp=xc.CONTRADICTS)
         self.assertEqual((o.outcome, o.account_hold), (gate.CONTRADICTED, True))
 
@@ -1260,6 +1306,36 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(runner.cached_official(self.store, net, "张伟唱片")[0], ["张伟唱片.com"])
             self.assertEqual(runner.cached_official(self.store, net, "李娜唱片")[0], ["李娜唱片.com"])
         self.assertEqual(doms, ["张伟唱片", "李娜唱片"])
+
+
+    def test_a_re_read_date_is_stable_only_from_an_earlier_firm_read(self):
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), frozenset())
+        for c, d in ((0.6, "2026-11-18"), (0.9, "2026-11-18"), (0.95, "2028-11-18")):
+            self.store.step("r0", self.proof_id, "extract", "ok", {"dates": [{"what": "signed", "date": d, "confidence": c}]})
+        self.store.step("r0", self.proof_id, "extract", "error", {"dates": [{"what": "signed", "date": "2030-01-01",
+                                                                               "confidence": 0.99}]})   # a failed read
+        # QA #1489: 2026-11-18 then 2028-11-18 read firmly = the reads DISAGREE on `signed`: nothing is stable
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), frozenset())
+
+    def test_a_date_is_stable_only_when_the_preceding_read_agrees_and_no_firm_read_disagrees(self):
+        def read(*dates):
+            self.store.step("r0", self.proof_id, "extract", "ok",
+                            {"dates": [{"what": w, "date": d, "confidence": c} for w, d, c in dates]})
+        read(("signed", "2026-11-18", 0.9))
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), {("signed", "2026-11-18")})
+        read(("signed", "2027-01-01", 0.9))                                 # A -> B
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), frozenset())
+        read(("signed", "2026-11-18", 0.9))                                 # A -> B -> A: still conflicted
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), frozenset())
+        read(("issued", "2026-03-01", 0.95))                                # another kind, never disputed
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), {("issued", "2026-03-01")})
+        read(("issued", "2026-03-01", 0.5))                                 # the preceding read is not firm
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), frozenset())
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
+        # read BEFORE this run's extract step is recorded (a read never confirms itself)
+        self.assertLess(src.index("stable_dates = earlier_firm_dates(store, proof_id)"),
+                        src.index('store.step(run_id, proof_id, "extract"'))
+        self.assertIn("stable_dates=stable_dates", src)
 
     def test_since_cutoff_is_recorded_once_and_respected(self):
         db = sqlite3.connect(self.proof_path)

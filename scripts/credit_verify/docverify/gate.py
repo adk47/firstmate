@@ -213,6 +213,10 @@ def positive_pair(sigs: list[dict[str, Any]], fields: frozenset[str] | set[str] 
         for b in sigs[i + 1:]:
             if a["family"] == b["family"] or _overlap(a, b):
                 continue
+            # Fable 127 (6d004ade): the file_tamper half of ANY pair sits on a LOCATED claim field - a copy-move
+            # on a page counter, UI chrome or a margin, or a document-level flag with no field, never counts.
+            if any(e["family"] == "file_tamper" and not set(fields) & set(e.get("fields") or []) for e in (a, b)):
+                continue
             fams = {a["family"], b["family"]}
             if fams == {"file_tamper", "template"}:
                 tamper = a if a["family"] == "file_tamper" else b

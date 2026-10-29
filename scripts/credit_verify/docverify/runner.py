@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -217,6 +218,9 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
         else:
             ex = Extraction(ok=False, degraded=True, error="document not located" if not path else
                             f"sandbox failed: {str(raw['fatal'])[:120]}" if raw.get("fatal") else "no readable text")
+        # (what, date) pairs an EARLIER read of this document also extracted at >= OCR_DATE_MIN (Fable 127: an
+        # OCR date is impossible content only when stable on a re-read); read before this read is recorded
+        stable_dates = earlier_firm_dates(store, proof_id)
         store.step(run_id, proof_id, "extract", "ok" if ex.ok else "error", ex.as_dict())
         # JUNK PROOF option C (captain-1028-214x): what kind of artifact this is, with the full text; a record
         # only - it decides no outcome here (artifacts.junk_list builds the purge / decline proposal).
@@ -268,7 +272,8 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
             r = reqs.get(rid)
             h3 = (h3_map.get(key) or forensics.H3(verdict=None)) if intake is not None \
                 else forensics.read_h3(proof_db, proof_id, key)
-            findings = forensics.check(h3, ex, facts, mime)
+            findings = forensics.check(h3, ex, facts, mime, text_source=raw.get("text_source"),
+                                       stable_dates=stable_dates)
             store.step(run_id, proof_id, "forensics", forensics.worst(findings) or "ok",
                        {"h3": h3.verdict, "h3_reasons": h3.reasons[:3], "findings": [f.as_dict() for f in findings]},
                        key)
@@ -461,6 +466,35 @@ def cached_release(store: DocVerifyStore, net: Any, isrc: str) -> xc.Release:
     v = store.cached_lookup("isrc_release", norm_isrc(isrc) or isrc, lambda: asdict(xc.release_facts(net, isrc)),
                             ok=lambda v: not v.get("errors"))
     return xc.Release(**v)
+
+
+def earlier_firm_dates(store: DocVerifyStore, proof_id: str) -> frozenset[tuple[str, str]]:
+    """(what, date) pairs the IMMEDIATELY PRECEDING successful extraction of this document read at >= OCR_DATE_MIN,
+    minus any `what` for which some firm read ever gave a DIFFERENT date (QA #1489: reads A -> B -> A must never make
+    A 'stable'). Called before this run's read is recorded, so a read never confirms itself."""
+    reads: list[set[tuple[str, str]]] = []
+    for (det,) in store.db.execute("SELECT detail_json FROM dv_steps WHERE proof_id=? AND step='extract' AND "
+                                   "status='ok' ORDER BY id", (proof_id,)):
+        try:
+            dates = (json.loads(det or "{}") or {}).get("dates") or []
+        except ValueError:
+            continue
+        firm: set[tuple[str, str]] = set()
+        for d in dates:
+            try:
+                if float(d.get("confidence") or 0) >= forensics.OCR_DATE_MIN and d.get("what") and d.get("date"):
+                    firm.add((str(d["what"]), str(d["date"])))
+            except (TypeError, ValueError, AttributeError):
+                continue
+        reads.append(firm)
+    if not reads:
+        return frozenset()
+    seen: dict[str, set[str]] = {}
+    for firm in reads:
+        for what, d in firm:
+            seen.setdefault(what, set()).add(d)
+    conflicted = {what for what, ds in seen.items() if len(ds) > 1}
+    return frozenset(p for p in reads[-1] if p[0] not in conflicted)
 
 
 def named_by(ex: Any, r: Any, min_confidence: float | None = None) -> bool:
