@@ -54,6 +54,17 @@
       "approved_by": "Aaron Kaufman (U7RP6HKUZ)",
       "approval_ref": "captain verbatim 2026-10-20 ~11:30Z \"approve low risk credits\" (data/captain.md) + Fable ruling data/credit-trust-system-fable-a1/ruling-score-approve-band-b-2026-10-20.md (band-B phase 1, 11 conditions) + Fable ruling data/credit-trust-system-fable-a1/ruling-band-hint-stamps-2026-10-20.md (non-sticky band-hint stamp, engaged-user exclusion)",
       "status_note": "Relayed by firstmate inbox 110 (2026-10-20 11:31Z). Scope per firstmate: total risk < 30 only, every other guard intact, the 709 risk-0 rows first (Fable credit-pending-census ruling 1). Kill switches: /etc/hydra/credit-trust-score-approve.disabled (also honours /etc/hydra/credit-trust-decide.disabled), policies/credit-trust-decide.json score_approve.enabled=false, cron enabled=false, or approved=false here. Fable condition 10: an audit sample below 95 % precision pauses it at once (credit-review.py score-approve --pause <audit id>) and this entry flips to approved=false by PR until Fable reviews."
+    },
+    "fable-decider": {
+      "description": "L12 executor (scripts/credit-fable-execute.py): carries out Fable-ruled CLOSES of credit requests (unverified / user_verification_needed -> rejected) from tray files on disk, where EVERY row carries a Fable ruling id (else the whole tray is refused). This version closes only; approvals need a core automation scope and a separate change. Write-boundary guards on fresh Postgres facts (Trino, read-only): the row still has the tray's status and user and is not deleted; a reject_* rule it cites still fires, or a Fable R- rule comes with its evidence; the track is known not big (server popularity 1..59, not client-supplied); account gate allow and not watchlisted; registry approved + kill file /etc/hydra/fable-decider.disabled absent re-checked before every batch; daily cap 100 (a tray may raise it to <= 400 only with a Fable cap ruling id). Writes via muso-admin-api.sh PUT /admin/credit-requests/conditional-status with expectedStatus, as fable-decider@hydra-ops on the decider account (X-Credit-Automation-Id: fable-decider), <= 100 ids per call; read back from Postgres; one audit line per row (/var/lib/hydra/credit-review/fable-decider-audit.jsonl: request, user, rule, ruling id, tray + sha256, before/after); stops on the first surprise. Never deletes; a rejected row is restorable by a named human. Never scheduled.",
+      "entrypoints": [
+        "credit-fable-execute.py"
+      ],
+      "cron_names": [],
+      "approved": true,
+      "approved_by": "captain (Aaron Kaufman, U7RP6HKUZ)",
+      "approval_ref": "captain-1028-213x: captain verbatim 2026-10-28 21:3xZ \"move credits and profiles along ... if you get one fraud document deny ...\" + 21:4xZ \"yes approve all if Fable confirms\" (data/captain.md:586); Fable exec plan data/verify-program-lead-fable-l1/exec-plan-captain-1028-213x.md section (a); Fable confirms data/verify-program-lead-fable-l1/confirms-captain-1028-214x.md",
+      "cap_per_day": 100
     }
   }
 }

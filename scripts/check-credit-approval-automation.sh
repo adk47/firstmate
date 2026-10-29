@@ -46,6 +46,7 @@ FLOOR_ENTRYPOINTS=(
 # Approve-capable helpers that must never be called from a cron at all. They
 # are agent/manual tools; scheduling one is always a violation.
 NEVER_SCHEDULED=(
+  "credit-fable-execute.py"
   "apply-verdicts.sh"
   "batch-approve-credits.sh"
   "batch-verify-profile.sh"

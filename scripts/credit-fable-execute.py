@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""credit-fable-execute.py: run ONE Fable-ruled close tray through the L12 executor (fable-decider).
+
+  credit-fable-execute.py <tray.json>                 dry run (default): fresh facts + guards, writes nothing
+  credit-fable-execute.py <tray.json> --apply --limit 1   the ONE-row end-to-end check before a tray
+  credit-fable-execute.py <tray.json> --apply         the tray, paid first, capped, stopping on the first surprise
+
+Never scheduled (scripts/check-credit-approval-automation.sh NEVER_SCHEDULED). Kill file:
+/etc/hydra/fable-decider.disabled. Audit: /var/lib/hydra/credit-review/fable-decider-audit.jsonl.
+Prints one JSON summary line on stdout. Exit 0 = ran to the end, 1 = stopped on a surprise, 2 = tray refused.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from credit_review import fable_executor as fx  # noqa: E402
+
+FANOUT_WAIT_S = int(os.environ.get("FABLE_DECIDER_FANOUT_WAIT_S", "90"))
+MESSAGING_PG = os.environ.get(
+    "FABLE_DECIDER_MESSAGING_PG",
+    "kubectl -n messaging exec -i messaging-pg-pgha-6c8n-0 -c database -- psql -U postgres -d preferences -At '-F|'")
+
+
+def fanout_check(rows: list[tuple[str, int, str | None]], since: datetime) -> str | None:
+    """credits_rejected notes since the batch started, per user (send-gateway ledger, read-only). Core emits one
+    rejection event per (user, profile) group per call, so more notes than that for a user is a surprise."""
+    time.sleep(FANOUT_WAIT_S)
+    users = sorted({u for _, u, _ in rows})
+    groups: dict[int, set] = {}
+    for _, u, pid in rows:
+        groups.setdefault(u, set()).add(pid)
+    sql = ("select user_id, count(*) from send.messages where template_key = 'credits_rejected' "
+           f"and created_at >= '{since.strftime('%Y-%m-%dT%H:%M:%SZ')}' "
+           f"and user_id in ({','.join(repr(str(u)) for u in users)}) group by 1;")
+    p = subprocess.run(shlex.split(MESSAGING_PG), input=sql, capture_output=True, text=True, timeout=120,
+                       check=False)
+    if p.returncode != 0:
+        return f"send ledger unreadable rc={p.returncode}: {p.stderr.strip()[:160]}"
+    counts = {}
+    for line in p.stdout.splitlines():
+        parts = line.split("|")
+        if len(parts) == 2 and parts[1].isdigit():
+            counts[parts[0]] = int(parts[1])
+    over = {u: n for u, n in counts.items() if u.isdigit() and n > len(groups.get(int(u), ()))}
+    print(json.dumps({"fanout": {"since": since.isoformat(), "users": len(users), "notes": sum(counts.values()),
+                                 "users_noted": len(counts), "over": over}}), file=sys.stderr)
+    if over:
+        return f"more credits_rejected notes than (user, profile) groups for {sorted(over)[:10]}"
+    return None
+
+
+def _positive(v: str) -> int:
+    n = int(v)
+    if n < 1:
+        raise argparse.ArgumentTypeError("--limit must be >= 1")
+    return n
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("tray", nargs="?")
+    ap.add_argument("--tray", dest="tray_opt", help="tray path (the wrapper boundary passes it this way)")
+    ap.add_argument("--apply", action="store_true", help="write (default: dry run)")
+    ap.add_argument("--limit", type=_positive, default=None, help="only the first N rows (N >= 1)")
+    ap.add_argument("--no-fanout-check", action="store_true", help="skip the between-batch send-ledger read")
+    ap.add_argument("--verify-batch", action="store_true",
+                    help="(wrapper boundary) re-check one batch: --tray --ruling --run-id --expected --ids")
+    ap.add_argument("--ruling")
+    ap.add_argument("--run-id")
+    ap.add_argument("--expected")
+    ap.add_argument("--ids", help="comma-separated request ids")
+    a = ap.parse_args()
+    if a.tray_opt:
+        if a.tray and a.tray != a.tray_opt:
+            ap.error("tray given twice with different values")
+        a.tray = a.tray_opt
+    if a.verify_batch:
+        if not all([a.tray, a.ruling, a.run_id, a.expected, a.ids]):
+            print("verify-batch: --tray, --ruling, --run-id, --expected and --ids are all required", file=sys.stderr)
+            return 3
+        why = fx.verify_batch(a.tray, a.ruling, a.run_id, [i for i in a.ids.split(",") if i], a.expected)
+        if why:
+            print(f"fable_decider boundary: {why}", file=sys.stderr)
+            return 3
+        return 0
+    if not a.tray:
+        ap.error("tray is required")
+    try:
+        tray = fx.load_tray(a.tray)
+    except (fx.TrayError, OSError) as exc:
+        print(json.dumps({"tray": a.tray, "refused": str(exc)}))
+        return 2
+    res = fx.run(tray, apply=a.apply, limit=a.limit,
+                 between_batches=None if (a.no_fanout_check or not a.apply) else fanout_check)
+    print(json.dumps({**res.as_dict(), "tray_sha256": tray.sha256, "daily_cap": tray.daily_cap,
+                      "cap_ruling_id": tray.cap_ruling_id}))
+    return 1 if res.stopped else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1633,6 +1633,85 @@ EOF
     return 0
 }
 
+# --- fable-decider closes (L12; captain 2026-10-28 21:3xZ/21:4xZ, approval_ref captain-1028-213x) ---
+# The ONE agent path past the reject gate below: the L12 executor (scripts/credit-fable-execute.py) closing
+# Fable-ruled rows. Deliberately NOT a tier2-approvers entry: that list also authorizes profile merges and
+# bulk destructive DELETEs; this grants exactly one shape and nothing else:
+#   FABLE_DECIDER=1 + requester fable-decider@hydra-ops + PUT conditional-status
+#   + status "rejected" from unverified | user_verification_needed (never touches an approved row)
+#   + <=100 unique UUIDs + a Fable ruling id in FABLE_RULING_ID
+#   + the registry entry approved (approved_by + approval_ref) + kill file absent.
+# Any near miss falls through to the human-confirmation requirement unchanged.
+FABLE_DECIDER_KILL_FILE="${FABLE_DECIDER_KILL_FILE:-/etc/hydra/fable-decider.disabled}"
+is_fable_decider_close() {
+    local method="$1" path="$2" body="$3"
+    [[ "${FABLE_DECIDER:-0}" == "1" ]] || return 1
+    [[ "${REQUESTER_EMAIL:-}" == "fable-decider@hydra-ops" ]] || return 1
+    [[ "$method" == "PUT" ]] || return 1
+    [[ "$path" == "/admin/credit-requests/conditional-status" ]] || return 1
+    if [[ -e "$FABLE_DECIDER_KILL_FILE" ]]; then
+        echo "fable_decider: kill file $FABLE_DECIDER_KILL_FILE present - refusing" >&2
+        return 1
+    fi
+    [[ "${FABLE_RULING_ID:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._:\|-]{2,120}$ ]] || {
+        echo "fable_decider: FABLE_RULING_ID missing or malformed - refusing" >&2
+        return 1
+    }
+    jq -e '.automations["fable-decider"]
+           | .approved == true
+             and ((.approved_by // "") | tostring | length > 0)
+             and ((.approval_ref // "") | tostring | length > 0)' \
+        "$CREDIT_APPROVAL_REGISTRY" >/dev/null 2>&1 || {
+        echo "fable_decider: fable-decider is not approved in $CREDIT_APPROVAL_REGISTRY - refusing" >&2
+        return 1
+    }
+    printf '%s' "$body" | jq -e '
+        type == "object"
+        and ((keys | sort) == ["expectedStatus", "requestIds", "status"])
+        and .status == "rejected"
+        and (.expectedStatus == "unverified" or .expectedStatus == "user_verification_needed")
+        and (
+            .requestIds as $ids
+            | ($ids | type) == "array"
+            and ($ids | length) > 0
+            and ($ids | length) <= 100
+            and all($ids[];
+                type == "string"
+                and length == 36
+                and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+            )
+            and (($ids | map(ascii_downcase) | unique | length) == ($ids | length))
+        )
+    ' >/dev/null 2>&1 || return 1
+    # Boundary re-check (QA #1475): the flags above are caller-settable, so the wrapper itself re-runs the
+    # executor's per-batch checks on a CLEAN environment (no caller env reaches it): the tray names every id under
+    # this ruling, each id has a fresh reservation from this run, the tray's daily cap holds, and every row guard
+    # passes on fresh facts + the account gate. The verifier path is fixed relative to THIS file, never from env.
+    [[ -n "${FABLE_DECIDER_RUN_ID:-}" && -n "${FABLE_DECIDER_TRAY:-}" ]] || {
+        echo "fable_decider: FABLE_DECIDER_RUN_ID / FABLE_DECIDER_TRAY missing - refusing" >&2
+        return 1
+    }
+    if ! fable_decider_verify_batch "$body"; then
+        echo "fable_decider: boundary re-check refused the batch" >&2
+        return 1
+    fi
+    return 0
+}
+
+# The boundary re-check itself: the executor's own verify_batch, run in a CLEAN environment (env -i: a fixed
+# PATH and HOME only), so no caller-set variable can redirect the tray loader, registry, audit file, Trino or the
+# account gate to a path of the caller's choosing. The verifier path is fixed relative to THIS file.
+fable_decider_verify_batch() {
+    local body="$1" verifier ids expected
+    verifier="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." 2>/dev/null && pwd)/scripts/credit-fable-execute.py"
+    [[ -f "$verifier" ]] || { echo "fable_decider: verifier $verifier missing - refusing" >&2; return 1; }
+    ids="$(printf '%s' "$body" | jq -r '.requestIds | join(",")')"
+    expected="$(printf '%s' "$body" | jq -r '.expectedStatus')"
+    env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root \
+        python3 "$verifier" --verify-batch --tray "$FABLE_DECIDER_TRAY" --ruling "$FABLE_RULING_ID" \
+        --run-id "$FABLE_DECIDER_RUN_ID" --expected "$expected" --ids "$ids" >&2
+}
+
 # --- Credit reject gate (incident 2026-07-22) ---
 # Rejection of a credit request is NEVER autonomous. core-backend's
 # updateStatus.js transition matrix has no rejected->user_verification_needed
@@ -1670,6 +1749,22 @@ enforce_credit_reject_gate() {
     status_val="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)"
     if [[ "$status_val" != "rejected" ]] \
         && ! echo "$body" | grep -q '"status"[[:space:]]*:[[:space:]]*"rejected"'; then
+        return 0
+    fi
+
+    # The registered L12 executor (is_fable_decider_close above): audited like a human reject, with the
+    # Fable ruling id as the approval reference. Audit failure refuses, as below.
+    if is_fable_decider_close "$method" "$path" "$body"; then
+        if ! mkdir -p "$(dirname "$CREDIT_REJECT_AUDIT_PATH")" 2>/dev/null \
+            || ! jq -n -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg method "$method" --arg path "$path" \
+                --arg requester "${REQUESTER_EMAIL:-}" --arg ruling "$FABLE_RULING_ID" \
+                --argjson n "$(printf '%s' "$body" | jq '.requestIds | length')" \
+                '{ts:$ts, gate:"credit_reject", method:$method, path:$path, requester:$requester,
+                  confirmed_by:"fable-decider", approval_msg_id:$ruling, automation:"fable-decider", rows:$n}' \
+                >> "$CREDIT_REJECT_AUDIT_PATH"; then
+            echo "MUSO_CREDIT_REJECT_AUDIT_UNWRITABLE: fable-decider close not audited - refusing." >&2
+            return 1
+        fi
         return 0
     fi
 
@@ -3156,6 +3251,10 @@ EOF
     # own calls ever carry it.
     if [[ "${CREDIT_TRUST_DECIDE:-0}" == "1" && "$REQUESTER_EMAIL" == "credit-trust-decide@hydra-ops" ]]; then
         curl_args+=(-H "X-Credit-Automation-Id: credit-trust-decide")
+    fi
+    # The L12 executor: its own automation id on the decider account (closes only; see is_fable_decider_close).
+    if [[ "${FABLE_DECIDER:-0}" == "1" && "$REQUESTER_EMAIL" == "fable-decider@hydra-ops" ]]; then
+        curl_args+=(-H "X-Credit-Automation-Id: fable-decider")
     fi
     # Same contract for score-approve: its own id on the same decider account.
     if [[ "${CREDIT_TRUST_SCORE_APPROVE:-0}" == "1" && "$REQUESTER_EMAIL" == "credit-trust-score-approve@hydra-ops" ]]; then
