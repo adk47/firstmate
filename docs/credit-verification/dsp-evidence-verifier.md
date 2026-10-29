@@ -159,3 +159,9 @@ what a looser rule would act on, so their labelled precision is what the captain
   document evidence
   (doc-verify's `verified` is the second signal a consumer would combine with this verdict).
 - One-person set: Recording Engineer (d1 only) is left out on purpose. A narrower set can only cost a decline.
+
+## Anchor records for L12 approvals
+
+For an approve tray, `credit-dsp-verify.py anchors --tray <tray.json>` builds the server-side anchor
+record per row from the verifier's own verdict (Fable `l12-approvals-core` = A):
+[`dsp-anchor-record.md`](./dsp-anchor-record.md). Nothing is written to core until core's anchor endpoint exists.

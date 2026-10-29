@@ -12,6 +12,11 @@ Subcommands:
                    until it closes).
   verify-packets   Verdicts for ready-made packets (JSON list or JSONL, file or '-'), one JSON line
                    per verdict on stdout. No network. The verifier-eval-v1 entry point.
+  anchors          For an APPROVE tray (JSON {action, rows:[{request_id, ruling_id, roles?}]}), build the
+                   server-side anchor record per row (kind dsp_anchor / dsp_label_line, schema dsp-anchor/1)
+                   from the verifier's OWN standing verdict and packet, never from the tray; log every
+                   record or refusal to dsp_anchors and print them as JSONL. Fable ruling
+                   l12-approvals-core = A. `--write` is refused: core has no anchor endpoint yet.
   export           The standing (latest) verdict per request as JSONL on stdout.
   summary          Counts of the standing verdicts (by verdict, class, need, anchor, paid).
 
@@ -49,7 +54,8 @@ def real_deps():
     from credit_review import watchlist
     from credit_review.decide import Policy, paying_users
     from credit_verify.dspverify import capture
-    from credit_verify.dspverify.runner import Deps
+    from credit_verify.dspverify.runner import Deps, trino_org_claim
+    from credit_verify.proof.stage2 import trino_query
     pol = Policy.load()                    # deny lists + the fraud watchlist; missing/malformed = fatal
     wl = watchlist.load(required=True)     # the watchlist on its own, so its flag is recorded per row
     paying, why = paying_users()
@@ -59,7 +65,7 @@ def real_deps():
                 deny_user_ids=frozenset(pol.deny_user_ids), deny_profile_ids=frozenset(pol.deny_profile_ids),
                 watch_user_ids=frozenset(wl.user_ids),
                 watch_profile_ids=frozenset(str(x).lower() for x in wl.profile_ids),
-                paying=paying, log=log)
+                paying=paying, org_claim=trino_org_claim(trino_query), log=log)
 
 
 def cmd_submit(args: argparse.Namespace) -> int:
@@ -69,7 +75,11 @@ def cmd_submit(args: argparse.Namespace) -> int:
         log(f"kill switch present at {k}; nothing submitted")
         print("NO_REPLY")
         return 0
-    runner.submit(Store(args.store), real_deps(), max_requests=args.max_requests)
+    only = None
+    if args.tray:
+        only = {str(r["request_id"]).lower() for r in runner.tray_rows(json.loads(Path(args.tray).read_text()))}
+        log(f"tray {args.tray}: {len(only)} approve rows")
+    runner.submit(Store(args.store), real_deps(), max_requests=args.max_requests, only=only)
     print("NO_REPLY")
     return 0
 
@@ -119,6 +129,22 @@ def cmd_verify_packets(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_anchors(args: argparse.Namespace) -> int:
+    from credit_verify.dspverify import runner
+    from credit_verify.dspverify.store import Store
+    if (k := killed()):
+        log(f"kill switch present at {k}; no anchors")
+        return 0
+    if args.write:
+        log("--write refused: core has no server-side anchor endpoint yet (Fable l12-approvals-core step 3: the "
+            "core PR for the anchor table / proof kind comes first). Records are built and logged locally only.")
+        return 2
+    _, out = runner.build_anchors(Store(args.store), json.loads(Path(args.tray).read_text(encoding="utf-8")), log=log)
+    for o in out:
+        print(json.dumps(o, ensure_ascii=False, default=str))
+    return 0
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     from credit_verify.dspverify.store import Store, export_jsonl
     for line in export_jsonl(Store(args.store).latest()):
@@ -139,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("submit")
     s.add_argument("--max-requests", type=int, default=300)
     s.set_defaults(fn=cmd_submit)
+    s.add_argument("--tray", default=None, help="only this approve tray's request ids")
     s = sub.add_parser("verify")
     s.add_argument("--max-groups", type=int, default=200)
     s.set_defaults(fn=cmd_verify)
@@ -150,6 +177,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("packets", help="JSON list or JSONL file of packets, or '-' for stdin")
     s.add_argument("--log", action="store_true", help="also log the verdicts to the shadow store")
     s.set_defaults(fn=cmd_verify_packets)
+    s = sub.add_parser("anchors")
+    s.add_argument("--tray", required=True)
+    s.add_argument("--write", action="store_true", help="refused until core's anchor endpoint exists")
+    s.set_defaults(fn=cmd_anchors)
     sub.add_parser("export").set_defaults(fn=cmd_export)
     sub.add_parser("summary").set_defaults(fn=cmd_summary)
     args = ap.parse_args(argv)

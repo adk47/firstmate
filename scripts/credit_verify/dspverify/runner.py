@@ -49,6 +49,8 @@ class Deps:
     watch_user_ids: frozenset[int] | None = None       # policies/fraud-watchlist.json; None = not read
     watch_profile_ids: frozenset[str] | None = None
     paying: frozenset[int] | None = None
+    # (user_id, org profile_id) -> True (a processed, live organization claim) | False | None (unknown).
+    org_claim: Callable[[int | None, str], bool | None] = lambda uid, pid: None
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     log: Callable[[str], None] = lambda m: None
 
@@ -128,13 +130,17 @@ def _batches(items: list[Any], n: int) -> list[list[Any]]:
     return [items[i:i + n] for i in range(0, len(items), n)]
 
 
-def submit(store: Store, deps: Deps, *, max_requests: int = 300, max_pages: int = 20) -> Stats:
+def submit(store: Store, deps: Deps, *, max_requests: int = 300, max_pages: int = 20,
+           only: set[str] | None = None) -> Stats:
+    """`only`: restrict to these credit request ids (a tray's rows), still read from core as pending."""
     st = Stats(new_run_id("submit"), "submit")
     store.start_run(st.run_id, "submit")
     try:
         rows = order(pending_requests(deps.admin, max_pages), deps.paying)
         skip = store.requests_with_open_capture() | store.requests_verified_since(
             (deps.now() - REVERIFY_AFTER).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        if only is not None:
+            rows = [r for r in rows if str(r.get("id")).lower() in only]
         rows = [r for r in rows if str(r.get("id")) not in skip][:max_requests]
         st.requests = len(rows)
         builder = EvidenceBuilder(deps.admin, now=deps.now())
@@ -260,6 +266,12 @@ def build_packet(req: dict[str, Any], capture: dict[str, Any] | None, builder: E
         "profile_type": profile_type(doc),
         "track_id": tid,
         "track_title": req.get("spotifyTrackTitle"),
+        # ISRC as the CATALOG holds it (raw DSP recordings, read by the pod), never the request's own
+        # metadata, which the claimant's client can set; core's metadata ISRC is kept for comparison.
+        "isrcs": sorted({str(x.get("isrc")) for x in ((capture or {}).get("recording_facts") or {}).get("isrcs") or []
+                         if x.get("isrc")}),
+        "request_isrc": (req.get("metadata") or {}).get("isrc") if isinstance(req.get("metadata"), dict) else None,
+        "recording_facts": (capture or {}).get("recording_facts"),
         "created_at": req.get("createdAt"),
         "roles": [str(c) for c in (req.get("credits") or []) if c],
         "popularity": cat.popularity,
@@ -270,6 +282,7 @@ def build_packet(req: dict[str, Any], capture: dict[str, Any] | None, builder: E
         "verification_data": req.get("verificationData") if isinstance(req.get("verificationData"), dict) else None,
         "name_collisions": (capture or {}).get("name_collisions"),
         "label_strings": label_strings(req, track_doc),
+        "org_claim_processed": deps.org_claim(uid, pid) if profile_type(doc) == "organization" else None,
         "capture": capture,
         "gate": gate,
         # Every guard is an explicit bool or None (unknown, which blocks approval): QA @dfe29fd.
@@ -294,6 +307,7 @@ def capture_for_request(read_row: dict[str, Any], cap: dict[str, Any], req: dict
     roles = tr.get("roles") or {}
     return {"request_id": cap["capture_request_id"], "requested_at": cap["requested_at"],
             "read_at": utcnow(), "person_name": tr.get("person_name"), "name_collisions": tr.get("name_collisions"),
+            "recording_facts": tr.get("recording_facts"),
             "roles": {str(c): roles.get(str(c)) or {} for c in (req.get("credits") or []) if c}}
 
 
@@ -403,3 +417,88 @@ def verify_packets(packets: list[dict[str, Any]], store: Store | None = None) ->
     if store:
         store.finish_run(run_id, {"requests": len(out)})
     return out
+
+
+ORG_CLAIM_SQL = ("SELECT count(*) FROM postgresql_core.public.claiming c WHERE c.userid = {uid} "
+                 "AND cast(c.profileid AS varchar) = '{pid}' AND c.status = 'processed' AND c.deletedat IS NULL")
+
+
+def trino_org_claim(query: Callable[[str], str]) -> Callable[[int | None, str], bool | None]:
+    """A cached org-claim lookup over a read-only Trino SELECT; any failure or odd input is None."""
+    import re
+    cache: dict[tuple[int, str], bool | None] = {}
+
+    def look(uid: int | None, pid: str) -> bool | None:
+        if not isinstance(uid, int) or isinstance(uid, bool) or not re.fullmatch(r"[0-9a-fA-F-]{36}", pid or ""):
+            return None
+        if (uid, pid) not in cache:
+            try:
+                out = query(ORG_CLAIM_SQL.format(uid=uid, pid=pid.lower()))
+                nums = [ln.strip().strip('"') for ln in out.splitlines() if ln.strip().strip('"').isdigit()]
+                cache[(uid, pid)] = int(nums[-1]) > 0 if nums else None
+            except Exception:  # noqa: BLE001 - unknown, which never anchors
+                cache[(uid, pid)] = None
+        return cache[(uid, pid)]
+    return look
+
+
+# ── anchor records for an approve tray (Fable ruling l12-approvals-core = A) ────────────────────
+def tray_rows(tray: dict[str, Any]) -> list[dict[str, Any]]:
+    """The tray's APPROVE rows: tray-level action 'approve', or a row whose own action is approve."""
+    rows = tray.get("rows") if isinstance(tray.get("rows"), list) else []
+    top = str(tray.get("action") or "").lower()
+    out = []
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("request_id"):
+            continue
+        if str(r.get("action") or top).lower() == "approve":
+            out.append(r)
+    return out
+
+
+def build_anchors(store: Store, tray: dict[str, Any], *, now: datetime | None = None,
+                  log: Callable[[str], None] = lambda m: None) -> tuple[Stats, list[dict[str, Any]]]:
+    """One anchor record per APPROVE tray row, built ONLY from the verifier's own standing verdict
+    and packet for that request (never from the tray). Records are logged to dsp_anchors; nothing
+    is written to core here (the core anchor endpoint does not exist yet)."""
+    from . import anchor as anchor_mod
+    st = Stats(new_run_id("anchors"), "anchors")
+    store.start_run(st.run_id, "anchors")
+    out: list[dict[str, Any]] = []
+    try:
+        for row in tray_rows(tray):
+            rid = str(row["request_id"]).lower()
+            ruling = row.get("ruling_id") or tray.get("ruling_id")
+            st.requests += 1
+            latest = store.latest_captured_for(rid)
+            if latest is None or not latest.get("packet_json"):
+                why = ("no verdict from this job's own capture for this request (run submit --tray, then verify); "
+                       "verdicts from supplied packets never anchor")
+                store.add_anchor(st.run_id, rid, "refused", reason=why, ruling_id=ruling)
+                out.append({"request_id": rid, "outcome": "refused", "reason": why})
+                st.classes["refused"] = st.classes.get("refused", 0) + 1
+                continue
+            packet = json.loads(latest["packet_json"])
+            verdict = {"verdict": latest["verdict"], "reason_class": latest["reason_class"],
+                       "approve_roles": json.loads(latest["approve_roles"] or "[]")}
+            try:
+                rec = anchor_mod.build(packet, verdict, ruling_id=ruling, now=now)
+            except anchor_mod.AnchorRefused as exc:
+                store.add_anchor(st.run_id, rid, "refused", reason=str(exc), ruling_id=ruling, verdict_id=latest["id"])
+                out.append({"request_id": rid, "outcome": "refused", "reason": str(exc)})
+                st.classes["refused"] = st.classes.get("refused", 0) + 1
+                continue
+            note = None
+            tray_roles = [str(x) for x in (row.get("roles") or []) if x]
+            if tray_roles and sorted(tray_roles) != sorted(rec["roles"]):
+                note = (f"the tray names roles {tray_roles}; the anchor covers {rec['roles']} only "
+                        "(role edit before any approval)")
+            store.add_anchor(st.run_id, rid, "built", kind=rec["kind"], reason=note, ruling_id=ruling,
+                             verdict_id=latest["id"], record=rec)
+            out.append({"request_id": rid, "outcome": "built", "kind": rec["kind"], "roles": rec["roles"],
+                        "record_sha256": rec["record_sha256"], "note": note})
+            st.classes[rec["kind"]] = st.classes.get(rec["kind"], 0) + 1
+    finally:
+        store.finish_run(st.run_id, st.as_dict())
+    log("anchors " + json.dumps(st.as_dict()))
+    return st, out

@@ -461,7 +461,11 @@ class FakePod:
         out = []
         for it in items:
             tracks = {f"{t['track_id']}|{t['profile_id']}": {"person_name": "Jane Mixer",
-                                                             "name_collisions": self.collisions, "roles": {
+                                                             "name_collisions": self.collisions,
+                                                             "recording_facts": {"isrcs": [{"source": "spotify",
+                                                                                            "isrc": "USAAA2600001"}],
+                                                                                 "label_lines": []},
+                                                             "roles": {
                 r: {"sources": self.reading(t)} for r in t["roles"]}} for t in it["tracks"]}
             out.append({"key": it["key"], "request_id": it["request_id"], "tracks": tracks,
                         "idp_hold_ids": self.idp_hold_ids})
@@ -667,6 +671,158 @@ class RunnerAndStore(unittest.TestCase):
             p = subprocess.run([sys.executable, str(CLI), cmd], capture_output=True, text=True, env=env, timeout=60)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertIn("kill switch", p.stderr)
+
+
+from credit_verify.dspverify import anchor  # noqa: E402
+
+NOW = datetime(2026, 10, 28, 4, 0, tzinfo=timezone.utc)
+
+
+def approve_packet(**kw) -> dict:
+    base = {"isrcs": ["USAAA2600001"],
+            "recording_facts": {"isrcs": [{"source": "spotify", "isrc": "USAAA2600001"}], "label_lines": []}}
+    base.update(kw)
+    return packet(**base)
+
+
+class Anchors(unittest.TestCase):
+    def test_dsp_anchor_built_from_the_verifiers_own_evidence(self):
+        p = approve_packet()
+        v = rules.verify(p).as_dict()
+        rec = anchor.build(p, v, ruling_id="l12-tray2", now=NOW)
+        self.assertEqual((rec["schema"], rec["kind"], rec["roles"], rec["both_read"]),
+                         ("dsp-anchor/1", "dsp_anchor", ["Mixing"], True))
+        self.assertEqual(rec["isrcs"], ["USAAA2600001"])
+        self.assertEqual(rec["metadata"], {"ruling_id": "l12-tray2"})          # metadata only
+        for b in rec["role_evidence"]["Mixing"]["sources"]:
+            self.assertEqual(b["state"], "CAPTURED")
+            self.assertTrue(any(h["is_claimant_linked_id"] for h in b["role_holders"]))
+        self.assertEqual(rec["record_sha256"], anchor.record_sha256(rec))
+        self.assertEqual(rec["capture_request_id"], "cap-1")
+
+    def test_refusals(self):
+        p = approve_packet()
+        v = rules.verify(p).as_dict()
+        wait = approve_packet(sources={"Mixing": {"spotify": credited(), "tidal": NO_REC}})
+        cases = [
+            (wait, rules.verify(wait).as_dict(), "not APPROVE"),
+            (wait, v, "not APPROVE"),                                  # a stored APPROVE never beats its packet
+            (p, {**v, "verdict": "WAIT"}, "not APPROVE"),
+            (p, {**v, "approve_roles": ["Mixing", "Producer"]}, "does not match"),
+            (p, {**v, "reason_class": "something_else"}, "does not match"),
+            (approve_packet(isrcs=[]), v, "no ISRC"),
+        ]
+        for pk, vd, needle in cases:
+            with self.assertRaises(anchor.AnchorRefused) as cm:
+                anchor.build(pk, vd, now=NOW)
+            self.assertIn(needle, str(cm.exception))
+        with self.assertRaises(anchor.AnchorRefused) as cm:           # stale capture
+            anchor.build(p, v, now=datetime(2026, 10, 30, tzinfo=timezone.utc))
+        self.assertIn("older than", str(cm.exception))
+
+    def org_packet(self, **kw):
+        lines = [{"source": "spotify", "release_id": "spotify:r1", "kind": "copyright_p",
+                  "string": "(P) 2024 Controlled Substance, LLC"}]
+        base = dict(roles=("Record Label",), sources={}, profile_type="organization",
+                    profile_name="Substance Controlled LLC", org_claim_processed=True,
+                    label_strings=[{"kind": "core_label", "string": "Controlled Substance LLC"}],
+                    recording_facts={"isrcs": [{"isrc": "USAAA2600001"}], "label_lines": lines,
+                                     "read_at": "2026-10-28T03:20:00+00:00", "label_lines_fresh": False})
+        base.update(kw)
+        return approve_packet(**base)
+
+    def test_label_line_anchor(self):
+        p = self.org_packet()
+        v = rules.verify(p).as_dict()
+        self.assertEqual(v["reason_class"], "org_label_anchor")
+        rec = anchor.build(p, v, ruling_id="org-label-anchor", now=NOW)
+        self.assertEqual((rec["kind"], rec["roles"], rec["label_lines_fresh"]), ("dsp_label_line", ["Record Label"], False))
+        self.assertEqual(rec["label_lines"][0]["kind"], "copyright_p")
+        for stored in ({**v, "verdict": "DECLINE"}, {**v, "verdict": "APPROVE"}, {**v, "approve_roles": ["x"]}):
+            with self.assertRaises(anchor.AnchorRefused) as cm:   # QA @b6159bd: stored verdict drift
+                anchor.build(p, stored, now=NOW)
+            self.assertIn("does not match", str(cm.exception))
+        for kw, needle in ((dict(org_claim_processed=None), "processed claim"),
+                           (dict(recording_facts={"isrcs": [{"isrc": "X"}], "label_lines": []}), "not on the catalog"),
+                           (dict(gate={"decision": "hold"}), "guards block")):
+            p2 = self.org_packet(**kw)
+            with self.assertRaises(anchor.AnchorRefused) as cm:
+                anchor.build(p2, rules.verify(p2).as_dict(), now=NOW)
+            self.assertIn(needle, str(cm.exception))
+
+
+class TrayAnchors(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = Store(os.path.join(self.tmp, "dsp.sqlite"))
+
+    def test_tray_rows_get_records_only_where_the_verifier_approves(self):
+        good, bad = req(1), req(2)
+        admin = FakeAdmin([good, bad])
+
+        def reading(t):
+            if t["track_id"] == good["trackId"]:
+                return {"spotify": credited(), "tidal": credited("tidal")}
+            return {"spotify": credited(), "tidal": NO_REC}
+        d = runner.Deps(admin=admin, capture=FakePod(reading=reading),
+                        gate=lambda uid: account_gate.GateResult("allow", (), {"band": "green"}),
+                        paying=frozenset(), watch_user_ids=frozenset(), watch_profile_ids=frozenset(),
+                        now=lambda: datetime(2026, 10, 28, 3, 20, tzinfo=timezone.utc))
+        tray = {"tray": "t2", "action": "approve", "rows": [
+            {"request_id": good["id"], "ruling_id": "l12-t2", "roles": ["Mixing"]},
+            {"request_id": bad["id"], "ruling_id": "l12-t2"},
+            {"request_id": "00000000-0000-0000-0000-0000000000ff", "ruling_id": "l12-t2"}]}
+        st = runner.submit(self.store, d, only={r["request_id"] for r in runner.tray_rows(tray)})
+        self.assertEqual(st.requests, 2)
+        runner.verify(self.store, d)
+        _, out = runner.build_anchors(self.store, tray, now=NOW)
+        got = {o["request_id"]: o["outcome"] for o in out}
+        self.assertEqual(got, {good["id"]: "built", bad["id"]: "refused", "00000000-0000-0000-0000-0000000000ff": "refused"})
+        rows = self.store.anchors()
+        self.assertEqual(len(rows), 3)
+        built = json.loads(next(r for r in rows if r["outcome"] == "built")["record_json"])
+        self.assertEqual(built["metadata"]["ruling_id"], "l12-t2")
+        db = sqlite3.connect(self.store.path)
+        with self.assertRaises(sqlite3.DatabaseError):
+            db.execute("UPDATE dsp_anchors SET outcome='written'")
+        with self.assertRaises(sqlite3.DatabaseError):
+            db.execute("DELETE FROM dsp_anchors")
+
+    def test_supplied_packets_never_anchor(self):
+        # QA @3b7f0b4: a packet logged through verify-packets --log is not this job's capture.
+        p = approve_packet(request_id="11111111-1111-1111-1111-111111111111")
+        runner.verify_packets([p], self.store)
+        self.assertEqual(self.store.latest_for(p["request_id"])["verdict"], rules.APPROVE)
+        tray = {"action": "approve", "rows": [{"request_id": p["request_id"], "ruling_id": "x"}]}
+        _, out = runner.build_anchors(self.store, tray, now=NOW)
+        self.assertEqual(out[0]["outcome"], "refused")
+        self.assertIn("never anchor", out[0]["reason"])
+        # Same through the CLI path that logs packets.
+        path = os.path.join(self.tmp, "p.jsonl")
+        Path(path).write_text(json.dumps(p), encoding="utf-8")
+        tpath = os.path.join(self.tmp, "t.json")
+        Path(tpath).write_text(json.dumps(tray), encoding="utf-8")
+        env = {**os.environ, "CREDIT_DSP_VERIFY_STORE": os.path.join(self.tmp, "cli.sqlite"),
+               "CREDIT_DSP_VERIFY_KILL_SWITCH": os.path.join(self.tmp, "nope"),
+               "CREDIT_VERIFY_KILL_SWITCH": os.path.join(self.tmp, "nope2")}
+        subprocess.run([sys.executable, str(CLI), "verify-packets", path, "--log"], env=env, check=True,
+                       capture_output=True, timeout=60)
+        r = subprocess.run([sys.executable, str(CLI), "anchors", "--tray", tpath], env=env, capture_output=True,
+                           text=True, timeout=60)
+        self.assertEqual(json.loads(r.stdout.splitlines()[0])["outcome"], "refused", r.stderr)
+
+    def test_reject_tray_builds_nothing(self):
+        self.assertEqual(runner.tray_rows({"action": "reject", "rows": [{"request_id": "x"}]}), [])
+
+    def test_cli_write_is_refused(self):
+        path = os.path.join(self.tmp, "tray.json")
+        Path(path).write_text(json.dumps({"action": "approve", "rows": []}), encoding="utf-8")
+        env = {**os.environ, "CREDIT_DSP_VERIFY_STORE": os.path.join(self.tmp, "w.sqlite"),
+               "CREDIT_DSP_VERIFY_KILL_SWITCH": os.path.join(self.tmp, "nope")}
+        p = subprocess.run([sys.executable, str(CLI), "anchors", "--tray", path, "--write"], capture_output=True,
+                           text=True, env=env, timeout=60)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("no server-side anchor endpoint", p.stderr)
 
 
 if __name__ == "__main__":

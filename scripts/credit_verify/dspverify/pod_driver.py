@@ -107,6 +107,7 @@ def main(payload):
     from db.collections.catalog.track import CatalogTrack
     from db.collections.raw.profile import RawProfile
     from db.collections.raw.recording import RawRecording
+    from db.collections.raw.release import RawRelease
     _connect(config, db.init_connect)
 
     def targets_for(track_id):
@@ -187,6 +188,37 @@ def main(payload):
                         "name", "deleted", "merged")[:limit], profile_id, name)
             return ncache[key]
 
+        def recording_facts(tg):
+            """Server-read facts for the anchor record: per DSP recording its ISRC, and per release
+            its ℗/© lines (+ a label string when the raw release carries one). Catalog reads at
+            read time, NOT same-run captures: the record says so (label_lines_fresh false)."""
+            out = {"isrcs": [], "label_lines": [], "read_at": datetime.now(timezone.utc).isoformat(),
+                   "label_lines_fresh": False}
+            try:
+                for src, recs in tg.items():
+                    for rid in recs:
+                        raw = RawRecording.objects(_id=rid).only("isrc", "release_ids").first()
+                        if raw is None:
+                            continue
+                        if raw.isrc:
+                            out["isrcs"].append({"source": src, "recording_id": rid, "isrc": raw.isrc.upper()})
+                        for rel_id in sorted(raw.release_ids or [])[:6]:
+                            rel = RawRelease.objects(_id=rel_id).only("copyrights", "custom_data", "title").first()
+                            if rel is None:
+                                continue
+                            for c in rel.copyrights or []:
+                                if getattr(c, "name", None):
+                                    out["label_lines"].append({"source": src, "release_id": rel_id,
+                                                               "kind": f"copyright_{(c.type or '').lower() or 'x'}",
+                                                               "string": c.name[:200]})
+                            lab = (rel.custom_data or {}).get("label")
+                            if isinstance(lab, str) and lab.strip():
+                                out["label_lines"].append({"source": src, "release_id": rel_id, "kind": "label",
+                                                           "string": lab.strip()[:200]})
+            except Exception as exc:  # noqa: BLE001 - unknown, recorded; never an anchor
+                out["error"] = f"{type(exc).__name__}: {exc}"[:200]
+            return out
+
         def name_of(pid):
             if pid not in pname:
                 p = RawProfile.objects(_id=pid).only("name").first()
@@ -210,6 +242,7 @@ def main(payload):
                     names.discard("")
                     tr["person_name"] = plan.person_name
                     tr["name_collisions"] = name_collisions(t["profile_id"], plan.person_name)
+                    tr["recording_facts"] = recording_facts(tg)
                     for role in t["roles"]:
                         fam = {fc._fold(c) for c in fc.default_family_codes(role)} | {fc._fold(role)}
                         fam.discard("")

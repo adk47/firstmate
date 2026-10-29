@@ -75,12 +75,32 @@ CREATE TABLE IF NOT EXISTS dsp_verdicts (
   signals_json TEXT NOT NULL,
   evidence_json TEXT NOT NULL,           -- per role per DSP + request evidence
   packet_sha256 TEXT NOT NULL,
+  packet_json TEXT,                      -- the complete packet (an anchor record is rebuilt from it)
   capture_request_id TEXT,
   mode TEXT NOT NULL DEFAULT 'shadow',
   version TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS dsp_v_req ON dsp_verdicts(request_id, version);
 CREATE INDEX IF NOT EXISTS dsp_v_run ON dsp_verdicts(run_id);
+CREATE TABLE IF NOT EXISTS dsp_anchors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  at TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  kind TEXT,                             -- dsp_anchor | dsp_label_line | NULL when refused
+  outcome TEXT NOT NULL,                 -- built | refused | written | write_refused | write_error
+  reason TEXT,
+  ruling_id TEXT,                        -- metadata only
+  verdict_id INTEGER,                    -- the dsp_verdicts row it was built from
+  record_json TEXT,
+  record_sha256 TEXT,
+  sink_response TEXT
+);
+CREATE INDEX IF NOT EXISTS dsp_a_req ON dsp_anchors(request_id);
+CREATE TRIGGER IF NOT EXISTS dsp_a_no_update BEFORE UPDATE ON dsp_anchors
+BEGIN SELECT RAISE(ABORT, 'dsp_anchors is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS dsp_a_no_delete BEFORE DELETE ON dsp_anchors
+BEGIN SELECT RAISE(ABORT, 'dsp_anchors is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS dsp_v_no_update BEFORE UPDATE ON dsp_verdicts
 BEGIN SELECT RAISE(ABORT, 'dsp_verdicts is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS dsp_v_no_delete BEFORE DELETE ON dsp_verdicts
@@ -120,6 +140,10 @@ class Store:
         if fresh:
             os.chmod(self.path, 0o600)
         self.db.executescript(SCHEMA)
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(dsp_verdicts)")}
+        if "packet_json" not in cols:           # stores created before dsp-anchor
+            self.db.execute("ALTER TABLE dsp_verdicts ADD COLUMN packet_json TEXT")
+            self.db.commit()
 
     # -- runs ------------------------------------------------------------------
     def start_run(self, run_id: str, kind: str) -> None:
@@ -181,15 +205,72 @@ class Store:
             self.db.execute(
                 "INSERT INTO dsp_verdicts (run_id, at, request_id, user_id, profile_id, track_id, paid, verdict, reason_class,"
                 " reason, need, confidence, anchor, approve_roles, decline_roles, role_edit_roles, blockers_json, signals_json,"
-                " evidence_json, packet_sha256, capture_request_id, mode, version)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'shadow',?)",
+                " evidence_json, packet_sha256, packet_json, capture_request_id, mode, version)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'shadow',?)",
                 (run_id, utcnow(), v["request_id"], packet.get("user_id"), packet.get("profile_id"),
                  packet.get("track_id"), None if paid is None else int(paid), v["verdict"], v["reason_class"], v["reason"],
                  v.get("need"),
                  float(v["confidence"]), v["anchor"], _j(v["approve_roles"]), _j(v["decline_roles"]),
                  _j(v["role_edit_roles"]), _j(v["blockers"]), _j(v["signals"]),
-                 _j({"roles": v["roles"], "request": v["evidence"]}), packet_sha256(packet),
+                 _j({"roles": v["roles"], "request": v["evidence"]}), packet_sha256(packet), _j(packet),
                  (v.get("evidence") or {}).get("capture_request_id"), VERSION))
+
+    def add_anchor(self, run_id: str, request_id: str, outcome: str, *, kind: str | None = None,
+                   reason: str | None = None, ruling_id: str | None = None, verdict_id: int | None = None,
+                   record: dict[str, Any] | None = None, sink_response: Any = None) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT INTO dsp_anchors (run_id, at, request_id, kind, outcome, reason, ruling_id, verdict_id,"
+                " record_json, record_sha256, sink_response) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, utcnow(), request_id, kind, outcome, (reason or "")[:600] or None, ruling_id, verdict_id,
+                 None if record is None else _j(record), (record or {}).get("record_sha256"),
+                 None if sink_response is None else _j(sink_response)))
+
+    def anchors(self, request_id: str | None = None) -> list[dict[str, Any]]:
+        self.db.row_factory = sqlite3.Row
+        try:
+            sql, args = "SELECT * FROM dsp_anchors", []
+            if request_id:
+                sql, args = sql + " WHERE request_id=?", [request_id]
+            return [dict(r) for r in self.db.execute(sql + " ORDER BY id", args).fetchall()]
+        finally:
+            self.db.row_factory = None
+
+    def latest_for(self, request_id: str) -> dict[str, Any] | None:
+        """The latest verdict for this request under this version, from ANY run (reports)."""
+        self.db.row_factory = sqlite3.Row
+        try:
+            r = self.db.execute("SELECT * FROM dsp_verdicts WHERE request_id=? AND version=? ORDER BY id DESC LIMIT 1",
+                                (request_id, VERSION)).fetchone()
+            return dict(r) if r else None
+        finally:
+            self.db.row_factory = None
+
+    def latest_captured_for(self, request_id: str) -> dict[str, Any] | None:
+        """The latest verdict that THIS job produced from its OWN capture (QA @3b7f0b4): a `verify` run,
+        whose packet names a capture request this store filed (dsp_captures) for this credit request.
+        Verdicts logged from caller-supplied packets (verify-packets --log, eval) never qualify."""
+        self.db.row_factory = sqlite3.Row
+        try:
+            rows = self.db.execute(
+                "SELECT v.* FROM dsp_verdicts v JOIN dsp_runs r ON r.run_id = v.run_id"
+                " WHERE v.request_id=? AND v.version=? AND r.kind='verify' ORDER BY v.id DESC LIMIT 1",
+                (request_id, VERSION)).fetchall()
+            if not rows:
+                return None
+            v = dict(rows[0])
+            cap_id = v.get("capture_request_id")
+            if not cap_id:
+                return None
+            for (ids,) in self.db.execute("SELECT request_ids_json FROM dsp_captures WHERE capture_request_id=?",
+                                         (cap_id,)):
+                if request_id in {str(x).lower() for x in json.loads(ids or "[]")}:
+                    packet = json.loads(v.get("packet_json") or "{}")
+                    if ((packet.get("capture") or {}).get("request_id")) == cap_id:
+                        return v
+            return None
+        finally:
+            self.db.row_factory = None
 
     LATEST = ("SELECT v.* FROM dsp_verdicts v JOIN (SELECT request_id, MAX(id) id FROM dsp_verdicts WHERE version=?"
               " GROUP BY request_id) l USING(id)")
