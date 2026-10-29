@@ -716,6 +716,66 @@ class RecentIntakeTest(unittest.TestCase):
         return self.r.run(state_path=self.state, hours=2, apply=apply, now=now, conv_search=self._search,
                           gmail_search=gmail, file_conversations=fc, file_messages=file_messages or fm)
 
+    def test_support_messages_over_the_cap_are_carried_never_dropped(self) -> None:
+        ids = [f"m{i}" for i in range(7)]
+        gm = lambda q, page: {"messages": [{"id": i} for i in ids]}             # noqa: E731
+        run = lambda now: self.r.run(state_path=self.state, hours=2, apply=True, now=now,  # noqa: E731
+                                     conv_search=self._search, gmail_search=gm, max_messages=3,
+                                     file_conversations=lambda c: {"deferred_conversations": []},
+                                     file_messages=lambda m: self.msgs_filed.append(m) or {"fetch_errors": []})
+        out = run(10_000.0)
+        self.assertEqual((self.msgs_filed[-1], out["messages_carried_out"]), (["m0", "m1", "m2"], 4))
+        self.assertTrue(out["window_advanced"])                                  # carried, so the window moves
+        ids[:] = ["m9"]                                                          # the next window finds one new
+        out = run(13_600.0)
+        self.assertEqual(self.msgs_filed[-1], ["m3", "m4", "m5"])                # carried ones first
+        self.assertEqual(out["messages_carried_out"], 2)
+        run(17_200.0)
+        self.assertEqual(self.msgs_filed[-1], ["m6", "m9"])
+        self.assertEqual(sorted(sum(self.msgs_filed, [])), sorted([f"m{i}" for i in range(7)] + ["m9"]))
+        self.assertEqual(json.loads(Path(self.state).read_text())["carry_messages"], [])
+
+    def test_no_gmail_keeps_queued_messages_for_a_later_enabled_run(self) -> None:
+        # QA #1488: --no-gmail (gmail_search=None) must not fetch or file carried support@ ids, nor drop them.
+        Path(self.state).write_text(json.dumps({"since": 9_000.0, "carry": [], "carry_messages": ["queued1"]}))
+        filed: list[list[str]] = []
+
+        def run(now, gm):
+            return self.r.run(state_path=self.state, hours=2, apply=True, now=now, conv_search=self._search,
+                              gmail_search=gm, max_messages=60, file_conversations=lambda c: {"deferred_conversations": []},
+                              file_messages=lambda ids: filed.append(list(ids)) or {"fetch_errors": []})
+        out = run(10_000.0, None)                                                   # Intercom only
+        self.assertEqual((filed, out["messages"]), ([], 0))
+        self.assertEqual(json.loads(Path(self.state).read_text())["carry_messages"], ["queued1"])
+        run(13_600.0, None)                                                          # still disabled: still kept
+        self.assertEqual(json.loads(Path(self.state).read_text())["carry_messages"], ["queued1"])
+        run(17_200.0, lambda q, page: {"messages": [{"id": "new1"}]})               # enabled again
+        self.assertEqual(filed, [["queued1", "new1"]])
+        self.assertEqual(json.loads(Path(self.state).read_text())["carry_messages"], [])
+
+    def test_a_carried_message_whose_fetch_fails_stays_carried(self) -> None:
+        # QA #1488: an aged carried id (older than the 7-day search clamp) is never re-found by the search; a
+        # failed fetch must keep it in carry_messages, ahead of new work, and run 2 retries it.
+        Path(self.state).write_text(json.dumps({"since": 9_000.0, "carry": [], "carry_messages": ["old1"]}))
+        seen = []
+        fail = {"old1": True}
+        gm = lambda q, page: {"messages": [{"id": "new1"}]}                                   # noqa: E731
+
+        def fm(ids):
+            seen.append(list(ids))
+            return {"fetch_errors": [f"{m}: OSError" for m in ids if fail.get(m)]}
+        run = lambda now: self.r.run(state_path=self.state, hours=2, apply=True, now=now,  # noqa: E731
+                                     conv_search=self._search, gmail_search=gm, max_messages=60,
+                                     file_conversations=lambda c: {"deferred_conversations": []}, file_messages=fm)
+        out = run(10_000.0 + 8 * 86400)
+        self.assertEqual(seen[-1], ["old1", "new1"])
+        self.assertFalse(out["window_advanced"])                                   # a failed fetch holds the window
+        self.assertEqual(json.loads(Path(self.state).read_text())["carry_messages"], ["old1"])
+        fail["old1"] = False
+        run(10_000.0 + 8 * 86400 + 3600)
+        self.assertEqual(seen[-1][0], "old1")                                        # retried, first
+        self.assertEqual(json.loads(Path(self.state).read_text())["carry_messages"], [])
+
     def test_an_unwritable_unresolved_tray_holds_the_window(self) -> None:
         # QA #1481: the tray append happens inside the pass, before save_state; a failure leaves the cursor.
         u = {"conversation_id": "c2", "why": "unresolved: the contact is younger than 24 h", "files": ["ab"]}
@@ -836,9 +896,13 @@ class RecentIntakeTest(unittest.TestCase):
         job = next(j for j in jobs if j["name"] == "credit-verify-proof-file")
         self.assertEqual(job["enabled"], True)                               # Fable [key=intake-reenable] 01:0xZ
         self.assertIn("--apply", job["payload"]["argv"])
-        # captain 12:18Z item 2 + r5 NO-GO on #1481: support@ filing stays OFF in the cron until the forged-header
-        # tests (#1446) are merged; drop this pin only in the PR that lands after #1446.
-        self.assertIn("--no-gmail", job["payload"]["argv"])
+        # captain 12:18Z item 2: support@ filing needs the forged-header tests (#1446, merged) - now ON (Fable
+        # 2026-10-29 05:04Z, after a read-only gog run on the cron identity), under the same 60 per-run cap
+        self.assertNotIn("--no-gmail", job["payload"]["argv"])
+        self.assertEqual(job["payload"]["argv"][job["payload"]["argv"].index("--max-fetches") + 1], "60")
+        src = (Path(__file__).resolve().parents[1] / "credit-proof.py").read_text()
+        body = src[src.index("def cmd_file_recent("):src.index("def cmd_email(")]
+        self.assertIn("max_messages=args.max_fetches", body)
         email = next(j for j in jobs if j["name"] == "credit-verify-proof-email")
         self.assertEqual(email["enabled"], False)                            # the support@ email cron stays dark
         self.assertEqual(job["payload"]["argv"][:3], ["python3", "/opt/hydra/scripts/credit-proof.py", "file-recent"])

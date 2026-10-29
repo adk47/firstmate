@@ -189,6 +189,7 @@ def cmd_file_recent(args: argparse.Namespace) -> int:
             state_path=args.state or recent.STATE, hours=args.hours, apply=args.apply,
             conv_search=recent.intercom_search(tok),
             gmail_search=None if args.no_gmail else recent.gog_search(),
+            max_messages=args.max_fetches,          # the same per-run cap for support@ (the rest is carried)
             order=lambda convs: recent.paid_first(convs, export, paying),
             # unresolved conversations go to the tray inside the pass, before the window is saved (QA #1481)
             file_conversations=recent.with_unresolved_tray(lambda ids: intake.run(

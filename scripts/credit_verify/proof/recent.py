@@ -143,9 +143,11 @@ def run(*, state_path: str, hours: float, apply: bool, now: float | None = None,
         file_conversations: Callable[[list[str]], dict[str, Any]],
         file_messages: Callable[[list[str]], dict[str, Any]],
         order: Callable[[list[str]], list[str]] = lambda c: c,
+        max_messages: int | None = None,
         log: Callable[[str], None] = lambda m: None) -> dict[str, Any]:
     """One intake pass. `file_conversations(ids)` / `file_messages(ids)` are intake.run / gmail_intake.run
-    already bound to the store, apply flag and fetch budget; they return their stats."""
+    already bound to the store, apply flag and fetch budget; they return their stats. At most `max_messages`
+    support@ messages are fetched per run; the rest ride in `carry_messages` to the next run, never dropped."""
     now = time.time() if now is None else now
     fd = locked(state_path)
     try:
@@ -159,7 +161,13 @@ def run(*, state_path: str, hours: float, apply: bool, now: float | None = None,
         todo = list(dict.fromkeys(carried + order(convs)))
         cstats = file_conversations(todo) if todo else {"deferred_conversations": []}
         carry = list(cstats.get("deferred_conversations") or [])
-        msgs, m_ok = recent_messages(gmail_search, since) if gmail_search else ([], True)
+        carried_msgs = [str(m) for m in st.get("carry_messages") or []]
+        found, m_ok = recent_messages(gmail_search, since) if gmail_search else ([], True)
+        pending = list(dict.fromkeys(carried_msgs + found))
+        # support@ disabled (--no-gmail = Intercom only, QA #1488): nothing is fetched or filed, and the queued
+        # ids are kept untouched for a later run with support@ enabled
+        cap = 0 if gmail_search is None else len(pending) if max_messages is None else max(0, int(max_messages))
+        msgs, carry_msgs = pending[:cap], pending[cap:]
         mstats = file_messages(msgs) if msgs else {}
         retry_msgs = [e.split(":", 1)[0] for e in mstats.get("fetch_errors") or []]
         # Transient Intercom failures (a conversation GET or an attachment download) hold the window, so the
@@ -167,7 +175,8 @@ def run(*, state_path: str, hours: float, apply: bool, now: float | None = None,
         # that is not Intercom's) and would hold the window forever, so it never does.
         transient = [e for e in cstats.get("errors") or [] if "ValueError" not in e]
         out.update(conversations=len(todo), carried_in=len(carried), carried_out=len(carry),
-                   messages=len(msgs), retry_messages=retry_msgs, intercom_transient_errors=transient[:5],
+                   messages=len(msgs), messages_carried_in=len(carried_msgs), messages_carried_out=len(carry_msgs),
+                   retry_messages=retry_msgs, intercom_transient_errors=transient[:5],
                    complete=c_ok and m_ok,
                    intercom={k: (len(v) if isinstance(v, list) else v) for k, v in cstats.items()},
                    # the strict intake's unresolved conversations, kept whole for the tray (not just a count)
@@ -179,7 +188,11 @@ def run(*, state_path: str, hours: float, apply: bool, now: float | None = None,
             # A held window keeps the lower bound this run ATTEMPTED - on a first run too - so a later run
             # never jumps to a fresh `now - hours` and skips what this one could not finish (QA #1447).
             nxt = {"since": now if (c_ok and m_ok and not retry_msgs and not transient) else start,
-                   "carry": carry, "last_run": now}
+                   # a message whose raw fetch failed is carried too, ahead of new work (QA #1488): a carried id
+                   # older than the 7-day search clamp is never found by the search again, so dropping it here
+                   # would lose it
+                   "carry": carry, "carry_messages": list(dict.fromkeys(
+                       [m for m in retry_msgs if m in set(msgs)] + carry_msgs)), "last_run": now}
             save_state(state_path, nxt)
             out["window_advanced"] = nxt["since"] == now
         log("file-recent " + json.dumps(out, default=str)[:2000])
